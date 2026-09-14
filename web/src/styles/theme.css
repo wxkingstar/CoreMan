@@ -1,0 +1,120 @@
+/* CoreMan: shared semantic tokens, including teleported Element Plus surfaces. */
+:root {
+  color-scheme: light;
+  --cm-brand: #16756B; --cm-brand-soft: #EAF4F1; --cm-bg: #F5F7FA;
+  --cm-surface: #FFFFFF; --cm-text: #1C293B; --cm-muted: #5C697B;
+  --cm-border: #DFE5ED; --cm-shadow: 0 8px 28px #1c293b12;
+  --el-color-primary: #16756B; --el-color-primary-light-3: #438F87;
+  --el-color-primary-light-5: #80B5AD; --el-color-primary-light-7: #BCD9D4;
+  --el-color-primary-light-8: #D7E9E5; --el-color-primary-light-9: #EAF4F1;
+  --el-color-info: #5C697B; --el-color-primary-dark-2: #105C54; --el-color-success: #14765E;
+  --el-color-warning: #985C0C; --el-color-danger: #BD3947;
+  --el-text-color-primary: var(--cm-text); --el-text-color-regular: var(--cm-text);
+  --el-text-color-secondary: var(--cm-muted); --el-text-color-placeholder: #697789;
+  --el-border-color: var(--cm-border); --el-bg-color: var(--cm-surface);
+  --el-bg-color-page: var(--cm-bg); --el-border-radius-base: 7px;
+  --el-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", sans-serif;
+  --el-menu-hover-bg-color: var(--cm-brand-soft); --el-menu-active-color: var(--el-color-primary);
+}
+html.dark {
+  color-scheme: dark; --cm-brand-soft: #203F3A; --cm-bg: #111A25;
+  --cm-surface: #192534; --cm-text: #E8EEF6; --cm-muted: #ABB9CA;
+  --cm-border: #344355; --cm-shadow: 0 10px 32px #0004;
+  --el-color-primary: #83CFC2; --el-color-primary-light-3: #65B5A8;
+  --el-color-primary-light-5: #427E74; --el-color-primary-light-7: #31584F;
+  --el-color-primary-light-8: #25483F; --el-color-primary-light-9: #203F3A;
+  --el-color-info: #ABB9CA; --el-color-primary-dark-2: #A1DED3; --el-color-success: #7ECAB0;
+  --el-color-warning: #E5B36C; --el-color-danger: #F298A2;
+  --el-text-color-primary: var(--cm-text); --el-text-color-regular: var(--cm-text);
+  --el-text-color-secondary: var(--cm-muted); --el-text-color-placeholder: #A0AEC0;
+  --el-bg-color: var(--cm-surface); --el-bg-color-overlay: var(--cm-surface);
+  --el-bg-color-page: var(--cm-bg); --el-fill-color-blank: var(--cm-surface);
+  --el-fill-color-light: #223143; --el-border-color: var(--cm-border);
+  --el-border-color-light: var(--cm-border); --el-border-color-lighter: #2D3C4D;
+}
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--cm-text); background: var(--cm-bg); font-family: var(--el-font-family); font-size: 14px; line-height: 1.6; }
+button, input, textarea, select { font: inherit; }
+a { color: var(--el-color-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
+h1,h2,h3,p { margin-top: 0; } h2 { font-size: 23px; letter-spacing: -.4px; line-height: 1.4; } h3 { font-size: 16px; }
+.el-main { min-width: 0; padding: 28px; overflow: visible; }
+.el-main > * { min-width: 0; max-width: 100%; }
+.el-main .page-header, .el-main .toolbar { flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.el-main .page-header h2 { margin: 0; }
+.el-main .actions, .el-main .fields { flex-wrap: wrap; }
+.el-main .el-form--inline { padding: 16px 16px 0; border: 1px solid var(--cm-border); border-radius: 10px; background: var(--cm-surface); margin-bottom: 20px; }
+.el-main .el-form--inline .el-form-item { margin-right: 16px; margin-bottom: 16px; }
+.el-card { --el-card-border-radius: 10px; box-shadow: none !important; }
+.el-card__header { padding: 18px 20px; font-weight: 600; }
+.el-table { border: 1px solid var(--cm-border); border-radius: 10px; --el-table-header-bg-color: var(--el-fill-color-light); --el-table-header-text-color: var(--cm-muted); }
+.el-table .el-table__cell { padding: 14px 0; }
+.el-table th.el-table__cell { padding: 12px 0; font-size: 12px; font-weight: 600; }
+.el-table .cell { line-height: 1.6; }
+.el-pagination { max-width: 100%; overflow-x: auto; padding: 16px 0 4px; }
+.el-tabs__header { margin-bottom: 24px; }
+.el-tabs__item { height: 46px; }
+.el-button--primary { --el-button-text-color: #fff; --el-button-bg-color: var(--cm-brand); --el-button-border-color: var(--cm-brand); --el-button-hover-bg-color: #12665D; --el-button-hover-border-color: #12665D; --el-button-hover-text-color: #fff; --el-button-active-bg-color: #105C54; }
+.el-select__popper.el-popper, .el-dropdown__popper.el-popper, .el-picker__popper.el-popper { border: 1px solid var(--cm-border); border-radius: 10px; box-shadow: var(--cm-shadow); background: var(--cm-surface); }
+.el-select-dropdown__list, .el-dropdown-menu { padding: 6px; }
+.el-select-dropdown__item, .el-dropdown-menu__item { border-radius: 6px; margin: 2px 0; min-height: 36px; height: auto; line-height: 24px; padding: 6px 12px; }
+.el-select-dropdown__item.is-selected { background: var(--cm-brand-soft); color: var(--el-color-primary); font-weight: 600; }
+.el-select-dropdown__item.is-hovering { background: var(--el-fill-color-light); }
+.el-select-dropdown__item.is-selected.is-hovering { background: var(--cm-brand-soft); }
+.el-select-dropdown__item.is-disabled { opacity: .6; }
+.el-dialog, .el-message-box { border-radius: 12px; box-shadow: var(--cm-shadow); }
+.el-dialog { max-width: calc(100vw - 32px); }
+/* MessageBox is width: 100%; retain its component limit as well as the viewport gutter. */
+.el-message-box { max-width: min(var(--el-messagebox-width, 420px), calc(100vw - 32px)); }
+.el-dialog { padding: 24px; } .el-dialog__header { padding-bottom: 20px; }
+.el-drawer { max-width: 100vw; }
+.el-descriptions__table { table-layout: fixed; }
+.el-descriptions__content, .el-descriptions__label { overflow-wrap: anywhere; }
+.el-alert { margin-bottom: 16px; border-radius: 8px; }
+.el-tag { border-radius: 5px; font-weight: 500; }
+.el-form-item__content { min-width: 0; }
+.el-select, .el-input, .el-input-number, .el-date-editor { max-width: 100%; }
+.el-date-editor.el-input__wrapper { min-width: 0; }
+.el-collapse { border-radius: 10px; padding: 0 16px; background: var(--cm-surface); }
+.el-collapse-item__header { font-weight: 600; }
+.cm-page-intro { color: var(--cm-muted); margin: -6px 0 22px; max-width: 90ch; }
+.cm-panel { border: 1px solid var(--cm-border); border-radius: 10px; background: var(--cm-surface); padding: 20px; margin-bottom: 20px; }
+.cm-section-title { display: flex; align-items: center; gap: 12px; margin: 24px 0 20px; padding-top: 20px; border-top: 1px solid var(--cm-border); }
+.cm-section-title span { color: var(--el-color-primary); font-size: 12px; }
+.cm-section-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.cm-section-nav a { padding: 7px 12px; background: var(--cm-brand-soft); border-radius: 6px; }
+.cm-form-section { scroll-margin-top: 24px; }
+.cm-state { margin-bottom: 16px; }
+@media (max-width: 1024px) { .el-main { padding: 20px; } }
+@media (max-width: 767px) {
+ .el-main { padding: 16px; } h2 { font-size: 21px; }
+ .el-main .page-header { align-items: flex-start; }
+ .el-main .el-form--inline .el-form-item { display: flex; margin-right: 0; }
+ .el-form-item { flex-direction: column; align-items: stretch; }
+ .el-form-item__label { justify-content: flex-start; width: auto !important; height: auto; padding-bottom: 6px; }
+ .el-form-item__content { margin-left: 0 !important; }
+ .el-form--inline .el-form-item__content { width: 100%; }
+ .el-dialog { padding: 18px; margin-top: 5vh; }
+ .el-drawer { width: min(100vw, 640px) !important; }
+ .el-main .toolbar { align-items: stretch; }
+ .el-main .toolbar > .el-select, .el-main .toolbar > .el-input { width: 100% !important; }
+ .el-radio-group { flex-wrap: wrap; }
+ .el-tabs__nav-wrap { max-width: 100%; }
+ .el-message { max-width: calc(100vw - 24px); }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+.el-main .page-header .cm-page-intro { flex-basis: 100%; order: 3; margin: 0; }
+.detail-back { margin-bottom: 20px; }
+.employee-dialog.el-dialog { display: flex; flex-direction: column; margin-block: 24px; max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px); }
+.employee-dialog .el-dialog__header { flex-shrink: 0; }
+.employee-dialog .el-dialog__body { display: flex; min-height: 0; overflow: hidden; }
+.employee-dialog .employee-form { display: flex; flex-direction: column; min-height: 0; width: 100%; }
+.employee-dialog .employee-form-fields { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 8px; }
+.employee-form .form-footer { flex-shrink: 0; background: var(--cm-surface); padding: 16px 0 0; border-top: 1px solid var(--cm-border); margin-bottom: 0; }
+@media (max-width: 767px) {
+  .el-form .el-form-item .el-form-item__label { align-self: flex-start; text-align: left; display: block; line-height: 24px; padding: 0 0 6px; }
+  .el-main .el-form--inline .el-form-item .el-input, .el-main .el-form--inline .el-form-item .el-select { width: 100% !important; }
+  .el-main .el-form--inline .el-form-item { width: 100%; }
+}
+.employee-row .el-tag { flex-shrink: 0; }

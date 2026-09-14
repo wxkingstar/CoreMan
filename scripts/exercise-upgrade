@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 只使用 Testcontainers 临时数据库和模拟平台，不运行 deploy/coreman，也不连接业务库。
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+unset TEST_DATABASE_URL ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy
+exec "$ROOT/.venv/bin/python" -m pytest -q \
+  tests/integration/test_upgrade_exercise.py \
+  tests/integration/test_operations.py \
+  tests/integration/test_feishu_supervisor.py \
+  tests/integration/test_feishu_transport.py \
+  tests/integration/test_gateway_wecom.py::test_drain_records_the_offset_it_delivered_and_takeover_records_zero

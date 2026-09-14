@@ -1,0 +1,78 @@
+[project]
+name = "coreman"
+version = "0.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "AI 员工平台：基于运行时的企微/飞书机器人接入与管理"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "sqlalchemy[asyncio]>=2.0.32",
+  "asyncpg>=0.29",
+  "alembic>=1.13",
+  "cryptography>=43",
+  "structlog>=24.4",
+  "itsdangerous>=2.2",
+  "httpx>=0.27",
+  "python-multipart>=0.0.9",
+  "websockets>=14",
+  "pyjwt[crypto]>=2.10,<3",
+  "croniter>=6,<7",
+  "aiosmtplib>=4,<6",
+  "boto3>=1.43.93,<2",
+  "lark-oapi>=1.7.3,<2",
+  "prometheus-client>=0.21,<1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "testcontainers[postgres]>=4.8",
+  "psycopg[binary]>=3.2",
+  "hypothesis>=6.112",
+  "pyyaml>=6.0",
+  "types-pyyaml>=6.0",
+  "respx>=0.21",
+  "types-croniter>=6.2.4.20260711",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["coreman"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:coreman.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["docs", "web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 的依赖注入约定就是 `param: T = Depends(...)`；不加白名单 B008 会把所有路由都判为违规。
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["migrations/", "web/"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "asyncpg.*", "boto3.*", "botocore.*", "lark_oapi.*"]
+ignore_missing_imports = true

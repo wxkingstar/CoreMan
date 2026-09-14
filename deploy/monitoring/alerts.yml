@@ -1,0 +1,37 @@
+groups:
+  - name: coreman
+    rules:
+      - alert: CoreManTargetDown
+        expr: up{job=~"coreman-.*"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "CoreMan instance has been unreachable for 5 minutes"}
+      - alert: CoreManQueueBacklog
+        expr: max(coreman_tasks_queued) >= 100
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "CoreMan queue backlog persists"}
+      - alert: CoreManDeliveryFailure
+        expr: max(coreman_outbox_failed) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "CoreMan has failed deliveries; inspect permissions and application scope"}
+      - alert: CoreManDeliveryLag
+        expr: max(coreman_outbox_lag_seconds) > 300
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "CoreMan delivery queue has been delayed"}
+      - alert: CoreManGatewayDisconnected
+        expr: sum(max by(state) (coreman_gateway_connections{state!="subscribed"})) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "An enabled CoreMan bot remains disconnected"}
+      - alert: CoreManRelayUnhealthy
+        expr: min by(relay) (coreman_relay_health) == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "CoreMan relay is unhealthy"}
+      - alert: CoreManTaskFailureRate
+        expr: (sum(increase(coreman_task_duration_seconds_count{status=~"failed|timed_out"}[10m])) / clamp_min(sum(increase(coreman_task_duration_seconds_count[10m])), 1) > 0.2) and (sum(increase(coreman_task_duration_seconds_count{status=~"failed|timed_out"}[10m])) >= 5)
+        labels: {severity: warning}
+        annotations: {summary: "CoreMan task failure rate exceeded 20 percent with at least 5 failures"}

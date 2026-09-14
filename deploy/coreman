@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# CoreMan 运维脚本（spec §12）。M0 提供 up/down/status/logs/migrate/build/upgrade(api|worker|scheduler|gateway|all)。
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _dir="$(cd "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+ROOT="$(cd "$(dirname "$_self")/.." && pwd)"
+# compose 的 --env-file 按 CWD 解析，服务里的 env_file: 按 --project-directory（=$ROOT）解析。
+# 只有绝对路径能让两者指向同一个文件；导出后 compose 才能插值 ${COREMAN_ENV_FILE:-.env}。
+ENV_FILE="${COREMAN_ENV_FILE:-$ROOT/.env}"
+case "$ENV_FILE" in /*) ;; *) ENV_FILE="$PWD/$ENV_FILE" ;; esac
+export COREMAN_ENV_FILE="$ENV_FILE"
+COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
+DEFAULT_SERVICES=(postgres api-1 api-2 caddy scheduler worker-a worker-b gateway-wecom-a gateway-feishu-a)
+
+compose() {
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "docker compose $*"
+  else
+    docker compose --project-directory "$ROOT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  fi
+}
+
+env_get() { [[ -f "$ENV_FILE" ]] && grep -E "^$1=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true; }
+
+caddy_base_url() {  # 按 .env 的 CADDY_HTTP_PORT 生成访问地址；80 时不带端口
+  local port
+  port="$(env_get CADDY_HTTP_PORT)"
+  port="${port:-80}"
+  if [[ "$port" == "80" ]]; then echo "http://localhost"; else echo "http://localhost:${port}"; fi
+}
+
+# 升级状态不写回含凭证的 .env；显式环境变量优先。
+if [[ -z "${COREMAN_IMAGE_TAG:-}" && -f "$ROOT/.coreman-image-tag" ]]; then
+  IFS= read -r COREMAN_IMAGE_TAG < "$ROOT/.coreman-image-tag"
+  export COREMAN_IMAGE_TAG
+fi
+
+env_set() {  # env_set KEY VALUE：存在则替换，不存在则追加（用 python 避免 sed 跨平台差异）
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "未找到 $ENV_FILE，请先执行 coreman up 生成配置" >&2
+    return 1
+  fi
+  ENV_FILE="$ENV_FILE" KEY="$1" VALUE="$2" python3 - <<'PY'
+import os, re
+path, key, value = os.environ["ENV_FILE"], os.environ["KEY"], os.environ["VALUE"]
+lines = open(path, encoding="utf-8").read().splitlines()
+pat = re.compile(rf"^{re.escape(key)}=")
+found = False
+for i, line in enumerate(lines):
+    if pat.match(line):
+        lines[i] = f"{key}={value}"; found = True
+if not found:
+    lines.append(f"{key}={value}")
+open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+}
+
+ensure_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    cp "$ROOT/.env.example" "$ENV_FILE"
+    echo "已从 .env.example 生成 $ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"  # 内含 MASTER_KEY 与库密码，已存在的文件也一并收紧
+  if [[ -z "$(env_get MASTER_KEY)" ]]; then
+    env_set MASTER_KEY "$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')"
+    echo "已生成 MASTER_KEY（请备份，丢失后库内凭证不可解）"
+  fi
+  if [[ -z "$(env_get SESSION_SECRET)" ]]; then
+    env_set SESSION_SECRET "$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+  fi
+  if [[ "$(env_get BOOTSTRAP_ADMIN_PASSWORD)" == "change-me" || -z "$(env_get BOOTSTRAP_ADMIN_PASSWORD)" ]]; then
+    env_set BOOTSTRAP_ADMIN_PASSWORD "$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+    echo "已生成随机引导管理员密码，请在配置文件中查看"
+  fi
+  if [[ "$(env_get POSTGRES_PASSWORD)" == "change-me" || -z "$(env_get POSTGRES_PASSWORD)" ]]; then
+    local pw
+    pw="$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
+    env_set POSTGRES_PASSWORD "$pw"
+    env_set DATABASE_URL "postgresql+asyncpg://coreman:${pw}@postgres:5432/coreman"
+    echo "已生成随机 POSTGRES_PASSWORD 并同步 DATABASE_URL"
+  fi
+}
+
+wait_healthy() {  # wait_healthy <service> [timeout_s]
+  local service="$1" timeout="${2:-180}" cid status i
+  [[ "${DRY_RUN:-0}" == "1" ]] && { echo "wait_healthy $service"; return 0; }
+  for ((i = 0; i < timeout; i += 3)); do
+    cid="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -n "$cid" ]]; then
+      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+      if [[ "$status" == "healthy" || "$status" == "running" ]]; then echo "$service: $status"; return 0; fi
+    fi
+    sleep 3
+  done
+  echo "等待 $service 健康超时" >&2
+  return 1
+}
+
+cmd_up() {
+  ensure_env
+  compose up -d postgres
+  compose run --rm migrate
+  compose up -d "${DEFAULT_SERVICES[@]:1}"
+  echo "CoreMan 已启动：管理台 $(caddy_base_url)/ ，引导账号见 $ENV_FILE"
+}
+
+cmd_down() { compose down; }
+
+cmd_status() {
+  compose ps
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    local address url
+    address="$(compose port caddy 80)"
+    url="${API_HEALTH_URL:-http://127.0.0.1:${address##*:}/health}"
+    curl -fsS --max-time 5 "$url" || return 1
+  fi
+}
+
+cmd_logs() { compose logs -f --tail=200 "$@"; }
+cmd_migrate() { compose run --rm migrate; }
+cmd_build() {
+  if command -v git >/dev/null && git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    COREMAN_BUILD_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+    if ! git -C "$ROOT" diff --quiet HEAD -- coreman web pyproject.toml uv.lock migrations deploy || [[ -n "$(git -C "$ROOT" ls-files --others --exclude-standard -- coreman web migrations deploy)" ]]; then
+      COREMAN_BUILD_REVISION="$COREMAN_BUILD_REVISION-dirty"
+    fi
+    export COREMAN_BUILD_REVISION
+  fi
+  compose build migrate worker-a
+}
+cmd_contact_sync() { compose run --rm migrate /app/.venv/bin/python -m coreman.cli contact-sync "$@"; }
+
+managed_prefix() {
+  local service="$1" cid hostname
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then echo "$service:dry-run:"; return; fi
+  cid="$(compose ps -q "$service")"
+  [[ -n "$cid" ]] || return 1
+  hostname="$(docker inspect --format '{{.Config.Hostname}}' "$cid")"
+  echo "$service:$hostname:"
+}
+
+runtime_op() {
+  compose run --rm --no-deps --pull never operations /app/.venv/bin/python -m coreman.operations "$@"
+}
+
+prepare_stop() {
+  local service="$1" cid
+  [[ "${DRY_RUN:-0}" == "1" ]] && { echo "disable_restart $service"; return; }
+  cid="$(compose ps -q "$service")"
+  [[ -z "$cid" ]] || docker update --restart=no "$cid" >/dev/null
+}
+
+upgrade_worker() {
+  local side other prefix replacement
+  for side in b a; do
+    [[ "$side" == b ]] && other=a || other=b
+    replacement="$(managed_prefix "worker-$other")"
+    runtime_op ready --prefix "$replacement" --timeout 180
+    if prefix="$(managed_prefix "worker-$side")"; then
+      prepare_stop "worker-$side"
+      runtime_op drain --prefix "$prefix" --replacement "$replacement" --timeout 7500
+    fi
+    compose up -d --force-recreate --no-deps --pull never "worker-$side"
+    wait_healthy "worker-$side"
+    prefix="$(managed_prefix "worker-$side")"
+    runtime_op ready --prefix "$prefix" --timeout 180
+  done
+}
+
+upgrade_gateway() {
+  local platform="$1" source=a target=b prefix replacement
+  [[ "$platform" == wecom || "$platform" == feishu ]] || { echo "平台须为 wecom 或 feishu" >&2; return 2; }
+  if [[ "${DRY_RUN:-0}" != "1" ]] && [[ -z "$(compose ps -q "gateway-$platform-a")" ]]; then source=b; target=a; fi
+  if prefix="$(managed_prefix "gateway-$platform-$target")"; then
+    replacement="$(managed_prefix "gateway-$platform-$source")"
+    runtime_op ready --prefix "$replacement" --timeout 180
+    prepare_stop "gateway-$platform-$target"
+    runtime_op drain --prefix "$prefix" --replacement "$replacement" --timeout 180
+    compose stop "gateway-$platform-$target"
+  fi
+  compose up -d --force-recreate --no-deps --pull never "gateway-$platform-$target"
+  wait_healthy "gateway-$platform-$target"
+  replacement="$(managed_prefix "gateway-$platform-$target")"
+  runtime_op ready --prefix "$replacement" --timeout 180
+  if prefix="$(managed_prefix "gateway-$platform-$source")"; then
+    prepare_stop "gateway-$platform-$source"
+    runtime_op drain --prefix "$prefix" --replacement "$replacement" --timeout 180
+    compose stop "gateway-$platform-$source"
+  fi
+}
+
+cmd_upgrade() {
+  local target="${1:-}" tag="${2:-}" platform=""
+  if [[ "$target" == gateway ]]; then platform="${2:-wecom}"; tag="${3:-}"; fi
+  [[ -n "$target" ]] || { usage; return 1; }
+  if [[ -n "$tag" ]]; then
+    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "镜像标签无效" >&2; return 2; }
+    export COREMAN_IMAGE_TAG="$tag"
+  fi
+  case "$target" in
+    api)
+      compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+      if [[ "${COREMAN_SKIP_MIGRATION:-0}" != "1" ]]; then compose run --rm --no-deps --pull never migrate; fi
+      for s in api-1 api-2; do compose up -d --no-deps --pull never "$s"; wait_healthy "$s"; done ;;
+    worker) upgrade_worker ;;
+    scheduler) compose up -d --no-deps --pull never scheduler; wait_healthy scheduler ;;
+    gateway) upgrade_gateway "$platform" ;;
+    all)
+      cmd_upgrade api
+      cmd_upgrade scheduler
+      cmd_upgrade worker
+      upgrade_gateway wecom
+      upgrade_gateway feishu ;;
+    *) echo "未知升级目标：$target" >&2; return 1 ;;
+  esac
+  if [[ "${DRY_RUN:-0}" != "1" && -n "${COREMAN_IMAGE_TAG:-}" ]]; then
+    printf '%s\n' "$COREMAN_IMAGE_TAG" > "$ROOT/.coreman-image-tag.tmp"
+    mv "$ROOT/.coreman-image-tag.tmp" "$ROOT/.coreman-image-tag"
+  fi
+}
+
+cmd_rollback() {
+  [[ -n "${1:-}" ]] || { echo "请指定保留的镜像标签" >&2; return 2; }
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    local control
+    control="$(compose ps -q api-1)"
+    [[ -n "$control" ]] || { echo "回退需要一个运行中的当前 API 作为排空控制工具" >&2; return 2; }
+    COREMAN_OPERATIONS_IMAGE="$(docker inspect --format '{{.Image}}' "$control")"
+    export COREMAN_OPERATIONS_IMAGE
+  fi
+  export COREMAN_SKIP_MIGRATION=1
+  cmd_upgrade all "$1"
+}
+
+usage() {
+  cat <<'EOF'
+用法: coreman <命令> [参数]
+  up                          首次或整体启动（自动补全 .env 的密钥）
+  down                        停止并删除容器（保留数据卷）
+  status                      容器状态与 api 健康
+  logs [service…]             跟踪日志
+  migrate                     执行数据库迁移
+  build                       本地构建两个镜像
+  upgrade <api|worker|scheduler|gateway|all> [tag]   按目标滚动升级（先 build，失败立即停止）
+  upgrade gateway <wecom|feishu> [tag]  网关 a/b 排空接管
+  rollback <tag>              回退镜像，不回退数据库
+  skills sync URL --source KEY 同步已登记的技能目录
+  contact-sync [--app 名称]     同步企业微信通讯录
+  help                        本说明
+环境变量: DRY_RUN=1 只打印 compose 命令；COREMAN_ENV_FILE 指定 .env 路径
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    up) cmd_up "$@" ;;
+    rollback) cmd_rollback "$@" ;;
+    down) cmd_down "$@" ;;
+    status) cmd_status "$@" ;;
+    logs) cmd_logs "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    build) cmd_build "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
+    skills) compose run --rm migrate /app/.venv/bin/python -m coreman.cli skills "$@" ;;
+    contact-sync) cmd_contact_sync "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage; return 1 ;;
+  esac
+}
+
+main "$@"

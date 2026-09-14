@@ -1,0 +1,36 @@
+import type { skillEditorZh } from './skillEditor'
+
+const skillEditorEn = {
+  projectToken: 'Project Access Token (optional)', tokenPreserve: 'Configured; leave blank to keep the current token', tokenPlaceholder: 'Paste a project access token with read_repository permission',
+  tokenHint: 'Encrypted and never displayed again. SSH URLs are converted to HTTPS URLs for the same repository when authenticating with a token. The token is not stored in the repository URL.', removeToken: 'Remove saved token',
+  modifiedMask: 'The mask was modified. Cancel and reopen to keep the original value, or enter a complete new value. Do not edit individual dots.',
+  intro: 'Sync skills from source repositories, configure and enable them in the catalog, then install them for AI employees.',
+  allSources: 'All sources', newSkill: 'Create skill', editSkill: 'Edit skill',
+  noSources: 'Add a skill source first, then sync skills from its repository or create them manually.',
+  emptyCatalog: 'No matching skills. Sync the catalog from skill sources or adjust your filters.',
+  sourceTitle: 'Connect repositories to the skill catalog', sourceHint: 'A source defines skill ownership and the default installation repository. Add a URL, then select “Sync to catalog” to import skills.',
+  newSource: 'Add source', editSource: 'Edit source', linkedSkills: 'Linked skills', skillCount: '{count} skills', sync: 'Sync to catalog', viewSkills: 'View skills',
+  syncHint: 'Reads the marketplace plugin manifest and imports only names, descriptions, and versions. New skills are disabled by default. Existing permissions and environment settings are preserved. Syncing does not install skills for employees.',
+  syncResult: 'Catalog synced: {created} created, {updated} updated, {unchanged} unchanged. Configure and enable new skills before use.',
+  presetTitle: 'Reuse installation settings', presetHint: 'Manage environment variables centrally and link them through a skill’s fixed environment presets. Variables are injected during installation.',
+  newPreset: 'Create environment preset', editPreset: 'Edit environment preset', envValues: 'Environment variables',
+  basics: 'Basic information', skillName: 'Skill identifier', nameHint: 'Must match the skill name in the repository. Letters, digits, hyphens, and underscores are supported.',
+  belongsTo: 'Defines ownership and the default installation repository.', descriptionHint: 'Describe what the skill does and when to use it.',
+  installation: 'Installation settings', git: 'Git repository', versionHint: 'Optional, e.g. 1.0.0', effectiveRepository: 'Effective installation repository', missingRepository: 'The selected source has no repository URL. Enter a repository override.',
+  access: 'Permissions and environment', fixedPresets: 'Fixed environment presets', optional: 'Optional', fixedHint: 'Variables from the selected presets are used on every installation.',
+  defaultPolicy: 'Default security constraints (optional)', policyHint: 'For example: query only approved databases; do not write data or export sensitive fields.',
+  databaseAdvanced: 'Database skills · Advanced settings', databaseHint: 'Only needed for database query skills. Preserves existing database groups, MySQL / Doris selection, and fallback rules.',
+  userFieldsHint: 'Define values users must provide during installation, such as personal API keys. Enter field definitions here, not actual secrets.',
+  addField: 'Add configuration field', noUserFields: 'No additional user configuration required.', envKey: 'Variable name', envValue: 'Variable value', fieldLabel: 'Display name', fieldLabelHint: 'e.g. API key', fieldHint: 'Input hint', fieldHintExample: 'Tell users where to obtain this value.',
+  publish: 'Enable in skill catalog', publishHint: 'Once enabled, AI employee administrators can install this skill. Saving does not install it automatically.',
+  sourceDialogHint: 'A source can contain multiple skills. After saving, sync from the source list, then configure and enable skills in the catalog.',
+  sourceLabelHint: 'e.g. Internal skill library', repositoryHint: 'Supports HTTPS and SSH Git URLs. For private repositories, configure a Project Access Token below. May be blank for MCP groups.',
+  saveSource: 'Save source', presetLabelHint: 'e.g. ERP read-only connection', requiredBasics: 'Enter a skill identifier and select a source.', policyRequired: 'Enter default security constraints for skills that require approval.',
+  presetRequired: 'Enter a preset name and identifier.', editMode: 'Environment variable editor mode', pairs: 'Key-value pairs', raw: '.env text',
+  pairsHint: 'Add variables individually. Existing secrets are masked; keep the mask to leave a value unchanged.',
+  rawHint: 'Paste KEY=value. Supports comments, export, quotes, and multiline quoted values. Quote values containing #. Commands and variable expansion are not executed. Saved secrets remain masked.',
+  addVariable: 'Add variable', envInvalid: 'Invalid environment variable format.',
+  envError: { syntax: 'Invalid format on line {line}. Use KEY=value; variable names must start with an uppercase letter.', duplicate: 'Duplicate variable name on line {line}. Merge or remove duplicates.', quote: 'Unclosed quote on line {line}.', key: 'Invalid variable name at entry {line}. Use uppercase letters, digits, and underscores, starting with a letter.' },
+}
+
+export default skillEditorEn satisfies { [K in keyof typeof skillEditorZh]: (typeof skillEditorZh)[K] extends string ? string : { [P in keyof (typeof skillEditorZh)[K]]: string } }

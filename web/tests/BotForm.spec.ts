@@ -1,0 +1,106 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus, { ElMessage } from 'element-plus'
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('@/api/admin', () => ({
+  bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), patch: vi.fn() },
+  relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
+  catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
+  settings: { defaults: vi.fn().mockResolvedValue({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' }) },
+  teams: { list: vi.fn().mockResolvedValue([]) },
+}))
+
+import { bots, relays } from '@/api/admin'
+import { ApiError } from '@/api/client'
+import type { BotOut } from '@/api/types'
+import { i18n } from '@/i18n'
+import { useAuthStore } from '@/stores/auth'
+import BotForm from '@/views/BotForm.vue'
+
+// 完整的 BotOut（含敏感字段），用于编辑态。除 team_id 外每个字段都与表单载入后的值一致，
+// 这样 changedFields() 的产出里只可能出现 team_id。
+const editBot: BotOut = {
+  id: 'b1', bot_key: 'sales_bot', platform: 'wecom', name: '销售助手', description: '',
+  avatar_url: null, enabled: true, team_id: 't1', team_name: '销售',
+  created_by: 'me', created_by_name: 'U',
+  relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1',
+  model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/data/skills/sales_bot',
+  verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
+  welcome_message: null, notify_webhook_url: 'ht••••-1',
+  member_count: 0, allowed_user_count: 0,
+  permissions: {
+    role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true,
+    can_switch_relay: true, can_toggle: true, can_delete: true, can_manage_members: true,
+    can_reassign_team: true,
+  },
+  version: 1, created_at: '', updated_at: '',
+  system_prompt: '你是销售助手', credentials: { bot_id: 'bot-1', secret: '••••••••' },
+  env_vars: { FOO: '••••••••' },
+}
+
+describe('BotForm', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('links working_dir to bot_key, switches model with relay, and submits create', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="agent_timeout"]').exists()).toBe(false)
+    await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
+    expect((wrapper.get('[data-test="working_dir"] input').element as HTMLInputElement).value).toBe('/data/skills/sales_bot')
+    expect((wrapper.vm as unknown as { form: { model: string; verbosity_level: number } }).form.model).toBe('vllm/claude-sonnet-4-6')
+    ;(wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void> }).selectRelay('r2')
+    await flushPromises()
+    expect((wrapper.vm as unknown as { form: { model: string } }).form.model).toBe('codex/gpt-5.5')
+    await wrapper.get('[data-test="name"] input').setValue('销售')
+    await wrapper.get('[data-test="cred-bot_id"] input').setValue('bot-id')
+    await wrapper.get('[data-test="cred-secret"] input').setValue('secret-value')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', relay_server_id: 'r2', model: 'codex/gpt-5.5', working_dir: '/data/skills/sales_bot', credentials: { bot_id: 'bot-id', secret: 'secret-value' } }))
+    expect(wrapper.emitted('saved')).toBeTruthy()
+  })
+
+  it('patches team_id as an explicit null when a manager clears the team', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'platform_admin', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    vi.mocked(bots.patch).mockResolvedValue({ ...editBot, team_id: null, team_name: null, version: 2 })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    // Element Plus 的清空手势派发的是 undefined 而不是 null，这里走模板上那个处理器把它归一化。
+    const teamSelect = wrapper.get('[data-test="team"]').findComponent({ name: 'ElSelect' })
+    teamSelect.vm.$emit('update:modelValue', undefined)
+    await flushPromises()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.patch).toHaveBeenCalledWith('b1', { team_id: null }, 1)
+    // 关键点：axios 会 JSON.stringify 请求体，undefined 会让这个键整个消失。
+    const body = vi.mocked(bots.patch).mock.calls[0][1]
+    expect(Object.keys(JSON.parse(JSON.stringify(body)) as Record<string, unknown>)).toEqual(['team_id'])
+  })
+
+  it('keeps notification destinations out of the employee editor', async () => {
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="webhook"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="command_modules"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // 机器人绑在自己看不见的 relay 上（visibility=admins）时 /models 是 404：静默回落到目录全集。
+  it('falls back to the catalog when the relay model list is not visible (404)', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    vi.mocked(relays.models).mockRejectedValueOnce(new ApiError(404, 404, 'relay 实例不存在'))
+    const wrapper = mount(BotForm, {
+      props: { mode: 'edit', bot: { ...editBot, relay_url: null } },
+      global: { plugins: [ElementPlus, i18n] },
+    })
+    await flushPromises()
+    expect(error).not.toHaveBeenCalled()
+    const vm = wrapper.vm as unknown as { modelOptions: string[]; form: { model: string } }
+    expect(vm.modelOptions).toEqual(['vllm/claude-sonnet-4-6', 'codex/gpt-5.5'])
+    expect(vm.form.model).toBe('vllm/claude-sonnet-4-6')
+    error.mockRestore()
+  })
+})

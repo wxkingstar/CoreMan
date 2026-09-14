@@ -1,0 +1,13 @@
+{$CADDY_SITE_ADDRESS}
+
+encode zstd gzip
+
+@privateMetrics path /metrics*
+respond @privateMetrics 404
+
+reverse_proxy api-1:8000 api-2:8000 {
+	lb_policy round_robin
+	health_uri /health
+	health_interval 10s
+	fail_duration 15s
+}

@@ -1,0 +1,296 @@
+// Command relay-codex is the OpenAI-compatible HTTP front-end for the
+// `codex` CLI. Unlike relay-claude, this binary does NOT translate codex
+// events into Claude shape — it emits OpenAI SSE directly from codex's
+// native JSONL events, and exploits codex's first-class features:
+//
+//   - Thread-based resume: when the client supplies a stable session_id,
+//     follow-up turns send only the latest user message via
+//     `codex exec resume <thread_id>` instead of re-shipping full history.
+//     Big token savings on long conversations.
+//   - Native multimodal attachments via `-i FILE`.
+//   - Reasoning effort via `-c model_reasoning_effort=`.
+//   - Multi-stage UX: command_execution surfaces as tool_calls, reasoning
+//     items as thinking deltas — visible in the UI even though codex doesn't
+//     stream individual tokens.
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"clawrelay-api/pkg/openai"
+	"clawrelay-api/pkg/proc"
+	"clawrelay-api/pkg/sessions"
+)
+
+// version 1.1.6 被生产二进制占用但源码从未入库（版本漂移事故）；本分支合入了
+// 该幽灵 1.1.6 的源码内容（usage 跨轮差分，PR #27），正式版本号为 1.1.7，
+// 以保证线上版本号可比较；buildCommit 让 /health 能定位构建源。
+var version = "1.1.7"
+
+// buildCommit is stamped at build time via:
+//
+//	go build -ldflags "-X main.buildCommit=$(git rev-parse --short HEAD)"
+var buildCommit = "unknown"
+
+var defaultModel = "codex/gpt-5.5"
+
+// availableModels lists what /v1/models advertises. Codex itself accepts any
+// model the underlying OpenAI account has access to; this list is for
+// discovery only.
+var availableModels = []openai.ModelInfo{
+	{ID: "codex/gpt-5.5", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+	{ID: "codex/gpt-5.4", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+	{ID: "codex/gpt-5.3-codex", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+}
+
+var allowedOrigins = []string{}
+
+var (
+	sessionStore *sessions.Store
+	threads      *threadMap
+	meter        *usageMeter
+	stats        = openai.NewStats()
+)
+
+func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
+	openai.SetCORSHeaders(w, r, allowedOrigins)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		openai.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is accepted")
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		openai.WriteError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Failed to read body: %v", err))
+		return
+	}
+	logBody := openai.SanitizeEnvVarsInLog(string(bodyBytes))
+	if len(logBody) <= 4096 {
+		log.Printf("Raw request body (%d bytes): %s", len(bodyBytes), logBody)
+	} else {
+		log.Printf("Raw request body (%d bytes): %s...[truncated]", len(bodyBytes), logBody[:4096])
+	}
+
+	var req openai.ChatCompletionRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		openai.WriteError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Invalid JSON: %v", err))
+		return
+	}
+	if len(req.Messages) == 0 {
+		openai.WriteError(w, http.StatusBadRequest, "invalid_request_error", "messages array is required and must not be empty")
+		return
+	}
+
+	release, err := proc.AcquireSession(r.Context(), req.SessionID)
+	if err != nil {
+		return
+	}
+	defer release()
+
+	model := req.Model
+	if model == "" {
+		model = defaultModel
+	}
+
+	// Tools are ignored for codex — its tool harness isn't compatible with
+	// OpenAI's tool definitions schema. Log loudly so callers debugging
+	// missing tool-call behavior aren't confused.
+	if len(req.Tools) > 0 {
+		log.Printf("WARNING: %d tool definitions provided but codex backend ignores them; "+
+			"codex uses its own native tool harness (shell, file edits, web_search, etc.)", len(req.Tools))
+	}
+
+	// Per-session attachment directory. Codex (unlike claude's bypassPermissions)
+	// won't read files outside its working dir, so uploads must be staged INSIDE
+	// it — see resolveCodexUploadDir. We git-ignore the staging root so the bot's
+	// working-dir git status stays clean, and remove this turn's files when the
+	// request finishes (codex resume only resends the latest message, so no
+	// cross-turn dedup is lost).
+	sessionDir := resolveCodexUploadDir(req.WorkingDir, sessionStore.AbsDir(), req.SessionID)
+	if sessionDir != "" && req.WorkingDir != "" {
+		uploadsRoot := filepath.Join(req.WorkingDir, ".relay_uploads")
+		if err := os.MkdirAll(uploadsRoot, 0755); err == nil {
+			_ = os.WriteFile(filepath.Join(uploadsRoot, ".gitignore"), []byte("*\n"), 0644)
+		}
+		defer os.RemoveAll(sessionDir)
+	}
+
+	// Look up an existing codex thread for this client session — this is the
+	// big optimization: when bound, we send only the new user message instead
+	// of replaying the entire conversation.
+	threadID := threads.Get(req.SessionID)
+	if threadID != "" {
+		log.Printf("Resuming codex thread_id=%s for session_id=%s", threadID, req.SessionID)
+	}
+
+	input := buildCodexInput(&req, model, threadID, sessionDir)
+
+	chatID := openai.GenerateChatID()
+	created := time.Now().Unix()
+
+	log.Printf("ChatCompletion request: model=%s stream=%v messages=%d resume=%v images=%d",
+		model, req.Stream, len(req.Messages), input.IsResume, len(input.ImagePath))
+	log.Printf("codex args: %v (stdin %d bytes)", input.Args, len(input.Stdin))
+
+	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+
+	sessionStore.LogRequest(req.SessionID, &req)
+
+	// Never rebuild history implicitly after an ambiguous CLI failure.
+	rebuildFresh := (func() codexInput)(nil)
+
+	if req.Stream {
+		handleStreamResponse(w, r, input, chatID, created, model, includeUsage, req.WorkingDir, req.EnvVars, req.SessionID, rebuildFresh)
+	} else {
+		handleNonStreamResponse(w, r, input, chatID, created, model, req.WorkingDir, req.EnvVars, req.SessionID, rebuildFresh)
+	}
+}
+
+func modelsHandler(w http.ResponseWriter, r *http.Request) {
+	openai.SetCORSHeaders(w, r, allowedOrigins)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	resp := openai.ModelListResponse{Object: "list", Data: availableModels}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("codex", "--version")
+	if err := cmd.Run(); err != nil {
+		http.Error(w, fmt.Sprintf("Codex CLI not available: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "healthy",
+		"backend": "codex",
+		"version": version,
+		"commit":  buildCommit,
+	})
+}
+
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	openai.SetCORSHeaders(w, r, allowedOrigins)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats.Snapshot())
+}
+
+func main() {
+	parentPID := flag.Int("parent-pid", 0, "exit when the supervising daemon exits")
+	socketPath := flag.String("socket", "", "private Unix socket (Daemon transport)")
+	port := flag.String("port", "50010", "port to listen on")
+	proxy := flag.String("proxy", "", "HTTP/HTTPS proxy URL")
+	model := flag.String("model", "", "default model name (e.g. gpt-5.5, gpt-5.4, gpt-5.3-codex)")
+	sessionsDir := flag.String("sessions-dir", "sessions", "directory for session log files + attachments + thread bindings")
+	logFilePath := flag.String("log-file", "relay-codex.log", "log file path (use - for stdout only)")
+	showVersion := flag.Bool("version", false, "show version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
+	if *model != "" {
+		defaultModel = *model
+		// Codex accepts model names without prefix; normalize for display.
+		if !strings.Contains(*model, "/") {
+			defaultModel = "codex/" + *model
+		}
+		log.Printf("Default model set to: %s", defaultModel)
+	}
+
+	if *proxy != "" {
+		os.Setenv("HTTP_PROXY", *proxy)
+		os.Setenv("HTTPS_PROXY", *proxy)
+		os.Setenv("http_proxy", *proxy)
+		os.Setenv("https_proxy", *proxy)
+	}
+
+	if *logFilePath != "-" {
+		logFile, err := os.OpenFile(*logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("Failed to open log file: %v", err)
+		}
+		defer logFile.Close()
+		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	}
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
+	sessionStore = sessions.New(*sessionsDir)
+	sessionStore.StartCleanup(72*time.Hour, 1*time.Hour)
+	threads = newThreadMap(sessionStore.AbsDir())
+	meter = newUsageMeter(sessionStore.AbsDir())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", chatCompletionsHandler)
+	mux.HandleFunc("/v1/models", modelsHandler)
+	mux.HandleFunc("/v1/stats", statsHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/sessions", sessionStore.ListHandler())
+	mux.HandleFunc("/session/", sessionStore.PageHandler())
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		log.Printf("HTTP %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		mux.ServeHTTP(w, r)
+	})
+
+	addr := "127.0.0.1:" + *port
+	if *proxy != "" {
+		log.Printf("Using proxy: %s", *proxy)
+	}
+	log.Printf("Starting relay-codex (Codex CLI → OpenAI) on %s", addr)
+	log.Printf("Endpoints:")
+	log.Printf("  POST /v1/chat/completions")
+	log.Printf("  GET  /v1/models")
+	log.Printf("  GET  /v1/stats")
+	log.Printf("  GET  /health")
+	log.Printf("  GET  /sessions")
+	log.Printf("  GET  /session/{id}")
+
+	var listener net.Listener
+	var err error
+	if *socketPath != "" {
+		listener, err = net.Listen("unix", *socketPath)
+		if err == nil {
+			err = os.Chmod(*socketPath, 0600)
+		}
+	} else {
+		listener, err = net.Listen("tcp", addr)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := proc.Serve(listener, handler, *parentPID); err != nil {
+		log.Fatal(err)
+	}
+}

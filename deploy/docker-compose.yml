@@ -1,0 +1,178 @@
+name: coreman
+
+x-hc: &hc
+  interval: 15s
+  timeout: 5s
+  retries: 4
+  start_period: 20s
+
+x-runtime: &runtime
+  image: coreman-runtime:${COREMAN_IMAGE_TAG:-dev}
+  build: { context: ., dockerfile: deploy/Dockerfile.runtime, args: {BUILD_REVISION: "${COREMAN_BUILD_REVISION:-unknown}"} }
+  env_file: ${COREMAN_ENV_FILE:-.env}
+  restart: unless-stopped
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    storage-init: { condition: service_completed_successfully }
+  networks: [coreman]
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: coreman
+      POSTGRES_USER: coreman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coreman -d coreman"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [coreman]
+
+  migrate:
+    image: coreman-api:${COREMAN_IMAGE_TAG:-dev}
+    build: { context: ., dockerfile: deploy/Dockerfile.api, args: {BUILD_REVISION: "${COREMAN_BUILD_REVISION:-unknown}"} }
+    env_file: ${COREMAN_ENV_FILE:-.env}
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [coreman]
+
+  operations:
+    image: ${COREMAN_OPERATIONS_IMAGE:-coreman-api:${COREMAN_IMAGE_TAG:-dev}}
+    profiles: [tools]
+    env_file: ${COREMAN_ENV_FILE:-.env}
+    networks: [coreman]
+    restart: "no"
+
+  storage-init:
+    image: coreman-runtime:${COREMAN_IMAGE_TAG:-dev}
+    user: "0:0"
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.init_storage"]
+    volumes: [storage:/data/storage]
+    network_mode: none
+    restart: "no"
+
+  api-1: &api
+    image: coreman-api:${COREMAN_IMAGE_TAG:-dev}
+    env_file: ${COREMAN_ENV_FILE:-.env}
+    environment: { COREMAN_INSTANCE_NAME: api-1 }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      storage-init: { condition: service_completed_successfully }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+    stop_grace_period: 30s
+    restart: unless-stopped
+    volumes: [storage:/data/storage]
+    networks: [coreman]
+
+  api-2:
+    <<: *api
+    environment: { COREMAN_INSTANCE_NAME: api-2 }
+
+  caddy:
+    image: caddy:2
+    ports: ["${CADDY_HTTP_PORT:-80}:80", "${CADDY_HTTPS_PORT:-443}:443"]
+    environment: { CADDY_SITE_ADDRESS: "${CADDY_SITE_ADDRESS:-:80}" }
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api-1, api-2]
+    restart: unless-stopped
+    networks: [coreman]
+
+  gateway-wecom-a:
+    <<: *runtime
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.gateway_wecom"]
+    environment: { COREMAN_INSTANCE_NAME: gateway-wecom-a, COREMAN_SERVICE: gateway-wecom }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9101/health',timeout=3)"]
+    stop_grace_period: 120s
+
+  gateway-wecom-b:
+    <<: *runtime
+    profiles: [standby]
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.gateway_wecom"]
+    environment: { COREMAN_INSTANCE_NAME: gateway-wecom-b, COREMAN_SERVICE: gateway-wecom }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9101/health',timeout=3)"]
+    stop_grace_period: 120s
+
+  gateway-feishu-a:
+    <<: *runtime
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.gateway_feishu"]
+    environment: { COREMAN_INSTANCE_NAME: gateway-feishu-a, COREMAN_SERVICE: gateway-feishu }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9102/health',timeout=3)"]
+    stop_grace_period: 120s
+
+  gateway-feishu-b:
+    <<: *runtime
+    profiles: [standby]
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.gateway_feishu"]
+    environment: { COREMAN_INSTANCE_NAME: gateway-feishu-b, COREMAN_SERVICE: gateway-feishu }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9102/health',timeout=3)"]
+    stop_grace_period: 120s
+
+  worker-a:
+    <<: *runtime
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.worker"]
+    environment: { COREMAN_INSTANCE_NAME: worker-a, COREMAN_SERVICE: worker }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9103/health',timeout=3)"]
+    stop_grace_period: 7200s
+    volumes: [storage:/data/storage]
+
+  worker-b:
+    <<: *runtime
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.worker"]
+    environment: { COREMAN_INSTANCE_NAME: worker-b, COREMAN_SERVICE: worker }
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9103/health',timeout=3)"]
+    stop_grace_period: 7200s
+    volumes: [storage:/data/storage]
+
+  scheduler:
+    <<: *runtime
+    command: ["/app/.venv/bin/python", "-m", "coreman.runtime.scheduler"]
+    environment: { COREMAN_INSTANCE_NAME: scheduler, COREMAN_SERVICE: scheduler }
+    volumes: [storage:/data/storage]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9104/health',timeout=3)"]
+    stop_grace_period: 30s
+
+  prometheus:
+    image: ghcr.io/prometheus/prometheus:v3.14.0
+    profiles: [monitoring]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d", "--storage.tsdb.retention.size=1GB"]
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks: [coreman]
+    restart: unless-stopped
+
+volumes:
+  prometheus_data: {}
+  pgdata: {}
+  storage: {}
+  caddy_data: {}
+  caddy_config: {}
+
+networks:
+  coreman: {}

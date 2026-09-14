@@ -1,0 +1,24 @@
+.git
+.venv
+web/node_modules
+web/dist
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+docs
+tests
+.env
+.env.*
+
+.claude
+.agents
+.codex
+.worktrees
+.coreman-image-tag*
+
+runtime_daemon/dist
+runtime_daemon/bin
+
+# Keep local QA evidence out of container build contexts.
+outputs

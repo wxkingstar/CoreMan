@@ -1,0 +1,43 @@
+/* Shared overlay geometry: stable actions, one scrolling content area. */
+.el-dialog {
+  --cm-dialog-gutter: 24px;
+  display: flex;
+  flex-direction: column;
+  margin-block: var(--cm-dialog-gutter);
+  max-height: calc(100vh - 2 * var(--cm-dialog-gutter));
+  max-height: calc(100dvh - 2 * var(--cm-dialog-gutter));
+}
+.el-dialog__header { flex-shrink: 0; padding-right: 36px; }
+.el-dialog__title, .el-drawer__title { overflow-wrap: anywhere; }
+.el-dialog__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.el-dialog__footer, .el-drawer__footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--cm-border);
+  padding-top: 16px;
+  margin-top: 16px;
+}
+.el-dialog__footer .el-button + .el-button,
+.el-drawer__footer .el-button + .el-button { margin-left: 0; }
+.el-dialog .el-form-item__content, .el-drawer .el-form-item__content { gap: 8px; }
+.el-dialog .el-form-item__content > .el-button + .el-button,
+.el-drawer .el-form-item__content > .el-button + .el-button { margin-left: 0; }
+.el-dialog .hint, .el-drawer .hint { overflow-wrap: anywhere; }
+.el-dialog__headerbtn:focus-visible, .el-drawer__close-btn:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -4px; border-radius: 8px; }
+.el-drawer__header { margin-bottom: 0; padding-bottom: 20px; }
+.el-drawer__body { min-height: 0; overscroll-behavior: contain; }
+.el-drawer__footer { margin-top: 0; }
+.el-message-box { display: inline-flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); }
+.el-message-box__header, .el-message-box__btns { flex-shrink: 0; }
+.el-message-box__content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.el-message-box__message { overflow-wrap: anywhere; }
+.el-message-box__btns { flex-wrap: wrap; gap: 8px; }
+.el-message-box__btns .el-button + .el-button { margin-left: 0; }
+@media (max-width: 767px) {
+  .el-dialog { --cm-dialog-gutter: 16px; }
+  .employee-dialog.el-dialog { margin-block: 16px; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); }
+  .el-dialog__footer .el-button, .el-drawer__footer .el-button { min-width: 80px; }
+}

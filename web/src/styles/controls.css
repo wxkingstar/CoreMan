@@ -1,0 +1,91 @@
+/* CoreMan controls: one scale for fields, pickers and actions.
+   Multi-selects may grow; textareas retain rows/autosize. */
+:root {
+  --cm-control-height: 40px;
+  --cm-control-small: 32px;
+  --cm-control-large: 48px;
+  --cm-control-radius: 8px;
+  --cm-control-padding: 12px;
+  --cm-control-hover: #91AAA6;
+  --cm-control-ring: #16756B1F;
+  --cm-control-error-ring: #BD39471A;
+  --el-component-size: var(--cm-control-height);
+  --el-component-size-small: var(--cm-control-small);
+  --el-component-size-large: var(--cm-control-large);
+  --el-border-radius-base: var(--cm-control-radius);
+}
+html.dark { --cm-control-hover: #708C92; --cm-control-ring: #83CFC226; --cm-control-error-ring: #F298A226; }
+.cm-controls-large { --cm-control-height: var(--cm-control-large); }
+:where(.el-input, .el-select, .el-input-number, .el-cascader, .el-date-editor, .el-button) {
+  --cm-field-height: var(--cm-control-height);
+  font-size: 14px;
+}
+.el-input--small, .el-select--small, .el-select__wrapper.is-small, .el-input-number--small, .el-cascader--small, .el-range-editor--small, .el-button--small { --cm-field-height: var(--cm-control-small); }
+.el-input--large, .el-select--large, .el-select__wrapper.is-large, .el-input-number--large, .el-cascader--large, .el-range-editor--large, .el-button--large { --cm-field-height: var(--cm-control-large); }
+.el-input { --el-input-height: var(--cm-field-height); }
+.el-input__wrapper, .el-select__wrapper, .el-textarea__inner {
+  background-color: var(--cm-surface);
+  border-radius: var(--cm-control-radius);
+  box-shadow: 0 0 0 1px var(--cm-border) inset;
+  transition: box-shadow .16s ease, background-color .16s ease;
+}
+.el-input__wrapper, .el-select .el-select__wrapper { min-height: var(--cm-field-height, var(--cm-control-height)); }
+.el-input__wrapper { padding: 1px var(--cm-control-padding); }
+.el-select__wrapper { padding: 6px var(--cm-control-padding); }
+.el-input .el-input__inner { height: calc(var(--cm-field-height) - 2px); line-height: calc(var(--cm-field-height) - 2px); }
+/* The Select search input is inside its field: never give it a second border or focus ring. */
+.el-input__inner:focus-visible, .el-select__input:focus-visible, .el-range-input:focus-visible { outline: none; }
+.el-input__wrapper:hover, .el-select__wrapper:hover, .el-textarea__inner:hover { box-shadow: 0 0 0 1px var(--cm-control-hover) inset; }
+.el-input__wrapper.is-focus, .el-select__wrapper.is-focused, .el-range-editor.is-active, .el-textarea__inner:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset, 0 0 0 3px var(--cm-control-ring);
+}
+.el-form-item.is-error .el-input__wrapper,
+.el-form-item.is-error .el-select__wrapper,
+.el-form-item.is-error .el-textarea__inner {
+  box-shadow: 0 0 0 1px var(--el-color-danger) inset;
+}
+.el-form-item.is-error .el-input__wrapper.is-focus,
+.el-form-item.is-error .el-select__wrapper.is-focused,
+.el-form-item.is-error .el-textarea__inner:focus { box-shadow: 0 0 0 1px var(--el-color-danger) inset, 0 0 0 3px var(--cm-control-error-ring); }
+.el-input.is-disabled .el-input__wrapper, .el-select__wrapper.is-disabled, .el-textarea.is-disabled .el-textarea__inner {
+  background: var(--el-fill-color-light);
+  box-shadow: 0 0 0 1px var(--cm-border) inset;
+  cursor: not-allowed;
+}
+.el-textarea__inner { padding: 10px var(--cm-control-padding); line-height: 1.6; }
+.el-button { height: var(--cm-field-height); min-height: var(--cm-field-height); padding: 0 16px; font-weight: 500; border-radius: var(--cm-control-radius); transition: background-color .16s, border-color .16s, box-shadow .16s; }
+.el-button--small { padding-inline: 12px; }
+.el-button.is-circle { width: var(--cm-field-height); padding: 0; border-radius: 50%; }
+.el-button.is-round { border-radius: 999px; }
+.el-button.is-link { padding-inline: 4px; }
+.el-button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
+.el-input-number { height: var(--cm-field-height); line-height: calc(var(--cm-field-height) - 2px); }
+.el-input-number .el-input { --cm-field-height: inherit; }
+.el-date-editor.el-input__wrapper { height: var(--cm-field-height); }
+.el-date-editor .el-range-input, .el-date-editor .el-range-separator { height: auto; line-height: 24px; }
+.el-form-item { margin-bottom: 22px; }
+.el-form-item__label, .el-form-item__content { line-height: var(--cm-control-height); }
+.el-form-item__label { height: var(--cm-control-height); font-weight: 500; }
+.el-form--label-top .el-form-item__label { height: auto; line-height: 22px; margin-bottom: 8px; padding: 0; }
+.el-form-item__error { padding-top: 5px; line-height: 16px; }
+/* Pagination belongs to the compact scale, including its size selector and jumper. */
+.el-pagination { --cm-control-height: var(--cm-control-small); --el-pagination-button-height: var(--cm-control-small); }
+@media (max-width: 767px) {
+  .el-button--small, .el-input--small, .el-select--small, .el-select__wrapper.is-small, .el-input-number--small { --cm-field-height: var(--cm-control-height); }
+}
+/* Browser autofill paints only the native input. Match the surrounding field,
+   including its padding and password/clear icon area, in both themes. */
+.el-input__inner:autofill,
+.el-input__inner:-webkit-autofill,
+.el-select__input:autofill,
+.el-select__input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--cm-surface) inset;
+  box-shadow: 0 0 0 1000px var(--cm-surface) inset;
+  -webkit-text-fill-color: var(--cm-text);
+  caret-color: var(--cm-text);
+}
+.el-input.is-disabled .el-input__inner:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--el-fill-color-light) inset;
+  -webkit-text-fill-color: var(--el-disabled-text-color);
+}

@@ -1,0 +1,27 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+node_modules/
+web/dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+.DS_Store
+data/
+.worktrees/
+.superpowers/
+.claude/worktrees/
+
+.coreman-image-tag
+.coreman-image-tag.tmp
+
+/runtime_daemon/dist/
+/runtime_daemon/bin/
+
+# Local audit evidence can contain private conversations and credentials.
+/outputs/

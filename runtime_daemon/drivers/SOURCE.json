@@ -1,0 +1,150 @@
+{
+  "revision": "c2124fb7e839531257b091a710e5b831dc96975d",
+  "files": [
+    {
+      "path": "go.mod",
+      "sha256": "f43b1be4976c69593511015ba6eaa4de8dc578f9faf53636faf974cfa83a6c8c"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "fc8962fba02afd42062085848c57399a386cdc9ccf7ad77c29856193fd1fcb94"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "cb8f405714e3326c7d4451bc4b02f31047261f86a5da45a48e7d9375812481b1"
+    },
+    {
+      "path": "pkg/.DS_Store",
+      "sha256": "d13bc3fb807b4d45b8b143d0f6ed3c7ca38a18de1f70e25492a7735dce7d3ffc"
+    },
+    {
+      "path": "cmd/relay-claude/process_test.go",
+      "sha256": "3514bd8ecf0e34cb819629172ee291abb8da08f6e3dcac2abbd17451ade4ed92"
+    },
+    {
+      "path": "cmd/relay-claude/translate.go",
+      "sha256": "e94b6e146dc20d9abc668dc72a11ff8d3af54a00153c840d07c3138b6e1fe0d6"
+    },
+    {
+      "path": "cmd/relay-claude/stream.go",
+      "sha256": "b9eb6a3351e2c43ada051d8f2b309e3feb10f5b77459fa980cd890dfb2cb5664"
+    },
+    {
+      "path": "cmd/relay-claude/types.go",
+      "sha256": "06c113c9c5f6c7d2b635a2255f0fcf5aa72aa8c48227fa5550cc840e1ca1b962"
+    },
+    {
+      "path": "cmd/relay-claude/process.go",
+      "sha256": "121269dd2cd47ef70a92257ccca2b283f8668641b76ea6881c0abaddc2c5af8f"
+    },
+    {
+      "path": "cmd/relay-claude/stream_test.go",
+      "sha256": "7f5021fae194f98ad16d2ff0fb909d295e9836f85214d527e786e447ceddf744"
+    },
+    {
+      "path": "cmd/relay-claude/usage_meter.go",
+      "sha256": "6d695bf8e0c3d36938a1175bb637cf12e8ad1f534e6aa6bbdb33b25a170b373d"
+    },
+    {
+      "path": "cmd/relay-claude/usage_meter_test.go",
+      "sha256": "56bb3713661655984856c8edeed1e743fcccec981ab3bbb000c441816d1978d9"
+    },
+    {
+      "path": "cmd/relay-claude/main.go",
+      "sha256": "31aec15147a2ec0284f9a66d304c5a5d97a56ea26ecfb24df29124b46c953358"
+    },
+    {
+      "path": "cmd/relay-claude/translate_test.go",
+      "sha256": "f4d7362a2d4c4cb0c35423e8d6597169bd77950714fa837d26cc9899ba4ce068"
+    },
+    {
+      "path": "cmd/relay-claude/prompt.go",
+      "sha256": "3de3b73a45d4157b18e4ab6cd687f9658894351a1d6b834c36ff8a592e0126c9"
+    },
+    {
+      "path": "cmd/relay-claude/main_test.go",
+      "sha256": "f5507d7d8ea90573ab7890cd044f4f1ecee2a8ae46512a743f5c59bc21290347"
+    },
+    {
+      "path": "cmd/relay-codex/codex.go",
+      "sha256": "58aecb6795e32cc1bf520b0b0143efe6a6a003afeadc5ce865b2528765558e5a"
+    },
+    {
+      "path": "cmd/relay-codex/stream.go",
+      "sha256": "9cdce2b73602174e8579ce000251e0e77c15b416b27ce90c4de0ba969d30adcf"
+    },
+    {
+      "path": "cmd/relay-codex/types.go",
+      "sha256": "02a6f3d0c14d86dcb2d10be1f29adf882751a9367d77e716ffe7471a23b134bf"
+    },
+    {
+      "path": "cmd/relay-codex/threadmap_test.go",
+      "sha256": "77538c0a481b1c1996959859f92f99a85bbeea79ec0722e4c73814e6cc5c0809"
+    },
+    {
+      "path": "cmd/relay-codex/threadmap.go",
+      "sha256": "47971e8fca8b6a8e9ef9235a66c7ea6c9e3afc232db724a2a76262527e999c14"
+    },
+    {
+      "path": "cmd/relay-codex/usage_meter.go",
+      "sha256": "3a7e276f98cbf3b11c1df01abb72c3b16b897cea327d7f6d032efae9545091fe"
+    },
+    {
+      "path": "cmd/relay-codex/usage_meter_test.go",
+      "sha256": "b10b7450bfb36c39c9fe61cc1bd96b4802c21aea4fa2a7baee0f1e058cdd6495"
+    },
+    {
+      "path": "cmd/relay-codex/main.go",
+      "sha256": "15cba4716620eee0e8d97d99250763f50add053364355e1f320921c847ab1bcf"
+    },
+    {
+      "path": "cmd/relay-codex/codex_test.go",
+      "sha256": "98a2651a3edb5d6639da59342f4e92d37ec04e3ba45311b32eb0c52de428b61c"
+    },
+    {
+      "path": "pkg/proc/proc.go",
+      "sha256": "623c7e46b9d3bac5d5f82504a9a9e0cdd7895144eeed8bd61c48ac2c877dfc90"
+    },
+    {
+      "path": "pkg/proc/proc_test.go",
+      "sha256": "eea92e3a586dea75c3a4036286675cb7ee40f82509bc1fdabbff5ac6fa5ab456"
+    },
+    {
+      "path": "pkg/sessions/viewer.go",
+      "sha256": "c97ef9414ea0ac5362326cd9b0a5035f399e950ea4e5df1e3da2a761ac7aebcf"
+    },
+    {
+      "path": "pkg/sessions/session_viewer.html",
+      "sha256": "7934d14c06bf6387cc244b434d4e7e26a697c8ba0729a90b8c7385b24ea6a727"
+    },
+    {
+      "path": "pkg/sessions/store_test.go",
+      "sha256": "66dbd8162b8f4a1ab787eafa842e681c38a3b69aec92ae3463d7c63f704f3e56"
+    },
+    {
+      "path": "pkg/sessions/store.go",
+      "sha256": "b0bc70a6e89c8a2d6767303f366bafda5c316e5bc5ed81de902beed0f507cccf"
+    },
+    {
+      "path": "pkg/attachments/attach.go",
+      "sha256": "a67ce0b665cd5cb1fffd67b386a79e7a2b83fdf530d6e94ce41c728decaae0b0"
+    },
+    {
+      "path": "pkg/openai/types.go",
+      "sha256": "9ed8166202522e373c51bc29f2ea5ed084906afe4958a2caffa460f80991b144"
+    },
+    {
+      "path": "pkg/openai/stats.go",
+      "sha256": "ed587e3034e2737bc55cae2449ef29e249b988f82d4ff852763a12b177a98c71"
+    },
+    {
+      "path": "pkg/openai/helpers_test.go",
+      "sha256": "4ac2f60611c4c240913469397b2d6b12e95d3dcb0da9060214a26586130a130b"
+    },
+    {
+      "path": "pkg/openai/helpers.go",
+      "sha256": "a36efb5744a5b74c68d3f3ef6dba129de8dd7fdad458f36a8573b3395a89d19f"
+    }
+  ],
+  "scope": "Claude v1 and Codex; channel and channelv3 excluded"
+}
