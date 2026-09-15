@@ -28,6 +28,8 @@ from coreman.runtime.gateway_feishu.cards import (
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
 _OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))")
+# 常驻守护连接上用会话级锁：连接是 AUTOCOMMIT，不留未结束的事务，锁随连接关闭释放。
+_OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
 # 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
 OUTBOX_PER_ROUND = 20
 
@@ -60,8 +62,8 @@ class FeishuTransport:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
         self._last_call = 0.0
-        # 常驻连接（子进程的应用独占锁连接）：出站锁在它的长事务上拿一次，持有到进程退出，
-        # 每一轮就不必再占一条池连接跨越整轮。
+        # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
+        # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
         self._output_held = False
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
@@ -126,7 +128,7 @@ class FeishuTransport:
         key = {"key": f"feishu-output:{self.bot_id}"}
         if self._guard is not None:
             if not self._output_held:
-                self._output_held = bool(await self._guard.scalar(_OUTPUT_LOCK, key))
+                self._output_held = bool(await self._guard.scalar(_OUTPUT_SESSION_LOCK, key))
             return self._output_held and await self._deliver()
         # 单独的锁事务跨越多个状态提交。
         async with self.factory() as guard:

@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from coreman.core.bus import instances, leases, outbox, streams, tasks
 from coreman.core.bus.tasks import NewTask
@@ -165,11 +167,16 @@ async def test_round_checks_the_lease_fence_once(db_session, db_engine):
 
 
 async def test_output_lock_on_a_guard_connection_keeps_a_second_child_out(db_session, db_engine):
-    """出站锁挂在常驻连接的长事务上：它不退出，同一 bot 的另一个 child 一张卡片都碰不了。"""
+    """出站锁是常驻连接上的会话级锁：它不退出，同一 bot 的另一个 child 一张卡片都碰不了；
+    连接本身不停在事务里，不会挡住迁移里的在线建索引。"""
     bot, row, generation = await seed(db_session)
     factory = make_session_factory(db_engine)
     first_api, second_api = FakeAPI(), FakeAPI()
-    async with db_engine.connect() as first_guard, db_engine.connect() as second_guard:
+    # 与子进程一致：守护连接来自 NullPool 的 AUTOCOMMIT 引擎，close 真正断开连接、释放会话级锁。
+    guard_engine = create_async_engine(
+        db_engine.url, poolclass=NullPool, isolation_level="AUTOCOMMIT"
+    )
+    async with guard_engine.connect() as first_guard, guard_engine.connect() as second_guard:
         first = FeishuTransport(
             factory,
             first_api,
@@ -188,13 +195,21 @@ async def test_output_lock_on_a_guard_connection_keeps_a_second_child_out(db_ses
         )
         await first.round()
         assert first_api.calls
+        pid = await first_guard.scalar(text("SELECT pg_backend_pid()"))
+        async with factory() as session:
+            in_transaction = await session.scalar(
+                text("SELECT xact_start IS NOT NULL FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": pid},
+            )
+        assert in_transaction is False
         assert await second.round() is False and second_api.calls == []
-        await first_guard.rollback()  # 第一个 child 退出：长事务结束，锁随之释放
+        await first_guard.close()  # 第一个 child 退出：连接关闭，会话级锁随之释放
         async with factory() as session:
             await streams.complete(session, row.task_id, final_text="done")
             await session.commit()
         await second.round()
         assert second_api.calls
+    await guard_engine.dispose()
 
 
 async def test_outbox_permanent_platform_rejection_is_visible(db_session, db_engine):

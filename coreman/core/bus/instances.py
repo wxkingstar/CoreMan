@@ -41,12 +41,17 @@ async def register(
 
 
 async def heartbeat(session: AsyncSession, instance_id: str, running: int) -> bool:
-    """写心跳与在跑任务数；返回本实例是否已被要求排空。"""
+    """写心跳与在跑任务数；返回本实例是否已被要求排空。
+
+    心跳同时清掉 stopped_at：宿主机休眠或数据库抖动时 scheduler 会把心跳中断超过 60 秒的实例
+    标记为已停止，进程恢复后若不自愈，就绪检查与排空请求会一直认为它已退出，7 天后还会删掉
+    它仍在引用的实例行。正常退出先停心跳循环再写 stopped_at，不受影响。
+    """
     row = (
         await session.execute(
             update(ProcessInstance)
             .where(ProcessInstance.id == instance_id)
-            .values(heartbeat_at=func.now(), running=running)
+            .values(heartbeat_at=func.now(), running=running, stopped_at=None)
             .returning(ProcessInstance.drain_requested_at)
         )
     ).first()
