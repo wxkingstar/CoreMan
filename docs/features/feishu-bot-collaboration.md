@@ -56,3 +56,11 @@ B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。
 - [接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)：机器人 @ 事件权限 `im:message.group_at_msg.include_bot:readonly`。
 - [发送消息内容](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json)：post 的独立 `at` / `md` 段落、CommonMark/GFM 支持，以及 `content_v2`。
 - [回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)：引用并不等于 @；使用稳定 uuid 做平台重试去重。
+
+## 2026-09-16 交互修复验证
+
+实现提交 a7970c0。54 项相关测试、240 个源文件类型检查及代码规范检查通过。
+真实 QA 群覆盖：富文本 @ 与表格（63→64→65）、引用总结续聊（66）、运行中取消（67→68，命令 69）、系统确认卡片独立会话（71）、运行中修改需求（77→78 取消，79→80→81 按新要求完成）、等待后正常完成（82→83→84）。最后一例从运行时原始工具日志核对了 20 秒等待与之后的数据读取。全部使用合成库存，未修改业务数据。
+
+最终运行状态：执行服务 v8，API、调度及飞书收发服务 v6；后续版本只涉及执行阶段反馈契约。没有遗留活动协作。
+多人真实现场测试尚未进行；跨身份隔离由自动测试覆盖。B 缺少稳定人类身份时，真实群内取消应向原接收请求的 A 发起。后续优先优化等待消息合并、任务标题引用预览、明确区分进度询问与需求修改。
