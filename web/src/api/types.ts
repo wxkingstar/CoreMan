@@ -29,7 +29,7 @@ export type PlatformAppIn = Omit<PlatformAppOut, 'id' | 'version' | 'created_at'
 export interface SyncRun { id: number; status: 'running' | 'success' | 'failed' | 'aborted'; started_at: string; finished_at: string | null; stats: Record<string, unknown>; error: string | null; triggered_by: string | null }
 export interface Providers { wecom: boolean; feishu: boolean }
 
-// ---- M1b：relay 实例、模型目录、机器人、审计与设置 ----
+// ---- 运行时、模型目录、机器人、审计与设置 ----
 
 export type HealthStatus = 'healthy' | 'down' | 'auth_fail' | 'timeout' | 'unknown'
 export type ModelsMode = 'inherit' | 'restricted'
@@ -147,7 +147,7 @@ export interface SettingsOut extends PromptSettings {
 export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>
 export type SettingsDefaults = Pick<SettingsOut, 'default_model' | 'default_verbosity_level' | 'default_effort_level'>
 
-// ---- M2：对话记录、运行状态、并发与提示词设置 ----
+// ---- 对话记录、运行状态、并发与提示词设置 ----
 
 /** 对话记录状态（`coreman/core/db/models/logs.py::CHAT_LOG_STATUSES`）。 */
 export type ChatLogStatus = 'success' | 'error' | 'timeout' | 'stopped' | 'ask_user' | 'failed'
@@ -222,7 +222,7 @@ export interface RuntimeOutboxItem {
 /** 排空目标：实例与机器人严格二选一，两个都给或都不给后端返回 422。 */
 export interface DrainIn { instance_id?: string; bot_key?: string }
 
-// ---- M3a：公告 ----
+// ---- 公告 ----
 
 /** 公告范围（`coreman/api/routers/announcements.py::Scope`）。 */
 export type AnnouncementScope = 'global' | 'relay' | 'bot'

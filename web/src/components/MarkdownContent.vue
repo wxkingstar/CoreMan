@@ -12,8 +12,12 @@ const rendered = computed(() => DOMPurify.sanitize(markdown.render(props.content
 
 <template>
   <!-- Only sanitized parser output is inserted as HTML. -->
-  <!-- eslint-disable-next-line vue/no-v-html -->
-  <div class="markdown-content" v-html="rendered" />
+  <!-- eslint-disable vue/no-v-html -->
+  <div
+    class="markdown-content"
+    v-html="rendered"
+  />
+  <!-- eslint-enable vue/no-v-html -->
 </template>
 
 <style scoped>

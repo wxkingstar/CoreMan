@@ -5,10 +5,10 @@ export default {
     renameHint: 'ランタイムを識別する名前です。保存すると AI 社員一覧にも反映されます。',
     validityHint: 'リンクは発行から 24 時間有効で、1 つのランタイムにのみ使用できます。コピーして対象マシンで実行してください。',
     controlProxy: 'CoreMan 接続プロキシ',
-    mailProxy: 'メール確認プロキシ',
+
     proxyHint: '空欄：ランタイム環境の HTTP(S) プロキシ設定を使用し、設定がなければ直接接続します。AI サービスへ直接接続できない場合、Claude / Codex のリクエストが失敗する可能性があります。',
     controlProxyHint: '空欄：上記の HTTP(S) プロキシを使わず、CoreMan に直接接続します。対象マシンから直接アクセスできない場合、インストールパッケージの取得、ランタイムの接続、タスク通信が失敗します。',
-    mailProxyHint: '空欄：ランタイム環境の COREMAN_MAIL_PROXY を使用し、未設定なら直接接続します。Gmail に直接接続できない場合、メール確認が失敗します。Tencent 企業メールは常に直接接続します。メール確認を使わない場合は空欄で構いません。',
+
     environment: '実行環境',
     sessionService: 'ユーザーサービスで稼働中。無人起動には管理者による linger の有効化が必要です。',
 
@@ -139,7 +139,7 @@ export default {
     forbidden: 'この操作を行う権限がありません',
     noPermissionPage: 'このページにアクセスする権限がありません',
     modify: '変更',
-    comingSoon: 'この機能は近日公開予定です',
+
     conflict: 'データが他の操作により更新されています。再読み込みしてください',
     conflictReloaded: 'データが他の操作により更新されました。最新バージョンを取得したので、内容を確認してもう一度保存してください。',
     fieldError: '{field}：{detail}',
@@ -155,7 +155,7 @@ export default {
     bootstrapHint: '管理者アカウント、または企業プラットフォームでログインしてください。',
     wecom: 'WeCom でログイン',
     feishu: 'Lark でログイン',
-    comingSoon: 'M1 マイルストーンで公開',
+
     required: '{field}を入力してください',
     failed: 'ログインに失敗しました',
     wecomHint: 'WeCom ログインアプリが設定されていません',
@@ -171,7 +171,7 @@ export default {
       wecom_not_configured: 'WeCom ログインアプリが設定されていません',
     },
   },
-  layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語', comingSoon: '近日公開' },
+  layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
   menu: {
     skills: "スキル管理",
     skillApprovals: "スキル承認",
@@ -180,7 +180,7 @@ export default {
     cron: '定期タスク', announcements: 'お知らせ', chatLogs: '会話ログ', statistics: '利用統計',
     approvals: '承認', systems: '業務システム', runtime: '稼働状況', audit: '監査ログ', settings: '設定',
   },
-  home: { welcome: 'CoreMan へようこそ', empty: '管理機能は今後のマイルストーンで順次公開されます' },
+
   users: {
     title: 'チームとユーザー',
     tabUsers: 'ユーザー',
@@ -392,7 +392,7 @@ export default {
       current: '現在',
       target: '切り替え先',
       model: 'モデル',
-      warnings: '切り替え後：現在の会話コンテキストは失われます。メモリの移行は M3 から自動化されます。作業ディレクトリ内のファイルは影響を受けません。',
+      warnings: '切り替え後：現在の会話コンテキストは失われます。メモリは切り替え時に移行先ランタイムへ移行されます。インストール済みのスキルは移行先で再インストールが必要です。',
       backendChange: '切り替え先のモデルは現在と異なるバックエンド（Claude ↔ Codex）です。プロンプトやツールの挙動が大きく変わるため、ご確認ください。',
       confirm: '切り替える',
       done: '切り替えました',

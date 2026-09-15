@@ -31,8 +31,7 @@ describe('AdminLayout menu', () => {
     expect(MENU.find((m) => m.key === 'audit')?.roles).toEqual(['ai_committee', 'platform_admin'])
   })
 
-  // 公告在 M3a 之前挂在「即将开放」里（灰掉、不可点）；后端开了之后必须变成真菜单，
-  // 且只对 ai_committee / platform_admin 可见。
+  // 公告曾挂在「即将开放」里（灰掉、不可点）；现在必须是真菜单，且只对 ai_committee / platform_admin 可见。
   it('opens the announcements entry to managers only', () => {
     const label = i18n.global.t('menu.announcements')
     for (const role of ['ai_committee', 'platform_admin']) {

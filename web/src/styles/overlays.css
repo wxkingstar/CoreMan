@@ -1,6 +1,8 @@
 /* Shared overlay geometry: stable actions, one scrolling content area. */
 .el-dialog {
   --cm-dialog-gutter: 24px;
+  /* 固定像素宽度（720px、900px…）的对话框在窄屏上不能撑出横向滚动。 */
+  max-width: calc(100vw - 32px);
   display: flex;
   flex-direction: column;
   margin-block: var(--cm-dialog-gutter);
