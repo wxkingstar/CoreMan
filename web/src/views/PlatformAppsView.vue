@@ -22,6 +22,8 @@ const paged = usePaged<PlatformAppOut, Filters>((q) => platformApps.list(q), { p
 const lastRun = reactive<Record<string, SyncRun | undefined>>({})
 const syncing = reactive<Record<string, boolean>>({})
 const pollTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+/** 卸载后置 false：还在飞的轮询请求回来时既不能再武装定时器，也不能在已离开的页面上弹消息。 */
+let alive = true
 
 async function reload() {
   await paged.load()
@@ -101,10 +103,13 @@ async function runSync(a: PlatformAppOut) {
   syncing[a.id] = true
   try {
     const { run_id } = await platformApps.sync(a.id)
+    if (!alive) return
     ElMessage.info(t('apps.syncStarted'))
     const poll = async () => {
       try {
         const run = await syncRuns.get(run_id)
+        // 请求在飞时页面卸载或应用被删（deleteApp 会清掉 syncing[a.id]）：到此为止。
+        if (!alive || !syncing[a.id]) return
         if (run.status === 'running') {
           pollTimers[a.id] = setTimeout(poll, 2000)
           return
@@ -115,6 +120,7 @@ async function runSync(a: PlatformAppOut) {
         const key = run.status === 'success' ? 'apps.syncDone' : run.status === 'aborted' ? 'apps.syncAborted' : 'apps.syncFailed'
         ;(run.status === 'success' ? ElMessage.success : ElMessage.error)(t(key) + (run.error ? `: ${run.error}` : ''))
       } catch (e) {
+        if (!alive || !syncing[a.id]) return
         delete pollTimers[a.id]
         syncing[a.id] = false
         ElMessage.error(errorMessage(e))
@@ -122,6 +128,7 @@ async function runSync(a: PlatformAppOut) {
     }
     pollTimers[a.id] = setTimeout(poll, 2000)
   } catch (e) {
+    if (!alive) return
     syncing[a.id] = false
     ElMessage.error(errorMessage(e))
   }
@@ -258,6 +265,7 @@ async function submitForm() {
 onMounted(reload)
 
 onBeforeUnmount(() => {
+  alive = false
   Object.values(pollTimers).forEach((id) => clearTimeout(id))
 })
 </script>
