@@ -17,8 +17,9 @@ from typing import Any
 
 import httpx
 
-from coreman.core.relay.safe_transport import RegisteredTransport
+from coreman.core.db.models import RelayServer
 from coreman.core.relay.sse import SseEvent, SseParser
+from coreman.core.runtime_nodes.transport import ReverseTransport
 
 _AUTH_MARKERS = ("not logged in", "/login", "401")
 
@@ -92,17 +93,15 @@ class ChatRequest:
         return body
 
 
-def relay_base_url(host: str, port: int) -> str:
-    """由 host + clawrelay_port 拼出 relay 基址。"""
-    return f"http://{host}:{port}"
+RUNTIME_BASE_URL = "http://runtime"
 
 
 class RelayClient:
-    """单个 运行时的客户端。"""
+    """单个运行时实例的客户端。"""
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str = RUNTIME_BASE_URL,
         *,
         http: httpx.AsyncClient | None = None,
         timeout: float = 5.0,
@@ -111,19 +110,32 @@ class RelayClient:
         """初始化客户端。
 
         Args:
-            base_url: relay 基址，如 http://10.0.0.5:50009
-            http: 自定义 httpx.AsyncClient（默认自建，外部注入的不由本类关闭）
+            base_url: 请求基址；反向通道只取路径，主机名无意义
+            http: 自定义 httpx.AsyncClient（外部注入的不由本类关闭）
             timeout: 默认客户端各阶段超时秒数
+            transport: 自建客户端使用的传输层；运行时实例请用 `RelayClient.for_relay`
+
+        Raises:
+            ValueError: http 与 transport 都没给——不再按地址猜测传输方式
         """
         if http is None and transport is None:
-            from coreman.core.runtime_nodes.transport import runtime_transport
-
-            url = httpx.URL(base_url)
-            transport = runtime_transport(base_url) or RegisteredTransport(url.host, url.port or 80)
+            raise ValueError("RelayClient 需要 http 或 transport；运行时实例请用 for_relay")
         self._http = http or httpx.AsyncClient(
             base_url=base_url, timeout=httpx.Timeout(timeout), transport=transport, trust_env=False
         )
         self._owns = http is None
+
+    @classmethod
+    def for_relay(cls, relay: RelayServer, *, timeout: float = 5.0) -> RelayClient:
+        """按实例所属运行时节点建反向通道客户端。
+
+        Raises:
+            RelayError: 实例未绑定运行时节点（独立中继实例已不再支持）
+        """
+        if relay.runtime_node_id is None:
+            raise RelayError("运行时实例未绑定节点")
+        transport = ReverseTransport(relay.runtime_node_id, relay.model_provider)
+        return cls(RUNTIME_BASE_URL, timeout=timeout, transport=transport)
 
     async def aclose(self) -> None:
         """关闭自建的连接；外部注入的 http 不关。"""

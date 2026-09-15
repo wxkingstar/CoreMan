@@ -15,24 +15,21 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     assert next(r.model for r in by_provider["codex"] if r.is_default) == "codex/gpt-5.5"
 
 
-async def test_relay_unique_host_port_and_version(db_session: AsyncSession) -> None:
-    db_session.add(
-        RelayServer(name="claude01", host="10.0.0.1", clawrelay_port=50009, model_provider="claude")
-    )
+async def test_relay_unique_name_defaults_and_version(db_session: AsyncSession) -> None:
+    db_session.add(RelayServer(name="claude01", model_provider="claude"))
     await db_session.commit()
     got = (await db_session.execute(select(RelayServer))).scalar_one()
     assert (
         got.version == 1
         and got.health_status == "unknown"
         and got.visibility == "all"
-        and got.runtime_env == "host"
+        and got.host is None
+        and got.clawrelay_port is None
     )
-    db_session.add(
-        RelayServer(name="dup", host="10.0.0.1", clawrelay_port=50009, model_provider="claude")
-    )
+    db_session.add(RelayServer(name="claude01", model_provider="codex"))
     try:
         await db_session.commit()
-        raise AssertionError("host+port 应唯一")
+        raise AssertionError("实例名应唯一")
     except IntegrityError:
         await db_session.rollback()
 

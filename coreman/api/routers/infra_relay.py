@@ -1,4 +1,4 @@
-"""Relay 遥测。agent token 只能操作所属实例，签名调用方必须有 relay scope。"""
+"""运行时实例遥测。节点派生的上报令牌只能操作所属实例，签名调用方必须有 relay scope。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +25,6 @@ RELAY_SCOPE = require_scope("relay")
 
 class ReportTarget(BaseModel):
     server_id: uuid.UUID | None = None
-    port: int | None = Field(default=None, ge=1, le=65535)
     name: str | None = Field(default=None, max_length=100)
     model_provider: str | None = Field(default=None, max_length=100)
 
@@ -63,13 +62,9 @@ async def target(
     if not bearer:
         client = await signed_client(request, session)
         await require_scope(scope)(client, session)
-    if body.server_id is None and body.port is None:
-        raise ApiError(422, 422, "需要 server_id 或 agent 端口")
-    stmt = select(RelayServer).where(RelayServer.is_active)
-    if body.server_id is not None:
-        stmt = stmt.where(RelayServer.id == body.server_id)
-    if body.port is not None:
-        stmt = stmt.where(RelayServer.agent_port == body.port)
+    if body.server_id is None:
+        raise ApiError(422, 422, "需要 server_id")
+    stmt = select(RelayServer).where(RelayServer.is_active, RelayServer.id == body.server_id)
     if body.name:
         stmt = stmt.where(RelayServer.name == body.name)
     if body.model_provider:
@@ -101,7 +96,6 @@ async def target(
 
 
 @router.post("/api/infra/relay/rate-limits")
-@router.post("/api/robot/rate-limits/report", include_in_schema=False)
 async def rate_limits(
     body: QuotaReport, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -119,7 +113,6 @@ async def rate_limits(
 
 
 @router.post("/api/infra/relay/health")
-@router.post("/api/robot/health/report", include_in_schema=False)
 async def health(
     body: HealthReport, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -143,13 +136,12 @@ async def health(
 @router.get(
     "/api/robot/clawrelay-servers", dependencies=[Depends(RELAY_SCOPE)], include_in_schema=False
 )
-async def servers(
-    host: str | None = Query(default=None, max_length=253),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    stmt = select(RelayServer).where(RelayServer.is_active).order_by(RelayServer.name)
-    if host:
-        stmt = stmt.where(RelayServer.host == host)
+async def servers(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    stmt = (
+        select(RelayServer)
+        .where(RelayServer.is_active, RelayServer.runtime_node_id.is_not(None))
+        .order_by(RelayServer.name)
+    )
     catalog = await load_catalog(session)
     data = []
     for r in (await session.execute(stmt)).scalars():
@@ -157,13 +149,6 @@ async def servers(
             key: getattr(r, key)
             for key in (
                 "name",
-                "host",
-                "ssh_user",
-                "runtime_env",
-                "chroot_path",
-                "runtime_user",
-                "clawrelay_port",
-                "agent_port",
                 "model_provider",
                 "supported_models_mode",
                 "description",
@@ -182,8 +167,8 @@ async def servers(
         }
         item.update(
             id=str(r.id),
+            runtime_node_id=str(r.runtime_node_id),
             relay_url=r.relay_url,
-            webhook_port=r.agent_port,
             configured_supported_models=r.supported_models,
             effective_supported_models=effective_models(r, catalog),
             supported_models=effective_models(r, catalog),

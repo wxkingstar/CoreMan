@@ -1,6 +1,6 @@
 import httpx
 
-from coreman.core.relay.client import ChatRequest, RelayClient, RelayError, relay_base_url
+from coreman.core.relay.client import ChatRequest, RelayClient, RelayError
 
 
 def _client(handler):  # type: ignore[no-untyped-def]
@@ -67,10 +67,6 @@ async def test_models_error_raises() -> None:
         raise AssertionError("应抛 RelayError")
     except RelayError:
         pass
-
-
-def test_relay_base_url() -> None:
-    assert relay_base_url("10.0.0.5", 50009) == "http://10.0.0.5:50009"
 
 
 def test_to_body_accepts_content_parts() -> None:

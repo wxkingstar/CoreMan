@@ -17,6 +17,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.bots.permissions import is_bot_admin
+from coreman.core.bots.relay_policy import relay_available
 from coreman.core.db.models import Bot, BotMember, Memory, RelayServer, User
 from coreman.core.knowledge.memory import MAX_BATCH_BYTES, MAX_FILE_BYTES, content_hash, file_name
 from coreman.core.relay.agent_client import AgentError, call_agent
@@ -204,8 +205,8 @@ async def delete_memory(
 
 async def relay_for_memory(session: AsyncSession, bot: Bot) -> RelayServer:
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
-    if relay is None or not relay.is_active or not relay.agent_token_enc:
-        raise ApiError(409, 409, "机器人未分配可用的 Agent")
+    if relay is None or not relay_available(relay):
+        raise ApiError(409, 409, "机器人未分配可用的运行时")
     count = await session.scalar(
         select(func.count())
         .select_from(Bot)

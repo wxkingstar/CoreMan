@@ -1,6 +1,7 @@
 import base64
 
 import httpx
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,25 +10,34 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import AuditLog, Bot, ModelCatalog, RelayServer, User
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 from tests.api.test_bots import _bot_body, _team
+from tests.fakes.runtime_node import attach_node
+
+
+@pytest.fixture(autouse=True)
+def _skip_memory_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这些用例只看切换规则；记忆迁移另有 test_memory_transfer 覆盖，这里不连节点。"""
+    from coreman.core.bots import switch_relay
+
+    async def not_configured(*args: object, **kwargs: object) -> str:
+        return "not_configured"
+
+    monkeypatch.setattr(switch_relay, "transfer", not_configured)
 
 
 async def _setup(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> tuple[dict[str, object], dict[str, str], User]:
     team = await _team(db_session)
-    db_session.add_all(
-        [
-            RelayServer(name="claude01", host="h1", clawrelay_port=1, model_provider="claude"),
-            RelayServer(name="codex01", host="h2", clawrelay_port=1, model_provider="codex"),
-            RelayServer(
-                name="teamb",
-                host="h3",
-                clawrelay_port=1,
-                model_provider="claude",
-                team_id=(await _team(db_session, "b")).id,
-            ),
-        ]
-    )
+    relays = [
+        RelayServer(name="claude01", model_provider="claude"),
+        RelayServer(name="codex01", model_provider="codex"),
+        RelayServer(
+            name="teamb", model_provider="claude", team_id=(await _team(db_session, "b")).id
+        ),
+    ]
+    db_session.add_all(relays)
+    for relay in relays:
+        await attach_node(db_session, relay)
     await db_session.commit()
     ids = {r.name: str(r.id) for r in (await db_session.execute(select(RelayServer))).scalars()}
     creator = await login_as(
@@ -162,13 +172,11 @@ async def test_same_relay_model_switch_skips_relay_visibility(
     """visibility='admins' 的 relay 上，机器人管理员（member）在同一台上换模型走的也是这个
     入口：不该再要求 relay 可见（PATCH model 同样不看）；换到另一台隐藏 relay 仍要拦。"""
     team = await _team(db_session, "vis")
-    hidden = RelayServer(
-        name="hidden", host="h7", clawrelay_port=1, model_provider="claude", visibility="admins"
-    )
-    hidden2 = RelayServer(
-        name="hidden2", host="h8", clawrelay_port=1, model_provider="claude", visibility="admins"
-    )
+    hidden = RelayServer(name="hidden", model_provider="claude", visibility="admins")
+    hidden2 = RelayServer(name="hidden2", model_provider="claude", visibility="admins")
     db_session.add_all([hidden, hidden2])
+    await attach_node(db_session, hidden)
+    await attach_node(db_session, hidden2)
     owner = await login_as(client, db_session, role="member", team_id=team.id, login_name="owner")
     bot = Bot(
         bot_key="hidden_bot",

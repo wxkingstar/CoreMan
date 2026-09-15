@@ -1,55 +1,61 @@
+import uuid
+
 import httpx
 import pytest
 
-from coreman.core.crypto import Cipher
 from coreman.core.db.models import RelayServer
 from coreman.core.relay import agent_client
 
 
-async def test_agent_requests_use_instance_token_and_cannot_override_operation(monkeypatch):
-    cipher = Cipher(b"\x05" * 32)
-    relay = RelayServer(
-        host="10.0.0.9",
-        agent_port=52123,
-        is_active=True,
-        agent_token_enc=cipher.encrypt("synthetic-token", "relay_servers.agent_token_enc"),
+def _relay(**values: object) -> RelayServer:
+    return RelayServer(
+        runtime_node_id=uuid.uuid4(), model_provider="claude", is_active=True, **values
     )
 
+
+def _fake_http(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        agent_client,
+        "make_http",
+        lambda r: httpx.AsyncClient(base_url="http://runtime", transport=transport),
+    )
+
+
+async def test_agent_requests_reach_node_without_token_and_cannot_override_operation(monkeypatch):
+    seen = []
+
     def handler(req):
-        assert req.headers["Authorization"] == "Bearer synthetic-token"
+        seen.append(req)
+        assert "authorization" not in req.headers
         assert b'"type":"status"' in req.content
         return httpx.Response(200, json={"success": True, "count": 0})
 
-    monkeypatch.setattr(
-        agent_client,
-        "make_http",
-        lambda r: httpx.AsyncClient(
-            base_url="http://agent.test", transport=httpx.MockTransport(handler)
-        ),
-    )
-    result = await agent_client.call_agent(relay, cipher, "status", {"type": "pull"})
+    _fake_http(monkeypatch, handler)
+    relay = _relay()
+    result = await agent_client.call_agent(relay, None, "status", {"type": "pull"})
     assert result["count"] == 0
     relay.is_active = False
     with pytest.raises(agent_client.AgentError):
-        await agent_client.call_agent(relay, cipher, "status")
+        await agent_client.call_agent(relay, None, "status")
+    for retired in ("mail-probe", "check-active-tasks"):
+        with pytest.raises(agent_client.AgentError):
+            await agent_client.call_agent(_relay(), None, retired)
+    assert len(seen) == 1
+
+
+async def test_standalone_relay_is_rejected_before_any_request(monkeypatch):
+    _fake_http(monkeypatch, lambda req: pytest.fail("must not send"))
+    relay = RelayServer(model_provider="claude", is_active=True)
+    with pytest.raises(agent_client.AgentError):
+        await agent_client.call_agent(relay, None, "ping")
+    monkeypatch.undo()
+    with pytest.raises(agent_client.AgentError):
+        agent_client.make_http(relay)
 
 
 async def test_agent_error_body_is_never_forwarded(monkeypatch):
-    cipher = Cipher(b"\x05" * 32)
-    relay = RelayServer(
-        is_active=True,
-        agent_token_enc=cipher.encrypt("synthetic-token", "relay_servers.agent_token_enc"),
-    )
-    monkeypatch.setattr(
-        agent_client,
-        "make_http",
-        lambda r: httpx.AsyncClient(
-            base_url="http://agent.test",
-            transport=httpx.MockTransport(
-                lambda r: httpx.Response(500, text="synthetic-private-output")
-            ),
-        ),
-    )
+    _fake_http(monkeypatch, lambda r: httpx.Response(500, text="synthetic-private-output"))
     with pytest.raises(agent_client.AgentError) as exc:
-        await agent_client.call_agent(relay, cipher, "status")
+        await agent_client.call_agent(_relay(), None, "status")
     assert "synthetic-private-output" not in str(exc.value)

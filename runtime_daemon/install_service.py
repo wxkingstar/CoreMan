@@ -11,7 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from relay_agent.agent import atomic_write
+from runtime_daemon.agent import atomic_write
 
 
 def systemd_quote(value: str) -> str:

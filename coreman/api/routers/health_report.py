@@ -83,7 +83,7 @@ class OutputFilter:
 
 
 def make_client(relay: RelayServer) -> RelayClient:
-    return RelayClient(relay.relay_url)
+    return RelayClient.for_relay(relay)
 
 
 @router.post("/{bot_id}/health-report")

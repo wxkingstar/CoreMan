@@ -1,4 +1,4 @@
-"""探测一台 relay：写健康列，健康时预填模型目录（spec §5.3「首次注册预填」）。"""
+"""探测一台运行时实例：写健康列，健康时预填模型目录（spec §5.3「首次注册预填」）。"""
 
 from __future__ import annotations
 
@@ -9,21 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import ModelCatalog, RelayServer
 from coreman.core.logging import get_logger
-from coreman.core.relay.client import RelayClient, RelayError, RelayHealth, relay_base_url
-from coreman.core.relay.safe_transport import RegisteredTransport
+from coreman.core.relay.client import RelayClient, RelayError, RelayHealth
 
 log = get_logger(__name__)
 
 
 def make_client(relay: RelayServer) -> RelayClient:
-    """按 relay 的 host + clawrelay_port 建客户端。
+    """按实例所属运行时节点建反向通道客户端；未绑定节点时抛 RelayError。
 
     模块级函数：测试用 monkeypatch 替换它来免网络，调用方必须走 `probe.make_client(...)`。
     """
-    if relay.runtime_node_id:
-        return RelayClient(relay.relay_url)
-    base = relay_base_url(relay.host, relay.clawrelay_port)
-    return RelayClient(base, transport=RegisteredTransport(relay.host, relay.clawrelay_port))
+    return RelayClient.for_relay(relay)
 
 
 async def probe_relay(

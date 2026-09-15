@@ -25,8 +25,8 @@ from pathlib import Path
 
 import httpx
 
-from relay_agent.agent import COMMAND_CANCEL, Agent, OperationError, atomic_write
 from runtime_daemon import __version__
+from runtime_daemon.agent import COMMAND_CANCEL, Agent, OperationError, atomic_write
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
@@ -460,7 +460,7 @@ class Daemon:
                 "working_dir": data.get("working_dir", ""),
             }
             if command["path"] == "/":
-                if data.get("type") in {"status", "check-active-tasks", "ping"}:
+                if data.get("type") in {"status", "ping"}:
                     self.task_info.pop(identity, None)
                 import threading
 

@@ -25,16 +25,18 @@ from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
 from tests.fakes.fake_relay import FakeRelay
+from tests.fakes.runtime_node import attach_node
 from tests.integration.test_chat_handler import chat_task, run, stream_of
 from tests.integration.worker_helpers import build_ctx, seed_bot
 
 
 async def _second_relay(session: AsyncSession, *, pct7=Decimal("5")) -> RelayServer:  # type: ignore[no-untyped-def]
-    r = RelayServer(name="r-idle", host="idle.test", clawrelay_port=80, model_provider="claude")
+    r = RelayServer(name="r-idle", model_provider="claude")
     r.rate_limit_7d_used_pct = pct7
     r.rate_limit_5h_used_pct = Decimal("10")
     r.rate_limit_probed_at = datetime.now(UTC)
     session.add(r)
+    await attach_node(session, r)
     await session.commit()
     return r
 

@@ -8,6 +8,7 @@ from coreman.core.bots.secrets import CREDENTIALS_AAD, ENV_AAD, decrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AuditLog, Bot, BotMember, RelayServer, Team
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
+from tests.fakes.runtime_node import attach_node
 
 
 def _bot_body(**over: object) -> dict[str, object]:
@@ -18,7 +19,7 @@ def _bot_body(**over: object) -> dict[str, object]:
         "description": "卖货",
         "relay_server_id": None,
         "model": "vllm/claude-sonnet-4-6",
-        "working_dir": "/home/claude01/data/skills/sales_bot",
+        "working_dir": "/data/skills/sales_bot",
         "system_prompt": "你是销售",
         "verbosity_level": 2,
         "effort_level": "high",
@@ -226,10 +227,9 @@ async def test_relay_url_follows_relay_visibility(
     """绑在 visibility='admins' 的 relay 上的机器人：普通成员只该看到 relay 名字，不该
     拿到 http://host:port（relay_servers 对这类实例连存在性都不透）。"""
     team = await _team(db_session)
-    relay = RelayServer(
-        name="hidden", host="h9", clawrelay_port=8787, model_provider="claude", visibility="admins"
-    )
+    relay = RelayServer(name="hidden", model_provider="claude", visibility="admins")
     db_session.add(relay)
+    await attach_node(db_session, relay)
     await db_session.commit()
     relay_id, relay_url = str(relay.id), relay.relay_url
     await login_as(client, db_session, role="ai_committee")
@@ -240,32 +240,27 @@ async def test_relay_url_follows_relay_visibility(
     bid = r.json()["data"]["id"]
     await login_as(client, db_session, role="member", team_id=team.id)
     got = (await client.get(f"/api/admin/bots/{bid}")).json()["data"]
-    assert got["relay_name"] == "hidden" and got["relay_url"] is None
+    assert got["relay_name"] == "hidden / claude" and got["relay_url"] is None
     listed = (await client.get("/api/admin/bots", params={"scope": "team"})).json()["data"]["items"]
-    assert [(b["relay_name"], b["relay_url"]) for b in listed] == [("hidden", None)]
+    assert [(b["relay_name"], b["relay_url"]) for b in listed] == [("hidden / claude", None)]
     await login_as(client, db_session, role="platform_admin")
     got = (await client.get(f"/api/admin/bots/{bid}")).json()["data"]
-    assert got["relay_url"] == relay_url == "http://h9:8787"
+    assert got["relay_url"] == relay_url and relay_url.startswith("runtime://")
 
 
 async def test_relay_policy_on_create(client: httpx.AsyncClient, db_session: AsyncSession) -> None:
     team_a, team_b = await _team(db_session, "a"), await _team(db_session, "b")
-    db_session.add_all(
-        [
-            RelayServer(name="pub", host="h1", clawrelay_port=1, model_provider="claude"),
-            RelayServer(
-                name="teamb",
-                host="h2",
-                clawrelay_port=1,
-                model_provider="claude",
-                team_id=team_b.id,
-            ),
-            RelayServer(name="codex", host="h3", clawrelay_port=1, model_provider="codex"),
-            RelayServer(
-                name="off", host="h4", clawrelay_port=1, model_provider="claude", is_active=False
-            ),
-        ]
-    )
+    relays = [
+        RelayServer(name="pub", model_provider="claude"),
+        RelayServer(name="teamb", model_provider="claude", team_id=team_b.id),
+        RelayServer(name="codex", model_provider="codex"),
+        RelayServer(name="off", model_provider="claude", is_active=False),
+    ]
+    db_session.add_all(relays)
+    for relay in relays:
+        await attach_node(db_session, relay)
+    # 未绑定运行时节点的独立实例不能再承接机器人。
+    db_session.add(RelayServer(name="standalone", model_provider="claude"))
     await db_session.commit()
     ids = {r.name: str(r.id) for r in (await db_session.execute(select(RelayServer))).scalars()}
     await login_as(client, db_session, role="member", team_id=team_a.id)
@@ -295,8 +290,21 @@ async def test_relay_policy_on_create(client: httpx.AsyncClient, db_session: Asy
     assert (
         r.status_code == 201
         and r.json()["data"]["backend"] == "codex"
-        and r.json()["data"]["relay_name"] == "codex"
+        and r.json()["data"]["relay_name"] == "codex / codex"
     )
+    assert (
+        await client.post(
+            "/api/admin/bots", json=_bot_body(bot_key="b7", relay_server_id=ids["standalone"])
+        )
+    ).status_code == 422
+    # 工作目录只按节点项目主目录校验：必须是其下的绝对路径。
+    for bad in ("/srv/other/b8", "/data/skills", "data/skills/b8"):
+        assert (
+            await client.post(
+                "/api/admin/bots",
+                json=_bot_body(bot_key="b8", relay_server_id=ids["pub"], working_dir=bad),
+            )
+        ).status_code == 422
     await login_as(client, db_session, role="ai_committee")
     assert (
         await client.post(

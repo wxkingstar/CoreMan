@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bot
-from coreman.core.bots.relay_policy import relay_visible, validate_model_for_relay
+from coreman.core.bots.relay_policy import (
+    relay_available,
+    relay_visible,
+    validate_model_for_relay,
+)
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
@@ -62,7 +66,11 @@ async def switch_relay(
     # 跑着，PATCH model 同样不看 relay 可见性——对 visibility='admins' 的实例多这一道就成了
     # 「机器人管理员连自己的模型都改不了」。
     same_relay = target is not None and target.id == bot.relay_server_id
-    if target is None or not target.is_active or not (same_relay or relay_visible(actor, target)):
+    if (
+        target is None
+        or not relay_available(target)
+        or not (same_relay or relay_visible(actor, target))
+    ):
         raise SwitchError(422, "目标运行时未注册或不可用")
     creator = await session.get(User, bot.created_by)
     if not same_relay and not relay_allowed_for_bot(
@@ -91,22 +99,24 @@ async def switch_relay(
         raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试")
     memory_status = "unchanged"
     target_directory = bot.working_dir
-    old_runtime = (
-        await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
-    )
-    if target.runtime_node_id:
+    if not same_relay:
+        # 目录按「相对项目主目录」平移到目标节点；原实例不在任何节点上时按 bot_key 起一个。
+        old_runtime = (
+            await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
+        )
         target_node = await session.get(RuntimeNode, target.runtime_node_id)
+        if target_node is None:
+            raise SwitchError(422, "目标运行时未注册或不可用")
         source_node = (
             await session.get(RuntimeNode, old_runtime.runtime_node_id)
             if old_runtime and old_runtime.runtime_node_id
             else None
         )
-        if target_node:
-            relative = PurePosixPath(bot.bot_key)
-            if source_node:
-                relative = PurePosixPath(bot.working_dir).relative_to(source_node.workspace_root)
-            target_directory = str(PurePosixPath(target_node.workspace_root) / relative)
-    if not same_relay:
+        relative = PurePosixPath(bot.bot_key)
+        current = PurePosixPath(bot.working_dir)
+        if source_node and current.is_relative_to(source_node.workspace_root):
+            relative = current.relative_to(source_node.workspace_root)
+        target_directory = str(PurePosixPath(target_node.workspace_root) / relative)
         try:
             await reserve_workspace(session, target.id, target_directory, bot_id=bot.id)
             if target_directory == bot.working_dir:

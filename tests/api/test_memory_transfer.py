@@ -2,27 +2,19 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from coreman.core.db.models import Bot, Memory, RelayServer, User
+from coreman.core.db.models import Bot, Memory, User
 from coreman.core.knowledge import memory_transfer
 from coreman.core.knowledge.memory import content_hash
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
+from tests.fakes.runtime_node import add_node_relay, attach_node
 from tests.integration.worker_helpers import seed_bot
 
 
 async def prepare(client, session):
-    bot, old, cipher = await seed_bot(session)
-    old.agent_port = 9000
-    old.agent_token_enc = cipher.encrypt("synthetic-old-token", "relay_servers.agent_token_enc")
-    new = RelayServer(
-        name="target",
-        host="new.test",
-        clawrelay_port=80,
-        model_provider="claude",
-        agent_port=9000,
-        agent_token_enc=cipher.encrypt("synthetic-new-token", "relay_servers.agent_token_enc"),
-    )
-    session.add(new)
+    bot, old, _ = await seed_bot(session)
+    await attach_node(session, old)
+    new = await add_node_relay(session, name="target")
     session.add(
         Memory(
             bot_id=bot.id,
