@@ -27,12 +27,18 @@ from coreman.core.bus import outbox
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
-from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
+from coreman.runtime.gateway_wecom.ws_client import (
+    DeliveryNotSent,
+    DeliveryRejected,
+    DeliveryUncertain,
+)
 
 if TYPE_CHECKING:
     from coreman.runtime.gateway_wecom.runner import BotRunner
 
 UNSUPPORTED_KINDS = ("stream_finish",)
+# 频控一族（846607 频控、45009 接口调用超限、-1 系统繁忙）：该会话先静默一阵再发。
+RATE_LIMIT_CODES = frozenset({846607, 45009, -1})
 
 
 class OutboxConsumer:
@@ -75,12 +81,20 @@ class OutboxConsumer:
             waits.append(last + self.min_chat_interval - now)
         return max([0.0, *waits])
 
+    def online(self) -> bool:
+        """连接已经订阅成功，帧写得出去。"""
+        return self.runner.ws.state == "subscribed"
+
     async def consume(self) -> None:
-        """领一条发一条，直到队列空（或连接断了）。锁防重入。"""
+        """领一条发一条，直到队列空（或连接不可用）。锁防重入。
+
+        连接还没订阅上（刚认领还在建连、断线重连的退避窗口、订阅被拒）就一条都不领：领了也
+        发不出去，只会平白耗掉重试额度，还把同组后续项一起拖进退避。
+        """
         if self.paused:
             return
         async with self.runner.lock:
-            while not self.paused:
+            while not self.paused and self.online():
                 async with self.runner.factory() as session:
                     item = await outbox.claim_next(session, bot_id=self.runner.bot.id)
                     keep_going = item is None or await self._handle(session, item)
@@ -98,6 +112,8 @@ class OutboxConsumer:
             await outbox.mark_skipped(session, item.id, "出站箱不支持")
             return True
         chat_id = str((item.target or {}).get("chat_id") or "")
+        # 内部键（`_attempt_id` 等）只给总线自己用，拼帧只读剥掉它们之后的内容。
+        payload = outbox.public_payload(item.payload)
         if item.kind == "send":
             if not await private_target_valid(session, item):
                 await outbox.mark_skipped(session, item.id, "接收用户停用或私聊绑定已变更")
@@ -109,14 +125,14 @@ class OutboxConsumer:
                 self._log.info("outbox_deferred", outbox_id=item.id, wait_s=round(wait, 2))
                 return True
             req_id = str(uuid.uuid4())
-            card = item.payload.get("card")
+            card = payload.get("card")
             body = (
                 {"chatid": chat_id, "msgtype": "template_card", "template_card": card}
                 if isinstance(card, dict)
                 else {
                     "chatid": chat_id,
                     "msgtype": "markdown",
-                    "markdown": {"content": str(item.payload.get("markdown") or "")},
+                    "markdown": {"content": str(payload.get("markdown") or "")},
                 }
             )
             frame: dict[str, Any] = {
@@ -128,7 +144,7 @@ class OutboxConsumer:
             # 更新卡片是对那次点击的被动回复：必须原样带回 req_id，而且只有 5 秒窗口，
             # 所以既不按会话频控排队（排一秒就废了），也不记进 `_last_sent`。
             req_id = str((item.target or {}).get("req_id") or "")
-            card = item.payload.get("card")
+            card = payload.get("card")
             if not req_id or not isinstance(card, dict):
                 await outbox.mark_skipped(session, item.id, "缺少 req_id 或 card")
                 return True
@@ -147,24 +163,34 @@ class OutboxConsumer:
                 "headers": {"req_id": req_id},
                 "body": {
                     "msgtype": "text",
-                    "text": {"content": str(item.payload.get("text") or "")},
+                    "text": {"content": str(payload.get("text") or "")},
                 },
             }
         else:
             await outbox.mark_skipped(session, item.id, "未知 kind")
             return True
-        # Durable attempt first, then register the ACK waiter before sending bytes.
+        if not self.online():
+            # 领到之后、写帧之前连接没了：原样放回队列，不算一次尝试。
+            await outbox.defer(session, item.id, 0.0)
+            return False
+        # 先把这次尝试落库，再登记回执、写帧；进程死在等回执的路上由 scheduler 回收。
         await outbox.begin_attempt(session, item, req_id)
         try:
             await self.runner.ws.send_confirmed(frame)
+        except DeliveryNotSent as exc:
+            # 字节根本没写出去：结果确定是「没送到」，按普通失败退避重试。
+            await outbox.mark_failed(session, item.id, f"not_sent: {exc}")
+            self._log.info("outbox_not_sent", outbox_id=item.id, reason=str(exc))
+            return False
         except DeliveryRejected as exc:
-            if exc.errcode in {846607, 45009, -1}:
+            if exc.errcode in RATE_LIMIT_CODES and chat_id:
                 self.note_rate_limited(chat_id)
-                await outbox.mark_failed(session, item.id, str(exc))
-            else:
-                await outbox.unknown_attempt(session, item.id, str(exc))
+            # 平台明确拒了：退避重试，额度用完才判死（同组后续项随即释放）。
+            await outbox.mark_failed(session, item.id, str(exc))
+            self._log.warning("outbox_rejected", outbox_id=item.id, errcode=exc.errcode)
             return True
-        except (DeliveryUncertain, RuntimeError, WebSocketException) as exc:
+        except (DeliveryUncertain, RuntimeError, WebSocketException, OSError) as exc:
+            # 写出去了却没等到回执：结果未知，有界重试（下次换新的 `_attempt_id`）。
             await outbox.unknown_attempt(session, item.id, f"delivery_unknown: {exc}")
             self._log.warning("outbox_delivery_unknown", outbox_id=item.id)
             return False

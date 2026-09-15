@@ -49,6 +49,8 @@ class FakeWeComWs:
         self.subscribe_attempts = 0
         self._silenced: set[str] = set()
         self.send_rejections: list[tuple[int, str]] = []
+        # 进行中（finish=false）的流推送按顺序各拒一次，回执里直接带错误码（同步拒绝）。
+        self.stream_rejections: list[tuple[int, str]] = []
         self._finish_rejection: tuple[int, str, float] | None = None
         self._server: Server | None = None
 
@@ -283,6 +285,21 @@ class FakeWeComWs:
                     )
                 elif frame.get("cmd") == "aibot_send_msg" and self.send_rejections:
                     code, message = self.send_rejections.pop(0)
+                    await self._send(
+                        ws,
+                        {
+                            "cmd": "",
+                            "headers": frame.get("headers") or {},
+                            "errcode": code,
+                            "errmsg": message,
+                        },
+                    )
+                elif (
+                    frame.get("cmd") == "aibot_respond_msg"
+                    and self.stream_rejections
+                    and not _is_finish_frame(frame)
+                ):
+                    code, message = self.stream_rejections.pop(0)
                     await self._send(
                         ws,
                         {

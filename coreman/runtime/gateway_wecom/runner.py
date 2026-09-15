@@ -26,15 +26,14 @@ from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
 from coreman.runtime.gateway_wecom.correlation import PushCorrelation
 from coreman.runtime.gateway_wecom.inbound import enqueue_inbound, normalize_frame
 from coreman.runtime.gateway_wecom.outbox_consumer import OutboxConsumer
-from coreman.runtime.gateway_wecom.pusher import StreamPusher
+from coreman.runtime.gateway_wecom.pusher import STREAM_DEAD, StreamPusher
 from coreman.runtime.gateway_wecom.ws_client import WeComWsClient
 
 if TYPE_CHECKING:  # 服务持有 runner，runner 只在类型层面引用服务，运行期不成环
     from coreman.runtime.gateway_wecom.service import GatewayWecomService
 
-# 企微推送错误码（平台协议 §3.3）：频控 / 流已结束或不存在。
+# 企微推送错误码（平台协议 §3.3）：频控；流已结束或不存在的那一组 STREAM_DEAD 与 pusher 同源。
 RATE_LIMITED = 846607
-STREAM_DEAD = (846606, 846608)
 # 「等一会儿再发就好」的那一族：频控 846607、接口调用超限 45009、系统繁忙 -1。
 # 出站箱的条目撞上它们要放回队列重发；其余错误码（参数、凭证、会话不存在）重试也没用。
 RETRYABLE = frozenset({RATE_LIMITED, 45009, -1})

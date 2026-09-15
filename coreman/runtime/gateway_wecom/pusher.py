@@ -35,7 +35,11 @@ from coreman.core.db.models import Task, TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.core.logging import get_logger
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
-from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
+from coreman.runtime.gateway_wecom.ws_client import (
+    DeliveryNotSent,
+    DeliveryRejected,
+    DeliveryUncertain,
+)
 
 if TYPE_CHECKING:
     from coreman.runtime.gateway_wecom.runner import BotRunner
@@ -46,6 +50,13 @@ if TYPE_CHECKING:
 ERRCODE_DELAY_BUDGET = 3.0
 # 每条流留这么多帧的「带走了多少正文」历史：够覆盖上面那个预算窗口，又不至于把内存吃住。
 FRAME_HISTORY = 16
+# 企微判这条流已经失效：流不存在或超时（846606）/ 流已结束（846608）。只有它们才封流。
+STREAM_DEAD = frozenset({846606, 846608})
+# 流收尾之后，帧历史与封流标记再留这么久：回执超时之后才到的错误码还要用它们算缺口；
+# 过了这个窗口就清掉，常驻网关的内存不随处理过的流线性增长。
+RETIRE_SECONDS = 60.0
+# 一帧推送的结局（见 `_send_frame`）。
+SENT, RETRY, DEAD, OFFLINE = "sent", "retry", "dead", "offline"
 
 
 def _view_up_to(row: TaskStream, offset: int) -> StreamView:
@@ -90,6 +101,8 @@ class StreamPusher:
         # 的长度会被估高——高出来的那一段 worker 不推、网关也不推，就此丢字。
         self._frames: dict[str, deque[tuple[float, int]]] = {}
         self._confirmed: dict[str, int] = {}
+        # 已经走完的流 → 收尾时刻；`_sweep_retired` 按 RETIRE_SECONDS 清掉它们的全部内存状态。
+        self._retired: dict[str, float] = {}
         self._log = get_logger(__name__).bind(bot_key=runner.bot.bot_key)
 
     def block(self, stream_id: str) -> None:
@@ -120,6 +133,21 @@ class StreamPusher:
             length = sent_len
         return length
 
+    def _retire(self, stream_id: str) -> None:
+        """这条流在本网关上走完了：节流状态立刻丢，帧历史先留着给迟到的错误码用。"""
+        self._last_push.pop(stream_id, None)
+        self._last_content.pop(stream_id, None)
+        self._retired.setdefault(stream_id, self.clock())
+
+    def _sweep_retired(self) -> None:
+        """收尾超过 RETIRE_SECONDS 的流：帧历史、确认长度、封流标记一并清掉。"""
+        deadline = self.clock() - RETIRE_SECONDS
+        for stream_id in [s for s, at in self._retired.items() if at <= deadline]:
+            del self._retired[stream_id]
+            self._frames.pop(stream_id, None)
+            self._confirmed.pop(stream_id, None)
+            self.blocked.discard(stream_id)
+
     async def note_stream_dead(self, stream_id: str, task_id: int | None) -> None:
         """企微回了 846606/846608：这条流没了，立刻把投递交出去，别等下一轮扫描。
 
@@ -132,6 +160,7 @@ class StreamPusher:
            而那一帧 finish 其实没送到：`confirmed..offset` 这一段只能由网关补投。
         """
         self.block(stream_id)
+        self._retire(stream_id)
         if task_id is None:
             return
         async with self.runner.factory() as session:
@@ -139,19 +168,21 @@ class StreamPusher:
             if row is None:
                 return
             confirmed = self.delivered_len(row.stream_id)
-            if row.is_complete:
+            if row.delivery_mode == "proactive":
+                # 主动模式那一帧 finish 被拒：offset 之后归 worker，网关只补 confirmed..offset。
+                await self.deliver_gap(session, row, confirmed=confirmed)
+            elif row.is_complete:
                 # 被拒的多半就是那一帧 finish：`finish_pushed_at` 已经标上了，可终稿其实
                 # 一个字都没送到。改走 outbox（同一个幂等键，重复收到错误码也只发一条）。
                 await self.deliver_final(session, task_id, offset=confirmed)
-            elif row.finish_pushed_at is None:
-                await self.hand_off(session, row, reason="stream_dead")
             else:
-                await self.deliver_gap(session, row, confirmed=confirmed)
+                await self.hand_off(session, row, reason="stream_dead")
             await session.commit()
 
     async def push_pending(self) -> None:
         """推完这一轮所有待推的流。锁防重入：通知与兜底轮询会同时叫它。"""
         async with self.runner.lock:
+            self._sweep_retired()
             async with self.runner.factory() as session:
                 now = datetime.now(UTC)
                 for row in await streams.pending_for_bot(session, self.runner.bot.id):
@@ -161,11 +192,22 @@ class StreamPusher:
                 await session.commit()
 
     async def send_stream(self, row: TaskStream, content: str, *, finish: bool) -> bool:
-        """发一帧 stream；返回 False 表示连接不可用（调用方应当放弃这一轮）。"""
+        """发一帧 stream；返回这一帧是否确认送达（排空用：没送达就只认此前确认过的长度）。"""
+        return await self._send_frame(row, content, finish=finish) == SENT
+
+    async def _send_frame(self, row: TaskStream, content: str, *, finish: bool) -> str:
+        """发一帧 stream 并等回执，返回结局：
+
+        - `SENT`：平台确认收到；
+        - `DEAD`：846606/846608，这条流已经失效——就地封流，调用方负责把投递交出去；
+        - `RETRY`：其它错误码（系统繁忙、频控……），流还活着，下一轮用同一个 req_id 重推；
+        - `OFFLINE`：没写出去或没等到回执（连接断了 / 回执超时），这一轮别再推这个 bot。
+          不封流、不记帧：没确认的帧不计入已送达长度，重连后按版本号重推。
+        """
         req_id = str((row.reply_context or {}).get("req_id") or "")
         if not req_id:
             self._log.warning("stream_without_req_id", task_id=row.task_id)
-            return True
+            return SENT
         frame: dict[str, Any] = {
             "cmd": "aibot_respond_msg",
             "headers": {"req_id": req_id},
@@ -176,13 +218,23 @@ class StreamPusher:
         }
         try:
             await self.runner.ws.send_confirmed(frame)
-        except (DeliveryRejected, DeliveryUncertain) as exc:
-            self.blocked.add(row.stream_id)
+        except DeliveryRejected as exc:
+            if exc.errcode in STREAM_DEAD:
+                self.block(row.stream_id)
+                self._log.warning(
+                    "stream_dead", task_id=row.task_id, errcode=exc.errcode, finish=finish
+                )
+                return DEAD
+            self._log.warning(
+                "stream_frame_rejected", task_id=row.task_id, errcode=exc.errcode, finish=finish
+            )
+            return RETRY
+        except DeliveryUncertain as exc:
             self._log.warning("stream_not_confirmed", task_id=row.task_id, reason=str(exc))
-            return False
-        except (RuntimeError, WebSocketException) as exc:
+            return OFFLINE
+        except (DeliveryNotSent, RuntimeError, WebSocketException, OSError) as exc:
             self._log.info("stream_push_skipped", task_id=row.task_id, reason=type(exc).__name__)
-            return False
+            return OFFLINE
         self._frames.setdefault(row.stream_id, deque(maxlen=FRAME_HISTORY)).append(
             (self.clock(), len(row.pending_text or ""))
         )
@@ -193,7 +245,7 @@ class StreamPusher:
             stream_id=row.stream_id,
             extra={"task_id": row.task_id, "finish": finish},
         )
-        return True
+        return SENT
 
     # ---- 单行分支 ---------------------------------------------------------
 
@@ -219,6 +271,17 @@ class StreamPusher:
             )
         return await self._progress(session, row, now)
 
+    async def _on_dead(self, session: AsyncSession, row: TaskStream) -> None:
+        """这一帧的回执就是 846606/846608：流当场失效，在同一轮里把投递交出去。
+
+        不能留给下一轮的「已封流」分支去 `hand_off`：主动模式的行在那里会被当成「未完成待
+        交接」，worker 记下的 offset 被改写，`confirmed..offset` 那一段就再也没人推了。
+        """
+        if row.delivery_mode == "stream" and row.is_complete:
+            await self.deliver_final(session, row.task_id, offset=self.delivered_len(row.stream_id))
+        else:
+            await self.hand_off(session, row, reason="stream_dead")
+
     async def _takeover(self, session: AsyncSession, row: TaskStream) -> None:
         """上一任建的流：推不了，转交 worker 的 outbox（`_push_if_proactive` 会补终稿）。"""
         # offset=0：上一任的连接早就断了，这条流上一个字都没真的送到用户眼前。
@@ -228,6 +291,7 @@ class StreamPusher:
             "finish_suffix": msg("drain_suffix"),
             "takeover": True,
         }
+        self._retire(row.stream_id)
         if await self._to_proactive(session, row, state) is None:
             # worker 抢在这一刻之前收了尾：它看到的还是 stream，终稿只能由网关送出去。
             await self.deliver_final(session, row.task_id, offset=0)
@@ -257,6 +321,16 @@ class StreamPusher:
         网关自己入 outbox 发出去（幂等键与 worker 的 `:send:final` 同一个，抢着发也只发一条）。
         """
         offset = self.delivered_len(row.stream_id)
+        self._retire(row.stream_id)
+        if row.delivery_mode == "proactive":
+            # 行已经是主动模式：offset 是 worker 记下的「从哪里接着推」，改写它会丢掉
+            # `confirmed..offset` 那一段。只补这段缺口，并认下 finish（这条流不再推了）。
+            await self.deliver_gap(session, row, confirmed=offset)
+            await streams.mark_pushed(session, row.task_id, row.version)
+            if row.finish_pushed_at is None:
+                await streams.mark_finish_pushed(session, row.task_id)
+            self._log.info(reason, task_id=row.task_id, gap_from=offset)
+            return
         if not row.is_complete:
             state = {
                 **(row.background_state or {}),
@@ -304,6 +378,7 @@ class StreamPusher:
         await streams.mark_pushed(session, task_id, row.version)
         if row.finish_pushed_at is None:
             await streams.mark_finish_pushed(session, task_id)
+        self._retire(row.stream_id)
 
     async def queue_pending_card(self, session: AsyncSession, row: TaskStream) -> None:
         """流的最后一帧送达之后把待发卡片入出站箱；幂等键与 worker 主动模式那一路相同。"""
@@ -361,16 +436,19 @@ class StreamPusher:
         return str((task.session_key if task is not None else "") or "")
 
     async def _finish(self, session: AsyncSession, row: TaskStream, content: str) -> bool:
-        if not await self.send_stream(row, content, finish=True):
-            return False
+        result = await self._send_frame(row, content, finish=True)
+        if result == DEAD:
+            await self._on_dead(session, row)
+            return True
+        if result != SENT:
+            return result == RETRY
         await streams.mark_pushed(session, row.task_id, row.version)
         await streams.mark_finish_pushed(session, row.task_id)
         if row.is_complete:
             # 主动模式下这一帧只是「切后台」的收尾，正文还没写完：卡片归 worker 自己入队
             # （同一个幂等键），网关此刻插一张只会比答案先到。
             await self.queue_pending_card(session, row)
-        self._last_push.pop(row.stream_id, None)
-        self._last_content.pop(row.stream_id, None)
+        self._retire(row.stream_id)
         return True
 
     async def _progress(self, session: AsyncSession, row: TaskStream, now: datetime) -> bool:
@@ -383,8 +461,14 @@ class StreamPusher:
             # 渲染结果没变（只改了不上屏的字段）：认下这个版本，别每轮都重算。
             await streams.mark_pushed(session, row.task_id, row.version)
             return True
-        if not await self.send_stream(row, content, finish=False):
-            return False
+        result = await self._send_frame(row, content, finish=False)
+        if result == DEAD:
+            await self._on_dead(session, row)
+            return True
+        if result == RETRY:
+            self._last_push[row.stream_id] = tick  # 被拒也守节流，别每轮都砸同一个错误码
+        if result != SENT:
+            return result == RETRY
         self._last_push[row.stream_id] = tick
         self._last_content[row.stream_id] = content
         await streams.mark_pushed(session, row.task_id, row.version)
@@ -393,4 +477,5 @@ class StreamPusher:
     async def _quiet(self, session: AsyncSession, row: TaskStream, reason: str) -> None:
         """这条流已经交接完了：认下版本，免得它每一轮都被捞出来。"""
         await streams.mark_pushed(session, row.task_id, row.version)
+        self._retire(row.stream_id)
         self._log.debug(reason, task_id=row.task_id, stream_id=row.stream_id)
