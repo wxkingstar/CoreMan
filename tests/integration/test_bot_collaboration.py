@@ -325,7 +325,7 @@ async def test_help_endpoint_auth_binding_and_no_identity_override(db_session):
         ).status_code == 409
 
 
-async def test_parallel_human_requests_get_distinct_sessions(db_session):
+async def test_direct_human_requests_share_original_group_session(db_session):
     a, b, actor, route, task, row = await setup(db_session)
     queued = []
     for mid in ("human-one", "human-two"):
@@ -349,7 +349,8 @@ async def test_parallel_human_requests_get_distinct_sessions(db_session):
                 lease_generation=1,
             )
         )
-    assert queued[0].session_key != queued[1].session_key
+    assert queued[0].session_key == queued[1].session_key == "group"
+    assert row.status == "cancelled"
     assert queued[0].inbound_event_id != queued[1].inbound_event_id
 
 
@@ -412,24 +413,6 @@ async def test_model_markup_cannot_add_notification_recipients(db_session):
     assert "**核实**" in item.payload["markdown"]
 
 
-@pytest.mark.parametrize("status", ["requested", "completed"])
-async def test_explicit_human_reply_retains_context_and_supersedes_active_round(db_session, status):
-    a, _, _, _, task, row = await setup(db_session)
-    row.status = status
-    row.source_session_key = "group:request:original"
-    from coreman.core.db.models import InboundEvent
-
-    origin = await db_session.get(InboundEvent, task.inbound_event_id)
-    kwargs = dict(bot_id=a.id, chat_id="group", parent_id=origin.platform_msg_id)
-    assert await service.followup_session(db_session, **kwargs, platform_user_id="other") is None
-    assert row.status == status
-    assert (
-        await service.followup_session(db_session, **kwargs, platform_user_id="human-id")
-        == row.source_session_key
-    )
-    assert row.status == ("cancelled" if status == "requested" else "completed")
-
-
 async def test_origin_human_can_stop_at_helper_and_cancel_alias_routes_fast(db_session, db_engine):
     a, b, _, _, task, row = await setup(db_session)
     from coreman.runtime.worker.commands import do_stop
@@ -460,57 +443,254 @@ async def test_origin_human_can_stop_at_helper_and_cancel_alias_routes_fast(db_s
     assert row.status == "cancelled"
 
 
-async def test_repeated_reply_to_old_card_cancels_newer_round(db_session):
-    from coreman.core.bus.tasks import NewTask
-    from coreman.core.db.models import BotCollaboration, InboundEvent
-
-    a, _, _, route, task, first = await setup(db_session)
-    first.status = "cancelled"
-    first.source_session_key = "group:request:original"
-    newer_task = await tasks.enqueue(
-        db_session,
-        NewTask(bot_id=a.id, kind="chat", payload={}, inbound_event_id=task.inbound_event_id),
-    )
-    second = BotCollaboration(
-        route_id=route.id,
-        source_task_id=newer_task.id,
-        origin_user_id=first.origin_user_id,
-        origin_platform_user_id=first.origin_platform_user_id,
-        source_session_key=first.source_session_key,
-        source_relay_session_id=first.source_relay_session_id,
-        source_relay_id=first.source_relay_id,
-        question="new requirement",
-        status="waiting_helper",
-        expires_at=first.expires_at,
-    )
-    db_session.add(second)
-    await db_session.flush()
-    origin = await db_session.get(InboundEvent, task.inbound_event_id)
-    key = await service.followup_session(
-        db_session,
-        bot_id=a.id,
-        chat_id="group",
-        parent_id=origin.platform_msg_id,
-        platform_user_id="human-id",
-    )
-    assert key == first.source_session_key
-    assert second.status == "cancelled"
-
-
-async def test_legacy_shared_group_session_is_never_reused_by_quote(db_session):
-    from coreman.core.db.models import InboundEvent
-
-    a, _, _, _, task, row = await setup(db_session)
-    origin = await db_session.get(InboundEvent, task.inbound_event_id)
-    assert row.source_session_key == "group"
-    assert (
-        await service.followup_session(
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_changed_source_mapping_cannot_dispatch_old_help(db_session, replacement):
+    a, b, actor, route, task, row = await setup(db_session)
+    await service.send_message(db_session, row, route)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    item.payload = {**item.payload, "_feishu_message_id": "stale-request"}
+    await sessions.clear(db_session, a.id, "group")
+    if replacement:
+        fresh = await sessions.get_or_create(
             db_session,
             bot_id=a.id,
-            chat_id="group",
-            parent_id=origin.platform_msg_id,
-            platform_user_id="human-id",
+            session_key="group",
+            backend="claude",
+            ttl_hours=72,
+            speaker_user_id=actor.id,
         )
-        is None
+        assert fresh.relay_session_id != row.source_relay_session_id
+    await receipt(db_session, b, mid="stale-request", union="ua")
+    await db_session.flush()
+    assert await service.tick(db_session, datetime.now(UTC)) == 0
+    assert row.status == "cancelled"
+    assert row.helper_task_id is None
+
+
+async def test_serial_claim_waits_for_cancelled_runtime_and_preserves_fifo(db_session):
+    a, _, _, _, old, _ = await setup(db_session)
+    await tasks.request_cancel(db_session, old.id, "superseded")
+    first = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id, kind="chat", session_key="group", payload={"serialize_session": True}
+        ),
     )
+    second = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id, kind="chat", session_key="group", payload={"serialize_session": True}
+        ),
+    )
+    assert await tasks.claim(db_session, lane="normal", instance_id="worker-test") is None
+    await tasks.finish(db_session, old.id, status="cancelled")
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    assert claimed.id == first.id
+    assert await tasks.claim(db_session, lane="normal", instance_id="worker-test") is None
+    await tasks.finish(db_session, first.id, status="succeeded")
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    assert claimed.id == second.id
+
+
+async def test_denied_human_cannot_cancel_shared_collaboration(db_session):
+    a, _, actor, _, source, row = await setup(db_session)
+    db_session.add(BotAllowedUser(bot_id=a.id, user_id=actor.id))
+    await db_session.flush()
+    assert not await service.admit_human(db_session, a.id, "group", "outsider")
     assert row.status == "requested"
+    await db_session.refresh(source)
+    assert source.cancel_requested_at is None
+
+
+async def test_second_human_replaces_shared_task_without_changing_origin(db_session):
+    a, _, actor, _, source, row = await setup(db_session)
+    second = User(login_name="second", display_name="第二位人类")
+    db_session.add(second)
+    await db_session.flush()
+    db_session.add(UserIdentity(user_id=second.id, platform="feishu", platform_user_id="second-id"))
+    await db_session.flush()
+    assert await service.admit_human(db_session, a.id, "group", "second-id")
+    assert row.status == "cancelled"
+    assert row.origin_user_id == actor.id
+    assert row.origin_platform_user_id == "human-id"
+    with pytest.raises(ValueError, match="cannot delegate"):
+        await service.request_help(
+            db_session,
+            task_id=source.id,
+            actor=str(actor.id),
+            target_key="helper",
+            question="late registration",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["clear", "replace", "expire"])
+async def test_resume_checks_session_after_resolve(db_engine, db_session, mutation):
+    from coreman.core.db.models import ChatSession
+    from coreman.runtime.worker.chat.collaboration import resolve
+    from coreman.runtime.worker.chat.opening import OpenStage
+    from tests.integration.worker_helpers import build_ctx
+
+    a, _, actor, _, source, row = await setup(db_session)
+    row.status = "resuming"
+    resume = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id,
+            kind="chat",
+            inbound_event_id=source.inbound_event_id,
+            session_key="group",
+            payload={"collaboration_id": str(row.id), "collaboration_phase": "resume"},
+        ),
+    )
+    row.resume_task_id = resume.id
+    row.response = "feedback"
+    await db_session.flush()
+    ctx = build_ctx(db_engine, resume)
+    intake, _, _ = await resolve(db_session, ctx)
+    mapping = await db_session.get(ChatSession, (a.id, "group"))
+    if mutation == "clear":
+        await sessions.clear(db_session, a.id, "group")
+    elif mutation == "replace":
+        mapping.relay_session_id = uuid.uuid4()
+    else:
+        mapping.last_active_at = datetime.now(UTC) - timedelta(hours=100)
+    await db_session.flush()
+    with pytest.raises(ValueError, match="session changed or expired"):
+        await OpenStage()._session_info(db_session, ctx, intake, "claude")
+
+
+async def test_two_help_sessions_do_not_reuse_b_daily_session(db_engine, db_session):
+    from coreman.runtime.worker.chat.collaboration import resolve
+    from coreman.runtime.worker.chat.opening import OpenStage
+    from tests.integration.worker_helpers import build_ctx
+
+    a, b, actor, route, source, row = await setup(db_session)
+    daily = await sessions.get_or_create(
+        db_session,
+        bot_id=b.id,
+        session_key="group",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=actor.id,
+    )
+    helper_ids = []
+    for number in range(2):
+        if number:
+            source = await chat_task(
+                db_session, a, "再次求助", sender="human-id", chat_type="group", chat_id="group"
+            )
+            row = await service.request_help(
+                db_session,
+                task_id=source.id,
+                actor=str(actor.id),
+                target_key="helper",
+                question="只提供本次背景",
+            )
+        await service.send_message(db_session, row, route)
+        item = await db_session.get(OutboxItem, row.request_outbox_id)
+        mid = f"help-{number}"
+        item.payload = {**item.payload, "_feishu_message_id": mid}
+        await receipt(db_session, b, mid=mid, union="ua")
+        await db_session.flush()
+        await service.tick(db_session, datetime.now(UTC))
+        helper = await db_session.get(Task, row.helper_task_id)
+        ctx = build_ctx(db_engine, helper)
+        intake, _, _ = await resolve(db_session, ctx)
+        info = await OpenStage()._session_info(db_session, ctx, intake, "claude")
+        helper_ids.append(info.relay_session_id)
+        assert helper.session_key == f"collaboration:{row.id}"
+        assert info.relay_session_id != daily.relay_session_id
+        await tasks.finish(db_session, source.id, status="succeeded")
+        await tasks.finish(db_session, helper.id, status="succeeded")
+        row.status = "completed"
+        await db_session.commit()
+    assert helper_ids[0] != helper_ids[1]
+    after = await sessions.get_or_create(
+        db_session,
+        bot_id=b.id,
+        session_key="group",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=actor.id,
+    )
+    assert after.relay_session_id == daily.relay_session_id
+
+
+async def test_cancel_between_resolve_and_open_does_not_create_session(db_engine, db_session):
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.integration.worker_helpers import build_ctx
+
+    a, _, _, _, source, _ = await setup(db_session)
+    handler = ChatTaskHandler()
+    ctx = build_ctx(db_engine, source)
+    intake, relay, _ = await handler._resolve(db_session, ctx)
+    await tasks.request_cancel(db_session, source.id, "superseded")
+    await db_session.flush()
+    with pytest.raises(ValueError, match="cancelled before dispatch"):
+        await handler._open(db_session, ctx, intake, relay, ctx.clock())
+
+
+@pytest.mark.parametrize("command", ["reset", "stop"])
+async def test_denied_fast_command_cannot_mutate_shared_session(db_engine, db_session, command):
+    from coreman.core.db.models import ChatSession
+    from coreman.runtime.worker.commands import CommandHandler
+    from tests.integration.worker_helpers import build_ctx
+
+    a, _, actor, _, source, row = await setup(db_session)
+    db_session.add(BotAllowedUser(bot_id=a.id, user_id=actor.id))
+    cmd = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id,
+            kind="command",
+            lane="fast",
+            session_key="group",
+            inbound_event_id=source.inbound_event_id,
+            payload={"command": command, "platform_user_id": "outsider"},
+        ),
+    )
+    await db_session.commit()
+    await CommandHandler().run(build_ctx(db_engine, cmd))
+    await db_session.refresh(row)
+    assert row.status == "requested"
+    mapping = await db_session.get(ChatSession, (a.id, "group"))
+    assert mapping.relay_session_id == row.source_relay_session_id
+    await db_session.refresh(cmd)
+    assert cmd.result == {"denied": True}
+
+
+@pytest.mark.parametrize("route_enabled", [True, False])
+async def test_configured_peer_does_not_change_ordinary_group_rounds(
+    db_engine, db_session, route_enabled
+):
+    from tests.fakes.fake_relay import FakeRelay
+    from tests.integration.test_chat_handler import run
+
+    a, _, actor, route, initial, row = await setup(db_session)
+    row.status = "completed"
+    route.enabled = route_enabled
+    await tasks.finish(db_session, initial.id, status="succeeded")
+    await db_session.commit()
+    fake = FakeRelay("normal")
+    for number in range(2):
+        message = InboundMessage(
+            platform="feishu",
+            bot_id=a.id,
+            kind="message",
+            chat_type="group",
+            chat_id="group",
+            sender={"platform_user_id": "human-id"},
+            message_id=f"direct-{number}",
+            mentions_bot=True,
+            parts=[{"type": "text", "text": f"direct turn {number}"}],
+            reply_context={"chat_id": "group", "message_id": f"direct-{number}"},
+        )
+        task = await enqueue_inbound(db_session, a, message, lease_generation=1)
+        await db_session.commit()
+        claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+        await db_session.commit()
+        assert claimed.id == task.id and task.session_key == "group"
+        await run(db_engine, claimed, fake)
+    assert len(fake.requests) == 2
+    assert fake.requests[0]["session_id"] == fake.requests[1]["session_id"]
+    assert fake.requests[0]["session_id"] == str(row.source_relay_session_id)

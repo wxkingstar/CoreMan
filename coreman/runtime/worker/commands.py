@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_speaker
-from coreman.core.db.models import Bot
+from coreman.core.db.models import Bot, BotAllowedUser
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound, reply_once
@@ -57,7 +58,10 @@ async def _clear_states(
                         BotCollaborationRoute.target_bot_id == bot_id,
                     ),
                     BotCollaborationRoute.chat_id == session_key,
-                    BotCollaboration.origin_platform_user_id == platform_user_id,
+                    or_(
+                        BotCollaborationRoute.source_bot_id == bot_id,
+                        BotCollaboration.origin_platform_user_id == platform_user_id,
+                    ),
                     BotCollaboration.status.in_(ACTIVE),
                 )
                 .with_for_update(of=BotCollaboration)
@@ -97,28 +101,6 @@ async def do_stop(
     platform_user_id: str | None = None,
 ) -> str:
     stopped = await _clear_states(session, bot_id, session_key, platform_user_id)
-    # Opt-in group tasks use per-request sessions, so stop follows original human provenance.
-    if platform_user_id:
-        from sqlalchemy import select
-
-        from coreman.core.db.models import InboundEvent, Task
-
-        scoped = list(
-            await session.scalars(
-                select(Task)
-                .join(InboundEvent, Task.inbound_event_id == InboundEvent.id)
-                .where(
-                    Task.bot_id == bot_id,
-                    Task.status.in_(tasks.OPEN),
-                    Task.session_key.startswith(session_key + ":request:", autoescape=True),
-                    InboundEvent.sender_platform_user_id == platform_user_id,
-                    InboundEvent.chat_id == session_key,
-                )
-            )
-        )
-        for task in scoped:
-            if task.id != ctx.task.id and await tasks.request_cancel(session, task.id, "user_stop"):
-                stopped += 1
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1
@@ -153,6 +135,29 @@ class CommandHandler:
             pid = await _speaker_id(
                 session, ctx, bot, str(ctx.task.payload.get("platform_user_id") or "")
             )
+            if bot is not None and bot.platform == "feishu":
+                bot = await session.scalar(select(Bot).where(Bot.id == bot.id).with_for_update())
+                assert bot is not None
+                speaker = await resolve_speaker(
+                    session, platform="feishu", platform_user_id=pid or ""
+                )
+                allowed = set(
+                    await session.scalars(
+                        select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id)
+                    )
+                )
+                if not bot.enabled or (allowed and speaker.user_id not in allowed):
+                    await reply_once(
+                        session,
+                        ctx,
+                        reply_context=inbound.reply_context,
+                        text=msg("no_permission", ctx.locale),
+                    )
+                    await tasks.finish(
+                        session, ctx.task.id, status="succeeded", result={"denied": True}
+                    )
+                    await session.commit()
+                    return
             if command == "reset":
                 text = await do_reset(session, ctx, ctx.task.bot_id, key, pid)
             elif command == "stop":

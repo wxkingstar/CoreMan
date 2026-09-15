@@ -21,8 +21,18 @@ _CLAIM_SQL = text(
     """
 UPDATE tasks SET status='claimed', claimed_by=:instance, claimed_at=now(), heartbeat_at=now(),
                  attempts=attempts+1
-WHERE id = (SELECT id FROM tasks WHERE status='queued' AND lane=:lane AND run_after<=now()
-            ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+WHERE id = (SELECT candidate.id FROM tasks candidate
+            WHERE candidate.status='queued' AND candidate.lane=:lane AND candidate.run_after<=now()
+            AND (candidate.kind='command'
+                 OR candidate.payload->>'serialize_session' IS DISTINCT FROM 'true'
+                 OR NOT EXISTS (
+                     SELECT 1 FROM tasks prior WHERE prior.bot_id=candidate.bot_id
+                     AND prior.session_key=candidate.session_key AND prior.id<>candidate.id
+                     AND (prior.status IN ('claimed','running') OR
+                          (prior.status='queued' AND prior.id<candidate.id
+                           AND prior.cancel_requested_at IS NULL))
+                 ))
+            ORDER BY candidate.priority DESC, candidate.id LIMIT 1 FOR UPDATE SKIP LOCKED)
 RETURNING id
 """
 )

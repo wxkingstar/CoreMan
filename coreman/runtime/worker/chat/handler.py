@@ -63,6 +63,11 @@ class ChatTaskHandler(
     async def _prepare(self, ctx: TaskContext) -> Prepared | None:
         started = ctx.clock()
         async with ctx.session_factory() as session:
+            current = await tasks.get(session, ctx.task.id)
+            if current and current.cancel_requested_at:
+                await tasks.finish(session, ctx.task.id, status="cancelled")
+                await session.commit()
+                return None
             resolved = await self._resolve(session, ctx)
             await session.commit()
         if resolved is None:

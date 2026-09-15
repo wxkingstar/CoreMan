@@ -116,7 +116,15 @@ async def authorized(
 async def request_help(
     session: AsyncSession, *, task_id: int, actor: str, target_key: str, question: str
 ) -> BotCollaboration:
-    task = await session.get(Task, task_id, with_for_update=True)
+    snapshot = await session.get(Task, task_id)
+    if snapshot is None:
+        raise ValueError("task cannot delegate")
+    await session.scalar(select(Bot).where(Bot.id == snapshot.bot_id).with_for_update())
+    # Keep ledger -> task lock order consistent with close/finalization.
+    await session.scalar(
+        select(BotCollaboration).where(BotCollaboration.source_task_id == task_id).with_for_update()
+    )
+    task = await session.get(Task, task_id, with_for_update=True, populate_existing=True)
     if (
         not task
         or task.kind != "chat"
@@ -275,6 +283,9 @@ async def tick(session: AsyncSession, now: datetime) -> int:
         except ValueError as exc:
             await close(session, row, "cancelled", str(exc))
             continue
+        if not await source_session_current(session, row, route):
+            await close(session, row, "cancelled", "原会话已重置或切换，旧协作结果已作废")
+            continue
         if row.expires_at <= now:
             await close(session, row, "timed_out", "等待协作伙伴反馈超时")
             continue
@@ -329,6 +340,7 @@ async def tick(session: AsyncSession, now: datetime) -> int:
                 payload={
                     "collaboration_id": str(row.id),
                     "collaboration_phase": "resume" if reply else "helper",
+                    "serialize_session": True,
                 },
             ),
         )
@@ -341,82 +353,57 @@ async def tick(session: AsyncSession, now: datetime) -> int:
     return count
 
 
-async def followup_session(
-    session: AsyncSession, *, bot_id: uuid.UUID, chat_id: str, parent_id: str, platform_user_id: str
-) -> str | None:
-    """An explicit reply by the original human continues their own conversation only."""
-    from coreman.core.db.models import FeishuDelivery
+async def source_session_current(
+    session: AsyncSession, row: BotCollaboration, route: BotCollaborationRoute
+) -> bool:
+    current = await session.get(
+        ChatSession, (route.source_bot_id, row.source_session_key), populate_existing=True
+    )
+    return current is not None and current.relay_session_id == row.source_relay_session_id
 
-    if not parent_id or not platform_user_id:
-        return None
-    task = await session.scalar(
-        select(Task)
-        .join(FeishuDelivery, FeishuDelivery.task_id == Task.id)
-        .where(Task.bot_id == bot_id, Task.kind == "chat", FeishuDelivery.message_id == parent_id)
+
+async def admit_human(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pid: str) -> bool:
+    """An authorized human turn replaces pending work in the shared group conversation.
+
+    Bot lock serializes admission with registration/opening. Ledger locks precede task locks,
+    matching completion and reconciliation. No actor change or per-user session partition.
+    """
+    if not await routes_for(session, bot_id, chat_id):
+        return False
+    bot = await session.scalar(select(Bot).where(Bot.id == bot_id).with_for_update())
+    speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)
+    allowed = set(
+        await session.scalars(select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot_id))
     )
-    if task is None:
-        task = await session.scalar(
-            select(Task)
-            .join(InboundEvent, InboundEvent.id == Task.inbound_event_id)
-            .where(
-                Task.bot_id == bot_id,
-                InboundEvent.chat_id == chat_id,
-                InboundEvent.platform_msg_id == parent_id,
-                Task.kind == "chat",
-            )
-        )
-    if task is None:
-        return None
-    cid = task.payload.get("collaboration_id")
-    row = await session.scalar(
-        select(BotCollaboration).where(
-            BotCollaboration.id == uuid.UUID(cid)
-            if cid
-            else BotCollaboration.source_task_id == task.id
-        )
-    )
-    if row:
-        route = await session.get(BotCollaborationRoute, row.route_id)
-        if (
-            not route
-            or route.source_bot_id != bot_id
-            or route.chat_id != chat_id
-            or row.origin_platform_user_id != platform_user_id
-        ):
-            return None
-        try:
-            await authorized(session, route, platform_user_id, row.origin_user_id)
-        except ValueError:
-            return None
-        key = row.source_session_key
-    else:
-        origin = await session.get(InboundEvent, task.inbound_event_id)
-        if (
-            not origin
-            or origin.chat_id != chat_id
-            or origin.sender_platform_user_id != platform_user_id
-            or (origin.payload.get("sender") or {}).get("sender_type", "user") != "user"
-        ):
-            return None
-        key = task.session_key or ""
-    if not key or not key.startswith(chat_id + ":request:"):
-        return None
-    # A reply to any earlier card supersedes the currently active round of this conversation.
-    active_rounds = await session.scalars(
+    if not bot or not bot.enabled or (allowed and speaker.user_id not in allowed):
+        return False
+    from coreman.core.chat.announcements import find_announcement
+
+    if await find_announcement(session, bot_id=bot_id, relay_server_id=bot.relay_server_id):
+        return False
+    rows = await session.scalars(
         select(BotCollaboration)
         .join(BotCollaborationRoute)
         .where(
             BotCollaborationRoute.source_bot_id == bot_id,
             BotCollaborationRoute.chat_id == chat_id,
-            BotCollaboration.source_session_key == key,
-            BotCollaboration.origin_platform_user_id == platform_user_id,
             BotCollaboration.status.in_(ACTIVE),
         )
         .order_by(BotCollaboration.created_at)
         .with_for_update(of=BotCollaboration)
     )
-    for active in active_rounds:
-        await close(
-            session, active, "cancelled", "已收到原发起人的补充，旧一轮停止，将按新要求继续"
+    for row in rows:
+        await close(session, row, "cancelled", "已收到群内新要求，旧一轮停止，将按新要求继续")
+    pending = await session.scalars(
+        select(Task)
+        .where(
+            Task.bot_id == bot_id,
+            Task.session_key == chat_id,
+            Task.kind == "chat",
+            Task.status.in_(tasks.OPEN),
         )
-    return key
+        .order_by(Task.id)
+    )
+    for task in pending:
+        await tasks.request_cancel(session, task.id, "superseded")
+    return True

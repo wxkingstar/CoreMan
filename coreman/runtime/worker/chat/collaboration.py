@@ -218,6 +218,8 @@ async def final_transition(
     assert route is not None
     try:
         await service.authorized(session, route, row.origin_platform_user_id, row.origin_user_id)
+        if not await service.source_session_current(session, row, route):
+            raise ValueError("原会话已重置或切换，旧协作结果已作废")
         if row.expires_at <= datetime.now(UTC):
             raise ValueError("协作等待超时")
         if verdict.log_status != "success":

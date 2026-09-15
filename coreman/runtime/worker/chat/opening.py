@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -80,6 +81,28 @@ class OpenStage(ChatStageBase):
         )
         if bot is None or not bot.enabled or current_relay is None or not current_relay.is_active:
             raise ValueError("bot_or_relay_changed_before_dispatch")
+        current_task = await tasks.get(session, ctx.task.id)
+        if (
+            current_task is None
+            or current_task.cancel_requested_at
+            or current_task.status not in tasks.ACTIVE
+        ):
+            raise ValueError("task cancelled before dispatch")
+        if ctx.task.payload.get("collaboration_id"):
+            from coreman.core.db.models import BotCollaboration
+
+            collaboration = await session.get(
+                BotCollaboration,
+                uuid.UUID(ctx.task.payload["collaboration_id"]),
+                populate_existing=True,
+            )
+            phase = ctx.task.payload.get("collaboration_phase")
+            if (
+                collaboration is None
+                or collaboration.expires_at <= datetime.now(UTC)
+                or collaboration.status != ("helper_running" if phase == "helper" else "resuming")
+            ):
+                raise ValueError("collaboration cancelled before dispatch")
         relay = current_relay
         intake = replace(intake, bot=bot, relay=relay)
         if intake.speaker.known:
@@ -176,6 +199,22 @@ class OpenStage(ChatStageBase):
             # The earlier resolve transaction cannot fence an intervening runtime switch.
             if intake.relay is None or intake.relay.id != row.source_relay_id:
                 raise ValueError("collaboration runtime changed before dispatch")
+            from coreman.core.db.models import ChatSession
+
+            current = await session.get(
+                ChatSession, (intake.bot.id, row.source_session_key), populate_existing=True
+            )
+            ttl = int(await ctx.settings_store.get("session_ttl_hours", default=72))
+            if (
+                row.status != "resuming"
+                or current is None
+                or current.relay_session_id != row.source_relay_session_id
+                or current.backend != backend
+                or current.last_active_at < datetime.now(UTC) - timedelta(hours=ttl)
+            ):
+                raise ValueError("collaboration source session changed or expired")
+            current.last_active_at = datetime.now(UTC)
+            current.last_speaker_user_id = intake.speaker.user_id
             return sessions.SessionInfo(row.source_relay_session_id, False, False)
         ttl = int(await ctx.settings_store.get("session_ttl_hours", default=72))
         return await sessions.get_or_create(

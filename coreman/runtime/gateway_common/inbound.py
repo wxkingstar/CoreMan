@@ -173,20 +173,6 @@ async def _enqueue_task(
         )
     else:
         session_key = message.chat_id
-        if message.platform == "feishu" and message.chat_type == "group":
-            from coreman.core.chat.bot_collaboration import followup_session, routes_for
-
-            if await routes_for(session, bot.id, message.chat_id):
-                session_key = (
-                    await followup_session(
-                        session,
-                        bot_id=bot.id,
-                        chat_id=message.chat_id,
-                        parent_id=str(message.reply_context.get("parent_id") or ""),
-                        platform_user_id=message.sender.platform_user_id,
-                    )
-                    or f"{message.chat_id}:request:{message.message_id}"
-                )
         new = NewTask(
             bot_id=bot.id,
             kind="chat",
@@ -195,4 +181,9 @@ async def _enqueue_task(
             inbound_event_id=event_id,
             dedupe_key=f"inbound:{event_id}",
         )
+    if message.platform == "feishu" and message.chat_type == "group":
+        from coreman.core.chat.bot_collaboration import admit_human
+
+        if await admit_human(session, bot.id, message.chat_id, message.sender.platform_user_id):
+            new.payload["serialize_session"] = True
     return await enqueue(session, new)
