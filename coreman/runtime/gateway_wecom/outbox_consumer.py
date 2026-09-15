@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.exceptions import WebSocketException
 
+from coreman.core.bus import outbox
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
-from coreman.runtime.bus import outbox
 from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
 
 if TYPE_CHECKING:

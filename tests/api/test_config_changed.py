@@ -2,9 +2,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.notify import Listener, asyncpg_dsn
 from coreman.core.chat import sessions
 from coreman.core.db.models import Bot, ChatSession
-from coreman.runtime.bus.notify import Listener, asyncpg_dsn
 from tests.api.conftest import login_as
 from tests.api.test_bots import _bot_body, _team
 

@@ -5,6 +5,8 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.rate_limit import quota_table
 from coreman.core.db.models import (
@@ -20,8 +22,6 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import instances, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
 from tests.fakes.fake_relay import FakeRelay

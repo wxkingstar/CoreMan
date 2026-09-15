@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from coreman.core.bus import streams
 from coreman.core.wecom.thinking import ThinkingCollector
-from coreman.runtime.bus import streams
 from coreman.runtime.worker.context import TaskContext
 
 

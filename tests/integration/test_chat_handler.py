@@ -4,6 +4,8 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, streams, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
@@ -17,8 +19,6 @@ from coreman.core.db.models import (
 )
 from coreman.core.i18n.messages import msg
 from coreman.core.prompting.defaults import SPEAKER_CHANGED_LINE
-from coreman.runtime.bus import instances, streams, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.worker_helpers import build_ctx, seed_bot

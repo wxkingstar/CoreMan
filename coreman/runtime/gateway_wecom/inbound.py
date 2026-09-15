@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox
+from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command
 from coreman.core.chat.identity import looks_like_open_userid
 from coreman.core.db.models import InboundEvent, Task
@@ -31,8 +33,6 @@ from coreman.core.wecom.messages import (
     parse_card_event,
     text_of,
 )
-from coreman.runtime.bus import outbox
-from coreman.runtime.bus.tasks import NewTask, enqueue
 
 if TYPE_CHECKING:  # BotInfo 定义在 runner 里，runner 又要用本模块的入队函数
     from coreman.runtime.gateway_wecom.runner import BotInfo

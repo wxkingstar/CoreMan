@@ -5,11 +5,11 @@ from collections.abc import Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import streams, tasks
 from coreman.core.chat import interactions
 from coreman.core.db.models import ChatLog, ChatSession, InteractionState, OutboxItem, Task
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.cards import question_brief
-from coreman.runtime.bus import streams, tasks
 from coreman.runtime.worker.background import Timing
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_relay import FakeRelay

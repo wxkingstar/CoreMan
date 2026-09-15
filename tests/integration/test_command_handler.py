@@ -3,11 +3,11 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import sessions
 from coreman.core.db.models import Bot, InboundEvent, TaskStream
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import instances, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.commands import CommandHandler
 from tests.integration.worker_helpers import build_ctx, seed_bot
 

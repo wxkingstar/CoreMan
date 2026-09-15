@@ -3,8 +3,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import instances, leases
 from coreman.core.db.models import Bot, BotLease, User
-from coreman.runtime.bus import instances, leases
 
 
 async def _bots(session: AsyncSession) -> tuple[Bot, Bot]:

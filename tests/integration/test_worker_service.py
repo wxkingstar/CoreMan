@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, ProcessInstance, Task, User
 from coreman.core.db.session import make_session_factory
-from coreman.runtime.bus import instances, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.service import WorkerService
 

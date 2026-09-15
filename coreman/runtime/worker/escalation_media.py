@@ -7,6 +7,7 @@ import uuid
 
 from sqlalchemy import select
 
+from coreman.core.bus import tasks
 from coreman.core.config import get_settings
 from coreman.core.db.models import Escalation, PlatformApp, Task, User
 from coreman.core.escalations.service import notify_localized
@@ -14,7 +15,6 @@ from coreman.core.object_store import object_store
 from coreman.core.platforms.feishu import FeishuClient
 from coreman.core.platforms.wecom import WeComClient
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus import tasks
 from coreman.runtime.worker.context import TaskContext
 
 

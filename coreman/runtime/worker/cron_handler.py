@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 
 from coreman.core.auth.system_access import build_system_access
+from coreman.core.bus import tasks
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, run_precheck
@@ -36,7 +37,6 @@ from coreman.core.relay.sse import (
     UsageEvent,
 )
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus import tasks
 from coreman.runtime.worker.context import TaskContext
 
 

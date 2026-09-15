@@ -20,6 +20,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
+from coreman.core.bus import instances, leases, outbox, tasks
 from coreman.core.db.models import (
     Bot,
     BotLease,
@@ -29,7 +30,6 @@ from coreman.core.db.models import (
     TaskStream,
     User,
 )
-from coreman.runtime.bus import instances, leases, outbox, tasks
 
 router = APIRouter(
     prefix="/api/admin/runtime", tags=["runtime"], dependencies=[Depends(verify_csrf)]

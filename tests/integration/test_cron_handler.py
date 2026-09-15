@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
 from coreman.core.db.models import ChatLog, CronRun, OutboxItem, Task, User, UserReached
 from coreman.core.db.session import make_session_factory
-from coreman.runtime.bus import instances, tasks
 from coreman.runtime.scheduler.cron import recover_runs, run_tick
 from coreman.runtime.worker.cron_handler import CronRunHandler
 from tests.fakes.fake_relay import FakeRelay

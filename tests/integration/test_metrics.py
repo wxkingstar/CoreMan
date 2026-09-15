@@ -1,9 +1,9 @@
 from prometheus_client.parser import text_string_to_metric_families
 
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.session import make_session_factory
 from coreman.core.observability.metrics import render
-from coreman.runtime.bus import tasks
-from coreman.runtime.bus.tasks import NewTask
 from tests.integration.test_scheduler_reaper import _bot
 
 

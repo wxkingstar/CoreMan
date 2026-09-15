@@ -2,7 +2,7 @@ import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.runtime.bus.notify import Listener, asyncpg_dsn, notify
+from coreman.core.bus.notify import Listener, asyncpg_dsn, notify
 
 
 def test_asyncpg_dsn() -> None:

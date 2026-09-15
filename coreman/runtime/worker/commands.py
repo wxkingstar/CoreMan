@@ -6,12 +6,12 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import tasks
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound, reply_once
 

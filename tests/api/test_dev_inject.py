@@ -4,9 +4,9 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import streams
 from coreman.core.config import reset_settings_cache
 from coreman.core.db.models import Bot, InboundEvent, Task, User
-from coreman.runtime.bus import streams
 
 
 @pytest.fixture

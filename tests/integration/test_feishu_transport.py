@@ -3,11 +3,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from coreman.core.bus import instances, leases, outbox, streams, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, FeishuDelivery, OutboxItem, TaskStream, User
 from coreman.core.db.session import make_session_factory
 from coreman.core.platforms.feishu import FeishuError
-from coreman.runtime.bus import instances, leases, outbox, streams, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
 
 

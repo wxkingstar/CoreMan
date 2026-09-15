@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.bots.secrets import decrypt_json, merge_secret_dict
+from coreman.core.bus import outbox, tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
@@ -26,7 +27,6 @@ from coreman.core.db.models import (
 )
 from coreman.core.errors import ApiError
 from coreman.core.knowledge.skill_policy import selected_groups, user_inputs
-from coreman.runtime.bus import outbox, tasks
 
 INPUTS_AAD = "skill_install.inputs"
 USER_ENV_AAD = "bot_skills.user_env_vars_enc"

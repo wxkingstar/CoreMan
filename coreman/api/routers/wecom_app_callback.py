@@ -12,11 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
+from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.db.models import AuthNonce, PlatformApp, User, UserIdentity
 from coreman.core.escalations import service
 from coreman.core.timeutils import utcnow
 from coreman.core.wecom.callback_crypto import MAX_BODY, CallbackCrypto, CallbackError, parse_xml
-from coreman.runtime.bus.tasks import NewTask, enqueue
 
 router = APIRouter(tags=["wecom-callback"])
 

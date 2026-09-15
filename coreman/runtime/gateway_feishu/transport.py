@@ -14,11 +14,11 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.bus import outbox, streams
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, TaskStream
 from coreman.core.observability.metrics import OUTBOX_FAILED, after_commit
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
-from coreman.runtime.bus import outbox, streams
 from coreman.runtime.gateway_feishu.cards import (
     interaction_card,
     split_utf8,

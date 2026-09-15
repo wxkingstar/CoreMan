@@ -10,9 +10,9 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.notify import notify
 from coreman.core.db.models import OutboxItem
 from coreman.core.observability.metrics import OUTBOX_FAILED, after_commit
-from coreman.runtime.bus.notify import notify
 
 BACKOFF_SECONDS = (2, 10, 30, 120, 120, 120)
 MAX_ATTEMPTS = 6

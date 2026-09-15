@@ -8,9 +8,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, PlatformApp, User, UserIdentity, UserReached
-from coreman.runtime.bus import outbox
 
 
 def chunks(text: str, limit: int) -> list[str]:

@@ -5,6 +5,8 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import interactions
 from coreman.core.db.models import (
     ChatLog,
@@ -16,8 +18,6 @@ from coreman.core.db.models import (
 )
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.cards import format_answers
-from coreman.runtime.bus import instances, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.background import Timing
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
 from tests.fakes.fake_relay import FakeRelay

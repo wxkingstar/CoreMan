@@ -24,13 +24,13 @@ from datetime import UTC, datetime
 import asyncpg
 
 from coreman import __version__
+from coreman.core.bus import instances
+from coreman.core.bus.notify import asyncpg_dsn
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.settings_store import SettingsStore
 from coreman.runtime.base import HEALTH_PORTS, Service
-from coreman.runtime.bus import instances
-from coreman.runtime.bus.notify import asyncpg_dsn
 from coreman.runtime.scheduler import cron, notifications, reaper
 
 # hashtext 把锁名压成 int4，pg_try_advisory_lock 隐式提升成 bigint；同名即同锁，跨实例通用。

@@ -1,10 +1,10 @@
 import pytest
 from sqlalchemy import select
 
+from coreman.core.bus import outbox
 from coreman.core.chat import interactions
 from coreman.core.db.models import OutboxItem
 from coreman.core.wecom.cards import answered_card, question_task_id
-from coreman.runtime.bus import outbox
 from coreman.runtime.worker.choice_flow import advance_choice
 from tests.integration.test_card_actions import Q1, _state
 from tests.integration.test_chat_handler import chat_task

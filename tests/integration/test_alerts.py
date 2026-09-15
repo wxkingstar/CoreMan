@@ -29,9 +29,9 @@ async def test_alert_holdoff_and_recovery_survive_transactions(db_session):
 
 
 async def test_evaluation_ignores_future_queue_and_detects_enabled_disconnected_bot(db_session):
+    from coreman.core.bus import tasks
+    from coreman.core.bus.tasks import NewTask
     from coreman.core.observability.alerts import tick
-    from coreman.runtime.bus import tasks
-    from coreman.runtime.bus.tasks import NewTask
     from tests.integration.test_scheduler_reaper import _bot
 
     bot = await _bot(db_session)

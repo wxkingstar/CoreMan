@@ -3,10 +3,10 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
+from coreman.core.bus import instances
 from coreman.core.db.models import ProcessInstance
 from coreman.core.db.session import make_session_factory
 from coreman.operations import drain, ready
-from coreman.runtime.bus import instances
 
 
 async def test_drain_requires_replacement_and_never_kills_running_instance(db_engine, db_session):
