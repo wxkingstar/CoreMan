@@ -83,6 +83,7 @@ npm run build
 
 ## 文档与目录
 
+- 概念与结构：[术语表](docs/glossary.md) · [架构与服务拓扑图](docs/architecture.md#service-topology)
 - 接入与能力：[企业微信](docs/wecom.md) · [飞书](docs/feishu.md) · [技能与审批](docs/skills-management.md) · [记忆](docs/memories.md) · [定时任务](docs/cron-jobs.md) · [人工求助](docs/escalations.md)
 - 运维与集成：[运行维护](docs/operations.md) · [基础设施 API](docs/infrastructure-api.md) · [对象存储](docs/object-storage.md) · [统计与体检](docs/statistics-and-health.md) · [IM 回复时限](docs/im-reply-lifecycle.md)
 - 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)（[可直接打开的 HTML](docs/environment-creation/manual.html)）
