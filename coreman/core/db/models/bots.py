@@ -63,7 +63,8 @@ class Bot(TimestampMixin, Base):
     verbosity_level: Mapped[int] = mapped_column(SmallInteger, server_default=text("1"))
     effort_level: Mapped[str | None] = mapped_column(Text)
     sse_timeout_seconds: Mapped[int] = mapped_column(Integer, server_default=text("3600"))
-    # 兼容旧数据库，已停用；IM 投递时限由平台策略决定。
+    # 已不再读取，下个版本删除：IM 投递时限由平台策略决定（worker 不读此列），
+    # 列暂留只为兼容上一版本代码对 bots 表的读写。
     agent_timeout_seconds: Mapped[int | None] = mapped_column(Integer)
     credentials_enc: Mapped[str] = mapped_column(Text, comment="enc")
     env_vars_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
