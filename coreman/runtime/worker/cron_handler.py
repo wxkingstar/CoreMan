@@ -14,7 +14,7 @@ from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
-from coreman.core.cron.precheck import PrecheckError, run_precheck
+from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
 from coreman.core.db.models import Bot, ChatLog, CronJob, CronRun, RelayServer, Task, User
 from coreman.core.errors import ApiError
 from coreman.core.knowledge.installation import effective_env
@@ -70,8 +70,9 @@ class CronRunHandler:
         execution_relay_id: uuid.UUID | None = None
         try:
             # precheck 只接收非敏感快照，不注入 bot env / token / 任意 Python 对象。
+            # 解释器在独立线程里跑：同进程其它任务的心跳、SSE 消费与取消传导不能跟着停摆。
             started = time.monotonic()
-            result = run_precheck(
+            result = await run_precheck_in_thread(
                 config.get("precheck_script"),
                 {
                     "now": utcnow().isoformat(),

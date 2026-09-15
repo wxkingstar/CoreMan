@@ -2,14 +2,19 @@
 
 只解释数据运算和控制流；所有值限定为 JSON 类型，所有方法逐项实现。
 不把脚本交给 Python 执行，不开放文件、环境变量、模块对象或任意网络访问。
+
+worker 里一律经 `run_precheck_in_thread` 调用：解释器是纯 CPU 计算，直接在事件循环上跑会让
+同进程的心跳、SSE 消费与取消传导一起停摆（spec §9「超时用独立线程」）。
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import math
 import operator
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +23,14 @@ from typing import Any
 MAX_SIZE = 65536
 MAX_ITEMS = 10000
 MAX_STEPS = 20000
+MAX_TIMEOUT_SECONDS = 120.0
+# 线程无法强杀：超时后先置停止标记让解释器在下一步退出，仍卡在单个内建调用里的只能遗弃。
+# 遗弃线程同时存在的上限；到顶后新的 precheck 直接判失败，不再继续堆积线程。
+MAX_ABANDONED_THREADS = 4
+ABANDON_GRACE_SECONDS = 5.0
+
+_abandoned_lock = threading.Lock()
+_abandoned_threads = 0
 
 
 class PrecheckError(ValueError):
@@ -34,6 +47,31 @@ class PrecheckResult:
 class _Return(Exception):
     def __init__(self, value: Any):
         self.value = value
+
+
+def _checked(value: Any) -> Any:
+    """每个表达式结果都做的 O(1) 检查：类型、整数位数、浮点有限、字符串与集合长度。
+
+    容器的递归遍历与序列化大小留给 `Interpreter.bound`，只在赋值、返回、传给内建函数时做。
+    """
+    kind = type(value)
+    if value is None or kind is bool:
+        return value
+    if kind is int:
+        if value.bit_length() > 256:
+            raise PrecheckError("integer limit")
+    elif kind is float:
+        if not math.isfinite(value):
+            raise PrecheckError("non-finite number")
+    elif kind is str:
+        if len(value) > MAX_SIZE:
+            raise PrecheckError("string limit")
+    elif kind in (list, dict):
+        if len(value) > MAX_ITEMS:
+            raise PrecheckError("collection limit")
+    else:
+        raise PrecheckError("unsupported value type")
+    return value
 
 
 def _bounded(value: Any, depth: int = 0) -> Any:
@@ -111,24 +149,47 @@ def validate_script(script: str) -> ast.FunctionDef:
 
 
 class Interpreter:
-    def __init__(self, ctx: dict[str, Any], timeout_seconds: float):
+    def __init__(
+        self,
+        ctx: dict[str, Any],
+        timeout_seconds: float,
+        stop: threading.Event | None = None,
+    ):
         # JSON roundtrip：调用者也不能将自定义对象送入解释器。
         self.env: dict[str, Any] = {"ctx": _bounded(json.loads(json.dumps(ctx)))}
-        self.deadline = time.monotonic() + min(timeout_seconds, 120)
+        self.deadline = time.monotonic() + min(timeout_seconds, MAX_TIMEOUT_SECONDS)
         self.steps = 0
+        self._stop = stop
 
     def step(self) -> None:
         self.steps += 1
-        if self.steps > MAX_STEPS or time.monotonic() > self.deadline:
+        if (
+            self.steps > MAX_STEPS
+            or time.monotonic() > self.deadline
+            or (self._stop is not None and self._stop.is_set())
+        ):
             raise PrecheckError("execution budget exceeded")
+
+    def bound(self, value: Any) -> Any:
+        """赋值、返回、传给内建函数前的完整限界。
+
+        解释器没有任何原地修改操作，已绑定到变量上的对象一经检查就永远合规：同一个对象再次
+        绑定（`x = big`、`len(big)`）不必重新遍历。只有新造出来的容器才走递归检查。
+        """
+        if type(value) not in (list, dict):
+            return value
+        for bound in self.env.values():
+            if bound is value:
+                return value
+        return _bounded(value)
 
     def block(self, statements: list[ast.stmt]) -> None:
         for node in statements:
             self.step()
             if isinstance(node, ast.Return):
-                raise _Return(self.expr(node.value) if node.value else None)
+                raise _Return(self.bound(self.expr(node.value)) if node.value else None)
             if isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets):
-                value = self.expr(node.value)
+                value = self.bound(self.expr(node.value))
                 for target in node.targets:
                     assert isinstance(target, ast.Name)
                     if target.id in {"ctx", "json", "math", "time", "datetime"}:
@@ -137,7 +198,7 @@ class Interpreter:
             elif isinstance(node, ast.If):
                 self.block(node.body if self.expr(node.test) else node.orelse)
             elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-                values = self.expr(node.iter)
+                values = self.bound(self.expr(node.iter))
                 if type(values) not in (list, dict, str):
                     raise PrecheckError("unsupported iterator")
                 if len(values) > MAX_ITEMS:
@@ -158,7 +219,7 @@ class Interpreter:
 
     def expr(self, node: ast.expr) -> Any:
         self.step()
-        return _bounded(self._expr(node))
+        return _checked(self._expr(node))
 
     def _expr(self, node: ast.expr) -> Any:
         if isinstance(node, ast.Constant):
@@ -257,8 +318,10 @@ class Interpreter:
         if isinstance(node, ast.Call):
             if any(k.arg is None for k in node.keywords):
                 raise PrecheckError("argument unpacking is forbidden")
-            args = [self.expr(a) for a in node.args]
-            kwargs = {k.arg: self.expr(k.value) for k in node.keywords if k.arg is not None}
+            args = [self.bound(self.expr(a)) for a in node.args]
+            kwargs = {
+                k.arg: self.bound(self.expr(k.value)) for k in node.keywords if k.arg is not None
+            }
             return self.call(node.func, args, kwargs)
         raise PrecheckError(f"unsupported expression: {type(node).__name__}")
 
@@ -321,13 +384,17 @@ class Interpreter:
 
 
 def run_precheck(
-    script: str | None, ctx: dict[str, Any], timeout_seconds: float = 30
+    script: str | None,
+    ctx: dict[str, Any],
+    timeout_seconds: float = 30,
+    *,
+    stop: threading.Event | None = None,
 ) -> PrecheckResult:
     if not script or not script.strip():
         return PrecheckResult(True)
     try:
         fn = validate_script(script)
-        interpreter = Interpreter(ctx, timeout_seconds)
+        interpreter = Interpreter(ctx, timeout_seconds, stop)
         result: Any = None
         try:
             interpreter.block(fn.body)
@@ -351,3 +418,74 @@ def run_precheck(
     except (ValueError, TypeError, KeyError, IndexError, ArithmeticError, RecursionError) as exc:
         # 不回传 ctx 值和 Python 异常正文，避免凭证或业务数据出现在错误日志。
         raise PrecheckError(f"precheck failed: {type(exc).__name__}") from exc
+
+
+def abandoned_threads() -> int:
+    """当前被遗弃、仍未退出的 precheck 线程数（测试与排查用）。"""
+    with _abandoned_lock:
+        return _abandoned_threads
+
+
+async def run_precheck_in_thread(
+    script: str | None, ctx: dict[str, Any], timeout_seconds: float = 30
+) -> PrecheckResult:
+    """在独立线程里执行 precheck，事件循环只等结果。
+
+    不用默认线程池：遗弃的线程会占住池位，而同一个池还承担 DNS 解析等其它阻塞调用。
+    超过「解释器时限 + 宽限」仍未返回时置停止标记并遗弃线程，按预算超限判失败；
+    同时遗弃的线程到达上限后新的 precheck 直接失败。
+    """
+    global _abandoned_threads
+    if not script or not script.strip():
+        return PrecheckResult(True)
+    with _abandoned_lock:
+        if _abandoned_threads >= MAX_ABANDONED_THREADS:
+            raise PrecheckError("precheck capacity exhausted")
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[PrecheckResult] = loop.create_future()
+    stop = threading.Event()
+    state = {"finished": False, "abandoned": False}
+
+    def deliver(result: PrecheckResult | None, error: BaseException | None) -> None:
+        if future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(result)  # type: ignore[arg-type]
+
+    def work() -> None:
+        global _abandoned_threads
+        result: PrecheckResult | None = None
+        error: BaseException | None = None
+        try:
+            result = run_precheck(script, ctx, timeout_seconds, stop=stop)
+        except PrecheckError as exc:
+            error = exc
+        except Exception as exc:  # noqa: BLE001 线程里的异常只能换成失败结果带回去
+            error = PrecheckError(f"precheck failed: {type(exc).__name__}")
+        finally:
+            with _abandoned_lock:
+                state["finished"] = True
+                if state["abandoned"]:
+                    _abandoned_threads -= 1
+        try:
+            loop.call_soon_threadsafe(deliver, result, error)
+        except RuntimeError:
+            pass  # 事件循环已关闭：没人在等这个结果了
+
+    thread = threading.Thread(target=work, name="cron-precheck", daemon=True)
+    thread.start()
+    limit = min(timeout_seconds, MAX_TIMEOUT_SECONDS) + ABANDON_GRACE_SECONDS
+    try:
+        async with asyncio.timeout(limit):
+            return await future
+    except BaseException as exc:
+        stop.set()
+        with _abandoned_lock:
+            if not state["finished"]:
+                state["abandoned"] = True
+                _abandoned_threads += 1
+        if isinstance(exc, TimeoutError):
+            raise PrecheckError("execution budget exceeded") from None
+        raise

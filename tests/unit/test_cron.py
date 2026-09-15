@@ -1,8 +1,12 @@
+import asyncio
+import threading
+import time
 from datetime import UTC, datetime
 
 import pytest
 
-from coreman.core.cron.precheck import PrecheckError, run_precheck
+from coreman.core.cron import precheck
+from coreman.core.cron.precheck import PrecheckError, run_precheck, run_precheck_in_thread
 from coreman.core.cron.schedule import next_run
 
 
@@ -103,3 +107,84 @@ async def test_partial_cron_reply_is_not_success(finish):
 
     with pytest.raises(ValueError, match="incomplete_result"):
         await CronRunHandler()._consume(stream())
+
+
+def test_precheck_rebinding_large_value_is_not_quadratic() -> None:
+    # 旧实现对每个表达式结果都整体遍历 + 序列化：这段 18000 步的脚本要跑几十秒。
+    script = (
+        "def should_trigger(ctx):\n"
+        " big = range(10000)\n"
+        " for i in range(6000):\n"
+        "  x = big\n"
+        " return {'trigger': True}\n"
+    )
+    started = time.monotonic()
+    assert run_precheck(script, {}).trigger
+    assert time.monotonic() - started < 3
+
+
+def test_precheck_new_containers_are_still_size_checked() -> None:
+    base = "def should_trigger(ctx):\n s = json.dumps(range(9000))\n"
+    with pytest.raises(PrecheckError, match="data size limit"):
+        run_precheck(base + " pair = [s, s]\n return {'trigger': True}", {})
+    with pytest.raises(PrecheckError, match="data size limit"):
+        run_precheck(base + " return {'trigger': True, 'reason': json.dumps([s, s])}", {})
+    with pytest.raises(PrecheckError, match="integer limit"):
+        run_precheck(
+            "def should_trigger(ctx):\n x = 3\n for i in range(20):\n  x = x * x\n"
+            " return {'trigger': True}",
+            {},
+        )
+
+
+async def test_precheck_thread_keeps_event_loop_responsive() -> None:
+    script = (
+        "def should_trigger(ctx):\n"
+        " big = range(10000)\n"
+        " for i in range(5000):\n"
+        "  s = json.dumps(big)\n"
+        " return {'trigger': True}\n"
+    )
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    running = asyncio.create_task(ticker())
+    try:
+        with pytest.raises(PrecheckError, match="budget"):
+            await run_precheck_in_thread(script, {}, 0.5)
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+    # 同步执行时这 0.5 秒里事件循环一跳都走不了。
+    assert ticks >= 5
+
+
+async def test_precheck_abandons_stuck_thread_up_to_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = threading.Event()
+
+    def stuck(script, ctx, timeout_seconds=30, *, stop=None):  # type: ignore[no-untyped-def]
+        release.wait(5)
+        return precheck.PrecheckResult(True)
+
+    monkeypatch.setattr(precheck, "run_precheck", stuck)
+    monkeypatch.setattr(precheck, "MAX_ABANDONED_THREADS", 1)
+    monkeypatch.setattr(precheck, "ABANDON_GRACE_SECONDS", 0.05)
+    script = "def should_trigger(ctx):\n return {'trigger': True}"
+    try:
+        with pytest.raises(PrecheckError, match="budget"):
+            await run_precheck_in_thread(script, {}, 0.01)
+        assert precheck.abandoned_threads() == 1
+        with pytest.raises(PrecheckError, match="capacity"):
+            await run_precheck_in_thread(script, {}, 0.01)
+    finally:
+        release.set()
+    for _ in range(200):
+        if precheck.abandoned_threads() == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert precheck.abandoned_threads() == 0

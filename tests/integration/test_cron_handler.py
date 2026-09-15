@@ -167,3 +167,43 @@ async def test_private_delivery_revalidates_identity(
     actor.status = "disabled"
     await db_session.commit()
     assert not await private_target_valid(db_session, item)
+
+
+async def test_long_precheck_does_not_stall_heartbeats(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    import time as _time
+
+    from coreman.core.cron import precheck
+
+    def slow(script, ctx, timeout_seconds=30, *, stop=None):  # type: ignore[no-untyped-def]
+        _time.sleep(0.8)  # 纯 CPU/阻塞：放在事件循环上会让下面的心跳一次都写不进去
+        return precheck.PrecheckResult(False, reason="slow")
+
+    monkeypatch.setattr(precheck, "run_precheck", slow)
+    now = datetime.now(UTC)
+    await job(db_session, now, precheck_script="def should_trigger(ctx):\n pass")
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    beats = 0
+
+    async def beating() -> None:
+        nonlocal beats
+        while True:
+            await ctx.heartbeat()
+            beats += 1
+            await asyncio.sleep(0.1)
+
+    beat = asyncio.create_task(beating())
+    await asyncio.sleep(0)
+    before = beats
+    try:
+        await CronRunHandler().run(ctx)
+    finally:
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "skipped" and not fake.requests
+    assert beats - before >= 4
