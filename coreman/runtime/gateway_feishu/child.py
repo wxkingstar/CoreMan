@@ -39,7 +39,9 @@ class BotInfo:
 
 
 # 子进程连接池：出站那一路一条会话，入站 ack 那一路一条会话。常驻的应用独占锁连接走单独的
-# NullPool 引擎、不占这两个名额——出站锁也挂在它的长事务上，出站就不必再占一条池连接跨越整轮。
+# NullPool 引擎、不占这两个名额，出站锁也由它持有，出站就不必再占一条池连接跨越整轮。
+# 这条连接是 AUTOCOMMIT 并使用会话级咨询锁：它若停在一个不结束的事务里，迁移中的在线建索引
+# （CREATE INDEX CONCURRENTLY）和 VACUUM 都会一直等它，滚动升级就卡在迁移上。
 POOL_SIZE, MAX_OVERFLOW = 1, 1
 # 没有本 bot 的通知时多久兜底跑一轮：卡片 9 分钟转静态、失败退避到点都靠它。
 IDLE_POLL_SECONDS = 3.0
@@ -88,7 +90,12 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
         pool_pre_ping=True,
         hide_parameters=True,
     )
-    guard_engine = create_async_engine(cfg.database_url, poolclass=NullPool, hide_parameters=True)
+    guard_engine = create_async_engine(
+        cfg.database_url,
+        poolclass=NullPool,
+        hide_parameters=True,
+        isolation_level="AUTOCOMMIT",
+    )
     factory = make_session_factory(engine)
     listener: Listener | None = None
     app_guard: AsyncConnection | None = None
@@ -111,7 +118,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
         app_id, secret = credentials["app_id"], credentials["app_secret"]
         app_guard = await guard_engine.connect()
         exclusive = await app_guard.scalar(
-            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
+            text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))"),
             {"key": f"feishu-app-connection:{app_id}"},
         )
         if not exclusive:
