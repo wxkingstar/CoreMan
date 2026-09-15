@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from relay_agent.agent import COMMAND_CANCEL, Agent, OperationError, run_command
+from runtime_daemon.agent import COMMAND_CANCEL, Agent, OperationError, run_command
 from runtime_daemon.daemon import Daemon
 from runtime_daemon.install_service import systemd_quote
 

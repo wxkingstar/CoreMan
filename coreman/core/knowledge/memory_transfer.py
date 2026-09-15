@@ -33,11 +33,12 @@ async def transfer(
         .limit(1)
     ):
         raise ApiError(409, 409, "技能正在安装，请完成或取消后再换机")
-    configured = bool(old and old.agent_port and old.agent_token_enc)
+    # 原实例在运行时节点上才有本地记忆可读；未绑定节点的机器人只部署库里已回收的记忆。
+    configured = bool(old and old.runtime_node_id)
     if not configured and not memories:
         return "not_configured"
-    if cipher is None or not target.agent_port or not target.agent_token_enc:
-        raise ApiError(409, 409, "有记忆需要迁移，请先配置目标实例 Agent")
+    if target.runtime_node_id is None:
+        raise ApiError(409, 409, "有记忆需要迁移，但目标运行时未绑定节点")
     in_flight = await session.scalar(
         select(Task.id)
         .where(

@@ -12,7 +12,7 @@ CoreMan 是一个可自托管的 AI 员工平台，把企业微信、飞书与�
 
 - **企业微信与飞书接入**：长连接收发、流式回复、图片与文件、引用消息、交互问答卡片。
 - **AI 员工管理**：提示词、模型、运行时、协作者、使用白名单及团队归属。
-- **运行时管理**：独立 Runtime Daemon 主动连接管理端，提供 Claude Code / Codex 后端、健康状态与额度信息；也可接入兼容的中继实例。
+- **运行时管理**：独立 Runtime Daemon 主动连接管理端，提供 Claude Code / Codex 后端、健康状态与额度信息。
 - **团队与权限**：团队、用户、角色、平台登录、通讯录同步、加密凭证与操作审计。
 - **任务与协作**：定时执行、通知、人工求助、会话管理、对话记录及运行状态。
 - **技能与记忆**：技能目录、安装审批、环境配置、记忆同步、使用统计与体检。
@@ -85,9 +85,9 @@ npm run build
 
 - 接入与能力：[飞书](docs/feishu.md) · [技能与审批](docs/skills-management.md) · [记忆](docs/memories.md) · [定时任务](docs/cron-jobs.md) · [人工求助](docs/escalations.md)
 - 运维与集成：[运行维护](docs/operations.md) · [基础设施 API](docs/infrastructure-api.md) · [对象存储](docs/object-storage.md) · [统计与体检](docs/statistics-and-health.md) · [IM 回复时限](docs/im-reply-lifecycle.md)
-- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Relay Agent](relay_agent/README.md) · [Linux 环境手册](docs/environment-creation/README.md)（[可直接打开的 HTML](docs/environment-creation/manual.html)）
+- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)（[可直接打开的 HTML](docs/environment-creation/manual.html)）
 
-`coreman/api` 为管理 API，`coreman/core` 为共享业务组件，`coreman/runtime` 为网关/worker/scheduler；`web` 为 Vue 3 管理台，`runtime_daemon` 与 `relay_agent` 为执行端，`deploy` 为部署配置，`migrations` 为数据库迁移，`tests` 为测试。
+`coreman/api` 为管理 API，`coreman/core` 为共享业务组件，`coreman/runtime` 为网关/worker/scheduler；`web` 为 Vue 3 管理台，`runtime_daemon` 为执行端，`deploy` 为部署配置，`migrations` 为数据库迁移，`tests` 为测试。
 
 ## 参与贡献与安全
 

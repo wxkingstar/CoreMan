@@ -5,7 +5,7 @@
 | Scope | 新路径 | 旧别名 |
 |---|---|---|
 | org | GET `/api/infra/org/members`、`tree`、`full` | `/api/robot/organization/members`、`tree`；`/api/organization/full` |
-| relay | POST `/api/infra/relay/rate-limits`、`health` | `/api/robot/rate-limits/report`、`/api/robot/health/report` |
+| relay | POST `/api/infra/relay/rate-limits`、`health` | — |
 | relay | GET `/api/infra/relay/servers` | `/api/robot/clawrelay-servers` |
 | push | POST `/api/infra/push` | `/api/push` |
 | notify | POST `/api/infra/notify/user` | `/api/robot/wework-notify` |
@@ -21,6 +21,6 @@
 
 对话令牌使用 ES256，issuer 来自设置，aud/scope 为系统 key，主体为当前已验证且启用的发起者。未知身份、bootstrap 身份、停用用户不签发。授权与机器人的允许范围每次请求重新读取，续跑也不复用历史提示词中的身份与令牌。公开公钥地址 `/api/.well-known/jwks.json`；轮换后旧公钥保留 24 小时。CoreMan bot_token 逐请求验证，不转换为寿命更长的管理会话。
 
-Relay Agent 上报可用该实例的 Bearer 令牌代替签名，只能修改自己实例；不能用 Bearer 列出全部实例。额度为空只更新心跳，不用零覆盖旧测量；遥测不提升配置 version。实时任务及手动探测仅管理员可用；`today-usage` 按 UTC 当日对话开始时间统计，未上报 token/成本保留 null，并给出上报记录数，不能把缺失当作零花费。独立程序安装与真实验证边界见 [relay-agent 说明](../relay_agent/README.md)。
+运行时实例全部由已注册的 Runtime Daemon 节点提供（每个节点按 AI 类型各一个实例），管理端经节点主动建立的反向通道下发请求，不再支持独立部署的中继实例。节点上报额度与健康时可用该实例的派生 Bearer 令牌代替签名，上报正文必须带 `server_id`，只能修改自己实例；不能用 Bearer 列出全部实例。额度为空只更新心跳，不用零覆盖旧测量；遥测不提升配置 version。实时任务及手动探测仅管理员可用；`today-usage` 按 UTC 当日对话开始时间统计，未上报 token/成本保留 null，并给出上报记录数，不能把缺失当作零花费。节点安装与服务管理见 [Runtime Daemon 说明](../runtime_daemon/README.md)。
 
 测试均使用隔离 PostgreSQL 和假平台/Agent。真实系统登录权限、企微通知可见范围、模型健康与额度探测需在相应接入环境验收。

@@ -21,6 +21,11 @@ def relay_visible(user: User, relay: RelayServer) -> bool:
     return relay.visibility == "all" or user.role in MANAGER_ROLES
 
 
+def relay_available(relay: RelayServer) -> bool:
+    """实例能承接机器人：已启用且属于某个运行时节点（独立中继实例已不再支持）。"""
+    return bool(relay.is_active) and relay.runtime_node_id is not None
+
+
 async def validate_model_for_relay(
     session: AsyncSession, relay: RelayServer | None, model: str, effort: str | None
 ) -> None:

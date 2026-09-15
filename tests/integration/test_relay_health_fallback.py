@@ -5,6 +5,7 @@ from sqlalchemy import update
 from coreman.core.db.models import RelayServer
 from coreman.core.db.session import make_session_factory
 from coreman.core.observability import relay_health
+from tests.fakes.runtime_node import attach_node
 from tests.integration.worker_helpers import seed_bot
 
 
@@ -12,6 +13,9 @@ async def test_health_fallback_skips_fresh_and_does_not_overwrite_new_report(
     db_engine, db_session, monkeypatch
 ):
     _, relay, _ = await seed_bot(db_session)
+    standalone = RelayServer(name="standalone", model_provider="claude")
+    db_session.add(standalone)
+    await attach_node(db_session, relay)
     now = datetime.now(UTC)
     relay.health_checked_at = now
     await db_session.commit()
@@ -24,7 +28,8 @@ async def test_health_fallback_skips_fresh_and_does_not_overwrite_new_report(
 
     monkeypatch.setattr(relay_health, "read_health", healthy)
     assert await relay_health.tick(factory, now) == 0 and not calls
-    assert await relay_health.tick(factory, now + timedelta(hours=3)) == 1
+    # 未绑定节点的独立实例不再参与兜底探测。
+    assert await relay_health.tick(factory, now + timedelta(hours=3)) == 1 and calls == [relay.id]
     await db_session.refresh(relay)
     assert relay.health_status == "healthy"
 

@@ -329,7 +329,7 @@ async def revoke_link(
 async def list_nodes(
     user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    from coreman.api.routers.relay_servers import _bot_counts, _team_names, relay_out
+    from coreman.api.routers.relay_servers import bot_counts, relay_out, team_names
     from coreman.core.relay.models import load_catalog
 
     stmt = select(RuntimeNode).order_by(RuntimeNode.created_at.desc()).limit(200)
@@ -342,8 +342,8 @@ async def list_nodes(
         )
     )
     catalog = await load_catalog(session)
-    names = await _team_names(session, {n.team_id for n in nodes if n.team_id})
-    counts = await _bot_counts(session, {r.id for r in relays})
+    names = await team_names(session, {n.team_id for n in nodes if n.team_id})
+    counts = await bot_counts(session, {r.id for r in relays})
     data = []
     for n in nodes:
         backends = [
@@ -498,7 +498,7 @@ async def enroll(
         )
         session.add(node)
         await session.flush()
-        for provider, port in (("claude", 50009), ("codex", 50010)):
+        for provider in ("claude", "codex"):
             agent_token = hmac.new(
                 body.node_token.encode(), provider.encode(), hashlib.sha256
             ).hexdigest()
@@ -506,11 +506,6 @@ async def enroll(
                 RelayServer(
                     runtime_node_id=node.id,
                     name=f"{node.id}/{provider}",
-                    host=str(node.id),
-                    clawrelay_port=port,
-                    agent_port=52123,
-                    runtime_env=body.environment,
-                    runtime_user=body.username,
                     model_provider=provider,
                     team_id=link.team_id,
                     visibility=link.visibility,

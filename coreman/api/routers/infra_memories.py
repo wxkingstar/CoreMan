@@ -112,7 +112,7 @@ async def deploy_memories(
 
     relay = await target(request, body, session, scope="memories")
     client = getattr(request.state, "api_client", None)
-    caller = f"api:{client.app_key}" if client is not None else f"relay-agent:{relay.id}"
+    caller = f"api:{client.app_key}" if client is not None else f"runtime:{relay.id}"
     try:
         directory = working_dir(body.working_dir)
     except ValueError:

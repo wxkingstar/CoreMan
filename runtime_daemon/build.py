@@ -53,11 +53,9 @@ def main():
             system, arch = target.split("-")
             bundle = stage / target
             (bundle / "runtime_daemon/bin").mkdir(parents=True)
-            (bundle / "relay_agent").mkdir()
             for src in (ROOT / "runtime_daemon").glob("*.py"):
                 shutil.copy2(src, bundle / "runtime_daemon" / src.name)
             shutil.copy2(ROOT / "runtime_daemon/requirements.txt", bundle / "runtime_daemon")
-            shutil.copy2(ROOT / "relay_agent/agent.py", bundle / "relay_agent/agent.py")
             shutil.copy2(ROOT / "LICENSE", bundle / "LICENSE")
             shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", bundle / "THIRD_PARTY_NOTICES.md")
             shutil.copy2(ROOT / "runtime_daemon/drivers/LICENSE", bundle / "LICENSE.clawrelay")

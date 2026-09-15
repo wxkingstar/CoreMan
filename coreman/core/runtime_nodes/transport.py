@@ -214,10 +214,3 @@ class ReverseStream(httpx.AsyncByteStream):
             )
             await session.execute(delete(RuntimeChunk).where(RuntimeChunk.call_id == self.call_id))
             await session.commit()
-
-
-def runtime_transport(base_url: str) -> ReverseTransport | None:
-    url = httpx.URL(base_url)
-    if not url.host.endswith(".runtime"):
-        return None
-    return ReverseTransport(uuid.UUID(url.host.removesuffix(".runtime")), url.path.strip("/"))

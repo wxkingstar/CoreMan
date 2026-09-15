@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from coreman.core.db.models import Memory, RelayServer
 from coreman.core.knowledge.memory import content_hash
+from tests.fakes.runtime_node import attach_node
 from tests.integration.worker_helpers import seed_bot
 
 
@@ -12,6 +13,7 @@ async def prepare(db_session):
     bot, relay, cipher = await seed_bot(db_session)
     token = "memory-agent-token-synthetic-long"
     relay.agent_token_enc = cipher.encrypt(token, "relay_servers.agent_token_enc")
+    await attach_node(db_session, relay)
     await db_session.commit()
     return bot, relay, {"Authorization": f"Bearer {token}"}
 
@@ -86,7 +88,7 @@ async def test_batch_wrong_owner_or_corrupt_file_is_atomic(client, db_session):
     assert await db_session.scalar(select(Memory)) is None
     body["memories"] = [entry | {"file_name": "../escape.md"}]
     assert (await client.post(path, json=body, headers=headers)).status_code == 422
-    other = RelayServer(name="other", host="10.0.0.2", clawrelay_port=9001, model_provider="claude")
+    other = RelayServer(name="other", model_provider="claude")
     db_session.add(other)
     await db_session.commit()
     body["server_id"] = str(other.id)

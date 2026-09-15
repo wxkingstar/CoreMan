@@ -1,15 +1,8 @@
-import importlib.util
 import json
-from pathlib import Path
 
 import pytest
 
-spec = importlib.util.spec_from_file_location(
-    "standalone_relay_agent", Path(__file__).parents[2] / "relay_agent/agent.py"
-)
-assert spec and spec.loader
-agent_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(agent_module)
+from runtime_daemon import agent as agent_module
 
 
 @pytest.fixture
@@ -153,20 +146,6 @@ def test_commands_do_not_inherit_agent_identity(monkeypatch):
     assert json.loads(result) == {"agent": [], "path": True}
 
 
-def test_agent_authentication_checked_before_dispatch(agent):
-    from io import BytesIO
-
-    handler = object.__new__(agent_module.Handler)
-    handler.agent = agent
-    handler.headers = {"Authorization": "Bearer wrong", "Content-Length": "17"}
-    handler.rfile = BytesIO(b'{"type":"ping"}')
-    responses = []
-    handler.respond = lambda status, payload: responses.append((status, payload))
-    handler.do_POST()
-    assert responses[0][0] == 401
-    assert handler.rfile.tell() == 0
-
-
 def test_memory_v2_conflict_preflight_delete_and_mtime(agent):
     import hashlib
     import os
@@ -264,8 +243,17 @@ def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
     bot = agent.root / "token-bot"
     bot.mkdir()
     calls = []
-    monkeypatch.setattr(agent_module, "run_command", lambda command, *args, **kwargs: calls.append((command, kwargs)))
-    agent.install_skill({"project_dir": str(bot), "git_url": "https://github.com/example/tools.git", "skill_name": "query", "git_access_token": "test-token"})
+    monkeypatch.setattr(
+        agent_module, "run_command", lambda command, *a, **kwargs: calls.append((command, kwargs))
+    )
+    agent.install_skill(
+        {
+            "project_dir": str(bot),
+            "git_url": "https://github.com/example/tools.git",
+            "skill_name": "query",
+            "git_access_token": "test-token",
+        }
+    )
     clone, install = calls
     assert clone[0][:2] == ["git", "clone"]
     assert "test-token" not in str(clone[0])

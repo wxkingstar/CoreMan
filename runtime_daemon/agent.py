@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-"""CoreMan relay-agent，Python 3.10+ / requests；以实例用户运行。
+"""运行时节点上的实例操作：工作区、Git 仓库、记忆、技能安装与额度/健康探测。
 
-必需：COREMAN_API_URL、COREMAN_AGENT_TOKEN、COREMAN_RELAY_ID。
-可选：COREMAN_WORKSPACE_ROOT=/data/skills、COREMAN_RELAY_URL=http://127.0.0.1:50009、
-COREMAN_MODEL_PROVIDER=claude、COREMAN_MODEL、COREMAN_GIT_HOSTS、COREMAN_AGENT_PORT=52123。
+由 runtime_daemon 按 AI 类型各持有一个实例，经反向通道接收 CoreMan 的管理命令；
+本模块不监听任何端口，也不单独部署。
 """
 
 from __future__ import annotations
 
-import argparse
 import base64
 import contextvars
 import hashlib
-import hmac
 import json
 import math
 import os
@@ -26,7 +22,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -139,7 +134,6 @@ class Agent:
         api_url: str,
         token: str,
         relay_id: str,
-        relay_url: str = "http://127.0.0.1:50009",
         provider: str = "claude",
         model: str = "",
         git_hosts: tuple[str, ...] = ("github.com",),
@@ -151,7 +145,7 @@ class Agent:
             raise ValueError("COREMAN_API_URL 必须是 HTTP(S) 地址")
         self.root, self.home = root.resolve(), home or Path.home()
         self.api_url, self.token, self.relay_id = api_url.rstrip("/"), token, relay_id
-        self.relay_url, self.provider, self.model = relay_url.rstrip("/"), provider, model
+        self.provider, self.model = provider, model
         self.git_hosts = set(git_hosts)
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -215,39 +209,8 @@ class Agent:
         return data
 
     def active_tasks(self) -> list[dict]:
-        tasks = []
-        proc_root = Path("/proc")
-        if not proc_root.is_dir():
-            return tasks
-        for entry in proc_root.iterdir():
-            if not entry.name.isdecimal():
-                continue
-            try:
-                if entry.stat().st_uid != os.getuid():
-                    continue
-                cmd = (entry / "comm").read_text().strip()
-                if not any(name in cmd.lower() for name in ("claude", "codex", "node")):
-                    continue
-                env = {}
-                for field in (entry / "environ").read_bytes().split(b"\0"):
-                    key, _, value = field.partition(b"=")
-                    env[key.decode(errors="replace")] = value.decode(errors="replace")
-                bot = env.get("COREMAN_BOT_KEY") or env.get("BOT_KEY")
-                if not bot:
-                    continue
-                tasks.append(
-                    {
-                        "pid": int(entry.name),
-                        "bot_key": bot,
-                        "user": env.get("COREMAN_USER_LOGIN")
-                        or env.get("BOT_USER_LOGIN", ""),
-                        "chat_id": env.get("COREMAN_CHAT_ID") or env.get("AGENT_CHAT_ID", ""),
-                        "chat_type": env.get("COREMAN_CHAT_TYPE") or env.get("AGENT_CHAT_TYPE", ""),
-                    }
-                )
-            except (OSError, ValueError):
-                continue
-        return tasks
+        """本实例正在执行的任务；由运行时守护进程按其在途调用提供。"""
+        return []
 
     def memory_dir(self, working_dir: str) -> Path:
         workspace = self.workspace(working_dir)
@@ -477,15 +440,18 @@ class Agent:
                 config = {"credential.helper": "", "http.followRedirects": "false",
                           "http.sslVerify": "true", "core.hooksPath": os.devnull,
                           "protocol.file.allow": "never", "protocol.ext.allow": "never",
-                          f"http.{url.rstrip('/')}.extraHeader": f"Authorization: Basic {credential}"}
+                          f"http.{url.rstrip('/')}.extraHeader":
+                              f"Authorization: Basic {credential}"}
                 env["GIT_CONFIG_COUNT"] = str(len(config))
                 for i, (key, value) in enumerate(config.items()):
                     env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
                 # The installer sees a local checkout, never the repository token.
                 with tempfile.TemporaryDirectory(prefix="coreman-skill-") as directory:
                     checkout = str(Path(directory) / "repo")
-                    run_command(["git", "clone", "--depth", "1", "--template=", "--", url, checkout],
-                                path, timeout=180, env_override=env)
+                    run_command(
+                        ["git", "clone", "--depth", "1", "--template=", "--", url, checkout],
+                        path, timeout=180, env_override=env,
+                    )
                     command[4] = checkout
                     run_command(command + ["-y"], path, timeout=300)
             else:
@@ -520,35 +486,8 @@ class Agent:
         return {"success": True, "message": "任务已启动"}
 
     def health_check(self) -> None:
-        start = time.monotonic()
-        status = "healthy" if self.model else "unknown"
-        try:
-            result = self.http.get(self.relay_url + "/health", timeout=10, allow_redirects=False)
-            if result.status_code != 200 or result.json().get("status") != "healthy":
-                status = "down"
-            elif self.model:
-                result = self.http.post(
-                    self.relay_url + "/v1/chat/completions",
-                    json={
-                        "model": self.model,
-                        "stream": False,
-                        "messages": [{"role": "user", "content": "hi"}],
-                        "session_id": "",
-                    },
-                    timeout=90 if self.provider == "codex" else 60,
-                    allow_redirects=False,
-                )
-                if result.status_code in (401, 403):
-                    status = "auth_fail"
-                elif result.status_code != 200:
-                    status = "down"
-        except requests.Timeout:
-            status = "timeout"
-        except (requests.RequestException, ValueError):
-            status = "down"
-        self.report(
-            "relay/health", {"status": status, "latency_ms": int((time.monotonic() - start) * 1000)}
-        )
+        """探测 AI 接口并上报；由运行时守护进程经本机 socket 实现。"""
+        raise OperationError("当前环境不支持健康检查")
 
     def probe_rate_limits(self) -> None:
         if self.provider == "codex":
@@ -808,75 +747,6 @@ class Agent:
         urls = re.findall(r"https://[^\s]+", output)
         return {"success": True, "message": "PR 已创建", "url": urls[-1] if urls else None}
 
-    def mail_probe(self, data: dict) -> dict:
-        import email
-        import imaplib
-        from email.header import decode_header, make_header
-
-        providers = {
-            "gmail": "imap.gmail.com",
-            "qq": "imap.qq.com",
-            "wecom": "imap.exmail.qq.com",
-            "exmail": "imap.exmail.qq.com",
-        }
-        host = providers.get(str(data.get("provider", "gmail")))
-        if not host or not data.get("username") or not data.get("password"):
-            raise OperationError("邮箱服务或凭证未配置")
-        minutes = max(1, min(int(data.get("since_minutes", 20)), 1440))
-        limit = max(1, min(int(data.get("max_scan", 50)), 100))
-        cutoff, started = time.time() - minutes * 60, time.monotonic()
-        matched, scanned = [], 0
-        with imaplib.IMAP4_SSL(host, timeout=20) as conn:
-            conn.login(str(data["username"]), str(data["password"]))
-            if conn.select("INBOX", readonly=True)[0] != "OK":
-                raise OperationError("无法只读打开收件箱")
-            status, found = conn.uid(
-                "SEARCH", None, "SINCE", time.strftime("%d-%b-%Y", time.gmtime(cutoff - 86400))
-            )
-            if status != "OK":
-                raise OperationError("邮件查询失败")
-            for uid in (found[0] or b"").split()[-limit:]:
-                if time.monotonic() - started > 110:
-                    raise OperationError("邮箱查询超时")
-                status, response = conn.uid("FETCH", uid, "(INTERNALDATE BODY.PEEK[]<0.131072>)")
-                if status != "OK" or not response or not isinstance(response[0], tuple):
-                    continue
-                date = imaplib.Internaldate2tuple(response[0][0])
-                if date is None or time.mktime(date) < cutoff:
-                    continue
-                scanned += 1
-                message = email.message_from_bytes(response[0][1])
-                subject = str(make_header(decode_header(message.get("Subject", ""))))
-                sender = str(make_header(decode_header(message.get("From", ""))))
-                texts = []
-                for part in message.walk():
-                    if (
-                        part.get_content_type() in {"text/plain", "text/html"}
-                        and part.get_content_disposition() != "attachment"
-                    ):
-                        raw = part.get_payload(decode=True) or b""
-                        texts.append(
-                            raw.decode(part.get_content_charset() or "utf-8", errors="replace")
-                        )
-                text = "\n".join(texts)
-                keywords = [str(k).casefold() for k in data.get("keywords", [])]
-                if keywords and not any(
-                    k in (subject + sender + text).casefold() for k in keywords
-                ):
-                    continue
-                row = {
-                    "uid": uid.decode(),
-                    "subject": subject,
-                    "from": sender,
-                    "date": time.strftime("%Y-%m-%d %H:%M:%S", date),
-                    "bulk": bool(message.get("List-Unsubscribe") or message.get("List-Id")),
-                    "snippet": text[: max(0, min(int(data.get("body_chars", 400)), 4000))],
-                }
-                if data.get("include_links"):
-                    row["links"] = list(dict.fromkeys(re.findall(r"https?://[^\s<>\"']+", text)))
-                matched.append(row)
-        return {"success": True, "scanned": scanned, "matched": matched, "window_minutes": minutes}
-
     def start_schedules(self) -> None:
         def loop():
             last_quota, last_memory, last_health = 0.0, 0.0, ""
@@ -906,7 +776,7 @@ class Agent:
         kind = data.get("type")
         if kind == "ping":
             return {"success": True, "message": "pong", "memory_protocol": 2, "memory_read": True}
-        if kind in {"status", "check-active-tasks"}:
+        if kind == "status":
             tasks = self.active_tasks()
             return {
                 "success": True,
@@ -919,8 +789,6 @@ class Agent:
             }
         if kind == "probe-rate-limits":
             return self.start_background(kind, self.probe_rate_limits)
-        if kind == "mail-probe":
-            return self.mail_probe(data)
         if kind == "health-check":
             return self.start_background(kind, self.health_check)
         if kind == "collect-memory":
@@ -949,89 +817,3 @@ class Agent:
                     ),
                 }
         raise OperationError("不支持的操作")
-
-
-class Handler(BaseHTTPRequestHandler):
-    timeout = 30
-    agent: Agent
-
-    def log_message(self, format, *args) -> None:
-        pass
-
-    def do_POST(self) -> None:
-        auth = self.headers.get("Authorization", "")
-        if not hmac.compare_digest(auth.encode(), ("Bearer " + self.agent.token).encode()):
-            self.respond(401, {"success": False, "message": "认证失败"})
-            return
-        if self.path != "/":
-            self.respond(404, {"success": False, "message": "路径不存在"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= MAX_BODY:
-                self.respond(413, {"success": False, "message": "请求体大小不合法"})
-                return
-            data = json.loads(self.rfile.read(length))
-            if not isinstance(data, dict):
-                raise ValueError("object required")
-            self.respond(200, self.agent.dispatch(data))
-        except OperationError as exc:
-            self.respond(409, {"success": False, "message": str(exc)})
-        except (ValueError, TypeError):
-            self.respond(400, {"success": False, "message": "请求格式不正确"})
-        except Exception as exc:
-            print(
-                json.dumps({"event": "agent_request_failed", "error": type(exc).__name__}),
-                flush=True,
-            )
-            self.respond(500, {"success": False, "message": "Agent 操作失败"})
-
-    def respond(self, status: int, body: dict) -> None:
-        raw = json.dumps(body, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(raw)
-        self.close_connection = True
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="CoreMan relay-agent")
-    parser.add_argument(
-        "--port", type=int, default=int(os.environ.get("COREMAN_AGENT_PORT", "52123"))
-    )
-    parser.add_argument("--bind", default="0.0.0.0")
-    parser.add_argument("--install-claude-probe", action="store_true")
-    parser.add_argument("--no-schedules", action="store_true")
-    args = parser.parse_args()
-    agent = Agent(
-        root=Path(os.environ.get("COREMAN_WORKSPACE_ROOT", "/data/skills")),
-        api_url=os.environ["COREMAN_API_URL"],
-        token=os.environ["COREMAN_AGENT_TOKEN"],
-        relay_id=os.environ["COREMAN_RELAY_ID"],
-        relay_url=os.environ.get("COREMAN_RELAY_URL", "http://127.0.0.1:50009"),
-        provider=os.environ.get("COREMAN_MODEL_PROVIDER", "claude"),
-        model=os.environ.get("COREMAN_MODEL", ""),
-        git_hosts=tuple(
-            os.environ.get("COREMAN_GIT_HOSTS", "github.com").split(",")
-        ),
-    )
-    if args.install_claude_probe:
-        agent.install_claude_probe()
-    if not args.no_schedules:
-        agent.start_schedules()
-    Handler.agent = agent
-    server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        agent.stop.set()
-        server.server_close()
-
-
-if __name__ == "__main__":
-    main()

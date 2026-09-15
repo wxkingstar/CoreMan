@@ -37,6 +37,7 @@ from coreman.runtime.worker.service import WorkerService
 from tests.fakes.fake_media import FakeMedia
 from tests.fakes.fake_relay import FakeRelay
 from tests.fakes.fake_wecom_ws import FakeWeComWs
+from tests.fakes.runtime_node import attach_node
 from tests.integration.test_e2e_wecom import FAST_WS, _ready, _seed
 
 KEY = "k" * 32
@@ -224,11 +225,12 @@ async def test_rate_limit_offer_and_switch(
     relay.rate_limit_5h_used_pct = Decimal("100")
     relay.rate_limit_7d_used_pct = Decimal("90")
     relay.rate_limit_probed_at = datetime.now(UTC)
-    idle = RelayServer(name="idle", host="idle.test", clawrelay_port=80, model_provider="claude")
+    idle = RelayServer(name="idle", model_provider="claude")
     idle.rate_limit_5h_used_pct = Decimal("1")
     idle.rate_limit_7d_used_pct = Decimal("5")
     idle.rate_limit_probed_at = datetime.now(UTC)
     db_session.add(idle)
+    await attach_node(db_session, idle)
     await db_session.commit()
 
     relays = {"limit": FakeRelay("rate_limit")}

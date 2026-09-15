@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -31,6 +32,7 @@ from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed as notify_bot_changed  # 再导出
 from coreman.core.bots.platform_account import reserve_feishu_app
+from coreman.core.bots.relay_policy import relay_available
 from coreman.core.bots.relay_policy import relay_visible as relay_visible  # 再导出
 from coreman.core.bots.relay_policy import (  # 再导出
     validate_model_for_relay as validate_model_for_relay,
@@ -63,8 +65,6 @@ from coreman.core.masking import is_masked, mask_secret
 from coreman.core.relay.models import backend_of
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
-# 运行机上机器人都跑在这些家目录下，页面里粘进来的绝对路径要还原成「相对运行根」的路径。
-WORKING_DIR_PREFIXES = ("/home/claude01/", "/home/debian/", "~/")
 # 审计 diff 里只记 ***（明文永不落库）。Task 8 复用。
 # system_prompt 也在内：它受 can_view_sensitive 管（§10.2，manager 不旁路），而审计日志对
 # ai_committee / platform_admin 是可读的——落明文等于给 manager 开了一条读提示词的后门。
@@ -85,16 +85,17 @@ NON_NULLABLE = (
 
 
 def normalize_working_dir(value: str) -> str:
+    """工作目录原样下发给运行时节点当运行根。
+
+    是否位于所选节点的项目主目录之下由 reserve_workspace 校验。
+    """
     v = value.strip()
-    for p in WORKING_DIR_PREFIXES:
-        if v.startswith(p):
-            v = v[len(p) :]
-            break
-    v = v if v.startswith("/") else "/" + v
-    # 这个路径会原样下发给 relay 当运行根：.. 能爬出运行根，不接。
+    if not v.startswith("/"):
+        raise ValueError("工作目录必须是绝对路径")
+    # .. 能爬出项目主目录，不接。
     if any(seg == ".." for seg in v.split("/")):
         raise ValueError("工作目录不能包含 .. 路径段")
-    return v
+    return str(PurePosixPath(v))
 
 
 def _check_env_vars(v: dict[str, str]) -> dict[str, str]:
@@ -237,7 +238,7 @@ async def resolve_relay_for_create(
     if relay_id is None:
         return None
     relay = await session.get(RelayServer, relay_id)
-    if relay is None or not relay.is_active or not relay_visible(user, relay):
+    if relay is None or not relay_available(relay) or not relay_visible(user, relay):
         raise ApiError(422, 422, "目标运行时未注册或不可用")
     if not relay_allowed_for_bot(
         user, relay, bot_team_id=bot_team_id, creator_team_id=user.team_id

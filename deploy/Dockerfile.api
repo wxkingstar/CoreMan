@@ -11,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 WORKDIR /build
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY runtime_daemon/ runtime_daemon/
-COPY relay_agent/ relay_agent/
 RUN python3 runtime_daemon/build.py --output /bundles
 
 FROM python:3.12-slim AS api
