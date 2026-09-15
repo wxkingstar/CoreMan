@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -29,7 +30,7 @@ const backendChanged = computed(() => !!target.value && !!model.value && backend
 
 function fail(e: unknown): void {
   if (e instanceof ApiError && e.status === 409) ElMessage.error(t('common.conflict'))
-  else ElMessage.error(e instanceof Error ? e.message : String(e))
+  else ElMessage.error(errorMessage(e))
 }
 
 /** 选中一台 relay：载入它的有效模型集，当前模型还在集合里就留着，否则落到该 relay 的默认模型。 */

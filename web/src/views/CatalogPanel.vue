@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -29,7 +30,7 @@ async function load() {
   try {
     rows.value = await catalog.list()
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   } finally {
     loading.value = false
   }
@@ -42,7 +43,7 @@ async function patch(row: CatalogOut, body: CatalogPatch, reload = false) {
     // 退役 / 改默认会连带改动同 provider 下的别的行（后端会改派默认），得整表重取。
     if (reload) await load()
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
     await load()
   }
 }
@@ -81,7 +82,7 @@ async function remove(row: CatalogOut) {
     await load()
   } catch (e) {
     // 409「仍有机器人使用该模型」直接把后端的话给用户看。
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 
@@ -108,7 +109,7 @@ async function submitForm() {
     dialogVisible.value = false
     await load()
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 

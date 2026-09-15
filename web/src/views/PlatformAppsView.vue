@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage, fieldErrorMap } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
@@ -81,7 +82,7 @@ async function toggle(a: PlatformAppOut) {
     ElMessage.success(t('common.saved'))
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) ElMessage.warning(t('common.conflict'))
-    else ElMessage.error(e instanceof Error ? e.message : String(e))
+    else ElMessage.error(errorMessage(e))
     await reload()
   }
 }
@@ -92,7 +93,7 @@ async function runTest(a: PlatformAppOut) {
     if (res.ok) ElMessage.success(`${t('apps.testOk')}${res.message ? `: ${res.message}` : ''}`)
     else ElMessage.error(res.message || t('common.loadFailed'))
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 
@@ -116,13 +117,13 @@ async function runSync(a: PlatformAppOut) {
       } catch (e) {
         delete pollTimers[a.id]
         syncing[a.id] = false
-        ElMessage.error(e instanceof Error ? e.message : String(e))
+        ElMessage.error(errorMessage(e))
       }
     }
     pollTimers[a.id] = setTimeout(poll, 2000)
   } catch (e) {
     syncing[a.id] = false
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 
@@ -145,7 +146,7 @@ async function deleteApp(a: PlatformAppOut) {
     ElMessage.success(t('common.deleted'))
     await reload()
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 
@@ -191,8 +192,19 @@ const formRules = computed<FormRules>(() => ({
 }))
 
 const callbackUrl = ref<string | null>(null)
+/** 后端 422 明细回填到表单项；每次打开或提交时清空。 */
+const serverErrors = reactive<Record<string, string>>({})
+const fieldLabels = computed<Record<string, string>>(() => ({
+  platform: t('apps.platform'), name: t('apps.name'), capabilities: t('apps.capabilities'), corp_id: t('apps.corpId'),
+  app_id: t('apps.appId'), secret: t('apps.secret'), callback_token: t('apps.callbackToken'),
+  callback_aes_key: t('apps.callbackAesKey'), extra: t('apps.extra'), enabled: t('common.enabled'),
+}))
+function resetServerErrors() {
+  for (const key of Object.keys(serverErrors)) delete serverErrors[key]
+}
 
 function openCreate() {
+  resetServerErrors()
   callbackUrl.value = null
   dialogEditingId.value = null
   Object.assign(form, emptyForm())
@@ -201,6 +213,7 @@ function openCreate() {
 }
 
 function openEdit(a: PlatformAppOut) {
+  resetServerErrors()
   callbackUrl.value = a.callback_url ?? null
   dialogEditingId.value = a.id
   dialogEditingVersion.value = a.version
@@ -210,6 +223,7 @@ function openEdit(a: PlatformAppOut) {
 }
 
 async function submitForm() {
+  resetServerErrors()
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
 
@@ -234,7 +248,8 @@ async function submitForm() {
       dialogVisible.value = false
       await reload()
     } else {
-      ElMessage.error(e instanceof Error ? e.message : String(e))
+      Object.assign(serverErrors, fieldErrorMap(e, fieldLabels.value))
+      ElMessage.error(errorMessage(e, fieldLabels.value))
     }
   }
 }
@@ -447,7 +462,10 @@ onBeforeUnmount(() => {
         :rules="formRules"
         label-width="120px"
       >
-        <el-form-item :label="t('apps.platform')">
+        <el-form-item
+          :label="t('apps.platform')"
+          :error="serverErrors.platform"
+        >
           <el-radio-group
             v-model="form.platform"
             :disabled="!!dialogEditingId"
@@ -460,10 +478,16 @@ onBeforeUnmount(() => {
             </el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item :label="t('apps.name')">
+        <el-form-item
+          :label="t('apps.name')"
+          :error="serverErrors.name"
+        >
           <el-input v-model="form.name" />
         </el-form-item>
-        <el-form-item :label="t('apps.capabilities')">
+        <el-form-item
+          :label="t('apps.capabilities')"
+          :error="serverErrors.capabilities"
+        >
           <el-checkbox-group v-model="form.capabilities">
             <el-checkbox
               v-for="c in CAPABILITIES"
@@ -477,13 +501,17 @@ onBeforeUnmount(() => {
         <el-form-item
           :label="t('apps.corpId')"
           prop="corp_id"
+          :error="serverErrors.corp_id"
         >
           <el-input
             :model-value="form.corp_id ?? ''"
             @update:model-value="form.corp_id = ($event as string) || null"
           />
         </el-form-item>
-        <el-form-item :label="t('apps.appId')">
+        <el-form-item
+          :label="t('apps.appId')"
+          :error="serverErrors.app_id"
+        >
           <el-input
             :model-value="form.app_id ?? ''"
             @update:model-value="form.app_id = ($event as string) || null"
@@ -492,6 +520,7 @@ onBeforeUnmount(() => {
         <el-form-item
           :label="t('apps.secret')"
           prop="secret"
+          :error="serverErrors.secret"
         >
           <SecretInput
             :model-value="form.secret"
@@ -510,19 +539,28 @@ onBeforeUnmount(() => {
           />
           <small>{{ t('apps.callbackUrlHint') }}</small>
         </el-form-item>
-        <el-form-item :label="t('apps.callbackToken')">
+        <el-form-item
+          :label="t('apps.callbackToken')"
+          :error="serverErrors.callback_token"
+        >
           <SecretInput
             v-model="form.callback_token"
             :placeholder="t('apps.callbackToken')"
           />
         </el-form-item>
-        <el-form-item :label="t('apps.callbackAesKey')">
+        <el-form-item
+          :label="t('apps.callbackAesKey')"
+          :error="serverErrors.callback_aes_key"
+        >
           <SecretInput
             v-model="form.callback_aes_key"
             :placeholder="t('apps.callbackAesKey')"
           />
         </el-form-item>
-        <el-form-item :label="t('apps.extra')">
+        <el-form-item
+          :label="t('apps.extra')"
+          :error="serverErrors.extra"
+        >
           <el-input
             v-model="extraText"
             type="textarea"

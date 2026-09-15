@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage } from 'element-plus'
@@ -65,7 +66,7 @@ const saving = ref(false)
 
 function fail(e: unknown): void {
   // 422（模型不在目录中 / 设置项不能置空 / 关引导登录前先配登录应用）都是后端写好的中文，直接透传。
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 function apply(data: SettingsOut): void {
@@ -113,7 +114,7 @@ async function load() {
   try {
     apply(await settings.get())
   } catch (e) {
-    loadError.value = e instanceof Error ? e.message : String(e)
+    loadError.value = errorMessage(e)
     fail(e)
   } finally {
     loading.value = false

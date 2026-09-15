@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { onMounted, reactive, ref } from 'vue'
@@ -28,14 +29,14 @@ async function testAccess(row: BusinessSystem) {
 }
 const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null })
 const form = reactive(empty())
-function fail(e: unknown) { ElMessage.error(e instanceof Error ? e.message : String(e)) }
+function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page }, () => { void load() })
 async function load() {
   persistQuery(); listLoading.value = true; listError.value = ''
 
   try { const data = await systems.list(page.value); rows.value = data.items; total.value = data.total }
-  catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) }
+  catch (e) { listError.value = errorMessage(e); fail(e) }
  finally { listLoading.value = false }
 }
 async function edit(row: BusinessSystem | null) {

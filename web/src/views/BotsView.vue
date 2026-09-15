@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
@@ -51,7 +52,7 @@ const visibleScopes = computed(() => SCOPES.filter((s) => s !== 'team' || hasTea
 const modelOptions = computed(() => [...new Set(catalogRows.value.map((r) => r.model))])
 
 function fail(e: unknown): void {
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 function search(): void {

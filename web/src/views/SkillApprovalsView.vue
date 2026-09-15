@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { computed, onMounted, ref, reactive } from 'vue'
@@ -10,12 +11,12 @@ const rows = ref<Approval[]>([]), catalog = ref<Skill[]>([]), selected = ref<App
 const page = ref(1), total = ref(0), busy = ref(false), visible = ref(false)
 const staleApproval = computed(() => { const row = selected.value; const current = catalog.value.find(skill => skill.id === row?.skill_id); return !!row && !!current && row.skill_revision != null && current.revision !== row.skill_revision })
 const form = reactive({ decision: 'approve' as 'approve' | 'reject', approved_databases: [] as string[], approved_security_prompt: '', comment: '' })
-const fail = (e: unknown) => ElMessage.error(e instanceof Error ? e.message : String(e))
+const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page }, () => { void load() })
 async function load() {
   persistQuery(); listLoading.value = true; listError.value = ''
- try { const data = await skills.approvals(page.value); rows.value = data.items; total.value = data.total } catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) }  finally { listLoading.value = false }
+ try { const data = await skills.approvals(page.value); rows.value = data.items; total.value = data.total } catch (e) { listError.value = errorMessage(e); fail(e) }  finally { listLoading.value = false }
 }
 function edit(row: Approval) { selected.value = row; Object.assign(form, { decision: 'approve', approved_databases: [...row.requested_databases], approved_security_prompt: row.requested_security_prompt, comment: '' }); visible.value = true }
 async function save() { if (!selected.value || busy.value || staleApproval.value && form.decision === 'approve') return; busy.value = true; try { await skills.review(selected.value, form); visible.value = false; await load() } catch (e) { fail(e) } finally { busy.value = false } }

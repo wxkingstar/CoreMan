@@ -103,4 +103,26 @@ describe('BotForm', () => {
     expect(vm.form.model).toBe('vllm/claude-sonnet-4-6')
     error.mockRestore()
   })
+
+  // 422 明细要落到对应表单项上，提示里用表单标签而不是字段名。
+  it('shows backend validation errors on the matching form item', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    vi.mocked(bots.create).mockRejectedValueOnce(new ApiError(422, 422, '参数校验失败', [
+      { loc: ['body', 'working_dir'], msg: 'Value error, 工作目录必须是绝对路径', type: 'value_error' },
+    ]))
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
+    await wrapper.get('[data-test="name"] input').setValue('销售')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(error).toHaveBeenCalledWith(`${i18n.global.t('bots.workingDir')}：工作目录必须是绝对路径`)
+    // 错误文字在 transition 里异步出现，这里断言表单项已进入错误态。
+    expect(wrapper.get('[data-test="working_dir"]').classes()).toContain('is-error')
+    expect(wrapper.get('[data-test="name"]').classes()).not.toContain('is-error')
+    expect(wrapper.emitted('saved')).toBeFalsy()
+    error.mockRestore()
+    wrapper.unmount()
+  })
 })

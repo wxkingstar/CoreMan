@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage, fieldErrorMap } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
@@ -90,8 +91,17 @@ watch(xhighAllowed, (ok) => {
   if (!ok && form.effort_level === 'xhigh') form.effort_level = 'high'
 })
 
+/** 后端 422 明细里的字段名 → 表单标签：提示里用人话，表单项上就地标红。 */
+const fieldLabels = computed<Record<string, string>>(() => ({
+  bot_key: t('bots.botKey'), platform: t('bots.platform'), name: t('bots.name'), description: t('bots.description'),
+  team_id: t('bots.team'), relay_server_id: t('bots.relay'), model: t('bots.model'), effort_level: t('bots.effort'),
+  verbosity_level: t('bots.verbosity'), working_dir: t('bots.workingDir'), sse_timeout_seconds: t('bots.sseTimeout'),
+  system_prompt: t('bots.systemPrompt'), credentials: t('bots.credentials'), env_vars: t('bots.envVars'),
+  welcome_message: t('bots.welcome'),
+}))
+
 function fail(e: unknown): void {
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e, fieldLabels.value))
 }
 
 /** 选 relay：换成该 relay 的有效模型集；当前模型不在里面就落到 relay 的默认模型。 */
@@ -241,7 +251,10 @@ async function submit(): Promise<void> {
   } catch (e) {
     // 编辑冲突（If-Match 不匹配）用统一文案；其它（422 校验、创建时 bot_key 重复）直接给后端原话。
     if (props.mode === 'edit' && e instanceof ApiError && e.status === 409) ElMessage.warning(t('common.conflict'))
-    else fail(e)
+    else {
+      Object.assign(fieldErrors, fieldErrorMap(e, fieldLabels.value))
+      fail(e)
+    }
   } finally {
     saving.value = false
   }
@@ -323,6 +336,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.platform')"
         data-test="platform"
+        :error="fieldErrors.platform"
       >
         <el-select
           v-model="form.platform"
@@ -350,6 +364,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.description')"
         data-test="description"
+        :error="fieldErrors.description"
       >
         <el-input
           v-model="form.description"
@@ -362,6 +377,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
         v-if="isManager"
         :label="t('bots.team')"
         data-test="team"
+        :error="fieldErrors.team_id"
       >
         <el-select
           :model-value="form.team_id"
@@ -388,6 +404,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.relay')"
         data-test="relay"
+        :error="fieldErrors.relay_server_id"
       >
         <template v-if="props.mode === 'create' && runtimeGroups.length">
           <el-select
@@ -464,6 +481,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.effort')"
         data-test="effort"
+        :error="fieldErrors.effort_level"
       >
         <el-select
           :model-value="form.effort_level"
@@ -485,6 +503,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.verbosity')"
         data-test="verbosity"
+        :error="fieldErrors.verbosity_level"
       >
         <el-select
           v-model="form.verbosity_level"
@@ -510,6 +529,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.sseTimeout')"
         data-test="sse_timeout"
+        :error="fieldErrors.sse_timeout_seconds"
       >
         <el-select
           v-model="form.sse_timeout_seconds"
@@ -535,6 +555,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
         v-if="sensitiveVisible"
         :label="t('bots.systemPrompt')"
         data-test="system_prompt"
+        :error="fieldErrors.system_prompt"
       >
         <el-input
           v-model="form.system_prompt"
@@ -547,6 +568,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
         <el-form-item
           :label="t('bots.credentials')"
           class="section"
+          :error="fieldErrors.credentials"
         />
         <el-form-item
           v-for="k in credKeys"
@@ -565,6 +587,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
         <el-form-item
           :label="t('bots.envVars')"
           data-test="env_vars"
+          :error="fieldErrors.env_vars"
         >
           <EnvVarsEditor
             :model-value="form.env_vars"
@@ -583,6 +606,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
       <el-form-item
         :label="t('bots.welcome')"
         data-test="welcome"
+        :error="fieldErrors.welcome_message"
       >
         <el-input
           :model-value="form.welcome_message ?? ''"

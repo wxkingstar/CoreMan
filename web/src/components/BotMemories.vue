@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { reactive, ref, watch } from 'vue'
@@ -17,11 +18,11 @@ const deleted = ref(false)
 const rows = ref<MemoryRow[]>([])
 const selected = ref<MemoryRow | null>(null)
 const form = reactive<MemoryInput>({ file_name: '', content: '' })
-const fail = (error: unknown) => ElMessage.error(error instanceof Error ? error.message : String(error))
+const fail = (error: unknown) => ElMessage.error(errorMessage(error))
 async function reload() {
   loadError.value = ''
   loading.value = true
-  try { rows.value = await memories.list(props.botId, deleted.value) } catch (error) { loadError.value = error instanceof Error ? error.message : String(error); fail(error) } finally { loading.value = false }
+  try { rows.value = await memories.list(props.botId, deleted.value) } catch (error) { loadError.value = errorMessage(error); fail(error) } finally { loading.value = false }
 }
 watch([visible, deleted], () => { if (visible.value) void reload() })
 async function edit(row?: MemoryRow) {
