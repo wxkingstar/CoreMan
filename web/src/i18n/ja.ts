@@ -137,6 +137,7 @@ export default {
     modify: '変更',
     comingSoon: 'この機能は近日公開予定です',
     conflict: 'データが他の操作により更新されています。再読み込みしてください',
+    conflictReloaded: 'データが他の操作により更新されました。最新バージョンを取得したので、内容を確認してもう一度保存してください。',
     fieldError: '{field}：{detail}',
     errorSeparator: '；',
     moreErrors: 'ほか {count} 件',
