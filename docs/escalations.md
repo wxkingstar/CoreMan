@@ -10,9 +10,7 @@
 
 ## 调用与身份
 
-首选带 `escalations` scope 的签名 API client，路径 `/api/infra/escalations`。旧 `/api/escalation/create`、`/{id}/poll|followup|resolve|cancel` 保留。签名算法见 infrastructure-api.md。
-
-兼容接口的认证：公开的 app_key 不能单独作为 X-API-Key 凭证，须同时携带 **X-App-Key=调用方标识、X-API-Key=调用方 secret**；不支持只把 app_key 放入 X-API-Key。
+首选带 `escalations` scope 的签名 API client，路径 `/api/infra/escalations`。兼容路径 `/api/escalation/create`、`/{id}/poll|followup|resolve|cancel` 保留，认证与新路径相同，必须签名；不再接受 X-API-Key 明文密钥。签名算法见 infrastructure-api.md。
 
 发起请求支持 `bot_key, question`，以及三选一：`to_user_id`（企微账号）、`targets:[{to_user_id,to_real_name?}]`、`target_user_ids:[内部UUID]`，可附 `request_id` 幂等键与 `platform_app_id`。接收人必须是启用的绑定员工，拒绝广播。`from_user_id` 不能冒充人类：须携带本人有效会话或 bot_token 并匹配平台账号；只带服务凭证时为系统求助，发起人为空。bot_token 的签发和作用域边界不因兼容接口放宽。
 

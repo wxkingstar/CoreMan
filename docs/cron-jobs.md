@@ -32,7 +32,7 @@ def should_trigger(ctx):
 
 当前采用受限 AST 解释器，不调用 Python exec/eval。支持赋值、if、for、JSON 数据、基本算术/比较、有限容器方法和明确允许的函数。支持 json.loads/dumps、有限 math 函数、time.time；datetime.datetime.now/utcnow 返回 UTC ISO 字符串。最多 20,000 步、10,000 个容器项，值总量 64 KiB，脚本 32 KiB。
 
-**兼容边界**：旧脚本的 requests、数据库客户端、正则、文件操作、自定义函数、导入别名、反射等未开放。不支持的脚本明确 failed_precheck，不悄悄跳过检查或启动模型。迁移旧任务时需逐条适配、试跑；本轮未读取生产任务或迁入生产任务。
+**兼容边界**：旧脚本的 requests、数据库客户端、正则、文件操作、自定义函数、导入别名、反射等未开放。不支持的脚本明确 failed_precheck，不悄悄跳过检查或启动模型。从其他系统迁入的任务需逐条适配、试跑。
 
 ## 投递
 
@@ -48,4 +48,4 @@ def should_trigger(ctx):
 
 ## 验证边界
 
-本地使用一次性 PostgreSQL、FakeRelay、模拟 HTTP/SMTP 测试；不读取真实 .env 内容，不发送真实平台消息。真实 SMTP、Webhook、企微通知应用、平台回调与旧任务迁入仍需目标环境条件。
+本地使用一次性 PostgreSQL、FakeRelay、模拟 HTTP/SMTP 测试；不读取真实 .env 内容，不发送真实平台消息。真实 SMTP、Webhook、企微通知应用与平台回调需在目标环境中验证。
