@@ -1,7 +1,7 @@
 """运行时 HTTP 客户端。
 
-GET /health（5 秒）与 GET /v1/models（spec §5.3、report-clawrelay §1.2/§1.4），以及
-POST /v1/chat/completions 的流式对话（spec §8.3、report-clawrelay §2）。
+GET /health（5 秒）与 GET /v1/models，以及
+POST /v1/chat/completions 的流式对话。
 
 /health 每次调用都会让 relay fork 一个 CLI，不要高频探测。
 """

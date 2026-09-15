@@ -30,6 +30,7 @@ from coreman.core.bus.notify import asyncpg_dsn
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.session import make_engine, make_session_factory
+from coreman.core.runtime_nodes import transport as runtime_transport
 from coreman.core.settings_store import SettingsStore
 from coreman.runtime.base import HEALTH_PORTS, Service
 from coreman.runtime.scheduler import cron, notifications, reaper
@@ -86,10 +87,13 @@ class SchedulerService(Service):
             await self._start()
         except Exception:
             # on_start 抛出时基类不会走 on_shutdown，连接池得自己收干净再往上抛。
+            runtime_transport.configure(None)
             await self._engine.dispose()
             raise
 
     async def _start(self) -> None:
+        # 健康探测经运行时反向通道发请求：复用本进程连接池，不需要 LISTEN 唤醒。
+        runtime_transport.configure(self._factory)
         async with self._factory() as session:
             # capacity 对看护进程没有意义：它不认领任务，只有一个「在不在」。
             await instances.register(
@@ -129,6 +133,7 @@ class SchedulerService(Service):
                 await session.commit()
         except Exception:  # noqa: BLE001 退出路径上写不进去也只能记一笔
             self._log.exception("instance_mark_stopped_failed")
+        runtime_transport.configure(None)
         await self._engine.dispose()
 
     async def _sleep(self, seconds: float) -> None:
