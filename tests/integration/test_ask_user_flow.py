@@ -46,7 +46,10 @@ async def test_question_round_creates_state_card_and_log(
     s = await stream_of(db_session, t.id)
     assert s.is_complete and s.final_text.endswith("\n\n" + question_brief(Q, index=0, total=1))
     chat_session = (await db_session.execute(select(ChatSession))).scalar_one()
-    link = f"{relay_row.relay_url}/session/{chat_session.relay_session_id}"
+    link = (
+        f"http://localhost/api/admin/runtime-nodes/{relay_row.runtime_node_id}/claude/session/"
+        f"{chat_session.relay_session_id}"
+    )
     assert s.final_text.startswith(msg("session_link_prefix", url=link))
     card = s.pending_card
     assert card and card["card_type"] == "vote_interaction"

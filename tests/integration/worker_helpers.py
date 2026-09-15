@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from coreman.core.bots.secrets import CREDENTIALS_AAD, ENV_AAD
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, RelayServer, Task, User
+from coreman.core.db.models import Bot, RelayServer, RuntimeNode, Task, User
 from coreman.core.db.session import make_session_factory
 from coreman.core.relay.client import RelayClient
 from coreman.core.settings_store import SettingsStore
@@ -33,7 +34,23 @@ async def seed_bot(
     creator = User(login_name="creator", display_name="创建者")
     session.add(creator)
     await session.flush()
+    # 运行时实例一律挂在节点上（relay.runtime_node_id 恒有值），测试夹具与生产保持一致。
+    node = RuntimeNode(
+        id=uuid.uuid4(),
+        name="node-1",
+        token_hash="test-token-hash",
+        workspace_root="/data/skills",
+        hostname="relay.test",
+        username="coreman",
+        platform="linux",
+        architecture="amd64",
+        environment="host",
+        version="test",
+    )
+    session.add(node)
+    await session.flush()
     relay = RelayServer(
+        runtime_node_id=node.id,
         name="r1",
         host="relay.test",
         clawrelay_port=80,
@@ -76,6 +93,7 @@ def build_ctx(
     clock=None,
     openuserid=None,
     media_fetcher=None,
+    public_base_url: str = "http://localhost",
 ) -> TaskContext:  # type: ignore[no-untyped-def]
     factory = make_session_factory(engine)
     return TaskContext(
@@ -86,6 +104,7 @@ def build_ctx(
         cipher=Cipher(MASTER),
         relay_client_factory=relay_client_factory or (lambda r: RelayClient(r.relay_url)),
         chat_logs=ChatLogWriter(factory),
+        public_base_url=public_base_url,
         openuserid=openuserid,
         media_fetcher=media_fetcher,
         **({"clock": clock} if clock else {}),

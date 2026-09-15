@@ -208,7 +208,10 @@ async def test_silence_heartbeats_and_empty_reply(
     texts = [i.payload["markdown"] for i in items]
     beats = [x for x in texts if x.startswith("⏳ AI 仍在处理中")]
     assert len(beats) == 2
-    url = f"{relay.relay_url}/session/{st.state['context']['relay_session_id']}"
+    url = (
+        f"http://localhost/api/admin/runtime-nodes/{relay.runtime_node_id}/claude/session/"
+        f"{st.state['context']['relay_session_id']}"
+    )
     assert texts[-1].endswith(msg("empty_stream", url=url))
 
 

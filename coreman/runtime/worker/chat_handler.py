@@ -223,6 +223,14 @@ def strip_mention(text: str, bot_name: str) -> str:
     return re.sub(rf"@{re.escape(bot_name)}\s?", "", text)
 
 
+def session_viewer_url(ctx: TaskContext, relay: RelayServer, relay_session_id: uuid.UUID) -> str:
+    """会话查看链接：运行时一律由节点提供，查看器走管理台对该节点的反向代理。"""
+    return (
+        f"{ctx.public_base_url}/api/admin/runtime-nodes/{relay.runtime_node_id}"
+        f"/{relay.model_provider}/session/{relay_session_id}"
+    )
+
+
 async def next_event(gen: AsyncIterator[SseEvent]) -> SseEvent | None:
     """取下一个事件，流结束返回 None。
 
@@ -688,15 +696,7 @@ class ChatTaskHandler:
             writer.set_thinking_line(msg("queued_notice", ctx.locale, seconds=queued))
         backend = backend_of(bot.model, relay.model_provider)
         info = await self._session_info(session, ctx, intake, backend)
-        session_url = f"{relay.relay_url}/session/{info.relay_session_id}"
-        if relay.runtime_node_id:
-            from coreman.core.config import get_settings
-
-            base = get_settings().public_base_url
-            session_url = (
-                f"{base}/api/admin/runtime-nodes/{relay.runtime_node_id}"
-                f"/{relay.model_provider}/session/{info.relay_session_id}"
-            )
+        session_url = session_viewer_url(ctx, relay, info.relay_session_id)
         access = await build_system_access(
             session,
             ctx.cipher,

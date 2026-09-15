@@ -77,6 +77,7 @@ class WorkerService(Service):
         self.draining = False
         # 依赖都是纯构造（不连库、不要事件循环），放在 __init__ 里 on_shutdown 才不必处处判空。
         settings = get_settings()
+        self._public_base_url = settings.public_base_url
         self._engine = make_engine(settings.database_url)
         self._factory = make_session_factory(self._engine)
         self._store = SettingsStore(self._factory)
@@ -226,6 +227,7 @@ class WorkerService(Service):
             cipher=self._cipher,
             relay_client_factory=self._relay_factory,
             chat_logs=self._chat_logs,
+            public_base_url=self._public_base_url,
             openuserid=self._openuserid,
             media_fetcher=self._media_fetcher,
         )

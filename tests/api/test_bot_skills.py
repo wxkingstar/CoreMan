@@ -20,7 +20,6 @@ from tests.integration.worker_helpers import build_ctx, seed_bot
 
 async def prepare(client, session, *, internal=False):
     bot, relay, cipher = await seed_bot(session, env={"MANUAL_KEY": "manual"})
-    relay.agent_port = 9001
     relay.agent_token_enc = cipher.encrypt("synthetic-long-token", "relay_servers.agent_token_enc")
     source = SkillSource(
         key="tools", label="Tools", git_url="https://github.com/example/skills.git"
