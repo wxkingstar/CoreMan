@@ -229,3 +229,28 @@ async def test_cron_relay_error_without_finish_keeps_reason(
     assert log is not None and log.error_code == "x_relay_error"
     item = await db_session.scalar(select(OutboxItem))
     assert item is not None and "codex produced no output" in item.payload["markdown"]
+
+
+async def test_cron_handler_leaves_periodic_heartbeats_to_the_service(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    now = datetime.now(UTC)
+    await job(db_session, now)
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("slow", chunk_delay=0.05)
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    calls = 0
+    original = ctx.heartbeat
+
+    async def counting() -> None:
+        nonlocal calls
+        calls += 1
+        await original()
+
+    ctx.heartbeat = counting  # type: ignore[method-assign]
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "success"
+    # 只剩外部调用前那一次显式收取取消；周期心跳由 WorkerService 统一写。
+    assert calls == 1

@@ -286,6 +286,8 @@ class WorkerService(Service):
 
     async def _heartbeat_loop(self) -> None:
         # 不看 self._stop：优雅退出期间在途任务还在跑，心跳断了会被巡检当成失联进程。
+        # 这里是任务行 heartbeat_at 的唯一写入方：处理器不再各起一条心跳协程，同一任务每轮只写
+        # 一次。取消的兜底传导与失联（LOST）判定都在 ctx.heartbeat 里，语义不变。
         while True:
             try:
                 async with self._factory() as session:
@@ -296,10 +298,13 @@ class WorkerService(Service):
                 if drain and not self.draining:
                     self.draining = True
                     self._log.info("drain_requested")
-                for _run, ctx in list(self._running.values()):
-                    await ctx.heartbeat()
             except Exception:  # noqa: BLE001 心跳失败下一轮再来
                 self._log.exception("heartbeat_failed")
+            for _run, ctx in list(self._running.values()):
+                try:
+                    await ctx.heartbeat()
+                except Exception:  # noqa: BLE001 一个任务的心跳写不进去，不能拖住其它任务
+                    ctx.log.warning("task_heartbeat_failed")
             if self.draining and not self._running:
                 self.request_stop("drained")
                 return

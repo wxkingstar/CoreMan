@@ -11,8 +11,9 @@ relay 不可用 → 同会话串行 → 会话/提示词/env → 开流 → 组�
 relay 检查排在最后：公告、拒绝、命令这几条路都不碰 relay，机器人没绑可用实例时它们照样
 该答什么答什么，不该被一句「relay 未配置」顶掉。
 
-进程内只有两条协程：主流程与 10 秒一次的心跳。取消（用户 stop / 被新消息替代 / 超时）
-统一走 `ctx.cancel_event`，消费循环每一轮开头都看一眼；断开 relay 连接就等于让 relay
+处理器里只有主流程一条协程：任务心跳（取消的兜底传导与失联判定）由 WorkerService 的
+心跳循环统一写，这里不再另起一条。取消（用户 stop / 被新消息替代 / 超时）统一走
+`ctx.cancel_event`，消费循环每一轮开头都看一眼；断开 relay 连接就等于让 relay
 杀掉那一轮 CLI，所以取消时是 `aclose()` 生成器而不是干等它跑完。
 """
 
@@ -297,7 +298,6 @@ class ChatTaskHandler:
     kind = "chat"
     SILENT_WARN_SECONDS = 30.0
     TICK_SECONDS = 1.0
-    HEARTBEAT_SECONDS = 10.0
     LONG_TASK_SECONDS = 60
     QUEUED_NOTICE_SECONDS = 5.0
     SUPERSEDE_POLL_SECONDS = 0.1
@@ -308,15 +308,10 @@ class ChatTaskHandler:
         self._on_first_event: Callable[[], None] | None = None  # 测试钩子
 
     async def run(self, ctx: TaskContext) -> None:
-        beat = asyncio.create_task(self._heartbeat(ctx), name=f"chat-heartbeat-{ctx.task.id}")
-        try:
-            pre = await self._prepare(ctx)
-            if pre is None:
-                return
-            outcome = await self._converse(ctx, pre)
-        finally:
-            beat.cancel()
-            await asyncio.wait({beat})
+        pre = await self._prepare(ctx)
+        if pre is None:
+            return
+        outcome = await self._converse(ctx, pre)
         await self._finalize(ctx, pre, outcome)
 
     # ---- 前置 -------------------------------------------------------------
@@ -1450,12 +1445,3 @@ class ChatTaskHandler:
         await pre.supervisor.push(text, dedupe_key=f"{ctx.task.id}:send:final")
         # 卡片排在终稿之后：先正文后选项卡，顺序反了用户会对着一张没头没尾的卡片发愣。
         await self._queue_card(ctx, pre, card)
-
-    async def _heartbeat(self, ctx: TaskContext) -> None:
-        """10 秒一次：既是「我还活着」的证明，也是取消信号的兜底传导路径。"""
-        while True:
-            await asyncio.sleep(self.HEARTBEAT_SECONDS)
-            try:
-                await ctx.heartbeat()
-            except Exception:  # noqa: BLE001 心跳写不进去下一轮再来，不能把任务带走
-                ctx.log.warning("task_heartbeat_failed")

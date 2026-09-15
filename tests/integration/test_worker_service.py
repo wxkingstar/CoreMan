@@ -180,3 +180,40 @@ async def test_unknown_kind_and_handler_crash_are_recorded(
         )
         assert rb and rb.status == "failed" and rb.error_code == "unknown_kind"
         assert datetime.now(UTC) > ra.finished_at
+
+
+async def test_heartbeat_loop_is_per_task_and_isolates_failures(
+    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    bot = await _bot(db_session)
+    beats: list[str] = []
+    original = TaskContext.heartbeat
+
+    async def flaky(self: TaskContext) -> None:
+        beats.append(str(self.task.session_key))
+        if self.task.session_key == "a":
+            raise RuntimeError("db blip")
+        await original(self)
+
+    monkeypatch.setattr(TaskContext, "heartbeat", flaky)
+    handler = RecordingHandler(hold=1.2)
+    service = WorkerService(
+        port=0,
+        handlers={"chat": handler},
+        heartbeat_seconds=0.2,
+        max_concurrent_override=4,
+        fast_slots_override=0,
+    )
+    runner = await _run_service(service)
+    try:
+        for key in ("a", "b"):
+            assert await tasks.enqueue(
+                db_session, NewTask(bot_id=bot.id, kind="chat", payload={}, session_key=key)
+            )
+        await db_session.commit()
+        await asyncio.sleep(1.0)
+    finally:
+        service.request_stop("test")
+        await asyncio.wait_for(runner, 10)
+    # 服务心跳循环是任务心跳的唯一来源：任务 a 每次都写失败，任务 b 的心跳照样每轮都写。
+    assert beats.count("a") >= 3 and beats.count("b") >= 3, beats

@@ -64,17 +64,8 @@ class CronRunHandler:
     kind = "cron_run"
 
     async def run(self, ctx: TaskContext) -> None:
-        heartbeat = asyncio.create_task(self._heartbeat(ctx))
-        try:
-            await self._run(ctx)
-        finally:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-
-    async def _heartbeat(self, ctx: TaskContext) -> None:
-        while True:
-            await ctx.heartbeat()
-            await asyncio.sleep(10)
+        # 周期心跳由 WorkerService 的心跳循环统一写；外部调用前那一次显式收取取消见 _run。
+        await self._run(ctx)
 
     async def _run(self, ctx: TaskContext) -> None:
         config = ctx.task.payload.get("config", {})
