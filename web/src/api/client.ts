@@ -18,11 +18,24 @@ export interface Envelope<T> {
   message?: string
 }
 
+/** 422 字段级明细：后端只回 loc/msg/type 三个键（`coreman/api/errors.py::safe_validation_errors`）。 */
+export interface FieldError {
+  loc: (string | number)[]
+  msg: string
+  type: string
+}
+
 export class ApiError extends Error {
-  constructor(public status: number, public code: number, message: string) {
+  constructor(public status: number, public code: number, message: string, public errors: FieldError[] = []) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+function fieldErrorsOf(raw: unknown): FieldError[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((item): item is FieldError =>
+    !!item && typeof item === 'object' && Array.isArray((item as FieldError).loc) && typeof (item as FieldError).msg === 'string')
 }
 
 export function readCookie(name: string): string | null {
@@ -61,9 +74,10 @@ export async function call<T>(promise: Promise<AxiosResponse<Envelope<T>>>): Pro
     const res = await promise
     return res.data.data
   } catch (e) {
-    const err = e as AxiosError<{ code?: number; message?: string }>
+    const err = e as AxiosError<{ code?: number; message?: string; errors?: unknown }>
     const status = err.response?.status ?? 0
-    throw new ApiError(status, err.response?.data?.code ?? status, err.response?.data?.message ?? err.message)
+    const data = err.response?.data
+    throw new ApiError(status, data?.code ?? status, data?.message ?? err.message, fieldErrorsOf(data?.errors))
   }
 }
 

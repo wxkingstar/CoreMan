@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -19,7 +20,7 @@ async function refresh() {
     const data = await call<{ active_tasks: typeof tasks.value }>(http.get(`/api/admin/relay-servers/${props.relayId}/live-status`))
     tasks.value = data.active_tasks
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    error.value = errorMessage(e)
   } finally {
     loading.value = false
   }
@@ -34,7 +35,7 @@ async function probe(operation: 'probe-rate-limits' | 'health-check') {
     await call(http.post(`/api/admin/relay-servers/${props.relayId}/agent-probe`, { operation }))
     ElMessage.success(t('relayAgent.probeQueued'))
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   } finally {
     probing.value = false
   }

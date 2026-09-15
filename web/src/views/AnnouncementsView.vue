@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage, fieldErrorMap } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -17,7 +18,7 @@ const relayOptions = ref<{ id: string; label: string }[]>([])
 
 function fail(e: unknown): void {
   // 422（范围与目标不匹配 / 目标不存在 / 结束早于开始）都是后端写好的中文，直接透传。
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 /** 公告不分页，一次拉全量；增删改与启停之后都要重新拉，页面才不会停在旧状态。 */
@@ -27,7 +28,7 @@ async function load(): Promise<void> {
     listError.value = ''
     rows.value = await api.list()
   } catch (e) {
-    listError.value = e instanceof Error ? e.message : String(e)
+    listError.value = errorMessage(e)
     fail(e)
   } finally {
     loading.value = false
@@ -64,6 +65,16 @@ const form = reactive<AnnouncementIn>(emptyForm())
 // 用 datetimerange 表示不了，所以拆成两个可清空的 datetime。el-date-picker 的 v-model 是 Date，提交时转 ISO。
 const startAt = ref<Date | null>(null)
 const endAt = ref<Date | null>(null)
+/** 后端 422 明细回填到表单项；每次打开或提交时清空。 */
+const serverErrors = reactive<Record<string, string>>({})
+const fieldLabels = computed<Record<string, string>>(() => ({
+  scope: t('announcements.scope'), relay_server_id: t('announcements.target'), bot_id: t('announcements.target'),
+  content: t('announcements.content'), start_at: t('announcements.windowStart'), end_at: t('announcements.windowEnd'),
+  is_active: t('announcements.active'),
+}))
+function resetServerErrors(): void {
+  for (const key of Object.keys(serverErrors)) delete serverErrors[key]
+}
 
 const formRules = computed<FormRules>(() => ({
   content: [{ required: true, message: t('announcements.contentRequired'), trigger: 'blur' }],
@@ -94,6 +105,7 @@ function onScopeChange(scope: AnnouncementScope): void {
 }
 
 function openCreate(): void {
+  resetServerErrors()
   editingId.value = null
   Object.assign(form, emptyForm())
   startAt.value = null
@@ -102,6 +114,7 @@ function openCreate(): void {
 }
 
 function openEdit(row: AnnouncementOut): void {
+  resetServerErrors()
   editingId.value = row.id
   Object.assign(form, {
     scope: row.scope,
@@ -131,6 +144,7 @@ function payload(): AnnouncementIn {
 }
 
 async function submit(): Promise<void> {
+  resetServerErrors()
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
   if (startAt.value && endAt.value && endAt.value < startAt.value) {
@@ -144,7 +158,8 @@ async function submit(): Promise<void> {
     dialogVisible.value = false
     await load()
   } catch (e) {
-    fail(e)
+    Object.assign(serverErrors, fieldErrorMap(e, fieldLabels.value))
+    ElMessage.error(errorMessage(e, fieldLabels.value))
   }
 }
 
@@ -341,6 +356,7 @@ defineExpose({ form, load, onScopeChange })
           :label="t('announcements.scope')"
           prop="scope"
           data-test="form-scope"
+          :error="serverErrors.scope"
         >
           <el-radio-group
             :model-value="form.scope"
@@ -362,6 +378,7 @@ defineExpose({ form, load, onScopeChange })
           :label="t('announcements.target')"
           prop="relay_server_id"
           data-test="form-target"
+          :error="serverErrors.relay_server_id"
         >
           <el-select
             v-model="form.relay_server_id"
@@ -381,6 +398,7 @@ defineExpose({ form, load, onScopeChange })
           :label="t('announcements.target')"
           prop="bot_id"
           data-test="form-target"
+          :error="serverErrors.bot_id"
         >
           <el-select
             v-model="form.bot_id"
@@ -399,6 +417,7 @@ defineExpose({ form, load, onScopeChange })
           :label="t('announcements.content')"
           prop="content"
           data-test="form-content"
+          :error="serverErrors.content"
         >
           <el-input
             v-model="form.content"
@@ -418,6 +437,7 @@ defineExpose({ form, load, onScopeChange })
         <el-form-item
           :label="t('announcements.window')"
           data-test="form-window"
+          :error="serverErrors.start_at || serverErrors.end_at"
         >
           <!-- 两个独立可清空的时间点，而不是 datetimerange：只配开始（永不过期）或只配结束是合法状态。 -->
           <!-- el-date-picker 不透传 data-* 到 DOM，测试钩子只能挂在外层 span 上。 -->

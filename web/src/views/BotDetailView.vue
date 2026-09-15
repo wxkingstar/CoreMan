@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { useCompactLayout } from '@/composables/useCompactLayout'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -58,7 +59,7 @@ const memberExclude = computed(() => [bot.value?.created_by, ...members.value.ma
 const allowedInitial = computed(() => allowed.value.map((u) => ({ id: u.user_id, display_name: u.display_name, login_name: u.login_name })))
 
 function fail(e: unknown): void {
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 /** silent：只为刷新 member_count / allowed_user_count 时不要闪整页的加载遮罩。 */
@@ -68,7 +69,7 @@ async function reload(silent = false): Promise<void> {
     detailError.value = ''
     bot.value = await bots.get(botId)
   } catch (e) {
-    detailError.value = e instanceof Error ? e.message : String(e)
+    detailError.value = errorMessage(e)
     fail(e)
   } finally {
     if (!silent) loading.value = false

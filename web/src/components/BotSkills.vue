@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { computed, ref, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -14,12 +15,12 @@ const selected = ref<Skill | null>(null)
 const databaseOptions = computed(() => Object.entries(selected.value?.selectable_env_groups ?? {}).map(([value, label]) => ({ value, label })))
 const sourceOptions = computed(() => Object.entries(selected.value?.data_sources ?? {}).map(([value, label]) => ({ value, label })))
 const form = reactive<InstallInput>({ selected_env_groups: [], data_source: null, user_env_vars: {}, requested_security_prompt: null, reinstall_code: true })
-const fail = (e: unknown) => ElMessage.error(e instanceof Error ? e.message : String(e))
+const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 async function load() {
   loadError.value = ''
   busy.value = true
   try { const [available, installed] = await Promise.all([allSkills(), skills.installed(props.botId)]); catalog.value = available.filter(s => s.enabled); rows.value = installed.items; pending.value = installed.pending_approvals }
-  catch (e) { loadError.value = e instanceof Error ? e.message : String(e); fail(e) } finally { busy.value = false }
+  catch (e) { loadError.value = errorMessage(e); fail(e) } finally { busy.value = false }
 }
 watch(visible, value => { if (value) void load() })
 function edit(skill: Skill) {

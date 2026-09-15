@@ -18,7 +18,20 @@ describe('api client', () => {
       isAxiosError: true,
       response: { status: 401, data: { code: 401, message: '未登录或会话已过期' } },
     })
-    await expect(call(Promise.reject(failure))).rejects.toMatchObject({ status: 401, code: 401, message: '未登录或会话已过期' })
+    await expect(call(Promise.reject(failure))).rejects.toMatchObject({ status: 401, code: 401, message: '未登录或会话已过期', errors: [] })
+  })
+
+  it('passes 422 field errors through ApiError and drops malformed entries', async () => {
+    const failure = Object.assign(new Error('Request failed'), {
+      isAxiosError: true,
+      response: {
+        status: 422,
+        data: { code: 422, message: '参数校验失败', errors: [{ loc: ['body', 'name'], msg: 'Field required', type: 'missing' }, 'junk', { msg: 'no loc' }] },
+      },
+    })
+    await expect(call(Promise.reject(failure))).rejects.toMatchObject({
+      status: 422, code: 422, message: '参数校验失败', errors: [{ loc: ['body', 'name'], msg: 'Field required', type: 'missing' }],
+    })
   })
 
   it('adds X-CSRF-Token on unsafe methods', async () => {
@@ -36,6 +49,7 @@ describe('api client', () => {
     const e = new ApiError(403, 403, 'CSRF 校验失败')
     expect(e).toBeInstanceOf(Error)
     expect(e.status).toBe(403)
+    expect(e.errors).toEqual([])
   })
 
   it('calls unauthorized handler on 401 responses', async () => {

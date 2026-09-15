@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
@@ -59,7 +60,7 @@ function deliveryStatus(status: string) {
 let originalForm = ''
 const { confirmDiscard } = useUnsavedChanges(() => visible.value && !!originalForm && originalForm !== JSON.stringify(payload()))
 async function closeEditor(done: () => void) { if (await confirmDiscard()) done() }
-function fail(e: unknown) { ElMessage.error(e instanceof Error ? e.message : String(e)) }
+function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page, bot_id: filter }, () => { void load() })
 async function load() {
@@ -67,7 +68,7 @@ async function load() {
 
   loading.value = true
   try { const data = await cron.list(page.value, filter.value || undefined); rows.value = data.items; total.value = data.total }
-  catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) } finally { listLoading.value = false; loading.value = false }
+  catch (e) { listError.value = errorMessage(e); fail(e) } finally { listLoading.value = false; loading.value = false }
 }
 async function searchBots(keyword = '') {
   try { botOptions.value = (await bots.list({ scope: 'mine', keyword, per_page: 100 })).items }

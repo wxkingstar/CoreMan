@@ -8,6 +8,7 @@ import { http } from '@/api/client'
 vi.mock('@/api/client', () => ({
   http: { get: vi.fn(), post: vi.fn() },
   call: (promise: Promise<unknown>) => promise,
+  ApiError: class ApiError extends Error {},
 }))
 
 it('loads only on opening and clears stale tasks when refresh fails', async () => {

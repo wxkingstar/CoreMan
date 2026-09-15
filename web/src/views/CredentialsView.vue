@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { nextTick, onMounted, reactive, ref } from 'vue'
@@ -15,7 +16,7 @@ const form = reactive({ app_key: '', name: '', scopes: [] as string[], enabled: 
 const formRef = ref<FormInstance>()
 const formSession = ref(0)
 const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'cron', 'escalations']
-function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(e instanceof Error ? e.message : String(e)) }
+function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
 async function load() {
@@ -23,7 +24,7 @@ async function load() {
   persistQuery(); listLoading.value = true; listError.value = ''
 
   try { const [data, k] = await Promise.all([credentials.clients(page.value), credentials.keys()]); rows.value = data.items; total.value = data.total; keys.value = k }
-  catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) }
+  catch (e) { listError.value = errorMessage(e); fail(e) }
  finally { listLoading.value = false }
 }
 async function edit(row: ApiClient | null) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -62,7 +63,7 @@ async function patch(u: UserOut, body: UserPatch) {
     Object.assign(u, updated)
     ElMessage.success(t('common.saved'))
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
     await paged.load()
   }
 }

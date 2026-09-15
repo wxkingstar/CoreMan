@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
 import type { EnvEntry } from '@/utils/dotenv'
@@ -38,10 +39,10 @@ const fields = ref<{ key: string; label: string; placeholder: string; required: 
 const sourceForm = reactive({ key: '', label: '', git_url: '', categories: {} as Record<string, string>, sort_order: 0, access_token: '', remove_access_token: false })
 const presetForm = reactive<Preset>({ group_key: '', label: '', vars: {}, tags: [], version: 0 })
 const variables = ref<{ key: string; value: string }[]>([])
-const fail = (e: unknown) => ElMessage.error(e instanceof Error ? e.message : String(e))
+const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 const listLoading = ref(false), listError = ref('')
 const { persist } = useListQuery({ keyword: query })
-async function load() { listLoading.value = true; listError.value = ''; try { const [a, b] = await Promise.all([allSkills(), skills.sources()]); rows.value = a; sources.value = b; if (manager.value) presets.value = await skills.presets() } catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) } finally { listLoading.value = false } }
+async function load() { listLoading.value = true; listError.value = ''; try { const [a, b] = await Promise.all([allSkills(), skills.sources()]); rows.value = a; sources.value = b; if (manager.value) presets.value = await skills.presets() } catch (e) { listError.value = errorMessage(e); fail(e) } finally { listLoading.value = false } }
 function edit(row: Skill | null) {
   selected.value = row
   const base = empty()

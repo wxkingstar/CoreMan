@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -6,7 +7,7 @@ import { smtp, type SmtpIn } from '@/api/cron'
 const { t } = useI18n()
 const form = reactive<SmtpIn>({ enabled: false, host: '', port: 465, security: 'tls', username: '', sender: '' })
 const version = ref(0), password = ref(''), hasPassword = ref(false), loading = ref(false), loaded = ref(false)
-function fail(e: unknown) { ElMessage.error(e instanceof Error ? e.message : String(e)) }
+function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 onMounted(async () => {
   try {
     const data = await smtp.get()

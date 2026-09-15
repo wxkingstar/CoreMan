@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage } from 'element-plus'
@@ -73,7 +74,7 @@ watch(range, (v) => {
 })
 
 function fail(e: unknown) {
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 /** 后端列表项没有 platform_user_id：姓名、登录名都为空（未映射到内部用户）时退到 user_id。 */

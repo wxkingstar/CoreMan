@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -8,7 +9,7 @@ import type { Page, PlatformAppOut, UserOut } from '@/api/types'
 const { t } = useI18n()
 const channels = ref<AlertChannel[]>([]), version = ref(0), loaded = ref(false), saving = ref(false)
 const apps = ref<PlatformAppOut[]>([]), people = ref<UserOut[]>([])
-function fail(e: unknown) { ElMessage.error(e instanceof Error ? e.message : String(e)) }
+function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 async function pages<T>(fetch: (page: number) => Promise<Page<T>>): Promise<T[]> {
   const all: T[] = []
   for (let page = 1; page <= 100; page++) {

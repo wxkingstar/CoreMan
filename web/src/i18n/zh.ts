@@ -135,6 +135,9 @@ export default {
     modify: '修改',
     comingSoon: '该功能即将开放',
     conflict: '数据已被他人修改，请刷新后重试',
+    fieldError: '{field}：{detail}',
+    errorSeparator: '；',
+    moreErrors: '等 {count} 项',
   },
   login: {
 "artTitle": "你的下一位，\n默契搭档。","artSubtitle": "让 AI 融入团队，让好想法一起发生。","artFooter": "一起思考，一起把事情做好。","artHello": "嘿，等你很久啦。","artPrivacy": "放心，我们不看。","artAlt": "三位可爱的 AI 同事，输入密码时会捂住眼睛","entryHint": "欢迎回来，今天也一起做点了不起的事。","entryFooter": "CoreMan · 让 AI 成为团队的一员",

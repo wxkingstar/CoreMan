@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -18,13 +19,13 @@ async function open() {
     for (let page = 1; ; page++) { const data = await systems.list(page); all.push(...data.items); if (all.length >= data.total || !data.items.length) break }
     options.value = all.filter(s => s.enabled && (s.allowed_bot_ids === null || s.allowed_bot_ids.includes(props.botId)))
     visible.value = true
-  } catch (e) { ElMessage.error(e instanceof Error ? e.message : String(e)) } finally { busy.value = false }
+  } catch (e) { ElMessage.error(errorMessage(e)) } finally { busy.value = false }
 }
 async function save() {
   if (busy.value) return
   busy.value = true
   try { await systems.saveGrants(props.botId, keys.value, version.value); visible.value = false; emit('saved'); ElMessage.success(t('common.saved')) }
-  catch (e) { ElMessage.error(e instanceof Error ? e.message : String(e)) } finally { busy.value = false }
+  catch (e) { ElMessage.error(errorMessage(e)) } finally { busy.value = false }
 }
 </script>
 <template>

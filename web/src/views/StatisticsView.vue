@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -17,7 +18,7 @@ const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective
 const price = reactive<ModelPrice>(emptyPrice())
 const money = (value: number | null) => value == null ? t('statistics.unknown') : `$${value.toFixed(6)}`
 const number = (value: number | null) => value == null ? t('statistics.unknown') : value.toLocaleString()
-const fail = (e: unknown) => ElMessage.error(e instanceof Error ? e.message : String(e))
+const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 const chart = computed(() => {
   if (!data.value) return []
   const first = Date.parse(data.value.start), last = Date.parse(data.value.end)
@@ -43,7 +44,7 @@ const labelEvery = computed(() => Math.max(1, Math.ceil(chart.value.length / Mat
 const axisMax = computed(() => Math.max(4, Math.ceil(peak.value / 4) * 4))
 const loadError = ref('')
 const { persist } = useListQuery({ range, timezone, metric }, () => { void load() })
-async function load() { persist(); loadError.value = ''; if (busy.value) return; busy.value = true; try { data.value = await statistics.get({ start: range.value?.[0], end: range.value?.[1], timezone: timezone.value }); range.value = [data.value.start, data.value.end] } catch (e) { loadError.value = e instanceof Error ? e.message : String(e); data.value = null; fail(e) } finally { busy.value = false } }
+async function load() { persist(); loadError.value = ''; if (busy.value) return; busy.value = true; try { data.value = await statistics.get({ start: range.value?.[0], end: range.value?.[1], timezone: timezone.value }); range.value = [data.value.start, data.value.end] } catch (e) { loadError.value = errorMessage(e); data.value = null; fail(e) } finally { busy.value = false } }
 async function loadPrices() { try { prices.value = await statistics.prices() } catch (e) { fail(e) } }
 function edit(row?: ModelPrice) { Object.assign(price, row ?? emptyPrice()); editing.value = true }
 async function save() { saving.value = true; try { await statistics.savePrice(price); editing.value = false; await loadPrices() } catch (e) { fail(e) } finally { saving.value = false } }

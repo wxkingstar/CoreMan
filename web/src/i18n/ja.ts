@@ -137,6 +137,9 @@ export default {
     modify: '変更',
     comingSoon: 'この機能は近日公開予定です',
     conflict: 'データが他の操作により更新されています。再読み込みしてください',
+    fieldError: '{field}：{detail}',
+    errorSeparator: '；',
+    moreErrors: 'ほか {count} 件',
   },
   login: {
 "artTitle": "次の仲間は、\nきっと気が合う。","artSubtitle": "AI がチームに加わると、アイデアが動き出す。","artFooter": "一緒に考え、一緒につくろう。","artHello": "おかえり、待ってたよ。","artPrivacy": "大丈夫、見ていないよ。","artAlt": "パスワード入力中に目を隠す、3 人の AI の仲間","entryHint": "おかえりなさい。今日も一緒に始めましょう。","entryFooter": "CoreMan · AI をチームの一員に",

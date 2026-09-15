@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -25,7 +26,7 @@ const refreshError = ref('')
 let timer: ReturnType<typeof setInterval> | null = null
 
 function fail(e: unknown) {
-  ElMessage.error(e instanceof Error ? e.message : String(e))
+  ElMessage.error(errorMessage(e))
 }
 
 const cards = computed(() => {
@@ -58,7 +59,7 @@ async function refresh(silent = false): Promise<void> {
     tasks.value = ts
     failedOutbox.value = ob
   } catch (e) {
-    refreshError.value = e instanceof Error ? e.message : String(e)
+    refreshError.value = errorMessage(e)
     if (!silent) fail(e)
   } finally {
     loading.value = false

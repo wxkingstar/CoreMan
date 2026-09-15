@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -84,7 +85,7 @@ async function submitForm() {
     await load()
     emit('changed')
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 
@@ -144,7 +145,7 @@ async function saveRules() {
     await load()
     emit('changed')
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
+    ElMessage.error(errorMessage(e))
   }
 }
 </script>

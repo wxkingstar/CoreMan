@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -41,7 +42,7 @@ async function saveName() {
     renameDialog.value = false
     ElMessage.success(t('common.saved'))
     await refresh()
-  } catch (error) { ElMessage.error((error as Error).message) }
+  } catch (error) { ElMessage.error(errorMessage(error)) }
   finally { renaming.value = false }
 }
 const generated = ref<InstallLink | null>(null)
@@ -55,12 +56,12 @@ async function refresh(silent = false) {
   try {
     nodes.value = await runtimeNodes.list()
   } catch (error) {
-    if (!silent) ElMessage.error((error as Error).message)
+    if (!silent) ElMessage.error(errorMessage(error))
   } finally { loading.value = false }
 }
 async function update(node: RuntimeNode, body: { is_active?: boolean; draining?: boolean }) {
   try { await runtimeNodes.patch(node.id, body); await refresh() }
-  catch (error) { ElMessage.error((error as Error).message) }
+  catch (error) { ElMessage.error(errorMessage(error)) }
 }
 async function create() {
   if (!form.workspace_root.startsWith('/') || form.workspace_root === '/') {
@@ -68,7 +69,7 @@ async function create() {
   }
   creating.value = true
   try { generated.value = await runtimeNodes.createLink(form); await refresh() }
-  catch (error) { ElMessage.error((error as Error).message) }
+  catch (error) { ElMessage.error(errorMessage(error)) }
   finally { creating.value = false }
 }
 async function copy() {
@@ -77,7 +78,7 @@ async function copy() {
 }
 async function probe(row: RelayOut) {
   try { await relays.probe(row.id); await refresh() }
-  catch (error) { ElMessage.error((error as Error).message) }
+  catch (error) { ElMessage.error(errorMessage(error)) }
 }
 function capabilityState(node: RuntimeNode, provider: string) {
   const cap = node.capabilities[provider]

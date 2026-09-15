@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorMessage } from '@/utils/errors'
 import { onBeforeUnmount, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { healthReport } from '@/api/healthReport'
@@ -12,7 +13,7 @@ async function run() {
   content.value = ''; error.value = ''; completed.value = false; tool.value = ''; busy.value = true
   controller = new AbortController()
   try { await healthReport(props.botId, controller.signal, event => { if (event.kind === 'text') content.value += event.text ?? ''; if (event.kind === 'tool') tool.value = event.name ?? ''; if (event.kind === 'done') completed.value = true }) }
-  catch (e) { error.value = controller.signal.aborted ? t('healthReport.cancelled') : (e instanceof Error ? e.message : String(e)) }
+  catch (e) { error.value = controller.signal.aborted ? t('healthReport.cancelled') : errorMessage(e) }
   finally { busy.value = false; controller = null; tool.value = '' }
 }
 function stop() { controller?.abort() }

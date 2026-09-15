@@ -1,3 +1,4 @@
+import { errorMessage } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
 import { reactive, ref, toRef, type Ref } from 'vue'
 import type { Page } from '@/api/types'
@@ -25,7 +26,7 @@ export function usePaged<T, F extends Record<string, unknown> = Record<string, u
       total.value = res.total
     } catch (e) {
       if (request !== generation) return
-      error.value = e instanceof Error ? e.message : String(e)
+      error.value = errorMessage(e)
       items.value = []
       total.value = 0
       ElMessage.error(error.value)
