@@ -88,12 +88,14 @@ class SseParser:
         backend: claude / codex，决定是否检查 codex 错误标记
         done: 是否见过 `data: [DONE]`
         saw_finish: 是否见过非空 finish_reason
+        saw_error: 是否产出过 RelayErrorEvent（relay 以正文回传的错误）
         counts: text/thinking/tool/usage 事件计数（用于收尾判空）
     """
 
     backend: str
     done: bool = False
     saw_finish: bool = False
+    saw_error: bool = False
     counts: dict[str, int] = field(
         default_factory=lambda: {"text": 0, "thinking": 0, "tool": 0, "usage": 0}
     )
@@ -129,6 +131,7 @@ class SseParser:
             if chunk.get("x_relay_error") or (
                 self.backend == "codex" and any(m in content for m in CODEX_ERROR_MARKERS)
             ):
+                self.saw_error = True
                 out.append(RelayErrorEvent(content))
                 return out
             self.counts["text"] += 1

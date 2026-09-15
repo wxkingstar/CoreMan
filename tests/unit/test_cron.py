@@ -188,3 +188,33 @@ async def test_precheck_abandons_stuck_thread_up_to_cap(monkeypatch: pytest.Monk
             break
         await asyncio.sleep(0.01)
     assert precheck.abandoned_threads() == 0
+
+
+async def test_cron_stream_classification_keeps_relay_reason() -> None:
+    from coreman.core.relay.client import IncompleteResultError, RelayError
+    from coreman.core.relay.sse import RelayErrorEvent, TextDelta
+    from coreman.runtime.worker.cron_handler import CronRunHandler, CronStreamError
+
+    async def relay_error():
+        yield TextDelta("部分")
+        yield RelayErrorEvent("\n\n[codex error] boom")
+
+    with pytest.raises(CronStreamError) as caught:
+        await CronRunHandler()._consume(relay_error())
+    assert caught.value.code == "x_relay_error"
+    assert caught.value.detail == "[codex error] boom" and caught.value.partial == "部分"
+
+    async def zero_events():
+        if False:
+            yield TextDelta("")
+        raise IncompleteResultError("incomplete_result: SSE 未返回确认终态")
+
+    with pytest.raises(CronStreamError, match="empty_stream"):
+        await CronRunHandler()._consume(zero_events())
+
+    async def transport():
+        yield TextDelta("x")
+        raise RelayError("连接失败: ConnectError")
+
+    with pytest.raises(RelayError, match="连接失败"):
+        await CronRunHandler()._consume(transport())

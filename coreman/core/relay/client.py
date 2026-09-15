@@ -30,6 +30,10 @@ class RelayError(Exception):
     """访问 relay 接口失败。"""
 
 
+class IncompleteResultError(RelayError):
+    """流正常读完，却既没有确认终态（finish_reason），也没有 relay 回传的错误。"""
+
+
 @dataclass
 class RelayHealth:
     """一次 /health 探测的结果。"""
@@ -206,6 +210,7 @@ class RelayClient:
 
         Raises:
             RelayError: HTTP 非 200、连接失败、读超时或总时长超限
+            IncompleteResultError: 流结束时没有 finish_reason，也没有 relay 回传的错误
         """
         parser = SseParser(request.backend)
         timeout = httpx.Timeout(
@@ -234,8 +239,10 @@ class RelayClient:
             raise RelayError(f"连接失败: {type(exc).__name__}") from exc
         for event in parser.flush():
             yield event
-        if not parser.saw_finish:
-            raise RelayError("incomplete_result: SSE 未返回确认终态")
+        # relay 已经以 x_relay_error 交代了失败原因（有的驱动失败时不补 finish chunk）：原因已经
+        # 交给调用方按错误分类，再抛「未确认终态」只会让调用方丢掉这段原话。
+        if not parser.saw_finish and not parser.saw_error:
+            raise IncompleteResultError("incomplete_result: SSE 未返回确认终态")
 
 
 async def _next_line(lines: AsyncIterator[str], deadline: float) -> str | None:

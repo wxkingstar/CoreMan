@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-from coreman.core.relay.client import ChatRequest, RelayClient, RelayError
+from coreman.core.relay.client import (
+    ChatRequest,
+    IncompleteResultError,
+    RelayClient,
+    RelayError,
+)
 from coreman.runtime.gateway_wecom.ws_client import (
     DeliveryRejected,
     DeliveryUncertain,
@@ -42,6 +47,38 @@ def test_unconfirmed_terminal_is_not_success(reason):
         NS(locale="zh"), pre, Outcome(text_events=1, finish_reason=reason)
     )
     assert verdict.task_status == "failed"
+
+
+def _classify(text: str, out: Outcome) -> Verdict:
+    pre = NS(writer=NS(pending_text=text), session_url="http://fake/s", relay=NS(name="test"))
+    return ChatTaskHandler()._classify(NS(locale="zh"), pre, out)
+
+
+def test_relay_error_wins_over_unconfirmed_terminal() -> None:
+    verdict = _classify(
+        "[codex error] original session retained",
+        Outcome(relay_error=True, error=IncompleteResultError("incomplete_result")),
+    )
+    assert verdict.error_code == "x_relay_error"
+    assert verdict.final_text == "[codex error] original session retained"
+
+
+def test_zero_event_unconfirmed_stream_is_empty_stream() -> None:
+    verdict = _classify("", Outcome(error=IncompleteResultError("incomplete_result")))
+    assert verdict.error_code == "empty_stream" and "http://fake/s" in verdict.final_text
+
+
+def test_unconfirmed_partial_output_keeps_streamed_text() -> None:
+    verdict = _classify(
+        "half answer", Outcome(text_events=1, error=IncompleteResultError("incomplete_result"))
+    )
+    assert verdict.error_code == "incomplete_result" and verdict.task_status == "failed"
+    assert verdict.final_text.startswith("half answer\n\n")
+
+
+def test_transport_error_stays_generic() -> None:
+    verdict = _classify("", Outcome(error=RelayError("连接失败: ConnectError")))
+    assert verdict.error_code == "RelayError" and verdict.task_status == "failed"
 
 
 @pytest.mark.parametrize("offset", [0, 10, 500])

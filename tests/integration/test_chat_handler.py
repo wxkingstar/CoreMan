@@ -221,6 +221,29 @@ async def test_relay_error_empty_and_tools_only(
     assert (await tasks.get(db_session, t3.id)).status == "succeeded"  # type: ignore[union-attr]
 
 
+async def test_unconfirmed_streams_keep_relay_reason_link_and_partial_text(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _, _ = await seed_bot(db_session)
+    t = await chat_task(db_session, bot, "a")
+    await run(db_engine, t, FakeRelay("relay_error_no_finish"))
+    s = await stream_of(db_session, t.id)
+    assert s.is_complete and "[codex error] codex produced no output" in (s.final_text or "")
+    log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t.id))).scalar_one()
+    assert log.status == "error" and log.error_code == "x_relay_error"
+    t2 = await chat_task(db_session, bot, "b")
+    await run(db_engine, t2, FakeRelay("empty_no_finish"))
+    log2 = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t2.id))).scalar_one()
+    assert log2.status == "error" and log2.error_code == "empty_stream"
+    assert (await stream_of(db_session, t2.id)).final_text.startswith("⚠️ AI 服务返回了空回复")  # type: ignore[union-attr]
+    t3 = await chat_task(db_session, bot, "c")
+    await run(db_engine, t3, FakeRelay("no_finish"))
+    log3 = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t3.id))).scalar_one()
+    assert log3.status == "error" and log3.error_code == "incomplete_result"
+    assert "半截" in ((await stream_of(db_session, t3.id)).final_text or "")
+    assert (await tasks.get(db_session, t3.id)).status == "failed"  # type: ignore[union-attr]
+
+
 async def test_whitelist_unsupported_help_and_disabled(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
