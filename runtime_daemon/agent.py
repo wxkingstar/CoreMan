@@ -822,7 +822,8 @@ class Agent:
 
     def start_schedules(self) -> None:
         def loop():
-            last_quota, last_memory, last_health = 0.0, 0.0, ""
+            # 从负无穷起算：monotonic 是开机时长，刚开机的主机也要在启动后立即跑第一轮。
+            last_quota, last_memory, last_health = -math.inf, -math.inf, ""
             while not self.stop.is_set():
                 now = time.monotonic()
                 local = time.localtime()

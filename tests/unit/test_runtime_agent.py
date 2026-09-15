@@ -184,6 +184,8 @@ def run_schedule_once(agent, monkeypatch) -> list[str]:
 
     monkeypatch.setattr(agent, "start_background", record)
     monkeypatch.setenv("COREMAN_MEMORY_SYNC", "1")
+    # 刚开机的主机 monotonic 很小（CI 虚拟机即如此），第一轮仍应在启动后立即排上。
+    monkeypatch.setattr(agent_module.time, "monotonic", lambda: 5.0)
     agent.stop.clear()
     agent.start_schedules()
     for thread in threading.enumerate():
