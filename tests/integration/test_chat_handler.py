@@ -352,6 +352,37 @@ async def test_user_stop_and_superseded(db_engine: AsyncEngine, db_session: Asyn
     assert (await tasks.get(db_session, new.id)).status == "succeeded"  # type: ignore[union-attr]
 
 
+async def test_long_task_done_notice_only_for_streamed_success(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    bot, _, _ = await seed_bot(db_session)
+
+    async def run_with(text: str, relay: FakeRelay, threshold: int):  # type: ignore[no-untyped-def]
+        t = await chat_task(db_session, bot, text)
+        ctx = build_ctx(db_engine, t, relay_client_factory=lambda _r: relay.client())
+        handler = ChatTaskHandler()
+        handler.LONG_TASK_SECONDS = threshold
+        handler.LONG_TASK_NOTICE_DELAY_SECONDS = 600
+        await handler.run(ctx)
+        await ctx.chat_logs.drain(5)
+        return t
+
+    quick = await run_with("quick", FakeRelay("normal"), 60)
+    slow = await run_with("slow", FakeRelay("normal"), 0)
+    broken = await run_with("broken", FakeRelay("relay_error"), 0)
+    items = {i.dedupe_key: i for i in (await db_session.execute(select(OutboxItem))).scalars()}
+    # 流式气泡原地刷新不弹通知：只有按流收尾的成功长任务才另发一条提醒，出错不算完成。
+    assert f"{quick.id}:send:long_done" not in items
+    assert f"{broken.id}:send:long_done" not in items
+    notice = items[f"{slow.id}:send:long_done"]
+    assert notice.payload["markdown"] in {msg("long_task_done", seconds=s) for s in range(5)}
+    assert notice.target == {"chat_id": "zs"} and notice.status == "pending"
+    # 延后入队，让网关先推终稿的 finish 帧。
+    assert notice.not_before > datetime.now(UTC) + timedelta(seconds=300)
+
+
 async def _pump(ctx) -> None:  # type: ignore[no-untyped-def]
     while True:
         await asyncio.sleep(0.2)
@@ -400,9 +431,11 @@ async def test_reaped_task_is_not_finished_twice(
     assert (await db_session.execute(select(OutboxItem))).scalars().all() == []
 
 
-async def test_long_task_does_not_send_a_premature_reminder(
+async def test_long_task_reminder_is_queued_after_the_final_reply(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
+    from datetime import UTC, datetime, timedelta
+
     bot, _, _ = await seed_bot(db_session)
     t = await chat_task(db_session, bot, "hi")
     now = [1000.0]
@@ -413,12 +446,17 @@ async def test_long_task_does_not_send_a_premature_reminder(
         clock=lambda: now[0],
     )
     handler = ChatTaskHandler()
+    handler.LONG_TASK_NOTICE_DELAY_SECONDS = 600
     handler._on_first_event = lambda: now.__setitem__(0, 1075.0)  # 首事件后把时钟拨到 75 秒
     await handler.run(ctx)
-    items = (await db_session.execute(select(OutboxItem))).scalars().all()
-    assert items == []  # Completion travels with the actual final result, never ahead of it.
     row = await tasks.get(db_session, t.id)
     assert row and row.status == "succeeded"
+    assert (await stream_of(db_session, t.id)).is_complete
+    (item,) = (await db_session.execute(select(OutboxItem))).scalars().all()
+    # 终稿随流收尾；提醒是另一条新消息，且延后可领，不会跑到终稿前面。
+    assert item.dedupe_key == f"{t.id}:send:long_done"
+    assert item.payload == {"markdown": msg("long_task_done", seconds=75)}
+    assert item.not_before > datetime.now(UTC) + timedelta(seconds=300)
 
 
 async def test_allowlist_and_commands_come_before_relay_check(

@@ -22,6 +22,8 @@ class ChatStageBase:
     SILENT_WARN_SECONDS = 30.0
     TICK_SECONDS = 1.0
     LONG_TASK_SECONDS = 60
+    # 长任务完成提醒延后入队的秒数：让网关先推终稿的 finish 帧，提醒不跑到回复前面。
+    LONG_TASK_NOTICE_DELAY_SECONDS = 3.0
     QUEUED_NOTICE_SECONDS = 5.0
     SUPERSEDE_POLL_SECONDS = 0.1
     SUPERSEDE_POLLS = 200
