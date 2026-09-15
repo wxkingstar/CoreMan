@@ -1,4 +1,4 @@
-"""运维命令：python -m coreman.cli contact-sync [--app NAME]（spec §12 coreman contact-sync）。"""
+"""运维命令：python -m coreman.cli contact-sync [--app NAME]（对应 coreman contact-sync）。"""
 
 from __future__ import annotations
 
@@ -32,7 +32,8 @@ async def _contact_sync(app_name: str | None) -> int:
     configure_logging(
         service="cli", instance="contact-sync", level=settings.log_level, stream=sys.stderr
     )
-    engine = make_engine(settings.database_url)
+    # 整个通讯录归并在一笔事务里、先排队等跨平台咨询锁：运维命令不套单语句超时。
+    engine = make_engine(settings.database_url, command_timeout=None)
     factory = make_session_factory(engine)
     try:
         async with factory() as session:

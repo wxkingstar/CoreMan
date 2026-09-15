@@ -38,6 +38,14 @@ TAKEOVERS = Counter(
 WECOM_ERRORS = Counter(
     "coreman_wecom_errcode_total", "Platform errors by bounded code", ["code"], registry=REGISTRY
 )
+# 白名单拒绝：reason 只有 identity_unknown（平台账号没映射到员工，多为应用未绑定或不在
+# 可见范围）与 not_allowed（员工不在名单）两种。成批出现前者往往是配置问题而不是越权。
+WHITELIST_DENIED = Counter(
+    "coreman_whitelist_denied_total",
+    "Messages rejected by a bot allow list",
+    ["reason"],
+    registry=REGISTRY,
+)
 
 
 def after_commit(session: AsyncSession, action: Callable[[], object]) -> None:

@@ -1,4 +1,4 @@
-"""角色矩阵（spec §10.2）中的通用判定；资源级规则写在各路由模块。"""
+"""角色矩阵中的通用判定；资源级规则写在各路由模块。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def require_roles(*roles: str) -> Callable[..., Coroutine[Any, Any, User]]:
 
 
 def can_edit_user(actor: User, target: User, changes: dict[str, Any]) -> bool:
-    """spec §10.2「改派用户团队、用户角色」行 + 本计划裁决 9。"""
+    """能否改派用户的团队、角色与状态。"""
     if target.source == "bootstrap":
         return False
     if actor.id == target.id and ("role" in changes or "status" in changes):

@@ -1,4 +1,4 @@
-"""task_streams 读写（spec §5.4、§6.3）。
+"""task_streams 读写。
 
 worker 每次写都让 version+1；网关按 version > pushed_version 推送后回写 pushed_version。
 """

@@ -62,6 +62,103 @@ HEAL_DEFER_ROUNDS = 30
 # Enrollment rejections worth retrying; any other 4xx will not change with the same token.
 RETRYABLE_ENROLL_STATUSES = {408, 429}
 
+# 运行时控制类环境变量黑名单，与 coreman/core/bots/env_policy.py 逐项一致（守护进程是独立包，
+# 不能 import coreman；各条目的理由见那边的注释）。tests/unit/test_env_policy.py 校验两份相同。
+# 请求 env 会原样并入免审批运行的 CLI 进程，命中任一条就拒绝整个请求。
+BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
+    "ANTHROPIC_",
+    "OPENAI_",
+    "CLAUDE_",
+    "CODEX_",
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "NPM_CONFIG_",
+    "CORECLR_",
+    "OPENSSL_",
+    "BASH_FUNC_",
+    "GIT_",
+    "SSH_",
+    "SSL_",
+    "XDG_",
+)
+BLOCKED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "HOME",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "CLAUDECODE",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "BUN_OPTIONS",
+        "PERL5OPT",
+        "PERL5LIB",
+        "PERLLIB",
+        "PERL5DB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "_JAVA_OPTIONS",
+        "DOTNET_STARTUP_HOOKS",
+        "GOFLAGS",
+        "GCONV_PATH",
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "PROMPT_COMMAND",
+        "ZDOTDIR",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "MANPAGER",
+        "BROWSER",
+        "LESSOPEN",
+        "LESSCLOSE",
+        "SUDO_ASKPASS",
+        "RIPGREP_CONFIG_PATH",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "FTP_PROXY",
+        "COREMAN_AGENT_TOKEN",
+        "COREMAN_NODE_TOKEN",
+        "COREMAN_INSTALL_TOKEN",
+    }
+)
+ALLOWED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        # 厂商 API key 与模型名只换凭据，不改变请求端点；端点类变量仍被前缀拦下。
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+    }
+)
+
+
+def blocked_env_keys(keys) -> list[str]:
+    """Sorted blocked key names; compared upper-case because curl also honours http_proxy."""
+    found = set()
+    for key in keys:
+        name = str(key).upper()
+        if name in ALLOWED_ENV_KEYS:
+            continue
+        if name in BLOCKED_ENV_KEYS or name.startswith(BLOCKED_ENV_PREFIXES):
+            found.add(str(key))
+    return sorted(found)
+
 
 def environment() -> str:
     container = os.environ.get("container", "")
@@ -605,15 +702,15 @@ class Daemon:
                 if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", sid):
                     raise ValueError("会话标识无效")
             env = data.get("env_vars") or {}
-            blocked = {
-                "HOME",
-                "PATH",
-                "COREMAN_AGENT_TOKEN",
-                "COREMAN_NODE_TOKEN",
-                "COREMAN_INSTALL_TOKEN",
-            }
-            if any(k in blocked for k in env):
-                raise ValueError("请求不能覆盖运行时身份或用户环境")
+            if not isinstance(env, dict):
+                raise ValueError("env_vars 必须是对象")
+            blocked = blocked_env_keys(env)
+            if blocked:
+                # Only key names: values may carry the bot's secrets.
+                raise ValueError(
+                    "请求包含运行时控制类环境变量（模型端点、代码加载、凭据或运行时身份），"
+                    f"已拒绝执行：{', '.join(blocked)}；请在机器人或技能环境配置中删除"
+                )
         return data
 
     async def execute(self, command: dict) -> None:

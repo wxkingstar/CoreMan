@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -28,19 +27,8 @@ router = APIRouter(tags=["escalations"])
 async def escalation_client(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> ApiClient:
-    if request.headers.get("X-Signature"):
-        client = await signed_client(request, session)
-    else:
-        # app_key 是公开标识，绝不能当作旧 X-API-Key 的凭证。
-        # 兼容调用须同时携带 X-App-Key 和 X-API-Key=客户端 secret。
-        key, secret = request.headers.get("X-App-Key", ""), request.headers.get("X-API-Key", "")
-        legacy_client = await session.get(ApiClient, key) if key and len(key) <= 128 else None
-        if legacy_client is None or not legacy_client.enabled or not secret or len(secret) > 4096:
-            raise ApiError(401, 401, "求助接口凭证无效")
-        client = legacy_client
-        expected = request.app.state.cipher.decrypt(client.secret_enc, "api_clients.secret_enc")
-        if not secrets.compare_digest(secret.encode(), expected.encode()):
-            raise ApiError(401, 401, "求助接口凭证无效")
+    # 只接受签名调用；旧 X-API-Key 直接携带客户端 secret 的方式已移除。
+    client = await signed_client(request, session)
     if "escalations" not in client.scopes:
         raise ApiError(403, 403, "调用方没有求助权限")
     await session.execute(
@@ -84,12 +72,16 @@ class CreateIn(BaseModel):
         return self
 
 
-def _out(row: Escalation) -> dict[str, Any]:
+def _out(row: Escalation, failures: dict[str, str] | None = None) -> dict[str, Any]:
+    failure = (failures or {}).get(row.escalation_id)
     return {
         "escalation_id": row.escalation_id,
         "group_id": row.group_id,
         "status": row.status,
         "queued": row.status == "queued",
+        # 通知没能送达而结束：status 为 cancelled，Agent 据此停止轮询、改走其它渠道。
+        "delivery_failed": failure is not None,
+        "failure_reason": failure,
         "question": row.question,
         "replies": row.replies,
         "rounds": row.rounds,
@@ -104,13 +96,13 @@ def _out(row: Escalation) -> dict[str, Any]:
     }
 
 
-def _group(rows: list[Escalation]) -> dict[str, Any]:
+def _group(rows: list[Escalation], failures: dict[str, str] | None = None) -> dict[str, Any]:
     # 胜出者进入追问 pending 或结束后仍是原回复者，不能按第一行重新选人。
     winner = next((r for r in rows if r.replies), None)
     chosen = winner or rows[0]
     return {
-        **_out(chosen),
-        "escalations": [_out(row) for row in rows],
+        **_out(chosen, failures),
+        "escalations": [_out(row, failures) for row in rows],
         "winner_id": winner.escalation_id if winner else None,
     }
 
@@ -205,8 +197,9 @@ async def create_escalation(
         request_id=body.request_id,
         now=utcnow(),
     )
+    failures = await service.delivery_failures(session, rows)
     await session.commit()
-    return {"code": 0, "data": _group(rows)}
+    return {"code": 0, "data": _group(rows, failures)}
 
 
 @router.get("/api/infra/escalations/{identity}")
@@ -224,8 +217,9 @@ async def poll(
                 await service.close(session, row, "expired", "expired", now)
             else:
                 row.last_polled_at = now
+    failures = await service.delivery_failures(session, rows)
     await session.commit()
-    return {"code": 0, "data": _group(rows)}
+    return {"code": 0, "data": _group(rows, failures)}
 
 
 class ResolveIn(BaseModel):

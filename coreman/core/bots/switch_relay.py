@@ -1,4 +1,4 @@
-"""切换 relay 的领域逻辑（spec §10.2 权限、§8.5 清会话、§8.8 限流切换复用）。API 与 worker 共用。
+"""切换 relay 的领域逻辑（权限校验、清会话；限流自动切换复用同一逻辑）。API 与 worker 共用。
 
 只改内存里的对象并写审计 / 通知，**不 commit**：API 端点要在 commit 之后刷 ETag，worker
 要把回执与状态清理放进同一个事务，事务边界一律留给调用方。
@@ -25,7 +25,7 @@ from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSkill, RelayServer, RuntimeNode, User
-from coreman.core.errors import ApiError
+from coreman.core.errors import VERSION_CONFLICT, ApiError
 from coreman.core.knowledge.memory_transfer import transfer
 from coreman.core.relay.models import default_model, effective_models, load_catalog, supports_xhigh
 
@@ -33,9 +33,10 @@ from coreman.core.relay.models import default_model, effective_models, load_cata
 class SwitchError(Exception):
     """切换被规则挡下。`status` 直接就是 API 的 HTTP 码，worker 只看它区分 403 与其它。"""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, code: int | None = None) -> None:
         super().__init__(message)
-        self.status, self.message = status, message
+        # code 是 API 信封里的业务码，默认同 HTTP 码；版本冲突用 VERSION_CONFLICT。
+        self.status, self.message, self.code = status, message, code or status
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ async def switch_relay(
     expected_version = bot.version
     await session.refresh(bot, with_for_update=True)
     if bot.version != expected_version:
-        raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试")
+        raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试", VERSION_CONFLICT)
     memory_status = "unchanged"
     target_directory = bot.working_dir
     if not same_relay:
@@ -140,7 +141,7 @@ async def switch_relay(
     if bot.effort_level == "xhigh" and not supports_xhigh(new_model, catalog):
         # 自动换来的模型不支持 xhigh 时降一档，否则下发给 relay 的就是非法档位。
         bot.effort_level = "high"
-    # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废（spec §8.5）。
+    # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废。
     await sessions.clear_bot(session, bot.id)
     await record_audit(
         session,

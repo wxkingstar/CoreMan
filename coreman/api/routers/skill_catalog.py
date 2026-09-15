@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
@@ -208,7 +208,9 @@ def skill_out(row: Skill) -> dict[str, Any]:
     }
 
 
-async def audited(session: AsyncSession, actor: User, action: str, identity: str) -> None:
+async def audited(
+    session: AsyncSession, request: Request, actor: User, action: str, identity: str
+) -> None:
     await record_audit(
         session,
         actor_id=actor.id,
@@ -216,6 +218,7 @@ async def audited(session: AsyncSession, actor: User, action: str, identity: str
         action=action,
         target_type="skill_config",
         target_id=identity,
+        ip=client_ip(request),
     )
     await session.commit()
 
@@ -247,7 +250,7 @@ async def create_source(
     apply_source(row, body, request)
     session.add(row)
     await session.flush()
-    await audited(session, actor, "skill_source.create", str(row.id))
+    await audited(session, request, actor, "skill_source.create", str(row.id))
     return {"code": 0, "data": source_out(row)}
 
 
@@ -266,7 +269,7 @@ async def update_source(
     require_if_match(request, row.version)
     apply_source(row, body, request)
     row.updated_at = utcnow()
-    await audited(session, actor, "skill_source.update", str(row.id))
+    await audited(session, request, actor, "skill_source.update", str(row.id))
     return {"code": 0, "data": source_out(row)}
 
 
@@ -370,7 +373,7 @@ async def create_skill(
     await apply_skill(session, row, body, request)
     session.add(row)
     await session.flush()
-    await audited(session, actor, "skill.create", str(row.id))
+    await audited(session, request, actor, "skill.create", str(row.id))
     return {"code": 0, "data": skill_out(row)}
 
 
@@ -388,7 +391,7 @@ async def update_skill(
         raise not_found("技能不存在")
     require_if_match(request, row.revision)
     await apply_skill(session, row, body, request)
-    await audited(session, actor, "skill.update", str(row.id))
+    await audited(session, request, actor, "skill.update", str(row.id))
     return {"code": 0, "data": skill_out(row)}
 
 
@@ -445,7 +448,7 @@ async def put_preset(
         session.add(row)
     row.label, row.tags = body.label, body.tags
     row.vars_enc, row.updated_at = encrypt_json(cipher, values, PRESET_AAD), utcnow()
-    await audited(session, actor, "env_preset.save", key)
+    await audited(session, request, actor, "env_preset.save", key)
     return {
         "code": 0,
         "data": {

@@ -138,7 +138,7 @@ async def test_kick_fuse_stops_reconnecting() -> None:
 
 
 async def test_errcode_events_and_connection_takeover() -> None:
-    """补齐 Task 11 要用的其余契约：错误响应包、事件帧、主动推送记录、新连接顶掉旧连接。"""
+    """补齐网关要用的其余契约：错误响应包、事件帧、主动推送记录、新连接顶掉旧连接。"""
     fake = FakeWeComWs(accepted={"bot1": "sec"})
     url = await fake.start()
     errs: list = []

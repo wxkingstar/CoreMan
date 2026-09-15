@@ -1,4 +1,4 @@
-"""通讯录归并（spec §5.1 归并规则）。一次 apply = 一个事务。"""
+"""通讯录归并。一次 apply = 一个事务。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class SyncStats:
 
 
 def _login_name_for(u: DirectoryUser) -> str:
-    """裁决 4：邮箱前缀（parse_wecom_directory 已把 biz_mail 兜底进 email），没有邮箱用平台 userid。
+    """login_name：邮箱前缀（parse_wecom_directory 已把 biz_mail 兜底进 email），否则用平台 userid。
 
     冲突（与他人 login_name 重复）由调用方处理：留空并记入 SyncStats.login_name_conflicts。
     """

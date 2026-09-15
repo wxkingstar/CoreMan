@@ -219,7 +219,7 @@ async def test_claude_catalog_additions_and_retirements_override_old_discovery(c
         )
         assert response.status_code == 201, response.text
     response = await client.patch(
-        "/api/admin/model-catalog/claude/vllm/claude-opus-4-6", json={"retired": True}
+        "/api/admin/model-catalog/claude/claude-opus-4-6", json={"retired": True}
     )
     assert response.status_code == 200, response.text
     for installed in [True, False, True]:
@@ -230,7 +230,7 @@ async def test_claude_catalog_additions_and_retirements_override_old_discovery(c
                 "version": "test",
                 "service_status": "foreground",
                 "codex": {},
-                "claude": {"installed": installed, "models": ["vllm/claude-opus-4-6"]},
+                "claude": {"installed": installed, "models": ["claude-opus-4-6"]},
             },
         )
         assert response.status_code == 200, response.text
@@ -239,7 +239,7 @@ async def test_claude_catalog_additions_and_retirements_override_old_discovery(c
             "effective_models"
         ]
         assert ("claude-sonnet-5" in models) == installed
-        assert "vllm/claude-opus-4-6" not in models
+        assert "claude-opus-4-6" not in models
         assert "minimax/new" not in models
 
 

@@ -11,7 +11,9 @@ from coreman.api.security import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, unsig
 from coreman.core.db.models import AdminSession, AuditLog, User
 
 
-async def _login(client: httpx.AsyncClient, password: str = "pass-1234") -> httpx.Response:
+async def _login(
+    client: httpx.AsyncClient, password: str = "pass-1234-bootstrap"
+) -> httpx.Response:
     return await client.post(
         "/api/auth/bootstrap", json={"username": "admin", "password": password}
     )

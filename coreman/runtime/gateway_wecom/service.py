@@ -1,4 +1,4 @@
-"""gateway-wecom 进程（spec §4.1、§6.5、§7.3）：租约、连接、入站、推送、排空。
+"""gateway-wecom 进程：租约、连接、入站、推送、排空。
 
 进程内五条后台协程，各管一件事：
 
@@ -33,15 +33,17 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import BotLease
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.runtime.base import HEALTH_PORTS, Service
+from coreman.runtime.gateway_common import drain as drain_pacing
 from coreman.runtime.gateway_common.lease_loop import LeaseCoordinator
 from coreman.runtime.gateway_wecom.runner import BotInfo, BotRunner, load_bot_info
 from coreman.runtime.gateway_wecom.ws_client import DEFAULT_WS_CONFIG, WsConfig
 
 PLATFORM = "wecom"
 CHANNELS = ("stream_updated", "outbox_added", "lease_changed", "config_changed")
-# 排空并发 1、间隔 3 秒（spec §6.5）：同时断一片连接会把下游的重连全挤在一个瞬间。
-DRAIN_GAP_SECONDS = 3.0
-# 踢线熔断后多久才允许重新认领这个 bot（spec §6.5「停止重连该 bot 30 秒」）。
+# 批与批间隔 3 秒：同时断一片连接会把下游的重连全挤在一个瞬间；
+# 每批几个按剩余时间动态算，见 `gateway_common.drain`。
+DRAIN_GAP_SECONDS = drain_pacing.DRAIN_GAP_SECONDS
+# 踢线熔断后多久才允许重新认领这个 bot。
 KICK_COOLDOWN_SECONDS = 30.0
 # 退出前等在途推送 / 出站收尾的上限（回执超时是 10 秒，留一点余量）。
 INFLIGHT_SETTLE_SECONDS = 15.0
@@ -155,6 +157,8 @@ class GatewayWecomService(Service):
         self.ready = True
 
     async def on_shutdown(self) -> None:
+        # 宽限从收到停机信号算起（compose stop_grace_period 同值）：等在途推送的时间也要算进去。
+        deadline = time.monotonic() + drain_pacing.shutdown_budget(self._stop_grace)
         self.draining = True
         self.ready = False
         # 先停循环再排空：否则租约扫描会在排空的间隙里把刚放手的 bot 又认领回来。
@@ -162,7 +166,7 @@ class GatewayWecomService(Service):
             job.cancel()
         await asyncio.gather(*self._bg, return_exceptions=True)
         await self._settle_inflight()
-        await self._drain_all()
+        await self._drain_all(deadline)
         try:
             async with self.factory() as session:
                 await instances.mark_stopped(session, self.instance_id)
@@ -174,18 +178,18 @@ class GatewayWecomService(Service):
 
     # ---- 排空 -------------------------------------------------------------
 
-    async def _drain_all(self) -> None:
-        deadline = time.monotonic() + self._stop_grace
-        for index, bot_id in enumerate(list(self.runners)):
-            if index and time.monotonic() + DRAIN_GAP_SECONDS < deadline:
-                await asyncio.sleep(DRAIN_GAP_SECONDS)
-            if time.monotonic() > deadline:
-                self._log.warning("drain_deadline_exceeded", left=len(self.runners))
-                return
-            await self.drain_bot(bot_id)
+    async def _drain_all(self, deadline: float | None = None) -> None:
+        """整实例排空：分批错开、批内并发，在 `deadline`（默认宽限期）前排完。"""
+        if deadline is None:
+            deadline = time.monotonic() + drain_pacing.shutdown_budget(self._stop_grace)
+        left = await drain_pacing.drain_in_batches(
+            list(self.runners), self.drain_bot, deadline=deadline, gap=DRAIN_GAP_SECONDS
+        )
+        if left:
+            self._log.warning("drain_deadline_exceeded", left=len(left))
 
     async def drain_bot(self, bot_id: uuid.UUID) -> None:
-        """单 bot 排空（spec §6.5）：① 停出站 ② 流补 finish ③ 关 WS ④ 释放租约 ⑤ 通知。
+        """单 bot 排空：① 停出站 ② 流补 finish ③ 关 WS ④ 释放租约 ⑤ 通知。
 
         同一个 bot 并发进来只排一次，扫描也不会趁排空的间隙提前交还租约
         （见 `LeaseCoordinator.drain`）。

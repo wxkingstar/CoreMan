@@ -1,6 +1,6 @@
 # CoreMan Runtime Daemon
 
-一个独立的系统用户环境安装一个 Daemon，可同时提供 Claude Code 与 Codex。Daemon 主动连接 CoreMan；目标机器无需开放入站端口。Claude 只保留 v1。
+一个独立的系统用户环境安装一个 Daemon，可同时提供 Claude Code 与 Codex。Daemon 主动连接 CoreMan；目标机器无需开放入站端口。
 
 ## 系统要求
 
@@ -21,7 +21,7 @@
 
 安装脚本的顺序是：下载并校验安装包 → 解包到 `stage-*` 临时目录 → 在 `release-*` 目录建 venv → 注册系统服务 → **服务管理器接受后**才写入 `config.json` → 启动并等待上线。任何一步失败都会删除本次的 `release-*`、`ca.pem` 与 `config.json`，可以直接重新运行同一条安装命令；只有“服务已注册但 60 秒内未确认上线”会保留安装，此时修复后重启服务即可。
 
-已安装 Codex 的 Daemon 后端继承后台 `codex` 模型目录中未退役的模型，新增模型无需更新本机驱动；旧节点在下一次心跳时自动应用。Claude 后端在心跳时同步目录中的原生 Claude 模型（`claude-` 或兼容的 `vllm/claude-` 前缀），过滤已退役模型，不自动纳入 MiniMax/Kimi 等第三方模型。驱动上报的模型用于发现和补充目录，不作为账号白名单。目录配置不代表账号已获该模型权限，实际调用由 CLI 校验。未安装对应 CLI 时模型列表为空；普通中继的模型限制规则不变。
+已安装 Codex 的 Daemon 后端继承后台 `codex` 模型目录中未退役的模型，新增模型无需更新本机驱动；旧节点在下一次心跳时自动应用。Claude 后端在心跳时同步目录中的原生 Claude 模型（`claude-` 开头；早期版本预置的 `vllm/claude-` 目录项也会被识别），过滤已退役模型，不自动纳入 MiniMax/Kimi 等第三方模型。驱动上报原生 Claude Code 模型名，调用时会去掉模型名中 `/` 之前的前缀再传给 CLI。驱动上报的模型用于发现和补充目录，不作为账号白名单。目录配置不代表账号已获该模型权限，实际调用由 CLI 校验。未安装对应 CLI 时模型列表为空。
 
 首次 curl 下载使用调用者的 curl 网络环境；下载后 CoreMan 连接使用表单中显式配置的连接代理，默认直连。AI 请求代理独立配置。CoreMan 地址须可从目标环境访问，正式部署使用 HTTPS。
 
@@ -46,7 +46,7 @@ Daemon 每次启动把随包 certifi 根证书、系统 CA 文件（OpenSSL 编�
 - macOS 使用 `~/Library/LaunchAgents/org.coreman.runtime.plist`，依附当前用户的 launchd 域。登录会话的自动启动不等于无人登录开机启动。手工重启：`launchctl kickstart -k gui/$(id -u)/org.coreman.runtime`。
 - 无用户服务管理器的 chroot/nspawn 使用监督进程。安装器输出 `~/.local/share/coreman-runtime/supervise.sh`；需要宿主机服务管理器托管该入口才能保证重启后启动。
 - 后台「排空任务」停止接收新的 POST 任务，已有任务继续；「关闭启用」同时撤销节点接单能力并取消在途请求。排空结束后再停止服务或升级。
-- Git/Skill/MCP、记忆同步和额度/健康探测沿用项目 Agent。Codex 额度直接向 CLI 查询。Claude 额度 statusLine 探针是可选项，在安装链接中勾选，或在 `config.json` 设置 `install_claude_probe: true` 后重启服务。启用时先备份 settings，再把 statusLine 指向 `~/.cache/claude_rate_limits/capture.sh`；该脚本记下 Claude 传入的额度后，把同一份输入交给原状态栏命令，原状态栏照常显示。守护进程每 30 分钟启动一次短暂的 Claude 交互会话来刷新额度；Claude Code 只在订阅账号的 statusLine 输入中提供额度字段。未启用时不排 Claude 额度探测。
+- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。Codex 额度直接向 CLI 查询。Claude 额度 statusLine 探针是可选项，在安装链接中勾选，或在 `config.json` 设置 `install_claude_probe: true` 后重启服务。启用时先备份 settings，再把 statusLine 指向 `~/.cache/claude_rate_limits/capture.sh`；该脚本记下 Claude 传入的额度后，把同一份输入交给原状态栏命令，原状态栏照常显示。守护进程每 30 分钟启动一次短暂的 Claude 交互会话来刷新额度；Claude Code 只在订阅账号的 statusLine 输入中提供额度字段。未启用时不排 Claude 额度探测。
 
 ### 退出码
 
@@ -142,7 +142,7 @@ rm -rf "$TOOL"
 
 ## 发布与开发
 
-CoreMan 数据库升级到 Alembic `0018_runtime_nodes`。API 镜像构建会生成四个安装包并包含安装脚本与会话查看模板。手工运行 API 时先构建：
+运行时节点要求 CoreMan 数据库已迁移到最新版本（`alembic upgrade head`，`deploy/coreman up` / `upgrade` 会自动执行）。API 镜像构建会生成四个安装包并包含安装脚本与会话查看模板。手工运行 API 时先构建：
 
 ```sh
 python3 runtime_daemon/build.py
@@ -158,9 +158,9 @@ python3 runtime_daemon/build.py
 
 管理端通过 PostgreSQL 暂存加密的请求/响应片段，支持多个 API 副本与独立 worker。Daemon 每 0.5 秒轮询任务、10 秒发送心跳；超过 45 秒无心跳视为离线。命令领取后不自动重放，避免网络故障导致重复执行。流式响应有序、限量并支持背压；断开消费者会取消任务，Go 驱动清理 CLI 进程组。
 
-## 代码来源与能力
+## 组件与许可
 
-Go 驱动版本及来源快照记录在 `drivers/SOURCE.json`，原 MIT 许可证保留在 `drivers/LICENSE`，发布包随附许可文本。
+Go 驱动基于开源项目 clawrelay-api 修改，上游快照记录在 `drivers/SOURCE.json`，上游 MIT 许可证保留在 `drivers/LICENSE`，发布包随附该许可文本。详见 [第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 - Claude Code / Codex：请求转换、流式输出、会话续接、取消、工具事件与用量。
 - Agent：受限工作区内的 Git、技能和 MCP 操作、记忆同步、健康与额度探测。
@@ -169,6 +169,6 @@ Go 驱动版本及来源快照记录在 `drivers/SOURCE.json`，原 MIT 许可�
 
 ## 验证范围
 
-数据库注册/撤销/禁用、重复领取、加密流、响应去重、取消、目录逃逸和子进程终止均有测试。部署相关的单元测试覆盖：私有 CA 信任链（本地 HTTPS 服务）、socket 目录选择与驱动自愈、日志轮转、注册 4xx 的退出码、服务注册失败回滚、升级切换与回滚、卸载保留/清除，以及在符号链接 `$HOME` 下真实运行 `install.sh`（替身服务注册，不触碰本机 launchd/systemd）。原 Go 驱动套件、前端套件及原 Agent 套件继续执行。端到端测试启动真实 Daemon、Go 二进制、API 与 PostgreSQL，AI CLI 使用隔离替身，不调用真实账户。
+数据库注册/撤销/禁用、重复领取、加密流、响应去重、取消、目录逃逸和子进程终止均有测试。部署相关的单元测试覆盖：私有 CA 信任链（本地 HTTPS 服务）、socket 目录选择与驱动自愈、日志轮转、注册 4xx 的退出码、服务注册失败回滚、升级切换与回滚、卸载保留/清除，以及在符号链接 `$HOME` 下真实运行 `install.sh`（替身服务注册，不触碰本机 launchd/systemd）。Go 驱动、前端与 Agent 各自的测试套件同样纳入持续集成。端到端测试启动真实 Daemon、Go 二进制、API 与 PostgreSQL，AI CLI 使用隔离替身，不调用真实账户。
 
-四种架构通过交叉构建；本机 macOS ARM64 通过 Daemon 联调。Linux、macOS 的真实系统服务自启、升级/卸载命令对真实 systemd/launchd 的调用，以及现有 chroot/nspawn 宿主托管仍需在实际目标机器验收，测试不会修改开发者机器的登录项或已有服务。
+四种架构通过交叉构建；本机 macOS ARM64 通过 Daemon 联调。Linux、macOS 的真实系统服务自启、升级/卸载命令对真实 systemd/launchd 的调用，以及 chroot/nspawn 宿主托管，请在实际目标机器上验证；测试不会修改开发者机器的登录项或已有服务。

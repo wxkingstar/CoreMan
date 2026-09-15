@@ -1,6 +1,6 @@
 """推送关联表：把发出去的 req_id 记下来，等企微回错误码时能反查出这是哪一次推送。
 
-企微的错误响应包只有 `errcode/errmsg/headers.req_id`（平台协议 §3.2），日志里孤零零
+企微的错误响应包只有 `errcode/errmsg/headers.req_id`，日志里孤零零
 一个 6000/846608 根本没法定位是哪条流、哪个动作。发送侧每次推送都 `put` 一条，收到错误码时
 `lookup` 把 `action/stream_id/extra/age` 一起打进 WARNING——这是线上排查这类问题的唯一线索。
 

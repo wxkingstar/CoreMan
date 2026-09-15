@@ -1,4 +1,4 @@
-"""企业微信智能机器人 WebSocket 长连接客户端（移植 平台协议 §3.1，常量见 spec §17.2）。
+"""企业微信智能机器人 WebSocket 长连接客户端。
 
 一条连接 = 一个机器人（`bot_id` + `secret` 订阅）。除了收发帧，这个类还扛着四件线上被反复
 验证过的事：
@@ -47,7 +47,7 @@ ConnectFactory = Callable[[str], AbstractAsyncContextManager[ClientConnection]]
 
 @dataclass(frozen=True)
 class WsConfig:
-    """长连接的全部时间常量（spec §17.2 默认值；测试可整体缩短）。"""
+    """长连接的全部时间常量（默认值；测试可整体缩短）。"""
 
     url: str = WS_URL
     ping_interval: float = 30.0

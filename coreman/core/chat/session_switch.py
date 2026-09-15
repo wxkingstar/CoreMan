@@ -1,4 +1,4 @@
-"""`sessions` / `会话列表` 多会话切换（spec §8.2 步骤 4；使用平台默认文案）。
+"""`sessions` / `会话列表` 多会话切换（使用平台默认文案）。
 
 历史会话不另建表：`chat_logs` 里每条消息都记了当时用的 `relay_session_id`，按它分组就是
 「这个会话键跟这个机器人聊过哪几轮」。预览取该会话最早的一条文本消息——最早那句通常
@@ -85,7 +85,7 @@ async def recent_sessions(
     """最近 N 个 relay 会话（当前 relay 或未记录 relay 的），每个取最早一条文本消息的前 30 字。
 
     只列当前 relay 上的会话：relay 会话 id 是那台实例自己的，切到别的实例上的旧会话等于
-    切到一个不存在的 id。`relay_server_id IS NULL` 的老行一并放行——M2 之前没记这一列，
+    切到一个不存在的 id。`relay_server_id IS NULL` 的老行一并放行——早期版本没记这一列，
     把它们全挡掉等于说「你从没聊过天」。
     """
     last_at = func.max(ChatLog.request_at).label("last_at")

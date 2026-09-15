@@ -27,7 +27,7 @@ async function testAccess(row: BusinessSystem) {
   } catch (e) { fail(e) }
   finally { testing.value = null }
 }
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null })
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
 const form = reactive(empty())
 function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
@@ -42,7 +42,8 @@ async function load() {
 async function edit(row: BusinessSystem | null) {
   editing.value = row
   Object.assign(form, row ? { ...row, allowed_bot_ids: row.allowed_bot_ids ? [...row.allowed_bot_ids] : null } : empty())
-  restricted.value = !!row && row.allowed_bot_ids !== null
+  // 新建默认限定且名单为空：发言者令牌会注入 AI 员工的运行环境，对全部员工开放须管理员主动关闭限定
+  restricted.value = !row || row.allowed_bot_ids !== null
   visible.value = true
   try {
     const all: BotOut[] = []
@@ -108,6 +109,21 @@ onMounted(load)
         prop="base_url"
         :label="t('infra.baseUrl')"
       />
+      <el-table-column
+        min-width="160"
+        :label="t('infra.botScope')"
+      >
+        <template #default="{ row }">
+          <el-tag
+            v-if="row.allowed_bot_ids === null"
+            data-test="open-to-all"
+            type="warning"
+          >
+            {{ t('infra.openToAllBots') }}
+          </el-tag>
+          <span v-else>{{ t('infra.restrictedCount', { n: row.allowed_bot_ids.length }) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column
         min-width="140"
         :label="t('infra.status')"
@@ -190,6 +206,11 @@ onMounted(load)
         </el-form-item>
         <el-form-item :label="t('infra.restrictBots')">
           <el-switch v-model="restricted" />
+          <small
+            v-if="!restricted"
+            data-test="open-to-all-warning"
+            class="open-warning"
+          >{{ t('infra.openToAllWarning') }}</small>
         </el-form-item>
         <el-form-item
           v-if="restricted"
@@ -228,4 +249,4 @@ onMounted(load)
     </el-dialog>
   </section>
 </template>
-<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px }</style>
+<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px } .open-warning { display:block; width:100%; color:var(--el-color-warning) }</style>

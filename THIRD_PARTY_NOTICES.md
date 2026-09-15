@@ -4,11 +4,11 @@
 
 ## Runtime Go 驱动
 
-`runtime_daemon/drivers/` 包含衍生的 clawrelay-api 驱动代码。
+`runtime_daemon/drivers/` 中的 Go 驱动（`relay-claude`、`relay-codex` 及 `pkg/`）基于开源项目 clawrelay-api 修改而来，Go 模块名仍为 `clawrelay-api`。CoreMan 对这些文件的修改同样以 MIT 许可证发布。
 
 - 版权：Copyright (c) 2025 roodkcab。
 - 许可证：[MIT 原文](runtime_daemon/drivers/LICENSE)。
-- 导入版本与逐文件摘要：[SOURCE.json](runtime_daemon/drivers/SOURCE.json)。该文件记录导入时来源快照，不代表后续修改后的文件摘要。
+- 导入版本（上游 revision）与逐文件摘要：[SOURCE.json](runtime_daemon/drivers/SOURCE.json)。该文件记录导入时的上游快照，不代表后续修改后的文件摘要。
 - Runtime 安装包构建会附带 `LICENSE.clawrelay`。
 
 ## 模型提供商图标

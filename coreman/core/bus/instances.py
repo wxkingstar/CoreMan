@@ -1,4 +1,4 @@
-"""process_instances 读写（spec §5.4、§6.2 排空）。"""
+"""process_instances 读写（含排空）。"""
 
 from __future__ import annotations
 

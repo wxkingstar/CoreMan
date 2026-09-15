@@ -21,7 +21,7 @@ def test_msg_format_and_fallback() -> None:
     assert msg("help").startswith("📖 **命令列表**")
 
 
-# 媒体 / 引用消息文案（spec §8.2 步骤 6-7）：zh 默认文案，两套 locale 都必须齐。
+# 媒体 / 引用消息文案：zh 默认文案，两套 locale 都必须齐。
 MEDIA_KEYS = {
     "media_prompt_image",
     "media_prompt_images",

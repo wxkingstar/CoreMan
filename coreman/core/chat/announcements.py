@@ -1,4 +1,4 @@
-"""公告匹配（spec §8.2 步骤 2）：bot > relay > global，启用且在时间窗内，同级取最新。"""
+"""公告匹配：bot > relay > global，启用且在时间窗内，同级取最新。"""
 
 from __future__ import annotations
 

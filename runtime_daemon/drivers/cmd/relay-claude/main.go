@@ -35,15 +35,16 @@ var version = "2.2.0"
 // 1.1.6-not-in-repo incident made version numbers alone untrustworthy).
 var buildCommit = "unknown"
 
-var defaultModel = "vllm/claude-sonnet-4-6"
+var defaultModel = "claude-sonnet-4-6"
 
 // availableModels is what /v1/models returns. Extend as needed; the relay
 // passes any unknown model through to claude (so adding here is purely
-// cosmetic / discovery for clients).
+// cosmetic / discovery for clients). IDs are native Claude Code model names;
+// resolveModel still strips any "provider/" prefix a client sends.
 var availableModels = []openai.ModelInfo{
-	{ID: "vllm/claude-sonnet-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
-	{ID: "vllm/claude-opus-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
-	{ID: "vllm/claude-haiku-4-5-20251001", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-sonnet-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-opus-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-haiku-4-5-20251001", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
 }
 
 var modelAliases = map[string]string{

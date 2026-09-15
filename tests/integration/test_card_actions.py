@@ -1,4 +1,4 @@
-"""企微模板卡片回调的语义处理（spec §8.7 投票卡片、§8.8 限流切换卡片）。"""
+"""企微模板卡片回调的语义处理（投票卡片、限流切换卡片）。"""
 
 import uuid
 from datetime import UTC, datetime, timedelta

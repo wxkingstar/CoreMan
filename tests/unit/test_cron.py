@@ -110,7 +110,7 @@ async def test_partial_cron_reply_is_not_success(finish):
 
 
 def test_precheck_rebinding_large_value_is_not_quadratic() -> None:
-    # 旧实现对每个表达式结果都整体遍历 + 序列化：这段 18000 步的脚本要跑几十秒。
+    # 若对每个表达式结果都整体遍历 + 序列化，这段 18000 步的脚本要跑几十秒。
     script = (
         "def should_trigger(ctx):\n"
         " big = range(10000)\n"
@@ -188,6 +188,44 @@ async def test_precheck_abandons_stuck_thread_up_to_cap(monkeypatch: pytest.Monk
             break
         await asyncio.sleep(0.01)
     assert precheck.abandoned_threads() == 0
+
+
+async def test_oversized_cron_reply_is_truncated_not_failed(monkeypatch) -> None:
+    from coreman.core.relay.sse import FinishEvent, TextDelta, UsageEvent
+    from coreman.runtime.worker import cron_handler
+    from coreman.runtime.worker.cron_handler import CronRunHandler
+
+    monkeypatch.setattr(cron_handler, "RESULT_MAX_CHARS", 10)
+
+    async def stream():
+        yield TextDelta("123456")
+        yield TextDelta("789abcdef")
+        yield TextDelta("never kept")
+        yield UsageEvent(5, 7, 0, 0)
+        yield FinishEvent("stop")
+
+    reply, usage, _tools, truncated = await CronRunHandler()._consume(stream())
+    # 超限之后照样把流收完：终态与用量都在后面。
+    assert reply == "123456789a" and truncated and usage is not None and usage.output_tokens == 7
+
+    async def short():
+        yield TextDelta("ok")
+        yield FinishEvent("stop")
+
+    assert (await CronRunHandler()._consume(short()))[::3] == ("ok", False)
+
+
+def test_bounded_delivery_chunks_cap_parts_and_append_notice() -> None:
+    from coreman.core.cron.delivery import bounded_chunks, chunks
+
+    assert bounded_chunks("短内容", 20, 3, "…截断") == chunks("短内容", 20)
+    text = "报表数据" * 500
+    parts = bounded_chunks(text, 64, 4, "…截断")
+    assert len(parts) <= 4 and all(len(p.encode()) <= 64 for p in parts)
+    joined = "".join(parts)
+    assert joined.endswith("…截断") and text.startswith(joined[: -len("…截断")])
+    with pytest.raises(ValueError):
+        bounded_chunks(text, 4, 1, "…很长很长的截断提示")
 
 
 async def test_cron_stream_classification_keeps_relay_reason() -> None:

@@ -1,4 +1,4 @@
-"""机器人（spec §5.2：bots、bot_members、bot_allowed_users；skills / system_grants 在 M3/M5）。"""
+"""机器人：bots、bot_members、bot_allowed_users。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class Bot(TimestampMixin, Base):
         # 唯一约束在这里给全名（不再在列上写 unique=True），保证 alembic check 只看到一个同名约束。
         UniqueConstraint("bot_key", name="uq_bots_bot_key"),
         Index("bots_relay_idx", "relay_server_id"),
-        # M1b 漏建：这两列都是外键，级联删除与「我创建的机器人」列表都要走它们（迁移 0004 补）。
+        # 早先漏建：这两列都是外键，级联删除与「我创建的机器人」列表都要走它们（迁移 0004 补）。
         Index("bots_team_id_idx", "team_id"),
         Index("bots_created_by_idx", "created_by"),
     )
@@ -70,7 +70,7 @@ class Bot(TimestampMixin, Base):
     env_vars_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
     welcome_message: Mapped[str | None] = mapped_column(Text)
     notify_webhook_url: Mapped[str | None] = mapped_column(Text)
-    # 已停用的历史列，仅兼容现有数据库；不再通过 API 配置或展示。
+    # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")
     )
@@ -80,7 +80,7 @@ class Bot(TimestampMixin, Base):
 
 
 class BotMember(Base):
-    """bot 管理员；创建者不入此表（spec §5.2）。"""
+    """bot 管理员；创建者不入此表。"""
 
     __tablename__ = "bot_members"
     __table_args__ = (
@@ -99,7 +99,7 @@ class BotMember(Base):
 
 
 class BotAllowedUser(Base):
-    """bot 白名单；空表 = 不限制（spec §5.2）。"""
+    """bot 白名单；空表 = 不限制。"""
 
     __tablename__ = "bot_allowed_users"
     __table_args__ = (PrimaryKeyConstraint("bot_id", "user_id"),)

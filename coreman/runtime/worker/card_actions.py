@@ -1,4 +1,4 @@
-"""card_action 任务处理器：企微模板卡片事件的语义处理（spec §8.7、§8.8 的卡片部分）。
+"""card_action 任务处理器：企微模板卡片事件的语义处理（投票卡片与限流切换卡片）。
 
 所有应答都写 outbox(card_update)——网关 5 秒内以事件的 req_id 更新卡片；错过窗口的应答
 被企微丢弃，用户再点一次会带来新的 req_id，届时状态已变（已答/已提交/已过期），照样应答。
@@ -289,7 +289,7 @@ class CardActionHandler:
         speaker: str,
         icon: str,
     ) -> str:
-        """限流切换卡片：继续等，还是排一个切换任务（spec §8.8）。"""
+        """限流切换卡片：继续等，还是排一个切换任务。"""
 
         async def notice(title_key: str, desc_key: str, **kw: object) -> None:
             await self._reply_card(

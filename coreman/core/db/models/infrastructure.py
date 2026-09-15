@@ -1,4 +1,4 @@
-"""M3b：系统授权、调用方凭证与 ES256 密钥。"""
+"""系统授权、调用方凭证与 ES256 密钥。"""
 
 from __future__ import annotations
 
@@ -56,6 +56,10 @@ class BotSystemGrant(Base):
 
 
 class SystemGrantAudit(Base):
+    """已弃用：原先只写不读，现已停止写入，授权变更以 audit_logs 的 bot.system_grants /
+    system.update 为准。映射只为让模型与迁移保持一致（alembic check），不从 models 包导出、
+    不得再读写；按 expand-only 规则表本身保留，下个版本随迁移一并删除。"""
+
     __tablename__ = "system_grant_audit"
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     bot_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)

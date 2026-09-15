@@ -89,10 +89,12 @@ services:
     logging: *logging
     restart: "no"
 
+  # API 只信任 edge 网段（仅 Caddy 与 API 加入）转发的客户端地址；同在 coreman 网络的其他容器
+  # 直连 8000 端口时伪造的 X-Forwarded-For 不生效，登录限流与审计 IP 才可信。
   api-1: &api
     image: coreman-api:${COREMAN_IMAGE_TAG:-dev}
     env_file: ${COREMAN_ENV_FILE:-.env}
-    environment: { COREMAN_INSTANCE_NAME: api-1 }
+    environment: { COREMAN_INSTANCE_NAME: api-1, FORWARDED_ALLOW_IPS: "${COREMAN_EDGE_SUBNET:-10.250.250.0/28}" }
     depends_on:
       migrate: { condition: service_completed_successfully }
       storage-init: { condition: service_completed_successfully }
@@ -103,11 +105,11 @@ services:
     restart: unless-stopped
     logging: *logging
     volumes: [storage:/data/storage]
-    networks: [coreman]
+    networks: [coreman, edge]
 
   api-2:
     <<: *api
-    environment: { COREMAN_INSTANCE_NAME: api-2 }
+    environment: { COREMAN_INSTANCE_NAME: api-2, FORWARDED_ALLOW_IPS: "${COREMAN_EDGE_SUBNET:-10.250.250.0/28}" }
 
   caddy:
     image: caddy:2
@@ -120,7 +122,8 @@ services:
     depends_on: [api-1, api-2]
     restart: unless-stopped
     logging: *logging
-    networks: [coreman]
+    # 只加入 edge：保证 Caddy 到 API 的连接一定来自受信网段。
+    networks: [edge]
 
   # 网关 a/b 同一时刻只有一侧活跃；b 侧放在 standby profile，由 deploy/coreman 按记录的活跃侧拉起。
   gateway-wecom-a:
@@ -213,3 +216,8 @@ volumes:
 
 networks:
   coreman: {}
+  # 固定网段才能在 API 启动时写进 FORWARDED_ALLOW_IPS；与现有网络冲突时在 .env 设 COREMAN_EDGE_SUBNET。
+  edge:
+    ipam:
+      config:
+        - subnet: "${COREMAN_EDGE_SUBNET:-10.250.250.0/28}"

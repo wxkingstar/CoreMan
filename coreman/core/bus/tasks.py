@@ -1,10 +1,10 @@
-"""tasks 表读写（spec §5.4、§6.2）。"""
+"""tasks 表读写。"""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -16,7 +16,7 @@ from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
 
-# 认领语句逐字取自 spec §6.2（只把 RETURNING * 收窄成 id，随后按主键取回 ORM 行）。
+# 认领语句只 RETURNING id，随后按主键取回 ORM 行。
 _CLAIM_SQL = text(
     """
 UPDATE tasks SET status='claimed', claimed_by=:instance, claimed_at=now(), heartbeat_at=now(),
@@ -182,6 +182,54 @@ async def active_for_session(
     return list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+
+
+async def defer(session: AsyncSession, task_id: int, *, seconds: float) -> bool:
+    """把已认领、未被请求取消的任务放回队列，`seconds` 秒后才能再被认领；返回是否命中。
+
+    不算失败、不写终态：下一次认领照常 attempts+1，调用方据此给重排次数封顶。
+    已被请求取消的不放回——那是用户 stop 或被更新的消息替代，应当按取消收尾。
+    """
+    row = (
+        await session.execute(
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.status.in_(ACTIVE),
+                Task.cancel_requested_at.is_(None),
+            )
+            .values(
+                status="queued",
+                claimed_by=None,
+                claimed_at=None,
+                started_at=None,
+                heartbeat_at=None,
+                run_after=func.now() + timedelta(seconds=max(seconds, 0.0)),
+            )
+            .returning(Task.lane, Task.bot_id)
+        )
+    ).first()
+    if row is None:
+        return False
+    await notify(session, "tasks_queued", {"lane": row[0], "bot_id": str(row[1])})
+    return True
+
+
+async def has_newer(
+    session: AsyncSession, bot_id: uuid.UUID, session_key: str, *, task_id: int, kind: str
+) -> bool:
+    """同会话里是否已有比 `task_id` 更晚入队的同类任务（不论状态）。"""
+    stmt = (
+        select(Task.id)
+        .where(
+            Task.bot_id == bot_id,
+            Task.session_key == session_key,
+            Task.kind == kind,
+            Task.id > task_id,
+        )
+        .limit(1)
+    )
+    return (await session.scalar(stmt)) is not None
 
 
 async def supersede(

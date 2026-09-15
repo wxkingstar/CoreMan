@@ -1,4 +1,4 @@
-"""提示词层：system prompt 三明治、请求级环境变量、用户输入消毒（spec §8.3）。
+"""提示词层：system prompt 三明治、请求级环境变量、用户输入消毒。
 
 `defaults` 只放字面量、不 import 任何 coreman 模块，`settings_schema` 才能 import 它
 拿默认值而不成环（本包的 `__init__` 不碰 settings_schema，同理）。

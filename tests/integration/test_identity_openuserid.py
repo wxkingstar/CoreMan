@@ -19,10 +19,10 @@ WO = "wo" + "A" * 40
 
 @pytest.fixture(autouse=True)
 def _fresh_token_cache() -> Iterator[None]:
-    """`wecom._TOKENS` 是进程级缓存：不清干净，`token_calls` 会被别的用例的令牌顶掉。"""
-    wecom._TOKENS.clear()
+    """令牌缓存与失败负缓存都是进程级的：不清干净，`token_calls` 会被别的用例的令牌顶掉。"""
+    wecom.clear_token_cache()
     yield
-    wecom._TOKENS.clear()
+    wecom.clear_token_cache()
 
 
 async def _app(session: AsyncSession, caps: list[str]) -> PlatformApp:

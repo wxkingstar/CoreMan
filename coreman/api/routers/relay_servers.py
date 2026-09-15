@@ -1,4 +1,4 @@
-"""运行时实例（spec §5.3 relay_servers）：列表、健康探测与目录预填、有效模型集。
+"""运行时实例（relay_servers）：列表、健康探测与目录预填、有效模型集。
 
 实例由运行时节点注册时自动创建（每个节点按 AI 类型各一行），管理台不再手工增删改。
 读：任何登录用户，但 `visibility='admins'` 的实例只对 ai_committee / platform_admin 可见；

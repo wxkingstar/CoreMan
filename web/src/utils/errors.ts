@@ -10,11 +10,11 @@ const MSG_PREFIX = /^(Value error|Assertion failed),\s*/
 /** 一条提示里最多列几项，其余折叠成「等 N 项」。 */
 const MAX_LISTED = 3
 /**
- * 乐观锁冲突的后端文案：`coreman/api/versioning.py::require_if_match`、StaleDataError 处理器
- * （`coreman/api/errors.py`）与换机领域服务（`coreman/core/bots/switch_relay.py`）。
- * 其它 409（工作目录被占用、飞书应用已分配、记录已存在）必须把后端原话给用户，不能一律当成并发冲突。
+ * 乐观锁冲突的专用业务码（`coreman/core/errors.py::VERSION_CONFLICT`）：`require_if_match`、
+ * StaleDataError 处理器与换机领域服务都用它。
+ * 其它 409（工作目录被占用、飞书应用已分配、记录已存在）code 仍是 409，必须把后端原话给用户，不能一律当成并发冲突。
  */
-const VERSION_CONFLICT = /已被(他人|其他操作)修改/
+export const VERSION_CONFLICT_CODE = 40901
 
 /** 字段名 → 界面上的表单标签。 */
 export type FieldLabels = Record<string, string>
@@ -67,5 +67,5 @@ export function errorMessage(e: unknown, labels?: FieldLabels): string {
 
 /** 只有乐观锁版本冲突才该提示「已被他人修改，请刷新」。 */
 export function isVersionConflict(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 409 && VERSION_CONFLICT.test(e.message)
+  return e instanceof ApiError && e.status === 409 && e.code === VERSION_CONFLICT_CODE
 }

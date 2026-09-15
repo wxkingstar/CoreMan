@@ -19,11 +19,15 @@ import httpx
 
 from coreman.core.db.models import RelayServer
 from coreman.core.relay.sse import SseEvent, SseParser
-from coreman.core.runtime_nodes.transport import ReverseTransport
+from coreman.core.runtime_nodes.transport import (
+    TOTAL_TIMEOUT_EXTENSION,
+    ReverseTransport,
+    RuntimeQueueTimeout,
+)
 
 _AUTH_MARKERS = ("not logged in", "/login", "401")
 
-# verbosity 档位到 relay settings.outputStyle 的映射；1 档不传 settings（spec §8.3）。
+# verbosity 档位到 relay settings.outputStyle 的映射；1 档不传 settings。
 VERBOSITY_OUTPUT_STYLES = {2: "verbosity-normal", 3: "verbosity-quiet", 4: "verbosity-silent"}
 
 
@@ -33,6 +37,10 @@ class RelayError(Exception):
 
 class IncompleteResultError(RelayError):
     """流正常读完，却既没有确认终态（finish_reason），也没有 relay 回传的错误。"""
+
+
+class RelayBusyError(RelayError):
+    """运行时节点满载：对话排队超过上限仍未开始执行（没有任何副作用）。"""
 
 
 @dataclass
@@ -49,7 +57,7 @@ class RelayHealth:
 
 @dataclass
 class ChatRequest:
-    """一次 relay 对话请求的全部输入（spec §8.3）。"""
+    """一次 relay 对话请求的全部输入。"""
 
     model: str
     system_prompt: str
@@ -230,8 +238,13 @@ class RelayClient:
         )
         deadline = time.monotonic() + total_timeout
         try:
+            # 声明总时限：经反向通道时节点满载可以排队，调用期限也按它算（直连 relay 忽略）。
             async with self._http.stream(
-                "POST", "/v1/chat/completions", json=request.to_body(), timeout=timeout
+                "POST",
+                "/v1/chat/completions",
+                json=request.to_body(),
+                timeout=timeout,
+                extensions={TOTAL_TIMEOUT_EXTENSION: total_timeout},
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread())[:500].decode(errors="replace")
@@ -247,6 +260,8 @@ class RelayClient:
             raise RelayError(f"SSE timeout: 总时长超过 {total_timeout:.0f} 秒") from exc
         except httpx.ReadTimeout as exc:
             raise RelayError(f"SSE timeout: {read_timeout:.0f} 秒无字节") from exc
+        except RuntimeQueueTimeout as exc:
+            raise RelayBusyError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise RelayError(f"连接失败: {type(exc).__name__}") from exc
         for event in parser.flush():

@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
@@ -108,9 +108,12 @@ async def health_report(
         target_type="bot",
         target_id=str(bot_id),
         diff={"report_id": [None, str(report_id)]},
+        ip=client_ip(request),
     )
     await session.commit()
     actor_id = actor.id
+    # 流结束时请求对象仍可用，但先取出 IP，完成审计与发起审计保持同一来源。
+    ip = client_ip(request)
 
     async def stream() -> AsyncIterator[str]:
         status = "failed"
@@ -268,6 +271,7 @@ async def health_report(
                             target_type="bot",
                             target_id=str(bot_id),
                             diff={"report_id": [None, str(report_id)], "status": [None, status]},
+                            ip=ip,
                         )
                         await audit_session.commit()
 

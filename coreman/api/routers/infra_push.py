@@ -36,7 +36,6 @@ class PushIn(BaseModel):
 
 
 @router.post("/api/infra/push")
-@router.post("/api/push")
 async def push(
     body: PushIn,
     client: ApiClient = Depends(PUSH),

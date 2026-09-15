@@ -1,4 +1,4 @@
-"""M0 基线：teams、users、admin_sessions、audit_logs、settings
+"""基线：teams、users、admin_sessions、audit_logs、settings
 
 Revision ID: 0001
 Revises:

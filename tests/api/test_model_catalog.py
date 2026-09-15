@@ -51,7 +51,7 @@ async def test_create_patch_default_and_delete(
     assert r.json()["data"]["retired"] is True and r.json()["data"]["is_default"] is False
     listed = await client.get("/api/admin/model-catalog", params={"provider": "claude"})
     rows = listed.json()["data"]
-    assert [x["model"] for x in rows if x["is_default"]] == ["vllm/claude-sonnet-4-6"]
+    assert [x["model"] for x in rows if x["is_default"]] == ["claude-sonnet-4-6"]
     deleted = await client.delete("/api/admin/model-catalog/claude/vllm%2Fclaude-new")
     assert deleted.status_code == 200
     missing = await client.patch("/api/admin/model-catalog/claude/nope", json={"retired": True})

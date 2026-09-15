@@ -9,12 +9,15 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     ChatRequest,
     IncompleteResultError,
+    RelayBusyError,
     RelayClient,
     RelayError,
 )
+from coreman.core.runtime_nodes.transport import TOTAL_TIMEOUT_EXTENSION, RuntimeQueueTimeout
 from coreman.runtime.gateway_wecom.ws_client import (
     DeliveryRejected,
     DeliveryUncertain,
@@ -76,6 +79,35 @@ def test_unconfirmed_partial_output_keeps_streamed_text() -> None:
     assert verdict.final_text.startswith("half answer\n\n")
 
 
+async def test_queue_timeout_surfaces_as_busy_and_declares_total_timeout() -> None:
+    seen: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions.get(TOTAL_TIMEOUT_EXTENSION))
+        raise RuntimeQueueTimeout("运行时繁忙：排队 120 秒仍未开始执行", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fake"
+    ) as http:
+        client = RelayClient("http://fake", http=http)
+        with pytest.raises(RelayBusyError, match="排队"):
+            [
+                e
+                async for e in client.chat_stream(
+                    ChatRequest("m", "s", "u", "/tmp", "s", "claude"), total_timeout=5400
+                )
+            ]
+    # 反向通道按这个总时限排队并计算调用期限
+    assert seen == [5400]
+
+
+def test_busy_runtime_is_classified_apart_from_connection_errors() -> None:
+    verdict = _classify("", Outcome(error=RelayBusyError("运行时繁忙：排队 120 秒仍未开始执行")))
+    assert verdict.error_code == "runtime_busy" and verdict.task_status == "failed"
+    assert verdict.final_text == msg("runtime_busy", "zh", relay="test")
+    assert "排队" in (verdict.error_message or "")
+
+
 def test_transport_error_stays_generic() -> None:
     verdict = _classify("", Outcome(error=RelayError("连接失败: ConnectError")))
     assert verdict.error_code == "RelayError" and verdict.task_status == "failed"
@@ -114,12 +146,24 @@ async def test_supersede_does_not_continue_while_victim_runs(monkeypatch):
         async def __aexit__(self, *args):
             pass
 
-    monkeypatch.setattr(chat_handler.tasks, "get", AsyncMock(return_value=NS(status="running")))
+    active = AsyncMock(return_value=[NS(id=7), NS(id=9), NS(id=12)])
+    monkeypatch.setattr(chat_handler.tasks, "active_for_session", active)
     handler = ChatTaskHandler()
-    handler.SUPERSEDE_POLLS = 1
+    handler.SUPERSEDE_WAIT_SECONDS = 0
     handler.SUPERSEDE_POLL_SECONDS = 0
+
+    def ctx(cancelled: bool = False):  # type: ignore[no-untyped-def]
+        event = asyncio.Event()
+        if cancelled:
+            event.set()
+        return NS(session_factory=Session, log=Mock(), task=NS(id=9), cancel_event=event)
+
+    # 更早的 7 还活着：等满上限就交给调用方重排；更晚的 12 会反过来替代本任务，不等它。
     with pytest.raises(TimeoutError, match="session_busy"):
-        await handler._wait_superseded(NS(session_factory=Session, log=Mock()), [7])
+        await handler._wait_superseded(ctx(), uuid.uuid4(), "s")
+    assert await handler._wait_superseded(ctx(cancelled=True), uuid.uuid4(), "s") is False
+    active.return_value = [NS(id=9), NS(id=12)]
+    assert await handler._wait_superseded(ctx(), uuid.uuid4(), "s") is True
 
 
 def ws_client():

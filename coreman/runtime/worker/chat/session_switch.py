@@ -1,4 +1,4 @@
-"""会话列表与序号切换（spec §8.2 步骤 4）：都不进 AI、不落 chat_logs。"""
+"""会话列表与序号切换：都不进 AI、不落 chat_logs。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class SessionSwitchStage(ChatStageBase):
     """sessions 列表与 5 分钟内的序号切换。"""
 
     async def _sessions(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
-        """`sessions` 列表与 5 分钟内的序号切换（spec §8.2 步骤 4）；都不进 AI、不落 chat_logs。
+        """`sessions` 列表与 5 分钟内的序号切换；都不进 AI、不落 chat_logs。
 
         作用域是会话而不是发言者：群里切的是「这个群用哪条 relay 会话」，一个人切完全群
         跟着走，各人各一份反而会让同一个群分裂成几条上下文。

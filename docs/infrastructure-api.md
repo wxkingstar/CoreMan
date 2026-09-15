@@ -1,15 +1,17 @@
-# 基础设施接口（M3b）
+# 基础设施接口
 
-新路径以 `/api/infra` 开头；旧别名保留。请求签名使用实际调用路径，不能拿新路径的签名调用旧路径。API 调用方在管理台创建，密钥只显示一次，启用状态与 scope 每次检查。
+基础设施接口供外部业务系统与 AI 员工的技能调用：读取组织通讯录、向会话推送消息、通知员工、测试业务系统授权、上报运行时健康等。
 
-| Scope | 新路径 | 旧别名 |
+新路径以 `/api/infra` 开头；仍有技能在用的少数兼容别名保留，其余旧路径已移除。请求签名使用实际调用路径，不能拿新路径的签名调用旧路径。API 调用方在管理台创建，密钥只显示一次，启用状态与 scope 每次检查。
+
+| Scope | 新路径 | 兼容别名 |
 |---|---|---|
-| org | GET `/api/infra/org/members`、`tree`、`full` | `/api/robot/organization/members`、`tree`；`/api/organization/full` |
+| org | GET `/api/infra/org/members`、`tree`、`full` | `/api/robot/organization/members` |
 | relay | POST `/api/infra/relay/rate-limits`、`health` | — |
 | relay | GET `/api/infra/relay/servers` | `/api/robot/clawrelay-servers` |
-| push | POST `/api/infra/push` | `/api/push` |
-| notify | POST `/api/infra/notify/user` | `/api/robot/wework-notify` |
-| systems | POST `/api/infra/systems/test-access` | `/api/test/bot-token-access` |
+| push | POST `/api/infra/push` | — |
+| notify | POST `/api/infra/notify/user` | — |
+| systems | POST `/api/infra/systems/test-access` | — |
 
 头：`X-App-Key`、`X-Timestamp`（秒，±600 秒）、`X-Signature`。算法是 SHA256(`METHOD + path + params + timestamp + app_key + app_secret`)；path 去掉前导 `/`，query 与 body 合并排序，PHP urlencode 编码标量键值，标量数组展开 `key[0]=value`，嵌套结构跳过。签名兼容旧规则，业务字段仍单独验证。密钥轮换即时使旧签名失效。
 
@@ -23,4 +25,4 @@
 
 运行时实例全部由已注册的 Runtime Daemon 节点提供（每个节点按 AI 类型各一个实例），管理端经节点主动建立的反向通道下发请求，不再支持独立部署的中继实例。节点上报额度与健康时可用该实例的派生 Bearer 令牌代替签名，上报正文必须带 `server_id`，只能修改自己实例；不能用 Bearer 列出全部实例。额度为空只更新心跳，不用零覆盖旧测量；遥测不提升配置 version。实时任务及手动探测仅管理员可用；`today-usage` 按 UTC 当日对话开始时间统计，未上报 token/成本保留 null，并给出上报记录数，不能把缺失当作零花费。节点安装与服务管理见 [Runtime Daemon 说明](../runtime_daemon/README.md)。
 
-测试均使用隔离 PostgreSQL 和假平台/Agent。真实系统登录权限、企微通知可见范围、模型健康与额度探测需在相应接入环境验收。
+自动测试使用隔离 PostgreSQL 与模拟平台/Agent。业务系统的真实登录权限、企业微信通知的可见范围、模型健康与额度探测需在自己的部署环境中验证。
