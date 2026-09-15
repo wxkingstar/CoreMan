@@ -1,4 +1,4 @@
-"""M1a：users.source、team_rules、user_identities、departments、user_departments、
+"""账号：users.source、team_rules、user_identities、departments、user_departments、
 auth_nonces、login_attempts、platform_apps、contact_sync_runs
 
 Revision ID: 0002
@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column("source", sa.Text(), server_default=sa.text("'sync'"), nullable=False),
     )
     op.create_check_constraint("source", "users", "source IN ('sync','bootstrap','manual')")
-    # M0 的引导登录把引导账号写成了普通 users 行；改成 source='bootstrap'、login_name=NULL，
+    # 早期的引导登录把引导账号写成了普通 users 行；改成 source='bootstrap'、login_name=NULL，
     # 只保留最近登录的一条，其余（不同用户名反复引导产生的）停用。
     op.execute(
         """

@@ -1,4 +1,4 @@
-"""structlog JSON 日志（spec §13）：字段 ts/level/service/instance/event，凭证脱敏。"""
+"""structlog JSON 日志：字段 ts/level/service/instance/event，凭证脱敏。"""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def configure_logging(
     structlog.configure(
         processors=[
             _static_fields(service, instance),
-            # 保留：M1 起在请求入口绑定 task_id / stream_id 等请求级字段。
+            # 保留：在请求入口绑定 task_id / stream_id 等请求级字段。
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_log_level,

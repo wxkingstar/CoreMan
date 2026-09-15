@@ -1,4 +1,4 @@
-"""M3a：交互待答状态与公告（spec §5.4 `interaction_states`、§5.5 `announcements`）。
+"""交互待答状态与公告（`interaction_states`、`announcements`）。
 
 `interaction_states` 是 AskUserQuestion / 限流切换 / 会话切换三种「等用户下一步」的状态；
 `(kind, scope_key)` 唯一且 DEFERRABLE，数据访问层用「删旧插新」覆盖同 scope 的旧状态。
@@ -72,7 +72,7 @@ class InteractionState(TimestampMixin, Base):
 
 
 class Announcement(TimestampMixin, Base):
-    """公告：命中即拦截对话（spec §8.2 步骤 2）。scope 决定 relay_server_id / bot_id 哪个非空。"""
+    """公告：命中即拦截对话。scope 决定 relay_server_id / bot_id 哪个非空。"""
 
     __tablename__ = "announcements"
     __table_args__ = (

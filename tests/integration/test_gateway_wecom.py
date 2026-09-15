@@ -347,7 +347,7 @@ async def _seed_stream(db_engine: AsyncEngine, bot_id, service: GatewayWecomServ
 async def test_proactive_stream_is_finished_once_with_suffix(
     db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings
 ) -> None:  # type: ignore[no-untyped-def]
-    """worker 切后台（Task 9 的 background_state 契约）→ 网关补一次 finish，之后不再跟。"""
+    """worker 切后台（background_state 契约）→ 网关补一次 finish，之后不再跟。"""
     bot = await _bot(db_session)
     fake = FakeWeComWs(accepted={"bot1": "sec"})
     url = await fake.start()
@@ -772,7 +772,7 @@ async def test_lease_round_does_not_release_a_bot_that_is_still_draining(
 ) -> None:  # type: ignore[no-untyped-def]
     """排空进行中（runner 已摘、连接还在关）：并发的租约扫描不许把租约提前交出去。
 
-    交早了就是 §6.5 的 ④ 跑到 ③ 前面：新实例（或本实例）立刻认领出 gen+1，而排空尾声那次
+    交早了就是「释放租约」跑到「关连接」前面：新实例（或本实例）立刻认领出 gen+1，而排空尾声那次
     release 又把新租约放掉，连接来回断三次。
     """
     bot = await _bot(db_session)
@@ -1043,8 +1043,8 @@ async def test_concurrent_drain_of_the_same_bot_only_drains_once(
 ) -> None:  # type: ignore[no-untyped-def]
     """同一个 bot 并发两次排空：第二次立刻返回，且不许抹掉第一次的排空标记。
 
-    抹掉了的话，并发的租约扫描会把「持有租约却没有连接」的这一行提前 release——§6.5 的 ④
-    跑到 ③ 前面，连接来回断。
+    抹掉了的话，并发的租约扫描会把「持有租约却没有连接」的这一行提前 release——排空的「释放租约」
+    跑到「关连接」前面，连接来回断。
     """
     bot = await _bot(db_session)
     fake = FakeWeComWs(accepted={"bot1": "sec"})

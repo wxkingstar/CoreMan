@@ -1,4 +1,4 @@
-"""平台设置（spec §4.2 settings）：platform_admin 读写全量，其余角色只读三个默认值键。
+"""平台设置（settings 表）：platform_admin 读写全量，其余角色只读三个默认值键。
 
 `default_model` 是派生键：每次读取都从模型目录算（claude → codex 的默认模型），
 写入会被 `SettingsPatch` 以 422 拒绝；settings 表里遗留的同名行不再被读取。
@@ -66,7 +66,7 @@ def _check_not_null(changes: dict[str, Any]) -> None:
 
 
 async def _check_login_app(session: AsyncSession, changes: dict[str, Any]) -> None:
-    """关引导登录前必须已有别的登录入口，否则谁都进不来（spec §10.1）。"""
+    """关引导登录前必须已有别的登录入口，否则谁都进不来。"""
     if changes.get("bootstrap_admin_enabled") is not False:
         return
     stmt = (

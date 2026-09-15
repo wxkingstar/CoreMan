@@ -1,4 +1,4 @@
-"""chat_sessions（spec §8.5）：只管 relay_session_id，对话历史由 relay 按 session_id 自持。
+"""chat_sessions：只管 relay_session_id，对话历史由 relay 按 session_id 自持。
 
 所以「清会话」= 删掉这里的映射行，下一轮自然换一个新的 relay 会话；不需要、也无法去 relay
 上删历史。换机、换模型、超 TTL 都走这条路。

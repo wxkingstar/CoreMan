@@ -1,4 +1,4 @@
-"""审计日志查询（spec §5.3 audit_logs）：只读列表，ai_committee / platform_admin 可见。"""
+"""审计日志查询（audit_logs）：只读列表，ai_committee / platform_admin 可见。"""
 
 from __future__ import annotations
 

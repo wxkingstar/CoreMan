@@ -1,4 +1,4 @@
-"""平台应用与通讯录同步记录（spec §5.1 platform_apps；contact_sync_runs 为 M1 新增）。"""
+"""平台应用与通讯录同步记录（platform_apps、contact_sync_runs）。"""
 
 from __future__ import annotations
 

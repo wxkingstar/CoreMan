@@ -1,4 +1,4 @@
-"""机器人配置变更通知（spec §6.3 pg_notify 通道）。API 路由与 worker 共用。"""
+"""机器人配置变更通知（pg_notify 通道）。API 路由与 worker 共用。"""
 
 from __future__ import annotations
 

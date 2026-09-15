@@ -1,4 +1,4 @@
-"""乐观锁：PUT 必须带 If-Match: "<version>"（spec §10.4，冲突 409）。"""
+"""乐观锁：PUT 必须带 If-Match: "<version>"（冲突 409）。"""
 
 from __future__ import annotations
 

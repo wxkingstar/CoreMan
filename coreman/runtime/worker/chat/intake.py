@@ -1,4 +1,4 @@
-"""入站阶段（spec §8.2 步骤 1–5）：加载机器人、入站消息与发言者。
+"""入站阶段：加载机器人、入站消息与发言者。
 
 公告、白名单、内置命令、待答文本答案都在这里就地了结；relay 不可用排在最后。
 """
@@ -187,7 +187,7 @@ class IntakeStage(ChatStageBase):
     async def _pending_answer(
         self, session: AsyncSession, ctx: TaskContext, intake: Intake
     ) -> bool:
-        """AskUserQuestion 的自由文本答案 / 取消词（spec §8.2 步骤 5）。
+        """AskUserQuestion 的自由文本答案 / 取消词。
 
         排在命令之后、relay 检查之前：答一道题既不进模型也不碰 relay，机器人此刻没有可用
         实例照样答得下去；而 reset/stop 得先把待答状态清掉，不能被这里吞成一句答案。

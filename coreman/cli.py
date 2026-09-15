@@ -1,4 +1,4 @@
-"""运维命令：python -m coreman.cli contact-sync [--app NAME]（spec §12 coreman contact-sync）。"""
+"""运维命令：python -m coreman.cli contact-sync [--app NAME]（对应 coreman contact-sync）。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""settings 表读写 + 进程内 60 秒缓存（spec §4.2）。"""
+"""settings 表读写 + 进程内 60 秒缓存。"""
 
 from __future__ import annotations
 

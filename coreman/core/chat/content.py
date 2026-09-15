@@ -1,6 +1,6 @@
-"""入站 parts → relay content parts（spec §8.2 步骤 6-7，使用平台默认文案）。
+"""入站 parts → relay content parts（使用平台默认文案）。
 
-规则矩阵见计划裁决第 4 条。`failed` 非空 = 这一轮不该进 AI：调用方把它回给用户并结束。
+`failed` 非空 = 这一轮不该进 AI：调用方把它回给用户并结束。
 下载过程中的提示通过 `on_hint` 交给调用方写进思考区，本模块不碰流。
 
 这里只做「组装」：下载解密在 `wecom.media`，消毒在 `prompting.sanitize`，谁也不越界。
@@ -87,7 +87,7 @@ def _own_text(own: list[dict[str, Any]]) -> str:
 class ContentBuilder:
     """把一条入站消息的 parts 组装成 relay 的 content parts。
 
-    `on_hint` 可以是同步回调，也可以是协程函数：Task 7 传的是「把思考区刷给用户」的
+    `on_hint` 可以是同步回调，也可以是协程函数：对话流水线传的是「把思考区刷给用户」的
     异步回调，下载几十兆的附件时用户才看得见「正在下载…」，所以这里 await 它。
     """
 

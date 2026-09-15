@@ -1,4 +1,4 @@
-"""M1b：relay_servers、model_catalog（含种子）、bots、bot_members、bot_allowed_users
+"""机器人与运行时：relay_servers、model_catalog（含种子）、bots、bot_members、bot_allowed_users
 
 Revision ID: 0003
 Revises: 0002

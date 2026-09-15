@@ -113,7 +113,7 @@ class BackgroundPusher:
         self._last_activity, self._fired = now, set()
 
     def next_dedupe_key(self) -> str:
-        """幂等键 `{task_id}:send:{seq}`（spec §6.4 的格式）。"""
+        """幂等键 `{task_id}:send:{seq}`。"""
         self._seq += 1
         return f"{self.task_id}:send:{self._seq}"
 

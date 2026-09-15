@@ -1,4 +1,4 @@
-"""AskUserQuestion 提问轮、自由文本答案与取消（spec §8.2 步骤 5、§8.4）。"""
+"""AskUserQuestion 提问轮、自由文本答案与取消。"""
 
 from collections.abc import Callable
 

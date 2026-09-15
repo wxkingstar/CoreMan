@@ -1,4 +1,4 @@
-"""团队与团队规则（spec §5.1 teams/team_rules）。"""
+"""团队与团队规则（teams / team_rules）。"""
 
 from __future__ import annotations
 

@@ -137,7 +137,7 @@ export interface SettingsOut extends PromptSettings {
   default_effort_level: EffortLevel | null
   session_ttl_hours: number
   jwt_issuer: string
-  /** 全局并发闸门（spec §6.3）：worker 同时在跑的任务上限，其中 fast 车道独占的名额。 */
+  /** 全局并发闸门：worker 同时在跑的任务上限，其中 fast 车道独占的名额。 */
   max_concurrent_tasks: number
   fast_lane_slots: number
   /** 企微模板卡片左上角的来源图标；空串表示不显示图标。 */

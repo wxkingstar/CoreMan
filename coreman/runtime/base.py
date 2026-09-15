@@ -1,4 +1,4 @@
-"""运行时进程基类：健康服务器、心跳日志、SIGTERM 优雅退出（spec §4.1、§13）。"""
+"""运行时进程基类：健康服务器、心跳日志、SIGTERM 优雅退出。"""
 
 from __future__ import annotations
 

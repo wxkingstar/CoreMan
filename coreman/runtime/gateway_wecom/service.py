@@ -1,4 +1,4 @@
-"""gateway-wecom 进程（spec §4.1、§6.5、§7.3）：租约、连接、入站、推送、排空。
+"""gateway-wecom 进程：租约、连接、入站、推送、排空。
 
 进程内五条后台协程，各管一件事：
 
@@ -40,10 +40,10 @@ from coreman.runtime.gateway_wecom.ws_client import DEFAULT_WS_CONFIG, WsConfig
 
 PLATFORM = "wecom"
 CHANNELS = ("stream_updated", "outbox_added", "lease_changed", "config_changed")
-# 批与批间隔 3 秒（spec §6.5）：同时断一片连接会把下游的重连全挤在一个瞬间；
+# 批与批间隔 3 秒：同时断一片连接会把下游的重连全挤在一个瞬间；
 # 每批几个按剩余时间动态算，见 `gateway_common.drain`。
 DRAIN_GAP_SECONDS = drain_pacing.DRAIN_GAP_SECONDS
-# 踢线熔断后多久才允许重新认领这个 bot（spec §6.5「停止重连该 bot 30 秒」）。
+# 踢线熔断后多久才允许重新认领这个 bot。
 KICK_COOLDOWN_SECONDS = 30.0
 # 退出前等在途推送 / 出站收尾的上限（回执超时是 10 秒，留一点余量）。
 INFLIGHT_SETTLE_SECONDS = 15.0
@@ -189,7 +189,7 @@ class GatewayWecomService(Service):
             self._log.warning("drain_deadline_exceeded", left=len(left))
 
     async def drain_bot(self, bot_id: uuid.UUID) -> None:
-        """单 bot 排空（spec §6.5）：① 停出站 ② 流补 finish ③ 关 WS ④ 释放租约 ⑤ 通知。
+        """单 bot 排空：① 停出站 ② 流补 finish ③ 关 WS ④ 释放租约 ⑤ 通知。
 
         同一个 bot 并发进来只排一次，扫描也不会趁排空的间隙提前交还租约
         （见 `LeaseCoordinator.drain`）。

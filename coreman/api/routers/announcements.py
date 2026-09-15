@@ -1,4 +1,4 @@
-"""公告管理（spec §5.5 announcements、§10.2 公告 = ai_committee / platform_admin）。
+"""公告管理（仅 ai_committee / platform_admin 可用）。
 
 公告是运维数据（几十条封顶），列表不分页，一次把 relay / bot 的名字一起 join 出来，
 省得前端再为每行发一次请求。`time_status` 只看时间窗，不看 `is_active`——

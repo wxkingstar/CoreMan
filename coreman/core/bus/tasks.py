@@ -1,4 +1,4 @@
-"""tasks 表读写（spec §5.4、§6.2）。"""
+"""tasks 表读写。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
 
-# 认领语句逐字取自 spec §6.2（只把 RETURNING * 收窄成 id，随后按主键取回 ORM 行）。
+# 认领语句只 RETURNING id，随后按主键取回 ORM 行。
 _CLAIM_SQL = text(
     """
 UPDATE tasks SET status='claimed', claimed_by=:instance, claimed_at=now(), heartbeat_at=now(),

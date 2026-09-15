@@ -80,7 +80,7 @@ function openDetail(row: BotOut): void {
   router.push({ name: 'bot-detail', params: { id: row.id } })
 }
 
-/** 切换 relay 的对话框在详情页（Task 12），列表这里只负责带着 action 跳过去。 */
+/** 切换 relay 的对话框在详情页，列表这里只负责带着 action 跳过去。 */
 function openSwitchRelay(row: BotOut): void {
   router.push({ name: 'bot-detail', params: { id: row.id }, query: { action: 'switch' } })
 }

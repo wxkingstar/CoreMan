@@ -1,4 +1,4 @@
-"""飞书登录（spec §10.1）：官方网页授权；state 单次使用，code 防重放。"""
+"""飞书登录：官方网页授权；state 单次使用，code 防重放。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from coreman.core.platforms.feishu import FeishuClient, FeishuError, oauth_url
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 STATE_TTL = timedelta(minutes=10)
-# state 与浏览器的绑定：start 下发明文、nonce 里只存 sha256（spec §10.1 登录 CSRF 防护）
+# state 与浏览器的绑定：start 下发明文、nonce 里只存 sha256（登录 CSRF 防护）
 BIND_COOKIE = "coreman_feishu_oauth"
 BIND_PATH = "/api/auth/feishu"
 _SAFE_PATH = re.compile(r"^/(?![/\\])")

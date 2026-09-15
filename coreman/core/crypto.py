@@ -1,6 +1,6 @@
 """库内凭证加密：AES-256-GCM.
 
-格式 enc:v1:<base64(nonce|ciphertext|tag)>，AAD=表名.列名（spec §4.2）。
+格式 enc:v1:<base64(nonce|ciphertext|tag)>，AAD=表名.列名。
 """
 
 from __future__ import annotations

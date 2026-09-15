@@ -176,7 +176,7 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
         FINISH,
         DONE,
     ],
-    # relay 撞上额度限制时把 Anthropic 的英文告示原样当正文回来（spec §8.8）。
+    # relay 撞上额度限制时把 Anthropic 的英文告示原样当正文回来。
     "rate_limit": lambda: [_text("You've hit your limit · resets 3pm"), FINISH, DONE],
     "slow": lambda: SCENARIOS["normal"](),
 }

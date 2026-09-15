@@ -1,4 +1,4 @@
-"""bots 的凭证与环境变量：JSON 整体加密、脱敏、合并（本计划裁决 6）。"""
+"""bots 的凭证与环境变量：JSON 整体加密、脱敏、合并。"""
 
 from __future__ import annotations
 

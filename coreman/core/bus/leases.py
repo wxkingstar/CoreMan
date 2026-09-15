@@ -1,4 +1,4 @@
-"""bot_leases 读写（spec §5.4、§6.5）。"""
+"""bot_leases 读写。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from coreman.core.db.models import Bot, BotLease
 from coreman.core.observability.metrics import TAKEOVERS, after_commit
 
 STALE_AFTER_SECONDS = 30
-# 认领语句逐字取自 spec §6.5；过期判定用 make_interval 绑参，不做 SQL 字符串拼接。
+# 过期判定用 make_interval 绑参，不做 SQL 字符串拼接。
 # 不看 drain_requested_by：排空标记只在「持有者还活着」时才该挡住换手，而那由下面的
 # holder/heartbeat 条件挡着。标记自己挡认领的话，排空做到一半挂掉的网关会让这个 bot 永久
 # 没人接（标记再没人来清）；认领成功时顺手把标记清掉，排空就此结束。

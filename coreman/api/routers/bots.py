@@ -1,6 +1,6 @@
-"""机器人 CRUD（spec §5.2、§10.2、§10.4）。子资源（切换 relay、启停、成员、白名单）在 Task 8。
+"""机器人 CRUD。子资源（切换 relay、启停、成员、白名单）在 bots_extra.py。
 
-读：任何登录用户都能看基础字段，敏感字段（system_prompt / 凭证 / 环境变量）按 §10.2 裁剪；
+读：任何登录用户都能看基础字段，敏感字段（system_prompt / 凭证 / 环境变量）按角色裁剪；
 写：只有 bot 管理员（创建者 + bot_members），改派团队与删除另有更严的判定。
 """
 
@@ -66,8 +66,8 @@ from coreman.core.masking import is_masked, mask_secret
 from coreman.core.relay.models import backend_of
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
-# 审计 diff 里只记 ***（明文永不落库）。Task 8 复用。
-# system_prompt 也在内：它受 can_view_sensitive 管（§10.2，manager 不旁路），而审计日志对
+# 审计 diff 里只记 ***（明文永不落库）。子资源路由复用。
+# system_prompt 也在内：它受 can_view_sensitive 管（manager 不旁路），而审计日志对
 # ai_committee / platform_admin 是可读的——落明文等于给 manager 开了一条读提示词的后门。
 # notify_webhook_url 也在内：企微群机器人 webhook 的 key 就写在 URL 里，它本身就是凭证。
 AUDIT_MASKED_KEYS = ("credentials", "env_vars", "system_prompt", "notify_webhook_url")
@@ -225,7 +225,7 @@ def _public(bot: Bot) -> dict[str, Any]:
 
 
 async def load_bot(session: AsyncSession, bot_id: uuid.UUID) -> Bot:
-    """按 id 取机器人，取不到就 404（Task 8 复用）。"""
+    """按 id 取机器人，取不到就 404（子资源路由复用）。"""
     bot = await session.get(Bot, bot_id)
     if bot is None:
         raise not_found("机器人不存在")
@@ -468,7 +468,7 @@ async def create_bot(
         model=body.model,
         working_dir=body.working_dir,
         system_prompt=body.system_prompt,
-        # M3 技能合并前，merged 就等于原始提示词。
+        # 新建时还没装技能，merged 就等于原始提示词。
         merged_system_prompt=body.system_prompt,
         verbosity_level=body.verbosity_level,
         effort_level=body.effort_level,
@@ -568,7 +568,7 @@ async def patch_bot(
 
         with session.no_autoflush:
             await rebuild_prompt(session, bot)
-    # 换模型（可能连后端都换了）或换工作目录 = 换上下文，旧 relay 会话必须作废（spec §8.5）。
+    # 换模型（可能连后端都换了）或换工作目录 = 换上下文，旧 relay 会话必须作废。
     # 以「值真的变了」为准：把原值重新提交一遍不该把用户正在进行的对话清掉。
     if before["model"] != bot.model or before["working_dir"] != bot.working_dir:
         await sessions.clear_bot(session, bot.id)

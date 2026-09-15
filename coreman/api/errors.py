@@ -1,4 +1,4 @@
-"""API 错误信封：{code, message, errors?}（spec §10.4）。"""
+"""API 错误信封：{code, message, errors?}。"""
 
 from __future__ import annotations
 
