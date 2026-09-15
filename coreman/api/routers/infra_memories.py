@@ -22,7 +22,6 @@ class CollectIn(ReportTarget):
 
 
 @router.post("/api/infra/memories/collect")
-@router.post("/api/robot/memories/collect")
 async def collect_memories(
     body: CollectIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -37,7 +36,6 @@ class QueryIn(ReportTarget):
 
 
 @router.get("/api/infra/memories")
-@router.get("/api/robot/memories/query")
 async def query_memories(
     request: Request, query: QueryIn = Depends(), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -100,7 +98,6 @@ async def workspaces(
 
 
 @router.post("/api/infra/memories/deploy")
-@router.post("/api/robot/memories/deploy")
 async def deploy_memories(
     body: QueryIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:

@@ -44,7 +44,6 @@ def make_http(url: httpx.URL) -> httpx.AsyncClient:
 
 @router.post("/api/admin/systems/test-access")
 @router.post("/api/infra/systems/test-access", dependencies=[Depends(require_scope("systems"))])
-@router.post("/api/test/bot-token-access", dependencies=[Depends(require_scope("systems"))])
 async def test_access(
     body: TestAccessIn,
     request: Request,

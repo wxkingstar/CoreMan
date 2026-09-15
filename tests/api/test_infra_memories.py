@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from sqlalchemy import select
 
 from coreman.core.db.models import Memory, RelayServer
@@ -18,16 +17,8 @@ async def prepare(db_session):
     return bot, relay, {"Authorization": f"Bearer {token}"}
 
 
-@pytest.mark.parametrize(
-    "collect_path,query_path",
-    [
-        ("/api/infra/memories/collect", "/api/robot/memories/query"),
-        ("/api/robot/memories/collect", "/api/infra/memories"),
-    ],
-)
-async def test_collect_current_relay_hash_mtime_and_tombstone(
-    client, db_session, collect_path, query_path
-):
+async def test_collect_current_relay_hash_mtime_and_tombstone(client, db_session):
+    collect_path, query_path = "/api/infra/memories/collect", "/api/infra/memories"
     bot, relay, headers = await prepare(db_session)
     now = datetime.now(UTC)
     entry = {
@@ -142,7 +133,7 @@ async def test_infra_deploy_uses_stored_rows_and_bound_agent(client, db_session,
 
     monkeypatch.setattr(agent_client, "call_agent", call)
     body = {"server_id": str(relay.id), "working_dir": bot.working_dir}
-    response = await client.post("/api/robot/memories/deploy", json=body, headers=headers)
+    response = await client.post("/api/infra/memories/deploy", json=body, headers=headers)
     assert response.status_code == 200, response.text
     assert calls == ["ping", "deploy-memory"]
     assert (

@@ -1,12 +1,17 @@
 import asyncio
 import hashlib
+import json
+import time
 import uuid
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from xml.sax.saxutils import escape
 
+import httpx
 import pytest
 from sqlalchemy import select, update
 
+from coreman.core.auth.signatures import sign_request
 from coreman.core.db.models import (
     ApiClient,
     Escalation,
@@ -21,6 +26,25 @@ from coreman.core.notifications import NotificationSkipped, escalation_current
 from tests.api.conftest import login_existing
 from tests.integration.worker_helpers import seed_bot
 from tests.unit.test_callback_crypto import AES_KEY, encrypted_message
+
+
+class Signed(httpx.Auth):
+    """按实际路径、查询参数和 JSON 正文给每个请求签名；回调等其它路由忽略这些头。"""
+
+    def __init__(self, app_key: str, secret: str) -> None:
+        self.app_key, self.secret = app_key, secret
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        params = dict(request.url.params)
+        if request.content and "application/json" in request.headers.get("content-type", ""):
+            params.update(json.loads(request.content))
+        ts = str(int(time.time()))
+        request.headers["X-App-Key"] = self.app_key
+        request.headers["X-Timestamp"] = ts
+        request.headers["X-Signature"] = sign_request(
+            request.method, request.url.path, params, ts, self.app_key, self.secret
+        )
+        yield request
 
 
 async def setup(client, session):
@@ -54,7 +78,7 @@ async def setup(client, session):
     session.add(app)
     await session.commit()
     await login_existing(client, session, creator)
-    client.headers.update({"X-App-Key": "esc", "X-API-Key": "client-secret"})
+    client.auth = Signed("esc", "client-secret")
     return bot, recipient, app, cipher
 
 
@@ -124,9 +148,9 @@ async def test_escalation_fifo_callback_dedupe_and_followups(client, db_session,
     assert result.json()["data"]["status"] == "pending"
 
 
-async def test_public_key_not_credential_and_sender_cannot_be_forged(client, db_session):
+@pytest.mark.parametrize("path", ["/api/escalation/create", "/api/infra/escalations"])
+async def test_unsigned_secret_rejected_and_sender_cannot_be_forged(client, db_session, path):
     bot, _, _, _ = await setup(client, db_session)
-    path = "/api/escalation/create"
     body = {
         "bot_key": bot.bot_key,
         "to_user_id": "recipient",
@@ -134,9 +158,12 @@ async def test_public_key_not_credential_and_sender_cannot_be_forged(client, db_
         "from_user_id": "recipient",
     }
     assert (await client.post(path, json=body)).status_code == 403
-    client.headers["X-API-Key"] = "esc"
-    assert (await client.post(path, json=body)).status_code == 401
-    client.headers["X-API-Key"] = "client-secret"
+    # 旧的 X-App-Key + X-API-Key 明文 secret 鉴权已移除：不签名一律 401。
+    client.auth = None
+    legacy = {"X-App-Key": "esc", "X-API-Key": "client-secret"}
+    assert (await client.post(path, json=body, headers=legacy)).status_code == 401
+    assert await db_session.scalar(select(Escalation)) is None
+    client.auth = Signed("esc", "client-secret")
     client.cookies.clear()
     assert (await client.post(path, json=body)).status_code == 403
     body.pop("from_user_id")
@@ -322,10 +349,10 @@ async def test_group_winner_client_isolation_and_followup_delivery(client, db_se
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     path = f"{base}/{data['group_id']}"
-    client.headers.update({"X-App-Key": "other-client", "X-API-Key": "other-secret"})
+    client.auth = Signed("other-client", "other-secret")
     assert (await client.get(path)).status_code == 404
     assert (await client.post(f"{path}/cancel")).status_code == 404
-    client.headers.update({"X-App-Key": "esc", "X-API-Key": "client-secret"})
+    client.auth = Signed("esc", "client-secret")
     await db_session.execute(update(OutboxItem).values(status="sent"))
     await db_session.commit()
     query, raw = callback_body(app, msg_id="group-first")

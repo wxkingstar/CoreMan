@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -28,19 +27,8 @@ router = APIRouter(tags=["escalations"])
 async def escalation_client(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> ApiClient:
-    if request.headers.get("X-Signature"):
-        client = await signed_client(request, session)
-    else:
-        # app_key 是公开标识，绝不能当作旧 X-API-Key 的凭证。
-        # 兼容调用须同时携带 X-App-Key 和 X-API-Key=客户端 secret。
-        key, secret = request.headers.get("X-App-Key", ""), request.headers.get("X-API-Key", "")
-        legacy_client = await session.get(ApiClient, key) if key and len(key) <= 128 else None
-        if legacy_client is None or not legacy_client.enabled or not secret or len(secret) > 4096:
-            raise ApiError(401, 401, "求助接口凭证无效")
-        client = legacy_client
-        expected = request.app.state.cipher.decrypt(client.secret_enc, "api_clients.secret_enc")
-        if not secrets.compare_digest(secret.encode(), expected.encode()):
-            raise ApiError(401, 401, "求助接口凭证无效")
+    # 只接受签名调用；旧 X-API-Key 直接携带客户端 secret 的方式已移除。
+    client = await signed_client(request, session)
     if "escalations" not in client.scopes:
         raise ApiError(403, 403, "调用方没有求助权限")
     await session.execute(

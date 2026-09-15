@@ -38,12 +38,12 @@ async def test_push_is_durable_idempotent_and_rejects_changed_payload(client, db
     db_session.add(bot)
     await db_session.commit()
     body = {"bot_key": bot.bot_key, "chat_id": "user1", "content": "消息", "request_id": "test1"}
-    for path in ("/api/infra/push", "/api/push"):
+    path = "/api/infra/push"
+    for _ in range(2):
         r = await client.post(path, json=body, headers=signed(path, body, credential["secret"]))
         assert r.status_code == 200, r.text
         assert r.json()["data"]["status"] == "pending"
     assert (await db_session.scalar(select(func.count()).select_from(OutboxItem))) == 1
-    path = "/api/infra/push"
     changed = {**body, "content": "另一条消息"}
     assert (
         await client.post(path, json=changed, headers=signed(path, changed, credential["secret"]))
@@ -94,17 +94,13 @@ async def test_system_test_requires_real_current_user_and_hides_target_secrets(
     assert (
         await client.post(path, json={**body, "email_prefix": "someone-else"})
     ).status_code == 403
-    for path in (
-        "/api/admin/systems/test-access",
-        "/api/infra/systems/test-access",
-        "/api/test/bot-token-access",
-    ):
+    for path in ("/api/admin/systems/test-access", "/api/infra/systems/test-access"):
         r = await client.post(path, json=body, headers=signed(path, body, credential["secret"]))
         assert r.status_code == 200 and r.json()["data"]["success"], r.text
         assert "synthetic-secret" not in r.text and "private=session" not in r.text
-    assert len(seen) == 3
+    assert len(seen) == 2
     client.cookies.clear()
     assert (
         await client.post(path, json=body, headers=signed(path, body, credential["secret"]))
     ).status_code in (401, 403)
-    assert len(seen) == 3
+    assert len(seen) == 2
