@@ -84,12 +84,16 @@ class CreateIn(BaseModel):
         return self
 
 
-def _out(row: Escalation) -> dict[str, Any]:
+def _out(row: Escalation, failures: dict[str, str] | None = None) -> dict[str, Any]:
+    failure = (failures or {}).get(row.escalation_id)
     return {
         "escalation_id": row.escalation_id,
         "group_id": row.group_id,
         "status": row.status,
         "queued": row.status == "queued",
+        # 通知没能送达而结束：status 为 cancelled，Agent 据此停止轮询、改走其它渠道。
+        "delivery_failed": failure is not None,
+        "failure_reason": failure,
         "question": row.question,
         "replies": row.replies,
         "rounds": row.rounds,
@@ -104,13 +108,13 @@ def _out(row: Escalation) -> dict[str, Any]:
     }
 
 
-def _group(rows: list[Escalation]) -> dict[str, Any]:
+def _group(rows: list[Escalation], failures: dict[str, str] | None = None) -> dict[str, Any]:
     # 胜出者进入追问 pending 或结束后仍是原回复者，不能按第一行重新选人。
     winner = next((r for r in rows if r.replies), None)
     chosen = winner or rows[0]
     return {
-        **_out(chosen),
-        "escalations": [_out(row) for row in rows],
+        **_out(chosen, failures),
+        "escalations": [_out(row, failures) for row in rows],
         "winner_id": winner.escalation_id if winner else None,
     }
 
@@ -205,8 +209,9 @@ async def create_escalation(
         request_id=body.request_id,
         now=utcnow(),
     )
+    failures = await service.delivery_failures(session, rows)
     await session.commit()
-    return {"code": 0, "data": _group(rows)}
+    return {"code": 0, "data": _group(rows, failures)}
 
 
 @router.get("/api/infra/escalations/{identity}")
@@ -224,8 +229,9 @@ async def poll(
                 await service.close(session, row, "expired", "expired", now)
             else:
                 row.last_polled_at = now
+    failures = await service.delivery_failures(session, rows)
     await session.commit()
-    return {"code": 0, "data": _group(rows)}
+    return {"code": 0, "data": _group(rows, failures)}
 
 
 class ResolveIn(BaseModel):

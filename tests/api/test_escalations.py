@@ -352,6 +352,62 @@ async def test_group_winner_client_isolation_and_followup_delivery(client, db_se
     assert data["resolution"] == "agent" and data["followup_questions"] == ["round 1", "round 2"]
 
 
+async def test_failed_question_delivery_ends_escalation_with_reason(client, db_session, db_engine):
+    from coreman.core.bus import outbox
+
+    bot, _, _, _ = await setup(client, db_session)
+    base = "/api/infra/escalations"
+
+    async def create(question):
+        body = {"bot_key": bot.bot_key, "to_user_id": "recipient", "question": question}
+        response = await client.post(base, json=body)
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    first, second = await create("Q1"), await create("Q2")
+    assert first["status"] == "pending" and second["status"] == "queued"
+    assert first["delivery_failed"] is False and first["failure_reason"] is None
+    ask = await db_session.scalar(
+        select(OutboxItem).where(
+            OutboxItem.dedupe_key == f"escalation:{first['escalation_id']}:ask:0:0"
+        )
+    )
+    # 重试耗尽 / 平台永久拒绝：通知判死之后，求助不能继续挂成 pending 让 Agent 空等。
+    await outbox.fail(db_session, ask.id, "WeComError (60020)")
+    await db_session.commit()
+    async with make_session_factory(db_engine)() as session:
+        assert await service.tick(session, datetime.now(UTC)) == 1
+        await session.commit()
+    data = (await client.get(f"{base}/{first['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is True
+    assert data["failure_reason"] == "WeComError (60020)"
+    # 失败的那条腾出位置，排队的下一条照常激活；Agent 自己取消的不算发送失败。
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "pending" and data["delivery_failed"] is False
+    assert (await client.post(f"{base}/{second['escalation_id']}/cancel")).status_code == 200
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is False
+
+
+async def test_unreachable_recipient_is_cancelled_instead_of_left_pending(client, db_session):
+    bot, recipient, _, _ = await setup(client, db_session)
+    base = "/api/infra/escalations"
+    body = {"bot_key": bot.bot_key, "to_user_id": "recipient", "question": "Q1"}
+    first = (await client.post(base, json=body)).json()["data"]
+    second = (await client.post(base, json={**body, "question": "Q2"})).json()["data"]
+    assert second["status"] == "queued"
+    ident = await db_session.scalar(
+        select(UserIdentity).where(UserIdentity.user_id == recipient.id)
+    )
+    ident.platform_user_id = "recipient-rebound"
+    await db_session.commit()
+    # 排队的那条轮到激活时，接收人账号已变更：通知入不了队，直接结束而不是挂成 pending。
+    assert (await client.post(f"{base}/{first['escalation_id']}/cancel")).status_code == 200
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is True
+    assert data["failure_reason"] == service.NOTIFICATION_UNAVAILABLE
+
+
 async def test_history_prevents_destructive_config_delete(client, db_session):
     bot, _, app, _ = await setup(client, db_session)
     actor = await db_session.get(User, bot.created_by)
