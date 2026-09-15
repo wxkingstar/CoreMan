@@ -113,11 +113,7 @@ func (t *sseTranslator) flushAggLog() {
 	if t.aggCount == 0 {
 		return
 	}
-	preview := t.aggBuf.String()
-	if len(preview) > 500 {
-		preview = preview[:500] + "..."
-	}
-	log.Printf("[STREAM %s] chunks=%d len=%d content=%q", strings.ToUpper(t.aggType), t.aggCount, t.aggBuf.Len(), preview)
+	log.Printf("[STREAM %s] chunks=%d %s", strings.ToUpper(t.aggType), t.aggCount, openai.ContentPreview(t.aggBuf.String(), 500))
 	t.aggType = ""
 	t.aggBuf.Reset()
 	t.aggCount = 0
@@ -296,7 +292,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 	if !t.streamDeltaSent {
 		text := extractTextFromEvent(&event)
 		if text != "" {
-			log.Printf("[STREAM FALLBACK DELTA] len=%d content=%q", len(text), openai.Truncate(text, 200))
+			log.Printf("[STREAM FALLBACK DELTA] %s", openai.ContentPreview(text, 200))
 			t.emit(w, flusher, openai.ChatCompletionResponse{
 				ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
 				Choices: []openai.ChatCompletionChoice{{

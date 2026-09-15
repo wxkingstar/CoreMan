@@ -79,12 +79,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Failed to read body: %v", err))
 		return
 	}
-	logBody := openai.SanitizeEnvVarsInLog(string(bodyBytes))
-	if len(logBody) <= 4096 {
-		log.Printf("Raw request body (%d bytes): %s", len(bodyBytes), logBody)
-	} else {
-		log.Printf("Raw request body (%d bytes): %s...[truncated]", len(bodyBytes), logBody[:4096])
-	}
+	// Bodies carry chat messages and prompts: size only unless RELAY_DEBUG=1.
+	openai.LogRequestBody(bodyBytes)
 
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -145,7 +141,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("ChatCompletion request: model=%s stream=%v messages=%d resume=%v images=%d",
 		model, req.Stream, len(req.Messages), input.IsResume, len(input.ImagePath))
-	log.Printf("codex args: %v (stdin %d bytes)", input.Args, len(input.Stdin))
+	if openai.DebugLogging() {
+		log.Printf("codex args: %v (stdin %d bytes)", openai.RedactArgs(input.Args), len(input.Stdin))
+	} else {
+		log.Printf("codex invocation: args=%d stdin=%d bytes", len(input.Args), len(input.Stdin))
+	}
 
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 

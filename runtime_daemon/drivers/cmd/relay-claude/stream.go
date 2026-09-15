@@ -272,7 +272,9 @@ processLines:
 			continue
 		}
 
-		log.Printf("[BUFFERED STREAM RAW] %s", line)
+		if openai.DebugLogging() {
+			log.Printf("[BUFFERED STREAM RAW] %s", line)
+		}
 
 		var event claudeEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
@@ -373,7 +375,7 @@ processLines:
 							sessionStore.LogDelta(sessionID, delta.Text)
 							safeText := filter.Feed(delta.Text)
 							if safeText != "" {
-								log.Printf("[BUFFERED STREAM DELTA] len=%d content=%q", len(safeText), openai.Truncate(safeText, 200))
+								log.Printf("[BUFFERED STREAM DELTA] %s", openai.ContentPreview(safeText, 200))
 								chunk := openai.ChatCompletionResponse{
 									ID:      chatID,
 									Object:  "chat.completion.chunk",
@@ -405,7 +407,7 @@ processLines:
 				fullText.WriteString(text)
 				safeText := filter.Feed(text)
 				if safeText != "" {
-					log.Printf("[BUFFERED STREAM FALLBACK] len=%d content=%q", len(safeText), openai.Truncate(safeText, 200))
+					log.Printf("[BUFFERED STREAM FALLBACK] %s", openai.ContentPreview(safeText, 200))
 					chunk := openai.ChatCompletionResponse{
 						ID:      chatID,
 						Object:  "chat.completion.chunk",
