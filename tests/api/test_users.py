@@ -4,8 +4,22 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import AuditLog, Team, User, UserIdentity
+from coreman.api.routers.users import PUBLIC_USER_FIELDS
+from coreman.core.db.models import AuditLog, Department, Team, User, UserDepartment, UserIdentity
 from tests.api.conftest import login_as
+
+# 管理角色额外可见的通讯录明细（前端按这份契约隐藏列）。
+DETAIL_FIELDS = {
+    "email",
+    "mobile",
+    "identities",
+    "departments",
+    "manual_fields",
+    "last_login_at",
+    "position",
+    "skills",
+    "bot_accessible",
+}
 
 
 async def _teams(db_session: AsyncSession) -> tuple[Team, Team]:
@@ -15,22 +29,43 @@ async def _teams(db_session: AsyncSession) -> tuple[Team, Team]:
     return a, b
 
 
+async def _directory(db_session: AsyncSession, team: Team) -> User:
+    """一个带手机号、邮箱、平台身份与部门的同步用户，外加一个停用用户。"""
+    zs = User(
+        login_name="zhangsan",
+        display_name="张三",
+        email="zs@example.com",
+        mobile="13800000000",
+        position="研发",
+        team_id=team.id,
+    )
+    dept = Department(platform="wecom", platform_dept_id="1", name="研发部", path="总部/研发部")
+    db_session.add_all([zs, dept, User(login_name="lisi", display_name="李四", status="disabled")])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            UserIdentity(user_id=zs.id, platform="wecom", platform_user_id="zhangsan"),
+            UserDepartment(user_id=zs.id, department_id=dept.id, is_primary=True),
+        ]
+    )
+    await db_session.commit()
+    return zs
+
+
 async def test_list_filters(client: httpx.AsyncClient, db_session: AsyncSession) -> None:
     a, _ = await _teams(db_session)
-    me = await login_as(client, db_session, role="member")
-    zs = User(login_name="zhangsan", display_name="张三", email="zs@example.com", team_id=a.id)
-    db_session.add_all([zs, User(login_name="lisi", display_name="李四", status="disabled")])
-    await db_session.flush()
-    db_session.add(UserIdentity(user_id=zs.id, platform="wecom", platform_user_id="zhangsan"))
-    await db_session.commit()
+    me = await login_as(client, db_session, role="ai_committee")
+    await _directory(db_session, a)
     r = await client.get("/api/admin/users", params={"keyword": "zs@"})
     assert r.status_code == 200 and [u["login_name"] for u in r.json()["data"]["items"]] == [
         "zhangsan"
     ]
     item = r.json()["data"]["items"][0]
+    assert set(item) == set(PUBLIC_USER_FIELDS) | DETAIL_FIELDS
     assert item["team_name"] == "甲" and item["identities"] == [
         {"platform": "wecom", "platform_user_id": "zhangsan"}
     ]
+    assert item["mobile"] == "13800000000" and item["departments"] == ["总部/研发部"]
     assert {
         u["login_name"]
         for u in (await client.get("/api/admin/users", params={"unassigned": "true"})).json()[
@@ -40,6 +75,72 @@ async def test_list_filters(client: httpx.AsyncClient, db_session: AsyncSession)
     assert (await client.get("/api/admin/users", params={"status": "disabled"})).json()["data"][
         "total"
     ] == 1
+    assert (await client.get("/api/admin/users", params={"role": "ai_committee"})).json()["data"][
+        "total"
+    ] == 1
+    detail = await client.get(f"/api/admin/users/{item['id']}")
+    assert detail.status_code == 200 and detail.json()["data"]["email"] == "zs@example.com"
+
+
+async def test_member_and_team_lead_get_public_fields_only(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """非管理角色只拿选择器需要的字段：手机号、邮箱、平台身份、部门等一律不回。"""
+    a, _ = await _teams(db_session)
+    zs = await _directory(db_session, a)
+    for role in ("member", "team_lead"):
+        await login_as(client, db_session, role=role, team_id=a.id)
+        r = await client.get("/api/admin/users", params={"keyword": "张", "per_page": 200})
+        assert r.status_code == 200, r.text
+        items = r.json()["data"]["items"]
+        assert [u["login_name"] for u in items] == ["zhangsan"]
+        assert set(items[0]) == set(PUBLIC_USER_FIELDS), role
+        assert items[0]["team_name"] == "甲" and items[0]["status"] == "active"
+        body = r.text
+        assert "13800000000" not in body and "zs@example.com" not in body
+        assert "总部/研发部" not in body and "platform_user_id" not in body
+        detail = await client.get(f"/api/admin/users/{zs.id}")
+        assert detail.status_code == 200 and set(detail.json()["data"]) == set(PUBLIC_USER_FIELDS)
+        # 选择器仍可按状态筛人
+        disabled = await client.get("/api/admin/users", params={"status": "disabled"})
+        assert [u["login_name"] for u in disabled.json()["data"]["items"]] == ["lisi"]
+
+
+async def test_member_cannot_probe_email_via_keyword(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """邮箱对 member 不可见，keyword 也不能匹配邮箱，否则可以逐字符试探出来。"""
+    a, _ = await _teams(db_session)
+    await _directory(db_session, a)
+    await login_as(client, db_session, role="member")
+    for kw in ("zs@", "example.com"):
+        r = await client.get("/api/admin/users", params={"keyword": kw})
+        assert r.status_code == 200 and r.json()["data"]["total"] == 0, kw
+
+
+async def test_keyword_escapes_like_wildcards_and_is_bounded(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await login_as(client, db_session, role="member", login_name="viewer")
+    db_session.add_all(
+        [
+            User(login_name="wang_xin", display_name="王一"),
+            User(login_name="wangaxin", display_name="王二"),
+            User(login_name="rate", display_name="百分之百%"),
+        ]
+    )
+    await db_session.commit()
+
+    async def names(keyword: str) -> list[str]:
+        r = await client.get("/api/admin/users", params={"keyword": keyword})
+        assert r.status_code == 200, r.text
+        return sorted(u["login_name"] for u in r.json()["data"]["items"])
+
+    assert await names("g_x") == ["wang_xin"]
+    assert await names("%") == ["rate"]
+    assert await names("\\") == []
+    assert (await client.get("/api/admin/users", params={"keyword": "x" * 201})).status_code == 422
+    assert (await client.get("/api/admin/users", params={"keyword": "x" * 200})).status_code == 200
 
 
 async def test_patch_permissions(client: httpx.AsyncClient, db_session: AsyncSession) -> None:
@@ -57,11 +158,11 @@ async def test_patch_permissions(client: httpx.AsyncClient, db_session: AsyncSes
     ok = await client.patch(
         f"/api/admin/users/{target.id}", json={"role": "team_lead", "position": "研发"}
     )
-    assert (
-        ok.status_code == 200
-        and ok.json()["data"]["role"] == "team_lead"
-        and ok.json()["data"]["manual_fields"] == ["position"]
-    )
+    # team_lead 的回显同样裁剪：不能借 PATCH 拿到明细
+    assert ok.status_code == 200 and ok.json()["data"]["role"] == "team_lead"
+    assert set(ok.json()["data"]) == set(PUBLIC_USER_FIELDS)
+    await db_session.refresh(target)
+    assert target.manual_fields == ["position"] and target.position == "研发"
     assert (
         await client.patch(f"/api/admin/users/{target.id}", json={"role": "ai_committee"})
     ).status_code == 403
