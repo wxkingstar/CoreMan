@@ -22,7 +22,7 @@ ALL_PROFILES=(--profile standby --profile monitoring --profile tools)
 WAIT_TIMEOUT="${COREMAN_WAIT_TIMEOUT:-300}"
 TAG_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
 # 进入镜像的路径；只有这些路径的未提交改动才让构建标签带 -dirty。
-IMAGE_PATHS=(coreman web runtime_daemon relay_agent migrations deploy pyproject.toml uv.lock alembic.ini README.md LICENSE THIRD_PARTY_NOTICES.md)
+IMAGE_PATHS=(coreman web runtime_daemon migrations deploy pyproject.toml uv.lock alembic.ini README.md LICENSE THIRD_PARTY_NOTICES.md)
 
 # 升级状态不写回含凭证的 .env，放在仓库根目录（或 COREMAN_STATE_DIR）的状态文件里：
 #   .coreman-image-tag          最近一次成功完成的 upgrade/rollback 的镜像标签

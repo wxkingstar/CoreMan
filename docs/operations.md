@@ -13,7 +13,7 @@ COREMAN_ENV_FILE=/absolute/path/.env ./deploy/coreman upgrade all 3f2c1ab
 
 ### 构建与镜像标签
 
-`build` 默认以当前 Git 短提交作为镜像标签；进入镜像的路径（`coreman`、`web`、`runtime_daemon`、`relay_agent`、`migrations`、`deploy`、依赖锁文件等）有未提交或未跟踪的改动时，标签与镜像内的构建提交都加 `-dirty`。`--tag <标签>` 可指定其他标签。健康检查和实例列表的版本带构建提交。
+`build` 默认以当前 Git 短提交作为镜像标签；进入镜像的路径（`coreman`、`web`、`runtime_daemon`、`migrations`、`deploy`、依赖锁文件等）有未提交或未跟踪的改动时，标签与镜像内的构建提交都加 `-dirty`。`--tag <标签>` 可指定其他标签。健康检查和实例列表的版本带构建提交。
 
 `build` 拒绝覆盖正在使用的标签：部署标签、待定升级标签或任一运行中 CoreMan 容器的标签。覆盖后 `rollback` 就回不到旧代码；确需覆盖时加 `--force`。尚无任何部署（没有部署标签，也没有 CoreMan 容器）时，`build` 直接把新标签记为部署标签，随后 `up` 使用它。
 
