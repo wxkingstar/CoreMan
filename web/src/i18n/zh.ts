@@ -137,7 +137,7 @@ export default {
     forbidden: '没有权限执行此操作',
     noPermissionPage: '没有权限访问该页面',
     modify: '修改',
-    comingSoon: '该功能即将开放',
+
     conflict: '数据已被他人修改，请刷新后重试',
     conflictReloaded: '数据已被他人修改，已获取最新版本；请确认后再次保存。',
     fieldError: '{field}：{detail}',
@@ -153,7 +153,7 @@ export default {
     bootstrapHint: '使用管理员账号登录，或选择企业平台登录。',
     wecom: '企业微信登录',
     feishu: '飞书登录',
-    comingSoon: 'M1 里程碑开放',
+
     required: '请输入{field}',
     failed: '登录失败',
     wecomHint: '未配置企业微信登录应用',
@@ -169,7 +169,7 @@ export default {
       wecom_not_configured: '未配置企业微信登录应用',
     },
   },
-  layout: { logout: '退出登录', darkMode: '深色模式', language: '语言', comingSoon: '即将开放' },
+  layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
   menu: {
     skills: "技能管理",
     skillApprovals: "技能审批",
@@ -178,7 +178,7 @@ export default {
     cron: '定时任务', announcements: '公告', chatLogs: '对话记录', statistics: '使用统计',
     approvals: '审批', systems: '业务系统', runtime: '平台运行状态', audit: '审计日志', settings: '设置',
   },
-  home: { welcome: '欢迎使用 CoreMan', empty: '管理功能将在后续里程碑逐步开放' },
+
   users: {
     title: '团队与用户',
     tabUsers: '用户',
@@ -390,7 +390,7 @@ export default {
       current: '当前',
       target: '目标运行时',
       model: '模型',
-      warnings: '切换后：当前会话上下文会丢失；记忆迁移将从 M3 起自动进行；工作目录中的文件不受影响。',
+      warnings: '切换后：当前会话上下文会丢失；记忆会在切换时迁移到目标运行时；已安装的技能需要在目标运行时重新安装。',
       backendChange: '目标模型与当前模型分属不同后端（Claude ↔ Codex），提示词与工具行为差异较大，请确认。',
       confirm: '确认切换',
       done: '已切换',
