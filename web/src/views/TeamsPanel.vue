@@ -320,11 +320,11 @@ async function saveRules() {
               @change="(v: string | number | boolean | undefined) => setRulePlatform(row, v)"
             >
               <el-option
-                label="wecom"
+                :label="t('platforms.wecom')"
                 value="wecom"
               />
               <el-option
-                label="feishu"
+                :label="t('platforms.feishu')"
                 value="feishu"
               />
             </el-select>

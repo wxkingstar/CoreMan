@@ -86,11 +86,16 @@ def lease_out(row: BotLease, bot_key: str, bot_name: str) -> dict[str, Any]:
     }
 
 
-def task_out(row: Task, bot_keys: dict[uuid.UUID, str]) -> dict[str, Any]:
+def task_out(row: Task, bot_keys: dict[uuid.UUID, tuple[str, str]]) -> dict[str, Any]:
     return {
         "id": row.id,
         "bot_id": str(row.bot_id) if row.bot_id else None,
-        "bot_key": bot_keys.get(row.bot_id) if row.bot_id else None,
+        "bot_key": (
+            bot_keys[row.bot_id][0] if row.bot_id is not None and row.bot_id in bot_keys else None
+        ),
+        "bot_name": (
+            bot_keys[row.bot_id][1] if row.bot_id is not None and row.bot_id in bot_keys else None
+        ),
         "kind": row.kind,
         "lane": row.lane,
         "priority": row.priority,
@@ -107,11 +112,16 @@ def task_out(row: Task, bot_keys: dict[uuid.UUID, str]) -> dict[str, Any]:
     }
 
 
-def outbox_out(row: OutboxItem, bot_keys: dict[uuid.UUID, str]) -> dict[str, Any]:
+def outbox_out(row: OutboxItem, bot_keys: dict[uuid.UUID, tuple[str, str]]) -> dict[str, Any]:
     return {
         "id": row.id,
         "bot_id": str(row.bot_id) if row.bot_id else None,
-        "bot_key": bot_keys.get(row.bot_id) if row.bot_id else None,
+        "bot_key": (
+            bot_keys[row.bot_id][0] if row.bot_id is not None and row.bot_id in bot_keys else None
+        ),
+        "bot_name": (
+            bot_keys[row.bot_id][1] if row.bot_id is not None and row.bot_id in bot_keys else None
+        ),
         "kind": row.kind,
         "dedupe_key": row.dedupe_key,
         "status": row.status,
@@ -123,12 +133,16 @@ def outbox_out(row: OutboxItem, bot_keys: dict[uuid.UUID, str]) -> dict[str, Any
     }
 
 
-async def _bot_keys(session: AsyncSession, bot_ids: list[uuid.UUID | None]) -> dict[uuid.UUID, str]:
+async def _bot_keys(
+    session: AsyncSession, bot_ids: list[uuid.UUID | None]
+) -> dict[uuid.UUID, tuple[str, str]]:
     """批量取 bot_key，避免列表里逐行查库。"""
     if not bot_ids:
         return {}
-    rows = (await session.execute(select(Bot.id, Bot.bot_key).where(Bot.id.in_(bot_ids)))).all()
-    return {row[0]: row[1] for row in rows}
+    rows = (
+        await session.execute(select(Bot.id, Bot.bot_key, Bot.name).where(Bot.id.in_(bot_ids)))
+    ).all()
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 @router.get("/instances")

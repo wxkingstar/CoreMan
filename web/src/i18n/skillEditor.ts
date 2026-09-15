@@ -1,4 +1,7 @@
 export const skillEditorZh = {
+  projectToken: 'Project Access Token（可选）', tokenPreserve: '已配置；留空保留原 token', tokenPlaceholder: '粘贴有 read_repository 权限的项目访问令牌',
+  tokenHint: '加密保存，不回显。使用 token 时将 SSH 地址转换为同一仓库的 HTTPS 地址进行认证；不会把 token 写入仓库地址。', removeToken: '移除已保存的 token',
+
   modifiedMask: '掩码已被修改。请取消并重新打开编辑以保留原值，或填写完整新值；不要局部修改圆点。',
   intro: '从来源仓库同步技能，在目录中配置并启用，再为 AI 员工安装。',
   allSources: '全部来源', newSkill: '新建技能', editSkill: '编辑技能',
@@ -23,7 +26,7 @@ export const skillEditorZh = {
   fieldLabel: '显示名称', fieldLabelHint: '例如：API 密钥', fieldHint: '填写提示', fieldHintExample: '告诉用户从哪里获取这个值。',
   publish: '在技能目录中启用', publishHint: '启用后，AI 员工管理员可以选择安装；保存不会自动安装。',
   sourceDialogHint: '一个来源可以包含多个技能。保存后回到来源列表同步，再到技能目录完善配置并启用。',
-  sourceLabelHint: '例如：公司内部技能库', repositoryHint: '支持 HTTPS 和 SSH Git 地址；私有仓库需要服务端已配置读取权限。MCP 分组可留空。',
+  sourceLabelHint: '例如：公司内部技能库', repositoryHint: '支持 HTTPS 和 SSH Git 地址；私有仓库可在下方配置 Project Access Token。MCP 分组可留空。',
   saveSource: '保存来源', presetLabelHint: '例如：ERP 只读连接',
   requiredBasics: '请填写技能标识并选择来源。', policyRequired: '需要审核的技能，请填写默认安全约束。',
   presetRequired: '请填写环境预设的名称和标识。', editMode: '环境变量编辑方式', pairs: '键值对', raw: '.env 文本',
@@ -33,6 +36,9 @@ export const skillEditorZh = {
   envError: { syntax: '第 {line} 行格式无效，请使用 KEY=value；变量名须以大写字母开头。', duplicate: '第 {line} 行变量名重复，请合并或删除重复项。', quote: '第 {line} 行的引号未闭合。', key: '第 {line} 项变量名无效，请使用大写字母、数字和下划线，且以字母开头。' },
 }
 export const skillEditorJa = {
+  projectToken: 'Project Access Token（任意）', tokenPreserve: '設定済み。空欄で既存の token を保持', tokenPlaceholder: 'read_repository 権限のあるプロジェクトトークン',
+  tokenHint: '暗号化して保存し、値は返しません。SSH アドレスは同じリポジトリの HTTPS アドレスに変換して認証します。URL に token は含めません。', removeToken: '保存済みの token を削除',
+
   modifiedMask: 'マスクが変更されています。キャンセルして開き直すか、完全な新しい値を入力してください。マスクの一部は編集できません。',
   intro: 'ソースからスキルを同期し、カタログで設定・有効化してから AI 社員にインストールします。',
   allSources: 'すべてのソース', newSkill: 'スキルを作成', editSkill: 'スキルを編集',

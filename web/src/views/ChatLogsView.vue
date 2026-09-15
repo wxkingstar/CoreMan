@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref, watch } from 'vue'
@@ -208,7 +209,7 @@ defineExpose({ paged, openDetail })
           <el-option
             v-for="b in botList"
             :key="b.id"
-            :label="b.bot_key"
+            :label="b.name"
             :value="b.id"
           />
         </el-select>
@@ -324,7 +325,7 @@ defineExpose({ paged, openDetail })
             </template>
           </el-table-column>
           <el-table-column
-            prop="bot_key"
+            prop="bot_name"
             :label="t('chatLogs.bot')"
             width="150"
           />
@@ -447,7 +448,7 @@ defineExpose({ paged, openDetail })
           <el-table :data="stats?.by_bot ?? []">
             <el-table-column
               min-width="140"
-              prop="bot_key"
+              prop="bot_name"
               :label="t('chatLogs.bot')"
             />
             <el-table-column
@@ -496,7 +497,7 @@ defineExpose({ paged, openDetail })
               {{ formatDateTime(detail.data.request_at) }}
             </el-descriptions-item>
             <el-descriptions-item :label="t('chatLogs.bot')">
-              {{ detail.data.bot_key }}
+              {{ detail.data.bot_name || '—' }}
             </el-descriptions-item>
             <el-descriptions-item :label="t('chatLogs.user')">
               {{ userOf(detail.data) }}
@@ -539,13 +540,13 @@ defineExpose({ paged, openDetail })
           </el-descriptions>
 
           <h4>{{ t('chatLogs.message') }}</h4>
-          <pre class="body">{{ detail.data.message_content ?? detail.data.message_preview ?? '—' }}</pre>
+          <MarkdownContent :content="detail.data.message_content ?? detail.data.message_preview ?? '—'" />
           <template v-if="detail.data.quoted_content">
             <h4>{{ t('chatLogs.quoted') }}</h4>
-            <pre class="body">{{ detail.data.quoted_content }}</pre>
+            <MarkdownContent :content="detail.data.quoted_content" />
           </template>
           <h4>{{ t('chatLogs.response') }}</h4>
-          <pre class="body">{{ detail.data.response_content ?? detail.data.response_preview ?? '—' }}</pre>
+          <MarkdownContent :content="detail.data.response_content ?? detail.data.response_preview ?? '—'" />
           <template v-if="detail.data.error_message || detail.data.error_code">
             <h4>{{ t('chatLogs.error') }}</h4>
             <pre class="body error">{{ detail.data.error_code }} {{ detail.data.error_message }}</pre>

@@ -18,7 +18,7 @@ from coreman.api.routers.relay_servers import load_relay
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.bots.relay_policy import relay_visible
-from coreman.core.db.models import ChatLog, User
+from coreman.core.db.models import Bot, ChatLog, User
 from coreman.core.relay.agent_client import AgentError, call_agent
 
 router = APIRouter(
@@ -99,6 +99,14 @@ async def live_status(
         data = await call_agent(relay, request.app.state.cipher, "status")
     except AgentError as exc:
         raise ApiError(502, 502, str(exc)) from exc
+    tasks = data.get("active_tasks", [])
+    keys = {task.get("bot_key") for task in tasks if task.get("bot_key")}
+    names: dict[str, str] = {}
+    if keys:
+        rows = await session.execute(select(Bot.bot_key, Bot.name).where(Bot.bot_key.in_(keys)))
+        names = {row[0]: row[1] for row in rows.all()}
+    for task in tasks:
+        task["bot_name"] = names.get(task.get("bot_key"))
     return {"code": 0, "data": data}
 
 

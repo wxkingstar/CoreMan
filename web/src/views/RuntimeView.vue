@@ -275,7 +275,7 @@ defineExpose({ refresh })
       row-key="bot_id"
     >
       <el-table-column
-        prop="bot_key"
+        prop="bot_name"
         :label="t('bots.title')"
         width="180"
       />
@@ -362,7 +362,7 @@ defineExpose({ refresh })
         width="160"
       >
         <template #default="{ row }: { row: RuntimeTask }">
-          {{ row.bot_key ?? '—' }}
+          {{ row.bot_name ?? '—' }}
         </template>
       </el-table-column>
       <el-table-column
@@ -443,7 +443,7 @@ defineExpose({ refresh })
         width="160"
       >
         <template #default="{ row }: { row: RuntimeOutboxItem }">
-          {{ row.bot_key ?? '—' }}
+          {{ row.bot_name ?? '—' }}
         </template>
       </el-table-column>
       <el-table-column

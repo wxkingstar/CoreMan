@@ -4,16 +4,16 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { log } = vi.hoisted(() => ({
-  log: { id: 9, bot_id: 'b1', bot_key: 'sales_bot', platform: 'wecom', user_id: 'u1', user_login: 'zhangsan', user_name: '张三', chat_type: 'single', chat_id: 'zs', session_key: 'zs', relay_session_id: 'sid', model: 'm', stream_id: 's', task_id: 1, message_type: 'text', message_preview: '你好', response_preview: '世界', tools_used: ['Bash'], status: 'success', error_code: null, latency_ms: 1234, input_tokens: 10, output_tokens: 5, cache_read_tokens: null, cache_creation_tokens: null, request_at: '2026-09-11T00:00:00Z', response_at: '2026-09-11T00:00:01Z' },
+  log: { id: 9, bot_id: 'b1', bot_key: 'sales_bot', bot_name: '销售', platform: 'wecom', user_id: 'u1', user_login: 'zhangsan', user_name: '张三', chat_type: 'single', chat_id: 'zs', session_key: 'zs', relay_session_id: 'sid', model: 'm', stream_id: 's', task_id: 1, message_type: 'text', message_preview: '你好', response_preview: '世界', tools_used: ['Bash'], status: 'success', error_code: null, latency_ms: 1234, input_tokens: 10, output_tokens: 5, cache_read_tokens: null, cache_creation_tokens: null, request_at: '2026-09-11T00:00:00Z', response_at: '2026-09-11T00:00:01Z' },
 }))
 
 vi.mock('@/api/admin', () => ({
   chatLogs: {
     list: vi.fn().mockResolvedValue({ items: [log], total: 1, page: 1, per_page: 50 }),
     get: vi.fn().mockResolvedValue({ ...log, message_content: '你好完整', response_content: '世界完整', error_message: null }),
-    stats: vi.fn().mockResolvedValue({ total: 1, by_status: { success: 1 }, avg_latency_ms: 1234, tokens: { input: 10, output: 5, cache_read: 0, cache_creation: 0 }, by_bot: [{ bot_id: 'b1', bot_key: 'sales_bot', total: 1, success: 1, error: 0, avg_latency_ms: 1234 }] }),
+    stats: vi.fn().mockResolvedValue({ total: 1, by_status: { success: 1 }, avg_latency_ms: 1234, tokens: { input: 10, output: 5, cache_read: 0, cache_creation: 0 }, by_bot: [{ bot_id: 'b1', bot_key: 'sales_bot', bot_name: '销售', total: 1, success: 1, error: 0, avg_latency_ms: 1234 }] }),
   },
-  bots: { list: vi.fn().mockResolvedValue({ items: [{ id: 'b1', bot_key: 'sales_bot', name: '销售' }], total: 1, page: 1, per_page: 200 }) },
+  bots: { list: vi.fn().mockResolvedValue({ items: [{ id: 'b1', bot_key: 'sales_bot', bot_name: '销售', name: '销售' }], total: 1, page: 1, per_page: 200 }) },
 }))
 
 import { chatLogs } from '@/api/admin'
@@ -35,7 +35,8 @@ describe('ChatLogsView', () => {
     useAuthStore().user = { id: 'u1', login_name: 'zhangsan', display_name: '张三', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
     const wrapper = mount(ChatLogsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
     await flushPromises()
-    expect(wrapper.text()).toContain('sales_bot')
+    expect(wrapper.text()).toContain('销售')
+    expect(wrapper.text()).not.toContain('sales_bot')
     expect(wrapper.text()).toContain('2026-09-11 08:00:00')
     const vm = wrapper.vm as unknown as { paged: { filters: { status: string }; load: () => Promise<void> }; openDetail: (id: number) => Promise<void> }
     vm.paged.filters.status = 'error'

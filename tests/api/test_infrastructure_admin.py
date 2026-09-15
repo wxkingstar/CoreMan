@@ -129,3 +129,31 @@ async def test_bot_token_role_csrf_and_disabled_user(
     # JWKS 不需要登录，且只含公钥。
     r = await client.get("/api/.well-known/jwks.json")
     assert r.status_code == 200 and "d" not in r.json()["keys"][0]
+
+
+async def test_client_names_trim_and_reject_whitespace_on_create_and_update(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await login_as(client, db_session, role="platform_admin")
+    for name in (" ", "\t\n", "\u3000"):
+        response = await client.post(
+            "/api/admin/api-clients", json={"app_key": "blank-name", "name": name}
+        )
+        assert response.status_code == 422
+    response = await client.post(
+        "/api/admin/api-clients", json={"app_key": "trim-name", "name": "  测试  "}
+    )
+    assert response.status_code == 201
+    row = response.json()["data"]
+    assert row["name"] == "测试"
+    response = await client.put(
+        "/api/admin/api-clients/trim-name",
+        json={"name": "   "}, headers={"If-Match": str(row["version"])},
+    )
+    assert response.status_code == 422
+    response = await client.put(
+        "/api/admin/api-clients/trim-name",
+        json={"name": " 更新 "}, headers={"If-Match": str(row["version"])},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["name"] == "更新"

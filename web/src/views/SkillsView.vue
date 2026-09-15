@@ -35,7 +35,7 @@ const empty = (): SkillInput => ({ name: '', source_id: '', description: '', cat
 const form = reactive<SkillInput>(empty())
 const selectable = ref<string[]>([]), mcp = ref('')
 const fields = ref<{ key: string; label: string; placeholder: string; required: boolean }[]>([])
-const sourceForm = reactive({ key: '', label: '', git_url: '', categories: {} as Record<string, string>, sort_order: 0 })
+const sourceForm = reactive({ key: '', label: '', git_url: '', categories: {} as Record<string, string>, sort_order: 0, access_token: '', remove_access_token: false })
 const presetForm = reactive<Preset>({ group_key: '', label: '', vars: {}, tags: [], version: 0 })
 const variables = ref<{ key: string; value: string }[]>([])
 const fail = (e: unknown) => ElMessage.error(e instanceof Error ? e.message : String(e))
@@ -63,8 +63,8 @@ async function save() {
     await skills.save(selected.value, body); visible.value = false; mcp.value = ''; await load()
   } catch (e) { fail(e) } finally { busy.value = false }
 }
-function editSource(row: Source | null) { selectedSource.value = row; Object.assign(sourceForm, { key: row?.key ?? '', label: row?.label ?? '', git_url: row?.git_url ?? '', categories: row?.categories ?? {}, sort_order: row?.sort_order ?? 0 }); sourceVisible.value = true }
-async function saveSource() { busy.value = true; try { await skills.sourceSave(selectedSource.value, { ...sourceForm, git_url: sourceForm.git_url || null }); sourceVisible.value = false; await load() } catch (e) { fail(e) } finally { busy.value = false } }
+function editSource(row: Source | null) { selectedSource.value = row; Object.assign(sourceForm, { key: row?.key ?? '', label: row?.label ?? '', git_url: row?.git_url ?? '', categories: row?.categories ?? {}, sort_order: row?.sort_order ?? 0, access_token: '', remove_access_token: false }); sourceVisible.value = true }
+async function saveSource() { busy.value = true; try { await skills.sourceSave(selectedSource.value, { ...sourceForm, git_url: sourceForm.git_url || null }); sourceVisible.value = false; sourceForm.access_token = ''; await load() } catch (e) { fail(e) } finally { busy.value = false } }
 function editPreset(row: Preset | null) { selectedPreset.value = !!row; Object.assign(presetForm, row ?? { group_key: '', label: '', vars: {}, tags: [], version: 0 }); variables.value = Object.entries(row?.vars ?? {}).map(([key, value]) => ({ key, value })); presetVisible.value = true }
 async function savePreset() {
   busy.value = true
@@ -686,6 +686,7 @@ onMounted(load)
       :close-on-click-modal="false"
       :title="t(selectedSource ? 'skillEditor.editSource' : 'skillEditor.newSource')"
       width="680px"
+      @closed="sourceForm.access_token = ''"
     >
       <p class="hint dialog-intro">
         {{ t('skillEditor.sourceDialogHint') }}
@@ -721,6 +722,27 @@ onMounted(load)
               v-model="sourceForm.git_url"
               placeholder="https://github.com/example/skills.git"
             /><span class="hint">{{ t('skillEditor.repositoryHint') }}</span>
+          </el-form-item>
+          <el-form-item
+            class="full-width"
+            :label="t('skillEditor.projectToken')"
+          >
+            <el-input
+              v-model="sourceForm.access_token"
+              type="password"
+              show-password
+              autocomplete="new-password"
+              :disabled="sourceForm.remove_access_token"
+              :placeholder="t(selectedSource?.has_access_token ? 'skillEditor.tokenPreserve' : 'skillEditor.tokenPlaceholder')"
+            />
+            <span class="hint">{{ t('skillEditor.tokenHint') }}</span>
+            <el-checkbox
+              v-if="selectedSource?.has_access_token"
+              v-model="sourceForm.remove_access_token"
+              @change="sourceForm.access_token = ''"
+            >
+              {{ t('skillEditor.removeToken') }}
+            </el-checkbox>
           </el-form-item>
           <el-form-item :label="t('infra.sortOrder')">
             <el-input-number

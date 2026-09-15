@@ -95,7 +95,7 @@ onMounted(load)
             :to="`/bots/${bot.id}`"
             class="employee-row"
           >
-            <span class="employee-avatar">{{ bot.name.slice(0, 1) }}</span><span class="employee-label"><strong>{{ bot.name }}</strong><small>{{ bot.team_name || '—' }} · {{ bot.platform }} · {{ bot.model }}</small></span><el-tag :type="bot.enabled ? 'success' : 'info'">
+            <span class="employee-avatar">{{ bot.name.slice(0, 1) }}</span><span class="employee-label"><strong>{{ bot.name }}</strong><small>{{ bot.team_name || '—' }} · {{ t(`platforms.${bot.platform}`) }} · {{ bot.model }}</small></span><el-tag :type="bot.enabled ? 'success' : 'info'">
               {{ bot.enabled ? t('common.enabled') : t('common.disabled') }}
             </el-tag>
           </router-link>

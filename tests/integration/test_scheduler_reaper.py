@@ -174,7 +174,7 @@ async def test_reap_lost_task_falls_back_to_outbox_when_stream_unpushable(
     item = (await db_session.execute(select(OutboxItem))).scalar_one()
     assert item.kind == "send" and item.platform == "wecom"
     assert item.dedupe_key == f"{t.id}:send:lost"
-    assert item.target == {"chat_id": "群1"} and item.payload == {"markdown": msg("worker_lost")}
+    assert item.target == {"chat_id": "群1"} and item.payload["markdown"] == msg("worker_lost")
     # 幂等：任务已经不是 running 了，再收一次不会多发一条。
     assert await reaper.reap_lost_tasks(db_session, now) == 0
 
@@ -249,6 +249,7 @@ async def test_cleanups(db_engine: AsyncEngine, db_session: AsyncSession) -> Non
         payload={},
     )
     assert a
+    assert await outbox.claim_next(db_session, bot_id=bot.id)
     await outbox.mark_sent(db_session, a.id)
     db_session.add(
         ChatSession(

@@ -112,9 +112,6 @@ defineExpose({ read })
 <style scoped>
 .env-editor-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .env-editor-bar h3 { margin: 0; }
-.env-editor-bar :deep(.el-radio-button__inner) { outline: none; border: 1px solid var(--cm-border); }
-.env-editor-bar :deep(.el-radio-button + .el-radio-button) { margin-left: -1px; }
-.env-editor-bar :deep(.el-radio-button__original-radio:focus-visible + .el-radio-button__inner) { outline: 2px solid var(--el-color-primary); outline-offset: -3px; }
 .env-hint { color: var(--cm-muted); font-size: 13px; line-height: 1.7; }
 .env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto; gap: 12px; margin-bottom: 12px; }
 .env-raw :deep(textarea) { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.7; tab-size: 2; }

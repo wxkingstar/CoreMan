@@ -21,7 +21,7 @@ async def _seed(db_session: AsyncSession) -> tuple[Bot, Bot, User]:
     mine = Bot(
         bot_key="mine",
         platform="wecom",
-        name="mine",
+        name="销售助理",
         created_by=creator.id,
         team_id=team.id,
         model="m",
@@ -31,7 +31,7 @@ async def _seed(db_session: AsyncSession) -> tuple[Bot, Bot, User]:
     theirs = Bot(
         bot_key="theirs",
         platform="wecom",
-        name="theirs",
+        name="运营助理",
         created_by=stranger.id,
         team_id=other.id,
         model="m",
@@ -79,6 +79,7 @@ async def test_visibility_by_role(client: httpx.AsyncClient, db_session: AsyncSe
 
     await login_existing(client, db_session, creator)
     data = (await client.get("/api/admin/chat-logs")).json()["data"]
+    assert {d["bot_name"] for d in data["items"]} == {"销售助理", "运营助理"}
     # 我的 bot 2 条 + 我参与的 1 条
     assert data["total"] == 3 and {d["bot_key"] for d in data["items"]} == {"mine", "theirs"}
     assert all(
@@ -119,8 +120,10 @@ async def test_detail_and_stats(client: httpx.AsyncClient, db_session: AsyncSess
     ).scalar_one()
     d = (await client.get(f"/api/admin/chat-logs/{mine_log.id}")).json()["data"]
     assert d["response_content"] == "回答0" and d["message_content"].startswith("问题0")
+    assert d["bot_name"] == "销售助理"
     assert d["tools_used"] == ["Bash"]
     stats = (await client.get("/api/admin/chat-logs/stats")).json()["data"]
+    assert {r["bot_name"] for r in stats["by_bot"]} == {"销售助理", "运营助理"}
     assert stats["total"] == 3 and stats["by_status"] == {"success": 1, "error": 1, "stopped": 1}
     assert stats["tokens"]["input"] == 30 and stats["avg_latency_ms"] > 0
     assert [b["bot_key"] for b in stats["by_bot"]] == ["mine", "theirs"]

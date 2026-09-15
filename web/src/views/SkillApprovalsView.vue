@@ -51,7 +51,7 @@ onMounted(async () => { await load(); try { catalog.value = await allSkills() } 
       >
         <template #default="{ row }">
           <router-link :to="`/bots/${row.bot_id}`">
-            {{ row.bot_id }}
+            {{ row.bot_name || '—' }}
           </router-link>
         </template>
       </el-table-column>

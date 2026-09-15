@@ -171,7 +171,7 @@ async def health_report(
                             ),
                         )
                         env.update(access.env)
-                        backend = backend_of(current_bot.model)
+                        backend = backend_of(current_bot.model, relay.model_provider)
                         chat = ChatRequest(
                             model=current_bot.model,
                             system_prompt=build_system_prompt(

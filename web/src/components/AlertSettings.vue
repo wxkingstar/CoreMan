@@ -65,7 +65,7 @@ async function save() {
             <el-option
               v-for="app in apps"
               :key="app.id"
-              :label="`${app.name} (${app.platform})`"
+              :label="`${app.name} (${t(`platforms.${app.platform}`)})`"
               :value="app.id"
             />
           </el-select>

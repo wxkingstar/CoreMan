@@ -9,6 +9,7 @@ COREMAN_MODEL_PROVIDER=claude、COREMAN_MODEL、COREMAN_GIT_HOSTS、COREMAN_AGEN
 from __future__ import annotations
 
 import argparse
+import base64
 import contextvars
 import hashlib
 import hmac
@@ -462,7 +463,33 @@ class Agent:
             command = ["npx", "--yes", "skills", "add", url]
             if skill:
                 command += ["--skill", skill]
-            run_command(command + ["-y"], path, timeout=300)
+            access_token = data.get("git_access_token")
+            if access_token:
+                if (not isinstance(access_token, str) or len(access_token) > 2000
+                        or any(c.isspace() or ord(c) < 32 for c in access_token)
+                        or not url.startswith("https://")):
+                    raise OperationError("Git token 或 HTTPS 仓库地址无效")
+                env = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("COREMAN_", "GIT_")) and "proxy" not in key.lower()}
+                env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+                credential = base64.b64encode(f"oauth2:{access_token}".encode()).decode()
+                config = {"credential.helper": "", "http.followRedirects": "false",
+                          "http.sslVerify": "true", "core.hooksPath": os.devnull,
+                          "protocol.file.allow": "never", "protocol.ext.allow": "never",
+                          f"http.{url.rstrip('/')}.extraHeader": f"Authorization: Basic {credential}"}
+                env["GIT_CONFIG_COUNT"] = str(len(config))
+                for i, (key, value) in enumerate(config.items()):
+                    env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+                # The installer sees a local checkout, never the repository token.
+                with tempfile.TemporaryDirectory(prefix="coreman-skill-") as directory:
+                    checkout = str(Path(directory) / "repo")
+                    run_command(["git", "clone", "--depth", "1", "--template=", "--", url, checkout],
+                                path, timeout=180, env_override=env)
+                    command[4] = checkout
+                    run_command(command + ["-y"], path, timeout=300)
+            else:
+                run_command(command + ["-y"], path, timeout=300)
         return {"success": True, "message": "Skill 已安装"}
 
     def start_background(self, name: str, function) -> dict:

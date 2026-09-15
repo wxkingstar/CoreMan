@@ -21,7 +21,8 @@ from coreman.core.audit import record_audit
 from coreman.core.bots.secrets import decrypt_json, encrypt_json, mask_dict, merge_secret_dict
 from coreman.core.db.models import EnvPreset, Skill, SkillSource, User
 from coreman.core.knowledge import skill_policy as policy
-from coreman.core.knowledge.catalog_sync import fetch_catalog, sync_catalog
+from coreman.core.knowledge.catalog_sync import CatalogAccessError, fetch_catalog, sync_catalog
+from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
 from coreman.core.masking import mask_secret
 from coreman.core.timeutils import utcnow
 
@@ -46,6 +47,20 @@ class SourceIn(BaseModel):
     git_url: str | None = Field(default=None, max_length=1000)
     categories: dict[str, str] = Field(default_factory=dict, max_length=100)
     sort_order: int = Field(default=0, ge=0, le=10000)
+    access_token: str | None = Field(default=None, max_length=2000, repr=False)
+    remove_access_token: bool = False
+
+    @model_validator(mode="after")
+    def token_valid(self) -> SourceIn:
+        if self.access_token:
+            if self.remove_access_token or not self.git_url:
+                raise ValueError("请填写仓库地址，且不能同时设置和移除 token")
+            if (
+                any(c.isspace() or ord(c) < 32 for c in self.access_token)
+                or "•" in self.access_token
+            ):
+                raise ValueError("Project Access Token 格式无效，请填写完整值")
+        return self
 
     @field_validator("key")
     @classmethod
@@ -159,9 +174,28 @@ class PresetIn(BaseModel):
 
 def source_out(row: SkillSource) -> dict[str, Any]:
     return {
-        key: getattr(row, key)
-        for key in ("id", "key", "label", "git_url", "categories", "sort_order", "version")
+        **{
+            key: getattr(row, key)
+            for key in ("id", "key", "label", "git_url", "categories", "sort_order", "version")
+        },
+        "has_access_token": bool(row.access_token_enc),
     }
+
+
+def apply_source(row: SkillSource, body: SourceIn, request: Request) -> None:
+    if row.access_token_enc and not body.access_token and not body.remove_access_token:
+        if (
+            not body.git_url
+            or not row.git_url
+            or https_repository(body.git_url) != https_repository(row.git_url)
+        ):
+            raise ApiError(422, 422, "仓库地址已变更，请为新仓库重新填写 token 或移除原 token")
+    for key, value in body.model_dump(exclude={"access_token", "remove_access_token"}).items():
+        setattr(row, key, value)
+    if body.remove_access_token:
+        row.access_token_enc = None
+    elif body.access_token:
+        row.access_token_enc = request.app.state.cipher.encrypt(body.access_token, SOURCE_TOKEN_AAD)
 
 
 def skill_out(row: Skill) -> dict[str, Any]:
@@ -204,11 +238,13 @@ async def sources(
 @router.post("/skill-sources")
 async def create_source(
     body: SourceIn,
+    request: Request,
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     require_manager(actor)
-    row = SkillSource(**body.model_dump())
+    row = SkillSource()
+    apply_source(row, body, request)
     session.add(row)
     await session.flush()
     await audited(session, actor, "skill_source.create", str(row.id))
@@ -228,8 +264,7 @@ async def update_source(
     if row is None:
         raise not_found("技能来源不存在")
     require_if_match(request, row.version)
-    for key, value in body.model_dump().items():
-        setattr(row, key, value)
+    apply_source(row, body, request)
     row.updated_at = utcnow()
     await audited(session, actor, "skill_source.update", str(row.id))
     return {"code": 0, "data": source_out(row)}
@@ -250,10 +285,21 @@ async def sync_source(
     if not row.git_url:
         raise ApiError(422, 422, "请先为来源填写 Git 仓库地址")
     url = row.git_url
+    token = (
+        request.app.state.cipher.decrypt(row.access_token_enc, SOURCE_TOKEN_AAD)
+        if row.access_token_enc
+        else None
+    )
     # Do not retain a database transaction while fetching the remote manifest.
     await session.commit()
     try:
-        entries = await asyncio.to_thread(fetch_catalog, url)
+        entries = (
+            await asyncio.to_thread(fetch_catalog, url, token)
+            if token
+            else await asyncio.to_thread(fetch_catalog, url)
+        )
+    except CatalogAccessError as exc:
+        raise ApiError(422, 422, str(exc)) from None
     except (ValueError, OSError):
         raise ApiError(
             422,

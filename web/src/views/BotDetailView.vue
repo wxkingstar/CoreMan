@@ -224,7 +224,7 @@ onMounted(async () => {
           <h2>{{ bot.name }}</h2>
           <span class="muted">{{ bot.bot_key }}</span>
           <el-tag size="small">
-            {{ bot.platform }}
+            {{ t(`platforms.${bot.platform}`) }}
           </el-tag>
           <el-tag
             size="small"

@@ -82,6 +82,11 @@ class ClientIn(BaseModel):
     scopes: list[str] = Field(default_factory=list, max_length=20)
     enabled: bool = True
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("scopes")
     @classmethod
     def valid_scopes(cls, value: list[str]) -> list[str]:

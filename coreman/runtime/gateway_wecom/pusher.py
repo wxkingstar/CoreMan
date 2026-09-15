@@ -35,6 +35,7 @@ from coreman.core.i18n.messages import msg
 from coreman.core.logging import get_logger
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
 from coreman.runtime.bus import outbox, streams
+from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
 
 if TYPE_CHECKING:
     from coreman.runtime.gateway_wecom.runner import BotRunner
@@ -54,8 +55,9 @@ def _view_up_to(row: TaskStream, offset: int) -> StreamView:
     照库里的全量渲染的话，用户会先在流里看到一段、再在推送里看到同一段。
     """
     view = StreamView.from_row(row)
-    if offset and not view.is_complete and len(view.pending_text) > offset:
-        view.pending_text = view.pending_text[:offset]
+    view.pending_text = view.pending_text[:offset]
+    view.final_text = None
+    view.is_complete = False
     return view
 
 
@@ -173,7 +175,11 @@ class StreamPusher:
             },
         }
         try:
-            await self.runner.ws.send(frame)
+            await self.runner.ws.send_confirmed(frame)
+        except (DeliveryRejected, DeliveryUncertain) as exc:
+            self.blocked.add(row.stream_id)
+            self._log.warning("stream_not_confirmed", task_id=row.task_id, reason=str(exc))
+            return False
         except (RuntimeError, WebSocketException) as exc:
             self._log.info("stream_push_skipped", task_id=row.task_id, reason=type(exc).__name__)
             return False
@@ -271,7 +277,15 @@ class StreamPusher:
         row = await streams.get(session, task_id)
         if row is None:
             return
-        text = (row.final_text or "")[offset:]
+        final = row.final_text or ""
+        task = await session.get(Task, task_id)
+        successful = task is not None and task.status not in {"failed", "cancelled", "timed_out"}
+        prefix = (row.pending_text or "")[:offset]
+        text = (
+            final[offset:]
+            if successful and len(prefix) == offset and final.startswith(prefix)
+            else final
+        )
         chat_id = await self._chat_id(session, row)
         if not chat_id:
             # 没有会话 id 就真的没处送了：留一条 WARNING 给运维，别假装投递成功。

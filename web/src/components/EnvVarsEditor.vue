@@ -227,7 +227,7 @@ function removeRow(i: number): void {
 
 <style scoped>
 .env-vars-editor { width: 100%; }
-.mode-switch { margin-bottom: 8px; }
+.env-vars-editor .mode-switch { margin-bottom: 0; vertical-align: middle; }
 .env-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .env-cell { flex: 1; min-width: 0; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; margin-right: 8px; }

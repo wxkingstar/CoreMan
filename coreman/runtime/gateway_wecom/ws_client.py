@@ -78,6 +78,16 @@ class _Reconnect(Exception):
     """内部信号：当前连接不可用，退出内层任务走外层退避重连。"""
 
 
+class DeliveryRejected(RuntimeError):
+    def __init__(self, errcode: int, errmsg: str) -> None:
+        super().__init__(f"errcode={errcode} {errmsg}")
+        self.errcode = errcode
+
+
+class DeliveryUncertain(RuntimeError):
+    """发送后未收到确认，不能安全地声称已送达或盲目重投。"""
+
+
 def _as_int(value: Any, default: int) -> int:
     """errcode 一律按 int 读，但对端给什么都不能把收帧循环顶翻。"""
     try:
@@ -146,6 +156,7 @@ class WeComWsClient:
         self._stop = asyncio.Event()
         self._last_recv = 0.0
         self._log = get_logger(__name__)
+        self._acks: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     # ---- 对外 ----
 
@@ -183,6 +194,29 @@ class WeComWsClient:
             raise RuntimeError("WebSocket 未连接")
         await ws.send(json.dumps(data, ensure_ascii=False))
 
+    async def send_confirmed(self, data: dict[str, Any], *, timeout: float = 10.0) -> None:  # noqa: ASYNC109 bounded platform acknowledgement
+        """先登记回执再发送；接收循环只唤醒 future，不等待发送方的数据库锁。"""
+        req_id = str(data["headers"]["req_id"])
+        if req_id in self._acks:
+            raise RuntimeError("同一 req_id 正在等待确认")
+        future = asyncio.get_running_loop().create_future()
+        self._acks[req_id] = future
+        try:
+            async with asyncio.timeout(timeout):
+                await self.send(data)
+                ack = await future
+            code = _as_int(ack.get("errcode"), -1)
+            if code:
+                raise DeliveryRejected(code, str(ack.get("errmsg", ""))[:300])
+        except (TimeoutError, WebSocketException, OSError) as exc:
+            raise DeliveryUncertain("delivery_unknown: 未收到平台送达确认") from exc
+        finally:
+            self._acks.pop(req_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
+
     # ---- 连接循环 ----
 
     async def _run(self) -> None:
@@ -214,6 +248,11 @@ class WeComWsClient:
                 self._log.exception("wecom_ws_loop_error", bot_key=self.bot_key)
             finally:
                 self._ws = None
+                for waiter in self._acks.values():
+                    if not waiter.done():
+                        waiter.set_exception(
+                            DeliveryUncertain("delivery_unknown: connection closed")
+                        )
             if self._stopping or self.fused:
                 break
             await self._set_state(failure_state)
@@ -316,6 +355,11 @@ class WeComWsClient:
 
     async def _handle_ack(self, frame: dict[str, Any]) -> None:
         """ping / 推送的响应包：errcode 0 忽略，非 0 交给上层去反查 req_id 的推送上下文。"""
+        req_id = str((frame.get("headers") or {}).get("req_id", ""))
+        waiter = self._acks.get(req_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(frame)
+            return
         errcode = _as_int(frame.get("errcode"), 0)
         if errcode:
             from coreman.core.observability.metrics import WECOM_ERRORS
