@@ -2,7 +2,8 @@ import uuid
 
 import pytest
 
-from coreman.core.prompting.env_vars import build_env, env_keys_for_log
+from coreman.core.knowledge import skill_policy
+from coreman.core.prompting.env_vars import build_env, env_keys_for_log, is_reserved_key
 from coreman.core.prompting.system_prompt import Speaker
 
 
@@ -58,7 +59,6 @@ def test_static_credentials_never_survive_request_identity_rebinding(known: bool
         "COREMAN_USER_NAME": "someone-else",
         "AGENT_REAL_NAME": "someone-else",
         "BOT_TOKEN_ERP": "old-token",
-        "ETEAMS_TOKEN": "old-personal-token",
         "COREMAN_SYSTEMS": "old-systems",
         "BOT_SYSTEMS_CONFIG": "old-systems",
     }
@@ -70,7 +70,17 @@ def test_static_credentials_never_survive_request_identity_rebinding(known: bool
         platform_user_id="current",
         session_id="s",
         speaker=speaker,
-        bot_env={**forged, "DB_HOST": "shared", "BOT_KEY": "forged"},
+        # 平台只按 BOT_TOKEN_ 签发发言者令牌；其他前缀（如某业务系统自己的 *_TOKEN）
+        # 是机器人静态配置，照常下发。
+        bot_env={**forged, "DB_HOST": "shared", "BOT_KEY": "forged", "OA_TOKEN": "static"},
     )
     assert not set(forged) & set(env)
-    assert env["BOT_KEY"] == "b" and env["DB_HOST"] == "shared"
+    assert env["BOT_KEY"] == "b" and env["DB_HOST"] == "shared" and env["OA_TOKEN"] == "static"
+
+
+def test_reserved_keys_are_shared_with_skill_policy() -> None:
+    assert is_reserved_key("BOT_TOKEN_ANY") and is_reserved_key("COREMAN_USER_LOGIN")
+    assert not is_reserved_key("OA_TOKEN")
+    with pytest.raises(ValueError):
+        skill_policy.env_vars({"BOT_TOKEN_ERP": "x"})
+    assert skill_policy.env_vars({"OA_TOKEN": "x"}) == {"OA_TOKEN": "x"}

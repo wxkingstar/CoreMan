@@ -23,6 +23,21 @@ _ALIASES = {
     "COREMAN_SESSION_ID": "AGENT_BROWSER_SESSION",
 }
 
+# 请求级保留键：身份别名与业务系统配置只能由本轮已验证的发言者重建，机器人 env、
+# 技能预设都不得提供同名键。
+RESERVED_KEYS = frozenset(
+    set(_ALIASES)
+    | set(_ALIASES.values())
+    | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
+)
+# 平台按发言者签发的业务系统令牌前缀（见 core/auth/system_access.py）。静态配置里的
+# 同前缀键必然是上一轮或他人的令牌，一律丢弃。
+SPEAKER_TOKEN_PREFIX = "BOT_TOKEN_"
+
+
+def is_reserved_key(key: str) -> bool:
+    return key in RESERVED_KEYS or key.startswith(SPEAKER_TOKEN_PREFIX)
+
 
 def build_env(
     *,
@@ -42,16 +57,7 @@ def build_env(
     """
     # 先丢弃静态配置中的请求身份，再按本轮已验证的主体重建。否则未知发言者或
     # 通讯录缺少 login/name 时，会继承机器人创建者手填的身份与上一轮令牌。
-    reserved = (
-        set(_ALIASES)
-        | set(_ALIASES.values())
-        | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
-    )
-    env: dict[str, str] = {
-        k: str(v)
-        for k, v in bot_env.items()
-        if k not in reserved and not k.startswith(("BOT_TOKEN_", "ETEAMS_"))
-    }
+    env: dict[str, str] = {k: str(v) for k, v in bot_env.items() if not is_reserved_key(k)}
     request_level = {
         "COREMAN_BOT_KEY": bot_key,
         "COREMAN_PLATFORM": platform,
