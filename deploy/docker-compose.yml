@@ -6,11 +6,17 @@ x-hc: &hc
   retries: 4
   start_period: 20s
 
+# Docker 默认 json-file 不轮转；worker/网关每个任务多行结构化日志，长期运行会占满 /var/lib/docker。
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "50m", max-file: "5" }
+
 x-runtime: &runtime
   image: coreman-runtime:${COREMAN_IMAGE_TAG:-dev}
   build: { context: ., dockerfile: deploy/Dockerfile.runtime, args: {BUILD_REVISION: "${COREMAN_BUILD_REVISION:-unknown}"} }
   env_file: ${COREMAN_ENV_FILE:-.env}
   restart: unless-stopped
+  logging: *logging
   depends_on:
     migrate: { condition: service_completed_successfully }
     storage-init: { condition: service_completed_successfully }
@@ -19,6 +25,29 @@ x-runtime: &runtime
 services:
   postgres:
     image: postgres:16
+    # 连接预算：默认 max_connections=100 会先于业务 QPS 用尽，这里显式放宽到 300。
+    #   - api×2、worker×2、scheduler、企微网关、飞书网关各一个进程池，上限各 10（pool_size 5 + max_overflow 5），约 70 条；
+    #   - worker、网关各 1 条 LISTEN 连接，scheduler 1 条咨询锁连接，约 5 条；
+    #   - 网关 a/b 接管期间新旧两侧同时在线，再加约 11 条；
+    #   - 飞书网关每个应用一个子进程，各最多 5 条（20 个应用约 100 条）；
+    #   - 走 runtime 节点的在跑对话各占 1 条瞬时连接，migrate/operations 临时进程与管理员排查也需要余量。
+    #   合计约 200～250 条；`coreman status` 显示当前客户端连接数与上限，超过 80% 时告警。
+    # 内存：shared_buffers=256MB、work_mem=4MB 面向 2～4 GB 内存的单机，空闲连接每条另占数 MB。
+    #   内存更大时可把 shared_buffers 调到物理内存约 25%、effective_cache_size 调到 50%～75%。
+    # shm_size：并行查询使用 /dev/shm，Docker 默认 64MB 在连接数放宽后偏小。
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+    shm_size: 256mb
     environment:
       POSTGRES_DB: coreman
       POSTGRES_USER: coreman
@@ -30,6 +59,7 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *logging
     networks: [coreman]
 
   migrate:
@@ -39,12 +69,14 @@ services:
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
     depends_on:
       postgres: { condition: service_healthy }
+    logging: *logging
     networks: [coreman]
 
   operations:
     image: ${COREMAN_OPERATIONS_IMAGE:-coreman-api:${COREMAN_IMAGE_TAG:-dev}}
     profiles: [tools]
     env_file: ${COREMAN_ENV_FILE:-.env}
+    logging: *logging
     networks: [coreman]
     restart: "no"
 
@@ -54,6 +86,7 @@ services:
     command: ["/app/.venv/bin/python", "-m", "coreman.runtime.init_storage"]
     volumes: [storage:/data/storage]
     network_mode: none
+    logging: *logging
     restart: "no"
 
   api-1: &api
@@ -68,6 +101,7 @@ services:
       test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
     stop_grace_period: 30s
     restart: unless-stopped
+    logging: *logging
     volumes: [storage:/data/storage]
     networks: [coreman]
 
@@ -85,8 +119,10 @@ services:
       - caddy_config:/config
     depends_on: [api-1, api-2]
     restart: unless-stopped
+    logging: *logging
     networks: [coreman]
 
+  # 网关 a/b 同一时刻只有一侧活跃；b 侧放在 standby profile，由 deploy/coreman 按记录的活跃侧拉起。
   gateway-wecom-a:
     <<: *runtime
     command: ["/app/.venv/bin/python", "-m", "coreman.runtime.gateway_wecom"]
@@ -166,6 +202,7 @@ services:
       - prometheus_data:/prometheus
     networks: [coreman]
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   prometheus_data: {}
