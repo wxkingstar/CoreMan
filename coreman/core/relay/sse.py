@@ -1,4 +1,4 @@
-"""运行时 SSE 事件解析（report-clawrelay §2、§8.1、§11）。
+"""运行时 SSE 事件解析。
 
 relay 只发 `: 注释` 与 `data: <json>` 两种帧，以 `data: [DONE]` 收尾；每个 chunk 都带
 `finish_reason`（结束前恒为 null），`delta.content` 可能是 `null`/`""`，usage chunk 的
@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-# codex 后端没有 x_relay_error，只能靠正文里的这两个标记判定异常（report-clawrelay §11）。
+# codex 后端没有 x_relay_error，只能靠正文里的这两个标记判定异常。
 CODEX_ERROR_MARKERS = ("\n\n[codex error] ", "⚠️ [codex] 进程异常退出")
 
 
