@@ -142,7 +142,7 @@ rm -rf "$TOOL"
 
 ## 发布与开发
 
-CoreMan 数据库升级到 Alembic `0018_runtime_nodes`。API 镜像构建会生成四个安装包并包含安装脚本与会话查看模板。手工运行 API 时先构建：
+运行时节点要求 CoreMan 数据库已迁移到最新版本（`alembic upgrade head`，`deploy/coreman up` / `upgrade` 会自动执行）。API 镜像构建会生成四个安装包并包含安装脚本与会话查看模板。手工运行 API 时先构建：
 
 ```sh
 python3 runtime_daemon/build.py
@@ -171,4 +171,4 @@ Go 驱动基于开源项目 clawrelay-api 修改，上游快照记录在 `driver
 
 数据库注册/撤销/禁用、重复领取、加密流、响应去重、取消、目录逃逸和子进程终止均有测试。部署相关的单元测试覆盖：私有 CA 信任链（本地 HTTPS 服务）、socket 目录选择与驱动自愈、日志轮转、注册 4xx 的退出码、服务注册失败回滚、升级切换与回滚、卸载保留/清除，以及在符号链接 `$HOME` 下真实运行 `install.sh`（替身服务注册，不触碰本机 launchd/systemd）。Go 驱动、前端与 Agent 各自的测试套件同样纳入持续集成。端到端测试启动真实 Daemon、Go 二进制、API 与 PostgreSQL，AI CLI 使用隔离替身，不调用真实账户。
 
-四种架构通过交叉构建；本机 macOS ARM64 通过 Daemon 联调。Linux、macOS 的真实系统服务自启、升级/卸载命令对真实 systemd/launchd 的调用，以及现有 chroot/nspawn 宿主托管仍需在实际目标机器验收，测试不会修改开发者机器的登录项或已有服务。
+四种架构通过交叉构建；本机 macOS ARM64 通过 Daemon 联调。Linux、macOS 的真实系统服务自启、升级/卸载命令对真实 systemd/launchd 的调用，以及 chroot/nspawn 宿主托管，请在实际目标机器上验证；测试不会修改开发者机器的登录项或已有服务。
