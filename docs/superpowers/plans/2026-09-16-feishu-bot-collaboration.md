@@ -15,8 +15,8 @@
 - [x] Run meaningful unit/integration/API tests and review the diff.
 - [x] Build/migrate/roll local services; enable only the existing A/B QA group route.
 - [x] Real E2E: human mentions A, A invokes help, B-only data feedback reaches A, A summarizes. Change B-only data and repeat; collect message/task/outbox evidence.
-- [ ] Report actual E2E results and residual limits in a single-file HTML.
+- [x] Report actual E2E results and residual limits in a single-file HTML.
 
 Constraints: No blanket bot-to-human identity conversion; no creator fallback; one help request per original task; no recursive B help or resumed A help; same tenant/group; exact peer union IDs plus server-issued outbound message IDs; bounded lifetime; original human reply context; preserve all unrelated bots.
 
-Validation: 37 related tests passed; ruff and mypy (240 source files) passed. Independent review findings (source cancellation and dispatch-time runtime switch) were reproduced, fixed and re-reviewed. Two real QA flows succeeded on v3; final v4 will repeat with sufficient stock.
+Validation: 37 related tests passed; ruff and mypy (240 source files) passed. Independent review findings (source cancellation and dispatch-time runtime switch) were reproduced, fixed and re-reviewed. Three real QA flows passed: tasks 51→52→53 and 54→55→56 on v3, tasks 60→61→62 on final v4. B-only fixture changes produced availability 108→77→165 and shortage 12→43→0 (surplus45). Each chain verified original human, original A relay session, real Feishu request/reply IDs, final original-human reply and pushed delivery. The additional human-triggered online check (57→58→59) also succeeded. Evidence: outputs/feishu-mutual-mention-20260916/implementation-report.html and implementation-evidence.json.
