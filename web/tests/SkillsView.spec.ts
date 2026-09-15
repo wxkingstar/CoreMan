@@ -6,6 +6,9 @@ vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(),
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
+import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
+import SkillPresetDialog from '@/components/skills/SkillPresetDialog.vue'
+import SkillSourceDialog from '@/components/skills/SkillSourceDialog.vue'
 import { i18n } from '@/i18n'
 
 it('preserves encrypted MCP configuration and security fields when editing catalog metadata', async () => {
@@ -16,10 +19,11 @@ it('preserves encrypted MCP configuration and security fields when editing catal
   vi.mocked(skills.save).mockResolvedValue(row)
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
   await flushPromises()
-  const vm = wrapper.vm as unknown as { edit: (row: Skill) => void; rows: Skill[]; form: SkillInput; save: () => Promise<void> }
+  const vm = wrapper.vm as unknown as { edit: (row: Skill) => void; rows: Skill[] }
   vm.edit(vm.rows[0]!); await flushPromises()
-  vm.form.description = 'new'
-  await vm.save(); await flushPromises()
+  const dialog = wrapper.findComponent(SkillEditorDialog).vm as unknown as { form: SkillInput; save: () => Promise<void> }
+  dialog.form.description = 'new'
+  await dialog.save(); await flushPromises()
   expect(skills.save).toHaveBeenCalledWith(expect.objectContaining({ revision: 4 }), expect.objectContaining({ description: 'new', mcp_config: null, security_prompt_template: 'Read only', security_level: 'internal' }))
   wrapper.unmount()
 })
@@ -32,14 +36,14 @@ it('opens the filtered catalog after sync and preselects the source for new skil
   vi.mocked(skills.sourceSync).mockResolvedValue({ created: 2, updated: 0, unchanged: 1 })
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
   await flushPromises()
-  const vm = wrapper.vm as unknown as { syncSource: (row: unknown) => Promise<void>; edit: (row: null) => void; activeTab: string; sourceFilter: string; form: SkillInput; syncResult: string }
+  const vm = wrapper.vm as unknown as { syncSource: (row: unknown) => Promise<void>; edit: (row: null) => void; activeTab: string; sourceFilter: string; syncResult: string }
   await vm.syncSource(source)
   expect(skills.sourceSync).toHaveBeenCalledWith(source)
   expect(vm.activeTab).toBe('catalog')
   expect(vm.sourceFilter).toBe('source')
   expect(vm.syncResult).toContain('2')
   vm.edit(null)
-  expect(vm.form.source_id).toBe('source')
+  expect((wrapper.findComponent(SkillEditorDialog).vm as unknown as { form: SkillInput }).form.source_id).toBe('source')
   wrapper.unmount()
 })
 
@@ -49,13 +53,13 @@ it('saves raw environment input directly and retains masked values', async () =>
   vi.mocked(skills.presets).mockResolvedValue([])
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
   await flushPromises()
-  const vm = wrapper.vm as unknown as { editPreset: (row: unknown) => void; savePreset: () => Promise<void> }
+  const vm = wrapper.vm as unknown as { editPreset: (row: unknown) => void }
   vm.editPreset({ group_key: 'db_erp', label: 'ERP', vars: { DB_PASSWORD: '******mask' }, tags: [], version: 2 })
   await flushPromises()
   const editor = wrapper.findComponent(SkillEnvEditor)
   await editor.get('input[value=raw]').setValue(true)
   await editor.get('textarea').setValue('DB_PASSWORD="******mask"\nAPI_KEY="value#with=equals"')
-  await vm.savePreset()
+  await (wrapper.findComponent(SkillPresetDialog).vm as unknown as { savePreset: () => Promise<void> }).savePreset()
   expect(skills.presetSave).toHaveBeenCalledWith(expect.objectContaining({ group_key: 'db_erp', version: 2, vars: { DB_PASSWORD: '******mask', API_KEY: 'value#with=equals' } }))
   wrapper.unmount()
 })
@@ -69,16 +73,17 @@ it('keeps stored project tokens out of the form and clears newly entered tokens 
   vi.mocked(skills.sourceSave).mockResolvedValue(source as never)
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
   await flushPromises()
-  const vm = wrapper.vm as unknown as { editSource: (row: unknown) => void; saveSource: () => Promise<void>; sourceForm: { access_token: string; remove_access_token: boolean } }
+  const vm = wrapper.vm as unknown as { editSource: (row: unknown) => void }
+  const dialog = wrapper.findComponent(SkillSourceDialog).vm as unknown as { saveSource: () => Promise<void>; sourceForm: { access_token: string; remove_access_token: boolean } }
   vm.editSource(source)
-  expect(vm.sourceForm.access_token).toBe('')
-  expect(vm.sourceForm.remove_access_token).toBe(false)
-  await vm.saveSource()
+  expect(dialog.sourceForm.access_token).toBe('')
+  expect(dialog.sourceForm.remove_access_token).toBe(false)
+  await dialog.saveSource()
   expect(skills.sourceSave).toHaveBeenCalledWith(source, expect.objectContaining({ access_token: '', remove_access_token: false }))
   vm.editSource(source)
-  vm.sourceForm.access_token = 'test-token'
-  await vm.saveSource()
+  dialog.sourceForm.access_token = 'test-token'
+  await dialog.saveSource()
   expect(skills.sourceSave).toHaveBeenLastCalledWith(source, expect.objectContaining({ access_token: 'test-token' }))
-  expect(vm.sourceForm.access_token).toBe('')
+  expect(dialog.sourceForm.access_token).toBe('')
   wrapper.unmount()
 })

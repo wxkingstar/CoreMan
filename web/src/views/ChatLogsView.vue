@@ -1,29 +1,21 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
-import MarkdownContent from '@/components/MarkdownContent.vue'
+import ChatLogDetailDrawer from '@/components/chatLogs/ChatLogDetailDrawer.vue'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage } from 'element-plus'
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots as botsApi, chatLogs } from '@/api/admin'
 import type { BotOut, ChatLogOut, ChatLogStats } from '@/api/types'
 import { usePaged } from '@/composables/usePaged'
-import { formatBytes, formatDateTime } from '@/utils/format'
+import { latencyOf, statusType, tokensOf, userOf } from '@/utils/chatLogs'
+import { formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
 
 // 与 coreman/core/db/models/logs.py 的 CHAT_LOG_STATUSES / CHAT_TYPES 一一对应。
 const STATUSES = ['success', 'error', 'timeout', 'stopped', 'ask_user', 'failed'] as const
 const CHAT_TYPES = ['single', 'group', 'cron'] as const
-// 状态 tag 配色：成功绿、出错与失败红、超时与中止橙、等待补充蓝。
-const STATUS_TYPE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
-  success: 'success',
-  error: 'danger',
-  failed: 'danger',
-  timeout: 'warning',
-  stopped: 'warning',
-  ask_user: 'info',
-}
 
 type ChatFilters = {
   bot_id: string | null
@@ -56,11 +48,7 @@ const botList = ref<BotOut[]>([])
 const tab = ref<'logs' | 'stats'>('logs')
 const stats = ref<ChatLogStats | null>(null)
 const statsLoading = ref(false)
-const detail = reactive<{ visible: boolean; loading: boolean; data: ChatLogOut | null }>({
-  visible: false,
-  loading: false,
-  data: null,
-})
+const detailDrawer = ref<InstanceType<typeof ChatLogDetailDrawer>>()
 
 // el-date-picker 的 v-model 是 Date[]，后端要 ISO 字符串，中间过一层。
 const range = ref<[Date, Date] | null>(paged.filters.since && paged.filters.until ? [new Date(paged.filters.since), new Date(paged.filters.until)] : null)
@@ -77,14 +65,6 @@ function fail(e: unknown) {
   ElMessage.error(errorMessage(e))
 }
 
-/** 后端列表项没有 platform_user_id：姓名、登录名都为空（未映射到内部用户）时退到 user_id。 */
-function userOf(row: ChatLogOut): string {
-  return row.user_name || row.user_login || row.user_id || '—'
-}
-
-function statusType(status: string): 'success' | 'info' | 'warning' | 'danger' {
-  return STATUS_TYPE[status] ?? 'info'
-}
 
 // el-table-column 会先拿 `{ row: {} }` 空跑一次 default 插槽来探测子列，插槽里直接 t() 动态键
 // 会因此收到 undefined 并打印「Not found key」。列上的翻译一律过这两个守卫。
@@ -96,24 +76,6 @@ function chatTypeLabel(chatType: string | undefined): string {
   return chatType ? t(`chatLogs.chatTypes.${chatType}`) : '—'
 }
 
-/** `file_info` 是后端透传的 JSON（企微文件消息的 filename / size / mime），字段缺失时逐个兜底。 */
-function fileLine(info: Record<string, unknown>): string {
-  if (Array.isArray(info.files)) return info.files.filter((f) => f && typeof f === 'object').map((f) => fileLine(f as Record<string, unknown>)).join('；')
-  const { filename, mime, size } = info as { filename?: unknown; mime?: unknown; size?: unknown }
-  return `${filename ? String(filename) : '—'} · ${mime ? String(mime) : '—'} · ${formatBytes(Number(size ?? Number.NaN))}`
-}
-
-function num(v: number | null | undefined): string {
-  return v === null || v === undefined ? '—' : String(v)
-}
-
-function tokensOf(row: ChatLogOut): string {
-  return `${num(row.input_tokens)} / ${num(row.output_tokens)}`
-}
-
-function latencyOf(ms: number | null): string {
-  return ms === null ? '—' : `${ms} ms`
-}
 
 async function loadStats(): Promise<void> {
   statsLoading.value = true
@@ -132,16 +94,7 @@ function onTabChange(name: string | number): void {
 }
 
 async function openDetail(id: number): Promise<void> {
-  detail.visible = true
-  detail.loading = true
-  detail.data = null
-  try {
-    detail.data = await chatLogs.get(id)
-  } catch (e) {
-    fail(e)
-  } finally {
-    detail.loading = false
-  }
+  await detailDrawer.value?.open(id)
 }
 
 function onRowClick(row: ChatLogOut): void {
@@ -480,95 +433,11 @@ defineExpose({ paged, openDetail })
       </el-tab-pane>
     </el-tabs>
 
-    <el-drawer
-      v-model="detail.visible"
-      :title="t('chatLogs.detail')"
-      size="60%"
-    >
-      <div
-        v-loading="detail.loading"
-        data-test="drawer"
-      >
-        <template v-if="detail.data">
-          <el-descriptions
-            :column="2"
-            border
-          >
-            <el-descriptions-item :label="t('chatLogs.time')">
-              {{ formatDateTime(detail.data.request_at) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.bot')">
-              {{ detail.data.bot_name || '—' }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.user')">
-              {{ userOf(detail.data) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.status')">
-              <el-tag
-                :type="statusType(detail.data.status)"
-                disable-transitions
-              >
-                {{ t(`chatLogs.statuses.${detail.data.status}`) }}
-              </el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.latency')">
-              {{ latencyOf(detail.data.latency_ms) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.tokens')">
-              {{ tokensOf(detail.data) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.session')">
-              {{ detail.data.relay_session_id ?? '—' }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('chatLogs.tools')">
-              <span v-if="!detail.data.tools_used.length">—</span>
-              <el-tag
-                v-for="tool in detail.data.tools_used"
-                :key="tool"
-                class="chip"
-                type="info"
-                disable-transitions
-              >
-                {{ tool }}
-              </el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item
-              v-if="detail.data.file_info"
-              :label="t('chatLogs.file')"
-            >
-              {{ fileLine(detail.data.file_info) }}
-            </el-descriptions-item>
-          </el-descriptions>
-
-          <h4>{{ t('chatLogs.message') }}</h4>
-          <MarkdownContent :content="detail.data.message_content ?? detail.data.message_preview ?? '—'" />
-          <template v-if="detail.data.quoted_content">
-            <h4>{{ t('chatLogs.quoted') }}</h4>
-            <MarkdownContent :content="detail.data.quoted_content" />
-          </template>
-          <h4>{{ t('chatLogs.response') }}</h4>
-          <MarkdownContent :content="detail.data.response_content ?? detail.data.response_preview ?? '—'" />
-          <template v-if="detail.data.error_message || detail.data.error_code">
-            <h4>{{ t('chatLogs.error') }}</h4>
-            <pre class="body error">{{ detail.data.error_code }} {{ detail.data.error_message }}</pre>
-          </template>
-        </template>
-      </div>
-    </el-drawer>
+    <ChatLogDetailDrawer ref="detailDrawer" />
   </div>
 </template>
 
 <style scoped>
 .preview { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip { margin-right: 6px; }
-.body {
-  margin: 0 0 12px;
-  padding: 8px 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-  background: var(--el-fill-color-light);
-  border-radius: 4px;
-}
-.body.error { color: var(--el-color-danger); }
 </style>

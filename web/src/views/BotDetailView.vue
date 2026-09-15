@@ -7,13 +7,14 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { bots } from '@/api/admin'
-import type { AllowedUserOut, BotMemberOut, BotOut, SwitchRelayOut } from '@/api/types'
+import type { BotOut, SwitchRelayOut } from '@/api/types'
 import SystemGrants from '@/components/SystemGrants.vue'
 import BotHealthReport from '@/components/BotHealthReport.vue'
 import BotMemories from '@/components/BotMemories.vue'
 import BotSkills from '@/components/BotSkills.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
-import UserPicker from '@/components/UserPicker.vue'
+import BotAllowedUsersDialog from '@/components/bot/BotAllowedUsersDialog.vue'
+import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
@@ -30,17 +31,11 @@ const router = useRouter()
 const botId = String(route.params.id)
 const bot = ref<BotOut | null>(null)
 const loading = ref(false)
-const busy = ref(false)
 
 const editVisible = ref(false)
 const switchVisible = ref(false)
-const membersVisible = ref(false)
-const allowedVisible = ref(false)
-
-const members = ref<BotMemberOut[]>([])
-const allowed = ref<AllowedUserOut[]>([])
-const allowedIds = ref<string[]>([])
-const memberPick = ref<string[]>([])
+const membersDialog = ref<InstanceType<typeof BotMembersDialog>>()
+const allowedDialog = ref<InstanceType<typeof BotAllowedUsersDialog>>()
 
 const perms = computed(() => bot.value?.permissions ?? null)
 // 敏感字段只有 can_view_sensitive 时后端才下发；没下发就整块不渲染（而不是渲染成空）。
@@ -54,9 +49,7 @@ const credRows = computed(() => Object.entries(bot.value?.credentials ?? {}))
 // 明文环境变量用普通表格而不是 EnvVarsEditor：这是只读审阅视图，值要能整段换行、能被选中复制，
 // 而 el-input 里的值只是 DOM property（进不了页面文本），长串还会被输入框宽度截掉。
 const envFullRows = computed(() => Object.entries(bot.value?.env_vars_full ?? {}))
-// 协作者选择里排除创建者（后端 409）与已有成员（后端 409）。
-const memberExclude = computed(() => [bot.value?.created_by, ...members.value.map((m) => m.user_id)].filter((x): x is string => !!x))
-const allowedInitial = computed(() => allowed.value.map((u) => ({ id: u.user_id, display_name: u.display_name, login_name: u.login_name })))
+
 
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
@@ -76,32 +69,12 @@ async function reload(silent = false): Promise<void> {
   }
 }
 
-async function loadMembers(): Promise<void> {
-  try {
-    members.value = await bots.members(botId)
-  } catch (e) {
-    fail(e)
-  }
-}
-
-async function loadAllowed(): Promise<void> {
-  try {
-    allowed.value = await bots.allowedUsers(botId)
-    allowedIds.value = allowed.value.map((u) => u.user_id)
-  } catch (e) {
-    fail(e)
-  }
-}
-
 async function openMembers(): Promise<void> {
-  membersVisible.value = true
-  memberPick.value = []
-  await loadMembers()
+  await membersDialog.value?.open()
 }
 
 async function openAllowed(): Promise<void> {
-  allowedVisible.value = true
-  await loadAllowed()
+  await allowedDialog.value?.open()
 }
 
 async function toggle(): Promise<void> {
@@ -145,52 +118,6 @@ function onSwitched(result: SwitchRelayOut): void {
   }
 }
 
-async function addMembers(): Promise<void> {
-  if (!memberPick.value.length) return
-  busy.value = true
-  try {
-    // 逐个加：后端一次只收一个 user_id，且单个失败（已停用 422 / 已是协作者 409）不该拖垮其余。
-    for (const uid of memberPick.value) {
-      try {
-        await bots.addMember(botId, uid)
-      } catch (e) {
-        fail(e)
-      }
-    }
-    memberPick.value = []
-    await loadMembers()
-    await reload(true)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function removeMember(userId: string): Promise<void> {
-  busy.value = true
-  try {
-    await bots.removeMember(botId, userId)
-    await loadMembers()
-    await reload(true)
-  } catch (e) {
-    fail(e)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function saveAllowed(): Promise<void> {
-  busy.value = true
-  try {
-    allowed.value = await bots.setAllowedUsers(botId, allowedIds.value)
-    allowedIds.value = allowed.value.map((u) => u.user_id)
-    ElMessage.success(t('common.saved'))
-    await reload(true)
-  } catch (e) {
-    fail(e)
-  } finally {
-    busy.value = false
-  }
-}
 
 onMounted(async () => {
   await reload()
@@ -507,110 +434,20 @@ onMounted(async () => {
         @switched="onSwitched"
       />
 
-      <el-dialog
-        v-model="membersVisible"
-        :title="t('bots.detail.members')"
-        width="640px"
-      >
-        <p class="muted">
-          {{ t('bots.detail.membersHint') }}
-        </p>
-        <table class="kv members">
-          <thead>
-            <tr>
-              <th>{{ t('users.name') }}</th>
-              <th>{{ t('bots.detail.addedAt') }}</th>
-              <th v-if="perms?.can_manage_members">
-                {{ t('common.actions') }}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="m in members"
-              :key="m.user_id"
-            >
-              <td>
-                {{ m.display_name }}
-                <span class="muted">{{ m.login_name ?? '—' }}</span>
-              </td>
-              <td>{{ formatDateTime(m.added_at) }}</td>
-              <td v-if="perms?.can_manage_members">
-                <el-button
-                  size="small"
-                  type="danger"
-                  plain
-                  :loading="busy"
-                  :data-test="'remove-member-' + m.user_id"
-                  @click="removeMember(m.user_id)"
-                >
-                  {{ t('bots.detail.removeMember') }}
-                </el-button>
-              </td>
-            </tr>
-            <tr v-if="!members.length">
-              <td :colspan="perms?.can_manage_members ? 3 : 2">
-                —
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div
-          v-if="perms?.can_manage_members"
-          class="picker-row"
-        >
-          <UserPicker
-            v-model="memberPick"
-            :exclude="memberExclude"
-          />
-          <el-button
-            type="primary"
-            :loading="busy"
-            :disabled="!memberPick.length"
-            data-test="add-member"
-            @click="addMembers"
-          >
-            {{ t('bots.detail.addMember') }}
-          </el-button>
-        </div>
-      </el-dialog>
+      <BotMembersDialog
+        ref="membersDialog"
+        :bot-id="botId"
+        :created-by="bot.created_by"
+        :perms="perms"
+        @changed="reload(true)"
+      />
 
-      <el-dialog
-        v-model="allowedVisible"
-        :title="t('bots.detail.allowedUsers')"
-        width="640px"
-      >
-        <p class="muted">
-          {{ t('bots.detail.allowedHint') }}
-        </p>
-        <template v-if="perms?.can_edit">
-          <div class="picker-row">
-            <UserPicker
-              v-model="allowedIds"
-              :initial="allowedInitial"
-            />
-            <el-button
-              type="primary"
-              :loading="busy"
-              data-test="save-allowed"
-              @click="saveAllowed"
-            >
-              {{ t('bots.detail.save') }}
-            </el-button>
-          </div>
-        </template>
-        <ul v-else>
-          <li
-            v-for="u in allowed"
-            :key="u.user_id"
-          >
-            {{ u.display_name }}<span class="muted">{{ u.login_name ? ` (${u.login_name})` : '' }}</span>
-          </li>
-          <li v-if="!allowed.length">
-            —
-          </li>
-        </ul>
-      </el-dialog>
+      <BotAllowedUsersDialog
+        ref="allowedDialog"
+        :bot-id="botId"
+        :perms="perms"
+        @changed="reload(true)"
+      />
     </template>
     <el-empty v-else-if="!loading" />
   </div>
@@ -632,6 +469,5 @@ h3 { margin: 20px 0 8px; }
 .kv { border-collapse: collapse; width: 100%; }
 .kv th, .kv td { border: 1px solid var(--el-border-color-lighter); padding: 6px 10px; text-align: left; font-weight: normal; word-break: break-all; }
 .kv th { background: var(--el-fill-color-light); width: 220px; }
-.members th { width: auto; }
-.picker-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+
 </style>
