@@ -517,11 +517,12 @@ export default {
     cardIconUrl: '卡片来源图标 URL',
     cardIconHint: '企微模板卡片左上角的来源图标；留空则不显示图标。',
     prompts: '提示词段落',
-    promptHint: '这七段会拼进每个AI 员工的系统提示词，改动对所有AI 员工立即生效；不能留空，留空请填回出厂文案。',
+    promptHint: '这些段落会拼进每个AI 员工的系统提示词（定时任务约束只在定时执行时加入），改动对所有AI 员工立即生效；不能留空，留空请填回出厂文案。',
     prompt: {
       security_policy: '安全策略',
       codex_contract: 'Codex 输出契约',
       runtime_mode: '运行模式',
+      cron_mode: '定时任务约束',
       runtime_tail: '运行模式尾部提醒',
       verbosity_2: '输出详细度 2（简洁）',
       verbosity_3: '输出详细度 3（标准）',

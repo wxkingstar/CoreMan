@@ -519,11 +519,12 @@ export default {
     cardIconUrl: 'カードのソースアイコン URL',
     cardIconHint: 'WeCom テンプレートカード左上に表示されるソースアイコン。空欄の場合はアイコンを表示しません。',
     prompts: 'プロンプト段落',
-    promptHint: 'この 7 段落は各AI スタッフのシステムプロンプトに組み込まれ、変更は全AI スタッフに即時反映されます。空欄は不可です。',
+    promptHint: 'これらの段落は各AI スタッフのシステムプロンプトに組み込まれ（定期タスクの制約は定期実行時のみ）、変更は全AI スタッフに即時反映されます。空欄は不可です。',
     prompt: {
       security_policy: 'セキュリティポリシー',
       codex_contract: 'Codex 出力コントラクト',
       runtime_mode: '実行モード',
+      cron_mode: '定期タスクの制約',
       runtime_tail: '実行モードの末尾リマインダー',
       verbosity_2: '出力詳細度 2（簡潔）',
       verbosity_3: '出力詳細度 3（標準）',
