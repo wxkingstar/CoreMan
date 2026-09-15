@@ -26,6 +26,7 @@ vi.mock('@/api/admin', () => ({
 
 import { platformApps, syncRuns } from '@/api/admin'
 import { i18n } from '@/i18n'
+import PlatformAppFormDialog from '@/components/platformApps/PlatformAppFormDialog.vue'
 import PlatformAppsView from '@/views/PlatformAppsView.vue'
 
 describe('PlatformAppsView', () => {
@@ -85,7 +86,7 @@ describe('PlatformAppsView', () => {
     await flushPromises()
     await wrapper.get('[data-test="create-app"]').trigger('click')
     await flushPromises()
-    const vm = wrapper.vm as unknown as { form: { name: string; corp_id: string | null; secret: string }; submitForm: () => Promise<void>; saving: boolean }
+    const vm = wrapper.findComponent(PlatformAppFormDialog).vm as unknown as { form: { name: string; corp_id: string | null; secret: string }; submitForm: () => Promise<void>; saving: boolean }
     Object.assign(vm.form, { name: '登录应用', corp_id: 'ww2', secret: 'secret-value' })
     await flushPromises()
     const first = vm.submitForm()

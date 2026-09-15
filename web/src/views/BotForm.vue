@@ -2,13 +2,15 @@
 import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage, type FormInstance } from 'element-plus'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots, catalog, relays, settings, teams as teamsApi } from '@/api/admin'
 import { ApiError } from '@/api/client'
-import type { BotIn, BotOut, BotPatch, CatalogOut, EffortLevel, Platform, RelayOut, TeamOut } from '@/api/types'
-import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
-import SecretInput from '@/components/SecretInput.vue'
+import type { BotIn, BotOut, BotPatch, CatalogOut, Platform, RelayOut, TeamOut } from '@/api/types'
+import BotFormIdentity from '@/components/botForm/BotFormIdentity.vue'
+import BotFormRuntime from '@/components/botForm/BotFormRuntime.vue'
+import BotFormSecurity from '@/components/botForm/BotFormSecurity.vue'
+import { botFormKey } from '@/components/botForm/context'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ mode: 'create' | 'edit'; bot?: BotOut }>()
@@ -23,10 +25,7 @@ const CRED_KEYS: Record<Platform, readonly string[]> = {
   wecom: ['bot_id', 'secret'],
   feishu: ['app_id', 'app_secret', 'encrypt_key', 'verification_token'],
 }
-const PLATFORMS: Platform[] = ['wecom', 'feishu']
-const SSE_OPTIONS = [1800, 3600, 7200, 14400, 21600, 43200]
-const VERBOSITY_OPTIONS = [1, 2, 3, 4]
-const EFFORT_OPTIONS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh']
+
 const BOT_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,49}$/
 
 function credDefaults(platform: Platform): Record<string, string> {
@@ -308,6 +307,12 @@ onMounted(async () => {
   originalForm = JSON.stringify(form)
 })
 
+// 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
+provide(botFormKey, {
+  mode: props.mode, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
+  modelOptions, xhighAllowed, sensitiveVisible, credKeys, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
+})
+
 defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
 </script>
 
@@ -329,290 +334,11 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
           href="#form-security"
         >03 {{ t('workspace.security') }}</a><a href="#form-experience">04 {{ t('workspace.experience') }}</a>
       </nav>
-      <h3
-        id="form-identity"
-        class="cm-section-title"
-      >
-        <span>01</span>{{ t('workspace.identity') }}
-      </h3>
-      <el-form-item
-        :label="t('bots.botKey')"
-        data-test="bot_key"
-        :error="fieldErrors.bot_key"
-      >
-        <el-input
-          v-model="form.bot_key"
-          :disabled="mode === 'edit'"
-          @input="onBotKeyInput"
-        />
-        <div class="muted">
-          {{ t('bots.botKeyHint') }}
-        </div>
-      </el-form-item>
+      <BotFormIdentity />
 
-      <el-form-item
-        :label="t('bots.platform')"
-        data-test="platform"
-        :error="fieldErrors.platform"
-      >
-        <el-select
-          v-model="form.platform"
-          :disabled="mode === 'edit'"
-          style="width: 200px"
-          @change="onPlatformChange"
-        >
-          <el-option
-            v-for="p in PLATFORMS"
-            :key="p"
-            :label="t(`platforms.${p}`)"
-            :value="p"
-          />
-        </el-select>
-      </el-form-item>
+      <BotFormRuntime />
 
-      <el-form-item
-        :label="t('bots.name')"
-        data-test="name"
-        :error="fieldErrors.name"
-      >
-        <el-input v-model="form.name" />
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.description')"
-        data-test="description"
-        :error="fieldErrors.description"
-      >
-        <el-input
-          v-model="form.description"
-          type="textarea"
-          :rows="2"
-        />
-      </el-form-item>
-
-      <el-form-item
-        v-if="isManager"
-        :label="t('bots.team')"
-        data-test="team"
-        :error="fieldErrors.team_id"
-      >
-        <el-select
-          :model-value="form.team_id"
-          clearable
-          :placeholder="t('bots.team')"
-          style="width: 240px"
-          @update:model-value="form.team_id = ($event as string | undefined) ?? null"
-        >
-          <el-option
-            v-for="tm in teamList"
-            :key="tm.id"
-            :label="tm.name_zh"
-            :value="tm.id"
-          />
-        </el-select>
-      </el-form-item>
-
-      <h3
-        id="form-runtime"
-        class="cm-section-title"
-      >
-        <span>02</span>{{ t('workspace.configuration') }}
-      </h3>
-      <el-form-item
-        :label="t('bots.relay')"
-        data-test="relay"
-        :error="fieldErrors.relay_server_id"
-      >
-        <template v-if="props.mode === 'create' && runtimeGroups.length">
-          <el-select
-            :model-value="selectedRuntime"
-            clearable
-            :placeholder="t('runtimeNodes.nodes')"
-            @update:model-value="selectRuntime($event as string | null)"
-          >
-            <el-option
-              v-for="node in runtimeGroups"
-              :key="node.id"
-              :label="node.name"
-              :value="node.id"
-            />
-          </el-select>
-          <el-select
-            :model-value="form.relay_server_id"
-            :placeholder="t('runtimeNodes.aiType')"
-            style="margin-left: 10px"
-            @update:model-value="selectRelay($event as string)"
-          >
-            <el-option
-              v-for="backend in runtimeBackends"
-              :key="backend.id"
-              :value="backend.id"
-              :label="backend.model_provider === 'claude' ? 'Claude Code' : 'Codex / GPT'"
-              :disabled="!backend.effective_models.length"
-            />
-          </el-select>
-        </template>
-        <el-select
-          v-else
-          :model-value="form.relay_server_id"
-          clearable
-          :disabled="mode === 'edit'"
-          :placeholder="t('bots.noRelay')"
-          style="width: 320px"
-          @update:model-value="selectRelay(($event as string) ?? null)"
-        >
-          <el-option
-            v-for="r in relayList"
-            :key="r.id"
-            :label="`${r.name} · ${r.model_provider} · ${r.team_name ?? t('bots.publicPool')}`"
-            :value="r.id"
-          />
-        </el-select>
-        <div
-          v-if="mode === 'edit'"
-          class="muted"
-        >
-          {{ t('bots.relayLocked') }}
-        </div>
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.model')"
-        data-test="model"
-        :error="fieldErrors.model"
-      >
-        <el-select
-          v-model="form.model"
-          filterable
-          style="width: 320px"
-        >
-          <el-option
-            v-for="m in modelOptions"
-            :key="m"
-            :label="m"
-            :value="m"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.effort')"
-        data-test="effort"
-        :error="fieldErrors.effort_level"
-      >
-        <el-select
-          :model-value="form.effort_level"
-          clearable
-          :placeholder="t('bots.effortNone')"
-          style="width: 200px"
-          @update:model-value="form.effort_level = ($event as EffortLevel) ?? null"
-        >
-          <el-option
-            v-for="lv in EFFORT_OPTIONS"
-            :key="lv"
-            :label="lv"
-            :value="lv"
-            :disabled="lv === 'xhigh' && !xhighAllowed"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.verbosity')"
-        data-test="verbosity"
-        :error="fieldErrors.verbosity_level"
-      >
-        <el-select
-          v-model="form.verbosity_level"
-          style="width: 200px"
-        >
-          <el-option
-            v-for="lv in VERBOSITY_OPTIONS"
-            :key="lv"
-            :label="t(`bots.verbosityLevels.${lv}`)"
-            :value="lv"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.workingDir')"
-        data-test="working_dir"
-        :error="fieldErrors.working_dir"
-      >
-        <el-input v-model="form.working_dir" />
-      </el-form-item>
-
-      <el-form-item
-        :label="t('bots.sseTimeout')"
-        data-test="sse_timeout"
-        :error="fieldErrors.sse_timeout_seconds"
-      >
-        <el-select
-          v-model="form.sse_timeout_seconds"
-          style="width: 200px"
-        >
-          <el-option
-            v-for="s in SSE_OPTIONS"
-            :key="s"
-            :label="String(s)"
-            :value="s"
-          />
-        </el-select>
-      </el-form-item>
-
-      <h3
-        v-if="sensitiveVisible"
-        id="form-security"
-        class="cm-section-title"
-      >
-        <span>03</span>{{ t('workspace.security') }}
-      </h3>
-      <el-form-item
-        v-if="sensitiveVisible"
-        :label="t('bots.systemPrompt')"
-        data-test="system_prompt"
-        :error="fieldErrors.system_prompt"
-      >
-        <el-input
-          v-model="form.system_prompt"
-          type="textarea"
-          :rows="4"
-        />
-      </el-form-item>
-
-      <template v-if="sensitiveVisible">
-        <el-form-item
-          :label="t('bots.credentials')"
-          class="section"
-          :error="fieldErrors.credentials"
-        />
-        <el-form-item
-          v-for="k in credKeys"
-          :key="k"
-          :label="t(`bots.cred.${k}`)"
-        >
-          <SecretInput
-            :model-value="form.credentials[k] ?? ''"
-            :data-test="'cred-' + k"
-            :start-editing="mode === 'create'"
-            :placeholder="t(`bots.cred.${k}`)"
-            @update:model-value="form.credentials[k] = $event ?? ''"
-          />
-        </el-form-item>
-
-        <el-form-item
-          :label="t('bots.envVars')"
-          data-test="env_vars"
-          :error="fieldErrors.env_vars"
-        >
-          <EnvVarsEditor
-            :model-value="form.env_vars"
-            @update:model-value="form.env_vars = $event"
-            @invalid="onEnvInvalid"
-          />
-        </el-form-item>
-      </template>
+      <BotFormSecurity />
 
       <h3
         id="form-experience"
@@ -659,8 +385,3 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
     </el-form-item>
   </el-form>
 </template>
-
-<style scoped>
-.muted { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
-.section { font-weight: 600; }
-</style>
