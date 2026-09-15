@@ -1,6 +1,6 @@
-"""结构性守卫：spec §10.4 要求 /api/admin/* 一律「cookie 会话 + CSRF」。
+"""结构性守卫：/api/admin/* 一律「cookie 会话 + CSRF」。
 
-M1 会往管理台加几十个写端点，靠每个 handler 自己调 verify_csrf 迟早会漏，
+管理台有几十个写端点，靠每个 handler 自己调 verify_csrf 迟早会漏，
 所以直接在路由表上断言：CSRF 校验必须挂在路由器级依赖上。
 """
 

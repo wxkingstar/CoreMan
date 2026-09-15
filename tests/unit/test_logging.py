@@ -57,7 +57,7 @@ def test_unknown_level_falls_back_to_info(capsys: pytest.CaptureFixture[str]) ->
 
 def test_fields_survive_fresh_context(capsys: pytest.CaptureFixture[str]) -> None:
     """uvicorn 的请求任务不继承 lifespan 的 contextvars；service/instance 必须由处理器
-    静态注入，否则请求路径的日志会缺这两个字段（spec §13）。"""
+    静态注入，否则请求路径的日志会缺这两个字段。"""
     configure_logging(service="api", instance="api-1", level="INFO")
     contextvars.Context().run(lambda: get_logger("t").info("in_request"))
     rec = json.loads(capsys.readouterr().out.strip().splitlines()[-1])

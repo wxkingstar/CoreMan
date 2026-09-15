@@ -1,4 +1,4 @@
-"""迁移门禁（spec §12 双版本并存）：upgrade() 只能扩展表结构，不能让还在跑的上一版本失败。
+"""迁移门禁（双版本并存）：upgrade() 只能扩展表结构，不能让还在跑的上一版本失败。
 
 升级时先跑迁移、再逐个替换进程，窗口期内上一版本的 api / worker 仍在读写新库。所以
 upgrade() 里禁止：
@@ -290,7 +290,7 @@ def _scan_versions() -> list[Violation]:
 def test_upgrade_only_expands_schema() -> None:
     unexpected = [v for v in _scan_versions() if (v.revision, v.rule) not in ALLOWED]
     assert not unexpected, (
-        "迁移违反双版本并存规则（spec §12）。改成可空列或带 server_default 的列、把删除/改类型"
+        "迁移违反双版本并存规则。改成可空列或带 server_default 的列、把删除/改类型"
         "留到下一版本，或在 ALLOWED 里写明上一版本为何不受影响：\n"
         + "\n".join(str(v) for v in unexpected)
     )

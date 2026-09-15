@@ -1,4 +1,4 @@
-"""M3a：交互待答状态 interaction_states 与公告 announcements
+"""交互待答状态 interaction_states 与公告 announcements
 
 Revision ID: 0005
 Revises: 0004
