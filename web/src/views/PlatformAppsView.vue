@@ -229,7 +229,20 @@ function openEdit(a: PlatformAppOut) {
   dialogVisible.value = true
 }
 
+const saving = ref(false)
+
+/** 双击保存：第二次会撞「记录已存在」409 并弹出误导性的错误。 */
 async function submitForm() {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await saveApp()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveApp() {
   resetServerErrors()
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
@@ -587,6 +600,7 @@ onBeforeUnmount(() => {
         <el-button
           type="primary"
           data-test="save-app"
+          :loading="saving"
           @click="submitForm"
         >
           {{ t('common.save') }}

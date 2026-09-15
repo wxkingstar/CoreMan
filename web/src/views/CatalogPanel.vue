@@ -98,11 +98,15 @@ function openCreate() {
   dialogVisible.value = true
 }
 
+const saving = ref(false)
+
 async function submitForm() {
+  if (saving.value) return
   if (!form.provider || !form.model) {
     ElMessage.error(t('login.required', { field: t('catalog.model') }))
     return
   }
+  saving.value = true
   try {
     await catalog.create({ ...form })
     ElMessage.success(t('common.saved'))
@@ -110,6 +114,8 @@ async function submitForm() {
     await load()
   } catch (e) {
     ElMessage.error(errorMessage(e))
+  } finally {
+    saving.value = false
   }
 }
 
@@ -286,6 +292,7 @@ onMounted(load)
         <el-button
           type="primary"
           data-test="save-model"
+          :loading="saving"
           @click="submitForm"
         >
           {{ t('common.save') }}

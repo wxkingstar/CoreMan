@@ -74,7 +74,20 @@ function openEdit(team: TeamOut) {
   dialogVisible.value = true
 }
 
+const saving = ref(false)
+
+/** 提交防重入：双击第二次会撞唯一约束 409。 */
 async function submitForm() {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await saveTeam()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveTeam() {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
   try {
@@ -136,8 +149,11 @@ function setRulePlatform(row: RuleIn, value: string | number | boolean | undefin
   row.platform = value === 'wecom' || value === 'feishu' ? value : null
 }
 
+const savingRules = ref(false)
+
 async function saveRules() {
-  if (!rulesTeamId.value) return
+  if (!rulesTeamId.value || savingRules.value) return
+  savingRules.value = true
   try {
     await teamsApi.replaceRules(rulesTeamId.value, ruleRows.value)
     ElMessage.success(t('common.saved'))
@@ -146,6 +162,8 @@ async function saveRules() {
     emit('changed')
   } catch (e) {
     ElMessage.error(errorMessage(e))
+  } finally {
+    savingRules.value = false
   }
 }
 </script>
@@ -296,6 +314,8 @@ async function saveRules() {
         </el-button>
         <el-button
           type="primary"
+          data-test="save-team"
+          :loading="saving"
           @click="submitForm"
         >
           {{ t('common.save') }}
@@ -375,6 +395,7 @@ async function saveRules() {
         <el-button
           type="primary"
           data-test="save-rules"
+          :loading="savingRules"
           @click="saveRules"
         >
           {{ t('common.save') }}
