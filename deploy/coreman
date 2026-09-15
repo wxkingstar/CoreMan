@@ -9,7 +9,7 @@ while [[ -L "$_self" ]]; do
   [[ "$_self" != /* ]] && _self="$_dir/$_self"
 done
 ROOT="$(cd "$(dirname "$_self")/.." && pwd)"
-# compose 的 --env-file 按 CWD 解析，服务里的 env_file: 按 --project-directory（=$ROOT）解析。
+# compose 的 --env-file 按 CWD 解析，服务里的 env_file: 按 --project-directory（=${ROOT}）解析。
 # 只有绝对路径能让两者指向同一个文件；导出后 compose 才能插值 ${COREMAN_ENV_FILE:-.env}。
 ENV_FILE="${COREMAN_ENV_FILE:-$ROOT/.env}"
 case "$ENV_FILE" in /*) ;; *) ENV_FILE="$PWD/$ENV_FILE" ;; esac
@@ -76,7 +76,7 @@ current_tag() {
 
 env_set() {  # env_set KEY VALUE：存在则替换，不存在则追加（用 python 避免 sed 跨平台差异）
   if [[ ! -f "$ENV_FILE" ]]; then
-    echo "未找到 $ENV_FILE，请先执行 coreman up 生成配置" >&2
+    echo "未找到 ${ENV_FILE}，请先执行 coreman up 生成配置" >&2
     return 1
   fi
   ENV_FILE="$ENV_FILE" KEY="$1" VALUE="$2" python3 - <<'PY'
@@ -242,7 +242,7 @@ preflight_images() {  # preflight_images <tag>：两种镜像都已在本机才�
     echo "镜像预检失败，本机缺少：${missing# }。未改动任何容器或状态文件。"
     echo "处理方式："
     echo "  - 在对应提交上构建：coreman build --tag $tag"
-    echo "  - 或拉取发布镜像后改名：docker pull ghcr.io/<owner>/coreman-api:$tag && docker tag ghcr.io/<owner>/coreman-api:$tag coreman-api:$tag（coreman-runtime 同理）"
+    echo "  - 或拉取发布镜像后改名：docker pull ghcr.io/<owner>/coreman-api:$tag && docker tag ghcr.io/<owner>/coreman-api:$tag coreman-api:${tag}（coreman-runtime 同理）"
     echo "  - 查看本机已有标签：docker image ls coreman-api; docker image ls coreman-runtime"
   } >&2
   return 2
@@ -273,7 +273,7 @@ active_side() {  # active_side <platform>：优先状态文件；缺失时 a 未
   fi
   if [[ "$side" == a ]]; then other=b; else other=a; fi
   if ! service_running "gateway-$platform-$side" && service_running "gateway-$platform-$other"; then
-    echo "注意：$GATEWAY_STATE_FILE 记录 $platform 活跃侧为 $side，但只有 $other 侧在运行，按 $other 处理" >&2
+    echo "注意：$GATEWAY_STATE_FILE 记录 $platform 活跃侧为 ${side}，但只有 $other 侧在运行，按 $other 处理" >&2
     side="$other"
   fi
   echo "$side"
@@ -324,7 +324,7 @@ begin_upgrade() {  # begin_upgrade <命令描述>：写入 pending，之后的�
     write_state "$PENDING_FILE" "$UPGRADE_TAG"
   fi
   UPGRADE_ACTIVE=1
-  echo "开始：$UPGRADE_COMMAND（部署标签 ${DEPLOYED_TAG:-未记录}）"
+  echo "开始：${UPGRADE_COMMAND}（部署标签 ${DEPLOYED_TAG:-未记录}）"
 }
 
 finish_upgrade() {
@@ -334,24 +334,24 @@ finish_upgrade() {
   fi
   UPGRADE_ACTIVE=0
   DEPLOYED_TAG="$UPGRADE_TAG"
-  echo "完成：$UPGRADE_COMMAND；部署标签已更新为 $UPGRADE_TAG"
+  echo "完成：${UPGRADE_COMMAND}；部署标签已更新为 $UPGRADE_TAG"
 }
 
 report_failed_upgrade() {
   local code="$1"
   {
     echo
-    echo "未完成：$UPGRADE_COMMAND（退出码 $code）。"
-    echo "已保留 $PENDING_FILE（$UPGRADE_TAG）；部署标签仍为 ${DEPLOYED_TAG:-未记录}。"
+    echo "未完成：${UPGRADE_COMMAND}（退出码 ${code}）。"
+    echo "已保留 ${PENDING_FILE}（${UPGRADE_TAG}）；部署标签仍为 ${DEPLOYED_TAG:-未记录}。"
     echo "各容器当前实际镜像："
     report_images
     echo "恢复建议："
     echo "  1. coreman logs <服务> 查看失败原因；排空超时表示仍有在途任务，不要删除容器或数据卷。"
-    echo "  2. 排除问题后重跑：$UPGRADE_COMMAND（已就绪的服务会先排空再重建，不会丢在途任务）。"
+    echo "  2. 排除问题后重跑：${UPGRADE_COMMAND}（已就绪的服务会先排空再重建，不会丢在途任务）。"
     if [[ "$UPGRADE_COMMAND" == "coreman upgrade"* && -n "$DEPLOYED_TAG" && "$DEPLOYED_TAG" != "$UPGRADE_TAG" ]]; then
-      echo "  3. 放弃本次升级：coreman rollback $DEPLOYED_TAG（不回退数据库，仅适用于兼容迁移）。"
+      echo "  3. 放弃本次升级：coreman rollback ${DEPLOYED_TAG}（不回退数据库，仅适用于兼容迁移）。"
     fi
-    echo "  4. 确认各服务版本与排空状态后，可手工删除 $PENDING_FILE。"
+    echo "  4. 确认各服务版本与排空状态后，可手工删除 ${PENDING_FILE}。"
   } >&2
 }
 
@@ -372,11 +372,11 @@ check_pending() {  # 有未完成的升级时拒绝整体启动，避免把已�
   pending="$(read_first_line "$PENDING_FILE")"
   [[ -n "$pending" ]] || return 0
   if [[ "$force" == 1 ]]; then
-    echo "注意：忽略未完成的升级 $pending（--force）" >&2
+    echo "注意：忽略未完成的升级 ${pending}（--force）" >&2
     return 0
   fi
   {
-    echo "存在未完成的升级：$PENDING_FILE（$pending），部署标签为 ${DEPLOYED_TAG:-未记录}。"
+    echo "存在未完成的升级：${PENDING_FILE}（${pending}），部署标签为 ${DEPLOYED_TAG:-未记录}。"
     echo "整体启动会按部署标签重建服务，可能把已升级的服务拉回旧版本。请先："
     echo "  - 继续升级：coreman upgrade all $pending"
     [[ -z "$DEPLOYED_TAG" ]] || echo "  - 或放弃：coreman rollback $DEPLOYED_TAG"
@@ -423,7 +423,7 @@ cmd_status() {
   echo "部署标签：${DEPLOYED_TAG:-未记录（使用 .env 的 COREMAN_IMAGE_TAG）}"
   pending="$(read_first_line "$PENDING_FILE")"
   if [[ -n "$pending" ]]; then
-    echo "警告：存在未完成的升级（$PENDING_FILE：$pending），处理方法见 docs/operations.md"
+    echo "警告：存在未完成的升级（${PENDING_FILE}：${pending}），处理方法见 docs/operations.md"
   fi
   for platform in "${GATEWAY_PLATFORMS[@]}"; do
     sides="$sides $platform=$(active_side "$platform")"
@@ -468,10 +468,10 @@ cmd_build() {
   [[ "$tag" =~ $TAG_PATTERN ]] || { echo "镜像标签无效：$tag" >&2; return 2; }
   if reason="$(tag_in_use "$tag")"; then
     if [[ "$force" != 1 ]]; then
-      echo "拒绝覆盖正在使用的镜像标签 $tag（$reason）：覆盖后无法再回退到该版本。请提交后重新构建或用 --tag 指定新标签；确认要覆盖时加 --force。" >&2
+      echo "拒绝覆盖正在使用的镜像标签 ${tag}（${reason}）：覆盖后无法再回退到该版本。请提交后重新构建或用 --tag 指定新标签；确认要覆盖时加 --force。" >&2
       return 2
     fi
-    echo "注意：覆盖正在使用的镜像标签 $tag（$reason，--force）" >&2
+    echo "注意：覆盖正在使用的镜像标签 ${tag}（${reason}，--force）" >&2
   fi
   export COREMAN_IMAGE_TAG="$tag"
   compose build migrate worker-a
