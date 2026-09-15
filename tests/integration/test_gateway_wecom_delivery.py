@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
 
@@ -11,13 +12,16 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from websockets.exceptions import ConnectionClosedError
 
+from coreman.core.bots.secrets import CREDENTIALS_AAD
 from coreman.core.bus import outbox, streams
-from coreman.core.db.models import OutboxItem
+from coreman.core.crypto import Cipher
+from coreman.core.db.models import Bot, OutboxItem
 from coreman.core.db.session import make_session_factory
 from coreman.core.i18n.messages import msg
 from coreman.runtime.gateway_wecom.pusher import RETIRE_SECONDS
 from tests.fakes.fake_wecom_ws import FakeWeComWs
 from tests.integration.test_gateway_wecom import _bot, _seed_stream, _start, _stream_row, _wait
+from tests.integration.worker_helpers import MASTER
 
 
 async def _outbox_rows(db_engine: AsyncEngine) -> dict[str, OutboxItem]:
@@ -47,6 +51,56 @@ async def _make_due(db_engine: AsyncEngine) -> None:
             update(OutboxItem).values(not_before=func.now() - text("interval '1 second'"))
         )
         await s.commit()
+
+
+async def test_a_stuck_bot_does_not_hold_up_the_other_bots(
+    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings
+) -> None:  # type: ignore[no-untyped-def]
+    """出站按 bot 各跑各的：一个 bot 卡在等回执，同实例的其它 bot 照常发，也不叠第二趟。"""
+    bot = await _bot(db_session)
+    other = Bot(
+        bot_key="other_bot",
+        platform="wecom",
+        name="另一个",
+        created_by=bot.created_by,
+        model="vllm/claude-sonnet-4-6",
+        working_dir="/d",
+        credentials_enc=Cipher(MASTER).encrypt(
+            json.dumps({"bot_id": "bot2", "secret": "sec2"}), CREDENTIALS_AAD
+        ),
+    )
+    db_session.add(other)
+    await db_session.commit()
+    fake = FakeWeComWs(accepted={"bot1": "sec", "bot2": "sec2"})
+    url = await fake.start()
+    service, runner = await _start(url)
+    stuck = asyncio.Event()
+    try:
+        await _wait(lambda: len(service.runners) == 2 and {"bot1", "bot2"} <= set(fake.connections))
+        calls: list[int] = []
+
+        async def hang() -> None:
+            calls.append(1)
+            await stuck.wait()
+
+        service.runners[bot.id].outbox.consume = hang  # type: ignore[method-assign]
+        await _add_sends(db_engine, bot.id, [("51:send:0", {"markdown": "卡住的"})])
+        await _wait(lambda: bool(calls))
+        await _add_sends(db_engine, other.id, [("52:send:0", {"markdown": "照常"})])
+
+        async def other_sent() -> bool:
+            row = (await _outbox_rows(db_engine)).get("52:send:0")
+            return row is not None and row.status == "sent"
+
+        await _wait(other_sent)
+        await asyncio.sleep(0.5)  # 再过几轮兜底轮询
+        assert calls == [1]  # 卡住的那一趟没跑完，不会再叠一趟
+        assert [b["markdown"]["content"] for b in fake.sent_messages()] == ["照常"]
+    finally:
+        stuck.set()
+        service.request_stop("test")
+        await asyncio.wait_for(runner, 15)
+        await fake.stop()
 
 
 async def test_outbox_queued_while_the_subscription_is_rejected_is_delivered_later(

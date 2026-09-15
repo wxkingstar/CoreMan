@@ -346,3 +346,51 @@ async def test_outbox_claim_backoff_and_retry(db_session: AsyncSession) -> None:
     await db_session.commit()
     brow = (await db_session.execute(select(OutboxItem).where(OutboxItem.id == b.id))).scalar_one()
     assert brow.status == "skipped" and brow.last_error == "stale generation"
+
+
+async def test_poll_probes_find_only_the_bots_that_have_work(db_session: AsyncSession) -> None:
+    """网关兜底轮询先用一条语句找出有活的 bot，再只对它们开事务推流 / 认领出站。"""
+    bot = await _bot(db_session)
+    idle = Bot(
+        bot_key="b2",
+        platform="wecom",
+        name="b2",
+        created_by=bot.created_by,
+        model="m",
+        working_dir="/d",
+        credentials_enc="enc:v1:x",
+    )
+    db_session.add(idle)
+    await db_session.commit()
+    ids = [bot.id, idle.id]
+    assert await outbox.bots_with_due(db_session, ids) == set()
+    assert await streams.bots_with_pending(db_session, ids) == set()
+    assert await outbox.bots_with_due(db_session, []) == set()
+    assert await streams.bots_with_pending(db_session, []) == set()
+    await _send(db_session, bot, "9:send:0")
+    await outbox.add(
+        db_session,
+        bot_id=idle.id,
+        platform="wecom",
+        kind="send",
+        dedupe_key="10:send:0",
+        target={"chat_id": "c"},
+        payload={"markdown": "later"},
+        not_before=datetime.now(UTC) + timedelta(hours=1),
+    )
+    t = await tasks.enqueue(db_session, NewTask(bot_id=bot.id, kind="chat", session_key="u1"))
+    assert t
+    await streams.create(
+        db_session,
+        task_id=t.id,
+        bot_id=bot.id,
+        platform="wecom",
+        stream_id="s1",
+        reply_context={"req_id": "r1"},
+        lease_generation=1,
+        running_since=datetime.now(UTC),
+    )
+    await streams.update(db_session, t.id, pending_text="hi")
+    await db_session.commit()
+    assert await outbox.bots_with_due(db_session, ids) == {bot.id}
+    assert await streams.bots_with_pending(db_session, ids) == {bot.id}

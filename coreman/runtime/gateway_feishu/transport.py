@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from coreman.core.bus import outbox, streams
 from coreman.core.chat.reachability import private_target_valid
@@ -26,6 +26,10 @@ from coreman.runtime.gateway_feishu.cards import (
 )
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+# 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
+_OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))")
+# 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
+OUTBOX_PER_ROUND = 20
 
 
 def api_id(value: Any) -> str:
@@ -51,10 +55,17 @@ class FeishuTransport:
         bot_id: uuid.UUID,
         instance_id: str,
         generation: int,
+        guard: AsyncConnection | None = None,
     ) -> None:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
         self._last_call = 0.0
+        # 常驻连接（子进程的应用独占锁连接）：出站锁在它的长事务上拿一次，持有到进程退出，
+        # 每一轮就不必再占一条池连接跨越整轮。
+        self._guard = guard
+        self._output_held = False
+        # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
+        self._round_fenced = False
 
     async def fence(self) -> None:
         async with self.factory() as session:
@@ -74,7 +85,8 @@ class FeishuTransport:
 
     async def call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         await asyncio.sleep(max(0, self._last_call + 0.3 - time.monotonic()))
-        await self.fence()
+        if not self._round_fenced:
+            await self.fence()
         self._last_call = time.monotonic()
         return await self.client.call(method, path, **kwargs)
 
@@ -104,16 +116,27 @@ class FeishuTransport:
             )
         return api_id((result.get("data") or {}).get("message_id"))
 
-    async def round(self) -> None:
-        # 单独的锁事务跨越多个状态提交：新旧 child 不能同时更新同一卡片。
+    async def round(self) -> bool:
+        """推一轮流卡片、发一批出站；返回 True 表示出站还没发完（调用方别等兜底，接着来）。
+
+        新旧 child 不能同时更新同一卡片：本 bot 的出站锁要么由构造时给的常驻连接持有（拿到
+        一次就一直持有），要么在这里开一个跨越整轮的锁事务。租约围栏每轮只在开头查一次。
+        """
+        await self.fence()
+        key = {"key": f"feishu-output:{self.bot_id}"}
+        if self._guard is not None:
+            if not self._output_held:
+                self._output_held = bool(await self._guard.scalar(_OUTPUT_LOCK, key))
+            return self._output_held and await self._deliver()
+        # 单独的锁事务跨越多个状态提交。
         async with self.factory() as guard:
-            acquired = await guard.scalar(
-                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
-                {"key": f"feishu-output:{self.bot_id}"},
-            )
-            if not acquired:
-                return
-            await self.fence()
+            if not await guard.scalar(_OUTPUT_LOCK, key):
+                return False
+            return await self._deliver()
+
+    async def _deliver(self) -> bool:
+        self._round_fenced = True
+        try:
             async with self.factory() as session:
                 rows = list(
                     await session.scalars(
@@ -142,9 +165,12 @@ class FeishuTransport:
                         if delivery.failures >= 6 or exc.code in {230013, -2}:
                             delivery.fallback = True
                         await session.commit()
-            for _ in range(20):
+            for _ in range(OUTBOX_PER_ROUND):
                 if not await self.consume_one():
-                    break
+                    return False
+            return True
+        finally:
+            self._round_fenced = False
 
     async def sequence(self, task_id: int) -> int:
         async with self.factory() as session:

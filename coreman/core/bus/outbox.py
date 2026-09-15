@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -309,6 +310,26 @@ async def list_failed(session: AsyncSession, *, limit: int = 200) -> list[Outbox
 async def count_pending(session: AsyncSession) -> int:
     stmt = select(func.count()).select_from(OutboxItem).where(OutboxItem.status == "pending")
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def bots_with_due(session: AsyncSession, bot_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+    """兜底轮询用：这些 bot 里哪些此刻有到点的待发条目。
+
+    一条语句（走 `outbox_pending_idx`）代替「每个 bot 开一个事务跑一次认领」；同组前序项还没
+    落定的那种「有条目但领不到」留给认领语句自己判断。
+    """
+    if not bot_ids:
+        return set()
+    stmt = (
+        select(OutboxItem.bot_id)
+        .where(
+            OutboxItem.bot_id.in_(list(bot_ids)),
+            OutboxItem.status == "pending",
+            OutboxItem.not_before <= func.now(),
+        )
+        .distinct()
+    )
+    return {bot_id for bot_id in (await session.execute(stmt)).scalars() if bot_id is not None}
 
 
 async def begin_attempt(session: AsyncSession, item: OutboxItem, req_id: str) -> None:
