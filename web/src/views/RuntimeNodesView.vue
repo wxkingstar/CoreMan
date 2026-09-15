@@ -3,7 +3,7 @@ import { errorMessage } from '@/utils/errors'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { runtimeNodes, type RuntimeNode, type InstallLink } from '@/api/runtimeNodes'
+import { runtimeNodes, type RuntimeNode, type InstallInput, type InstallLink } from '@/api/runtimeNodes'
 import { relays, teams } from '@/api/admin'
 import type { TeamOut, RelayOut } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -47,7 +47,21 @@ async function saveName() {
 }
 const generated = ref<InstallLink | null>(null)
 const form = reactive({ name: '', workspace_root: '', team_id: null as string | null,
-  options: { control_proxy: '', environment: 'auto', proxy: '', claude_path: '', codex_path: '', max_concurrent: 10, install_claude_probe: false } })
+  options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', max_concurrent: 10, install_claude_probe: false } })
+const CA_PEM_MAX_BYTES = 64 * 1024
+const CA_PEM_RE = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/
+/** 私有 CA 证书即时校验：留空合法（不传该键）；填了就必须是 PEM 证书且不超过 64 KB。 */
+const caPemError = computed(() => {
+  const pem = form.options.ca_pem.trim()
+  if (!pem) return ''
+  if (new TextEncoder().encode(pem).length > CA_PEM_MAX_BYTES) return t('runtimeNodes.caPemTooLarge')
+  return CA_PEM_RE.test(pem) ? '' : t('runtimeNodes.caPemInvalid')
+})
+function installPayload(): InstallInput {
+  const { ca_pem, ...options } = form.options
+  const pem = ca_pem.trim()
+  return { ...form, options: pem ? { ...options, ca_pem: pem } : options }
+}
 const filtered = computed(() => nodes.value.filter(n => `${n.name} ${n.hostname} ${n.username} ${n.workspace_root}`.toLowerCase().includes(query.value.toLowerCase())))
 let timer: ReturnType<typeof setInterval> | undefined
 async function refresh(silent = false) {
@@ -90,8 +104,9 @@ async function create() {
   if (!form.workspace_root.startsWith('/') || form.workspace_root === '/') {
     ElMessage.warning(t('runtimeNodes.rootRequired')); return
   }
+  if (caPemError.value) { ElMessage.warning(caPemError.value); return }
   creating.value = true
-  try { generated.value = await runtimeNodes.createLink(form); await refresh() }
+  try { generated.value = await runtimeNodes.createLink(installPayload()); await refresh() }
   catch (error) { ElMessage.error(errorMessage(error)) }
   finally { creating.value = false }
 }
@@ -418,6 +433,21 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 />
                 <p class="muted proxy-hint">
                   {{ t('runtimeNodes.controlProxyHint') }}
+                </p>
+              </el-form-item>
+              <el-form-item
+                :label="t('runtimeNodes.caPem')"
+                :error="caPemError"
+                data-test="runtime-ca-pem"
+              >
+                <el-input
+                  v-model="form.options.ca_pem"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                />
+                <p class="muted proxy-hint">
+                  {{ t('runtimeNodes.caPemHint') }}
                 </p>
               </el-form-item>
               <el-form-item :label="t('runtimeNodes.environment')">

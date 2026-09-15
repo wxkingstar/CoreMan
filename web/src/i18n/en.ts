@@ -7,7 +7,7 @@ const en = {
   runtimeNodes: {
     editName: 'Edit name', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
     validityHint: 'The installation link is valid for 24 hours and can install one runtime. Copy it and run it on the target machine.',
-    controlProxy: 'CoreMan connection proxy', environment: 'Installation environment',
+    controlProxy: 'CoreMan connection proxy', caPem: 'Private CA certificate (PEM)', caPemHint: 'Required when the HTTPS address uses a self-signed or private CA certificate on an internal network. When set, the first download command must pass the certificate file path to curl --cacert.', caPemInvalid: 'Paste a PEM certificate that includes -----BEGIN CERTIFICATE----- and -----END CERTIFICATE-----.', caPemTooLarge: 'The certificate must not exceed 64 KB.', environment: 'Installation environment',
     sessionService: 'User service started. An administrator must enable linger to start it at boot without a login.',
     proxyHint: 'Leave blank to use the runtime environment’s HTTP(S) proxy, or connect directly if none is configured. Claude / Codex requests may fail if the target machine cannot reach AI services directly.',
     controlProxyHint: 'Leave blank to connect directly to CoreMan without the HTTP(S) proxy above. The target machine must reach the platform directly, or downloads, registration, and task communication will fail.',

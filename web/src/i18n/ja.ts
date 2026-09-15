@@ -5,6 +5,10 @@ export default {
     renameHint: 'ランタイムを識別する名前です。保存すると AI 社員一覧にも反映されます。',
     validityHint: 'リンクは発行から 24 時間有効で、1 つのランタイムにのみ使用できます。コピーして対象マシンで実行してください。',
     controlProxy: 'CoreMan 接続プロキシ',
+    caPem: 'プライベート CA 証明書（PEM）',
+    caPemHint: '社内の自己署名証明書やプライベート CA が発行した HTTPS アドレスでは入力が必要です。入力した場合、最初のダウンロードコマンドは curl --cacert に証明書ファイルのパスを付けて実行してください。',
+    caPemInvalid: 'PEM 形式の証明書を貼り付けてください（-----BEGIN CERTIFICATE----- と -----END CERTIFICATE----- を含む）',
+    caPemTooLarge: '証明書は 64 KB 以内にしてください',
 
     proxyHint: '空欄：ランタイム環境の HTTP(S) プロキシ設定を使用し、設定がなければ直接接続します。AI サービスへ直接接続できない場合、Claude / Codex のリクエストが失敗する可能性があります。',
     controlProxyHint: '空欄：上記の HTTP(S) プロキシを使わず、CoreMan に直接接続します。対象マシンから直接アクセスできない場合、インストールパッケージの取得、ランタイムの接続、タスク通信が失敗します。',

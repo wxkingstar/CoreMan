@@ -20,7 +20,8 @@ export interface InstallLink {
 }
 export interface InstallInput {
   name: string; workspace_root: string; team_id: string | null
-  options: { control_proxy?: string; environment?: string; proxy: string; claude_path: string; codex_path: string; max_concurrent: number; install_claude_probe: boolean }
+  /** ca_pem：私有 CA 证书（PEM，≤64 KB）；留空时不传该键。 */
+  options: { control_proxy?: string; environment?: string; proxy: string; ca_pem?: string; claude_path: string; codex_path: string; max_concurrent: number; install_claude_probe: boolean }
 }
 const base = '/api/admin/runtime-nodes'
 export const runtimeNodes = {

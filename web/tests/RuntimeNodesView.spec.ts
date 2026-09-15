@@ -118,3 +118,25 @@ it('shows node concurrency only when the daemon reports it', async () => {
   expect(cells[0].text()).toBe('并发 3 / 10')
   wrapper.unmount()
 })
+// 内网自签 / 私有 CA 的 HTTPS 地址需要随安装链接下发 CA 证书；留空不传，填了要即时校验格式与大小。
+it('validates the optional private CA certificate and only sends it when filled', async () => {
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="install-runtime"]').trigger('click'); await flushPromises()
+  expect(wrapper.find('[data-test="runtime-ca-pem"]').exists()).toBe(true)
+  const vm = wrapper.vm as unknown as { form: { workspace_root: string; options: { ca_pem: string } }; caPemError: string; create: () => Promise<void>; generated: unknown }
+  vm.form.workspace_root = '/home/ai/projects'
+  await vm.create(); await flushPromises()
+  expect(vi.mocked(runtimeNodes.createLink).mock.calls[0][0].options).not.toHaveProperty('ca_pem')
+  vm.form.options.ca_pem = 'not a certificate'
+  expect(vm.caPemError).toBe(i18n.global.t('runtimeNodes.caPemInvalid'))
+  await vm.create()
+  expect(runtimeNodes.createLink).toHaveBeenCalledTimes(1)
+  vm.form.options.ca_pem = `-----BEGIN CERTIFICATE-----\n${'A'.repeat(65 * 1024)}\n-----END CERTIFICATE-----`
+  expect(vm.caPemError).toBe(i18n.global.t('runtimeNodes.caPemTooLarge'))
+  const pem = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----\n'
+  vm.form.options.ca_pem = pem
+  expect(vm.caPemError).toBe('')
+  await vm.create(); await flushPromises()
+  expect(vi.mocked(runtimeNodes.createLink).mock.calls[1][0].options).toMatchObject({ ca_pem: pem.trim(), max_concurrent: 10 })
+  wrapper.unmount()
+})
