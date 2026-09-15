@@ -1,4 +1,4 @@
-"""管理台会话 cookie（签名的 admin_sessions.id）、双 cookie CSRF、登录限流（spec §10.1）。"""
+"""管理台会话 cookie（签名的 admin_sessions.id）、双 cookie CSRF、登录限流。"""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ async def verify_csrf(request: Request) -> None:
 
 
 class DbLoginLimiter:
-    """登录失败限流（spec §14：5 次/分钟），记录在 login_attempts，api 多副本共享。
+    """登录失败限流（5 次/分钟），记录在 login_attempts，api 多副本共享。
 
     只记失败：成功登录不计数，否则一个人正常登录几次就会把自己锁死。
     非法 IP（无法入 INET 列）统一记为 0.0.0.0，仍然计数。

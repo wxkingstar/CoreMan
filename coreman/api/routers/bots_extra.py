@@ -1,8 +1,8 @@
-"""机器人子资源：切换 relay、启停、协作者、白名单（spec §5.2、§10.2、§10.4）。
+"""机器人子资源：切换 relay、启停、协作者、白名单。
 
-与 Task 7 的 CRUD 共用 `/api/admin/bots` 前缀，拆成第二个路由器只是为了让 bots.py 不再变长；
+与 bots.py 的 CRUD 共用 `/api/admin/bots` 前缀，拆成第二个路由器只是为了让 bots.py 不再变长；
 校验与视图函数（load_bot / member_ids_of / build_out）都从那边复用，换机的判定与副作用则在
-`coreman.core.bots.switch_relay` 里——worker 的限流自动切换（spec §8.8）走的是同一条路。
+`coreman.core.bots.switch_relay` 里——worker 的限流自动切换走的是同一条路。
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class MemberIn(BaseModel):
 
 
 class AllowedUsersIn(BaseModel):
-    """整体替换：空数组 = 不限制（spec §5.2）。"""
+    """整体替换：空数组 = 不限制。"""
 
     user_ids: list[uuid.UUID] = Field(max_length=500)
 

@@ -1,4 +1,4 @@
-"""对话日志（spec §5.7）。不挂 bots 外键：bot 删除后日志保留。"""
+"""对话日志。不挂 bots 外键：bot 删除后日志保留。"""
 
 from __future__ import annotations
 

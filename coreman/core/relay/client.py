@@ -27,7 +27,7 @@ from coreman.core.runtime_nodes.transport import (
 
 _AUTH_MARKERS = ("not logged in", "/login", "401")
 
-# verbosity 档位到 relay settings.outputStyle 的映射；1 档不传 settings（spec §8.3）。
+# verbosity 档位到 relay settings.outputStyle 的映射；1 档不传 settings。
 VERBOSITY_OUTPUT_STYLES = {2: "verbosity-normal", 3: "verbosity-quiet", 4: "verbosity-silent"}
 
 
@@ -57,7 +57,7 @@ class RelayHealth:
 
 @dataclass
 class ChatRequest:
-    """一次 relay 对话请求的全部输入（spec §8.3）。"""
+    """一次 relay 对话请求的全部输入。"""
 
     model: str
     system_prompt: str

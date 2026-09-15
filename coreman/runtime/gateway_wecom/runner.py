@@ -1,4 +1,4 @@
-"""一个 bot 的运行体：长连接 + 入站入队 + 流推送 + 出站箱消费（spec §6.5、§7.3）。
+"""一个 bot 的运行体：长连接 + 入站入队 + 流推送 + 出站箱消费。
 
 `BotInfo` 是这个 bot 的运行期快照（含解密后的密钥，只在内存里）。租约认领成功时创建
 `BotRunner`，释放租约时销毁；`bots` 行变化通过 `config_changed` 热更新：
@@ -33,7 +33,7 @@ from coreman.runtime.gateway_wecom.ws_client import WeComWsClient
 if TYPE_CHECKING:  # 服务持有 runner，runner 只在类型层面引用服务，运行期不成环
     from coreman.runtime.gateway_wecom.service import GatewayWecomService
 
-# 企微推送错误码（平台协议 §3.3）：频控；流已结束或不存在的那一组 STREAM_DEAD 与 pusher 同源。
+# 企微推送错误码：频控；流已结束或不存在的那一组 STREAM_DEAD 与 pusher 同源。
 RATE_LIMITED = 846607
 # 「等一会儿再发就好」的那一族：频控 846607、接口调用超限 45009、系统繁忙 -1。
 # 出站箱的条目撞上它们要放回队列重发；其余错误码（参数、凭证、会话不存在）重试也没用。
@@ -138,7 +138,7 @@ class BotRunner:
         await self.ws.stop()
 
     async def reconnect(self, bot: BotInfo | None = None) -> None:
-        """凭证变了：旧连接必须断。熔断过的客户端是一次性的，所以整只换新（Task 10）。"""
+        """凭证变了：旧连接必须断。熔断过的客户端是一次性的，所以整只换新。"""
         # 换连接期间不能有别的协程正拿着旧的 self.ws 发帧，所以整段在锁里做。
         async with self.lock:
             await self.ws.stop()
@@ -149,7 +149,7 @@ class BotRunner:
             await self.ws.start()
 
     async def drain(self) -> None:
-        """单 bot 排空的 ①②（spec §6.5）：停出站消费，给未完成的流补一个 finish。
+        """单 bot 排空的 ①②：停出站消费，给未完成的流补一个 finish。
 
         推不出去（连接已经断了）也照样把流置成 proactive：这条流此后归 worker 的 outbox 管，
         不能留在「等网关推」的状态里。已经完成的流不翻 proactive——它只差最后一帧 finish，
@@ -209,7 +209,7 @@ class BotRunner:
     # ---- 长连接回调 -------------------------------------------------------
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
-        """收帧任务里同步跑：只做归一化 + 入队，绝不在这里跑对话（Task 10 的背压点）。"""
+        """收帧任务里同步跑：只做归一化 + 入队，绝不在这里跑对话（背压点）。"""
         message = normalize_frame(
             self.bot, frame, gateway_instance=self.service.instance_id, now=datetime.now(UTC)
         )
@@ -233,7 +233,7 @@ class BotRunner:
             await session.commit()
         if state == "kicked" and self.ws.fused:
             # 熔断不可自愈：交回租约（服务在下一轮扫描里做，回调里不能 stop 自己所在的任务），
-            # 冷却期内不再认领，免得和抢连的那一方打起来。M4 接告警。
+            # 冷却期内不再认领，免得和抢连的那一方打起来。
             self._log.warning("wecom_kick_fused", kicks=len(self.ws.kick_times))
             self.service.note_fused(self.bot.id)
 

@@ -1,4 +1,4 @@
-"""消费阶段（spec §8.4）：逐帧消费 SSE、驱动两阶段超时，结果只记进 Outcome。"""
+"""消费阶段：逐帧消费 SSE、驱动两阶段超时，结果只记进 Outcome。"""
 
 from __future__ import annotations
 

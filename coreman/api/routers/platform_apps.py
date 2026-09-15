@@ -1,4 +1,4 @@
-"""平台应用（spec §5.1 platform_apps；§10.2：仅 platform_admin）。"""
+"""平台应用（platform_apps；仅 platform_admin 可用）。"""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
-"""模型目录的读取、有效模型集与默认模型（spec §5.3 末段；本计划裁决 2、3）。
+"""模型目录的读取、有效模型集与默认模型。
 
-`load_catalog` 原先住在 `coreman/api/routers/model_catalog.py`，限流自动切换（spec §8.8）
+`load_catalog` 原先住在 `coreman/api/routers/model_catalog.py`，限流自动切换
 把它拉了进来：worker 不该为了读一张目录表去 import FastAPI 路由模块。原位置再导出。
 """
 

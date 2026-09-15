@@ -1,4 +1,4 @@
-"""用户可见文案（spec §13）。代码里不得散落硬编码提示；测试从这里取期望值。"""
+"""用户可见文案。代码里不得散落硬编码提示；测试从这里取期望值。"""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "choice_config_changed": "机器人配置已变更，之前的提问已失效，请重新发送消息。",
         "choice_submit_done": "已收到您的选择，处理完成。",
-        # 限流切换卡片（spec §8.8）点完之后回给用户的告知卡：标题进 main_title.title，
+        # 限流切换卡片点完之后回给用户的告知卡：标题进 main_title.title，
         # 正文进 sub_title_text。卡面其余字样（选项、按钮）在 cards.py 里。
         "rl_expired_title": "⏰ 已过期",
         "rl_expired_desc": "卡片已过期（30 分钟有效），请重新触发",
@@ -189,7 +189,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "worker_lost": "任务执行进程异常中断，请重试。",
         "drain_suffix": "\n\n⏳ 服务切换中，任务继续在后台处理，稍后自动推送结果",
         "processing_done": "处理完成。",
-        # sessions / 会话列表（spec §8.2 步骤 4）：zh 默认文案。
+        # sessions / 会话列表：zh 默认文案。
         "sessions_header": "📋 最近 {n} 个会话（回复序号切换，5 分钟内有效）",
         "no_sessions": "暂无历史会话",
         "session_switched": "✅ 已切换到会话 {index}：{preview}",
@@ -199,7 +199,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "rt_hours": "{n} 小时前",
         "rt_yesterday": "昨天",
         "rt_days": "{n} 天前",
-        # 媒体与引用消息（spec §8.2 步骤 6-7）。前半段是塞进 content parts 发给模型的
+        # 媒体与引用消息。前半段是塞进 content parts 发给模型的
         # 提示词，随附件一起发送给模型；
         # 后半段 downloading_* / media_reason_* 才是给用户看的。
         "media_prompt_image": "请描述这张图片的内容。",

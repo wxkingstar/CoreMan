@@ -1,4 +1,4 @@
-"""M3b：系统授权、调用方凭证与 ES256 密钥。"""
+"""系统授权、调用方凭证与 ES256 密钥。"""
 
 from __future__ import annotations
 

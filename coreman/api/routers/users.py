@@ -1,4 +1,4 @@
-"""用户管理（spec §10.2、§10.3 团队与用户页）。
+"""用户管理（管理台团队与用户页）。
 
 列表/详情对所有登录用户开放：协作者、白名单、定时任务接收人的选择器要按名字搜人。
 但通讯录明细（手机号、邮箱、平台身份、部门路径等）只给 ai_committee / platform_admin，
@@ -71,7 +71,7 @@ class UserPatch(BaseModel):
 
 
 def sees_directory_details(viewer: User) -> bool:
-    """通讯录明细只给管理角色（spec §10.2 未把用户目录授予 member / team_lead）。"""
+    """通讯录明细只给管理角色（member / team_lead 无权查看用户目录）。"""
     return viewer.role in MANAGER_ROLES
 
 

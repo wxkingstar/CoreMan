@@ -1,4 +1,4 @@
-"""进程配置：只读 .env / 环境变量中的基础设施项（spec §4.2）。业务配置在 settings 表。"""
+"""进程配置：只读 .env / 环境变量中的基础设施项。业务配置在 settings 表。"""
 
 from __future__ import annotations
 

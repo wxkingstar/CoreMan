@@ -1,4 +1,4 @@
-"""收尾阶段：抢终态、额度后处理（spec §8.8）、提问卡片、终稿投递与 chat_logs。"""
+"""收尾阶段：抢终态、额度后处理、提问卡片、终稿投递与 chat_logs。"""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class FinalizeStage(ChatStageBase):
     async def _postprocess_rate_limit(
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict
     ) -> tuple[Verdict, dict[str, Any] | None]:
-        """spec §8.8：触限附额度表、未触限附预警、管理员再推一张切换卡。只在有终稿的收尾做。
+        """额度后处理：触限附额度表、未触限附预警、管理员再推一张切换卡。只在有终稿的收尾做。
 
         取消 / 超时那几路不进来：用户根本没拿到模型的回答，一张额度表帮不上任何忙。
         """

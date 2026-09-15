@@ -1,4 +1,4 @@
-"""看护动作：掉线任务收尸 + 过期行清理（spec §4.1、§6.2、§6.5）。
+"""看护动作：掉线任务收尸 + 过期行清理。
 
 每个动作都是一条独立的函数：接收 `session` 与 `now`、返回处理条数、**不 commit**——事务边界
 交给调用方（主循环一个动作一个短事务，用例则直接在自己的会话里断言）。`now` 由调用方传进来
@@ -44,7 +44,7 @@ from coreman.core.knowledge.installation import recover_installations
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
 
-# worker 每 10 秒写一次任务心跳，60 秒一次都没写上来就当这个 worker 没了（spec §6.2）。
+# worker 每 10 秒写一次任务心跳，60 秒一次都没写上来就当这个 worker 没了。
 TASK_TIMEOUT_SECONDS = 60
 # 网关租约的过期判据与网关自己抢占时用的完全同源，否则会出现「谁都不认为对方死了」的僵局。
 LEASE_STALE_SECONDS = leases.STALE_AFTER_SECONDS
@@ -375,7 +375,7 @@ async def recover_outbox_attempts(session: AsyncSession, now: datetime) -> int:
 
 
 async def cleanup_sessions(session: AsyncSession, now: datetime, ttl_hours: int) -> int:
-    """超过 TTL 没说过话的会话映射删掉，下次再聊就是一轮全新的 relay 会话（spec §8.5）。"""
+    """超过 TTL 没说过话的会话映射删掉，下次再聊就是一轮全新的 relay 会话。"""
     cutoff = now - timedelta(hours=ttl_hours)
     stmt = (
         delete(ChatSession)

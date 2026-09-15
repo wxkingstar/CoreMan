@@ -1,4 +1,4 @@
-"""`interaction_states` 数据访问（spec §5.4）。每个函数接收 AsyncSession，调用方控制事务。
+"""`interaction_states` 数据访问。每个函数接收 AsyncSession，调用方控制事务。
 
 `state` 的形状：
 - choice: {questions, answers, current_index, waiting_for_text, waiting_since, context{...}}

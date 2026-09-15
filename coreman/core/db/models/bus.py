@@ -1,4 +1,4 @@
-"""运行时总线表（spec §5.4）。所有进程只经这些表 + pg_notify 通信。"""
+"""运行时总线表。所有进程只经这些表 + pg_notify 通信。"""
 
 from __future__ import annotations
 

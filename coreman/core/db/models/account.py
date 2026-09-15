@@ -1,4 +1,4 @@
-"""账号与组织（spec §5.1）+ 登录辅助表 auth_nonces / login_attempts。"""
+"""账号与组织+ 登录辅助表 auth_nonces / login_attempts。"""
 
 from __future__ import annotations
 

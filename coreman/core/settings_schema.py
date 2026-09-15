@@ -1,4 +1,4 @@
-"""settings 表中管理台可改的键（spec §4.2）与校验。"""
+"""settings 表中管理台可改的键与校验。"""
 
 from __future__ import annotations
 
@@ -20,16 +20,16 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "default_effort_level": None,
     "session_ttl_hours": 72,
     "jwt_issuer": "coreman",
-    # 全局并发闸门（spec §6.3）：worker 同时在跑的任务上限，其中 fast 车道独占的名额。
+    # 全局并发闸门：worker 同时在跑的任务上限，其中 fast 车道独占的名额。
     "max_concurrent_tasks": 30,
     "fast_lane_slots": 2,
     "card_icon_url": "",
-    # 提示词段落（spec §8.3）：默认值由 CoreMan 提供，管理台可逐段覆盖。
+    # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
 # 派生键：读取时由其它表算出，不落 settings 表、不可写入。库里遗留的同名行一律忽略。
 DERIVED_SETTING_KEYS = ("default_model",)
-# 平台默认模型按这个 provider 顺序取第一个有默认值的（spec §5.3 模型目录）。
+# 平台默认模型按这个 provider 顺序取第一个有默认值的。
 DEFAULT_MODEL_PROVIDERS = ("claude", "codex")
 # 任何登录用户都能读的三个键：新建机器人表单要用它们做默认值（default_model 为派生键）。
 PUBLIC_DEFAULT_KEYS = ("default_model", "default_verbosity_level", "default_effort_level")

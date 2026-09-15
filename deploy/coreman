@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CoreMan 运维脚本（spec §12）：up/down/status/logs/migrate/build/upgrade/rollback。
+# CoreMan 运维脚本：up/down/status/logs/migrate/build/upgrade/rollback。
 set -euo pipefail
 
 _self="${BASH_SOURCE[0]}"

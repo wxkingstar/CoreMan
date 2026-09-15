@@ -4,7 +4,7 @@
 不把脚本交给 Python 执行，不开放文件、环境变量、模块对象或任意网络访问。
 
 worker 里一律经 `run_precheck_in_thread` 调用：解释器是纯 CPU 计算，直接在事件循环上跑会让
-同进程的心跳、SSE 消费与取消传导一起停摆（spec §9「超时用独立线程」）。
+同进程的心跳、SSE 消费与取消传导一起停摆，所以超时控制也要放在独立线程里。
 """
 
 from __future__ import annotations

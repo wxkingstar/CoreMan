@@ -1,4 +1,4 @@
-"""模型目录（spec §5.3 model_catalog；替代代码常量 MODEL_PROVIDERS）。"""
+"""模型目录（model_catalog 表，替代代码常量 MODEL_PROVIDERS）。"""
 
 from __future__ import annotations
 

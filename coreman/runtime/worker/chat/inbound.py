@@ -9,7 +9,7 @@ from typing import Any
 def part_kind(part: dict[str, Any]) -> str:
     """归一化 part 类别：带转写的语音等同文本，其余原样。
 
-    企微网关按 spec §7.1 发 `AudioPart(type="audio")`，飞书侧历史上叫 `voice`：两个名字都认，
+    企微网关发 `AudioPart(type="audio")`，飞书侧历史上叫 `voice`：两个名字都认，
     否则「企微已经转好文字的语音」会被当成不支持的消息类型挡在门外。
     """
     kind = str(part.get("type") or "")

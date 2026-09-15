@@ -1,4 +1,4 @@
-"""task_streams → 企微 stream.content（spec §6.3、§7.2；限制来自 平台协议 §3.5、§5.7）。"""
+"""task_streams → 企微 stream.content（遵守企微协议的内容限制）。"""
 
 from __future__ import annotations
 

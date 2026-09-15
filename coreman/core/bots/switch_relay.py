@@ -1,4 +1,4 @@
-"""切换 relay 的领域逻辑（spec §10.2 权限、§8.5 清会话、§8.8 限流切换复用）。API 与 worker 共用。
+"""切换 relay 的领域逻辑（权限校验、清会话；限流自动切换复用同一逻辑）。API 与 worker 共用。
 
 只改内存里的对象并写审计 / 通知，**不 commit**：API 端点要在 commit 之后刷 ETag，worker
 要把回执与状态清理放进同一个事务，事务边界一律留给调用方。
@@ -141,7 +141,7 @@ async def switch_relay(
     if bot.effort_level == "xhigh" and not supports_xhigh(new_model, catalog):
         # 自动换来的模型不支持 xhigh 时降一档，否则下发给 relay 的就是非法档位。
         bot.effort_level = "high"
-    # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废（spec §8.5）。
+    # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废。
     await sessions.clear_bot(session, bot.id)
     await record_audit(
         session,
