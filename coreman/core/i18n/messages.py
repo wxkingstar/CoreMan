@@ -141,6 +141,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_switch_forbidden": "权限不足，您可能已被移出该机器人的管理员",
         "relay_switch_detail": "模型：{model}",
         "relay_error": "抱歉，AI 连接出现错误（运行时 {relay}），请稍后再试。",
+        "runtime_busy": "抱歉，运行时 {relay} 正忙，排队等待超时仍未开始处理，请稍后再试。",
         "relay_error_text": "⚠️ AI 服务返回了错误，请稍后重试。",
         "empty_stream": (
             "⚠️ AI 服务返回了空回复，可能是服务瞬时异常，请重试。"
@@ -381,6 +382,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_error": (
             "申し訳ありません。AI 接続でエラーが発生しました（インスタンス {relay}）。"
             "しばらくしてから再試行してください。"
+        ),
+        "runtime_busy": (
+            "申し訳ありません。インスタンス {relay} が混み合っており、待機時間内に処理を"
+            "開始できませんでした。しばらくしてから再試行してください。"
         ),
         "relay_error_text": (
             "⚠️ AI サービスがエラーを返しました。しばらくしてから再試行してください。"
