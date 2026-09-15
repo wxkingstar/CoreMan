@@ -46,6 +46,7 @@ from coreman.api.routers import (
     relay_servers,
     runtime,
     runtime_nodes,
+    runtime_protocol,
     skill_catalog,
     statistics,
     teams,
@@ -130,7 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(announcements.router)
     app.include_router(runtime.router)
     app.include_router(runtime_nodes.router)
-    app.include_router(runtime_nodes.public_router)
+    app.include_router(runtime_protocol.router)
     if cfg.coreman_env == "dev":
         # 注入接口只在开发环境存在：生产里连路由都不注册，不是靠角色挡。
         app.include_router(dev.router)
