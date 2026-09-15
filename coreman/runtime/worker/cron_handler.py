@@ -193,7 +193,9 @@ class CronRunHandler:
             stop = asyncio.create_task(ctx.cancel_event.wait())
             consume = asyncio.create_task(self._consume(gen))
             try:
-                async with asyncio.timeout(min(bot.sse_timeout_seconds, 7200)):
+                # 兜底：正常由 chat_stream 的 total_timeout 先到期并给出分类错误；
+                # 不再额外封顶 2 小时，与对话一样允许到 sse_timeout_seconds 上限。
+                async with asyncio.timeout(bot.sse_timeout_seconds + 60):
                     ready, _ = await asyncio.wait(
                         {stop, consume}, return_when=asyncio.FIRST_COMPLETED
                     )
