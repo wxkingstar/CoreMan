@@ -11,7 +11,6 @@ from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import OutboxItem
 from coreman.core.notifications import NotificationError, NotificationSkipped, send_notification
-from coreman.core.observability.metrics import OUTBOX_FAILED, after_commit
 from coreman.core.platforms.feishu import FeishuError
 from coreman.core.platforms.wecom import WeComError
 
@@ -39,9 +38,7 @@ async def deliver_one(factory: async_sessionmaker[AsyncSession], cipher: Cipher)
                     await send_notification(session, item, cipher)
             except FeishuError as exc:
                 if exc.code in {230013, -2}:
-                    item.status, item.last_error = "failed", str(exc)
-                    item.attempts += 1
-                    after_commit(session, OUTBOX_FAILED.inc)
+                    await outbox.fail(session, item.id, str(exc))
                 else:
                     await outbox.mark_failed(session, item.id, str(exc))
             except NotificationSkipped as exc:

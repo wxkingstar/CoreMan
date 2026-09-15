@@ -134,6 +134,12 @@ class Task(Base):
             "tasks_finished_idx", "finished_at", postgresql_where=text("finished_at IS NOT NULL")
         ),
         Index("tasks_heartbeat_idx", "heartbeat_at", postgresql_where=text("status = 'running'")),
+        # 删入站事件时外键检查按 inbound_event_id 反查任务；没有它每删一行扫一遍 tasks。
+        Index(
+            "tasks_inbound_event_idx",
+            "inbound_event_id",
+            postgresql_where=text("inbound_event_id IS NOT NULL"),
+        ),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
@@ -222,6 +228,20 @@ class OutboxItem(Base):
             "not_before",
             "id",
             postgresql_where=text("status = 'pending'"),
+        ),
+        # 认领语句的外层与同组 NOT EXISTS、scheduler 回收 sending：只看还没落定的这一小撮行。
+        Index(
+            "outbox_active_idx",
+            "bot_id",
+            "id",
+            postgresql_where=text("status IN ('pending','sending')"),
+        ),
+        # 失败排查、告警计数、失败 / 跳过条目的保留期清理。
+        Index(
+            "outbox_failed_idx",
+            "bot_id",
+            "id",
+            postgresql_where=text("status IN ('failed','skipped')"),
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)

@@ -430,7 +430,7 @@ async def test_rate_limited_send_is_deferred_not_failed(
         await _wait(rows_settled, timeout=8)
         assert await _rows() == expected
         # 企微回 846607：反查 req_id 拿到会话，该会话进入 10 秒退避。
-        sent = await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
+        await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
         service.runners[bot.id].outbox.note_rate_limited("zs")
         await _wait(lambda: service.runners[bot.id].outbox.wait_seconds("zs") > 5)
     finally:
@@ -834,7 +834,7 @@ async def test_rejected_send_goes_back_to_the_queue_and_is_retried(
                 payload={"markdown": "后台推送"},
             )
             await s.commit()
-        sent = await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
+        await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
 
         # NACK arrives while send_confirmed is waiting, before any sent commit.
         async def requeued() -> bool:
