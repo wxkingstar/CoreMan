@@ -57,7 +57,13 @@ async def test_presets_forbid_identity_and_doris_fallback(client, db_session):
     assert (
         await client.put(path, json=body | {"vars": mask}, headers={"If-Match": "1"})
     ).status_code == 200
-    for key in ("COREMAN_USER_LOGIN", "BOT_USER_LOGIN", "BOT_TOKEN_STAT", "COREMAN_SYSTEMS"):
+    for key in (
+        "COREMAN_USER_LOGIN",
+        "BOT_USER_LOGIN",
+        "BOT_TOKEN_STAT",
+        "COREMAN_SYSTEMS",
+        "NODE_OPTIONS",
+    ):
         assert (
             await client.put(path, json=body | {"vars": {key: "forged"}}, headers={"If-Match": "2"})
         ).status_code == 422

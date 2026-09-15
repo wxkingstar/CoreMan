@@ -91,6 +91,16 @@ def test_workspace_and_identity_protection(daemon, tmp_path):
             daemon.validate_command(command(payload))
     with pytest.raises(ValueError):
         daemon.validate_command(command({}, path="http://example.test/"))
+    # 控制类变量整单拒绝，错误里点名键（不含值），便于管理员定位要删的配置。
+    payload = {
+        "working_dir": str(root / "hello"),
+        "env_vars": {"ANTHROPIC_BASE_URL": "https://secret.example", "LD_PRELOAD": "/x.so"},
+    }
+    with pytest.raises(ValueError, match="ANTHROPIC_BASE_URL, LD_PRELOAD") as excinfo:
+        daemon.validate_command(command(payload))
+    assert "secret.example" not in str(excinfo.value)
+    ok = {"working_dir": str(root / "hello"), "env_vars": {"COREMAN_BOT_KEY": "b", "DB": "1"}}
+    assert daemon.validate_command(command(ok))["env_vars"] == ok["env_vars"]
 
 
 async def test_management_cancel_kills_child_process_group(tmp_path):

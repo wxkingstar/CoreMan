@@ -10,7 +10,11 @@
 
 from __future__ import annotations
 
+from coreman.core.bots.env_policy import blocked_env_keys, is_blocked_env_key
+from coreman.core.logging import get_logger
 from coreman.core.prompting.system_prompt import Speaker
+
+log = get_logger(__name__)
 
 # 新名 → 兼容别名（同值）。COREMAN_PLATFORM 是 CoreMan 新增的，旧实现没有对应名字。
 _ALIASES = {
@@ -57,7 +61,16 @@ def build_env(
     """
     # 先丢弃静态配置中的请求身份，再按本轮已验证的主体重建。否则未知发言者或
     # 通讯录缺少 login/name 时，会继承机器人创建者手填的身份与上一轮令牌。
-    env: dict[str, str] = {k: str(v) for k, v in bot_env.items() if not is_reserved_key(k)}
+    # 控制类变量（模型端点、解释器启动项等）保存时就会 422；这里兜住保存规则收紧前的
+    # 存量数据：丢弃并记下键名，管理员下次编辑该机器人 env 时会被要求删掉。
+    blocked = blocked_env_keys(bot_env)
+    if blocked:
+        log.warning("bot_env_blocked_keys_dropped", bot_key=bot_key, keys=blocked)
+    env: dict[str, str] = {
+        k: str(v)
+        for k, v in bot_env.items()
+        if not is_reserved_key(k) and not is_blocked_env_key(k)
+    }
     request_level = {
         "COREMAN_BOT_KEY": bot_key,
         "COREMAN_PLATFORM": platform,

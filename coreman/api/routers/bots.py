@@ -30,6 +30,7 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
+from coreman.core.bots.env_policy import blocked_env_keys
 from coreman.core.bots.events import notify_bot_changed as notify_bot_changed  # 再导出
 from coreman.core.bots.platform_account import reserve_feishu_app
 from coreman.core.bots.relay_policy import relay_available
@@ -102,6 +103,12 @@ def _check_env_vars(v: dict[str, str]) -> dict[str, str]:
     bad = [k for k in v if not ENV_KEY_RE.match(k)]
     if bad:
         raise ValueError(f"环境变量名不合法：{', '.join(bad)}")
+    # 模型端点、解释器启动项等控制类变量会并入免审批运行的 CLI 进程，见 env_policy。
+    blocked = blocked_env_keys(v)
+    if blocked:
+        raise ValueError(
+            f"环境变量会改变运行时的模型端点、代码加载或凭据，不允许配置：{', '.join(blocked)}"
+        )
     if any(len(val) > 4000 for val in v.values()):
         raise ValueError("环境变量值过长")
     return v
@@ -323,7 +330,9 @@ async def build_out(
         "relay_name": (
             f"{node.name} / {relay.model_provider}"
             if node and relay
-            else relay.name if relay else None
+            else relay.name
+            if relay
+            else None
         ),
         "relay_url": relay.relay_url if relay and relay_visible(user, relay) else None,
         "model": bot.model,
