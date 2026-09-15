@@ -1,24 +1,16 @@
-"""企微入站帧 → `InboundMessage` → `inbound_events` + `tasks`（spec §7.1、§7.3）。
+"""企微入站帧 → `InboundMessage`（spec §7.1、§7.3）：只做企微特有的解析。
 
-两件事严格分开：`normalize_frame` 是纯函数（不碰库、不看时钟），`enqueue_inbound` 只做落库与
-入队。去重靠 `inbound_events (bot_id, platform_msg_id)` 唯一键——企微会重推，重推的那一条
-连任务都不建。
+`normalize_frame` 是纯函数（不碰库、不看时钟）；落库、去重与建任务是平台无关的，在
+`gateway_common.inbound.enqueue_inbound`。
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from coreman.core.bus import outbox
-from coreman.core.bus.tasks import NewTask, enqueue
-from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command
 from coreman.core.chat.identity import looks_like_open_userid
-from coreman.core.db.models import InboundEvent, Task
 from coreman.core.logging import get_logger
 from coreman.core.wecom.messages import (
     AudioPart,
@@ -31,17 +23,10 @@ from coreman.core.wecom.messages import (
     TextPart,
     VideoPart,
     parse_card_event,
-    text_of,
 )
 
-if TYPE_CHECKING:  # BotInfo 定义在 runner 里，runner 又要用本模块的入队函数
+if TYPE_CHECKING:  # BotInfo 定义在 runner 里，runner 又要用本模块的归一化函数
     from coreman.runtime.gateway_wecom.runner import BotInfo
-
-
-class InboundBot(Protocol):
-    id: uuid.UUID
-    bot_key: str
-    welcome_message: str | None
 
 
 PLATFORM = "wecom"
@@ -221,121 +206,3 @@ def _quote_part(quote: dict[str, Any]) -> QuotePart:
     inner = _obj(quote, kind)
     text = _opt_str(inner.get("content")) if kind in ("text", "voice") else None
     return QuotePart(kind=kind, text=text, refs=[inner] if inner and text is None else [])
-
-
-# ---- 落库与入队 -----------------------------------------------------------
-
-
-async def enqueue_inbound(
-    session: AsyncSession, bot: InboundBot, message: InboundMessage, *, lease_generation: int
-) -> Task | None:
-    """写 `inbound_events`（去重）并按 kind 建任务 / 入欢迎语；重复投递返回 None。
-
-    调用方负责提交；提交之后 `tasks_queued` / `outbox_added` 通知才会发出。
-    """
-    payload = message.model_dump(mode="json")
-    stmt = (
-        insert(InboundEvent)
-        .values(
-            bot_id=bot.id,
-            platform=message.platform,
-            platform_msg_id=message.message_id,
-            kind=message.kind,
-            chat_type=message.chat_type,
-            chat_id=message.chat_id,
-            sender_platform_user_id=message.sender.platform_user_id or None,
-            sender_open_id=message.sender.open_id,
-            payload=payload,
-            reply_context=message.reply_context,
-        )
-        .on_conflict_do_nothing(index_elements=[InboundEvent.bot_id, InboundEvent.platform_msg_id])
-        .returning(InboundEvent.id)
-    )
-    row = (await session.execute(stmt)).first()
-    if row is None:
-        # 平台重推：事件、任务、出站都不能再来一遍。
-        log.debug("inbound_duplicate", bot_key=bot.bot_key, platform_msg_id=message.message_id)
-        return None
-    event_id = int(row[0])
-    if message.kind == "message":
-        return await _enqueue_task(session, bot, message, payload, event_id)
-    if message.kind == "card_action" and message.card_action:
-        # 卡片点击要在 5 秒内更新卡片，所以走快车道，不排在长对话后面。
-        return await enqueue(
-            session,
-            NewTask(
-                bot_id=bot.id,
-                kind="card_action",
-                lane="fast",
-                payload={
-                    "card_action": message.card_action,
-                    "bot_key": bot.bot_key,
-                    "platform_user_id": message.sender.platform_user_id,
-                    "chat_type": message.chat_type,
-                    "chat_id": message.chat_id,
-                },
-                session_key=message.chat_id,
-                inbound_event_id=event_id,
-                dedupe_key=f"inbound:{event_id}",
-            ),
-        )
-    if message.kind == "feedback":
-        # 点赞/点踩本期只留一条日志：没有任务要建，但运营要能数出来。
-        fb = _obj(_obj(_obj(message.raw, "body"), "event"), "feedback_event")
-        log.info(
-            "wecom_feedback",
-            bot_key=bot.bot_key,
-            feedback_type=fb.get("type"),
-            feedback_id=fb.get("id"),
-        )
-    if message.kind == "enter_chat" and bot.welcome_message:
-        await outbox.add(
-            session,
-            bot_id=bot.id,
-            platform=message.platform,
-            kind="welcome",
-            dedupe_key=f"welcome:{message.message_id}",
-            target={
-                "req_id": message.reply_context.get("req_id", ""),
-                "chat_id": message.chat_id,
-                "message_id": message.reply_context.get("message_id"),
-            },
-            payload={"text": bot.welcome_message},
-            lease_generation=lease_generation,
-        )
-    return None
-
-
-async def _enqueue_task(
-    session: AsyncSession,
-    bot: InboundBot,
-    message: InboundMessage,
-    payload: dict[str, Any],
-    event_id: int,
-) -> Task | None:
-    """纯命令走 fast 车道的 command 任务，其余一律 chat。"""
-    base: dict[str, Any] = {
-        "bot_key": bot.bot_key,
-        "platform_user_id": message.sender.platform_user_id,
-    }
-    command = classify_command(text_of(message))
-    if command in GATEWAY_COMMANDS:
-        new = NewTask(
-            bot_id=bot.id,
-            kind="command",
-            lane="fast",
-            payload={"command": command, **base},
-            session_key=message.chat_id,
-            inbound_event_id=event_id,
-            dedupe_key=f"inbound:{event_id}",
-        )
-    else:
-        new = NewTask(
-            bot_id=bot.id,
-            kind="chat",
-            payload={"message": payload, **base},
-            session_key=message.chat_id,
-            inbound_event_id=event_id,
-            dedupe_key=f"inbound:{event_id}",
-        )
-    return await enqueue(session, new)

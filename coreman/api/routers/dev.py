@@ -25,7 +25,7 @@ from coreman.api.security import verify_csrf
 from coreman.core.db.models import Bot, ChatLog, InboundEvent, Task, TaskStream, User
 from coreman.core.wecom.messages import InboundMessage, Part, Sender, TextPart
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
-from coreman.runtime.gateway_wecom.inbound import enqueue_inbound
+from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.gateway_wecom.runner import BotInfo
 
 router = APIRouter(prefix="/api/dev", tags=["dev"], dependencies=[Depends(verify_csrf)])

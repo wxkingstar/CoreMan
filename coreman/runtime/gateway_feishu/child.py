@@ -22,10 +22,10 @@ from coreman.core.db.models import Bot
 from coreman.core.db.session import make_session_factory
 from coreman.core.logging import configure_logging, get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
+from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.gateway_feishu.channel import DurableChannel
 from coreman.runtime.gateway_feishu.inbound import normalize_event
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
-from coreman.runtime.gateway_wecom.inbound import enqueue_inbound
 
 
 @dataclass
