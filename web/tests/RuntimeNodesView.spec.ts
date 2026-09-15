@@ -106,3 +106,15 @@ it('re-enables and resumes a runtime without asking', async () => {
   confirm.mockRestore()
   wrapper.unmount()
 })
+it('shows node concurrency only when the daemon reports it', async () => {
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
+    { ...base, id: 'n1', name: 'busy', max_concurrent: 10, active_calls: 3 },
+    { ...base, id: 'n2', name: 'quiet', max_concurrent: null, active_calls: null },
+  ] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  const cells = wrapper.findAll('[data-test="runtime-concurrency"]')
+  expect(cells).toHaveLength(1)
+  expect(cells[0].text()).toBe('并发 3 / 10')
+  wrapper.unmount()
+})

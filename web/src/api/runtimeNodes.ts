@@ -9,6 +9,8 @@ export interface RuntimeNode {
   platform: string; architecture: string; environment: string; workspace_root: string
   version: string; online: boolean; is_active: boolean; draining: boolean
   heartbeat_at: string | null; service_status: string; team_name: string | null
+  /** 节点并发上限与当前进行中的调用数；Daemon 未上报时为 null。 */
+  max_concurrent: number | null; active_calls: number | null
   capabilities: Record<string, Capability>; backends: RelayOut[]
 }
 export interface InstallLink {
