@@ -457,17 +457,3 @@ async def run_retention(
                 break
         counts[key] = total
     return counts
-
-
-async def run_all(
-    factory: async_sessionmaker[AsyncSession],
-    store: SettingsStore,
-    now: datetime,
-    *,
-    chat_logs_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> dict[str, int]:
-    """跑完三档。主循环按各自节奏分开调，手动收尸（运维脚本、用例）用这个一把梭。"""
-    counts = await run_tick(factory, now, chat_logs_factory=chat_logs_factory)
-    counts.update(await run_cleanup(factory, store, now))
-    counts.update(await run_retention(factory, now))
-    return counts

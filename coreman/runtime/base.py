@@ -135,7 +135,3 @@ class Service:
                 for sig in (signal.SIGTERM, signal.SIGINT):
                     loop.remove_signal_handler(sig)
                 self._log.info("service_stopped")
-
-
-def run_service(name: str) -> None:
-    asyncio.run(Service(name, HEALTH_PORTS[name]).run())
