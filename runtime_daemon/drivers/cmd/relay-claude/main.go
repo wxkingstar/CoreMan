@@ -100,12 +100,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Failed to read body: %v", err))
 		return
 	}
-	logBody := openai.SanitizeEnvVarsInLog(string(bodyBytes))
-	if len(logBody) <= 4096 {
-		log.Printf("Raw request body (%d bytes): %s", len(bodyBytes), logBody)
-	} else {
-		log.Printf("Raw request body (%d bytes): %s...[truncated]", len(bodyBytes), logBody[:4096])
-	}
+	// Bodies carry chat messages and prompts: size only unless RELAY_DEBUG=1.
+	openai.LogRequestBody(bodyBytes)
 
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -157,7 +153,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	args, stdinData := buildClaudeArgs(&req, model, prompt, systemPrompt)
 
-	log.Printf("Claude args: %v (stdin length: %d bytes)", args, len(stdinData))
+	if openai.DebugLogging() {
+		log.Printf("Claude args: %v (stdin length: %d bytes)", openai.RedactArgs(args), len(stdinData))
+	} else {
+		log.Printf("Claude invocation: model=%s args=%d stdin=%d bytes", model, len(args), len(stdinData))
+	}
 
 	workingDir := req.WorkingDir
 	envVars := req.EnvVars

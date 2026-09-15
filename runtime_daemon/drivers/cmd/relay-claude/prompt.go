@@ -55,7 +55,7 @@ func parseToolCalls(text string) (cleanText string, toolCalls []openai.ToolCall)
 			Arguments json.RawMessage `json:"arguments"`
 		}
 		if err := json.Unmarshal([]byte(callJSON), &call); err != nil {
-			log.Printf("Failed to parse tool_call JSON: %v, raw: %s", err, callJSON)
+			log.Printf("Failed to parse tool_call JSON: %v (%s)", err, openai.ContentPreview(callJSON, 500))
 			cleanText += text[match[0]:match[1]]
 			continue
 		}

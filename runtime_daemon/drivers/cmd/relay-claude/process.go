@@ -190,7 +190,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		select {
 		case <-firstLineSeen:
 		case <-timer.C:
-			log.Printf("first-line watchdog: claude silent on stdout for %s, killing process group (args=%q)", watchdogTimeout, args)
+			log.Printf("first-line watchdog: claude silent on stdout for %s, killing process group%s", watchdogTimeout, openai.ArgsLogSuffix(args))
 			proc.KillGroup(cmd)
 		}
 	}()
@@ -337,7 +337,7 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				select {
 				case line, lok = <-innerLines:
 				case <-sniffTimer.C:
-					log.Printf("resume sniff watchdog: no content/result within %s, killing process group (args=%q)", watchdogTimeout, args)
+					log.Printf("resume sniff watchdog: no content/result within %s, killing process group%s", watchdogTimeout, openai.ArgsLogSuffix(args))
 					proc.KillGroup(cmd)
 					continue // the kill closes stdout shortly; drain to EOF
 				}
@@ -461,7 +461,9 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 		if line == "" {
 			continue
 		}
-		log.Printf("[CLAUDE RAW] %s", line)
+		if openai.DebugLogging() {
+			log.Printf("[CLAUDE RAW] %s", line)
+		}
 		var event claudeEvent
 		if jsonErr := json.Unmarshal([]byte(line), &event); jsonErr != nil {
 			log.Printf("Failed to parse claude event: %v", jsonErr)

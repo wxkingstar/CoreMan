@@ -1,0 +1,69 @@
+package openai
+
+import (
+	"fmt"
+	"log"
+	"os"
+)
+
+// DebugLogging reports whether RELAY_DEBUG=1. Request bodies, CLI arguments
+// and model output carry chat messages, system prompts and user identities, so
+// they reach the relay log only when an operator opts in while debugging.
+func DebugLogging() bool {
+	return os.Getenv("RELAY_DEBUG") == "1"
+}
+
+// promptValueFlags are CLI flags whose value is prompt text.
+var promptValueFlags = map[string]bool{
+	"--append-system-prompt": true,
+	"--system-prompt":        true,
+}
+
+// RedactArgs returns a copy of CLI args with the value of every prompt-valued
+// flag replaced by its length, e.g. "--append-system-prompt <len=1234>".
+func RedactArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i+1 < len(out); i++ {
+		if promptValueFlags[out[i]] {
+			out[i+1] = fmt.Sprintf("<len=%d>", len(args[i+1]))
+			i++
+		}
+	}
+	return out
+}
+
+// ArgsLogSuffix is appended to diagnostic log lines about a CLI process: empty
+// by default, " (args=[...])" with prompt values redacted under RELAY_DEBUG=1.
+func ArgsLogSuffix(args []string) string {
+	if !DebugLogging() {
+		return ""
+	}
+	return fmt.Sprintf(" (args=%q)", RedactArgs(args))
+}
+
+// LogRequestBody records an incoming chat request body. By default only its
+// size is logged (handlers log model and message counts after parsing); with
+// RELAY_DEBUG=1 the body is logged with env_vars redacted, truncated to 4 KB.
+func LogRequestBody(body []byte) {
+	if !DebugLogging() {
+		log.Printf("Request body received (%d bytes)", len(body))
+		return
+	}
+	logBody := SanitizeEnvVarsInLog(string(body))
+	if len(logBody) <= 4096 {
+		log.Printf("Raw request body (%d bytes): %s", len(body), logBody)
+	} else {
+		log.Printf("Raw request body (%d bytes): %s...[truncated]", len(body), logBody[:4096])
+	}
+}
+
+// ContentPreview describes model output or other chat content for a log line:
+// only its length by default, plus a truncated quoted preview under
+// RELAY_DEBUG=1.
+func ContentPreview(text string, max int) string {
+	if !DebugLogging() {
+		return fmt.Sprintf("len=%d", len(text))
+	}
+	return fmt.Sprintf("len=%d content=%q", len(text), Truncate(text, max))
+}

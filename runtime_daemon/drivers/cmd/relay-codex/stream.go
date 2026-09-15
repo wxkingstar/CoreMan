@@ -183,16 +183,16 @@ probe:
 			// codex sometimes writes non-JSON lines (banner, error logs) to
 			// stdout. Skip silently rather than confusing the client.
 			if line != "" {
-				log.Printf("[CODEX NON-JSON] %s", line)
+				log.Printf("[CODEX NON-JSON] %s", openai.ContentPreview(line, 500))
 			}
 			return
 		}
 
-		log.Printf("[CODEX RAW] %s", openai.Truncate(line, 500))
+		logCodexRaw(line)
 
 		var ev codexEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			log.Printf("[CODEX PARSE ERR] %v: %s", err, line)
+			log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.ContentPreview(line, 500))
 			return
 		}
 
@@ -377,15 +377,15 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 			line = strings.TrimSpace(line)
 			if line == "" || !strings.HasPrefix(line, "{") {
 				if line != "" {
-					log.Printf("[CODEX NON-JSON] %s", line)
+					log.Printf("[CODEX NON-JSON] %s", openai.ContentPreview(line, 500))
 				}
 				continue
 			}
-			log.Printf("[CODEX RAW] %s", openai.Truncate(line, 500))
+			logCodexRaw(line)
 
 			var ev codexEvent
 			if err := json.Unmarshal([]byte(line), &ev); err != nil {
-				log.Printf("[CODEX PARSE ERR] %v: %s", err, line)
+				log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.ContentPreview(line, 500))
 				continue
 			}
 			sawEvent = true
@@ -496,6 +496,14 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	json.NewEncoder(w).Encode(resp)
 
 	_ = threadIDSeen
+}
+
+// logCodexRaw records a raw codex JSONL event only under RELAY_DEBUG=1: agent
+// messages, reasoning and command output carry chat content.
+func logCodexRaw(line string) {
+	if openai.DebugLogging() {
+		log.Printf("[CODEX RAW] %s", openai.Truncate(line, 500))
+	}
 }
 
 // isStaleThreadErr reports whether a codex error message indicates the
