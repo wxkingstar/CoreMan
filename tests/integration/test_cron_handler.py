@@ -58,7 +58,7 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     # 推送带任务名/机器人/耗时的头与「定时推送」尾，存档的 reply 仍是原文。
     assert pushed.startswith(f"**{run.job_name}**\n> 机器人：销售 | 耗时：")
     assert run.reply in pushed and pushed.endswith(msg("cron_push_footer"))
-    assert run.delivery["outbox_ids"] == [item.id]
+    assert run.delivery["outbox_ids"] == [item.id] and "fallback_user_id" not in run.delivery
     await db_session.refresh(row)
     assert row.running_task_id is None
     await CronRunHandler().run(ctx)
@@ -204,6 +204,31 @@ async def test_private_delivery_revalidates_identity(
     actor.status = "disabled"
     await db_session.commit()
     assert not await private_target_valid(db_session, item)
+
+
+async def test_result_without_any_target_falls_back_to_creator(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    now = datetime.now(UTC)
+    row = await job(db_session, now)
+    db_session.add(
+        UserReached(bot_id=row.bot_id, user_id=row.created_by, platform_chat_id="creator-chat")
+    )
+    await db_session.commit()
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    await CronRunHandler().run(
+        build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    )
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "success"
+    # 一个接收人、群、邮箱、webhook 都没配：跑成功的结果不能静默无人收，兜底私聊给创建者。
+    assert run.delivery["fallback_user_id"] == str(row.created_by)
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None and item.target["chat_id"] == "creator-chat"
+    assert item.target["recipient_user_id"] == str(row.created_by)
+    assert run.reply is not None and run.reply in item.payload["markdown"]
 
 
 async def test_long_precheck_does_not_stall_heartbeats(

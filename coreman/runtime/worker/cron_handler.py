@@ -406,6 +406,7 @@ class CronRunHandler:
                         content=content,
                         cipher=ctx.cipher,
                         locale=ctx.locale,
+                        fallback_user_id=job.created_by if job else None,
                     )
                 run.cost_usd = await estimate(
                     session,

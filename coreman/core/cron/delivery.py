@@ -55,11 +55,30 @@ async def enqueue_result(
     content: str,
     cipher: Cipher,
     locale: str = "zh",
+    fallback_user_id: uuid.UUID | str | None = None,
 ) -> dict[str, Any]:
+    """按快照里的接收人与渠道入队；返回 `{outbox_ids, errors}`。
+
+    `fallback_user_id`（通常是任务创建者）：一个接收人、群、邮箱、webhook 都没配时，结果
+    改按私聊推给这个人，免得任务跑成功却无人收到。测试通知不传它，照旧提示先配置接收人。
+    """
     ids: list[int] = []
     errors: dict[str, str] = {}
     notice = msg("cron_delivery_truncated", locale)
+    webhook_enc = config.get("notify_webhook_url_enc")
+    # 仅兼容升级前已入队的任务快照；新任务总会包含独立地址字段。
+    if "notify_webhook_url_enc" not in config and bot.notify_webhook_url:
+        webhook_enc = cipher.encrypt(bot.notify_webhook_url, "notifications.webhook_url")
     recipients = list(dict.fromkeys(config.get("target_users", [])))
+    has_channel = bool(
+        recipients
+        or config.get("target_chats")
+        or config.get("notify_emails")
+        or (config.get("notify_webhook") and webhook_enc)
+    )
+    fallback = not has_channel and fallback_user_id is not None
+    if fallback:
+        recipients = [str(fallback_user_id)]
     for uid in recipients:
         user = await session.get(User, uuid.UUID(uid))
         if user is None or user.status != "active" or user.source == "bootstrap":
@@ -138,10 +157,6 @@ async def enqueue_result(
             )
             if item:
                 ids.append(item.id)
-    webhook_enc = config.get("notify_webhook_url_enc")
-    # 仅兼容升级前已入队的任务快照；新任务总会包含独立地址字段。
-    if "notify_webhook_url_enc" not in config and bot.notify_webhook_url:
-        webhook_enc = cipher.encrypt(bot.notify_webhook_url, "notifications.webhook_url")
     if config.get("notify_webhook") and webhook_enc:
         # 密钥 URL 不进入可见的 outbox target/API；发送时解密，异常不保存 URL。
         target = {
@@ -174,4 +189,7 @@ async def enqueue_result(
         )
         if item:
             ids.append(item.id)
-    return {"outbox_ids": ids, "errors": errors}
+    result: dict[str, Any] = {"outbox_ids": ids, "errors": errors}
+    if fallback:
+        result["fallback_user_id"] = str(fallback_user_id)
+    return result

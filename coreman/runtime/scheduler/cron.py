@@ -195,6 +195,7 @@ async def recover_runs(
                             reason=msg("cron_worker_lost"),
                         ),
                         cipher=cipher,
+                        fallback_user_id=job.created_by,
                     )
                 session.add(
                     ChatLog(
