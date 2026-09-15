@@ -12,7 +12,7 @@
 
 每个 bot 一个 `BotRunner`（一条 WS）。同一个 bot 只能被一个实例持有，靠 `bot_leases` 抢占；
 租约规则在 `gateway_common.lease_loop.LeaseCoordinator`，这里只实现「起连接 / 断连接 / 排空」
-几个钩子。排空严格按 spec §6.5 的 ①–⑤，让新实例接手时用户最多感觉到 2–5 秒的停顿。
+几个钩子。排空严格按 ①–⑤ 的顺序做，让新实例接手时用户最多感觉到 2–5 秒的停顿。
 """
 
 from __future__ import annotations

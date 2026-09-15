@@ -1,4 +1,4 @@
-"""企微入站帧 → `InboundMessage`（spec §7.1、§7.3）：只做企微特有的解析。
+"""企微入站帧 → `InboundMessage`：只做企微特有的解析。
 
 `normalize_frame` 是纯函数（不碰库、不看时钟）；落库、去重与建任务是平台无关的，在
 `gateway_common.inbound.enqueue_inbound`。
