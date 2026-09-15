@@ -1,4 +1,4 @@
-"""网关租约循环（spec §6.5）：认领、续期、排空、孤儿回收，企微与飞书共用同一份规则。
+"""网关租约循环：认领、续期、排空、孤儿回收，企微与飞书共用同一份规则。
 
 平台只实现连接相关的钩子（`LeaseHooks`）：
 
@@ -100,7 +100,7 @@ class LeaseCoordinator:
         async with self.factory() as session:
             held = await leases.held_by(session, self.instance_id)
             # 兜底复核 `enabled`：`config_changed` 会在 LISTEN 重连的窗口里丢，只靠通知的话
-            # 停用的机器人会一直挂着连接到进程重启（spec §6.1 要求每个监听者都有兜底轮询）。
+            # 停用的机器人会一直挂着连接到进程重启（每个监听者都必须有兜底轮询）。
             disabled = await leases.disabled_among(session, [x.bot_id for x in held])
             await session.commit()
         held_ids = {lease.bot_id for lease in held}
@@ -129,7 +129,7 @@ class LeaseCoordinator:
         """单 bot 排空；整段挂在 `busy` 里。
 
         从摘掉连接到释放租约之间，这个 bot 看上去就是「持有租约却没有连接」，并发的扫描会把
-        它当成认领后启动失败而提前 release——§6.5 的 ④ 就跑到了 ③ 前面。同一个 bot 并发进来
+        它当成认领后启动失败而提前 release——释放租约就跑到了关连接前面。同一个 bot 并发进来
         两次的话，第二次直接返回：它的 `finally` 会把第一次挂上的标记抹掉。
         """
         if bot_id in self.busy:

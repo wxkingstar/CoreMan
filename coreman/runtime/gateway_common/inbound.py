@@ -1,4 +1,4 @@
-"""`InboundMessage` → `inbound_events` + `tasks`（spec §7.1）：与平台无关的入站落库与入队。
+"""`InboundMessage` → `inbound_events` + `tasks`：与平台无关的入站落库与入队。
 
 各平台网关只负责把回调归一化成 `InboundMessage`（企微 `normalize_frame`、飞书
 `normalize_event`），落库与建任务都走这里。去重靠 `inbound_events (bot_id, platform_msg_id)`
