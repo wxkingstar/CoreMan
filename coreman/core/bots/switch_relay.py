@@ -25,7 +25,7 @@ from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSkill, RelayServer, RuntimeNode, User
-from coreman.core.errors import ApiError
+from coreman.core.errors import VERSION_CONFLICT, ApiError
 from coreman.core.knowledge.memory_transfer import transfer
 from coreman.core.relay.models import default_model, effective_models, load_catalog, supports_xhigh
 
@@ -33,9 +33,10 @@ from coreman.core.relay.models import default_model, effective_models, load_cata
 class SwitchError(Exception):
     """切换被规则挡下。`status` 直接就是 API 的 HTTP 码，worker 只看它区分 403 与其它。"""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, code: int | None = None) -> None:
         super().__init__(message)
-        self.status, self.message = status, message
+        # code 是 API 信封里的业务码，默认同 HTTP 码；版本冲突用 VERSION_CONFLICT。
+        self.status, self.message, self.code = status, message, code or status
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ async def switch_relay(
     expected_version = bot.version
     await session.refresh(bot, with_for_update=True)
     if bot.version != expected_version:
-        raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试")
+        raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试", VERSION_CONFLICT)
     memory_status = "unchanged"
     target_directory = bot.working_dir
     if not same_relay:

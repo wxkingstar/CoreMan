@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
 from coreman.api.permissions import require_roles
@@ -44,7 +44,6 @@ def make_http(url: httpx.URL) -> httpx.AsyncClient:
 
 @router.post("/api/admin/systems/test-access")
 @router.post("/api/infra/systems/test-access", dependencies=[Depends(require_scope("systems"))])
-@router.post("/api/test/bot-token-access", dependencies=[Depends(require_scope("systems"))])
 async def test_access(
     body: TestAccessIn,
     request: Request,
@@ -86,6 +85,7 @@ async def test_access(
         actor_login=user.login_name,
         target_type="system",
         target_id=system.key,
+        ip=client_ip(request),
     )
     await session.commit()
     status = 0

@@ -1,9 +1,11 @@
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import StaleDataError
 
-from coreman.api.errors import forbidden, not_found
+from coreman.api.errors import VERSION_CONFLICT, ApiError, forbidden, not_found
+from coreman.api.versioning import require_if_match
 
 
 class Payload(BaseModel):
@@ -44,7 +46,42 @@ async def test_stale_data_error_returns_409_envelope(app: FastAPI) -> None:
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/api/admin/_stale")
     assert r.status_code == 409
-    assert r.json() == {"code": 409, "message": "记录已被他人修改，请刷新后重试"}
+    assert r.json() == {"code": VERSION_CONFLICT, "message": "记录已被他人修改，请刷新后重试"}
+
+
+async def test_if_match_conflict_uses_dedicated_code_other_409_do_not(app: FastAPI) -> None:
+    """版本冲突带专用 code；业务占用类 409 与唯一约束冲突保持 code=409。"""
+
+    @app.post("/api/admin/_if_match")
+    async def _if_match(request: Request) -> dict[str, object]:
+        require_if_match(request, 3)
+        return {"code": 0, "data": None}
+
+    @app.post("/api/admin/_occupied")
+    async def _occupied() -> dict[str, object]:
+        raise ApiError(409, 409, "该实例工作目录已属于另一个机器人")
+
+    @app.post("/api/admin/_integrity")
+    async def _integrity() -> dict[str, object]:
+        raise IntegrityError("x", None, Exception("dup"))
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        stale = await c.post("/api/admin/_if_match", headers={"If-Match": '"2"'})
+        fresh = await c.post("/api/admin/_if_match", headers={"If-Match": '"3"'})
+        occupied = await c.post("/api/admin/_occupied")
+        integrity = await c.post("/api/admin/_integrity")
+    assert VERSION_CONFLICT != 409
+    assert stale.status_code == 409 and stale.json()["code"] == VERSION_CONFLICT
+    assert fresh.status_code == 200
+    assert occupied.status_code == 409 and occupied.json()["code"] == 409
+    assert integrity.status_code == 409 and integrity.json()["code"] == 409
+
+
+def test_switch_error_carries_version_conflict_code() -> None:
+    from coreman.core.bots.switch_relay import SwitchError
+
+    assert SwitchError(409, "机器人已被其他操作修改，请刷新后重试", VERSION_CONFLICT).code == 40901
+    assert SwitchError(409, "工作目录被占用").code == 409
 
 
 def test_error_factories_return_fresh_instances() -> None:

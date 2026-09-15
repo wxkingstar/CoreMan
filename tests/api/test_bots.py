@@ -437,3 +437,11 @@ def test_legacy_agent_timeout_is_not_exposed_or_written():
     for schema in (BotIn, BotPatch):
         assert "agent_timeout_seconds" not in schema.model_json_schema()["properties"]
     assert BotPatch(agent_timeout_seconds=30).model_dump(exclude_unset=True) == {}
+
+
+def test_deprecated_custom_command_modules_is_not_exposed_or_written():
+    from coreman.api.routers.bots import BotIn, BotPatch
+
+    for schema in (BotIn, BotPatch):
+        assert "custom_command_modules" not in schema.model_json_schema()["properties"]
+    assert BotPatch(custom_command_modules=["x"]).model_dump(exclude_unset=True) == {}

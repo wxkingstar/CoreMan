@@ -38,13 +38,11 @@ async def members(
 
 
 @router.get("/api/infra/org/tree")
-@router.get("/api/robot/organization/tree", include_in_schema=False)
 async def tree(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     return {"code": 0, "data": organization_tree(await organization_members(session))}
 
 
 @router.get("/api/infra/org/full")
-@router.get("/api/organization/full", include_in_schema=False)
 async def full(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     rows = await organization_members(session)
     return {

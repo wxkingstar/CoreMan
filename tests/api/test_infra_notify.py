@@ -41,7 +41,8 @@ async def test_notification_dedupe_and_worker_retry_without_direct_api_send(
 ):
     user, secret, cipher = await setup_recipient(client, db_session)
     body = {"wework_user_id": "recipient", "content": "提醒", "request_id": "n1"}
-    for path in ("/api/robot/wework-notify", "/api/infra/notify/user"):
+    path = "/api/infra/notify/user"
+    for _ in range(2):
         r = await client.post(path, json=body, headers=signed(path, body, secret))
         assert r.status_code == 200, r.text
     item = (await db_session.execute(select(OutboxItem))).scalar_one()

@@ -157,3 +157,42 @@ async def test_client_names_trim_and_reject_whitespace_on_create_and_update(
     )
     assert response.status_code == 200
     assert response.json()["data"]["name"] == "更新"
+
+
+async def test_retired_cron_scope_is_tolerated_on_read_and_dropped_on_save(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    import pytest
+
+    from coreman.api.infra_auth import INFRA_SCOPES, require_scope
+    from coreman.core.db.models import ApiClient
+
+    assert "cron" not in INFRA_SCOPES
+    with pytest.raises(ValueError):
+        require_scope("cron")
+    await login_as(client, db_session, role="platform_admin")
+    created = await client.post(
+        "/api/admin/api-clients", json={"app_key": "old-cron", "name": "旧", "scopes": ["org"]}
+    )
+    assert created.status_code == 201
+    # 模拟上一版本存下的 cron 接口组。
+    row = await db_session.get(ApiClient, "old-cron")
+    row.scopes = ["cron", "org"]
+    await db_session.commit()
+    listed = await client.get("/api/admin/api-clients")
+    assert listed.status_code == 200, listed.text
+    item = next(i for i in listed.json()["data"]["items"] if i["app_key"] == "old-cron")
+    assert item["scopes"] == ["org"]
+    response = await client.put(
+        "/api/admin/api-clients/old-cron",
+        json={"name": "旧", "scopes": ["cron", "org"]},
+        headers={"If-Match": str(item["version"])},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["scopes"] == ["org"]
+    await db_session.refresh(row)
+    assert row.scopes == ["org"]
+    response = await client.post(
+        "/api/admin/api-clients", json={"app_key": "bad", "name": "坏", "scopes": ["unknown"]}
+    )
+    assert response.status_code == 422

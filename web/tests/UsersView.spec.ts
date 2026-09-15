@@ -71,6 +71,23 @@ describe('UsersView', () => {
     wrapper.unmount()
   })
 
+  it('still loads the user list and reports the error when the team list fails', async () => {
+    const { teams } = await import('@/api/admin')
+    const { ElMessage } = await import('element-plus')
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => {} }) as never)
+    vi.mocked(teams.list).mockRejectedValueOnce(new Error('teams unavailable'))
+    vi.mocked(users.list).mockClear()
+    const auth = useAuthStore()
+    auth.user = { id: 'me', login_name: 'admin', display_name: 'A', role: 'platform_admin', locale: 'zh' } as never
+    const wrapper = mount(UsersView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(error).toHaveBeenCalledWith('teams unavailable')
+    expect(users.list).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('张三')
+    error.mockRestore()
+    wrapper.unmount()
+  })
+
   it('member sees read-only rows', async () => {
     const auth = useAuthStore()
     auth.user = { id: 'me', login_name: 'm', display_name: 'M', role: 'member', locale: 'zh' } as never

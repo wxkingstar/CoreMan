@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError, type FieldError } from '@/api/client'
-import { errorMessage, fieldErrorMap, fieldKey, isVersionConflict } from '@/utils/errors'
+import { errorMessage, fieldErrorMap, fieldKey, isVersionConflict, VERSION_CONFLICT_CODE } from '@/utils/errors'
 
 const invalid = (errors: FieldError[]) => new ApiError(422, 422, '参数校验失败', errors)
 
@@ -39,12 +39,16 @@ describe('errorMessage', () => {
 })
 
 describe('isVersionConflict', () => {
-  it('only matches optimistic-lock conflicts', () => {
-    expect(isVersionConflict(new ApiError(409, 409, '记录已被他人修改，请刷新后重试'))).toBe(true)
-    expect(isVersionConflict(new ApiError(409, 409, '机器人已被其他操作修改，请刷新后重试'))).toBe(true)
+  it('matches the dedicated version-conflict code, not the message text', () => {
+    expect(VERSION_CONFLICT_CODE).toBe(40901)
+    expect(isVersionConflict(new ApiError(409, VERSION_CONFLICT_CODE, '记录已被他人修改，请刷新后重试'))).toBe(true)
+    // 文案改了、换了语言也照样识别。
+    expect(isVersionConflict(new ApiError(409, VERSION_CONFLICT_CODE, 'Modified by someone else'))).toBe(true)
+    // 旧的文案匹配不再生效：code 仍是 409 的都是其它冲突。
+    expect(isVersionConflict(new ApiError(409, 409, '记录已被他人修改，请刷新后重试'))).toBe(false)
     expect(isVersionConflict(new ApiError(409, 409, '该实例工作目录已属于另一个机器人'))).toBe(false)
     expect(isVersionConflict(new ApiError(409, 409, '记录已存在、被其它记录引用或不满足约束；被引用的配置可先停用'))).toBe(false)
-    expect(isVersionConflict(new ApiError(422, 422, '记录已被他人修改'))).toBe(false)
+    expect(isVersionConflict(new ApiError(422, VERSION_CONFLICT_CODE, '记录已被他人修改'))).toBe(false)
     expect(isVersionConflict(new Error('记录已被他人修改'))).toBe(false)
   })
 })

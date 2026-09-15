@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.relay_servers import load_relay
@@ -131,6 +131,7 @@ async def agent_probe(
         target_type="relay",
         target_id=str(relay_id),
         diff={"operation": [None, body.operation]},
+        ip=client_ip(request),
     )
     await session.commit()
     return {"code": 0, "data": data}

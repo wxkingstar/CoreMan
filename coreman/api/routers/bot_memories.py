@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
@@ -74,7 +74,12 @@ async def load(session: AsyncSession, bot: Bot, identity: uuid.UUID) -> Memory:
 
 
 async def audit(
-    session: AsyncSession, actor: User, bot: Bot, action: str, identity: uuid.UUID | None = None
+    session: AsyncSession,
+    request: Request,
+    actor: User,
+    bot: Bot,
+    action: str,
+    identity: uuid.UUID | None = None,
 ) -> None:
     await record_audit(
         session,
@@ -84,6 +89,7 @@ async def audit(
         target_type="bot",
         target_id=str(bot.id),
         diff={"memory_id": [None, str(identity)]} if identity else None,
+        ip=client_ip(request),
     )
 
 
@@ -145,6 +151,7 @@ def apply(row: Memory, body: MemoryIn) -> None:
 async def create_memory(
     bot_id: uuid.UUID,
     body: MemoryIn,
+    request: Request,
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
@@ -160,7 +167,7 @@ async def create_memory(
     apply(row, body)
     session.add(row)
     await session.flush()
-    await audit(session, actor, bot, "create", row.id)
+    await audit(session, request, actor, bot, "create", row.id)
     await session.commit()
     return {"code": 0, "data": memory_out(row, full=True)}
 
@@ -180,7 +187,7 @@ async def update_memory(
     if body.file_name != row.file_name:
         raise ApiError(422, 422, "文件名不可修改；可另建文件后删除旧文件")
     apply(row, body)
-    await audit(session, actor, bot, "edit", row.id)
+    await audit(session, request, actor, bot, "edit", row.id)
     await session.commit()
     return {"code": 0, "data": memory_out(row, full=True)}
 
@@ -198,7 +205,7 @@ async def delete_memory(
     require_if_match(request, row.version)
     row.deleted_at = row.file_mtime = row.updated_at = utcnow()
     row.content, row.content_hash = "", content_hash("")
-    await audit(session, actor, bot, "delete", row.id)
+    await audit(session, request, actor, bot, "delete", row.id)
     await session.commit()
     return {"code": 0, "data": memory_out(row)}
 
@@ -226,7 +233,7 @@ async def collect_memory(
 ) -> dict[str, Any]:
     bot = await require_admin(session, bot_id, actor)
     relay = await relay_for_memory(session, bot)
-    await audit(session, actor, bot, "collect_requested")
+    await audit(session, request, actor, bot, "collect_requested")
     await session.commit()
     try:
         result = await call_agent(
@@ -271,7 +278,7 @@ async def deploy_memory(
         > MAX_BATCH_BYTES - 1024
     ):
         raise ApiError(413, 413, "部署请求超过 Agent 大小限制")
-    await audit(session, actor, bot, "deploy_requested")
+    await audit(session, request, actor, bot, "deploy_requested")
     await session.commit()
     try:
         capability = await call_agent(relay, request.app.state.cipher, "ping")
@@ -296,6 +303,6 @@ async def deploy_memory(
         raise ApiError(409, 409, "部署期间配置已变更，请重新回收核对后部署")
     if result.get("protocol_version") != 2:
         raise ApiError(409, 409, "Agent 版本不支持删除和冲突检测，请先升级")
-    await audit(session, actor, bot, "deployed")
+    await audit(session, request, actor, bot, "deployed")
     await session.commit()
     return {"code": 0, "data": result}

@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from coreman.core.errors import VERSION_CONFLICT as VERSION_CONFLICT
 from coreman.core.errors import ApiError as ApiError
 from coreman.core.errors import forbidden as forbidden
 from coreman.core.errors import not_found as not_found
@@ -67,7 +68,7 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _stale_data(_: Request, exc: StaleDataError) -> JSONResponse:
         """乐观锁（version_id_col）冲突：并发写只有一个能赢，输的那个到这里。"""
         return JSONResponse(
-            status_code=409, content=_payload(409, "记录已被他人修改，请刷新后重试")
+            status_code=409, content=_payload(VERSION_CONFLICT, "记录已被他人修改，请刷新后重试")
         )
 
     @app.exception_handler(StarletteHTTPException)

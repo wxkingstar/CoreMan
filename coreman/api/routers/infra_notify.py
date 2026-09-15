@@ -1,4 +1,4 @@
-"""用户通知及旧企微别名；成功表示已持久化入队。"""
+"""用户通知；成功表示已持久化入队。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,6 @@ class NotifyIn(BaseModel):
 
 
 @router.post("/api/infra/notify/user")
-@router.post("/api/robot/wework-notify")
 async def notify_user(
     body: NotifyIn,
     client: ApiClient = Depends(NOTIFY),
