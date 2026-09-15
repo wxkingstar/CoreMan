@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -47,5 +47,34 @@ describe('PlatformAppsView', () => {
     expect(platformApps.sync).toHaveBeenCalledWith('p1')
     await vi.advanceTimersByTimeAsync(2100)
     expect(syncRuns.get).toHaveBeenCalledWith(9)
+    wrapper.unmount()
+  })
+
+  // onBeforeUnmount 只能清掉已排队的定时器；在飞的请求回来后不能再 setTimeout，也不能弹消息。
+  it('stops polling and stays silent when unmounted while a poll request is in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const info = vi.spyOn(ElMessage, 'info').mockReturnValue({ close: () => {} })
+    const success = vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    let finish: (run: unknown) => void = () => {}
+    vi.mocked(syncRuns.get).mockClear()
+    vi.mocked(syncRuns.get).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }) as never)
+    const wrapper = mount(PlatformAppsView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    await wrapper.get('[data-test="sync-p1"]').trigger('click')
+    await flushPromises()
+    expect(info).toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(2100)
+    expect(syncRuns.get).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    finish({ id: 9, status: 'running', started_at: '', finished_at: null, stats: {}, error: null, triggered_by: null })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(syncRuns.get).toHaveBeenCalledTimes(1)
+    expect(success).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+    info.mockRestore()
+    success.mockRestore()
+    error.mockRestore()
   })
 })
