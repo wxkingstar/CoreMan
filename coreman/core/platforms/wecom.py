@@ -8,9 +8,11 @@ open_userid 转 userid /cgi-bin/batch/openuserid_to_userid。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
+import weakref
 from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlencode
@@ -23,6 +25,43 @@ log = get_logger(__name__)
 BASE_URL = "https://qyapi.weixin.qq.com"
 _TOKEN_EXPIRED_CODES = {40014, 42001}
 _TOKENS: dict[str, tuple[str, float]] = {}  # cache_key -> (token, expires_at monotonic)
+# gettoken 失败的负缓存：cache_key -> (错误, expires_at monotonic)。
+# 凭证 / 配置类错误（secret 或 corpid 不对、IP 不在白名单）重试也不会好，每个请求都去打 gettoken
+# 只会被企微限频；换了 secret 就是新的 cache_key，改对之后立刻生效。
+_TOKEN_FAILURES: dict[str, tuple[WeComError, float]] = {}
+_CREDENTIAL_ERRCODES = frozenset({40001, 40013, 40091, 41002, 41004, 60020})
+CREDENTIAL_FAILURE_TTL = 60.0
+# 限频（45009 调用超限、45011 过于频繁）：短暂冷却，别在限频窗口里继续加码。
+_RATE_LIMIT_ERRCODES = frozenset({45009, 45011})
+RATE_LIMIT_FAILURE_TTL = 30.0
+# 同一个 cache_key 并发取令牌只打一次 gettoken；锁按事件循环分开（asyncio.Lock 不能跨循环）。
+_TOKEN_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def clear_token_cache() -> None:
+    """清空进程级令牌缓存与失败负缓存（测试与凭证轮换后使用）。"""
+    _TOKENS.clear()
+    _TOKEN_FAILURES.clear()
+
+
+def _failure_ttl(errcode: int) -> float:
+    """gettoken 失败要缓存多久；0 表示不缓存（系统繁忙、HTTP / 网络错误这类瞬断）。"""
+    if errcode in _CREDENTIAL_ERRCODES:
+        return CREDENTIAL_FAILURE_TTL
+    if errcode in _RATE_LIMIT_ERRCODES:
+        return RATE_LIMIT_FAILURE_TTL
+    return 0.0
+
+
+def _token_lock(cache_key: str) -> asyncio.Lock:
+    locks = _TOKEN_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(cache_key, asyncio.Lock())
 
 
 def _body_of(r: httpx.Response) -> dict[str, Any]:
@@ -93,28 +132,57 @@ class WeComClient:
             await self._http.aclose()
 
     async def get_token(self, *, force: bool = False) -> str:
-        """获取访问令牌（自动缓存）。
+        """获取访问令牌（自动缓存；凭证类失败短期负缓存；并发只打一次 gettoken）。
 
         Args:
-            force: 是否强制刷新缓存中的令牌
+            force: 是否强制刷新缓存中的令牌（同时绕过失败负缓存，供「测试连接」与令牌过期重试）
 
         Returns:
             访问令牌字符串
+
+        Raises:
+            WeComError: gettoken 返回错误，或负缓存期内的同一错误
         """
-        hit = _TOKENS.get(self._cache_key)
-        if hit and not force and hit[1] > time.monotonic():
-            return hit[0]
+        key = self._cache_key
+        seen = _TOKENS.get(key)
+        if not force:
+            if seen and seen[1] > _clock():
+                return seen[0]
+            self._raise_cached_failure()
+        async with _token_lock(key):
+            hit = _TOKENS.get(key)
+            # 等锁期间别人已经取到了令牌；force 时只认比进来时看到的那张更新的。
+            if hit and hit[1] > _clock() and (not force or hit is not seen):
+                return hit[0]
+            if not force:
+                self._raise_cached_failure()
+            return await self._fetch_token()
+
+    def _raise_cached_failure(self) -> None:
+        failed = _TOKEN_FAILURES.get(self._cache_key)
+        if failed and failed[1] > _clock():
+            # 每次抛新实例：同一个异常对象反复 raise 会把 traceback 越串越长。
+            raise WeComError(failed[0].errcode, failed[0].errmsg)
+
+    async def _fetch_token(self) -> str:
         r = await self._http.get(
             "/cgi-bin/gettoken", params={"corpid": self._corp_id, "corpsecret": self._secret}
         )
         data = _body_of(r)
         code = int(data.get("errcode", 0))
         if code != 0:
-            raise WeComError(code, str(data.get("errmsg", "")))
+            error = WeComError(code, str(data.get("errmsg", "")))
+            ttl = _failure_ttl(code)
+            if ttl:
+                _TOKEN_FAILURES[self._cache_key] = (error, _clock() + ttl)
+                _TOKENS.pop(self._cache_key, None)
+                log.warning("wecom_gettoken_failure_cached", errcode=code, seconds=ttl)
+            raise error
+        _TOKEN_FAILURES.pop(self._cache_key, None)
         token = str(data["access_token"])
         _TOKENS[self._cache_key] = (
             token,
-            time.monotonic() + int(data.get("expires_in", 7200)) - 300,
+            _clock() + int(data.get("expires_in", 7200)) - 300,
         )
         return token
 
