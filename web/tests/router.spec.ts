@@ -83,4 +83,16 @@ describe('router guard', () => {
     expect(router.currentRoute.value.name).toBe('login')
     expect(router.currentRoute.value.query.redirect).toBe(previousFullPath)
   })
+
+  // 旧的 relay 管理页已删除；/relays 书签继续落到运行时管理页。
+  it('redirects the retired /relays page to the runtime page', async () => {
+    vi.mocked(api.me).mockResolvedValueOnce({
+      id: 'u1', login_name: 'admin', display_name: 'Admin', role: 'platform_admin', locale: 'zh',
+      email: null, avatar_url: null, source: 'bootstrap', team_id: null,
+    })
+    await router.push('/relays')
+    await router.isReady()
+    expect(router.currentRoute.value.fullPath).toBe('/runtimes')
+    expect(router.currentRoute.value.name).toBe('relays')
+  })
 })

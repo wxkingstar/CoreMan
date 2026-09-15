@@ -148,11 +148,11 @@ defineExpose({ pick, confirm })
         </template>
       </el-table-column>
       <el-table-column
-        :label="t('relays.server')"
+        :label="t('runtimeNodes.nodes')"
         width="160"
       >
         <template #default="{ row }: { row: RelayOut }">
-          {{ row.host }}:{{ row.clawrelay_port }}
+          {{ row.runtime_name ?? '—' }}
         </template>
       </el-table-column>
       <el-table-column

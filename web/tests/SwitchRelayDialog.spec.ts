@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 // vi.hoisted() 先于它执行，返回值可以安全地在工厂里用（同 BotsView.spec）。
 const { relayRow } = vi.hoisted(() => ({
   relayRow: (id: string, provider: string, def: string) => ({
-    id, name: id, host: 'h', clawrelay_port: 1, relay_url: 'http://h:1', model_provider: provider,
+    id, name: id, runtime_node_id: 'n1', runtime_name: 'node-1', relay_url: 'http://h:1', model_provider: provider,
     default_model: def, effective_models: [def], team_id: null, team_name: null, is_active: true,
     health_status: 'healthy', health_checked_at: null, health_detail: null,
     rate_limit_5h_used_pct: 10, rate_limit_7d_used_pct: null, version: 1,

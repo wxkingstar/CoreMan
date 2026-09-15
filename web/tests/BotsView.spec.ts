@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 // vi.mock() 工厂会被提升到模块顶部，直接引用模块级 const 会 ReferenceError；
-// vi.hoisted() 先于它执行，返回值可以安全地在工厂里用（同 RelaysView.spec）。
+// vi.hoisted() 先于它执行，返回值可以安全地在工厂里用。
 const { bot } = vi.hoisted(() => {
   const perms = { role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true, can_switch_relay: true, can_toggle: true, can_delete: true, can_manage_members: true, can_reassign_team: false }
   return {

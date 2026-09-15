@@ -2,9 +2,9 @@ import { call, http } from '@/api/client'
 import type {
   AllowedUserOut, AnnouncementIn, AnnouncementOut, AuditLogOut, BotIn, BotMemberOut, BotOut, BotPatch, CatalogIn, CatalogOut, CatalogPatch,
   ChatLogOut, ChatLogStats, DeptNode, DrainIn, Page, PlatformAppIn, PlatformAppOut, ProbeResult, Providers,
-  RelayIn, RelayModels, RelayOut, RuleIn, RuntimeInstance, RuntimeLease, RuntimeOutboxItem, RuntimeQueue,
+  RelayModels, RelayOut, RuleIn, RuntimeInstance, RuntimeLease, RuntimeOutboxItem, RuntimeQueue,
   RuntimeTask, SettingsDefaults, SettingsOut, SettingsPatch, SwitchRelayIn, SwitchRelayOut, SyncRun, TeamIn,
-  TeamLoad, TeamOut, UserOut, UserPatch,
+  TeamOut, UserOut, UserPatch,
 } from '@/api/types'
 
 type Query = Record<string, string | number | boolean | undefined | null>
@@ -25,7 +25,6 @@ export const departments = { tree: (platform = 'wecom') => call<DeptNode[]>(http
 export const platformApps = {
   list: (params: Query) => call<Page<PlatformAppOut>>(http.get('/api/admin/platform-apps', { params })),
   create: (body: PlatformAppIn) => call<PlatformAppOut>(http.post('/api/admin/platform-apps', body)),
-  get: (id: string) => call<PlatformAppOut>(http.get(`/api/admin/platform-apps/${id}`)),
   update: (id: string, body: PlatformAppIn, version: number) =>
     call<PlatformAppOut>(http.put(`/api/admin/platform-apps/${id}`, body, { headers: { 'If-Match': `"${version}"` } })),
   remove: (id: string) => call<null>(http.delete(`/api/admin/platform-apps/${id}`)),
@@ -35,17 +34,11 @@ export const platformApps = {
 }
 export const syncRuns = { get: (id: number) => call<SyncRun>(http.get(`/api/admin/sync-runs/${id}`)) }
 export const auth = { providers: () => call<Providers>(http.get('/api/auth/providers')) }
+// 运行时（relay）由节点 Daemon 自动登记，管理台只读列表、探测与取有效模型集；手工增删改已下线。
 export const relays = {
   list: (params: Query) => call<Page<RelayOut>>(http.get('/api/admin/relay-servers', { params })),
-  get: (id: string) => call<RelayOut>(http.get(`/api/admin/relay-servers/${id}`)),
-  create: (body: RelayIn) => call<RelayOut>(http.post('/api/admin/relay-servers', body)),
-  update: (id: string, body: RelayIn, version: number) =>
-    call<RelayOut>(http.put(`/api/admin/relay-servers/${id}`, body, { headers: { 'If-Match': `"${version}"` } })),
-  remove: (id: string) => call<null>(http.delete(`/api/admin/relay-servers/${id}`)),
   probe: (id: string) => call<ProbeResult>(http.post(`/api/admin/relay-servers/${id}/probe`)),
   models: (id: string) => call<RelayModels>(http.get(`/api/admin/relay-servers/${id}/models`)),
-  agentToken: (id: string) => call<{ token: string }>(http.post(`/api/admin/relay-servers/${id}/agent-token`)),
-  teamLoad: () => call<TeamLoad>(http.get('/api/admin/relay-servers/team-load')),
 }
 export const catalog = {
   list: (provider?: string) => call<CatalogOut[]>(http.get('/api/admin/model-catalog', { params: provider ? { provider } : {} })),
