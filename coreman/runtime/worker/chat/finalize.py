@@ -164,6 +164,18 @@ class FinalizeStage(ChatStageBase):
         # 用户「异常中断」。那时候再推送、再改写终稿、再补一条 chat_log，用户会收到两份自相
         # 矛盾的回答，管理台也会多一条假成功记录——所以就此收手，一个字都不再落。
         async with ctx.session_factory() as session:
+            # Same lock order as timeout/stop: collaboration first, then its task.
+            # Otherwise a simultaneous B completion and human stop can deadlock.
+            if intake.bot.platform == "feishu":
+                from coreman.core.db.models import BotCollaboration
+
+                cid = ctx.task.payload.get("collaboration_id")
+                condition = (
+                    BotCollaboration.id == uuid.UUID(cid)
+                    if cid
+                    else BotCollaboration.source_task_id == ctx.task.id
+                )
+                await session.scalar(select(BotCollaboration).where(condition).with_for_update())
             owned = await tasks.finish(
                 session,
                 ctx.task.id,
@@ -172,16 +184,34 @@ class FinalizeStage(ChatStageBase):
                 error_message=verdict.error_message,
                 only_active=True,
             )
+            collaboration_silent = False
+            if owned and intake.bot.platform == "feishu":
+                from coreman.runtime.worker.chat.collaboration import final_transition
+
+                verdict, collaboration_silent = await final_transition(session, ctx, pre, verdict)
             await session.commit()
         if not owned:
             ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)
+            return
+        if collaboration_silent:
+            await pre.writer.complete(verdict.final_text)
+            ctx.chat_logs.submit(
+                log_entry(
+                    ctx,
+                    intake,
+                    status=verdict.log_status,
+                    relay_session_id=pre.info.relay_session_id,
+                    response_content=verdict.final_text,
+                    tools_used=out.tools,
+                )
+            )
             return
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
         # 再开一轮提问就是让用户对着一张没人接的卡片作答。
         card = (
             await self._open_choice(ctx, pre, out.questions)
-            if verdict.log_status == "ask_user"
+            if verdict.log_status == "ask_user" and out.questions
             else None
         )
         # 触限时模型不会同时提问，两张卡不会真的打架；真撞上了以切换卡为准——额度没了，

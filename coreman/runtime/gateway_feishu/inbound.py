@@ -28,6 +28,7 @@ def _normalize_event(
     bot_open_id: str,
     gateway_instance: str,
     now: datetime,
+    allow_bot: bool = False,
 ) -> InboundMessage | None:
     header = raw.get("header") or {}
     if header.get("app_id") != app_id:
@@ -99,11 +100,12 @@ def _normalize_event(
     if event_type != "im.message.receive_v1":
         return None
     sender = event.get("sender") or {}
-    if sender.get("sender_type") != "user":
+    sender_type = sender.get("sender_type")
+    if sender_type != "user" and not (allow_bot and sender_type == "bot"):
         return None
     identity = sender.get("sender_id") or {}
     # user_id 是租户内稳定 ID；应用 open_id 不跨 bot 复用，缺权限时保持未知身份。
-    user_id = str(identity.get("user_id") or "")
+    user_id = str(identity.get("user_id") or "") if sender_type == "user" else ""
     message = event.get("message") or {}
     mid, chat_id = str(message.get("message_id") or ""), str(message.get("chat_id") or "")
     chat_type = {"p2p": "single", "group": "group"}.get(str(message.get("chat_type") or ""))
@@ -176,7 +178,9 @@ def _normalize_event(
         kind="message",
         chat_type=chat_type,
         chat_id=chat_id,
-        sender=Sender(platform_user_id=user_id, open_id=identity.get("open_id")),
+        sender=Sender(
+            platform_user_id=user_id, open_id=identity.get("open_id"), sender_type=sender_type
+        ),
         message_id=mid,
         mentions_bot=mentioned,
         parts=parts,

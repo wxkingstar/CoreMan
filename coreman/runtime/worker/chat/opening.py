@@ -115,6 +115,9 @@ class OpenStage(ChatStageBase):
             bot_env=await effective_env(session, ctx.cipher, bot),
         )
         env.update(access.env)
+        from coreman.runtime.worker.chat.collaboration import configure
+
+        system_prompt, env = await configure(session, ctx, intake, info, system_prompt, env)
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
         request = ChatRequest(
@@ -135,7 +138,7 @@ class OpenStage(ChatStageBase):
         }
         stream_kwargs.update(self._stream_kwargs(ctx, intake))
         await open_stream(session, ctx, **stream_kwargs)
-        if info.is_new:
+        if info.is_new and ctx.task.payload.get("collaboration_phase") != "helper":
             writer.add_text(msg("session_link_prefix", ctx.locale, url=session_url))
         writer.set_thinking_line(msg("thinking_start", ctx.locale))
         # IM 投递策略固定在底层，不读取旧的员工/全局 agent_timeout_seconds。
@@ -161,6 +164,19 @@ class OpenStage(ChatStageBase):
         self, session: AsyncSession, ctx: TaskContext, intake: Intake, backend: str
     ) -> sessions.SessionInfo:
         """本轮用哪个 relay 会话。默认按 session_key 取（或新建）并刷新 chat_sessions。"""
+        if ctx.task.payload.get("collaboration_phase") == "resume":
+            from coreman.core.db.models import BotCollaboration
+
+            row = await session.get(
+                BotCollaboration, uuid.UUID(ctx.task.payload["collaboration_id"])
+            )
+            if row is None:
+                raise ValueError("collaboration missing")
+            # _open holds the bot lock and has refreshed intake.relay.
+            # The earlier resolve transaction cannot fence an intervening runtime switch.
+            if intake.relay is None or intake.relay.id != row.source_relay_id:
+                raise ValueError("collaboration runtime changed before dispatch")
+            return sessions.SessionInfo(row.source_relay_session_id, False, False)
         ttl = int(await ctx.settings_store.get("session_ttl_hours", default=72))
         return await sessions.get_or_create(
             session,
@@ -192,6 +208,10 @@ class OpenStage(ChatStageBase):
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""
+        if ctx.task.payload.get("collaboration_phase") == "helper":
+            return {
+                "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
+            }
         return {}
 
     def _after_supervisor(self, pre: Prepared) -> None:

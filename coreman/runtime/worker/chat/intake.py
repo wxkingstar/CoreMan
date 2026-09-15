@@ -48,6 +48,10 @@ class IntakeStage(ChatStageBase):
         self, session: AsyncSession, ctx: TaskContext
     ) -> tuple[Intake, RelayServer, list[dict[str, Any]]] | None:
         """这一轮从哪儿来。chat 是入站消息；子类可以换成别的入口（提交轮读状态快照）。"""
+        if ctx.task.payload.get("collaboration_id"):
+            from coreman.runtime.worker.chat.collaboration import resolve
+
+            return await resolve(session, ctx)
         return await self._intake(session, ctx)
 
     def _needs_content(self) -> bool:
@@ -70,6 +74,11 @@ class IntakeStage(ChatStageBase):
         chat_type = str(message.get("chat_type") or inbound.chat_type)
         session_key = ctx.task.session_key or chat_id
         sender = message.get("sender") or {}
+        if sender.get("sender_type", "user") != "user":
+            await tasks.finish(
+                session, ctx.task.id, status="cancelled", error_code="bot_requires_collaboration"
+            )
+            return None
         platform_user_id = str(
             sender.get("platform_user_id") or inbound.sender_platform_user_id or ""
         )

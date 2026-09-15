@@ -38,13 +38,36 @@ async def _speaker_id(
 
 async def _clear_states(
     session: AsyncSession, bot_id: uuid.UUID, session_key: str, platform_user_id: str | None
-) -> None:
+) -> int:
     """reset/stop 都作废待答状态：否则下一条输入会被吞成上一题的答案。"""
+    closed = 0
     if platform_user_id:
+        from sqlalchemy import select
+
+        from coreman.core.chat.bot_collaboration import ACTIVE, close
+        from coreman.core.db.models import BotCollaboration, BotCollaborationRoute
+
+        rows = list(
+            await session.scalars(
+                select(BotCollaboration)
+                .join(BotCollaborationRoute)
+                .where(
+                    BotCollaborationRoute.source_bot_id == bot_id,
+                    BotCollaborationRoute.chat_id == session_key,
+                    BotCollaboration.origin_platform_user_id == platform_user_id,
+                    BotCollaboration.status.in_(ACTIVE),
+                )
+                .with_for_update(of=BotCollaboration)
+            )
+        )
+        closed = len(rows)
+        for row in rows:
+            await close(session, row, "cancelled", "原始用户停止了协作")
         await interactions.clear_for_speaker(
             session, bot_id=bot_id, platform_user_id=platform_user_id
         )
     await interactions.clear_for_session(session, bot_id=bot_id, session_key=session_key)
+    return closed
 
 
 async def do_reset(
@@ -70,8 +93,29 @@ async def do_stop(
     session_key: str,
     platform_user_id: str | None = None,
 ) -> str:
-    await _clear_states(session, bot_id, session_key, platform_user_id)
-    stopped = 0
+    stopped = await _clear_states(session, bot_id, session_key, platform_user_id)
+    # Opt-in group tasks use per-request sessions, so stop follows original human provenance.
+    if platform_user_id:
+        from sqlalchemy import select
+
+        from coreman.core.db.models import InboundEvent, Task
+
+        scoped = list(
+            await session.scalars(
+                select(Task)
+                .join(InboundEvent, Task.inbound_event_id == InboundEvent.id)
+                .where(
+                    Task.bot_id == bot_id,
+                    Task.status.in_(tasks.OPEN),
+                    Task.session_key.startswith(session_key + ":request:", autoescape=True),
+                    InboundEvent.sender_platform_user_id == platform_user_id,
+                    InboundEvent.chat_id == session_key,
+                )
+            )
+        )
+        for task in scoped:
+            if task.id != ctx.task.id and await tasks.request_cancel(session, task.id, "user_stop"):
+                stopped += 1
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1

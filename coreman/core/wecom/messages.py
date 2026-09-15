@@ -17,6 +17,7 @@ class Sender(BaseModel):
     """发言者的平台标识；映射到 CoreMan 用户是 worker 的事（`resolve_speaker`）。"""
 
     platform_user_id: str
+    sender_type: Literal["user", "bot"] = "user"
     open_id: str | None = None
     display_name: str | None = None
 

@@ -69,6 +69,9 @@ async def enqueue_inbound(
         log.debug("inbound_duplicate", bot_key=bot.bot_key, platform_msg_id=message.message_id)
         return None
     event_id = int(row[0])
+    # Bot receipts are retained for collaboration reconciliation, never human intake.
+    if message.sender.sender_type == "bot":
+        return None
     if message.kind == "message":
         return await _enqueue_task(session, bot, message, payload, event_id)
     if message.kind == "card_action" and message.card_action:
@@ -142,11 +145,17 @@ async def _enqueue_task(
             dedupe_key=f"inbound:{event_id}",
         )
     else:
+        session_key = message.chat_id
+        if message.platform == "feishu" and message.chat_type == "group":
+            from coreman.core.chat.bot_collaboration import routes_for
+
+            if await routes_for(session, bot.id, message.chat_id):
+                session_key = f"{message.chat_id}:request:{message.message_id}"
         new = NewTask(
             bot_id=bot.id,
             kind="chat",
             payload={"message": payload, **base},
-            session_key=message.chat_id,
+            session_key=session_key,
             inbound_event_id=event_id,
             dedupe_key=f"inbound:{event_id}",
         )

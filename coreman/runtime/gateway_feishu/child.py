@@ -149,6 +149,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
                 bot_open_id=bot_open_id,
                 gateway_instance=instance_id,
                 now=datetime.now(UTC),
+                allow_bot=True,
             )
             if message is None:
                 return

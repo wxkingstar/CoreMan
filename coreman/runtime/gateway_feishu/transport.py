@@ -183,6 +183,12 @@ class FeishuTransport:
             return delivery.sequence
 
     async def push(self, row: TaskStream) -> None:
+        if row.reply_context.get("_collaboration_helper"):
+            if row.is_complete:
+                async with self.factory() as session:
+                    await streams.mark_finish_pushed(session, row.task_id)
+                    await session.commit()
+            return
         async with self.factory() as session:
             delivery = await session.get(FeishuDelivery, row.task_id)
             if delivery is None:
@@ -319,6 +325,29 @@ class FeishuTransport:
                 await session.commit()
                 return True
             try:
+                if item.payload.get("_collaboration_id"):
+                    from coreman.core.chat.bot_collaboration import ACTIVE, authorized
+                    from coreman.core.db.models import BotCollaboration, BotCollaborationRoute
+
+                    row = await session.get(
+                        BotCollaboration,
+                        uuid.UUID(item.payload["_collaboration_id"]),
+                    )
+                    try:
+                        if row is None:
+                            raise ValueError("collaboration missing")
+                        route = await session.get(BotCollaborationRoute, row.route_id)
+                        if route is None:
+                            raise ValueError("collaboration route missing")
+                        if row.status not in ACTIVE or row.expires_at <= datetime.now(UTC):
+                            raise ValueError("collaboration inactive")
+                        await authorized(
+                            session, route, row.origin_platform_user_id, row.origin_user_id
+                        )
+                    except ValueError as exc:
+                        await outbox.mark_skipped(session, item.id, str(exc))
+                        await session.commit()
+                        return True
                 await self._send_item(item)
                 await session.flush()
                 await outbox.mark_sent(session, item.id)
@@ -331,6 +360,16 @@ class FeishuTransport:
             return True
 
     async def _send_item(self, item: OutboxItem) -> None:
+        if item.payload.get("_collaboration_id"):
+            mid = await self.send(
+                str(item.target.get("chat_id") or ""),
+                {"text": item.payload["text"]},
+                kind="text",
+                key=f"outbox:{item.id}",
+                reply_to=item.target.get("message_id"),
+            )
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
         card = item.payload.get("card")
         if item.kind == "card_update":
             mid = api_id(item.target.get("message_id"))

@@ -154,3 +154,7 @@ __all__ = [
     "UserIdentity",
     "UserReached",
 ]
+
+from coreman.core.db.models.bot_collaboration import BotCollaboration, BotCollaborationRoute
+
+__all__ += ["BotCollaboration", "BotCollaborationRoute"]
