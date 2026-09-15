@@ -246,7 +246,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             </el-table-column>
             <el-table-column
               :label="t('runtimeNodes.state')"
-              width="110"
+              width="130"
             >
               <template #default="{ row }: { row: RuntimeNode }">
                 <el-tag :type="!row.is_active ? 'info' : row.online ? 'success' : 'danger'">
@@ -256,6 +256,12 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   class="muted"
                 >
                   {{ t('runtimeNodes.draining') }}
+                </div><div
+                  v-if="row.max_concurrent != null && row.active_calls != null"
+                  class="muted"
+                  data-test="runtime-concurrency"
+                >
+                  {{ t('runtimeNodes.concurrencyUsage', { n: row.active_calls, total: row.max_concurrent }) }}
                 </div>
               </template>
             </el-table-column>
