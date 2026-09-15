@@ -482,3 +482,68 @@ def test_first_build_records_deploy_tag(stack: FakeStack) -> None:
     assert r.returncode == 0, r.stderr
     assert stack.tag_file() == "abc1234"
     assert "coreman up" in r.stdout
+
+
+# ---- 网关活跃侧持久化 ----
+
+
+def gateway_state(state_dir: Path) -> str | None:
+    path = state_dir / ".coreman-gateway-active"
+    return path.read_text() if path.exists() else None
+
+
+def test_up_starts_recorded_gateway_side(env_file: Path, isolated_state_dir: Path) -> None:
+    (isolated_state_dir / ".coreman-gateway-active").write_text("wecom=b\nfeishu=a\n")
+    r = run("up", env_file=env_file)
+    assert r.returncode == 0, r.stderr
+    wait_line = next(line for line in r.stdout.splitlines() if "up -d --wait" in line)
+    services = wait_line.split()
+    assert "gateway-wecom-b" in services and "gateway-feishu-a" in services
+    assert "gateway-wecom-a" not in services and "gateway-feishu-b" not in services
+
+
+def test_up_without_state_starts_side_a(env_file: Path) -> None:
+    r = run("up", env_file=env_file)
+    assert r.returncode == 0, r.stderr
+    wait_line = next(line for line in r.stdout.splitlines() if "up -d --wait" in line)
+    assert wait_line.endswith("worker-b gateway-wecom-a gateway-feishu-a")
+
+
+def test_upgrade_gateway_records_and_alternates_active_side(stack: FakeStack) -> None:
+    stack.seed("v1")
+    assert stack.run("upgrade", "gateway", "wecom").returncode == 0
+    assert gateway_state(stack.state_dir) == "wecom=b\n"
+    services = stack.services()
+    assert services["gateway-wecom-b"]["running"] and not services["gateway-wecom-a"]["running"]
+
+    assert stack.run("upgrade", "gateway", "feishu").returncode == 0
+    assert gateway_state(stack.state_dir) == "wecom=b\nfeishu=b\n"
+
+    second = stack.run("upgrade", "gateway", "wecom")
+    assert second.returncode == 0, second.stderr
+    assert "drain --prefix gateway-wecom-b" in "\n".join(stack.calls())
+    assert gateway_state(stack.state_dir) == "wecom=a\nfeishu=b\n"
+
+
+def test_upgrade_all_follows_recorded_sides(stack: FakeStack) -> None:
+    services = [s for s in CORE_SERVICES if s != "gateway-wecom-a"] + ["gateway-wecom-b"]
+    stack.seed("v1", services=services)
+    (stack.state_dir / ".coreman-gateway-active").write_text("wecom=b\nfeishu=a\n")
+    r = stack.run("upgrade", "all", "v2")
+    assert r.returncode == 0, r.stderr
+    calls = "\n".join(stack.calls())
+    assert "drain --prefix gateway-wecom-b:host-gateway-wecom-b:" in calls
+    assert "drain --prefix gateway-feishu-a:host-gateway-feishu-a:" in calls
+    assert gateway_state(stack.state_dir) == "wecom=a\nfeishu=b\n"
+    assert stack.services()["gateway-wecom-a"]["image"] == "coreman-runtime:v2"
+    assert stack.tag_file() == "v2"
+
+
+def test_state_contradicting_running_containers_prefers_running_side(stack: FakeStack) -> None:
+    stack.seed("v1")  # 只有 a 侧在运行
+    (stack.state_dir / ".coreman-gateway-active").write_text("wecom=b\n")
+    r = stack.run("upgrade", "gateway", "wecom")
+    assert r.returncode == 0, r.stderr
+    assert "只有 a 侧在运行" in r.stderr
+    assert "drain --prefix gateway-wecom-a:host-gateway-wecom-a:" in "\n".join(stack.calls())
+    assert gateway_state(stack.state_dir) == "wecom=b\n"

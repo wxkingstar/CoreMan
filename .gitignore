@@ -22,6 +22,8 @@ data/
 .coreman-image-tag.tmp
 .coreman-image-tag.pending
 .coreman-image-tag.pending.tmp
+.coreman-gateway-active
+.coreman-gateway-active.tmp
 
 /runtime_daemon/dist/
 /runtime_daemon/bin/
