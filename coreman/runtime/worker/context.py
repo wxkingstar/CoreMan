@@ -35,6 +35,8 @@ class TaskContext:
     chat_logs: ChatLogWriter
     clock: Callable[[], float] = time.monotonic
     locale: str = "zh"
+    # 管理台对外地址：会话查看链接指向管理台对运行时节点的反向代理。
+    public_base_url: str = ""
     # 两个共享依赖由 WorkerService 建一份传下来：解析器的缓存、媒体客户端的连接池都靠这份复用。
     openuserid: OpenUseridResolver | None = None
     media_fetcher: MediaFetcher | None = None

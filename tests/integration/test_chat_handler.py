@@ -111,8 +111,9 @@ async def test_normal_round_trip_new_session_then_resume(
     await run(db_engine, t1, fake)
     s = await stream_of(db_session, t1.id)
     assert s.is_complete and s.final_text and s.final_text.endswith(msg("done_suffix"))
+    viewer = f"http://localhost/api/admin/runtime-nodes/{relay_row.runtime_node_id}/claude/session/"
     assert (
-        s.final_text.startswith("📎 查看实时聊天记录：[链接>>](http://relay.test:80/session/")
+        s.final_text.startswith(f"📎 查看实时聊天记录：[链接>>]({viewer}")
         and "你好，世界。" in s.final_text
     )
     assert (

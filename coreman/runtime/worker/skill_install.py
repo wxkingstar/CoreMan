@@ -88,7 +88,8 @@ async def checked(
     elif actor.id != requester.id:
         raise ValueError("installation_actor_mismatch")
     relay = await session.get(RelayServer, bot.relay_server_id)
-    if relay is None or not relay.is_active or not relay.agent_token_enc or not relay.agent_port:
+    # 实例都由运行时节点提供，Agent 走节点反向通道，不再要求单独配置的 Agent 端口。
+    if relay is None or not relay.is_active or not relay.agent_token_enc:
         raise ValueError("installation_agent_unavailable")
     # 工作目录共享会让一个机器人的安装改写另一个机器人的运行环境。
     others = await session.scalar(
