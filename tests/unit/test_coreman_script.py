@@ -578,6 +578,15 @@ def test_upgrade_gateway_records_and_alternates_active_side(stack: FakeStack) ->
     assert gateway_state(stack.state_dir) == "wecom=a\nfeishu=b\n"
 
 
+def test_upgrade_api_reconciles_caddy_after_api(stack: FakeStack) -> None:
+    """Caddy 须与 API 同在 edge 网段，API 才采信它转发的客户端地址；升级 API 后顺带对齐 Caddy。"""
+    stack.seed("v1")
+    r = stack.run("upgrade", "api", "v2")
+    assert r.returncode == 0, r.stderr
+    calls = "\n".join(stack.calls())
+    assert calls.index("--pull never api-2") < calls.index("up -d --no-deps --pull never caddy")
+
+
 def test_upgrade_all_follows_recorded_sides(stack: FakeStack) -> None:
     services = [s for s in CORE_SERVICES if s != "gateway-wecom-a"] + ["gateway-wecom-b"]
     stack.seed("v1", services=services)

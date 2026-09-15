@@ -5,17 +5,13 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
+from coreman.core.bots.env_policy import is_blocked_env_key
 from coreman.core.db.models import Skill
-from coreman.core.prompting.env_vars import _ALIASES
+from coreman.core.prompting.env_vars import is_reserved_key
 from coreman.core.relay.safe_transport import validate_host
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-RESERVED = (
-    set(_ALIASES)
-    | set(_ALIASES.values())
-    | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
-)
 
 
 def name(value: str) -> str:
@@ -55,12 +51,10 @@ def env_vars(values: dict[str, str]) -> dict[str, str]:
     if len(values) > 100:
         raise ValueError("环境变量超过 100 项")
     for key, value in values.items():
-        if (
-            not ENV_KEY.fullmatch(key)
-            or key in RESERVED
-            or key.startswith(("BOT_TOKEN_", "ETEAMS_"))
-        ):
+        if not ENV_KEY.fullmatch(key) or is_reserved_key(key):
             raise ValueError("环境变量名无效，或试图覆盖运行时身份与授权")
+        if is_blocked_env_key(key):
+            raise ValueError(f"环境变量会改变运行时的模型端点、代码加载或凭据，不允许配置：{key}")
         if len(value) > 4000 or "\x00" in value:
             raise ValueError("环境变量值无效或过长")
     return values

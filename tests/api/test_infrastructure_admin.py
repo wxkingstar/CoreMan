@@ -1,12 +1,12 @@
 import base64
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.tokens import active_key, issue_token
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import ApiClient, AuditLog, BotSystemGrant
+from coreman.core.db.models import ApiClient, AuditLog, BotSystemGrant, BusinessSystem
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 from tests.api.test_bots import _bot_body
 
@@ -45,7 +45,9 @@ async def test_system_grants_whitelist_reclaim_and_optimistic_lock(
     owner = await login_as(client, db_session, role="team_lead")
     bot = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
     manager = await login_as(client, db_session, role="ai_committee")
-    r = await client.post("/api/admin/systems", json={"key": "erp", "name": "ERP"})
+    r = await client.post(
+        "/api/admin/systems", json={"key": "erp", "name": "ERP", "allowed_bot_ids": [bot["id"]]}
+    )
     assert r.status_code == 201, r.text
     system = r.json()["data"]
     await login_existing(client, db_session, owner)
@@ -71,6 +73,15 @@ async def test_system_grants_whitelist_reclaim_and_optimistic_lock(
     )
     assert r.status_code == 200, r.text
     assert not list((await db_session.execute(select(BotSystemGrant))).scalars())
+    # 授权变更只记审计日志；弃用的 system_grant_audit 表不再写入。
+    logs = {
+        row.action: row.diff
+        for row in (await db_session.execute(select(AuditLog))).scalars()
+        if row.action in ("bot.system_grants", "system.update")
+    }
+    assert logs["bot.system_grants"] == {"system_keys": [[], ["erp"]]}
+    assert logs["system.update"] == {"granted_bot_ids": [[bot["id"]], []]}
+    assert await db_session.scalar(text("SELECT count(*) FROM system_grant_audit")) == 0
     await login_existing(client, db_session, owner)
     version = (await client.get(f"/api/admin/bots/{bot['id']}/system-grants")).json()["data"][
         "version"
@@ -81,6 +92,34 @@ async def test_system_grants_whitelist_reclaim_and_optimistic_lock(
         headers={"If-Match": str(version)},
     )
     assert r.status_code == 403
+
+
+async def test_new_systems_default_to_empty_allowlist_and_reserve_platform_key(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """新建系统缺省不对任何机器人开放；coreman 与管理 API 令牌的 audience 冲突，不能登记或授予。"""
+    owner = await login_as(client, db_session, role="team_lead")
+    bot = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
+    await login_as(client, db_session, role="ai_committee")
+    r = await client.post("/api/admin/systems", json={"key": "coreman", "name": "CoreMan"})
+    assert r.status_code == 422 and r.json()["errors"][0]["loc"] == ["body", "key"]
+    r = await client.post("/api/admin/systems", json={"key": "oa", "name": "OA"})
+    assert r.status_code == 201 and r.json()["data"]["allowed_bot_ids"] == []
+    r = await client.post(
+        "/api/admin/systems", json={"key": "wiki", "name": "Wiki", "allowed_bot_ids": None}
+    )
+    assert r.status_code == 201 and r.json()["data"]["allowed_bot_ids"] is None
+    # 保存规则收紧前落库的保留 key：即使对全部机器人开放也不能授予。
+    db_session.add(BusinessSystem(key="coreman", name="Legacy"))
+    await db_session.commit()
+    await login_existing(client, db_session, owner)
+    path = f"/api/admin/bots/{bot['id']}/system-grants"
+    headers = {"If-Match": str(bot["version"])}
+    for keys in (["oa"], ["coreman"]):
+        r = await client.put(path, json={"system_keys": keys}, headers=headers)
+        assert r.status_code == 403, keys
+    r = await client.put(path, json={"system_keys": ["wiki"]}, headers=headers)
+    assert r.status_code == 200, r.text
 
 
 async def test_bot_token_role_csrf_and_disabled_user(
@@ -148,12 +187,14 @@ async def test_client_names_trim_and_reject_whitespace_on_create_and_update(
     assert row["name"] == "测试"
     response = await client.put(
         "/api/admin/api-clients/trim-name",
-        json={"name": "   "}, headers={"If-Match": str(row["version"])},
+        json={"name": "   "},
+        headers={"If-Match": str(row["version"])},
     )
     assert response.status_code == 422
     response = await client.put(
         "/api/admin/api-clients/trim-name",
-        json={"name": " 更新 "}, headers={"If-Match": str(row["version"])},
+        json={"name": " 更新 "},
+        headers={"If-Match": str(row["version"])},
     )
     assert response.status_code == 200
     assert response.json()["data"]["name"] == "更新"

@@ -221,6 +221,32 @@ async def test_validation_error_never_echoes_values(
     assert set(first) <= {"loc", "msg", "type"}
 
 
+async def test_env_vars_reject_runtime_control_variables(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """模型端点、解释器启动项等控制类变量：新建与修改都 422，明细落在 env_vars 字段上且只点名键。"""
+    team = await _team(db_session)
+    await login_as(client, db_session, role="member", team_id=team.id)
+    r = await client.post(
+        "/api/admin/bots",
+        json=_bot_body(
+            env_vars={"ANTHROPIC_BASE_URL": "https://attacker.example", "NODE_OPTIONS": "-r x"}
+        ),
+    )
+    assert r.status_code == 422, r.text
+    err = r.json()["errors"][0]
+    assert err["loc"] == ["body", "env_vars"]
+    assert "ANTHROPIC_BASE_URL, NODE_OPTIONS" in err["msg"]
+    assert "attacker.example" not in r.text
+    bot = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
+    r = await client.patch(
+        f"/api/admin/bots/{bot['id']}",
+        json={"env_vars": {"DB_PASSWORD": "pw••••56", "LD_PRELOAD": "/tmp/x.so"}},
+        headers={"If-Match": str(bot["version"])},
+    )
+    assert r.status_code == 422 and "LD_PRELOAD" in r.json()["errors"][0]["msg"]
+
+
 async def test_relay_url_follows_relay_visibility(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:

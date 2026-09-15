@@ -44,7 +44,7 @@ def api_settings(
     monkeypatch.setenv("MASTER_KEY", MASTER_KEY)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret-0123456789")
     monkeypatch.setenv("BOOTSTRAP_ADMIN_USERNAME", "admin")
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "pass-1234")
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "pass-1234-bootstrap")
     monkeypatch.setenv("WEB_DIST_DIR", str(tmp_path / "dist-missing"))
     # 默认 dev（多数用例要 dev 注入路由）；用例请求 `prod_env` 时才切 prod。
     monkeypatch.setenv("COREMAN_ENV", "prod" if "prod_env" in request.fixturenames else "dev")
@@ -118,7 +118,7 @@ async def login_existing(client: httpx.AsyncClient, db_session: AsyncSession, us
 async def admin_client(client: httpx.AsyncClient) -> httpx.AsyncClient:
     """以引导管理员登录并自动带 CSRF 头。"""
     r = await client.post(
-        "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234"}
+        "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234-bootstrap"}
     )
     assert r.status_code == 200, r.text
     client.headers["X-CSRF-Token"] = client.cookies["coreman_csrf"]

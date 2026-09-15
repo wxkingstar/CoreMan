@@ -45,7 +45,6 @@ from coreman.core.db.models.infrastructure import (
     BotSystemGrant,
     BusinessSystem,
     JwtKey,
-    SystemGrantAudit,
 )
 from coreman.core.db.models.interactions import (
     ANNOUNCEMENT_SCOPES,
@@ -104,7 +103,6 @@ __all__ = [
     "BotSystemGrant",
     "BusinessSystem",
     "JwtKey",
-    "SystemGrantAudit",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",
     "CAPABILITIES",

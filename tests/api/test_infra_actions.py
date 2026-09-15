@@ -5,7 +5,7 @@ import jwt
 from sqlalchemy import func, select
 
 from coreman.core.auth.signatures import sign_request
-from coreman.core.db.models import Bot, OutboxItem
+from coreman.core.db.models import Bot, BusinessSystem, OutboxItem
 from tests.api.conftest import login_as
 
 
@@ -98,6 +98,11 @@ async def test_system_test_requires_real_current_user_and_hides_target_secrets(
         r = await client.post(path, json=body, headers=signed(path, body, credential["secret"]))
         assert r.status_code == 200 and r.json()["data"]["success"], r.text
         assert "synthetic-secret" not in r.text and "private=session" not in r.text
+    assert len(seen) == 2
+    db_session.add(BusinessSystem(key="coreman", name="Legacy", base_url="https://example.test/"))
+    await db_session.commit()
+    path = "/api/admin/systems/test-access"
+    assert (await client.post(path, json={"system_key": "coreman"})).status_code == 422
     assert len(seen) == 2
     client.cookies.clear()
     assert (
