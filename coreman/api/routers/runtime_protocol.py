@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
@@ -293,6 +293,7 @@ async def enroll(
             target_type="runtime_node",
             target_id=str(node.id),
             diff={"install_link": [None, str(link.id)]},
+            ip=client_ip(request),
         )
         await session.flush()
     relays = list(

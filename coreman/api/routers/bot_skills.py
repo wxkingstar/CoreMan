@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
@@ -38,7 +38,12 @@ async def admin_bot(session: AsyncSession, identity: uuid.UUID, actor: User) -> 
 
 
 async def audit(
-    session: AsyncSession, actor: User, bot: Bot, action: str, skill_id: uuid.UUID
+    session: AsyncSession,
+    request: Request,
+    actor: User,
+    bot: Bot,
+    action: str,
+    skill_id: uuid.UUID,
 ) -> None:
     await record_audit(
         session,
@@ -48,6 +53,7 @@ async def audit(
         target_type="bot",
         target_id=str(bot.id),
         diff={"skill_id": [None, str(skill_id)]},
+        ip=client_ip(request),
     )
 
 
@@ -195,7 +201,7 @@ async def install(
             installed.status = "pending_approval"
         await session.flush()
         notifications = await installs.notify_approvers(session, bot, skill, row)
-        await audit(session, actor, bot, "approval_requested", skill_id)
+        await audit(session, request, actor, bot, "approval_requested", skill_id)
         await session.commit()
         return {
             "code": 0,
@@ -207,7 +213,7 @@ async def install(
         }
     inputs.update(approved_databases=[], security_prompt=None)
     task = await installs.queue(session, cipher, bot=bot, skill=skill, actor=actor, inputs=inputs)
-    await audit(session, actor, bot, "install_requested", skill_id)
+    await audit(session, request, actor, bot, "install_requested", skill_id)
     await session.commit()
     return {"code": 0, "data": {"status": "installing", "task_id": task.id}}
 
@@ -249,7 +255,7 @@ async def uninstall(
     await session.flush()
     await installs.rebuild_prompt(session, bot)
     await notify_bot_changed(session, bot.id)
-    await audit(session, actor, bot, "uninstalled", skill_id)
+    await audit(session, request, actor, bot, "uninstalled", skill_id)
     await session.commit()
     return {"code": 0, "data": {"status": row.status, "revision": row.revision}}
 
@@ -356,6 +362,6 @@ async def review(
         if installed and installed.installed_at is None:
             installed.status = "uninstalled"
     row.reviewed_by, row.reviewed_at, row.review_comment = actor.id, utcnow(), body.comment
-    await audit(session, actor, bot, f"approval_{row.status}", row.skill_id)
+    await audit(session, request, actor, bot, f"approval_{row.status}", row.skill_id)
     await session.commit()
     return {"code": 0, "data": {"approval": approval_out(row), "task_id": task_id}}
