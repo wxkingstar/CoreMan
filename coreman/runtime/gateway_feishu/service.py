@@ -24,7 +24,13 @@ from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, BotLease
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.runtime.base import HEALTH_PORTS, Service
+from coreman.runtime.gateway_common import drain as drain_pacing
 from coreman.runtime.gateway_common.lease_loop import LeaseCoordinator
+
+# 停机时排空子进程的总时限：compose 宽限 120 秒，留出杀掉剩余子进程与标记实例停止的余量。
+SHUTDOWN_HARD_SECONDS = 100.0
+# 排空计划按这个时限分批（比硬时限早一点：批里的子进程最多要等 10 秒才退出）。
+SHUTDOWN_DRAIN_SECONDS = 88.0
 
 
 @dataclass
@@ -223,11 +229,15 @@ class GatewayFeishuService(Service):
         self._jobs[0].cancel()
         await asyncio.gather(self._jobs[0], return_exceptions=True)
         try:
-            async with asyncio.timeout(100):
-                for index, bot_id in enumerate(list(self.children)):
-                    if index:
-                        await asyncio.sleep(3)
-                    await self.stop_child(bot_id)
+            async with asyncio.timeout(SHUTDOWN_HARD_SECONDS):
+                # 与企微网关同一套节奏：批间隔 3 秒、批内并发，bot 多时也在宽限内停完。
+                left = await drain_pacing.drain_in_batches(
+                    list(self.children),
+                    self.stop_child,
+                    deadline=time.monotonic() + SHUTDOWN_DRAIN_SECONDS,
+                )
+                if left:
+                    raise TimeoutError  # 没排上的直接杀掉，租约交给过期接管
         except TimeoutError:
             for child in self.children.values():
                 if child.process and child.process.returncode is None:

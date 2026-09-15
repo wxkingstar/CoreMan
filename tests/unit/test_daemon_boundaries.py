@@ -9,12 +9,15 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     ChatRequest,
     IncompleteResultError,
+    RelayBusyError,
     RelayClient,
     RelayError,
 )
+from coreman.core.runtime_nodes.transport import TOTAL_TIMEOUT_EXTENSION, RuntimeQueueTimeout
 from coreman.runtime.gateway_wecom.ws_client import (
     DeliveryRejected,
     DeliveryUncertain,
@@ -74,6 +77,35 @@ def test_unconfirmed_partial_output_keeps_streamed_text() -> None:
     )
     assert verdict.error_code == "incomplete_result" and verdict.task_status == "failed"
     assert verdict.final_text.startswith("half answer\n\n")
+
+
+async def test_queue_timeout_surfaces_as_busy_and_declares_total_timeout() -> None:
+    seen: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions.get(TOTAL_TIMEOUT_EXTENSION))
+        raise RuntimeQueueTimeout("运行时繁忙：排队 120 秒仍未开始执行", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fake"
+    ) as http:
+        client = RelayClient("http://fake", http=http)
+        with pytest.raises(RelayBusyError, match="排队"):
+            [
+                e
+                async for e in client.chat_stream(
+                    ChatRequest("m", "s", "u", "/tmp", "s", "claude"), total_timeout=5400
+                )
+            ]
+    # 反向通道按这个总时限排队并计算调用期限
+    assert seen == [5400]
+
+
+def test_busy_runtime_is_classified_apart_from_connection_errors() -> None:
+    verdict = _classify("", Outcome(error=RelayBusyError("运行时繁忙：排队 120 秒仍未开始执行")))
+    assert verdict.error_code == "runtime_busy" and verdict.task_status == "failed"
+    assert verdict.final_text == msg("runtime_busy", "zh", relay="test")
+    assert "排队" in (verdict.error_message or "")
 
 
 def test_transport_error_stays_generic() -> None:

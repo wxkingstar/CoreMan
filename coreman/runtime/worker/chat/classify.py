@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from coreman.core.i18n.messages import msg
-from coreman.core.relay.client import IncompleteResultError
+from coreman.core.relay.client import IncompleteResultError, RelayBusyError
 from coreman.core.wecom.cards import question_brief
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
@@ -42,6 +42,15 @@ class ClassifyStage(ChatStageBase):
             )
         if unconfirmed:
             return self._incomplete(ctx, pre, text)
+        if isinstance(out.error, RelayBusyError):
+            # 节点满载排队超时：还没开始执行，告诉用户是「忙」而不是「连接出错」。
+            return Verdict(
+                "error",
+                "failed",
+                "runtime_busy",
+                f"RelayBusyError: {out.error}",
+                msg("runtime_busy", locale, relay=pre.relay.name),
+            )
         if out.error is not None:
             name = type(out.error).__name__
             return Verdict(

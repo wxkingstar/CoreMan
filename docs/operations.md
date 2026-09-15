@@ -46,11 +46,11 @@ COREMAN_ENV_FILE=/absolute/path/.env ./deploy/coreman upgrade all 3f2c1ab
 
 只升级部分目标（例如 `upgrade api v2`）成功后同样更新部署标签，其余服务仍运行旧标签；`status` 会提示混合版本，应尽快完成其余目标。
 
-API 升级先重载 Caddy 的指标隔离规则，再迁移并逐台健康升级。worker 先确认另一台就绪，关闭旧容器自动重启，要求旧实例排空，最多等待 7500 秒，再重建；不会因超时强杀在途任务。网关确认备用实例新鲜心跳后排空活跃实例，等待其退出、租约转移且连接 subscribed，随后停止旧服务，并把新的活跃侧写入 `.coreman-gateway-active`；下次反向升级。若两侧均运行，先把备用侧的工作交还活跃侧，再重建备用侧。排空期间的自动重启被关闭，避免旧容器退出后又抢回租约；确认排空状态后用 `docker update --restart=unless-stopped <容器>` 恢复预期策略。
+API 升级先重载 Caddy 的指标隔离规则，再迁移并逐台健康升级。worker 先确认另一台就绪，关闭旧容器自动重启，要求旧实例排空，最多等待 7500 秒，再重建；不会因超时强杀在途任务。网关确认备用实例新鲜心跳后排空活跃实例，等待其退出、租约转移且连接 subscribed，随后停止旧服务，并把新的活跃侧写入 `.coreman-gateway-active`；下次反向升级。若两侧均运行，先把备用侧的工作交还活跃侧，再重建备用侧。网关整实例排空按批进行：批间隔 3 秒，每批 bot 数按剩余 bot 与剩余宽限计算（单批最多 10 个），bot 多时也在 120 秒停止宽限内排完，不会落到硬接管。排空期间的自动重启被关闭，避免旧容器退出后又抢回租约；确认排空状态后用 `docker update --restart=unless-stopped <容器>` 恢复预期策略。
 
 ### 启动、停止与网关活跃侧
 
-`up` 先迁移，再用 `docker compose up -d --wait` 等待全部服务运行且健康检查通过（默认 300 秒，可用 `COREMAN_WAIT_TIMEOUT` 调整）；超时返回非零，按提示查看 `status` 与 `logs`。`up` 是整体启动/初始化入口，不能替代在途任务期间的滚动升级。
+`up` 先迁移，再用 `docker compose up -d --wait` 等待全部服务运行且健康检查通过（默认 300 秒，可用 `COREMAN_WAIT_TIMEOUT` 调整）；超时返回非零，按提示查看 `status` 与 `logs`。`up` 是整体启动/初始化入口，不能替代在途任务期间的滚动升级。配置文件缺失或缺少 `MASTER_KEY`、`POSTGRES_PASSWORD` 时 `up` 会自动生成；若数据卷 `coreman_pgdata`（项目名以 `COMPOSE_PROJECT_NAME` 为准）已存在，新生成的值必然与已有数据不匹配，`up` 拒绝生成并提示恢复原配置文件或自行删除数据卷，不做任何改动。
 
 网关 a/b 同一时刻只有一侧活跃。`up`、`upgrade all` 与 `upgrade gateway` 按 `.coreman-gateway-active` 选择活跃侧；记录缺失时沿用推断：a 侧未运行而 b 侧在运行时为 b，否则为 a。记录与运行容器矛盾（记录的一侧未运行、另一侧在运行）时以运行容器为准并给出提示。宿主机重启后，Docker 按 `restart: unless-stopped` 只恢复上次运行的一侧。
 
