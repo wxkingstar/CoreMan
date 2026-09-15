@@ -259,8 +259,8 @@ async def test_media_download_signed_link_and_expiry(
         objects, "LocalObjectStore", lambda _root, key, base: real_store(str(tmp_path), key, base)
     )
     task = await claim(db_session)
+    from coreman.core.bus import tasks
     from coreman.core.escalations.media_recovery import recover
-    from coreman.runtime.bus import tasks
 
     if mode == "cancelled":
         await tasks.request_cancel(db_session, task.id, "test cancel")

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox
 from coreman.core.db.models import (
     AlertState,
     Bot,
@@ -21,7 +22,6 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import outbox
 
 
 async def emit(session: AsyncSession, row: AlertState, *, recovered: bool) -> None:

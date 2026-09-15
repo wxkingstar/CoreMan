@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, encrypt_json
+from coreman.core.bus import tasks
 from coreman.core.db.models import (
     Bot,
     BotSkill,
@@ -28,7 +29,6 @@ from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
 from coreman.core.knowledge.skill_policy import env_vars, selected_groups, user_inputs
 from coreman.core.relay.agent_client import call_agent
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus import tasks
 from coreman.runtime.worker.context import TaskContext
 
 

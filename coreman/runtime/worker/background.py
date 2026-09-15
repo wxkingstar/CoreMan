@@ -20,10 +20,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from coreman.core.bus import outbox, streams
 from coreman.core.db.models import TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.stream_render import truncate_utf8
-from coreman.runtime.bus import outbox, streams
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.stream_writer import StreamWriter
 

@@ -3,9 +3,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox, streams, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, OutboxItem, User
-from coreman.runtime.bus import outbox, streams, tasks
-from coreman.runtime.bus.tasks import NewTask
 
 
 async def test_same_task_card_cannot_overtake_retry_or_unconfirmed_result(db_session):

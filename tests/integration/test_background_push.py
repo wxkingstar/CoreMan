@@ -5,10 +5,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import streams, tasks
 from coreman.core.db.models import ChatLog, OutboxItem, TaskStream
 from coreman.core.db.session import make_session_factory
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import streams, tasks
 from coreman.runtime.worker.background import TimeoutSupervisor, Timing
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.replies import open_stream

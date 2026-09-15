@@ -489,7 +489,7 @@ async def cancel_run(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    from coreman.runtime.bus.tasks import request_cancel
+    from coreman.core.bus.tasks import request_cancel
 
     row = await _load(session, job_id, actor)
     require_if_match(request, row.version)

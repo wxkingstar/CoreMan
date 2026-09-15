@@ -14,10 +14,10 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.model_catalog import load_catalog
 from coreman.api.security import verify_csrf
 from coreman.core.audit import diff_dict, record_audit
+from coreman.core.bus.notify import notify
 from coreman.core.db.models import PlatformApp, User
 from coreman.core.settings_schema import PUBLIC_DEFAULT_KEYS, SETTING_DEFAULTS, SettingsPatch
 from coreman.core.settings_store import SettingsStore
-from coreman.runtime.bus.notify import notify
 
 router = APIRouter(
     prefix="/api/admin/settings", tags=["settings"], dependencies=[Depends(verify_csrf)]

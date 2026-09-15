@@ -4,11 +4,11 @@ import asyncio
 
 from sqlalchemy import func, select
 
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.db.session import make_session_factory
 from coreman.operations import drain
-from coreman.runtime.bus import tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.gateway_wecom.service import GatewayWecomService
 from coreman.runtime.gateway_wecom.ws_client import WsConfig
 from coreman.runtime.worker.service import WorkerService

@@ -30,11 +30,11 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.exceptions import WebSocketException
 
+from coreman.core.bus import outbox, streams
 from coreman.core.db.models import Task, TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.core.logging import get_logger
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
-from coreman.runtime.bus import outbox, streams
 from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
 
 if TYPE_CHECKING:

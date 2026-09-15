@@ -17,6 +17,8 @@ from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from coreman import __version__
+from coreman.core.bus import instances, streams, tasks
+from coreman.core.bus.notify import Listener, asyncpg_dsn
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.chat.openuserid import OpenUseridResolver
 from coreman.core.config import get_settings
@@ -29,8 +31,6 @@ from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
 from coreman.core.wecom.media import MediaFetcher
 from coreman.runtime.base import HEALTH_PORTS, Service
-from coreman.runtime.bus import instances, streams, tasks
-from coreman.runtime.bus.notify import Listener, asyncpg_dsn
 from coreman.runtime.worker.context import TaskContext
 
 LANES = ("normal", "fast")

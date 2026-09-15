@@ -12,10 +12,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.bus import instances
 from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, BotLease, ProcessInstance, Task
 from coreman.core.db.session import make_engine, make_session_factory
-from coreman.runtime.bus import instances
 
 PREFIX = re.compile(r"(?:worker-[ab]|gateway-(?:wecom|feishu)-[ab]):[A-Za-z0-9_.-]+:\Z")
 

@@ -7,13 +7,13 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import OutboxItem
 from coreman.core.notifications import NotificationError, NotificationSkipped, send_notification
 from coreman.core.observability.metrics import OUTBOX_FAILED, after_commit
 from coreman.core.platforms.feishu import FeishuError
 from coreman.core.platforms.wecom import WeComError
-from coreman.runtime.bus import outbox
 
 
 async def deliver_one(factory: async_sessionmaker[AsyncSession], cipher: Cipher) -> bool:

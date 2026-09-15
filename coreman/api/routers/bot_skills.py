@@ -20,10 +20,10 @@ from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, mask_dict
+from coreman.core.bus import tasks
 from coreman.core.db.models import Bot, BotSkill, Skill, SkillApproval, SkillSource, User
 from coreman.core.knowledge import installation as installs
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus import tasks
 
 router = APIRouter(prefix="/api/admin", tags=["skill-install"], dependencies=[Depends(verify_csrf)])
 

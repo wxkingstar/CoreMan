@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bots.permissions import can_switch_relay
+from coreman.core.bus import outbox, streams, tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.chat_logs import ChatLogEntry
@@ -92,7 +93,6 @@ from coreman.core.wecom.cards import (
     switch_offer_card,
 )
 from coreman.core.wecom.media import MediaFetcher
-from coreman.runtime.bus import outbox, streams, tasks
 from coreman.runtime.worker.background import DEFAULT_TIMING, TimeoutSupervisor, Timing
 from coreman.runtime.worker.choice_flow import (
     FREE_TEXT_WAIT_SECONDS,

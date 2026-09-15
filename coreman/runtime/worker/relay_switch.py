@@ -16,11 +16,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.switch_relay import SwitchError, switch_relay
+from coreman.core.bus import outbox, tasks
 from coreman.core.chat import interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, BotMember, RelayServer, User
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import outbox, tasks
 from coreman.runtime.worker.context import TaskContext
 
 

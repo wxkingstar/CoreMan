@@ -12,9 +12,9 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
-from coreman.runtime.bus.notify import notify
 
 # 认领语句逐字取自 spec §6.2（只把 RETURNING * 收窄成 id，随后按主键取回 ORM 行）。
 _CLAIM_SQL = text(

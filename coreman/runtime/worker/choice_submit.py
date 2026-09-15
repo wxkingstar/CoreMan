@@ -14,12 +14,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox, tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InteractionState, RelayServer
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.cards import format_answers
-from coreman.runtime.bus import outbox, tasks
 from coreman.runtime.worker.background import DEFAULT_TIMING, Timing
 from coreman.runtime.worker.chat_handler import ChatTaskHandler, Intake, Prepared, Verdict
 from coreman.runtime.worker.context import TaskContext

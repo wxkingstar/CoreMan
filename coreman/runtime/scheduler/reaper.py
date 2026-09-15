@@ -22,6 +22,9 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
+from coreman.core.bus import leases, outbox, streams, tasks
+from coreman.core.bus.notify import notify
+from coreman.core.bus.tasks import ACTIVE
 from coreman.core.chat import interactions
 from coreman.core.chat.chat_logs import ChatLogEntry, ChatLogWriter
 from coreman.core.db.models import (
@@ -39,9 +42,6 @@ from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import recover_installations
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
-from coreman.runtime.bus import leases, outbox, streams, tasks
-from coreman.runtime.bus.notify import notify
-from coreman.runtime.bus.tasks import ACTIVE
 
 # worker 每 10 秒写一次任务心跳，60 秒一次都没写上来就当这个 worker 没了（spec §6.2）。
 TASK_TIMEOUT_SECONDS = 60

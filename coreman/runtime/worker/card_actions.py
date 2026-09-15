@@ -16,6 +16,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
@@ -27,8 +29,6 @@ from coreman.core.wecom.cards import (
     parse_task_id,
     waiting_card,
 )
-from coreman.runtime.bus import outbox, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound

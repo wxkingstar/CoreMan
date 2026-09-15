@@ -4,9 +4,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import instances, leases, outbox, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import AuditLog, Bot, BotLease, OutboxItem, ProcessInstance, Task, User
-from coreman.runtime.bus import instances, leases, outbox, tasks
-from coreman.runtime.bus.tasks import NewTask
 from tests.api.conftest import login_as
 
 

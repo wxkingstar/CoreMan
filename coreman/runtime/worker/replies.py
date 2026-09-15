@@ -11,8 +11,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import streams
 from coreman.core.db.models import Bot, BotLease, InboundEvent, Task, TaskStream
-from coreman.runtime.bus import streams
 from coreman.runtime.worker.context import TaskContext
 
 _ALNUM = string.ascii_letters + string.digits

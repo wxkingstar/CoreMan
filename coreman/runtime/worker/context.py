@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.bus import tasks as bus_tasks
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import RelayServer, Task
 from coreman.core.logging import get_logger
 from coreman.core.relay.client import RelayClient
 from coreman.core.settings_store import SettingsStore
-from coreman.runtime.bus import tasks as bus_tasks
 
 if TYPE_CHECKING:  # 只用于类型标注，避免 worker 启动时连带拉起企微与解析器模块。
     from coreman.core.chat.openuserid import OpenUseridResolver

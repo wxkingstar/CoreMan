@@ -26,6 +26,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.relay_policy import relay_visible as relay_visible  # 再导出
+from coreman.core.bus.notify import notify
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, ModelCatalog, RelayServer, RuntimeNode, Team, User
 from coreman.core.logging import get_logger
@@ -33,7 +34,6 @@ from coreman.core.relay import probe
 from coreman.core.relay.client import RelayClient
 from coreman.core.relay.models import default_model, effective_models
 from coreman.core.relay.safe_transport import validate_host
-from coreman.runtime.bus.notify import notify
 
 log = get_logger(__name__)
 router = APIRouter(

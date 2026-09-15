@@ -11,10 +11,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import outbox, streams
+from coreman.core.bus.notify import notify
 from coreman.core.db.models import BotLease, InboundEvent, OutboxItem, Task, TaskStream
 from coreman.core.db.session import make_session_factory
-from coreman.runtime.bus import outbox, streams
-from coreman.runtime.bus.notify import notify
 from tests.fakes.fake_wecom_ws import FakeWeComWs
 from tests.integration.test_gateway_wecom import _bot, _start, _wait
 

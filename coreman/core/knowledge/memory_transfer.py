@@ -8,13 +8,13 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.tasks import ACTIVE, OPEN
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, Memory, RelayServer, Task
 from coreman.core.errors import ApiError
 from coreman.core.knowledge.memory import MAX_BATCH_BYTES, MemoryInput, collect
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus.tasks import ACTIVE, OPEN
 
 
 async def transfer(

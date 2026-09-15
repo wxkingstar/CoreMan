@@ -3,9 +3,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import tasks
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.db.models import Announcement, ChatLog, RelayServer, Task
-from coreman.runtime.bus import tasks
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.test_chat_handler import chat_task, run, stream_of
 from tests.integration.worker_helpers import seed_bot

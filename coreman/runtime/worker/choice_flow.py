@@ -15,12 +15,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import outbox, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import interactions
 from coreman.core.db.models import Bot, InteractionState, OutboxItem
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.cards import answered_card, choice_card, question_brief, question_task_id
-from coreman.runtime.bus import outbox, tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.context import TaskContext
 
 # 选了「其他」之后等用户打字的时限：超过这么久再来的消息算新话题，不再吞成上一题的答案。

@@ -9,12 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, InboundEvent, PlatformApp, User
 from coreman.core.escalations.service import add_reply
 from coreman.core.prompting.system_prompt import Speaker
 from coreman.core.timeutils import utcnow
-from coreman.runtime.bus import tasks
-from coreman.runtime.bus.tasks import NewTask
 from coreman.runtime.worker.context import TaskContext
 
 

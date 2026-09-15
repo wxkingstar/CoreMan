@@ -11,11 +11,11 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from coreman.core.bus import outbox
 from coreman.core.cron.delivery import chunks
 from coreman.core.db.models import Bot, Escalation, OutboxItem, PlatformApp, User, UserIdentity
 from coreman.core.errors import ApiError, not_found
 from coreman.core.i18n.messages import msg
-from coreman.runtime.bus import outbox
 
 ACTIVE = ("pending", "replied")
 OPEN = (*ACTIVE, "queued")

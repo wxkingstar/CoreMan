@@ -5,9 +5,9 @@ from datetime import datetime
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.tasks import OPEN
 from coreman.core.db.models import Escalation, Task
 from coreman.core.escalations.service import notify_localized
-from coreman.runtime.bus.tasks import OPEN
 
 
 async def recover(session: AsyncSession, now: datetime) -> int:

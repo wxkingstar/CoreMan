@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
+from coreman.core.bus import outbox
 from coreman.core.db.models import ApiClient, OutboxItem, PlatformApp, User, UserIdentity
-from coreman.runtime.bus import outbox
 
 router = APIRouter(tags=["infra-notify"])
 NOTIFY = require_scope("notify")

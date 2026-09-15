@@ -4,10 +4,10 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bus import instances, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, ProcessInstance, User
 from coreman.core.db.session import make_session_factory
-from coreman.runtime.bus import instances, tasks
-from coreman.runtime.bus.tasks import NewTask
 
 
 async def _bot(session: AsyncSession, key: str = "b1") -> Bot:

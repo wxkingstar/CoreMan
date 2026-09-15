@@ -14,8 +14,8 @@ from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus.notify import notify
 from coreman.core.db.models import TaskStream
-from coreman.runtime.bus.notify import notify
 
 WRITABLE = frozenset(
     {

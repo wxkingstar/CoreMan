@@ -6,7 +6,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.runtime.bus.notify import notify
+from coreman.core.bus.notify import notify
 
 
 async def notify_bot_changed(session: AsyncSession, bot_id: uuid.UUID) -> None:
