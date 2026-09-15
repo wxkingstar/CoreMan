@@ -2,9 +2,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.bots import switch_relay
 from coreman.core.bus import instances, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import interactions, sessions
@@ -28,6 +30,16 @@ from tests.fakes.fake_relay import FakeRelay
 from tests.fakes.runtime_node import attach_node
 from tests.integration.test_chat_handler import chat_task, run, stream_of
 from tests.integration.worker_helpers import build_ctx, seed_bot
+
+
+@pytest.fixture(autouse=True)
+def _skip_memory_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这里只看限流切换流程；实例都挂在节点上，记忆迁移另有 test_memory_transfer 覆盖，不连节点。"""
+
+    async def not_configured(*_args: object, **_kwargs: object) -> str:
+        return "not_configured"
+
+    monkeypatch.setattr(switch_relay, "transfer", not_configured)
 
 
 async def _second_relay(session: AsyncSession, *, pct7=Decimal("5")) -> RelayServer:  # type: ignore[no-untyped-def]
