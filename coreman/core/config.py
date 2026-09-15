@@ -26,11 +26,7 @@ class Settings(BaseSettings):
     session_secret: str = Field(alias="SESSION_SECRET", min_length=16)
     bootstrap_admin_username: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_USERNAME")
     bootstrap_admin_password: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_PASSWORD")
-    timezone: str = Field(default="Asia/Shanghai", alias="TIMEZONE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    relay_network_mode: Literal["bridge", "host"] = Field(
-        default="bridge", alias="RELAY_NETWORK_MODE"
-    )
     object_storage: Literal["local", "s3"] = Field(default="local", alias="OBJECT_STORAGE")
     object_storage_root: str = Field(default="/data/storage", alias="OBJECT_STORAGE_ROOT")
     s3_endpoint: str | None = Field(default=None, alias="S3_ENDPOINT")
@@ -48,7 +44,9 @@ class Settings(BaseSettings):
     image_tag: str = Field(default="dev", alias="COREMAN_IMAGE_TAG")
 
     @model_validator(mode="after")
-    def storage_credentials(self) -> Settings:
+    def _check_storage_credentials(self) -> Settings:
+        # pydantic 在每次加载配置时自动调用（代码里没有显式调用方，但不是死代码）。
+        # S3ObjectStore 只在首次读写附件时才构造，这里让缺凭据的 S3 配置在进程启动时就失败。
         if self.object_storage == "s3" and not (
             self.s3_bucket and self.s3_access_key and self.s3_secret_key
         ):

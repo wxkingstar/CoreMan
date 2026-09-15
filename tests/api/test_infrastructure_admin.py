@@ -1,7 +1,7 @@
 import base64
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.tokens import active_key, issue_token
@@ -73,6 +73,15 @@ async def test_system_grants_whitelist_reclaim_and_optimistic_lock(
     )
     assert r.status_code == 200, r.text
     assert not list((await db_session.execute(select(BotSystemGrant))).scalars())
+    # 授权变更只记审计日志；弃用的 system_grant_audit 表不再写入。
+    logs = {
+        row.action: row.diff
+        for row in (await db_session.execute(select(AuditLog))).scalars()
+        if row.action in ("bot.system_grants", "system.update")
+    }
+    assert logs["bot.system_grants"] == {"system_keys": [[], ["erp"]]}
+    assert logs["system.update"] == {"granted_bot_ids": [[bot["id"]], []]}
+    assert await db_session.scalar(text("SELECT count(*) FROM system_grant_audit")) == 0
     await login_existing(client, db_session, owner)
     version = (await client.get(f"/api/admin/bots/{bot['id']}/system-grants")).json()["data"][
         "version"

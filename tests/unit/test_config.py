@@ -26,12 +26,18 @@ def _env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
 def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     _env(monkeypatch)
     s = Settings()
-    assert s.timezone == "Asia/Shanghai"
     assert s.log_level == "INFO"
-    assert s.relay_network_mode == "bridge"
     assert s.object_storage == "local"
     assert s.master_key_bytes == b"\x01" * 32
     assert s.bootstrap_admin_username is None
+    # 已删除的死配置不再作为字段存在。
+    assert not {"timezone", "relay_network_mode"} & set(Settings.model_fields)
+
+
+def test_s3_storage_requires_credentials_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, OBJECT_STORAGE="s3", S3_BUCKET="bucket")
+    with pytest.raises(ValueError, match="S3_ACCESS_KEY"):
+        Settings()
 
 
 def _example_value(key: str) -> str:

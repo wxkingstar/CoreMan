@@ -21,7 +21,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
-from coreman.core.audit import record_audit
+from coreman.core.audit import diff_dict, record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
 from coreman.core.auth.tokens import active_key, public_keys
 from coreman.core.bots.events import notify_bot_changed
@@ -32,7 +32,6 @@ from coreman.core.db.models import (
     BotSystemGrant,
     BusinessSystem,
     JwtKey,
-    SystemGrantAudit,
     User,
 )
 
@@ -234,6 +233,7 @@ async def update_system(
     for field, value in body.model_dump().items():
         setattr(row, field, value)
     # 白名单变窄时实际删除授权，之后放开也不会悄悄恢复历史授权。
+    removed: list[uuid.UUID] = []
     if body.allowed_bot_ids is not None:
         removed = list(
             (
@@ -247,17 +247,9 @@ async def update_system(
                 )
             ).scalars()
         )
-        for bot_id in removed:
-            session.add(
-                SystemGrantAudit(
-                    bot_id=bot_id,
-                    requested=[key],
-                    approved=[],
-                    actor_id=user.id,
-                    comment="系统白名单收紧",
-                )
-            )
-    await audit(session, request, user, "system.update", "system", key)
+    # 回收的授权记在审计日志里（原先写入的 system_grant_audit 表没有读者，已弃用）。
+    diff = {"granted_bot_ids": [sorted(str(b) for b in removed), []]} if removed else None
+    await audit(session, request, user, "system.update", "system", key, diff)
     await persist(session, commit=True)
     set_etag(response, row.version)
     return {"code": 0, "data": system_out(row)}
@@ -333,23 +325,26 @@ async def put_grants(
         for s in systems
     ):
         raise ApiError(403, 403, "申请包含未开放给此机器人的系统")
-    await session.execute(delete(BotSystemGrant).where(BotSystemGrant.bot_id == bot_id))
+    before = list(
+        (
+            await session.execute(
+                delete(BotSystemGrant)
+                .where(BotSystemGrant.bot_id == bot_id)
+                .returning(BotSystemGrant.system_key)
+            )
+        ).scalars()
+    )
     session.add_all(
         [BotSystemGrant(bot_id=bot_id, system_key=key, granted_by=user.id) for key in keys]
-    )
-    session.add(
-        SystemGrantAudit(
-            bot_id=bot_id,
-            requested=body.system_keys,
-            approved=keys,
-            actor_id=user.id,
-            comment=body.comment,
-        )
     )
     bot.version += 1
     await persist(session)
     await notify_bot_changed(session, bot.id)
-    await audit(session, request, user, "bot.system_grants", "bot", str(bot_id))
+    # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
+    diff = diff_dict(
+        {"system_keys": sorted(before)}, {"system_keys": keys, "comment": body.comment or None}
+    )
+    await audit(session, request, user, "bot.system_grants", "bot", str(bot_id), diff)
     await persist(session, commit=True)
     return {"code": 0, "data": {"system_keys": keys, "version": bot.version}}
 
