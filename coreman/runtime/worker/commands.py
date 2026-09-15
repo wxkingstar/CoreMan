@@ -42,7 +42,7 @@ async def _clear_states(
     """reset/stop 都作废待答状态：否则下一条输入会被吞成上一题的答案。"""
     closed = 0
     if platform_user_id:
-        from sqlalchemy import select
+        from sqlalchemy import or_, select
 
         from coreman.core.chat.bot_collaboration import ACTIVE, close
         from coreman.core.db.models import BotCollaboration, BotCollaborationRoute
@@ -52,7 +52,10 @@ async def _clear_states(
                 select(BotCollaboration)
                 .join(BotCollaborationRoute)
                 .where(
-                    BotCollaborationRoute.source_bot_id == bot_id,
+                    or_(
+                        BotCollaborationRoute.source_bot_id == bot_id,
+                        BotCollaborationRoute.target_bot_id == bot_id,
+                    ),
                     BotCollaborationRoute.chat_id == session_key,
                     BotCollaboration.origin_platform_user_id == platform_user_id,
                     BotCollaboration.status.in_(ACTIVE),

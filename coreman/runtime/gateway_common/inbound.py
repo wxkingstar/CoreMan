@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.bus.tasks import NewTask, enqueue
-from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command
+from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command, is_cancel_word
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.logging import get_logger
 from coreman.core.wecom.messages import InboundMessage, text_of
@@ -134,6 +134,33 @@ async def _enqueue_task(
         "platform_user_id": message.sender.platform_user_id,
     }
     command = classify_command(text_of(message))
+    if (
+        message.platform == "feishu"
+        and message.chat_type == "group"
+        and message.sender.platform_user_id
+        and is_cancel_word(text_of(message))
+    ):
+        from sqlalchemy import or_, select
+
+        from coreman.core.chat.bot_collaboration import ACTIVE
+        from coreman.core.db.models import BotCollaboration, BotCollaborationRoute
+
+        active = await session.scalar(
+            select(BotCollaboration.id)
+            .join(BotCollaborationRoute)
+            .where(
+                or_(
+                    BotCollaborationRoute.source_bot_id == bot.id,
+                    BotCollaborationRoute.target_bot_id == bot.id,
+                ),
+                BotCollaborationRoute.chat_id == message.chat_id,
+                BotCollaboration.origin_platform_user_id == message.sender.platform_user_id,
+                BotCollaboration.status.in_(ACTIVE),
+            )
+            .limit(1)
+        )
+        if active:
+            command = "stop"
     if command in GATEWAY_COMMANDS:
         new = NewTask(
             bot_id=bot.id,
@@ -147,10 +174,19 @@ async def _enqueue_task(
     else:
         session_key = message.chat_id
         if message.platform == "feishu" and message.chat_type == "group":
-            from coreman.core.chat.bot_collaboration import routes_for
+            from coreman.core.chat.bot_collaboration import followup_session, routes_for
 
             if await routes_for(session, bot.id, message.chat_id):
-                session_key = f"{message.chat_id}:request:{message.message_id}"
+                session_key = (
+                    await followup_session(
+                        session,
+                        bot_id=bot.id,
+                        chat_id=message.chat_id,
+                        parent_id=str(message.reply_context.get("parent_id") or ""),
+                        platform_user_id=message.sender.platform_user_id,
+                    )
+                    or f"{message.chat_id}:request:{message.message_id}"
+                )
         new = NewTask(
             bot_id=bot.id,
             kind="chat",

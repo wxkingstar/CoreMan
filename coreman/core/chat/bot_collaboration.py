@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -70,7 +71,7 @@ def event_matches(
         and (sender.get("sender_id") or {}).get("union_id") == sender_union
         and msg.get("chat_id") == chat
         and msg.get("chat_type") == "group"
-        and msg.get("message_type") == "text"
+        and msg.get("message_type") in {"text", "post"}
         and msg.get("message_id") == message_id
         and (parent_id is None or msg.get("parent_id") == parent_id)
     )
@@ -179,7 +180,7 @@ async def request_help(
     return row
 
 
-async def send_text(
+async def send_message(
     session: AsyncSession,
     row: BotCollaboration,
     route: BotCollaborationRoute,
@@ -197,7 +198,11 @@ async def send_text(
         str(request_item.payload["_feishu_message_id"]) if request_item else origin.platform_msg_id
     )
     mention = route.source_open_id if response else route.target_open_id
-    text = escape((row.response if response else row.question) or "", quote=False)
+    text = (row.response if response else row.question) or ""
+    # Only the route-owned at node may notify a recipient, never model-supplied markup.
+    text = re.sub(
+        r"<\s*/?\s*at\b[^>]*>", lambda m: escape(m.group(), quote=False), text, flags=re.I
+    )
     item = await outbox.add(
         session,
         bot_id=route.target_bot_id if response else route.source_bot_id,
@@ -209,7 +214,8 @@ async def send_text(
             "message_id": reply_mid,
         },
         payload={
-            "text": f'<at user_id="{escape(mention, quote=True)}">协作伙伴</at>\n{text}',
+            "markdown": text,
+            "_mention_open_id": mention,
             "_collaboration_id": str(row.id),
             "_collaboration_phase": "reply" if response else "ask",
         },
@@ -333,3 +339,84 @@ async def tick(session: AsyncSession, now: datetime) -> int:
                 row.helper_task_id, row.status = task.id, "helper_running"
             count += 1
     return count
+
+
+async def followup_session(
+    session: AsyncSession, *, bot_id: uuid.UUID, chat_id: str, parent_id: str, platform_user_id: str
+) -> str | None:
+    """An explicit reply by the original human continues their own conversation only."""
+    from coreman.core.db.models import FeishuDelivery
+
+    if not parent_id or not platform_user_id:
+        return None
+    task = await session.scalar(
+        select(Task)
+        .join(FeishuDelivery, FeishuDelivery.task_id == Task.id)
+        .where(Task.bot_id == bot_id, Task.kind == "chat", FeishuDelivery.message_id == parent_id)
+    )
+    if task is None:
+        task = await session.scalar(
+            select(Task)
+            .join(InboundEvent, InboundEvent.id == Task.inbound_event_id)
+            .where(
+                Task.bot_id == bot_id,
+                InboundEvent.chat_id == chat_id,
+                InboundEvent.platform_msg_id == parent_id,
+                Task.kind == "chat",
+            )
+        )
+    if task is None:
+        return None
+    cid = task.payload.get("collaboration_id")
+    row = await session.scalar(
+        select(BotCollaboration).where(
+            BotCollaboration.id == uuid.UUID(cid)
+            if cid
+            else BotCollaboration.source_task_id == task.id
+        )
+    )
+    if row:
+        route = await session.get(BotCollaborationRoute, row.route_id)
+        if (
+            not route
+            or route.source_bot_id != bot_id
+            or route.chat_id != chat_id
+            or row.origin_platform_user_id != platform_user_id
+        ):
+            return None
+        try:
+            await authorized(session, route, platform_user_id, row.origin_user_id)
+        except ValueError:
+            return None
+        key = row.source_session_key
+    else:
+        origin = await session.get(InboundEvent, task.inbound_event_id)
+        if (
+            not origin
+            or origin.chat_id != chat_id
+            or origin.sender_platform_user_id != platform_user_id
+            or (origin.payload.get("sender") or {}).get("sender_type", "user") != "user"
+        ):
+            return None
+        key = task.session_key or ""
+    if not key or not key.startswith(chat_id + ":request:"):
+        return None
+    # A reply to any earlier card supersedes the currently active round of this conversation.
+    active_rounds = await session.scalars(
+        select(BotCollaboration)
+        .join(BotCollaborationRoute)
+        .where(
+            BotCollaborationRoute.source_bot_id == bot_id,
+            BotCollaborationRoute.chat_id == chat_id,
+            BotCollaboration.source_session_key == key,
+            BotCollaboration.origin_platform_user_id == platform_user_id,
+            BotCollaboration.status.in_(ACTIVE),
+        )
+        .order_by(BotCollaboration.created_at)
+        .with_for_update(of=BotCollaboration)
+    )
+    for active in active_rounds:
+        await close(
+            session, active, "cancelled", "已收到原发起人的补充，旧一轮停止，将按新要求继续"
+        )
+    return key

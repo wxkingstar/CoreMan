@@ -76,7 +76,7 @@ async def setup(session):
     return a, b, actor, route, task, row
 
 
-async def receipt(session, bot, *, mid, union, parent=None):
+async def receipt(session, bot, *, mid, union, parent=None, message_type="text"):
     raw = {
         "header": {"tenant_key": "tenant"},
         "event": {
@@ -85,7 +85,7 @@ async def receipt(session, bot, *, mid, union, parent=None):
                 "message_id": mid,
                 "chat_id": "group",
                 "chat_type": "group",
-                "message_type": "text",
+                "message_type": message_type,
                 "parent_id": parent,
             },
         },
@@ -113,7 +113,8 @@ async def receipt(session, bot, *, mid, union, parent=None):
     await session.flush()
 
 
-async def test_real_receipts_required_and_replay_is_idempotent(db_session):
+@pytest.mark.parametrize("message_type", ["text", "post"])
+async def test_real_receipts_required_and_replay_is_idempotent(db_session, message_type):
     a, b, actor, route, task, row = await setup(db_session)
     # Request is idempotent, but cannot change destination/content mid-task.
     assert (
@@ -133,11 +134,12 @@ async def test_real_receipts_required_and_replay_is_idempotent(db_session):
             target_key="helper",
             question="different",
         )
-    await service.send_text(db_session, row, route)
+    await service.send_message(db_session, row, route)
     item = await db_session.get(OutboxItem, row.request_outbox_id)
-    assert item.payload["text"].startswith('<at user_id="ob">')
+    assert item.payload["_mention_open_id"] == "ob"
+    assert item.payload["markdown"] == "库存多少?"
     # Receipt can arrive before the outbound acknowledgement commits.
-    await receipt(db_session, b, mid="request", union="ua")
+    await receipt(db_session, b, mid="request", union="ua", message_type=message_type)
     assert await service.tick(db_session, datetime.now(UTC)) == 0
     item.payload = {**item.payload, "_feishu_message_id": "request"}
     item.status = "sent"
@@ -156,10 +158,10 @@ async def test_real_receipts_required_and_replay_is_idempotent(db_session):
             question="loop",
         )
     row.response = "库存73，预留11，可用62"
-    await service.send_text(db_session, row, route, response=True)
+    await service.send_message(db_session, row, route, response=True)
     response = await db_session.get(OutboxItem, row.response_outbox_id)
     assert response.target["message_id"] == "request"
-    assert '<at user_id="oa">' in response.payload["text"]
+    assert response.payload["_mention_open_id"] == "oa"
     response.payload = {**response.payload, "_feishu_message_id": "reply"}
     response.status = "sent"
     await db_session.flush()
@@ -179,7 +181,7 @@ async def test_real_receipts_required_and_replay_is_idempotent(db_session):
 )
 async def test_fail_closed(db_session, failure):
     a, b, actor, route, task, row = await setup(db_session)
-    await service.send_text(db_session, row, route)
+    await service.send_message(db_session, row, route)
     item = await db_session.get(OutboxItem, row.request_outbox_id)
     item.payload = {**item.payload, "_feishu_message_id": "request"}
     item.status = "sent"
@@ -194,11 +196,11 @@ async def test_fail_closed(db_session, failure):
     elif failure == "wrong_peer":
         await receipt(db_session, b, mid="request", union="unrelated")
     else:
-        await receipt(db_session, b, mid="request", union="ua")
+        await receipt(db_session, b, mid="request", union="ua", message_type="post")
         await db_session.flush()
         await service.tick(db_session, datetime.now(UTC))
         row.response = "feedback"
-        await service.send_text(db_session, row, route, response=True)
+        await service.send_message(db_session, row, route, response=True)
         reply = await db_session.get(OutboxItem, row.response_outbox_id)
         reply.payload = {**reply.payload, "_feishu_message_id": "reply"}
         reply.status = "sent"
@@ -223,11 +225,11 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     from tests.integration.worker_helpers import build_ctx
 
     a, b, actor, route, task, row = await setup(db_session)
-    await service.send_text(db_session, row, route)
+    await service.send_message(db_session, row, route)
     item = await db_session.get(OutboxItem, row.request_outbox_id)
     item.payload = {**item.payload, "_feishu_message_id": "request"}
     item.status = "sent"
-    await receipt(db_session, b, mid="request", union="ua")
+    await receipt(db_session, b, mid="request", union="ua", message_type="post")
     await db_session.flush()
     await service.tick(db_session, datetime.now(UTC))
     helper = await db_session.get(Task, row.helper_task_id)
@@ -242,7 +244,11 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     prompt, env = await configure(db_session, ctx, intake, info, "system", {})
     assert "COREMAN_BOT_HELP_TOKEN" not in env
     helper.status = "running"
-    pre = SimpleNamespace(writer=SimpleNamespace(pending_text="库存73，预留11，可用62"))
+    pre = SimpleNamespace(
+        writer=SimpleNamespace(
+            pending_text='{"status":"completed","answer":"库存73，预留11，可用62"}', boundaries=[]
+        )
+    )
     verdict = Verdict("success", "succeeded", None, None, "库存73，预留11，可用62")
     verdict, silent = await final_transition(db_session, ctx, pre, verdict)
     assert silent and row.status == "waiting_source"
@@ -267,13 +273,13 @@ async def test_stop_cancels_waiting_and_late_receipt_cannot_resume(db_engine, db
     from tests.integration.worker_helpers import build_ctx
 
     a, b, actor, route, task, row = await setup(db_session)
-    await service.send_text(db_session, row, route)
+    await service.send_message(db_session, row, route)
     item = await db_session.get(OutboxItem, row.request_outbox_id)
     item.payload = {**item.payload, "_feishu_message_id": "request"}
     item.status = "sent"
     await do_stop(db_session, build_ctx(db_engine, task), a.id, "group", "human-id")
     assert row.status == "cancelled"
-    await receipt(db_session, b, mid="request", union="ua")
+    await receipt(db_session, b, mid="request", union="ua", message_type="post")
     assert await service.tick(db_session, datetime.now(UTC)) == 0
     assert row.helper_task_id is None
 
@@ -394,3 +400,117 @@ async def test_resume_rechecks_runtime_after_resolve_before_dispatch(db_engine, 
     intake = replace(intake, relay=switched)
     with pytest.raises(ValueError, match="runtime changed"):
         await OpenStage()._session_info(db_session, ctx, intake, "claude")
+
+
+async def test_model_markup_cannot_add_notification_recipients(db_session):
+    _, _, _, route, _, row = await setup(db_session)
+    row.question = '**核实** <at user_id="all">所有人</at> **77**'
+    await service.send_message(db_session, row, route)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    assert item.payload["_mention_open_id"] == "ob"
+    assert "<at" not in item.payload["markdown"]
+    assert "**核实**" in item.payload["markdown"]
+
+
+@pytest.mark.parametrize("status", ["requested", "completed"])
+async def test_explicit_human_reply_retains_context_and_supersedes_active_round(db_session, status):
+    a, _, _, _, task, row = await setup(db_session)
+    row.status = status
+    row.source_session_key = "group:request:original"
+    from coreman.core.db.models import InboundEvent
+
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    kwargs = dict(bot_id=a.id, chat_id="group", parent_id=origin.platform_msg_id)
+    assert await service.followup_session(db_session, **kwargs, platform_user_id="other") is None
+    assert row.status == status
+    assert (
+        await service.followup_session(db_session, **kwargs, platform_user_id="human-id")
+        == row.source_session_key
+    )
+    assert row.status == ("cancelled" if status == "requested" else "completed")
+
+
+async def test_origin_human_can_stop_at_helper_and_cancel_alias_routes_fast(db_session, db_engine):
+    a, b, _, _, task, row = await setup(db_session)
+    from coreman.runtime.worker.commands import do_stop
+    from tests.integration.test_chat_handler import build_ctx
+
+    await do_stop(db_session, build_ctx(db_engine, task), b.id, "group", "other")
+    assert row.status == "requested"
+    msg = InboundMessage(
+        platform="feishu",
+        bot_id=b.id,
+        kind="message",
+        chat_type="group",
+        chat_id="group",
+        sender={"platform_user_id": "human-id"},
+        message_id="cancel-alias",
+        mentions_bot=True,
+        parts=[{"type": "text", "text": "取消"}],
+        reply_context={"chat_id": "group"},
+    )
+    command = await enqueue_inbound(
+        db_session,
+        SimpleNamespace(id=b.id, bot_key=b.bot_key, welcome_message=None),
+        msg,
+        lease_generation=1,
+    )
+    assert command.kind == "command" and command.payload["command"] == "stop"
+    await do_stop(db_session, build_ctx(db_engine, task), b.id, "group", "human-id")
+    assert row.status == "cancelled"
+
+
+async def test_repeated_reply_to_old_card_cancels_newer_round(db_session):
+    from coreman.core.bus.tasks import NewTask
+    from coreman.core.db.models import BotCollaboration, InboundEvent
+
+    a, _, _, route, task, first = await setup(db_session)
+    first.status = "cancelled"
+    first.source_session_key = "group:request:original"
+    newer_task = await tasks.enqueue(
+        db_session,
+        NewTask(bot_id=a.id, kind="chat", payload={}, inbound_event_id=task.inbound_event_id),
+    )
+    second = BotCollaboration(
+        route_id=route.id,
+        source_task_id=newer_task.id,
+        origin_user_id=first.origin_user_id,
+        origin_platform_user_id=first.origin_platform_user_id,
+        source_session_key=first.source_session_key,
+        source_relay_session_id=first.source_relay_session_id,
+        source_relay_id=first.source_relay_id,
+        question="new requirement",
+        status="waiting_helper",
+        expires_at=first.expires_at,
+    )
+    db_session.add(second)
+    await db_session.flush()
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    key = await service.followup_session(
+        db_session,
+        bot_id=a.id,
+        chat_id="group",
+        parent_id=origin.platform_msg_id,
+        platform_user_id="human-id",
+    )
+    assert key == first.source_session_key
+    assert second.status == "cancelled"
+
+
+async def test_legacy_shared_group_session_is_never_reused_by_quote(db_session):
+    from coreman.core.db.models import InboundEvent
+
+    a, _, _, _, task, row = await setup(db_session)
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    assert row.source_session_key == "group"
+    assert (
+        await service.followup_session(
+            db_session,
+            bot_id=a.id,
+            chat_id="group",
+            parent_id=origin.platform_msg_id,
+            platform_user_id="human-id",
+        )
+        is None
+    )
+    assert row.status == "requested"

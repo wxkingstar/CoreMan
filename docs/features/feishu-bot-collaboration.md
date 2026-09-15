@@ -2,11 +2,12 @@
 
 ## 行为
 
-人类 @ A → A 使用任务内求助接口 → A 的执行释放 → A 在群内发送文字 @ B →
+人类 @ A → A 使用任务内求助接口 → A 的执行释放 → A 在群内发送富文本 @ B →
 飞书真实事件到达 B → B 以原始人类授权执行 → B 引用求助消息并明确 @ A →
 飞书真实事件到达 A → A 恢复原始运行时会话，回复原始人类消息。
 
 帮助阶段的任务可以结束，整体协作状态单独保存在 `bot_collaborations`。
+B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。只有 completed 且答案非空才向 A 投递；群里仅展示 answer 的 Markdown。进度文字、格式错误或 blocked 均不能触发完成汇总；后台工具须等待实际结果。
 成功发送消息不等于收到反馈；没有真实平台入站事件不会排入下一步。
 
 ## 开启范围
@@ -41,9 +42,10 @@
 - 人类身份源于原始真实人类事件。每次派发重新校验在职状态及双方用户白名单；业务令牌由当前机器人现有授权机制重新签发，没有创建者身份回退。
 - 机器人消息独立保存在 inbound_events，永远不走普通人类入口。只有发件箱返回的消息编号、群、租户、sender union_id、明确 @ 与回复 parent_id 全部匹配才派发。
 - 调度器会处理入站早于发送确认提交的情况；行锁与唯一任务键防止重复执行。
-- 开启协作的群中，每个人类请求使用独立会话，避免并发请求串话；A 恢复时沿用该请求的运行时会话。
-- `stop` / `reset` 取消该人类在本群发起的未完成协作。超时、权限变化和执行失败会通知人类，不把缺少反馈的结果标为完成。
-- B 使用文字反馈，保留明确 @。普通人类最终回答继续用现有卡片。
+- 开启协作的群中，新请求使用独立会话。原发起人引用 A 的任务卡片或原始请求并 @ A 时，沿用原会话；若有活动协作，先停止该会话旧一轮，再处理新补充。其他人不会进入原人的会话。命令确认卡片及旧公共群会话不被复用。
+- `stop` / `reset` 可在任一协作端取消已确认原始人类在本群发起的未完成协作；存在活动协作时，整句“取消/cancel”也进入停止命令。若应用没有提供稳定人类身份，不能替他取消；应向最初接收请求的 A 发送停止。超时、权限变化和执行失败会通知人类，不把缺少反馈的结果标为完成。
+- 求助与 B 反馈使用 `post`：独立 `at` 段落加 `md` 段落，支持真实 @、加粗、代码与表格；旧发件箱文字消息兼容投递。模型输出中的额外 at 标签按文字显示，不能增加通知对象。普通人类最终回答继续用现有卡片。
+- 入站优先读取 `content_v2` 保留 Markdown，兼容旧 `content`；收件匹配允许 text/post，其余身份和关联校验不变。
 - 初始求助和反馈等待默认由 15 秒调度周期推进，因此会有数秒到十几秒的交接延迟。
 
 排查顺序：协作记录状态 → request/response outbox 编号和 `_feishu_message_id` →
@@ -52,5 +54,5 @@
 ## 官方参考（通过 SpecFusion 查询）
 
 - [接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)：机器人 @ 事件权限 `im:message.group_at_msg.include_bot:readonly`。
-- [发送消息内容](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json)：text 的 `<at user_id="...">...</at>`。
+- [发送消息内容](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json)：post 的独立 `at` / `md` 段落、CommonMark/GFM 支持，以及 `content_v2`。
 - [回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)：引用并不等于 @；使用稳定 uuid 做平台重试去重。

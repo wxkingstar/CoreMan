@@ -361,10 +361,26 @@ class FeishuTransport:
 
     async def _send_item(self, item: OutboxItem) -> None:
         if item.payload.get("_collaboration_id"):
+            # A separate at node preserves a real notification; Markdown occupies its own row.
+            # Keep old durable text items deliverable during a rolling upgrade.
+            rich = "markdown" in item.payload
+            content = (
+                {
+                    "zh_cn": {
+                        "title": "",
+                        "content": [
+                            [{"tag": "at", "user_id": item.payload["_mention_open_id"]}],
+                            [{"tag": "md", "text": item.payload["markdown"]}],
+                        ],
+                    }
+                }
+                if rich
+                else {"text": item.payload["text"]}
+            )
             mid = await self.send(
                 str(item.target.get("chat_id") or ""),
-                {"text": item.payload["text"]},
-                kind="text",
+                content,
+                kind="post" if rich else "text",
                 key=f"outbox:{item.id}",
                 reply_to=item.target.get("message_id"),
             )

@@ -138,12 +138,19 @@ def _normalize_event(
         parts.append(TextPart(text=text.strip()))
     elif kind == "post":
         post = content
-        if "content" not in post:
-            post = next((v for v in content.values() if isinstance(v, dict) and "content" in v), {})
+        if "content" not in post and "content_v2" not in post:
+            post = next(
+                (
+                    v
+                    for v in content.values()
+                    if isinstance(v, dict) and ("content" in v or "content_v2" in v)
+                ),
+                {},
+            )
         title = post.get("title")
         if title:
             parts.append(TextPart(text=str(title)))
-        for line in post.get("content") or []:
+        for line in post.get("content_v2", post.get("content")) or []:
             for segment in line if isinstance(line, list) else []:
                 if not isinstance(segment, dict):
                     continue
