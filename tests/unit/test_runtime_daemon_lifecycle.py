@@ -198,7 +198,19 @@ def test_service_log_is_capped_only_when_stderr_appends_to_it(tmp_path, mode, de
 
 def test_configure_logging_rotates_and_quiets_http_clients(tmp_path):
     root = logging.getLogger()
-    previous = (root.level, {name: logging.getLogger(name).level for name in logs.QUIET_LOGGERS})
+    names = (*logs.QUIET_LOGGERS, "coreman-runtime")
+    loggers = {name: logging.getLogger(name) for name in names}
+    previous = (
+        root.level,
+        logging.root.manager.disable,
+        {name: (logger.level, logger.disabled) for name, logger in loggers.items()},
+    )
+    # Other suites configure logging process-wide (dictConfig disables existing loggers);
+    # start from the state the daemon process has when main() runs.
+    logging.disable(logging.NOTSET)
+    for logger in loggers.values():
+        logger.setLevel(logging.NOTSET)
+        logger.disabled = False
     handlers = logs.configure_logging(tmp_path, console_level=logging.CRITICAL)
     try:
         main = handlers[0]
@@ -216,8 +228,10 @@ def test_configure_logging_rotates_and_quiets_http_clients(tmp_path):
             root.removeHandler(handler)
             handler.close()
         root.setLevel(previous[0])
-        for name, level in previous[1].items():
-            logging.getLogger(name).setLevel(level)
+        logging.disable(previous[1])
+        for name, (level, disabled) in previous[2].items():
+            loggers[name].setLevel(level)
+            loggers[name].disabled = disabled
 
 
 # ---------------------------------------------------------------------------
