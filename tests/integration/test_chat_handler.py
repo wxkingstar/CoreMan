@@ -383,6 +383,87 @@ async def test_long_task_done_notice_only_for_streamed_success(
     assert notice.not_before > datetime.now(UTC) + timedelta(seconds=300)
 
 
+async def test_busy_session_defers_new_message_instead_of_failing(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func, update
+
+    from coreman.core.db.models import Task
+
+    bot, _, _ = await seed_bot(db_session)
+    fake = FakeRelay("normal")
+
+    def handler(**overrides: float) -> ChatTaskHandler:
+        h = ChatTaskHandler()
+        h.SUPERSEDE_WAIT_SECONDS = 0.2
+        h.SUPERSEDE_RETRY_SECONDS = 600
+        for key, value in overrides.items():
+            setattr(h, key, value)
+        return h
+
+    async def run_task(task, h: ChatTaskHandler) -> None:  # type: ignore[no-untyped-def]
+        ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: fake.client())
+        await h.run(ctx)
+        await ctx.chat_logs.drain(5)
+
+    async def reclaim(task_id: int):  # type: ignore[no-untyped-def]
+        await db_session.execute(
+            update(Task).where(Task.id == task_id).values(run_after=func.now())
+        )
+        await db_session.commit()
+        claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+        await db_session.commit()
+        assert claimed is not None and claimed.id == task_id
+        return claimed
+
+    async def stream_count(task_id: int) -> int:
+        rows = await db_session.execute(select(TaskStream).where(TaskStream.task_id == task_id))
+        return len(rows.scalars().all())
+
+    # 上一轮一直停不下来（认领着却没人收尾）：新消息不再以 session_busy 失败，而是放回队列。
+    stuck = await chat_task(db_session, bot, "first")
+    new = await chat_task(db_session, bot, "second")
+    await run_task(new, handler())
+    row = await tasks.get(db_session, new.id)
+    assert row is not None and row.status == "queued" and row.claimed_by is None
+    assert row.run_after > datetime.now(UTC) + timedelta(seconds=300)
+    assert (await tasks.get(db_session, stuck.id)).cancel_requested_at is not None  # type: ignore[union-attr]
+    assert fake.requests == [] and await stream_count(new.id) == 0
+    # 旧任务退出后再认领：照常作答，同会话仍是串行的。
+    await tasks.finish(db_session, stuck.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+    again = await reclaim(new.id)
+    assert again.attempts == 2
+    await run_task(again, handler())
+    assert (await tasks.get(db_session, new.id)).status == "succeeded"  # type: ignore[union-attr]
+    assert len(fake.requests) == 1
+
+    # 重排次数到头才告诉用户，文案走 i18n。
+    stuck2 = await chat_task(db_session, bot, "third")
+    busy = await chat_task(db_session, bot, "fourth")
+    await run_task(busy, handler(SUPERSEDE_MAX_ATTEMPTS=1))
+    row = await tasks.get(db_session, busy.id)
+    assert row is not None and row.status == "failed" and row.error_code == "session_busy"
+    assert (await stream_of(db_session, busy.id)).final_text == msg("session_busy")
+    await tasks.finish(db_session, stuck2.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+
+    # 重排期间同会话又来了更新的消息：重排回来的旧消息已被替代，不再作答。
+    stuck3 = await chat_task(db_session, bot, "fifth")
+    older = await chat_task(db_session, bot, "sixth")
+    await run_task(older, handler())
+    assert (await tasks.get(db_session, older.id)).status == "queued"  # type: ignore[union-attr]
+    await chat_task(db_session, bot, "seventh")
+    await tasks.finish(db_session, stuck3.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+    await run_task(await reclaim(older.id), handler())
+    row = await tasks.get(db_session, older.id)
+    assert row is not None and row.status == "cancelled" and row.error_code == "superseded"
+    assert len(fake.requests) == 1 and await stream_count(older.id) == 0
+
+
 async def _pump(ctx) -> None:  # type: ignore[no-untyped-def]
     while True:
         await asyncio.sleep(0.2)

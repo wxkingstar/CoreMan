@@ -23,13 +23,14 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from coreman.core.bus import tasks
+from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.background import DEFAULT_TIMING, Timing
 from coreman.runtime.worker.chat.classify import ClassifyStage
 from coreman.runtime.worker.chat.content import ContentStage
 from coreman.runtime.worker.chat.converse import ConverseStage
 from coreman.runtime.worker.chat.finalize import FinalizeStage
 from coreman.runtime.worker.chat.intake import IntakeStage
-from coreman.runtime.worker.chat.models import Prepared
+from coreman.runtime.worker.chat.models import Intake, Prepared
 from coreman.runtime.worker.chat.opening import OpenStage
 from coreman.runtime.worker.chat.session_switch import SessionSwitchStage
 from coreman.runtime.worker.context import TaskContext
@@ -68,24 +69,21 @@ class ChatTaskHandler(
         if resolved is None:
             return None
         intake, relay, parts = resolved
+        if ctx.task.attempts > 1 and await self._outdated(ctx, intake):
+            return None
         # supersede 必须先提交再等：被替代的任务跑在另一条连接上，看不见未提交的取消标记。
         async with ctx.session_factory() as session:
-            victims = await tasks.supersede(
+            await tasks.supersede(
                 session, intake.bot.id, intake.session_key, except_task_id=ctx.task.id
             )
             await session.commit()
         try:
-            await self._wait_superseded(ctx, victims)
+            ready = await self._wait_superseded(ctx, intake.bot.id, intake.session_key)
         except TimeoutError:
-            async with ctx.session_factory() as session:
-                await reply_once(
-                    session,
-                    ctx,
-                    reply_context=intake.inbound.reply_context,
-                    text="上一轮任务仍在停止中，请稍后继续。",
-                )
-                await tasks.finish(session, ctx.task.id, status="failed", error_code="session_busy")
-                await session.commit()
+            await self._session_busy(ctx, intake)
+            return None
+        if not ready:
+            await self._cancelled_before_open(ctx)
             return None
         async with ctx.session_factory() as session:
             pre = await self._open(session, ctx, intake, relay, started)
@@ -103,3 +101,70 @@ class ChatTaskHandler(
             )
         ctx.log.info("task_started", bot_key=intake.bot.bot_key, chat_type=intake.chat_type)
         return pre
+
+    async def _session_busy(self, ctx: TaskContext, intake: Intake) -> None:
+        """上一轮迟迟停不下来：新消息不丢，放回队列稍后再认领；重排到头才告诉用户。
+
+        等待期间还没开流、没碰会话，放回队列是干净的；再认领时照旧先等更早的任务退出，
+        同会话串行不变。
+        """
+        if ctx.task.attempts < self.SUPERSEDE_MAX_ATTEMPTS:
+            async with ctx.session_factory() as session:
+                deferred = await tasks.defer(
+                    session, ctx.task.id, seconds=self.SUPERSEDE_RETRY_SECONDS
+                )
+                await session.commit()
+            if deferred:
+                ctx.log.warning("session_busy_deferred", attempts=ctx.task.attempts)
+                return
+            # 没放回去：本任务刚被请求取消（stop / 更新的消息），按取消收尾。
+            await self._cancelled_before_open(ctx)
+            return
+        ctx.log.warning("session_busy_gave_up", attempts=ctx.task.attempts)
+        async with ctx.session_factory() as session:
+            await reply_once(
+                session,
+                ctx,
+                reply_context=intake.inbound.reply_context,
+                text=msg("session_busy", ctx.locale),
+            )
+            await tasks.finish(
+                session, ctx.task.id, status="failed", error_code="session_busy", only_active=True
+            )
+            await session.commit()
+
+    async def _outdated(self, ctx: TaskContext, intake: Intake) -> bool:
+        """重排回来时同会话已有更新的消息：这一条已被它替代，不再作答（与运行中被替代同理）。"""
+        async with ctx.session_factory() as session:
+            newer = await tasks.has_newer(
+                session,
+                intake.bot.id,
+                intake.session_key,
+                task_id=ctx.task.id,
+                kind=ctx.task.kind,
+            )
+            if newer:
+                await tasks.finish(
+                    session,
+                    ctx.task.id,
+                    status="cancelled",
+                    error_code="superseded",
+                    only_active=True,
+                )
+            await session.commit()
+        if newer:
+            ctx.log.info("deferred_task_superseded")
+        return newer
+
+    async def _cancelled_before_open(self, ctx: TaskContext) -> None:
+        """还没开流就被取消：没有气泡要收尾，stop 的回执由命令自己发，只写终态。"""
+        async with ctx.session_factory() as session:
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="cancelled",
+                error_code=ctx.cancel_reason or "cancelled",
+                only_active=True,
+            )
+            await session.commit()
+        ctx.log.info("cancelled_before_open", reason=ctx.cancel_reason)

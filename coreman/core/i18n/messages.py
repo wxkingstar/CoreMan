@@ -32,6 +32,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "nothing_running": "没有正在运行的任务。",
         "task_stopped_suffix": "\n\n⏹ 任务已被用户停止。",
         "superseded_suffix": "\n\n⏹ 已收到新消息，上一个任务自动停止。",
+        "session_busy": "⚠️ 上一轮任务迟迟未能停止，这条消息暂时无法处理，请稍后重新发送。",
         "help": HELP_ZH,
         "no_permission": "⚠️ 抱歉，您没有使用此机器人的权限。\n\n如需开通权限，请联系管理员。",
         "unsupported_message": "暂不支持该类型的消息，请发送文字。",
@@ -441,6 +442,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "long_task_done": (
             "✅ タスクが完了しました（所要 {seconds} 秒）。上の返信をご確認ください。"
+        ),
+        "session_busy": (
+            "⚠️ 前回のタスクが停止しないため、このメッセージを処理できませんでした。"
+            "しばらくしてから再送してください。"
         ),
         "cron_push_header": "**{name}**\n> ボット：{bot} | 所要：{seconds} 秒\n\n",
         "cron_push_footer": (
