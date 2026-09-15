@@ -121,12 +121,21 @@ async function saveEdit() {
 }
 
 async function showTree() {
-  tree.value = await departments.tree('wecom')
-  treeVisible.value = true
+  try {
+    tree.value = await departments.tree('wecom')
+    treeVisible.value = true
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
 }
 
+/** 团队只是筛选与改派的下拉数据：加载失败只提示，不能挡住用户列表。 */
 async function reloadTeams() {
-  teamList.value = await teamsApi.list()
+  try {
+    teamList.value = await teamsApi.list()
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
 }
 
 function search() {
@@ -155,7 +164,8 @@ function onSizeChange(size: number) {
 }
 
 onMounted(async () => {
-  teamList.value = await teamsApi.list()
+  // 团队请求失败时降级：已提示错误，用户列表照常加载。
+  await reloadTeams()
   await paged.load()
 })
 </script>
