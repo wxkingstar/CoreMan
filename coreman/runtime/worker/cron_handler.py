@@ -173,8 +173,9 @@ class CronRunHandler:
                             config.get("system_prompt")
                             or bot.merged_system_prompt
                             or bot.system_prompt
-                        )
-                        + "\n\n这是定时执行。请直接给出可交付的结果；不要等待对话卡片回答。",
+                            or ""
+                        ),
+                        scheduled=True,
                     ),
                 )
                 await session.commit()

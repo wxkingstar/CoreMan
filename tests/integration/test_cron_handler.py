@@ -45,6 +45,8 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     assert len(fake.requests) == 1
     env = fake.requests[0]["env_vars"]
     assert env["COREMAN_USER_LOGIN"] == "creator" and env["COREMAN_CHAT_TYPE"] == "cron"
+    system_prompt = fake.requests[0]["messages"][0]["content"]
+    assert "# Scheduled Run Constraints" in system_prompt
     records = (await db_session.scalars(select(ChatLog))).all()
     assert len(records) == 1 and records[0].chat_type == "cron"
     assert await db_session.scalar(select(UserReached)) is None

@@ -62,6 +62,7 @@ class SettingsPatch(BaseModel):
     prompt_security_policy: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_codex_contract: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_runtime_mode: str | None = Field(default=None, min_length=1, max_length=20000)
+    prompt_cron_mode: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_runtime_tail: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_2: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_3: str | None = Field(default=None, min_length=1, max_length=20000)
