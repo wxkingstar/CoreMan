@@ -23,8 +23,16 @@ func TestZeroStdoutAuthErrorPreservesSession(t *testing.T) {
 	if rebuilt {
 		t.Fatal("must not destroy session on auth failure")
 	}
-	if !strings.Contains(rec.Body.String(), `"x_relay_error":true`) {
-		t.Fatal(rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, `"x_relay_error":true`) {
+		t.Fatal(body)
+	}
+	// 失败也要有确认终态：否则下游按「流被截断」处理，原因文本被通用文案顶掉。
+	errAt := strings.Index(body, "[codex error]")
+	finishAt := strings.Index(body, `"finish_reason":"stop"`)
+	doneAt := strings.Index(body, "data: [DONE]")
+	if errAt < 0 || finishAt < errAt || doneAt < finishAt {
+		t.Fatalf("want error delta, finish chunk, [DONE] in order; got:\n%s", body)
 	}
 }
 

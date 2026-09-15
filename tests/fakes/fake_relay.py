@@ -100,6 +100,20 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
         _chunk({"role": "", "content": ""}, finish="stop", error=True),
         DONE,
     ],
+    # 驱动在 SSE 已开之后失败，只回错误块、不带 finish chunk（旧版 codex 首行零输出的形状）。
+    "relay_error_no_finish": lambda: [
+        ": ping\n\n",
+        _chunk(
+            {
+                "role": "assistant",
+                "content": "\n\n[codex error] codex produced no output: exit status 1",
+            },
+            error=True,
+        ),
+        DONE,
+    ],
+    # 零事件流：只有心跳与 [DONE]，既无正文也无 finish chunk。
+    "empty_no_finish": lambda: [": ping\n\n", DONE],
     "codex_error": lambda: [_text("部分输出"), _text("\n\n[codex error] boom"), FINISH, DONE],
     "codex_normal": lambda: [
         ": ping\n\n",

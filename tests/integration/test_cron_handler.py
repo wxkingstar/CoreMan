@@ -207,3 +207,25 @@ async def test_long_precheck_does_not_stall_heartbeats(
     run = await db_session.scalar(select(CronRun))
     assert run is not None and run.status == "skipped" and not fake.requests
     assert beats - before >= 4
+
+
+async def test_cron_relay_error_without_finish_keeps_reason(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    now = datetime.now(UTC)
+    await job(db_session, now, target_chats=["test-group"])
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("relay_error_no_finish")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "failed"
+    assert run.error_message is not None and run.error_message.startswith("x_relay_error: ")
+    assert "codex produced no output" in run.error_message
+    row = await db_session.get(Task, task.id, populate_existing=True)
+    assert row is not None and row.error_code == "x_relay_error"
+    log = await db_session.scalar(select(ChatLog))
+    assert log is not None and log.error_code == "x_relay_error"
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None and "codex produced no output" in item.payload["markdown"]

@@ -71,7 +71,7 @@ from coreman.core.prompting import (
     sanitize_parts,
     sanitize_user_input,
 )
-from coreman.core.relay.client import ChatRequest
+from coreman.core.relay.client import ChatRequest, IncompleteResultError
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
@@ -1022,10 +1022,34 @@ class ChatTaskHandler:
     # ---- 收尾 -------------------------------------------------------------
 
     def _classify(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
-        """spec §8.4 的流结束分类。"""
+        """spec §8.4 的流结束分类。
+
+        relay 自带的错误与零事件流排在通用异常之前：驱动回错后不补 finish chunk、或整条流
+        一个事件都没有时，客户端抛的是「未确认终态」，这时要按 relay 的原话 / 空回复分类，
+        不能落成一句通用的「连接出现错误」，把原因文本和会话链接一起丢掉。
+        """
         locale, text, url = ctx.locale, pre.writer.pending_text, pre.session_url
         if out.cancelled:
             return self._cancelled(ctx, text, out.reason)
+        if out.relay_error:
+            return Verdict(
+                "error",
+                "failed",
+                "x_relay_error",
+                "运行时以正文回传了错误",
+                text or msg("relay_error_text", locale),
+            )
+        unconfirmed = isinstance(out.error, IncompleteResultError)
+        if (out.error is None or unconfirmed) and not out.ask_user and out.counted == 0:
+            return Verdict(
+                "error",
+                "failed",
+                "empty_stream",
+                "运行时未返回任何事件",
+                msg("empty_stream", locale, url=url),
+            )
+        if unconfirmed:
+            return self._incomplete(ctx, pre, text)
         if out.error is not None:
             name = type(out.error).__name__
             return Verdict(
@@ -1054,30 +1078,8 @@ class ChatTaskHandler:
             return Verdict(
                 "ask_user", "succeeded", None, None, f"{text}\n\n{brief}" if text else brief
             )
-        if out.relay_error:
-            return Verdict(
-                "error",
-                "failed",
-                "x_relay_error",
-                "运行时以正文回传了错误",
-                text or msg("relay_error_text", locale),
-            )
-        if out.counted == 0:
-            return Verdict(
-                "error",
-                "failed",
-                "empty_stream",
-                "运行时未返回任何事件",
-                msg("empty_stream", locale, url=url),
-            )
         if out.finish_reason not in {"stop", "end_turn", "completed"}:
-            return Verdict(
-                "error",
-                "failed",
-                "incomplete_result",
-                "未确认执行完成",
-                msg("relay_error", locale, relay=pre.relay.name),
-            )
+            return self._incomplete(ctx, pre, text)
         if out.text_events == 0:
             body = (
                 msg("no_text_with_tools", locale, n=out.tool_events, url=url)
@@ -1086,6 +1088,17 @@ class ChatTaskHandler:
             )
             return Verdict("success", "succeeded", None, None, text + body)
         return Verdict("success", "succeeded", None, None, text + msg("done_suffix", locale))
+
+    def _incomplete(self, ctx: TaskContext, pre: Prepared, text: str) -> Verdict:
+        """没拿到确认终态：已经流出的正文照留（驱动常把失败原因写在里面），后面接一句错误说明。"""
+        notice = msg("relay_error", ctx.locale, relay=pre.relay.name)
+        return Verdict(
+            "error",
+            "failed",
+            "incomplete_result",
+            "未确认执行完成",
+            f"{text.rstrip()}\n\n{notice}" if text.strip() else notice,
+        )
 
     def _empty_success_text(self, ctx: TaskContext) -> str:
         """一个字也没说、一个工具也没调，却是正常收尾时给用户的交代。"""

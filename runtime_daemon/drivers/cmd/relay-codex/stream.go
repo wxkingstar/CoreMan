@@ -616,10 +616,20 @@ func defaultStr(s, fallback string) string {
 	return s
 }
 
+// emitCodexFailure closes an already-open SSE stream with a visible failure.
+// The shape matches relay-claude's emitStreamError: an x_relay_error content
+// delta, then a finish chunk (also flagged) and [DONE]. Without the finish
+// chunk a client that gates success on finish_reason cannot tell a reported
+// failure from a truncated stream and discards the reason text.
 func emitCodexFailure(w http.ResponseWriter, f http.Flusher, id string, created int64, model, message string) {
 	chunk := openai.ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("assistant", "\n\n[codex error] "+message)}}, XRelayError: true}
 	data, _ := json.Marshal(chunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	finish := "stop"
+	fin := openai.ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+		Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finish}}, XRelayError: true}
+	data, _ = json.Marshal(fin)
 	fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
 	f.Flush()
 }

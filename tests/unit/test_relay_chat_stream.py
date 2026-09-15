@@ -3,7 +3,12 @@ import json
 
 import pytest
 
-from coreman.core.relay.client import VERBOSITY_OUTPUT_STYLES, ChatRequest, RelayError
+from coreman.core.relay.client import (
+    VERBOSITY_OUTPUT_STYLES,
+    ChatRequest,
+    IncompleteResultError,
+    RelayError,
+)
 from coreman.core.relay.sse import FinishEvent, RelayErrorEvent, TextDelta, ToolUseStart, UsageEvent
 from tests.fakes.fake_relay import FakeRelay
 
@@ -68,6 +73,16 @@ async def test_relay_error_and_empty() -> None:
     assert [e for e in await collect(FakeRelay("relay_error")) if isinstance(e, RelayErrorEvent)]
     events = await collect(FakeRelay("empty"))
     assert events == [FinishEvent("stop")]
+
+
+async def test_relay_error_without_finish_is_not_reported_as_incomplete() -> None:
+    # 驱动回错后不补 finish chunk：错误事件已经交给调用方，不能再抛「未确认终态」把原话顶掉。
+    events = await collect(FakeRelay("relay_error_no_finish"))
+    assert [e for e in events if isinstance(e, RelayErrorEvent)]
+    with pytest.raises(IncompleteResultError, match="incomplete_result"):
+        await collect(FakeRelay("empty_no_finish"))
+    with pytest.raises(IncompleteResultError):
+        await collect(FakeRelay("no_finish"))
 
 
 async def test_http_error_connect_error_and_timeouts() -> None:

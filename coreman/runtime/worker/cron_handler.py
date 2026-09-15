@@ -25,7 +25,7 @@ from coreman.core.prompting import (
     load_segments,
     sanitize_user_input,
 )
-from coreman.core.relay.client import ChatRequest
+from coreman.core.relay.client import ChatRequest, IncompleteResultError, RelayError
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
@@ -38,6 +38,26 @@ from coreman.core.relay.sse import (
 )
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
+
+
+class CronStreamError(ValueError):
+    """这一轮没有拿到可交付的结果。
+
+    `code` 进 error_code 与统计口径；`detail` 是给人看的原因（relay 回传的原话）；`partial`、
+    `usage`、`tools` 是失败前已经拿到的部分，照样留进执行记录。
+    """
+
+    def __init__(
+        self,
+        code: str,
+        detail: str | None = None,
+        partial: str = "",
+        usage: UsageEvent | None = None,
+        tools: list[str] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code, self.detail, self.partial = code, detail, partial
+        self.usage, self.tools = usage, list(tools or [])
 
 
 class CronRunHandler:
@@ -65,6 +85,7 @@ class CronRunHandler:
         tools: list[str] = []
         reply = ""
         status, error = "failed", None
+        detail: str | None = None
         session_id = uuid.uuid4()
         execution_model: str | None = None
         execution_relay_id: uuid.UUID | None = None
@@ -192,6 +213,9 @@ class CronRunHandler:
         except PrecheckError as exc:
             status, error = "failed_precheck", str(exc)
             meta["error"] = error
+        except CronStreamError as exc:
+            status, error, detail = "failed", exc.code, exc.detail
+            reply, usage, tools = exc.partial, exc.usage, exc.tools
         except asyncio.CancelledError:
             status, error = "failed", "cancelled"
             # 进程强制取消仍尝试原子结单；事务失败则由看护补齐。
@@ -210,35 +234,62 @@ class CronRunHandler:
             session_id,
             execution_model,
             execution_relay_id,
+            detail=detail,
         )
 
     async def _consume(
         self, gen: AsyncGenerator[SseEvent, None]
     ) -> tuple[str, UsageEvent | None, list[str]]:
+        """收完整条流再判定。
+
+        与 chat 同一口径：relay 回传的错误优先（保留原话），其次是零事件流，最后才是
+        「未确认终态」；连接失败、超时这类通用异常原样抛出。
+        """
         parts: list[str] = []
+        errors: list[str] = []
         size = 0
+        events = 0
         usage = None
         finished = False
         tools: list[str] = []
-        async for event in gen:
-            if isinstance(event, (RelayErrorEvent, AskUserQuestionEvent)):
-                raise ValueError("relay_error_or_interactive_answer_required")
-            if isinstance(event, FinishEvent):
-                finished = event.reason in ("stop", "end_turn", "completed")
-            if isinstance(event, TextDelta):
-                size += len(event.text)
-                if size > 100000:
-                    raise ValueError("result_size_limit")
-                parts.append(event.text)
-            elif isinstance(event, UsageEvent):
-                usage = event
-            elif isinstance(event, ToolUseStart) and event.name not in tools:
-                tools.append(event.name)
+        try:
+            async for event in gen:
+                if isinstance(event, AskUserQuestionEvent):
+                    raise CronStreamError(
+                        "interactive_answer_required",
+                        partial="".join(parts),
+                        usage=usage,
+                        tools=tools,
+                    )
+                if isinstance(event, RelayErrorEvent):
+                    errors.append(event.text)
+                    continue
+                if isinstance(event, FinishEvent):
+                    finished = event.reason in ("stop", "end_turn", "completed")
+                    continue
+                events += 1
+                if isinstance(event, TextDelta):
+                    size += len(event.text)
+                    if size > 100000:
+                        raise CronStreamError("result_size_limit", usage=usage, tools=tools)
+                    parts.append(event.text)
+                elif isinstance(event, UsageEvent):
+                    usage = event
+                elif isinstance(event, ToolUseStart) and event.name not in tools:
+                    tools.append(event.name)
+        except RelayError as exc:
+            if not errors and not isinstance(exc, IncompleteResultError):
+                raise
+            finished = False
         reply = "".join(parts).strip()
+        if errors:
+            detail = "".join(errors).strip()[:2000]
+            raise CronStreamError("x_relay_error", detail, reply, usage, tools)
         if not finished:
-            raise ValueError("incomplete_result")
+            code = "incomplete_result" if events else "empty_stream"
+            raise CronStreamError(code, partial=reply, usage=usage, tools=tools)
         if not reply:
-            raise ValueError("empty_result")
+            raise CronStreamError("empty_result", usage=usage, tools=tools)
         return reply, usage, tools
 
     async def _finish(
@@ -253,6 +304,8 @@ class CronRunHandler:
         relay_session_id: uuid.UUID,
         execution_model: str | None = None,
         execution_relay_id: uuid.UUID | None = None,
+        *,
+        detail: str | None = None,
     ) -> None:
         async with ctx.session_factory() as session:
             # 全部路径遵循 job → task → run 锁序，且终态、记录、出站在同一提交中。
@@ -275,9 +328,10 @@ class CronRunHandler:
             ):
                 return
             if task.cancel_requested_at is not None:
-                status, error, reply = "failed", "cancelled", ""
+                status, error, reply, detail = "failed", "cancelled", "", None
             now = utcnow()
-            run.status, run.reply, run.error_message = status, reply or None, error
+            run.status, run.reply = status, reply or None
+            run.error_message = f"{error}: {detail}" if error and detail else error
             run.precheck_meta, run.finished_at = meta, now
             if usage:
                 for key in (
@@ -306,6 +360,7 @@ class CronRunHandler:
                 task.id,
                 status=task_status,
                 error_code=error,
+                error_message=detail,
                 result={"cron_run_id": run.id, "status": status},
                 only_active=True,
             )
@@ -317,7 +372,7 @@ class CronRunHandler:
                     content = (
                         reply
                         if status == "success"
-                        else f"**定时任务执行失败**\n{run.job_name}\n{error or status}"
+                        else f"**定时任务执行失败**\n{run.job_name}\n{detail or error or status}"
                     )
                     run.delivery = await enqueue_result(
                         session,
@@ -357,6 +412,7 @@ class CronRunHandler:
                         tools_used=tools,
                         status="success" if status in {"success", "skipped"} else "error",
                         error_code=error,
+                        error_message=detail,
                         input_tokens=run.input_tokens,
                         output_tokens=run.output_tokens,
                         cache_read_tokens=run.cache_read_tokens,
