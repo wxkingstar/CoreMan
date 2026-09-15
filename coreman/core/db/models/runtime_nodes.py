@@ -32,6 +32,8 @@ class RuntimeNode(TimestampMixin, Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     service_status: Mapped[str] = mapped_column(Text, server_default="unknown")
+    # 节点上报的协议版本；旧节点不上报时为空。
+    protocol_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):

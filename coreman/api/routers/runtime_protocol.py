@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -34,7 +35,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
-from coreman.core.runtime_nodes.common import absolute_root, token_digest
+from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
     CHUNK_SIZE,
     LEASE_SECONDS,
@@ -42,12 +43,22 @@ from coreman.core.runtime_nodes.transport import (
     TERMINAL,
     chunk_aad,
     envelope_aad,
+    notify_call,
+    notify_node,
     now,
+    poll_seconds,
+    subscribe_node,
+    unsubscribe_node,
+    wait_event,
 )
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime-daemon"])
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+# 长轮询最多挂起的秒数（只有节点带 wait 才挂起）；一批响应帧与待消费分片的上限。
+MAX_POLL_WAIT = 25.0
+MAX_BATCH_FRAMES = 64
+MAX_BUFFERED_CHUNKS = 128
 
 
 class RedactInstallAccess(logging.Filter):
@@ -74,6 +85,8 @@ class EnrollIn(BaseModel):
     environment: Literal["host", "chroot", "nspawn"] = "host"
     version: str = Field(max_length=100)
     workspace_root: str = Field(min_length=2, max_length=400)
+    # 旧节点不上报协议版本，按 1 处理。
+    protocol: int = Field(default=1, ge=1, le=1000)
 
     _root = field_validator("workspace_root")(absolute_root)
 
@@ -101,12 +114,15 @@ class HeartbeatIn(BaseModel):
     service_status: Literal[
         "systemd-user", "systemd-user-session", "systemd", "launchd", "supervised", "foreground"
     ]
+    protocol: int = Field(default=1, ge=1, le=1000)
 
 
 class PollIn(BaseModel):
     running: list[uuid.UUID] = Field(default_factory=list, max_length=64)
     abandoned: list[uuid.UUID] = Field(default_factory=list, max_length=64)
     slots: int = Field(default=1, ge=0, le=32)
+    # 新节点带上最长等待秒数做长轮询；旧节点不带，没有命令时立即返回。
+    wait: float = Field(default=0, ge=0, le=MAX_POLL_WAIT)
 
 
 class FrameIn(BaseModel):
@@ -116,6 +132,12 @@ class FrameIn(BaseModel):
     content_type: str = Field(default="application/json", max_length=100)
     done: bool = False
     error: Literal["execution_failed", "connection_lost", "response_too_large"] | None = None
+
+
+class FramesIn(BaseModel):
+    """一批序号连续的响应帧（协议 2）；旧节点仍按单帧 FrameIn 回传。"""
+
+    frames: list[FrameIn] = Field(min_length=1, max_length=MAX_BATCH_FRAMES)
 
 
 async def load_link(session: AsyncSession, token: str, *, lock: bool = False) -> RuntimeInstallLink:
@@ -233,6 +255,7 @@ async def enroll(
             version=body.version,
             capabilities={},
             heartbeat_at=now(),
+            protocol_version=body.protocol,
         )
         session.add(node)
         await session.flush()
@@ -275,6 +298,7 @@ async def enroll(
         "data": {
             "node_id": str(body.node_id),
             "backends": {r.model_provider: {"relay_id": str(r.id)} for r in relays},
+            "protocol": PROTOCOL_VERSION,
         },
     }
 
@@ -291,6 +315,7 @@ async def heartbeat(
             heartbeat_at=now(),
             version=body.version,
             service_status=body.service_status,
+            protocol_version=body.protocol,
             capabilities={p: getattr(body, p).model_dump() for p in ("claude", "codex")},
         )
     )
@@ -343,6 +368,25 @@ async def heartbeat(
             await session.execute(
                 insert(ModelCatalog).values(provider=provider, model=model).on_conflict_do_nothing()
             )
+    # 消费者已离开（租约过期）或超过期限的在途调用：长轮询不再每次检查，改在心跳里收尾。
+    moment = now()
+    stale = list(
+        await session.scalars(
+            update(RuntimeCall)
+            .where(
+                RuntimeCall.node_id == node.id,
+                RuntimeCall.status.not_in(TERMINAL),
+                (RuntimeCall.consumer_at < moment - timedelta(seconds=LEASE_SECONDS))
+                | (RuntimeCall.deadline <= moment),
+            )
+            .values(status="cancelled", request_enc="")
+            .returning(RuntimeCall.id)
+        )
+    )
+    for call_id in stale:
+        await notify_call(session, call_id, node.id)
+    if stale:
+        await notify_node(session, node.id)
     # Bound cleanup, indexed by deadline; terminal payloads are not retained indefinitely.
     expired = (
         select(RuntimeCall.id)
@@ -352,7 +396,7 @@ async def heartbeat(
     )
     await session.execute(delete(RuntimeCall).where(RuntimeCall.id.in_(expired)))
     await session.commit()
-    return {"code": 0, "data": {"draining": node.draining}}
+    return {"code": 0, "data": {"draining": node.draining, "protocol": PROTOCOL_VERSION}}
 
 
 @router.post("/poll")
@@ -360,41 +404,95 @@ async def poll(
     body: PollIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     node = await node_auth(request, session)
+    node_id = node.id
+    ended: list[uuid.UUID] = []
     if body.abandoned:
-        await session.execute(
-            update(RuntimeCall).where(
-                RuntimeCall.node_id == node.id,
+        ended += await session.scalars(
+            update(RuntimeCall)
+            .where(
+                RuntimeCall.node_id == node_id,
                 RuntimeCall.id.in_(body.abandoned),
                 RuntimeCall.status.not_in(TERMINAL),
-            ).values(status="failed", error="control_lost", request_enc="")
+            )
+            .values(status="failed", error="control_lost", request_enc="")
+            .returning(RuntimeCall.id)
         )
-    moment = now()
-    await session.execute(
-        update(RuntimeCall)
-        .where(
-            RuntimeCall.node_id == node.id,
-            RuntimeCall.status.not_in(TERMINAL),
-            (RuntimeCall.consumer_at < moment - timedelta(seconds=LEASE_SECONDS))
-            | (RuntimeCall.deadline <= moment),
+    if body.running:
+        # 只核对节点报告在跑的调用：消费者租约过期或超过期限即取消。排队中的过期调用
+        # 由领取条件跳过、心跳收尾，空闲节点的轮询不再执行写语句。
+        moment = now()
+        ended += await session.scalars(
+            update(RuntimeCall)
+            .where(
+                RuntimeCall.node_id == node_id,
+                RuntimeCall.id.in_(body.running),
+                RuntimeCall.status.not_in(TERMINAL),
+                (RuntimeCall.consumer_at < moment - timedelta(seconds=LEASE_SECONDS))
+                | (RuntimeCall.deadline <= moment),
+            )
+            .values(status="cancelled", request_enc="")
+            .returning(RuntimeCall.id)
         )
-        .values(status="cancelled", request_enc="")
-    )
+    for call_id in ended:
+        await notify_call(session, call_id, node_id)
+    # 先订阅再读库：读库与等待之间写入的命令一定能唤醒本次长轮询。
+    wake = subscribe_node(node_id) if body.wait else None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + body.wait
+    try:
+        while True:
+            if wake is not None:
+                wake.clear()
+            draining, cancelled, commands = await _collect(session, request, node_id, body)
+            await session.commit()  # 等待期间不占用数据库连接
+            remaining = deadline - loop.time()
+            if commands or cancelled or wake is None or remaining <= 0:
+                break
+            await wait_event(wake, min(poll_seconds(), remaining))
+    finally:
+        if wake is not None:
+            unsubscribe_node(node_id, wake)
+    return {
+        "code": 0,
+        "data": {
+            "commands": commands,
+            "cancelled": cancelled,
+            "draining": draining,
+            "protocol": PROTOCOL_VERSION,
+        },
+    }
+
+
+async def _collect(
+    session: AsyncSession, request: Request, node_id: uuid.UUID, body: PollIn
+) -> tuple[bool, list[str], list[dict[str, Any]]]:
+    """一轮领取：节点报告在跑、但已进入终态的调用要取消；有空位时领取仍有消费者的排队调用。"""
+    node = await session.get(RuntimeNode, node_id, populate_existing=True)
+    if node is None or not node.is_active:
+        # 等待期间被停用：在跑的全部取消，下一次轮询按凭证失效处理。
+        return True, [str(i) for i in body.running], []
     active = set(
         await session.scalars(
             select(RuntimeCall.id).where(
-                RuntimeCall.node_id == node.id,
+                RuntimeCall.node_id == node_id,
                 RuntimeCall.id.in_(body.running),
                 RuntimeCall.status.not_in(TERMINAL),
             )
         )
     )
     cancelled = [str(i) for i in body.running if i not in active]
-    commands = []
+    commands: list[dict[str, Any]] = []
     if not node.draining and body.slots:
+        moment = now()
         rows = list(
             await session.scalars(
                 select(RuntimeCall)
-                .where(RuntimeCall.node_id == node.id, RuntimeCall.status == "queued")
+                .where(
+                    RuntimeCall.node_id == node_id,
+                    RuntimeCall.status == "queued",
+                    RuntimeCall.consumer_at >= moment - timedelta(seconds=LEASE_SECONDS),
+                    RuntimeCall.deadline > moment,
+                )
                 .order_by(RuntimeCall.created_at)
                 .limit(min(body.slots, 4))
                 .with_for_update(skip_locked=True)
@@ -406,21 +504,19 @@ async def poll(
             )
             row.status, row.request_enc = "running", ""
             commands.append({"id": str(row.id), "provider": row.provider, **payload})
-    await session.commit()
-    return {
-        "code": 0,
-        "data": {"commands": commands, "cancelled": cancelled, "draining": node.draining},
-    }
+            await notify_call(session, row.id, node_id)
+    return node.draining, cancelled, commands
 
 
 @router.post("/calls/{call_id}/frames")
 async def frame(
     call_id: uuid.UUID,
-    body: FrameIn,
+    body: FramesIn | FrameIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     node = await node_auth(request, session)
+    frames = body.frames if isinstance(body, FramesIn) else [body]
     row = await session.scalar(
         select(RuntimeCall)
         .where(RuntimeCall.id == call_id, RuntimeCall.node_id == node.id)
@@ -430,38 +526,53 @@ async def frame(
         raise not_found("运行时请求不存在")
     if row.status == "cancelled" or row.deadline <= now():
         raise ApiError(410, 410, "运行时请求已取消")
-    if body.seq < row.next_seq:
-        return {"code": 0, "data": None}  # idempotent publish after a lost HTTP response
-    if row.status in TERMINAL or row.status != "running" or body.seq != row.next_seq:
+    # 丢了响应后的重发：已落库的序号直接跳过，其余必须从当前序号起连续，终态帧只能在最后。
+    fresh = [item for item in frames if item.seq >= row.next_seq]
+    if not fresh:
+        return {"code": 0, "data": None}
+    if (
+        row.status != "running"
+        or any(item.seq != row.next_seq + index for index, item in enumerate(fresh))
+        or any(item.done or item.error for item in fresh[:-1])
+    ):
         raise ApiError(409, 409, "响应序号不匹配")
     try:
-        decoded = base64.b64decode(body.data, validate=True)
+        decoded = [base64.b64decode(item.data, validate=True) for item in fresh]
     except ValueError as exc:
         raise ApiError(422, 422, "响应编码无效") from exc
-    if len(decoded) > CHUNK_SIZE or row.response_bytes + len(decoded) > MAX_RESPONSE:
+    if (
+        any(len(data) > CHUNK_SIZE for data in decoded)
+        or row.response_bytes + sum(len(data) for data in decoded) > MAX_RESPONSE
+    ):
         raise ApiError(413, 413, "运行时响应过大")
-    buffered = await session.scalar(
-        select(func.count()).select_from(RuntimeChunk).where(RuntimeChunk.call_id == call_id)
-    )
-    if buffered and buffered >= 128:
-        raise ApiError(429, 429, "等待响应消费者")
-    if body.status_code is not None:
-        if row.status_code is not None and row.status_code != body.status_code:
-            raise ApiError(409, 409, "响应头已经提交")
-        row.status_code = body.status_code
-        row.content_type = body.content_type.replace("\r", "").replace("\n", "")
-    if decoded:
-        session.add(
-            RuntimeChunk(
-                call_id=call_id,
-                seq=body.seq,
-                data_enc=request.app.state.cipher.encrypt(body.data, chunk_aad(call_id, body.seq)),
-            )
+    incoming = sum(1 for data in decoded if data)
+    if incoming:
+        buffered = await session.scalar(
+            select(func.count()).select_from(RuntimeChunk).where(RuntimeChunk.call_id == call_id)
         )
-    row.next_seq += 1
-    row.response_bytes += len(decoded)
-    if body.done or body.error:
-        row.status, row.error = ("failed", body.error) if body.error else ("done", None)
-        row.deadline = min(row.deadline, now() + timedelta(minutes=5))
+        if (buffered or 0) + incoming > MAX_BUFFERED_CHUNKS:
+            raise ApiError(429, 429, "等待响应消费者")
+    for item, data in zip(fresh, decoded, strict=True):
+        if item.status_code is not None:
+            if row.status_code is not None and row.status_code != item.status_code:
+                raise ApiError(409, 409, "响应头已经提交")
+            row.status_code = item.status_code
+            row.content_type = item.content_type.replace("\r", "").replace("\n", "")
+        if data:
+            session.add(
+                RuntimeChunk(
+                    call_id=call_id,
+                    seq=item.seq,
+                    data_enc=request.app.state.cipher.encrypt(
+                        item.data, chunk_aad(call_id, item.seq)
+                    ),
+                )
+            )
+        row.next_seq += 1
+        row.response_bytes += len(data)
+        if item.done or item.error:
+            row.status, row.error = ("failed", item.error) if item.error else ("done", None)
+            row.deadline = min(row.deadline, now() + timedelta(minutes=5))
+    await notify_call(session, call_id, node.id)
     await session.commit()
     return {"code": 0, "data": None}

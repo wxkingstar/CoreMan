@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import PurePosixPath
 
+# 节点协议版本。2：领取命令支持长轮询、响应帧可批量回传、心跳上报节点并发。
+# 节点在注册与心跳里上报自己的版本，管理端在响应里返回自己的版本，双方都按低者行事。
+PROTOCOL_VERSION = 2
+
 
 def token_digest(token: str) -> str:
     """安装链接与节点凭证只以 SHA-256 摘要落库。"""
