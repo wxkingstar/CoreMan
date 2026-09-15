@@ -22,6 +22,7 @@ from coreman.core.db.models import (
     RelayServer,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.observability.metrics import WHITELIST_DENIED, after_commit
 from coreman.core.timeutils import parse_ts
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.inbound import (
@@ -150,7 +151,13 @@ class IntakeStage(ChatStageBase):
             intake.speaker.user_id is not None and intake.speaker.user_id in allowed
         ):
             return False
-        ctx.log.info("denied_not_allowed", platform_user_id=intake.speaker.platform_user_id)
+        # 身份未知与不在名单分开计数：前者成批出现通常是应用未绑定、用户不在可见范围或
+        # 解密接口抖动，整批员工被拒却只有 info 日志，运维看不到。
+        reason = "identity_unknown" if intake.speaker.user_id is None else "not_allowed"
+        ctx.log.warning(
+            "whitelist_denied", reason=reason, platform_user_id=intake.speaker.platform_user_id
+        )
+        after_commit(session, lambda: WHITELIST_DENIED.labels(reason).inc())
         await reply_once(
             session,
             ctx,

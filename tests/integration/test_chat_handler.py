@@ -255,12 +255,29 @@ async def test_whitelist_unsupported_help_and_disabled(
     await db_session.commit()
     bot, _, _ = await seed_bot(db_session, allowed_user_ids=[u.id])
     fake = FakeRelay("normal")
+    from coreman.core.observability.metrics import REGISTRY
+
+    def denied_count(reason: str) -> float:
+        name = "coreman_whitelist_denied_total"
+        return REGISTRY.get_sample_value(name, {"reason": reason}) or 0.0
+
+    unknown_before, outsider_before = denied_count("identity_unknown"), denied_count("not_allowed")
     denied = await chat_task(db_session, bot, "hi", sender="zs")
     await run(db_engine, denied, fake)
     assert (await stream_of(db_session, denied.id)).final_text == msg(
         "no_permission"
     ) and fake.requests == []
     assert (await db_session.execute(select(ChatLog))).scalars().all() == []
+    # 拒绝按原因计数：没映射到员工的账号与名单外的员工分开统计。
+    assert denied_count("identity_unknown") == unknown_before + 1
+    outsider = User(login_name="outsider", display_name="名单外")
+    db_session.add(outsider)
+    await db_session.flush()
+    db_session.add(UserIdentity(user_id=outsider.id, platform="wecom", platform_user_id="out"))
+    await db_session.commit()
+    await run(db_engine, await chat_task(db_session, bot, "hi", sender="out"), fake)
+    assert denied_count("not_allowed") == outsider_before + 1
+    assert denied_count("identity_unknown") == unknown_before + 1 and fake.requests == []
     ok = await chat_task(db_session, bot, "hi", sender="vip")
     await run(db_engine, ok, fake)
     assert len(fake.requests) == 1
