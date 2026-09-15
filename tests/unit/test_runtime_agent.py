@@ -1,4 +1,6 @@
 import json
+import subprocess
+import threading
 
 import pytest
 
@@ -106,6 +108,130 @@ def test_explicit_probe_install_preserves_existing_settings(agent):
     with pytest.raises(ValueError):
         agent.install_claude_probe()
     assert settings.read_text() == "broken-json"
+
+
+def run_capture(agent, payload: str) -> str:
+    capture = agent.home / ".cache/claude_rate_limits/capture.sh"
+    return subprocess.run(
+        ["/bin/sh", str(capture)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    ).stdout
+
+
+def test_probe_install_keeps_the_existing_status_line_working(agent):
+    settings = agent.home / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    original = {"type": "command", "command": "tr a-z A-Z", "padding": 0}
+    settings.write_text(json.dumps({"statusLine": original, "theme": "dark"}))
+    agent.install_claude_probe()
+    cache = agent.home / ".cache/claude_rate_limits"
+    status = json.loads(settings.read_text())["statusLine"]
+    assert status == {"type": "command", "command": str(cache / "capture.sh"), "padding": 0}
+    payload = '{"rate_limits":{"five_hour":{"used_percentage":2}}}'
+    assert run_capture(agent, payload) == payload.upper()
+    assert (cache / "rate_limits.json").read_text() == payload
+    backup = json.loads(settings.with_name("settings.before-coreman-probe.json").read_text())
+    assert backup["statusLine"] == original
+
+    # 守护进程每次启动都会重装：不能把采集脚本包进自己，也不覆盖用户之后调整的字段。
+    status["padding"] = 2
+    settings.write_text(json.dumps({"statusLine": status, "theme": "dark"}))
+    agent.install_claude_probe()
+    agent.install_claude_probe()
+    assert json.loads(settings.read_text()) == {"statusLine": status, "theme": "dark"}
+    assert run_capture(agent, '{"model":"x"}') == '{"MODEL":"X"}'
+    assert str(cache / "capture.sh") not in (cache / "capture.sh").read_text()
+
+
+def test_probe_install_recovers_a_status_line_replaced_by_the_old_probe(agent):
+    capture = agent.home / ".cache/claude_rate_limits/capture.sh"
+    settings = agent.home / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.with_name("settings.before-coreman-probe.json").write_text(
+        json.dumps({"statusLine": {"type": "command", "command": "printf legacy"}})
+    )
+    settings.write_text(json.dumps({"statusLine": {"type": "command", "command": str(capture)}}))
+    agent.install_claude_probe()
+    assert run_capture(agent, "{}") == "legacy"
+
+
+def test_probe_install_without_a_status_line_and_with_an_unknown_one(agent):
+    cache = agent.home / ".cache/claude_rate_limits"
+    settings = agent.home / ".claude/settings.json"
+    agent.install_claude_probe()
+    assert json.loads(settings.read_text())["statusLine"]["command"] == str(cache / "capture.sh")
+    assert run_capture(agent, '{"rate_limits":{}}') == ""
+    # 空输入不能把上次采到的数据清空。
+    assert run_capture(agent, "") == ""
+    assert (cache / "rate_limits.json").read_text() == '{"rate_limits":{}}'
+    settings.write_text(json.dumps({"statusLine": "bunx ccstatusline"}))
+    with pytest.raises(agent_module.OperationError):
+        agent.install_claude_probe()
+    assert json.loads(settings.read_text()) == {"statusLine": "bunx ccstatusline"}
+
+
+def run_schedule_once(agent, monkeypatch) -> list[str]:
+    started: list[str] = []
+
+    def record(name, function):
+        started.append(name)
+        agent.stop.set()
+        return {"success": True}
+
+    monkeypatch.setattr(agent, "start_background", record)
+    monkeypatch.setenv("COREMAN_MEMORY_SYNC", "1")
+    agent.stop.clear()
+    agent.start_schedules()
+    for thread in threading.enumerate():
+        if thread.name == "coreman-agent-schedules":
+            thread.join(timeout=5)
+    return started
+
+
+def test_quota_probe_is_not_scheduled_until_the_claude_probe_is_enabled(agent, monkeypatch):
+    assert "probe-rate-limits" not in run_schedule_once(agent, monkeypatch)
+    result = agent.dispatch({"type": "probe-rate-limits"})
+    assert result["success"] is False
+    assert "install_claude_probe" in result["message"]
+    assert "--install-claude-probe" not in result["message"]
+    (agent.home / ".cache/claude_rate_limits").mkdir(parents=True)
+    (agent.home / ".cache/claude_rate_limits/probe.sh").write_text("unused")
+    assert "probe-rate-limits" in run_schedule_once(agent, monkeypatch)
+    agent.provider = "codex"
+    (agent.home / ".cache/claude_rate_limits/probe.sh").unlink()
+    assert agent.rate_limit_probe_enabled()
+
+
+def test_background_failure_log_keeps_operation_messages_only(agent, capsys):
+    def raising(exc):
+        def function():
+            raise exc
+
+        return function
+
+    failures = (
+        ("known", agent_module.OperationError("额度探测没有刷新数据")),
+        ("unknown", ValueError("/home/someone/private-path")),
+    )
+    for name, exc in failures:
+        agent.start_background(name, raising(exc))
+        for thread in threading.enumerate():
+            if thread.name == name:
+                thread.join(timeout=5)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events == [
+        {
+            "event": "agent_operation_failed",
+            "operation": "known",
+            "error": "OperationError",
+            "message": "额度探测没有刷新数据",
+        },
+        {"event": "agent_operation_failed", "operation": "unknown", "error": "ValueError"},
+    ]
 
 
 def test_failed_probe_does_not_publish_stale_quota(agent, monkeypatch):

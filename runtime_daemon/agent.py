@@ -65,6 +65,12 @@ OUTPUT_STYLES = {
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
 
 
+CLAUDE_PROBE_DISABLED = (
+    "未启用 Claude 额度探针：安装链接勾选该选项，"
+    "或在 config.json 设置 install_claude_probe 为 true 后重启服务"
+)
+
+
 class OperationError(Exception):
     pass
 
@@ -124,6 +130,44 @@ def atomic_write(path: Path, content: str) -> None:
         temp_path = Path(tmp.name)
     os.chmod(temp_path, 0o600)
     os.replace(temp_path, path)
+
+
+def status_line_command(value: object) -> str | None:
+    """Claude statusLine 只支持 command 类型；无法识别时返回 None。"""
+    if not isinstance(value, dict) or value.get("type", "command") != "command":
+        return None
+    command = value.get("command")
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def saved_status_line(path: Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    value = data.get("statusLine") if isinstance(data, dict) else None
+    return value if status_line_command(value) is not None else None
+
+
+def claude_capture_script(target: Path, command: str | None) -> str:
+    """statusLine 包装脚本：落盘 Claude 传入的 JSON（订阅账号含 rate_limits），再交给原命令显示。"""
+    forward = "/bin/sh -c " + shlex.quote(command) if command else ""
+    # 采集失败不能拖垮状态栏：临时文件建不出来时，直接把输入交给原命令。
+    fallback = "exec " + forward if command else "cat >/dev/null; exit 0"
+    lines = [
+        "#!/bin/sh",
+        "# CoreMan Claude 额度探针，由 runtime_daemon 生成，重新安装时覆盖。",
+        "umask 077",
+        "target=" + shlex.quote(str(target)),
+        'tmp=$(mktemp "$target.XXXXXX" 2>/dev/null) || { ' + fallback + "; }",
+        'cat > "$tmp"',
+        "ok=$?",
+        # 替换前先打开，原命令读到的一定是本次输入，不会被并发会话的写入换掉。
+        'exec 3< "$tmp"',
+        'if [ "$ok" -eq 0 ] && [ -s "$tmp" ]; then mv -f "$tmp" "$target"; else rm -f "$tmp"; fi',
+        "exec " + forward + " <&3 3<&-" if command else "exit 0",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 class Agent:
@@ -468,16 +512,16 @@ class Agent:
             try:
                 function()
             except Exception as exc:
-                print(
-                    json.dumps(
-                        {
-                            "event": "agent_operation_failed",
-                            "operation": name,
-                            "error": type(exc).__name__,
-                        }
-                    ),
-                    flush=True,
-                )
+                event = {
+                    "event": "agent_operation_failed",
+                    "operation": name,
+                    "error": type(exc).__name__,
+                }
+                if isinstance(exc, OperationError):
+                    # 本模块的 OperationError 都是固定提示（最多带退出码或 HTTP 状态码），
+                    # 不含命令输出与凭证；其它异常可能带路径或响应内容，只记类型。
+                    event["message"] = str(exc)[:200]
+                print(json.dumps(event, ensure_ascii=False), flush=True)
             finally:
                 with self.background_lock:
                     self.background.discard(name)
@@ -489,15 +533,22 @@ class Agent:
         """探测 AI 接口并上报；由运行时守护进程经本机 socket 实现。"""
         raise OperationError("当前环境不支持健康检查")
 
+    def claude_probe_dir(self) -> Path:
+        return self.home / ".cache/claude_rate_limits"
+
+    def rate_limit_probe_enabled(self) -> bool:
+        # Codex 额度经 app-server 随时可查；Claude 需要安装时显式启用 statusLine 探针。
+        return self.provider == "codex" or (self.claude_probe_dir() / "probe.sh").is_file()
+
     def probe_rate_limits(self) -> None:
         if self.provider == "codex":
             limits = self.codex_limits()
         else:
-            cache = self.home / ".cache/claude_rate_limits"
+            cache = self.claude_probe_dir()
             target = cache / "rate_limits.json"
             script = cache / "probe.sh"
             if not script.is_file():
-                raise OperationError("尚未安装 Claude 额度探测，请运行 --install-claude-probe")
+                raise OperationError(CLAUDE_PROBE_DISABLED)
             before = target.stat().st_mtime_ns if target.exists() else 0
             try:
                 run_command(["/bin/bash", str(script)], timeout=100)
@@ -586,23 +637,45 @@ class Agent:
         return out
 
     def install_claude_probe(self) -> None:
-        # 仅在显式安装参数下修改 statusLine；保留其它全局设置，损坏 JSON 则停止。
-        cache = self.home / ".cache/claude_rate_limits"
+        """在原 statusLine 前串一层额度采集，原状态栏照常显示。
+
+        守护进程每次启动都会调用，必须幂等：已接管时沿用记录的原命令，不会把采集脚本包进自己，
+        也不改用户之后调整的 padding 等字段。settings 损坏或 statusLine 无法识别时停止，不改动设置。
+        """
+        cache = self.claude_probe_dir()
         config = self.home / ".claude/settings.json"
         current = json.loads(config.read_text()) if config.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("Claude settings.json 不是 JSON 对象")
         capture = cache / "capture.sh"
-        atomic_write(
-            capture,
-            "#!/bin/sh\numask 077\ncat > "
-            + shlex.quote(str(cache / "rate_limits.json"))
-            + "\nprintf ok\n",
-        )
-        os.chmod(capture, 0o700)
+        original_file = cache / "statusline-original.json"
         backup = config.with_name("settings.before-coreman-probe.json")
+        status = current.get("statusLine")
+        if status is not None and status_line_command(status) is None:
+            raise OperationError("无法识别现有 statusLine，未修改 Claude 设置")
+        wrapped = status is not None and status_line_command(status) == str(capture)
+        if not wrapped:
+            original = status
+        elif original_file.is_file():
+            data = json.loads(original_file.read_text())
+            original = data.get("statusLine") if isinstance(data, dict) else None
+        else:
+            # 旧版探针直接替换了 statusLine，原命令只留在首次启用前的备份里。
+            original = saved_status_line(backup)
+        command = status_line_command(original)
+        if command is None or command == str(capture):
+            original, command = None, None
+        atomic_write(
+            original_file, json.dumps({"statusLine": original}, ensure_ascii=False, indent=2)
+        )
+        atomic_write(capture, claude_capture_script(cache / "rate_limits.json", command))
+        os.chmod(capture, 0o700)
         if config.exists() and not backup.exists():
             atomic_write(backup, config.read_text())
-        current["statusLine"] = {"type": "command", "command": str(capture)}
-        atomic_write(config, json.dumps(current, ensure_ascii=False, indent=2))
+        if not wrapped:
+            # 只把命令换成采集脚本，padding 等其它字段原样保留。
+            current["statusLine"] = {**(status or {}), "type": "command", "command": str(capture)}
+            atomic_write(config, json.dumps(current, ensure_ascii=False, indent=2))
         # CLI 交互模式触发 statusLine；不授予工具自动执行权限。
         pipeline = '(printf "hi\\n"; sleep 10; printf "/exit\\n") | claude'
         if platform.system() == "Darwin":
@@ -755,7 +828,9 @@ class Agent:
                 local = time.localtime()
                 slot = time.strftime("%Y-%m-%d-%H", local)
                 if now - last_quota >= 1800:
-                    self.start_background("probe-rate-limits", self.probe_rate_limits)
+                    # 未启用 Claude 探针时跳过，避免每 30 分钟记一条必然失败的日志。
+                    if self.rate_limit_probe_enabled():
+                        self.start_background("probe-rate-limits", self.probe_rate_limits)
                     last_quota = now
                 if os.environ.get("COREMAN_MEMORY_SYNC", "1") == "1" and now - last_memory >= 3600:
                     self.start_background(
@@ -788,6 +863,8 @@ class Agent:
                 "count": len(tasks),
             }
         if kind == "probe-rate-limits":
+            if not self.rate_limit_probe_enabled():
+                return {"success": False, "message": CLAUDE_PROBE_DISABLED}
             return self.start_background(kind, self.probe_rate_limits)
         if kind == "health-check":
             return self.start_background(kind, self.health_check)

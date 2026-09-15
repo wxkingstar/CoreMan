@@ -21,7 +21,7 @@ const en = {
     installHint: 'Run the installation command as the target user. Supports Linux, macOS, and existing chroot/nspawn environments.',
     rootHint: 'An absolute path on the target machine. All projects will be created under this directory.', nameAuto: 'Defaults to user at host', validHours: 'Validity in hours',
     advanced: 'Advanced settings', proxy: 'HTTP(S) proxy', autoDiscover: 'Auto-discover', concurrency: 'Maximum concurrent tasks', claudeProbe: 'Configure Claude quota probe',
-    probeHint: 'Backs up and configures the Claude statusLine. Any existing custom status line will be replaced.', linkReady: 'Installation link created',
+    probeHint: 'Backs up Claude settings and adds a quota capture step in front of the statusLine. Any existing status line keeps working. A short Claude session runs every 30 minutes to refresh the quota.', linkReady: 'Installation link created',
     commandHint: 'On the target server, run the following command as a user already signed in to Claude/Codex.',
     credentialHint: 'The link contains installation credentials and is shown only once. By default, it can register one new node. Share it only with trusted people.',
     createLink: 'Generate installation command', copyCommand: 'Copy installation command', rootRequired: 'Enter a valid absolute project root path', copyManually: 'Could not copy. Select and copy the command manually.',
