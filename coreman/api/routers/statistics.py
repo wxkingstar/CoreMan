@@ -18,7 +18,7 @@ from coreman.api.routers.chat_logs import _scope, accessible_bot_ids
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
-from coreman.core.db.models import ChatLog, ModelPrice, User
+from coreman.core.db.models import Bot, ChatLog, ModelPrice, User
 from coreman.core.relay.models import backend_of
 
 router = APIRouter(prefix="/api/admin", tags=["statistics"], dependencies=[Depends(verify_csrf)])
@@ -83,10 +83,11 @@ async def statistics(
             await session.execute(
                 select(
                     ChatLog.bot_id.label("id"),
-                    func.max(ChatLog.bot_key).label("name"),
+                    func.max(Bot.name).label("name"),
                     *aggregates(),
                 )
                 .where(*conditions)
+                .outerjoin(Bot, Bot.id == ChatLog.bot_id)
                 .group_by(ChatLog.bot_id)
                 .order_by(func.count().desc(), ChatLog.bot_id)
                 .limit(50)

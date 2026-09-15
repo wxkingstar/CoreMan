@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { expect, it, vi } from 'vitest'
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { role: 'ai_committee' } }) }))
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
@@ -57,5 +57,28 @@ it('saves raw environment input directly and retains masked values', async () =>
   await editor.get('textarea').setValue('DB_PASSWORD="******mask"\nAPI_KEY="value#with=equals"')
   await vm.savePreset()
   expect(skills.presetSave).toHaveBeenCalledWith(expect.objectContaining({ group_key: 'db_erp', version: 2, vars: { DB_PASSWORD: '******mask', API_KEY: 'value#with=equals' } }))
+  wrapper.unmount()
+})
+
+
+it('keeps stored project tokens out of the form and clears newly entered tokens after save', async () => {
+  vi.mocked(allSkills).mockResolvedValue([])
+  const source = { id: 'source', key: 'tools', label: 'Tools', version: 3, git_url: 'https://git.example.com/tools.git', has_access_token: true }
+  vi.mocked(skills.sources).mockResolvedValue([source] as never)
+  vi.mocked(skills.presets).mockResolvedValue([])
+  vi.mocked(skills.sourceSave).mockResolvedValue(source as never)
+  const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  const vm = wrapper.vm as unknown as { editSource: (row: unknown) => void; saveSource: () => Promise<void>; sourceForm: { access_token: string; remove_access_token: boolean } }
+  vm.editSource(source)
+  expect(vm.sourceForm.access_token).toBe('')
+  expect(vm.sourceForm.remove_access_token).toBe(false)
+  await vm.saveSource()
+  expect(skills.sourceSave).toHaveBeenCalledWith(source, expect.objectContaining({ access_token: '', remove_access_token: false }))
+  vm.editSource(source)
+  vm.sourceForm.access_token = 'test-token'
+  await vm.saveSource()
+  expect(skills.sourceSave).toHaveBeenLastCalledWith(source, expect.objectContaining({ access_token: 'test-token' }))
+  expect(vm.sourceForm.access_token).toBe('')
   wrapper.unmount()
 })

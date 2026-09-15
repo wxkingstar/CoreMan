@@ -48,6 +48,7 @@ class FakeWeComWs:
         self.frames: list[dict[str, Any]] = []
         self.subscribe_attempts = 0
         self._silenced: set[str] = set()
+        self.send_rejections: list[tuple[int, str]] = []
         self._finish_rejection: tuple[int, str, float] | None = None
         self._server: Server | None = None
 
@@ -280,8 +281,29 @@ class FakeWeComWs:
                             "errmsg": "ok",
                         },
                     )
+                elif frame.get("cmd") == "aibot_send_msg" and self.send_rejections:
+                    code, message = self.send_rejections.pop(0)
+                    await self._send(
+                        ws,
+                        {
+                            "cmd": "",
+                            "headers": frame.get("headers") or {},
+                            "errcode": code,
+                            "errmsg": message,
+                        },
+                    )
                 elif self._finish_rejection is not None and _is_finish_frame(frame):
                     await self._reject_late(ws, frame, self._finish_rejection)
+                elif frame.get("cmd", "").startswith("aibot_"):
+                    await self._send(
+                        ws,
+                        {
+                            "cmd": "",
+                            "headers": frame.get("headers") or {},
+                            "errcode": 0,
+                            "errmsg": "ok",
+                        },
+                    )
         except (WebSocketException, OSError):
             pass
         finally:

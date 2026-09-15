@@ -160,7 +160,7 @@ export type ChatLogStatus = 'success' | 'error' | 'timeout' | 'stopped' | 'ask_u
 export type ChatType = 'single' | 'group' | 'cron'
 
 export interface ChatLogOut {
-  id: number; bot_id: string; bot_key: string; platform: string
+  id: number; bot_id: string; bot_key: string; bot_name?: string | null; platform: string
   user_id: string | null; user_login: string | null; user_name: string | null
   chat_type: ChatType; chat_id: string | null; session_key: string | null
   relay_session_id: string | null; model: string | null; stream_id: string | null; task_id: number | null
@@ -179,7 +179,7 @@ export interface ChatLogOut {
   cost_usd?: number | null
 }
 export interface ChatLogByBot {
-  bot_id: string; bot_key: string; total: number
+  bot_id: string; bot_key: string; bot_name?: string | null; total: number
   /** 后端口径：`status IN (error, timeout, failed)` 的合计，不是只数 error。 */
   success: number; error: number; avg_latency_ms: number | null
 }
@@ -215,13 +215,13 @@ export interface RuntimeQueue {
 /** 任务状态（同上 `TASK_STATUSES`）。 */
 export type TaskStatus = 'queued' | 'claimed' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out'
 export interface RuntimeTask {
-  id: number; bot_id: string; bot_key: string | null; kind: string; lane: string; priority: number
+  id: number; bot_id: string; bot_key: string | null; bot_name?: string | null; kind: string; lane: string; priority: number
   session_key: string | null; status: TaskStatus; claimed_by: string | null; run_after: string
   claimed_at: string | null; started_at: string | null; heartbeat_at: string | null
   cancel_requested_at: string | null; cancel_reason: string | null; attempts: number
 }
 export interface RuntimeOutboxItem {
-  id: number; bot_id: string | null; bot_key: string | null; kind: string; dedupe_key: string; status: string
+  id: number; bot_id: string | null; bot_key: string | null; bot_name?: string | null; kind: string; dedupe_key: string; status: string
   attempts: number; not_before: string; last_error: string | null; created_at: string; sent_at: string | null
 }
 /** 排空目标：实例与机器人严格二选一，两个都给或都不给后端返回 422。 */

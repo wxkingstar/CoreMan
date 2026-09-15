@@ -8,6 +8,71 @@ from coreman.runtime.bus import outbox, streams, tasks
 from coreman.runtime.bus.tasks import NewTask
 
 
+async def test_same_task_card_cannot_overtake_retry_or_unconfirmed_result(db_session):
+    bot = await _bot(db_session)
+
+    async def add(key):
+        return await outbox.add(
+            db_session,
+            bot_id=bot.id,
+            platform="wecom",
+            kind="send",
+            dedupe_key=key,
+            target={"chat_id": "c"},
+            payload={"markdown": key},
+        )
+
+    final = await add("77:send:final")
+    card = await add("77:card:0")
+    other = await add("78:send:final")
+    final.not_before = datetime.now(UTC) + timedelta(seconds=60)
+    await db_session.commit()
+    assert (await outbox.claim_next(db_session, bot_id=bot.id)).id == other.id
+    await outbox.mark_sent(db_session, other.id)
+    assert await outbox.claim_next(db_session, bot_id=bot.id) is None
+    final.not_before = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    assert (await outbox.claim_next(db_session, bot_id=bot.id)).id == final.id
+    await outbox.begin_attempt(db_session, final, "attempt-1")
+    assert await outbox.claim_next(db_session, bot_id=bot.id) is None
+    await outbox.mark_failed(db_session, final.id, "846607")
+    assert await outbox.claim_next(db_session, bot_id=bot.id) is None
+    final = await db_session.get(OutboxItem, final.id, populate_existing=True)
+    final.not_before = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    assert (await outbox.claim_next(db_session, bot_id=bot.id)).id == final.id
+    await outbox.begin_attempt(db_session, final, "attempt-2")
+    await outbox.mark_sent(db_session, final.id)
+    assert (await outbox.claim_next(db_session, bot_id=bot.id)).id == card.id
+
+
+async def test_crashed_send_is_unknown_and_blocks_dependent_card(db_session):
+    bot = await _bot(db_session)
+    for key in ("77:send:final", "77:card:0"):
+        await outbox.add(
+            db_session,
+            bot_id=bot.id,
+            platform="wecom",
+            kind="send",
+            dedupe_key=key,
+            target={"chat_id": "c"},
+            payload={"markdown": key},
+        )
+    first = await outbox.claim_next(db_session, bot_id=bot.id)
+    await outbox.begin_attempt(db_session, first, "lost-attempt")
+    first.not_before = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    assert await outbox.claim_next(db_session, bot_id=bot.id) is None
+    rows = list(
+        await db_session.scalars(
+            select(OutboxItem).order_by(OutboxItem.id).execution_options(populate_existing=True)
+        )
+    )
+    assert [r.status for r in rows] == ["failed", "failed"]
+    assert rows[0].last_error.startswith("delivery_unknown")
+    assert rows[1].last_error.startswith("dependency_failed")
+
+
 async def _bot(session: AsyncSession) -> Bot:
     user = User(login_name="c", display_name="c")
     session.add(user)

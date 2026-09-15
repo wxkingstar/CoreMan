@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import ColumnElement, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.bot_names import bot_names
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
@@ -104,12 +105,15 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def chat_log_out(row: ChatLog, *, full: bool = False) -> dict[str, Any]:
+def chat_log_out(
+    row: ChatLog, *, full: bool = False, bot_name: str | None = None
+) -> dict[str, Any]:
     """列表项只有摘要；`full=True` 才带正文、报错详情与成本。"""
     data: dict[str, Any] = {
         "id": row.id,
         "bot_id": str(row.bot_id),
         "bot_key": row.bot_key,
+        "bot_name": bot_name,
         "platform": row.platform,
         "user_id": str(row.user_id) if row.user_id else None,
         "user_login": row.user_login,
@@ -169,7 +173,11 @@ async def list_chat_logs(
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
     rows: list[ChatLog] = page["items"]
-    return {"code": 0, "data": {**page, "items": [chat_log_out(r) for r in rows]}}
+    names = await bot_names(session, (r.bot_id for r in rows))
+    return {
+        "code": 0,
+        "data": {**page, "items": [chat_log_out(r, bot_name=names.get(r.bot_id)) for r in rows]},
+    }
 
 
 @router.get("/stats")
@@ -227,6 +235,7 @@ async def chat_log_stats(
             .limit(TOP_BOTS)
         )
     ).all()
+    names = await bot_names(session, (r[0] for r in by_bot))
     return {
         "code": 0,
         "data": {
@@ -243,6 +252,7 @@ async def chat_log_stats(
                 {
                     "bot_id": str(row[0]),
                     "bot_key": row[1],
+                    "bot_name": names.get(row[0]),
                     "total": int(row[2]),
                     "success": int(row[3] or 0),
                     "error": int(row[4] or 0),
@@ -271,4 +281,5 @@ async def get_chat_log(
     if row is None:
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。
         raise not_found("对话记录不存在")
-    return {"code": 0, "data": chat_log_out(row, full=True)}
+    names = await bot_names(session, [row.bot_id])
+    return {"code": 0, "data": chat_log_out(row, full=True, bot_name=names.get(row.bot_id))}

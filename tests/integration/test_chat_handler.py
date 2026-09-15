@@ -359,7 +359,7 @@ async def test_reaped_task_is_not_finished_twice(
     assert (await db_session.execute(select(OutboxItem))).scalars().all() == []
 
 
-async def test_long_task_reminder_goes_to_outbox(
+async def test_long_task_does_not_send_a_premature_reminder(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     bot, _, _ = await seed_bot(db_session)
@@ -375,11 +375,9 @@ async def test_long_task_reminder_goes_to_outbox(
     handler._on_first_event = lambda: now.__setitem__(0, 1075.0)  # 首事件后把时钟拨到 75 秒
     await handler.run(ctx)
     items = (await db_session.execute(select(OutboxItem))).scalars().all()
-    assert (
-        len(items) == 1
-        and items[0].dedupe_key == f"{t.id}:send:done"
-        and "耗时" in items[0].payload["markdown"]
-    )
+    assert items == []  # Completion travels with the actual final result, never ahead of it.
+    row = await tasks.get(db_session, t.id)
+    assert row and row.status == "succeeded"
 
 
 async def test_allowlist_and_commands_come_before_relay_check(

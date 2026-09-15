@@ -234,6 +234,8 @@ class RelayClient:
             raise RelayError(f"连接失败: {type(exc).__name__}") from exc
         for event in parser.flush():
             yield event
+        if not parser.saw_finish:
+            raise RelayError("incomplete_result: SSE 未返回确认终态")
 
 
 async def _next_line(lines: AsyncIterator[str], deadline: float) -> str | None:

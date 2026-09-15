@@ -1,32 +1,45 @@
 <script setup lang="ts">
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
-import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { nextTick, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { credentials, type ApiClient, type JwtKey } from '@/api/infrastructure'
 import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 const rows = ref<ApiClient[]>([]), keys = ref<JwtKey[]>([])
+const tab = ref('clients')
 const page = ref(1), total = ref(0), busy = ref(false), visible = ref(false), secret = ref('')
 const editing = ref<ApiClient | null>(null)
 const form = reactive({ app_key: '', name: '', scopes: [] as string[], enabled: true })
+const formRef = ref<FormInstance>()
+const formSession = ref(0)
 const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'cron', 'escalations']
 function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(e instanceof Error ? e.message : String(e)) }
 const listLoading = ref(false), listError = ref('')
-const { persist: persistQuery } = useListQuery({ page }, () => { void load() })
+const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
 async function load() {
+  if (!['clients', 'keys'].includes(tab.value)) tab.value = 'clients'
   persistQuery(); listLoading.value = true; listError.value = ''
 
   try { const [data, k] = await Promise.all([credentials.clients(page.value), credentials.keys()]); rows.value = data.items; total.value = data.total; keys.value = k }
   catch (e) { listError.value = e instanceof Error ? e.message : String(e); fail(e) }
  finally { listLoading.value = false }
 }
-function edit(row: ApiClient | null) { editing.value = row; Object.assign(form, row ? { ...row, scopes: [...row.scopes] } : { app_key: '', name: '', scopes: [], enabled: true }); visible.value = true }
+async function edit(row: ApiClient | null) {
+  formSession.value += 1
+  editing.value = row
+  Object.assign(form, row ? { ...row, scopes: [...row.scopes] } : { app_key: '', name: '', scopes: [], enabled: true })
+  visible.value = true
+  await nextTick()
+  formRef.value?.clearValidate()
+}
 async function save() {
   if (busy.value) return
   busy.value = true
   try {
+    form.name = form.name.trim()
+    if (!await formRef.value?.validate().catch(() => false)) return
     if (editing.value) await credentials.update({ ...editing.value, ...form })
     else secret.value = (await credentials.create({ app_key: form.app_key, name: form.name, scopes: form.scopes, enabled: form.enabled })).secret
     visible.value = false; ElMessage.success(t('common.saved')); await load()
@@ -52,8 +65,25 @@ onMounted(load)
         {{ t('workspace.intro.credentials') }}
       </p>
     </header>
-    <el-tabs>
-      <el-tab-pane :label="t('infra.clients')">
+    <el-alert
+      :title="t('infra.clientPurpose')"
+      type="info"
+      :closable="false"
+      show-icon
+    />
+    <LoadState
+      :loading="listLoading"
+      :error="listError"
+      @retry="load"
+    />
+    <el-tabs
+      v-model="tab"
+      @tab-change="persistQuery"
+    >
+      <el-tab-pane
+        name="clients"
+        :label="t('infra.clients')"
+      >
         <el-button
           type="primary"
           data-test="create-client"
@@ -61,12 +91,11 @@ onMounted(load)
         >
           {{ t('common.create') }}
         </el-button>
-        <LoadState
-          :loading="listLoading"
-          :error="listError"
-          @retry="load"
-        />
-        <el-table :data="rows">
+
+        <el-table
+          v-if="!listLoading && !listError"
+          :data="rows"
+        >
           <el-table-column
             min-width="140"
             prop="name"
@@ -79,9 +108,21 @@ onMounted(load)
           />
           <el-table-column
             min-width="140"
-            prop="scopes"
             :label="t('infra.scopes')"
-          />
+          >
+            <template #default="{ row }">
+              <div class="scope-tags">
+                <el-tag
+                  v-for="scope in row.scopes"
+                  :key="scope"
+                  size="small"
+                >
+                  {{ scopes.includes(scope) ? t('infra.scopeNames.' + scope) : scope }}
+                </el-tag>
+                <span v-if="!row.scopes.length">—</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column
             min-width="140"
             :label="t('infra.status')"
@@ -111,6 +152,7 @@ onMounted(load)
           </el-table-column>
         </el-table>
         <el-pagination
+          v-if="!listLoading && !listError"
           v-model:current-page="page"
           :total="total"
           :page-size="50"
@@ -118,7 +160,10 @@ onMounted(load)
           @current-change="load"
         />
       </el-tab-pane>
-      <el-tab-pane :label="t('infra.jwtKeys')">
+      <el-tab-pane
+        name="keys"
+        :label="t('infra.jwtKeys')"
+      >
         <el-button
           type="primary"
           :disabled="busy"
@@ -126,7 +171,10 @@ onMounted(load)
         >
           {{ t('infra.rotateKey') }}
         </el-button>
-        <el-table :data="keys">
+        <el-table
+          v-if="!listLoading && !listError"
+          :data="keys"
+        >
           <el-table-column
             min-width="140"
             prop="kid"
@@ -157,15 +205,37 @@ onMounted(load)
       :title="t('infra.clients')"
       width="560px"
     >
-      <el-form label-position="top">
-        <el-form-item :label="t('infra.key')">
+      <el-form
+        :key="formSession"
+        ref="formRef"
+        :model="form"
+        label-position="top"
+      >
+        <el-form-item
+          :label="t('infra.key')"
+          prop="app_key"
+          :rules="[{ required: true, pattern: /^[a-zA-Z0-9_-]{2,128}$/, message: t('infra.clientKeyHint'), trigger: 'blur' }]"
+        >
           <el-input
             v-model="form.app_key"
             :disabled="!!editing"
+            placeholder="test-client"
+            :maxlength="128"
           />
         </el-form-item>
-        <el-form-item :label="t('infra.name')">
-          <el-input v-model="form.name" />
+        <p class="field-hint">
+          {{ t('infra.clientKeyHint') }}
+        </p>
+        <el-form-item
+          :label="t('infra.name')"
+          prop="name"
+          :rules="[{ required: true, min: 1, max: 100, message: t('infra.clientNameHint'), trigger: 'blur' }]"
+        >
+          <el-input
+            v-model="form.name"
+            :maxlength="100"
+            :placeholder="t('infra.clientNamePlaceholder')"
+          />
         </el-form-item>
         <el-form-item :label="t('infra.scopes')">
           <el-select
@@ -225,4 +295,7 @@ onMounted(load)
     </el-dialog>
   </section>
 </template>
-<style scoped>.el-table { margin-top:16px }  .secret { margin-top:16px }</style>
+<style scoped>
+:deep(.el-form-item__error) { position: static; width: 100%; padding-top: 6px; line-height: 1.5 }
+.scope-tags { display: flex; flex-wrap: wrap; gap: 6px }
+.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px }</style>

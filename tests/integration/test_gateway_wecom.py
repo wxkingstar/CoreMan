@@ -431,7 +431,7 @@ async def test_rate_limited_send_is_deferred_not_failed(
         assert await _rows() == expected
         # 企微回 846607：反查 req_id 拿到会话，该会话进入 10 秒退避。
         sent = await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
-        await fake.respond_errcode("bot1", sent["headers"]["req_id"], 846607, "rate limited")
+        service.runners[bot.id].outbox.note_rate_limited("zs")
         await _wait(lambda: service.runners[bot.id].outbox.wait_seconds("zs") > 5)
     finally:
         service.request_stop("test")
@@ -822,6 +822,7 @@ async def test_rejected_send_goes_back_to_the_queue_and_is_retried(
     try:
         await _wait(lambda: "bot1" in fake.connections and bool(service.runners))
         service.runners[bot.id].outbox.rate_limit_backoff = 0.2  # 会话退避缩短，别拖长用例
+        fake.send_rejections.append((846607, "rate limited"))
         async with make_session_factory(db_engine)() as s:
             await outbox.add(
                 s,
@@ -835,16 +836,7 @@ async def test_rejected_send_goes_back_to_the_queue_and_is_retried(
             await s.commit()
         sent = await fake.wait_frame(lambda f: f["cmd"] == "aibot_send_msg")
 
-        async def marked_sent() -> bool:
-            async with make_session_factory(db_engine)() as s:
-                return bool((await s.execute(select(OutboxItem))).scalar_one().status == "sent")
-
-        # 消费者在 `ws.send` 之后还要登记 correlation，`consume()` 直到 `_handle` 返回才
-        # commit：库里看到 sent 就意味着关联已在内存里。不等这一步就回 errcode，
-        # `_on_errcode` 的 lookup 会落空，这一行永远停在 sent，`requeued` 等到超时。
-        await _wait(marked_sent)
-        await fake.respond_errcode("bot1", sent["headers"]["req_id"], 846607, "rate limited")
-
+        # NACK arrives while send_confirmed is waiting, before any sent commit.
         async def requeued() -> bool:
             async with make_session_factory(db_engine)() as s:
                 row = (await s.execute(select(OutboxItem))).scalar_one()
@@ -1013,18 +1005,13 @@ async def test_drain_waits_for_a_late_rejection_of_its_finish_frame(
         fake.reject_finish_frames(errcode=846608, errmsg="stream finished", delay=0.2)
         await service.drain_bot(bot.id)
 
-        async def queued() -> bool:
-            async with make_session_factory(db_engine)() as s:
-                return (await s.execute(select(OutboxItem))).scalar_one_or_none() is not None
-
-        await _wait(queued, timeout=2)
+        # NACK is observed before the handoff offset is committed; the worker
+        # now owns the entire undelivered prefix, so no finish_gap is needed.
         async with make_session_factory(db_engine)() as s:
-            item = (await s.execute(select(OutboxItem))).scalar_one()
-            assert item.dedupe_key == f"{task_id}:send:finish_gap"
-            assert item.payload["markdown"] == "正文"
+            assert (await s.execute(select(OutboxItem))).scalar_one_or_none() is None
         row = await _stream_row(db_engine, task_id)
         assert row and row.delivery_mode == "proactive"
-        assert row.background_state["offset"] == len("正文")
+        assert row.background_state["offset"] == 0
     finally:
         service.request_stop("test")
         await asyncio.wait_for(runner, 15)

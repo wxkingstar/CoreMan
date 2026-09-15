@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, text, update
@@ -19,8 +19,12 @@ MAX_ATTEMPTS = 6
 _CLAIM_SQL = text(
     """
 UPDATE outbox SET status='sending'
-WHERE id = (SELECT id FROM outbox WHERE bot_id=:bot_id AND status='pending' AND not_before<=now()
-            ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
+WHERE id = (SELECT q.id FROM outbox q
+            WHERE q.bot_id=:bot_id AND q.status='pending' AND q.not_before<=now()
+            AND NOT EXISTS (SELECT 1 FROM outbox prev WHERE prev.bot_id=q.bot_id
+              AND prev.id<q.id AND prev.status IN ('pending','sending')
+              AND prev.payload->>'_delivery_group'=q.payload->>'_delivery_group')
+            ORDER BY q.id LIMIT 1 FOR UPDATE OF q SKIP LOCKED)
 RETURNING id
 """
 )
@@ -41,6 +45,9 @@ async def add(
     """幂等入队；同 dedupe_key 已存在时返回 None，不发通知。"""
     if (kind == "notify") != (bot_id is None):
         raise ValueError("通知项不绑定 bot；其它出站项必须绑定 bot")
+    group = dedupe_key.split(":", 1)[0]
+    if group.isdigit() and kind == "send":
+        payload = {**payload, "_delivery_group": group}
     values: dict[str, Any] = {
         "bot_id": bot_id,
         "platform": platform,
@@ -65,6 +72,29 @@ async def add(
 
 
 async def claim_next(session: AsyncSession, *, bot_id: uuid.UUID) -> OutboxItem | None:
+    # A committed attempt abandoned by a crashed gateway has an unknown outcome.
+    # Do not silently retry it with a new platform request ID.
+    await session.execute(
+        update(OutboxItem)
+        .where(
+            OutboxItem.bot_id == bot_id,
+            OutboxItem.status == "sending",
+            OutboxItem.not_before < func.now(),
+            OutboxItem.payload.has_key("_attempt_id"),
+        )
+        .values(status="failed", last_error="delivery_unknown: gateway lost before acknowledgement")
+    )
+    await session.execute(
+        text("""
+        UPDATE outbox q SET status='failed',
+        last_error='dependency_failed: preceding delivery failed'
+        WHERE q.bot_id=:bot_id AND q.status='pending' AND EXISTS (
+          SELECT 1 FROM outbox prev WHERE prev.bot_id=q.bot_id AND prev.id<q.id
+          AND prev.status='failed'
+          AND prev.payload->>'_delivery_group'=q.payload->>'_delivery_group')
+    """),
+        {"bot_id": bot_id},
+    )
     row = (await session.execute(_CLAIM_SQL, {"bot_id": bot_id})).first()
     return (
         None if row is None else await session.get(OutboxItem, int(row[0]), populate_existing=True)
@@ -73,7 +103,9 @@ async def claim_next(session: AsyncSession, *, bot_id: uuid.UUID) -> OutboxItem 
 
 async def mark_sent(session: AsyncSession, item_id: int) -> None:
     await session.execute(
-        update(OutboxItem).where(OutboxItem.id == item_id).values(status="sent", sent_at=func.now())
+        update(OutboxItem)
+        .where(OutboxItem.id == item_id, OutboxItem.status == "sending")
+        .values(status="sent", sent_at=func.now())
     )
 
 
@@ -184,3 +216,17 @@ async def list_failed(session: AsyncSession, *, limit: int = 200) -> list[Outbox
 async def count_pending(session: AsyncSession) -> int:
     stmt = select(func.count()).select_from(OutboxItem).where(OutboxItem.status == "pending")
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def begin_attempt(session: AsyncSession, item: OutboxItem, req_id: str) -> None:
+    item.payload = {**item.payload, "_attempt_id": req_id}
+    item.not_before = datetime.now(UTC) + timedelta(seconds=30)
+    await session.commit()
+
+
+async def unknown_attempt(session: AsyncSession, item_id: int, detail: str) -> None:
+    await session.execute(
+        update(OutboxItem)
+        .where(OutboxItem.id == item_id, OutboxItem.status == "sending")
+        .values(status="failed", last_error=detail[:2000])
+    )

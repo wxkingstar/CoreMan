@@ -27,6 +27,7 @@ from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
 from coreman.runtime.bus import outbox
+from coreman.runtime.gateway_wecom.ws_client import DeliveryRejected, DeliveryUncertain
 
 if TYPE_CHECKING:
     from coreman.runtime.gateway_wecom.runner import BotRunner
@@ -152,25 +153,23 @@ class OutboxConsumer:
         else:
             await outbox.mark_skipped(session, item.id, "未知 kind")
             return True
+        # Durable attempt first, then register the ACK waiter before sending bytes.
+        await outbox.begin_attempt(session, item, req_id)
         try:
-            await self.runner.ws.send(frame)
-        except (RuntimeError, WebSocketException) as exc:
-            status = await outbox.mark_failed(session, item.id, f"{type(exc).__name__}: {exc}")
-            self._log.warning(
-                "outbox_send_failed", outbox_id=item.id, status=status, reason=type(exc).__name__
-            )
+            await self.runner.ws.send_confirmed(frame)
+        except DeliveryRejected as exc:
+            if exc.errcode in {846607, 45009, -1}:
+                self.note_rate_limited(chat_id)
+                await outbox.mark_failed(session, item.id, str(exc))
+            else:
+                await outbox.unknown_attempt(session, item.id, str(exc))
+            return True
+        except (DeliveryUncertain, RuntimeError, WebSocketException) as exc:
+            await outbox.unknown_attempt(session, item.id, f"delivery_unknown: {exc}")
+            self._log.warning("outbox_delivery_unknown", outbox_id=item.id)
             return False
         if chat_id:
             self._last_sent[chat_id] = self.clock()
-        # 关联要抢在 `mark_sent` 那一次库往返之前登记：企微的 errcode 是异步回的，落在这段
-        # 往返里的话 `_on_errcode` 反查不到 req_id，`_reject_outbox` 不会被调用，被 846607
-        # 拒掉的那条主动推送就留在 sent 里静默丢失。纯顺序调整，不改语义。
-        self.runner.correlation.put(
-            req_id,
-            bot_key=self.runner.bot.bot_key,
-            action=item.kind,
-            extra={"chat_id": chat_id, "outbox_id": item.id},
-        )
         await outbox.mark_sent(session, item.id)
         self._log.info("outbox_sent", outbox_id=item.id, kind=item.kind)
         return True

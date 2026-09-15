@@ -74,6 +74,7 @@ from coreman.core.relay.client import ChatRequest
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
+    FinishEvent,
     RelayErrorEvent,
     SseEvent,
     TextDelta,
@@ -159,6 +160,7 @@ class Outcome:
     tools: list[str] = field(default_factory=list)
     usage: UsageEvent | None = None
     saw_event: bool = False
+    finish_reason: str | None = None
     relay_error: bool = False
     ask_user: bool = False
     questions: list[dict[str, Any]] = field(default_factory=list)
@@ -299,7 +301,7 @@ class ChatTaskHandler:
     LONG_TASK_SECONDS = 60
     QUEUED_NOTICE_SECONDS = 5.0
     SUPERSEDE_POLL_SECONDS = 0.1
-    SUPERSEDE_POLLS = 50
+    SUPERSEDE_POLLS = 200
 
     def __init__(self, *, timing: Timing = DEFAULT_TIMING) -> None:
         self.timing = timing
@@ -333,7 +335,19 @@ class ChatTaskHandler:
                 session, intake.bot.id, intake.session_key, except_task_id=ctx.task.id
             )
             await session.commit()
-        await self._wait_superseded(ctx, victims)
+        try:
+            await self._wait_superseded(ctx, victims)
+        except TimeoutError:
+            async with ctx.session_factory() as session:
+                await reply_once(
+                    session,
+                    ctx,
+                    reply_context=intake.inbound.reply_context,
+                    text="上一轮任务仍在停止中，请稍后继续。",
+                )
+                await tasks.finish(session, ctx.task.id, status="failed", error_code="session_busy")
+                await session.commit()
+            return None
         async with ctx.session_factory() as session:
             pre = await self._open(session, ctx, intake, relay, started)
             await session.commit()
@@ -431,7 +445,7 @@ class ChatTaskHandler:
                     intake,
                     status="error",
                     error_code="relay_unavailable",
-                    error_message="机器人未绑定可用的 relay 实例",
+                    error_message="机器人未绑定可用的运行时",
                 )
             )
             return None
@@ -644,6 +658,7 @@ class ChatTaskHandler:
                 return
             await asyncio.sleep(self.SUPERSEDE_POLL_SECONDS)
         ctx.log.warning("superseded_wait_timeout", victims=victims)
+        raise TimeoutError("session_busy")
 
     async def _open(
         self,
@@ -1000,7 +1015,9 @@ class ChatTaskHandler:
             out.usage = event
         elif isinstance(event, AskUserQuestionEvent):
             out.ask_user, out.questions = True, list(event.questions)
-        # FinishEvent 只是信息：问卷事件在它之后才产出，不能据它收摊。
+        elif isinstance(event, FinishEvent):
+            out.finish_reason = event.reason
+        # Keep consuming usage and questions following the terminal marker.
 
     # ---- 收尾 -------------------------------------------------------------
 
@@ -1042,7 +1059,7 @@ class ChatTaskHandler:
                 "error",
                 "failed",
                 "x_relay_error",
-                "relay 以正文回传了错误",
+                "运行时以正文回传了错误",
                 text or msg("relay_error_text", locale),
             )
         if out.counted == 0:
@@ -1050,8 +1067,16 @@ class ChatTaskHandler:
                 "error",
                 "failed",
                 "empty_stream",
-                "relay 未返回任何事件",
+                "运行时未返回任何事件",
                 msg("empty_stream", locale, url=url),
+            )
+        if out.finish_reason not in {"stop", "end_turn", "completed"}:
+            return Verdict(
+                "error",
+                "failed",
+                "incomplete_result",
+                "未确认执行完成",
+                msg("relay_error", locale, relay=pre.relay.name),
             )
         if out.text_events == 0:
             body = (
@@ -1257,24 +1282,8 @@ class ChatTaskHandler:
             # 无论谁先，终稿都只由后手那一边负责送达，不会两边都以为对方会送。
             done = await pre.writer.complete(verdict.final_text, pending_card=card)
             await self._push_if_proactive(ctx, pre, verdict, done, card)
-        async with ctx.session_factory() as session:
-            if (
-                elapsed >= self.LONG_TASK_SECONDS
-                and not out.cancelled
-                and not supervisor.switched  # 后台模式已经单独推过完成消息了
-                and verdict.log_status != "error"
-            ):
-                # 长任务用户多半已经切走了，另发一条提醒；dedupe_key 保证只提醒一次。
-                await outbox.add(
-                    session,
-                    bot_id=intake.bot.id,
-                    platform=intake.bot.platform,
-                    kind="send",
-                    dedupe_key=f"{ctx.task.id}:send:done",
-                    target={"chat_id": intake.chat_id},
-                    payload={"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)},
-                )
-            await session.commit()
+        # The delivered final response already carries completion; do not race it
+        # with a separate notification or label a waiting-user turn as complete.
         ctx.chat_logs.submit(
             log_entry(
                 ctx,
@@ -1410,7 +1419,11 @@ class ChatTaskHandler:
         if done.delivery_mode != "proactive":
             return
         pusher = pre.supervisor.pusher
-        rest = verdict.final_text if plain else verdict.final_text[done.offset :]
+        rest = (
+            verdict.final_text[done.offset :]
+            if verdict.log_status == "success" and not plain
+            else verdict.final_text
+        )
         ctx.log.info(
             "proactive_final_push",
             stream_version=done.version,

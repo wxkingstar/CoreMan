@@ -17,6 +17,15 @@ from coreman.core.relay.safe_transport import RegisteredTransport
 
 
 async def read_health(relay: RelayServer) -> tuple[str, int]:
+    if relay.runtime_node_id:
+        from coreman.core.relay.client import RelayClient
+
+        runtime_client = RelayClient(relay.relay_url)
+        try:
+            health = await runtime_client.health()
+            return health.status, health.latency_ms
+        finally:
+            await runtime_client.aclose()
     started = time.monotonic()
     status = "down"
     try:

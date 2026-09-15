@@ -24,6 +24,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.knowledge import installation as installs
+from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
 from coreman.core.knowledge.skill_policy import env_vars, selected_groups, user_inputs
 from coreman.core.relay.agent_client import call_agent
 from coreman.core.timeutils import utcnow
@@ -177,6 +178,16 @@ class SkillInstallHandler:
                 if not url:
                     raise ValueError("installation_source_missing")
                 payload["git_url"] = url
+                # Never forward a source credential to an override repository.
+                if source.access_token_enc:
+                    if not source.git_url or https_repository(url) != https_repository(
+                        source.git_url
+                    ):
+                        raise ValueError("installation_token_repository_mismatch")
+                    payload["git_url"] = https_repository(url)
+                    payload["git_access_token"] = ctx.cipher.decrypt(
+                        source.access_token_enc, SOURCE_TOKEN_AAD
+                    )
             needs_code = row.installed_at is None or inputs["reinstall_code"]
             relay_version = relay.version
             await session.commit()

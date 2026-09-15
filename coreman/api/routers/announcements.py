@@ -116,7 +116,7 @@ async def _check_targets(session: AsyncSession, body: AnnouncementIn) -> None:
         body.relay_server_id is not None
         and await session.get(RelayServer, body.relay_server_id) is None
     ):
-        raise ApiError(422, 422, "目标 relay 不存在")
+        raise ApiError(422, 422, "目标运行时不存在")
     if body.bot_id is not None and await session.get(Bot, body.bot_id) is None:
         raise ApiError(422, 422, "目标机器人不存在")
 

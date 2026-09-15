@@ -9,7 +9,7 @@ const { t } = useI18n()
 const visible = ref(false)
 const loading = ref(false)
 const probing = ref(false)
-const tasks = ref<{ pid: number; bot_key: string; user: string; chat_id: string }[]>([])
+const tasks = ref<{ pid?: number; request_id?: string; bot_key: string; bot_name?: string | null; user: string; chat_id: string }[]>([])
 const error = ref('')
 async function refresh() {
   loading.value = true
@@ -88,13 +88,17 @@ async function probe(operation: 'probe-rate-limits' | 'health-check') {
       :empty-text="t('relayAgent.noTasks')"
     >
       <el-table-column
-        prop="pid"
         :label="t('relayAgent.process')"
-        width="90"
-      />
+        width="140"
+        show-overflow-tooltip
+      >
+        <template #default="{ row }">
+          {{ row.pid ?? row.request_id ?? '—' }}
+        </template>
+      </el-table-column>
       <el-table-column
         min-width="140"
-        prop="bot_key"
+        prop="bot_name"
         :label="t('relayAgent.bot')"
       />
       <el-table-column

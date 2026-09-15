@@ -192,3 +192,69 @@ async def test_preset_rejects_edited_masks_without_overwriting_secret(client, db
     )
     assert response.status_code == 200
     assert response.json()["data"]["vars"]["PASSWORD"] == "co••••ue"
+
+
+async def test_source_access_token_encrypted_preserved_scoped_and_removed(
+    client, db_session, app, monkeypatch
+):
+    import uuid
+
+    from coreman.core.db.models import SkillSource
+    from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD
+
+    actor = await login_as(client, db_session, role="platform_admin")
+    token = "glpat-example-test-only"
+    body = {
+        "key": "token_source",
+        "label": "Token source",
+        "git_url": "git@git.example.com:group/repo.git",
+        "access_token": token,
+    }
+    response = await client.post("/api/admin/skill-sources", json=body)
+    assert response.status_code == 200, response.text
+    row = response.json()["data"]
+    assert row["has_access_token"] is True
+    assert token not in response.text and "access_token_enc" not in response.text
+    stored = await db_session.get(SkillSource, uuid.UUID(row["id"]))
+    assert token not in stored.access_token_enc
+    assert app.state.cipher.decrypt(stored.access_token_enc, SOURCE_TOKEN_AAD) == token
+    path = f"/api/admin/skill-sources/{row['id']}"
+    body["access_token"] = ""
+    response = await client.put(path, json=body, headers={"If-Match": "1"})
+    assert response.status_code == 200 and response.json()["data"]["has_access_token"]
+    seen = []
+    monkeypatch.setattr(
+        "coreman.api.routers.skill_catalog.fetch_catalog",
+        lambda url, value: seen.append((url, value)) or [],
+    )
+    response = await client.post(path + "/sync", headers={"If-Match": "2"})
+    assert response.status_code == 200
+    assert seen == [(body["git_url"], token)]
+    response = await client.put(
+        path, json=body | {"git_url": "https://other.example/other.git"}, headers={"If-Match": "2"}
+    )
+    assert response.status_code == 422
+    response = await client.put(
+        path, json=body | {"remove_access_token": True}, headers={"If-Match": "2"}
+    )
+    assert response.status_code == 200 and not response.json()["data"]["has_access_token"]
+    await db_session.refresh(stored)
+    assert stored.access_token_enc is None
+    logs = list(await db_session.scalars(select(AuditLog).where(AuditLog.actor_id == actor.id)))
+    assert token not in str([log.diff for log in logs])
+
+
+async def test_source_token_rejects_invalid_secret_without_echoing_it(client, db_session):
+    await login_as(client, db_session, role="platform_admin")
+    token = "glpat-secret\ninjected"
+    response = await client.post(
+        "/api/admin/skill-sources",
+        json={
+            "key": "bad_token",
+            "label": "Bad",
+            "git_url": "https://git.example.com/repo.git",
+            "access_token": token,
+        },
+    )
+    assert response.status_code == 422
+    assert "glpat-secret" not in response.text

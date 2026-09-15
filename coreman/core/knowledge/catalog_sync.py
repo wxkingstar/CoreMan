@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.audit import record_audit
 from coreman.core.db.models import Skill, SkillSource, User
+from coreman.core.knowledge.git_auth import https_repository, token_git_env
 from coreman.core.knowledge.skill_policy import git_url, name
+
+
+class CatalogAccessError(ValueError):
+    """Fixed, credential-free diagnostics for repository authentication failures."""
 
 
 def read_json(root: Path, path: Path) -> dict[str, Any]:
@@ -56,7 +61,7 @@ def read_catalog(root: Path) -> list[dict[str, str | None]]:
     return result
 
 
-def fetch_catalog(url: str) -> list[dict[str, str | None]]:
+def fetch_catalog(url: str, access_token: str | None = None) -> list[dict[str, str | None]]:
     git_url(url)
     # 不继承全局 Git hook/credential helper、模板或代理，仓库对象不是代码指令。
     env = {
@@ -70,37 +75,61 @@ def fetch_catalog(url: str) -> list[dict[str, str | None]]:
         GIT_TERMINAL_PROMPT="0",
         GIT_LFS_SKIP_SMUDGE="1",
     )
+    if access_token:
+        url = https_repository(url)
+        env.update(token_git_env(url, access_token))
     with tempfile.TemporaryDirectory(prefix="coreman-catalog-") as directory:
         root = Path(directory) / "repo"
-        try:
-            subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "protocol.file.allow=never",
-                    "-c",
-                    "protocol.ext.allow=never",
-                    "-c",
-                    "http.followRedirects=false",
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--template=",
-                    "--",
-                    url,
-                    str(root),
-                ],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=180,
-                check=True,
-            )
-        except (subprocess.SubprocessError, OSError) as exc:
-            raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from exc
+        with (Path(directory) / "git-error").open("w+b") as errors:
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "protocol.file.allow=never",
+                        "-c",
+                        "protocol.ext.allow=never",
+                        "-c",
+                        "http.followRedirects=false",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--template=",
+                        "--",
+                        url,
+                        str(root),
+                    ],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=errors,
+                    timeout=180,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                errors.seek(0)
+                diagnostic = errors.read(8192).lower()
+                if any(
+                    marker in diagnostic for marker in (b"403", b"not allowed to download code")
+                ):
+                    raise CatalogAccessError(
+                        "Git 仓库拒绝读取（403）。请检查 Project Access Token "
+                        "的 read_repository 权限，"
+                        "并确认项目角色至少为 Reporter。"
+                    ) from None
+                if any(
+                    marker in diagnostic
+                    for marker in (b"401", b"http basic: access denied", b"authentication failed")
+                ):
+                    raise CatalogAccessError(
+                        "Git 认证失败。请检查 token 是否有效、是否过期或已撤销，"
+                        "以及 read_repository 权限。"
+                    ) from None
+                raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
+            except (subprocess.SubprocessError, OSError):
+                raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
         return read_catalog(root)
 
 

@@ -30,6 +30,6 @@ async def validate_model_for_relay(
         effective_models(relay, catalog) if relay else [r.model for r in catalog if not r.retired]
     )
     if model not in allowed:
-        raise ApiError(422, 422, "模型不在目标 relay 的有效模型集内" if relay else "模型不在目录中")
+        raise ApiError(422, 422, "模型不在目标运行时的有效模型集内" if relay else "模型不在目录中")
     if effort == "xhigh" and not supports_xhigh(model, catalog):
         raise ApiError(422, 422, "该模型不支持 xhigh")

@@ -223,6 +223,13 @@ async def test_pending_card_is_sent_after_finish_frame(
         assert cmds.index("aibot_send_msg") > max(
             i for i, c in enumerate(cmds) if c == "aibot_respond_msg"
         )
+
+        async def card_confirmed() -> bool:
+            async with make_session_factory(db_engine)() as s:
+                item = (await s.execute(select(OutboxItem))).scalar_one()
+                return item.status == "sent"
+
+        await _wait(card_confirmed)
         async with make_session_factory(db_engine)() as s:
             rows = (await s.execute(select(OutboxItem))).scalars().all()
             assert [r.dedupe_key for r in rows] == [f"{task.id}:card:0"] and rows[

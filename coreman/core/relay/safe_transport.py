@@ -29,13 +29,13 @@ def allowed_address(value: str) -> bool:
 def validate_host(host: str) -> None:
     lowered = host.lower().rstrip(".")
     if lowered in _BLOCKED_NAMES or lowered.endswith(".localhost"):
-        raise ValueError("目标主机不允许用于 Relay 调用")
+        raise ValueError("目标主机不允许用于运行时调用")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return
     if not allowed_address(str(ip)):
-        raise ValueError("目标地址不允许用于 Relay 调用")
+        raise ValueError("目标地址不允许用于运行时调用")
 
 
 class RegisteredTransport(httpx.AsyncBaseTransport):

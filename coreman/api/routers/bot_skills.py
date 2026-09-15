@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.bot_names import bot_names
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
@@ -264,7 +265,16 @@ async def approvals(
     page = await paginate(
         session, select(SkillApproval).order_by(SkillApproval.requested_at.desc()), params
     )
-    return {"code": 0, "data": {**page, "items": [approval_out(row) for row in page["items"]]}}
+    names = await bot_names(session, (row.bot_id for row in page["items"]))
+    return {
+        "code": 0,
+        "data": {
+            **page,
+            "items": [
+                {**approval_out(row), "bot_name": names.get(row.bot_id)} for row in page["items"]
+            ],
+        },
+    }
 
 
 class ReviewIn(BaseModel):

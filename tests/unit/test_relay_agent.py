@@ -258,3 +258,19 @@ def test_automatic_memory_report_reads_only_assigned_workspaces(agent, monkeypat
     monkeypatch.setattr(agent, "report", lambda endpoint, body: sent.extend(body["memories"]))
     assert agent.dispatch({"type": "collect-memory"})["count"] == 1
     assert [row["content"] for row in sent] == ["mine"]
+
+
+def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
+    bot = agent.root / "token-bot"
+    bot.mkdir()
+    calls = []
+    monkeypatch.setattr(agent_module, "run_command", lambda command, *args, **kwargs: calls.append((command, kwargs)))
+    agent.install_skill({"project_dir": str(bot), "git_url": "https://github.com/example/tools.git", "skill_name": "query", "git_access_token": "test-token"})
+    clone, install = calls
+    assert clone[0][:2] == ["git", "clone"]
+    assert "test-token" not in str(clone[0])
+    assert clone[1]["env_override"]["GIT_CONFIG_COUNT"] == "7"
+    assert "env_override" not in install[1]
+    assert "test-token" not in str(install)
+    assert install[0][4].startswith("/")
+    assert install[0][-3:] == ["--skill", "query", "-y"]

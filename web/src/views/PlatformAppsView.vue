@@ -274,11 +274,11 @@ onBeforeUnmount(() => {
           style="width: 140px"
         >
           <el-option
-            label="wecom"
+            :label="t('platforms.wecom')"
             value="wecom"
           />
           <el-option
-            label="feishu"
+            :label="t('platforms.feishu')"
             value="feishu"
           />
         </el-select>
@@ -310,7 +310,7 @@ onBeforeUnmount(() => {
       >
         <template #default="{ row }: { row: PlatformAppOut }">
           <el-tag :type="row.platform === 'wecom' ? 'primary' : 'warning'">
-            {{ row.platform }}
+            {{ t(`platforms.${row.platform}`) }}
           </el-tag>
         </template>
       </el-table-column>
@@ -453,10 +453,10 @@ onBeforeUnmount(() => {
             :disabled="!!dialogEditingId"
           >
             <el-radio label="wecom">
-              wecom
+              {{ t('platforms.wecom') }}
             </el-radio>
             <el-radio label="feishu">
-              feishu
+              {{ t('platforms.feishu') }}
             </el-radio>
           </el-radio-group>
         </el-form-item>

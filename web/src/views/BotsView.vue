@@ -209,7 +209,7 @@ onMounted(async () => {
           <el-option
             v-for="p in PLATFORMS"
             :key="p"
-            :label="p"
+            :label="t(`platforms.${p}`)"
             :value="p"
           />
         </el-select>
@@ -308,7 +308,7 @@ onMounted(async () => {
       >
         <template #default="{ row }: { row: BotOut }">
           <el-tag size="small">
-            {{ row.platform }}
+            {{ t(`platforms.${row.platform}`) }}
           </el-tag>
         </template>
       </el-table-column>
