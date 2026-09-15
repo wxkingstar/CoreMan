@@ -547,3 +547,19 @@ def test_state_contradicting_running_containers_prefers_running_side(stack: Fake
     assert "只有 a 侧在运行" in r.stderr
     assert "drain --prefix gateway-wecom-a:host-gateway-wecom-a:" in "\n".join(stack.calls())
     assert gateway_state(stack.state_dir) == "wecom=b\n"
+
+
+def test_shell_variables_before_non_ascii_text_are_braced() -> None:
+    """bash 5 在 UTF-8 locale 下把紧跟 $name 的中文字符算进变量名，set -u 时脚本直接退出。"""
+    import pathlib
+    import re
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    unbraced = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
+    offenders = [
+        f"{rel}:{number}: {line.strip()}"
+        for rel in ("deploy/coreman", "scripts/exercise-upgrade")
+        for number, line in enumerate((repo / rel).read_text(encoding="utf-8").splitlines(), 1)
+        if unbraced.search(line)
+    ]
+    assert offenders == []
