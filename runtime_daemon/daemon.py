@@ -135,7 +135,16 @@ BLOCKED_ENV_KEYS: frozenset[str] = frozenset(
     }
 )
 ALLOWED_ENV_KEYS: frozenset[str] = frozenset(
-    {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+    {
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        # 厂商 API key 与模型名只换凭据，不改变请求端点；端点类变量仍被前缀拦下。
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+    }
 )
 
 

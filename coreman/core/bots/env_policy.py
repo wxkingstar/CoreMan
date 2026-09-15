@@ -116,7 +116,17 @@ BLOCKED_ENV_KEYS: frozenset[str] = frozenset(
 
 # 前缀规则里的例外：只影响提交署名，不改变执行行为。
 ALLOWED_ENV_KEYS: frozenset[str] = frozenset(
-    {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+    {
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        # 厂商 API key 与模型名：技能（如图片生成、自带 LLM 客户端）直接读取。只换 key 不改变请求
+        # 发往的端点，端点类（*_BASE_URL）仍被前缀拦下；CLI 的模型由驱动 --model 显式指定。
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+    }
 )
 
 
