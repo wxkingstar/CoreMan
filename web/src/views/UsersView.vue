@@ -47,6 +47,15 @@ function canEdit(u: UserOut): boolean {
 // 停用/启用只有 ai_committee 与 platform_admin 能做（后端 can_edit_user 同样拒绝 team_lead）
 const canEditStatus = computed(() => me.value?.role === 'platform_admin' || me.value?.role === 'ai_committee')
 
+/**
+ * 邮箱、部门、Bot 可用、最近登录只对上面这两个管理角色下发；其它角色按实际下发的字段决定显示哪些列，
+ * 没下发的列整列隐藏，而不是显示一列空值。
+ */
+const columns = computed(() => {
+  const has = (key: keyof UserOut) => canEditStatus.value || paged.items.value.some((u) => u[key] !== undefined)
+  return { email: has('email'), departments: has('departments'), botAccessible: has('bot_accessible'), lastLogin: has('last_login_at') }
+})
+
 function roleOptions(): Role[] {
   const r = me.value?.role as Role | undefined
   return r ? (ROLE_OPTIONS[r] ?? []) : []
@@ -60,7 +69,10 @@ function teamOptionsFor(): TeamOut[] {
 async function patch(u: UserOut, body: UserPatch) {
   try {
     const updated = await usersApi.patch(u.id, body)
-    Object.assign(u, updated)
+    // 回显按操作者角色裁剪：没下发的字段保持原值，不能当成空值写回。
+    for (const [key, value] of Object.entries(updated)) {
+      if (value !== undefined) (u as unknown as Record<string, unknown>)[key] = value
+    }
     ElMessage.success(t('common.saved'))
   } catch (e) {
     ElMessage.error(errorMessage(e))
@@ -77,7 +89,8 @@ const editDrawerTitle = computed(() => t('users.edit') + (editing.user ? `：${e
 
 function openEdit(u: UserOut) {
   editing.user = u
-  editing.form = { position: u.position, skills: u.skills, locale: u.locale, status: u.status }
+  // 非管理角色拿不到职位/技能原值：输入框留空，保存时只提交实际改过的字段。
+  editing.form = { position: u.position ?? null, skills: u.skills ?? null, locale: u.locale, status: u.status }
   editing.visible = true
 }
 
@@ -88,8 +101,9 @@ async function saveEdit() {
   const u = editing.user
   if (!u || savingEdit.value) return
   const body: UserPatch = {}
-  if (editing.form.position !== u.position) body.position = editing.form.position
-  if (editing.form.skills !== u.skills) body.skills = editing.form.skills
+  // 原值没下发（undefined）按空处理：留空不提交，免得把看不到的值清掉。
+  if ((editing.form.position ?? null) !== (u.position ?? null)) body.position = editing.form.position ?? null
+  if ((editing.form.skills ?? null) !== (u.skills ?? null)) body.skills = editing.form.skills ?? null
   if (editing.form.locale !== u.locale) body.locale = editing.form.locale
   if (canEditStatus.value && editing.form.status !== u.status) body.status = editing.form.status
   if (Object.keys(body).length === 0) {
@@ -280,18 +294,20 @@ onMounted(async () => {
             </template>
           </el-table-column>
           <el-table-column
+            v-if="columns.email"
             min-width="140"
             prop="email"
             :label="t('users.email')"
           />
           <el-table-column
+            v-if="columns.departments"
             min-width="140"
             :label="t('users.departments')"
           >
             <template #default="{ row }: { row: UserOut }">
-              <span>{{ row.departments[0] ?? '-' }}</span>
+              <span>{{ row.departments?.[0] ?? '-' }}</span>
               <el-tooltip
-                v-if="row.departments.length > 1"
+                v-if="row.departments && row.departments.length > 1"
                 :content="row.departments.slice(1).join('; ')"
               >
                 <span class="dept-more">+{{ row.departments.length - 1 }}</span>
@@ -346,12 +362,13 @@ onMounted(async () => {
             </template>
           </el-table-column>
           <el-table-column
+            v-if="columns.botAccessible"
             min-width="140"
             :label="t('users.botAccessible')"
           >
             <template #default="{ row }: { row: UserOut }">
               <el-switch
-                :model-value="row.bot_accessible"
+                :model-value="row.bot_accessible ?? false"
                 :disabled="!canEdit(row)"
                 @change="(v: boolean) => patch(row, { bot_accessible: v })"
               />
@@ -368,11 +385,12 @@ onMounted(async () => {
             </template>
           </el-table-column>
           <el-table-column
+            v-if="columns.lastLogin"
             min-width="140"
             :label="t('users.lastLogin')"
           >
             <template #default="{ row }: { row: UserOut }">
-              {{ formatDateTime(row.last_login_at) }}
+              {{ formatDateTime(row.last_login_at ?? null) }}
             </template>
           </el-table-column>
           <el-table-column
