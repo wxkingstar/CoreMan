@@ -94,7 +94,38 @@ open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 PY
 }
 
+pgdata_volume() {  # compose 顶层 name: coreman，COMPOSE_PROJECT_NAME 可覆盖项目名
+  echo "${COMPOSE_PROJECT_NAME:-coreman}_pgdata"
+}
+
+pgdata_exists() {  # 只读检测数据库数据卷是否已存在（曾初始化过库）；不创建、不删除任何东西
+  local volume
+  volume="$(pgdata_volume)"
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "docker volume inspect $volume"
+    return 1
+  fi
+  docker volume inspect "$volume" >/dev/null 2>&1
+}
+
 ensure_env() {
+  local missing="" volume
+  [[ -f "$ENV_FILE" ]] || missing="${missing} ${ENV_FILE}"
+  [[ -n "$(env_get MASTER_KEY)" ]] || missing="${missing} MASTER_KEY"
+  case "$(env_get POSTGRES_PASSWORD)" in "" | change-me) missing="${missing} POSTGRES_PASSWORD" ;; esac
+  # 库密码只在数据卷首次初始化时生效，MASTER_KEY 决定库内密文能否解密：已有数据时新生成的值必然对不上。
+  if [[ -n "$missing" ]] && pgdata_exists; then
+    volume="$(pgdata_volume)"
+    {
+      echo "检测到已有数据库数据卷 ${volume}，但以下配置缺失、需要新生成：${missing# }。"
+      echo "新生成的库密码与 MASTER_KEY 和已有数据不匹配：数据库无法登录，库内加密的凭证也无法解密。未做任何改动。"
+      echo "处理方式："
+      echo "  - 把原来的配置文件恢复到 ${ENV_FILE}（或用 COREMAN_ENV_FILE 指向它），再执行 coreman up"
+      echo "  - 数据卷由手工 docker compose up 初始化过：把当时使用的 POSTGRES_PASSWORD（及 DATABASE_URL）与 MASTER_KEY 填回配置文件"
+      echo "  - 确认旧数据不再需要：自行执行 docker volume rm ${volume}（不可恢复，脚本不会代为删除）后再执行 coreman up"
+    } >&2
+    return 2
+  fi
   if [[ ! -f "$ENV_FILE" ]]; then
     cp "$ROOT/.env.example" "$ENV_FILE"
     echo "已从 .env.example 生成 $ENV_FILE"
