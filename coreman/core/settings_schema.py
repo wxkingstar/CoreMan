@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from coreman.core.db.models import ModelCatalog
 from coreman.core.prompting.defaults import PROMPT_DEFAULTS_BY_KEY
+from coreman.core.relay.models import default_model
 
 # 提示词段落的键，顺序即管理台设置页的展示顺序，也是 worker 读取的顺序。
 PROMPT_SETTING_KEYS: tuple[str, ...] = tuple(PROMPT_DEFAULTS_BY_KEY)
 
 SETTING_DEFAULTS: dict[str, Any] = {
     "bootstrap_admin_enabled": True,
-    "default_model": "vllm/claude-sonnet-4-6",
     "default_verbosity_level": 1,
     "default_effort_level": None,
     "session_ttl_hours": 72,
@@ -25,13 +27,28 @@ SETTING_DEFAULTS: dict[str, Any] = {
     # 提示词段落（spec §8.3）：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
-# 任何登录用户都能读的三个键：新建机器人表单要用它们做默认值。
+# 派生键：读取时由其它表算出，不落 settings 表、不可写入。库里遗留的同名行一律忽略。
+DERIVED_SETTING_KEYS = ("default_model",)
+# 平台默认模型按这个 provider 顺序取第一个有默认值的（spec §5.3 模型目录）。
+DEFAULT_MODEL_PROVIDERS = ("claude", "codex")
+# 任何登录用户都能读的三个键：新建机器人表单要用它们做默认值（default_model 为派生键）。
 PUBLIC_DEFAULT_KEYS = ("default_model", "default_verbosity_level", "default_effort_level")
+
+
+def platform_default_model(catalog: Sequence[ModelCatalog]) -> str | None:
+    """平台默认模型：按 claude → codex 取该 provider 的默认（未退役），目录为空时为 None。
+
+    默认值只在模型目录维护一处（is_default / retired），这里不再有部署相关的硬编码模型名。
+    """
+    for provider in DEFAULT_MODEL_PROVIDERS:
+        model = default_model(provider, catalog)
+        if model is not None:
+            return model
+    return None
 
 
 class SettingsPatch(BaseModel):
     bootstrap_admin_enabled: bool | None = None
-    default_model: str | None = Field(default=None, min_length=1, max_length=100)
     default_verbosity_level: int | None = Field(default=None, ge=1, le=4)
     default_effort_level: Literal["low", "medium", "high", "xhigh"] | None = None
     session_ttl_hours: int | None = Field(default=None, ge=1, le=720)
@@ -49,6 +66,20 @@ class SettingsPatch(BaseModel):
     prompt_verbosity_2: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_3: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_4: str | None = Field(default=None, min_length=1, max_length=20000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_derived(cls, data: Any) -> Any:
+        """未知键照旧忽略（兼容旧前端多带的字段），但派生键必须明确拒绝：
+        静默吞掉会让管理员以为默认模型改成功了。"""
+        if isinstance(data, dict):
+            derived = [k for k in DERIVED_SETTING_KEYS if k in data]
+            if derived:
+                raise ValueError(
+                    "、".join(derived)
+                    + " 由模型目录派生，不能在设置中修改，请到模型目录调整默认模型"
+                )
+        return data
 
     def changes(self) -> dict[str, Any]:
         """只取请求体里真正出现过的字段：None 是合法取值（default_effort_level 可以清空），
