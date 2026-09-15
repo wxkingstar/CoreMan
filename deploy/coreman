@@ -15,7 +15,9 @@ ENV_FILE="${COREMAN_ENV_FILE:-$ROOT/.env}"
 case "$ENV_FILE" in /*) ;; *) ENV_FILE="$PWD/$ENV_FILE" ;; esac
 export COREMAN_ENV_FILE="$ENV_FILE"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
-DEFAULT_SERVICES=(postgres api-1 api-2 caddy scheduler worker-a worker-b gateway-wecom-a gateway-feishu-a)
+# 网关不在固定列表里：a/b 两侧按记录的活跃侧拉起其中一侧。
+DEFAULT_SERVICES=(postgres api-1 api-2 caddy scheduler worker-a worker-b)
+GATEWAY_PLATFORMS=(wecom feishu)
 ALL_PROFILES=(--profile standby --profile monitoring --profile tools)
 WAIT_TIMEOUT="${COREMAN_WAIT_TIMEOUT:-300}"
 TAG_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
@@ -25,9 +27,11 @@ IMAGE_PATHS=(coreman web runtime_daemon relay_agent migrations deploy pyproject.
 # 升级状态不写回含凭证的 .env，放在仓库根目录（或 COREMAN_STATE_DIR）的状态文件里：
 #   .coreman-image-tag          最近一次成功完成的 upgrade/rollback 的镜像标签
 #   .coreman-image-tag.pending  进行中或失败未收尾的升级目标标签
+#   .coreman-gateway-active     各平台网关当前活跃侧（wecom=a / feishu=b）
 STATE_DIR="${COREMAN_STATE_DIR:-$ROOT}"
 TAG_FILE="$STATE_DIR/.coreman-image-tag"
 PENDING_FILE="$STATE_DIR/.coreman-image-tag.pending"
+GATEWAY_STATE_FILE="$STATE_DIR/.coreman-gateway-active"
 
 compose() {
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -244,6 +248,51 @@ preflight_images() {  # preflight_images <tag>：两种镜像都已在本机才�
   return 2
 }
 
+# ---- 网关活跃侧 ----
+
+service_running() { [[ -n "$(compose ps -q "$1" 2>/dev/null || true)" ]]; }
+
+recorded_side() {  # recorded_side <platform>：状态文件里的活跃侧，缺失时输出空
+  local platform="$1" line
+  [[ -f "$GATEWAY_STATE_FILE" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in "$platform=a" | "$platform=b") echo "${line#*=}"; return 0 ;; esac
+  done < "$GATEWAY_STATE_FILE"
+}
+
+active_side() {  # active_side <platform>：优先状态文件；缺失时 a 未运行且 b 在运行才判为 b
+  local platform="$1" side other
+  side="$(recorded_side "$platform")"
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "${side:-a}"
+    return 0
+  fi
+  if [[ -z "$side" ]]; then
+    if ! service_running "gateway-$platform-a" && service_running "gateway-$platform-b"; then echo b; else echo a; fi
+    return 0
+  fi
+  if [[ "$side" == a ]]; then other=b; else other=a; fi
+  if ! service_running "gateway-$platform-$side" && service_running "gateway-$platform-$other"; then
+    echo "注意：$GATEWAY_STATE_FILE 记录 $platform 活跃侧为 $side，但只有 $other 侧在运行，按 $other 处理" >&2
+    side="$other"
+  fi
+  echo "$side"
+}
+
+record_side() {  # record_side <platform> <a|b>：保留其他平台的记录，原子替换状态文件
+  local platform="$1" side="$2" content="" p s
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "gateway-active $platform=$side"
+    return 0
+  fi
+  for p in "${GATEWAY_PLATFORMS[@]}"; do
+    if [[ "$p" == "$platform" ]]; then s="$side"; else s="$(recorded_side "$p")"; fi
+    if [[ -n "$s" ]]; then content="${content}${p}=${s}"$'\n'; fi
+  done
+  printf '%s' "$content" > "$GATEWAY_STATE_FILE.tmp"
+  mv "$GATEWAY_STATE_FILE.tmp" "$GATEWAY_STATE_FILE"
+}
+
 # ---- 升级事务：pending → 各步骤 → 提升；失败时 EXIT 钩子输出现场 ----
 
 UPGRADE_ACTIVE=0
@@ -339,7 +388,7 @@ check_pending() {  # 有未完成的升级时拒绝整体启动，避免把已�
 # ---- 命令 ----
 
 cmd_up() {
-  local force=0 arg
+  local force=0 arg platform services
   for arg in "$@"; do
     case "$arg" in
       --force) force=1 ;;
@@ -351,7 +400,11 @@ cmd_up() {
   ensure_env
   compose up -d postgres
   compose run --rm migrate
-  if ! compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${DEFAULT_SERVICES[@]:1}"; then
+  services=("${DEFAULT_SERVICES[@]:1}")
+  for platform in "${GATEWAY_PLATFORMS[@]}"; do
+    services+=("gateway-$platform-$(active_side "$platform")")
+  done
+  if ! compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${services[@]}"; then
     echo "部分服务未在 ${WAIT_TIMEOUT} 秒内健康：coreman status 查看状态，coreman logs <服务> 查看原因" >&2
     return 1
   fi
@@ -361,7 +414,7 @@ cmd_up() {
 cmd_down() { compose down "$@"; }
 
 cmd_status() {
-  local address url pending
+  local address url pending platform sides=""
   compose ps
   [[ "${DRY_RUN:-0}" != "1" ]] || return 0
   echo
@@ -372,6 +425,10 @@ cmd_status() {
   if [[ -n "$pending" ]]; then
     echo "警告：存在未完成的升级（$PENDING_FILE：$pending），处理方法见 docs/operations.md"
   fi
+  for platform in "${GATEWAY_PLATFORMS[@]}"; do
+    sides="$sides $platform=$(active_side "$platform")"
+  done
+  echo "网关活跃侧：${sides# }"
   report_pg_connections
   address="$(compose port caddy 80)"
   url="${API_HEALTH_URL:-http://127.0.0.1:${address##*:}/health}"
@@ -478,10 +535,11 @@ upgrade_worker() {
   done
 }
 
-upgrade_gateway() {
-  local platform="$1" source=a target=b prefix replacement
+upgrade_gateway() {  # 在非活跃侧重建新网关，排空活跃侧后切换，并记录新的活跃侧
+  local platform="$1" source target prefix replacement
   [[ "$platform" == wecom || "$platform" == feishu ]] || { echo "平台须为 wecom 或 feishu" >&2; return 2; }
-  if [[ "${DRY_RUN:-0}" != "1" ]] && [[ -z "$(compose ps -q "gateway-$platform-a")" ]]; then source=b; target=a; fi
+  source="$(active_side "$platform")"
+  if [[ "$source" == a ]]; then target=b; else target=a; fi
   if prefix="$(managed_prefix "gateway-$platform-$target")"; then
     replacement="$(managed_prefix "gateway-$platform-$source")"
     runtime_op ready --prefix "$replacement" --timeout 180
@@ -498,14 +556,15 @@ upgrade_gateway() {
     runtime_op drain --prefix "$prefix" --replacement "$replacement" --timeout 180
     compose stop "gateway-$platform-$source"
   fi
+  record_side "$platform" "$target"
 }
 
 upgrade_all() {
+  local platform
   upgrade_api
   upgrade_scheduler
   upgrade_worker
-  upgrade_gateway wecom
-  upgrade_gateway feishu
+  for platform in "${GATEWAY_PLATFORMS[@]}"; do upgrade_gateway "$platform"; done
 }
 
 cmd_upgrade() {
@@ -550,14 +609,14 @@ cmd_rollback() {
 usage() {
   cat <<'EOF'
 用法: coreman <命令> [参数]
-  up [--force]                首次或整体启动并等待健康（自动补全 .env 的密钥；有未完成升级时拒绝，--force 忽略）
+  up [--force]                首次或整体启动并等待健康（自动补全 .env 的密钥；按记录的活跃侧拉起网关；有未完成升级时拒绝）
   down [-t 秒]                停止并删除容器（保留数据卷；worker 可能等待在途任务最长 2 小时）
-  status                      容器状态、各容器镜像标签、PostgreSQL 连接数与 api 健康
+  status                      容器状态、各容器镜像标签、网关活跃侧、PostgreSQL 连接数与 api 健康
   logs [service…]             跟踪日志
   migrate                     执行数据库迁移
   build [--tag 标签] [--force]  构建两个镜像；默认标签为 Git 短提交（未提交改动加 -dirty），拒绝覆盖正在使用的标签
   upgrade <api|worker|scheduler|all> [tag]  预检镜像后按目标滚动升级（失败立即停止并保留待定标签）
-  upgrade gateway <wecom|feishu> [tag]      网关 a/b 排空接管
+  upgrade gateway <wecom|feishu> [tag]      网关 a/b 排空接管，并记录新的活跃侧
   rollback <tag>              回退到保留的镜像标签，不回退数据库
   skills sync URL --source KEY 同步已登记的技能目录
   contact-sync [--app 名称]     同步企业微信通讯录
