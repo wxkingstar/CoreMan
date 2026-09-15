@@ -100,6 +100,20 @@ describe('Infrastructure management', () => {
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.push'))
     wrapper.unmount()
   })
+  it('offers no retired cron scope and drops it when editing an old client', async () => {
+    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], enabled: true, version: 3, last_used_at: null, has_secret: true }
+    vi.mocked(credentials.clients).mockResolvedValue({ items: [old], total: 1, page: 1, per_page: 50 })
+    vi.mocked(credentials.update).mockResolvedValue({ ...old, scopes: ['org'], version: 4 })
+    const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { scopes: string[]; form: { scopes: string[] }; edit: (row: typeof old) => Promise<void>; save: () => Promise<void> }
+    expect(vm.scopes).not.toContain('cron')
+    await vm.edit(old); await flushPromises()
+    expect(vm.form.scopes).toEqual(['org'])
+    await vm.save(); await flushPromises()
+    expect(credentials.update).toHaveBeenCalledWith(expect.objectContaining({ app_key: 'old', scopes: ['org'] }))
+    wrapper.unmount()
+  })
   it('saves grants with the loaded version and excludes disallowed systems', async () => {
     vi.mocked(systems.list).mockResolvedValue({ ...page, total: 2, items: [erp, { ...erp, key: 'blocked', name: 'Blocked', allowed_bot_ids: [] }] })
     vi.mocked(systems.grants).mockResolvedValue({ system_keys: ['erp'], version: 7 })

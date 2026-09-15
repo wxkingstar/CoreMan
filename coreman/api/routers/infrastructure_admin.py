@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
-from coreman.api.infra_auth import INFRA_SCOPES
+from coreman.api.infra_auth import INFRA_SCOPES, RETIRED_INFRA_SCOPES
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
@@ -90,9 +90,11 @@ class ClientIn(BaseModel):
     @field_validator("scopes")
     @classmethod
     def valid_scopes(cls, value: list[str]) -> list[str]:
-        if not set(value) <= INFRA_SCOPES:
+        # 已下线的接口组静默丢弃：旧客户端回传原有勾选时不能因此保存失败。
+        current = set(value) - RETIRED_INFRA_SCOPES
+        if not current <= INFRA_SCOPES:
             raise ValueError("包含未知接口组")
-        return sorted(set(value))
+        return sorted(current)
 
 
 class ClientCreate(ClientIn):
@@ -122,7 +124,8 @@ def client_out(row: ApiClient) -> dict[str, Any]:
     return {
         "app_key": row.app_key,
         "name": row.name,
-        "scopes": row.scopes,
+        # 旧数据里可能还存着已下线的接口组，读取时不展示也不报错。
+        "scopes": [scope for scope in row.scopes if scope in INFRA_SCOPES],
         "enabled": row.enabled,
         "version": row.version,
         "last_used_at": row.last_used_at,

@@ -15,7 +15,7 @@ const editing = ref<ApiClient | null>(null)
 const form = reactive({ app_key: '', name: '', scopes: [] as string[], enabled: true })
 const formRef = ref<FormInstance>()
 const formSession = ref(0)
-const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'cron', 'escalations']
+const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'escalations']
 function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
@@ -30,7 +30,8 @@ async function load() {
 async function edit(row: ApiClient | null) {
   formSession.value += 1
   editing.value = row
-  Object.assign(form, row ? { ...row, scopes: [...row.scopes] } : { app_key: '', name: '', scopes: [], enabled: true })
+  // 已下线的接口组（如旧的 cron）不再提供勾选，编辑时丢弃，保存才不会被后端当作未知接口组拒绝。
+  Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)) } : { app_key: '', name: '', scopes: [], enabled: true })
   visible.value = true
   await nextTick()
   formRef.value?.clearValidate()
