@@ -82,6 +82,32 @@ RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["relea
 
 同一时刻只允许一个安装/升级/卸载操作（`install.lock`）。chroot 中由宿主机托管 `supervise.sh` 时，先在宿主机停止托管再升级，完成后恢复托管。不要通过反复兑换安装链接升级同一个用户环境。
 
+发布包与同名 `.sha256` 可以从 GitHub Release 附件下载，也可以从运行中的 API 容器复制，例如 `docker cp coreman-api-1-1:/app/runtime_daemon/dist/coreman-runtime-darwin-arm64.tar.gz .`。从源码运行 API 时，先执行 `python3 runtime_daemon/build.py`，发布包在 `runtime_daemon/dist/`。
+
+### 旧版本首次升级
+
+较早安装的节点，其安装工具还没有 `--upgrade` 参数，上面的命令会直接报参数错误。判断方法：当前版本目录下仍有 `relay_agent/`，或 `"$RELEASE/.venv/bin/python" -m runtime_daemon.install_service --help` 的输出里没有 `--upgrade`。
+
+第一次升级改用新发布包里的安装工具，解释器仍用当前版本的 venv。该工具只依赖 Python 标准库，执行过程与上面相同，失败同样自动回滚：
+
+```sh
+DATA=~/.local/share/coreman-runtime
+BUNDLE=/path/to/coreman-runtime-darwin-arm64.tar.gz   # 同目录需有 .sha256，或在下方加 --sha256 <hex>
+RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"])' "$DATA/config.json")
+TOOL=$(mktemp -d)
+tar -xzf "$BUNDLE" -C "$TOOL" runtime_daemon
+(cd "$TOOL" && PYTHONPATH="$TOOL" "$RELEASE/.venv/bin/python" -m runtime_daemon.install_service \
+  --upgrade "$BUNDLE" --config "$DATA/config.json")
+rm -rf "$TOOL"
+```
+
+升级成功后，管理台「运行时管理」中该节点会显示并发上限，服务端记录的节点协议版本为 2。之后的升级使用上面的常规命令即可。
+
+旧版本遗留两类文件，确认升级成功后可按需清理：
+
+- `claude.log`、`codex.log`：旧版驱动会把请求正文和系统提示词写进日志，可能含聊天内容。新版驱动默认不再记录，这两个旧文件建议删除或按敏感数据处理。
+- `/tmp/coreman-<UID>-*/`：旧版的驱动 socket 目录。新版在 macOS 上改用安装目录下的 `run/`，旧目录可以删除。
+
 ## 卸载
 
 ```sh
