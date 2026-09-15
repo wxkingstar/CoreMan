@@ -110,7 +110,7 @@ async def test_partial_cron_reply_is_not_success(finish):
 
 
 def test_precheck_rebinding_large_value_is_not_quadratic() -> None:
-    # 旧实现对每个表达式结果都整体遍历 + 序列化：这段 18000 步的脚本要跑几十秒。
+    # 若对每个表达式结果都整体遍历 + 序列化，这段 18000 步的脚本要跑几十秒。
     script = (
         "def should_trigger(ctx):\n"
         " big = range(10000)\n"

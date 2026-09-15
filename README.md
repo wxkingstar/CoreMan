@@ -4,6 +4,8 @@
 
 **融入团队的 AI 员工。Your AI teammate at work.**
 
+中文 · [English](README.en.md)
+
 CoreMan 是一个可自托管的 AI 员工平台，把企业微信、飞书与运行在自有环境中的 AI CLI 连接起来。团队成员在聊天中协作，管理员在统一后台管理 AI 员工、运行时、技能、权限与任务。
 
 项目处于早期迭代阶段（0.1.0）。平台本身不提供模型额度；使用 Claude Code / Codex 等后端需要自行安装、登录并获得对应服务的使用权限。
@@ -40,7 +42,7 @@ cp .env.example .env
 
 1. 在「团队与用户」中建立团队，按需在「平台应用」配置通讯录同步及登录。
 2. 在「运行时管理」生成安装命令，在已经安装并登录 AI CLI 的目标用户环境中执行；详见 [Runtime 安装](runtime_daemon/README.md)。
-3. 创建 AI 员工，填写企业微信或飞书机器人凭证，绑定可用运行时和模型，再启用。
+3. 创建 AI 员工，填写企业微信或飞书机器人凭证，绑定可用运行时和模型，再启用；平台侧准备见 [企业微信接入](docs/wecom.md) 与 [飞书接入](docs/feishu.md)。
 4. 从对应聊天平台发送消息，在「对话记录」和「运行状态」验证完整链路。
 
 平台登录验证成功后，可在设置中关闭引导管理员登录。AI CLI 会以 Runtime 所属系统用户的权限执行操作；请使用独立、最小权限的用户环境，并按需隔离文件和网络。提示词约束不能替代操作系统隔离。
@@ -83,9 +85,10 @@ npm run build
 
 ## 文档与目录
 
-- 接入与能力：[飞书](docs/feishu.md) · [技能与审批](docs/skills-management.md) · [记忆](docs/memories.md) · [定时任务](docs/cron-jobs.md) · [人工求助](docs/escalations.md)
+- 概念与结构：[术语表](docs/glossary.md) · [架构与服务拓扑图](docs/architecture.md#service-topology)
+- 接入与能力：[企业微信](docs/wecom.md) · [飞书](docs/feishu.md) · [技能与审批](docs/skills-management.md) · [记忆](docs/memories.md) · [定时任务](docs/cron-jobs.md) · [人工求助](docs/escalations.md)
 - 运维与集成：[运行维护](docs/operations.md) · [基础设施 API](docs/infrastructure-api.md) · [对象存储](docs/object-storage.md) · [统计与体检](docs/statistics-and-health.md) · [IM 回复时限](docs/im-reply-lifecycle.md)
-- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)（[可直接打开的 HTML](docs/environment-creation/manual.html)）
+- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)
 
 `coreman/api` 为管理 API，`coreman/core` 为共享业务组件，`coreman/runtime` 为网关/worker/scheduler；`web` 为 Vue 3 管理台，`runtime_daemon` 为执行端，`deploy` 为部署配置，`migrations` 为数据库迁移，`tests` 为测试。
 

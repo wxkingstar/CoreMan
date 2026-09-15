@@ -1,6 +1,6 @@
 # 短期附件存储
 
-默认 `OBJECT_STORAGE=local` 使用共享卷 `/data/storage/objects`。可配置 `OBJECT_STORAGE=s3`，并设置 S3_BUCKET、S3_ACCESS_KEY、S3_SECRET_KEY；S3_REGION 默认 us-east-1，S3_ENDPOINT 可指定 HTTPS 兼容服务，S3_PREFIX 默认 coreman-objects。临时凭据另设 S3_SESSION_TOKEN。示例仅在 `.env.example`，未改动真实环境文件。
+默认 `OBJECT_STORAGE=local` 使用共享卷 `/data/storage/objects`。可配置 `OBJECT_STORAGE=s3`，并设置 S3_BUCKET、S3_ACCESS_KEY、S3_SECRET_KEY；S3_REGION 默认 us-east-1，S3_ENDPOINT 可指定 HTTPS 兼容服务，S3_PREFIX 默认 coreman-objects。临时凭据另设 S3_SESSION_TOKEN。配置示例见 `.env.example`。
 
 SDK 使用显式凭据、独立 Session、HTTPS 证书验证，忽略环境代理与外部覆盖的 endpoint；不使用机器元数据凭据链。自定义 endpoint 不允许内嵌凭据、查询串、路径和已知元数据地址。账号应限定独立 bucket/prefix 的 Put/Get/Delete/List；不得将该前缀与其它应用混用。SDK 参考：[PutObject](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/put_object.html)、[GetObject](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/get_object.html)。
 
@@ -10,4 +10,4 @@ SDK 使用显式凭据、独立 Session、HTTPS 证书验证，忽略环境代�
 
 scheduler 每轮清理最多 500 个过期元数据对象，S3 批量删除失败保留记录重试。每轮最多扫描一页 1000 个对象，游标推进；只清理专用前缀下 UUID 文件名、无元数据且超过 25 小时的孤儿。其它文件名、前缀和新对象不动。S3 bucket 若启用版本管理，还需配置非当前版本的生命周期规则；SDK 重试产生的历史版本不由普通对象列表完整枚举。应用未修改 bucket 策略或生命周期规则。
 
-当前 S3 验证使用测试替身，没有访问真实云 bucket；本机验收继续使用原本的 local 卷。真实 S3 endpoint、权限和版本保留须在目标环境按实际条件验收。
+自动测试使用 S3 测试替身，不访问真实云 bucket。接入真实 S3 兼容服务前，请在目标环境验证 endpoint、账号权限与版本保留策略。

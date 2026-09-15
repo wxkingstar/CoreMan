@@ -43,7 +43,7 @@ export const relays = {
 export const catalog = {
   list: (provider?: string) => call<CatalogOut[]>(http.get('/api/admin/model-catalog', { params: provider ? { provider } : {} })),
   create: (body: CatalogIn) => call<CatalogOut>(http.post('/api/admin/model-catalog', body)),
-  // model 里有 `/`（vllm/claude-sonnet-4-6），必须转义后再拼进路径。
+  // model 里可能有 `/`（如 codex/gpt-5.5），必须转义后再拼进路径。
   patch: (provider: string, model: string, body: CatalogPatch) =>
     call<CatalogOut>(http.patch(`/api/admin/model-catalog/${provider}/${encodeURIComponent(model)}`, body)),
   remove: (provider: string, model: string) =>

@@ -12,6 +12,71 @@ CoreMan separates chat delivery, task execution and administration into independ
 
 The services coordinate through persisted state rather than an additional message broker. Multiple workers and gateways use database claims and leases to avoid concurrent ownership.
 
+## Service topology
+
+Terms used below are defined in the [glossary](glossary.md).
+
+```mermaid
+flowchart LR
+    subgraph IM["Chat platforms"]
+        WeCom["WeCom<br/>smart robot (long connection)"]
+        Feishu["Feishu<br/>custom app (long connection)"]
+    end
+
+    Browser["Admin console<br/>(Vue, browser)"]
+    PlatformAPI["WeCom / Feishu<br/>server APIs, login, app callbacks"]
+
+    subgraph Host["CoreMan deployment (Docker Compose)"]
+        Caddy["Caddy<br/>HTTPS reverse proxy"]
+        API["api<br/>FastAPI"]
+        GW["gateway-wecom / gateway-feishu<br/>a/b, one side active"]
+        Worker["worker<br/>a/b"]
+        Scheduler["scheduler<br/>single leader"]
+        subgraph PG["PostgreSQL bus (LISTEN/NOTIFY + polling)"]
+            Inbound[("inbound_events")]
+            Tasks[("tasks")]
+            Streams[("task_streams")]
+            Outbox[("outbox")]
+            Leases[("bot_leases /<br/>process_instances")]
+            Calls[("runtime_calls /<br/>runtime_chunks")]
+        end
+        Storage[("attachments<br/>local volume or S3")]
+    end
+
+    subgraph Node["Employee environment (one system user)"]
+        Daemon["Runtime Daemon"]
+        Drivers["Go drivers<br/>runtime-claude / runtime-codex"]
+        CLI["Claude Code / Codex CLI"]
+        Workdir[("bot working directories")]
+    end
+
+    WeCom <--> GW
+    Feishu <--> GW
+    GW -- "inbound message" --> Inbound
+    GW -- "enqueue" --> Tasks
+    GW -- "hold" --> Leases
+    Worker -- "claim" --> Tasks
+    Worker -- "progress" --> Streams
+    Streams -- "stream push" --> GW
+    Worker -- "results, notices" --> Outbox
+    Outbox -- "deliver" --> GW
+    Worker -- "call" --> Calls
+    Scheduler -- "cron runs, reaping,<br/>cleanup" --> Tasks
+    Scheduler -- "app notifications" --> PlatformAPI
+    Browser --> Caddy --> API
+    PlatformAPI -- "login redirects, callbacks" --> Caddy
+    API --> PG
+    API --> Storage
+    Worker --> Storage
+    Daemon -- "outbound HTTPS:<br/>enroll, heartbeat, poll,<br/>stream frames" --> Caddy
+    API -- "reverse channel" --> Calls
+    Daemon -- "Unix socket" --> Drivers
+    Drivers --> CLI
+    CLI --> Workdir
+```
+
+A chat message travels as follows: the active gateway for the bot (the lease holder) stores the inbound event and a task. A worker claims the task, builds the request and writes a runtime call. The runtime node that owns the bot's instance picks up the call through its outbound poll, runs the CLI in the bot's working directory and streams frames back. The worker writes progress to `task_streams`, the gateway pushes it to the chat platform, and anything that must be sent later goes through the outbox.
+
 ## Configuration layers
 
 Configuration comes from five layers. Each layer owns its own keys, so there is no general rule where a later layer overrides an earlier one. Where layers do interact, the rules are listed under [Precedence](#precedence).
