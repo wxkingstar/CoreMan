@@ -15,6 +15,7 @@ from coreman.api.infra_auth import require_scope
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
+from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
 from coreman.core.auth.tokens import active_key, issue_token
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
@@ -60,6 +61,9 @@ async def test_access(
     system = await session.get(BusinessSystem, body.system_key)
     if system is None or not system.enabled:
         raise not_found("业务系统不存在或未启用")
+    # 历史库里的保留 key：签出的令牌能直接调用 CoreMan 管理 API，不发给外部地址。
+    if system.key in RESERVED_SYSTEM_KEYS:
+        raise ApiError(422, 422, "该系统标识为平台保留，不能签发测试令牌")
     if not system.base_url:
         raise ApiError(422, 422, "业务系统尚未配置地址")
     try:

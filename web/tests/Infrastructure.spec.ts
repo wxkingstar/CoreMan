@@ -35,6 +35,23 @@ describe('Infrastructure management', () => {
     expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ key: 'new', allowed_bot_ids: [] }))
     wrapper.unmount()
   })
+  it('defaults new systems to an empty allowlist and flags systems open to all employees', async () => {
+    vi.mocked(systems.create).mockResolvedValue(erp)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-test="open-to-all"]').text()).toBe(i18n.global.t('infra.openToAllBots'))
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: typeof erp; restricted: boolean }
+    expect(vm.restricted).toBe(true)
+    expect(document.querySelector('[data-test="open-to-all-warning"]')).toBeNull()
+    vm.form.key = 'oa'; vm.form.name = 'OA'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ key: 'oa', allowed_bot_ids: [] }))
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    vm.restricted = false; await flushPromises()
+    expect(document.querySelector('[data-test="open-to-all-warning"]')?.textContent).toBe(i18n.global.t('infra.openToAllWarning'))
+    wrapper.unmount()
+  })
   it('shows a new client secret once and clears it when the dialog closes', async () => {
     vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
