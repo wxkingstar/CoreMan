@@ -84,6 +84,10 @@ class DeliveryRejected(RuntimeError):
         self.errcode = errcode
 
 
+class DeliveryNotSent(RuntimeError):
+    """帧根本没写进连接（未订阅、写帧时连接已断）：结果确定是没送到，可以放心重试。"""
+
+
 class DeliveryUncertain(RuntimeError):
     """发送后未收到确认，不能安全地声称已送达或盲目重投。"""
 
@@ -188,14 +192,21 @@ class WeComWsClient:
             await self._set_state("disconnected")
 
     async def send(self, data: dict[str, Any]) -> None:
-        """发一帧 JSON；未订阅成功时拒绝发送（上层据此判断要不要丢弃这次推送）。"""
+        """发一帧 JSON；未订阅成功时拒绝发送（`DeliveryNotSent`：一个字节都没出去）。"""
         ws = self._ws
         if self.state != "subscribed" or ws is None:
-            raise RuntimeError("WebSocket 未连接")
+            raise DeliveryNotSent("WebSocket 未连接")
         await ws.send(json.dumps(data, ensure_ascii=False))
 
     async def send_confirmed(self, data: dict[str, Any], *, timeout: float = 10.0) -> None:  # noqa: ASYNC109 bounded platform acknowledgement
-        """先登记回执再发送；接收循环只唤醒 future，不等待发送方的数据库锁。"""
+        """先登记回执再发送；接收循环只唤醒 future，不等待发送方的数据库锁。
+
+        三种失败必须分开，上层的处置完全不同：
+
+        - `DeliveryNotSent`：没订阅上，或写帧那一步连接就断了——确定没送到，可以直接重试；
+        - `DeliveryRejected`：平台回了非 0 错误码——确定没送到，按错误码处置；
+        - `DeliveryUncertain`：帧写出去了，但回执超时或连接在等回执时断了——结果未知。
+        """
         req_id = str(data["headers"]["req_id"])
         if req_id in self._acks:
             raise RuntimeError("同一 req_id 正在等待确认")
@@ -203,7 +214,10 @@ class WeComWsClient:
         self._acks[req_id] = future
         try:
             async with asyncio.timeout(timeout):
-                await self.send(data)
+                try:
+                    await self.send(data)
+                except (WebSocketException, OSError) as exc:
+                    raise DeliveryNotSent(f"写帧失败：{type(exc).__name__}") from exc
                 ack = await future
             code = _as_int(ack.get("errcode"), -1)
             if code:
