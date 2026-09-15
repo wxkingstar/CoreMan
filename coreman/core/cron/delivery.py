@@ -11,6 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, PlatformApp, User, UserIdentity, UserReached
+from coreman.core.i18n.messages import msg
+
+# 各渠道单条字节上限与最多条数。结果正文本身已限 10 万字符（cron_handler），但按这个上限
+# 分片，群 webhook 能刷出上百条、通知应用更多；超过条数就截断并附提示，完整结果留在运行记录。
+CHAT_PART_BYTES, CHAT_MAX_PARTS = 20000, 5
+NOTIFY_PART_BYTES, NOTIFY_MAX_PARTS = 2048, 5
+WEBHOOK_PART_BYTES, WEBHOOK_MAX_PARTS = 4096, 10
+# 分片按 UTF-8 边界切，每片最多比上限少 3 个字节；预算里按每片 4 字节扣掉，保证不超条数。
+_BOUNDARY_SLACK = 4
 
 
 def chunks(text: str, limit: int) -> list[str]:
@@ -25,6 +34,18 @@ def chunks(text: str, limit: int) -> list[str]:
     return result
 
 
+def bounded_chunks(text: str, limit: int, max_parts: int, notice: str) -> list[str]:
+    """按 `limit` 字节分片，最多 `max_parts` 片；放不下时截断正文并在末尾附 `notice`。"""
+    data = text.encode("utf-8")
+    if len(data) <= limit * max_parts - _BOUNDARY_SLACK * max_parts:
+        return chunks(text, limit)
+    budget = limit * max_parts - _BOUNDARY_SLACK * max_parts - len(notice.encode("utf-8"))
+    if budget <= 0:
+        raise ValueError("chunk budget too small")
+    head = data[:budget].decode("utf-8", errors="ignore")
+    return chunks(head + notice, limit)
+
+
 async def enqueue_result(
     session: AsyncSession,
     *,
@@ -33,9 +54,11 @@ async def enqueue_result(
     run_id: int | str,
     content: str,
     cipher: Cipher,
+    locale: str = "zh",
 ) -> dict[str, Any]:
     ids: list[int] = []
     errors: dict[str, str] = {}
+    notice = msg("cron_delivery_truncated", locale)
     recipients = list(dict.fromkeys(config.get("target_users", [])))
     for uid in recipients:
         user = await session.get(User, uuid.UUID(uid))
@@ -52,7 +75,8 @@ async def enqueue_result(
             continue
         reached = await session.get(UserReached, (bot.id, user.id))
         if reached is not None:
-            for index, part in enumerate(chunks(content, 20000)):
+            parts = bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
+            for index, part in enumerate(parts):
                 item = await outbox.add(
                     session,
                     bot_id=bot.id,
@@ -82,7 +106,8 @@ async def enqueue_result(
             errors[f"user:{uid}"] = "no_private_chat_or_unambiguous_notification_app"
             continue
         hint = f"\n\n请先给机器人「{bot.name}」发一句话建立私聊。"
-        for index, part in enumerate(chunks(content, max(256, 2048 - len(hint.encode())))):
+        limit = max(256, NOTIFY_PART_BYTES - len(hint.encode()))
+        for index, part in enumerate(bounded_chunks(content, limit, NOTIFY_MAX_PARTS, notice)):
             item = await outbox.add(
                 session,
                 bot_id=None,
@@ -99,7 +124,9 @@ async def enqueue_result(
             if item:
                 ids.append(item.id)
     for chat_id in dict.fromkeys(config.get("target_chats", [])):
-        for index, part in enumerate(chunks(content, 20000)):
+        for index, part in enumerate(
+            bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
+        ):
             item = await outbox.add(
                 session,
                 bot_id=bot.id,
@@ -121,7 +148,9 @@ async def enqueue_result(
             "channel": "webhook",
             "url_enc": webhook_enc,
         }
-        for index, part in enumerate(chunks(content, 4096)):
+        for index, part in enumerate(
+            bounded_chunks(content, WEBHOOK_PART_BYTES, WEBHOOK_MAX_PARTS, notice)
+        ):
             item = await outbox.add(
                 session,
                 bot_id=None,

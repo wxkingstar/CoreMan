@@ -59,6 +59,29 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
 
 
+async def test_oversized_result_is_truncated_and_still_delivered(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch
+) -> None:
+    from coreman.core.i18n.messages import msg
+    from coreman.runtime.worker import cron_handler
+
+    monkeypatch.setattr(cron_handler, "RESULT_MAX_CHARS", 3)
+    now = datetime.now(UTC)
+    await job(db_session, now, target_chats=["test-group"])
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    notice = msg("cron_result_truncated", limit=3)
+    assert run is not None and run.status == "success" and run.error_message is None
+    assert run.reply == "你好，" + notice
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None and run.reply in item.payload["markdown"]
+    assert (await tasks.get(db_session, task.id)).status == "succeeded"  # type: ignore[union-attr]
+
+
 async def test_precheck_failures_and_skip_do_not_call_model(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

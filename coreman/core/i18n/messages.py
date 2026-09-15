@@ -176,6 +176,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "bg_done_plain": "✅ 任务已完成",
         "bg_ttl_expired": "⏳ 任务运行超时，已终止后台等待{link}",
         "long_task_done": "✅ 您的任务已完成（耗时 {seconds} 秒），请查看上方回复。",
+        # 定时任务推送（cron_handler / scheduler.cron）：头尾让用户分清定时推送与对话回复。
+        "cron_push_header": "**{name}**\n> 机器人：{bot} | 耗时：{seconds} 秒\n\n",
+        "cron_push_footer": "\n\n---\n⏰ 此消息由定时任务自动推送，不在当前对话上下文中。",
+        "cron_failed": "**定时任务执行失败**\n> 任务：{name}\n> 机器人：{bot}\n> 原因：{reason}",
+        "cron_worker_lost": "执行进程中断，请查看运行记录",
+        "cron_result_truncated": "\n\n…（结果过长，已截断，仅保留前 {limit} 个字符）",
+        "cron_delivery_truncated": "\n\n…（内容过长，已截断，完整结果见定时任务运行记录）",
         "queued_notice": "⏳ 当前使用人数较多，您的请求已排队 {seconds} 秒，现在开始处理…",
         "worker_lost": "任务执行进程异常中断，请重试。",
         "drain_suffix": "\n\n⏳ 服务切换中，任务继续在后台处理，稍后自动推送结果",
@@ -434,6 +441,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "long_task_done": (
             "✅ タスクが完了しました（所要 {seconds} 秒）。上の返信をご確認ください。"
+        ),
+        "cron_push_header": "**{name}**\n> ボット：{bot} | 所要：{seconds} 秒\n\n",
+        "cron_push_footer": (
+            "\n\n---\n⏰ このメッセージは定期タスクによる自動送信で、"
+            "現在の会話の文脈には含まれません。"
+        ),
+        "cron_failed": (
+            "**定期タスクの実行に失敗しました**\n"
+            "> タスク：{name}\n> ボット：{bot}\n> 原因：{reason}"
+        ),
+        "cron_worker_lost": "実行プロセスが中断されました。実行履歴を確認してください",
+        "cron_result_truncated": ("\n\n…（結果が長すぎるため、先頭 {limit} 文字のみ保持しました）"),
+        "cron_delivery_truncated": (
+            "\n\n…（内容が長すぎるため省略しました。全文は定期タスクの実行履歴をご確認ください）"
         ),
         "queued_notice": (
             "⏳ 現在利用者が多いため、リクエストは {seconds} 秒待機しました。処理を開始します…"
