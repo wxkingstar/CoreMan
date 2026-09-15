@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -281,13 +282,41 @@ func newRebuildFresh(threads *threadMap, req *openai.ChatCompletionRequest, mode
 	}
 }
 
+// stderrTailBytes bounds how much trailing stderr a launch keeps for
+// classifying zero-output failures.
+const stderrTailBytes = 8 * 1024
+
+// tailBuffer keeps the last limit bytes of the lines added to it.
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func (t *tailBuffer) add(line string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, line...)
+	t.buf = append(t.buf, '\n')
+	if over := len(t.buf) - t.limit; over > 0 {
+		t.buf = append(t.buf[:0:0], t.buf[over:]...)
+	}
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
 // launchCodex starts a `codex` subprocess and returns line channels. lines
 // carries stdout JSONL events; the channel closes after Wait. waitErr blocks
 // until the process has been reaped and returns cmd.Wait()'s error — because
 // close(lines) is deferred past cmd.Wait(), waitErr never blocks once the
-// caller has observed lines closing. envExtra is merged into the inherited
-// environment minus codex bookkeeping vars.
-func launchCodex(input codexInput, workingDir string, envExtra map[string]string) (*exec.Cmd, <-chan string, func() error, error) {
+// caller has observed lines closing. stderrTail likewise waits for the reap
+// and returns the last stderrTailBytes of stderr. envExtra is merged into the
+// inherited environment minus codex bookkeeping vars.
+func launchCodex(input codexInput, workingDir string, envExtra map[string]string) (*exec.Cmd, <-chan string, func() error, func() string, error) {
 	cmd := exec.Command("codex", input.Args...)
 	// Own process group so KillGroup can reap the whole tree (node wrapper +
 	// native codex binary) instead of orphaning the native child.
@@ -300,23 +329,33 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %v", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create stderr pipe: %v", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 	if err := proc.Start(cmd); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to start codex: %v", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to start codex: %v", err)
 	}
 
+	stderr := &tailBuffer{limit: stderrTailBytes}
 	var stderrDone sync.WaitGroup
 	stderrDone.Add(1)
 	go func() {
 		defer stderrDone.Done()
 		s := bufio.NewScanner(stderrPipe)
+		// An oversized line must not end the scan early: the pipe would stop
+		// draining and a child blocked writing stderr never exits.
+		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for s.Scan() {
-			log.Printf("codex stderr: %s", s.Text())
+			line := s.Text()
+			log.Printf("codex stderr: %s", line)
+			stderr.add(line)
+		}
+		if err := s.Err(); err != nil {
+			log.Printf("codex stderr scanner error: %v", err)
+			io.Copy(io.Discard, stderrPipe) //nolint:errcheck // backstop drain
 		}
 	}()
 
@@ -349,6 +388,10 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 		<-waitDone
 		return waitErrVal
 	}
+	stderrTail := func() string {
+		<-waitDone // the stderr reader has finished before waitDone closes
+		return stderr.String()
+	}
 
-	return cmd, lines, waitErr, nil
+	return cmd, lines, waitErr, stderrTail, nil
 }

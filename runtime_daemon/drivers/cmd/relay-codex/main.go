@@ -151,8 +151,13 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	sessionStore.LogRequest(req.SessionID, &req)
 
-	// Never rebuild history implicitly after an ambiguous CLI failure.
-	rebuildFresh := (func() codexInput)(nil)
+	// Only a resumed thread can be missing. The handlers use this solely when a
+	// zero-output resume reports the rollout as gone on stderr; any other
+	// failure keeps the binding and asks the user to reset explicitly.
+	var rebuildFresh func() codexInput
+	if input.IsResume {
+		rebuildFresh = newRebuildFresh(threads, &req, model, sessionDir)
+	}
 
 	if req.Stream {
 		handleStreamResponse(w, r, input, chatID, created, model, includeUsage, req.WorkingDir, req.EnvVars, req.SessionID, rebuildFresh)

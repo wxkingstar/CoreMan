@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"clawrelay-api/pkg/openai"
@@ -25,9 +26,11 @@ import (
 //	turn.completed          → finish_reason chunk + usage chunk
 //	error / turn.failed     → server_error response and stream end
 //
-// Resume failures preserve the existing binding; resetting context is explicit.
+// Resume failures preserve the existing binding, except the verified
+// "no rollout found" signature on a zero-output resume: that turn is retried
+// once on a new thread and the user is told the earlier context is gone.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
-	cmd, lines, waitErr, err := launchCodex(input, workingDir, envVars)
+	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
@@ -57,9 +60,12 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInp
 	defer heartbeat.Stop()
 
 	// First output may be slow: SSE is already open and heartbeats continue.
-	// Empty stdout is not proof that history was lost; never retry as a new thread.
+	// Empty stdout alone is not proof that history was lost. Only the stderr
+	// signature of a missing rollout (canRebuildStaleThread) drops the binding,
+	// and then this turn is retried exactly once on a new thread.
 	var firstLine string
 	haveFirst := false
+	rebuilt := false
 probe:
 	for {
 		select {
@@ -85,12 +91,19 @@ probe:
 				log.Printf("[CODEX] no output + client already gone; not retrying session_id=%s", sessionID)
 				return
 			}
-			// Preserve the binding; an operator/user must explicitly reset lost history.
-			msg := "codex produced no output"
-			if werr != nil {
-				msg += ": " + werr.Error()
+			if !rebuilt && canRebuildStaleThread(input, rebuildFresh, stderrTail()) {
+				log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread session_id=%s", sessionID)
+				rebuilt = true
+				input = rebuildFresh()
+				cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
+				if err != nil {
+					emitCodexFailure(w, flusher, chatID, created, model, "codex could not start a new session: "+err.Error())
+					return
+				}
+				continue
 			}
-			emitCodexFailure(w, flusher, chatID, created, model, msg+"; original session retained, reset explicitly if needed")
+			// Any other silent failure keeps the binding; resetting is the user's call.
+			emitCodexFailure(w, flusher, chatID, created, model, zeroOutputMessage(werr, rebuilt))
 			return
 		}
 	}
@@ -260,15 +273,17 @@ probe:
 				stats.Record(model, inp, out, 0, cr, 0)
 				streamUsage = openai.BuildUsageInfo(inp, out, cr, 0)
 			}
-			// If a resume failed because the thread is gone, drop the stale
-			// binding so the next turn starts fresh. Verified real-world text
-			// is "no rollout found for thread id ..." — it contains neither
-			// "session" nor a stable code, hence the three-noun match. The
-			// usage baseline is tied to that thread's cumulative counter, so
-			// drop it too.
+			// Structured failures keep the binding: codex reports a missing
+			// rollout with zero stdout (handled in the probe above), so an
+			// error event here is not evidence that the thread is gone.
 			textDelta("\n\n[codex error] " + errMsg)
 			emittedAnyContent = true
 		}
+	}
+
+	if rebuilt {
+		// Say that the earlier context is gone before any answer text.
+		textDelta(staleThreadNotice)
 	}
 
 	// The probed first line must flow through the same pipeline as the rest.
@@ -332,17 +347,19 @@ processLines:
 // handleNonStreamResponse runs codex to completion and returns one OpenAI
 // chat.completion JSON. Failures preserve the existing session binding.
 func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
-	cmd, lines, waitErr, err := launchCodex(input, workingDir, envVars)
+	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 
-	// Note: WatchDisconnect captures the ORIGINAL lines channel; after a retry
-	// relaunch the handler itself keeps ranging over the new channel until the
-	// killed process closes it, so the producer never wedges. getCmd is a
-	// closure so the watcher always signals the current child.
-	defer proc.WatchDisconnect(r.Context(), func() *exec.Cmd { return cmd }, lines)()
+	// Note: WatchDisconnect captures the ORIGINAL lines channel; after a
+	// new-thread relaunch the handler itself keeps ranging over the new channel
+	// until the killed process closes it, so the producer never wedges. The
+	// current child is published atomically so the watcher always signals it.
+	var current atomic.Pointer[exec.Cmd]
+	current.Store(cmd)
+	defer proc.WatchDisconnect(r.Context(), current.Load, lines)()
 
 	var (
 		fullText      strings.Builder
@@ -350,6 +367,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 		errorMsg      string
 		threadIDSeen  string
 		turnCompleted bool
+		rebuilt       bool
 	)
 
 	for {
@@ -420,12 +438,27 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 			log.Printf("[CODEX] no output because client disconnected (non-stream); not retrying session_id=%s", sessionID)
 			return
 		}
-		// Preserve the binding; an operator/user must explicitly reset lost history.
-		msg := "codex produced no output"
-		if werr != nil {
-			msg += ": " + werr.Error()
+		if !rebuilt && canRebuildStaleThread(input, rebuildFresh, stderrTail()) {
+			log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread (non-stream) session_id=%s", sessionID)
+			rebuilt = true
+			input = rebuildFresh()
+			cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
+			if err != nil {
+				openai.WriteError(w, http.StatusInternalServerError, "server_error", "codex could not start a new session: "+err.Error())
+				return
+			}
+			current.Store(cmd)
+			if r.Context().Err() != nil {
+				// The watcher may already have fired for the previous child.
+				proc.KillGroup(cmd)
+				for range lines {
+				}
+				return
+			}
+			continue
 		}
-		openai.WriteError(w, http.StatusInternalServerError, "server_error", msg)
+		// Any other silent failure keeps the binding; resetting is the user's call.
+		openai.WriteError(w, http.StatusInternalServerError, "server_error", zeroOutputMessage(werr, rebuilt))
 		return
 	}
 
@@ -441,6 +474,9 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	if body == "" {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", "Empty response from codex")
 		return
+	}
+	if rebuilt {
+		body = staleThreadNotice + body
 	}
 
 	resp := openai.ChatCompletionResponse{
@@ -485,6 +521,40 @@ func isStaleThreadErr(errMsg string) bool {
 	return gone && (strings.Contains(m, "thread") ||
 		strings.Contains(m, "session") ||
 		strings.Contains(m, "rollout"))
+}
+
+// staleThreadNotice precedes the answer when a resumed thread turned out to be
+// gone and the turn ran on a new thread instead.
+const staleThreadNotice = "[codex] 之前的会话记录已不存在，已开启新会话\n\n"
+
+// canRebuildStaleThread reports whether a zero-output resume failed because the
+// thread itself is gone. codex exits 1 with empty stdout and writes "no rollout
+// found for thread id ..." to stderr only. stderr is matched line by line so
+// words from unrelated lines cannot combine into a false verdict; anything
+// else (auth, network, crashes) must keep the existing binding.
+func canRebuildStaleThread(input codexInput, rebuildFresh func() codexInput, stderr string) bool {
+	if !input.IsResume || rebuildFresh == nil {
+		return false
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if isStaleThreadErr(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// zeroOutputMessage is the user-visible reason for a codex run that produced
+// no stdout at all.
+func zeroOutputMessage(werr error, rebuilt bool) string {
+	msg := "codex produced no output"
+	if werr != nil {
+		msg += ": " + werr.Error()
+	}
+	if rebuilt {
+		return msg + "（之前的会话记录已不存在，新会话也未能启动，请稍后重试）"
+	}
+	return msg + "（原会话已保留；如需开启新会话，请发送 reset）"
 }
 
 // abortCodexAndHarvest handles a client disconnect mid-stream: SIGINT the
