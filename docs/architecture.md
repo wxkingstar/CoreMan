@@ -12,6 +12,29 @@ CoreMan separates chat delivery, task execution and administration into independ
 
 The services coordinate through persisted state rather than an additional message broker. Multiple workers and gateways use database claims and leases to avoid concurrent ownership.
 
+## Configuration layers
+
+Configuration comes from five layers. Each layer owns its own keys, so there is no general rule where a later layer overrides an earlier one. Where layers do interact, the rules are listed under [Precedence](#precedence).
+
+| Layer | Stored in | Example keys | Changed through | Takes effect |
+|---|---|---|---|---|
+| 1. Infrastructure | `.env` or the process environment (`coreman/core/config.py`) | `DATABASE_URL`, `MASTER_KEY`, `PUBLIC_BASE_URL`, `OBJECT_STORAGE` | Edit `.env` on the deployment host | After the services restart |
+| 2. Platform settings | `settings` table (keys and defaults in `coreman/core/settings_schema.py`) | `session_ttl_hours`, `max_concurrent_tasks` / `fast_lane_slots`, `prompt_*` | Settings page (`PUT /api/admin/settings`, platform administrators) | Saving publishes `config_changed`. Processes also refresh their 60-second cache |
+| 3. Bot | `bots` row | `model`, `relay_server_id`, `verbosity_level` / `effort_level`, `sse_timeout_seconds`, `env_vars` | Bot pages (bot administrators) | Next task. Gateways reload on `config_changed` |
+| 4. Runtime instance | `relay_servers` row, plus the global `model_catalog` | `model_provider`, `supported_models_mode` / `supported_models`, `visibility` | Runtime and model catalog pages (AI committee, platform administrators) | Next bot edit or task |
+| 5. Runtime node | `~/.local/share/coreman-runtime/config.json` (mode 0600) and the runtime user's service environment | `max_concurrent`, `proxy` / `control_proxy`, `workspace_root`, and the CA bundle via `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS` | Install link options set the first values. After that, edit the file or environment on the node | After the daemon restarts |
+
+Missing keys in layer 2 fall back to `SETTING_DEFAULTS`. The `settings` table also holds `alert_channels` and `notification_smtp`, which are edited on their own pages. Secrets stay in layer 1 or in encrypted `*_enc` columns. A node's token exists only in its local `config.json`.
+
+### Precedence
+
+- **Defaults and bots.** `default_verbosity_level`, `default_effort_level` and `default_model` only fill in the new-bot form. Once a bot is saved, its row wins. Changing a default never rewrites existing bots.
+- **Default model.** `default_model` is derived, not stored. It is the default of the `claude` provider in `model_catalog`, or the `codex` default if `claude` has none. Retired rows are skipped. The settings API rejects writes to it. Change the default in the model catalog instead.
+- **Models.** A bot's `model` must belong to its runtime instance's effective model set. `inherit` means every non-retired catalog model of the provider. `restricted` means `supported_models` intersected with the catalog.
+- **Visibility.** An instance with `visibility = admins` is offered only to the AI committee and platform administrators when a runtime is chosen for a bot.
+- **Concurrency.** `max_concurrent_tasks` (layer 2) caps the tasks workers run across the platform and reserves `fast_lane_slots` of them. A node's `max_concurrent` (layer 5, default 10, 1-32 at install time) caps the calls that node accepts. The two limits are independent, so a task admitted by the worker gate still waits in the node queue when that node is full.
+- **Timeouts.** `bots.sse_timeout_seconds` bounds a single run. IM delivery deadlines are fixed platform policy. `bots.agent_timeout_seconds` is no longer read and will be removed in the next release.
+
 Secrets remain in deployment configuration or encrypted database fields. Do not expose database, monitoring or driver ports as public application endpoints. Deploy independent runtime user environments when workloads require separation.
 
 For installation and upgrades, see [operations](operations.md) and [Runtime Daemon](../runtime_daemon/README.md).
