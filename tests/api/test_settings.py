@@ -49,7 +49,7 @@ async def test_get_put_defaults_and_guard(
     ).status_code == 200
     assert (
         await admin_client.post(
-            "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234"}
+            "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234-bootstrap"}
         )
     ).status_code == 403
 
@@ -78,7 +78,7 @@ async def test_null_only_allowed_for_effort_level(admin_client: httpx.AsyncClien
         await admin_client.put("/api/admin/settings", json={"default_effort_level": None})
     ).status_code == 200
     r = await admin_client.post(
-        "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234"}
+        "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234-bootstrap"}
     )
     assert r.status_code == 200
 

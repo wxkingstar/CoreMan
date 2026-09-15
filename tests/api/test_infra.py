@@ -44,7 +44,7 @@ def infra_app(app: FastAPI) -> FastAPI:
 async def _login(client: httpx.AsyncClient) -> None:
     assert (
         await client.post(
-            "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234"}
+            "/api/auth/bootstrap", json={"username": "admin", "password": "pass-1234-bootstrap"}
         )
     ).status_code == 200
 
