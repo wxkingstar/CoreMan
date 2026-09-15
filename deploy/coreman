@@ -511,6 +511,8 @@ upgrade_api() {
   if [[ "${COREMAN_SKIP_MIGRATION:-0}" != "1" ]]; then compose run --rm --no-deps --pull never migrate; fi
   local s
   for s in api-1 api-2; do compose up -d --no-deps --pull never "$s"; wait_healthy "$s"; done
+  # API 只信任 edge 网段转发的客户端地址；Caddy 的网络配置变化时随 API 一并重建，未变化时不做任何事
+  compose up -d --no-deps --pull never caddy
 }
 
 upgrade_scheduler() {
