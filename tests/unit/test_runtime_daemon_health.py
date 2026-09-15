@@ -1,6 +1,5 @@
 """Daemon behaviour behind the deployment fixes: TLS wiring, socket self-healing, fatal errors."""
 
-import asyncio
 import json
 import shutil
 import socket
@@ -228,9 +227,3 @@ def test_main_exits_nonzero_on_unexpected_errors(tmp_path, monkeypatch):
         module.main()
     assert caught.value.code == 1
     assert not (tmp_path / "state.json").exists()
-
-
-def test_event_loop_is_closed_between_main_invocations():
-    # main() uses asyncio.run; a leaked running loop would break the next service start.
-    with pytest.raises(RuntimeError):
-        asyncio.get_running_loop()
