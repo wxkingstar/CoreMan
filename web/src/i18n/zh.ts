@@ -501,6 +501,8 @@ export default {
     bootstrapEnabled: '引导登录',
     bootstrapHint: '关闭前请先配置并启用一个具备登录能力的平台应用，否则任何人都无法登录。',
     defaultModel: '默认模型',
+    defaultModelHint: '由模型目录中标记为「默认」的模型决定，这里只读；如需更改，请在「运行时管理 → 模型目录」中设置默认模型。',
+    defaultModelNone: '未设置（模型目录为空或全部已退役）',
     defaultVerbosity: '默认输出详细度',
     defaultEffort: '默认思考档位',
     effortNone: '不设置',

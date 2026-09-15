@@ -503,6 +503,8 @@ export default {
     bootstrapEnabled: 'ブートストラップログイン',
     bootstrapHint: '管理者アカウント、または企業プラットフォームでログインしてください。',
     defaultModel: '既定モデル',
+    defaultModelHint: 'モデルカタログで「既定」に設定されたモデルが使われます（ここでは変更できません）。変更するには「ランタイム管理 → モデルカタログ」で既定モデルを設定してください。',
+    defaultModelNone: '未設定（モデルカタログが空、またはすべて廃止済み）',
     defaultVerbosity: '既定の出力詳細度',
     defaultEffort: '既定の思考レベル',
     effortNone: '設定しない',

@@ -104,3 +104,31 @@ it('saves one section while retaining unsaved changes in another', async () => {
   expect(form.prompt_runtime_tail).toBe('unsaved prompt')
   wrapper.unmount()
 })
+
+// 默认模型由模型目录派生：设置页只读展示，PUT 不能带 default_model（后端 422）。
+it('shows the default model read-only and never submits it', async () => {
+  setActivePinia(createPinia())
+  vi.mocked(settings.update).mockClear()
+  const wrapper = mount(SettingsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  const item = wrapper.get('[data-test="default-model"]')
+  expect(item.text()).toContain('vllm/claude-sonnet-4-6')
+  expect(item.text()).toContain(i18n.global.t('settings.defaultModelHint'))
+  expect(item.find('input').exists()).toBe(false)
+  const form = (wrapper.vm as unknown as { form: { default_model: string | null; session_ttl_hours: number } }).form
+  form.default_model = 'someone/else'
+  form.session_ttl_hours = 12
+  await wrapper.get('[data-test="save"]').trigger('click')
+  await flushPromises()
+  expect(settings.update).toHaveBeenCalledWith({ session_ttl_hours: 12 })
+  wrapper.unmount()
+})
+
+it('explains a missing default model', async () => {
+  setActivePinia(createPinia())
+  vi.mocked(settings.get).mockResolvedValueOnce({ ...serverSettings, default_model: null } as never)
+  const wrapper = mount(SettingsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  expect(wrapper.get('[data-test="default-model"]').text()).toContain(i18n.global.t('settings.defaultModelNone'))
+  wrapper.unmount()
+})
