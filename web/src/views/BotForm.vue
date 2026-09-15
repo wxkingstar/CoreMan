@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { errorMessage, fieldErrorMap } from '@/utils/errors'
+import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
@@ -59,6 +59,8 @@ const form = reactive<BotIn>(emptyForm())
 const formRef = ref<FormInstance>()
 const fieldErrors = reactive<Record<string, string>>({})
 const saving = ref(false)
+/** If-Match 用的版本号：版本冲突后会刷新成最新值，表单内容保留。 */
+const version = ref(props.bot?.version ?? 0)
 let originalForm = ''
 const { confirmDiscard } = useUnsavedChanges(() => !!originalForm && originalForm !== JSON.stringify(form))
 async function cancel() { if (await confirmDiscard()) emit('cancel') }
@@ -244,19 +246,33 @@ async function submit(): Promise<void> {
       emit('cancel')
       return
     }
-    const updated = await bots.patch(b.id, changed, b.version)
+    const updated = await bots.patch(b.id, changed, version.value)
     ElMessage.success(t('bots.saved'))
     originalForm = JSON.stringify(form)
     emit('saved', updated)
   } catch (e) {
-    // 编辑冲突（If-Match 不匹配）用统一文案；其它（422 校验、创建时 bot_key 重复）直接给后端原话。
-    if (props.mode === 'edit' && e instanceof ApiError && e.status === 409) ElMessage.warning(t('common.conflict'))
+    // 只有乐观锁版本冲突才用统一文案；其它 409（工作目录被占用、飞书应用已分配）与 422 直接给后端原话。
+    if (props.mode === 'edit' && isVersionConflict(e)) await reloadVersion()
     else {
       Object.assign(fieldErrors, fieldErrorMap(e, fieldLabels.value))
       fail(e)
     }
   } finally {
     saving.value = false
+  }
+}
+
+/**
+ * 版本冲突后只刷新版本号：changedFields 仍以打开表单时的快照为基准，再次保存只提交用户改过的字段，
+ * 不会把别人刚改的其它字段用旧值覆盖回去。
+ */
+async function reloadVersion(): Promise<void> {
+  ElMessage.warning(t('common.conflictReloaded'))
+  if (!props.bot) return
+  try {
+    version.value = (await bots.get(props.bot.id)).version
+  } catch (e) {
+    fail(e)
   }
 }
 

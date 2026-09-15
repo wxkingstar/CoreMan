@@ -135,6 +135,7 @@ export default {
     modify: '修改',
     comingSoon: '该功能即将开放',
     conflict: '数据已被他人修改，请刷新后重试',
+    conflictReloaded: '数据已被他人修改，已获取最新版本；请确认后再次保存。',
     fieldError: '{field}：{detail}',
     errorSeparator: '；',
     moreErrors: '等 {count} 项',

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { errorMessage } from '@/utils/errors'
+import { errorMessage, isVersionConflict } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots, relays } from '@/api/admin'
-import { ApiError } from '@/api/client'
+
 import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
 import HealthTag from '@/components/HealthTag.vue'
 import { pctColor, pctNum } from '@/utils/format'
@@ -21,6 +21,8 @@ const saving = ref(false)
 const targetId = ref<string | null>(null)
 const models = ref<string[]>([])
 const model = ref<string>('')
+/** If-Match 用的版本号：版本冲突后刷新成最新值。 */
+const version = ref(props.bot.version)
 
 const target = computed(() => relayList.value.find((r) => r.id === targetId.value) ?? null)
 // 挂载时会预选当前 relay，此时直接确认就是空操作：后端照样写一条 diff 为空的 bot.switch_relay 审计。
@@ -29,8 +31,17 @@ const unchanged = computed(() => targetId.value === props.bot.relay_server_id &&
 const backendChanged = computed(() => !!target.value && !!model.value && backendOf(model.value) !== props.bot.backend)
 
 function fail(e: unknown): void {
-  if (e instanceof ApiError && e.status === 409) ElMessage.error(t('common.conflict'))
-  else ElMessage.error(errorMessage(e))
+  ElMessage.error(errorMessage(e))
+}
+
+/** 只有乐观锁冲突才提示并发修改，并拉最新版本号；其它 409 给后端原话。 */
+async function reloadVersion(): Promise<void> {
+  ElMessage.warning(t('common.conflictReloaded'))
+  try {
+    version.value = (await bots.get(props.bot.id)).version
+  } catch (e) {
+    fail(e)
+  }
 }
 
 /** 选中一台 relay：载入它的有效模型集，当前模型还在集合里就留着，否则落到该 relay 的默认模型。 */
@@ -51,12 +62,13 @@ async function confirm(): Promise<void> {
   if (!targetId.value || !model.value || unchanged.value) return
   saving.value = true
   try {
-    const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value }, props.bot.version)
+    const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value }, version.value)
     ElMessage.success(t('bots.switch.done'))
     emit('switched', result)
     emit('update:visible', false)
   } catch (e) {
-    fail(e)
+    if (isVersionConflict(e)) await reloadVersion()
+    else fail(e)
   } finally {
     saving.value = false
   }

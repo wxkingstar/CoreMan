@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/admin', () => ({
-  bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), patch: vi.fn() },
+  bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), patch: vi.fn(), get: vi.fn() },
   relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
   catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
   settings: { defaults: vi.fn().mockResolvedValue({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' }) },
@@ -123,6 +123,49 @@ describe('BotForm', () => {
     expect(wrapper.get('[data-test="name"]').classes()).not.toContain('is-error')
     expect(wrapper.emitted('saved')).toBeFalsy()
     error.mockRestore()
+    wrapper.unmount()
+  })
+
+  // 只有版本冲突才提示「已被他人修改」；工作目录被占用这类 409 要把后端原话给用户，不能误导去刷新。
+  it('shows the backend message for non-version 409 conflicts', async () => {
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    const warning = vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
+    vi.mocked(bots.patch).mockRejectedValueOnce(new ApiError(409, 409, '该实例工作目录已属于另一个机器人'))
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    await wrapper.get('[data-test="working_dir"] input').setValue('/data/skills/other_bot')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(error).toHaveBeenCalledWith('该实例工作目录已属于另一个机器人')
+    expect(warning).not.toHaveBeenCalled()
+    expect(bots.get).not.toHaveBeenCalled()
+    error.mockRestore()
+    warning.mockRestore()
+    wrapper.unmount()
+  })
+
+  // 版本冲突后要拿到最新版本号，否则用户再点保存还是带旧 If-Match，必然再 409。
+  it('reloads the version after an optimistic-lock conflict and retries with it', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
+    vi.mocked(bots.patch).mockReset()
+    vi.mocked(bots.patch)
+      .mockRejectedValueOnce(new ApiError(409, 409, '记录已被他人修改，请刷新后重试'))
+      .mockResolvedValueOnce({ ...editBot, name: '新名字', version: 6 })
+    vi.mocked(bots.get).mockResolvedValueOnce({ ...editBot, description: '别人改的', version: 5 })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    await wrapper.get('[data-test="name"] input').setValue('新名字')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(warning).toHaveBeenCalledWith(i18n.global.t('common.conflictReloaded'))
+    expect(bots.get).toHaveBeenCalledWith('b1')
+    expect(wrapper.emitted('saved')).toBeFalsy()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    // 只提交自己改过的字段（别人改的 description 不会被旧值覆盖），版本号用刚拉到的最新值。
+    expect(vi.mocked(bots.patch).mock.calls.map((c) => [c[1], c[2]])).toEqual([[{ name: '新名字' }, 1], [{ name: '新名字' }, 5]])
+    expect(wrapper.emitted('saved')).toBeTruthy()
+    warning.mockRestore()
     wrapper.unmount()
   })
 })

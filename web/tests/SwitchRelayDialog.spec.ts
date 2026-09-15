@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { describe, expect, it, vi } from 'vitest'
 
 // vi.mock() 的工厂会被提升到模块顶部，直接引用模块级 const 会 ReferenceError；
@@ -24,6 +24,7 @@ vi.mock('@/api/admin', () => ({
       : { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6'], default: 'vllm/claude-sonnet-4-6' }),
   },
   bots: {
+    get: vi.fn().mockResolvedValue({ id: 'b1', version: 7 }),
     switchRelay: vi.fn().mockResolvedValue({
       old_relay_id: 'r1', new_relay_id: 'r2',
       old_model: 'vllm/claude-sonnet-4-6', new_model: 'codex/gpt-5.5',
@@ -33,6 +34,7 @@ vi.mock('@/api/admin', () => ({
 }))
 
 import { bots } from '@/api/admin'
+import { ApiError } from '@/api/client'
 import { i18n } from '@/i18n'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
@@ -77,6 +79,41 @@ describe('SwitchRelayDialog', () => {
     await flushPromises()
     expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5' }, 1)
     expect(wrapper.emitted('switched')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  // 换机的 409 不全是并发冲突（例如目标工作目录已被占用）：只有版本冲突才提示刷新，并换上最新版本号。
+  it('reloads the version after a version conflict and shows other 409s verbatim', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    vi.mocked(bots.switchRelay).mockClear()
+    vi.mocked(bots.switchRelay)
+      .mockRejectedValueOnce(new ApiError(409, 409, '机器人已被其他操作修改，请刷新后重试'))
+      .mockRejectedValueOnce(new ApiError(409, 409, '该实例工作目录已属于另一个机器人'))
+    const bot = { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude' }
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: bot as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; confirm: () => Promise<void> }
+    await vm.pick('r2')
+    await flushPromises()
+    await vm.confirm()
+    await flushPromises()
+    expect(warning).toHaveBeenCalledWith(i18n.global.t('common.conflictReloaded'))
+    expect(bots.get).toHaveBeenCalledWith('b1')
+    await vm.confirm()
+    await flushPromises()
+    expect(error).toHaveBeenCalledWith('该实例工作目录已属于另一个机器人')
+    expect(error).not.toHaveBeenCalledWith(i18n.global.t('common.conflict'))
+    await vm.confirm()
+    await flushPromises()
+    expect(vi.mocked(bots.switchRelay).mock.calls.map((c) => c[2])).toEqual([1, 7, 7])
+    expect(wrapper.emitted('switched')).toBeTruthy()
+    warning.mockRestore()
+    error.mockRestore()
     wrapper.unmount()
   })
 })

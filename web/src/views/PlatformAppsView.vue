@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { errorMessage, fieldErrorMap } from '@/utils/errors'
+import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { platformApps, syncRuns } from '@/api/admin'
-import { ApiError } from '@/api/client'
+
 import type { Platform, PlatformAppIn, PlatformAppOut, SyncRun } from '@/api/types'
 import SecretInput from '@/components/SecretInput.vue'
 import SyncRunsDialog from '@/components/SyncRunsDialog.vue'
@@ -81,7 +81,7 @@ async function toggle(a: PlatformAppOut) {
     Object.assign(a, updated)
     ElMessage.success(t('common.saved'))
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409) ElMessage.warning(t('common.conflict'))
+    if (isVersionConflict(e)) ElMessage.warning(t('common.conflict'))
     else ElMessage.error(errorMessage(e))
     await reload()
   }
@@ -243,7 +243,8 @@ async function submitForm() {
     dialogVisible.value = false
     await reload()
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
+    // 只有版本冲突才关窗重载；「记录已存在」这类 409 保留表单，给后端原话。
+    if (isVersionConflict(e)) {
       ElMessage.warning(t('common.conflict'))
       dialogVisible.value = false
       await reload()
