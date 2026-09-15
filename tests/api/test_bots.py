@@ -18,7 +18,7 @@ def _bot_body(**over: object) -> dict[str, object]:
         "name": "销售助手",
         "description": "卖货",
         "relay_server_id": None,
-        "model": "vllm/claude-sonnet-4-6",
+        "model": "claude-sonnet-4-6",
         "working_dir": "/data/skills/sales_bot",
         "system_prompt": "你是销售",
         "verbosity_level": 2,

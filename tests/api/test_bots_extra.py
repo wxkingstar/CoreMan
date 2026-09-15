@@ -61,7 +61,7 @@ async def test_switch_relay_resolves_model(
     assert r.status_code == 200, r.text
     d = r.json()["data"]
     assert (
-        d["old_model"] == "vllm/claude-sonnet-4-6"
+        d["old_model"] == "claude-sonnet-4-6"
         and d["new_model"] == "codex/gpt-5.5"
         and d["bot"]["backend"] == "codex"
     )
@@ -75,10 +75,10 @@ async def test_switch_relay_resolves_model(
     ).status_code == 422
     r = await client.post(
         f"/api/admin/bots/{bot['id']}/switch-relay",
-        json={"relay_server_id": ids["claude01"], "model": "vllm/claude-opus-4-6"},
+        json={"relay_server_id": ids["claude01"], "model": "claude-opus-4-6"},
         headers={"If-Match": f'"{v}"'},
     )
-    assert r.status_code == 200 and r.json()["data"]["new_model"] == "vllm/claude-opus-4-6"
+    assert r.status_code == 200 and r.json()["data"]["new_model"] == "claude-opus-4-6"
     audit = (
         (
             await db_session.execute(
@@ -88,7 +88,7 @@ async def test_switch_relay_resolves_model(
         .scalars()
         .all()
     )
-    assert len(audit) == 2 and audit[0].diff["model"] == ["vllm/claude-sonnet-4-6", "codex/gpt-5.5"]
+    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-4-6", "codex/gpt-5.5"]
 
 
 async def test_switch_relay_permissions_and_xhigh_downgrade(
@@ -97,7 +97,7 @@ async def test_switch_relay_permissions_and_xhigh_downgrade(
     bot, ids, _ = await _setup(client, db_session)
     row = (
         await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "vllm/claude-sonnet-4-6")
+            select(ModelCatalog).where(ModelCatalog.model == "claude-sonnet-4-6")
         )
     ).scalar_one()
     row.supports_xhigh = True
@@ -185,7 +185,7 @@ async def test_same_relay_model_switch_skips_relay_visibility(
         created_by=owner.id,
         team_id=team.id,
         relay_server_id=hidden.id,
-        model="vllm/claude-sonnet-4-6",
+        model="claude-sonnet-4-6",
         working_dir="/d",
         # 创建者读详情会解密凭证，得是真密文
         credentials_enc=encrypt_json(
@@ -197,11 +197,11 @@ async def test_same_relay_model_switch_skips_relay_visibility(
     await db_session.refresh(bot)
     r = await client.post(
         f"/api/admin/bots/{bot.id}/switch-relay",
-        json={"relay_server_id": str(hidden.id), "model": "vllm/claude-opus-4-6"},
+        json={"relay_server_id": str(hidden.id), "model": "claude-opus-4-6"},
         headers={"If-Match": f'"{bot.version}"'},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["data"]["new_model"] == "vllm/claude-opus-4-6"
+    assert r.json()["data"]["new_model"] == "claude-opus-4-6"
     moved = await client.post(
         f"/api/admin/bots/{bot.id}/switch-relay",
         json={"relay_server_id": str(hidden2.id)},
@@ -217,7 +217,7 @@ async def test_switch_relay_explicit_model_without_xhigh_is_422(
     bot, ids, _ = await _setup(client, db_session)
     row = (
         await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "vllm/claude-sonnet-4-6")
+            select(ModelCatalog).where(ModelCatalog.model == "claude-sonnet-4-6")
         )
     ).scalar_one()
     row.supports_xhigh = True
@@ -230,7 +230,7 @@ async def test_switch_relay_explicit_model_without_xhigh_is_422(
     assert r.status_code == 200, r.text
     bad = await client.post(
         f"/api/admin/bots/{bot['id']}/switch-relay",
-        json={"relay_server_id": ids["claude01"], "model": "vllm/claude-opus-4-6"},
+        json={"relay_server_id": ids["claude01"], "model": "claude-opus-4-6"},
         headers={"If-Match": f'"{r.json()["data"]["version"]}"'},
     )
     assert bad.status_code == 422 and bad.json()["message"] == "该模型不支持 xhigh"
