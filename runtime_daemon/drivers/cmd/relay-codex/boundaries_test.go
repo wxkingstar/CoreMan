@@ -232,6 +232,9 @@ func TestRebuiltThreadThatAlsoFailsIsReported(t *testing.T) {
 
 func TestStaleThreadSignatureIsMatchedPerStderrLine(t *testing.T) {
 	rebuild := func() codexInput { return codexInput{} }
+	if canRebuildStaleThread(resumeInput(), rebuild, "Error: session expired\nthread abc not found\n") {
+		t.Fatal("only the verified missing-rollout signature may rebuild a resumed thread")
+	}
 	if canRebuildStaleThread(resumeInput(), rebuild, "worker thread started\nconfig file not found\n") {
 		t.Fatal("words from separate stderr lines must not combine into a stale-thread verdict")
 	}

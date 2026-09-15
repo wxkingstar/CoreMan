@@ -506,29 +506,13 @@ func logCodexRaw(line string) {
 	}
 }
 
-// isStaleThreadErr reports whether a codex error message indicates the
-// resumed thread no longer exists. Verified real-world text is
-// "no rollout found for thread id ..." — it contains NEITHER "session" nor a
-// stable error code, so we match the three nouns codex uses across versions
-// ("session" kept for older/other builds).
+// isStaleThreadErr reports whether a codex stderr line says the resumed thread
+// no longer exists. Only the verified text "no rollout found for thread id ..."
+// counts: broader wording such as "session expired" or "thread ... not found"
+// also appears in transient failures, and rebuilding on those would silently
+// drop a conversation that could still resume.
 func isStaleThreadErr(errMsg string) bool {
-	m := strings.ToLower(errMsg)
-	// 主签名（实证）："no rollout found for thread id ..."
-	if strings.Contains(m, "no rollout found") {
-		return true
-	}
-	// 其余必须是「对象 + 不存在」的组合才算：单凭名词命中就 Forget 的话，
-	// Rust panic 文本（"thread '...' panicked"）、限流提示（"usage limit
-	// reached for this session"）这类瞬态错误会误删有效绑定，把可自愈故障
-	// 放大成不可逆的整会话上下文丢失。
-	gone := strings.Contains(m, "not found") ||
-		strings.Contains(m, "no longer exists") ||
-		strings.Contains(m, "does not exist") ||
-		strings.Contains(m, "missing") ||
-		strings.Contains(m, "expired")
-	return gone && (strings.Contains(m, "thread") ||
-		strings.Contains(m, "session") ||
-		strings.Contains(m, "rollout"))
+	return strings.Contains(strings.ToLower(errMsg), "no rollout found")
 }
 
 // staleThreadNotice precedes the answer when a resumed thread turned out to be

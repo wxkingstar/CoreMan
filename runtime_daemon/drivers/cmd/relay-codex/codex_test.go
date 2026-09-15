@@ -165,9 +165,10 @@ func TestIsStaleThreadErr(t *testing.T) {
 		want bool
 	}{
 		{"no rollout found for thread id 01997e2d-ab12", true},
-		{"ROLLOUT file missing", true}, // case-insensitive
-		{"thread 01997e2d not found", true},
-		{"session expired", true},
+		{"Error: No Rollout Found for thread id x", true}, // case-insensitive
+		{"thread 01997e2d not found", false},
+		{"session expired", false},
+		{"ROLLOUT file missing", false},
 		{"rate limit exceeded, retry later", false},
 		{"stream error: connection reset", false},
 		// 单凭名词命中不删绑定（C2 收紧）：panic/限流文本含 thread/session 但
