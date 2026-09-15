@@ -34,6 +34,9 @@ class RuntimeNode(TimestampMixin, Base):
     service_status: Mapped[str] = mapped_column(Text, server_default="unknown")
     # 节点上报的协议版本；旧节点不上报时为空。
     protocol_version: Mapped[int | None] = mapped_column(Integer)
+    # 节点在心跳里上报的并发上限与当前在执行数；旧节点不上报时为空。
+    max_concurrent: Mapped[int | None] = mapped_column(Integer)
+    active_calls: Mapped[int | None] = mapped_column(Integer)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):

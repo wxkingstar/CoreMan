@@ -38,11 +38,15 @@ def upgrade() -> None:
     op.drop_constraint("uq_relay_servers_host", "relay_servers", type_="unique")
     for column in LEGACY_COLUMNS:
         op.alter_column("relay_servers", column, nullable=True)
-    # 节点遥测：协议版本（旧节点不上报，保持为空）。
+    # 节点遥测：协议版本、并发上限与当前在执行数（旧节点不上报，保持为空）。
     op.add_column("runtime_nodes", sa.Column("protocol_version", sa.Integer(), nullable=True))
+    op.add_column("runtime_nodes", sa.Column("max_concurrent", sa.Integer(), nullable=True))
+    op.add_column("runtime_nodes", sa.Column("active_calls", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("runtime_nodes", "active_calls")
+    op.drop_column("runtime_nodes", "max_concurrent")
     op.drop_column("runtime_nodes", "protocol_version")
     # 已删除的独立实例无法恢复；节点实例补回旧版本要求的非空值（主机取节点 ID）。
     op.execute("UPDATE relay_servers SET host = runtime_node_id::text WHERE host IS NULL")

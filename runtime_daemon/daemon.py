@@ -719,6 +719,9 @@ class Daemon:
             "version": __version__,
             "protocol": PROTOCOL_VERSION,
             "service_status": self.config.get("service_status", "foreground"),
+            # Shown in the console so an overloaded node is visible before calls time out.
+            "max_concurrent": self.max_concurrent,
+            "active_calls": len([task for task in self.tasks.values() if not task.done()]),
         }
 
     async def heartbeat_loop(self) -> None:

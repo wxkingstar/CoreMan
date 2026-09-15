@@ -178,7 +178,17 @@ async def test_stopping_mid_poll_hands_claimed_commands_back(node):
     assert node.server_protocol == 2
 
 
-def test_heartbeat_and_enroll_report_the_protocol_version(node):
+async def test_heartbeat_reports_protocol_and_concurrency(node):
     body = node.heartbeat_body()
     assert body["protocol"] == module.PROTOCOL_VERSION == 2
     assert {"claude", "codex", "version", "service_status"} <= set(body)
+    assert body["max_concurrent"] == 2 and body["active_calls"] == 0
+    running = asyncio.create_task(asyncio.sleep(60))
+    finished = asyncio.create_task(asyncio.sleep(0))
+    await finished
+    node.tasks.update(one=running, two=finished)
+    try:
+        assert node.heartbeat_body()["active_calls"] == 1
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
