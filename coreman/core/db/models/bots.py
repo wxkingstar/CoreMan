@@ -70,7 +70,7 @@ class Bot(TimestampMixin, Base):
     env_vars_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
     welcome_message: Mapped[str | None] = mapped_column(Text)
     notify_webhook_url: Mapped[str | None] = mapped_column(Text)
-    # 已停用的历史列，仅兼容现有数据库；不再通过 API 配置或展示。
+    # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")
     )

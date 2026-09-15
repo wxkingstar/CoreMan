@@ -49,12 +49,7 @@ async def test_bot_key_check_and_members(db_session: AsyncSession) -> None:
     )
     db_session.add(bot)
     await db_session.commit()
-    assert (
-        bot.version == 1
-        and bot.verbosity_level == 1
-        and bot.sse_timeout_seconds == 3600
-        and bot.custom_command_modules == []
-    )
+    assert bot.version == 1 and bot.verbosity_level == 1 and bot.sse_timeout_seconds == 3600
     db_session.add(BotMember(bot_id=bot.id, user_id=u.id, added_by=u.id))
     await db_session.commit()
     assert (await db_session.execute(select(BotMember))).scalar_one().role == "admin"
