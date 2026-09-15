@@ -28,8 +28,12 @@ from coreman.core.timeutils import utcnow
 router = APIRouter(prefix="/api/admin", tags=["skill-install"], dependencies=[Depends(verify_csrf)])
 
 
-async def admin_bot(session: AsyncSession, identity: uuid.UUID, actor: User) -> Bot:
-    bot = await session.scalar(select(Bot).where(Bot.id == identity).with_for_update())
+async def admin_bot(
+    session: AsyncSession, identity: uuid.UUID, actor: User, *, lock: bool = True
+) -> Bot:
+    # 写路径锁 bots 行串行化安装/卸载；只读查询不加锁，免得被并发写操作或换机阻塞。
+    query = select(Bot).where(Bot.id == identity)
+    bot = await session.scalar(query.with_for_update() if lock else query)
     if bot is None:
         raise not_found("机器人不存在")
     if not await installs.bot_admin(session, bot, actor):
@@ -86,7 +90,7 @@ async def bot_skills(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await admin_bot(session, bot_id, actor)
+    await admin_bot(session, bot_id, actor, lock=False)
     rows = (
         await session.execute(
             select(BotSkill, Skill)
