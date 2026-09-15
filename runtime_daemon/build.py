@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -12,6 +13,42 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_NAME = "SOURCE-MANIFEST.json"
+
+
+def source_files(root: Path) -> list[Path]:
+    """Sources a bundle is built from: daemon Python, requirements and driver sources.
+
+    Must match coreman/core/runtime_nodes/bundle.py, which refuses to serve a bundle whose
+    recorded digest differs from the local source tree (a test keeps both in step).
+    """
+    daemon = root / "runtime_daemon"
+    drivers = daemon / "drivers"
+    files = [*sorted(daemon.glob("*.py")), daemon / "requirements.txt"]
+    for path in sorted(drivers.rglob("*")):
+        parts = path.relative_to(drivers).parts
+        if (
+            path.is_file()
+            and not path.name.endswith("_test.go")
+            and "testdata" not in parts
+            and not any(part.startswith(".") for part in parts)
+        ):
+            files.append(path)
+    return files
+
+
+def source_manifest(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in source_files(root)
+    }
+
+
+def source_digest(files: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(f"{name}\0{files[name]}\n".encode())
+    return digest.hexdigest()
 
 
 def main():
@@ -24,6 +61,8 @@ def main():
     )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    files = source_manifest(ROOT)
+    manifest = json.dumps({"source_digest": source_digest(files), "files": files}, indent=2)
     with tempfile.TemporaryDirectory(prefix="runtime-build-") as tmp:
         stage = Path(tmp)
         wheels = stage / "wheels"
@@ -61,6 +100,7 @@ def main():
             shutil.copy2(ROOT / "runtime_daemon/drivers/LICENSE", bundle / "LICENSE.clawrelay")
             shutil.copy2(ROOT / "runtime_daemon/drivers/SOURCE.json", bundle / "SOURCE.json")
             shutil.copytree(wheels, bundle / "wheels")
+            (bundle / MANIFEST_NAME).write_text(manifest)
             for provider in ("claude", "codex"):
                 subprocess.run(
                     [
@@ -84,6 +124,8 @@ def main():
                         )
             checksum = hashlib.sha256(path.read_bytes()).hexdigest()
             path.with_suffix(path.suffix + ".sha256").write_text(checksum + "\n")
+            # The API compares this with the local sources before serving the bundle.
+            path.with_name(path.name + ".manifest.json").write_text(manifest)
             print(path)
 
 

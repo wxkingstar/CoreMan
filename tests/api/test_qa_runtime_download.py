@@ -1,8 +1,13 @@
 """Exercise install package delivery and revocation against isolated fixtures."""
 
 import hashlib
+import json
+from pathlib import Path
 
+from coreman.core.runtime_nodes import bundle as bundles
 from tests.api.conftest import login_as
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 async def test_bundle_bytes_checksum_no_store_and_revocation(client, db_session, app, tmp_path):
@@ -25,6 +30,15 @@ async def test_bundle_bytes_checksum_no_store_and_revocation(client, db_session,
     bundle = tmp_path / "coreman-runtime-darwin-arm64.tar.gz"
     bundle.write_bytes(payload)
     bundle.with_suffix(".gz.sha256").write_text(checksum + "  " + bundle.name)
+    # 从源码运行时：没有源码摘要清单或摘要过期的发布包不下发，并提示重新构建。
+    missing = await client.get(url)
+    assert missing.status_code == 503 and "build.py" in missing.json()["message"]
+    manifest = bundles.manifest_path(bundle)
+    manifest.write_text(json.dumps({"source_digest": "0" * 64}))
+    stale = await client.get(url)
+    assert stale.status_code == 503 and "摘要不一致" in stale.json()["message"]
+    digest = bundles.source_digest(bundles.source_manifest(REPO))
+    manifest.write_text(json.dumps({"source_digest": digest}))
     response = await client.get(url)
     assert response.status_code == 200
     assert response.content == payload and response.headers["x-sha256"] == checksum
