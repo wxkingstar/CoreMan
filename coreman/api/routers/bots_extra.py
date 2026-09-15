@@ -133,7 +133,7 @@ async def switch_relay(
             cipher=request.app.state.cipher,
         )
     except SwitchError as exc:
-        raise ApiError(exc.status, exc.status, exc.message) from exc
+        raise ApiError(exc.status, exc.code, exc.message) from exc
     await session.commit()
     await session.refresh(bot)
     set_etag(response, bot.version)
