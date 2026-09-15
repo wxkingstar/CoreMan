@@ -749,7 +749,7 @@ unset INSTALL_URL
 
 安装脚本下载发布包并核对 X-SHA256，建立独立 venv，持久保存节点身份并注册。临时安装脚本含链接配置，完成后删除该确切临时文件。不要用 sudo 运行，否则 Runtime 会安装到 root HOME。
 
-当前用户已有 config.json 时安装器拒绝覆盖。安装成功但等待上线超时，应检查日志和状态，再重启已有服务；不要删除 config.json 或重新生成节点身份。该文件中的 node_id/node_token/backends 必须保留。
+当前用户已有 config.json 时安装器拒绝覆盖，并给出升级与卸载命令。安装器在服务注册成功后才写入 config.json；注册失败会清理本次发布目录与 CA 文件，可以直接重跑。安装成功但等待上线超时，应检查日志和状态，再重启已有服务；不要删除 config.json 或重新生成节点身份。该文件中的 node_id/node_token/backends 必须保留。
 
 ### 11.4 配置字段
 
@@ -830,7 +830,7 @@ chroot 对进程与网络没有单独隔离；宿主机能看到这些进程。�
 4. 备份配置和必要用户数据，按批准的安装/升级工具替换制品，不改变节点身份。
 5. 启动后先检查 CLI 认证，再检查节点心跳、模型能力和最小任务，最后恢复接单。
 
-当前安装器不能覆盖已有 config.json。执行前检查本项目是否已提供可用升级工具；工具不存在时不执行不存在的 upgrade.py，也不把重新安装当作升级。CLI 可以按第 8 节固定版本更新；Runtime 发布目录的升级/回退必须同时更新服务的 WorkingDirectory、ExecStart 和 config.release，保留原身份并验证兼容性。
+当前安装器不能覆盖已有 config.json，重新安装不等于升级。升级 Runtime 使用 `python -m runtime_daemon.install_service --upgrade <发布包> --sha256 <校验值>`：先校验并自检新包，再停服务、切换 release、重写服务定义、启动并等待上线；任一步失败自动回滚到原版本，节点身份保持不变。卸载使用 `--uninstall`，默认保留节点身份、当前发布目录、会话与日志；`--uninstall --purge` 才删除整个数据目录。CLI 可以按第 8 节固定版本更新。
 
 断开 CoreMan 或停止 Daemon 可能取消在途工作，不用生产任务测试重启。冷启动演练必须在测试环境验证“宿主机启动 → 环境启动 → Daemon → 心跳 → 任务”，再交付为自动恢复已完成。
 
@@ -875,10 +875,10 @@ PY
 | --- | --- |
 | 安装下载 503 | API 未发布该架构包，核对 RUNTIME_BUNDLE_DIR 与 API 容器挂载 |
 | 安装链接 410 | 过期或已使用；有 config 的环境重启原服务，无 config 时核对服务端注册状态 |
-| 安装拒绝覆盖 config | 当前用户已存在节点身份，不删配置重装 |
-| 手工 curl 正常、服务 TLS 失败 | 检查 systemd drop-in、CA 路径和服务重启；shell 环境不会自动进入 systemd |
+| 安装拒绝覆盖 config | 当前用户已存在节点身份；升级用 --upgrade，确需重装先执行 --uninstall --purge |
+| 手工 curl 正常、服务 TLS 失败 | Daemon 只信任 config.json 的 ca_file 与系统 CA（生成安装链接时可填私有 CA）；CLI 与 npm 仍读 systemd drop-in 里的 CA 环境变量，修改后重启服务 |
 | 登录后平台仍待登录 | 核对实际 HOME、CLI path、用户；Daemon 约每 60 秒重新发现 CLI |
-| 已在线但任务失败 | 查看 claude.log/codex.log，核对登录、模型、代理、插件与工作目录 |
+| 已在线但任务失败 | 查看 runtime.log 与 claude.log/codex.log，核对登录、模型、代理、插件与工作目录 |
 | npm 写系统目录/权限错误 | 确认运行用户与 ~/.npmrc，使用显式 --prefix |
 | npx 找不到技能安装器 | 检查 Node PATH、npm 网络和目录权限，不只检查 CLI 入口存在 |
 | Runtime 安装目录只读 | 去掉 HOME/.local 下过度共享，确保安装与缓存目录独立可写 |
@@ -888,7 +888,7 @@ PY
 | 浏览器 TLS/sandbox 错误 | 检查 caCert/libnss3-tools 和 Linux namespace 配置，不默认关闭保护 |
 | 工作区拒绝 | 检查路径实际解析结果、可写性和平台配置，不能用 / 或跨目录链接 |
 
-systemd 模式优先查 journal；无用户服务模式查 `~/.local/share/coreman-runtime/service.log`；驱动日志为 claude.log/codex.log。该实现使用 Python 标准日志输出，不假设 runtime.log 文件一定存在。采集日志时脱敏请求内容、URL 中的 token 和外部凭据。
+Daemon 主日志为 `~/.local/share/coreman-runtime/runtime.log`，按 10 MB × 5 轮转；驱动日志为 claude.log/codex.log，service.log 只保留 WARNING 以上与崩溃回溯，二者每 60 秒按 10 MB × 5 复制截断轮转，轮转瞬间可能丢少量行。systemd 模式另可查 journal。驱动默认不记录聊天正文与提示词，排障时才在服务环境设置 RELAY_DEBUG=1。Daemon 以退出码 78 停止表示配置错误（安装链接失效、CA 无效等），服务不会自动重试，修正后手动启动。采集日志时脱敏请求内容、URL 中的 token 和外部凭据。
 
 ## 14. 完成交付
 

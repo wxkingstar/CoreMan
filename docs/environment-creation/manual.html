@@ -761,7 +761,7 @@ sh &quot;$INSTALL_SCRIPT&quot;
 unset INSTALL_URL
 </code></pre>
 <p>安装脚本下载发布包并核对 X-SHA256，建立独立 venv，持久保存节点身份并注册。临时安装脚本含链接配置，完成后删除该确切临时文件。不要用 sudo 运行，否则 Runtime 会安装到 root HOME。</p>
-<p>当前用户已有 config.json 时安装器拒绝覆盖。安装成功但等待上线超时，应检查日志和状态，再重启已有服务；不要删除 config.json 或重新生成节点身份。该文件中的 node_id/node_token/backends 必须保留。</p>
+<p>当前用户已有 config.json 时安装器拒绝覆盖，并给出升级与卸载命令。安装器在服务注册成功后才写入 config.json；注册失败会清理本次发布目录与 CA 文件，可以直接重跑。安装成功但等待上线超时，应检查日志和状态，再重启已有服务；不要删除 config.json 或重新生成节点身份。该文件中的 node_id/node_token/backends 必须保留。</p>
 <h3 id="114">11.4 配置字段</h3>
 <table>
 <thead>
@@ -864,7 +864,7 @@ sudo journalctl -u &quot;coreman-chroot-runtime@$ENV_NAME.service&quot; -n 100 -
 <li>备份配置和必要用户数据，按批准的安装/升级工具替换制品，不改变节点身份。</li>
 <li>启动后先检查 CLI 认证，再检查节点心跳、模型能力和最小任务，最后恢复接单。</li>
 </ol>
-<p>当前安装器不能覆盖已有 config.json。执行前检查本项目是否已提供可用升级工具；工具不存在时不执行不存在的 upgrade.py，也不把重新安装当作升级。CLI 可以按第 8 节固定版本更新；Runtime 发布目录的升级/回退必须同时更新服务的 WorkingDirectory、ExecStart 和 config.release，保留原身份并验证兼容性。</p>
+<p>当前安装器不能覆盖已有 config.json，重新安装不等于升级。升级 Runtime 使用 <code>python -m runtime_daemon.install_service --upgrade &lt;发布包&gt; --sha256 &lt;校验值&gt;</code>：先校验并自检新包，再停服务、切换 release、重写服务定义、启动并等待上线；任一步失败自动回滚到原版本，节点身份保持不变。卸载使用 <code>--uninstall</code>，默认保留节点身份、当前发布目录、会话与日志；<code>--uninstall --purge</code> 才删除整个数据目录。CLI 可以按第 8 节固定版本更新。</p>
 <p>断开 CoreMan 或停止 Daemon 可能取消在途工作，不用生产任务测试重启。冷启动演练必须在测试环境验证“宿主机启动 → 环境启动 → Daemon → 心跳 → 任务”，再交付为自动恢复已完成。</p>
 </section><section class="chapter"><h2 id="13">13. 验收与故障定位</h2>
 <h3 id="131">13.1 逐项验收</h3>
@@ -966,11 +966,11 @@ PY
 </tr>
 <tr>
 <td>安装拒绝覆盖 config</td>
-<td>当前用户已存在节点身份，不删配置重装</td>
+<td>当前用户已存在节点身份；升级用 --upgrade，确需重装先执行 --uninstall --purge</td>
 </tr>
 <tr>
 <td>手工 curl 正常、服务 TLS 失败</td>
-<td>检查 systemd drop-in、CA 路径和服务重启；shell 环境不会自动进入 systemd</td>
+<td>Daemon 只信任 config.json 的 ca_file 与系统 CA（生成安装链接时可填私有 CA）；CLI 与 npm 仍读 systemd drop-in 里的 CA 环境变量，修改后重启服务</td>
 </tr>
 <tr>
 <td>登录后平台仍待登录</td>
@@ -978,7 +978,7 @@ PY
 </tr>
 <tr>
 <td>已在线但任务失败</td>
-<td>查看 claude.log/codex.log，核对登录、模型、代理、插件与工作目录</td>
+<td>查看 runtime.log 与 claude.log/codex.log，核对登录、模型、代理、插件与工作目录</td>
 </tr>
 <tr>
 <td>npm 写系统目录/权限错误</td>
@@ -1016,7 +1016,7 @@ PY
 </tr>
 </tbody>
 </table>
-<p>systemd 模式优先查 journal；无用户服务模式查 <code>~/.local/share/coreman-runtime/service.log</code>；驱动日志为 claude.log/codex.log。该实现使用 Python 标准日志输出，不假设 runtime.log 文件一定存在。采集日志时脱敏请求内容、URL 中的 token 和外部凭据。</p>
+<p>Daemon 主日志为 <code>~/.local/share/coreman-runtime/runtime.log</code>，按 10 MB × 5 轮转；驱动日志为 claude.log/codex.log，service.log 只保留 WARNING 以上与崩溃回溯，二者每 60 秒按 10 MB × 5 复制截断轮转，轮转瞬间可能丢少量行。systemd 模式另可查 journal。驱动默认不记录聊天正文与提示词，排障时才在服务环境设置 RELAY_DEBUG=1。Daemon 以退出码 78 停止表示配置错误（安装链接失效、CA 无效等），服务不会自动重试，修正后手动启动。采集日志时脱敏请求内容、URL 中的 token 和外部凭据。</p>
 </section><section class="chapter"><h2 id="14">14. 完成交付</h2>
 <p>交付记录包含：宿主机标识、环境名与类型、OS/架构、UID/GID、rootfs/工作区、软件与插件版本、制品校验、代理地址与 CA 指纹、Git/CLI 身份、托管方式、平台节点 ID、验收结果、未完成项及恢复方法。不包含密码、OAuth、node_token 或安装链接。</p>
 <p>分别确认：环境创建完成、基础工具完成、CLI 认证完成、技能/插件完成、Runtime 上线、业务任务验收、冷启动验收。只有全部适用阶段通过，才报告运行时已可交付。</p></section></main><script>const searchBox=document.querySelector('#search');const chapters=[...document.querySelectorAll('.chapter')];
