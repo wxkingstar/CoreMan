@@ -20,13 +20,13 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman import __version__
-from coreman.core.bus import instances
+from coreman.core.bus import instances, outbox, streams
 from coreman.core.bus.notify import Listener, asyncpg_dsn
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
@@ -43,6 +43,11 @@ CHANNELS = ("stream_updated", "outbox_added", "lease_changed", "config_changed")
 DRAIN_GAP_SECONDS = 3.0
 # 踢线熔断后多久才允许重新认领这个 bot（spec §6.5「停止重连该 bot 30 秒」）。
 KICK_COOLDOWN_SECONDS = 30.0
+# 退出前等在途推送 / 出站收尾的上限（回执超时是 10 秒，留一点余量）。
+INFLIGHT_SETTLE_SECONDS = 15.0
+
+# 兜底轮询的批量探测：给一批持有的 bot，返回其中真有活要干的那些。
+Probe = Callable[[AsyncSession, Sequence[uuid.UUID]], Awaitable[set[uuid.UUID]]]
 
 
 def _as_uuid(value: Any) -> uuid.UUID | None:
@@ -98,6 +103,8 @@ class GatewayWecomService(Service):
         # 踢线熔断了的 bot：下一轮扫描把它们的租约交还出去（冷却由 lease_loop 管）。
         self._fused: set[uuid.UUID] = set()
         self._bg: list[asyncio.Task[None]] = []
+        # (推送 / 出站, bot) → 这个 bot 正在跑的那一趟；见 `_dispatch`。
+        self._inflight: dict[tuple[str, uuid.UUID], asyncio.Task[None]] = {}
 
     @property
     def draining(self) -> bool:
@@ -154,6 +161,7 @@ class GatewayWecomService(Service):
         for job in self._bg:
             job.cancel()
         await asyncio.gather(*self._bg, return_exceptions=True)
+        await self._settle_inflight()
         await self._drain_all()
         try:
             async with self.factory() as session:
@@ -297,28 +305,74 @@ class GatewayWecomService(Service):
 
     # ---- 推送 / 出站 / 配置 ------------------------------------------------
 
-    def _targets(self, payloads: list[dict[str, Any]]) -> list[BotRunner]:
-        """通知里点名的 bot；没点名（兜底轮询）就扫全部持有的 bot。"""
-        ids = {u for p in payloads if (u := _as_uuid(p.get("bot_id"))) is not None}
-        return [r for bot_id in (ids or set(self.runners)) if (r := self.runners.get(bot_id))]
+    async def _poll_targets(self, payloads: list[dict[str, Any]], probe: Probe) -> list[BotRunner]:
+        """通知里点名的 bot 直接处理；没点名（兜底轮询）就先用一条批量查询挑出真有活的 bot。
+
+        兜底轮询每秒一次，逐 bot 去查的话空闲时 N 个 bot 就是每秒 N 个事务。
+        """
+        named = {u for p in payloads if (u := _as_uuid(p.get("bot_id"))) is not None}
+        if not named:
+            held = list(self.runners)
+            if not held:
+                return []
+            async with self.factory() as session:
+                named = await probe(session, held)
+        return [r for bot_id in named if (r := self.runners.get(bot_id))]
+
+    def _dispatch(
+        self, kind: str, runners: list[BotRunner], action: Callable[[BotRunner], Awaitable[None]]
+    ) -> None:
+        """每个 bot 各跑各的：一个半开连接等回执等满 10 秒，不再拖住同实例的其它 bot。
+
+        同一个 bot 上一趟还没跑完（多半卡在等回执）就不再叠一趟——它的锁本来也会让新一趟
+        排队；这期间漏看的增量由下一次兜底轮询补上。
+        """
+        self._inflight = {key: task for key, task in self._inflight.items() if not task.done()}
+        for runner in runners:
+            key = (kind, runner.bot.id)
+            if key in self._inflight:
+                continue
+            self._inflight[key] = asyncio.create_task(
+                self._run_one(kind, runner, action), name=f"gateway-{kind}-{runner.bot.bot_key}"
+            )
+
+    async def _run_one(
+        self, kind: str, runner: BotRunner, action: Callable[[BotRunner], Awaitable[None]]
+    ) -> None:
+        try:
+            await action(runner)
+        except Exception:  # noqa: BLE001 一个 bot 推挂了不能带走其它 bot
+            self._log.exception(f"{kind}_failed", bot_key=runner.bot.bot_key)
+
+    async def _settle_inflight(self) -> None:
+        """退出前等在途的推送 / 出站跑完（多半在等回执），超时的才取消。"""
+        pending = [task for task in self._inflight.values() if not task.done()]
+        if pending:
+            _, stuck = await asyncio.wait(pending, timeout=INFLIGHT_SETTLE_SECONDS)
+            for task in stuck:
+                task.cancel()
+            await asyncio.gather(*stuck, return_exceptions=True)
+        self._inflight.clear()
 
     async def _stream_loop(self) -> None:
         while not self._stop.is_set():
             payloads = await self._listener.wait("stream_updated", timeout=self._poll)
-            for runner in self._targets(payloads):
-                try:
-                    await runner.pusher.push_pending()
-                except Exception:  # noqa: BLE001 一个 bot 推挂了不能带走其它 bot
-                    self._log.exception("stream_push_failed", bot_key=runner.bot.bot_key)
+            try:
+                targets = await self._poll_targets(payloads, streams.bots_with_pending)
+            except Exception:  # noqa: BLE001 库抖一下，下一轮再来
+                self._log.exception("stream_poll_failed")
+                continue
+            self._dispatch("stream_push", targets, lambda runner: runner.pusher.push_pending())
 
     async def _outbox_loop(self) -> None:
         while not self._stop.is_set():
             payloads = await self._listener.wait("outbox_added", timeout=self._poll)
-            for runner in self._targets(payloads):
-                try:
-                    await runner.outbox.consume()
-                except Exception:  # noqa: BLE001 同上
-                    self._log.exception("outbox_consume_failed", bot_key=runner.bot.bot_key)
+            try:
+                targets = await self._poll_targets(payloads, outbox.bots_with_due)
+            except Exception:  # noqa: BLE001 同上
+                self._log.exception("outbox_poll_failed")
+                continue
+            self._dispatch("outbox_consume", targets, lambda runner: runner.outbox.consume())
 
     async def _config_loop(self) -> None:
         while not self._stop.is_set():

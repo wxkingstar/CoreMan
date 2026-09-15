@@ -6,6 +6,7 @@ worker 每次写都让 version+1；网关按 version > pushed_version 推送后�
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -218,6 +219,21 @@ async def pending_for_bot(
     return list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+
+
+async def bots_with_pending(session: AsyncSession, bot_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+    """兜底轮询用：这些 bot 里哪些有待推的流（判据与 `pending_for_bot` 同源）。
+
+    一条语句代替「每个 bot 开一个事务跑一次 `pending_for_bot`」。
+    """
+    if not bot_ids:
+        return set()
+    stmt = (
+        select(TaskStream.bot_id)
+        .where(TaskStream.bot_id.in_(list(bot_ids)), _pending_clause())
+        .distinct()
+    )
+    return set((await session.execute(stmt)).scalars())
 
 
 async def active_for_bot(session: AsyncSession, bot_id: uuid.UUID) -> list[TaskStream]:

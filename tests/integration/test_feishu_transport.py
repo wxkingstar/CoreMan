@@ -131,6 +131,72 @@ async def test_nine_minute_stream_becomes_static_without_completion(db_session, 
         assert not (await session.scalars(select(OutboxItem))).all()
 
 
+async def test_round_checks_the_lease_fence_once(db_session, db_engine):
+    """租约围栏每轮只在开头查一次：轮内每一次平台调用不再逐次回表。"""
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="notice",
+            target={"chat_id": "oc1"},
+            payload={"markdown": "notice"},
+        )
+        await session.commit()
+    fences = 0
+    real_fence = transport.fence
+
+    async def counting_fence():
+        nonlocal fences
+        fences += 1
+        await real_fence()
+
+    transport.fence = counting_fence
+    assert await transport.round() is False  # 出站发完了，不用接着来
+    assert fences == 1 and len(api.calls) >= 4
+    async with factory() as session:
+        assert (await session.scalar(select(OutboxItem))).status == "sent"
+
+
+async def test_output_lock_on_a_guard_connection_keeps_a_second_child_out(db_session, db_engine):
+    """出站锁挂在常驻连接的长事务上：它不退出，同一 bot 的另一个 child 一张卡片都碰不了。"""
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+    first_api, second_api = FakeAPI(), FakeAPI()
+    async with db_engine.connect() as first_guard, db_engine.connect() as second_guard:
+        first = FeishuTransport(
+            factory,
+            first_api,
+            bot_id=bot.id,
+            instance_id="old",
+            generation=generation,
+            guard=first_guard,
+        )
+        second = FeishuTransport(
+            factory,
+            second_api,
+            bot_id=bot.id,
+            instance_id="old",
+            generation=generation,
+            guard=second_guard,
+        )
+        await first.round()
+        assert first_api.calls
+        assert await second.round() is False and second_api.calls == []
+        await first_guard.rollback()  # 第一个 child 退出：长事务结束，锁随之释放
+        async with factory() as session:
+            await streams.complete(session, row.task_id, final_text="done")
+            await session.commit()
+        await second.round()
+        assert second_api.calls
+
+
 async def test_outbox_permanent_platform_rejection_is_visible(db_session, db_engine):
     bot, row, generation = await seed(db_session)
     factory, api = make_session_factory(db_engine), FakeAPI()
