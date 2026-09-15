@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coreman.core.bus import outbox, streams
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, TaskStream
-from coreman.core.observability.metrics import OUTBOX_FAILED, after_commit
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.runtime.gateway_feishu.cards import (
     interaction_card,
@@ -297,9 +296,7 @@ class FeishuTransport:
                 await outbox.mark_sent(session, item.id)
             except FeishuError as exc:
                 if exc.code in {230013, -2}:
-                    item.status, item.last_error = "failed", str(exc)
-                    item.attempts += 1
-                    after_commit(session, OUTBOX_FAILED.inc)
+                    await outbox.fail(session, item.id, str(exc))
                 else:
                     await outbox.mark_failed(session, item.id, str(exc))
             await session.commit()

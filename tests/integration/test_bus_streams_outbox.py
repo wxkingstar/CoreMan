@@ -1,11 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, streams, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, OutboxItem, User
+from coreman.core.observability.metrics import OUTBOX_FAILED
 
 
 async def test_same_task_card_cannot_overtake_retry_or_unconfirmed_result(db_session):
@@ -46,31 +47,122 @@ async def test_same_task_card_cannot_overtake_retry_or_unconfirmed_result(db_ses
     assert (await outbox.claim_next(db_session, bot_id=bot.id)).id == card.id
 
 
-async def test_crashed_send_is_unknown_and_blocks_dependent_card(db_session):
-    bot = await _bot(db_session)
-    for key in ("77:send:final", "77:card:0"):
-        await outbox.add(
-            db_session,
-            bot_id=bot.id,
-            platform="wecom",
-            kind="send",
-            dedupe_key=key,
-            target={"chat_id": "c"},
-            payload={"markdown": key},
-        )
-    first = await outbox.claim_next(db_session, bot_id=bot.id)
-    await outbox.begin_attempt(db_session, first, "lost-attempt")
-    first.not_before = datetime.now(UTC) - timedelta(seconds=1)
-    await db_session.commit()
-    assert await outbox.claim_next(db_session, bot_id=bot.id) is None
-    rows = list(
-        await db_session.scalars(
+async def _send(session, bot, key):
+    return await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="wecom",
+        kind="send",
+        dedupe_key=key,
+        target={"chat_id": "c"},
+        payload={"markdown": key},
+    )
+
+
+async def _rows(session):
+    return list(
+        await session.scalars(
             select(OutboxItem).order_by(OutboxItem.id).execution_options(populate_existing=True)
         )
     )
-    assert [r.status for r in rows] == ["failed", "failed"]
-    assert rows[0].last_error.startswith("delivery_unknown")
-    assert rows[1].last_error.startswith("dependency_failed")
+
+
+async def _due(session, item_id):
+    await session.execute(
+        update(OutboxItem)
+        .where(OutboxItem.id == item_id)
+        .values(not_before=func.now() - text("interval '1 second'"))
+    )
+    await session.commit()
+
+
+async def test_abandoned_attempt_is_retried_while_the_dependent_card_waits(db_session):
+    """网关在等回执时死掉：结果未知，由 scheduler 回收后按普通失败退避重发；卡片一直等着。"""
+    bot = await _bot(db_session)
+    bot_id = bot.id
+    first = await _send(db_session, bot, "77:send:final")
+    card = await _send(db_session, bot, "77:card:0")
+    first_id, card_id = first.id, card.id
+    # 投递组由幂等键推出，不混进要发给平台的 payload
+    assert first.payload == {"markdown": "77:send:final"}
+    claimed = await outbox.claim_next(db_session, bot_id=bot_id)
+    assert claimed.id == first_id
+    await outbox.begin_attempt(db_session, claimed, "lost-attempt")
+    await _due(db_session, first_id)
+    # 认领本身不再顺手判死任何东西：sending 的前序项照样挡住卡片
+    assert await outbox.claim_next(db_session, bot_id=bot_id) is None
+    await db_session.rollback()
+    assert await outbox.recover_abandoned(db_session) == 1
+    await db_session.commit()
+    rows = await _rows(db_session)
+    assert [(r.status, r.attempts) for r in rows] == [("pending", 1), ("pending", 0)]
+    assert rows[0].last_error.startswith("delivery_unknown") and rows[1].last_error is None
+    await _due(db_session, first_id)
+    again = await outbox.claim_next(db_session, bot_id=bot_id)
+    assert again.id == first_id
+    await outbox.begin_attempt(db_session, again, "attempt-2")
+    assert again.payload["_attempt_id"] == "attempt-2"
+    assert await outbox.unknown_attempt(db_session, first_id, "delivery_unknown: x") == "pending"
+    await db_session.commit()
+    # 迟到的第二次判定不会重复计数：条目已经不是 sending
+    assert await outbox.unknown_attempt(db_session, first_id, "delivery_unknown: y") is None
+    await _due(db_session, first_id)
+    assert (await outbox.claim_next(db_session, bot_id=bot_id)).id == first_id
+    await outbox.mark_sent(db_session, first_id)
+    assert (await outbox.claim_next(db_session, bot_id=bot_id)).id == card_id
+
+
+async def test_permanent_failure_releases_dependents_and_retry_restores_order(db_session):
+    """前序项最终失败：后续项立即可领（不再级联判死）；人工重投后顺序保证重新生效。"""
+    bot = await _bot(db_session)
+    bot_id = bot.id
+    first = await _send(db_session, bot, "77:send:final")
+    card = await _send(db_session, bot, "77:card:0")
+    first_id, card_id = first.id, card.id
+    await db_session.commit()
+    failures = OUTBOX_FAILED._value.get()
+    status = None
+    for attempt in range(outbox.MAX_ATTEMPTS):
+        await _due(db_session, first_id)
+        claimed = await outbox.claim_next(db_session, bot_id=bot_id)
+        assert claimed.id == first_id
+        await outbox.begin_attempt(db_session, claimed, f"attempt-{attempt}")
+        status = await outbox.unknown_attempt(db_session, first_id, "delivery_unknown: timeout")
+        await db_session.commit()
+    assert status == "failed"
+    assert OUTBOX_FAILED._value.get() == failures + 1
+    rows = await _rows(db_session)
+    assert [r.status for r in rows] == ["failed", "pending"] and rows[1].last_error is None
+    # 迟到的回执不得把判死的条目改回 sent
+    await outbox.mark_sent(db_session, first_id)
+    await db_session.commit()
+    assert (await _rows(db_session))[0].status == "failed"
+    # 前序项已经不可能成功：卡片不再等它（也没有被级联判死）
+    assert (await outbox.claim_next(db_session, bot_id=bot_id)).id == card_id
+    await db_session.rollback()
+    # 人工重投之后顺序保证重新生效：卡片排回它后面
+    assert await outbox.retry(db_session, first_id)
+    await db_session.commit()
+    assert (await outbox.claim_next(db_session, bot_id=bot_id)).id == first_id
+    assert await outbox.claim_next(db_session, bot_id=bot_id) is None
+    await outbox.mark_sent(db_session, first_id)
+    assert (await outbox.claim_next(db_session, bot_id=bot_id)).id == card_id
+
+
+async def test_notify_items_are_marked_sent_straight_from_pending(db_session):
+    """通知消费者在行锁里直接从 pending 发出：`mark_sent` 必须认 pending。"""
+    item = await outbox.add(
+        db_session,
+        bot_id=None,
+        platform="wecom",
+        kind="notify",
+        dedupe_key="notify:1",
+        target={"user": "u"},
+        payload={"content": "x"},
+    )
+    await outbox.mark_sent(db_session, item.id)
+    await db_session.commit()
+    assert (await _rows(db_session))[0].status == "sent"
 
 
 async def _bot(session: AsyncSession) -> Bot:

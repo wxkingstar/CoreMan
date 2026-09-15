@@ -5,14 +5,15 @@
 心跳表、租约表或任何「上一任真的死了吗」的判断。非主实例除了每 `leader_retry_seconds` 试一次
 锁之外，不碰任何业务表。
 
-主实例两个节奏：
+主实例三个节奏：
 
 | 节奏 | 动作 |
 | --- | --- |
-| `tick_seconds` | 掉线任务收尸、放掉死网关的租约、标记死实例 |
-| `cleanup_seconds` | 删过期的流 / 已发出站 / 过期会话，清早已停掉的实例行 |
+| `tick_seconds` | 掉线任务收尸、放掉死网关的租约、标记死实例、回收网关丢下的出站尝试 |
+| `cleanup_seconds` | 删过期的流 / 过期会话，清早已停掉的实例行 |
+| `retention_seconds` | 按保留期分批删终态任务、入站事件与出站条目 |
 
-M4 的 cron 调度每 10 秒独立运行，通知消费者单独投递。
+cron 调度每 10 秒独立运行，通知消费者单独投递。
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ class SchedulerService(Service):
         port: int = HEALTH_PORTS["scheduler"],
         tick_seconds: float = 15.0,
         cleanup_seconds: float = 60.0,
+        retention_seconds: float = 3600.0,
         leader_retry_seconds: float = 5.0,
     ) -> None:
         super().__init__(
@@ -65,6 +67,7 @@ class SchedulerService(Service):
         self.is_leader = False
         self._tick_seconds = tick_seconds
         self._cleanup_seconds = cleanup_seconds
+        self._retention_seconds = retention_seconds
         self._leader_retry = leader_retry_seconds
         # 依赖都是纯构造（不连库、不要事件循环），放 __init__ 里 on_shutdown 才不必处处判空。
         settings = get_settings()
@@ -190,7 +193,7 @@ class SchedulerService(Service):
 
     async def _tick_loop(self) -> None:
         """持锁期间的主循环。第一轮就顺带跑一次清理：刚接手的实例先把摊子收干净。"""
-        next_cleanup = 0.0
+        next_cleanup = next_retention = 0.0
         while not self._stop.is_set() and await self._lock_alive():
             now = datetime.now(UTC)
             try:
@@ -198,6 +201,9 @@ class SchedulerService(Service):
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds
+                if time.monotonic() >= next_retention:
+                    counts.update(await reaper.run_retention(self._factory, now))
+                    next_retention = time.monotonic() + self._retention_seconds
             except Exception:  # noqa: BLE001 一轮看护出错不能让进程丢主、更不能让它退出
                 self._log.exception("scheduler_tick_failed")
             else:

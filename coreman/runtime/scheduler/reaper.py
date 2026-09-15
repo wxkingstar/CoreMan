@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
@@ -32,6 +32,7 @@ from coreman.core.db.models import (
     Bot,
     BotLease,
     ChatSession,
+    InboundEvent,
     InteractionState,
     OutboxItem,
     ProcessInstance,
@@ -51,6 +52,15 @@ INSTANCE_DEAD_SECONDS = 60
 INSTANCE_PURGE_DAYS = 7
 STREAM_RETENTION_HOURS = 1
 OUTBOX_RETENTION_DAYS = 7
+# 保留期：终态任务与入站事件留 90 天（审计看 chat_logs，不靠这两张表）；
+# 失败 / 跳过的出站条目留 30 天给人排查。
+TASK_RETENTION_DAYS = 90
+INBOUND_RETENTION_DAYS = 90
+OUTBOX_FAILED_RETENTION_DAYS = 30
+# 保留期清理分批删：每批一个短事务，一轮最多这么多批——积压几十万行时也不会长时间持锁。
+RETENTION_BATCH = 1000
+RETENTION_MAX_BATCHES = 20
+TERMINAL_TASK_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
 LOST_ERROR_CODE = "worker_lost"
 LOST_ERROR_MESSAGE = "worker 心跳超时"
 
@@ -301,15 +311,67 @@ async def cleanup_streams(session: AsyncSession, now: datetime) -> int:
     return await _affected(session, stmt)
 
 
-async def cleanup_outbox(session: AsyncSession, now: datetime) -> int:
-    """发出去 7 天的出站条目删掉。失败 / 跳过的一律保留：那是要人来看的。"""
-    cutoff = now - timedelta(days=OUTBOX_RETENTION_DAYS)
-    stmt = (
-        delete(OutboxItem)
-        .where(OutboxItem.status == "sent", OutboxItem.sent_at < cutoff)
-        .returning(OutboxItem.id)
+async def cleanup_outbox(
+    session: AsyncSession, now: datetime, *, limit: int = RETENTION_BATCH
+) -> int:
+    """出站条目按保留期删一批：发出去的留 7 天，失败 / 跳过的留 30 天（那是要人来看的）。"""
+    sent_cutoff = now - timedelta(days=OUTBOX_RETENTION_DAYS)
+    failed_cutoff = now - timedelta(days=OUTBOX_FAILED_RETENTION_DAYS)
+    doomed = (
+        select(OutboxItem.id)
+        .where(
+            or_(
+                and_(OutboxItem.status == "sent", OutboxItem.sent_at < sent_cutoff),
+                and_(
+                    OutboxItem.status.in_(("failed", "skipped")),
+                    OutboxItem.created_at < failed_cutoff,
+                ),
+            )
+        )
+        .order_by(OutboxItem.id)
+        .limit(limit)
+        .correlate(None)
     )
+    stmt = delete(OutboxItem).where(OutboxItem.id.in_(doomed)).returning(OutboxItem.id)
     return await _affected(session, stmt)
+
+
+async def cleanup_tasks(
+    session: AsyncSession, now: datetime, *, limit: int = RETENTION_BATCH
+) -> int:
+    """终态超过保留期的任务删一批（流与飞书投递状态随外键级联删掉）。"""
+    cutoff = now - timedelta(days=TASK_RETENTION_DAYS)
+    doomed = (
+        select(Task.id)
+        .where(Task.finished_at < cutoff, Task.status.in_(TERMINAL_TASK_STATUSES))
+        .order_by(Task.finished_at)
+        .limit(limit)
+        .correlate(None)
+    )
+    stmt = delete(Task).where(Task.id.in_(doomed)).returning(Task.id)
+    return await _affected(session, stmt)
+
+
+async def cleanup_inbound_events(
+    session: AsyncSession, now: datetime, *, limit: int = RETENTION_BATCH
+) -> int:
+    """超过保留期的入站事件删一批；还有任务引用的先留着（任务按自己的保留期走完再删）。"""
+    cutoff = now - timedelta(days=INBOUND_RETENTION_DAYS)
+    referenced = exists().where(Task.inbound_event_id == InboundEvent.id)
+    doomed = (
+        select(InboundEvent.id)
+        .where(InboundEvent.received_at < cutoff, ~referenced)
+        .order_by(InboundEvent.id)
+        .limit(limit)
+        .correlate(None)
+    )
+    stmt = delete(InboundEvent).where(InboundEvent.id.in_(doomed)).returning(InboundEvent.id)
+    return await _affected(session, stmt)
+
+
+async def recover_outbox_attempts(session: AsyncSession, now: datetime) -> int:
+    """网关在等回执时丢下的出站尝试放回队列（结果未知按普通失败退避重发）。"""
+    return await outbox.recover_abandoned(session)
 
 
 async def cleanup_sessions(session: AsyncSession, now: datetime, ttl_hours: int) -> int:
@@ -348,6 +410,7 @@ async def run_tick(
         "skill_installations_recovered": await _run(factory, recover_installations, now),
         "stale_leases": await _run(factory, release_stale_leases, now),
         "dead_instances": await _run(factory, mark_dead_instances, now),
+        "outbox_attempts_recovered": await _run(factory, recover_outbox_attempts, now),
     }
 
 
@@ -359,13 +422,41 @@ async def run_cleanup(
     sessions: Job = partial(cleanup_sessions, ttl_hours=ttl)
     return {
         "old_streams": await _run(factory, cleanup_streams, now),
-        "old_outbox": await _run(factory, cleanup_outbox, now),
         "old_sessions": await _run(factory, sessions, now),
         "purged_instances": await _run(factory, purge_instances, now),
         # 待答状态到点置 expired。读路径（get_open）本来就按 expires_at 过滤，不靠这一步才正确；
         # 但卡片回调是按 task_id 前缀反查的，那条路没有时间条件，得靠 status 认出「这轮已经过期」。
         "interactions_expired": await _run(factory, interactions.expire_due, now),
     }
+
+
+async def run_retention(
+    factory: async_sessionmaker[AsyncSession],
+    now: datetime,
+    *,
+    batch: int = RETENTION_BATCH,
+    max_batches: int = RETENTION_MAX_BATCHES,
+) -> dict[str, int]:
+    """保留期那一档（小时级）：分批删过期的任务、入站事件与出站条目，每批一个短事务。
+
+    顺序不能换：任务引用入站事件，先删任务，入站事件才删得掉。
+    """
+    jobs: dict[str, Callable[..., Awaitable[int]]] = {
+        "old_tasks": cleanup_tasks,
+        "old_inbound_events": cleanup_inbound_events,
+        "old_outbox": cleanup_outbox,
+    }
+    counts: dict[str, int] = {}
+    for key, job in jobs.items():
+        step: Job = partial(job, limit=batch)
+        total = 0
+        for _ in range(max_batches):
+            deleted = await _run(factory, step, now)
+            total += deleted
+            if deleted < batch:
+                break
+        counts[key] = total
+    return counts
 
 
 async def run_all(
@@ -375,7 +466,8 @@ async def run_all(
     *,
     chat_logs_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, int]:
-    """跑完两档。主循环按各自节奏分开调，手动收尸（运维脚本、用例）用这个一把梭。"""
+    """跑完三档。主循环按各自节奏分开调，手动收尸（运维脚本、用例）用这个一把梭。"""
     counts = await run_tick(factory, now, chat_logs_factory=chat_logs_factory)
     counts.update(await run_cleanup(factory, store, now))
+    counts.update(await run_retention(factory, now))
     return counts

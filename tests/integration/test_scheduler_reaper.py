@@ -1,7 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, leases, outbox, streams, tasks
@@ -12,6 +12,7 @@ from coreman.core.db.models import (
     BotLease,
     ChatLog,
     ChatSession,
+    InboundEvent,
     OutboxItem,
     ProcessInstance,
     Task,
@@ -369,3 +370,72 @@ async def test_terminal_task_incomplete_stream_is_recovered_once(db_session):
     assert await reaper.recover_terminal_streams(db_session, now + timedelta(seconds=120)) == 0
     await db_session.refresh(task)
     assert task.status == "succeeded"
+
+
+async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """保留期：终态任务 / 入站事件 90 天、失败与跳过的出站条目 30 天；活动与近期的行不动。"""
+    bot = await _bot(db_session)
+    now = datetime.now(UTC)
+    old = now - timedelta(days=91)
+    events = [
+        InboundEvent(
+            bot_id=bot.id,
+            platform="wecom",
+            platform_msg_id=f"m{i}",
+            kind="message",
+            chat_type="single",
+            chat_id="zs",
+            payload={},
+            reply_context={},
+            received_at=old,
+        )
+        for i in range(3)
+    ]
+    db_session.add_all(events)
+    await db_session.flush()
+    event_ids = [e.id for e in events]
+    done = await tasks.enqueue(
+        db_session, NewTask(bot_id=bot.id, kind="chat", inbound_event_id=event_ids[0])
+    )
+    queued = await tasks.enqueue(
+        db_session, NewTask(bot_id=bot.id, kind="chat", inbound_event_id=event_ids[1])
+    )
+    recent = await tasks.enqueue(db_session, NewTask(bot_id=bot.id, kind="chat"))
+    assert done and queued and recent
+    done_id, queued_id, recent_id = done.id, queued.id, recent.id
+    await tasks.finish(db_session, done_id, status="succeeded")
+    await tasks.finish(db_session, recent_id, status="failed")
+    await db_session.execute(update(Task).where(Task.id == done_id).values(finished_at=old))
+    for key, status, age in (
+        ("failed-old", "failed", 31),
+        ("skipped-old", "skipped", 31),
+        ("failed-new", "failed", 5),
+        ("pending-old", "pending", 31),
+    ):
+        item = await outbox.add(
+            db_session,
+            bot_id=bot.id,
+            platform="wecom",
+            kind="send",
+            dedupe_key=key,
+            target={},
+            payload={},
+        )
+        assert item
+        await db_session.execute(
+            update(OutboxItem)
+            .where(OutboxItem.id == item.id)
+            .values(status=status, created_at=now - timedelta(days=age))
+        )
+    await db_session.commit()
+    # batch=1：逼出分批循环，每批一个短事务
+    counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
+    assert counts == {"old_tasks": 1, "old_inbound_events": 2, "old_outbox": 2}
+    async with make_session_factory(db_engine)() as s:
+        assert set((await s.execute(select(Task.id))).scalars()) == {queued_id, recent_id}
+        # 还被排队任务引用的入站事件留着；任务先删掉的那条、没有任务的那条都删了
+        assert set((await s.execute(select(InboundEvent.id))).scalars()) == {event_ids[1]}
+        keys = set((await s.execute(select(OutboxItem.dedupe_key))).scalars())
+        assert keys == {"failed-new", "pending-old"}
