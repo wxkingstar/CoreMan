@@ -9,18 +9,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - WeCom setup and troubleshooting guide (`docs/wecom.md`), a glossary (`docs/glossary.md`), a service topology diagram in `docs/architecture.md`, and an English README (`README.en.md`).
+- Trust model and threat boundaries in `SECURITY.md`.
+- Scheduled runs add an overridable "scheduled task constraints" prompt section (`prompt_cron_mode`), editable in Settings.
+- Scheduled pushes carry a header (task, bot, duration) and a footer. Jobs without any delivery target send the result to the job creator.
+- A separate completion reminder after streamed replies that take 60 seconds or longer, so the chat client notifies the user.
+- Allowlist denials are logged as warnings and counted by `coreman_whitelist_denied_total{reason}`.
+- Escalation create and poll responses include `delivery_failed` and `failure_reason`.
 
 ### Changed
 
-- The bundled Claude driver now reports native Claude Code model names (`claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001`) instead of names with a `vllm/` prefix. The prefix never had a functional meaning: the driver strips anything before the last `/` before calling the CLI, so both forms reach the CLI unchanged.
-- Existing `vllm/claude-*` model catalog entries are not migrated. The initial database migration still seeds them, so a new installation shows both the seeded `vllm/claude-*` entries and the native names reported by the first node heartbeat. Bots keep working with either name. Administrators can retire the entries they do not want in the model catalog and choose the default model there.
+- The bundled Claude driver now reports native Claude Code model names (`claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001`) instead of names with a `vllm/` prefix. The prefix never had a functional meaning: the driver strips anything before the last `/` before calling the CLI. Migration 0023 renames the seeded `vllm/claude-*` catalog entries, prices and bot models to the native names.
+- A run waits up to 120 seconds in the queue of a full runtime node instead of failing after the 10-second connect timeout. Reverse-channel calls expire after the bot's timeout (up to 12 hours) instead of a fixed 2 hours, and scheduled runs are no longer capped at 2 hours.
+- Gateways drain bots in paced batches that fit the stop grace period.
+- New business systems allow no bots until an administrator selects them, and the `coreman` system key is reserved.
+- API containers trust forwarded client addresses only from the Caddy network (`COREMAN_EDGE_SUBNET`, default `10.250.250.0/28`).
+- Scheduled results longer than 100,000 characters are truncated instead of failing the run.
+- A new message in a session whose previous turn is still stopping waits and is re-queued instead of failing with "session busy".
+- Database engines use a 10-second connect timeout and a 300-second statement timeout.
+- Optimistic-lock conflicts return HTTP 409 with the dedicated code `40901`.
 - Documentation opens with user-facing descriptions instead of release status notes.
 
 ### Fixed
 
+- Escalations whose question notification cannot be delivered are cancelled instead of waiting until they expire.
+- WeCom `gettoken` credential failures are cached briefly instead of being retried on every request.
+- `deploy/coreman` refuses to generate new secrets when a PostgreSQL data volume already exists.
+- The users page still loads when the team list request fails.
+- Audit entries for skills, memories, the skill catalog and runtime nodes record the client IP.
+- Listing a bot's skills no longer locks the bot row.
+
+### Security
+
+- Bot, environment preset, skill and MCP environment variables can no longer set runtime control variables such as model endpoints, loader hooks, proxies or CLI configuration directories. The Runtime Daemon enforces the same list.
+- The application refuses to start with a template or short bootstrap administrator password.
+
 ### Removed
 
 - The generated `docs/environment-creation/manual.html`; use `docs/environment-creation/README.md`.
+- Unused compatibility routes `/api/robot/memories/*`, `/api/robot/wework-notify`, `/api/robot/organization/tree`, `/api/organization/full`, `/api/push` and `/api/test/bot-token-access`. The remaining escalation compatibility routes require signed requests and no longer accept a plain `X-API-Key` secret.
+- The `cron` infrastructure API scope, which no route used, and the `ETEAMS_` reserved environment prefix.
+- The `RELAY_NETWORK_MODE` and `TIMEZONE` settings.
+- `system_grant_audit` is no longer written (grant changes are recorded in `audit_logs`) and `bots.custom_command_modules` is no longer read. Both will be dropped in the next release.
 
 ## [0.1.0] - TBD
 
