@@ -242,6 +242,10 @@ async def list_nodes(
                 "heartbeat_at": n.heartbeat_at,
                 "capabilities": n.capabilities,
                 "service_status": n.service_status,
+                "protocol_version": n.protocol_version,
+                "max_concurrent": n.max_concurrent,
+                # 离线节点的在执行数已过时，不展示。
+                "active_calls": n.active_calls if online(n) else None,
                 "team_name": names.get(n.team_id) if n.team_id else None,
                 "backends": backends,
             }

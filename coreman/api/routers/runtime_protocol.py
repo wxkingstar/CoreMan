@@ -115,6 +115,9 @@ class HeartbeatIn(BaseModel):
         "systemd-user", "systemd-user-session", "systemd", "launchd", "supervised", "foreground"
     ]
     protocol: int = Field(default=1, ge=1, le=1000)
+    # 协议 2 起上报；旧节点缺省为空，管理台显示为未知。
+    max_concurrent: int | None = Field(default=None, ge=1, le=256)
+    active_calls: int | None = Field(default=None, ge=0, le=1024)
 
 
 class PollIn(BaseModel):
@@ -316,6 +319,8 @@ async def heartbeat(
             version=body.version,
             service_status=body.service_status,
             protocol_version=body.protocol,
+            max_concurrent=body.max_concurrent,
+            active_calls=body.active_calls,
             capabilities={p: getattr(body, p).model_dump() for p in ("claude", "codex")},
         )
     )

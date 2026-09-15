@@ -186,3 +186,22 @@ async def test_api_registers_shared_pool_and_fallback_is_a_small_pool(app):
         await engine.dispose()
     finally:
         transport.configure(app.state.session_factory, app.state.runtime_listener)
+
+
+async def test_heartbeat_concurrency_is_listed_and_legacy_nodes_stay_unknown(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}
+
+    async def listed():
+        nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+        row = next(n for n in nodes if n["id"] == body["node_id"])
+        return row["max_concurrent"], row["active_calls"], row["protocol_version"]
+
+    endpoint = "/api/runtime/heartbeat"
+    assert (await client.post(endpoint, headers=headers, json=beat)).status_code == 200
+    assert await listed() == (None, None, 1)
+    reported = {**beat, "protocol": 2, "max_concurrent": 6, "active_calls": 2}
+    assert (await client.post(endpoint, headers=headers, json=reported)).status_code == 200
+    assert await listed() == (6, 2, 2)
+    invalid = {**reported, "active_calls": -1}
+    assert (await client.post(endpoint, headers=headers, json=invalid)).status_code == 422
