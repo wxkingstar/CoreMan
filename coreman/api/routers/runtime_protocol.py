@@ -35,6 +35,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
+from coreman.core.runtime_nodes.bundle import stale_bundle_reason
 from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
     CHUNK_SIZE,
@@ -216,6 +217,10 @@ async def download_bundle(
     )
     if not path.is_file():
         raise ApiError(503, 503, "该平台安装包尚未发布，请先构建 Runtime 发布包")
+    # 从源码运行时不下发过期的发布包；镜像内没有源码树，不做这项检查。
+    stale = stale_bundle_reason(ROOT, path)
+    if stale:
+        raise ApiError(503, 503, stale)
     checksum = path.with_suffix(path.suffix + ".sha256").read_text().split()[0]
     return FileResponse(
         path, headers={**NO_STORE, "X-SHA256": checksum}, media_type="application/gzip"
