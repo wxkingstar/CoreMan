@@ -16,7 +16,6 @@ def test_patch_partial_and_bounds() -> None:
         SettingsPatch(jwt_issuer="Bad Issuer")
     assert set(SETTING_DEFAULTS) == {
         "bootstrap_admin_enabled",
-        "default_model",
         "default_verbosity_level",
         "default_effort_level",
         "session_ttl_hours",
@@ -81,3 +80,31 @@ def test_legacy_agent_timeout_is_not_configurable() -> None:
     assert "agent_timeout_seconds" not in SETTING_DEFAULTS
     assert "agent_timeout_seconds" not in SettingsPatch.model_json_schema()["properties"]
     assert SettingsPatch(agent_timeout_seconds=30).changes() == {}
+
+
+def test_default_model_is_derived_not_stored() -> None:
+    """默认模型由模型目录派生：不在默认值表里，也不能通过设置写入。"""
+    from coreman.core.db.models import ModelCatalog
+    from coreman.core.settings_schema import DERIVED_SETTING_KEYS, platform_default_model
+
+    assert DERIVED_SETTING_KEYS == ("default_model",)
+    assert "default_model" not in SETTING_DEFAULTS
+    assert "default_model" not in SettingsPatch.model_json_schema()["properties"]
+    with pytest.raises(ValidationError):
+        SettingsPatch.model_validate({"default_model": "x/y"})
+    with pytest.raises(ValidationError):
+        SettingsPatch.model_validate({"default_model": None, "session_ttl_hours": 24})
+
+    def row(
+        provider: str, model: str, *, default: bool = False, retired: bool = False
+    ) -> ModelCatalog:
+        return ModelCatalog(
+            provider=provider, model=model, is_default=default, retired=retired, sort_order=0
+        )
+
+    assert platform_default_model([]) is None
+    codex = row("codex", "codex/a", default=True)
+    assert platform_default_model([codex]) == "codex/a"
+    assert platform_default_model([codex, row("claude", "c/a", default=True)]) == "c/a"
+    assert platform_default_model([codex, row("claude", "c/a", retired=True)]) == "codex/a"
+    assert platform_default_model([row("minimax", "m/a", default=True)]) is None
