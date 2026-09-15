@@ -46,7 +46,7 @@ Daemon 每次启动把随包 certifi 根证书、系统 CA 文件（OpenSSL 编�
 - macOS 使用 `~/Library/LaunchAgents/org.coreman.runtime.plist`，依附当前用户的 launchd 域。登录会话的自动启动不等于无人登录开机启动。手工重启：`launchctl kickstart -k gui/$(id -u)/org.coreman.runtime`。
 - 无用户服务管理器的 chroot/nspawn 使用监督进程。安装器输出 `~/.local/share/coreman-runtime/supervise.sh`；需要宿主机服务管理器托管该入口才能保证重启后启动。
 - 后台「排空任务」停止接收新的 POST 任务，已有任务继续；「关闭启用」同时撤销节点接单能力并取消在途请求。排空结束后再停止服务或升级。
-- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。Claude 额度 statusLine 探针是可选项；启用前备份原 settings，替换现有状态栏需由安装者主动选择。
+- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。Codex 额度直接向 CLI 查询。Claude 额度 statusLine 探针是可选项，在安装链接中勾选，或在 `config.json` 设置 `install_claude_probe: true` 后重启服务。启用时先备份 settings，再把 statusLine 指向 `~/.cache/claude_rate_limits/capture.sh`；该脚本记下 Claude 传入的额度后，把同一份输入交给原状态栏命令，原状态栏照常显示。守护进程每 30 分钟启动一次短暂的 Claude 交互会话来刷新额度；Claude Code 只在订阅账号的 statusLine 输入中提供额度字段。未启用时不排 Claude 额度探测。
 
 ### 退出码
 
@@ -117,7 +117,7 @@ rm -rf "$TOOL"
 
 - 默认：停止并删除 systemd unit / launchd plist / `supervise.sh`，清理 socket 目录、`cli-bin`、`state.json`、`trust.pem` 以及非当前的 `release-*`；保留 `config.json`（节点身份，`service_status` 标记为 `uninstalled`）、当前版本、会话与日志。之后可用 `--upgrade <发布包>` 或 `python -m runtime_daemon.install_service --config <config.json>` 以同一身份重新注册服务。
 - `--purge`：在上述基础上删除整个 `~/.local/share/coreman-runtime`（含身份、会话、日志、CA）。之后请在「运行时管理」中撤销该节点；重新接入需要新的安装链接。
-- 卸载不会改动 CLI 登录；若启用过 Claude 额度探针，`~/.claude/settings.before-coreman-probe.json` 是启用前的备份，需要时手工恢复。
+- 卸载不会改动 CLI 登录与 Claude 设置。启用过 Claude 额度探针时，statusLine 仍指向 `capture.sh` 并继续转交原命令；要恢复原状态栏，把 `~/.cache/claude_rate_limits/statusline-original.json` 中的 `statusLine` 写回 `~/.claude/settings.json`。`~/.claude/settings.before-coreman-probe.json` 是首次启用前的完整备份。
 
 ## 日志
 

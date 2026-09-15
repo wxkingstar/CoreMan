@@ -55,7 +55,7 @@ export default {
   "autoDiscover": "自动发现",
   "concurrency": "最大并发任务",
   "claudeProbe": "配置 Claude 额度探针",
-  "probeHint": "启用后备份并设置 Claude statusLine；已有自定义状态栏会被替换。",
+  "probeHint": "启用后备份 Claude 设置，在 statusLine 前串接额度采集，原有状态栏照常显示；每 30 分钟启动一次短暂的 Claude 会话刷新额度。",
   "linkReady": "安装链接已生成",
   "commandHint": "在目标服务器上，以已登录 Claude/Codex 的用户运行以下命令。",
   "credentialHint": "链接包含安装凭证，仅展示一次，默认仅可注册一个新节点；不要分享给不受信的人。",

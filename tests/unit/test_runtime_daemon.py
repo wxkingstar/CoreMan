@@ -134,6 +134,8 @@ def test_status_command_does_not_override_global_claude_config(daemon, tmp_path)
         == "custom"
     )
     assert json.loads(settings.read_text())["theme"] == "dark"
+    # 原状态栏命令由采集脚本转交，不被替换掉。
+    assert "custom" in (tmp_path / ".cache/claude_rate_limits/capture.sh").read_text()
     assert systemd_quote('a b%"') == '"a b%%\\""'
 
 

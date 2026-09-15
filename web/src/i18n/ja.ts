@@ -57,7 +57,7 @@ export default {
   "autoDiscover": "自動検出",
   "concurrency": "最大同時タスク数",
   "claudeProbe": "Claude 使用量プローブを設定",
-  "probeHint": "既存の statusLine をバックアップして置き換えます。",
+  "probeHint": "Claude の設定をバックアップし、statusLine の前に使用量の取得処理を追加します。既存のステータスラインはそのまま表示されます。30 分ごとに短い Claude セッションで使用量を更新します。",
   "linkReady": "リンクを作成しました",
   "commandHint": "Claude/Codex にログインしたユーザーで次のコマンドを実行してください。",
   "credentialHint": "リンクは認証情報を含み、一度だけ表示します。新規ノード1件のみ登録できます。",
