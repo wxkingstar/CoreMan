@@ -1,11 +1,16 @@
-"""用户管理（spec §10.2、§10.3 团队与用户页）。"""
+"""用户管理（spec §10.2、§10.3 团队与用户页）。
+
+列表/详情对所有登录用户开放：协作者、白名单、定时任务接收人的选择器要按名字搜人。
+但通讯录明细（手机号、邮箱、平台身份、部门路径等）只给 ai_committee / platform_admin，
+其余角色拿到的是 `PUBLIC_USER_FIELDS` 裁剪后的记录。
+"""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,12 +20,27 @@ from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import MANUAL_TRACKED, can_edit_user
+from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
 from coreman.core.audit import diff_dict, record_audit
+from coreman.core.bots.permissions import MANAGER_ROLES
 from coreman.core.db.models import Department, Team, User, UserDepartment
 
 router = APIRouter(prefix="/api/admin/users", tags=["users"], dependencies=[Depends(verify_csrf)])
 _NOT_NULLABLE = ("role", "locale", "bot_accessible", "status")
+# 非管理角色可见的字段：够选择器显示与筛选，不含任何联系方式或平台身份。
+PUBLIC_USER_FIELDS = (
+    "id",
+    "login_name",
+    "display_name",
+    "avatar_url",
+    "status",
+    "role",
+    "team_id",
+    "team_name",
+    "source",
+    "locale",
+)
 
 
 class UserPatch(BaseModel):
@@ -50,20 +70,33 @@ class UserPatch(BaseModel):
         return self
 
 
-def user_out(u: User, team_name: str | None, dept_paths: list[str]) -> dict[str, Any]:
-    return {
+def sees_directory_details(viewer: User) -> bool:
+    """通讯录明细只给管理角色（spec §10.2 未把用户目录授予 member / team_lead）。"""
+    return viewer.role in MANAGER_ROLES
+
+
+def user_out(
+    u: User, team_name: str | None, dept_paths: list[str], *, full: bool = True
+) -> dict[str, Any]:
+    """`full=False` 时只输出 `PUBLIC_USER_FIELDS`，且不触碰 identities 关系（调用方可不预加载）。"""
+    public: dict[str, Any] = {
         "id": str(u.id),
         "login_name": u.login_name,
         "display_name": u.display_name,
-        "email": u.email,
-        "mobile": u.mobile,
         "avatar_url": u.avatar_url,
         "status": u.status,
-        "locale": u.locale,
         "role": u.role,
-        "source": u.source,
         "team_id": str(u.team_id) if u.team_id else None,
         "team_name": team_name,
+        "source": u.source,
+        "locale": u.locale,
+    }
+    if not full:
+        return public
+    return {
+        **public,
+        "email": u.email,
+        "mobile": u.mobile,
         "position": u.position,
         "skills": u.skills,
         "bot_accessible": u.bot_accessible,
@@ -98,27 +131,38 @@ async def _team_names(session: AsyncSession) -> dict[uuid.UUID, str]:
     return {t.id: t.name_zh for t in (await session.execute(select(Team))).scalars()}
 
 
+async def _render(session: AsyncSession, users: list[User], *, full: bool) -> list[dict[str, Any]]:
+    names = await _team_names(session)
+    # 部门路径属于明细：非管理角色不查，也就不会被意外带出。
+    paths = await _dept_paths(session, [u.id for u in users]) if full else {}
+    return [
+        user_out(u, names.get(u.team_id) if u.team_id else None, paths.get(u.id, []), full=full)
+        for u in users
+    ]
+
+
 @router.get("")
 async def list_users(
-    keyword: str | None = None,
+    keyword: str | None = Query(default=None, max_length=200),
     team_id: uuid.UUID | None = None,
     role: str | None = None,
     status: str | None = None,
     unassigned: bool = False,
     params: PageParams = Depends(),
-    _: User = Depends(current_user),
+    viewer: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    stmt = (
-        select(User)
-        .options(selectinload(User.identities))
-        .order_by(User.display_name, User.created_at)
-    )
+    full = sees_directory_details(viewer)
+    stmt = select(User).order_by(User.display_name, User.created_at)
+    if full:
+        stmt = stmt.options(selectinload(User.identities))
     if keyword:
-        kw = f"%{keyword}%"
-        stmt = stmt.where(
-            or_(User.display_name.ilike(kw), User.login_name.ilike(kw), User.email.ilike(kw))
-        )
+        kw = f"%{escape_like(keyword)}%"
+        matches = [User.display_name.ilike(kw, escape="\\"), User.login_name.ilike(kw, escape="\\")]
+        # 邮箱看不到就不能拿来搜：否则可以逐字符试探出别人的邮箱。
+        if full:
+            matches.append(User.email.ilike(kw, escape="\\"))
+        stmt = stmt.where(or_(*matches))
     if team_id:
         stmt = stmt.where(User.team_id == team_id)
     if unassigned:
@@ -129,17 +173,7 @@ async def list_users(
         stmt = stmt.where(User.status == status)
     page = await paginate(session, stmt, params)
     users: list[User] = page["items"]
-    names, paths = await _team_names(session), await _dept_paths(session, [u.id for u in users])
-    return {
-        "code": 0,
-        "data": {
-            **page,
-            "items": [
-                user_out(u, names.get(u.team_id) if u.team_id else None, paths.get(u.id, []))
-                for u in users
-            ],
-        },
-    }
+    return {"code": 0, "data": {**page, "items": await _render(session, users, full=full)}}
 
 
 async def _load(session: AsyncSession, user_id: uuid.UUID) -> User:
@@ -156,15 +190,12 @@ async def _load(session: AsyncSession, user_id: uuid.UUID) -> User:
 @router.get("/{user_id}")
 async def get_user(
     user_id: uuid.UUID,
-    _: User = Depends(current_user),
+    viewer: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     u = await _load(session, user_id)
-    names, paths = await _team_names(session), await _dept_paths(session, [u.id])
-    return {
-        "code": 0,
-        "data": user_out(u, names.get(u.team_id) if u.team_id else None, paths.get(u.id, [])),
-    }
+    full = sees_directory_details(viewer)
+    return {"code": 0, "data": (await _render(session, [u], full=full))[0]}
 
 
 @router.patch("/{user_id}")
@@ -209,10 +240,6 @@ async def patch_user(
     # 重新用 selectinload 查一遍：session.refresh() 默认只刷新列属性，identities 关系会
     # 被标记为未加载，序列化时同步访问会在 async 会话里抛 MissingGreenlet。
     target = await _load(session, target.id)
-    names, paths = await _team_names(session), await _dept_paths(session, [target.id])
-    return {
-        "code": 0,
-        "data": user_out(
-            target, names.get(target.team_id) if target.team_id else None, paths.get(target.id, [])
-        ),
-    }
+    # team_lead 也能改本团队成员：回显同样按角色裁剪，不能借一次 PATCH 拿到明细。
+    full = sees_directory_details(actor)
+    return {"code": 0, "data": (await _render(session, [target], full=full))[0]}
