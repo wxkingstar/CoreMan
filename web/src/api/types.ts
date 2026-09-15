@@ -3,11 +3,13 @@ export type Role = 'platform_admin' | 'ai_committee' | 'team_lead' | 'member'
 export type Platform = 'wecom' | 'feishu'
 
 export interface UserOut {
-  id: string; login_name: string | null; display_name: string; email: string | null; mobile: string | null
+  id: string; login_name: string | null; display_name: string
   avatar_url: string | null; status: 'active' | 'disabled'; locale: 'zh' | 'ja' | 'en'; role: Role
   source: 'sync' | 'bootstrap' | 'manual'; team_id: string | null; team_name: string | null
-  position: string | null; skills: string | null; bot_accessible: boolean; manual_fields: string[]
-  last_login_at: string | null; identities: { platform: Platform; platform_user_id: string }[]; departments: string[]
+  // 明细字段只对 ai_committee / platform_admin 下发；列表、详情与 PATCH 回显都按操作者角色裁剪。
+  email?: string | null; mobile?: string | null
+  position?: string | null; skills?: string | null; bot_accessible?: boolean; manual_fields?: string[]
+  last_login_at?: string | null; identities?: { platform: Platform; platform_user_id: string }[]; departments?: string[]
 }
 export type UserPatch = Partial<Pick<UserOut, 'team_id' | 'role' | 'locale' | 'bot_accessible' | 'position' | 'skills' | 'status'>>
 export interface RuleIn { platform: Platform | null; dept_path_contains: string; sort_order: number }

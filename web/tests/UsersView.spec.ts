@@ -79,4 +79,63 @@ describe('UsersView', () => {
     expect(wrapper.find('[data-test="team-select-u1"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="edit-u1"]').exists()).toBe(false)
   })
+
+  // 非管理角色拿到的用户只有基础字段（后端按角色裁剪）。
+  const restrictedUser = {
+    id: 'u1', login_name: 'zhangsan', display_name: '张三', avatar_url: null, status: 'active', role: 'member',
+    team_id: 't1', team_name: '甲', source: 'sync', locale: 'zh',
+  }
+
+  it('hides detail columns the backend withholds from non-manager roles', async () => {
+    const auth = useAuthStore()
+    auth.user = { id: 'me', login_name: 'lead', display_name: 'L', role: 'team_lead', team_id: 't1', locale: 'zh' } as never
+    vi.mocked(users.list).mockResolvedValueOnce({ items: [restrictedUser], total: 1, page: 1, per_page: 50 } as never)
+    const wrapper = mount(UsersView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('张三')
+    const headers = wrapper.findAll('th').map((th) => th.text())
+    for (const key of ['users.email', 'users.departments', 'users.botAccessible', 'users.lastLogin']) {
+      expect(headers).not.toContain(i18n.global.t(key))
+    }
+    expect(headers).toContain(i18n.global.t('users.team'))
+    wrapper.unmount()
+  })
+
+  it('keeps detail columns for managers', async () => {
+    const auth = useAuthStore()
+    auth.user = { id: 'me', login_name: 'admin', display_name: 'A', role: 'ai_committee', locale: 'zh' } as never
+    const wrapper = mount(UsersView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const headers = wrapper.findAll('th').map((th) => th.text())
+    for (const key of ['users.email', 'users.departments', 'users.botAccessible', 'users.lastLogin']) {
+      expect(headers).toContain(i18n.global.t(key))
+    }
+    wrapper.unmount()
+  })
+
+  // team_lead 编辑本团队成员时看不到职位原值：输入框留空、没改不提交，改了只提交这一项。
+  it('lets team_lead fill a withheld field without clearing untouched ones', async () => {
+    const auth = useAuthStore()
+    auth.user = { id: 'me', login_name: 'lead', display_name: 'L', role: 'team_lead', team_id: 't1', locale: 'zh' } as never
+    vi.mocked(users.list).mockResolvedValueOnce({ items: [{ ...restrictedUser }], total: 1, page: 1, per_page: 50 } as never)
+    vi.mocked(users.patch).mockClear()
+    const wrapper = mount(UsersView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="edit-u1"]').trigger('click')
+    await flushPromises()
+    const input = document.querySelector<HTMLInputElement>('[data-test="edit-position"] input')!
+    expect(input.value).toBe('')
+    document.querySelector<HTMLButtonElement>('[data-test="save-edit"]')!.click()
+    await flushPromises()
+    expect(users.patch).not.toHaveBeenCalled()
+    await wrapper.get('[data-test="edit-u1"]').trigger('click')
+    await flushPromises()
+    input.value = '研发'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    document.querySelector<HTMLButtonElement>('[data-test="save-edit"]')!.click()
+    await flushPromises()
+    expect(vi.mocked(users.patch).mock.calls).toEqual([['u1', { position: '研发' }]])
+    wrapper.unmount()
+  })
 })
