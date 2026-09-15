@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from coreman.core.prompting.system_prompt import Speaker
 
-# 新名 → 兼容别名（同值）。COREMAN_PLATFORM 是 CoreMan 新增的，旧实现没有对应名字。
+# 新名 → 兼容别名（同值）。COREMAN_PLATFORM 没有兼容别名。
 _ALIASES = {
     "COREMAN_BOT_KEY": "BOT_KEY",
     "COREMAN_CHAT_ID": "AGENT_CHAT_ID",

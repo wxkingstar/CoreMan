@@ -45,7 +45,7 @@ class FinalizeStage(ChatStageBase):
         """把额度表 / 预警接在终稿后面，但让「✅ 任务已完成」继续压尾。
 
         `_classify` 已经把 ✅ 拼进终稿了，直接追加会变成「✅ 之后还有一大张表」，读起来像
-        任务完成之后又出了什么事；剥掉再拼回去，顺序就与旧实现的「表/预警 → ✅」一致。
+        任务完成之后又出了什么事；剥掉再拼回去，顺序保持「表/预警 → ✅」。
         """
         done = msg("done_suffix", ctx.locale)
         if text.endswith(done):

@@ -260,7 +260,7 @@ def switch_offer_card(
     """当前 relay 触发额度限制时，问用户切换还是等待（spec §8.8）。
 
     `main_title.desc` 与两个选项都不截断：实例名是决策依据，截了用户就不知道在切给谁；
-    企微对这两个字段只是「建议」长度，旧实现一直原样下发。
+    企微对这两个字段只是「建议」长度，原样下发即可。
     """
     return {
         "card_type": "vote_interaction",
