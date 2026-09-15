@@ -77,4 +77,26 @@ describe('PlatformAppsView', () => {
     success.mockRestore()
     error.mockRestore()
   })
+
+  it('ignores a second save while the first one is still in flight', async () => {
+    let finish: (app: unknown) => void = () => {}
+    vi.mocked(platformApps.create).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }) as never)
+    const wrapper = mount(PlatformAppsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-app"]').trigger('click')
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { name: string; corp_id: string | null; secret: string }; submitForm: () => Promise<void>; saving: boolean }
+    Object.assign(vm.form, { name: '登录应用', corp_id: 'ww2', secret: 'secret-value' })
+    await flushPromises()
+    const first = vm.submitForm()
+    const second = vm.submitForm()
+    await flushPromises()
+    expect(vm.saving).toBe(true)
+    finish({ ...mockApp, id: 'p2' })
+    await Promise.all([first, second])
+    await flushPromises()
+    expect(platformApps.create).toHaveBeenCalledTimes(1)
+    expect(vm.saving).toBe(false)
+    wrapper.unmount()
+  })
 })

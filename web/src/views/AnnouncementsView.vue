@@ -143,7 +143,20 @@ function payload(): AnnouncementIn {
   }
 }
 
+const saving = ref(false)
+
+/** 公告表没有唯一约束：双击保存会插入两条一模一样的公告，并各推送一次。 */
 async function submit(): Promise<void> {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await save()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function save(): Promise<void> {
   resetServerErrors()
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
@@ -486,6 +499,7 @@ defineExpose({ form, load, onScopeChange })
         <el-button
           type="primary"
           data-test="save-announcement"
+          :loading="saving"
           @click="submit"
         >
           {{ t('common.save') }}

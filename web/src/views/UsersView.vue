@@ -82,9 +82,11 @@ function openEdit(u: UserOut) {
 }
 
 /** 只提交与原值不同的字段：未变化的字段会被后端记进 manual_fields，从此不再被同步刷新。 */
+const savingEdit = ref(false)
+
 async function saveEdit() {
   const u = editing.user
-  if (!u) return
+  if (!u || savingEdit.value) return
   const body: UserPatch = {}
   if (editing.form.position !== u.position) body.position = editing.form.position
   if (editing.form.skills !== u.skills) body.skills = editing.form.skills
@@ -95,8 +97,13 @@ async function saveEdit() {
     editing.visible = false
     return
   }
-  await patch(u, body)
-  editing.visible = false
+  savingEdit.value = true
+  try {
+    await patch(u, body)
+    editing.visible = false
+  } finally {
+    savingEdit.value = false
+  }
 }
 
 async function showTree() {
@@ -474,6 +481,7 @@ onMounted(async () => {
         <el-button
           type="primary"
           data-test="save-edit"
+          :loading="savingEdit"
           @click="saveEdit"
         >
           {{ t('common.save') }}

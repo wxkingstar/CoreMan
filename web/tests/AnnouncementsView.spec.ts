@@ -190,6 +190,33 @@ describe('AnnouncementsView', () => {
     wrapper.unmount()
   })
 
+  // 公告没有唯一约束：第一次保存还在飞时再点一次，不能再发一个创建请求。
+  it('ignores a second save while the first one is still in flight', async () => {
+    login('platform_admin')
+    vi.mocked(announcements.create).mockClear()
+    let finish: (row: unknown) => void = () => {}
+    vi.mocked(announcements.create).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }) as never)
+    const wrapper = mount(AnnouncementsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-announcement"]').trigger('click')
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { content: string }; submit: () => Promise<void>; saving: boolean }
+    vm.form.content = '维护中'
+    await flushPromises()
+    const first = vm.submit()
+    const second = vm.submit()
+    await flushPromises()
+    expect(vm.saving).toBe(true)
+    const buttons = document.querySelectorAll('[data-test="save-announcement"]')
+    expect(buttons[buttons.length - 1]!.classList.contains('is-loading')).toBe(true)
+    finish(ROW)
+    await Promise.all([first, second])
+    await flushPromises()
+    expect(announcements.create).toHaveBeenCalledTimes(1)
+    expect(vm.saving).toBe(false)
+    wrapper.unmount()
+  })
+
   it('preserves both bounds of a fully bounded window', async () => {
     const wrapper = await openEditorFor(ROW_BOUNDED)
     await clickSave()
