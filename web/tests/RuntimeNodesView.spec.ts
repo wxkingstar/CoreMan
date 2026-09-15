@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { i18n } from '@/i18n'
@@ -66,5 +66,43 @@ it('requires the project root before creating a one-time install command', async
   expect(runtimeNodes.createLink).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ max_concurrent: 10 }) }))
   expect(wrapper.text()).not.toContain('有效小时数')
   expect(wrapper.find('[id=tab-links]').exists()).toBe(false)
+  wrapper.unmount()
+})
+// 停用会级联停掉该节点全部运行时并取消进行中的调用，误触一次代价很大。
+it('asks before disabling or draining a runtime and explains the impact', async () => {
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="toggle-runtime"]').trigger('click'); await flushPromises()
+  expect(confirm).toHaveBeenCalledTimes(1)
+  // 列表 mock 每次返回同一个对象，前面的改名用例可能已经改过名字，这里取当前渲染的名字。
+  const name = (wrapper.vm as unknown as { nodes: { name: string }[] }).nodes[0].name
+  expect(String(confirm.mock.calls[0][0])).toContain(`「${name}」`)
+  expect(String(confirm.mock.calls[0][0])).toContain('取消')
+  expect(runtimeNodes.patch).not.toHaveBeenCalled()
+  confirm.mockResolvedValueOnce('confirm' as never)
+  await wrapper.get('[data-test="toggle-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { is_active: false })
+  confirm.mockRejectedValueOnce('cancel')
+  await wrapper.get('[data-test="drain-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenCalledTimes(1)
+  confirm.mockResolvedValueOnce('confirm' as never)
+  await wrapper.get('[data-test="drain-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenLastCalledWith('node1', { draining: true })
+  expect(confirm).toHaveBeenCalledTimes(4)
+  confirm.mockRestore()
+  wrapper.unmount()
+})
+it('re-enables and resumes a runtime without asking', async () => {
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+  const stopped = { id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: false, draining: true,
+    capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([stopped] as never).mockResolvedValueOnce([stopped] as never)
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="toggle-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { is_active: true })
+  await wrapper.get('[data-test="drain-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenLastCalledWith('node1', { draining: false })
+  expect(confirm).not.toHaveBeenCalled()
+  confirm.mockRestore()
   wrapper.unmount()
 })
