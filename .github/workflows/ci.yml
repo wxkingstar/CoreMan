@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  layering:
+    name: Layer import gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Forbid cross-layer imports
+        # Same rule as tests/unit/test_layering.py (which also sees imports inside functions);
+        # this grep keeps the gate visible even when the Python job fails for other reasons.
+        run: |
+          set -euo pipefail
+          status=0
+          gate() {
+            local message="$1" dir="$2" pattern="$3" allowed="${4:-}" hits
+            hits="$(grep -rnE --include='*.py' "$pattern" "$dir" || true)"
+            if [[ -n "$allowed" ]]; then
+              hits="$(grep -vE "^${allowed}:" <<<"$hits" || true)"
+            fi
+            if [[ -n "$hits" ]]; then
+              echo "::error::$message"
+              echo "$hits"
+              status=1
+            fi
+          }
+          gate "coreman/core must not import coreman.api or coreman.runtime" coreman/core \
+            '^[[:space:]]*(from|import)[[:space:]]+coreman\.(api|runtime)([.[:space:]]|$)'
+          gate "coreman/api must not import coreman.runtime (only routers/dev.py may)" coreman/api \
+            '^[[:space:]]*(from|import)[[:space:]]+coreman\.runtime([.[:space:]]|$)' \
+            'coreman/api/routers/dev\.py'
+          gate "coreman/runtime must not import coreman.api" coreman/runtime \
+            '^[[:space:]]*(from|import)[[:space:]]+coreman\.api([.[:space:]]|$)'
+          exit "$status"
+
+  python:
+    name: Python (ruff, mypy, pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: coreman_test
+          POSTGRES_USER: coreman
+          POSTGRES_PASSWORD: coreman
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U coreman -d coreman_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://coreman:coreman@127.0.0.1:5432/coreman_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Mypy
+        run: uv run mypy coreman
+      - name: Pytest
+        run: uv run pytest -q
+
+  web:
+    name: Web (lint, type check, vitest, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # package.json engines: >=22.12.0; "22" resolves to the newest 22.x release.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx vue-tsc --noEmit
+      - run: npx vitest run
+      - run: npm run build
+
+  go:
+    name: Go drivers (vet, race tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: runtime_daemon/drivers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: runtime_daemon/drivers/go.mod
+          cache-dependency-path: runtime_daemon/drivers/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  shell-compose:
+    name: Shell scripts and Compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: ShellCheck
+        run: >-
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0
+          deploy/coreman runtime_daemon/install.sh scripts/exercise-upgrade
+      - name: Compose config (example env, all profiles)
+        env:
+          COREMAN_ENV_FILE: .env.example
+        run: |
+          set -euo pipefail
+          compose=(docker compose --project-directory . --env-file .env.example -f deploy/docker-compose.yml)
+          "${compose[@]}" config --quiet
+          "${compose[@]}" --profile standby --profile monitoring --profile tools config --quiet
