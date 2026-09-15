@@ -27,12 +27,32 @@ import httpx
 
 from runtime_daemon import __version__
 from runtime_daemon.agent import COMMAND_CANCEL, Agent, OperationError, atomic_write
+from runtime_daemon.lifecycle import (
+    FatalConfigError,
+    choose_socket_dir,
+    ensure_private_dir,
+    fatal_exit_status,
+    record_fatal,
+)
+from runtime_daemon.logs import (
+    LogRotator,
+    appended_stderr_file,
+    configure_logging,
+    rotate_copytruncate,
+)
+from runtime_daemon.tls import build_trust_bundle, client_context
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
 PROVIDERS = ("claude", "codex")
 CONTROL_LEASE_SECONDS = 40.0
 FRAME_RETRY_SECONDS = 25.0
+# Discovery rounds in a row a live driver's socket may refuse connections before a restart.
+SOCKET_FAILURE_LIMIT = 2
+# Discovery rounds a broken driver is kept for its in-flight streams before a forced restart.
+HEAL_DEFER_ROUNDS = 30
+# Enrollment rejections worth retrying; any other 4xx will not change with the same token.
+RETRYABLE_ENROLL_STATUSES = {408, 429}
 
 
 def environment() -> str:
@@ -51,6 +71,19 @@ def environment() -> str:
         except OSError:
             pass
     return "host"
+
+
+def enrollment_rejection(response: httpx.Response) -> str:
+    try:
+        detail = str(response.json().get("message") or "")[:200]
+    except (ValueError, AttributeError):
+        detail = ""
+    return (
+        f"安装注册被 CoreMan 拒绝（HTTP {response.status_code}：{detail or '无详细信息'}）。"
+        "重启服务无法解决：请在「运行时管理」重新生成安装链接，先执行 "
+        "python -m runtime_daemon.install_service --uninstall --purge 清理本次安装，"
+        "再运行新的安装命令。"
+    )
 
 
 def cli_status(provider: str) -> dict:
@@ -106,6 +139,9 @@ class RuntimeAgent(Agent):
         self.daemon = daemon
         self.lock = daemon.operations_lock
         self.http.trust_env = False
+        if daemon.trust_file:
+            # Same chain as the control-plane client; proxy variables stay ignored.
+            self.http.verify = str(daemon.trust_file)
         if daemon.config.get("control_proxy"):
             self.http.proxies.update(
                 {"http": daemon.config["control_proxy"], "https": daemon.config["control_proxy"]}
@@ -195,6 +231,11 @@ class Daemon:
         self.log_handles = []
         self.control_deadline = float("inf")
         self.abandoned: set[str] = set()
+        self.trust_file: Path | None = None
+        self.tls_context = None
+        self.log_rotator = LogRotator()
+        self.socket_failures: dict[str, int] = {}
+        self.heal_deferrals: dict[str, int] = {}
 
     def socket_path(self, provider: str) -> Path:
         # Keep under Unix's 104-byte sockaddr limit, including long macOS home paths.
@@ -219,13 +260,13 @@ class Daemon:
         self.config.setdefault("node_id", str(uuid.uuid4()))
         self.config.setdefault("node_token", secrets.token_urlsafe(32))
         self.save()  # durable before enrollment: response loss is safely retryable
-        self.socket_dir = Path("/tmp") / f"coreman-{os.getuid()}-{self.config['node_id'][:8]}"
-        if self.socket_dir.is_symlink():
-            raise ValueError("Socket 目录不安全")
-        self.socket_dir.mkdir(mode=0o700, exist_ok=True)
-        if self.socket_dir.stat().st_uid != os.getuid():
-            raise ValueError("Socket 目录属于其它用户")
-        os.chmod(self.socket_dir, 0o700)
+        # XDG_RUNTIME_DIR or the data directory; /tmp cleaners age out idle sockets.
+        self.socket_dir = ensure_private_dir(
+            choose_socket_dir(self.data_dir, self.config["node_id"])
+        )
+        self.trust_file = build_trust_bundle(self.data_dir, self.config.get("ca_file"))
+        self.tls_context = client_context(self.trust_file)
+        self.log_rotator.start()
         configured_path = self.config.get("path") or os.environ.get("PATH", "")
         bin_dir = self.data_dir / "cli-bin"
         bin_dir.mkdir(exist_ok=True)
@@ -283,26 +324,30 @@ class Daemon:
         if "backends" in self.config:
             return
         machine = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
-        result = await self.api(
-            "/api/runtime/enroll",
-            {
-                "install_token": self.config["install_token"],
-                "node_id": self.config["node_id"],
-                "node_token": self.config["node_token"],
-                "hostname": socket.gethostname(),
-                "username": getpass.getuser(),
-                "platform": platform.system().lower(),
-                "architecture": machine,
-                "environment": (
-                    environment()
-                    if self.config.get("environment", "auto") == "auto"
-                    else self.config["environment"]
-                ),
-                "version": __version__,
-                "workspace_root": self.config["workspace_root"],
-            },
-            retry=True,
-        )
+        payload = {
+            "install_token": self.config["install_token"],
+            "node_id": self.config["node_id"],
+            "node_token": self.config["node_token"],
+            "hostname": socket.gethostname(),
+            "username": getpass.getuser(),
+            "platform": platform.system().lower(),
+            "architecture": machine,
+            "environment": (
+                environment()
+                if self.config.get("environment", "auto") == "auto"
+                else self.config["environment"]
+            ),
+            "version": __version__,
+            "workspace_root": self.config["workspace_root"],
+        }
+        try:
+            result = await self.api("/api/runtime/enroll", payload, retry=True)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if 400 <= status < 500 and status not in RETRYABLE_ENROLL_STATUSES:
+                # Expired, revoked or reused links: stop instead of crash-looping forever.
+                raise FatalConfigError(enrollment_rejection(exc.response)) from exc
+            raise
         self.config["backends"] = result["backends"]
         self.config.pop("install_token", None)
         self.save()
@@ -311,6 +356,8 @@ class Daemon:
         existing = self.drivers.get(provider)
         if existing and existing.poll() is None:
             return
+        # Cleaners may remove the whole directory, not only the socket file.
+        ensure_private_dir(self.socket_dir)
         path = self.socket_path(provider)
         path.unlink(missing_ok=True)
         release = Path(self.config.get("release", str(Path(__file__).resolve().parents[1])))
@@ -318,34 +365,77 @@ class Daemon:
         session_dir = self.data_dir / "sessions" / provider
         session_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.data_dir / (provider + ".log")
-        if log_path.exists() and log_path.stat().st_size > 20 * 1024 * 1024:
-            log_path.replace(log_path.with_suffix(".log.1"))
-        log_handle = log_path.open("ab")
-        self.log_handles.append(log_handle)
+        rotate_copytruncate(log_path)
         env = {k: v for k, v in os.environ.items() if not k.startswith("COREMAN_")}
-        self.drivers[provider] = subprocess.Popen(
-            [
-                str(binary),
-                "--parent-pid",
-                str(os.getpid()),
-                "--socket",
-                str(path),
-                "--sessions-dir",
-                str(session_dir),
-                "--log-file",
-                "-",
-            ],
-            env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        # The driver appends to this file for its whole life. A pipe would kill it with
+        # SIGPIPE before it reaps its CLI process groups if the daemon died first, so the
+        # rotator copy-truncates the O_APPEND file on a timer instead.
+        with log_path.open("ab") as log_handle:
+            os.chmod(log_path, 0o600)
+            self.drivers[provider] = subprocess.Popen(
+                [
+                    str(binary),
+                    "--parent-pid",
+                    str(os.getpid()),
+                    "--socket",
+                    str(path),
+                    "--sessions-dir",
+                    str(session_dir),
+                    "--log-file",
+                    "-",
+                ],
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self.log_rotator.watch(log_path)
+        self.socket_failures[provider] = 0
+        self.heal_deferrals[provider] = 0
+
+    def driver_fault(self, provider: str) -> str:
+        """Why a live driver can no longer be reached; empty when fine or not running."""
+        process = self.drivers.get(provider)
+        if process is None or process.poll() is not None:
+            return ""
+        if not self.socket_path(provider).is_socket():
+            return "socket missing"
+        if self.socket_failures.get(provider, 0) >= SOCKET_FAILURE_LIMIT:
+            return "socket unreachable"
+        return ""
+
+    def stop_driver(self, provider: str, timeout: float = 15) -> None:
+        process = self.drivers.get(provider)
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    async def heal_driver(self, provider: str) -> None:
+        """Terminate a live driver whose socket is gone so ``start_driver`` recreates it."""
+        reason = self.driver_fault(provider)
+        if not reason:
+            return
+        busy = any(info["provider"] == provider for info in list(self.task_info.values()))
+        deferred = self.heal_deferrals.get(provider, 0)
+        if busy and deferred < HEAL_DEFER_ROUNDS:
+            # Connected streams outlive an unlinked socket; let them finish first.
+            self.heal_deferrals[provider] = deferred + 1
+            LOG.warning("%s driver %s; restart deferred for running requests", provider, reason)
+            return
+        LOG.warning("Restarting %s driver: %s", provider, reason)
+        await asyncio.to_thread(self.stop_driver, provider)
 
     async def discover(self) -> None:
         for provider in PROVIDERS:
             cap = await asyncio.to_thread(cli_status, provider)
             if cap["installed"]:
                 try:
+                    await self.heal_driver(provider)
                     self.start_driver(provider)
                     async with httpx.AsyncClient(
                         transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path(provider))),
@@ -362,6 +452,10 @@ class Daemon:
                                 await asyncio.sleep(0.1)
                         response.raise_for_status()
                         cap["models"] = [r["id"] for r in response.json()["data"]]
+                    self.socket_failures[provider] = 0
+                except httpx.ConnectError:
+                    self.socket_failures[provider] = self.socket_failures.get(provider, 0) + 1
+                    cap["detail"] = "AI API 启动中或不可用"
                 except (httpx.HTTPError, OSError, ValueError):
                     cap["detail"] = "AI API 启动中或不可用"
                 if provider not in self.agents:
@@ -525,6 +619,7 @@ class Daemon:
             timeout=15,
             follow_redirects=False,
             trust_env=False,
+            verify=self.tls_context or True,
             proxy=self.config.get("control_proxy") or None,
             headers={
                 "X-Runtime-ID": self.config["node_id"],
@@ -623,6 +718,7 @@ class Daemon:
                             await asyncio.to_thread(proc.wait)
                 for handle in self.log_handles:
                     handle.close()
+                self.log_rotator.stop()
                 for provider in PROVIDERS:
                     self.socket_path(provider).unlink(missing_ok=True)
 
@@ -631,8 +727,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CoreMan Runtime Daemon")
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    data_dir = args.config.parent
+    configure_logging(data_dir)
     daemon = Daemon(args.config)
+    service_log = appended_stderr_file(data_dir / "service.log")
+    if service_log:
+        # launchd and the chroot supervisor append stderr here for the service's lifetime.
+        rotate_copytruncate(service_log)
+        daemon.log_rotator.watch(service_log)
 
     async def start():
         loop = asyncio.get_running_loop()
@@ -640,7 +742,15 @@ def main() -> None:
             loop.add_signal_handler(sig, daemon.stopping.set)
         await daemon.run()
 
-    asyncio.run(start())
+    try:
+        asyncio.run(start())
+    except FatalConfigError as exc:
+        LOG.error("%s", exc)
+        record_fatal(data_dir, str(exc))
+        raise SystemExit(fatal_exit_status(daemon.config.get("service_status", ""))) from None
+    except Exception:
+        LOG.exception("Runtime stopped unexpectedly")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
