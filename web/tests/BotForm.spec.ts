@@ -11,7 +11,7 @@ vi.mock('@/api/admin', () => ({
   teams: { list: vi.fn().mockResolvedValue([]) },
 }))
 
-import { bots, relays } from '@/api/admin'
+import { bots, relays, settings } from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { BotOut } from '@/api/types'
 import { i18n } from '@/i18n'
@@ -166,6 +166,18 @@ describe('BotForm', () => {
     expect(vi.mocked(bots.patch).mock.calls.map((c) => [c[1], c[2]])).toEqual([[{ name: '新名字' }, 1], [{ name: '新名字' }, 5]])
     expect(wrapper.emitted('saved')).toBeTruthy()
     warning.mockRestore()
+    wrapper.unmount()
+  })
+
+  // 模型目录为空或全部退役时默认模型是 null：保持空，由必填校验提示用户选择。
+  it('keeps the model empty when there is no default model', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    vi.mocked(settings.defaults).mockResolvedValueOnce({ default_model: null, default_verbosity_level: 3, default_effort_level: null })
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { model: string; verbosity_level: number } }
+    expect(vm.form.model).toBe('')
+    expect(vm.form.verbosity_level).toBe(3)
     wrapper.unmount()
   })
 })

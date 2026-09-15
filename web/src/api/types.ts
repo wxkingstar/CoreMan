@@ -129,7 +129,8 @@ export type PromptSettings = { [K in PromptSegment as `prompt_${K}`]: string }
 
 export interface SettingsOut extends PromptSettings {
   bootstrap_admin_enabled: boolean
-  default_model: string
+  /** 由模型目录里标记为默认的模型派生，只读；目录为空或全部退役时为 null。 */
+  default_model: string | null
   default_verbosity_level: number
   default_effort_level: EffortLevel | null
   session_ttl_hours: number
@@ -140,7 +141,8 @@ export interface SettingsOut extends PromptSettings {
   /** 企微模板卡片左上角的来源图标；空串表示不显示图标。 */
   card_icon_url: string
 }
-export type SettingsPatch = Partial<SettingsOut>
+/** default_model 只读：PUT 带这个键后端会 422。 */
+export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>
 export type SettingsDefaults = Pick<SettingsOut, 'default_model' | 'default_verbosity_level' | 'default_effort_level'>
 
 // ---- M2：对话记录、运行状态、并发与提示词设置 ----

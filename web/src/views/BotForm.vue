@@ -298,7 +298,8 @@ onMounted(async () => {
   }
   try {
     const d = await settings.defaults()
-    form.model = d.default_model
+    // 模型目录为空或全部退役时没有默认模型（null）：保持空，不覆盖已有值，交给必填校验提示。
+    if (d.default_model) form.model = d.default_model
     form.verbosity_level = d.default_verbosity_level
     form.effort_level = d.default_effort_level
   } catch (e) {

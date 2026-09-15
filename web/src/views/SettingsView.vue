@@ -5,19 +5,19 @@ import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { catalog, settings } from '@/api/admin'
+import { settings } from '@/api/admin'
 import AlertSettings from '@/components/AlertSettings.vue'
 import NotificationSettings from '@/components/NotificationSettings.vue'
-import { PROMPT_SEGMENTS, type CatalogOut, type EffortLevel, type SettingsOut, type SettingsPatch } from '@/api/types'
+import { PROMPT_SEGMENTS, type EffortLevel, type SettingsOut, type SettingsPatch } from '@/api/types'
 
 const { t } = useI18n()
 
 const EFFORT_OPTIONS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh']
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
-// 与 coreman/core/settings_schema.py::SETTING_DEFAULTS 的键集一致；save() 只按这几个键做浅比较。
+// 可写设置项：coreman/core/settings_schema.py::SETTING_DEFAULTS 里除只读的 default_model 以外的键。
+// save() 只按这几个键做浅比较，default_model 永远不会进 PUT 请求体。
 const KEYS = [
   'bootstrap_admin_enabled',
-  'default_model',
   'default_verbosity_level',
   'default_effort_level',
   'session_ttl_hours',
@@ -37,7 +37,7 @@ const KEYS = [
 function empty(): SettingsOut {
   return {
     bootstrap_admin_enabled: true,
-    default_model: '',
+    default_model: null,
     default_verbosity_level: 1,
     default_effort_level: null,
     session_ttl_hours: 72,
@@ -60,12 +60,12 @@ const form = reactive<SettingsOut>(empty())
 let original: SettingsOut = empty()
 const initialized = ref(false), loadError = ref('')
 useUnsavedChanges(() => initialized.value && Object.keys(changes()).length > 0)
-const models = ref<CatalogOut[]>([])
+
 const loading = ref(false)
 const saving = ref(false)
 
 function fail(e: unknown): void {
-  // 422（模型不在目录中 / 设置项不能置空 / 关引导登录前先配登录应用）都是后端写好的中文，直接透传。
+  // 422（设置项不能置空 / 关引导登录前先配登录应用）都是后端写好的中文，直接透传。
   ElMessage.error(errorMessage(e))
 }
 
@@ -118,12 +118,6 @@ async function load() {
     fail(e)
   } finally {
     loading.value = false
-  }
-  try {
-    // 默认模型必须是目录里未退役的行，否则后端 422「模型不在目录中」。
-    models.value = (await catalog.list()).filter((m) => !m.retired)
-  } catch (e) {
-    fail(e)
   }
 }
 onMounted(load)
@@ -185,18 +179,19 @@ defineExpose({ form })
         :label="t('settings.defaultModel')"
         data-test="default-model"
       >
-        <el-select
-          v-model="form.default_model"
-          filterable
-          style="width: 320px"
+        <!-- 只读：默认模型由模型目录派生，在「运行时管理 → 模型目录」里改。 -->
+        <code v-if="form.default_model">
+          {{ form.default_model }}
+        </code>
+        <span
+          v-else
+          class="muted"
         >
-          <el-option
-            v-for="m in models"
-            :key="m.provider + '/' + m.model"
-            :label="m.provider + ' / ' + m.model"
-            :value="m.model"
-          />
-        </el-select>
+          {{ t('settings.defaultModelNone') }}
+        </span>
+        <div class="hint">
+          {{ t('settings.defaultModelHint') }}
+        </div>
       </el-form-item>
 
       <el-form-item
@@ -376,4 +371,5 @@ defineExpose({ form })
 .prompt-hint { margin-bottom: 12px; }
 /* el-form-item__content 是 flex，width: 100% 让提示文案整行落到输入框下面。 */
 .hint { width: 100%; color: var(--el-text-color-secondary); font-size: 12px; }
+.muted { color: var(--el-text-color-secondary); }
 </style>
