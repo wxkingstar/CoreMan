@@ -33,7 +33,12 @@ from coreman.core.db.models import (
     Team,
     User,
 )
-from coreman.core.runtime_nodes.common import absolute_root, token_digest
+from coreman.core.runtime_nodes.common import (
+    MAX_CA_PEM_BYTES,
+    absolute_root,
+    token_digest,
+    validate_ca_pem,
+)
 from coreman.core.runtime_nodes.transport import (
     TERMINAL,
     notify_call,
@@ -46,6 +51,7 @@ router = APIRouter(prefix="/api/admin/runtime-nodes", dependencies=[Depends(veri
 MANAGERS = require_roles("ai_committee", "platform_admin")
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+CA_FILE_HINT = "coreman-ca.pem"
 
 
 class InstallOptions(BaseModel):
@@ -59,6 +65,9 @@ class InstallOptions(BaseModel):
     )
     max_concurrent: int = Field(default=10, ge=1, le=32)
     install_claude_probe: bool = False
+    # 平台使用私有 CA 时的 PEM 证书：与 proxy 一样随配置注入安装脚本，
+    # 安装脚本取出后写成节点数据目录下的 ca.pem，并在节点配置里记为 ca_file。
+    ca_pem: str = Field(default="", max_length=MAX_CA_PEM_BYTES)
 
     @field_validator("proxy", "control_proxy")
     @classmethod
@@ -73,6 +82,11 @@ class InstallOptions(BaseModel):
             ):
                 raise ValueError("代理使用不含账号密码的 HTTP(S) 地址")
         return value
+
+    @field_validator("ca_pem")
+    @classmethod
+    def validate_ca(cls, value: str) -> str:
+        return validate_ca_pem(value)
 
     @field_validator("claude_path", "codex_path")
     @classmethod
@@ -156,15 +170,24 @@ async def create_link(
         actor_login=actor.login_name,
         target_type="runtime_install_link",
         target_id=str(link.id),
-        diff={"workspace_root": [None, body.workspace_root]},
+        diff={
+            "workspace_root": [None, body.workspace_root],
+            **({"ca_pem": [None, "provided"]} if body.options.ca_pem else {}),
+        },
     )
     await session.commit()
     base = request.app.state.settings.public_base_url
     url = f"{base}/api/runtime/install/{link.id}.{token}/install.sh"
-    return {
-        "code": 0,
-        "data": {**link_out(link), "url": url, "command": f"curl -fsSL {shlex.quote(url)} | sh"},
-    }
+    data: dict[str, Any] = {**link_out(link), "url": url}
+    if body.options.ca_pem:
+        # 下载安装脚本这一步本身也要信任私有 CA，curl 不会读取安装链接里的证书。
+        data["command"] = f"curl --cacert {CA_FILE_HINT} -fsSL {shlex.quote(url)} | sh"
+        data["ca_hint"] = (
+            f"平台使用私有 CA：先把同一份 CA 证书保存为当前目录下的 {CA_FILE_HINT}，再执行安装命令"
+        )
+    else:
+        data["command"] = f"curl -fsSL {shlex.quote(url)} | sh"
+    return {"code": 0, "data": data}
 
 
 @router.get("/install-links")
