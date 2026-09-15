@@ -26,6 +26,7 @@ def test_patch_partial_and_bounds() -> None:
         "prompt_security_policy",
         "prompt_codex_contract",
         "prompt_runtime_mode",
+        "prompt_cron_mode",
         "prompt_runtime_tail",
         "prompt_verbosity_2",
         "prompt_verbosity_3",
@@ -66,11 +67,15 @@ def test_prompt_keys() -> None:
         "prompt_security_policy",
         "prompt_codex_contract",
         "prompt_runtime_mode",
+        "prompt_cron_mode",
         "prompt_runtime_tail",
         "prompt_verbosity_2",
         "prompt_verbosity_3",
         "prompt_verbosity_4",
     }
+    assert SettingsPatch(prompt_cron_mode="x").changes() == {"prompt_cron_mode": "x"}
+    with pytest.raises(ValidationError):
+        SettingsPatch(prompt_cron_mode="")
     assert SettingsPatch(prompt_runtime_tail="x").changes() == {"prompt_runtime_tail": "x"}
     with pytest.raises(ValidationError):
         SettingsPatch(prompt_runtime_tail="")

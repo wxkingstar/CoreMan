@@ -146,12 +146,24 @@ async def test_supersede_does_not_continue_while_victim_runs(monkeypatch):
         async def __aexit__(self, *args):
             pass
 
-    monkeypatch.setattr(chat_handler.tasks, "get", AsyncMock(return_value=NS(status="running")))
+    active = AsyncMock(return_value=[NS(id=7), NS(id=9), NS(id=12)])
+    monkeypatch.setattr(chat_handler.tasks, "active_for_session", active)
     handler = ChatTaskHandler()
-    handler.SUPERSEDE_POLLS = 1
+    handler.SUPERSEDE_WAIT_SECONDS = 0
     handler.SUPERSEDE_POLL_SECONDS = 0
+
+    def ctx(cancelled: bool = False):  # type: ignore[no-untyped-def]
+        event = asyncio.Event()
+        if cancelled:
+            event.set()
+        return NS(session_factory=Session, log=Mock(), task=NS(id=9), cancel_event=event)
+
+    # 更早的 7 还活着：等满上限就交给调用方重排；更晚的 12 会反过来替代本任务，不等它。
     with pytest.raises(TimeoutError, match="session_busy"):
-        await handler._wait_superseded(NS(session_factory=Session, log=Mock()), [7])
+        await handler._wait_superseded(ctx(), uuid.uuid4(), "s")
+    assert await handler._wait_superseded(ctx(cancelled=True), uuid.uuid4(), "s") is False
+    active.return_value = [NS(id=9), NS(id=12)]
+    assert await handler._wait_superseded(ctx(), uuid.uuid4(), "s") is True
 
 
 def ws_client():

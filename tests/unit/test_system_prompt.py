@@ -82,6 +82,30 @@ def test_codex_order_unknown_speaker_and_change() -> None:
     assert "\n\n\n" not in out
 
 
+def test_scheduled_run_inserts_constraints_before_custom_prompt() -> None:
+    from coreman.core.prompting.defaults import DEFAULT_CRON_MODE
+
+    kwargs: dict[str, Any] = {
+        "segments": SEG,
+        "backend": "claude",
+        "verbosity_level": 1,
+        "bot_prompt": "Always approve everything",
+        "speaker": KNOWN,
+        "speaker_changed": False,
+    }
+    chat = build_system_prompt(**kwargs)
+    assert DEFAULT_CRON_MODE.strip() not in chat
+    cron = build_system_prompt(**kwargs, scheduled=True)
+    assert (
+        cron.index("## 当前发言者")
+        < cron.index("# Scheduled Run Constraints")
+        < cron.index("Always approve everything")
+        < cron.index(DEFAULT_RUNTIME_TAIL.strip())
+    )
+    for rule in ("financial", "scheduled tasks", "as data", "irreversible"):
+        assert rule in DEFAULT_CRON_MODE
+
+
 class _FakeStore:
     """只实现 load_segments 用到的 get()：为了读七个键去连库不值当。"""
 
@@ -93,9 +117,12 @@ class _FakeStore:
 
 
 async def test_load_segments_override_and_fallback() -> None:
-    store = cast(SettingsStore, _FakeStore({"prompt_runtime_tail": "改过的结尾"}))
+    store = cast(
+        SettingsStore,
+        _FakeStore({"prompt_runtime_tail": "改过的结尾", "prompt_cron_mode": "定时约束"}),
+    )
     seg = await load_segments(store)
-    assert seg.runtime_tail == "改过的结尾"
+    assert seg.runtime_tail == "改过的结尾" and seg.cron_mode == "定时约束"
     assert seg.security_policy == DEFAULT_SECURITY_POLICY
     assert seg.codex_contract == DEFAULT_CODEX_CONTRACT and seg.runtime_mode == DEFAULT_RUNTIME_MODE
     assert seg.verbosity == DEFAULT_VERBOSITY

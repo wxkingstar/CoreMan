@@ -17,6 +17,7 @@ from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
 from coreman.core.db.models import Bot, ChatLog, CronJob, CronRun, RelayServer, Task, User
 from coreman.core.errors import ApiError
+from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import effective_env
 from coreman.core.pricing import estimate
 from coreman.core.prompting import (
@@ -38,6 +39,10 @@ from coreman.core.relay.sse import (
 )
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
+
+# 结果正文上限（字符）：超出只保留前面这些并附截断提示，任务照常算成功。它同时约束
+# cron_runs.reply 的大小；各投递渠道另按自己的分片与条数上限再截一次（见 cron.delivery）。
+RESULT_MAX_CHARS = 100_000
 
 
 class CronStreamError(ValueError):
@@ -173,8 +178,9 @@ class CronRunHandler:
                             config.get("system_prompt")
                             or bot.merged_system_prompt
                             or bot.system_prompt
-                        )
-                        + "\n\n这是定时执行。请直接给出可交付的结果；不要等待对话卡片回答。",
+                            or ""
+                        ),
+                        scheduled=True,
                     ),
                 )
                 await session.commit()
@@ -193,7 +199,10 @@ class CronRunHandler:
                     )
                     if stop in ready:
                         raise asyncio.CancelledError()
-                    reply, usage, tools = consume.result()
+                    reply, usage, tools, truncated = consume.result()
+                    if truncated:
+                        ctx.log.warning("cron_result_truncated", limit=RESULT_MAX_CHARS)
+                        reply += msg("cron_result_truncated", ctx.locale, limit=RESULT_MAX_CHARS)
                     status = "success"
             finally:
                 stop.cancel()
@@ -230,15 +239,19 @@ class CronRunHandler:
 
     async def _consume(
         self, gen: AsyncGenerator[SseEvent, None]
-    ) -> tuple[str, UsageEvent | None, list[str]]:
-        """收完整条流再判定。
+    ) -> tuple[str, UsageEvent | None, list[str], bool]:
+        """收完整条流再判定；返回 (正文, 用量, 工具, 是否截断过)。
 
         与 chat 同一口径：relay 回传的错误优先（保留原话），其次是零事件流，最后才是
         「未确认终态」；连接失败、超时这类通用异常原样抛出。
+
+        正文超过 `RESULT_MAX_CHARS` 只保留前面部分、继续把流收完：终态与用量还在后面，
+        长报表不能因为多写了几行就整轮判失败、白烧 token。
         """
         parts: list[str] = []
         errors: list[str] = []
         size = 0
+        truncated = False
         events = 0
         usage = None
         finished = False
@@ -260,10 +273,12 @@ class CronRunHandler:
                     continue
                 events += 1
                 if isinstance(event, TextDelta):
-                    size += len(event.text)
-                    if size > 100000:
-                        raise CronStreamError("result_size_limit", usage=usage, tools=tools)
-                    parts.append(event.text)
+                    room = RESULT_MAX_CHARS - size
+                    if len(event.text) > room:
+                        truncated = True
+                    if room > 0:
+                        parts.append(event.text[:room])
+                    size += min(len(event.text), max(room, 0))
                 elif isinstance(event, UsageEvent):
                     usage = event
                 elif isinstance(event, ToolUseStart) and event.name not in tools:
@@ -281,7 +296,7 @@ class CronRunHandler:
             raise CronStreamError(code, partial=reply, usage=usage, tools=tools)
         if not reply:
             raise CronStreamError("empty_result", usage=usage, tools=tools)
-        return reply, usage, tools
+        return reply, usage, tools, truncated
 
     async def _finish(
         self,
@@ -360,11 +375,29 @@ class CronRunHandler:
             if bot is not None:
                 config = task.payload.get("config", {})
                 if status != "skipped" and error != "cancelled":
-                    content = (
-                        reply
-                        if status == "success"
-                        else f"**定时任务执行失败**\n{run.job_name}\n{detail or error or status}"
-                    )
+                    if status == "success":
+                        # 头尾标明是哪个定时任务、跑了多久：主动推送和对话回复长得一样，
+                        # 不加标记用户会把它当成某次对话的回答。cron_runs.reply 仍存原文。
+                        seconds = max(0, int((now - run.started_at).total_seconds()))
+                        content = (
+                            msg(
+                                "cron_push_header",
+                                ctx.locale,
+                                name=run.job_name,
+                                bot=bot.name,
+                                seconds=seconds,
+                            )
+                            + reply
+                            + msg("cron_push_footer", ctx.locale)
+                        )
+                    else:
+                        content = msg(
+                            "cron_failed",
+                            ctx.locale,
+                            name=run.job_name,
+                            bot=bot.name,
+                            reason=detail or error or status,
+                        )
                     run.delivery = await enqueue_result(
                         session,
                         bot=bot,
@@ -372,6 +405,8 @@ class CronRunHandler:
                         run_id=run.id,
                         content=content,
                         cipher=ctx.cipher,
+                        locale=ctx.locale,
+                        fallback_user_id=job.created_by if job else None,
                     )
                 run.cost_usd = await estimate(
                     session,

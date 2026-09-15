@@ -206,8 +206,7 @@ class FinalizeStage(ChatStageBase):
             # 无论谁先，终稿都只由后手那一边负责送达，不会两边都以为对方会送。
             done = await pre.writer.complete(verdict.final_text, pending_card=card)
             await self._push_if_proactive(ctx, pre, verdict, done, card)
-        # The delivered final response already carries completion; do not race it
-        # with a separate notification or label a waiting-user turn as complete.
+            await self._notify_long_task(ctx, pre, verdict, done, elapsed)
         ctx.chat_logs.submit(
             log_entry(
                 ctx,
@@ -230,6 +229,42 @@ class FinalizeStage(ChatStageBase):
             tools=len(out.tools),
         )
         await self._after_finalize(ctx, pre, verdict)
+
+    async def _notify_long_task(
+        self,
+        ctx: TaskContext,
+        pre: Prepared,
+        verdict: Verdict,
+        done: streams.Completion,
+        elapsed: int,
+    ) -> None:
+        """耗时 ≥LONG_TASK_SECONDS 且正常完成时，另发一条完成提醒。
+
+        流式气泡是原地刷新，企微 / 飞书都不会因此弹新消息通知，用户切走之后不知道已经
+        完成。只有终稿仍由网关按流收尾（`delivery_mode=stream`）才需要：主动推送与后台切换
+        那几路的终稿本身就是一条新消息，已经会提醒；提问轮的卡片同理，出错 / 被停不算完成。
+        群聊与私聊一样直接发到会话里，不 @ 发言者。
+        """
+        if (
+            verdict.log_status != "success"
+            or done.delivery_mode != "stream"
+            or elapsed < self.LONG_TASK_SECONDS
+        ):
+            return
+        delay = timedelta(seconds=self.LONG_TASK_NOTICE_DELAY_SECONDS)
+        async with ctx.session_factory() as session:
+            await outbox.add(
+                session,
+                bot_id=pre.intake.bot.id,
+                platform=pre.intake.bot.platform,
+                kind="send",
+                dedupe_key=f"{ctx.task.id}:send:long_done",
+                target={"chat_id": pre.intake.chat_id},
+                payload={"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)},
+                not_before=datetime.now(UTC) + delay,
+            )
+            await session.commit()
+        ctx.log.info("long_task_notice_queued", elapsed_s=elapsed)
 
     async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
         """收尾之后的挂钩（清理本轮独有的状态）。只在这一轮真的抢到终态时才会走到。"""
