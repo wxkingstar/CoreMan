@@ -375,11 +375,29 @@ class CronRunHandler:
             if bot is not None:
                 config = task.payload.get("config", {})
                 if status != "skipped" and error != "cancelled":
-                    content = (
-                        reply
-                        if status == "success"
-                        else f"**定时任务执行失败**\n{run.job_name}\n{detail or error or status}"
-                    )
+                    if status == "success":
+                        # 头尾标明是哪个定时任务、跑了多久：主动推送和对话回复长得一样，
+                        # 不加标记用户会把它当成某次对话的回答。cron_runs.reply 仍存原文。
+                        seconds = max(0, int((now - run.started_at).total_seconds()))
+                        content = (
+                            msg(
+                                "cron_push_header",
+                                ctx.locale,
+                                name=run.job_name,
+                                bot=bot.name,
+                                seconds=seconds,
+                            )
+                            + reply
+                            + msg("cron_push_footer", ctx.locale)
+                        )
+                    else:
+                        content = msg(
+                            "cron_failed",
+                            ctx.locale,
+                            name=run.job_name,
+                            bot=bot.name,
+                            reason=detail or error or status,
+                        )
                     run.delivery = await enqueue_result(
                         session,
                         bot=bot,

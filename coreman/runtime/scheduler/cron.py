@@ -13,6 +13,7 @@ from coreman.core.cron.schedule import next_run
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, CronJob, CronRun, Task, User
 from coreman.core.errors import ApiError
+from coreman.core.i18n.messages import msg
 
 MISFIRE_SECONDS = 300
 
@@ -187,7 +188,12 @@ async def recover_runs(
                         bot=bot,
                         config=task.payload.get("config", {}),
                         run_id=run.id,
-                        content=f"**定时任务执行失败**\n{run.job_name}\n执行进程中断，请查看运行记录。",
+                        content=msg(
+                            "cron_failed",
+                            name=run.job_name,
+                            bot=bot.name,
+                            reason=msg("cron_worker_lost"),
+                        ),
                         cipher=cipher,
                     )
                 session.add(

@@ -51,7 +51,13 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     assert len(records) == 1 and records[0].chat_type == "cron"
     assert await db_session.scalar(select(UserReached)) is None
     item = await db_session.scalar(select(OutboxItem))
-    assert item is not None and item.payload["markdown"] == run.reply and item.status == "pending"
+    assert item is not None and item.status == "pending"
+    pushed = item.payload["markdown"]
+    from coreman.core.i18n.messages import msg
+
+    # 推送带任务名/机器人/耗时的头与「定时推送」尾，存档的 reply 仍是原文。
+    assert pushed.startswith(f"**{run.job_name}**\n> 机器人：销售 | 耗时：")
+    assert run.reply in pushed and pushed.endswith(msg("cron_push_footer"))
     assert run.delivery["outbox_ids"] == [item.id]
     await db_session.refresh(row)
     assert row.running_task_id is None
@@ -147,6 +153,12 @@ async def test_disabled_actor_and_lost_worker_recovery(
     runs = (await db_session.scalars(select(CronRun))).all()
     await db_session.refresh(runs[-1])
     assert runs[-1].status == "failed" and runs[-1].delivery["outbox_ids"]
+    from coreman.core.i18n.messages import msg
+
+    lost = await db_session.get(OutboxItem, runs[-1].delivery["outbox_ids"][0])
+    assert lost is not None and lost.payload["markdown"] == msg(
+        "cron_failed", name=runs[-1].job_name, bot="销售", reason=msg("cron_worker_lost")
+    )
     assert len((await db_session.scalars(select(ChatLog))).all()) == 2
 
 
@@ -254,6 +266,10 @@ async def test_cron_relay_error_without_finish_keeps_reason(
     assert log is not None and log.error_code == "x_relay_error"
     item = await db_session.scalar(select(OutboxItem))
     assert item is not None and "codex produced no output" in item.payload["markdown"]
+    # 失败推送与成功推送同一套标记：任务名、机器人、原因；不带「定时推送」尾巴。
+    assert item.payload["markdown"].startswith("**定时任务执行失败**\n> 任务：")
+    assert "> 机器人：销售\n> 原因：x_relay_error" not in item.payload["markdown"]
+    assert "> 原因：[codex error]" in item.payload["markdown"]
 
 
 async def test_cron_handler_leaves_periodic_heartbeats_to_the_service(
