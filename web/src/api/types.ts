@@ -30,7 +30,6 @@ export interface Providers { wecom: boolean; feishu: boolean }
 // ---- M1b：relay 实例、模型目录、机器人、审计与设置 ----
 
 export type HealthStatus = 'healthy' | 'down' | 'auth_fail' | 'timeout' | 'unknown'
-export type RuntimeEnv = 'host' | 'chroot' | 'nspawn'
 export type ModelsMode = 'inherit' | 'restricted'
 export type Visibility = 'all' | 'admins'
 export type Backend = 'claude' | 'codex'
@@ -38,15 +37,14 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh'
 /** 限额百分比：后端是 Numeric 列，序列化后可能是数字也可能是数字字符串，取值一律过 Number()。 */
 export type Pct = number | string | null
 
+/** 运行时列表项：旧的手工部署字段（主机、端口、SSH/chroot、agent 令牌）后端已不再下发。 */
 export interface RelayOut {
   runtime_node_id?: string | null; runtime_name?: string | null; workspace_root?: string | null
-  id: string; name: string; host: string; clawrelay_port: number; agent_port: number | null
-  relay_url: string; ssh_user: string | null; runtime_env: RuntimeEnv
-  chroot_path: string | null; runtime_user: string | null
+  id: string; name: string; relay_url: string
   model_provider: string; supported_models_mode: ModelsMode; supported_models: string[] | null
   effective_models: string[]; default_model: string | null
   team_id: string | null; team_name: string | null; visibility: Visibility
-  description: string | null; is_active: boolean; has_agent_token: boolean
+  description: string | null; is_active: boolean
   rate_limit_5h_used_pct: Pct; rate_limit_5h_resets_at: string | null
   rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null
   rate_limit_probed_at: string | null
@@ -55,20 +53,13 @@ export interface RelayOut {
   relay_version: string | null; relay_mode: string | null
   bot_count: number; version: number; created_at: string; updated_at: string
 }
-export type RelayIn = Pick<
-  RelayOut,
-  'name' | 'host' | 'clawrelay_port' | 'agent_port' | 'ssh_user' | 'runtime_env' | 'chroot_path'
-  | 'runtime_user' | 'model_provider' | 'supported_models_mode' | 'supported_models' | 'team_id'
-  | 'visibility' | 'description' | 'is_active'
->
+
 export interface RelayModels { provider: string; mode: ModelsMode; models: string[]; default: string | null }
 export interface RelayHealth {
   status: HealthStatus; detail: string | null; latency_ms: number
   backend: string | null; version: string | null; mode: string | null
 }
 export interface ProbeResult { health: RelayHealth; added_models: string[]; relay: RelayOut }
-export interface TeamLoadRow { team_id: string; team_name: string; relay_count: number; relay_names: string[]; bot_count: number }
-export interface TeamLoad { teams: TeamLoadRow[]; unassigned_user_count: number; unassigned_bot_count: number }
 
 export interface CatalogOut {
   provider: string; model: string; display_name: string | null; is_default: boolean
