@@ -18,7 +18,7 @@ from typing import Protocol
 
 from coreman import __version__
 from coreman.core.bus import instances, streams, tasks
-from coreman.core.bus.notify import Listener, asyncpg_dsn
+from coreman.core.bus.notify import RUNTIME_CALL_CHANNEL, Listener, asyncpg_dsn
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.chat.openuserid import OpenUseridResolver
 from coreman.core.config import get_settings
@@ -27,6 +27,7 @@ from coreman.core.db.models import RelayServer, Task
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import RelayClient
+from coreman.core.runtime_nodes import transport as runtime_transport
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
 from coreman.core.wecom.media import MediaFetcher
@@ -46,7 +47,7 @@ class TaskHandler(Protocol):
 
 
 def default_relay_client(relay: RelayServer) -> RelayClient:
-    return RelayClient(relay.relay_url)
+    return RelayClient.for_relay(relay)
 
 
 class WorkerService(Service):
@@ -86,7 +87,10 @@ class WorkerService(Service):
         # 这两个可注入（测试用假客户端）；没给就在 _start 里建默认的，全进程共享一份缓存/连接池。
         self._openuserid = openuserid
         self._media_fetcher = media_fetcher
-        self._listener = Listener(asyncpg_dsn(settings.database_url), CHANNELS)
+        # 同一条 LISTEN 连接顺带接收运行时调用通知，反向通道不必再按固定间隔查库。
+        self._listener = Listener(
+            asyncpg_dsn(settings.database_url), (*CHANNELS, RUNTIME_CALL_CHANNEL)
+        )
         self._running: dict[int, tuple[asyncio.Task[None], TaskContext]] = {}
         self._wake: dict[str, asyncio.Event] = {lane: asyncio.Event() for lane in LANES}
         self._bg: list[asyncio.Task[None]] = []
@@ -98,6 +102,7 @@ class WorkerService(Service):
             await self._start()
         except Exception:
             # on_start 抛出时基类不会走 on_shutdown，监听连接和连接池得自己收干净再往上抛。
+            runtime_transport.configure(None)
             await self._listener.stop()
             await self._engine.dispose()
             raise
@@ -108,6 +113,7 @@ class WorkerService(Service):
         if self._media_fetcher is None:
             self._media_fetcher = MediaFetcher()
         await self._listener.start()
+        runtime_transport.configure(self._factory, self._listener)
         async with self._factory() as session:
             await instances.register(
                 session,
@@ -155,6 +161,7 @@ class WorkerService(Service):
         except Exception:  # noqa: BLE001 退出路径上写不进去也只能记一笔
             self._log.exception("instance_mark_stopped_failed")
         await self._chat_logs.drain(10)
+        runtime_transport.configure(None)
         await self._listener.stop()
         if self._media_fetcher is not None:
             await self._media_fetcher.aclose()
