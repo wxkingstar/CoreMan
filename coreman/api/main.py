@@ -55,10 +55,12 @@ from coreman.api.routers import (
 )
 from coreman.api.routers import settings as settings_router
 from coreman.api.spa import mount_spa
+from coreman.core.bus.notify import RUNTIME_CHANNELS, Listener, asyncpg_dsn
 from coreman.core.config import Settings, get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.logging import configure_logging, get_logger
+from coreman.core.runtime_nodes import transport as runtime_transport
 from coreman.core.settings_store import SettingsStore
 
 
@@ -75,11 +77,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.cipher = Cipher(cfg.master_key_bytes)
         background_tasks: set[asyncio.Task[Any]] = set()
         app.state.background_tasks = background_tasks
+        # 反向通道：节点长轮询与响应帧的消费靠这条 LISTEN 连接唤醒，并共用本进程的连接池。
+        app.state.runtime_listener = Listener(asyncpg_dsn(cfg.database_url), RUNTIME_CHANNELS)
+        await app.state.runtime_listener.start()
+        runtime_transport.configure(app.state.session_factory, app.state.runtime_listener)
         get_logger(__name__).info("api_started", version=__version__)
         try:
             yield
         finally:
             await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
+            runtime_transport.configure(None)
+            await app.state.runtime_listener.stop()
             await app.state.engine.dispose()
 
     app = FastAPI(

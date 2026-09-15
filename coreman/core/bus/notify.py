@@ -24,6 +24,12 @@ CHANNELS = (
     "lease_changed",
     "config_changed",
 )
+# 运行时反向通道：调用被领取/写入响应帧/进入终态（载荷 call_id、node_id），
+# 以及节点有新命令或在途调用被取消（载荷 node_id、call_id）。只由注册了
+# coreman.core.runtime_nodes.transport 的进程消费，不在上面的通用通道里。
+RUNTIME_CALL_CHANNEL = "runtime_call"
+RUNTIME_NODE_CHANNEL = "runtime_node"
+RUNTIME_CHANNELS = (RUNTIME_CALL_CHANNEL, RUNTIME_NODE_CHANNEL)
 log = get_logger(__name__)
 
 

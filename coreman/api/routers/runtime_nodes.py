@@ -36,6 +36,8 @@ from coreman.core.db.models import (
 from coreman.core.runtime_nodes.common import absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
     TERMINAL,
+    notify_call,
+    notify_node,
     now,
     online,
 )
@@ -270,11 +272,16 @@ async def patch_node(
             .values(is_active=node.is_active)
         )
     if not node.is_active:
-        await session.execute(
+        cancelled = await session.scalars(
             update(RuntimeCall)
             .where(RuntimeCall.node_id == node_id, RuntimeCall.status.not_in(TERMINAL))
             .values(status="cancelled", request_enc="")
+            .returning(RuntimeCall.id)
         )
+        for call_id in cancelled:
+            await notify_call(session, call_id, node_id)
+    # 启停或排空变化立即唤醒该节点挂起的长轮询，按新状态重新领取。
+    await notify_node(session, node_id)
     await record_audit(
         session,
         action="runtime.update",
