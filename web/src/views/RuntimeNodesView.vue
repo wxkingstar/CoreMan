@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { runtimeNodes, type RuntimeNode, type InstallLink } from '@/api/runtimeNodes'
 import { relays, teams } from '@/api/admin'
@@ -59,9 +59,32 @@ async function refresh(silent = false) {
     if (!silent) ElMessage.error(errorMessage(error))
   } finally { loading.value = false }
 }
+/** 正在提交启停/排空的节点：提交期间禁用该行开关，避免连点。 */
+const pendingId = ref('')
 async function update(node: RuntimeNode, body: { is_active?: boolean; draining?: boolean }) {
+  if (pendingId.value) return
+  pendingId.value = node.id
   try { await runtimeNodes.patch(node.id, body); await refresh() }
   catch (error) { ElMessage.error(errorMessage(error)) }
+  finally { pendingId.value = '' }
+}
+async function confirmed(message: string, title: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(message, title, { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') })
+    return true
+  } catch {
+    return false
+  }
+}
+/** 停用会把该节点下全部运行时置为停用并取消所有未完成的调用，必须先确认；重新启用不需要。 */
+async function toggleActive(node: RuntimeNode) {
+  if (node.is_active && !(await confirmed(t('runtimeNodes.disableConfirm', { name: node.name }), t('runtimeNodes.disableTitle')))) return
+  await update(node, { is_active: !node.is_active })
+}
+/** 排空只停止接收新调用，进行中的会跑完；恢复接单不需要确认。 */
+async function toggleDrain(node: RuntimeNode) {
+  if (!node.draining && !(await confirmed(t('runtimeNodes.drainConfirm', { name: node.name }), t('runtimeNodes.drain')))) return
+  await update(node, { draining: !node.draining })
 }
 async function create() {
   if (!form.workspace_root.startsWith('/') || form.workspace_root === '/') {
@@ -252,10 +275,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 <el-switch
                   :model-value="row.is_active"
                   :aria-label="t('runtimeNodes.enable')"
-                  @change="update(row, { is_active: !row.is_active })"
+                  :loading="pendingId === row.id"
+                  data-test="toggle-runtime"
+                  @change="toggleActive(row)"
                 /><el-button
                   text
-                  @click="update(row, { draining: !row.draining })"
+                  :disabled="pendingId === row.id"
+                  data-test="drain-runtime"
+                  @click="toggleDrain(row)"
                 >
                   {{ row.draining ? t('runtimeNodes.resume') : t('runtimeNodes.drain') }}
                 </el-button>
