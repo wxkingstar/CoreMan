@@ -86,7 +86,7 @@ npm run build
 - 概念与结构：[术语表](docs/glossary.md) · [架构与服务拓扑图](docs/architecture.md#service-topology)
 - 接入与能力：[企业微信](docs/wecom.md) · [飞书](docs/feishu.md) · [技能与审批](docs/skills-management.md) · [记忆](docs/memories.md) · [定时任务](docs/cron-jobs.md) · [人工求助](docs/escalations.md)
 - 运维与集成：[运行维护](docs/operations.md) · [基础设施 API](docs/infrastructure-api.md) · [对象存储](docs/object-storage.md) · [统计与体检](docs/statistics-and-health.md) · [IM 回复时限](docs/im-reply-lifecycle.md)
-- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)（[可直接打开的 HTML](docs/environment-creation/manual.html)）
+- 运行环境：[Runtime Daemon](runtime_daemon/README.md) · [Linux 环境手册](docs/environment-creation/README.md)
 
 `coreman/api` 为管理 API，`coreman/core` 为共享业务组件，`coreman/runtime` 为网关/worker/scheduler；`web` 为 Vue 3 管理台，`runtime_daemon` 为执行端，`deploy` 为部署配置，`migrations` 为数据库迁移，`tests` 为测试。
 
