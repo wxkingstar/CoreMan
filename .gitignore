@@ -17,8 +17,11 @@ data/
 .superpowers/
 .claude/worktrees/
 
+# deploy/coreman 的本机部署状态
 .coreman-image-tag
 .coreman-image-tag.tmp
+.coreman-image-tag.pending
+.coreman-image-tag.pending.tmp
 
 /runtime_daemon/dist/
 /runtime_daemon/bin/

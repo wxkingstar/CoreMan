@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CoreMan 运维脚本（spec §12）。M0 提供 up/down/status/logs/migrate/build/upgrade(api|worker|scheduler|gateway|all)。
+# CoreMan 运维脚本（spec §12）：up/down/status/logs/migrate/build/upgrade/rollback。
 set -euo pipefail
 
 _self="${BASH_SOURCE[0]}"
@@ -16,6 +16,18 @@ case "$ENV_FILE" in /*) ;; *) ENV_FILE="$PWD/$ENV_FILE" ;; esac
 export COREMAN_ENV_FILE="$ENV_FILE"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
 DEFAULT_SERVICES=(postgres api-1 api-2 caddy scheduler worker-a worker-b gateway-wecom-a gateway-feishu-a)
+ALL_PROFILES=(--profile standby --profile monitoring --profile tools)
+WAIT_TIMEOUT="${COREMAN_WAIT_TIMEOUT:-300}"
+TAG_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+# 进入镜像的路径；只有这些路径的未提交改动才让构建标签带 -dirty。
+IMAGE_PATHS=(coreman web runtime_daemon relay_agent migrations deploy pyproject.toml uv.lock alembic.ini README.md LICENSE THIRD_PARTY_NOTICES.md)
+
+# 升级状态不写回含凭证的 .env，放在仓库根目录（或 COREMAN_STATE_DIR）的状态文件里：
+#   .coreman-image-tag          最近一次成功完成的 upgrade/rollback 的镜像标签
+#   .coreman-image-tag.pending  进行中或失败未收尾的升级目标标签
+STATE_DIR="${COREMAN_STATE_DIR:-$ROOT}"
+TAG_FILE="$STATE_DIR/.coreman-image-tag"
+PENDING_FILE="$STATE_DIR/.coreman-image-tag.pending"
 
 compose() {
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -27,6 +39,17 @@ compose() {
 
 env_get() { [[ -f "$ENV_FILE" ]] && grep -E "^$1=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true; }
 
+read_first_line() {  # 文件不存在时输出空
+  local line=""
+  if [[ -f "$1" ]]; then IFS= read -r line < "$1" || true; fi
+  printf '%s' "$line"
+}
+
+write_state() {  # write_state <file> <content>：先写临时文件再改名，避免半写
+  printf '%s\n' "$2" > "$1.tmp"
+  mv "$1.tmp" "$1"
+}
+
 caddy_base_url() {  # 按 .env 的 CADDY_HTTP_PORT 生成访问地址；80 时不带端口
   local port
   port="$(env_get CADDY_HTTP_PORT)"
@@ -34,11 +57,18 @@ caddy_base_url() {  # 按 .env 的 CADDY_HTTP_PORT 生成访问地址；80 时�
   if [[ "$port" == "80" ]]; then echo "http://localhost"; else echo "http://localhost:${port}"; fi
 }
 
-# 升级状态不写回含凭证的 .env；显式环境变量优先。
-if [[ -z "${COREMAN_IMAGE_TAG:-}" && -f "$ROOT/.coreman-image-tag" ]]; then
-  IFS= read -r COREMAN_IMAGE_TAG < "$ROOT/.coreman-image-tag"
-  export COREMAN_IMAGE_TAG
+# 显式环境变量优先，其次是记录的部署标签，最后由 compose 读取 .env 的 COREMAN_IMAGE_TAG。
+EXPLICIT_IMAGE_TAG="${COREMAN_IMAGE_TAG:-}"
+DEPLOYED_TAG="$(read_first_line "$TAG_FILE")"
+if [[ -z "$EXPLICIT_IMAGE_TAG" && -n "$DEPLOYED_TAG" ]]; then
+  export COREMAN_IMAGE_TAG="$DEPLOYED_TAG"
 fi
+
+current_tag() {
+  local tag="${COREMAN_IMAGE_TAG:-}"
+  [[ -n "$tag" ]] || tag="$(env_get COREMAN_IMAGE_TAG)"
+  echo "${tag:-dev}"
+}
 
 env_set() {  # env_set KEY VALUE：存在则替换，不存在则追加（用 python 避免 sed 跨平台差异）
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -101,38 +131,302 @@ wait_healthy() {  # wait_healthy <service> [timeout_s]
   return 1
 }
 
+# ---- 镜像与容器现场 ----
+
+image_tag_of() {  # coreman-api:v2 → v2；registry:5000/coreman-api → latest
+  local image="$1" last
+  case "$image" in *@*) echo "${image##*@}"; return ;; esac
+  last="${image##*/}"
+  case "$last" in *:*) echo "${last##*:}" ;; *) echo latest ;; esac
+}
+
+is_coreman_image() {
+  local name="${1##*/}"
+  name="${name%%[:@]*}"
+  [[ "$name" == coreman-api || "$name" == coreman-runtime ]]
+}
+
+container_images() {  # 每行「服务 镜像 状态 重启策略」，含已停止容器与各 profile 服务
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  local ids
+  ids="$(compose "${ALL_PROFILES[@]}" ps -a -q 2>/dev/null)" || return 0
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086  # 容器 ID 按空白拆分为多个参数
+  docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}} {{.Config.Image}} {{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}} {{.HostConfig.RestartPolicy.Name}}' $ids 2>/dev/null || true
+}
+
+report_images() {  # 打印各容器的镜像标签；运行中的 CoreMan 容器标签不一致时提示混版本
+  local rows service image state restart tags="" count=0 paused=""
+  rows="$(container_images)"
+  if [[ -z "$rows" ]]; then
+    echo "  （未查询到 CoreMan 容器）"
+    return 0
+  fi
+  printf '  %-18s %-16s %-18s %s\n' 服务 标签 状态 镜像
+  while read -r service image state restart; do
+    [[ -n "$service" ]] || continue
+    printf '  %-18s %-16s %-18s %s\n' "$service" "$(image_tag_of "$image")" "$state" "$image"
+    is_coreman_image "$image" || continue
+    case "$state" in running*) ;; *) continue ;; esac
+    case " $tags " in *" $(image_tag_of "$image") "*) ;; *) tags="$tags $(image_tag_of "$image")"; count=$((count + 1)) ;; esac
+    if [[ "$restart" == no && "$service" != migrate && "$service" != operations && "$service" != storage-init ]]; then
+      paused="$paused $service"
+    fi
+  done <<< "$rows"
+  if ((count > 1)); then
+    echo "警告：运行中的 CoreMan 容器使用了多个镜像标签：${tags# }"
+  fi
+  if [[ -n "$paused" ]]; then
+    echo "注意：以下运行中容器的自动重启已关闭（排空时设置）：${paused# }；确认排空状态后执行 docker update --restart=unless-stopped <容器>"
+  fi
+}
+
+has_coreman_containers() {
+  local rows service image _
+  rows="$(container_images)"
+  while read -r service image _; do
+    [[ -n "$service" ]] && is_coreman_image "$image" && return 0
+  done <<< "$rows"
+  return 1
+}
+
+tag_in_use() {  # tag_in_use <tag>：输出占用原因；部署标签、待定标签或运行中的容器正在使用该标签
+  local tag="$1" rows service image state _
+  if [[ "$tag" == "$DEPLOYED_TAG" ]]; then echo "部署标签 $TAG_FILE"; return 0; fi
+  if [[ "$tag" == "$(read_first_line "$PENDING_FILE")" ]]; then echo "待定升级 $PENDING_FILE"; return 0; fi
+  rows="$(container_images)"
+  while read -r service image state _; do
+    if [[ -z "$service" ]] || ! is_coreman_image "$image"; then continue; fi
+    case "$state" in running*) ;; *) continue ;; esac
+    if [[ "$(image_tag_of "$image")" == "$tag" ]]; then echo "运行中的 $service"; return 0; fi
+  done <<< "$rows"
+  return 1
+}
+
+report_pg_connections() {
+  local out used max pct
+  if ! out="$(compose exec -T postgres psql -U coreman -d coreman -At -c \
+    "SELECT count(*) FILTER (WHERE backend_type = 'client backend'), current_setting('max_connections') FROM pg_stat_activity" 2>/dev/null)"; then
+    echo "PostgreSQL 连接：无法查询（postgres 是否在运行？）"
+    return 0
+  fi
+  out="${out//[[:space:]]/}"
+  used="${out%%|*}"
+  max="${out##*|}"
+  if ! [[ "$used" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]] || ((max == 0)); then
+    echo "PostgreSQL 连接：无法解析查询结果"
+    return 0
+  fi
+  pct=$((used * 100 / max))
+  echo "PostgreSQL 连接：${used}/${max}（${pct}%）"
+  if ((pct >= 80)); then
+    echo "警告：客户端连接已达 max_connections 的 80%，参见 docs/operations.md「数据库连接预算」"
+  fi
+}
+
+preflight_images() {  # preflight_images <tag>：两种镜像都已在本机才允许动任何容器
+  local tag="$1" image missing=""
+  for image in "coreman-api:$tag" "coreman-runtime:$tag"; do
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "docker image inspect $image"
+      continue
+    fi
+    docker image inspect "$image" >/dev/null 2>&1 || missing="$missing $image"
+  done
+  [[ -n "$missing" ]] || return 0
+  {
+    echo "镜像预检失败，本机缺少：${missing# }。未改动任何容器或状态文件。"
+    echo "处理方式："
+    echo "  - 在对应提交上构建：coreman build --tag $tag"
+    echo "  - 或拉取发布镜像后改名：docker pull ghcr.io/<owner>/coreman-api:$tag && docker tag ghcr.io/<owner>/coreman-api:$tag coreman-api:$tag（coreman-runtime 同理）"
+    echo "  - 查看本机已有标签：docker image ls coreman-api; docker image ls coreman-runtime"
+  } >&2
+  return 2
+}
+
+# ---- 升级事务：pending → 各步骤 → 提升；失败时 EXIT 钩子输出现场 ----
+
+UPGRADE_ACTIVE=0
+UPGRADE_TAG=""
+UPGRADE_COMMAND=""
+
+prepare_upgrade_tag() {  # prepare_upgrade_tag [tag]：校验、导出并预检目标标签
+  local tag="${1:-}"
+  if [[ -n "$tag" ]]; then
+    [[ "$tag" =~ $TAG_PATTERN ]] || { echo "镜像标签无效：$tag" >&2; return 2; }
+  else
+    tag="$(current_tag)"
+  fi
+  export COREMAN_IMAGE_TAG="$tag"
+  UPGRADE_TAG="$tag"
+  preflight_images "$tag"
+}
+
+begin_upgrade() {  # begin_upgrade <命令描述>：写入 pending，之后的失败都会输出恢复建议
+  local previous
+  UPGRADE_COMMAND="$1 $UPGRADE_TAG"
+  previous="$(read_first_line "$PENDING_FILE")"
+  if [[ -n "$previous" ]]; then
+    echo "注意：上次升级到 $previous 未完成，本次改为 $UPGRADE_TAG" >&2
+  fi
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "pending $UPGRADE_TAG"
+  else
+    write_state "$PENDING_FILE" "$UPGRADE_TAG"
+  fi
+  UPGRADE_ACTIVE=1
+  echo "开始：$UPGRADE_COMMAND（部署标签 ${DEPLOYED_TAG:-未记录}）"
+}
+
+finish_upgrade() {
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    write_state "$TAG_FILE" "$UPGRADE_TAG"
+    rm -f "$PENDING_FILE"
+  fi
+  UPGRADE_ACTIVE=0
+  DEPLOYED_TAG="$UPGRADE_TAG"
+  echo "完成：$UPGRADE_COMMAND；部署标签已更新为 $UPGRADE_TAG"
+}
+
+report_failed_upgrade() {
+  local code="$1"
+  {
+    echo
+    echo "未完成：$UPGRADE_COMMAND（退出码 $code）。"
+    echo "已保留 $PENDING_FILE（$UPGRADE_TAG）；部署标签仍为 ${DEPLOYED_TAG:-未记录}。"
+    echo "各容器当前实际镜像："
+    report_images
+    echo "恢复建议："
+    echo "  1. coreman logs <服务> 查看失败原因；排空超时表示仍有在途任务，不要删除容器或数据卷。"
+    echo "  2. 排除问题后重跑：$UPGRADE_COMMAND（已就绪的服务会先排空再重建，不会丢在途任务）。"
+    if [[ "$UPGRADE_COMMAND" == "coreman upgrade"* && -n "$DEPLOYED_TAG" && "$DEPLOYED_TAG" != "$UPGRADE_TAG" ]]; then
+      echo "  3. 放弃本次升级：coreman rollback $DEPLOYED_TAG（不回退数据库，仅适用于兼容迁移）。"
+    fi
+    echo "  4. 确认各服务版本与排空状态后，可手工删除 $PENDING_FILE。"
+  } >&2
+}
+
+on_exit() {
+  local code=$?
+  set +e
+  if [[ "$UPGRADE_ACTIVE" == 1 && "$code" -ne 0 ]]; then
+    report_failed_upgrade "$code"
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+check_pending() {  # 有未完成的升级时拒绝整体启动，避免把已升级的服务按旧标签重建
+  local force="$1" pending
+  pending="$(read_first_line "$PENDING_FILE")"
+  [[ -n "$pending" ]] || return 0
+  if [[ "$force" == 1 ]]; then
+    echo "注意：忽略未完成的升级 $pending（--force）" >&2
+    return 0
+  fi
+  {
+    echo "存在未完成的升级：$PENDING_FILE（$pending），部署标签为 ${DEPLOYED_TAG:-未记录}。"
+    echo "整体启动会按部署标签重建服务，可能把已升级的服务拉回旧版本。请先："
+    echo "  - 继续升级：coreman upgrade all $pending"
+    [[ -z "$DEPLOYED_TAG" ]] || echo "  - 或放弃：coreman rollback $DEPLOYED_TAG"
+    echo "  - 或确认各服务版本后删除该文件 / 使用 coreman up --force"
+  } >&2
+  return 2
+}
+
+# ---- 命令 ----
+
 cmd_up() {
+  local force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=1 ;;
+      *) echo "未知参数：$arg" >&2; return 2 ;;
+    esac
+  done
+  [[ "$WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || { echo "COREMAN_WAIT_TIMEOUT 须为秒数" >&2; return 2; }
+  check_pending "$force"
   ensure_env
   compose up -d postgres
   compose run --rm migrate
-  compose up -d "${DEFAULT_SERVICES[@]:1}"
+  if ! compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${DEFAULT_SERVICES[@]:1}"; then
+    echo "部分服务未在 ${WAIT_TIMEOUT} 秒内健康：coreman status 查看状态，coreman logs <服务> 查看原因" >&2
+    return 1
+  fi
   echo "CoreMan 已启动：管理台 $(caddy_base_url)/ ，引导账号见 $ENV_FILE"
 }
 
-cmd_down() { compose down; }
+cmd_down() { compose down "$@"; }
 
 cmd_status() {
+  local address url pending
   compose ps
-  if [[ "${DRY_RUN:-0}" != "1" ]]; then
-    local address url
-    address="$(compose port caddy 80)"
-    url="${API_HEALTH_URL:-http://127.0.0.1:${address##*:}/health}"
-    curl -fsS --max-time 5 "$url" || return 1
+  [[ "${DRY_RUN:-0}" != "1" ]] || return 0
+  echo
+  echo "镜像标签："
+  report_images
+  echo "部署标签：${DEPLOYED_TAG:-未记录（使用 .env 的 COREMAN_IMAGE_TAG）}"
+  pending="$(read_first_line "$PENDING_FILE")"
+  if [[ -n "$pending" ]]; then
+    echo "警告：存在未完成的升级（$PENDING_FILE：$pending），处理方法见 docs/operations.md"
   fi
+  report_pg_connections
+  address="$(compose port caddy 80)"
+  url="${API_HEALTH_URL:-http://127.0.0.1:${address##*:}/health}"
+  curl -fsS --max-time 5 "$url" || return 1
+  echo
 }
 
 cmd_logs() { compose logs -f --tail=200 "$@"; }
 cmd_migrate() { compose run --rm migrate; }
+
+worktree_dirty() {
+  ! git -C "$ROOT" diff --quiet HEAD -- "${IMAGE_PATHS[@]}" \
+    || [[ -n "$(git -C "$ROOT" ls-files --others --exclude-standard -- "${IMAGE_PATHS[@]}")" ]]
+}
+
 cmd_build() {
+  local tag="" force=0 short="" reason
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tag) [[ $# -ge 2 ]] || { echo "--tag 需要标签参数" >&2; return 2; }; tag="$2"; shift 2 ;;
+      --tag=*) tag="${1#--tag=}"; shift ;;
+      --force) force=1; shift ;;
+      *) echo "未知参数：$1" >&2; return 2 ;;
+    esac
+  done
   if command -v git >/dev/null && git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
     COREMAN_BUILD_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
-    if ! git -C "$ROOT" diff --quiet HEAD -- coreman web pyproject.toml uv.lock migrations deploy || [[ -n "$(git -C "$ROOT" ls-files --others --exclude-standard -- coreman web migrations deploy)" ]]; then
+    short="$(git -C "$ROOT" rev-parse --short HEAD)"
+    if worktree_dirty; then
       COREMAN_BUILD_REVISION="$COREMAN_BUILD_REVISION-dirty"
+      short="$short-dirty"
     fi
     export COREMAN_BUILD_REVISION
   fi
+  [[ -n "$tag" ]] || tag="${short:-$EXPLICIT_IMAGE_TAG}"
+  [[ -n "$tag" ]] || { echo "无法从 Git 推导镜像标签，请用 --tag 指定" >&2; return 2; }
+  [[ "$tag" =~ $TAG_PATTERN ]] || { echo "镜像标签无效：$tag" >&2; return 2; }
+  if reason="$(tag_in_use "$tag")"; then
+    if [[ "$force" != 1 ]]; then
+      echo "拒绝覆盖正在使用的镜像标签 $tag（$reason）：覆盖后无法再回退到该版本。请提交后重新构建或用 --tag 指定新标签；确认要覆盖时加 --force。" >&2
+      return 2
+    fi
+    echo "注意：覆盖正在使用的镜像标签 $tag（$reason，--force）" >&2
+  fi
+  export COREMAN_IMAGE_TAG="$tag"
   compose build migrate worker-a
+  echo "已构建 coreman-api:$tag 与 coreman-runtime:$tag"
+  if [[ -z "$DEPLOYED_TAG" && -z "$(read_first_line "$PENDING_FILE")" ]] && ! has_coreman_containers; then
+    [[ "${DRY_RUN:-0}" == "1" ]] || write_state "$TAG_FILE" "$tag"
+    echo "尚无部署记录，已记为部署标签；执行 coreman up 启动"
+  else
+    echo "滚动升级：coreman upgrade all $tag"
+  fi
 }
+
 cmd_contact_sync() { compose run --rm migrate /app/.venv/bin/python -m coreman.cli contact-sync "$@"; }
 
 managed_prefix() {
@@ -153,6 +447,18 @@ prepare_stop() {
   [[ "${DRY_RUN:-0}" == "1" ]] && { echo "disable_restart $service"; return; }
   cid="$(compose ps -q "$service")"
   [[ -z "$cid" ]] || docker update --restart=no "$cid" >/dev/null
+}
+
+upgrade_api() {
+  compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+  if [[ "${COREMAN_SKIP_MIGRATION:-0}" != "1" ]]; then compose run --rm --no-deps --pull never migrate; fi
+  local s
+  for s in api-1 api-2; do compose up -d --no-deps --pull never "$s"; wait_healthy "$s"; done
+}
+
+upgrade_scheduler() {
+  compose up -d --no-deps --pull never scheduler
+  wait_healthy scheduler
 }
 
 upgrade_worker() {
@@ -194,38 +500,40 @@ upgrade_gateway() {
   fi
 }
 
+upgrade_all() {
+  upgrade_api
+  upgrade_scheduler
+  upgrade_worker
+  upgrade_gateway wecom
+  upgrade_gateway feishu
+}
+
 cmd_upgrade() {
-  local target="${1:-}" tag="${2:-}" platform=""
+  local target="${1:-}" tag="${2:-}" platform="" label
   if [[ "$target" == gateway ]]; then platform="${2:-wecom}"; tag="${3:-}"; fi
   [[ -n "$target" ]] || { usage; return 1; }
-  if [[ -n "$tag" ]]; then
-    [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "镜像标签无效" >&2; return 2; }
-    export COREMAN_IMAGE_TAG="$tag"
-  fi
   case "$target" in
-    api)
-      compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
-      if [[ "${COREMAN_SKIP_MIGRATION:-0}" != "1" ]]; then compose run --rm --no-deps --pull never migrate; fi
-      for s in api-1 api-2; do compose up -d --no-deps --pull never "$s"; wait_healthy "$s"; done ;;
-    worker) upgrade_worker ;;
-    scheduler) compose up -d --no-deps --pull never scheduler; wait_healthy scheduler ;;
-    gateway) upgrade_gateway "$platform" ;;
-    all)
-      cmd_upgrade api
-      cmd_upgrade scheduler
-      cmd_upgrade worker
-      upgrade_gateway wecom
-      upgrade_gateway feishu ;;
+    api|worker|scheduler|all) label="coreman upgrade $target" ;;
+    gateway)
+      [[ "$platform" == wecom || "$platform" == feishu ]] || { echo "平台须为 wecom 或 feishu" >&2; return 2; }
+      label="coreman upgrade gateway $platform" ;;
     *) echo "未知升级目标：$target" >&2; return 1 ;;
   esac
-  if [[ "${DRY_RUN:-0}" != "1" && -n "${COREMAN_IMAGE_TAG:-}" ]]; then
-    printf '%s\n' "$COREMAN_IMAGE_TAG" > "$ROOT/.coreman-image-tag.tmp"
-    mv "$ROOT/.coreman-image-tag.tmp" "$ROOT/.coreman-image-tag"
-  fi
+  prepare_upgrade_tag "$tag"
+  begin_upgrade "$label"
+  case "$target" in
+    api) upgrade_api ;;
+    worker) upgrade_worker ;;
+    scheduler) upgrade_scheduler ;;
+    gateway) upgrade_gateway "$platform" ;;
+    all) upgrade_all ;;
+  esac
+  finish_upgrade
 }
 
 cmd_rollback() {
   [[ -n "${1:-}" ]] || { echo "请指定保留的镜像标签" >&2; return 2; }
+  prepare_upgrade_tag "$1"
   if [[ "${DRY_RUN:-0}" != "1" ]]; then
     local control
     control="$(compose ps -q api-1)"
@@ -234,25 +542,28 @@ cmd_rollback() {
     export COREMAN_OPERATIONS_IMAGE
   fi
   export COREMAN_SKIP_MIGRATION=1
-  cmd_upgrade all "$1"
+  begin_upgrade "coreman rollback"
+  upgrade_all
+  finish_upgrade
 }
 
 usage() {
   cat <<'EOF'
 用法: coreman <命令> [参数]
-  up                          首次或整体启动（自动补全 .env 的密钥）
-  down                        停止并删除容器（保留数据卷）
-  status                      容器状态与 api 健康
+  up [--force]                首次或整体启动并等待健康（自动补全 .env 的密钥；有未完成升级时拒绝，--force 忽略）
+  down [-t 秒]                停止并删除容器（保留数据卷；worker 可能等待在途任务最长 2 小时）
+  status                      容器状态、各容器镜像标签、PostgreSQL 连接数与 api 健康
   logs [service…]             跟踪日志
   migrate                     执行数据库迁移
-  build                       本地构建两个镜像
-  upgrade <api|worker|scheduler|gateway|all> [tag]   按目标滚动升级（先 build，失败立即停止）
-  upgrade gateway <wecom|feishu> [tag]  网关 a/b 排空接管
-  rollback <tag>              回退镜像，不回退数据库
+  build [--tag 标签] [--force]  构建两个镜像；默认标签为 Git 短提交（未提交改动加 -dirty），拒绝覆盖正在使用的标签
+  upgrade <api|worker|scheduler|all> [tag]  预检镜像后按目标滚动升级（失败立即停止并保留待定标签）
+  upgrade gateway <wecom|feishu> [tag]      网关 a/b 排空接管
+  rollback <tag>              回退到保留的镜像标签，不回退数据库
   skills sync URL --source KEY 同步已登记的技能目录
   contact-sync [--app 名称]     同步企业微信通讯录
   help                        本说明
-环境变量: DRY_RUN=1 只打印 compose 命令；COREMAN_ENV_FILE 指定 .env 路径
+环境变量: DRY_RUN=1 只打印 compose 命令；COREMAN_ENV_FILE 指定 .env 路径；COREMAN_IMAGE_TAG 覆盖部署标签；
+  COREMAN_WAIT_TIMEOUT 为 up 等待健康的秒数（默认 300）；COREMAN_STATE_DIR 为状态文件目录（默认仓库根目录）
 EOF
 }
 
