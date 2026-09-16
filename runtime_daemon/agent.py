@@ -76,8 +76,12 @@ class OperationError(Exception):
 
 
 def run_command(
-    command: list[str], cwd: Path | None = None, timeout: int = 300,
-    *, env_override: dict[str, str] | None = None,
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: int = 300,
+    *,
+    env_override: dict[str, str] | None = None,
+    stderr_to_stdout: bool = True,
 ) -> str:
     """不通过 shell；超时终止整个进程组，不把命令输出（可能有凭证）放进异常。"""
     with tempfile.TemporaryFile() as output:
@@ -86,10 +90,12 @@ def run_command(
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=output,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT if stderr_to_stdout else subprocess.DEVNULL,
             start_new_session=True,
             # 第三方安装器与探针不需要 Agent 的服务端身份或服务端配置。
-            env=env_override if env_override is not None else {
+            env=env_override
+            if env_override is not None
+            else {
                 key: value for key, value in os.environ.items() if not key.startswith("COREMAN_")
             },
         )
@@ -401,13 +407,14 @@ class Agent:
             if not destination.resolve().is_relative_to(directory):
                 raise OperationError("输出样式目录不在工作区内")
             atomic_write(destination, content)
+        from .workspace import remove_legacy_instruction_excludes
+
+        remove_legacy_instruction_excludes(directory)
         exclude = directory / ".git/info/exclude"
         if (directory / ".git").is_dir():
             previous = exclude.read_text() if exclude.exists() else ""
             additions = [
-                name
-                for name in ("/.claude/output-styles/", "/AGENTS.md")
-                if name not in previous.splitlines()
+                name for name in ("/.claude/output-styles/",) if name not in previous.splitlines()
             ]
             if additions:
                 atomic_write(exclude, previous.rstrip() + "\n" + "\n".join(additions) + "\n")
@@ -472,20 +479,34 @@ class Agent:
                 command += ["--skill", skill]
             access_token = data.get("git_access_token")
             if access_token:
-                if (not isinstance(access_token, str) or len(access_token) > 2000
-                        or any(c.isspace() or ord(c) < 32 for c in access_token)
-                        or not url.startswith("https://")):
+                if (
+                    not isinstance(access_token, str)
+                    or len(access_token) > 2000
+                    or any(c.isspace() or ord(c) < 32 for c in access_token)
+                    or not url.startswith("https://")
+                ):
                     raise OperationError("Git token 或 HTTPS 仓库地址无效")
-                env = {key: value for key, value in os.environ.items()
-                       if not key.startswith(("COREMAN_", "GIT_")) and "proxy" not in key.lower()}
-                env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-                           GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith(("COREMAN_", "GIT_")) and "proxy" not in key.lower()
+                }
+                env.update(
+                    GIT_CONFIG_NOSYSTEM="1",
+                    GIT_CONFIG_GLOBAL=os.devnull,
+                    GIT_TERMINAL_PROMPT="0",
+                    GIT_LFS_SKIP_SMUDGE="1",
+                )
                 credential = base64.b64encode(f"oauth2:{access_token}".encode()).decode()
-                config = {"credential.helper": "", "http.followRedirects": "false",
-                          "http.sslVerify": "true", "core.hooksPath": os.devnull,
-                          "protocol.file.allow": "never", "protocol.ext.allow": "never",
-                          f"http.{url.rstrip('/')}.extraHeader":
-                              f"Authorization: Basic {credential}"}
+                config = {
+                    "credential.helper": "",
+                    "http.followRedirects": "false",
+                    "http.sslVerify": "true",
+                    "core.hooksPath": os.devnull,
+                    "protocol.file.allow": "never",
+                    "protocol.ext.allow": "never",
+                    f"http.{url.rstrip('/')}.extraHeader": f"Authorization: Basic {credential}",
+                }
                 env["GIT_CONFIG_COUNT"] = str(len(config))
                 for i, (key, value) in enumerate(config.items()):
                     env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
@@ -494,7 +515,9 @@ class Agent:
                     checkout = str(Path(directory) / "repo")
                     run_command(
                         ["git", "clone", "--depth", "1", "--template=", "--", url, checkout],
-                        path, timeout=180, env_override=env,
+                        path,
+                        timeout=180,
+                        env_override=env,
                     )
                     command[4] = checkout
                     run_command(command + ["-y"], path, timeout=300)
@@ -851,7 +874,13 @@ class Agent:
             raise OperationError("操作已取消")
         kind = data.get("type")
         if kind == "ping":
-            return {"success": True, "message": "pong", "memory_protocol": 2, "memory_read": True}
+            return {
+                "success": True,
+                "message": "pong",
+                "memory_protocol": 2,
+                "memory_read": True,
+                "workspace_protocol": 1,
+            }
         if kind == "status":
             tasks = self.active_tasks()
             return {
@@ -874,6 +903,10 @@ class Agent:
         with self.lock:
             if cancelled is not None and cancelled.is_set():
                 raise OperationError("操作已取消")
+            if isinstance(kind, str) and kind.startswith("workspace-"):
+                from .workspace import Workspace
+
+                return Workspace(self, data).dispatch()
             if kind == "init":
                 return self.initialize_repo(data)
             if kind == "pr":
@@ -882,6 +915,14 @@ class Agent:
                 return self.pull(data)
             if kind == "install-skill":
                 return self.install_skill(data)
+            if kind in {"read-memory", "deploy-memory"} and data.get("bot_id") is not None:
+                from .workspace import Workspace
+
+                if kind == "read-memory":
+                    Workspace(self, data)
+                else:
+                    for row in data.get("memories", []):
+                        Workspace(self, {**data, "working_dir": row.get("working_dir")})
             if kind == "read-memory":
                 if not isinstance(data.get("working_dir"), str) or not data["working_dir"]:
                     raise OperationError("快照必须指定工作目录")

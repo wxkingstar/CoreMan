@@ -21,7 +21,7 @@ def _skip_memory_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
     async def not_configured(*args: object, **kwargs: object) -> str:
         return "not_configured"
 
-    monkeypatch.setattr(switch_relay, "transfer", not_configured)
+    monkeypatch.setattr(switch_relay, "prepare_switch", not_configured)
 
 
 async def _setup(

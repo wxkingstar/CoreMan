@@ -12,6 +12,18 @@ from coreman.core.db.models import RelayServer
 from coreman.core.runtime_nodes.transport import ReverseTransport
 
 OPERATIONS = {
+    "workspace-info",
+    "workspace-init",
+    "workspace-list",
+    "workspace-read",
+    "workspace-write",
+    "workspace-export",
+    "workspace-import",
+    "workspace-finish",
+    "workspace-git-status",
+    "workspace-git-test",
+    "workspace-git-backup",
+    "workspace-git-restore",
     "ping",
     "status",
     "probe-rate-limits",
@@ -27,7 +39,9 @@ OPERATIONS = {
 
 
 class AgentError(Exception):
-    pass
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def make_http(relay: RelayServer) -> httpx.AsyncClient:
@@ -55,7 +69,12 @@ async def call_agent(
     del cipher
     if operation not in OPERATIONS or not relay.is_active or relay.runtime_node_id is None:
         raise AgentError("实例未启用、未绑定运行时节点或操作不支持")
-    timeout = 950 if operation in {"pull", "pr", "init", "install-skill"} else 130
+    timeout = (
+        950
+        if operation
+        in {"pull", "pr", "init", "install-skill", "workspace-git-backup", "workspace-git-restore"}
+        else 130
+    )
     try:
         async with make_http(relay) as client:
             async with client.stream(
@@ -73,7 +92,13 @@ async def call_agent(
                         raise AgentError("Agent 响应超过上限")
                 result = json.loads(data)
                 if not isinstance(result, dict) or result.get("success") is not True:
-                    raise AgentError("Agent 未完成操作，请查看该实例状态")
+                    raise AgentError(
+                        "Agent 未完成操作，请查看该实例状态",
+                        code=str(result["code"])
+                        if isinstance(result, dict)
+                        and result.get("code") in {"conflict", "instructions_conflict"}
+                        else None,
+                    )
                 return result
     except (httpx.HTTPError, ValueError) as exc:
         raise AgentError(f"Agent 连接失败（{type(exc).__name__}）") from exc

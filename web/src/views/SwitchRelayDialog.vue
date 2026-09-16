@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { errorMessage, isVersionConflict } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { workspace, type SwitchPreview } from '@/api/workspace'
 import { bots, relays } from '@/api/admin'
 
 import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
@@ -19,6 +20,22 @@ const relayList = ref<RelayOut[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const targetId = ref<string | null>(null)
+const workspaceMode = ref<'copy' | 'git' | 'existing'>('copy')
+const targetDirectory = ref('')
+const allowStoredMemory = ref(false)
+const preview = ref<SwitchPreview>()
+const checking = ref(false)
+const progress = ref('')
+let progressTimer: ReturnType<typeof setInterval> | undefined
+const moving = computed(() => !!targetId.value && (targetId.value !== props.bot.relay_server_id || targetDirectory.value !== props.bot.working_dir))
+const targetBlocked = computed(() => moving.value && (!preview.value || (workspaceMode.value !== 'existing' && preview.value.exists && !preview.value.empty) || (workspaceMode.value === 'git' && !preview.value.git_configured) || (!!props.bot.relay_server_id && !preview.value.source_online && (!allowStoredMemory.value || !preview.value.memory_snapshot_at || workspaceMode.value === 'copy'))))
+watch(targetDirectory, () => { preview.value = undefined })
+async function checkTarget() {
+  if (!targetId.value || !targetDirectory.value) return
+  checking.value = true
+  try { preview.value = await workspace.preview(props.bot.id, targetId.value, targetDirectory.value) } catch (e) { fail(e) } finally { checking.value = false }
+}
+onBeforeUnmount(() => clearInterval(progressTimer))
 const models = ref<string[]>([])
 const model = ref<string>('')
 /** If-Match 用的版本号：版本冲突后刷新成最新值。 */
@@ -26,7 +43,7 @@ const version = ref(props.bot.version)
 
 const target = computed(() => relayList.value.find((r) => r.id === targetId.value) ?? null)
 // 挂载时会预选当前 relay，此时直接确认就是空操作：后端照样写一条 diff 为空的 bot.switch_relay 审计。
-const unchanged = computed(() => targetId.value === props.bot.relay_server_id && model.value === props.bot.model)
+const unchanged = computed(() => targetId.value === props.bot.relay_server_id && model.value === props.bot.model && targetDirectory.value === props.bot.working_dir)
 // 跨 backend（claude ↔ codex）要红字强提示：会话上下文与工具链都不一样。
 const backendChanged = computed(() => !!target.value && !!model.value && backendOf(model.value) !== props.bot.backend)
 
@@ -47,6 +64,9 @@ async function reloadVersion(): Promise<void> {
 /** 选中一台 relay：载入它的有效模型集，当前模型还在集合里就留着，否则落到该 relay 的默认模型。 */
 async function pick(id: string): Promise<void> {
   targetId.value = id
+  preview.value = undefined
+  allowStoredMemory.value = false
+  targetDirectory.value = id === props.bot.relay_server_id ? props.bot.working_dir : `${relayList.value.find(r => r.id === id)?.workspace_root || '/home/ai'}/${props.bot.bot_key || 'project'}`
   try {
     const info = await relays.models(id)
     models.value = info.models
@@ -59,10 +79,11 @@ async function pick(id: string): Promise<void> {
 }
 
 async function confirm(): Promise<void> {
-  if (!targetId.value || !model.value || unchanged.value) return
+  if (!targetId.value || !model.value || unchanged.value || targetBlocked.value) return
   saving.value = true
+  progressTimer = setInterval(() => { void workspace.get(props.bot.id).then(s => { progress.value = s.phase || t('workspaceFiles.states.' + s.state, s.state) }).catch(() => {}) }, 3000)
   try {
-    const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value }, version.value)
+    const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value, ...(moving.value ? { workspace_mode: workspaceMode.value, target_directory: targetDirectory.value, allow_stored_memory: allowStoredMemory.value } : {}) }, version.value)
     ElMessage.success(t('bots.switch.done'))
     emit('switched', result)
     emit('update:visible', false)
@@ -71,6 +92,7 @@ async function confirm(): Promise<void> {
     else fail(e)
   } finally {
     saving.value = false
+    clearInterval(progressTimer)
   }
 }
 
@@ -88,7 +110,7 @@ onMounted(async () => {
   if (cur && relayList.value.some((r) => r.id === cur)) await pick(cur)
 })
 
-defineExpose({ pick, confirm })
+defineExpose({ pick, confirm, checkTarget })
 </script>
 
 <template>
@@ -97,6 +119,9 @@ defineExpose({ pick, confirm })
     :model-value="visible"
     :title="t('bots.switch.title')"
     width="900px"
+    class="workspace-switch-dialog"
+    :close-on-press-escape="!saving"
+    :show-close="!saving"
     @update:model-value="emit('update:visible', $event)"
   >
     <el-table
@@ -108,6 +133,7 @@ defineExpose({ pick, confirm })
         <template #default="{ row }: { row: RelayOut }">
           <el-radio
             :model-value="targetId"
+            :disabled="saving"
             :value="row.id"
             :data-test="'pick-' + row.id"
             @change="pick(row.id)"
@@ -214,7 +240,7 @@ defineExpose({ pick, confirm })
         <el-select
           v-model="model"
           filterable
-          :disabled="!target"
+          :disabled="!target || saving"
           style="width: 320px"
         >
           <el-option
@@ -225,7 +251,76 @@ defineExpose({ pick, confirm })
           />
         </el-select>
       </el-form-item>
+      <template v-if="target">
+        <el-form-item :label="t('workspaceFiles.source')">
+          <code>{{ bot.working_dir }}</code>
+        </el-form-item>
+        <el-form-item :label="t('workspaceFiles.target')">
+          <el-input
+            v-model="targetDirectory"
+            :disabled="saving"
+          />
+        </el-form-item>
+        <el-form-item :label="t('workspaceFiles.mode')">
+          <el-select
+            v-model="workspaceMode"
+            :disabled="saving"
+          >
+            <el-option
+              value="copy"
+              :label="t('workspaceFiles.copy')"
+            /><el-option
+              value="git"
+              :label="t('workspaceFiles.restore')"
+            /><el-option
+              value="existing"
+              :label="t('workspaceFiles.existing')"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            :loading="checking"
+            :disabled="saving || !targetDirectory"
+            data-test="check-workspace"
+            @click="checkTarget"
+          >
+            {{ t('workspaceFiles.check') }}
+          </el-button>
+        </el-form-item>
+        <template v-if="preview">
+          <el-alert
+            :title="t('workspaceFiles.checked')"
+            type="success"
+            :closable="false"
+          />
+          <el-alert
+            v-if="preview.exists && !preview.empty && workspaceMode !== 'existing'"
+            :title="t('workspaceFiles.occupied')"
+            type="warning"
+            :closable="false"
+          />
+          <template v-if="bot.relay_server_id && !preview.source_online">
+            <el-alert
+              :title="t('workspaceFiles.offline')"
+              type="warning"
+              :closable="false"
+            /><p>{{ t('workspaceFiles.snapshot') }}: {{ preview.memory_snapshot_at || '—' }}</p><el-checkbox
+              v-model="allowStoredMemory"
+              :disabled="!preview.memory_snapshot_at || saving"
+            >
+              {{ t('workspaceFiles.consent') }}
+            </el-checkbox>
+          </template>
+        </template>
+      </template>
     </el-form>
+    <el-alert
+      v-if="saving"
+      :title="progress || t('workspaceFiles.progress')"
+      type="info"
+      :closable="false"
+    />
 
     <el-alert
       :title="t('bots.switch.warnings')"
@@ -245,6 +340,7 @@ defineExpose({ pick, confirm })
     <template #footer>
       <el-button
         data-test="switch-cancel"
+        :disabled="saving"
         @click="emit('update:visible', false)"
       >
         {{ t('common.cancel') }}
@@ -252,7 +348,7 @@ defineExpose({ pick, confirm })
       <el-button
         type="primary"
         :loading="saving"
-        :disabled="!target || !model || unchanged"
+        :disabled="!target || !model || unchanged || targetBlocked"
         data-test="switch-confirm"
         @click="confirm"
       >
@@ -265,4 +361,8 @@ defineExpose({ pick, confirm })
 <style scoped>
 .switch-form { margin-top: 12px; }
 .backend-change { margin-top: 8px; }
+</style>
+
+<style>
+.workspace-switch-dialog {max-width:calc(100vw - 24px);display:flex;flex-direction:column;max-height:90vh;margin-top:5vh!important}.workspace-switch-dialog .el-dialog__body{overflow:auto;min-height:0}.workspace-switch-dialog .el-dialog__footer{flex-shrink:0}.workspace-switch-dialog code{overflow-wrap:anywhere}.workspace-switch-dialog .el-select{max-width:100%}
 </style>

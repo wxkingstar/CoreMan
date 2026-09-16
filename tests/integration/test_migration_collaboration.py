@@ -3,6 +3,7 @@
 import asyncio
 
 from alembic import command
+from alembic.script import ScriptDirectory
 
 from tests.conftest import alembic_config
 from tests.integration.test_migration_native_model_names import _execute, _restore_seed, _rows
@@ -10,6 +11,9 @@ from tests.integration.test_migration_native_model_names import _execute, _resto
 
 def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_database: str) -> None:
     cfg = alembic_config(migrated_database)
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    # Reconstruct the historical snapshot before changing its version stamp.
+    command.downgrade(cfg, "0026")
     before = asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
     # Same tables as the QA revision, but its 0023 stamp predates the main data migration.
     command.stamp(cfg, "0023")
@@ -26,7 +30,7 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
         )
         command.upgrade(cfg, "head")
         assert asyncio.run(_rows(migrated_database, "SELECT version_num FROM alembic_version")) == [
-            ("0026",)
+            (head,)
         ]
         assert (
             asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
@@ -51,6 +55,9 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
 
 def test_reactions_only_0025_gets_missing_collaboration_columns(migrated_database: str) -> None:
     cfg = alembic_config(migrated_database)
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    # Reconstruct the historical snapshot before changing its version stamp.
+    command.downgrade(cfg, "0026")
     before = asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
     command.stamp(cfg, "0025")
     try:
@@ -66,7 +73,7 @@ def test_reactions_only_0025_gets_missing_collaboration_columns(migrated_databas
         )
         command.upgrade(cfg, "head")
         assert asyncio.run(_rows(migrated_database, "SELECT version_num FROM alembic_version")) == [
-            ("0026",)
+            (head,)
         ]
         assert (
             asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))

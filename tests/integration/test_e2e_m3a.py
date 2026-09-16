@@ -214,7 +214,7 @@ async def test_ask_user_question_full_loop(
 
 
 async def test_rate_limit_offer_and_switch(
-    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings: None
+    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings: None, monkeypatch, tmp_path
 ) -> None:
     bot = await _seed(db_session)
     creator = await db_session.get(User, bot.created_by)
@@ -233,6 +233,42 @@ async def test_rate_limit_offer_and_switch(
     await attach_node(db_session, idle)
     await db_session.commit()
 
+    # Run the new management channel against real ephemeral daemon workspaces.
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import RuntimeNode
+    from coreman.core.knowledge import memory_transfer
+    from runtime_daemon.agent import Agent
+
+    agents = {}
+    for configured, name in ((relay, "source"), (idle, "target")):
+        root = tmp_path / name
+        root.mkdir()
+        node = (
+            await db_session.get(RuntimeNode, configured.runtime_node_id)
+            if configured.runtime_node_id
+            else None
+        )
+        if node is None:
+            node = await attach_node(db_session, configured, workspace_root=str(root))
+        node.workspace_root = str(root)
+        agents[configured.id] = Agent(
+            root=root,
+            home=tmp_path / (name + "-home"),
+            api_url="http://test",
+            token="x" * 32,
+            relay_id=str(configured.id),
+        )
+    bot.working_dir = str(tmp_path / "source" / bot.bot_key)
+    agents[relay.id].dispatch(
+        {"type": "workspace-init", "working_dir": bot.working_dir, "bot_id": str(bot.id)}
+    )
+    await db_session.commit()
+
+    async def manage(configured, cipher, operation, payload=None):
+        return agents[configured.id].dispatch({"type": operation, **(payload or {})})
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", manage)
+    monkeypatch.setattr(memory_transfer, "call_agent", manage)
     relays = {"limit": FakeRelay("rate_limit")}
     stack = await _stack(relays, ["limit"])
     try:
@@ -260,8 +296,7 @@ async def test_rate_limit_offer_and_switch(
         assert upd["body"]["template_card"]["main_title"]["title"] == msg("rl_switching_title")
         await stack.ws.wait_frame(
             lambda f: (
-                _sent("markdown")(f)
-                and "已切换运行时" in str(f["body"]["markdown"]["content"])
+                _sent("markdown")(f) and "已切换运行时" in str(f["body"]["markdown"]["content"])
             ),
             timeout=60,
         )

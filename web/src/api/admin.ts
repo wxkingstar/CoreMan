@@ -52,12 +52,12 @@ export const catalog = {
 export const bots = {
   list: (params: Query) => call<Page<BotOut>>(http.get('/api/admin/bots', { params })),
   get: (id: string) => call<BotOut>(http.get(`/api/admin/bots/${id}`)),
-  create: (body: BotIn) => call<BotOut>(http.post('/api/admin/bots', body)),
+  create: (body: BotIn) => call<BotOut>(http.post('/api/admin/bots', body, { timeout: 300000 })),
   patch: (id: string, body: BotPatch, version: number) =>
     call<BotOut>(http.patch(`/api/admin/bots/${id}`, body, { headers: { 'If-Match': `"${version}"` } })),
   remove: (id: string) => call<null>(http.delete(`/api/admin/bots/${id}`)),
   switchRelay: (id: string, body: SwitchRelayIn, version: number) =>
-    call<SwitchRelayOut>(http.post(`/api/admin/bots/${id}/switch-relay`, body, { timeout: 420000, headers: { 'If-Match': `"${version}"` } })),
+    call<SwitchRelayOut>(http.post(`/api/admin/bots/${id}/switch-relay`, body, { timeout: 1800000, headers: { 'If-Match': `"${version}"` } })),
   toggle: (id: string) => call<BotOut>(http.post(`/api/admin/bots/${id}/toggle`)),
   members: (id: string) => call<BotMemberOut[]>(http.get(`/api/admin/bots/${id}/members`)),
   addMember: (id: string, userId: string) => call<BotMemberOut>(http.post(`/api/admin/bots/${id}/members`, { user_id: userId })),

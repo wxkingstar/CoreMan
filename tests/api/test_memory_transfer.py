@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from sqlalchemy import select
 
 from coreman.core.db.models import Bot, Memory, User
@@ -9,6 +11,24 @@ from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
 from tests.fakes.runtime_node import add_node_relay, attach_node
 from tests.integration.worker_helpers import seed_bot
+
+
+@pytest.fixture(autouse=True)
+def workspace_channel(monkeypatch):
+    # These tests exercise real memory collection/deployment; only the independent
+    # file channel is replaced. Workspace transfer itself has separate E2E tests.
+    from coreman.core.bots import workspace_transfer
+
+    async def call(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1}
+        if operation == "workspace-info":
+            return {"success": True, "exists": False, "empty": True, "owned": False}
+        if operation == "workspace-export":
+            return {"success": True, "manifest": [], "excluded": []}
+        return {"success": True}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
 
 
 async def prepare(client, session):
@@ -66,9 +86,9 @@ async def test_switch_collects_then_deploys_before_rebind(client, db_session, mo
     assert result.status_code == 200, result.text
     assert result.json()["data"]["memory_status"] == "transferred"
     assert operations == [
-        (new_id, "ping"),
         (old_id, "ping"),
         (old_id, "read-memory"),
+        (new_id, "ping"),
         (new_id, "deploy-memory"),
     ]
     await db_session.refresh(bot)

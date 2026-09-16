@@ -33,6 +33,8 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
+vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, source_online: true, git_configured: false, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
+import { workspace } from '@/api/workspace'
 import { bots } from '@/api/admin'
 import { ApiError } from '@/api/client'
 import { VERSION_CONFLICT_CODE } from '@/utils/errors'
@@ -58,10 +60,13 @@ describe('SwitchRelayDialog', () => {
     // 换一台就恢复正常。
     await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
     await flushPromises()
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
+    await (wrapper.vm as unknown as { checkTarget: () => Promise<void> }).checkTarget()
+    await flushPromises()
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
     await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
     await flushPromises()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5' }, 1)
+    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
     wrapper.unmount()
   })
 
@@ -76,9 +81,10 @@ describe('SwitchRelayDialog', () => {
     await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
     await flushPromises()
     expect(document.body.textContent).toContain(i18n.global.t('bots.switch.backendChange'))
+    await (wrapper.vm as unknown as { checkTarget: () => Promise<void> }).checkTarget()
     await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
     await flushPromises()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5' }, 1)
+    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
     expect(wrapper.emitted('switched')).toBeTruthy()
     wrapper.unmount()
   })
@@ -100,6 +106,7 @@ describe('SwitchRelayDialog', () => {
     await flushPromises()
     const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; confirm: () => Promise<void> }
     await vm.pick('r2')
+    await (wrapper.vm as unknown as { checkTarget: () => Promise<void> }).checkTarget()
     await flushPromises()
     await vm.confirm()
     await flushPromises()
@@ -117,4 +124,22 @@ describe('SwitchRelayDialog', () => {
     error.mockRestore()
     wrapper.unmount()
   })
+  it('allows first runtime assignment without a source or stored memory snapshot', async () => {
+    vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, source_online: false, git_configured: false, memory_snapshot_at: null })
+    vi.mocked(bots.switchRelay).mockClear()
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: null, model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; checkTarget: () => Promise<void>; confirm: () => Promise<void> }
+    await vm.pick('r2')
+    await vm.checkTarget()
+    await flushPromises()
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
+    await vm.confirm()
+    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ relay_server_id: 'r2', allow_stored_memory: false }), 1)
+    wrapper.unmount()
+  })
+
 })

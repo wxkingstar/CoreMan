@@ -44,6 +44,8 @@ async def require_admin(
     )
     if actor.status != "active" or not is_bot_admin(actor, bot, members):
         raise ApiError(403, 403, "仅机器人管理员可管理记忆")
+    if lock and bot.workspace_state in {"migrating", "initializing", "busy"}:
+        raise ApiError(409, 409, "工作目录正在处理中，请完成后再修改记忆")
     return bot
 
 
@@ -251,7 +253,7 @@ async def deploy_memory(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await require_admin(session, bot_id, actor)
+    bot = await require_admin(session, bot_id, actor, lock=True)
     relay = await relay_for_memory(session, bot)
     rows = list(
         await session.scalars(
@@ -279,7 +281,7 @@ async def deploy_memory(
     ):
         raise ApiError(413, 413, "部署请求超过 Agent 大小限制")
     await audit(session, request, actor, bot, "deploy_requested")
-    await session.commit()
+    # Keep the employee lock through deployment so migration cannot start mid-write.
     try:
         capability = await call_agent(relay, request.app.state.cipher, "ping")
         if capability.get("memory_protocol") != 2:

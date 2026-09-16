@@ -59,3 +59,21 @@ async def test_agent_error_body_is_never_forwarded(monkeypatch):
     with pytest.raises(agent_client.AgentError) as exc:
         await agent_client.call_agent(_relay(), None, "status")
     assert "synthetic-private-output" not in str(exc.value)
+
+
+async def test_instruction_conflict_code_is_forwarded_without_runtime_text(monkeypatch):
+    _fake_http(
+        monkeypatch,
+        lambda r: httpx.Response(
+            200,
+            json={
+                "success": False,
+                "code": "instructions_conflict",
+                "message": "private filesystem text",
+            },
+        ),
+    )
+    with pytest.raises(agent_client.AgentError) as caught:
+        await agent_client.call_agent(_relay(), None, "workspace-init")
+    assert caught.value.code == "instructions_conflict"
+    assert "private filesystem" not in str(caught.value)

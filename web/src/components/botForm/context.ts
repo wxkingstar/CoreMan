@@ -4,6 +4,7 @@ import type { BotIn, RelayOut, TeamOut } from '@/api/types'
 /** BotForm 与其分区子组件共享的表单状态和联动逻辑；状态只在 BotForm 里维护一份。 */
 export interface BotFormContext {
   mode: 'create' | 'edit'
+  botId?: string
   form: BotIn
   fieldErrors: Record<string, string>
   isManager: ComputedRef<boolean>

@@ -105,7 +105,7 @@ class InstallOptions(BaseModel):
 
 class InstallIn(BaseModel):
     name: str = Field(default="", max_length=100)
-    workspace_root: str = Field(min_length=2, max_length=400)
+    workspace_root: str = Field(default="/home/ai", min_length=2, max_length=400)
     team_id: uuid.UUID | None = None
     visibility: Literal["all", "admins"] = "all"
     options: InstallOptions = Field(default_factory=InstallOptions)

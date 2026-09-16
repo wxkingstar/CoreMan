@@ -73,7 +73,12 @@ class MemoryInput(BaseModel):
 
 
 async def collect(
-    session: AsyncSession, relay: RelayServer, entries: list[MemoryInput], now: datetime
+    session: AsyncSession,
+    relay: RelayServer,
+    entries: list[MemoryInput],
+    now: datetime,
+    *,
+    allow_migrating: bool = False,
 ) -> dict[str, int]:
     if len(entries) > 500 or sum(len(row.content.encode()) for row in entries) > MAX_BATCH_BYTES:
         raise ApiError(413, 413, "记忆批次超过限制")
@@ -89,6 +94,8 @@ async def collect(
             .with_for_update()
         )
     )
+    if not allow_migrating and any(bot.workspace_state == "migrating" for bot in bots):
+        raise ApiError(409, 409, "员工正在迁移，暂缓后台记忆回收")
     by_directory: dict[str, list[Bot]] = {}
     for bot in bots:
         by_directory.setdefault(working_dir(bot.working_dir), []).append(bot)
@@ -139,5 +146,7 @@ async def collect(
                 now,
             )
             result["updated"] += 1
+    for bot in bots:
+        bot.memory_snapshot_at = now
     await session.flush()
     return result

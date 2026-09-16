@@ -57,6 +57,8 @@ it('requires the project root before creating a one-time install command', async
   const wrapper = mountPage('platform_admin'); await flushPromises()
   await wrapper.get('[data-test="install-runtime"]').trigger('click'); await flushPromises()
   const vm = wrapper.vm as unknown as { form: { workspace_root: string }; create: () => Promise<void>; generated: { command: string } | null }
+  expect(vm.form.workspace_root).toBe('/home/ai')
+  vm.form.workspace_root = ''
   await vm.create()
   expect(runtimeNodes.createLink).not.toHaveBeenCalled()
   vm.form.workspace_root = '/home/ai/projects'

@@ -133,7 +133,7 @@ function onBotKeyInput(): void {
   if (props.mode !== 'create') return
   // 空着，或还是上一次自动填的值，才继续联动；手改过就停。
   if (form.working_dir && form.working_dir !== autoWorkingDir.value) return
-  const root = relayList.value.find(r => r.id === form.relay_server_id)?.workspace_root ?? '/data/skills'
+  const root = relayList.value.find(r => r.id === form.relay_server_id)?.workspace_root ?? '/home/ai'
   autoWorkingDir.value = form.bot_key ? `${root}/${form.bot_key}` : ''
   form.working_dir = autoWorkingDir.value
 }
@@ -309,7 +309,7 @@ onMounted(async () => {
 
 // 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
 provide(botFormKey, {
-  mode: props.mode, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
+  mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
   modelOptions, xhighAllowed, sensitiveVisible, credKeys, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
 })
 

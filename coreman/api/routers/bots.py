@@ -338,6 +338,8 @@ async def build_out(
         "model": bot.model,
         "backend": backend_of(bot.model, relay.model_provider if relay else None),
         "working_dir": bot.working_dir,
+        "workspace_state": bot.workspace_state,
+        "workspace_error": bot.workspace_error,
         "verbosity_level": bot.verbosity_level,
         "effort_level": bot.effort_level,
         "sse_timeout_seconds": bot.sse_timeout_seconds,
@@ -492,6 +494,13 @@ async def create_bot(
         ),
         ip=client_ip(request),
     )
+    from coreman.core.bots.workspace_transfer import initialize_workspace
+
+    try:
+        await initialize_workspace(session, bot, cipher)
+    except ApiError:
+        # 员工配置仍可保存和重试，任务认领会拒绝未 ready 的工作目录。
+        pass
     await notify_bot_changed(session, bot.id)
     await session.commit()
     # enabled / version / 时间戳都是服务端默认值，不刷回来视图里就是 None。
@@ -523,6 +532,8 @@ async def patch_bot(
     if not can_edit_bot(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
     require_if_match(request, bot.version)
+    await session.refresh(bot, with_for_update=True)
+    require_if_match(request, bot.version)
     changes = body.changes()
     if not changes:
         raise ApiError(422, 422, "至少修改一个字段")
@@ -545,7 +556,11 @@ async def patch_bot(
             changes.get("model", bot.model),
             changes.get("effort_level", bot.effort_level),
         )
+    if bot.workspace_state in {"migrating", "initializing", "busy"}:
+        raise ApiError(409, 409, "工作目录操作正在进行，请完成后再编辑")
     if "working_dir" in changes and changes["working_dir"] != bot.working_dir:
+        if bot.relay_server_id:
+            raise ApiError(409, 409, "请通过切换运行时迁移工作目录，避免文件和记忆丢失")
         await reserve_workspace(session, bot.relay_server_id, changes["working_dir"], bot_id=bot.id)
     cipher = _cipher(request)
     before = _public(bot)
@@ -604,6 +619,9 @@ async def delete_bot(
     bot = await load_bot(session, bot_id)
     if not can_delete_bot(user, bot):
         raise forbidden()
+    await session.refresh(bot, with_for_update=True)
+    if bot.workspace_state in {"migrating", "initializing", "busy"}:
+        raise ApiError(409, 409, "工作目录正在处理中，请完成后再删除员工")
     snapshot = _public(bot)
     await session.delete(bot)
     await record_audit(

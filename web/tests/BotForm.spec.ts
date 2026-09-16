@@ -26,7 +26,7 @@ const editBot: BotOut = {
   avatar_url: null, enabled: true, team_id: 't1', team_name: '销售',
   created_by: 'me', created_by_name: 'U',
   relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1',
-  model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/data/skills/sales_bot',
+  model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/sales_bot',
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
   welcome_message: null, notify_webhook_url: 'ht••••-1',
   member_count: 0, allowed_user_count: 0,
@@ -49,7 +49,7 @@ describe('BotForm', () => {
     await flushPromises()
     expect(wrapper.find('[data-test="agent_timeout"]').exists()).toBe(false)
     await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
-    expect((wrapper.get('[data-test="working_dir"] input').element as HTMLInputElement).value).toBe('/data/skills/sales_bot')
+    expect((wrapper.get('[data-test="working_dir"] input').element as HTMLInputElement).value).toBe('/home/ai/sales_bot')
     expect((wrapper.vm as unknown as { form: { model: string; verbosity_level: number } }).form.model).toBe('vllm/claude-sonnet-4-6')
     ;(wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void> }).selectRelay('r2')
     await flushPromises()
@@ -59,7 +59,7 @@ describe('BotForm', () => {
     await wrapper.get('[data-test="cred-secret"] input').setValue('secret-value')
     await wrapper.get('[data-test="submit"]').trigger('click')
     await flushPromises()
-    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', relay_server_id: 'r2', model: 'codex/gpt-5.5', working_dir: '/data/skills/sales_bot', credentials: { bot_id: 'bot-id', secret: 'secret-value' } }))
+    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', relay_server_id: 'r2', model: 'codex/gpt-5.5', working_dir: '/home/ai/sales_bot', credentials: { bot_id: 'bot-id', secret: 'secret-value' } }))
     expect(wrapper.emitted('saved')).toBeTruthy()
   })
 

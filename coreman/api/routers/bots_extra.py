@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
@@ -39,6 +39,9 @@ router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depend
 class SwitchRelayIn(BaseModel):
     relay_server_id: uuid.UUID
     model: str | None = Field(default=None, min_length=1, max_length=100)
+    workspace_mode: Literal["copy", "git", "existing"] = "copy"
+    target_directory: str | None = Field(default=None, min_length=1, max_length=500)
+    allow_stored_memory: bool = False
 
 
 class MemberIn(BaseModel):
@@ -131,6 +134,9 @@ async def switch_relay(
             member_ids=member_ids,
             ip=client_ip(request),
             cipher=request.app.state.cipher,
+            workspace_mode=body.workspace_mode,
+            target_directory=body.target_directory,
+            allow_stored_memory=body.allow_stored_memory,
         )
     except SwitchError as exc:
         raise ApiError(exc.status, exc.code, exc.message) from exc
@@ -162,6 +168,9 @@ async def toggle_bot(
     bot = await load_bot(session, bot_id)
     if not can_toggle_bot(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    await session.refresh(bot, with_for_update=True)
+    if bot.workspace_state in {"migrating", "initializing", "busy"}:
+        raise ApiError(409, 409, "工作目录操作正在进行，请完成后再启停")
     before = bot.enabled
     bot.enabled = not before
     await record_audit(
@@ -321,3 +330,78 @@ async def replace_allowed_users(
         )
     await session.commit()
     return {"code": 0, "data": await _allowed_of(session, bot_id)}
+
+
+class WorkspacePreviewIn(BaseModel):
+    relay_server_id: uuid.UUID
+    target_directory: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+@router.post("/{bot_id}/workspace/switch-preview")
+async def workspace_switch_preview(
+    bot_id: uuid.UUID,
+    body: WorkspacePreviewIn,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    from coreman.core.bots.permissions import relay_allowed_for_bot
+    from coreman.core.bots.relay_policy import relay_available, relay_visible
+    from coreman.core.bots.workspace_transfer import require_workspace, target_path
+    from coreman.core.relay.agent_client import AgentError, call_agent
+
+    bot = await load_bot(session, bot_id)
+    if not can_switch_relay(user, bot, await member_ids_of(session, bot_id)):
+        raise forbidden()
+    target = await session.get(RelayServer, body.relay_server_id)
+    creator = await session.get(User, bot.created_by)
+    if (
+        target is None
+        or not relay_available(target)
+        or (target.id != bot.relay_server_id and not relay_visible(user, target))
+        or (
+            target.id != bot.relay_server_id
+            and not relay_allowed_for_bot(
+                user,
+                target,
+                bot_team_id=bot.team_id,
+                creator_team_id=creator.team_id if creator else None,
+            )
+        )
+    ):
+        raise ApiError(422, 422, "目标运行时未注册或不可用")
+    directory = await target_path(session, bot, target, body.target_directory)
+    try:
+        await require_workspace(target, request.app.state.cipher)
+        info = await call_agent(
+            target,
+            request.app.state.cipher,
+            "workspace-info",
+            {
+                "working_dir": directory,
+                "bot_id": str(bot.id),
+            },
+        )
+    except AgentError as exc:
+        raise ApiError(502, 502, "无法检查目标目录，请检查运行时连接") from exc
+    source_online = False
+    if bot.relay_server_id:
+        source = await session.get(RelayServer, bot.relay_server_id)
+        if source:
+            try:
+                await require_workspace(source, request.app.state.cipher)
+                source_online = True
+            except (AgentError, ApiError):
+                pass
+    return {
+        "code": 0,
+        "data": {
+            "directory": directory,
+            "exists": bool(info.get("exists")),
+            "empty": bool(info.get("empty")),
+            "owned": bool(info.get("owned")),
+            "source_online": source_online,
+            "git_configured": bool(bot.git_url),
+            "memory_snapshot_at": bot.memory_snapshot_at,
+        },
+    }

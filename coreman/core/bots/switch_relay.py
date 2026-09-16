@@ -1,14 +1,12 @@
 """切换 relay 的领域逻辑（权限校验、清会话；限流自动切换复用同一逻辑）。API 与 worker 共用。
 
-只改内存里的对象并写审计 / 通知，**不 commit**：API 端点要在 commit 之后刷 ETag，worker
-要把回执与状态清理放进同一个事务，事务边界一律留给调用方。
+换机过程中持久化执行隔离状态和记忆快照；最终绑定、审计和 ready 状态由调用方提交。
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,12 +19,11 @@ from coreman.core.bots.relay_policy import (
     relay_visible,
     validate_model_for_relay,
 )
-from coreman.core.bots.workspace import reserve_workspace
+from coreman.core.bots.workspace_transfer import WorkspaceMode, prepare_switch, target_path
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotSkill, RelayServer, RuntimeNode, User
+from coreman.core.db.models import Bot, BotSkill, RelayServer, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
-from coreman.core.knowledge.memory_transfer import transfer
 from coreman.core.relay.models import default_model, effective_models, load_catalog, supports_xhigh
 
 
@@ -59,6 +56,9 @@ async def switch_relay(
     member_ids: set[uuid.UUID],
     ip: str | None,
     cipher: Cipher | None = None,
+    workspace_mode: WorkspaceMode = "copy",
+    target_directory: str | None = None,
+    allow_stored_memory: bool = False,
 ) -> SwitchResult:
     """把机器人换到 `target` 上（可同时指定模型），成功返回换前换后的快照。"""
     if not can_switch_relay(actor, bot, member_ids):
@@ -98,34 +98,23 @@ async def switch_relay(
     await session.refresh(bot, with_for_update=True)
     if bot.version != expected_version:
         raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试", VERSION_CONFLICT)
+    if bot.workspace_state in {"migrating", "initializing", "busy"} and same_relay:
+        raise SwitchError(409, "工作目录操作正在进行，请完成后再切换模型")
     memory_status = "unchanged"
+    requested_directory = target_directory
     target_directory = bot.working_dir
-    if not same_relay:
-        # 目录按「相对项目主目录」平移到目标节点；原实例不在任何节点上时按 bot_key 起一个。
-        old_runtime = (
-            await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
-        )
-        target_node = await session.get(RuntimeNode, target.runtime_node_id)
-        if target_node is None:
-            raise SwitchError(422, "目标运行时未注册或不可用")
-        source_node = (
-            await session.get(RuntimeNode, old_runtime.runtime_node_id)
-            if old_runtime and old_runtime.runtime_node_id
-            else None
-        )
-        relative = PurePosixPath(bot.bot_key)
-        current = PurePosixPath(bot.working_dir)
-        if source_node and current.is_relative_to(source_node.workspace_root):
-            relative = current.relative_to(source_node.workspace_root)
-        target_directory = str(PurePosixPath(target_node.workspace_root) / relative)
+    if not same_relay or (requested_directory and requested_directory != bot.working_dir):
         try:
-            await reserve_workspace(session, target.id, target_directory, bot_id=bot.id)
-            if target_directory == bot.working_dir:
-                memory_status = await transfer(session, bot, target, cipher)
-            else:
-                memory_status = await transfer(
-                    session, bot, target, cipher, target_directory=target_directory
-                )
+            target_directory = await target_path(session, bot, target, requested_directory)
+            memory_status = await prepare_switch(
+                session,
+                bot,
+                target,
+                cipher,
+                mode=workspace_mode,
+                directory=target_directory,
+                allow_stored_memory=allow_stored_memory,
+            )
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
         installed = await session.scalars(
@@ -136,6 +125,10 @@ async def switch_relay(
             item.error_message = "实例已切换，原授权仍保留，请重新安装以确认目标实例代码。"
     old_relay_id, old_model, old_effort = bot.relay_server_id, bot.model, bot.effort_level
     old_directory = bot.working_dir
+    if memory_status != "unchanged":
+        bot.workspace_state, bot.workspace_error, bot.workspace_phase = "ready", None, None
+        bot.workspace_operation_id, bot.workspace_deadline = None, None
+        bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
     bot.working_dir = target_directory
     bot.relay_server_id, bot.model = target.id, new_model
     if bot.effort_level == "xhigh" and not supports_xhigh(new_model, catalog):

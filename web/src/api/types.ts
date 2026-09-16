@@ -107,7 +107,7 @@ export interface BotIn {
   enabled: boolean
 }
 export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled'>>
-export interface SwitchRelayIn { relay_server_id: string; model?: string | null }
+export interface SwitchRelayIn { relay_server_id: string; model?: string | null; workspace_mode?: 'copy' | 'git' | 'existing'; target_directory?: string; allow_stored_memory?: boolean }
 export interface SwitchRelayOut {
   old_relay_id: string | null; new_relay_id: string
   old_model: string; new_model: string; bot: BotOut

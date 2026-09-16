@@ -22,7 +22,9 @@ _CLAIM_SQL = text(
 UPDATE tasks SET status='claimed', claimed_by=:instance, claimed_at=now(), heartbeat_at=now(),
                  attempts=attempts+1
 WHERE id = (SELECT candidate.id FROM tasks candidate
-            WHERE candidate.status='queued' AND candidate.lane=:lane AND candidate.run_after<=now()
+            JOIN bots workspace_bot ON workspace_bot.id=candidate.bot_id
+            WHERE workspace_bot.workspace_state='ready' AND candidate.status='queued'
+            AND candidate.lane=:lane AND candidate.run_after<=now()
             AND (candidate.kind='command'
                  OR candidate.payload->>'serialize_session' IS DISTINCT FROM 'true'
                  OR NOT EXISTS (
@@ -32,7 +34,8 @@ WHERE id = (SELECT candidate.id FROM tasks candidate
                           (prior.status='queued' AND prior.id<candidate.id
                            AND prior.cancel_requested_at IS NULL))
                  ))
-            ORDER BY candidate.priority DESC, candidate.id LIMIT 1 FOR UPDATE SKIP LOCKED)
+            ORDER BY candidate.priority DESC, candidate.id LIMIT 1
+            FOR UPDATE OF candidate SKIP LOCKED FOR SHARE OF workspace_bot SKIP LOCKED)
 RETURNING id
 """
 )

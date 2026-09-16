@@ -3,7 +3,7 @@
 import uuid
 from pathlib import PurePosixPath
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import Bot, RelayServer, RuntimeNode
@@ -39,10 +39,23 @@ async def reserve_workspace(
     )
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"workspace:{node.id}:{directory}"},
+        {"key": f"workspace:{node.id}"},
     )
-    stmt = select(Bot.id).where(Bot.relay_server_id.in_(peers), Bot.working_dir == directory)
+    stmt = select(Bot).where(
+        or_(
+            Bot.relay_server_id.in_(peers),
+            Bot.workspace_target_relay_id.in_(peers),
+        )
+    )
     if bot_id is not None:
         stmt = stmt.where(Bot.id != bot_id)
-    if await session.scalar(stmt.limit(1)):
-        raise ApiError(409, 409, "该实例工作目录已属于另一个机器人")
+    for other in await session.scalars(stmt):
+        paths = []
+        if other.relay_server_id in peers:
+            paths.append(other.working_dir)
+        if other.workspace_target_relay_id in peers and other.workspace_target_dir:
+            paths.append(other.workspace_target_dir)
+        for occupied in paths:
+            other_path = PurePosixPath(occupied)
+            if path.is_relative_to(other_path) or other_path.is_relative_to(path):
+                raise ApiError(409, 409, "工作目录与另一位 AI 员工的目录重叠")

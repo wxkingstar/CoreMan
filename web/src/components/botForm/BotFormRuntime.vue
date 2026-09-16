@@ -1,14 +1,17 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
 import { useI18n } from 'vue-i18n'
 import type { EffortLevel } from '@/api/types'
 import { useBotFormContext } from '@/components/botForm/context'
 
+const workspaceVisible = ref(false)
 const SSE_OPTIONS = [1800, 3600, 7200, 14400, 21600, 43200]
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
 const EFFORT_OPTIONS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh']
 const { t } = useI18n()
 const {
-  mode, form, fieldErrors, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
+  mode, botId, form, fieldErrors, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
   selectRuntime, selectRelay, modelOptions, xhighAllowed,
 } = useBotFormContext()
 </script>
@@ -142,7 +145,23 @@ const {
     data-test="working_dir"
     :error="fieldErrors.working_dir"
   >
-    <el-input v-model="form.working_dir" />
+    <el-input
+      v-model="form.working_dir"
+      :readonly="mode === 'edit' && !!form.relay_server_id"
+    />
+    <el-button
+      v-if="botId"
+      link
+      type="primary"
+      @click="workspaceVisible = true"
+    >
+      {{ t('workspaceFiles.open') }}
+    </el-button>
+    <WorkspaceDrawer
+      v-if="botId && workspaceVisible"
+      v-model:visible="workspaceVisible"
+      :bot-id="botId"
+    />
   </el-form-item>
 
   <el-form-item

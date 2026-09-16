@@ -18,6 +18,7 @@ import BotAllowedUsersDialog from '@/components/bot/BotAllowedUsersDialog.vue'
 import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
+import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 const botFormRef = ref<InstanceType<typeof BotForm>>()
@@ -35,6 +36,7 @@ const loading = ref(false)
 
 const editVisible = ref(false)
 const switchVisible = ref(false)
+const workspaceVisible = ref(false)
 const membersDialog = ref<InstanceType<typeof BotMembersDialog>>()
 const allowedDialog = ref<InstanceType<typeof BotAllowedUsersDialog>>()
 
@@ -236,6 +238,14 @@ onMounted(async () => {
             </el-descriptions-item>
             <el-descriptions-item :label="t('bots.detail.workingDir')">
               {{ bot.working_dir }}
+              <el-button
+                v-if="perms?.can_edit"
+                link
+                type="primary"
+                @click="workspaceVisible = true"
+              >
+                {{ t('workspaceFiles.open') }}
+              </el-button>
             </el-descriptions-item>
             <el-descriptions-item :label="t('bots.detail.verbosity')">
               {{ t(`bots.verbosityLevels.${bot.verbosity_level}`) }}
@@ -444,6 +454,12 @@ onMounted(async () => {
         />
       </el-dialog>
 
+      <WorkspaceDrawer
+        v-if="workspaceVisible"
+        v-model:visible="workspaceVisible"
+        :bot-id="botId"
+        @update:visible="!$event && reload(true)"
+      />
       <SwitchRelayDialog
         v-if="switchVisible"
         :bot="bot"

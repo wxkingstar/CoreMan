@@ -128,6 +128,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(model_catalog.router)
     app.include_router(relay_servers.router)
     app.include_router(relay_agent.router)
+    from coreman.api.routers import bot_workspace
+
+    app.include_router(bot_workspace.router)
     app.include_router(bots.router)
     app.include_router(bot_memories.router)
     app.include_router(skill_catalog.router)

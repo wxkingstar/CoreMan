@@ -46,7 +46,7 @@ async function saveName() {
   finally { renaming.value = false }
 }
 const generated = ref<InstallLink | null>(null)
-const form = reactive({ name: '', workspace_root: '', team_id: null as string | null,
+const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null,
   options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', max_concurrent: 10, install_claude_probe: false } })
 const CA_PEM_MAX_BYTES = 64 * 1024
 const CA_PEM_RE = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/
