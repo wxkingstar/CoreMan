@@ -106,9 +106,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(infrastructure_admin.router)
     app.include_router(infra_org.router)
     app.include_router(infra_memories.router)
-    from coreman.api.routers import bot_collaboration
+    from coreman.api.routers import bot_collaboration, bot_collaboration_admin
 
     app.include_router(bot_collaboration.router)
+    app.include_router(bot_collaboration_admin.router)
     app.include_router(escalations.router)
     app.include_router(wecom_app_callback.router)
     app.include_router(infra_notify.router)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import os
 import signal
 import uuid
@@ -131,6 +132,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
             instance_id=instance_id,
             generation=generation,
             guard=app_guard,
+            credentials_fingerprint=hashlib.sha256(initial_credentials.encode()).hexdigest(),
         )
         await transport.fence()
 
