@@ -200,7 +200,7 @@ class FeishuTransport:
         if previous and now - previous[0] < 3 and (active == bool(previous[2].endswith("."))):
             return previous[2]
         frame = (previous[1] + 1) % 3 if previous else 0
-        title = "🤔 思考过程" + ("." * (frame + 1) if active else "")
+        title = "🤔 思考中" + "." * (frame + 1) if active else "🤔 思考过程"
         if previous and previous[2] == title:
             return title
         # Only patch the header: preserve the reader's expanded state and body.
@@ -261,7 +261,13 @@ class FeishuTransport:
                 json={
                     "type": "card_json",
                     "data": json.dumps(
-                        stream_card("", "", session_url=row.session_url), ensure_ascii=False
+                        stream_card(
+                            "",
+                            "",
+                            session_url=row.session_url,
+                            heading="🤔 思考过程" if row.is_complete else "🤔 思考中.",
+                        ),
+                        ensure_ascii=False,
                     ),
                 },
             )

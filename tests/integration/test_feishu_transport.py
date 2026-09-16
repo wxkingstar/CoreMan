@@ -492,7 +492,7 @@ async def test_thinking_heading_animates_without_new_content(db_session, db_engi
     import json
 
     assert (
-        json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程.."
+        json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考中.."
     )
     assert not any(path.endswith("/content") for _, path, _ in api.calls)
     api.calls.clear()
