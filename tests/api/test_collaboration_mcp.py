@@ -71,7 +71,14 @@ async def test_legacy_endpoint_and_mcp_share_failed_call_budget(client, app, db_
     assert task.cancel_requested_at is not None
 
 
-async def test_legacy_long_question_remains_supported(client, app, db_session):
+async def test_legacy_long_question_remains_supported(client, app, db_session, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from coreman.core.chat import collaboration_setup
+
+    monkeypatch.setattr(collaboration_setup, "check_current_group", AsyncMock())
+    monkeypatch.setattr(collaboration_setup, "available", AsyncMock(return_value=True))
+    monkeypatch.setattr(collaboration_setup, "begin_runtime", AsyncMock())
     auth, task, peer = await headers(app, db_session)
     response = await client.post(
         "/api/runtime/bot-help",

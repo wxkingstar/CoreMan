@@ -21,6 +21,7 @@ from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
     BotCollaboration,
+    BotCollaborationPartner,
     BotCollaborationRoute,
     ChatSession,
     InboundEvent,
@@ -30,7 +31,14 @@ from coreman.core.db.models import (
 from coreman.core.prompting import Speaker
 
 AAD = "bot_collaboration.task_capability"
-ACTIVE = ("requested", "waiting_helper", "helper_running", "waiting_source", "resuming")
+ACTIVE = (
+    "waiting_identity",
+    "requested",
+    "waiting_helper",
+    "helper_running",
+    "waiting_source",
+    "resuming",
+)
 
 
 def issue_capability(
@@ -92,22 +100,27 @@ async def routes_for(
     )
 
 
-async def authorized(
-    session: AsyncSession, route: BotCollaborationRoute, pid: str, uid: uuid.UUID
-) -> Speaker:
-    if not route.enabled or route.archived or route.source_bot_id == route.target_bot_id:
-        raise ValueError("collaboration route disabled")
-    if route.setup:
-        # Admin-managed routes cannot reuse proof after credentials or authority change.
-        # Legacy manually provisioned routes remain compatible until reverified.
-        from coreman.core.chat.collaboration_setup import status
+async def partners_for(session: AsyncSession, bot_id: uuid.UUID) -> list[BotCollaborationPartner]:
+    return list(
+        await session.scalars(
+            select(BotCollaborationPartner).where(
+                BotCollaborationPartner.source_bot_id == bot_id,
+                BotCollaborationPartner.enabled.is_(True),
+                BotCollaborationPartner.archived.is_(False),
+            )
+        )
+    )
 
-        if (await status(session, route))["status"] != "ready":
-            raise ValueError("collaboration verification invalidated")
+
+async def authorized_partner(
+    session: AsyncSession, partner: BotCollaborationPartner, pid: str, uid: uuid.UUID
+) -> Speaker:
+    if not partner.enabled or partner.archived or partner.source_bot_id == partner.target_bot_id:
+        raise ValueError("collaboration partner disabled")
     speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)
     if not speaker.known or speaker.user_id != uid:
         raise ValueError("original human identity changed")
-    for bid in (route.source_bot_id, route.target_bot_id):
+    for bid in (partner.source_bot_id, partner.target_bot_id):
         bot = await session.get(Bot, bid, populate_existing=True)
         if bot is None or not bot.enabled or bot.platform != "feishu":
             raise ValueError("collaboration bot disabled")
@@ -121,8 +134,46 @@ async def authorized(
     return speaker
 
 
+async def authorized(
+    session: AsyncSession,
+    route: BotCollaborationRoute,
+    pid: str,
+    uid: uuid.UUID,
+    *,
+    allow_pending: bool = False,
+) -> Speaker:
+    if not route.enabled or route.archived:
+        raise ValueError("collaboration route disabled")
+    partner = await session.scalar(
+        select(BotCollaborationPartner)
+        .where(
+            BotCollaborationPartner.source_bot_id == route.source_bot_id,
+            BotCollaborationPartner.target_bot_id == route.target_bot_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if partner is None:
+        raise ValueError("collaboration partner disabled")
+    speaker = await authorized_partner(session, partner, pid, uid)
+    if route.setup.get("status"):
+        from coreman.core.chat.collaboration_setup import status
+
+        state = (await status(session, route))["status"]
+        if state != "ready" and not (allow_pending and state == "pending"):
+            raise ValueError("协作消息身份暂时无法验证，本轮已停止")
+    elif not (route.tenant_key and route.source_union_id and route.target_union_id):
+        raise ValueError("collaboration verification missing")
+    return speaker
+
+
 async def request_help(
-    session: AsyncSession, *, task_id: int, actor: str, target_key: str, question: str
+    session: AsyncSession,
+    *,
+    task_id: int,
+    actor: str,
+    target_key: str,
+    question: str,
+    cipher: Cipher | None = None,
 ) -> BotCollaboration:
     snapshot = await session.get(Task, task_id)
     if snapshot is None:
@@ -153,32 +204,80 @@ async def request_help(
     speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)
     if speaker.user_id is None or str(speaker.user_id) != actor:
         raise ValueError("capability actor mismatch")
-    route = await session.scalar(
-        select(BotCollaborationRoute)
-        .join(Bot, Bot.id == BotCollaborationRoute.target_bot_id)
-        .where(
-            BotCollaborationRoute.source_bot_id == task.bot_id,
-            BotCollaborationRoute.chat_id == source.chat_id,
-            BotCollaborationRoute.enabled.is_(True),
-            Bot.bot_key == target_key,
-        )
-    )
-    if route is None:
-        raise ValueError("peer not configured for this group")
-    await authorized(session, route, pid, speaker.user_id)
     existing = await session.scalar(
         select(BotCollaboration).where(BotCollaboration.source_task_id == task.id)
     )
     if existing:
-        if existing.route_id != route.id or existing.question != question:
+        old_route = await session.get(BotCollaborationRoute, existing.route_id)
+        old_target = await session.get(Bot, old_route.target_bot_id) if old_route else None
+        if not old_target or old_target.bot_key != target_key or existing.question != question:
             raise ValueError("one help request per task")
+        assert old_route is not None
+        await authorized(session, old_route, pid, speaker.user_id, allow_pending=True)
         return existing
+    if task.payload.get("collaboration_attempt_error"):
+        raise ValueError(task.payload["collaboration_attempt_error"])
+    partner = await session.scalar(
+        select(BotCollaborationPartner)
+        .join(Bot, Bot.id == BotCollaborationPartner.target_bot_id)
+        .where(BotCollaborationPartner.source_bot_id == task.bot_id, Bot.bot_key == target_key)
+    )
+    if partner is None:
+        raise ValueError("peer not configured")
+    await authorized_partner(session, partner, pid, speaker.user_id)
     if not question.strip():
         raise ValueError("empty help question")
     info = await session.get(ChatSession, (task.bot_id, task.session_key))
     bot = await session.get(Bot, task.bot_id)
     if info is None or bot is None or not bot.relay_server_id:
         raise ValueError("source session unavailable")
+    from coreman.core.chat import collaboration_setup as setup
+
+    left = await session.get(Bot, partner.source_bot_id)
+    right = await session.get(Bot, partner.target_bot_id)
+    assert left is not None and right is not None
+    try:
+        if cipher is None:
+            raise ValueError("暂时无法确认伙伴是否在当前群，本轮不再重试")
+        await setup.check_current_group(left, right, source.chat_id, cipher)
+        if not await setup.available(session, left) or not await setup.available(session, right):
+            raise ValueError("协作伙伴运行时不可用，本轮已停止")
+        route = await session.scalar(
+            select(BotCollaborationRoute).where(
+                BotCollaborationRoute.source_bot_id == task.bot_id,
+                BotCollaborationRoute.target_bot_id == partner.target_bot_id,
+                BotCollaborationRoute.chat_id == source.chat_id,
+            )
+        )
+        if route is None:
+            route = BotCollaborationRoute(
+                source_bot_id=task.bot_id,
+                target_bot_id=partner.target_bot_id,
+                chat_id=source.chat_id,
+                tenant_key="",
+                source_open_id="",
+                target_open_id="",
+                source_union_id="",
+                target_union_id="",
+                enabled=True,
+                archived=False,
+                timeout_seconds=partner.timeout_seconds,
+                setup={},
+            )
+            session.add(route)
+            await session.flush()
+        state = await setup.status(session, route) if route.setup.get("status") else None
+        if (
+            not state
+            or state["status"] not in {"ready", "pending"}
+            or not route.setup.get("runtime_request")
+        ):
+            await setup.begin_runtime(session, route, left, right, speaker.user_id, partner, cipher)
+        route.enabled, route.archived = True, False
+        route.timeout_seconds = partner.timeout_seconds
+    except ValueError as exc:
+        task.payload = {**task.payload, "collaboration_attempt_error": str(exc)}
+        raise
     row = BotCollaboration(
         route_id=route.id,
         source_task_id=task.id,
@@ -188,7 +287,7 @@ async def request_help(
         source_relay_session_id=info.relay_session_id,
         source_relay_id=bot.relay_server_id,
         question=question,
-        status="requested",
+        status="waiting_identity" if route.setup.get("status") == "pending" else "requested",
         expires_at=datetime.now(UTC) + timedelta(seconds=max(30, min(route.timeout_seconds, 1800))),
     )
     session.add(row)
@@ -256,6 +355,14 @@ async def close(session: AsyncSession, row: BotCollaboration, status: str, error
             await outbox.mark_skipped(session, item.id, error)
     route = await session.get(BotCollaborationRoute, row.route_id)
     assert route is not None
+    if route.setup.get("runtime_request") and route.setup.get("status") == "pending":
+        # A closed attempt cannot leave delayed probe notifications behind.
+        route.setup = {**route.setup, "status": "failed", "reason": "collaboration_closed"}
+        for side in ("source", "target"):
+            probe_id = route.setup.get(f"{side}_outbox_id")
+            probe = await session.get(OutboxItem, probe_id) if probe_id else None
+            if probe and probe.status == "pending":
+                await outbox.mark_skipped(session, probe.id, error)
     source = await session.get(Task, row.source_task_id)
     assert source is not None
     origin = await session.get(InboundEvent, source.inbound_event_id)
@@ -287,7 +394,13 @@ async def tick(session: AsyncSession, now: datetime) -> int:
         route = await session.get(BotCollaborationRoute, row.route_id, populate_existing=True)
         assert route is not None
         try:
-            await authorized(session, route, row.origin_platform_user_id, row.origin_user_id)
+            await authorized(
+                session,
+                route,
+                row.origin_platform_user_id,
+                row.origin_user_id,
+                allow_pending=row.status == "waiting_identity",
+            )
         except ValueError as exc:
             await close(session, row, "cancelled", str(exc))
             continue
@@ -296,6 +409,18 @@ async def tick(session: AsyncSession, now: datetime) -> int:
             continue
         if row.expires_at <= now:
             await close(session, row, "timed_out", "等待协作伙伴反馈超时")
+            continue
+        if row.status == "waiting_identity":
+            # Scheduler reconciles genuine receipts; the model never polls or retries.
+            source_task = await session.get(Task, row.source_task_id)
+            if (
+                route.setup.get("status") == "ready"
+                and source_task
+                and source_task.status == "succeeded"
+            ):
+                await send_message(session, row, route)
+            elif source_task and source_task.status in ("failed", "cancelled", "timed_out"):
+                await close(session, row, "failed", "协作任务中断")
             continue
         if row.status in ("helper_running", "resuming"):
             running = await session.get(
@@ -383,7 +508,7 @@ async def admit_human(
     Bot lock serializes admission with registration/opening. Ledger locks precede task locks,
     matching completion and reconciliation. No actor change or per-user session partition.
     """
-    if not await routes_for(session, bot_id, chat_id):
+    if not await partners_for(session, bot_id):
         return None
     bot = await session.scalar(select(Bot).where(Bot.id == bot_id).with_for_update())
     speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)

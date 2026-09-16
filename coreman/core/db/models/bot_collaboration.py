@@ -24,6 +24,25 @@ from sqlalchemy.types import Uuid
 from coreman.core.db.base import Base
 
 
+class BotCollaborationPartner(Base):
+    """Administrator intent, independent of conversation transport identity."""
+
+    __tablename__ = "bot_collaboration_partners"
+    __table_args__ = (UniqueConstraint("source_bot_id", "target_bot_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_bot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE")
+    )
+    target_bot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE")
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    archived: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    timeout_seconds: Mapped[int] = mapped_column(Integer, server_default=text("300"))
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    __mapper_args__ = {"version_id_col": version}
+
+
 class BotCollaborationRoute(Base):
     __tablename__ = "bot_collaboration_routes"
     __table_args__ = (UniqueConstraint("source_bot_id", "target_bot_id", "chat_id"),)

@@ -1,26 +1,22 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessageBox } from 'element-plus'
-import { collaboration, type CollaborationRoute, type CollaborationPeer, type CollaborationGroup } from '@/api/collaboration'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { collaboration, type CollaborationRoute, type CollaborationPeer } from '@/api/collaboration'
 import { errorMessage } from '@/utils/errors'
 const props = defineProps<{ botId: string; sourceName: string; canEdit: boolean; active: boolean }>()
 const { t, te } = useI18n()
-const rows = ref<CollaborationRoute[]>([]), peers = ref<CollaborationPeer[]>([]), groups = ref<CollaborationGroup[]>([])
-const loading = ref(false), optionsLoading = ref(false), groupsLoading = ref(false), busy = ref(false), visible = ref(false)
-const error = ref(''), formError = ref(''), target = ref(''), chat = ref(''), current = ref<CollaborationRoute | null>(null)
+const rows = ref<CollaborationRoute[]>([]), peers = ref<CollaborationPeer[]>([])
+const loading = ref(false), optionsLoading = ref(false), busy = ref(false), visible = ref(false)
+const error = ref(''), formError = ref(''), optionsError = ref(''), target = ref('')
 let listSequence = 0
-let generation = 0, optionsGeneration = 0, groupsGeneration = 0
-let poll: ReturnType<typeof setTimeout> | undefined
+let generation = 0, optionsGeneration = 0
+let query = ''
 let controller = new AbortController()
 const permitted = computed(() => props.active && props.canEdit)
-function stop() { clearTimeout(poll); controller.abort(); controller = new AbortController(); generation++; optionsGeneration++; groupsGeneration++ }
-function schedule() {
- clearTimeout(poll)
- if (permitted.value && !error.value && rows.value.some(r => r.status === 'pending')) poll = setTimeout(() => void refresh(), 3000)
-}
+function stop() { controller.abort(); controller = new AbortController(); generation++; optionsGeneration++; listSequence++ }
 async function refresh() {
- if (!permitted.value || busy.value) { schedule(); return }
+ if (!permitted.value || busy.value) return
  const sequence = ++listSequence
  const epoch = generation
  loading.value = true; error.value = ''
@@ -28,63 +24,54 @@ async function refresh() {
   const result = await collaboration.list(props.botId, controller.signal)
   if (epoch !== generation || sequence !== listSequence) return
   rows.value = result
-  if (current.value) current.value = result.find(r => r.id === current.value?.id) ?? null
  } catch (e) { if (epoch === generation && sequence === listSequence) error.value = errorMessage(e) }
- finally { if (epoch === generation && sequence === listSequence) { loading.value = false; schedule() } }
+ finally { if (epoch === generation && sequence === listSequence) { loading.value = false } }
 }
 watch(() => [props.botId, props.active, props.canEdit], () => {
- stop(); rows.value = []; current.value = null; visible.value = false; busy.value = false; loading.value = false
+ stop(); rows.value = []; peers.value = []; target.value = ''; error.value = ''; formError.value = ''; optionsError.value = ''; visible.value = false; busy.value = false; loading.value = false; optionsLoading.value = false
  if (permitted.value) void refresh()
 }, { immediate: true })
 onBeforeUnmount(stop)
 async function search(q = '') {
+ if (!permitted.value || !visible.value) return
+ query = q
  const epoch = ++optionsGeneration
- optionsLoading.value = true; formError.value = ''
- try { const result = await collaboration.options(props.botId, q, controller.signal); if (epoch === optionsGeneration) peers.value = result }
- catch (e) { if (epoch === optionsGeneration) formError.value = errorMessage(e) }
+ optionsLoading.value = true; optionsError.value = ''
+ try { const result = await collaboration.options(props.botId, q, controller.signal); if (epoch === optionsGeneration) peers.value = result.filter(peer => peer.id !== props.botId) }
+ catch (e) { if (epoch === optionsGeneration) optionsError.value = errorMessage(e) }
  finally { if (epoch === optionsGeneration) optionsLoading.value = false }
 }
-async function loadGroups() {
- const epoch = ++groupsGeneration
- chat.value = ''; groups.value = []; formError.value = ''
- if (!target.value) return
- groupsLoading.value = true
- try { const result = await collaboration.groups(props.botId, target.value, controller.signal); if (epoch === groupsGeneration) groups.value = result }
- catch (e) { if (epoch === groupsGeneration) formError.value = errorMessage(e) }
- finally { if (epoch === groupsGeneration) groupsLoading.value = false }
-}
-function open(row?: CollaborationRoute) {
+function open() {
  if (busy.value || !permitted.value) return
- current.value = row ?? null; target.value = row?.target_bot_id ?? ''; chat.value = row?.chat_id ?? ''
- formError.value = ''; peers.value = []; groups.value = []; visible.value = true
- if (!row) void search()
+ target.value = ''; formError.value = ''; peers.value = []; visible.value = true
+ void search()
 }
 async function confirm(message: string) {
  try { await ElMessageBox.confirm(message, t('collaboration.title'), { type: 'warning', confirmButtonText: t('collaboration.confirm'), cancelButtonText: t('collaboration.cancel') }); return true } catch { return false }
 }
 async function close(done?: () => void) {
  if (busy.value) return
- if (!current.value && target.value && !await confirm(t('collaboration.discard'))) return
- optionsGeneration++; groupsGeneration++; visible.value = false; done?.()
+ const epoch = generation
+ if (target.value && !await confirm(t('collaboration.discard'))) return
+ if (epoch !== generation) return
+ optionsGeneration++; visible.value = false; done?.()
 }
 function replace(row: CollaborationRoute) {
  const index = rows.value.findIndex(r => r.id === row.id)
  if (index >= 0) rows.value[index] = row
  else rows.value.push(row)
- if (visible.value) current.value = row
- schedule()
 }
-async function verify() {
- if (busy.value || !permitted.value || current.value?.status === 'pending') return
- if (!current.value && (!target.value || !chat.value)) return
+async function save() {
+ if (busy.value || !permitted.value || !target.value || rows.value.some(r => r.target_bot_id === target.value)) return
  const epoch = generation
  listSequence++; loading.value = false; error.value = ''; busy.value = true; formError.value = ''
  try {
-  const row = current.value
-  const result = row ? await collaboration.verify(props.botId, row.id, row.version) : await collaboration.create(props.botId, target.value, chat.value)
-  if (epoch === generation) replace(result)
+  const result = await collaboration.create(props.botId, target.value)
+  if (epoch !== generation) return
+  replace(result); optionsGeneration++; visible.value = false; target.value = ''
+  ElMessage.success(t('collaboration.saved'))
  } catch (e) { if (epoch === generation) formError.value = errorMessage(e) }
- finally { if (epoch === generation) { busy.value = false; schedule() } }
+ finally { if (epoch === generation) busy.value = false }
 }
 async function mutate(row: CollaborationRoute, action: 'enable' | 'pause' | 'remove') {
  if (busy.value || !permitted.value) return
@@ -102,7 +89,7 @@ async function mutate(row: CollaborationRoute, action: 'enable' | 'pause' | 'rem
    if (epoch === generation) { replace(result); visible.value = false }
   }
  } catch (e) { if (epoch === generation) { if (visible.value) formError.value = errorMessage(e); else error.value = errorMessage(e) } }
- finally { if (epoch === generation) { busy.value = false; schedule() } }
+ finally { if (epoch === generation) { busy.value = false } }
 }
 function reason(row: CollaborationRoute) {
  const key = `collaboration.reasons.${row.reason}`
@@ -176,8 +163,10 @@ function status(row: CollaborationRoute) { return row.status !== 'ready' ? row.s
             </p>
             <p>{{ row.target_description }}</p>
             <p>{{ t('collaboration.direction', { source: sourceName, target: row.target_name }) }}</p>
-            <p>{{ row.chat_name }} <span v-if="row.active_count"> · {{ t('collaboration.active', { count: row.active_count }) }}</span></p>
-            <el-tag :type="status(row) === 'enabled' ? 'success' : row.status === 'failed' ? 'danger' : 'info'">
+            <p v-if="row.active_count">
+              {{ t('collaboration.active', { count: row.active_count }) }}
+            </p>
+            <el-tag :type="status(row) === 'enabled' ? 'success' : 'info'">
               {{ t(`collaboration.status.${status(row)}`) }}
             </el-tag>
           </div>
@@ -195,13 +184,6 @@ function status(row: CollaborationRoute) { return row.status !== 'ready' ? row.s
               @click="mutate(row, 'enable')"
             >
               {{ t('collaboration.enable') }}
-            </el-button>
-            <el-button
-              v-if="!row.enabled && (row.can_verify || row.status === 'pending')"
-              :disabled="busy"
-              @click="open(row)"
-            >
-              {{ t(row.status === 'pending' ? 'collaboration.status.pending' : 'collaboration.verify') }}
             </el-button>
             <el-button
               v-if="row.can_remove"
@@ -224,90 +206,48 @@ function status(row: CollaborationRoute) { return row.status !== 'ready' ? row.s
         :close-on-click-modal="false"
         destroy-on-close
       >
-        <el-steps
-          :active="current ? (current.status === 'ready' ? 3 : 2) : target ? 1 : 0"
-          finish-status="success"
-          simple
-        >
-          <el-step :title="t('collaboration.steps.peer')" /><el-step :title="t('collaboration.steps.group')" /><el-step :title="t('collaboration.steps.verify')" />
-        </el-steps>
         <el-form
           class="partner-form"
           label-position="top"
         >
-          <template v-if="!current">
-            <el-form-item :label="t('collaboration.peer')">
-              <el-select
-                v-model="target"
-                data-test="partner-select"
-                filterable
-                remote
-                :remote-method="search"
-                :loading="optionsLoading"
-                :disabled="busy"
-                :placeholder="t('collaboration.search')"
-                :no-data-text="t('collaboration.noPeers')"
-                :aria-label="t('collaboration.peer')"
-                @change="loadGroups"
-              >
-                <el-option
-                  v-for="peer in peers"
-                  :key="peer.id"
-                  :value="peer.id"
-                  :label="peer.available && peer.enabled ? peer.name : `${peer.name} — ${t('collaboration.unavailable')}`"
-                  :disabled="!peer.available || !peer.enabled"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item :label="t('collaboration.group')">
-              <el-select
-                v-model="chat"
-                data-test="group-select"
-                filterable
-                :placeholder="t('collaboration.groupPlaceholder')"
-                :no-data-text="t('collaboration.noGroupOptions')"
-                :no-match-text="t('collaboration.noGroupMatch')"
-                :disabled="!target || busy || groupsLoading"
-                :loading="groupsLoading"
-                :aria-label="t('collaboration.group')"
-              >
-                <el-option
-                  v-for="group in groups"
-                  :key="group.chat_id"
-                  :label="group.name"
-                  :value="group.chat_id"
-                />
-              </el-select>
-              <p v-if="target && !groupsLoading && !groups.length">
-                {{ t('collaboration.noGroups') }}
-              </p>
-            </el-form-item>
-          </template>
-          <template v-else>
-            <p>{{ t('collaboration.direction', { source: sourceName, target: current.target_name }) }}</p><p>{{ current.chat_name }}</p>
-          </template>
+          <el-form-item :label="t('collaboration.peer')">
+            <el-select
+              v-model="target"
+              data-test="partner-select"
+              filterable
+              remote
+              :remote-method="search"
+              :loading="optionsLoading"
+              :disabled="busy"
+              :placeholder="t('collaboration.search')"
+              :no-data-text="t('collaboration.noPeers')"
+              :aria-label="t('collaboration.peer')"
+            >
+              <el-option
+                v-for="peer in peers"
+                :key="peer.id"
+                :value="peer.id"
+                :label="rows.some(row => row.target_bot_id === peer.id) ? `${peer.name} (${t('collaboration.alreadyAdded')})` : peer.available && peer.enabled ? peer.name : `${peer.name} (${t('collaboration.unavailable')})`"
+                :disabled="rows.some(row => row.target_bot_id === peer.id)"
+              />
+            </el-select>
+          </el-form-item>
           <el-alert
-            :title="t('collaboration.warning')"
-            type="warning"
+            :title="t('collaboration.usageHint')"
+            type="info"
             :closable="false"
           />
-          <p
-            v-if="current"
-            role="status"
-          >
-            {{ reason(current) || t(`collaboration.${current.status === 'pending' ? 'waiting' : current.status}`) }}
-          </p>
           <el-alert
-            v-if="formError"
-            :title="formError"
+            v-if="formError || optionsError"
+            :title="formError || optionsError"
             type="error"
             :closable="false"
             role="alert"
           />
           <el-button
-            v-if="formError"
+            v-if="optionsError"
             :disabled="busy"
-            @click="current ? refresh() : target ? loadGroups() : search()"
+            @click="search(query)"
           >
             {{ t('collaboration.retry') }}
           </el-button>
@@ -320,22 +260,13 @@ function status(row: CollaborationRoute) { return row.status !== 'ready' ? row.s
             {{ t('collaboration.close') }}
           </el-button>
           <el-button
-            v-if="current?.can_enable"
             type="primary"
+            data-test="save-partner"
             :loading="busy"
-            @click="mutate(current, 'enable')"
+            :disabled="busy || !target || rows.some(row => row.target_bot_id === target)"
+            @click="save"
           >
-            {{ t('collaboration.enable') }}
-          </el-button>
-          <el-button
-            v-else
-            type="primary"
-            data-test="verify-partner"
-            :loading="busy"
-            :disabled="busy || (current ? !current.can_verify || current.status === 'pending' : !target || !chat)"
-            @click="verify"
-          >
-            {{ t('collaboration.verify') }}
+            {{ t('collaboration.save') }}
           </el-button>
         </template>
       </el-drawer>

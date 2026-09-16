@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +18,8 @@ from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
+    BotAllowedUser,
+    BotCollaborationPartner,
     BotCollaborationRoute,
     BotMember,
     InboundEvent,
@@ -24,7 +28,7 @@ from coreman.core.db.models import (
     RuntimeNode,
     User,
 )
-from coreman.core.platforms.feishu import FeishuClient
+from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.runtime_nodes.transport import online
 
 PROBE_SECONDS = 300
@@ -140,7 +144,14 @@ async def begin(
     chosen = next((g for g in groups if g["chat_id"] == route.chat_id), None)
     if chosen is None:
         raise ValueError("所选群已不在双方共同群中，请重新选择")
-    source_open, target_open = await _open_id(source, cipher), await _open_id(target, cipher)
+    try:
+        async with asyncio.timeout(15):
+            source_open, target_open = (
+                await _open_id(source, cipher),
+                await _open_id(target, cipher),
+            )
+    except (FeishuError, TimeoutError):
+        raise ValueError("暂时无法验证协作机器人身份，本轮已停止") from None
     if source_open == target_open:
         raise ValueError("协作双方机器人身份不能相同")
     probe = str(uuid.uuid4())
@@ -187,7 +198,124 @@ async def begin(
     await session.flush()
 
 
-async def _current(session: AsyncSession, route: BotCollaborationRoute) -> tuple[Bot, Bot, User]:
+async def check_current_group(source: Bot, target: Bot, chat_id: str, cipher: Cipher) -> None:
+    """One bounded check per bot using that bot's own tenant token; never list groups."""
+    configs = [credentials(bot, cipher) for bot in (source, target)]
+    if configs[0]["app_id"] == configs[1]["app_id"]:
+        raise ValueError("两个 AI 员工不能使用同一个飞书应用建立协作")
+
+    async def check(bot: Bot, config: dict[str, str]) -> None:
+        client = FeishuClient(config["app_id"], config["app_secret"])
+        try:
+            async with asyncio.timeout(10):
+                token = await client.get_token()
+                body = await client.call(
+                    "GET",
+                    f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}/members/is_in_chat",
+                    token=token,
+                )
+            member = (body.get("data") or {}).get("is_in_chat")
+            if member is False:
+                raise ValueError(f"「{bot.name}」不在当前群，请先将其加入群聊后重新发起任务")
+            if member is not True:
+                raise FeishuError(-2, "invalid membership response")
+        except FeishuError as exc:
+            if exc.code == 99991672:
+                raise ValueError(
+                    f"无法确认「{bot.name}」是否在当前群：应用缺少群成员查询权限，"
+                    "请管理员开启 im:chat.members:read 并发布应用，本轮不再重试"
+                ) from None
+            if exc.code == 232010:
+                raise ValueError(
+                    f"无法确认「{bot.name}」是否在当前群：应用与群不在同一租户，本轮不再重试"
+                ) from None
+            raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群，本轮不再重试") from None
+        except (TimeoutError, TypeError, AttributeError):
+            raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群，本轮不再重试") from None
+        finally:
+            await client.aclose()
+
+    results = await asyncio.gather(
+        *(check(bot, config) for bot, config in zip((source, target), configs, strict=True)),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+async def begin_runtime(
+    session: AsyncSession,
+    route: BotCollaborationRoute,
+    source: Bot,
+    target: Bot,
+    actor_id: uuid.UUID,
+    partner: BotCollaborationPartner,
+    cipher: Cipher,
+) -> None:
+    """Lazy transport handshake after membership and original-human ACL checks."""
+    try:
+        async with asyncio.timeout(15):
+            source_open, target_open = (
+                await _open_id(source, cipher),
+                await _open_id(target, cipher),
+            )
+    except (FeishuError, TimeoutError):
+        raise ValueError("暂时无法验证协作机器人身份，本轮已停止") from None
+    if source_open == target_open:
+        raise ValueError("协作双方机器人身份不能相同")
+    probe = str(uuid.uuid4())
+    meta: dict[str, Any] = {
+        "status": "pending",
+        "reason": None,
+        "probe_id": probe,
+        "actor_id": str(actor_id),
+        "partner_id": str(partner.id),
+        "runtime_request": True,
+        "expires_at": (
+            datetime.now(UTC)
+            + timedelta(seconds=min(PROBE_SECONDS, max(30, partner.timeout_seconds)))
+        ).isoformat(),
+        "chat_name": route.chat_id,
+        "source_fingerprint": fingerprint(source),
+        "target_fingerprint": fingerprint(target),
+        "source_app_id": credentials(source, cipher)["app_id"],
+        "target_app_id": credentials(target, cipher)["app_id"],
+        "source_open_id": source_open,
+        "target_open_id": target_open,
+    }
+    route.enabled, route.archived = True, False
+    route.source_open_id, route.target_open_id = source_open, target_open
+    route.tenant_key = route.source_union_id = route.target_union_id = ""
+    await session.flush()
+    for side, sender, receiver_open in (
+        ("source", source, target_open),
+        ("target", target, source_open),
+    ):
+        item = await outbox.add(
+            session,
+            bot_id=sender.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"collaboration-setup:{route.id}:{probe}:{side}",
+            target={"chat_id": route.chat_id},
+            payload={
+                "markdown": "正在建立本次协作连接，核验双方机器人身份，不会启动 AI 任务。",
+                "_collaboration_setup_id": str(route.id),
+                "_setup_probe_id": probe,
+                "_setup_side": side,
+                "_mention_open_id": receiver_open,
+            },
+        )
+        assert item is not None
+        meta[f"{side}_outbox_id"] = item.id
+    route.setup = meta
+    await session.flush()
+
+
+async def _current(
+    session: AsyncSession, route: BotCollaborationRoute
+) -> tuple[Bot, Bot, User | None]:
     meta = route.setup or {}
     source = await session.get(Bot, route.source_bot_id, populate_existing=True)
     target = await session.get(Bot, route.target_bot_id, populate_existing=True)
@@ -203,7 +331,32 @@ async def _current(session: AsyncSession, route: BotCollaborationRoute) -> tuple
         actor = await session.get(User, uuid.UUID(meta.get("actor_id", "")), populate_existing=True)
     except (ValueError, TypeError, AttributeError):
         actor = None
-    if (
+    if meta.get("runtime_request"):
+        try:
+            partner = await session.get(
+                BotCollaborationPartner,
+                uuid.UUID(meta.get("partner_id", "")),
+                populate_existing=True,
+            )
+        except (ValueError, TypeError):
+            partner = None
+        if not partner or partner.source_bot_id != source.id or partner.target_bot_id != target.id:
+            raise ValueError("permission_revoked")
+        # The current requesting human is checked separately for every ledger operation.
+        if not partner.enabled or partner.archived:
+            raise ValueError("permission_revoked")
+        if meta.get("status") == "pending":
+            if not actor or actor.status != "active":
+                raise ValueError("permission_revoked")
+            for bot in (source, target):
+                allowed = set(
+                    await session.scalars(
+                        select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id)
+                    )
+                )
+                if allowed and actor.id not in allowed:
+                    raise ValueError("permission_revoked")
+    elif (
         not actor
         or not await manageable(session, actor, source)
         or not await manageable(session, actor, target)

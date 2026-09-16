@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import tasks
 from coreman.core.chat import bot_collaboration as service
 from coreman.core.chat.identity import resolve_speaker
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
     BotCollaboration,
-    BotCollaborationRoute,
+    BotCollaborationPartner,
     InboundEvent,
     Task,
 )
@@ -129,7 +130,13 @@ async def stop_budget(session: AsyncSession, task: Task) -> dict[str, Any]:
 
 
 async def invoke(
-    session: AsyncSession, *, task_id: int, actor: str, name: str, arguments: dict[str, Any]
+    session: AsyncSession,
+    *,
+    task_id: int,
+    actor: str,
+    name: str,
+    arguments: dict[str, Any],
+    cipher: Cipher | None = None,
 ) -> dict[str, Any]:
     # Match registration's bot -> ledger -> task order. All endpoints share this durable meter.
     snapshot = await session.get(Task, task_id)
@@ -159,6 +166,8 @@ async def invoke(
     if budget["calls"] > MAX_CALLS or seen[fingerprint] > MAX_REPEATS:
         return await stop_budget(session, task)
     try:
+        if task.payload.get("collaboration_attempt_error"):
+            raise ValueError(task.payload["collaboration_attempt_error"])
         if model is None:
             raise ValueError("invalid tool or arguments")
         if name != "request_collaboration" and task.payload.get("collaboration_handoff"):
@@ -176,6 +185,7 @@ async def invoke(
                 actor=actor,
                 target_key=model.collaborator_id,
                 question=question,
+                cipher=cipher,
             )
             task.payload = {**task.payload, "collaboration_handoff": True}
             return {
@@ -192,12 +202,12 @@ async def invoke(
             )
         )
         query = (
-            select(Bot, BotCollaborationRoute)
-            .join(BotCollaborationRoute, BotCollaborationRoute.target_bot_id == Bot.id)
+            select(Bot, BotCollaborationPartner)
+            .join(BotCollaborationPartner, BotCollaborationPartner.target_bot_id == Bot.id)
             .where(
-                BotCollaborationRoute.source_bot_id == task.bot_id,
-                BotCollaborationRoute.chat_id == source.chat_id,
-                BotCollaborationRoute.enabled.is_(True),
+                BotCollaborationPartner.source_bot_id == task.bot_id,
+                BotCollaborationPartner.enabled.is_(True),
+                BotCollaborationPartner.archived.is_(False),
                 Bot.enabled.is_(True),
                 Bot.platform == "feishu",
                 Bot.id != task.bot_id,
@@ -209,7 +219,7 @@ async def invoke(
             if pair is None:
                 raise ValueError("peer unavailable or unauthorized")
             bot, route = pair
-            await service.authorized(
+            await service.authorized_partner(
                 session, route, source.sender_platform_user_id or "", uuid.UUID(actor)
             )
             return {
@@ -243,8 +253,12 @@ async def invoke(
             "next_cursor": rows[model.limit - 1][0].bot_key if len(rows) > model.limit else None,
         }
     except ValueError as exc:
+        if name == "request_collaboration" and not task.payload.get("collaboration_handoff"):
+            task.payload = {**task.payload, "collaboration_attempt_error": str(exc)}
         budget = {**budget, "failures": budget.get("failures", 0) + 1}
         task.payload = {**task.payload, "collaboration_budget": budget}
         if budget["failures"] >= MAX_FAILURES:
             return await stop_budget(session, task)
+        if task.payload.get("collaboration_attempt_error"):
+            return {"error": str(exc), "stop": True, "message": "本轮协作已停止，不要重试或轮询。"}
         return {"error": str(exc), "stop": False, "remaining_calls": MAX_CALLS - budget["calls"]}

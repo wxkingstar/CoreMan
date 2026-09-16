@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select
@@ -8,9 +9,12 @@ from sqlalchemy import func, select
 from coreman.core.bus import tasks
 from coreman.core.chat import bot_collaboration as service
 from coreman.core.chat import sessions
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
+    BotCollaboration,
+    BotCollaborationPartner,
     BotCollaborationRoute,
     OutboxItem,
     Task,
@@ -56,11 +60,12 @@ async def setup(session):
         timeout_seconds=300,
     )
     session.add(route)
+    session.add(BotCollaborationPartner(source_bot_id=a.id, target_bot_id=b.id))
     await session.commit()
     task = await chat_task(
         session, a, "需要B数据", sender="human-id", chat_type="group", chat_id="group"
     )
-    await sessions.get_or_create(
+    info = await sessions.get_or_create(
         session,
         bot_id=a.id,
         session_key="group",
@@ -69,9 +74,20 @@ async def setup(session):
         speaker_user_id=actor.id,
     )
     await session.commit()
-    row = await service.request_help(
-        session, task_id=task.id, actor=str(actor.id), target_key="helper", question="库存多少?"
+    # Seed an already verified transport/ledger; request-time checks are tested separately.
+    row = BotCollaboration(
+        route_id=route.id,
+        source_task_id=task.id,
+        origin_user_id=actor.id,
+        origin_platform_user_id="human-id",
+        source_session_key="group",
+        source_relay_session_id=info.relay_session_id,
+        source_relay_id=relay.id,
+        question="库存多少?",
+        status="requested",
+        expires_at=datetime.now(UTC) + timedelta(seconds=300),
     )
+    session.add(row)
     await session.commit()
     return a, b, actor, route, task, row
 
@@ -579,13 +595,27 @@ async def test_two_help_sessions_do_not_reuse_b_daily_session(db_engine, db_sess
             source = await chat_task(
                 db_session, a, "再次求助", sender="human-id", chat_type="group", chat_id="group"
             )
-            row = await service.request_help(
-                db_session,
-                task_id=source.id,
-                actor=str(actor.id),
-                target_key="helper",
-                question="只提供本次背景",
-            )
+            with (
+                patch(
+                    "coreman.core.chat.collaboration_setup.check_current_group",
+                    new_callable=AsyncMock,
+                ),
+                patch(
+                    "coreman.core.chat.collaboration_setup.available",
+                    new=AsyncMock(return_value=True),
+                ),
+                patch(
+                    "coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock
+                ),
+            ):
+                row = await service.request_help(
+                    db_session,
+                    task_id=source.id,
+                    actor=str(actor.id),
+                    target_key="helper",
+                    question="只提供本次背景",
+                    cipher=Cipher(b"t" * 32),
+                )
         await service.send_message(db_session, row, route)
         item = await db_session.get(OutboxItem, row.request_outbox_id)
         mid = f"help-{number}"
@@ -668,7 +698,10 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
 
     a, _, actor, route, initial, row = await setup(db_session)
     row.status = "completed"
-    route.enabled = route_enabled
+    partner = await db_session.scalar(
+        select(BotCollaborationPartner).where(BotCollaborationPartner.source_bot_id == a.id)
+    )
+    partner.enabled = route_enabled
     await tasks.finish(db_session, initial.id, status="succeeded")
     await db_session.commit()
     fake = FakeRelay("normal")

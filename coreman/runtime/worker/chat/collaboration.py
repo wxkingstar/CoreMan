@@ -17,6 +17,7 @@ from coreman.core.chat import sessions
 from coreman.core.db.models import (
     Bot,
     BotCollaboration,
+    BotCollaborationPartner,
     BotCollaborationRoute,
     InboundEvent,
     RelayServer,
@@ -166,11 +167,11 @@ async def configure(
         return system_prompt, env
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
     route = await session.scalar(
-        select(BotCollaborationRoute.id)
+        select(BotCollaborationPartner.id)
         .where(
-            BotCollaborationRoute.source_bot_id == intake.bot.id,
-            BotCollaborationRoute.chat_id == intake.chat_id,
-            BotCollaborationRoute.enabled.is_(True),
+            BotCollaborationPartner.source_bot_id == intake.bot.id,
+            BotCollaborationPartner.enabled.is_(True),
+            BotCollaborationPartner.archived.is_(False),
         )
         .limit(1)
     )
@@ -208,7 +209,13 @@ async def final_transition(
     route = await session.get(BotCollaborationRoute, row.route_id)
     assert route is not None
     try:
-        await service.authorized(session, route, row.origin_platform_user_id, row.origin_user_id)
+        await service.authorized(
+            session,
+            route,
+            row.origin_platform_user_id,
+            row.origin_user_id,
+            allow_pending=row.status == "waiting_identity",
+        )
         if not await service.source_session_current(session, row, route):
             raise ValueError("原会话已重置或切换，旧协作结果已作废")
         if row.expires_at <= datetime.now(UTC):
@@ -225,7 +232,8 @@ async def final_transition(
         if cid:
             row.status = "completed"
         else:
-            await service.send_message(session, row, route)
+            if row.status != "waiting_identity" or route.setup.get("status") == "ready":
+                await service.send_message(session, row, route)
             peer = await session.get(Bot, route.target_bot_id)
             peer_name = peer.name if peer else "协作伙伴"
             verdict = replace(
