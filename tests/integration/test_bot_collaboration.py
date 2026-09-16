@@ -234,7 +234,12 @@ async def test_fail_closed(db_session, failure):
     assert len(notices) == 1
 
 
-async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, db_session):
+@pytest.mark.parametrize("feedback_status", ["completed", "blocked"])
+async def test_worker_uses_origin_human_and_resumes_original_session(
+    db_engine, db_session, feedback_status
+):
+    import json
+
     from coreman.runtime.worker.chat.collaboration import configure, final_transition, resolve
     from coreman.runtime.worker.chat.models import Verdict
     from coreman.runtime.worker.chat.opening import OpenStage
@@ -254,15 +259,20 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     assert intake.speaker.user_id == actor.id
     assert intake.inbound.sender_platform_user_id is None
     assert intake.bot.id == b.id
-    assert "库存多少?" in intake.text
+    assert json.loads(intake.text) == {"collaboration_request": "库存多少?"}
+    assert "不能再" not in intake.text
     # No delegation capability for B; original task did have one.
     info = sessions.SessionInfo(uuid.uuid4(), True, False)
     prompt, env = await configure(db_session, ctx, intake, info, "system", {})
     assert "COREMAN_BOT_HELP_TOKEN" not in env
+    assert "有限等待" in prompt and "不得调用协作工具" in prompt
+    answer = (
+        "缺少仓库权限，未能核实库存" if feedback_status == "blocked" else "库存73，预留11，可用62"
+    )
     helper.status = "running"
     pre = SimpleNamespace(
         writer=SimpleNamespace(
-            pending_text='{"status":"completed","answer":"库存73，预留11，可用62"}', boundaries=[]
+            pending_text=json.dumps({"status": feedback_status, "answer": answer}), boundaries=[]
         )
     )
     verdict = Verdict("success", "succeeded", None, None, "库存73，预留11，可用62")
@@ -277,11 +287,20 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     resumed = await db_session.get(Task, row.resume_task_id)
     resumed_ctx = build_ctx(db_engine, resumed)
     intake, relay, parts = await resolve(db_session, resumed_ctx)
+    data = json.loads(intake.text)
+    assert data["partner_status"] == feedback_status and answer in data["peer_feedback"]
+    resume_prompt, resume_env = await configure(db_session, resumed_ctx, intake, info, "system", {})
+    assert "partner_status=blocked" in resume_prompt and "不能再次" not in intake.text
+    assert not resume_env
+
     assert intake.speaker.user_id == actor.id and intake.bot.id == a.id
     assert intake.inbound.id == task.inbound_event_id
-    assert "可用62" in intake.text
+    assert answer in intake.text
     info = await OpenStage()._session_info(db_session, resumed_ctx, intake, "claude")
     assert info.relay_session_id == row.source_relay_session_id
+    resumed.status = "running"
+    final, _ = await final_transition(db_session, resumed_ctx, pre, verdict)
+    assert row.status == ("failed" if feedback_status == "blocked" else "completed")
 
 
 async def test_stop_cancels_waiting_and_late_receipt_cannot_resume(db_engine, db_session):
@@ -732,7 +751,7 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
         assert user_text == f"direct turn {number}"
         assert "COREMAN_BOT_HELP_URL" not in str(request["messages"])
         if route_enabled:
-            assert "search_collaborators" in request["messages"][0]["content"]
+            assert "## 协作" in request["messages"][0]["content"]
             assert "COREMAN_COLLABORATION_URL" in request["env_vars"]
             assert request["env_vars"]["COREMAN_COLLABORATION_TOKEN"] not in str(
                 request["messages"]
