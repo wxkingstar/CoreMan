@@ -87,10 +87,14 @@ defineExpose({ openFile, draft, save })
       >
         {{ t('workspaceFiles.retry') }}
       </el-button>
-      <el-tabs v-model="tab">
+      <el-tabs
+        v-model="tab"
+        class="workspace-tabs"
+      >
         <el-tab-pane
           :label="t('workspaceFiles.files')"
           name="files"
+          class="workspace-files-pane"
         >
           <div class="file-toolbar">
             <el-button
@@ -111,8 +115,14 @@ defineExpose({ openFile, draft, save })
             type="warning"
             :closable="false"
           />
-          <div class="file-layout">
-            <div class="file-list">
+          <div
+            class="file-layout"
+            :class="{ 'file-layout-empty': !entries.length }"
+          >
+            <div
+              v-if="entries.length"
+              class="file-list"
+            >
               <el-button
                 v-for="entry in entries"
                 :key="entry.path"
@@ -123,7 +133,10 @@ defineExpose({ openFile, draft, save })
                 {{ entry.type === 'directory' ? '▸ ' : '' }}{{ entry.name }}
               </el-button>
             </div>
-            <div class="file-editor">
+            <div
+              class="file-editor"
+              :class="{ 'file-editor-empty': !file }"
+            >
               <template v-if="file">
                 <strong>{{ path }}</strong><el-alert
                   v-if="conflict"
@@ -265,5 +278,15 @@ defineExpose({ openFile, draft, save })
   </el-drawer>
 </template>
 <style scoped>
+.workspace-content { height: 100%; display: flex; flex-direction: column; }
+.workspace-content > :not(.workspace-tabs) { flex-shrink: 0; }
+.workspace-tabs { flex: 1; min-height: 280px; display: flex; flex-direction: column; }
+.workspace-tabs :deep(.el-tabs__content) { flex: 1; overflow: auto; }
+.workspace-files-pane { min-height: 100%; display: flex; flex-direction: column; }
+.workspace-files-pane > .file-toolbar { flex-shrink: 0; }
+.file-layout { flex: 1; min-height: 260px; }
+.file-layout.file-layout-empty { grid-template-columns: minmax(0, 1fr); }
+.file-editor-empty { display: flex; align-items: center; justify-content: center; }
+
 .git-exclusions{margin:12px 0;color:var(--el-text-color-secondary)}.git-exclusions summary{cursor:pointer}.git-exclusions ul{max-height:160px;overflow:auto;padding-left:20px}.git-exclusions code{overflow-wrap:anywhere}.workspace-content{min-width:0}.workspace-status,.file-toolbar,.workspace-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.workspace-status code{overflow-wrap:anywhere}.file-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px}.file-list{max-height:55vh;overflow:auto;display:flex;flex-direction:column;align-items:stretch}.file-list .el-button{margin:0;justify-content:flex-start;white-space:normal;height:auto;min-height:34px;text-align:left}.file-editor{min-width:0}.file-editor strong{display:block;overflow-wrap:anywhere;margin-bottom:12px}.file-editor img{max-width:100%;max-height:55vh}.git-files{display:flex;flex-direction:column;margin:16px 0;max-height:35vh;overflow:auto}.workspace-actions{justify-content:flex-end;margin:0}@media(max-width:600px){.file-layout{grid-template-columns:1fr}.file-list{max-height:180px}.workspace-actions .el-button{margin:0}}
 </style>
