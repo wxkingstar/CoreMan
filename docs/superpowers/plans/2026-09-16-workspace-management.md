@@ -17,29 +17,29 @@
 
 ## Task 1: Runtime workspace operations
 Files: runtime_daemon/workspace.py (new), runtime_daemon/agent.py, runtime_daemon/build.py, tests/unit/test_runtime_workspace.py.
-- [ ] Add failing real filesystem tests for initialization, links, containment, read/write hash conflicts, export/import hashes, Git status and push.
-- [ ] Implement dispatch operations workspace-info/init/list/read/write, workspace-export/import/finish, workspace-git-status/test/backup/restore.
-- [ ] Read responses are bounded; transfer uses 256KiB base64 chunks; importing only to operation-owned staging directory; finish verifies manifest then atomically installs.
-- [ ] Run runtime unit suite and inspect bundle inclusion.
+- [x] Add failing real filesystem tests for initialization, links, containment, read/write hash conflicts, export/import hashes, Git status and push.
+- [x] Implement dispatch operations workspace-info/init/list/read/write, workspace-export/import/finish, workspace-git-status/test/backup/restore.
+- [x] Read responses are bounded; transfer uses 256KiB base64 chunks; importing only to operation-owned staging directory; finish verifies manifest then atomically installs.
+- [x] Run runtime unit suite and inspect bundle inclusion.
 
 ## Task 2: Workspace API and persisted configuration
-Files: coreman/api/routers/bot_workspace.py, coreman/core/db/models/bots.py, migrations/versions/0027_workspace_management.py, tests/api/test_bot_workspace.py, coreman/api/main.py.
-- [ ] Tests: permissions, runtime unavailability, safe error reporting, writes during active tasks, encrypted Git token, push result state.
-- [ ] Add Bot workspace state/config columns and per-employee browse/read/write/Git config/status/backup endpoints; shared operation guard locks employee row, checks active tasks and migration state.
-- [ ] Register routes and runtime operation allowlist; use current root and working_dir from database, never caller-controlled root.
+Files: coreman/api/routers/bot_workspace.py, coreman/core/db/models/bots.py, migrations/versions/0028_workspace_management.py, tests/api/test_bot_workspace.py, coreman/api/main.py.
+- [x] Tests: permissions, runtime unavailability, safe error reporting, writes during active tasks, encrypted Git token, push result state.
+- [x] Add Bot workspace state/config columns and per-employee browse/read/write/Git config/status/backup endpoints; shared operation guard locks employee row, checks active tasks and migration state.
+- [x] Register routes and runtime operation allowlist; use current root and working_dir from database, never caller-controlled root.
 
 ## Task 3: Migration and initialization integration
 Files: coreman/core/bots/workspace.py, workspace_transfer.py (new), switch_relay.py, coreman/core/knowledge/memory_transfer.py, coreman/api/routers/bots.py, bots_extra.py, coreman/core/bus/tasks.py, tests/api/test_memory_transfer.py and new tests.
-- [ ] Tests first: creation initializes or stays pending; source snapshot committed before failure; target existing directory rejected; queued claims fenced while migration runs.
-- [ ] Introduce persisted operation state; task claim synchronizes with bot row lock so checking active tasks and fencing is race-free.
-- [ ] Implement copy/git/existing choices, offline stored-memory explicit consent, snapshot before file transfer, deployment before binding, retry/error progress.
-- [ ] Creation initializes before executable; unknown old daemon capability errors explain upgrade requirement.
+- [x] Tests first: creation initializes or stays pending; source snapshot committed before failure; target existing directory rejected; queued claims fenced while migration runs.
+- [x] Introduce persisted operation state; task claim synchronizes with bot row lock so checking active tasks and fencing is race-free.
+- [x] Implement copy/git/existing choices, offline stored-memory explicit consent, snapshot before file transfer, deployment before binding, retry/error progress.
+- [x] Creation initializes before executable; unknown old daemon capability errors explain upgrade requirement.
 
 ## Task 4: UI and integration
 Files: web/src/components/WorkspaceDrawer.vue, api/workspace.ts, existing detail/form/switch components and runtime defaults; web tests.
-- [ ] Add tested file drawer, text editing with conflict handling and download; Git settings/status/backup.
-- [ ] Path-adjacent entry; switching source/target directory and stored-memory consent; operation progress and retry initialization.
-- [ ] Build, lint targeted files, component tests; broader Python/runtime regression and independent final review.
+- [x] Add tested file drawer, text editing with conflict handling and download; Git settings/status/backup.
+- [x] Path-adjacent entry; switching source/target directory and stored-memory consent; operation progress and retry initialization.
+- [x] Build, lint targeted files, component tests; broader Python/runtime regression and independent final review.
 
 ## Contracts
 Agent payload always includes working_dir and bot_id from trusted API. init additionally content. list uses path; read path/offset/length returns content (text when small UTF8), data (base64), size, hash, editable; write path/content/expected_hash returns hash. info returns exists, empty, owned, workspace_protocol=1. All results success=true. Git operations accept git_url, branch, git_access_token, files, message; status returns initialized, branch, files[{path,status}], head. export returns manifest with path/size/hash/mode/link, excluded; transfer reads via workspace-read binary chunks; import receives transfer_id, path, data, offset, manifest on first call; finish transfer_id/manifest/bot_id/content. Precise runtime contracts will be documented by implementer and reconciled before integration.

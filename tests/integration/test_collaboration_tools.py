@@ -1,12 +1,14 @@
 """Real DB tests for discovery authorization and durable loop guards."""
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from coreman.core.bus import tasks
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import BotAllowedUser, BotCollaboration
 from tests.integration.test_bot_collaboration import setup
 from tests.integration.test_chat_handler import chat_task
@@ -27,7 +29,28 @@ async def fresh(session):
 async def call(session, task, actor, name, args):
     from coreman.core.chat.collaboration_tools import invoke
 
-    result = await invoke(session, task_id=task.id, actor=str(actor.id), name=name, arguments=args)
+    if name == "request_collaboration":
+        with (
+            patch(
+                "coreman.core.chat.collaboration_setup.check_current_group", new_callable=AsyncMock
+            ),
+            patch(
+                "coreman.core.chat.collaboration_setup.available", new=AsyncMock(return_value=True)
+            ),
+            patch("coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock),
+        ):
+            result = await invoke(
+                session,
+                task_id=task.id,
+                actor=str(actor.id),
+                name=name,
+                arguments=args,
+                cipher=Cipher(b"t" * 32),
+            )
+    else:
+        result = await invoke(
+            session, task_id=task.id, actor=str(actor.id), name=name, arguments=args
+        )
     await session.commit()
     return result
 
@@ -161,7 +184,7 @@ async def test_worker_tool_loop_is_cut_off(db_session, db_engine, monkeypatch):
 
 
 async def test_search_pages_and_detail_size_are_bounded(db_session):
-    from coreman.core.db.models import Bot, BotCollaborationRoute
+    from coreman.core.db.models import Bot, BotCollaborationPartner, BotCollaborationRoute
 
     a, b, actor, route, task = await fresh(db_session)
     b.description = "库存" * 3000
@@ -180,6 +203,7 @@ async def test_search_pages_and_detail_size_are_bounded(db_session):
         )
         db_session.add(peer)
         await db_session.flush()
+        db_session.add(BotCollaborationPartner(source_bot_id=a.id, target_bot_id=peer.id))
         db_session.add(
             BotCollaborationRoute(
                 source_bot_id=a.id,

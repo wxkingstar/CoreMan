@@ -211,3 +211,25 @@ async def test_model_only_switch_and_toggle_cannot_interrupt_migration(client, d
         assert response.status_code == 409, response.text
     await db_session.refresh(bot)
     assert bot.version == version and bot.workspace_state == "migrating"
+
+
+async def test_expired_same_runtime_directory_migration_can_retry(client, db_session, monkeypatch):
+    from coreman.core.bots import switch_relay
+
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot.workspace_state = "migrating"
+    bot.workspace_deadline = utcnow() - timedelta(minutes=1)
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+
+    async def prepared(*args, **kwargs):
+        assert kwargs["directory"] == "/data/skills/recovered"
+        return "transferred"
+
+    monkeypatch.setattr(switch_relay, "prepare_switch", prepared)
+    result = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(relay.id), "target_directory": "/data/skills/recovered"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert result.status_code == 200, result.text

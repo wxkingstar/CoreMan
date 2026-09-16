@@ -96,3 +96,96 @@ def test_reactions_only_0025_gets_missing_collaboration_columns(migrated_databas
         ) == [(4,)]
     finally:
         command.upgrade(cfg, "head")
+
+
+def test_partner_migration_groups_legacy_routes_and_preserves_ledger(
+    migrated_database: str,
+) -> None:
+    from tests.conftest import BUSINESS_TABLES
+
+    async def seed():
+        from coreman.core.db.session import make_engine, make_session_factory
+        from tests.integration.test_bot_collaboration import setup
+
+        engine = make_engine(migrated_database)
+        try:
+            async with make_session_factory(engine)() as session:
+                a, b, _, route, _, row = await setup(session)
+                return str(a.id), str(b.id), str(route.id), str(row.id)
+        finally:
+            await engine.dispose()
+
+    cfg = alembic_config(migrated_database)
+    aid, bid, rid, cid = asyncio.run(seed())
+    try:
+        command.downgrade(cfg, "0026")
+        asyncio.run(
+            _execute(
+                migrated_database,
+                (
+                    "UPDATE bot_collaboration_routes SET enabled=false, timeout_seconds=120 "
+                    "WHERE id=CAST(:id AS uuid)",
+                    {"id": rid},
+                ),
+                (
+                    "INSERT INTO bot_collaboration_routes "
+                    "(id,source_bot_id,target_bot_id,chat_id,tenant_key,source_open_id,target_open_id,source_union_id,target_union_id,enabled,timeout_seconds,setup)"
+                    " "
+                    "SELECT "
+                    "gen_random_uuid(),source_bot_id,target_bot_id,'second-group',tenant_key,source_open_id,target_open_id,source_union_id,target_union_id,true,60,'{\"status\":\"ready\"}'::jsonb"
+                    " FROM bot_collaboration_routes WHERE id=CAST(:id AS uuid)",
+                    {"id": rid},
+                ),
+                (
+                    "INSERT INTO bot_collaboration_routes "
+                    "(id,source_bot_id,target_bot_id,chat_id,tenant_key,source_open_id,target_open_id,source_union_id,target_union_id,enabled,archived)"
+                    " "
+                    "SELECT "
+                    "gen_random_uuid(),target_bot_id,source_bot_id,'archived-group',tenant_key,target_open_id,source_open_id,target_union_id,source_union_id,true,true"
+                    " FROM bot_collaboration_routes WHERE id=CAST(:id AS uuid)",
+                    {"id": rid},
+                ),
+            )
+        )
+        command.upgrade(cfg, "head")
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                f"SELECT enabled,archived,timeout_seconds FROM bot_collaboration_partners "
+                f"WHERE source_bot_id='{aid}'",
+            )
+        ) == [(True, False, 60)]
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                f"SELECT enabled,archived FROM bot_collaboration_partners WHERE "
+                f"source_bot_id='{bid}'",
+            )
+        ) == [(False, True)]
+        assert asyncio.run(
+            _rows(
+                migrated_database, f"SELECT route_id::text FROM bot_collaborations WHERE id='{cid}'"
+            )
+        ) == [(rid,)]
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT count(DISTINCT setup->>'partner_id') FROM bot_collaboration_routes",
+            )
+        ) == [(2,)]
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT setup->>'status' FROM bot_collaboration_routes WHERE "
+                "chat_id='second-group'",
+            )
+        ) == [("ready",)]
+    finally:
+        command.upgrade(cfg, "head")
+        asyncio.run(
+            _execute(
+                migrated_database,
+                (f"TRUNCATE {', '.join(BUSINESS_TABLES)} RESTART IDENTITY CASCADE", {}),
+            )
+        )
+        asyncio.run(_restore_seed(migrated_database))

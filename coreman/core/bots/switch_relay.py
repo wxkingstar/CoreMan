@@ -98,12 +98,17 @@ async def switch_relay(
     await session.refresh(bot, with_for_update=True)
     if bot.version != expected_version:
         raise SwitchError(409, "机器人已被其他操作修改，请刷新后重试", VERSION_CONFLICT)
-    if bot.workspace_state in {"migrating", "initializing", "busy"} and same_relay:
+    changing_directory = bool(target_directory and target_directory != bot.working_dir)
+    if (
+        bot.workspace_state in {"migrating", "initializing", "busy"}
+        and same_relay
+        and not changing_directory
+    ):
         raise SwitchError(409, "工作目录操作正在进行，请完成后再切换模型")
     memory_status = "unchanged"
     requested_directory = target_directory
     target_directory = bot.working_dir
-    if not same_relay or (requested_directory and requested_directory != bot.working_dir):
+    if not same_relay or changing_directory:
         try:
             target_directory = await target_path(session, bot, target, requested_directory)
             memory_status = await prepare_switch(

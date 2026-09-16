@@ -16,13 +16,21 @@ def upgrade():
     existing = {
         c["name"] for c in sa.inspect(op.get_bind()).get_columns("bot_collaboration_routes")
     }
-    for column in (
-        sa.Column("setup", JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
-        sa.Column("archived", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("version", sa.Integer(), server_default=sa.text("1"), nullable=False),
-    ):
-        if column.name not in existing:
-            op.add_column("bot_collaboration_routes", column)
+    if "setup" not in existing:
+        op.add_column(
+            "bot_collaboration_routes",
+            sa.Column("setup", JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
+        )
+    if "archived" not in existing:
+        op.add_column(
+            "bot_collaboration_routes",
+            sa.Column("archived", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        )
+    if "version" not in existing:
+        op.add_column(
+            "bot_collaboration_routes",
+            sa.Column("version", sa.Integer(), server_default=sa.text("1"), nullable=False),
+        )
 
 
 def downgrade():

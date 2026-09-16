@@ -62,3 +62,86 @@ def test_setup_rejects_user_and_missing_union():
             verified_identity(
                 row, message_id="mid", chat_id="group", app_id="receiver", open_id="receiver-open"
             )
+
+
+@pytest.mark.asyncio
+async def test_membership_uses_each_bots_own_explicit_token(monkeypatch):
+    from coreman.core.chat import collaboration_setup as service
+
+    calls = []
+
+    class Client:
+        def __init__(self, app_id, secret):
+            self.app_id = app_id
+
+        async def get_token(self):
+            return f"token-{self.app_id}"
+
+        async def call(self, method, path, *, token):
+            calls.append((self.app_id, method, path, token))
+            return {"data": {"is_in_chat": True}}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(service, "FeishuClient", Client)
+    monkeypatch.setattr(
+        service, "credentials", lambda bot, _: {"app_id": bot.name, "app_secret": "s"}
+    )
+    await service.check_current_group(
+        SimpleNamespace(name="A"), SimpleNamespace(name="B"), "oc_current", object()
+    )
+    assert calls == [
+        (name, "GET", "/open-apis/im/v1/chats/oc_current/members/is_in_chat", f"token-{name}")
+        for name in ("A", "B")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,reason",
+    [
+        (False, "不在当前群"),
+        (None, "无法确认"),
+        ("timeout", "无法确认"),
+        ("denied", "im:chat.members:read"),
+        ("tenant", "不在同一租户"),
+    ],
+)
+async def test_membership_false_is_distinct_from_unverifiable(monkeypatch, outcome, reason):
+    from coreman.core.chat import collaboration_setup as service
+    from coreman.core.platforms.feishu import FeishuError
+
+    calls = []
+
+    class Client:
+        def __init__(self, app_id, secret):
+            self.app_id = app_id
+
+        async def get_token(self):
+            return self.app_id
+
+        async def call(self, method, path, *, token):
+            calls.append(self.app_id)
+            if self.app_id == "B":
+                if outcome == "timeout":
+                    raise TimeoutError
+                if outcome == "denied":
+                    raise FeishuError(99991672)
+                if outcome == "tenant":
+                    raise FeishuError(232010)
+                return {"data": {"is_in_chat": outcome}}
+            return {"data": {"is_in_chat": True}}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(service, "FeishuClient", Client)
+    monkeypatch.setattr(
+        service, "credentials", lambda bot, _: {"app_id": bot.name, "app_secret": "s"}
+    )
+    with pytest.raises(ValueError, match=reason):
+        await service.check_current_group(
+            SimpleNamespace(name="A"), SimpleNamespace(name="B"), "oc_current", object()
+        )
+    assert calls == ["A", "B"]

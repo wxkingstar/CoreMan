@@ -39,6 +39,7 @@ async def request_help(
     try:
         result = await tools.invoke(
             session,
+            cipher=request.app.state.cipher,
             task_id=task_id,
             actor=actor,
             name="request_collaboration",
@@ -102,7 +103,12 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             name, arguments = "invalid", {}
         try:
             value = await tools.invoke(
-                session, task_id=task_id, actor=actor, name=name, arguments=arguments
+                session,
+                task_id=task_id,
+                actor=actor,
+                name=name,
+                arguments=arguments,
+                cipher=request.app.state.cipher,
             )
             await session.commit()
         except ValueError as exc:

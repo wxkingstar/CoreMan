@@ -1,15 +1,12 @@
-"""Human-managed, verified outgoing collaboration connections."""
+"""Source-managed partner selection, independent of runtime group verification."""
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,10 +16,17 @@ from coreman.api.routers.bots import load_bot
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import record_audit
+from coreman.core.bus import outbox
 from coreman.core.chat import bot_collaboration as collaboration
 from coreman.core.chat import collaboration_setup as setup
-from coreman.core.db.models import Bot, BotCollaboration, BotCollaborationRoute, BotMember, User
-from coreman.core.platforms.feishu import FeishuError
+from coreman.core.db.models import (
+    Bot,
+    BotCollaboration,
+    BotCollaborationPartner,
+    BotCollaborationRoute,
+    OutboxItem,
+    User,
+)
 
 router = APIRouter(
     prefix="/api/admin/bots", tags=["collaborators"], dependencies=[Depends(verify_csrf)]
@@ -30,8 +34,8 @@ router = APIRouter(
 
 
 class CreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     target_bot_id: uuid.UUID
-    chat_id: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class ToggleIn(BaseModel):
@@ -47,86 +51,81 @@ async def source_bot(
         else await load_bot(session, bot_id)
     )
     if bot is None:
-        raise not_found("协作连接或 AI 员工不存在")
+        raise not_found("协作伙伴或 AI 员工不存在")
     if not await setup.manageable(session, user, bot):
         raise forbidden()
+    if bot.platform != "feishu":
+        raise ApiError(422, 422, "当前仅支持飞书 AI 员工协作")
     return bot
 
 
-async def target_bot(session: AsyncSession, user: User, source: Bot, target_id: uuid.UUID) -> Bot:
+async def target_bot(session: AsyncSession, source: Bot, target_id: uuid.UUID) -> Bot:
     if source.id == target_id:
         raise ApiError(422, 422, "不能将自己添加为协作伙伴")
     target = await load_bot(session, target_id)
-    if not await setup.manageable(session, user, target):
-        raise forbidden()
-    if not await setup.available(session, source) or not await setup.available(session, target):
-        raise ApiError(422, 422, "请先启用双方飞书 AI 员工并配置可用的 Runtime")
+    if target.platform != "feishu":
+        raise ApiError(422, 422, "请选择飞书 AI 员工作为协作伙伴")
+    # Selecting a partner grants no target management or human-use permission.
     return target
 
 
-async def route_for(
-    session: AsyncSession, bot_id: uuid.UUID, route_id: uuid.UUID
-) -> BotCollaborationRoute:
-    route = await session.scalar(
-        select(BotCollaborationRoute)
+async def partner_for(
+    session: AsyncSession, bot_id: uuid.UUID, partner_id: uuid.UUID
+) -> BotCollaborationPartner:
+    partner = await session.scalar(
+        select(BotCollaborationPartner)
         .where(
-            BotCollaborationRoute.id == route_id,
-            BotCollaborationRoute.source_bot_id == bot_id,
-            BotCollaborationRoute.archived.is_(False),
+            BotCollaborationPartner.id == partner_id,
+            BotCollaborationPartner.source_bot_id == bot_id,
+            BotCollaborationPartner.archived.is_(False),
         )
         .with_for_update()
     )
-    if route is None:
-        raise not_found("协作连接或 AI 员工不存在")
-    return route
+    if partner is None:
+        raise not_found("协作伙伴或 AI 员工不存在")
+    return partner
 
 
-@asynccontextmanager
-async def platform_read():  # type: ignore[no-untyped-def]
-    try:
-        async with asyncio.timeout(30):
-            yield
-    except (FeishuError, httpx.HTTPError, TimeoutError) as from_exc:
-        raise ApiError(
-            502, 502, "无法完成飞书连接检查，请检查双方应用凭证、群权限和网络后重试"
-        ) from from_exc
-    except ValueError as exc:
-        raise ApiError(422, 422, "连接验证条件不满足，请检查双方应用凭证和所选群后重试") from exc
+def active_query(partner: BotCollaborationPartner):  # type: ignore[no-untyped-def]
+    return (
+        select(BotCollaboration)
+        .join(BotCollaborationRoute, BotCollaboration.route_id == BotCollaborationRoute.id)
+        .where(
+            BotCollaborationRoute.source_bot_id == partner.source_bot_id,
+            BotCollaborationRoute.target_bot_id == partner.target_bot_id,
+            BotCollaboration.status.in_(collaboration.ACTIVE),
+        )
+    )
 
 
-async def output(session: AsyncSession, route: BotCollaborationRoute, user: User) -> dict[str, Any]:
-    target = await session.get(Bot, route.target_bot_id)
-    state = await setup.status(session, route)
+async def output(session: AsyncSession, partner: BotCollaborationPartner) -> dict[str, Any]:
+    target = await session.get(Bot, partner.target_bot_id)
+    available = bool(target and await setup.available(session, target))
     await session.flush()
-    can_manage = target is not None and await setup.manageable(session, user, target)
     return {
-        "id": str(route.id),
-        "target_bot_id": str(route.target_bot_id),
+        "id": str(partner.id),
+        "target_bot_id": str(partner.target_bot_id),
         "target_name": target.name if target else "已移除的 AI 员工",
         "target_description": target.description if target else "",
-        "chat_id": route.chat_id,
-        "chat_name": route.setup.get("chat_name") or "已配置的飞书群",
-        "enabled": route.enabled,
-        "version": route.version,
-        "status": state["status"],
-        "reason": state.get("reason"),
-        "can_enable": bool(state.get("can_enable") and can_manage),
-        "can_verify": bool(can_manage and not route.enabled and state["status"] != "pending"),
+        "enabled": partner.enabled,
+        "version": partner.version,
+        "status": "ready" if available else "unavailable",
+        "reason": None if available else "runtime_unavailable",
+        "can_enable": True,
         "can_remove": True,
         "active_count": await session.scalar(
-            select(func.count())
-            .select_from(BotCollaboration)
-            .where(
-                BotCollaboration.route_id == route.id,
-                BotCollaboration.status.in_(collaboration.ACTIVE),
-            )
+            select(func.count()).select_from(active_query(partner).subquery())
         )
         or 0,
     }
 
 
 async def audit(
-    session: AsyncSession, request: Request, user: User, route: BotCollaborationRoute, action: str
+    session: AsyncSession,
+    request: Request,
+    user: User,
+    partner: BotCollaborationPartner,
+    action: str,
 ) -> None:
     await record_audit(
         session,
@@ -134,39 +133,32 @@ async def audit(
         actor_id=user.id,
         actor_login=user.login_name,
         target_type="bot",
-        target_id=str(route.source_bot_id),
+        target_id=str(partner.source_bot_id),
         diff={
-            "route_id": str(route.id),
-            "target_bot_id": str(route.target_bot_id),
-            "enabled": route.enabled,
+            "partner_id": str(partner.id),
+            "target_bot_id": str(partner.target_bot_id),
+            "enabled": partner.enabled,
         },
         ip=client_ip(request),
     )
 
 
 @router.get("/{bot_id}/collaborators")
-async def list_routes(
+async def list_partners(
     bot_id: uuid.UUID,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     await source_bot(session, user, bot_id)
-    routes = list(
-        await session.scalars(
-            select(BotCollaborationRoute)
-            .where(
-                BotCollaborationRoute.source_bot_id == bot_id,
-                BotCollaborationRoute.archived.is_(False),
-            )
-            .order_by(BotCollaborationRoute.id)
-            .with_for_update()
+    partners = await session.scalars(
+        select(BotCollaborationPartner)
+        .where(
+            BotCollaborationPartner.source_bot_id == bot_id,
+            BotCollaborationPartner.archived.is_(False),
         )
+        .order_by(BotCollaborationPartner.id)
     )
-    for route in routes:
-        await setup.reconcile(session, route)
-    result = [await output(session, route, user) for route in routes]
-    await session.commit()
-    return {"code": 0, "data": result}
+    return {"code": 0, "data": [await output(session, p) for p in partners]}
 
 
 @router.get("/{bot_id}/collaborator-options")
@@ -177,12 +169,7 @@ async def options(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     await source_bot(session, user, bot_id)
-    managed = select(BotMember.bot_id).where(BotMember.user_id == user.id)
-    query = select(Bot).where(
-        Bot.id != bot_id,
-        Bot.platform == "feishu",
-        or_(Bot.created_by == user.id, Bot.id.in_(managed)),
-    )
+    query = select(Bot).where(Bot.id != bot_id, Bot.platform == "feishu")
     if q.strip():
         query = query.where(
             or_(
@@ -191,32 +178,19 @@ async def options(
             )
         )
     bots = await session.scalars(query.order_by(Bot.name, Bot.id).limit(50))
-    result = [
-        {
-            "id": str(bot.id),
-            "name": bot.name,
-            "description": bot.description,
-            "enabled": bot.enabled,
-            "available": await setup.available(session, bot),
-        }
-        for bot in bots
-    ]
-    return {"code": 0, "data": result}
-
-
-@router.get("/{bot_id}/collaborator-groups")
-async def groups(
-    bot_id: uuid.UUID,
-    target_bot_id: uuid.UUID,
-    request: Request,
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    source = await source_bot(session, user, bot_id)
-    target = await target_bot(session, user, source, target_bot_id)
-    async with platform_read():
-        result = await setup.common_groups(source, target, request.app.state.cipher)
-    return {"code": 0, "data": result}
+    return {
+        "code": 0,
+        "data": [
+            {
+                "id": str(bot.id),
+                "name": bot.name,
+                "description": bot.description,
+                "enabled": bot.enabled,
+                "available": await setup.available(session, bot),
+            }
+            for bot in bots
+        ],
+    }
 
 
 @router.post("/{bot_id}/collaborators", status_code=201)
@@ -229,91 +203,66 @@ async def create(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     source = await source_bot(session, user, bot_id, lock=True)
-    target = await target_bot(session, user, source, body.target_bot_id)
-    route = await session.scalar(
+    target = await target_bot(session, source, body.target_bot_id)
+    partner = await session.scalar(
+        select(BotCollaborationPartner)
+        .where(
+            BotCollaborationPartner.source_bot_id == bot_id,
+            BotCollaborationPartner.target_bot_id == target.id,
+        )
+        .with_for_update()
+    )
+    if partner is not None and not partner.archived:
+        raise ApiError(409, 409, "该协作伙伴已添加，请直接在列表中操作")
+    if partner is None:
+        partner = BotCollaborationPartner(
+            source_bot_id=bot_id, target_bot_id=target.id, enabled=True, archived=False, version=1
+        )
+        session.add(partner)
+    else:
+        partner.archived, partner.enabled = False, True
+    await session.flush()
+    await audit(session, request, user, partner, "add")
+    result = await output(session, partner)
+    set_etag(response, partner.version)
+    await session.commit()
+    return {"code": 0, "data": result}
+
+
+async def stop(session: AsyncSession, partner: BotCollaborationPartner) -> None:
+    # The scheduler holds ledger before reconciling route proof. Match that order.
+    rows = list(
+        await session.scalars(
+            active_query(partner).order_by(BotCollaboration.id).with_for_update(of=BotCollaboration)
+        )
+    )
+    partner.enabled = False
+    routes = await session.scalars(
         select(BotCollaborationRoute)
         .where(
-            BotCollaborationRoute.source_bot_id == bot_id,
-            BotCollaborationRoute.target_bot_id == target.id,
-            BotCollaborationRoute.chat_id == body.chat_id,
+            BotCollaborationRoute.source_bot_id == partner.source_bot_id,
+            BotCollaborationRoute.target_bot_id == partner.target_bot_id,
         )
+        .order_by(BotCollaborationRoute.id)
         .with_for_update()
     )
-    if route is not None and not route.archived:
-        raise ApiError(409, 409, "该伙伴在此群的连接已存在，请直接在列表中操作")
-    async with platform_read():
-        if route is None:
-            route = BotCollaborationRoute(
-                source_bot_id=bot_id,
-                target_bot_id=target.id,
-                chat_id=body.chat_id,
-                tenant_key="",
-                source_open_id="",
-                target_open_id="",
-                source_union_id="",
-                target_union_id="",
-                enabled=False,
-                archived=False,
-                setup={},
-                version=1,
-            )
-            session.add(route)
-            await session.flush()
-        else:
-            route.archived = False
-        await setup.begin(session, route, source, target, user, request.app.state.cipher)
-    await audit(session, request, user, route, "verify")
-    result = await output(session, route, user)
-    set_etag(response, route.version)
-    await session.commit()
-    return {"code": 0, "data": result}
-
-
-@router.post("/{bot_id}/collaborators/{route_id}/verify")
-async def verify(
-    bot_id: uuid.UUID,
-    route_id: uuid.UUID,
-    request: Request,
-    response: Response,
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    source = await source_bot(session, user, bot_id, lock=True)
-    route = await route_for(session, bot_id, route_id)
-    require_if_match(request, route.version)
-    target = await target_bot(session, user, source, route.target_bot_id)
-    await setup.reconcile(session, route)
-    if route.enabled or route.setup.get("status") == "pending":
-        raise ApiError(409, 409, "请先暂停连接或等待当前验证结束")
-    async with platform_read():
-        await setup.begin(session, route, source, target, user, request.app.state.cipher)
-    await audit(session, request, user, route, "verify")
-    result = await output(session, route, user)
-    set_etag(response, route.version)
-    await session.commit()
-    return {"code": 0, "data": result}
-
-
-async def stop(session: AsyncSession, route: BotCollaborationRoute) -> None:
-    route.enabled = False
-    if route.setup.get("status") == "pending":
-        route.setup = {**route.setup, "status": "failed", "reason": "verification_cancelled"}
-    rows = await session.scalars(
-        select(BotCollaboration)
-        .where(
-            BotCollaboration.route_id == route.id, BotCollaboration.status.in_(collaboration.ACTIVE)
-        )
-        .order_by(BotCollaboration.id)
-        .with_for_update()
-    )
+    for route in routes:
+        route.enabled = False
+        if route.setup.get("status") == "pending":
+            route.setup = {**route.setup, "status": "failed", "reason": "verification_cancelled"}
+            for side in ("source", "target"):
+                probe_id = route.setup.get(f"{side}_outbox_id")
+                probe = await session.get(OutboxItem, probe_id) if probe_id else None
+                if probe and probe.status == "pending":
+                    await outbox.mark_skipped(session, probe.id, "协作伙伴已暂停或移除")
     for row in rows:
-        await collaboration.close(session, row, "cancelled", "管理员已暂停或移除协作连接")
+        await collaboration.close(session, row, "cancelled", "管理员已暂停或移除协作伙伴")
 
 
-@router.patch("/{bot_id}/collaborators/{route_id}")
+@router.patch("/{bot_id}/collaborators/{partner_id}")
 async def toggle(
     bot_id: uuid.UUID,
-    route_id: uuid.UUID,
+    partner_id: uuid.UUID,
     body: ToggleIn,
     request: Request,
     response: Response,
@@ -321,37 +270,33 @@ async def toggle(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     source = await source_bot(session, user, bot_id, lock=True)
-    route = await route_for(session, bot_id, route_id)
-    require_if_match(request, route.version)
+    partner = await partner_for(session, bot_id, partner_id)
+    require_if_match(request, partner.version)
     if body.enabled:
-        await target_bot(session, user, source, route.target_bot_id)
-        await setup.reconcile(session, route)
-        state = await setup.status(session, route)
-        if not state.get("can_enable"):
-            raise ApiError(422, 422, "连接尚未通过验证或配置已变化，请重新验证")
-        route.enabled = True
+        await target_bot(session, source, partner.target_bot_id)
+        partner.enabled = True
     else:
-        await stop(session, route)
-    await audit(session, request, user, route, "enable" if body.enabled else "pause")
-    result = await output(session, route, user)
-    set_etag(response, route.version)
+        await stop(session, partner)
+    await audit(session, request, user, partner, "enable" if body.enabled else "pause")
+    result = await output(session, partner)
+    set_etag(response, partner.version)
     await session.commit()
     return {"code": 0, "data": result}
 
 
-@router.delete("/{bot_id}/collaborators/{route_id}", status_code=204)
+@router.delete("/{bot_id}/collaborators/{partner_id}", status_code=204)
 async def archive(
     bot_id: uuid.UUID,
-    route_id: uuid.UUID,
+    partner_id: uuid.UUID,
     request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     await source_bot(session, user, bot_id, lock=True)
-    route = await route_for(session, bot_id, route_id)
-    require_if_match(request, route.version)
-    await stop(session, route)
-    route.archived = True
-    await audit(session, request, user, route, "remove")
+    partner = await partner_for(session, bot_id, partner_id)
+    require_if_match(request, partner.version)
+    await stop(session, partner)
+    partner.archived = True
+    await audit(session, request, user, partner, "remove")
     await session.commit()
     return Response(status_code=204)

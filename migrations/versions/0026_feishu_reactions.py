@@ -16,16 +16,26 @@ def upgrade():
     # when upgrading a reactions-only database without resetting its version stamp.
     importlib.import_module("migrations.versions.0025_collaboration_setup").upgrade()
     existing = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("feishu_deliveries")}
-    for column in (
-        sa.Column("reaction_id", sa.Text()),
-        sa.Column("reaction_done", sa.Boolean(), nullable=False, server_default=sa.text("false")),
-        sa.Column("reaction_retry_at", sa.DateTime(timezone=True)),
-        sa.Column(
-            "reaction_failures", sa.BigInteger(), nullable=False, server_default=sa.text("0")
-        ),
-    ):
-        if column.name not in existing:
-            op.add_column("feishu_deliveries", column)
+    if "reaction_id" not in existing:
+        op.add_column("feishu_deliveries", sa.Column("reaction_id", sa.Text()))
+    if "reaction_done" not in existing:
+        op.add_column(
+            "feishu_deliveries",
+            sa.Column(
+                "reaction_done", sa.Boolean(), nullable=False, server_default=sa.text("false")
+            ),
+        )
+    if "reaction_retry_at" not in existing:
+        op.add_column(
+            "feishu_deliveries", sa.Column("reaction_retry_at", sa.DateTime(timezone=True))
+        )
+    if "reaction_failures" not in existing:
+        op.add_column(
+            "feishu_deliveries",
+            sa.Column(
+                "reaction_failures", sa.BigInteger(), nullable=False, server_default=sa.text("0")
+            ),
+        )
 
 
 def downgrade():

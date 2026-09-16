@@ -123,9 +123,10 @@ def test_rich_bot_event_prefers_original_markdown_without_duplicate_text(legacy)
     "text",
     [
         "正在等待60秒",
-        '{"status":"blocked","answer":"数据缺失"}',
+        '{"status":"pending","answer":"正在等待"}',
         '{"status":"completed","answer":""}',
         "[]",
+        '{"status":[],"answer":"不能接受非字符串状态"}',
     ],
 )
 def test_incomplete_helper_result_cannot_resume_source(text):
@@ -138,7 +139,7 @@ def test_incomplete_helper_result_cannot_resume_source(text):
 def test_completed_helper_result_preserves_markdown():
     from coreman.runtime.worker.chat.collaboration import read_helper_result
 
-    assert read_helper_result('{"status":"completed","answer":"**可用78**"}') == "**可用78**"
+    assert read_helper_result('{"status":"completed","answer":"**可用78**"}').answer == "**可用78**"
 
 
 def test_helper_contract_uses_final_tool_segment_and_rejects_progress_tail():
@@ -146,6 +147,14 @@ def test_helper_contract_uses_final_tool_segment_and_rejects_progress_tail():
 
     progress = "我去读取数据。"
     final = '{"status":"completed","answer":"**可用78**"}'
-    assert read_helper_result(progress + final, [len(progress)]) == "**可用78**"
+    assert read_helper_result(progress + final, [len(progress)]).answer == "**可用78**"
     with pytest.raises(ValueError):
         read_helper_result(final + "还在等待", [len(final)])
+
+
+def test_blocked_helper_preserves_reason_without_claiming_completion():
+    from coreman.runtime.worker.chat.collaboration import read_helper_result
+
+    result = read_helper_result('{"status":"blocked","answer":"缺少仓库ID；已确认日期范围"}')
+    assert result.status == "blocked"
+    assert result.answer == "缺少仓库ID；已确认日期范围"
