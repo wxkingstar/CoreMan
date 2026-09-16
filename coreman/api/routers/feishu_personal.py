@@ -105,7 +105,18 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     elif method in ("ping", "tools/list"):
         if params:
             return _error(rid, -32602, "Invalid params")
-        result = {} if method == "ping" else {"tools": tools.definitions()}
+        grant = await session.get(
+            FeishuPersonalGrant, (scope.bot.id, scope.user_id), populate_existing=True
+        )
+        allow_send = bool(
+            grant
+            and grant.status == "connected"
+            and grant.authorization_level == "all"
+            and {"im:message", "im:message.send_as_user"}.issubset(
+                set(grant.scopes or []) & set(grant.requested_scopes or [])
+            )
+        )
+        result = {} if method == "ping" else {"tools": tools.definitions(allow_send=allow_send)}
     elif method == "tools/call":
         if (
             set(params) - {"name", "arguments"}
@@ -175,21 +186,28 @@ async def authorizations(
                     "bot_name": name,
                     "status": (
                         "expired"
-                        if grant.status == "pending"
+                        if grant.status in ("pending", "selecting")
                         and grant.pending_expires_at
                         and grant.pending_expires_at <= datetime.now(UTC)
                         else grant.status
                     ),
                     "scopes": list(grant.scopes or []),
+                    "authorization_level": grant.authorization_level,
+                    "requested_scopes": list(grant.requested_scopes or []),
+                    "missing_scopes": sorted(
+                        set(grant.requested_scopes or []) - set(grant.scopes or [])
+                    )
+                    if grant.status == "connected"
+                    else [],
                     "expires_at": (
                         (
                             grant.pending_expires_at
-                            if grant.status == "pending"
+                            if grant.status in ("pending", "selecting")
                             else grant.expires_at
                         ).isoformat()
                         if (
                             grant.pending_expires_at
-                            if grant.status == "pending"
+                            if grant.status in ("pending", "selecting")
                             else grant.expires_at
                         )
                         else None
@@ -204,11 +222,12 @@ async def authorizations(
 @router.delete("/api/me/feishu-authorizations/{bot_id}", dependencies=[Depends(verify_csrf)])
 async def revoke(
     bot_id: uuid.UUID,
+    request: Request,
     response: Response,
     actor: User = Depends(interactive_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await service.revoke_grant(session, bot_id, actor.id)
+    result = await service.revoke_grant(session, bot_id, actor.id, request.app.state.cipher)
     await session.commit()
     response.headers.update(NO_STORE)
-    return {"code": 0, "data": {"ok": True}}
+    return {"code": 0, "data": {"ok": True, "remote_revoked": result["remote_revoked"]}}

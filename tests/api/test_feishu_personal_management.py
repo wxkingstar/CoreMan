@@ -7,7 +7,12 @@ from tests.api.test_feishu_personal import grant, setup
 URL = "/api/me/feishu-authorizations"
 
 
-async def test_grants_are_own_only_and_revoke_requires_csrf(client, app, db_session):
+async def test_grants_are_own_only_and_revoke_requires_csrf(client, app, db_session, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from coreman.core.feishu_personal import revocation
+
+    monkeypatch.setattr(revocation, "revoke_tokens", AsyncMock(return_value=True))
     bot, owner, _ = await setup(db_session, app)
     own = await grant(db_session, app, bot, owner)
     other = User(login_name="other-personal-user", display_name="Other", role="platform_admin")
@@ -38,7 +43,10 @@ async def test_grants_are_own_only_and_revoke_requires_csrf(client, app, db_sess
     await db_session.refresh(foreign)
     assert foreign.pending_enc is not None
     client.headers["X-CSRF-Token"] = csrf
-    assert (await client.delete(f"{URL}/{bot.id}")).json()["data"] == {"ok": True}
+    assert (await client.delete(f"{URL}/{bot.id}")).json()["data"] == {
+        "ok": True,
+        "remote_revoked": False,
+    }
     await db_session.refresh(foreign)
     await db_session.refresh(own)
     assert foreign.status == "revoked" and foreign.pending_enc is None

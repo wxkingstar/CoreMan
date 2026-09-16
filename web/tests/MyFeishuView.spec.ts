@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { i18n } from '@/i18n'
 import MyFeishuView from '@/views/MyFeishuView.vue'
@@ -7,7 +7,7 @@ import { feishuAuthorizations } from '@/api/feishuAuthorizations'
 vi.mock('@/api/feishuAuthorizations', () => ({ feishuAuthorizations: { list: vi.fn(), revoke: vi.fn() } }))
 const row = { bot_id: 'bot-1', bot_name: 'Personal Assistant', status: 'connected' as const, scopes: ['im:message:readonly'], expires_at: null }
 const render = () => mount(MyFeishuView, { global: { plugins: [ElementPlus, i18n] } })
-beforeEach(() => { vi.restoreAllMocks(); vi.mocked(feishuAuthorizations.list).mockReset().mockResolvedValue({ items: [row] }); vi.mocked(feishuAuthorizations.revoke).mockReset().mockResolvedValue({ ok: true }) })
+beforeEach(() => { vi.restoreAllMocks(); vi.mocked(feishuAuthorizations.list).mockReset().mockResolvedValue({ items: [row] }); vi.mocked(feishuAuthorizations.revoke).mockReset().mockResolvedValue({ ok: true, remote_revoked: true }) })
 describe('own Feishu authorizations', () => {
   it('shows private-chat instructions and all statuses without a browser connect action', async () => {
     vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: ['connected', 'pending', 'expired', 'revoked'].map((status) => ({ ...row, bot_id: status, status: status as typeof row.status })) })
@@ -100,5 +100,52 @@ it('does not let a stale automatic refresh restore access after revocation', asy
   resolve({ items: [row] }); await flushPromises()
   expect(w.text()).toContain(i18n.global.t('myFeishu.status.revoked'))
   expect(w.find('[data-test="revoke-bot-1"]').exists()).toBe(false)
+  w.unmount()
+})
+
+it('shows five scopes per bot and expands each bot independently', async () => {
+  const scopes = Array.from({ length: 9 }, (_, i) => `scope:${i}`)
+  vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, scopes }, { ...row, bot_id: 'bot-2', scopes }] })
+  const w = render(); await flushPromises()
+  expect(w.findAll('.feishu-scope')).toHaveLength(10)
+  await w.get('[data-test="toggle-scopes-bot-1"]').trigger('click')
+  expect(w.findAll('.feishu-scope')).toHaveLength(14)
+  expect(w.get('[data-test="toggle-scopes-bot-2"]').attributes('aria-expanded')).toBe('false')
+  await w.get('[data-test="toggle-scopes-bot-1"]').trigger('click')
+  expect(w.findAll('.feishu-scope')).toHaveLength(10)
+  w.unmount()
+})
+
+
+it('distinguishes the selected tier from Feishu grants and missing permissions', async () => {
+  vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, authorization_level: 'all_except_send', requested_scopes: ['doc:write'], missing_scopes: ['doc:write'], scopes: ['im:message:send'] }] })
+  const w = render(); await flushPromises()
+  expect(w.text()).toContain(i18n.global.t('myFeishu.levels.all_except_send'))
+  expect(w.text()).toContain(i18n.global.t('myFeishu.scopeHint'))
+  expect(w.get('.feishu-requested-scope').text()).toBe('doc:write')
+  expect(w.get('.feishu-scope').text()).toBe('im:message:send')
+  expect(w.get('.feishu-missing-scope').text()).toBe('doc:write')
+  w.unmount()
+})
+it('does not claim remote revocation when only local access has stopped', async () => {
+  vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+  const success = vi.spyOn(ElMessage, 'success')
+  const warning = vi.spyOn(ElMessage, 'warning')
+  vi.mocked(feishuAuthorizations.revoke).mockResolvedValue({ ok: true, remote_revoked: false })
+  const w = render(); await flushPromises()
+  vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'revoked' }] })
+  await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+  expect(success).not.toHaveBeenCalled()
+  expect(warning).toHaveBeenCalledWith(i18n.global.t('myFeishu.localRevoked'))
+  w.unmount()
+})
+
+
+it('does not present the default tier as the users choice while selecting', async () => {
+  vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'selecting', authorization_level: 'messages_readonly', scopes: [] }] })
+  const w = render(); await flushPromises()
+  const card = w.get('.feishu-grant')
+  expect(card.text()).toContain(i18n.global.t('myFeishu.unselected'))
+  expect(card.text()).not.toContain(i18n.global.t('myFeishu.levels.messages_readonly'))
   w.unmount()
 })

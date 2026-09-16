@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import FeishuPersonalGrant
+from coreman.core.feishu_personal import permissions, revocation
 from coreman.core.feishu_personal.policy import Scope, app_credentials
 
 BASE = "https://open.feishu.cn/open-apis"
@@ -49,6 +50,8 @@ def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
     row.token_enc = row.pending_enc = None
     row.expires_at = row.pending_expires_at = row.next_poll_at = None
     row.scopes = []
+    row.requested_scopes = []
+    row.selection_chat_id = None
 
 
 def save_tokens(
@@ -67,6 +70,7 @@ def save_tokens(
         row.scopes = str(data["scope"]).split()
     row.app_fingerprint = _fingerprint(row.app_id, secret)
     row.status = "connected"
+    row.remote_revoked = False
     row.pending_enc = None
     row.pending_expires_at = row.next_poll_at = None
 
@@ -155,26 +159,85 @@ def _state(row: FeishuPersonalGrant) -> dict[str, Any]:
     return {
         "status": row.status,
         "scopes": row.scopes,
+        "authorization_level": row.authorization_level,
+        "requested_scopes": row.requested_scopes,
+        "missing_scopes": sorted(set(row.requested_scopes or []) - set(row.scopes or [])),
+        "checked_at": datetime.now(UTC).isoformat(),
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
     }
 
 
-async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
+SELECTION_PROMPT = """请选择本次飞书授权范围，回复 1、2 或 3：
+1. 消息只读：搜索、读取你有权限访问的私聊和群聊消息。
+2. 全部权限，不含发送消息：申请应用已开通的用户权限，包含修改、删除和管理操作，但不允许发送消息。
+3. 全部权限，包含发送消息：在第二档基础上，允许以你的身份发送消息。
+选择后才会生成授权链接；实际可用操作以系统已接入的工具为准。个人授权仅限本人与机器人的私聊使用。"""
+
+
+async def _revoke_remote(cipher: Cipher, row: FeishuPersonalGrant, secret: str) -> bool:
+    if not row.token_enc:
+        return True
+    try:
+        tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
+        return await revocation.revoke_tokens(row.app_id, secret, tokens)
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
-    if row.status == "connected" and row.token_enc:
-        return _state(row)
-    if row.pending_enc and row.pending_expires_at and row.pending_expires_at > datetime.now(UTC):
-        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
-        return {
-            "status": "pending",
-            "authorization_url": pending["url"],
-            "expires_at": row.pending_expires_at.isoformat(),
-        }
+    remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
+    row.remote_revoked = remote_revoked
+    _clear(row, "selecting")
+    row.authorization_level = "messages_readonly"
+    row.selection_chat_id = scope.event.chat_id
+    row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=10)
+    return {"status": "selecting", "prompt": SELECTION_PROMPT, "remote_revoked": remote_revoked}
+
+
+async def choose_authorization(
+    session: AsyncSession, cipher: Cipher, scope: Scope, choice: str
+) -> dict[str, Any]:
+    row, secret = await _row(session, cipher, scope)
+    if (
+        row.status != "selecting"
+        or row.selection_chat_id != scope.event.chat_id
+        or not row.pending_expires_at
+        or row.pending_expires_at <= datetime.now(UTC)
+    ):
+        raise PersonalError("selection_required")
+    levels = {"1": "messages_readonly", "2": "all_except_send", "3": "all"}
+    if choice not in levels:
+        raise PersonalError("selection_required")
+    level = levels[choice]
+    available = (
+        list(permissions.MESSAGE_SCOPES)
+        if level == "messages_readonly"
+        else await permissions.app_user_scopes(row.app_id, secret, http=_http)
+    )
+    if level == "all" and not {"im:message", "im:message.send_as_user"}.issubset(available):
+        raise PersonalError("app_send_permission_missing")
+    if level == "messages_readonly" and not (
+        permissions.MESSAGE_SCOPES - {"offline_access"}
+    ).issubset(available):
+        raise PersonalError("app_message_permission_missing")
+    selected = permissions.select_scopes(level, available)
+    if not selected:
+        raise PersonalError("authorization_unavailable")
+    row.authorization_level = level
+    row.requested_scopes = selected
+    # Only this worker-owned path can select a level; MCP has no level argument.
+    return await _start_authorization(row, secret, cipher)
+
+
+async def _start_authorization(
+    row: FeishuPersonalGrant, secret: str, cipher: Cipher
+) -> dict[str, Any]:
     data = await _http(
         "POST",
         "https://accounts.feishu.cn/oauth/v1/device_authorization",
         auth=(row.app_id, secret),
-        data={"client_id": row.app_id, "scope": SCOPES},
+        data={"client_id": row.app_id, "scope": " ".join(row.requested_scopes)},
     )
     url = data.get("verification_uri_complete", "")
     parsed = urlparse(url)
@@ -185,7 +248,10 @@ async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict
         or parsed.username
     ):
         raise PersonalError("authorization_unavailable")
-    _clear(row, "pending")
+    row.status = "pending"
+    row.token_enc = None
+    row.scopes = []
+    row.next_poll_at = None
     row.pending_enc = cipher.encrypt(
         jsonlib.dumps({"device_code": data["device_code"], "url": url}), _aad(row, "pending_enc")
     )
@@ -198,6 +264,28 @@ async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict
         "status": "pending",
         "authorization_url": url,
         "expires_at": row.pending_expires_at.isoformat(),
+    }
+
+
+async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
+    row, _ = await _row(session, cipher, scope)
+    if row.status == "connected" and row.token_enc:
+        return _state(row)
+    if (
+        row.status == "pending"
+        and row.pending_enc
+        and row.pending_expires_at
+        and row.pending_expires_at > datetime.now(UTC)
+    ):
+        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
+        return {
+            "status": "pending",
+            "authorization_url": pending["url"],
+            "expires_at": row.pending_expires_at.isoformat(),
+        }
+    return {
+        "status": "selection_required",
+        "prompt": "请发送连接我的飞书，再由本人回复 1、2 或 3 选择授权范围。",
     }
 
 
@@ -256,7 +344,7 @@ async def authorization_status(
 
 
 async def revoke_grant(
-    session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID
+    session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID, cipher: Cipher | None = None
 ) -> dict[str, Any]:
     await _lock(session, bot_id, user_id)
     row = (
@@ -267,15 +355,57 @@ async def revoke_grant(
             .execution_options(populate_existing=True)
         )
     ).one_or_none()
+    remote_revoked = True
     if row:
+        remote_revoked = row.remote_revoked
+        if row.token_enc:
+            remote_revoked = False
+            if cipher is not None:
+                from coreman.core.db.models import Bot
+
+                bot = await session.get(Bot, bot_id)
+                try:
+                    if bot is None:
+                        raise ValueError("bot_unavailable")
+                    app_id, secret = app_credentials(cipher, bot)
+                    if app_id == row.app_id:
+                        remote_revoked = await _revoke_remote(cipher, row, secret)
+                except ValueError:
+                    pass
+        row.remote_revoked = remote_revoked
         _clear(row)
-    return {"status": "revoked"}
+    return {"status": "revoked", "remote_revoked": remote_revoked}
 
 
 async def revoke_authorization(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> dict[str, Any]:
-    return await revoke_grant(session, scope.bot.id, scope.user_id)
+    return await revoke_grant(session, scope.bot.id, scope.user_id, cipher)
+
+
+def _check_read_scope(row: FeishuPersonalGrant, path: str) -> None:
+    if row.authorization_level == "legacy_readonly":
+        return
+    if path == "/im/v1/messages/search":
+        required = "search:message"
+    elif path.startswith("/im/v1/messages"):
+        required = "im:message:readonly"
+    elif path == "/vc/v1/meetings/search":
+        required = "vc:meeting.search:read"
+    elif path.startswith("/vc/v1/meetings/"):
+        required = "vc:meeting:readonly"
+    elif path.startswith("/vc/v1/notes/"):
+        required = "vc:note:read"
+    elif path == "/minutes/v1/minutes/search":
+        required = "minutes:minutes.search:read"
+    elif path.endswith("/artifacts"):
+        required = "minutes:minutes.artifacts:read"
+    elif path.startswith("/minutes/"):
+        required = "minutes:minutes.basic:read"
+    else:
+        required = "docx:document:readonly"
+    if required not in set(row.requested_scopes or []) & set(row.scopes or []):
+        raise PersonalError("selected_permission_missing")
 
 
 async def api_request(
@@ -288,25 +418,48 @@ async def api_request(
     params: Any = None,
     json: Any = None,
 ) -> dict[str, Any]:
+    sending = method == "POST" and path == "/im/v1/messages"
     allowed = (
-        method == "POST"
-        and path
-        in ("/im/v1/messages/search", "/vc/v1/meetings/search", "/minutes/v1/minutes/search")
-    ) or (
-        method == "GET"
-        and re.fullmatch(
-            r"/(?:im/v1/messages(?:/mget)?|vc/v1/(?:meetings|notes)/[A-Za-z0-9_-]+"
-            r"|minutes/v1/minutes/[A-Za-z0-9_-]+(?:/artifacts)?"
-            r"|docx/v1/documents/[A-Za-z0-9_-]+/raw_content)",
-            path,
+        sending
+        or (
+            method == "POST"
+            and path
+            in ("/im/v1/messages/search", "/vc/v1/meetings/search", "/minutes/v1/minutes/search")
         )
-        is not None
+        or (
+            method == "GET"
+            and re.fullmatch(
+                r"/(?:im/v1/messages(?:/mget)?|vc/v1/(?:meetings|notes)/[A-Za-z0-9_-]+"
+                r"|minutes/v1/minutes/[A-Za-z0-9_-]+(?:/artifacts)?"
+                r"|docx/v1/documents/[A-Za-z0-9_-]+/raw_content)",
+                path,
+            )
+            is not None
+        )
     )
     if not allowed:
         raise PersonalError("invalid_tool_or_arguments")
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")
+    if sending and (
+        row.authorization_level != "all"
+        or not {"im:message", "im:message.send_as_user"}.issubset(
+            set(row.scopes or []) & set(row.requested_scopes or [])
+        )
+    ):
+        raise PersonalError("sending_not_authorized")
+    if row.authorization_level == "messages_readonly" and not path.startswith("/im/v1/messages"):
+        raise PersonalError("outside_selected_authorization")
+    if row.authorization_level not in (
+        "legacy_readonly",
+        "messages_readonly",
+        "all_except_send",
+        "all",
+    ):
+        raise PersonalError("outside_selected_authorization")
+    if not sending:
+        _check_read_scope(row, path)
     tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
     if not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
         if not tokens.get("refresh_token"):
@@ -328,6 +481,10 @@ async def api_request(
         data.setdefault("refresh_token", tokens["refresh_token"])
         save_tokens(cipher, row, data, secret)
         tokens = data
+    if sending and not {"im:message", "im:message.send_as_user"}.issubset(set(row.scopes or [])):
+        raise PersonalError("sending_not_authorized")
+    if not sending:
+        _check_read_scope(row, path)
     response = await _http(
         method,
         BASE + path,

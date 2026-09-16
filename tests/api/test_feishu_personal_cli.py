@@ -9,15 +9,15 @@ import socket
 import pytest
 import uvicorn
 
-from coreman.core.feishu_personal import service
-from tests.api.test_feishu_personal import headers, setup
+from coreman.core.feishu_personal import permissions, service
+from tests.api.test_feishu_personal import headers, setup, start_selected
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COREMAN_REAL_CLAUDE_TEST") != "1", reason="requires a logged-in Claude CLI"
 )
 
 
-async def test_real_claude_can_start_authorization(app, db_session, monkeypatch):
+async def test_real_claude_can_retrieve_human_selected_authorization(app, db_session, monkeypatch):
     _, user, task = await setup(db_session, app)
     calls = []
 
@@ -32,7 +32,12 @@ async def test_real_claude_can_start_authorization(app, db_session, monkeypatch)
             "verification_uri_complete": "https://accounts.feishu.cn/verify?probe=synthetic",
         }
 
+    async def scopes(app_id, secret, *, http):
+        return service.SCOPES.split()
+
+    monkeypatch.setattr(permissions, "app_user_scopes", scopes)
     monkeypatch.setattr(service, "_http", oauth)
+    await start_selected(db_session, app, task, user)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]

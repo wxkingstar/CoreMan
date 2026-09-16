@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 
 from coreman.core.db.models import FeishuPersonalGrant
 from coreman.core.db.session import make_session_factory
-from coreman.core.feishu_personal import policy, service
+from coreman.core.feishu_personal import permissions, policy, revocation, service
 from tests.api.test_feishu_personal import grant, setup
 
 
@@ -21,6 +21,17 @@ async def test_revoke_serializes_with_authorize_or_refresh(
         await grant(
             db_session, app, bot, owner, expires_at=datetime.now(UTC) - timedelta(seconds=1)
         )
+
+    async def scopes(app_id, secret, *, http):
+        return service.SCOPES.split()
+
+    async def revoke_tokens(app_id, secret, tokens):
+        assert tokens["access_token"] == "new-access-secret"
+        assert tokens["refresh_token"] == "new-refresh-secret"
+        return True
+
+    monkeypatch.setattr(permissions, "app_user_scopes", scopes)
+    monkeypatch.setattr(revocation, "revoke_tokens", revoke_tokens)
     factory = make_session_factory(db_engine)
     at_http, release_http, revoke_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
     revoke_pid = None
@@ -52,7 +63,8 @@ async def test_revoke_serializes_with_authorize_or_refresh(
                     session, app.state.cipher, scope, "GET", "/minutes/v1/minutes/minute-one"
                 )
             else:
-                result = await service.authorize(session, app.state.cipher, scope)
+                await service.begin_selection(session, app.state.cipher, scope)
+                result = await service.choose_authorization(session, app.state.cipher, scope, "1")
             await session.commit()
             return result
 
@@ -61,7 +73,7 @@ async def test_revoke_serializes_with_authorize_or_refresh(
         async with factory() as session:
             revoke_pid = await session.scalar(text("SELECT pg_backend_pid()"))
             revoke_started.set()
-            result = await service.revoke_grant(session, bot.id, owner.id)
+            result = await service.revoke_grant(session, bot.id, owner.id, app.state.cipher)
             await session.commit()
             return result
 
@@ -94,7 +106,7 @@ async def test_revoke_serializes_with_authorize_or_refresh(
                 assert not revoker.done()
                 release_http.set()
                 written, revoked = await asyncio.gather(writer, revoker)
-                assert revoked == {"status": "revoked"}
+                assert revoked == {"status": "revoked", "remote_revoked": True}
                 assert (
                     written["minute"]["title"] == "private content"
                     if existing

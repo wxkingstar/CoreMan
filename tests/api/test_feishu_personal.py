@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from coreman.core.bots.secrets import CREDENTIALS_AAD
 from coreman.core.db.models import InboundEvent, User, UserIdentity
+from coreman.core.feishu_personal import permissions, policy, service
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
 
@@ -83,6 +84,32 @@ def headers(app, task, user):
         "Authorization": "Bearer "
         + issue_capability(app.state.cipher, task_id=task.id, user_id=str(user.id))
     }
+
+
+async def start_selected(session, app, task, user):
+    scope = await policy.task_scope(session, task.id, str(user.id))
+    await service.begin_selection(session, app.state.cipher, scope)
+    result = await service.choose_authorization(session, app.state.cipher, scope, "1")
+    await session.commit()
+    return result
+
+
+@pytest.fixture(autouse=True)
+def available_personal_scopes(monkeypatch):
+    async def scopes(app_id, secret, *, http):
+        return service.SCOPES.split()
+
+    monkeypatch.setattr(permissions, "app_user_scopes", scopes)
+
+
+async def test_mcp_cannot_start_authorization_without_human_selection(client, app, db_session):
+    _, user, task = await setup(db_session, app)
+    with respx.mock as mock:
+        out = value(
+            await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
+        )
+        assert out["status"] == "selection_required"
+        assert not mock.calls
 
 
 async def grant(session, app, bot, user, **kw):
@@ -194,6 +221,7 @@ async def test_device_authorization_is_durable_encrypted_and_read_only(client, a
                 },
             )
         )
+        await start_selected(db_session, app, task, user)
         out = value(
             await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
         )
@@ -228,9 +256,7 @@ async def test_authorization_cannot_be_completed_by_different_identity(
                 },
             )
         )
-        value(
-            await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
-        )
+        await start_selected(db_session, app, task, user)
         mock.post("https://open.feishu.cn/open-apis/authen/v2/oauth/token").mock(
             return_value=httpx.Response(
                 200,
@@ -336,12 +362,15 @@ async def test_refresh_rotates_durable_token_and_revocation_blocks_reads(client,
         )
     assert out["artifacts"]["transcript"] == "Speaker: decision"
     assert route.calls[0].request.headers["authorization"] == "Bearer fresh-secret"
-    out = value(
-        await client.post(
-            URL, headers=headers(app, task, user), json=rpc("feishu_revoke_authorization")
+    with respx.mock as mock:
+        revoke = mock.post("https://accounts.feishu.cn/oauth/v1/revoke").respond(200)
+        out = value(
+            await client.post(
+                URL, headers=headers(app, task, user), json=rpc("feishu_revoke_authorization")
+            )
         )
-    )
-    assert out["status"] == "revoked"
+    assert out == {"status": "revoked", "remote_revoked": True}
+    assert revoke.call_count == 2
     with respx.mock:
         out = value(
             await client.post(
@@ -416,9 +445,7 @@ async def test_device_poll_interval_is_enforced(client, app, db_session):
                 },
             )
         )
-        value(
-            await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
-        )
+        await start_selected(db_session, app, task, user)
         poll = mock.post("https://open.feishu.cn/open-apis/authen/v2/oauth/token").mock(
             return_value=httpx.Response(400, json={"error": "authorization_pending"})
         )

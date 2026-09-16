@@ -7,6 +7,7 @@ import { feishuAuthorizations, type FeishuAuthorization } from '@/api/feishuAuth
 import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 const rows = ref<FeishuAuthorization[]>([])
+const expandedScopes = ref<Record<string, boolean>>({})
 const loading = ref(false), error = ref(''), revoking = ref('')
 let requestVersion = 0
 let refreshing = false
@@ -34,8 +35,9 @@ async function revoke(row: FeishuAuthorization) {
   revoking.value = row.bot_id
   try {
     await ElMessageBox.confirm(t('myFeishu.confirmRevoke', { name: row.bot_name }), t('myFeishu.revoke'), { type: 'warning' })
-    await feishuAuthorizations.revoke(row.bot_id)
-    ElMessage.success(t('myFeishu.revoked'))
+    const result = await feishuAuthorizations.revoke(row.bot_id)
+    if (result.remote_revoked) ElMessage.success(t('myFeishu.revoked'))
+    else ElMessage.warning(t('myFeishu.localRevoked'))
     await load()
   } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(t('myFeishu.revokeError')) }
   finally { revoking.value = '' }
@@ -111,14 +113,54 @@ onUnmounted(() => {
             {{ t('myFeishu.reconnectHint', { command: '连接我的飞书' }) }}
           </p>
           <dl>
+            <dt>{{ t('myFeishu.level') }}</dt>
+            <dd>{{ row.status === 'selecting' ? t('myFeishu.unselected') : t('myFeishu.levels.' + (row.authorization_level || 'legacy_readonly')) }}</dd>
+            <dt>{{ t('myFeishu.allowedScopes') }}</dt>
+            <dd>
+              <p class="feishu-scope-hint">
+                {{ t('myFeishu.scopeHint') }}
+              </p>
+              <details v-if="row.requested_scopes?.length">
+                <summary>{{ t('myFeishu.scopeCount', { count: row.requested_scopes.length }) }}</summary>
+                <span
+                  v-for="scope in row.requested_scopes"
+                  :key="scope"
+                  class="feishu-requested-scope"
+                >{{ scope }}</span>
+              </details>
+              <span v-else>—</span>
+            </dd>
             <dt>{{ t('myFeishu.scopes') }}</dt>
             <dd>
               <span
-                v-for="scope in row.scopes"
+                v-for="scope in (expandedScopes[row.bot_id] ? row.scopes : row.scopes.slice(0, 5))"
                 :key="scope"
                 class="feishu-scope"
               >{{ scope }}</span><span v-if="!row.scopes.length">—</span>
+              <el-button
+                v-if="row.scopes.length > 5"
+                link
+                type="primary"
+                :data-test="'toggle-scopes-' + row.bot_id"
+                :aria-expanded="!!expandedScopes[row.bot_id]"
+                @click="expandedScopes[row.bot_id] = !expandedScopes[row.bot_id]"
+              >
+                {{ expandedScopes[row.bot_id] ? t('myFeishu.collapseScopes') : t('myFeishu.expandScopes', { count: row.scopes.length }) }}
+              </el-button>
             </dd>
+            <template v-if="row.missing_scopes?.length">
+              <dt>{{ t('myFeishu.missingScopes') }}</dt>
+              <dd>
+                <details>
+                  <summary>{{ t('myFeishu.scopeCount', { count: row.missing_scopes.length }) }}</summary>
+                  <span
+                    v-for="scope in row.missing_scopes"
+                    :key="scope"
+                    class="feishu-missing-scope"
+                  >{{ scope }}</span>
+                </details>
+              </dd>
+            </template>
             <dt>{{ t(row.status === 'pending' ? 'myFeishu.pendingExpiresAt' : 'myFeishu.expiresAt') }}</dt>
             <dd>{{ row.expires_at ? formatDateTime(row.expires_at) : '—' }}</dd>
           </dl>
@@ -147,5 +189,7 @@ h3 { margin: 0; overflow-wrap: anywhere; }
 dl { display: grid; grid-template-columns: minmax(80px, 120px) minmax(0, 1fr); gap: 12px; }
 dt { color: var(--el-text-color-secondary); }
 dd { margin: 0; overflow-wrap: anywhere; }
-.feishu-scope { display: block; }
+.feishu-scope, .feishu-requested-scope, .feishu-missing-scope { display: block; }
+.feishu-scope-hint { margin: 0 0 8px; color: var(--el-text-color-secondary); }
+summary { cursor: pointer; }
 </style>
