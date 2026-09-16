@@ -59,3 +59,46 @@ it('keeps access visible when revocation fails, and hides raw error details', as
   expect(w.text()).not.toContain('secret-token')
   w.unmount()
 })
+
+it('automatically discovers authorization completed outside the page and stops after leaving', async () => {
+  vi.useFakeTimers()
+  vi.mocked(feishuAuthorizations.list).mockResolvedValueOnce({ items: [] })
+  const w = render()
+  try {
+    await flushPromises()
+    expect(w.text()).toContain(i18n.global.t('myFeishu.empty'))
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(w.text()).toContain(row.bot_name)
+    w.unmount()
+    const calls = vi.mocked(feishuAuthorizations.list).mock.calls.length
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(feishuAuthorizations.list).toHaveBeenCalledTimes(calls)
+  } finally { vi.useRealTimers() }
+})
+it('refreshes when returning from Feishu without replacing the current card with a loading screen', async () => {
+  const w = render(); await flushPromises()
+  let resolve!: (value: { items: typeof row[] }) => void
+  vi.mocked(feishuAuthorizations.list).mockReturnValueOnce(new Promise(r => { resolve = r }))
+  window.dispatchEvent(new Event('focus'))
+  await flushPromises()
+  expect(feishuAuthorizations.list).toHaveBeenCalledTimes(2)
+  expect(w.text()).toContain(row.bot_name)
+  resolve({ items: [] }); await flushPromises()
+  expect(w.text()).toContain(i18n.global.t('myFeishu.empty'))
+  w.unmount()
+})
+it('does not let a stale automatic refresh restore access after revocation', async () => {
+  vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+  const w = render(); await flushPromises()
+  let resolve!: (value: { items: typeof row[] }) => void
+  vi.mocked(feishuAuthorizations.list).mockReturnValueOnce(new Promise(r => { resolve = r }))
+  window.dispatchEvent(new Event('focus')); await flushPromises()
+  vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'revoked' }] })
+  await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+  resolve({ items: [row] }); await flushPromises()
+  expect(w.text()).toContain(i18n.global.t('myFeishu.status.revoked'))
+  expect(w.find('[data-test="revoke-bot-1"]').exists()).toBe(false)
+  w.unmount()
+})

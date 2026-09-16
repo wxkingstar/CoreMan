@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import LoadState from '@/components/LoadState.vue'
@@ -8,12 +8,26 @@ import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 const rows = ref<FeishuAuthorization[]>([])
 const loading = ref(false), error = ref(''), revoking = ref('')
-async function load() {
-  if (loading.value) return
-  loading.value = true; error.value = ''
-  try { rows.value = (await feishuAuthorizations.list()).items }
-  catch { error.value = t('myFeishu.loadError') }
-  finally { loading.value = false }
+let requestVersion = 0
+let refreshing = false
+let timer: ReturnType<typeof setInterval> | undefined
+async function load(background = false) {
+  if (background && (refreshing || loading.value || revoking.value)) return
+  const version = ++requestVersion
+  if (background) refreshing = true
+  else { loading.value = true; error.value = '' }
+  try {
+    const result = await feishuAuthorizations.list()
+    if (version === requestVersion) { rows.value = result.items; error.value = '' }
+  } catch {
+    if (version === requestVersion && !background) error.value = t('myFeishu.loadError')
+  } finally {
+    if (background) refreshing = false
+    if (version === requestVersion) loading.value = false
+  }
+}
+function refreshVisible() {
+  if (document.visibilityState !== 'hidden') void load(true)
 }
 async function revoke(row: FeishuAuthorization) {
   if (revoking.value) return
@@ -26,7 +40,18 @@ async function revoke(row: FeishuAuthorization) {
   } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(t('myFeishu.revokeError')) }
   finally { revoking.value = '' }
 }
-onMounted(load)
+onMounted(() => {
+  void load()
+  window.addEventListener('focus', refreshVisible)
+  document.addEventListener('visibilitychange', refreshVisible)
+  timer = setInterval(refreshVisible, 15000)
+})
+onUnmounted(() => {
+  ++requestVersion
+  clearInterval(timer)
+  window.removeEventListener('focus', refreshVisible)
+  document.removeEventListener('visibilitychange', refreshVisible)
+})
 </script>
 <template>
   <section>
@@ -49,7 +74,7 @@ onMounted(load)
       <el-button
         :loading="loading"
         :disabled="!!revoking"
-        @click="load"
+        @click="load()"
       >
         {{ t('myFeishu.refresh') }}
       </el-button>
@@ -57,7 +82,7 @@ onMounted(load)
     <LoadState
       :loading="loading"
       :error="error"
-      @retry="load"
+      @retry="load()"
     />
     <template v-if="!loading && !error">
       <el-empty
