@@ -1,4 +1,4 @@
-"""公告管理 API（spec §5.5、§10.2：只有 ai_committee / platform_admin 能看能改）。"""
+"""公告管理 API（只有 ai_committee / platform_admin 能看能改）。"""
 
 from datetime import UTC, datetime, timedelta
 

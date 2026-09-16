@@ -13,6 +13,13 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSystemGrant, BusinessSystem, User
 from coreman.core.prompting.system_prompt import Speaker
 
+# 业务系统 key 同时是发言者令牌的 audience。CoreMan 管理 API 自己按 audience="coreman"
+# 接受 bot_token（api/bot_auth.py，且免 CSRF）：若允许登记名为 coreman 的系统，平台就会
+# 为每位发言者签发一枚能以其身份调用管理 API 的令牌，并注入 bot 管理员可控的 CLI。
+PLATFORM_AUDIENCE = "coreman"
+# 创建时拒绝；历史库里若已有同名行，签发与授权也一律跳过。
+RESERVED_SYSTEM_KEYS = frozenset({PLATFORM_AUDIENCE})
+
 
 @dataclass
 class SystemAccess:
@@ -40,6 +47,7 @@ async def build_system_access(
                 select(BusinessSystem)
                 .where(
                     BusinessSystem.enabled,
+                    BusinessSystem.key.not_in(RESERVED_SYSTEM_KEYS),
                     or_(BusinessSystem.default_for_all_bots, BusinessSystem.key.in_(grants)),
                     or_(
                         BusinessSystem.allowed_bot_ids.is_(None),

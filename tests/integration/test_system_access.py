@@ -24,6 +24,8 @@ async def test_only_current_user_receives_enabled_whitelisted_system_tokens(
                 key="erp", name="ERP", base_url="https://erp.example", allowed_bot_ids=[bot.id]
             ),
             BusinessSystem(key="cloud", name="Cloud", default_for_all_bots=True),
+            # 历史库里的保留 key：audience=coreman 的令牌能调用管理 API，永不签发。
+            BusinessSystem(key="coreman", name="Legacy", default_for_all_bots=True),
             BusinessSystem(
                 key="blocked", name="Blocked", default_for_all_bots=True, allowed_bot_ids=[]
             ),

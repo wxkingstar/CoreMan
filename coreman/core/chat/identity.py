@@ -1,4 +1,4 @@
-"""发言者身份解析（spec §8.2 步骤 1）。"""
+"""发言者身份解析。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""列表分页（spec §10.3：分页 50）。"""
+"""列表分页（默认每页 50 条）。"""
 
 from __future__ import annotations
 

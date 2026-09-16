@@ -1,4 +1,4 @@
-"""M2：运行时总线（process_instances…user_reached）与对话日志 chat_logs
+"""运行时总线（process_instances…user_reached）与对话日志 chat_logs
 
 Revision ID: 0004
 Revises: 0003
@@ -360,7 +360,7 @@ def upgrade() -> None:
     )
     op.create_index("chat_logs_status_idx", "chat_logs", ["status", sa.text("request_at DESC")])
 
-    # M1b 漏建的外键索引：删团队/删用户、以及「我创建的机器人」列表都要全表扫。
+    # 0003 漏建的外键索引：删团队/删用户、以及「我创建的机器人」列表都要全表扫。
     op.create_index("bots_team_id_idx", "bots", ["team_id"])
     op.create_index("bots_created_by_idx", "bots", ["created_by"])
     op.create_index("bot_members_user_id_idx", "bot_members", ["user_id"])

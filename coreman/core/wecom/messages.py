@@ -1,4 +1,4 @@
-"""平台无关的入站消息模型（spec §7.1）。
+"""平台无关的入站消息模型。
 
 网关把各平台的回调归一化成 `InboundMessage` 落进 `inbound_events.payload`，worker 只读这一
 份模型，不认识任何平台字段。模型故意保持「贫血」：网关不解析身份（`sender` 只有平台 id）、

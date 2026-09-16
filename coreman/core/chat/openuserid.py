@@ -1,4 +1,4 @@
-"""企微 open_userid 解密（spec §8.2 步骤 1）：自建应用 `batch/openuserid_to_userid`。
+"""企微 open_userid 解密：自建应用 `batch/openuserid_to_userid`。
 
 进程内正负缓存：成功 24 小时、失败 5 分钟；应用行 60 秒重读一次。解出的映射由
 identity.resolve_speaker 写回 `user_identities.open_id`，下次连本模块都不用叫。

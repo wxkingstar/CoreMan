@@ -1,4 +1,4 @@
-"""M3b 基础设施授权
+"""基础设施授权
 
 Revision ID: 0006
 Revises: 0005

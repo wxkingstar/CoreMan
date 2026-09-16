@@ -17,7 +17,9 @@ from coreman.api.errors import ApiError
 from coreman.core.auth.signatures import sign_request
 from coreman.core.db.models import ApiClient
 
-INFRA_SCOPES = {"relay", "org", "notify", "push", "systems", "memories", "cron", "escalations"}
+INFRA_SCOPES = {"relay", "org", "notify", "push", "systems", "memories", "escalations"}
+# 已下线的接口组：库里旧 api_client 可能仍存着，读取时忽略、保存时丢弃，不报错。
+RETIRED_INFRA_SCOPES = {"cron"}
 
 
 async def signed_client(

@@ -1,6 +1,6 @@
-"""Relay 可见性与模型校验（spec §5.3、§10.2）。API 路由与 worker 共用。
+"""Relay 可见性与模型校验。API 路由与 worker 共用。
 
-原先住在 `coreman/api/routers/relay_servers.py` / `bots.py` 里，被限流自动切换（spec §8.8）
+原先住在 `coreman/api/routers/relay_servers.py` / `bots.py` 里，被限流自动切换
 拉了进来：worker 不该为了两个判定去 import FastAPI 路由模块。原位置改成再导出，既有导入
 路径与测试一字不改。
 """

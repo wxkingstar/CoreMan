@@ -1,4 +1,4 @@
-"""引导管理员登录（spec §10.1）、当前用户、登出。"""
+"""引导管理员登录、当前用户、登出。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from coreman.core.logging import get_logger
 
 log = get_logger(__name__)
 public_router = APIRouter(prefix="/api/auth", tags=["auth"])
-# CSRF 挂在路由器级依赖上（spec §10.4）：/api/admin/* 的写端点一个都不能漏，
+# CSRF 挂在路由器级依赖上：/api/admin/* 的写端点一个都不能漏，
 # verify_csrf 对 GET/HEAD/OPTIONS 是 no-op，所以只读端点不受影响。
 admin_router = APIRouter(
     prefix="/api/admin/auth", tags=["auth"], dependencies=[Depends(verify_csrf)]
@@ -68,7 +68,7 @@ async def bootstrap_login(
         raise ApiError(401, 401, "用户名或密码错误")
 
     # 引导账号只认 source='bootstrap'（users_bootstrap_uk 保证至多一行），不按 login_name
-    # 匹配——避免撞上同步来的同名员工、错误地把其提升为 platform_admin（M0 复盘发现）。
+    # 匹配——避免撞上同步来的同名员工、错误地把其提升为 platform_admin。
     user = (
         await session.execute(select(User).where(User.source == "bootstrap"))
     ).scalar_one_or_none()

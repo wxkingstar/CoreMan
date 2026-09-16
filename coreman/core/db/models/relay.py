@@ -1,4 +1,4 @@
-"""运行时实例与模型目录（spec §5.3）。"""
+"""运行时实例与模型目录。"""
 
 from __future__ import annotations
 

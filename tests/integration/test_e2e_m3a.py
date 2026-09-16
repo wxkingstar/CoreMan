@@ -1,7 +1,7 @@
-"""M3a 端到端：媒体消息、AskUserQuestion 全回路、限流切换，全部经真网关 + 真 worker 跑通。
+"""端到端：媒体消息、AskUserQuestion 全回路、限流切换，全部经真网关 + 真 worker 跑通。
 
 与 `test_e2e_wecom.py` 同一套骨架（fake 企微 WS → 网关 → PostgreSQL → worker → 推回企微），
-但 worker 挂齐五个处理器，并注入假媒体下载点。断的是 M3a 三条主路径在「用户视角」的成品：
+但 worker 挂齐五个处理器，并注入假媒体下载点。断的是三条主路径在「用户视角」的成品：
 
 1. 图片消息：下载解密 → content parts 发给模型 → 回复推回企微，对话记录落 `image/success`。
 2. AskUserQuestion：卡片发出 → 用户点选 → 卡片就地改成已答 → 同一会话续跑 → 主动推送结论。

@@ -1,4 +1,4 @@
-"""对话日志落库（spec §5.7、§8.6）。
+"""对话日志落库。
 
 写日志永远不能拖慢、更不能弄挂一轮对话：`submit` 是发射后不管，`write` 自己吞掉所有异常，
 积压到上限就丢弃并计数。日志内容（用户消息、模型回复）只进库、绝不进日志流。
@@ -23,7 +23,7 @@ from coreman.core.pricing import estimate
 
 log = get_logger(__name__)
 
-# 超长内容截断（spec §5.7）：日志是给人看的审计痕迹，不是对话存档，relay 那边自有全量历史。
+# 超长内容截断：日志是给人看的审计痕迹，不是对话存档，relay 那边自有全量历史。
 LIMITS: dict[str, int] = {
     "message_content": 10000,
     "quoted_content": 5000,

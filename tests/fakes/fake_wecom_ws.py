@@ -1,6 +1,6 @@
 """假的企微智能机器人 WS 服务：真起一个本地 websockets server，供网关测试端到端跑。
 
-只实现被测代码真正依赖的那部分协议（平台协议 §3.1/§3.2）：订阅校验、ping 应答、
+只实现被测代码真正依赖的那部分协议：订阅校验、ping 应答、
 把消息/事件推给客户端、错误响应包，以及企微那个关键脾气——同一 `bot_id` 的新连接会把旧连接
 踢下线（先发 `disconnected_event` 再断）。收到的每一帧都记在 `frames` 里供断言。
 """
@@ -91,7 +91,7 @@ class FakeWeComWs:
             msgtype: {"content": text},
         }
         if chat_type == "group":
-            # chatid 只有群聊才有（§3.2）；单聊即便传了也不放，跟企微保持一致。
+            # chatid 只有群聊才有；单聊即便传了也不放，跟企微保持一致。
             body["chatid"] = chatid or "group1"
         return await self.send_frame(bot_id, "aibot_msg_callback", body)
 

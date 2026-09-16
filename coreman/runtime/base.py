@@ -1,4 +1,4 @@
-"""运行时进程基类：健康服务器、心跳日志、SIGTERM 优雅退出（spec §4.1、§13）。"""
+"""运行时进程基类：健康服务器、心跳日志、SIGTERM 优雅退出。"""
 
 from __future__ import annotations
 
@@ -135,7 +135,3 @@ class Service:
                 for sig in (signal.SIGTERM, signal.SIGINT):
                     loop.remove_signal_handler(sig)
                 self._log.info("service_stopped")
-
-
-def run_service(name: str) -> None:
-    asyncio.run(Service(name, HEALTH_PORTS[name]).run())

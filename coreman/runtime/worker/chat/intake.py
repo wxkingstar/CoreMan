@@ -1,4 +1,4 @@
-"""入站阶段（spec §8.2 步骤 1–5）：加载机器人、入站消息与发言者。
+"""入站阶段：加载机器人、入站消息与发言者。
 
 公告、白名单、内置命令、待答文本答案都在这里就地了结；relay 不可用排在最后。
 """
@@ -22,6 +22,7 @@ from coreman.core.db.models import (
     RelayServer,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.observability.metrics import WHITELIST_DENIED, after_commit
 from coreman.core.timeutils import parse_ts
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.inbound import (
@@ -159,7 +160,13 @@ class IntakeStage(ChatStageBase):
             intake.speaker.user_id is not None and intake.speaker.user_id in allowed
         ):
             return False
-        ctx.log.info("denied_not_allowed", platform_user_id=intake.speaker.platform_user_id)
+        # 身份未知与不在名单分开计数：前者成批出现通常是应用未绑定、用户不在可见范围或
+        # 解密接口抖动，整批员工被拒却只有 info 日志，运维看不到。
+        reason = "identity_unknown" if intake.speaker.user_id is None else "not_allowed"
+        ctx.log.warning(
+            "whitelist_denied", reason=reason, platform_user_id=intake.speaker.platform_user_id
+        )
+        after_commit(session, lambda: WHITELIST_DENIED.labels(reason).inc())
         await reply_once(
             session,
             ctx,
@@ -189,7 +196,7 @@ class IntakeStage(ChatStageBase):
     async def _pending_answer(
         self, session: AsyncSession, ctx: TaskContext, intake: Intake
     ) -> bool:
-        """AskUserQuestion 的自由文本答案 / 取消词（spec §8.2 步骤 5）。
+        """AskUserQuestion 的自由文本答案 / 取消词。
 
         排在命令之后、relay 检查之前：答一道题既不进模型也不碰 relay，机器人此刻没有可用
         实例照样答得下去；而 reset/stop 得先把待答状态清掉，不能被这里吞成一句答案。

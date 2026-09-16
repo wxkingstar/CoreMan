@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import ColumnElement, and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -20,6 +20,22 @@ from coreman.core.i18n.messages import msg
 ACTIVE = ("pending", "replied")
 OPEN = (*ACTIVE, "queued")
 TERMINAL = ("completed", "expired", "cancelled")
+# 通知入不了队（接收人账号已变更、应用失效）时 poll 返回的原因。
+NOTIFICATION_UNAVAILABLE = "notification_unavailable"
+
+
+def question_key(row: Escalation) -> str:
+    """本轮「等对方回答」的那条通知（提问或追问）首片的出站幂等键。"""
+    phase = "ask" if row.rounds == 0 else "followup"
+    return f"escalation:{row.escalation_id}:{phase}:{row.rounds}:0"
+
+
+def _question_key_sql() -> ColumnElement[str]:
+    """与 `question_key` 同义的 SQL 表达式，走 outbox.dedupe_key 的唯一索引。"""
+    phase = case((Escalation.rounds == 0, "ask"), else_="followup")
+    return func.concat(
+        "escalation:", Escalation.escalation_id, ":", phase, ":", Escalation.rounds, ":0"
+    )
 
 
 def is_expired(row: Escalation, now: datetime) -> bool:
@@ -33,7 +49,8 @@ async def lock(session: AsyncSession) -> None:
     await session.execute(text("SELECT pg_advisory_xact_lock(721309130009)"))
 
 
-async def notify(session: AsyncSession, row: Escalation, content: str, phase: str) -> None:
+async def notify(session: AsyncSession, row: Escalation, content: str, phase: str) -> bool:
+    """按接收人快照入队通知；接收人账号已变更或应用失效、入不了队时返回 False。"""
     platform = "feishu" if row.notify_platform == "feishu_bot" else "wecom"
     ident = await session.scalar(
         select(UserIdentity).where(
@@ -45,7 +62,7 @@ async def notify(session: AsyncSession, row: Escalation, content: str, phase: st
         or ident.platform_user_id != row.to_platform_user_id
         or row.platform_app_id is None
     ):
-        return
+        return False
     for index, part in enumerate(chunks(content, 2048)):
         await outbox.add(
             session,
@@ -66,11 +83,12 @@ async def notify(session: AsyncSession, row: Escalation, content: str, phase: st
                 "msgtype": "text",
             },
         )
+    return True
 
 
 async def notify_localized(
     session: AsyncSession, row: Escalation, key: str, phase: str, **values: object
-) -> None:
+) -> bool:
     recipient = await session.get(User, row.to_user_id)
     locale = recipient.locale if recipient else "zh"
     values["reply_hint"] = msg(
@@ -80,7 +98,7 @@ async def notify_localized(
         values["sender"] = (
             msg("esc_sender", locale, name=values["sender"]) if values["sender"] else ""
         )
-    await notify(session, row, msg(key, locale, **values), phase)
+    return await notify(session, row, msg(key, locale, **values), phase)
 
 
 async def activate_next(session: AsyncSession, recipient: uuid.UUID, now: datetime) -> None:
@@ -113,7 +131,7 @@ async def activate_next(session: AsyncSession, recipient: uuid.UUID, now: dateti
     # 排队消耗墙钟期限；激活不无限延长已经存在的请求。
     bot = await session.get(Bot, row.bot_id)
     sender = await session.get(User, row.from_user_id) if row.from_user_id else None
-    await notify_localized(
+    queued = await notify_localized(
         session,
         row,
         "esc_ask",
@@ -123,6 +141,11 @@ async def activate_next(session: AsyncSession, recipient: uuid.UUID, now: dateti
         question=row.question,
     )
     await session.flush()
+    if not queued:
+        # 提问根本发不出去：留着 pending 只会让 Agent 空等到过期，直接结束并激活下一个。
+        row.status, row.updated_at = "cancelled", now
+        await session.flush()
+        await activate_next(session, recipient, now)
 
 
 async def create(
@@ -273,9 +296,10 @@ async def followup(session: AsyncSession, row: Escalation, question: str, now: d
     row.status = "pending"
     row.last_polled_at = now
     row.updated_at = now
-    await notify_localized(
+    if not await notify_localized(
         session, row, "esc_followup", "followup", round=row.rounds, question=question
-    )
+    ):
+        await close(session, row, "cancelled", None, now)
 
 
 async def add_reply(
@@ -386,6 +410,39 @@ async def add_reply(
     return row
 
 
+async def delivery_failures(session: AsyncSession, rows: list[Escalation]) -> dict[str, str]:
+    """因本轮提问 / 追问通知发不出去而结束的求助 → 原因（escalation_id 为键）。
+
+    原因不另存列：由那条通知的出站记录推出来——`failed` 取其脱敏后的 last_error；整条没入队
+    （activated 之后本该必有）记 `notification_unavailable`。被 Agent 取消、同组他人胜出的
+    求助，其通知要么已发出、要么发送前重查被标 skipped，都不会被误判成发送失败。
+    """
+    candidates = {
+        question_key(row): row
+        for row in rows
+        if row.status == "cancelled" and row.activated_at is not None
+    }
+    if not candidates:
+        return {}
+    items = {
+        item.dedupe_key: item
+        for item in await session.scalars(
+            select(OutboxItem).where(OutboxItem.dedupe_key.in_(list(candidates)))
+        )
+    }
+    failures: dict[str, str] = {}
+    # 已发出的出站记录保留 7 天就会被清理：更早结束的求助查不到记录不代表没入队，不下结论。
+    recent = datetime.now(UTC) - timedelta(days=6)
+    for key, row in candidates.items():
+        item = items.get(key)
+        if item is None:
+            if row.updated_at is not None and row.updated_at >= recent:
+                failures[row.escalation_id] = NOTIFICATION_UNAVAILABLE
+        elif item.status == "failed":
+            failures[row.escalation_id] = item.last_error or "notification_failed"
+    return failures
+
+
 async def tick(session: AsyncSession, now: datetime) -> int:
     await lock(session)
     active = aliased(Escalation)
@@ -394,7 +451,14 @@ async def tick(session: AsyncSession, now: datetime) -> int:
         .where(active.to_user_id == Escalation.to_user_id, active.status.in_(ACTIVE))
         .exists()
     )
+    # 本轮提问 / 追问的通知已判永久失败（重试耗尽或平台拒绝）：对方不会收到，求助不能继续挂着。
+    question_failed = (
+        select(OutboxItem.id)
+        .where(OutboxItem.dedupe_key == _question_key_sql(), OutboxItem.status == "failed")
+        .exists()
+    )
     due = or_(
+        and_(Escalation.status == "pending", question_failed),
         Escalation.expires_at <= now,
         Escalation.last_polled_at < now - timedelta(seconds=300),
         and_(Escalation.status == "queued", ~active_for_recipient),
@@ -422,9 +486,21 @@ async def tick(session: AsyncSession, now: datetime) -> int:
             .with_for_update()
         )
     )
+    failed_keys = set(
+        await session.scalars(
+            select(OutboxItem.dedupe_key).where(
+                OutboxItem.dedupe_key.in_([question_key(row) for row in rows]),
+                OutboxItem.status == "failed",
+            )
+        )
+    )
     changed = 0
     for row in rows:
-        if row.expires_at <= now or (
+        if row.status == "pending" and question_key(row) in failed_keys:
+            # 通知发不出去先于到期判定：poll 能拿到明确的失败原因，而不是笼统的 expired。
+            await close(session, row, "cancelled", None, now, activate=False)
+            changed += 1
+        elif row.expires_at <= now or (
             row.last_polled_at and now - row.last_polled_at > timedelta(seconds=300)
         ):
             await close(session, row, "expired", "expired", now, activate=False)

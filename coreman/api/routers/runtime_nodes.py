@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
@@ -174,6 +174,7 @@ async def create_link(
             "workspace_root": [None, body.workspace_root],
             **({"ca_pem": [None, "provided"]} if body.options.ca_pem else {}),
         },
+        ip=client_ip(request),
     )
     await session.commit()
     base = request.app.state.settings.public_base_url
@@ -203,6 +204,7 @@ async def list_links(
 @router.delete("/install-links/{link_id}")
 async def revoke_link(
     link_id: uuid.UUID,
+    request: Request,
     actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
@@ -217,6 +219,7 @@ async def revoke_link(
         actor_login=actor.login_name,
         target_type="runtime_install_link",
         target_id=str(link_id),
+        ip=client_ip(request),
     )
     await session.commit()
     return {"code": 0, "data": None}
@@ -280,6 +283,7 @@ async def list_nodes(
 async def patch_node(
     node_id: uuid.UUID,
     body: NodePatch,
+    request: Request,
     actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
@@ -317,6 +321,7 @@ async def patch_node(
         target_type="runtime_node",
         target_id=str(node_id),
         diff=diff,
+        ip=client_ip(request),
     )
     await session.commit()
     return {"code": 0, "data": None}

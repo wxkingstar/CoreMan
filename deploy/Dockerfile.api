@@ -38,5 +38,7 @@ ENV COREMAN_BUILD_REVISION=${BUILD_REVISION}
 LABEL org.opencontainers.image.revision=${BUILD_REVISION}
 USER coreman
 EXPOSE 8000
+# 只信任 FORWARDED_ALLOW_IPS 列出的反向代理（uvicorn 支持 IP 与 CIDR）传来的 X-Forwarded-For；
+# compose 传入 Caddy 所在的 edge 网段，未设置时 uvicorn 只信任 127.0.0.1。
 CMD ["/app/.venv/bin/uvicorn", "coreman.api.main:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--forwarded-allow-ips", "*"]
+     "--proxy-headers"]

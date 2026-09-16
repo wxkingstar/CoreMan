@@ -45,16 +45,47 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     assert len(fake.requests) == 1
     env = fake.requests[0]["env_vars"]
     assert env["COREMAN_USER_LOGIN"] == "creator" and env["COREMAN_CHAT_TYPE"] == "cron"
+    system_prompt = fake.requests[0]["messages"][0]["content"]
+    assert "# Scheduled Run Constraints" in system_prompt
     records = (await db_session.scalars(select(ChatLog))).all()
     assert len(records) == 1 and records[0].chat_type == "cron"
     assert await db_session.scalar(select(UserReached)) is None
     item = await db_session.scalar(select(OutboxItem))
-    assert item is not None and item.payload["markdown"] == run.reply and item.status == "pending"
-    assert run.delivery["outbox_ids"] == [item.id]
+    assert item is not None and item.status == "pending"
+    pushed = item.payload["markdown"]
+    from coreman.core.i18n.messages import msg
+
+    # 推送带任务名/机器人/耗时的头与「定时推送」尾，存档的 reply 仍是原文。
+    assert pushed.startswith(f"**{run.job_name}**\n> 机器人：销售 | 耗时：")
+    assert run.reply in pushed and pushed.endswith(msg("cron_push_footer"))
+    assert run.delivery["outbox_ids"] == [item.id] and "fallback_user_id" not in run.delivery
     await db_session.refresh(row)
     assert row.running_task_id is None
     await CronRunHandler().run(ctx)
     assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
+
+
+async def test_oversized_result_is_truncated_and_still_delivered(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch
+) -> None:
+    from coreman.core.i18n.messages import msg
+    from coreman.runtime.worker import cron_handler
+
+    monkeypatch.setattr(cron_handler, "RESULT_MAX_CHARS", 3)
+    now = datetime.now(UTC)
+    await job(db_session, now, target_chats=["test-group"])
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    notice = msg("cron_result_truncated", limit=3)
+    assert run is not None and run.status == "success" and run.error_message is None
+    assert run.reply == "你好，" + notice
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None and run.reply in item.payload["markdown"]
+    assert (await tasks.get(db_session, task.id)).status == "succeeded"  # type: ignore[union-attr]
 
 
 async def test_precheck_failures_and_skip_do_not_call_model(
@@ -122,6 +153,12 @@ async def test_disabled_actor_and_lost_worker_recovery(
     runs = (await db_session.scalars(select(CronRun))).all()
     await db_session.refresh(runs[-1])
     assert runs[-1].status == "failed" and runs[-1].delivery["outbox_ids"]
+    from coreman.core.i18n.messages import msg
+
+    lost = await db_session.get(OutboxItem, runs[-1].delivery["outbox_ids"][0])
+    assert lost is not None and lost.payload["markdown"] == msg(
+        "cron_failed", name=runs[-1].job_name, bot="销售", reason=msg("cron_worker_lost")
+    )
     assert len((await db_session.scalars(select(ChatLog))).all()) == 2
 
 
@@ -167,6 +204,31 @@ async def test_private_delivery_revalidates_identity(
     actor.status = "disabled"
     await db_session.commit()
     assert not await private_target_valid(db_session, item)
+
+
+async def test_result_without_any_target_falls_back_to_creator(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    now = datetime.now(UTC)
+    row = await job(db_session, now)
+    db_session.add(
+        UserReached(bot_id=row.bot_id, user_id=row.created_by, platform_chat_id="creator-chat")
+    )
+    await db_session.commit()
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    await CronRunHandler().run(
+        build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    )
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "success"
+    # 一个接收人、群、邮箱、webhook 都没配：跑成功的结果不能静默无人收，兜底私聊给创建者。
+    assert run.delivery["fallback_user_id"] == str(row.created_by)
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None and item.target["chat_id"] == "creator-chat"
+    assert item.target["recipient_user_id"] == str(row.created_by)
+    assert run.reply is not None and run.reply in item.payload["markdown"]
 
 
 async def test_long_precheck_does_not_stall_heartbeats(
@@ -229,6 +291,10 @@ async def test_cron_relay_error_without_finish_keeps_reason(
     assert log is not None and log.error_code == "x_relay_error"
     item = await db_session.scalar(select(OutboxItem))
     assert item is not None and "codex produced no output" in item.payload["markdown"]
+    # 失败推送与成功推送同一套标记：任务名、机器人、原因；不带「定时推送」尾巴。
+    assert item.payload["markdown"].startswith("**定时任务执行失败**\n> 任务：")
+    assert "> 机器人：销售\n> 原因：x_relay_error" not in item.payload["markdown"]
+    assert "> 原因：[codex error]" in item.payload["markdown"]
 
 
 async def test_cron_handler_leaves_periodic_heartbeats_to_the_service(

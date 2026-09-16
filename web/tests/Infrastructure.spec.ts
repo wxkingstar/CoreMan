@@ -35,6 +35,23 @@ describe('Infrastructure management', () => {
     expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ key: 'new', allowed_bot_ids: [] }))
     wrapper.unmount()
   })
+  it('defaults new systems to an empty allowlist and flags systems open to all employees', async () => {
+    vi.mocked(systems.create).mockResolvedValue(erp)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-test="open-to-all"]').text()).toBe(i18n.global.t('infra.openToAllBots'))
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: typeof erp; restricted: boolean }
+    expect(vm.restricted).toBe(true)
+    expect(document.querySelector('[data-test="open-to-all-warning"]')).toBeNull()
+    vm.form.key = 'oa'; vm.form.name = 'OA'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ key: 'oa', allowed_bot_ids: [] }))
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    vm.restricted = false; await flushPromises()
+    expect(document.querySelector('[data-test="open-to-all-warning"]')?.textContent).toBe(i18n.global.t('infra.openToAllWarning'))
+    wrapper.unmount()
+  })
   it('shows a new client secret once and clears it when the dialog closes', async () => {
     vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
@@ -98,6 +115,20 @@ describe('Infrastructure management', () => {
     await flushPromises()
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.org'))
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.push'))
+    wrapper.unmount()
+  })
+  it('offers no retired cron scope and drops it when editing an old client', async () => {
+    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], enabled: true, version: 3, last_used_at: null, has_secret: true }
+    vi.mocked(credentials.clients).mockResolvedValue({ items: [old], total: 1, page: 1, per_page: 50 })
+    vi.mocked(credentials.update).mockResolvedValue({ ...old, scopes: ['org'], version: 4 })
+    const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { scopes: string[]; form: { scopes: string[] }; edit: (row: typeof old) => Promise<void>; save: () => Promise<void> }
+    expect(vm.scopes).not.toContain('cron')
+    await vm.edit(old); await flushPromises()
+    expect(vm.form.scopes).toEqual(['org'])
+    await vm.save(); await flushPromises()
+    expect(credentials.update).toHaveBeenCalledWith(expect.objectContaining({ app_key: 'old', scopes: ['org'] }))
     wrapper.unmount()
   })
   it('saves grants with the loaded version and excludes disallowed systems', async () => {

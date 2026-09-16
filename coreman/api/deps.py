@@ -16,7 +16,6 @@ from coreman.api.security import (
     refresh_session_cookie,
     unsign_session_id,
 )
-from coreman.core.config import Settings
 from coreman.core.db.models import AdminSession, User
 from coreman.core.settings_store import SettingsStore
 
@@ -26,10 +25,6 @@ _RENEW_INTERVAL = timedelta(minutes=5)
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     async with request.app.state.session_factory() as session:
         yield session
-
-
-def get_settings_dep(request: Request) -> Settings:
-    return request.app.state.settings  # type: ignore[no-any-return]
 
 
 def get_store(request: Request) -> SettingsStore:

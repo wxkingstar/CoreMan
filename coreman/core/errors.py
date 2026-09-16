@@ -2,6 +2,10 @@
 
 from typing import Any
 
+# 乐观锁版本冲突（If-Match / version 不一致）的专用业务码。其它 409（工作目录被占用、
+# 飞书应用已分配、记录已存在）仍用 409，前端据此区分「请刷新」与「原话提示」。
+VERSION_CONFLICT = 40901
+
 
 class ApiError(Exception):
     def __init__(

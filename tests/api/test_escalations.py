@@ -1,12 +1,17 @@
 import asyncio
 import hashlib
+import json
+import time
 import uuid
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from xml.sax.saxutils import escape
 
+import httpx
 import pytest
 from sqlalchemy import select, update
 
+from coreman.core.auth.signatures import sign_request
 from coreman.core.db.models import (
     ApiClient,
     Escalation,
@@ -21,6 +26,25 @@ from coreman.core.notifications import NotificationSkipped, escalation_current
 from tests.api.conftest import login_existing
 from tests.integration.worker_helpers import seed_bot
 from tests.unit.test_callback_crypto import AES_KEY, encrypted_message
+
+
+class Signed(httpx.Auth):
+    """按实际路径、查询参数和 JSON 正文给每个请求签名；回调等其它路由忽略这些头。"""
+
+    def __init__(self, app_key: str, secret: str) -> None:
+        self.app_key, self.secret = app_key, secret
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        params = dict(request.url.params)
+        if request.content and "application/json" in request.headers.get("content-type", ""):
+            params.update(json.loads(request.content))
+        ts = str(int(time.time()))
+        request.headers["X-App-Key"] = self.app_key
+        request.headers["X-Timestamp"] = ts
+        request.headers["X-Signature"] = sign_request(
+            request.method, request.url.path, params, ts, self.app_key, self.secret
+        )
+        yield request
 
 
 async def setup(client, session):
@@ -54,7 +78,7 @@ async def setup(client, session):
     session.add(app)
     await session.commit()
     await login_existing(client, session, creator)
-    client.headers.update({"X-App-Key": "esc", "X-API-Key": "client-secret"})
+    client.auth = Signed("esc", "client-secret")
     return bot, recipient, app, cipher
 
 
@@ -124,9 +148,9 @@ async def test_escalation_fifo_callback_dedupe_and_followups(client, db_session,
     assert result.json()["data"]["status"] == "pending"
 
 
-async def test_public_key_not_credential_and_sender_cannot_be_forged(client, db_session):
+@pytest.mark.parametrize("path", ["/api/escalation/create", "/api/infra/escalations"])
+async def test_unsigned_secret_rejected_and_sender_cannot_be_forged(client, db_session, path):
     bot, _, _, _ = await setup(client, db_session)
-    path = "/api/escalation/create"
     body = {
         "bot_key": bot.bot_key,
         "to_user_id": "recipient",
@@ -134,9 +158,12 @@ async def test_public_key_not_credential_and_sender_cannot_be_forged(client, db_
         "from_user_id": "recipient",
     }
     assert (await client.post(path, json=body)).status_code == 403
-    client.headers["X-API-Key"] = "esc"
-    assert (await client.post(path, json=body)).status_code == 401
-    client.headers["X-API-Key"] = "client-secret"
+    # 旧的 X-App-Key + X-API-Key 明文 secret 鉴权已移除：不签名一律 401。
+    client.auth = None
+    legacy = {"X-App-Key": "esc", "X-API-Key": "client-secret"}
+    assert (await client.post(path, json=body, headers=legacy)).status_code == 401
+    assert await db_session.scalar(select(Escalation)) is None
+    client.auth = Signed("esc", "client-secret")
     client.cookies.clear()
     assert (await client.post(path, json=body)).status_code == 403
     body.pop("from_user_id")
@@ -322,10 +349,10 @@ async def test_group_winner_client_isolation_and_followup_delivery(client, db_se
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     path = f"{base}/{data['group_id']}"
-    client.headers.update({"X-App-Key": "other-client", "X-API-Key": "other-secret"})
+    client.auth = Signed("other-client", "other-secret")
     assert (await client.get(path)).status_code == 404
     assert (await client.post(f"{path}/cancel")).status_code == 404
-    client.headers.update({"X-App-Key": "esc", "X-API-Key": "client-secret"})
+    client.auth = Signed("esc", "client-secret")
     await db_session.execute(update(OutboxItem).values(status="sent"))
     await db_session.commit()
     query, raw = callback_body(app, msg_id="group-first")
@@ -350,6 +377,62 @@ async def test_group_winner_client_isolation_and_followup_delivery(client, db_se
     assert (await client.post(f"{path}/resolve", json={"resolution": "agent"})).status_code == 200
     data = (await client.get(path)).json()["data"]
     assert data["resolution"] == "agent" and data["followup_questions"] == ["round 1", "round 2"]
+
+
+async def test_failed_question_delivery_ends_escalation_with_reason(client, db_session, db_engine):
+    from coreman.core.bus import outbox
+
+    bot, _, _, _ = await setup(client, db_session)
+    base = "/api/infra/escalations"
+
+    async def create(question):
+        body = {"bot_key": bot.bot_key, "to_user_id": "recipient", "question": question}
+        response = await client.post(base, json=body)
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    first, second = await create("Q1"), await create("Q2")
+    assert first["status"] == "pending" and second["status"] == "queued"
+    assert first["delivery_failed"] is False and first["failure_reason"] is None
+    ask = await db_session.scalar(
+        select(OutboxItem).where(
+            OutboxItem.dedupe_key == f"escalation:{first['escalation_id']}:ask:0:0"
+        )
+    )
+    # 重试耗尽 / 平台永久拒绝：通知判死之后，求助不能继续挂成 pending 让 Agent 空等。
+    await outbox.fail(db_session, ask.id, "WeComError (60020)")
+    await db_session.commit()
+    async with make_session_factory(db_engine)() as session:
+        assert await service.tick(session, datetime.now(UTC)) == 1
+        await session.commit()
+    data = (await client.get(f"{base}/{first['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is True
+    assert data["failure_reason"] == "WeComError (60020)"
+    # 失败的那条腾出位置，排队的下一条照常激活；Agent 自己取消的不算发送失败。
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "pending" and data["delivery_failed"] is False
+    assert (await client.post(f"{base}/{second['escalation_id']}/cancel")).status_code == 200
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is False
+
+
+async def test_unreachable_recipient_is_cancelled_instead_of_left_pending(client, db_session):
+    bot, recipient, _, _ = await setup(client, db_session)
+    base = "/api/infra/escalations"
+    body = {"bot_key": bot.bot_key, "to_user_id": "recipient", "question": "Q1"}
+    first = (await client.post(base, json=body)).json()["data"]
+    second = (await client.post(base, json={**body, "question": "Q2"})).json()["data"]
+    assert second["status"] == "queued"
+    ident = await db_session.scalar(
+        select(UserIdentity).where(UserIdentity.user_id == recipient.id)
+    )
+    ident.platform_user_id = "recipient-rebound"
+    await db_session.commit()
+    # 排队的那条轮到激活时，接收人账号已变更：通知入不了队，直接结束而不是挂成 pending。
+    assert (await client.post(f"{base}/{first['escalation_id']}/cancel")).status_code == 200
+    data = (await client.get(f"{base}/{second['escalation_id']}")).json()["data"]
+    assert data["status"] == "cancelled" and data["delivery_failed"] is True
+    assert data["failure_reason"] == service.NOTIFICATION_UNAVAILABLE
 
 
 async def test_history_prevents_destructive_config_delete(client, db_session):

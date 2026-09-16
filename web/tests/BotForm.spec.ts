@@ -13,6 +13,7 @@ vi.mock('@/api/admin', () => ({
 
 import { bots, relays, settings } from '@/api/admin'
 import { ApiError } from '@/api/client'
+import { VERSION_CONFLICT_CODE } from '@/utils/errors'
 import type { BotOut } from '@/api/types'
 import { i18n } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -149,7 +150,7 @@ describe('BotForm', () => {
     const warning = vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
     vi.mocked(bots.patch).mockReset()
     vi.mocked(bots.patch)
-      .mockRejectedValueOnce(new ApiError(409, 409, '记录已被他人修改，请刷新后重试'))
+      .mockRejectedValueOnce(new ApiError(409, VERSION_CONFLICT_CODE, '记录已被他人修改，请刷新后重试'))
       .mockResolvedValueOnce({ ...editBot, name: '新名字', version: 6 })
     vi.mocked(bots.get).mockResolvedValueOnce({ ...editBot, description: '别人改的', version: 5 })
     const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })

@@ -252,6 +252,9 @@ def image_for(service):
 if args[:2] == ["image", "inspect"]:
     missing = set(os.environ.get("FAKE_DOCKER_MISSING", "").split())
     sys.exit(1 if missing & set(args[2:]) else 0)
+if args[:2] == ["volume", "inspect"]:
+    volumes = set(os.environ.get("FAKE_DOCKER_VOLUMES", "").split())
+    sys.exit(0 if args[2:] and set(args[2:]) <= volumes else 1)
 if args[:1] == ["update"]:
     state[args[-1][4:]]["restart"] = "no"
     save()
@@ -484,6 +487,56 @@ def test_first_build_records_deploy_tag(stack: FakeStack) -> None:
     assert "coreman up" in r.stdout
 
 
+# ---- .env 与已有数据卷 ----
+
+
+def test_up_refuses_to_generate_env_over_existing_pgdata(stack: FakeStack) -> None:
+    stack.env_file.unlink()
+    r = stack.run("up", FAKE_DOCKER_VOLUMES="coreman_pgdata")
+    assert r.returncode == 2
+    assert not stack.env_file.exists()
+    assert "coreman_pgdata" in r.stderr and "MASTER_KEY" in r.stderr
+    assert "docker volume rm coreman_pgdata" in r.stderr and "未做任何改动" in r.stderr
+    calls = stack.calls()
+    assert calls == [c for c in calls if c.startswith("volume inspect coreman_pgdata")]
+    assert calls  # 确实做了只读检测，且没有启动 compose 或删除任何东西
+
+
+def test_up_refuses_to_replace_placeholder_password_over_existing_pgdata(
+    stack: FakeStack,
+) -> None:
+    original = stack.env_file.read_bytes()  # .env.example：MASTER_KEY 为空、库密码 change-me
+    r = stack.run("up", FAKE_DOCKER_VOLUMES="coreman_pgdata")
+    assert r.returncode == 2
+    assert "POSTGRES_PASSWORD" in r.stderr
+    assert stack.env_file.read_bytes() == original
+
+
+def test_up_generates_env_when_no_pgdata_exists(stack: FakeStack) -> None:
+    stack.env_file.unlink()
+    r = stack.run("up", FAKE_DOCKER_VOLUMES="other_pgdata")
+    assert r.returncode == 0, r.stderr
+    content = stack.env_file.read_text(encoding="utf-8")
+    assert "MASTER_KEY=\n" not in content and "POSTGRES_PASSWORD=change-me" not in content
+    assert any(c.startswith("volume inspect coreman_pgdata") for c in stack.calls())
+
+
+def test_complete_env_with_existing_pgdata_starts_normally(stack: FakeStack) -> None:
+    assert stack.run("up", FAKE_DOCKER_VOLUMES="other_pgdata").returncode == 0
+    generated = stack.env_file.read_bytes()
+    stack.docker_log.unlink()
+    r = stack.run("up", FAKE_DOCKER_VOLUMES="coreman_pgdata")
+    assert r.returncode == 0, r.stderr
+    assert stack.env_file.read_bytes() == generated
+    assert not any(c.startswith("volume inspect") for c in stack.calls())
+
+
+def test_pgdata_check_follows_compose_project_name(stack: FakeStack) -> None:
+    stack.env_file.unlink()
+    r = stack.run("up", COMPOSE_PROJECT_NAME="staging", FAKE_DOCKER_VOLUMES="staging_pgdata")
+    assert r.returncode == 2 and "staging_pgdata" in r.stderr
+
+
 # ---- 网关活跃侧持久化 ----
 
 
@@ -523,6 +576,15 @@ def test_upgrade_gateway_records_and_alternates_active_side(stack: FakeStack) ->
     assert second.returncode == 0, second.stderr
     assert "drain --prefix gateway-wecom-b" in "\n".join(stack.calls())
     assert gateway_state(stack.state_dir) == "wecom=a\nfeishu=b\n"
+
+
+def test_upgrade_api_reconciles_caddy_after_api(stack: FakeStack) -> None:
+    """Caddy 须与 API 同在 edge 网段，API 才采信它转发的客户端地址；升级 API 后顺带对齐 Caddy。"""
+    stack.seed("v1")
+    r = stack.run("upgrade", "api", "v2")
+    assert r.returncode == 0, r.stderr
+    calls = "\n".join(stack.calls())
+    assert calls.index("--pull never api-2") < calls.index("up -d --no-deps --pull never caddy")
 
 
 def test_upgrade_all_follows_recorded_sides(stack: FakeStack) -> None:

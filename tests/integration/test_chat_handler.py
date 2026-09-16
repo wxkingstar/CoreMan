@@ -255,12 +255,29 @@ async def test_whitelist_unsupported_help_and_disabled(
     await db_session.commit()
     bot, _, _ = await seed_bot(db_session, allowed_user_ids=[u.id])
     fake = FakeRelay("normal")
+    from coreman.core.observability.metrics import REGISTRY
+
+    def denied_count(reason: str) -> float:
+        name = "coreman_whitelist_denied_total"
+        return REGISTRY.get_sample_value(name, {"reason": reason}) or 0.0
+
+    unknown_before, outsider_before = denied_count("identity_unknown"), denied_count("not_allowed")
     denied = await chat_task(db_session, bot, "hi", sender="zs")
     await run(db_engine, denied, fake)
     assert (await stream_of(db_session, denied.id)).final_text == msg(
         "no_permission"
     ) and fake.requests == []
     assert (await db_session.execute(select(ChatLog))).scalars().all() == []
+    # 拒绝按原因计数：没映射到员工的账号与名单外的员工分开统计。
+    assert denied_count("identity_unknown") == unknown_before + 1
+    outsider = User(login_name="outsider", display_name="名单外")
+    db_session.add(outsider)
+    await db_session.flush()
+    db_session.add(UserIdentity(user_id=outsider.id, platform="wecom", platform_user_id="out"))
+    await db_session.commit()
+    await run(db_engine, await chat_task(db_session, bot, "hi", sender="out"), fake)
+    assert denied_count("not_allowed") == outsider_before + 1
+    assert denied_count("identity_unknown") == unknown_before + 1 and fake.requests == []
     ok = await chat_task(db_session, bot, "hi", sender="vip")
     await run(db_engine, ok, fake)
     assert len(fake.requests) == 1
@@ -335,6 +352,118 @@ async def test_user_stop_and_superseded(db_engine: AsyncEngine, db_session: Asyn
     assert (await tasks.get(db_session, new.id)).status == "succeeded"  # type: ignore[union-attr]
 
 
+async def test_long_task_done_notice_only_for_streamed_success(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    bot, _, _ = await seed_bot(db_session)
+
+    async def run_with(text: str, relay: FakeRelay, threshold: int):  # type: ignore[no-untyped-def]
+        t = await chat_task(db_session, bot, text)
+        ctx = build_ctx(db_engine, t, relay_client_factory=lambda _r: relay.client())
+        handler = ChatTaskHandler()
+        handler.LONG_TASK_SECONDS = threshold
+        handler.LONG_TASK_NOTICE_DELAY_SECONDS = 600
+        await handler.run(ctx)
+        await ctx.chat_logs.drain(5)
+        return t
+
+    quick = await run_with("quick", FakeRelay("normal"), 60)
+    slow = await run_with("slow", FakeRelay("normal"), 0)
+    broken = await run_with("broken", FakeRelay("relay_error"), 0)
+    items = {i.dedupe_key: i for i in (await db_session.execute(select(OutboxItem))).scalars()}
+    # 流式气泡原地刷新不弹通知：只有按流收尾的成功长任务才另发一条提醒，出错不算完成。
+    assert f"{quick.id}:send:long_done" not in items
+    assert f"{broken.id}:send:long_done" not in items
+    notice = items[f"{slow.id}:send:long_done"]
+    assert notice.payload["markdown"] in {msg("long_task_done", seconds=s) for s in range(5)}
+    assert notice.target == {"chat_id": "zs"} and notice.status == "pending"
+    # 延后入队，让网关先推终稿的 finish 帧。
+    assert notice.not_before > datetime.now(UTC) + timedelta(seconds=300)
+
+
+async def test_busy_session_defers_new_message_instead_of_failing(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func, update
+
+    from coreman.core.db.models import Task
+
+    bot, _, _ = await seed_bot(db_session)
+    fake = FakeRelay("normal")
+
+    def handler(**overrides: float) -> ChatTaskHandler:
+        h = ChatTaskHandler()
+        h.SUPERSEDE_WAIT_SECONDS = 0.2
+        h.SUPERSEDE_RETRY_SECONDS = 600
+        for key, value in overrides.items():
+            setattr(h, key, value)
+        return h
+
+    async def run_task(task, h: ChatTaskHandler) -> None:  # type: ignore[no-untyped-def]
+        ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: fake.client())
+        await h.run(ctx)
+        await ctx.chat_logs.drain(5)
+
+    async def reclaim(task_id: int):  # type: ignore[no-untyped-def]
+        await db_session.execute(
+            update(Task).where(Task.id == task_id).values(run_after=func.now())
+        )
+        await db_session.commit()
+        claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+        await db_session.commit()
+        assert claimed is not None and claimed.id == task_id
+        return claimed
+
+    async def stream_count(task_id: int) -> int:
+        rows = await db_session.execute(select(TaskStream).where(TaskStream.task_id == task_id))
+        return len(rows.scalars().all())
+
+    # 上一轮一直停不下来（认领着却没人收尾）：新消息不再以 session_busy 失败，而是放回队列。
+    stuck = await chat_task(db_session, bot, "first")
+    new = await chat_task(db_session, bot, "second")
+    await run_task(new, handler())
+    row = await tasks.get(db_session, new.id)
+    assert row is not None and row.status == "queued" and row.claimed_by is None
+    assert row.run_after > datetime.now(UTC) + timedelta(seconds=300)
+    assert (await tasks.get(db_session, stuck.id)).cancel_requested_at is not None  # type: ignore[union-attr]
+    assert fake.requests == [] and await stream_count(new.id) == 0
+    # 旧任务退出后再认领：照常作答，同会话仍是串行的。
+    await tasks.finish(db_session, stuck.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+    again = await reclaim(new.id)
+    assert again.attempts == 2
+    await run_task(again, handler())
+    assert (await tasks.get(db_session, new.id)).status == "succeeded"  # type: ignore[union-attr]
+    assert len(fake.requests) == 1
+
+    # 重排次数到头才告诉用户，文案走 i18n。
+    stuck2 = await chat_task(db_session, bot, "third")
+    busy = await chat_task(db_session, bot, "fourth")
+    await run_task(busy, handler(SUPERSEDE_MAX_ATTEMPTS=1))
+    row = await tasks.get(db_session, busy.id)
+    assert row is not None and row.status == "failed" and row.error_code == "session_busy"
+    assert (await stream_of(db_session, busy.id)).final_text == msg("session_busy")
+    await tasks.finish(db_session, stuck2.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+
+    # 重排期间同会话又来了更新的消息：重排回来的旧消息已被替代，不再作答。
+    stuck3 = await chat_task(db_session, bot, "fifth")
+    older = await chat_task(db_session, bot, "sixth")
+    await run_task(older, handler())
+    assert (await tasks.get(db_session, older.id)).status == "queued"  # type: ignore[union-attr]
+    await chat_task(db_session, bot, "seventh")
+    await tasks.finish(db_session, stuck3.id, status="cancelled", error_code="superseded")
+    await db_session.commit()
+    await run_task(await reclaim(older.id), handler())
+    row = await tasks.get(db_session, older.id)
+    assert row is not None and row.status == "cancelled" and row.error_code == "superseded"
+    assert len(fake.requests) == 1 and await stream_count(older.id) == 0
+
+
 async def _pump(ctx) -> None:  # type: ignore[no-untyped-def]
     while True:
         await asyncio.sleep(0.2)
@@ -383,9 +512,11 @@ async def test_reaped_task_is_not_finished_twice(
     assert (await db_session.execute(select(OutboxItem))).scalars().all() == []
 
 
-async def test_long_task_does_not_send_a_premature_reminder(
+async def test_long_task_reminder_is_queued_after_the_final_reply(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
+    from datetime import UTC, datetime, timedelta
+
     bot, _, _ = await seed_bot(db_session)
     t = await chat_task(db_session, bot, "hi")
     now = [1000.0]
@@ -396,12 +527,17 @@ async def test_long_task_does_not_send_a_premature_reminder(
         clock=lambda: now[0],
     )
     handler = ChatTaskHandler()
+    handler.LONG_TASK_NOTICE_DELAY_SECONDS = 600
     handler._on_first_event = lambda: now.__setitem__(0, 1075.0)  # 首事件后把时钟拨到 75 秒
     await handler.run(ctx)
-    items = (await db_session.execute(select(OutboxItem))).scalars().all()
-    assert items == []  # Completion travels with the actual final result, never ahead of it.
     row = await tasks.get(db_session, t.id)
     assert row and row.status == "succeeded"
+    assert (await stream_of(db_session, t.id)).is_complete
+    (item,) = (await db_session.execute(select(OutboxItem))).scalars().all()
+    # 终稿随流收尾；提醒是另一条新消息，且延后可领，不会跑到终稿前面。
+    assert item.dedupe_key == f"{t.id}:send:long_done"
+    assert item.payload == {"markdown": msg("long_task_done", seconds=75)}
+    assert item.not_before > datetime.now(UTC) + timedelta(seconds=300)
 
 
 async def test_allowlist_and_commands_come_before_relay_check(

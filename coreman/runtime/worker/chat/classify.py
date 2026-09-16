@@ -1,9 +1,9 @@
-"""分类阶段（spec §8.4）：只看 Outcome 决定 chat_logs / tasks 状态与给用户的终稿。"""
+"""分类阶段：只看 Outcome 决定 chat_logs / tasks 状态与给用户的终稿。"""
 
 from __future__ import annotations
 
 from coreman.core.i18n.messages import msg
-from coreman.core.relay.client import IncompleteResultError
+from coreman.core.relay.client import IncompleteResultError, RelayBusyError
 from coreman.core.wecom.cards import question_brief
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
@@ -14,7 +14,7 @@ class ClassifyStage(ChatStageBase):
     """流结束分类。"""
 
     def _classify(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
-        """spec §8.4 的流结束分类。
+        """流结束分类。
 
         relay 自带的错误与零事件流排在通用异常之前：驱动回错后不补 finish chunk、或整条流
         一个事件都没有时，客户端抛的是「未确认终态」，这时要按 relay 的原话 / 空回复分类，
@@ -42,6 +42,15 @@ class ClassifyStage(ChatStageBase):
             )
         if unconfirmed:
             return self._incomplete(ctx, pre, text)
+        if isinstance(out.error, RelayBusyError):
+            # 节点满载排队超时：还没开始执行，告诉用户是「忙」而不是「连接出错」。
+            return Verdict(
+                "error",
+                "failed",
+                "runtime_busy",
+                f"RelayBusyError: {out.error}",
+                msg("runtime_busy", locale, relay=pre.relay.name),
+            )
         if out.error is not None:
             name = type(out.error).__name__
             return Verdict(

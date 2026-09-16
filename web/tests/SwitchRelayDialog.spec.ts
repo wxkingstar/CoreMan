@@ -35,6 +35,7 @@ vi.mock('@/api/admin', () => ({
 
 import { bots } from '@/api/admin'
 import { ApiError } from '@/api/client'
+import { VERSION_CONFLICT_CODE } from '@/utils/errors'
 import { i18n } from '@/i18n'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
@@ -88,7 +89,7 @@ describe('SwitchRelayDialog', () => {
     const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
     vi.mocked(bots.switchRelay).mockClear()
     vi.mocked(bots.switchRelay)
-      .mockRejectedValueOnce(new ApiError(409, 409, '机器人已被其他操作修改，请刷新后重试'))
+      .mockRejectedValueOnce(new ApiError(409, VERSION_CONFLICT_CODE, '机器人已被其他操作修改，请刷新后重试'))
       .mockRejectedValueOnce(new ApiError(409, 409, '该实例工作目录已属于另一个机器人'))
     const bot = { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude' }
     const wrapper = mount(SwitchRelayDialog, {

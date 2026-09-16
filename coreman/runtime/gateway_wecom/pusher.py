@@ -1,4 +1,4 @@
-"""把 `task_streams` 的增量推成企微流式回复（spec §6.3、§7.3）。
+"""把 `task_streams` 的增量推成企微流式回复。
 
 worker 每写一次流就 `version+1` 并 `NOTIFY stream_updated`；网关按 `version > pushed_version`
 取待推的行，渲染成 `aibot_respond_msg` 的 stream 帧发出去，再回写 `pushed_version`。
@@ -251,7 +251,7 @@ class StreamPusher:
 
     async def _push_row(self, session: AsyncSession, row: TaskStream, now: datetime) -> bool:
         if row.finish_pushed_at is not None:
-            # finish 之后同一个 req_id 不可再推（平台协议 §3.3 的硬限制）。
+            # finish 之后同一个 req_id 不可再推（企微协议的硬限制）。
             await self._quiet(session, row, "stream_already_finished")
             return True
         if row.stream_id in self.blocked:

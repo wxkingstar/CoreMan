@@ -1,4 +1,4 @@
-"""AskUserQuestion 待答状态的推进（spec §8.5）：下一题，或答完一轮后交给提交任务。
+"""AskUserQuestion 待答状态的推进：下一题，或答完一轮后交给提交任务。
 
 两条入口共用这一段：用户直接发文字回答（`ChatTaskHandler._pending_answer`）与用户在卡片上
 点选提交（`CardActionHandler`）。两边算出的「第几题、答了什么」形状相同，往后该发什么、

@@ -1,4 +1,4 @@
-"""pg_notify / LISTEN 通道（spec §6.1）。通知与写操作同事务；消费者必须有 1 秒兜底轮询。"""
+"""pg_notify / LISTEN 通道。通知与写操作同事务；消费者必须有 1 秒兜底轮询。"""
 
 from __future__ import annotations
 

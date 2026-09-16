@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -50,18 +52,33 @@ def session_viewer_url(ctx: TaskContext, relay: RelayServer, relay_session_id: u
 class OpenStage(ChatStageBase):
     """开流：同会话串行、会话与提示词、task_streams 与超时看护。"""
 
-    async def _wait_superseded(self, ctx: TaskContext, victims: list[int]) -> None:
-        """等被替代的任务真的退出，免得两轮同时往同一个 relay 会话里写。最多等 5 秒。"""
-        if not victims:
-            return
-        for _ in range(self.SUPERSEDE_POLLS):
+    async def _wait_superseded(self, ctx: TaskContext, bot_id: uuid.UUID, session_key: str) -> bool:
+        """等同会话里比本任务早的活动任务都退出，免得两轮同时往同一个 relay 会话里写。
+
+        返回 False 表示等待期间本任务自己被取消（用户 stop / 又来了更新的消息）；等满
+        `SUPERSEDE_WAIT_SECONDS` 仍未退出抛 `TimeoutError`，由调用方决定重排还是放弃。
+
+        只等比自己早的任务，不只等这一次标记的：重排回来再认领时，那些任务早就带着取消标记、
+        `supersede` 不会再返回它们，但串行不变量照样要守。比自己晚的任务会反过来替代本任务，
+        这里靠 `cancel_event` 退出，两边不会互等。被替代任务所在的 worker 失联时，reaper
+        约一分钟内收尸，等待上限留足了这段时间。
+        """
+        deadline = time.monotonic() + self.SUPERSEDE_WAIT_SECONDS
+        delay = self.SUPERSEDE_POLL_SECONDS
+        while True:
             async with ctx.session_factory() as session:
-                rows = [await tasks.get(session, tid) for tid in victims]
-            if all(row is None or row.status not in tasks.ACTIVE for row in rows):
-                return
-            await asyncio.sleep(self.SUPERSEDE_POLL_SECONDS)
-        ctx.log.warning("superseded_wait_timeout", victims=victims)
-        raise TimeoutError("session_busy")
+                active = await tasks.active_for_session(session, bot_id, session_key)
+            older = [row.id for row in active if row.id < ctx.task.id]
+            if not older:
+                return True
+            if ctx.cancel_event.is_set():
+                return False
+            if time.monotonic() >= deadline:
+                ctx.log.warning("superseded_wait_timeout", victims=older)
+                raise TimeoutError("session_busy")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ctx.cancel_event.wait(), delay)
+            delay = min(delay * 2, self.SUPERSEDE_POLL_MAX_SECONDS)
 
     async def _open(
         self,

@@ -1,4 +1,4 @@
-"""请求级环境变量（spec §8.3 的表）。
+"""请求级环境变量。
 
 每轮对话都按当前发言者重新算一遍，覆盖机器人自己配的同名变量——机器人级 env 是
 静态配置，身份类的值只能由这里说了算，否则群里换个人说话，skill 拿到的还是上一个
@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+from coreman.core.bots.env_policy import blocked_env_keys, is_blocked_env_key
+from coreman.core.logging import get_logger
 from coreman.core.prompting.system_prompt import Speaker
 
-# 新名 → 兼容别名（同值）。COREMAN_PLATFORM 是 CoreMan 新增的，旧实现没有对应名字。
+log = get_logger(__name__)
+
+# 新名 → 兼容别名（同值）。COREMAN_PLATFORM 没有兼容别名。
 _ALIASES = {
     "COREMAN_BOT_KEY": "BOT_KEY",
     "COREMAN_CHAT_ID": "AGENT_CHAT_ID",
@@ -22,6 +26,21 @@ _ALIASES = {
     "COREMAN_USER_NAME": "AGENT_REAL_NAME",
     "COREMAN_SESSION_ID": "AGENT_BROWSER_SESSION",
 }
+
+# 请求级保留键：身份别名与业务系统配置只能由本轮已验证的发言者重建，机器人 env、
+# 技能预设都不得提供同名键。
+RESERVED_KEYS = frozenset(
+    set(_ALIASES)
+    | set(_ALIASES.values())
+    | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
+)
+# 平台按发言者签发的业务系统令牌前缀（见 core/auth/system_access.py）。静态配置里的
+# 同前缀键必然是上一轮或他人的令牌，一律丢弃。
+SPEAKER_TOKEN_PREFIX = "BOT_TOKEN_"
+
+
+def is_reserved_key(key: str) -> bool:
+    return key in RESERVED_KEYS or key.startswith(SPEAKER_TOKEN_PREFIX)
 
 
 def build_env(
@@ -42,15 +61,15 @@ def build_env(
     """
     # 先丢弃静态配置中的请求身份，再按本轮已验证的主体重建。否则未知发言者或
     # 通讯录缺少 login/name 时，会继承机器人创建者手填的身份与上一轮令牌。
-    reserved = (
-        set(_ALIASES)
-        | set(_ALIASES.values())
-        | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
-    )
+    # 控制类变量（模型端点、解释器启动项等）保存时就会 422；这里兜住保存规则收紧前的
+    # 存量数据：丢弃并记下键名，管理员下次编辑该机器人 env 时会被要求删掉。
+    blocked = blocked_env_keys(bot_env)
+    if blocked:
+        log.warning("bot_env_blocked_keys_dropped", bot_key=bot_key, keys=blocked)
     env: dict[str, str] = {
         k: str(v)
         for k, v in bot_env.items()
-        if k not in reserved and not k.startswith(("BOT_TOKEN_", "ETEAMS_"))
+        if not is_reserved_key(k) and not is_blocked_env_key(k)
     }
     request_level = {
         "COREMAN_BOT_KEY": bot_key,

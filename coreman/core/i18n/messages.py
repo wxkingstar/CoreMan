@@ -1,4 +1,4 @@
-"""用户可见文案（spec §13）。代码里不得散落硬编码提示；测试从这里取期望值。"""
+"""用户可见文案。代码里不得散落硬编码提示；测试从这里取期望值。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "nothing_running": "没有正在运行的任务。",
         "task_stopped_suffix": "\n\n⏹ 任务已被用户停止。",
         "superseded_suffix": "\n\n⏹ 已收到新消息，上一个任务自动停止。",
+        "session_busy": "⚠️ 上一轮任务迟迟未能停止，这条消息暂时无法处理，请稍后重新发送。",
         "help": HELP_ZH,
         "no_permission": "⚠️ 抱歉，您没有使用此机器人的权限。\n\n如需开通权限，请联系管理员。",
         "unsupported_message": "暂不支持该类型的消息，请发送文字。",
@@ -51,7 +52,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "choice_config_changed": "机器人配置已变更，之前的提问已失效，请重新发送消息。",
         "choice_submit_done": "已收到您的选择，处理完成。",
-        # 限流切换卡片（spec §8.8）点完之后回给用户的告知卡：标题进 main_title.title，
+        # 限流切换卡片点完之后回给用户的告知卡：标题进 main_title.title，
         # 正文进 sub_title_text。卡面其余字样（选项、按钮）在 cards.py 里。
         "rl_expired_title": "⏰ 已过期",
         "rl_expired_desc": "卡片已过期（30 分钟有效），请重新触发",
@@ -141,6 +142,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_switch_forbidden": "权限不足，您可能已被移出该机器人的管理员",
         "relay_switch_detail": "模型：{model}",
         "relay_error": "抱歉，AI 连接出现错误（运行时 {relay}），请稍后再试。",
+        "runtime_busy": "抱歉，运行时 {relay} 正忙，排队等待超时仍未开始处理，请稍后再试。",
         "relay_error_text": "⚠️ AI 服务返回了错误，请稍后重试。",
         "empty_stream": (
             "⚠️ AI 服务返回了空回复，可能是服务瞬时异常，请重试。"
@@ -176,11 +178,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "bg_done_plain": "✅ 任务已完成",
         "bg_ttl_expired": "⏳ 任务运行超时，已终止后台等待{link}",
         "long_task_done": "✅ 您的任务已完成（耗时 {seconds} 秒），请查看上方回复。",
+        # 定时任务推送（cron_handler / scheduler.cron）：头尾让用户分清定时推送与对话回复。
+        "cron_push_header": "**{name}**\n> 机器人：{bot} | 耗时：{seconds} 秒\n\n",
+        "cron_push_footer": "\n\n---\n⏰ 此消息由定时任务自动推送，不在当前对话上下文中。",
+        "cron_failed": "**定时任务执行失败**\n> 任务：{name}\n> 机器人：{bot}\n> 原因：{reason}",
+        "cron_worker_lost": "执行进程中断，请查看运行记录",
+        "cron_result_truncated": "\n\n…（结果过长，已截断，仅保留前 {limit} 个字符）",
+        "cron_delivery_truncated": "\n\n…（内容过长，已截断，完整结果见定时任务运行记录）",
         "queued_notice": "⏳ 当前使用人数较多，您的请求已排队 {seconds} 秒，现在开始处理…",
         "worker_lost": "任务执行进程异常中断，请重试。",
         "drain_suffix": "\n\n⏳ 服务切换中，任务继续在后台处理，稍后自动推送结果",
         "processing_done": "处理完成。",
-        # sessions / 会话列表（spec §8.2 步骤 4）：zh 默认文案。
+        # sessions / 会话列表：zh 默认文案。
         "sessions_header": "📋 最近 {n} 个会话（回复序号切换，5 分钟内有效）",
         "no_sessions": "暂无历史会话",
         "session_switched": "✅ 已切换到会话 {index}：{preview}",
@@ -190,7 +199,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "rt_hours": "{n} 小时前",
         "rt_yesterday": "昨天",
         "rt_days": "{n} 天前",
-        # 媒体与引用消息（spec §8.2 步骤 6-7）。前半段是塞进 content parts 发给模型的
+        # 媒体与引用消息。前半段是塞进 content parts 发给模型的
         # 提示词，随附件一起发送给模型；
         # 后半段 downloading_* / media_reason_* 才是给用户看的。
         "media_prompt_image": "请描述这张图片的内容。",
@@ -382,6 +391,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "申し訳ありません。AI 接続でエラーが発生しました（インスタンス {relay}）。"
             "しばらくしてから再試行してください。"
         ),
+        "runtime_busy": (
+            "申し訳ありません。インスタンス {relay} が混み合っており、待機時間内に処理を"
+            "開始できませんでした。しばらくしてから再試行してください。"
+        ),
         "relay_error_text": (
             "⚠️ AI サービスがエラーを返しました。しばらくしてから再試行してください。"
         ),
@@ -434,6 +447,24 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "long_task_done": (
             "✅ タスクが完了しました（所要 {seconds} 秒）。上の返信をご確認ください。"
+        ),
+        "session_busy": (
+            "⚠️ 前回のタスクが停止しないため、このメッセージを処理できませんでした。"
+            "しばらくしてから再送してください。"
+        ),
+        "cron_push_header": "**{name}**\n> ボット：{bot} | 所要：{seconds} 秒\n\n",
+        "cron_push_footer": (
+            "\n\n---\n⏰ このメッセージは定期タスクによる自動送信で、"
+            "現在の会話の文脈には含まれません。"
+        ),
+        "cron_failed": (
+            "**定期タスクの実行に失敗しました**\n"
+            "> タスク：{name}\n> ボット：{bot}\n> 原因：{reason}"
+        ),
+        "cron_worker_lost": "実行プロセスが中断されました。実行履歴を確認してください",
+        "cron_result_truncated": ("\n\n…（結果が長すぎるため、先頭 {limit} 文字のみ保持しました）"),
+        "cron_delivery_truncated": (
+            "\n\n…（内容が長すぎるため省略しました。全文は定期タスクの実行履歴をご確認ください）"
         ),
         "queued_notice": (
             "⏳ 現在利用者が多いため、リクエストは {seconds} 秒待機しました。処理を開始します…"

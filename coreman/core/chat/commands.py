@@ -1,4 +1,4 @@
-"""内置命令关键字（spec §8.2 步骤 4；平台协议 §4.2/§4.3）。"""
+"""内置命令关键字。"""
 
 from __future__ import annotations
 

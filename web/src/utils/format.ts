@@ -13,7 +13,7 @@ const fmt = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit',
 })
 
-/** 东八区 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'（spec §10.3：时间东八区）。 */
+/** 东八区 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'。 */
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value)

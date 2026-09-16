@@ -186,7 +186,7 @@ async def test_quotes(builder: ContentBuilder, fake: FakeMedia, hints: list[str]
 
 
 async def test_on_hint_may_be_async_and_follows_locale(fake: FakeMedia) -> None:
-    # Task 7 传的是「把思考区刷给用户」的异步回调：提示必须在下载期间就 await 出去。
+    # 对话流水线传的是「把思考区刷给用户」的异步回调：提示必须在下载期间就 await 出去。
     seen: list[str] = []
 
     async def flush(line: str) -> None:

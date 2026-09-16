@@ -123,7 +123,7 @@ export interface AuditLogOut {
 
 /** 提示词段落键的短名，顺序即 `coreman/core/prompting/defaults.py::PROMPT_DEFAULTS_BY_KEY`。 */
 export const PROMPT_SEGMENTS = [
-  'security_policy', 'codex_contract', 'runtime_mode', 'runtime_tail',
+  'security_policy', 'codex_contract', 'runtime_mode', 'cron_mode', 'runtime_tail',
   'verbosity_2', 'verbosity_3', 'verbosity_4',
 ] as const
 export type PromptSegment = (typeof PROMPT_SEGMENTS)[number]
@@ -137,7 +137,7 @@ export interface SettingsOut extends PromptSettings {
   default_effort_level: EffortLevel | null
   session_ttl_hours: number
   jwt_issuer: string
-  /** 全局并发闸门（spec §6.3）：worker 同时在跑的任务上限，其中 fast 车道独占的名额。 */
+  /** 全局并发闸门：worker 同时在跑的任务上限，其中 fast 车道独占的名额。 */
   max_concurrent_tasks: number
   fast_lane_slots: number
   /** 企微模板卡片左上角的来源图标；空串表示不显示图标。 */

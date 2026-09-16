@@ -38,7 +38,7 @@ class _Snapshot:
 
 
 class ChoiceSubmitHandler(ChatTaskHandler):
-    """答完一轮问卷之后把答案送回模型的那一轮（spec §8.5）。"""
+    """答完一轮问卷之后把答案送回模型的那一轮。"""
 
     kind = "choice_submit"
 

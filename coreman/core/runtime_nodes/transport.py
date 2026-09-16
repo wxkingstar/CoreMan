@@ -50,6 +50,33 @@ TERMINAL = {"done", "failed", "cancelled"}
 # 有 LISTEN 时通知是主路径，轮询只兜底丢通知；没有监听连接时只能靠轮询。
 FALLBACK_POLL_SECONDS = 1.0
 UNLISTENED_POLL_SECONDS = 0.25
+# 调用方用这个请求扩展声明整次调用的总时限（秒）：声明了的执行类请求（对话）在节点满载时
+# 排队等空位，调用期限也按它算；没声明的探测类请求不排队、期限沿用默认。
+TOTAL_TIMEOUT_EXTENSION = "coreman.total_timeout"
+# 等节点接单（queued→running）的上限：节点并发满了是排队，不是连接失败。
+QUEUE_WAIT_SECONDS = 120.0
+# 排队期间多久核对一次节点：掉线、停用或开始排空（不会再接单）时不必等满排队上限。
+NODE_CHECK_SECONDS = 5.0
+# 调用期限 = 排队上限 + 总时限（封顶 bots.sse_timeout_seconds 的上限 12 小时）+ 余量。
+MAX_TOTAL_SECONDS = 12 * 3600
+CALL_DEADLINE_MARGIN_SECONDS = 300
+DEFAULT_CALL_SECONDS = 2 * 3600
+
+
+class RuntimeQueueTimeout(httpx.PoolTimeout):
+    """节点在线但一直没有空位：调用排队超过 `QUEUE_WAIT_SECONDS` 仍未开始执行。"""
+
+
+def call_seconds(total_timeout: object) -> float:
+    """一次调用在库里的期限（秒）；过期后节点取消执行、心跳清理行。"""
+    if (
+        isinstance(total_timeout, int | float)
+        and not isinstance(total_timeout, bool)
+        and total_timeout > 0
+    ):
+        total = min(float(total_timeout), MAX_TOTAL_SECONDS)
+        return QUEUE_WAIT_SECONDS + total + CALL_DEADLINE_MARGIN_SECONDS
+    return DEFAULT_CALL_SECONDS
 
 
 def now() -> datetime:
@@ -275,6 +302,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                 "body": base64.b64encode(raw).decode(),
             }
         )
+        extensions = request.extensions
         started = now()
         async with self.factory() as session:
             node = await session.get(RuntimeNode, self.node_id)
@@ -295,17 +323,24 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                     node_id=self.node_id,
                     provider=self.provider,
                     request_enc=self.cipher.encrypt(payload, envelope_aad(call_id)),
-                    deadline=started + timedelta(hours=2),
+                    deadline=started
+                    + timedelta(seconds=call_seconds(extensions.get(TOTAL_TIMEOUT_EXTENSION))),
                     consumer_at=started,
                 )
             )
             await notify_node(session, self.node_id, call_id)
             await session.commit()
-        timeout = request.extensions.get("timeout", {})
+        timeout = extensions.get("timeout", {})
         stream = ReverseStream(self, call_id, request, float(timeout.get("read") or 120))
         accepted = False
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + float(timeout.get("connect") or 10)
+        # 反向通道没有 TCP 建连，调用落库就算「连上」。之后等节点接单：执行类请求在节点满载时
+        # 排队（上限 QUEUE_WAIT_SECONDS）；探测类请求不排队，仍按 connect 超时尽快失败。
+        # 放弃等待时 aclose 把仍在排队的调用置为 cancelled，节点不会再领到它。
+        queued = TOTAL_TIMEOUT_EXTENSION in extensions
+        wait = QUEUE_WAIT_SECONDS if queued else float(timeout.get("connect") or 10)
+        deadline = loop.time() + wait
+        next_check = loop.time() + NODE_CHECK_SECONDS
         try:
             while True:
                 async with asyncio.timeout_at(deadline):
@@ -322,16 +357,34 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                     if row.status == "running" and not accepted:
                         accepted = True
                         deadline = loop.time() + stream.read_timeout
-                    else:
-                        await wait_event(stream.wake, poll_seconds())
+                        continue
+                    if not accepted and loop.time() >= next_check:
+                        next_check = loop.time() + NODE_CHECK_SECONDS
+                        if reason := await self._unavailable():
+                            raise httpx.ConnectError(reason, request=request)
+                    await wait_event(stream.wake, poll_seconds())
         except TimeoutError as exc:
             await stream.aclose()
             if accepted:
                 raise httpx.ReadTimeout("运行时已接收，但响应头超时", request=request) from exc
+            if queued:
+                raise RuntimeQueueTimeout(
+                    f"运行时繁忙：排队 {wait:.0f} 秒仍未开始执行", request=request
+                ) from exc
             raise httpx.ConnectTimeout("运行时未及时接收请求", request=request) from exc
         except BaseException:
             await stream.aclose()
             raise
+
+    async def _unavailable(self) -> str | None:
+        """排队期间核对节点；返回不必再等的原因（离线、停用、排空中不会再接单）。"""
+        async with self.factory() as session:
+            node = await session.get(RuntimeNode, self.node_id)
+            if not node or not node.is_active or not online(node):
+                return "运行时离线或未启用"
+            if node.draining:
+                return "运行时正在排空任务"
+        return None
 
 
 class ReverseStream(httpx.AsyncByteStream):

@@ -7,7 +7,7 @@ from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError
 from coreman.api.routers.infra_relay import ReportTarget, target
 from coreman.core.db.models import Bot, Memory
@@ -22,7 +22,6 @@ class CollectIn(ReportTarget):
 
 
 @router.post("/api/infra/memories/collect")
-@router.post("/api/robot/memories/collect")
 async def collect_memories(
     body: CollectIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -37,7 +36,6 @@ class QueryIn(ReportTarget):
 
 
 @router.get("/api/infra/memories")
-@router.get("/api/robot/memories/query")
 async def query_memories(
     request: Request, query: QueryIn = Depends(), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -100,7 +98,6 @@ async def workspaces(
 
 
 @router.post("/api/infra/memories/deploy")
-@router.post("/api/robot/memories/deploy")
 async def deploy_memories(
     body: QueryIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
@@ -158,6 +155,7 @@ async def deploy_memories(
         target_type="bot",
         target_id=str(bot.id),
         diff={"relay_id": [None, str(relay.id)]},
+        ip=client_ip(request),
     )
     await session.commit()
     try:
@@ -185,6 +183,7 @@ async def deploy_memories(
         target_type="bot",
         target_id=str(bot.id),
         diff={"count": [None, len(rows)]},
+        ip=client_ip(request),
     )
     await session.commit()
     return {"code": 0, "data": {"count": len(rows)}}

@@ -27,13 +27,12 @@ async def test_org_requires_actual_path_signature_enabled_client_and_scope(
         )
     ).json()["data"]
     secret = data["secret"]
+    # /api/robot/organization/members 仍有 human-escalation 技能在调用，保留别名。
     paths = [
         "/api/infra/org/full",
-        "/api/organization/full",
         "/api/infra/org/members",
         "/api/robot/organization/members",
         "/api/infra/org/tree",
-        "/api/robot/organization/tree",
     ]
     for path in paths:
         assert (await client.get(path)).status_code == 401

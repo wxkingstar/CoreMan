@@ -15,13 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
-from coreman.api.infra_auth import INFRA_SCOPES
+from coreman.api.infra_auth import INFRA_SCOPES, RETIRED_INFRA_SCOPES
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
-from coreman.core.audit import record_audit
+from coreman.core.audit import diff_dict, record_audit
+from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
 from coreman.core.auth.tokens import active_key, public_keys
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import is_bot_admin
@@ -31,7 +32,6 @@ from coreman.core.db.models import (
     BotSystemGrant,
     BusinessSystem,
     JwtKey,
-    SystemGrantAudit,
     User,
 )
 
@@ -51,7 +51,10 @@ class SystemIn(BaseModel):
     enabled: bool = True
     sort_order: int = 0
     default_for_all_bots: bool = False
-    allowed_bot_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+    # 空列表 = 显式白名单且暂无机器人；null = 对全部机器人开放，必须由管理员明确选择。
+    # 缺省按空白名单处理：bot 管理员能控制提示词与 env，而平台会把发言者令牌注入其 CLI，
+    # 新系统不能在没人确认的情况下对所有机器人开放。
+    allowed_bot_ids: list[uuid.UUID] | None = Field(default_factory=list, max_length=500)
 
     @field_validator("base_url", "sitemap_url")
     @classmethod
@@ -70,6 +73,13 @@ class SystemIn(BaseModel):
 
 class SystemCreate(SystemIn):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,49}$")
+
+    @field_validator("key")
+    @classmethod
+    def not_reserved(cls, value: str) -> str:
+        if value in RESERVED_SYSTEM_KEYS:
+            raise ValueError("该标识为平台保留（与 CoreMan 自身令牌的 audience 冲突），请换一个")
+        return value
 
 
 class GrantsIn(BaseModel):
@@ -90,9 +100,11 @@ class ClientIn(BaseModel):
     @field_validator("scopes")
     @classmethod
     def valid_scopes(cls, value: list[str]) -> list[str]:
-        if not set(value) <= INFRA_SCOPES:
+        # 已下线的接口组静默丢弃：旧客户端回传原有勾选时不能因此保存失败。
+        current = set(value) - RETIRED_INFRA_SCOPES
+        if not current <= INFRA_SCOPES:
             raise ValueError("包含未知接口组")
-        return sorted(set(value))
+        return sorted(current)
 
 
 class ClientCreate(ClientIn):
@@ -122,7 +134,8 @@ def client_out(row: ApiClient) -> dict[str, Any]:
     return {
         "app_key": row.app_key,
         "name": row.name,
-        "scopes": row.scopes,
+        # 旧数据里可能还存着已下线的接口组，读取时不展示也不报错。
+        "scopes": [scope for scope in row.scopes if scope in INFRA_SCOPES],
         "enabled": row.enabled,
         "version": row.version,
         "last_used_at": row.last_used_at,
@@ -223,6 +236,7 @@ async def update_system(
     for field, value in body.model_dump().items():
         setattr(row, field, value)
     # 白名单变窄时实际删除授权，之后放开也不会悄悄恢复历史授权。
+    removed: list[uuid.UUID] = []
     if body.allowed_bot_ids is not None:
         removed = list(
             (
@@ -236,17 +250,9 @@ async def update_system(
                 )
             ).scalars()
         )
-        for bot_id in removed:
-            session.add(
-                SystemGrantAudit(
-                    bot_id=bot_id,
-                    requested=[key],
-                    approved=[],
-                    actor_id=user.id,
-                    comment="系统白名单收紧",
-                )
-            )
-    await audit(session, request, user, "system.update", "system", key)
+    # 回收的授权记在审计日志里（原先写入的 system_grant_audit 表没有读者，已弃用）。
+    diff = {"granted_bot_ids": [sorted(str(b) for b in removed), []]} if removed else None
+    await audit(session, request, user, "system.update", "system", key, diff)
     await persist(session, commit=True)
     set_etag(response, row.version)
     return {"code": 0, "data": system_out(row)}
@@ -313,28 +319,35 @@ async def put_grants(
             )
         ).scalars()
     )
+    # allowed_bot_ids 为 null 的历史行仍按「对全部机器人开放」处理（不做数据迁移），
+    # 管理台会明示这一状态；新建系统缺省是空白名单。
     if len(systems) != len(keys) or any(
-        not s.enabled or (s.allowed_bot_ids is not None and bot_id not in s.allowed_bot_ids)
+        not s.enabled
+        or s.key in RESERVED_SYSTEM_KEYS
+        or (s.allowed_bot_ids is not None and bot_id not in s.allowed_bot_ids)
         for s in systems
     ):
         raise ApiError(403, 403, "申请包含未开放给此机器人的系统")
-    await session.execute(delete(BotSystemGrant).where(BotSystemGrant.bot_id == bot_id))
+    before = list(
+        (
+            await session.execute(
+                delete(BotSystemGrant)
+                .where(BotSystemGrant.bot_id == bot_id)
+                .returning(BotSystemGrant.system_key)
+            )
+        ).scalars()
+    )
     session.add_all(
         [BotSystemGrant(bot_id=bot_id, system_key=key, granted_by=user.id) for key in keys]
-    )
-    session.add(
-        SystemGrantAudit(
-            bot_id=bot_id,
-            requested=body.system_keys,
-            approved=keys,
-            actor_id=user.id,
-            comment=body.comment,
-        )
     )
     bot.version += 1
     await persist(session)
     await notify_bot_changed(session, bot.id)
-    await audit(session, request, user, "bot.system_grants", "bot", str(bot_id))
+    # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
+    diff = diff_dict(
+        {"system_keys": sorted(before)}, {"system_keys": keys, "comment": body.comment or None}
+    )
+    await audit(session, request, user, "bot.system_grants", "bot", str(bot_id), diff)
     await persist(session, commit=True)
     return {"code": 0, "data": {"system_keys": keys, "version": bot.version}}
 
