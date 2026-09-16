@@ -6,15 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-16
+
+First public release.
+
+The Changed, Fixed, Security and Removed sections describe differences from the initial public snapshot (`bfdd299`, 2026-09-14) for deployments that tracked `main` before this tag. Such deployments must run database migrations up to `0028` and upgrade Runtime Daemon drivers together with the services; older drivers keep serving chat but do not support collaboration tools, detailed process output or workspace operations.
+
 ### Added
 
-- WeCom setup and troubleshooting guide (`docs/wecom.md`), a glossary (`docs/glossary.md`), a service topology diagram in `docs/architecture.md`, and an English README (`README.en.md`).
-- Trust model and threat boundaries in `SECURITY.md`.
+- WeCom integration through smart robot long connections and Feishu integration through custom app long connections: streaming replies, images and files, quoted messages, interactive question cards and welcome messages.
+- AI teammate (bot) management: prompts, models, runtime binding, working directories, collaborators, usage allowlists, team ownership and encrypted credentials and environment variables.
+- Runtime Daemon for Linux and macOS (amd64/arm64): connects outward to CoreMan, discovers Claude Code and Codex CLIs, runs requests through bundled Go drivers, reports health and quota, and supports install links, private CAs, in-place upgrade and uninstall.
+- Teams, users and roles (platform administrator, AI committee, team lead, member), WeCom and Feishu sign-in, directory sync, bootstrap administrator and audit logs.
+- Scheduled tasks with pre-check scripts and result delivery to private chats, group chats, email and WeCom group robot webhooks.
+- Human escalation API with WeCom app and Feishu delivery, reply callbacks, queuing, reminders and follow-ups.
+- Skill catalog synced from Git plugin marketplaces, environment presets, approval workflow and persistent installation tasks.
+- Memory sync between runtime nodes and the admin console, including memory transfer when a bot switches runtime.
+- Business system grants with per-request ES256 `BOT_TOKEN_<SYSTEM>` tokens and a public JWKS endpoint; signed infrastructure API for directory, push, notification and runtime telemetry.
+- Chat logs, usage statistics with model pricing, bot health reports, announcements and runtime status with lease, queue, task and outbox views.
+- Self-hosted deployment with Docker Compose and Caddy: PostgreSQL-backed task bus with leases and outbox, a/b gateways and workers, drain-based rolling upgrade and rollback, optional S3 attachment storage, Prometheus metrics and alert notifications.
+- Admin console in Chinese, Japanese and English.
+- Feishu bot collaboration (limited trial): administrators configure directed partner relationships, and in Feishu group chats an AI teammate can search for, inspect and ask a partner for help through a task-scoped MCP endpoint. The partner answers in the group and the original teammate resumes its runtime session. Membership and permissions are checked on every request, and the server enforces a single hop and tool call budgets.
+- Feishu replies show a typing reaction while a message is handled, a collapsible thinking panel with an animated heading, and detailed tool and process output from the Claude Code and Codex drivers. The reaction needs the `im:message.reactions:write_only` app permission.
+- Workspace management for AI teammates: browse and edit runtime files from the console, back them up to Git, initialize `AGENTS.md` (with `CLAUDE.md` linked to it), and move files and memory to the new runtime (copy, Git or existing directory) when switching runtime nodes.
 - Scheduled runs add an overridable "scheduled task constraints" prompt section (`prompt_cron_mode`), editable in Settings.
 - Scheduled pushes carry a header (task, bot, duration) and a footer. Jobs without any delivery target send the result to the job creator.
 - A separate completion reminder after streamed replies that take 60 seconds or longer, so the chat client notifies the user.
 - Allowlist denials are logged as warnings and counted by `coreman_whitelist_denied_total{reason}`.
 - Escalation create and poll responses include `delivery_failed` and `failure_reason`.
+- WeCom setup and troubleshooting guide (`docs/wecom.md`), a glossary (`docs/glossary.md`), a service topology diagram in `docs/architecture.md`, and an English README (`README.en.md`).
+- Trust model and threat boundaries in `SECURITY.md`.
 
 ### Changed
 
@@ -37,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The users page still loads when the team list request fails.
 - Audit entries for skills, memories, the skill catalog and runtime nodes record the client IP.
 - Listing a bot's skills no longer locks the bot row.
+- Claude Code context compaction no longer trips the resume watchdog on long sessions.
 
 ### Security
 
@@ -50,25 +72,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The `cron` infrastructure API scope, which no route used, and the `ETEAMS_` reserved environment prefix.
 - The `RELAY_NETWORK_MODE` and `TIMEZONE` settings.
 - `system_grant_audit` is no longer written (grant changes are recorded in `audit_logs`) and `bots.custom_command_modules` is no longer read. Both will be dropped in the next release.
-
-## [0.1.0] - TBD
-
-First public release.
-
-### Added
-
-- WeCom integration through smart robot long connections and Feishu integration through custom app long connections: streaming replies, images and files, quoted messages, interactive question cards and welcome messages.
-- AI teammate (bot) management: prompts, models, runtime binding, working directories, collaborators, usage allowlists, team ownership and encrypted credentials and environment variables.
-- Runtime Daemon for Linux and macOS (amd64/arm64): connects outward to CoreMan, discovers Claude Code and Codex CLIs, runs requests through bundled Go drivers, reports health and quota, and supports install links, private CAs, in-place upgrade and uninstall.
-- Teams, users and roles (platform administrator, AI committee, team lead, member), WeCom and Feishu sign-in, directory sync, bootstrap administrator and audit logs.
-- Scheduled tasks with pre-check scripts and result delivery to private chats, group chats, email and WeCom group robot webhooks.
-- Human escalation API with WeCom app and Feishu delivery, reply callbacks, queuing, reminders and follow-ups.
-- Skill catalog synced from Git plugin marketplaces, environment presets, approval workflow and persistent installation tasks.
-- Memory sync between runtime nodes and the admin console, including memory transfer when a bot switches runtime.
-- Business system grants with per-request ES256 `BOT_TOKEN_<SYSTEM>` tokens and a public JWKS endpoint; signed infrastructure API for directory, push, notification and runtime telemetry.
-- Chat logs, usage statistics with model pricing, bot health reports, announcements and runtime status with lease, queue, task and outbox views.
-- Self-hosted deployment with Docker Compose and Caddy: PostgreSQL-backed task bus with leases and outbox, a/b gateways and workers, drain-based rolling upgrade and rollback, optional S3 attachment storage, Prometheus metrics and alert notifications.
-- Admin console in Chinese, Japanese and English.
 
 [Unreleased]: https://github.com/wxkingstar/CoreMan/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/wxkingstar/CoreMan/releases/tag/v0.1.0

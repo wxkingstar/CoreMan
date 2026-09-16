@@ -21,3 +21,8 @@
 
 `v1/` 是已认可版本的归档，后续设计请以它为基础另建版本，不覆盖此目录。
 新版本确认后，再更新产品使用的 `web/public/coreman-mark.svg`，并记录对应版本。
+
+## 分享预览图
+
+- [v1 源文件](../social-preview/v1/social-preview.html)与[导出图](../social-preview/v1/social-preview.png)：1280 × 640，用作 GitHub 仓库 Social preview。
+- 沿用 v1 Logo 与色板；修改后按源文件注释里的命令用 Chrome 无头模式重新导出，再到仓库 Settings → General → Social preview 上传。
