@@ -1,4 +1,29 @@
 export default {
+  myFeishu: {
+    pendingExpiresAt: "認証リンクの有効期限",
+    requestHint: "接続後、飛書の個別チャットで「{command}」などのリクエストを送信してください。個人データへのアクセスは現在 Claude ランタイムのみ対応しています。",
+  "title": "マイ飛書",
+  "intro": "AI 社員ごとの飛書個人データへのアクセス権限を管理します。",
+  "connectHint": "飛書で AI 社員に「{command}」と個別メッセージを送り、認証を開始してください。",
+  "privateOnly": "個人メッセージと会議資料へのアクセスは飛書の個別チャットのみ対応しています。グループチャットと WeCom には対応していません。",
+  "refresh": "更新",
+  "empty": "飛書の個人認証はまだありません",
+  "scopes": "認証範囲",
+  "expiresAt": "現在のアクセス資格情報の有効期限（自動更新可能）",
+  "revoke": "認証を取り消す",
+  "confirmRevoke": "「{name}」について CoreMan が保存した資格情報を削除し、本システムからのアクセスを停止しますか？飛書側のアプリ認証も取り消すには、飛書の認証管理で削除してください。",
+  "revoked": "CoreMan の保存済み資格情報を削除しました",
+  "loadError": "認証を読み込めません。再試行してください。",
+  "revokeError": "認証を取り消せません。再試行してください。",
+  "pendingHint": "飛書の個別チャットで認証を完了してから、このページを更新してください。",
+  "reconnectHint": "再接続するには、飛書でこの AI 社員に「{command}」と個別メッセージを送ってください。",
+  "status": {
+    "connected": "接続済み",
+    "pending": "認証待ち",
+    "expired": "期限切れ",
+    "revoked": "取り消し済み"
+  }
+},
   platforms: { wecom: 'WeCom', feishu: 'Lark' },
   runtimeNodes: {
     editName: '名前を編集',
@@ -177,6 +202,7 @@ export default {
   },
   layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
   menu: {
+    myFeishu: "マイ飛書",
     skills: "スキル管理",
     skillApprovals: "スキル承認",
     credentials: "API と署名鍵",

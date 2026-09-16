@@ -44,12 +44,15 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") {
 			continue
 		}
 		env = append(env, e)
 	}
 	for k, v := range extra {
+		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !openai.FeishuPersonalEnabled(extra) {
+			continue
+		}
 		env = append(env, k+"="+v)
 	}
 	return env
@@ -155,6 +158,13 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		// Explicitly override saved/local configuration on resumed tasks.
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_collaboration.url="http://127.0.0.1:1/disabled"`,
 			"-c", "mcp_servers.coreman_collaboration.enabled=false")
+	}
+
+	if openai.FeishuPersonalEnabled(req.EnvVars) {
+		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_FEISHU_PERSONAL_URL"]))
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_feishu_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_feishu_personal.bearer_token_env_var="COREMAN_FEISHU_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=true", "--ephemeral", "--disable", "memories")
+	} else {
+		out.Args = append(out.Args, "-c", `mcp_servers.coreman_feishu_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=false")
 	}
 
 	// Image attachments via codex's native `-i FILE` mechanism. This is
@@ -354,6 +364,9 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for s.Scan() {
 			line := openai.RedactCollaborationToken(s.Text(), envExtra)
+			if openai.FeishuPersonalEnabled(envExtra) {
+				line = openai.PrivateContentPreview(line, 0, true)
+			}
 			log.Printf("codex stderr: %s", line)
 			stderr.add(line)
 		}

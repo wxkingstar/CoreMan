@@ -13,6 +13,7 @@ export interface MenuItem {
 export const MENU: readonly MenuItem[] = [
   { key: 'statistics', path: '/statistics' },
   { key: 'bots', path: '/bots' },
+  { key: 'myFeishu', path: '/my-feishu' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
   { key: 'skillApprovals', path: '/skill-approvals', roles: ['ai_committee', 'platform_admin'] },
@@ -43,9 +44,9 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, chatLogs: ChatDotRound, statistics: TrendCharts, skillApprovals: Checked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { bots: User, myFeishu: Key, skills: Collection, cron: Timer, chatLogs: ChatDotRound, statistics: TrendCharts, skillApprovals: Checked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs'] },
+  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]

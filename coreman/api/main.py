@@ -28,6 +28,7 @@ from coreman.api.routers import (
     departments,
     dev,
     escalations,
+    feishu_personal,
     health,
     health_report,
     infra_memories,
@@ -147,6 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(runtime.router)
     app.include_router(runtime_nodes.router)
     app.include_router(runtime_protocol.router)
+    app.include_router(feishu_personal.router)
     if cfg.coreman_env == "dev":
         # 注入接口只在开发环境存在：生产里连路由都不注册，不是靠角色挡。
         app.include_router(dev.router)

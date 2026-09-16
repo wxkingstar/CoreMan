@@ -84,3 +84,28 @@ def test_reserved_keys_are_shared_with_skill_policy() -> None:
     with pytest.raises(ValueError):
         skill_policy.env_vars({"BOT_TOKEN_ERP": "x"})
     assert skill_policy.env_vars({"OA_TOKEN": "x"}) == {"OA_TOKEN": "x"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "COREMAN_FEISHU_PERSONAL_URL",
+        "COREMAN_FEISHU_PERSONAL_TOKEN",
+        "COREMAN_FEISHU_PERSONAL_FUTURE",
+    ],
+)
+def test_personal_capabilities_cannot_be_static_env(key: str) -> None:
+    assert is_reserved_key(key)
+    with pytest.raises(ValueError):
+        skill_policy.env_vars({key: "forged"})
+    env = build_env(
+        bot_key="b",
+        platform="feishu",
+        chat_id="g",
+        chat_type="group",
+        platform_user_id="human",
+        session_id="s",
+        speaker=Speaker("human", None, None, None),
+        bot_env={key: "forged"},
+    )
+    assert key not in env

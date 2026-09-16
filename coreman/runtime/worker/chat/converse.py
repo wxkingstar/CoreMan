@@ -50,6 +50,7 @@ class ConverseStage(ChatStageBase):
         guard_checked = silent_since - 1
         guarded = bool(
             pre.request.env_vars.get("COREMAN_COLLABORATION_TOKEN")
+            or pre.request.env_vars.get("COREMAN_FEISHU_PERSONAL_TOKEN")
             or ctx.task.payload.get("collaboration_id")
         )
         try:

@@ -33,12 +33,21 @@ var firstLineTimeout = 90 * time.Second
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !(openai.FeishuPersonalEnabled(extra) && strings.HasPrefix(e, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=")) {
 			env = append(env, e)
 		}
 	}
 	for k, v := range extra {
+		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !openai.FeishuPersonalEnabled(extra) {
+			continue
+		}
+		if k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && openai.FeishuPersonalEnabled(extra) {
+			continue
+		}
 		env = append(env, k+"="+v)
+	}
+	if openai.FeishuPersonalEnabled(extra) {
+		env = append(env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
 	}
 	return env
 }
@@ -70,20 +79,33 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPro
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
-	if req.SystemPromptFile != "" {
+	if req.SystemPromptFile != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 		args = append(args, "--append-system-prompt-file", req.SystemPromptFile)
 	}
-	url := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"])
-	token := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"])
-	if url != "" && token != "" {
-		config, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-			"coreman_collaboration": map[string]any{"type": "http", "url": url,
-				"headers": map[string]string{"Authorization": "Bearer ${COREMAN_COLLABORATION_TOKEN}"}},
-		}})
+	servers := map[string]any{}
+	var denied []string
+	for _, cfg := range []struct {
+		name, prefix string
+		enabled      bool
+	}{
+		{"coreman_collaboration", "COREMAN_COLLABORATION", !openai.FeishuPersonalEnabled(req.EnvVars) && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
+		{"coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL", openai.FeishuPersonalEnabled(req.EnvVars)},
+	} {
+		if cfg.enabled {
+			servers[cfg.name] = map[string]any{"type": "http", "url": strings.TrimSpace(req.EnvVars[cfg.prefix+"_URL"]), "headers": map[string]string{"Authorization": "Bearer ${" + cfg.prefix + "_TOKEN}"}}
+		} else {
+			denied = append(denied, "mcp__"+cfg.name)
+		}
+	}
+	if len(servers) > 0 {
+		config, _ := json.Marshal(map[string]any{"mcpServers": servers})
 		args = append(args, "--mcp-config", string(config))
-	} else {
-		// Deny a stale server even if a resumed session or local config remembers it.
-		args = append(args, "--disallowedTools", "mcp__coreman_collaboration")
+	}
+	if len(denied) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(denied, ","))
+	}
+	if openai.FeishuPersonalEnabled(req.EnvVars) {
+		args = append(args, "--no-session-persistence", "--restricted", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--settings", `{"disableAllHooks":true}`, "--allowedTools", "mcp__coreman_feishu_personal")
 	}
 	args = append(args, "--model", model)
 	args = append(args, "--verbose")
@@ -98,13 +120,16 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPro
 	if req.PermissionMode != "" {
 		permMode = req.PermissionMode
 	}
+	if openai.FeishuPersonalEnabled(req.EnvVars) {
+		permMode = "default"
+	}
 	args = append(args, "--permission-mode", permMode)
 
-	if req.AllowedTools != "" {
+	if req.AllowedTools != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 		args = append(args, "--allowedTools", req.AllowedTools)
 	}
 	for _, dir := range req.AddDirs {
-		if dir != "" {
+		if dir != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 			args = append(args, "--add-dir", dir)
 		}
 	}
@@ -118,10 +143,10 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPro
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
-	if req.Settings != "" {
+	if req.Settings != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 		args = append(args, "--settings", req.Settings)
 	}
-	if req.SessionID != "" {
+	if req.SessionID != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 		args = append(args, "--resume", req.SessionID)
 	}
 	input, _ := json.Marshal(map[string]any{
@@ -175,6 +200,9 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		found := false
 		for s.Scan() {
 			line := openai.RedactCollaborationToken(s.Text(), envVars)
+			if openai.FeishuPersonalEnabled(envVars) {
+				line = openai.PrivateContentPreview(line, 0, true)
+			}
 			log.Printf("Claude stderr: %s", line)
 			if strings.Contains(line, "No conversation found with session ID") {
 				found = true
@@ -491,7 +519,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 		if line == "" {
 			continue
 		}
-		if openai.DebugLogging() {
+		if openai.DebugLogging() && !openai.FeishuPersonalEnabled(envVars) {
 			log.Printf("[CLAUDE RAW] %s", line)
 		}
 		var event claudeEvent

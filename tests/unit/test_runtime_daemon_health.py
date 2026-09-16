@@ -227,3 +227,19 @@ def test_main_exits_nonzero_on_unexpected_errors(tmp_path, monkeypatch):
         module.main()
     assert caught.value.code == 1
     assert not (tmp_path / "state.json").exists()
+
+
+@pytest.mark.parametrize("advertised", [None, False, "true", True])
+async def test_personal_capability_comes_only_from_driver_health(healing_daemon, advertised):
+    daemon = healing_daemon
+    driver = Path(daemon.config["release"]) / "runtime_daemon/bin/runtime-claude"
+    source = driver.read_text()
+    source = source.replace(
+        '{"data": [{"id": "fake-model"}]}',
+        '{"data": [{"id": "fake-model"}], "capabilities": {"feishu_personal_restricted_v1": '
+        + repr(advertised)
+        + "}}",
+    )
+    driver.write_text(source)
+    await daemon.discover()
+    assert daemon.capabilities["claude"]["feishu_personal_restricted_v1"] is (advertised is True)

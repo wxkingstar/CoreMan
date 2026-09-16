@@ -3,6 +3,19 @@ import type zh from './zh'
 type Messages<T> = { [K in keyof T]: T[K] extends string ? string : Messages<T[K]> }
 
 const en = {
+  myFeishu: {
+    pendingExpiresAt: "Authorization link expires at",
+    requestHint: "After connecting, send a private Feishu message such as “{command}”. Personal data access currently requires a Claude runtime; other runtimes are unsupported.",
+    title: 'My Feishu', intro: 'Manage each AI employee’s access to your personal Feishu data.',
+    connectHint: 'To authorize, privately message a Feishu AI employee: “{command}”.',
+    privateOnly: 'Personal messages and meeting materials are available only in Feishu private conversations. Group chats and WeCom are unsupported.',
+    refresh: 'Refresh', empty: 'No personal Feishu authorizations yet', scopes: 'Granted scopes', expiresAt: "Current access credential expiry (automatically refreshable)", revoke: 'Revoke access',
+    confirmRevoke: "Delete the credentials CoreMan stores for “{name}” and stop access from this system? To revoke the app authorization in Feishu too, remove it in Feishu authorization settings.",
+    revoked: "Credentials removed from CoreMan", loadError: 'Unable to load authorizations. Please retry.', revokeError: 'Unable to revoke access. Please retry.',
+    pendingHint: 'Complete authorization in your Feishu private conversation, then refresh this page.',
+    reconnectHint: 'To reconnect, privately message this Feishu AI employee: “{command}”.',
+    status: { connected: 'Connected', pending: 'Pending authorization', expired: 'Expired', revoked: 'Revoked' },
+  },
   platforms: { wecom: 'WeCom', feishu: 'Feishu' },
   runtimeNodes: {
     editName: 'Edit name', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
@@ -100,7 +113,8 @@ const en = {
     errors: { feishu_error: 'Feishu sign-in failed. Please retry.', feishu_not_configured: 'Feishu sign-in is not configured', invalid_state: 'Sign-in state expired. Please sign in again.', code_replayed: 'This sign-in credential has already been used. Please sign in again.', wecom_error: 'WeCom sign-in failed. Please try again later.', not_member: 'This WeCom account is not a member of the organization', user_not_found: 'No matching account found. Contact an administrator.', user_disabled: 'Account disabled. Contact an administrator.', rate_limited: 'Too many sign-in attempts. Please try again later.', wecom_not_configured: 'WeCom sign-in app is not configured' },
   },
   layout: { logout: 'Sign out', darkMode: 'Dark mode', language: 'Language' },
-  menu: { skills: 'Skills', skillApprovals: 'Skill approvals', credentials: 'APIs and keys', home: 'Workspace', bots: 'AI employees', relays: 'Runtime management', users: 'Teams and users', apps: 'Platform apps', cron: 'Scheduled tasks', announcements: 'Announcements', chatLogs: 'Conversation logs', statistics: 'Usage statistics', approvals: 'Approvals', systems: 'Business systems', runtime: 'Platform status', audit: 'Audit logs', settings: 'Settings' },
+  menu: {
+    myFeishu: "My Feishu", skills: 'Skills', skillApprovals: 'Skill approvals', credentials: 'APIs and keys', home: 'Workspace', bots: 'AI employees', relays: 'Runtime management', users: 'Teams and users', apps: 'Platform apps', cron: 'Scheduled tasks', announcements: 'Announcements', chatLogs: 'Conversation logs', statistics: 'Usage statistics', approvals: 'Approvals', systems: 'Business systems', runtime: 'Platform status', audit: 'Audit logs', settings: 'Settings' },
 
   users: { title: 'Teams and users', tabUsers: 'Users', tabTeams: 'Teams', keyword: 'Keyword', team: 'Team', role: 'Role', status: 'Status', unassigned: 'Unassigned only', name: 'Name', email: 'Email', departments: 'Departments', botAccessible: 'Accept help requests', lastLogin: 'Last sign-in', edit: 'Edit', position: 'Position', skills: 'Skills', locale: 'Language', roles: { platform_admin: 'Platform administrator', ai_committee: 'AI committee', team_lead: 'Team lead', member: 'Member' }, statuses: { active: 'Enabled', disabled: 'Disabled' }, sources: { sync: 'Synced', bootstrap: 'Bootstrap', manual: 'Manual' }, noTeam: 'Unassigned', deptTree: 'Department tree', pickerPlaceholder: 'Search users by name or account' },
   teams: { slug: 'Identifier', nameZh: 'Chinese name', nameJa: 'Japanese name', nameEn: 'English name', sortOrder: 'Sort order', memberCount: 'Members', rules: 'Rules', addRule: 'Add rule', platform: 'Platform', anyPlatform: 'Any platform', pathContains: 'Path contains', deleteConfirm: 'Delete this team?', hasMembers: 'This team still has {count} members. Move them before deleting.' },

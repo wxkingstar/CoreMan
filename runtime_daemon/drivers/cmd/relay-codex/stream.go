@@ -203,16 +203,18 @@ probe:
 			// codex sometimes writes non-JSON lines (banner, error logs) to
 			// stdout. Skip silently rather than confusing the client.
 			if line != "" {
-				log.Printf("[CODEX NON-JSON] %s", openai.ContentPreview(line, 500))
+				log.Printf("[CODEX NON-JSON] %s", openai.PrivateContentPreview(line, 500, openai.FeishuPersonalEnabled(envVars)))
 			}
 			return
 		}
 
-		logCodexRaw(line)
+		if !openai.FeishuPersonalEnabled(envVars) {
+			logCodexRaw(line)
+		}
 
 		var ev codexEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.ContentPreview(line, 500))
+			log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.PrivateContentPreview(line, 500, openai.FeishuPersonalEnabled(envVars)))
 			return
 		}
 
@@ -395,15 +397,17 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 			line = strings.TrimSpace(line)
 			if line == "" || !strings.HasPrefix(line, "{") {
 				if line != "" {
-					log.Printf("[CODEX NON-JSON] %s", openai.ContentPreview(line, 500))
+					log.Printf("[CODEX NON-JSON] %s", openai.PrivateContentPreview(line, 500, openai.FeishuPersonalEnabled(envVars)))
 				}
 				continue
 			}
-			logCodexRaw(line)
+			if !openai.FeishuPersonalEnabled(envVars) {
+				logCodexRaw(line)
+			}
 
 			var ev codexEvent
 			if err := json.Unmarshal([]byte(line), &ev); err != nil {
-				log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.ContentPreview(line, 500))
+				log.Printf("[CODEX PARSE ERR] %v (%s)", err, openai.PrivateContentPreview(line, 500, openai.FeishuPersonalEnabled(envVars)))
 				continue
 			}
 			sawEvent = true

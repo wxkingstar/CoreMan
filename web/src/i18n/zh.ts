@@ -1,4 +1,29 @@
 export default {
+  myFeishu: {
+    pendingExpiresAt: "授权链接到期时间",
+    requestHint: "连接后，请在飞书私聊中发送“{command}”等请求。目前仅支持 Claude 运行时，其他运行时不支持个人数据访问。",
+  "title": "我的飞书",
+  "intro": "管理你授予各个 AI 员工的飞书个人数据访问权限。",
+  "connectHint": "在飞书私聊 AI 员工，发送“{command}”开始授权。",
+  "privateOnly": "个人消息和会议资料仅可在飞书私聊中访问；群聊和企业微信不支持。",
+  "refresh": "刷新",
+  "empty": "尚无个人飞书授权",
+  "scopes": "授权范围",
+  "expiresAt": "当前访问凭证到期时间（可自动刷新）",
+  "revoke": "撤销授权",
+  "confirmRevoke": "删除 CoreMan 为“{name}”保存的凭证并停止本系统访问？如需撤销飞书侧应用授权，请同时在飞书授权管理中移除。",
+  "revoked": "已删除 CoreMan 保存的凭证",
+  "loadError": "无法加载授权，请重试。",
+  "revokeError": "撤销失败，请重试。",
+  "pendingHint": "请回到飞书私聊完成授权，然后刷新此页面。",
+  "reconnectHint": "如需重新连接，请在飞书私聊该 AI 员工并发送“{command}”。",
+  "status": {
+    "connected": "已连接",
+    "pending": "等待授权",
+    "expired": "已过期",
+    "revoked": "已撤销"
+  }
+},
   platforms: { wecom: '企业微信', feishu: '飞书' },
   runtimeNodes: {
     editName: '编辑名称',
@@ -175,6 +200,7 @@ export default {
   },
   layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
   menu: {
+    myFeishu: "我的飞书",
     skills: "技能管理",
     skillApprovals: "技能审批",
     credentials: "接口与密钥",

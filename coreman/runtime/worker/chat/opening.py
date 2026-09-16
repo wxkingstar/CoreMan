@@ -157,9 +157,14 @@ class OpenStage(ChatStageBase):
         env.update(access.env)
         from coreman.runtime.worker.chat.collaboration import configure
 
-        system_prompt, env = await configure(
+        system_prompt, env = await configure(session, ctx, intake, info, system_prompt, env)
+        from coreman.runtime.worker.chat.personal import configure as configure_personal
+
+        info, system_prompt, env = await configure_personal(
             session, ctx, intake, info, system_prompt, env
         )
+        if "COREMAN_FEISHU_PERSONAL_TOKEN" in env:
+            session_url = ""
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
         request = ChatRequest(

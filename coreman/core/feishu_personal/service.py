@@ -1,0 +1,357 @@
+"""Server-owned Feishu OAuth credentials and read-only, identity-bound API calls."""
+
+from __future__ import annotations
+
+import hashlib
+import json as jsonlib
+import re
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
+from urllib.parse import urlparse
+
+import httpx
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from coreman.core.crypto import Cipher
+from coreman.core.db.models import FeishuPersonalGrant
+from coreman.core.feishu_personal.policy import Scope, app_credentials
+
+BASE = "https://open.feishu.cn/open-apis"
+TOKEN_URL = BASE + "/authen/v2/oauth/token"
+SCOPES = (
+    "offline_access auth:user.id:read search:message im:message:readonly "
+    "im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read "
+    "vc:meeting.search:read vc:meeting:readonly vc:note:read "
+    "minutes:minutes.search:read minutes:minutes.basic:read minutes:minutes.artifacts:read "
+    "docx:document:readonly"
+)
+
+
+class PersonalError(Exception):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _aad(row: FeishuPersonalGrant, field: str) -> str:
+    return f"feishu_personal_grants.{field}:{row.bot_id}:{row.user_id}:{row.app_id}"
+
+
+def _fingerprint(app_id: str, secret: str) -> str:
+    return hashlib.sha256((app_id + ":" + secret).encode()).hexdigest()
+
+
+def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
+    row.status = status
+    row.token_enc = row.pending_enc = None
+    row.expires_at = row.pending_expires_at = row.next_poll_at = None
+    row.scopes = []
+
+
+def save_tokens(
+    cipher: Cipher, row: FeishuPersonalGrant, data: dict[str, Any], secret: str
+) -> None:
+    if not isinstance(data.get("access_token"), str) or not data["access_token"]:
+        raise PersonalError("authorization_failed")
+    row.token_enc = cipher.encrypt(
+        jsonlib.dumps({k: data[k] for k in ("access_token", "refresh_token") if data.get(k)}),
+        _aad(row, "token_enc"),
+    )
+    row.expires_at = datetime.now(UTC) + timedelta(
+        seconds=max(1, int(data.get("expires_in", 7200)))
+    )
+    if data.get("scope"):
+        row.scopes = str(data["scope"]).split()
+    row.app_fingerprint = _fingerprint(row.app_id, secret)
+    row.status = "connected"
+    row.pending_enc = None
+    row.pending_expires_at = row.next_poll_at = None
+
+
+async def _http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
+            # Bound upstream payload size as minutes may contain very long transcripts.
+            async with client.stream(method, url, **kwargs) as response:
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                    if len(chunks) > 8_000_000:
+                        raise PersonalError("response_too_large")
+                data = jsonlib.loads(chunks)
+                if not isinstance(data, dict):
+                    raise PersonalError("upstream_unavailable")
+                if response.status_code >= 400 and not data.get("error"):
+                    raise PersonalError("upstream_unavailable")
+                return data
+    except (httpx.HTTPError, ValueError) as exc:
+        raise PersonalError("upstream_unavailable") from exc
+
+
+async def _lock(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    digest = hashlib.sha256(f"feishu-personal:{bot_id}:{user_id}".encode()).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+async def _row(
+    session: AsyncSession, cipher: Cipher, scope: Scope
+) -> tuple[FeishuPersonalGrant, str]:
+    await _lock(session, scope.bot.id, scope.user_id)
+    try:
+        app_id, secret = app_credentials(cipher, scope.bot)
+    except ValueError as exc:
+        raise PersonalError("feishu_app_unavailable") from exc
+    if app_id != scope.app_id:
+        raise PersonalError("app_identity_mismatch")
+    # Upsert plus row lock serializes authorize, refresh, revoke and reads for this owner.
+    await session.execute(
+        insert(FeishuPersonalGrant)
+        .values(
+            bot_id=scope.bot.id,
+            user_id=scope.user_id,
+            app_id=app_id,
+            app_fingerprint=_fingerprint(app_id, secret),
+            platform_user_id=scope.event.sender_platform_user_id,
+            open_id=scope.event.sender_open_id,
+            tenant_key=scope.tenant_key,
+            status="revoked",
+            scopes=[],
+            poll_interval=5,
+        )
+        .on_conflict_do_nothing()
+    )
+    row = (
+        await session.scalars(
+            select(FeishuPersonalGrant)
+            .where(
+                FeishuPersonalGrant.bot_id == scope.bot.id,
+                FeishuPersonalGrant.user_id == scope.user_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    expected = (
+        app_id,
+        str(scope.event.sender_platform_user_id),
+        str(scope.event.sender_open_id),
+        scope.tenant_key,
+        _fingerprint(app_id, secret),
+    )
+    actual = (row.app_id, row.platform_user_id, row.open_id, row.tenant_key, row.app_fingerprint)
+    if actual != expected:
+        _clear(row)
+        row.app_id, row.platform_user_id, row.open_id, row.tenant_key, row.app_fingerprint = (
+            expected
+        )
+    return row, secret
+
+
+def _state(row: FeishuPersonalGrant) -> dict[str, Any]:
+    return {
+        "status": row.status,
+        "scopes": row.scopes,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+    }
+
+
+async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
+    row, secret = await _row(session, cipher, scope)
+    if row.status == "connected" and row.token_enc:
+        return _state(row)
+    if row.pending_enc and row.pending_expires_at and row.pending_expires_at > datetime.now(UTC):
+        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
+        return {
+            "status": "pending",
+            "authorization_url": pending["url"],
+            "expires_at": row.pending_expires_at.isoformat(),
+        }
+    data = await _http(
+        "POST",
+        "https://accounts.feishu.cn/oauth/v1/device_authorization",
+        auth=(row.app_id, secret),
+        data={"client_id": row.app_id, "scope": SCOPES},
+    )
+    url = data.get("verification_uri_complete", "")
+    parsed = urlparse(url)
+    if (
+        not data.get("device_code")
+        or parsed.scheme != "https"
+        or parsed.hostname not in ("accounts.feishu.cn", "open.feishu.cn")
+        or parsed.username
+    ):
+        raise PersonalError("authorization_unavailable")
+    _clear(row, "pending")
+    row.pending_enc = cipher.encrypt(
+        jsonlib.dumps({"device_code": data["device_code"], "url": url}), _aad(row, "pending_enc")
+    )
+    row.pending_expires_at = datetime.now(UTC) + timedelta(
+        seconds=min(1800, int(data.get("expires_in", 600)))
+    )
+    row.poll_interval = max(1, min(60, int(data.get("interval", 5))))
+    # First check may happen immediately; subsequent polls obey the server interval.
+    return {
+        "status": "pending",
+        "authorization_url": url,
+        "expires_at": row.pending_expires_at.isoformat(),
+    }
+
+
+async def authorization_status(
+    session: AsyncSession, cipher: Cipher, scope: Scope
+) -> dict[str, Any]:
+    row, secret = await _row(session, cipher, scope)
+    if not row.pending_enc:
+        return _state(row)
+    now = datetime.now(UTC)
+    if not row.pending_expires_at or row.pending_expires_at <= now:
+        _clear(row, "expired")
+        return _state(row)
+    if row.next_poll_at and row.next_poll_at > now:
+        return {
+            "status": "pending",
+            "retry_after": max(1, int((row.next_poll_at - now).total_seconds())),
+        }
+    pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
+    row.next_poll_at = now + timedelta(seconds=row.poll_interval)
+    data = await _http(
+        "POST",
+        TOKEN_URL,
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": pending["device_code"],
+            "client_id": row.app_id,
+            "client_secret": secret,
+        },
+    )
+    error = data.get("error")
+    if error in ("authorization_pending", "slow_down"):
+        if error == "slow_down":
+            row.poll_interval = min(60, row.poll_interval + 5)
+            row.next_poll_at = now + timedelta(seconds=row.poll_interval)
+        return {"status": "pending", "retry_after": row.poll_interval}
+    if error or not data.get("access_token"):
+        _clear(row, "expired")
+        raise PersonalError("authorization_failed")
+    info = await _http(
+        "GET",
+        BASE + "/authen/v1/user_info",
+        headers={"Authorization": "Bearer " + data["access_token"]},
+    )
+    identity = info.get("data") or {}
+    if (
+        info.get("code") != 0
+        or identity.get("user_id") != row.platform_user_id
+        or identity.get("open_id") != row.open_id
+        or identity.get("tenant_key") != row.tenant_key
+    ):
+        _clear(row)
+        raise PersonalError("identity_mismatch")
+    save_tokens(cipher, row, data, secret)
+    return _state(row)
+
+
+async def revoke_grant(
+    session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID
+) -> dict[str, Any]:
+    await _lock(session, bot_id, user_id)
+    row = (
+        await session.scalars(
+            select(FeishuPersonalGrant)
+            .where(FeishuPersonalGrant.bot_id == bot_id, FeishuPersonalGrant.user_id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).one_or_none()
+    if row:
+        _clear(row)
+    return {"status": "revoked"}
+
+
+async def revoke_authorization(
+    session: AsyncSession, cipher: Cipher, scope: Scope
+) -> dict[str, Any]:
+    return await revoke_grant(session, scope.bot.id, scope.user_id)
+
+
+async def api_request(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    method: str,
+    path: str,
+    *,
+    params: Any = None,
+    json: Any = None,
+) -> dict[str, Any]:
+    allowed = (
+        method == "POST"
+        and path
+        in ("/im/v1/messages/search", "/vc/v1/meetings/search", "/minutes/v1/minutes/search")
+    ) or (
+        method == "GET"
+        and re.fullmatch(
+            r"/(?:im/v1/messages(?:/mget)?|vc/v1/(?:meetings|notes)/[A-Za-z0-9_-]+"
+            r"|minutes/v1/minutes/[A-Za-z0-9_-]+(?:/artifacts)?"
+            r"|docx/v1/documents/[A-Za-z0-9_-]+/raw_content)",
+            path,
+        )
+        is not None
+    )
+    if not allowed:
+        raise PersonalError("invalid_tool_or_arguments")
+    row, secret = await _row(session, cipher, scope)
+    if row.status != "connected" or not row.token_enc:
+        raise PersonalError("authorization_required")
+    tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
+    if not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
+        if not tokens.get("refresh_token"):
+            _clear(row, "expired")
+            raise PersonalError("authorization_required")
+        data = await _http(
+            "POST",
+            TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+                "client_id": row.app_id,
+                "client_secret": secret,
+            },
+        )
+        if data.get("error") or not data.get("access_token"):
+            _clear(row, "expired")
+            raise PersonalError("authorization_required")
+        data.setdefault("refresh_token", tokens["refresh_token"])
+        save_tokens(cipher, row, data, secret)
+        tokens = data
+    response = await _http(
+        method,
+        BASE + path,
+        headers={"Authorization": "Bearer " + tokens["access_token"]},
+        params=params,
+        json=json,
+    )
+    if response.get("code") != 0:
+        # Do not forward upstream message text or request context to the model.
+        if response.get("code") in (99991663, 99991668, 99991671, 99991677):
+            _clear(row, "expired")
+            raise PersonalError("authorization_required")
+        raise PersonalError("feishu_read_failed")
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, str):
+            for sensitive in (tokens.get("access_token"), tokens.get("refresh_token"), secret):
+                if sensitive:
+                    value = value.replace(sensitive, "[redacted]")
+            return value
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        return value
+
+    return cast(dict[str, Any], redact(response.get("data") or {}))
