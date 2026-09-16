@@ -79,3 +79,13 @@ func (item *codexItem) nativeToolCall() (name, arguments string) {
 	encoded, _ := json.Marshal(input)
 	return name, string(encoded)
 }
+
+// Preserve provider tool fields so non-shell details survive translation too.
+func (item *codexItem) UnmarshalJSON(data []byte) error {
+	type plain codexItem
+	if err := json.Unmarshal(data, (*plain)(item)); err != nil {
+		return err
+	}
+	item.Raw = append(json.RawMessage(nil), data...)
+	return nil
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 THINKING_BYTES = 4000
 ANSWER_BYTES = 16000
@@ -32,13 +33,35 @@ def split_utf8(value: str, limit: int = ANSWER_BYTES) -> list[str]:
 def visible_parts(thinking: str, answer: str) -> tuple[str, str]:
     hidden = _THINK.findall(answer)
     answer = _THINK.sub("", answer)
+    # A streaming <think> block may be incomplete; it is never answer content.
+    opened = re.search(r"<think>(.*)$", answer, re.S | re.I)
+    if opened:
+        hidden.append(opened.group(1))
+        answer = answer[: opened.start()]
+    for length in range(1, len("<think>")):
+        if answer.lower().endswith("<think>"[:length]):
+            answer = answer[:-length]
+            break
     thinking = "\n".join([thinking, *hidden]).strip()
     return thinking, answer
 
 
-def stream_card(thinking: str, answer: str, *, streaming: bool = True) -> dict[str, Any]:
+def thinking_preview(thinking: str) -> str:
+    # Five logical lines; client wrapping depends on its viewport and font size.
+    lines = [line for line in thinking.splitlines() if line.strip()]
+    return "\n".join(line[-240:] for line in lines[-5:]) or "正在思考，请稍候…"
+
+
+def stream_card(
+    thinking: str,
+    answer: str,
+    *,
+    streaming: bool = True,
+    session_url: str | None = None,
+    heading: str = "🤔 思考过程",
+) -> dict[str, Any]:
     thinking, answer = visible_parts(thinking, answer)
-    return {
+    card: dict[str, Any] = {
         "schema": "2.0",
         "config": {
             "streaming_mode": streaming,
@@ -53,13 +76,18 @@ def stream_card(thinking: str, answer: str, *, streaming: bool = True) -> dict[s
             "elements": [
                 {
                     "tag": "collapsible_panel",
+                    "element_id": "thinking_panel",
                     "expanded": False,
-                    "header": {"title": {"tag": "plain_text", "content": "💭"}},
+                    "header": {"title": {"tag": "plain_text", "content": heading}},
+                    "background_color": "grey",
+                    "border": {"color": "grey", "corner_radius": "8px"},
+                    "padding": "8px",
                     "elements": [
                         {
                             "tag": "markdown",
                             "element_id": "thinking",
-                            "content": split_utf8(thinking, THINKING_BYTES)[0] or "…",
+                            "content": thinking_preview(thinking),
+                            "text_size": "notation",
                         }
                     ],
                 },
@@ -71,6 +99,17 @@ def stream_card(thinking: str, answer: str, *, streaming: bool = True) -> dict[s
             ]
         },
     }
+    if session_url and urlparse(session_url).scheme in {"http", "https"}:
+        # Use a native URL button; do not interpolate the URL into model Markdown.
+        card["body"]["elements"][0]["elements"].append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看完整思考过程"},
+                "type": "default",
+                "behaviors": [{"type": "open_url", "default_url": session_url}],
+            }
+        )
+    return card
 
 
 def interaction_card(card: dict[str, Any]) -> dict[str, Any]:

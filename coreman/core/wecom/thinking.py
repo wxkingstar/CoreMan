@@ -1,15 +1,13 @@
-"""Bounded progress rendering for the chat stream."""
+"""Process text collection; channel renderers apply display limits."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 
-GENERATING_TAIL_CHARS = 200
-
 
 class ThinkingCollector:
-    """Collect rendered progress lines and a bounded tail of generated text."""
+    """Preserve process text; each channel applies its own display budget."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self.clock = clock
@@ -31,7 +29,7 @@ class ThinkingCollector:
         self._lines.append(f"🔧 **{name}**")
 
     def add_generating(self, text: str) -> None:
-        self._tail = ((self._tail or "") + text)[-GENERATING_TAIL_CHARS:]
+        self._tail = (self._tail or "") + text
 
     def add_end(self, content: str, now: float | None = None) -> None:
         self._flush()

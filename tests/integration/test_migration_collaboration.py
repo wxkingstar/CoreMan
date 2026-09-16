@@ -26,7 +26,7 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
         )
         command.upgrade(cfg, "head")
         assert asyncio.run(_rows(migrated_database, "SELECT version_num FROM alembic_version")) == [
-            ("0025",)
+            ("0026",)
         ]
         assert (
             asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
@@ -47,3 +47,45 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
     finally:
         command.upgrade(cfg, "head")
         asyncio.run(_restore_seed(migrated_database))
+
+
+def test_reactions_only_0025_gets_missing_collaboration_columns(migrated_database: str) -> None:
+    cfg = alembic_config(migrated_database)
+    before = asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
+    command.stamp(cfg, "0025")
+    try:
+        asyncio.run(
+            _execute(
+                migrated_database,
+                (
+                    "ALTER TABLE bot_collaboration_routes DROP COLUMN setup, "
+                    "DROP COLUMN archived, DROP COLUMN version",
+                    {},
+                ),
+            )
+        )
+        command.upgrade(cfg, "head")
+        assert asyncio.run(_rows(migrated_database, "SELECT version_num FROM alembic_version")) == [
+            ("0026",)
+        ]
+        assert (
+            asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
+            == before
+        )
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name='bot_collaboration_routes' "
+                "AND column_name IN ('setup','archived','version')",
+            )
+        ) == [(3,)]
+        assert asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name='feishu_deliveries' AND column_name LIKE 'reaction_%'",
+            )
+        ) == [(4,)]
+    finally:
+        command.upgrade(cfg, "head")

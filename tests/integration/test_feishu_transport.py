@@ -270,5 +270,236 @@ async def test_bad_card_does_not_block_notices_and_final_falls_back(db_session, 
     async with factory() as session:
         final = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key != "unrelated"))
         assert final.status == "sent"
-        assert final.payload == {"markdown": "visible"}
+        assert final.payload == {"markdown": "visible", "_typing_task_id": row.task_id}
         assert (await session.get(TaskStream, row.task_id)).finish_pushed_at
+
+
+async def test_typing_survives_thinking_and_failed_answer_then_cleans_after_delivery(
+    db_session, db_engine
+):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class ReactionAPI(FakeAPI):
+        reject_answer = False
+
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/reactions"):
+                self.calls.append((method, path, kwargs.get("json")))
+                return {"data": {"reaction_id": "reaction1"}}
+            if self.reject_answer and path.endswith("/elements/answer/content"):
+                raise FeishuError(999)
+            return await super().call(method, path, **kwargs)
+
+    api = ReactionAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="", thinking_md="working")
+        await session.commit()
+    await transport.round()
+    assert any(
+        path.endswith("/reactions") and body["reaction_type"]["emoji_type"] == "Typing"
+        for _, path, body in api.calls
+    )
+    assert not any(method == "DELETE" for method, _, _ in api.calls)
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="actual answer")
+        await session.commit()
+    api.reject_answer = True
+    await transport.round()
+    assert not any(method == "DELETE" for method, _, _ in api.calls)
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        delivery.retry_at = None
+        await session.commit()
+    api.reject_answer = False
+    # Restart must reuse the saved reaction and clean it only after the answer is delivered.
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    assert sum(path.endswith("/reactions") for _, path, _ in api.calls) == 1
+    answer_index = max(
+        i for i, (_, path, _) in enumerate(api.calls) if path.endswith("/elements/answer/content")
+    )
+    delete_index = next(i for i, (method, _, _) in enumerate(api.calls) if method == "DELETE")
+    assert answer_index < delete_index
+    await transport.round()
+    assert sum(path.endswith("/reactions") for _, path, _ in api.calls) == 1
+
+
+async def test_typing_cleanup_retries_after_stream_is_finished(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class CleanupAPI(FakeAPI):
+        reject_delete = True
+
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/reactions"):
+                return {"data": {"reaction_id": "reaction1"}}
+            if method == "DELETE" and self.reject_delete:
+                raise FeishuError(999)
+            return await super().call(method, path, **kwargs)
+
+    api = CleanupAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text="done")
+        await session.commit()
+    await transport.round()
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.reaction_id == "reaction1" and delivery.reaction_done
+        assert (await session.get(TaskStream, row.task_id)).finish_pushed_at
+        delivery.reaction_retry_at = None
+        await session.commit()
+    api.reject_delete = False
+    await transport.round()
+    async with factory() as session:
+        assert (await session.get(FeishuDelivery, row.task_id)).reaction_id is None
+
+
+async def test_missing_reaction_permission_does_not_block_answer(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class NoPermissionAPI(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/reactions"):
+                raise FeishuError(99991672)
+            return await super().call(method, path, **kwargs)
+
+    api = NoPermissionAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.message_id and not delivery.fallback and delivery.failures == 0
+        assert delivery.reaction_done
+    assert any(body.get("content") == "hello" for _, _, body in api.calls)
+
+
+async def test_card_only_answer_waits_for_outbox_delivery(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class CardAPI(FakeAPI):
+        fail_card = True
+
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/reactions"):
+                return {"data": {"reaction_id": "reaction1"}}
+            if path == "/open-apis/im/v1/messages" and self.fail_card:
+                raise FeishuError(999)
+            return await super().call(method, path, **kwargs)
+
+    api = CardAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="")
+        await streams.complete(
+            session,
+            row.task_id,
+            final_text="",
+            pending_card={
+                "schema": "2.0",
+                "body": {"elements": [{"tag": "markdown", "content": "请选择"}]},
+            },
+        )
+        await session.commit()
+    await transport.round()
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.reaction_id == "reaction1" and not delivery.reaction_done
+        item = await session.scalar(select(OutboxItem))
+        item.not_before = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    api.fail_card = False
+    await transport.round()
+    async with factory() as session:
+        assert (await session.get(FeishuDelivery, row.task_id)).reaction_done
+
+
+async def test_fallback_thinking_only_completion_cleans_typing(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        session.add(FeishuDelivery(task_id=row.task_id, fallback=True, reaction_id="reaction1"))
+        await streams.complete(session, row.task_id, final_text="<think>only process</think>")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.reaction_done and delivery.reaction_id is None
+        assert not list(await session.scalars(select(OutboxItem)))
+
+
+async def test_permanent_outbox_failure_ends_typing(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class PermanentAPI(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            if path == "/open-apis/im/v1/messages":
+                raise FeishuError(230013)
+            return await super().call(method, path, **kwargs)
+
+    async with factory() as session:
+        session.add(FeishuDelivery(task_id=row.task_id, fallback=True, reaction_id="reaction1"))
+        await streams.complete(session, row.task_id, final_text="answer")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, PermanentAPI(), bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        assert (await session.scalar(select(OutboxItem))).status == "failed"
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.reaction_done and delivery.reaction_id is None
+
+
+async def test_thinking_heading_animates_without_new_content(db_session, db_engine, monkeypatch):
+    bot, row, generation = await seed(db_session)
+    await streams.update(db_session, row.task_id, pending_text="", thinking_md="waiting")
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    clock = [100.0]
+    monkeypatch.setattr(
+        "coreman.runtime.gateway_feishu.transport.heading_clock", lambda: clock[0], raising=False
+    )
+    await transport.round()
+    api.calls.clear()
+    clock[0] += 3
+    await transport.round()
+    patches = [
+        body for method, path, body in api.calls if path.endswith("/elements/thinking_panel")
+    ]
+    import json
+
+    assert (
+        json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考中.."
+    )
+    assert not any(path.endswith("/content") for _, path, _ in api.calls)
+    api.calls.clear()
+    await transport.round()
+    assert not any(path.endswith("/elements/thinking_panel") for _, path, _ in api.calls)
+    await streams.update(db_session, row.task_id, pending_text="answer")
+    await db_session.commit()
+    await transport.round()
+    patches = [body for _, path, body in api.calls if path.endswith("/elements/thinking_panel")]
+    assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程"

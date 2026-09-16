@@ -203,6 +203,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 			}
 			if delta.Type == "thinking_delta" && delta.Thinking != "" {
 				t.aggAppend("thinking_delta", delta.Thinking)
+				sessionStore.LogThinking(t.sessionID, delta.Thinking)
 				t.emit(w, flusher, openai.ChatCompletionResponse{
 					ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
 					Choices: []openai.ChatCompletionChoice{{
@@ -223,6 +224,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		if streamEvt.Type == "content_block_stop" {
 			if tb, ok := t.toolBlocks[streamEvt.Index]; ok {
 				sessionStore.LogToolUse(t.sessionID, tb.Name, tb.ID, tb.Args.String())
+				if tb.Name != "AskUserQuestion" && tb.Args.Len() > 0 {
+					t.progress(w, flusher, "\n\n工具参数 · "+tb.Name+"\n"+tb.Args.String()+"\n")
+				}
 				delete(t.toolBlocks, streamEvt.Index)
 			}
 		}
@@ -230,6 +234,27 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 			t.askUserComplete = true
 		}
 		return outcomeContinue
+	}
+
+	if event.Type == "user" && event.Message != nil {
+		var message struct {
+			Content []struct {
+				Type    string          `json:"type"`
+				ToolID  string          `json:"tool_use_id"`
+				Content json.RawMessage `json:"content"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(event.Message, &message) == nil {
+			for _, block := range message.Content {
+				if block.Type == "tool_result" {
+					var content string
+					if json.Unmarshal(block.Content, &content) != nil {
+						content = string(block.Content)
+					}
+					t.progress(w, flusher, "\n\n工具结果 · "+block.ToolID+"\n"+content+"\n")
+				}
+			}
+		}
 	}
 
 	// A partial content-block stop precedes Claude's persisted assistant turn.
@@ -286,6 +311,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 					}
 					t.seenToolIDs[id] = true
 					log.Printf("[ASSISTANT TOOL_USE FALLBACK] name=%s", c.Name)
+					if len(c.Input) > 0 {
+						t.progress(w, flusher, "\n\n工具参数 · "+c.Name+"\n"+string(c.Input)+"\n")
+					}
 					tc := openai.ToolCall{
 						ID:       id,
 						Type:     "function",
@@ -391,4 +419,13 @@ func (t *sseTranslator) fallbackToolID(messageID string, index int) string {
 	}
 	t.fallbackToolSeq++
 	return fmt.Sprintf("relay-fallback:%s:%d", t.chatID, t.fallbackToolSeq)
+}
+
+// progress stays on the process channel, never masquerading as answer text.
+func (t *sseTranslator) progress(w http.ResponseWriter, flusher http.Flusher, content string) {
+	sessionStore.LogThinking(t.sessionID, content)
+	t.emit(w, flusher, openai.ChatCompletionResponse{
+		ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
+		Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: &openai.ChatMessage{Role: "assistant", Thinking: content}}},
+	})
 }

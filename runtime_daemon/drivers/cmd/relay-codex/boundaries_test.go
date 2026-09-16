@@ -254,3 +254,19 @@ func TestTailBufferKeepsOnlyTheEnd(t *testing.T) {
 		t.Fatalf("tail = %q", got)
 	}
 }
+
+func TestNonShellToolProcessIsPreserved(t *testing.T) {
+	dir := fakeCodex(t, `echo '{"type":"item.started","item":{"id":"m1","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"query":"example"}}}'
+echo '{"type":"item.completed","item":{"id":"m1","type":"mcp_tool_call","result":{"content":"found example"}}}'
+echo '{"type":"item.completed","item":{"id":"f1","type":"file_change","changes":[{"path":"example.txt","kind":"update"}]}}'
+echo '{"type":"item.completed","item":{"id":"w1","type":"web_search","query":"public docs"}}'
+echo '{"type":"turn.completed"}'
+`)
+	rec := httptest.NewRecorder()
+	handleStreamResponse(rec, httptest.NewRequest("POST", "/", nil), codexInput{}, "r", 1, "m", false, dir, nil, "", nil)
+	for _, want := range []string{"found example", "example.txt", "public docs", `"thinking":`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("missing %s", want)
+		}
+	}
+}

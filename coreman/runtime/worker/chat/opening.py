@@ -180,7 +180,11 @@ class OpenStage(ChatStageBase):
         }
         stream_kwargs.update(self._stream_kwargs(ctx, intake))
         await open_stream(session, ctx, **stream_kwargs)
-        if info.is_new and ctx.task.payload.get("collaboration_phase") != "helper":
+        if (
+            info.is_new
+            and bot.platform != "feishu"
+            and ctx.task.payload.get("collaboration_phase") != "helper"
+        ):
             writer.add_text(msg("session_link_prefix", ctx.locale, url=session_url))
         writer.set_thinking_line(msg("thinking_start", ctx.locale))
         # IM 投递策略固定在底层，不读取旧的员工/全局 agent_timeout_seconds。

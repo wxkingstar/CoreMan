@@ -128,6 +128,7 @@ probe:
 	}
 
 	thinkingDelta := func(text string) {
+		sessionStore.LogThinking(sessionID, text)
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []openai.ChatCompletionChoice{{
@@ -187,6 +188,13 @@ probe:
 		}
 		startedTools[item.ID] = true
 		toolCallDelta(item.ID, name, arguments)
+		// Count each native tool once while preserving its process details.
+		// Progress remains thinking content and never creates another tool start.
+		if item.Type == "command_execution" {
+			thinkingDelta("\n\n工具参数 · shell\n" + arguments + "\n")
+		} else {
+			thinkingDelta("\n\n工具开始 · " + item.Type + "\n" + string(item.Raw) + "\n")
+		}
 	}
 
 	handleLine := func(raw string) {
@@ -231,6 +239,8 @@ probe:
 			// missing start frames while deduplicating normal start/completion pairs.
 			emitToolStart(ev.Item)
 			switch ev.Item.Type {
+			case "file_change", "web_search", "mcp_tool_call", "collab_tool_call", "todo_list":
+				thinkingDelta("\n\n工具结果 · " + ev.Item.Type + "\n" + string(ev.Item.Raw) + "\n")
 			case "agent_message":
 				if ev.Item.Text != "" {
 					emittedAnyContent = true
@@ -242,6 +252,7 @@ probe:
 					thinkingDelta(ev.Item.Text)
 				}
 			case "command_execution":
+				thinkingDelta("\n\n工具结果 · shell\n" + ev.Item.AggregatedOutput + "\n")
 				// Log tool result for /sessions viewer.
 				exit := ""
 				if ev.Item.ExitCode != nil {
@@ -250,7 +261,7 @@ probe:
 				sessionStore.LogToolUse(sessionID, "shell", ev.Item.ID,
 					fmt.Sprintf(`{"command":%q,"exit_code":%s,"output":%q}`,
 						ev.Item.Command, defaultStr(exit, "null"),
-						openai.Truncate(ev.Item.AggregatedOutput, 4096)))
+						ev.Item.AggregatedOutput))
 			}
 
 		case "turn.completed":
