@@ -329,6 +329,9 @@ def test_memory_snapshot_does_not_report_or_hold_lock_during_report(agent, monke
 def test_skill_install_selects_only_requested_catalog_entry(agent, monkeypatch):
     bot = agent.root / "bot"
     bot.mkdir()
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("query")
     calls = []
     monkeypatch.setattr(
         agent_module, "run_command", lambda command, *args, **kwargs: calls.append(command)
@@ -370,6 +373,9 @@ def test_automatic_memory_report_reads_only_assigned_workspaces(agent, monkeypat
 def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
     bot = agent.root / "token-bot"
     bot.mkdir()
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("query")
     calls = []
     monkeypatch.setattr(
         agent_module, "run_command", lambda command, *a, **kwargs: calls.append((command, kwargs))
@@ -390,3 +396,127 @@ def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
     assert "test-token" not in str(install)
     assert install[0][4].startswith("/")
     assert install[0][-3:] == ["--skill", "query", "-y"]
+
+
+@pytest.mark.parametrize("with_token", [False, True])
+def test_skill_install_links_claude_to_canonical_skills(agent, monkeypatch, with_token):
+    bot = agent.root / "linked-bot"
+    bot.mkdir()
+
+    def install(command, *args, **kwargs):
+        if command[0] == "npx":
+            source = bot / ".agents/skills/query"
+            source.mkdir(parents=True, exist_ok=True)
+            (source / "SKILL.md").write_text("query instructions")
+
+    monkeypatch.setattr(agent_module, "run_command", install)
+    data = {
+        "project_dir": str(bot),
+        "git_url": "https://github.com/example/tools.git",
+        "skill_name": "query",
+    }
+    if with_token:
+        data["git_access_token"] = "test-token"
+    for _ in range(2):
+        assert agent.install_skill(data)["success"]
+        alias = bot / ".claude/skills/query"
+        assert alias.is_symlink()
+        assert (alias / "SKILL.md").read_text() == "query instructions"
+        assert alias.resolve() == bot / ".agents/skills/query"
+
+
+def test_skill_link_preserves_existing_claude_directory(agent):
+    bot = agent.root / "conflict"
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("new")
+    target = bot / ".claude/skills/query"
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("existing")
+    with pytest.raises(agent_module.OperationError):
+        agent.link_claude_skills(bot, "query")
+    assert (target / "SKILL.md").read_text() == "existing"
+
+
+def test_skill_link_rejects_outside_directory(agent, tmp_path):
+    bot = agent.root / "escape-bot"
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("query")
+    (bot / ".claude").symlink_to(tmp_path)
+    with pytest.raises(agent_module.OperationError):
+        agent.link_claude_skills(bot, "query")
+    assert not (tmp_path / "skills").exists()
+
+
+def test_skill_install_rejects_conflict_before_running_installer(agent, monkeypatch):
+    bot = agent.root / "conflict-before-install"
+    (bot / ".claude/skills/query").mkdir(parents=True)
+    calls = []
+    monkeypatch.setattr(agent_module, "run_command", lambda *a, **k: calls.append(a))
+    with pytest.raises(agent_module.OperationError, match="不能覆盖"):
+        agent.install_skill(
+            {
+                "project_dir": str(bot),
+                "git_url": "https://github.com/example/tools.git",
+                "skill_name": "query",
+            }
+        )
+    assert not calls
+
+
+def test_skill_install_cannot_report_success_without_files(agent, monkeypatch):
+    bot = agent.root / "missing-files"
+    bot.mkdir()
+    monkeypatch.setattr(agent_module, "run_command", lambda *a, **k: "")
+    with pytest.raises(agent_module.OperationError, match="SKILL.md"):
+        agent.install_skill(
+            {
+                "project_dir": str(bot),
+                "git_url": "https://github.com/example/tools.git",
+                "skill_name": "query",
+            }
+        )
+
+
+def test_skill_links_all_entries_with_relative_targets(agent):
+    import os
+
+    bot = agent.root / "all-skills"
+    for name in ("one", "two"):
+        source = bot / ".agents/skills" / name
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(name)
+    agent.link_claude_skills(bot, None)
+    for name in ("one", "two"):
+        assert os.readlink(bot / ".claude/skills" / name) == f"../../.agents/skills/{name}"
+
+
+def test_skill_link_rejects_wrong_alias_without_changing_it(agent):
+    bot = agent.root / "wrong-alias"
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("query")
+    target = bot / ".claude/skills/query"
+    target.parent.mkdir(parents=True)
+    target.symlink_to("../../.agents/skills/other")
+    with pytest.raises(agent_module.OperationError, match="其他位置"):
+        agent.link_claude_skills(bot, "query")
+    assert target.is_symlink()
+
+
+def test_mcp_install_does_not_require_skill_directories(agent):
+    bot = agent.root / "mcp-only"
+    bot.mkdir()
+    assert agent.install_skill(
+        {
+            "project_dir": str(bot),
+            "install_type": "mcp",
+            "skill_name": "query",
+            "mcp_config": {"command": "example"},
+        }
+    )["success"]
+    assert not (bot / ".claude/skills").exists()
+    assert json.loads((bot / ".mcp.json").read_text())["mcpServers"]["query"] == {
+        "command": "example"
+    }

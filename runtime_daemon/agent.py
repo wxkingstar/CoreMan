@@ -445,6 +445,51 @@ class Agent:
         self.prepare_workspace(path)
         return {"success": True, "message": "仓库已更新", "working_dir": str(path)}
 
+    def link_claude_skills(
+        self, path: Path, skill: str | None, *, validate_only: bool = False
+    ) -> None:
+        canonical = path / ".agents/skills"
+        aliases = path / ".claude/skills"
+        for directory in (path / ".agents", canonical, path / ".claude", aliases):
+            if not directory.resolve().is_relative_to(path):
+                raise OperationError("技能目录链接指向工作区外")
+            if directory.exists() and not directory.is_dir():
+                raise OperationError("技能目录路径被文件占用")
+            if directory.is_symlink() and not directory.exists():
+                raise OperationError("技能目录链接已失效")
+        sources = (
+            [canonical / skill]
+            if skill
+            else sorted(canonical.iterdir())
+            if canonical.is_dir()
+            else []
+        )
+        if not sources and not validate_only:
+            raise OperationError("安装后未找到 .agents/skills 技能目录")
+        links = []
+        for source in sources:
+            if not source.resolve().is_relative_to(canonical.resolve()):
+                raise OperationError("技能内容链接指向目录外")
+            target = aliases / source.name
+            if target.is_symlink():
+                if target.resolve() != source.resolve():
+                    raise OperationError("Claude 技能同名链接指向其他位置，请先处理冲突")
+            elif target.exists() and target.resolve() != source.resolve():
+                raise OperationError("Claude 技能同名目录或文件已存在，不能覆盖")
+            if validate_only:
+                continue
+            manifest = source / "SKILL.md"
+            if not source.is_dir() or not manifest.is_file():
+                raise OperationError("安装后未找到技能 SKILL.md")
+            if not manifest.resolve().is_relative_to(canonical.resolve()):
+                raise OperationError("技能内容链接指向目录外")
+            if not target.exists():
+                links.append((source, target))
+        if not validate_only:
+            aliases.mkdir(parents=True, exist_ok=True)
+            for source, target in links:
+                target.symlink_to(os.path.relpath(source, aliases), target_is_directory=True)
+
     def install_skill(self, data: dict) -> dict:
         path = self.workspace(str(data.get("project_dir", "")))
         if not path.is_dir():
@@ -474,6 +519,7 @@ class Agent:
                 if skill and skill != requested_skill:
                     raise OperationError("Skill 名称不匹配")
                 skill = requested_skill
+            self.link_claude_skills(path, skill, validate_only=True)
             command = ["npx", "--yes", "skills", "add", url]
             if skill:
                 command += ["--skill", skill]
@@ -523,6 +569,7 @@ class Agent:
                     run_command(command + ["-y"], path, timeout=300)
             else:
                 run_command(command + ["-y"], path, timeout=300)
+            self.link_claude_skills(path, skill)
         return {"success": True, "message": "Skill 已安装"}
 
     def start_background(self, name: str, function) -> dict:

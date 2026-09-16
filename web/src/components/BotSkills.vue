@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
+import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
+import { useAuthStore } from '@/stores/auth'
 import LoadState from '@/components/LoadState.vue'
 import { computed, ref, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { allSkills, skills, type Skill, type Installed, type Approval, type InstallInput } from '@/api/skills'
+import { allSkills, skills, type Skill, type Installed, type Approval, type InstallInput, type Source, type Preset } from '@/api/skills'
 const props = defineProps<{ botId: string }>()
 const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
+const auth = useAuthStore()
+const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
+const skillDialog = ref<InstanceType<typeof SkillEditorDialog>>()
+const sources = ref<Source[]>([]), presets = ref<Preset[]>([])
 const loadError = ref('')
 const visible = ref(false), editing = ref(false), busy = ref(false)
 const catalog = ref<Skill[]>([]), rows = ref<Installed[]>([]), pending = ref<Approval[]>([])
@@ -19,11 +25,21 @@ const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 async function load() {
   loadError.value = ''
   busy.value = true
-  try { const [available, installed] = await Promise.all([allSkills(), skills.installed(props.botId)]); catalog.value = available.filter(s => s.enabled); rows.value = installed.items; pending.value = installed.pending_approvals }
+  try { const [available, installed] = await Promise.all([allSkills(), skills.installed(props.botId)]); catalog.value = available; rows.value = installed.items; pending.value = installed.pending_approvals }
   catch (e) { loadError.value = errorMessage(e); fail(e) } finally { busy.value = false }
 }
 watch(visible, value => { if (value) void load() })
+async function configure(skill: Skill) {
+  if (!manager.value || busy.value) return
+  busy.value = true
+  try {
+    const [sourceRows, presetRows] = await Promise.all([skills.sources(), skills.presets()])
+    sources.value = sourceRows; presets.value = presetRows
+    skillDialog.value?.open(skill, skill.source_id)
+  } catch (e) { fail(e) } finally { busy.value = false }
+}
 function edit(skill: Skill) {
+  if (!skill.enabled) return
   selected.value = skill
   const current = rows.value.find(row => row.skill_id === skill.id)
   Object.assign(form, { selected_env_groups: current?.selected_env_groups.filter(key => key in skill.selectable_env_groups) ?? [], data_source: skill.default_data_source, user_env_vars: Object.fromEntries(Object.entries(current?.user_env_vars ?? {}).filter(([key]) => key in skill.user_env_vars)), requested_security_prompt: current?.security_prompt || skill.security_prompt_template || '', reinstall_code: true })
@@ -114,7 +130,16 @@ async function remove(row: Installed) {
       type="warning"
     />
     <h3>{{ t('skill.available') }}</h3>
-    <el-table :data="catalog">
+    <el-alert
+      v-if="!busy && !loadError && catalog.some(skill => !skill.enabled)"
+      :title="t('skill.disabledHint')"
+      :closable="false"
+      type="warning"
+    />
+    <el-table
+      :data="catalog"
+      :empty-text="t('skill.emptyCatalog')"
+    >
       <el-table-column
         min-width="140"
         prop="name"
@@ -133,19 +158,45 @@ async function remove(row: Installed) {
           {{ t(`skill.${row.security_level}`) }}
         </template>
       </el-table-column>
+      <el-table-column
+        min-width="100"
+        :label="t('common.status')"
+      >
+        <template #default="{ row }">
+          <el-tag :type="row.enabled ? 'success' : 'info'">
+            {{ t(row.enabled ? 'common.enabled' : 'common.disabled') }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column min-width="140">
         <template #default="{ row }">
           <el-button
+            v-if="row.enabled"
             :disabled="busy || pending.some(a => a.skill_id === row.id) || rows.some(r => r.skill_id === row.id && r.status === 'installing')"
             :data-test="`skill-install-${row.id}`"
             @click="edit(row)"
           >
             {{ t('skill.configureInstall') }}
           </el-button>
+          <el-button
+            v-else-if="manager"
+            :disabled="busy"
+            :data-test="`skill-configure-${row.id}`"
+            @click="configure(row)"
+          >
+            {{ t('skill.configureEnable') }}
+          </el-button>
         </template>
       </el-table-column>
     </el-table>
   </el-dialog>
+  <SkillEditorDialog
+    v-if="manager"
+    ref="skillDialog"
+    :sources="sources"
+    :presets="presets"
+    @saved="load"
+  />
   <el-dialog
     v-model="editing"
     :close-on-click-modal="false"
