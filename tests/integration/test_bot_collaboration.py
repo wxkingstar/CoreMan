@@ -241,7 +241,7 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     assert "库存多少?" in intake.text
     # No delegation capability for B; original task did have one.
     info = sessions.SessionInfo(uuid.uuid4(), True, False)
-    prompt, env = await configure(db_session, ctx, intake, info, "system", {})
+    prompt, env, turn_context = await configure(db_session, ctx, intake, info, "system", {})
     assert "COREMAN_BOT_HELP_TOKEN" not in env
     helper.status = "running"
     pre = SimpleNamespace(
@@ -694,3 +694,41 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
     assert len(fake.requests) == 2
     assert fake.requests[0]["session_id"] == fake.requests[1]["session_id"]
     assert fake.requests[0]["session_id"] == str(row.source_relay_session_id)
+    for request in fake.requests:
+        user_text = request["messages"][1]["content"]
+        if route_enabled:
+            assert "COREMAN_BOT_HELP_URL" in user_text
+            assert "ListAgents" in user_text
+            assert request["env_vars"]["COREMAN_BOT_HELP_TOKEN"] not in user_text
+        else:
+            assert "COREMAN_BOT_HELP_URL" not in user_text
+
+
+async def test_real_stop_ingress_reports_the_work_it_already_cancelled(db_engine, db_session):
+    from coreman.core.db.models import TaskStream
+    from coreman.core.i18n.messages import msg
+    from coreman.runtime.worker.commands import CommandHandler
+    from tests.integration.worker_helpers import build_ctx
+
+    a, _, _, _, _, row = await setup(db_session)
+    incoming = InboundMessage(
+        platform="feishu",
+        bot_id=a.id,
+        kind="message",
+        chat_type="group",
+        chat_id="group",
+        sender={"platform_user_id": "human-id"},
+        message_id="real-stop",
+        mentions_bot=True,
+        parts=[{"type": "text", "text": "stop"}],
+        reply_context={"chat_id": "group", "message_id": "real-stop"},
+    )
+    command = await enqueue_inbound(db_session, a, incoming, lease_generation=1)
+    await db_session.commit()
+    assert row.status == "cancelled"
+    await tasks.finish(db_session, row.source_task_id, status="cancelled")
+    await db_session.commit()
+    await CommandHandler().run(build_ctx(db_engine, command))
+    stream = await db_session.get(TaskStream, command.id)
+    assert stream.final_text == msg("stopped")
+    assert "新要求" not in row.error

@@ -101,10 +101,15 @@ class ChatTaskHandler(
             built = await self._build_content(ctx, pre, parts)
             if built is None:
                 return None
+            from coreman.runtime.worker.chat.collaboration import with_turn_context
+
             pre = replace(
                 pre,
                 content=built,
-                request=replace(pre.request, user_content=self._user_content(built)),
+                request=replace(
+                    pre.request,
+                    user_content=with_turn_context(self._user_content(built), pre.turn_context),
+                ),
             )
         ctx.log.info("task_started", bot_key=intake.bot.bot_key, chat_type=intake.chat_type)
         return pre

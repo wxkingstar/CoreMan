@@ -57,6 +57,7 @@ class Prepared:
     supervisor: TimeoutSupervisor
     # 开流之后才组装（下载要写提示行），所以这里可空：`_prepare` 交出去之前一定已填上。
     content: BuiltContent | None = None
+    turn_context: str = ""
 
 
 @dataclass

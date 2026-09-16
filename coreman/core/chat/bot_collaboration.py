@@ -6,6 +6,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
@@ -362,25 +363,32 @@ async def source_session_current(
     return current is not None and current.relay_session_id == row.source_relay_session_id
 
 
-async def admit_human(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pid: str) -> bool:
+@dataclass(frozen=True)
+class HumanAdmission:
+    interrupted: bool
+
+
+async def admit_human(
+    session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pid: str, *, command: str | None = None
+) -> HumanAdmission | None:
     """An authorized human turn replaces pending work in the shared group conversation.
 
     Bot lock serializes admission with registration/opening. Ledger locks precede task locks,
     matching completion and reconciliation. No actor change or per-user session partition.
     """
     if not await routes_for(session, bot_id, chat_id):
-        return False
+        return None
     bot = await session.scalar(select(Bot).where(Bot.id == bot_id).with_for_update())
     speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)
     allowed = set(
         await session.scalars(select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot_id))
     )
     if not bot or not bot.enabled or (allowed and speaker.user_id not in allowed):
-        return False
+        return None
     from coreman.core.chat.announcements import find_announcement
 
     if await find_announcement(session, bot_id=bot_id, relay_server_id=bot.relay_server_id):
-        return False
+        return None
     rows = await session.scalars(
         select(BotCollaboration)
         .join(BotCollaborationRoute)
@@ -392,8 +400,17 @@ async def admit_human(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pi
         .order_by(BotCollaboration.created_at)
         .with_for_update(of=BotCollaboration)
     )
+    interrupted = False
+    reason = (
+        "用户停止了协作"
+        if command == "stop"
+        else "用户请求重置会话，旧协作已作废"
+        if command == "reset"
+        else "已收到群内新要求，旧一轮停止，将按新要求继续"
+    )
     for row in rows:
-        await close(session, row, "cancelled", "已收到群内新要求，旧一轮停止，将按新要求继续")
+        interrupted = True
+        await close(session, row, "cancelled", reason)
     pending = await session.scalars(
         select(Task)
         .where(
@@ -405,5 +422,8 @@ async def admit_human(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pi
         .order_by(Task.id)
     )
     for task in pending:
-        await tasks.request_cancel(session, task.id, "superseded")
-    return True
+        cancelled = await tasks.request_cancel(
+            session, task.id, "user_stop" if command == "stop" else "superseded"
+        )
+        interrupted = interrupted or cancelled
+    return HumanAdmission(interrupted=interrupted)

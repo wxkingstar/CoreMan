@@ -101,6 +101,8 @@ async def do_stop(
     platform_user_id: str | None = None,
 ) -> str:
     stopped = await _clear_states(session, bot_id, session_key, platform_user_id)
+    # Ingress may have already cancelled the running collaboration before the fast lane runs.
+    stopped += int(bool(ctx.task.payload.get("interrupted_previous_task")))
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1

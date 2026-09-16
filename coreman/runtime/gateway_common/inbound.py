@@ -184,6 +184,14 @@ async def _enqueue_task(
     if message.platform == "feishu" and message.chat_type == "group":
         from coreman.core.chat.bot_collaboration import admit_human
 
-        if await admit_human(session, bot.id, message.chat_id, message.sender.platform_user_id):
+        admission = await admit_human(
+            session,
+            bot.id,
+            message.chat_id,
+            message.sender.platform_user_id,
+            command=str(new.payload["command"]) if new.kind == "command" else None,
+        )
+        if admission is not None:
             new.payload["serialize_session"] = True
+            new.payload["interrupted_previous_task"] = admission.interrupted
     return await enqueue(session, new)
