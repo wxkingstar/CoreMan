@@ -67,3 +67,21 @@ func TestContentPreviewAndArgsSuffixFollowDebugSwitch(t *testing.T) {
 		t.Fatalf("suffix = %q", got)
 	}
 }
+
+func TestRedactRuntimeConfiguration(t *testing.T) {
+	args := []string{"-c", `developer_instructions="PRIVATE-RULES"`, "--mcp-config", `{"headers":{"Authorization":"Bearer SECRET"}}`}
+	got := strings.Join(RedactArgs(args), " ")
+	if strings.Contains(got, "PRIVATE-RULES") || strings.Contains(got, "SECRET") {
+		t.Fatal(got)
+	}
+}
+
+func TestRedactCollaborationToken(t *testing.T) {
+	env := map[string]string{"COREMAN_COLLABORATION_TOKEN": "task-secret"}
+	if got := RedactCollaborationToken("Authorization: Bearer task-secret", env); strings.Contains(got, "task-secret") {
+		t.Fatal(got)
+	}
+	if got := RedactCollaborationToken("diagnostic", nil); got != "diagnostic" {
+		t.Fatal(got)
+	}
+}

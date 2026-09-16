@@ -19,9 +19,9 @@ import (
 //
 //	thread.started          → captured into threadMap, no client output
 //	turn.started            → (silent)
-//	item.started cmd_exec   → tool_calls delta naming "shell" with command
+//	item.started tool       → one tool_calls delta for the worker budget
 //	item.completed agent    → text content delta carrying the full message
-//	item.completed cmd_exec → tool_calls delta closing the shell call
+//	item.completed tool     → fallback start for completion-only items, no duplicate
 //	item.completed reasoning→ thinking delta with the reasoning text
 //	turn.completed          → finish_reason chunk + usage chunk
 //	error / turn.failed     → server_error response and stream end
@@ -176,6 +176,18 @@ probe:
 	turnFailed := false
 	emittedAnyContent := false
 	turnCompleted := false
+	startedTools := make(map[string]bool)
+	emitToolStart := func(item *codexItem) {
+		if item == nil || item.ID == "" || startedTools[item.ID] {
+			return
+		}
+		name, arguments := item.nativeToolCall()
+		if name == "" {
+			return
+		}
+		startedTools[item.ID] = true
+		toolCallDelta(item.ID, name, arguments)
+	}
 
 	handleLine := func(raw string) {
 		line := strings.TrimSpace(raw)
@@ -208,21 +220,16 @@ probe:
 		case "turn.started":
 			// no-op
 
-		case "item.started":
-			if ev.Item == nil {
-				return
-			}
-			if ev.Item.Type == "command_execution" {
-				// Surface to client as a tool_call so the UI can render
-				// "Codex is running: <command>" indicators.
-				args, _ := json.Marshal(map[string]string{"command": ev.Item.Command})
-				toolCallDelta(ev.Item.ID, "shell", string(args))
-			}
+		case "item.started", "item.updated":
+			emitToolStart(ev.Item)
 
 		case "item.completed":
 			if ev.Item == nil {
 				return
 			}
+			// File changes are completion-only in the native protocol. Also cover
+			// missing start frames while deduplicating normal start/completion pairs.
+			emitToolStart(ev.Item)
 			switch ev.Item.Type {
 			case "agent_message":
 				if ev.Item.Text != "" {

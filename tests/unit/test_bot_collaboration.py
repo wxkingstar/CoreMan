@@ -149,18 +149,3 @@ def test_helper_contract_uses_final_tool_segment_and_rejects_progress_tail():
     assert read_helper_result(progress + final, [len(progress)]) == "**可用78**"
     with pytest.raises(ValueError):
         read_helper_result(final + "还在等待", [len(final)])
-
-
-def test_current_turn_context_preserves_multimodal_attachments():
-    from coreman.runtime.worker.chat.collaboration import with_turn_context
-
-    parts = [
-        {"type": "text", "text": "please inspect this"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
-    ]
-    result = with_turn_context(parts, "current authorized peers")
-    assert result[1:] == parts
-    assert len(parts) == 2
-    assert result[0]["type"] == "text"
-    assert "current authorized peers" in result[0]["text"]
-    assert with_turn_context(parts, "") is parts

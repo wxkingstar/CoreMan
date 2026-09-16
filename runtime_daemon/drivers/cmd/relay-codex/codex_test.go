@@ -26,16 +26,7 @@ func TestBuildCodexInputInjectsSystemBlockOnFresh(t *testing.T) {
 		}
 	}
 
-	// stdin must lead with <system_rules priority="highest">
-	if !strings.HasPrefix(in.Stdin, `<system_rules priority="highest">`) {
-		t.Fatalf("stdin does not start with system_rules block; got: %s", in.Stdin)
-	}
-	if !strings.Contains(in.Stdin, "[SYS_USER] 王鑫") {
-		t.Fatalf("stdin missing user identity from system message; got: %s", in.Stdin)
-	}
-	if !strings.Contains(in.Stdin, "</system_rules>") {
-		t.Fatalf("stdin missing closing tag; got: %s", in.Stdin)
-	}
+	assertDeveloperRules(t, in, sysMsg)
 	if !strings.Contains(in.Stdin, "User: hi") {
 		t.Fatalf("stdin missing user turn; got: %s", in.Stdin)
 	}
@@ -60,12 +51,7 @@ func TestBuildCodexInputInjectsSystemBlockOnResume(t *testing.T) {
 		t.Fatalf("expected resume args, got: %v", in.Args)
 	}
 
-	if !strings.HasPrefix(in.Stdin, `<system_rules priority="highest">`) {
-		t.Fatalf("resume stdin does not start with system_rules block; got: %s", in.Stdin)
-	}
-	if !strings.Contains(in.Stdin, "[SYS_USER] 张三") {
-		t.Fatalf("resume stdin missing user identity; got: %s", in.Stdin)
-	}
+	assertDeveloperRules(t, in, sysMsg)
 	// resume mode only sends latest user message
 	if strings.Contains(in.Stdin, "以前的话") || strings.Contains(in.Stdin, "以前的回答") {
 		t.Fatalf("resume stdin should not contain history; got: %s", in.Stdin)
@@ -219,12 +205,27 @@ func TestNewRebuildFreshForgetsAndReplaysFullHistory(t *testing.T) {
 			t.Fatalf("fresh rebuild must replay full history, missing %q; got:\n%s", want, in.Stdin)
 		}
 	}
-	if !strings.HasPrefix(in.Stdin, `<system_rules priority="highest">`) {
-		t.Fatalf("rebuilt stdin missing system_rules block; got:\n%s", in.Stdin)
+	if !strings.Contains(strings.Join(in.Args, " "), "developer_instructions=") {
+		t.Fatal("missing developer rules on fallback")
 	}
+
 }
 
 func jsonEscape(s string) string {
 	b, _ := json.Marshal(s)
 	return strings.Trim(string(b), `"`)
+}
+
+func assertDeveloperRules(t *testing.T, in codexInput, want string) {
+	t.Helper()
+	if strings.Contains(in.Stdin, want) || strings.Contains(in.Stdin, "system_rules") {
+		t.Fatal("rules leaked into user message")
+	}
+	encoded, _ := json.Marshal(want)
+	for _, arg := range in.Args {
+		if arg == "developer_instructions="+string(encoded) {
+			return
+		}
+	}
+	t.Fatal("missing native developer instructions")
 }

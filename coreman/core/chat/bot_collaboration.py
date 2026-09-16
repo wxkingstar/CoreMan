@@ -95,8 +95,15 @@ async def routes_for(
 async def authorized(
     session: AsyncSession, route: BotCollaborationRoute, pid: str, uid: uuid.UUID
 ) -> Speaker:
-    if not route.enabled or route.source_bot_id == route.target_bot_id:
+    if not route.enabled or route.archived or route.source_bot_id == route.target_bot_id:
         raise ValueError("collaboration route disabled")
+    if route.setup:
+        # Admin-managed routes cannot reuse proof after credentials or authority change.
+        # Legacy manually provisioned routes remain compatible until reverified.
+        from coreman.core.chat.collaboration_setup import status
+
+        if (await status(session, route))["status"] != "ready":
+            raise ValueError("collaboration verification invalidated")
     speaker = await resolve_speaker(session, platform="feishu", platform_user_id=pid)
     if not speaker.known or speaker.user_id != uid:
         raise ValueError("original human identity changed")

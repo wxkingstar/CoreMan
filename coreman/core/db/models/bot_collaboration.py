@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -40,6 +42,10 @@ class BotCollaborationRoute(Base):
     target_union_id: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     timeout_seconds: Mapped[int] = mapped_column(Integer, server_default=text("300"))
+    setup: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    archived: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    __mapper_args__ = {"version_id_col": version}
 
 
 class BotCollaboration(Base):

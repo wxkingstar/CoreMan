@@ -68,10 +68,12 @@ type nativeToolCall struct {
 }
 
 type claudeMessage struct {
+	ID      string          `json:"id,omitempty"`
 	Content []claudeContent `json:"content"`
 }
 
 type claudeContent struct {
+	ID    string          `json:"id,omitempty"`
 	Type  string          `json:"type"`
 	Text  string          `json:"text,omitempty"`
 	Name  string          `json:"name,omitempty"`

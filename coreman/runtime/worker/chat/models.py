@@ -57,7 +57,6 @@ class Prepared:
     supervisor: TimeoutSupervisor
     # 开流之后才组装（下载要写提示行），所以这里可空：`_prepare` 交出去之前一定已填上。
     content: BuiltContent | None = None
-    turn_context: str = ""
 
 
 @dataclass
@@ -68,6 +67,7 @@ class Outcome:
     text/thinking/tool/usage 四类的总数（`FinishEvent` 只是信息，不算事件）。
     """
 
+    collaboration_handoff: bool = False
     request_started: float | None = None
     text_events: int = 0
     thinking_events: int = 0

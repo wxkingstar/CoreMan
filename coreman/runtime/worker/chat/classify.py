@@ -23,6 +23,8 @@ class ClassifyStage(ChatStageBase):
         locale, text, url = ctx.locale, pre.writer.pending_text, pre.session_url
         if out.cancelled:
             return self._cancelled(ctx, text, out.reason)
+        if out.collaboration_handoff:
+            return Verdict("success", "succeeded", None, None, "")
         if out.relay_error:
             return Verdict(
                 "error",
@@ -106,6 +108,14 @@ class ClassifyStage(ChatStageBase):
         return msg("no_text_no_tools", ctx.locale)
 
     def _cancelled(self, ctx: TaskContext, text: str, reason: str | None) -> Verdict:
+        if reason == "collaboration_budget_exhausted":
+            return Verdict(
+                "stopped",
+                "cancelled",
+                reason,
+                "协作调用达到安全上限",
+                "本轮调用已达到安全上限，为避免重复消耗已停止。尚未确认任务完成。",
+            )
         if reason == "user_stop":
             return Verdict(
                 "stopped",

@@ -241,7 +241,7 @@ async def test_worker_uses_origin_human_and_resumes_original_session(db_engine, 
     assert "库存多少?" in intake.text
     # No delegation capability for B; original task did have one.
     info = sessions.SessionInfo(uuid.uuid4(), True, False)
-    prompt, env, turn_context = await configure(db_session, ctx, intake, info, "system", {})
+    prompt, env = await configure(db_session, ctx, intake, info, "system", {})
     assert "COREMAN_BOT_HELP_TOKEN" not in env
     helper.status = "running"
     pre = SimpleNamespace(
@@ -694,14 +694,18 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
     assert len(fake.requests) == 2
     assert fake.requests[0]["session_id"] == fake.requests[1]["session_id"]
     assert fake.requests[0]["session_id"] == str(row.source_relay_session_id)
-    for request in fake.requests:
+    for number, request in enumerate(fake.requests):
         user_text = request["messages"][1]["content"]
+        assert user_text == f"direct turn {number}"
+        assert "COREMAN_BOT_HELP_URL" not in str(request["messages"])
         if route_enabled:
-            assert "COREMAN_BOT_HELP_URL" in user_text
-            assert "ListAgents" in user_text
-            assert request["env_vars"]["COREMAN_BOT_HELP_TOKEN"] not in user_text
+            assert "search_collaborators" in request["messages"][0]["content"]
+            assert "COREMAN_COLLABORATION_URL" in request["env_vars"]
+            assert request["env_vars"]["COREMAN_COLLABORATION_TOKEN"] not in str(
+                request["messages"]
+            )
         else:
-            assert "COREMAN_BOT_HELP_URL" not in user_text
+            assert "COREMAN_COLLABORATION_URL" not in request["env_vars"]
 
 
 async def test_real_stop_ingress_reports_the_work_it_already_cancelled(db_engine, db_session):

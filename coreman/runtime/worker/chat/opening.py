@@ -155,9 +155,9 @@ class OpenStage(ChatStageBase):
             bot_env=await effective_env(session, ctx.cipher, bot),
         )
         env.update(access.env)
-        from coreman.runtime.worker.chat.collaboration import configure, with_turn_context
+        from coreman.runtime.worker.chat.collaboration import configure
 
-        system_prompt, env, turn_context = await configure(
+        system_prompt, env = await configure(
             session, ctx, intake, info, system_prompt, env
         )
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
@@ -165,7 +165,7 @@ class OpenStage(ChatStageBase):
         request = ChatRequest(
             model=bot.model,
             system_prompt=system_prompt,
-            user_content=with_turn_context(sanitize_user_input(intake.text), turn_context),
+            user_content=sanitize_user_input(intake.text),
             working_dir=bot.working_dir,
             session_id=str(info.relay_session_id),
             backend=backend,
@@ -207,7 +207,6 @@ class OpenStage(ChatStageBase):
             session_url,
             started,
             supervisor,
-            turn_context=turn_context,
         )
         self._after_supervisor(pre)
         return pre

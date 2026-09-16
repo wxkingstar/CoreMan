@@ -58,6 +58,7 @@ class FeishuTransport:
         instance_id: str,
         generation: int,
         guard: AsyncConnection | None = None,
+        credentials_fingerprint: str | None = None,
     ) -> None:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
@@ -65,6 +66,7 @@ class FeishuTransport:
         # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
+        self.credentials_fingerprint = credentials_fingerprint
         self._output_held = False
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
         self._round_fenced = False
@@ -325,6 +327,19 @@ class FeishuTransport:
                 await session.commit()
                 return True
             try:
+                if item.payload.get("_collaboration_setup_id"):
+                    from coreman.core.chat.collaboration_setup import guard_probe
+
+                    try:
+                        if self.credentials_fingerprint is None:
+                            raise ValueError("credentials_changed")
+                        await guard_probe(
+                            session, item, credentials_fingerprint=self.credentials_fingerprint
+                        )
+                    except ValueError as exc:
+                        await outbox.mark_skipped(session, item.id, str(exc))
+                        await session.commit()
+                        return True
                 if item.payload.get("_collaboration_id"):
                     from coreman.core.chat.bot_collaboration import ACTIVE, authorized
                     from coreman.core.db.models import BotCollaboration, BotCollaborationRoute
@@ -360,7 +375,7 @@ class FeishuTransport:
             return True
 
     async def _send_item(self, item: OutboxItem) -> None:
-        if item.payload.get("_collaboration_id"):
+        if item.payload.get("_collaboration_id") or item.payload.get("_collaboration_setup_id"):
             # A separate at node preserves a real notification; Markdown occupies its own row.
             # Keep old durable text items deliverable during a rolling upgrade.
             rich = "markdown" in item.payload

@@ -26,7 +26,7 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
         )
         command.upgrade(cfg, "head")
         assert asyncio.run(_rows(migrated_database, "SELECT version_num FROM alembic_version")) == [
-            ("0024",)
+            ("0025",)
         ]
         assert (
             asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
