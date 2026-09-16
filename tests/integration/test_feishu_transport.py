@@ -468,3 +468,38 @@ async def test_permanent_outbox_failure_ends_typing(db_session, db_engine):
         assert (await session.scalar(select(OutboxItem))).status == "failed"
         delivery = await session.get(FeishuDelivery, row.task_id)
         assert delivery.reaction_done and delivery.reaction_id is None
+
+
+async def test_thinking_heading_animates_without_new_content(db_session, db_engine, monkeypatch):
+    bot, row, generation = await seed(db_session)
+    await streams.update(db_session, row.task_id, pending_text="", thinking_md="waiting")
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    clock = [100.0]
+    monkeypatch.setattr(
+        "coreman.runtime.gateway_feishu.transport.heading_clock", lambda: clock[0], raising=False
+    )
+    await transport.round()
+    api.calls.clear()
+    clock[0] += 3
+    await transport.round()
+    patches = [
+        body for method, path, body in api.calls if path.endswith("/elements/thinking_panel")
+    ]
+    import json
+
+    assert (
+        json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程.."
+    )
+    assert not any(path.endswith("/content") for _, path, _ in api.calls)
+    api.calls.clear()
+    await transport.round()
+    assert not any(path.endswith("/elements/thinking_panel") for _, path, _ in api.calls)
+    await streams.update(db_session, row.task_id, pending_text="answer")
+    await db_session.commit()
+    await transport.round()
+    patches = [body for _, path, body in api.calls if path.endswith("/elements/thinking_panel")]
+    assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程"

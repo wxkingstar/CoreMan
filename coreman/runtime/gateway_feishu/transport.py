@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from time import monotonic as heading_clock
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -63,6 +64,7 @@ class FeishuTransport:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
         self._last_call = 0.0
+        self._headings: dict[int, tuple[float, int, str]] = {}
         # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
@@ -153,6 +155,10 @@ class FeishuTransport:
                         .limit(50)
                     )
                 )
+            active_ids = {row.task_id for row in rows}
+            self._headings = {
+                key: value for key, value in self._headings.items() if key in active_ids
+            }
             for row in rows:
                 try:
                     await self.push(row)
@@ -183,6 +189,40 @@ class FeishuTransport:
             delivery.sequence += 1
             await session.commit()
             return delivery.sequence
+
+    async def animate_heading(self, row: TaskStream, card_id: str) -> str:
+        now = heading_clock()
+        previous = self._headings.get(row.task_id)
+        answer = (
+            row.final_text if row.is_complete and row.final_text is not None else row.pending_text
+        )
+        active = not row.is_complete and not visible_parts("", answer)[1].strip()
+        if previous and now - previous[0] < 3 and (active == bool(previous[2].endswith("."))):
+            return previous[2]
+        frame = (previous[1] + 1) % 3 if previous else 0
+        title = "🤔 思考过程" + ("." * (frame + 1) if active else "")
+        if previous and previous[2] == title:
+            return title
+        # Only patch the header: preserve the reader's expanded state and body.
+        # Cosmetic failures must never prevent the real answer from being sent.
+        self._headings[row.task_id] = (now, frame, title)
+        try:
+            await self.call(
+                "PATCH",
+                f"/open-apis/cardkit/v1/cards/{card_id}/elements/thinking_panel",
+                json={
+                    "sequence": await self.sequence(row.task_id),
+                    "partial_element": json.dumps(
+                        {"header": {"title": {"tag": "plain_text", "content": title}}},
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+        except FeishuError:
+            self._headings[row.task_id] = (now + 12, frame, title)
+        if row.is_complete:
+            self._headings.pop(row.task_id, None)
+        return title
 
     async def push(self, row: TaskStream) -> None:
         if row.reply_context.get("_collaboration_helper"):
@@ -241,6 +281,7 @@ class FeishuTransport:
             async with self.factory() as session:
                 await session.merge(delivery)
                 await session.commit()
+        heading = await self.animate_heading(row, card_id)
         # 官方流式模式 10 分钟后自动关闭；提前关闭后仍可更新同一卡片。
         # https://open.feishu.cn/document/cardkit-v1/streaming-updates-openapi-overview
         expired = datetime.now(UTC) - delivery.created_at >= timedelta(minutes=9)
@@ -258,6 +299,7 @@ class FeishuTransport:
             answer,
             streaming=not (row.is_complete or expired),
             session_url=row.session_url,
+            heading=heading,
         )
         if (row.is_complete or expired) and not delivery.is_static:
             await self.call(

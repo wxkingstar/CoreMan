@@ -53,7 +53,12 @@ def thinking_preview(thinking: str) -> str:
 
 
 def stream_card(
-    thinking: str, answer: str, *, streaming: bool = True, session_url: str | None = None
+    thinking: str,
+    answer: str,
+    *,
+    streaming: bool = True,
+    session_url: str | None = None,
+    heading: str = "🤔 思考过程",
 ) -> dict[str, Any]:
     thinking, answer = visible_parts(thinking, answer)
     card: dict[str, Any] = {
@@ -71,8 +76,9 @@ def stream_card(
             "elements": [
                 {
                     "tag": "collapsible_panel",
+                    "element_id": "thinking_panel",
                     "expanded": False,
-                    "header": {"title": {"tag": "plain_text", "content": "🤔 思考过程"}},
+                    "header": {"title": {"tag": "plain_text", "content": heading}},
                     "background_color": "grey",
                     "border": {"color": "grey", "corner_radius": "8px"},
                     "padding": "8px",
