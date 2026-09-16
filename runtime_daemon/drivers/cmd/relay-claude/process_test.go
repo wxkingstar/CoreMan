@@ -227,6 +227,63 @@ sleep 30`)
 	collectAllLines(t, lines)
 }
 
+// Compaction is live work, even when it exceeds the startup watchdog budget.
+func TestResumeSniffAllowsLongCompaction(t *testing.T) {
+	for _, end := range []string{
+		`{"type":"system","subtype":"status","status":null}`,
+		`{"type":"system","subtype":"compact_boundary"}`,
+	} {
+		t.Run(end, func(t *testing.T) {
+			writeFakeClaude(t, `echo '{"type":"system","subtype":"init"}'
+echo '{"type":"system","subtype":"status","status":"compacting"}'
+sleep 3
+echo '`+end+`'
+sleep 0.2
+echo '{"type":"result","subtype":"success","result":"after compaction"}'
+`)
+			old := firstLineTimeout
+			firstLineTimeout = 2 * time.Second
+			defer func() { firstLineTimeout = old }()
+			lines, ready, _ := startClaudeStream([]string{"--resume", "sess-x"}, "hi", "", nil)
+			err := waitReadyErr(t, ready)
+			got := collectAllLines(t, lines)
+			if err != nil {
+				t.Fatalf("healthy compaction was killed: %v", err)
+			}
+			if !strings.Contains(strings.Join(got, "\n"), `"result":"after compaction"`) {
+				t.Fatalf("missing result after compaction: %v", got)
+			}
+		})
+	}
+}
+
+func TestResumeSniffRestartsAfterCompaction(t *testing.T) {
+	for _, end := range []string{
+		`{"type":"system","subtype":"status","status":null}`,
+		`{"type":"system","subtype":"compact_boundary"}`,
+	} {
+		t.Run(end, func(t *testing.T) {
+			writeFakeClaude(t, `echo '{"type":"system","subtype":"init"}'
+echo '{"type":"system","subtype":"status","status":"compacting"}'
+sleep 3
+echo '`+end+`'
+sleep 30
+`)
+			old := firstLineTimeout
+			firstLineTimeout = 2 * time.Second
+			defer func() { firstLineTimeout = old }()
+			start := time.Now()
+			lines, ready, _ := startClaudeStream([]string{"--resume", "sess-x"}, "hi", "", nil)
+			err := waitReadyErr(t, ready)
+			collectAllLines(t, lines)
+			elapsed := time.Since(start)
+			if err == nil || elapsed < 5*time.Second || elapsed > 9*time.Second {
+				t.Fatalf("want watchdog kill after compaction + fresh timeout; elapsed=%s err=%v", elapsed, err)
+			}
+		})
+	}
+}
+
 // A stderr line larger than bufio.Scanner's default 64KB buffer must not end
 // the stderr scan early — the "No conversation found" marker printed after it
 // still has to gate the resume retry.

@@ -328,15 +328,19 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			// locally before any API call — a CLI that hangs after that (dead
 			// proxy, wedged retry loop) would stall the sniff forever, and the
 			// pre-ready keepalives now hide the stall from the client's own
-			// idle timeout. Bound the whole sniff with the same budget.
+			// idle timeout. Pause this deadline during explicit compaction,
+			// then give the next API call a fresh budget when compaction ends.
+			// HTTP disconnects and the upstream total deadline still apply.
 			sniffTimer := time.NewTimer(watchdogTimeout)
+			sniffDeadline := sniffTimer.C
+			compacting := false
 		sniff:
 			for {
 				var line string
 				var lok bool
 				select {
 				case line, lok = <-innerLines:
-				case <-sniffTimer.C:
+				case <-sniffDeadline:
 					log.Printf("resume sniff watchdog: no content/result within %s, killing process group%s", watchdogTimeout, openai.ArgsLogSuffix(args))
 					proc.KillGroup(cmd)
 					continue // the kill closes stdout shortly; drain to EOF
@@ -346,12 +350,26 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				}
 				buffered = append(buffered, line)
 				var evt struct {
-					Type string `json:"type"`
+					Type    string          `json:"type"`
+					Subtype string          `json:"subtype"`
+					Status  json.RawMessage `json:"status"`
 				}
 				if json.Unmarshal([]byte(line), &evt) != nil {
 					continue
 				}
 				if evt.Type == "init" || evt.Type == "system" {
+					if evt.Type == "system" {
+						if evt.Subtype == "status" && string(evt.Status) == `"compacting"` {
+							sniffTimer.Stop()
+							sniffDeadline = nil
+							compacting = true
+						} else if compacting && (evt.Subtype == "compact_boundary" ||
+							(evt.Subtype == "status" && string(evt.Status) == "null")) {
+							sniffTimer.Reset(watchdogTimeout)
+							sniffDeadline = sniffTimer.C
+							compacting = false
+						}
+					}
 					continue
 				}
 				if evt.Type == "result" {
