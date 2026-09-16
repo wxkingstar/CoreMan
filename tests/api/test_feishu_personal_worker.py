@@ -142,15 +142,19 @@ async def test_rejected_command_never_falls_back_to_normal_agent(
     assert task.result == {"personal_mode_denied": True}
 
 
-async def test_open_stage_builds_isolated_personal_request(db_session, app, db_engine):
+@pytest.mark.parametrize("message", ["/personal read messages", "查看最近的会议"])
+async def test_open_stage_builds_isolated_personal_request(db_session, app, db_engine, message):
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.api.test_feishu_personal import grant
     from tests.fakes.fake_relay import FakeRelay
 
-    bot, _, task = await setup(db_session, app)
-    intake = await intake_for(db_session, bot, task, "/personal read messages")
+    bot, user, task = await setup(db_session, app)
+    if not message.startswith("/"):
+        await grant(db_session, app, bot, user)
+    intake = await intake_for(db_session, bot, task, message)
     intake.inbound.payload = {
         **intake.inbound.payload,
-        "parts": [{"type": "text", "text": "/personal read messages"}],
+        "parts": [{"type": "text", "text": message}],
     }
     task.payload = {**task.payload, "message": intake.inbound.payload}
     await db_session.commit()
@@ -163,3 +167,48 @@ async def test_open_stage_builds_isolated_personal_request(db_session, app, db_e
     assert request["messages"][0]["content"] == PRIVATE_POLICY
     assert request["env_vars"][policy.PREFIX + "TOKEN"]
     assert not any(key.startswith("BOT_TOKEN_") for key in request["env_vars"])
+
+
+@pytest.mark.parametrize("status", ["connected", "pending"])
+async def test_authorized_private_chat_automatically_gets_personal_tools(
+    db_session, app, db_engine, status
+):
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user)
+    if status == "pending":
+        from datetime import UTC, datetime, timedelta
+
+        row.status = "pending"
+        row.token_enc = None
+        row.pending_enc = "encrypted-pending-code"
+        row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await db_session.commit()
+    intake = await intake_for(db_session, bot, task, "授权好了，看看我最近的会议")
+    original = sessions.SessionInfo(uuid.uuid4(), False, False)
+    _, _, env = await configure(
+        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
+    )
+    assert policy.PREFIX + "TOKEN" in env
+    from coreman.core.feishu_personal.service import revoke_grant
+
+    await revoke_grant(db_session, bot.id, user.id)
+    await db_session.commit()
+    result = await configure(
+        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
+    )
+    assert result == (original, "ordinary", {})
+
+
+async def test_connected_grant_never_enables_ordinary_group_chat(db_session, app, db_engine):
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(db_session, app, chat_type="group")
+    await grant(db_session, app, bot, user)
+    intake = await intake_for(db_session, bot, task, "查看我的会议")
+    original = sessions.SessionInfo(uuid.uuid4(), False, False)
+    result = await configure(
+        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
+    )
+    assert result == (original, "ordinary", {})

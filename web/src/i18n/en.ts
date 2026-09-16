@@ -5,7 +5,7 @@ type Messages<T> = { [K in keyof T]: T[K] extends string ? string : Messages<T[K
 const en = {
   myFeishu: {
     pendingExpiresAt: "Authorization link expires at",
-    requestHint: "After connecting, send a private Feishu message such as “{command}”. Personal data access currently requires a Claude runtime; other runtimes are unsupported.",
+    requestHint: "After authorizing, ask naturally in private chat, for example “{command}”. No command prefix is needed. The agent reads only when needed; revoke access here to stop it. Currently requires a Claude runtime.",
     title: 'My Feishu', intro: 'Manage each AI employee’s access to your personal Feishu data.',
     connectHint: 'To authorize, privately message a Feishu AI employee: “{command}”.',
     privateOnly: 'Personal messages and meeting materials are available only in Feishu private conversations. Group chats and WeCom are unsupported.',

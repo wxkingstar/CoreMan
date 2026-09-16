@@ -1,7 +1,7 @@
 export default {
   myFeishu: {
     pendingExpiresAt: "授权链接到期时间",
-    requestHint: "连接后，请在飞书私聊中发送“{command}”等请求。目前仅支持 Claude 运行时，其他运行时不支持个人数据访问。",
+    requestHint: "授权后直接在私聊中提问，例如“{command}”，无需命令前缀。Agent 会按需读取；不再需要时可在此撤销授权。目前仅支持 Claude 运行时。",
   "title": "我的飞书",
   "intro": "管理你授予各个 AI 员工的飞书个人数据访问权限。",
   "connectHint": "在飞书私聊 AI 员工，发送“{command}”开始授权。",

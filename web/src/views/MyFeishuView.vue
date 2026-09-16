@@ -43,7 +43,7 @@ onMounted(load)
       show-icon
     >
       <p>{{ t('myFeishu.privateOnly') }}</p>
-      <p>{{ t('myFeishu.requestHint', { command: '/飞书个人 查看最近的聊天' }) }}</p>
+      <p>{{ t('myFeishu.requestHint', { command: '查看最近的聊天' }) }}</p>
     </el-alert>
     <div class="feishu-toolbar">
       <el-button

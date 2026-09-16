@@ -79,6 +79,11 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     rid, method, params = body.get("id"), body["method"], body.get("params", {})
     if not isinstance(params, dict):
         return _error(rid, -32602, "Invalid params")
+    # MCP request metadata is transport context, never tool arguments or identity.
+    if "_meta" in params:
+        if not isinstance(params["_meta"], dict):
+            return _error(rid, -32602, "Invalid params")
+        params = {key: item for key, item in params.items() if key != "_meta"}
     if "id" not in body:
         # Notifications never run tools or mutate a grant.
         if method != "notifications/initialized" or params:

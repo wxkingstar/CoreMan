@@ -451,3 +451,18 @@ async def test_refresh_rejection_clears_credentials(client, app, db_session):
     assert out["error"] == "authorization_required"
     await db_session.refresh(row)
     assert row.status == "expired" and row.token_enc is None
+
+
+async def test_claude_mcp_metadata_does_not_become_tool_arguments(client, app, db_session):
+    _, user, task = await setup(db_session, app)
+    body = rpc("feishu_authorization_status")
+    body["params"]["_meta"] = {
+        "claudecode/toolUseId": "toolu_probe",
+        "progressToken": 2,
+        "actor": "must-not-override-owner",
+    }
+    out = value(await client.post(URL, headers=headers(app, task, user), json=body))
+    assert out["status"] == "revoked"
+    body["params"]["_meta"] = "invalid"
+    response = await client.post(URL, headers=headers(app, task, user), json=body)
+    assert response.json()["error"]["code"] == -32602

@@ -1,7 +1,7 @@
 export default {
   myFeishu: {
     pendingExpiresAt: "認証リンクの有効期限",
-    requestHint: "接続後、飛書の個別チャットで「{command}」などのリクエストを送信してください。個人データへのアクセスは現在 Claude ランタイムのみ対応しています。",
+    requestHint: "認証後は個別チャットで「{command}」などと自然に質問できます。コマンド接頭辞は不要です。Agent が必要に応じて読み取り、こちらで認証を取り消すと停止します。現在は Claude ランタイムのみ対応しています。",
   "title": "マイ飛書",
   "intro": "AI 社員ごとの飛書個人データへのアクセス権限を管理します。",
   "connectHint": "飛書で AI 社員に「{command}」と個別メッセージを送り、認証を開始してください。",
