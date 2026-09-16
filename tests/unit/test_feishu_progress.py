@@ -24,7 +24,7 @@ def test_card_shows_recent_process_with_full_view_link():
         "\n".join(f"步骤{i}" for i in range(20)), "", session_url="https://coreman.test/session/abc"
     )
     panel = card["body"]["elements"][0]
-    assert panel["header"]["title"]["content"] == "思考过程"
+    assert panel["header"]["title"]["content"] == "🤔 思考过程"
     preview = panel["elements"][0]["content"]
     assert "步骤19" in preview and "步骤0\n" not in preview
     assert len(preview.splitlines()) <= 5

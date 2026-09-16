@@ -72,7 +72,7 @@ def stream_card(
                 {
                     "tag": "collapsible_panel",
                     "expanded": False,
-                    "header": {"title": {"tag": "plain_text", "content": "思考过程"}},
+                    "header": {"title": {"tag": "plain_text", "content": "🤔 思考过程"}},
                     "background_color": "grey",
                     "border": {"color": "grey", "corner_radius": "8px"},
                     "padding": "8px",
