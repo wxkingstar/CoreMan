@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CoreMan Social Preview</title>
+<!--
+  GitHub 仓库分享预览图源文件（1280 × 640）。
+  重新导出：
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+    --hide-scrollbars --force-device-scale-factor=1 --window-size=1280,640 \
+    --screenshot=social-preview.png social-preview.html
+-->
+<style>
+  :root {
+    --teal: #16756B;
+    --teal-deep: #0E4D46;
+    --paper: #F2F8F3;
+    --lime: #C4E58D;
+    --ink: #0C2F2B;
+    --muted: #4F6D68;
+    --line: #D5E6DC;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "PingFang SC", -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* 右侧松石青面板，左缘沿用 Logo 的圆角语言 */
+  .panel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 520px;
+    background: var(--teal);
+    border-radius: 56px 0 0 56px;
+    overflow: hidden;
+  }
+  .panel .ring {
+    position: absolute; right: -180px; top: -120px; width: 640px; height: 640px;
+    border: 44px solid rgba(242, 248, 243, 0.07); border-radius: 50%;
+  }
+  .panel .dot {
+    position: absolute; right: 64px; bottom: 56px; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--lime); opacity: 0.9;
+  }
+
+  .left { position: absolute; left: 88px; top: 92px; width: 620px; }
+  .brand { display: flex; align-items: center; gap: 28px; }
+  .brand svg { width: 108px; height: 108px; flex: none; }
+  .brand h1 { font-size: 92px; font-weight: 700; letter-spacing: -2.5px; line-height: 1; }
+  .tag-cn { margin-top: 44px; font-size: 50px; font-weight: 600; color: var(--teal); letter-spacing: 1px; }
+  .tag-en { margin-top: 12px; font-size: 30px; font-weight: 500; color: var(--muted); }
+  .chips { position: absolute; left: 88px; bottom: 84px; display: flex; flex-wrap: wrap; gap: 12px; width: 640px; }
+  .chip {
+    font-size: 21px; font-weight: 500; color: var(--teal-deep);
+    padding: 8px 18px; border: 2px solid var(--line); border-radius: 999px; background: #FFFFFF;
+  }
+
+  /* 聊天示意 */
+  .chat { position: absolute; right: 56px; top: 196px; width: 404px; display: flex; flex-direction: column; gap: 22px; }
+  .msg { display: flex; gap: 14px; align-items: flex-start; }
+  .msg.me { flex-direction: row-reverse; }
+  .avatar { width: 52px; height: 52px; flex: none; border-radius: 16px; }
+  .avatar.human { background: #F2F8F3; display: grid; place-items: center; }
+  .avatar.human svg { width: 30px; height: 30px; }
+  .bubble {
+    font-size: 23px; line-height: 1.45; padding: 14px 20px; border-radius: 20px;
+    max-width: 320px;
+  }
+  .me .bubble { background: rgba(242, 248, 243, 0.14); color: var(--paper); border-top-right-radius: 6px; }
+  .bot .bubble { background: var(--paper); color: var(--ink); border-top-left-radius: 6px; }
+  .bot .bubble b { color: var(--teal); font-weight: 600; }
+  .bot .avatar { box-shadow: 0 0 0 3px rgba(242, 248, 243, 0.35); }
+  .meta { font-size: 18px; color: rgba(242, 248, 243, 0.7); margin: -8px 0 0 66px; }
+</style>
+</head>
+<body>
+  <div class="panel"><div class="ring"></div><div class="dot"></div></div>
+
+  <div class="left">
+    <div class="brand">
+      <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+        <rect width="64" height="64" rx="18" fill="#16756B"/>
+        <path d="M44.748 19.621a18.5 18.5 0 1 0 0 24.758" stroke="#F2F8F3" stroke-width="6.5" stroke-linecap="round"/>
+        <path d="M37.75 26v6.5M47.75 26v6.5" stroke="#F2F8F3" stroke-width="4.5" stroke-linecap="round"/>
+        <circle cx="44.748" cy="44.379" r="3.25" fill="#C4E58D"/>
+      </svg>
+      <h1>CoreMan</h1>
+    </div>
+    <p class="tag-cn">融入团队的 AI 员工</p>
+    <p class="tag-en">Your AI teammate at work.</p>
+  </div>
+
+  <div class="chips">
+    <span class="chip">企业微信 WeCom</span>
+    <span class="chip">飞书 Feishu / Lark</span>
+    <span class="chip">Claude Code</span>
+    <span class="chip">Codex</span>
+    <span class="chip">Self-hosted</span>
+  </div>
+
+  <div class="chat">
+    <div class="msg me">
+      <div class="avatar human"><svg viewBox="0 0 24 24" fill="#16756B" aria-hidden="true"><circle cx="12" cy="8" r="4.2"/><path d="M3.8 21a8.2 8.2 0 0 1 16.4 0z"/></svg></div>
+      <div class="bubble">@CoreMan 帮我整理本周的客户反馈</div>
+    </div>
+    <div class="msg bot">
+      <svg class="avatar" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+        <rect width="64" height="64" rx="18" fill="#0E4D46"/>
+        <path d="M44.748 19.621a18.5 18.5 0 1 0 0 24.758" stroke="#F2F8F3" stroke-width="6.5" stroke-linecap="round"/>
+        <path d="M37.75 26v6.5M47.75 26v6.5" stroke="#F2F8F3" stroke-width="4.5" stroke-linecap="round"/>
+        <circle cx="44.748" cy="44.379" r="3.25" fill="#C4E58D"/>
+      </svg>
+      <div class="bubble">已汇总 <b>42</b> 条反馈，<br>其中 <b>3</b> 条需要今天跟进 ✓</div>
+    </div>
+    <div class="meta">在你的运行时上执行 · 结果回到群聊</div>
+  </div>
+</body>
+</html>
