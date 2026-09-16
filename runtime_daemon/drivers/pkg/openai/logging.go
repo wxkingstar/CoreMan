@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // DebugLogging reports whether RELAY_DEBUG=1. Request bodies, CLI arguments
@@ -17,6 +18,7 @@ func DebugLogging() bool {
 var promptValueFlags = map[string]bool{
 	"--append-system-prompt": true,
 	"--system-prompt":        true,
+	"--mcp-config":           true,
 }
 
 // RedactArgs returns a copy of CLI args with the value of every prompt-valued
@@ -25,7 +27,7 @@ func RedactArgs(args []string) []string {
 	out := make([]string, len(args))
 	copy(out, args)
 	for i := 0; i+1 < len(out); i++ {
-		if promptValueFlags[out[i]] {
+		if promptValueFlags[out[i]] || ((out[i] == "-c" || out[i] == "--config") && strings.HasPrefix(args[i+1], "developer_instructions=")) {
 			out[i+1] = fmt.Sprintf("<len=%d>", len(args[i+1]))
 			i++
 		}
@@ -66,4 +68,12 @@ func ContentPreview(text string, max int) string {
 		return fmt.Sprintf("len=%d", len(text))
 	}
 	return fmt.Sprintf("len=%d content=%q", len(text), Truncate(text, max))
+}
+
+// RedactCollaborationToken prevents CLI diagnostics echoing task credentials.
+func RedactCollaborationToken(text string, env map[string]string) string {
+	if token := env["COREMAN_COLLABORATION_TOKEN"]; token != "" {
+		return strings.ReplaceAll(text, token, "[REDACTED]")
+	}
+	return text
 }

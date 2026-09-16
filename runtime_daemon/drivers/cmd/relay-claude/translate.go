@@ -57,7 +57,8 @@ type sseTranslator struct {
 	streamDeltaSent bool
 	streamUsage     *openai.UsageInfo
 	sawResult       bool // a result event reached feed (finish chunk emitted)
-	seenToolNames   map[string]bool
+	seenToolIDs     map[string]bool
+	fallbackToolSeq int
 
 	askUserComplete bool
 	askUserIdx      int
@@ -81,15 +82,15 @@ func newSSETranslator(chatID string, created int64, model, sessionID string, met
 		meterModel = model
 	}
 	return &sseTranslator{
-		chatID:        chatID,
-		created:       created,
-		model:         model,
-		sessionID:     sessionID,
-		meter:         meter,
-		meterModel:    meterModel,
-		seenToolNames: map[string]bool{},
-		askUserIdx:    -1,
-		toolBlocks:    map[int]*toolBlock{},
+		chatID:      chatID,
+		created:     created,
+		model:       model,
+		sessionID:   sessionID,
+		meter:       meter,
+		meterModel:  meterModel,
+		seenToolIDs: map[string]bool{},
+		askUserIdx:  -1,
+		toolBlocks:  map[int]*toolBlock{},
 	}
 }
 
@@ -153,6 +154,12 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		if streamEvt.Type == "content_block_start" && streamEvt.ContentBlock != nil {
 			var block streamContentBlock
 			if err := json.Unmarshal(streamEvt.ContentBlock, &block); err == nil && block.Type == "tool_use" && block.Name != "" {
+				if block.ID == "" {
+					block.ID = t.fallbackToolID("", streamEvt.Index)
+				}
+				if t.seenToolIDs[block.ID] {
+					return outcomeContinue
+				}
 				t.flushAggLog()
 				log.Printf("[STREAM TOOL_USE] name=%s id=%s", block.Name, block.ID)
 				t.toolBlocks[streamEvt.Index] = &toolBlock{Name: block.Name, ID: block.ID}
@@ -162,7 +169,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 					log.Printf("[ASK_USER_QUESTION] detected at index=%d", streamEvt.Index)
 					return outcomeContinue
 				}
-				t.seenToolNames[block.Name] = true
+				t.seenToolIDs[block.ID] = true
 				tc := openai.ToolCall{
 					ID:       block.ID,
 					Type:     "function",
@@ -263,16 +270,24 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 
 	t.flushAggLog()
 
-	// Fallback: pull tool_use names from a non-streamed assistant event.
+	// Fallback: count actual tool uses, not names; repeated Bash/MCP calls must
+	// each reach the worker budget, while streamed copies are deduplicated.
 	if event.Type == "assistant" && event.Message != nil {
 		var msg claudeMessage
 		if err := json.Unmarshal(event.Message, &msg); err == nil {
-			for _, c := range msg.Content {
-				if c.Type == "tool_use" && c.Name != "" && !t.seenToolNames[c.Name] {
-					t.seenToolNames[c.Name] = true
+			for index, c := range msg.Content {
+				if c.Type == "tool_use" && c.Name != "" {
+					id := c.ID
+					if id == "" {
+						id = t.fallbackToolID(msg.ID, index)
+					}
+					if t.seenToolIDs[id] {
+						continue
+					}
+					t.seenToolIDs[id] = true
 					log.Printf("[ASSISTANT TOOL_USE FALLBACK] name=%s", c.Name)
 					tc := openai.ToolCall{
-						ID:       c.Name,
+						ID:       id,
 						Type:     "function",
 						Function: openai.ToolCallFunction{Name: c.Name, Arguments: ""},
 					}
@@ -365,4 +380,15 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 	}
 
 	return outcomeContinue
+}
+
+// A real message ID makes legacy missing-tool-ID frames replay-stable. Without
+// any wire identity, allocate per occurrence rather than undercount same-name
+// calls; those old frames cannot reliably be distinguished from replay.
+func (t *sseTranslator) fallbackToolID(messageID string, index int) string {
+	if messageID != "" {
+		return fmt.Sprintf("relay-fallback:%s:%d", messageID, index)
+	}
+	t.fallbackToolSeq++
+	return fmt.Sprintf("relay-fallback:%s:%d", t.chatID, t.fallbackToolSeq)
 }

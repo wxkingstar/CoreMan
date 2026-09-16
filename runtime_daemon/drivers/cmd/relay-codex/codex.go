@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -43,7 +44,7 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") {
 			continue
 		}
 		env = append(env, e)
@@ -139,17 +140,21 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		out.Stdin, out.ImagePath = flattenForFreshSession(req.Messages, sessionDir)
 	}
 
-	// Prepend system messages on every turn (fresh + resume). We previously
-	// tried `-c instructions=...` but codex 0.125+ silently ignores that path,
-	// which meant upstream-provided rules (security policies, per-user identity)
-	// were being dropped entirely. Re-injecting on every turn is intentional:
-	// codex doesn't carry custom system prompts across resumes, and the upstream
-	// may rewrite the identity portion ([SYS_USER]) per turn.
-	if sysBlock := joinSystemMessages(req.Messages); sysBlock != "" {
-		out.Stdin = "<system_rules priority=\"highest\">\n" +
-			sysBlock +
-			"\n</system_rules>\n\n" +
-			out.Stdin
+	// Refresh trusted per-turn rules using the native developer channel. An empty
+	// value clears a previous turn's rules without replacing Codex base instructions.
+	rules, _ := json.Marshal(joinSystemMessages(req.Messages))
+	out.Args = append(out.Args, "-c", "developer_instructions="+string(rules))
+	url := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"])
+	token := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"])
+	if url != "" && token != "" {
+		encodedURL, _ := json.Marshal(url)
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_collaboration.url="+string(encodedURL),
+			"-c", `mcp_servers.coreman_collaboration.bearer_token_env_var="COREMAN_COLLABORATION_TOKEN"`,
+			"-c", "mcp_servers.coreman_collaboration.enabled=true")
+	} else {
+		// Explicitly override saved/local configuration on resumed tasks.
+		out.Args = append(out.Args, "-c", `mcp_servers.coreman_collaboration.url="http://127.0.0.1:1/disabled"`,
+			"-c", "mcp_servers.coreman_collaboration.enabled=false")
 	}
 
 	// Image attachments via codex's native `-i FILE` mechanism. This is
@@ -170,7 +175,7 @@ func (c codexInput) isResume() bool { return c.IsResume }
 
 // joinSystemMessages concatenates every system message in the request into a
 // single block, separated by blank lines. Returns "" if there are none. Used
-// to build the <system_rules> sentinel block that gets prepended to stdin.
+// as the native developer_instructions configuration on each turn.
 func joinSystemMessages(messages []openai.ChatMessage) string {
 	var parts []string
 	for _, msg := range messages {
@@ -222,14 +227,13 @@ func lastUserMessage(messages []openai.ChatMessage, sessionDir string) (text str
 
 // flattenForFreshSession converts the OpenAI message array into a single
 // prompt for the first turn of a brand-new codex session. System messages
-// are skipped here — they're injected by buildCodexInput as a sentinel
-// <system_rules> block prepended to the final stdin payload.
+// are passed separately through native developer_instructions.
 func flattenForFreshSession(messages []openai.ChatMessage, sessionDir string) (prompt string, images []string) {
 	var parts []string
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
-			// Handled by buildCodexInput's <system_rules> prepend; skip here
+			// Handled by buildCodexInput's developer_instructions; skip here
 			// to avoid duplicating system content into the dialogue body.
 			continue
 		case "user":
@@ -349,7 +353,7 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 		// draining and a child blocked writing stderr never exits.
 		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for s.Scan() {
-			line := s.Text()
+			line := openai.RedactCollaborationToken(s.Text(), envExtra)
 			log.Printf("codex stderr: %s", line)
 			stderr.add(line)
 		}

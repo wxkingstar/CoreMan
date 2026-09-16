@@ -33,7 +33,7 @@ var firstLineTimeout = 90 * time.Second
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") {
 			env = append(env, e)
 		}
 	}
@@ -72,6 +72,18 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPro
 	}
 	if req.SystemPromptFile != "" {
 		args = append(args, "--append-system-prompt-file", req.SystemPromptFile)
+	}
+	url := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"])
+	token := strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"])
+	if url != "" && token != "" {
+		config, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
+			"coreman_collaboration": map[string]any{"type": "http", "url": url,
+				"headers": map[string]string{"Authorization": "Bearer ${COREMAN_COLLABORATION_TOKEN}"}},
+		}})
+		args = append(args, "--mcp-config", string(config))
+	} else {
+		// Deny a stale server even if a resumed session or local config remembers it.
+		args = append(args, "--disallowedTools", "mcp__coreman_collaboration")
 	}
 	args = append(args, "--model", model)
 	args = append(args, "--verbose")
@@ -162,7 +174,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 		found := false
 		for s.Scan() {
-			line := s.Text()
+			line := openai.RedactCollaborationToken(s.Text(), envVars)
 			log.Printf("Claude stderr: %s", line)
 			if strings.Contains(line, "No conversation found with session ID") {
 				found = true

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+from coreman.core.db.models import Task
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
@@ -46,6 +47,11 @@ class ConverseStage(ChatStageBase):
         stopping = asyncio.ensure_future(ctx.cancel_event.wait())
         pending: asyncio.Task[SseEvent | None] | None = None
         silent_since = ctx.clock()
+        guard_checked = silent_since - 1
+        guarded = bool(
+            pre.request.env_vars.get("COREMAN_COLLABORATION_TOKEN")
+            or ctx.task.payload.get("collaboration_id")
+        )
         try:
             while True:
                 if ctx.cancel_event.is_set():
@@ -60,6 +66,19 @@ class ConverseStage(ChatStageBase):
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 now = ctx.clock()
+                if guarded and now - guard_checked >= 1:
+                    guard_checked = now
+                    async with ctx.session_factory() as session:
+                        task = await session.get(Task, ctx.task.id)
+                        if task is None or task.cancel_requested_at:
+                            out.cancelled, out.reason = (
+                                True,
+                                task.cancel_reason if task else "reaper",
+                            )
+                            return out
+                        if task.payload.get("collaboration_handoff"):
+                            out.collaboration_handoff = True
+                            return out
                 if await supervisor.tick(now) == "expired":
                     # 硬 TTL：返回即可，finally 会断连（=让 relay 杀掉这一轮 CLI）。
                     out.cancelled, out.reason = True, "hard_ttl"
@@ -71,6 +90,9 @@ class ConverseStage(ChatStageBase):
                     silent_since = now
                     self._apply(ctx, pre, out, event)
                     await pre.writer.flush()
+                    if guarded and out.tool_events >= 64:
+                        out.cancelled, out.reason = True, "collaboration_budget_exhausted"
+                        return out
                 elif not done and now - silent_since >= self.SILENT_WARN_SECONDS:
                     # 静默只提醒、不中断：工具跑十几分钟不吐字是正常的，中断才是事故。
                     ctx.log.warning("sse_silent", seconds=int(now - silent_since))

@@ -22,6 +22,7 @@ from coreman.core.chat.rate_limit import (
 from coreman.core.db.models import (
     BotMember,
     RelayServer,
+    Task,
     User,
 )
 from coreman.core.i18n.messages import msg
@@ -176,6 +177,15 @@ class FinalizeStage(ChatStageBase):
                     else BotCollaboration.source_task_id == ctx.task.id
                 )
                 await session.scalar(select(BotCollaboration).where(condition).with_for_update())
+            # Cancellation wins even when it lands between the last SSE frame and finalization.
+            current = await session.get(Task, ctx.task.id, with_for_update=True)
+            if current and current.cancel_requested_at:
+                verdict = self._classify(
+                    ctx, pre, replace(out, cancelled=True, reason=current.cancel_reason)
+                )
+            elif current and current.payload.get("collaboration_handoff") and not out.cancelled:
+                # Registration is durable; EOF before the next poll must not undo accepted help.
+                verdict = self._classify(ctx, pre, replace(out, collaboration_handoff=True))
             owned = await tasks.finish(
                 session,
                 ctx.task.id,

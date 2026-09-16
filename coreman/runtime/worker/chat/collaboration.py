@@ -135,7 +135,12 @@ async def configure(
     info: sessions.SessionInfo,
     system_prompt: str,
     env: dict[str, str],
-) -> tuple[str, dict[str, str], str]:
+) -> tuple[str, dict[str, str]]:
+    env = {
+        k: v
+        for k, v in env.items()
+        if not k.startswith(("COREMAN_COLLABORATION_", "COREMAN_BOT_HELP_"))
+    }
     phase = ctx.task.payload.get("collaboration_phase")
     if phase:
         row = await session.get(BotCollaboration, uuid.UUID(ctx.task.payload["collaboration_id"]))
@@ -152,56 +157,34 @@ async def configure(
 工具返回后台任务时，必须继续等待并读取最终结果，不能把进度当最终答案或直接结束本轮。
 无法完成、缺少资料或等待失败时返回 {"status":"blocked","answer":"具体阻碍"}。
 这个 JSON 是内部交接格式，群里只展示 answer。"""
-        return system_prompt + protocol, env, protocol
+        return system_prompt + protocol, env
     if (
         intake.bot.platform != "feishu"
         or intake.chat_type != "group"
         or intake.speaker.user_id is None
     ):
-        return system_prompt, env, ""
-    routes = await service.routes_for(session, intake.bot.id, intake.chat_id)
-    peers = []
-    for route in routes:
-        try:
-            await service.authorized(
-                session, route, intake.speaker.platform_user_id, intake.speaker.user_id
-            )
-        except ValueError:
-            continue
-        peer = await session.get(Bot, route.target_bot_id)
-        assert peer is not None
-        peers.append(
-            {"bot_key": peer.bot_key, "name": peer.name, "description": peer.description or ""}
+        return system_prompt, env
+    # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
+    route = await session.scalar(
+        select(BotCollaborationRoute.id)
+        .where(
+            BotCollaborationRoute.source_bot_id == intake.bot.id,
+            BotCollaborationRoute.chat_id == intake.chat_id,
+            BotCollaborationRoute.enabled.is_(True),
         )
-    if not peers:
-        return system_prompt, env, ""
-    env = dict(env)
-    env["COREMAN_BOT_HELP_URL"] = ctx.public_base_url.rstrip("/") + "/api/runtime/bot-help"
-    env["COREMAN_BOT_HELP_TOKEN"] = service.issue_capability(
+        .limit(1)
+    )
+    if route is None:
+        return system_prompt, env
+    from coreman.core.chat.collaboration_tools import POLICY
+
+    env["COREMAN_COLLABORATION_URL"] = (
+        ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
+    )
+    env["COREMAN_COLLABORATION_TOKEN"] = service.issue_capability(
         ctx.cipher, task_id=ctx.task.id, user_id=str(intake.speaker.user_id)
     )
-    prompt = """\n本轮服务端已核验的飞书协作配置如下，适用于当前连续会话。
-不要沿用旧对话中的“伙伴不可达”结论。
-你可以通过工具向同群的协作伙伴求助。可用伙伴：PEERS
-这里的伙伴是飞书机器人，不是本机 Claude 会话。
-ListAgents / SendMessage 等本机会话工具不能用于寻找或联系它们。
-若用户不需要求助，正常回答即可；需要求助时必须使用下面的服务端入口。
-当你缺少伙伴掌握的数据或能力、自己无法可靠完成原始请求时，使用 shell 工具调用以下接口一次：
-用工具将 JSON 写入临时文件，内容为：
-{"target_bot_key":"伙伴 bot_key","question":"包含必要上下文的具体求助问题"}
-然后执行：
-curl --fail-with-body --silent --show-error -X POST "$COREMAN_BOT_HELP_URL" \
--H "Authorization: Bearer $COREMAN_BOT_HELP_TOKEN" \
--H 'Content-Type: application/json' --data-binary @该临时文件
-不要打印凭证，不要指定或替换人类身份，不要自行调用飞书 API。
-向伙伴说明人类目标、必要条件和希望返回的依据，避免转发无关上下文。
-各机器人工作目录独立，不要把自己的工作目录当作伙伴的数据目录或擅自替伙伴指定路径。
-伙伴应在自己的数据源中核验；汇总时可复核计算，但不要因自己目录缺少伙伴文件而判定伙伴查询失败。
-面向群成员的文字使用自然协作口吻，不要展示内部接口、令牌、协作 ID 或会话恢复机制。
-成功后立即结束本轮，只告知正在等待反馈。不要等待/轮询、不要猜测结果、不要声称已完成。
-平台收到伙伴真实反馈后会恢复本会话，由你总结给原始人类。每项任务只允许求助一次。"""
-    prompt = prompt.replace("PEERS", json.dumps(peers, ensure_ascii=False))
-    return system_prompt + prompt, env, prompt
+    return system_prompt + POLICY, env
 
 
 async def final_transition(
@@ -259,19 +242,3 @@ async def final_transition(
         await service.close(session, row, "failed", str(exc))
         verdict = replace(verdict, final_text=f"本次协作未完成：{exc}", log_status="error")
     return verdict, ctx.task.payload.get("collaboration_phase") == "helper"
-
-
-def with_turn_context(
-    content: str | list[dict[str, Any]], context: str
-) -> str | list[dict[str, Any]]:
-    """Reassert current server-verified capabilities in resumed turns, without credentials.
-
-    Old conversation claims can otherwise make the model confuse Feishu peers with local agents.
-    Keep the original user input/attachments intact; no full A history is copied to B.
-    """
-    if not context:
-        return content
-    prefix = "[CoreMan 本轮协作配置]\n" + context + "\n[本轮请求]\n"
-    if isinstance(content, str):
-        return prefix + content
-    return [{"type": "text", "text": prefix}, *content]
