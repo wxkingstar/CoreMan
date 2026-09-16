@@ -12,7 +12,7 @@ B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。
 
 ## 开启范围
 
-迁移 0023 创建 `bot_collaboration_routes`，默认关闭。每条记录指定：
+迁移 0024 创建 `bot_collaboration_routes`，默认关闭。每条记录指定：
 
 - source_bot_id / target_bot_id：平台现有飞书机器人。
 - chat_id / tenant_key：同一个授权群与租户。
@@ -101,3 +101,7 @@ B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。
 证据文件：`outputs/feishu-session-continuity-20260916/report.html`、`live-evidence.json`、`assertions.json`。21 项证据断言通过；70 项自动化通过，240 个源文件类型检查通过。执行服务与飞书网关为 v11，API/调度仍为 v9，企微保持原服务版本。最终活动协作 0。
 
 覆盖边界：真实多人账号并行、真实企微、B 私聊未实测；相关隔离/身份/兼容行为以自动化与代码检查为依据。真实重置命令使用 `new`，没有把 `reset/clear` 别名或自然过期标成真实 E2E 通过。
+
+### 合并主线时的迁移兼容
+
+主线的 `0023` 已用于 Claude 模型名称迁移，协作表迁移顺延为 `0024`。新库和主线已有库按顺序升级；试运行版曾以 `0023` 创建协作表，升级时检测两个表均已存在后保留原表与数据，并补跑幂等的模型名称迁移。仅存在一个协作表时拒绝继续，避免掩盖不完整结构。该兼容路径使用隔离数据库回归验证；本次合并不执行现有业务库升级。

@@ -2,14 +2,28 @@
 
 import sqlalchemy as sa
 from alembic import op
+from alembic.script import ScriptDirectory
 
-revision = "0023"
-down_revision = "0022"
+revision = "0024"
+down_revision = "0023"
 branch_labels = None
 depends_on = None
 
 
 def upgrade():
+    # The pre-main QA build used 0023 for these tables. Main already published
+    # 0023 for model names; preserve the QA ledger and apply that missed data step.
+    inspector = sa.inspect(op.get_bind())
+    existing = [
+        inspector.has_table(name) for name in ("bot_collaboration_routes", "bot_collaborations")
+    ]
+    if any(existing):
+        if not all(existing):
+            raise RuntimeError("Incomplete legacy collaboration schema; refusing upgrade")
+        native = ScriptDirectory.from_config(op.get_context().config).get_revision("0023")
+        assert native is not None
+        native.module.upgrade()
+        return
     op.create_table(
         "bot_collaboration_routes",
         sa.Column("id", sa.Uuid(), primary_key=True),
