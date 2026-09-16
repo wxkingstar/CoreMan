@@ -19,6 +19,7 @@ import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
 import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
+import { FolderOpened } from '@element-plus/icons-vue'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 const botFormRef = ref<InstanceType<typeof BotForm>>()
@@ -237,15 +238,20 @@ onMounted(async () => {
               {{ bot.model }}
             </el-descriptions-item>
             <el-descriptions-item :label="t('bots.detail.workingDir')">
-              {{ bot.working_dir }}
-              <el-button
-                v-if="perms?.can_edit"
-                link
-                type="primary"
-                @click="workspaceVisible = true"
-              >
-                {{ t('workspaceFiles.open') }}
-              </el-button>
+              <div class="workspace-path-row">
+                <span class="workspace-path">{{ bot.working_dir }}</span>
+                <el-button
+                  v-if="perms?.can_edit"
+                  :icon="FolderOpened"
+                  class="workspace-open"
+                  text
+                  size="small"
+                  type="primary"
+                  @click="workspaceVisible = true"
+                >
+                  {{ t('workspaceFiles.open') }}
+                </el-button>
+              </div>
             </el-descriptions-item>
             <el-descriptions-item :label="t('bots.detail.verbosity')">
               {{ t(`bots.verbosityLevels.${bot.verbosity_level}`) }}
@@ -488,6 +494,10 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.workspace-path-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.workspace-path { min-width: 0; overflow-wrap: anywhere; }
+.workspace-open { flex-shrink: 0; vertical-align: middle; }
+
 .configuration-actions { margin: 16px 0; }
 
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

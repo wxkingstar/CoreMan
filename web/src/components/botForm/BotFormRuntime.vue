@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { FolderOpened } from '@element-plus/icons-vue'
 import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
 import { useI18n } from 'vue-i18n'
 import type { EffortLevel } from '@/api/types'
@@ -145,18 +146,22 @@ const {
     data-test="working_dir"
     :error="fieldErrors.working_dir"
   >
-    <el-input
-      v-model="form.working_dir"
-      :readonly="mode === 'edit' && !!form.relay_server_id"
-    />
-    <el-button
-      v-if="botId"
-      link
-      type="primary"
-      @click="workspaceVisible = true"
-    >
-      {{ t('workspaceFiles.open') }}
-    </el-button>
+    <div class="workspace-path-row">
+      <el-input
+        v-model="form.working_dir"
+        :readonly="mode === 'edit' && !!form.relay_server_id"
+      />
+      <el-button
+        v-if="botId"
+        :icon="FolderOpened"
+        text
+        size="small"
+        type="primary"
+        @click="workspaceVisible = true"
+      >
+        {{ t('workspaceFiles.open') }}
+      </el-button>
+    </div>
     <WorkspaceDrawer
       v-if="botId && workspaceVisible"
       v-model:visible="workspaceVisible"
@@ -184,5 +189,9 @@ const {
 </template>
 
 <style scoped>
+.workspace-path-row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.workspace-path-row .el-input { flex: 1; min-width: 0; }
+.workspace-path-row .el-button { flex-shrink: 0; }
+
 .muted { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 </style>
