@@ -1,7 +1,6 @@
 from datetime import timedelta
 
 import pytest
-
 from sqlalchemy import select
 
 from coreman.core.db.models import Bot, Memory, User
