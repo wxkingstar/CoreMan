@@ -128,6 +128,7 @@ probe:
 	}
 
 	thinkingDelta := func(text string) {
+		sessionStore.LogThinking(sessionID, text)
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []openai.ChatCompletionChoice{{
@@ -217,6 +218,13 @@ probe:
 				// "Codex is running: <command>" indicators.
 				args, _ := json.Marshal(map[string]string{"command": ev.Item.Command})
 				toolCallDelta(ev.Item.ID, "shell", string(args))
+				thinkingDelta("\n\n工具参数 · shell\n" + string(args) + "\n")
+			}
+
+			switch ev.Item.Type {
+			case "file_change", "web_search", "mcp_tool_call", "collab_tool_call":
+				toolCallDelta(ev.Item.ID, ev.Item.Type, string(ev.Item.Raw))
+				thinkingDelta("\n\n工具开始 · " + ev.Item.Type + "\n" + string(ev.Item.Raw) + "\n")
 			}
 
 		case "item.completed":
@@ -224,6 +232,8 @@ probe:
 				return
 			}
 			switch ev.Item.Type {
+			case "file_change", "web_search", "mcp_tool_call", "collab_tool_call", "todo_list":
+				thinkingDelta("\n\n工具结果 · " + ev.Item.Type + "\n" + string(ev.Item.Raw) + "\n")
 			case "agent_message":
 				if ev.Item.Text != "" {
 					emittedAnyContent = true
@@ -235,6 +245,7 @@ probe:
 					thinkingDelta(ev.Item.Text)
 				}
 			case "command_execution":
+				thinkingDelta("\n\n工具结果 · shell\n" + ev.Item.AggregatedOutput + "\n")
 				// Log tool result for /sessions viewer.
 				exit := ""
 				if ev.Item.ExitCode != nil {
@@ -243,7 +254,7 @@ probe:
 				sessionStore.LogToolUse(sessionID, "shell", ev.Item.ID,
 					fmt.Sprintf(`{"command":%q,"exit_code":%s,"output":%q}`,
 						ev.Item.Command, defaultStr(exit, "null"),
-						openai.Truncate(ev.Item.AggregatedOutput, 4096)))
+						ev.Item.AggregatedOutput))
 			}
 
 		case "turn.completed":

@@ -256,6 +256,29 @@ function renderEvent(ev) {
   const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
   const ts = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : '';
 
+  if (ev.type === 'thinking_delta') {
+    let box = eventsEl.querySelector('.process-live');
+    if (!box) {
+      const panel = document.createElement('details');
+      panel.className = 'msg msg-tool';
+      panel.open = true;
+      const title = document.createElement('summary');
+      title.textContent = '思考过程';
+      box = document.createElement('pre');
+      box.className = 'process-live';
+      box.style.cssText = 'line-height:1.6em;max-height:8em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0';
+      panel.append(title, box);
+      eventsEl.insertBefore(panel, autoLoadHint);
+    }
+    const following = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
+    box.textContent += data.text || '';
+    if (following) box.scrollTop = box.scrollHeight;
+    return;
+  }
+  if (ev.type === 'request' || ev.type === 'response_done') {
+    const box = eventsEl.querySelector('.process-live');
+    if (box) box.classList.remove('process-live');
+  }
   if (ev.type === 'response_delta') {
     if (!streamingEl) {
       streamingEl = document.createElement('div');

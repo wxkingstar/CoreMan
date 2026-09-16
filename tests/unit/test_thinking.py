@@ -14,7 +14,7 @@ def test_steps_to_markdown() -> None:
     assert (
         lines[0] == "🤔 正在思考中..." and lines[1] == "🔧 **Bash**" and lines[2] == "🔧 **Read**"
     )
-    assert lines[3].startswith("💭 ") and len(lines[3]) == 2 + 200 and lines[3].endswith("b" * 100)
+    assert lines[3].startswith("💭 ") and len(lines[3]) == 2 + 250 and lines[3].endswith("b" * 100)
     assert lines[4] == "✨ 回复生成完成（总耗时12s）" and c.step_count == 5
 
 

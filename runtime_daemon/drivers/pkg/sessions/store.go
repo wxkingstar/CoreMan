@@ -242,6 +242,19 @@ func (s *Store) LogDelta(sessionID, text string) {
 	})
 }
 
+// LogThinking preserves provider-supplied process text for the authenticated viewer.
+func (s *Store) LogThinking(sessionID, text string) {
+	if sessionID == "" || text == "" {
+		return
+	}
+	entry := s.Get(sessionID)
+	if entry == nil {
+		return
+	}
+	data, _ := json.Marshal(map[string]string{"text": text})
+	entry.Append(Event{Timestamp: time.Now().Format(time.RFC3339Nano), Type: "thinking_delta", Data: data})
+}
+
 // LogToolUse appends a tool_use event with name, id, and serialized input.
 func (s *Store) LogToolUse(sessionID, name, id, input string) {
 	if sessionID == "" {

@@ -24,6 +24,7 @@ from coreman.runtime.gateway_feishu.cards import (
     stream_card,
     visible_parts,
 )
+from coreman.runtime.gateway_feishu.reactions import clean_finished, typing
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
@@ -167,6 +168,7 @@ class FeishuTransport:
                         if delivery.failures >= 6 or exc.code in {230013, -2}:
                             delivery.fallback = True
                         await session.commit()
+            await clean_finished(self)
             for _ in range(OUTBOX_PER_ROUND):
                 if not await self.consume_one():
                     return False
@@ -196,6 +198,10 @@ class FeishuTransport:
                 session.add(delivery)
                 await session.commit()
                 await session.refresh(delivery)
+        await typing(self, row.task_id)
+        async with self.factory() as session:
+            delivery = await session.get(FeishuDelivery, row.task_id)
+            assert delivery is not None
         if delivery.fallback or datetime.now(UTC) - delivery.created_at >= timedelta(days=13):
             if row.is_complete:
                 async with self.factory() as session:
@@ -203,6 +209,8 @@ class FeishuTransport:
                     await self.enqueue_final(session, row, visible_parts("", answer)[1], start=0)
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
+                if not visible_parts("", answer)[1].strip() and not row.pending_card:
+                    await typing(self, row.task_id, done=True)
             return
         if delivery.retry_at and delivery.retry_at > datetime.now(UTC):
             return
@@ -212,7 +220,9 @@ class FeishuTransport:
                 "/open-apis/cardkit/v1/cards",
                 json={
                     "type": "card_json",
-                    "data": json.dumps(stream_card("", ""), ensure_ascii=False),
+                    "data": json.dumps(
+                        stream_card("", "", session_url=row.session_url), ensure_ascii=False
+                    ),
                 },
             )
             delivery.card_id = api_id((result.get("data") or {}).get("card_id"))
@@ -243,7 +253,12 @@ class FeishuTransport:
         answer = (
             row.final_text if row.is_complete and row.final_text is not None else row.pending_text
         )
-        card = stream_card(row.thinking_md, answer, streaming=not (row.is_complete or expired))
+        card = stream_card(
+            row.thinking_md,
+            answer,
+            streaming=not (row.is_complete or expired),
+            session_url=row.session_url,
+        )
         if (row.is_complete or expired) and not delivery.is_static:
             await self.call(
                 "PATCH",
@@ -281,6 +296,8 @@ class FeishuTransport:
                     f"/open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
                     json={"sequence": await self.sequence(row.task_id), "content": content},
                 )
+        if visible_parts("", answer)[1].strip() or (row.is_complete and not row.pending_card):
+            await typing(self, row.task_id, done=True)
         async with self.factory() as session:
             saved = await session.get(FeishuDelivery, row.task_id)
             assert saved is not None
@@ -294,7 +311,7 @@ class FeishuTransport:
     async def enqueue_final(
         self, session: AsyncSession, row: TaskStream, answer: str, *, start: int
     ) -> None:
-        for index, chunk in enumerate(split_utf8(answer)[start:], start):
+        for index, chunk in enumerate(split_utf8(answer)[start:] if answer.strip() else [], start):
             await outbox.add(
                 session,
                 bot_id=row.bot_id,
@@ -302,7 +319,7 @@ class FeishuTransport:
                 kind="send",
                 dedupe_key=f"{row.task_id}:overflow:{index}",
                 target={"chat_id": row.reply_context.get("chat_id")},
-                payload={"markdown": chunk},
+                payload={"markdown": chunk, "_typing_task_id": row.task_id},
             )
         if row.pending_card:
             await outbox.add(
@@ -312,7 +329,7 @@ class FeishuTransport:
                 kind="send",
                 dedupe_key=f"{row.task_id}:card:0",
                 target={"chat_id": row.reply_context.get("chat_id")},
-                payload={"card": row.pending_card},
+                payload={"card": row.pending_card, "_typing_task_id": row.task_id},
             )
 
     async def consume_one(self) -> bool:
@@ -349,13 +366,18 @@ class FeishuTransport:
                         await session.commit()
                         return True
                 await self._send_item(item)
+                if item.payload.get("_typing_task_id"):
+                    await typing(self, int(item.payload["_typing_task_id"]), done=True)
                 await session.flush()
                 await outbox.mark_sent(session, item.id)
             except FeishuError as exc:
                 if exc.code in {230013, -2}:
                     await outbox.fail(session, item.id, str(exc))
+                    status = "failed"
                 else:
-                    await outbox.mark_failed(session, item.id, str(exc))
+                    status = await outbox.mark_failed(session, item.id, str(exc))
+                if status == "failed" and item.payload.get("_typing_task_id"):
+                    await typing(self, int(item.payload["_typing_task_id"]), done=True)
             await session.commit()
             return True
 
