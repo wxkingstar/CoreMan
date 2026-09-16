@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +93,7 @@ class EnrollIn(BaseModel):
 
 
 class Capability(BaseModel):
+    feishu_personal_restricted_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)
     login: Literal["ready", "required", "unknown"] = "unknown"

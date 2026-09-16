@@ -144,14 +144,19 @@ async def test_idle_poll_skips_stale_queue_and_heartbeat_settles_it(client, db_s
     beat = await client.post(
         "/api/runtime/heartbeat",
         headers=headers,
-        json={"claude": {}, "codex": {}, "version": "test", "service_status": "foreground",
-              "protocol": 2},
+        json={
+            "claude": {},
+            "codex": {},
+            "version": "test",
+            "service_status": "foreground",
+            "protocol": 2,
+        },
     )
     assert beat.status_code == 200 and beat.json()["data"]["protocol"] == 2
     row = await db_session.scalar(
-        select(RuntimeCall).where(RuntimeCall.id == call_id).execution_options(
-            populate_existing=True
-        )
+        select(RuntimeCall)
+        .where(RuntimeCall.id == call_id)
+        .execution_options(populate_existing=True)
     )
     assert row.status == "cancelled" and row.request_enc == ""
     node = await db_session.get(RuntimeNode, node_id)
@@ -205,3 +210,34 @@ async def test_heartbeat_concurrency_is_listed_and_legacy_nodes_stay_unknown(cli
     assert await listed() == (6, 2, 2)
     invalid = {**reported, "active_calls": -1}
     assert (await client.post(endpoint, headers=headers, json=invalid)).status_code == 422
+
+
+async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omission(
+    client, db_session
+):
+    _, body, headers = await enrollment(client, db_session)
+    for declared in ({"feishu_personal_restricted_v1": True}, {}):
+        response = await client.post(
+            "/api/runtime/heartbeat",
+            headers=headers,
+            json={"version": "test", "service_status": "launchd", "claude": declared, "codex": {}},
+        )
+        assert response.status_code == 200
+        node = await db_session.get(RuntimeNode, uuid.UUID(body["node_id"]), populate_existing=True)
+        assert node.capabilities["claude"].get("feishu_personal_restricted_v1") is bool(declared)
+
+
+@pytest.mark.parametrize("value", ["true", 1])
+async def test_heartbeat_personal_capability_requires_boolean(client, db_session, value):
+    _, _, headers = await enrollment(client, db_session)
+    response = await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={
+            "version": "test",
+            "service_status": "launchd",
+            "claude": {"feishu_personal_restricted_v1": value},
+            "codex": {},
+        },
+    )
+    assert response.status_code == 422
