@@ -3,6 +3,7 @@ import type zh from './zh'
 type Messages<T> = { [K in keyof T]: T[K] extends string ? string : Messages<T[K]> }
 
 const en = {
+  selfReminders: {"hint": "Request a one-time reminder in a Feishu private chat, then send the exact confirmation shown. Supports 1 minute to 30 days and delivery only to your original private chat.", "deliveryHint": "Cancel stops notifications that have not started sending. Sent or sending notifications cannot be recalled. Refresh to check delivery.", "refresh": "Refresh", "empty": "No self reminders", "fixed": "One-time self reminder", "cancel": "Cancel reminder", "status": {"scheduled": "Scheduled", "running": "Processing", "success": "Notification created", "failed": "Failed", "skipped": "Skipped", "cancelled": "Cancelled", "pending": "Pending delivery", "sending": "Sending", "sent": "Sent"}},
   myFeishu: {
     retentionNotice: "Private chat text and answers may be retained in CoreMan conversation audit records. Resetting, switching modes or revoking stops reuse of old context but does not delete audit records. Personal data is not written to shared memory.",
     modeHint: "Send “普通助手” to exit personal mode or “飞书资料” to enter it. Switching clears conversation context without expanding authorization.",
@@ -130,6 +131,7 @@ const en = {
   },
   layout: { logout: 'Sign out', darkMode: 'Dark mode', language: 'Language' },
   menu: {
+    selfReminders: "My reminders",
     myFeishu: "My Feishu", skills: 'Skills', skillApprovals: 'Skill approvals', credentials: 'APIs and keys', home: 'Workspace', bots: 'AI employees', relays: 'Runtime management', users: 'Teams and users', apps: 'Platform apps', cron: 'Scheduled tasks', announcements: 'Announcements', chatLogs: 'Conversation logs', statistics: 'Usage statistics', approvals: 'Approvals', systems: 'Business systems', runtime: 'Platform status', audit: 'Audit logs', settings: 'Settings' },
 
   users: { title: 'Teams and users', tabUsers: 'Users', tabTeams: 'Teams', keyword: 'Keyword', team: 'Team', role: 'Role', status: 'Status', unassigned: 'Unassigned only', name: 'Name', email: 'Email', departments: 'Departments', botAccessible: 'Accept help requests', lastLogin: 'Last sign-in', edit: 'Edit', position: 'Position', skills: 'Skills', locale: 'Language', roles: { platform_admin: 'Platform administrator', ai_committee: 'AI committee', team_lead: 'Team lead', member: 'Member' }, statuses: { active: 'Enabled', disabled: 'Disabled' }, sources: { sync: 'Synced', bootstrap: 'Bootstrap', manual: 'Manual' }, noTeam: 'Unassigned', deptTree: 'Department tree', pickerPlaceholder: 'Search users by name or account' },

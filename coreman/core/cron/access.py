@@ -36,6 +36,7 @@ def job_config(job: object) -> dict[str, object]:
 
     assert isinstance(job, CronJob)
     return {
+        "execution_mode": job.execution_mode,
         "name": job.name,
         "prompt": job.prompt,
         "system_prompt": job.system_prompt,

@@ -1,4 +1,5 @@
 export default {
+  selfReminders: {"hint": "在飞书私聊发送“两分钟后提醒我检查接口，只提醒一次”，然后回复“确认提醒”。支持 1 分钟至 30 天，仅向本人原私聊提醒一次。", "deliveryHint": "取消会停止尚未发送的通知。已发送或正在发送的通知不能撤回；可刷新查看投递状态。", "refresh": "刷新", "empty": "暂无本人提醒", "fixed": "一次性本人提醒", "cancel": "取消提醒", "status": {"scheduled": "等待提醒", "running": "处理中", "success": "已生成通知", "failed": "失败", "skipped": "已跳过", "cancelled": "已取消", "pending": "待发送", "sending": "正在发送", "sent": "已发送"}},
   myFeishu: {
     retentionNotice: "私聊文本和回答可能保留在 CoreMan 对话审计记录中。清除会话、切换模式或撤销授权会停止使用旧上下文，不会删除已有审计记录；个人资料不会写入共享记忆。",
     modeHint: "发送“普通助手”退出资料模式，发送“飞书资料”重新进入；切换会清除会话上下文，不会扩大授权范围。",
@@ -217,6 +218,7 @@ export default {
   },
   layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
   menu: {
+    selfReminders: "我的提醒",
     myFeishu: "我的飞书",
     skills: "技能管理",
     skillApprovals: "技能审批",

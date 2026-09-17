@@ -34,6 +34,7 @@ ESCALATION_STATUSES = ("pending", "queued", "replied", "completed", "expired", "
 class CronJob(TimestampMixin, Base):
     __tablename__ = "cron_jobs"
     __table_args__ = (
+        CheckConstraint("execution_mode IN ('ai', 'self_reminder')", name="execution_mode"),
         CheckConstraint("schedule_kind IN ('recurring', 'once')", name="schedule_kind"),
         CheckConstraint("schedule_kind != 'once' OR run_at IS NOT NULL", name="once_run_at"),
         CheckConstraint("precheck_timeout_seconds BETWEEN 5 AND 120", name="precheck_timeout"),
@@ -41,6 +42,8 @@ class CronJob(TimestampMixin, Base):
     )
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    execution_mode: Mapped[str] = mapped_column(Text, server_default=text("'ai'"))
+    reminder_chat_id: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str] = mapped_column(Text)
     cron_expression: Mapped[str] = mapped_column(Text)
     schedule_kind: Mapped[str] = mapped_column(Text, server_default=text("'recurring'"))

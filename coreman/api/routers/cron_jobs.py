@@ -120,7 +120,7 @@ async def _bot(session: AsyncSession, bot_id: uuid.UUID, actor: User) -> Bot:
 
 async def _load(session: AsyncSession, job_id: uuid.UUID, actor: User) -> CronJob:
     row = await session.scalar(select(CronJob).where(CronJob.id == job_id).with_for_update())
-    if row is None:
+    if row is None or row.execution_mode != "ai":
         raise not_found("定时任务不存在")
     await _bot(session, row.bot_id, actor)
     return row
@@ -323,6 +323,7 @@ async def list_jobs(
 ) -> dict[str, Any]:
     stmt = (
         select(CronJob)
+        .where(CronJob.execution_mode == "ai")
         .join(Bot, Bot.id == CronJob.bot_id)
         .where(
             (Bot.created_by == actor.id)

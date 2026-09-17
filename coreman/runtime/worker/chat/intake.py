@@ -116,6 +116,10 @@ class IntakeStage(ChatStageBase):
             return None
         if await self._denied(session, ctx, intake):
             return None
+        from coreman.runtime.worker.chat.reminders import intercept
+
+        if await intercept(session, ctx, intake):
+            return None
         if await self._command(session, ctx, intake):
             return None
         from coreman.runtime.worker.chat.personal import reject_unavailable

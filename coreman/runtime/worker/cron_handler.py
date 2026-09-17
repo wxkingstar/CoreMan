@@ -70,6 +70,10 @@ class CronRunHandler:
 
     async def run(self, ctx: TaskContext) -> None:
         # 周期心跳由 WorkerService 的心跳循环统一写；外部调用前那一次显式收取取消见 _run。
+        from coreman.runtime.worker.reminder_handler import run_fixed
+
+        if await run_fixed(ctx):
+            return
         await self._run(ctx)
 
     async def _run(self, ctx: TaskContext) -> None:

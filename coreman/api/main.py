@@ -48,6 +48,7 @@ from coreman.api.routers import (
     runtime,
     runtime_nodes,
     runtime_protocol,
+    self_reminders,
     skill_catalog,
     statistics,
     teams,
@@ -143,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(audit_logs.router)
     app.include_router(chat_logs.router)
     app.include_router(cron_jobs.router)
+    app.include_router(self_reminders.router)
     app.include_router(notification_settings.router)
     app.include_router(announcements.router)
     app.include_router(runtime.router)

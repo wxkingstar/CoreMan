@@ -55,7 +55,12 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
             )
             if not invalid and bot is not None and user is not None:
                 try:
-                    await require_operator(session, bot, user)
+                    if job.execution_mode == "self_reminder":
+                        from coreman.core.reminders import require_fixed
+
+                        await require_fixed(session, job, bot, user)
+                    else:
+                        await require_operator(session, bot, user)
                 except ApiError:
                     invalid = True
             if invalid:
@@ -212,7 +217,11 @@ async def recover_runs(
             job.last_status = "failed"
             bot = await session.get(Bot, job.bot_id)
             if bot is not None:
-                if task is not None and task.status != "cancelled":
+                if (
+                    task is not None
+                    and task.status != "cancelled"
+                    and job.execution_mode != "self_reminder"
+                ):
                     run.delivery = await enqueue_result(
                         session,
                         bot=bot,

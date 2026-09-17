@@ -1,4 +1,5 @@
 export default {
+  selfReminders: {"hint": "飛書の個別チャットで一回限りのリマインダーを依頼し、表示された確認コマンドを返信してください。1分から30日まで、本人の元の個別チャットにのみ送信します。", "deliveryHint": "キャンセルは未送信の通知を停止します。送信済み・送信中の通知は取り消せません。更新して状態を確認できます。", "refresh": "更新", "empty": "リマインダーはありません", "fixed": "本人への一回限りの通知", "cancel": "キャンセル", "status": {"scheduled": "待機中", "running": "処理中", "success": "通知を作成済み", "failed": "失敗", "skipped": "スキップ", "cancelled": "キャンセル済み", "pending": "送信待ち", "sending": "送信中", "sent": "送信済み"}},
   myFeishu: {
     retentionNotice: "個別チャットの本文と回答は CoreMan の対話監査記録に保持される場合があります。会話のクリア、モード切替、認可取消は古い文脈の再利用を停止しますが、監査記録は削除しません。個人資料は共有メモリに書き込みません。",
     modeHint: "「普通助手」で資料モードを終了し、「飞书资料」で戻ります。切替は会話文脈をクリアし、認可範囲は拡大しません。",
@@ -219,6 +220,7 @@ export default {
   },
   layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
   menu: {
+    selfReminders: "自分のリマインダー",
     myFeishu: "マイ飛書",
     skills: "スキル管理",
     skillApprovals: "スキル承認",

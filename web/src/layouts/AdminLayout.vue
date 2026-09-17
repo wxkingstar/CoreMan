@@ -13,6 +13,7 @@ export interface MenuItem {
 export const MENU: readonly MenuItem[] = [
   { key: 'statistics', path: '/statistics' },
   { key: 'bots', path: '/bots' },
+  { key: 'selfReminders', path: '/self-reminders' },
   { key: 'myFeishu', path: '/my-feishu' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
@@ -46,7 +47,7 @@ const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
 const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu'] },
+  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]
