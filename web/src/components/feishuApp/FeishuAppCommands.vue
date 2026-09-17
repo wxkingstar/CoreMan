@@ -116,22 +116,27 @@ async function remove(row: FeishuSlashCommand): Promise<void> {
           :label="t('feishuApp.commandIcon')"
           width="180"
         />
-        <el-table-column width="140">
+        <el-table-column
+          :label="t('common.actions')"
+          width="160"
+        >
           <template #default="{ row }">
-            <el-button
-              text
-              type="primary"
-              @click="open(row)"
-            >
-              {{ t('common.edit') }}
-            </el-button>
-            <el-button
-              text
-              type="danger"
-              @click="remove(row)"
-            >
-              {{ t('common.delete') }}
-            </el-button>
+            <div class="row-actions">
+              <el-button
+                text
+                type="primary"
+                @click="open(row)"
+              >
+                {{ t('common.edit') }}
+              </el-button>
+              <el-button
+                text
+                type="danger"
+                @click="remove(row)"
+              >
+                {{ t('common.delete') }}
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -210,4 +215,6 @@ async function remove(row: FeishuSlashCommand): Promise<void> {
 
 <style scoped>
 .add { margin-top: 12px; }
+.row-actions { display: flex; flex-wrap: nowrap; gap: 4px; white-space: nowrap; }
+.row-actions .el-button + .el-button { margin-left: 0; }
 </style>

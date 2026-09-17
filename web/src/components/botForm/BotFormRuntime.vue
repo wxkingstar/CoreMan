@@ -34,7 +34,10 @@ const {
     :error="fieldErrors.relay_server_id"
     :required="mode === 'create'"
   >
-    <template v-if="mode === 'create' && runtimeGroups.length">
+    <div
+      v-if="mode === 'create' && runtimeGroups.length"
+      class="runtime-row"
+    >
       <el-select
         :model-value="selectedRuntime"
         clearable
@@ -51,7 +54,6 @@ const {
       <el-select
         :model-value="form.relay_server_id"
         :placeholder="t('runtimeNodes.aiType')"
-        style="margin-left: 10px"
         @update:model-value="selectRelay($event as string)"
       >
         <el-option
@@ -62,7 +64,7 @@ const {
           :disabled="!backend.effective_models.length"
         />
       </el-select>
-    </template>
+    </div>
     <el-select
       v-else
       :model-value="form.relay_server_id"
@@ -196,6 +198,9 @@ const {
 </template>
 
 <style scoped>
+/* 运行时节点与 AI 类型并排等宽，窄屏时各占一行且左边缘对齐。 */
+.runtime-row { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; }
+.runtime-row .el-select { flex: 1 1 200px; min-width: 0; }
 .workspace-path-row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
 .workspace-path-row .el-input { flex: 1; min-width: 0; }
 .workspace-path-row .el-button { flex-shrink: 0; }

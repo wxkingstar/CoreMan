@@ -112,6 +112,8 @@ h1,h2,h3,p { margin-top: 0; } h2 { font-size: 23px; letter-spacing: -.4px; line-
 .employee-dialog .employee-form { display: flex; flex-direction: column; min-height: 0; width: 100%; }
 .employee-dialog .employee-form-fields { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 8px; }
 .employee-form .form-footer { flex-shrink: 0; background: var(--cm-surface); padding: 16px 0 0; border-top: 1px solid var(--cm-border); margin-bottom: 0; }
+/* 对话框底部按钮靠右：没有标签的表单项默认按 label-width 缩进（行内样式），这里覆盖掉。 */
+.employee-form .form-footer .el-form-item__content { margin-left: 0 !important; justify-content: flex-end; }
 @media (max-width: 767px) {
   .el-form .el-form-item .el-form-item__label { align-self: flex-start; text-align: left; display: block; line-height: 24px; padding: 0 0 6px; }
   .el-main .el-form--inline .el-form-item .el-input, .el-main .el-form--inline .el-form-item .el-select { width: 100% !important; }

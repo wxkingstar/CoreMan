@@ -204,7 +204,10 @@ async function save(): Promise<void> {
               >{{ t(`feishuApp.menuKindHints.${row.kind}`) }}</span>
             </template>
           </el-table-column>
-          <el-table-column width="70">
+          <el-table-column
+            :label="t('common.actions')"
+            width="90"
+          >
             <template #default="{ $index }">
               <el-button
                 text
