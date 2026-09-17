@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -122,6 +123,52 @@ async def require_fixed(session: AsyncSession, job: CronJob, bot: Bot, actor: Us
         raise ApiError(403, 403, "invalid_fixed_reminder")
 
 
+def _plain_message_parts(message: dict[str, Any]) -> list[dict[str, str]]:
+    """Prove only a plain native payload, without dropping rich or ambiguous content."""
+    content = json.loads(message.get("content") or "{}")
+    if not isinstance(content, dict):
+        raise ValueError("plain_message_required")
+    if message.get("message_type") == "text":
+        text = content.get("text")
+        if not isinstance(text, str):
+            raise ValueError("plain_message_required")
+        # The gateway strips text-message edges; do not otherwise rewrite its text.
+        return [{"type": "text", "text": text.strip()}]
+    if message.get("message_type") != "post":
+        raise ValueError("plain_message_required")
+    if "content" not in content and "content_v2" not in content:
+        # The gateway chooses a locale; require exactly one to avoid that ambiguity.
+        if len(content) != 1:
+            raise ValueError("unambiguous_post_required")
+        locale, post = next(iter(content.items()))
+        if not re.fullmatch(r"[a-z]{2}_[a-z]{2}", locale) or not isinstance(post, dict):
+            raise ValueError("plain_post_required")
+        content = post
+    keys = set(content) & {"content", "content_v2"}
+    if len(keys) != 1 or set(content) - {"title", "content", "content_v2"}:
+        raise ValueError("plain_post_required")
+    if content.get("title", "") != "":
+        raise ValueError("plain_post_required")
+    lines = content[next(iter(keys))]
+    # One paragraph can have adjacent text spans, but never discard line boundaries.
+    if not isinstance(lines, list) or len(lines) != 1 or not isinstance(lines[0], list):
+        raise ValueError("single_paragraph_required")
+    parts = []
+    for segment in lines[0]:
+        if (
+            not isinstance(segment, dict)
+            or set(segment) - {"tag", "text", "style"}
+            or segment.get("tag") != "text"
+            or not isinstance(segment.get("text"), str)
+            or segment.get("style", []) != []
+        ):
+            raise ValueError("plain_post_required")
+        parts.append({"type": "text", "text": segment["text"]})
+    if not parts:
+        raise ValueError("plain_post_required")
+    return parts
+
+
 async def verified_origin(
     session: AsyncSession, task: Task, cipher: Cipher, text: str
 ) -> tuple[Bot, User, InboundEvent]:
@@ -144,6 +191,7 @@ async def verified_origin(
     message, sender = source.get("message") or {}, source.get("sender") or {}
     ids = sender.get("sender_id") or {}
     normalized = event.payload.get("sender") or {}
+    plain_parts = _plain_message_parts(message)
     credentials = decrypt_json(cipher, bot.credentials_enc, CREDENTIALS_AAD)
     if (
         event.bot_id != bot.id
@@ -165,10 +213,9 @@ async def verified_origin(
         or message.get("chat_id") != event.chat_id
         or message.get("message_id") != event.platform_msg_id
         or message.get("chat_type") != "p2p"
-        or message.get("message_type") != "text"
         or any(message.get(key) for key in ("parent_id", "root_id", "thread_id"))
-        or json.loads(message.get("content") or "{}").get("text") != text
-        or event.payload.get("parts") != [{"type": "text", "text": text}]
+        or event.payload.get("parts") != plain_parts
+        or text != "".join(part["text"] for part in plain_parts)
         or task.payload.get("message", event.payload) != event.payload
     ):
         raise ValueError("origin")
@@ -210,6 +257,8 @@ async def handle_request(
         bot, actor, event = await verified_origin(session, task, cipher, text)
     except (ValueError, TypeError, AttributeError, ApiError):
         return "无法验证本人直接私聊请求，未设置提醒。" if "提醒" in text else None
+    # Strip only outer whitespace after the exact normalized parts have been proved.
+    text = text.strip()
     scope = f"{bot.id}:{actor.id}:{event.chat_id}"
     pending = await session.scalar(
         select(InteractionState)

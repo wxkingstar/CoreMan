@@ -603,3 +603,148 @@ async def test_union_stop_uses_current_verified_human(db_session, app, db_engine
     await db_session.refresh(task)
     if tamper:
         assert task.result == {"denied": True}
+
+
+async def set_native_content(session, bot, task, kind, content, *, message_fields=None):
+    """Persist the real gateway output, including its whitespace and post normalization."""
+    from coreman.runtime.gateway_feishu.inbound import normalize_event
+
+    event = await session.get(InboundEvent, task.inbound_event_id)
+    raw = copy.deepcopy(event.payload["raw"])
+    raw["event"]["message"].update(message_type=kind, content=json.dumps(content))
+    raw["event"]["message"].update(message_fields or {})
+    normalized = normalize_event(
+        raw,
+        bot_id=bot.id,
+        app_id="cli_test",
+        bot_open_id="ou_bot",
+        gateway_instance="gw",
+        now=datetime.now(UTC),
+    )
+    assert normalized is not None
+    event.payload = normalized.model_dump(mode="json")
+    event.reply_context = normalized.reply_context
+    task.payload = {"message": event.payload}
+    await session.commit()
+
+
+@pytest.mark.parametrize("shape", ["direct", "localized", "v2", "segments"])
+async def test_native_plain_post_proposal_and_confirmation(db_session, app, shape):
+    bot, user, task = await direct(db_session, app, "两分钟后提醒我检查接口，只提醒一次")
+
+    def post(text):
+        segments = [{"tag": "text", "text": text}]
+        if shape == "segments":
+            segments = [{"tag": "text", "text": text[:2]}, {"tag": "text", "text": text[2:]}]
+        result = {"title": "", "content_v2" if shape == "v2" else "content": [segments]}
+        return {"zh_cn": result} if shape == "localized" else result
+
+    await set_native_content(
+        db_session, bot, task, "post", post("两分钟后提醒我检查接口，只提醒一次")
+    )
+    assert "确认提醒" in await handle_request(db_session, task, app.state.cipher)
+    assert await db_session.scalar(select(CronJob)) is None
+    await set_native_content(db_session, bot, task, "post", post("确认提醒"))
+    assert "已设置" in await handle_request(db_session, task, app.state.cipher)
+    job = await db_session.scalar(select(CronJob))
+    assert job.created_by == user.id and job.prompt == "检查接口"
+
+
+async def test_native_text_whitespace_uses_gateway_strip(db_session, app):
+    bot, user, task = await direct(db_session, app, "两分钟后提醒我检查接口")
+    await set_native_content(db_session, bot, task, "text", {"text": "  两分钟后提醒我检查接口  "})
+    assert "确认提醒" in await handle_request(db_session, task, app.state.cipher)
+    await set_native_content(db_session, bot, task, "text", {"text": "\n确认提醒\n"})
+    assert "已设置" in await handle_request(db_session, task, app.state.cipher)
+    assert (await db_session.scalar(select(CronJob))).prompt == "检查接口"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "image",
+        "link",
+        "markdown",
+        "code",
+        "unknown",
+        "title",
+        "multiline",
+        "locales",
+        "both_content",
+        "quoted",
+        "forward",
+        "normalized_mismatch",
+    ],
+)
+async def test_native_post_rejects_rich_ambiguous_and_quoted_commands(db_session, app, tamper):
+    bot, user, task = await direct(db_session, app, "两分钟后提醒我检查接口")
+    text = "两分钟后提醒我检查接口"
+    content = {"title": "", "content": [[{"tag": "text", "text": text}]]}
+    fields = {}
+    if tamper in ("image", "link", "markdown", "code", "unknown"):
+        content["content"][0].append(
+            {
+                "tag": {
+                    "image": "img",
+                    "link": "a",
+                    "markdown": "md",
+                    "code": "code_block",
+                    "unknown": "mystery",
+                }[tamper],
+                "text": "",
+                "image_key": "img_test",
+            }
+        )
+    if tamper == "title":
+        content["title"] = "other request"
+    if tamper == "multiline":
+        content["content"].append([{"tag": "text", "text": "another line"}])
+    if tamper == "locales":
+        content = {"zh_cn": content, "en_us": copy.deepcopy(content)}
+    if tamper == "both_content":
+        content["content_v2"] = copy.deepcopy(content["content"])
+    if tamper == "quoted":
+        fields["parent_id"] = "quoted-message"
+    if tamper == "forward":
+        content["content"][0].append({"tag": "message", "message_id": "forwarded"})
+    await set_native_content(db_session, bot, task, "post", content, message_fields=fields)
+    if tamper == "normalized_mismatch":
+        event = await db_session.get(InboundEvent, task.inbound_event_id)
+        event.payload = {**event.payload, "parts": [{"type": "text", "text": "两分钟后提醒我伪造"}]}
+        task.payload = {"message": event.payload}
+        await db_session.commit()
+    assert "验证" in await handle_request(db_session, task, app.state.cipher)
+    assert await db_session.scalar(select(InteractionState)) is None
+
+
+@pytest.mark.parametrize("confirmation", ["mixed", "quoted", "extra_words"])
+async def test_native_post_confirmation_keeps_exact_plain_command_boundary(
+    db_session, app, confirmation
+):
+    bot, user, task = await direct(db_session, app, "两分钟后提醒我检查接口")
+    content = {"content": [[{"tag": "text", "text": "两分钟后提醒我检查接口"}]]}
+    await set_native_content(db_session, bot, task, "post", content)
+    assert "确认提醒" in await handle_request(db_session, task, app.state.cipher)
+    content = {
+        "content": [
+            [
+                {
+                    "tag": "text",
+                    "text": "确认提醒谢谢" if confirmation == "extra_words" else "确认提醒",
+                }
+            ]
+        ]
+    }
+    if confirmation == "mixed":
+        content["content"][0].append({"tag": "message", "message_id": "forward"})
+    await set_native_content(
+        db_session,
+        bot,
+        task,
+        "post",
+        content,
+        message_fields={"parent_id": "quoted"} if confirmation == "quoted" else None,
+    )
+    assert "已设置" not in await handle_request(db_session, task, app.state.cipher)
+    assert await db_session.scalar(select(CronJob)) is None
+    assert (await db_session.scalar(select(InteractionState))).status == "open"
