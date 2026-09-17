@@ -67,7 +67,9 @@ def _normalize_event(
         if not isinstance(value, dict):
             return None
         task_id = str(value.get("task_id") or "")
-        if not parse_task_id(task_id) or not header.get("event_id"):
+        if (
+            not parse_task_id(task_id) and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
+        ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")
         chat_id = str(ctx.get("open_chat_id") or "")
@@ -94,6 +96,7 @@ def _normalize_event(
             card_action={
                 "task_id": task_id,
                 "card_type": "form",
+                "level": str(value.get("level") or ""),
                 "event_key": str(value.get("event_key") or ""),
                 "selected": selected,
             },

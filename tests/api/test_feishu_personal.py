@@ -115,7 +115,7 @@ async def headers(app, task, user):
 async def start_selected(session, app, task, user):
     scope = await policy.task_scope(session, task.id, str(user.id))
     await service.begin_selection(session, app.state.cipher, scope)
-    result = await service.choose_authorization(session, app.state.cipher, scope, "1")
+    result = await service.choose_authorization(session, app.state.cipher, scope, "3")
     await session.commit()
     return result
 

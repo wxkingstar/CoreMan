@@ -39,13 +39,19 @@ async def test_connection_shows_choices_without_contacting_oauth(
     monkeypatch.setattr(service, "_http", http)
     assert await reject_unavailable(db_session, build_ctx(db_engine, task), intake)
     row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
-    assert row.status == "selecting" and row.pending_enc is None
+    assert row.status == "selecting" and row.pending_enc is not None
     assert row.selection_chat_id == intake.chat_id
+    state = await service.authorization_status(
+        db_session,
+        app.state.cipher,
+        await policy.verified_origin_scope(db_session, task, str(user.id)),
+    )
+    assert state["status"] == "selecting"
     http.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "choice,expected", [("1", "messages_readonly"), ("2", "all_except_send"), ("3", "all")]
+    "choice,expected", [("1", "all"), ("2", "all_except_send"), ("3", "messages_readonly")]
 )
 async def test_chosen_level_controls_requested_scopes(
     db_session, app, monkeypatch, choice, expected
@@ -71,8 +77,8 @@ async def test_chosen_level_controls_requested_scopes(
     row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
     assert row.authorization_level == expected and result["status"] == "pending"
     requested = set(http.call_args.kwargs["data"]["scope"].split())
-    assert ("docx:document:write_only" in requested) == (choice != "1")
-    assert ("im:message.send_as_user" in requested) == (choice == "3")
+    assert ("docx:document:write_only" in requested) == (choice != "3")
+    assert ("im:message.send_as_user" in requested) == (choice == "1")
 
 
 async def test_missing_send_permission_never_looks_like_complete_third_tier(
@@ -85,7 +91,7 @@ async def test_missing_send_permission_never_looks_like_complete_third_tier(
         permissions, "app_user_scopes", AsyncMock(return_value=list(permissions.MESSAGE_SCOPES))
     )
     with pytest.raises(service.PersonalError, match="app_send_permission_missing"):
-        await service.choose_authorization(db_session, app.state.cipher, scope, "3")
+        await service.choose_authorization(db_session, app.state.cipher, scope, "1")
 
 
 async def test_historical_broad_grant_cannot_expand_readonly_selection(

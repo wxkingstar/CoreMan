@@ -64,7 +64,7 @@ async def test_revoke_serializes_with_authorize_or_refresh(
                 )
             else:
                 await service.begin_selection(session, app.state.cipher, scope)
-                result = await service.choose_authorization(session, app.state.cipher, scope, "1")
+                result = await service.choose_authorization(session, app.state.cipher, scope, "3")
             await session.commit()
             return result
 

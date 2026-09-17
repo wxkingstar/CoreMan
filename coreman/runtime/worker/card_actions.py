@@ -85,6 +85,15 @@ class CardActionHandler:
                     )
                     await session.commit()
                     return
+            if bot.platform == "feishu" and task_id.startswith("personal:"):
+                from coreman.runtime.worker.personal_cards import handle_selection
+
+                result = await handle_selection(session, ctx, bot, inbound, action)
+                await tasks.finish(
+                    session, ctx.task.id, status="succeeded", result={"card": result}
+                )
+                await session.commit()
+                return
             parsed = parse_task_id(task_id)
             if parsed is None:
                 # 不是我们发的卡（别的应用、或者编码换过代）：不猜，也不回卡片。

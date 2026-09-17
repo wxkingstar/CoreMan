@@ -192,11 +192,7 @@ def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
 
 
 SELECTION_PROMPT = (
-    """请选择本次飞书授权范围，回复 1、2 或 3：
-1. 消息只读：搜索、读取你有权限访问的私聊和群聊消息。
-2. 全部权限，不含发送消息：申请应用已开通的用户权限，包含修改、删除和管理操作，但不允许发送消息。
-3. 全部权限，包含发送消息：在第二档基础上，允许以你的身份发送消息。
-选择后才会生成授权链接；实际可用操作以系统已接入的工具为准。个人授权仅限本人与机器人的私聊使用。"""
+    "请选择卡片中的授权范围，点击后生成授权链接。个人授权仅限本人与机器人的私聊使用。"
     + "\n"
     + RETENTION_NOTICE
 )
@@ -218,13 +214,19 @@ async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -
     row.remote_revoked = remote_revoked
     _clear(row, "selecting")
     row.authorization_level = "messages_readonly"
+    row.pending_enc = cipher.encrypt(str(scope.task.id), _aad(row, "pending_enc"))
     row.selection_chat_id = scope.event.chat_id
     row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=10)
     return {"status": "selecting", "prompt": SELECTION_PROMPT, "remote_revoked": remote_revoked}
 
 
 async def choose_authorization(
-    session: AsyncSession, cipher: Cipher, scope: Scope, choice: str
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    choice: str,
+    *,
+    selection_task_id: int | None = None,
 ) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
     if (
@@ -234,7 +236,12 @@ async def choose_authorization(
         or row.pending_expires_at <= datetime.now(UTC)
     ):
         raise PersonalError("selection_required")
-    levels = {"1": "messages_readonly", "2": "all_except_send", "3": "all"}
+    if selection_task_id is not None and (
+        not row.pending_enc
+        or cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")) != str(selection_task_id)
+    ):
+        raise PersonalError("selection_required")
+    levels = {"1": "all", "2": "all_except_send", "3": "messages_readonly"}
     if choice not in levels:
         raise PersonalError("selection_required")
     level = levels[choice]
@@ -316,7 +323,7 @@ async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict
     return {
         "retention_notice": RETENTION_NOTICE,
         "status": "selection_required",
-        "prompt": "请发送连接我的飞书，再由本人回复 1、2 或 3 选择授权范围。",
+        "prompt": "请发送连接飞书，再由本人点击授权卡片选择范围。",
     }
 
 
@@ -324,7 +331,7 @@ async def authorization_status(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
-    if not row.pending_enc:
+    if row.status != "pending" or not row.pending_enc:
         return _state(row, cipher)
     now = datetime.now(UTC)
     if not row.pending_expires_at or row.pending_expires_at <= now:

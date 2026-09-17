@@ -83,6 +83,11 @@ async def task_scope(session: AsyncSession, task_id: int, actor: str) -> Scope:
         or task.payload.get("collaboration_phase")
     ):
         raise ValueError("private_human_task_required")
+    return await verified_origin_scope(session, task, actor)
+
+
+async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -> Scope:
+    """Validate a durable private origin. Callers must separately validate task lifecycle."""
     event = await session.get(InboundEvent, task.inbound_event_id)
     if (
         event is None
