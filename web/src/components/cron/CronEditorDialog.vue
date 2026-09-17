@@ -45,7 +45,10 @@ function payload(): CronIn {
   return { ...form, target_users: [...form.target_users], target_chats: [...form.target_chats], notify_emails: split(emails.value),
     expires_at: expires.value?.toISOString() ?? null,
     run_at: form.schedule_kind === 'once' ? runAt.value?.toISOString() ?? null : null,
-    timezone: form.schedule_kind === 'once' ? localZone : form.timezone }
+    timezone: onceTimeChanged() ? localZone : form.timezone }
+}
+function onceTimeChanged(): boolean {
+  return form.schedule_kind === 'once' && (!editing.value || editing.value.schedule_kind !== 'once' || runAt.value?.getTime() !== new Date(editing.value.run_at || 0).getTime())
 }
 async function open(row?: CronOut) {
   editing.value = row ?? null
@@ -67,7 +70,7 @@ async function save() {
   if (saving.value) return
   if (!form.name.trim() || !form.bot_id || !form.prompt.trim()) { ElMessage.warning(t('cron.required')); return }
   if (expires.value && expires.value.getTime() <= Date.now() && form.enabled) { ElMessage.warning(t('cron.expired')); return }
-  const onceChanged = form.schedule_kind === 'once' && (!editing.value || editing.value.schedule_kind !== 'once' || runAt.value?.toISOString() !== new Date(editing.value.run_at || 0).toISOString())
+  const onceChanged = onceTimeChanged()
   if (form.schedule_kind === 'once' && (!runAt.value || (onceChanged && runAt.value.getTime() <= Date.now()))) { ElMessage.warning(t('cronOnce.future')); return }
   saving.value = true
   try {
