@@ -16,6 +16,15 @@ def test_classify() -> None:
         assert classify_command(w) is None
 
 
+def test_classify_accepts_slash_command_text() -> None:
+    # 飞书斜杠指令发送的是「/指令名」纯文本（选中后末尾常带空格）。
+    assert classify_command("/new ") == "reset"
+    assert classify_command("/STOP") == "stop"
+    assert classify_command("/help") == "help"
+    for w in ("/", "//new", "/help 我写代码", "/deploy"):
+        assert classify_command(w) is None
+
+
 def test_cancel_words() -> None:
     from coreman.core.chat.commands import is_cancel_word
 

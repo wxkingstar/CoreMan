@@ -22,6 +22,9 @@ def normalize(text: str) -> str:
 
 def classify_command(text: str) -> Command | None:
     s = normalize(text)
+    # 飞书斜杠指令把所选指令作为普通文本「/new」发来：去掉一个前导斜杠后仍按整句匹配。
+    if s.startswith("/"):
+        s = s[1:].strip()
     if not s:
         return None
     if s in RESET_WORDS:
