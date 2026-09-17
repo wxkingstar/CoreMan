@@ -59,3 +59,24 @@ Result: Ruff passed; mypy reported no issues in the three source modules.
 - Confirmed unavailable content is a context note rather than fake source text, and cross-chat text never reaches the relay request.
 - Confirmed the session-reset case uses only durable delivery/stream rows.
 - No external configuration, deployment, credential mutation, or live Feishu action was performed. Live post-reset quote verification remains with the controller after deployment.
+
+## Review fixes
+
+- Removed the overly strict sender-ownership check from official message reads. A parent written by a human or another bot in the same chat is valid context; the current bot's authenticated read plus exact response `message_id` and `chat_id` remain the scope boundary.
+- A present but malformed `parent_id` (including empty string or non-string zero) now produces the explicit unavailable context marker without making an HTTP request. The normal gateway shape with absent/`None` parent still means no quote and performs no enrichment.
+
+Review RED command:
+
+```text
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:coreman_test_only@127.0.0.1:15440/coreman_test ../../.venv/bin/pytest -q tests/integration/test_feishu_quote.py -k 'accepts_any_sender or malformed_parent'
+```
+
+RED result: `4 failed`; same-chat human/other-bot content was rejected, while empty/zero parent references were silently ignored.
+
+Review GREEN command:
+
+```text
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:coreman_test_only@127.0.0.1:15440/coreman_test ../../.venv/bin/pytest -q tests/integration/test_feishu_quote.py
+```
+
+GREEN result: `8 passed in 4.60s`. Focused Ruff and mypy checks also passed for the amended helper/content modules and tests.

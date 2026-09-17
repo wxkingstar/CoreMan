@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bots.secrets import CREDENTIALS_AAD
@@ -26,7 +27,7 @@ async def _feishu_bot(session: AsyncSession):  # type: ignore[no-untyped-def]
     return bot
 
 
-async def _set_parent(session: AsyncSession, task: Task, parent_id: str, chat_id: str) -> None:
+async def _set_parent(session: AsyncSession, task: Task, parent_id: object, chat_id: str) -> None:
     event = await session.get(InboundEvent, task.inbound_event_id)
     assert event is not None
     event.reply_context = {
@@ -143,8 +144,16 @@ async def test_deleted_parent_gets_explicit_unavailable_quote(
     assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n继续"
 
 
-async def test_official_parent_read_is_identity_checked_and_bounded(
-    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch
+@pytest.mark.parametrize(
+    ("sender_type", "sender_id"),
+    [("user", "ou_human"), ("app", "cli_other_bot")],
+)
+async def test_official_parent_read_accepts_any_sender_in_the_same_chat_and_is_bounded(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    monkeypatch,
+    sender_type: str,
+    sender_id: str,
 ) -> None:
     bot = await _feishu_bot(db_session)
     task = await chat_task(db_session, bot, "概括", chat_id="oc_same")
@@ -160,7 +169,7 @@ async def test_official_parent_read_is_identity_checked_and_bounded(
                         "message_id": "om_api",
                         "chat_id": "oc_same",
                         "msg_type": "interactive",
-                        "sender": {"sender_type": "app", "id": "cli_quote"},
+                        "sender": {"sender_type": sender_type, "id": sender_id},
                         "body": {
                             "content": json.dumps(
                                 {
@@ -184,6 +193,26 @@ async def test_official_parent_read_is_identity_checked_and_bounded(
     content = relay.requests[0]["messages"][1]["content"]
     assert calls == [("GET", "/open-apis/im/v1/messages/om_api")]
     assert content == msg("quote_text_prefix", quoted="甲" * 12_000, text="概括")
+
+
+@pytest.mark.parametrize("parent_id", ["", 0])
+async def test_present_malformed_parent_is_explicitly_unavailable_without_http(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    monkeypatch,
+    parent_id: object,
+) -> None:
+    bot = await _feishu_bot(db_session)
+    task = await chat_task(db_session, bot, "继续", chat_id="oc_same")
+    await _set_parent(db_session, task, parent_id, "oc_same")
+
+    async def no_http(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("malformed parent must not call Feishu")
+
+    monkeypatch.setattr(FeishuClient, "call", no_http)
+    relay = FakeRelay("normal")
+    await run(db_engine, task, relay)
+    assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n继续"
 
 
 async def test_cross_chat_parent_is_refused_even_when_api_returns_text(

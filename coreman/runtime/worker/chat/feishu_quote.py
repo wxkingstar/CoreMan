@@ -59,22 +59,13 @@ async def _persisted_text(
     return _bounded(markdown) if isinstance(markdown, str) else None
 
 
-def _api_text(
-    body: dict[str, Any], *, app_id: str, chat_id: str, parent_id: str
-) -> str | None:
+def _api_text(body: dict[str, Any], *, chat_id: str, parent_id: str) -> str | None:
     data = body.get("data")
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
         return None
     item = items[0]
-    sender = item.get("sender")
-    if (
-        item.get("message_id") != parent_id
-        or item.get("chat_id") != chat_id
-        or not isinstance(sender, dict)
-        or sender.get("sender_type") not in {"app", "bot"}
-        or sender.get("id") != app_id
-    ):
+    if item.get("message_id") != parent_id or item.get("chat_id") != chat_id:
         return None
     raw = (item.get("body") or {}).get("content")
     if not isinstance(raw, str) or len(raw) > 256_000:
@@ -135,7 +126,8 @@ async def enrich(
 ) -> tuple[list[dict[str, Any]], str]:
     """返回补过引用的 parts/text；失败显式标注，但不伪造父消息原文。"""
     if not isinstance(parent_id, str) or not _MESSAGE_ID.fullmatch(parent_id) or not chat_id:
-        return parts, text
+        note_text = f"{UNAVAILABLE}\n\n{text}" if text.strip() else UNAVAILABLE
+        return [{"type": "text", "text": UNAVAILABLE}, *parts], note_text
     if any(part.get("type") == "quote" for part in parts):
         return parts, text
     quoted = await _persisted_text(session, bot=bot, chat_id=chat_id, parent_id=parent_id)
@@ -149,12 +141,7 @@ async def enrich(
                 credentials.get("app_id", ""), credentials.get("app_secret", "")
             )
             response = await client.call("GET", f"/open-apis/im/v1/messages/{parent_id}")
-            quoted = _api_text(
-                response,
-                app_id=credentials.get("app_id", ""),
-                chat_id=chat_id,
-                parent_id=parent_id,
-            )
+            quoted = _api_text(response, chat_id=chat_id, parent_id=parent_id)
         except Exception:
             # 解密、凭证、权限、删除、超时和畸形响应都统一显式降级；绝不反射上游错误。
             quoted = None
