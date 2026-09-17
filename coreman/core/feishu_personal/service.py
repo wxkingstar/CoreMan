@@ -62,8 +62,8 @@ def save_tokens(
 ) -> None:
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise PersonalError("authorization_failed")
-    if row.status != "connected":
-        row.context_epoch = uuid.uuid4()
+    # The explicit selection/link issuance already started a new generation.
+    # Completing verified OAuth (or refreshing) must keep this attempt usable.
     row.token_enc = cipher.encrypt(
         jsonlib.dumps({k: data[k] for k in ("access_token", "refresh_token") if data.get(k)}),
         _aad(row, "token_enc"),
@@ -276,6 +276,7 @@ async def _start_authorization(
         or parsed.username
     ):
         raise PersonalError("authorization_unavailable")
+    row.context_epoch = uuid.uuid4()
     row.status = "pending"
     row.token_enc = None
     row.scopes = []

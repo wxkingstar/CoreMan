@@ -77,12 +77,38 @@ def value(response):
     return json.loads(response.json()["result"]["content"][0]["text"])
 
 
-def headers(app, task, user):
+async def headers(app, task, user):
+    import uuid
+
+    from coreman.core.chat import sessions
     from coreman.core.feishu_personal.policy import issue_capability
 
+    epoch, sid = uuid.uuid4(), uuid.uuid4()
+    async with app.state.session_factory() as session:
+        try:
+            scope = await policy.task_scope(session, task.id, str(user.id))
+            info = await sessions.get_or_create(
+                session,
+                bot_id=task.bot_id,
+                session_key=task.session_key,
+                backend="claude",
+                ttl_hours=72,
+                speaker_user_id=user.id,
+            )
+            row, _ = await service._row(session, app.state.cipher, scope)
+            epoch, sid = row.context_epoch, info.relay_session_id
+            await session.commit()
+        except (ValueError, service.PersonalError):
+            await session.rollback()
     return {
         "Authorization": "Bearer "
-        + issue_capability(app.state.cipher, task_id=task.id, user_id=str(user.id))
+        + issue_capability(
+            app.state.cipher,
+            task_id=task.id,
+            user_id=str(user.id),
+            context_epoch=epoch,
+            base_session_id=sid,
+        )
     }
 
 
@@ -106,7 +132,9 @@ async def test_mcp_cannot_start_authorization_without_human_selection(client, ap
     _, user, task = await setup(db_session, app)
     with respx.mock as mock:
         out = value(
-            await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
+            await client.post(
+                URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
+            )
         )
         assert out["status"] == "selection_required"
         assert not mock.calls
@@ -159,7 +187,7 @@ async def test_non_private_feishu_provenance_rejected_before_any_http(
     bot, user, task = await setup(db_session, app, chat_type=chat_type, platform=platform)
     with respx.mock:
         response = await client.post(
-            URL, headers=headers(app, task, user), json=rpc("feishu_authorize")
+            URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
         )
     assert response.status_code == 403
 
@@ -180,11 +208,11 @@ async def test_non_private_feishu_provenance_rejected_before_any_http(
 )
 async def test_capability_cannot_bypass_origin_or_lifecycle(client, app, db_session, mutate):
     bot, user, task = await setup(db_session, app)
-    auth = headers(app, task, user)
+    auth = await headers(app, task, user)
     event = await db_session.get(InboundEvent, task.inbound_event_id)
     if mutate == "foreign_actor":
         fake = User(id=uuid.uuid4())
-        auth = headers(app, task, fake)
+        auth = await headers(app, task, fake)
     elif mutate == "cancelled":
         task.cancel_requested_at = datetime.now(UTC)
     elif mutate == "finished":
@@ -223,7 +251,9 @@ async def test_device_authorization_is_durable_encrypted_and_read_only(client, a
         )
         await start_selected(db_session, app, task, user)
         out = value(
-            await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
+            await client.post(
+                URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
+            )
         )
     assert out["status"] == "pending" and out["authorization_url"].startswith(
         "https://accounts.feishu.cn/"
@@ -276,7 +306,7 @@ async def test_authorization_cannot_be_completed_by_different_identity(
         )
         out = value(
             await client.post(
-                URL, headers=headers(app, task, user), json=rpc("feishu_authorization_status")
+                URL, headers=await headers(app, task, user), json=rpc("feishu_authorization_status")
             )
         )
     assert out["error"] == "identity_mismatch"
@@ -318,7 +348,7 @@ async def test_search_returns_real_content_without_exposing_token(client, app, d
         out = value(
             await client.post(
                 URL,
-                headers=headers(app, task, user),
+                headers=await headers(app, task, user),
                 json=rpc("feishu_search_messages", {"query": "budget", "chat_type": "p2p"}),
             )
         )
@@ -356,7 +386,7 @@ async def test_refresh_rotates_durable_token_and_revocation_blocks_reads(client,
         out = value(
             await client.post(
                 URL,
-                headers=headers(app, task, user),
+                headers=await headers(app, task, user),
                 json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
             )
         )
@@ -366,7 +396,7 @@ async def test_refresh_rotates_durable_token_and_revocation_blocks_reads(client,
         revoke = mock.post("https://accounts.feishu.cn/oauth/v1/revoke").respond(200)
         out = value(
             await client.post(
-                URL, headers=headers(app, task, user), json=rpc("feishu_revoke_authorization")
+                URL, headers=await headers(app, task, user), json=rpc("feishu_revoke_authorization")
             )
         )
     assert out == {"status": "revoked", "remote_revoked": True}
@@ -375,7 +405,7 @@ async def test_refresh_rotates_durable_token_and_revocation_blocks_reads(client,
         out = value(
             await client.post(
                 URL,
-                headers=headers(app, task, user),
+                headers=await headers(app, task, user),
                 json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
             )
         )
@@ -396,7 +426,9 @@ async def test_refresh_rotates_durable_token_and_revocation_blocks_reads(client,
 async def test_no_arbitrary_proxy_or_writes(client, app, db_session, name, args):
     bot, user, task = await setup(db_session, app)
     with respx.mock:
-        out = value(await client.post(URL, headers=headers(app, task, user), json=rpc(name, args)))
+        out = value(
+            await client.post(URL, headers=await headers(app, task, user), json=rpc(name, args))
+        )
     assert out["error"] == "invalid_tool_or_arguments"
 
 
@@ -411,7 +443,7 @@ async def test_app_rotation_requires_new_authorization(client, app, db_session):
         out = value(
             await client.post(
                 URL,
-                headers=headers(app, task, user),
+                headers=await headers(app, task, user),
                 json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
             )
         )
@@ -426,7 +458,7 @@ async def test_task_destination_must_match_inbound_private_chat(client, app, db_
     await db_session.commit()
     with respx.mock:
         response = await client.post(
-            URL, headers=headers(app, task, user), json=rpc("feishu_authorize")
+            URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
         )
     assert response.status_code == 403
 
@@ -452,7 +484,9 @@ async def test_device_poll_interval_is_enforced(client, app, db_session):
         for _ in range(2):
             out = value(
                 await client.post(
-                    URL, headers=headers(app, task, user), json=rpc("feishu_authorization_status")
+                    URL,
+                    headers=await headers(app, task, user),
+                    json=rpc("feishu_authorization_status"),
                 )
             )
             assert out["status"] == "pending"
@@ -471,7 +505,7 @@ async def test_refresh_rejection_clears_credentials(client, app, db_session):
         out = value(
             await client.post(
                 URL,
-                headers=headers(app, task, user),
+                headers=await headers(app, task, user),
                 json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
             )
         )
@@ -488,8 +522,8 @@ async def test_claude_mcp_metadata_does_not_become_tool_arguments(client, app, d
         "progressToken": 2,
         "actor": "must-not-override-owner",
     }
-    out = value(await client.post(URL, headers=headers(app, task, user), json=body))
+    out = value(await client.post(URL, headers=await headers(app, task, user), json=body))
     assert out["status"] == "revoked"
     body["params"]["_meta"] = "invalid"
-    response = await client.post(URL, headers=headers(app, task, user), json=body)
+    response = await client.post(URL, headers=await headers(app, task, user), json=body)
     assert response.json()["error"]["code"] == -32602

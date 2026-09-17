@@ -17,12 +17,14 @@ from tests.integration.worker_helpers import build_ctx
 async def test_agent_cannot_choose_or_start_authorization(client, app, db_session):
     _, user, task = await setup(db_session, app)
     result = value(
-        await client.post(URL, headers=headers(app, task, user), json=rpc("feishu_authorize"))
+        await client.post(URL, headers=await headers(app, task, user), json=rpc("feishu_authorize"))
     )
     assert result["status"] == "selection_required"
     result = value(
         await client.post(
-            URL, headers=headers(app, task, user), json=rpc("feishu_authorize", {"level": "all"})
+            URL,
+            headers=await headers(app, task, user),
+            json=rpc("feishu_authorize", {"level": "all"}),
         )
     )
     assert result["error"] == "invalid_tool_or_arguments"

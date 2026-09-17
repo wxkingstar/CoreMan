@@ -30,17 +30,38 @@ class Scope:
     app_id: str
 
 
-def issue_capability(cipher: Cipher, *, task_id: int, user_id: str) -> str:
+def issue_capability(
+    cipher: Cipher,
+    *,
+    task_id: int,
+    user_id: str,
+    context_epoch: uuid.UUID,
+    base_session_id: uuid.UUID,
+) -> str:
     return cipher.encrypt(
-        json.dumps({"task": task_id, "actor": user_id, "exp": time.time() + 1800}), AAD
+        json.dumps(
+            {
+                "task": task_id,
+                "actor": user_id,
+                "exp": time.time() + 1800,
+                "epoch": str(context_epoch),
+                "session": str(base_session_id),
+            }
+        ),
+        AAD,
     )
 
 
-def read_capability(cipher: Cipher, token: str) -> tuple[int, str]:
+def read_capability(cipher: Cipher, token: str) -> tuple[int, str, uuid.UUID, uuid.UUID]:
     data = json.loads(cipher.decrypt(token, AAD))
     if not isinstance(data, dict) or data["exp"] <= time.time():
         raise ValueError("expired_capability")
-    return int(data["task"]), str(uuid.UUID(data["actor"]))
+    return (
+        int(data["task"]),
+        str(uuid.UUID(data["actor"])),
+        uuid.UUID(data["epoch"]),
+        uuid.UUID(data["session"]),
+    )
 
 
 def app_credentials(cipher: Cipher, bot: Bot) -> tuple[str, str]:

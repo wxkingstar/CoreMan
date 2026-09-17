@@ -84,7 +84,7 @@ async def test_mcp_rejects_browser_and_tool_notifications(client, app, db_sessio
     from tests.api.test_feishu_personal import headers
 
     _, owner, task = await setup(db_session, app)
-    auth = headers(app, task, owner)
+    auth = await headers(app, task, owner)
     response = await client.post(
         MCP_URL, headers={**auth, "Origin": "https://evil.example"}, json={}
     )

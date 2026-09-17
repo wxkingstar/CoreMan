@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError
 from coreman.api.security import verify_csrf
-from coreman.core.db.models import Bot, FeishuPersonalGrant, User
+from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
 from coreman.core.feishu_personal import policy, service, tools
 
 router = APIRouter(tags=["feishu-personal"])
@@ -52,13 +52,31 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     if not auth.startswith("Bearer ") or len(auth) > 4096:
         raise ApiError(401, 401, "Invalid personal capability")
     try:
-        task_id, actor = policy.read_capability(request.app.state.cipher, auth[7:])
+        task_id, actor, epoch, base_session_id = policy.read_capability(
+            request.app.state.cipher, auth[7:]
+        )
     except (ValueError, KeyError, TypeError, OverflowError):
         raise ApiError(401, 401, "Invalid personal capability") from None
     try:
         scope = await policy.task_scope(session, task_id, actor)
     except (ValueError, KeyError, TypeError):
         raise ApiError(403, 403, "Verified private human task required") from None
+    # Session then grant is also the worker opening/mode-switch lock order. Hold
+    # both through dispatch/commit: reset or mode exit cannot acknowledge while
+    # an older personal operation is still using its capability.
+    base = await session.get(
+        ChatSession, (scope.bot.id, scope.task.session_key), with_for_update=True
+    )
+    if base is None or base.relay_session_id != base_session_id:
+        raise ApiError(403, 403, "Private conversation changed")
+    try:
+        grant, _ = await service._row(session, request.app.state.cipher, scope)
+        # Revalidate task cancellation after waiting for competing transactions.
+        await policy.task_scope(session, task_id, actor)
+    except (ValueError, service.PersonalError):
+        raise ApiError(403, 403, "Private authorization changed") from None
+    if grant.context_epoch != epoch or grant.assistant_mode != "personal":
+        raise ApiError(403, 403, "Private authorization changed")
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
@@ -105,9 +123,6 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     elif method in ("ping", "tools/list"):
         if params:
             return _error(rid, -32602, "Invalid params")
-        grant = await session.get(
-            FeishuPersonalGrant, (scope.bot.id, scope.user_id), populate_existing=True
-        )
         allow_send = bool(
             grant
             and grant.status == "connected"

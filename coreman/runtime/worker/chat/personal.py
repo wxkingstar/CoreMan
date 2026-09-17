@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
 from coreman.core.chat import sessions
-from coreman.core.db.models import ChatLog, ChatSession, FeishuPersonalGrant, RuntimeNode, Task
+from coreman.core.db.models import ChatSession, FeishuPersonalGrant, RuntimeNode, Task
 from coreman.core.feishu_personal import policy, service
 from coreman.core.prompting import sanitize_user_input
 from coreman.core.prompting.env_vars import build_env
@@ -122,12 +122,18 @@ async def reject_unavailable(session: AsyncSession, ctx: TaskContext, intake: In
             scope = await policy.task_scope(session, ctx.task.id, str(intake.speaker.user_id))
             if text == "飞书资料":
                 await validate(session, ctx, intake)
+            # Match opening/MCP lock order: chat session before grant.
+            base = await session.get(
+                ChatSession, (scope.bot.id, intake.session_key), with_for_update=True
+            )
             mode_row, _ = await service._row(session, ctx.cipher, scope)
             mode_row.assistant_mode = "ordinary" if text == "普通助手" else "personal"
             mode_row.context_epoch = uuid.uuid4()
-            base = await session.get(ChatSession, (scope.bot.id, intake.session_key))
             if base:
                 await session.delete(base)
+            await tasks.supersede(
+                session, scope.bot.id, intake.session_key, except_task_id=ctx.task.id
+            )
             switch_reply = (
                 "已切换到普通助手，不会读取个人飞书资料。"
                 if text == "普通助手"
@@ -230,6 +236,7 @@ async def configure(
     await validate(session, ctx, intake)
     scope = await policy.task_scope(session, ctx.task.id, str(intake.speaker.user_id))
     row, _ = await service._row(session, ctx.cipher, scope)
+    base_session_id = info.relay_session_id
     private_id = uuid.uuid5(
         info.relay_session_id,
         f"feishu-private:{scope.bot.id}:{scope.user_id}:{intake.chat_id}:{row.context_epoch}",
@@ -251,7 +258,11 @@ async def configure(
         ctx.public_base_url.rstrip("/") + "/api/runtime/feishu-personal/mcp"
     )
     env[policy.PREFIX + "TOKEN"] = policy.issue_capability(
-        ctx.cipher, task_id=ctx.task.id, user_id=str(intake.speaker.user_id)
+        ctx.cipher,
+        task_id=ctx.task.id,
+        user_id=str(intake.speaker.user_id),
+        context_epoch=row.context_epoch,
+        base_session_id=base_session_id,
     )
     now = datetime.now(UTC)
     guidance = (
@@ -269,41 +280,49 @@ async def configure(
     return info, PRIVATE_POLICY + guidance, env
 
 
+def transcript(
+    intake: Intake, info: sessions.SessionInfo, user_text: str, answer: str
+) -> dict[str, str]:
+    """Internal task-result record, committed with success before final delivery."""
+    return {
+        "user_id": str(intake.speaker.user_id),
+        "platform_user_id": intake.speaker.platform_user_id,
+        "chat_id": intake.chat_id,
+        "session_id": str(info.relay_session_id),
+        "user_text": sanitize_user_input(user_text)[:6000],
+        "answer": sanitize_user_input(answer)[:6000],
+    }
+
+
 async def history(
     session: AsyncSession, ctx: TaskContext, intake: Intake, info: sessions.SessionInfo
 ) -> list[dict[str, str]]:
-    """Replay only completed private text for this verified actor and generation."""
-    # The previous completed turn may still be in this worker's audit write queue.
-    await ctx.chat_logs.drain(5)
+    """Replay transactionally durable private turns, independently of audit writers."""
     scope = await policy.task_scope(session, ctx.task.id, str(intake.speaker.user_id))
+    record = Task.result["private_transcript"]
     rows = (
         await session.scalars(
-            select(ChatLog)
-            .join(Task, Task.id == ChatLog.task_id)
+            select(record)
             .where(
-                ChatLog.bot_id == scope.bot.id,
-                ChatLog.user_id == scope.user_id,
-                ChatLog.platform_user_id == intake.speaker.platform_user_id,
-                ChatLog.platform == "feishu",
-                ChatLog.chat_type == "single",
-                ChatLog.chat_id == intake.chat_id,
-                ChatLog.session_key == intake.session_key,
-                ChatLog.relay_session_id == info.relay_session_id,
-                ChatLog.status == "success",
-                ChatLog.response_at.is_not(None),
-                Task.status == "succeeded",
+                Task.bot_id == scope.bot.id,
+                Task.session_key == intake.session_key,
                 Task.kind == "chat",
+                Task.status == "succeeded",
                 Task.id < ctx.task.id,
+                record["user_id"].astext == str(scope.user_id),
+                record["platform_user_id"].astext == intake.speaker.platform_user_id,
+                record["chat_id"].astext == intake.chat_id,
+                record["session_id"].astext == str(info.relay_session_id),
             )
-            .order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
+            .order_by(Task.id.desc())
             .limit(8)
         )
     ).all()
     pairs: list[list[dict[str, str]]] = []
     remaining = 24000
     for row in rows:
-        user = sanitize_user_input(row.message_content or "")[:6000]
-        answer = sanitize_user_input(row.response_content or "")[:6000]
+        user = sanitize_user_input(row.get("user_text") or "")[:6000]
+        answer = sanitize_user_input(row.get("answer") or "")[:6000]
         if not user or not answer or len(user) + len(answer) > remaining:
             continue
         remaining -= len(user) + len(answer)

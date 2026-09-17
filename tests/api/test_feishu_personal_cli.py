@@ -67,7 +67,9 @@ async def test_real_claude_can_retrieve_human_selected_authorization(app, db_ses
         env = {
             **os.environ,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-            "COREMAN_PERSONAL_PROBE_CAPABILITY": headers(app, task, user)["Authorization"][7:],
+            "COREMAN_PERSONAL_PROBE_CAPABILITY": await headers(app, task, user)["Authorization"][
+                7:
+            ],
         }
         env.pop("CLAUDECODE", None)
         proc = await asyncio.create_subprocess_exec(

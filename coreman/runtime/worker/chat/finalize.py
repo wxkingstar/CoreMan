@@ -186,10 +186,26 @@ class FinalizeStage(ChatStageBase):
             elif current and current.payload.get("collaboration_handoff") and not out.cancelled:
                 # Registration is durable; EOF before the next poll must not undo accepted help.
                 verdict = self._classify(ctx, pre, replace(out, collaboration_handoff=True))
+            private_result = None
+            if (
+                verdict.log_status == "success"
+                and "COREMAN_FEISHU_PERSONAL_TOKEN" in pre.request.env_vars
+            ):
+                from coreman.runtime.worker.chat.personal import transcript
+
+                private_result = {
+                    "private_transcript": transcript(
+                        intake,
+                        pre.info,
+                        pre.content.text if pre.content else intake.text,
+                        verdict.final_text,
+                    )
+                }
             owned = await tasks.finish(
                 session,
                 ctx.task.id,
                 status=verdict.task_status,
+                result=private_result,
                 error_code=verdict.error_code,
                 error_message=verdict.error_message,
                 only_active=True,
