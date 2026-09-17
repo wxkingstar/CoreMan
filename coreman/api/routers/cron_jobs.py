@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -18,7 +19,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import record_audit
 from coreman.core.cron.access import job_config, require_operator
-from coreman.core.cron.delivery import enqueue_result
+from coreman.core.cron.delivery import delivery_summary, enqueue_result, private_destination
 from coreman.core.cron.precheck import PrecheckError, run_precheck, validate_script
 from coreman.core.cron.schedule import next_run
 from coreman.core.db.models import (
@@ -29,7 +30,6 @@ from coreman.core.db.models import (
     InboundEvent,
     OutboxItem,
     User,
-    UserIdentity,
 )
 from coreman.core.notification_channels import validate_wecom_webhook
 from coreman.core.timeutils import aware_utc
@@ -43,7 +43,9 @@ class CronIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bot_id: uuid.UUID
     name: str = Field(min_length=1, max_length=100)
-    cron_expression: str = Field(max_length=128)
+    cron_expression: str = Field(default="", max_length=128)
+    schedule_kind: Literal["recurring", "once"] = "recurring"
+    run_at: datetime | None = None
     timezone: str = Field(default="Asia/Shanghai", max_length=100)
     prompt: str = Field(min_length=1, max_length=32000)
     system_prompt: str | None = Field(default=None, max_length=32000)
@@ -62,6 +64,13 @@ class CronIn(BaseModel):
     @classmethod
     def webhook(cls, value: str | None) -> str | None:
         return validate_wecom_webhook(value) if value else value
+
+    @field_validator("run_at")
+    @classmethod
+    def once_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("一次性执行时间必须包含时区偏移")
+        return value.astimezone(UTC) if value else None
 
     @field_validator("expires_at")
     @classmethod
@@ -84,6 +93,9 @@ def _out(row: CronJob, actor: User) -> dict[str, Any]:
         "bot_id": str(row.bot_id),
         "cron_expression": row.cron_expression,
         "timezone": row.timezone,
+        "schedule_kind": row.schedule_kind,
+        "run_at": row.run_at,
+        "consumed_at": row.consumed_at,
         "enabled": row.enabled,
         "expires_at": row.expires_at,
         "created_by": str(row.created_by),
@@ -114,42 +126,67 @@ async def _load(session: AsyncSession, job_id: uuid.UUID, actor: User) -> CronJo
     return row
 
 
-async def _validate(session: AsyncSession, body: CronIn, now: datetime) -> datetime:
+async def _validate(
+    session: AsyncSession,
+    body: CronIn,
+    now: datetime,
+    *,
+    creator_id: uuid.UUID,
+    old: CronJob | None = None,
+) -> datetime | None:
     try:
-        upcoming = next_run(body.cron_expression, body.timezone, now)
+        if body.schedule_kind == "once":
+            ZoneInfo(body.timezone)
+            if body.run_at is None:
+                raise ValueError("请选择包含时区的一次性执行时间")
+            unchanged = (
+                old is not None and old.schedule_kind == "once" and old.run_at == body.run_at
+            )
+            if (
+                not unchanged or (old is not None and body.enabled and not old.enabled)
+            ) and body.run_at <= now:
+                raise ValueError("一次性执行时间必须在未来")
+            if (
+                unchanged
+                and old is not None
+                and old.consumed_at is not None
+                and body.enabled
+                and not old.enabled
+            ):
+                raise ValueError("此任务已执行；重新安排需明确选择新的未来时间")
+            if body.expires_at is not None and body.expires_at <= body.run_at:
+                raise ValueError("到期时间必须晚于一次性执行时间")
+            upcoming = body.run_at
+        else:
+            if body.run_at is not None:
+                raise ValueError("周期任务不能设置一次性执行时间")
+            upcoming = next_run(body.cron_expression, body.timezone, now)
         if body.precheck_script:
             validate_script(body.precheck_script)
-    except ValueError as exc:
+    except (ValueError, ZoneInfoNotFoundError) as exc:
         raise ApiError(422, 422, str(exc)) from exc
     if body.enabled and body.expires_at is not None and body.expires_at <= now:
         raise ApiError(422, 422, "已过期的任务不能启用")
     if any("@" not in email or any(c in email for c in "<>,; ") for email in body.notify_emails):
         raise ApiError(422, 422, "邮件地址无效")
-    if body.target_users:
-        valid = set(
-            await session.scalars(
-                select(User.id).where(
-                    User.id.in_(body.target_users),
-                    User.status == "active",
-                    User.source != "bootstrap",
-                )
-            )
-        )
-        if valid != set(body.target_users):
-            raise ApiError(422, 422, "接收人不存在或已停用")
+    if body.enabled:
         bot = await session.get(Bot, body.bot_id)
         if bot is None:
             raise ApiError(404, 404, "AI 员工不存在")
-        bound = set(
-            await session.scalars(
-                select(UserIdentity.user_id).where(
-                    UserIdentity.user_id.in_(body.target_users),
-                    UserIdentity.platform == bot.platform,
-                )
-            )
-        )
-        if bound != set(body.target_users):
-            raise ApiError(422, 422, "接收人尚未绑定该 AI 员工所属平台的身份")
+        recipients = body.target_users
+        if not (recipients or body.target_chats or body.notify_emails or body.notify_webhook):
+            recipients = [creator_id]
+        messages = {
+            "recipient_disabled": "接收人不存在或已停用，请更换接收人或停用计划",
+            "recipient_unbound": "接收人尚未绑定该 AI 员工所属平台的身份，请先完成绑定",
+            "no_private_chat_or_unambiguous_notification_app": (
+                f"接收人暂不可达：请先私聊当前机器人「{bot.name}」发送一句话，再保存计划"
+            ),
+        }
+        for uid in dict.fromkeys(recipients):
+            _, _, _, error = await private_destination(session, bot, uid)
+            if error:
+                raise ApiError(422, 422, messages[error])
     return upcoming
 
 
@@ -249,10 +286,12 @@ async def _audit(
 @router.get("/notification-chats")
 async def notification_chats(
     bot_id: uuid.UUID,
+    request: Request,
+    details: bool = False,
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await _bot(session, bot_id, actor)
+    bot = await _bot(session, bot_id, actor)
     chats = (
         await session.scalars(
             select(InboundEvent.chat_id)
@@ -265,6 +304,13 @@ async def notification_chats(
             .limit(200)
         )
     ).all()
+    if details:
+        from coreman.core.cron.chats import known_chat_options
+
+        return {
+            "code": 0,
+            "data": await known_chat_options(bot, list(chats), request.app.state.cipher),
+        }
     return {"code": 0, "data": chats}
 
 
@@ -292,7 +338,44 @@ async def list_jobs(
     if bot_id is not None:
         stmt = stmt.where(CronJob.bot_id == bot_id)
     data = await paginate(session, stmt, page)
-    data["items"] = [_out(row, actor) for row in data["items"]]
+    rows = data["items"]
+    # PostgreSQL DISTINCT ON gives one latest run per job in a bounded page, then one outbox batch.
+    runs = (
+        (
+            await session.scalars(
+                select(CronRun)
+                .where(CronRun.cron_job_id.in_([r.id for r in rows]))
+                .distinct(CronRun.cron_job_id)
+                .order_by(CronRun.cron_job_id, CronRun.id.desc())
+            )
+        ).all()
+        if rows
+        else []
+    )
+    latest = {r.cron_job_id: r for r in runs}
+    ids = {int(i) for r in runs for i in r.delivery.get("outbox_ids", [])}
+    statuses: dict[int, str] = (
+        {
+            item_id: status
+            for item_id, status in (
+                await session.execute(
+                    select(OutboxItem.id, OutboxItem.status).where(OutboxItem.id.in_(ids))
+                )
+            ).all()
+        }
+        if ids
+        else {}
+    )
+    data["items"] = [
+        {
+            **_out(row, actor),
+            "delivery_status": delivery_summary(
+                latest[row.id].delivery if row.id in latest else None, statuses
+            ),
+            "latest_run_id": latest[row.id].id if row.id in latest else None,
+        }
+        for row in rows
+    ]
     return {"code": 0, "data": data}
 
 
@@ -305,7 +388,7 @@ async def create_job(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     await _bot(session, body.bot_id, actor)
-    upcoming = await _validate(session, body, datetime.now(UTC))
+    upcoming = await _validate(session, body, datetime.now(UTC), creator_id=actor.id)
     values = _values(body, request)
     row = CronJob(**values, created_by=actor.id, next_run_at=upcoming)
     session.add(row)
@@ -333,13 +416,23 @@ async def update_job(
         raise ApiError(409, 409, "任务已等待立即运行，请待本次入队后再修改")
     if body.bot_id != row.bot_id:
         raise ApiError(422, 422, "不能更换任务机器人")
-    upcoming = await _validate(session, body, datetime.now(UTC))
-    if (body.cron_expression, body.timezone, body.enabled) != (
+    schedule_changed = (body.schedule_kind, body.run_at, body.cron_expression, body.timezone) != (
+        row.schedule_kind,
+        row.run_at,
         row.cron_expression,
         row.timezone,
-        row.enabled,
+    )
+    if schedule_changed and row.running_task_id is not None:
+        raise ApiError(409, 409, "执行中不能重新安排时间，请等待本次结束")
+    upcoming = await _validate(session, body, datetime.now(UTC), creator_id=row.created_by, old=row)
+    rearm_once = body.schedule_kind == "once" and (
+        row.schedule_kind != "once" or body.run_at != row.run_at
+    )
+    if rearm_once or (
+        body.schedule_kind == "recurring" and (schedule_changed or body.enabled != row.enabled)
     ):
         row.next_run_at = upcoming
+        row.consumed_at = None
     for key, value in _values(body, request, row).items():
         setattr(row, key, value)
     if not row.enabled:
@@ -363,6 +456,8 @@ async def force_job(
     row = await _load(session, job_id, actor)
     require_if_match(request, row.version)
     now = datetime.now(UTC)
+    if row.schedule_kind == "once" and row.consumed_at is not None:
+        raise ApiError(409, 409, "一次性任务已消费；请明确选择新的未来时间重新安排")
     if not row.enabled or (row.expires_at and row.expires_at <= now):
         raise ApiError(409, 409, "任务已停用或过期")
     if row.running_task_id or row.force_run_at:

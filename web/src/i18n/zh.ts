@@ -122,6 +122,8 @@ export default {
   skill: {disabledHint: "来源同步的技能默认禁用。请先配置授权方式和运行环境，并启用后再安装。", configureEnable: "配置并启用", emptyCatalog: "暂无已启用的技能，请联系技能管理员在技能目录中配置并启用。", "packageVersion": "安装包版本", "security": "授权方式", "public": "直接安装", "internal": "需审核", "remove": "卸载 / 撤回", "removeHint": "停止后续 CoreMan 请求注入此技能的凭据并撤回待审申请。运行时代码、MCP 文件及其中的静态凭据保留；运行中的操作可能继续。外部账号须单独撤权。确认卸载？", "installHint": "提交后由运行时执行安装，刷新查看状态。内部技能须经审核，批准范围以审核结果为准。", "available": "可安装技能", "configureInstall": "配置并安装", "databases": "数据库范围", "dataSource": "数据源", "policy": "安全约束", "reinstall": "安装 / 更新代码", "requester": "申请人", "comment": "审核意见", "review": "审核申请", "decision": "审核决定", "approve": "批准", "reject": "拒绝", "requestedPolicy": "申请的安全约束", "catalog": "技能目录", "sources": "技能来源", "presets": "环境预设", "repository": "仓库地址", "presetHint": "已有值仅显示掩码；保留掩码代表不修改。更改预设后须重新安装技能才会更新运行配置。", "duplicateKey": "配置标识不能重复", "fixedGroups": "固定环境组", "selectableGroups": "可申请的数据库组", "dorisGroups": "支持 Doris 的数据库组", "installType": "安装方式", "repositoryOverride": "独立仓库地址（空则使用来源）", "mcpConfig": "MCP 配置（JSON）", "preserveConfig": "留空保留已保存的加密配置", "userFields": "用户需填写的配置", "required": "必填", "status": {"installed": "已安装", "pending_approval": "等待审核", "installing": "安装中", "failed": "安装未完成", "uninstalled": "已卸载", "pending": "等待审核", "approved": "已批准", "rejected": "已拒绝", "withdrawn": "已撤回"}},
   memory: { status: '状态', title: '记忆管理', hint: '编辑先保存到管理台，部署后才更新运行时文件。回收不会覆盖更新的记录，删除的内容不会自动复活。每文件最多 256 KiB。', filename: '文件名', filenameHint: '请填写不含路径的 .md 文件名', collect: '从运行时回收', deploy: '部署到运行时', deployHint: '将管理台内容和删除记录同步到当前运行时；运行时文件较新时会拒绝覆盖。确认部署？', deleteHint: '删除管理台内容并保留删除标记；部署后删除运行时文件。确认删除？', showDeleted: '显示已删除', modified: '文件更新时间', deleted: '已删除', saved: '已保存', restore: '重新编写', edit: '编辑记忆', content: '内容', done: '已处理 {count} 个文件' },
   smtp: {"title": "邮件通知", "hint": "用于定时任务结果通知。密码加密保存；更换服务器或账号时需要重新填写密码。保存配置不会发送测试邮件。", "host": "SMTP 服务器", "port": "端口", "security": "加密方式", "sender": "发件邮箱", "username": "认证账号", "password": "认证密码", "saved": "已保存，留空保留", "unset": "尚未设置"},
+  cronOnce: {"kind": "执行频率", "recurring": "重复执行", "once": "仅执行一次", "time": "执行日期与时间", "local": "浏览器本地时区", "future": "请选择未来的执行日期与时间", "confirm": "确认一次性任务", "creator": "任务创建者（私聊）", "consumed": "已执行一次；重新安排需选择新的未来时间", "runWarning": "立即运行会消费这次计划，不再在原定时间重复执行。"},
+  cronDeliveryErrors: {"recipient_disabled": "接收人不存在或已停用，请更换接收人后重试。", "recipient_unbound": "接收人尚未绑定此平台身份，请完成绑定后重试。", "no_private_chat_or_unambiguous_notification_app": "请让接收人先私聊当前机器人发送一句话，再重试通知。"},
   notification: {
   "title": "通知设置",
   "webhook": "附加通知：企微群机器人",
@@ -136,7 +138,7 @@ export default {
   "wecomHint": "通过当前 AI 员工发送到企微用户和群聊。用户需绑定企微身份，并先与员工建立私聊。",
   "platformHint": "先选择 AI 员工，接收用户和群聊使用该员工所属平台。",
   "groupsHint": "选择已互动群聊，或输入群聊 ID 后回车",
-  "status": {
+  "status": {"mixed": "部分投递或状态不一致","no_run": "尚未执行",
     "pending": "待发送",
     "sent": "已送达",
     "failed": "发送失败",

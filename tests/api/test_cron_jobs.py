@@ -2,7 +2,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import BotMember, CronJob, Setting, UserIdentity
+from coreman.core.db.models import BotMember, CronJob, Setting, UserIdentity, UserReached
 from tests.api.conftest import login_as, login_existing
 from tests.integration.worker_helpers import seed_bot
 
@@ -15,6 +15,7 @@ async def test_cron_creator_edit_manual_actor_and_version(
     bot, _, _ = await seed_bot(db_session)
     creator = await db_session.get(User, bot.created_by)
     db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="creator"))
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
     await db_session.commit()
     await login_existing(client, db_session, creator)
     body = {
@@ -110,6 +111,7 @@ async def test_job_webhook_is_private_independent_and_testable(
     db_session.add(
         UserIdentity(user_id=creator.id, platform="feishu", platform_user_id="fs-creator")
     )
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
     await db_session.commit()
     await login_existing(client, db_session, creator)
     path = "/api/admin/cron-jobs"
@@ -173,6 +175,7 @@ async def test_notification_validation_and_platform_recipients(
     bot, _, _ = await seed_bot(db_session)
     creator = await db_session.get(User, bot.created_by)
     db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="owner"))
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
     await db_session.commit()
     await login_existing(client, db_session, creator)
     body = {
@@ -222,6 +225,7 @@ async def test_migration_preserves_existing_job_destinations(
     db_session.add(
         UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="legacy-owner")
     )
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
     await db_session.commit()
     await login_existing(client, db_session, creator)
     response = await client.post(
@@ -254,3 +258,187 @@ async def test_migration_preserves_existing_job_destinations(
         enabled, encrypted = await connection.run_sync(migrate)
     assert enabled and encrypted != hook
     assert app.state.cipher.decrypt(encrypted, "notifications.webhook_url") == hook
+
+
+async def test_once_validation_consumption_edit_and_explicit_reschedule(client, db_session):
+    from datetime import UTC, datetime, timedelta
+    from uuid import UUID
+
+    from coreman.core.db.models import User, UserReached
+
+    bot, _, _ = await seed_bot(db_session)
+    creator = await db_session.get(User, bot.created_by)
+    db_session.add_all(
+        [
+            UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="owner"),
+            UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"),
+        ]
+    )
+    await db_session.commit()
+    await login_existing(client, db_session, creator)
+    path = "/api/admin/cron-jobs"
+    now = datetime.now(UTC)
+    body = {
+        "bot_id": str(bot.id),
+        "name": "once",
+        "prompt": "report",
+        "schedule_kind": "once",
+        "run_at": (now + timedelta(hours=2)).isoformat(),
+    }
+    assert (await client.post(path, json={**body, "run_at": now.isoformat()})).status_code == 422
+    response = await client.post(path, json=body)
+    assert response.status_code == 201, response.text
+    data = response.json()["data"]
+    assert data["schedule_kind"] == "once" and data["run_at"] == data["next_run_at"]
+    row = await db_session.get(CronJob, UUID(data["id"]))
+    row.consumed_at, row.next_run_at, row.enabled = now, None, False
+    row.run_at = now - timedelta(hours=2)
+    body["run_at"] = row.run_at.isoformat()
+    await db_session.commit()
+    headers = {"If-Match": f'"{row.version}"'}
+    response = await client.put(
+        f"{path}/{row.id}", json={**body, "name": "renamed", "enabled": False}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["consumed_at"] and data["next_run_at"] is None
+    headers = {"If-Match": f'"{data["version"]}"'}
+    assert (await client.put(f"{path}/{row.id}", json=body, headers=headers)).status_code == 422
+    assert (await client.post(f"{path}/{row.id}/run", headers=headers)).status_code == 409
+    response = await client.put(
+        f"{path}/{row.id}",
+        json={**body, "run_at": (now + timedelta(hours=3)).isoformat()},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["consumed_at"] is None
+
+
+async def test_active_recipient_reachability_and_disabled_history(client, db_session):
+    from coreman.core.db.models import OutboxItem, User, UserReached
+
+    bot, _, _ = await seed_bot(db_session)
+    creator = await db_session.get(User, bot.created_by)
+    db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="owner"))
+    await db_session.commit()
+    await login_existing(client, db_session, creator)
+    path = "/api/admin/cron-jobs"
+    body = {
+        "bot_id": str(bot.id),
+        "name": "unreachable",
+        "prompt": "report",
+        "cron_expression": "0 9 * * *",
+    }
+    response = await client.post(path, json=body)
+    assert response.status_code == 422 and "私聊" in response.text
+    response = await client.post(path, json={**body, "enabled": False})
+    assert response.status_code == 201, response.text
+    assert await db_session.scalar(select(OutboxItem)) is None
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
+    await db_session.commit()
+    assert (await client.post(path, json=body)).status_code == 201
+
+
+async def test_list_reports_latest_actual_delivery_and_historical_errors(client, db_session):
+    from datetime import UTC, datetime
+
+    from coreman.core.db.models import CronRun, OutboxItem, User
+
+    bot, _, _ = await seed_bot(db_session)
+    creator = await db_session.get(User, bot.created_by)
+    db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="owner"))
+    row = CronJob(
+        bot_id=bot.id,
+        created_by=creator.id,
+        name="legacy",
+        prompt="report",
+        cron_expression="0 9 * * *",
+        last_status="success",
+    )
+    db_session.add(row)
+    await db_session.flush()
+    run = CronRun(
+        cron_job_id=row.id,
+        bot_id=bot.id,
+        job_name=row.name,
+        prompt=row.prompt,
+        status="success",
+        started_at=datetime.now(UTC),
+        delivery={"errors": {"user:x": "recipient_unbound"}},
+    )
+    db_session.add(run)
+    await db_session.commit()
+    await login_existing(client, db_session, creator)
+    response = await client.get("/api/admin/cron-jobs")
+    data = response.json()["data"]["items"][0]
+    assert data["last_status"] == "success" and data["delivery_status"] == "failed"
+    item = OutboxItem(
+        bot_id=bot.id,
+        platform="wecom",
+        kind="send",
+        target={"chat_id": "private"},
+        payload={},
+        status="sent",
+        dedupe_key="test:summary",
+    )
+    db_session.add(item)
+    await db_session.flush()
+    run.delivery = {"errors": {"user:x": "recipient_unbound"}, "outbox_ids": [item.id]}
+    await db_session.commit()
+    response = await client.get("/api/admin/cron-jobs")
+    assert response.json()["data"]["items"][0]["delivery_status"] == "mixed"
+    await db_session.refresh(row)
+    assert row.enabled  # Reading never silently changes legacy schedules.
+
+
+async def test_save_uses_same_unique_notification_app_rules_as_delivery(client, db_session, app):
+    from coreman.core.cron.delivery import enqueue_result
+    from coreman.core.db.models import OutboxItem, PlatformApp, User
+
+    bot, _, _ = await seed_bot(db_session)
+    creator = await db_session.get(User, bot.created_by)
+    db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="owner"))
+    notify = PlatformApp(
+        platform="wecom", name="notify", capabilities=["notify"], secret_enc="unused"
+    )
+    db_session.add(notify)
+    await db_session.commit()
+    await login_existing(client, db_session, creator)
+    body = {
+        "bot_id": str(bot.id),
+        "name": "reachable via app",
+        "prompt": "report",
+        "cron_expression": "0 9 * * *",
+    }
+    assert (await client.post("/api/admin/cron-jobs", json=body)).status_code == 201
+    assert await db_session.scalar(select(OutboxItem)) is None
+    delivery = await enqueue_result(
+        db_session,
+        bot=bot,
+        config={},
+        run_id="parity",
+        content="result",
+        cipher=app.state.cipher,
+        fallback_user_id=creator.id,
+    )
+    assert not delivery["errors"] and delivery["outbox_ids"]
+    db_session.add(
+        PlatformApp(
+            platform="wecom", name="ambiguous", capabilities=["notify"], secret_enc="unused"
+        )
+    )
+    await db_session.commit()
+    assert (await client.post("/api/admin/cron-jobs", json=body)).status_code == 422
+    delivery = await enqueue_result(
+        db_session,
+        bot=bot,
+        config={},
+        run_id="ambiguous",
+        content="result",
+        cipher=app.state.cipher,
+        fallback_user_id=creator.id,
+    )
+    assert (
+        not delivery["outbox_ids"]
+        and "no_private_chat_or_unambiguous_notification_app" in delivery["errors"].values()
+    )

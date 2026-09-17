@@ -80,19 +80,11 @@ async def enqueue_result(
     if fallback:
         recipients = [str(fallback_user_id)]
     for uid in recipients:
-        user = await session.get(User, uuid.UUID(uid))
-        if user is None or user.status != "active" or user.source == "bootstrap":
-            errors[f"user:{uid}"] = "recipient_disabled"
+        ident, reached, app, error = await private_destination(session, bot, uid)
+        if error:
+            errors[f"user:{uid}"] = error
             continue
-        ident = await session.scalar(
-            select(UserIdentity).where(
-                UserIdentity.user_id == user.id, UserIdentity.platform == bot.platform
-            )
-        )
-        if ident is None:
-            errors[f"user:{uid}"] = "recipient_unbound"
-            continue
-        reached = await session.get(UserReached, (bot.id, user.id))
+        assert ident is not None
         if reached is not None:
             parts = bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
             for index, part in enumerate(parts):
@@ -112,18 +104,7 @@ async def enqueue_result(
                 if item:
                     ids.append(item.id)
             continue
-        apps = (
-            await session.scalars(
-                select(PlatformApp).where(
-                    PlatformApp.platform == bot.platform,
-                    PlatformApp.enabled,
-                    PlatformApp.capabilities.contains(["notify"]),
-                )
-            )
-        ).all()
-        if ident is None or len(apps) != 1:
-            errors[f"user:{uid}"] = "no_private_chat_or_unambiguous_notification_app"
-            continue
+        assert app is not None
         hint = f"\n\n请先给机器人「{bot.name}」发一句话建立私聊。"
         limit = max(256, NOTIFY_PART_BYTES - len(hint.encode()))
         for index, part in enumerate(bounded_chunks(content, limit, NOTIFY_MAX_PARTS, notice)):
@@ -134,7 +115,7 @@ async def enqueue_result(
                 kind="notify",
                 dedupe_key=f"cron:{run_id}:fallback:{uid}:{index}",
                 target={
-                    "platform_app_id": str(apps[0].id),
+                    "platform_app_id": str(app.id),
                     "user_id": uid,
                     "platform_user_id": ident.platform_user_id,
                 },
@@ -193,3 +174,58 @@ async def enqueue_result(
     if fallback:
         result["fallback_user_id"] = str(fallback_user_id)
     return result
+
+
+async def private_destination(
+    session: AsyncSession, bot: Bot, uid: uuid.UUID | str
+) -> tuple[UserIdentity | None, UserReached | None, PlatformApp | None, str | None]:
+    """One resolver for save validation and delivery; no external calls or test sends."""
+    user_id = uuid.UUID(str(uid))
+    user = await session.get(User, user_id)
+    if user is None or user.status != "active" or user.source == "bootstrap":
+        return None, None, None, "recipient_disabled"
+    ident = await session.scalar(
+        select(UserIdentity).where(
+            UserIdentity.user_id == user_id, UserIdentity.platform == bot.platform
+        )
+    )
+    if ident is None:
+        return None, None, None, "recipient_unbound"
+    reached = await session.get(UserReached, (bot.id, user_id))
+    if reached is not None:
+        return ident, reached, None, None
+    apps = (
+        await session.scalars(
+            select(PlatformApp)
+            .where(
+                PlatformApp.platform == bot.platform,
+                PlatformApp.enabled,
+                PlatformApp.capabilities.contains(["notify"]),
+            )
+            .limit(2)
+        )
+    ).all()
+    if len(apps) != 1:
+        return ident, None, None, "no_private_chat_or_unambiguous_notification_app"
+    return ident, None, apps[0], None
+
+
+def delivery_summary(delivery: dict[str, Any] | None, statuses: dict[int, str]) -> str:
+    """Only outbox evidence implies sent; absent/deleted evidence is unknown."""
+    if delivery is None:
+        return "no_run"
+    values = {"failed"} if delivery.get("errors") else set()
+    for item_id in delivery.get("outbox_ids", []):
+        status = statuses.get(int(item_id))
+        values.add(
+            "sent"
+            if status == "sent"
+            else "pending"
+            if status in {"pending", "sending", "queued"}
+            else "failed"
+            if status in {"failed", "skipped"}
+            else "unknown"
+        )
+    if len(values) > 1:
+        return "mixed"
+    return next(iter(values), "unknown")

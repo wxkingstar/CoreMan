@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useDeliveryStatus } from '@/components/cron/useDeliveryStatus'
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import CronEditorDialog from '@/components/cron/CronEditorDialog.vue'
@@ -14,6 +15,7 @@ import type { BotOut } from '@/api/types'
 import { formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
+const deliveryStatus = useDeliveryStatus()
 const rows = ref<CronOut[]>([]), total = ref(0), page = ref(1), filter = ref('')
 const botOptions = ref<BotOut[]>([])
 const loading = ref(false), saving = ref(false)
@@ -47,8 +49,8 @@ onMounted(() => { void load(); void searchBots() })
 function open(row?: CronOut) { void editor.value?.open(row) }
 async function run(row: CronOut) {
   saving.value = true
-  try { await cron.run(row); ElMessage.success(t('cron.queued')); await load() }
-  catch (e) { fail(e) } finally { saving.value = false }
+  try { if (row.schedule_kind === 'once') await ElMessageBox.confirm(t('cronOnce.runWarning')); await cron.run(row); ElMessage.success(t('cron.queued')); await load() }
+  catch (e) { if (e !== 'cancel' && e !== 'close') fail(e) } finally { saving.value = false }
 }
 async function cancelRun(row: CronOut) {
   try { await cron.cancel(row); await load() } catch (e) { fail(e) }
@@ -122,7 +124,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
         min-width="180"
       >
         <template #default="{ row }">
-          <code>{{ row.cron_expression }}</code><div class="hint">
+          <span v-if="row.schedule_kind === 'once'">{{ t('cronOnce.once') }} · {{ new Date(row.run_at).toLocaleString(undefined, { timeZone: row.timezone }) }}</span><code v-else>{{ row.cron_expression }}</code><div class="hint">
             {{ row.timezone }}
           </div>
         </template>
@@ -144,6 +146,14 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
         </template>
       </el-table-column>
       <el-table-column
+        :label="t('cron.deliveryStatus')"
+        min-width="150"
+      >
+        <template #default="{ row }">
+          {{ deliveryStatus(row.delivery_status || 'unknown') }}
+        </template>
+      </el-table-column>
+      <el-table-column
         :label="t('common.actions')"
         min-width="350"
       >
@@ -157,7 +167,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
           </el-button>
           <el-button
             link
-            :disabled="!row.enabled || !!row.running_task_id || !!row.force_run_at || saving"
+            :disabled="!row.enabled || (row.schedule_kind === 'once' && !!row.consumed_at) || !!row.running_task_id || !!row.force_run_at || saving"
             :data-test="`run-${row.id}`"
             @click="run(row)"
           >

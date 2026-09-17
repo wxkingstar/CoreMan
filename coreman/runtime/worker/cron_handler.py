@@ -352,6 +352,8 @@ class CronRunHandler:
             if job and job.running_task_id == task.id:
                 job.running_task_id = None
                 job.last_status = status
+                if job.schedule_kind == "once":
+                    job.enabled = False
             task_status = (
                 "succeeded"
                 if status in {"success", "skipped"}

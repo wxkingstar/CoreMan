@@ -90,6 +90,8 @@ const en = {
   },
   memory: { status: 'Status', title: 'Memory management', hint: 'Edits are saved to the console first; deploy to update runtime files. Collection does not overwrite newer records or automatically restore deleted content. Maximum 256 KiB per file.', filename: 'File name', filenameHint: 'Enter a .md file name without a path', collect: 'Collect from runtime', deploy: 'Deploy to runtime', deployHint: 'Sync console content and deletion records to the current runtime. Newer runtime files will not be overwritten. Deploy?', deleteHint: 'Deletes console content and keeps a deletion marker. Runtime files are deleted on deployment. Delete?', showDeleted: 'Show deleted', modified: 'File updated at', deleted: 'Deleted', saved: 'Saved', restore: 'Rewrite', edit: 'Edit memory', content: 'Content', done: 'Processed {count} files' },
   smtp: { title: 'Email notifications', hint: 'Used for scheduled task results. Passwords are encrypted; enter the password again when changing the server or account. Saving does not send a test email.', host: 'SMTP server', port: 'Port', security: 'Encryption', sender: 'Sender email', username: 'Username', password: 'Password', saved: 'Saved; leave blank to keep', unset: 'Not configured' },
+  cronOnce: {"kind": "Frequency", "recurring": "Recurring", "once": "Run only once", "time": "Execution date and time", "local": "Browser local timezone", "future": "Choose a future execution date and time", "confirm": "Confirm one-time task", "creator": "Task creator (direct message)", "consumed": "Already consumed; choose a new future time to reschedule", "runWarning": "Running now consumes this occurrence; it will not run again at the original time."},
+  cronDeliveryErrors: {"recipient_disabled": "Recipient is missing or disabled. Choose another recipient and retry.", "recipient_unbound": "Recipient has no identity bound to this platform. Bind it and retry.", "no_private_chat_or_unambiguous_notification_app": "Ask the recipient to privately message this bot first, then retry the notification."},
   notification: {
   "title": "Notifications",
   "webhook": "Additional channel: WeCom group webhook",
@@ -104,7 +106,7 @@ const en = {
   "wecomHint": "Send through this employee to WeCom users and chats. Users need a linked WeCom identity and a private conversation with the employee.",
   "platformHint": "Select an AI employee first. Users and chats belong to its platform.",
   "groupsHint": "Select a known chat, or enter a chat ID",
-  "status": {
+  "status": {"mixed": "Partial delivery or differing states","no_run": "No run yet",
     "pending": "Pending",
     "sent": "Delivered",
     "failed": "Failed",

@@ -124,6 +124,8 @@ export default {
   skill: {disabledHint: "同期したスキルは初期状態で無効です。承認方式と実行環境を設定し、有効にしてからインストールしてください。", configureEnable: "設定して有効化", emptyCatalog: "有効なスキルがありません。管理者に設定と有効化を依頼してください。", "packageVersion": "パッケージバージョン", "security": "承認方式", "public": "直接インストール", "internal": "承認が必要", "remove": "解除 / 取り下げ", "removeHint": "以後の CoreMan リクエストにこのスキルの認証情報を注入せず、未承認の申請を取り下げます。コードと MCP ファイル内の認証情報は残ります。実行中の処理や外部アカウントの権限は別途管理してください。解除しますか？", "installHint": "送信後にインスタンスでインストールします。更新ボタンで状態を確認できます。内部スキルは承認された範囲のみ利用できます。", "available": "利用可能なスキル", "configureInstall": "設定してインストール", "databases": "データベース範囲", "dataSource": "データソース", "policy": "安全上の制約", "reinstall": "コードのインストール / 更新", "requester": "申請者", "comment": "審査コメント", "review": "申請を審査", "decision": "審査結果", "approve": "承認", "reject": "却下", "requestedPolicy": "申請された制約", "catalog": "スキル一覧", "sources": "スキルのソース", "presets": "環境設定", "repository": "リポジトリ URL", "presetHint": "保存済みの値はマスク表示です。マスクを残すと変更されません。設定の変更後はスキルを再インストールしてください。", "duplicateKey": "設定キーが重複しています", "fixedGroups": "固定の環境グループ", "selectableGroups": "申請可能なデータベースグループ", "dorisGroups": "Doris 対応グループ", "installType": "インストール方式", "repositoryOverride": "個別リポジトリ URL（空欄ならソースを使用）", "mcpConfig": "MCP 設定（JSON）", "preserveConfig": "空欄なら保存済みの暗号化設定を保持", "userFields": "ユーザー入力項目", "required": "必須", "status": {"installed": "インストール済み", "pending_approval": "承認待ち", "installing": "インストール中", "failed": "インストール未完了", "uninstalled": "解除済み", "pending": "承認待ち", "approved": "承認済み", "rejected": "却下", "withdrawn": "取り下げ済み"}},
   memory: { status: '状態', title: 'メモリ管理', hint: '編集は管理画面に保存され、デプロイ後にインスタンスへ反映されます。収集時に新しい内容は上書きされず、削除した内容も自動復元されません。1 ファイル最大 256 KiB。', filename: 'ファイル名', filenameHint: 'パスを含まない .md ファイル名を入力してください', collect: 'インスタンスから収集', deploy: 'インスタンスへ反映', deployHint: '保存内容と削除を現在のインスタンスへ反映します。対象ファイルの方が新しい場合は上書きしません。実行しますか？', deleteHint: '管理画面の内容を削除します。インスタンスのファイルは次回デプロイ時に削除されます。続けますか？', showDeleted: '削除済みを表示', modified: 'ファイル更新日時', deleted: '削除済み', saved: '保存済み', restore: '再作成', edit: 'メモリを編集', content: '内容', done: '{count} 件のファイルを処理しました' },
   smtp: {"title": "メール通知", "hint": "定期タスクの結果を送信します。パスワードは暗号化して保存します。サーバーやアカウントの変更時は再入力してください。保存時にテストメールは送信しません。", "host": "SMTP サーバー", "port": "ポート", "security": "暗号化", "sender": "送信元", "username": "認証アカウント", "password": "認証パスワード", "saved": "保存済み。空欄で保持", "unset": "未設定"},
+  cronOnce: {"kind": "実行頻度", "recurring": "繰り返す", "once": "一度だけ実行", "time": "実行日時", "local": "ブラウザのローカルタイムゾーン", "future": "未来の実行日時を選択してください", "confirm": "一回限りのタスクを確認", "creator": "タスク作成者（個別メッセージ）", "consumed": "実行済み。再実行には新しい未来の日時を指定してください", "runWarning": "今すぐ実行すると、この予定は消費され、元の日時には実行されません。"},
+  cronDeliveryErrors: {"recipient_disabled": "宛先が存在しないか無効です。宛先を変更して再試行してください。", "recipient_unbound": "宛先のプラットフォームIDを連携して再試行してください。", "no_private_chat_or_unambiguous_notification_app": "宛先の方からこのボットに個別メッセージを送ってから、通知を再試行してください。"},
   notification: {
   "title": "通知設定",
   "webhook": "追加通知：WeCom グループ",
@@ -138,7 +140,7 @@ export default {
   "wecomHint": "この AI 社員から WeCom のユーザーとグループに送信します。ユーザーは WeCom 連携と社員との個別会話が必要です。",
   "platformHint": "先に AI 社員を選択してください。宛先はその社員のプラットフォームです。",
   "groupsHint": "既存のグループを選択、または ID を入力",
-  "status": {
+  "status": {"mixed": "一部配信または状態不一致","no_run": "未実行",
     "pending": "送信待ち",
     "sent": "配信済み",
     "failed": "失敗",
