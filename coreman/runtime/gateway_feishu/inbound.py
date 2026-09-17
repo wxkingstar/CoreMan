@@ -204,7 +204,10 @@ def _normalize_event(
         chat_type=chat_type,
         chat_id=chat_id,
         sender=Sender(
-            platform_user_id=user_id, open_id=identity.get("open_id"), sender_type=sender_type
+            platform_user_id=user_id,
+            open_id=identity.get("open_id"),
+            union_id=identity.get("union_id"),
+            sender_type=sender_type,
         ),
         message_id=mid,
         mentions_bot=mentioned,

@@ -121,3 +121,12 @@ def test_post_ignores_folder_and_unsafe_file_entries():
             "filename": "safe.txt",
         }
     ]
+
+
+def test_sender_preserves_union_id_without_inventing_user_id():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["sender"]["sender_id"] = {"open_id": "ou_app", "union_id": "on_stable"}
+    message = normalize_event(raw, **KW)
+    assert message is not None
+    assert message.sender.model_dump().get("union_id") == "on_stable"
+    assert message.sender.platform_user_id == ""

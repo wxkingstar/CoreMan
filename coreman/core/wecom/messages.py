@@ -19,6 +19,7 @@ class Sender(BaseModel):
     platform_user_id: str
     sender_type: Literal["user", "bot"] = "user"
     open_id: str | None = None
+    union_id: str | None = None
     display_name: str | None = None
 
 
