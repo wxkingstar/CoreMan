@@ -46,6 +46,17 @@ refresh_available 表示存在可尝试的续期凭证，不保证续期成功�
 无需重新授权或切换模式；仅在系统确认后才算已设置。
 """
 
+MODE_COMMANDS = {
+    "普通助手": "ordinary",
+    "ordinary assistant": "ordinary",
+    "飞书资料": "personal",
+    "feishu data": "personal",
+}
+
+
+def mode_command(text: str) -> str | None:
+    return MODE_COMMANDS.get(text.strip().casefold())
+
 
 def requested(text: str) -> bool:
     text = text.strip()
@@ -56,7 +67,7 @@ def requested(text: str) -> bool:
 
 
 async def enabled(session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
-    if intake.text.strip() in ("普通助手", "飞书资料") or requested(intake.text):
+    if mode_command(intake.text) or requested(intake.text):
         return True
     if intake.speaker.user_id is None:
         return False
@@ -119,17 +130,18 @@ async def reject_unavailable(session: AsyncSession, ctx: TaskContext, intake: In
     if not await enabled(session, ctx, intake):
         return False
     text = intake.text.strip()
-    if text in ("普通助手", "飞书资料"):
+    requested_mode = mode_command(text)
+    if requested_mode:
         try:
             scope = await policy.task_scope(session, ctx.task.id, str(intake.speaker.user_id))
-            if text == "飞书资料":
+            if requested_mode == "personal":
                 await validate(session, ctx, intake)
             # Match opening/MCP lock order: chat session before grant.
             base = await session.get(
                 ChatSession, (scope.bot.id, intake.session_key), with_for_update=True
             )
             mode_row, _ = await service._row(session, ctx.cipher, scope)
-            mode_row.assistant_mode = "ordinary" if text == "普通助手" else "personal"
+            mode_row.assistant_mode = requested_mode
             mode_row.context_epoch = uuid.uuid4()
             if base:
                 await session.delete(base)
@@ -138,11 +150,11 @@ async def reject_unavailable(session: AsyncSession, ctx: TaskContext, intake: In
             )
             switch_reply = (
                 "已切换到普通助手，不会读取个人飞书资料。"
-                if text == "普通助手"
+                if requested_mode == "ordinary"
                 else "已切换到飞书资料模式。"
             )
             switch_reply += "本次切换已清除会话上下文。\n" + service.RETENTION_NOTICE
-            if text == "飞书资料" and mode_row.status not in ("connected", "pending"):
+            if requested_mode == "personal" and mode_row.status not in ("connected", "pending"):
                 switch_reply += "\n尚未连接，请发送“连接我的飞书”选择授权范围。"
             switch_reply += "\n[管理授权](" + ctx.public_base_url.rstrip("/") + "/my-feishu)"
         except ValueError as exc:

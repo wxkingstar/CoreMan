@@ -99,8 +99,45 @@ def active_query(partner: BotCollaborationPartner):  # type: ignore[no-untyped-d
 
 
 async def output(session: AsyncSession, partner: BotCollaborationPartner) -> dict[str, Any]:
+    source = await session.get(Bot, partner.source_bot_id)
     target = await session.get(Bot, partner.target_bot_id)
-    available = bool(target and await setup.available(session, target))
+    runtime_ready = bool(
+        source
+        and target
+        and await setup.available(session, source)
+        and await setup.available(session, target)
+    )
+    routes = list(
+        await session.scalars(
+            select(BotCollaborationRoute).where(
+                BotCollaborationRoute.source_bot_id == partner.source_bot_id,
+                BotCollaborationRoute.target_bot_id == partner.target_bot_id,
+                BotCollaborationRoute.archived.is_(False),
+            )
+        )
+    )
+    verified = False
+    failures: list[tuple[str, str]] = []
+    for route in routes:
+        meta = route.setup or {}
+        sort_key = str(meta.get("expires_at") or route.id)
+        if meta.get("status") in {"failed", "expired", "unavailable"} and meta.get("reason"):
+            failures.append((sort_key, str(meta["reason"])))
+        if route.enabled and meta.get("status") == "ready":
+            route_status = await setup.status(session, route)
+            if route_status["status"] == "ready":
+                verified = True
+            elif route_status.get("reason"):
+                failures.append((sort_key, str(route_status["reason"])))
+    latest_failure = max(failures, default=None)
+    verification_error = latest_failure[1][:500] if latest_failure else None
+    status = (
+        "verified"
+        if runtime_ready and verified
+        else "runtime_ready"
+        if runtime_ready
+        else "unavailable"
+    )
     await session.flush()
     return {
         "id": str(partner.id),
@@ -109,8 +146,12 @@ async def output(session: AsyncSession, partner: BotCollaborationPartner) -> dic
         "target_description": target.description if target else "",
         "enabled": partner.enabled,
         "version": partner.version,
-        "status": "ready" if available else "unavailable",
-        "reason": None if available else "runtime_unavailable",
+        "status": status,
+        "reason": None if runtime_ready else "runtime_unavailable",
+        "configured": True,
+        "runtime_ready": runtime_ready,
+        "transport_verified": verified,
+        "verification_error": verification_error,
         "can_enable": True,
         "can_remove": True,
         "active_count": await session.scalar(

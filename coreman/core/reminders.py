@@ -77,6 +77,21 @@ def parse_request(text: str) -> tuple[int, str] | None:
     return seconds, content.strip()
 
 
+def is_reminder_request(text: str) -> bool:
+    """Route only explicit reminder-setting language into the fixed reminder flow."""
+    value = text.strip()
+    if value in ("确认提醒", "取消提醒") or value.startswith(("确认提醒", "取消提醒")):
+        return True
+    if parse_request(value):
+        return True
+    timing = r"(?:[0-9一二两三四五六七八九十百]+(?:分钟|小时|天)后|今天|明天|后天|下周)"
+    return bool(
+        re.search(rf"{timing}.{{0,12}}提醒我", value)
+        or re.search(rf"提醒我.{{0,12}}{timing}", value)
+        or re.fullmatch(r"(?:每天|每周|每月).{0,12}提醒我.+", value)
+    )
+
+
 async def require_actor(session: AsyncSession, bot: Bot, actor: User) -> None:
     allowed = (
         await session.scalars(select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id))
@@ -249,14 +264,15 @@ async def handle_request(
         p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text"
     )
     command = classify_command(text)
-    if "提醒" not in text and command not in ("stop", "reset"):
+    reminder_request = is_reminder_request(text)
+    if not reminder_request and command not in ("stop", "reset"):
         return None
     if event.chat_type != "single":
-        return "请在机器人私聊中设置本人提醒。" if "提醒" in text else None
+        return "请在机器人私聊中设置本人提醒。" if reminder_request else None
     try:
         bot, actor, event = await verified_origin(session, task, cipher, text)
     except (ValueError, TypeError, AttributeError, ApiError):
-        return "无法验证本人直接私聊请求，未设置提醒。" if "提醒" in text else None
+        return "无法验证本人直接私聊请求，未设置提醒。" if reminder_request else None
     # Strip only outer whitespace after the exact normalized parts have been proved.
     text = text.strip()
     scope = f"{bot.id}:{actor.id}:{event.chat_id}"

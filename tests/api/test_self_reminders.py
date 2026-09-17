@@ -79,6 +79,25 @@ async def test_propose_confirm_once_and_original_identity(db_session, app):
 
 
 @pytest.mark.parametrize(
+    "text",
+    ["帮我写一份温和的缴费提醒通知", "总结会议中的提醒事项"],
+)
+@pytest.mark.parametrize("chat_type", ["single", "group"])
+async def test_plain_reminder_mentions_continue_to_the_model_path(db_session, app, text, chat_type):
+    _, _, task = await direct(db_session, app, text)
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    event.chat_type = chat_type
+    await db_session.commit()
+    assert await handle_request(db_session, task, app.state.cipher) is None
+    assert await db_session.scalar(select(InteractionState)) is None
+
+
+async def test_explicit_but_unsupported_reminder_request_keeps_help(db_session, app):
+    _, _, task = await direct(db_session, app, "明天提醒我交水费")
+    assert "支持本人私聊的一次性提醒" in await handle_request(db_session, task, app.state.cipher)
+
+
+@pytest.mark.parametrize(
     "tamper",
     [
         "quote",

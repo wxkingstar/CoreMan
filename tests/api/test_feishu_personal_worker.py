@@ -354,6 +354,30 @@ async def test_mode_mentions_never_switch_or_grant(db_session, app, db_engine):
         assert not await personal.enabled(db_session, build_ctx(db_engine, task), intake)
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [("ordinary assistant", "ordinary"), ("Feishu data", "personal")],
+)
+async def test_exact_english_mode_aliases_use_the_same_switch_path(
+    db_session, app, db_engine, monkeypatch, command, expected
+):
+    from coreman.runtime.worker.chat import personal
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user)
+    intake = await intake_for(db_session, bot, task, command)
+    replies = []
+
+    async def reply(*args, **kwargs):
+        replies.append(kwargs["text"])
+
+    monkeypatch.setattr(personal, "reply_once", reply)
+    assert await personal.reject_unavailable(db_session, build_ctx(db_engine, task), intake)
+    assert row.assistant_mode == expected
+    assert replies
+
+
 async def test_selection_revoke_and_reauthorization_clear_but_refresh_preserves_epoch(
     db_session, app, monkeypatch
 ):

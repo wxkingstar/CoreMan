@@ -116,6 +116,49 @@ async def test_other_owner_and_offline_partner_selectable_without_platform_calls
     assert (await client.post(endpoint(a), json={"target_bot_id": str(b.id)})).status_code == 409
 
 
+async def test_partner_readiness_requires_verified_transport_and_exposes_known_failure(
+    client, db_session, configured, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from coreman.core.chat import collaboration_setup
+
+    a, b, partner, _, route = configured
+    monkeypatch.setattr(collaboration_setup, "available", AsyncMock(return_value=True))
+    route.enabled = True
+    route.archived = False
+    route.setup = {"status": "failed", "reason": "probe_delivery_failed"}
+    await db_session.commit()
+
+    body = (await client.get(endpoint(a))).json()["data"][0]
+    assert body["status"] == "runtime_ready"
+    assert body["configured"] is True
+    assert body["runtime_ready"] is True
+    assert body["transport_verified"] is False
+    assert body["verification_error"] == "probe_delivery_failed"
+
+    route.setup = {
+        "status": "ready",
+        "reason": None,
+        "runtime_request": True,
+        "partner_id": str(partner.id),
+        "source_fingerprint": collaboration_setup.fingerprint(a),
+        "target_fingerprint": collaboration_setup.fingerprint(b),
+    }
+    await db_session.commit()
+    body = (await client.get(endpoint(a))).json()["data"][0]
+    assert body["status"] == "verified"
+    assert body["transport_verified"] is True
+    assert body["verification_error"] is None
+
+    partner.enabled = False
+    await db_session.commit()
+    body = (await client.get(endpoint(a))).json()["data"][0]
+    assert body["status"] == "runtime_ready"
+    assert body["transport_verified"] is False
+    assert body["verification_error"] == "permission_revoked"
+
+
 async def test_self_wrong_platform_and_stale_group_body_rejected(client, db_session, configured):
     a, b, _, _, _ = configured
     assert (await client.post(endpoint(a), json={"target_bot_id": str(a.id)})).status_code == 422

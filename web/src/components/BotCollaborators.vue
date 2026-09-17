@@ -93,9 +93,16 @@ async function mutate(row: CollaborationRoute, action: 'enable' | 'pause' | 'rem
 }
 function reason(row: CollaborationRoute) {
  const key = `collaboration.reasons.${row.reason}`
+ const verificationKey = `collaboration.reasons.${row.verification_error}`
+ if (row.verification_error) return te(verificationKey) ? t(verificationKey) : row.verification_error
  return row.reason && te(key) ? t(key) : ''
 }
-function status(row: CollaborationRoute) { return row.status !== 'ready' ? row.status : row.enabled ? 'enabled' : 'paused' }
+function status(row: CollaborationRoute) {
+ if (!row.enabled) return 'paused'
+ if (row.status === 'ready') return 'enabled'
+ if (row.status === 'verified') return 'verified'
+ return row.status
+}
 </script>
 
 <template>
