@@ -256,6 +256,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "media_reason_timeout": "下载超时",
         "media_reason_too_large": "文件超过 100 MB",
         "media_reason_download_failed": "下载失败",
+        "media_reason_permission_denied": (
+            "飞书应用缺少媒体读取权限，请管理员开通 "
+            "im:message.history:readonly、im:message:readonly 或 im:message，发布后重试"
+        ),
+        "media_reason_resource_unavailable": "资源不存在或已不可用",
+        "media_reason_resource_expired": "资源已过期",
         "media_reason_decrypt_failed": "解密失败",
         "media_reason_invalid_key": "密钥无效",
         "unknown_filename": "未知",
@@ -556,6 +562,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "media_reason_timeout": "ダウンロードがタイムアウトしました",
         "media_reason_too_large": "ファイルが 100 MB を超えています",
         "media_reason_download_failed": "ダウンロードに失敗しました",
+        "media_reason_permission_denied": (
+            "Feishu アプリにメディア読み取り権限がありません。管理者が "
+            "im:message.history:readonly、im:message:readonly、または im:message を追加し、"
+            "公開後に再試行してください"
+        ),
+        "media_reason_resource_unavailable": "リソースが存在しないか、利用できません",
+        "media_reason_resource_expired": "リソースの有効期限が切れています",
         "media_reason_decrypt_failed": "復号に失敗しました",
         "media_reason_invalid_key": "鍵が無効です",
         "unknown_filename": "不明",

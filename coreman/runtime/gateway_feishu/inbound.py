@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -18,6 +19,8 @@ from coreman.core.wecom.messages import (
     TextPart,
     VideoPart,
 )
+
+_RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 
 
 def _normalize_event(
@@ -166,6 +169,21 @@ def _normalize_event(
                             }
                         )
                     )
+        files = post.get("files")
+        if isinstance(files, list):
+            for entry in files[:100]:
+                if not isinstance(entry, dict) or entry.get("is_folder") is not False:
+                    continue
+                file_key = entry.get("file_key")
+                if not isinstance(file_key, str) or not _RESOURCE_ID.fullmatch(file_key):
+                    continue
+                filename = entry.get("file_name")
+                parts.append(
+                    FilePart(
+                        ref={"message_id": mid, "file_key": file_key, "type": "file"},
+                        filename=str(filename) if filename else None,
+                    )
+                )
     elif kind in {"image", "file"}:
         key = content.get("image_key" if kind == "image" else "file_key")
         if key:

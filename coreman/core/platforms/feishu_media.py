@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from typing import Any
 
@@ -22,6 +23,32 @@ from coreman.core.wecom.media import (
 )
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_ERROR_BODY_LIMIT = 64 * 1024
+_MEDIA_SCOPES = "im:message.history:readonly、im:message:readonly 或 im:message"
+
+
+async def _rejection(response: httpx.Response) -> MediaError:
+    """Map a bounded platform rejection to stable, sanitized categories."""
+    raw = bytearray()
+    async for chunk in response.aiter_bytes(16 * 1024):
+        if len(raw) + len(chunk) > _ERROR_BODY_LIMIT:
+            return MediaError("download_failed")
+        raw.extend(chunk)
+    try:
+        body = json.loads(raw)
+        code = int(body.get("code", 0)) if isinstance(body, dict) else 0
+    except (ValueError, TypeError):
+        code = 0
+    if code == 99991672:
+        return MediaError(
+            "permission_denied",
+            f"请管理员为飞书应用开通任一应用权限：{_MEDIA_SCOPES}，发布后重试",
+        )
+    if response.status_code == 404:
+        return MediaError("resource_unavailable")
+    if response.status_code == 410:
+        return MediaError("resource_expired")
+    return MediaError("download_failed")
 
 
 class FeishuMediaFetcher(MediaFetcher):
@@ -49,7 +76,7 @@ class FeishuMediaFetcher(MediaFetcher):
                     headers={"Authorization": f"Bearer {token}"},
                 ) as response:
                     if response.status_code != 200:
-                        raise MediaError("download_failed", "platform rejected resource")
+                        raise await _rejection(response)
                     declared = response.headers.get("content-length", "")
                     if declared.isdecimal() and int(declared) > self.max_bytes:
                         raise MediaError("too_large")

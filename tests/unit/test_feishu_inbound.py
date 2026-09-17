@@ -60,3 +60,64 @@ def test_no_guessing_identity_or_remote_media_url():
     assert message.parts[0].ref == {"message_id": "om1", "file_key": "img_x", "type": "image"}
     assert normalize_event({"header": []}, **KW) is None
     assert normalize_event({"header": {"app_id": "cli_a"}, "event": "malformed"}, **KW) is None
+
+
+def test_post_preserves_top_level_files_from_real_feishu_shape():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["message"].update(
+        message_type="post",
+        content=json.dumps(
+            {
+                "title": "库存检查",
+                "content_v2": [[{"tag": "text", "text": "请检查附件"}]],
+                "files": [
+                    {
+                        "file_key": "file_v3_test",
+                        "file_name": "inventory-test.csv",
+                        "is_folder": False,
+                    }
+                ],
+            }
+        ),
+    )
+
+    message = normalize_event(raw, **KW)
+
+    assert message is not None
+    assert [part.model_dump() for part in message.parts] == [
+        {"type": "text", "text": "库存检查"},
+        {"type": "text", "text": "请检查附件"},
+        {
+            "type": "file",
+            "ref": {"message_id": "om1", "file_key": "file_v3_test", "type": "file"},
+            "filename": "inventory-test.csv",
+        },
+    ]
+
+
+def test_post_ignores_folder_and_unsafe_file_entries():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["message"].update(
+        message_type="post",
+        content=json.dumps(
+            {
+                "content_v2": [],
+                "files": [
+                    {"file_key": "folder_key", "file_name": "folder", "is_folder": True},
+                    {"file_key": "../secret", "file_name": "secret.txt", "is_folder": False},
+                    {"file_key": "safe_key", "file_name": "safe.txt", "is_folder": False},
+                ],
+            }
+        ),
+    )
+
+    message = normalize_event(raw, **KW)
+
+    assert message is not None
+    assert [part.model_dump() for part in message.parts] == [
+        {
+            "type": "file",
+            "ref": {"message_id": "om1", "file_key": "safe_key", "type": "file"},
+            "filename": "safe.txt",
+        }
+    ]
