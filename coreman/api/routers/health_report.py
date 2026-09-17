@@ -138,7 +138,7 @@ async def health_report(
                         if slot:
                             break
                 if not locked or not slot:
-                    yield event("error", {"message": "已有体检正在运行，请稍后重试。"})
+                    yield event("error", {"message": "已有运行环境检查正在进行，请稍后重试。"})
                     return
                 try:
                     async with request.app.state.session_factory() as fresh:
@@ -257,7 +257,8 @@ async def health_report(
                         "error",
                         {
                             "message": (
-                                "体检未完整完成或配置已变更，请稍后重试；上方内容仅为部分结果。"
+                                "运行环境检查未完整完成或配置已变更，请稍后重试；"
+                                "上方内容仅为部分结果。"
                             )
                         },
                     )

@@ -84,12 +84,45 @@ def is_reminder_request(text: str) -> bool:
         return True
     if parse_request(value):
         return True
+    prefix = r"(?:请|请你|麻烦|麻烦你|帮我)?"
     timing = r"(?:[0-9一二两三四五六七八九十百]+(?:分钟|小时|天)后|今天|明天|后天|下周)"
     return bool(
-        re.search(rf"{timing}.{{0,12}}提醒我", value)
-        or re.search(rf"提醒我.{{0,12}}{timing}", value)
-        or re.fullmatch(r"(?:每天|每周|每月).{0,12}提醒我.+", value)
+        re.fullmatch(rf"{prefix}{timing}.{{0,12}}提醒我.+", value)
+        or re.fullmatch(rf"{prefix}提醒我.{{0,12}}{timing}.+", value)
+        or re.fullmatch(rf"{prefix}(?:每天|每周|每月).{{0,12}}提醒我.+", value)
     )
+
+
+def raw_reminder_body(event: InboundEvent) -> str:
+    """Recover only the complete native message body for fail-closed intent routing."""
+    message = ((event.payload.get("raw") or {}).get("event") or {}).get("message") or {}
+    try:
+        content = json.loads(message.get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if message.get("message_type") == "text":
+        return content.get("text", "") if isinstance(content, dict) else ""
+    if message.get("message_type") != "post" or not isinstance(content, dict):
+        return ""
+    if "content" not in content and "content_v2" not in content:
+        if len(content) != 1 or not isinstance(next(iter(content.values())), dict):
+            return ""
+        content = next(iter(content.values()))
+    lines = content.get("content_v2", content.get("content"))
+    if not isinstance(lines, list):
+        return ""
+    rendered = []
+    for line in lines:
+        if not isinstance(line, list):
+            return ""
+        segments = []
+        for segment in line:
+            if not isinstance(segment, dict) or segment.get("tag") != "text":
+                segments.append("\uffff")
+            else:
+                segments.append(str(segment.get("text") or ""))
+        rendered.append("".join(segments))
+    return "\n".join(rendered)
 
 
 async def require_actor(session: AsyncSession, bot: Bot, actor: User) -> None:
@@ -265,6 +298,8 @@ async def handle_request(
     )
     command = classify_command(text)
     reminder_request = is_reminder_request(text)
+    if not reminder_request:
+        reminder_request = is_reminder_request(raw_reminder_body(event))
     if not reminder_request and command not in ("stop", "reset"):
         return None
     if event.chat_type != "single":

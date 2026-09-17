@@ -177,7 +177,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "bg_done_prefix": "✅ 回复已生成\n\n",
         "bg_done_plain": "✅ 回复已生成",
         "bg_ttl_expired": "⏳ 任务运行超时，已终止后台等待{link}",
-        "long_task_done": "✅ 您的任务已完成（耗时 {seconds} 秒），请查看上方回复。",
+        "long_task_done": "✅ 回复已生成（耗时 {seconds} 秒），请查看上方内容。",
         # 定时任务推送（cron_handler / scheduler.cron）：头尾让用户分清定时推送与对话回复。
         "cron_push_header": "**{name}**\n> 机器人：{bot} | 耗时：{seconds} 秒\n\n",
         "cron_push_footer": "\n\n---\n⏰ 此消息由定时任务自动推送，不在当前对话上下文中。",
@@ -451,9 +451,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "bg_ttl_expired": (
             "⏳ タスクの実行がタイムアウトしたため、バックグラウンド待機を終了しました{link}"
         ),
-        "long_task_done": (
-            "✅ タスクが完了しました（所要 {seconds} 秒）。上の返信をご確認ください。"
-        ),
+        "long_task_done": "✅ 返信を生成しました（所要 {seconds} 秒）。上の内容をご確認ください。",
         "session_busy": (
             "⚠️ 前回のタスクが停止しないため、このメッセージを処理できませんでした。"
             "しばらくしてから再送してください。"
