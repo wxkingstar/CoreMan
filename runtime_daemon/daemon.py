@@ -641,6 +641,14 @@ class Daemon:
                                 await asyncio.sleep(0.1)
                         response.raise_for_status()
                         cap["models"] = [r["id"] for r in response.json()["data"]]
+                        if provider == "claude":
+                            health = await client.get("/health")
+                            health.raise_for_status()
+                            declared = health.json().get("capabilities", {})
+                            cap["feishu_personal_restricted_v1"] = (
+                                isinstance(declared, dict)
+                                and declared.get("feishu_personal_restricted_v1") is True
+                            )
                     self.socket_failures[provider] = 0
                 except httpx.ConnectError:
                     self.socket_failures[provider] = self.socket_failures.get(provider, 0) + 1

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { users } from '@/api/admin'
+import { api } from '@/api/client'
 import { cron, type CronIn, type CronOut } from '@/api/cron'
 import type { BotOut, UserOut } from '@/api/types'
 import UserPicker from '@/components/UserPicker.vue'
@@ -14,15 +15,17 @@ const emit = defineEmits<{ saved: []; searchBots: [keyword: string] }>()
 const { t } = useI18n()
 const saving = ref(false), visible = ref(false), editing = ref<CronOut | null>(null)
 const selectedUsers = ref<UserOut[]>([])
+const runAt = ref<Date | null>(null)
+const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 const expires = ref<Date | null>(null), emails = ref(''), precheckResult = ref('')
 const template = 'def should_trigger(ctx):\n    return {"trigger": True, "reason": "ready"}'
 function empty(): CronIn {
-  return { bot_id: '', name: '', cron_expression: '0 9 * * 1-5', timezone: 'Asia/Shanghai', prompt: '',
+  return { schedule_kind: 'recurring', run_at: null, bot_id: '', name: '', cron_expression: '0 9 * * 1-5', timezone: 'Asia/Shanghai', prompt: '',
     system_prompt: null, precheck_script: null, precheck_timeout_seconds: 30, enabled: true,
     expires_at: null, target_users: [], target_chats: [], notify_emails: [], notify_webhook: false, notify_webhook_url: null }
 }
 const form = reactive<CronIn>(empty())
-const chatOptions = ref<string[]>([])
+const chatOptions = ref<{ id: string; name: string }[]>([])
 const selectedPlatform = computed(() => props.botOptions.find(b => b.id === form.bot_id)?.platform)
 watch(() => form.bot_id, async (id, previous) => {
   if (previous && !editing.value) { form.target_users = []; form.target_chats = []; selectedUsers.value = [] }
@@ -40,12 +43,19 @@ function searchBots(keyword = '') { emit('searchBots', keyword) }
 function payload(): CronIn {
   const split = (s: string) => [...new Set(s.split(/[,\n]/).map(x => x.trim()).filter(Boolean))]
   return { ...form, target_users: [...form.target_users], target_chats: [...form.target_chats], notify_emails: split(emails.value),
-    expires_at: expires.value?.toISOString() ?? null }
+    expires_at: expires.value?.toISOString() ?? null,
+    run_at: form.schedule_kind === 'once' ? runAt.value?.toISOString() ?? null : null,
+    timezone: onceTimeChanged() ? localZone : form.timezone }
+}
+function onceTimeChanged(): boolean {
+  return form.schedule_kind === 'once' && (!editing.value || editing.value.schedule_kind !== 'once' || runAt.value?.getTime() !== new Date(editing.value.run_at || 0).getTime())
 }
 async function open(row?: CronOut) {
   editing.value = row ?? null
   Object.assign(form, empty())
   if (row) for (const key of Object.keys(empty()) as (keyof CronIn)[]) Object.assign(form, { [key]: row[key] })
+  form.schedule_kind = row?.schedule_kind ?? 'recurring'
+  runAt.value = row?.run_at ? new Date(row.run_at) : null
   form.target_users = [...form.target_users]
   expires.value = row?.expires_at ? new Date(row.expires_at) : null
   form.target_chats = [...form.target_chats]; emails.value = form.notify_emails.join('\n')
@@ -60,12 +70,28 @@ async function save() {
   if (saving.value) return
   if (!form.name.trim() || !form.bot_id || !form.prompt.trim()) { ElMessage.warning(t('cron.required')); return }
   if (expires.value && expires.value.getTime() <= Date.now() && form.enabled) { ElMessage.warning(t('cron.expired')); return }
+  const onceChanged = onceTimeChanged()
+  if (form.schedule_kind === 'once' && (!runAt.value || (onceChanged && runAt.value.getTime() <= Date.now()))) { ElMessage.warning(t('cronOnce.future')); return }
   saving.value = true
   try {
+    if (form.schedule_kind === 'once') {
+      const recipients = await Promise.all(form.target_users.map(async id => {
+        const known = selectedUsers.value.find(user => user.id === id)
+        if (known) return known.display_name
+        try { return (await users.get(id)).display_name } catch { return id }
+      }))
+      recipients.push(...form.target_chats.map(id => chatOptions.value.find(chat => chat.id === id)?.name || id), ...payload().notify_emails)
+      if (form.notify_webhook) recipients.push(t('notification.webhook'))
+      if (!recipients.length) {
+        const creator = editing.value?.created_by ? await users.get(editing.value.created_by) : await api.me()
+        recipients.push(`${creator.display_name} · ${t('cronOnce.creator')}`)
+      }
+      await ElMessageBox.confirm(`${t('cronOnce.once')} · ${runAt.value!.toString()} (${localZone})\n${t('cron.recipients')}: ${recipients.join('、') || t('cronOnce.creator')}`, t('cronOnce.confirm'))
+    }
     if (editing.value) await cron.update(editing.value.id, payload(), editing.value.version)
     else await cron.create(payload())
     visible.value = false; ElMessage.success(t('common.saved')); emit('saved')
-  } catch (e) { fail(e) } finally { saving.value = false }
+  } catch (e) { if (e !== 'cancel' && e !== 'close') fail(e) } finally { saving.value = false }
 }
 async function preview() {
   try {
@@ -83,6 +109,7 @@ defineExpose({ open })
     :before-close="closeEditor"
     :title="t(editing ? 'common.edit' : 'common.create')"
     width="min(780px, 95vw)"
+    class="cron-editor-dialog"
     destroy-on-close
   >
     <el-form
@@ -121,17 +148,58 @@ defineExpose({ open })
             />
           </el-select>
         </el-form-item>
-        <el-form-item :label="t('cron.schedule')">
+        <el-form-item :label="t('cronOnce.kind')">
+          <el-radio-group
+            v-model="form.schedule_kind"
+            :disabled="!!editing?.running_task_id"
+          >
+            <el-radio-button value="recurring">
+              {{ t('cronOnce.recurring') }}
+            </el-radio-button>
+            <el-radio-button value="once">
+              {{ t('cronOnce.once') }}
+            </el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item
+          v-if="form.schedule_kind === 'once'"
+          :label="`${t('cronOnce.time')} · ${localZone}`"
+        >
+          <el-date-picker
+            v-model="runAt"
+            type="datetime"
+            :disabled="!!editing?.running_task_id"
+          />
+          <p class="hint">
+            {{ t('cronOnce.local') }}: {{ localZone }} · {{ t('cronOnce.once') }}
+          </p>
+          <p
+            v-if="editing?.consumed_at"
+            class="hint"
+          >
+            {{ t('cronOnce.consumed') }}
+          </p>
+        </el-form-item>
+        <el-form-item
+          v-if="form.schedule_kind !== 'once'"
+          :label="t('cron.schedule')"
+        >
           <el-input
             v-model="form.cron_expression"
             placeholder="0 9 * * 1-5"
           />
         </el-form-item>
-        <el-form-item :label="t('cron.timezone')">
+        <el-form-item
+          v-if="form.schedule_kind !== 'once'"
+          :label="t('cron.timezone')"
+        >
           <el-input v-model="form.timezone" />
         </el-form-item>
       </div>
-      <p class="hint">
+      <p
+        v-if="form.schedule_kind !== 'once'"
+        class="hint"
+      >
         {{ t('cron.scheduleHint') }}
       </p>
       <h3 class="cm-section-title">
@@ -189,9 +257,9 @@ defineExpose({ open })
           >
             <el-option
               v-for="chat in chatOptions"
-              :key="chat"
-              :label="chat"
-              :value="chat"
+              :key="chat.id"
+              :label="chat.name"
+              :value="chat.id"
             />
           </el-select>
         </el-form-item><el-form-item :label="t('cron.emails')">
@@ -280,4 +348,10 @@ defineExpose({ open })
 .el-select, .el-date-editor { width: 100%; }
 .precheck { margin-top: 20px; }
 @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+</style>
+
+<style>
+.cron-editor-dialog.el-dialog { max-height: 90dvh; display: flex; flex-direction: column; }
+.cron-editor-dialog .el-dialog__body { min-height: 0; overflow-y: auto; }
+.cron-editor-dialog .el-dialog__footer { flex-shrink: 0; }
 </style>

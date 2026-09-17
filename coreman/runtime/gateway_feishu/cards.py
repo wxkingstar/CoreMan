@@ -114,7 +114,7 @@ def stream_card(
 
 def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
     if card.get("schema") == "2.0":
-        return card
+        return {key: value for key, value in card.items() if key != "task_id"}
     title = card.get("main_title") or {}
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": str(title.get("desc") or title.get("title") or "…")},

@@ -130,3 +130,40 @@ async def test_detail_and_stats(client: httpx.AsyncClient, db_session: AsyncSess
     assert stats["by_bot"][0]["total"] == 2
     r = await client.get("/api/admin/chat-logs/stats", params={"bot_id": str(uuid.uuid4())})
     assert r.json()["data"]["total"] == 0
+
+
+async def test_feishu_private_content_is_owner_only(client, db_session, monkeypatch):
+    from coreman.api import bot_auth
+    from tests.api.conftest import login_existing
+
+    mine, _, creator = await _seed(db_session)
+    row = (await db_session.scalars(select(ChatLog).where(ChatLog.user_id == creator.id))).first()
+    row.platform = "feishu"
+    row.chat_type = "single"
+    row.message_content = "private-unique-secret"
+    await db_session.commit()
+    for role in ("platform_admin", "ai_committee", "team_lead"):
+        await login_as(client, db_session, role=role, team_id=mine.team_id)
+        assert (await client.get(f"/api/admin/chat-logs/{row.id}")).status_code == 404
+        data = (
+            await client.get("/api/admin/chat-logs", params={"keyword": "private-unique-secret"})
+        ).json()["data"]
+        assert data["total"] == 0
+        stats = (
+            await client.get(
+                "/api/admin/chat-logs/stats", params={"keyword": "private-unique-secret"}
+            )
+        ).json()["data"]
+        assert stats["total"] == 0
+    await login_existing(client, db_session, creator)
+    assert (await client.get(f"/api/admin/chat-logs/{row.id}")).status_code == 200
+
+    async def token_user(request, session):
+        return creator
+
+    monkeypatch.setattr(bot_auth, "token_user", token_user)
+    client.cookies.set("bot_token", "verified-owner-token")
+    assert (await client.get(f"/api/admin/chat-logs/{row.id}")).status_code == 404
+    assert (
+        await client.get("/api/admin/chat-logs", params={"keyword": "private-unique-secret"})
+    ).json()["data"]["total"] == 0

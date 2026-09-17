@@ -20,8 +20,14 @@ def normalize(text: str) -> str:
     return kept.strip().lower()
 
 
-def classify_command(text: str) -> Command | None:
+def command_text(text: str) -> str:
+    """命令匹配用的文本。飞书斜杠指令把所选指令作为普通文本「/new」发来：去掉一个前导斜杠。"""
     s = normalize(text)
+    return s[1:].strip() if s.startswith("/") else s
+
+
+def classify_command(text: str) -> Command | None:
+    s = command_text(text)
     if not s:
         return None
     if s in RESET_WORDS:

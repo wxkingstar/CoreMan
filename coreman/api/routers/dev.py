@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,12 +141,23 @@ async def inject_message(
 
 @router.get("/tasks/{task_id}")
 async def get_task(
+    request: Request,
     task_id: int,
-    _: User = Depends(_ADMINS),
+    actor: User = Depends(_ADMINS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     task = await session.get(Task, task_id, populate_existing=True)
     if task is None:
+        raise not_found("任务不存在")
+    inbound = (
+        await session.get(InboundEvent, task.inbound_event_id) if task.inbound_event_id else None
+    )
+    if (
+        inbound is not None
+        and inbound.platform == "feishu"
+        and inbound.chat_type == "single"
+        and (request.cookies.get("bot_token") or task.user_id != actor.id)
+    ):
         raise not_found("任务不存在")
     stream = await session.get(TaskStream, task_id, populate_existing=True)
     log = (
@@ -154,6 +165,13 @@ async def get_task(
             select(ChatLog).where(ChatLog.task_id == task_id).order_by(ChatLog.id.desc()).limit(1)
         )
     ).scalar_one_or_none()
+    if (
+        log is not None
+        and log.platform == "feishu"
+        and log.chat_type == "single"
+        and (request.cookies.get("bot_token") or log.user_id != actor.id)
+    ):
+        raise not_found("任务不存在")
     now = datetime.now(UTC)
     return {
         "code": 0,

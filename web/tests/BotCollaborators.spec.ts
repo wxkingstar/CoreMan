@@ -64,6 +64,10 @@ it('shows runtime unavailability without preventing pause', async () => {
  vi.mocked(collaboration.list).mockResolvedValue([{ ...row, status: 'unavailable', reason: 'runtime_unavailable' }]); const w = mountPanel(); await flushPromises()
  expect(w.findComponent({ name: 'ElTag' }).text()).toBe('暂不可用'); expect(w.text()).toContain('运行节点暂不可用'); expect(w.text()).toContain('暂停协作'); w.unmount()
 })
+it('distinguishes runtime readiness from a verified group transport and shows the known remedy', async () => {
+ vi.mocked(collaboration.list).mockResolvedValue([{ ...row, status: 'runtime_ready', configured: true, runtime_ready: true, transport_verified: false, verification_error: 'probe_delivery_failed' }]); const w = mountPanel(); await flushPromises()
+ expect(w.findComponent({ name: 'ElTag' }).text()).toBe('运行时就绪，群通道未验证'); expect(w.text()).toContain('群验证消息发送失败'); w.unmount()
+})
 it('uses the latest revision to pause and remove', async () => {
  vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never); vi.mocked(collaboration.list).mockResolvedValue([row]); vi.mocked(collaboration.update).mockResolvedValue({ ...row, enabled: false, version: 2 }); vi.mocked(collaboration.remove).mockResolvedValue()
  const w = mountPanel(); await flushPromises(); await w.findAllComponents({ name: 'ElButton' }).find(b => b.text() === '暂停协作')!.trigger('click'); await flushPromises(); expect(collaboration.update).toHaveBeenCalledWith('b1', 'r1', false, 1)

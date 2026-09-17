@@ -173,9 +173,8 @@ async def test_last_answer_submits_and_other_waits(
     t2, _ = await _card_task(db_session, bot, task_id=f"{PREFIX}@0", selected={"choice_answer": []})
     await CardActionHandler().run(build_ctx(db_engine, t2))
     items = await _outbox(db_session)
-    assert (
-        items[1].payload["card"]["sub_title_text"]
-        == "您的回答：(未选择)\n⏳ 正在生成结果，完成后自动推送…"
+    assert items[1].payload["card"]["sub_title_text"] == (
+        msg("card_answered_sub", answer=msg("card_no_selection")) + "\n" + msg("choice_generating")
     )
     assert items[2].payload == {"markdown": msg("choice_generating")}
     submit = (

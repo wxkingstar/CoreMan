@@ -39,9 +39,7 @@ async def test_bot_runtime_label_follows_node_name(client, db_session):
         assert detail["relay_server_id"] == str(relay.id)
 
     await check_label("Test runtime / claude")
-    renamed = await client.patch(
-        f"/api/admin/runtime-nodes/{node_id}", json={"name": "研发运行时"}
-    )
+    renamed = await client.patch(f"/api/admin/runtime-nodes/{node_id}", json={"name": "研发运行时"})
     assert renamed.status_code == 200, renamed.text
     await check_label("研发运行时 / claude")
 
@@ -386,7 +384,14 @@ async def test_reverse_timeout_cancels_unclaimed_request(client, db_session, app
 
 async def test_authenticated_session_view_has_no_external_dependencies(client, db_session):
     _, body, _ = await enrollment(client, db_session)
-    url = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/test-session"
+    from coreman.core.db.models import ChatLog
+    from tests.api.test_chat_logs import _seed
+
+    await _seed(db_session)
+    row = (await db_session.scalars(select(ChatLog))).first()
+    row.relay_session_id = uuid.uuid4()
+    await db_session.commit()
+    url = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{row.relay_session_id}"
     response = await client.get(url)
     assert response.status_code == 200
     assert "new EventSource(wsUrl)" in response.text
@@ -395,3 +400,34 @@ async def test_authenticated_session_view_has_no_external_dependencies(client, d
     assert "return marked.parse(text)" not in response.text
     await login_as(client, db_session, role="member")
     assert (await client.get(url)).status_code == 403
+
+
+async def test_private_runtime_viewer_blocks_admin_and_bot_token(client, db_session, monkeypatch):
+    from coreman.api import bot_auth
+    from coreman.core.db.models import ChatLog
+    from tests.api.conftest import login_existing
+    from tests.api.test_chat_logs import _seed
+
+    _, body, _ = await enrollment(client, db_session)
+    _, _, owner = await _seed(db_session)
+    row = (await db_session.scalars(select(ChatLog).where(ChatLog.user_id == owner.id))).first()
+    row.platform, row.chat_type = "feishu", "single"
+    row.relay_session_id = uuid.uuid4()
+    await db_session.commit()
+    url = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{row.relay_session_id}"
+    for suffix in ("", "/events"):
+        assert (await client.get(url + suffix)).status_code == 404
+    owner.role = "platform_admin"
+    await db_session.commit()
+    await login_existing(client, db_session, owner)
+    assert (await client.get(url)).status_code == 200
+
+    async def token_user(request, session):
+        return owner
+
+    monkeypatch.setattr(bot_auth, "token_user", token_user)
+    client.cookies.set("bot_token", "verified-owner-token")
+    for suffix in ("", "/events"):
+        assert (await client.get(url + suffix)).status_code == 404
+    unknown = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{uuid.uuid4()}"
+    assert (await client.get(unknown)).status_code == 404

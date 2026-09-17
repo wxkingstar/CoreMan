@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -18,6 +19,8 @@ from coreman.core.wecom.messages import (
     TextPart,
     VideoPart,
 )
+
+_RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 
 
 def _normalize_event(
@@ -64,7 +67,9 @@ def _normalize_event(
         if not isinstance(value, dict):
             return None
         task_id = str(value.get("task_id") or "")
-        if not parse_task_id(task_id) or not header.get("event_id"):
+        if (
+            not parse_task_id(task_id) and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
+        ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")
         chat_id = str(ctx.get("open_chat_id") or "")
@@ -91,6 +96,7 @@ def _normalize_event(
             card_action={
                 "task_id": task_id,
                 "card_type": "form",
+                "level": str(value.get("level") or ""),
                 "event_key": str(value.get("event_key") or ""),
                 "selected": selected,
             },
@@ -166,6 +172,21 @@ def _normalize_event(
                             }
                         )
                     )
+        files = post.get("files")
+        if isinstance(files, list):
+            for entry in files[:100]:
+                if not isinstance(entry, dict) or entry.get("is_folder") is not False:
+                    continue
+                file_key = entry.get("file_key")
+                if not isinstance(file_key, str) or not _RESOURCE_ID.fullmatch(file_key):
+                    continue
+                filename = entry.get("file_name")
+                parts.append(
+                    FilePart(
+                        ref={"message_id": mid, "file_key": file_key, "type": "file"},
+                        filename=str(filename) if filename else None,
+                    )
+                )
     elif kind in {"image", "file"}:
         key = content.get("image_key" if kind == "image" else "file_key")
         if key:
@@ -186,7 +207,10 @@ def _normalize_event(
         chat_type=chat_type,
         chat_id=chat_id,
         sender=Sender(
-            platform_user_id=user_id, open_id=identity.get("open_id"), sender_type=sender_type
+            platform_user_id=user_id,
+            open_id=identity.get("open_id"),
+            union_id=identity.get("union_id"),
+            sender_type=sender_type,
         ),
         message_id=mid,
         mentions_bot=mentioned,

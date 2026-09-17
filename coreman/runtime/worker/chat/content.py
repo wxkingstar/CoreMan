@@ -37,6 +37,25 @@ class ContentStage(ChatStageBase):
         返回 None = 这一轮到此为止（已经回过用户、结过任务、落过日志）。媒体下载失败记
         失败任务；「暂不支持」与「语音没转写出来」沿用既有口径：答过了就算这轮答完了。
         """
+        reply_context = pre.intake.inbound.reply_context
+        parent_id = reply_context.get("parent_id")
+        has_parent = "parent_id" in reply_context and parent_id is not None and parent_id != ""
+        if pre.intake.bot.platform == "feishu" and has_parent:
+            from coreman.runtime.worker.chat.feishu_quote import enrich
+
+            async with ctx.session_factory() as session:
+                parts, enriched_text = await enrich(
+                    session,
+                    bot=pre.intake.bot,
+                    cipher=ctx.cipher,
+                    chat_id=pre.intake.chat_id,
+                    parent_id=pre.intake.inbound.reply_context.get("parent_id"),
+                    parts=parts,
+                    text=pre.intake.text,
+                )
+        else:
+            enriched_text = pre.intake.text
+
         fetcher: MediaFetcher
         owns_fetcher = pre.intake.bot.platform == "feishu" or ctx.media_fetcher is None
         if pre.intake.bot.platform == "feishu":
@@ -61,7 +80,7 @@ class ContentStage(ChatStageBase):
             builder = ContentBuilder(
                 fetcher, locale=ctx.locale, platform=pre.intake.bot.platform, on_hint=on_hint
             )
-            build_task = asyncio.create_task(builder.build(parts, text=pre.intake.text))
+            build_task = asyncio.create_task(builder.build(parts, text=enriched_text))
             stopping = asyncio.create_task(ctx.cancel_event.wait())
             try:
                 while True:

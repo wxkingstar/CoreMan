@@ -4,13 +4,15 @@ import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
 import SecretInput from '@/components/SecretInput.vue'
 import { useBotFormContext } from '@/components/botForm/context'
 
+/** part：新建时整块收在「更多设置」里，不再显示分区标题。 */
+defineProps<{ part?: 'extra' }>()
 const { t } = useI18n()
-const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid } = useBotFormContext()
+const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid, manualCredentials } = useBotFormContext()
 </script>
 
 <template>
   <h3
-    v-if="sensitiveVisible"
+    v-if="sensitiveVisible && !part"
     id="form-security"
     class="cm-section-title"
   >
@@ -36,7 +38,17 @@ const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid } = us
       :error="fieldErrors.credentials"
     />
     <el-form-item
-      v-for="k in credKeys"
+      v-if="mode === 'create' && form.platform === 'feishu'"
+      :label="t('feishuApp.manualCredentials')"
+      data-test="manual-credentials"
+    >
+      <el-switch v-model="manualCredentials" />
+      <div class="muted">
+        {{ manualCredentials ? t('feishuApp.manualCredentialsHint') : t('feishuApp.oneClickHint') }}
+      </div>
+    </el-form-item>
+    <el-form-item
+      v-for="k in (mode === 'create' && form.platform === 'feishu' && !manualCredentials ? [] : credKeys)"
       :key="k"
       :label="t(`bots.cred.${k}`)"
     >
@@ -65,4 +77,5 @@ const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid } = us
 
 <style scoped>
 .section { font-weight: 600; }
+.muted { width: 100%; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 </style>

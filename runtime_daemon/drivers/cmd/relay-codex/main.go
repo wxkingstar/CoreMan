@@ -149,7 +149,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
-	sessionStore.LogRequest(req.SessionID, &req)
+	sessionID := openai.SessionLogID(&req)
+	sessionStore.LogRequest(sessionID, &req)
 
 	// Only a resumed thread can be missing. The handlers use this solely when a
 	// zero-output resume reports the rollout as gone on stderr; any other
@@ -160,9 +161,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		handleStreamResponse(w, r, input, chatID, created, model, includeUsage, req.WorkingDir, req.EnvVars, req.SessionID, rebuildFresh)
+		handleStreamResponse(w, r, input, chatID, created, model, includeUsage, req.WorkingDir, req.EnvVars, sessionID, rebuildFresh)
 	} else {
-		handleNonStreamResponse(w, r, input, chatID, created, model, req.WorkingDir, req.EnvVars, req.SessionID, rebuildFresh)
+		handleNonStreamResponse(w, r, input, chatID, created, model, req.WorkingDir, req.EnvVars, sessionID, rebuildFresh)
 	}
 }
 

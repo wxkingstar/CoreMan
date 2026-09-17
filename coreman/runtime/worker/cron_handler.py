@@ -70,6 +70,10 @@ class CronRunHandler:
 
     async def run(self, ctx: TaskContext) -> None:
         # 周期心跳由 WorkerService 的心跳循环统一写；外部调用前那一次显式收取取消见 _run。
+        from coreman.runtime.worker.reminder_handler import run_fixed
+
+        if await run_fixed(ctx):
+            return
         await self._run(ctx)
 
     async def _run(self, ctx: TaskContext) -> None:
@@ -352,6 +356,8 @@ class CronRunHandler:
             if job and job.running_task_id == task.id:
                 job.running_task_id = None
                 job.last_status = status
+                if job.schedule_kind == "once":
+                    job.enabled = False
             task_status = (
                 "succeeded"
                 if status in {"success", "skipped"}

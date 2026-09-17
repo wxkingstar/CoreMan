@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.announcements import find_announcement
-from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
 from coreman.core.db.models import Bot, BotAllowedUser
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.context import TaskContext
@@ -140,15 +140,28 @@ class CommandHandler:
             if bot is not None and bot.platform == "feishu":
                 bot = await session.scalar(select(Bot).where(Bot.id == bot.id).with_for_update())
                 assert bot is not None
-                speaker = await resolve_speaker(
-                    session, platform="feishu", platform_user_id=pid or ""
+                speaker = await resolve_feishu_event_speaker(
+                    session, bot=bot, event=inbound, cipher=ctx.cipher
                 )
+                pid = speaker.platform_user_id or pid
                 allowed = set(
                     await session.scalars(
                         select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id)
                     )
                 )
-                if not bot.enabled or (allowed and speaker.user_id not in allowed):
+                # The gateway copies the original actor into the task. Require
+                # that evidence to agree even when an empty app-B user_id is
+                # resolved to its verified union identity; a conflicting actor must never gain
+                # authority from somebody else's durable inbound event.
+                task_actor = ctx.task.payload.get("platform_user_id")
+                actor_matches = isinstance(task_actor, str) and task_actor == (
+                    inbound.sender_platform_user_id or ""
+                )
+                if (
+                    not actor_matches
+                    or not bot.enabled
+                    or (allowed and speaker.user_id not in allowed)
+                ):
                     await reply_once(
                         session,
                         ctx,
@@ -160,6 +173,10 @@ class CommandHandler:
                     )
                     await session.commit()
                     return
+            if bot is not None and bot.platform == "feishu":
+                from coreman.core.reminders import handle_request
+
+                await handle_request(session, ctx.task, ctx.cipher)
             if command == "reset":
                 text = await do_reset(session, ctx, ctx.task.bot_id, key, pid)
             elif command == "stop":

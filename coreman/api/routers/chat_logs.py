@@ -11,8 +11,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import ColumnElement, case, func, or_, select
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import ColumnElement, and_, case, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
@@ -48,11 +48,16 @@ async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID
     return ids
 
 
-def _scope(ids: set[uuid.UUID] | None, user: User) -> list[ColumnElement[bool]]:
+def _scope(
+    ids: set[uuid.UUID] | None, user: User, *, bot_token: bool = False
+) -> list[ColumnElement[bool]]:
     """可见性条件：我管得着的 bot，或者我自己参与过的对话。"""
+    private = and_(ChatLog.platform == "feishu", ChatLog.chat_type == "single")
+    # A bot token can originate in a group, even when its human identity is the owner.
+    privacy = not_(private) if bot_token else or_(not_(private), ChatLog.user_id == user.id)
     if ids is None:
-        return []
-    return [or_(ChatLog.bot_id.in_(ids), ChatLog.user_id == user.id)]
+        return [privacy]
+    return [privacy, or_(ChatLog.bot_id.in_(ids), ChatLog.user_id == user.id)]
 
 
 def _window(
@@ -155,6 +160,7 @@ def chat_log_out(
 
 @router.get("")
 async def list_chat_logs(
+    request: Request,
     bot_id: uuid.UUID | None = None,
     user: str | None = None,
     status: str | None = None,
@@ -167,7 +173,9 @@ async def list_chat_logs(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
-    conds = _scope(ids, actor) + _window(bot_id, since, until)
+    conds = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + _window(
+        bot_id, since, until
+    )
     conds += _filters(user, status, chat_type, keyword)
     # request_at 会并列（同一秒的批量写），加 id 兜底保证翻页稳定。
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
@@ -182,6 +190,7 @@ async def list_chat_logs(
 
 @router.get("/stats")
 async def chat_log_stats(
+    request: Request,
     bot_id: uuid.UUID | None = None,
     user: str | None = None,
     status: str | None = None,
@@ -194,7 +203,9 @@ async def chat_log_stats(
 ) -> dict[str, Any]:
     """概览：总量、按状态、平均时延、token 合计、按 bot 前 50（同样受可见性过滤）。"""
     ids = await accessible_bot_ids(session, actor)
-    conds = _scope(ids, actor) + _window(bot_id, since, until)
+    conds = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + _window(
+        bot_id, since, until
+    )
     conds += _filters(user, status, chat_type, keyword)
 
     def _tokens(col: Any) -> Any:
@@ -271,12 +282,15 @@ def _avg_ms(value: Any) -> int | None:
 
 @router.get("/{log_id}")
 async def get_chat_log(
+    request: Request,
     log_id: int,
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
-    stmt = select(ChatLog).where(ChatLog.id == log_id, *_scope(ids, actor))
+    stmt = select(ChatLog).where(
+        ChatLog.id == log_id, *_scope(ids, actor, bot_token=bool(request.cookies.get("bot_token")))
+    )
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。

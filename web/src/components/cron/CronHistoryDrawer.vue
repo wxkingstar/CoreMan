@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { cron, type CronOut, type CronRun } from '@/api/cron'
+import { formatDeliveryError } from '@/components/cron/deliveryError'
 import { useDeliveryStatus } from '@/components/cron/useDeliveryStatus'
 import { formatDateTime } from '@/utils/format'
 
@@ -45,7 +46,10 @@ defineExpose({ open })
             <b>{{ t('cron.prompt') }}</b><pre>{{ row.prompt }}</pre><b>{{ t('cron.reply') }}</b><pre>{{ row.reply || row.error_message || '—' }}</pre>
             <p>{{ t('cron.precheck') }}: {{ row.precheck_meta || '—' }}</p>
             <p v-if="row.delivery.errors && Object.keys(row.delivery.errors).length">
-              {{ row.delivery.errors }}
+              <span
+                v-for="(error, target) in row.delivery.errors"
+                :key="target"
+              >{{ formatDeliveryError(error as string, t) }} <small>({{ target }})</small><br></span>
             </p>
             <el-table :data="row.deliveries">
               <el-table-column
@@ -68,7 +72,11 @@ defineExpose({ open })
                 min-width="140"
                 prop="error"
                 :label="t('cron.error')"
-              />
+              >
+                <template #default="{ row: delivery }">
+                  {{ formatDeliveryError(delivery.error, t) }}
+                </template>
+              </el-table-column>
             </el-table>
           </div>
         </template>

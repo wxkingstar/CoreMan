@@ -120,3 +120,16 @@ async def test_inject_mixed_parts_and_reject_oversized_references(admin_client, 
     assert (
         await admin_client.post("/api/dev/inject-message", json={"bot_key": "sales_bot"})
     ).status_code == 422
+
+
+async def test_dev_task_private_stream_requires_owner(dev_env, admin_client, db_session):
+    await _bot(db_session)
+    result = await admin_client.post(
+        "/api/dev/inject-message", json={"bot_key": "sales_bot", "text": "private"}
+    )
+    task_id = result.json()["data"]["task_id"]
+    event = (await db_session.scalars(select(InboundEvent))).one()
+    event.platform = "feishu"
+    event.chat_type = "single"
+    await db_session.commit()
+    assert (await admin_client.get(f"/api/dev/tasks/{task_id}")).status_code == 404

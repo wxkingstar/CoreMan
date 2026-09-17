@@ -6,8 +6,11 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy import select
 
+from coreman.core.db.models import ChatLog
 from tests.api.conftest import login_as
+from tests.api.test_chat_logs import _seed
 from tests.api.test_escalations import setup
 from tests.api.test_runtime_nodes import enrollment
 from tests.unit.test_callback_crypto import encrypted_message
@@ -56,17 +59,22 @@ async def test_runtime_event_stream_forwarding_and_access(
     client, db_session, monkeypatch, upstream_status
 ):
     _, node, _ = await enrollment(client, db_session)
+    await _seed(db_session)
+    row = (await db_session.scalars(select(ChatLog))).first()
+    row.relay_session_id = uuid.uuid4()
+    await db_session.commit()
+    session_id = str(row.relay_session_id)
     payload = b'event: message\ndata: {"text":"qa-event"}\n\n'
 
     def handle(request):
-        assert request.url.path == "/session/qa-session/events"
+        assert request.url.path == f"/session/{session_id}/events"
         return httpx.Response(upstream_status, content=payload)
 
     monkeypatch.setattr(
         "coreman.core.runtime_nodes.transport.ReverseTransport",
         lambda node_id, provider: httpx.MockTransport(handle),
     )
-    path = f"/api/admin/runtime-nodes/{node['node_id']}/claude/session/qa-session/events"
+    path = f"/api/admin/runtime-nodes/{node['node_id']}/claude/session/{session_id}/events"
     response = await client.get(path)
     assert response.status_code == 200
     assert response.content == (

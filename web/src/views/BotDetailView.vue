@@ -13,6 +13,7 @@ import BotHealthReport from '@/components/BotHealthReport.vue'
 import BotMemories from '@/components/BotMemories.vue'
 import BotSkills from '@/components/BotSkills.vue'
 import BotCollaborators from '@/components/BotCollaborators.vue'
+import FeishuAppPanel from '@/components/feishuApp/FeishuAppPanel.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
 import BotAllowedUsersDialog from '@/components/bot/BotAllowedUsersDialog.vue'
 import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
@@ -421,6 +422,17 @@ onMounted(async () => {
               </table>
             </div>
           </template>
+        </el-tab-pane>
+        <el-tab-pane
+          v-if="bot.platform === 'feishu' && perms?.can_edit"
+          name="feishu-app"
+          :label="t('feishuApp.tab')"
+          lazy
+        >
+          <FeishuAppPanel
+            v-if="detailTab === 'feishu-app'"
+            :bot-id="botId"
+          />
         </el-tab-pane>
         <el-tab-pane
           name="collaboration"

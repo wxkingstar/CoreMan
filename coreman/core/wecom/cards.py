@@ -165,7 +165,7 @@ def answered_card(
     """答完之后把原卡片就地换成这张：按钮没了，用户不会对着同一题重复提交。"""
     sub = msg("card_answered_sub", locale, answer=answer)
     if is_last:
-        # 与聊天里那条「正在生成结果」同一句话，共用 choice_generating 一个键。
+        # 与聊天里的提交确认共用同一句准确状态，避免卡片永久停在“生成中”。
         sub += "\n" + msg("choice_generating", locale)
     return {
         "card_type": "text_notice",

@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { cron, type CronOut, type CronRun } from '@/api/cron'
+import { formatDeliveryError } from '@/components/cron/deliveryError'
 import { useDeliveryStatus } from '@/components/cron/useDeliveryStatus'
 
 const { t } = useI18n()
@@ -38,7 +39,7 @@ defineExpose({ show })
       v-for="(error, target) in testErrors"
       :key="target"
     >
-      {{ target }}: {{ error }}
+      {{ formatDeliveryError(error, t) }} <small>({{ target }})</small>
     </p>
     <el-button @click="refreshNotificationTests">
       {{ t('common.refresh') }}
@@ -57,7 +58,11 @@ defineExpose({ show })
       <el-table-column
         prop="error"
         :label="t('cron.error')"
-      />
+      >
+        <template #default="{ row }">
+          {{ formatDeliveryError(row.error, t) }}
+        </template>
+      </el-table-column>
     </el-table>
   </el-dialog>
 </template>

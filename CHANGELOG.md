@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Create a Feishu bot by scanning a QR code while creating an AI employee. The employee configuration is validated first, the app secret stays on the server and is consumed once, and an unused app can be reused on the next attempt. The app requests CoreMan's identity, messaging and management permissions plus every "Connect Feishu" tier at once; personal authorization still narrows what is used. Requires database migration `0034`.
+- Feishu app page on the employee detail view: permissions and approval status, available "Connect Feishu" tiers, scan to add missing permissions, basic information and avatar, bot menu, availability, slash commands, requesting administrator approval and submitting releases.
+
+### Changed
+
+- The create employee form now defaults to Feishu and shows only the key, name and runtime; the runtime is required and other settings keep their defaults under "More settings". The edit form is unchanged.
+- QR-created Feishu agents get the built-in slash commands `/new`, `/stop`, `/sessions` and `/help`; other Feishu bots can add them from the Feishu app page. Built-in commands, including `sessions`, now also match when sent with a leading slash.
+- The Feishu app permission list also requests `vc:meeting.meetingevent:read` and `im:chat.members:read`, and no longer reports protocol grants such as `auth:user.id:read` as missing.
+
 ## [0.1.0] - 2026-09-16
 
 First public release.

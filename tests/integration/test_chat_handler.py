@@ -564,3 +564,76 @@ async def test_allowlist_and_commands_come_before_relay_check(
     t3 = await chat_task(db_session, bot, "你好", sender="nobody")
     await run(db_engine, t3, fake)
     assert (await stream_of(db_session, t3.id)).final_text == msg("relay_error", relay="未配置")
+
+
+async def test_feishu_union_private_message_establishes_notification_target(db_engine, db_session):
+    from datetime import UTC, datetime
+
+    from coreman.core.bots.secrets import CREDENTIALS_AAD, encrypt_json
+    from coreman.core.chat.reachability import private_target_valid
+    from coreman.core.cron.delivery import enqueue_result
+    from coreman.core.db.models import UserReached
+    from coreman.runtime.gateway_feishu.inbound import normalize_event
+
+    bot, _, cipher = await seed_bot(db_session)
+    bot.platform = "feishu"
+    bot.credentials_enc = encrypt_json(
+        cipher, {"app_id": "cli_a", "app_secret": "secret"}, CREDENTIALS_AAD
+    )
+    user = User(login_name="union-human", display_name="Human")
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        UserIdentity(
+            user_id=user.id, platform="feishu", platform_user_id="canonical", union_id="on_stable"
+        )
+    )
+    task = await chat_task(db_session, bot, "hello", sender="", chat_id="oc_private")
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    raw = {
+        "header": {"app_id": "cli_a", "event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {"open_id": "ou_app", "union_id": "on_stable"},
+            },
+            "message": {
+                "chat_id": "oc_private",
+                "chat_type": "p2p",
+                "message_id": event.platform_msg_id,
+                "message_type": "text",
+                "content": '{"text":"hello"}',
+            },
+        },
+    }
+    normalized = normalize_event(
+        raw,
+        bot_id=bot.id,
+        app_id="cli_a",
+        bot_open_id="ou_bot",
+        gateway_instance="gw",
+        now=datetime.now(UTC),
+    )
+    assert normalized is not None
+    event.payload = normalized.model_dump(mode="json")
+    event.sender_open_id = "ou_app"
+    task.payload = {**task.payload, "message": event.payload}
+    await db_session.commit()
+    await run(db_engine, task, FakeRelay("normal"))
+    reached = await db_session.get(UserReached, (bot.id, user.id))
+    assert reached is not None and reached.platform_chat_id == "oc_private"
+    log = (await db_session.scalars(select(ChatLog).where(ChatLog.task_id == task.id))).one()
+    assert log.user_id == user.id and log.platform_user_id == "canonical"
+    result = await enqueue_result(
+        db_session,
+        bot=bot,
+        config={"target_users": [str(user.id)]},
+        run_id="union-test",
+        content="private notification",
+        cipher=cipher,
+    )
+    assert not result["errors"] and len(result["outbox_ids"]) == 1
+    item = await db_session.get(OutboxItem, result["outbox_ids"][0])
+    assert item.target["chat_id"] == "oc_private"
+    assert item.target["recipient_platform_user_id"] == "canonical"
+    assert await private_target_valid(db_session, item)

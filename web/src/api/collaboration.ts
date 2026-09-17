@@ -1,8 +1,9 @@
 import { call, http } from './client'
 export interface CollaborationRoute {
   id: string; target_bot_id: string; target_name: string; target_description: string | null
-  enabled: boolean; version: number; status: 'ready' | 'unavailable'
-  reason: string | null; can_enable: boolean; can_remove: boolean; active_count: number
+  enabled: boolean; version: number; status: 'ready' | 'verified' | 'runtime_ready' | 'unavailable'
+  reason: string | null; configured?: boolean; runtime_ready?: boolean; transport_verified?: boolean
+  verification_error?: string | null; can_enable: boolean; can_remove: boolean; active_count: number
 }
 export interface CollaborationPeer { id: string; name: string; description: string | null; enabled: boolean; available: boolean }
 const base = (id: string) => `/api/admin/bots/${encodeURIComponent(id)}`

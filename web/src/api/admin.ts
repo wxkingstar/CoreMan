@@ -53,6 +53,8 @@ export const bots = {
   list: (params: Query) => call<Page<BotOut>>(http.get('/api/admin/bots', { params })),
   get: (id: string) => call<BotOut>(http.get(`/api/admin/bots/${id}`)),
   create: (body: BotIn) => call<BotOut>(http.post('/api/admin/bots', body, { timeout: 300000 })),
+  /** 只校验不落库：扫码创建飞书应用前先确认员工配置可用。 */
+  validate: (body: BotIn) => call<{ valid: boolean }>(http.post('/api/admin/bots', body, { params: { dry_run: true } })),
   patch: (id: string, body: BotPatch, version: number) =>
     call<BotOut>(http.patch(`/api/admin/bots/${id}`, body, { headers: { 'If-Match': `"${version}"` } })),
   remove: (id: string) => call<null>(http.delete(`/api/admin/bots/${id}`)),

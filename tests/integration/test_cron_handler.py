@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -320,3 +321,31 @@ async def test_cron_handler_leaves_periodic_heartbeats_to_the_service(
     assert run is not None and run.status == "success"
     # 只剩外部调用前那一次显式收取取消；周期心跳由 WorkerService 统一写。
     assert calls == 1
+
+
+@pytest.mark.parametrize("skip", [False, True])
+async def test_once_worker_finish_and_repeated_handler_do_not_run_again(
+    db_engine, db_session, skip
+):
+    now = datetime.now(UTC)
+    row = await job(
+        db_session,
+        now,
+        schedule_kind="once",
+        run_at=now,
+        target_chats=["test-group"],
+        precheck_script='def should_trigger(ctx):\n return {"trigger": False}' if skip else None,
+    )
+    factory = make_session_factory(db_engine)
+    await run_tick(factory, now)
+    task = await claim(db_session)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    await db_session.refresh(row)
+    assert row.last_status == ("skipped" if skip else "success")
+    assert not row.enabled and row.consumed_at is not None
+    await CronRunHandler().run(ctx)
+    assert await run_tick(factory, now + timedelta(days=366)) == 0
+    assert len(fake.requests) == (0 if skip else 1)
+    assert len((await db_session.scalars(select(OutboxItem))).all()) == (0 if skip else 1)

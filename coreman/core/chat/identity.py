@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import User, UserIdentity
+from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
+from coreman.core.crypto import Cipher
+from coreman.core.db.models import Bot, InboundEvent, User, UserIdentity
 from coreman.core.prompting.system_prompt import Speaker
 
 if TYPE_CHECKING:  # 只用于类型：openuserid 反过来要 db.models，直接导会绕成环。
@@ -26,13 +28,15 @@ def looks_like_open_userid(value: str) -> bool:
 async def _lookup(
     session: AsyncSession, platform: str, value: str
 ) -> tuple[User, UserIdentity] | None:
-    """按 `platform_user_id` 或 `open_id` 找身份行，连同所属员工一起返回。"""
+    """飞书仅按主 ID 查找；企微兼容 open_id，连同所属员工返回。"""
     stmt = (
         select(User, UserIdentity)
         .join(UserIdentity, UserIdentity.user_id == User.id)
         .where(
             UserIdentity.platform == platform,
-            or_(UserIdentity.platform_user_id == value, UserIdentity.open_id == value),
+            (UserIdentity.platform_user_id == value)
+            if platform == "feishu"
+            else or_(UserIdentity.platform_user_id == value, UserIdentity.open_id == value),
         )
         # platform_user_id 命中优先于 open_id：同一个值理论上可能既是甲的 userid 又是乙的
         # open_id，此时按「本平台的主 id」判定。
@@ -79,3 +83,85 @@ async def resolve_speaker(
     ident.open_id = platform_user_id
     await session.flush()
     return Speaker(userid, user.id, user.login_name, user.display_name)
+
+
+async def resolve_feishu_event_speaker(
+    session: AsyncSession, *, bot: Bot, event: InboundEvent, cipher: Cipher
+) -> Speaker:
+    """Resolve union identity from authenticated gateway's durable event only.
+
+    Raw event and normalized columns must agree with the current bot app.
+    App-specific open_id is comparison evidence, never a global lookup key.
+    """
+    pid = event.sender_platform_user_id or ""
+    unknown = Speaker(pid, None, None, None)
+    try:
+        sender = event.payload.get("sender") or {}
+        raw = event.payload.get("raw") or {}
+        header = raw.get("header") or {}
+        source = raw.get("event") or {}
+        raw_sender = source.get("sender") or {}
+        ids = raw_sender.get("sender_id") or {}
+        message = source.get("message") or {}
+        union_id = ids.get("union_id")
+        raw_chat_type = message.get("chat_type")
+        if not union_id and not sender.get("union_id"):
+            return await resolve_speaker(session, platform="feishu", platform_user_id=pid)
+        credentials = decrypt_json(cipher, bot.credentials_enc, CREDENTIALS_AAD)
+        if (
+            event.bot_id != bot.id
+            or event.platform != "feishu"
+            or bot.platform != "feishu"
+            or not bot.enabled
+            or event.kind != "message"
+            or not credentials.get("app_id")
+            or not credentials.get("app_secret")
+            or header.get("app_id") != credentials["app_id"]
+            or header.get("event_type") != "im.message.receive_v1"
+            or message.get("chat_id") != event.chat_id
+            or message.get("message_id") != event.platform_msg_id
+            or not isinstance(raw_chat_type, str)
+            or {"p2p": "single", "group": "group"}.get(raw_chat_type) != event.chat_type
+            or raw_sender.get("sender_type") != "user"
+            or sender.get("sender_type") != "user"
+            or not event.sender_open_id
+            or ids.get("open_id") != event.sender_open_id
+            or sender.get("open_id") != event.sender_open_id
+            or (ids.get("user_id") or "") != pid
+            or (sender.get("platform_user_id") or "") != pid
+            or not isinstance(union_id, str)
+            or not union_id.strip()
+            or sender.get("union_id") != union_id
+        ):
+            return unknown
+    except (AttributeError, TypeError, ValueError):
+        return unknown
+    rows = (
+        await session.execute(
+            select(User, UserIdentity)
+            .join(UserIdentity, UserIdentity.user_id == User.id)
+            .where(UserIdentity.platform == "feishu", UserIdentity.union_id == union_id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if pid:
+        explicit = await _lookup(session, "feishu", pid)
+        if explicit is None:
+            return unknown
+        user, ident = explicit
+        if (ident.union_id and ident.union_id != union_id) or any(
+            candidate.id != ident.id for _, candidate in rows
+        ):
+            return unknown
+    else:
+        if len(rows) != 1:
+            return unknown
+        user, ident = rows[0]
+    if (
+        user.status != "active"
+        or user.source == "bootstrap"
+        or not ident.platform_user_id
+        or (pid and pid != ident.platform_user_id)
+    ):
+        return unknown
+    return Speaker(ident.platform_user_id, user.id, user.login_name, user.display_name)

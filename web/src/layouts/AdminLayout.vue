@@ -13,6 +13,8 @@ export interface MenuItem {
 export const MENU: readonly MenuItem[] = [
   { key: 'statistics', path: '/statistics' },
   { key: 'bots', path: '/bots' },
+  { key: 'selfReminders', path: '/self-reminders' },
+  { key: 'myFeishu', path: '/my-feishu' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
   { key: 'skillApprovals', path: '/skill-approvals', roles: ['ai_committee', 'platform_admin'] },
@@ -45,7 +47,7 @@ const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
 const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs'] },
+  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]
@@ -110,7 +112,29 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
               v-else-if="!organizationKeys.includes(item.key)"
               :index="item.path"
             >
-              <el-icon><component :is="icons[item.key]" /></el-icon><span>{{ t('menu.' + item.key) }}</span>
+              <el-icon>
+                <svg
+                  v-if="item.key === 'myFeishu'"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                  class="feishu-menu-icon"
+                >
+                  <path
+                    fill="currentColor"
+                    d="M2 5.2c3.5.5 6.6 2.1 9.3 4.6L20.8 3l-5.7 10.3c-1.3 2.3-3.8 3.2-6.1 1.9L2 5.2Z"
+                  />
+                  <path
+                    fill="currentColor"
+                    opacity=".7"
+                    d="m3.3 12.2 5.8 4.4c2.1 1.6 4.9 1.2 6.5-.7l4.4-5.1-3.1 7.8c-.5 1.3-1.9 2.1-3.3 1.9-4.4-.6-7.7-3.5-10.3-8.3Z"
+                  />
+                </svg>
+                <component
+                  :is="icons[item.key]"
+                  v-else
+                />
+              </el-icon><span>{{ t('menu.' + item.key) }}</span>
             </el-menu-item>
           </template>
         </el-menu-item-group>

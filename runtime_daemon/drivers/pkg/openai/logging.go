@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -48,7 +49,9 @@ func ArgsLogSuffix(args []string) string {
 // size is logged (handlers log model and message counts after parsing); with
 // RELAY_DEBUG=1 the body is logged with env_vars redacted, truncated to 4 KB.
 func LogRequestBody(body []byte) {
-	if !DebugLogging() {
+	var req ChatCompletionRequest
+	private := json.Unmarshal(body, &req) == nil && FeishuPersonalEnabled(req.EnvVars)
+	if !DebugLogging() || private {
 		log.Printf("Request body received (%d bytes)", len(body))
 		return
 	}
@@ -72,8 +75,18 @@ func ContentPreview(text string, max int) string {
 
 // RedactCollaborationToken prevents CLI diagnostics echoing task credentials.
 func RedactCollaborationToken(text string, env map[string]string) string {
-	if token := env["COREMAN_COLLABORATION_TOKEN"]; token != "" {
-		return strings.ReplaceAll(text, token, "[REDACTED]")
+	for _, key := range []string{"COREMAN_COLLABORATION_TOKEN", "COREMAN_FEISHU_PERSONAL_TOKEN"} {
+		if token := env[key]; token != "" {
+			text = strings.ReplaceAll(text, token, "[REDACTED]")
+		}
 	}
 	return text
+}
+
+// PrivateContentPreview never places private retrieval content in diagnostics.
+func PrivateContentPreview(text string, max int, private bool) string {
+	if private {
+		return fmt.Sprintf("len=%d [private]", len(text))
+	}
+	return ContentPreview(text, max)
 }

@@ -1,3 +1,4 @@
+from coreman.core.i18n.messages import msg
 from coreman.core.wecom.cards import (
     answered_card,
     choice_card,
@@ -85,7 +86,9 @@ def test_answered_waiting_expired_notice_cards() -> None:
         "card_type": "text_notice",
         "source": {"desc": "AI 助手"},
         "main_title": {"title": "✅ 已答 · 问题 2/2", "desc": "用哪个框架？"},
-        "sub_title_text": "您的回答：Remix\n⏳ 正在生成结果，完成后自动推送…",
+        "sub_title_text": msg("card_answered_sub", answer="Remix")
+        + "\n"
+        + msg("choice_generating"),
         "card_action": {"type": 1, "url": "https://work.weixin.qq.com"},
         "task_id": "t",
     }

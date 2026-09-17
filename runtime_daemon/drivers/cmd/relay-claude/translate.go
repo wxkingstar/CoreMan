@@ -42,6 +42,7 @@ const (
 // behavioral change is that terminal control (kill vs interrupt) is delegated
 // to the caller via the returned lineOutcome.
 type sseTranslator struct {
+	private   bool
 	chatID    string
 	created   int64
 	model     string
@@ -114,7 +115,7 @@ func (t *sseTranslator) flushAggLog() {
 	if t.aggCount == 0 {
 		return
 	}
-	log.Printf("[STREAM %s] chunks=%d %s", strings.ToUpper(t.aggType), t.aggCount, openai.ContentPreview(t.aggBuf.String(), 500))
+	log.Printf("[STREAM %s] chunks=%d %s", strings.ToUpper(t.aggType), t.aggCount, openai.PrivateContentPreview(t.aggBuf.String(), 500, t.private))
 	t.aggType = ""
 	t.aggBuf.Reset()
 	t.aggCount = 0
@@ -335,7 +336,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 	if !t.streamDeltaSent {
 		text := extractTextFromEvent(&event)
 		if text != "" {
-			log.Printf("[STREAM FALLBACK DELTA] %s", openai.ContentPreview(text, 200))
+			log.Printf("[STREAM FALLBACK DELTA] %s", openai.PrivateContentPreview(text, 200, t.private))
 			t.emit(w, flusher, openai.ChatCompletionResponse{
 				ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
 				Choices: []openai.ChatCompletionChoice{{

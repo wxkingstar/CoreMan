@@ -2,12 +2,14 @@ import { call, http } from '@/api/client'
 import type { Page } from '@/api/types'
 
 export interface CronIn {
+  schedule_kind?: 'recurring' | 'once'; run_at?: string | null
   bot_id: string; name: string; cron_expression: string; timezone: string; prompt: string
   system_prompt: string | null; precheck_script: string | null; precheck_timeout_seconds: number
   enabled: boolean; expires_at: string | null; target_users: string[]; target_chats: string[]
   notify_emails: string[]; notify_webhook: boolean; notify_webhook_url?: string | null
 }
 export interface CronOut extends CronIn {
+  consumed_at?: string | null; delivery_status?: string; latest_run_id?: number | null
   has_webhook_url: boolean
   id: string; version: number; created_by: string; can_edit: boolean; next_run_at: string | null
   force_run_at: string | null; running_task_id: number | null; last_status: string | null
@@ -38,7 +40,7 @@ export const cron = {
   runs: (id: string, page = 1) => call<Page<CronRun>>(http.get(`${root}/${id}/runs`, { params: { page } })),
   testNotification: (row: CronOut) => call<{ outbox_ids: number[]; errors: Record<string, string> }>(http.post(`${root}/${row.id}/test-notification`, null, version(row.version))),
   notificationTests: (id: string) => call<CronRun['deliveries']>(http.get(`${root}/${id}/notification-tests`)),
-  notificationChats: (bot_id: string) => call<string[]>(http.get(`${root}/notification-chats`, { params: { bot_id } })),
+  notificationChats: (bot_id: string) => call<{ id: string; name: string }[]>(http.get(`${root}/notification-chats`, { params: { bot_id, details: true } })),
   precheck: (script: string) => call<{ status: string; error?: string; trigger?: boolean; reason?: string }>(http.post(`${root}/precheck/test`, { script })),
 }
 export const smtp = {

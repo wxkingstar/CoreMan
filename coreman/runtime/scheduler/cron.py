@@ -26,6 +26,7 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                 select(CronJob)
                 .where(
                     CronJob.enabled.is_(True),
+                    or_(CronJob.schedule_kind == "recurring", CronJob.consumed_at.is_(None)),
                     or_(
                         CronJob.next_run_at <= now,
                         CronJob.force_run_at <= now,
@@ -54,7 +55,12 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
             )
             if not invalid and bot is not None and user is not None:
                 try:
-                    await require_operator(session, bot, user)
+                    if job.execution_mode == "self_reminder":
+                        from coreman.core.reminders import require_fixed
+
+                        await require_fixed(session, job, bot, user)
+                    else:
+                        await require_operator(session, bot, user)
                 except ApiError:
                     invalid = True
             if invalid:
@@ -62,6 +68,24 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                 job.force_run_at = None
                 job.force_run_by = None
                 job.last_status = "skipped"
+                if job.schedule_kind == "once":
+                    job.enabled = False
+                    job.consumed_at = now
+                    job.next_run_at = None
+                    session.add(
+                        CronRun(
+                            cron_job_id=job.id,
+                            bot_id=job.bot_id,
+                            job_name=job.name,
+                            status="skipped",
+                            prompt=job.prompt,
+                            started_at=now,
+                            finished_at=now,
+                            executed_by=actor_id,
+                            trigger_kind="manual" if force else "scheduled",
+                            precheck_meta={"reason": "job_or_actor_unavailable"},
+                        )
+                    )
                 count += 1
                 continue
             running = await session.get(Task, job.running_task_id) if job.running_task_id else None
@@ -85,10 +109,17 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
             if job.running_task_id is not None:
                 # 终态任务先由 recover_runs 补齐记录；这里不可丢掉关联再启动下一轮。
                 continue
+            if job.schedule_kind == "once" and due is None:
+                job.next_run_at = job.run_at
+                continue
             job.force_run_at = None
             job.force_run_by = None
             try:
-                job.next_run_at = next_run(job.cron_expression, job.timezone, now)
+                if job.schedule_kind == "once":
+                    job.next_run_at = None
+                    job.consumed_at = now
+                else:
+                    job.next_run_at = next_run(job.cron_expression, job.timezone, now)
             except ValueError:
                 job.enabled = False
                 job.last_status = "failed"
@@ -97,6 +128,8 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                 continue
             if not force and now - due > timedelta(seconds=MISFIRE_SECONDS):
                 job.last_status = "skipped"
+                if job.schedule_kind == "once":
+                    job.enabled = False
                 session.add(
                     CronRun(
                         cron_job_id=job.id,
@@ -175,6 +208,8 @@ async def recover_runs(
                 select(CronRun).where(CronRun.task_id == job.running_task_id).with_for_update()
             )
             job.running_task_id = None
+            if job.schedule_kind == "once":
+                job.enabled = False
             if run is None or run.status != "running":
                 continue
             run.status, run.finished_at = "failed", now
@@ -182,7 +217,11 @@ async def recover_runs(
             job.last_status = "failed"
             bot = await session.get(Bot, job.bot_id)
             if bot is not None:
-                if task is not None and task.status != "cancelled":
+                if (
+                    task is not None
+                    and task.status != "cancelled"
+                    and job.execution_mode != "self_reminder"
+                ):
                     run.delivery = await enqueue_result(
                         session,
                         bot=bot,

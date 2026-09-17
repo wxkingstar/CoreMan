@@ -26,6 +26,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
+    ChatLog,
     RelayServer,
     RuntimeCall,
     RuntimeInstallLink,
@@ -60,9 +61,7 @@ class InstallOptions(BaseModel):
     environment: Literal["auto", "host", "chroot", "nspawn"] = "auto"
     claude_path: str = Field(default="", max_length=500)
     codex_path: str = Field(default="", max_length=500)
-    git_hosts: list[str] = Field(
-        default_factory=lambda: ["github.com"], max_length=30
-    )
+    git_hosts: list[str] = Field(default_factory=lambda: ["github.com"], max_length=30)
     max_concurrent: int = Field(default=10, ge=1, le=32)
     install_claude_probe: bool = False
     # 平台使用私有 CA 时的 PEM 证书：与 proxy 一样随配置注入安装脚本，
@@ -327,18 +326,48 @@ async def patch_node(
     return {"code": 0, "data": None}
 
 
+async def _authorize_session_content(
+    session: AsyncSession, request: Request, actor: User, session_id: str
+) -> None:
+    """Unknown sessions have no trustworthy owner; never proxy their raw content.
+
+    Inspect all matching history, not just the latest row: older shared sessions may
+    contain personal content even if a later turn has another conversation type.
+    """
+    try:
+        identity = uuid.UUID(session_id)
+    except ValueError:
+        raise not_found("会话不存在") from None
+    rows = (
+        await session.execute(
+            select(ChatLog.platform, ChatLog.chat_type, ChatLog.user_id).where(
+                ChatLog.relay_session_id == identity
+            )
+        )
+    ).all()
+    if not rows or any(
+        platform == "feishu"
+        and chat_type == "single"
+        and (request.cookies.get("bot_token") or user_id != actor.id)
+        for platform, chat_type, user_id in rows
+    ):
+        raise not_found("会话不存在")
+
+
 @router.get("/{node_id}/{provider}/session/{session_id}")
 async def session_view(
+    request: Request,
     node_id: uuid.UUID,
     provider: Literal["claude", "codex"],
     session_id: str,
-    _: User = Depends(MANAGERS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     import re
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
         raise not_found("会话不存在")
+    await _authorize_session_content(session, request, actor, session_id)
     if not await session.get(RuntimeNode, node_id):
         raise not_found("运行时不存在")
     template = (ROOT / "runtime_daemon/drivers/pkg/sessions/session_viewer.html").read_text()
@@ -374,10 +403,11 @@ async def session_view(
 
 @router.get("/{node_id}/{provider}/session/{session_id}/events")
 async def session_events(
+    request: Request,
     node_id: uuid.UUID,
     provider: Literal["claude", "codex"],
     session_id: str,
-    _: User = Depends(MANAGERS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     import re
@@ -389,6 +419,7 @@ async def session_events(
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
         raise not_found("会话不存在")
+    await _authorize_session_content(session, request, actor, session_id)
     if not await session.get(RuntimeNode, node_id):
         raise not_found("运行时不存在")
     # Release the reader transaction before holding a long-lived stream.

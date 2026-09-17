@@ -7,9 +7,12 @@ HELP_ZH = """📖 **命令列表**
 🔄 **会话管理:**
 • `reset` / `new` / `clear` / `重置` / `清空` - 重置当前会话，开始新对话
 • `stop` / `停止` / `暂停` / `停` - 中断正在进行的任务
+• `sessions` / `会话列表` - 查看最近会话，回复序号切换
 
 ❓ **帮助:**
 • `help` / `帮助` / `?` / `？` - 显示此命令列表
+
+命令前可加 `/`，例如 `/new`；飞书中输入 `/` 可选择已配置的斜杠指令。
 
 💬 除以上命令外，直接输入任何内容即可与 AI 对话"""
 
@@ -18,9 +21,13 @@ HELP_JA = """📖 **コマンド一覧**
 🔄 **セッション管理:**
 • `reset` / `new` / `clear` / `重置` / `清空` - 現在のセッションをリセットして新しい会話を始める
 • `stop` / `停止` / `暂停` / `停` - 実行中のタスクを中断する
+• `sessions` / `会话列表` - 最近の会話を表示し、番号を返信して切り替える
 
 ❓ **ヘルプ:**
 • `help` / `帮助` / `?` / `？` - このコマンド一覧を表示
+
+コマンドの前に `/` を付けても使えます（例：`/new`）。
+飛書では `/` を入力すると設定済みのスラッシュコマンドを選べます。
 
 💬 上記以外の入力はそのまま AI との会話になります"""
 
@@ -44,7 +51,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ask_user_invalid": "AI 发起了提问但内容无效，请换一种表述重新发送。",
         "choice_cancelled": "已取消选择。",
         "answer_recorded": "✓ 已记录回答：{answer}",
-        "choice_generating": "⏳ 正在生成结果，完成后自动推送…",
+        "choice_generating": "已提交，结果会在此对话回复。",
         # 提交轮（choice_submit）：答案送回模型的那一轮全程主动推送，没有 stream 撑场面。
         "submit_heartbeat": "⏳ AI 仍在处理中（已耗时 {seconds} 秒），请稍候…",
         "choice_duplicate": (
@@ -152,7 +159,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "任务已执行（调用了 {n} 次工具），但 AI 未返回文字总结，产物可查看 [会话记录]({url})。"
         ),
         "no_text_no_tools": "AI 已完成处理，但未生成文本回复。请尝试换个方式描述您的需求。",
-        "done_suffix": "\n\n✅ 任务已完成",
+        "done_suffix": "\n\n✅ 回复已生成",
         "session_link_prefix": "📎 查看实时聊天记录：[链接>>]({url})\n\n",
         "thinking_start": "🤔 正在思考中...",
         "thinking_end": "回复生成完成",
@@ -174,10 +181,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "📎 完整执行过程见：[链接>>]({url})"
         ),
         "bg_truncated": "...(本段过长已截断，完整见 [链接>>]({url}))",
-        "bg_done_prefix": "✅ 任务已完成\n\n",
-        "bg_done_plain": "✅ 任务已完成",
+        "bg_done_prefix": "✅ 回复已生成\n\n",
+        "bg_done_plain": "✅ 回复已生成",
         "bg_ttl_expired": "⏳ 任务运行超时，已终止后台等待{link}",
-        "long_task_done": "✅ 您的任务已完成（耗时 {seconds} 秒），请查看上方回复。",
+        "long_task_done": "✅ 回复已生成（耗时 {seconds} 秒），请查看上方内容。",
         # 定时任务推送（cron_handler / scheduler.cron）：头尾让用户分清定时推送与对话回复。
         "cron_push_header": "**{name}**\n> 机器人：{bot} | 耗时：{seconds} 秒\n\n",
         "cron_push_footer": "\n\n---\n⏰ 此消息由定时任务自动推送，不在当前对话上下文中。",
@@ -256,6 +263,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "media_reason_timeout": "下载超时",
         "media_reason_too_large": "文件超过 100 MB",
         "media_reason_download_failed": "下载失败",
+        "media_reason_permission_denied": (
+            "飞书应用缺少媒体读取权限，请管理员开通 "
+            "im:message.history:readonly、im:message:readonly 或 im:message，发布后重试"
+        ),
+        "media_reason_resource_unavailable": "资源不存在或已不可用",
+        "media_reason_resource_expired": "资源已过期",
         "media_reason_decrypt_failed": "解密失败",
         "media_reason_invalid_key": "密钥无效",
         "unknown_filename": "未知",
@@ -285,7 +298,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "choice_cancelled": "選択をキャンセルしました。",
         "answer_recorded": "✓ 回答を記録しました：{answer}",
-        "choice_generating": "⏳ 結果を生成中です。完了後に自動送信します…",
+        "choice_generating": "送信しました。結果はこの会話に返信されます。",
         "submit_heartbeat": "⏳ AI が処理中です（経過 {seconds} 秒）。少々お待ちください…",
         "choice_duplicate": (
             "🔄 先ほど送信された回答を AI が処理中です。少々お待ちください。"
@@ -412,7 +425,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "AI は処理を完了しましたが、テキスト応答を生成しませんでした。"
             "別の表現でご要望をお試しください。"
         ),
-        "done_suffix": "\n\n✅ タスク完了",
+        "done_suffix": "\n\n✅ 返信を生成しました",
         "session_link_prefix": "📎 リアルタイムの会話ログ：[リンク>>]({url})\n\n",
         "thinking_start": "🤔 考え中...",
         "thinking_end": "回答の生成が完了しました",
@@ -440,14 +453,12 @@ MESSAGES: dict[str, dict[str, str]] = {
             "📎 完全な実行過程：[リンク>>]({url})"
         ),
         "bg_truncated": "...(この段落は長いため省略。全文は [リンク>>]({url}))",
-        "bg_done_prefix": "✅ タスク完了\n\n",
-        "bg_done_plain": "✅ タスク完了",
+        "bg_done_prefix": "✅ 返信を生成しました\n\n",
+        "bg_done_plain": "✅ 返信を生成しました",
         "bg_ttl_expired": (
             "⏳ タスクの実行がタイムアウトしたため、バックグラウンド待機を終了しました{link}"
         ),
-        "long_task_done": (
-            "✅ タスクが完了しました（所要 {seconds} 秒）。上の返信をご確認ください。"
-        ),
+        "long_task_done": "✅ 返信を生成しました（所要 {seconds} 秒）。上の内容をご確認ください。",
         "session_busy": (
             "⚠️ 前回のタスクが停止しないため、このメッセージを処理できませんでした。"
             "しばらくしてから再送してください。"
@@ -556,6 +567,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "media_reason_timeout": "ダウンロードがタイムアウトしました",
         "media_reason_too_large": "ファイルが 100 MB を超えています",
         "media_reason_download_failed": "ダウンロードに失敗しました",
+        "media_reason_permission_denied": (
+            "Feishu アプリにメディア読み取り権限がありません。管理者が "
+            "im:message.history:readonly、im:message:readonly、または im:message を追加し、"
+            "公開後に再試行してください"
+        ),
+        "media_reason_resource_unavailable": "リソースが存在しないか、利用できません",
+        "media_reason_resource_expired": "リソースの有効期限が切れています",
         "media_reason_decrypt_failed": "復号に失敗しました",
         "media_reason_invalid_key": "鍵が無効です",
         "unknown_filename": "不明",

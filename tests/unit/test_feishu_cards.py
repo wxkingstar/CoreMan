@@ -53,3 +53,34 @@ def test_multiple_choice_form_roundtrips_current_interaction_keys():
     assert message.card_action["task_id"] == task_id
     assert message.card_action["selected"] == {"choice_answer": ["opt_0", "opt_1"]}
     assert message.card_action["event_key"] == "submit_choice"
+
+
+def test_personal_selection_card_uses_explicit_levels_and_callback_roundtrip():
+    from coreman.runtime.worker.personal_cards import selection_card
+
+    card = selection_card(123)
+    buttons = [e for e in card["body"]["elements"] if e["tag"] == "button"]
+    values = [b["behaviors"][0]["value"] for b in buttons]
+    assert [v["level"] for v in values] == ["all", "all_except_send", "messages_readonly"]
+    assert buttons[0]["type"] == "primary"
+    assert all(v["task_id"] == "personal:123" for v in values)
+    raw = {
+        "header": {"app_id": "cli", "event_type": "card.action.trigger", "event_id": "e"},
+        "event": {
+            "operator": {"user_id": "human", "open_id": "ou_human"},
+            "context": {"open_chat_id": "oc1", "open_message_id": "om1"},
+            "action": {"value": values[0]},
+        },
+    }
+    message = normalize_event(
+        raw,
+        bot_id=uuid4(),
+        app_id="cli",
+        bot_open_id="ou_bot",
+        gateway_instance="gateway",
+        now=datetime.now(UTC),
+    )
+    assert message is not None
+    assert message.card_action["level"] == "all"
+    # The callback itself does not attest that the source chat was private.
+    assert message.chat_type == "group"

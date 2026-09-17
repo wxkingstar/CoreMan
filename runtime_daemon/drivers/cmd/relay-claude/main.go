@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -162,7 +163,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	workingDir := req.WorkingDir
 	envVars := req.EnvVars
-	sessionID := req.SessionID
+	sessionID := openai.SessionLogID(&req)
 	sessionStore.LogRequest(sessionID, &req)
 
 	if req.Stream {
@@ -188,18 +189,26 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("claude", "--version")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", "--version")
 	if err := cmd.Run(); err != nil {
 		http.Error(w, fmt.Sprintf("Claude CLI not available: %v", err), http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "healthy",
-		"backend": "claude",
-		"version": version,
-		"commit":  buildCommit,
-		"mode":    relayMode,
+	help, helpErr := exec.CommandContext(ctx, "claude", "--help").Output()
+	restricted := helpErr == nil
+	for _, flag := range []string{"--restricted", "--tools", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"} {
+		restricted = restricted && strings.Contains(string(help), flag)
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":       "healthy",
+		"backend":      "claude",
+		"version":      version,
+		"commit":       buildCommit,
+		"mode":         relayMode,
+		"capabilities": map[string]bool{"feishu_personal_restricted_v1": restricted},
 	})
 }
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from coreman.core.i18n.messages import msg
@@ -136,7 +136,7 @@ class ContentBuilder:
                 [], "", "voice", None, None, msg("voice_empty", self.locale), "voice_empty"
             )
         if quote is not None:
-            return await self._with_quote(quote, text)
+            return await self._with_quote(quote, own, text)
         if not own:
             # 一个 part 都没有又没有引用：有话就当纯文本照发，一个字都没有才给模型一句
             # 占位（绝不能发空字符串过去）。
@@ -233,7 +233,9 @@ class ContentBuilder:
         file_info = files[0] if len(files) == 1 else ({"files": files} if files else None)
         return BuiltContent(out, _joined_text(out), "mixed", None, file_info, None)
 
-    async def _with_quote(self, quote: dict[str, Any], text: str) -> BuiltContent:
+    async def _with_quote(
+        self, quote: dict[str, Any], own: list[dict[str, Any]], text: str
+    ) -> BuiltContent:
         """带引用的消息：引用内容拼进用户这句话的前缀，图片另外挂成 image part。"""
         kind = str(quote.get("kind") or "text")
         refs = [r for r in (quote.get("refs") or []) if isinstance(r, dict)]
@@ -241,6 +243,10 @@ class ContentBuilder:
         if kind in ("text", "voice"):
             key = "quote_text_prefix" if kind == "text" else "quote_voice_prefix"
             body = msg(key, self.locale, quoted=quoted or "", text=text)
+            current_media = [part for part in own if part.get("type") in {"image", "file"}]
+            if current_media:
+                built = await self._mixed([_text_part(body), *current_media], body)
+                return replace(built, quoted_content=quoted or "")
             return BuiltContent([_text_part(body)], body, "text", quoted or "", None, None)
         if kind == "image":
             ref = dict(refs[0]) if refs else {}

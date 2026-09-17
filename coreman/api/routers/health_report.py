@@ -32,9 +32,10 @@ router = APIRouter(
     prefix="/api/admin/bots", tags=["health-report"], dependencies=[Depends(verify_csrf)]
 )
 PROMPT = (
-    "请只读检查当前机器人工作目录、已安装技能和可用工具，给出简洁的体检报告："
+    "请只读检查当前运行环境中的机器人工作目录、已安装技能和可用工具，给出简洁的环境检查报告："
     "正常项、失败项、未能验证的项。禁止修改文件、安装依赖、发送消息或执行写入操作；"
     "不要显示任何密码、令牌、密钥或环境变量值。不要要求用户回答交互问题。"
+    "仅报告此运行环境中实际检查到的结果，不要声称已验证外部平台或端到端链路。"
 )
 LIMIT = 128 * 1024
 
@@ -137,7 +138,7 @@ async def health_report(
                         if slot:
                             break
                 if not locked or not slot:
-                    yield event("error", {"message": "已有体检正在运行，请稍后重试。"})
+                    yield event("error", {"message": "已有运行环境检查正在进行，请稍后重试。"})
                     return
                 try:
                     async with request.app.state.session_factory() as fresh:
@@ -256,7 +257,8 @@ async def health_report(
                         "error",
                         {
                             "message": (
-                                "体检未完整完成或配置已变更，请稍后重试；上方内容仅为部分结果。"
+                                "运行环境检查未完整完成或配置已变更，请稍后重试；"
+                                "上方内容仅为部分结果。"
                             )
                         },
                     )

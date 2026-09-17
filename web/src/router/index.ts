@@ -21,6 +21,8 @@ export const router = createRouter({
       children: [
         { path: ':pathMatch(.*)*', name: 'not-found', component: () => import('@/views/NotFoundView.vue') },
         { path: '', name: 'home', component: () => import('@/views/HomeView.vue') },
+        { path: 'self-reminders', name: 'self-reminders', component: () => import('@/views/SelfRemindersView.vue') },
+        { path: 'my-feishu', name: 'my-feishu', component: () => import('@/views/MyFeishuView.vue') },
         { path: 'statistics', name: 'statistics', component: () => import('@/views/StatisticsView.vue') },
         { path: 'systems', name: 'systems', component: () => import('@/views/SystemsView.vue'), meta: { roles: ['ai_committee', 'platform_admin'] } },
         { path: 'credentials', name: 'credentials', component: () => import('@/views/CredentialsView.vue'), meta: { roles: ['platform_admin'] } },

@@ -105,8 +105,10 @@ export interface BotIn {
   credentials: Record<string, string>; env_vars: Record<string, string>
   welcome_message: string | null
   enabled: boolean
+  /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
+  feishu_registration_id?: string | null
 }
-export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled'>>
+export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled' | 'feishu_registration_id'>>
 export interface SwitchRelayIn { relay_server_id: string; model?: string | null; workspace_mode?: 'copy' | 'git' | 'existing'; target_directory?: string; allow_stored_memory?: boolean }
 export interface SwitchRelayOut {
   old_relay_id: string | null; new_relay_id: string

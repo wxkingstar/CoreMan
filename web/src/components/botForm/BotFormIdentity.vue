@@ -3,22 +3,27 @@ import { useI18n } from 'vue-i18n'
 import type { Platform } from '@/api/types'
 import { useBotFormContext } from '@/components/botForm/context'
 
-const PLATFORMS: Platform[] = ['wecom', 'feishu']
+/** part：新建时拆成「必填」与「更多设置」两块渲染；编辑时不传，整块展示。 */
+defineProps<{ part?: 'essential' | 'extra' }>()
+const PLATFORMS: Platform[] = ['feishu', 'wecom']
 const { t } = useI18n()
 const { mode, form, fieldErrors, isManager, teamList, onBotKeyInput, onPlatformChange } = useBotFormContext()
 </script>
 
 <template>
   <h3
+    v-if="!part"
     id="form-identity"
     class="cm-section-title"
   >
     <span>01</span>{{ t('workspace.identity') }}
   </h3>
   <el-form-item
+    v-if="part !== 'extra'"
     :label="t('bots.botKey')"
     data-test="bot_key"
     :error="fieldErrors.bot_key"
+    :required="mode === 'create'"
   >
     <el-input
       v-model="form.bot_key"
@@ -31,6 +36,7 @@ const { mode, form, fieldErrors, isManager, teamList, onBotKeyInput, onPlatformC
   </el-form-item>
 
   <el-form-item
+    v-if="part !== 'essential'"
     :label="t('bots.platform')"
     data-test="platform"
     :error="fieldErrors.platform"
@@ -51,46 +57,50 @@ const { mode, form, fieldErrors, isManager, teamList, onBotKeyInput, onPlatformC
   </el-form-item>
 
   <el-form-item
+    v-if="part !== 'extra'"
     :label="t('bots.name')"
     data-test="name"
     :error="fieldErrors.name"
+    :required="mode === 'create'"
   >
     <el-input v-model="form.name" />
   </el-form-item>
 
-  <el-form-item
-    :label="t('bots.description')"
-    data-test="description"
-    :error="fieldErrors.description"
-  >
-    <el-input
-      v-model="form.description"
-      type="textarea"
-      :rows="2"
-    />
-  </el-form-item>
-
-  <el-form-item
-    v-if="isManager"
-    :label="t('bots.team')"
-    data-test="team"
-    :error="fieldErrors.team_id"
-  >
-    <el-select
-      :model-value="form.team_id"
-      clearable
-      :placeholder="t('bots.team')"
-      style="width: 240px"
-      @update:model-value="form.team_id = ($event as string | undefined) ?? null"
+  <template v-if="part !== 'essential'">
+    <el-form-item
+      :label="t('bots.description')"
+      data-test="description"
+      :error="fieldErrors.description"
     >
-      <el-option
-        v-for="tm in teamList"
-        :key="tm.id"
-        :label="tm.name_zh"
-        :value="tm.id"
+      <el-input
+        v-model="form.description"
+        type="textarea"
+        :rows="2"
       />
-    </el-select>
-  </el-form-item>
+    </el-form-item>
+
+    <el-form-item
+      v-if="isManager"
+      :label="t('bots.team')"
+      data-test="team"
+      :error="fieldErrors.team_id"
+    >
+      <el-select
+        :model-value="form.team_id"
+        clearable
+        :placeholder="t('bots.team')"
+        style="width: 240px"
+        @update:model-value="form.team_id = ($event as string | undefined) ?? null"
+      >
+        <el-option
+          v-for="tm in teamList"
+          :key="tm.id"
+          :label="tm.name_zh"
+          :value="tm.id"
+        />
+      </el-select>
+    </el-form-item>
+  </template>
 </template>
 
 <style scoped>

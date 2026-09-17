@@ -15,7 +15,7 @@ from coreman.core.bus import tasks
 from coreman.core.chat import interactions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.commands import classify_command, is_cancel_word
-from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
@@ -83,12 +83,17 @@ class IntakeStage(ChatStageBase):
         platform_user_id = str(
             sender.get("platform_user_id") or inbound.sender_platform_user_id or ""
         )
-        speaker = await resolve_speaker(
-            session,
-            platform=bot.platform,
-            platform_user_id=platform_user_id,
-            resolver=ctx.openuserid,
-        )
+        if bot.platform == "feishu":
+            speaker = await resolve_feishu_event_speaker(
+                session, bot=bot, event=inbound, cipher=ctx.cipher
+            )
+        else:
+            speaker = await resolve_speaker(
+                session,
+                platform=bot.platform,
+                platform_user_id=platform_user_id,
+                resolver=ctx.openuserid,
+            )
         text = strip_mention(joined_text(parts), bot.name)
         if bot.platform == "feishu":
             from coreman.runtime.worker.feishu_escalations import consume_reply
@@ -111,7 +116,15 @@ class IntakeStage(ChatStageBase):
             return None
         if await self._denied(session, ctx, intake):
             return None
+        from coreman.runtime.worker.chat.reminders import intercept
+
+        if await intercept(session, ctx, intake):
+            return None
         if await self._command(session, ctx, intake):
+            return None
+        from coreman.runtime.worker.chat.personal import reject_unavailable
+
+        if await reject_unavailable(session, ctx, intake):
             return None
         if await self._pending_answer(session, ctx, intake):
             return None
