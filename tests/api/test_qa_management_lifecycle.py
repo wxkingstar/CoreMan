@@ -2,7 +2,7 @@
 
 from sqlalchemy import select
 
-from coreman.core.db.models import BusinessSystem, CronJob, User, UserIdentity
+from coreman.core.db.models import BusinessSystem, CronJob, User, UserIdentity, UserReached
 from tests.api.conftest import login_as, login_existing
 from tests.integration.worker_helpers import seed_bot
 
@@ -11,6 +11,7 @@ async def test_cron_cancel_disable_history_and_delete(client, db_session):
     bot, _, _ = await seed_bot(db_session)
     creator = await db_session.get(User, bot.created_by)
     db_session.add(UserIdentity(user_id=creator.id, platform="wecom", platform_user_id="qa-user"))
+    db_session.add(UserReached(bot_id=bot.id, user_id=creator.id, platform_chat_id="private"))
     await db_session.commit()
     await login_existing(client, db_session, creator)
     response = await client.post(

@@ -80,7 +80,7 @@ def parse_request(text: str) -> tuple[int, str] | None:
 def is_reminder_request(text: str) -> bool:
     """Route only explicit reminder-setting language into the fixed reminder flow."""
     value = text.strip()
-    if value in ("确认提醒", "取消提醒") or value.startswith(("确认提醒", "取消提醒")):
+    if value in ("确认提醒", "取消提醒"):
         return True
     if parse_request(value):
         return True

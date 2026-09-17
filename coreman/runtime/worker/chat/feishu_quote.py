@@ -99,8 +99,15 @@ def _api_text(body: dict[str, Any], *, chat_id: str, parent_id: str) -> str | No
         return _bounded("\n".join(reversed(card_pieces)))
     # post 消息只采集官方结构里的文本节点；图片、文件 key 和 URL 一概不碰。
     pieces: list[str] = []
-    for localized in list(content.values())[:4]:
-        rows = localized.get("content") if isinstance(localized, dict) else None
+    posts = (
+        [content] if "content" in content or "content_v2" in content else list(content.values())[:4]
+    )
+    for localized in posts:
+        rows = (
+            (localized.get("content") or localized.get("content_v2"))
+            if isinstance(localized, dict)
+            else None
+        )
         if not isinstance(rows, list):
             continue
         for row in rows[:100]:

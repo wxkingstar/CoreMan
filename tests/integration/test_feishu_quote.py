@@ -266,3 +266,52 @@ async def test_cross_chat_parent_is_refused_even_when_api_returns_text(
     content = relay.requests[0]["messages"][1]["content"]
     assert content == "[引用消息内容不可用]\n\n引用了什么"
     assert "机密" not in content
+
+
+@pytest.mark.parametrize("localized", [False, True])
+@pytest.mark.parametrize("content_key", ["content", "content_v2"])
+@pytest.mark.parametrize("same_chat", [False, True])
+async def test_human_post_quote_shapes(
+    db_engine, db_session, monkeypatch, localized, content_key, same_chat
+):
+    bot = await _feishu_bot(db_session)
+    task = await chat_task(db_session, bot, "概括", chat_id="oc_same")
+    await _set_parent(db_session, task, "om_post", "oc_same")
+    post = {
+        "title": "标题",
+        content_key: [
+            [
+                {"tag": "text", "text": "甲" * 20000},
+                {"tag": "img", "image_key": "do-not-fetch"},
+                {"tag": "media", "file_key": "do-not-fetch"},
+            ]
+        ],
+    }
+    calls = []
+
+    async def parent(self, method, path, **kwargs):
+        calls.append((method, path))
+        return {
+            "data": {
+                "items": [
+                    {
+                        "message_id": "om_post",
+                        "chat_id": "oc_same" if same_chat else "oc_other",
+                        "msg_type": "post",
+                        "sender": {"sender_type": "user", "id": "ou_human"},
+                        "body": {"content": json.dumps({"zh_cn": post} if localized else post)},
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(FeishuClient, "call", parent)
+    relay = FakeRelay("normal")
+    await run(db_engine, task, relay)
+    assert calls == [("GET", "/open-apis/im/v1/messages/om_post")]
+    content = relay.requests[0]["messages"][1]["content"]
+    assert content == (
+        msg("quote_text_prefix", quoted="甲" * 12000, text="概括")
+        if same_chat
+        else "[引用消息内容不可用]\n\n概括"
+    )

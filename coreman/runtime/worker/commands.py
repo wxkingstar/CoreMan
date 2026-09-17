@@ -149,7 +149,19 @@ class CommandHandler:
                         select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id)
                     )
                 )
-                if not bot.enabled or (allowed and speaker.user_id not in allowed):
+                # The gateway copies the original actor into the task. Require
+                # that evidence to agree even when an empty app-B user_id is
+                # resolved to its verified union identity; a conflicting actor must never gain
+                # authority from somebody else's durable inbound event.
+                task_actor = ctx.task.payload.get("platform_user_id")
+                actor_matches = isinstance(task_actor, str) and task_actor == (
+                    inbound.sender_platform_user_id or ""
+                )
+                if (
+                    not actor_matches
+                    or not bot.enabled
+                    or (allowed and speaker.user_id not in allowed)
+                ):
                     await reply_once(
                         session,
                         ctx,

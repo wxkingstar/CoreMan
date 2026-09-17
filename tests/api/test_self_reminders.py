@@ -85,6 +85,8 @@ async def test_propose_confirm_once_and_original_identity(db_session, app):
         "总结会议中的提醒事项",
         "帮我把“明天提醒我交水费”翻译成英文",
         "请分析‘两分钟后提醒我检查接口’这句话",
+        "确认提醒这四个字翻译成英文",
+        "取消提醒用英语怎么说？",
     ],
 )
 @pytest.mark.parametrize("chat_type", ["single", "group"])
@@ -588,7 +590,7 @@ def test_ambiguous_shortened_hundreds_require_explicit_digits(text):
 
 
 @pytest.mark.parametrize("command", ["stop", "new"])
-@pytest.mark.parametrize("tamper", [None, "app", "ambiguous_union"])
+@pytest.mark.parametrize("tamper", [None, "app", "ambiguous_union", "actor_mismatch"])
 async def test_union_stop_uses_current_verified_human(db_session, app, db_engine, command, tamper):
     from coreman.core.db.models import BotAllowedUser, User
     from coreman.runtime.worker.commands import CommandHandler
@@ -623,7 +625,7 @@ async def test_union_stop_uses_current_verified_human(db_session, app, db_engine
     task.payload = {
         "message": payload,
         "command": "reset" if command == "new" else "stop",
-        "platform_user_id": "",
+        "platform_user_id": "outsider" if tamper == "actor_mismatch" else "",
     }
     db_session.add(BotAllowedUser(bot_id=bot.id, user_id=user.id))
     await db_session.commit()
@@ -778,6 +780,37 @@ async def test_native_post_confirmation_keeps_exact_plain_command_boundary(
         content,
         message_fields={"parent_id": "quoted"} if confirmation == "quoted" else None,
     )
-    assert "已设置" not in await handle_request(db_session, task, app.state.cipher)
+    reply = await handle_request(db_session, task, app.state.cipher)
+    if confirmation == "extra_words":
+        assert reply is None  # Extra prose belongs to the assistant, never confirmation.
+    else:
+        assert reply is not None and "已设置" not in reply
     assert await db_session.scalar(select(CronJob)) is None
     assert (await db_session.scalar(select(InteractionState))).status == "open"
+
+
+@pytest.mark.parametrize("text", ["确认提醒这四个字翻译成英文", "取消提醒用英语怎么说？"])
+@pytest.mark.parametrize("mode", ["single", "group", "personal"])
+async def test_confirmation_words_reach_assistant(db_session, app, db_engine, text, mode):
+    from tests.api.test_feishu_personal import grant
+    from tests.api.test_feishu_personal_worker import intake_for
+    from tests.fakes.fake_relay import FakeRelay
+    from tests.integration.test_chat_handler import run
+
+    bot, user, task = await setup(
+        db_session, app, chat_type="group" if mode == "group" else "single"
+    )
+    await set_text(db_session, task, text)
+    if mode == "personal":
+        await grant(db_session, app, bot, user)
+        await intake_for(db_session, bot, task, text)
+    await db_session.commit()
+    relay = FakeRelay("normal")
+    await run(db_engine, task, relay)
+    assert len(relay.requests) == 1
+    assert text in str(relay.requests[0]["messages"])
+    assert ("COREMAN_FEISHU_PERSONAL_TOKEN" in relay.requests[0]["env_vars"]) == (
+        mode == "personal"
+    )
+    assert await db_session.scalar(select(CronJob)) is None
+    assert await db_session.scalar(select(InteractionState)) is None

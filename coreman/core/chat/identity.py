@@ -104,6 +104,7 @@ async def resolve_feishu_event_speaker(
         ids = raw_sender.get("sender_id") or {}
         message = source.get("message") or {}
         union_id = ids.get("union_id")
+        raw_chat_type = message.get("chat_type")
         if not union_id and not sender.get("union_id"):
             return await resolve_speaker(session, platform="feishu", platform_user_id=pid)
         credentials = decrypt_json(cipher, bot.credentials_enc, CREDENTIALS_AAD)
@@ -119,7 +120,8 @@ async def resolve_feishu_event_speaker(
             or header.get("event_type") != "im.message.receive_v1"
             or message.get("chat_id") != event.chat_id
             or message.get("message_id") != event.platform_msg_id
-            or {"p2p": "single", "group": "group"}.get(message.get("chat_type")) != event.chat_type
+            or not isinstance(raw_chat_type, str)
+            or {"p2p": "single", "group": "group"}.get(raw_chat_type) != event.chat_type
             or raw_sender.get("sender_type") != "user"
             or sender.get("sender_type") != "user"
             or not event.sender_open_id
