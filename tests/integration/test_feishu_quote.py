@@ -195,7 +195,7 @@ async def test_official_parent_read_accepts_any_sender_in_the_same_chat_and_is_b
     assert content == msg("quote_text_prefix", quoted="甲" * 12_000, text="概括")
 
 
-@pytest.mark.parametrize("parent_id", ["", 0])
+@pytest.mark.parametrize("parent_id", [0, [], {}])
 async def test_present_malformed_parent_is_explicitly_unavailable_without_http(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
@@ -213,6 +213,22 @@ async def test_present_malformed_parent_is_explicitly_unavailable_without_http(
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
     assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n继续"
+
+
+async def test_empty_parent_is_normal_no_quote_without_http(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch
+) -> None:
+    bot = await _feishu_bot(db_session)
+    task = await chat_task(db_session, bot, "普通消息", chat_id="oc_same")
+    await _set_parent(db_session, task, "", "oc_same")
+
+    async def no_http(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("empty no-parent marker must not call Feishu")
+
+    monkeypatch.setattr(FeishuClient, "call", no_http)
+    relay = FakeRelay("normal")
+    await run(db_engine, task, relay)
+    assert relay.requests[0]["messages"][1]["content"] == "普通消息"
 
 
 async def test_cross_chat_parent_is_refused_even_when_api_returns_text(

@@ -80,3 +80,11 @@ TEST_DATABASE_URL=postgresql+asyncpg://postgres:coreman_test_only@127.0.0.1:1544
 ```
 
 GREEN result: `8 passed in 4.60s`. Focused Ruff and mypy checks also passed for the amended helper/content modules and tests.
+
+### Empty-parent compatibility follow-up
+
+The gateway copies Feishu's raw `parent_id`, where an empty string is the ordinary no-parent representation. Empty string now follows absent/`None`: no quote marker and no HTTP request. Non-string values (`0`, list, object) and invalid non-empty identifiers still receive the explicit unavailable marker without HTTP.
+
+RED: `pytest -q tests/integration/test_feishu_quote.py -k empty_parent` failed `1/1` because an ordinary empty parent produced the unavailable note.
+
+GREEN: the complete focused quote suite passed `10/10 in 5.21s`; focused Ruff and mypy checks passed for both amended source modules and the integration test.

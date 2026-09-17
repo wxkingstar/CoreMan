@@ -38,7 +38,8 @@ class ContentStage(ChatStageBase):
         失败任务；「暂不支持」与「语音没转写出来」沿用既有口径：答过了就算这轮答完了。
         """
         reply_context = pre.intake.inbound.reply_context
-        has_parent = "parent_id" in reply_context and reply_context["parent_id"] is not None
+        parent_id = reply_context.get("parent_id")
+        has_parent = "parent_id" in reply_context and parent_id is not None and parent_id != ""
         if pre.intake.bot.platform == "feishu" and has_parent:
             from coreman.runtime.worker.chat.feishu_quote import enrich
 

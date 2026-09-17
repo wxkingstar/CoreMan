@@ -125,6 +125,8 @@ async def enrich(
     text: str,
 ) -> tuple[list[dict[str, Any]], str]:
     """返回补过引用的 parts/text；失败显式标注，但不伪造父消息原文。"""
+    if parent_id == "":
+        return parts, text
     if not isinstance(parent_id, str) or not _MESSAGE_ID.fullmatch(parent_id) or not chat_id:
         note_text = f"{UNAVAILABLE}\n\n{text}" if text.strip() else UNAVAILABLE
         return [{"type": "text", "text": UNAVAILABLE}, *parts], note_text
