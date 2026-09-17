@@ -4,6 +4,11 @@ type Messages<T> = { [K in keyof T]: T[K] extends string ? string : Messages<T[K
 
 const en = {
   myFeishu: {
+    retentionNotice: "Private chat text and answers may be retained in CoreMan conversation audit records. Resetting, switching modes or revoking stops reuse of old context but does not delete audit records. Personal data is not written to shared memory.",
+    modeHint: "Send “普通助手” to exit personal mode or “飞书资料” to enter it. Switching clears conversation context without expanding authorization.",
+    tokenRefreshAvailable: "The access token expired; authorization remains connected. The next access will attempt renewal. Reconnect if renewal fails.",
+    tokenExpired: "The access token expired without a refresh credential. Please reconnect.",
+
     unselected: 'Not selected yet',
     levels: {"messages_readonly": "1 · Read messages only", "all_except_send": "2 · All permissions except sending messages", "all": "3 · All permissions including sending messages", "legacy_readonly": "Legacy read-only authorization"},
     localRevoked: "CoreMan access has stopped, but Feishu credential revocation is unconfirmed. Check and remove the app in Feishu authorization settings.",

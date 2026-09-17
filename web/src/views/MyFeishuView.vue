@@ -70,6 +70,8 @@ onUnmounted(() => {
       show-icon
     >
       <p>{{ t('myFeishu.privateOnly') }}</p>
+      <p>{{ t('myFeishu.retentionNotice') }}</p>
+      <p>{{ t('myFeishu.modeHint') }}</p>
       <p>{{ t('myFeishu.requestHint', { command: '查看最近的聊天' }) }}</p>
     </el-alert>
     <div class="feishu-toolbar">
@@ -111,6 +113,9 @@ onUnmounted(() => {
           </p>
           <p v-if="row.status === 'expired' || row.status === 'revoked'">
             {{ t('myFeishu.reconnectHint', { command: '连接我的飞书' }) }}
+          </p>
+          <p v-if="row.status === 'connected' && row.access_token_expired">
+            {{ t(row.refresh_available ? 'myFeishu.tokenRefreshAvailable' : 'myFeishu.tokenExpired') }}
           </p>
           <dl>
             <dt>{{ t('myFeishu.level') }}</dt>

@@ -164,6 +164,7 @@ async def interactive_user(request: Request, actor: User = Depends(current_user)
 
 @router.get("/api/me/feishu-authorizations")
 async def authorizations(
+    request: Request,
     response: Response,
     actor: User = Depends(interactive_user),
     session: AsyncSession = Depends(get_session),
@@ -182,6 +183,7 @@ async def authorizations(
         "data": {
             "items": [
                 {
+                    **service._state(grant, request.app.state.cipher),
                     "bot_id": str(grant.bot_id),
                     "bot_name": name,
                     "status": (

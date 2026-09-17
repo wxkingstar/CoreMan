@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select, text
@@ -46,6 +47,8 @@ def _fingerprint(app_id: str, secret: str) -> str:
 
 
 def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
+    row.context_epoch = uuid.uuid4()
+    row.assistant_mode = "personal"
     row.status = status
     row.token_enc = row.pending_enc = None
     row.expires_at = row.pending_expires_at = row.next_poll_at = None
@@ -59,6 +62,8 @@ def save_tokens(
 ) -> None:
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise PersonalError("authorization_failed")
+    if row.status != "connected":
+        row.context_epoch = uuid.uuid4()
     row.token_enc = cipher.encrypt(
         jsonlib.dumps({k: data[k] for k in ("access_token", "refresh_token") if data.get(k)}),
         _aad(row, "token_enc"),
@@ -155,23 +160,46 @@ async def _row(
     return row, secret
 
 
-def _state(row: FeishuPersonalGrant) -> dict[str, Any]:
+RETENTION_NOTICE = (
+    "私聊文本和回答可能保留在 CoreMan 对话审计记录中。"
+    "清除会话、切换模式或撤销授权会停止使用旧上下文，不会删除已有审计记录；"
+    "个人资料不会写入共享记忆。"
+)
+
+
+def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    refresh_available = False
+    if row.status == "connected" and row.token_enc:
+        tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
+        refresh_available = bool(tokens.get("refresh_token"))
     return {
+        "retention_notice": RETENTION_NOTICE,
+        "assistant_mode": row.assistant_mode,
+        "access_token_expired": bool(row.expires_at and row.expires_at <= now)
+        if row.status == "connected"
+        else None,
+        "refresh_available": refresh_available,
+        "checked_at_beijing": now.astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
         "status": row.status,
         "scopes": row.scopes,
         "authorization_level": row.authorization_level,
         "requested_scopes": row.requested_scopes,
         "missing_scopes": sorted(set(row.requested_scopes or []) - set(row.scopes or [])),
-        "checked_at": datetime.now(UTC).isoformat(),
+        "checked_at": now.isoformat(),
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
     }
 
 
-SELECTION_PROMPT = """请选择本次飞书授权范围，回复 1、2 或 3：
+SELECTION_PROMPT = (
+    """请选择本次飞书授权范围，回复 1、2 或 3：
 1. 消息只读：搜索、读取你有权限访问的私聊和群聊消息。
 2. 全部权限，不含发送消息：申请应用已开通的用户权限，包含修改、删除和管理操作，但不允许发送消息。
 3. 全部权限，包含发送消息：在第二档基础上，允许以你的身份发送消息。
 选择后才会生成授权链接；实际可用操作以系统已接入的工具为准。个人授权仅限本人与机器人的私聊使用。"""
+    + "\n"
+    + RETENTION_NOTICE
+)
 
 
 async def _revoke_remote(cipher: Cipher, row: FeishuPersonalGrant, secret: str) -> bool:
@@ -270,7 +298,7 @@ async def _start_authorization(
 async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
     row, _ = await _row(session, cipher, scope)
     if row.status == "connected" and row.token_enc:
-        return _state(row)
+        return _state(row, cipher)
     if (
         row.status == "pending"
         and row.pending_enc
@@ -279,11 +307,13 @@ async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict
     ):
         pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
         return {
+            **_state(row, cipher),
             "status": "pending",
             "authorization_url": pending["url"],
             "expires_at": row.pending_expires_at.isoformat(),
         }
     return {
+        "retention_notice": RETENTION_NOTICE,
         "status": "selection_required",
         "prompt": "请发送连接我的飞书，再由本人回复 1、2 或 3 选择授权范围。",
     }
@@ -294,13 +324,14 @@ async def authorization_status(
 ) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
     if not row.pending_enc:
-        return _state(row)
+        return _state(row, cipher)
     now = datetime.now(UTC)
     if not row.pending_expires_at or row.pending_expires_at <= now:
         _clear(row, "expired")
-        return _state(row)
+        return _state(row, cipher)
     if row.next_poll_at and row.next_poll_at > now:
         return {
+            **_state(row, cipher),
             "status": "pending",
             "retry_after": max(1, int((row.next_poll_at - now).total_seconds())),
         }
@@ -321,7 +352,7 @@ async def authorization_status(
         if error == "slow_down":
             row.poll_interval = min(60, row.poll_interval + 5)
             row.next_poll_at = now + timedelta(seconds=row.poll_interval)
-        return {"status": "pending", "retry_after": row.poll_interval}
+        return {**_state(row, cipher), "status": "pending", "retry_after": row.poll_interval}
     if error or not data.get("access_token"):
         _clear(row, "expired")
         raise PersonalError("authorization_failed")
@@ -340,7 +371,7 @@ async def authorization_status(
         _clear(row)
         raise PersonalError("identity_mismatch")
     save_tokens(cipher, row, data, secret)
-    return _state(row)
+    return _state(row, cipher)
 
 
 async def revoke_grant(

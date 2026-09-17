@@ -8,6 +8,10 @@ export interface FeishuAuthorization {
   missing_scopes?: string[]
   scopes: string[]
   expires_at: string | null
+  access_token_expired?: boolean | null
+  refresh_available?: boolean
+  checked_at?: string
+  retention_notice?: string
 }
 const base = '/api/me/feishu-authorizations'
 export const feishuAuthorizations = {

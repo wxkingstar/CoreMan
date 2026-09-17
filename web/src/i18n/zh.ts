@@ -1,5 +1,10 @@
 export default {
   myFeishu: {
+    retentionNotice: "私聊文本和回答可能保留在 CoreMan 对话审计记录中。清除会话、切换模式或撤销授权会停止使用旧上下文，不会删除已有审计记录；个人资料不会写入共享记忆。",
+    modeHint: "发送“普通助手”退出资料模式，发送“飞书资料”重新进入；切换会清除会话上下文，不会扩大授权范围。",
+    tokenRefreshAvailable: "访问令牌已到期，授权仍保持连接；下次访问将尝试续期，续期失败时需重新连接。",
+    tokenExpired: "访问令牌已到期且没有续期凭证，请重新连接。",
+
     unselected: '尚未选择',
     levels: {"messages_readonly": "1 · 仅读取消息", "all_except_send": "2 · 全部权限（不含发送消息）", "all": "3 · 全部权限（含发送消息）", "legacy_readonly": "原有只读授权"},
     localRevoked: "CoreMan 访问已停止，但尚未确认飞书凭证已撤销。可前往飞书授权管理检查并移除应用授权。",
