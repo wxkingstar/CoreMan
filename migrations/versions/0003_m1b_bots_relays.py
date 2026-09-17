@@ -15,21 +15,17 @@ down_revision = "0002"
 branch_labels = None
 depends_on = None
 
-# (provider, model, display_name, is_default, sort_order)；来自 运行时 盘点，
-# 运行期由 relay 探测预填补充（仅新增，不覆盖）。
+# 新安装系统的默认目录；修改此种子不会覆盖已安装系统的管理员配置。
+# (provider, model, display_name, is_default, sort_order)
 SEED_MODELS = [
-    ("claude", "vllm/claude-sonnet-4-6", "Claude Sonnet 4.6", True, 100),
-    ("claude", "vllm/claude-opus-4-6", "Claude Opus 4.6", False, 90),
-    ("claude", "vllm/claude-haiku-4-5-20251001", "Claude Haiku 4.5", False, 80),
-    ("claude", "minimax/MiniMax-M2.7", "MiniMax M2.7", False, 70),
-    ("claude", "minimax/MiniMax-M2.5", "MiniMax M2.5", False, 60),
-    ("claude", "kimi/kimi-k2.5", "Kimi K2.5", False, 50),
-    ("claude", "zhipu/glm-5.1", "GLM 5.1", False, 40),
-    ("codex", "codex/gpt-5.5", "GPT-5.5 (Codex)", True, 100),
-    ("codex", "codex/gpt-5.4", "GPT-5.4 (Codex)", False, 90),
-    ("codex", "codex/gpt-5.3-codex", "GPT-5.3 Codex", False, 80),
-    ("minimax", "minimax/MiniMax-M2.7", "MiniMax M2.7", True, 100),
-    ("minimax", "minimax/MiniMax-M2.5", "MiniMax M2.5", False, 90),
+    ("claude", "claude-sonnet-5", "Claude Sonnet 5", True, 100),
+    ("claude", "claude-opus-5", "Claude Opus 5", False, 90),
+    ("claude", "claude-haiku-4-5-20251001", "Claude Haiku 4.5", False, 80),
+    ("claude", "claude-fable-5-1", "Claude Fable 5.1", False, 70),
+    ("codex", "codex/gpt-6-astra", "GPT-6 Astra (Codex)", True, 100),
+    ("codex", "codex/gpt-5.6-sol", "GPT-5.6 Sol (Codex)", False, 90),
+    ("codex", "codex/gpt-5.6-terra", "GPT-5.6 Terra (Codex)", False, 80),
+    ("codex", "codex/gpt-5.6-luna", "GPT-5.6 Luna (Codex)", False, 70),
 ]
 
 

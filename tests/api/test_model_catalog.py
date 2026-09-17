@@ -11,7 +11,7 @@ async def test_list_seeded_for_member(client: httpx.AsyncClient, db_session: Asy
     r = await client.get("/api/admin/model-catalog", params={"provider": "codex"})
     assert r.status_code == 200
     models = [m["model"] for m in r.json()["data"]]
-    assert models[0] == "codex/gpt-5.5" and all(m.startswith("codex/") for m in models)
+    assert models[0] == "codex/gpt-6-astra" and all(m.startswith("codex/") for m in models)
     assert r.json()["data"][0]["backend"] == "codex"
     created = await client.post(
         "/api/admin/model-catalog", json={"provider": "claude", "model": "x/y"}
@@ -51,7 +51,7 @@ async def test_create_patch_default_and_delete(
     assert r.json()["data"]["retired"] is True and r.json()["data"]["is_default"] is False
     listed = await client.get("/api/admin/model-catalog", params={"provider": "claude"})
     rows = listed.json()["data"]
-    assert [x["model"] for x in rows if x["is_default"]] == ["claude-sonnet-4-6"]
+    assert [x["model"] for x in rows if x["is_default"]] == ["claude-sonnet-5"]
     deleted = await client.delete("/api/admin/model-catalog/claude/vllm%2Fclaude-new")
     assert deleted.status_code == 200
     missing = await client.patch("/api/admin/model-catalog/claude/nope", json={"retired": True})
@@ -110,6 +110,13 @@ async def test_delete_in_use_is_provider_scoped(
         )
     )
     await db_session.commit()
+    # 非默认目录模型仍可由管理员添加；删除的使用检查按 provider 隔离。
+    for provider in ("claude", "minimax"):
+        created = await client.post(
+            "/api/admin/model-catalog",
+            json={"provider": provider, "model": "minimax/MiniMax-M2.7"},
+        )
+        assert created.status_code == 201
     # 同名模型在 claude 下未被使用，可删；minimax 下在用，409
     freed = await client.delete("/api/admin/model-catalog/claude/minimax%2FMiniMax-M2.7")
     assert freed.status_code == 200
@@ -121,7 +128,9 @@ async def test_default_handoff_is_audited(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
     await login_as(client, db_session, role="ai_committee")
-    r = await client.patch("/api/admin/model-catalog/codex/codex%2Fgpt-5.5", json={"retired": True})
+    r = await client.patch(
+        "/api/admin/model-catalog/codex/codex%2Fgpt-6-astra", json={"retired": True}
+    )
     assert r.status_code == 200
     rows = await db_session.execute(
         select(AuditLog).where(AuditLog.action == "catalog.update").order_by(AuditLog.id.desc())
@@ -129,4 +138,4 @@ async def test_default_handoff_is_audited(
     audit = rows.scalars().first()
     assert audit is not None and audit.diff is not None
     assert audit.diff["retired"] == [False, True]
-    assert audit.diff["default_model"] == ["codex/gpt-5.5", "codex/gpt-5.4"]
+    assert audit.diff["default_model"] == ["codex/gpt-6-astra", "codex/gpt-5.6-sol"]

@@ -167,7 +167,7 @@ async def test_codex_catalog_changes_survive_legacy_heartbeats(client, db_sessio
     _, _, headers = await enrollment(client, db_session)
     heartbeat = {
         "claude": {"installed": True, "models": ["claude-test"]},
-        "codex": {"installed": True, "models": ["codex/gpt-5.5"]},
+        "codex": {"installed": True, "models": ["codex/gpt-6-astra"]},
         "version": "test",
         "service_status": "systemd-user",
     }
@@ -206,18 +206,18 @@ async def test_codex_catalog_changes_survive_legacy_heartbeats(client, db_sessio
     assert (await backends())["codex"]["effective_models"] == []
     heartbeat["codex"]["installed"] = True
     await beat()
-    assert "codex/gpt-5.5" in (await backends())["codex"]["effective_models"]
+    assert "codex/gpt-6-astra" in (await backends())["codex"]["effective_models"]
 
 
 async def test_claude_catalog_additions_and_retirements_override_old_discovery(client, db_session):
     _, _, headers = await enrollment(client, db_session)
-    for model in ["claude-sonnet-5", "minimax/new"]:
+    for model in ["claude-future", "minimax/new"]:
         response = await client.post(
             "/api/admin/model-catalog", json={"provider": "claude", "model": model}
         )
         assert response.status_code == 201, response.text
     response = await client.patch(
-        "/api/admin/model-catalog/claude/claude-opus-4-6", json={"retired": True}
+        "/api/admin/model-catalog/claude/claude-opus-5", json={"retired": True}
     )
     assert response.status_code == 200, response.text
     for installed in [True, False, True]:
@@ -228,7 +228,7 @@ async def test_claude_catalog_additions_and_retirements_override_old_discovery(c
                 "version": "test",
                 "service_status": "foreground",
                 "codex": {},
-                "claude": {"installed": installed, "models": ["claude-opus-4-6"]},
+                "claude": {"installed": installed, "models": ["claude-opus-5"]},
             },
         )
         assert response.status_code == 200, response.text
@@ -236,8 +236,8 @@ async def test_claude_catalog_additions_and_retirements_override_old_discovery(c
         models = next(b for b in nodes[0]["backends"] if b["model_provider"] == "claude")[
             "effective_models"
         ]
-        assert ("claude-sonnet-5" in models) == installed
-        assert "claude-opus-4-6" not in models
+        assert ("claude-future" in models) == installed
+        assert "claude-opus-5" not in models
         assert "minimax/new" not in models
 
 

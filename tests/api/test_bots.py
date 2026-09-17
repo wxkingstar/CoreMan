@@ -18,7 +18,7 @@ def _bot_body(**over: object) -> dict[str, object]:
         "name": "销售助手",
         "description": "卖货",
         "relay_server_id": None,
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "working_dir": "/data/skills/sales_bot",
         "system_prompt": "你是销售",
         "verbosity_level": 2,
@@ -311,7 +311,7 @@ async def test_relay_policy_on_create(client: httpx.AsyncClient, db_session: Asy
     ).status_code == 422
     r = await client.post(
         "/api/admin/bots",
-        json=_bot_body(bot_key="b5", relay_server_id=ids["codex"], model="codex/gpt-5.5"),
+        json=_bot_body(bot_key="b5", relay_server_id=ids["codex"], model="codex/gpt-6-astra"),
     )
     assert (
         r.status_code == 201

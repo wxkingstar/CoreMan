@@ -28,7 +28,7 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
             return RelayHealth("healthy", None, 5, backend="claude", version="2.2.0", mode="v1")
 
         async def models(self) -> list[str]:
-            return ["claude-sonnet-4-6", "claude-extra"]
+            return ["claude-sonnet-5", "claude-extra"]
 
         async def aclose(self) -> None:
             return None
@@ -57,7 +57,7 @@ async def test_list_probe_and_models_without_legacy_fields(
     assert not LEGACY_FIELDS & set(data["relay"])
     models = (await client.get(f"/api/admin/relay-servers/{relay.id}/models")).json()["data"]
     assert models["provider"] == "claude" and "claude-extra" in models["models"]
-    assert models["default"] == "claude-sonnet-4-6"
+    assert models["default"] == "claude-sonnet-5"
 
 
 async def test_manual_relay_management_routes_are_gone(
