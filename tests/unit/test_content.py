@@ -160,6 +160,21 @@ async def test_quotes(builder: ContentBuilder, fake: FakeMedia, hints: list[str]
     assert qf.message_type == "quote_file"
     assert qf.file_info == {"filename": "file.pdf", "size": 8, "mime": "application/pdf"}
     assert qf.parts[0] == _text(msg("quote_file_prefix", name="file.pdf", text="总结"))
+
+
+async def test_text_quote_keeps_current_message_attachment(
+    builder: ContentBuilder, fake: FakeMedia
+) -> None:
+    """引用父消息时，本轮新附的图片仍必须送给模型，不能被 quote 分支丢掉。"""
+    url = fake.add("/reply-image", PNG, aeskey=KEY)
+    built = await builder.build(
+        [_text("看这张"), _image(url), _quote("text", "父消息")], text="看这张"
+    )
+    assert built.parts == [
+        _text(msg("quote_text_prefix", quoted="父消息", text="看这张")),
+        {"type": "image_url", "image_url": {"url": _data_uri("image/png", PNG)}},
+    ]
+    assert built.quoted_content == "父消息"
     mixed = _quote(
         "mixed",
         refs=[
