@@ -389,36 +389,29 @@ async def apply_scopes(client: FeishuClient) -> None:
     await _write(client.call("POST", f"{V6_SCOPES}/apply"))
 
 
-def _command_description(description: str, icon_key: str | None) -> dict[str, Any]:
-    value: dict[str, Any] = {"default_value": description, "i18n": {"zh_cn": description}}
+def _command_body(description: str, icon_key: str | None) -> dict[str, Any]:
+    # 飞书指南示例把 icon 放在 description 里，实测会被忽略；与列表返回一致放在顶层才生效。
+    body: dict[str, Any] = {
+        "description": {"default_value": description, "i18n": {"zh_cn": description}}
+    }
     if icon_key:
-        value["icon"] = {"icon_key": icon_key}
-    return value
+        body["icon"] = {"icon_key": icon_key}
+    return body
 
 
 async def create_command(
     client: FeishuClient, *, command: str, description: str, icon_key: str | None
 ) -> str:
-    data = await _write(
-        client.call(
-            "POST",
-            SLASH,
-            json={"command": command, "description": _command_description(description, icon_key)},
-        )
-    )
+    body = {"command": command, **_command_body(description, icon_key)}
+    data = await _write(client.call("POST", SLASH, json=body))
     return str(data.get("command_id") or "")
 
 
 async def update_command(
     client: FeishuClient, command_id: str, *, description: str, icon_key: str | None
 ) -> None:
-    await _write(
-        client.call(
-            "PATCH",
-            f"{SLASH}/{command_id}",
-            json={"description": _command_description(description, icon_key)},
-        )
-    )
+    body = _command_body(description, icon_key)
+    await _write(client.call("PATCH", f"{SLASH}/{command_id}", json=body))
 
 
 async def delete_command(client: FeishuClient, command_id: str) -> None:

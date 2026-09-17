@@ -195,13 +195,11 @@ async def test_bot_menus_visibility_publish_and_commands_use_documented_bodies()
         }
     }
     assert bodies[3][2]["pc_default_ability"] == "bot" and bodies[3][2]["version"] == "1.0.4"
+    # 图标必须在顶层：放在 description 里会被飞书忽略（实测）。
     assert bodies[4][2] == {
         "command": "report",
-        "description": {
-            "default_value": "生成日报",
-            "i18n": {"zh_cn": "生成日报"},
-            "icon": {"icon_key": "ai-doc_outlined"},
-        },
+        "description": {"default_value": "生成日报", "i18n": {"zh_cn": "生成日报"}},
+        "icon": {"icon_key": "ai-doc_outlined"},
     }
     assert bodies[5][:2] == ("DELETE", f"{management.SLASH}/7374")
 
@@ -272,7 +270,8 @@ async def test_default_commands_only_add_missing_builtins():
     assert await management.ensure_default_commands(client) == ["new", "stop", "sessions"]
     created = [json.loads(c.content) for c in calls if c.method == "POST"]
     assert [c["command"] for c in created] == ["new", "stop", "sessions"]
-    assert created[0]["description"]["icon"] == {"icon_key": "add-chat-ai_outlined"}
+    assert created[0]["icon"] == {"icon_key": "add-chat-ai_outlined"}
+    assert "icon" not in created[0]["description"]
 
 
 def test_personal_levels_ignore_protocol_scopes():
