@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 
 from coreman.core.bus import outbox, tasks
-from coreman.core.db.models import Bot, CronJob, CronRun, Task, User
+from coreman.core.db.models import Bot, CronJob, CronRun, Task, User, UserIdentity
 from coreman.core.errors import ApiError
 from coreman.core.reminders import MODE, require_fixed
 from coreman.core.timeutils import utcnow
@@ -36,6 +36,7 @@ async def run_fixed(ctx: TaskContext) -> bool:
         if not task or task.status not in tasks.ACTIVE or not run or run.status != "running":
             return True
         error = None
+        identity = None
         try:
             if (
                 not job
@@ -52,6 +53,19 @@ async def run_fixed(ctx: TaskContext) -> bool:
             ):
                 raise ApiError(403, 403, "reminder_cancelled_or_unavailable")
             await require_fixed(session, job, bot, actor)
+            identities = (
+                await session.scalars(
+                    select(UserIdentity)
+                    .where(
+                        UserIdentity.user_id == actor.id,
+                        UserIdentity.platform == "feishu",
+                    )
+                    .limit(2)
+                )
+            ).all()
+            if len(identities) != 1:
+                raise ApiError(403, 403, "reminder_actor_unbound")
+            identity = identities[0]
         except ApiError:
             error = "reminder_cancelled_or_unavailable"
         now = utcnow()
@@ -61,7 +75,7 @@ async def run_fixed(ctx: TaskContext) -> bool:
             error,
         )
         if not error:
-            assert job and bot and actor
+            assert job and bot and actor and identity
             run.reply = job.prompt
             item = await outbox.add(
                 session,
@@ -69,7 +83,11 @@ async def run_fixed(ctx: TaskContext) -> bool:
                 platform="feishu",
                 kind="send",
                 dedupe_key=f"cron:{run.id}:self",
-                target={"chat_id": job.reminder_chat_id, "recipient_user_id": str(actor.id)},
+                target={
+                    "chat_id": job.reminder_chat_id,
+                    "recipient_user_id": str(actor.id),
+                    "recipient_platform_user_id": identity.platform_user_id,
+                },
                 payload={"markdown": "提醒：" + job.prompt},
             )
             run.delivery = {"outbox_ids": [item.id] if item else [], "errors": {}}

@@ -181,11 +181,14 @@ async def confirmed(session, app):
 
 
 async def test_static_scheduler_worker_exact_self_no_model(db_session, app, db_engine):
+    from coreman.core.bus import instances, leases, outbox
     from coreman.core.db.models import CronRun
     from coreman.core.db.session import make_session_factory
+    from coreman.runtime.gateway_feishu.transport import FeishuTransport
     from coreman.runtime.scheduler.cron import run_tick
     from coreman.runtime.worker.cron_handler import CronRunHandler
     from tests.integration.test_cron_handler import claim
+    from tests.integration.test_feishu_transport import FakeAPI
     from tests.integration.worker_helpers import build_ctx
 
     bot, user, row = await confirmed(db_session, app)
@@ -204,8 +207,61 @@ async def test_static_scheduler_worker_exact_self_no_model(db_session, app, db_e
     rows = (await db_session.scalars(select(OutboxItem))).all()
     assert len(rows) == 1 and rows[0].target["chat_id"] == "oc_private"
     assert rows[0].target["recipient_user_id"] == str(user.id)
+    assert rows[0].target["recipient_platform_user_id"] == "human"
     assert rows[0].payload["markdown"] == "提醒：检查接口"
     assert (await db_session.scalar(select(CronRun))).status == "success"
+
+    await instances.register(
+        db_session,
+        instance_id="reminder-delivery-test",
+        service="gateway-feishu",
+        version="test",
+        capacity=None,
+    )
+    await leases.ensure_rows(db_session, "feishu")
+    lease = await leases.acquire(
+        db_session,
+        bot_id=bot.id,
+        platform="feishu",
+        instance_id="reminder-delivery-test",
+    )
+    assert lease is not None
+    await db_session.commit()
+    api = FakeAPI()
+    transport = FeishuTransport(
+        factory,
+        api,
+        bot_id=bot.id,
+        instance_id="reminder-delivery-test",
+        generation=lease.generation,
+    )
+    assert await transport.consume_one()
+    await db_session.refresh(rows[0])
+    assert rows[0].status == "sent"
+    sent_calls = len(api.calls)
+
+    changed = await outbox.add(
+        db_session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"cron:{rows[0].id}:identity-changed",
+        target=dict(rows[0].target),
+        payload={"markdown": "must not send"},
+    )
+    identity = await db_session.scalar(
+        select(UserIdentity).where(
+            UserIdentity.user_id == user.id,
+            UserIdentity.platform == "feishu",
+        )
+    )
+    identity.platform_user_id = "changed-human"
+    await db_session.commit()
+    assert changed is not None and await transport.consume_one()
+    await db_session.refresh(changed)
+    assert changed.status == "skipped"
+    assert changed.last_error == "recipient binding changed"
+    assert len(api.calls) == sent_calls
 
 
 async def test_self_api_owner_only_no_generic_escalation(db_session, app, client):
