@@ -7,10 +7,13 @@ import { useI18n } from 'vue-i18n'
 import { bots, catalog, relays, settings, teams as teamsApi } from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { BotIn, BotOut, BotPatch, CatalogOut, Platform, RelayOut, TeamOut } from '@/api/types'
+import type { FeishuRegistration } from '@/api/feishuApps'
+import BotFormExperience from '@/components/botForm/BotFormExperience.vue'
 import BotFormIdentity from '@/components/botForm/BotFormIdentity.vue'
 import BotFormRuntime from '@/components/botForm/BotFormRuntime.vue'
 import BotFormSecurity from '@/components/botForm/BotFormSecurity.vue'
 import { botFormKey } from '@/components/botForm/context'
+import FeishuRegistrationDialog from '@/components/feishuApp/FeishuRegistrationDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ mode: 'create' | 'edit'; bot?: BotOut }>()
@@ -32,10 +35,13 @@ function credDefaults(platform: Platform): Record<string, string> {
   return Object.fromEntries(CRED_KEYS[platform].map((k) => [k, '']))
 }
 
+/** 新建时直接展示的必填项；其余字段收在「更多设置」里，出错时自动展开。 */
+const ESSENTIAL_FIELDS = new Set(['bot_key', 'name', 'relay_server_id'])
+
 function emptyForm(): BotIn {
   return {
     bot_key: '',
-    platform: 'wecom',
+    platform: 'feishu',
     name: '',
     description: '',
     avatar_url: null,
@@ -47,7 +53,7 @@ function emptyForm(): BotIn {
     verbosity_level: 1,
     effort_level: null,
     sse_timeout_seconds: 3600,
-    credentials: credDefaults('wecom'),
+    credentials: credDefaults('feishu'),
     env_vars: {},
     welcome_message: null,
     enabled: true,
@@ -58,6 +64,12 @@ const form = reactive<BotIn>(emptyForm())
 const formRef = ref<FormInstance>()
 const fieldErrors = reactive<Record<string, string>>({})
 const saving = ref(false)
+const moreOpen = ref<string[]>([])
+const manualCredentials = ref(false)
+/** 新建飞书员工默认扫码创建应用：凭证不在表单里填，由扫码会话交付给后端。 */
+const oneClickFeishu = computed(() => props.mode === 'create' && form.platform === 'feishu' && !manualCredentials.value)
+const registrationVisible = ref(false)
+const creatingFromRegistration = ref(false)
 /** If-Match 用的版本号：版本冲突后会刷新成最新值，表单内容保留。 */
 const version = ref(props.bot?.version ?? 0)
 let originalForm = ''
@@ -173,6 +185,7 @@ function fillFromBot(b: BotOut): void {
 
 /** 空值的凭证键不提交：编辑时「键缺失 = 删除」，正好用来清掉可选凭证。 */
 function credentialsPayload(): Record<string, string> {
+  if (oneClickFeishu.value) return {}
   return Object.fromEntries(
     credKeys.value.map((k) => [k, form.credentials[k] ?? '']).filter(([, v]) => v !== ''),
   )
@@ -213,23 +226,61 @@ function changedFields(b: BotOut): BotPatch {
   return out
 }
 
+/** 定位第一个出错字段：新建时它可能收在「更多设置」里，先展开再聚焦。 */
+function revealField(first: string): void {
+  if (props.mode === 'create' && !ESSENTIAL_FIELDS.has(first)) moreOpen.value = ['more']
+  const testId = first === 'relay_server_id' ? 'relay' : first
+  void nextTick(() => { const element = formRef.value?.$el.querySelector(`[data-test="${testId}"] input`); element?.focus() })
+}
+
 function validate(): boolean {
   for (const key of Object.keys(fieldErrors)) delete fieldErrors[key]
   if (props.mode === 'create' && !BOT_KEY_RE.test(form.bot_key)) fieldErrors.bot_key = t('bots.botKeyHint')
   for (const [key, label, value] of [['name', 'bots.name', form.name], ['model', 'bots.model', form.model], ['working_dir', 'bots.workingDir', form.working_dir]] as const) {
     if (!String(value).trim()) fieldErrors[key] = t('login.required', { field: t(label) })
   }
-  const first = Object.keys(fieldErrors)[0]
+  if (props.mode === 'create' && !form.relay_server_id) fieldErrors.relay_server_id = t('login.required', { field: t('bots.relay') })
+  const first = Object.keys(fieldErrors).sort((a, b) => Number(!ESSENTIAL_FIELDS.has(a)) - Number(!ESSENTIAL_FIELDS.has(b)))[0]
   if (!first) return true
   ElMessage.error(fieldErrors[first])
-  void nextTick(() => { const element = formRef.value?.$el.querySelector(`[data-test="${first}"] input`); element?.focus() })
+  revealField(first)
   return false
+}
+
+function failWithFields(e: unknown): void {
+  Object.assign(fieldErrors, fieldErrorMap(e, fieldLabels.value))
+  fail(e)
+  const first = Object.keys(fieldErrors)[0]
+  if (first) revealField(first)
+}
+
+/** 扫码成功后用服务端暂存的凭证创建员工；失败时应用仍可在下次扫码时复用，不会重复建应用。 */
+async function onRegistered(registration: FeishuRegistration): Promise<void> {
+  creatingFromRegistration.value = true
+  try {
+    const created = await bots.create({ ...payload(), credentials: {}, feishu_registration_id: registration.id })
+    ElMessage.success(t('bots.created'))
+    originalForm = JSON.stringify(form)
+    registrationVisible.value = false
+    emit('saved', created)
+  } catch (e) {
+    registrationVisible.value = false
+    failWithFields(e)
+  } finally {
+    creatingFromRegistration.value = false
+  }
 }
 
 async function submit(): Promise<void> {
   if (saving.value || !validate()) return
   saving.value = true
   try {
+    if (oneClickFeishu.value) {
+      // 先确认标识、工作目录等都可用，再让用户扫码，避免飞书侧留下建好却用不上的应用。
+      await bots.validate(payload())
+      registrationVisible.value = true
+      return
+    }
     if (props.mode === 'create') {
       const created = await bots.create(payload())
       ElMessage.success(t('bots.created'))
@@ -252,10 +303,7 @@ async function submit(): Promise<void> {
   } catch (e) {
     // 只有乐观锁版本冲突才用统一文案；其它 409（工作目录被占用、飞书应用已分配）与 422 直接给后端原话。
     if (props.mode === 'edit' && isVersionConflict(e)) await reloadVersion()
-    else {
-      Object.assign(fieldErrors, fieldErrorMap(e, fieldLabels.value))
-      fail(e)
-    }
+    else failWithFields(e)
   } finally {
     saving.value = false
   }
@@ -310,10 +358,10 @@ onMounted(async () => {
 // 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
 provide(botFormKey, {
   mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
-  modelOptions, xhighAllowed, sensitiveVisible, credKeys, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
+  modelOptions, xhighAllowed, sensitiveVisible, credKeys, manualCredentials, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
 })
 
-defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
+defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })
 </script>
 
 <template>
@@ -324,7 +372,41 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
     class="employee-form"
     @submit.prevent
   >
-    <div class="employee-form-fields">
+    <div
+      v-if="mode === 'create'"
+      class="employee-form-fields"
+    >
+      <BotFormIdentity part="essential" />
+      <BotFormRuntime part="essential" />
+      <el-form-item
+        v-if="oneClickFeishu"
+        :label="t('feishuApp.bot')"
+        data-test="feishu-one-click"
+      >
+        <div class="muted">
+          {{ t('feishuApp.oneClickHint') }}
+        </div>
+      </el-form-item>
+      <el-collapse
+        v-model="moreOpen"
+        class="more-settings"
+      >
+        <el-collapse-item
+          name="more"
+          :title="t('bots.moreSettings')"
+          data-test="more-settings"
+        >
+          <BotFormIdentity part="extra" />
+          <BotFormRuntime part="extra" />
+          <BotFormSecurity part="extra" />
+          <BotFormExperience part="extra" />
+        </el-collapse-item>
+      </el-collapse>
+    </div>
+    <div
+      v-else
+      class="employee-form-fields"
+    >
       <nav
         class="cm-section-nav"
         :aria-label="t('workspace.sections')"
@@ -340,32 +422,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
 
       <BotFormSecurity />
 
-      <h3
-        id="form-experience"
-        class="cm-section-title"
-      >
-        <span>04</span>{{ t('workspace.experience') }}
-      </h3>
-      <el-form-item
-        :label="t('bots.welcome')"
-        data-test="welcome"
-        :error="fieldErrors.welcome_message"
-      >
-        <el-input
-          :model-value="form.welcome_message ?? ''"
-          type="textarea"
-          :rows="2"
-          @update:model-value="form.welcome_message = ($event as string) || null"
-        />
-      </el-form-item>
-
-      <el-form-item
-        v-if="mode === 'create'"
-        :label="t('bots.enabled')"
-        data-test="enabled"
-      >
-        <el-switch v-model="form.enabled" />
-      </el-form-item>
+      <BotFormExperience />
     </div>
     <el-form-item class="form-footer">
       <el-button
@@ -380,8 +437,21 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard })
         data-test="submit"
         @click="submit"
       >
-        {{ t('common.save') }}
+        {{ oneClickFeishu ? t('feishuApp.scanAndCreate') : t('common.save') }}
       </el-button>
     </el-form-item>
+    <FeishuRegistrationDialog
+      v-if="oneClickFeishu"
+      v-model:visible="registrationVisible"
+      purpose="create"
+      :preset="{ name: form.name, description: form.description, avatar_url: form.avatar_url }"
+      :busy="creatingFromRegistration"
+      @succeeded="onRegistered"
+    />
   </el-form>
 </template>
+
+<style scoped>
+.muted { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.more-settings { margin: 4px 0 16px; }
+</style>

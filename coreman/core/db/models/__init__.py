@@ -40,6 +40,7 @@ from coreman.core.db.models.bus import (
     TaskStream,
     UserReached,
 )
+from coreman.core.db.models.feishu_apps import FeishuAppRegistration
 from coreman.core.db.models.feishu_personal import FeishuPersonalGrant
 from coreman.core.db.models.infrastructure import (
     ApiClient,
@@ -83,6 +84,7 @@ from .feishu import FeishuDelivery
 from .pricing import ModelPrice
 
 __all__ = [
+    "FeishuAppRegistration",
     "FeishuPersonalGrant",
     "RuntimeNode",
     "RuntimeInstallLink",

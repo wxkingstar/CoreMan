@@ -17,6 +17,8 @@ export interface BotFormContext {
   xhighAllowed: ComputedRef<boolean>
   sensitiveVisible: ComputedRef<boolean>
   credKeys: ComputedRef<readonly string[]>
+  /** 新建飞书员工时改为手动填写已有应用凭证（默认扫码创建）。 */
+  manualCredentials: Ref<boolean>
   onBotKeyInput: () => void
   onPlatformChange: () => void
   onEnvInvalid: (message: string) => void

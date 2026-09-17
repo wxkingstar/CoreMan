@@ -3,8 +3,12 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn().mockResolvedValue('data:image/png;base64,qr') } }))
+vi.mock('@/api/feishuApps', () => ({
+  feishuApps: { startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn() },
+}))
 vi.mock('@/api/admin', () => ({
-  bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), patch: vi.fn(), get: vi.fn() },
+  bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), validate: vi.fn().mockResolvedValue({ valid: true }), patch: vi.fn(), get: vi.fn() },
   relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
   catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
   settings: { defaults: vi.fn().mockResolvedValue({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' }) },
@@ -12,7 +16,9 @@ vi.mock('@/api/admin', () => ({
 }))
 
 import { bots, relays, settings } from '@/api/admin'
+import { feishuApps } from '@/api/feishuApps'
 import { ApiError } from '@/api/client'
+import FeishuRegistrationDialog from '@/components/feishuApp/FeishuRegistrationDialog.vue'
 import { VERSION_CONFLICT_CODE } from '@/utils/errors'
 import type { BotOut } from '@/api/types'
 import { i18n } from '@/i18n'
@@ -55,6 +61,8 @@ describe('BotForm', () => {
     await flushPromises()
     expect((wrapper.vm as unknown as { form: { model: string } }).form.model).toBe('codex/gpt-5.5')
     await wrapper.get('[data-test="name"] input').setValue('销售')
+    ;(wrapper.vm as unknown as { form: { platform: string } }).form.platform = 'wecom'
+    await flushPromises()
     await wrapper.get('[data-test="cred-bot_id"] input').setValue('bot-id')
     await wrapper.get('[data-test="cred-secret"] input').setValue('secret-value')
     await wrapper.get('[data-test="submit"]').trigger('click')
@@ -116,12 +124,17 @@ describe('BotForm', () => {
     await flushPromises()
     await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
     await wrapper.get('[data-test="name"] input').setValue('销售')
+    await (wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void> }).selectRelay('r1')
+    ;(wrapper.vm as unknown as { form: { platform: string } }).form.platform = 'wecom'
+    await flushPromises()
     await wrapper.get('[data-test="submit"]').trigger('click')
     await flushPromises()
     expect(error).toHaveBeenCalledWith(`${i18n.global.t('bots.workingDir')}：工作目录必须是绝对路径`)
     // 错误文字在 transition 里异步出现，这里断言表单项已进入错误态。
     expect(wrapper.get('[data-test="working_dir"]').classes()).toContain('is-error')
     expect(wrapper.get('[data-test="name"]').classes()).not.toContain('is-error')
+    // 出错字段收在「更多设置」里：自动展开，免得用户找不到。
+    expect((wrapper.vm as unknown as { moreOpen: string[] }).moreOpen).toEqual(['more'])
     expect(wrapper.emitted('saved')).toBeFalsy()
     error.mockRestore()
     wrapper.unmount()
@@ -167,6 +180,53 @@ describe('BotForm', () => {
     expect(vi.mocked(bots.patch).mock.calls.map((c) => [c[1], c[2]])).toEqual([[{ name: '新名字' }, 1], [{ name: '新名字' }, 5]])
     expect(wrapper.emitted('saved')).toBeTruthy()
     warning.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('defaults new employees to Feishu with essentials visible and the rest collapsed', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { platform: string }; moreOpen: string[] }
+    expect(vm.form.platform).toBe('feishu')
+    expect(vm.moreOpen).toEqual([])
+    expect(wrapper.find('.el-collapse-item.is-active').exists()).toBe(false)
+    expect(wrapper.find('[data-test="feishu-one-click"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="cred-app_id"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="submit"]').text()).toBe(i18n.global.t('feishuApp.scanAndCreate'))
+    // 运行时是必填项：没选时不发起校验、不弹扫码。
+    await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
+    await wrapper.get('[data-test="name"] input').setValue('销售')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="relay"]').classes()).toContain('is-error')
+    expect(bots.validate).not.toHaveBeenCalled()
+    expect(vm.moreOpen).toEqual([])
+    error.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('validates first, then creates the employee from the scanned registration', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    vi.mocked(feishuApps.startRegistration).mockResolvedValue({ id: 'reg1', purpose: 'create', status: 'pending', bot_id: null, app_id: null, url: 'https://open.feishu.cn/page/launcher?user_code=A', expires_at: '', retry_after: 30, error: null, created_at: null, reused: false })
+    vi.mocked(bots.create).mockClear()
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="bot_key"] input').setValue('sales_bot')
+    await wrapper.get('[data-test="name"] input').setValue('销售')
+    await (wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void> }).selectRelay('r1')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.validate).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', platform: 'feishu', credentials: {} }))
+    expect(bots.create).not.toHaveBeenCalled()
+    const dialog = wrapper.findComponent(FeishuRegistrationDialog)
+    expect((dialog.props() as { visible: boolean }).visible).toBe(true)
+    expect(feishuApps.startRegistration).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'create', name: '销售', reuse: true }))
+    dialog.vm.$emit('succeeded', { id: 'reg1', purpose: 'create', status: 'succeeded', app_id: 'cli_1' })
+    await flushPromises()
+    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', credentials: {}, feishu_registration_id: 'reg1' }))
+    expect(wrapper.emitted('saved')).toBeTruthy()
     wrapper.unmount()
   })
 

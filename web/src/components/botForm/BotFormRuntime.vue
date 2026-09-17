@@ -6,6 +6,8 @@ import { useI18n } from 'vue-i18n'
 import type { EffortLevel } from '@/api/types'
 import { useBotFormContext } from '@/components/botForm/context'
 
+/** part：新建时拆成「必填」（运行时）与「更多设置」两块；编辑时不传，整块展示。 */
+defineProps<{ part?: 'essential' | 'extra' }>()
 const workspaceVisible = ref(false)
 const SSE_OPTIONS = [1800, 3600, 7200, 14400, 21600, 43200]
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
@@ -19,15 +21,18 @@ const {
 
 <template>
   <h3
+    v-if="!part"
     id="form-runtime"
     class="cm-section-title"
   >
     <span>02</span>{{ t('workspace.configuration') }}
   </h3>
   <el-form-item
+    v-if="part !== 'extra'"
     :label="t('bots.relay')"
     data-test="relay"
     :error="fieldErrors.relay_server_id"
+    :required="mode === 'create'"
   >
     <template v-if="mode === 'create' && runtimeGroups.length">
       <el-select
@@ -82,110 +87,112 @@ const {
     </div>
   </el-form-item>
 
-  <el-form-item
-    :label="t('bots.model')"
-    data-test="model"
-    :error="fieldErrors.model"
-  >
-    <el-select
-      v-model="form.model"
-      filterable
-      style="width: 320px"
+  <template v-if="part !== 'essential'">
+    <el-form-item
+      :label="t('bots.model')"
+      data-test="model"
+      :error="fieldErrors.model"
     >
-      <el-option
-        v-for="m in modelOptions"
-        :key="m"
-        :label="m"
-        :value="m"
-      />
-    </el-select>
-  </el-form-item>
-
-  <el-form-item
-    :label="t('bots.effort')"
-    data-test="effort"
-    :error="fieldErrors.effort_level"
-  >
-    <el-select
-      :model-value="form.effort_level"
-      clearable
-      :placeholder="t('bots.effortNone')"
-      style="width: 200px"
-      @update:model-value="form.effort_level = ($event as EffortLevel) ?? null"
-    >
-      <el-option
-        v-for="lv in EFFORT_OPTIONS"
-        :key="lv"
-        :label="lv"
-        :value="lv"
-        :disabled="lv === 'xhigh' && !xhighAllowed"
-      />
-    </el-select>
-  </el-form-item>
-
-  <el-form-item
-    :label="t('bots.verbosity')"
-    data-test="verbosity"
-    :error="fieldErrors.verbosity_level"
-  >
-    <el-select
-      v-model="form.verbosity_level"
-      style="width: 200px"
-    >
-      <el-option
-        v-for="lv in VERBOSITY_OPTIONS"
-        :key="lv"
-        :label="t(`bots.verbosityLevels.${lv}`)"
-        :value="lv"
-      />
-    </el-select>
-  </el-form-item>
-
-  <el-form-item
-    :label="t('bots.workingDir')"
-    data-test="working_dir"
-    :error="fieldErrors.working_dir"
-  >
-    <div class="workspace-path-row">
-      <el-input
-        v-model="form.working_dir"
-        :readonly="mode === 'edit' && !!form.relay_server_id"
-      />
-      <el-button
-        v-if="botId"
-        :icon="FolderOpened"
-        text
-        size="small"
-        type="primary"
-        @click="workspaceVisible = true"
+      <el-select
+        v-model="form.model"
+        filterable
+        style="width: 320px"
       >
-        {{ t('workspaceFiles.open') }}
-      </el-button>
-    </div>
-    <WorkspaceDrawer
-      v-if="botId && workspaceVisible"
-      v-model:visible="workspaceVisible"
-      :bot-id="botId"
-    />
-  </el-form-item>
+        <el-option
+          v-for="m in modelOptions"
+          :key="m"
+          :label="m"
+          :value="m"
+        />
+      </el-select>
+    </el-form-item>
 
-  <el-form-item
-    :label="t('bots.sseTimeout')"
-    data-test="sse_timeout"
-    :error="fieldErrors.sse_timeout_seconds"
-  >
-    <el-select
-      v-model="form.sse_timeout_seconds"
-      style="width: 200px"
+    <el-form-item
+      :label="t('bots.effort')"
+      data-test="effort"
+      :error="fieldErrors.effort_level"
     >
-      <el-option
-        v-for="s in SSE_OPTIONS"
-        :key="s"
-        :label="String(s)"
-        :value="s"
+      <el-select
+        :model-value="form.effort_level"
+        clearable
+        :placeholder="t('bots.effortNone')"
+        style="width: 200px"
+        @update:model-value="form.effort_level = ($event as EffortLevel) ?? null"
+      >
+        <el-option
+          v-for="lv in EFFORT_OPTIONS"
+          :key="lv"
+          :label="lv"
+          :value="lv"
+          :disabled="lv === 'xhigh' && !xhighAllowed"
+        />
+      </el-select>
+    </el-form-item>
+
+    <el-form-item
+      :label="t('bots.verbosity')"
+      data-test="verbosity"
+      :error="fieldErrors.verbosity_level"
+    >
+      <el-select
+        v-model="form.verbosity_level"
+        style="width: 200px"
+      >
+        <el-option
+          v-for="lv in VERBOSITY_OPTIONS"
+          :key="lv"
+          :label="t(`bots.verbosityLevels.${lv}`)"
+          :value="lv"
+        />
+      </el-select>
+    </el-form-item>
+
+    <el-form-item
+      :label="t('bots.workingDir')"
+      data-test="working_dir"
+      :error="fieldErrors.working_dir"
+    >
+      <div class="workspace-path-row">
+        <el-input
+          v-model="form.working_dir"
+          :readonly="mode === 'edit' && !!form.relay_server_id"
+        />
+        <el-button
+          v-if="botId"
+          :icon="FolderOpened"
+          text
+          size="small"
+          type="primary"
+          @click="workspaceVisible = true"
+        >
+          {{ t('workspaceFiles.open') }}
+        </el-button>
+      </div>
+      <WorkspaceDrawer
+        v-if="botId && workspaceVisible"
+        v-model:visible="workspaceVisible"
+        :bot-id="botId"
       />
-    </el-select>
-  </el-form-item>
+    </el-form-item>
+
+    <el-form-item
+      :label="t('bots.sseTimeout')"
+      data-test="sse_timeout"
+      :error="fieldErrors.sse_timeout_seconds"
+    >
+      <el-select
+        v-model="form.sse_timeout_seconds"
+        style="width: 200px"
+      >
+        <el-option
+          v-for="s in SSE_OPTIONS"
+          :key="s"
+          :label="String(s)"
+          :value="s"
+        />
+      </el-select>
+    </el-form-item>
+  </template>
 </template>
 
 <style scoped>

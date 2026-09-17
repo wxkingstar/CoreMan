@@ -62,6 +62,7 @@ from coreman.core.db.models import (
     Team,
     User,
 )
+from coreman.core.feishu_apps import service as feishu_apps
 from coreman.core.masking import is_masked, mask_secret
 from coreman.core.relay.models import backend_of
 
@@ -136,7 +137,9 @@ class BotIn(BaseModel):
     verbosity_level: int = Field(default=1, ge=1, le=4)
     effort_level: Literal["low", "medium", "high", "xhigh"] | None = None
     sse_timeout_seconds: int = Field(default=3600, ge=1800, le=43200)
-    credentials: dict[str, str]
+    credentials: dict[str, str] = Field(default_factory=dict)
+    # 飞书扫码创建的应用：凭证由服务端扫码会话交付，credentials 必须留空。
+    feishu_registration_id: uuid.UUID | None = None
     env_vars: dict[str, str] = Field(default_factory=dict)
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
@@ -432,9 +435,12 @@ async def list_bots(
 async def create_bot(
     body: BotIn,
     request: Request,
+    response: Response,
+    dry_run: bool = False,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """dry_run 只校验不落库：扫码创建飞书应用前先确认员工配置可用，免得飞书侧留下无人使用的应用。"""
     if not can_create_bot(user):
         raise forbidden()
     # 只有 manager 能替别的团队建；其它角色一律落在自己团队（member 到这里必然有团队）。
@@ -448,13 +454,30 @@ async def create_bot(
         raise ApiError(422, 422, "新建时环境变量不能填脱敏值")
     if is_masked(body.notify_webhook_url):
         raise ApiError(422, 422, "新建时通知 webhook 不能填脱敏值")
-    creds = _checked_credentials(body.platform, body.credentials)
+    cipher = _cipher(request)
+    registration = None
+    creds: dict[str, str] = {}
+    if body.feishu_registration_id is not None:
+        if body.platform != "feishu" or body.credentials:
+            raise ApiError(422, 422, "扫码创建飞书应用时不能再填写凭证")
+        if not dry_run:
+            registration = await feishu_apps.load(session, user, body.feishu_registration_id)
+            creds = _checked_credentials(
+                body.platform, feishu_apps.credentials(cipher, registration)
+            )
+    elif dry_run and body.platform == "feishu" and not body.credentials:
+        pass  # 凭证随后由扫码交付，此处只校验其余配置。
+    else:
+        creds = _checked_credentials(body.platform, body.credentials)
     # bot_key 有唯一约束：先查再 409，别让 IntegrityError 变 500。
     dup = select(Bot.id).where(Bot.bot_key == body.bot_key).limit(1)
     if (await session.execute(dup)).first():
         raise ApiError(409, 409, "机器人标识已存在")
     await reserve_workspace(session, relay.id if relay else None, body.working_dir)
-    cipher = _cipher(request)
+    if dry_run:
+        await session.rollback()
+        response.status_code = 200
+        return {"code": 0, "data": {"valid": True}}
     if body.platform == "feishu":
         await reserve_feishu_app(session, cipher, creds)
     bot = Bot(
@@ -482,6 +505,8 @@ async def create_bot(
     )
     session.add(bot)
     await session.flush()
+    if registration is not None:
+        feishu_apps.consume(registration, bot.id)
     await record_audit(
         session,
         action="bot.create",
@@ -490,7 +515,14 @@ async def create_bot(
         target_type="bot",
         target_id=str(bot.id),
         diff=diff_dict(
-            {}, {**_public(bot), "credentials": "x", "env_vars": "x"}, AUDIT_MASKED_KEYS
+            {},
+            {
+                **_public(bot),
+                "credentials": "x",
+                "env_vars": "x",
+                "feishu_registration_id": str(registration.id) if registration else None,
+            },
+            AUDIT_MASKED_KEYS,
         ),
         ip=client_ip(request),
     )
