@@ -10,7 +10,7 @@ vi.mock('@/api/admin', () => ({
 vi.mock('@/api/feishuApps', () => ({
   feishuApps: {
     overview: vi.fn(), updateBase: vi.fn(), uploadAvatar: vi.fn(), updateBot: vi.fn(), updateVisibility: vi.fn(),
-    publish: vi.fn(), applyScopes: vi.fn(), createCommand: vi.fn(), updateCommand: vi.fn(), deleteCommand: vi.fn(),
+    publish: vi.fn(), applyScopes: vi.fn(), createCommand: vi.fn(), updateCommand: vi.fn(), deleteCommand: vi.fn(), addDefaultCommands: vi.fn(),
     startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn(),
   },
 }))
@@ -134,6 +134,15 @@ describe('FeishuAppPanel', () => {
     ;(document.querySelector('[data-test="command-save"]') as HTMLButtonElement).click()
     await flushPromises()
     expect(feishuApps.createCommand).toHaveBeenCalledWith('b1', { command: 'weekly', description: '生成周报', icon_key: 'skill_outlined' })
+
+    // 老机器人可一键补齐 CoreMan 内置指令，完成后刷新列表。
+    vi.mocked(feishuApps.addDefaultCommands).mockResolvedValue({ created: ['new', 'sessions'] })
+    const reloads = vi.mocked(feishuApps.overview).mock.calls.length
+    await wrapper.get('[data-test="command-defaults"]').trigger('click')
+    await flushPromises()
+    expect(feishuApps.addDefaultCommands).toHaveBeenCalledWith('b1')
+    expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('feishuApp.defaultCommandsAdded', { commands: '/new /sessions' }))
+    expect(vi.mocked(feishuApps.overview).mock.calls.length).toBe(reloads + 1)
     wrapper.unmount()
   })
 

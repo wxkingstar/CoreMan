@@ -9,9 +9,24 @@ const props = defineProps<{ botId: string; overview: FeishuAppOverview }>()
 const emit = defineEmits<{ changed: [] }>()
 const { t } = useI18n()
 /** 飞书图标库中的常用图标（完整列表见飞书斜杠指令文档）。 */
-const ICONS = ['skill_outlined', 'ai-agent_outlined', 'chat-ai_outlined', 'ai-doc_outlined', 'search-ai_outlined', 'meeting-ai_outlined', 'calendar-line_outlined', 'code_outlined', 'database_outlined', 'robot_outlined']
+const ICONS = ['skill_outlined', 'ai-agent_outlined', 'chat-ai_outlined', 'ai-doc_outlined', 'search-ai_outlined', 'meeting-ai_outlined', 'calendar-line_outlined', 'code_outlined', 'database_outlined', 'robot_outlined', 'add-chat-ai_outlined', 'clear_outlined', 'chat_outlined', 'explanation-ai_outlined']
 
 const dialogVisible = ref(false)
+const addingDefaults = ref(false)
+
+async function addDefaults(): Promise<void> {
+  addingDefaults.value = true
+  try {
+    const { created } = await feishuApps.addDefaultCommands(props.botId)
+    if (created.length) ElMessage.success(t('feishuApp.defaultCommandsAdded', { commands: created.map(c => `/${c}`).join(' ') }))
+    else ElMessage.info(t('feishuApp.defaultCommandsPresent'))
+    emit('changed')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    addingDefaults.value = false
+  }
+}
 const editing = ref<FeishuSlashCommand | null>(null)
 const form = reactive({ command: '', description: '', icon_key: 'skill_outlined' })
 const saving = ref(false)
@@ -126,6 +141,14 @@ async function remove(row: FeishuSlashCommand): Promise<void> {
         @click="open(null)"
       >
         {{ t('feishuApp.commandAdd') }}
+      </el-button>
+      <el-button
+        class="add"
+        :loading="addingDefaults"
+        data-test="command-defaults"
+        @click="addDefaults"
+      >
+        {{ t('feishuApp.defaultCommands') }}
       </el-button>
     </template>
     <el-dialog

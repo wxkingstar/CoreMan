@@ -18,9 +18,29 @@ def test_manifest_covers_identity_and_every_personal_tier():
     assert set(personal.SCOPES.split()) <= set(manifest.USER_SCOPES)
     assert {"im:message", "im:message.send_as_user"} <= set(manifest.USER_SCOPES)
     assert "im.message.receive_v1" in manifest.TENANT_EVENTS
+    # 协议层授权项不会出现在应用权限列表里，不能算缺失。
     assert manifest.missing_scopes(["offline_access"], kind="user") == sorted(
-        set(manifest.USER_SCOPES) - {"offline_access"}
+        set(manifest.USER_SCOPES) - manifest.PROTOCOL_SCOPES
     )
+    granted = [
+        s for s in manifest.USER_SCOPES if s not in ("vc:meeting:readonly", "auth:user.id:read")
+    ]
+    assert manifest.missing_scopes(granted, kind="user") == []
+    assert {"im:chat.members:read", "application:app_slash_command:write"} <= set(
+        manifest.TENANT_SCOPES
+    )
+
+
+def test_default_slash_commands_match_builtin_commands_and_icon_catalog():
+    from coreman.core.chat.commands import classify_command
+    from coreman.core.chat.session_switch import is_sessions_command
+
+    names = [name for name, _, _ in manifest.DEFAULT_SLASH_COMMANDS]
+    assert names == ["new", "stop", "sessions", "help"]
+    for name in names:
+        assert classify_command(f"/{name}") or is_sessions_command(f"/{name}")
+    for _, description, icon in manifest.DEFAULT_SLASH_COMMANDS:
+        assert description and icon.endswith("_outlined")
 
 
 def _client(handler):

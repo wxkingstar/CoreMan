@@ -14,7 +14,7 @@ from datetime import datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.chat.commands import normalize
+from coreman.core.chat.commands import command_text, normalize
 from coreman.core.db.models import ChatLog
 from coreman.core.i18n.messages import msg
 
@@ -35,7 +35,7 @@ class SessionPreview:
 
 def is_sessions_command(text: str) -> bool:
     """精确匹配才算命令：「会话」「sessions list」都是正经话，不该被当成列表指令吞掉。"""
-    return normalize(text).lower() in SESSION_WORDS
+    return command_text(text) in SESSION_WORDS
 
 
 def parse_choice(text: str, n: int) -> int | None:

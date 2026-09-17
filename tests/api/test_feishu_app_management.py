@@ -303,3 +303,23 @@ async def test_avatar_upload_checks_type_and_size_before_calling_feishu(
     patched = json.loads(feishu.calls[-1].content)
     assert patched["avatar_url"] == "https://s3-imfile.feishucdn.com/new"
     assert patched["i18ns"] == [{"i18n_key": "zh_cn", "name": "销售助手", "description": "卖货"}]
+
+
+async def test_default_commands_endpoint_adds_missing_builtins(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:
+    feishu, owner, bot = await _setup(client, db_session, monkeypatch)
+    feishu.routes[("GET", management.SLASH)] = (
+        200,
+        {"code": 0, "data": {"items": [{"command_id": "1", "command": "new"}]}},
+    )
+    feishu.routes[("POST", management.SLASH)] = (200, {"code": 0, "data": {"command_id": "9"}})
+    r = await client.post(f"/api/admin/bots/{bot.id}/feishu-app/slash-commands/defaults")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == {"created": ["stop", "sessions", "help"]}
+    posted = [json.loads(c.content)["command"] for c in feishu.calls if c.method == "POST"]
+    assert posted == ["stop", "sessions", "help"]
+    audit = await db_session.scalar(
+        select(AuditLog).where(AuditLog.action == "bot.feishu_app_command_defaults")
+    )
+    assert audit is not None

@@ -101,6 +101,7 @@ export const feishuApps = {
     call<{ command_id: string }>(http.post(`${app(botId)}/slash-commands`, body)),
   updateCommand: (botId: string, commandId: string, body: { description: string; icon_key: string | null }) =>
     call<{ ok: true }>(http.patch(`${app(botId)}/slash-commands/${encodeURIComponent(commandId)}`, body)),
+  addDefaultCommands: (botId: string) => call<{ created: string[] }>(http.post(`${app(botId)}/slash-commands/defaults`)),
   deleteCommand: (botId: string, commandId: string) =>
     call<{ ok: true }>(http.delete(`${app(botId)}/slash-commands/${encodeURIComponent(commandId)}`)),
 }

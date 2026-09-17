@@ -32,6 +32,8 @@ TENANT_SCOPES: tuple[str, ...] = (
     "im:message.reactions:write_only",
     "im:resource",
     "im:chat:read",
+    # 机器人协作确认成员是否在群里。
+    "im:chat.members:read",
     "cardkit:card:write",
     "application:bot.basic_info:read",
     "application:application:self_manage",
@@ -41,9 +43,25 @@ TENANT_SCOPES: tuple[str, ...] = (
     "application:app_slash_command:write",
 )
 
+# OAuth 协议层面的授权项：用户授权时随令牌下发，但不会出现在应用的权限列表里。
+PROTOCOL_SCOPES = frozenset({"offline_access", "auth:user.id:read"})
+
 # 用户身份：连接飞书全部档位（含第一档的以用户身份发送）。
+# 获取会议详情接受 vc:meeting:readonly 或 vc:meeting.meetingevent:read 任一；扫码创建时
+# 前者实测未被开通，两者都申请。
 USER_SCOPES: tuple[str, ...] = tuple(
-    sorted(set(personal_service.SCOPES.split()) | {"im:message", "im:message.send_as_user"})
+    sorted(
+        set(personal_service.SCOPES.split())
+        | {"im:message", "im:message.send_as_user", "vc:meeting.meetingevent:read"}
+    )
+)
+
+# 扫码创建智能体时默认配置的斜杠指令，对应 CoreMan 内置命令（飞书以「/指令名」文本发来）。
+DEFAULT_SLASH_COMMANDS: tuple[tuple[str, str, str], ...] = (
+    ("new", "开始新会话（清空上下文）", "add-chat-ai_outlined"),
+    ("stop", "停止当前回复", "clear_outlined"),
+    ("sessions", "查看并切换最近会话", "chat_outlined"),
+    ("help", "查看使用帮助", "explanation-ai_outlined"),
 )
 
 TENANT_EVENTS: tuple[str, ...] = (
@@ -74,4 +92,7 @@ def encode_addons(value: dict[str, Any]) -> str:
 def missing_scopes(granted: list[str], *, kind: str) -> list[str]:
     """清单里有、应用当前没开通的权限；用于提示「补齐权限」。"""
     wanted = TENANT_SCOPES if kind == "tenant" else USER_SCOPES
-    return sorted(set(wanted) - set(granted) - {"offline_access"})
+    missing = set(wanted) - set(granted) - PROTOCOL_SCOPES
+    if kind == "user" and "vc:meeting.meetingevent:read" in granted:
+        missing.discard("vc:meeting:readonly")  # 二者任一即可获取会议详情
+    return sorted(missing)

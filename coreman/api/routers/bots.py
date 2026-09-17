@@ -62,11 +62,15 @@ from coreman.core.db.models import (
     Team,
     User,
 )
+from coreman.core.feishu_apps import management as feishu_management
 from coreman.core.feishu_apps import service as feishu_apps
+from coreman.core.logging import get_logger
 from coreman.core.masking import is_masked, mask_secret
+from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.relay.models import backend_of
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
+log = get_logger(__name__)
 # 审计 diff 里只记 ***（明文永不落库）。子资源路由复用。
 # system_prompt 也在内：它受 can_view_sensitive 管（manager 不旁路），而审计日志对
 # ai_committee / platform_admin 是可读的——落明文等于给 manager 开了一条读提示词的后门。
@@ -535,9 +539,23 @@ async def create_bot(
         pass
     await notify_bot_changed(session, bot.id)
     await session.commit()
+    if registration is not None:
+        await _default_slash_commands(creds)
     # enabled / version / 时间戳都是服务端默认值，不刷回来视图里就是 None。
     await session.refresh(bot)
     return {"code": 0, "data": await build_out(session, cipher, bot, user)}
+
+
+async def _default_slash_commands(creds: dict[str, str]) -> None:
+    """扫码创建的智能体默认配好 CoreMan 内置斜杠指令；飞书侧失败不影响员工创建，管理页可再补。"""
+    client = FeishuClient(creds["app_id"], creds["app_secret"])
+    try:
+        created = await feishu_management.ensure_default_commands(client)
+        log.info("feishu_default_slash_commands", created=created)
+    except (ApiError, FeishuError) as exc:
+        log.warning("feishu_default_slash_commands_failed", error=getattr(exc, "code", None))
+    finally:
+        await client.aclose()
 
 
 @router.get("/{bot_id}")

@@ -523,6 +523,25 @@ class CommandPatch(BaseModel):
 CommandId = Path(pattern=r"^[0-9]{1,32}$")
 
 
+@router.post("/bots/{bot_id}/feishu-app/slash-commands/defaults")
+async def add_default_feishu_slash_commands(
+    bot_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """补齐 CoreMan 内置斜杠指令（/new /stop /sessions /help），已有的同名指令不改。"""
+    cipher = _cipher(request)
+    bot = await admin_feishu_bot(session, bot_id, user)
+    client = client_for(cipher, bot)
+    try:
+        created = await management.ensure_default_commands(client)
+    finally:
+        await client.aclose()
+    await _audit_app(session, request, user, bot, "command_defaults", {"created": [None, created]})
+    return {"code": 0, "data": {"created": created}}
+
+
 @router.post("/bots/{bot_id}/feishu-app/slash-commands", status_code=201)
 async def create_feishu_slash_command(
     bot_id: uuid.UUID,

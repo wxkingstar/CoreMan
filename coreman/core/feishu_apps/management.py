@@ -141,8 +141,9 @@ def personal_levels(user_scopes: list[str]) -> dict[str, bool]:
         broad = set(personal_permissions.select_scopes("all_except_send", sorted(available)))
     except personal_permissions.PermissionsError:
         broad = set()
-    broad.discard("offline_access")
-    readonly = personal_permissions.MESSAGE_SCOPES - {"offline_access"}
+    broad -= manifest.PROTOCOL_SCOPES
+    # 第 3 档按固定消息范围申请；auth:user.id:read 是协议层授权项，应用权限列表里本来就没有。
+    readonly = personal_permissions.MESSAGE_SCOPES - manifest.PROTOCOL_SCOPES
     return {
         "messages_readonly": readonly <= available,
         "all_except_send": bool(broad),
@@ -422,3 +423,16 @@ async def update_command(
 
 async def delete_command(client: FeishuClient, command_id: str) -> None:
     await _write(client.call("DELETE", f"{SLASH}/{command_id}"))
+
+
+async def ensure_default_commands(client: FeishuClient) -> list[str]:
+    """补齐 CoreMan 内置斜杠指令；已存在的同名指令不改动。返回本次新建的指令名。"""
+    data = await _write(client.call("GET", SLASH))
+    existing = {item.get("command") for item in data.get("items") or [] if isinstance(item, dict)}
+    created = []
+    for command, description, icon in manifest.DEFAULT_SLASH_COMMANDS:
+        if command in existing:
+            continue
+        await create_command(client, command=command, description=description, icon_key=icon)
+        created.append(command)
+    return created

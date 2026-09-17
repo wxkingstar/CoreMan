@@ -25,6 +25,13 @@ def test_classify_accepts_slash_command_text() -> None:
         assert classify_command(w) is None
 
 
+def test_sessions_command_accepts_slash_form() -> None:
+    from coreman.core.chat.session_switch import is_sessions_command
+
+    assert is_sessions_command("/sessions ") and is_sessions_command("/会话列表")
+    assert not is_sessions_command("/sessions list") and not is_sessions_command("//sessions")
+
+
 def test_cancel_words() -> None:
     from coreman.core.chat.commands import is_cancel_word
 

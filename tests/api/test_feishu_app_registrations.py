@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json, encrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AuditLog, Bot, FeishuAppRegistration, Team
-from coreman.core.feishu_apps import registration
+from coreman.core.feishu_apps import management, registration
+from coreman.core.platforms.feishu import FeishuClient
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 
 CIPHER = Cipher(base64.b64decode(MASTER_KEY))
@@ -41,6 +42,7 @@ class FakeFeishu:
     def __init__(self) -> None:
         self.begins: list[dict[str, object]] = []
         self.results: list[registration.Poll] = []
+        self.default_commands: list[str] = []
 
     async def begin(self, **kwargs: object) -> registration.Begin:
         self.begins.append(kwargs)
@@ -48,6 +50,10 @@ class FakeFeishu:
 
     async def poll(self, device_code: str) -> registration.Poll:
         return self.results.pop(0) if self.results else registration.Poll("pending")
+
+    async def ensure_default_commands(self, client: FeishuClient) -> list[str]:
+        self.default_commands.append(client.app_id)
+        return ["new", "stop", "sessions", "help"]
 
 
 async def _member(client: httpx.AsyncClient, db_session: AsyncSession, name: str = "creator"):
@@ -61,6 +67,7 @@ def _fake(monkeypatch) -> FakeFeishu:  # type: ignore[no-untyped-def]
     fake = FakeFeishu()
     monkeypatch.setattr(registration, "begin", fake.begin)
     monkeypatch.setattr(registration, "poll", fake.poll)
+    monkeypatch.setattr(management, "ensure_default_commands", fake.ensure_default_commands)
     return fake
 
 
@@ -119,6 +126,8 @@ async def test_scan_then_create_binds_credentials_without_exposing_secret(
     )
     audit = await db_session.scalar(select(AuditLog).where(AuditLog.action == "bot.create"))
     assert audit is not None and "app-secret-value" not in str(audit.diff)
+    # 扫码创建的智能体默认补齐 CoreMan 内置斜杠指令。
+    assert fake.default_commands == ["cli_new"]
 
     # 已被消费的会话不能再建第二个员工。
     r = await client.post(
@@ -204,13 +213,14 @@ async def test_expired_denied_and_manual_credentials_are_rejected(
 async def test_dry_run_reports_conflicts_and_create_is_rate_limited(
     client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
 ) -> None:
-    _fake(monkeypatch)
+    fake = _fake(monkeypatch)
     await _member(client, db_session)
     r = await client.post(
         "/api/admin/bots",
         json=_body(credentials={"app_id": "cli_manual", "app_secret": "manual-secret"}),
     )
     assert r.status_code == 201, r.text
+    assert fake.default_commands == []  # 手动填写凭证的应用不自动改动其飞书配置
     r = await client.post("/api/admin/bots", params={"dry_run": True}, json=_body())
     assert r.status_code == 409
     for _ in range(10):

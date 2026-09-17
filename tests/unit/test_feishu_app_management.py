@@ -255,3 +255,34 @@ def test_next_version_increments_patch():
     assert management.next_version("1.2.9") == "1.2.10"
     assert management.next_version(None) == "1.0.0"
     assert management.next_version("v1") == "1.0.0"
+
+
+async def test_default_commands_only_add_missing_builtins():
+    calls: list[httpx.Request] = []
+    client = _client(
+        {
+            ("GET", management.SLASH): (
+                200,
+                {"code": 0, "data": {"items": [{"command_id": "1", "command": "help"}]}},
+            ),
+            ("POST", management.SLASH): (200, {"code": 0, "data": {"command_id": "2"}}),
+        },
+        calls,
+    )
+    assert await management.ensure_default_commands(client) == ["new", "stop", "sessions"]
+    created = [json.loads(c.content) for c in calls if c.method == "POST"]
+    assert [c["command"] for c in created] == ["new", "stop", "sessions"]
+    assert created[0]["description"]["icon"] == {"icon_key": "add-chat-ai_outlined"}
+
+
+def test_personal_levels_ignore_protocol_scopes():
+    user = [
+        s
+        for s in manifest.USER_SCOPES
+        if s not in ("auth:user.id:read", "offline_access", "im:message.send_as_user")
+    ]
+    assert management.personal_levels(user) == {
+        "messages_readonly": True,
+        "all_except_send": True,
+        "all": False,
+    }
