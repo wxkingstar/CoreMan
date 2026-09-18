@@ -37,6 +37,8 @@ class RuntimeNode(TimestampMixin, Base):
     # 节点在心跳里上报的并发上限与当前在执行数；旧节点不上报时为空。
     max_concurrent: Mapped[int | None] = mapped_column(Integer)
     active_calls: Mapped[int | None] = mapped_column(Integer)
+    # 节点 config.json 的 git_hosts 白名单，由心跳上报、只读展示；旧节点不上报时为空。
+    git_hosts: Mapped[list[str] | None] = mapped_column(JSONB)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):

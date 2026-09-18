@@ -245,7 +245,7 @@ class RuntimeAgent(Agent):
             relay_id=relay_id,
             provider=provider,
             home=Path(daemon.config.get("home", str(Path.home()))),
-            git_hosts=tuple(daemon.config.get("git_hosts", ["github.com"])),
+            git_hosts=tuple(daemon.git_hosts),
         )
         self.daemon = daemon
         self.lock = daemon.operations_lock
@@ -820,6 +820,11 @@ class Daemon:
     def max_concurrent(self) -> int:
         return int(self.config.get("max_concurrent", 10))
 
+    @property
+    def git_hosts(self) -> list[str]:
+        """Hosts the Agent may use for Git; changed in config.json, applied on restart."""
+        return list(self.config.get("git_hosts", ["github.com"]))
+
     async def pause(self, seconds: float) -> None:
         with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
             await asyncio.wait_for(self.stopping.wait(), timeout=seconds)
@@ -854,6 +859,8 @@ class Daemon:
             # Shown in the console so an overloaded node is visible before calls time out.
             "max_concurrent": self.max_concurrent,
             "active_calls": len([task for task in self.tasks.values() if not task.done()]),
+            # Read-only in the console, so a rejected Git source can be explained there.
+            "git_hosts": self.git_hosts,
         }
 
     async def heartbeat_loop(self) -> None:

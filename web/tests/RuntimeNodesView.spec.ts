@@ -186,3 +186,26 @@ it('validates the optional private CA certificate and only sends it when filled'
   expect(vi.mocked(runtimeNodes.createLink).mock.calls[1][0].options).toMatchObject({ ca_pem: pem.trim(), max_concurrent: 10 })
   wrapper.unmount()
 })
+// 节点白名单只能在节点 config.json 修改；管理台只读展示，方便解释「Git 来源不在白名单内」。
+it('shows the reported Git host allowlist and flags entries that are not host names', async () => {
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
+    { ...base, id: 'n1', name: 'reported', git_hosts: ['github.com', 'https://git.corp.example/'] },
+    { ...base, id: 'n2', name: 'legacy', git_hosts: null },
+    { ...base, id: 'n3', name: 'empty', git_hosts: [] },
+  ] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  for (const icon of wrapper.findAll('.el-table__expand-icon')) await icon.trigger('click')
+  await flushPromises()
+  const rows = wrapper.findAll('[data-test="runtime-git-hosts"]')
+  expect(rows).toHaveLength(3)
+  const tags = rows[0].findAll('.el-tag')
+  expect(tags.map(tag => tag.text())).toEqual(['github.com', 'https://git.corp.example/'])
+  expect(tags[0].classes()).toContain('el-tag--info')
+  expect(tags[1].classes()).toContain('el-tag--danger')
+  expect(rows[0].text()).toContain('以下条目不是主机名，不会匹配任何仓库：https://git.corp.example/')
+  expect(rows[1].text()).toContain('未上报（节点版本较旧）')
+  expect(rows[2].text()).toContain('空（不允许任何 Git 主机）')
+  expect(rows[1].text()).not.toContain('不是主机名')
+  wrapper.unmount()
+})
