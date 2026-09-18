@@ -530,7 +530,7 @@ async def add_default_feishu_slash_commands(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """补齐 CoreMan 内置斜杠指令（/new /stop /sessions /help），已有的同名指令不改。"""
+    """补齐 CoreMan 内置斜杠指令（/new /stop /sessions /connect /help），已有的同名指令不改。"""
     cipher = _cipher(request)
     bot = await admin_feishu_bot(session, bot_id, user)
     client = client_for(cipher, bot)

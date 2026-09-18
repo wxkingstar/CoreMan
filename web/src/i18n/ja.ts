@@ -162,7 +162,7 @@ export default {
     commandAdd: 'コマンドを追加',
     defaultCommands: '組み込みコマンドを追加',
     defaultCommandsAdded: '{commands} を追加しました。約 5 分後に反映されます',
-    defaultCommandsPresent: '組み込みコマンド（/new /stop /sessions /help）はすべて追加済みです',
+    defaultCommandsPresent: '組み込みコマンド（/new /stop /sessions /connect /help）はすべて追加済みです',
     commandEdit: 'コマンドを編集',
     commandSaved: '保存しました。約 5 分後に反映されます',
     commandDeleteConfirm: 'コマンド /{command} を削除しますか？',

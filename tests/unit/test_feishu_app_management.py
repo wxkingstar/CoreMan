@@ -267,9 +267,10 @@ async def test_default_commands_only_add_missing_builtins():
         },
         calls,
     )
-    assert await management.ensure_default_commands(client) == ["new", "stop", "sessions"]
+    missing = ["new", "stop", "sessions", "connect"]
+    assert await management.ensure_default_commands(client) == missing
     created = [json.loads(c.content) for c in calls if c.method == "POST"]
-    assert [c["command"] for c in created] == ["new", "stop", "sessions"]
+    assert [c["command"] for c in created] == missing
     assert created[0]["icon"] == {"icon_key": "add-chat-ai_outlined"}
     assert "icon" not in created[0]["description"]
 

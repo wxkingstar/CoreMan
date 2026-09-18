@@ -9,7 +9,13 @@ from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import InboundEvent, RelayServer, RuntimeNode
 from coreman.core.feishu_personal import policy
 from coreman.runtime.worker.chat.models import Intake
-from coreman.runtime.worker.chat.personal import PRIVATE_POLICY, configure, requested, validate
+from coreman.runtime.worker.chat.personal import (
+    PRIVATE_POLICY,
+    configure,
+    connect_requested,
+    requested,
+    validate,
+)
 from tests.api.test_feishu_personal import setup
 from tests.integration.worker_helpers import build_ctx
 
@@ -17,8 +23,14 @@ from tests.integration.worker_helpers import build_ctx
 def test_explicit_personal_commands_only():
     for text in ("/飞书个人 看消息", "/personal read messages", "连接我的飞书", "/personal"):
         assert requested(text)
+    # 飞书斜杠指令 /connect 等同于「连接飞书」，选中后末尾常带空格。
+    for text in (" 连接飞书 ", "/connect", "/connect ", "/Connect"):
+        assert requested(text) and connect_requested(text)
     for text in ("read my messages", "请连接我的飞书", "/personalized", "hello /personal"):
         assert not requested(text)
+    for text in ("connect", "/connect me", "/connection", "//connect", "请 /connect"):
+        assert not requested(text) and not connect_requested(text)
+    assert not connect_requested("/personal")
 
 
 async def intake_for(db_session, bot, task, text):

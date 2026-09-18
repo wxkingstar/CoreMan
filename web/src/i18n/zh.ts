@@ -162,7 +162,7 @@ export default {
     commandAdd: '添加指令',
     defaultCommands: '添加内置指令',
     defaultCommandsAdded: '已添加 {commands}，约 5 分钟后生效',
-    defaultCommandsPresent: '内置指令（/new /stop /sessions /help）均已存在',
+    defaultCommandsPresent: '内置指令（/new /stop /sessions /connect /help）均已存在',
     commandEdit: '编辑指令',
     commandSaved: '已保存，约 5 分钟后生效',
     commandDeleteConfirm: '确定删除指令 /{command} 吗？',

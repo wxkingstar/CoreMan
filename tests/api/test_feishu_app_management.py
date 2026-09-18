@@ -316,9 +316,9 @@ async def test_default_commands_endpoint_adds_missing_builtins(
     feishu.routes[("POST", management.SLASH)] = (200, {"code": 0, "data": {"command_id": "9"}})
     r = await client.post(f"/api/admin/bots/{bot.id}/feishu-app/slash-commands/defaults")
     assert r.status_code == 200, r.text
-    assert r.json()["data"] == {"created": ["stop", "sessions", "help"]}
+    assert r.json()["data"] == {"created": ["stop", "sessions", "connect", "help"]}
     posted = [json.loads(c.content)["command"] for c in feishu.calls if c.method == "POST"]
-    assert posted == ["stop", "sessions", "help"]
+    assert posted == ["stop", "sessions", "connect", "help"]
     audit = await db_session.scalar(
         select(AuditLog).where(AuditLog.action == "bot.feishu_app_command_defaults")
     )
