@@ -38,7 +38,7 @@ function credDefaults(platform: Platform): Record<string, string> {
 }
 
 /** 新建时直接展示的必填项；其余字段收在「更多设置」里，出错时自动展开。 */
-const ESSENTIAL_FIELDS = new Set(['bot_key', 'name', 'relay_server_id'])
+const ESSENTIAL_FIELDS = new Set(['platform', 'bot_key', 'name', 'relay_server_id'])
 
 function emptyForm(): BotIn {
   return {

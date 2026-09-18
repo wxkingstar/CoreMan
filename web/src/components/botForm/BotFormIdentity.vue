@@ -20,23 +20,6 @@ const { mode, form, fieldErrors, isManager, teamList, onBotKeyInput, onPlatformC
   </h3>
   <el-form-item
     v-if="part !== 'extra'"
-    :label="t('bots.botKey')"
-    data-test="bot_key"
-    :error="fieldErrors.bot_key"
-    :required="mode === 'create'"
-  >
-    <el-input
-      v-model="form.bot_key"
-      :disabled="mode === 'edit'"
-      @input="onBotKeyInput"
-    />
-    <div class="muted">
-      {{ t('bots.botKeyHint') }}
-    </div>
-  </el-form-item>
-
-  <el-form-item
-    v-if="part !== 'essential'"
     :label="t('bots.platform')"
     data-test="platform"
     :error="fieldErrors.platform"
@@ -54,6 +37,23 @@ const { mode, form, fieldErrors, isManager, teamList, onBotKeyInput, onPlatformC
         :value="p"
       />
     </el-select>
+  </el-form-item>
+
+  <el-form-item
+    v-if="part !== 'extra'"
+    :label="t('bots.botKey')"
+    data-test="bot_key"
+    :error="fieldErrors.bot_key"
+    :required="mode === 'create'"
+  >
+    <el-input
+      v-model="form.bot_key"
+      :disabled="mode === 'edit'"
+      @input="onBotKeyInput"
+    />
+    <div class="muted">
+      {{ t('bots.botKeyHint') }}
+    </div>
   </el-form-item>
 
   <el-form-item

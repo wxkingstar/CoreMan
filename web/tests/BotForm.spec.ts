@@ -215,6 +215,9 @@ describe('BotForm', () => {
     expect(vm.form.platform).toBe('feishu')
     expect(vm.moreOpen).toEqual([])
     expect(wrapper.find('.el-collapse-item.is-active').exists()).toBe(false)
+    // 平台决定凭证与扫码方式，放在最上面，不收进「更多设置」。
+    expect(wrapper.find('.employee-form-fields > [data-test="platform"]').exists()).toBe(true)
+    expect(wrapper.find('.more-settings [data-test="platform"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="feishu-one-click"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="cred-app_id"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="submit"]').text()).toBe(i18n.global.t('feishuApp.scanAndCreate'))
