@@ -47,7 +47,7 @@ async function saveName() {
 }
 const generated = ref<InstallLink | null>(null)
 const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null,
-  options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', max_concurrent: 10, install_claude_probe: false } })
+  options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', git_hosts: ['github.com'], max_concurrent: 10, install_claude_probe: false } })
 const CA_PEM_MAX_BYTES = 64 * 1024
 const CA_PEM_RE = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/
 /** 私有 CA 证书即时校验：留空合法（不传该键）；填了就必须是 PEM 证书且不超过 64 KB。 */
@@ -471,6 +471,23 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   v-model="form.options.codex_path"
                   :placeholder="t('runtimeNodes.autoDiscover')"
                 />
+              </el-form-item>
+              <el-form-item
+                :label="t('runtimeNodes.gitHosts')"
+                data-test="runtime-git-hosts"
+              >
+                <el-select
+                  v-model="form.options.git_hosts"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  :reserve-keyword="false"
+                  placeholder="github.com"
+                />
+                <p class="muted proxy-hint">
+                  {{ t('runtimeNodes.gitHostsHint') }}
+                </p>
               </el-form-item>
               <el-form-item :label="t('runtimeNodes.concurrency')">
                 <el-input-number

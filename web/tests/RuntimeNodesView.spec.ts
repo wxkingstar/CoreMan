@@ -65,7 +65,7 @@ it('requires the project root before creating a one-time install command', async
   await vm.create(); await flushPromises()
   expect(runtimeNodes.createLink).toHaveBeenCalledWith(expect.objectContaining({ workspace_root: '/home/ai/projects' }))
   expect(vm.generated?.command).toContain('curl -fsSL')
-  expect(runtimeNodes.createLink).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ max_concurrent: 10 }) }))
+  expect(runtimeNodes.createLink).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ max_concurrent: 10, git_hosts: ['github.com'] }) }))
   expect(wrapper.text()).not.toContain('有效小时数')
   expect(wrapper.find('[id=tab-links]').exists()).toBe(false)
   wrapper.unmount()

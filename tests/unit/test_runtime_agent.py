@@ -354,6 +354,35 @@ def test_skill_install_selects_only_requested_catalog_entry(agent, monkeypatch):
         )
 
 
+def test_skill_sources_skip_host_whitelist_but_keep_format_checks(agent, monkeypatch):
+    bot = agent.root / "internal-bot"
+    source = bot / ".agents/skills/query"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("query")
+    calls = []
+    monkeypatch.setattr(
+        agent_module, "run_command", lambda command, *args, **kwargs: calls.append(command)
+    )
+    for url in (
+        "https://git.corp.example/skills/tools.git",
+        "git@git.corp.example:skills/tools.git",
+    ):
+        agent.install_skill({"project_dir": str(bot), "git_url": url, "skill_name": "query"})
+        assert calls[-1][4] == url
+    # 工作区的 Git 操作仍受白名单约束。
+    with pytest.raises(agent_module.OperationError, match="白名单"):
+        agent.pull({"git_url": "https://git.corp.example/skills/tools.git"})
+    for url in (
+        "file:///tmp/repo",
+        "https://user:secret@git.corp.example/repo",
+        "https:///repo",
+        "--upload-pack=evil",
+    ):
+        with pytest.raises(agent_module.OperationError):
+            agent.install_skill({"project_dir": str(bot), "git_url": url, "skill_name": "query"})
+    assert len(calls) == 2
+
+
 def test_automatic_memory_report_reads_only_assigned_workspaces(agent, monkeypatch):
     mine = agent.root / "mine"
     unrelated = agent.root / "unrelated"

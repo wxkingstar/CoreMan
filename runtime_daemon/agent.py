@@ -215,7 +215,7 @@ class Agent:
             raise OperationError("工作目录不在允许范围内")
         return resolved
 
-    def git_source(self, raw: str) -> tuple[str, str | None]:
+    def git_source(self, raw: str, *, any_host: bool = False) -> tuple[str, str | None]:
         url, sep, skill = raw.partition(".git@")
         if sep:
             url += ".git"
@@ -237,7 +237,9 @@ class Agent:
             ):
                 raise OperationError("Git 来源必须使用允许的 HTTPS 或 SSH 地址")
             host = parts.hostname
-        if host not in self.git_hosts:
+            if not host:
+                raise OperationError("Git 地址格式不正确")
+        if not any_host and host not in self.git_hosts:
             raise OperationError("Git 来源不在白名单内")
         if skill and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", skill):
             raise OperationError("Skill 名称不合法")
@@ -509,7 +511,9 @@ class Agent:
             current.setdefault("mcpServers", {})[name] = config
             atomic_write(target, json.dumps(current, ensure_ascii=False, indent=2))
         else:
-            url, skill = self.git_source(str(data.get("git_url", "")))
+            # 技能来源由技能管理员在 CoreMan 目录登记，不再受节点 Git 主机白名单限制；
+            # 白名单只约束机器人工作区的拉取、推送与备份。
+            url, skill = self.git_source(str(data.get("git_url", "")), any_host=True)
             requested_skill = data.get("skill_name")
             if requested_skill is not None:
                 if not isinstance(requested_skill, str) or not re.fullmatch(
