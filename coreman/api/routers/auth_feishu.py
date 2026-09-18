@@ -17,7 +17,9 @@ from sqlalchemy.orm import selectinload
 from coreman.api.deps import client_ip, get_session
 from coreman.api.routers.platform_apps import decrypt_secret
 from coreman.api.security import _db_ip, create_admin_session, set_login_cookies
-from coreman.core.audit import record_audit
+from coreman.core.audit import diff_dict, record_audit
+from coreman.core.contacts.feishu_source import fetch_feishu_user
+from coreman.core.contacts.sync import ContactSyncService, SyncAborted
 from coreman.core.db.models import AuthNonce, PlatformApp, UserIdentity
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError, oauth_url
@@ -48,6 +50,65 @@ async def _login_app(session: AsyncSession) -> PlatformApp | None:
         PlatformApp.capabilities.any("login"),  # type: ignore[arg-type]
     )
     return (await session.execute(stmt.order_by(PlatformApp.created_at))).scalars().first()
+
+
+async def _identity(session: AsyncSession, userid: str) -> UserIdentity | None:
+    stmt = (
+        select(UserIdentity)
+        .options(selectinload(UserIdentity.user))
+        .where(UserIdentity.platform == "feishu", UserIdentity.platform_user_id == userid)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _sync_login_user(
+    request: Request, session: AsyncSession, login_app: PlatformApp, userid: str, ip: str
+) -> UserIdentity | None:
+    """扫码的人还没同步进来：用具备通讯录同步能力的飞书应用只补这一个人。
+
+    飞书只返回应用通讯录范围内的成员，范围外、已离职或归并冲突时返回 None（照旧 user_not_found）。
+    """
+    app: PlatformApp | None = login_app
+    if "contact_sync" not in login_app.capabilities:
+        stmt = select(PlatformApp).where(
+            PlatformApp.platform == "feishu",
+            PlatformApp.enabled.is_(True),
+            PlatformApp.capabilities.any("contact_sync"),  # type: ignore[arg-type]
+        )
+        app = (await session.execute(stmt.order_by(PlatformApp.created_at))).scalars().first()
+    if app is None:
+        return None
+    client = FeishuClient(app.app_id or "", decrypt_secret(request.app.state.cipher, app))
+    try:
+        member = await fetch_feishu_user(client, userid)
+    except FeishuError as exc:
+        log.warning("feishu_login_sync_failed", user_id=userid, errcode=exc.code, ip=ip)
+        return None
+    finally:
+        await client.aclose()
+    if member is None:
+        return None
+    try:
+        stats = await ContactSyncService(request.app.state.session_factory).merge_one(
+            "feishu", member
+        )
+    except SyncAborted as exc:
+        log.warning("feishu_login_sync_aborted", user_id=userid, reason=str(exc), ip=ip)
+        return None
+    ident = await _identity(session, userid)
+    if ident is not None:
+        await record_audit(
+            session,
+            action="user.login_sync",
+            actor_id=ident.user.id,
+            actor_login=ident.user.login_name or f"user:{ident.user.id}",
+            target_type="user",
+            target_id=str(ident.user.id),
+            diff=diff_dict({}, {"platform": "feishu", "created": bool(stats.created)}),
+            ip=_db_ip(ip),
+        )
+        await session.commit()
+    return ident
 
 
 @router.get("/feishu/start")
@@ -155,15 +216,11 @@ async def _handle_callback(
     if not userid:
         # 非成员（只有 openid）：飞书应用不可见此人身份，不是「未绑定」，单独给一个 key。
         return _fail("not_member")
-    ident = (
-        await session.execute(
-            select(UserIdentity)
-            .options(selectinload(UserIdentity.user))
-            .where(UserIdentity.platform == "feishu", UserIdentity.platform_user_id == str(userid))
-        )
-    ).scalar_one_or_none()
+    ident = await _identity(session, str(userid))
     if ident is None:
-        log.warning("feishu_login_unknown_user", ip=ip)
+        ident = await _sync_login_user(request, session, app, str(userid), ip)
+    if ident is None:
+        log.warning("feishu_login_unknown_user", user_id=str(userid), ip=ip)
         return _fail("user_not_found")
     user = ident.user
     if user.status != "active":

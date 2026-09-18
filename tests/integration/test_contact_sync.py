@@ -296,3 +296,41 @@ async def test_cross_platform_conflicting_email_and_mobile_aborts(db_engine):
         assert not list(
             await session.scalars(select(UserIdentity).where(UserIdentity.platform == "feishu"))
         )
+
+
+async def test_merge_one_links_known_departments_and_disables_nobody(db_engine):
+    factory = make_session_factory(db_engine)
+    service = ContactSyncService(factory)
+    async with factory() as session:
+        team = Team(slug="backend", name_zh="服务端")
+        session.add(team)
+        await session.flush()
+        session.add(TeamRule(team_id=team.id, platform="feishu", dept_path_contains="服务端"))
+        await session.commit()
+    await service.apply(
+        Directory("feishu", DEPTS, [_user("old", "老员工", "2", email="old@example.com")])
+    )
+    newcomer = _user(
+        "new",
+        "新员工",
+        "3",
+        dept_ids=["3", "missing"],
+        email="new@example.com",
+        profile={"open_id": "ou_new"},
+    )
+    stats = await service.merge_one("feishu", newcomer)
+    assert (stats.created, stats.disabled) == (1, 0)
+    async with factory() as session:
+        users = {u.login_name: u for u in await session.scalars(select(User))}
+        assert users["old"].status == "active"
+        new = users["new"]
+        assert new.team_id == team.id
+        paths = list(
+            await session.scalars(
+                select(Department.path)
+                .join(UserDepartment, UserDepartment.department_id == Department.id)
+                .where(UserDepartment.user_id == new.id)
+            )
+        )
+        assert paths == ["公司/技术/服务端"]
+        assert len(list(await session.scalars(select(Department)))) == 3

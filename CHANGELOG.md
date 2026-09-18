@@ -14,9 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Installing with `curl … | sh -s -- --replace` replaces the runtime already installed for that user: the new bundle is downloaded and verified before anything is touched, then the old service is stopped and the whole install directory is moved to a sibling `coreman-runtime.bak-<timestamp>`. Nothing is deleted, and an install that fails afterwards prints the command that restores the old runtime.
 - `coreman-runtime --register` registers the service again from the identity that `--uninstall` kept.
 - Skill managers can enable or disable a skill from the status column of the skill catalog without opening the editor (`PATCH /api/admin/skills/{id}`). Like a full save, a change of status bumps the skill revision, so pending approvals and queued installs for that skill must be requested again.
+- A Feishu employee who scans the sign-in QR code before the contacts have been synced no longer gets "No matching account found". CoreMan asks the Feishu app with contact sync (the sign-in app itself when it has that capability) for just that member and signs them in. Only members within the app's contact scope are added; departments are not created and nobody is disabled, so a full sync is still needed for new departments and departures. The merge is audited as `user.login_sync`.
 
 ### Changed
 
+- The `feishu_login_unknown_user` and `wecom_login_unknown_user` log events include the platform `user_id`, so a rejected sign-in can be traced to a person.
 - The create employee form now defaults to Feishu and shows only the key, name and runtime; the runtime is required and other settings keep their defaults under "More settings". The edit form is unchanged.
 - QR-created Feishu agents get the built-in slash commands `/new`, `/stop`, `/sessions` and `/help`; other Feishu bots can add them from the Feishu app page. Built-in commands, including `sessions`, now also match when sent with a leading slash.
 - The Feishu app permission list also requests `vc:meeting.meetingevent:read` and `im:chat.members:read`, and no longer reports protocol grants such as `auth:user.id:read` as missing.

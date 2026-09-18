@@ -1,6 +1,6 @@
 import pytest
 
-from coreman.core.contacts.feishu_source import fetch_feishu_directory
+from coreman.core.contacts.feishu_source import fetch_feishu_directory, fetch_feishu_user
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 
 
@@ -68,5 +68,45 @@ async def test_scoped_department_collects_descendants_and_members(monkeypatch):
         directory = await fetch_feishu_directory(client)
         assert len(directory.departments) == 2
         assert len(directory.users) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"user_id": "u1", "name": "Tester", "department_ids": ["d1"]}, "u1"),
+        ({"user_id": "u1", "name": "Tester", "status": {"is_resigned": True}}, None),
+    ],
+)
+async def test_fetch_single_user(monkeypatch, row, expected):
+    client = FeishuClient("test", "synthetic")
+    calls = []
+
+    async def call(method, path, **kwargs):
+        calls.append((path, kwargs["params"]["user_id_type"]))
+        return {"data": {"user": row}}
+
+    monkeypatch.setattr(client, "call", call)
+    try:
+        member = await fetch_feishu_user(client, "u1")
+        assert (member.platform_user_id if member else None) == expected
+        assert calls == [("/open-apis/contact/v3/users/u1", "user_id")]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(("user_id", "returned"), [("../x", "../x"), ("u1", "u2")])
+async def test_fetch_single_user_fails_closed(monkeypatch, user_id, returned):
+    client = FeishuClient("test", "synthetic")
+
+    async def call(method, path, **kwargs):
+        assert "/" not in user_id
+        return {"data": {"user": {"user_id": returned}}}
+
+    monkeypatch.setattr(client, "call", call)
+    try:
+        with pytest.raises(FeishuError):
+            await fetch_feishu_user(client, user_id)
     finally:
         await client.aclose()

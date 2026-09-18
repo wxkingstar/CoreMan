@@ -164,7 +164,7 @@ async def _handle_callback(
         )
     ).scalar_one_or_none()
     if ident is None:
-        log.warning("wecom_login_unknown_user", ip=ip)
+        log.warning("wecom_login_unknown_user", user_id=str(userid), ip=ip)
         return _fail("user_not_found")
     user = ident.user
     if user.status != "active":

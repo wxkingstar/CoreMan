@@ -131,3 +131,22 @@ async def fetch_feishu_directory(client: FeishuClient) -> Directory:
                 raise FeishuError(-2, "invalid scoped user")
             users.append(row)
         return parse_feishu_directory(list(departments.values()), users)
+
+
+async def fetch_feishu_user(client: FeishuClient, user_id: str) -> DirectoryUser | None:
+    """按 user_id 取一个成员；不在应用通讯录范围内时飞书返回错误码（FeishuError）。
+
+    已离职/退出的成员返回 None，与整份目录同步时跳过他们一致。
+    """
+    if not user_id or any(c in user_id for c in "/?#"):
+        raise FeishuError(-2, "invalid user id")
+    body = await client.call(
+        "GET",
+        f"/open-apis/contact/v3/users/{user_id}",
+        params={"department_id_type": "department_id", "user_id_type": "user_id"},
+    )
+    row = (body.get("data") or {}).get("user")
+    if not isinstance(row, dict) or row.get("user_id") != user_id:
+        raise FeishuError(-2, "invalid scoped user")
+    users = parse_feishu_directory([], [row]).users
+    return users[0] if users else None
