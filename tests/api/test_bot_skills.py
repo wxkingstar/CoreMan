@@ -282,7 +282,8 @@ async def test_install_failure_shows_the_node_reason(client, db_session, db_engi
     bot_id, row, log = await failed_install(client, db_session, db_engine, monkeypatch, agent)
     assert row.error_message == (
         "运行时节点报告安装失败：Git 来源不在白名单内。"
-        "请在该运行时节点的 config.json 中把技能仓库域名加入 git_hosts，然后重启运行时服务。"
+        "该节点版本较旧，安装技能仍受 Git 白名单限制：请升级运行时节点，"
+        "或在节点 config.json 的 git_hosts 中加入技能仓库域名后重启服务。"
     )
     assert log["error_code"] == "operation_failed" and log["error_type"] == "AgentError"
     assert log["detail"] == "Git 来源不在白名单内" and log["remote"] is True

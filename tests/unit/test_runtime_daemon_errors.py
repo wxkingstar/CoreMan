@@ -22,7 +22,7 @@ def node(tmp_path):
         json.dumps({"workspace_root": str(root), "api_url": "http://localhost", "node_id": "n1"})
     )
     daemon = Daemon(path)
-    # Same whitelist as the node in the 2026-09-18 incident.
+    # The default allowlist of nodes installed from the console.
     daemon.agents["claude"] = agent_module.Agent(
         root=root,
         home=tmp_path / "home",
@@ -59,27 +59,33 @@ def body_of(frames):
     return json.loads(b"".join(base64.b64decode(frame["data"]) for frame in frames))
 
 
-async def test_whitelist_rejection_is_returned_and_logged(node, caplog):
-    (node.agents["claude"].root / "bot-1").mkdir()
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            {
+                "type": "install-skill",
+                "project_dir": "never-created",
+                "install_type": "skill",
+                "skill_name": "query",
+                "git_url": "https://git.example.org/ai/skills.git",
+            },
+            "工作目录不存在",
+        ),
+        # Workspace Git operations still honour git_hosts (skill installs no longer do).
+        (
+            {"type": "pull", "git_url": "https://git.example.org/ai/repo.git"},
+            "Git 来源不在白名单内",
+        ),
+    ],
+)
+async def test_operation_error_is_returned_and_logged(node, caplog, body, message):
     caplog.set_level(logging.WARNING, logger="coreman-runtime")
-    frames = await run(
-        node,
-        {
-            "type": "install-skill",
-            "project_dir": "bot-1",
-            "install_type": "skill",
-            "skill_name": "query",
-            "git_url": "https://git.example.org/ai/skills.git",
-        },
-    )
+    frames = await run(node, body)
     assert frames[0]["status_code"] == 200
     assert not any(frame.get("error") for frame in frames)
-    assert body_of(frames) == {
-        "success": False,
-        "code": "operation_failed",
-        "message": "Git 来源不在白名单内",
-    }
-    assert "Operation install-skill failed: Git 来源不在白名单内" in caplog.text
+    assert body_of(frames) == {"success": False, "code": "operation_failed", "message": message}
+    assert f"Operation {body['type']} failed: {message}" in caplog.text
 
 
 async def test_unexpected_errors_stay_type_only(node, caplog):
