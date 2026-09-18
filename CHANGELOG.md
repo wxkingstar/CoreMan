@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - QR-created Feishu agents get the built-in slash commands `/new`, `/stop`, `/sessions` and `/help`; other Feishu bots can add them from the Feishu app page. Built-in commands, including `sessions`, now also match when sent with a leading slash.
 - The Feishu app permission list also requests `vc:meeting.meetingevent:read` and `im:chat.members:read`, and no longer reports protocol grants such as `auth:user.id:read` as missing.
 - When a runtime is already installed, the installer now names the platform each side connects to and prints commands that run as pasted. The previous hint left out the change into the release directory, so it failed with `No module named 'runtime_daemon'`, and it suggested purging the node even when the service alone had been removed.
+- Container images keep `/app` owned by root and read-only and precompile the application's bytecode at build time. Base images are pinned by digest (Dependabot bumps them), and uv's download cache stays out of the image. A release that changes only code now adds about 8 MB per image instead of rewriting a layer of more than 300 MB, and the dependency layer shrinks from 444 MB to 265 MB.
 
 ## [0.1.0] - 2026-09-16
 
