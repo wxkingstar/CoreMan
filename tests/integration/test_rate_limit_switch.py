@@ -207,7 +207,7 @@ async def _switch_task(
 async def test_relay_switch_handler_switches_and_notifies(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
-    bot, relay, _ = await seed_bot(db_session)
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5")
     idle = await _second_relay(db_session)
     creator = await _creator_identity(db_session, bot)
     await sessions.get_or_create(
@@ -243,7 +243,7 @@ async def test_relay_switch_handler_switches_and_notifies(
     t = await _switch_task(db_session, bot, st, user_id=creator.id, target_id=idle.id)
     await RelaySwitchHandler().run(build_ctx(db_engine, t))
     await db_session.refresh(bot)
-    assert bot.relay_server_id == idle.id and bot.model == "claude-sonnet-4-6"
+    assert bot.relay_server_id == idle.id and bot.model == "claude-sonnet-5"
     assert await sessions.list_for_bot(db_session, bot.id) == []
     audit = (
         await db_session.execute(select(AuditLog).where(AuditLog.action == "bot.switch_relay"))
@@ -254,7 +254,7 @@ async def test_relay_switch_handler_switches_and_notifies(
         "relay_switch_ok",
         current="r1",
         target="r-idle",
-        detail=msg("relay_switch_detail", model="claude-sonnet-4-6"),
+        detail=msg("relay_switch_detail", model="claude-sonnet-5"),
     )
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
     row = await tasks.get(db_session, t.id)
