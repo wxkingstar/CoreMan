@@ -18,6 +18,11 @@ log = get_logger(__name__)
 DISABLE_LIMIT = 100
 
 
+async def _team_rules(session: AsyncSession) -> list[TeamRule]:
+    stmt = select(TeamRule).order_by(TeamRule.sort_order, TeamRule.created_at)
+    return list((await session.execute(stmt)).scalars().all())
+
+
 class SyncAborted(Exception):
     """一次同步停用人数超过 DISABLE_LIMIT，已回滚。"""
 
@@ -77,15 +82,7 @@ class ContactSyncService:
             await session.execute(text("SELECT pg_advisory_xact_lock(582190401)"))
             dept_map = await self._sync_departments(session, directory)
             stats.departments = len(dept_map)
-            rules = list(
-                (
-                    await session.execute(
-                        select(TeamRule).order_by(TeamRule.sort_order, TeamRule.created_at)
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            rules = await _team_rules(session)
             seen: set[str] = set()
             for du in directory.users:
                 seen.add(du.platform_user_id)
@@ -101,6 +98,35 @@ class ContactSyncService:
             "contact_sync_applied",
             platform=directory.platform,
             **{k: v for k, v in stats.to_dict().items() if not isinstance(v, list)},
+        )
+        return stats
+
+    async def merge_one(self, platform: str, du: DirectoryUser) -> SyncStats:
+        """只归并一个成员（登录时查不到人的补同步）：不建部门、不停用任何人。
+
+        部门关联只连到已经同步过的部门；新部门等下一次整份同步补齐。
+        与整份同步共用同一把咨询锁，归并规则也完全一致。
+
+        Raises:
+            SyncAborted: 该成员的邮箱与手机号分别指向不同账号
+        """
+        stats = SyncStats(users_total=1)
+        async with self._factory() as session:
+            await session.execute(text("SELECT pg_advisory_xact_lock(582190401)"))
+            dept_map = {
+                d.platform_dept_id: d
+                for d in (
+                    await session.execute(select(Department).where(Department.platform == platform))
+                ).scalars()
+            }
+            rules = await _team_rules(session)
+            await self._merge_user(session, platform, du, dept_map, rules, stats)
+            await session.commit()
+        log.info(
+            "contact_user_merged",
+            platform=platform,
+            user_id=du.platform_user_id,
+            created=stats.created,
         )
         return stats
 
