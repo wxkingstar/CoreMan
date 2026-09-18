@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
+import TruncatedText from '@/components/TruncatedText.vue'
 import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
 import SkillPresetDialog from '@/components/skills/SkillPresetDialog.vue'
 import SkillSourceDialog from '@/components/skills/SkillSourceDialog.vue'
@@ -137,26 +138,7 @@ onMounted(load)
             min-width="260"
           >
             <template #default="{ row }">
-              <el-tooltip
-                v-if="row.description"
-                placement="top-start"
-                effect="light"
-                :show-after="250"
-                :hide-after="150"
-                :enterable="true"
-                popper-class="skill-description-tooltip"
-              >
-                <template #content>
-                  <div class="skill-description-content">
-                    {{ row.description }}
-                  </div>
-                </template>
-                <span
-                  class="skill-description-preview"
-                  tabindex="0"
-                >{{ row.description }}</span>
-              </el-tooltip>
-              <span v-else>—</span>
+              <TruncatedText :text="row.description" />
             </template>
           </el-table-column>
           <el-table-column
@@ -393,29 +375,7 @@ onMounted(load)
     />
   </section>
 </template>
-<style>
-.el-popper.skill-description-tooltip {
-  max-width: min(480px, calc(100vw - 32px));
-  padding: 14px 16px;
-  border: 1px solid var(--cm-border);
-  border-radius: 10px;
-  background: var(--el-bg-color-overlay);
-  color: var(--el-text-color-primary);
-  box-shadow: 0 8px 28px rgb(0 0 0 / 12%);
-}
-.skill-description-content {
-  max-height: min(360px, 50vh);
-  overflow-y: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 13px;
-  line-height: 1.75;
-  user-select: text;
-}
-</style>
 <style scoped>
-.skill-description-preview { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; border-radius: 3px; }
-.skill-description-preview:focus-visible { outline: 2px solid var(--cm-brand); outline-offset: -2px; }
 .catalog-toolbar, .section-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
 .catalog-filters { display: flex; gap: 12px; flex: 1; max-width: 620px; }
 .catalog-filters > .el-input { flex: 1.4; min-width: 140px; }

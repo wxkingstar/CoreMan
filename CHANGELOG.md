@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - The `feishu_login_unknown_user` and `wecom_login_unknown_user` log events include the platform `user_id`, so a rejected sign-in can be traced to a person.
+- The skills dialog on the employee page keeps every row on one line: skill descriptions and install errors are truncated and shown in full on hover, like the skill catalog, and long names, versions and labels are shortened with an ellipsis instead of wrapping.
 - The create employee form now defaults to Feishu and shows only the key, name and runtime; the runtime is required and other settings keep their defaults under "More settings". The edit form is unchanged.
 - QR-created Feishu agents get the built-in slash commands `/new`, `/stop`, `/sessions` and `/help`; other Feishu bots can add them from the Feishu app page. Built-in commands, including `sessions`, now also match when sent with a leading slash.
 - The Feishu app permission list also requests `vc:meeting.meetingevent:read` and `im:chat.members:read`, and no longer reports protocol grants such as `auth:user.id:read` as missing.

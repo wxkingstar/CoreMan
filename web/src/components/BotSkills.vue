@@ -3,6 +3,7 @@ import { errorMessage } from '@/utils/errors'
 import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import LoadState from '@/components/LoadState.vue'
+import TruncatedText from '@/components/TruncatedText.vue'
 import { computed, ref, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -84,29 +85,38 @@ async function remove(row: Installed) {
       :error="loadError"
       @retry="load"
     />
-    <el-table :data="rows">
+    <el-table
+      class="skill-table"
+      :data="rows"
+    >
       <el-table-column
-        min-width="140"
+        min-width="160"
         prop="name"
         :label="t('common.name')"
+        show-overflow-tooltip
       />
       <el-table-column
-        min-width="140"
+        min-width="200"
         :label="t('common.status')"
       >
         <template #default="{ row }">
-          {{ t(`skill.status.${row.status}`) }}<p v-if="row.error_message">
-            {{ row.error_message }}
-          </p>
+          <TruncatedText
+            v-if="row.error_message"
+            :text="`${t(`skill.status.${row.status}`)} · ${row.error_message}`"
+          />
+          <template v-else>
+            {{ t(`skill.status.${row.status}`) }}
+          </template>
         </template>
       </el-table-column>
       <el-table-column
-        min-width="140"
+        width="140"
         prop="version"
         :label="t('skill.packageVersion')"
+        show-overflow-tooltip
       />
       <el-table-column
-        min-width="140"
+        width="150"
         :label="t('common.actions')"
       >
         <template #default="{ row }">
@@ -137,29 +147,35 @@ async function remove(row: Installed) {
       type="warning"
     />
     <el-table
+      class="skill-table"
       :data="catalog"
       :empty-text="t('skill.emptyCatalog')"
     >
       <el-table-column
-        min-width="140"
+        width="180"
         prop="name"
         :label="t('common.name')"
+        show-overflow-tooltip
       />
       <el-table-column
-        min-width="140"
-        prop="description"
+        min-width="240"
         :label="t('common.description')"
-      />
+      >
+        <template #default="{ row }">
+          <TruncatedText :text="row.description" />
+        </template>
+      </el-table-column>
       <el-table-column
-        min-width="140"
+        width="110"
         :label="t('skill.security')"
+        show-overflow-tooltip
       >
         <template #default="{ row }">
           {{ t(`skill.${row.security_level}`) }}
         </template>
       </el-table-column>
       <el-table-column
-        min-width="100"
+        width="100"
         :label="t('common.status')"
       >
         <template #default="{ row }">
@@ -168,7 +184,7 @@ async function remove(row: Installed) {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column min-width="140">
+      <el-table-column width="140">
         <template #default="{ row }">
           <el-button
             v-if="row.enabled"
@@ -279,3 +295,9 @@ async function remove(row: Installed) {
     </template>
   </el-dialog>
 </template>
+<style scoped>
+.skill-table :deep(.cell) { white-space: nowrap; }
+/* 标签/按钮是原子行内元素，溢出时会被单元格的省略号整体吞掉，故限宽并在内部省略 */
+.skill-table :deep(.cell > .el-tag), .skill-table :deep(.cell > .el-button) { max-width: 100%; }
+.skill-table :deep(.cell > .el-tag > .el-tag__content), .skill-table :deep(.cell > .el-button > span) { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+</style>
