@@ -21,6 +21,7 @@ export const skills = {
   sourceSync: (row: Source) => call<{ created: number; updated: number; unchanged: number }>(http.post(`${root}/skill-sources/${row.id}/sync`, {}, { ...match(row.version), timeout: 210000 })),
   sourceSave: (row: Source | null, body: Omit<Source, 'id' | 'version' | 'has_access_token'> & { access_token?: string; remove_access_token?: boolean }) => call<Source>(row ? http.put(`${root}/skill-sources/${row.id}`, body, match(row.version)) : http.post(`${root}/skill-sources`, body)),
   save: (row: Skill | null, body: SkillInput) => call<Skill>(row ? http.put(`${root}/skills/${row.id}`, body, match(row.revision)) : http.post(`${root}/skills`, body)),
+  setEnabled: (row: Skill, enabled: boolean) => call<Skill>(http.patch(`${root}/skills/${row.id}`, { enabled }, match(row.revision))),
   presets: () => call<Preset[]>(http.get(`${root}/env-presets`)),
   presetSave: (body: Preset) => call<Preset>(http.put(`${root}/env-presets/${body.group_key}`, { group_key: body.group_key, label: body.label, vars: body.vars, tags: body.tags }, match(body.version))),
   installed: (bot: string) => call<{ items: Installed[]; pending_approvals: Approval[] }>(http.get(`${root}/bots/${bot}/skills`)),

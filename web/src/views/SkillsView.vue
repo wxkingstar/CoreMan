@@ -39,6 +39,15 @@ async function load() { listLoading.value = true; listError.value = ''; try { co
 function edit(row: Skill | null) { skillDialog.value?.open(row, sourceFilter.value || (sources.value.length === 1 ? sources.value[0]!.id : '')) }
 function editSource(row: Source | null) { sourceDialog.value?.open(row) }
 function editPreset(row: Preset | null) { presetDialog.value?.open(row) }
+/** 列表里直接切换启用状态；失败（多为别人刚改过、修订号过期）时整表重取。 */
+const toggling = ref('')
+async function setEnabled(row: Skill, value: boolean | string | number) {
+  toggling.value = row.id
+  try {
+    Object.assign(row, await skills.setEnabled(row, Boolean(value)))
+    ElMessage.success(t('common.saved'))
+  } catch (e) { fail(e); await load() } finally { toggling.value = '' }
+}
 onMounted(load)
 </script>
 <template>
@@ -173,10 +182,24 @@ onMounted(load)
           </el-table-column>
           <el-table-column
             :label="t('common.status')"
-            min-width="100"
+            min-width="120"
           >
             <template #default="{ row }">
+              <div
+                v-if="manager"
+                class="status-toggle"
+              >
+                <el-switch
+                  :data-test="'enabled-' + row.name"
+                  :model-value="row.enabled"
+                  :loading="toggling === row.id"
+                  :aria-label="`${row.name} ${t('common.status')}`"
+                  @change="setEnabled(row, $event)"
+                />
+                <span :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'common.enabled' : 'common.disabled') }}</span>
+              </div>
               <el-tag
+                v-else
                 :type="row.enabled ? 'success' : 'info'"
                 effect="plain"
               >
@@ -405,6 +428,8 @@ onMounted(load)
 p.hint { margin: 0; max-width: 76ch; }
 .after-table { margin-top: 16px !important; }
 .preset-keys { display: flex; flex-wrap: wrap; gap: 6px; }
+.status-toggle { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.status-toggle .muted { color: var(--cm-muted); }
 @media (max-width: 700px) {
   .catalog-toolbar { align-items: stretch; flex-direction: column; }
   .catalog-filters { max-width: none; flex-wrap: wrap; }

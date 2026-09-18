@@ -46,6 +46,53 @@ async def test_catalog_permissions_revision_and_secrets(client, db_session):
     assert "TOP-SECRET" not in str([row.diff for row in await db_session.scalars(select(AuditLog))])
 
 
+async def test_status_toggle_only_changes_enabled_and_is_audited(client, db_session):
+    await login_as(client, db_session, role="platform_admin")
+    source = await client.post(
+        "/api/admin/skill-sources",
+        json={"key": "toggle", "label": "Toggle", "git_url": "https://github.com/example/s.git"},
+    )
+    body = {
+        "name": "toggle-query",
+        "source_id": source.json()["data"]["id"],
+        "security_level": "internal",
+        "env_groups": ["oss"],
+        "security_prompt_template": "Read only",
+    }
+    row = (await client.post("/api/admin/skills", json=body)).json()["data"]
+    path = f"/api/admin/skills/{row['id']}"
+    result = await client.patch(path, json={"enabled": True}, headers={"If-Match": "1"})
+    assert result.status_code == 200, result.text
+    data = result.json()["data"]
+    assert data["enabled"] is True and data["revision"] == 2
+    assert data["env_groups"] == ["oss"] and data["security_prompt_template"] == "Read only"
+    # 旧修订号、多余字段都拒绝；状态没变时不递增修订号，也不记审计。
+    assert (
+        await client.patch(path, json={"enabled": False}, headers={"If-Match": "1"})
+    ).status_code == 409
+    assert (
+        await client.patch(path, json={"enabled": False, "name": "x"}, headers={"If-Match": "2"})
+    ).status_code == 422
+    same = await client.patch(path, json={"enabled": True}, headers={"If-Match": "2"})
+    assert same.json()["data"]["revision"] == 2
+    off = await client.patch(path, json={"enabled": False}, headers={"If-Match": "2"})
+    assert off.json()["data"]["enabled"] is False and off.json()["data"]["revision"] == 3
+    actions = [
+        (log.action, log.diff)
+        for log in await db_session.scalars(
+            select(AuditLog).where(AuditLog.target_id == row["id"]).order_by(AuditLog.id)
+        )
+    ]
+    assert actions[1:] == [
+        ("skill.enable", {"enabled": [False, True]}),
+        ("skill.disable", {"enabled": [True, False]}),
+    ]
+    await login_as(client, db_session, role="member")
+    assert (
+        await client.patch(path, json={"enabled": True}, headers={"If-Match": "3"})
+    ).status_code == 403
+
+
 async def test_presets_forbid_identity_and_doris_fallback(client, db_session):
     await login_as(client, db_session, role="platform_admin")
     body = {"group_key": "db_erp", "label": "ERP", "vars": {"DB_PASSWORD": "secret-erp"}}

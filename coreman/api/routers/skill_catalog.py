@@ -154,6 +154,11 @@ class SkillIn(BaseModel):
         return self
 
 
+class SkillStatusIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 class PresetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     group_key: str = Field(min_length=1, max_length=100)
@@ -209,7 +214,12 @@ def skill_out(row: Skill) -> dict[str, Any]:
 
 
 async def audited(
-    session: AsyncSession, request: Request, actor: User, action: str, identity: str
+    session: AsyncSession,
+    request: Request,
+    actor: User,
+    action: str,
+    identity: str,
+    diff: dict[str, Any] | None = None,
 ) -> None:
     await record_audit(
         session,
@@ -218,6 +228,7 @@ async def audited(
         action=action,
         target_type="skill_config",
         target_id=identity,
+        diff=diff,
         ip=client_ip(request),
     )
     await session.commit()
@@ -392,6 +403,31 @@ async def update_skill(
     require_if_match(request, row.revision)
     await apply_skill(session, row, body, request)
     await audited(session, request, actor, "skill.update", str(row.id))
+    return {"code": 0, "data": skill_out(row)}
+
+
+@router.patch("/skills/{identity}")
+async def set_skill_status(
+    identity: uuid.UUID,
+    body: SkillStatusIn,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """列表里的启用开关：只改 enabled，不必回传整份目录配置。
+
+    和整份保存一样会递增 revision，待审申请与排队中的安装因此作废，须重新申请。
+    """
+    require_manager(actor)
+    row = await session.get(Skill, identity)
+    if row is None:
+        raise not_found("技能不存在")
+    require_if_match(request, row.revision)
+    if row.enabled != body.enabled:
+        diff = {"enabled": [row.enabled, body.enabled]}
+        row.enabled, row.updated_at = body.enabled, utcnow()
+        action = "skill.enable" if body.enabled else "skill.disable"
+        await audited(session, request, actor, action, str(row.id), diff)
     return {"code": 0, "data": skill_out(row)}
 
 

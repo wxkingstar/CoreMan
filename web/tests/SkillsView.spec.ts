@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { expect, it, vi } from 'vitest'
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { role: 'ai_committee' } }) }))
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
@@ -25,6 +25,32 @@ it('preserves encrypted MCP configuration and security fields when editing catal
   dialog.form.description = 'new'
   await dialog.save(); await flushPromises()
   expect(skills.save).toHaveBeenCalledWith(expect.objectContaining({ revision: 4 }), expect.objectContaining({ description: 'new', mcp_config: null, security_prompt_template: 'Read only', security_level: 'internal' }))
+  wrapper.unmount()
+})
+
+it('toggles skill status inline and reloads the catalog when the revision is stale', async () => {
+  const row = { id: 's1', revision: 2, name: 'goods-query', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['wuji_tools'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false, has_mcp_config: false } as Skill
+  vi.mocked(allSkills).mockResolvedValue([{ ...row }])
+  vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
+  vi.mocked(skills.presets).mockResolvedValue([])
+  // 行对象会被原地更新，按调用时刻记下修订号。
+  const sent: [string, number, boolean][] = []
+  vi.mocked(skills.setEnabled).mockImplementation(async (target, enabled) => {
+    sent.push([target.id, target.revision, enabled])
+    if (sent.length > 1) throw new Error('stale')
+    return { ...target, enabled, revision: target.revision + 1 }
+  })
+  const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  await wrapper.get('[data-test="enabled-goods-query"]').trigger('click')
+  await flushPromises()
+  const vm = wrapper.vm as unknown as { rows: Skill[] }
+  expect(vm.rows[0]).toMatchObject({ enabled: true, revision: 3 })
+  vi.mocked(allSkills).mockClear()
+  await wrapper.get('[data-test="enabled-goods-query"]').trigger('click')
+  await flushPromises()
+  expect(sent).toEqual([['s1', 2, true], ['s1', 3, false]])
+  expect(allSkills).toHaveBeenCalledTimes(1)
   wrapper.unmount()
 })
 
