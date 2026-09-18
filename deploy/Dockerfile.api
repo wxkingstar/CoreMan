@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # build.py 为全部目标平台交叉编译驱动、只下载与平台无关的 wheel，同样不依赖构建机架构。
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS runtime-bundles
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS runtime-bundles
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
