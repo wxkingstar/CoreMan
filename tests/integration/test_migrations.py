@@ -1,3 +1,5 @@
+import logging
+
 from alembic import command
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -48,3 +50,10 @@ async def test_updated_at_trigger(db_engine: AsyncEngine) -> None:
 def test_models_match_migrations(migrated_database: str) -> None:
     """等价于 CI 里的 alembic check：模型与迁移一致才通过。"""
     command.check(alembic_config(migrated_database))
+
+
+def test_running_migrations_keeps_existing_loggers_enabled(migrated_database: str) -> None:
+    """env.py 的 fileConfig 不得禁用进程里已有的 logger（进程内跑迁移时会静默别的模块日志）。"""
+    logger = logging.getLogger("tests.migrations.existing")
+    command.upgrade(alembic_config(migrated_database), "head")
+    assert not logger.disabled

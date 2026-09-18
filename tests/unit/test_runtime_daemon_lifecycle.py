@@ -205,8 +205,9 @@ def test_configure_logging_rotates_and_quiets_http_clients(tmp_path):
         logging.root.manager.disable,
         {name: (logger.level, logger.disabled) for name, logger in loggers.items()},
     )
-    # Other suites configure logging process-wide (dictConfig disables existing loggers);
-    # start from the state the daemon process has when main() runs.
+    # Other suites configure logging process-wide (the API lifespan's basicConfig, alembic's
+    # fileConfig in migrations/env.py, caplog levels); start from the state the daemon
+    # process has when main() runs.
     logging.disable(logging.NOTSET)
     for logger in loggers.values():
         logger.setLevel(logging.NOTSET)
