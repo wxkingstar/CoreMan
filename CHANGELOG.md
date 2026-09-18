@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - When a runtime is already installed, the installer now names the platform each side connects to and prints commands that run as pasted. The previous hint left out the change into the release directory, so it failed with `No module named 'runtime_daemon'`, and it suggested purging the node even when the service alone had been removed.
 - Container images keep `/app` owned by root and read-only and precompile the application's bytecode at build time. Base images are pinned by digest (Dependabot bumps them), and uv's download cache stays out of the image. A release that changes only code now adds about 8 MB per image instead of rewriting a layer of more than 300 MB, and the dependency layer shrinks from 444 MB to 265 MB.
 
+### Fixed
+
+- A runtime node could pick up a new request up to a second late. The caller renewed its lease on every read, which briefly locked the request just as the node's long poll, woken by the new request, tried to claim it and skipped it. The lease is now renewed every 10 seconds.
+
 ## [0.1.0] - 2026-09-16
 
 First public release.
