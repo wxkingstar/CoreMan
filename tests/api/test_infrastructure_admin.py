@@ -1,10 +1,15 @@
 import base64
 
 import httpx
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.main import create_app
 from coreman.core.auth.tokens import active_key, issue_token
+from coreman.core.config import Settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import ApiClient, AuditLog, BotSystemGrant, BusinessSystem
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
@@ -237,3 +242,31 @@ async def test_retired_cron_scope_is_tolerated_on_read_and_dropped_on_save(
         "/api/admin/api-clients", json={"app_key": "bad", "name": "坏", "scopes": ["unknown"]}
     )
     assert response.status_code == 422
+
+
+async def test_external_signing_key_is_published_and_listed(
+    api_settings: Settings,
+    db_engine,  # type: ignore[no-untyped-def]
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    monkeypatch.setenv("BOT_JWT_PRIVATE_KEY", private.decode())
+    monkeypatch.setenv("BOT_JWT_KID", "legacy-2024")
+    monkeypatch.setenv("BOT_JWT_ISSUER", "legacy-issuer")
+    app = create_app(Settings())  # type: ignore[call-arg]
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client,
+    ):
+        keys = (await client.get("/api/.well-known/jwks.json")).json()["keys"]
+        external = [k for k in keys if k["kid"] == "legacy-2024"]
+        assert len(external) == 1 and "d" not in external[0]
+        await login_as(client, db_session, role="platform_admin")
+        listed = (await client.get("/api/admin/jwt-keys")).json()["data"]
+        assert listed[0]["kid"] == "legacy-2024" and listed[0]["external"] is True
+        assert all(k["external"] is False for k in listed[1:])

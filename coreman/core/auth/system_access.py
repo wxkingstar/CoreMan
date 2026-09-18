@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.tokens import active_key, issue_token
+from coreman.core.auth.external_key import ExternalKey
+from coreman.core.auth.tokens import issue_token, signing_key
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSystemGrant, BusinessSystem, User
 from coreman.core.prompting.system_prompt import Speaker
@@ -28,8 +29,15 @@ class SystemAccess:
 
 
 async def build_system_access(
-    session: AsyncSession, cipher: Cipher, *, bot: Bot, speaker: Speaker, issuer: str
+    session: AsyncSession,
+    cipher: Cipher,
+    *,
+    bot: Bot,
+    speaker: Speaker,
+    issuer: str,
+    external_key: ExternalKey | None,
 ) -> SystemAccess:
+    """external_key 为部署配置的外部签发方密钥（Settings.external_jwt_key），有则用它签。"""
     if not speaker.known or not speaker.login_name:
         return SystemAccess()
     user = await session.get(User, speaker.user_id, populate_existing=True)
@@ -60,7 +68,7 @@ async def build_system_access(
     )
     if not systems:
         return SystemAccess()
-    key = await active_key(session, cipher)
+    key = await signing_key(session, cipher, external_key)
     env = {
         f"BOT_TOKEN_{system.key.upper()}": issue_token(
             key,

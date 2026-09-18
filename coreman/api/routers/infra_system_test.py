@@ -16,7 +16,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
-from coreman.core.auth.tokens import active_key, issue_token
+from coreman.core.auth.tokens import issue_token, signing_key
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
 
@@ -71,7 +71,7 @@ async def test_access(
     except ValueError as exc:
         raise ApiError(422, 422, "业务系统地址不允许访问") from exc
     cipher = request.app.state.cipher
-    key = await active_key(session, cipher)
+    key = await signing_key(session, cipher, request.app.state.settings.external_jwt_key)
     issuer = str(await request.app.state.settings_store.get("jwt_issuer", default="coreman"))
     token = issue_token(
         key,

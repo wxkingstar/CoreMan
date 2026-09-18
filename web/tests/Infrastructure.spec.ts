@@ -109,6 +109,21 @@ describe('Infrastructure management', () => {
     expect(wrapper.findAllComponents({ name: 'ElTable' })).toHaveLength(2)
     wrapper.unmount()
   })
+
+  it('marks the deployment-configured signing key and explains rotation does not affect it', async () => {
+    vi.mocked(credentials.keys).mockResolvedValue([
+      { kid: 'legacy-2024', is_active: true, created_at: null, retired_at: null, external: true },
+      { kid: 'platform', is_active: true, created_at: '2026-09-01T00:00:00Z', retired_at: null, external: false },
+    ])
+    const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { tab: string }
+    vm.tab = 'keys'; await flushPromises()
+    expect(wrapper.text()).toContain('部署配置')
+    expect(wrapper.text()).toContain('BOT_JWT_*')
+    expect(wrapper.text()).toContain('使用中')
+    wrapper.unmount()
+  })
   it('uses translated scope labels in the client list', async () => {
     vi.mocked(credentials.clients).mockResolvedValue({ items: [{ app_key: 'client', name: 'Client', scopes: ['org', 'push'], enabled: true, version: 1, last_used_at: null, has_secret: true }], total: 1, page: 1, per_page: 50 })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })

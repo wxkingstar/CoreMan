@@ -173,6 +173,13 @@ onMounted(load)
         >
           {{ t('infra.rotateKey') }}
         </el-button>
+        <el-alert
+          v-if="keys.some((k) => k.external)"
+          :title="t('infra.externalKeyHint')"
+          type="info"
+          :closable="false"
+          show-icon
+        />
         <el-table
           v-if="!listLoading && !listError"
           :data="keys"
@@ -187,7 +194,7 @@ onMounted(load)
             :label="t('infra.status')"
           >
             <template #default="{ row }">
-              {{ t(row.is_active ? 'infra.signing' : 'infra.retired') }}
+              {{ t(row.external ? 'infra.externalKey' : row.is_active ? 'infra.signing' : 'infra.retired') }}
             </template>
           </el-table-column>
           <el-table-column

@@ -145,6 +145,7 @@ class CronRunHandler:
                     bot=bot,
                     speaker=speaker,
                     issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
+                    external_key=ctx.external_jwt_key,
                 )
                 env = build_env(
                     bot_key=bot.bot_key,

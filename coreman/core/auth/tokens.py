@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.auth.external_key import ExternalKey
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import JwtKey
 
@@ -59,33 +60,52 @@ async def public_keys(session: AsyncSession) -> list[dict[str, Any]]:
     return [row.public_jwk for row in rows]
 
 
+async def signing_key(
+    session: AsyncSession, cipher: Cipher, external: ExternalKey | None
+) -> JwtKey | ExternalKey:
+    """业务系统令牌的签名密钥：部署配置了外部签发方密钥就用它，否则用平台当前密钥。"""
+    return external if external is not None else await active_key(session, cipher)
+
+
 def issue_token(
-    key: JwtKey, cipher: Cipher, *, issuer: str, login: str, name: str, audience: str, ttl: int
+    key: JwtKey | ExternalKey,
+    cipher: Cipher,
+    *,
+    issuer: str,
+    login: str,
+    name: str,
+    audience: str,
+    ttl: int,
 ) -> str:
+    """签发发言者令牌；用外部签发方密钥时 iss 取该密钥自己的 issuer（忽略参数 issuer）。"""
     if (
         not login.strip()
         or not audience
         or not issuer
         or not 1 <= ttl <= MAX_TTL
-        or not key.is_active
+        or not (isinstance(key, ExternalKey) or key.is_active)
     ):
         raise ValueError("无效的令牌主体、范围或有效期")
     now = int(datetime.now(UTC).timestamp())
-    return jwt.encode(
-        {
-            "iss": issuer,
-            "sub": login,
-            "name": name,
-            "aud": audience,
-            "scope": audience,
-            "iat": now,
-            "exp": now + ttl,
-            "jti": uuid.uuid4().hex,
-        },
-        cipher.decrypt(key.private_pem_enc, KEY_AAD),
-        algorithm="ES256",
-        headers={"kid": key.kid},
-    )
+    claims: dict[str, Any] = {
+        "iss": issuer,
+        "sub": login,
+        "name": name,
+        "aud": audience,
+        "scope": audience,
+        "iat": now,
+        "exp": now + ttl,
+        "jti": uuid.uuid4().hex,
+    }
+    if isinstance(key, ExternalKey):
+        # 与外部签发方的令牌字段保持一致：系统范围只放在 scope，不带 aud。
+        # 部分 JWT 库（如 PyJWT）在验签方没指定 audience 时会拒收带 aud 的令牌。
+        claims["iss"] = key.issuer
+        del claims["aud"]
+        pem = key.private_pem
+    else:
+        pem = cipher.decrypt(key.private_pem_enc, KEY_AAD)
+    return jwt.encode(claims, pem, algorithm="ES256", headers={"kid": key.kid})
 
 
 async def verify_token(

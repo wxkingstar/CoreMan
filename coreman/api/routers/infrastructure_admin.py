@@ -423,21 +423,33 @@ async def rotate_client(
 
 @router.get("/jwt-keys")
 async def list_keys(
-    user: User = Depends(ADMINS), session: AsyncSession = Depends(get_session)
+    request: Request, user: User = Depends(ADMINS), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     rows = (await session.execute(select(JwtKey).order_by(JwtKey.created_at.desc()))).scalars()
-    return {
-        "code": 0,
-        "data": [
+    data: list[dict[str, Any]] = [
+        {
+            "kid": r.kid,
+            "is_active": r.is_active,
+            "created_at": r.created_at,
+            "retired_at": r.retired_at,
+            "external": False,
+        }
+        for r in rows
+    ]
+    external = request.app.state.settings.external_jwt_key
+    if external is not None:
+        # 部署配置的外部签发方密钥：业务系统令牌实际由它签发，轮换平台密钥不影响它。
+        data.insert(
+            0,
             {
-                "kid": r.kid,
-                "is_active": r.is_active,
-                "created_at": r.created_at,
-                "retired_at": r.retired_at,
-            }
-            for r in rows
-        ],
-    }
+                "kid": external.kid,
+                "is_active": True,
+                "created_at": None,
+                "retired_at": None,
+                "external": True,
+            },
+        )
+    return {"code": 0, "data": data}
 
 
 @router.post("/jwt-keys/rotate")
@@ -451,6 +463,13 @@ async def rotate_key(
 
 
 @public_router.get("/api/.well-known/jwks.json")
-async def jwks(response: Response, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def jwks(
+    request: Request, response: Response, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
     response.headers["Cache-Control"] = "public, max-age=60"
-    return {"keys": await public_keys(session)}
+    keys = await public_keys(session)
+    # 业务系统令牌由外部签发方密钥签发时，信任本端点的系统也要能验。
+    external = request.app.state.settings.external_jwt_key
+    if external is not None:
+        keys.append(external.public_jwk)
+    return {"keys": keys}
