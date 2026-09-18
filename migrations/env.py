@@ -19,7 +19,9 @@ from coreman.core.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # fileConfig disables every logger that already exists by default; when migrations run
+    # in-process (tests' migrated_database fixture) that silences e.g. "coreman-runtime".
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 _url = config.attributes.get("database_url") or os.environ.get("DATABASE_URL")
 if _url:
