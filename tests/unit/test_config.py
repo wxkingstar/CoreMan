@@ -4,6 +4,8 @@ import secrets
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from coreman.core.config import Settings, get_settings, reset_settings_cache
 
@@ -92,3 +94,71 @@ def test_get_settings_cached_and_resettable(monkeypatch: pytest.MonkeyPatch) -> 
     os.environ["LOG_LEVEL"] = "WARNING"
     reset_settings_cache()
     assert get_settings().log_level == "WARNING"
+
+
+def _pem_pair(curve: ec.EllipticCurve | None = None) -> tuple[str, str]:
+    key = ec.generate_private_key(curve or ec.SECP256R1())
+    private = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    ).decode()
+    public = (
+        key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+    return private, public
+
+
+def test_external_jwt_key_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
+    assert Settings().external_jwt_key is None
+
+
+def test_external_jwt_key_loads_multiline_or_escaped_pem(monkeypatch: pytest.MonkeyPatch) -> None:
+    private, public = _pem_pair()
+    for value in (private, private.replace("\n", "\\n")):
+        _env(
+            monkeypatch,
+            BOT_JWT_PRIVATE_KEY=value,
+            BOT_JWT_PUBLIC_KEY=public.replace("\n", "\\n"),
+            BOT_JWT_KID="legacy-2024",
+            BOT_JWT_ISSUER="legacy-issuer",
+        )
+        key = Settings().external_jwt_key
+        assert key is not None
+        assert (key.kid, key.issuer) == ("legacy-2024", "legacy-issuer")
+        assert key.public_jwk["kid"] == "legacy-2024" and "d" not in key.public_jwk
+        assert "PRIVATE" not in repr(key)
+    # 公钥可省略（由私钥推出）。
+    _env(monkeypatch, BOT_JWT_PRIVATE_KEY=private, BOT_JWT_KID="k", BOT_JWT_ISSUER="i")
+    assert Settings().external_jwt_key is not None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"BOT_JWT_KID": ""}, "BOT_JWT_KID"),
+        ({"BOT_JWT_KID": "bad kid"}, "BOT_JWT_KID"),
+        ({"BOT_JWT_ISSUER": " "}, "BOT_JWT_ISSUER"),
+        ({"BOT_JWT_PRIVATE_KEY": "not a pem"}, "PEM 私钥"),
+        ({"BOT_JWT_PUBLIC_KEY": _pem_pair()[1]}, "同一对密钥"),
+        ({"BOT_JWT_PRIVATE_KEY": _pem_pair(ec.SECP384R1())[0]}, "P-256"),
+        ({"BOT_JWT_PRIVATE_KEY": ""}, "缺少 BOT_JWT_PRIVATE_KEY"),
+    ],
+)
+def test_external_jwt_key_misconfiguration_fails_at_startup(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, str], message: str
+) -> None:
+    private, public = _pem_pair()
+    env = {
+        "BOT_JWT_PRIVATE_KEY": private,
+        "BOT_JWT_PUBLIC_KEY": public,
+        "BOT_JWT_KID": "legacy-2024",
+        "BOT_JWT_ISSUER": "legacy-issuer",
+        **overrides,
+    }
+    _env(monkeypatch, **env)
+    with pytest.raises(ValueError, match=message) as info:
+        Settings()
+    # 报错不能带出私钥内容。
+    assert "PRIVATE KEY" not in str(info.value)

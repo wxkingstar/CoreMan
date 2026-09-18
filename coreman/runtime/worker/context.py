@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.auth.external_key import ExternalKey
 from coreman.core.bus import tasks as bus_tasks
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.crypto import Cipher
@@ -37,6 +38,8 @@ class TaskContext:
     locale: str = "zh"
     # 管理台对外地址：会话查看链接指向管理台对运行时节点的反向代理。
     public_base_url: str = ""
+    # 部署配置的外部签发方密钥（BOT_JWT_*）；有则业务系统令牌用它签。
+    external_jwt_key: ExternalKey | None = None
     # 两个共享依赖由 WorkerService 建一份传下来：解析器的缓存、媒体客户端的连接池都靠这份复用。
     openuserid: OpenUseridResolver | None = None
     media_fetcher: MediaFetcher | None = None

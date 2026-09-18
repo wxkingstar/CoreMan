@@ -9,7 +9,8 @@ export type SystemInput = Omit<BusinessSystem, 'version'>
 export interface ApiClient {
   app_key: string; name: string; scopes: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
 }
-export interface JwtKey { kid: string; is_active: boolean; created_at: string; retired_at: string | null }
+// external：部署配置的外部签发方密钥（BOT_JWT_*），没有创建时间，也不参与轮换。
+export interface JwtKey { kid: string; is_active: boolean; created_at: string | null; retired_at: string | null; external?: boolean }
 export const systems = {
   list: (page = 1) => call<Page<BusinessSystem>>(http.get('/api/admin/systems', { params: { page } })),
   create: (body: SystemInput) => call<BusinessSystem>(http.post('/api/admin/systems', body)),

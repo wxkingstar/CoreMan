@@ -6,8 +6,10 @@ import base64
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from coreman.core.auth.external_key import ExternalKey, load_external_key
 
 # 引导管理员直接拿到 platform_admin。.env.example 的占位值只由 `deploy/coreman up` 替换，
 # 直接 `docker compose up` 或自建编排时仍可能原样生效，这里在进程启动时拒绝。
@@ -42,6 +44,31 @@ class Settings(BaseSettings):
     service_name: str = Field(default="api", alias="COREMAN_SERVICE")
     instance_name: str = Field(default="", alias="COREMAN_INSTANCE_NAME")
     image_tag: str = Field(default="dev", alias="COREMAN_IMAGE_TAG")
+    # 可选：沿用已有签发方的密钥签业务系统令牌，让已信任该签发方的系统不改动即可验签。
+    bot_jwt_private_key: SecretStr | None = Field(default=None, alias="BOT_JWT_PRIVATE_KEY")
+    bot_jwt_public_key: str | None = Field(default=None, alias="BOT_JWT_PUBLIC_KEY")
+    bot_jwt_kid: str | None = Field(default=None, alias="BOT_JWT_KID")
+    bot_jwt_issuer: str | None = Field(default=None, alias="BOT_JWT_ISSUER")
+    _external_jwt_key: ExternalKey | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _load_external_jwt_key(self) -> Settings:
+        # 进程启动时就解析，配错（缺 kid、公私钥不配对、非 P-256）直接起不来，而不是到签发时才失败。
+        if self.bot_jwt_private_key is None or not self.bot_jwt_private_key.get_secret_value():
+            if self.bot_jwt_public_key or self.bot_jwt_kid or self.bot_jwt_issuer:
+                raise ValueError("BOT_JWT_* 已配置但缺少 BOT_JWT_PRIVATE_KEY")
+            return self
+        self._external_jwt_key = load_external_key(
+            self.bot_jwt_private_key.get_secret_value(),
+            public_pem=self.bot_jwt_public_key,
+            kid=self.bot_jwt_kid,
+            issuer=self.bot_jwt_issuer,
+        )
+        return self
+
+    @property
+    def external_jwt_key(self) -> ExternalKey | None:
+        return self._external_jwt_key
 
     @model_validator(mode="after")
     def _check_storage_credentials(self) -> Settings:

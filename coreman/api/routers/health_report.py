@@ -161,6 +161,7 @@ async def health_report(
                             bot=current_bot,
                             speaker=speaker,
                             issuer=str(await store.get("jwt_issuer", default="coreman")),
+                            external_key=request.app.state.settings.external_jwt_key,
                         )
                         env = build_env(
                             bot_key=current_bot.bot_key,
