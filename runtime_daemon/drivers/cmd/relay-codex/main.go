@@ -149,7 +149,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
-	sessionID := openai.SessionLogID(&req)
+	sessionID := req.SessionID
 	sessionStore.LogRequest(sessionID, &req)
 
 	// Only a resumed thread can be missing. The handlers use this solely when a
@@ -185,11 +185,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "healthy",
 		"backend": "codex",
 		"version": version,
 		"commit":  buildCommit,
+		// Session history omits env vars, so the session owner may view it.
+		"capabilities": map[string]bool{"owner_session_view_v1": true},
 	})
 }
 

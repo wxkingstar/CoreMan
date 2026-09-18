@@ -52,6 +52,11 @@ from runtime_daemon.tls import build_trust_bundle, client_context
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
 PROVIDERS = ("claude", "codex")
+# Only the driver's /health may grant these; anything but a literal true is false.
+DRIVER_CAPABILITIES = {
+    "claude": ("feishu_personal_restricted_v1", "owner_session_view_v1"),
+    "codex": ("owner_session_view_v1",),
+}
 CONTROL_LEASE_SECONDS = 40.0
 FRAME_RETRY_SECONDS = 25.0
 POLL_WAIT_SECONDS = 20.0
@@ -195,6 +200,16 @@ def enrollment_rejection(response: httpx.Response) -> str:
         "重启服务无法解决：请在「运行时管理」重新生成安装链接，"
         "把安装命令末尾的 | sh 换成 | sh -s -- --replace 后重新安装。"
     )
+
+
+async def optional_capabilities(client: httpx.AsyncClient) -> dict:
+    """驱动 /health 声明的能力；请求失败、状态码或内容不对都当什么也没声明。"""
+    try:
+        response = await client.get("/health")
+        declared = response.json().get("capabilities", {}) if response.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return {}
+    return declared if isinstance(declared, dict) else {}
 
 
 def cli_status(provider: str) -> dict:
@@ -701,10 +716,11 @@ class Daemon:
                             health = await client.get("/health")
                             health.raise_for_status()
                             declared = health.json().get("capabilities", {})
-                            cap["feishu_personal_restricted_v1"] = (
-                                isinstance(declared, dict)
-                                and declared.get("feishu_personal_restricted_v1") is True
-                            )
+                        else:
+                            # Codex 以前不读 /health：读不到只是不声明能力，不影响可用性。
+                            declared = await optional_capabilities(client)
+                        for flag in DRIVER_CAPABILITIES[provider]:
+                            cap[flag] = isinstance(declared, dict) and declared.get(flag) is True
                     self.socket_failures[provider] = 0
                 except httpx.ConnectError:
                     self.socket_failures[provider] = self.socket_failures.get(provider, 0) + 1

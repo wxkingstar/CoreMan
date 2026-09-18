@@ -585,6 +585,7 @@ async def test_authenticated_session_view_has_no_external_dependencies(client, d
     response = await client.get(url)
     assert response.status_code == 200
     assert "new EventSource(wsUrl)" in response.text
+    assert "location.pathname + '/events' + location.search" in response.text
     assert "const marked = {setOptions() {}}" in response.text
     assert '<script src="https://' not in response.text
     assert "return marked.parse(text)" not in response.text
@@ -592,19 +593,53 @@ async def test_authenticated_session_view_has_no_external_dependencies(client, d
     assert (await client.get(url)).status_code == 403
 
 
-async def test_private_runtime_viewer_blocks_admin_and_bot_token(client, db_session, monkeypatch):
-    from coreman.api import bot_auth
+def _link(app, node_id, session_id, user_id, bot_id, **kw):
+    from coreman.core import session_links
+
+    return session_links.issue(
+        app.state.cipher,
+        session_id=uuid.UUID(str(session_id)),
+        user_id=user_id,
+        node_id=uuid.UUID(str(node_id)),
+        provider="claude",
+        bot_id=bot_id,
+        **kw,
+    )
+
+
+async def _private_session(client, db_session, platform="feishu", upgraded=True):
     from coreman.core.db.models import ChatLog
-    from tests.api.conftest import login_existing
     from tests.api.test_chat_logs import _seed
 
     _, body, _ = await enrollment(client, db_session)
-    _, _, owner = await _seed(db_session)
+    node = await db_session.get(RuntimeNode, uuid.UUID(body["node_id"]))
+    node.capabilities = {"claude": {"owner_session_view_v1": upgraded}}
+    mine, _, owner = await _seed(db_session)
     row = (await db_session.scalars(select(ChatLog).where(ChatLog.user_id == owner.id))).first()
-    row.platform, row.chat_type = "feishu", "single"
+    row.platform, row.chat_type = platform, "single"
     row.relay_session_id = uuid.uuid4()
     await db_session.commit()
     url = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{row.relay_session_id}"
+    return body["node_id"], mine, owner, row, url
+
+
+def _mock_events(monkeypatch):
+    monkeypatch.setattr(
+        "coreman.core.runtime_nodes.transport.ReverseTransport",
+        lambda node_id, provider: httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"data: {}\n\n")
+        ),
+    )
+
+
+async def test_private_runtime_viewer_blocks_admin_and_bot_token(
+    app, client, db_session, monkeypatch
+):
+    from coreman.api import bot_auth
+    from tests.api.conftest import login_existing
+
+    node_id, _, owner, _, url = await _private_session(client, db_session)
+    # 飞书私聊可能含个人飞书资料：别的管理员看不了。
     for suffix in ("", "/events"):
         assert (await client.get(url + suffix)).status_code == 404
     owner.role = "platform_admin"
@@ -619,8 +654,171 @@ async def test_private_runtime_viewer_blocks_admin_and_bot_token(client, db_sess
     client.cookies.set("bot_token", "verified-owner-token")
     for suffix in ("", "/events"):
         assert (await client.get(url + suffix)).status_code == 404
-    unknown = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{uuid.uuid4()}"
+    unknown = f"/api/admin/runtime-nodes/{node_id}/claude/session/{uuid.uuid4()}"
     assert (await client.get(unknown)).status_code == 404
+
+
+@pytest.mark.parametrize("platform", ["feishu", "wecom"])
+async def test_member_owner_views_own_private_chat_and_is_audited(
+    app, client, db_session, monkeypatch, platform
+):
+    from coreman.core.db.models import AuditLog
+    from tests.api.conftest import login_existing
+
+    node_id, mine, owner, row, url = await _private_session(client, db_session, platform)
+    _mock_events(monkeypatch)
+    await login_existing(client, db_session, owner)
+    assert owner.role == "member"
+    # 普通私聊登录即可看自己的会话；过期的链接不妨碍本人。
+    expired = _link(app, node_id, row.relay_session_id, owner.id, mine.id, now=0)
+    page = await client.get(f"{url}?t={expired}")
+    assert page.status_code == 200
+    assert "location.pathname + '/events' + location.search" in page.text
+    assert page.headers["referrer-policy"] == "no-referrer"
+    assert (await client.get(f"{url}/events")).status_code == 200
+    link = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
+    assert (await client.get(f"{url}?t={link}")).status_code == 200
+    audits = (
+        await db_session.scalars(
+            select(AuditLog)
+            .where(AuditLog.action == "runtime.session_view")
+            .order_by(AuditLog.created_at, AuditLog.id)
+        )
+    ).all()
+    assert [a.diff["via"][1] for a in audits] == ["owner", "link"]
+    assert {(a.actor_id, a.target_id) for a in audits} == {(owner.id, str(row.relay_session_id))}
+
+
+async def test_private_chat_stays_closed_to_other_people_and_mixed_history(app, client, db_session):
+    from coreman.core.db.models import ChatLog
+    from tests.api.conftest import login_as, login_existing
+
+    node_id, mine, owner, row, url = await _private_session(client, db_session)
+    stranger = await login_as(client, db_session)
+    good = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
+    # 链接转给别人：对方登录后也打不开，并提示链接不属于他。
+    denied = await client.get(f"{url}?t={good}")
+    assert denied.status_code == 403 and "链接已失效或不属于当前登录账号" in denied.text
+    assert (await client.get(url)).status_code == 403
+    await login_existing(client, db_session, owner)
+    assert (await client.get(url)).status_code == 200
+    db_session.add(
+        ChatLog(
+            **{
+                c: getattr(row, c)
+                for c in ("bot_id", "bot_key", "platform", "chat_id", "message_type", "status")
+            },
+            chat_type="single",
+            user_id=stranger.id,
+            relay_session_id=row.relay_session_id,
+            request_at=row.request_at,
+        )
+    )
+    await db_session.commit()
+    for query in ("", f"?t={good}"):
+        assert (await client.get(f"{url}{query}")).status_code == 403
+
+
+async def test_first_turn_needs_a_valid_link(app, client, db_session):
+    import time
+
+    from coreman.core.session_links import TTL_SECONDS
+    from tests.api.conftest import login_existing
+
+    node_id, mine, owner, _, _ = await _private_session(client, db_session)
+    fresh = uuid.uuid4()
+    url = f"/api/admin/runtime-nodes/{node_id}/claude/session/{fresh}"
+    # 还没写日志的会话没有归属证据：管理员看不了，本人也只能凭链接。
+    assert (await client.get(url)).status_code == 404
+    await login_existing(client, db_session, owner)
+    assert (await client.get(url)).status_code == 403
+    for bad in (
+        _link(app, node_id, fresh, uuid.uuid4(), mine.id),
+        _link(app, uuid.uuid4(), fresh, owner.id, mine.id),
+        _link(app, node_id, uuid.uuid4(), owner.id, mine.id),
+        _link(app, node_id, fresh, owner.id, mine.id, now=time.time() - TTL_SECONDS),
+        "not-a-token",
+    ):
+        for suffix in ("", "/events"):
+            assert (await client.get(f"{url}{suffix}?t={bad}")).status_code == 403
+    good = _link(app, node_id, fresh, owner.id, mine.id)
+    assert (await client.get(f"{url}?t={good[:-4]}AAAA")).status_code == 403
+    assert (await client.get(f"{url}?t={good}")).status_code == 200
+
+
+async def test_old_runtime_keeps_private_sessions_for_admins_only(app, client, db_session):
+    from tests.api.conftest import login_existing
+
+    node_id, mine, owner, row, url = await _private_session(
+        client, db_session, "wecom", upgraded=False
+    )
+    link = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
+    await login_existing(client, db_session, owner)
+    for query in ("", f"?t={link}"):
+        denied = await client.get(url + query)
+        assert denied.status_code == 403 and "升级运行时" in denied.text
+    assert (await client.get(f"{url}/events?t={link}")).status_code == 403
+    owner.role = "ai_committee"
+    await db_session.commit()
+    assert (await client.get(f"{url}?t={link}")).status_code == 200
+
+
+@pytest.mark.parametrize("role", ["member", "platform_admin"])
+async def test_personal_session_needs_link_bound_to_context_epoch(app, client, db_session, role):
+    from coreman.core.db.models import FeishuPersonalGrant, Task
+    from tests.api.conftest import login_existing
+
+    node_id, mine, owner, row, url = await _private_session(client, db_session)
+    task = Task(
+        bot_id=mine.id,
+        kind="chat",
+        payload={},
+        status="failed",
+        result={"feishu_personal": True},
+    )
+    grant = FeishuPersonalGrant(
+        bot_id=mine.id,
+        user_id=owner.id,
+        app_id="cli_test",
+        platform_user_id="human",
+        open_id="ou_human",
+        tenant_key="tenant-test",
+        status="connected",
+    )
+    db_session.add_all([task, grant])
+    await db_session.flush()
+    row.task_id = task.id
+    owner.role = role
+    await db_session.commit()
+    await login_existing(client, db_session, owner)
+    # 飞书资料模式：本人（哪怕是管理员）也只能凭 24 小时内的链接看。
+    denied = await client.get(url)
+    assert denied.status_code == 403 and "飞书资料模式" in denied.text
+    link = _link(
+        app, node_id, row.relay_session_id, owner.id, mine.id, context_epoch=grant.context_epoch
+    )
+    assert (await client.get(f"{url}?t={link}")).status_code == 200
+    plain = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
+    assert (await client.get(f"{url}?t={plain}")).status_code == 200
+    # 撤销、切换模式、重新授权都会换上下文版本。
+    grant.context_epoch = uuid.uuid4()
+    await db_session.commit()
+    assert (await client.get(f"{url}?t={link}")).status_code == 403
+    await db_session.delete(grant)
+    await db_session.commit()
+    assert (await client.get(f"{url}?t={link}")).status_code == 403
+
+
+async def test_session_link_sends_signed_out_viewer_to_login(app, client, db_session):
+    from urllib.parse import quote
+
+    node_id, mine, owner, row, url = await _private_session(client, db_session)
+    link = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
+    client.cookies.clear()
+    response = await client.get(f"{url}?t={link}")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?redirect=" + quote(f"{url}?t={link}", safe="")
+    assert (await client.get(f"{url}/events?t={link}")).status_code == 401
 
 
 async def test_team_change_moves_node_and_its_instances(client, db_session):

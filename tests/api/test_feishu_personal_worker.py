@@ -735,3 +735,116 @@ async def test_verified_oauth_completion_preserves_new_attempt_capability(
     assert (
         await client.post(URL, headers=before_link, json=rpc("feishu_authorization_status"))
     ).status_code == 403
+
+
+async def _run_private_turn(db_session, app, db_engine, *, personal, session_view=True):
+    from sqlalchemy import select
+
+    from coreman.core.db.models import TaskStream
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.api.test_feishu_personal import grant
+    from tests.fakes.fake_relay import FakeRelay
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user) if personal else None
+    message = "查看最近的会议"
+    intake = await intake_for(db_session, bot, task, message)
+    node = await db_session.get(RuntimeNode, intake.relay.runtime_node_id)
+    node.capabilities = {
+        "claude": {
+            "feishu_personal_restricted_v1": True,
+            "owner_session_view_v1": session_view,
+        }
+    }
+    intake.inbound.payload = {
+        **intake.inbound.payload,
+        "parts": [{"type": "text", "text": message}],
+    }
+    task.payload = {**task.payload, "message": intake.inbound.payload}
+    await db_session.commit()
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    stream = (
+        await db_session.scalars(
+            select(TaskStream)
+            .where(TaskStream.task_id == task.id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    await db_session.refresh(task)
+    return ctx, bot, user, row, fake.requests[0], stream.session_url, task.result
+
+
+def _claims(ctx, url):
+    from urllib.parse import parse_qs, urlsplit
+
+    from coreman.core import session_links
+
+    parts = urlsplit(url)
+    return parts.path, session_links.read(ctx.cipher, parse_qs(parts.query)["t"][0])
+
+
+async def test_personal_session_link_is_bound_to_owner_private_session_and_epoch(
+    db_session, app, db_engine
+):
+    ctx, bot, user, row, request, url, result = await _run_private_turn(
+        db_session, app, db_engine, personal=True
+    )
+    assert policy.PREFIX + "TOKEN" in request["env_vars"]
+    # 会话页靠这个标记认出飞书资料模式，坚持要链接。
+    assert result["feishu_personal"] is True and result["private_transcript"]
+    path, claims = _claims(ctx, url)
+    # 链接指向本轮真正使用的私有会话，而不是切换之前的普通会话。
+    assert path.endswith("/claude/session/" + request["session_id"])
+    assert claims is not None
+    assert (claims.user_id, claims.bot_id) == (user.id, bot.id)
+    assert str(claims.session_id) == request["session_id"]
+    assert claims.context_epoch == row.context_epoch
+
+
+async def test_personal_session_link_hidden_on_runtime_without_memory_only_log(
+    db_session, app, db_engine
+):
+    *_, request, url, _ = await _run_private_turn(
+        db_session, app, db_engine, personal=True, session_view=False
+    )
+    assert policy.PREFIX + "TOKEN" in request["env_vars"]
+    assert not url
+
+
+async def test_ordinary_private_chat_link_is_signed_for_the_speaker(db_session, app, db_engine):
+    ctx, _, user, _, request, url, result = await _run_private_turn(
+        db_session, app, db_engine, personal=False
+    )
+    assert policy.PREFIX + "TOKEN" not in (request.get("env_vars") or {})
+    assert not (result or {}).get("feishu_personal")
+    path, claims = _claims(ctx, url)
+    assert path.endswith("/claude/session/" + request["session_id"])
+    assert claims is not None and claims.user_id == user.id and claims.context_epoch is None
+
+
+async def test_session_link_rules_by_chat_type_and_identity(db_session, app, db_engine):
+    from dataclasses import replace
+
+    from coreman.core.prompting import Speaker
+    from coreman.runtime.worker.chat.opening import session_link
+
+    bot, _, task = await setup(db_session, app)
+    intake = await intake_for(db_session, bot, task, "hi")
+    ctx = build_ctx(db_engine, task)
+    sid = uuid.uuid4()
+    plain = f"/claude/session/{sid}"
+    assert "?t=" in await session_link(db_session, ctx, intake, intake.relay, sid, personal=False)
+    group = replace(intake, chat_type="group")
+    assert (await session_link(db_session, ctx, group, intake.relay, sid, personal=False)).endswith(
+        plain
+    )
+    # 没绑定员工身份的飞书私聊谁也打不开，不给入口；企微私聊仍留给管理员查看。
+    anonymous = replace(intake, speaker=Speaker("human", None, None, None))
+    assert await session_link(db_session, ctx, anonymous, intake.relay, sid, personal=False) == ""
+    bot.platform = "wecom"
+    assert (
+        await session_link(db_session, ctx, anonymous, intake.relay, sid, personal=False)
+    ).endswith(plain)

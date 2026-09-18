@@ -229,17 +229,43 @@ def test_main_exits_nonzero_on_unexpected_errors(tmp_path, monkeypatch):
     assert not (tmp_path / "state.json").exists()
 
 
+@pytest.mark.parametrize("flag", ["feishu_personal_restricted_v1", "owner_session_view_v1"])
 @pytest.mark.parametrize("advertised", [None, False, "true", True])
-async def test_personal_capability_comes_only_from_driver_health(healing_daemon, advertised):
+async def test_personal_capability_comes_only_from_driver_health(healing_daemon, advertised, flag):
     daemon = healing_daemon
     driver = Path(daemon.config["release"]) / "runtime_daemon/bin/runtime-claude"
     source = driver.read_text()
     source = source.replace(
         '{"data": [{"id": "fake-model"}]}',
-        '{"data": [{"id": "fake-model"}], "capabilities": {"feishu_personal_restricted_v1": '
+        '{"data": [{"id": "fake-model"}], "capabilities": {"'
+        + flag
+        + '": '
         + repr(advertised)
         + "}}",
     )
     driver.write_text(source)
     await daemon.discover()
-    assert daemon.capabilities["claude"]["feishu_personal_restricted_v1"] is (advertised is True)
+    assert daemon.capabilities["claude"][flag] is (advertised is True)
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        (httpx.Response(200, json={"capabilities": {"owner_session_view_v1": True}}), True),
+        (httpx.Response(200, json={"status": "healthy"}), None),
+        (httpx.Response(503, text="Codex CLI not available"), None),
+        (httpx.Response(200, text="not json"), None),
+        (httpx.ConnectError("gone"), None),
+    ],
+)
+async def test_codex_capabilities_are_optional(reply, expected):
+    def handle(request):
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://runtime"
+    ) as client:
+        declared = await module.optional_capabilities(client)
+    assert declared.get("owner_session_view_v1") is expected

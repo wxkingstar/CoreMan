@@ -60,7 +60,10 @@ onMounted(async () => {
   } catch {
     providers.value = { wecom: false, feishu: false }
   }
-  if (!errorKey.value && /wxwork/i.test(navigator.userAgent) && providers.value.wecom) goWecom('oauth')
+  if (errorKey.value) return
+  // 在企微或飞书客户端里打开（常见于点聊天里的会话链接）时直接走对应的免扫码登录。
+  if (/wxwork/i.test(navigator.userAgent) && providers.value.wecom) goWecom('oauth')
+  else if (/Lark|Feishu/i.test(navigator.userAgent) && providers.value.feishu) goFeishu()
 })
 
 async function submit() {
@@ -71,7 +74,9 @@ async function submit() {
   try {
     await auth.loginBootstrap(form.username, form.password)
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
-    await router.push(redirect)
+    // 会话查看页由后端直接渲染，不在前端路由里，只能整页跳过去。
+    if (redirect.startsWith('/api/')) window.location.assign(redirect)
+    else await router.push(redirect)
   } catch (e) {
     ElMessage.error(e instanceof Error && e.message ? e.message : t('login.failed'))
   } finally {
