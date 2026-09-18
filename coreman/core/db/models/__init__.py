@@ -79,12 +79,15 @@ from coreman.core.db.models.runtime_nodes import (
 )
 from coreman.core.db.models.scheduling import CronJob, CronRun, Escalation
 from coreman.core.db.models.storage import StoredObject
+from coreman.core.db.models.wecom_bots import WECOM_PROVISION_STATUSES, WecomBotProvision
 
 from .feishu import FeishuDelivery
 from .pricing import ModelPrice
 
 __all__ = [
     "FeishuAppRegistration",
+    "WECOM_PROVISION_STATUSES",
+    "WecomBotProvision",
     "FeishuPersonalGrant",
     "RuntimeNode",
     "RuntimeInstallLink",

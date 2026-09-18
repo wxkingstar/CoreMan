@@ -7,7 +7,7 @@ const { serverSettings } = vi.hoisted(() => ({
   serverSettings: {
     bootstrap_admin_enabled: true, default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 1,
     default_effort_level: null, session_ttl_hours: 72, jwt_issuer: 'coreman',
-    max_concurrent_tasks: 30, fast_lane_slots: 2, card_icon_url: 'https://cdn.example.com/i.png',
+    max_concurrent_tasks: 30, fast_lane_slots: 2, card_icon_url: 'https://cdn.example.com/i.png', wecom_qr_provisioning_enabled: true,
     prompt_security_policy: '安全策略', prompt_codex_contract: 'codex 契约', prompt_runtime_mode: '运行模式',
     prompt_cron_mode: '定时约束', prompt_runtime_tail: '尾部提醒', prompt_verbosity_2: '简洁', prompt_verbosity_3: '标准', prompt_verbosity_4: '详细',
   },

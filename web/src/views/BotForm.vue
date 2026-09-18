@@ -8,12 +8,14 @@ import { bots, catalog, relays, settings, teams as teamsApi } from '@/api/admin'
 import { ApiError } from '@/api/client'
 import type { BotIn, BotOut, BotPatch, CatalogOut, Platform, RelayOut, TeamOut } from '@/api/types'
 import type { FeishuRegistration } from '@/api/feishuApps'
+import type { WecomProvision } from '@/api/wecomBots'
 import BotFormExperience from '@/components/botForm/BotFormExperience.vue'
 import BotFormIdentity from '@/components/botForm/BotFormIdentity.vue'
 import BotFormRuntime from '@/components/botForm/BotFormRuntime.vue'
 import BotFormSecurity from '@/components/botForm/BotFormSecurity.vue'
 import { botFormKey } from '@/components/botForm/context'
 import FeishuRegistrationDialog from '@/components/feishuApp/FeishuRegistrationDialog.vue'
+import WecomProvisionDialog from '@/components/wecomBot/WecomProvisionDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ mode: 'create' | 'edit'; bot?: BotOut }>()
@@ -70,6 +72,11 @@ const manualCredentials = ref(false)
 const oneClickFeishu = computed(() => props.mode === 'create' && form.platform === 'feishu' && !manualCredentials.value)
 const registrationVisible = ref(false)
 const creatingFromRegistration = ref(false)
+/** 平台设置里的扫码开关：服务端明确开启时，新建企微员工默认扫码创建机器人。 */
+const wecomQrEnabled = ref(false)
+const oneClickWecom = computed(() => props.mode === 'create' && form.platform === 'wecom' && wecomQrEnabled.value && !manualCredentials.value)
+const provisionVisible = ref(false)
+const creatingFromProvision = ref(false)
 /** If-Match 用的版本号：版本冲突后会刷新成最新值，表单内容保留。 */
 const version = ref(props.bot?.version ?? 0)
 let originalForm = ''
@@ -188,7 +195,7 @@ function fillFromBot(b: BotOut): void {
 
 /** 空值的凭证键不提交：编辑时「键缺失 = 删除」，正好用来清掉可选凭证。 */
 function credentialsPayload(): Record<string, string> {
-  if (oneClickFeishu.value) return {}
+  if (oneClickFeishu.value || oneClickWecom.value) return {}
   return Object.fromEntries(
     credKeys.value.map((k) => [k, form.credentials[k] ?? '']).filter(([, v]) => v !== ''),
   )
@@ -274,6 +281,23 @@ async function onRegistered(registration: FeishuRegistration): Promise<void> {
   }
 }
 
+/** 扫码取回并校验过的企微机器人交给后端创建员工；失败时机器人仍可在下次扫码时复用。 */
+async function onProvisioned(provision: WecomProvision): Promise<void> {
+  creatingFromProvision.value = true
+  try {
+    const created = await bots.create({ ...payload(), credentials: {}, wecom_provision_id: provision.id })
+    ElMessage.success(t('bots.created'))
+    originalForm = JSON.stringify(form)
+    provisionVisible.value = false
+    emit('saved', created)
+  } catch (e) {
+    provisionVisible.value = false
+    failWithFields(e)
+  } finally {
+    creatingFromProvision.value = false
+  }
+}
+
 async function submit(): Promise<void> {
   if (saving.value || !validate()) return
   saving.value = true
@@ -282,6 +306,12 @@ async function submit(): Promise<void> {
       // 先确认标识、工作目录等都可用，再让用户扫码，避免飞书侧留下建好却用不上的应用。
       await bots.validate(payload())
       registrationVisible.value = true
+      return
+    }
+    if (oneClickWecom.value) {
+      // 同飞书：先校验员工配置，再建企业微信机器人。
+      await bots.validate(payload())
+      provisionVisible.value = true
       return
     }
     if (props.mode === 'create') {
@@ -352,6 +382,7 @@ onMounted(async () => {
     if (d.default_model) form.model = d.default_model
     form.verbosity_level = d.default_verbosity_level
     form.effort_level = d.default_effort_level
+    wecomQrEnabled.value = d.wecom_qr_provisioning_enabled === true
   } catch (e) {
     fail(e)
   }
@@ -361,7 +392,7 @@ onMounted(async () => {
 // 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
 provide(botFormKey, {
   mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
-  modelOptions, xhighAllowed, sensitiveVisible, credKeys, manualCredentials, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
+  modelOptions, xhighAllowed, sensitiveVisible, credKeys, manualCredentials, wecomQrEnabled, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
 })
 
 defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })
@@ -388,6 +419,15 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })
       >
         <div class="muted">
           {{ t('feishuApp.oneClickHint') }}
+        </div>
+      </el-form-item>
+      <el-form-item
+        v-if="oneClickWecom"
+        :label="t('wecomBot.bot')"
+        data-test="wecom-one-click"
+      >
+        <div class="muted">
+          {{ t('wecomBot.oneClickHint') }}
         </div>
       </el-form-item>
       <el-collapse
@@ -440,7 +480,7 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })
         data-test="submit"
         @click="submit"
       >
-        {{ oneClickFeishu ? t('feishuApp.scanAndCreate') : t('common.save') }}
+        {{ oneClickFeishu ? t('feishuApp.scanAndCreate') : oneClickWecom ? t('wecomBot.scanAndCreate') : t('common.save') }}
       </el-button>
     </el-form-item>
     <FeishuRegistrationDialog
@@ -450,6 +490,12 @@ defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })
       :preset="{ name: form.name, description: form.description, avatar_url: form.avatar_url }"
       :busy="creatingFromRegistration"
       @succeeded="onRegistered"
+    />
+    <WecomProvisionDialog
+      v-if="oneClickWecom"
+      v-model:visible="provisionVisible"
+      :busy="creatingFromProvision"
+      @succeeded="onProvisioned"
     />
   </el-form>
 </template>

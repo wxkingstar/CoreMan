@@ -48,6 +48,16 @@ WHITELIST_DENIED = Counter(
 )
 
 
+# 企微扫码开通：generate 成功率、扫码完成率、超时率、校验失败率都从这里算；
+# stage × result 都是有限枚举，unexpected_response 意味着接口可能改版。
+WECOM_PROVISIONS = Counter(
+    "coreman_wecom_provision_total",
+    "WeCom QR bot provisioning outcomes",
+    ["stage", "result"],
+    registry=REGISTRY,
+)
+
+
 def after_commit(session: AsyncSession, action: Callable[[], object]) -> None:
     session.info.setdefault("coreman_metrics", []).append(action)
 

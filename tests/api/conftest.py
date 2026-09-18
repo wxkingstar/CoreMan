@@ -32,6 +32,23 @@ def prod_env(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def wecom_verified(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """新建企微员工会连企业微信长连接校验凭证；API 用例默认一律放行，并记下校验过的凭证。
+
+    要测校验失败的用例自己再 monkeypatch 一次 `verify.verify_credentials`。
+    """
+    from coreman.core.wecom_bots import verify
+
+    seen: list[tuple[str, str]] = []
+
+    async def ok(bot_id: str, secret: str, **_: object) -> None:
+        seen.append((bot_id, secret))
+
+    monkeypatch.setattr(verify, "verify_credentials", ok)
+    return seen
+
+
 @pytest.fixture
 def api_settings(
     request: pytest.FixtureRequest,

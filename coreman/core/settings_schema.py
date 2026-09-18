@@ -24,6 +24,8 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "max_concurrent_tasks": 30,
     "fast_lane_slots": 2,
     "card_icon_url": "",
+    # 扫码创建企业微信机器人依赖未公开接口：出问题时关掉，新建企微员工只允许手动填写凭证。
+    "wecom_qr_provisioning_enabled": True,
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
@@ -31,8 +33,14 @@ SETTING_DEFAULTS: dict[str, Any] = {
 DERIVED_SETTING_KEYS = ("default_model",)
 # 平台默认模型按这个 provider 顺序取第一个有默认值的。
 DEFAULT_MODEL_PROVIDERS = ("claude", "codex")
-# 任何登录用户都能读的三个键：新建机器人表单要用它们做默认值（default_model 为派生键）。
-PUBLIC_DEFAULT_KEYS = ("default_model", "default_verbosity_level", "default_effort_level")
+# 任何登录用户都能读的键：新建机器人表单要用它们做默认值（default_model 为派生键），
+# 并决定新建企微员工时是扫码还是手动填写凭证。
+PUBLIC_DEFAULT_KEYS = (
+    "default_model",
+    "default_verbosity_level",
+    "default_effort_level",
+    "wecom_qr_provisioning_enabled",
+)
 
 
 def platform_default_model(catalog: Sequence[ModelCatalog]) -> str | None:
@@ -57,6 +65,7 @@ class SettingsPatch(BaseModel):
     fast_lane_slots: int | None = Field(default=None, ge=0, le=50)
     # 卡片来源图标：空串 = 不放图标（企微 source.icon_url 省略）；只认 http(s) 绝对地址。
     card_icon_url: str | None = Field(default=None, max_length=512, pattern=r"^(https?://\S+)?$")
+    wecom_qr_provisioning_enabled: bool | None = None
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
     prompt_security_policy: str | None = Field(default=None, min_length=1, max_length=20000)

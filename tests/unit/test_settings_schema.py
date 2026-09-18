@@ -23,6 +23,7 @@ def test_patch_partial_and_bounds() -> None:
         "max_concurrent_tasks",
         "fast_lane_slots",
         "card_icon_url",
+        "wecom_qr_provisioning_enabled",
         "prompt_security_policy",
         "prompt_codex_contract",
         "prompt_runtime_mode",

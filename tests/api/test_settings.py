@@ -63,6 +63,7 @@ async def test_defaults_endpoint_for_member_and_settings_forbidden(
         "default_model",
         "default_verbosity_level",
         "default_effort_level",
+        "wecom_qr_provisioning_enabled",
     }
     assert (await client.get("/api/admin/settings")).status_code == 403
     assert (
@@ -167,4 +168,5 @@ async def test_defaults_endpoint_derives_default_model(
         "default_model": "codex/only",
         "default_verbosity_level": 1,
         "default_effort_level": None,
+        "wecom_qr_provisioning_enabled": True,
     }

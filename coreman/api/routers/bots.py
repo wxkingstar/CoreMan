@@ -61,6 +61,7 @@ from coreman.core.db.models import (
     RuntimeNode,
     Team,
     User,
+    WecomBotProvision,
 )
 from coreman.core.feishu_apps import management as feishu_management
 from coreman.core.feishu_apps import service as feishu_apps
@@ -68,6 +69,8 @@ from coreman.core.logging import get_logger
 from coreman.core.masking import is_masked, mask_secret
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.relay.models import backend_of
+from coreman.core.wecom_bots import service as wecom_provisions
+from coreman.core.wecom_bots import verify as wecom_verify
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
 log = get_logger(__name__)
@@ -144,6 +147,8 @@ class BotIn(BaseModel):
     credentials: dict[str, str] = Field(default_factory=dict)
     # 飞书扫码创建的应用：凭证由服务端扫码会话交付，credentials 必须留空。
     feishu_registration_id: uuid.UUID | None = None
+    # 企微扫码创建的机器人：同上，凭证由服务端扫码会话交付。
+    wecom_provision_id: uuid.UUID | None = None
     env_vars: dict[str, str] = Field(default_factory=dict)
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
@@ -461,7 +466,10 @@ async def create_bot(
         raise ApiError(422, 422, "新建时通知 webhook 不能填脱敏值")
     cipher = _cipher(request)
     registration = None
+    provision = None
     creds: dict[str, str] = {}
+    if body.feishu_registration_id is not None and body.wecom_provision_id is not None:
+        raise ApiError(422, 422, "不能同时指定飞书与企业微信扫码会话")
     if body.feishu_registration_id is not None:
         if body.platform != "feishu" or body.credentials:
             raise ApiError(422, 422, "扫码创建飞书应用时不能再填写凭证")
@@ -470,7 +478,15 @@ async def create_bot(
             creds = _checked_credentials(
                 body.platform, feishu_apps.credentials(cipher, registration)
             )
-    elif dry_run and body.platform == "feishu" and not body.credentials:
+    elif body.wecom_provision_id is not None:
+        if body.platform != "wecom" or body.credentials:
+            raise ApiError(422, 422, "扫码创建企业微信机器人时不能再填写凭证")
+        if not dry_run:
+            provision = await wecom_provisions.load(session, user, body.wecom_provision_id)
+            creds = _checked_credentials(
+                body.platform, wecom_provisions.credentials(cipher, provision)
+            )
+    elif dry_run and body.platform in ("feishu", "wecom") and not body.credentials:
         pass  # 凭证随后由扫码交付，此处只校验其余配置。
     else:
         creds = _checked_credentials(body.platform, body.credentials)
@@ -485,6 +501,8 @@ async def create_bot(
         return {"code": 0, "data": {"valid": True}}
     if body.platform == "feishu":
         await reserve_feishu_app(session, cipher, creds)
+    if body.platform == "wecom":
+        await _verify_wecom(cipher, provision, creds)
     bot = Bot(
         bot_key=body.bot_key,
         platform=body.platform,
@@ -512,6 +530,8 @@ async def create_bot(
     await session.flush()
     if registration is not None:
         feishu_apps.consume(registration, bot.id)
+    if provision is not None:
+        wecom_provisions.consume(provision, bot.id)
     await record_audit(
         session,
         action="bot.create",
@@ -526,6 +546,11 @@ async def create_bot(
                 "credentials": "x",
                 "env_vars": "x",
                 "feishu_registration_id": str(registration.id) if registration else None,
+                **(
+                    {"wecom_provision_id": str(provision.id) if provision else None}
+                    if body.platform == "wecom"
+                    else {}
+                ),
             },
             AUDIT_MASKED_KEYS,
         ),
@@ -545,6 +570,20 @@ async def create_bot(
     # enabled / version / 时间戳都是服务端默认值，不刷回来视图里就是 None。
     await session.refresh(bot)
     return {"code": 0, "data": await build_out(session, cipher, bot, user)}
+
+
+async def _verify_wecom(
+    cipher: Cipher, provision: WecomBotProvision | None, creds: dict[str, str]
+) -> None:
+    """新建企微员工前用长连接订阅校验凭证：扫码交付与手动填写走同一套校验。"""
+    if provision is not None:
+        await wecom_provisions.ensure_verified(cipher, provision)
+        return
+    try:
+        await wecom_verify.verify_credentials(creds["bot_id"], creds["secret"])
+    except wecom_verify.VerifyError as exc:
+        log.info("wecom_manual_credentials_rejected", reason=exc.code, errcode=exc.errcode)
+        raise wecom_provisions.verify_failure(f"verify_{exc.code}", exc.errcode) from exc
 
 
 async def _default_slash_commands(creds: dict[str, str]) -> None:

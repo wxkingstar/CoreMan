@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
 import SecretInput from '@/components/SecretInput.vue'
@@ -7,7 +8,10 @@ import { useBotFormContext } from '@/components/botForm/context'
 /** part：新建时整块收在「更多设置」里，不再显示分区标题。 */
 defineProps<{ part?: 'extra' }>()
 const { t } = useI18n()
-const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid, manualCredentials } = useBotFormContext()
+const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid, manualCredentials, wecomQrEnabled } = useBotFormContext()
+/** 新建时默认扫码创建（飞书，或开了扫码开关的企微），凭证由服务端交付，不在表单里填。 */
+const scanCreates = computed(() => mode === 'create' && !manualCredentials.value
+  && (form.platform === 'feishu' || (form.platform === 'wecom' && wecomQrEnabled.value)))
 </script>
 
 <template>
@@ -48,7 +52,17 @@ const { mode, form, fieldErrors, sensitiveVisible, credKeys, onEnvInvalid, manua
       </div>
     </el-form-item>
     <el-form-item
-      v-for="k in (mode === 'create' && form.platform === 'feishu' && !manualCredentials ? [] : credKeys)"
+      v-if="mode === 'create' && form.platform === 'wecom' && wecomQrEnabled"
+      :label="t('wecomBot.manualCredentials')"
+      data-test="wecom-manual-credentials"
+    >
+      <el-switch v-model="manualCredentials" />
+      <div class="muted">
+        {{ manualCredentials ? t('wecomBot.manualCredentialsHint') : t('wecomBot.oneClickHint') }}
+      </div>
+    </el-form-item>
+    <el-form-item
+      v-for="k in (scanCreates ? [] : credKeys)"
       :key="k"
       :label="t(`bots.cred.${k}`)"
     >
