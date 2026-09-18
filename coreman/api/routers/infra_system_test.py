@@ -15,7 +15,7 @@ from coreman.api.infra_auth import require_scope
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
-from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
+from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, token_subject
 from coreman.core.auth.tokens import issue_token, signing_key
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
@@ -53,7 +53,8 @@ async def test_access(
 ) -> dict[str, Any]:
     if user.source == "bootstrap" or not user.login_name:
         raise ApiError(403, 403, "请使用已绑定的真实用户测试")
-    if (body.email_prefix and body.email_prefix != user.login_name) or (
+    subject = await token_subject(session, user)
+    if (body.email_prefix and body.email_prefix not in (user.login_name, subject)) or (
         body.user_name and body.user_name != user.display_name
     ):
         raise ApiError(403, 403, "不能为其他用户签发测试令牌")
@@ -77,7 +78,7 @@ async def test_access(
         key,
         cipher,
         issuer=issuer,
-        login=user.login_name,
+        login=subject,
         name=user.display_name,
         audience=system.key,
         ttl=60,
@@ -99,7 +100,11 @@ async def test_access(
                 "GET", url, headers={"Cookie": f"bot_token={token}"}
             ) as response:
                 status = response.status_code
-        message = "目标已响应" if 200 <= status < 300 else "目标未通过访问测试，请检查目标认证配置"
+        message = (
+            f"目标已响应（令牌用户 {subject}）"
+            if 200 <= status < 300
+            else f"目标未通过访问测试，请检查目标认证配置，以及对方是否有用户 {subject}"
+        )
     except httpx.HTTPError:
         message = "目标连接失败或超时"
     # 不返回 token、页面正文或响应头：其中可能包含会话 cookie 和业务敏感内容。
@@ -108,6 +113,7 @@ async def test_access(
         "status_code": status,
         "url": str(url),
         "user_login": user.login_name,
+        "subject": subject,
         "message": message,
     }
     return {"code": 0, "data": data, **data}

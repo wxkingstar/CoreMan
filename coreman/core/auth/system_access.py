@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.external_key import ExternalKey
@@ -20,6 +20,28 @@ from coreman.core.prompting.system_prompt import Speaker
 PLATFORM_AUDIENCE = "coreman"
 # 创建时拒绝；历史库里若已有同名行，签发与授权也一律跳过。
 RESERVED_SYSTEM_KEYS = frozenset({PLATFORM_AUDIENCE})
+
+
+async def token_subject(session: AsyncSession, user: User) -> str:
+    """业务系统令牌的主体（sub）：邮箱前缀（小写），业务系统通常按它对应自己的账号。
+
+    login_name 只在首次同步时生成，当时没拿到邮箱就会是平台 userid，之后也不再改，所以这里
+    每次按当前邮箱算。没有邮箱、或另有账号的邮箱前缀相同（不同域名）时退回 login_name：
+    同一个 sub 不能对应两个人。
+    """
+    prefix = (user.email or "").split("@", 1)[0].strip().lower()
+    if not prefix:
+        return user.login_name or ""
+    clash = await session.execute(
+        select(User.id)
+        .where(
+            User.id != user.id,
+            User.email.is_not(None),
+            func.lower(func.split_part(User.email, "@", 1)) == prefix,
+        )
+        .limit(1)
+    )
+    return (user.login_name or "") if clash.first() else prefix
 
 
 @dataclass
@@ -69,12 +91,13 @@ async def build_system_access(
     if not systems:
         return SystemAccess()
     key = await signing_key(session, cipher, external_key)
+    subject = await token_subject(session, user)
     env = {
         f"BOT_TOKEN_{system.key.upper()}": issue_token(
             key,
             cipher,
             issuer=issuer,
-            login=user.login_name or "",
+            login=subject,
             name=user.display_name,
             audience=system.key,
             ttl=bot.sse_timeout_seconds + 300,

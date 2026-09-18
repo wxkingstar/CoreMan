@@ -21,7 +21,7 @@
 
 系统授权测试正文 `{system_key}`。除了服务签名，还须提供当前真实管理员的已验证会话或有效 CoreMan bot_token；普通会话写操作仍需 CSRF。旧 email_prefix/user_name 只能与当前用户一致。管理台使用 `/api/admin/systems/test-access`。只测试管理员预先登记的系统地址，不跟随重定向，DNS 解析后固定目标地址，保留 TLS 主机校验。测试令牌存活 60 秒，不返回令牌、页面正文或响应头。
 
-对话令牌使用 ES256，issuer 来自设置，aud/scope 为系统 key，主体为当前已验证且启用的发起者。未知身份、bootstrap 身份、停用用户不签发。授权与机器人的允许范围每次请求重新读取，续跑也不复用历史提示词中的身份与令牌。公开公钥地址 `/api/.well-known/jwks.json`；轮换后旧公钥保留 24 小时。CoreMan bot_token 逐请求验证，不转换为寿命更长的管理会话。
+对话令牌使用 ES256，issuer 来自设置，aud/scope 为系统 key，主体为当前已验证且启用的发起者：sub 取其邮箱前缀（小写），业务系统通常按它对应自己的账号；没有邮箱、或另有账号的邮箱前缀相同时用登录名。授权测试的结果会写明所用的令牌用户。未知身份、bootstrap 身份、停用用户不签发。授权与机器人的允许范围每次请求重新读取，续跑也不复用历史提示词中的身份与令牌。公开公钥地址 `/api/.well-known/jwks.json`；轮换后旧公钥保留 24 小时。CoreMan bot_token 逐请求验证，不转换为寿命更长的管理会话。
 
 部署时可用 `BOT_JWT_PRIVATE_KEY`、`BOT_JWT_KID`、`BOT_JWT_ISSUER`（可选 `BOT_JWT_PUBLIC_KEY`，须与私钥配对）让对话令牌和授权测试令牌改用已有签发方的 ES256 密钥签发，已信任该签发方的业务系统不用改动。此时令牌的 kid、iss 取这两项配置，系统范围只放在 scope，不带 aud（部分 JWT 库在验签方未指定 audience 时会拒收带 aud 的令牌）；公开公钥地址同时发布这把公钥，管理台「身份签名密钥」标为「部署配置」，轮换只影响平台自有密钥。外部密钥只用于签发：CoreMan 验证 bot_token 仍只认平台自有密钥，持有同一私钥的其他签发方不能借此调用 CoreMan 管理 API。
 

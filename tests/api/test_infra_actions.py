@@ -109,3 +109,41 @@ async def test_system_test_requires_real_current_user_and_hides_target_secrets(
         await client.post(path, json=body, headers=signed(path, body, credential["secret"]))
     ).status_code in (401, 403)
     assert len(seen) == 2
+
+
+async def test_system_test_uses_email_prefix_as_subject(client, db_session, monkeypatch):
+    from coreman.api.routers import infra_system_test
+
+    # 首次同步没拿到邮箱时 login_name 是平台 userid；之后补上邮箱，令牌主体应跟着用邮箱前缀。
+    user = await login_as(client, db_session, role="platform_admin", login_name="ou_1a2b3c")
+    user.email = "Real.Human@example.com"
+    await db_session.commit()
+    await client.post(
+        "/api/admin/systems",
+        json={"key": "example", "name": "Example", "base_url": "https://example.test/"},
+    )
+    subjects = []
+
+    def handler(req):
+        claims = jwt.decode(
+            req.headers["cookie"].removeprefix("bot_token="), options={"verify_signature": False}
+        )
+        subjects.append(claims["sub"])
+        return httpx.Response(302, headers={"Location": "/login"})
+
+    monkeypatch.setattr(
+        infra_system_test,
+        "make_http",
+        lambda url: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    path = "/api/admin/systems/test-access"
+    # 旧调用方传的 email_prefix 可以是登录名，也可以是邮箱前缀，但不能是别人。
+    for prefix in ("real.human", "ou_1a2b3c"):
+        r = await client.post(path, json={"system_key": "example", "email_prefix": prefix})
+        assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert subjects == ["real.human", "real.human"]
+    assert data["subject"] == "real.human" and data["user_login"] == "ou_1a2b3c"
+    assert not data["success"] and "real.human" in data["message"]
+    r = await client.post(path, json={"system_key": "example", "email_prefix": "someone-else"})
+    assert r.status_code == 403
