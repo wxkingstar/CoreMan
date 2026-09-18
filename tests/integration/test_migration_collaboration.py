@@ -17,13 +17,14 @@ def test_legacy_0023_keeps_ledger_and_applies_missed_model_rename(migrated_datab
     before = asyncio.run(_rows(migrated_database, "SELECT 'bot_collaborations'::regclass::oid"))
     # Same tables as the QA revision, but its 0023 stamp predates the main data migration.
     command.stamp(cfg, "0023")
+    # The current seed no longer ships Sonnet 4.6, so add the legacy row QA still carries.
     try:
         asyncio.run(
             _execute(
                 migrated_database,
                 (
-                    "UPDATE model_catalog SET model = 'vllm/claude-sonnet-4-6' "
-                    "WHERE model = 'claude-sonnet-4-6'",
+                    "INSERT INTO model_catalog (provider, model, display_name, sort_order) "
+                    "VALUES ('claude', 'vllm/claude-sonnet-4-6', 'Claude Sonnet 4.6', 60)",
                     {},
                 ),
             )

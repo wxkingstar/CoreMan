@@ -41,7 +41,7 @@ async def test_patch_model_clears_sessions_and_notifies(
         assert {"table": "bots", "id": created["id"]} in got
         r = await client.patch(
             f"/api/admin/bots/{created['id']}",
-            json={"model": "claude-opus-4-6"},
+            json={"model": "claude-opus-5"},
             headers={"If-Match": f'"{created["version"] + 1}"'},
         )
         assert r.status_code == 200, r.text

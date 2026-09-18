@@ -24,7 +24,7 @@ async def test_pending_workspace_is_not_claimed(db_session):
 async def test_migration_retains_collected_memory_when_copy_fails(client, db_session, monkeypatch):
     from coreman.core.bots import workspace_transfer
 
-    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5")
     target = await add_node_relay(db_session, name="target")
     await db_session.commit()
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
@@ -75,7 +75,7 @@ async def test_migration_retains_collected_memory_when_copy_fails(client, db_ses
 async def test_switch_into_nonempty_unknown_directory_rejected(client, db_session, monkeypatch):
     from coreman.core.bots import workspace_transfer
 
-    bot, _, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot, _, _ = await seed_bot(db_session, model="claude-sonnet-5")
     target = await add_node_relay(db_session, name="target")
     await db_session.commit()
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
@@ -104,7 +104,7 @@ async def test_copy_moves_real_files_and_memory_before_binding(
     from coreman.core.db.models import RuntimeNode
     from runtime_daemon.agent import Agent, OperationError
 
-    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5")
     src_root, dst_root = tmp_path / "source", tmp_path / "destination"
     src_root.mkdir()
     dst_root.mkdir()
@@ -195,14 +195,14 @@ async def test_migrating_destination_reservation_blocks_overlapping_new_workspac
 async def test_model_only_switch_and_toggle_cannot_interrupt_migration(client, db_session):
     from datetime import timedelta
 
-    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5")
     bot.workspace_state = "migrating"
     bot.workspace_deadline = utcnow() + timedelta(minutes=30)
     await db_session.commit()
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
     version = bot.version
     for endpoint, body in [
-        ("switch-relay", {"relay_server_id": str(relay.id), "model": "claude-sonnet-4-6"}),
+        ("switch-relay", {"relay_server_id": str(relay.id), "model": "claude-sonnet-5"}),
         ("toggle", {}),
     ]:
         response = await client.post(
@@ -216,7 +216,7 @@ async def test_model_only_switch_and_toggle_cannot_interrupt_migration(client, d
 async def test_expired_same_runtime_directory_migration_can_retry(client, db_session, monkeypatch):
     from coreman.core.bots import switch_relay
 
-    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-4-6")
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5")
     bot.workspace_state = "migrating"
     bot.workspace_deadline = utcnow() - timedelta(minutes=1)
     await db_session.commit()
