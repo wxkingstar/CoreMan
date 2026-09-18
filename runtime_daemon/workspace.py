@@ -573,18 +573,12 @@ class Workspace:
                 "GIT_SSH_COMMAND": "ssh -oBatchMode=yes",
             }
         )
+        from .agent import git_askpass, run_command
+
         with tempfile.TemporaryDirectory(prefix="coreman-git-auth-") as temp:
             if token:
-                script = Path(temp) / "askpass"
-                script.write_text(
-                    '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "oauth2";; '
-                    '*) printf "%s\\n" "$COREMAN_GIT_TOKEN";; esac\n'
-                )
-                script.chmod(0o700)
-                env.update({"GIT_ASKPASS": str(script), "COREMAN_GIT_TOKEN": token})
+                env.update(git_askpass(Path(temp), token))
             try:
-                from .agent import run_command
-
                 output = run_command(
                     [
                         "git",

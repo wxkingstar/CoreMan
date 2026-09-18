@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import base64
 import contextvars
 import hashlib
 import json
@@ -81,6 +80,20 @@ class OperationError(Exception):
 
 def operation_message(exc: OperationError) -> str:
     return str(exc)[:200]
+
+
+def git_askpass(directory: Path, token: str) -> dict[str, str]:
+    """令牌经 GIT_ASKPASS 交给 Git：只在环境变量里，不进命令行。
+
+    不用 GIT_CONFIG_COUNT 注入请求头：它要 Git 2.31+，旧版静默忽略，克隆就不带令牌。
+    """
+    script = directory / "askpass"
+    script.write_text(
+        '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "oauth2";; '
+        '*) printf "%s\\n" "$COREMAN_GIT_TOKEN";; esac\n'
+    )
+    script.chmod(0o700)
+    return {"GIT_ASKPASS": str(script), "COREMAN_GIT_TOKEN": token}
 
 
 def run_command(
@@ -564,24 +577,25 @@ class Agent:
                     GIT_TERMINAL_PROMPT="0",
                     GIT_LFS_SKIP_SMUDGE="1",
                 )
-                credential = base64.b64encode(f"oauth2:{access_token}".encode()).decode()
-                config = {
-                    "credential.helper": "",
-                    "http.followRedirects": "false",
-                    "http.sslVerify": "true",
-                    "core.hooksPath": os.devnull,
-                    "protocol.file.allow": "never",
-                    "protocol.ext.allow": "never",
-                    f"http.{url.rstrip('/')}.extraHeader": f"Authorization: Basic {credential}",
-                }
-                env["GIT_CONFIG_COUNT"] = str(len(config))
-                for i, (key, value) in enumerate(config.items()):
-                    env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+                # Git 2.32 以前不认 GIT_CONFIG_GLOBAL、仍读 ~/.gitconfig，这里的设置都放在
+                # 命令行里压过它；http.proxy 置空，令牌不经代理。
+                config = [
+                    "credential.helper=",
+                    "http.proxy=",
+                    "http.followRedirects=false",
+                    "http.sslVerify=true",
+                    f"core.hooksPath={os.devnull}",
+                    "protocol.file.allow=never",
+                    "protocol.ext.allow=never",
+                ]
+                options = [arg for item in config for arg in ("-c", item)]
                 # The installer sees a local checkout, never the repository token.
                 with tempfile.TemporaryDirectory(prefix="coreman-skill-") as directory:
+                    env.update(git_askpass(Path(directory), access_token))
                     checkout = str(Path(directory) / "repo")
                     run_command(
-                        ["git", "clone", "--depth", "1", "--template=", "--", url, checkout],
+                        ["git", *options, "clone", "--depth", "1", "--template=", "--"]
+                        + [url, checkout],
                         path,
                         timeout=180,
                         env_override=env,
