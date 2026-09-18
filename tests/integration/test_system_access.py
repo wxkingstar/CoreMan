@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.external_key import load_external_key
-from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.system_access import build_system_access, token_subject
 from coreman.core.auth.tokens import verify_token
 from coreman.core.db.models import BotSystemGrant, BusinessSystem, JwtKey, User
 from coreman.core.prompting.system_prompt import Speaker
@@ -129,3 +129,33 @@ async def test_external_key_signs_system_tokens_in_issuer_format(
     assert (await db_session.execute(select(JwtKey))).first() is None
     with pytest.raises(jwt.InvalidTokenError):
         await verify_token(db_session, token, issuer="legacy-issuer", audience="erp")
+
+
+async def test_token_subject_prefers_a_unique_email_prefix(db_session: AsyncSession) -> None:
+    bot, _, cipher = await seed_bot(db_session)
+    alice = await db_session.get(User, bot.created_by)
+    assert alice
+    alice.login_name, alice.email = "ou_1a2b3c", "Alice.W@example.com"
+    db_session.add(BusinessSystem(key="erp", name="ERP", default_for_all_bots=True))
+    await db_session.commit()
+    speaker = Speaker(alice.login_name, alice.id, alice.login_name, alice.display_name)
+
+    async def subject() -> str:
+        access = await build_system_access(
+            db_session, cipher, bot=bot, speaker=speaker, issuer="coreman", external_key=None
+        )
+        await db_session.commit()
+        claims = await verify_token(
+            db_session, access.env["BOT_TOKEN_ERP"], issuer="coreman", audience="erp"
+        )
+        assert claims["sub"] == await token_subject(db_session, alice)
+        return str(claims["sub"])
+
+    assert await subject() == "alice.w"
+    # 另一个账号的邮箱前缀相同（不同域名）：sub 不能对应两个人，退回 login_name。
+    db_session.add(User(login_name="alice.w", display_name="Other", email="alice.w@other.test"))
+    await db_session.commit()
+    assert await subject() == "ou_1a2b3c"
+    alice.email = None
+    await db_session.commit()
+    assert await subject() == "ou_1a2b3c"

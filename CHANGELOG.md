@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Business system tokens now use the speaker's email prefix (lowercased) as `sub`, which is how business systems usually look up their own accounts. A login name is generated only on the first contact sync and falls back to the platform user ID when no email was available then, so Feishu members synced without the `contact:user.email:readonly` permission got tokens that business systems could not match. The login name is still used when a user has no email or shares an email prefix with another account. The access test reports the token user it used.
 - Group chat sessions are still viewable only by `ai_committee` and `platform_admin`, and administrators can still view WeCom private chats of other people. Administrators still cannot view other people's Feishu private chats.
 - The `feishu_login_unknown_user` and `wecom_login_unknown_user` log events include the platform `user_id`, so a rejected sign-in can be traced to a person.
 - The skills dialog on the employee page keeps every row on one line: skill descriptions and install errors are truncated and shown in full on hover, like the skill catalog, and long names, versions and labels are shortened with an ellipsis instead of wrapping.
