@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -15,13 +16,22 @@ from coreman.runtime.worker.service import WorkerService
 class RecordingHandler:
     kind = "chat"
 
-    def __init__(self, hold: float = 0.0) -> None:
-        self.hold, self.started, self.cancelled = hold, [], []
+    def __init__(self, hold: float = 0.0, *, release: asyncio.Event | None = None) -> None:
+        # 给了 release 就一直跑到它被 set（hold 仍是下限），用例据此精确决定任务何时结束。
+        self.hold, self.release, self.started, self.cancelled = hold, release, [], []
+        # 每开始一个任务 set 一次：用例等它，而不是赌固定 sleep 够认领加启动。
+        self.task_started = asyncio.Event()
+
+    def _holding(self, deadline: float) -> bool:
+        if asyncio.get_running_loop().time() < deadline:
+            return True
+        return self.release is not None and not self.release.is_set()
 
     async def run(self, ctx: TaskContext) -> None:
         self.started.append(ctx.task.id)
+        self.task_started.set()
         deadline = asyncio.get_running_loop().time() + self.hold
-        while asyncio.get_running_loop().time() < deadline:
+        while self._holding(deadline):
             if ctx.cancel_event.is_set():
                 self.cancelled.append((ctx.task.id, ctx.cancel_reason))
                 async with ctx.session_factory() as s:
@@ -55,13 +65,19 @@ async def _bot(session: AsyncSession) -> Bot:
     return b
 
 
+async def _until(predicate: Callable[[], bool], failure: str) -> None:
+    try:
+        async with asyncio.timeout(10):
+            while not predicate():  # noqa: ASYNC110 ready / draining 是服务暴露的布尔标志
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        raise AssertionError(failure) from None
+
+
 async def _run_service(service: WorkerService) -> asyncio.Task[None]:
     t = asyncio.create_task(service.run())
-    for _ in range(100):
-        if service.ready:
-            return t
-        await asyncio.sleep(0.05)
-    raise AssertionError("worker 未就绪")
+    await _until(lambda: service.ready, "worker 未就绪")
+    return t
 
 
 async def test_claims_via_notify_respects_slots_and_cancels(
@@ -114,23 +130,30 @@ async def test_drain_stops_claiming_and_waits(
     db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings
 ) -> None:  # type: ignore[no-untyped-def]
     bot = await _bot(db_session)
-    handler = RecordingHandler(hold=0.8)
-    service = WorkerService(port=0, handlers={"chat": handler}, heartbeat_seconds=0.2)
+    release = asyncio.Event()
+    handler = RecordingHandler(release=release)
+    # 兜底轮询拉长到用例跑不到的时长：认领只由入队通知和任务结束触发，排空生效前后
+    # 不会恰好有一轮定时认领在飞。
+    service = WorkerService(
+        port=0, handlers={"chat": handler}, heartbeat_seconds=0.2, poll_interval=60.0
+    )
     runner = await _run_service(service)
     try:
         running = await tasks.enqueue(
             db_session, NewTask(bot_id=bot.id, kind="chat", payload={}, session_key="a")
         )
         await db_session.commit()
-        await asyncio.sleep(0.4)
+        await asyncio.wait_for(handler.task_started.wait(), 10)
         assert running and handler.started == [running.id]
         assert await instances.request_drain(db_session, service.instance_id) is True
         await db_session.commit()
-        await asyncio.sleep(0.5)
+        await _until(lambda: service.draining, "worker 没有察觉排空请求")
         later = await tasks.enqueue(
             db_session, NewTask(bot_id=bot.id, kind="chat", payload={}, session_key="b")
         )
         await db_session.commit()
+        assert not runner.done()  # 在途任务还没跑完，排空不能先退出
+        release.set()
         await asyncio.wait_for(runner, 10)  # 排空后自行退出
         assert later and later.id not in handler.started
     finally:
@@ -142,6 +165,57 @@ async def test_drain_stops_claiming_and_waits(
         assert row and row.status == "succeeded"
         pending = await tasks.get(s, later.id)
         assert pending and pending.status == "queued"
+
+
+async def test_queued_notice_survives_a_claim_in_flight_on_the_other_lane(
+    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """normal 车道的认领语句还没返回（快照早于入队）时，fast 车道先被这次入队叫醒。
+
+    两条车道若直接共用监听器上 tasks_queued 的同一个事件，fast 醒来就把它清掉了，normal 认领
+    落空、回去等待时再也看不到这次入队，只能干等兜底轮询。兜底轮询拉长到用例跑不到的时长，
+    任务仍须立刻被认领。
+    """
+    bot = await _bot(db_session)
+    real_claim = tasks.claim
+    normal_in_flight, release_normal, fast_woke = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    queued = False
+
+    async def gated_claim(session: AsyncSession, *, lane: str, instance_id: str) -> Task | None:
+        if lane == "fast" and queued:
+            fast_woke.set()
+        claimed = await real_claim(session, lane=lane, instance_id=instance_id)
+        if lane == "normal" and not release_normal.is_set():
+            # 已经查过一遍、没看到后面才入队的任务，停在这里模拟语句还没返回。
+            normal_in_flight.set()
+            await release_normal.wait()
+        return claimed
+
+    monkeypatch.setattr(tasks, "claim", gated_claim)
+    handler = RecordingHandler()
+    service = WorkerService(
+        port=0,
+        handlers={"chat": handler},
+        poll_interval=60.0,
+        max_concurrent_override=2,
+        fast_slots_override=1,
+    )
+    runner = await _run_service(service)
+    try:
+        await asyncio.wait_for(normal_in_flight.wait(), 10)
+        task = await tasks.enqueue(
+            db_session, NewTask(bot_id=bot.id, kind="chat", payload={}, session_key="a")
+        )
+        queued = True  # 通知随提交发出，所以在提交之前置位
+        await db_session.commit()
+        await asyncio.wait_for(fast_woke.wait(), 10)
+        release_normal.set()
+        await asyncio.wait_for(handler.task_started.wait(), 10)
+        assert task and handler.started == [task.id]
+    finally:
+        release_normal.set()
+        service.request_stop("test")
+        await asyncio.wait_for(runner, 10)
 
 
 async def test_unknown_kind_and_handler_crash_are_recorded(
