@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Runtime nodes get a stable management command at `~/.local/share/coreman-runtime/bin/coreman-runtime` for upgrading, uninstalling and re-registering the service. It follows the current release, runs from any directory, and every daemon start refreshes it, so nodes installed by earlier versions also get it.
 - Installing with `curl … | sh -s -- --replace` replaces the runtime already installed for that user: the new bundle is downloaded and verified before anything is touched, then the old service is stopped and the whole install directory is moved to a sibling `coreman-runtime.bak-<timestamp>`. Nothing is deleted, and an install that fails afterwards prints the command that restores the old runtime.
 - `coreman-runtime --register` registers the service again from the identity that `--uninstall` kept.
+- Skill managers can enable or disable a skill from the status column of the skill catalog without opening the editor (`PATCH /api/admin/skills/{id}`). Like a full save, a change of status bumps the skill revision, so pending approvals and queued installs for that skill must be requested again.
 
 ### Changed
 
