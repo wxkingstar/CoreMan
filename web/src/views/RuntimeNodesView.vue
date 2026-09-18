@@ -220,7 +220,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     class="git-hosts"
                     data-test="runtime-git-hosts"
                   >
-                    <span>{{ t('runtimeNodes.nodeGitHosts') }}:</span>
+                    <span>{{ t('runtimeNodes.gitHosts') }}:</span>
                     <span v-if="row.git_hosts == null">{{ t('runtimeNodes.nodeGitHostsUnknown') }}</span>
                     <span v-else-if="!row.git_hosts.length">{{ t('runtimeNodes.nodeGitHostsEmpty') }}</span>
                     <template v-else>

@@ -210,7 +210,6 @@ export default {
   "version": "Daemon バージョン",
   "service": "サービス管理",
   "heartbeat": "最終ハートビート",
-  "nodeGitHosts": "Git ホスト許可リスト",
   "nodeGitHostsHint": "ノードの config.json の git_hosts で Agent に許可している Git ホストです。変更するにはこのリストを編集し（ホスト名のみ）、サービスを再起動してください。",
   "nodeGitHostsUnknown": "未報告（旧バージョンのノード）",
   "nodeGitHostsEmpty": "空（Git ホストを許可していません）",

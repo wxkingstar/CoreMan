@@ -208,7 +208,6 @@ export default {
   "version": "Daemon 版本",
   "service": "服务管理",
   "heartbeat": "最后心跳",
-  "nodeGitHosts": "Git 主机白名单",
   "nodeGitHostsHint": "节点 config.json 中 git_hosts 允许 Agent 访问的 Git 主机。修改该列表（只写主机名）后重启服务生效。",
   "nodeGitHostsUnknown": "未上报（节点版本较旧）",
   "nodeGitHostsEmpty": "空（不允许任何 Git 主机）",
