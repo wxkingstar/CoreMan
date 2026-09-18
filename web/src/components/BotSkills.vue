@@ -139,7 +139,9 @@ async function remove(row: Installed) {
       :closable="false"
       type="warning"
     />
-    <h3>{{ t('skill.available') }}</h3>
+    <h3 class="skill-section-title">
+      {{ t('skill.available') }}
+    </h3>
     <el-alert
       v-if="!busy && !loadError && catalog.some(skill => !skill.enabled)"
       :title="t('skill.disabledHint')"
@@ -296,6 +298,9 @@ async function remove(row: Installed) {
   </el-dialog>
 </template>
 <style scoped>
+/* 全局样式把 h3 的上边距清零，这里给第二个列表留出分节间距 */
+.skill-section-title { margin: 24px 0 12px; }
+.skill-table + .el-alert { margin-top: 16px; }
 .skill-table :deep(.cell) { white-space: nowrap; }
 /* 标签/按钮是原子行内元素，溢出时会被单元格的省略号整体吞掉，故限宽并在内部省略 */
 .skill-table :deep(.cell > .el-tag), .skill-table :deep(.cell > .el-button) { max-width: 100%; }

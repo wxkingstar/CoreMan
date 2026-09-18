@@ -405,10 +405,24 @@ def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
     source = bot / ".agents/skills/query"
     source.mkdir(parents=True)
     (source / "SKILL.md").write_text("query")
-    calls = []
-    monkeypatch.setattr(
-        agent_module, "run_command", lambda command, *a, **kwargs: calls.append((command, kwargs))
-    )
+    calls, answers = [], []
+
+    def run(command, *args, **kwargs):
+        calls.append((command, kwargs))
+        env = kwargs.get("env_override")
+        if env and "GIT_ASKPASS" in env:
+            # askpass 脚本随临时目录删除，只能在命令运行期间调用。
+            for prompt in (
+                "Username for 'https://github.com': ",
+                "Password for 'https://github.com': ",
+            ):
+                answers.append(
+                    subprocess.run(
+                        [env["GIT_ASKPASS"], prompt], env=env, capture_output=True, text=True
+                    ).stdout
+                )
+
+    monkeypatch.setattr(agent_module, "run_command", run)
     agent.install_skill(
         {
             "project_dir": str(bot),
@@ -418,9 +432,12 @@ def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
         }
     )
     clone, install = calls
-    assert clone[0][:2] == ["git", "clone"]
+    assert clone[0][0] == "git" and "clone" in clone[0]
     assert "test-token" not in str(clone[0])
-    assert clone[1]["env_override"]["GIT_CONFIG_COUNT"] == "7"
+    assert {"credential.helper=", "http.proxy=", "http.followRedirects=false"} <= set(clone[0])
+    # GIT_CONFIG_COUNT 要 Git 2.31+，旧版会静默忽略、克隆时不带令牌。
+    assert "GIT_CONFIG_COUNT" not in clone[1]["env_override"]
+    assert answers == ["oauth2\n", "test-token\n"]
     assert "env_override" not in install[1]
     assert "test-token" not in str(install)
     assert install[0][4].startswith("/")
