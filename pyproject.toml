@@ -41,6 +41,7 @@ dev = [
   "types-pyyaml>=6.0",
   "respx>=0.21",
   "types-croniter>=6.2.4.20260711",
+  "pytest-xdist>=3.6",
 ]
 
 [build-system]

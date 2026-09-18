@@ -46,6 +46,10 @@ MAX_RESPONSE = 128 * 1024 * 1024
 CHUNK_SIZE = 48 * 1024
 ONLINE_SECONDS = 45
 LEASE_SECONDS = 40
+# 消费者租约隔这么久才续期一次，而不是每读一次库都写：续期会短暂锁住调用行，节点长轮询用
+# SKIP LOCKED 领取时就会跳过它（典型是调用刚落库、长轮询被通知唤醒的那一刻），只能等下一轮
+# 兜底轮询才领到。消费者读库间隔不超过 1 秒，租约最旧也远不到 LEASE_SECONDS。
+LEASE_REFRESH_SECONDS = 10
 TERMINAL = {"done", "failed", "cancelled"}
 # 有 LISTEN 时通知是主路径，轮询只兜底丢通知；没有监听连接时只能靠轮询。
 FALLBACK_POLL_SECONDS = 1.0
@@ -403,9 +407,11 @@ class ReverseStream(httpx.AsyncByteStream):
     async def read_batch(self, *, include_chunks: bool = True) -> tuple[RuntimeCall, list[bytes]]:
         async with self.transport.factory() as session:
             row = await session.get(RuntimeCall, self.call_id)
-            if row is None or row.deadline <= now():
+            moment = now()
+            if row is None or row.deadline <= moment:
                 raise httpx.ReadError("运行时请求已过期", request=self.request)
-            row.consumer_at = now()
+            if row.consumer_at <= moment - timedelta(seconds=LEASE_REFRESH_SECONDS):
+                row.consumer_at = moment
             data = []
             if include_chunks:
                 chunks = list(

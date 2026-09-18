@@ -56,7 +56,7 @@ jobs:
   python:
     name: Python (ruff, mypy, pytest)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -88,8 +88,20 @@ jobs:
         run: uv run ruff check .
       - name: Mypy
         run: uv run mypy coreman
+      - name: Tune the throwaway test database
+        # Every database test ends with a TRUNCATE of all business tables, which costs several
+        # times more with fsync on. Service containers take no server flags, but these reload.
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: >-
+          docker exec "$POSTGRES_CONTAINER" psql -U coreman -d coreman_test -v ON_ERROR_STOP=1
+          -c "ALTER SYSTEM SET fsync = off"
+          -c "ALTER SYSTEM SET synchronous_commit = off"
+          -c "ALTER SYSTEM SET full_page_writes = off"
+          -c "SELECT pg_reload_conf()"
       - name: Pytest
-        run: uv run pytest -q
+        # One database per xdist worker, created next to TEST_DATABASE_URL (tests/conftest.py).
+        run: uv run pytest -q -n auto --dist worksteal --durations=15
 
   web:
     name: Web (lint, type check, vitest, build)

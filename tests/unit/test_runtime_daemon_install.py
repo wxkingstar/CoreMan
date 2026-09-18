@@ -402,8 +402,11 @@ def test_retire_stops_the_runtime_and_moves_everything_aside(tmp_path, home, sys
     assert backup.stat().st_mode & 0o777 == 0o700
 
 
-def test_retire_moves_nothing_while_the_daemon_still_runs(tmp_path, home, systemd):
+def test_retire_moves_nothing_while_the_daemon_still_runs(tmp_path, home, systemd, monkeypatch):
     data, config, _ = retired_install(home)
+    # The lock stays held on purpose: give up at once instead of waiting STOP_TIMEOUT_SECONDS.
+    wait = install_service.wait_for_unlock
+    monkeypatch.setattr(install_service, "wait_for_unlock", lambda path, timeout: wait(path, 0))
     with (data / "daemon.lock").open("a") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         code = install_service.main(["--config", str(config), "--retire", str(tmp_path / "bak")])

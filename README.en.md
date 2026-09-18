@@ -77,6 +77,7 @@ Open <http://localhost:5173/>. The dev proxy forwards `/api` to the backend on p
 
 ```bash
 uv run pytest                          # database tests need Docker or a separate TEST_DATABASE_URL
+uv run pytest -n auto                  # parallel: one database per worker next to TEST_DATABASE_URL; needs CREATEDB
 uv run ruff check .
 uv run mypy coreman
 cd web

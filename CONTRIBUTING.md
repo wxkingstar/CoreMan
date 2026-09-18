@@ -17,6 +17,8 @@ npm run lint
 npm run build
 ```
 
+`uv run pytest -n auto` runs the suite in parallel. With `TEST_DATABASE_URL` set, each worker recreates its own database `<name>_gw<N>` on that server, so the role needs `CREATEDB`.
+
 Runtime driver changes also require `go test ./...` from `runtime_daemon/drivers`.
 
 Only contribute work you have permission to share under this project's MIT license. Keep existing third-party copyright and license notices intact.

@@ -14,7 +14,12 @@ from sqlalchemy import select
 from coreman.core.db.models import RuntimeCall, RuntimeNode
 from coreman.core.db.session import make_session_factory
 from coreman.core.runtime_nodes import transport
-from coreman.core.runtime_nodes.transport import ReverseTransport, envelope_aad, now
+from coreman.core.runtime_nodes.transport import (
+    ReverseStream,
+    ReverseTransport,
+    envelope_aad,
+    now,
+)
 from tests.api.test_runtime_nodes import enrollment, poll_command
 
 
@@ -119,6 +124,38 @@ async def test_batched_frames_are_idempotent_contiguous_and_single_frames_still_
         response = await asyncio.wait_for(pending, 5)
         assert response.status_code == 200 and response.text == "abc"
         assert response.headers["content-type"] == "text/event-stream"
+
+
+async def test_consumer_renews_its_lease_only_once_it_has_aged(client, db_session, db_engine):
+    _, body, _ = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    call_id = uuid.uuid4()
+    created = now()
+    db_session.add(
+        RuntimeCall(
+            id=call_id,
+            node_id=node_id,
+            provider="claude",
+            request_enc="",
+            deadline=created + timedelta(hours=1),
+            consumer_at=created,
+        )
+    )
+    await db_session.commit()
+    reverse = ReverseTransport(node_id, "claude", factory=make_session_factory(db_engine))
+    stream = ReverseStream(reverse, call_id, httpx.Request("GET", "http://node/claude/"), 10)
+    try:
+        # 一落库就读：不写租约，行不被锁，节点的 SKIP LOCKED 领取不会跳过它。
+        await stream.read_batch()
+        row = await db_session.get(RuntimeCall, call_id, populate_existing=True)
+        assert row.consumer_at == created
+        row.consumer_at = created - timedelta(seconds=transport.LEASE_REFRESH_SECONDS)
+        await db_session.commit()
+        await stream.read_batch()
+        row = await db_session.get(RuntimeCall, call_id, populate_existing=True)
+        assert row.consumer_at > created
+    finally:
+        transport.unsubscribe_call(call_id, stream.wake)
 
 
 async def test_idle_poll_skips_stale_queue_and_heartbeat_settles_it(client, db_session, app):

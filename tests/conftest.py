@@ -1,10 +1,12 @@
 """测试数据库：优先 TEST_DATABASE_URL（CI 的 postgres service），
 
-否则用 testcontainers 起 postgres:16。
+否则用 testcontainers 起 postgres:16。`pytest -n N`（pytest-xdist）并行时每个 worker
+用 TEST_DATABASE_URL 所在服务器上的独立库 `<库名>_<worker>`，互不 TRUNCATE。
 """
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -13,7 +15,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
+from sqlalchemy import create_engine, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.db.session import make_engine, make_session_factory
@@ -87,6 +89,7 @@ def alembic_config(database_url: str) -> Config:
     return cfg
 
 
+@functools.cache
 def model_catalog_seed() -> list[dict[str, object]]:
     """迁移 0003 里的模型目录种子，套上 0023 的改名（只读脚本目录，不连库）。
 
@@ -128,11 +131,29 @@ def _ignore_dotenv() -> Iterator[None]:
     Settings.model_config["env_file"] = original
 
 
+def worker_database(url: str, worker: str) -> str:
+    """在 url 所在服务器上重建 xdist worker 专用的库，返回它的 URL。
+
+    每次会话都 DROP 再 CREATE：上次中断留下的连接与半迁移状态不会带进来。
+    """
+    base = make_url(url)
+    name = f"{base.database}_{worker}"
+    admin = create_engine(base.set(drivername="postgresql+psycopg"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+    finally:
+        admin.dispose()
+    return base.set(database=name).render_as_string(hide_password=False)
+
+
 @pytest.fixture(scope="session")
 def database_url() -> Iterator[str]:
     url = os.environ.get("TEST_DATABASE_URL")
     if url:
-        yield url
+        worker = os.environ.get("PYTEST_XDIST_WORKER")
+        yield worker_database(url, worker) if worker else url
         return
     from testcontainers.community.postgres import PostgresContainer
 
