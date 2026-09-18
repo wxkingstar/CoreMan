@@ -9,7 +9,7 @@ import (
 func TestCollaborationConfigPerTurn(t *testing.T) {
 	for _, session := range []string{"", "existing"} {
 		req := &openai.ChatCompletionRequest{SessionID: session, EnvVars: map[string]string{"COREMAN_COLLABORATION_URL": "https://example.test/mcp", "COREMAN_COLLABORATION_TOKEN": "secret-marker"}}
-		args, _ := buildClaudeArgs(req, "m", "hi", "rules")
+		args, _ := buildClaudeArgs(req, "m", textPrompt("hi"), "rules")
 		joined := strings.Join(args, " ")
 		for _, want := range []string{"--mcp-config", "coreman_collaboration", "${COREMAN_COLLABORATION_TOKEN}", "https://example.test/mcp"} {
 			if !strings.Contains(joined, want) {
@@ -20,7 +20,7 @@ func TestCollaborationConfigPerTurn(t *testing.T) {
 			t.Fatal("token exposed in arguments")
 		}
 		delete(req.EnvVars, "COREMAN_COLLABORATION_TOKEN")
-		args, _ = buildClaudeArgs(req, "m", "hi", "rules")
+		args, _ = buildClaudeArgs(req, "m", textPrompt("hi"), "rules")
 		if !strings.Contains(strings.Join(args, " "), "--disallowedTools mcp__coreman_collaboration") {
 			t.Fatal("missing explicit disable")
 		}
@@ -50,7 +50,7 @@ func TestCollaborationEnvironmentDoesNotInheritPreviousTask(t *testing.T) {
 
 func TestCollaborationSessionFallbackKeepsConfiguration(t *testing.T) {
 	req := &openai.ChatCompletionRequest{SessionID: "old", EnvVars: map[string]string{"COREMAN_COLLABORATION_URL": "https://current.test/mcp", "COREMAN_COLLABORATION_TOKEN": "secret"}}
-	args, _ := buildClaudeArgs(req, "m", "hi", "rules")
+	args, _ := buildClaudeArgs(req, "m", textPrompt("hi"), "rules")
 	retry := strings.Join(replaceArg(args, "--resume", "--session-id"), " ")
 	if !strings.Contains(retry, "--session-id old") || !strings.Contains(retry, "https://current.test/mcp") {
 		t.Fatal("fallback lost current MCP configuration")

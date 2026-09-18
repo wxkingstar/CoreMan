@@ -11,7 +11,7 @@ import (
 // in headless mode, preventing CoreMan's existing card flow from opening.
 func TestHeadlessQuestionHostReceivesStructuredPrompt(t *testing.T) {
 	prompt := "Choose a color:\n\"RED\" or GREEN? 中文"
-	args, input := buildClaudeArgs(&openai.ChatCompletionRequest{}, "test", prompt, "")
+	args, input := buildClaudeArgs(&openai.ChatCompletionRequest{}, "test", textPrompt(prompt), "")
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--input-format stream-json") || !strings.Contains(joined, "--permission-prompt-tool stdio") {
 		t.Fatal("missing bidirectional question host protocol", args)

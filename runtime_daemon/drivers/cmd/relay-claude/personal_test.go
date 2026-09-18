@@ -12,7 +12,7 @@ func TestPersonalConfigScopedPerTurn(t *testing.T) {
 			for _, chat := range []string{"single", "group", ""} {
 				for _, token := range []string{"secret-marker", ""} {
 					req := &openai.ChatCompletionRequest{SessionID: session, EnvVars: map[string]string{"COREMAN_PLATFORM": platform, "COREMAN_CHAT_TYPE": chat, "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/personal", "COREMAN_FEISHU_PERSONAL_TOKEN": token}}
-					args, _ := buildClaudeArgs(req, "", "", "")
+					args, _ := buildClaudeArgs(req, "", nil, "")
 					joined := strings.Join(args, " ")
 					allowed := platform == "feishu" && chat == "single" && token != ""
 					if allowed && (!strings.Contains(joined, "${COREMAN_FEISHU_PERSONAL_TOKEN}") || !strings.Contains(joined, "--no-session-persistence")) {
@@ -56,7 +56,7 @@ func TestPersonalDisablesAutoMemoryAndMergesMCP(t *testing.T) {
 	if count != 1 {
 		t.Fatal("ambiguous memory setting", count)
 	}
-	args, _ := buildClaudeArgs(&openai.ChatCompletionRequest{EnvVars: env}, "", "", "")
+	args, _ := buildClaudeArgs(&openai.ChatCompletionRequest{EnvVars: env}, "", nil, "")
 	count = 0
 	for i, a := range args {
 		if a == "--mcp-config" {
@@ -73,7 +73,7 @@ func TestPersonalDisablesAutoMemoryAndMergesMCP(t *testing.T) {
 
 func TestPersonalOnlyHasDedicatedTools(t *testing.T) {
 	req := &openai.ChatCompletionRequest{SessionID: "old", SystemPromptFile: "/shared/prompt", Settings: `{"hooks":{}}`, AllowedTools: "Bash", PermissionMode: "bypassPermissions", AddDirs: []string{"/shared"}, EnvVars: map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/personal", "COREMAN_FEISHU_PERSONAL_TOKEN": "secret", "COREMAN_COLLABORATION_URL": "https://example.test/collab", "COREMAN_COLLABORATION_TOKEN": "secret"}}
-	args, _ := buildClaudeArgs(req, "", "", "")
+	args, _ := buildClaudeArgs(req, "", nil, "")
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{"--resume", "--append-system-prompt-file", "--allowedTools Bash", "--add-dir", "bypassPermissions", "https://example.test/collab"} {
 		if strings.Contains(joined, forbidden) {
