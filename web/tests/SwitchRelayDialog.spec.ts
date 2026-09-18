@@ -33,7 +33,7 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
-vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, source_online: true, git_configured: false, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
+vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: true, git_configured: false, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
 import { workspace } from '@/api/workspace'
 import { bots } from '@/api/admin'
 import { ApiError } from '@/api/client'
@@ -125,7 +125,7 @@ describe('SwitchRelayDialog', () => {
     wrapper.unmount()
   })
   it('allows first runtime assignment without a source or stored memory snapshot', async () => {
-    vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, source_online: false, git_configured: false, memory_snapshot_at: null })
+    vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: false, git_configured: false, memory_snapshot_at: null })
     vi.mocked(bots.switchRelay).mockClear()
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: null, model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
@@ -142,4 +142,31 @@ describe('SwitchRelayDialog', () => {
     wrapper.unmount()
   })
 
+  // 使用已有目录：没有任何员工认领的目录（如另一套机器人系统在用的目录）可以直接接管，被其他员工标记的要拦住。
+  it('takes over an unclaimed existing directory but blocks one marked by another employee', async () => {
+    const shared = { directory: '/srv/bots/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, git_configured: false, memory_snapshot_at: null }
+    vi.mocked(workspace.preview).mockResolvedValueOnce(shared).mockResolvedValueOnce({ ...shared, marked: true })
+    vi.mocked(bots.switchRelay).mockClear()
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/demo' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; checkTarget: () => Promise<void>; confirm: () => Promise<void>; workspaceMode: string; targetDirectory: string }
+    await vm.pick('r2')
+    vm.workspaceMode = 'existing'
+    vm.targetDirectory = '/srv/bots/demo'
+    await vm.checkTarget()
+    await flushPromises()
+    expect(document.querySelector('[data-test="workspace-takeover"]')).not.toBeNull()
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
+    await vm.confirm()
+    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'existing', target_directory: '/srv/bots/demo' }), 1)
+    await vm.checkTarget()
+    await flushPromises()
+    expect(document.querySelector('[data-test="workspace-unclaimable"]')).not.toBeNull()
+    expect(document.querySelector('[data-test="workspace-takeover"]')).toBeNull()
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
+    wrapper.unmount()
+  })
 })

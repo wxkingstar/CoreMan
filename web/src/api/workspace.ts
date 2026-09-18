@@ -3,7 +3,7 @@ export interface WorkspaceInfo { directory: string; state: string; error?: strin
 export interface WorkspaceEntry { name: string; path: string; type: string; size: number }
 export interface WorkspaceFile { content: string | null; data: string; size: number; hash: string; editable: boolean; eof: boolean }
 export interface GitStatus { initialized: boolean; branch: string; head?: string; files: { path: string; status: string }[]; excluded?: string[] }
-export interface SwitchPreview { directory: string; exists: boolean; empty: boolean; owned: boolean; source_online: boolean; git_configured: boolean; memory_snapshot_at: string | null }
+export interface SwitchPreview { directory: string; exists: boolean; empty: boolean; owned: boolean; marked: boolean; source_online: boolean; git_configured: boolean; memory_snapshot_at: string | null }
 const base = (id: string) => `/api/admin/bots/${id}/workspace`
 export const workspace = {
   get: (id: string) => call<WorkspaceInfo>(http.get(base(id))),

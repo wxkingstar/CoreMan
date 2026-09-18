@@ -33,6 +33,12 @@ def instruction_content(bot: Bot) -> str:
     )
 
 
+def claimable(info: dict[str, Any]) -> bool:
+    """已有目录能否「使用已有目录」：本员工的，或没有任何员工的所有权标记（如另一套机器人系统
+    在用的目录，接管时原有文件与指令布局不动，只写入标记）。旧运行时不报告 marked，按有标记处理。"""
+    return bool(info.get("owned")) or info.get("marked", True) is False
+
+
 async def require_workspace(relay: RelayServer, cipher: Cipher | None) -> None:
     result = await call_agent(relay, cipher, "ping")
     if result.get("workspace_protocol") != 1:
@@ -209,9 +215,9 @@ async def prepare_switch(
             )
             if not same_directory:
                 if mode == "existing":
-                    if not info.get("exists") or not info.get("owned"):
+                    if not info.get("exists") or not claimable(info):
                         raise ApiError(
-                            409, 409, "目标目录不存在或不属于本员工，请选择复制或 Git 恢复"
+                            409, 409, "目标目录不存在或属于其他员工，请选择复制或 Git 恢复"
                         )
                 elif info.get("exists") and not info.get("empty"):
                     raise ApiError(409, 409, "目标目录已有内容，请明确复用本员工目录或选择新的目录")

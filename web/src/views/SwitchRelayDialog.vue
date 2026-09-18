@@ -28,7 +28,10 @@ const checking = ref(false)
 const progress = ref('')
 let progressTimer: ReturnType<typeof setInterval> | undefined
 const moving = computed(() => !!targetId.value && (targetId.value !== props.bot.relay_server_id || targetDirectory.value !== props.bot.working_dir))
-const targetBlocked = computed(() => moving.value && (!preview.value || (workspaceMode.value !== 'existing' && preview.value.exists && !preview.value.empty) || (workspaceMode.value === 'git' && !preview.value.git_configured) || (!!props.bot.relay_server_id && !preview.value.source_online && (!allowStoredMemory.value || !preview.value.memory_snapshot_at || workspaceMode.value === 'copy'))))
+// 使用已有目录：本员工的，或没有任何员工认领（如另一套机器人系统在用的目录，直接接管）。
+const unclaimable = computed(() => !!preview.value && workspaceMode.value === 'existing' && (!preview.value.exists || (!preview.value.owned && preview.value.marked)))
+const takeover = computed(() => !!preview.value && workspaceMode.value === 'existing' && preview.value.exists && !preview.value.owned && !preview.value.marked)
+const targetBlocked = computed(() => moving.value && (!preview.value || unclaimable.value || (workspaceMode.value !== 'existing' && preview.value.exists && !preview.value.empty) || (workspaceMode.value === 'git' && !preview.value.git_configured) || (!!props.bot.relay_server_id && !preview.value.source_online && (!allowStoredMemory.value || !preview.value.memory_snapshot_at || workspaceMode.value === 'copy'))))
 watch(targetDirectory, () => { preview.value = undefined })
 async function checkTarget() {
   if (!targetId.value || !targetDirectory.value) return
@@ -299,6 +302,20 @@ defineExpose({ pick, confirm, checkTarget })
             :title="t('workspaceFiles.occupied')"
             type="warning"
             :closable="false"
+          />
+          <el-alert
+            v-if="unclaimable"
+            :title="t('workspaceFiles.unclaimable')"
+            type="warning"
+            :closable="false"
+            data-test="workspace-unclaimable"
+          />
+          <el-alert
+            v-if="takeover"
+            :title="t('workspaceFiles.takeover')"
+            type="info"
+            :closable="false"
+            data-test="workspace-takeover"
           />
           <template v-if="bot.relay_server_id && !preview.source_online">
             <el-alert

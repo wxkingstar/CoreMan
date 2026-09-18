@@ -95,6 +95,113 @@ async def test_switch_into_nonempty_unknown_directory_rejected(client, db_sessio
     assert response.status_code == 409, response.text
 
 
+async def test_switch_into_directory_marked_by_another_bot_rejected(
+    client, db_session, monkeypatch
+):
+    from coreman.core.bots import workspace_transfer
+
+    bot, _, _ = await seed_bot(db_session, model="claude-sonnet-5")
+    target = await add_node_relay(db_session, name="target")
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+
+    async def call(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1}
+        assert operation == "workspace-info"
+        return {"success": True, "exists": True, "empty": False, "owned": False, "marked": True}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "existing"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 409, response.text
+    assert "其他员工" in response.json()["message"]
+
+
+async def test_existing_mode_takes_over_unmarked_shared_directory(
+    client, db_session, monkeypatch, tmp_path
+):
+    import os
+
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import RuntimeNode
+    from runtime_daemon.agent import Agent, OperationError
+
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5")
+    src_root, dst_root = tmp_path / "source", tmp_path / "skills"
+    src_root.mkdir()
+    dst_root.mkdir()
+    source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
+    source_node.workspace_root = str(src_root)
+    bot.working_dir = str(src_root / bot.bot_key)
+    target = await add_node_relay(db_session, name="target", workspace_root=str(dst_root))
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    agents = {
+        relay.id: Agent(
+            root=root,
+            home=tmp_path / home,
+            api_url="http://test",
+            token="x" * 32,
+            relay_id=str(relay.id),
+        )
+        for relay, root, home in [(old, src_root, "home1"), (target, dst_root, "home2")]
+    }
+    agents[old.id].dispatch(
+        {"type": "workspace-init", "working_dir": bot.working_dir, "bot_id": str(bot.id)}
+    )
+    # 另一套机器人系统的目录：CLAUDE.md 为正本、AGENTS.md 链接过去，没有 CoreMan 所有权标记。
+    shared = dst_root / bot.bot_key
+    (shared / ".git/info").mkdir(parents=True)
+    (shared / "CLAUDE.md").write_text("# 共用规则")
+    (shared / "AGENTS.md").symlink_to("CLAUDE.md")
+    (shared / "report.csv").write_text("a,b\n")
+
+    async def call(relay, cipher, operation, payload=None):
+        try:
+            result = agents[relay.id].dispatch({"type": operation, **(payload or {})})
+        except OperationError as exc:
+            raise workspace_transfer.AgentError(str(exc)) from exc
+        assert result["success"], result
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    from coreman.core.relay import agent_client
+
+    monkeypatch.setattr(agent_client, "call_agent", call)
+    preview = await client.post(
+        f"/api/admin/bots/{bot.id}/workspace/switch-preview",
+        json={"relay_server_id": str(target.id), "target_directory": str(shared)},
+    )
+    assert preview.status_code == 200, preview.text
+    data = preview.json()["data"]
+    assert data["exists"] and not data["owned"] and data["marked"] is False
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={
+            "relay_server_id": str(target.id),
+            "workspace_mode": "existing",
+            "target_directory": str(shared),
+        },
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == target.id and bot.working_dir == str(shared)
+    assert (shared / "CLAUDE.md").read_text() == "# 共用规则"
+    assert os.readlink(shared / "AGENTS.md") == "CLAUDE.md"
+    assert (shared / "report.csv").read_text() == "a,b\n"
+    assert "/.coreman-workspace.json" in (shared / ".git/info/exclude").read_text()
+    info = agents[target.id].dispatch(
+        {"type": "workspace-info", "working_dir": str(shared), "bot_id": str(bot.id)}
+    )
+    assert info["owned"]
+
+
 async def test_copy_moves_real_files_and_memory_before_binding(
     client, db_session, monkeypatch, tmp_path
 ):

@@ -400,6 +400,8 @@ async def workspace_switch_preview(
             "exists": bool(info.get("exists")),
             "empty": bool(info.get("empty")),
             "owned": bool(info.get("owned")),
+            # 旧运行时不报告，按有标记处理：只能使用本员工自己的目录。
+            "marked": info.get("marked", True) is not False,
             "source_online": source_online,
             "git_configured": bool(bot.git_url),
             "memory_snapshot_at": bot.memory_snapshot_at,
