@@ -1,5 +1,7 @@
+# 基础镜像固定到摘要：标签会跟着上游补丁版移动，一动就让后面所有层变化、发布时整包重传。
+# 摘要由 Dependabot（docker 生态，/deploy）定期提 PR 升级。
 # 构建阶段产物与目标架构无关，固定在构建机架构上运行，避免多架构构建在模拟器里编译。
-FROM --platform=$BUILDPLATFORM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -7,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # build.py 为全部目标平台交叉编译驱动、只下载与平台无关的 wheel，同样不依赖构建机架构。
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS runtime-bundles
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS runtime-bundles
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
@@ -15,24 +17,29 @@ COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY runtime_daemon/ runtime_daemon/
 RUN python3 runtime_daemon/build.py --output /bundles
 
-FROM python:3.12-slim AS api
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS api
 RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
+# 运行时只写 /data/storage 与 /tmp，/app 保持 root 所有、只读。不要再 chown /app：
+# 那会把整个 venv 复制成新的一层，随每次代码变化重建，发布时多传几百 MB。
+RUN groupadd -r -g 10001 coreman && useradd -r -u 10001 -g coreman coreman \
+    && mkdir -p /data/storage/objects && chown -R coreman:coreman /data/storage
+COPY --from=ghcr.io/astral-sh/uv:0.11@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1 WEB_DIST_DIR=/app/web/dist
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md ./
-RUN uv sync --frozen --no-dev --no-install-project
-COPY coreman/ coreman/
+# uv 的下载缓存放在构建缓存里、不进镜像层（否则依赖层多出约 170MB）；UV_LINK_MODE=copy 就是为此设置的。
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
+# 以下按变化频率从低到高排列，日常只改代码的发布只重建、重传最后几层。
+COPY --from=runtime-bundles /bundles /app/runtime_daemon/dist
+COPY --from=web /web/dist /app/web/dist
 COPY runtime_daemon/install.sh runtime_daemon/install.sh
 COPY runtime_daemon/drivers/pkg/sessions/session_viewer.html runtime_daemon/drivers/pkg/sessions/session_viewer.html
-COPY --from=runtime-bundles /bundles /app/runtime_daemon/dist
-COPY migrations/ migrations/
 COPY alembic.ini ./
-RUN uv sync --frozen --no-dev
-COPY --from=web /web/dist /app/web/dist
-RUN groupadd -r -g 10001 coreman && useradd -r -u 10001 -g coreman coreman \
-    && mkdir -p /data/storage/objects && chown -R coreman:coreman /app /data/storage
+COPY migrations/ migrations/
+COPY coreman/ coreman/
+# 项目是 editable 安装，UV_COMPILE_BYTECODE 不编译它；/app 只读、运行时写不了 __pycache__，在这里预编译。
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev && /app/.venv/bin/python -m compileall -q coreman migrations
 ARG BUILD_REVISION=unknown
 ENV COREMAN_BUILD_REVISION=${BUILD_REVISION}
 LABEL org.opencontainers.image.revision=${BUILD_REVISION}
