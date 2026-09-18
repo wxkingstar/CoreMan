@@ -17,6 +17,7 @@ from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bo
 from coreman.core.bots.relay_policy import (
     relay_available,
     relay_visible,
+    validate_backend_ready,
     validate_model_for_relay,
 )
 from coreman.core.bots.workspace_transfer import WorkspaceMode, prepare_switch, target_path
@@ -79,6 +80,11 @@ async def switch_relay(
     ):
         raise SwitchError(422, "目标运行时不属于本团队或公共池")
     catalog = await load_catalog(session)
+    if not same_relay:
+        try:
+            await validate_backend_ready(session, target)
+        except ApiError as exc:
+            raise SwitchError(exc.status_code, exc.message) from exc
     if model is not None:
         try:
             await validate_model_for_relay(session, target, model, bot.effort_level)

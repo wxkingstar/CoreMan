@@ -17,6 +17,9 @@ async def add_node(
     workspace_root: str = "/data/skills",
     **values: Any,
 ) -> RuntimeNode:
+    values.setdefault(
+        "capabilities", {p: {"installed": True, "login": "ready"} for p in ("claude", "codex")}
+    )
     node = RuntimeNode(
         id=uuid.uuid4(),
         name=name,

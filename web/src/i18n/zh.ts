@@ -180,6 +180,11 @@ export default {
     publishRemarkDefault: '由 CoreMan 管理台提交',
   },
   runtimeNodes: {
+    unavailable: { disabled: '运行时未启用', root_pending: '主目录修改等待生效', not_installed: '未安装', login_required: '未登录', unknown: '状态未知，请升级 Runtime 并确认登录' },
+    rootEditHint: '使用绝对路径（不能是 / 或符号链接）。有 AI 员工绑定或迁入时需先切换运行时；修改不搬动原目录文件，等待 Runtime 确认后生效。',
+    rootPending: '项目主目录修改已提交，等待 Runtime 确认生效',
+    rootFailed: '主目录修改失败，仍使用原目录。请检查新路径和写入权限后重试',
+    rootUpgrade: '此 Runtime 暂不支持修改主目录，请先升级 Runtime',
     edit: '编辑运行时',
     renameHint: '用于识别运行时，保存后 AI 员工列表中的运行时名称会同步更新。',
     teamHint: '公共池对所有团队开放。更换团队不影响已绑定的 AI 员工；之后创建或切换到该运行时的 AI 员工按新团队限制。',

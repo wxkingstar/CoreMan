@@ -60,8 +60,8 @@ const {
           v-for="backend in runtimeBackends"
           :key="backend.id"
           :value="backend.id"
-          :label="backend.model_provider === 'claude' ? 'Claude Code' : 'Codex / GPT'"
-          :disabled="!backend.effective_models.length"
+          :label="`${backend.model_provider === 'claude' ? 'Claude Code' : 'Codex / GPT'}${backend.unavailable_reason !== null ? ' · ' + t('runtimeNodes.unavailable.' + (backend.unavailable_reason ?? 'unknown')) : ''}`"
+          :disabled="backend.unavailable_reason !== null || !backend.effective_models.length"
         />
       </el-select>
     </div>
@@ -77,8 +77,9 @@ const {
       <el-option
         v-for="r in relayList"
         :key="r.id"
-        :label="`${r.name} · ${r.model_provider} · ${r.team_name ?? t('bots.publicPool')}`"
+        :label="`${r.name} · ${r.model_provider} · ${r.team_name ?? t('bots.publicPool')}${r.unavailable_reason !== null ? ' · ' + t('runtimeNodes.unavailable.' + (r.unavailable_reason ?? 'unknown')) : ''}`"
         :value="r.id"
+        :disabled="r.unavailable_reason !== null || !r.effective_models.length"
       />
     </el-select>
     <div

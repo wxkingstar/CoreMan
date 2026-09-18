@@ -31,9 +31,6 @@ async def reserve_workspace(
     )
     if node is None:
         raise ApiError(422, 422, "目标运行时未注册或不可用")
-    path = PurePosixPath(directory)
-    if not path.is_relative_to(node.workspace_root) or str(path) == node.workspace_root:
-        raise ApiError(422, 422, "工作目录必须位于所选运行时的项目主目录之下")
     peers = list(
         await session.scalars(select(RelayServer.id).where(RelayServer.runtime_node_id == node.id))
     )
@@ -41,6 +38,12 @@ async def reserve_workspace(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"workspace:{node.id}"},
     )
+    await session.refresh(node)
+    if (node.root_change or {}).get("status") == "pending":
+        raise ApiError(409, 409, "项目主目录修改等待 Runtime 确认，请稍后重试")
+    path = PurePosixPath(directory)
+    if not path.is_relative_to(node.workspace_root) or str(path) == node.workspace_root:
+        raise ApiError(422, 422, "工作目录必须位于所选运行时的项目主目录之下")
     stmt = select(Bot).where(
         or_(
             Bot.relay_server_id.in_(peers),

@@ -115,6 +115,13 @@ class InstallIn(BaseModel):
 
 class NodePatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    workspace_root: str | None = Field(default=None, min_length=2, max_length=400)
+
+    @field_validator("workspace_root")
+    @classmethod
+    def valid_root(cls, value: str | None) -> str | None:
+        return absolute_root(value) if value is not None else None
+
     # 显式传 null 表示改为公共池；不传表示不改团队。
     team_id: uuid.UUID | None = None
     is_active: bool | None = None
@@ -268,6 +275,8 @@ async def list_nodes(
                 "architecture": n.architecture,
                 "environment": n.environment,
                 "workspace_root": n.workspace_root,
+                "root_change": n.root_change,
+                "root_edit_supported": n.root_edit_supported,
                 "version": n.version,
                 "online": online(n),
                 "is_active": n.is_active,
@@ -297,7 +306,7 @@ async def patch_node(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     node = await session.scalar(
-        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update()
+        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update(key_share=True)
     )
     if not node:
         raise not_found("运行时不存在")
@@ -309,6 +318,31 @@ async def patch_node(
     if changes.get("team_id") and not await session.get(Team, changes["team_id"]):
         raise ApiError(422, 422, "团队不存在")
     diff = {k: [_plain(getattr(node, k)), _plain(v)] for k, v in changes.items()}
+    root = changes.pop("workspace_root", None)
+    if root is not None and root != node.workspace_root:
+        if (node.root_change or {}).get("status") == "pending":
+            raise ApiError(409, 409, "项目主目录修改等待 Runtime 确认，请稍后重试")
+        if not node.root_edit_supported:
+            raise ApiError(409, 409, "请先升级 Runtime，再修改项目主目录")
+        if not online(node) or not node.is_active or changes.get("is_active") is False:
+            raise ApiError(409, 409, "请先启用运行时并等待其上线")
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"workspace:{node_id}"},
+        )
+        relay_ids = select(RelayServer.id).where(RelayServer.runtime_node_id == node_id)
+        bound = await session.scalar(
+            select(Bot.id)
+            .where(
+                or_(
+                    Bot.relay_server_id.in_(relay_ids), Bot.workspace_target_relay_id.in_(relay_ids)
+                )
+            )
+            .limit(1)
+        )
+        if bound:
+            raise ApiError(409, 409, "仍有 AI 员工使用或迁移到该运行时，请先切换它们的运行时")
+        node.root_change = {"id": str(uuid.uuid4()), "path": root, "status": "pending"}
     for key, value in changes.items():
         setattr(node, key, value)
     # 实例的团队与启停跟随节点：创建/切换 AI 员工时按实例的团队做可用范围校验。

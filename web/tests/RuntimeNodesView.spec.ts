@@ -6,9 +6,20 @@ import { i18n } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
 import RuntimeNodesView from '@/views/RuntimeNodesView.vue'
 import { runtimeNodes } from '@/api/runtimeNodes'
+
+it('submits a changed project root and explains acknowledgement', async () => {
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  expect(wrapper.find('[data-test="runtime-root"]').exists()).toBe(true)
+  const vm = wrapper.vm as unknown as { editForm: { workspace_root: string }; saveEdit: () => Promise<void> }
+  vm.editForm.workspace_root = '/home/ai/new'
+  await vm.saveEdit()
+  expect(runtimeNodes.patch).toHaveBeenLastCalledWith('node1', { workspace_root: '/home/ai/new' })
+  wrapper.unmount()
+})
 vi.mock('@/api/runtimeNodes', () => ({ runtimeNodes: {
   list: vi.fn().mockResolvedValue([{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
-    team_id: null, team_name: null, capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
+    team_id: null, team_name: null, root_edit_supported: true, capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
   links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), remove: vi.fn(), revokeLink: vi.fn(),
 } }))
 vi.mock('@/api/admin', () => ({ relays: { probe: vi.fn() }, teams: { list: vi.fn().mockResolvedValue([{ id: 'team1', slug: 'dev', name_zh: '研发', name_ja: null, name_en: null }]) }, catalog: { list: vi.fn().mockResolvedValue([]) } }))

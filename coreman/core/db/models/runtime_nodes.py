@@ -21,6 +21,8 @@ class RuntimeNode(TimestampMixin, Base):
     team_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("teams.id"))
     visibility: Mapped[str] = mapped_column(Text, server_default="all")
     workspace_root: Mapped[str] = mapped_column(Text)
+    root_change: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    root_edit_supported: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     hostname: Mapped[str] = mapped_column(Text)
     username: Mapped[str] = mapped_column(Text)
     platform: Mapped[str] = mapped_column(Text)

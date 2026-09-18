@@ -41,6 +41,7 @@ export type Pct = number | string | null
 
 /** 运行时列表项：旧的手工部署字段（主机、端口、SSH/chroot、agent 令牌）后端已不再下发。 */
 export interface RelayOut {
+  unavailable_reason?: 'disabled' | 'root_pending' | 'not_installed' | 'login_required' | 'unknown' | null
   runtime_node_id?: string | null; runtime_name?: string | null; workspace_root?: string | null
   id: string; name: string; relay_url: string
   model_provider: string; supported_models_mode: ModelsMode; supported_models: string[] | null

@@ -36,6 +36,7 @@ async def seed_bot(
     await session.flush()
     # 运行时实例一律挂在节点上（relay.runtime_node_id 恒有值），测试夹具与生产保持一致。
     node = RuntimeNode(
+        capabilities={p: {"installed": True, "login": "ready"} for p in ("claude", "codex")},
         id=uuid.uuid4(),
         name="node-1",
         token_hash="test-token-hash",

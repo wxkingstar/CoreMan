@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 // vi.hoisted() 先于它执行，返回值可以安全地在工厂里用（同 BotsView.spec）。
 const { relayRow } = vi.hoisted(() => ({
   relayRow: (id: string, provider: string, def: string) => ({
+    unavailable_reason: null,
     id, name: id, runtime_node_id: 'n1', runtime_name: 'node-1', relay_url: 'http://h:1', model_provider: provider,
     default_model: def, effective_models: [def], team_id: null, team_name: null, is_active: true,
     health_status: 'healthy', health_checked_at: null, health_detail: null,
@@ -35,13 +36,28 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: true, git_configured: false, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
 import { workspace } from '@/api/workspace'
-import { bots } from '@/api/admin'
+import { bots, relays } from '@/api/admin'
 import { ApiError } from '@/api/client'
 import { VERSION_CONFLICT_CODE } from '@/utils/errors'
 import { i18n } from '@/i18n'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 describe('SwitchRelayDialog', () => {
+  it('disables a logged-out backend even when it advertises models', async () => {
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'),
+      { ...relayRow('r2', 'codex', 'codex/gpt-5.5'), unavailable_reason: 'login_required' },
+    ] } as never)
+    vi.mocked(bots.switchRelay).mockClear()
+    const wrapper = mount(SwitchRelayDialog, { props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6' } as never, visible: true }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    expect(document.querySelector('[data-test="pick-r2"] input')!.hasAttribute('disabled')).toBe(true)
+    expect(document.body.textContent).toContain('未登录')
+    await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
+    await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
+    expect(bots.switchRelay).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   // 挂载时会预选当前 relay（「同一台只换模型」的入口），此时直接确认就是空操作：
   // 后端照样写一条 diff 为空的 bot.switch_relay 审计，所以前端要拦住。
   it('refuses to submit while neither relay nor model changed', async () => {

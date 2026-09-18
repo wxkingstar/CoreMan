@@ -24,11 +24,14 @@ const creating = ref(false)
 const dialog = ref(false)
 const editDialog = ref(false)
 const editId = ref('')
-const editForm = reactive({ name: '', team_id: null as string | null })
+const editForm = reactive({ name: '', workspace_root: '', team_id: null as string | null })
+const editingNode = computed(() => nodes.value.find(n => n.id === editId.value))
+const rootEditable = computed(() => !!editingNode.value?.root_edit_supported && editingNode.value?.root_change?.status !== 'pending')
 const saving = ref(false)
 function openEdit(node: RuntimeNode) {
   editId.value = node.id
   editForm.name = node.name
+  editForm.workspace_root = node.workspace_root ?? ''
   editForm.team_id = node.team_id
   editDialog.value = true
 }
@@ -38,7 +41,14 @@ async function saveEdit() {
   if (!name || name.length > 100 || saving.value) return
   const node = nodes.value.find(n => n.id === editId.value)
   const teamId = editForm.team_id || null
-  const body: { name?: string; team_id?: string | null } = {}
+  const body: { name?: string; workspace_root?: string; team_id?: string | null } = {}
+  const root = editForm.workspace_root.trim()
+  if (root !== (node?.workspace_root ?? '')) {
+    if (!rootEditable.value || !root.startsWith('/') || root === '/' || root.split('/').includes('..')) {
+      ElMessage.error(t('runtimeNodes.rootEditHint')); return
+    }
+    body.workspace_root = root
+  }
   if (name !== node?.name) body.name = name
   if (teamId !== (node?.team_id ?? null)) body.team_id = teamId
   if (!Object.keys(body).length) { editDialog.value = false; return }
@@ -46,7 +56,8 @@ async function saveEdit() {
   try {
     await runtimeNodes.patch(editId.value, body)
     editDialog.value = false
-    ElMessage.success(t('common.saved'))
+    if (body.workspace_root) ElMessage.info(t('runtimeNodes.rootPending'))
+    else ElMessage.success(t('common.saved'))
     await refresh()
   } catch (error) { ElMessage.error(errorMessage(error)) }
   finally { saving.value = false }
@@ -215,6 +226,18 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               <template #default="{ row }: { row: RuntimeNode }">
                 <div class="node-detail">
                   <p>{{ t('runtimeNodes.workspace') }}: <code>{{ row.workspace_root }}</code></p>
+                  <p
+                    v-if="row.root_change?.status === 'pending'"
+                    role="status"
+                  >
+                    {{ t('runtimeNodes.rootPending') }}: <code>{{ row.root_change.path }}</code>
+                  </p>
+                  <p
+                    v-if="row.root_change?.status === 'failed'"
+                    role="alert"
+                  >
+                    {{ t('runtimeNodes.rootFailed') }}: <code>{{ row.root_change.path }}</code>
+                  </p>
                   <p>{{ t('runtimeNodes.version') }}: {{ row.version }} · {{ t('runtimeNodes.service') }}: {{ row.service_status }} · {{ t('runtimeNodes.heartbeat') }}: {{ formatDateTime(row.heartbeat_at) }}</p>
                   <div
                     class="git-hosts"
@@ -407,6 +430,32 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           />
           <p class="muted field-hint">
             {{ t('runtimeNodes.renameHint') }}
+          </p>
+        </el-form-item>
+        <el-form-item
+          :label="t('runtimeNodes.workspace')"
+          required
+        >
+          <el-input
+            v-model="editForm.workspace_root"
+            data-test="runtime-root"
+            maxlength="400"
+            :disabled="saving || !rootEditable"
+          />
+          <p class="muted field-hint">
+            {{ t('runtimeNodes.rootEditHint') }}
+          </p>
+          <p
+            v-if="!editingNode?.root_edit_supported"
+            class="muted field-hint"
+          >
+            {{ t('runtimeNodes.rootUpgrade') }}
+          </p>
+          <p
+            v-if="editingNode?.root_change?.status === 'pending'"
+            class="muted field-hint"
+          >
+            {{ t('runtimeNodes.rootPending') }}
           </p>
         </el-form-item>
         <el-form-item :label="t('runtimeNodes.team')">

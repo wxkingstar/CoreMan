@@ -109,6 +109,12 @@ class Capability(BaseModel):
         return list(dict.fromkeys(value))
 
 
+class RootChangeResult(BaseModel):
+    id: str = Field(max_length=100)
+    path: str = Field(min_length=2, max_length=400)
+    status: Literal["applied", "failed"]
+
+
 class HeartbeatIn(BaseModel):
     claude: Capability
     codex: Capability
@@ -122,6 +128,8 @@ class HeartbeatIn(BaseModel):
     active_calls: int | None = Field(default=None, ge=0, le=1024)
     # 节点 config.json 的 Git 主机白名单，只读展示；旧节点不上报时为空。
     git_hosts: list[str] | None = None
+    root_edit_supported: bool = False
+    root_change_result: RootChangeResult | None = None
 
     @field_validator("git_hosts", mode="before")
     @classmethod
@@ -334,6 +342,20 @@ async def heartbeat(
     body: HeartbeatIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     node = await node_auth(request, session)
+    # Serialize acknowledgements with edits; never accept an old/mismatched result.
+    await session.refresh(node, with_for_update=True)
+    change = node.root_change or {}
+    result = body.root_change_result
+    if (
+        change.get("status") == "pending"
+        and result
+        and result.id == change.get("id")
+        and result.path == change.get("path")
+    ):
+        node.root_change = result.model_dump()
+        if result.status == "applied":
+            node.workspace_root = result.path
+    node.root_edit_supported = body.root_edit_supported
     await session.execute(
         update(RuntimeNode)
         .where(RuntimeNode.id == node.id)
@@ -425,7 +447,14 @@ async def heartbeat(
     )
     await session.execute(delete(RuntimeCall).where(RuntimeCall.id.in_(expired)))
     await session.commit()
-    return {"code": 0, "data": {"draining": node.draining, "protocol": PROTOCOL_VERSION}}
+    return {
+        "code": 0,
+        "data": {
+            "draining": node.draining,
+            "protocol": PROTOCOL_VERSION,
+            "root_change": node.root_change,
+        },
+    }
 
 
 @router.post("/poll")

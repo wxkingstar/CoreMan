@@ -9,7 +9,7 @@ vi.mock('@/api/feishuApps', () => ({
 }))
 vi.mock('@/api/admin', () => ({
   bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), validate: vi.fn().mockResolvedValue({ valid: true }), patch: vi.fn(), get: vi.fn() },
-  relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
+  relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', unavailable_reason: null, effective_models: ['vllm/claude-sonnet-4-6'], model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', unavailable_reason: null, effective_models: ['codex/gpt-5.5'], model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
   catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
   settings: { defaults: vi.fn().mockResolvedValue({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' }) },
   teams: { list: vi.fn().mockResolvedValue([]) },
@@ -48,6 +48,24 @@ const editBot: BotOut = {
 
 describe('BotForm', () => {
   beforeEach(() => setActivePinia(createPinia()))
+
+  it('keeps the runtime selected but selects no backend when none are ready', async () => {
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      { id: 'offline-ai', name: 'claude13 / codex', runtime_node_id: 'claude13', runtime_name: 'claude13', model_provider: 'codex', unavailable_reason: 'login_required', effective_models: ['codex/gpt-5.5'] },
+    ] } as never)
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { selectRuntime: (id: string) => Promise<void>; selectRelay: (id: string) => Promise<void>; selectedRuntime: string; form: { relay_server_id: string | null } }
+    await vm.selectRuntime('claude13')
+    expect(vm.selectedRuntime).toBe('claude13')
+    expect(vm.form.relay_server_id).toBeNull()
+    await vm.selectRelay('offline-ai')
+    expect(vm.form.relay_server_id).toBeNull()
+    const option = wrapper.findAllComponents({ name: 'ElOption' }).find(o => o.props('value') === 'offline-ai')!
+    expect(option.props('disabled')).toBe(true)
+    expect(option.props('label')).toContain('未登录')
+    wrapper.unmount()
+  })
 
   it('links working_dir to bot_key, switches model with relay, and submits create', async () => {
     useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }

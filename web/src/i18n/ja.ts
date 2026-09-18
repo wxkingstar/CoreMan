@@ -180,6 +180,11 @@ export default {
     publishRemarkDefault: 'CoreMan 管理画面から申請',
   },
   runtimeNodes: {
+    unavailable: { disabled: 'ランタイム無効', root_pending: 'ルート変更の反映待ち', not_installed: '未インストール', login_required: '未ログイン', unknown: '状態不明。Runtime を更新しログインを確認してください' },
+    rootEditHint: '絶対パスを指定してください（/ やシンボリックリンクは不可）。利用中・移行中の AI 社員を先に移してください。既存ファイルは移動せず、Runtime の確認後に反映します。',
+    rootPending: 'ルート変更を送信しました。Runtime の確認待ちです',
+    rootFailed: '変更に失敗したため元のルートを使用しています。パスと書き込み権限を確認して再試行してください',
+    rootUpgrade: 'ルートを編集するには Runtime を更新してください',
     edit: 'ランタイムを編集',
     renameHint: 'ランタイムを識別する名前です。保存すると AI 社員一覧にも反映されます。',
     teamHint: '共有プールはすべてのチームが利用できます。チームを変更しても割り当て済みの AI 社員には影響しません。以後このランタイムで作成・切り替えする AI 社員は新しいチームの制限に従います。',

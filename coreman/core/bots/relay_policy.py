@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import RelayServer, User
+from coreman.core.db.models import RelayServer, RuntimeNode, User
 from coreman.core.errors import ApiError
 from coreman.core.relay.models import effective_models, load_catalog, supports_xhigh
 
@@ -24,6 +24,38 @@ def relay_visible(user: User, relay: RelayServer) -> bool:
 def relay_available(relay: RelayServer) -> bool:
     """实例能承接机器人：已启用且属于某个运行时节点（独立中继实例已不再支持）。"""
     return bool(relay.is_active) and relay.runtime_node_id is not None
+
+
+def backend_unavailable_reason(relay: RelayServer, node: RuntimeNode | None) -> str | None:
+    """Only admission is gated; existing bots continue to run unchanged."""
+    if not relay_available(relay) or node is None or not node.is_active:
+        return "disabled"
+    if (node.root_change or {}).get("status") == "pending":
+        return "root_pending"
+    cap = (node.capabilities or {}).get(relay.model_provider, {})
+    if cap.get("installed") is False:
+        return "not_installed"
+    if cap.get("installed") is not True:
+        return "unknown"
+    if cap.get("login") == "required":
+        return "login_required"
+    if cap.get("login") != "ready":
+        return "unknown"
+    return None
+
+
+async def validate_backend_ready(session: AsyncSession, relay: RelayServer) -> None:
+    node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
+    reason = backend_unavailable_reason(relay, node)
+    if reason:
+        message = {
+            "disabled": "目标运行时未启用",
+            "root_pending": "项目主目录修改等待 Runtime 确认",
+            "not_installed": "AI 未安装",
+            "login_required": "AI 未登录",
+            "unknown": "AI 状态未知，请升级 Runtime 并确认登录状态",
+        }[reason]
+        raise ApiError(422, 422, message)
 
 
 async def validate_model_for_relay(

@@ -5,6 +5,8 @@ export interface Capability {
   health: string; detail: string; models: string[]
 }
 export interface RuntimeNode {
+  root_edit_supported?: boolean
+  root_change?: { id: string; path: string; status: 'pending' | 'applied' | 'failed' } | null
   id: string; name: string; hostname: string; username: string
   platform: string; architecture: string; environment: string; workspace_root: string
   version: string; online: boolean; is_active: boolean; draining: boolean
@@ -29,7 +31,7 @@ const base = '/api/admin/runtime-nodes'
 export const runtimeNodes = {
   list: () => call<RuntimeNode[]>(http.get(base)),
   /** team_id 传 null 表示改为公共池；不传表示不改团队。 */
-  patch: (id: string, body: { name?: string; team_id?: string | null; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
+  patch: (id: string, body: { name?: string; workspace_root?: string; team_id?: string | null; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
   remove: (id: string) => call<null>(http.delete(`${base}/${id}`)),
   createLink: (body: InstallInput) => call<InstallLink>(http.post(`${base}/install-links`, body)),
 }

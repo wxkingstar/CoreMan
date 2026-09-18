@@ -33,7 +33,7 @@ from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.env_policy import blocked_env_keys
 from coreman.core.bots.events import notify_bot_changed as notify_bot_changed  # 再导出
 from coreman.core.bots.platform_account import reserve_feishu_app
-from coreman.core.bots.relay_policy import relay_available
+from coreman.core.bots.relay_policy import relay_available, validate_backend_ready
 from coreman.core.bots.relay_policy import relay_visible as relay_visible  # 再导出
 from coreman.core.bots.relay_policy import (  # 再导出
     validate_model_for_relay as validate_model_for_relay,
@@ -258,6 +258,7 @@ async def resolve_relay_for_create(
         user, relay, bot_team_id=bot_team_id, creator_team_id=user.team_id
     ):
         raise ApiError(422, 422, "目标运行时不属于本团队或公共池")
+    await validate_backend_ready(session, relay)
     return relay
 
 

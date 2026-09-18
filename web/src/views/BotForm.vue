@@ -77,11 +77,13 @@ const { confirmDiscard } = useUnsavedChanges(() => !!originalForm && originalFor
 async function cancel() { if (await confirmDiscard()) emit('cancel') }
 const relayList = ref<RelayOut[]>([])
 const runtimeGroups = computed(() => [...new Map(relayList.value.filter(r => r.runtime_node_id).map(r => [r.runtime_node_id!, { id: r.runtime_node_id!, name: r.runtime_name ?? r.name }])).values()])
-const selectedRuntime = computed(() => relayList.value.find(r => r.id === form.relay_server_id)?.runtime_node_id ?? null)
+const chosenRuntime = ref<string | null>(null)
+const selectedRuntime = computed(() => chosenRuntime.value ?? relayList.value.find(r => r.id === form.relay_server_id)?.runtime_node_id ?? null)
 const runtimeBackends = computed(() => relayList.value.filter(r => r.runtime_node_id === selectedRuntime.value))
 async function selectRuntime(id: string | null) {
+  chosenRuntime.value = id
   const providers = relayList.value.filter(r => r.runtime_node_id === id)
-  const picked = providers.find(r => r.effective_models.length) ?? providers[0]
+  const picked = providers.find(r => r.unavailable_reason === null && r.effective_models.length)
   await selectRelay(picked?.id ?? null)
 }
 const catalogRows = ref<CatalogOut[]>([])
@@ -119,6 +121,7 @@ function fail(e: unknown): void {
 
 /** 选 relay：换成该 relay 的有效模型集；当前模型不在里面就落到 relay 的默认模型。 */
 async function selectRelay(id: string | null, keepModel = false): Promise<void> {
+  if (props.mode === 'create' && id && relayList.value.find(r => r.id === id)?.unavailable_reason !== null) return
   form.relay_server_id = id
   const selected = relayList.value.find(r => r.id === id)
   if (!props.bot && selected?.workspace_root) {

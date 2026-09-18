@@ -121,6 +121,196 @@ async def enrollment(client, db_session):
     return link, body, headers
 
 
+async def test_root_update_requires_daemon_ack(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    url = f"/api/admin/runtime-nodes/{body['node_id']}"
+    beat = {
+        "claude": {"installed": True, "login": "ready"},
+        "codex": {},
+        "version": "test",
+        "service_status": "foreground",
+        "root_edit_supported": True,
+    }
+    await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    response = await client.patch(url, json={"workspace_root": "/home/ai/new"})
+    assert response.status_code == 200, response.text
+    node = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    assert node["workspace_root"] == "/home/ai/projects"
+    change = node["root_change"]
+    assert change["status"] == "pending"
+    assert (await client.patch(url, json={"workspace_root": "/home/ai/other"})).status_code == 409
+    result = await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    assert result.json()["data"]["root_change"] == change
+    await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={**beat, "root_change_result": {**change, "status": "applied"}},
+    )
+    node = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    assert node["workspace_root"] == "/home/ai/new"
+    assert node["root_change"]["status"] == "applied"
+
+
+@pytest.mark.parametrize(
+    "cap,reason",
+    [
+        ({}, "not_installed"),
+        ({"installed": False}, "not_installed"),
+        ({"installed": True, "login": "required"}, "login_required"),
+        ({"installed": True, "login": "unknown"}, "unknown"),
+        ({"installed": True, "login": "ready"}, None),
+    ],
+)
+async def test_backend_readiness_controls_creation(client, db_session, monkeypatch, cap, reason):
+    from unittest.mock import AsyncMock
+
+    from coreman.core.bots import workspace_transfer
+    from tests.api.test_bots import _bot_body
+
+    monkeypatch.setattr(
+        workspace_transfer,
+        "call_agent",
+        AsyncMock(return_value={"success": True, "workspace_protocol": 1}),
+    )
+    _, body, headers = await enrollment(client, db_session)
+    await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={"claude": cap, "codex": {}, "version": "test", "service_status": "foreground"},
+    )
+    relay = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]["backends"]
+    claude = next(r for r in relay if r["model_provider"] == "claude")
+    assert claude["unavailable_reason"] == reason
+    response = await client.post(
+        "/api/admin/bots",
+        json={
+            **_bot_body(),
+            "relay_server_id": claude["id"],
+            "working_dir": "/home/ai/projects/test",
+        },
+    )
+    assert response.status_code == (201 if reason is None else 422), response.text
+
+
+async def test_root_update_guards_and_failed_ack(client, db_session):
+    from coreman.core.bots.workspace import reserve_workspace
+    from coreman.core.errors import ApiError
+
+    _, body, headers = await enrollment(client, db_session)
+    url = f"/api/admin/runtime-nodes/{body['node_id']}"
+    # Older runtimes must never report a root as saved without applying it.
+    assert (await client.patch(url, json={"workspace_root": "/home/new"})).status_code == 409
+    for path in ("/", "relative", "/home/../etc", "//home/ai"):
+        assert (await client.patch(url, json={"workspace_root": path})).status_code == 422
+    beat = {
+        "claude": {"installed": True, "login": "ready"},
+        "codex": {},
+        "version": "test",
+        "service_status": "foreground",
+        "root_edit_supported": True,
+    }
+    await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    await client.patch(url, json={"workspace_root": "/home/new"})
+    node = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    change = node["root_change"]
+    with pytest.raises(ApiError, match="等待"):
+        await reserve_workspace(
+            db_session, uuid.UUID(node["backends"][0]["id"]), "/home/ai/projects/new"
+        )
+    await db_session.rollback()
+    # Response from an old request cannot complete the current change.
+    await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={**beat, "root_change_result": {**change, "id": "stale", "status": "applied"}},
+    )
+    node = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    assert node["root_change"]["status"] == "pending"
+    await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={**beat, "root_change_result": {**change, "status": "failed"}},
+    )
+    node = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    assert node["workspace_root"] == "/home/ai/projects"
+    assert node["root_change"]["status"] == "failed"
+    await reserve_workspace(
+        db_session, uuid.UUID(node["backends"][0]["id"]), "/home/ai/projects/new"
+    )
+    await db_session.rollback()
+
+
+async def test_root_change_serializes_with_workspace_allocation(client, db_session):
+    from coreman.core.bots.workspace import reserve_workspace
+    from coreman.core.db.models import Bot
+    from tests.api.test_bots import _bot_body
+
+    _, body, headers = await enrollment(client, db_session)
+    beat = {
+        "claude": {},
+        "codex": {},
+        "version": "test",
+        "service_status": "foreground",
+        "root_edit_supported": True,
+    }
+    await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    created = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
+    relay = await db_session.scalar(
+        select(RelayServer).where(RelayServer.runtime_node_id == uuid.UUID(body["node_id"]))
+    )
+    bot = await db_session.get(Bot, uuid.UUID(created["id"]))
+    await reserve_workspace(db_session, relay.id, "/home/ai/projects/new")
+    editing = asyncio.create_task(
+        client.patch(
+            f"/api/admin/runtime-nodes/{body['node_id']}", json={"workspace_root": "/home/new"}
+        )
+    )
+    try:
+        await asyncio.sleep(0.1)
+        assert not editing.done()
+        bot.relay_server_id = relay.id
+        bot.working_dir = "/home/ai/projects/new"
+        await db_session.commit()
+        response = await asyncio.wait_for(editing, 3)
+        assert response.status_code == 409, response.text
+    finally:
+        await db_session.rollback()
+        if not editing.done():
+            editing.cancel()
+            await asyncio.gather(editing, return_exceptions=True)
+
+
+@pytest.mark.parametrize("incoming", [False, True])
+async def test_root_update_rejects_bound_or_incoming_employees(client, db_session, incoming):
+    from coreman.core.db.models import Bot
+    from tests.api.test_bots import _bot_body
+
+    _, body, headers = await enrollment(client, db_session)
+    beat = {
+        "claude": {},
+        "codex": {},
+        "version": "test",
+        "service_status": "foreground",
+        "root_edit_supported": True,
+    }
+    await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    bot_data = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
+    bot = await db_session.get(Bot, uuid.UUID(bot_data["id"]))
+    relay = await db_session.scalar(
+        select(RelayServer).where(RelayServer.runtime_node_id == uuid.UUID(body["node_id"]))
+    )
+    if incoming:
+        bot.workspace_target_relay_id = relay.id
+    else:
+        bot.relay_server_id = relay.id
+    await db_session.commit()
+    response = await client.patch(
+        f"/api/admin/runtime-nodes/{body['node_id']}", json={"workspace_root": "/home/new"}
+    )
+    assert response.status_code == 409
+    assert "AI 员工" in response.text
+
+
 async def poll_command(client, headers):
     for _ in range(100):
         result = await client.post("/api/runtime/poll", json={"slots": 1}, headers=headers)

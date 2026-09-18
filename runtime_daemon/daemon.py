@@ -431,7 +431,51 @@ class Daemon:
         return self.socket_dir / (provider + ".sock")
 
     def save(self) -> None:
-        atomic_write(self.config_path, json.dumps(self.config, indent=2))
+        atomic_write(self.config_path, json.dumps(self.config, indent=2), durable=True)
+
+    def apply_root_change(self, change: dict | None) -> None:
+        """Durable acknowledgement: retries/restarts never reapply a completed request.
+
+        Called on the event loop without awaits, so poll cannot start work between
+        the idle check and replacing the agents' root. No existing files are moved.
+        """
+        if not change or change.get("status") != "pending":
+            return
+        if self.config.get("root_change_result", {}).get("id") == change.get("id"):
+            return
+        if any(not task.done() for task in self.tasks.values()):
+            return
+        if not self.operations_lock.acquire(blocking=False):
+            return
+        previous = self.config.copy()
+        try:
+            result = {"id": change["id"], "path": change["path"], "status": "applied"}
+            try:
+                root = Path(change["path"])
+                if not root.is_absolute() or root == Path("/") or ".." in root.parts:
+                    raise ValueError("invalid root")
+                if root.resolve() != root:
+                    raise ValueError("symlink root")
+                root.mkdir(parents=True, exist_ok=True)
+                import tempfile
+
+                with tempfile.TemporaryFile(dir=root):
+                    pass
+            except (OSError, ValueError, RuntimeError):
+                result["status"] = "failed"
+            else:
+                self.config["workspace_root"] = str(root)
+            self.config["root_change_result"] = result
+            try:
+                self.save()
+            except OSError:
+                self.config = previous
+                return  # no acknowledgement until the configuration is durable
+            if result["status"] == "applied":
+                for agent in self.agents.values():
+                    agent.root = root
+        finally:
+            self.operations_lock.release()
 
     def prepare(self) -> None:
         self.lock_file = (self.data_dir / "daemon.lock").open("a")
@@ -861,13 +905,16 @@ class Daemon:
             "active_calls": len([task for task in self.tasks.values() if not task.done()]),
             # Read-only in the console, so a rejected Git source can be explained there.
             "git_hosts": self.git_hosts,
+            "root_edit_supported": True,
+            "root_change_result": self.config.get("root_change_result"),
         }
 
     async def heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
             delay = HEARTBEAT_SECONDS
             try:
-                await self.api("/api/runtime/heartbeat", self.heartbeat_body())
+                result = await self.api("/api/runtime/heartbeat", self.heartbeat_body())
+                self.apply_root_change(result.get("root_change"))
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in REJECTED_STATUSES:
                     delay = REJECTED_BACKOFF_MAX
