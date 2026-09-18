@@ -651,7 +651,7 @@ Runtime 启动本身不要求固定的第三方插件。**完整环境的必装�
 3. 在机器人工作目录发起安装，等待持久安装任务成功。
 4. 核验实际目录、依赖与最小功能；安装任务入队不代表成功。
 
-当前 Runtime 的普通技能安装使用 `npx --yes skills add <来源> --skill <名称> -y`；必须确保 npm/npx、代理、Git 权限和 git_hosts 白名单均可用。实际 `skills` 安装器版本目前由 npx 解析，交付时记录解析版本；若组织要求完全固定版本，应由项目实现固定安装器，不能在文档声称已经固定。
+当前 Runtime 的普通技能安装使用 `npx --yes skills add <来源> --skill <名称> -y`；必须确保 npm/npx、代理与 Git 权限均可用；技能来源不受 git_hosts 白名单限制。实际 `skills` 安装器版本目前由 npx 解析，交付时记录解析版本；若组织要求完全固定版本，应由项目实现固定安装器，不能在文档声称已经固定。
 
 手工安装通用技能时，以实例用户在目标项目执行等价命令，来源/技能名使用批准清单：
 
@@ -760,7 +760,7 @@ unset INSTALL_URL
 | path | 安装时捕获的 PATH；新增工具路径时要更新并重启 |
 | claude_path、codex_path | 自定义 CLI 绝对路径；Daemon 为其创建 cli-bin 入口 |
 | proxy | 覆盖四个 HTTP(S) 代理变量；留空使用服务环境 |
-| git_hosts | 允许访问的 Git 主机名列表，不含 scheme/path |
+| git_hosts | 机器人工作区拉取、推送、备份与创建 PR 允许访问的 Git 主机名列表，不含 scheme/path；技能安装不受此限制 |
 | max_concurrent | 本节点同时领取的任务槽位 |
 | install_claude_probe | 可选额度探针，在原 statusLine 命令前串接采集脚本 |
 | release | 安装器生成的发布包目录 |

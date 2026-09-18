@@ -235,6 +235,8 @@ export default {
   "proxy": "HTTP(S) プロキシ",
   "autoDiscover": "自動検出",
   "concurrency": "最大同時タスク数",
+  "gitHosts": "Git ホスト許可リスト",
+  "gitHostsHint": "AI スタッフのワークスペースの pull・push・バックアップ・PR 作成はこれらのホストのみにアクセスできます。ホスト名を入力して Enter で追加します（例: git.example.com）。スキルカタログに登録したソースは対象外です。インストール後はノードの config.json の git_hosts を変更してサービスを再起動します。",
   "claudeProbe": "Claude 使用量プローブを設定",
   "probeHint": "Claude の設定をバックアップし、statusLine の前に使用量の取得処理を追加します。既存のステータスラインはそのまま表示されます。30 分ごとに短い Claude セッションで使用量を更新します。",
   "linkReady": "リンクを作成しました",
