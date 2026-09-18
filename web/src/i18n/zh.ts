@@ -180,8 +180,12 @@ export default {
     publishRemarkDefault: '由 CoreMan 管理台提交',
   },
   runtimeNodes: {
-    editName: '编辑名称',
+    edit: '编辑运行时',
     renameHint: '用于识别运行时，保存后 AI 员工列表中的运行时名称会同步更新。',
+    teamHint: '公共池对所有团队开放。更换团队不影响已绑定的 AI 员工；之后创建或切换到该运行时的 AI 员工按新团队限制。',
+    deleteTitle: '删除运行时',
+    deleteConfirm: '删除后，「{name}」及其 Claude Code、Codex 实例将从平台移除，进行中的调用会被取消，且无法恢复。主机上的 Daemon 不会自动卸载，此后的连接都会被拒绝，请到该主机上执行 --uninstall --purge 卸载。确定删除吗？',
+    deleteInUse: '仍有 {n} 个 AI 员工在使用「{name}」，请先为它们切换运行时再删除。',
     validityHint: '安装链接自生成起 24 小时内有效，仅可安装一个运行时。复制后即可前往目标机器安装。',
     controlProxy: 'CoreMan 连接代理',
     caPem: '私有 CA 证书（PEM）',

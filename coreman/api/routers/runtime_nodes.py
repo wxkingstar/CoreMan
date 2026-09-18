@@ -1,4 +1,4 @@
-"""运行时节点管理端：安装链接、节点列表与启停/排空、会话查看器。
+"""运行时节点管理端：安装链接、节点列表、编辑/启停/排空/删除、会话查看器。
 
 节点自身调用的协议接口（安装脚本、注册、心跳、领取命令、回传响应帧）见 runtime_protocol.py。
 """
@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session
@@ -26,6 +26,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
+    Bot,
     ChatLog,
     RelayServer,
     RuntimeCall,
@@ -114,8 +115,15 @@ class InstallIn(BaseModel):
 
 class NodePatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    # 显式传 null 表示改为公共池；不传表示不改团队。
+    team_id: uuid.UUID | None = None
     is_active: bool | None = None
     draining: bool | None = None
+
+
+def _plain(value: Any) -> Any:
+    """审计 diff 落 JSONB，UUID 转成字符串。"""
+    return str(value) if isinstance(value, uuid.UUID) else value
 
 
 def link_out(link: RuntimeInstallLink) -> dict[str, Any]:
@@ -271,6 +279,7 @@ async def list_nodes(
                 "max_concurrent": n.max_concurrent,
                 # 离线节点的在执行数已过时，不展示。
                 "active_calls": n.active_calls if online(n) else None,
+                "team_id": str(n.team_id) if n.team_id else None,
                 "team_name": names.get(n.team_id) if n.team_id else None,
                 "backends": backends,
             }
@@ -291,15 +300,22 @@ async def patch_node(
     )
     if not node:
         raise not_found("运行时不存在")
-    changes = body.model_dump(exclude_unset=True, exclude_none=True)
-    diff = {k: [getattr(node, k), v] for k, v in changes.items()}
+    changes = {
+        k: v
+        for k, v in body.model_dump(exclude_unset=True).items()
+        if v is not None or k == "team_id"
+    }
+    if changes.get("team_id") and not await session.get(Team, changes["team_id"]):
+        raise ApiError(422, 422, "团队不存在")
+    diff = {k: [_plain(getattr(node, k)), _plain(v)] for k, v in changes.items()}
     for key, value in changes.items():
         setattr(node, key, value)
-    if "is_active" in changes:
+    # 实例的团队与启停跟随节点：创建/切换 AI 员工时按实例的团队做可用范围校验。
+    # 已绑定的 AI 员工不受团队变更影响。
+    relay_values = {k: changes[k] for k in ("team_id", "is_active") if k in changes}
+    if relay_values:
         await session.execute(
-            update(RelayServer)
-            .where(RelayServer.runtime_node_id == node_id)
-            .values(is_active=node.is_active)
+            update(RelayServer).where(RelayServer.runtime_node_id == node_id).values(**relay_values)
         )
     if not node.is_active:
         cancelled = await session.scalars(
@@ -320,6 +336,81 @@ async def patch_node(
         target_type="runtime_node",
         target_id=str(node_id),
         diff=diff,
+        ip=client_ip(request),
+    )
+    await session.commit()
+    return {"code": 0, "data": None}
+
+
+@router.delete("/{node_id}")
+async def delete_node(
+    node_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(MANAGERS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """删除节点及其 Claude/Codex 实例；仍有 AI 员工使用（含迁移目标）时拒绝。
+
+    节点凭证随之失效，主机上的 Daemon 之后只会收到 401，需在主机上卸载。
+    """
+    node = await session.scalar(
+        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update()
+    )
+    if not node:
+        raise not_found("运行时不存在")
+    # 与创建/切换 AI 员工时的工作目录分配共用同一把锁，避免删除期间有员工绑到该节点上。
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"workspace:{node_id}"},
+    )
+    relay_ids = select(RelayServer.id).where(RelayServer.runtime_node_id == node_id)
+    bots = list(
+        await session.scalars(
+            select(Bot.name)
+            .where(
+                or_(
+                    Bot.relay_server_id.in_(relay_ids),
+                    Bot.workspace_target_relay_id.in_(relay_ids),
+                )
+            )
+            .order_by(Bot.name)
+        )
+    )
+    if bots:
+        shown = "、".join(bots[:5]) + (f" 等 {len(bots)} 个" if len(bots) > 5 else "")
+        raise ApiError(409, 409, f"仍有 AI 员工使用该运行时：{shown}。请先为它们切换运行时")
+    cancelled = await session.scalars(
+        update(RuntimeCall)
+        .where(RuntimeCall.node_id == node_id, RuntimeCall.status.not_in(TERMINAL))
+        .values(status="cancelled", request_enc="")
+        .returning(RuntimeCall.id)
+    )
+    for call_id in cancelled:
+        await notify_call(session, call_id, node_id)
+    snapshot = {
+        "name": node.name,
+        "hostname": node.hostname,
+        "username": node.username,
+        "workspace_root": node.workspace_root,
+        "team_id": _plain(node.team_id),
+    }
+    # 安装链接保留作记录，只解除对节点的引用；已用过的链接不能再注册出同一节点。
+    await session.execute(
+        update(RuntimeInstallLink).where(RuntimeInstallLink.node_id == node_id).values(node_id=None)
+    )
+    # 实例上的公告随实例级联删除；调用与分片随节点级联删除。
+    await session.execute(delete(RelayServer).where(RelayServer.runtime_node_id == node_id))
+    await session.execute(delete(RuntimeNode).where(RuntimeNode.id == node_id))
+    # 唤醒该节点挂起的长轮询，让它立即按凭证失效处理。
+    await notify_node(session, node_id)
+    await record_audit(
+        session,
+        action="runtime.delete",
+        actor_id=actor.id,
+        actor_login=actor.login_name,
+        target_type="runtime_node",
+        target_id=str(node_id),
+        diff={k: [v, None] for k, v in snapshot.items()},
         ip=client_ip(request),
     )
     await session.commit()

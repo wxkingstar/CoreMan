@@ -8,10 +8,11 @@ import RuntimeNodesView from '@/views/RuntimeNodesView.vue'
 import { runtimeNodes } from '@/api/runtimeNodes'
 vi.mock('@/api/runtimeNodes', () => ({ runtimeNodes: {
   list: vi.fn().mockResolvedValue([{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
-    capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
-  links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), revokeLink: vi.fn(),
+    team_id: null, team_name: null, capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
+  links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), remove: vi.fn(), revokeLink: vi.fn(),
 } }))
-vi.mock('@/api/admin', () => ({ relays: { probe: vi.fn() }, teams: { list: vi.fn().mockResolvedValue([]) }, catalog: { list: vi.fn().mockResolvedValue([]) } }))
+vi.mock('@/api/admin', () => ({ relays: { probe: vi.fn() }, teams: { list: vi.fn().mockResolvedValue([{ id: 'team1', slug: 'dev', name_zh: '研发', name_ja: null, name_en: null }]) }, catalog: { list: vi.fn().mockResolvedValue([]) } }))
+type EditVm = { editForm: { name: string; team_id: string | null }; editDialog: boolean; saveEdit: () => Promise<void> }
 beforeEach(() => { setActivePinia(createPinia()); vi.clearAllMocks() })
 function mountPage(role: string) {
   useAuthStore().user = { id: 'me', login_name: 'test', display_name: 'Test', role, locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
@@ -25,32 +26,75 @@ it('shows one runtime with separate Claude/Codex login states', async () => {
   expect(wrapper.text()).toContain('已登录')
   expect(wrapper.text()).toContain('待登录')
   expect(wrapper.find('[data-test="install-runtime"]').exists()).toBe(false)
-  expect(wrapper.find('[data-test="rename-runtime"]').exists()).toBe(false)
+  expect(wrapper.find('[data-test="edit-runtime"]').exists()).toBe(false)
+  expect(wrapper.find('[data-test="delete-runtime"]').exists()).toBe(false)
   wrapper.unmount()
 })
 it('edits a runtime name and rejects a blank name', async () => {
   const wrapper = mountPage('platform_admin'); await flushPromises()
-  await wrapper.get('[data-test="rename-runtime"]').trigger('click'); await flushPromises()
-  const vm = wrapper.vm as unknown as { renameName: string; renameDialog: boolean; saveName: () => Promise<void> }
-  expect(vm.renameName).toBe('AI Server')
-  vm.renameName = '   '
-  await vm.saveName()
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  const vm = wrapper.vm as unknown as EditVm
+  expect(vm.editForm.name).toBe('AI Server')
+  vm.editForm.name = '   '
+  await vm.saveEdit()
   expect(runtimeNodes.patch).not.toHaveBeenCalled()
-  vm.renameName = '  研发 Mac  '
-  await vm.saveName()
+  vm.editForm.name = '  研发 Mac  '
+  await vm.saveEdit()
   expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { name: '研发 Mac' })
-  expect(vm.renameDialog).toBe(false)
+  expect(vm.editDialog).toBe(false)
+  wrapper.unmount()
+})
+// 团队决定谁能把 AI 员工建到这台机器上：只提交真正改动的字段，清空即改回公共池。
+it('moves a runtime between a team and the shared pool', async () => {
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  const vm = wrapper.vm as unknown as EditVm
+  expect(vm.editForm.team_id).toBe(null)
+  await vm.saveEdit()  // 什么都没改：不发请求，直接关闭。
+  expect(runtimeNodes.patch).not.toHaveBeenCalled()
+  expect(vm.editDialog).toBe(false)
+  vm.editForm.team_id = 'team1'
+  await vm.saveEdit(); await flushPromises()
+  expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { team_id: 'team1' })
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: 'team1', team_name: '研发', capabilities: {}, backends: [] }] as never)
+  await (wrapper.vm as unknown as { refresh: (silent?: boolean) => Promise<void> }).refresh(); await flushPromises()
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  expect(vm.editForm.team_id).toBe('team1')
+  vm.editForm.team_id = ''  // el-select 清空
+  await vm.saveEdit()
+  expect(runtimeNodes.patch).toHaveBeenLastCalledWith('node1', { team_id: null })
   wrapper.unmount()
 })
 it('keeps the entered name when saving fails', async () => {
   vi.mocked(runtimeNodes.patch).mockRejectedValueOnce(new Error('保存失败'))
   const wrapper = mountPage('platform_admin'); await flushPromises()
-  await wrapper.get('[data-test="rename-runtime"]').trigger('click'); await flushPromises()
-  const vm = wrapper.vm as unknown as { renameName: string; renameDialog: boolean; saveName: () => Promise<void> }
-  vm.renameName = '研发 Mac'
-  await vm.saveName()
-  expect(vm.renameDialog).toBe(true)
-  expect(vm.renameName).toBe('研发 Mac')
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  const vm = wrapper.vm as unknown as EditVm
+  vm.editForm.name = '研发 Mac'
+  await vm.saveEdit()
+  expect(vm.editDialog).toBe(true)
+  expect(vm.editForm.name).toBe('研发 Mac')
+  wrapper.unmount()
+})
+// 删除不可恢复，且会让主机上的 Daemon 失效：绑定中的员工先拦下来，其余必须确认。
+it('blocks deleting a runtime that still has bots and confirms otherwise', async () => {
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+  const backend = { id: 'relay1', model_provider: 'claude', bot_count: 2, effective_models: [], health_status: 'healthy' }
+  const busy = { id: 'node1', name: 'AI Server', team_id: null, team_name: null, online: true, is_active: true, draining: false, capabilities: {}, backends: [backend] }
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([busy] as never)
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="delete-runtime"]').trigger('click'); await flushPromises()
+  expect(confirm).not.toHaveBeenCalled()
+  expect(runtimeNodes.remove).not.toHaveBeenCalled()
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ ...busy, backends: [{ ...backend, bot_count: 0 }] }] as never)
+  await (wrapper.vm as unknown as { refresh: (silent?: boolean) => Promise<void> }).refresh(); await flushPromises()
+  await wrapper.get('[data-test="delete-runtime"]').trigger('click'); await flushPromises()
+  expect(String(confirm.mock.calls[0][0])).toContain('「AI Server」')
+  expect(runtimeNodes.remove).not.toHaveBeenCalled()
+  confirm.mockResolvedValueOnce('confirm' as never)
+  await wrapper.get('[data-test="delete-runtime"]').trigger('click'); await flushPromises()
+  expect(runtimeNodes.remove).toHaveBeenCalledWith('node1')
+  confirm.mockRestore()
   wrapper.unmount()
 })
 it('requires the project root before creating a one-time install command', async () => {

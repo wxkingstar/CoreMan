@@ -8,7 +8,7 @@ export interface RuntimeNode {
   id: string; name: string; hostname: string; username: string
   platform: string; architecture: string; environment: string; workspace_root: string
   version: string; online: boolean; is_active: boolean; draining: boolean
-  heartbeat_at: string | null; service_status: string; team_name: string | null
+  heartbeat_at: string | null; service_status: string; team_id: string | null; team_name: string | null
   /** 节点并发上限与当前进行中的调用数；Daemon 未上报时为 null。 */
   max_concurrent: number | null; active_calls: number | null
   capabilities: Record<string, Capability>; backends: RelayOut[]
@@ -26,6 +26,8 @@ export interface InstallInput {
 const base = '/api/admin/runtime-nodes'
 export const runtimeNodes = {
   list: () => call<RuntimeNode[]>(http.get(base)),
-  patch: (id: string, body: { name?: string; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
+  /** team_id 传 null 表示改为公共池；不传表示不改团队。 */
+  patch: (id: string, body: { name?: string; team_id?: string | null; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
+  remove: (id: string) => call<null>(http.delete(`${base}/${id}`)),
   createLink: (body: InstallInput) => call<InstallLink>(http.post(`${base}/install-links`, body)),
 }

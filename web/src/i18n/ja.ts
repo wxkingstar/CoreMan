@@ -180,8 +180,12 @@ export default {
     publishRemarkDefault: 'CoreMan 管理画面から申請',
   },
   runtimeNodes: {
-    editName: '名前を編集',
+    edit: 'ランタイムを編集',
     renameHint: 'ランタイムを識別する名前です。保存すると AI 社員一覧にも反映されます。',
+    teamHint: '共有プールはすべてのチームが利用できます。チームを変更しても割り当て済みの AI 社員には影響しません。以後このランタイムで作成・切り替えする AI 社員は新しいチームの制限に従います。',
+    deleteTitle: 'ランタイムを削除',
+    deleteConfirm: '削除すると「{name}」とその Claude Code・Codex インスタンスがプラットフォームから削除され、実行中の呼び出しはキャンセルされます。元に戻せません。ホスト上の Daemon は自動でアンインストールされず、以後の接続はすべて拒否されます。そのホストで --uninstall --purge を実行してください。削除しますか？',
+    deleteInUse: '「{name}」を使用中の AI 社員が {n} 件あります。先にランタイムを切り替えてから削除してください。',
     validityHint: 'リンクは発行から 24 時間有効で、1 つのランタイムにのみ使用できます。コピーして対象マシンで実行してください。',
     controlProxy: 'CoreMan 接続プロキシ',
     caPem: 'プライベート CA 証明書（PEM）',

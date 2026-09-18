@@ -431,3 +431,102 @@ async def test_private_runtime_viewer_blocks_admin_and_bot_token(client, db_sess
         assert (await client.get(url + suffix)).status_code == 404
     unknown = f"/api/admin/runtime-nodes/{body['node_id']}/claude/session/{uuid.uuid4()}"
     assert (await client.get(unknown)).status_code == 404
+
+
+async def test_team_change_moves_node_and_its_instances(client, db_session):
+    from coreman.core.db.models import Team
+
+    _, body, _ = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    team = Team(slug=f"t{uuid.uuid4().hex[:6]}", name_zh="研发")
+    db_session.add(team)
+    await db_session.commit()
+    team_id = team.id
+    url = f"/api/admin/runtime-nodes/{node_id}"
+
+    async def teams():
+        db_session.expire_all()
+        node = await db_session.get(RuntimeNode, node_id)
+        relays = await db_session.scalars(
+            select(RelayServer.team_id).where(RelayServer.runtime_node_id == node_id)
+        )
+        return node.team_id, set(relays)
+
+    assert (await client.patch(url, json={"team_id": str(team_id)})).status_code == 200
+    assert await teams() == (team_id, {team_id})
+    row = (await client.get("/api/admin/runtime-nodes")).json()["data"][0]
+    assert (row["team_id"], row["team_name"]) == (str(team_id), "研发")
+    # 只改名称不会动团队；显式传 null 改回公共池。
+    assert (await client.patch(url, json={"name": "研发机"})).status_code == 200
+    assert await teams() == (team_id, {team_id})
+    assert (await client.patch(url, json={"team_id": None})).status_code == 200
+    assert await teams() == (None, {None})
+    missing = await client.patch(url, json={"team_id": str(uuid.uuid4())})
+    assert missing.status_code == 422
+    assert await teams() == (None, {None})
+
+
+async def test_delete_runtime_requires_unbound_bots_and_revokes_node(client, db_session):
+    from coreman.core.db.models import AuditLog, Bot
+    from tests.api.test_bots import _bot_body
+
+    link, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    relay_ids = list(
+        await db_session.scalars(
+            select(RelayServer.id).where(RelayServer.runtime_node_id == node_id)
+        )
+    )
+    created = await client.post("/api/admin/bots", json=_bot_body())
+    assert created.status_code == 201, created.text
+    bot = await db_session.get(Bot, uuid.UUID(created.json()["data"]["id"]))
+    bot.relay_server_id = relay_ids[0]
+    await db_session.commit()
+    url = f"/api/admin/runtime-nodes/{node_id}"
+
+    blocked = await client.delete(url)
+    assert blocked.status_code == 409
+    assert "销售助手" in blocked.json()["message"]
+    # 正在迁移到该节点的 AI 员工同样占用它。
+    bot.relay_server_id, bot.workspace_target_relay_id = None, relay_ids[1]
+    await db_session.commit()
+    assert (await client.delete(url)).status_code == 409
+    bot.workspace_target_relay_id = None
+    await db_session.commit()
+
+    call = RuntimeCall(
+        node_id=node_id,
+        provider="claude",
+        request_enc="x",
+        deadline=now() + timedelta(minutes=5),
+        consumer_at=now(),
+    )
+    db_session.add(call)
+    await db_session.commit()
+    call_id = call.id
+    deleted = await client.delete(url)
+    assert deleted.status_code == 200, deleted.text
+    db_session.expire_all()
+    assert await db_session.get(RuntimeNode, node_id) is None
+    assert await db_session.get(RuntimeCall, call_id) is None
+    assert not list(
+        await db_session.scalars(select(RelayServer).where(RelayServer.id.in_(relay_ids)))
+    )
+    stored = await db_session.get(RuntimeInstallLink, uuid.UUID(link["id"]))
+    assert stored.node_id is None and stored.used_at is not None
+    audit = await db_session.scalar(select(AuditLog).where(AuditLog.action == "runtime.delete"))
+    assert audit.target_id == str(node_id)
+    assert audit.diff["name"] == ["Test runtime", None]
+    assert (await client.get("/api/admin/runtime-nodes")).json()["data"] == []
+    # 节点凭证失效，也不能凭旧安装链接重新注册出同一节点。
+    assert (await client.post("/api/runtime/poll", headers=headers, json={})).status_code == 401
+    assert (await client.post("/api/runtime/enroll", json=body)).status_code == 409
+    assert (await client.delete(url)).status_code == 404
+
+
+async def test_members_cannot_edit_or_delete_runtime(client, db_session):
+    _, body, _ = await enrollment(client, db_session)
+    await login_as(client, db_session, role="member")
+    url = f"/api/admin/runtime-nodes/{body['node_id']}"
+    assert (await client.patch(url, json={"team_id": None})).status_code == 403
+    assert (await client.delete(url)).status_code == 403

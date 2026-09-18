@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `coreman-runtime --register` registers the service again from the identity that `--uninstall` kept.
 - Skill managers can enable or disable a skill from the status column of the skill catalog without opening the editor (`PATCH /api/admin/skills/{id}`). Like a full save, a change of status bumps the skill revision, so pending approvals and queued installs for that skill must be requested again.
 - A Feishu employee who scans the sign-in QR code before the contacts have been synced no longer gets "No matching account found". CoreMan asks the Feishu app with contact sync (the sign-in app itself when it has that capability) for just that member and signs them in. Only members within the app's contact scope are added; departments are not created and nobody is disabled, so a full sync is still needed for new departments and departures. The merge is audited as `user.login_sync`.
+- Runtime management can now change a node's team (its Claude Code and Codex instances follow; employees already bound are unaffected) and delete a node together with its instances. Deleting is refused while AI employees are bound to it or are being moved onto it; it cancels calls in progress, keeps the installation link as a record and invalidates the node credential, so the Daemon on that host must be uninstalled separately.
 
 ### Changed
 

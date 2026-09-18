@@ -22,28 +22,34 @@ const tab = ref('nodes')
 const loading = ref(false)
 const creating = ref(false)
 const dialog = ref(false)
-const renameDialog = ref(false)
-const renameId = ref('')
-const renameName = ref('')
-const renaming = ref(false)
-function openRename(node: RuntimeNode) {
-  renameId.value = node.id
-  renameName.value = node.name
-  renameDialog.value = true
+const editDialog = ref(false)
+const editId = ref('')
+const editForm = reactive({ name: '', team_id: null as string | null })
+const saving = ref(false)
+function openEdit(node: RuntimeNode) {
+  editId.value = node.id
+  editForm.name = node.name
+  editForm.team_id = node.team_id
+  editDialog.value = true
 }
-async function saveName() {
-  const name = renameName.value.trim()
-  if (!name || name.length > 100 || renaming.value) return
-  renaming.value = true
+/** 只提交有变化的字段；团队清空即改回公共池（team_id: null）。 */
+async function saveEdit() {
+  const name = editForm.name.trim()
+  if (!name || name.length > 100 || saving.value) return
+  const node = nodes.value.find(n => n.id === editId.value)
+  const teamId = editForm.team_id || null
+  const body: { name?: string; team_id?: string | null } = {}
+  if (name !== node?.name) body.name = name
+  if (teamId !== (node?.team_id ?? null)) body.team_id = teamId
+  if (!Object.keys(body).length) { editDialog.value = false; return }
+  saving.value = true
   try {
-    await runtimeNodes.patch(renameId.value, { name })
-    const node = nodes.value.find(n => n.id === renameId.value)
-    if (node) node.name = name
-    renameDialog.value = false
+    await runtimeNodes.patch(editId.value, body)
+    editDialog.value = false
     ElMessage.success(t('common.saved'))
     await refresh()
   } catch (error) { ElMessage.error(errorMessage(error)) }
-  finally { renaming.value = false }
+  finally { saving.value = false }
 }
 const generated = ref<InstallLink | null>(null)
 const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null,
@@ -82,9 +88,9 @@ async function update(node: RuntimeNode, body: { is_active?: boolean; draining?:
   catch (error) { ElMessage.error(errorMessage(error)) }
   finally { pendingId.value = '' }
 }
-async function confirmed(message: string, title: string): Promise<boolean> {
+async function confirmed(message: string, title: string, danger = false): Promise<boolean> {
   try {
-    await ElMessageBox.confirm(message, title, { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') })
+    await ElMessageBox.confirm(message, title, { type: 'warning', confirmButtonText: danger ? t('common.delete') : t('common.confirm'), cancelButtonText: t('common.cancel'), confirmButtonClass: danger ? 'el-button--danger' : undefined })
     return true
   } catch {
     return false
@@ -99,6 +105,21 @@ async function toggleActive(node: RuntimeNode) {
 async function toggleDrain(node: RuntimeNode) {
   if (!node.draining && !(await confirmed(t('runtimeNodes.drainConfirm', { name: node.name }), t('runtimeNodes.drain')))) return
   await update(node, { draining: !node.draining })
+}
+/** 仍有 AI 员工绑定时直接提示先切换运行时（服务端还会核对迁移中的员工）；删除不可恢复，必须确认。 */
+async function remove(node: RuntimeNode) {
+  if (pendingId.value) return
+  const inUse = node.backends.reduce((sum, backend) => sum + backend.bot_count, 0)
+  if (inUse) { ElMessage.warning(t('runtimeNodes.deleteInUse', { n: inUse, name: node.name })); return }
+  if (!(await confirmed(t('runtimeNodes.deleteConfirm', { name: node.name }), t('runtimeNodes.deleteTitle'), true))) return
+  pendingId.value = node.id
+  try {
+    await runtimeNodes.remove(node.id)
+    nodes.value = nodes.value.filter(n => n.id !== node.id)
+    ElMessage.success(t('common.deleted'))
+    await refresh()
+  } catch (error) { ElMessage.error(errorMessage(error)) }
+  finally { pendingId.value = '' }
 }
 async function create() {
   if (!form.workspace_root.startsWith('/') || form.workspace_root === '/') {
@@ -283,30 +304,43 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             <el-table-column
               v-if="canManage"
               :label="t('common.actions')"
-              min-width="250"
+              min-width="290"
             >
               <template #default="{ row }: { row: RuntimeNode }">
-                <el-button
-                  text
-                  data-test="rename-runtime"
-                  @click="openRename(row)"
-                >
-                  {{ t('runtimeNodes.editName') }}
-                </el-button>
-                <el-switch
-                  :model-value="row.is_active"
-                  :aria-label="t('runtimeNodes.enable')"
-                  :loading="pendingId === row.id"
-                  data-test="toggle-runtime"
-                  @change="toggleActive(row)"
-                /><el-button
-                  text
-                  :disabled="pendingId === row.id"
-                  data-test="drain-runtime"
-                  @click="toggleDrain(row)"
-                >
-                  {{ row.draining ? t('runtimeNodes.resume') : t('runtimeNodes.drain') }}
-                </el-button>
+                <div class="row-actions">
+                  <el-button
+                    text
+                    type="primary"
+                    data-test="edit-runtime"
+                    @click="openEdit(row)"
+                  >
+                    {{ t('common.edit') }}
+                  </el-button>
+                  <el-switch
+                    :model-value="row.is_active"
+                    :aria-label="t('runtimeNodes.enable')"
+                    :loading="pendingId === row.id"
+                    data-test="toggle-runtime"
+                    @change="toggleActive(row)"
+                  />
+                  <el-button
+                    text
+                    :disabled="pendingId === row.id"
+                    data-test="drain-runtime"
+                    @click="toggleDrain(row)"
+                  >
+                    {{ row.draining ? t('runtimeNodes.resume') : t('runtimeNodes.drain') }}
+                  </el-button>
+                  <el-button
+                    text
+                    type="danger"
+                    :disabled="pendingId === row.id"
+                    data-test="delete-runtime"
+                    @click="remove(row)"
+                  >
+                    {{ t('common.delete') }}
+                  </el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -320,47 +354,66 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       </el-tab-pane>
     </el-tabs>
     <el-dialog
-      v-model="renameDialog"
-      :title="t('runtimeNodes.editName')"
+      v-model="editDialog"
+      :title="t('runtimeNodes.edit')"
       width="min(460px, 95vw)"
       :close-on-click-modal="false"
-      :close-on-press-escape="!renaming"
-      :show-close="!renaming"
+      :close-on-press-escape="!saving"
+      :show-close="!saving"
       destroy-on-close
     >
       <el-form
         label-position="top"
-        @submit.prevent="saveName"
+        @submit.prevent="saveEdit"
       >
         <el-form-item
           :label="t('runtimeNodes.name')"
           required
         >
           <el-input
-            v-model="renameName"
+            v-model="editForm.name"
             data-test="runtime-name"
             maxlength="100"
             show-word-limit
-            :disabled="renaming"
+            :disabled="saving"
           />
+          <p class="muted field-hint">
+            {{ t('runtimeNodes.renameHint') }}
+          </p>
         </el-form-item>
-        <p class="muted">
-          {{ t('runtimeNodes.renameHint') }}
-        </p>
+        <el-form-item :label="t('runtimeNodes.team')">
+          <el-select
+            v-model="editForm.team_id"
+            clearable
+            :placeholder="t('bots.publicPool')"
+            :disabled="saving"
+            data-test="runtime-team"
+          >
+            <el-option
+              v-for="team in teamList"
+              :key="team.id"
+              :value="team.id"
+              :label="team.name_zh"
+            />
+          </el-select>
+          <p class="muted field-hint">
+            {{ t('runtimeNodes.teamHint') }}
+          </p>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button
-          :disabled="renaming"
-          @click="renameDialog = false"
+          :disabled="saving"
+          @click="editDialog = false"
         >
           {{ t('common.cancel') }}
         </el-button>
         <el-button
           type="primary"
-          data-test="save-runtime-name"
-          :loading="renaming"
-          :disabled="!renameName.trim() || renameName.trim().length > 100"
-          @click="saveName"
+          data-test="save-runtime"
+          :loading="saving"
+          :disabled="!editForm.name.trim() || editForm.name.trim().length > 100"
+          @click="saveEdit"
         >
           {{ t('common.save') }}
         </el-button>
@@ -422,7 +475,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   v-model="form.options.proxy"
                   placeholder="http://127.0.0.1:7890"
                 />
-                <p class="muted proxy-hint">
+                <p class="muted field-hint">
                   {{ t('runtimeNodes.proxyHint') }}
                 </p>
               </el-form-item>
@@ -431,7 +484,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   v-model="form.options.control_proxy"
                   placeholder="http://127.0.0.1:7890"
                 />
-                <p class="muted proxy-hint">
+                <p class="muted field-hint">
                   {{ t('runtimeNodes.controlProxyHint') }}
                 </p>
               </el-form-item>
@@ -446,7 +499,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   :rows="4"
                   placeholder="-----BEGIN CERTIFICATE-----"
                 />
-                <p class="muted proxy-hint">
+                <p class="muted field-hint">
                   {{ t('runtimeNodes.caPemHint') }}
                 </p>
               </el-form-item>
@@ -545,8 +598,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .page-header h2 { margin: 0 0 8px; }
 .toolbar { display: flex; gap: 12px; margin: 12px 0 20px; max-width: 520px; }
 .muted, small { color: var(--el-text-color-secondary); font-size: 12px; }
-.proxy-hint { width: 100%; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
+.field-hint { width: 100%; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }
+.row-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }
+.row-actions .el-button + .el-button { margin-left: 0; }
 .node-detail { padding: 10px 28px 24px; }
 .backend-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--el-border-color-lighter); }
 .backend-models { width: 100%; overflow-wrap: anywhere; font-size: 13px; }

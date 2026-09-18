@@ -171,7 +171,11 @@ const en = {
     publishRemarkDefault: 'Submitted from the CoreMan console',
   },
   runtimeNodes: {
-    editName: 'Edit name', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
+    edit: 'Edit runtime', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
+    teamHint: 'The shared pool is open to every team. Changing the team does not affect AI employees already bound; AI employees created on or switched to this runtime later follow the new team.',
+    deleteTitle: 'Delete runtime',
+    deleteConfirm: 'Deleting removes "{name}" and its Claude Code and Codex instances from the platform and cancels calls in progress. This cannot be undone. The Daemon on the host is not uninstalled and all its future connections will be refused; run --uninstall --purge on that host. Delete it?',
+    deleteInUse: '{n} AI employees still use "{name}". Switch their runtime before deleting it.',
     validityHint: 'The installation link is valid for 24 hours and can install one runtime. Copy it and run it on the target machine.',
     controlProxy: 'CoreMan connection proxy', caPem: 'Private CA certificate (PEM)', caPemHint: 'Required when the HTTPS address uses a self-signed or private CA certificate on an internal network. When set, the first download command must pass the certificate file path to curl --cacert.', caPemInvalid: 'Paste a PEM certificate that includes -----BEGIN CERTIFICATE----- and -----END CERTIFICATE-----.', caPemTooLarge: 'The certificate must not exceed 64 KB.', environment: 'Installation environment',
     sessionService: 'User service started. An administrator must enable linger to start it at boot without a login.',
