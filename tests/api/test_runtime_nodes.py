@@ -764,11 +764,14 @@ async def test_old_runtime_keeps_private_sessions_for_admins_only(app, client, d
 
 
 @pytest.mark.parametrize("role", ["member", "platform_admin"])
-async def test_personal_session_needs_link_bound_to_context_epoch(app, client, db_session, role):
+async def test_private_chat_with_feishu_tools_is_an_ordinary_owner_session(
+    app, client, db_session, role
+):
     from coreman.core.db.models import FeishuPersonalGrant, Task
     from tests.api.conftest import login_existing
 
     node_id, mine, owner, row, url = await _private_session(client, db_session)
+    # Tasks from the former replacement mode still carry this marker; it no longer matters.
     task = Task(
         bot_id=mine.id,
         kind="chat",
@@ -791,22 +794,13 @@ async def test_personal_session_needs_link_bound_to_context_epoch(app, client, d
     owner.role = role
     await db_session.commit()
     await login_existing(client, db_session, owner)
-    # 飞书资料模式：本人（哪怕是管理员）也只能凭 24 小时内的链接看。
-    denied = await client.get(url)
-    assert denied.status_code == 403 and "飞书资料模式" in denied.text
-    link = _link(
-        app, node_id, row.relay_session_id, owner.id, mine.id, context_epoch=grant.context_epoch
-    )
+    assert (await client.get(url)).status_code == 200
+    link = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
     assert (await client.get(f"{url}?t={link}")).status_code == 200
-    plain = _link(app, node_id, row.relay_session_id, owner.id, mine.id)
-    assert (await client.get(f"{url}?t={plain}")).status_code == 200
-    # 撤销、切换模式、重新授权都会换上下文版本。
-    grant.context_epoch = uuid.uuid4()
-    await db_session.commit()
-    assert (await client.get(f"{url}?t={link}")).status_code == 403
+    # Revoking stops later reads; it does not hide the owner's existing conversation.
     await db_session.delete(grant)
     await db_session.commit()
-    assert (await client.get(f"{url}?t={link}")).status_code == 403
+    assert (await client.get(url)).status_code == 200
 
 
 async def test_session_link_sends_signed_out_viewer_to_login(app, client, db_session):
@@ -918,3 +912,31 @@ async def test_members_cannot_edit_or_delete_runtime(client, db_session):
     url = f"/api/admin/runtime-nodes/{body['node_id']}"
     assert (await client.patch(url, json={"team_id": None})).status_code == 403
     assert (await client.delete(url)).status_code == 403
+
+
+async def test_private_scheduled_run_session_is_owner_only(app, client, db_session):
+    from coreman.core.db.models import CronRun, Task
+    from tests.api.conftest import login_existing
+
+    _, mine, owner, row, url = await _private_session(client, db_session)
+    task = Task(bot_id=mine.id, kind="cron_run", payload={}, status="succeeded")
+    db_session.add(task)
+    await db_session.flush()
+    db_session.add(
+        CronRun(
+            bot_id=mine.id,
+            job_name="日报",
+            task_id=task.id,
+            executed_by=owner.id,
+            status="success",
+            prompt="总结我的会议",
+            started_at=row.request_at,
+            private=True,
+        )
+    )
+    row.platform, row.chat_type, row.task_id = "wecom", "cron", task.id
+    await db_session.commit()
+    # 以本人身份运行过的定时任务：别的管理员不能按角色代看。
+    assert (await client.get(url)).status_code == 404
+    await login_existing(client, db_session, owner)
+    assert (await client.get(url)).status_code == 200

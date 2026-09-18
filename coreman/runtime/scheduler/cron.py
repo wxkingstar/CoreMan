@@ -59,6 +59,10 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                         from coreman.core.reminders import require_fixed
 
                         await require_fixed(session, job, bot, user)
+                    elif job.execution_mode == "personal_ai":
+                        from coreman.core.personal_schedules import require_personal
+
+                        await require_personal(session, job, bot, user)
                     else:
                         await require_operator(session, bot, user)
                 except ApiError:
@@ -77,6 +81,7 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                             cron_job_id=job.id,
                             bot_id=job.bot_id,
                             job_name=job.name,
+                            private=job.execution_mode == "personal_ai",
                             status="skipped",
                             prompt=job.prompt,
                             started_at=now,
@@ -98,6 +103,7 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                             cron_job_id=job.id,
                             bot_id=job.bot_id,
                             job_name=job.name,
+                            private=job.execution_mode == "personal_ai",
                             status="skipped",
                             prompt=job.prompt,
                             started_at=now,
@@ -135,6 +141,7 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                         cron_job_id=job.id,
                         bot_id=job.bot_id,
                         job_name=job.name,
+                        private=job.execution_mode == "personal_ai",
                         status="skipped",
                         prompt=job.prompt,
                         started_at=now,
@@ -167,6 +174,7 @@ async def run_tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> 
                         cron_job_id=job.id,
                         bot_id=job.bot_id,
                         job_name=job.name,
+                        private=job.execution_mode == "personal_ai",
                         task_id=task.id,
                         executed_by=actor_id,
                         trigger_kind="manual" if force else "scheduled",

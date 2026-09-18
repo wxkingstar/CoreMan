@@ -48,9 +48,9 @@ class ConverseStage(ChatStageBase):
         pending: asyncio.Task[SseEvent | None] | None = None
         silent_since = ctx.clock()
         guard_checked = silent_since - 1
+        # 飞书个人工具叠加在普通助手上，不受协作轮次的工具预算与逐秒复核约束。
         guarded = bool(
             pre.request.env_vars.get("COREMAN_COLLABORATION_TOKEN")
-            or pre.request.env_vars.get("COREMAN_FEISHU_PERSONAL_TOKEN")
             or ctx.task.payload.get("collaboration_id")
         )
         try:

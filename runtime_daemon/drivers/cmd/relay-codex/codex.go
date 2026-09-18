@@ -160,9 +160,11 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 			"-c", "mcp_servers.coreman_collaboration.enabled=false")
 	}
 
+	// Feishu personal tools mount on top of everything above, like the
+	// collaboration server; the thread, memories and sandbox stay as usual.
 	if openai.FeishuPersonalEnabled(req.EnvVars) {
 		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_FEISHU_PERSONAL_URL"]))
-		out.Args = append(out.Args, "-c", "mcp_servers.coreman_feishu_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_feishu_personal.bearer_token_env_var="COREMAN_FEISHU_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=true", "--ephemeral", "--disable", "memories")
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_feishu_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_feishu_personal.bearer_token_env_var="COREMAN_FEISHU_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_feishu_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=false")
 	}
@@ -362,13 +364,16 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 		// An oversized line must not end the scan early: the pipe would stop
 		// draining and a child blocked writing stderr never exits.
 		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		private := openai.FeishuPersonalEnabled(envExtra)
 		for s.Scan() {
 			line := openai.RedactCollaborationToken(s.Text(), envExtra)
-			if openai.FeishuPersonalEnabled(envExtra) {
+			// The in-memory tail keeps the real text so a personal turn can
+			// still spot a missing rollout; only the log gets the preview.
+			stderr.add(line)
+			if private {
 				line = openai.PrivateContentPreview(line, 0, true)
 			}
 			log.Printf("codex stderr: %s", line)
-			stderr.add(line)
 		}
 		if err := s.Err(); err != nil {
 			log.Printf("codex stderr scanner error: %v", err)

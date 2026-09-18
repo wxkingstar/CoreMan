@@ -1,4 +1,4 @@
-"""Private task MCP and interactive management of the caller's Feishu grants."""
+"""Owner-scoped personal MCP and interactive management of the caller's Feishu grants."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError
 from coreman.api.security import verify_csrf
+from coreman.core import personal_schedules as schedules
 from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
 from coreman.core.feishu_personal import policy, service, tools
 
@@ -46,37 +47,43 @@ def _constant(_: str) -> None:
 
 @router.post("/api/runtime/feishu-personal/mcp")
 async def mcp(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
+    """One owner's personal tools for one task: a private chat turn or an owner-only job.
+
+    Feishu tools are further fenced by the grant generation the capability was issued for;
+    a revoked, reselected or re-bound grant makes them report `authorization_changed` while
+    the owner's schedule tools keep working for the rest of the turn.
+    """
     if "origin" in request.headers:
         raise ApiError(403, 403, "Browser origins are not supported")
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer ") or len(auth) > 4096:
         raise ApiError(401, 401, "Invalid personal capability")
+    cipher = request.app.state.cipher
     try:
-        task_id, actor, epoch, base_session_id = policy.read_capability(
-            request.app.state.cipher, auth[7:]
-        )
+        capability = policy.read_capability(cipher, auth[7:])
     except (ValueError, KeyError, TypeError, OverflowError):
         raise ApiError(401, 401, "Invalid personal capability") from None
     try:
-        scope = await policy.task_scope(session, task_id, actor)
+        scope = await policy.capability_scope(session, capability.task_id, capability.actor)
     except (ValueError, KeyError, TypeError):
-        raise ApiError(403, 403, "Verified private human task required") from None
-    # Session then grant is also the worker opening/mode-switch lock order. Hold
-    # both through dispatch/commit: reset or mode exit cannot acknowledge while
-    # an older personal operation is still using its capability.
-    base = await session.get(
-        ChatSession, (scope.bot.id, scope.task.session_key), with_for_update=True
-    )
-    if base is None or base.relay_session_id != base_session_id:
-        raise ApiError(403, 403, "Private conversation changed")
+        raise ApiError(403, 403, "Verified private owner task required") from None
+    if scope.scheduled != (capability.session_id is None):
+        raise ApiError(403, 403, "Verified private owner task required")
+    if not scope.scheduled:
+        # Session then grant is also the worker opening lock order. Hold both through
+        # dispatch/commit: a reset cannot acknowledge while an older operation still runs.
+        base = await session.get(
+            ChatSession, (scope.bot.id, scope.task.session_key), with_for_update=True
+        )
+        if base is None or base.relay_session_id != capability.session_id:
+            raise ApiError(403, 403, "Private conversation changed")
     try:
-        grant, _ = await service._row(session, request.app.state.cipher, scope)
+        grant = await service.existing_row(session, cipher, scope)
         # Revalidate task cancellation after waiting for competing transactions.
-        await policy.task_scope(session, task_id, actor)
+        await policy.capability_scope(session, capability.task_id, capability.actor)
     except (ValueError, service.PersonalError):
         raise ApiError(403, 403, "Private authorization changed") from None
-    if grant.context_epoch != epoch or grant.assistant_mode != "personal":
-        raise ApiError(403, 403, "Private authorization changed")
+    current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
@@ -118,20 +125,28 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         result = {
             "protocolVersion": version,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "coreman-feishu-personal", "version": "1.0"},
+            "serverInfo": {"name": "coreman-feishu-personal", "version": "2.0"},
         }
     elif method in ("ping", "tools/list"):
         if params:
             return _error(rid, -32602, "Invalid params")
+        live = grant if current else None
+        connected = bool(live and live.status == "connected" and live.token_enc)
+        reads = connected or bool(live and live.status == "pending" and not scope.scheduled)
         allow_send = bool(
-            grant
-            and grant.status == "connected"
-            and grant.authorization_level == "all"
+            connected
+            and live
+            and live.authorization_level == "all"
             and {"im:message", "im:message.send_as_user"}.issubset(
-                set(grant.scopes or []) & set(grant.requested_scopes or [])
+                set(live.scopes or []) & set(live.requested_scopes or [])
             )
         )
-        result = {} if method == "ping" else {"tools": tools.definitions(allow_send=allow_send)}
+        definitions = tools.definitions(
+            allow_send=allow_send, auth=current and not scope.scheduled, reads=reads
+        )
+        if not scope.scheduled:
+            definitions += schedules.definitions()
+        result = {} if method == "ping" else {"tools": definitions}
     elif method == "tools/call":
         if (
             set(params) - {"name", "arguments"}
@@ -139,14 +154,14 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             or not isinstance(params.get("arguments", {}), dict)
         ):
             return _error(rid, -32602, "Invalid params")
+        name, arguments = params["name"], params.get("arguments", {})
         try:
-            value = await tools.dispatch(
-                session,
-                request.app.state.cipher,
-                scope,
-                params["name"],
-                params.get("arguments", {}),
-            )
+            if name in schedules.TOOLS:
+                value = await schedules.dispatch(session, scope, name, arguments)
+            elif not current:
+                value = {"error": "authorization_changed"}
+            else:
+                value = await tools.dispatch(session, cipher, scope, name, arguments)
         except service.PersonalError as exc:
             value = {"error": exc.code}
         except Exception:

@@ -29,6 +29,7 @@ class FeishuPersonalGrant(TimestampMixin, Base):
     context_epoch: Mapped[uuid.UUID] = mapped_column(
         Uuid, default=uuid.uuid4, server_default=text("gen_random_uuid()")
     )
+    # 已停用：个人工具改为叠加在普通助手上，不再切换模式。上一版本发布期间仍会读写，下个版本删除。
     assistant_mode: Mapped[str] = mapped_column(Text, default="personal", server_default="personal")
     token_enc: Mapped[str | None] = mapped_column(Text)
     pending_enc: Mapped[str | None] = mapped_column(Text)

@@ -1,7 +1,7 @@
-"""私聊会话查看链接的凭据：绑定本人、会话、节点与过期时间，飞书资料模式再绑上下文版本。
+"""私聊会话查看链接的凭据：绑定本人、会话、节点与过期时间。
 
 凭据只是登录之外的第二道门：打开时仍要登录，且登录的就是链接签给的那个人。
-AES-GCM 同时保证不可伪造与不外露（用户 ID、上下文版本不以明文出现在 URL 里）。
+AES-GCM 同时保证不可伪造与不外露（用户 ID 不以明文出现在 URL 里）。
 """
 
 from __future__ import annotations
@@ -26,8 +26,6 @@ class LinkClaims:
     provider: str
     bot_id: uuid.UUID
     expires_at: float
-    # 飞书资料模式的链接才有：撤销授权、切换模式、重新授权都会换掉它，旧链接随之作废。
-    context_epoch: uuid.UUID | None
 
 
 def issue(
@@ -38,7 +36,6 @@ def issue(
     node_id: uuid.UUID,
     provider: str,
     bot_id: uuid.UUID,
-    context_epoch: uuid.UUID | None = None,
     now: float | None = None,
 ) -> str:
     claims: dict[str, object] = {
@@ -49,8 +46,6 @@ def issue(
         "b": str(bot_id),
         "x": int((time.time() if now is None else now) + TTL_SECONDS),
     }
-    if context_epoch is not None:
-        claims["e"] = str(context_epoch)
     sealed = cipher.encrypt(json.dumps(claims, separators=(",", ":")), AAD)
     raw = base64.b64decode(sealed[len(PREFIX) :])
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -70,7 +65,6 @@ def read(cipher: Cipher, token: str, *, now: float | None = None) -> LinkClaims 
             provider=str(data["p"]),
             bot_id=uuid.UUID(data["b"]),
             expires_at=float(data["x"]),
-            context_epoch=uuid.UUID(data["e"]) if data.get("e") else None,
         )
     except (DecryptError, ValueError, KeyError, TypeError):
         return None

@@ -1,15 +1,20 @@
-"""Human-only Feishu consent cards, bound to the original verified private message."""
+"""Human-only Feishu cards (consent, schedule confirmation), bound to a verified private chat."""
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core import personal_schedules as schedules
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.identity import resolve_speaker
-from coreman.core.db.models import Bot, InboundEvent, Task
+from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, User
+from coreman.core.errors import ApiError
 from coreman.core.feishu_personal import policy, service
+from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 
 OPTIONS = (
@@ -82,6 +87,38 @@ def selection_card(task_id: int, *, remote_revoked: bool = True) -> dict[str, An
     }
 
 
+async def card_owner_scope(
+    session: AsyncSession, original: Task, inbound: InboundEvent
+) -> policy.Scope | None:
+    """The clicker must be the verified private-chat speaker of `original`, in that chat.
+
+    Callers must separately check that the card was sent by us to this chat and that
+    `original` is the kind of task their card belongs to.
+    """
+    speaker = await resolve_speaker(
+        session, platform="feishu", platform_user_id=inbound.sender_platform_user_id or ""
+    )
+    if not speaker.known or speaker.user_id is None:
+        return None
+    scope = await policy.verified_origin_scope(session, original, str(speaker.user_id))
+    raw = inbound.payload.get("raw") or {}
+    header, event = raw.get("header") or {}, raw.get("event") or {}
+    operator, context = event.get("operator") or {}, event.get("context") or {}
+    if (
+        header.get("event_type") != "card.action.trigger"
+        or header.get("app_id") != scope.app_id
+        or (header.get("tenant_key") or operator.get("tenant_key")) != scope.tenant_key
+        or inbound.chat_id != scope.chat_id
+        or context.get("open_chat_id") != scope.chat_id
+        or context.get("open_message_id") != inbound.reply_context.get("message_id")
+        or operator.get("user_id") != scope.platform_user_id
+        or operator.get("open_id") != scope.open_id
+        or inbound.sender_open_id != scope.open_id
+    ):
+        return None
+    return scope
+
+
 async def handle_selection(
     session: AsyncSession,
     ctx: TaskContext,
@@ -112,26 +149,8 @@ async def handle_selection(
             or inbound.bot_id != bot.id
         ):
             return "ignored"
-        speaker = await resolve_speaker(
-            session, platform="feishu", platform_user_id=inbound.sender_platform_user_id or ""
-        )
-        if not speaker.known or speaker.user_id is None:
-            return "ignored"
-        scope = await policy.verified_origin_scope(session, original, str(speaker.user_id))
-        raw = inbound.payload.get("raw") or {}
-        header, event = raw.get("header") or {}, raw.get("event") or {}
-        operator, context = event.get("operator") or {}, event.get("context") or {}
-        if (
-            header.get("event_type") != "card.action.trigger"
-            or header.get("app_id") != scope.app_id
-            or (header.get("tenant_key") or operator.get("tenant_key")) != scope.tenant_key
-            or inbound.chat_id != scope.event.chat_id
-            or context.get("open_chat_id") != scope.event.chat_id
-            or context.get("open_message_id") != inbound.reply_context.get("message_id")
-            or operator.get("user_id") != scope.event.sender_platform_user_id
-            or operator.get("open_id") != scope.event.sender_open_id
-            or inbound.sender_open_id != scope.event.sender_open_id
-        ):
+        scope = await card_owner_scope(session, original, inbound)
+        if scope is None:
             return "ignored"
     except (ValueError, TypeError, KeyError, AttributeError):
         return "ignored"
@@ -194,3 +213,114 @@ async def handle_selection(
         },
     )
     return outcome
+
+
+async def _schedule_card(session: AsyncSession, bot: Bot, inbound: InboundEvent, text: str) -> None:
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="card_update",
+        dedupe_key=f"{inbound.id}:card_update",
+        target={"chat_id": inbound.chat_id, "message_id": inbound.reply_context.get("message_id")},
+        payload={
+            "card": {
+                "schema": "2.0",
+                "header": {"title": {"tag": "plain_text", "content": "定时任务"}},
+                "body": {"elements": [{"tag": "markdown", "content": text}]},
+            }
+        },
+    )
+
+
+async def handle_schedule(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    inbound: InboundEvent,
+    action: dict[str, Any],
+) -> str:
+    """本人确认或取消模型拟好的定时任务。只有卡片发给的那个私聊里的本人点了才算数。"""
+    verb, _, state_id = str(action.get("level") or "").partition(":")
+    if verb not in ("confirm", "cancel"):
+        return "ignored"
+    try:
+        original = await session.get(Task, int(str(action["task_id"]).split(":")[1]))
+        if (
+            original is None
+            or original.bot_id != bot.id
+            or original.kind != "chat"
+            or original.payload.get("collaboration_id")
+            or original.payload.get("collaboration_phase")
+            or ctx.task.kind != "card_action"
+            or ctx.task.status not in tasks.ACTIVE
+            or ctx.task.cancel_requested_at
+            or inbound.platform != "feishu"
+            or inbound.kind != "card_action"
+            or inbound.bot_id != bot.id
+        ):
+            return "ignored"
+        scope = await card_owner_scope(session, original, inbound)
+        if scope is None:
+            return "ignored"
+        state = await session.scalar(
+            select(InteractionState)
+            .where(
+                InteractionState.id == uuid.UUID(state_id),
+                InteractionState.kind == schedules.KIND,
+                InteractionState.bot_id == bot.id,
+            )
+            .with_for_update()
+        )
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return "ignored"
+    draft = state.state if state else {}
+    if (
+        state is None
+        or draft.get("user_id") != str(scope.user_id)
+        or draft.get("chat_id") != scope.chat_id
+        or draft.get("origin_task_id") != original.id
+    ):
+        return "ignored"
+    now = utcnow()
+    if state.status != "open" or (state.expires_at is not None and state.expires_at <= now):
+        # 重复点击或回放：不覆盖已经给出的结果。
+        if state.status in ("submitted", "cancelled"):
+            return "expired"
+        state.status = "expired"
+        await _schedule_card(
+            session, bot, inbound, "这张确认卡片已过期，没有创建定时任务。需要的话请重新告诉我。"
+        )
+        return "expired"
+    name = str(draft.get("name") or "")
+    if verb == "cancel":
+        state.status = "cancelled"
+        await _schedule_card(session, bot, inbound, f"已取消，没有创建「{name}」。")
+        return "personal_schedule_cancelled"
+    actor = await session.get(User, scope.user_id, with_for_update=True, populate_existing=True)
+    try:
+        if actor is None:
+            raise ApiError(403, 403, "reminder_actor_unavailable")
+        job = await schedules.create_confirmed(session, bot, actor, scope.chat_id, draft, now)
+    except schedules.ScheduleError as exc:
+        state.status = "cancelled"
+        await _schedule_card(session, bot, inbound, f"没有创建「{name}」：{exc.message}")
+        return "personal_schedule_rejected"
+    except ApiError:
+        state.status = "cancelled"
+        await _schedule_card(
+            session, bot, inbound, f"没有创建「{name}」：你当前不能使用这个机器人的定时任务。"
+        )
+        return "personal_schedule_rejected"
+    state.status = "submitted"
+    manage = ctx.public_base_url.rstrip("/") + "/self-reminders"
+    await _schedule_card(
+        session,
+        bot,
+        inbound,
+        f"**已创建定时任务「{job.name}」**\n执行时间："
+        + schedules.describe(job.schedule_kind, job.cron_expression, job.run_at)
+        + f"\n下次运行：{schedules.shown(job.next_run_at)}"
+        + f"\n结果只发到这个私聊。[查看或管理]({manage})",
+    )
+    return "personal_schedule_created"

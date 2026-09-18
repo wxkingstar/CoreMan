@@ -32,6 +32,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.notification_channels import validate_wecom_webhook
+from coreman.core.personal_schedules import MODE as PERSONAL_MODE
 from coreman.core.timeutils import aware_utc
 
 router = APIRouter(
@@ -86,8 +87,14 @@ class CronIn(BaseModel):
 
 
 def _out(row: CronJob, actor: User) -> dict[str, Any]:
+    config = {k: v for k, v in job_config(row).items() if k != "notify_webhook_url_enc"}
+    personal = row.execution_mode == PERSONAL_MODE
+    if personal and row.created_by != actor.id:
+        # 成员本人的定时任务：管理员能看到它存在、能停用，看不到指令。
+        config["prompt"] = ""
     return {
-        **{k: v for k, v in job_config(row).items() if k != "notify_webhook_url_enc"},
+        **config,
+        "personal": personal,
         "has_webhook_url": bool(row.notify_webhook_url_enc),
         "id": str(row.id),
         "bot_id": str(row.bot_id),
@@ -106,7 +113,7 @@ def _out(row: CronJob, actor: User) -> dict[str, Any]:
         "last_run_at": row.last_run_at,
         "last_status": row.last_status,
         "created_at": row.created_at,
-        "can_edit": row.created_by == actor.id,
+        "can_edit": row.created_by == actor.id and not personal,
     }
 
 
@@ -118,9 +125,13 @@ async def _bot(session: AsyncSession, bot_id: uuid.UUID, actor: User) -> Bot:
     return bot
 
 
-async def _load(session: AsyncSession, job_id: uuid.UUID, actor: User) -> CronJob:
+async def _load(
+    session: AsyncSession, job_id: uuid.UUID, actor: User, *, personal: bool = False
+) -> CronJob:
+    """管理员可操作的任务。成员本人的定时任务（personal_ai）只允许停用，其余接口按不存在处理。"""
     row = await session.scalar(select(CronJob).where(CronJob.id == job_id).with_for_update())
-    if row is None or row.execution_mode != "ai":
+    modes = ("ai", PERSONAL_MODE) if personal else ("ai",)
+    if row is None or row.execution_mode not in modes:
         raise not_found("定时任务不存在")
     await _bot(session, row.bot_id, actor)
     return row
@@ -323,7 +334,7 @@ async def list_jobs(
 ) -> dict[str, Any]:
     stmt = (
         select(CronJob)
-        .where(CronJob.execution_mode == "ai")
+        .where(CronJob.execution_mode.in_(("ai", PERSONAL_MODE)))
         .join(Bot, Bot.id == CronJob.bot_id)
         .where(
             (Bot.created_by == actor.id)
@@ -478,7 +489,7 @@ async def disable_job(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    row = await _load(session, job_id, actor)
+    row = await _load(session, job_id, actor, personal=True)
     require_if_match(request, row.version)
     row.enabled = False
     row.force_run_at = None
@@ -529,13 +540,19 @@ async def list_runs(
         else []
     )
     statuses = {d.id: _delivery_out(d) for d in deliveries}
+
+    def hidden(run: CronRun) -> bool:
+        # 以创建者本人身份运行过：指令和结果可能含本人飞书资料，只给本人看。
+        return run.private and run.executed_by != actor.id
+
     data["items"] = [
         {
             "id": r.id,
             "task_id": r.task_id,
             "status": r.status,
-            "prompt": r.prompt,
-            "reply": r.reply,
+            "private": r.private,
+            "prompt": "" if hidden(r) else r.prompt,
+            "reply": None if hidden(r) else r.reply,
             "error_message": r.error_message,
             "precheck_meta": r.precheck_meta,
             "delivery": r.delivery,

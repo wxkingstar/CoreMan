@@ -34,7 +34,9 @@ ESCALATION_STATUSES = ("pending", "queued", "replied", "completed", "expired", "
 class CronJob(TimestampMixin, Base):
     __tablename__ = "cron_jobs"
     __table_args__ = (
-        CheckConstraint("execution_mode IN ('ai', 'self_reminder')", name="execution_mode"),
+        CheckConstraint(
+            "execution_mode IN ('ai', 'self_reminder', 'personal_ai')", name="execution_mode"
+        ),
         CheckConstraint("schedule_kind IN ('recurring', 'once')", name="schedule_kind"),
         CheckConstraint("schedule_kind != 'once' OR run_at IS NOT NULL", name="once_run_at"),
         CheckConstraint("precheck_timeout_seconds BETWEEN 5 AND 120", name="precheck_timeout"),
@@ -100,6 +102,8 @@ class CronRun(Base):
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 以任务创建者本人身份运行过、或属于本人专属任务：指令与结果只给本人看。
+    private: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
 
 class Escalation(TimestampMixin, Base):

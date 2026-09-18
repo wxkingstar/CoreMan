@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session
@@ -29,12 +29,11 @@ from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     Bot,
     ChatLog,
-    FeishuPersonalGrant,
+    CronRun,
     RelayServer,
     RuntimeCall,
     RuntimeInstallLink,
     RuntimeNode,
-    Task,
     Team,
     User,
 )
@@ -456,16 +455,6 @@ async def delete_node(
     return {"code": 0, "data": None}
 
 
-async def _link_epoch_current(session: AsyncSession, claims: session_links.LinkClaims) -> bool:
-    """飞书资料模式的链接绑定签发时的上下文版本；撤销、切换模式或重新授权后即失效。"""
-    if claims.context_epoch is None:
-        return True
-    grant = await session.get(
-        FeishuPersonalGrant, (claims.bot_id, claims.user_id), populate_existing=True
-    )
-    return grant is not None and grant.context_epoch == claims.context_epoch
-
-
 async def _owner_viewable(session: AsyncSession, node_id: uuid.UUID, provider: str) -> bool:
     node = await session.get(RuntimeNode, node_id)
     capability = (node.capabilities.get(provider) or {}) if node else {}
@@ -482,11 +471,12 @@ async def _authorize_session_content(
 ) -> str:
     """能否查看会话原文；返回放行依据（link / owner / role）供审计。
 
-    私聊归本人，不看角色：普通私聊登录即可看自己的会话；飞书资料模式的会话还要聊天里发出的
-    链接（24 小时内、签给当前登录的人、上下文版本未变）。会话历史里不能有别人的记录；第一轮
-    还没写记录时，只有链接能证明它属于谁。bot_token 登录一律不走本人这条路：群聊里的智能体
-    拿着发言人的 token，不能借此读到他的私聊。非管理员还要节点已升级到记录不含环境变量的驱动。
-    其余按角色：管理员可看群聊与企微私聊；飞书私聊可能含个人飞书资料，任何角色都不能代看。
+    私聊归本人，不看角色：登录即可看自己的会话。会话历史里不能有别人的记录；第一轮还没写记录
+    时，只有聊天里发出的链接（24 小时内、签给当前登录的人）能证明它属于谁。bot_token 登录一律
+    不走本人这条路：群聊里的智能体拿着发言人的 token，不能借此读到他的私聊。非管理员还要节点
+    已升级到记录不含环境变量的驱动。以本人身份运行过的定时任务与私聊同样只归执行者本人。
+    其余按角色：管理员可看群聊与企微私聊；飞书私聊和这类定时任务可能含个人飞书资料，
+    任何角色都不能代看。
     """
     try:
         identity = uuid.UUID(session_id)
@@ -498,15 +488,13 @@ async def _authorize_session_content(
                 ChatLog.platform,
                 ChatLog.chat_type,
                 ChatLog.user_id,
-                func.coalesce(Task.result.has_key("feishu_personal"), False),
-            )
-            .outerjoin(Task, Task.id == ChatLog.task_id)
-            .where(ChatLog.relay_session_id == identity)
+                ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),
+            ).where(ChatLog.relay_session_id == identity)
         )
     ).all()
-    personal = any(row[3] for row in rows)
     mine = not request.cookies.get("bot_token") and all(
-        chat_type == "single" and user_id == actor.id for _, chat_type, user_id, _ in rows
+        (chat_type == "single" or private) and user_id == actor.id
+        for _, chat_type, user_id, private in rows
     )
     token = request.query_params.get("t", "")
     claims = session_links.read(request.app.state.cipher, token) if token else None
@@ -517,17 +505,12 @@ async def _authorize_session_content(
         and claims.user_id == actor.id
         and claims.node_id == node_id
         and claims.provider == provider
-        and await _link_epoch_current(session, claims)
     )
-    if linked or (mine and rows and not personal):
+    if linked or (mine and rows):
         if actor.role in MANAGER_ROLES or await _owner_viewable(session, node_id, provider):
             return "link" if linked else "owner"
         # 旧驱动的会话记录里带着请求的环境变量（机器人密钥、访问令牌），以前只给管理员看。
         raise ApiError(403, 403, "这个运行时版本较旧，暂时不能查看完整过程，请联系管理员升级运行时")
-    if mine and rows:
-        raise ApiError(
-            403, 403, "飞书资料模式的完整过程只能从聊天里最近一条回复的链接打开，链接 24 小时内有效"
-        )
     if actor.role not in MANAGER_ROLES:
         if token:
             raise ApiError(
@@ -535,7 +518,8 @@ async def _authorize_session_content(
             )
         raise forbidden()
     if not rows or any(
-        platform == "feishu" and chat_type == "single" for platform, chat_type, _, _ in rows
+        (platform == "feishu" and chat_type == "single") or private
+        for platform, chat_type, _, private in rows
     ):
         raise not_found("会话不存在")
     return "role"

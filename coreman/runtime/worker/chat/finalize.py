@@ -186,25 +186,10 @@ class FinalizeStage(ChatStageBase):
             elif current and current.payload.get("collaboration_handoff") and not out.cancelled:
                 # Registration is durable; EOF before the next poll must not undo accepted help.
                 verdict = self._classify(ctx, pre, replace(out, collaboration_handoff=True))
-            private_result: dict[str, Any] | None = None
-            if "COREMAN_FEISHU_PERSONAL_TOKEN" in pre.request.env_vars:
-                # 不论成败都标上：会话页据此认出飞书资料模式的会话，坚持要聊天里的链接。
-                marked: dict[str, Any] = {"feishu_personal": True}
-                if verdict.log_status == "success":
-                    from coreman.runtime.worker.chat.personal import transcript
-
-                    marked["private_transcript"] = transcript(
-                        intake,
-                        pre.info,
-                        pre.content.text if pre.content else intake.text,
-                        verdict.final_text,
-                    )
-                private_result = marked
             owned = await tasks.finish(
                 session,
                 ctx.task.id,
                 status=verdict.task_status,
-                result=private_result,
                 error_code=verdict.error_code,
                 error_message=verdict.error_message,
                 only_active=True,

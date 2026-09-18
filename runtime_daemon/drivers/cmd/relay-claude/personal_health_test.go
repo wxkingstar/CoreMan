@@ -10,37 +10,32 @@ import (
 	"time"
 )
 
-func TestPersonalHealthRequiresRestrictedCLI(t *testing.T) {
-	for _, supported := range []bool{false, true} {
-		t.Run(map[bool]string{false: "old", true: "restricted"}[supported], func(t *testing.T) {
-			dir := t.TempDir()
-			help := "old cli"
-			if supported {
-				help = "--restricted --tools --strict-mcp-config --disable-slash-commands --no-session-persistence"
-			}
-			if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho '"+help+"'\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", dir)
-			recorder := httptest.NewRecorder()
-			healthHandler(recorder, httptest.NewRequest("GET", "/health", nil))
-			var body struct {
-				Capabilities map[string]bool `json:"capabilities"`
-			}
-			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-				t.Fatal(err)
-			}
-			if body.Capabilities["feishu_personal_restricted_v1"] != supported {
-				t.Fatal("incorrect capability", recorder.Body.String())
-			}
-		})
+func TestHealthAdvertisesAdditivePersonalTools(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho 'claude 1.0'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	recorder := httptest.NewRecorder()
+	healthHandler(recorder, httptest.NewRequest("GET", "/health", nil))
+	var body struct {
+		Capabilities map[string]bool `json:"capabilities"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Capabilities["feishu_personal_tools_v1"] || !body.Capabilities["owner_session_view_v1"] {
+		t.Fatal("missing capability", recorder.Body.String())
+	}
+	// Servers that still expect the restricted mode must see no support here.
+	if _, ok := body.Capabilities["feishu_personal_restricted_v1"]; ok {
+		t.Fatal("retired restricted capability advertised", recorder.Body.String())
 	}
 }
 
-func TestPersonalHealthProbeHonorsRequestDeadline(t *testing.T) {
+func TestHealthProbeHonorsRequestDeadline(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then exec /bin/sleep 30; fi\necho version\n"
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
@@ -52,16 +47,7 @@ func TestPersonalHealthProbeHonorsRequestDeadline(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("health probe ignored cancellation")
 	}
-	if recorder.Code == 503 {
-		return
-	} // Deadline may also expire during the version probe.
-	var body struct {
-		Capabilities map[string]bool `json:"capabilities"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Capabilities["feishu_personal_restricted_v1"] {
-		t.Fatal("timed out CLI marked capable")
+	if recorder.Code != 503 {
+		t.Fatal("hung CLI reported healthy", recorder.Code, recorder.Body.String())
 	}
 }

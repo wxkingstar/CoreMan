@@ -71,7 +71,6 @@ class ChatRequest:
     verbosity_level: int = 1
     env_vars: dict[str, str] = field(default_factory=dict)
     max_turns: int = 80
-    history: list[dict[str, str]] = field(default_factory=list)
 
     def to_body(self) -> dict[str, Any]:
         """拼出 POST /v1/chat/completions 的请求体。
@@ -83,12 +82,6 @@ class ChatRequest:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": self.system_prompt},
-                *[
-                    {"role": item["role"], "content": item["content"]}
-                    for item in self.history
-                    if item.get("role") in ("user", "assistant")
-                    and isinstance(item.get("content"), str)
-                ],
                 {"role": "user", "content": self.user_content},
             ],
             "stream": True,

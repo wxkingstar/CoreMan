@@ -242,14 +242,13 @@ const imageFileNote = "(Files of the images above, in order. You already see the
 // buildPromptFromMessages flattens an OpenAI message array into one user
 // turn, separately returning the system prompt. Images go to the CLI as
 // native image blocks right after their message's text, so the model sees
-// them without a file-reading tool (Feishu personal mode has none) and the
-// CLI converts and downsizes them itself. With imageFiles, images are also
-// written to disk and listed as `[Image file: /path]` so tools can work on
-// the file. Other attachments are dumped to disk and inlined as
-// `[File: /path]` markers. Written files are content-hashed under a non-empty
-// sessionDir for cross-turn dedup, otherwise tempFiles is populated for
-// cleanup.
-func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string, imageFiles bool) (prompt []promptBlock, systemPrompt string, tempFiles []string) {
+// them without a file-reading tool and the CLI converts and downsizes them
+// itself. Images are also written to disk and listed as `[Image file: /path]`
+// so tools can work on the file. Other attachments are dumped to disk and
+// inlined as `[File: /path]` markers. Written files are content-hashed under
+// a non-empty sessionDir for cross-turn dedup, otherwise tempFiles is
+// populated for cleanup.
+func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string) (prompt []promptBlock, systemPrompt string, tempFiles []string) {
 	var parts []string // transcript text since the last image block
 	flush := func() {
 		if len(parts) > 0 {
@@ -285,9 +284,6 @@ func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string, i
 				var refs []string
 				for _, img := range images {
 					prompt = append(prompt, promptBlock{Type: "image", Source: &imageSource{Type: "base64", MediaType: img.MediaType, Data: img.Data}})
-					if !imageFiles {
-						continue
-					}
 					path, err := attachments.SaveImage(img, sessionDir, "claude-img")
 					if err != nil {
 						log.Printf("Failed to save image: %v", err)

@@ -29,25 +29,22 @@ var firstLineTimeout = 90 * time.Second
 // cleanEnv returns the current environment with CLAUDECODE removed (the
 // claude CLI uses this to detect being run inside another Claude session;
 // stripping it lets us run the CLI as a normal subprocess), plus any extra
-// KEY=VALUE pairs from the request.
+// KEY=VALUE pairs from the request. Per-task MCP credentials never come from
+// the relay's own environment, and the Feishu personal ones reach only a turn
+// that mounts that server.
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !(openai.FeishuPersonalEnabled(extra) && strings.HasPrefix(e, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=")) {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") {
 			env = append(env, e)
 		}
 	}
+	personal := openai.FeishuPersonalEnabled(extra)
 	for k, v := range extra {
-		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !openai.FeishuPersonalEnabled(extra) {
-			continue
-		}
-		if k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && openai.FeishuPersonalEnabled(extra) {
+		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !personal {
 			continue
 		}
 		env = append(env, k+"="+v)
-	}
-	if openai.FeishuPersonalEnabled(extra) {
-		env = append(env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
 	}
 	return env
 }
@@ -79,21 +76,25 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
-	if req.SystemPromptFile != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+	if req.SystemPromptFile != "" {
 		args = append(args, "--append-system-prompt-file", req.SystemPromptFile)
 	}
+	// CoreMan's MCP servers are mounted on top of the bot's own tools, each
+	// only when this turn carries its credentials. The token stays in the
+	// environment; the CLI expands ${..._TOKEN} in the header itself.
 	servers := map[string]any{}
 	var denied []string
 	for _, cfg := range []struct {
 		name, prefix string
 		enabled      bool
 	}{
-		{"coreman_collaboration", "COREMAN_COLLABORATION", !openai.FeishuPersonalEnabled(req.EnvVars) && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
+		{"coreman_collaboration", "COREMAN_COLLABORATION", strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
 		{"coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL", openai.FeishuPersonalEnabled(req.EnvVars)},
 	} {
 		if cfg.enabled {
 			servers[cfg.name] = map[string]any{"type": "http", "url": strings.TrimSpace(req.EnvVars[cfg.prefix+"_URL"]), "headers": map[string]string{"Authorization": "Bearer ${" + cfg.prefix + "_TOKEN}"}}
 		} else {
+			// Deny a stale server even if a resumed session or local config remembers it.
 			denied = append(denied, "mcp__"+cfg.name)
 		}
 	}
@@ -103,9 +104,6 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	}
 	if len(denied) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(denied, ","))
-	}
-	if openai.FeishuPersonalEnabled(req.EnvVars) {
-		args = append(args, "--no-session-persistence", "--restricted", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--settings", `{"disableAllHooks":true}`, "--allowedTools", "mcp__coreman_feishu_personal")
 	}
 	args = append(args, "--model", model)
 	args = append(args, "--verbose")
@@ -120,16 +118,13 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	if req.PermissionMode != "" {
 		permMode = req.PermissionMode
 	}
-	if openai.FeishuPersonalEnabled(req.EnvVars) {
-		permMode = "default"
-	}
 	args = append(args, "--permission-mode", permMode)
 
-	if req.AllowedTools != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+	if req.AllowedTools != "" {
 		args = append(args, "--allowedTools", req.AllowedTools)
 	}
 	for _, dir := range req.AddDirs {
-		if dir != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+		if dir != "" {
 			args = append(args, "--add-dir", dir)
 		}
 	}
@@ -143,10 +138,10 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
-	if req.Settings != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+	if req.Settings != "" {
 		args = append(args, "--settings", req.Settings)
 	}
-	if req.SessionID != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+	if req.SessionID != "" {
 		args = append(args, "--resume", req.SessionID)
 	}
 	// A text-only turn stays a plain string; blocks are needed only for images.
@@ -206,15 +201,19 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		// exits, so stdout never EOFs and the sniff stalls.
 		s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 		found := false
+		private := openai.FeishuPersonalEnabled(envVars)
 		for s.Scan() {
-			line := openai.RedactCollaborationToken(s.Text(), envVars)
-			if openai.FeishuPersonalEnabled(envVars) {
-				line = openai.PrivateContentPreview(line, 0, true)
-			}
-			log.Printf("Claude stderr: %s", line)
+			line := s.Text()
+			// Personal turns resume sessions too: match the marker on the raw
+			// line, and keep only the private preview out of the log.
 			if strings.Contains(line, "No conversation found with session ID") {
 				found = true
 			}
+			logged := openai.RedactCollaborationToken(line, envVars)
+			if private {
+				logged = openai.PrivateContentPreview(logged, 0, true)
+			}
+			log.Printf("Claude stderr: %s", logged)
 		}
 		if err := s.Err(); err != nil {
 			log.Printf("Claude stderr scanner error: %v", err)

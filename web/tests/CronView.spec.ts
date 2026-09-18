@@ -49,5 +49,42 @@ describe('CronView', () => {
     expect(wrapper.text()).toContain('待发送')
     wrapper.unmount()
   })
+  it('lets admins only disable a member’s own personal task', async () => {
+    vi.mocked(cron.list).mockResolvedValueOnce({ items: [{ ...row, personal: true, prompt: '', can_edit: false, running_task_id: 9 }], total: 1 } as never)
+    const wrapper = mount(CronView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wrapper.get('[data-test="personal-j1"]').text()).toBe(i18n.global.t('cron.personal'))
+    for (const action of ['history', 'run', 'test-notification', 'edit', 'delete']) {
+      expect(wrapper.find(`[data-test="${action}-j1"]`).exists(), action).toBe(false)
+    }
+    expect(wrapper.text()).not.toContain(i18n.global.t('cron.cancelRun'))
+    await wrapper.get('[data-test="disable-j1"]').trigger('click'); await flushPromises()
+    expect(cron.disable).toHaveBeenCalledWith(expect.objectContaining({ id: 'j1', version: 3 }))
+    wrapper.unmount()
+  })
+  it('does not tag ordinary tasks as personal', async () => {
+    const wrapper = mount(CronView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="personal-j1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="delete-j1"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+  it('shows a placeholder for private runs the viewer did not execute', async () => {
+    const base = { task_id: 1, status: 'success', error_message: null, precheck_meta: null, delivery: {}, deliveries: [], started_at: '2026-09-18T01:00:00Z', finished_at: null, trigger_kind: 'scheduled', input_tokens: null, output_tokens: null }
+    vi.mocked(cron.runs).mockResolvedValueOnce({ items: [
+      { ...base, id: 1, private: true, prompt: '', reply: null, executed_by: 'u2' },
+      { ...base, id: 2, private: true, prompt: 'my own prompt', reply: 'my own reply', executed_by: 'u1' },
+    ], total: 2 } as never)
+    const wrapper = mount(CronView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="history-j1"]').trigger('click'); await flushPromises()
+    for (const button of document.querySelectorAll<HTMLElement>('.el-drawer .el-table__expand-icon')) button.click()
+    await flushPromises()
+    const drawer = document.querySelector('.el-drawer')!
+    expect(drawer.querySelectorAll('[data-test="private-run"]')).toHaveLength(1)
+    expect(drawer.textContent).toContain(i18n.global.t('cron.privateRun'))
+    expect(drawer.textContent).toContain('my own reply')
+    wrapper.unmount()
+  })
 
 })

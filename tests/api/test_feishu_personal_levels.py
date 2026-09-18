@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from coreman.core.db.models import FeishuPersonalGrant
 from coreman.core.feishu_personal import permissions, policy, service
-from coreman.runtime.worker.chat.personal import reject_unavailable
+from coreman.runtime.worker.chat.personal import intercept
 from tests.api.test_feishu_personal import URL, grant, headers, rpc, setup, value
 from tests.api.test_feishu_personal_worker import intake_for
 from tests.integration.worker_helpers import build_ctx
@@ -37,7 +37,7 @@ async def test_connection_shows_choices_without_contacting_oauth(
     intake = await intake_for(db_session, bot, task, "连接飞书")
     http = AsyncMock()
     monkeypatch.setattr(service, "_http", http)
-    assert await reject_unavailable(db_session, build_ctx(db_engine, task), intake)
+    assert await intercept(db_session, build_ctx(db_engine, task), intake)
     row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
     assert row.status == "selecting" and row.pending_enc is not None
     assert row.selection_chat_id == intake.chat_id
@@ -187,8 +187,6 @@ async def test_send_requires_actual_and_requested_scope(db_session, app, monkeyp
 
 
 async def test_expired_selection_does_not_trap_ordinary_chat(db_session, app, db_engine):
-    from coreman.runtime.worker.chat.personal import enabled
-
     bot, user, task = await setup(db_session, app)
     scope = await policy.task_scope(db_session, task.id, str(user.id))
     await service.begin_selection(db_session, app.state.cipher, scope)
@@ -196,7 +194,7 @@ async def test_expired_selection_does_not_trap_ordinary_chat(db_session, app, db
     row.pending_expires_at = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.flush()
     intake = await intake_for(db_session, bot, task, "普通问题")
-    assert not await enabled(db_session, build_ctx(db_engine, task), intake)
+    assert not await intercept(db_session, build_ctx(db_engine, task), intake)
 
 
 async def test_repeated_revoke_does_not_misreport_remote_success(db_session, app, monkeypatch):
@@ -214,7 +212,7 @@ async def test_plain_digit_without_selection_does_not_start_authorization(
 ):
     bot, _, task = await setup(db_session, app)
     intake = await intake_for(db_session, bot, task, "3")
-    assert not await reject_unavailable(db_session, build_ctx(db_engine, task), intake)
+    assert not await intercept(db_session, build_ctx(db_engine, task), intake)
 
 
 async def test_unrequested_historical_document_permission_is_blocked(db_session, app, monkeypatch):

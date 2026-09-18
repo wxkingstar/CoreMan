@@ -1,8 +1,8 @@
 export default {
-  selfReminders: {"hint": "飛書の個別チャットで一回限りのリマインダーを依頼し、表示された確認コマンドを返信してください。1分から30日まで、本人の元の個別チャットにのみ送信します。", "deliveryHint": "キャンセルは未送信の通知を停止します。送信済み・送信中の通知は取り消せません。更新して状態を確認できます。", "refresh": "更新", "empty": "リマインダーはありません", "fixed": "本人への一回限りの通知", "cancel": "キャンセル", "status": {"scheduled": "待機中", "running": "処理中", "success": "通知を作成済み", "failed": "失敗", "skipped": "スキップ", "cancelled": "キャンセル済み", "pending": "送信待ち", "sending": "送信中", "sent": "送信済み"}},
+  selfReminders: {"hint": "一回限りのリマインダー：飛書の個別チャットで「两分钟后提醒我检查接口，只提醒一次」のように依頼し、「确认提醒」と返信してください。1分から30日まで、本人の元の個別チャットに一度だけ送信します。", "scheduleHint": "AI 定期タスク：飛書の個別チャットで AI 社員に「每个工作日 9 点总结我的飞书未读消息」のように伝え、カードの「确认创建」をクリックしてください。結果はその個別チャットにのみ送信されます。AI 社員ごとに有効なタスクは最大 10 件で、実行間隔は 1 時間以上です。", "deliveryHint": "リマインダーのキャンセルは未送信の通知を停止します。送信済み・送信中の通知は取り消せません。定期タスクは一時停止すると自動実行されず、いつでも再開できます。削除すると元に戻せません。", "refresh": "更新", "empty": "リマインダーや定期タスクはありません", "fixed": "本人への一回限りの通知", "cancel": "キャンセル", "status": {"scheduled": "待機中", "running": "処理中", "success": "通知を作成済み", "failed": "失敗", "skipped": "スキップ", "cancelled": "キャンセル済み", "pending": "送信待ち", "sending": "送信中", "sent": "送信済み"}, "schedule": "AI 定期タスク", "recurring": "繰り返し", "once": "一度だけ実行", "when": "実行日時", "next": "次回実行", "statusLabel": "状態", "state": {"active": "有効", "paused": "一時停止中", "running": "実行中"}, "scheduleStatus": {"scheduled": "実行待ち", "paused": "一時停止中", "running": "実行中", "success": "前回は成功", "failed": "前回は失敗", "skipped": "前回はスキップ", "failed_precheck": "前回はチェック失敗"}, "instruction": "実行する指示", "lastRun": "直近の実行", "noRun": "まだ実行されていません", "delivery": "配信", "error": "失敗理由", "truncated": "結果が長いため先頭のみ表示しています。全文は個別チャットで確認してください。", "expiredOnce": "一回限りのタスクの実行時刻を過ぎています。もう一度実行するには個別チャットで作成し直してください。", "pause": "一時停止", "resume": "再開", "delete": "削除", "confirmDelete": "定期タスク「{name}」を削除しますか？削除すると実行されなくなり、元に戻せません。", "pausedDone": "一時停止しました", "resumedDone": "再開しました", "deletedDone": "削除しました"},
   myFeishu: {
-    retentionNotice: "個別チャットの本文と回答は CoreMan の対話監査記録に保持される場合があります。思考過程の全文はランタイムのメモリに 24 時間だけ保持され、本人がログインして返信内のリンクから閲覧できます。モード切替、認可取消、再認可を行うと古いリンクはすぐ無効になります。会話のクリア、モード切替、認可取消は古い文脈の再利用を停止しますが、監査記録は削除しません。個人資料は共有メモリに書き込みません。",
-    modeHint: "「普通助手」で資料モードを終了し、「飞书资料」で戻ります。切替は会話文脈をクリアし、認可範囲は拡大しません。",
+    retentionNotice: "これらの個別チャットは通常の個別チャットと同様に会話ログに保存され、閲覧できるのは本人のみです。認証を取り消すと以後の読み取りは停止しますが、既存の記録は削除されません。",
+    toolsHint: "モードの切り替えは不要です。接続後も、この AI 社員との個別チャットは従来の機能をすべて保ったまま、本人の飛書データを読み取るツールが自動で追加されます。",
     tokenRefreshAvailable: "アクセストークンは期限切れですが認可は接続状態です。次のアクセスで更新を試みます。失敗した場合は再接続してください。",
     tokenExpired: "アクセストークンは期限切れで更新資格情報がありません。再接続してください。",
     connectTitle: "接続と管理",
@@ -12,7 +12,7 @@ export default {
     capabilities: "利用範囲",
     inactive: "未有効です。個人の飛書データにはアクセスできません。",
     incomplete: "未取得の権限があります。選択したレベル内で付与済みの権限のみ利用できます。詳細を展開して確認してください。",
-    supportedTools: "AI 社員との飛書の個別チャットでのみ利用できます。実行できる操作は実装済みツールによります。",
+    supportedTools: "AI 社員との飛書の個別チャットと本人の定期タスクでのみ利用できます。実行できる操作は実装済みツールによります。",
     advancedDetails: "認証の詳細情報",
     credentialHint: "権限確認用の情報です。資格情報には過去の認証が含まれる場合があります。今回のレベルを超える権限は CoreMan が無効化し、現在のアクセス範囲を広げません。",
     capabilityHints: {"messages_readonly": "アクセス可能な個別・グループメッセージを検索・読み取りできます。送信や会議・文書などの個人データへのアクセスはできません。", "all_except_send": "アプリで有効なユーザー権限（読み取り、変更、削除、管理）を許可します。メッセージ送信は禁止です。", "all": "アプリで有効なユーザー権限（読み取り、変更、削除、管理、送信）を許可します。送信には宛先と内容の明示が必要です。", "legacy_readonly": "従来の個人データの読み取り専用アクセスを維持します。メッセージ送信はできません。"},
@@ -31,7 +31,7 @@ export default {
   "title": "マイ飛書",
   "intro": "AI 社員ごとの飛書個人データへのアクセス権限を管理します。",
   "connectHint": "飛書の個別チャットで AI 社員に「{command}」と送り、カードで権限を選択してから認証リンクを開いてください。",
-  "privateOnly": "個人メッセージと会議資料へのアクセスは飛書の個別チャットのみ対応しています。グループチャットと WeCom には対応していません。",
+  "privateOnly": "認証は AI 社員との飛書の個別チャットと、本人が作成し本人にのみ結果を送る定期タスクでのみ使われます。グループチャットと WeCom では使われません。",
   "refresh": "更新",
   "empty": "飛書の個人認証はまだありません",
   "scopes": "飛書で実際に付与された権限",
@@ -305,7 +305,7 @@ export default {
   },
   "clearAddress": "保存した URL を削除"
 },
-  cron: {"cancelRun": '今回の実行をキャンセル', "name": "名前", "bot": "AI スタッフ", "schedule": "実行スケジュール", "timezone": "タイムゾーン", "scheduleHint": "分・時・日・月・曜日の順です。既定は平日 09:00。夏時間の重複時刻は一度だけ実行します。", "next": "次回実行", "lastStatus": "実行状態", "identityHint": "自動実行は作成者、即時実行は操作した本人の現在の権限を使用します。実行内容を編集できるのは作成者のみです。", "prompt": "実行内容", "systemPrompt": "このタスク専用の指示（空欄はAI スタッフの設定を使用）", "expires": "有効期限", "recipients": "結果の送信先", "users": "個人メッセージの宛先", "groups": "グループ ID", "emails": "メールの宛先", "perLine": "1 行に 1 件、またはカンマ区切り", "webhook": "AI スタッフのグループ Webhook に送信", "precheck": "実行前チェック", "precheckHint": "空欄の場合は毎回実行。データ判定、if/for と限定された関数に対応します。ファイル・リフレクション・任意のネットワーク要求は非対応。テストは空の ctx を使用し、モデルを呼び出しません。", "template": "テンプレートを挿入", "test": "ロジックをテスト", "willRun": "実行します", "willSkip": "スキップします", "history": "実行履歴", "run": "今すぐ実行", "queued": "実行待ち", "required": "名前、AI スタッフ、実行内容を入力してください", "expired": "有効期限は未来の日時にしてください", "reply": "実行結果", "channel": "通知先", "deliveryStatus": "配信状態", "error": "エラー", "started": "開始日時", "trigger": "実行方法", "scheduled": "自動", "manual": "手動", "tokens": "入力 / 出力 Token", "status": {"running": "実行中", "success": "成功", "failed": "失敗", "skipped": "スキップ", "failed_precheck": "チェック失敗"}},
+  cron: {"cancelRun": '今回の実行をキャンセル', "personal": "メンバー本人のタスク", "personalHint": "メンバーが個別チャットで自分用に作成した AI 定期タスクです。指示と実行結果は本人のみ閲覧できます。管理者は停止のみ可能です。", "privateRun": "実行者本人のみ閲覧できます", "name": "名前", "bot": "AI スタッフ", "schedule": "実行スケジュール", "timezone": "タイムゾーン", "scheduleHint": "分・時・日・月・曜日の順です。既定は平日 09:00。夏時間の重複時刻は一度だけ実行します。", "next": "次回実行", "lastStatus": "実行状態", "identityHint": "自動実行は作成者、即時実行は操作した本人の現在の権限を使用します。実行内容を編集できるのは作成者のみです。", "prompt": "実行内容", "systemPrompt": "このタスク専用の指示（空欄はAI スタッフの設定を使用）", "expires": "有効期限", "recipients": "結果の送信先", "users": "個人メッセージの宛先", "groups": "グループ ID", "emails": "メールの宛先", "perLine": "1 行に 1 件、またはカンマ区切り", "webhook": "AI スタッフのグループ Webhook に送信", "precheck": "実行前チェック", "precheckHint": "空欄の場合は毎回実行。データ判定、if/for と限定された関数に対応します。ファイル・リフレクション・任意のネットワーク要求は非対応。テストは空の ctx を使用し、モデルを呼び出しません。", "template": "テンプレートを挿入", "test": "ロジックをテスト", "willRun": "実行します", "willSkip": "スキップします", "history": "実行履歴", "run": "今すぐ実行", "queued": "実行待ち", "required": "名前、AI スタッフ、実行内容を入力してください", "expired": "有効期限は未来の日時にしてください", "reply": "実行結果", "channel": "通知先", "deliveryStatus": "配信状態", "error": "エラー", "started": "開始日時", "trigger": "実行方法", "scheduled": "自動", "manual": "手動", "tokens": "入力 / 出力 Token", "status": {"running": "実行中", "success": "成功", "failed": "失敗", "skipped": "スキップ", "failed_precheck": "チェック失敗"}},
   infra: {"clientPurpose": "外部システムは識別子とシークレットで CoreMan にアクセスし、許可した API グループのみを利用できます。「AI スタッフ送信」で指定会話に通知できます。資格情報の作成だけでは送信されません。", "clientKeyHint": "識別子は英数字・アンダースコア・ハイフンの 2〜128 文字（例：test-client）。作成後は変更できません。", "clientNameHint": "名前を 1〜100 文字で入力してください。日本語も使用できます。", "clientNamePlaceholder": "例：テストシステム", "testAccess": '自分の権限で確認', "key": "識別子", "name": "名前", "description": "説明", "baseUrl": "システム URL", "sitemapUrl": "ナビゲーション URL", "status": "状態", "enabled": "有効", "defaultAccess": "既定で許可", "restrictBots": "AI スタッフを制限", "allowedBots": "申請可能なAI スタッフ", "emptyWhitelist": "制限リストが空の場合、すべてのAI スタッフのアクセスが拒否されます。", "botScope": "公開範囲", "openToAllBots": "すべての AI スタッフに公開", "restrictedCount": "{n} 件の AI スタッフに限定", "openToAllWarning": "制限しない場合、どの AI スタッフの管理者もこのシステムを申請でき、会話相手のトークンがその AI スタッフの実行環境に渡されます。信頼できる AI スタッフだけに公開してください。", "sortOrder": "表示順", "reclaimWarning": "許可リストに含まれないAI スタッフの権限は直ちに取り消されます。保存しますか？", "clients": "API クライアント", "scopes": "許可する API グループ", "rotateSecret": "秘密鍵を更新", "rotateWarning": "以前のシークレットは直ちに無効になります。呼び出し側の設定を更新してください。続行しますか？", "jwtKeys": "署名鍵", "rotateKey": "新しい署名鍵を有効化", "rotateKeyWarning": "新しい鍵で署名を開始します。古い公開鍵は 24 時間保持されます。続行しますか？", "signing": "署名に使用中", "retired": "廃止済み", "externalKey": "デプロイ設定", "externalKeyHint": "業務システム用トークンは、デプロイ時に設定した外部発行元の鍵（BOT_JWT_*）で署名されます。下のローテーションはプラットフォーム自身の鍵にのみ適用されます。", "createdAt": "作成日時", "secretOnce": "シークレットを保存してください", "secretHint": "平文の表示は今回のみです。閉じると再表示できません。", "systemGrants": "システム権限", "grantsHint": "必要なシステムを選択してください。既定で許可されたシステムもAI スタッフの許可リストに従います。", "scopeNames": {"relay": "ランタイム 報告", "org": "組織", "notify": "ユーザー通知", "push": "AI スタッフ送信", "systems": "権限テスト", "memories": "メモリー", "escalations": "支援依頼"}},
   app: { title: 'CoreMan', subtitle: 'AI 社員プラットフォーム' },
   common: {
@@ -374,7 +374,7 @@ export default {
   },
   layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
   menu: {
-    selfReminders: "自分のリマインダー",
+    selfReminders: "自分の定期タスク",
     myFeishu: "マイ飛書",
     skills: "スキル管理",
     skillApprovals: "スキル承認",

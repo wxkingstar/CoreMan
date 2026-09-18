@@ -53,9 +53,11 @@ LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
 PROVIDERS = ("claude", "codex")
 # Only the driver's /health may grant these; anything but a literal true is false.
+# The retired feishu_personal_restricted_v1 is never forwarded, so servers that
+# still expect the restricted mode send no personal credentials to this node.
 DRIVER_CAPABILITIES = {
-    "claude": ("feishu_personal_restricted_v1", "owner_session_view_v1"),
-    "codex": ("owner_session_view_v1",),
+    "claude": ("feishu_personal_tools_v1", "owner_session_view_v1"),
+    "codex": ("feishu_personal_tools_v1", "owner_session_view_v1"),
 }
 CONTROL_LEASE_SECONDS = 40.0
 FRAME_RETRY_SECONDS = 25.0

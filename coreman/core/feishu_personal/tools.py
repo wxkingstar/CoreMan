@@ -166,7 +166,10 @@ _SCHEMAS: dict[str, tuple[type[Arguments], str]] = {
 }
 
 
-def definitions(*, allow_send: bool = False) -> list[dict[str, Any]]:
+def definitions(
+    *, allow_send: bool = False, auth: bool = True, reads: bool = True
+) -> list[dict[str, Any]]:
+    """`auth`：授权工具（只在私聊里有意义）；`reads`：本人资料工具（已连接或正在授权时）。"""
     return [
         {
             "name": name,
@@ -179,7 +182,7 @@ def definitions(*, allow_send: bool = False) -> list[dict[str, Any]]:
             "inputSchema": schema.model_json_schema(),
         }
         for name, (schema, description) in _SCHEMAS.items()
-        if name != "feishu_send_message" or allow_send
+        if (auth if name in _AUTH else reads) and (name != "feishu_send_message" or allow_send)
     ]
 
 
@@ -259,7 +262,8 @@ async def dispatch(
     arguments: Any,
 ) -> dict[str, Any]:
     spec = _SCHEMAS.get(name)
-    if spec is None or not isinstance(arguments, dict):
+    # 授权要本人在私聊里点卡片完成，定时任务里没有人能确认。
+    if spec is None or not isinstance(arguments, dict) or (name in _AUTH and scope.scheduled):
         return {"error": "invalid_tool_or_arguments"}
     try:
         args = spec[0].model_validate(arguments)
@@ -349,7 +353,7 @@ async def dispatch(
         times = _times(args)
         if isinstance(args, SearchMeetings):
             path = "/vc/v1/meetings/search"
-            own_filter: dict[str, Any] = {"participant_ids": [scope.event.sender_open_id]}
+            own_filter: dict[str, Any] = {"participant_ids": [scope.open_id]}
             if times:
                 own_filter["start_time"] = times
             body["meeting_filter"] = own_filter
@@ -360,7 +364,7 @@ async def dispatch(
                 if isinstance(args, SearchMinutes) and args.relationship == "owner"
                 else "participant_ids"
             )
-            own_filter = {key: [scope.event.sender_open_id]}
+            own_filter = {key: [scope.open_id]}
             if times:
                 own_filter["create_time"] = times
             body.update({"filter": own_filter, "sorter": "create_time_desc"})

@@ -1,4 +1,4 @@
-"""Reserved reminder commands take priority over personal mode and choices."""
+"""Reserved reminder commands run before the connect command, choices and the assistant."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 

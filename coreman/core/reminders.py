@@ -86,10 +86,10 @@ def is_reminder_request(text: str) -> bool:
         return True
     prefix = r"(?:请|请你|麻烦|麻烦你|帮我)?"
     timing = r"(?:[0-9一二两三四五六七八九十百]+(?:分钟|小时|天)后|今天|明天|后天|下周)"
+    # 周期性的说法（每天、每周……提醒我）不在这里接：交给助手拟本人定时任务，由本人确认。
     return bool(
         re.fullmatch(rf"{prefix}{timing}.{{0,12}}提醒我.+", value)
         or re.fullmatch(rf"{prefix}提醒我.{{0,12}}{timing}.+", value)
-        or re.fullmatch(rf"{prefix}(?:每天|每周|每月).{{0,12}}提醒我.+", value)
     )
 
 

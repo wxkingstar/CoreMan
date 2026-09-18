@@ -129,14 +129,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	hasTools := len(req.Tools) > 0
 
-	// Private-mode attachments stay in per-request temp files, never the
-	// shared session directory.
 	var sessionDir string
-	if req.SessionID != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+	if req.SessionID != "" {
 		sessionDir = filepath.Join(sessionStore.AbsDir(), req.SessionID, "files")
 	}
-	// Personal mode has no tools to use an image file with.
-	prompt, systemPrompt, tempFiles := buildPromptFromMessages(req.Messages, sessionDir, !openai.FeishuPersonalEnabled(req.EnvVars))
+	prompt, systemPrompt, tempFiles := buildPromptFromMessages(req.Messages, sessionDir)
 	if len(tempFiles) > 0 {
 		defer func() {
 			for _, f := range tempFiles {
@@ -200,11 +197,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	help, helpErr := exec.CommandContext(ctx, "claude", "--help").Output()
-	restricted := helpErr == nil
-	for _, flag := range []string{"--restricted", "--tools", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"} {
-		restricted = restricted && strings.Contains(string(help), flag)
-	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "healthy",
 		"backend": "claude",
@@ -212,9 +204,12 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"commit":  buildCommit,
 		"mode":    relayMode,
 		"capabilities": map[string]bool{
-			"feishu_personal_restricted_v1": restricted,
-			// Session history omits env vars and keeps personal sessions in
-			// memory, so the session owner may view it.
+			// Feishu personal tools mount on top of the bot's normal
+			// capabilities. The retired feishu_personal_restricted_v1 is not
+			// advertised, so servers that still expect the restricted mode
+			// send no personal credentials here.
+			"feishu_personal_tools_v1": true,
+			// Session history omits env vars, so the session owner may view it.
 			"owner_session_view_v1": true,
 		},
 	})

@@ -75,8 +75,8 @@ onUnmounted(() => {
         {{ t('myFeishu.connectTitle') }}
       </div>
       <p>{{ t('myFeishu.connectHint', { command: '连接飞书' }) }}</p>
+      <p>{{ t('myFeishu.toolsHint') }}</p>
       <p>{{ t('myFeishu.retentionNotice') }}</p>
-      <p>{{ t('myFeishu.modeHint') }}</p>
       <span class="feishu-private-label">{{ t('myFeishu.privateOnly') }}</span>
     </aside>
     <LoadState

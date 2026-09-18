@@ -15,6 +15,9 @@ describe('own Feishu authorizations', () => {
     expect(w.text()).toContain('连接飞书')
     expect(w.text()).toContain('无需命令前缀')
     expect(w.text()).not.toContain('/飞书个人')
+    // 个人工具叠加在普通私聊上：不再有“普通助手 / 飞书资料”模式切换，也没有只存内存的思考过程。
+    for (const stale of ['普通助手', '“飞书资料”', '资料模式', '24 小时']) expect(w.text()).not.toContain(stale)
+    expect(w.get('.feishu-connect-guide').text()).toContain(i18n.global.t('myFeishu.toolsHint'))
     expect(w.text()).toContain('卡片')
     expect(w.text()).toContain(i18n.global.t('myFeishu.privateOnly'))
     for (const status of ['connected', 'pending', 'expired', 'revoked']) expect(w.text()).toContain(i18n.global.t(`myFeishu.status.${status}`))
@@ -165,7 +168,7 @@ it.each([true, false])('retains audit disclosure and expiry guidance with refres
   vi.mocked(feishuAuthorizations.list).mockResolvedValue({ items: [{ ...row, access_token_expired: true, refresh_available }] })
   const w = render(); await flushPromises()
   expect(w.get('.feishu-connect-guide').text()).toContain(i18n.global.t('myFeishu.retentionNotice'))
-  expect(w.get('.feishu-connect-guide').text()).toContain(i18n.global.t('myFeishu.modeHint'))
+  expect(w.get('.feishu-connect-guide').text()).toContain(i18n.global.t('myFeishu.toolsHint'))
   expect(w.get('.feishu-grant').text()).toContain(i18n.global.t(refresh_available ? 'myFeishu.tokenRefreshAvailable' : 'myFeishu.tokenExpired'))
   expect(w.get('.feishu-grant').text()).toContain(i18n.global.t('myFeishu.status.connected'))
   w.unmount()
