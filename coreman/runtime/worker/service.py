@@ -1,16 +1,18 @@
 """worker 进程：认领任务、心跳、排空、把任务交给处理器。
 
-进程内只有五个后台协程：两条车道各一个认领循环、一个心跳循环、一个取消循环、一个配置失效
-循环。任务本身跑在各自的 `asyncio.Task` 里，处理器崩了也只影响那一个任务——`_run` 兜住所有
-异常并把失败写回 tasks / task_streams，绝不让服务退出。
+进程内只有六个后台协程：两条车道各一个认领循环、一个入队通知分发循环、一个心跳循环、一个
+取消循环、一个配置失效循环。任务本身跑在各自的 `asyncio.Task` 里，处理器崩了也只影响那一个
+任务——`_run` 兜住所有异常并把失败写回 tasks / task_streams，绝不让服务退出。
 
 唤醒有三条路：`tasks_queued` 通知、1 秒兜底轮询、以及「有任务跑完腾出槽位」的进程内事件。
-第三条不能省：只靠前两条时，一个满载的 worker 要等到下一次兜底轮询才会补位。
+第三条不能省：只靠前两条时，一个满载的 worker 要等到下一次兜底轮询才会补位。前后两条都落在
+每条车道自己的事件上，认领循环只等它。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import time
 from collections.abc import Callable, Mapping
@@ -129,6 +131,7 @@ class WorkerService(Service):
             for name, coro in (
                 ("worker-claim-normal", self._claim_loop("normal")),
                 ("worker-claim-fast", self._claim_loop("fast")),
+                ("worker-queued", self._queued_loop()),
                 ("worker-heartbeat", self._heartbeat_loop()),
                 ("worker-cancel", self._cancel_loop()),
                 ("worker-config", self._config_loop()),
@@ -193,8 +196,8 @@ class WorkerService(Service):
     async def _claim_loop(self, lane: str) -> None:
         wake = self._wake[lane]
         while not self._stop.is_set():
-            # 先清再判：清完到判之间有任务跑完，这一轮的槽位检查就已经看得见它腾出的位置；
-            # 判完到 wait 之间跑完，事件已经被重新置位，wait 立即返回。两头都不会丢唤醒。
+            # 先清再判：清完到判之间有任务跑完或入队，这一轮的检查就已经看得见；判完到 wait
+            # 之间才发生，事件已经被重新置位，wait 立即返回。两头都不会丢唤醒。
             wake.clear()
             claimed: Task | None = None
             try:
@@ -215,16 +218,20 @@ class WorkerService(Service):
 
     async def _wait_for_work(self, wake: asyncio.Event) -> None:
         """等「有新任务入队」或「有槽位腾出」，`poll_interval` 到点兜底返回。"""
-        waiters: list[asyncio.Task[object]] = [
-            asyncio.ensure_future(self._listener.wait("tasks_queued", timeout=self._poll)),
-            asyncio.ensure_future(wake.wait()),
-        ]
-        try:
-            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for waiter in waiters:
-                waiter.cancel()
-            await asyncio.gather(*waiters, return_exceptions=True)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(wake.wait(), self._poll)
+
+    async def _queued_loop(self) -> None:
+        """`tasks_queued` 的唯一消费者：收到就叫醒所有车道。
+
+        监听器每个通道只有一个事件，`wait` 取走即清。两条认领循环若直接去等它，一条的认领语句
+        还没返回（快照早于入队）时另一条先醒来，就把这次唤醒吃掉了：前者落空回去等待，只能干等
+        兜底轮询。车道事件由认领循环自己先清再判，转一手就不会丢。
+        """
+        while not self._stop.is_set():
+            if await self._listener.wait("tasks_queued", timeout=self._poll):
+                for event in self._wake.values():
+                    event.set()
 
     def _spawn(self, task: Task) -> None:
         ctx = TaskContext(
