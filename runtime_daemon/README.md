@@ -14,12 +14,26 @@
 
 1. 在目标用户环境准备上述依赖并完成 CLI 登录。已有 chroot/nspawn 应先进入目标环境。
 2. 管理员打开「运行时管理 → 安装运行时」，填写目标机器的项目主目录绝对路径，选择团队。链接固定 24 小时有效，默认并发上限为 10。可设置 AI 代理、CoreMan 连接代理、私有 CA、CLI 路径、环境和并发上限。目录必须可写，不能为 `/`，不能借符号链接跳出实际目录。
-3. 复制生成的 curl 安装命令，在目标用户环境运行。命令注入 CoreMan 地址和一次性安装凭证；安装包包含本机 Go 驱动及离线 Python 依赖。
+3. 复制生成的 curl 安装命令，在目标用户环境运行。命令注入 CoreMan 地址和一次性安装凭证；安装包包含本机 Go 驱动及离线 Python 依赖。目标环境已有 Runtime 时安装会停下并给出处理方式：一个系统用户只运行一个 Runtime；要换平台或换身份重装，把命令末尾的 `| sh` 换成 `| sh -s -- --replace`（见下文「替换已有 Runtime」）。
 4. 首次注册自动纳管并启用。列表分别显示 Claude/Codex 是否安装、登录状态、模型、健康和额度；未安装或未登录不会被标成可用。后续安装/登录 CLI 后最多约一分钟重新发现。
 
 链接默认只注册一个节点，可过期或撤销；相同节点的注册网络重试不会重复创建。链接仅生成时返回明文。运行身份保存于 `~/.local/share/coreman-runtime/config.json`（0600），不要复制到其他用户环境。节点只上报登录状态，不上传 CLI 登录文件。`$HOME` 含符号链接（如 `/home -> /data/home`）时，安装目录按实际路径解析。
 
 安装脚本的顺序是：下载并校验安装包 → 解包到 `stage-*` 临时目录 → 在 `release-*` 目录建 venv → 注册系统服务 → **服务管理器接受后**才写入 `config.json` → 启动并等待上线。任何一步失败都会删除本次的 `release-*`、`ca.pem` 与 `config.json`，可以直接重新运行同一条安装命令；只有“服务已注册但 60 秒内未确认上线”会保留安装，此时修复后重启服务即可。
+
+安装成功后，本机的管理命令固定在 `~/.local/share/coreman-runtime/bin/coreman-runtime`（升级、卸载、重新注册都用它，见下文）。该命令在任何目录下都能执行，切换版本时自动更新；`python -m runtime_daemon.install_service` 只在版本目录内可用，因为 `runtime_daemon` 不装进 venv。
+
+### 替换已有 Runtime
+
+改连其他 CoreMan、或要换一个新节点身份时，用同一条安装命令加 `--replace`：
+
+```sh
+curl -fsSL '<安装链接>' | sh -s -- --replace
+```
+
+顺序是：先下载并校验新安装包（这一步失败不动现有 Runtime）→ 停止并注销现有服务 → 把整个安装目录的内容移到同级的 `coreman-runtime.bak-<时间戳>`（节点身份、会话、日志、CA 都在里面，不删除）→ 按全新安装继续。安装失败时脚本会打印恢复旧 Runtime 的命令；确认新 Runtime 正常后可自行删除备份目录，并到原平台的「运行时管理」中撤销旧节点（卸载不会通知服务端）。
+
+备份目录在停服务之前就先建好：安装目录单独挂载（例如 `~/.local/share` 只读、安装目录是 bind 进来的）时，旁边建不了备份或不在同一文件系统，`--replace` 会直接拒绝、不碰现有 Runtime，这时改用 `coreman-runtime --uninstall --purge` 后再正常安装。由宿主机托管 `supervise.sh` 的环境，与升级一样先在宿主机停止托管。
 
 已安装 Codex 的 Daemon 后端继承后台 `codex` 模型目录中未退役的模型，新增模型无需更新本机驱动；旧节点在下一次心跳时自动应用。Claude 后端在心跳时同步目录中的原生 Claude 模型（`claude-` 开头；早期版本预置的 `vllm/claude-` 目录项也会被识别），过滤已退役模型，不自动纳入 MiniMax/Kimi 等第三方模型。驱动上报原生 Claude Code 模型名，调用时会去掉模型名中 `/` 之前的前缀再传给 CLI。驱动上报的模型用于发现和补充目录，不作为账号白名单。目录配置不代表账号已获该模型权限，实际调用由 CLI 校验。未安装对应 CLI 时模型列表为空。
 
@@ -65,11 +79,17 @@ launchd 没有按退出码阻止重启的机制，因此 launchd 下同类错误
 ```sh
 # 1. 在后台对该节点「排空任务」，等在途任务结束。
 # 2. 取得与本机平台一致的发布包及其 .sha256（runtime_daemon/dist/ 或 API 镜像中的发布目录）。
-# 3. 用当前版本的 venv 执行：
+# 3. 执行本机管理命令：
+~/.local/share/coreman-runtime/bin/coreman-runtime \
+  --upgrade /path/to/coreman-runtime-linux-amd64.tar.gz   # 可加 --sha256 <hex>
+```
+
+没有 `bin/coreman-runtime` 的旧安装（在它引入之前装的），改成在版本目录下执行，发布包写绝对路径；升级一次后该命令就会出现：
+
+```sh
 DATA=~/.local/share/coreman-runtime
 RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"])' "$DATA/config.json")
-"$RELEASE/.venv/bin/python" -m runtime_daemon.install_service \
-  --upgrade /path/to/coreman-runtime-linux-amd64.tar.gz   # 可加 --sha256 <hex>
+cd "$RELEASE" && .venv/bin/python -m runtime_daemon.install_service --upgrade <发布包的绝对路径>
 ```
 
 执行过程：
@@ -86,7 +106,7 @@ RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["relea
 
 ### 旧版本首次升级
 
-较早安装的节点，其安装工具还没有 `--upgrade` 参数，上面的命令会直接报参数错误。判断方法：当前版本目录下仍有 `relay_agent/`，或 `"$RELEASE/.venv/bin/python" -m runtime_daemon.install_service --help` 的输出里没有 `--upgrade`。
+较早安装的节点，其安装工具还没有 `--upgrade` 参数，上面的命令会直接报参数错误。判断方法：当前版本目录下仍有 `relay_agent/`，或在版本目录下执行 `.venv/bin/python -m runtime_daemon.install_service --help`，输出里没有 `--upgrade`。
 
 第一次升级改用新发布包里的安装工具，解释器仍用当前版本的 venv。该工具只依赖 Python 标准库，执行过程与上面相同，失败同样自动回滚：
 
@@ -111,11 +131,13 @@ rm -rf "$TOOL"
 ## 卸载
 
 ```sh
-"$RELEASE/.venv/bin/python" -m runtime_daemon.install_service --uninstall          # 保留身份与数据
-"$RELEASE/.venv/bin/python" -m runtime_daemon.install_service --uninstall --purge  # 全部删除
+MANAGE=~/.local/share/coreman-runtime/bin/coreman-runtime
+$MANAGE --uninstall          # 停止并移除服务，保留身份与数据
+$MANAGE --uninstall --purge  # 全部删除
+$MANAGE --register           # 卸载服务后，按保留的身份重新注册
 ```
 
-- 默认：停止并删除 systemd unit / launchd plist / `supervise.sh`，清理 socket 目录、`cli-bin`、`state.json`、`trust.pem` 以及非当前的 `release-*`；保留 `config.json`（节点身份，`service_status` 标记为 `uninstalled`）、当前版本、会话与日志。之后可用 `--upgrade <发布包>` 或 `python -m runtime_daemon.install_service --config <config.json>` 以同一身份重新注册服务。
+- 默认：停止并删除 systemd unit / launchd plist / `supervise.sh`，清理 socket 目录、`cli-bin`、`state.json`、`trust.pem` 以及非当前的 `release-*`；保留 `config.json`（节点身份，`service_status` 标记为 `uninstalled`）、当前版本、会话与日志。之后可用 `--register` 以同一身份重新注册服务，或直接 `--upgrade <发布包>`。
 - `--purge`：在上述基础上删除整个 `~/.local/share/coreman-runtime`（含身份、会话、日志、CA）。之后请在「运行时管理」中撤销该节点；重新接入需要新的安装链接。
 - 卸载不会改动 CLI 登录与 Claude 设置。启用过 Claude 额度探针时，statusLine 仍指向 `capture.sh` 并继续转交原命令；要恢复原状态栏，把 `~/.cache/claude_rate_limits/statusline-original.json` 中的 `statusLine` 写回 `~/.claude/settings.json`。`~/.claude/settings.before-coreman-probe.json` 是首次启用前的完整备份。
 
@@ -134,7 +156,7 @@ rm -rf "$TOOL"
 ## 常见故障
 
 - **安装失败后如何重试**：安装脚本已自动清理本次的 `release-*`、`stage-*`、`ca.pem` 与 `config.json`，修复提示的问题（缺 `python3-venv`、下载失败、`launchctl bootstrap` / `systemctl --user` 失败等）后直接重新运行同一条命令。链接已过期、被撤销或已被使用时需要重新生成。中途被强制终止（如 `kill -9`）留下的 `release-*`/`stage-*` 会在下一次安装时清理。
-- **提示“此用户环境已有 Runtime”**：说明 `config.json` 存在。升级用 `--upgrade`；确实要换身份重装，先 `--uninstall --purge`，再用新链接安装。
+- **提示“本机已安装 CoreMan Runtime”**：说明 `config.json` 存在。提示会列出现有 Runtime 与本次链接各自连接的平台，并按当前状态给出可直接复制的命令。升级用 `--upgrade`；换平台或换身份用 `| sh -s -- --replace` 重装（旧安装整体备份，不删除）；只是服务被卸载、身份还在，用 `--register` 恢复。链接只在注册成功后才算已使用，失败后可以直接重跑。
 - **服务反复停在 failed / launchd 不再拉起**：查看 `state.json` 的 `error` 或 `runtime.log`。退出码 78 表示配置错误，按提示处理（多为链接失效：`--uninstall --purge` 后重新生成链接安装；或修正 `ca_file`）后执行 `systemctl --user restart coreman-runtime` / `launchctl kickstart -k gui/$(id -u)/org.coreman.runtime`。
 - **TLS 握手失败（`ConnectError`、证书校验失败）**：CoreMan 使用私有 CA 时确认 `config.json` 有 `ca_file` 且文件是 PEM 证书；重启服务使 `trust.pem` 重新生成。
 - **socket 丢失 / 所有请求 `execution_failed`**：驱动 socket 位于 Linux 的 `$XDG_RUNTIME_DIR/coreman-<节点ID前8位>/`，否则位于安装目录下的 `run/`；仅当路径超过 Unix socket 长度上限（常见于很长的 macOS 用户目录）时才退回 `/tmp/coreman-<UID>-<节点ID前8位>/`。Daemon 每 60 秒发现一次：socket 文件或目录缺失、或连续 2 轮连接失败时，会重建目录并重启对应驱动（有在途请求时最多推迟 30 轮）。一般 1–3 分钟内自愈；若仍失败，查看 `claude.log`/`codex.log` 后重启服务。

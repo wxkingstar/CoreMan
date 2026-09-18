@@ -5,10 +5,12 @@ HTTPS server with a stub ``install_service`` and a symlinked ``$HOME``.
 """
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +96,76 @@ def test_supervisor_stops_when_the_daemon_reports_a_configuration_error(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Management command
+# ---------------------------------------------------------------------------
+
+ECHO_INSTALL_SERVICE = """
+import json, os, sys
+def main():
+    print(json.dumps({"argv": sys.argv, "cwd": os.getcwd(), "module": __file__}))
+    return 0
+"""
+
+
+def fake_release(path: Path, install_service_source: str) -> Path:
+    (path / "runtime_daemon").mkdir(parents=True)
+    (path / "runtime_daemon/__init__.py").write_text("")
+    (path / "runtime_daemon/install_service.py").write_text(install_service_source)
+    python = path / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    return path
+
+
+def test_manage_command_ignores_the_callers_directory(tmp_path):
+    data = tmp_path / "coreman runtime"
+    release = fake_release(data / "release-a", ECHO_INSTALL_SERVICE)
+    config = data / "config.json"
+    command = lifecycle.write_manage_command(config, release)
+    assert command == data / "bin/coreman-runtime"
+    assert command.stat().st_mode & 0o777 == 0o700
+    # A checkout in the current directory must not shadow the release's module.
+    fake_release(tmp_path / "checkout", "raise SystemExit('shadowed')")
+    env = {**os.environ, "PYTHONPATH": str(tmp_path / "checkout")}
+
+    def run(*args):
+        result = subprocess.run(
+            [str(command), *args],
+            cwd=tmp_path / "checkout",
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    upgrade = run("--upgrade", "bundle.tar.gz")
+    assert upgrade["module"] == str(release / "runtime_daemon/install_service.py")
+    assert upgrade["argv"] == [
+        "coreman-runtime",
+        "--config",
+        str(config),
+        "--upgrade",
+        "bundle.tar.gz",
+    ]
+    assert upgrade["cwd"] == str(tmp_path / "checkout")
+    assert run()["argv"][-1] == "--help"
+
+    before = command.stat().st_mtime_ns
+    lifecycle.write_manage_command(config, release)
+    assert command.stat().st_mtime_ns == before
+    lifecycle.write_manage_command(config, data / "release-b")
+    assert "release-b" in command.read_text() and "release-a" not in command.read_text()
+
+
+def test_manage_command_help_names_itself(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        install_service.main(["--help"])
+    output = capsys.readouterr().out
+    assert "--register" in output and "--retire" not in output and "--replace" in output
+
+
+# ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
 
@@ -105,6 +177,7 @@ def test_registration_failure_leaves_no_identity_or_unit(tmp_path, home, systemd
         install_service.install(config, staged_config(tmp_path))
     assert not config.exists()
     assert not install_service.systemd_unit_path().exists()
+    assert not lifecycle.manage_command_path(config).exists()
     assert systemd.ran("disable", "--now")
 
 
@@ -131,12 +204,13 @@ def test_unconfirmed_install_is_kept_for_a_restart(tmp_path, home, systemd, monk
     assert config.stat().st_mode & 0o777 == 0o600
     assert install_service.systemd_unit_path().exists()
     assert systemd.ran("restart", "coreman-runtime")
+    assert str(tmp_path / "release-a") in lifecycle.manage_command_path(config).read_text()
 
 
 def test_install_never_overwrites_an_identity(tmp_path, home, systemd):
     config = tmp_path / "config.json"
     config.write_text('{"node_id": "existing"}')
-    with pytest.raises(InstallError, match="已有 Runtime"):
+    with pytest.raises(InstallError, match="本机已安装"):
         install_service.install(config, staged_config(tmp_path))
     assert json.loads(config.read_text()) == {"node_id": "existing"}
     assert not systemd.calls
@@ -199,6 +273,7 @@ def test_upgrade_switches_release_and_keeps_one_previous(upgradable, monkeypatch
     assert (release / "runtime_daemon/bin/runtime-claude").exists()
     assert upgradable["old"].exists() and not upgradable["older"].exists()
     assert [e[0] for e in upgradable["events"]] == ["stop", "write", "start"]
+    assert str(release) in lifecycle.manage_command_path(upgradable["config"]).read_text()
     assert not list(upgradable["data"].glob("stage-*"))
 
 
@@ -218,6 +293,8 @@ def test_failed_upgrade_rolls_back_to_the_previous_release(upgradable, monkeypat
     writes = [e[1] for e in upgradable["events"] if e[0] == "write"]
     assert writes[0].startswith("release-" + upgradable["digest"][:16])
     assert writes[-1] == "release-old"
+    command = lifecycle.manage_command_path(upgradable["config"]).read_text()
+    assert str(upgradable["old"]) in command and upgradable["digest"][:16] not in command
 
 
 def test_upgrade_checks_the_bundle_before_touching_the_service(upgradable):
@@ -254,7 +331,7 @@ def test_cli_rejects_flag_combinations(capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_uninstall_keeps_identity_unless_purged(tmp_path, home, systemd):
+def test_uninstall_keeps_identity_unless_purged(tmp_path, home, systemd, capsys):
     data = home / ".local/share/coreman-runtime"
     current, stale = data / "release-current", data / "release-stale"
     for path in (current, stale, data / "cli-bin", data / "run", data / "sessions/claude"):
@@ -275,9 +352,86 @@ def test_uninstall_keeps_identity_unless_purged(tmp_path, home, systemd):
     assert not (data / "cli-bin").exists() and not (data / "run").exists()
     assert current.exists() and not stale.exists() and (data / "sessions/claude").exists()
     assert json.loads(config.read_text())["service_status"] == "uninstalled"
+    command = lifecycle.manage_command_path(config)
+    assert str(current) in command.read_text()
+    assert f"{command} --register" in capsys.readouterr().out
 
     assert install_service.main(["--uninstall", "--purge", "--config", str(config)]) == 0
     assert not data.exists()
+
+
+def test_register_restores_the_service_from_the_kept_identity(tmp_path, home, systemd, monkeypatch):
+    monkeypatch.setattr(install_service, "wait_online", lambda *args, **kwargs: None)
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"release": str(tmp_path / "release-a"), "service_status": "uninstalled"})
+    )
+    assert install_service.main(["--register", "--config", str(config)]) == 0
+    assert json.loads(config.read_text())["service_status"] == "systemd-user"
+    assert systemd.ran("enable", "coreman-runtime") and systemd.ran("restart", "coreman-runtime")
+
+
+def retired_install(home):
+    data = home / ".local/share/coreman-runtime"
+    for path in (
+        data / "release-old/.venv",
+        data / "sessions/claude",
+        data / "stage-new",
+        data / "bin",
+    ):
+        path.mkdir(parents=True)
+    (data / "install.lock").write_text("")
+    (data / "runtime.log").write_text("old log")
+    config = data / "config.json"
+    config.write_text(json.dumps({"node_id": "0123456789", "service_status": "systemd-user"}))
+    unit = install_service.systemd_unit_path()
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Unit]\n")
+    return data, config, unit
+
+
+def test_retire_stops_the_runtime_and_moves_everything_aside(tmp_path, home, systemd):
+    data, config, unit = retired_install(home)
+    backup = tmp_path / "coreman-runtime.bak"
+    assert install_service.main(["--config", str(config), "--retire", str(backup)]) == 0
+    assert systemd.ran("disable", "--now") and not unit.exists()
+    assert sorted(p.name for p in data.iterdir()) == ["install.lock", "stage-new"]
+    assert json.loads((backup / "config.json").read_text())["node_id"] == "0123456789"
+    assert (backup / "runtime.log").read_text() == "old log"
+    assert (backup / "release-old/.venv").is_dir() and (backup / "sessions/claude").is_dir()
+    assert backup.stat().st_mode & 0o777 == 0o700
+
+
+def test_retire_moves_nothing_while_the_daemon_still_runs(tmp_path, home, systemd):
+    data, config, _ = retired_install(home)
+    with (data / "daemon.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        code = install_service.main(["--config", str(config), "--retire", str(tmp_path / "bak")])
+    assert code == 1
+    assert config.exists() and (data / "runtime.log").exists() and not (tmp_path / "bak").exists()
+
+
+def test_retire_leaves_the_service_alone_when_no_backup_can_be_made(
+    tmp_path, home, systemd, monkeypatch, capsys
+):
+    # Like a data directory bind-mounted under a read-only ~/.local/share.
+    data, config, unit = retired_install(home)
+    code = install_service.main(["--config", str(config), "--retire", str(tmp_path / "ro/bak")])
+    assert code == 1 and "未改动现有 Runtime" in capsys.readouterr().err
+    assert not systemd.calls and unit.exists() and config.exists()
+
+    real_stat = Path.stat
+
+    def other_device(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path.name != "bak":
+            return result
+        return os.stat_result((*result[:2], result.st_dev + 1, *result[3:]))
+
+    monkeypatch.setattr(Path, "stat", other_device)
+    code = install_service.main(["--config", str(config), "--retire", str(tmp_path / "bak")])
+    assert code == 1 and "不在同一文件系统" in capsys.readouterr().err
+    assert not systemd.calls and unit.exists() and not (tmp_path / "bak").exists()
 
 
 def test_purge_refuses_directories_that_are_not_an_install(tmp_path, home, systemd):
@@ -292,23 +446,45 @@ def test_purge_refuses_directories_that_are_not_an_install(tmp_path, home, syste
 # install.sh
 # ---------------------------------------------------------------------------
 
+# Registration is faked; --retire runs the real code, which finds no service in the fake $HOME.
 STUB_INSTALL_SERVICE = """
-import argparse, os, shutil, sys
+import argparse, json, os, pathlib, shutil, sys
+if "--retire" in sys.argv:
+    from runtime_daemon import real_install_service
+    sys.exit(real_install_service.main())
+from runtime_daemon.lifecycle import write_manage_command
 parser = argparse.ArgumentParser()
 parser.add_argument("--config")
 parser.add_argument("--staged-config")
+parser.add_argument("--register", action="store_true")
 args = parser.parse_args()
+if args.register:
+    print("registered")
+    sys.exit(0)
 if os.environ.get("FAKE_INSTALL_MODE") == "ok":
     shutil.copy(args.staged_config, args.config)
+    release = json.loads(pathlib.Path(args.staged_config).read_text())["release"]
+    write_manage_command(pathlib.Path(args.config), pathlib.Path(release))
     sys.exit(0)
 print("launchctl bootstrap failed: 5", file=sys.stderr)
 sys.exit(1)
 """
 
 
+def install_script_bundle() -> bytes:
+    files = release_files(STUB_INSTALL_SERVICE)
+    for name in ("lifecycle.py", "install_service.py"):
+        source = (ROOT / "runtime_daemon" / name).read_text()
+        files["runtime_daemon/" + name.replace("install_service", "real_install_service")] = (
+            source,
+            0o644,
+        )
+    return make_bundle(files)
+
+
 def test_install_script_retries_cleanly_with_private_ca_and_symlinked_home(tmp_path):
     pki = make_pki(tmp_path / "pki")
-    bundle = make_bundle(release_files(STUB_INSTALL_SERVICE))
+    bundle = install_script_bundle()
     digest = hashlib.sha256(bundle).hexdigest()
     real_home = tmp_path / "data-home"
     real_home.mkdir()
@@ -324,7 +500,7 @@ def test_install_script_retries_cleanly_with_private_ca_and_symlinked_home(tmp_p
             return 200, {"X-SHA256": digest, "Content-Type": "application/gzip"}, bundle
         return 404, {}, b""
 
-    def run(mode, **cfg):
+    def run(mode, *args, **cfg):
         script = (ROOT / "runtime_daemon/install.sh").read_text()
         payload = {
             "api_url": f"https://127.0.0.1:{port}",
@@ -345,7 +521,7 @@ def test_install_script_retries_cleanly_with_private_ca_and_symlinked_home(tmp_p
             "FAKE_INSTALL_MODE": mode,
         }
         return subprocess.run(
-            ["sh", str(path)], env=env, capture_output=True, text=True, timeout=300
+            ["sh", str(path), *args], env=env, capture_output=True, text=True, timeout=300
         )
 
     with https_server(pki, respond) as port:
@@ -375,4 +551,132 @@ def test_install_script_retries_cleanly_with_private_ca_and_symlinked_home(tmp_p
     assert not list(install_dir.glob("stage-*"))
 
     again = run("ok", ca_pem=pki.ca_pem)
-    assert again.returncode != 0 and "--uninstall --purge" in again.stderr
+    assert again.returncode != 0 and "未做任何改动" in again.stderr
+    assert "同一平台" in again.stderr and "| sh -s -- --replace" in again.stderr
+    assert "--cacert coreman-ca.pem" in again.stderr
+    assert f"{install_dir}/bin/coreman-runtime --upgrade" in again.stderr
+
+    def printed(result, marker):
+        return next(line.strip() for line in result.stderr.splitlines() if marker in line)
+
+    # Every printed command must work from any directory, not only from inside the release.
+    upgrade = printed(again, "--upgrade")
+    assert (
+        subprocess.run(
+            ["sh", "-c", upgrade.split(" --upgrade")[0] + " --help"],
+            cwd=tmp_path,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+    (install_dir / "config.json").write_text(
+        json.dumps({**config, "service_status": "uninstalled"})
+    )
+    uninstalled = run("ok", ca_pem=pki.ca_pem)
+    assert f"{install_dir}/bin/coreman-runtime --register" in uninstalled.stderr
+
+    # Installs from before bin/coreman-runtime get a command that changes into the release.
+    shutil.rmtree(install_dir / "bin")
+    legacy = run("ok", ca_pem=pki.ca_pem)
+    assert "恢复原节点" in legacy.stderr
+    restore = printed(legacy, "runtime_daemon.install_service")
+    assert restore.startswith("cd ") and restore.endswith("-m runtime_daemon.install_service")
+    assert (
+        subprocess.run(
+            ["sh", "-c", restore + " --help"], cwd=tmp_path, capture_output=True
+        ).returncode
+        == 0
+    )
+
+    shutil.rmtree(release)
+    broken = run("ok", ca_pem=pki.ca_pem)
+    assert (
+        broken.returncode != 0 and "--replace" in broken.stderr and "--upgrade" not in broken.stderr
+    )
+
+
+def test_install_script_replace_backs_up_the_existing_runtime(tmp_path):
+    pki = make_pki(tmp_path / "pki")
+    bundle = install_script_bundle()
+    digest = hashlib.sha256(bundle).hexdigest()
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "python3").symlink_to(sys.executable)
+    install_dir = home.resolve() / ".local/share/coreman-runtime"
+
+    def respond(path):
+        if "expired" in path:
+            return 410, {}, b""
+        if path.endswith("/bundle"):
+            return 200, {"X-SHA256": digest, "Content-Type": "application/gzip"}, bundle
+        return 404, {}, b""
+
+    def run(mode, *args, token="link.token"):
+        payload = {
+            "api_url": f"https://127.0.0.1:{port}",
+            "install_token": token,
+            "workspace_root": str(tmp_path / "projects"),
+            "ca_pem": pki.ca_pem,
+        }
+        path = tmp_path / "install.sh"
+        path.write_text(
+            (ROOT / "runtime_daemon/install.sh")
+            .read_text()
+            .replace("__COREMAN_CONFIG__", base64.b64encode(json.dumps(payload).encode()).decode())
+        )
+        env = {
+            "HOME": str(home),
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            "FAKE_INSTALL_MODE": mode,
+        }
+        return subprocess.run(
+            ["sh", str(path), *args], env=env, capture_output=True, text=True, timeout=300
+        )
+
+    def backups():
+        return sorted(install_dir.parent.glob("coreman-runtime.bak-*"))
+
+    # The previous runtime: another platform's identity plus sessions and logs.
+    install_dir.mkdir(parents=True)
+    old_config = {"api_url": "http://localhost:8081", "node_id": "old-node-id"}
+    (install_dir / "config.json").write_text(json.dumps(old_config))
+    (install_dir / "sessions").mkdir()
+    (install_dir / "runtime.log").write_text("old log")
+
+    with https_server(pki, respond) as port:
+        assert run("ok", "--force").returncode != 0
+
+        expired = run("ok", "--replace", token="expired.token")
+        assert expired.returncode != 0 and "安装包下载失败" in expired.stderr
+        assert json.loads((install_dir / "config.json").read_text()) == old_config
+        assert not backups()
+
+        failed = run("fail", "--replace")
+        assert failed.returncode != 0 and "服务注册失败" in failed.stderr
+        assert "要恢复原 Runtime" in failed.stderr
+        assert not (install_dir / "config.json").exists()
+        [backup] = backups()
+        assert json.loads((backup / "config.json").read_text()) == old_config
+        assert (backup / "runtime.log").read_text() == "old log"
+
+        restore = next(line.strip() for line in failed.stderr.splitlines() if "&& mv " in line)
+        assert subprocess.run(["sh", "-c", restore], capture_output=True).returncode == 0
+        assert json.loads((install_dir / "config.json").read_text()) == old_config
+        assert not backups()
+
+        replaced = run("ok", "--replace")
+        assert replaced.returncode == 0, replaced.stderr
+        assert "已替换原 Runtime" in replaced.stdout and "http://localhost:8081" in replaced.stdout
+
+    config = json.loads((install_dir / "config.json").read_text())
+    assert config["api_url"].startswith("https://127.0.0.1:") and "node_id" not in config
+    assert (install_dir / "ca.pem").read_text() == pki.ca_pem
+    assert (install_dir / "bin/coreman-runtime").is_file()
+    [backup] = backups()
+    assert json.loads((backup / "config.json").read_text()) == old_config
+    assert (backup / "sessions").is_dir() and not (install_dir / "runtime.log").exists()
+    assert (backup / "install.lock").exists() is False

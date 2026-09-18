@@ -499,7 +499,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           :rows="4"
           readonly
           data-test="runtime-install-command"
-        /><p>{{ t('runtimeNodes.expires') }}: {{ formatDateTime(generated.expires_at) }}</p><small>{{ t('runtimeNodes.credentialHint') }}</small>
+        /><p>{{ t('runtimeNodes.expires') }}: {{ formatDateTime(generated.expires_at) }}</p><small>{{ t('runtimeNodes.credentialHint') }}</small><p><small data-test="runtime-replace-hint">{{ t('runtimeNodes.replaceHint') }}</small></p>
       </template>
       <template #footer>
         <el-button @click="dialog = false">

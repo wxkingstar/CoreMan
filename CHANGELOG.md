@@ -10,12 +10,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Create a Feishu bot by scanning a QR code while creating an AI employee. The employee configuration is validated first, the app secret stays on the server and is consumed once, and an unused app can be reused on the next attempt. The app requests CoreMan's identity, messaging and management permissions plus every "Connect Feishu" tier at once; personal authorization still narrows what is used. Requires database migration `0034`.
 - Feishu app page on the employee detail view: permissions and approval status, available "Connect Feishu" tiers, scan to add missing permissions, basic information and avatar, bot menu, availability, slash commands, requesting administrator approval and submitting releases.
+- Runtime nodes get a stable management command at `~/.local/share/coreman-runtime/bin/coreman-runtime` for upgrading, uninstalling and re-registering the service. It follows the current release, runs from any directory, and every daemon start refreshes it, so nodes installed by earlier versions also get it.
+- Installing with `curl … | sh -s -- --replace` replaces the runtime already installed for that user: the new bundle is downloaded and verified before anything is touched, then the old service is stopped and the whole install directory is moved to a sibling `coreman-runtime.bak-<timestamp>`. Nothing is deleted, and an install that fails afterwards prints the command that restores the old runtime.
+- `coreman-runtime --register` registers the service again from the identity that `--uninstall` kept.
 
 ### Changed
 
 - The create employee form now defaults to Feishu and shows only the key, name and runtime; the runtime is required and other settings keep their defaults under "More settings". The edit form is unchanged.
 - QR-created Feishu agents get the built-in slash commands `/new`, `/stop`, `/sessions` and `/help`; other Feishu bots can add them from the Feishu app page. Built-in commands, including `sessions`, now also match when sent with a leading slash.
 - The Feishu app permission list also requests `vc:meeting.meetingevent:read` and `im:chat.members:read`, and no longer reports protocol grants such as `auth:user.id:read` as missing.
+- When a runtime is already installed, the installer now names the platform each side connects to and prints commands that run as pasted. The previous hint left out the change into the release directory, so it failed with `No module named 'runtime_daemon'`, and it suggested purging the node even when the service alone had been removed.
 
 ## [0.1.0] - 2026-09-16
 
