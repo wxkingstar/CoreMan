@@ -54,3 +54,14 @@ it('shows disabled catalog entries and lets managers configure them before insta
   expect(wrapper.find('[data-test="skill-install-s2"]').exists()).toBe(true)
   wrapper.unmount()
 })
+
+it('keeps descriptions and install errors on a single truncated line', async () => {
+  const item = { id: 's1', name: 'query', description: 'Long description', enabled: true, security_level: 'public', selectable_env_groups: {}, user_env_vars: {}, security_prompt_template: null, default_data_source: null }
+  vi.mocked(allSkills).mockResolvedValue([item] as never)
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's1', name: 'query', status: 'failed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: 'git clone failed' }], pending_approvals: [] })
+  const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
+  await wrapper.get('[data-test="skills-open"]').trigger('click'); await flushPromises()
+  expect(wrapper.findAll('.truncated-text-preview').map(node => node.text())).toEqual(['安装未完成 · git clone failed', 'Long description'])
+  expect(wrapper.find('.el-table p').exists()).toBe(false)
+  wrapper.unmount()
+})
