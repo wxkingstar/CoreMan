@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import sessions
+from coreman.core.chat.commands import command_text, normalize
 from coreman.core.db.models import ChatSession, FeishuPersonalGrant, RuntimeNode, Task
 from coreman.core.feishu_personal import policy, service
 from coreman.core.prompting import sanitize_user_input
@@ -54,13 +55,23 @@ MODE_COMMANDS = {
 }
 
 
+CONNECT_WORDS = ("连接我的飞书", "连接飞书")
+# 飞书斜杠指令选中后以文本「/connect 」发来；不带斜杠的 connect 仍按普通对话处理。
+CONNECT_SLASH_COMMAND = "/connect"
+
+
 def mode_command(text: str) -> str | None:
     return MODE_COMMANDS.get(text.strip().casefold())
 
 
+def connect_requested(text: str) -> bool:
+    """本人要连接飞书：整句「连接飞书」「连接我的飞书」或斜杠指令 /connect。"""
+    return command_text(text) in CONNECT_WORDS or normalize(text) == CONNECT_SLASH_COMMAND
+
+
 def requested(text: str) -> bool:
     text = text.strip()
-    return text in ("连接我的飞书", "连接飞书") or any(
+    return connect_requested(text) or any(
         text == command or text.startswith(command + " ") or text.startswith(command + "\n")
         for command in ("/飞书个人", "/personal")
     )
@@ -175,8 +186,7 @@ async def reject_unavailable(session: AsyncSession, ctx: TaskContext, intake: In
         )
         return True
     scope = await policy.task_scope(session, ctx.task.id, str(intake.speaker.user_id))
-    text = intake.text.strip()
-    if text in ("连接我的飞书", "连接飞书"):
+    if connect_requested(intake.text):
         from coreman.runtime.worker.personal_cards import selection_card
 
         result = await service.begin_selection(session, ctx.cipher, scope)

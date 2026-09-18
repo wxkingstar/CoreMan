@@ -57,10 +57,12 @@ USER_SCOPES: tuple[str, ...] = tuple(
 )
 
 # 扫码创建智能体时默认配置的斜杠指令，对应 CoreMan 内置命令（飞书以「/指令名」文本发来）。
+# connect 等同于私聊发送「连接飞书」。
 DEFAULT_SLASH_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("new", "开始新会话（清空上下文）", "add-chat-ai_outlined"),
     ("stop", "停止当前回复", "clear_outlined"),
     ("sessions", "查看并切换最近会话", "chat_outlined"),
+    ("connect", "连接飞书，授权读取本人消息、会议和文档", "global-link_outlined"),
     ("help", "查看使用帮助", "explanation-ai_outlined"),
 )
 

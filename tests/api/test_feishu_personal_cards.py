@@ -19,6 +19,27 @@ from tests.api.test_feishu_personal_worker import intake_for
 from tests.integration.worker_helpers import build_ctx
 
 
+@pytest.mark.parametrize("text", ["连接飞书", "/connect ", "/CONNECT"])
+async def test_connect_words_and_slash_command_send_selection_card(
+    db_session, app, db_engine, text
+):
+    bot, user, original = await setup(db_session, app)
+    intake = await intake_for(db_session, bot, original, text)
+    assert await reject_unavailable(db_session, build_ctx(db_engine, original), intake)
+    await db_session.flush()
+    sent = (await db_session.scalars(select(OutboxItem))).one()
+    assert sent.payload["card"]["task_id"] == f"personal:{original.id}"
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    assert row.status == "selecting"
+
+
+async def test_bare_connect_stays_ordinary_chat(db_session, app, db_engine):
+    bot, _, original = await setup(db_session, app)
+    intake = await intake_for(db_session, bot, original, "connect")
+    assert not await reject_unavailable(db_session, build_ctx(db_engine, original), intake)
+    assert (await db_session.scalars(select(OutboxItem))).all() == []
+
+
 async def prepare(session, app, engine):
     bot, user, original = await setup(session, app)
     intake = await intake_for(session, bot, original, "连接飞书")

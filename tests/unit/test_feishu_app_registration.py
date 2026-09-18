@@ -34,11 +34,13 @@ def test_manifest_covers_identity_and_every_personal_tier():
 def test_default_slash_commands_match_builtin_commands_and_icon_catalog():
     from coreman.core.chat.commands import classify_command
     from coreman.core.chat.session_switch import is_sessions_command
+    from coreman.runtime.worker.chat.personal import connect_requested
 
     names = [name for name, _, _ in manifest.DEFAULT_SLASH_COMMANDS]
-    assert names == ["new", "stop", "sessions", "help"]
+    assert names == ["new", "stop", "sessions", "connect", "help"]
     for name in names:
-        assert classify_command(f"/{name}") or is_sessions_command(f"/{name}")
+        text = f"/{name} "
+        assert classify_command(text) or is_sessions_command(text) or connect_requested(text)
     for _, description, icon in manifest.DEFAULT_SLASH_COMMANDS:
         assert description and icon.endswith("_outlined")
 

@@ -53,7 +53,7 @@ class FakeFeishu:
 
     async def ensure_default_commands(self, client: FeishuClient) -> list[str]:
         self.default_commands.append(client.app_id)
-        return ["new", "stop", "sessions", "help"]
+        return ["new", "stop", "sessions", "connect", "help"]
 
 
 async def _member(client: httpx.AsyncClient, db_session: AsyncSession, name: str = "creator"):

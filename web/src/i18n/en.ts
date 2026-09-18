@@ -153,7 +153,7 @@ const en = {
     commandAdd: 'Add command',
     defaultCommands: 'Add built-in commands',
     defaultCommandsAdded: 'Added {commands}. Takes effect in about 5 minutes',
-    defaultCommandsPresent: 'All built-in commands (/new /stop /sessions /help) already exist',
+    defaultCommandsPresent: 'All built-in commands (/new /stop /sessions /connect /help) already exist',
     commandEdit: 'Edit command',
     commandSaved: 'Saved. Takes effect in about 5 minutes',
     commandDeleteConfirm: 'Delete the command /{command}?',
