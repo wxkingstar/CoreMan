@@ -56,8 +56,8 @@ PROVIDERS = ("claude", "codex")
 # The retired feishu_personal_restricted_v1 is never forwarded, so servers that
 # still expect the restricted mode send no personal credentials to this node.
 DRIVER_CAPABILITIES = {
-    "claude": ("feishu_personal_tools_v1", "owner_session_view_v1"),
-    "codex": ("feishu_personal_tools_v1", "owner_session_view_v1"),
+    "claude": ("feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1"),
+    "codex": ("feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1"),
 }
 CONTROL_LEASE_SECONDS = 40.0
 FRAME_RETRY_SECONDS = 25.0

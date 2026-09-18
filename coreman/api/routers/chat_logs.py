@@ -50,9 +50,10 @@ async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID
 
 def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[ColumnElement[bool]]:
     """可见性条件：我管得着的 bot，或者我自己参与过的对话。"""
-    # 飞书私聊，以及以本人身份运行的定时任务：只有本人能看。
+    # 飞书私聊、挂了本人企业微信工具的轮次，以及以本人身份运行的定时任务：只有本人能看。
     private = or_(
         and_(ChatLog.platform == "feishu", ChatLog.chat_type == "single"),
+        ChatLog.private.is_(True),
         and_(
             ChatLog.chat_type == "cron",
             ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),

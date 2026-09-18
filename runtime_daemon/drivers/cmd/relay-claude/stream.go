@@ -164,7 +164,7 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, args []string,
 	}
 
 	t := newSSETranslator(chatID, created, model, sessionID, identityMeter{}, "")
-	t.private = openai.FeishuPersonalEnabled(envVars)
+	t.private = openai.PersonalPrivate(envVars)
 
 processLines:
 	for {
@@ -273,7 +273,7 @@ processLines:
 			continue
 		}
 
-		if openai.DebugLogging() && !openai.FeishuPersonalEnabled(envVars) {
+		if openai.DebugLogging() && !openai.PersonalPrivate(envVars) {
 			log.Printf("[BUFFERED STREAM RAW] %s", line)
 		}
 
@@ -376,7 +376,7 @@ processLines:
 							sessionStore.LogDelta(sessionID, delta.Text)
 							safeText := filter.Feed(delta.Text)
 							if safeText != "" {
-								log.Printf("[BUFFERED STREAM DELTA] %s", openai.PrivateContentPreview(safeText, 200, openai.FeishuPersonalEnabled(envVars)))
+								log.Printf("[BUFFERED STREAM DELTA] %s", openai.PrivateContentPreview(safeText, 200, openai.PersonalPrivate(envVars)))
 								chunk := openai.ChatCompletionResponse{
 									ID:      chatID,
 									Object:  "chat.completion.chunk",
@@ -408,7 +408,7 @@ processLines:
 				fullText.WriteString(text)
 				safeText := filter.Feed(text)
 				if safeText != "" {
-					log.Printf("[BUFFERED STREAM FALLBACK] %s", openai.PrivateContentPreview(safeText, 200, openai.FeishuPersonalEnabled(envVars)))
+					log.Printf("[BUFFERED STREAM FALLBACK] %s", openai.PrivateContentPreview(safeText, 200, openai.PersonalPrivate(envVars)))
 					chunk := openai.ChatCompletionResponse{
 						ID:      chatID,
 						Object:  "chat.completion.chunk",

@@ -283,7 +283,7 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
     client, db_session
 ):
     _, body, headers = await enrollment(client, db_session)
-    flags = ("feishu_personal_tools_v1", "owner_session_view_v1")
+    flags = ("feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1")
     for declared in (dict.fromkeys(flags, True), {}):
         response = await client.post(
             "/api/runtime/heartbeat",
@@ -296,8 +296,9 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
             assert node.capabilities["claude"].get(flag) is bool(declared)
 
 
+@pytest.mark.parametrize("flag", ["feishu_personal_tools_v1", "wecom_personal_tools_v1"])
 @pytest.mark.parametrize("value", ["true", 1])
-async def test_heartbeat_personal_capability_requires_boolean(client, db_session, value):
+async def test_heartbeat_personal_capability_requires_boolean(client, db_session, value, flag):
     _, _, headers = await enrollment(client, db_session)
     response = await client.post(
         "/api/runtime/heartbeat",
@@ -305,7 +306,7 @@ async def test_heartbeat_personal_capability_requires_boolean(client, db_session
         json={
             "version": "test",
             "service_status": "launchd",
-            "claude": {"feishu_personal_tools_v1": value},
+            "claude": {flag: value},
             "codex": {},
         },
     )

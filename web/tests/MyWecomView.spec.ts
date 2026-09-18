@@ -1,0 +1,141 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { i18n } from '@/i18n'
+import MyWecomView from '@/views/MyWecomView.vue'
+import { wecomAuthorizations, type WecomAuthorization } from '@/api/wecomAuthorizations'
+vi.mock('@/api/wecomAuthorizations', () => ({ wecomAuthorizations: { list: vi.fn(), revoke: vi.fn() } }))
+const row: WecomAuthorization = { bot_id: 'bot-1', bot_name: 'Personal Assistant', status: 'connected', authorization_level: 'all_except_send', verified_at: '2026-09-18T02:03:04+00:00', selection_expires_at: null, retention_notice: 'server notice' }
+const render = () => mount(MyWecomView, { global: { plugins: [ElementPlus, i18n] } })
+beforeEach(() => { vi.restoreAllMocks(); vi.mocked(wecomAuthorizations.list).mockReset().mockResolvedValue({ items: [row] }); vi.mocked(wecomAuthorizations.revoke).mockReset().mockResolvedValue({ ok: true }) })
+describe('own WeCom connections', () => {
+  it('explains the bot-bound authorizer, commands, tiers and privacy without a browser connect action', async () => {
+    const w = render(); await flushPromises()
+    const guide = w.get('.wecom-connect-guide')
+    expect(guide.text()).toContain('连接企业微信')
+    expect(guide.text()).toContain('断开企业微信')
+    expect(guide.text()).toContain('可使用权限')
+    expect(guide.text()).toContain('7 天')
+    for (const key of ['authorizerHint', 'retentionNotice', 'privateOnly']) expect(guide.text()).toContain(i18n.global.t(`myWecom.${key}`))
+    for (const level of ['readonly', 'all_except_send', 'all']) {
+      expect(guide.text()).toContain(i18n.global.t(`myWecom.levels.${level}`))
+      expect(guide.text()).toContain(i18n.global.t(`myWecom.capabilityHints.${level}`))
+    }
+    expect(w.find('[data-test="connect"]').exists()).toBe(false)
+    w.unmount()
+  })
+  it('shows every status with its guidance and hides revoke for disconnected bots', async () => {
+    const statuses = ['connected', 'selecting', 'expired', 'revoked'] as const
+    vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: statuses.map((status) => ({ ...row, bot_id: status, status, verified_at: status === 'connected' ? row.verified_at : null, selection_expires_at: status === 'selecting' ? '2026-09-18T02:13:04+00:00' : null })) })
+    const w = render(); await flushPromises()
+    const cards = w.findAll('.wecom-grant')
+    expect(cards).toHaveLength(4)
+    statuses.forEach((status, i) => expect(cards[i].get('.el-tag').text()).toBe(i18n.global.t(`myWecom.status.${status}`)))
+    expect(cards[0].get('.el-tag').classes()).toContain('el-tag--success')
+    expect(cards[1].get('.el-tag').classes()).toContain('el-tag--warning')
+    expect(cards[2].get('.el-tag').classes()).toContain('el-tag--warning')
+    expect(cards[3].get('.el-tag').classes()).toContain('el-tag--info')
+    expect(cards[0].text()).toContain(i18n.global.t('myWecom.levels.all_except_send'))
+    expect(cards[0].text()).toContain(i18n.global.t('myWecom.capabilityHints.all_except_send'))
+    expect(cards[1].text()).toContain(i18n.global.t('myWecom.selectingHint'))
+    expect(cards[1].text()).toContain(i18n.global.t('myWecom.selectionExpiresAt'))
+    expect(cards[2].text()).toContain(i18n.global.t('myWecom.expiredHint', { command: '连接企业微信' }))
+    expect(cards[3].text()).toContain(i18n.global.t('myWecom.reconnectHint', { command: '连接企业微信' }))
+    for (const card of cards.slice(1)) expect(card.text()).toContain(i18n.global.t('myWecom.inactive'))
+    expect(w.find('[data-test="revoke-connected"]').exists()).toBe(true)
+    expect(w.find('[data-test="revoke-selecting"]').exists()).toBe(true)
+    expect(w.find('[data-test="revoke-revoked"]').exists()).toBe(false)
+    w.unmount()
+  })
+  it('shows when the authorizer was last checked with WeCom only when known', async () => {
+    vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: [row, { ...row, bot_id: 'bot-2', verified_at: null }] })
+    const w = render(); await flushPromises()
+    const cards = w.findAll('.wecom-grant')
+    expect(cards[0].text()).toContain(i18n.global.t('myWecom.verifiedAt'))
+    expect(cards[0].get('[data-test="verified-at"]').text()).toMatch(/^2026-09-18 \d\d:03:04$/)
+    expect(cards[1].text()).not.toContain(i18n.global.t('myWecom.verifiedAt'))
+    w.unmount()
+  })
+  it('does not present the default tier as the users choice while selecting', async () => {
+    vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'selecting', authorization_level: 'readonly', verified_at: null }] })
+    const w = render(); await flushPromises()
+    const overview = w.get('.wecom-permission-overview')
+    expect(overview.text()).toContain(i18n.global.t('myWecom.unselected'))
+    expect(overview.text()).not.toContain(i18n.global.t('myWecom.levels.readonly'))
+    w.unmount()
+  })
+  it('cancelling confirmation does not disconnect', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const w = render(); await flushPromises(); await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+    expect(wecomAuthorizations.revoke).not.toHaveBeenCalled()
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(i18n.global.t('myWecom.confirmRevoke', { name: row.bot_name }), i18n.global.t('myWecom.revoke'), { type: 'warning' })
+    w.unmount()
+  })
+  it('disconnects the selected bot and refreshes its visible state', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const success = vi.spyOn(ElMessage, 'success')
+    const w = render(); await flushPromises()
+    vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'revoked', verified_at: null }] })
+    await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+    expect(wecomAuthorizations.revoke).toHaveBeenCalledWith('bot-1')
+    expect(success).toHaveBeenCalledWith(i18n.global.t('myWecom.revoked'))
+    expect(w.text()).toContain(i18n.global.t('myWecom.status.revoked'))
+    expect(w.find('[data-test="revoke-bot-1"]').exists()).toBe(false); w.unmount()
+  })
+  it('keeps the connection visible when disconnecting fails, and hides raw error details', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const failure = vi.spyOn(ElMessage, 'error')
+    vi.mocked(wecomAuthorizations.revoke).mockRejectedValueOnce(new Error('secret-token'))
+    const w = render(); await flushPromises()
+    await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+    expect(failure).toHaveBeenCalledWith(i18n.global.t('myWecom.revokeError'))
+    expect(w.text()).toContain(i18n.global.t('myWecom.status.connected'))
+    expect(w.get('[data-test="revoke-bot-1"]').attributes('disabled')).toBeUndefined()
+    expect(w.text()).not.toContain('secret-token')
+    w.unmount()
+  })
+  it('offers retry after list failure without displaying raw upstream errors', async () => {
+    vi.mocked(wecomAuthorizations.list).mockRejectedValueOnce(new Error('secret-token'))
+    const w = render(); await flushPromises()
+    expect(w.text()).toContain(i18n.global.t('myWecom.loadError')); expect(w.text()).not.toContain('secret-token')
+    await w.findAll('button').find(b => b.text() === i18n.global.t('workspace.retry'))!.trigger('click'); await flushPromises()
+    expect(w.text()).toContain(row.bot_name); w.unmount()
+  })
+  it('shows the empty state when nothing is connected', async () => {
+    vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: [] })
+    const w = render(); await flushPromises()
+    expect(w.text()).toContain(i18n.global.t('myWecom.empty'))
+    w.unmount()
+  })
+})
+
+it('automatically discovers a connection completed in the private chat and stops after leaving', async () => {
+  vi.useFakeTimers()
+  vi.mocked(wecomAuthorizations.list).mockResolvedValueOnce({ items: [] })
+  const w = render()
+  try {
+    await flushPromises()
+    expect(w.text()).toContain(i18n.global.t('myWecom.empty'))
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(w.text()).toContain(row.bot_name)
+    w.unmount()
+    const calls = vi.mocked(wecomAuthorizations.list).mock.calls.length
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(wecomAuthorizations.list).toHaveBeenCalledTimes(calls)
+  } finally { vi.useRealTimers() }
+})
+it('does not let a stale automatic refresh restore access after disconnecting', async () => {
+  vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+  const w = render(); await flushPromises()
+  let resolve!: (value: { items: WecomAuthorization[] }) => void
+  vi.mocked(wecomAuthorizations.list).mockReturnValueOnce(new Promise(r => { resolve = r }))
+  window.dispatchEvent(new Event('focus')); await flushPromises()
+  vi.mocked(wecomAuthorizations.list).mockResolvedValue({ items: [{ ...row, status: 'revoked', verified_at: null }] })
+  await w.get('[data-test="revoke-bot-1"]').trigger('click'); await flushPromises()
+  resolve({ items: [row] }); await flushPromises()
+  expect(w.text()).toContain(i18n.global.t('myWecom.status.revoked'))
+  expect(w.find('[data-test="revoke-bot-1"]').exists()).toBe(false)
+  w.unmount()
+})

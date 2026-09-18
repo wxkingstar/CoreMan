@@ -240,30 +240,37 @@ func TestLogRequestNeverRecordsEnvVars(t *testing.T) {
 	}
 }
 
-// Feishu personal tools are additive, so their sessions are ordinary ones:
-// persisted, listed and hydrated like any other, still without env vars.
+// Feishu and WeCom personal tools are additive, so their sessions are ordinary
+// ones: persisted, listed and hydrated like any other, still without env vars.
 func TestPersonalSessionIsOrdinary(t *testing.T) {
-	dir := t.TempDir()
-	s := New(dir)
-	s.LogRequest("personal", &openai.ChatCompletionRequest{
-		EnvVars:  map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/mcp", "COREMAN_FEISHU_PERSONAL_TOKEN": "personal-secret"},
-		Messages: []openai.ChatMessage{{Role: "user", Content: json.RawMessage(`"my calendar"`)}},
-	})
-	s.LogDelta("personal", "meeting at ten")
+	for name, env := range map[string]map[string]string{
+		"feishu": {"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/mcp", "COREMAN_FEISHU_PERSONAL_TOKEN": "personal-secret"},
+		"wecom":  {"COREMAN_PLATFORM": "wecom", "COREMAN_CHAT_TYPE": "single", "COREMAN_WECOM_PERSONAL_URL": "https://example.test/mcp", "COREMAN_WECOM_PERSONAL_TOKEN": "personal-secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			s := New(dir)
+			s.LogRequest("personal", &openai.ChatCompletionRequest{
+				EnvVars:  env,
+				Messages: []openai.ChatMessage{{Role: "user", Content: json.RawMessage(`"my calendar"`)}},
+			})
+			s.LogDelta("personal", "meeting at ten")
 
-	disk, err := os.ReadFile(filepath.Join(dir, "personal.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(disk), "meeting at ten") || strings.Contains(string(disk), "personal-secret") || strings.Contains(string(disk), "env_vars") {
-		t.Fatalf("unexpected personal log: %s", disk)
-	}
-	rec := httptest.NewRecorder()
-	s.ListHandler()(rec, httptest.NewRequest("GET", "/sessions", nil))
-	if !strings.Contains(rec.Body.String(), `"personal"`) {
-		t.Fatalf("personal session not listed: %s", rec.Body.String())
-	}
-	if !strings.Contains(historyText(t, New(dir).GetOrCreate("personal")), "meeting at ten") {
-		t.Fatal("personal session not hydrated from disk")
+			disk, err := os.ReadFile(filepath.Join(dir, "personal.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(disk), "meeting at ten") || strings.Contains(string(disk), "personal-secret") || strings.Contains(string(disk), "env_vars") {
+				t.Fatalf("unexpected personal log: %s", disk)
+			}
+			rec := httptest.NewRecorder()
+			s.ListHandler()(rec, httptest.NewRequest("GET", "/sessions", nil))
+			if !strings.Contains(rec.Body.String(), `"personal"`) {
+				t.Fatalf("personal session not listed: %s", rec.Body.String())
+			}
+			if !strings.Contains(historyText(t, New(dir).GetOrCreate("personal")), "meeting at ten") {
+				t.Fatal("personal session not hydrated from disk")
+			}
+		})
 	}
 }

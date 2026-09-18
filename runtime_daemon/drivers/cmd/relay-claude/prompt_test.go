@@ -40,11 +40,12 @@ func imagePart(url string) map[string]any {
 }
 
 // Images reach the model as native blocks, and tools also get the image file
-// in the session directory. Feishu personal tools are additive, so a turn that
-// mounts them handles attachments exactly like an ordinary turn.
+// in the session directory. Feishu and WeCom personal tools are additive, so a
+// turn that mounts them handles attachments exactly like an ordinary turn.
 func TestImagesReachCLIAsNativeBlocks(t *testing.T) {
 	personal := map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/personal", "COREMAN_FEISHU_PERSONAL_TOKEN": "secret"}
-	for name, env := range map[string]map[string]string{"ordinary": nil, "personal": personal} {
+	wecom := map[string]string{"COREMAN_PLATFORM": "wecom", "COREMAN_CHAT_TYPE": "single", "COREMAN_WECOM_PERSONAL_URL": "https://example.test/wecom", "COREMAN_WECOM_PERSONAL_TOKEN": "secret"}
+	for name, env := range map[string]map[string]string{"ordinary": nil, "personal": personal, "wecom personal": wecom} {
 		t.Run(name, func(t *testing.T) {
 			stdinLog := filepath.Join(t.TempDir(), "stdin.json")
 			t.Setenv("STDIN_LOG", stdinLog)

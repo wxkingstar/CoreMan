@@ -44,13 +44,16 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") {
 			continue
 		}
 		env = append(env, e)
 	}
+	// Each personal tools credential reaches only a turn that mounts its server.
+	feishu := openai.FeishuPersonalEnabled(extra)
+	wecom := openai.WecomPersonalEnabled(extra)
 	for k, v := range extra {
-		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !openai.FeishuPersonalEnabled(extra) {
+		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) {
 			continue
 		}
 		env = append(env, k+"="+v)
@@ -167,6 +170,14 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		out.Args = append(out.Args, "-c", "mcp_servers.coreman_feishu_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_feishu_personal.bearer_token_env_var="COREMAN_FEISHU_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_feishu_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_feishu_personal.enabled=false")
+	}
+
+	// WeCom personal tools are an independent server under the same rules.
+	if openai.WecomPersonalEnabled(req.EnvVars) {
+		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_WECOM_PERSONAL_URL"]))
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_wecom_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_wecom_personal.bearer_token_env_var="COREMAN_WECOM_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=true")
+	} else {
+		out.Args = append(out.Args, "-c", `mcp_servers.coreman_wecom_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=false")
 	}
 
 	// Image attachments via codex's native `-i FILE` mechanism. This is
@@ -364,7 +375,7 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 		// An oversized line must not end the scan early: the pipe would stop
 		// draining and a child blocked writing stderr never exits.
 		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		private := openai.FeishuPersonalEnabled(envExtra)
+		private := openai.PersonalPrivate(envExtra)
 		for s.Scan() {
 			line := openai.RedactCollaborationToken(s.Text(), envExtra)
 			// The in-memory tail keeps the real text so a personal turn can

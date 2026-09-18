@@ -193,6 +193,12 @@ class OpenStage(ChatStageBase):
         system_prompt, env = await configure_personal(
             session, ctx, intake, info.relay_session_id, system_prompt, env
         )
+        from coreman.runtime.worker.chat import wecom_personal
+
+        system_prompt, env = await wecom_personal.configure(
+            session, ctx, intake, info.relay_session_id, system_prompt, env
+        )
+        ctx.private_turn = wecom_personal.mounted(env)
         session_url = await session_link(session, ctx, intake, relay, info.relay_session_id)
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
