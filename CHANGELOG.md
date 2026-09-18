@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A failed skill installation now says why in the skill management dialog instead of always showing "安装未完成". Runtime nodes return the Agent's fixed error message (for example "工作目录不存在", or "Git 来源不在白名单内" from nodes that predate the change above, shown with a hint to upgrade the node or add the host to `git_hosts`) as an `operation_failed` result and write it to `runtime.log`; command output, paths and credentials are still never returned or logged. Checks that fail before anything reaches the node say that nothing was executed, and the worker logs every failure with the task, bot and skill IDs and an error code. Older nodes still report only `execution_failed`; the dialog then points to the node's `runtime.log` and suggests upgrading the node.
 - A runtime node could pick up a new request up to a second late. The caller renewed its lease on every read, which briefly locked the request just as the node's long poll, woken by the new request, tried to claim it and skipped it. The lease is now renewed every 10 seconds.
 
 ## [0.1.0] - 2026-09-16

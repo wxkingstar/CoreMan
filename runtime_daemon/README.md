@@ -161,6 +161,7 @@ $MANAGE --register           # 卸载服务后，按保留的身份重新注册
 - **服务反复停在 failed / launchd 不再拉起**：查看 `state.json` 的 `error` 或 `runtime.log`。退出码 78 表示配置错误，按提示处理（多为链接失效：`--uninstall --purge` 后重新生成链接安装；或修正 `ca_file`）后执行 `systemctl --user restart coreman-runtime` / `launchctl kickstart -k gui/$(id -u)/org.coreman.runtime`。
 - **TLS 握手失败（`ConnectError`、证书校验失败）**：CoreMan 使用私有 CA 时确认 `config.json` 有 `ca_file` 且文件是 PEM 证书；重启服务使 `trust.pem` 重新生成。
 - **socket 丢失 / 所有请求 `execution_failed`**：驱动 socket 位于 Linux 的 `$XDG_RUNTIME_DIR/coreman-<节点ID前8位>/`，否则位于安装目录下的 `run/`；仅当路径超过 Unix socket 长度上限（常见于很长的 macOS 用户目录）时才退回 `/tmp/coreman-<UID>-<节点ID前8位>/`。Daemon 每 60 秒发现一次：socket 文件或目录缺失、或连续 2 轮连接失败时，会重建目录并重启对应驱动（有在途请求时最多推迟 30 轮）。一般 1–3 分钟内自愈；若仍失败，查看 `claude.log`/`codex.log` 后重启服务。
+- **技能安装失败**：管理台「技能管理」直接显示节点返回的原因，`runtime.log` 同时记录 `Operation install-skill failed: <原因>`（只有 Agent 的固定提示，不含命令输出与凭证）。新版节点安装技能不检查 Git 白名单；较旧的节点在技能仓库域名不在 `config.json` 的 `git_hosts` 中时报「Git 来源不在白名单内」，升级节点，或把主机名（如 `git.example.com`，不含协议与路径）加入该列表后重启服务。更早的节点只会报“未返回具体原因”，升级后才能看到节点侧原因。
 - **服务已安装但未确认上线**：常见原因是网络/代理不可达或 CLI 探测较慢。查看 `runtime.log`，修复后重启服务，无需重新兑换链接。
 
 ## 发布与开发

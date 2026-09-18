@@ -27,9 +27,73 @@ from coreman.core.db.models import (
 from coreman.core.knowledge import installation as installs
 from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
 from coreman.core.knowledge.skill_policy import env_vars, selected_groups, user_inputs
-from coreman.core.relay.agent_client import call_agent
+from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
+
+INCOMPLETE = "安装未完成，请检查实例状态后重新提交；远端操作可能已执行。"
+CANCELLED = "安装已取消；远端操作可能已执行，请检查实例状态后按需重新提交。"
+
+# 安装前后校验失败的错误码 → 用户可见原因。
+REASONS = {
+    "installation_no_longer_active": "安装任务已取消或已结束",
+    "installation_configuration_changed": "技能已停用或修改，或安装记录已变化",
+    "installation_target_changed": "技能来源、机器人所属实例或工作目录在提交后发生了变化",
+    "installation_permission_revoked": "提交人已不是该机器人的管理员，或执行人账号已停用",
+    "installation_approval_invalid": "内部技能审批已失效，或与本次安装的数据库、安全提示不一致",
+    "installation_actor_mismatch": "执行人与提交人不一致",
+    "installation_agent_unavailable": "机器人所属实例已停用或未绑定运行时节点",
+    "installation_directory_shared": "同一实例上另有机器人使用相同工作目录，安装会影响对方",
+    "installation_preset_missing": "所选环境变量预设已被删除",
+    "installation_preset_conflict": "所选环境变量预设中有同名变量但取值不同",
+    "installation_environment_conflict": "与该机器人已安装技能的环境变量同名但取值不同",
+    "installation_mcp_missing": "MCP 技能缺少 MCP 配置",
+    "installation_source_missing": "技能及其来源都没有配置 Git 地址",
+    "installation_token_repository_mismatch": "技能仓库与来源仓库不一致，不能使用来源的访问令牌",
+    "installation_configuration_changed_during_execution": "安装期间实例或环境变量配置发生了变化",
+}
+
+# 节点固定提示（前缀）→ 处理建议；退出码等后缀可变。
+HINTS = (
+    (
+        "Git 来源不在白名单内",
+        # 新版节点安装技能不再检查白名单，只有未升级的节点还会这样拒绝。
+        "该节点版本较旧，安装技能仍受 Git 白名单限制：请升级运行时节点，"
+        "或在节点 config.json 的 git_hosts 中加入技能仓库域名后重启服务。",
+    ),
+    ("工作目录不存在", "机器人的工作目录尚未在运行时节点上创建，请先与机器人对话一次后重试。"),
+    ("操作超时", "请检查运行时节点到 Git 仓库与 npm 源的网络后重试。"),
+    ("操作失败（退出码", "Git 或 npx 命令失败，请在运行时节点上检查仓库权限、网络与 npx 后重试。"),
+)
+
+
+def failure_reason(exc: BaseException, *, remote: bool) -> tuple[str, str]:
+    """返回（日志用错误码，用户可见原因）。
+
+    原因只由平台固定文案和节点 operation_failed 的固定提示组成：Agent 的其它错误文本
+    可能含第三方输出，不写入库。
+    """
+    if isinstance(exc, ValueError) and str(exc) in REASONS:
+        code = str(exc)
+        if remote:
+            return code, f"安装未完成：{REASONS[code]}；远端操作已执行，请检查实例状态后重新提交。"
+        return code, f"安装未执行：{REASONS[code]}，请处理后重新提交。"
+    if isinstance(exc, AgentError):
+        code = exc.code or "agent_error"
+        if exc.detail:
+            hint = next((h for p, h in HINTS if exc.detail.startswith(p)), "处理后请重新提交。")
+            return code, f"运行时节点报告安装失败：{exc.detail}。{hint}"
+        if exc.code == "execution_failed":
+            return code, (
+                "运行时节点执行安装时出错，未返回具体原因（节点版本较旧或出现意外错误）；"
+                "请查看节点 runtime.log，或升级运行时后重新提交。远端操作可能已执行。"
+            )
+        return code, INCOMPLETE
+    if isinstance(exc, TimeoutError):
+        return "timeout", (
+            "安装超过 16 分钟未完成，已停止等待；请检查实例状态后重新提交，远端操作可能已执行。"
+        )
+    return type(exc).__name__, INCOMPLETE
 
 
 async def checked(
@@ -135,7 +199,9 @@ class SkillInstallHandler:
     kind = "skill_install"
 
     async def run(self, ctx: TaskContext) -> None:
-        work = asyncio.create_task(self.install(ctx))
+        # 是否已向节点下发安装：之后的校验失败意味着远端操作已经执行。
+        progress = {"remote": False}
+        work = asyncio.create_task(self.install(ctx, progress))
         stopping = asyncio.create_task(ctx.cancel_event.wait())
         try:
             async with asyncio.timeout(960):
@@ -146,19 +212,28 @@ class SkillInstallHandler:
         except asyncio.CancelledError:
             work.cancel()
             await asyncio.gather(work, return_exceptions=True)
-            await self.fail(ctx, cancelled=True)
+            ctx.log.info("skill_install_cancelled", skill_id=ctx.task.payload.get("skill_id"))
+            await self.fail(ctx, CANCELLED, cancelled=True)
             if not ctx.cancel_event.is_set():
                 raise
-        except Exception:
+        except Exception as exc:
             work.cancel()
             await asyncio.gather(work, return_exceptions=True)
-            # Agent 错误可能含第三方输出；仅返回固定文案。
-            await self.fail(ctx)
+            code, reason = failure_reason(exc, remote=progress["remote"])
+            ctx.log.warning(
+                "skill_install_failed",
+                skill_id=ctx.task.payload.get("skill_id"),
+                error_code=code,
+                error_type=type(exc).__name__,
+                detail=exc.detail if isinstance(exc, AgentError) else None,
+                remote=progress["remote"],
+            )
+            await self.fail(ctx, reason)
         finally:
             stopping.cancel()
             await asyncio.gather(stopping, return_exceptions=True)
 
-    async def install(self, ctx: TaskContext) -> None:
+    async def install(self, ctx: TaskContext, progress: dict[str, bool]) -> None:
         async with ctx.session_factory() as session:
             bot, skill, row, relay, inputs, approval, values = await checked(session, ctx)
             source = await session.get(SkillSource, skill.source_id)
@@ -193,6 +268,7 @@ class SkillInstallHandler:
             relay_version = relay.version
             await session.commit()
         if needs_code:
+            progress["remote"] = True
             await call_agent(relay, ctx.cipher, "install-skill", payload)
         async with ctx.session_factory() as session:
             bot, skill, row, relay, inputs, approval, current_values = await checked(session, ctx)
@@ -222,7 +298,7 @@ class SkillInstallHandler:
             )
             await session.commit()
 
-    async def fail(self, ctx: TaskContext, *, cancelled: bool = False) -> None:
+    async def fail(self, ctx: TaskContext, reason: str, *, cancelled: bool = False) -> None:
         async with ctx.session_factory() as session:
             await session.scalar(select(Bot).where(Bot.id == ctx.task.bot_id).with_for_update())
             row = await session.get(
@@ -234,9 +310,9 @@ class SkillInstallHandler:
                 status="cancelled" if cancelled else "failed",
                 only_active=True,
                 error_code="skill_install_incomplete",
-                error_message="安装未完成，请检查实例状态后重新提交；远端操作可能已执行。",
+                error_message=reason,
             )
             if row and row.install_task_id == ctx.task.id:
                 row.status, row.install_task_id = "failed", None
-                row.error_message = "安装未完成，请检查实例状态后重新提交；远端操作可能已执行。"
+                row.error_message = reason
             await session.commit()
