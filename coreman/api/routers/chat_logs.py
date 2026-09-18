@@ -48,9 +48,7 @@ async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID
     return ids
 
 
-def _scope(
-    ids: set[uuid.UUID] | None, user: User, *, bot_token: bool = False
-) -> list[ColumnElement[bool]]:
+def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[ColumnElement[bool]]:
     """可见性条件：我管得着的 bot，或者我自己参与过的对话。"""
     private = and_(ChatLog.platform == "feishu", ChatLog.chat_type == "single")
     # A bot token can originate in a group, even when its human identity is the owner.

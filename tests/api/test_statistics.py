@@ -52,6 +52,45 @@ async def test_statistics_scope_timezone_and_missing_counts(client, db_session):
     ).status_code == 422
 
 
+async def test_statistics_hides_feishu_private_from_bot_token(client, db_session, monkeypatch):
+    import uuid
+
+    from coreman.api import bot_auth
+
+    actor = await login_as(client, db_session)
+    for platform in ("wecom", "feishu"):
+        db_session.add(
+            ChatLog(
+                bot_id=uuid.uuid4(),
+                bot_key="bot",
+                platform=platform,
+                user_id=actor.id,
+                user_name="owner",
+                chat_type="single",
+                message_type="text",
+                status="success",
+                request_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
+                input_tokens=7,
+            )
+        )
+    await db_session.commit()
+    params = {"start": "2026-09-01", "end": "2026-09-01"}
+    data = (await client.get("/api/admin/statistics", params=params)).json()["data"]
+    assert data["total"]["messages"] == 2
+
+    async def token_user(request, session):
+        return actor
+
+    monkeypatch.setattr(bot_auth, "token_user", token_user)
+    client.cookies.set("bot_token", "verified-owner-token")
+    result = await client.get("/api/admin/statistics", params=params)
+    assert result.status_code == 200, result.text
+    data = result.json()["data"]
+    # 令牌可能来自群聊：本人飞书私聊连聚合量也不能透出。
+    assert data["total"]["messages"] == 1 and data["total"]["input_tokens"] == 7
+    assert [row["messages"] for row in data["by_user"]] == [1]
+
+
 async def test_price_permissions_effective_date_and_unknown_usage(client, db_session):
     await login_as(client, db_session)
     body = {
