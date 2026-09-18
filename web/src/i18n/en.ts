@@ -185,6 +185,8 @@ const en = {
     aiType: 'AI type', title: 'Runtime management', intro: 'Runtimes register automatically after Daemon installation. Each user environment manages Claude Code and Codex independently.',
     install: 'Install runtime', nodes: 'Runtimes', search: 'Search name, host, user, or directory', empty: 'No runtimes yet. Create an installation link to connect your first machine.',
     workspace: 'Project root directory', version: 'Daemon version', service: 'Service management', heartbeat: 'Last heartbeat',
+    nodeGitHosts: 'Git host allowlist', nodeGitHostsHint: 'Git hosts that git_hosts in the node config.json allows the Agent to use. Edit that list (host names only) and restart the service to change it.',
+    nodeGitHostsUnknown: 'Not reported (older node)', nodeGitHostsEmpty: 'Empty (no Git host allowed)', nodeGitHostsInvalid: 'Not host names, so they never match a repository: {hosts}',
     supervised: 'Currently supervised by a process. Use the host service manager to start automatically at boot.',
     quota: 'Quota used', bots: 'Bots', noModels: 'No models discovered yet', notInstalled: 'Not installed', offline: 'Offline', online: 'Online', team: 'Team', state: 'State', draining: 'Draining',
     enable: 'Enable runtime', resume: 'Resume tasks', drain: 'Drain tasks', concurrencyUsage: 'Concurrency {n} / {total}', disableTitle: 'Disable runtime', disableConfirm: 'Disabling stops Claude Code and Codex on this runtime from accepting work and immediately cancels every call in progress. AI employees bound to it cannot reply. Disable "{name}"?', drainConfirm: '"{name}" will stop accepting new calls; calls in progress will finish. Drain it?', links: 'Installation links', name: 'Name', expires: 'Expires at', revoke: 'Revoke',

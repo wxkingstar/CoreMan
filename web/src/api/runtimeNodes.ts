@@ -11,6 +11,8 @@ export interface RuntimeNode {
   heartbeat_at: string | null; service_status: string; team_id: string | null; team_name: string | null
   /** 节点并发上限与当前进行中的调用数；Daemon 未上报时为 null。 */
   max_concurrent: number | null; active_calls: number | null
+  /** 节点 config.json 的 Git 主机白名单（只读）；旧版 Daemon 未上报时为 null。 */
+  git_hosts: string[] | null
   capabilities: Record<string, Capability>; backends: RelayOut[]
 }
 export interface InstallLink {

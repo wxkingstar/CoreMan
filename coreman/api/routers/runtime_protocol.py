@@ -120,6 +120,22 @@ class HeartbeatIn(BaseModel):
     # 协议 2 起上报；旧节点缺省为空，管理台显示为未知。
     max_concurrent: int | None = Field(default=None, ge=1, le=256)
     active_calls: int | None = Field(default=None, ge=0, le=1024)
+    # 节点 config.json 的 Git 主机白名单，只读展示；旧节点不上报时为空。
+    git_hosts: list[str] | None = None
+
+    @field_validator("git_hosts", mode="before")
+    @classmethod
+    def reported_hosts(cls, value: object) -> list[str] | None:
+        # 手工改坏的配置不能让整个心跳被拒（节点会显示离线）：原样保留可显示的条目，
+        # 写成 URL 之类不匹配的条目也要让管理员看到。
+        if not isinstance(value, list):
+            return None
+        hosts = (
+            "".join(c for c in h if c.isprintable()).strip()[:253]
+            for h in value[:50]
+            if isinstance(h, str)
+        )
+        return list(dict.fromkeys(h for h in hosts if h))
 
 
 class PollIn(BaseModel):
@@ -328,6 +344,7 @@ async def heartbeat(
             protocol_version=body.protocol,
             max_concurrent=body.max_concurrent,
             active_calls=body.active_calls,
+            git_hosts=body.git_hosts,
             capabilities={p: getattr(body, p).model_dump() for p in ("claude", "codex")},
         )
     )

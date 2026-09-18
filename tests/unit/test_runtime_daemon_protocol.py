@@ -192,3 +192,12 @@ async def test_heartbeat_reports_protocol_and_concurrency(node):
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
+
+
+def test_heartbeat_reports_the_git_hosts_the_agent_enforces(node):
+    node.config["node_token"] = "synthetic-node-token-" + "x" * 30
+    assert node.heartbeat_body()["git_hosts"] == ["github.com"]
+    node.config["git_hosts"] = ["github.com", "git.corp.example"]
+    agent = module.RuntimeAgent(node, "claude", "relay-1")
+    assert node.heartbeat_body()["git_hosts"] == ["github.com", "git.corp.example"]
+    assert agent.git_hosts == set(node.heartbeat_body()["git_hosts"])

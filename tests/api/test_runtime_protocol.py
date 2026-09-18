@@ -249,6 +249,36 @@ async def test_heartbeat_concurrency_is_listed_and_legacy_nodes_stay_unknown(cli
     assert (await client.post(endpoint, headers=headers, json=invalid)).status_code == 422
 
 
+async def test_heartbeat_git_hosts_are_listed_without_rejecting_a_bad_config(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}
+
+    async def listed(extra):
+        response = await client.post("/api/runtime/heartbeat", headers=headers, json=beat | extra)
+        assert response.status_code == 200
+        nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+        return next(n for n in nodes if n["id"] == body["node_id"])["git_hosts"]
+
+    # Older nodes do not report it: shown as unknown, not as an empty allowlist.
+    assert await listed({}) is None
+    assert await listed({"git_hosts": ["github.com", "git.corp.example"]}) == [
+        "github.com",
+        "git.corp.example",
+    ]
+    # A hand-edited config.json must not take the node offline. Entries that can never match,
+    # such as a URL, stay visible so the administrator can spot them.
+    hosts = ["https://git.corp.example/", "github.com", "github.com", 7, "bad\x1bhost", "  "]
+    assert await listed({"git_hosts": hosts}) == [
+        "https://git.corp.example/",
+        "github.com",
+        "badhost",
+    ]
+    assert len(await listed({"git_hosts": [f"h{i}.example" for i in range(80)]})) == 50
+    assert await listed({"git_hosts": ["x" * 400]}) == ["x" * 253]
+    assert await listed({"git_hosts": "github.com"}) is None
+    assert await listed({"git_hosts": []}) == []
+
+
 async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omission(
     client, db_session
 ):

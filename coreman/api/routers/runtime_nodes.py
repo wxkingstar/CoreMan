@@ -280,6 +280,7 @@ async def list_nodes(
                 # 离线节点的在执行数已过时，不展示。
                 "active_calls": n.active_calls if online(n) else None,
                 "team_id": str(n.team_id) if n.team_id else None,
+                "git_hosts": n.git_hosts,
                 "team_name": names.get(n.team_id) if n.team_id else None,
                 "backends": backends,
             }

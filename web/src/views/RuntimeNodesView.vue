@@ -145,6 +145,11 @@ function capabilityState(node: RuntimeNode, provider: string) {
   if (!node.online) return t('runtimeNodes.offline')
   return t(`runtimeNodes.login.${cap.login}`)
 }
+// 与安装链接的校验一致：写成 URL 或带路径的条目永远匹配不到仓库主机。
+const GIT_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
+function invalidGitHosts(node: RuntimeNode) {
+  return (node.git_hosts ?? []).filter(host => !GIT_HOST_RE.test(host))
+}
 onMounted(async () => {
   await refresh()
   if (canManage.value) {
@@ -211,6 +216,29 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 <div class="node-detail">
                   <p>{{ t('runtimeNodes.workspace') }}: <code>{{ row.workspace_root }}</code></p>
                   <p>{{ t('runtimeNodes.version') }}: {{ row.version }} · {{ t('runtimeNodes.service') }}: {{ row.service_status }} · {{ t('runtimeNodes.heartbeat') }}: {{ formatDateTime(row.heartbeat_at) }}</p>
+                  <div
+                    class="git-hosts"
+                    data-test="runtime-git-hosts"
+                  >
+                    <span>{{ t('runtimeNodes.nodeGitHosts') }}:</span>
+                    <span v-if="row.git_hosts == null">{{ t('runtimeNodes.nodeGitHostsUnknown') }}</span>
+                    <span v-else-if="!row.git_hosts.length">{{ t('runtimeNodes.nodeGitHostsEmpty') }}</span>
+                    <template v-else>
+                      <el-tag
+                        v-for="host in row.git_hosts"
+                        :key="host"
+                        size="small"
+                        :type="invalidGitHosts(row).includes(host) ? 'danger' : 'info'"
+                      >
+                        {{ host }}
+                      </el-tag>
+                    </template>
+                    <small
+                      v-if="invalidGitHosts(row).length"
+                      class="git-hosts-invalid"
+                    >{{ t('runtimeNodes.nodeGitHostsInvalid', { hosts: invalidGitHosts(row).join(', ') }) }}</small>
+                    <small class="git-hosts-hint">{{ t('runtimeNodes.nodeGitHostsHint') }}</small>
+                  </div>
                   <el-alert
                     v-if="['supervised', 'systemd-user-session'].includes(row.service_status)"
                     type="warning"
@@ -603,6 +631,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .row-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }
 .row-actions .el-button + .el-button { margin-left: 0; }
 .node-detail { padding: 10px 28px 24px; }
+.git-hosts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 1em 0; }
+.git-hosts .el-tag { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.git-hosts-invalid, .git-hosts-hint { flex-basis: 100%; }
+.git-hosts-invalid { color: var(--el-color-danger); }
 .backend-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--el-border-color-lighter); }
 .backend-models { width: 100%; overflow-wrap: anywhere; font-size: 13px; }
 @media (max-width: 640px) { .page-header { align-items: flex-start; flex-direction: column; } .node-detail { padding: 12px; } }
