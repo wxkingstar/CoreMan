@@ -15,6 +15,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -58,6 +59,43 @@ def home_dir() -> Path:
 
 def default_data_dir() -> Path:
     return home_dir() / ".local/share/coreman-runtime"
+
+
+def manage_command_path(config_path: Path) -> Path:
+    return config_path.parent / "bin/coreman-runtime"
+
+
+def manage_command_script(config_path: Path, release: Path) -> str:
+    """The install_service entry for operators, independent of the caller's directory.
+
+    ``runtime_daemon`` is not installed into the venv, so ``python -m`` only finds it from
+    inside the release. ``-I`` keeps the current directory and PYTHON* variables out of
+    ``sys.path``; relative paths in the arguments still resolve against the caller.
+    """
+    loader = (
+        'import sys; sys.argv[0] = "coreman-runtime"; sys.path.insert(0, sys.argv.pop(1)); '
+        "from runtime_daemon.install_service import main; raise SystemExit(main())"
+    )
+    command = [str(release / ".venv/bin/python"), "-I", "-c", loader, str(release)]
+    command += ["--config", str(config_path)]
+    return (
+        "#!/bin/sh\n"
+        "# CoreMan Runtime 管理命令（升级、卸载、重新注册服务），运行 --help 查看用法。\n"
+        "# 由安装程序生成，切换版本时自动更新，请勿手工修改。\n"
+        '[ "$#" -gt 0 ] || set -- --help\n'
+        "exec " + " ".join(shlex.quote(part) for part in command) + ' "$@"\n'
+    )
+
+
+def write_manage_command(config_path: Path, release: Path) -> Path:
+    path = manage_command_path(config_path)
+    script = manage_command_script(config_path, release)
+    with contextlib.suppress(OSError):
+        if path.read_text() == script and os.access(path, os.X_OK):
+            return path
+    write_private(path, script)
+    path.chmod(0o700)
+    return path
 
 
 def write_private(path: Path, content: str | bytes) -> None:

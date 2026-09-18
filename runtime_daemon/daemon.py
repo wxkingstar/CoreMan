@@ -33,6 +33,7 @@ from runtime_daemon.lifecycle import (
     ensure_private_dir,
     fatal_exit_status,
     record_fatal,
+    write_manage_command,
 )
 from runtime_daemon.logs import (
     LogRotator,
@@ -185,9 +186,8 @@ def enrollment_rejection(response: httpx.Response) -> str:
         detail = ""
     return (
         f"安装注册被 CoreMan 拒绝（HTTP {response.status_code}：{detail or '无详细信息'}）。"
-        "重启服务无法解决：请在「运行时管理」重新生成安装链接，先执行 "
-        "python -m runtime_daemon.install_service --uninstall --purge 清理本次安装，"
-        "再运行新的安装命令。"
+        "重启服务无法解决：请在「运行时管理」重新生成安装链接，"
+        "把安装命令末尾的 | sh 换成 | sh -s -- --replace 后重新安装。"
     )
 
 
@@ -430,6 +430,12 @@ class Daemon:
     def prepare(self) -> None:
         self.lock_file = (self.data_dir / "daemon.lock").open("a")
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if self.config.get("release"):
+            # Releases switched by an installer that predates the command still get one.
+            try:
+                write_manage_command(self.config_path, Path(self.config["release"]))
+            except OSError as exc:
+                LOG.warning("无法写入本机管理命令：%s", exc)
         root = Path(self.config["workspace_root"])
         if not root.is_absolute() or root == Path("/") or ".." in root.parts:
             raise ValueError("项目主目录必须是绝对路径")

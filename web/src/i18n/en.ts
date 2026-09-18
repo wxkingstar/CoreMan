@@ -190,6 +190,7 @@ const en = {
     probeHint: 'Backs up Claude settings and adds a quota capture step in front of the statusLine. Any existing status line keeps working. A short Claude session runs every 30 minutes to refresh the quota.', linkReady: 'Installation link created',
     commandHint: 'On the target server, run the following command as a user already signed in to Claude/Codex.',
     credentialHint: 'The link contains installation credentials and is shown only once. By default, it can register one new node. Share it only with trusted people.',
+    replaceHint: 'If the target machine already runs a runtime, replace the trailing | sh with | sh -s -- --replace: the existing runtime is stopped and its whole install directory is backed up before this link installs a new one.',
     createLink: 'Generate installation command', copyCommand: 'Copy installation command', rootRequired: 'Enter a valid absolute project root path', copyManually: 'Could not copy. Select and copy the command manually.',
     login: { ready: 'Signed in', required: 'Sign-in required', unknown: 'Sign-in status unknown' }, linkState: { ready: 'Ready to install', used: 'Used', expired: 'Expired', revoked: 'Revoked' },
   },

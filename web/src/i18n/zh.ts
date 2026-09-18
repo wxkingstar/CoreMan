@@ -238,6 +238,7 @@ export default {
   "linkReady": "安装链接已生成",
   "commandHint": "在目标服务器上，以已登录 Claude/Codex 的用户运行以下命令。",
   "credentialHint": "链接包含安装凭证，仅展示一次，默认仅可注册一个新节点；不要分享给不受信的人。",
+  "replaceHint": "目标机器已装过 Runtime 时，把命令末尾的 | sh 换成 | sh -s -- --replace：先停止原 Runtime 并整体备份原安装目录，再用本链接重装。",
   "createLink": "生成安装命令",
   "copyCommand": "复制安装命令",
   "rootRequired": "请输入有效的项目主目录绝对路径",

@@ -1,7 +1,7 @@
 """Install, upgrade or remove the current user's service without altering an existing CLI login.
 
-python -m runtime_daemon.install_service --upgrade coreman-runtime-linux-amd64.tar.gz
-python -m runtime_daemon.install_service --uninstall [--purge]
+Operators run it through ``~/.local/share/coreman-runtime/bin/coreman-runtime``, which works
+from any directory; ``python -m runtime_daemon.install_service`` only works inside a release.
 """
 
 from __future__ import annotations
@@ -32,11 +32,13 @@ from runtime_daemon.lifecycle import (
     install_lock,
     load_bundle,
     lock_held,
+    manage_command_path,
     prune_releases,
     read_expected_sha256,
     remove_socket_dirs,
     wait_for_unlock,
     wait_online,
+    write_manage_command,
     write_private,
 )
 
@@ -327,7 +329,9 @@ def install(config_path: Path, staged_config: Path | None = None) -> int:
     data_dir = config_path.parent
     if staged_config is not None:
         if config_path.exists():
-            raise InstallError("此用户环境已有 Runtime。请使用现有运行时服务，避免覆盖身份。")
+            raise InstallError(
+                "本机已安装 CoreMan Runtime，本次安装未做改动；重新运行安装命令查看处理方式。"
+            )
         cfg = json.loads(staged_config.read_text())
     else:
         cfg = load_config(config_path)
@@ -338,6 +342,7 @@ def install(config_path: Path, staged_config: Path | None = None) -> int:
     created = False
     try:
         write_service(kind, cfg, config_path)
+        write_manage_command(config_path, Path(cfg["release"]))
         if staged_config is not None:
             create_private(config_path, json.dumps(cfg, indent=2))
             created = True
@@ -347,6 +352,8 @@ def install(config_path: Path, staged_config: Path | None = None) -> int:
         start_service(kind, config_path)
     except (OSError, subprocess.SubprocessError, InstallError) as exc:
         remove_service(kind, config_path)
+        if staged_config is not None:
+            manage_command_path(config_path).unlink(missing_ok=True)
         if created:
             config_path.unlink(missing_ok=True)
         raise InstallError(f"服务注册失败（{describe(exc)}），已撤销本次注册。") from exc
@@ -361,6 +368,8 @@ def install(config_path: Path, staged_config: Path | None = None) -> int:
         wait_online(data_dir, started, ONLINE_TIMEOUT_SECONDS)
     except FatalConfigError as exc:
         remove_service(kind, config_path)
+        if staged_config is not None:
+            manage_command_path(config_path).unlink(missing_ok=True)
         if created:
             config_path.unlink(missing_ok=True)
         raise InstallError(f"Runtime 无法完成注册，已撤销本次注册：{exc}") from exc
@@ -372,6 +381,8 @@ def install(config_path: Path, staged_config: Path | None = None) -> int:
         )
         return EXIT_NOT_CONFIRMED
     print("Runtime 已注册并上线。请在运行时管理中查看 Claude/Codex 状态。")
+    manage = shlex.quote(str(manage_command_path(config_path)))
+    print(f"本机管理命令（升级、卸载等）：{manage} --help")
     return 0
 
 
@@ -380,6 +391,7 @@ def switch_release(config_path: Path, release: Path, kind: str) -> None:
     cfg["release"] = str(release)
     save_config(config_path, cfg)
     write_service(kind, cfg, config_path)
+    write_manage_command(config_path, release)
 
 
 def upgrade(config_path: Path, bundle: Path, sha256: str | None = None) -> None:
@@ -461,18 +473,8 @@ def uninstall(config_path: Path, *, purge: bool = False) -> None:
     ):
         raise InstallError(f"{data_dir} 不像 Runtime 安装目录，拒绝删除")
     with install_lock(data_dir):
-        try:
-            cfg = json.loads(config_path.read_text())
-        except (OSError, ValueError):
-            cfg = {}
-        for kind in installed_kinds(config_path, cfg):
-            with contextlib.suppress(InstallError):
-                stop_service(kind, config_path)
-            remove_service(kind, config_path)
-        if lock_held(data_dir / "daemon.lock"):
-            raise InstallError("Runtime 进程仍在运行（可能由宿主机托管）；请先停止后重试")
-        if cfg.get("node_id"):
-            remove_socket_dirs(data_dir, str(cfg["node_id"]))
+        cfg = read_config_leniently(config_path)
+        stop_runtime(config_path, cfg)
         shutil.rmtree(data_dir / "cli-bin", ignore_errors=True)
         for name in ("state.json", "trust.pem", "supervisor.pid", "supervisor.lock"):
             (data_dir / name).unlink(missing_ok=True)
@@ -480,23 +482,100 @@ def uninstall(config_path: Path, *, purge: bool = False) -> None:
             shutil.rmtree(data_dir)
             print(f"已删除 {data_dir}（含节点身份、会话与日志）。请在「运行时管理」中撤销该节点。")
             return
-        if cfg:
-            current = [Path(cfg["release"])] if cfg.get("release") else []
-            prune_releases(data_dir, keep=current)
-            cfg["service_status"] = "uninstalled"
-            save_config(config_path, cfg)
+        if not cfg:
+            print(f"已停止并移除 Runtime 服务；{data_dir} 中没有可用的节点配置。")
+            return
+        current = [Path(cfg["release"])] if cfg.get("release") else []
+        prune_releases(data_dir, keep=current)
+        cfg["service_status"] = "uninstalled"
+        save_config(config_path, cfg)
+        if current:
+            write_manage_command(config_path, current[0])
+        manage = shlex.quote(str(manage_command_path(config_path)))
         print(
-            f"已停止并移除 Runtime 服务；节点身份、会话与日志保留在 {data_dir}。"
-            "彻底删除请加 --purge；保留的身份可用 --config 重新注册服务。"
+            f"已停止并移除 Runtime 服务；节点身份、会话与日志保留在 {data_dir}。\n"
+            f"  恢复服务：{manage} --register\n"
+            f"  彻底删除：{manage} --uninstall --purge"
         )
 
 
+def read_config_leniently(config_path: Path) -> dict:
+    try:
+        cfg = json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def stop_runtime(config_path: Path, cfg: dict) -> None:
+    """Stop and unregister the service; the caller holds the install lock."""
+    data_dir = config_path.parent
+    for kind in installed_kinds(config_path, cfg):
+        with contextlib.suppress(InstallError):
+            stop_service(kind, config_path)
+        remove_service(kind, config_path)
+    if lock_held(data_dir / "daemon.lock"):
+        raise InstallError("Runtime 进程仍在运行（可能由宿主机托管）；请先停止后重试")
+    if cfg.get("node_id"):
+        remove_socket_dirs(data_dir, str(cfg["node_id"]))
+
+
+def retire(config_path: Path, backup: Path) -> None:
+    """``install.sh --replace``: stop the installed runtime and move its files into ``backup``.
+
+    install.sh holds the install lock and runs this from the new bundle, so an old or broken
+    release does not matter. The backup is created before the service is touched: renames
+    only work within one filesystem, and a data directory bind-mounted under a read-only
+    ``~/.local/share`` has no writable sibling. The lock and install.sh's stage directories
+    stay; config.json moves last, so an interrupted move still reads as an installed runtime.
+    """
+    data_dir = config_path.parent
+    unchanged = (
+        "未改动现有 Runtime；请先用 coreman-runtime --uninstall --purge 卸载，再不带 --replace 安装"
+    )
+    try:
+        backup.mkdir(mode=0o700)
+    except OSError as exc:
+        raise InstallError(f"无法创建备份目录 {backup}（{describe(exc)}），{unchanged}") from exc
+    try:
+        if backup.stat().st_dev != data_dir.stat().st_dev:
+            raise InstallError(f"备份目录 {backup} 与安装目录不在同一文件系统，{unchanged}")
+        stop_runtime(config_path, read_config_leniently(config_path))
+    except BaseException:
+        backup.rmdir()
+        raise
+    try:
+        for child in sorted(data_dir.iterdir(), key=lambda path: path == config_path):
+            if child.name != "install.lock" and not child.name.startswith("stage-"):
+                child.rename(backup / child.name)
+    except OSError as exc:
+        raise InstallError(
+            f"备份现有 Runtime 失败（{describe(exc)}）；服务已停止，已移动的文件在 {backup}"
+        ) from exc
+
+
+MAIN_EPILOG = """示例：
+  coreman-runtime --upgrade ./coreman-runtime-darwin-arm64.tar.gz   升级并保留节点身份
+  coreman-runtime --uninstall            停止并移除服务，保留节点身份、会话与日志
+  coreman-runtime --uninstall --purge    同时删除节点身份、会话与日志
+  coreman-runtime --register             卸载服务后，按保留的身份重新注册
+改连其他平台或换新身份：把安装命令末尾的 | sh 换成 | sh -s -- --replace"""
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="CoreMan Runtime 服务安装、升级与卸载")
+    parser = argparse.ArgumentParser(
+        description="CoreMan Runtime 管理命令：升级、卸载与重新注册服务",
+        epilog=MAIN_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--config", type=Path, help="config.json 路径，默认为用户安装目录")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--upgrade", type=Path, metavar="BUNDLE", help="发布包 .tar.gz")
     action.add_argument("--uninstall", action="store_true", help="停止并移除服务")
+    action.add_argument(
+        "--register", action="store_true", help="按现有配置注册并启动服务（--uninstall 之后恢复）"
+    )
+    action.add_argument("--retire", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--sha256", help="发布包校验值；缺省读取同目录 <BUNDLE>.sha256")
     parser.add_argument("--purge", action="store_true", help="卸载时同时删除身份与数据")
     parser.add_argument("--staged-config", type=Path, help=argparse.SUPPRESS)
@@ -511,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
             upgrade(config_path, args.upgrade.absolute(), args.sha256)
         elif args.uninstall:
             uninstall(config_path, purge=args.purge)
+        elif args.retire:
+            retire(config_path, args.retire.absolute())
         else:
             return install(config_path, args.staged_config)
     except InstallError as exc:
