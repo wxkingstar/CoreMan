@@ -22,6 +22,8 @@ from coreman.core.relay.safe_transport import RegisteredTransport
 
 router = APIRouter(tags=["system-test"], dependencies=[Depends(verify_csrf)])
 MANAGERS = require_roles("ai_committee", "platform_admin")
+# 带令牌仍跳到这类地址，说明令牌没被认下来（不带令牌时目标可能只回 401，没有可比的跳转）。
+LOGIN_HINTS = ("login", "signin")
 
 
 class TestAccessIn(BaseModel):
@@ -41,6 +43,47 @@ def make_http(url: httpx.URL) -> httpx.AsyncClient:
         trust_env=False,
         timeout=10,
     )
+
+
+def redirect_target(url: httpx.URL, location: str | None) -> str | None:
+    """跳转目标只取主机与路径：查询参数里可能带回调令牌，既不回显也不参与比较。"""
+    if not location:
+        return None
+    try:
+        target = url.join(location)
+    except httpx.InvalidURL:
+        return None
+    path = target.path or "/"
+    return path if target.host == url.host else f"{target.host}{path}"
+
+
+async def fetch(
+    client: httpx.AsyncClient, url: httpx.URL, token: str | None
+) -> tuple[int, str | None]:
+    headers = {"Cookie": f"bot_token={token}"} if token else {}
+    async with client.stream("GET", url, headers=headers) as response:
+        return response.status_code, redirect_target(url, response.headers.get("location"))
+
+
+def judge(
+    subject: str, baseline: tuple[int, str | None], result: tuple[int, str | None]
+) -> tuple[bool, str]:
+    """对比不带令牌与带令牌两次请求。很多后台登录后首页照样跳转（去默认页或别的子系统），
+    所以带令牌的 3xx 只要去向与不带令牌时不同、又不是登录页，就算令牌已被识别。"""
+    base_status, base_target = baseline
+    status, target = result
+    if 200 <= status < 300:
+        if 200 <= base_status < 300:
+            return False, f"目标首页不带令牌也能打开（HTTP {base_status}），无法判断令牌是否生效"
+        return True, f"目标已识别令牌（令牌用户 {subject}）"
+    if 300 <= status < 400 and target:
+        if target == base_target or any(hint in target.lower() for hint in LOGIN_HINTS):
+            return False, (
+                f"带令牌仍跳到 {target}，令牌未生效：请检查目标认证配置，"
+                f"以及对方是否有用户 {subject} 并已分配权限"
+            )
+        return True, f"目标已识别令牌，登录后跳转到 {target}（令牌用户 {subject}）"
+    return False, f"目标未通过访问测试，请检查目标认证配置，以及对方是否有用户 {subject}"
 
 
 @router.post("/api/admin/systems/test-access")
@@ -93,24 +136,22 @@ async def test_access(
         ip=client_ip(request),
     )
     await session.commit()
-    status = 0
+    baseline: tuple[int, str | None] = (0, None)
+    result: tuple[int, str | None] = (0, None)
     try:
         async with client:
-            async with client.stream(
-                "GET", url, headers={"Cookie": f"bot_token={token}"}
-            ) as response:
-                status = response.status_code
-        message = (
-            f"目标已响应（令牌用户 {subject}）"
-            if 200 <= status < 300
-            else f"目标未通过访问测试，请检查目标认证配置，以及对方是否有用户 {subject}"
-        )
+            baseline = await fetch(client, url, None)
+            result = await fetch(client, url, token)
+        success, message = judge(subject, baseline, result)
     except httpx.HTTPError:
-        message = "目标连接失败或超时"
-    # 不返回 token、页面正文或响应头：其中可能包含会话 cookie 和业务敏感内容。
+        success, message = False, "目标连接失败或超时"
+    # 只回显跳转目标的主机与路径；不返回 token、页面正文、其余响应头与查询参数：
+    # 其中可能包含会话 cookie 和业务敏感内容。
     data = {
-        "success": 200 <= status < 300,
-        "status_code": status,
+        "success": success,
+        "status_code": result[0],
+        "baseline_status_code": baseline[0],
+        "redirect": result[1],
         "url": str(url),
         "user_login": user.login_name,
         "subject": subject,
