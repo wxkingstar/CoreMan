@@ -29,7 +29,7 @@ it('preserves encrypted MCP configuration and security fields when editing catal
 })
 
 it('toggles skill status inline and reloads the catalog when the revision is stale', async () => {
-  const row = { id: 's1', revision: 2, name: 'goods-query', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['wuji_tools'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false, has_mcp_config: false } as Skill
+  const row = { id: 's1', revision: 2, name: 'sample-query', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['shared_tools'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false, has_mcp_config: false } as Skill
   vi.mocked(allSkills).mockResolvedValue([{ ...row }])
   vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
   vi.mocked(skills.presets).mockResolvedValue([])
@@ -42,12 +42,12 @@ it('toggles skill status inline and reloads the catalog when the revision is sta
   })
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
   await flushPromises()
-  await wrapper.get('[data-test="enabled-goods-query"]').trigger('click')
+  await wrapper.get('[data-test="enabled-sample-query"]').trigger('click')
   await flushPromises()
   const vm = wrapper.vm as unknown as { rows: Skill[] }
   expect(vm.rows[0]).toMatchObject({ enabled: true, revision: 3 })
   vi.mocked(allSkills).mockClear()
-  await wrapper.get('[data-test="enabled-goods-query"]').trigger('click')
+  await wrapper.get('[data-test="enabled-sample-query"]').trigger('click')
   await flushPromises()
   expect(sent).toEqual([['s1', 2, true], ['s1', 3, false]])
   expect(allSkills).toHaveBeenCalledTimes(1)
