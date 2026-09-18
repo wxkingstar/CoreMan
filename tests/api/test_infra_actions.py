@@ -2,6 +2,7 @@ import time
 
 import httpx
 import jwt
+import pytest
 from sqlalchemy import func, select
 
 from coreman.core.auth.signatures import sign_request
@@ -75,6 +76,8 @@ async def test_system_test_requires_real_current_user_and_hides_target_secrets(
     seen = []
 
     def handler(req):
+        if "cookie" not in req.headers:  # 先不带令牌请求一次作对照
+            return httpx.Response(302, headers={"Location": "/login?next=%2F"})
         claims = jwt.decode(
             req.headers["cookie"].removeprefix("bot_token="), options={"verify_signature": False}
         )
@@ -125,10 +128,12 @@ async def test_system_test_uses_email_prefix_as_subject(client, db_session, monk
     subjects = []
 
     def handler(req):
-        claims = jwt.decode(
-            req.headers["cookie"].removeprefix("bot_token="), options={"verify_signature": False}
-        )
-        subjects.append(claims["sub"])
+        if "cookie" in req.headers:
+            claims = jwt.decode(
+                req.headers["cookie"].removeprefix("bot_token="),
+                options={"verify_signature": False},
+            )
+            subjects.append(claims["sub"])
         return httpx.Response(302, headers={"Location": "/login"})
 
     monkeypatch.setattr(
@@ -147,3 +152,47 @@ async def test_system_test_uses_email_prefix_as_subject(client, db_session, monk
     assert not data["success"] and "real.human" in data["message"]
     r = await client.post(path, json={"system_key": "example", "email_prefix": "someone-else"})
     assert r.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("baseline", "with_token", "success", "hint"),
+    [
+        # 登录后首页照样跳转（去默认页或别的子系统）：去向与不带令牌时不同，算已识别。
+        ((302, "/login"), (302, "/statistics/index"), True, "登录后跳转到 /statistics/index"),
+        ((302, "/Login/index?reason=x"), (302, "http://other.example/"), True, "other.example/"),
+        ((302, "/login"), (200, None), True, "目标已识别令牌"),
+        # 带不带令牌都去登录页（查询参数不同也算同一处）：令牌未生效。
+        ((302, "/login?reason=a"), (302, "/login?reason=b"), False, "带令牌仍跳到 /login"),
+        # 不带令牌只回 401，带令牌跳到登录页：同样未生效。
+        ((401, None), (302, "/signin"), False, "令牌未生效"),
+        ((302, "/login"), (403, None), False, "目标未通过访问测试"),
+        # 首页本来就公开：看不出令牌是否生效。
+        ((200, None), (200, None), False, "无法判断令牌是否生效"),
+    ],
+)
+async def test_system_test_compares_with_a_request_without_token(
+    client, db_session, monkeypatch, baseline, with_token, success, hint
+):
+    from coreman.api.routers import infra_system_test
+
+    await login_as(client, db_session, role="platform_admin", login_name="real-human")
+    await client.post(
+        "/api/admin/systems",
+        json={"key": "example", "name": "Example", "base_url": "https://example.test/"},
+    )
+
+    def handler(req):
+        status, location = with_token if "cookie" in req.headers else baseline
+        return httpx.Response(status, headers={"Location": location} if location else {})
+
+    monkeypatch.setattr(
+        infra_system_test,
+        "make_http",
+        lambda url: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    r = await client.post("/api/admin/systems/test-access", json={"system_key": "example"})
+    data = r.json()["data"]
+    assert data["success"] is success and hint in data["message"], data
+    assert data["status_code"] == with_token[0] and data["baseline_status_code"] == baseline[0]
+    # 只回显主机与路径，查询参数不外露。
+    assert "reason" not in r.text
