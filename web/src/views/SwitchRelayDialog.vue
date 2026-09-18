@@ -63,6 +63,7 @@ async function reloadVersion(): Promise<void> {
 
 /** 选中一台 relay：载入它的有效模型集，当前模型还在集合里就留着，否则落到该 relay 的默认模型。 */
 async function pick(id: string): Promise<void> {
+  if (id !== props.bot.relay_server_id && relayList.value.find(r => r.id === id)?.unavailable_reason !== null) return
   targetId.value = id
   preview.value = undefined
   allowStoredMemory.value = false
@@ -79,7 +80,7 @@ async function pick(id: string): Promise<void> {
 }
 
 async function confirm(): Promise<void> {
-  if (!targetId.value || !model.value || unchanged.value || targetBlocked.value) return
+  if (!targetId.value || !model.value || unchanged.value || targetBlocked.value || (targetId.value !== props.bot.relay_server_id && target.value?.unavailable_reason !== null)) return
   saving.value = true
   progressTimer = setInterval(() => { void workspace.get(props.bot.id).then(s => { progress.value = s.phase || t('workspaceFiles.states.' + s.state, s.state) }).catch(() => {}) }, 3000)
   try {
@@ -133,7 +134,7 @@ defineExpose({ pick, confirm, checkTarget })
         <template #default="{ row }: { row: RelayOut }">
           <el-radio
             :model-value="targetId"
-            :disabled="saving"
+            :disabled="saving || (row.id !== bot.relay_server_id && row.unavailable_reason !== null)"
             :value="row.id"
             :data-test="'pick-' + row.id"
             @change="pick(row.id)"
@@ -148,6 +149,12 @@ defineExpose({ pick, confirm, checkTarget })
       >
         <template #default="{ row }: { row: RelayOut }">
           <div>{{ row.name }}</div>
+          <p
+            v-if="row.unavailable_reason !== null"
+            class="muted"
+          >
+            {{ t('runtimeNodes.unavailable.' + (row.unavailable_reason ?? 'unknown')) }}
+          </p>
           <el-tag
             v-if="row.id === bot.relay_server_id"
             size="small"
@@ -348,7 +355,7 @@ defineExpose({ pick, confirm, checkTarget })
       <el-button
         type="primary"
         :loading="saving"
-        :disabled="!target || !model || unchanged || targetBlocked"
+        :disabled="!target || !model || unchanged || targetBlocked || (targetId !== bot.relay_server_id && target.unavailable_reason !== null)"
         data-test="switch-confirm"
         @click="confirm"
       >

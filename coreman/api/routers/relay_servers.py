@@ -23,7 +23,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.model_catalog import load_catalog
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
-from coreman.core.bots.relay_policy import relay_visible
+from coreman.core.bots.relay_policy import backend_unavailable_reason, relay_visible
 from coreman.core.db.models import Bot, ModelCatalog, RelayServer, RuntimeNode, Team, User
 from coreman.core.relay import probe
 from coreman.core.relay.client import RelayClient
@@ -61,6 +61,7 @@ async def relay_out(
         "runtime_node_id": str(node.id) if node else None,
         "runtime_name": node.name if node else None,
         "workspace_root": node.workspace_root if node else None,
+        "unavailable_reason": backend_unavailable_reason(relay, node),
         "relay_url": relay.relay_url,
         "model_provider": relay.model_provider,
         "supported_models_mode": relay.supported_models_mode,

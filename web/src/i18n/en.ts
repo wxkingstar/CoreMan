@@ -171,6 +171,11 @@ const en = {
     publishRemarkDefault: 'Submitted from the CoreMan console',
   },
   runtimeNodes: {
+    unavailable: { disabled: 'Runtime disabled', root_pending: 'Root change pending', not_installed: 'Not installed', login_required: 'Not logged in', unknown: 'Status unknown; upgrade Runtime and check login' },
+    rootEditHint: 'Use an absolute path, not / or a symbolic link. Move bound or incoming AI employees first. Existing files are not moved; changes take effect after Runtime acknowledgement.',
+    rootPending: 'Project root change submitted; waiting for Runtime acknowledgement',
+    rootFailed: 'Root change failed; the original root is still active. Check the new path and write permissions, then retry',
+    rootUpgrade: 'Upgrade this Runtime to enable root editing',
     edit: 'Edit runtime', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
     teamHint: 'The shared pool is open to every team. Changing the team does not affect AI employees already bound; AI employees created on or switched to this runtime later follow the new team.',
     deleteTitle: 'Delete runtime',

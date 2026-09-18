@@ -1,4 +1,5 @@
 import base64
+import uuid
 
 import httpx
 import pytest
@@ -47,6 +48,34 @@ async def _setup(
         await client.post("/api/admin/bots", json=_bot_body(relay_server_id=ids["claude01"]))
     ).json()["data"]
     return created, ids, creator
+
+
+@pytest.mark.parametrize(
+    "cap",
+    [
+        {},
+        {"installed": False},
+        {"installed": True, "login": "required"},
+        {"installed": True, "login": "unknown"},
+    ],
+)
+async def test_switch_relay_rejects_backend_without_ready_login(client, db_session, cap):
+    from coreman.core.db.models import RuntimeNode
+
+    bot, ids, _ = await _setup(client, db_session)
+    target = await db_session.get(RelayServer, uuid.UUID(ids["codex01"]))
+    node = await db_session.get(RuntimeNode, target.runtime_node_id)
+    node.capabilities = {"codex": cap}
+    await db_session.commit()
+    response = await client.post(
+        f"/api/admin/bots/{bot['id']}/switch-relay",
+        json={"relay_server_id": ids["codex01"]},
+        headers={"If-Match": f'"{bot["version"]}"'},
+    )
+    assert response.status_code == 422, response.text
+    await db_session.refresh(node)
+    stored = await db_session.get(Bot, uuid.UUID(bot["id"]))
+    assert str(stored.relay_server_id) == ids["claude01"]
 
 
 async def test_switch_relay_resolves_model(

@@ -135,15 +135,24 @@ def run_command(
         return output.read(MAX_BODY).decode(errors="replace")
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write(path: Path, content: str, *, durable: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
     ) as tmp:
         tmp.write(content)
         temp_path = Path(tmp.name)
+        if durable:
+            tmp.flush()
+            os.fsync(tmp.fileno())
     os.chmod(temp_path, 0o600)
     os.replace(temp_path, path)
+    if durable:
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def status_line_command(value: object) -> str | None:

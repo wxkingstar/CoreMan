@@ -74,6 +74,99 @@ def command(data, path="/v1/chat/completions"):
     }
 
 
+def test_root_change_is_durable_and_updates_agents(daemon, tmp_path):
+    target = str(tmp_path / "new-projects")
+    daemon.apply_root_change({"id": "change-1", "path": target, "status": "pending"})
+    assert daemon.agents["claude"].root == Path(target)
+    saved = json.loads(daemon.config_path.read_text())
+    assert saved["workspace_root"] == target
+    assert saved["root_change_result"] == {"id": "change-1", "path": target, "status": "applied"}
+    assert (
+        Daemon(daemon.config_path).heartbeat_body()["root_change_result"]
+        == saved["root_change_result"]
+    )
+
+
+def test_root_change_rejects_symlink_and_keeps_old_root(daemon, tmp_path):
+    old = daemon.config["workspace_root"]
+    (tmp_path / "link").symlink_to(tmp_path / "projects")
+    daemon.apply_root_change({"id": "bad", "path": str(tmp_path / "link"), "status": "pending"})
+    assert daemon.config["workspace_root"] == old
+    assert daemon.agents["claude"].root == Path(old)
+    assert daemon.config["root_change_result"]["status"] == "failed"
+
+
+def test_root_change_symlink_loop_does_not_kill_heartbeats(daemon, tmp_path):
+    old = daemon.config["workspace_root"]
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    daemon.apply_root_change({"id": "loop", "path": str(loop), "status": "pending"})
+    assert daemon.config["workspace_root"] == old
+    assert daemon.heartbeat_body()["root_change_result"]["status"] == "failed"
+
+
+def test_root_change_write_failure_does_not_ack_or_change_agents(daemon, tmp_path, monkeypatch):
+    old = daemon.config["workspace_root"]
+
+    def unwritable():
+        raise OSError("read-only disk")
+
+    monkeypatch.setattr(daemon, "save", unwritable)
+    daemon.apply_root_change(
+        {"id": "write-failure", "path": str(tmp_path / "new"), "status": "pending"}
+    )
+    assert daemon.config["workspace_root"] == old
+    assert daemon.agents["claude"].root == Path(old)
+    assert "root_change_result" not in daemon.config
+
+
+def test_root_change_flushes_config_and_parent_before_ack(daemon, tmp_path, monkeypatch):
+    import os
+    import stat
+
+    synced = []
+    original = os.fsync
+
+    def sync(fd):
+        synced.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        original(fd)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    daemon.apply_root_change(
+        {"id": "durable", "path": str(tmp_path / "durable"), "status": "pending"}
+    )
+    assert synced == ["file", "directory"]
+    assert daemon.heartbeat_body()["root_change_result"]["status"] == "applied"
+
+
+def test_root_change_replayed_after_restart_is_not_applied_again(daemon, tmp_path):
+    target = str(tmp_path / "new")
+    change = {"id": "once", "path": target, "status": "pending"}
+    daemon.apply_root_change(change)
+    restarted = Daemon(daemon.config_path)
+    # The root is now temporarily unwritable/non-directory, but an old request
+    # is only acknowledged again, never re-executed or changed into a failure.
+    Path(target).rmdir()
+    Path(target).write_text("blocked")
+    restarted.apply_root_change(change)
+    assert restarted.config["root_change_result"]["status"] == "applied"
+
+
+async def test_root_change_waits_for_active_work(daemon, tmp_path):
+    old = daemon.config["workspace_root"]
+    active = asyncio.create_task(asyncio.sleep(60))
+    daemon.tasks["busy"] = active
+    try:
+        daemon.apply_root_change(
+            {"id": "later", "path": str(tmp_path / "new"), "status": "pending"}
+        )
+        assert daemon.config["workspace_root"] == old
+        assert "root_change_result" not in daemon.config
+    finally:
+        active.cancel()
+        await asyncio.gather(active, return_exceptions=True)
+
+
 def test_workspace_and_identity_protection(daemon, tmp_path):
     root = Path(daemon.config["workspace_root"])
     result = daemon.validate_command(

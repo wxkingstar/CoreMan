@@ -91,6 +91,10 @@ Configuration comes from five layers. Each layer owns its own keys, so there is 
 
 Missing keys in layer 2 fall back to `SETTING_DEFAULTS`. The `settings` table also holds `alert_channels` and `notification_smtp`, which are edited on their own pages. Secrets stay in layer 1 or in encrypted `*_enc` columns. A node's token exists only in its local `config.json`.
 
+`workspace_root` is an exception to node-local configuration editing: change it through the runtime editor, not by editing `config.json`. A durable `runtime_nodes.root_change` request is sent in heartbeat responses. An idle daemon validates the new root, flushes its updated configuration and acknowledges the request ID and path; only then does the server change the canonical root. Pending changes block workspace allocation, and nodes with bound or incoming bots cannot request a root change. Old daemons without `root_edit_supported` must be upgraded. Existing files are not moved.
+
+New bot bindings and runtime switches also require the target provider's reported capability to have `installed=true` and `login=ready`. The relay API returns an `unavailable_reason` for disabled UI choices. This is an admission policy, not an automatic shutdown of existing bots; same-relay model edits remain allowed.
+
 ### Precedence
 
 - **Defaults and bots.** `default_verbosity_level`, `default_effort_level` and `default_model` only fill in the new-bot form. Once a bot is saved, its row wins. Changing a default never rewrites existing bots.
