@@ -15,6 +15,7 @@ export const MENU: readonly MenuItem[] = [
   { key: 'bots', path: '/bots' },
   { key: 'selfReminders', path: '/self-reminders' },
   { key: 'myFeishu', path: '/my-feishu' },
+  { key: 'myWecom', path: '/my-wecom' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
   { key: 'skillApprovals', path: '/skill-approvals', roles: ['ai_committee', 'platform_admin'] },
@@ -35,7 +36,7 @@ export const MENU: readonly MenuItem[] = [
 <script setup lang="ts">
 import BrandLogo from '@/components/BrandLogo.vue'
 import { computed, ref, watch } from 'vue'
-import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, OfficeBuilding, SwitchButton, Moon } from '@element-plus/icons-vue'
+import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, OfficeBuilding, SwitchButton, Moon } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
@@ -45,9 +46,9 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'selfReminders'] },
+  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]

@@ -23,8 +23,14 @@ from coreman.core.db.session import make_engine, make_session_factory
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESS_TABLES = [
     "feishu_personal_grants",
-    "bot_collaborations", "bot_collaboration_routes", "bot_collaboration_partners",
-    "runtime_chunks", "runtime_calls", "runtime_install_links", "runtime_nodes",
+    "wecom_personal_grants",
+    "bot_collaborations",
+    "bot_collaboration_routes",
+    "bot_collaboration_partners",
+    "runtime_chunks",
+    "runtime_calls",
+    "runtime_install_links",
+    "runtime_nodes",
     "alert_states",
     "feishu_deliveries",
     "model_prices",

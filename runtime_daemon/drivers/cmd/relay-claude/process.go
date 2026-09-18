@@ -30,18 +30,19 @@ var firstLineTimeout = 90 * time.Second
 // claude CLI uses this to detect being run inside another Claude session;
 // stripping it lets us run the CLI as a normal subprocess), plus any extra
 // KEY=VALUE pairs from the request. Per-task MCP credentials never come from
-// the relay's own environment, and the Feishu personal ones reach only a turn
-// that mounts that server.
+// the relay's own environment, and the Feishu and WeCom personal ones each
+// reach only a turn that mounts that server.
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") {
 			env = append(env, e)
 		}
 	}
-	personal := openai.FeishuPersonalEnabled(extra)
+	feishu := openai.FeishuPersonalEnabled(extra)
+	wecom := openai.WecomPersonalEnabled(extra)
 	for k, v := range extra {
-		if strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !personal {
+		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) {
 			continue
 		}
 		env = append(env, k+"="+v)
@@ -90,6 +91,7 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	}{
 		{"coreman_collaboration", "COREMAN_COLLABORATION", strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
 		{"coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL", openai.FeishuPersonalEnabled(req.EnvVars)},
+		{"coreman_wecom_personal", "COREMAN_WECOM_PERSONAL", openai.WecomPersonalEnabled(req.EnvVars)},
 	} {
 		if cfg.enabled {
 			servers[cfg.name] = map[string]any{"type": "http", "url": strings.TrimSpace(req.EnvVars[cfg.prefix+"_URL"]), "headers": map[string]string{"Authorization": "Bearer ${" + cfg.prefix + "_TOKEN}"}}
@@ -201,7 +203,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		// exits, so stdout never EOFs and the sniff stalls.
 		s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 		found := false
-		private := openai.FeishuPersonalEnabled(envVars)
+		private := openai.PersonalPrivate(envVars)
 		for s.Scan() {
 			line := s.Text()
 			// Personal turns resume sessions too: match the marker on the raw
@@ -526,7 +528,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 		if line == "" {
 			continue
 		}
-		if openai.DebugLogging() && !openai.FeishuPersonalEnabled(envVars) {
+		if openai.DebugLogging() && !openai.PersonalPrivate(envVars) {
 			log.Printf("[CLAUDE RAW] %s", line)
 		}
 		var event claudeEvent

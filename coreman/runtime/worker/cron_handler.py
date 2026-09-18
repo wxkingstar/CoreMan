@@ -26,6 +26,7 @@ from coreman.core.db.models import (
     RuntimeNode,
     Task,
     User,
+    WecomPersonalGrant,
 )
 from coreman.core.errors import ApiError
 from coreman.core.feishu_personal import policy
@@ -51,7 +52,9 @@ from coreman.core.relay.sse import (
     UsageEvent,
 )
 from coreman.core.timeutils import utcnow
+from coreman.core.wecom_personal import policy as wecom_policy
 from coreman.runtime.worker.chat.personal import feishu_guidance
+from coreman.runtime.worker.chat.wecom_personal import guidance as wecom_guidance
 from coreman.runtime.worker.context import TaskContext
 
 # 结果正文上限（字符）：超出只保留前面这些并附截断提示，任务照常算成功。它同时约束
@@ -279,18 +282,20 @@ class CronRunHandler:
         config: dict[str, Any],
         env: dict[str, str],
     ) -> str:
-        """本人创建、本人执行、只发本人的任务，可以以本人身份读飞书；返回要追加的提示词。
+        """本人创建、本人执行、只发本人的任务，可以以本人身份用飞书或企业微信；返回要追加的提示词。
 
         不满足就原样跳过，任务照常运行：授权撤销或运行时太旧不该让定时任务失败。
         """
         if (
-            bot.platform != "feishu"
+            bot.platform not in ("feishu", "wecom")
             or job.created_by != actor.id
             or not policy.self_only(config, actor.id)
             or relay.runtime_node_id is None
         ):
             return ""
         node = await session.get(RuntimeNode, relay.runtime_node_id, populate_existing=True)
+        if bot.platform == "wecom":
+            return await self._wecom_tools(session, ctx, bot, actor, node, backend, env)
         grant = await session.get(FeishuPersonalGrant, (bot.id, actor.id), populate_existing=True)
         if (
             node is None
@@ -315,6 +320,41 @@ class CronRunHandler:
             base_session_id=None,
         )
         return feishu_guidance(grant, base_url, scheduled=True)
+
+    @staticmethod
+    async def _wecom_tools(
+        session: AsyncSession,
+        ctx: TaskContext,
+        bot: Bot,
+        actor: User,
+        node: RuntimeNode | None,
+        backend: str,
+        env: dict[str, str],
+    ) -> str:
+        grant = await session.get(WecomPersonalGrant, (bot.id, actor.id), populate_existing=True)
+        if (
+            node is None
+            or not node.is_active
+            or not wecom_policy.runtime_supported(node.capabilities, backend)
+            or grant is None
+            or grant.status != "connected"
+        ):
+            return ""
+        try:
+            await wecom_policy.scheduled_scope(session, ctx.task.id, str(actor.id))
+        except ValueError:
+            return ""
+        env[wecom_policy.PREFIX + "URL"] = (
+            ctx.public_base_url.rstrip("/") + "/api/runtime/wecom-personal/mcp"
+        )
+        env[wecom_policy.PREFIX + "TOKEN"] = wecom_policy.issue_capability(
+            ctx.cipher,
+            task_id=ctx.task.id,
+            user_id=str(actor.id),
+            context_epoch=grant.context_epoch,
+            base_session_id=None,
+        )
+        return wecom_guidance(grant, scheduled=True)
 
     async def _consume(
         self, gen: AsyncGenerator[SseEvent, None]

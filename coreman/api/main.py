@@ -56,6 +56,7 @@ from coreman.api.routers import (
     users,
     wecom_app_callback,
     wecom_bots,
+    wecom_personal,
 )
 from coreman.api.routers import settings as settings_router
 from coreman.api.spa import mount_spa
@@ -155,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(feishu_personal.router)
     app.include_router(feishu_apps.router)
     app.include_router(wecom_bots.router)
+    app.include_router(wecom_personal.router)
     if cfg.coreman_env == "dev":
         # 注入接口只在开发环境存在：生产里连路由都不注册，不是靠角色挡。
         app.include_router(dev.router)

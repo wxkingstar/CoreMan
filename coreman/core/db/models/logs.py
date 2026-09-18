@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Identity,
@@ -73,6 +74,8 @@ class ChatLog(Base):
     cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
     request_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 这一轮挂了本人的企业微信工具：记录里可能有本人的邮件、文档等资料，只给本人看。
+    private: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

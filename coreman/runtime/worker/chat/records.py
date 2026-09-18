@@ -52,6 +52,7 @@ def log_entry(
         model=intake.bot.model,
         stream_id=ctx.stream_id,
         task_id=ctx.task.id,
+        private=ctx.private_turn,
         message_content=content.text if content else intake.text,
         quoted_content=content.quoted_content if content else None,
         file_info=content.file_info if content else None,

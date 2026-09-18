@@ -475,8 +475,8 @@ async def _authorize_session_content(
     时，只有聊天里发出的链接（24 小时内、签给当前登录的人）能证明它属于谁。bot_token 登录一律
     不走本人这条路：群聊里的智能体拿着发言人的 token，不能借此读到他的私聊。非管理员还要节点
     已升级到记录不含环境变量的驱动。以本人身份运行过的定时任务与私聊同样只归执行者本人。
-    其余按角色：管理员可看群聊与企微私聊；飞书私聊和这类定时任务可能含个人飞书资料，
-    任何角色都不能代看。
+    其余按角色：管理员可看群聊与企微私聊；飞书私聊、挂了本人企业微信工具的企微私聊和这类
+    定时任务可能含个人资料，任何角色都不能代看。
     """
     try:
         identity = uuid.UUID(session_id)
@@ -488,7 +488,8 @@ async def _authorize_session_content(
                 ChatLog.platform,
                 ChatLog.chat_type,
                 ChatLog.user_id,
-                ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),
+                ChatLog.private.is_(True)
+                | ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),
             ).where(ChatLog.relay_session_id == identity)
         )
     ).all()

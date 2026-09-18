@@ -74,6 +74,7 @@ class ChatLogEntry:
     cache_creation_tokens: int | None = None
     cost_usd: float | None = None
     response_at: datetime | None = None
+    private: bool = False
 
 
 class ChatLogWriter:

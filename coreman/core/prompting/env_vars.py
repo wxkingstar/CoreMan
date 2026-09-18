@@ -41,7 +41,7 @@ SPEAKER_TOKEN_PREFIX = "BOT_TOKEN_"
 
 def is_reserved_key(key: str) -> bool:
     return key in RESERVED_KEYS or key.startswith(
-        (SPEAKER_TOKEN_PREFIX, "COREMAN_FEISHU_PERSONAL_")
+        (SPEAKER_TOKEN_PREFIX, "COREMAN_FEISHU_PERSONAL_", "COREMAN_WECOM_PERSONAL_")
     )
 
 

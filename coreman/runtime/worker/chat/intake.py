@@ -126,6 +126,10 @@ class IntakeStage(ChatStageBase):
 
         if await intercept(session, ctx, intake):
             return None
+        from coreman.runtime.worker.chat import wecom_personal
+
+        if await wecom_personal.intercept(session, ctx, intake):
+            return None
         if await self._pending_answer(session, ctx, intake):
             return None
         if await self._sessions(session, ctx, intake):

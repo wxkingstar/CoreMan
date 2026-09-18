@@ -46,4 +46,14 @@ describe('AdminLayout menu', () => {
     expect(entry?.path).toBe('/announcements')
     expect(entry?.roles).toEqual(['ai_committee', 'platform_admin'])
   })
+
+  it('lists My WeCom next to My Feishu for every signed-in user', () => {
+    const labels = mountAs('member').findAll('.el-menu-item').map((el) => el.text())
+    const feishu = labels.indexOf(i18n.global.t('menu.myFeishu'))
+    expect(feishu).toBeGreaterThanOrEqual(0)
+    expect(labels[feishu + 1]).toBe(i18n.global.t('menu.myWecom'))
+    const entry = MENU.find((m) => m.key === 'myWecom')
+    expect(entry?.path).toBe('/my-wecom')
+    expect(entry?.roles).toBeUndefined()
+  })
 })

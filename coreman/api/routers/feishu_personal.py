@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api import mcp_rpc
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError
 from coreman.api.security import verify_csrf
@@ -19,30 +20,6 @@ from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
 from coreman.core.feishu_personal import policy, service, tools
 
 router = APIRouter(tags=["feishu-personal"])
-NO_STORE = {"Cache-Control": "no-store"}
-
-
-def _response(body: dict[str, Any]) -> Response:
-    return Response(
-        json.dumps(body, ensure_ascii=False), media_type="application/json", headers=NO_STORE
-    )
-
-
-def _error(rid: Any, code: int, message: str) -> Response:
-    return _response({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
-
-
-def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate key")
-        result[key] = value
-    return result
-
-
-def _constant(_: str) -> None:
-    raise ValueError("invalid JSON constant")
 
 
 @router.post("/api/runtime/feishu-personal/mcp")
@@ -84,52 +61,16 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     except (ValueError, service.PersonalError):
         raise ApiError(403, 403, "Private authorization changed") from None
     current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
-    raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > 16384:
-            raise ApiError(413, 413, "Request too large")
-    try:
-        body = json.loads(raw, object_pairs_hook=_object, parse_constant=_constant)
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        return _error(None, -32700, "Parse error")
-    if (
-        not isinstance(body, dict)
-        or body.get("jsonrpc") != "2.0"
-        or set(body) - {"jsonrpc", "id", "method", "params"}
-        or not isinstance(body.get("method"), str)
-        or ("id" in body and type(body["id"]) not in (str, int, type(None)))
-    ):
-        return _error(None, -32600, "Invalid request")
-    rid, method, params = body.get("id"), body["method"], body.get("params", {})
-    if not isinstance(params, dict):
-        return _error(rid, -32602, "Invalid params")
-    # MCP request metadata is transport context, never tool arguments or identity.
-    if "_meta" in params:
-        if not isinstance(params["_meta"], dict):
-            return _error(rid, -32602, "Invalid params")
-        params = {key: item for key, item in params.items() if key != "_meta"}
-    if "id" not in body:
-        # Notifications never run tools or mutate a grant.
-        if method != "notifications/initialized" or params:
-            return _error(None, -32600, "Invalid notification")
-        return Response(status_code=202, headers=NO_STORE)
-    result: dict[str, Any]
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, 16384))
+    if isinstance(parsed, Response):
+        return parsed
+    rid, method, params = parsed
     if method == "initialize":
-        if set(params) - {"protocolVersion", "capabilities", "clientInfo"}:
-            return _error(rid, -32602, "Invalid params")
-        requested = params.get("protocolVersion")
-        version = (
-            requested if requested in ("2025-03-26", "2025-06-18", "2025-11-25") else "2025-03-26"
-        )
-        result = {
-            "protocolVersion": version,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "coreman-feishu-personal", "version": "2.0"},
-        }
-    elif method in ("ping", "tools/list"):
+        return mcp_rpc.initialize(rid, params, "coreman-feishu-personal")
+    result: dict[str, Any]
+    if method in ("ping", "tools/list"):
         if params:
-            return _error(rid, -32602, "Invalid params")
+            return mcp_rpc.error(rid, -32602, "Invalid params")
         live = grant if current else None
         connected = bool(live and live.status == "connected" and live.token_enc)
         reads = connected or bool(live and live.status == "pending" and not scope.scheduled)
@@ -153,7 +94,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             or not isinstance(params.get("name"), str)
             or not isinstance(params.get("arguments", {}), dict)
         ):
-            return _error(rid, -32602, "Invalid params")
+            return mcp_rpc.error(rid, -32602, "Invalid params")
         name, arguments = params["name"], params.get("arguments", {})
         try:
             if name in schedules.TOOLS:
@@ -176,13 +117,13 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             "isError": "error" in value,
         }
     else:
-        return _error(rid, -32601, "Method not found")
-    return _response({"jsonrpc": "2.0", "id": rid, "result": result})
+        return mcp_rpc.error(rid, -32601, "Method not found")
+    return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
 
 
 @router.get("/api/runtime/feishu-personal/mcp")
 async def no_sse() -> Response:
-    return Response(status_code=405, headers={"Allow": "POST", **NO_STORE})
+    return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})
 
 
 async def interactive_user(request: Request, actor: User = Depends(current_user)) -> User:
@@ -207,7 +148,7 @@ async def authorizations(
             .order_by(Bot.name, Bot.id)
         )
     ).all()
-    response.headers.update(NO_STORE)
+    response.headers.update(mcp_rpc.NO_STORE)
     return {
         "code": 0,
         "data": {
@@ -261,5 +202,5 @@ async def revoke(
 ) -> dict[str, Any]:
     result = await service.revoke_grant(session, bot_id, actor.id, request.app.state.cipher)
     await session.commit()
-    response.headers.update(NO_STORE)
+    response.headers.update(mcp_rpc.NO_STORE)
     return {"code": 0, "data": {"ok": True, "remote_revoked": result["remote_revoked"]}}

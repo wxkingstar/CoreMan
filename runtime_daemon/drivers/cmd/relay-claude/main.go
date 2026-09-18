@@ -209,6 +209,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			// advertised, so servers that still expect the restricted mode
 			// send no personal credentials here.
 			"feishu_personal_tools_v1": true,
+			// WeCom personal tools are an independent server that mounts the
+			// same way.
+			"wecom_personal_tools_v1": true,
 			// Session history omits env vars, so the session owner may view it.
 			"owner_session_view_v1": true,
 		},

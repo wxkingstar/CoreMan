@@ -46,6 +46,8 @@ class TaskContext:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_reason: str | None = None
     stream_id: str | None = None
+    # 这一轮挂了本人的企业微信工具：对话记录只给本人看。
+    private_turn: bool = False
     # init=False：由 __post_init__ 绑好任务字段再交出去，调用方不该也不能自己传。
     log: structlog.stdlib.BoundLogger = field(init=False, repr=False, compare=False)
 
