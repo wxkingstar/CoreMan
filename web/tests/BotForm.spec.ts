@@ -51,13 +51,13 @@ describe('BotForm', () => {
 
   it('keeps the runtime selected but selects no backend when none are ready', async () => {
     vi.mocked(relays.list).mockResolvedValueOnce({ items: [
-      { id: 'offline-ai', name: 'claude13 / codex', runtime_node_id: 'claude13', runtime_name: 'claude13', model_provider: 'codex', unavailable_reason: 'login_required', effective_models: ['codex/gpt-5.5'] },
+      { id: 'offline-ai', name: 'demo-node / codex', runtime_node_id: 'demo-node', runtime_name: 'demo-node', model_provider: 'codex', unavailable_reason: 'login_required', effective_models: ['codex/gpt-5.5'] },
     ] } as never)
     const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
     await flushPromises()
     const vm = wrapper.vm as unknown as { selectRuntime: (id: string) => Promise<void>; selectRelay: (id: string) => Promise<void>; selectedRuntime: string; form: { relay_server_id: string | null } }
-    await vm.selectRuntime('claude13')
-    expect(vm.selectedRuntime).toBe('claude13')
+    await vm.selectRuntime('demo-node')
+    expect(vm.selectedRuntime).toBe('demo-node')
     expect(vm.form.relay_server_id).toBeNull()
     await vm.selectRelay('offline-ai')
     expect(vm.form.relay_server_id).toBeNull()
