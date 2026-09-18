@@ -1,7 +1,7 @@
 # 基础镜像固定到摘要：标签会跟着上游补丁版移动，一动就让后面所有层变化、发布时整包重传。
 # 摘要由 Dependabot（docker 生态，/deploy）定期提 PR 升级。
 # 构建阶段产物与目标架构无关，固定在构建机架构上运行，避免多架构构建在模拟器里编译。
-FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS web
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:dbaa92e5758cbbcf85d65d5403fdb530fe3442cbe8c6dbfb7ef23365450d5070 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
