@@ -17,6 +17,10 @@ data/
 .superpowers/
 .claude/worktrees/
 
+# Personal agent instructions and settings: private deployment details stay local.
+CLAUDE.local.md
+.claude/settings.local.json
+
 # deploy/coreman 的本机部署状态
 .coreman-image-tag
 .coreman-image-tag.tmp
