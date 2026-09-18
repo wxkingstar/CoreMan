@@ -47,6 +47,7 @@ def aggregate_out(row: Any) -> dict[str, Any]:
 
 @router.get("/statistics")
 async def statistics(
+    request: Request,
     start: date | None = None,
     end: date | None = None,
     timezone: Literal["UTC", "Asia/Shanghai", "Asia/Tokyo"] = "Asia/Shanghai",
@@ -61,7 +62,10 @@ async def statistics(
     lower = datetime.combine(start, time.min, zone).astimezone(UTC)
     upper = datetime.combine(end + timedelta(days=1), time.min, zone).astimezone(UTC)
     ids = await accessible_bot_ids(session, actor)
-    conditions = _scope(ids, actor) + [ChatLog.request_at >= lower, ChatLog.request_at < upper]
+    conditions = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + [
+        ChatLog.request_at >= lower,
+        ChatLog.request_at < upper,
+    ]
     # 每条聚合查询有上限；统计不应挤占实时聊天的数据库资源。
     await session.execute(text("SELECT set_config('statement_timeout', '5000', true)"))
     total = (await session.execute(select(*aggregates()).where(*conditions))).mappings().one()
