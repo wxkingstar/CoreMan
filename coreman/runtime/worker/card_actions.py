@@ -86,9 +86,14 @@ class CardActionHandler:
                     await session.commit()
                     return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
-                from coreman.runtime.worker.personal_cards import handle_selection
+                from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
-                result = await handle_selection(session, ctx, bot, inbound, action)
+                handle = (
+                    handle_schedule
+                    if action.get("event_key") == "personal_schedule"
+                    else handle_selection
+                )
+                result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}
                 )

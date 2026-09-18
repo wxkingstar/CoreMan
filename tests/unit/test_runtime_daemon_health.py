@@ -229,23 +229,50 @@ def test_main_exits_nonzero_on_unexpected_errors(tmp_path, monkeypatch):
     assert not (tmp_path / "state.json").exists()
 
 
-@pytest.mark.parametrize("flag", ["feishu_personal_restricted_v1", "owner_session_view_v1"])
-@pytest.mark.parametrize("advertised", [None, False, "true", True])
-async def test_personal_capability_comes_only_from_driver_health(healing_daemon, advertised, flag):
-    daemon = healing_daemon
-    driver = Path(daemon.config["release"]) / "runtime_daemon/bin/runtime-claude"
-    source = driver.read_text()
+def declare_capabilities(daemon, monkeypatch, provider: str, capabilities: dict) -> None:
+    """Install only `provider`, whose fake driver declares `capabilities` on /health."""
+    release = Path(daemon.config["release"]) / "runtime_daemon/bin"
+    source = (release / "runtime-claude").read_text()
     source = source.replace(
         '{"data": [{"id": "fake-model"}]}',
-        '{"data": [{"id": "fake-model"}], "capabilities": {"'
-        + flag
-        + '": '
-        + repr(advertised)
-        + "}}",
+        '{"data": [{"id": "fake-model"}], "capabilities": ' + repr(capabilities) + "}",
     )
+    driver = release / ("runtime-" + provider)
     driver.write_text(source)
+    driver.chmod(0o700)
+    monkeypatch.setattr(
+        module, "cli_status", lambda name: {**fake_status(name), "installed": name == provider}
+    )
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("flag", ["feishu_personal_tools_v1", "owner_session_view_v1"])
+@pytest.mark.parametrize("advertised", [None, False, "true", True])
+async def test_personal_capability_comes_only_from_driver_health(
+    healing_daemon, monkeypatch, advertised, flag, provider
+):
+    daemon = healing_daemon
+    declare_capabilities(daemon, monkeypatch, provider, {flag: advertised})
     await daemon.discover()
-    assert daemon.capabilities["claude"][flag] is (advertised is True)
+    assert daemon.capabilities[provider][flag] is (advertised is True)
+
+
+def test_both_drivers_declare_additive_personal_tools():
+    for provider in module.PROVIDERS:
+        assert "feishu_personal_tools_v1" in module.DRIVER_CAPABILITIES[provider]
+        assert "owner_session_view_v1" in module.DRIVER_CAPABILITIES[provider]
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_retired_restricted_capability_is_never_forwarded(
+    healing_daemon, monkeypatch, provider
+):
+    # Old servers trust only the restricted flag; dropping it keeps personal credentials away.
+    daemon = healing_daemon
+    declare_capabilities(daemon, monkeypatch, provider, {"feishu_personal_restricted_v1": True})
+    await daemon.discover()
+    assert "feishu_personal_restricted_v1" not in daemon.capabilities[provider]
+    assert daemon.capabilities[provider]["feishu_personal_tools_v1"] is False
 
 
 @pytest.mark.parametrize(

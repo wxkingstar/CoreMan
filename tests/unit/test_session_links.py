@@ -22,10 +22,9 @@ def _issue(**kw):
 
 
 def test_round_trip_is_url_safe_and_opaque():
-    epoch = uuid.uuid4()
-    values, token = _issue(context_epoch=epoch)
+    values, token = _issue()
     assert re.fullmatch(r"[A-Za-z0-9_-]+", token)
-    assert str(values["user_id"]) not in token and str(epoch) not in token
+    assert str(values["user_id"]) not in token
     claims = session_links.read(CIPHER, token)
     assert claims is not None
     assert claims.session_id == values["session_id"]
@@ -33,7 +32,6 @@ def test_round_trip_is_url_safe_and_opaque():
     assert claims.node_id == values["node_id"]
     assert claims.bot_id == values["bot_id"]
     assert claims.provider == "claude"
-    assert claims.context_epoch == epoch
 
 
 def test_expires_after_a_day():

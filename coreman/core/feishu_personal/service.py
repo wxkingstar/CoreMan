@@ -48,7 +48,6 @@ def _fingerprint(app_id: str, secret: str) -> str:
 
 def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
     row.context_epoch = uuid.uuid4()
-    row.assistant_mode = "personal"
     row.status = status
     row.token_enc = row.pending_enc = None
     row.expires_at = row.pending_expires_at = row.next_poll_at = None
@@ -106,33 +105,19 @@ async def _lock(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) ->
     await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
-async def _row(
-    session: AsyncSession, cipher: Cipher, scope: Scope
-) -> tuple[FeishuPersonalGrant, str]:
-    await _lock(session, scope.bot.id, scope.user_id)
+def _credentials(cipher: Cipher, scope: Scope) -> tuple[str, str]:
     try:
         app_id, secret = app_credentials(cipher, scope.bot)
     except ValueError as exc:
         raise PersonalError("feishu_app_unavailable") from exc
     if app_id != scope.app_id:
         raise PersonalError("app_identity_mismatch")
-    # Upsert plus row lock serializes authorize, refresh, revoke and reads for this owner.
-    await session.execute(
-        insert(FeishuPersonalGrant)
-        .values(
-            bot_id=scope.bot.id,
-            user_id=scope.user_id,
-            app_id=app_id,
-            app_fingerprint=_fingerprint(app_id, secret),
-            platform_user_id=scope.event.sender_platform_user_id,
-            open_id=scope.event.sender_open_id,
-            tenant_key=scope.tenant_key,
-            status="revoked",
-            scopes=[],
-            poll_interval=5,
-        )
-        .on_conflict_do_nothing()
-    )
+    return app_id, secret
+
+
+async def _locked(
+    session: AsyncSession, scope: Scope, app_id: str, secret: str
+) -> FeishuPersonalGrant | None:
     row = (
         await session.scalars(
             select(FeishuPersonalGrant)
@@ -143,11 +128,13 @@ async def _row(
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-    ).one()
+    ).one_or_none()
+    if row is None:
+        return None
     expected = (
         app_id,
-        str(scope.event.sender_platform_user_id),
-        str(scope.event.sender_open_id),
+        str(scope.platform_user_id),
+        str(scope.open_id),
         scope.tenant_key,
         _fingerprint(app_id, secret),
     )
@@ -157,15 +144,50 @@ async def _row(
         row.app_id, row.platform_user_id, row.open_id, row.tenant_key, row.app_fingerprint = (
             expected
         )
+    return row
+
+
+async def _row(
+    session: AsyncSession, cipher: Cipher, scope: Scope
+) -> tuple[FeishuPersonalGrant, str]:
+    await _lock(session, scope.bot.id, scope.user_id)
+    app_id, secret = _credentials(cipher, scope)
+    # Upsert plus row lock serializes authorize, refresh, revoke and reads for this owner.
+    await session.execute(
+        insert(FeishuPersonalGrant)
+        .values(
+            bot_id=scope.bot.id,
+            user_id=scope.user_id,
+            app_id=app_id,
+            app_fingerprint=_fingerprint(app_id, secret),
+            platform_user_id=scope.platform_user_id,
+            open_id=scope.open_id,
+            tenant_key=scope.tenant_key,
+            status="revoked",
+            scopes=[],
+            poll_interval=5,
+        )
+        .on_conflict_do_nothing()
+    )
+    row = await _locked(session, scope, app_id, secret)
+    assert row is not None
     return row, secret
 
 
+async def existing_row(
+    session: AsyncSession, cipher: Cipher, scope: Scope
+) -> FeishuPersonalGrant | None:
+    """Same lock and identity checks as `_row`, without creating a grant for a new user."""
+    await _lock(session, scope.bot.id, scope.user_id)
+    app_id, secret = _credentials(cipher, scope)
+    return await _locked(session, scope, app_id, secret)
+
+
 RETENTION_NOTICE = (
-    "私聊文本和回答可能保留在 CoreMan 对话审计记录中。"
-    "完整思考过程只在运行时内存中保留 24 小时，仅本人登录后可凭回复里的链接查看，"
-    "切换模式、撤销或重新授权后旧链接立即失效。"
-    "清除会话、切换模式或撤销授权会停止使用旧上下文，不会删除已有审计记录；"
-    "个人资料不会写入共享记忆。"
+    "授权只在你和机器人的私聊里生效，群聊不会使用；"
+    "你本人创建、结果只发给你本人的定时任务也可以使用。"
+    "私聊内容和回答与普通私聊一样保留在对话记录中，只有你本人能查看；"
+    "撤销授权会停止后续读取，但不会删除已有记录。"
 )
 
 
@@ -177,7 +199,6 @@ def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
         refresh_available = bool(tokens.get("refresh_token"))
     return {
         "retention_notice": RETENTION_NOTICE,
-        "assistant_mode": row.assistant_mode,
         "access_token_expired": bool(row.expires_at and row.expires_at <= now)
         if row.status == "connected"
         else None,
@@ -217,7 +238,7 @@ async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -
     _clear(row, "selecting")
     row.authorization_level = "messages_readonly"
     row.pending_enc = cipher.encrypt(str(scope.task.id), _aad(row, "pending_enc"))
-    row.selection_chat_id = scope.event.chat_id
+    row.selection_chat_id = scope.chat_id
     row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=10)
     return {"status": "selecting", "prompt": SELECTION_PROMPT, "remote_revoked": remote_revoked}
 
@@ -233,7 +254,7 @@ async def choose_authorization(
     row, secret = await _row(session, cipher, scope)
     if (
         row.status != "selecting"
-        or row.selection_chat_id != scope.event.chat_id
+        or row.selection_chat_id != scope.chat_id
         or not row.pending_expires_at
         or row.pending_expires_at <= datetime.now(UTC)
     ):

@@ -39,10 +39,9 @@ func imagePart(url string) map[string]any {
 	return map[string]any{"type": "image_url", "image_url": map[string]string{"url": url}}
 }
 
-// Regression: live Feishu QA on 2026-09-18 found images invisible in personal
-// mode, which runs the CLI without Read. Images now reach the model as native
-// blocks in both modes; ordinary mode also keeps the image file for tools,
-// and private attachments never land in the shared session directory.
+// Images reach the model as native blocks, and tools also get the image file
+// in the session directory. Feishu personal tools are additive, so a turn that
+// mounts them handles attachments exactly like an ordinary turn.
 func TestImagesReachCLIAsNativeBlocks(t *testing.T) {
 	personal := map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/personal", "COREMAN_FEISHU_PERSONAL_TOKEN": "secret"}
 	for name, env := range map[string]map[string]string{"ordinary": nil, "personal": personal} {
@@ -80,7 +79,7 @@ echo '{"type":"result","subtype":"success","result":"ok"}'
 				t.Fatalf("stdin is not a block turn: %v\n%s", err, data)
 			}
 			blocks := turn.Message.Content
-			if len(blocks) < 2 || blocks[0].Type != "text" || blocks[1].Type != "image" {
+			if len(blocks) != 3 || blocks[0].Type != "text" || blocks[1].Type != "image" {
 				t.Fatalf("blocks = %+v", blocks)
 			}
 			if src := blocks[1].Source; src == nil || src.Type != "base64" || src.MediaType != "image/png" || src.Data != pngB64 {
@@ -91,6 +90,14 @@ echo '{"type":"result","subtype":"success","result":"ok"}'
 				t.Fatalf("text block = %q", text)
 			}
 
+			// Tools still get the image file, flagged as already visible.
+			if !strings.HasSuffix(blocks[2].Text, "]\n"+imageFileNote) {
+				t.Fatalf("blocks = %+v", blocks)
+			}
+			imagePath := strings.TrimSuffix(strings.TrimPrefix(blocks[2].Text, "[Image file: "), "]\n"+imageFileNote)
+			if filepath.Dir(imagePath) != filepath.Join(store, "s1", "files") || !strings.HasPrefix(filepath.Base(imagePath), "claude-img-") {
+				t.Fatalf("image path = %q", imagePath)
+			}
 			var saved []string
 			filepath.WalkDir(store, func(path string, d os.DirEntry, err error) error {
 				if err == nil && !d.IsDir() && strings.Contains(path, string(filepath.Separator)+"files"+string(filepath.Separator)) {
@@ -98,29 +105,8 @@ echo '{"type":"result","subtype":"success","result":"ok"}'
 				}
 				return nil
 			})
-			if env == nil {
-				// Tools still get the image file, flagged as already visible.
-				if len(blocks) != 3 || !strings.HasSuffix(blocks[2].Text, "]\n"+imageFileNote) {
-					t.Fatalf("blocks = %+v", blocks)
-				}
-				imagePath := strings.TrimSuffix(strings.TrimPrefix(blocks[2].Text, "[Image file: "), "]\n"+imageFileNote)
-				if filepath.Dir(imagePath) != filepath.Join(store, "s1", "files") || !strings.HasPrefix(filepath.Base(imagePath), "claude-img-") {
-					t.Fatalf("image path = %q", imagePath)
-				}
-				if len(saved) != 2 {
-					t.Fatalf("session files = %v, want the image and the text file", saved)
-				}
-				return
-			}
-			if len(blocks) != 2 {
-				t.Fatalf("blocks = %+v", blocks)
-			}
-			if len(saved) != 0 {
-				t.Fatalf("private attachments in session dir: %v", saved)
-			}
-			filePath := strings.TrimSuffix(strings.SplitN(text, "[File: ", 2)[1], "]")
-			if _, err := os.Stat(filePath); !os.IsNotExist(err) {
-				t.Fatalf("private temp file %s left behind: %v", filePath, err)
+			if len(saved) != 2 {
+				t.Fatalf("session files = %v, want the image and the text file", saved)
 			}
 		})
 	}
@@ -133,29 +119,22 @@ func TestImagesStayInTranscriptOrder(t *testing.T) {
 		*openai.NewChatMessage("assistant", "一个像素"),
 		*openai.NewChatMessage("user", "什么颜色"),
 	}
-	for _, imageFiles := range []bool{false, true} {
-		prompt, system, temp := buildPromptFromMessages(messages, "", imageFiles)
-		if system != "rules" || len(prompt) != 3 || prompt[1].Type != "image" || prompt[0].Text != "Human: 这是什么" {
-			t.Fatalf("system = %q, blocks = %+v", system, prompt)
-		}
-		after := "Assistant: 一个像素\n\nHuman: 什么颜色"
-		if imageFiles {
-			if len(temp) != 1 {
-				t.Fatalf("temp = %v", temp)
-			}
-			os.Remove(temp[0])
-			after = "[Image file: " + temp[0] + "]\n" + imageFileNote + "\n\n" + after
-		} else if len(temp) != 0 {
-			t.Fatalf("temp = %v", temp)
-		}
-		if prompt[2].Text != after {
-			t.Fatalf("text after image = %q, want %q", prompt[2].Text, after)
-		}
+	prompt, system, temp := buildPromptFromMessages(messages, "")
+	if system != "rules" || len(prompt) != 3 || prompt[1].Type != "image" || prompt[0].Text != "Human: 这是什么" {
+		t.Fatalf("system = %q, blocks = %+v", system, prompt)
+	}
+	if len(temp) != 1 {
+		t.Fatalf("temp = %v", temp)
+	}
+	os.Remove(temp[0])
+	after := "[Image file: " + temp[0] + "]\n" + imageFileNote + "\n\nAssistant: 一个像素\n\nHuman: 什么颜色"
+	if prompt[2].Text != after {
+		t.Fatalf("text after image = %q, want %q", prompt[2].Text, after)
 	}
 }
 
 func TestTextOnlyTurnKeepsStringContent(t *testing.T) {
-	prompt, _, _ := buildPromptFromMessages([]openai.ChatMessage{*openai.NewChatMessage("user", "hi")}, "", true)
+	prompt, _, _ := buildPromptFromMessages([]openai.ChatMessage{*openai.NewChatMessage("user", "hi")}, "")
 	_, input := buildClaudeArgs(&openai.ChatCompletionRequest{}, "m", prompt, "")
 	if want := `{"message":{"content":"Human: hi","role":"user"},"type":"user"}` + "\n"; input != want {
 		t.Fatalf("stdin = %s, want %s", input, want)
@@ -164,12 +143,15 @@ func TestTextOnlyTurnKeepsStringContent(t *testing.T) {
 
 func TestUnusableImagePartsAreDropped(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(pngB64)
-	prompt, _, _ := buildPromptFromMessages([]openai.ChatMessage{userMessage(t,
+	prompt, _, temp := buildPromptFromMessages([]openai.ChatMessage{userMessage(t,
 		imagePart("https://example.com/a.png"),
 		imagePart("data:image/png;base64,***"),
 		imagePart("data:application/octet-stream;base64,"+base64.StdEncoding.EncodeToString(raw)),
-	)}, "", false)
-	if len(prompt) != 2 || prompt[1].Type != "image" || prompt[1].Source.MediaType != "image/png" {
-		t.Fatalf("blocks = %+v", prompt)
+	)}, "")
+	for _, f := range temp {
+		os.Remove(f)
+	}
+	if len(prompt) != 3 || prompt[1].Type != "image" || prompt[1].Source.MediaType != "image/png" || len(temp) != 1 {
+		t.Fatalf("blocks = %+v, temp = %v", prompt, temp)
 	}
 }

@@ -122,9 +122,9 @@ class IntakeStage(ChatStageBase):
             return None
         if await self._command(session, ctx, intake):
             return None
-        from coreman.runtime.worker.chat.personal import reject_unavailable
+        from coreman.runtime.worker.chat.personal import intercept
 
-        if await reject_unavailable(session, ctx, intake):
+        if await intercept(session, ctx, intake):
             return None
         if await self._pending_answer(session, ctx, intake):
             return None

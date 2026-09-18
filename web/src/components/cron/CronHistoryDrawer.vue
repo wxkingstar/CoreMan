@@ -23,6 +23,11 @@ async function loadHistory() {
 function open(row: CronOut) {
   historyJob.value = row; history.value = []; historyPage.value = 1; historyVisible.value = true; void loadHistory()
 }
+/**
+ * 以本人身份运行的记录只给执行者本人看：后端对其他查看者清空 prompt、reply 置 null。
+ * 用返回内容判断，查看者本人执行的记录（prompt 非空）照常显示。
+ */
+function hidden(run: CronRun) { return !!run.private && !run.prompt && run.reply == null }
 defineExpose({ open })
 </script>
 
@@ -43,7 +48,22 @@ defineExpose({ open })
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="run-detail">
-            <b>{{ t('cron.prompt') }}</b><pre>{{ row.prompt }}</pre><b>{{ t('cron.reply') }}</b><pre>{{ row.reply || row.error_message || '—' }}</pre>
+            <template v-if="hidden(row)">
+              <b>{{ t('cron.prompt') }}</b><p
+                class="private-run"
+                data-test="private-run"
+              >
+                {{ t('cron.privateRun') }}
+              </p><b>{{ t('cron.reply') }}</b><p class="private-run">
+                {{ t('cron.privateRun') }}
+              </p>
+              <p v-if="row.error_message">
+                {{ t('cron.error') }}: {{ row.error_message }}
+              </p>
+            </template>
+            <template v-else>
+              <b>{{ t('cron.prompt') }}</b><pre>{{ row.prompt }}</pre><b>{{ t('cron.reply') }}</b><pre>{{ row.reply || row.error_message || '—' }}</pre>
+            </template>
             <p>{{ t('cron.precheck') }}: {{ row.precheck_meta || '—' }}</p>
             <p v-if="row.delivery.errors && Object.keys(row.delivery.errors).length">
               <span
@@ -127,4 +147,5 @@ defineExpose({ open })
 <style scoped>
 .run-detail { padding: 12px 24px; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.private-run { color: var(--el-text-color-secondary); font-style: italic; }
 </style>

@@ -3,11 +3,14 @@ package sessions
 import (
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"clawrelay-api/pkg/openai"
 )
 
 // aged returns a timestamp comfortably older than the 72h test maxAge.
@@ -198,5 +201,69 @@ func TestCleanupClosesEntryBeforeUnlink(t *testing.T) {
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		t.Fatalf("late Append resurrected the jsonl, stat err=%v", err)
+	}
+}
+
+func historyText(t *testing.T, entry *Entry) string {
+	t.Helper()
+	data, err := json.Marshal(entry.Events())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestLogRequestNeverRecordsEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	req := &openai.ChatCompletionRequest{
+		Model:    "m",
+		EnvVars:  map[string]string{"BOT_DB_PASSWORD": "bot-secret", "COREMAN_COLLABORATION_TOKEN": "collab-secret"},
+		Messages: []openai.ChatMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+	}
+	s.LogRequest("ordinary", req)
+
+	disk, err := os.ReadFile(filepath.Join(dir, "ordinary.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{string(disk), historyText(t, s.Get("ordinary"))} {
+		if strings.Contains(text, "secret") || strings.Contains(text, "env_vars") {
+			t.Fatalf("env vars recorded: %s", text)
+		}
+		if !strings.Contains(text, "hello") {
+			t.Fatalf("request content missing: %s", text)
+		}
+	}
+	if req.EnvVars["BOT_DB_PASSWORD"] != "bot-secret" {
+		t.Fatal("logging must not mutate the live request")
+	}
+}
+
+// Feishu personal tools are additive, so their sessions are ordinary ones:
+// persisted, listed and hydrated like any other, still without env vars.
+func TestPersonalSessionIsOrdinary(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.LogRequest("personal", &openai.ChatCompletionRequest{
+		EnvVars:  map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test/mcp", "COREMAN_FEISHU_PERSONAL_TOKEN": "personal-secret"},
+		Messages: []openai.ChatMessage{{Role: "user", Content: json.RawMessage(`"my calendar"`)}},
+	})
+	s.LogDelta("personal", "meeting at ten")
+
+	disk, err := os.ReadFile(filepath.Join(dir, "personal.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(disk), "meeting at ten") || strings.Contains(string(disk), "personal-secret") || strings.Contains(string(disk), "env_vars") {
+		t.Fatalf("unexpected personal log: %s", disk)
+	}
+	rec := httptest.NewRecorder()
+	s.ListHandler()(rec, httptest.NewRequest("GET", "/sessions", nil))
+	if !strings.Contains(rec.Body.String(), `"personal"`) {
+		t.Fatalf("personal session not listed: %s", rec.Body.String())
+	}
+	if !strings.Contains(historyText(t, New(dir).GetOrCreate("personal")), "meeting at ten") {
+		t.Fatal("personal session not hydrated from disk")
 	}
 }

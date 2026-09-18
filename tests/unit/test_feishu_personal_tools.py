@@ -14,7 +14,7 @@ def upstream(monkeypatch):
 
 
 async def invoke(name, args):
-    scope = SimpleNamespace(event=SimpleNamespace(sender_open_id="ou_self"))
+    scope = SimpleNamespace(open_id="ou_self", scheduled=False)
     return await tools.dispatch(None, None, scope, name, args)
 
 

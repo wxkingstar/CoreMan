@@ -9,16 +9,29 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
-from coreman.core.db.models import Bot, ChatLog, CronJob, CronRun, RelayServer, Task, User
+from coreman.core.db.models import (
+    Bot,
+    ChatLog,
+    CronJob,
+    CronRun,
+    FeishuPersonalGrant,
+    RelayServer,
+    RuntimeNode,
+    Task,
+    User,
+)
 from coreman.core.errors import ApiError
+from coreman.core.feishu_personal import policy
 from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import effective_env
+from coreman.core.personal_schedules import require_personal
 from coreman.core.pricing import estimate
 from coreman.core.prompting import (
     build_env,
@@ -38,6 +51,7 @@ from coreman.core.relay.sse import (
     UsageEvent,
 )
 from coreman.core.timeutils import utcnow
+from coreman.runtime.worker.chat.personal import feishu_guidance
 from coreman.runtime.worker.context import TaskContext
 
 # 结果正文上限（字符）：超出只保留前面这些并附截断提示，任务照常算成功。它同时约束
@@ -130,7 +144,10 @@ class CronRunHandler:
                     or (job.expires_at is not None and job.expires_at <= utcnow())
                 ):
                     raise ApiError(403, 403, "job_or_actor_unavailable")
-                speaker = await require_operator(session, bot, actor)
+                if job.execution_mode == "personal_ai":
+                    speaker = await require_personal(session, job, bot, actor)
+                else:
+                    speaker = await require_operator(session, bot, actor)
                 relay = (
                     await session.get(RelayServer, bot.relay_server_id)
                     if bot.relay_server_id
@@ -159,6 +176,11 @@ class CronRunHandler:
                 )
                 env.update(access.env)
                 backend = backend_of(bot.model, relay.model_provider)
+                personal_prompt = await self._personal_tools(
+                    session, ctx, job, bot, actor, relay, backend, config, env
+                )
+                if personal_prompt or job.execution_mode == "personal_ai":
+                    run.private = True
                 prompt = str(config["prompt"])
                 if result.prompt_appendix:
                     prompt += "\n\n" + result.prompt_appendix
@@ -186,7 +208,8 @@ class CronRunHandler:
                             or ""
                         ),
                         scheduled=True,
-                    ),
+                    )
+                    + personal_prompt,
                 )
                 await session.commit()
             # 身份验证后、外部调用前再次收取取消；独立会话不改写用户的 chat_sessions。
@@ -243,6 +266,55 @@ class CronRunHandler:
             execution_relay_id,
             detail=detail,
         )
+
+    async def _personal_tools(
+        self,
+        session: AsyncSession,
+        ctx: TaskContext,
+        job: CronJob,
+        bot: Bot,
+        actor: User,
+        relay: RelayServer,
+        backend: str,
+        config: dict[str, Any],
+        env: dict[str, str],
+    ) -> str:
+        """本人创建、本人执行、只发本人的任务，可以以本人身份读飞书；返回要追加的提示词。
+
+        不满足就原样跳过，任务照常运行：授权撤销或运行时太旧不该让定时任务失败。
+        """
+        if (
+            bot.platform != "feishu"
+            or job.created_by != actor.id
+            or not policy.self_only(config, actor.id)
+            or relay.runtime_node_id is None
+        ):
+            return ""
+        node = await session.get(RuntimeNode, relay.runtime_node_id, populate_existing=True)
+        grant = await session.get(FeishuPersonalGrant, (bot.id, actor.id), populate_existing=True)
+        if (
+            node is None
+            or not node.is_active
+            or not policy.runtime_supported(node.capabilities, backend)
+            or grant is None
+            or grant.status != "connected"
+            or not grant.token_enc
+        ):
+            return ""
+        try:
+            await policy.scheduled_scope(session, ctx.task.id, str(actor.id))
+        except ValueError:
+            return ""
+        base_url = ctx.public_base_url.rstrip("/")
+        env[policy.PREFIX + "URL"] = base_url + "/api/runtime/feishu-personal/mcp"
+        env[policy.PREFIX + "TOKEN"] = policy.issue_capability(
+            ctx.cipher,
+            task_id=ctx.task.id,
+            user_id=str(actor.id),
+            context_epoch=grant.context_epoch,
+            base_session_id=None,
+        )
+        return feishu_guidance(grant, base_url, scheduled=True)
 
     async def _consume(
         self, gen: AsyncGenerator[SseEvent, None]

@@ -27,7 +27,13 @@ from sqlalchemy.types import Uuid
 
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
-INTERACTION_KINDS = ("choice", "relay_switch", "session_switch", "self_reminder")
+INTERACTION_KINDS = (
+    "choice",
+    "relay_switch",
+    "session_switch",
+    "self_reminder",
+    "personal_schedule",
+)
 INTERACTION_STATUSES = ("open", "submitted", "cancelled", "expired")
 ANNOUNCEMENT_SCOPES = ("global", "relay", "bot")
 # 与迁移 0005 逐字一致（alembic.ext.checkconstraint_byname 按名字比对，正文也保持相同）。

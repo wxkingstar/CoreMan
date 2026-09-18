@@ -115,10 +115,28 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
       empty-text="—"
     >
       <el-table-column
-        prop="name"
         :label="t('cron.name')"
         min-width="150"
-      />
+      >
+        <template #default="{ row }">
+          {{ row.name }}
+          <el-tooltip
+            v-if="row.personal"
+            :content="t('cron.personalHint')"
+            placement="top"
+          >
+            <el-tag
+              size="small"
+              type="info"
+              class="personal-tag"
+              tabindex="0"
+              :data-test="`personal-${row.id}`"
+            >
+              {{ t('cron.personal') }}
+            </el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column
         :label="t('cron.schedule')"
         min-width="180"
@@ -159,6 +177,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
       >
         <template #default="{ row }">
           <el-button
+            v-if="!row.personal"
             link
             :data-test="`history-${row.id}`"
             @click="showHistory(row)"
@@ -166,6 +185,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
             {{ t('cron.history') }}
           </el-button>
           <el-button
+            v-if="!row.personal"
             link
             :disabled="!row.enabled || (row.schedule_kind === 'once' && !!row.consumed_at) || !!row.running_task_id || !!row.force_run_at || saving"
             :data-test="`run-${row.id}`"
@@ -174,7 +194,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
             {{ t('cron.run') }}
           </el-button>
           <el-button
-            v-if="row.can_edit"
+            v-if="row.can_edit && !row.personal"
             link
             :disabled="notificationTesting"
             :data-test="`test-notification-${row.id}`"
@@ -183,7 +203,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
             {{ t('notification.test') }}
           </el-button>
           <el-button
-            v-if="row.can_edit"
+            v-if="row.can_edit && !row.personal"
             link
             :disabled="!!row.force_run_at"
             :data-test="`edit-${row.id}`"
@@ -192,7 +212,7 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
             {{ t('common.edit') }}
           </el-button>
           <el-button
-            v-if="row.running_task_id || row.force_run_at"
+            v-if="!row.personal && (row.running_task_id || row.force_run_at)"
             link
             type="warning"
             @click="cancelRun(row)"
@@ -202,14 +222,17 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
           <el-button
             v-if="row.enabled"
             link
+            :data-test="`disable-${row.id}`"
             @click="disable(row)"
           >
             {{ t('common.disable') }}
           </el-button>
+          <span v-if="row.personal && !row.enabled">—</span>
           <el-button
-            v-if="row.can_edit"
+            v-if="row.can_edit && !row.personal"
             link
             type="danger"
+            :data-test="`delete-${row.id}`"
             :disabled="!!row.running_task_id"
             @click="remove(row)"
           >
@@ -240,4 +263,5 @@ function showHistory(row: CronOut) { historyDrawer.value?.open(row) }
 .hint { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 .el-select { width: 100%; }
 .toolbar .el-select { max-width: 320px; }
+.personal-tag { margin-left: 6px; cursor: help; }
 </style>

@@ -11,6 +11,8 @@ export interface CronIn {
 export interface CronOut extends CronIn {
   consumed_at?: string | null; delivery_status?: string; latest_run_id?: number | null
   has_webhook_url: boolean
+  /** 成员在私聊里为自己创建的 AI 定时任务：这里只能停用（can_edit 恒为 false），非创建者查看时 prompt 为空。 */
+  personal?: boolean
   id: string; version: number; created_by: string; can_edit: boolean; next_run_at: string | null
   force_run_at: string | null; running_task_id: number | null; last_status: string | null
 }
@@ -20,6 +22,8 @@ export interface CronRun {
   delivery: { errors?: Record<string, string>; outbox_ids?: number[] }
   deliveries: { id: number; platform: string; channel?: string; status: string; attempts: number; error: string | null }[]
   started_at: string; finished_at: string | null; trigger_kind: string; executed_by: string | null
+  /** 以本人身份运行的记录：查看者不是执行者时 prompt 为空、reply 为 null。 */
+  private?: boolean
   input_tokens: number | null; output_tokens: number | null
 }
 export interface SmtpIn {

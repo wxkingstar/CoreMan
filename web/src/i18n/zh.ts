@@ -1,8 +1,8 @@
 export default {
-  selfReminders: {"hint": "在飞书私聊发送“两分钟后提醒我检查接口，只提醒一次”，然后回复“确认提醒”。支持 1 分钟至 30 天，仅向本人原私聊提醒一次。", "deliveryHint": "取消会停止尚未发送的通知。已发送或正在发送的通知不能撤回；可刷新查看投递状态。", "refresh": "刷新", "empty": "暂无本人提醒", "fixed": "一次性本人提醒", "cancel": "取消提醒", "status": {"scheduled": "等待提醒", "running": "处理中", "success": "已生成通知", "failed": "失败", "skipped": "已跳过", "cancelled": "已取消", "pending": "待发送", "sending": "正在发送", "sent": "已发送"}},
+  selfReminders: {"hint": "一次性提醒：在飞书私聊发送“两分钟后提醒我检查接口，只提醒一次”，然后回复“确认提醒”。支持 1 分钟至 30 天，仅向本人原私聊提醒一次。", "scheduleHint": "AI 定时任务：在飞书私聊告诉 AI 员工，例如“每个工作日 9 点总结我的飞书未读消息”，然后点击卡片上的“确认创建”。结果只发回这个私聊；每个 AI 员工最多 10 个启用中的任务，两次执行至少间隔 1 小时。", "deliveryHint": "取消提醒会停止尚未发送的通知，已发送或正在发送的通知不能撤回。定时任务暂停后不再自动执行，可随时恢复；删除后无法恢复。", "refresh": "刷新", "empty": "暂无提醒或定时任务", "fixed": "一次性本人提醒", "cancel": "取消提醒", "status": {"scheduled": "等待提醒", "running": "处理中", "success": "已生成通知", "failed": "失败", "skipped": "已跳过", "cancelled": "已取消", "pending": "待发送", "sending": "正在发送", "sent": "已发送"}, "schedule": "AI 定时任务", "recurring": "周期执行", "once": "仅执行一次", "when": "执行时间", "next": "下次执行", "statusLabel": "状态", "state": {"active": "已启用", "paused": "已暂停", "running": "执行中"}, "scheduleStatus": {"scheduled": "等待执行", "paused": "已暂停", "running": "执行中", "success": "上次执行成功", "failed": "上次执行失败", "skipped": "上次已跳过", "failed_precheck": "上次检查失败"}, "instruction": "执行指令", "lastRun": "最近一次执行", "noRun": "尚未执行", "delivery": "投递", "error": "失败原因", "truncated": "结果较长，这里只显示开头部分，完整结果请查看私聊。", "expiredOnce": "一次性任务的时间已过，如需再次执行，请在私聊里重新创建。", "pause": "暂停", "resume": "恢复", "delete": "删除", "confirmDelete": "删除定时任务“{name}”？删除后不再执行，且无法恢复。", "pausedDone": "已暂停", "resumedDone": "已恢复", "deletedDone": "已删除"},
   myFeishu: {
-    retentionNotice: "私聊文本和回答可能保留在 CoreMan 对话审计记录中。完整思考过程只在运行时内存中保留 24 小时，仅本人登录后可凭回复里的链接查看，切换模式、撤销或重新授权后旧链接立即失效。清除会话、切换模式或撤销授权会停止使用旧上下文，不会删除已有审计记录；个人资料不会写入共享记忆。",
-    modeHint: "发送“普通助手”退出资料模式，发送“飞书资料”重新进入；切换会清除会话上下文，不会扩大授权范围。",
+    retentionNotice: "这些私聊与普通私聊一样保存在对话记录中，只有你本人能查看；撤销授权会停止后续读取，但不会删除已有记录。",
+    toolsHint: "连接后无需切换模式：你与该 AI 员工的私聊保留原有全部能力，并自动增加读取你本人飞书资料的工具。",
     tokenRefreshAvailable: "访问令牌已到期，授权仍保持连接；下次访问将尝试续期，续期失败时需重新连接。",
     tokenExpired: "访问令牌已到期且没有续期凭证，请重新连接。",
     connectTitle: "连接与管理",
@@ -12,7 +12,7 @@ export default {
     capabilities: "能力说明",
     inactive: "尚未生效，当前不能访问个人飞书数据。",
     incomplete: "部分权限尚未获得，当前只能使用已授予且符合所选档位的权限。请展开高级授权详情查看缺项。",
-    supportedTools: "仅限你与 AI 员工的飞书私聊中使用；实际可执行的操作以系统已接入的工具为准。",
+    supportedTools: "仅在你与 AI 员工的飞书私聊及你本人的定时任务中使用；实际可执行的操作以系统已接入的工具为准。",
     advancedDetails: "高级授权详情",
     credentialHint: "以下为权限核对信息。飞书凭证可能包含历史授权；超出本次档位的额外权限已被 CoreMan 禁用，不会扩大当前访问范围。",
     capabilityHints: {"messages_readonly": "搜索和读取你有权限访问的私聊、群聊消息；不能发送消息，也不能使用会议、文档等其他个人数据权限。", "all_except_send": "允许使用应用已开通的用户权限，包括读取、修改、删除和管理操作；禁止发送消息。", "all": "允许使用应用已开通的用户权限，包括读取、修改、删除、管理和发送消息。发送前仍需你明确指定接收方和内容。", "legacy_readonly": "保留原有的个人数据只读访问，不允许发送消息。"},
@@ -31,7 +31,7 @@ export default {
   "title": "我的飞书",
   "intro": "管理你授予各个 AI 员工的飞书个人数据访问权限。",
   "connectHint": "在飞书私聊 AI 员工，发送“{command}”，点击卡片选择授权范围，再打开授权链接。",
-  "privateOnly": "个人消息和会议资料仅可在飞书私聊中访问；群聊和企业微信不支持。",
+  "privateOnly": "授权只用于你与 AI 员工的飞书私聊，以及你本人创建、结果只发给你的定时任务；群聊和企业微信不会使用。",
   "refresh": "刷新",
   "empty": "尚无个人飞书授权",
   "scopes": "飞书实际授予",
@@ -303,7 +303,7 @@ export default {
   },
   "clearAddress": "移除已保存的地址"
 },
-  cron: {"cancelRun": '取消本次执行', "name": "名称", "bot": "AI 员工", "schedule": "触发时间", "timezone": "时区", "scheduleHint": "五项依次为分、时、日、月、周。默认在工作日 09:00 执行；夏令时重复时刻只执行一次。", "next": "下次执行", "lastStatus": "执行状态", "identityHint": "自动执行使用创建者的当前权限；立即运行使用点击者本人。修改执行内容仅限任务创建者。", "prompt": "执行内容", "systemPrompt": "本任务专用提示词（留空沿用AI 员工）", "expires": "到期时间", "recipients": "结果接收方式", "users": "私聊接收人", "groups": "群聊 ID", "emails": "邮件接收人", "perLine": "每行一个，也可用逗号分隔", "webhook": "发送到AI 员工配置的群 Webhook", "precheck": "执行前检查", "precheckHint": "留空时每次执行。支持数据判断、if/for 和有限函数；不支持文件、反射或任意网络请求。测试使用空 ctx，不会调用模型。", "template": "填入模板", "test": "测试检查逻辑", "willRun": "将执行", "willSkip": "将跳过", "history": "执行记录", "run": "立即运行", "queued": "等待触发", "required": "请填写名称、AI 员工和执行内容", "expired": "到期时间必须在未来", "reply": "执行结果", "channel": "通知渠道", "deliveryStatus": "投递状态", "error": "失败原因", "started": "开始时间", "trigger": "触发方式", "scheduled": "自动", "manual": "手动", "tokens": "输入 / 输出 Token", "status": {"running": "运行中", "success": "成功", "failed": "失败", "skipped": "已跳过", "failed_precheck": "检查失败"}},
+  cron: {"cancelRun": '取消本次执行', "personal": "成员本人任务", "personalHint": "成员在私聊中为自己创建的 AI 定时任务，指令和执行结果仅本人可见；管理员只能停用。", "privateRun": "仅执行者本人可见", "name": "名称", "bot": "AI 员工", "schedule": "触发时间", "timezone": "时区", "scheduleHint": "五项依次为分、时、日、月、周。默认在工作日 09:00 执行；夏令时重复时刻只执行一次。", "next": "下次执行", "lastStatus": "执行状态", "identityHint": "自动执行使用创建者的当前权限；立即运行使用点击者本人。修改执行内容仅限任务创建者。", "prompt": "执行内容", "systemPrompt": "本任务专用提示词（留空沿用AI 员工）", "expires": "到期时间", "recipients": "结果接收方式", "users": "私聊接收人", "groups": "群聊 ID", "emails": "邮件接收人", "perLine": "每行一个，也可用逗号分隔", "webhook": "发送到AI 员工配置的群 Webhook", "precheck": "执行前检查", "precheckHint": "留空时每次执行。支持数据判断、if/for 和有限函数；不支持文件、反射或任意网络请求。测试使用空 ctx，不会调用模型。", "template": "填入模板", "test": "测试检查逻辑", "willRun": "将执行", "willSkip": "将跳过", "history": "执行记录", "run": "立即运行", "queued": "等待触发", "required": "请填写名称、AI 员工和执行内容", "expired": "到期时间必须在未来", "reply": "执行结果", "channel": "通知渠道", "deliveryStatus": "投递状态", "error": "失败原因", "started": "开始时间", "trigger": "触发方式", "scheduled": "自动", "manual": "手动", "tokens": "输入 / 输出 Token", "status": {"running": "运行中", "success": "成功", "failed": "失败", "skipped": "已跳过", "failed_precheck": "检查失败"}},
   infra: {"clientPurpose": "外部业务系统使用调用方标识和密钥访问 CoreMan，仅可调用勾选的接口组。例如“AI 员工推送”可向指定会话发送通知；创建凭证不会自动发送消息。", "clientKeyHint": "标识须为 2–128 位英文字母、数字、下划线或短横线，例如 test-client；创建后不可修改。", "clientNameHint": "请填写 1–100 个字符的名称，可使用中文。", "clientNamePlaceholder": "例如：测试系统", "testAccess": '以我的身份测试', "key": "标识", "name": "名称", "description": "说明", "baseUrl": "系统地址", "sitemapUrl": "导航地址", "status": "状态", "enabled": "启用", "defaultAccess": "默认开放", "restrictBots": "限定AI 员工", "allowedBots": "允许申请的AI 员工", "emptyWhitelist": "限定列表为空时，所有AI 员工都不能申请或自动获得访问权。", "botScope": "开放范围", "openToAllBots": "对全部 AI 员工开放", "restrictedCount": "限定 {n} 个 AI 员工", "openToAllWarning": "不限定时，任何 AI 员工的管理员都能为其申请此系统，平台会把对话者的令牌注入该员工的运行环境。请只对可信的 AI 员工开放。", "sortOrder": "排序", "reclaimWarning": "收紧白名单将立即回收不在名单中的AI 员工授权，确定保存吗？", "clients": "API 调用方", "scopes": "允许访问的接口组", "rotateSecret": "轮换密钥", "rotateWarning": "旧密钥会立即失效，请准备更新调用方配置。确定轮换吗？", "jwtKeys": "身份签名密钥", "rotateKey": "生成并启用新密钥", "rotateKeyWarning": "将使用新密钥签发令牌，旧公钥保留 24 小时用于验证未过期令牌。确定继续吗？", "signing": "使用中", "retired": "已退役", "externalKey": "部署配置", "externalKeyHint": "业务系统令牌由部署配置的外部签发方密钥（BOT_JWT_*）签发；下方轮换只影响平台自有密钥。", "createdAt": "创建时间", "secretOnce": "请保存此密钥", "secretHint": "明文仅在此显示一次，关闭后无法再次查看。", "systemGrants": "系统权限", "grantsHint": "勾选需要访问的业务系统。默认开放的系统无需勾选，但仍受AI 员工白名单限制。", "scopeNames": {"relay": "运行时上报", "org": "组织通讯录", "notify": "通知用户", "push": "AI 员工推送", "systems": "授权测试", "memories": "记忆同步", "escalations": "求助"}},
   app: { title: 'CoreMan', subtitle: 'AI 员工平台' },
   common: {
@@ -372,7 +372,7 @@ export default {
   },
   layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
   menu: {
-    selfReminders: "我的提醒",
+    selfReminders: "我的定时任务",
     myFeishu: "我的飞书",
     skills: "技能管理",
     skillApprovals: "技能审批",

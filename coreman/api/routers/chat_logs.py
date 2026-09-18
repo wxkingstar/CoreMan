@@ -21,7 +21,7 @@ from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
-from coreman.core.db.models import Bot, BotMember, ChatLog, User
+from coreman.core.db.models import Bot, BotMember, ChatLog, CronRun, User
 from coreman.core.timeutils import aware_utc
 
 router = APIRouter(
@@ -50,7 +50,14 @@ async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID
 
 def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[ColumnElement[bool]]:
     """可见性条件：我管得着的 bot，或者我自己参与过的对话。"""
-    private = and_(ChatLog.platform == "feishu", ChatLog.chat_type == "single")
+    # 飞书私聊，以及以本人身份运行的定时任务：只有本人能看。
+    private = or_(
+        and_(ChatLog.platform == "feishu", ChatLog.chat_type == "single"),
+        and_(
+            ChatLog.chat_type == "cron",
+            ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),
+        ),
+    )
     # A bot token can originate in a group, even when its human identity is the owner.
     privacy = not_(private) if bot_token else or_(not_(private), ChatLog.user_id == user.id)
     if ids is None:

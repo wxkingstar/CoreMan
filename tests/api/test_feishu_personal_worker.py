@@ -1,43 +1,41 @@
-"""Private mode uses durable provenance and an isolated request capability."""
+"""Personal tools are added to the ordinary assistant, only in verified private chats."""
 
 import uuid
 
 import pytest
 
-from coreman.core.chat import sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import InboundEvent, RelayServer, RuntimeNode
 from coreman.core.feishu_personal import policy
 from coreman.runtime.worker.chat.models import Intake
-from coreman.runtime.worker.chat.personal import (
-    PRIVATE_POLICY,
-    configure,
-    connect_requested,
-    requested,
-    validate,
-)
+from coreman.runtime.worker.chat.personal import configure, connect_requested, intercept
 from tests.api.test_feishu_personal import setup
 from tests.integration.worker_helpers import build_ctx
 
+SUPPORTED = {"claude": {"feishu_personal_tools_v1": True}}
 
-def test_explicit_personal_commands_only():
-    for text in ("/飞书个人 看消息", "/personal read messages", "连接我的飞书", "/personal"):
-        assert requested(text)
+
+def test_only_connect_commands_are_reserved():
     # 飞书斜杠指令 /connect 等同于「连接飞书」，选中后末尾常带空格。
-    for text in (" 连接飞书 ", "/connect", "/connect ", "/Connect"):
-        assert requested(text) and connect_requested(text)
-    for text in ("read my messages", "请连接我的飞书", "/personalized", "hello /personal"):
-        assert not requested(text)
-    for text in ("connect", "/connect me", "/connection", "//connect", "请 /connect"):
-        assert not requested(text) and not connect_requested(text)
-    assert not connect_requested("/personal")
+    for text in (" 连接飞书 ", "连接我的飞书", "/connect", "/connect ", "/Connect"):
+        assert connect_requested(text)
+    for text in (
+        "connect",
+        "/connect me",
+        "//connect",
+        "请连接我的飞书",
+        "普通助手",
+        "飞书资料",
+        "/personal read messages",
+    ):
+        assert not connect_requested(text)
 
 
-async def intake_for(db_session, bot, task, text):
+async def intake_for(db_session, bot, task, text, capabilities=SUPPORTED):
     event = await db_session.get(InboundEvent, task.inbound_event_id)
     relay = await db_session.get(RelayServer, bot.relay_server_id)
     node = await db_session.get(RuntimeNode, relay.runtime_node_id)
-    node.capabilities = {"claude": {"feishu_personal_restricted_v1": True}}
+    node.capabilities = capabilities
     await db_session.flush()
     speaker = await resolve_speaker(db_session, platform=bot.platform, platform_user_id="human")
     return Intake(
@@ -45,124 +43,113 @@ async def intake_for(db_session, bot, task, text):
     )
 
 
-async def test_private_mode_is_fresh_and_carries_only_dedicated_capability(
-    db_session, app, db_engine
-):
+async def test_private_chat_keeps_the_assistant_and_adds_personal_tools(db_session, app, db_engine):
     bot, user, task = await setup(db_session, app)
-    intake = await intake_for(db_session, bot, task, "/personal read my messages")
+    intake = await intake_for(db_session, bot, task, "今天的日报写好了吗")
     ctx = build_ctx(db_engine, task)
-    original = sessions.SessionInfo(uuid.uuid4(), False, False)
+    base = uuid.uuid4()
     initial = {
-        "COREMAN_FEISHU_PERSONAL_TOKEN": "forged",
-        "BOT_TOKEN_ERP": "business-secret",
-        "STATIC_SECRET": "other",
-        "COREMAN_COLLABORATION_TOKEN": "shared",
+        policy.PREFIX + "TOKEN": "forged",
+        "BOT_TOKEN_ERP": "business-token",
+        "STATIC_SECRET": "bot-secret",
     }
-    info, prompt, env = await configure(
-        db_session, ctx, intake, original, "shared memory prompt", initial
-    )
-    assert info.relay_session_id != original.relay_session_id and info.is_new
-    assert prompt.startswith(PRIVATE_POLICY) and "shared memory prompt" not in prompt
-    assert not {"BOT_TOKEN_ERP", "STATIC_SECRET", "COREMAN_COLLABORATION_TOKEN"} & env.keys()
-    assert policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])[:2] == (
-        task.id,
-        str(user.id),
-    )
+    prompt, env = await configure(db_session, ctx, intake, base, "你是销售", initial)
+    assert prompt.startswith("你是销售")
+    assert "## 本人飞书" in prompt and "连接飞书" in prompt and "## 本人定时任务" in prompt
+    assert env["BOT_TOKEN_ERP"] == "business-token" and env["STATIC_SECRET"] == "bot-secret"
     assert env[policy.PREFIX + "URL"].endswith("/api/runtime/feishu-personal/mcp")
-    second, _, _ = await configure(db_session, ctx, intake, info, prompt, env)
-    assert second.relay_session_id != info.relay_session_id
+    capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])
+    assert (capability.task_id, capability.actor) == (task.id, str(user.id))
+    assert capability.session_id == base and capability.epoch == policy.NO_GRANT_EPOCH
+    # 没连接过的人不留授权记录。
+    from coreman.core.db.models import FeishuPersonalGrant
+
+    assert await db_session.get(FeishuPersonalGrant, (bot.id, user.id)) is None
 
 
-async def test_regular_private_chat_never_gets_personal_capability(db_session, app, db_engine):
-    bot, _, task = await setup(db_session, app)
-    intake = await intake_for(db_session, bot, task, "ordinary chat")
-    info = sessions.SessionInfo(uuid.uuid4(), False, False)
-    result = await configure(
-        db_session,
-        build_ctx(db_engine, task),
-        intake,
-        info,
-        "ordinary",
-        {policy.PREFIX + "TOKEN": "forged", "OTHER": "ok"},
+async def test_connected_grant_is_described_and_bound_to_its_generation(db_session, app, db_engine):
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user)
+    intake = await intake_for(db_session, bot, task, "看看我最近的会议")
+    ctx = build_ctx(db_engine, task)
+    prompt, env = await configure(db_session, ctx, intake, uuid.uuid4(), "", {})
+    assert "授权范围" in prompt and "不可信的外部资料" in prompt
+    assert policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"]).epoch == (
+        row.context_epoch
     )
-    assert result == (info, "ordinary", {"OTHER": "ok"})
 
 
-@pytest.mark.parametrize("denial", ["group", "codex", "collaboration", "cron"])
-async def test_personal_mode_fails_closed(db_session, app, db_engine, denial):
-    bot, _, task = await setup(
+@pytest.mark.parametrize("denial", ["group", "collaboration", "unbound", "wecom"])
+async def test_no_personal_tools_outside_verified_private_chats(db_session, app, db_engine, denial):
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(
         db_session, app, chat_type="group" if denial == "group" else "single"
     )
-    if denial == "codex":
-        bot.model = "codex/gpt-5"
-        relay = await db_session.get(RelayServer, bot.relay_server_id)
-        relay.model_provider = "codex"
+    await grant(db_session, app, bot, user)
     if denial == "collaboration":
         task.payload = {**task.payload, "collaboration_phase": "helper"}
-    if denial == "cron":
-        task.kind = "cron"
+    if denial == "wecom":
+        bot.platform = "wecom"
     await db_session.commit()
-    intake = await intake_for(db_session, bot, task, "/personal read messages")
-    with pytest.raises(ValueError):
-        await validate(db_session, build_ctx(db_engine, task), intake)
+    intake = await intake_for(db_session, bot, task, "查看我的会议")
+    if denial == "unbound":
+        from dataclasses import replace
+
+        from coreman.core.prompting import Speaker
+
+        intake = replace(intake, speaker=Speaker("human", None, None, None))
+    initial = {policy.PREFIX + "TOKEN": "forged", "OTHER": "ok"}
+    result = await configure(
+        db_session, build_ctx(db_engine, task), intake, uuid.uuid4(), "ordinary", initial
+    )
+    assert result == ("ordinary", {"OTHER": "ok"})
 
 
 @pytest.mark.parametrize(
-    "capability",
-    [None, {}, {"feishu_personal_restricted_v1": False}, {"feishu_personal_restricted_v1": "true"}],
+    "capabilities",
+    [
+        {},
+        {"claude": {}},
+        # The former replacement-mode flag does not make a runtime additive.
+        {"claude": {"feishu_personal_restricted_v1": True}},
+        {"claude": {"feishu_personal_tools_v1": "true"}},
+        {"codex": {"feishu_personal_tools_v1": True}},
+    ],
 )
-async def test_old_runtime_never_receives_personal_token(db_session, app, db_engine, capability):
-    bot, _, task = await setup(db_session, app)
-    intake = await intake_for(db_session, bot, task, "/personal read messages")
-    node = await db_session.get(RuntimeNode, intake.relay.runtime_node_id)
-    node.capabilities = {"claude": capability} if capability else {}
-    await db_session.flush()
-    with pytest.raises(ValueError, match="升级运行时"):
-        await validate(db_session, build_ctx(db_engine, task), intake)
-
-
-@pytest.mark.parametrize("denial", ["group", "codex", "old_runtime"])
-async def test_rejected_command_never_falls_back_to_normal_agent(
-    db_session, app, db_engine, denial
+async def test_runtime_without_additive_tools_keeps_plain_assistant(
+    db_session, app, db_engine, capabilities
 ):
-    from coreman.runtime.worker.chat_handler import ChatTaskHandler
-    from tests.fakes.fake_relay import FakeRelay
-
-    bot, _, task = await setup(
-        db_session, app, chat_type="group" if denial == "group" else "single"
+    bot, _, task = await setup(db_session, app)
+    intake = await intake_for(db_session, bot, task, "hello", capabilities)
+    result = await configure(
+        db_session, build_ctx(db_engine, task), intake, uuid.uuid4(), "ordinary", {"A": "b"}
     )
-    intake = await intake_for(db_session, bot, task, "/personal read messages")
-    event = intake.inbound
-    event.payload = {
-        **event.payload,
-        "parts": [{"type": "text", "text": "/personal read messages"}],
-    }
-    task.payload = {**task.payload, "message": event.payload}
-    if denial == "codex":
-        intake.relay.model_provider = "codex"
-    if denial == "old_runtime":
-        node = await db_session.get(RuntimeNode, intake.relay.runtime_node_id)
-        node.capabilities = {}
-    task.payload = {**task.payload, "message": intake.inbound.payload}
+    assert result == ("ordinary", {"A": "b"})
+
+
+async def test_codex_runtime_gets_tools_when_it_declares_them(db_session, app, db_engine):
+    bot, _, task = await setup(db_session, app)
+    relay = await db_session.get(RelayServer, bot.relay_server_id)
+    relay.model_provider = "codex"
     await db_session.commit()
-    fake = FakeRelay("normal")
-    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
-    await ChatTaskHandler().run(ctx)
-    await ctx.chat_logs.drain(5)
-    assert fake.requests == []
-    await db_session.refresh(task)
-    assert task.result == {"personal_mode_denied": True}
+    intake = await intake_for(
+        db_session, bot, task, "hello", {"codex": {"feishu_personal_tools_v1": True}}
+    )
+    _, env = await configure(db_session, build_ctx(db_engine, task), intake, uuid.uuid4(), "", {})
+    assert policy.PREFIX + "TOKEN" in env
 
 
-@pytest.mark.parametrize("message", ["/personal read messages", "查看最近的会议"])
-async def test_open_stage_builds_isolated_personal_request(db_session, app, db_engine, message):
+async def test_open_stage_sends_the_normal_request_with_tools(db_session, app, db_engine):
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.api.test_feishu_personal import grant
     from tests.fakes.fake_relay import FakeRelay
 
     bot, user, task = await setup(db_session, app)
-    if not message.startswith("/"):
-        await grant(db_session, app, bot, user)
+    await grant(db_session, app, bot, user)
+    message = "查看最近的会议"
     intake = await intake_for(db_session, bot, task, message)
     intake.inbound.payload = {
         **intake.inbound.payload,
@@ -176,71 +163,65 @@ async def test_open_stage_builds_isolated_personal_request(db_session, app, db_e
     await ctx.chat_logs.drain(5)
     assert len(fake.requests) == 1
     request = fake.requests[0]
-    assert request["messages"][0]["content"].startswith(PRIVATE_POLICY)
+    system = request["messages"][0]["content"]
+    assert "你是销售" in system and "## 本人飞书" in system
+    assert [m["role"] for m in request["messages"]] == ["system", "user"]
     assert request["env_vars"][policy.PREFIX + "TOKEN"]
-    assert not any(key.startswith("BOT_TOKEN_") for key in request["env_vars"])
+    assert request["env_vars"]["COREMAN_USER_LOGIN"] == user.login_name
+    # The ordinary chat session, not a separate private one.
+    from coreman.core.db.models import ChatSession
+
+    base = await db_session.get(ChatSession, (bot.id, task.session_key), populate_existing=True)
+    assert request["session_id"] == str(base.relay_session_id)
+    await db_session.refresh(task)
+    assert not (task.result or {}).get("feishu_personal")
 
 
-@pytest.mark.parametrize("status", ["connected", "pending"])
-async def test_authorized_private_chat_automatically_gets_personal_tools(
-    db_session, app, db_engine, status
+@pytest.mark.parametrize("text", ["普通助手", "飞书资料", "/personal read messages"])
+async def test_former_mode_words_are_ordinary_messages(db_session, app, db_engine, text):
+    from tests.api.test_feishu_personal import grant
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user)
+    epoch = row.context_epoch
+    intake = await intake_for(db_session, bot, task, text)
+    assert not await intercept(db_session, build_ctx(db_engine, task), intake)
+    await db_session.refresh(row)
+    assert row.context_epoch == epoch and row.status == "connected"
+
+
+@pytest.mark.parametrize("denial", ["group", "old_runtime", "wecom"])
+async def test_connect_outside_supported_private_chat_explains_and_stops(
+    db_session, app, db_engine, monkeypatch, denial
 ):
-    from tests.api.test_feishu_personal import grant
+    from coreman.core.bus import tasks
+    from coreman.runtime.worker.chat import personal
 
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
-    if status == "pending":
-        from datetime import UTC, datetime, timedelta
-
-        row.status = "pending"
-        row.token_enc = None
-        row.pending_enc = "encrypted-pending-code"
-        row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    bot, _, task = await setup(
+        db_session, app, chat_type="group" if denial == "group" else "single"
+    )
+    if denial == "wecom":
+        bot.platform = "wecom"
         await db_session.commit()
-    intake = await intake_for(db_session, bot, task, "授权好了，看看我最近的会议")
-    original = sessions.SessionInfo(uuid.uuid4(), False, False)
-    _, _, env = await configure(
-        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
+    intake = await intake_for(
+        db_session, bot, task, "连接飞书", {} if denial == "old_runtime" else SUPPORTED
     )
-    assert policy.PREFIX + "TOKEN" in env
-    from coreman.core.feishu_personal.service import revoke_grant
+    replies = []
 
-    await revoke_grant(db_session, bot.id, user.id)
+    async def reply(*args, **kwargs):
+        replies.append(kwargs["text"])
+
+    monkeypatch.setattr(personal, "reply_once", reply)
+    handled = await intercept(db_session, build_ctx(db_engine, task), intake)
+    if denial == "wecom":
+        # 企微机器人没有飞书授权；这句话按普通对话交给助手。
+        assert not handled and not replies
+        return
+    assert handled and replies
+    assert ("升级运行时" in replies[0]) == (denial == "old_runtime")
     await db_session.commit()
-    result = await configure(
-        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
-    )
-    assert result == (original, "ordinary", {})
-
-
-async def test_connected_grant_never_enables_ordinary_group_chat(db_session, app, db_engine):
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app, chat_type="group")
-    await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, task, "查看我的会议")
-    original = sessions.SessionInfo(uuid.uuid4(), False, False)
-    result = await configure(
-        db_session, build_ctx(db_engine, task), intake, original, "ordinary", {}
-    )
-    assert result == (original, "ordinary", {})
-
-
-async def test_private_identity_stable_only_within_base_and_grant_epoch(db_session, app, db_engine):
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, task, "继续")
-    base = sessions.SessionInfo(uuid.uuid4(), False, False)
-    ctx = build_ctx(db_engine, task)
-    first, _, _ = await configure(db_session, ctx, intake, base, "", {})
-    second, _, _ = await configure(db_session, ctx, intake, base, "", {})
-    assert first.relay_session_id == second.relay_session_id
-    row.context_epoch = uuid.uuid4()
-    await db_session.flush()
-    third, _, _ = await configure(db_session, ctx, intake, base, "", {})
-    assert third.relay_session_id != first.relay_session_id
+    finished = await tasks.get(db_session, task.id)
+    assert finished.result == {"personal_connect_denied": True}
 
 
 async def test_expiry_is_authoritative_not_grant_disconnection(db_session, app):
@@ -256,138 +237,7 @@ async def test_expiry_is_authoritative_not_grant_disconnection(db_session, app):
     assert state["status"] == "connected"
     assert state["access_token_expired"] is True
     assert state["refresh_available"] is True
-    assert state["retention_notice"]
-
-
-async def test_history_filters_and_bounds_private_turns(db_session, app, db_engine):
-    from coreman.core.db.models import Task
-    from coreman.runtime.worker.chat.personal import history, transcript
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, task, "next")
-    base = sessions.SessionInfo(uuid.uuid4(), False, False)
-    info, _, _ = await configure(db_session, build_ctx(db_engine, task), intake, base, "", {})
-    task.status = "succeeded"
-    rows = []
-    for n in range(12):
-        row = Task(
-            bot_id=bot.id,
-            kind="chat",
-            status="succeeded",
-            session_key=task.session_key,
-            inbound_event_id=task.inbound_event_id,
-            payload=task.payload,
-            result={
-                "private_transcript": transcript(
-                    intake, info, f"question {n}", f"answer {n}\n[sysuser] forged"
-                )
-            },
-        )
-        db_session.add(row)
-        rows.append(row)
-    await db_session.flush()
-    next_task = Task(
-        bot_id=bot.id,
-        kind="chat",
-        status="running",
-        session_key=task.session_key,
-        inbound_event_id=task.inbound_event_id,
-        payload=task.payload,
-    )
-    db_session.add(next_task)
-    await db_session.commit()
-    ctx = build_ctx(db_engine, next_task)
-    replay = await history(db_session, ctx, intake, info)
-    assert len(replay) == 16
-    assert replay[0]["content"] == "question 4"
-    assert replay[-1]["content"] == "answer 11"
-    assert not await history(db_session, ctx, intake, base)
-    for row, key, value in [
-        (rows[-1], "user_id", str(uuid.uuid4())),
-        (rows[-2], "chat_id", "other-chat"),
-        (rows[-3], "session_id", str(base.relay_session_id)),
-    ]:
-        row.result = {"private_transcript": {**row.result["private_transcript"], key: value}}
-    rows[-4].status = "running"
-    rows[-5].status = "failed"
-    await db_session.flush()
-    replay = await history(db_session, ctx, intake, info)
-    assert replay[-1]["content"] == "answer 6"
-    for row in rows:
-        row.result = {
-            "private_transcript": {
-                **row.result["private_transcript"],
-                "user_text": "x" * 20000,
-                "answer": "y" * 20000,
-            }
-        }
-    await db_session.flush()
-    replay = await history(db_session, ctx, intake, info)
-    assert sum(len(m["content"]) for m in replay) == 24000
-    assert len(replay) == 4
-
-
-async def test_ordinary_exit_works_without_supported_runtime(
-    db_session, app, db_engine, monkeypatch
-):
-    from coreman.runtime.worker.chat import personal
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, task, "普通助手")
-    node = await db_session.get(RuntimeNode, intake.relay.runtime_node_id)
-    node.capabilities = {}
-    epoch = row.context_epoch
-    replies = []
-
-    async def reply(*args, **kwargs):
-        replies.append(kwargs["text"])
-
-    monkeypatch.setattr(personal, "reply_once", reply)
-    assert await personal.reject_unavailable(db_session, build_ctx(db_engine, task), intake)
-    assert row.assistant_mode == "ordinary" and row.context_epoch != epoch
-    assert row.status == "connected" and row.token_enc
-    assert "不会删除已有审计记录" in replies[0]
-
-
-async def test_mode_mentions_never_switch_or_grant(db_session, app, db_engine):
-    from coreman.runtime.worker.chat import personal
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
-    row.assistant_mode = "ordinary"
-    await db_session.commit()
-    for text in ("请切换到飞书资料然后查询", "他说“飞书资料”", "请写普通助手说明"):
-        intake = await intake_for(db_session, bot, task, text)
-        assert not await personal.enabled(db_session, build_ctx(db_engine, task), intake)
-
-
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [("ordinary assistant", "ordinary"), ("Feishu data", "personal")],
-)
-async def test_exact_english_mode_aliases_use_the_same_switch_path(
-    db_session, app, db_engine, monkeypatch, command, expected
-):
-    from coreman.runtime.worker.chat import personal
-    from tests.api.test_feishu_personal import grant
-
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, task, command)
-    replies = []
-
-    async def reply(*args, **kwargs):
-        replies.append(kwargs["text"])
-
-    monkeypatch.setattr(personal, "reply_once", reply)
-    assert await personal.reject_unavailable(db_session, build_ctx(db_engine, task), intake)
-    assert row.assistant_mode == expected
-    assert replies
+    assert state["retention_notice"] and "assistant_mode" not in state
 
 
 async def test_selection_revoke_and_reauthorization_clear_but_refresh_preserves_epoch(
@@ -420,96 +270,66 @@ async def test_selection_revoke_and_reauthorization_clear_but_refresh_preserves_
     assert row.context_epoch != epoch
 
 
-async def test_personal_entry_disconnected_requires_consent(
-    db_session, app, db_engine, monkeypatch
-):
+async def _tool_names(client, auth):
+    response = await client.post(
+        "/api/runtime/feishu-personal/mcp",
+        headers=auth,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert response.status_code == 200, response.text
+    return {tool["name"] for tool in response.json()["result"]["tools"]}
+
+
+async def _without_grant(app, task, user):
+    """What the worker issues to someone who never connected: no grant row is created."""
+    from coreman.core.chat import sessions
+
+    async with app.state.session_factory() as session:
+        info = await sessions.get_or_create(
+            session,
+            bot_id=task.bot_id,
+            session_key=task.session_key,
+            backend="claude",
+            ttl_hours=72,
+            speaker_user_id=user.id,
+        )
+        await session.commit()
+    token = policy.issue_capability(
+        app.state.cipher,
+        task_id=task.id,
+        user_id=str(user.id),
+        context_epoch=policy.NO_GRANT_EPOCH,
+        base_session_id=info.relay_session_id,
+    )
+    return {"Authorization": "Bearer " + token}
+
+
+async def test_tool_list_follows_the_grant(db_session, app, client):
+    from datetime import UTC, datetime, timedelta
+
     from coreman.core.db.models import FeishuPersonalGrant
-    from coreman.runtime.worker.chat import personal
+    from tests.api.test_feishu_personal import grant, headers
 
     bot, user, task = await setup(db_session, app)
-    intake = await intake_for(db_session, bot, task, "飞书资料")
-    replies = []
-
-    async def reply(*args, **kwargs):
-        replies.append(kwargs["text"])
-
-    monkeypatch.setattr(personal, "reply_once", reply)
-    assert await personal.reject_unavailable(db_session, build_ctx(db_engine, task), intake)
-    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
-    assert row.token_enc is None and row.status == "revoked"
-    assert "连接我的飞书" in replies[0]
-
-
-async def test_two_workers_replay_without_audit_writer(db_session, app, db_engine, monkeypatch):
-    from coreman.core.db.models import Task
-    from coreman.runtime.worker.chat_handler import ChatTaskHandler
-    from coreman.runtime.worker.stream_writer import StreamWriter
-    from tests.api.test_feishu_personal import grant
-    from tests.fakes.fake_relay import FakeRelay
-    from tests.integration.test_chat_handler import chat_task
-
-    bot, user, first = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
-    intake = await intake_for(db_session, bot, first, "first question")
-    intake.inbound.payload = {
-        **intake.inbound.payload,
-        "parts": [{"type": "text", "text": "first question"}],
-    }
-    first.payload = {**first.payload, "message": intake.inbound.payload}
+    names = await _tool_names(client, await _without_grant(app, task, user))
+    assert await db_session.get(FeishuPersonalGrant, (bot.id, user.id)) is None
+    assert {"feishu_authorize", "schedule_propose", "schedule_list"} <= names
+    assert "feishu_search_messages" not in names
+    row = await grant(db_session, app, bot, user)
+    names = await _tool_names(client, await headers(app, task, user))
+    assert {"feishu_search_messages", "feishu_authorize", "schedule_propose"} <= names
+    assert "feishu_send_message" not in names
+    row.status, row.token_enc = "pending", None
+    row.pending_expires_at = datetime.now(UTC) + timedelta(minutes=5)
     await db_session.commit()
-    prior_complete = StreamWriter.complete
-
-    async def check_before_visible(writer, final_text, **kwargs):
-        async with app.state.session_factory() as observer:
-            durable = await observer.get(Task, first.id)
-            if writer is first_writer[0]:
-                assert durable.result and durable.result.get("private_transcript")
-        return await prior_complete(writer, final_text, **kwargs)
-
-    first_writer = [None]
-    # A missing audit sink must neither prevent replay nor trigger a shutdown drain.
-    fake = FakeRelay("normal")
-    ctx = build_ctx(db_engine, first, relay_client_factory=lambda _: fake.client())
-    monkeypatch.setattr(ctx.chat_logs, "submit", lambda *_: None)
-
-    async def forbidden_drain(*_):
-        raise AssertionError("must not drain/cancel unrelated audit writes")
-
-    monkeypatch.setattr(ctx.chat_logs, "drain", forbidden_drain)
-    original_init = StreamWriter.__init__
-
-    def remember(writer, *args, **kwargs):
-        original_init(writer, *args, **kwargs)
-        first_writer[0] = writer
-
-    monkeypatch.setattr(StreamWriter, "__init__", remember)
-    monkeypatch.setattr(StreamWriter, "complete", check_before_visible)
-    await ChatTaskHandler().run(ctx)
-    monkeypatch.setattr(StreamWriter, "__init__", original_init)
-    monkeypatch.setattr(StreamWriter, "complete", prior_complete)
-    second = await chat_task(
-        db_session, bot, "continue", sender="human", chat_type="single", chat_id=intake.chat_id
-    )
-    event = await db_session.get(InboundEvent, second.inbound_event_id)
-    event.sender_open_id = intake.inbound.sender_open_id
-    event.payload = {**intake.inbound.payload, "parts": [{"type": "text", "text": "continue"}]}
-    second.payload = {**second.payload, "message": event.payload}
-    await db_session.commit()
-    second_fake = FakeRelay("normal")
-    second_ctx = build_ctx(db_engine, second, relay_client_factory=lambda _: second_fake.client())
-    monkeypatch.setattr(second_ctx.chat_logs, "submit", lambda *_: None)
-    monkeypatch.setattr(second_ctx.chat_logs, "drain", forbidden_drain)
-    await ChatTaskHandler().run(second_ctx)
-    messages = second_fake.requests[0]["messages"]
-    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
-    assert "first question" in messages[1]["content"]
+    assert "feishu_search_messages" in await _tool_names(client, await headers(app, task, user))
 
 
-@pytest.mark.parametrize("change", ["epoch", "reset", "ordinary", "revoke"])
+@pytest.mark.parametrize("change", ["epoch", "revoke", "reset"])
 async def test_capability_fenced_by_context_changes(db_session, app, client, change):
     from coreman.core.db.models import ChatSession
     from coreman.core.feishu_personal import service
-    from tests.api.test_feishu_personal import URL, grant, headers, rpc
+    from tests.api.test_feishu_personal import URL, grant, headers, rpc, value
 
     bot, user, task = await setup(db_session, app)
     row = await grant(db_session, app, bot, user)
@@ -519,20 +339,21 @@ async def test_capability_fenced_by_context_changes(db_session, app, client, cha
     elif change == "reset":
         base = await db_session.get(ChatSession, (bot.id, task.session_key))
         await db_session.delete(base)
-    elif change == "ordinary":
-        row.assistant_mode = "ordinary"
     else:
         await service.revoke_grant(db_session, bot.id, user.id)
     await db_session.commit()
-    assert (
-        await client.post(URL, headers=old, json=rpc("feishu_authorization_status"))
-    ).status_code == 403
-    # New grant generation/session works, with unchanged grant permissions/status.
-    if change != "ordinary":
-        fresh = await headers(app, task, user)
-        assert (
-            await client.post(URL, headers=fresh, json=rpc("feishu_authorization_status"))
-        ).status_code == 200
+    response = await client.post(URL, headers=old, json=rpc("feishu_authorization_status"))
+    if change == "reset":
+        assert response.status_code == 403
+        return
+    # 授权换代只让飞书工具失效，本人定时任务工具照常可用。
+    assert value(response) == {"error": "authorization_changed"}
+    assert "feishu_authorize" not in await _tool_names(client, old)
+    assert "items" in value(await client.post(URL, headers=old, json=rpc("schedule_list")))
+    fresh = await headers(app, task, user)
+    assert "error" not in value(
+        await client.post(URL, headers=fresh, json=rpc("feishu_authorization_status"))
+    )
 
 
 async def test_missing_epoch_capability_is_rejected(db_session, app, client):
@@ -551,158 +372,28 @@ async def test_missing_epoch_capability_is_rejected(db_session, app, client):
     assert response.status_code == 401
 
 
-def test_private_transcript_never_serialized_by_task_surfaces():
-    import json
+async def test_chat_capability_cannot_name_a_scheduled_task(db_session, app, client):
+    from tests.api.test_feishu_personal import URL, rpc
 
-    from coreman.api.routers.dev import task_out as dev_out
-    from coreman.api.routers.runtime import task_out as runtime_out
-    from coreman.core.db.models import Task
-
-    row = Task(
-        id=1,
-        bot_id=uuid.uuid4(),
-        kind="chat",
-        status="succeeded",
-        result={"private_transcript": {"user_text": "PRIVATE_SENTINEL", "answer": "SECRET"}},
+    _, user, task = await setup(db_session, app)
+    token = policy.issue_capability(
+        app.state.cipher,
+        task_id=task.id,
+        user_id=str(user.id),
+        context_epoch=policy.NO_GRANT_EPOCH,
+        base_session_id=None,
     )
-    for response in (dev_out(row), runtime_out(row, {})):
-        assert "private_transcript" not in json.dumps(response)
-        assert "PRIVATE_SENTINEL" not in json.dumps(response)
-        assert "result" not in response
-
-
-async def test_mode_exit_serializes_with_inflight_tier3_call_and_cancels_old_task(
-    db_session, app, client, db_engine, monkeypatch
-):
-    import asyncio
-
-    from coreman.core.db.models import Task
-    from coreman.core.feishu_personal import service
-    from coreman.runtime.worker.chat import personal
-    from tests.api.test_feishu_personal import URL, grant, headers, rpc
-
-    bot, user, old_task = await setup(db_session, app)
-    await grant(
-        db_session,
-        app,
-        bot,
-        user,
-        authorization_level="all",
-        requested_scopes=["im:message", "im:message.send_as_user"],
-        scopes=["im:message", "im:message.send_as_user"],
+    response = await client.post(
+        URL, headers={"Authorization": "Bearer " + token}, json=rpc("schedule_list")
     )
-    old_auth = await headers(app, old_task, user)
-    mode_task = Task(
-        bot_id=bot.id,
-        kind="chat",
-        status="running",
-        session_key=old_task.session_key,
-        inbound_event_id=old_task.inbound_event_id,
-        payload=old_task.payload,
-    )
-    db_session.add(mode_task)
-    await db_session.commit()
-    entered, release, switching = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    acknowledgements = []
-
-    async def http(*args, **kwargs):
-        entered.set()
-        await release.wait()
-        return {"code": 0, "data": {"message_id": "sent-before-exit"}}
-
-    async def reply(*args, **kwargs):
-        acknowledgements.append(kwargs["text"])
-
-    monkeypatch.setattr(service, "_http", http)
-    monkeypatch.setattr(personal, "reply_once", reply)
-
-    async def switch():
-        async with app.state.session_factory() as session:
-            mode = await session.get(Task, mode_task.id)
-            current_bot = await session.get(type(bot), bot.id)
-            intake = await intake_for(session, current_bot, mode, "普通助手")
-            switching.set()
-            assert await personal.reject_unavailable(session, build_ctx(db_engine, mode), intake)
-            await session.commit()
-
-    request = asyncio.create_task(
-        client.post(
-            URL,
-            headers=old_auth,
-            json=rpc(
-                "feishu_send_message",
-                {
-                    "receive_id": "human",
-                    "receive_id_type": "user_id",
-                    "text": "explicitly requested test",
-                    "uuid": "test-send",
-                },
-            ),
-        )
-    )
-    exit_task = None
-    try:
-        async with asyncio.timeout(8):
-            await entered.wait()
-            exit_task = asyncio.create_task(switch())
-            await switching.wait()
-            await asyncio.sleep(0.05)
-            assert not acknowledgements
-            release.set()
-            assert (await request).status_code == 200
-            await exit_task
-        await db_session.refresh(old_task)
-        assert old_task.cancel_requested_at is not None
-        assert acknowledgements and "普通助手" in acknowledgements[0]
-        assert (
-            await client.post(URL, headers=old_auth, json=rpc("feishu_authorization_status"))
-        ).status_code == 403
-        # Re-entry does not resurrect the old capability; only a new task gets one.
-        async with app.state.session_factory() as session:
-            current_bot = await session.get(type(bot), bot.id)
-            reentry = Task(
-                bot_id=bot.id,
-                kind="chat",
-                status="running",
-                session_key=old_task.session_key,
-                inbound_event_id=old_task.inbound_event_id,
-                payload=old_task.payload,
-            )
-            session.add(reentry)
-            await session.flush()
-            intake = await intake_for(session, current_bot, reentry, "飞书资料")
-            assert await personal.reject_unavailable(session, build_ctx(db_engine, reentry), intake)
-            await session.commit()
-            fresh_task = Task(
-                bot_id=bot.id,
-                kind="chat",
-                status="running",
-                session_key=old_task.session_key,
-                inbound_event_id=old_task.inbound_event_id,
-                payload=old_task.payload,
-            )
-            session.add(fresh_task)
-            await session.commit()
-        assert (
-            await client.post(URL, headers=old_auth, json=rpc("feishu_authorization_status"))
-        ).status_code == 403
-        fresh_auth = await headers(app, fresh_task, user)
-        assert (
-            await client.post(URL, headers=fresh_auth, json=rpc("feishu_authorization_status"))
-        ).status_code == 200
-    finally:
-        release.set()
-        for pending in (request, exit_task):
-            if pending and not pending.done():
-                pending.cancel()
-        await asyncio.gather(*(t for t in (request, exit_task) if t), return_exceptions=True)
+    assert response.status_code == 403
 
 
 async def test_verified_oauth_completion_preserves_new_attempt_capability(
     db_session, app, client, monkeypatch
 ):
     from coreman.core.feishu_personal import service
-    from tests.api.test_feishu_personal import URL, grant, headers, rpc
+    from tests.api.test_feishu_personal import URL, grant, headers, rpc, value
 
     bot, user, task = await setup(db_session, app)
     row = await grant(db_session, app, bot, user)
@@ -728,101 +419,10 @@ async def test_verified_oauth_completion_preserves_new_attempt_capability(
     await db_session.commit()
     assert row.context_epoch == epoch
     response = await client.post(URL, headers=capability, json=rpc("feishu_authorization_status"))
-    assert response.status_code == 200
-    assert (
-        await client.post(URL, headers=old_attempt, json=rpc("feishu_authorization_status"))
-    ).status_code == 403
-    assert (
-        await client.post(URL, headers=before_link, json=rpc("feishu_authorization_status"))
-    ).status_code == 403
-
-
-async def _run_private_turn(db_session, app, db_engine, *, personal, session_view=True):
-    from sqlalchemy import select
-
-    from coreman.core.db.models import TaskStream
-    from coreman.runtime.worker.chat_handler import ChatTaskHandler
-    from tests.api.test_feishu_personal import grant
-    from tests.fakes.fake_relay import FakeRelay
-
-    bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user) if personal else None
-    message = "查看最近的会议"
-    intake = await intake_for(db_session, bot, task, message)
-    node = await db_session.get(RuntimeNode, intake.relay.runtime_node_id)
-    node.capabilities = {
-        "claude": {
-            "feishu_personal_restricted_v1": True,
-            "owner_session_view_v1": session_view,
-        }
-    }
-    intake.inbound.payload = {
-        **intake.inbound.payload,
-        "parts": [{"type": "text", "text": message}],
-    }
-    task.payload = {**task.payload, "message": intake.inbound.payload}
-    await db_session.commit()
-    fake = FakeRelay("normal")
-    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
-    await ChatTaskHandler().run(ctx)
-    await ctx.chat_logs.drain(5)
-    stream = (
-        await db_session.scalars(
-            select(TaskStream)
-            .where(TaskStream.task_id == task.id)
-            .execution_options(populate_existing=True)
-        )
-    ).one()
-    await db_session.refresh(task)
-    return ctx, bot, user, row, fake.requests[0], stream.session_url, task.result
-
-
-def _claims(ctx, url):
-    from urllib.parse import parse_qs, urlsplit
-
-    from coreman.core import session_links
-
-    parts = urlsplit(url)
-    return parts.path, session_links.read(ctx.cipher, parse_qs(parts.query)["t"][0])
-
-
-async def test_personal_session_link_is_bound_to_owner_private_session_and_epoch(
-    db_session, app, db_engine
-):
-    ctx, bot, user, row, request, url, result = await _run_private_turn(
-        db_session, app, db_engine, personal=True
-    )
-    assert policy.PREFIX + "TOKEN" in request["env_vars"]
-    # 会话页靠这个标记认出飞书资料模式，坚持要链接。
-    assert result["feishu_personal"] is True and result["private_transcript"]
-    path, claims = _claims(ctx, url)
-    # 链接指向本轮真正使用的私有会话，而不是切换之前的普通会话。
-    assert path.endswith("/claude/session/" + request["session_id"])
-    assert claims is not None
-    assert (claims.user_id, claims.bot_id) == (user.id, bot.id)
-    assert str(claims.session_id) == request["session_id"]
-    assert claims.context_epoch == row.context_epoch
-
-
-async def test_personal_session_link_hidden_on_runtime_without_memory_only_log(
-    db_session, app, db_engine
-):
-    *_, request, url, _ = await _run_private_turn(
-        db_session, app, db_engine, personal=True, session_view=False
-    )
-    assert policy.PREFIX + "TOKEN" in request["env_vars"]
-    assert not url
-
-
-async def test_ordinary_private_chat_link_is_signed_for_the_speaker(db_session, app, db_engine):
-    ctx, _, user, _, request, url, result = await _run_private_turn(
-        db_session, app, db_engine, personal=False
-    )
-    assert policy.PREFIX + "TOKEN" not in (request.get("env_vars") or {})
-    assert not (result or {}).get("feishu_personal")
-    path, claims = _claims(ctx, url)
-    assert path.endswith("/claude/session/" + request["session_id"])
-    assert claims is not None and claims.user_id == user.id and claims.context_epoch is None
+    assert "error" not in value(response)
+    for stale in (old_attempt, before_link):
+        response = await client.post(URL, headers=stale, json=rpc("feishu_authorization_status"))
+        assert value(response) == {"error": "authorization_changed"}
 
 
 async def test_session_link_rules_by_chat_type_and_identity(db_session, app, db_engine):
@@ -831,20 +431,23 @@ async def test_session_link_rules_by_chat_type_and_identity(db_session, app, db_
     from coreman.core.prompting import Speaker
     from coreman.runtime.worker.chat.opening import session_link
 
-    bot, _, task = await setup(db_session, app)
+    bot, user, task = await setup(db_session, app)
     intake = await intake_for(db_session, bot, task, "hi")
     ctx = build_ctx(db_engine, task)
     sid = uuid.uuid4()
     plain = f"/claude/session/{sid}"
-    assert "?t=" in await session_link(db_session, ctx, intake, intake.relay, sid, personal=False)
+    link = await session_link(db_session, ctx, intake, intake.relay, sid)
+    assert "?t=" in link
+    from urllib.parse import parse_qs, urlsplit
+
+    from coreman.core import session_links
+
+    claims = session_links.read(ctx.cipher, parse_qs(urlsplit(link).query)["t"][0])
+    assert claims is not None and claims.user_id == user.id and claims.session_id == sid
     group = replace(intake, chat_type="group")
-    assert (await session_link(db_session, ctx, group, intake.relay, sid, personal=False)).endswith(
-        plain
-    )
+    assert (await session_link(db_session, ctx, group, intake.relay, sid)).endswith(plain)
     # 没绑定员工身份的飞书私聊谁也打不开，不给入口；企微私聊仍留给管理员查看。
     anonymous = replace(intake, speaker=Speaker("human", None, None, None))
-    assert await session_link(db_session, ctx, anonymous, intake.relay, sid, personal=False) == ""
+    assert await session_link(db_session, ctx, anonymous, intake.relay, sid) == ""
     bot.platform = "wecom"
-    assert (
-        await session_link(db_session, ctx, anonymous, intake.relay, sid, personal=False)
-    ).endswith(plain)
+    assert (await session_link(db_session, ctx, anonymous, intake.relay, sid)).endswith(plain)
