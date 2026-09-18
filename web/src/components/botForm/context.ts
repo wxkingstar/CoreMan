@@ -17,8 +17,10 @@ export interface BotFormContext {
   xhighAllowed: ComputedRef<boolean>
   sensitiveVisible: ComputedRef<boolean>
   credKeys: ComputedRef<readonly string[]>
-  /** 新建飞书员工时改为手动填写已有应用凭证（默认扫码创建）。 */
+  /** 新建飞书员工时改为手动填写已有应用凭证（默认扫码创建）；企微开启扫码时同理。 */
   manualCredentials: Ref<boolean>
+  /** 平台设置允许扫码创建企业微信机器人。 */
+  wecomQrEnabled: Ref<boolean>
   onBotKeyInput: () => void
   onPlatformChange: () => void
   onEnvInvalid: (message: string) => void

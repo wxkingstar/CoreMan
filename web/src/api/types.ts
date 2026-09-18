@@ -108,8 +108,10 @@ export interface BotIn {
   enabled: boolean
   /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
   feishu_registration_id?: string | null
+  /** 扫码创建的企业微信机器人：凭证由服务端扫码会话交付，credentials 留空。 */
+  wecom_provision_id?: string | null
 }
-export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled' | 'feishu_registration_id'>>
+export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled' | 'feishu_registration_id' | 'wecom_provision_id'>>
 export interface SwitchRelayIn { relay_server_id: string; model?: string | null; workspace_mode?: 'copy' | 'git' | 'existing'; target_directory?: string; allow_stored_memory?: boolean }
 export interface SwitchRelayOut {
   old_relay_id: string | null; new_relay_id: string
@@ -145,10 +147,13 @@ export interface SettingsOut extends PromptSettings {
   fast_lane_slots: number
   /** 企微模板卡片左上角的来源图标；空串表示不显示图标。 */
   card_icon_url: string
+  /** 允许扫码创建企业微信机器人；关闭后新建企微员工只能手动填写凭证。 */
+  wecom_qr_provisioning_enabled: boolean
 }
 /** default_model 只读：PUT 带这个键后端会 422。 */
 export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>
 export type SettingsDefaults = Pick<SettingsOut, 'default_model' | 'default_verbosity_level' | 'default_effort_level'>
+  & Partial<Pick<SettingsOut, 'wecom_qr_provisioning_enabled'>>
 
 // ---- 对话记录、运行状态、并发与提示词设置 ----
 

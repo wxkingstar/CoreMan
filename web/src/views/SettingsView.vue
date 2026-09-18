@@ -25,6 +25,7 @@ const KEYS = [
   'max_concurrent_tasks',
   'fast_lane_slots',
   'card_icon_url',
+  'wecom_qr_provisioning_enabled',
   'prompt_security_policy',
   'prompt_codex_contract',
   'prompt_runtime_mode',
@@ -46,6 +47,7 @@ function empty(): SettingsOut {
     max_concurrent_tasks: 30,
     fast_lane_slots: 2,
     card_icon_url: '',
+    wecom_qr_provisioning_enabled: true,
     prompt_security_policy: '',
     prompt_codex_contract: '',
     prompt_runtime_mode: '',
@@ -291,6 +293,16 @@ defineExpose({ form })
         />
         <div class="hint">
           {{ t('settings.cardIconHint') }}
+        </div>
+      </el-form-item>
+
+      <el-form-item
+        :label="t('settings.wecomQr')"
+        data-test="wecom-qr"
+      >
+        <el-switch v-model="form.wecom_qr_provisioning_enabled" />
+        <div class="hint">
+          {{ t('settings.wecomQrHint') }}
         </div>
       </el-form-item>
 

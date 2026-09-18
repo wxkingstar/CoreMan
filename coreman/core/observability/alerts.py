@@ -20,6 +20,7 @@ from coreman.core.db.models import (
     Task,
     User,
     UserIdentity,
+    WecomBotProvision,
 )
 from coreman.core.i18n.messages import msg
 
@@ -161,7 +162,17 @@ async def tick(session: AsyncSession, now: datetime) -> None:
         .where(Task.finished_at > now - timedelta(minutes=10), Task.error_code == "worker_lost")
     )
     await observe(session, "reaper", bool(lost), "alert_reaper", now)
-    seen = {"queue", "outbox", "task_failure", "reaper"}
+    # 扫码创建企微机器人依赖未公开接口：返回结构一变就提醒管理员切到手动填写凭证。
+    drifted = await session.scalar(
+        select(func.count())
+        .select_from(WecomBotProvision)
+        .where(
+            WecomBotProvision.error == "unexpected_response",
+            WecomBotProvision.updated_at > now - timedelta(minutes=30),
+        )
+    )
+    await observe(session, "wecom_provision", bool(drifted), "alert_wecom_provision", now)
+    seen = {"queue", "outbox", "task_failure", "reaper", "wecom_provision"}
     for identity, state in await session.execute(
         select(RelayServer.id, RelayServer.health_status).where(RelayServer.is_active)
     ):

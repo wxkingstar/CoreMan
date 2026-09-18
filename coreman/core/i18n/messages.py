@@ -250,6 +250,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "alert_reaper": "检测到 worker 失联任务，已由看护流程收尾。",
         "alert_relay": "运行时健康异常，请查看运行时健康报告。",
         "alert_gateway": "机器人连接异常或凭证被拒绝，请检查租约和平台配置。",
+        "alert_wecom_provision": (
+            "扫码创建企业微信机器人的接口返回了无法识别的结构，可能已经改版。"
+            "可在平台设置中关闭扫码创建，改为手动填写 Bot ID 与 Secret。"
+        ),
         "stream_recovered": "处理已结束，回复连接已恢复。",
         "stream_interrupted": "本次处理已中断，以上为已保存的内容。",
         "voice_unsupported": "暂不支持语音消息，请发送文字。",
@@ -554,6 +558,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "alert_gateway": (
             "ボットの接続または認証に問題があります。"
             "リースとプラットフォーム設定を確認してください。"
+        ),
+        "alert_wecom_provision": (
+            "WeCom ボットの QR 作成 API が想定外の応答を返しました。"
+            "仕様が変わった可能性があります。プラットフォーム設定で QR 作成をオフにし、"
+            "Bot ID と Secret の手動入力に切り替えてください。"
         ),
         "stream_recovered": "処理は終了しました。返信の接続を復旧しました。",
         "stream_interrupted": "処理が中断されました。上記は保存済みの内容です。",

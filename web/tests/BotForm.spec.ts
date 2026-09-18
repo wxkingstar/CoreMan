@@ -7,6 +7,9 @@ vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn().mockResolvedValue('data
 vi.mock('@/api/feishuApps', () => ({
   feishuApps: { startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn() },
 }))
+vi.mock('@/api/wecomBots', () => ({
+  wecomBots: { startProvision: vi.fn(), provision: vi.fn(), cancelProvision: vi.fn() },
+}))
 vi.mock('@/api/admin', () => ({
   bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), validate: vi.fn().mockResolvedValue({ valid: true }), patch: vi.fn(), get: vi.fn() },
   relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', unavailable_reason: null, effective_models: ['vllm/claude-sonnet-4-6'], model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', unavailable_reason: null, effective_models: ['codex/gpt-5.5'], model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
@@ -19,6 +22,8 @@ import { bots, relays, settings } from '@/api/admin'
 import { feishuApps } from '@/api/feishuApps'
 import { ApiError } from '@/api/client'
 import FeishuRegistrationDialog from '@/components/feishuApp/FeishuRegistrationDialog.vue'
+import WecomProvisionDialog from '@/components/wecomBot/WecomProvisionDialog.vue'
+import { wecomBots } from '@/api/wecomBots'
 import { VERSION_CONFLICT_CODE } from '@/utils/errors'
 import type { BotOut } from '@/api/types'
 import { i18n } from '@/i18n'
@@ -246,6 +251,56 @@ describe('BotForm', () => {
     expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'sales_bot', credentials: {}, feishu_registration_id: 'reg1' }))
     expect(wrapper.emitted('saved')).toBeTruthy()
     wrapper.unmount()
+  })
+
+  it('scans to create a WeCom bot when the platform switch is on and keeps a manual fallback', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const qrOn = { default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' as const, wecom_qr_provisioning_enabled: true }
+    vi.mocked(settings.defaults).mockResolvedValueOnce(qrOn)
+    vi.mocked(wecomBots.startProvision).mockResolvedValue({ id: 'p1', status: 'pending', bot_id: null, wecom_bot_id: null, url: 'https://work.weixin.qq.com/ai/qc/c?s=Ab12Cd34Ef56Gh78', upstream_status: null, verified: false, expires_at: '', retry_after: 30, error: null, created_at: null, reused: false })
+    vi.mocked(bots.create).mockClear()
+    vi.mocked(bots.validate).mockClear()
+    const fill = async (wrapper: ReturnType<typeof mount>) => {
+      await wrapper.get('[data-test="bot_key"] input').setValue('wecom_bot')
+      await wrapper.get('[data-test="name"] input').setValue('销售')
+      await (wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void> }).selectRelay('r1')
+      ;(wrapper.vm as unknown as { form: { platform: string } }).form.platform = 'wecom'
+      await flushPromises()
+    }
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await fill(wrapper)
+    expect(wrapper.find('[data-test="wecom-one-click"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="cred-bot_id"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="submit"]').text()).toBe(i18n.global.t('wecomBot.scanAndCreate'))
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.validate).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'wecom_bot', platform: 'wecom', credentials: {} }))
+    expect(bots.create).not.toHaveBeenCalled()
+    const dialog = wrapper.findComponent(WecomProvisionDialog)
+    expect((dialog.props() as { visible: boolean }).visible).toBe(true)
+    dialog.vm.$emit('succeeded', { id: 'p1', status: 'succeeded', wecom_bot_id: 'aib-1', verified: true })
+    await flushPromises()
+    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'wecom_bot', credentials: {}, wecom_provision_id: 'p1' }))
+    expect(wrapper.emitted('saved')).toBeTruthy()
+    wrapper.unmount()
+
+    // 兜底：同一页面改为手动填写 Bot ID 与 Secret，直接创建（后端同样先校验）。
+    vi.mocked(settings.defaults).mockResolvedValueOnce(qrOn)
+    vi.mocked(bots.create).mockClear()
+    const manual = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    await fill(manual)
+    manual.get('[data-test="wecom-manual-credentials"]').findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+    await flushPromises()
+    expect(manual.find('[data-test="wecom-one-click"]').exists()).toBe(false)
+    await manual.get('[data-test="cred-bot_id"] input').setValue('aib-manual')
+    await manual.get('[data-test="cred-secret"] input').setValue('manual-secret')
+    await manual.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ credentials: { bot_id: 'aib-manual', secret: 'manual-secret' } }))
+    expect(vi.mocked(bots.create).mock.calls[0][0]).not.toHaveProperty('wecom_provision_id')
+    manual.unmount()
   })
 
   // 模型目录为空或全部退役时默认模型是 null：保持空，由必填校验提示用户选择。

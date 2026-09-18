@@ -13,7 +13,7 @@
 | `cleanup_seconds` | 删过期的流 / 过期会话，清早已停掉的实例行 |
 | `retention_seconds` | 按保留期分批删终态任务、入站事件与出站条目 |
 
-cron 调度每 10 秒独立运行，通知消费者单独投递。
+cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次。
 """
 
 from __future__ import annotations
@@ -115,6 +115,7 @@ class SchedulerService(Service):
                 ("scheduler-objects", self._objects_loop()),
                 ("scheduler-alerts", self._alerts_loop()),
                 ("scheduler-relay-health", self._relay_health_loop()),
+                ("scheduler-wecom-provisions", self._wecom_provisions_loop()),
             )
         ]
         self.ready = True
@@ -295,6 +296,20 @@ class SchedulerService(Service):
             except Exception:
                 self._log.error("alerts_evaluation_failed")
             await self._sleep(30)
+
+    async def _wecom_provisions_loop(self) -> None:
+        """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""
+        from coreman.core.wecom_bots import service as provisions
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    counts = await provisions.sweep(self._factory, self._cipher)
+                    if counts["wecom_secrets_expired"]:
+                        self._log.info("wecom_provisions_swept", **counts)
+            except Exception:
+                self._log.exception("wecom_provisions_sweep_failed")
+            await self._sleep(provisions.POLL_SECONDS)
 
     async def _objects_loop(self) -> None:
         from coreman.core.object_store import object_store
