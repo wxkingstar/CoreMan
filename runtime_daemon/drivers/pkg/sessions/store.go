@@ -21,7 +21,13 @@ type Event struct {
 	Timestamp string          `json:"timestamp"`
 	Type      string          `json:"type"` // "request", "response_delta", "response_done", "tool_use", "error"
 	Data      json.RawMessage `json:"data"`
+	// at drives expiry of private sessions; it is never serialized.
+	at time.Time
 }
+
+// PrivateSessionTTL bounds how long a Feishu personal-data session stays
+// viewable. Such sessions live only in memory: no .jsonl, no hydration.
+var PrivateSessionTTL = 24 * time.Hour
 
 // maxBufferedEvents caps the in-memory event history per session. Long-lived
 // sessions (a busy group chat can keep one session_id for weeks) would
@@ -41,6 +47,25 @@ type Entry struct {
 	// so Append must become a no-op instead of writing a dead fd or growing
 	// an unreachable events slice.
 	closed bool
+	// private entries hold Feishu personal data: memory only, events expire
+	// after PrivateSessionTTL.
+	private bool
+}
+
+// pruneLocked drops private events older than PrivateSessionTTL. Caller must
+// hold e.mu.
+func (e *Entry) pruneLocked(now time.Time) {
+	if !e.private {
+		return
+	}
+	cutoff := now.Add(-PrivateSessionTTL)
+	keep := 0
+	for keep < len(e.events) && !e.events[keep].at.After(cutoff) {
+		keep++
+	}
+	if keep > 0 {
+		e.events = append([]Event(nil), e.events[keep:]...)
+	}
 }
 
 // trimLocked drops the oldest half of the buffer once it exceeds the cap,
@@ -52,10 +77,12 @@ func (e *Entry) trimLocked() {
 	}
 	drop := len(e.events) / 2
 	data, _ := json.Marshal(map[string]int{"dropped": drop})
+	now := time.Now()
 	marker := Event{
-		Timestamp: time.Now().Format(time.RFC3339Nano),
+		Timestamp: now.Format(time.RFC3339Nano),
 		Type:      "truncated",
 		Data:      data,
+		at:        now,
 	}
 	// Copy into a fresh slice: re-slicing would keep the old backing array
 	// (and every dropped Event's Data) reachable, defeating the trim.
@@ -151,11 +178,15 @@ func (s *Store) Get(sessionID string) *Entry {
 // Append adds an event to the session, persists it to the log file, and
 // fans it out to live WebSocket subscribers.
 func (e *Entry) Append(ev Event) {
+	if ev.at.IsZero() {
+		ev.at = time.Now()
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return
 	}
+	e.pruneLocked(ev.at)
 	e.events = append(e.events, ev)
 	e.trimLocked()
 
@@ -186,6 +217,7 @@ func (e *Entry) Append(ev Event) {
 func (e *Entry) Subscribe() (history []Event, ch chan Event, cancel func()) {
 	ch = make(chan Event, 256)
 	e.mu.Lock()
+	e.pruneLocked(time.Now())
 	history = make([]Event, len(e.events))
 	copy(history, e.events)
 	e.subscribers[ch] = struct{}{}
@@ -203,6 +235,7 @@ func (e *Entry) Subscribe() (history []Event, ch chan Event, cancel func()) {
 func (e *Entry) Events() []Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.pruneLocked(time.Now())
 	out := make([]Event, len(e.events))
 	copy(out, e.events)
 	return out
@@ -210,14 +243,51 @@ func (e *Entry) Events() []Event {
 
 // ---- High-level logging helpers ----
 
+// getOrCreatePrivate returns a memory-only entry. A viewer may have opened the
+// id before its first request and created a persisted entry; that is
+// converted and its (empty) log removed so nothing private reaches disk.
+func (s *Store) getOrCreatePrivate(sessionID string) *Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		entry = &Entry{subscribers: make(map[chan Event]struct{}), private: true}
+		s.sessions[sessionID] = entry
+		return entry
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.private {
+		entry.private = true
+		entry.events = nil
+		if entry.logFile != nil {
+			entry.logFile.Close()
+			entry.logFile = nil
+		}
+		logPath := filepath.Join(s.Dir, sessionID+".jsonl")
+		if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("private session: failed to remove %s: %v", logPath, err)
+		}
+	}
+	return entry
+}
+
 // LogRequest appends a "request" event. Safe to call with empty sessionID
-// (becomes a no-op).
+// (becomes a no-op). env_vars never enter the history: they carry bot secrets
+// and task credentials, and the history is streamed to the session viewer.
 func (s *Store) LogRequest(sessionID string, req *openai.ChatCompletionRequest) {
 	if sessionID == "" {
 		return
 	}
-	entry := s.GetOrCreate(sessionID)
-	data, _ := json.Marshal(req)
+	var entry *Entry
+	if openai.FeishuPersonalEnabled(req.EnvVars) {
+		entry = s.getOrCreatePrivate(sessionID)
+	} else {
+		entry = s.GetOrCreate(sessionID)
+	}
+	logged := *req
+	logged.EnvVars = nil
+	data, _ := json.Marshal(&logged)
 	entry.Append(Event{
 		Timestamp: time.Now().Format(time.RFC3339Nano),
 		Type:      "request",
@@ -321,6 +391,7 @@ func (s *Store) StartCleanup(maxAge, interval time.Duration) {
 }
 
 func (s *Store) cleanupOldSessions(maxAge time.Duration) {
+	s.cleanupPrivateSessions(time.Now())
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		return
@@ -401,5 +472,23 @@ func (s *Store) cleanupOldSessions(maxAge time.Duration) {
 		}
 
 		log.Printf("session cleanup: removed expired session %s (last modified: %s)", sessionID, modTime.Format(time.RFC3339))
+	}
+}
+
+// cleanupPrivateSessions expires private history and forgets entries that
+// have nothing left and nobody watching.
+func (s *Store) cleanupPrivateSessions(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sessionID, entry := range s.sessions {
+		entry.mu.Lock()
+		if entry.private {
+			entry.pruneLocked(now)
+			if len(entry.events) == 0 && len(entry.subscribers) == 0 {
+				entry.closed = true
+				delete(s.sessions, sessionID)
+			}
+		}
+		entry.mu.Unlock()
 	}
 }

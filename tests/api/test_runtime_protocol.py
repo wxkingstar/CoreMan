@@ -283,7 +283,8 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
     client, db_session
 ):
     _, body, headers = await enrollment(client, db_session)
-    for declared in ({"feishu_personal_restricted_v1": True}, {}):
+    flags = ("feishu_personal_restricted_v1", "owner_session_view_v1")
+    for declared in (dict.fromkeys(flags, True), {}):
         response = await client.post(
             "/api/runtime/heartbeat",
             headers=headers,
@@ -291,7 +292,8 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
         )
         assert response.status_code == 200
         node = await db_session.get(RuntimeNode, uuid.UUID(body["node_id"]), populate_existing=True)
-        assert node.capabilities["claude"].get("feishu_personal_restricted_v1") is bool(declared)
+        for flag in flags:
+            assert node.capabilities["claude"].get(flag) is bool(declared)
 
 
 @pytest.mark.parametrize("value", ["true", 1])

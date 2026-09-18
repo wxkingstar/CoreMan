@@ -132,8 +132,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	// Private-mode attachments stay in per-request temp files, never the
 	// shared session directory.
 	var sessionDir string
-	if id := openai.SessionLogID(&req); id != "" {
-		sessionDir = filepath.Join(sessionStore.AbsDir(), id, "files")
+	if req.SessionID != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
+		sessionDir = filepath.Join(sessionStore.AbsDir(), req.SessionID, "files")
 	}
 	// Personal mode has no tools to use an image file with.
 	prompt, systemPrompt, tempFiles := buildPromptFromMessages(req.Messages, sessionDir, !openai.FeishuPersonalEnabled(req.EnvVars))
@@ -166,7 +166,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	workingDir := req.WorkingDir
 	envVars := req.EnvVars
-	sessionID := openai.SessionLogID(&req)
+	sessionID := req.SessionID
 	sessionStore.LogRequest(sessionID, &req)
 
 	if req.Stream {
@@ -206,12 +206,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		restricted = restricted && strings.Contains(string(help), flag)
 	}
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":       "healthy",
-		"backend":      "claude",
-		"version":      version,
-		"commit":       buildCommit,
-		"mode":         relayMode,
-		"capabilities": map[string]bool{"feishu_personal_restricted_v1": restricted},
+		"status":  "healthy",
+		"backend": "claude",
+		"version": version,
+		"commit":  buildCommit,
+		"mode":    relayMode,
+		"capabilities": map[string]bool{
+			"feishu_personal_restricted_v1": restricted,
+			// Session history omits env vars and keeps personal sessions in
+			// memory, so the session owner may view it.
+			"owner_session_view_v1": true,
+		},
 	})
 }
 

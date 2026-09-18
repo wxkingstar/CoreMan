@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core import session_links
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
 from coreman.core.chat import sessions
@@ -47,6 +48,46 @@ def session_viewer_url(ctx: TaskContext, relay: RelayServer, relay_session_id: u
         f"{ctx.public_base_url}/api/admin/runtime-nodes/{relay.runtime_node_id}"
         f"/{relay.model_provider}/session/{relay_session_id}"
     )
+
+
+async def session_link(
+    session: AsyncSession,
+    ctx: TaskContext,
+    intake: Intake,
+    relay: RelayServer,
+    relay_session_id: uuid.UUID,
+    *,
+    personal: bool,
+) -> str:
+    """本轮回复里的会话查看链接。
+
+    群聊沿用管理员查看。私聊归本人，登录即可看；链接另签本人凭据（24 小时有效），第一轮还没
+    写对话记录时靠它证明归属。飞书私聊只有本人能看：发言人没绑定员工身份时谁也打不开，就不给。
+    飞书资料模式只能凭链接看，还要节点只在内存里保留这类会话，凭据另绑上下文版本。
+    """
+    url = session_viewer_url(ctx, relay, relay_session_id)
+    if intake.chat_type != "single":
+        return url
+    user_id = intake.speaker.user_id
+    if user_id is None or relay.runtime_node_id is None:
+        return "" if intake.bot.platform == "feishu" else url
+    epoch = None
+    if personal:
+        from coreman.runtime.worker.chat.personal import session_view_epoch
+
+        epoch = await session_view_epoch(session, intake)
+        if epoch is None:
+            return ""
+    token = session_links.issue(
+        ctx.cipher,
+        session_id=relay_session_id,
+        user_id=user_id,
+        node_id=relay.runtime_node_id,
+        provider=relay.model_provider,
+        bot_id=intake.bot.id,
+        context_epoch=epoch,
+    )
+    return f"{url}?t={token}"
 
 
 class OpenStage(ChatStageBase):
@@ -135,7 +176,6 @@ class OpenStage(ChatStageBase):
             writer.set_thinking_line(msg("queued_notice", ctx.locale, seconds=queued))
         backend = backend_of(bot.model, relay.model_provider)
         info = await self._session_info(session, ctx, intake, backend)
-        session_url = session_viewer_url(ctx, relay, info.relay_session_id)
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -165,11 +205,15 @@ class OpenStage(ChatStageBase):
             session, ctx, intake, info, system_prompt, env
         )
         private_history = []
-        if "COREMAN_FEISHU_PERSONAL_TOKEN" in env:
+        personal = "COREMAN_FEISHU_PERSONAL_TOKEN" in env
+        if personal:
             from coreman.runtime.worker.chat.personal import history
 
-            session_url = ""
             private_history = await history(session, ctx, intake, info)
+        # 飞书资料模式换了私有会话，链接要在这之后按最终的会话生成。
+        session_url = await session_link(
+            session, ctx, intake, relay, info.relay_session_id, personal=personal
+        )
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
         request = ChatRequest(

@@ -94,6 +94,9 @@ class EnrollIn(BaseModel):
 
 class Capability(BaseModel):
     feishu_personal_restricted_v1: StrictBool = False
+    # 驱动的会话记录可以给本人看：不含环境变量（机器人密钥、访问令牌），
+    # 飞书资料模式的会话只留在内存里。旧节点没有，本人凭链接查看需等升级。
+    owner_session_view_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)
     login: Literal["ready", "required", "unknown"] = "unknown"

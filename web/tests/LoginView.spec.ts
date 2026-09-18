@@ -15,6 +15,7 @@ vi.mock('@/api/admin', () => ({
   auth: { providers: vi.fn().mockResolvedValue({ wecom: true, feishu: false }) },
 }))
 
+import { auth as authApi } from '@/api/admin'
 import { api } from '@/api/client'
 import { i18n } from '@/i18n'
 import LoginView from '@/views/LoginView.vue'
@@ -135,6 +136,43 @@ describe('LoginView', () => {
     await flushPromises()
     expect(assign).toHaveBeenCalledWith('/api/auth/wecom/start?mode=oauth&redirect=%2F')
 
+    vi.unstubAllGlobals()
+  })
+
+  it('auto-starts Feishu login inside the Feishu client and keeps the session link', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    vi.stubGlobal('navigator', { ...window.navigator, userAgent: 'Mozilla/5.0 Lark/7.20.0 LarkLocale/zh_CN' })
+    vi.mocked(authApi.providers).mockResolvedValueOnce({ wecom: true, feishu: true })
+    const link = '/api/admin/runtime-nodes/n/claude/session/s?t=abc'
+    const router = makeRouter()
+    await router.push('/login?redirect=' + encodeURIComponent(link))
+    mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(assign).toHaveBeenCalledWith('/api/auth/feishu/start?redirect=' + encodeURIComponent(link))
+    vi.unstubAllGlobals()
+  })
+
+  it('opens server-rendered pages with a full navigation after password login', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    vi.mocked(api.bootstrapLogin).mockResolvedValueOnce({
+      user: {
+        id: 'u', login_name: 'admin', display_name: 'admin', role: 'member', locale: 'zh',
+        email: null, avatar_url: null, source: 'bootstrap', team_id: null,
+      },
+    })
+    const link = '/api/admin/runtime-nodes/n/claude/session/s?t=abc'
+    const router = makeRouter()
+    await router.push('/login?redirect=' + encodeURIComponent(link))
+    await router.isReady()
+    const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await wrapper.get('[data-test="username"]').setValue('admin')
+    await wrapper.get('[data-test="password"]').setValue('pw')
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(assign).toHaveBeenCalledWith(link)
+    expect(router.currentRoute.value.path).toBe('/login')
     vi.unstubAllGlobals()
   })
 })

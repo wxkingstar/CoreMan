@@ -9,10 +9,6 @@ import (
 
 func TestPersonalPrivacyLogging(t *testing.T) {
 	env := map[string]string{"COREMAN_PLATFORM": "feishu", "COREMAN_CHAT_TYPE": "single", "COREMAN_FEISHU_PERSONAL_URL": "https://example.test", "COREMAN_FEISHU_PERSONAL_TOKEN": "personal-secret", "COREMAN_COLLABORATION_TOKEN": "collab-secret"}
-	req := &ChatCompletionRequest{SessionID: "private-session", EnvVars: env}
-	if SessionLogID(req) != "" {
-		t.Fatal("private session exposed to viewer")
-	}
 	if got := RedactCollaborationToken("personal-secret collab-secret", env); strings.Contains(got, "secret") {
 		t.Fatal("token leak", got)
 	}

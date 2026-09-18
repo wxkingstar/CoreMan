@@ -12,26 +12,29 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session
-from coreman.api.errors import ApiError, not_found
+from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
+from coreman.core import session_links
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     Bot,
     ChatLog,
+    FeishuPersonalGrant,
     RelayServer,
     RuntimeCall,
     RuntimeInstallLink,
     RuntimeNode,
+    Task,
     Team,
     User,
 )
@@ -50,7 +53,8 @@ from coreman.core.runtime_nodes.transport import (
 )
 
 router = APIRouter(prefix="/api/admin/runtime-nodes", dependencies=[Depends(verify_csrf)])
-MANAGERS = require_roles("ai_committee", "platform_admin")
+MANAGER_ROLES = ("ai_committee", "platform_admin")
+MANAGERS = require_roles(*MANAGER_ROLES)
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 CA_FILE_HINT = "coreman-ca.pem"
@@ -452,13 +456,37 @@ async def delete_node(
     return {"code": 0, "data": None}
 
 
-async def _authorize_session_content(
-    session: AsyncSession, request: Request, actor: User, session_id: str
-) -> None:
-    """Unknown sessions have no trustworthy owner; never proxy their raw content.
+async def _link_epoch_current(session: AsyncSession, claims: session_links.LinkClaims) -> bool:
+    """飞书资料模式的链接绑定签发时的上下文版本；撤销、切换模式或重新授权后即失效。"""
+    if claims.context_epoch is None:
+        return True
+    grant = await session.get(
+        FeishuPersonalGrant, (claims.bot_id, claims.user_id), populate_existing=True
+    )
+    return grant is not None and grant.context_epoch == claims.context_epoch
 
-    Inspect all matching history, not just the latest row: older shared sessions may
-    contain personal content even if a later turn has another conversation type.
+
+async def _owner_viewable(session: AsyncSession, node_id: uuid.UUID, provider: str) -> bool:
+    node = await session.get(RuntimeNode, node_id)
+    capability = (node.capabilities.get(provider) or {}) if node else {}
+    return isinstance(capability, dict) and capability.get("owner_session_view_v1") is True
+
+
+async def _authorize_session_content(
+    session: AsyncSession,
+    request: Request,
+    actor: User,
+    node_id: uuid.UUID,
+    provider: str,
+    session_id: str,
+) -> str:
+    """能否查看会话原文；返回放行依据（link / owner / role）供审计。
+
+    私聊归本人，不看角色：普通私聊登录即可看自己的会话；飞书资料模式的会话还要聊天里发出的
+    链接（24 小时内、签给当前登录的人、上下文版本未变）。会话历史里不能有别人的记录；第一轮
+    还没写记录时，只有链接能证明它属于谁。bot_token 登录一律不走本人这条路：群聊里的智能体
+    拿着发言人的 token，不能借此读到他的私聊。非管理员还要节点已升级到记录不含环境变量的驱动。
+    其余按角色：管理员可看群聊与企微私聊；飞书私聊可能含个人飞书资料，任何角色都不能代看。
     """
     try:
         identity = uuid.UUID(session_id)
@@ -466,36 +494,116 @@ async def _authorize_session_content(
         raise not_found("会话不存在") from None
     rows = (
         await session.execute(
-            select(ChatLog.platform, ChatLog.chat_type, ChatLog.user_id).where(
-                ChatLog.relay_session_id == identity
+            select(
+                ChatLog.platform,
+                ChatLog.chat_type,
+                ChatLog.user_id,
+                func.coalesce(Task.result.has_key("feishu_personal"), False),
             )
+            .outerjoin(Task, Task.id == ChatLog.task_id)
+            .where(ChatLog.relay_session_id == identity)
         )
     ).all()
+    personal = any(row[3] for row in rows)
+    mine = not request.cookies.get("bot_token") and all(
+        chat_type == "single" and user_id == actor.id for _, chat_type, user_id, _ in rows
+    )
+    token = request.query_params.get("t", "")
+    claims = session_links.read(request.app.state.cipher, token) if token else None
+    linked = (
+        mine
+        and claims is not None
+        and claims.session_id == identity
+        and claims.user_id == actor.id
+        and claims.node_id == node_id
+        and claims.provider == provider
+        and await _link_epoch_current(session, claims)
+    )
+    if linked or (mine and rows and not personal):
+        if actor.role in MANAGER_ROLES or await _owner_viewable(session, node_id, provider):
+            return "link" if linked else "owner"
+        # 旧驱动的会话记录里带着请求的环境变量（机器人密钥、访问令牌），以前只给管理员看。
+        raise ApiError(403, 403, "这个运行时版本较旧，暂时不能查看完整过程，请联系管理员升级运行时")
+    if mine and rows:
+        raise ApiError(
+            403, 403, "飞书资料模式的完整过程只能从聊天里最近一条回复的链接打开，链接 24 小时内有效"
+        )
+    if actor.role not in MANAGER_ROLES:
+        if token:
+            raise ApiError(
+                403, 403, "链接已失效或不属于当前登录账号，请打开聊天里最新一条回复的链接"
+            )
+        raise forbidden()
     if not rows or any(
-        platform == "feishu"
-        and chat_type == "single"
-        and (request.cookies.get("bot_token") or user_id != actor.id)
-        for platform, chat_type, user_id in rows
+        platform == "feishu" and chat_type == "single" for platform, chat_type, _, _ in rows
     ):
         raise not_found("会话不存在")
+    return "role"
+
+
+def _renewed(result: Response, renewal: Response) -> Response:
+    """直接返回 Response 时，current_user 续期写在注入 response 上的 cookie 要手动带上。"""
+    for value in renewal.headers.getlist("set-cookie"):
+        result.headers.append("set-cookie", value)
+    return result
+
+
+def _error_page(exc: ApiError) -> HTMLResponse:
+    """查看页是浏览器直接打开的，错误也回一页能读的文字，而不是 JSON。"""
+    from html import escape
+
+    body = (
+        '<!doctype html><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>CoreMan</title>"
+        '<p style="font:16px/1.6 system-ui,sans-serif;margin:32px 16px">'
+        f"{escape(exc.message)}</p>"
+    )
+    return HTMLResponse(body, status_code=exc.status_code, headers=NO_STORE)
 
 
 @router.get("/{node_id}/{provider}/session/{session_id}")
 async def session_view(
     request: Request,
+    response: Response,
     node_id: uuid.UUID,
     provider: Literal["claude", "codex"],
     session_id: str,
-    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     import re
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
-        raise not_found("会话不存在")
-    await _authorize_session_content(session, request, actor, session_id)
-    if not await session.get(RuntimeNode, node_id):
-        raise not_found("运行时不存在")
+        return _error_page(not_found("会话不存在"))
+    try:
+        actor = await current_user(request, response, session)
+    except ApiError as exc:
+        if exc.status_code != 401:
+            raise
+        # 聊天里点开链接时多半还没登录（飞书、企微内置浏览器各有各的 cookie）：登录后回到原链接。
+        target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        return RedirectResponse(
+            "/login?redirect=" + quote(target, safe=""), status_code=302, headers=NO_STORE
+        )
+    try:
+        via = await _authorize_session_content(
+            session, request, actor, node_id, provider, session_id
+        )
+        if not await session.get(RuntimeNode, node_id):
+            raise not_found("运行时不存在")
+    except ApiError as exc:
+        return _renewed(_error_page(exc), response)
+    await record_audit(
+        session,
+        action="runtime.session_view",
+        actor_id=actor.id,
+        actor_login=actor.login_name or f"user:{actor.id}",
+        target_type="runtime_session",
+        target_id=session_id,
+        diff={"node_id": [None, str(node_id)], "provider": [None, provider], "via": [None, via]},
+        ip=client_ip(request),
+    )
+    await session.commit()
     template = (ROOT / "runtime_daemon/drivers/pkg/sessions/session_viewer.html").read_text()
     template = re.sub(r"<link[^>]+https://[^>]+>", "", template)
     template = re.sub(r'<script src="https://[^>]+></script>', "", template)
@@ -513,7 +621,8 @@ async def session_view(
     )
     template = template.replace(
         "const wsUrl = wsProto + '//' + location.host + '/session/' + sessionId + '/ws';",
-        "const wsUrl = location.pathname + '/events';",
+        # 带上查询串：私聊链接的凭据要随事件流一起校验。
+        "const wsUrl = location.pathname + '/events' + location.search;",
     )
     template = template.replace("WebSocket.CONNECTING", "EventSource.CONNECTING").replace(
         "WebSocket.OPEN", "EventSource.OPEN"
@@ -524,7 +633,7 @@ async def session_view(
     template = template.replace(
         "return marked.parse(text);", "return '<pre>' + escHtml(text) + '</pre>';"
     )
-    return Response(template, media_type="text/html", headers=NO_STORE)
+    return _renewed(Response(template, media_type="text/html", headers=NO_STORE), response)
 
 
 @router.get("/{node_id}/{provider}/session/{session_id}/events")
@@ -533,7 +642,7 @@ async def session_events(
     node_id: uuid.UUID,
     provider: Literal["claude", "codex"],
     session_id: str,
-    actor: User = Depends(MANAGERS),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     import re
@@ -545,7 +654,7 @@ async def session_events(
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
         raise not_found("会话不存在")
-    await _authorize_session_content(session, request, actor, session_id)
+    await _authorize_session_content(session, request, actor, node_id, provider, session_id)
     if not await session.get(RuntimeNode, node_id):
         raise not_found("运行时不存在")
     # Release the reader transaction before holding a long-lived stream.
