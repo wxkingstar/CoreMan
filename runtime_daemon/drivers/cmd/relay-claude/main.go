@@ -129,11 +129,14 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	hasTools := len(req.Tools) > 0
 
+	// Private-mode attachments stay in per-request temp files, never the
+	// shared session directory.
 	var sessionDir string
-	if req.SessionID != "" {
-		sessionDir = filepath.Join(sessionStore.AbsDir(), req.SessionID, "files")
+	if id := openai.SessionLogID(&req); id != "" {
+		sessionDir = filepath.Join(sessionStore.AbsDir(), id, "files")
 	}
-	prompt, systemPrompt, tempFiles := buildPromptFromMessages(req.Messages, sessionDir)
+	// Personal mode has no tools to use an image file with.
+	prompt, systemPrompt, tempFiles := buildPromptFromMessages(req.Messages, sessionDir, !openai.FeishuPersonalEnabled(req.EnvVars))
 	if len(tempFiles) > 0 {
 		defer func() {
 			for _, f := range tempFiles {

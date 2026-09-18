@@ -75,7 +75,7 @@ func replaceArg(args []string, old, new string) []string {
 
 // buildClaudeArgs assembles `claude` CLI flags from the OpenAI-shaped request.
 // stdinData is the prompt body that should be piped on stdin.
-func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPrompt string) (args []string, stdinData string) {
+func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []promptBlock, systemPrompt string) (args []string, stdinData string) {
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
@@ -149,9 +149,17 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model, prompt, systemPro
 	if req.SessionID != "" && !openai.FeishuPersonalEnabled(req.EnvVars) {
 		args = append(args, "--resume", req.SessionID)
 	}
+	// A text-only turn stays a plain string; blocks are needed only for images.
+	var content any = prompt
+	switch {
+	case len(prompt) == 0:
+		content = ""
+	case len(prompt) == 1 && prompt[0].Type == "text":
+		content = prompt[0].Text
+	}
 	input, _ := json.Marshal(map[string]any{
 		"type":    "user",
-		"message": map[string]string{"role": "user", "content": prompt},
+		"message": map[string]any{"role": "user", "content": content},
 	})
 	return args, string(input) + "\n"
 }

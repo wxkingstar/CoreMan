@@ -217,20 +217,53 @@ func (f *toolCallFilter) Finish() (remaining string, blocks []string) {
 	return f.pending, f.toolBlocks
 }
 
-// buildPromptFromMessages flattens an OpenAI message array into a single
-// prompt string, separately returning the system prompt. Attachments are
-// dumped to disk and inlined as `[Image: /path]` / `[File: /path]` markers.
-// When sessionDir is non-empty, attachments are content-hashed there for
-// cross-turn dedup; otherwise tempFiles is populated for cleanup.
-func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string) (prompt, systemPrompt string, tempFiles []string) {
-	var parts []string
+// promptBlock is one content block of the stream-json user turn piped to the
+// CLI: transcript text, or an image in native base64 form.
+type promptBlock struct {
+	Type   string       `json:"type"`
+	Text   string       `json:"text,omitempty"`
+	Source *imageSource `json:"source,omitempty"`
+}
+
+type imageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+// imageFileNote follows the `[Image file: /path]` markers so models don't Read
+// the file to "look closer" and pay for the same image twice. Asked for every
+// detail, haiku Read the file 4/4 times under a bare "no need to Read it" and
+// 0/4 under this wording, while Bash use of the file (copy, size) went on as
+// before. A Read deny rule is no substitute: the CLI applies it to Bash
+// commands naming the path too.
+const imageFileNote = "(Files of the images above, in order. You already see the images; reading a file would only show the same pixels again, so do not Read it. Use a path only when a tool needs the file itself, e.g. to upload, send or convert it.)"
+
+// buildPromptFromMessages flattens an OpenAI message array into one user
+// turn, separately returning the system prompt. Images go to the CLI as
+// native image blocks right after their message's text, so the model sees
+// them without a file-reading tool (Feishu personal mode has none) and the
+// CLI converts and downsizes them itself. With imageFiles, images are also
+// written to disk and listed as `[Image file: /path]` so tools can work on
+// the file. Other attachments are dumped to disk and inlined as
+// `[File: /path]` markers. Written files are content-hashed under a non-empty
+// sessionDir for cross-turn dedup, otherwise tempFiles is populated for
+// cleanup.
+func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string, imageFiles bool) (prompt []promptBlock, systemPrompt string, tempFiles []string) {
+	var parts []string // transcript text since the last image block
+	flush := func() {
+		if len(parts) > 0 {
+			prompt = append(prompt, promptBlock{Type: "text", Text: strings.Join(parts, "\n\n")})
+			parts = nil
+		}
+	}
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
 			systemPrompt = msg.ContentString()
 		case "user":
 			text := msg.ContentString()
-			files := attachments.ExtractAndSave(msg.Content, sessionDir, "claude-img", "claude-file")
+			files := attachments.SaveFiles(msg.Content, sessionDir, "claude-file")
 			for _, a := range files {
 				if sessionDir == "" {
 					tempFiles = append(tempFiles, a.Path)
@@ -239,11 +272,7 @@ func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string) (
 			if len(files) > 0 {
 				var refs []string
 				for _, a := range files {
-					if a.IsImage {
-						refs = append(refs, fmt.Sprintf("[Image: %s]", a.Path))
-					} else {
-						refs = append(refs, fmt.Sprintf("[File: %s]", a.Path))
-					}
+					refs = append(refs, fmt.Sprintf("[File: %s]", a.Path))
 				}
 				if text != "" {
 					text += "\n"
@@ -251,6 +280,28 @@ func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string) (
 				text += strings.Join(refs, "\n")
 			}
 			parts = append(parts, fmt.Sprintf("Human: %s", text))
+			if images := attachments.Images(msg.Content); len(images) > 0 {
+				flush()
+				var refs []string
+				for _, img := range images {
+					prompt = append(prompt, promptBlock{Type: "image", Source: &imageSource{Type: "base64", MediaType: img.MediaType, Data: img.Data}})
+					if !imageFiles {
+						continue
+					}
+					path, err := attachments.SaveImage(img, sessionDir, "claude-img")
+					if err != nil {
+						log.Printf("Failed to save image: %v", err)
+						continue
+					}
+					if sessionDir == "" {
+						tempFiles = append(tempFiles, path)
+					}
+					refs = append(refs, fmt.Sprintf("[Image file: %s]", path))
+				}
+				if len(refs) > 0 {
+					parts = append(parts, strings.Join(refs, "\n")+"\n"+imageFileNote)
+				}
+			}
 		case "assistant":
 			text := msg.ContentString()
 			if len(msg.ToolCalls) > 0 {
@@ -277,6 +328,6 @@ func buildPromptFromMessages(messages []openai.ChatMessage, sessionDir string) (
 			parts = append(parts, fmt.Sprintf("%s: %s", msg.Role, msg.ContentString()))
 		}
 	}
-	prompt = strings.Join(parts, "\n\n")
+	flush()
 	return
 }

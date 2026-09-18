@@ -1,6 +1,7 @@
 // Package attachments handles base64 image/file payloads inside chat messages.
-// The relay decodes these once and writes them to disk so the upstream CLI
-// (which can read files but not parse multipart JSON) sees stable paths.
+// The relay decodes these once and either writes them to disk so the upstream
+// CLI (which can read files but not parse multipart JSON) sees stable paths,
+// or, for images, hands them back for CLIs that accept them natively.
 package attachments
 
 import (
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,31 +56,91 @@ func MimeToExt(mime string) string {
 	}
 }
 
+// contentPart is one element of an OpenAI multipart `content` array.
+type contentPart struct {
+	Type     string `json:"type"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url,omitempty"`
+	FileURL *struct {
+		URL      string `json:"url"`
+		Filename string `json:"filename,omitempty"`
+	} `json:"file_url,omitempty"`
+}
+
+func parseParts(content json.RawMessage) []contentPart {
+	if len(content) == 0 {
+		return nil
+	}
+	var parts []contentPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		return nil
+	}
+	return parts
+}
+
+// Image is one image_url part carried as a base64 `data:` URI.
+type Image struct {
+	MediaType string // e.g. "image/png"
+	Data      string // base64 payload, known to decode
+}
+
+// Images returns a message's image_url parts in order without touching disk,
+// for CLIs that take images natively instead of reading them from a path.
+func Images(content json.RawMessage) []Image {
+	var images []Image
+	for _, p := range parseParts(content) {
+		if p.Type != "image_url" || p.ImageURL == nil || !strings.HasPrefix(p.ImageURL.URL, "data:") {
+			continue
+		}
+		header, data, ok := strings.Cut(p.ImageURL.URL[len("data:"):], ",")
+		if !ok {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			log.Printf("Failed to decode image base64: %v", err)
+			continue
+		}
+		mediaType, _, _ := strings.Cut(header, ";")
+		if !strings.HasPrefix(mediaType, "image/") {
+			mediaType = http.DetectContentType(raw)
+		}
+		images = append(images, Image{MediaType: mediaType, Data: data})
+	}
+	return images
+}
+
+// SaveImage writes one image the way ExtractAndSave does and returns its path,
+// for callers that also want tools to reach an image sent natively.
+func SaveImage(img Image, sessionDir, prefix string) (string, error) {
+	return write(sessionDir, prefix, MimeToExt(img.MediaType), img.Data)
+}
+
+// SaveFiles is ExtractAndSave limited to file_url parts; image_url parts are
+// left to the caller (see Images).
+func SaveFiles(content json.RawMessage, sessionDir, prefixFile string) []Saved {
+	var files []contentPart
+	for _, p := range parseParts(content) {
+		if p.Type == "file_url" {
+			files = append(files, p)
+		}
+	}
+	return save(files, sessionDir, "", prefixFile)
+}
+
 // ExtractAndSave walks a message's `content` field looking for image_url and
 // file_url parts encoded as `data:` URIs. Each decoded payload is written to
 // disk and returned. When sessionDir is non-empty, files are content-hashed
 // for cross-turn dedup; otherwise each call gets a fresh /tmp filename and
 // the caller should delete the files after use.
 func ExtractAndSave(content json.RawMessage, sessionDir, prefixImage, prefixFile string) []Saved {
-	if len(content) == 0 {
-		return nil
-	}
-	var parts []struct {
-		Type     string `json:"type"`
-		ImageURL *struct {
-			URL string `json:"url"`
-		} `json:"image_url,omitempty"`
-		FileURL *struct {
-			URL      string `json:"url"`
-			Filename string `json:"filename,omitempty"`
-		} `json:"file_url,omitempty"`
-	}
-	if err := json.Unmarshal(content, &parts); err != nil {
-		return nil
-	}
+	return save(parseParts(content), sessionDir, prefixImage, prefixFile)
+}
 
-	if sessionDir != "" {
-		os.MkdirAll(sessionDir, 0755)
+func save(parts []contentPart, sessionDir, prefixImage, prefixFile string) []Saved {
+	if len(parts) == 0 {
+		return nil
 	}
 
 	if prefixImage == "" {
@@ -124,41 +186,42 @@ func ExtractAndSave(content json.RawMessage, sessionDir, prefixImage, prefixFile
 			}
 		}
 
-		dir := "/tmp"
-		if sessionDir != "" {
-			dir = sessionDir
-		}
-
-		var filePath string
-		if sessionDir != "" {
-			// Hash the base64 body so duplicate uploads across turns reuse
-			// the same file (no redundant decode/write).
-			hash := sha256.Sum256([]byte(b64Data))
-			name := fmt.Sprintf("%s-%s%s", prefix, hex.EncodeToString(hash[:8]), ext)
-			filePath = filepath.Join(dir, name)
-			if _, err := os.Stat(filePath); err == nil {
-				files = append(files, Saved{Path: filePath, IsImage: isImage})
-				continue
-			}
-		} else {
-			var randBytes [8]byte
-			if _, err := rand.Read(randBytes[:]); err != nil {
-				continue
-			}
-			filePath = filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, hex.EncodeToString(randBytes[:]), ext))
-		}
-
-		fileBytes, err := base64.StdEncoding.DecodeString(b64Data)
+		filePath, err := write(sessionDir, prefix, ext, b64Data)
 		if err != nil {
-			log.Printf("Failed to decode attachment base64: %v", err)
+			log.Printf("Failed to save attachment: %v", err)
 			continue
 		}
-		if err := os.WriteFile(filePath, fileBytes, 0600); err != nil {
-			log.Printf("Failed to write file %s: %v", filePath, err)
-			continue
-		}
-		log.Printf("Saved attachment to: %s", filePath)
 		files = append(files, Saved{Path: filePath, IsImage: isImage})
 	}
 	return files
+}
+
+// write stores one base64 payload and returns its path. Under sessionDir the
+// name is content-hashed so duplicate uploads across turns reuse the same
+// file (no redundant decode/write); otherwise it gets a fresh /tmp name.
+func write(sessionDir, prefix, ext, b64Data string) (string, error) {
+	var filePath string
+	if sessionDir != "" {
+		os.MkdirAll(sessionDir, 0755)
+		hash := sha256.Sum256([]byte(b64Data))
+		filePath = filepath.Join(sessionDir, fmt.Sprintf("%s-%s%s", prefix, hex.EncodeToString(hash[:8]), ext))
+		if _, err := os.Stat(filePath); err == nil {
+			return filePath, nil
+		}
+	} else {
+		var randBytes [8]byte
+		if _, err := rand.Read(randBytes[:]); err != nil {
+			return "", err
+		}
+		filePath = filepath.Join("/tmp", fmt.Sprintf("%s-%s%s", prefix, hex.EncodeToString(randBytes[:]), ext))
+	}
+	fileBytes, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return "", fmt.Errorf("decode base64: %w", err)
+	}
+	if err := os.WriteFile(filePath, fileBytes, 0600); err != nil {
+		return "", err
+	}
+	log.Printf("Saved attachment to: %s", filePath)
+	return filePath, nil
 }
