@@ -100,7 +100,7 @@ Compose 为 PostgreSQL 显式设置 `max_connections=300`、`shared_buffers=256M
 
 仓库使用 GitHub Actions：
 
-- `CI`（push 与 PR 到 main）：分层 import 门禁、ruff、mypy、pytest（PostgreSQL 16 service）、前端 lint / 类型检查 / vitest / 构建、Go 驱动 `go vet` 与 `go test -race`、shellcheck、`docker compose config`。
+- `CI`（push 与 PR 到 main）：分层 import 门禁、ruff、mypy、pytest（PostgreSQL 16 service，pytest-xdist 按 CPU 数并行、每个 worker 独立库）、前端 lint / 类型检查 / vitest / 构建、Go 驱动 `go vet` 与 `go test -race`、shellcheck、`docker compose config`。
 - `Release`（推送 `v*` 标签）：构建 amd64/arm64 的 `ghcr.io/<owner>/coreman-api` 与 `ghcr.io/<owner>/coreman-runtime`，镜像标签为 `v1.2.3`、`1.2.3`、`1.2`，正式版本另打 `latest`；从刚发布的 API 镜像导出 runtime 安装包，连同各自的 `.sha256` 与汇总的 `SHA256SUMS` 附到 GitHub Release。
 - Dependabot 每周检查 Python、npm、Go、GitHub Actions 与容器镜像依赖；PostgreSQL 大版本升级需要迁移数据卷，不会自动提出。
 

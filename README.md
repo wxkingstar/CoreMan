@@ -73,6 +73,7 @@ npm run dev
 
 ```bash
 uv run pytest                          # 数据库测试需 Docker 或独立 TEST_DATABASE_URL
+uv run pytest -n auto                  # 并行：每个 worker 在 TEST_DATABASE_URL 所在服务器上建独立库，账号需 CREATEDB
 uv run ruff check .
 uv run mypy coreman
 cd web
