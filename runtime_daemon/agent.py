@@ -72,7 +72,15 @@ CLAUDE_PROBE_DISABLED = (
 
 
 class OperationError(Exception):
-    pass
+    """Messages are fixed prompts, at most with an exit code, HTTP status or count.
+
+    They never carry command output, paths or credentials, so they may be logged and
+    returned to the platform (tests/unit/test_runtime_daemon_errors.py checks this).
+    """
+
+
+def operation_message(exc: OperationError) -> str:
+    return str(exc)[:200]
 
 
 def run_command(
@@ -594,7 +602,7 @@ class Agent:
                 if isinstance(exc, OperationError):
                     # 本模块的 OperationError 都是固定提示（最多带退出码或 HTTP 状态码），
                     # 不含命令输出与凭证；其它异常可能带路径或响应内容，只记类型。
-                    event["message"] = str(exc)[:200]
+                    event["message"] = operation_message(exc)
                 print(json.dumps(event, ensure_ascii=False), flush=True)
             finally:
                 with self.background_lock:

@@ -38,10 +38,25 @@ OPERATIONS = {
 }
 
 
+# 反向通道把节点的错误帧当作连接错误抛出，异常文本就是帧里的错误码。
+NODE_ERRORS = {"execution_failed", "connection_lost", "control_lost", "response_too_large"}
+
+
 class AgentError(Exception):
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    """`str()` 是平台固定文案；`detail` 只来自节点 `operation_failed` 结果里的固定提示。"""
+
+    def __init__(self, message: str, *, code: str | None = None, detail: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.detail = detail
+
+
+def operation_detail(value: object) -> str | None:
+    """节点回传的失败原因：去掉控制字符并限长，节点本身也可能被篡改。"""
+    if not isinstance(value, str):
+        return None
+    text = "".join(c for c in value if c.isprintable()).strip()[:200]
+    return text or None
 
 
 def make_http(relay: RelayServer) -> httpx.AsyncClient:
@@ -92,13 +107,20 @@ async def call_agent(
                         raise AgentError("Agent 响应超过上限")
                 result = json.loads(data)
                 if not isinstance(result, dict) or result.get("success") is not True:
+                    code = result.get("code") if isinstance(result, dict) else None
+                    if code not in {"conflict", "instructions_conflict", "operation_failed"}:
+                        code = None
                     raise AgentError(
                         "Agent 未完成操作，请查看该实例状态",
-                        code=str(result["code"])
-                        if isinstance(result, dict)
-                        and result.get("code") in {"conflict", "instructions_conflict"}
+                        code=code,
+                        # 只有 operation_failed 的 message 是节点固定提示；其它结果的文本不转发。
+                        detail=operation_detail(result["message"])
+                        if code == "operation_failed" and "message" in result
                         else None,
                     )
                 return result
     except (httpx.HTTPError, ValueError) as exc:
-        raise AgentError(f"Agent 连接失败（{type(exc).__name__}）") from exc
+        raise AgentError(
+            f"Agent 连接失败（{type(exc).__name__}）",
+            code=str(exc) if str(exc) in NODE_ERRORS else None,
+        ) from exc

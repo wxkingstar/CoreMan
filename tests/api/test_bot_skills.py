@@ -1,10 +1,13 @@
 import uuid
 
+import pytest
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 from coreman.core.db.models import (
     BotSkill,
     EnvPreset,
+    RelayServer,
     Skill,
     SkillApproval,
     SkillSource,
@@ -12,6 +15,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.knowledge import installation as installs
+from coreman.core.relay.agent_client import AgentError
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker import skill_install
 from tests.api.conftest import login_as, login_existing
@@ -150,6 +154,9 @@ async def test_internal_approval_binds_scope_actor_and_catalog(
     assert task.status == "failed" and not calls
     row = await db_session.get(BotSkill, (bot.id, skill.id))
     assert row.status == "failed" and row.installed_at is None
+    # 校验在下发前失败：说明远端没有执行，而不是笼统的「可能已执行」。
+    expected = "安装未执行：技能已停用或修改，或安装记录已变化，请处理后重新提交。"
+    assert row.error_message == task.error_message == expected
     approval = await db_session.get(SkillApproval, uuid.UUID(approval_id))
     assert approval.status == "approved"
 
@@ -240,3 +247,92 @@ async def test_approved_install_policy_survives_edit_and_lost_task(
     await db_session.refresh(bot)
     assert "Only orders table" not in bot.merged_system_prompt
     assert "DB_PASSWORD" not in await installs.effective_env(db_session, cipher, bot)
+
+
+async def failed_install(client, db_session, db_engine, monkeypatch, agent):
+    bot, skill, _ = await prepare(client, db_session)
+    bot_id, skill_id = bot.id, skill.id
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    path = f"/api/admin/bots/{bot_id}/skills/{skill_id}/install"
+    result = await client.post(path, json={"user_env_vars": {"API_KEY": "secret"}})
+    assert result.status_code == 200, result.text
+    with capture_logs() as logs:
+        task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert task.status == "failed"
+    task_id, task_error = task.id, task.error_message
+    db_session.expire_all()
+    row = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert row.status == "failed" and row.install_task_id is None
+    assert row.error_message == task_error
+    failures = [entry for entry in logs if entry["event"] == "skill_install_failed"]
+    assert len(failures) == 1
+    assert failures[0]["task_id"] == task_id and failures[0]["bot_id"] == str(bot_id)
+    assert failures[0]["skill_id"] == str(skill_id)
+    return bot_id, row, failures[0]
+
+
+async def test_install_failure_shows_the_node_reason(client, db_session, db_engine, monkeypatch):
+    async def agent(*args):
+        raise AgentError(
+            "Agent 未完成操作，请查看该实例状态",
+            code="operation_failed",
+            detail="Git 来源不在白名单内",
+        )
+
+    bot_id, row, log = await failed_install(client, db_session, db_engine, monkeypatch, agent)
+    assert row.error_message == (
+        "运行时节点报告安装失败：Git 来源不在白名单内。"
+        "请在该运行时节点的 config.json 中把技能仓库域名加入 git_hosts，然后重启运行时服务。"
+    )
+    assert log["error_code"] == "operation_failed" and log["error_type"] == "AgentError"
+    assert log["detail"] == "Git 来源不在白名单内" and log["remote"] is True
+    listing = (await client.get(f"/api/admin/bots/{bot_id}/skills")).json()["data"]["items"]
+    assert listing[0]["error_message"] == row.error_message
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "expected"),
+    [
+        # 旧版节点只回 execution_failed：提示查看节点日志或升级。
+        (
+            AgentError("Agent 连接失败（ConnectError）", code="execution_failed"),
+            "execution_failed",
+            "运行时节点执行安装时出错，未返回具体原因",
+        ),
+        # 其它 Agent 错误的文本不入库。
+        (AgentError("synthetic-private-output"), "agent_error", skill_install.INCOMPLETE),
+        (
+            AgentError("x", code="operation_failed", detail="操作失败（退出码 128）"),
+            "operation_failed",
+            "运行时节点报告安装失败：操作失败（退出码 128）。Git 或 npx 命令失败",
+        ),
+        (RuntimeError("synthetic-private-output"), "RuntimeError", skill_install.INCOMPLETE),
+    ],
+)
+async def test_install_failure_reasons_never_carry_raw_errors(
+    client, db_session, db_engine, monkeypatch, error, code, expected
+):
+    async def agent(*args):
+        raise error
+
+    _, row, log = await failed_install(client, db_session, db_engine, monkeypatch, agent)
+    assert row.error_message.startswith(expected)
+    assert "synthetic-private-output" not in row.error_message
+    assert "synthetic-private-output" not in str(log)
+    assert log["error_code"] == code
+
+
+async def test_check_failure_after_the_node_ran_says_so(client, db_session, db_engine, monkeypatch):
+    async def agent(relay, *args):
+        # 安装期间实例配置被修改（乐观锁版本号变化）。
+        stored = await db_session.get(RelayServer, relay.id)
+        stored.name = "renamed during install"
+        await db_session.commit()
+        return {"success": True}
+
+    _, row, log = await failed_install(client, db_session, db_engine, monkeypatch, agent)
+    assert row.error_message == (
+        "安装未完成：安装期间实例或环境变量配置发生了变化；远端操作已执行，请检查实例状态后重新提交。"
+    )
+    assert log["error_code"] == "installation_configuration_changed_during_execution"
+    assert log["remote"] is True

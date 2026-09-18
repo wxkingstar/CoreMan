@@ -26,7 +26,13 @@ from pathlib import Path
 import httpx
 
 from runtime_daemon import PROTOCOL_VERSION, __version__
-from runtime_daemon.agent import COMMAND_CANCEL, Agent, OperationError, atomic_write
+from runtime_daemon.agent import (
+    COMMAND_CANCEL,
+    Agent,
+    OperationError,
+    atomic_write,
+    operation_message,
+)
 from runtime_daemon.lifecycle import (
     FatalConfigError,
     choose_socket_dir,
@@ -730,6 +736,7 @@ class Daemon:
     async def execute(self, command: dict) -> None:
         identity, provider = command["id"], command["provider"]
         frames = FrameBatcher(lambda batch: self.send_frames(identity, batch))
+        operation_name = ""
 
         try:
             data = self.validate_command(command)
@@ -745,6 +752,7 @@ class Daemon:
                 "working_dir": data.get("working_dir", ""),
             }
             if command["path"] == "/":
+                operation_name = str(data.get("type"))[:40]
                 if data.get("type") in {"status", "ping"}:
                     self.task_info.pop(identity, None)
                 import threading
@@ -762,6 +770,13 @@ class Daemon:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(asyncio.shield(operation), timeout=5)
                     raise
+                except OperationError as exc:
+                    # Fixed prompts only (at most an exit code, HTTP status or count), never
+                    # command output or credentials: safe to log and to hand back. Older
+                    # platforms read any unsuccessful result as a failed operation.
+                    message = operation_message(exc)
+                    LOG.warning("Operation %s failed: %s", operation_name, message)
+                    result = {"success": False, "code": "operation_failed", "message": message}
                 finally:
                     COMMAND_CANCEL.reset(token)
                 await frames.add(json.dumps(result).encode(), status_code=200)
@@ -788,7 +803,13 @@ class Daemon:
             frames.discard()
             raise
         except Exception as exc:
-            LOG.warning("Request failed: %s", type(exc).__name__)
+            # Other exception types may carry paths or response text: log the type only.
+            reason = type(exc).__name__
+            if isinstance(exc, OperationError):
+                reason += ": " + operation_message(exc)
+            if operation_name:
+                reason = f"{operation_name}: {reason}"
+            LOG.warning("Request failed: %s", reason)
             with contextlib.suppress(Exception):
                 await frames.finish(error="execution_failed")
         finally:
