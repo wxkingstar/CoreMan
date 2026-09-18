@@ -54,14 +54,64 @@ def digest(path):
     return h.hexdigest()
 
 
-def remove_legacy_instruction_excludes(directory):
-    from .agent import OperationError, atomic_write
+def instruction_alias(root, name):
+    """name 是指向另一份指令文件的相对链接时，返回那份文件名。
+
+    AGENTS.md 与 CLAUDE.md 是同一份指令：一个是普通文件，另一个链接过去。CoreMan 新建的目录
+    以 AGENTS.md 为正本；其他机器人系统已有的目录常以 Git 里跟踪的 CLAUDE.md 为正本、AGENTS.md
+    链接过去。两种方向都认，不改写已有目录的布局。
+    """
+    if name not in ("AGENTS.md", "CLAUDE.md"):
+        return None
+    partner = "CLAUDE.md" if name == "AGENTS.md" else "AGENTS.md"
+    path = root / name
+    if (
+        path.is_symlink()
+        and os.readlink(path) == partner
+        and (root / partner).is_file()
+        and not (root / partner).is_symlink()
+    ):
+        return partner
+    return None
+
+
+def replace_file(path, raw):
+    """原子替换文件内容，保留原文件的权限和属组；新文件按 umask / 目录默认 ACL 取权限。
+
+    工作目录可能与其它实例用户共用（如多个实例用户共用的机器人目录），
+    不能像私有文件那样收成 0600，否则别的实例读不到。
+    """
+    temporary = path.parent / f".coreman-tmp-{os.urandom(8).hex()}"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        if path.is_file() and not path.is_symlink():
+            st = path.stat()
+            os.chmod(temporary, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(temporary, -1, st.st_gid)
+            except PermissionError:
+                pass
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def git_exclude_file(directory):
+    from .agent import OperationError
 
     current = directory
     for part in (".git", "info", "exclude"):
         current = current / part
         if current.is_symlink():
             raise OperationError("Git 排除配置不能是符号链接")
+    return current
+
+
+def remove_legacy_instruction_excludes(directory):
+    current = git_exclude_file(directory)
     if current.is_file():
         previous = current.read_text()
         updated = "".join(
@@ -70,7 +120,20 @@ def remove_legacy_instruction_excludes(directory):
             if line.rstrip("\r\n") not in {"/AGENTS.md", "AGENTS.md"}
         )
         if updated != previous:
-            atomic_write(current, updated)
+            replace_file(current, updated.encode())
+
+
+def exclude_marker(directory):
+    """Git 仓库里把所有权标记列入本地排除：共用目录的另一套系统部署时可能 git clean -fd，
+    不排除就会删掉标记；也免得它出现在 git status 里、被误提交。"""
+    if not (directory / ".git").is_dir() or (directory / ".git").is_symlink():
+        return
+    current = git_exclude_file(directory)
+    previous = current.read_text() if current.is_file() else ""
+    if "/" + MARKER not in previous.splitlines():
+        current.parent.mkdir(parents=True, exist_ok=True)
+        text = previous + ("\n" if previous and not previous.endswith("\n") else "")
+        replace_file(current, (text + "/" + MARKER + "\n").encode())
 
 
 class InstructionsConflict(Exception):
@@ -141,8 +204,35 @@ class Workspace:
         if marker.exists() or marker.is_symlink():
             if not self.owned(root):
                 raise self.error("工作目录属于其他员工或所有权标记无效")
+        self.instructions(root)
+        remove_legacy_instruction_excludes(root)
+        exclude_marker(root)
+        marker.write_text(
+            json.dumps(
+                {
+                    "bot_id": self.bot,
+                    "workspace_protocol": 1,
+                    "transfer_id": self.data.get("transfer_id"),
+                }
+            )
+        )
+        return {"initialized": True, "owned": True, "workspace_protocol": 1}
+
+    def instructions(self, root):
+        """确保 AGENTS.md 与 CLAUDE.md 是一份正本加一个指向它的链接；已有的正本原样沿用。"""
+        agents, alias = root / "AGENTS.md", root / "CLAUDE.md"
+        if instruction_alias(root, "AGENTS.md"):
+            return
+        if (
+            alias.is_file()
+            and not alias.is_symlink()
+            and not (agents.exists() or agents.is_symlink())
+        ):
+            # 只有 CLAUDE.md（Git 仓库、其他机器人系统的目录）：它可能被 Git 跟踪、与别人共用，
+            # 不改动它，只补一个 AGENTS.md 链接让 Codex 也读到同一份。
+            agents.symlink_to("CLAUDE.md")
+            return
         canonical = self.path("AGENTS.md", root)
-        alias = root / "CLAUDE.md"
         if (
             alias.exists()
             and not alias.is_symlink()
@@ -166,23 +256,16 @@ class Workspace:
                     n += 1
                 alias.rename(root / f"CLAUDE.md.preserved-{n}")
             alias.symlink_to("AGENTS.md")
-        remove_legacy_instruction_excludes(root)
-        marker.write_text(
-            json.dumps(
-                {
-                    "bot_id": self.bot,
-                    "workspace_protocol": 1,
-                    "transfer_id": self.data.get("transfer_id"),
-                }
-            )
-        )
-        return {"initialized": True, "owned": True, "workspace_protocol": 1}
 
     def info(self):
+        marker = self.root / MARKER
         return {
             "exists": self.root.is_dir(),
             "empty": not self.root.exists() or not any(self.root.iterdir()),
             "owned": self.owned(),
+            # 有标记但不属于本员工 = 其他员工的目录；没有标记的已有目录（如另一套机器人系统在用的）
+            # 可以接管。
+            "marked": marker.exists() or marker.is_symlink(),
             "workspace_protocol": 1,
         }
 
@@ -234,23 +317,14 @@ class Workspace:
             "hash": digest(path),
             "editable": size <= MAX_TEXT
             and content is not None
-            and (
-                not path.is_symlink()
-                or (self.data["path"] == "CLAUDE.md" and os.readlink(path) == "AGENTS.md")
-            ),
+            and (not path.is_symlink() or bool(instruction_alias(self.root, self.data["path"]))),
             "offset": offset,
             "eof": offset + len(raw) >= size,
         }
 
     def write(self):
         name = self.data["path"]
-        if (
-            name == "CLAUDE.md"
-            and (self.root / name).is_symlink()
-            and os.readlink(self.root / name) == "AGENTS.md"
-        ):
-            name = "AGENTS.md"
-        path = self.path(name)
+        path = self.path(instruction_alias(self.root, name) or name)
         raw = self.data["content"].encode("utf-8")
         if len(raw) > MAX_TEXT or "expected_hash" not in self.data:
             raise self.error("文件过大或缺少版本校验")
@@ -262,10 +336,7 @@ class Workspace:
                 "message": "文件已发生变化，请重新读取后保存",
             }
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
-            f.write(raw)
-            temporary = Path(f.name)
-        temporary.replace(path)
+        replace_file(path, raw)
         return {"hash": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
     def export(self):
@@ -581,7 +652,7 @@ class Workspace:
                 "files": [
                     {"path": e["path"], "status": "??"}
                     for e in export["manifest"]
-                    if "link" not in e or (e["path"] == "CLAUDE.md" and e["link"] == "AGENTS.md")
+                    if "link" not in e or instruction_alias(self.root, e["path"])
                 ][:1000],
                 "excluded": export["excluded"],
             }
@@ -625,11 +696,11 @@ class Workspace:
         if not isinstance(files, list) or len(files) > 1000:
             raise self.error("请选择需要备份的文件")
         for name in files:
-            path = self.path(name, allow_link=name == "CLAUDE.md")
+            path = self.path(name, allow_link=name in ("AGENTS.md", "CLAUDE.md"))
             if (
                 not name
                 or path.is_dir()
-                or (path.is_symlink() and os.readlink(path) != "AGENTS.md")
+                or (path.is_symlink() and not instruction_alias(self.root, name))
             ):
                 raise self.error("只能备份安全的指定文件")
         created = not (self.root / ".git").exists()

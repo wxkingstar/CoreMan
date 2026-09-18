@@ -39,6 +39,65 @@ def test_init_preserves_instructions(agent):
     assert call(agent, "info")["owned"]
 
 
+def shared_workspace(agent):
+    """另一套机器人系统的目录：Git 跟踪的 CLAUDE.md 为正本，AGENTS.md 链接过去，组可写共用。"""
+    p = agent.root / "one"
+    (p / ".git/info").mkdir(parents=True)
+    (p / "CLAUDE.md").write_text("# shared rules\n")
+    (p / "CLAUDE.md").chmod(0o664)
+    (p / "AGENTS.md").symlink_to("CLAUDE.md")
+    (p / "report.csv").write_text("a,b\n")
+    return p
+
+
+def test_init_takes_over_shared_workspace_without_changing_layout(agent):
+    p = shared_workspace(agent)
+    info = call(agent, "info")
+    assert info["exists"] and not info["empty"] and not info["owned"] and not info["marked"]
+    call(agent, "init", content="new")
+    assert (p / "CLAUDE.md").read_text() == "# shared rules\n"
+    assert not (p / "CLAUDE.md").is_symlink()
+    assert (p / "AGENTS.md").readlink().as_posix() == "CLAUDE.md"
+    assert not list(p.glob("CLAUDE.md.preserved-*"))
+    # 对方部署时 git clean -fd 不带 -x：标记列入本地排除才不会被删。
+    assert (p / ".git/info/exclude").read_text() == "/.coreman-workspace.json\n"
+    info = call(agent, "info")
+    assert info["owned"] and info["marked"]
+    other = agent.dispatch({"type": "workspace-info", "working_dir": "one", "bot_id": 2})
+    assert other["marked"] and not other["owned"]
+
+
+def test_init_links_agents_md_to_lone_claude_md(agent):
+    p = agent.root / "one"
+    p.mkdir()
+    (p / "CLAUDE.md").write_text("tracked rules")
+    call(agent, "init", content="new")
+    assert (p / "CLAUDE.md").read_text() == "tracked rules"
+    assert not (p / "CLAUDE.md").is_symlink()
+    assert (p / "AGENTS.md").readlink().as_posix() == "CLAUDE.md"
+    assert not list(p.glob("CLAUDE.md.preserved-*"))
+
+
+def test_edit_through_agents_link_keeps_shared_permissions(agent):
+    import os
+    import stat
+
+    p = shared_workspace(agent)
+    call(agent, "init")
+    original = call(agent, "read", path="AGENTS.md")
+    assert original["editable"]
+    call(agent, "write", path="AGENTS.md", content="updated", expected_hash=original["hash"])
+    assert (p / "CLAUDE.md").read_text() == "updated"
+    assert (p / "AGENTS.md").is_symlink()
+    assert stat.S_IMODE((p / "CLAUDE.md").stat().st_mode) == 0o664
+    # 新文件按 umask 取权限，而不是收成 0600。
+    call(agent, "write", path="notes.md", content="x", expected_hash=None)
+    mask = os.umask(0)
+    os.umask(mask)
+    assert stat.S_IMODE((p / "notes.md").stat().st_mode) == 0o666 & ~mask
+    assert not list(p.glob(".coreman-tmp-*"))
+
+
 def test_file_bounds_and_hash(agent):
     call(agent, "init")
     result = call(agent, "write", path="a.txt", content="hello", expected_hash=None)
@@ -170,6 +229,23 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     assert call(agent, "git-backup", working_dir="two", files=["new.txt"], **config)["pushed"]
 
 
+def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
+    from runtime_daemon.workspace import Workspace
+
+    p = shared_workspace(agent)
+    call(agent, "init")
+    commands = []
+    monkeypatch.setattr(
+        Workspace, "git", lambda self, args, cwd=None, token="": commands.append(args) or ""
+    )
+    config = {"git_url": "https://github.com/example/repo.git", "branch": "main"}
+    assert call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md"], **config)["pushed"]
+    assert ["add", "-f", "--", "AGENTS.md", "CLAUDE.md"] in commands
+    (p / "other.md").symlink_to("CLAUDE.md")
+    with pytest.raises(OperationError):
+        call(agent, "git-backup", files=["other.md"], **config)
+
+
 def test_bundle_includes_workspace_module():
     from runtime_daemon.build import ROOT, source_files
 
@@ -253,7 +329,9 @@ def test_init_and_prepare_remove_only_legacy_instruction_excludes(agent):
     exclude = root / ".git/info/exclude"
     exclude.write_text("# keep\n/AGENTS.md\nAGENTS.md\nsecret.txt\n")
     call(agent, "init")
-    assert exclude.read_text() == "# keep\nsecret.txt\n"
+    assert exclude.read_text() == "# keep\nsecret.txt\n/.coreman-workspace.json\n"
+    call(agent, "init")
+    assert exclude.read_text().count("/.coreman-workspace.json") == 1
     exclude.write_text("/AGENTS.md\ncache/\n")
     agent.prepare_workspace(root)
     assert exclude.read_text() == "cache/\n/.claude/output-styles/\n"
