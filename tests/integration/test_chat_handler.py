@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, streams, tasks
 from coreman.core.bus.tasks import NewTask
+from coreman.core.chat import chat_logs
 from coreman.core.chat.redaction import PLACEHOLDER
 from coreman.core.db.models import (
     Bot,
@@ -498,6 +499,10 @@ async def test_reaped_task_is_not_finished_twice(
             db_session, tid, status="failed", error_code="worker_lost", error_message="收尸"
         )
         await streams.complete(db_session, tid, final_text=msg("worker_lost"))
+        # 开流时写下的进行中记录，收尸在同一事务里结掉（同 reaper.reap_lost_tasks）。
+        assert await chat_logs.close_running(
+            db_session, tid, status="timeout", error_code="worker_lost", error_message="收尸"
+        )
         await db_session.commit()
         await ctx.heartbeat()  # reaper 收尸后的第一次心跳：应当就地取消
         await asyncio.wait_for(runner, 10)
@@ -510,9 +515,9 @@ async def test_reaped_task_is_not_finished_twice(
     assert row and row.status == "failed" and row.error_code == "worker_lost"
     s = await stream_of(db_session, tid)
     assert s.final_text == msg("worker_lost")
-    assert (
-        await db_session.execute(select(ChatLog).where(ChatLog.task_id == tid))
-    ).scalars().all() == []
+    logs = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == tid))).scalars()
+    # 只有收尸结掉的那一行：worker 没有把它改回成功，也没有再补一行。
+    assert [(r.status, r.error_code) for r in logs] == [("timeout", "worker_lost")]
     assert (await db_session.execute(select(OutboxItem))).scalars().all() == []
 
 

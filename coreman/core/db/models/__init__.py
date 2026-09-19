@@ -63,7 +63,7 @@ from coreman.core.db.models.knowledge import (
     SkillApproval,
     SkillSource,
 )
-from coreman.core.db.models.logs import CHAT_LOG_STATUSES, CHAT_TYPES, ChatLog
+from coreman.core.db.models.logs import CHAT_LOG_RUNNING, CHAT_LOG_STATUSES, CHAT_TYPES, ChatLog
 from coreman.core.db.models.platform import CAPABILITIES, ContactSyncRun, PlatformApp
 from coreman.core.db.models.relay import (
     HEALTH_STATUSES,
@@ -127,6 +127,7 @@ __all__ = [
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",
     "CAPABILITIES",
+    "CHAT_LOG_RUNNING",
     "CHAT_LOG_STATUSES",
     "CHAT_TYPES",
     "CONNECTION_STATES",

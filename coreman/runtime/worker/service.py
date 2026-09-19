@@ -21,6 +21,7 @@ from typing import Protocol
 from coreman import __version__
 from coreman.core.bus import instances, streams, tasks
 from coreman.core.bus.notify import RUNTIME_CALL_CHANNEL, Listener, asyncpg_dsn
+from coreman.core.chat import chat_logs
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.chat.openuserid import OpenUseridResolver
 from coreman.core.config import get_settings
@@ -278,7 +279,10 @@ class WorkerService(Service):
             await self._fail(ctx, type(exc).__name__, f"{type(exc).__name__}: {exc}")
 
     async def _fail(self, ctx: TaskContext, code: str, message: str) -> None:
-        """把失败落回 tasks；流已经开了就补一个终态，别让用户那边一直转圈。"""
+        """把失败落回 tasks；流已经开了就补一个终态，别让用户那边一直转圈。
+
+        开流之后崩的，对话记录停在进行中：同一事务里按出错结掉，保留开流时写下的内容。
+        """
         try:
             async with self._factory() as session:
                 row = await tasks.get(session, ctx.task.id)
@@ -287,6 +291,13 @@ class WorkerService(Service):
                         session,
                         ctx.task.id,
                         status="failed",
+                        error_code=code,
+                        error_message=message,
+                    )
+                    await chat_logs.close_running(
+                        session,
+                        ctx.task.id,
+                        status="error",
                         error_code=code,
                         error_message=message,
                     )

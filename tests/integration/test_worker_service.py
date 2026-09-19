@@ -256,6 +256,61 @@ async def test_unknown_kind_and_handler_crash_are_recorded(
         assert datetime.now(UTC) > ra.finished_at
 
 
+async def test_handler_crash_after_open_closes_the_running_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings
+) -> None:  # type: ignore[no-untyped-def]
+    from coreman.core.chat import chat_logs
+    from coreman.core.chat.chat_logs import ChatLogEntry
+    from coreman.core.db.models import ChatLog
+
+    bot = await _bot(db_session)
+
+    class OpensThenCrashes:
+        kind = "chat"
+
+        async def run(self, ctx: TaskContext) -> None:
+            async with ctx.session_factory() as session:
+                await chat_logs.open_turn(
+                    session,
+                    ChatLogEntry(
+                        bot_id=bot.id,
+                        bot_key=bot.bot_key,
+                        platform="wecom",
+                        chat_type="group",
+                        message_type="text",
+                        status="running",
+                        request_at=datetime.now(UTC),
+                        task_id=ctx.task.id,
+                        message_content="开流之后崩了",
+                    ),
+                )
+                await session.commit()
+            raise RuntimeError("boom")
+
+    service = WorkerService(port=0, handlers={"chat": OpensThenCrashes()})
+    runner = await _run_service(service)
+    try:
+        task = await tasks.enqueue(
+            db_session, NewTask(bot_id=bot.id, kind="chat", payload={}, session_key="a")
+        )
+        await db_session.commit()
+        assert task
+        factory = make_session_factory(db_engine)
+        for _ in range(100):
+            async with factory() as s:
+                row = await tasks.get(s, task.id)
+                if row and row.status not in tasks.OPEN:
+                    break
+            await asyncio.sleep(0.05)
+    finally:
+        service.request_stop("test")
+        await asyncio.wait_for(runner, 10)
+    async with factory() as s:
+        log = await s.scalar(select(ChatLog).where(ChatLog.task_id == task.id))
+    assert log is not None and log.status == "error" and log.error_code == "RuntimeError"
+    assert log.message_content == "开流之后崩了" and log.latency_ms is not None
+
+
 async def test_heartbeat_loop_is_per_task_and_isolates_failures(
     db_engine: AsyncEngine, db_session: AsyncSession, runtime_settings, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]

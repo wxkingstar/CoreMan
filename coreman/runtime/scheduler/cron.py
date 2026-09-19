@@ -192,8 +192,9 @@ async def recover_runs(
     factory: async_sessionmaker[AsyncSession], now: datetime, cipher: Cipher
 ) -> int:
     """补齐 worker 崩溃或通用取消留下的运行记录；不重新调用模型。"""
+    from coreman.core.chat import chat_logs
+    from coreman.core.chat.chat_logs import ChatLogEntry
     from coreman.core.cron.delivery import enqueue_result
-    from coreman.core.db.models import ChatLog
 
     count = 0
     async with factory() as session:
@@ -244,23 +245,36 @@ async def recover_runs(
                         cipher=cipher,
                         fallback_user_id=job.created_by,
                     )
-                session.add(
-                    ChatLog(
-                        bot_id=bot.id,
-                        bot_key=bot.bot_key,
-                        platform=bot.platform,
-                        chat_type="cron",
-                        message_type="text",
-                        task_id=run.task_id,
-                        user_id=run.executed_by,
-                        request_at=run.started_at,
-                        response_at=now,
-                        message_content=run.prompt[:10000],
-                        status="error",
-                        error_code="worker_lost",
-                        error_message="执行进程中断，未自动重复调用模型",
-                    )
+                # 调用过模型的执行已有进行中的记录：原地结掉，保留开始时写下的会话与模型。
+                lost = "执行进程中断，未自动重复调用模型"
+                closed = run.task_id is not None and await chat_logs.close_running(
+                    session,
+                    run.task_id,
+                    status="error",
+                    error_code="worker_lost",
+                    error_message=lost,
                 )
+                if not closed:
+                    # 只补不改：close_running 写失败时那一行进行中的记录还在，不能拿这份
+                    # 残缺的记录覆盖它（会抹掉会话 id），留给巡检结掉。
+                    await chat_logs.insert_turn(
+                        session,
+                        ChatLogEntry(
+                            bot_id=bot.id,
+                            bot_key=bot.bot_key,
+                            platform=bot.platform,
+                            chat_type="cron",
+                            message_type="text",
+                            task_id=run.task_id,
+                            user_id=run.executed_by,
+                            request_at=run.started_at,
+                            response_at=now,
+                            message_content=run.prompt,
+                            status="error",
+                            error_code="worker_lost",
+                            error_message=lost,
+                        ),
+                    )
             count += 1
         await session.commit()
     return count

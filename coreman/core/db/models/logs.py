@@ -1,4 +1,8 @@
-"""对话日志。不挂 bots 外键：bot 删除后日志保留。"""
+"""对话日志。不挂 bots 外键：bot 删除后日志保留。
+
+对话一轮一行：开流时以 `running` 写入，收尾时原地改成终态。开流前就结束的轮次（relay 不可用、
+失联任务）只在结束时写一行终态。
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,16 @@ from sqlalchemy.types import Uuid
 
 from coreman.core.db.base import Base
 
-CHAT_LOG_STATUSES = ("success", "error", "timeout", "stopped", "ask_user", "failed")
+CHAT_LOG_RUNNING = "running"
+CHAT_LOG_STATUSES = (
+    CHAT_LOG_RUNNING,
+    "success",
+    "error",
+    "timeout",
+    "stopped",
+    "ask_user",
+    "failed",
+)
 CHAT_TYPES = ("single", "group", "cron")
 
 
@@ -33,13 +46,24 @@ class ChatLog(Base):
     __table_args__ = (
         CheckConstraint("chat_type IN ('single','group','cron')", name="chat_type"),
         CheckConstraint(
-            "status IN ('success','error','timeout','stopped','ask_user','failed')", name="status"
+            "status IN ('running','success','error','timeout','stopped','ask_user','failed')",
+            name="status",
         ),
         Index("chat_logs_time_idx", "request_at"),
         Index("chat_logs_bot_time_idx", "bot_id", text("request_at DESC")),
         Index("chat_logs_user_time_idx", "user_id", text("request_at DESC")),
         Index("chat_logs_session_idx", "bot_id", "session_key", "relay_session_id", "request_at"),
         Index("chat_logs_status_idx", "status", text("request_at DESC")),
+        # 结束时按任务找行：改进行中的那一行，或确认这一轮还没写过再补一行。
+        Index("chat_logs_task_idx", "task_id"),
+        # 一个任务最多一行进行中。旧版本在收尸与收尾交错时可能给同一任务留下两行终态，
+        # 所以唯一只约束进行中的行，历史数据不影响升级。
+        Index(
+            "chat_logs_running_task_uk",
+            "task_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid)

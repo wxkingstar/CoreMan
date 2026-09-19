@@ -14,7 +14,7 @@ import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 
 // 与 coreman/core/db/models/logs.py 的 CHAT_LOG_STATUSES / CHAT_TYPES 一一对应。
-const STATUSES = ['success', 'error', 'timeout', 'stopped', 'ask_user', 'failed'] as const
+const STATUSES = ['running', 'success', 'error', 'timeout', 'stopped', 'ask_user', 'failed'] as const
 const CHAT_TYPES = ['single', 'group', 'cron'] as const
 
 type ChatFilters = {

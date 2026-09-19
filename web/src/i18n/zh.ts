@@ -779,7 +779,7 @@ export default {
     byBot: '按AI 员工',
     quoted: '引用内容',
     file: '文件',
-    statuses: { success: '成功', error: '出错', timeout: '超时', stopped: '已中止', ask_user: '等待补充', failed: '失败' },
+    statuses: { running: '进行中', success: '成功', error: '出错', timeout: '超时', stopped: '已中止', ask_user: '等待补充', failed: '失败' },
     chatTypes: { single: '单聊', group: '群聊', cron: '定时任务' },
   },
   announcements: {

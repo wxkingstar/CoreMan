@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from coreman.core.bots.permissions import can_switch_relay
 from coreman.core.bus import outbox, streams, tasks
-from coreman.core.chat import interactions
+from coreman.core.chat import chat_logs, interactions
 from coreman.core.chat.rate_limit import (
     is_rate_limited,
     pick_idle_server,
@@ -199,13 +199,7 @@ class FinalizeStage(ChatStageBase):
                 from coreman.runtime.worker.chat.collaboration import final_transition
 
                 verdict, collaboration_silent = await final_transition(session, ctx, pre, verdict)
-            await session.commit()
-        if not owned:
-            ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)
-            return
-        if collaboration_silent:
-            await pre.writer.complete(verdict.final_text)
-            ctx.chat_logs.submit(
+            entry = (
                 log_entry(
                     ctx,
                     intake,
@@ -214,8 +208,32 @@ class FinalizeStage(ChatStageBase):
                     response_content=verdict.final_text,
                     tools_used=out.tools,
                 )
+                if collaboration_silent
+                else log_entry(
+                    ctx,
+                    intake,
+                    status=verdict.log_status,
+                    relay_session_id=pre.info.relay_session_id,
+                    response_content=verdict.final_text,
+                    tools_used=out.tools,
+                    error_code=verdict.error_code,
+                    error_message=verdict.error_message,
+                    usage=out.usage,
+                    content=pre.content,
+                )
             )
+            # 记录与任务同一事务结束：不会出现任务结束了、记录还停在进行中。
+            logged = owned and await chat_logs.finish_turn(session, entry)
+            await session.commit()
+        if not owned:
+            ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)
             return
+        if collaboration_silent:
+            await pre.writer.complete(verdict.final_text)
+            if not logged:
+                ctx.chat_logs.submit_finish(entry)
+            return
+        logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
         # 再开一轮提问就是让用户对着一张没人接的卡片作答。
@@ -247,20 +265,14 @@ class FinalizeStage(ChatStageBase):
             done = await pre.writer.complete(verdict.final_text, pending_card=card)
             await self._push_if_proactive(ctx, pre, verdict, done, card)
             await self._notify_long_task(ctx, pre, verdict, done, elapsed)
-        ctx.chat_logs.submit(
-            log_entry(
-                ctx,
-                intake,
-                status=verdict.log_status,
-                relay_session_id=pre.info.relay_session_id,
-                response_content=verdict.final_text,
-                tools_used=out.tools,
-                error_code=verdict.error_code,
-                error_message=verdict.error_message,
-                usage=out.usage,
-                content=pre.content,
+        # 额度表 / 预警是抢到终态之后才接上的，记录里的回复要补成用户实际收到的这一份。
+        if not logged:
+            # 同事务里没写成（已记告警）：交给写入端事后补写；中途出错没走到这里的，由巡检结掉。
+            ctx.chat_logs.submit_finish(
+                replace(entry, response_content=ctx.redact(verdict.final_text))
             )
-        )
+        elif verdict.final_text != logged_text:
+            ctx.chat_logs.submit_amend(ctx.task.id, ctx.redact(verdict.final_text))
         ctx.log.info(
             "task_finished",
             status=verdict.log_status,

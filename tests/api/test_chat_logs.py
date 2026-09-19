@@ -169,3 +169,25 @@ async def test_feishu_private_content_is_owner_only(client, db_session, monkeypa
     assert (
         await client.get("/api/admin/chat-logs", params={"keyword": "private-unique-secret"})
     ).json()["data"]["total"] == 0
+
+
+async def test_running_turns_are_listed_and_counted_apart(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    mine, _, _ = await _seed(db_session)
+    await login_as(client, db_session, role="platform_admin")
+    row = (
+        await db_session.scalars(
+            select(ChatLog).where(ChatLog.bot_id == mine.id).order_by(ChatLog.id)
+        )
+    ).first()
+    assert row is not None
+    row.status, row.latency_ms, row.response_content = "running", None, None
+    await db_session.commit()
+    listed = (await client.get("/api/admin/chat-logs", params={"status": "running"})).json()
+    assert [item["id"] for item in listed["data"]["items"]] == [row.id]
+    stats = (await client.get("/api/admin/chat-logs/stats")).json()["data"]
+    assert stats["by_status"]["running"] == 1
+    # 进行中不算成功也不算出错。
+    bot = next(b for b in stats["by_bot"] if b["bot_id"] == str(mine.id))
+    assert bot["total"] == 2 and bot["success"] + bot["error"] == 1
