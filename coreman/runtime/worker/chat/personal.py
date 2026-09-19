@@ -46,6 +46,8 @@ DATA_RULES = "\n".join(
         "- 以工具返回的 status、missing_scopes 为准，权限缺失时如实说明，不要声称拥有完整授权；"
         "app_permission_missing 表示应用未开通该权限，需要管理员在后台补齐权限；"
         "user_permission_missing 表示本人授权时没有包含，需要重新发送“连接飞书”。",
+        "- 发邮件失败后用同一个 uuid 重试；返回 mail_send_unconfirmed 表示邮件可能已经发出，"
+        "请用户到“已发送”确认，不要换 uuid 重发。",
         "- access_token_expired 只表示访问令牌到期，不等于授权被撤销；"
         "refresh_available 表示可以尝试续期，不保证成功。",
     )

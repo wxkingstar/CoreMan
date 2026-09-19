@@ -426,14 +426,12 @@ ENDPOINTS: dict[str, Endpoint] = {
 }
 
 # Needed by an API above in addition to its gating permission: reading a mail returns the
-# subject, addresses and body only with their field permissions, and the event list needs
-# the primary calendar lookup.
+# subject, addresses and body only with their field permissions.
 EXTRA_SCOPES = frozenset(
     {
         "mail:user_mailbox.message.subject:read",
         "mail:user_mailbox.message.address:read",
         "mail:user_mailbox.message.body:read",
-        "calendar:calendar:read",
     }
 )
 

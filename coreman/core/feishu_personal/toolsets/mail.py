@@ -229,7 +229,8 @@ async def create_draft(args: Compose, call: Call) -> dict[str, Any]:
     "feishu_mail_send",
     SendMail,
     "mail.send_draft",
-    "Send a mail from the user's mailbox. Retry with the same uuid: it never sends twice.",
+    "Send a mail from the user's mailbox. Retry with the same uuid: it never sends twice."
+    " On mail_send_unconfirmed the mail may already be out: ask the user to check Sent.",
 )
 async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
     content = args.model_dump(exclude={"uuid"})
@@ -237,11 +238,22 @@ async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
     record = await sends.claim(call.session, call.scope, args.uuid, fingerprint)
     if record.status == "sent":
         return {**(record.result or {}), "draft_id": record.draft_id, "sent": True, "repeat": True}
-    if record.draft_id is None:
-        record.draft_id = await _draft(args, call)
+    retry = record.draft_id is not None
+    draft_id = record.draft_id or await _draft(args, call)
+    if not retry:
         # Kept even if sending fails below, so a retry sends this draft instead of a new one.
+        record.draft_id = draft_id
         await call.session.flush()
-    sent = await call("mail.send_draft", path={**ME, "draft_id": record.draft_id}, json={})
+    try:
+        sent = await call("mail.send_draft", path={**ME, "draft_id": draft_id}, json={})
+    except service.PersonalError as exc:
+        # An earlier attempt may have sent this draft and only lost the reply; Feishu then
+        # refuses the draft. Say so, or the model composes the mail again under a new uuid.
+        if retry and exc.code in ("feishu_request_failed", "upstream_unavailable"):
+            raise service.PersonalError(
+                "mail_send_unconfirmed", upstream_code=exc.upstream_code
+            ) from exc
+        raise
     record.status, record.result = "sent", sent
     return {**sent, "draft_id": record.draft_id, "sent": True}
 

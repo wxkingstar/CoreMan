@@ -18,6 +18,7 @@ import json
 from typing import Any
 
 from coreman.core.feishu_personal import endpoints as personal_endpoints
+from coreman.core.feishu_personal import permissions
 from coreman.core.feishu_personal import service as personal_service
 
 # 应用身份：员工身份识别（user_id 是卡片归属与身份校验的依据）、通讯录姓名，
@@ -98,7 +99,22 @@ def encode_addons(value: dict[str, Any]) -> str:
 def missing_scopes(granted: list[str], *, kind: str) -> list[str]:
     """清单里有、应用当前没开通的权限；用于提示「补齐权限」。"""
     wanted = TENANT_SCOPES if kind == "tenant" else USER_SCOPES
-    missing = set(wanted) - set(granted) - PROTOCOL_SCOPES
-    if kind == "user" and "vc:meeting.meetingevent:read" in granted:
-        missing.discard("vc:meeting:readonly")  # 二者任一即可获取会议详情
+    have = set(granted)
+    missing = set(wanted) - have - PROTOCOL_SCOPES
+    if kind == "user":
+        missing = {scope for scope in missing if not _covered(scope, have)}
     return sorted(missing)
+
+
+# 第三档按固定名称申请，发送还要求 also 里的权限，这些必须原样开通，不能用别的权限代替。
+_EXACT = permissions.MESSAGE_SCOPES | frozenset().union(
+    *(endpoint.also for endpoint in personal_endpoints.ENDPOINTS.values())
+)
+
+
+def _covered(scope: str, have: set[str]) -> bool:
+    """用到这个权限的接口都已能用应用持有的其他权限调用，比如旧版的 calendar:calendar。"""
+    if scope in _EXACT:
+        return False
+    users = [e for e in personal_endpoints.ENDPOINTS.values() if scope in e.scopes]
+    return bool(users) and all(have.intersection(e.scopes) for e in users)

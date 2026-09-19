@@ -317,6 +317,27 @@ async def test_mail_retry_with_the_same_uuid_never_sends_twice(upstream):
         await invoke("feishu_mail_send", {**args, "subject": "Another"})
 
 
+async def test_mail_resend_that_fails_is_unconfirmed_not_retried(upstream):
+    args = {**SAMPLES["feishu_mail_send"], "uuid": "lost-reply"}
+
+    async def reply_lost(session, cipher, scope, method, path, **kwargs):
+        if path.endswith("/send"):
+            if not getattr(reply_lost, "tried", False):
+                reply_lost.tried = True
+                raise service.PersonalError("upstream_unavailable")
+            # Feishu sent it the first time, so the draft is gone.
+            raise service.PersonalError("feishu_request_failed", upstream_code=1230001)
+        return _upstream(method, path)
+
+    upstream.side_effect = reply_lost
+    with pytest.raises(service.PersonalError, match="upstream_unavailable"):
+        await invoke("feishu_mail_send", args)
+    with pytest.raises(service.PersonalError) as caught:
+        await invoke("feishu_mail_send", args)
+    assert caught.value.payload() == {"error": "mail_send_unconfirmed", "upstream_code": 1230001}
+    assert [p for _, p, _ in calls(upstream)].count("/mail/v1/user_mailboxes/me/drafts") == 1
+
+
 async def test_mail_read_decodes_the_body_and_list_fetches_summaries(upstream):
     out = await invoke("feishu_mail_read", {"message_id": "TWFpbA==", "text_limit": 3})
     assert out["message"]["body_plain_text"] == "hel" and "body_html" not in out["message"]
