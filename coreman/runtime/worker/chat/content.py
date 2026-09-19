@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from coreman.core.bus import tasks
+from coreman.core.chat import chat_logs
 from coreman.core.chat.content import BuiltContent, ContentBuilder
 from coreman.core.i18n.messages import msg
 from coreman.core.prompting import (
@@ -132,17 +133,7 @@ class ContentStage(ChatStageBase):
                 error_message=verdict.error_message,
                 only_active=True,
             )
-            await session.commit()
-        if not owned:
-            # reaper 已经替这一轮收过尾、也告诉过用户了，再改终稿、再补日志只会自相矛盾。
-            ctx.log.warning("task_already_finalized", status=verdict.task_status)
-            return None
-        pre.writer.thinking.add_end(msg("thinking_end", ctx.locale))
-        done = await pre.writer.complete(verdict.final_text)
-        # 下载几十兆要十几秒，这期间网关多半已经排空过这条流：那时没人再跟流，终稿得自己推。
-        await self._push_if_proactive(ctx, pre, verdict, done, plain=True)
-        ctx.chat_logs.submit(
-            log_entry(
+            entry = log_entry(
                 ctx,
                 pre.intake,
                 status=verdict.log_status,
@@ -152,5 +143,16 @@ class ContentStage(ChatStageBase):
                 error_message=verdict.error_message,
                 content=built,
             )
-        )
+            logged = owned and await chat_logs.finish_turn(session, entry)
+            await session.commit()
+        if not owned:
+            # reaper 已经替这一轮收过尾、也告诉过用户了，再改终稿、再补日志只会自相矛盾。
+            ctx.log.warning("task_already_finalized", status=verdict.task_status)
+            return None
+        if not logged:
+            ctx.chat_logs.submit_finish(entry)
+        pre.writer.thinking.add_end(msg("thinking_end", ctx.locale))
+        done = await pre.writer.complete(verdict.final_text)
+        # 下载几十兆要十几秒，这期间网关多半已经排空过这条流：那时没人再跟流，终稿得自己推。
+        await self._push_if_proactive(ctx, pre, verdict, done, plain=True)
         return None

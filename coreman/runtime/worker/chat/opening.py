@@ -13,15 +13,16 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core import session_links
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
-from coreman.core.chat import sessions
+from coreman.core.chat import chat_logs, sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.redaction import collect_secrets
 from coreman.core.db.models import (
+    CHAT_LOG_RUNNING,
     Bot,
     RelayServer,
+    Task,
 )
 from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import effective_env
@@ -38,6 +39,7 @@ from coreman.core.relay.models import backend_of
 from coreman.runtime.worker.background import TimeoutSupervisor
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Intake, Prepared
+from coreman.runtime.worker.chat.records import log_entry
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import open_stream
 from coreman.runtime.worker.stream_writer import StreamWriter
@@ -60,24 +62,18 @@ async def session_link(
 ) -> str:
     """本轮回复里的会话查看链接。
 
-    群聊沿用管理员查看。私聊归本人，登录即可看；链接另签本人凭据（24 小时有效），第一轮还没
-    写对话记录时靠它证明归属。飞书私聊只有本人能看：发言人没绑定员工身份时谁也打不开，就不给。
+    查看页按对话记录判断归属：开流时这一轮已经写进 chat_logs（见 `_open`），第一轮也不例外，
+    链接不需要另带凭据。群聊沿用管理员查看，私聊归本人。飞书私聊只有本人能看：发言人没绑定
+    员工身份时谁也打不开，就不给。
     """
     url = session_viewer_url(ctx, relay, relay_session_id)
-    if intake.chat_type != "single":
-        return url
-    user_id = intake.speaker.user_id
-    if user_id is None or relay.runtime_node_id is None:
-        return "" if intake.bot.platform == "feishu" else url
-    token = session_links.issue(
-        ctx.cipher,
-        session_id=relay_session_id,
-        user_id=user_id,
-        node_id=relay.runtime_node_id,
-        provider=relay.model_provider,
-        bot_id=intake.bot.id,
-    )
-    return f"{url}?t={token}"
+    if (
+        intake.chat_type == "single"
+        and intake.bot.platform == "feishu"
+        and (intake.speaker.user_id is None or relay.runtime_node_id is None)
+    ):
+        return ""
+    return url
 
 
 class OpenStage(ChatStageBase):
@@ -129,7 +125,15 @@ class OpenStage(ChatStageBase):
         )
         if bot is None or not bot.enabled or current_relay is None or not current_relay.is_active:
             raise ValueError("bot_or_relay_changed_before_dispatch")
-        current_task = await tasks.get(session, ctx.task.id)
+        # FOR KEY SHARE 持有到开流提交：收尸（FOR UPDATE SKIP LOCKED）会跳过这个任务，不会在检查
+        # 之后、写进行中记录之前插进来结掉它（否则收尸补一行、这里再写一行）；心跳只改非键列，
+        # 不受影响。收尸先拿到锁的，这里等它提交后读到的就是终态。
+        current_task = await session.get(
+            Task,
+            ctx.task.id,
+            with_for_update={"read": True, "key_share": True},
+            populate_existing=True,
+        )
         if (
             current_task is None
             or current_task.cancel_requested_at
@@ -225,6 +229,12 @@ class OpenStage(ChatStageBase):
         }
         stream_kwargs.update(self._stream_kwargs(ctx, intake))
         await open_stream(session, ctx, **stream_kwargs)
+        # 这一轮的记录与会话、流同一事务提交：链接一出现在聊天里，查看页就能按它判断归属。
+        # 放在开流之后：记录要带上流 id。
+        await chat_logs.open_turn(
+            session,
+            log_entry(ctx, intake, status=CHAT_LOG_RUNNING, relay_session_id=info.relay_session_id),
+        )
         if (
             info.is_new
             and bot.platform != "feishu"

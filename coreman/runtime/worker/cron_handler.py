@@ -13,13 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
+from coreman.core.chat import chat_logs
+from coreman.core.chat.chat_logs import ChatLogEntry
 from coreman.core.chat.redaction import collect_secrets
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
 from coreman.core.db.models import (
+    CHAT_LOG_RUNNING,
     Bot,
-    ChatLog,
     CronJob,
     CronRun,
     FeishuPersonalGrant,
@@ -215,6 +217,20 @@ class CronRunHandler:
                         ),
                         scheduled=True,
                         extra=personal_prompt,
+                    ),
+                )
+                # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。
+                await chat_logs.open_turn(
+                    session,
+                    self._log_entry(
+                        ctx.task,
+                        bot,
+                        actor,
+                        run,
+                        status=CHAT_LOG_RUNNING,
+                        relay_session_id=session_id,
+                        relay_server_id=relay.id,
+                        model=bot.model,
                     ),
                 )
                 await session.commit()
@@ -438,6 +454,7 @@ class CronRunHandler:
         *,
         detail: str | None = None,
     ) -> None:
+        unlogged: ChatLogEntry | None = None
         async with ctx.session_factory() as session:
             # 全部路径遵循 job → task → run 锁序，且终态、记录、出站在同一提交中。
             job = await session.scalar(
@@ -544,33 +561,63 @@ class CronRunHandler:
                     cache_read_tokens=run.cache_read_tokens,
                     cache_creation_tokens=run.cache_creation_tokens,
                 )
-                session.add(
-                    ChatLog(
-                        bot_id=bot.id,
-                        bot_key=bot.bot_key,
-                        platform=bot.platform,
-                        chat_type="cron",
-                        message_type="text",
-                        task_id=task.id,
-                        user_id=task.user_id,
-                        user_login=actor.login_name if actor else None,
-                        user_name=actor.display_name if actor else None,
-                        request_at=run.started_at,
-                        response_at=now,
-                        relay_session_id=relay_session_id,
-                        relay_server_id=execution_relay_id,
-                        model=execution_model,
-                        message_content=run.prompt[:10000],
-                        response_content=reply[:50000],
-                        tools_used=tools,
-                        status="success" if status in {"success", "skipped"} else "error",
-                        error_code=error,
-                        error_message=detail,
-                        input_tokens=run.input_tokens,
-                        output_tokens=run.output_tokens,
-                        cache_read_tokens=run.cache_read_tokens,
-                        cache_creation_tokens=run.cache_creation_tokens,
-                        cost_usd=run.cost_usd,
-                    )
+                # 调用过模型的执行已有进行中的记录，这里原地改成终态；预检跳过等没开始的补一行。
+                entry = self._log_entry(
+                    task,
+                    bot,
+                    actor,
+                    run,
+                    status="success" if status in {"success", "skipped"} else "error",
+                    relay_session_id=relay_session_id,
+                    relay_server_id=execution_relay_id,
+                    model=execution_model,
+                    response_at=now,
+                    response_content=reply,
+                    tools_used=tools,
+                    error_code=error,
+                    error_message=detail,
+                    input_tokens=run.input_tokens,
+                    output_tokens=run.output_tokens,
+                    cache_read_tokens=run.cache_read_tokens,
+                    cache_creation_tokens=run.cache_creation_tokens,
+                    cost_usd=None if run.cost_usd is None else float(run.cost_usd),
                 )
+                if not await chat_logs.finish_turn(session, entry):
+                    unlogged = entry
             await session.commit()
+        if unlogged is not None:
+            # 同事务里没写成（已记告警）：交给写入端事后补写，别让记录停在进行中。
+            ctx.chat_logs.submit_finish(unlogged)
+
+    @staticmethod
+    def _log_entry(
+        task: Task,
+        bot: Bot,
+        actor: User | None,
+        run: CronRun,
+        *,
+        status: str,
+        relay_session_id: uuid.UUID,
+        relay_server_id: uuid.UUID | None,
+        model: str | None,
+        **terminal: Any,
+    ) -> ChatLogEntry:
+        """定时执行的对话记录：开始时写进行中的一行，结束时按同一口径写终态。"""
+        return ChatLogEntry(
+            bot_id=bot.id,
+            bot_key=bot.bot_key,
+            platform=bot.platform,
+            chat_type="cron",
+            message_type="text",
+            status=status,
+            request_at=run.started_at,
+            task_id=task.id,
+            user_id=task.user_id,
+            user_login=actor.login_name if actor else None,
+            user_name=actor.display_name if actor else None,
+            relay_session_id=relay_session_id,
+            relay_server_id=relay_server_id,
+            model=model,
+            message_content=run.prompt,
+            **terminal,
+        )

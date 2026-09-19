@@ -25,12 +25,14 @@ from sqlalchemy.sql import Executable
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
 from coreman.core.bus.tasks import ACTIVE
-from coreman.core.chat import interactions
+from coreman.core.chat import chat_logs, interactions
 from coreman.core.chat.chat_logs import ChatLogEntry, ChatLogWriter
 from coreman.core.db.models import (
+    CHAT_LOG_RUNNING,
     CHAT_TYPES,
     Bot,
     BotLease,
+    ChatLog,
     ChatSession,
     InboundEvent,
     InteractionState,
@@ -41,6 +43,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import recover_installations
+from coreman.core.logging import get_logger
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
 
@@ -63,6 +66,11 @@ RETENTION_MAX_BATCHES = 20
 TERMINAL_TASK_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
 LOST_ERROR_CODE = "worker_lost"
 LOST_ERROR_MESSAGE = "worker 心跳超时"
+# 任务结束这么久了对话记录还在进行中，才由巡检按任务终态结掉（见 close_abandoned_turns）。
+ABANDONED_TURN_GRACE_SECONDS = 120
+TASK_TO_LOG_STATUS = {"succeeded": "success", "cancelled": "stopped", "timed_out": "timeout"}
+
+log = get_logger(__name__)
 
 Job = Callable[[AsyncSession, datetime], Awaitable[int]]
 
@@ -114,11 +122,10 @@ async def reap_lost_tasks(
         bot = await session.get(Bot, task.bot_id)
         stream = await streams.get(session, task.id)
         # 日志先攒好：finish 之后 task 的属性会被过期掉，再读要多打一次 SELECT。
-        entry = (
-            None
-            if writer is None or task.kind in {"cron_run", "escalation_media", "skill_install"}
-            else _lost_entry(task, stream, bot, now)
-        )
+        # 定时执行的记录由 cron 看护按执行记录收尾，这里不碰。
+        turn = task.kind not in {"cron_run", "escalation_media", "skill_install"}
+        entry = _lost_entry(task, stream, bot, now) if turn else None
+        task_id = task.id
         await tasks.finish(
             session,
             task.id,
@@ -138,7 +145,17 @@ async def reap_lost_tasks(
                     )
                 )
         await _tell_user(session, task, stream, bot)
-        if writer is not None and entry is not None:
+        if entry is None:
+            continue
+        # 开过流的轮次已有进行中的记录：同一事务里按失联结掉，保留开流时写下的内容。
+        closed = await chat_logs.close_running(
+            session,
+            task_id,
+            status="timeout",
+            error_code=LOST_ERROR_CODE,
+            error_message=LOST_ERROR_MESSAGE,
+        )
+        if not closed and writer is not None:
             await writer.write(entry)
     return len(lost)
 
@@ -177,6 +194,54 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
                     target={"chat_id": str(chat_id)},
                     payload={"markdown": final},
                 )
+    return len(rows)
+
+
+async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
+    """兜底：任务已经结束（或已被删掉）的轮次，对话记录还停在进行中，按任务终态结掉。
+
+    正常收尾与收尸都在抢终态的同一事务里结掉记录，走到这里的只有漏网的：删机器人级联删掉了
+    在途任务、升级窗口里旧版本的看护收了尸等。等 `ABANDONED_TURN_GRACE_SECONDS` 再动手，
+    cron 看护这类按自己口径收尾的路径先走完。
+    """
+    cutoff = now - timedelta(seconds=ABANDONED_TURN_GRACE_SECONDS)
+    rows = (
+        await session.execute(
+            select(ChatLog.id, Task.status, Task.error_code, Task.error_message)
+            .outerjoin(Task, Task.id == ChatLog.task_id)
+            .where(
+                ChatLog.status == CHAT_LOG_RUNNING,
+                or_(
+                    and_(Task.id.is_(None), ChatLog.request_at < cutoff),
+                    and_(Task.status.in_(TERMINAL_TASK_STATUSES), Task.finished_at < cutoff),
+                ),
+            )
+            .order_by(ChatLog.id)
+            .limit(500)
+            .with_for_update(of=ChatLog, skip_locked=True)
+        )
+    ).all()
+    for log_id, task_status, error_code, error_message in rows:
+        code: str | None
+        message: str | None
+        if task_status is None:
+            status, code, message = "error", "task_missing", "任务记录已不存在（如机器人已删除）"
+        else:
+            status = TASK_TO_LOG_STATUS.get(task_status, "error")
+            code, message = error_code, error_message[:5000] if error_message else None
+        await session.execute(
+            update(ChatLog)
+            .where(ChatLog.id == log_id)
+            .values(
+                status=status,
+                error_code=code,
+                error_message=message,
+                latency_ms=chat_logs.elapsed_ms(),
+            )
+        )
+    if rows:
+        # 正常路径不该走到这里：数量持续不为零说明有收尾路径漏写了记录。
+        log.warning("abandoned_turns_closed", count=len(rows))
     return len(rows)
 
 
@@ -427,6 +492,7 @@ async def run_cleanup(
         # 待答状态到点置 expired。读路径（get_open）本来就按 expires_at 过滤，不靠这一步才正确；
         # 但卡片回调是按 task_id 前缀反查的，那条路没有时间条件，得靠 status 认出「这轮已经过期」。
         "interactions_expired": await _run(factory, interactions.expire_due, now),
+        "abandoned_turns": await _run(factory, close_abandoned_turns, now),
     }
 
 

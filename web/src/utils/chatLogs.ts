@@ -1,8 +1,11 @@
 import type { ChatLogOut } from '@/api/types'
 import { formatBytes } from '@/utils/format'
 
-// 状态 tag 配色：成功绿、出错与失败红、超时与中止橙、等待补充蓝。
-const STATUS_TYPE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
+// 状态 tag 配色：进行中主色、成功绿、出错与失败红、超时与中止橙、等待补充灰蓝。
+type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
+const STATUS_TYPE: Record<string, TagType> = {
+  running: 'primary',
   success: 'success',
   error: 'danger',
   failed: 'danger',
@@ -16,7 +19,7 @@ export function userOf(row: ChatLogOut): string {
   return row.user_name || row.user_login || row.user_id || '—'
 }
 
-export function statusType(status: string): 'success' | 'info' | 'warning' | 'danger' {
+export function statusType(status: string): TagType {
   return STATUS_TYPE[status] ?? 'info'
 }
 

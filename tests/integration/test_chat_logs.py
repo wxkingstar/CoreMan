@@ -67,7 +67,7 @@ async def test_write_truncates_dedupes_tools_and_marks_reached(
     await db_session.commit()
     writer = ChatLogWriter(make_session_factory(db_engine))
     assert await writer.write(entry(bot, u.id)) is True
-    assert await writer.write(entry(bot, u.id)) is True
+    assert await writer.write(entry(bot, u.id, task_id=2)) is True
     log = (await db_session.execute(select(ChatLog).order_by(ChatLog.id))).scalars().first()
     assert (
         log
@@ -77,7 +77,7 @@ async def test_write_truncates_dedupes_tools_and_marks_reached(
     assert log.tools_used == ["Bash"] and log.input_tokens == 0 and log.output_tokens is None
     reached = (await db_session.execute(select(UserReached))).scalars().all()
     assert len(reached) == 1 and reached[0].platform_chat_id == "zs"
-    assert await writer.write(entry(bot, None, user_login=None, user_name=None)) is True
+    assert await writer.write(entry(bot, None, user_login=None, user_name=None, task_id=3))
     assert len((await db_session.execute(select(UserReached))).scalars().all()) == 1
 
 
@@ -99,8 +99,8 @@ async def test_submit_is_fire_and_forget_and_bounded(
     db_session.add(bot)
     await db_session.commit()
     writer = ChatLogWriter(make_session_factory(db_engine), max_pending=2)
-    for _ in range(4):
-        writer.submit(entry(bot, None))
+    for i in range(4):
+        writer.submit(entry(bot, None, task_id=i + 1))
     assert writer.dropped >= 1
     await writer.drain(timeout=5)
     n = len((await db_session.execute(select(ChatLog))).scalars().all())
@@ -140,8 +140,11 @@ async def test_group_and_cron_do_not_prove_private_chat_reachability(
 
     bot, _, _ = await seed_bot(db_session)
     writer = ChatLogWriter(make_session_factory(db_engine))
-    for kind in ("group", "cron"):
+    for task_id, kind in enumerate(("group", "cron"), start=1):
         assert await writer.write(
-            entry(bot, bot.created_by, chat_type=kind, chat_id="not-a-private-chat")
+            entry(
+                bot, bot.created_by, chat_type=kind, chat_id="not-a-private-chat", task_id=task_id
+            )
         )
+    assert len((await db_session.execute(select(ChatLog))).scalars().all()) == 2
     assert await db_session.scalar(select(UserReached)) is None

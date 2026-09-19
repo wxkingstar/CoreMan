@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from coreman.core.chat.chat_logs import ChatLogEntry
 from coreman.core.chat.content import BuiltContent
+from coreman.core.db.models import CHAT_LOG_RUNNING
 from coreman.core.relay.sse import UsageEvent
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
@@ -25,13 +26,14 @@ def log_entry(
     usage: UsageEvent | None = None,
     content: BuiltContent | None = None,
 ) -> ChatLogEntry:
-    """拼一条 chat_logs。耗时从认领时刻起算，`response_at` 只有成功才填。
+    """拼一条 chat_logs。耗时从认领时刻起算，`response_at` 只有成功才填；进行中两者都空。
 
     `content` 非空时消息四列以组装结果为准：入站 parts 只认得出「有张图」，组装完才知道
     真正发给模型的是哪句提示词、引用了什么、附件多大。
     """
     now = datetime.now(UTC)
     request_at = ctx.task.claimed_at or now
+    finished = status != CHAT_LOG_RUNNING
     speaker = intake.speaker
     return ChatLogEntry(
         bot_id=intake.bot.id,
@@ -62,7 +64,7 @@ def log_entry(
         tools_used=list(tools_used or []),
         error_code=error_code,
         error_message=error_message,
-        latency_ms=int((now - request_at).total_seconds() * 1000),
+        latency_ms=int((now - request_at).total_seconds() * 1000) if finished else None,
         input_tokens=usage.input_tokens if usage else None,
         output_tokens=usage.output_tokens if usage else None,
         cache_read_tokens=usage.cache_read_tokens if usage else None,

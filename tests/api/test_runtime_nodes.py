@@ -785,6 +785,38 @@ async def test_first_turn_needs_a_valid_link(app, client, db_session):
     assert (await client.get(f"{url}?t={good}")).status_code == 200
 
 
+async def test_turn_in_progress_is_judged_by_its_running_row(app, client, db_session):
+    """第一轮还在跑：开流时写下的进行中记录就够判断归属，链接不用带凭据。"""
+    from coreman.core.db.models import ChatLog
+    from tests.api.conftest import login_existing
+
+    node_id, mine, owner, row, private_url = await _private_session(client, db_session)
+    row.status, row.response_content, row.latency_ms = "running", None, None
+    group = ChatLog(
+        bot_id=row.bot_id,
+        bot_key=row.bot_key,
+        platform="feishu",
+        chat_type="group",
+        chat_id="oc_group",
+        user_id=owner.id,
+        relay_session_id=uuid.uuid4(),
+        message_type="text",
+        status="running",
+        request_at=row.request_at,
+    )
+    db_session.add(group)
+    await db_session.commit()
+    group_url = f"/api/admin/runtime-nodes/{node_id}/claude/session/{group.relay_session_id}"
+    admin = await login_as(client, db_session, role="platform_admin")
+    assert (await client.get(group_url)).status_code == 200
+    # 飞书私聊即使还在跑，管理员也看不了；本人不带凭据就能看。
+    assert (await client.get(private_url)).status_code == 404
+    await login_existing(client, db_session, owner)
+    assert (await client.get(private_url)).status_code == 200
+    assert (await client.get(group_url)).status_code == 403
+    assert admin.role == "platform_admin"
+
+
 async def test_old_runtime_keeps_private_sessions_for_admins_only(app, client, db_session):
     from tests.api.conftest import login_existing
 

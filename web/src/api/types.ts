@@ -158,7 +158,7 @@ export type SettingsDefaults = Pick<SettingsOut, 'default_model' | 'default_verb
 // ---- 对话记录、运行状态、并发与提示词设置 ----
 
 /** 对话记录状态（`coreman/core/db/models/logs.py::CHAT_LOG_STATUSES`）。 */
-export type ChatLogStatus = 'success' | 'error' | 'timeout' | 'stopped' | 'ask_user' | 'failed'
+export type ChatLogStatus = 'running' | 'success' | 'error' | 'timeout' | 'stopped' | 'ask_user' | 'failed'
 /** 会话类型（同上 `CHAT_TYPES`）。 */
 export type ChatType = 'single' | 'group' | 'cron'
 

@@ -441,14 +441,8 @@ async def test_session_link_rules_by_chat_type_and_identity(db_session, app, db_
     ctx = build_ctx(db_engine, task)
     sid = uuid.uuid4()
     plain = f"/claude/session/{sid}"
-    link = await session_link(db_session, ctx, intake, intake.relay, sid)
-    assert "?t=" in link
-    from urllib.parse import parse_qs, urlsplit
-
-    from coreman.core import session_links
-
-    claims = session_links.read(ctx.cipher, parse_qs(urlsplit(link).query)["t"][0])
-    assert claims is not None and claims.user_id == user.id and claims.session_id == sid
+    # 归属看开流时写下的对话记录，链接本身不带凭据。
+    assert (await session_link(db_session, ctx, intake, intake.relay, sid)).endswith(plain)
     group = replace(intake, chat_type="group")
     assert (await session_link(db_session, ctx, group, intake.relay, sid)).endswith(plain)
     # 没绑定员工身份的飞书私聊谁也打不开，不给入口；企微私聊仍留给管理员查看。

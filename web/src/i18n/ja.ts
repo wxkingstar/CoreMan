@@ -781,7 +781,7 @@ export default {
     byBot: 'AI スタッフ別',
     quoted: '引用内容',
     file: 'ファイル',
-    statuses: { success: '成功', error: 'エラー', timeout: 'タイムアウト', stopped: '中断', ask_user: '追加入力待ち', failed: '失敗' },
+    statuses: { running: '実行中', success: '成功', error: 'エラー', timeout: 'タイムアウト', stopped: '中断', ask_user: '追加入力待ち', failed: '失敗' },
     chatTypes: { single: '個別チャット', group: 'グループチャット', cron: '定期タスク' },
   },
   announcements: {
