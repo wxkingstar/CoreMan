@@ -125,6 +125,30 @@ ENDPOINTS: dict[str, Endpoint] = {
         "im:chat.group_info:readonly",
         "im:chat",
     ),
+    "im.read_users": _e(
+        "GET", "/im/v1/messages/{message_id}/read_users", "read", "im:message:readonly"
+    ),
+    "im.announcement": _e(
+        "GET",
+        "/im/v1/chats/{chat_id}/announcement",
+        "read",
+        "im:chat.announcement:read",
+        "im:chat:readonly",
+        "im:chat",
+    ),
+    # Recipients see the edited text: treated like sending.
+    "im.edit": _e("PUT", "/im/v1/messages/{message_id}", "send", "im:message:update", "im:message"),
+    "im.resource": _e(
+        "GET",
+        "/im/v1/messages/{message_id}/resources/{file_key}",
+        "read",
+        "im:message:readonly",
+        "im:message.history:readonly",
+        "im:message",
+    ),
+    # Uploads to IM exist only to be sent as the user.
+    "im.upload_file": _e("POST", "/im/v1/files", "send", "im:resource", "im:resource:upload"),
+    "im.upload_image": _e("POST", "/im/v1/images", "send", "im:resource", "im:resource:upload"),
     "im.chat_create": _e("POST", "/im/v1/chats", "write", "im:chat:create_by_user", "im:chat"),
     "im.chat_add_members": _e(
         "POST", "/im/v1/chats/{chat_id}/members", "write", "im:chat.members:write_only", "im:chat"
@@ -243,6 +267,12 @@ ENDPOINTS: dict[str, Endpoint] = {
         "GET", _MAILBOX + "/messages/{message_id}", "read", "mail:user_mailbox.message:readonly"
     ),
     "mail.search": _e("POST", _MAILBOX + "/search", "read", "mail:user_mailbox.message:readonly"),
+    "mail.attachment_url": _e(
+        "GET",
+        _MAILBOX + "/messages/{message_id}/attachments/download_url",
+        "read",
+        "mail:user_mailbox.message.body:read",
+    ),
     "mail.draft": _e("POST", _MAILBOX + "/drafts", "write", "mail:user_mailbox.message:modify"),
     "mail.send_draft": _e(
         "POST", _MAILBOX + "/drafts/{draft_id}/send", "send", "mail:user_mailbox.message:send"
@@ -261,6 +291,10 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     # 任务
     "task.list": _e("GET", "/task/v2/tasks", "read", "task:task:read", "task:task:write"),
+    "task.search": _e("POST", "/task/v2/tasks/search", "read", "task:task:read", "task:task:write"),
+    "task.related": _e(
+        "GET", "/task/v2/task_v2/list_related_task", "read", "task:task:read", "task:task:write"
+    ),
     "task.get": _e(
         "GET", "/task/v2/tasks/{task_guid}", "read", "task:task:read", "task:task:write"
     ),
@@ -307,6 +341,60 @@ ENDPOINTS: dict[str, Endpoint] = {
         "read",
         "docx:document:readonly",
         "docx:document",
+    ),
+    "doc.legacy": _e(
+        "GET", "/doc/v2/{doc_token}/raw_content", "read", "docs:doc:readonly", "docs:doc"
+    ),
+    "slides.get": _e(
+        "GET",
+        "/slides_ai/v1/xml_presentations/{presentation_id}",
+        "read",
+        "slides:presentation:read",
+    ),
+    "mindnote.nodes": _e(
+        "GET", "/mindnote/v1/mindnotes/{mindnote_id}/nodes", "read", "mindnote:node:read"
+    ),
+    "drive.metas": _e(
+        "POST",
+        "/drive/v1/metas/batch_query",
+        "read",
+        "drive:drive.metadata:readonly",
+        "drive:drive",
+    ),
+    "drive.download": _e(
+        "GET",
+        "/drive/v1/files/{file_token}/download",
+        "read",
+        "drive:file:download",
+        "drive:drive",
+        "drive:drive:readonly",
+    ),
+    "drive.upload": _e(
+        "POST", "/drive/v1/files/upload_all", "write", "drive:file:upload", "drive:drive"
+    ),
+    "drive.root": _e(
+        "GET",
+        "/drive/explorer/v2/root_folder/meta",
+        "read",
+        "space:document:retrieve",
+        "drive:drive",
+        "drive:drive:readonly",
+    ),
+    "drive.move": _e(
+        "POST", "/drive/v1/files/{file_token}/move", "write", "space:document:move", "drive:drive"
+    ),
+    "drive.copy": _e(
+        "POST", "/drive/v1/files/{file_token}/copy", "write", "docs:document:copy", "drive:drive"
+    ),
+    "drive.rename": _e(
+        "PATCH",
+        "/drive/v1/files/{file_token}",
+        "write",
+        "docx:document:write_only",
+        "sheets:spreadsheet:write_only",
+        "base:app:update",
+        "drive:file:upload",
+        "drive:drive",
     ),
     "docx.create": _e(
         "POST", "/docx/v1/documents", "write", "docx:document:create", "docx:document"
@@ -385,6 +473,12 @@ ENDPOINTS: dict[str, Endpoint] = {
         "write",
         *_SHEET_WRITE,
     ),
+    "sheets.structure": _e(
+        "POST",
+        "/sheets/v2/spreadsheets/{spreadsheet_token}/sheets_batch_update",
+        "write",
+        *_SHEET_WRITE,
+    ),
     "sheets.create": _e(
         "POST",
         "/sheets/v3/spreadsheets",
@@ -413,6 +507,16 @@ ENDPOINTS: dict[str, Endpoint] = {
         "bitable:app:readonly",
         "base:record:read",
     ),
+    "bitable.create_table": _e(
+        "POST",
+        "/bitable/v1/apps/{app_token}/tables",
+        "write",
+        "bitable:app",
+        "base:table:create",
+    ),
+    "bitable.create_field": _e(
+        "POST", _TABLE + "/fields", "write", "bitable:app", "base:field:create"
+    ),
     "bitable.create": _e("POST", _TABLE + "/records", "write", "bitable:app", "base:record:create"),
     "bitable.update": _e(
         "PUT", _TABLE + "/records/{record_id}", "write", "bitable:app", "base:record:update"
@@ -431,6 +535,30 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     # 通讯录
     "contact.search": _e("POST", "/contact/v3/users/search", "read", "contact:user:search"),
+    "contact.departments": _e(
+        "POST",
+        "/contact/v3/departments/search",
+        "read",
+        "contact:department.base:readonly",
+        "contact:contact.base:readonly",
+        "contact:contact:readonly",
+    ),
+    "contact.department": _e(
+        "GET",
+        "/contact/v3/departments/{department_id}",
+        "read",
+        "contact:department.base:readonly",
+        "contact:contact.base:readonly",
+        "contact:contact:readonly",
+    ),
+    "contact.department_users": _e(
+        "GET",
+        "/contact/v3/users/find_by_department",
+        "read",
+        "contact:user.base:readonly",
+        "contact:contact.base:readonly",
+        "contact:contact:readonly",
+    ),
     "contact.user": _e(
         "GET",
         "/contact/v3/users/{user_id}",
@@ -466,6 +594,15 @@ ENDPOINTS: dict[str, Endpoint] = {
         "POST", "/approval/v4/instances/remind", "write", "approval:instance:write"
     ),
     # OKR
+    "okr.progress_create": _e(
+        "POST", "/okr/v1/progress_records/", "write", "okr:okr.progress:writeonly"
+    ),
+    "okr.progress_update": _e(
+        "PUT",
+        "/okr/v1/progress_records/{progress_id}",
+        "write",
+        "okr:okr.progress:writeonly",
+    ),
     "okr.cycles": _e("GET", "/okr/v2/cycles", "read", "okr:okr.period:readonly"),
     "okr.objectives": _e(
         "GET", "/okr/v2/cycles/{cycle_id}/objectives", "read", "okr:okr.content:readonly"
@@ -480,12 +617,16 @@ ENDPOINTS: dict[str, Endpoint] = {
 }
 
 # Needed by an API above in addition to its gating permission: reading a mail returns the
-# subject, addresses and body only with their field permissions.
+# subject, addresses and body only with their field permissions, and a colleague's
+# profile carries email, departments and manager only with theirs.
 EXTRA_SCOPES = frozenset(
     {
         "mail:user_mailbox.message.subject:read",
         "mail:user_mailbox.message.address:read",
         "mail:user_mailbox.message.body:read",
+        "contact:user.email:readonly",
+        "contact:user.department:readonly",
+        "contact:user.employee:readonly",
     }
 )
 

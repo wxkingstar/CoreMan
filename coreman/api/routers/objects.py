@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
+from coreman.core.config import Settings
 from coreman.core.db.models import StoredObject
 from coreman.core.object_store import LocalObjectStore
 from coreman.core.s3_store import S3ObjectStore
@@ -34,6 +35,12 @@ async def download(
     row = await session.get(StoredObject, identity)
     if row is None or row.expires_at <= now:
         raise not_found("附件不存在或已过期")
+    return await serve(cfg, row)
+
+
+async def serve(cfg: Settings, row: StoredObject) -> Response:
+    """Stream a stored object as a download that browsers never render."""
+    store = LocalObjectStore(cfg.object_storage_root, cfg.master_key_bytes, cfg.public_base_url)
     if row.backend == "s3":
         try:
             remote = S3ObjectStore(cfg)
@@ -64,7 +71,7 @@ async def download(
         )
     if row.backend != "local":
         raise not_found("附件存储类型不支持")
-    path = store.path(identity)
+    path = store.path(row.id)
     if not path.is_file():
         raise not_found("附件文件不存在")
     return FileResponse(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, model_validator
 
@@ -29,6 +29,36 @@ _DUE = Field(default=None, description="ISO time, or YYYY-MM-DD for an all-day d
 
 class ListTasks(Page):
     completed: bool | None = Field(default=None, description="Omit for both")
+    relation: Literal["responsible", "related"] = Field(
+        default="responsible",
+        description="related also includes tasks the user created or follows",
+    )
+
+
+class SearchTasks(Page):
+    query: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
+    creator_open_ids: list[Identifier] = Field(default_factory=list, max_length=20)
+    assignee_open_ids: list[Identifier] = Field(default_factory=list, max_length=20)
+    follower_open_ids: list[Identifier] = Field(default_factory=list, max_length=20)
+    completed: bool | None = None
+    due_after: ISOTime | None = None
+    due_before: ISOTime | None = None
+
+    _due = valid_times("due_after", "due_before")
+
+    @model_validator(mode="after")
+    def something(self) -> SearchTasks:
+        if not (
+            self.query
+            or self.creator_open_ids
+            or self.assignee_open_ids
+            or self.follower_open_ids
+            or self.completed is not None
+            or self.due_after
+            or self.due_before
+        ):
+            raise ValueError("give a query or at least one filter")
+        return self
 
 
 class TaskRef(Arguments):
@@ -119,13 +149,38 @@ def _members(args: TaskFields) -> list[dict[str, str]]:
     "feishu_task_list",
     ListTasks,
     "task.list",
-    "List tasks the user is responsible for.",
+    "List tasks the user is responsible for, or every task they are related to.",
 )
 async def list_tasks(args: ListTasks, call: Call) -> dict[str, Any]:
-    params = {**page(args), "type": "my_tasks", "user_id_type": "open_id"}
+    params = {**page(args), "user_id_type": "open_id"}
     if args.completed is not None:
         params["completed"] = "true" if args.completed else "false"
-    return await call("task.list", params=params)
+    if args.relation == "related":
+        return await call("task.related", params=params)
+    return await call("task.list", params={**params, "type": "my_tasks"})
+
+
+@tool(
+    "feishu_task_search",
+    SearchTasks,
+    "task.search",
+    "Search tasks by keyword, creator, assignee, follower, completion or due time.",
+)
+async def search_tasks(args: SearchTasks, call: Call) -> dict[str, Any]:
+    due = compact({"start_time": args.due_after, "end_time": args.due_before})
+    filters = compact(
+        {
+            "creator_ids": args.creator_open_ids or None,
+            "assignee_ids": args.assignee_open_ids or None,
+            "follower_ids": args.follower_open_ids or None,
+            "is_completed": args.completed,
+            "due_time": due or None,
+        }
+    )
+    params = compact({"page_token": args.page_token, "user_id_type": "open_id"})
+    return await call(
+        "task.search", params=params, json=compact({"query": args.query, "filter": filters or None})
+    )
 
 
 @tool("feishu_task_get", TaskRef, "task.get", "Read one task with members and due date.")
@@ -219,6 +274,7 @@ async def comment(args: Comment, call: Call) -> dict[str, Any]:
 
 TOOLS = [
     list_tasks,
+    search_tasks,
     get_task,
     create_task,
     add_subtask,

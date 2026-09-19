@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
 from coreman.api.deps import current_user, get_session, via_bot_token
-from coreman.api.errors import ApiError
+from coreman.api.errors import ApiError, not_found
+from coreman.api.routers.objects import serve
 from coreman.api.security import verify_csrf
 from coreman.core import personal_schedules as schedules
-from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
-from coreman.core.feishu_personal import policy, service, tools
+from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, StoredObject, User
+from coreman.core.feishu_personal import files, policy, service, tools
 
 router = APIRouter(tags=["feishu-personal"])
 # Mail bodies, sheet rows and document paragraphs arrive as tool arguments.
@@ -102,7 +104,8 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             elif not current:
                 value = {"error": "authorization_changed"}
             else:
-                value = await tools.dispatch(session, cipher, scope, name, arguments)
+                relay = files.FileRelay(request.app.state.settings, cipher)
+                value = await tools.dispatch(session, cipher, scope, name, arguments, relay)
         except service.PersonalError as exc:
             value = exc.payload()
         except Exception:
@@ -124,6 +127,69 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
 @router.get("/api/runtime/feishu-personal/mcp")
 async def no_sse() -> Response:
     return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})
+
+
+async def _sealed_owner(
+    session: AsyncSession, relay: files.FileRelay, kind: str, token: str
+) -> tuple[files.Claims, FeishuPersonalGrant]:
+    # One answer for forged, expired and revoked links: nothing to learn from the difference.
+    try:
+        claims = relay.open(kind, token)
+    except ValueError:
+        raise not_found("链接无效或已过期") from None
+    grant = await session.get(
+        FeishuPersonalGrant, (claims.bot_id, claims.user_id), populate_existing=True
+    )
+    if grant is None or not files.current(grant, claims):
+        raise not_found("链接无效或已过期")
+    return claims, grant
+
+
+@router.get(files.DOWNLOAD_PATH + "{token}")
+async def personal_download(
+    token: str, request: Request, session: AsyncSession = Depends(get_session)
+) -> Response:
+    """A file a personal tool fetched from Feishu, for the agent to download with curl."""
+    relay = files.FileRelay(request.app.state.settings, request.app.state.cipher)
+    claims, _ = await _sealed_owner(session, relay, "download", token)
+    try:
+        row = await session.get(StoredObject, uuid.UUID(str(claims.extra["o"])))
+    except (KeyError, ValueError):
+        row = None
+    if row is None or row.expires_at <= datetime.now(UTC):
+        raise not_found("文件不存在或已过期")
+    return await serve(request.app.state.settings, row)
+
+
+@router.put(files.UPLOAD_PATH + "{token}")
+async def personal_upload(
+    token: str, request: Request, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """The agent PUTs a local file here; the returned upload ID goes to the send tools."""
+    if "origin" in request.headers:
+        raise ApiError(403, 403, "Browser origins are not supported")
+    relay = files.FileRelay(request.app.state.settings, request.app.state.cipher)
+    claims, grant = await _sealed_owner(session, relay, "upload", token)
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > files.UPLOAD_LIMIT:
+        raise ApiError(413, 413, "文件超过 30 MB")
+
+    async def body() -> AsyncIterator[bytes]:
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > files.UPLOAD_LIMIT:
+                raise ApiError(413, 413, "文件超过 30 MB")
+            yield chunk
+
+    row = await relay.save(
+        session, body(), filename=str(claims.extra.get("n") or "file"), mime=str(claims.extra["c"])
+    )
+    if row.size == 0:
+        raise ApiError(400, 400, "文件为空")
+    upload_id = relay.upload_id(grant, row)
+    await session.commit()
+    return {"upload_id": upload_id, "filename": row.filename, "size": row.size}
 
 
 async def interactive_user(request: Request, actor: User = Depends(current_user)) -> User:

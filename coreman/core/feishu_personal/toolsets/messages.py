@@ -91,6 +91,20 @@ class Reaction(MessageRef):
     )
 
 
+class ReadUsers(Page):
+    message_id: Identifier
+
+
+class ChatRef(Arguments):
+    chat_id: Identifier
+
+
+class EditMessage(Arguments):
+    message_id: Identifier
+    text: Text
+    format: Format = "text"
+
+
 class ListChats(Page):
     query: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] = ""
 
@@ -312,6 +326,39 @@ async def add_chat_members(args: AddChatMembers, call: Call) -> dict[str, Any]:
     )
 
 
+@tool(
+    "feishu_message_read_users",
+    ReadUsers,
+    "im.read_users",
+    "Who has read a message the user sent in the last 7 days.",
+)
+async def read_users(args: ReadUsers, call: Call) -> dict[str, Any]:
+    return await call(
+        "im.read_users",
+        path={"message_id": args.message_id},
+        params={**page(args), "user_id_type": "open_id"},
+    )
+
+
+@tool("feishu_chat_announcement", ChatRef, "im.announcement", "Read a group chat's announcement.")
+async def announcement(args: ChatRef, call: Call) -> dict[str, Any]:
+    return await call(
+        "im.announcement", path={"chat_id": args.chat_id}, params={"user_id_type": "open_id"}
+    )
+
+
+@tool(
+    "feishu_edit_message",
+    EditMessage,
+    "im.edit",
+    "Change the text of a text or Markdown message the user sent.",
+)
+async def edit_message(args: EditMessage, call: Call) -> dict[str, Any]:
+    return await call(
+        "im.edit", path={"message_id": args.message_id}, json=_message(args.text, args.format)
+    )
+
+
 TOOLS = [
     search_messages,
     read_messages,
@@ -320,6 +367,9 @@ TOOLS = [
     reply_message,
     forward_message,
     recall_message,
+    edit_message,
+    read_users,
+    announcement,
     add_reaction,
     pin_message,
     list_chats,

@@ -159,10 +159,11 @@ def feishu_guidance(row: FeishuPersonalGrant | None, base_url: str, *, scheduled
             "时间参数用带时区的 ISO 格式，用户没说时区时按北京时间（+08:00）。"
             "订会议室先用 feishu_meeting_rooms 找房间、feishu_calendar_freebusy 看是否空闲，"
             "再在建日程时带上 room_ids；发起审批先用 feishu_approval_templates 找表单、"
-            "feishu_approval_template 看字段，再按字段填好提交；改文档先读出原文再编辑。\n"
-            + DATA_RULES
-            + "\n"
-            + manage
+            "feishu_approval_template 看字段，再按字段填好提交；改文档先读出原文再编辑。"
+            "邮件附件、消息里的文件和云空间文件用 feishu_download_* 取得 download_url，"
+            "再用 curl 下载到临时目录，用完即删；要发送或保存本地文件，先用 feishu_prepare_upload"
+            " 取上传链接，curl -T 上传得到 upload_id，再交给 feishu_send_file、feishu_save_to_drive"
+            " 或邮件的 attachment_ids。\n" + DATA_RULES + "\n" + manage
         )
     if scheduled:
         return ""

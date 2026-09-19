@@ -47,6 +47,10 @@ class DriveFiles(Page):
 
 class ReadDocument(TextPage):
     document_id: Identifier = Field(description="docx token, or a wiki node token for markdown")
+    kind: Literal["docx", "doc", "slides", "mindnote"] = Field(
+        default="docx",
+        description="doc is the old document type; wiki pages of other kinds: see feishu_wiki_node",
+    )
     format: Literal["markdown", "text"] = Field(
         default="markdown", description="text is plain text of a docx only"
     )
@@ -95,6 +99,85 @@ class ShareDocument(Arguments):
     notify: bool = True
 
 
+FileKind = Literal["docx", "doc", "sheet", "bitable", "mindnote", "file", "slides", "folder"]
+
+
+class FileRef(Arguments):
+    token: Identifier
+    type: FileKind
+
+
+class FileInfo(Arguments):
+    files: Annotated[list[FileRef], Field(min_length=1, max_length=20)]
+
+
+class MoveFile(FileRef):
+    folder_token: Identifier = Field(description="Destination folder")
+
+
+class CopyFile(FileRef):
+    name: Title
+    folder_token: Identifier = Field(description="Destination folder")
+
+
+class RenameFile(Arguments):
+    token: Identifier
+    type: Literal["docx", "sheet", "bitable", "file"]
+    new_title: Title
+
+
+# Base field types by name; Feishu uses numbers.
+FIELD_TYPES = {
+    "text": 1,
+    "number": 2,
+    "single_select": 3,
+    "multi_select": 4,
+    "date": 5,
+    "checkbox": 7,
+    "person": 11,
+    "phone": 13,
+    "url": 15,
+    "attachment": 17,
+}
+FieldType = Literal[
+    "text",
+    "number",
+    "single_select",
+    "multi_select",
+    "date",
+    "checkbox",
+    "person",
+    "phone",
+    "url",
+    "attachment",
+]
+
+
+class NewField(Arguments):
+    name: FieldName
+    type: FieldType = "text"
+    options: list[Annotated[str, StringConstraints(min_length=1, max_length=100)]] = Field(
+        default_factory=list, max_length=50, description="Choices for select fields"
+    )
+
+    def body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"field_name": self.name, "type": FIELD_TYPES[self.type]}
+        if self.options:
+            body["property"] = {"options": [{"name": option} for option in self.options]}
+        return body
+
+
+class CreateTable(Arguments):
+    app_token: Identifier
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    fields: list[NewField] = Field(default_factory=list, max_length=50)
+
+
+class CreateField(NewField):
+    app_token: Identifier
+    table_id: Identifier
+
+
 class CreateFolder(Arguments):
     name: Title
     folder_token: Identifier | None = Field(default=None, description="Omit for My Space root")
@@ -141,6 +224,19 @@ class ReadSheet(Spreadsheet):
 class WriteSheet(Spreadsheet):
     range: Range = Field(description="sheetId!A1:D20; the values must fit it")
     values: Rows
+
+
+class ManageSheet(Spreadsheet):
+    action: Literal["add", "rename"]
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    sheet_id: Identifier | None = Field(default=None, description="Sheet to rename")
+    index: int | None = Field(default=None, ge=0, le=200, description="Position for a new sheet")
+
+    @model_validator(mode="after")
+    def target(self) -> ManageSheet:
+        if self.action == "rename" and not self.sheet_id:
+            raise ValueError("rename needs sheet_id")
+        return self
 
 
 class CreateSheet(Arguments):
@@ -294,10 +390,24 @@ async def drive_files(args: DriveFiles, call: Call) -> dict[str, Any]:
     "feishu_read_document",
     ReadDocument,
     "docx.raw",
-    "Read a document as Markdown (docx or wiki page), or as plain text.",
+    "Read a document as Markdown (docx or wiki page) or plain text, or an old-style doc,"
+    " slides or mind note.",
 )
 async def read_document(args: ReadDocument, call: Call) -> dict[str, Any]:
-    if args.format == "text":
+    if args.kind == "doc":
+        data = await call("doc.legacy", path={"doc_token": args.document_id})
+    elif args.kind == "slides":
+        data = await call("slides.get", path={"presentation_id": args.document_id})
+        presentation = data.get("xml_presentation")
+        if isinstance(presentation, dict) and isinstance(presentation.get("content"), str):
+            data = {**presentation, **{k: v for k, v in data.items() if k != "xml_presentation"}}
+    elif args.kind == "mindnote":
+        return await call(
+            "mindnote.nodes",
+            path={"mindnote_id": args.document_id},
+            params={"page_size": 500, "user_id_type": "open_id"},
+        )
+    elif args.format == "text":
         data = await call("docx.raw", path={"document_id": args.document_id})
     else:
         fetched = await call(
@@ -373,6 +483,94 @@ async def share_document(args: ShareDocument, call: Call) -> dict[str, Any]:
                 raise  # Permission or authorization problems apply to everyone: say so once.
             failed.append({"open_id": open_id, **exc.payload()})
     return {"shared": shared, "failed": failed, "permission": args.permission}
+
+
+@tool(
+    "feishu_file_info",
+    FileInfo,
+    "drive.metas",
+    "Look up files' titles, owners, times and links by token.",
+)
+async def file_info(args: FileInfo, call: Call) -> dict[str, Any]:
+    docs = [{"doc_token": item.token, "doc_type": item.type} for item in args.files]
+    return await call(
+        "drive.metas",
+        params={"user_id_type": "open_id"},
+        json={"request_docs": docs, "with_url": True},
+    )
+
+
+@tool("feishu_move_file", MoveFile, "drive.move", "Move a file or folder to another folder.")
+async def move_file(args: MoveFile, call: Call) -> dict[str, Any]:
+    return await call(
+        "drive.move",
+        path={"file_token": args.token},
+        json={"type": args.type, "folder_token": args.folder_token},
+    )
+
+
+@tool("feishu_copy_file", CopyFile, "drive.copy", "Copy a document, sheet, base or file.")
+async def copy_file(args: CopyFile, call: Call) -> dict[str, Any]:
+    return await call(
+        "drive.copy",
+        path={"file_token": args.token},
+        params={"user_id_type": "open_id"},
+        json={"name": args.name, "type": args.type, "folder_token": args.folder_token},
+    )
+
+
+@tool("feishu_rename_file", RenameFile, "drive.rename", "Rename a document, sheet, base or file.")
+async def rename_file(args: RenameFile, call: Call) -> dict[str, Any]:
+    return await call(
+        "drive.rename",
+        path={"file_token": args.token},
+        params={"type": args.type},
+        json={"new_title": args.new_title},
+    )
+
+
+@tool(
+    "feishu_sheet_manage",
+    ManageSheet,
+    "sheets.structure",
+    "Add a worksheet to a spreadsheet, or rename one.",
+)
+async def sheet_manage(args: ManageSheet, call: Call) -> dict[str, Any]:
+    if args.action == "add":
+        request = {"addSheet": {"properties": compact({"title": args.title, "index": args.index})}}
+    else:
+        request = {"updateSheet": {"properties": {"sheetId": args.sheet_id, "title": args.title}}}
+    return await call(
+        "sheets.structure",
+        path={"spreadsheet_token": args.spreadsheet_token},
+        json={"requests": [request]},
+    )
+
+
+@tool(
+    "feishu_base_create_table",
+    CreateTable,
+    "bitable.create_table",
+    "Add a table to a Base, optionally with its fields.",
+)
+async def base_create_table(args: CreateTable, call: Call) -> dict[str, Any]:
+    table: dict[str, Any] = {"name": args.name}
+    if args.fields:
+        table["fields"] = [field.body() for field in args.fields]
+    return await call(
+        "bitable.create_table", path={"app_token": args.app_token}, json={"table": table}
+    )
+
+
+@tool(
+    "feishu_base_create_field", CreateField, "bitable.create_field", "Add a field to a Base table."
+)
+async def base_create_field(args: CreateField, call: Call) -> dict[str, Any]:
+    return await call(
+        "bitable.create_field",
+        path={"app_token": args.app_token, "table_id": args.table_id},
+        json=args.body(),
+    )
 
 
 @tool(
@@ -612,6 +810,10 @@ TOOLS = [
     search_docs,
     drive_files,
     create_folder,
+    file_info,
+    move_file,
+    copy_file,
+    rename_file,
     read_document,
     create_document,
     append_document,
@@ -624,9 +826,12 @@ TOOLS = [
     sheet_write,
     sheet_append,
     create_sheet,
+    sheet_manage,
     base_tables,
     base_fields,
     base_search,
+    base_create_table,
+    base_create_field,
     base_create,
     base_update,
     base_delete,

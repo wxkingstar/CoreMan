@@ -33,8 +33,12 @@ from coreman.core.feishu_personal.toolbase import (
     tool,
     valid_times,
 )
+from coreman.core.feishu_personal.toolsets.files import UploadId, uploaded
 
 ME = {"mailbox": "me"}
+# Feishu refuses a mail over 25 MB; base64 makes attachments about a third larger.
+MAX_EML = 25 * 1024 * 1024
+MAIL_ATTACHMENT_LIMIT = 18 * 1024 * 1024
 Address = Annotated[
     str, StringConstraints(max_length=254, pattern=r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+\.[^@\s<>,;\"]+$")
 ]
@@ -91,7 +95,12 @@ class Compose(Arguments):
     )
     reply_all: bool = Field(default=False, description="With reply: also everyone on To/Cc")
     forward_message_id: PathId | None = Field(
-        default=None, description="Forward this mail's text below the body (not attachments)"
+        default=None, description="Forward this mail below the body, with its attachments"
+    )
+    attachment_ids: list[UploadId] = Field(
+        default_factory=list,
+        max_length=10,
+        description="upload_id values from feishu_prepare_upload; 18 MB in total",
     )
 
     @model_validator(mode="after")
@@ -194,7 +203,18 @@ class _Original:
         )
         body = _decode(message.get("body_plain_text"))
         self.body = body if isinstance(body, str) else ""
-        self.attachments = len(message.get("attachments") or [])
+        # Regular attachments travel with a forward; inline images belong to the HTML body and
+        # large attachments are links Feishu keeps elsewhere.
+        self.files: list[tuple[str, str]] = []
+        self.left_out: list[str] = []
+        for item in message.get("attachments") or []:
+            if not isinstance(item, dict) or item.get("is_inline"):
+                continue
+            name = _clean(item.get("filename")) or "attachment"
+            if isinstance(item.get("id"), str) and item["id"] and item.get("attachment_type") != 2:
+                self.files.append((item["id"], name))
+            else:
+                self.left_out.append(name)
         self.chinese = bool(_CJK.search(self.subject))
         stamp = message.get("internal_date")
         self.date = ""
@@ -243,6 +263,49 @@ async def _original(call: Call, message_id: str) -> _Original:
     return _Original(message)
 
 
+async def _forwarded(
+    call: Call, original: _Original, budget: int
+) -> tuple[list[tuple[str, str, bytes]], list[str]]:
+    """The original's attachments that fit in `budget` bytes, and the names left out."""
+    attached: list[tuple[str, str, bytes]] = []
+    left_out = list(original.left_out)
+    if not original.files:
+        return attached, left_out
+    data = await call(
+        "mail.attachment_url",
+        path={**ME, "message_id": original.message_id},
+        params={"attachment_ids": [found for found, _ in original.files[:20]]},
+    )
+    urls = {
+        item.get("attachment_id"): item.get("download_url")
+        for item in data.get("download_urls") or []
+        if isinstance(item, dict)
+    }
+    for index, (attachment_id, name) in enumerate(original.files):
+        url = urls.get(attachment_id) if index < 20 else None
+        if not isinstance(url, str) or budget <= 0:
+            left_out.append(name)
+            continue
+        try:
+            download = await service.signed_download(url)
+            content = bytearray()
+            async for chunk in download.chunks(budget):
+                content.extend(chunk)
+        except service.PersonalError:
+            left_out.append(name)
+            continue
+        budget -= len(content)
+        attached.append((name, download.content_type, bytes(content)))
+    return attached, left_out
+
+
+def _attach(message: EmailMessage, name: str, mime: str, content: bytes) -> None:
+    main, _, sub = mime.split(";")[0].strip().partition("/")
+    if not main or not sub or main == "multipart":
+        main, sub = "application", "octet-stream"
+    message.add_attachment(content, maintype=main, subtype=sub, filename=name)
+
+
 async def _draft(args: Compose, call: Call) -> tuple[str, dict[str, Any]]:
     profile = await call("mail.profile", path=ME)
     sender = profile.get("primary_email_address") or (profile.get("user_mailbox") or {}).get(
@@ -253,6 +316,12 @@ async def _draft(args: Compose, call: Call) -> tuple[str, dict[str, Any]]:
     to, cc, subject, body = list(args.to), list(args.cc), args.subject, args.body
     headers: dict[str, str] = {}
     notes: dict[str, Any] = {}
+    attachments = [
+        await uploaded(call, upload_id, MAIL_ATTACHMENT_LIMIT) for upload_id in args.attachment_ids
+    ]
+    budget = MAIL_ATTACHMENT_LIMIT - sum(len(content) for _, _, content in attachments)
+    if budget < 0:
+        raise service.PersonalError("file_too_large")
     source = args.reply_to_message_id or args.forward_message_id
     if source:
         original = await _original(call, source)
@@ -263,8 +332,11 @@ async def _draft(args: Compose, call: Call) -> tuple[str, dict[str, Any]]:
             quote = "<br><br><blockquote>" + html.escape(quote.strip()).replace("\n", "<br>")
             quote += "</blockquote>"
         body += quote
-        if forward and original.attachments:
-            notes["attachments_not_forwarded"] = original.attachments
+        if forward:
+            carried, left_out = await _forwarded(call, original, budget)
+            attachments += carried
+            if left_out:
+                notes["attachments_not_forwarded"] = left_out
         if not forward:
             me = {sender.lower()}
             first = original.reply_to or _address(original.sender)
@@ -290,13 +362,20 @@ async def _draft(args: Compose, call: Call) -> tuple[str, dict[str, Any]]:
     for name, value in headers.items():
         message[name] = value
     message.set_content(body, subtype="html" if args.body_format == "html" else "plain")
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    for name, mime, content in attachments:
+        _attach(message, name, mime, content)
+    eml = message.as_bytes()
+    if len(eml) > MAX_EML:
+        raise service.PersonalError("file_too_large")
+    raw = base64.urlsafe_b64encode(eml).decode("ascii")
     created = await call("mail.draft", path=ME, json={"raw": raw})
     draft = created.get("draft")
     nested = draft.get("draft_id") if isinstance(draft, dict) else None
     draft_id = created.get("draft_id") or created.get("id") or nested
     if not isinstance(draft_id, str) or not draft_id:
         raise service.PersonalError("mail_draft_failed")
+    if attachments:
+        notes["attachments"] = [name for name, _, _ in attachments]
     return draft_id, {"to": to, "cc": cc, "subject": subject, **notes}
 
 

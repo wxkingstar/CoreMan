@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json as jsonlib
+import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -91,9 +93,11 @@ def save_tokens(
     row.pending_expires_at = row.next_poll_at = None
 
 
-async def _http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+async def _http(method: str, url: str, *, seconds: float = 20, **kwargs: Any) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=seconds, follow_redirects=False, trust_env=False
+        ) as client:
             # Bound upstream payload size as minutes may contain very long transcripts.
             async with client.stream(method, url, **kwargs) as response:
                 chunks = bytearray()
@@ -482,16 +486,10 @@ def _check(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint) -> None:
         raise PersonalError(reason)
 
 
-async def api_request(
-    session: AsyncSession,
-    cipher: Cipher,
-    scope: Scope,
-    method: str,
-    path: str,
-    *,
-    params: Any = None,
-    json: Any = None,
-) -> dict[str, Any]:
+async def _authorize(
+    session: AsyncSession, cipher: Cipher, scope: Scope, method: str, path: str
+) -> tuple[endpoints.Endpoint, FeishuPersonalGrant, str, dict[str, Any]]:
+    """The registered endpoint, the owner's grant and a fresh token, or a PersonalError."""
     endpoint = endpoints.match(method, path)
     if endpoint is None:
         raise PersonalError("invalid_tool_or_arguments")
@@ -522,24 +520,47 @@ async def api_request(
         tokens = data
     # A refresh may return fewer permissions than before.
     _check(row, endpoint)
+    return endpoint, row, secret, tokens
+
+
+def _failure(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint, code: Any) -> PersonalError:
+    # Do not forward upstream message text or request context to the model; the numeric
+    # code alone lets it tell the user which permission or input to fix.
+    if code in (99991663, 99991668, 99991671, 99991677):
+        _clear(row, "expired")
+        return PersonalError("authorization_required")
+    if isinstance(code, int) and code in _PERMISSION_CODES:
+        return PersonalError(_PERMISSION_CODES[code])
+    failed = "feishu_read_failed" if endpoint.kind == "read" else "feishu_request_failed"
+    return PersonalError(failed, upstream_code=code if isinstance(code, int) else None)
+
+
+async def api_request(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    method: str,
+    path: str,
+    *,
+    params: Any = None,
+    json: Any = None,
+    data: Any = None,
+    files: Any = None,
+) -> dict[str, Any]:
+    """Call a registered endpoint as the owner. `data`/`files` send a multipart upload."""
+    endpoint, row, secret, tokens = await _authorize(session, cipher, scope, method, path)
+    body: dict[str, Any] = {"data": data, "files": files} if files is not None else {"json": json}
     response = await _http(
         method,
         BASE + path,
         headers={"Authorization": "Bearer " + tokens["access_token"]},
         params=params,
-        json=json,
+        seconds=120 if files is not None else 20,
+        **body,
     )
     code = response.get("code")
     if code != 0:
-        # Do not forward upstream message text or request context to the model; the numeric
-        # code alone lets it tell the user which permission or input to fix.
-        if code in (99991663, 99991668, 99991671, 99991677):
-            _clear(row, "expired")
-            raise PersonalError("authorization_required")
-        if isinstance(code, int) and code in _PERMISSION_CODES:
-            raise PersonalError(_PERMISSION_CODES[code])
-        failed = "feishu_read_failed" if endpoint.kind == "read" else "feishu_request_failed"
-        raise PersonalError(failed, upstream_code=code if isinstance(code, int) else None)
+        raise _failure(row, endpoint, code)
 
     def redact(value: Any) -> Any:
         if isinstance(value, str):
@@ -554,3 +575,147 @@ async def api_request(
         return value
 
     return cast(dict[str, Any], redact(response.get("data") or {}))
+
+
+# Pre-signed download links (mail attachments) must point at Feishu, never elsewhere.
+_SIGNED_HOSTS = (
+    ".feishu.cn",
+    ".feishucdn.com",
+    ".larksuite.com",
+    ".larksuitecdn.com",
+    ".larkoffice.com",
+)
+_DISPOSITION = re.compile(r"filename\*=UTF-8\'\'([^;]+)|filename=\"?([^\";]+)\"?", re.IGNORECASE)
+
+
+def _feishu_host(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and not parsed.username and host.endswith(_SIGNED_HOSTS)
+
+
+def _error_body(raw: bytes) -> dict[str, Any] | None:
+    """Feishu's JSON error, or None when the body is something else (such as a JSON file)."""
+    try:
+        data = jsonlib.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("code"), int) and "msg" in data:
+        return data if data["code"] != 0 else None
+    return None
+
+
+class Download:
+    """An open binary response. Iterate `chunks()` once; it closes the connection."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        response: httpx.Response,
+        head: bytes = b"",
+        rest: AsyncIterator[bytes] | None = None,
+    ) -> None:
+        self._client, self._response = client, response
+        self._head, self._rest = head, rest if rest is not None else response.aiter_bytes()
+        self.content_type = response.headers.get("content-type", "application/octet-stream")
+        found = _DISPOSITION.search(response.headers.get("content-disposition", ""))
+        name = (unquote(found.group(1)) if found.group(1) else found.group(2)) if found else ""
+        self.filename = name.strip() or None
+
+    async def chunks(self, limit: int) -> AsyncIterator[bytes]:
+        total = len(self._head)
+        try:
+            if total > limit:
+                raise PersonalError("file_too_large")
+            if self._head:
+                yield self._head
+            async for chunk in self._rest:
+                total += len(chunk)
+                if total > limit:
+                    raise PersonalError("file_too_large")
+                yield chunk
+        except httpx.HTTPError as exc:
+            raise PersonalError("upstream_unavailable") from exc
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._response.aclose()
+        await self._client.aclose()
+
+
+async def _open(method: str, url: str, **kwargs: Any) -> Download | dict[str, Any]:
+    """A binary download, or Feishu's JSON error body.
+
+    Redirects are followed only to Feishu hosts, and without the original headers and query:
+    the owner's token must never reach another host.
+    """
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(120, connect=10), follow_redirects=False, trust_env=False
+    )
+    try:
+        for _ in range(4):
+            response = await client.send(client.build_request(method, url, **kwargs), stream=True)
+            location = response.headers.get("location")
+            if not (response.is_redirect and location):
+                break
+            await response.aclose()
+            url, method, kwargs = str(response.url.join(location)), "GET", {}
+            if not _feishu_host(url):
+                raise PersonalError("feishu_read_failed")
+        else:
+            raise PersonalError("feishu_read_failed")
+        content_type = response.headers.get("content-type", "")
+        if response.is_success and not content_type.startswith("application/json"):
+            return Download(client, response)
+        # Feishu answers errors in JSON; keep reading only as much as an error can be.
+        rest = response.aiter_bytes()
+        head = b""
+        async for chunk in rest:
+            head += chunk
+            if len(head) > 1_000_000:
+                break
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise PersonalError("upstream_unavailable") from exc
+    except BaseException:
+        await client.aclose()
+        raise
+    error = _error_body(head)
+    if response.is_success and error is None:
+        return Download(client, response, head, rest)
+    await response.aclose()
+    await client.aclose()
+    return error or {}
+
+
+async def api_download(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    method: str,
+    path: str,
+    *,
+    params: Any = None,
+) -> Download:
+    """Download a file from a registered endpoint as the owner."""
+    endpoint, row, _, tokens = await _authorize(session, cipher, scope, method, path)
+    opened = await _open(
+        method,
+        BASE + path,
+        headers={"Authorization": "Bearer " + tokens["access_token"]},
+        params=params,
+    )
+    if isinstance(opened, dict):
+        raise _failure(row, endpoint, opened.get("code"))
+    return opened
+
+
+async def signed_download(url: str) -> Download:
+    """Fetch a pre-signed Feishu link. It carries its own authorization, so none is sent."""
+    if not _feishu_host(url):
+        raise PersonalError("feishu_read_failed")
+    opened = await _open("GET", url)
+    if isinstance(opened, dict):
+        raise PersonalError("feishu_read_failed")
+    return opened
