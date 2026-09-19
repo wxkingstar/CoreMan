@@ -7,6 +7,7 @@ import pytest
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import InboundEvent, RelayServer, RuntimeNode
 from coreman.core.feishu_personal import policy
+from coreman.core.prompting.defaults import DEFAULT_RUNTIME_TAIL
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.chat.personal import configure, connect_requested, intercept
 from tests.api.test_feishu_personal import setup
@@ -165,6 +166,10 @@ async def test_open_stage_sends_the_normal_request_with_tools(db_session, app, d
     request = fake.requests[0]
     system = request["messages"][0]["content"]
     assert "你是销售" in system and "## 本人飞书" in system
+    # 个人工具两段排在结尾重申之前，⑪ 仍是整份 system prompt 的最后一段。
+    tail = DEFAULT_RUNTIME_TAIL.strip()
+    assert system.index("## 本人飞书") < system.index("## 本人定时任务") < system.index(tail)
+    assert system.endswith(tail)
     assert [m["role"] for m in request["messages"]] == ["system", "user"]
     assert request["env_vars"][policy.PREFIX + "TOKEN"]
     assert request["env_vars"]["COREMAN_USER_LOGIN"] == user.login_name

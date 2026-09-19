@@ -174,7 +174,6 @@ class OpenStage(ChatStageBase):
             issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
             external_key=ctx.external_jwt_key,
         )
-        system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt)
         env = build_env(
             bot_key=bot.bot_key,
             platform=bot.platform,
@@ -188,17 +187,20 @@ class OpenStage(ChatStageBase):
         env.update(access.env)
         from coreman.runtime.worker.chat.collaboration import configure
 
-        system_prompt, env = await configure(session, ctx, intake, info, system_prompt, env)
+        # 三处都在传入文本后面追加自己的段落：从空串起步，攒出的就是本轮附加能力，
+        # 交给 build_system_prompt 放在结尾重申之前。
+        extra, env = await configure(session, ctx, intake, info, "", env)
         from coreman.runtime.worker.chat.personal import configure as configure_personal
 
-        system_prompt, env = await configure_personal(
-            session, ctx, intake, info.relay_session_id, system_prompt, env
+        extra, env = await configure_personal(
+            session, ctx, intake, info.relay_session_id, extra, env
         )
         from coreman.runtime.worker.chat import wecom_personal
 
-        system_prompt, env = await wecom_personal.configure(
-            session, ctx, intake, info.relay_session_id, system_prompt, env
+        extra, env = await wecom_personal.configure(
+            session, ctx, intake, info.relay_session_id, extra, env
         )
+        system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
         ctx.private_turn = wecom_personal.mounted(env)
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具），出站闸门必须按最终的这一份建。
         ctx.secrets = collect_secrets(env)
@@ -308,6 +310,7 @@ class OpenStage(ChatStageBase):
         info: sessions.SessionInfo,
         backend: str,
         systems_prompt: str = "",
+        extra: str = "",
     ) -> str:
         """本轮的 system prompt。续跑时也使用当前身份、配置与系统授权。"""
         return build_system_prompt(
@@ -318,6 +321,7 @@ class OpenStage(ChatStageBase):
             speaker=intake.speaker,
             speaker_changed=info.speaker_changed,
             systems_prompt=systems_prompt,
+            extra=extra,
         )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:

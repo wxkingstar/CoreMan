@@ -214,8 +214,8 @@ class CronRunHandler:
                             or ""
                         ),
                         scheduled=True,
-                    )
-                    + personal_prompt,
+                        extra=personal_prompt,
+                    ),
                 )
                 await session.commit()
             # 身份验证后、外部调用前再次收取取消；独立会话不改写用户的 chat_sessions。
