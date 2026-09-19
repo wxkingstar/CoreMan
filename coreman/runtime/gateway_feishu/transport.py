@@ -34,6 +34,8 @@ _OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"
 _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
 # 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
 OUTBOX_PER_ROUND = 20
+# 同一 bot 两次平台调用之间至少隔这么久，避免触发飞书的接口频控。
+CALL_SPACING_SECONDS = 0.3
 
 
 def api_id(value: Any) -> str:
@@ -91,7 +93,7 @@ class FeishuTransport:
                 raise LeaseLost
 
     async def call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        await asyncio.sleep(max(0, self._last_call + 0.3 - time.monotonic()))
+        await asyncio.sleep(max(0, self._last_call + CALL_SPACING_SECONDS - time.monotonic()))
         if not self._round_fenced:
             await self.fence()
         self._last_call = time.monotonic()

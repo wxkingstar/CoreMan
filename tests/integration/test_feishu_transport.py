@@ -13,6 +13,12 @@ from coreman.core.platforms.feishu import FeishuError
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
 
 
+@pytest.fixture(autouse=True)
+def _no_call_spacing(monkeypatch):
+    """频控间隔只为保护真实的飞书接口；FakeAPI 不限频，每次调用都等 0.3 秒只会拖慢用例。"""
+    monkeypatch.setattr("coreman.runtime.gateway_feishu.transport.CALL_SPACING_SECONDS", 0)
+
+
 class FakeAPI:
     def __init__(self):
         self.calls = []

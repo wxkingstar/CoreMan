@@ -71,6 +71,9 @@ REJECTED_STATUSES = {401, 403}
 REJECTED_BACKOFF_MAX = 60.0
 # Discovery rounds in a row a live driver's socket may refuse connections before a restart.
 SOCKET_FAILURE_LIMIT = 2
+# A freshly started driver needs a moment to bind its socket: about 3 seconds of retries.
+DRIVER_CONNECT_ATTEMPTS = 30
+DRIVER_CONNECT_RETRY_SECONDS = 0.1
 # Discovery rounds a broken driver is kept for its in-flight streams before a forced restart.
 HEAL_DEFER_ROUNDS = 30
 # Enrollment rejections worth retrying; any other 4xx will not change with the same token.
@@ -704,14 +707,14 @@ class Daemon:
                         base_url="http://runtime",
                         timeout=10,
                     ) as client:
-                        for attempt in range(30):
+                        for attempt in range(DRIVER_CONNECT_ATTEMPTS):
                             try:
                                 response = await client.get("/v1/models")
                                 break
                             except httpx.ConnectError:
-                                if attempt == 29:
+                                if attempt == DRIVER_CONNECT_ATTEMPTS - 1:
                                     raise
-                                await asyncio.sleep(0.1)
+                                await asyncio.sleep(DRIVER_CONNECT_RETRY_SECONDS)
                         response.raise_for_status()
                         cap["models"] = [r["id"] for r in response.json()["data"]]
                         if provider == "claude":
