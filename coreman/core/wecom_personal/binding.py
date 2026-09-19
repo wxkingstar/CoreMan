@@ -14,19 +14,22 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.bus import outbox
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.openuserid import OpenUseridResolver
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import WecomPersonalBinding
+from coreman.core.db.models import Bot, WecomPersonalBinding
 from coreman.core.logging import get_logger
 from coreman.core.wecom_bots import scan
 from coreman.core.wecom_personal import gateway, service
+from coreman.core.wecom_personal.cards import card_task_id, selection_card
 
 QR_TTL = timedelta(minutes=5)
 POLL_SECONDS = 3
@@ -34,6 +37,17 @@ MAX_BACKOFF_SECONDS = 30
 # 扫到凭证后，核对本人的重试最多再延长这么久。
 VERIFY_GRACE = timedelta(minutes=10)
 SWEEP_LIMIT = 50
+# 私聊里发起绑定后这么久之内完成，结果才回到那个私聊。
+NOTIFY_TTL = timedelta(minutes=30)
+# 绑定没成功时回到私聊的说明；二维码过期不打扰，本人重新点链接即可。
+ANNOUNCED_FAILURES = {
+    "not_self": (
+        "确认授权的不是你本人的企业微信账号，没有绑定。请用你自己的企业微信重新点授权链接。"
+    ),
+    "identity_unlinked": (
+        "企业微信返回的账号在 CoreMan 里对不上，没有绑定，请联系管理员同步通讯录。"
+    ),
+}
 # 取消或结束后，这么久之内不再重新生成：二维码要向企业微信申请，别被反复点击刷接口。
 RESTART_COOLDOWN = timedelta(seconds=10)
 # 扫码失败的原因（scan_error）：前端按这些键给出说明。
@@ -94,6 +108,86 @@ async def start(cipher: Cipher, row: WecomPersonalBinding) -> None:
     row.scan_next_poll_at = now + timedelta(seconds=POLL_SECONDS)
     row.scan_upstream_status = None
     row.scan_error = None
+
+
+def remember_chat(
+    row: WecomPersonalBinding, *, bot_id: uuid.UUID, chat_id: str, task_id: int
+) -> None:
+    """本人在私聊里要求绑定：记下来，绑定结果回到这个私聊。"""
+    row.scan_notify = {
+        "bot_id": str(bot_id),
+        "chat_id": chat_id,
+        "task_id": task_id,
+        "at": _now().isoformat(),
+    }
+
+
+def _success_text(row: WecomPersonalBinding) -> str:
+    summary = service.summary(row)
+    lines = [
+        "**已绑定企业微信**",
+        f"授权机器人「{row.bot_name or row.wecom_bot_id}」代表你本人，现在的使用范围是"
+        f"「{service.LEVEL_TITLES.get(row.authorization_level, '仅读取')}」。",
+    ]
+    observed = [
+        entry
+        for key, entry in (row.capabilities or {}).items()
+        if key.endswith(":read") and isinstance(entry, dict)
+    ]
+    if observed and all(entry.get("state") == "unauthorized" for entry in observed):
+        lines.append(
+            "不过企业微信里还没有授权任何能力，可能是跳过了「确认授权」。" + service.renew_hint(row)
+        )
+    elif summary["unauthorized"] or summary["expired"]:
+        missing = "、".join(summary["unauthorized"] + summary["expired"])
+        lines.append(f"其中「{missing}」暂时用不了。" + service.renew_hint(row))
+    lines.append("现在就可以直接问我，例如“看看我这周的日程”；要调整范围，在下面的卡片里选择。")
+    return "\n".join(lines)
+
+
+async def _announce(session: AsyncSession, row: WecomPersonalBinding, outcome: str) -> None:
+    """把绑定结果发回发起绑定的那个私聊；成功时附上档位卡片。"""
+    notify, row.scan_notify = row.scan_notify, None
+    if not isinstance(notify, dict):
+        return
+    try:
+        at = datetime.fromisoformat(str(notify["at"]))
+        bot_id = uuid.UUID(str(notify["bot_id"]))
+        chat_id = str(notify["chat_id"])
+        task_id = int(notify["task_id"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if _now() - at > NOTIFY_TTL:
+        return
+    bot = await session.get(Bot, bot_id)
+    if bot is None or not bot.enabled or bot.platform != "wecom":
+        return
+    if outcome == "bound":
+        text = _success_text(row)
+    elif outcome in ANNOUNCED_FAILURES:
+        text = ANNOUNCED_FAILURES[outcome]
+    else:
+        text = "没有绑定成功，请重新发送“连接企业微信”再试一次。"
+    stamp = int(_now().timestamp())
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="wecom",
+        kind="send",
+        dedupe_key=f"wecom_personal:bind:{row.user_id}:{stamp}:text",
+        target={"chat_id": chat_id},
+        payload={"markdown": text},
+    )
+    if outcome == "bound":
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="wecom",
+            kind="send",
+            dedupe_key=f"wecom_personal:bind:{row.user_id}:{stamp}:card",
+            target={"chat_id": chat_id},
+            payload={"card": selection_card(card_task_id(task_id), row.authorization_level)},
+        )
 
 
 def cancel(row: WecomPersonalBinding) -> None:
@@ -179,6 +273,7 @@ async def refresh(
     if outcome != "bound":
         log.warning("wecom_personal_scan_rejected", reason=outcome)
         _clear(row, "failed", outcome)
+        await _announce(session, row, outcome)
         return None
     row.scan_upstream_status = "success"
     _clear(row, "succeeded")
@@ -188,6 +283,7 @@ async def refresh(
     except service.PersonalError:
         # 检测失败不影响绑定：页面上可以再点一次「重新检查」。
         pass
+    await _announce(session, row, "bound")
     return None
 
 

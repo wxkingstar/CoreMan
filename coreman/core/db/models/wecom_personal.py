@@ -131,3 +131,5 @@ class WecomPersonalBinding(TimestampMixin, Base):
     scan_poll_interval: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
     scan_upstream_status: Mapped[str | None] = mapped_column(Text)
     scan_error: Mapped[str | None] = mapped_column(Text)
+    # 从私聊里发起绑定时记下来：{"bot_id", "chat_id", "task_id", "at"}，绑定结果回到这个私聊。
+    scan_notify: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,7 +22,14 @@ from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, RuntimeNode, Task, WecomPersonalBinding
 from coreman.core.relay.models import backend_of
 from coreman.core.wecom.cards import notice_card
-from coreman.core.wecom_personal import policy, service
+from coreman.core.wecom_personal import binding, policy, service
+from coreman.core.wecom_personal.cards import (
+    CARD_PREFIX,
+    OPTIONS,
+    QUESTION_KEY,
+    card_task_id,
+    selection_card,
+)
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import reply_once
@@ -37,17 +43,12 @@ CONNECT_WORDS = (
     "绑定企微",
 )
 DISCONNECT_WORDS = ("断开企业微信", "断开我的企业微信", "断开企微", "断开我的企微")
-CARD_PREFIX = "wecom_personal"
-QUESTION_KEY = "wecom_personal_level"
 # 档位卡片的有效期，从发出卡片的那一轮结束起算。
 SELECTION_TTL = timedelta(minutes=10)
-# 卡片选项最多 11 个字，完整说明放在卡片前那条消息里。
-OPTIONS = (
-    ("readonly", "仅读取"),
-    ("all_except_send", "读写（不发邮件）"),
-    ("all", "全部（含发邮件）"),
-)
 PAGE_PATH = "/my-wecom"
+# 手机企业微信里点开它，页面会直接跳到企业微信的确认页；电脑上点开则弹出二维码。
+AUTHORIZE_QUERY = "?authorize=1"
+__all__ = ["CARD_PREFIX", "OPTIONS", "QUESTION_KEY", "card_task_id", "selection_card"]
 
 DATA_RULES = "\n".join(
     (
@@ -110,10 +111,6 @@ async def _scope(session: AsyncSession, ctx: TaskContext, intake: Intake) -> pol
         return None
 
 
-def card_task_id(origin_task_id: int) -> str:
-    return f"{CARD_PREFIX}@{origin_task_id}@{secrets.token_hex(4)}"
-
-
 def _problems(row: WecomPersonalBinding) -> str:
     summary = service.summary(row)
     parts = []
@@ -143,45 +140,34 @@ def selection_brief(row: WecomPersonalBinding, ctx: TaskContext) -> str:
     return "\n".join(lines)
 
 
+def authorize_url(ctx: TaskContext) -> str | None:
+    base = ctx.public_base_url.rstrip("/")
+    return base + PAGE_PATH + AUTHORIZE_QUERY if base else None
+
+
 def binding_brief(ctx: TaskContext, row: WecomPersonalBinding | None) -> str:
     lead = (
         "你之前的授权机器人已被删除或重置了 Secret，需要重新绑定。"
         if row is not None and row.error == "credentials_rejected"
         else "你还没有绑定企业微信。"
     )
+    url = authorize_url(ctx)
+    entry = (
+        f"👉 [点这里一键授权]({url})"
+        if url
+        else "请打开 CoreMan「我的企业微信」页面点「扫码绑定」。"
+    )
     return "\n".join(
         (
             "**绑定企业微信**",
             lead + "绑定后，你在任意 AI 员工的私聊里都能让它以你的身份查询和办理企业微信里的事情。",
-            f"1. 打开 {page_url(ctx)}，点「扫码绑定」；",
-            "2. 用手机企业微信扫码，确认创建机器人，并**点「确认授权」**；",
-            "3. 绑定完成后回到这里，再发送“连接企业微信”选择使用范围。",
-            "扫码会在你的企业微信「工作台 → 智能机器人」里建一个只属于你的授权机器人，"
+            entry,
+            "在手机上点开后，依次点「确认创建」和「**确认授权**」，完成后我会在这里通知你；"
+            "在电脑上点开会显示二维码，用手机企业微信扫码即可。",
+            "授权会在你的企业微信「工作台 → 智能机器人」里建一个只属于你的授权机器人，"
             "它只负责取数，不需要和它聊天，也不要删除它。",
         )
     )
-
-
-def selection_card(task_id: str, level: str = "readonly", icon_url: str = "") -> dict[str, Any]:
-    source: dict[str, Any] = {"desc": "企业微信个人工具"}
-    if icon_url:
-        source["icon_url"] = icon_url
-    return {
-        "card_type": "vote_interaction",
-        "source": source,
-        "main_title": {"title": "连接企业微信", "desc": "选择允许 AI 员工使用的范围"},
-        "checkbox": {
-            "question_key": QUESTION_KEY,
-            "option_list": [
-                {"id": option, "text": title, "is_checked": option == level}
-                for option, title in OPTIONS
-            ],
-            "mode": 0,
-            "disable": False,
-        },
-        "submit_button": {"text": "连接", "key": "wecom_personal_connect"},
-        "task_id": task_id,
-    }
 
 
 async def validate(session: AsyncSession, ctx: TaskContext, intake: Intake) -> policy.Scope:
@@ -231,10 +217,19 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
         scope = await validate(session, ctx, intake)
     except ValueError as exc:
         return await _finish(session, ctx, intake, str(exc), {"personal_connect_denied": True})
-    row = await service.load(session, scope.user_id)
-    if row is None or row.status != "bound":
+    row = await service.load(session, scope.user_id, create=True)
+    assert row is not None
+    if row.status != "bound":
+        # 记下这个私聊：本人点链接完成授权后，结果和档位卡片发回这里。
+        binding.remember_chat(
+            row, bot_id=intake.bot.id, chat_id=intake.chat_id, task_id=ctx.task.id
+        )
         return await _finish(
-            session, ctx, intake, binding_brief(ctx, row), {"wecom_personal_unbound": True}
+            session,
+            ctx,
+            intake,
+            binding_brief(ctx, row),
+            {"wecom_personal_flow": True, "wecom_personal_unbound": True},
         )
     icon = str(await ctx.settings_store.get("card_icon_url", default="") or "")
     # 说明随这一轮回复，卡片随后主动推送：卡片选项只有几个字，每一档的意思写在说明里。

@@ -10,6 +10,10 @@ import { errorMessage } from '@/utils/errors'
  * 所以只画给本人看；唯一的链接留给在手机企业微信里打开本页的人直接跳转。
  * 轮询、核对本人、保存凭证都在服务端完成，这里只展示进度。
  */
+const props = defineProps<{
+  /** 手机企业微信里从私聊链接进来：拿到二维码内容就直接跳过去，由企业微信打开确认页。 */
+  redirect?: boolean
+}>()
 const visible = defineModel<boolean>('visible', { required: true })
 const emit = defineEmits<{ changed: [WecomBinding]; bound: [WecomBinding] }>()
 const { t, te } = useI18n()
@@ -18,6 +22,7 @@ const row = ref<WecomBinding | null>(null)
 const qr = ref('')
 const error = ref('')
 const starting = ref(false)
+const redirected = ref(false)
 let qrSource: string | null = null
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
@@ -57,6 +62,12 @@ async function show(next: WecomBinding, current: number): Promise<void> {
   }
   if (current !== generation) return
   stopPolling()
+  if (props.redirect && source && !redirected.value) {
+    // 用 replace：本人在企业微信里确认完按返回，直接回到私聊等通知。
+    redirected.value = true
+    window.location.replace(source)
+    return
+  }
   if (next.scan?.status === 'pending') {
     timer = setTimeout(() => void poll(current), Math.max(1, next.scan.retry_after ?? 3) * 1000)
     return
@@ -133,7 +144,14 @@ onUnmounted(() => { ++generation; stopPolling() })
       v-loading="starting"
       class="bind"
     >
-      <template v-if="pending && scan">
+      <p
+        v-if="redirected"
+        class="hint"
+        data-test="bind-redirecting"
+      >
+        {{ t('myWecom.scan.redirecting') }}
+      </p>
+      <template v-else-if="pending && scan">
         <p class="hint">
           {{ t('myWecom.scan.hint') }}
         </p>

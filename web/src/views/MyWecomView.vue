@@ -18,6 +18,8 @@ const CONFIRM_WINDOW = 3 * 60_000, AUTO_CHECK_EVERY = 10_000, AUTO_CHECK_FOR = 2
 const { t, te } = useI18n()
 const binding = ref<WecomBinding | null>(null)
 const loading = ref(false), error = ref(''), busy = ref(''), scanning = ref(false)
+// 从私聊链接进来且在手机企业微信里：二维码一生成就直接跳到企业微信的确认页。
+const redirectToWecom = ref(false)
 let requestVersion = 0
 let refreshing = false, autoChecking = false
 let timer: ReturnType<typeof setInterval> | undefined
@@ -148,8 +150,31 @@ watch(awaitingConfirm, (waiting) => {
   autoTimer = setInterval(() => void autoCheck(), AUTO_CHECK_EVERY)
 })
 
+/** 手机企业微信里打开的页面：可以直接跳到企业微信的确认页，不必扫同一块屏幕上的二维码。 */
+function inMobileWecom(): boolean {
+  const ua = navigator.userAgent
+  return /wxwork/i.test(ua) && /iphone|ipad|android|mobile/i.test(ua)
+}
+/**
+ * 私聊里「一键授权」链接带着 ?authorize=1：还没绑定就直接开始授权。手机企业微信里直接跳转，
+ * 电脑上弹出二维码。参数用完就去掉，刷新页面不会再触发一次。
+ */
+async function authorizeFromLink(): Promise<void> {
+  const params = new URLSearchParams(window.location.search)
+  if (params.get('authorize') !== '1') return
+  params.delete('authorize')
+  const query = params.toString()
+  window.history.replaceState(window.history.state, '', window.location.pathname + (query ? `?${query}` : '') + window.location.hash)
+  await load()
+  if (binding.value && binding.value.status !== 'bound' && binding.value.identity_linked) {
+    redirectToWecom.value = inMobileWecom()
+    scanning.value = true
+  }
+}
+
 onMounted(() => {
-  void load()
+  if (new URLSearchParams(window.location.search).get('authorize') === '1') void authorizeFromLink()
+  else void load()
   window.addEventListener('focus', refreshVisible)
   document.addEventListener('visibilitychange', refreshVisible)
   timer = setInterval(refreshVisible, 15000)
@@ -449,6 +474,7 @@ onUnmounted(() => {
     </div>
     <WecomBindDialog
       v-model:visible="scanning"
+      :redirect="redirectToWecom"
       @changed="apply"
       @bound="onBound"
     />
