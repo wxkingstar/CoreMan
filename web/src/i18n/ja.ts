@@ -390,7 +390,7 @@ export default {
   "linkReady": "リンクを作成しました",
   "commandHint": "Claude/Codex にログインしたユーザーで次のコマンドを実行してください。",
   "credentialHint": "リンクは認証情報を含み、一度だけ表示します。新規ノード1件のみ登録できます。",
-  "replaceHint": "対象マシンに既存の Runtime がある場合は、末尾の | sh を | sh -s -- --replace に変えてください。既存の Runtime を停止し、インストールディレクトリ全体をバックアップしてから、このリンクで再インストールします。",
+  "replaceHint": "対象マシンに既存の Runtime がある場合は、末尾の {from} を {to} に変えてください。既存の Runtime を停止し、インストールディレクトリ全体をバックアップしてから、このリンクで再インストールします。",
   "createLink": "インストールコマンドを作成",
   "copyCommand": "コマンドをコピー",
   "rootRequired": "プロジェクトルートの絶対パスを入力してください",
