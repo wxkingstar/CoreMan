@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- "Connect Feishu" could not create an authorization link on the two "all permissions" tiers for an app with many permissions enabled. Those tiers requested every user permission the app had, and Feishu refuses a request with too many permissions (error 20084); one production app has 638. They now request only what the personal tools use: for each API, one permission the app has (the most specific first), plus the message-read set, about 60 in all. When Feishu still refuses, the worker logs Feishu's reason and code (`feishu_personal_authorization_refused`, `personal_authorization_unavailable`) instead of dropping them.
 - Opening "查看完整思考过程" (View full thinking) while the first turn of a new group chat was still running showed "会话不存在" (Session not found), even to administrators, because the session viewer judged ownership from chat logs that were only written when a turn ended.
 - The `xhigh` reasoning effort can now be chosen for the models that support it. The model catalog never marked any model as supporting `xhigh`, so the option stayed greyed out even for Claude Opus 5. Migration `0043` sets the flags from Anthropic's and OpenAI's model documentation (listed under Added); models not in those docs keep the administrator's setting. Employees set to `xhigh` on a model that is switched off drop to `high`, which is what Claude Code already ran them at. Requires database migration `0043`.
 

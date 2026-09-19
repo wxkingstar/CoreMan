@@ -127,7 +127,7 @@ offline_access auth:user.id:read search:message im:message:readonly
 im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read
 ```
 
-第一、二档按应用已开通的用户权限申请，个人工具用到的权限如下（第二档会去掉带 send、reply、forward 的权限和 `im:message`；`calendar:calendar.event:reply` 只是回复本人收到的日程邀请，不算发送，第二档保留）：
+第一、二档只申请个人工具用到的权限：每个接口从应用已开通的权限里挑一个（优先细分权限，没有才用旧版大权限），再加上第三档的消息读取权限，不会把应用开通的其他权限一并申请——飞书单次授权能申请的权限数量有上限，超过会报 20084。个人工具用到的权限如下（第二档会去掉带 send、reply、forward 的权限和 `im:message`；`calendar:calendar.event:reply` 只是回复本人收到的日程邀请，不算发送，第二档保留）：
 
 | 业务域 | 用户身份权限 |
 |--------|-------------|
@@ -148,7 +148,7 @@ im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read
 
 1. 本人的飞书身份须已同步到 CoreMan，机器人绑定的 Runtime 已升级（心跳上报 `feishu_personal_tools_v1`；Claude 与 Codex 均支持）。
 2. **私聊**机器人发送 `连接飞书`，或在输入框输入 `/` 选择斜杠指令 `/connect`。系统展示选择卡片，本人点击选项后才生成链接：1 全部权限含发送消息、2 全部权限但不含发送消息、3 消息只读。卡片绑定本人、原私聊及当次选择，旧卡片和重复点击不能重新生成链接。选择有效期 10 分钟，每次重新连接都重新选择，模型不能代选。
-   第一、二档从应用当前已开通的用户权限生成范围，需要应用身份 `admin:app.info:readonly` 或 `application:application:self_manage` 查询应用权限；缺少时明确提示。第一档额外要求应用已开通 `im:message` 和 `im:message.send_as_user`。第三档按固定消息读取范围申请，不依赖权限查询。
+   第一、二档从应用当前已开通的用户权限里挑个人工具用到的部分，需要应用身份 `admin:app.info:readonly` 或 `application:application:self_manage` 查询应用权限；缺少时明确提示。第一档额外要求应用已开通 `im:message` 和 `im:message.send_as_user`。第三档按固定消息读取范围申请，不依赖权限查询。
    飞书可能沿用历史同意记录而直接显示成功，CoreMan 仍按本次选择及实际返回权限交集执行。缺失权限会显示在后台；不会以历史多余权限扩大本次范围。
 3. 返回私聊回复“已授权”；Agent 会检查授权并核对身份。之后可直接询问“查看最近的聊天”“我明天有哪些日程”“帮我约张三周五下午开会”“看看有没有未读邮件”或“查找我参加的会议纪要”，无需命令前缀。
 4. 网页「我的飞书」可以查看、断开本人在各机器人上的连接。私聊也支持直接说“撤销授权”。

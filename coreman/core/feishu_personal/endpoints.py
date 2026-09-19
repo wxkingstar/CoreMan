@@ -481,6 +481,24 @@ def denied(endpoint: Endpoint, level: str, scopes: set[str] | frozenset[str]) ->
     return "sending_not_authorized" if endpoint.kind == "send" else "selected_permission_missing"
 
 
+def request_scopes(level: str, allowed: set[str] | frozenset[str]) -> list[str]:
+    """What the top two tiers ask the owner to grant: only what the tools use.
+
+    `allowed` is the app's enabled user permissions already narrowed to the tier. Apps
+    often enable hundreds of permissions and Feishu refuses an authorization request with
+    too many (error 20084), so each API contributes one permission the app has, the most
+    specific one first, plus the fixed message-read set and the extra field permissions.
+    """
+    chosen = set(allowed & (MESSAGE_SCOPES | EXTRA_SCOPES | {"offline_access"}))
+    for endpoint in ENDPOINTS.values():
+        if level not in LEVELS_BY_KIND[endpoint.kind] or not endpoint.also <= allowed:
+            continue
+        pick = next((scope for scope in endpoint.scopes if scope in allowed), None)
+        if pick is not None:
+            chosen |= {pick} | endpoint.also
+    return sorted(chosen)
+
+
 def manifest_scopes() -> frozenset[str]:
     """User permissions the app requests at creation: one accepted permission per API."""
     wanted = set(EXTRA_SCOPES)

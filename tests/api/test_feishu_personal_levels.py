@@ -63,6 +63,7 @@ async def test_chosen_level_controls_requested_scopes(
         "docx:document:write_only",
         "im:message",
         "im:message.send_as_user",
+        "aily:session:read",
     ]
     monkeypatch.setattr(permissions, "app_user_scopes", AsyncMock(return_value=available))
     http = AsyncMock(
@@ -79,6 +80,8 @@ async def test_chosen_level_controls_requested_scopes(
     requested = set(http.call_args.kwargs["data"]["scope"].split())
     assert ("docx:document:write_only" in requested) == (choice != "3")
     assert ("im:message.send_as_user" in requested) == (choice == "1")
+    # Permissions no tool uses are never requested, however many the app enabled.
+    assert "aily:session:read" not in requested
 
 
 async def test_missing_send_permission_never_looks_like_complete_third_tier(
@@ -375,3 +378,23 @@ async def test_mail_retries_through_mcp_send_one_mail(db_session, app, client, m
     assert changed == {"error": "uuid_reused"}
     row = (await db_session.scalars(select(FeishuPersonalSend))).one()
     assert (row.status, row.draft_id, row.send_key) == ("sent", "d1", "report-1")
+
+
+async def test_refused_authorization_keeps_feishus_code(db_session, app, monkeypatch):
+    _, user, task = await setup(db_session, app)
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    await service.begin_selection(db_session, app.state.cipher, scope)
+    monkeypatch.setattr(
+        permissions,
+        "app_user_scopes",
+        AsyncMock(return_value=list(permissions.MESSAGE_SCOPES) + ["docx:document"]),
+    )
+    refusal = {
+        "error": "invalid_scope",
+        "error_description": "The provided scope list contains too many scopes.",
+        "code": 20084,
+    }
+    monkeypatch.setattr(service, "_http", AsyncMock(return_value=refusal))
+    with pytest.raises(service.PersonalError) as caught:
+        await service.choose_authorization(db_session, app.state.cipher, scope, "2")
+    assert caught.value.payload() == {"error": "authorization_unavailable", "upstream_code": 20084}

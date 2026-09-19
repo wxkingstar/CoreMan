@@ -470,3 +470,37 @@ def test_only_registered_paths_match():
 )
 def test_denied_follows_tier_kind_and_permissions(key, level, scopes, reason):
     assert endpoints.denied(endpoints.ENDPOINTS[key], level, frozenset(scopes)) == reason
+
+
+# An app like the one that hit Feishu's limit: everything CoreMan asks for, older broad
+# permissions, and hundreds of unrelated ones (638 in production; Feishu refused them all).
+CROWDED = sorted(
+    set(manifest.USER_SCOPES)
+    | {"calendar:calendar", "drive:drive", "docx:document", "im:chat", "wiki:wiki"}
+    | {f"aily:thing{i}:read" for i in range(600)}
+    | {"offline_access"}
+)
+
+
+@pytest.mark.parametrize("level", ["all", "all_except_send"])
+def test_top_tiers_request_only_what_the_tools_use(level):
+    narrowed = set(permissions.select_scopes(level, CROWDED))
+    requested = endpoints.request_scopes(level, narrowed)
+    assert len(requested) <= len(endpoints.ENDPOINTS)
+    assert not [s for s in requested if s.startswith("aily:")]
+    # The most specific permission is chosen over the broad one when the app has both.
+    assert "calendar:calendar.event:read" in requested and "calendar:calendar" not in requested
+    assert set(permissions.MESSAGE_SCOPES) - {"auth:user.id:read"} <= set(requested)
+    granted = frozenset(requested)
+    for key, endpoint in endpoints.ENDPOINTS.items():
+        if level in endpoints.LEVELS_BY_KIND[endpoint.kind]:
+            assert endpoints.denied(endpoint, level, granted) is None, key
+    sending = {"im:message.send_as_user", "im:message", "mail:user_mailbox.message:send"}
+    assert (sending <= granted) == (level == "all")
+
+
+def test_broad_permissions_are_requested_when_they_are_all_the_app_has():
+    requested = endpoints.request_scopes(
+        "all_except_send", {"calendar:calendar", "wiki:wiki", "offline_access"}
+    )
+    assert requested == ["calendar:calendar", "offline_access", "wiki:wiki"]
