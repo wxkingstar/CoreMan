@@ -111,6 +111,30 @@ def test_scheduled_run_inserts_constraints_before_custom_prompt() -> None:
         assert rule in DEFAULT_CRON_MODE
 
 
+def test_extra_sections_stay_before_the_tail() -> None:
+    """本轮附加能力（本人飞书、定时任务等）不能抢 ⑪ 的结尾位置。"""
+    kwargs: dict[str, Any] = {
+        "segments": SEG,
+        "backend": "claude",
+        "verbosity_level": 3,
+        "bot_prompt": "你是销售",
+        "speaker": KNOWN,
+        "speaker_changed": False,
+        "systems_prompt": "## 业务系统访问",
+        "extra": "\n\n## 本人飞书\n可以读取。\n\n## 本人定时任务\n可以创建。",
+    }
+    for scheduled in (False, True):
+        out = build_system_prompt(**kwargs, scheduled=scheduled)
+        assert (
+            out.index("## 业务系统访问")
+            < out.index("## 本人飞书")
+            < out.index("## 本人定时任务")
+            < out.index(DEFAULT_RUNTIME_TAIL.strip())
+        )
+        assert out.endswith(DEFAULT_RUNTIME_TAIL.strip())
+        assert "\n\n\n" not in out
+
+
 class _FakeStore:
     """只实现 load_segments 用到的 get()：为了读七个键去连库不值当。"""
 
