@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate, make_msgid
@@ -11,7 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, model_validator
 
-from coreman.core.feishu_personal import service
+from coreman.core.feishu_personal import sends, service
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
     Call,
@@ -19,6 +21,7 @@ from coreman.core.feishu_personal.toolbase import (
     Page,
     PathId,
     TextPage,
+    Uuid,
     compact,
     ordered,
     page,
@@ -82,6 +85,10 @@ class Compose(Arguments):
         if not (self.to or self.cc or self.bcc):
             raise ValueError("at least one recipient")
         return self
+
+
+class SendMail(Compose):
+    uuid: Uuid
 
 
 class ModifyMail(Arguments):
@@ -220,14 +227,23 @@ async def create_draft(args: Compose, call: Call) -> dict[str, Any]:
 
 @tool(
     "feishu_mail_send",
-    Compose,
+    SendMail,
     "mail.send_draft",
-    "Send a mail from the user's mailbox. Never retry after an unclear result: check Sent.",
+    "Send a mail from the user's mailbox. Retry with the same uuid: it never sends twice.",
 )
-async def send_mail(args: Compose, call: Call) -> dict[str, Any]:
-    draft_id = await _draft(args, call)
-    sent = await call("mail.send_draft", path={**ME, "draft_id": draft_id}, json={})
-    return {**sent, "draft_id": draft_id, "sent": True}
+async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
+    content = args.model_dump(exclude={"uuid"})
+    fingerprint = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+    record = await sends.claim(call.session, call.scope, args.uuid, fingerprint)
+    if record.status == "sent":
+        return {**(record.result or {}), "draft_id": record.draft_id, "sent": True, "repeat": True}
+    if record.draft_id is None:
+        record.draft_id = await _draft(args, call)
+        # Kept even if sending fails below, so a retry sends this draft instead of a new one.
+        await call.session.flush()
+    sent = await call("mail.send_draft", path={**ME, "draft_id": record.draft_id}, json={})
+    record.status, record.result = "sent", sent
+    return {**sent, "draft_id": record.draft_id, "sent": True}
 
 
 @tool(

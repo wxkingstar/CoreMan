@@ -326,3 +326,52 @@ async def test_upstream_refusals_name_what_to_fix(
     )
     row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
     assert row.status == "connected"
+
+
+async def test_mail_retries_through_mcp_send_one_mail(db_session, app, client, monkeypatch):
+    from coreman.core.db.models import FeishuPersonalSend
+
+    bot, user, task = await setup(db_session, app)
+    scopes = [
+        "mail:user_mailbox:readonly",
+        "mail:user_mailbox.message:modify",
+        "mail:user_mailbox.message:send",
+    ]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level="all",
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    sent = []
+
+    async def feishu(method, url, **kwargs):
+        if url.endswith("/profile"):
+            return {"code": 0, "data": {"primary_email_address": "me@example.com"}}
+        if url.endswith("/drafts"):
+            return {"code": 0, "data": {"draft_id": f"d{len(sent) + 1}"}}
+        sent.append(url)
+        # The first send is lost upstream; later ones go through.
+        return {"code": 0, "data": {"message_id": "m1"}} if len(sent) > 1 else {"code": 1}
+
+    monkeypatch.setattr(service, "_http", AsyncMock(side_effect=feishu))
+    args = {"to": ["a@example.com"], "subject": "周报", "body": "内容", "uuid": "report-1"}
+    auth = await headers(app, task, user)
+    first = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    assert first == {"error": "feishu_request_failed", "upstream_code": 1}
+    second = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    third = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    assert second["sent"] and third["repeat"] and third["message_id"] == "m1"
+    # Both sends used the draft made first; the third call reached no Feishu API.
+    assert [url.rsplit("/", 2)[-2] for url in sent] == ["d1", "d1"]
+    changed = value(
+        await client.post(
+            URL, headers=auth, json=rpc("feishu_mail_send", {**args, "body": "别的内容"})
+        )
+    )
+    assert changed == {"error": "uuid_reused"}
+    row = (await db_session.scalars(select(FeishuPersonalSend))).one()
+    assert (row.status, row.draft_id, row.send_key) == ("sent", "d1", "report-1")

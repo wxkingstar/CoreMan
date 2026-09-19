@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from coreman.core.feishu_apps import manifest
-from coreman.core.feishu_personal import endpoints, permissions, service, tools
+from coreman.core.feishu_personal import endpoints, permissions, sends, service, tools
 
 UUID = "a1b2c3"
 # One minimal valid call per tool; a new tool without an entry fails the coverage test.
@@ -68,7 +68,12 @@ SAMPLES = {
     "feishu_mail_search": {"query": "invoice"},
     "feishu_mail_read": {"message_id": "TWFpbA=="},
     "feishu_mail_create_draft": {"to": ["a@example.com"], "subject": "Hi", "body": "Hello"},
-    "feishu_mail_send": {"to": ["a@example.com"], "subject": "Hi", "body": "Hello"},
+    "feishu_mail_send": {
+        "to": ["a@example.com"],
+        "subject": "Hi",
+        "body": "Hello",
+        "uuid": UUID,
+    },
     "feishu_mail_modify": {"message_id": "m1", "mark_read": True},
     "feishu_mail_trash": {"message_id": "m1"},
     "feishu_task_list": {},
@@ -155,12 +160,25 @@ def upstream(monkeypatch):
 
     mock = AsyncMock(side_effect=call)
     monkeypatch.setattr(service, "api_request", mock)
+    # Mail dedup records, in memory; the database version is covered by the API tests.
+    records = {}
+
+    async def claim(session, scope, key, fingerprint):
+        record = records.setdefault(
+            key,
+            SimpleNamespace(fingerprint=fingerprint, status="drafted", draft_id=None, result=None),
+        )
+        if record.fingerprint != fingerprint:
+            raise service.PersonalError("uuid_reused")
+        return record
+
+    monkeypatch.setattr(sends, "claim", claim)
     return mock
 
 
 async def invoke(name, args):
     scope = SimpleNamespace(open_id="ou_self", platform_user_id="u_self", scheduled=False)
-    return await tools.dispatch(None, None, scope, name, args)
+    return await tools.dispatch(SimpleNamespace(flush=AsyncMock()), None, scope, name, args)
 
 
 def calls(mock):
@@ -253,7 +271,13 @@ async def test_created_event_invites_attendees_and_reports_a_failed_invite(upstr
 async def test_mail_is_sent_from_the_owner_mailbox_as_a_draft_first(upstream):
     out = await invoke(
         "feishu_mail_send",
-        {"to": ["a@example.com"], "cc": ["b@example.com"], "subject": "周报", "body": "内容"},
+        {
+            "to": ["a@example.com"],
+            "cc": ["b@example.com"],
+            "subject": "周报",
+            "body": "内容",
+            "uuid": UUID,
+        },
     )
     (_, profile, _), (_, draft, kw), (_, send, _) = calls(upstream)
     assert profile == "/mail/v1/user_mailboxes/me/profile"
@@ -268,6 +292,29 @@ async def test_mail_is_sent_from_the_owner_mailbox_as_a_draft_first(upstream):
     )
     assert message["Subject"] == "周报" and message.get_content().strip() == "内容"
     assert out["sent"] is True and out["draft_id"] == "d1"
+
+
+async def test_mail_retry_with_the_same_uuid_never_sends_twice(upstream):
+    args = SAMPLES["feishu_mail_send"]
+
+    async def send_fails_once(session, cipher, scope, method, path, **kwargs):
+        if path.endswith("/send") and not getattr(send_fails_once, "failed", False):
+            send_fails_once.failed = True
+            raise service.PersonalError("feishu_request_failed", upstream_code=500)
+        return _upstream(method, path)
+
+    upstream.side_effect = send_fails_once
+    with pytest.raises(service.PersonalError, match="feishu_request_failed"):
+        await invoke("feishu_mail_send", args)
+    # The retry sends the draft already made instead of composing a new mail.
+    assert (await invoke("feishu_mail_send", args))["sent"] is True
+    repeat = await invoke("feishu_mail_send", args)
+    assert repeat["sent"] is True and repeat["repeat"] is True
+    paths = [path for _, path, _ in calls(upstream)]
+    assert paths.count("/mail/v1/user_mailboxes/me/drafts") == 1
+    assert paths.count("/mail/v1/user_mailboxes/me/drafts/d1/send") == 2
+    with pytest.raises(service.PersonalError, match="uuid_reused"):
+        await invoke("feishu_mail_send", {**args, "subject": "Another"})
 
 
 async def test_mail_read_decodes_the_body_and_list_fetches_summaries(upstream):
@@ -322,9 +369,18 @@ async def test_own_identity_is_used_where_the_api_names_a_person(upstream):
         ("feishu_mail_read", {"message_id": "a/b"}),
         (
             "feishu_mail_send",
-            {"to": ["a@example.com"], "subject": "x\r\nBcc: c@example.com", "body": "b"},
+            {
+                "to": ["a@example.com"],
+                "subject": "x\r\nBcc: c@example.com",
+                "body": "b",
+                "uuid": UUID,
+            },
         ),
-        ("feishu_mail_send", {"to": ["not an address"], "subject": "x", "body": "b"}),
+        (
+            "feishu_mail_send",
+            {"to": ["not an address"], "subject": "x", "body": "b", "uuid": UUID},
+        ),
+        ("feishu_mail_send", {"to": ["a@example.com"], "subject": "x", "body": "b"}),
         (
             "feishu_calendar_events",
             {"start_time": "2026-09-01T00:00:00Z", "end_time": "2026-11-01T00:00:00Z"},
@@ -377,6 +433,7 @@ def test_only_registered_paths_match():
         ),
         ("calendar.create", "all_except_send", {"calendar:calendar.event:create"}, None),
         ("calendar.create", "all_except_send", set(), "selected_permission_missing"),
+        ("calendar.reply", "all_except_send", {"calendar:calendar.event:reply"}, None),
         (
             "calendar.event",
             "messages_readonly",

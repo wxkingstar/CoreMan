@@ -21,6 +21,8 @@ MESSAGE_SCOPES = frozenset(
 BASE = "https://open.feishu.cn/open-apis"
 _SCOPE = re.compile(r"[a-z0-9_.]+(?::[a-z0-9_.]+)+\Z")
 _SEND = re.compile(r"(?:^|[.:_])(send|reply|forward)(?:$|[.:_])")
+# Named like sending but only answers the owner's own invitation (accept, decline, maybe).
+NOT_SENDING = frozenset({"calendar:calendar.event:reply"})
 
 
 class PermissionsError(ValueError):
@@ -51,7 +53,9 @@ def select_scopes(level: str, available: list[str]) -> list[str]:
     if level == "messages_readonly":
         scopes &= MESSAGE_SCOPES
     elif level == "all_except_send":
-        scopes = {s for s in scopes if s != "im:message" and not _SEND.search(s)}
+        scopes = {
+            s for s in scopes if s != "im:message" and (s in NOT_SENDING or not _SEND.search(s))
+        }
     return sorted(scopes)
 
 

@@ -109,7 +109,7 @@ async def _http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         raise PersonalError("upstream_unavailable") from exc
 
 
-async def _lock(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) -> None:
+async def lock(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) -> None:
     digest = hashlib.sha256(f"feishu-personal:{bot_id}:{user_id}".encode()).digest()
     key = int.from_bytes(digest[:8], "big", signed=True)
     await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
@@ -160,7 +160,7 @@ async def _locked(
 async def _row(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> tuple[FeishuPersonalGrant, str]:
-    await _lock(session, scope.bot.id, scope.user_id)
+    await lock(session, scope.bot.id, scope.user_id)
     app_id, secret = _credentials(cipher, scope)
     # Upsert plus row lock serializes authorize, refresh, revoke and reads for this owner.
     await session.execute(
@@ -188,7 +188,7 @@ async def existing_row(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> FeishuPersonalGrant | None:
     """Same lock and identity checks as `_row`, without creating a grant for a new user."""
-    await _lock(session, scope.bot.id, scope.user_id)
+    await lock(session, scope.bot.id, scope.user_id)
     app_id, secret = _credentials(cipher, scope)
     return await _locked(session, scope, app_id, secret)
 
@@ -418,7 +418,7 @@ async def authorization_status(
 async def revoke_grant(
     session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID, cipher: Cipher | None = None
 ) -> dict[str, Any]:
-    await _lock(session, bot_id, user_id)
+    await lock(session, bot_id, user_id)
     row = (
         await session.scalars(
             select(FeishuPersonalGrant)
