@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session, via_bot_token
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
@@ -493,7 +493,7 @@ async def _authorize_session_content(
             ).where(ChatLog.relay_session_id == identity)
         )
     ).all()
-    mine = not request.cookies.get("bot_token") and all(
+    mine = not via_bot_token(request) and all(
         (chat_type == "single" or private) and user_id == actor.id
         for _, chat_type, user_id, private in rows
     )

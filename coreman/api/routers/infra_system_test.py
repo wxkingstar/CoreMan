@@ -15,13 +15,21 @@ from coreman.api.infra_auth import require_scope
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
-from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, token_subject
+from coreman.core.auth.system_access import (
+    RESERVED_SYSTEM_KEYS,
+    SubjectUnavailable,
+    token_subject,
+)
 from coreman.core.auth.tokens import issue_token, signing_key
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
 
 router = APIRouter(tags=["system-test"], dependencies=[Depends(verify_csrf)])
 MANAGERS = require_roles("ai_committee", "platform_admin")
+SUBJECT_UNAVAILABLE_MESSAGES = {
+    "email_missing": "该账号未登记邮箱，无法确定其在业务系统中的身份；请先补全企业邮箱",
+    "email_prefix_ambiguous": "该账号的邮箱前缀与其他账号重复，无法唯一确定身份；请先处理冲突",
+}
 # 带令牌仍跳到这类地址，说明令牌没被认下来（不带令牌时目标可能只回 401，没有可比的跳转）。
 LOGIN_HINTS = ("login", "signin")
 
@@ -96,7 +104,13 @@ async def test_access(
 ) -> dict[str, Any]:
     if user.source == "bootstrap" or not user.login_name:
         raise ApiError(403, 403, "请使用已绑定的真实用户测试")
-    subject = await token_subject(session, user)
+    try:
+        subject = await token_subject(session, user)
+    except SubjectUnavailable as exc:
+        # 与聊天链路同一口径：算不出唯一 sub 就不签发，连测试令牌也不例外。
+        raise ApiError(422, 422, SUBJECT_UNAVAILABLE_MESSAGES[exc.reason]) from exc
+    # 这一项只回答「是不是你本人」，不用来查人：调用方自报登录名或邮箱前缀都算本人，
+    # 旧的基础设施调用方传的是登录名。真正决定令牌主体的始终是 subject。
     if (body.email_prefix and body.email_prefix not in (user.login_name, subject)) or (
         body.user_name and body.user_name != user.display_name
     ):

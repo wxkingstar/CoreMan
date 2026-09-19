@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from coreman.core.crypto import PREFIX, Cipher, DecryptError
+from coreman.core.crypto import Cipher, DecryptError
 
 AAD = "session_viewer.link.v1"
 TTL_SECONDS = 24 * 3600
@@ -46,8 +46,9 @@ def issue(
         "b": str(bot_id),
         "x": int((time.time() if now is None else now) + TTL_SECONDS),
     }
-    sealed = cipher.encrypt(json.dumps(claims, separators=(",", ":")), AAD)
-    raw = base64.b64decode(sealed[len(PREFIX) :])
+    # `seal` 而不是 `encrypt`：链接要进 URL，不背 `enc:v2:<kid>:` 前缀。凭据只活 24 小时，
+    # 跟着主密钥走即可，轮换期间旧链接失效是可以接受的。
+    raw = cipher.seal(json.dumps(claims, separators=(",", ":")), AAD)
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
@@ -57,7 +58,7 @@ def read(cipher: Cipher, token: str, *, now: float | None = None) -> LinkClaims 
         return None
     try:
         raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
-        data = json.loads(cipher.decrypt(PREFIX + base64.b64encode(raw).decode("ascii"), AAD))
+        data = json.loads(cipher.open(raw, AAD))
         claims = LinkClaims(
             session_id=uuid.UUID(data["s"]),
             user_id=uuid.UUID(data["u"]),

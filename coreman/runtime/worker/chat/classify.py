@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import IncompleteResultError, RelayBusyError
 from coreman.core.wecom.cards import question_brief
@@ -14,6 +16,16 @@ class ClassifyStage(ChatStageBase):
     """流结束分类。"""
 
     def _classify(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
+        """流结束分类，并在这唯一的产出口过一遍出站密钥闸门。
+
+        终稿会沿四条路出去：`writer.complete`、超时看护的完成/终止通知、`_push_if_proactive`
+        的主动推送，以及 `chat_logs`。在这里过闸比在每条路上各加一次可靠——漏掉任何一条，
+        一枚还活着的令牌就进了聊天记录。
+        """
+        verdict = self._classify_outcome(ctx, pre, out)
+        return replace(verdict, final_text=ctx.redact(verdict.final_text) or "")
+
+    def _classify_outcome(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
         """流结束分类。
 
         relay 自带的错误与零事件流排在通用异常之前：驱动回错后不补 finish chunk、或整条流

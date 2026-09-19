@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import current_user, get_session, via_bot_token
 from coreman.api.errors import ApiError
 from coreman.api.security import verify_csrf
 from coreman.core import personal_schedules as schedules
@@ -128,7 +128,7 @@ async def no_sse() -> Response:
 
 async def interactive_user(request: Request, actor: User = Depends(current_user)) -> User:
     login = getattr(request.state, "admin_session", None)
-    if request.cookies.get("bot_token") or login is None or login.user_id != actor.id:
+    if via_bot_token(request) or login is None or login.user_id != actor.id:
         raise ApiError(403, 403, "Interactive login required")
     return actor
 

@@ -159,6 +159,8 @@ async def test_feishu_private_content_is_owner_only(client, db_session, monkeypa
     assert (await client.get(f"/api/admin/chat-logs/{row.id}")).status_code == 200
 
     async def token_user(request, session):
+        request.state.bot_token_authenticated = True
+        request.state.admin_session = None
         return creator
 
     monkeypatch.setattr(bot_auth, "token_user", token_user)

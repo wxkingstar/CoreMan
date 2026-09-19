@@ -321,8 +321,13 @@ class FinalizeStage(ChatStageBase):
 
         `context` 是提交轮重建这次请求要的全部东西（relay 会话、模型、工作目录、提示词）：
         答完题再回到模型时，原来那个任务早就结束了，只有这份快照能把上下文接回去。里面
-        一个密钥都不能有——env 与凭据留在 bots 表里，提交轮自己去解。
+        一个密钥都不能有——env 与凭据留在 bots 表里，提交轮自己去解。提示词也不存：
+        提交轮本来就按本轮重新构建身份与授权（见 choice_submit），而存下来的那份带着
+        首轮的身份标签，留着只是让一个用不上的标签多躺在库里。
         """
+        # 题面与选项是模型写的，会落进 interaction_states 再渲染成卡片发给用户：
+        # 和终稿走的是两条路，所以这里单独过一次闸。
+        questions = ctx.redact_json(questions)
         intake = pre.intake
         prefix = make_choice_prefix(
             intake.bot.bot_key,
@@ -337,7 +342,6 @@ class FinalizeStage(ChatStageBase):
             "model": intake.bot.model,
             "working_dir": intake.bot.working_dir,
             "backend": pre.request.backend,
-            "system_prompt": pre.request.system_prompt,
             "chat_type": intake.chat_type,
             "chat_id": intake.chat_id,
             "session_key": intake.session_key,

@@ -16,7 +16,7 @@ from sqlalchemy import ColumnElement, and_, case, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
-from coreman.api.deps import current_user, get_session
+from coreman.api.deps import current_user, get_session, via_bot_token
 from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
@@ -179,9 +179,7 @@ async def list_chat_logs(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
-    conds = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + _window(
-        bot_id, since, until
-    )
+    conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
     conds += _filters(user, status, chat_type, keyword)
     # request_at 会并列（同一秒的批量写），加 id 兜底保证翻页稳定。
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
@@ -209,9 +207,7 @@ async def chat_log_stats(
 ) -> dict[str, Any]:
     """概览：总量、按状态、平均时延、token 合计、按 bot 前 50（同样受可见性过滤）。"""
     ids = await accessible_bot_ids(session, actor)
-    conds = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + _window(
-        bot_id, since, until
-    )
+    conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
     conds += _filters(user, status, chat_type, keyword)
 
     def _tokens(col: Any) -> Any:
@@ -295,7 +291,7 @@ async def get_chat_log(
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
     stmt = select(ChatLog).where(
-        ChatLog.id == log_id, *_scope(ids, actor, bot_token=bool(request.cookies.get("bot_token")))
+        ChatLog.id == log_id, *_scope(ids, actor, bot_token=via_bot_token(request))
     )
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:

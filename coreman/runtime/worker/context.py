@@ -6,13 +6,14 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.auth.external_key import ExternalKey
 from coreman.core.bus import tasks as bus_tasks
+from coreman.core.chat import redaction
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import RelayServer, Task
@@ -46,6 +47,8 @@ class TaskContext:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_reason: str | None = None
     stream_id: str | None = None
+    # 本轮注入 CLI 的凭据；开流阶段按最终 env 填好，出站文本与对话记录都按它过滤。
+    secrets: frozenset[str] = frozenset()
     # 这一轮挂了本人的企业微信工具：对话记录只给本人看。
     private_turn: bool = False
     # init=False：由 __post_init__ 绑好任务字段再交出去，调用方不该也不能自己传。
@@ -55,6 +58,18 @@ class TaskContext:
         self.log = get_logger("coreman.runtime.worker.task").bind(
             task_id=self.task.id, bot_id=str(self.task.bot_id)
         )
+
+    def redact(self, text: str | None) -> str | None:
+        """出站文本的统一过滤口：凡是用户看得到、或要进 chat_logs 的正文都过这里。"""
+        return redaction.redact(text, self.secrets)
+
+    def redact_json(self, value: Any) -> Any:
+        """递归过滤结构里的字符串：会落库、之后再渲染给用户的模型产物走这里。"""
+        return redaction.redact_value(value, self.secrets)
+
+    def redact_text(self, text: str) -> redaction.Redacted:
+        """带下标换算的版本，给同时要挪 `segment_boundaries` 的调用方。"""
+        return redaction.redact_text(text, self.secrets)
 
     def request_cancel(self, reason: str) -> None:
         if not self.cancel_event.is_set():

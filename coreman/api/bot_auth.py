@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import jwt
 from fastapi import Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.errors import ApiError
-from coreman.core.auth.system_access import PLATFORM_AUDIENCE
+from coreman.core.auth.system_access import PLATFORM_AUDIENCE, user_for_subject
 from coreman.core.auth.tokens import verify_token
 from coreman.core.db.models import User
 
@@ -26,15 +25,9 @@ async def token_user(request: Request, session: AsyncSession) -> User:
         claims = await verify_token(session, raw, issuer=issuer, audience=PLATFORM_AUDIENCE)
     except jwt.InvalidTokenError as exc:
         raise denied from exc
-    user = (
-        await session.execute(
-            select(User).where(
-                User.login_name == claims["sub"],
-                User.status == "active",
-                User.source != "bootstrap",
-            )
-        )
-    ).scalar_one_or_none()
+    # sub 是邮箱前缀（见 system_access.token_subject），不是 login_name——两者在历史上
+    # 可能不同，按 login_name 反查会认到另一个人头上。
+    user = await user_for_subject(session, claims["sub"])
     if user is None:
         raise denied
     request.state.bot_token_authenticated = True

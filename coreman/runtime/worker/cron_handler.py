@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
+from coreman.core.chat.redaction import collect_secrets
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
@@ -184,6 +185,8 @@ class CronRunHandler:
                 )
                 if personal_prompt or job.execution_mode == "personal_ai":
                     run.private = True
+                # 定时执行同样带着本人的业务系统令牌与个人工具凭据，出站闸门一视同仁。
+                ctx.secrets = collect_secrets(env)
                 prompt = str(config["prompt"])
                 if result.prompt_appendix:
                     prompt += "\n\n" + result.prompt_appendix
@@ -222,7 +225,7 @@ class CronRunHandler:
             client = ctx.relay_client_factory(relay)
             gen = client.chat_stream(request, total_timeout=float(bot.sse_timeout_seconds))
             stop = asyncio.create_task(ctx.cancel_event.wait())
-            consume = asyncio.create_task(self._consume(gen))
+            consume = asyncio.create_task(self._consume(ctx, gen))
             try:
                 # 兜底：正常由 chat_stream 的 total_timeout 先到期并给出分类错误；
                 # 不再额外封顶 2 小时，与对话一样允许到 sse_timeout_seconds 上限。
@@ -357,7 +360,7 @@ class CronRunHandler:
         return wecom_guidance(grant, scheduled=True)
 
     async def _consume(
-        self, gen: AsyncGenerator[SseEvent, None]
+        self, ctx: TaskContext, gen: AsyncGenerator[SseEvent, None]
     ) -> tuple[str, UsageEvent | None, list[str], bool]:
         """收完整条流再判定；返回 (正文, 用量, 工具, 是否截断过)。
 
@@ -406,9 +409,11 @@ class CronRunHandler:
             if not errors and not isinstance(exc, IncompleteResultError):
                 raise
             finished = False
-        reply = "".join(parts).strip()
+        # 模型产出在这唯一一处成形，之后分头走推送、cron_runs.reply 与 chat_logs：
+        # 在这里过出站闸门，三条路就都干净了（对话链路的对应位置是 chat/classify）。
+        reply = ctx.redact("".join(parts).strip()) or ""
         if errors:
-            detail = "".join(errors).strip()[:2000]
+            detail = ctx.redact("".join(errors).strip()[:2000]) or ""
             raise CronStreamError("x_relay_error", detail, reply, usage, tools)
         if not finished:
             code = "incomplete_result" if events else "empty_stream"

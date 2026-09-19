@@ -53,10 +53,12 @@ def log_entry(
         stream_id=ctx.stream_id,
         task_id=ctx.task.id,
         private=ctx.private_turn,
-        message_content=content.text if content else intake.text,
-        quoted_content=content.quoted_content if content else None,
+        # chat_logs 的可见范围比一次对话大（管理台、统计、体检都读它），所以正文三列也要
+        # 过一遍出站闸门：模型复述的凭据不能留在库里。
+        message_content=ctx.redact(content.text if content else intake.text),
+        quoted_content=ctx.redact(content.quoted_content if content else None),
         file_info=content.file_info if content else None,
-        response_content=response_content,
+        response_content=ctx.redact(response_content),
         tools_used=list(tools_used or []),
         error_code=error_code,
         error_message=error_message,

@@ -121,7 +121,7 @@ CoreMan 不使用额外的消息中间件，进程之间只通过 PostgreSQL 表
 ：`bot_system_grants` 表记录某个 AI 员工可以访问哪些业务系统。收紧系统的白名单会立即回收不再符合条件的授权。
 
 **BOT_TOKEN**
-：每轮对话按**当前已验证的发言者**签发的 ES256 JWT，受众为业务系统 key，以环境变量 `BOT_TOKEN_<系统 KEY 大写>` 下发给 AI CLI，技能用它以发言者本人身份调用该业务系统。发言者未知、为引导管理员或已停用时不签发；AI 员工自身配置或环境预设中的同名变量会被丢弃。业务系统通过公开的 `/api/.well-known/jwks.json` 校验签名，见 [基础设施 API](infrastructure-api.md)。
+：每轮对话按**当前已验证的发言者**签发的 ES256 JWT，受众为业务系统 key，以环境变量 `BOT_TOKEN_<系统 KEY 大写>` 下发给 AI CLI，技能用它以发言者本人身份调用该业务系统。发言者未知、为引导管理员、已停用，或算不出唯一的 sub（无邮箱 / 邮箱前缀与他人重复）时不签发；AI 员工自身配置或环境预设中的同名变量会被丢弃。令牌值在出站方向被拦截：模型若在回复中复述它，投递与 `chat_logs` 中都只会留下占位符。业务系统通过公开的 `/api/.well-known/jwks.json` 校验签名，见 [基础设施 API](infrastructure-api.md)。
 
 **请求级环境变量（request-level env）**
 ：每轮对话按发言者重新计算的变量，如 `COREMAN_BOT_KEY`、`COREMAN_PLATFORM`、`COREMAN_CHAT_ID`、`COREMAN_PLATFORM_USER_ID`、`COREMAN_USER_LOGIN`。它们覆盖 AI 员工配置中的同名变量，身份未知时不下发身份类变量。

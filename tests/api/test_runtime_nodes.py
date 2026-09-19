@@ -648,6 +648,8 @@ async def test_private_runtime_viewer_blocks_admin_and_bot_token(
     assert (await client.get(url)).status_code == 200
 
     async def token_user(request, session):
+        request.state.bot_token_authenticated = True
+        request.state.admin_session = None
         return owner
 
     monkeypatch.setattr(bot_auth, "token_user", token_user)

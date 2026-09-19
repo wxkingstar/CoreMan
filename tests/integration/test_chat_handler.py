@@ -1,4 +1,5 @@
 import asyncio
+import re
 import uuid
 
 from sqlalchemy import select
@@ -6,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, streams, tasks
 from coreman.core.bus.tasks import NewTask
+from coreman.core.chat.redaction import PLACEHOLDER
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
+    BusinessSystem,
     ChatLog,
     ChatSession,
     InboundEvent,
@@ -174,9 +177,10 @@ async def test_known_identity_and_group_speaker_change(
         fake,
     )
     sp = fake.requests[0]["messages"][0]["content"]
-    assert (
-        "[SYS_USER] user_id=zs, login=zhangsan, name=张三" in sp and SPEAKER_CHANGED_LINE not in sp
-    )
+    # 身份行带本轮随机标签：注入文本写不出同样的一行。
+    tag = re.search(r"\[SYS_USER:([0-9a-f]{8})\]", sp)
+    assert tag and f"[SYS_USER:{tag[1]}] user_id=zs, login=zhangsan, name=张三" in sp
+    assert SPEAKER_CHANGED_LINE not in sp
     assert (
         fake.requests[0]["env_vars"]["BOT_USER_LOGIN"] == "zhangsan"
         and fake.requests[0]["env_vars"]["AGENT_CHAT_ID"] == "g1"
@@ -637,3 +641,40 @@ async def test_feishu_union_private_message_establishes_notification_target(db_e
     assert item.target["chat_id"] == "oc_private"
     assert item.target["recipient_platform_user_id"] == "canonical"
     assert await private_target_valid(db_session, item)
+
+
+async def test_leaked_credentials_never_reach_delivery_or_chat_logs(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """模型把本轮令牌复述出来时，用户看到的和库里留下的都只能是占位符。
+
+    提示词已经要求它别这么做，但提示词不是边界：IM 聊天记录与 `chat_logs` 的可见范围都
+    远大于「当前发言者」，一枚活着的令牌漏进去就是一次越权。
+    """
+    bot, _, _ = await seed_bot(db_session, env={"MY_API_KEY": "bot-level-secret-value"})
+    u = User(login_name="zhangsan", display_name="张三", email="zhangsan@example.test")
+    db_session.add_all([u, BusinessSystem(key="erp", name="ERP", default_for_all_bots=True)])
+    await db_session.flush()
+    db_session.add(UserIdentity(user_id=u.id, platform="wecom", platform_user_id="zs"))
+    await db_session.commit()
+
+    fake = FakeRelay("leaks_credentials")
+    task = await chat_task(db_session, bot, "查一下 ERP", sender="zs")
+    await run(db_engine, task, fake)
+
+    # 令牌确实签发并注入了（否则这条测试就什么都没验到）。
+    token = fake.requests[0]["env_vars"]["BOT_TOKEN_ERP"]
+    assert token and token.startswith("eyJ")
+
+    stream = await stream_of(db_session, task.id)
+    written = "\n".join(filter(None, [stream.final_text, stream.pending_text, stream.thinking_md]))
+    assert token not in written
+    assert "bot_token=" + token not in written
+    assert PLACEHOLDER in written
+    # 正文骨架还在，只有凭据被换掉：不是整段丢弃。
+    assert "已调用 ERP" in written
+
+    log = (await db_session.execute(select(ChatLog))).scalar_one()
+    assert log.response_content and token not in log.response_content
+    # 机器人自己配的密钥同样拦住（env 里任何凭据类键都算）。
+    assert "bot-level-secret-value" not in written

@@ -92,11 +92,18 @@ async def login_as(
     team_id: uuid.UUID | None = None,
     login_name: str | None = None,
     display_name: str = "测试用户",
+    email: str | None = None,
 ) -> User:
-    """直接造 users + admin_sessions 行并写签名 cookie，供权限矩阵测试以任意角色登录。"""
+    """直接造 users + admin_sessions 行并写签名 cookie，供权限矩阵测试以任意角色登录。
+
+    默认带一个唯一邮箱：业务系统令牌的 sub 只认邮箱前缀（见 auth/system_access），
+    没有邮箱的账号一个令牌都拿不到。要测「缺邮箱」时显式传 email=None 之后再清空。
+    """
+    name = login_name or f"u_{_secrets.token_hex(4)}"
     user = User(
-        login_name=login_name or f"u_{_secrets.token_hex(4)}",
+        login_name=name,
         display_name=display_name,
+        email=email if email is not None else f"{name}@example.test",
         role=role,
         team_id=team_id,
         source="sync",

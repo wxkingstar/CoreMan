@@ -43,18 +43,21 @@ async def test_eof_after_partial_output_fails():
             ]
 
 
+def _ctx() -> NS:
+    """分类只需要 locale 与出站闸门；这里不注入凭据，所以 redact 是恒等的。"""
+    return NS(locale="zh", redact=lambda text: text)
+
+
 @pytest.mark.parametrize("reason", [None, "length", "error"])
 def test_unconfirmed_terminal_is_not_success(reason):
     pre = NS(writer=NS(pending_text="partial"), session_url="http://fake/s", relay=NS(name="test"))
-    verdict = ChatTaskHandler()._classify(
-        NS(locale="zh"), pre, Outcome(text_events=1, finish_reason=reason)
-    )
+    verdict = ChatTaskHandler()._classify(_ctx(), pre, Outcome(text_events=1, finish_reason=reason))
     assert verdict.task_status == "failed"
 
 
 def _classify(text: str, out: Outcome) -> Verdict:
     pre = NS(writer=NS(pending_text=text), session_url="http://fake/s", relay=NS(name="test"))
-    return ChatTaskHandler()._classify(NS(locale="zh"), pre, out)
+    return ChatTaskHandler()._classify(_ctx(), pre, out)
 
 
 def test_relay_error_wins_over_unconfirmed_terminal() -> None:

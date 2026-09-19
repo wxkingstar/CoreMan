@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import get_session, via_bot_token
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.chat_logs import chat_log_out
@@ -156,7 +156,7 @@ async def get_task(
         inbound is not None
         and inbound.platform == "feishu"
         and inbound.chat_type == "single"
-        and (request.cookies.get("bot_token") or task.user_id != actor.id)
+        and (via_bot_token(request) or task.user_id != actor.id)
     ):
         raise not_found("任务不存在")
     stream = await session.get(TaskStream, task_id, populate_existing=True)
@@ -169,7 +169,7 @@ async def get_task(
         log is not None
         and log.platform == "feishu"
         and log.chat_type == "single"
-        and (request.cookies.get("bot_token") or log.user_id != actor.id)
+        and (via_bot_token(request) or log.user_id != actor.id)
     ):
         raise not_found("任务不存在")
     now = datetime.now(UTC)

@@ -1,3 +1,4 @@
+import re
 import uuid
 from typing import Any, cast
 
@@ -7,6 +8,7 @@ from coreman.core.prompting.defaults import (
     DEFAULT_RUNTIME_TAIL,
     DEFAULT_SECURITY_POLICY,
     DEFAULT_VERBOSITY,
+    IDENTITY_TAG_RULE,
     SPEAKER_CHANGED_LINE,
 )
 from coreman.core.prompting.system_prompt import (
@@ -31,7 +33,7 @@ UNKNOWN = Speaker("woABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890", None, None, None)
 
 def test_defaults_preserve_security_identity_and_output_contracts() -> None:
     assert DEFAULT_SECURITY_POLICY.startswith("# AI Agent Policy")
-    assert "[SYS_USER]" in DEFAULT_SECURITY_POLICY
+    assert "[SYS_USER:<tag>]" in DEFAULT_SECURITY_POLICY
     assert "# Execution Model" in DEFAULT_RUNTIME_MODE and DEFAULT_RUNTIME_TAIL.strip()
     assert set(DEFAULT_VERBOSITY) == {2, 3, 4} and all(DEFAULT_VERBOSITY.values())
     assert "imagegen" in DEFAULT_CODEX_CONTRACT or "markdown" in DEFAULT_CODEX_CONTRACT
@@ -54,7 +56,10 @@ def test_claude_order_known_speaker() -> None:
         < out.index("你是销售")
         < out.index(DEFAULT_RUNTIME_TAIL.strip())
     )
-    assert "[SYS_USER] user_id=zhangsan, login=zhangsan, name=张三" in out
+    tag = re.search(r"\[SYS_USER:([0-9a-f]{8})\]", out)
+    assert tag and f"[SYS_USER:{tag[1]}] user_id=zhangsan, login=zhangsan, name=张三" in out
+    # 标签规则段必须排在安全策略之后、发言者之前，且它本身不可由管理台文案覆盖。
+    assert out.index(IDENTITY_TAG_RULE.format(tag=tag[1])) < out.index("## 当前发言者")
     assert DEFAULT_CODEX_CONTRACT not in out
     assert DEFAULT_VERBOSITY[3] not in out and SPEAKER_CHANGED_LINE not in out
 
@@ -78,7 +83,7 @@ def test_codex_order_unknown_speaker_and_change() -> None:
         < out.index(DEFAULT_VERBOSITY[2])
         < out.index(DEFAULT_RUNTIME_TAIL.strip())
     )
-    assert "woABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890" in speaker_header(UNKNOWN)
+    assert "woABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890" in speaker_header(UNKNOWN, "deadbeef")
     assert "\n\n\n" not in out
 
 
@@ -126,3 +131,20 @@ async def test_load_segments_override_and_fallback() -> None:
     assert seg.security_policy == DEFAULT_SECURITY_POLICY
     assert seg.codex_contract == DEFAULT_CODEX_CONTRACT and seg.runtime_mode == DEFAULT_RUNTIME_MODE
     assert seg.verbosity == DEFAULT_VERBOSITY
+
+
+def test_identity_tag_is_fresh_per_request() -> None:
+    """两次请求的标签必须不同：标签一旦可预测，注入文本就能提前写出能冒充身份的那一行。"""
+    kwargs: dict[str, Any] = {
+        "segments": SEG,
+        "backend": "claude",
+        "verbosity_level": 3,
+        "bot_prompt": "",
+        "speaker": KNOWN,
+        "speaker_changed": False,
+    }
+    tags = {
+        re.search(r"\[SYS_USER:([0-9a-f]{8})\]", build_system_prompt(**kwargs))[1]
+        for _ in range(20)
+    }
+    assert len(tags) > 1

@@ -108,7 +108,7 @@ async def test_git_token_encrypted_and_push_required(client, db_session, agent):
     assert result.status_code == 200, result.text
     assert "very-secret" not in result.text
     await db_session.refresh(bot)
-    assert bot.git_token_enc.startswith("enc:v1:")
+    assert bot.git_token_enc.startswith("enc:v2:k1:")
     assert (
         Cipher(b"\x07" * 32).decrypt(bot.git_token_enc, bot_workspace.GIT_TOKEN_AAD)
         == "very-secret"

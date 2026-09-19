@@ -49,14 +49,28 @@ class StreamWriter:
 
     def thinking_md(self) -> str:
         md = self.thinking.to_markdown()
-        return "\n".join([*self.extra_lines, md]) if self.extra_lines else md
+        joined = "\n".join([*self.extra_lines, md]) if self.extra_lines else md
+        # 思考区照样是给人看的：工具名、参数回显里一样可能带上本轮凭据。
+        return self.ctx.redact(joined) or ""
+
+    def visible(self) -> tuple[str, list[int]]:
+        """写库与推送用的正文和切分点。
+
+        `pending_text` 自身保留原文（增量是往它后面追加的，改了就接不上），替换只发生在
+        出库这一刻；切分点是正文上的下标，必须跟着替换一起挪，否则命中密钥之后每一个
+        切分点都会偏移一个占位符的长度。
+        """
+        redacted = self.ctx.redact_text(self.pending_text)
+        return redacted.text, [redacted.shift(i) for i in self.boundaries]
 
     def snapshot(self) -> tuple[str, str, list[int]]:
-        return self.thinking_md(), self.pending_text, list(self.boundaries)
+        text, boundaries = self.visible()
+        return self.thinking_md(), text, boundaries
 
     async def flush(self, force: bool = False) -> bool:
         """写一次增量；被节流或内容未变时返回 False（不写库）。"""
-        state = (self.thinking_md(), self.pending_text, tuple(self.boundaries))
+        text, boundaries = self.visible()
+        state = (self.thinking_md(), text, tuple(boundaries))
         now = self.ctx.clock()
         if not force and (
             state == self._last_written or now - self._last_flush < self.min_interval
@@ -84,15 +98,19 @@ class StreamWriter:
         这次收尾谁先谁后由行锁定夺，调用方据此决定终稿还要不要自己推。
         """
         async with self.ctx.session_factory() as session:
+            text, boundaries = self.visible()
             await streams.update(
                 session,
                 self.ctx.task.id,
                 thinking_md=self.thinking_md(),
-                pending_text=self.pending_text,
-                segment_boundaries=list(self.boundaries),
+                pending_text=text,
+                segment_boundaries=boundaries,
             )
             done = await streams.complete(
-                session, self.ctx.task.id, final_text=final_text, pending_card=pending_card
+                session,
+                self.ctx.task.id,
+                final_text=self.ctx.redact(final_text) or "",
+                pending_card=pending_card,
             )
             await session.commit()
         return done

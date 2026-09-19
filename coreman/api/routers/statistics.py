@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, current_user, get_session
+from coreman.api.deps import client_ip, current_user, get_session, via_bot_token
 from coreman.api.errors import ApiError, forbidden
 from coreman.api.routers.chat_logs import _scope, accessible_bot_ids
 from coreman.api.security import verify_csrf
@@ -62,7 +62,7 @@ async def statistics(
     lower = datetime.combine(start, time.min, zone).astimezone(UTC)
     upper = datetime.combine(end + timedelta(days=1), time.min, zone).astimezone(UTC)
     ids = await accessible_bot_ids(session, actor)
-    conditions = _scope(ids, actor, bot_token=bool(request.cookies.get("bot_token"))) + [
+    conditions = _scope(ids, actor, bot_token=via_bot_token(request)) + [
         ChatLog.request_at >= lower,
         ChatLog.request_at < upper,
     ]

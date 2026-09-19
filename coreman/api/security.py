@@ -118,9 +118,14 @@ async def verify_csrf(request: Request) -> None:
         # 必须先完成验签和当前用户状态校验，不能仅凭 cookie 存在就豁免 CSRF。
         from coreman.api.bot_auth import token_user
 
-        async with request.app.state.session_factory() as session:
-            await token_user(request, session)
-        return
+        try:
+            async with request.app.state.session_factory() as session:
+                await token_user(request, session)
+            return
+        except ApiError:
+            # 令牌认不下来（多半是过期的残留 cookie）：不豁免，改走下面标准的 CSRF 校验。
+            # 那条路更严，所以回落不会放宽任何限制；直接 401 反而会把正常登录的人挡在外面。
+            pass
     cookie = request.cookies.get(CSRF_COOKIE)
     header = request.headers.get(CSRF_HEADER)
     if not cookie or not header or not secrets.compare_digest(cookie, header):
