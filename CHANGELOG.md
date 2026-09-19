@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Saying "连接企业微信" (Connect WeCom) in a WeCom private chat before binding now replies with a one-tap authorization link instead of pointing to the page. Opened inside WeCom on a phone, the link signs in and jumps straight to WeCom's "confirm creation / confirm authorization" page, so there is no QR code to scan on the same screen; opened on a computer it shows the QR code. When binding finishes, the assistant announces the result in that private chat and sends the tier card; failures such as someone else confirming are explained there too. The link carries no WeCom scan code: that code can fetch the authorization bot's secret, so it is only handed to the signed-in member. Requires database migration `0042`.
 
+### Security
+
+- Service logs no longer contain live platform credentials. httpx wrote one INFO line per outbound request with the full URL, and WeCom takes `access_token`, `corpsecret` and the OAuth `code` as query parameters, so every API call put a working token into the API, worker, scheduler and gateway logs. The `httpx` and `httpcore` loggers are now held at WARNING in every process, including when `LOG_LEVEL=DEBUG`. As a fallback, every log line, traceback and uvicorn access log line has credential-style query values (`*token`, `*secret`, `*ticket`, `code`, `key`) replaced with `***`; this also covers the request URL that `raise_for_status()` puts in its error message. Rotate WeCom app secrets if old logs may have been read by others.
+
 ## [0.2.0] - 2026-09-19
 
 AI employees can now be created by scanning a QR code with Feishu or WeCom, members can connect their own Feishu or WeCom data to private chats and create scheduled AI tasks by asking, and the README has been rewritten around a first-time user.
