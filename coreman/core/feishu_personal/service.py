@@ -19,7 +19,9 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import FeishuPersonalGrant
 from coreman.core.feishu_personal import endpoints, permissions, revocation
 from coreman.core.feishu_personal.policy import Scope, app_credentials
+from coreman.core.logging import get_logger
 
+log = get_logger(__name__)
 BASE = "https://open.feishu.cn/open-apis"
 TOKEN_URL = BASE + "/authen/v2/oauth/token"
 SCOPES = (
@@ -290,6 +292,9 @@ async def choose_authorization(
     ).issubset(available):
         raise PersonalError("app_message_permission_missing")
     selected = permissions.select_scopes(level, available)
+    if level != "messages_readonly":
+        # Not everything the app enabled: Feishu refuses requests with too many permissions.
+        selected = endpoints.request_scopes(level, set(selected))
     if not selected:
         raise PersonalError("authorization_unavailable")
     row.authorization_level = level
@@ -315,7 +320,18 @@ async def _start_authorization(
         or parsed.hostname not in ("accounts.feishu.cn", "open.feishu.cn")
         or parsed.username
     ):
-        raise PersonalError("authorization_unavailable")
+        code = data.get("code")
+        # Feishu's reason (e.g. invalid_scope / 20084, too many permissions) carries no secret.
+        log.warning(
+            "feishu_personal_authorization_refused",
+            error=data.get("error"),
+            description=data.get("error_description"),
+            upstream_code=code,
+            scopes=len(row.requested_scopes),
+        )
+        raise PersonalError(
+            "authorization_unavailable", upstream_code=code if isinstance(code, int) else None
+        )
     row.context_epoch = uuid.uuid4()
     row.status = "pending"
     row.token_enc = None

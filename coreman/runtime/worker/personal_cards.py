@@ -186,6 +186,12 @@ async def handle_selection(
         if getattr(exc, "code", "") == "selection_required":
             # Do not overwrite a newer successful link on a double-click or replay.
             return "expired"
+        ctx.log.warning(
+            "personal_authorization_unavailable",
+            level=level,
+            code=getattr(exc, "code", type(exc).__name__),
+            upstream_code=getattr(exc, "upstream_code", None),
+        )
         text = "暂时无法生成授权链接，请稍后重新发送“连接飞书”。"
         if getattr(exc, "code", "") == "app_scope_discovery_permission_missing":
             text = (
