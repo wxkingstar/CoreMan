@@ -7,7 +7,7 @@ import SkillPresetDialog from '@/components/skills/SkillPresetDialog.vue'
 import SkillSourceDialog from '@/components/skills/SkillSourceDialog.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { skills, allSkills, type Skill, type Source, type Preset } from '@/api/skills'
 import { useAuthStore } from '@/stores/auth'
@@ -28,7 +28,7 @@ async function syncSource(row: Source) {
   syncing.value = row.id; syncResult.value = ''
   try {
     const result = await skills.sourceSync(row)
-    syncResult.value = t('skillEditor.syncResult', result)
+    syncResult.value = t('skillEditor.syncResult', result) + (result.skipped ? ` ${t('skillEditor.syncSkipped', result)}` : '')
     await load(); showSource(row)
   } catch (e) { fail(e) } finally { syncing.value = '' }
 }
@@ -48,6 +48,13 @@ async function setEnabled(row: Skill, value: boolean | string | number) {
     Object.assign(row, await skills.setEnabled(row, Boolean(value)))
     ElMessage.success(t('common.saved'))
   } catch (e) { fail(e); await load() } finally { toggling.value = '' }
+}
+/** 删除只留墓碑，来源同步不会再导入；仍有 AI 员工在用或待审时后端拒绝并列出员工。 */
+const deleting = ref('')
+async function remove(row: Skill) {
+  try { await ElMessageBox.confirm(t('skillEditor.deleteConfirm', { name: row.name }), t('common.delete'), { type: 'warning' }) } catch { return }
+  deleting.value = row.id
+  try { await skills.remove(row); ElMessage.success(t('skillEditor.deleted')); await load() } catch (e) { fail(e); await load() } finally { deleting.value = '' }
 }
 onMounted(load)
 </script>
@@ -192,17 +199,29 @@ onMounted(load)
           <el-table-column
             v-if="manager"
             :label="t('common.actions')"
-            width="90"
+            width="130"
             fixed="right"
           >
             <template #default="{ row }">
-              <el-button
-                link
-                type="primary"
-                @click="edit(row)"
-              >
-                {{ t('common.edit') }}
-              </el-button>
+              <div class="row-actions">
+                <el-button
+                  link
+                  type="primary"
+                  @click="edit(row)"
+                >
+                  {{ t('common.edit') }}
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  :data-test="'delete-' + row.name"
+                  :loading="deleting === row.id"
+                  :disabled="!!deleting && deleting !== row.id"
+                  @click="remove(row)"
+                >
+                  {{ t('common.delete') }}
+                </el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.bot_names import bot_names
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
@@ -19,7 +20,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.bots.secrets import decrypt_json, encrypt_json, mask_dict, merge_secret_dict
-from coreman.core.db.models import EnvPreset, Skill, SkillSource, User
+from coreman.core.db.models import BotSkill, EnvPreset, Skill, SkillApproval, SkillSource, User
 from coreman.core.knowledge import skill_policy as policy
 from coreman.core.knowledge.catalog_sync import CatalogAccessError, fetch_catalog, sync_catalog
 from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
@@ -346,7 +347,7 @@ async def list_skills(
     params: PageParams = Depends(),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    query = select(Skill)
+    query = select(Skill).where(Skill.deleted_at.is_(None))
     if not manager(actor):
         query = query.where(Skill.enabled)
     page = await paginate(session, query.order_by(Skill.name), params)
@@ -372,6 +373,13 @@ async def apply_skill(session: AsyncSession, row: Skill, body: SkillIn, request:
     row.updated_at = utcnow()
 
 
+async def live_skill(session: AsyncSession, identity: uuid.UUID, *, lock: bool = False) -> Skill:
+    row = await session.get(Skill, identity, with_for_update=lock)
+    if row is None or row.deleted_at is not None:
+        raise not_found("技能不存在")
+    return row
+
+
 @router.post("/skills")
 async def create_skill(
     body: SkillIn,
@@ -379,12 +387,23 @@ async def create_skill(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """新建技能；与已删除技能同名时复用那一行，等于恢复并按本次内容重新配置。"""
     require_manager(actor)
-    row = Skill()
+    row = await session.scalar(
+        select(Skill)
+        .where(Skill.name == body.name, Skill.deleted_at.is_not(None))
+        .with_for_update()
+    )
+    action = "skill.restore" if row else "skill.create"
+    if row is None:
+        row = Skill()
+    else:
+        # 恢复不继承删除前的 MCP 密文：和新建一样，由本次提交的配置决定。
+        row.deleted_at, row.mcp_config_enc = None, None
     await apply_skill(session, row, body, request)
     session.add(row)
     await session.flush()
-    await audited(session, request, actor, "skill.create", str(row.id))
+    await audited(session, request, actor, action, str(row.id))
     return {"code": 0, "data": skill_out(row)}
 
 
@@ -397,9 +416,7 @@ async def update_skill(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     require_manager(actor)
-    row = await session.get(Skill, identity)
-    if row is None:
-        raise not_found("技能不存在")
+    row = await live_skill(session, identity)
     require_if_match(request, row.revision)
     await apply_skill(session, row, body, request)
     await audited(session, request, actor, "skill.update", str(row.id))
@@ -419,9 +436,7 @@ async def set_skill_status(
     和整份保存一样会递增 revision，待审申请与排队中的安装因此作废，须重新申请。
     """
     require_manager(actor)
-    row = await session.get(Skill, identity)
-    if row is None:
-        raise not_found("技能不存在")
+    row = await live_skill(session, identity)
     require_if_match(request, row.revision)
     if row.enabled != body.enabled:
         diff = {"enabled": [row.enabled, body.enabled]}
@@ -429,6 +444,50 @@ async def set_skill_status(
         action = "skill.enable" if body.enabled else "skill.disable"
         await audited(session, request, actor, action, str(row.id), diff)
     return {"code": 0, "data": skill_out(row)}
+
+
+@router.delete("/skills/{identity}")
+async def delete_skill(
+    identity: uuid.UUID,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """从目录删除技能。只留墓碑不删行：来源再同步时跳过它，安装与审批历史照常可查。
+
+    仍有 AI 员工安装着（含安装中、安装未完成）或有待审申请的技能不能删，须先在员工处停用。
+    行锁与安装申请的共享锁互斥，删除和新的安装申请只有一个能成功。
+    """
+    require_manager(actor)
+    row = await live_skill(session, identity, lock=True)
+    require_if_match(request, row.revision)
+    in_use = set(
+        await session.scalars(
+            select(BotSkill.bot_id).where(
+                BotSkill.skill_id == row.id, BotSkill.status != "uninstalled"
+            )
+        )
+    ) | set(
+        await session.scalars(
+            select(SkillApproval.bot_id).where(
+                SkillApproval.skill_id == row.id, SkillApproval.status == "pending"
+            )
+        )
+    )
+    if in_use:
+        names = sorted((await bot_names(session, in_use)).values())
+        shown = "、".join(names[:5]) + (" 等" if len(names) > 5 else "")
+        raise ApiError(
+            409,
+            409,
+            f"仍有 {len(in_use)} 个 AI 员工在用或正在申请该技能（{shown}），"
+            "请先在这些员工的技能中停用 / 撤回后再删除",
+        )
+    diff = {"name": [row.name, None], "enabled": [row.enabled, False]}
+    row.deleted_at = row.updated_at = utcnow()
+    row.enabled = False
+    await audited(session, request, actor, "skill.delete", str(row.id), diff)
+    return {"code": 0, "data": None}
 
 
 @router.get("/env-presets")

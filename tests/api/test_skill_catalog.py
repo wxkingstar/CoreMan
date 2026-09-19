@@ -150,7 +150,7 @@ async def test_source_sync_imports_disabled_entries_and_attributes_actor(
     path = f"/api/admin/skill-sources/{source['id']}/sync"
     response = await client.post(path, headers={"If-Match": "1"})
     assert response.status_code == 200, response.text
-    assert response.json()["data"] == {"created": 1, "updated": 0, "unchanged": 0}
+    assert response.json()["data"] == {"created": 1, "updated": 0, "unchanged": 0, "skipped": 0}
     stored = await db_session.scalar(select(Skill).where(Skill.name == "query-sync"))
     assert not stored.enabled
     assert str(stored.source_id) == source["id"]

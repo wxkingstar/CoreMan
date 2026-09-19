@@ -43,7 +43,7 @@ onMounted(async () => { await load(); try { catalog.value = await allSkills() } 
         :label="t('menu.skills')"
       >
         <template #default="{ row }">
-          {{ catalog.find(s => s.id === row.skill_id)?.name ?? row.skill_id }}
+          {{ row.skill_name ?? catalog.find(s => s.id === row.skill_id)?.name ?? row.skill_id }}
         </template>
       </el-table-column>
       <el-table-column

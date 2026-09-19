@@ -1,8 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { expect, it, vi } from 'vitest'
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { role: 'ai_committee' } }) }))
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), remove: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
@@ -54,12 +54,36 @@ it('toggles skill status inline and reloads the catalog when the revision is sta
   wrapper.unmount()
 })
 
+it('deletes a skill only after confirmation and reloads the catalog either way', async () => {
+  const row = { id: 's1', revision: 5, name: 'unwanted', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false } as Skill
+  vi.mocked(allSkills).mockResolvedValue([row])
+  vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
+  vi.mocked(skills.presets).mockResolvedValue([])
+  vi.mocked(skills.remove).mockResolvedValue(undefined as never)
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+  const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  await wrapper.get('[data-test="delete-unwanted"]').trigger('click')
+  await flushPromises()
+  expect(confirm.mock.calls[0]![0]).toContain('unwanted')
+  expect(skills.remove).not.toHaveBeenCalled()
+  confirm.mockResolvedValue('confirm' as never)
+  vi.mocked(allSkills).mockClear().mockResolvedValue([])
+  await wrapper.get('[data-test="delete-unwanted"]').trigger('click')
+  await flushPromises()
+  expect(skills.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', revision: 5 }))
+  expect(allSkills).toHaveBeenCalledTimes(1)
+  expect(wrapper.find('[data-test="delete-unwanted"]').exists()).toBe(false)
+  confirm.mockRestore()
+  wrapper.unmount()
+})
+
 it('opens the filtered catalog after sync and preselects the source for new skills', async () => {
   vi.mocked(allSkills).mockResolvedValue([])
   const source = { id: 'source', key: 'tools', label: 'Tools', version: 3, git_url: 'https://example.com/skills.git' }
   vi.mocked(skills.sources).mockResolvedValue([source] as never)
   vi.mocked(skills.presets).mockResolvedValue([])
-  vi.mocked(skills.sourceSync).mockResolvedValue({ created: 2, updated: 0, unchanged: 1 })
+  vi.mocked(skills.sourceSync).mockResolvedValue({ created: 2, updated: 0, unchanged: 1, skipped: 0 })
   const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
   await flushPromises()
   const vm = wrapper.vm as unknown as { syncSource: (row: unknown) => Promise<void>; edit: (row: null) => void; activeTab: string; sourceFilter: string; syncResult: string }
@@ -68,6 +92,10 @@ it('opens the filtered catalog after sync and preselects the source for new skil
   expect(vm.activeTab).toBe('catalog')
   expect(vm.sourceFilter).toBe('source')
   expect(vm.syncResult).toContain('2')
+  expect(vm.syncResult).not.toContain(i18n.global.t('skillEditor.syncSkipped', { skipped: 0 }))
+  vi.mocked(skills.sourceSync).mockResolvedValue({ created: 0, updated: 0, unchanged: 1, skipped: 2 })
+  await vm.syncSource(source)
+  expect(vm.syncResult).toContain(i18n.global.t('skillEditor.syncSkipped', { skipped: 2 }))
   vm.edit(null)
   expect((wrapper.findComponent(SkillEditorDialog).vm as unknown as { form: SkillInput }).form.source_id).toBe('source')
   wrapper.unmount()
