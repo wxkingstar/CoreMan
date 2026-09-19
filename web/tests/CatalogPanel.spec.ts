@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/api/admin', () => ({
   catalog: {
     list: vi.fn().mockResolvedValue([
-      { provider: 'claude', model: 'vllm/claude-sonnet-4-6', display_name: 'Sonnet', is_default: true, retired: false, supports_xhigh: false, sort_order: 100, backend: 'claude' },
-      { provider: 'codex', model: 'codex/gpt-5.5', display_name: null, is_default: true, retired: false, supports_xhigh: false, sort_order: 100, backend: 'codex' },
+      { provider: 'claude', model: 'vllm/claude-sonnet-4-6', display_name: 'Sonnet', is_default: true, retired: false, supports_xhigh: false, supports_max: false, sort_order: 100, backend: 'claude' },
+      { provider: 'codex', model: 'codex/gpt-5.5', display_name: null, is_default: true, retired: false, supports_xhigh: false, supports_max: false, sort_order: 100, backend: 'codex' },
     ]),
     patch: vi.fn().mockImplementation(async (p: string, m: string, body: Record<string, unknown>) => ({ provider: p, model: m, ...body })),
     create: vi.fn(), remove: vi.fn(),
@@ -31,5 +31,8 @@ describe('CatalogPanel', () => {
     await wrapper.get('[data-test="retired-vllm/claude-sonnet-4-6"]').trigger('click')
     await flushPromises()
     expect(catalog.patch).toHaveBeenCalledWith('claude', 'vllm/claude-sonnet-4-6', { retired: true })
+    await wrapper.get('[data-test="max-codex/gpt-5.5"]').trigger('click')
+    await flushPromises()
+    expect(catalog.patch).toHaveBeenCalledWith('codex', 'codex/gpt-5.5', { supports_max: true })
   })
 })

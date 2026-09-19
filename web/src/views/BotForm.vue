@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
+import { fitEffort, supportedEfforts } from '@/utils/effort'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { computed, nextTick, onMounted, provide, reactive, ref, watch } from 'vue'
@@ -106,11 +107,12 @@ const credKeys = computed(() => CRED_KEYS[form.platform])
 const sensitiveVisible = computed(() => props.mode === 'create' || props.bot?.credentials !== undefined)
 const modelOptions = computed<string[]>(() =>
   relayModels.value ?? [...new Set(catalogRows.value.filter((r) => !r.retired).map((r) => r.model))])
-// 后端 supports_xhigh() 的写法：目录里任一行匹配即可（同一 model 可挂在多个 provider 下）。
-const xhighAllowed = computed(() => catalogRows.value.some((r) => r.model === form.model && r.supports_xhigh))
+const supportedEffortList = computed(() => supportedEfforts(form.model, catalogRows.value))
 
-watch(xhighAllowed, (ok) => {
-  if (!ok && form.effort_level === 'xhigh') form.effort_level = 'high'
+// 换模型后原档位不再支持时降到新模型支持的最高档。编辑时模型没换就不动，保存时不会顺带改掉原值。
+watch(() => supportedEffortList.value.join(), () => {
+  if (props.mode === 'edit' && form.model === props.bot?.model) return
+  if (form.effort_level) form.effort_level = fitEffort(form.effort_level, supportedEffortList.value)
 })
 
 /** 后端 422 明细里的字段名 → 表单标签：提示里用人话，表单项上就地标红。 */
@@ -385,7 +387,8 @@ onMounted(async () => {
     // 模型目录为空或全部退役时没有默认模型（null）：保持空，不覆盖已有值，交给必填校验提示。
     if (d.default_model) form.model = d.default_model
     form.verbosity_level = d.default_verbosity_level
-    form.effort_level = d.default_effort_level
+    // 平台默认档位可能高于默认模型支持的档位（例如 max 配 Haiku），按模型降档。
+    form.effort_level = d.default_effort_level && fitEffort(d.default_effort_level, supportedEffortList.value)
     wecomQrEnabled.value = d.wecom_qr_provisioning_enabled === true
   } catch (e) {
     fail(e)
@@ -396,7 +399,7 @@ onMounted(async () => {
 // 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
 provide(botFormKey, {
   mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
-  modelOptions, xhighAllowed, sensitiveVisible, credKeys, manualCredentials, wecomQrEnabled, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
+  modelOptions, supportedEfforts: supportedEffortList, sensitiveVisible, credKeys, manualCredentials, wecomQrEnabled, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
 })
 
 defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })

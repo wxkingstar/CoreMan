@@ -83,8 +83,10 @@ BUSINESS_TABLES = [
 
 
 SEED_MODEL_CATALOG = text(
-    "INSERT INTO model_catalog (provider, model, display_name, is_default, sort_order)"
-    " VALUES (:provider, :model, :display_name, :is_default, :sort_order)"
+    "INSERT INTO model_catalog"
+    " (provider, model, display_name, is_default, supports_xhigh, supports_max, sort_order)"
+    " VALUES (:provider, :model, :display_name, :is_default, :supports_xhigh, :supports_max,"
+    " :sort_order)"
     " ON CONFLICT DO NOTHING"
 )
 
@@ -98,7 +100,7 @@ def alembic_config(database_url: str) -> Config:
 
 @functools.cache
 def model_catalog_seed() -> list[dict[str, object]]:
-    """迁移 0003 里的模型目录种子，套上 0023 的改名（只读脚本目录，不连库）。
+    """迁移 0003 里的模型目录种子，套上 0023 的改名与 0043 的档位标记（只读脚本目录，不连库）。
 
     `model_catalog` 也列在 BUSINESS_TABLES 里（用例可以增删目录行，不清理会串味），但它同时
     是迁移写入的参考数据；TRUNCATE 之后按这份唯一来源补回，每个用例才都从「迁移后」状态起跑。
@@ -108,18 +110,25 @@ def model_catalog_seed() -> list[dict[str, object]]:
     scripts = ScriptDirectory.from_config(cfg)
     seed = scripts.get_revision("0003")
     renames = scripts.get_revision("0023")
-    assert seed is not None and renames is not None
+    efforts = scripts.get_revision("0043")
+    assert seed is not None and renames is not None and efforts is not None
     native = dict(renames.module.RENAMES)
-    return [
-        {
-            "provider": p,
-            "model": native.get(m, m),
-            "display_name": d,
-            "is_default": df,
-            "sort_order": s,
-        }
-        for p, m, d, df, s in seed.module.SEED_MODELS
-    ]
+    rows = []
+    for p, m, d, df, s in seed.module.SEED_MODELS:
+        model = native.get(m, m)
+        xhigh, max_ = efforts.module.known(model) or (False, False)
+        rows.append(
+            {
+                "provider": p,
+                "model": model,
+                "display_name": d,
+                "is_default": df,
+                "supports_xhigh": xhigh,
+                "supports_max": max_,
+                "sort_order": s,
+            }
+        )
+    return rows
 
 
 @pytest.fixture(scope="session", autouse=True)

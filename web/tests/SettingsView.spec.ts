@@ -15,7 +15,7 @@ const { serverSettings } = vi.hoisted(() => ({
 
 vi.mock('@/api/admin', () => ({
   settings: { get: vi.fn().mockResolvedValue({ ...serverSettings }), update: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ ...serverSettings, ...b })) },
-  catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', retired: false, is_default: true, display_name: null, supports_xhigh: false, sort_order: 1, backend: 'claude' }]) },
+  catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', retired: false, is_default: true, display_name: null, supports_xhigh: false, supports_max: false, sort_order: 1, backend: 'claude' }]) },
 }))
 
 vi.mock('@/components/AlertSettings.vue', () => ({ default: { template: '<div />' } }))

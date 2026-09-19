@@ -13,7 +13,7 @@ vi.mock('@/api/wecomBots', () => ({
 vi.mock('@/api/admin', () => ({
   bots: { create: vi.fn().mockImplementation(async (b: Record<string, unknown>) => ({ id: 'b1', version: 1, ...b })), validate: vi.fn().mockResolvedValue({ valid: true }), patch: vi.fn(), get: vi.fn() },
   relays: { list: vi.fn().mockResolvedValue({ items: [{ id: 'r1', name: 'claude01', unavailable_reason: null, effective_models: ['vllm/claude-sonnet-4-6'], model_provider: 'claude', team_id: null, team_name: null, is_active: true, default_model: 'vllm/claude-sonnet-4-6' }, { id: 'r2', name: 'codex01', unavailable_reason: null, effective_models: ['codex/gpt-5.5'], model_provider: 'codex', team_id: null, team_name: null, is_active: true, default_model: 'codex/gpt-5.5' }], total: 2, page: 1, per_page: 200 }), models: vi.fn().mockImplementation(async (id: string) => id === 'r1' ? { provider: 'claude', mode: 'inherit', models: ['vllm/claude-sonnet-4-6', 'vllm/claude-opus-4-6'], default: 'vllm/claude-sonnet-4-6' } : { provider: 'codex', mode: 'inherit', models: ['codex/gpt-5.5'], default: 'codex/gpt-5.5' }) },
-  catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
+  catalog: { list: vi.fn().mockResolvedValue([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', supports_xhigh: false, supports_max: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'claude' }, { provider: 'codex', model: 'codex/gpt-5.5', supports_xhigh: true, supports_max: false, retired: false, is_default: true, display_name: null, sort_order: 1, backend: 'codex' }]) },
   settings: { defaults: vi.fn().mockResolvedValue({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'high' }) },
   teams: { list: vi.fn().mockResolvedValue([]) },
 }))
@@ -69,6 +69,30 @@ describe('BotForm', () => {
     const option = wrapper.findAllComponents({ name: 'ElOption' }).find(o => o.props('value') === 'offline-ai')!
     expect(option.props('disabled')).toBe(true)
     expect(option.props('label')).toContain('未登录')
+    wrapper.unmount()
+  })
+
+  it('offers only the effort levels the model supports and steps down to the highest one', async () => {
+    // 平台默认 max 高于默认模型（xhigh / max 都不支持）能用的档位：载入时降到 high。
+    vi.mocked(settings.defaults).mockResolvedValueOnce({ default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 2, default_effort_level: 'max' })
+    const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { selectRelay: (id: string) => Promise<void>; form: { effort_level: string | null } }
+    const option = (lv: string) => wrapper.findAllComponents({ name: 'ElOption' }).find(o => o.props('value') === lv)!
+    expect(vm.form.effort_level).toBe('high')
+    expect(option('xhigh').props('disabled')).toBe(true)
+    expect(option('xhigh').props('label')).toBe('xhigh（当前模型不支持）')
+    expect(option('max').props('disabled')).toBe(true)
+    await vm.selectRelay('r2')
+    await flushPromises()
+    // codex/gpt-5.5 支持 xhigh、不支持 max。
+    expect(option('xhigh').props('disabled')).toBe(false)
+    expect(option('xhigh').props('label')).toBe('xhigh')
+    expect(option('max').props('disabled')).toBe(true)
+    vm.form.effort_level = 'xhigh'
+    await vm.selectRelay('r1')
+    await flushPromises()
+    expect(vm.form.effort_level).toBe('high')
     wrapper.unmount()
   })
 

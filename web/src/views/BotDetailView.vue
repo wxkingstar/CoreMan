@@ -117,7 +117,7 @@ function onSaved(updated: BotOut): void {
 
 function onSwitched(result: SwitchRelayOut): void {
   bot.value = result.bot
-  // 后端可能自动降档/换模型（目标 relay 不支持原模型、xhigh 落到 high），把结果说出来。
+  // 后端可能自动降档/换模型（目标 relay 不支持原模型、xhigh / max 落到新模型支持的最高档），把结果说出来。
   if (result.old_model !== result.new_model) {
     ElMessage.info(`${t('bots.switch.model')}: ${result.old_model} → ${result.new_model}`)
   }

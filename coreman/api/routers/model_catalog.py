@@ -34,6 +34,7 @@ class CatalogIn(BaseModel):
     is_default: bool = False
     retired: bool = False
     supports_xhigh: bool = False
+    supports_max: bool = False
     sort_order: int = 0
 
 
@@ -42,6 +43,7 @@ class CatalogPatch(BaseModel):
     is_default: bool | None = None
     retired: bool | None = None
     supports_xhigh: bool | None = None
+    supports_max: bool | None = None
     sort_order: int | None = None
 
     def changes(self) -> dict[str, Any]:
@@ -58,6 +60,7 @@ def catalog_out(row: ModelCatalog) -> dict[str, Any]:
         "is_default": row.is_default,
         "retired": row.retired,
         "supports_xhigh": row.supports_xhigh,
+        "supports_max": row.supports_max,
         "sort_order": row.sort_order,
         "backend": backend_of(row.model),
     }

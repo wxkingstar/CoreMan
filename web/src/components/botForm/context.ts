@@ -1,5 +1,5 @@
 import { inject, type ComputedRef, type InjectionKey, type Ref } from 'vue'
-import type { BotIn, RelayOut, TeamOut } from '@/api/types'
+import type { BotIn, EffortLevel, RelayOut, TeamOut } from '@/api/types'
 
 /** BotForm 与其分区子组件共享的表单状态和联动逻辑；状态只在 BotForm 里维护一份。 */
 export interface BotFormContext {
@@ -14,7 +14,8 @@ export interface BotFormContext {
   selectedRuntime: ComputedRef<string | null>
   runtimeBackends: ComputedRef<RelayOut[]>
   modelOptions: ComputedRef<string[]>
-  xhighAllowed: ComputedRef<boolean>
+  /** 当前模型支持的思考档位（xhigh / max 看模型目录）。 */
+  supportedEfforts: ComputedRef<EffortLevel[]>
   sensitiveVisible: ComputedRef<boolean>
   credKeys: ComputedRef<readonly string[]>
   /** 新建飞书员工时改为手动填写已有应用凭证（默认扫码创建）；企微开启扫码时同理。 */

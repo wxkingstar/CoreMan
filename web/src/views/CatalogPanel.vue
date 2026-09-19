@@ -56,6 +56,10 @@ function onXhigh(row: CatalogOut, value: boolean | string | number) {
   patch(row, { supports_xhigh: Boolean(value) })
 }
 
+function onMax(row: CatalogOut, value: boolean | string | number) {
+  patch(row, { supports_max: Boolean(value) })
+}
+
 function onSortOrder(row: CatalogOut, value: number | undefined) {
   if (value === undefined || value === row.sort_order) return
   patch(row, { sort_order: value })
@@ -87,7 +91,7 @@ async function remove(row: CatalogOut) {
 }
 
 function emptyForm(): CatalogIn {
-  return { provider: '', model: '', display_name: null, is_default: false, retired: false, supports_xhigh: false, sort_order: 0 }
+  return { provider: '', model: '', display_name: null, is_default: false, retired: false, supports_xhigh: false, supports_max: false, sort_order: 0 }
 }
 
 const dialogVisible = ref(false)
@@ -213,6 +217,19 @@ onMounted(load)
           </template>
         </el-table-column>
         <el-table-column
+          :label="t('catalog.max')"
+          width="90"
+        >
+          <template #default="{ row }: { row: CatalogOut }">
+            <el-switch
+              :data-test="'max-' + row.model"
+              :model-value="row.supports_max"
+              :disabled="!canManage"
+              @change="onMax(row, $event)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column
           :label="t('catalog.sortOrder')"
           width="150"
         >
@@ -276,6 +293,9 @@ onMounted(load)
         </el-form-item>
         <el-form-item :label="t('catalog.xhigh')">
           <el-switch v-model="form.supports_xhigh" />
+        </el-form-item>
+        <el-form-item :label="t('catalog.max')">
+          <el-switch v-model="form.supports_max" />
         </el-form-item>
         <el-form-item :label="t('catalog.sortOrder')">
           <el-input-number

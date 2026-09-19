@@ -58,7 +58,7 @@ def platform_default_model(catalog: Sequence[ModelCatalog]) -> str | None:
 class SettingsPatch(BaseModel):
     bootstrap_admin_enabled: bool | None = None
     default_verbosity_level: int | None = Field(default=None, ge=1, le=4)
-    default_effort_level: Literal["low", "medium", "high", "xhigh"] | None = None
+    default_effort_level: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     session_ttl_hours: int | None = Field(default=None, ge=1, le=720)
     jwt_issuer: str | None = Field(default=None, pattern=r"^[a-z0-9._-]{1,50}$")
     max_concurrent_tasks: int | None = Field(default=None, ge=1, le=500)

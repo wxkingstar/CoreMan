@@ -636,6 +636,7 @@ export default {
     isDefault: '默认',
     retired: '已退役',
     xhigh: 'xhigh',
+    max: 'max',
     sortOrder: '排序',
     add: '新增模型',
     deleteConfirm: '确定要删除该模型吗？',
@@ -667,6 +668,7 @@ export default {
     verbosityLevels: { 1: '极简', 2: '简洁', 3: '标准', 4: '详细' },
     effort: '思考档位',
     effortNone: '跟随默认',
+    effortUnsupported: '{level}（当前模型不支持）',
     sseTimeout: 'SSE 超时（秒）',
     credentials: '平台凭证',
     cred: {
