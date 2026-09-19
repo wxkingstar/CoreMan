@@ -123,7 +123,7 @@ The console is available in Chinese, Japanese and English.
 - **Execution boundary**: the AI CLI acts with the permissions of the system user that runs the runtime. Give each runtime a dedicated, least-privilege system user and isolate files and network access as needed; prompt constraints are no substitute for operating-system isolation. See the [security policy](SECURITY.md) for the trust model.
 - **Upgrades and backups**: build a new version with `./deploy/coreman build` and roll it out with `./deploy/coreman upgrade all <tag>`, see [operations](docs/operations.md) (in Chinese). Back up `.env` and the database regularly; without `MASTER_KEY`, the credentials encrypted in the database cannot be decrypted.
 
-CoreMan is at an early stage (latest release 0.1.0) and `main` keeps gaining features; see the [CHANGELOG](CHANGELOG.md).
+CoreMan is at an early stage (latest release 0.2.0) and `main` keeps gaining features; see the [CHANGELOG](CHANGELOG.md).
 
 ## Documentation
 
