@@ -74,15 +74,81 @@ async def final_text(db_session, task):
     return stream.final_text
 
 
-async def test_connect_without_a_binding_explains_how_to_bind(db_session, app, db_engine):
+async def test_connect_without_a_binding_offers_a_one_tap_link(db_session, app, db_engine):
     bot, user, task, _ = await connect(db_session, app, db_engine, bound=False)
     await db_session.refresh(task)
-    assert task.result == {"wecom_personal_unbound": True}
+    assert task.result == {"wecom_personal_flow": True, "wecom_personal_unbound": True}
     text = await final_text(db_session, task)
-    assert "http://localhost/my-wecom" in text and "确认授权" in text
+    assert "(http://localhost/my-wecom?authorize=1)" in text and "确认授权" in text
+    # 私聊里不出现企业微信的授权地址：它能换回授权机器人的 Secret，只在本人登录的页面上给出。
+    assert "work.weixin.qq.com" not in text
     assert await db_session.scalar(select(OutboxItem)) is None
-    # 私聊里不生成二维码：二维码等于密钥，只在本人登录的页面上展示。
-    assert await db_session.get(WecomPersonalBinding, user.id) is None
+    row = await db_session.get(WecomPersonalBinding, user.id)
+    assert row.status == "unbound" and row.scan_status is None
+    assert row.scan_notify["chat_id"] == SENDER and row.scan_notify["task_id"] == task.id
+    assert row.scan_notify["bot_id"] == str(bot.id)
+
+
+async def test_binding_from_chat_announces_the_result_and_the_card_connects(
+    db_session, app, db_engine, monkeypatch
+):
+    from coreman.core.wecom_personal import binding
+    from tests.api.test_wecom_binding import mock_wecom
+    from tests.api.test_wecom_bot_provisions import _bound, _fake
+    from tests.api.test_wecom_personal import PERSONAL_BOT, PERSONAL_SECRET
+
+    fake = _fake(monkeypatch)
+    bot, user, _, _ = await connect(db_session, app, db_engine, bound=False)
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    await binding.start(app.state.cipher, row)
+    fake.results.append(_bound(PERSONAL_BOT, PERSONAL_SECRET))
+    row.scan_next_poll_at = None
+    with respx.mock as mock:
+        mock_wecom(mock, probe={"mail": 850002})
+        await binding.refresh(db_session, app.state.cipher, row)
+    await db_session.commit()
+    assert row.status == "bound" and row.scan_notify is None
+    sent = (await db_session.scalars(select(OutboxItem).order_by(OutboxItem.id))).all()
+    assert [item.target for item in sent] == [{"chat_id": SENDER}] * 2
+    assert "已绑定企业微信" in sent[0].payload["markdown"]
+    assert "邮件" in sent[0].payload["markdown"]
+    card_task = sent[1].payload["card"]["task_id"]
+    result, update = await click(db_session, db_engine, bot, card_task, level="all")
+    assert result == "wecom_personal_connected"
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    assert row.authorization_level == "all"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+async def test_a_rejected_binding_is_explained_in_the_chat(
+    db_session, app, db_engine, monkeypatch, stale
+):
+    from coreman.core.wecom_personal import binding
+    from tests.api.test_wecom_binding import mock_wecom
+    from tests.api.test_wecom_bot_provisions import _bound, _fake
+    from tests.api.test_wecom_personal import PERSONAL_BOT, PERSONAL_SECRET
+
+    fake = _fake(monkeypatch)
+    _, user, _, _ = await connect(db_session, app, db_engine, bound=False)
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    if stale:
+        row.scan_notify = {
+            **row.scan_notify,
+            "at": (datetime.now(UTC) - binding.NOTIFY_TTL - timedelta(minutes=1)).isoformat(),
+        }
+    await binding.start(app.state.cipher, row)
+    fake.results.append(_bound(PERSONAL_BOT, PERSONAL_SECRET))
+    row.scan_next_poll_at = None
+    with respx.mock as mock:
+        mock_wecom(mock, authorizer="wo-stranger-0000000000000000000000")
+        await binding.refresh(db_session, app.state.cipher, row)
+    await db_session.commit()
+    sent = (await db_session.scalars(select(OutboxItem))).all()
+    if stale:
+        assert sent == []
+    else:
+        assert len(sent) == 1 and "没有绑定" in sent[0].payload["markdown"]
+    assert row.scan_notify is None
 
 
 async def test_connect_after_the_bot_was_deleted_asks_to_rebind(db_session, app, db_engine):

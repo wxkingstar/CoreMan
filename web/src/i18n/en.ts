@@ -76,6 +76,7 @@ const en = {
     },
     scanBind: 'Scan to bind',
     scan: {
+      redirecting: 'Opening the WeCom authorization page: tap "Confirm creation" and then "Confirm authorization", then come back.',
       title: 'Scan to bind WeCom',
       hint: 'Scan with WeCom on your phone to create an authorization bot that belongs only to you.',
       qrAlt: 'WeCom QR code',

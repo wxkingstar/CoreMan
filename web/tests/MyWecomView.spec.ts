@@ -401,3 +401,50 @@ describe('after binding', () => {
     expect(api.get).toHaveBeenCalledTimes(calls)
   })
 })
+
+describe('one-tap authorization link from the private chat', () => {
+  const originalUA = navigator.userAgent
+  function arrive(ua: string) {
+    Object.defineProperty(window.navigator, 'userAgent', { value: ua, configurable: true })
+    window.history.replaceState(null, '', '/my-wecom?authorize=1')
+  }
+  afterEach(() => {
+    Object.defineProperty(window.navigator, 'userAgent', { value: originalUA, configurable: true })
+    window.history.replaceState(null, '', '/')
+    vi.restoreAllMocks()
+  })
+
+  it('jumps straight to the WeCom confirmation page inside WeCom on a phone', async () => {
+    arrive('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148 wxwork/5.0.10')
+    api.get.mockResolvedValue(unbound())
+    api.startScan.mockResolvedValue(unbound({ scan: scan() }))
+    const replace = vi.fn()
+    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, replace, search: '?authorize=1', pathname: '/my-wecom', hash: '' } as Location)
+    const w = render(); await flushPromises()
+    expect(api.startScan).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalledWith(QR_URL)
+    // 跳走之后不再轮询，也不再画二维码。
+    expect(api.pollScan).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-test="bind-redirecting"]')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('shows the QR code on a desktop and drops the parameter from the address', async () => {
+    arrive('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) wxwork/5.0.10')
+    api.get.mockResolvedValue(unbound())
+    api.startScan.mockResolvedValue(unbound({ scan: scan() }))
+    const w = render(); await flushPromises()
+    expect(window.location.search).toBe('')
+    expect(api.startScan).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[data-test="bind-redirecting"]')).toBeNull()
+    w.unmount()
+  })
+
+  it('does nothing extra when the member is already bound', async () => {
+    arrive('Mozilla/5.0 (iPhone) Mobile wxwork/5.0.10')
+    api.get.mockResolvedValue(bound())
+    const w = render(); await flushPromises()
+    expect(api.startScan).not.toHaveBeenCalled()
+    w.unmount()
+  })
+})

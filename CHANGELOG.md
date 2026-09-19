@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Saying "连接企业微信" (Connect WeCom) in a WeCom private chat before binding now replies with a one-tap authorization link instead of pointing to the page. Opened inside WeCom on a phone, the link signs in and jumps straight to WeCom's "confirm creation / confirm authorization" page, so there is no QR code to scan on the same screen; opened on a computer it shows the QR code. When binding finishes, the assistant announces the result in that private chat and sends the tier card; failures such as someone else confirming are explained there too. The link carries no WeCom scan code: that code can fetch the authorization bot's secret, so it is only handed to the signed-in member. Requires database migration `0042`.
+
 ## [0.2.0] - 2026-09-19
 
 AI employees can now be created by scanning a QR code with Feishu or WeCom, members can connect their own Feishu or WeCom data to private chats and create scheduled AI tasks by asking, and the README has been rewritten around a first-time user.

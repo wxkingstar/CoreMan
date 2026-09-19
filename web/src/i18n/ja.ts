@@ -85,6 +85,7 @@ export default {
     },
     scanBind: 'スキャンしてバインド',
     scan: {
+      redirecting: 'WeCom の承認ページを開いています。「作成を確認」「承認を確認」の順にタップしてから戻ってください。',
       title: 'スキャンして WeCom をバインド',
       hint: 'スマートフォンの WeCom でスキャンして、あなた専用の認可ボットを作成します。',
       qrAlt: 'WeCom の QR コード',
