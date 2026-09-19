@@ -5,17 +5,17 @@ import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
 import { useI18n } from 'vue-i18n'
 import type { EffortLevel } from '@/api/types'
 import { useBotFormContext } from '@/components/botForm/context'
+import { EFFORT_LEVELS } from '@/utils/effort'
 
 /** part：新建时拆成「必填」（运行时）与「更多设置」两块；编辑时不传，整块展示。 */
 defineProps<{ part?: 'essential' | 'extra' }>()
 const workspaceVisible = ref(false)
 const SSE_OPTIONS = [1800, 3600, 7200, 14400, 21600, 43200]
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
-const EFFORT_OPTIONS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh']
 const { t } = useI18n()
 const {
   mode, botId, form, fieldErrors, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
-  selectRuntime, selectRelay, modelOptions, xhighAllowed,
+  selectRuntime, selectRelay, modelOptions, supportedEfforts,
 } = useBotFormContext()
 </script>
 
@@ -123,11 +123,11 @@ const {
         @update:model-value="form.effort_level = ($event as EffortLevel) ?? null"
       >
         <el-option
-          v-for="lv in EFFORT_OPTIONS"
+          v-for="lv in EFFORT_LEVELS"
           :key="lv"
-          :label="lv"
+          :label="supportedEfforts.includes(lv) ? lv : t('bots.effortUnsupported', { level: lv })"
           :value="lv"
-          :disabled="lv === 'xhigh' && !xhighAllowed"
+          :disabled="!supportedEfforts.includes(lv)"
         />
       </el-select>
     </el-form-item>

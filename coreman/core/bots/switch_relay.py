@@ -25,7 +25,7 @@ from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSkill, RelayServer, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
-from coreman.core.relay.models import default_model, effective_models, load_catalog, supports_xhigh
+from coreman.core.relay.models import default_model, effective_models, fit_effort, load_catalog
 
 
 class SwitchError(Exception):
@@ -142,9 +142,9 @@ async def switch_relay(
         bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
     bot.working_dir = target_directory
     bot.relay_server_id, bot.model = target.id, new_model
-    if bot.effort_level == "xhigh" and not supports_xhigh(new_model, catalog):
-        # 自动换来的模型不支持 xhigh 时降一档，否则下发给 relay 的就是非法档位。
-        bot.effort_level = "high"
+    if bot.effort_level:
+        # 自动换来的模型不支持 xhigh / max 时降到它支持的最高档，否则下发给 relay 的就是非法档位。
+        bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)
     # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废。
     await sessions.clear_bot(session, bot.id)
     await record_audit(

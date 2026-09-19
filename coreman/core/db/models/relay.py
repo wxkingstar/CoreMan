@@ -105,4 +105,5 @@ class ModelCatalog(TimestampMixin, Base):
     is_default: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     retired: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     supports_xhigh: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    supports_max: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))

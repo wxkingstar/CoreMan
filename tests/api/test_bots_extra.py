@@ -120,21 +120,22 @@ async def test_switch_relay_resolves_model(
     assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6-astra"]
 
 
-async def test_switch_relay_permissions_and_xhigh_downgrade(
+async def test_switch_relay_permissions_and_effort_downgrade(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
     bot, ids, _ = await _setup(client, db_session)
+    # codex 实例的默认模型改成只支持到 xhigh，自动换过去时 max 降到 xhigh。
     row = (
         await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "claude-sonnet-5")
+            select(ModelCatalog).where(ModelCatalog.model == "codex/gpt-6-astra")
         )
     ).scalar_one()
-    row.supports_xhigh = True
+    row.supports_max = False
     await db_session.commit()
     v = bot["version"]
     r = await client.patch(
         f"/api/admin/bots/{bot['id']}",
-        json={"effort_level": "xhigh"},
+        json={"effort_level": "max"},
         headers={"If-Match": f'"{v}"'},
     )
     assert r.status_code == 200
@@ -154,15 +155,15 @@ async def test_switch_relay_permissions_and_xhigh_downgrade(
         headers={"If-Match": f'"{v}"'},
     )
     # 同模型仍支持
-    assert r.status_code == 200 and r.json()["data"]["bot"]["effort_level"] == "xhigh"
+    assert r.status_code == 200 and r.json()["data"]["bot"]["effort_level"] == "max"
     v = r.json()["data"]["bot"]["version"]
     r = await client.post(
         f"/api/admin/bots/{bot['id']}/switch-relay",
         json={"relay_server_id": ids["codex01"]},
         headers={"If-Match": f'"{v}"'},
     )
-    # 换模型后 xhigh 降级
-    assert r.status_code == 200 and r.json()["data"]["bot"]["effort_level"] == "high"
+    # 换模型后降到新模型支持的最高档
+    assert r.status_code == 200 and r.json()["data"]["bot"]["effort_level"] == "xhigh"
     last = (
         (
             await db_session.execute(
@@ -172,7 +173,7 @@ async def test_switch_relay_permissions_and_xhigh_downgrade(
         .scalars()
         .all()
     )[-1]
-    assert last.diff["effort_level"] == ["xhigh", "high"]
+    assert last.diff["effort_level"] == ["max", "xhigh"]
 
 
 async def test_switch_relay_checks_permission_before_if_match(
@@ -245,11 +246,9 @@ async def test_switch_relay_explicit_model_without_xhigh_is_422(
     """显式带 model 时没有自动降档这回事：模型不支持 xhigh 就 422（页面对话框总是显式带模型）。"""
     bot, ids, _ = await _setup(client, db_session)
     row = (
-        await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "claude-sonnet-5")
-        )
+        await db_session.execute(select(ModelCatalog).where(ModelCatalog.model == "claude-opus-5"))
     ).scalar_one()
-    row.supports_xhigh = True
+    row.supports_xhigh = False
     await db_session.commit()
     r = await client.patch(
         f"/api/admin/bots/{bot['id']}",

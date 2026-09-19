@@ -112,10 +112,13 @@ async def test_create_validations(client: httpx.AsyncClient, db_session: AsyncSe
     assert (
         await client.post("/api/admin/bots", json=_bot_body(model="not/in-catalog"))
     ).status_code == 422
-    # 目录未标 supports_xhigh
-    assert (
-        await client.post("/api/admin/bots", json=_bot_body(effort_level="xhigh"))
-    ).status_code == 422
+    # 目录未标 supports_xhigh / supports_max（Haiku 4.5 都不支持）
+    for effort in ("xhigh", "max"):
+        bad = await client.post(
+            "/api/admin/bots",
+            json=_bot_body(model="claude-haiku-4-5-20251001", effort_level=effort),
+        )
+        assert bad.status_code == 422 and bad.json()["message"] == f"该模型不支持 {effort}"
     assert (
         await client.post("/api/admin/bots", json=_bot_body(credentials={"bot_id": "x"}))
     ).status_code == 422

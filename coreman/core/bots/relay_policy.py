@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import RelayServer, RuntimeNode, User
 from coreman.core.errors import ApiError
-from coreman.core.relay.models import effective_models, load_catalog, supports_xhigh
+from coreman.core.relay.models import effective_models, load_catalog, supports_effort
 
 MANAGER_ROLES = ("ai_committee", "platform_admin")
 
@@ -68,5 +68,5 @@ async def validate_model_for_relay(
     )
     if model not in allowed:
         raise ApiError(422, 422, "模型不在目标运行时的有效模型集内" if relay else "模型不在目录中")
-    if effort == "xhigh" and not supports_xhigh(model, catalog):
-        raise ApiError(422, 422, "该模型不支持 xhigh")
+    if effort and not supports_effort(model, effort, catalog):
+        raise ApiError(422, 422, f"该模型不支持 {effort}")

@@ -26,7 +26,7 @@ from coreman.core.db.base import Base, TimestampMixin
 from coreman.core.db.models.account import PLATFORM_CHECK
 
 BOT_KEY_RE = r"^[a-z0-9][a-z0-9_-]{1,49}$"
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 class Bot(TimestampMixin, Base):
@@ -35,7 +35,9 @@ class Bot(TimestampMixin, Base):
         CheckConstraint(f"bot_key ~ '{BOT_KEY_RE}'", name="bot_key"),
         CheckConstraint(PLATFORM_CHECK, name="platform"),
         CheckConstraint("verbosity_level BETWEEN 1 AND 4", name="verbosity_level"),
-        CheckConstraint("effort_level IN ('low','medium','high','xhigh')", name="effort_level"),
+        CheckConstraint(
+            "effort_level IN ('low','medium','high','xhigh','max')", name="effort_level"
+        ),
         CheckConstraint("sse_timeout_seconds BETWEEN 1800 AND 43200", name="sse_timeout_seconds"),
         # 唯一约束在这里给全名（不再在列上写 unique=True），保证 alembic check 只看到一个同名约束。
         UniqueConstraint("bot_key", name="uq_bots_bot_key"),

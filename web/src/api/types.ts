@@ -35,7 +35,7 @@ export type HealthStatus = 'healthy' | 'down' | 'auth_fail' | 'timeout' | 'unkno
 export type ModelsMode = 'inherit' | 'restricted'
 export type Visibility = 'all' | 'admins'
 export type Backend = 'claude' | 'codex'
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh'
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 /** 限额百分比：后端是 Numeric 列，序列化后可能是数字也可能是数字字符串，取值一律过 Number()。 */
 export type Pct = number | string | null
 
@@ -66,7 +66,7 @@ export interface ProbeResult { health: RelayHealth; added_models: string[]; rela
 
 export interface CatalogOut {
   provider: string; model: string; display_name: string | null; is_default: boolean
-  retired: boolean; supports_xhigh: boolean; sort_order: number; backend: Backend
+  retired: boolean; supports_xhigh: boolean; supports_max: boolean; sort_order: number; backend: Backend
 }
 export type CatalogIn = Omit<CatalogOut, 'backend'>
 export type CatalogPatch = Partial<Omit<CatalogOut, 'provider' | 'model' | 'backend'>>

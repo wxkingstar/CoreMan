@@ -638,6 +638,7 @@ export default {
     isDefault: '既定',
     retired: '廃止',
     xhigh: 'xhigh',
+    max: 'max',
     sortOrder: '並び順',
     add: 'モデルを追加',
     deleteConfirm: 'このモデルを削除してもよろしいですか？',
@@ -669,6 +670,7 @@ export default {
     verbosityLevels: { 1: '最小', 2: '簡潔', 3: '標準', 4: '詳細' },
     effort: '思考レベル',
     effortNone: '既定に従う',
+    effortUnsupported: '{level}（このモデルは非対応）',
     sseTimeout: 'SSE タイムアウト（秒）',
     credentials: 'プラットフォーム資格情報',
     cred: {

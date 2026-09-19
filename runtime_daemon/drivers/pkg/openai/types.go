@@ -29,7 +29,7 @@ type ChatCompletionRequest struct {
 	EnvVars          map[string]string `json:"env_vars,omitempty"`
 	MaxTurns         *int              `json:"max_turns,omitempty"`
 	SessionID        string            `json:"session_id,omitempty"`
-	Effort           string            `json:"effort,omitempty"`            // high/medium/low
+	Effort           string            `json:"effort,omitempty"` // low/medium/high/xhigh/max
 	SystemPromptFile string            `json:"system_prompt_file,omitempty"`
 	PermissionMode   string            `json:"permission_mode,omitempty"`
 	AllowedTools     string            `json:"allowed_tools,omitempty"` // comma-separated

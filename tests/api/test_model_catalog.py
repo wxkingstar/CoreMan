@@ -30,11 +30,17 @@ async def test_create_patch_default_and_delete(
             "model": "vllm/claude-new",
             "display_name": "New",
             "supports_xhigh": True,
+            "supports_max": True,
             "sort_order": 200,
             "is_default": True,
         },
     )
     assert r.status_code == 201, r.text
+    assert r.json()["data"]["supports_max"] is True
+    r = await client.patch(
+        "/api/admin/model-catalog/claude/vllm%2Fclaude-new", json={"supports_max": False}
+    )
+    assert r.status_code == 200 and r.json()["data"]["supports_max"] is False
     listed = await client.get("/api/admin/model-catalog", params={"provider": "claude"})
     rows = listed.json()["data"]
     assert rows[0]["model"] == "vllm/claude-new" and [x for x in rows if x["is_default"]] == [

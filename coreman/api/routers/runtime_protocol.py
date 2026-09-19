@@ -35,6 +35,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
+from coreman.core.relay.models import known_effort_flags
 from coreman.core.runtime_nodes.bundle import stale_bundle_reason
 from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
@@ -424,7 +425,9 @@ async def heartbeat(
         )
         for model in cap.models:
             await session.execute(
-                insert(ModelCatalog).values(provider=provider, model=model).on_conflict_do_nothing()
+                insert(ModelCatalog)
+                .values(provider=provider, model=model, **known_effort_flags(model))
+                .on_conflict_do_nothing()
             )
     # 消费者已离开（租约过期）或超过期限的在途调用：长轮询不再每次检查，改在心跳里收尾。
     moment = now()

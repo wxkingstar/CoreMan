@@ -7,7 +7,13 @@ import httpx
 import pytest
 from sqlalchemy import select, update
 
-from coreman.core.db.models import RelayServer, RuntimeCall, RuntimeInstallLink, RuntimeNode
+from coreman.core.db.models import (
+    ModelCatalog,
+    RelayServer,
+    RuntimeCall,
+    RuntimeInstallLink,
+    RuntimeNode,
+)
 from coreman.core.db.session import make_session_factory
 from coreman.core.runtime_nodes.transport import ReverseTransport, now
 from tests.api.conftest import login_as
@@ -397,6 +403,37 @@ async def test_codex_catalog_changes_survive_legacy_heartbeats(client, db_sessio
     heartbeat["codex"]["installed"] = True
     await beat()
     assert "codex/gpt-6-astra" in (await backends())["codex"]["effective_models"]
+
+
+async def test_heartbeat_prefills_effort_support_for_new_catalog_rows(client, db_session):
+    _, _, headers = await enrollment(client, db_session)
+    # 管理员已关掉的已有行不被心跳改回来。
+    row = await db_session.get(ModelCatalog, {"provider": "claude", "model": "claude-sonnet-5"})
+    row.supports_xhigh = False
+    row.supports_max = False
+    await db_session.commit()
+    response = await client.post(
+        "/api/runtime/heartbeat",
+        headers=headers,
+        json={
+            "claude": {
+                "installed": True,
+                "models": ["claude-opus-4-8", "claude-opus-4-6", "claude-sonnet-5", "claude-x"],
+            },
+            "codex": {"installed": True, "models": ["codex/gpt-5.5"]},
+            "version": "test",
+            "service_status": "systemd-user",
+        },
+    )
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    rows = (await db_session.execute(select(ModelCatalog))).scalars().all()
+    flags = {r.model: (r.supports_xhigh, r.supports_max) for r in rows}
+    assert flags["claude-opus-4-8"] == (True, True)
+    assert flags["claude-opus-4-6"] == (False, True)
+    assert flags["claude-sonnet-5"] == (False, False)
+    assert flags["claude-x"] == (False, False)
+    assert flags["codex/gpt-5.5"] == (True, False)
 
 
 async def test_claude_catalog_additions_and_retirements_override_old_discovery(client, db_session):

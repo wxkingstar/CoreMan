@@ -6,9 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- The `max` reasoning effort, above `xhigh`, for AI employees and the platform default. The model catalog gets a "max" switch next to "xhigh", and migration `0043` fills both from the vendors' documentation: Claude Fable 5.1/5, Mythos 5.1/5, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5 support both; Claude Opus 4.6, Sonnet 4.6 and Mythos Preview support `max` but not `xhigh`; GPT-6 Astra and GPT-5.6 Sol/Terra/Luna support both; GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5.3-Codex and GPT-5.2 support `xhigh` only; Claude Opus 4.5, Sonnet 4.5 and Haiku 4.5 support neither. Models that runtimes report later get both switches filled in the same way when they are added to the catalog. The employee form greys out the levels the chosen model does not support and says so, and switching to a model that lacks the current level steps it down to the highest one the model supports, as the runtime switch already did for `xhigh`. The Claude driver passes the level to `claude --effort`; the Codex driver passes it as `model_reasoning_effort`, which Codex CLI accepts from 0.154. Requires database migration `0043`; downgrading it maps `max` back to `xhigh` where the model supports it and to `high` otherwise.
+
 ### Changed
 
 - Saying "连接企业微信" (Connect WeCom) in a WeCom private chat before binding now replies with a one-tap authorization link instead of pointing to the page. Opened inside WeCom on a phone, the link signs in and jumps straight to WeCom's "confirm creation / confirm authorization" page, so there is no QR code to scan on the same screen; opened on a computer it shows the QR code. When binding finishes, the assistant announces the result in that private chat and sends the tier card; failures such as someone else confirming are explained there too. The link carries no WeCom scan code: that code can fetch the authorization bot's secret, so it is only handed to the signed-in member. Requires database migration `0042`.
+
+### Fixed
+
+- The `xhigh` reasoning effort can now be chosen for the models that support it. The model catalog never marked any model as supporting `xhigh`, so the option stayed greyed out even for Claude Opus 5. Migration `0043` sets the flags from Anthropic's and OpenAI's model documentation (listed under Added); models not in those docs keep the administrator's setting. Employees set to `xhigh` on a model that is switched off drop to `high`, which is what Claude Code already ran them at. Requires database migration `0043`.
 
 ### Security
 

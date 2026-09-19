@@ -9,10 +9,10 @@ import { settings } from '@/api/admin'
 import AlertSettings from '@/components/AlertSettings.vue'
 import NotificationSettings from '@/components/NotificationSettings.vue'
 import { PROMPT_SEGMENTS, type EffortLevel, type SettingsOut, type SettingsPatch } from '@/api/types'
+import { EFFORT_LEVELS } from '@/utils/effort'
 
 const { t } = useI18n()
 
-const EFFORT_OPTIONS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh']
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
 // 可写设置项：coreman/core/settings_schema.py::SETTING_DEFAULTS 里除只读的 default_model 以外的键。
 // save() 只按这几个键做浅比较，default_model 永远不会进 PUT 请求体。
@@ -227,7 +227,7 @@ defineExpose({ form })
           @update:model-value="form.default_effort_level = ($event as EffortLevel) ?? null"
         >
           <el-option
-            v-for="lv in EFFORT_OPTIONS"
+            v-for="lv in EFFORT_LEVELS"
             :key="lv"
             :label="lv"
             :value="lv"

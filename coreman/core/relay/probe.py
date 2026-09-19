@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.db.models import ModelCatalog, RelayServer
 from coreman.core.logging import get_logger
 from coreman.core.relay.client import RelayClient, RelayError, RelayHealth
+from coreman.core.relay.models import known_effort_flags
 
 log = get_logger(__name__)
 
@@ -73,6 +74,7 @@ async def probe_relay(
                 provider=relay.model_provider,
                 model=model,
                 is_default=not existing and not added,
+                **known_effort_flags(model),
                 sort_order=0,
             )
         )

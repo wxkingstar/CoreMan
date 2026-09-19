@@ -142,7 +142,7 @@ class BotIn(BaseModel):
     working_dir: str = Field(min_length=1, max_length=500)
     system_prompt: str = Field(default="", max_length=20000)
     verbosity_level: int = Field(default=1, ge=1, le=4)
-    effort_level: Literal["low", "medium", "high", "xhigh"] | None = None
+    effort_level: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     sse_timeout_seconds: int = Field(default=3600, ge=1800, le=43200)
     credentials: dict[str, str] = Field(default_factory=dict)
     # 飞书扫码创建的应用：凭证由服务端扫码会话交付，credentials 必须留空。
@@ -182,7 +182,7 @@ class BotPatch(BaseModel):
     working_dir: str | None = Field(default=None, min_length=1, max_length=500)
     system_prompt: str | None = Field(default=None, max_length=20000)
     verbosity_level: int | None = Field(default=None, ge=1, le=4)
-    effort_level: Literal["low", "medium", "high", "xhigh"] | None = None
+    effort_level: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     sse_timeout_seconds: int | None = Field(default=None, ge=1800, le=43200)
     credentials: dict[str, str] | None = None
     env_vars: dict[str, str] | None = None
