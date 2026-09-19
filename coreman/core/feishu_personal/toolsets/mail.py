@@ -1,15 +1,19 @@
-"""邮件：只访问本人邮箱（me）。列表、搜索、读取、整理，起草与发送。"""
+"""邮件：只访问本人邮箱（me）。列表、搜索、读取、整理，起草、发送、回复与转发。"""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import hashlib
+import html
 import json
+import re
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate, make_msgid
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, StringConstraints, model_validator
 
@@ -76,14 +80,30 @@ class Compose(Arguments):
     to: Addresses = Field(default_factory=list)
     cc: Addresses = Field(default_factory=list)
     bcc: Addresses = Field(default_factory=list)
-    subject: Annotated[str, StringConstraints(max_length=500, pattern=r"^[^\r\n]+$")]
+    subject: Annotated[str, StringConstraints(max_length=500, pattern=r"^[^\r\n]+$")] | None = (
+        Field(default=None, description="Required unless replying or forwarding")
+    )
     body: Annotated[str, StringConstraints(min_length=1, max_length=20000)]
     body_format: Literal["text", "html"] = "text"
+    reply_to_message_id: PathId | None = Field(
+        default=None,
+        description="Reply to this mail: recipients, subject, quote and threading come from it",
+    )
+    reply_all: bool = Field(default=False, description="With reply: also everyone on To/Cc")
+    forward_message_id: PathId | None = Field(
+        default=None, description="Forward this mail's text below the body (not attachments)"
+    )
 
     @model_validator(mode="after")
-    def has_recipient(self) -> Compose:
-        if not (self.to or self.cc or self.bcc):
+    def consistent(self) -> Compose:
+        if self.reply_to_message_id and self.forward_message_id:
+            raise ValueError("reply or forward, not both")
+        if self.reply_all and not self.reply_to_message_id:
+            raise ValueError("reply_all needs reply_to_message_id")
+        if not self.reply_to_message_id and not (self.to or self.cc or self.bcc):
             raise ValueError("at least one recipient")
+        if not (self.reply_to_message_id or self.forward_message_id or self.subject):
+            raise ValueError("subject is required")
         return self
 
 
@@ -124,22 +144,152 @@ def _message_id(item: Any) -> str | None:
     return item if isinstance(item, str) and item else None
 
 
-async def _draft(args: Compose, call: Call) -> str:
+_ADDRESS = re.compile(r"[^@\s<>,;\"]+@[^@\s<>,;\"]+\.[^@\s<>,;\"]+\Z")
+_PREFIX = re.compile(r"^\s*(re|fwd?|回复|转发)\s*[:：]\s*", re.IGNORECASE)
+_CJK = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _clean(value: Any) -> str:
+    # Values from someone else's mail: never let them add header lines.
+    return re.sub(r"[\r\n]+", " ", value).strip() if isinstance(value, str) else ""
+
+
+def _address(value: Any) -> str | None:
+    found = _clean(value.get("mail_address") if isinstance(value, dict) else value)
+    return found if _ADDRESS.match(found) else None
+
+
+def _addresses(values: Any) -> list[str]:
+    return [a for a in map(_address, values if isinstance(values, list) else []) if a]
+
+
+def _unique(values: list[str], skip: set[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if value.lower() not in skip and value.lower() not in {v.lower() for v in out}:
+            out.append(value)
+    return out
+
+
+def _person(value: Any) -> str:
+    address = _address(value) or ""
+    name = _clean(value.get("name")) if isinstance(value, dict) else ""
+    return f"{name} <{address}>" if name and address else address or name
+
+
+class _Original:
+    def __init__(self, message: dict[str, Any]) -> None:
+        self.message_id = _clean(message.get("message_id"))
+        self.subject = _clean(message.get("subject"))
+        self.sender = message.get("head_from")
+        self.reply_to = _address(message.get("reply_to"))
+        self.to = _addresses(message.get("to"))
+        self.cc = _addresses(message.get("cc"))
+        self.smtp_id = _clean(message.get("smtp_message_id")).strip("<>")
+        references = message.get("references")
+        self.references = (
+            [_clean(ref).strip("<>") for ref in references if isinstance(ref, str) and _clean(ref)]
+            if isinstance(references, list)
+            else []
+        )
+        body = _decode(message.get("body_plain_text"))
+        self.body = body if isinstance(body, str) else ""
+        self.attachments = len(message.get("attachments") or [])
+        self.chinese = bool(_CJK.search(self.subject))
+        stamp = message.get("internal_date")
+        self.date = ""
+        if isinstance(stamp, (str, int)) and str(stamp).isdigit():
+            moment = datetime.fromtimestamp(int(stamp) / 1000, UTC)
+            self.date = moment.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+
+    def subject_for(self, forward: bool) -> str:
+        base = self.subject
+        while _PREFIX.match(base):
+            base = _PREFIX.sub("", base, count=1)
+        if self.chinese:
+            return ("转发：" if forward else "回复：") + base
+        return ("Fwd: " if forward else "Re: ") + base
+
+    def quoted(self, forward: bool) -> str:
+        if forward:
+            labels = (
+                ("---------- 转发的邮件 ----------", "发件人", "日期", "主题", "收件人")
+                if self.chinese
+                else ("---------- Forwarded message ----------", "From", "Date", "Subject", "To")
+            )
+            head = [
+                labels[0],
+                f"{labels[1]}: {_person(self.sender)}",
+                f"{labels[2]}: {self.date}",
+                f"{labels[3]}: {self.subject}",
+                f"{labels[4]}: {', '.join(self.to)}",
+            ]
+            return "\n\n" + "\n".join(head) + "\n\n" + self.body
+        intro = (
+            f"在 {self.date}，{_person(self.sender)} 写道："
+            if self.chinese
+            else f"On {self.date}, {_person(self.sender)} wrote:"
+        )
+        return "\n\n" + intro + "\n" + "\n".join("> " + line for line in self.body.splitlines())
+
+
+async def _original(call: Call, message_id: str) -> _Original:
+    data = await call(
+        "mail.get", path={**ME, "message_id": message_id}, params={"format": "plain_text_full"}
+    )
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise service.PersonalError("mail_not_found")
+    return _Original(message)
+
+
+async def _draft(args: Compose, call: Call) -> tuple[str, dict[str, Any]]:
     profile = await call("mail.profile", path=ME)
     sender = profile.get("primary_email_address") or (profile.get("user_mailbox") or {}).get(
         "primary_email_address"
     )
     if not isinstance(sender, str) or not sender:
         raise service.PersonalError("mailbox_unavailable")
+    to, cc, subject, body = list(args.to), list(args.cc), args.subject, args.body
+    headers: dict[str, str] = {}
+    notes: dict[str, Any] = {}
+    source = args.reply_to_message_id or args.forward_message_id
+    if source:
+        original = await _original(call, source)
+        forward = args.forward_message_id is not None
+        subject = subject or original.subject_for(forward)
+        quote = original.quoted(forward)
+        if args.body_format == "html":
+            quote = "<br><br><blockquote>" + html.escape(quote.strip()).replace("\n", "<br>")
+            quote += "</blockquote>"
+        body += quote
+        if forward and original.attachments:
+            notes["attachments_not_forwarded"] = original.attachments
+        if not forward:
+            me = {sender.lower()}
+            first = original.reply_to or _address(original.sender)
+            to = _unique(([first] if first else []) + to, me)
+            if args.reply_all:
+                cc = _unique(original.to + original.cc + cc, me | {a.lower() for a in to})
+            if original.smtp_id:
+                headers["In-Reply-To"] = f"<{original.smtp_id}>"
+                chain = [*original.references, original.smtp_id]
+                headers["References"] = " ".join(f"<{ref}>" for ref in chain)
+            if original.message_id:
+                headers["X-LMS-Reply-To-Message-Id"] = original.message_id
+        if not (to or cc or args.bcc):
+            raise service.PersonalError("mail_recipient_unknown")
     message = EmailMessage(policy=SMTP)
     message["From"] = sender
-    for header, values in (("To", args.to), ("Cc", args.cc), ("Bcc", args.bcc)):
+    for header, values in (("To", to), ("Cc", cc), ("Bcc", args.bcc)):
         if values:
             message[header] = ", ".join(values)
-    message["Subject"] = args.subject
+    message["Subject"] = subject or ""
     message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(domain=sender.rsplit("@", 1)[1])
-    message.set_content(args.body, subtype="html" if args.body_format == "html" else "plain")
+    for name, value in headers.items():
+        message[name] = value
+    message.set_content(body, subtype="html" if args.body_format == "html" else "plain")
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
     created = await call("mail.draft", path=ME, json={"raw": raw})
     draft = created.get("draft")
@@ -147,7 +297,7 @@ async def _draft(args: Compose, call: Call) -> str:
     draft_id = created.get("draft_id") or created.get("id") or nested
     if not isinstance(draft_id, str) or not draft_id:
         raise service.PersonalError("mail_draft_failed")
-    return draft_id
+    return draft_id, {"to": to, "cc": cc, "subject": subject, **notes}
 
 
 @tool("feishu_mail_folders", Arguments, "mail.folders", "List the user's mail folders.")
@@ -219,17 +369,19 @@ async def read_mail(args: ReadMail, call: Call) -> dict[str, Any]:
     "feishu_mail_create_draft",
     Compose,
     "mail.draft",
-    "Save a mail as a draft in the user's mailbox without sending it.",
+    "Save a new mail, a reply or a forward as a draft in the user's mailbox without sending.",
 )
 async def create_draft(args: Compose, call: Call) -> dict[str, Any]:
-    return {"draft_id": await _draft(args, call), "sent": False}
+    draft_id, summary = await _draft(args, call)
+    return {"draft_id": draft_id, "sent": False, **summary}
 
 
 @tool(
     "feishu_mail_send",
     SendMail,
     "mail.send_draft",
-    "Send a mail from the user's mailbox. Retry with the same uuid: it never sends twice."
+    "Send a new mail, reply (reply_to_message_id) or forward (forward_message_id) from the"
+    " user's mailbox. Retry with the same uuid: it never sends twice."
     " On mail_send_unconfirmed the mail may already be out: ask the user to check Sent.",
 )
 async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
@@ -239,7 +391,11 @@ async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
     if record.status == "sent":
         return {**(record.result or {}), "draft_id": record.draft_id, "sent": True, "repeat": True}
     retry = record.draft_id is not None
-    draft_id = record.draft_id or await _draft(args, call)
+    summary: dict[str, Any] = {}
+    if record.draft_id:
+        draft_id = record.draft_id
+    else:
+        draft_id, summary = await _draft(args, call)
     if not retry:
         # Kept even if sending fails below, so a retry sends this draft instead of a new one.
         record.draft_id = draft_id
@@ -254,8 +410,8 @@ async def send_mail(args: SendMail, call: Call) -> dict[str, Any]:
                 "mail_send_unconfirmed", upstream_code=exc.upstream_code
             ) from exc
         raise
-    record.status, record.result = "sent", sent
-    return {**sent, "draft_id": record.draft_id, "sent": True}
+    record.status, record.result = "sent", {**sent, **summary}
+    return {**sent, **summary, "draft_id": draft_id, "sent": True}
 
 
 @tool(

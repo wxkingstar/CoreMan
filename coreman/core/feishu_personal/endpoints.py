@@ -79,6 +79,7 @@ _SHEET_READ = (
 _SHEET_WRITE = ("sheets:spreadsheet:write_only", "sheets:spreadsheet", "drive:drive")
 _TABLE = "/bitable/v1/apps/{app_token}/tables/{table_id}"
 _WIKI_READ = ("wiki:wiki:readonly", "wiki:wiki")
+_APPROVAL_READ = ("approval:approval:read", "approval:approval:readonly", "approval:approval")
 
 ENDPOINTS: dict[str, Endpoint] = {
     # 消息与群
@@ -138,6 +139,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         "vc:meeting.meetingevent:read",
     ),
     "vc.note": _e("GET", "/vc/v1/notes/{note_id}", "read", "vc:note:read"),
+    "vc.rooms": _e("POST", "/vc/v1/rooms/search", "read", "vc:room:readonly", "vc:room"),
     "minutes.search": _e(
         "POST", "/minutes/v1/minutes/search", "read", "minutes:minutes.search:read"
     ),
@@ -279,6 +281,13 @@ ENDPOINTS: dict[str, Endpoint] = {
         "task:tasklist:read",
         "task:tasklist:write",
     ),
+    "task.subtask": _e(
+        "POST",
+        "/task/v2/tasks/{task_guid}/subtasks",
+        "write",
+        "task:task:write",
+        "task:task:writeonly",
+    ),
     "task.comment": _e(
         "POST", "/task/v2/comments", "write", "task:comment:write", "task:comment:writeonly"
     ),
@@ -301,6 +310,35 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "docx.create": _e(
         "POST", "/docx/v1/documents", "write", "docx:document:create", "docx:document"
+    ),
+    "docs.fetch": _e(
+        "POST",
+        "/docs_ai/v1/documents/{document_id}/fetch",
+        "read",
+        "docx:document:readonly",
+        "docx:document",
+    ),
+    "docs.update": _e(
+        "PUT",
+        "/docs_ai/v1/documents/{document_id}",
+        "write",
+        "docx:document:write_only",
+        "docx:document",
+    ),
+    "drive.folder": _e(
+        "POST", "/drive/v1/files/create_folder", "write", "space:folder:create", "drive:drive"
+    ),
+    # Granting someone access to a document notifies them: treated like sending.
+    "drive.share": _e(
+        "POST",
+        "/drive/v1/permissions/{token}/members",
+        "send",
+        "docs:permission.member:create",
+        "drive:drive",
+        "docs:doc",
+        "sheets:spreadsheet",
+        "bitable:app",
+        "wiki:wiki",
     ),
     "docx.append": _e(
         "POST",
@@ -411,6 +449,22 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "approval.approve": _e("POST", "/approval/v4/tasks/pass", "write", "approval:task:write"),
     "approval.reject": _e("POST", "/approval/v4/tasks/refuse", "write", "approval:task:write"),
+    "approval.transfer": _e("POST", "/approval/v4/tasks/forward", "write", "approval:task:write"),
+    "approval.templates": _e(
+        "POST", "/approval/v4/approvals/search_launchable", "read", *_APPROVAL_READ
+    ),
+    "approval.template": _e(
+        "GET", "/approval/v4/approvals/{approval_code}/detail", "read", *_APPROVAL_READ
+    ),
+    "approval.submit": _e(
+        "POST", "/approval/v4/instances/initiate", "write", "approval:instance:write"
+    ),
+    "approval.recall": _e(
+        "POST", "/approval/v4/instances/recall", "write", "approval:instance:write"
+    ),
+    "approval.remind": _e(
+        "POST", "/approval/v4/instances/remind", "write", "approval:instance:write"
+    ),
     # OKR
     "okr.cycles": _e("GET", "/okr/v2/cycles", "read", "okr:okr.period:readonly"),
     "okr.objectives": _e(

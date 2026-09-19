@@ -1,18 +1,21 @@
-"""通讯录、审批、OKR、考勤：都以本人身份，只看本人能看的。"""
+"""通讯录、审批（查看、处理、发起）、OKR、考勤：都以本人身份，只看本人能看的。"""
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Annotated, Any, Literal
 
-from pydantic import StringConstraints, model_validator
+from pydantic import Field, JsonValue, StringConstraints, model_validator
 
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
     Call,
     Day,
     Identifier,
+    OpenIds,
     Page,
+    Uuid,
     compact,
     page,
     tool,
@@ -48,6 +51,51 @@ class Instance(Arguments):
 class Decision(Instance):
     task_id: Identifier
     comment: Comment | None = None
+
+
+class Templates(Page):
+    keyword: Keyword = ""
+
+
+class Template(Arguments):
+    approval_code: Identifier
+
+
+class FormValue(Arguments):
+    id: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    type: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_]{1,50}$")]
+    value: JsonValue
+
+
+class NodeUsers(Arguments):
+    key: Annotated[str, StringConstraints(min_length=1, max_length=200)] = Field(
+        description="custom_node_id, or node_id, from the template"
+    )
+    open_ids: OpenIds
+
+
+class Submit(Template):
+    form: list[FormValue] = Field(
+        min_length=1, max_length=100, description="One entry per form widget: id, type, value"
+    )
+    approvers: list[NodeUsers] = Field(
+        default_factory=list, max_length=20, description="Only for nodes the submitter chooses"
+    )
+    cc: list[NodeUsers] = Field(default_factory=list, max_length=20)
+    uuid: Uuid
+
+
+class Remind(Instance):
+    task_ids: Annotated[list[Identifier], Field(min_length=1, max_length=20)]
+    comment: Comment | None = None
+
+
+class Transfer(Decision):
+    transfer_open_id: Identifier
+
+
+def _nodes(items: list[NodeUsers]) -> list[dict[str, Any]] | None:
+    return [{"key": item.key, "value": item.open_ids} for item in items] or None
 
 
 class Objectives(Page):
@@ -148,6 +196,101 @@ async def reject(args: Decision, call: Call) -> dict[str, Any]:
     return await call("approval.reject", json=args.model_dump(exclude_none=True))
 
 
+@tool(
+    "feishu_approval_transfer",
+    Transfer,
+    "approval.transfer",
+    "Hand the user's pending approval task to a colleague (open_id).",
+)
+async def transfer(args: Transfer, call: Call) -> dict[str, Any]:
+    body = compact(
+        {
+            "instance_code": args.instance_code,
+            "task_id": args.task_id,
+            "transfer_user_id": args.transfer_open_id,
+            "comment": args.comment,
+        }
+    )
+    return await call("approval.transfer", params={"user_id_type": "open_id"}, json=body)
+
+
+@tool(
+    "feishu_approval_templates",
+    Templates,
+    "approval.templates",
+    "Find approval forms the user can submit, such as leave, expense or purchase.",
+)
+async def templates(args: Templates, call: Call) -> dict[str, Any]:
+    body = compact(
+        {
+            "keyword": args.keyword or None,
+            "locale": "zh-CN",
+            "page_size": args.limit,
+            "page_token": args.page_token,
+        }
+    )
+    return await call("approval.templates", json=body)
+
+
+@tool(
+    "feishu_approval_template",
+    Template,
+    "approval.template",
+    "Read an approval form's widgets (id, type, options, required) and approval nodes.",
+)
+async def template(args: Template, call: Call) -> dict[str, Any]:
+    data = await call(
+        "approval.template", path={"approval_code": args.approval_code}, params={"locale": "zh-CN"}
+    )
+    if isinstance(data.get("form"), str):
+        try:
+            data = {**data, "form": json.loads(data["form"])}
+        except ValueError:
+            pass
+    return data
+
+
+@tool(
+    "feishu_approval_submit",
+    Submit,
+    "approval.submit",
+    "Submit an approval as the user with the form values read from its template."
+    " Reuse uuid for retries.",
+)
+async def submit(args: Submit, call: Call) -> dict[str, Any]:
+    form = [item.model_dump() for item in args.form]
+    body = compact(
+        {
+            "approval_code": args.approval_code,
+            "form": json.dumps(form, ensure_ascii=False),
+            "node_approver_list": _nodes(args.approvers),
+            "node_cc_list": _nodes(args.cc),
+            "uuid": args.uuid,
+        }
+    )
+    return await call("approval.submit", json=body)
+
+
+@tool(
+    "feishu_approval_recall",
+    Instance,
+    "approval.recall",
+    "Withdraw an approval the user submitted.",
+)
+async def recall(args: Instance, call: Call) -> dict[str, Any]:
+    return await call("approval.recall", json={"instance_code": args.instance_code})
+
+
+@tool(
+    "feishu_approval_remind",
+    Remind,
+    "approval.remind",
+    "Remind the approvers of the user's submitted approval (task IDs from its details).",
+)
+async def remind(args: Remind, call: Call) -> dict[str, Any]:
+    return await call("approval.remind", json=args.model_dump(exclude_none=True))
+
+
 @tool("feishu_okr_cycles", Page, "okr.cycles", "List the user's OKR cycles.")
 async def okr_cycles(args: Page, call: Call) -> dict[str, Any]:
     return await call(
@@ -200,6 +343,12 @@ TOOLS = [
     approval_instance,
     approve,
     reject,
+    transfer,
+    templates,
+    template,
+    submit,
+    recall,
+    remind,
     okr_cycles,
     okr_objectives,
     okr_key_results,

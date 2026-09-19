@@ -39,16 +39,46 @@ class TasklistTasks(ListTasks):
     tasklist_guid: Identifier
 
 
-class CreateTask(Arguments):
+class TaskFields(Arguments):
     summary: Summary
     description: Detail | None = None
     due: ISOTime | Day | None = _DUE
+    remind_minutes_before: int | None = Field(
+        default=None, ge=0, le=20160, description="Remind before the due time; needs due"
+    )
     assignee_open_ids: list[Identifier] = Field(default_factory=list, max_length=50)
     follower_open_ids: list[Identifier] = Field(default_factory=list, max_length=50)
-    tasklist_guid: Identifier | None = None
     client_token: Uuid
 
     _due = valid_times("due")
+
+    @model_validator(mode="after")
+    def reminder_needs_due(self) -> TaskFields:
+        if self.remind_minutes_before is not None and not self.due:
+            raise ValueError("remind_minutes_before needs due")
+        return self
+
+    def body(self) -> dict[str, Any]:
+        return compact(
+            {
+                "summary": self.summary,
+                "description": self.description,
+                "due": _due(self.due) if self.due else None,
+                "reminders": None
+                if self.remind_minutes_before is None
+                else [{"relative_fire_minute": self.remind_minutes_before}],
+                "members": _members(self) or None,
+                "client_token": self.client_token,
+            }
+        )
+
+
+class CreateTask(TaskFields):
+    tasklist_guid: Identifier | None = None
+
+
+class Subtask(TaskFields):
+    parent_task_guid: Identifier
 
 
 class UpdateTask(TaskRef):
@@ -74,7 +104,7 @@ def _due(value: str) -> dict[str, Any]:
     return {"timestamp": str(millis(value)), "is_all_day": len(value) == 10}
 
 
-def _members(args: CreateTask) -> list[dict[str, str]]:
+def _members(args: TaskFields) -> list[dict[str, str]]:
     return [
         {"id": open_id, "type": "user", "role": role}
         for role, ids in (
@@ -109,20 +139,29 @@ async def get_task(args: TaskRef, call: Call) -> dict[str, Any]:
     "feishu_task_create",
     CreateTask,
     "task.create",
-    "Create a task with assignees and followers (open_id). Reuse client_token for retries.",
+    "Create a task with a due date, reminder, assignees and followers (open_id)."
+    " Reuse client_token for retries.",
 )
 async def create_task(args: CreateTask, call: Call) -> dict[str, Any]:
-    body = compact(
-        {
-            "summary": args.summary,
-            "description": args.description,
-            "due": _due(args.due) if args.due else None,
-            "members": _members(args) or None,
-            "tasklists": [{"tasklist_guid": args.tasklist_guid}] if args.tasklist_guid else None,
-            "client_token": args.client_token,
-        }
-    )
+    body = args.body()
+    if args.tasklist_guid:
+        body["tasklists"] = [{"tasklist_guid": args.tasklist_guid}]
     return await call("task.create", params={"user_id_type": "open_id"}, json=body)
+
+
+@tool(
+    "feishu_task_add_subtask",
+    Subtask,
+    "task.subtask",
+    "Add a subtask under a task. Reuse client_token for retries.",
+)
+async def add_subtask(args: Subtask, call: Call) -> dict[str, Any]:
+    return await call(
+        "task.subtask",
+        path={"task_guid": args.parent_task_guid},
+        params={"user_id_type": "open_id"},
+        json=args.body(),
+    )
 
 
 @tool(
@@ -182,6 +221,7 @@ TOOLS = [
     list_tasks,
     get_task,
     create_task,
+    add_subtask,
     update_task,
     delete_task,
     tasklists,
