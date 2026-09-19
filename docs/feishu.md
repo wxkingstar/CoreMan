@@ -131,16 +131,16 @@ im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read
 
 | 业务域 | 用户身份权限 |
 |--------|-------------|
-| 消息与群 | `im:message` `im:message.send_as_user` `im:message:recall` `im:message.reactions:write_only` `im:message.pins:write_only` `im:chat.members:read` `im:chat.members:write_only` `im:chat:create_by_user` |
+| 消息与群 | `im:message` `im:message.send_as_user` `im:message:recall` `im:message:update`（编辑已发消息，第一档） `im:message.reactions:write_only` `im:message.pins:write_only` `im:chat.members:read` `im:chat.members:write_only` `im:chat:create_by_user` `im:chat.announcement:read` `im:resource`（发文件和图片，第一档） |
 | 会议与妙记 | `vc:meeting.search:read` `vc:meeting:readonly` `vc:meeting.meetingevent:read` `vc:note:read` `minutes:minutes.search:read` `minutes:minutes.basic:read` `minutes:minutes.artifacts:read` `vc:room:readonly`（查会议室） |
 | 日程 | `calendar:calendar:read` `calendar:calendar.event:read` `calendar:calendar.free_busy:read` `calendar:calendar.event:create` `calendar:calendar.event:update` `calendar:calendar.event:delete` `calendar:calendar.event:reply` |
 | 邮件 | `mail:user_mailbox:readonly` `mail:user_mailbox.folder:read` `mail:user_mailbox.message:readonly` `mail:user_mailbox.message.subject:read` `mail:user_mailbox.message.address:read` `mail:user_mailbox.message.body:read` `mail:user_mailbox.message:modify` `mail:user_mailbox.message:send` |
 | 任务 | `task:task:read` `task:task:write` `task:tasklist:read` `task:comment:write` |
-| 云文档 | `search:docs:read` `space:document:retrieve` `docx:document:readonly` `docx:document:create` `docx:document:write_only` `docs:document.comment:read` `docs:document.comment:create` `space:folder:create` `docs:permission.member:create`（共享给同事，第一档） |
+| 云文档 | `search:docs:read` `space:document:retrieve` `docx:document:readonly` `docs:doc:readonly`（旧版文档） `slides:presentation:read` `mindnote:node:read` `docx:document:create` `docx:document:write_only` `docs:document.comment:read` `docs:document.comment:create` `space:folder:create` `drive:drive.metadata:readonly` `space:document:move` `docs:document:copy` `drive:file:download` `drive:file:upload` `docs:permission.member:create`（共享给同事，第一档） |
 | 电子表格、多维表格 | `sheets:spreadsheet:read` `sheets:spreadsheet:write_only` `sheets:spreadsheet:create` `bitable:app` |
 | 知识库 | `wiki:space:retrieve` `wiki:node:read` `wiki:node:retrieve` `wiki:node:create` |
-| 通讯录 | `contact:user:search` `contact:user.base:readonly` |
-| 审批、OKR、考勤 | `approval:task:read` `approval:task:write` `approval:instance:read` `approval:approval:read` `approval:instance:write`（发起、撤回、催办） `okr:okr.period:readonly` `okr:okr.content:readonly` `attendance:task:readonly` |
+| 通讯录 | `contact:user:search` `contact:user.base:readonly` `contact:user.email:readonly` `contact:user.department:readonly` `contact:user.employee:readonly` `contact:department.base:readonly` |
+| 审批、OKR、考勤 | `approval:task:read` `approval:task:write` `approval:instance:read` `approval:approval:read` `approval:instance:write`（发起、撤回、催办） `okr:okr.period:readonly` `okr:okr.content:readonly` `okr:okr.progress:writeonly` `attendance:task:readonly` |
 
 完整清单以 `coreman/core/feishu_personal/endpoints.py` 为准：每个接口列出飞书接受的全部权限，持有其中任一即可，所以已经开通旧版大权限（如 `calendar:calendar`、`drive:drive`）的应用同样可用。
 
@@ -161,8 +161,9 @@ im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read
 - 只有本人与机器人的**私聊**会挂载这组工具；群聊、企微、机器人协作、未绑定身份或停用的用户都没有。服务端每次调用都核验原始飞书事件、聊天类型、发言者、应用、租户和任务状态；管理员身份不会代替本人授权。
 - 本人创建、以本人身份执行、结果只发给本人私聊的定时任务也能使用本人授权（见下文「本人定时任务」）。任务一旦配置了群、邮件、Webhook 或其他接收人，或由其他管理员“立即运行”，这一轮就不挂载个人工具。
 - 工具都是逐个定义、带参数校验的固定操作，不提供任意接口代理；服务端只放行 `endpoints.py` 登记的接口，其他路径一律拒绝。每个接口分为读取、写入、发送三类：第三档只有消息读取；第二档可读取和写入（创建、修改、删除日程，整理邮件、存草稿，建任务、改文档表格，审批通过或拒绝等），不能发送；第一档另可以本人身份发消息、回复、转发和发邮件，发送需用户明确指定接收人和内容。工具列表只包含本人档位和实际授权够得着的工具，调用时服务端再按档位和“本次选择 ∩ 实际返回”的权限核验一次。
-  覆盖范围：消息与群（搜索、读取、会话历史、群列表与成员、发送和回复文字或 Markdown、转发、撤回、表情回复、置顶、建群、拉人）、会议与妙记、日程（列表、详情、搜索、本人/同事/会议室忙闲、创建并邀请、全天和重复日程、提醒、查会议室并预订、修改、删除、回复邀请）、邮件（文件夹、列表、搜索、读取、存草稿、发送、回复与回复全部（带原文引用并归入同一会话）、转发正文、标记已读或移动、删除到垃圾箱）、任务（列表、详情、创建（截止时间、提醒）、子任务、修改与完成、删除、清单、评论）、云文档（搜索、云空间文件、新建文件夹、按 Markdown 读取文档和知识库页面、新建文档、追加段落、按文本或块修改/删除/插入/整篇覆盖、共享给同事、评论）、电子表格（工作表、读写、追加行、新建）、多维表格（数据表、字段、查询、增改删记录）、知识库（空间、节点、子节点、新建页面）、通讯录（搜索同事、查看资料）、审批（待办、已办、抄送、我发起的、详情、通过、拒绝、转交；查找审批模板、查看表单字段、发起（如请假、报销）、撤回、催办）、OKR（周期、目标、关键结果）和本人考勤结果。
-  暂不支持：邮件和消息的附件收发（本地文件在运行时机器上，服务端读不到）、转发邮件时带上原附件、修改 OKR 进展、旧版文档、幻灯片和思维导图正文。
+  覆盖范围：消息与群（搜索、读取、会话历史、已读情况、群列表与成员、群公告、发送和回复文字或 Markdown、编辑已发消息、发送文件和图片、下载消息里的文件和图片、转发、撤回、表情回复、置顶、建群、拉人）、会议与妙记、日程（列表、详情、搜索、本人/同事/会议室忙闲、创建并邀请、全天和重复日程、提醒、查会议室并预订、修改、删除、回复邀请）、邮件（文件夹、列表、搜索、读取、下载附件、存草稿、发送（可带附件）、回复与回复全部（带原文引用并归入同一会话）、转发（带原附件）、标记已读或移动、删除到垃圾箱）、任务（我负责的和与我相关的、搜索、详情、创建（截止时间、提醒）、子任务、修改与完成、删除、清单、评论）、云文档（搜索、云空间文件、文件信息、移动、复制、重命名、下载文件、上传文件、新建文件夹、按 Markdown 读取文档和知识库页面、读取旧版文档、幻灯片和思维导图、新建文档、追加段落、按文本或块修改/删除/插入/整篇覆盖、共享给同事、评论）、电子表格（工作表、新增和重命名工作表、读写、追加行、新建）、多维表格（数据表、字段、新建数据表和字段、查询、增改删记录）、知识库（空间、节点、子节点、新建页面）、通讯录（搜索同事、查看资料（含邮箱、部门、上级）、搜索部门、部门详情和成员）、审批（待办、已办、抄送、我发起的、详情、通过、拒绝、转交；查找审批模板、查看表单字段、发起（如请假、报销）、撤回、催办）、OKR（周期、目标、关键结果、新增和修改进展）和本人考勤结果。
+  暂不支持：删除云空间文件；假期余额、考勤统计、排班和薪资（飞书只对应用身份开放）；飞书邮件里的超大附件（以链接形式存放）转发时不带上，工具会列出没带上的附件。
+- 文件中转：模型拿不到本人的飞书凭证，文件由 CoreMan 以本人身份收发。下载时工具取回文件，暂存在对象存储（1 小时后清理），返回 30 分钟有效的下载链接，Agent 用 curl 下载到临时目录，用完删除。上传时工具先给出 30 分钟有效的上传链接，Agent 用 `curl -T` 上传后得到 `upload_id`，再交给发文件、存云空间或发邮件的工具。链接和 `upload_id` 用主密钥加密，绑定本人、机器人和本次授权，撤销或重新连接后立即失效；上传链接拒绝带 `Origin` 的浏览器请求。邮件附件的预签名下载地址只放行飞书域名。大小上限：下载单个文件 50 MB，上传 30 MB；其中发图片 10 MB、存到云空间 20 MB、邮件附件合计 18 MB（飞书整封邮件上限 25 MB）。
   历史授权保持原有只读范围，不自动升级；想用新工具需要重新发送“连接飞书”。已创建的应用要先在「飞书应用」页扫码补齐权限，第一、二档才会包含新权限。
 - 发邮件要带模型生成的 `uuid`：同一 uuid 重试时，已发出的直接返回原结果，草稿已建但发送失败的改发这份草稿，不会再发一封；同一 uuid 换了收件人或内容会被拒绝（`uuid_reused`）。重发已有草稿时飞书报错，说明上次可能已经发出、只是结果没返回，工具返回 `mail_send_unconfirmed`，提示用户到「已发送」确认，而不是再发。记录保存 7 天。飞书邮件接口本身没有幂等参数；发消息、建日程、建任务、建群用飞书自带的去重参数。
 - 飞书拒绝时，工具返回 `app_permission_missing`（应用未开通该权限，管理员补齐）、`user_permission_missing`（本人授权时未包含，重新连接）或带飞书错误码的 `feishu_read_failed` / `feishu_request_failed`，不转发飞书返回的原始文字。

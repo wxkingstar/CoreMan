@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_personal import endpoints, service
+from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, Call, Page, Tool, bounded
 from coreman.core.feishu_personal.toolsets import ALL
@@ -71,6 +72,7 @@ async def dispatch(
     scope: Scope,
     name: str,
     arguments: Any,
+    files: FileRelay | None = None,
 ) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         return {"error": "invalid_tool_or_arguments"}
@@ -95,7 +97,7 @@ async def dispatch(
             for error in exc.errors(include_url=False, include_input=False)[:5]
         ]
         return {"error": "invalid_tool_or_arguments", "invalid": problems}
-    data = await item.run(args, Call(session, cipher, scope))
+    data = await item.run(args, Call(session, cipher, scope, files))
     # Keep pagination explicit and never return a larger list than the requested page.
     if isinstance(args, Page):
         if isinstance(data.get("items"), list):

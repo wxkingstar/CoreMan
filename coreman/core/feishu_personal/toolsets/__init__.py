@@ -6,6 +6,7 @@ from coreman.core.feishu_personal.toolbase import Tool
 from coreman.core.feishu_personal.toolsets import (
     calendar,
     docs,
+    files,
     mail,
     meetings,
     messages,
@@ -20,5 +21,6 @@ ALL: list[Tool] = [
     *mail.TOOLS,
     *tasks.TOOLS,
     *docs.TOOLS,
+    *files.TOOLS,
     *org.TOOLS,
 ]

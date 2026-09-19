@@ -150,7 +150,42 @@ SAMPLES = {
     },
     "feishu_approval_recall": {"instance_code": "ins1"},
     "feishu_approval_remind": {"instance_code": "ins1", "task_ids": ["task1"]},
+    "feishu_message_read_users": {"message_id": "om_1"},
+    "feishu_chat_announcement": {"chat_id": "oc_1"},
+    "feishu_edit_message": {"message_id": "om_1", "text": "fixed"},
+    "feishu_task_search": {"query": "report"},
+    "feishu_file_info": {"files": [{"token": "doc1", "type": "docx"}]},
+    "feishu_move_file": {"token": "doc1", "type": "docx", "folder_token": "fld1"},
+    "feishu_copy_file": {"token": "doc1", "type": "docx", "name": "Copy", "folder_token": "fld1"},
+    "feishu_rename_file": {"token": "doc1", "type": "docx", "new_title": "New"},
+    "feishu_sheet_manage": {"spreadsheet_token": "sht1", "action": "add", "title": "Q3"},
+    "feishu_base_create_table": {"app_token": "app1", "name": "Leads"},
+    "feishu_base_create_field": {"app_token": "app1", "table_id": "tbl1", "name": "Owner"},
+    "feishu_search_departments": {"query": "市场"},
+    "feishu_get_department": {"department_id": "od-1"},
+    "feishu_department_members": {"department_id": "od-1"},
+    "feishu_okr_add_progress": {
+        "target_type": "key_result",
+        "target_id": "kr1",
+        "text": "完成 60%",
+        "percent": 60,
+    },
+    "feishu_okr_update_progress": {"progress_id": "p1", "text": "完成 80%"},
+    "feishu_download_mail_attachment": {"message_id": "m1", "attachment_id": "att1"},
+    "feishu_download_message_file": {"message_id": "om_1", "file_key": "fk_1"},
+    "feishu_download_drive_file": {"file_token": "box1"},
+    "feishu_prepare_upload": {"filename": "plan.pdf"},
+    "feishu_send_file": {
+        "receive_id": "oc_1",
+        "receive_id_type": "chat_id",
+        "upload_id": "upload-0123456789abcdef",
+        "uuid": UUID,
+    },
+    "feishu_save_to_drive": {"upload_id": "upload-0123456789abcdef"},
 }
+# Tools that only hand out an upload link and never call Feishu.
+OFFLINE = {"feishu_prepare_upload"}
+UPLOAD = "upload-0123456789abcdef"
 SENDING = {
     "feishu_send_message",
     "feishu_reply_message",
@@ -163,7 +198,23 @@ def _body(text):
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
 
 
-def _upstream(method, path):
+def _upstream(method, path, params=None):
+    if path.endswith("/attachments/download_url"):
+        ids = (params or {}).get("attachment_ids") or []
+        return {
+            "download_urls": [
+                {"attachment_id": i, "download_url": f"https://files.feishu.cn/att/{i}"}
+                for i in ids
+            ]
+        }
+    if path == "/im/v1/files":
+        return {"file_key": "file_1"}
+    if path == "/im/v1/images":
+        return {"image_key": "img_1"}
+    if path == "/drive/explorer/v2/root_folder/meta":
+        return {"token": "root1"}
+    if path == "/drive/v1/files/upload_all":
+        return {"file_token": "box9"}
     if path.endswith("/calendars/primary"):
         return {"calendars": [{"calendar": {"calendar_id": "cal_primary"}}]}
     if path.endswith("/profile"):
@@ -181,13 +232,77 @@ def _upstream(method, path):
     return {"items": []}
 
 
+class FakeDownload:
+    def __init__(self, data=b"file-bytes", filename="a.pdf", content_type="application/pdf"):
+        self.data, self.filename, self.content_type = data, filename, content_type
+
+    async def chunks(self, limit):
+        if len(self.data) > limit:
+            raise service.PersonalError("file_too_large")
+        yield self.data
+
+    async def aclose(self):
+        pass
+
+
+class FakeRelay:
+    """The object store and sealed links, in memory; the real ones are covered by API tests."""
+
+    def __init__(self):
+        self.saved = []
+        self.uploads = {UPLOAD: ("report.pdf", "application/pdf", b"%PDF-1.4 demo")}
+
+    async def save(self, session, source, *, filename, mime):
+        data = b"".join([chunk async for chunk in source])
+        row = SimpleNamespace(
+            id=len(self.saved), filename=filename, content_type=mime, size=len(data), data=data
+        )
+        self.saved.append(row)
+        return row
+
+    def download_link(self, grant, row):
+        return f"https://coreman.example.com/api/runtime/feishu-personal/files/t{row.id}"
+
+    def upload_link(self, grant, filename, mime):
+        return "https://coreman.example.com/api/runtime/feishu-personal/uploads/t"
+
+    async def uploaded(self, session, scope, upload_id):
+        if upload_id not in self.uploads:
+            raise service.PersonalError("upload_not_found")
+        name, mime, data = self.uploads[upload_id]
+        return SimpleNamespace(filename=name, content_type=mime, size=len(data), data=data)
+
+    async def read(self, row):
+        return row.data
+
+
+RELAY = {}
+
+
 @pytest.fixture
 def upstream(monkeypatch):
     async def call(session, cipher, scope, method, path, **kwargs):
-        return _upstream(method, path)
+        return _upstream(method, path, kwargs.get("params"))
 
     mock = AsyncMock(side_effect=call)
     monkeypatch.setattr(service, "api_request", mock)
+
+    async def download(session, cipher, scope, method, path, **kwargs):
+        await mock(session, cipher, scope, method, path, **kwargs)
+        return mock.next_download or FakeDownload()
+
+    mock.next_download = None
+    mock.signed = []
+
+    async def signed(url):
+        mock.signed.append(url)
+        return FakeDownload(b"original attachment", "budget.xlsx", "application/vnd.ms-excel")
+
+    monkeypatch.setattr(service, "api_download", download)
+    monkeypatch.setattr(service, "signed_download", signed)
+    grant = SimpleNamespace(status="connected", token_enc=b"x")
+    monkeypatch.setattr(service, "existing_row", AsyncMock(return_value=grant))
+    RELAY["current"] = mock.relay = FakeRelay()
     # Mail dedup records, in memory; the database version is covered by the API tests.
     records = {}
 
@@ -206,7 +321,8 @@ def upstream(monkeypatch):
 
 async def invoke(name, args):
     scope = SimpleNamespace(open_id="ou_self", platform_user_id="u_self", scheduled=False)
-    return await tools.dispatch(SimpleNamespace(flush=AsyncMock()), None, scope, name, args)
+    session = SimpleNamespace(flush=AsyncMock())
+    return await tools.dispatch(session, None, scope, name, args, RELAY.get("current"))
 
 
 def calls(mock):
@@ -227,7 +343,7 @@ async def test_every_tool_calls_only_registered_endpoints(upstream, name):
     out = await invoke(name, SAMPLES[name])
     assert "error" not in out, out
     assert out["content_trust"] == "external_untrusted_data"
-    assert upstream.call_args_list
+    assert bool(upstream.call_args_list) is (name not in OFFLINE)
     for method, path, _ in calls(upstream):
         assert endpoints.match(method, path) is not None, (method, path)
 
@@ -243,6 +359,8 @@ def test_listing_follows_the_saved_tier_and_granted_permissions():
         "feishu_read_messages",
         "feishu_chat_history",
         "feishu_list_chats",
+        "feishu_message_read_users",
+        "feishu_download_message_file",
     }
     middle = _names("all_except_send", everything)
     assert not middle & SENDING
@@ -544,14 +662,18 @@ ORIGINAL = {
     "references": ["<root@example.com>"],
     "internal_date": "1790000000000",
     "body_plain_text": _body("请看附件\nSubject: evil\r\nBcc: x@evil.com"),
-    "attachments": [{"id": "a1"}],
+    "attachments": [
+        {"id": "a1", "filename": "budget.xlsx", "attachment_type": 1},
+        {"id": "img1", "filename": "logo.png", "is_inline": True, "cid": "logo"},
+        {"id": "big1", "filename": "video.mp4", "attachment_type": 2},
+    ],
 }
 
 
-def _with_original(method, path):
-    if "/messages/" in path and method == "GET":
+def _with_original(method, path, params=None):
+    if "/messages/" in path and method == "GET" and not path.endswith("/download_url"):
         return {"message": ORIGINAL}
-    return _upstream(method, path)
+    return _upstream(method, path, params)
 
 
 def _eml(mock):
@@ -583,9 +705,9 @@ async def test_reply_all_threads_quotes_and_addresses_from_the_original(upstream
     assert out["sent"] is True and out["to"] == ["boss@example.com"]
 
 
-async def test_forward_quotes_the_original_and_says_attachments_stay_behind(upstream):
+async def test_forward_carries_the_original_attachments(upstream):
     async def respond(session, cipher, scope, method, path, **kwargs):
-        return _with_original(method, path)
+        return _with_original(method, path, kwargs.get("params"))
 
     upstream.side_effect = respond
     out = await invoke(
@@ -594,8 +716,19 @@ async def test_forward_quotes_the_original_and_says_attachments_stay_behind(upst
     )
     message = _eml(upstream)
     assert message["Subject"] == "转发：季度预算" and message["In-Reply-To"] is None
-    assert "---------- 转发的邮件 ----------" in message.get_content()
-    assert out == {**out, "sent": False, "attachments_not_forwarded": 1}
+    assert "---------- 转发的邮件 ----------" in message.get_body(("plain",)).get_content()
+    parts = list(message.iter_attachments())
+    assert [(p.get_filename(), p.get_content()) for p in parts] == [
+        ("budget.xlsx", b"original attachment")
+    ]
+    assert upstream.signed == ["https://files.feishu.cn/att/a1"]
+    # A large attachment is a link Feishu keeps elsewhere; say so instead of dropping it.
+    assert out == {
+        **out,
+        "sent": False,
+        "attachments": ["budget.xlsx"],
+        "attachments_not_forwarded": ["video.mp4"],
+    }
     assert not [p for _, p, _ in calls(upstream) if p.endswith("/send")]
 
 
@@ -785,3 +918,197 @@ def test_new_daily_tools_follow_the_tiers():
     # Granting colleagues access notifies them, like sending.
     assert "feishu_share_document" not in middle
     assert "feishu_share_document" in _names("all", everything)
+
+
+@pytest.mark.parametrize(
+    "args,path",
+    [
+        ({"document_id": "doccn1", "kind": "doc"}, "/doc/v2/doccn1/raw_content"),
+        ({"document_id": "sld1", "kind": "slides"}, "/slides_ai/v1/xml_presentations/sld1"),
+        ({"document_id": "mnd1", "kind": "mindnote"}, "/mindnote/v1/mindnotes/mnd1/nodes"),
+    ],
+)
+async def test_other_document_kinds_are_read_through_their_own_apis(upstream, args, path):
+    await invoke("feishu_read_document", args)
+    assert calls(upstream)[0][1] == path
+
+
+async def test_related_tasks_and_search_filters(upstream):
+    await invoke("feishu_task_list", {"relation": "related", "completed": False})
+    _, path, kw = calls(upstream)[0]
+    assert path == "/task/v2/task_v2/list_related_task" and kw["params"]["completed"] == "false"
+    upstream.reset_mock()
+    await invoke(
+        "feishu_task_search",
+        {"creator_open_ids": ["ou_self"], "due_before": "2026-09-30T00:00:00+08:00"},
+    )
+    body = calls(upstream)[0][2]["json"]
+    assert body["filter"] == {
+        "creator_ids": ["ou_self"],
+        "due_time": {"end_time": "2026-09-30T00:00:00+08:00"},
+    }
+    assert (await invoke("feishu_task_search", {}))["error"] == "invalid_tool_or_arguments"
+
+
+async def test_okr_progress_uses_feishus_rich_text_and_status_codes(upstream):
+    await invoke(
+        "feishu_okr_add_progress", {**SAMPLES["feishu_okr_add_progress"], "status": "overdue"}
+    )
+    _, path, kw = calls(upstream)[0]
+    body = kw["json"]
+    assert path == "/okr/v1/progress_records/"
+    assert body["target_type"] == 3 and body["progress_rate"] == {"percent": 60, "status": 1}
+    text = body["content"]["blocks"][0]["paragraph"]["elements"][0]
+    assert text == {"type": "textRun", "textRun": {"text": "完成 60%"}}
+
+
+async def test_sheet_and_base_structure_requests(upstream):
+    await invoke(
+        "feishu_sheet_manage",
+        {"spreadsheet_token": "sht1", "action": "rename", "title": "Q4", "sheet_id": "s1"},
+    )
+    await invoke(
+        "feishu_base_create_table",
+        {
+            "app_token": "app1",
+            "name": "Leads",
+            "fields": [{"name": "Stage", "type": "single_select", "options": ["New", "Won"]}],
+        },
+    )
+    (_, _, sheet), (_, _, table) = calls(upstream)
+    assert sheet["json"] == {
+        "requests": [{"updateSheet": {"properties": {"sheetId": "s1", "title": "Q4"}}}]
+    }
+    field = table["json"]["table"]["fields"][0]
+    assert field == {
+        "field_name": "Stage",
+        "type": 3,
+        "property": {"options": [{"name": "New"}, {"name": "Won"}]},
+    }
+    bad = {"spreadsheet_token": "sht1", "action": "rename", "title": "x"}
+    assert (await invoke("feishu_sheet_manage", bad))["error"] == "invalid_tool_or_arguments"
+
+
+def test_editing_a_sent_message_is_top_tier_like_sending():
+    everything = endpoints.manifest_scopes()
+    assert "feishu_edit_message" not in _names("all_except_send", everything)
+    assert "feishu_edit_message" in _names("all", everything)
+    assert "feishu_message_read_users" in _names("messages_readonly", permissions.MESSAGE_SCOPES)
+
+
+async def test_mail_attaches_uploaded_files(upstream):
+    out = await invoke(
+        "feishu_mail_send",
+        {
+            "to": ["a@example.com"],
+            "subject": "方案",
+            "body": "见附件",
+            "attachment_ids": [UPLOAD],
+            "uuid": "att-1",
+        },
+    )
+    message = _eml(upstream)
+    assert message.get_body(("plain",)).get_content().strip() == "见附件"
+    [part] = message.iter_attachments()
+    assert part.get_filename() == "report.pdf" and part.get_content() == b"%PDF-1.4 demo"
+    assert out["sent"] is True and out["attachments"] == ["report.pdf"]
+
+
+async def test_mail_attachments_over_the_limit_are_refused_before_any_draft(upstream, monkeypatch):
+    from coreman.core.feishu_personal.toolsets import mail
+
+    monkeypatch.setattr(mail, "MAIL_ATTACHMENT_LIMIT", 5)
+    with pytest.raises(service.PersonalError) as refused:
+        await invoke(
+            "feishu_mail_create_draft",
+            {"to": ["a@example.com"], "subject": "s", "body": "x", "attachment_ids": [UPLOAD]},
+        )
+    assert refused.value.code == "file_too_large"
+    assert not [p for _, p, _ in calls(upstream) if p.endswith("/drafts")]
+
+
+async def test_downloads_become_short_lived_links(upstream):
+    out = await invoke(
+        "feishu_download_mail_attachment",
+        {"message_id": "m1", "attachment_id": "att1", "filename": "合同.pdf"},
+    )
+    assert upstream.signed == ["https://files.feishu.cn/att/att1"]
+    assert out["download_url"].endswith("/files/t0") and out["filename"] == "合同.pdf"
+    assert "curl" in out["how"]
+    upstream.next_download = FakeDownload(b"png", None, "image/png")
+    out = await invoke(
+        "feishu_download_message_file", {"message_id": "om_1", "file_key": "img_1", "type": "image"}
+    )
+    # Images arrive without a name; the type still gives the file an extension.
+    assert out["filename"] == "file.png"
+    _, path, kwargs = calls(upstream)[-1]
+    assert path == "/im/v1/messages/om_1/resources/img_1" and kwargs["params"] == {"type": "image"}
+
+
+async def test_files_are_sent_as_images_or_typed_files(upstream):
+    base = {"receive_id": "ou_1", "receive_id_type": "open_id", "upload_id": UPLOAD}
+    await invoke("feishu_send_file", {**base, "uuid": "f1"})
+    upload, send = calls(upstream)[-2:]
+    assert upload[1] == "/im/v1/files" and upload[2]["data"]["file_type"] == "pdf"
+    assert send[2]["json"]["msg_type"] == "file"
+    assert send[2]["json"]["content"] == '{"file_key": "file_1"}'
+    await invoke(
+        "feishu_send_file",
+        {**base, "as_image": True, "reply_to_message_id": "om_7", "uuid": "f2"},
+    )
+    upload, reply = calls(upstream)[-2:]
+    assert upload[1] == "/im/v1/images" and upload[2]["data"] == {"image_type": "message"}
+    assert reply[1] == "/im/v1/messages/om_7/reply" and reply[2]["json"]["msg_type"] == "image"
+    with pytest.raises(service.PersonalError) as missing:
+        await invoke("feishu_send_file", {**base, "upload_id": "x" * 20, "uuid": "f3"})
+    assert missing.value.code == "upload_not_found"
+
+
+async def test_saving_to_drive_defaults_to_my_space_root(upstream):
+    out = await invoke("feishu_save_to_drive", {"upload_id": UPLOAD, "name": "归档.pdf"})
+    root, saved = calls(upstream)
+    assert root[1] == "/drive/explorer/v2/root_folder/meta"
+    assert saved[2]["data"] == {
+        "file_name": "归档.pdf",
+        "parent_type": "explorer",
+        "parent_node": "root1",
+        "size": "13",
+    }
+    assert out["file_token"] == "box9" and out["folder_token"] == "root1"
+
+
+def test_file_tools_follow_the_tiers():
+    everything = endpoints.manifest_scopes()
+    middle = _names("all_except_send", everything)
+    assert {"feishu_download_drive_file", "feishu_prepare_upload", "feishu_save_to_drive"} <= middle
+    assert "feishu_send_file" not in middle
+    assert "feishu_send_file" in _names("all", everything)
+    # Reading messages includes the files people sent in them.
+    readonly = _names("messages_readonly", permissions.MESSAGE_SCOPES)
+    assert {n for n in readonly if "file" in n} == {"feishu_download_message_file"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example.com/a",
+        "http://files.feishu.cn/a",
+        "https://feishu.cn.evil.example.com/a",
+        "https://user@files.feishu.cn/a",
+    ],
+)
+async def test_presigned_downloads_only_go_to_feishu(url):
+    with pytest.raises(service.PersonalError):
+        await service.signed_download(url)
+
+
+def test_download_names_come_from_content_disposition():
+    import httpx
+
+    def name(header):
+        response = httpx.Response(200, headers={"content-disposition": header})
+        return service.Download(httpx.AsyncClient(), response).filename
+
+    assert name("attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf") == "报告.pdf"
+    assert name('attachment; filename="a b.docx"') == "a b.docx"
+    assert name("inline") is None

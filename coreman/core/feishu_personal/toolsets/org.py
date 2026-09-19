@@ -35,6 +35,52 @@ class UserRef(Arguments):
     open_id: Identifier
 
 
+class SearchDepartments(Page):
+    query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
+
+
+class DepartmentRef(Arguments):
+    department_id: Identifier = Field(description="open_department_id")
+
+
+class DepartmentMembers(Page, DepartmentRef):
+    pass
+
+
+class ProgressFields(Arguments):
+    text: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
+    percent: float | None = Field(default=None, ge=0, le=100, description="Progress in %")
+    status: Literal["normal", "overdue", "done"] | None = None
+
+    def body(self) -> dict[str, Any]:
+        content = {
+            "blocks": [
+                {
+                    "type": "paragraph",
+                    "paragraph": {
+                        "elements": [{"type": "textRun", "textRun": {"text": self.text}}]
+                    },
+                }
+            ]
+        }
+        body: dict[str, Any] = {"content": content}
+        if self.percent is not None:
+            rate: dict[str, Any] = {"percent": self.percent}
+            if self.status is not None:
+                rate["status"] = {"normal": 0, "overdue": 1, "done": 2}[self.status]
+            body["progress_rate"] = rate
+        return body
+
+
+class AddProgress(ProgressFields):
+    target_type: Literal["objective", "key_result"]
+    target_id: Identifier
+
+
+class UpdateProgress(ProgressFields):
+    progress_id: Identifier
+
+
 class ApprovalTasks(Page):
     topic: Literal["todo", "done", "cc_unread", "cc_read"] = "todo"
     keyword: Keyword = ""
@@ -134,7 +180,12 @@ async def search_users(args: SearchUsers, call: Call) -> dict[str, Any]:
     )
 
 
-@tool("feishu_get_user", UserRef, "contact.user", "Read a colleague's profile by open_id.")
+@tool(
+    "feishu_get_user",
+    UserRef,
+    "contact.user",
+    "Read a colleague's profile by open_id: email, departments, manager and title.",
+)
 async def get_user(args: UserRef, call: Call) -> dict[str, Any]:
     return await call(
         "contact.user", path={"user_id": args.open_id}, params={"user_id_type": "open_id"}
@@ -291,6 +342,79 @@ async def remind(args: Remind, call: Call) -> dict[str, Any]:
     return await call("approval.remind", json=args.model_dump(exclude_none=True))
 
 
+@tool(
+    "feishu_search_departments",
+    SearchDepartments,
+    "contact.departments",
+    "Find departments by name to get their IDs.",
+)
+async def search_departments(args: SearchDepartments, call: Call) -> dict[str, Any]:
+    params = {**page(args), "department_id_type": "open_department_id", "user_id_type": "open_id"}
+    return await call("contact.departments", params=params, json={"query": args.query})
+
+
+@tool(
+    "feishu_get_department",
+    DepartmentRef,
+    "contact.department",
+    "Read a department: name, leader and parent.",
+)
+async def get_department(args: DepartmentRef, call: Call) -> dict[str, Any]:
+    return await call(
+        "contact.department",
+        path={"department_id": args.department_id},
+        params={"department_id_type": "open_department_id", "user_id_type": "open_id"},
+    )
+
+
+@tool(
+    "feishu_department_members",
+    DepartmentMembers,
+    "contact.department_users",
+    "List the people directly in a department.",
+)
+async def department_members(args: DepartmentMembers, call: Call) -> dict[str, Any]:
+    params = {
+        **page(args),
+        "department_id": args.department_id,
+        "department_id_type": "open_department_id",
+        "user_id_type": "open_id",
+    }
+    return await call("contact.department_users", params=params)
+
+
+@tool(
+    "feishu_okr_add_progress",
+    AddProgress,
+    "okr.progress_create",
+    "Record progress on one of the user's objectives or key results.",
+)
+async def okr_add_progress(args: AddProgress, call: Call) -> dict[str, Any]:
+    body = {
+        **args.body(),
+        "target_id": args.target_id,
+        "target_type": 2 if args.target_type == "objective" else 3,
+        "source_title": "CoreMan",
+        "source_url": "https://open.feishu.cn/app",
+    }
+    return await call("okr.progress_create", params={"user_id_type": "open_id"}, json=body)
+
+
+@tool(
+    "feishu_okr_update_progress",
+    UpdateProgress,
+    "okr.progress_update",
+    "Change a progress record the user wrote.",
+)
+async def okr_update_progress(args: UpdateProgress, call: Call) -> dict[str, Any]:
+    return await call(
+        "okr.progress_update",
+        path={"progress_id": args.progress_id},
+        params={"user_id_type": "open_id"},
+        json=args.body(),
+    )
+
+
 @tool("feishu_okr_cycles", Page, "okr.cycles", "List the user's OKR cycles.")
 async def okr_cycles(args: Page, call: Call) -> dict[str, Any]:
     return await call(
@@ -338,6 +462,9 @@ async def attendance(args: Attendance, call: Call) -> dict[str, Any]:
 TOOLS = [
     search_users,
     get_user,
+    search_departments,
+    get_department,
+    department_members,
     approval_tasks,
     approval_initiated,
     approval_instance,
@@ -352,5 +479,7 @@ TOOLS = [
     okr_cycles,
     okr_objectives,
     okr_key_results,
+    okr_add_progress,
+    okr_update_progress,
     attendance,
 ]

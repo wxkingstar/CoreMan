@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from functools import cache
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from pydantic import (
     BaseModel,
@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_personal import endpoints, service
 from coreman.core.feishu_personal.policy import Scope
+
+if TYPE_CHECKING:
+    from coreman.core.feishu_personal.files import FileRelay
 
 Identifier = Annotated[
     str, StringConstraints(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_-]+$")
@@ -187,6 +190,39 @@ class Call:
     session: AsyncSession
     cipher: Cipher
     scope: Scope
+    files: FileRelay | None = None
+
+    def relay(self) -> FileRelay:
+        if self.files is None:
+            raise service.PersonalError("file_transfer_unavailable")
+        return self.files
+
+    async def download(
+        self, key: str, *, path: dict[str, str], params: Any = None
+    ) -> service.Download:
+        endpoint = endpoints.ENDPOINTS[key]
+        try:
+            built = endpoints.build(endpoint, **path)
+        except ValueError:
+            raise service.PersonalError("invalid_tool_or_arguments") from None
+        return await service.api_download(
+            self.session, self.cipher, self.scope, endpoint.method, built, params=params
+        )
+
+    async def upload(
+        self, key: str, *, data: dict[str, Any], files: dict[str, Any], params: Any = None
+    ) -> dict[str, Any]:
+        endpoint = endpoints.ENDPOINTS[key]
+        return await service.api_request(
+            self.session,
+            self.cipher,
+            self.scope,
+            endpoint.method,
+            endpoint.path,
+            params=params,
+            data=data,
+            files=files,
+        )
 
     async def __call__(
         self,
