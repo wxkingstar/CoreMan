@@ -16,7 +16,7 @@
     "dompurify": "^3.4.15",
     "element-plus": "^2.8.4",
     "markdown-it": "^15.0.2",
-    "pinia": "^2.2.4",
+    "pinia": "^4.0.3",
     "qrcode": "^1.5.4",
     "vue": "^3.5.12",
     "vue-i18n": "^10.0.4",
