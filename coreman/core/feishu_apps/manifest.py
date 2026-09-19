@@ -17,6 +17,8 @@ import gzip
 import json
 from typing import Any
 
+from coreman.core.feishu_personal import endpoints as personal_endpoints
+from coreman.core.feishu_personal import permissions
 from coreman.core.feishu_personal import service as personal_service
 
 # 应用身份：员工身份识别（user_id 是卡片归属与身份校验的依据）、通讯录姓名，
@@ -46,13 +48,16 @@ TENANT_SCOPES: tuple[str, ...] = (
 # OAuth 协议层面的授权项：用户授权时随令牌下发，但不会出现在应用的权限列表里。
 PROTOCOL_SCOPES = frozenset({"offline_access", "auth:user.id:read"})
 
-# 用户身份：连接飞书全部档位（含第一档的以用户身份发送）。
+# 用户身份：连接飞书全部档位（含第一档的以用户身份发送）。个人工具用到的每个接口各申请一个
+# 权限（见 feishu_personal.endpoints），覆盖消息与群、会议妙记、日程、邮件、任务、云文档、
+# 通讯录、审批、OKR 和考勤；外加第三档固定申请的消息读取范围。
 # 获取会议详情接受 vc:meeting:readonly 或 vc:meeting.meetingevent:read 任一；扫码创建时
 # 前者实测未被开通，两者都申请。
 USER_SCOPES: tuple[str, ...] = tuple(
     sorted(
         set(personal_service.SCOPES.split())
-        | {"im:message", "im:message.send_as_user", "vc:meeting.meetingevent:read"}
+        | personal_endpoints.manifest_scopes()
+        | {"vc:meeting.meetingevent:read"}
     )
 )
 
@@ -62,7 +67,7 @@ DEFAULT_SLASH_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("new", "开始新会话（清空上下文）", "add-chat-ai_outlined"),
     ("stop", "停止当前回复", "clear_outlined"),
     ("sessions", "查看并切换最近会话", "chat_outlined"),
-    ("connect", "连接飞书，授权读取本人消息、会议和文档", "global-link_outlined"),
+    ("connect", "连接飞书，授权使用本人消息、日程、邮件、任务和文档", "global-link_outlined"),
     ("help", "查看使用帮助", "explanation-ai_outlined"),
 )
 
@@ -94,7 +99,22 @@ def encode_addons(value: dict[str, Any]) -> str:
 def missing_scopes(granted: list[str], *, kind: str) -> list[str]:
     """清单里有、应用当前没开通的权限；用于提示「补齐权限」。"""
     wanted = TENANT_SCOPES if kind == "tenant" else USER_SCOPES
-    missing = set(wanted) - set(granted) - PROTOCOL_SCOPES
-    if kind == "user" and "vc:meeting.meetingevent:read" in granted:
-        missing.discard("vc:meeting:readonly")  # 二者任一即可获取会议详情
+    have = set(granted)
+    missing = set(wanted) - have - PROTOCOL_SCOPES
+    if kind == "user":
+        missing = {scope for scope in missing if not _covered(scope, have)}
     return sorted(missing)
+
+
+# 第三档按固定名称申请，发送还要求 also 里的权限，这些必须原样开通，不能用别的权限代替。
+_EXACT = permissions.MESSAGE_SCOPES | frozenset().union(
+    *(endpoint.also for endpoint in personal_endpoints.ENDPOINTS.values())
+)
+
+
+def _covered(scope: str, have: set[str]) -> bool:
+    """用到这个权限的接口都已能用应用持有的其他权限调用，比如旧版的 calendar:calendar。"""
+    if scope in _EXACT:
+        return False
+    users = [e for e in personal_endpoints.ENDPOINTS.values() if scope in e.scopes]
+    return bool(users) and all(have.intersection(e.scopes) for e in users)

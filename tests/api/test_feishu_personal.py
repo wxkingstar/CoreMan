@@ -140,6 +140,21 @@ async def test_mcp_cannot_start_authorization_without_human_selection(client, ap
         assert not mock.calls
 
 
+async def test_long_mail_bodies_fit_in_one_tool_call(client, app, db_session):
+    # A long Chinese mail escaped by the client as \\uXXXX is far above the old 16 KB limit.
+    _, user, task = await setup(db_session, app)
+    arguments = {"to": ["a@example.com"], "subject": "周报", "body": "进展" * 9000}
+    raw = json.dumps(rpc("feishu_mail_create_draft", arguments))
+    assert len(raw) > 100_000
+    response = await client.post(
+        URL,
+        headers={**await headers(app, task, user), "Content-Type": "application/json"},
+        content=raw,
+    )
+    # Parsed and validated in full; it stops only because nobody is connected.
+    assert value(response) == {"error": "authorization_required"}
+
+
 async def grant(session, app, bot, user, **kw):
     from coreman.core.db.models import FeishuPersonalGrant
     from coreman.core.feishu_personal.policy import app_credentials

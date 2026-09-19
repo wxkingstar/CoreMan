@@ -44,7 +44,7 @@ CoreMan 使用企业自建应用。为同一企业部署：平台身份以 `user
 - 修改基础信息（名称、描述、帮助链接、头像）、机器人使用说明与菜单、可用范围（按 CoreMan 成员和飞书通讯录部门选择，以 user_id / department_id 提交），并提交发布版本。这些修改都要发布新版本并审核通过后才生效。
 - 管理斜杠指令，无需发布，约 5 分钟后在客户端生效（飞书 7.70 及以上）。扫码创建的智能体会自动添加 CoreMan 内置指令 `/new`、`/stop`、`/sessions`、`/connect`、`/help`；手动填写凭证的应用可在该页点「添加内置指令」补齐，已有的同名指令不改动。飞书把所选指令作为普通文本（例如 `/help`）发给机器人，CoreMan 的内置命令去掉一个前导 `/` 后仍按整句匹配，`/help 写代码` 这类带参数的内容照常交给 AI。`/connect` 等同于发送 `连接飞书`，必须带 `/`，单独发 `connect` 仍按普通对话处理。
 
-权限核对说明：`offline_access` 与 `auth:user.id:read` 属于用户授权协议项，会随个人授权令牌下发，但不会出现在应用的权限列表里，因此不计为缺少。获取会议详情接受 `vc:meeting:readonly` 或 `vc:meeting.meetingevent:read` 任一，扫码实测前者未被开通，所以两者都申请。清单新增权限后，已创建的应用需要在「飞书应用」页扫码补齐。
+权限核对说明：`offline_access` 与 `auth:user.id:read` 属于用户授权协议项，会随个人授权令牌下发，但不会出现在应用的权限列表里，因此不计为缺少。获取会议详情接受 `vc:meeting:readonly` 或 `vc:meeting.meetingevent:read` 任一，扫码实测前者未被开通，所以两者都申请。清单新增权限后，已创建的应用需要在「飞书应用」页扫码补齐。应用已开通飞书接受的旧版大权限（如 `calendar:calendar`、`wiki:wiki`、`docx:document`）时，被它覆盖的细分权限不计为缺少；第三档按名称申请的消息权限和以本人身份发送所需的权限必须原样开通。
 
 飞书的限制：修改与发布接口只允许应用改自己，并且只支持在开发者后台创建的自建应用；扫码创建的应用是否属于此类，官方文档未说明，请在测试租户实测。不支持时管理台会提示改到开发者后台操作。应用有版本在审核中时不能修改或再次发布。菜单中的「推送事件」类型会产生 `application.bot.menu_v6` 事件，CoreMan 目前不处理该事件。飞书没有删除应用的接口，删除 AI 员工不会删除飞书应用，如不再使用请到开发者后台删除。
 
@@ -118,15 +118,31 @@ CoreMan 不再只保留最后 200 字；Daemon 的 Claude 流式翻译器传递�
 
 ## 个人资料授权（仅私聊）
 
-飞书机器人使用自己的应用凭证，通过服务端 OAuth 获取当前发言者的用户授权；无需在用户电脑安装 CLI。机器人应用需在飞书开放平台开通并发布对应的用户身份权限，并允许设备授权流程：
+飞书机器人使用自己的应用凭证，通过服务端 OAuth 获取当前发言者的用户授权；无需在用户电脑安装 CLI。机器人应用需在飞书开放平台开通并发布对应的用户身份权限，并允许设备授权流程。扫码创建的应用会一次申请下面全部权限；手动配置的应用按需开通，没开通的业务域不会出现对应工具。
+
+第三档（仅读取消息）固定申请：
 
 ```text
 offline_access auth:user.id:read search:message im:message:readonly
 im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:chat:read
-vc:meeting.search:read vc:meeting:readonly vc:note:read
-minutes:minutes.search:read minutes:minutes.basic:read minutes:minutes.artifacts:read
-docx:document:readonly
 ```
+
+第一、二档按应用已开通的用户权限申请，个人工具用到的权限如下（第二档会去掉带 send、reply、forward 的权限和 `im:message`；`calendar:calendar.event:reply` 只是回复本人收到的日程邀请，不算发送，第二档保留）：
+
+| 业务域 | 用户身份权限 |
+|--------|-------------|
+| 消息与群 | `im:message` `im:message.send_as_user` `im:message:recall` `im:message.reactions:write_only` `im:message.pins:write_only` `im:chat.members:read` `im:chat.members:write_only` `im:chat:create_by_user` |
+| 会议与妙记 | `vc:meeting.search:read` `vc:meeting:readonly` `vc:meeting.meetingevent:read` `vc:note:read` `minutes:minutes.search:read` `minutes:minutes.basic:read` `minutes:minutes.artifacts:read` |
+| 日程 | `calendar:calendar:read` `calendar:calendar.event:read` `calendar:calendar.free_busy:read` `calendar:calendar.event:create` `calendar:calendar.event:update` `calendar:calendar.event:delete` `calendar:calendar.event:reply` |
+| 邮件 | `mail:user_mailbox:readonly` `mail:user_mailbox.folder:read` `mail:user_mailbox.message:readonly` `mail:user_mailbox.message.subject:read` `mail:user_mailbox.message.address:read` `mail:user_mailbox.message.body:read` `mail:user_mailbox.message:modify` `mail:user_mailbox.message:send` |
+| 任务 | `task:task:read` `task:task:write` `task:tasklist:read` `task:comment:write` |
+| 云文档 | `search:docs:read` `space:document:retrieve` `docx:document:readonly` `docx:document:create` `docx:document:write_only` `docs:document.comment:read` `docs:document.comment:create` |
+| 电子表格、多维表格 | `sheets:spreadsheet:read` `sheets:spreadsheet:write_only` `sheets:spreadsheet:create` `bitable:app` |
+| 知识库 | `wiki:space:retrieve` `wiki:node:read` `wiki:node:retrieve` `wiki:node:create` |
+| 通讯录 | `contact:user:search` `contact:user.base:readonly` |
+| 审批、OKR、考勤 | `approval:task:read` `approval:task:write` `approval:instance:read` `okr:okr.period:readonly` `okr:okr.content:readonly` `attendance:task:readonly` |
+
+完整清单以 `coreman/core/feishu_personal/endpoints.py` 为准：每个接口列出飞书接受的全部权限，持有其中任一即可，所以已经开通旧版大权限（如 `calendar:calendar`、`drive:drive`）的应用同样可用。
 
 使用方法：
 
@@ -134,17 +150,21 @@ docx:document:readonly
 2. **私聊**机器人发送 `连接飞书`，或在输入框输入 `/` 选择斜杠指令 `/connect`。系统展示选择卡片，本人点击选项后才生成链接：1 全部权限含发送消息、2 全部权限但不含发送消息、3 消息只读。卡片绑定本人、原私聊及当次选择，旧卡片和重复点击不能重新生成链接。选择有效期 10 分钟，每次重新连接都重新选择，模型不能代选。
    第一、二档从应用当前已开通的用户权限生成范围，需要应用身份 `admin:app.info:readonly` 或 `application:application:self_manage` 查询应用权限；缺少时明确提示。第一档额外要求应用已开通 `im:message` 和 `im:message.send_as_user`。第三档按固定消息读取范围申请，不依赖权限查询。
    飞书可能沿用历史同意记录而直接显示成功，CoreMan 仍按本次选择及实际返回权限交集执行。缺失权限会显示在后台；不会以历史多余权限扩大本次范围。
-3. 返回私聊回复“已授权”；Agent 会检查授权并核对身份。之后可直接询问“查看最近的聊天”或“查找我参加的会议纪要”，无需命令前缀。
+3. 返回私聊回复“已授权”；Agent 会检查授权并核对身份。之后可直接询问“查看最近的聊天”“我明天有哪些日程”“帮我约张三周五下午开会”“看看有没有未读邮件”或“查找我参加的会议纪要”，无需命令前缀。
 4. 网页「我的飞书」可以查看、断开本人在各机器人上的连接。私聊也支持直接说“撤销授权”。
 
 断开连接会尝试在飞书端撤销访问与刷新令牌，并清除 CoreMan 保存的访问凭证、刷新凭证及待授权凭证，阻止后续访问；远端撤销失败时明确显示未确认，重试不会误报成功；已经返回的私聊消息不会被删除。令牌失效与清除飞书记住的应用许可不同。若还需撤销飞书侧的应用许可，请在飞书的授权管理中移除。授权按“本人＋机器人应用”独立保存，应用凭证更换后需要重新连接。
 
 权限边界：
 
-- 个人工具是**叠加**的：机器人在私聊里的人设、技能、业务系统访问（按发言人签发的 Bot Token）、记忆和会话都保持不变，授权后只是额外多出一组以本人身份读取飞书（第一档还可按明确要求发送消息）的工具，由 Agent 按问题决定是否使用，无需命令前缀，也没有模式切换。待授权期间可直接回复“已授权”继续完成核验。撤销后，后续私聊不再有读取工具。
+- 个人工具是**叠加**的：机器人在私聊里的人设、技能、业务系统访问（按发言人签发的 Bot Token）、记忆和会话都保持不变，授权后只是额外多出一组以本人身份使用飞书（第一档还可按明确要求发消息和邮件）的工具，由 Agent 按问题决定是否使用，无需命令前缀，也没有模式切换。待授权期间可直接回复“已授权”继续完成核验。撤销后，后续私聊不再有这些工具。
 - 只有本人与机器人的**私聊**会挂载这组工具；群聊、企微、机器人协作、未绑定身份或停用的用户都没有。服务端每次调用都核验原始飞书事件、聊天类型、发言者、应用、租户和任务状态；管理员身份不会代替本人授权。
 - 本人创建、以本人身份执行、结果只发给本人私聊的定时任务也能使用本人授权（见下文「本人定时任务」）。任务一旦配置了群、邮件、Webhook 或其他接收人，或由其他管理员“立即运行”，这一轮就不挂载个人工具。
-- 档位是权限上限，不等于所有接口均已接入。工具固定为消息、会议、妙记和文档读取，以及第一档的文本发送；发送需用户明确指定接收人和内容。第二档可以申请文档修改、删除等权限，但未实现的操作不会因此自动成为工具。历史授权保持原有只读范围，不自动升级。
+- 工具都是逐个定义、带参数校验的固定操作，不提供任意接口代理；服务端只放行 `endpoints.py` 登记的接口，其他路径一律拒绝。每个接口分为读取、写入、发送三类：第三档只有消息读取；第二档可读取和写入（创建、修改、删除日程，整理邮件、存草稿，建任务、改文档表格，审批通过或拒绝等），不能发送；第一档另可以本人身份发消息、回复、转发和发邮件，发送需用户明确指定接收人和内容。工具列表只包含本人档位和实际授权够得着的工具，调用时服务端再按档位和“本次选择 ∩ 实际返回”的权限核验一次。
+  覆盖范围：消息与群（搜索、读取、会话历史、群列表与成员、发送、回复、转发、撤回、表情回复、置顶、建群、拉人）、会议与妙记、日程（列表、详情、搜索、忙闲、创建并邀请、修改、删除、回复邀请）、邮件（文件夹、列表、搜索、读取、存草稿、发送、标记已读或移动、删除到垃圾箱）、任务（列表、详情、创建、修改与完成、删除、清单、评论）、云文档（搜索、云空间文件、读取与新建文档、追加段落、评论）、电子表格（工作表、读写、追加行、新建）、多维表格（数据表、字段、查询、增改删记录）、知识库（空间、节点、子节点、新建页面）、通讯录（搜索同事、查看资料）、审批（待办、已办、抄送、我发起的、详情、通过、拒绝）、OKR（周期、目标、关键结果）和本人考勤结果。
+  历史授权保持原有只读范围，不自动升级；想用新工具需要重新发送“连接飞书”。已创建的应用要先在「飞书应用」页扫码补齐权限，第一、二档才会包含新权限。
+- 发邮件要带模型生成的 `uuid`：同一 uuid 重试时，已发出的直接返回原结果，草稿已建但发送失败的改发这份草稿，不会再发一封；同一 uuid 换了收件人或内容会被拒绝（`uuid_reused`）。重发已有草稿时飞书报错，说明上次可能已经发出、只是结果没返回，工具返回 `mail_send_unconfirmed`，提示用户到「已发送」确认，而不是再发。记录保存 7 天。飞书邮件接口本身没有幂等参数；发消息、建日程、建任务、建群用飞书自带的去重参数。
+- 飞书拒绝时，工具返回 `app_permission_missing`（应用未开通该权限，管理员补齐）、`user_permission_missing`（本人授权时未包含，重新连接）或带飞书错误码的 `feishu_read_failed` / `feishu_request_failed`，不转发飞书返回的原始文字。
 - 读取结果作为不可信的外部资料交给模型，提示词要求不把本人资料写入共享记忆、共享文件或技能目录，也不转交他人；这是提示词约束，不是隔离。授权换代（撤销、重新连接、应用凭证变更）后，进行中的一轮立即失去飞书工具，定时任务工具不受影响。
 - 私聊会话与普通私聊一样由 Runtime 落盘、可续聊，完整过程只有本人能查看（规则见上文「会话页的访问规则」）。Runtime 未上报 `feishu_personal_tools_v1` 时，机器人照常回答，只是不挂载个人工具；此时发送“连接飞书”会提示先升级运行时。旧版的 `feishu_personal_restricted_v1`（替换式受限模式）不再使用。
 - 用户 OAuth 凭证加密保存在数据库，不传给模型或 Runtime。服务器刷新凭证；撤销与并发读取按用户和机器人串行处理。

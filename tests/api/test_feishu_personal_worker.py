@@ -330,6 +330,53 @@ async def test_tool_list_follows_the_grant(db_session, app, client):
     assert "feishu_search_messages" in await _tool_names(client, await headers(app, task, user))
 
 
+@pytest.mark.parametrize(
+    "level,listed,hidden",
+    [
+        ("all", {"feishu_calendar_create_event", "feishu_mail_send"}, {"feishu_task_create"}),
+        (
+            "all_except_send",
+            {"feishu_calendar_create_event", "feishu_mail_create_draft"},
+            {"feishu_mail_send", "feishu_send_message", "feishu_task_create"},
+        ),
+        (
+            "messages_readonly",
+            {"feishu_search_messages"},
+            {"feishu_calendar_events", "feishu_mail_list"},
+        ),
+    ],
+)
+async def test_tool_list_shows_only_what_the_tier_and_grant_reach(
+    db_session, app, client, level, listed, hidden
+):
+    from tests.api.test_feishu_personal import grant, headers
+
+    bot, user, task = await setup(db_session, app)
+    scopes = [
+        "search:message",
+        "im:message:readonly",
+        "calendar:calendar:read",
+        "calendar:calendar.event:create",
+        "mail:user_mailbox:readonly",
+        "mail:user_mailbox.message:readonly",
+        "mail:user_mailbox.message:modify",
+        "mail:user_mailbox.message:send",
+        "im:message",
+        "im:message.send_as_user",
+    ]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level=level,
+        scopes=scopes + ["task:task:write"],
+        requested_scopes=scopes,
+    )
+    names = await _tool_names(client, await headers(app, task, user))
+    assert listed <= names and not hidden & names
+
+
 @pytest.mark.parametrize("change", ["epoch", "revoke", "reset"])
 async def test_capability_fenced_by_context_changes(db_session, app, client, change):
     from coreman.core.db.models import ChatSession

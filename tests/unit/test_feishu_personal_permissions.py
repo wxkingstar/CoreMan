@@ -22,6 +22,8 @@ def test_middle_tier_preserves_writes_but_excludes_all_message_sending_forms():
         "im:chat:update",
         "im:message:delete",
         "calendar:calendar.event:create",
+        # Answering one's own invitation is not sending, despite the name.
+        "calendar:calendar.event:reply",
     ]
     sends = [
         "im:message",

@@ -233,3 +233,145 @@ async def test_unrequested_historical_document_permission_is_blocked(db_session,
             db_session, app.state.cipher, scope, "GET", "/docx/v1/documents/doc1/raw_content"
         )
     service._http.assert_not_called()
+
+
+EVENTS = "/calendar/v4/calendars/cal1/events"
+
+
+@pytest.mark.parametrize(
+    "level,expected",
+    [("messages_readonly", "outside_selected_authorization"), ("all_except_send", None)],
+)
+async def test_writes_need_a_tier_that_allows_them(db_session, app, monkeypatch, level, expected):
+    bot, user, task = await setup(db_session, app)
+    scopes = ["calendar:calendar.event:create", "mail:user_mailbox.message:send"]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level=level,
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    http = AsyncMock(return_value={"code": 0, "data": {"event": {"event_id": "ev1"}}})
+    monkeypatch.setattr(service, "_http", http)
+    if expected:
+        with pytest.raises(service.PersonalError, match=expected):
+            await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+    else:
+        out = await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+        assert out == {"event": {"event_id": "ev1"}}
+    # Sending mail is a send even though the app granted it: the middle tier refuses it.
+    with pytest.raises(service.PersonalError, match="sending_not_authorized"):
+        await service.api_request(
+            db_session,
+            app.state.cipher,
+            scope,
+            "POST",
+            "/mail/v1/user_mailboxes/me/drafts/d1/send",
+        )
+    assert http.call_count == (0 if expected else 1)
+
+
+async def test_unregistered_paths_never_reach_feishu(db_session, app, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="all")
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    http = AsyncMock()
+    monkeypatch.setattr(service, "_http", http)
+    for method, path in [
+        ("GET", "/contact/v3/users"),
+        ("DELETE", "/drive/v1/files/f1"),
+        ("GET", "/calendar/v4/calendars/../events/instance_view"),
+    ]:
+        with pytest.raises(service.PersonalError, match="invalid_tool_or_arguments"):
+            await service.api_request(db_session, app.state.cipher, scope, method, path)
+    http.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "code,expected,upstream_code",
+    [
+        (99991672, "app_permission_missing", None),
+        (99991679, "user_permission_missing", None),
+        (190004, "feishu_request_failed", 190004),
+    ],
+)
+async def test_upstream_refusals_name_what_to_fix(
+    db_session, app, monkeypatch, code, expected, upstream_code
+):
+    bot, user, task = await setup(db_session, app)
+    scopes = ["calendar:calendar.event:create"]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level="all",
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    monkeypatch.setattr(
+        service, "_http", AsyncMock(return_value={"code": code, "msg": "user-secret leaked"})
+    )
+    with pytest.raises(service.PersonalError) as caught:
+        await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+    assert caught.value.payload() == (
+        {"error": expected, "upstream_code": upstream_code}
+        if upstream_code
+        else {"error": expected}
+    )
+    row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
+    assert row.status == "connected"
+
+
+async def test_mail_retries_through_mcp_send_one_mail(db_session, app, client, monkeypatch):
+    from coreman.core.db.models import FeishuPersonalSend
+
+    bot, user, task = await setup(db_session, app)
+    scopes = [
+        "mail:user_mailbox:readonly",
+        "mail:user_mailbox.message:modify",
+        "mail:user_mailbox.message:send",
+    ]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level="all",
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    sent = []
+
+    async def feishu(method, url, **kwargs):
+        if url.endswith("/profile"):
+            return {"code": 0, "data": {"primary_email_address": "me@example.com"}}
+        if url.endswith("/drafts"):
+            return {"code": 0, "data": {"draft_id": f"d{len(sent) + 1}"}}
+        sent.append(url)
+        # The first send is lost upstream; later ones go through.
+        return {"code": 0, "data": {"message_id": "m1"}} if len(sent) > 1 else {"code": 1}
+
+    monkeypatch.setattr(service, "_http", AsyncMock(side_effect=feishu))
+    args = {"to": ["a@example.com"], "subject": "周报", "body": "内容", "uuid": "report-1"}
+    auth = await headers(app, task, user)
+    first = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    assert first == {"error": "feishu_request_failed", "upstream_code": 1}
+    second = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    third = value(await client.post(URL, headers=auth, json=rpc("feishu_mail_send", args)))
+    assert second["sent"] and third["repeat"] and third["message_id"] == "m1"
+    # Both sends used the draft made first; the third call reached no Feishu API.
+    assert [url.rsplit("/", 2)[-2] for url in sent] == ["d1", "d1"]
+    changed = value(
+        await client.post(
+            URL, headers=auth, json=rpc("feishu_mail_send", {**args, "body": "别的内容"})
+        )
+    )
+    assert changed == {"error": "uuid_reused"}
+    row = (await db_session.scalars(select(FeishuPersonalSend))).one()
+    assert (row.status, row.draft_id, row.send_key) == ("sent", "d1", "report-1")

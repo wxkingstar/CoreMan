@@ -20,6 +20,8 @@ from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
 from coreman.core.feishu_personal import policy, service, tools
 
 router = APIRouter(tags=["feishu-personal"])
+# Mail bodies, sheet rows and document paragraphs arrive as tool arguments.
+MAX_BODY = 262_144
 
 
 @router.post("/api/runtime/feishu-personal/mcp")
@@ -61,7 +63,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     except (ValueError, service.PersonalError):
         raise ApiError(403, 403, "Private authorization changed") from None
     current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, 16384))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
@@ -72,18 +74,16 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         if params:
             return mcp_rpc.error(rid, -32602, "Invalid params")
         live = grant if current else None
-        connected = bool(live and live.status == "connected" and live.token_enc)
-        reads = connected or bool(live and live.status == "pending" and not scope.scheduled)
-        allow_send = bool(
-            connected
-            and live
-            and live.authorization_level == "all"
-            and {"im:message", "im:message.send_as_user"}.issubset(
-                set(live.scopes or []) & set(live.requested_scopes or [])
-            )
-        )
+        level: str | None = None
+        granted: set[str] = set()
+        if live is not None and live.status == "connected" and live.token_enc:
+            level = live.authorization_level
+            granted = set(live.requested_scopes or []) & set(live.scopes or [])
+        elif live is not None and live.status == "pending" and not scope.scheduled:
+            # List what was asked for, so the tools are there once the owner confirms.
+            level, granted = live.authorization_level, set(live.requested_scopes or [])
         definitions = tools.definitions(
-            allow_send=allow_send, auth=current and not scope.scheduled, reads=reads
+            auth=current and not scope.scheduled, level=level, scopes=granted
         )
         if not scope.scheduled:
             definitions += schedules.definitions()
@@ -104,7 +104,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             else:
                 value = await tools.dispatch(session, cipher, scope, name, arguments)
         except service.PersonalError as exc:
-            value = {"error": exc.code}
+            value = exc.payload()
         except Exception:
             # Do not let an upstream exception enter the global traceback logger: it
             # can contain OAuth response bodies, authorization URLs or credentials.

@@ -31,6 +31,21 @@ def test_manifest_covers_identity_and_every_personal_tier():
     )
 
 
+def test_umbrella_permissions_satisfy_the_granular_ones_they_cover():
+    umbrellas = {"calendar:calendar", "wiki:wiki", "docx:document", "drive:drive", "im:chat"}
+    granted = [
+        s
+        for s in manifest.USER_SCOPES
+        if not s.startswith(("calendar:", "wiki:", "docx:", "sheets:", "space:", "im:chat"))
+    ] + sorted(umbrellas)
+    # Every calendar, wiki, doc, sheet and chat tool is reachable through the broader
+    # permissions; only the message-only tier still needs im:chat:read by that name.
+    assert manifest.missing_scopes(granted, kind="user") == ["im:chat:read"]
+    # Sending as the user needs its exact permissions even with broad message access.
+    without_send = [s for s in manifest.USER_SCOPES if s != "im:message.send_as_user"]
+    assert manifest.missing_scopes(without_send, kind="user") == ["im:message.send_as_user"]
+
+
 def test_default_slash_commands_match_builtin_commands_and_icon_catalog():
     from coreman.core.chat.commands import classify_command
     from coreman.core.chat.session_switch import is_sessions_command
