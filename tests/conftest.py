@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUSINESS_TABLES = [
     "feishu_personal_grants",
     "wecom_personal_grants",
+    "wecom_personal_bindings",
     "bot_collaborations",
     "bot_collaboration_routes",
     "bot_collaboration_partners",

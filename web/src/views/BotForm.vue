@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
-import { ElMessage, type FormInstance } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { computed, nextTick, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots, catalog, relays, settings, teams as teamsApi } from '@/api/admin'
@@ -290,6 +290,10 @@ async function onProvisioned(provision: WecomProvision): Promise<void> {
     originalForm = JSON.stringify(form)
     provisionVisible.value = false
     emit('saved', created)
+    // 扫码建的机器人默认只有创建者能用：弹窗一关提示就看不到了，单独再提醒一次。
+    void ElMessageBox.alert(t('wecomBot.usageModeHint'), t('wecomBot.created', { botId: provision.wecom_bot_id ?? '' }), {
+      type: 'warning',
+    }).catch(() => undefined)
   } catch (e) {
     provisionVisible.value = false
     failWithFields(e)

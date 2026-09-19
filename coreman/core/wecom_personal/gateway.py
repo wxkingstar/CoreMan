@@ -23,6 +23,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -40,7 +41,7 @@ CLIENT_INFO = json.dumps(
     separators=(",", ":"),
 )
 # whoami 的身份说明形如「机器人身份：\n名字：…\nID：…\n授权真人用户身份：\n名字：…\nID：…」。
-_ID_AFTER_NAME = r"[:：]\s*名字[:：][^\n]*\n\s*ID[:：]\s*([A-Za-z0-9_@.-]{1,128})"
+_ID_AFTER_NAME = r"[:：]\s*名字[:：]([^\n]*)\n\s*ID[:：]\s*([A-Za-z0-9_@.-]{1,128})"
 _AUTHORIZER = re.compile("授权真人用户身份" + _ID_AFTER_NAME)
 _BOT = re.compile("机器人身份" + _ID_AFTER_NAME)
 
@@ -52,8 +53,10 @@ class GatewayError(Exception):
     token_expired（853004 / 853005）、wecom_error（企业微信业务错误，带 errcode 与截断后的说明）。
     """
 
-    def __init__(self, code: str, errcode: int | None = None, message: str = "") -> None:
-        self.code, self.errcode, self.message = code, errcode, message
+    def __init__(
+        self, code: str, errcode: int | None = None, message: str = "", help_url: str | None = None
+    ) -> None:
+        self.code, self.errcode, self.message, self.help_url = code, errcode, message, help_url
         super().__init__(code if errcode is None else f"{code}:{errcode}")
 
 
@@ -62,6 +65,8 @@ class Identity:
     bot_id: str
     # 没有人授权过这个机器人时为空。
     authorizer_id: str | None
+    bot_name: str | None = None
+    authorizer_name: str | None = None
 
 
 def sign(secret: str, bot_id: str, at: int, nonce: str) -> str:
@@ -144,10 +149,36 @@ async def fetch_token(bot_id: str, secret: str, *, http: httpx.AsyncClient | Non
     return token
 
 
-def _raise_for(errcode: int, message: Any, token: str) -> None:
+_LINK = re.compile(r"\((https://[^\s()<>\"']{1,1024})\)|(https://[^\s()<>\"'\]\[]{1,1024})")
+
+
+def help_link(*texts: Any) -> str | None:
+    """从企业微信的 help_message 里取第一个授权页链接；只认企业微信自己的 https 域名。"""
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        for match in _LINK.finditer(text):
+            url = match.group(1) or match.group(2)
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
+            host = (parsed.hostname or "").lower()
+            if (
+                parsed.scheme == "https"
+                and not parsed.username
+                and (host == "work.weixin.qq.com" or host.endswith(".work.weixin.qq.com"))
+                # 错误码查询页不是授权页。
+                and not parsed.path.startswith("/devtool/")
+            ):
+                return url
+    return None
+
+
+def _raise_for(errcode: int, message: Any, token: str, help_url: str | None = None) -> None:
     if errcode in TOKEN_ERRORS:
         raise GatewayError("token_expired", errcode)
-    raise GatewayError("wecom_error", errcode, _clip(message, token))
+    raise GatewayError("wecom_error", errcode, _clip(message, token), help_url)
 
 
 async def invoke(
@@ -162,7 +193,7 @@ async def invoke(
     )
     errcode = _errcode(data.get("errcode", 0))
     if errcode != 0:
-        _raise_for(errcode, data.get("errmsg"), token)
+        _raise_for(errcode, data.get("errmsg"), token, help_link(data.get("help_message")))
     try:
         inner = json.loads(data["results_json"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -171,7 +202,14 @@ async def invoke(
         raise GatewayError("upstream_unavailable")
     error = inner.get("error")
     if isinstance(error, dict) and _errcode(error.get("code", 0)) != 0:
-        _raise_for(_errcode(error.get("code")), error.get("message"), token)
+        _raise_for(
+            _errcode(error.get("code")),
+            error.get("message"),
+            token,
+            help_link(
+                error.get("help_message"), inner.get("help_message"), data.get("help_message")
+            ),
+        )
     if inner.get("taskid"):
         return {"taskid": str(inner["taskid"])}
     result = inner.get("result")
@@ -185,13 +223,22 @@ async def invoke(
         raise GatewayError("upstream_unavailable") from exc
 
 
+def _name(value: str) -> str | None:
+    return value.strip()[:64] or None
+
+
 def parse_identity(context: str) -> Identity | None:
-    """从 whoami 的身份说明里取出机器人 ID 与授权人 ID；格式认不出来返回 None。"""
+    """从 whoami 的身份说明里取出机器人与授权人；格式认不出来返回 None。"""
     bot = _BOT.search(context)
     if bot is None:
         return None
     person = _AUTHORIZER.search(context)
-    return Identity(bot.group(1), person.group(1) if person else None)
+    return Identity(
+        bot.group(2),
+        person.group(2) if person else None,
+        _name(bot.group(1)),
+        _name(person.group(1)) if person else None,
+    )
 
 
 async def whoami(token: str, *, http: httpx.AsyncClient | None = None) -> Identity:

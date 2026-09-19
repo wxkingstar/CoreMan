@@ -1,4 +1,8 @@
-"""运维命令：python -m coreman.cli contact-sync [--app NAME]（对应 coreman contact-sync）。"""
+"""运维命令：python -m coreman.cli contact-sync [--app NAME]（对应 coreman contact-sync）。
+
+另有 `wecom-bots audit`：只读检查每个企业微信 AI 员工机器人是否带着创建者本人的企业微信数据
+权限（扫码创建时点了「确认授权」就会带上）。
+"""
 
 from __future__ import annotations
 
@@ -91,8 +95,75 @@ async def _skills_sync(url: str, source: str) -> int:
         await engine.dispose()
 
 
+async def _wecom_bots_audit() -> int:
+    """逐个企业微信 AI 员工机器人：换令牌、查授权人、试一次只读调用，看凭证是否带数据权限。
+
+    AI 员工机器人代表的是扫码创建它的人；带着数据权限时，拿到它凭证的人就能以那个人的身份读写
+    企业微信。个人工具用的是成员各自绑定的授权机器人，AI 员工机器人不需要这些权限。
+    """
+    from coreman.core.db.models import Bot
+    from coreman.core.wecom_personal import gateway, policy
+
+    settings = get_settings()
+    configure_logging(
+        service="cli", instance="wecom-bots-audit", level=settings.log_level, stream=sys.stderr
+    )
+    engine = make_engine(settings.database_url)
+    cipher = settings.build_cipher()
+    rows = []
+    try:
+        async with make_session_factory(engine)() as session:
+            bots = (
+                await session.scalars(
+                    select(Bot).where(Bot.platform == "wecom").order_by(Bot.name, Bot.id)
+                )
+            ).all()
+        for bot in bots:
+            row: dict[str, object] = {"bot": bot.name, "enabled": bot.enabled}
+            rows.append(row)
+            try:
+                bot_id, secret = policy.bot_credentials(cipher, bot)
+            except (ValueError, KeyError, TypeError):
+                row["error"] = "missing_credentials"
+                continue
+            row["wecom_bot_id"] = bot_id
+            try:
+                token = await gateway.fetch_token(bot_id, secret)
+                identity = await gateway.whoami(token)
+            except gateway.GatewayError as exc:
+                row["error"] = exc.code
+                continue
+            row["represents"] = identity.authorizer_name
+            try:
+                await gateway.invoke(
+                    token,
+                    "/contact/users/search",
+                    {"keywords": [identity.authorizer_name or identity.bot_name or "a"]},
+                )
+            except gateway.GatewayError as exc:
+                if exc.code == "wecom_error" and exc.errcode in (850001, 850002, 850003):
+                    row["data_access"] = False
+                else:
+                    row["error"] = exc.code
+                continue
+            row["data_access"] = True
+    finally:
+        await engine.dispose()
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    flagged = [row["bot"] for row in rows if row.get("data_access")]
+    if flagged:
+        print(
+            f"{len(flagged)} 个机器人带着创建者本人的企业微信数据权限："
+            + "、".join(str(name) for name in flagged)
+            + "。建议创建者在电脑端企业微信「工作台 → 智能机器人 → 该机器人 → 可使用权限」"
+            "中取消授权；另请确认这些机器人的「使用模式」是「多人使用」。",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI 入口：目前只有 contact-sync 一个子命令。"""
+    """CLI 入口：contact-sync、skills sync、wecom-bots audit。"""
     parser = argparse.ArgumentParser(prog="coreman.cli", description="CoreMan 运维命令")
     sub = parser.add_subparsers(dest="command", required=True)
     cs = sub.add_parser("contact-sync", help="同步企业微信通讯录")
@@ -102,7 +173,12 @@ def main(argv: list[str] | None = None) -> int:
     sync = operations.add_parser("sync", help="从已登记来源同步技能展示元数据")
     sync.add_argument("url", help="已登记的 marketplace Git 地址")
     sync.add_argument("--source", required=True, help="来源标识")
+    wecom = sub.add_parser("wecom-bots", help="企业微信 AI 员工机器人检查")
+    wecom_ops = wecom.add_subparsers(dest="operation", required=True)
+    wecom_ops.add_parser("audit", help="只读检查机器人是否带着创建者的企业微信数据权限")
     args = parser.parse_args(argv)
+    if args.command == "wecom-bots" and args.operation == "audit":
+        return asyncio.run(_wecom_bots_audit())
     if args.command == "skills" and args.operation == "sync":
         return asyncio.run(_skills_sync(args.url, args.source))
     if args.command == "contact-sync":

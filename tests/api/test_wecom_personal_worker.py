@@ -1,10 +1,9 @@
-"""连接企业微信：本人私聊发指令、点档位卡片，企业微信确认授权人就是本人才连上。"""
+"""私聊里的「连接 / 断开企业微信」：没绑定给出绑定入口，已绑定用卡片选档位，断开只是暂停。"""
 
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -19,18 +18,17 @@ from coreman.core.db.models import (
     RelayServer,
     TaskStream,
     UserReached,
-    WecomPersonalGrant,
+    WecomPersonalBinding,
 )
 from coreman.core.prompting import Speaker
-from coreman.core.wecom_personal import gateway, policy
+from coreman.core.wecom_personal import policy
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat import wecom_personal
 from coreman.runtime.worker.chat.models import Intake
 from tests.api.test_wecom_personal import (
     SENDER,
     WECOM_BOT,
-    grant,
-    mock_whoami,
+    bind,
     setup,
     supported,
 )
@@ -38,7 +36,7 @@ from tests.integration.worker_helpers import build_ctx
 
 
 def test_only_whole_sentence_commands_are_reserved():
-    for text in (" 连接企业微信 ", "连接我的企业微信", "连接企微"):
+    for text in (" 连接企业微信 ", "连接我的企业微信", "连接企微", "绑定企业微信"):
         assert wecom_personal.connect_requested(text)
     for text in ("/connect", "请连接企业微信", "企业微信", "连接飞书"):
         assert not wecom_personal.connect_requested(text)
@@ -57,27 +55,55 @@ async def intake_for(session, bot, task, text):
     )
 
 
-async def connect(db_session, app, db_engine, *, authorizer=SENDER, token_status=200, **kw):
+async def connect(db_session, app, db_engine, *, bound=True, **kw):
     bot, user, task = await setup(db_session, app, **kw)
     await supported(db_session, bot)
+    row = await bind(db_session, app, user, level="all_except_send") if bound else None
     intake = await intake_for(db_session, bot, task, "连接企业微信")
     ctx = build_ctx(db_engine, task)
     with respx.mock(assert_all_called=False) as mock:
-        mock.post(gateway.AUTH_URL).mock(
-            return_value=httpx.Response(token_status, json={"errcode": 0, "token": "tok-pre"})
-        )
-        mock_whoami(mock, authorizer=authorizer)
         assert await wecom_personal.intercept(db_session, ctx, intake)
+        # 连接只是选档位：不向企业微信发任何请求。
+        assert not mock.calls
     await db_session.commit()
-    return bot, user, task
+    return bot, user, task, row
+
+
+async def final_text(db_session, task):
+    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == task.id))
+    return stream.final_text
+
+
+async def test_connect_without_a_binding_explains_how_to_bind(db_session, app, db_engine):
+    bot, user, task, _ = await connect(db_session, app, db_engine, bound=False)
+    await db_session.refresh(task)
+    assert task.result == {"wecom_personal_unbound": True}
+    text = await final_text(db_session, task)
+    assert "http://localhost/my-wecom" in text and "确认授权" in text
+    assert await db_session.scalar(select(OutboxItem)) is None
+    # 私聊里不生成二维码：二维码等于密钥，只在本人登录的页面上展示。
+    assert await db_session.get(WecomPersonalBinding, user.id) is None
+
+
+async def test_connect_after_the_bot_was_deleted_asks_to_rebind(db_session, app, db_engine):
+    bot, user, task = await setup(db_session, app)
+    await supported(db_session, bot)
+    db_session.add(
+        WecomPersonalBinding(user_id=user.id, status="unbound", error="credentials_rejected")
+    )
+    await db_session.commit()
+    intake = await intake_for(db_session, bot, task, "连接企业微信")
+    assert await wecom_personal.intercept(db_session, build_ctx(db_engine, task), intake)
+    await db_session.commit()
+    assert "已被删除或重置了 Secret" in await final_text(db_session, task)
 
 
 async def test_connect_sends_the_tier_card_to_the_private_chat(db_session, app, db_engine):
-    bot, user, task = await connect(db_session, app, db_engine)
+    bot, user, task, row = await connect(db_session, app, db_engine)
     await db_session.refresh(task)
     assert task.status == "succeeded" and task.result == {"wecom_personal_flow": True}
-    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == task.id))
-    assert "可使用权限" in stream.final_text and bot.name in stream.final_text
+    text = await final_text(db_session, task)
+    assert row.bot_name in text and "http://localhost/my-wecom" in text
     card = await db_session.scalar(select(OutboxItem))
     assert card.target == {"chat_id": SENDER} and card.kind == "send"
     body = card.payload["card"]
@@ -85,27 +111,25 @@ async def test_connect_sends_the_tier_card_to_the_private_chat(db_session, app, 
     assert body["task_id"].startswith(f"wecom_personal@{task.id}@")
     options = body["checkbox"]["option_list"]
     assert [o["id"] for o in options] == ["readonly", "all_except_send", "all"]
+    # 预先勾上本人当前的档位。
+    assert [o["id"] for o in options if o["is_checked"]] == ["all_except_send"]
     assert all(len(o["text"]) <= 11 for o in options)
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id))
-    assert row.status == "selecting" and row.selection_task_id == task.id
 
 
-@pytest.mark.parametrize("authorizer", ["wo-other-member-00000000000000000000", None])
-async def test_connect_tells_a_non_authorizer_right_away(db_session, app, db_engine, authorizer):
-    bot, user, task = await connect(db_session, app, db_engine, authorizer=authorizer)
-    await db_session.refresh(task)
-    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == task.id))
-    expected = "不是这个机器人" if authorizer else "还没有人授权"
-    assert expected in stream.final_text and task.result["personal_connect_denied"]
-    assert await db_session.scalar(select(OutboxItem)) is None
-    assert await db_session.get(WecomPersonalGrant, (bot.id, user.id)) is None
-
-
-async def test_connect_still_offers_the_card_when_wecom_is_unreachable(db_session, app, db_engine):
-    bot, user, _ = await connect(db_session, app, db_engine, token_status=502)
-    assert (await db_session.scalar(select(OutboxItem))).payload["card"]
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id))
-    assert row.status == "selecting"
+async def test_the_brief_lists_capabilities_that_need_renewal(db_session, app, db_engine):
+    bot, user, task = await setup(db_session, app)
+    await supported(db_session, bot)
+    await bind(
+        db_session,
+        app,
+        user,
+        capabilities={"mail:read": {"state": "expired"}, "todo:read": {"state": "unauthorized"}},
+    )
+    intake = await intake_for(db_session, bot, task, "连接企业微信")
+    assert await wecom_personal.intercept(db_session, build_ctx(db_engine, task), intake)
+    await db_session.commit()
+    text = await final_text(db_session, task)
+    assert "已过期：邮件" in text and "未授权：待办" in text and "电脑端企业微信" in text
 
 
 @pytest.mark.parametrize("denial", ["runtime", "unbound", "group"])
@@ -123,7 +147,7 @@ async def test_connect_explains_why_it_cannot_start(db_session, app, db_engine, 
     await db_session.commit()
     # 群聊里这句话只是普通消息，交给助手。
     assert handled is (denial != "group")
-    assert await db_session.get(WecomPersonalGrant, (bot.id, user.id)) is None
+    assert await db_session.get(WecomPersonalBinding, user.id) is None
     assert await db_session.scalar(select(OutboxItem)) is None
 
 
@@ -185,98 +209,72 @@ async def card_id(db_session):
     return card.payload["card"]["task_id"]
 
 
-def mock_token(mock):
-    return mock.post(gateway.AUTH_URL).mock(
-        return_value=httpx.Response(200, json={"errcode": 0, "token": "tok-new"})
-    )
-
-
-async def test_the_authorizer_connects_with_the_chosen_tier(db_session, app, db_engine):
-    bot, user, _ = await connect(db_session, app, db_engine)
-    task_id = await card_id(db_session)
+async def test_choosing_a_tier_enables_the_binding(db_session, app, db_engine):
+    bot, user, _, row = await connect(db_session, app, db_engine)
+    epoch = row.context_epoch
+    row.enabled = False
+    await db_session.commit()
     with respx.mock as mock:
-        mock_token(mock)
-        mock_whoami(mock)
-        result, update = await click(db_session, db_engine, bot, task_id)
+        result, update = await click(
+            db_session, db_engine, bot, await card_id(db_session), level="all"
+        )
+        assert not mock.calls
     assert result == "wecom_personal_connected"
-    assert (
-        update.target["req_id"] == "click-req"
-        and "已连接" in update.payload["card"]["main_title"]["title"]
-    )
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    assert row.status == "connected" and row.authorization_level == "all_except_send"
-    assert row.authorizer_id == SENDER and row.token_enc and row.verified_at
-
-
-async def test_an_authorizer_known_by_another_id_still_matches(db_session, app, db_engine):
-    # 回调里是明文 userid，whoami 给的是密文 userid：通过身份表落到同一位员工。
-    bot, user, _ = await connect(db_session, app, db_engine, sender="owner")
-    task_id = await card_id(db_session)
-    with respx.mock as mock:
-        mock_token(mock)
-        mock_whoami(mock, authorizer=SENDER)
-        result, _ = await click(db_session, db_engine, bot, task_id, clicker="owner")
-    assert result == "wecom_personal_connected"
-
-
-@pytest.mark.parametrize("authorizer", ["wo-other-member-00000000000000000000", None])
-async def test_an_authorizer_changed_before_the_click_does_not_connect(
-    db_session, app, db_engine, authorizer
-):
-    bot, user, _ = await connect(db_session, app, db_engine)
-    task_id = await card_id(db_session)
-    with respx.mock as mock:
-        mock_token(mock)
-        mock_whoami(mock, authorizer=authorizer)
-        result, update = await click(db_session, db_engine, bot, task_id)
-    assert result == (
-        "wecom_personal_not_authorizer" if authorizer else "wecom_personal_not_authorized"
-    )
-    assert "没有连接" in update.payload["card"]["main_title"]["title"]
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    assert row.status == "revoked" and row.token_enc is None
+    assert update.target["req_id"] == "click-req"
+    assert "已连接" in update.payload["card"]["main_title"]["title"]
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    assert row.authorization_level == "all" and row.enabled and row.context_epoch != epoch
 
 
 async def test_another_member_clicking_the_card_is_ignored(db_session, app, db_engine):
-    bot, user, _ = await connect(db_session, app, db_engine)
-    task_id = await card_id(db_session)
-    with respx.mock as mock:
-        result, update = await click(db_session, db_engine, bot, task_id, clicker="stranger")
-        assert not mock.calls
+    bot, user, _, _ = await connect(db_session, app, db_engine)
+    result, update = await click(
+        db_session, db_engine, bot, await card_id(db_session), clicker="stranger"
+    )
     assert result == "ignored" and update is None
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    assert row.status == "selecting"
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    assert row.authorization_level == "all_except_send"
 
 
-async def test_an_expired_card_does_not_connect(db_session, app, db_engine):
-    bot, user, _ = await connect(db_session, app, db_engine)
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id))
-    row.selection_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+async def test_an_expired_card_does_not_change_anything(db_session, app, db_engine):
+    bot, user, task, _ = await connect(db_session, app, db_engine)
+    await db_session.refresh(task)
+    task.finished_at = datetime.now(UTC) - wecom_personal.SELECTION_TTL - timedelta(seconds=1)
     await db_session.commit()
-    with respx.mock as mock:
-        result, update = await click(db_session, db_engine, bot, await card_id(db_session))
-        assert not mock.calls
+    result, update = await click(db_session, db_engine, bot, await card_id(db_session))
     assert result == "expired" and "失效" in update.payload["card"]["main_title"]["title"]
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    assert row.authorization_level == "all_except_send"
 
 
-async def test_upstream_failure_keeps_the_card_usable(db_session, app, db_engine):
-    bot, user, _ = await connect(db_session, app, db_engine)
-    with respx.mock as mock:
-        mock.post(gateway.AUTH_URL).mock(return_value=httpx.Response(502))
-        result, _ = await click(db_session, db_engine, bot, await card_id(db_session))
-    assert result == "wecom_personal_upstream_unavailable"
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    assert row.status == "selecting"
+async def test_a_binding_removed_before_the_click_is_reported(db_session, app, db_engine):
+    bot, user, _, row = await connect(db_session, app, db_engine)
+    row.status = "unbound"
+    await db_session.commit()
+    result, update = await click(db_session, db_engine, bot, await card_id(db_session))
+    assert result == "wecom_personal_unbound"
+    assert "没有连接" in update.payload["card"]["main_title"]["title"]
 
 
-async def test_disconnect_command_revokes_locally(db_session, app, db_engine):
+async def test_disconnect_only_pauses_and_keeps_the_credentials(db_session, app, db_engine):
     bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user)
+    epoch = row.context_epoch
     intake = await intake_for(db_session, bot, task, "断开企业微信")
     assert await wecom_personal.intercept(db_session, build_ctx(db_engine, task), intake)
     await db_session.commit()
-    row = await db_session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    assert row.status == "revoked" and row.token_enc is None
+    row = await db_session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    assert row.status == "bound" and not row.enabled and row.credentials_enc
+    assert row.context_epoch != epoch
+    assert "不需要重新扫码" in await final_text(db_session, task)
+
+
+async def test_disconnect_without_a_binding_says_so(db_session, app, db_engine):
+    bot, _, task = await setup(db_session, app)
+    intake = await intake_for(db_session, bot, task, "断开企业微信")
+    assert await wecom_personal.intercept(db_session, build_ctx(db_engine, task), intake)
+    await db_session.commit()
+    assert "还没有绑定" in await final_text(db_session, task)
 
 
 async def test_connected_private_chat_adds_tools_on_top_of_the_assistant(
@@ -284,13 +282,14 @@ async def test_connected_private_chat_adds_tools_on_top_of_the_assistant(
 ):
     bot, user, task = await setup(db_session, app)
     await supported(db_session, bot)
-    row = await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user, capabilities={"mail:read": {"state": "expired"}})
     intake = await intake_for(db_session, bot, task, "看看我的待办")
     ctx = build_ctx(db_engine, task)
     base = uuid.uuid4()
     initial = {policy.PREFIX + "TOKEN": "forged", "BOT_TOKEN_ERP": "business"}
     prompt, env = await wecom_personal.configure(db_session, ctx, intake, base, "你是助理", initial)
     assert prompt.startswith("你是助理") and "## 本人企业微信" in prompt and "仅读取" in prompt
+    assert "已过期：邮件" in prompt
     assert env["BOT_TOKEN_ERP"] == "business"
     assert env[policy.PREFIX + "URL"].endswith("/api/runtime/wecom-personal/mcp")
     capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])
@@ -302,7 +301,7 @@ async def test_connected_private_chat_adds_tools_on_top_of_the_assistant(
     assert capability.epoch == row.context_epoch
 
 
-@pytest.mark.parametrize("denial", ["not_connected", "runtime", "group", "codex_only"])
+@pytest.mark.parametrize("denial", ["not_connected", "paused", "runtime", "group", "codex_only"])
 async def test_no_tools_without_a_live_connection(db_session, app, db_engine, denial):
     bot, user, task = await setup(
         db_session, app, chat_type="group" if denial == "group" else "single"
@@ -313,7 +312,7 @@ async def test_no_tools_without_a_live_connection(db_session, app, db_engine, de
         )
         await supported(db_session, bot, capabilities)
     if denial != "not_connected":
-        await grant(db_session, app, bot, user)
+        await bind(db_session, app, user, enabled=denial != "paused")
     intake = await intake_for(db_session, bot, task, "看看我的待办")
     result = await wecom_personal.configure(
         db_session,
@@ -333,7 +332,7 @@ async def test_owner_only_schedule_can_use_the_tools(app, db_session, db_engine,
 
     bot, user, _ = await setup(db_session, app)
     await supported(db_session, bot)
-    await grant(db_session, app, bot, user)
+    await bind(db_session, app, user)
     db_session.add(BotMember(bot_id=bot.id, user_id=user.id))
     db_session.add(UserReached(bot_id=bot.id, user_id=user.id, platform_chat_id=SENDER))
     job = CronJob(
@@ -373,7 +372,7 @@ async def test_a_connected_turn_mounts_the_tools_and_is_owner_only(
     bot, user, task = await setup(db_session, app)
     await supported(db_session, bot)
     if connected:
-        await grant(db_session, app, bot, user)
+        await bind(db_session, app, user)
     fake = FakeRelay("normal")
     await run(db_engine, task, fake)
     env = fake.requests[0]["env_vars"]
