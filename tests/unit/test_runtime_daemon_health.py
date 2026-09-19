@@ -127,6 +127,9 @@ def test_refused_connections_count_toward_a_restart(healing_daemon):
 async def test_connect_errors_increment_the_failure_count(healing_daemon, monkeypatch):
     daemon = healing_daemon
     monkeypatch.setattr(daemon, "start_driver", lambda provider: None)
+    # No driver will ever bind the socket: still retry once, but skip the 3-second wait.
+    monkeypatch.setattr(module, "DRIVER_CONNECT_ATTEMPTS", 2)
+    monkeypatch.setattr(module, "DRIVER_CONNECT_RETRY_SECONDS", 0)
     for expected in (1, 2):
         await daemon.discover()
         assert daemon.socket_failures["claude"] == expected
