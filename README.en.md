@@ -1,107 +1,143 @@
-<p align="center"><img src="docs/brand/logo/v1/coreman-mark.svg" width="96" alt="CoreMan"></p>
+<p align="center"><img src="docs/brand/social-preview/v1/social-preview.png" width="760" alt="CoreMan: your AI teammate at work"></p>
+
+<p align="center">
+  <a href="https://github.com/wxkingstar/CoreMan/actions/workflows/ci.yml"><img src="https://github.com/wxkingstar/CoreMan/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/wxkingstar/CoreMan/releases"><img src="https://img.shields.io/github/v/release/wxkingstar/CoreMan" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-16756B" alt="MIT License"></a>
+</p>
+
+<p align="center"><a href="README.md">中文</a> · English</p>
 
 # CoreMan
 
-**Your AI teammate at work.**
+**Turn Claude Code and Codex into AI employees your team can reach in Feishu (Lark) and WeCom.**
 
-[中文](README.md) · English
+Mention one in a group chat or message it directly, and it runs Claude Code or Codex on your own machines and posts the result back to the chat. Administrators manage every AI employee from one console: which model it uses, which machine it runs on, which skills it has and who may use it.
 
-CoreMan is a self-hosted platform for AI teammates. It connects WeCom (WeChat Work) and Feishu (Lark) with AI CLIs running in environments you control. Team members work with AI teammates in chat, and administrators manage AI teammates, runtimes, skills, permissions and tasks from one console.
+- **Scan a QR code, get a bot**: when you create an AI employee, scan with Feishu or WeCom and the bot is created for you, with no app setup in the developer console. Chat runs over the platforms' long connections, so you need no public IP or callback domain.
+- **Runs in your environment**: CoreMan is self-hosted. The AI runs on machines you choose, as the system user you choose, and its working files stay there.
+- **Built for teams**: teams and roles, skill approval, scheduled tasks, conversation logs, usage statistics and audit logs out of the box.
 
-The project is at an early stage (0.1.0). CoreMan does not provide model quota: to use backends such as Claude Code or Codex, install and sign in to them yourself and make sure you are entitled to use the corresponding service.
+> [!NOTE]
+> CoreMan does not provide model quota. Install and sign in to Claude Code or Codex yourself, with your own subscription or API account.
 
-Most detailed documentation is currently written in Chinese. The [glossary](docs/glossary.md) lists the English term for each concept, and the [architecture overview](docs/architecture.md) is in English.
+## What it does
 
-## Features
+- **Shares the work in group chats**: "@Weekly Reporter summarize the requirements we discussed this week". Replies stream in with a collapsible thinking panel, and images, files and quoted messages work.
+- **Acts as a personal assistant**: after you send "连接飞书" (Connect Feishu) or "连接企业微信" (Connect WeCom) in a private chat and pick a scope (for WeCom, scan once on the console's "My WeCom" page first), it can read your own messages, meetings, documents, calendar and more to answer you. These tools are only used in your private chat with it.
+- **Works on a schedule**: say "every weekday at 9, summarize my unread Feishu messages" in a private chat and confirm the card to create a scheduled task. Administrators can also schedule tasks that deliver results to group chats, private chats or email.
+- **Asks a human when unsure**: human escalation sends a question to a named colleague, and the AI continues once they reply.
+- **Keeps capabilities in one place**: sync skills from Git plugin marketplaces and install them on AI employees after approval. When the AI calls internal business systems, it does so with the identity of the person who asked.
 
-- **WeCom and Feishu integration**: long-connection messaging, streaming replies, images and files, quoted messages, interactive question cards.
-- **AI teammate management**: prompts, models, runtimes, collaborators, usage allowlists and team ownership.
-- **Runtime management**: a standalone Runtime Daemon connects outward to the management service and provides Claude Code / Codex backends, health status and quota information.
-- **Teams and permissions**: teams, users, roles, platform sign-in, directory sync, encrypted credentials and audit logs.
-- **Tasks and collaboration**: scheduled runs, notifications, human escalation, session management, chat logs and runtime status.
-- **Skills and memory**: skill catalog, installation approval, environment presets, memory sync, usage statistics and health reports.
-- **Self-hosted operations**: Docker Compose, database migrations, multi-process coordination, drain-based upgrades, optional S3 storage and Prometheus monitoring.
+## How it works
+
+```mermaid
+flowchart LR
+    Chat["Feishu / WeCom<br/>group and private chats"] <-->|platform long connection| CM["CoreMan<br/>console, scheduling, permissions"]
+    CM <-->|runtime connects out| RT["Runtime<br/>your server or laptop"]
+    RT --> CLI["Claude Code / Codex<br/>runs in the AI employee's working directory"]
+```
+
+- **CoreMan** is the management service, deployed with Docker Compose. It handles chat messages, queuing, permissions and storage.
+- **Runtime** is a daemon installed in a Linux or macOS user environment. It connects out to CoreMan, so its machine needs no inbound ports. One runtime serves both Claude Code and Codex, whichever that user has signed in to.
+- **An AI employee** combines a Feishu or WeCom bot, a runtime, a model, a working directory, a prompt and skills.
+
+See the [architecture overview](docs/architecture.md) for how the services fit together and the [glossary](docs/glossary.md) for the English term of each concept. Most other documentation is in Chinese.
 
 ## Quick start
 
-You need Git, Python 3, Docker and Docker Compose v2. The first build downloads container images plus Python, Node.js and Go dependencies; the frontend and the Runtime installation bundles are built inside containers.
+You can run everything below on a single computer.
+
+**You need:**
+
+- A computer or server with Git, Python 3 and Docker (with Compose v2) to run CoreMan.
+- A Linux or macOS user environment with Claude Code or Codex installed and signed in, to run the runtime. For a trial, this can be the same computer.
+- A Feishu or WeCom account to scan the QR code that creates the bot.
+
+### 1. Start CoreMan
 
 ```bash
 git clone https://github.com/wxkingstar/CoreMan.git
 cd CoreMan
 cp .env.example .env
-# Edit .env: set a unique, strong BOOTSTRAP_ADMIN_PASSWORD
 ./deploy/coreman build
 ./deploy/coreman up
-./deploy/coreman status
 ```
 
-Open <http://localhost/> and sign in with `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` from `.env`. The deploy tool fills in empty encryption and session keys, and replaces placeholder database and administrator passwords with random values. Back up `.env` and the database.
+The first build downloads container images plus Python, Node.js and Go dependencies, so it takes a while depending on your network. `up` generates the encryption keys, the database password and the administrator password and writes them back to `.env`. Keep a backup of that file.
 
-If the ports are taken, set `CADDY_HTTP_PORT=8080` and `CADDY_HTTPS_PORT=8443` in `.env`, and change `PUBLIC_BASE_URL` to `http://localhost:8080`. For production, configure an HTTPS domain with matching `PUBLIC_BASE_URL` and `CADDY_SITE_ADDRESS`, and make sure runtimes can reach that address.
-
-First-time setup:
-
-1. Create a team under "Teams & Users". Optionally configure directory sync and sign-in under "Platform Apps".
-2. Under "Runtime Management", generate an install command and run it in the target user environment where the AI CLI is already installed and signed in. See [Runtime installation](runtime_daemon/README.md).
-3. Create an AI teammate, enter the WeCom or Feishu bot credentials, bind an available runtime and model, then enable it. Platform-side preparation is described in [WeCom setup](docs/wecom.md) and [Feishu setup](docs/feishu.md).
-4. Send a message from the chat platform and check the full path under "Chat Logs" and "Runtime Status".
-
-Once platform sign-in works, you can disable bootstrap administrator sign-in in the settings. The AI CLI acts with the permissions of the system user that runs the Runtime. Use a dedicated, least-privilege user environment and isolate files and network access as needed. Prompt constraints are no substitute for operating-system isolation.
-
-The console menu names above are translations; the console UI is available in Chinese, Japanese and English.
-
-## Local development
-
-The backend needs Python 3.12+, uv and PostgreSQL 16. The frontend needs Node.js 22.12+. Use a dedicated development database:
+Open <http://localhost/> and sign in as `admin`. To see the password:
 
 ```bash
-uv sync --all-groups
-cp .env.example .env
-# Edit .env: set a local DATABASE_URL, a strong administrator password, MASTER_KEY and SESSION_SECRET
-# Generate MASTER_KEY:
-python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())'
-# Generate SESSION_SECRET:
-python3 -c 'import secrets;print(secrets.token_urlsafe(32))'
-uv run --env-file .env alembic upgrade head
-uv run uvicorn coreman.api.main:app --reload --port 8000
-# In another terminal:
-cd web
-npm ci
-npm run dev
+grep BOOTSTRAP_ADMIN_PASSWORD .env
 ```
 
-Open <http://localhost:5173/>. The dev proxy forwards `/api` to the backend on port 8000. The API and frontend alone do not process chat tasks; the full path also needs the gateways, workers and scheduler, so use Compose for end-to-end testing. When you run the API by hand, build the Runtime bundles separately, see [Runtime development](runtime_daemon/README.md).
+If port 80 is taken, set `CADDY_HTTP_PORT=8080`, `CADDY_HTTPS_PORT=8443` and `PUBLIC_BASE_URL=http://localhost:8080` in `.env`, then run `./deploy/coreman up` again.
 
-## Checks
+### 2. Connect a runtime
 
-```bash
-uv run pytest                          # database tests need Docker or a separate TEST_DATABASE_URL
-uv run pytest -n auto                  # parallel: one database per worker next to TEST_DATABASE_URL; needs CREATEDB
-uv run ruff check .
-uv run mypy coreman
-cd web
-npx vitest run
-npm run lint
-npm run build
-```
+Under "Runtime management", click "Install runtime", enter a project root directory (AI employees' working directories are created under it) and generate the install command. Run it in the user environment where Claude Code or Codex is signed in. Once it finishes, the machine appears in the list with the sign-in status of Claude Code and Codex.
 
-Never point tests at a production database. Permissions, callbacks, networking and AI CLI sign-in on real platforms must be verified in your own deployment; passing simulated tests does not mean the external platform integration is complete.
+<p align="center"><img src="docs/images/readme/en/install-runtime.png" width="620" alt="Install runtime: run one curl command on the target machine"></p>
 
-## Documentation and layout
+Linux needs user-level systemd, and Debian or Ubuntu also need `python3-venv`. See the [runtime installation guide](runtime_daemon/README.md) for the full requirements.
+
+### 3. Create an AI employee
+
+Under "AI employees", click "Create AI employee", enter an identifier and a name, pick the runtime you just connected and click "Scan to create Feishu bot". Confirm in Feishu and the Feishu bot and the AI employee are created together. Scan-to-create does not support international Lark tenants yet.
+
+<p align="center"><img src="docs/images/readme/en/create-employee.png" width="820" alt="Create an AI employee: fill in three fields, then scan with Feishu"></p>
+
+For WeCom, switch the platform to WeCom and click "Scan to create WeCom bot". WeCom creates such bots for personal use only, so switch the bot to multi-user in the WeCom desktop client before colleagues can message it. To use an existing bot, enter its credentials under "More settings". Platform-side preparation and limits are described in [Feishu setup](docs/feishu.md) and [WeCom setup](docs/wecom.md).
+
+### 4. Chat with it
+
+Find the bot in Feishu or WeCom and message it, or add it to a group and mention it. Every turn shows up under "Conversation logs", and "Platform status" shows connections and task queues. If you get no reply, check those two pages first, then the setup guides above.
+
+## The console
+
+All AI employees live in one list that you can filter by platform, runtime, model and team:
+
+![AI employees](docs/images/readme/en/console-bots.png)
+
+Runtime management shows whether Claude Code and Codex are signed in and online on each machine:
+
+![Runtime management](docs/images/readme/en/console-runtimes.png)
+
+The console is available in Chinese, Japanese and English.
+
+## Features
+
+- **Chat**: long-connection messaging for Feishu and WeCom, streaming replies with a thinking panel, images, files, quoted messages, interactive question cards and Feishu slash commands (`/new`, `/stop` and more).
+- **AI employees**: scan-to-create bots, prompts, models, working directories, collaborators, usage allowlists and team ownership, and switching runtimes with workspace and memory migration. Feishu app permissions, menus, availability and releases can be managed from the console too.
+- **Personal authorization**: members connect Feishu or WeCom in a private chat and grant access to their own data by tier (for WeCom, after binding once on the "My WeCom" page). It is used only in that member's private chats and their own scheduled tasks, and only they can view those conversations.
+- **Tasks and collaboration**: scheduled tasks (delivered to private chats, group chats, email or WeCom group robots), AI scheduled tasks that members create themselves, human escalation, session management and collaboration between Feishu AI employees.
+- **Skills and business systems**: skill catalog with installation approval, environment presets and memory sync; short-lived tokens issued per speaker for internal business systems.
+- **Teams and governance**: teams, roles, directory sync and platform sign-in, encrypted credentials, usage and cost statistics, AI employee health reports, audit logs and announcements.
+- **Self-hosted operations**: Docker Compose deployment, database migrations, drain-based gateway upgrades and rollback, optional S3 attachment storage, Prometheus metrics and alerts.
+
+## Running in production
+
+- **Domain and HTTPS**: set `CADDY_SITE_ADDRESS` in `.env` to your domain (for example `coreman.example.com`) and `PUBLIC_BASE_URL` to the matching `https://` address; Caddy obtains the certificate. Browsers and every runtime must be able to reach that address.
+- **Platform sign-in and directory**: create teams under "Teams and users" and configure directory sync and sign-in under "Platform apps". Once platform sign-in works, turn off bootstrap administrator sign-in under "Settings".
+- **Execution boundary**: the AI CLI acts with the permissions of the system user that runs the runtime. Give each runtime a dedicated, least-privilege system user and isolate files and network access as needed; prompt constraints are no substitute for operating-system isolation. See the [security policy](SECURITY.md) for the trust model.
+- **Upgrades and backups**: build a new version with `./deploy/coreman build` and roll it out with `./deploy/coreman upgrade all <tag>`, see [operations](docs/operations.md) (in Chinese). Back up `.env` and the database regularly; without `MASTER_KEY`, the credentials encrypted in the database cannot be decrypted.
+
+CoreMan is at an early stage (latest release 0.1.0) and `main` keeps gaining features; see the [CHANGELOG](CHANGELOG.md).
+
+## Documentation
 
 Documents are in Chinese unless marked otherwise.
 
 - Concepts and structure: [Glossary](docs/glossary.md) · [Architecture and service topology](docs/architecture.md#service-topology) (English)
-- Integrations and features: [WeCom](docs/wecom.md) · [Feishu](docs/feishu.md) · [Skills and approval](docs/skills-management.md) · [Memory](docs/memories.md) · [Scheduled tasks](docs/cron-jobs.md) · [Human escalation](docs/escalations.md)
+- Integrations and features: [Feishu](docs/feishu.md) · [WeCom](docs/wecom.md) · [Skills and approval](docs/skills-management.md) · [Memory](docs/memories.md) · [Scheduled tasks](docs/cron-jobs.md) · [Human escalation](docs/escalations.md) · [Feishu AI employee collaboration](docs/features/feishu-bot-collaboration.md)
 - Operations and integration: [Operations](docs/operations.md) · [Infrastructure API](docs/infrastructure-api.md) · [Object storage](docs/object-storage.md) · [Statistics and health reports](docs/statistics-and-health.md) · [IM reply deadlines](docs/im-reply-lifecycle.md)
 - Runtime environments: [Runtime Daemon](runtime_daemon/README.md) · [Linux environment manual](docs/environment-creation/README.md)
-
-`coreman/api` is the management API, `coreman/core` holds shared business components, and `coreman/runtime` contains the gateways, workers and scheduler. `web` is the Vue 3 admin console, `runtime_daemon` is the execution side, `deploy` holds deployment configuration, `migrations` holds database migrations and `tests` holds the test suites.
+- Development: [CONTRIBUTING.md](CONTRIBUTING.md) (English)
 
 ## Contributing and security
 
-When filing an issue, include the version, reproduction steps and redacted logs. When opening a pull request, explain the purpose of the change and how you verified it. Do not upload real `.env` files, platform credentials, install tokens, chat logs, directory data, database backups or screenshots of internal systems. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests are welcome. When filing an issue, include the version, reproduction steps and redacted logs. When opening a pull request, explain the purpose of the change and how you verified it; local development and checks are described in [CONTRIBUTING.md](CONTRIBUTING.md). Do not upload real `.env` files, platform credentials, install tokens, chat logs, directory data, database backups or screenshots of internal systems.
 
 For leaked credentials or exploitable vulnerabilities, contact the maintainers through the repository's private vulnerability reporting channel (once enabled). Do not disclose sensitive details in public issues. See the [security policy](SECURITY.md) for details.
 
