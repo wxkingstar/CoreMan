@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from coreman.core.feishu_personal import service, tools
+from coreman.core.feishu_personal import endpoints, service, tools
 
 
 @pytest.fixture
@@ -37,7 +37,8 @@ async def invoke(name, args):
     ],
 )
 async def test_invalid_arguments_never_contact_service(upstream, name, args):
-    assert await invoke(name, args) == {"error": "invalid_tool_or_arguments"}
+    out = await invoke(name, args)
+    assert out["error"] == "invalid_tool_or_arguments" and out["invalid"]
     upstream.assert_not_called()
 
 
@@ -101,10 +102,11 @@ async def test_search_enriches_only_valid_bounded_message_ids(upstream):
 
 
 def test_tool_catalog_is_closed_and_strict():
-    catalog = tools.definitions()
-    assert len(catalog) == 12
+    assert [item["name"] for item in tools.definitions()] == list(tools._AUTH)
+    catalog = tools.definitions(level="all", scopes=endpoints.manifest_scopes())
+    assert len(catalog) == len(tools.TOOLS) + len(tools._AUTH)
     assert all(item["inputSchema"]["additionalProperties"] is False for item in catalog)
-    assert not any("send" in item["name"] or "proxy" in item["name"] for item in catalog)
+    assert not any("proxy" in item["name"] or "api" in item["name"] for item in catalog)
 
 
 @pytest.mark.parametrize(
@@ -115,7 +117,7 @@ def test_tool_catalog_is_closed_and_strict():
     ],
 )
 async def test_text_page_bounds_rejected_before_http(upstream, name, args):
-    assert await invoke(name, args) == {"error": "invalid_tool_or_arguments"}
+    assert (await invoke(name, args))["error"] == "invalid_tool_or_arguments"
     upstream.assert_not_called()
 
 

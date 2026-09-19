@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json as jsonlib
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -18,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import FeishuPersonalGrant
-from coreman.core.feishu_personal import permissions, revocation
+from coreman.core.feishu_personal import endpoints, permissions, revocation
 from coreman.core.feishu_personal.policy import Scope, app_credentials
 
 BASE = "https://open.feishu.cn/open-apis"
@@ -33,9 +32,20 @@ SCOPES = (
 
 
 class PersonalError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, upstream_code: int | None = None):
         self.code = code
+        self.upstream_code = upstream_code
         super().__init__(code)
+
+    def payload(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"error": self.code}
+        if self.upstream_code is not None:
+            out["upstream_code"] = self.upstream_code
+        return out
+
+
+# The app has not enabled the permission, or the owner did not grant it.
+_PERMISSION_CODES = {99991672: "app_permission_missing", 99991679: "user_permission_missing"}
 
 
 def _aad(row: FeishuPersonalGrant, field: str) -> str:
@@ -445,29 +455,15 @@ async def revoke_authorization(
     return await revoke_grant(session, scope.bot.id, scope.user_id, cipher)
 
 
-def _check_read_scope(row: FeishuPersonalGrant, path: str) -> None:
-    if row.authorization_level == "legacy_readonly":
-        return
-    if path == "/im/v1/messages/search":
-        required = "search:message"
-    elif path.startswith("/im/v1/messages"):
-        required = "im:message:readonly"
-    elif path == "/vc/v1/meetings/search":
-        required = "vc:meeting.search:read"
-    elif path.startswith("/vc/v1/meetings/"):
-        required = "vc:meeting:readonly"
-    elif path.startswith("/vc/v1/notes/"):
-        required = "vc:note:read"
-    elif path == "/minutes/v1/minutes/search":
-        required = "minutes:minutes.search:read"
-    elif path.endswith("/artifacts"):
-        required = "minutes:minutes.artifacts:read"
-    elif path.startswith("/minutes/"):
-        required = "minutes:minutes.basic:read"
-    else:
-        required = "docx:document:readonly"
-    if required not in set(row.requested_scopes or []) & set(row.scopes or []):
-        raise PersonalError("selected_permission_missing")
+def _granted(row: FeishuPersonalGrant) -> set[str]:
+    # Selected for the saved tier and actually granted: consent history never widens it.
+    return set(row.requested_scopes or []) & set(row.scopes or [])
+
+
+def _check(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint) -> None:
+    reason = endpoints.denied(endpoint, row.authorization_level, _granted(row))
+    if reason is not None:
+        raise PersonalError(reason)
 
 
 async def api_request(
@@ -480,48 +476,13 @@ async def api_request(
     params: Any = None,
     json: Any = None,
 ) -> dict[str, Any]:
-    sending = method == "POST" and path == "/im/v1/messages"
-    allowed = (
-        sending
-        or (
-            method == "POST"
-            and path
-            in ("/im/v1/messages/search", "/vc/v1/meetings/search", "/minutes/v1/minutes/search")
-        )
-        or (
-            method == "GET"
-            and re.fullmatch(
-                r"/(?:im/v1/messages(?:/mget)?|vc/v1/(?:meetings|notes)/[A-Za-z0-9_-]+"
-                r"|minutes/v1/minutes/[A-Za-z0-9_-]+(?:/artifacts)?"
-                r"|docx/v1/documents/[A-Za-z0-9_-]+/raw_content)",
-                path,
-            )
-            is not None
-        )
-    )
-    if not allowed:
+    endpoint = endpoints.match(method, path)
+    if endpoint is None:
         raise PersonalError("invalid_tool_or_arguments")
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")
-    if sending and (
-        row.authorization_level != "all"
-        or not {"im:message", "im:message.send_as_user"}.issubset(
-            set(row.scopes or []) & set(row.requested_scopes or [])
-        )
-    ):
-        raise PersonalError("sending_not_authorized")
-    if row.authorization_level == "messages_readonly" and not path.startswith("/im/v1/messages"):
-        raise PersonalError("outside_selected_authorization")
-    if row.authorization_level not in (
-        "legacy_readonly",
-        "messages_readonly",
-        "all_except_send",
-        "all",
-    ):
-        raise PersonalError("outside_selected_authorization")
-    if not sending:
-        _check_read_scope(row, path)
+    _check(row, endpoint)
     tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
     if not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
         if not tokens.get("refresh_token"):
@@ -543,10 +504,8 @@ async def api_request(
         data.setdefault("refresh_token", tokens["refresh_token"])
         save_tokens(cipher, row, data, secret)
         tokens = data
-    if sending and not {"im:message", "im:message.send_as_user"}.issubset(set(row.scopes or [])):
-        raise PersonalError("sending_not_authorized")
-    if not sending:
-        _check_read_scope(row, path)
+    # A refresh may return fewer permissions than before.
+    _check(row, endpoint)
     response = await _http(
         method,
         BASE + path,
@@ -554,12 +513,17 @@ async def api_request(
         params=params,
         json=json,
     )
-    if response.get("code") != 0:
-        # Do not forward upstream message text or request context to the model.
-        if response.get("code") in (99991663, 99991668, 99991671, 99991677):
+    code = response.get("code")
+    if code != 0:
+        # Do not forward upstream message text or request context to the model; the numeric
+        # code alone lets it tell the user which permission or input to fix.
+        if code in (99991663, 99991668, 99991671, 99991677):
             _clear(row, "expired")
             raise PersonalError("authorization_required")
-        raise PersonalError("feishu_read_failed")
+        if isinstance(code, int) and code in _PERMISSION_CODES:
+            raise PersonalError(_PERMISSION_CODES[code])
+        failed = "feishu_read_failed" if endpoint.kind == "read" else "feishu_request_failed"
+        raise PersonalError(failed, upstream_code=code if isinstance(code, int) else None)
 
     def redact(value: Any) -> Any:
         if isinstance(value, str):

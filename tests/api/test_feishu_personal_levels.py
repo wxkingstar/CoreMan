@@ -233,3 +233,96 @@ async def test_unrequested_historical_document_permission_is_blocked(db_session,
             db_session, app.state.cipher, scope, "GET", "/docx/v1/documents/doc1/raw_content"
         )
     service._http.assert_not_called()
+
+
+EVENTS = "/calendar/v4/calendars/cal1/events"
+
+
+@pytest.mark.parametrize(
+    "level,expected",
+    [("messages_readonly", "outside_selected_authorization"), ("all_except_send", None)],
+)
+async def test_writes_need_a_tier_that_allows_them(db_session, app, monkeypatch, level, expected):
+    bot, user, task = await setup(db_session, app)
+    scopes = ["calendar:calendar.event:create", "mail:user_mailbox.message:send"]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level=level,
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    http = AsyncMock(return_value={"code": 0, "data": {"event": {"event_id": "ev1"}}})
+    monkeypatch.setattr(service, "_http", http)
+    if expected:
+        with pytest.raises(service.PersonalError, match=expected):
+            await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+    else:
+        out = await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+        assert out == {"event": {"event_id": "ev1"}}
+    # Sending mail is a send even though the app granted it: the middle tier refuses it.
+    with pytest.raises(service.PersonalError, match="sending_not_authorized"):
+        await service.api_request(
+            db_session,
+            app.state.cipher,
+            scope,
+            "POST",
+            "/mail/v1/user_mailboxes/me/drafts/d1/send",
+        )
+    assert http.call_count == (0 if expected else 1)
+
+
+async def test_unregistered_paths_never_reach_feishu(db_session, app, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="all")
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    http = AsyncMock()
+    monkeypatch.setattr(service, "_http", http)
+    for method, path in [
+        ("GET", "/contact/v3/users"),
+        ("DELETE", "/drive/v1/files/f1"),
+        ("GET", "/calendar/v4/calendars/../events/instance_view"),
+    ]:
+        with pytest.raises(service.PersonalError, match="invalid_tool_or_arguments"):
+            await service.api_request(db_session, app.state.cipher, scope, method, path)
+    http.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "code,expected,upstream_code",
+    [
+        (99991672, "app_permission_missing", None),
+        (99991679, "user_permission_missing", None),
+        (190004, "feishu_request_failed", 190004),
+    ],
+)
+async def test_upstream_refusals_name_what_to_fix(
+    db_session, app, monkeypatch, code, expected, upstream_code
+):
+    bot, user, task = await setup(db_session, app)
+    scopes = ["calendar:calendar.event:create"]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level="all",
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    monkeypatch.setattr(
+        service, "_http", AsyncMock(return_value={"code": code, "msg": "user-secret leaked"})
+    )
+    with pytest.raises(service.PersonalError) as caught:
+        await service.api_request(db_session, app.state.cipher, scope, "POST", EVENTS)
+    assert caught.value.payload() == (
+        {"error": expected, "upstream_code": upstream_code}
+        if upstream_code
+        else {"error": expected}
+    )
+    row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
+    assert row.status == "connected"
