@@ -74,7 +74,7 @@ class Compose(Arguments):
     cc: Addresses = Field(default_factory=list)
     bcc: Addresses = Field(default_factory=list)
     subject: Annotated[str, StringConstraints(max_length=500, pattern=r"^[^\r\n]+$")]
-    body: Annotated[str, StringConstraints(min_length=1, max_length=50000)]
+    body: Annotated[str, StringConstraints(min_length=1, max_length=20000)]
     body_format: Literal["text", "html"] = "text"
 
     @model_validator(mode="after")

@@ -28,7 +28,7 @@ Range = Annotated[
 ]
 Cell = str | int | float | bool | None
 Rows = Annotated[
-    list[Annotated[list[Cell], Field(max_length=200)]], Field(min_length=1, max_length=5000)
+    list[Annotated[list[Cell], Field(max_length=100)]], Field(min_length=1, max_length=1000)
 ]
 FieldName = Annotated[str, StringConstraints(min_length=1, max_length=255)]
 FileType = Literal["docx", "doc", "sheet", "bitable", "file", "slides"]
@@ -57,7 +57,7 @@ class Block(Arguments):
     type: Literal[
         "text", "heading1", "heading2", "heading3", "bullet", "ordered", "code", "quote", "todo"
     ] = "text"
-    text: Annotated[str, StringConstraints(min_length=1, max_length=10000)]
+    text: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
 
 
 class AppendDocument(Arguments):

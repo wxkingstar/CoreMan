@@ -20,6 +20,8 @@ from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, User
 from coreman.core.feishu_personal import policy, service, tools
 
 router = APIRouter(tags=["feishu-personal"])
+# Mail bodies, sheet rows and document paragraphs arrive as tool arguments.
+MAX_BODY = 262_144
 
 
 @router.post("/api/runtime/feishu-personal/mcp")
@@ -61,7 +63,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     except (ValueError, service.PersonalError):
         raise ApiError(403, 403, "Private authorization changed") from None
     current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, 16384))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed

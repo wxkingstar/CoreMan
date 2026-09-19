@@ -24,7 +24,7 @@ Mention one in a group chat or message it directly, and it runs Claude Code or C
 ## What it does
 
 - **Shares the work in group chats**: "@Weekly Reporter summarize the requirements we discussed this week". Replies stream in with a collapsible thinking panel, and images, files and quoted messages work.
-- **Acts as a personal assistant**: after you send "连接飞书" (Connect Feishu) or "连接企业微信" (Connect WeCom) in a private chat and pick a scope (for WeCom, scan once on the console's "My WeCom" page first), it can read your own messages, meetings, documents, calendar and more to answer you. These tools are only used in your private chat with it.
+- **Acts as a personal assistant**: after you send "连接飞书" (Connect Feishu) or "连接企业微信" (Connect WeCom) in a private chat and pick a scope (for WeCom, scan once on the console's "My WeCom" page first), it can read and act on your own messages, calendar, mail, tasks, documents, approvals and more, for example checking your schedule, booking a meeting or sending mail (sending needs the top tier and your explicit request). These tools are only used in your private chat with it.
 - **Works on a schedule**: say "every weekday at 9, summarize my unread Feishu messages" in a private chat and confirm the card to create a scheduled task. Administrators can also schedule tasks that deliver results to group chats, private chats or email.
 - **Asks a human when unsure**: human escalation sends a question to a named colleague, and the AI continues once they reply.
 - **Keeps capabilities in one place**: sync skills from Git plugin marketplaces and install them on AI employees after approval. When the AI calls internal business systems, it does so with the identity of the person who asked.
