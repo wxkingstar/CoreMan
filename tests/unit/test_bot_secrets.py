@@ -15,7 +15,7 @@ CIPHER = Cipher(b"\x05" * 32)
 
 def test_roundtrip_and_empty() -> None:
     token = encrypt_json(CIPHER, {"bot_id": "b1", "secret": "s3cret-value"}, CREDENTIALS_AAD)
-    assert token.startswith("enc:v1:") and "s3cret" not in token
+    assert token.startswith("enc:v2:k1:") and "s3cret" not in token
     assert decrypt_json(CIPHER, token, CREDENTIALS_AAD) == {
         "bot_id": "b1",
         "secret": "s3cret-value",

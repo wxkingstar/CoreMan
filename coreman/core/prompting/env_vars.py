@@ -28,11 +28,11 @@ _ALIASES = {
 }
 
 # 请求级保留键：身份别名与业务系统配置只能由本轮已验证的发言者重建，机器人 env、
-# 技能预设都不得提供同名键。
+# 技能预设都不得提供同名键。COREMAN_USER_SUBJECT 没有兼容别名（是新增的键）。
 RESERVED_KEYS = frozenset(
     set(_ALIASES)
     | set(_ALIASES.values())
-    | {"COREMAN_PLATFORM", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
+    | {"COREMAN_PLATFORM", "COREMAN_USER_SUBJECT", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
 )
 # 平台按发言者签发的业务系统令牌前缀（见 core/auth/system_access.py）。静态配置里的
 # 同前缀键必然是上一轮或他人的令牌，一律丢弃。

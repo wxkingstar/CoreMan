@@ -10,11 +10,35 @@ from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from coreman.core.auth.external_key import ExternalKey, load_external_key
+from coreman.core.crypto import DEFAULT_KEY_ID, KID_RE, Cipher
 
 # 引导管理员直接拿到 platform_admin。.env.example 的占位值只由 `deploy/coreman up` 替换，
 # 直接 `docker compose up` 或自建编排时仍可能原样生效，这里在进程启动时拒绝。
 BOOTSTRAP_PASSWORD_MIN_LENGTH = 12
 TEMPLATE_PASSWORDS = frozenset({"change-me", "changeme"})
+
+
+def _parse_previous_keys(raw: str, *, current: str) -> dict[str, bytes]:
+    """`kid:base64,kid:base64` → `{kid: key}`；报错信息不带密钥内容。"""
+    keys: dict[str, bytes] = {}
+    for entry in (part.strip() for part in raw.split(",")):
+        if not entry:
+            continue
+        kid, sep, value = entry.partition(":")
+        if not sep or not KID_RE.match(kid):
+            raise ValueError("MASTER_KEYS_PREVIOUS 的每一项都必须是 kid:base64 密钥")
+        if kid == current:
+            raise ValueError(f"MASTER_KEYS_PREVIOUS 中的 {kid} 与 MASTER_KEY_ID 重复")
+        if kid in keys:
+            raise ValueError(f"MASTER_KEYS_PREVIOUS 中的 {kid} 重复")
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"MASTER_KEYS_PREVIOUS 中 {kid} 的密钥不是 base64") from exc
+        if len(decoded) != 32:
+            raise ValueError(f"MASTER_KEYS_PREVIOUS 中 {kid} 的密钥解码后必须是 32 字节")
+        keys[kid] = decoded
+    return keys
 
 
 class Settings(BaseSettings):
@@ -25,6 +49,10 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL")
     public_base_url: str = Field(alias="PUBLIC_BASE_URL")
     master_key: str = Field(alias="MASTER_KEY")
+    # 主密钥的标识，写进新密文（enc:v2:<kid>:...）。所有进程必须配同一个值。
+    master_key_id: str = Field(default=DEFAULT_KEY_ID, alias="MASTER_KEY_ID")
+    # 轮换期间保留的历史密钥，`kid:base64` 逗号分隔，只用于解密旧行。
+    master_keys_previous: str = Field(default="", alias="MASTER_KEYS_PREVIOUS")
     session_secret: str = Field(alias="SESSION_SECRET", min_length=16)
     bootstrap_admin_username: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_USERNAME")
     bootstrap_admin_password: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_PASSWORD")
@@ -50,6 +78,7 @@ class Settings(BaseSettings):
     bot_jwt_kid: str | None = Field(default=None, alias="BOT_JWT_KID")
     bot_jwt_issuer: str | None = Field(default=None, alias="BOT_JWT_ISSUER")
     _external_jwt_key: ExternalKey | None = PrivateAttr(default=None)
+    _previous_master_keys: dict[str, bytes] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
     def _load_external_jwt_key(self) -> Settings:
@@ -113,9 +142,36 @@ class Settings(BaseSettings):
             raise ValueError("MASTER_KEY 解码后必须是 32 字节")
         return v
 
+    @field_validator("master_key_id")
+    @classmethod
+    def _check_master_key_id(cls, v: str) -> str:
+        if not KID_RE.match(v):
+            raise ValueError("MASTER_KEY_ID 只能是 1-64 位字母、数字或 ._-")
+        return v
+
+    @model_validator(mode="after")
+    def _check_previous_master_keys(self) -> Settings:
+        # 进程启动时就解析：格式写错要立刻起不来，而不是等到读某一行旧密文时才失败。
+        self._previous_master_keys = _parse_previous_keys(
+            self.master_keys_previous, current=self.master_key_id
+        )
+        return self
+
     @property
     def master_key_bytes(self) -> bytes:
         return base64.b64decode(self.master_key)
+
+    @property
+    def previous_master_keys(self) -> dict[str, bytes]:
+        return dict(self._previous_master_keys)
+
+    def build_cipher(self) -> Cipher:
+        """所有进程都从这里造 Cipher，主密钥、标识与历史密钥不会各配各的。"""
+        return Cipher(
+            self.master_key_bytes,
+            key_id=self.master_key_id,
+            previous=self.previous_master_keys,
+        )
 
 
 @lru_cache(maxsize=1)

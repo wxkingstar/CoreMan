@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from coreman.core.config import Settings, get_settings, reset_settings_cache
+from coreman.core.crypto import Cipher
 
 VALID_KEY = base64.b64encode(b"\x01" * 32).decode()
 
@@ -162,3 +163,42 @@ def test_external_jwt_key_misconfiguration_fails_at_startup(
         Settings()
     # 报错不能带出私钥内容。
     assert "PRIVATE KEY" not in str(info.value)
+
+
+OLD_KEY = base64.b64encode(b"\x04" * 32).decode()
+
+
+def test_cipher_defaults_to_a_single_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
+    cipher = Settings().build_cipher()
+    assert cipher.key_id == "k1"
+    assert cipher.decrypt(cipher.encrypt("值", "bots.env_vars_enc"), "bots.env_vars_enc") == "值"
+
+
+def test_rotation_keeps_old_rows_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """轮换后的进程必须还能读旧密钥写的行，否则换钥匙就是一次停机重加密。"""
+    _env(monkeypatch, MASTER_KEY_ID="k1")
+    old = Cipher(base64.b64decode(OLD_KEY), key_id="k0")
+    row = old.encrypt("旧行", "bots.credentials_enc")
+
+    _env(monkeypatch, MASTER_KEY_ID="k2", MASTER_KEYS_PREVIOUS=f" k0:{OLD_KEY} ,")
+    rotated = Settings().build_cipher()
+    assert rotated.key_id == "k2"
+    assert rotated.decrypt(row, "bots.credentials_enc") == "旧行"
+    assert rotated.encrypt("新行", "bots.credentials_enc").startswith("enc:v2:k2:")
+
+
+def test_bad_rotation_config_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """配错了要在进程起不来时就知道，而不是读到某一行旧密文才炸。"""
+    _env(monkeypatch, MASTER_KEYS_PREVIOUS="k0")
+    with pytest.raises(ValueError, match="kid:base64"):
+        Settings()
+    _env(monkeypatch, MASTER_KEYS_PREVIOUS=f"k0:{base64.b64encode(b'short').decode()}")
+    with pytest.raises(ValueError, match="32 字节"):
+        Settings()
+    _env(monkeypatch, MASTER_KEY_ID="k1", MASTER_KEYS_PREVIOUS=f"k1:{OLD_KEY}")
+    with pytest.raises(ValueError, match="重复"):
+        Settings()
+    _env(monkeypatch, MASTER_KEY_ID="有冒号:的")
+    with pytest.raises(ValueError, match="MASTER_KEY_ID"):
+        Settings()

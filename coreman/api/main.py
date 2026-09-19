@@ -62,7 +62,6 @@ from coreman.api.routers import settings as settings_router
 from coreman.api.spa import mount_spa
 from coreman.core.bus.notify import RUNTIME_CHANNELS, Listener, asyncpg_dsn
 from coreman.core.config import Settings, get_settings
-from coreman.core.crypto import Cipher
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.logging import configure_logging, get_logger
 from coreman.core.runtime_nodes import transport as runtime_transport
@@ -79,7 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = make_engine(cfg.database_url)
         app.state.session_factory = make_session_factory(app.state.engine)
         app.state.settings_store = SettingsStore(app.state.session_factory)
-        app.state.cipher = Cipher(cfg.master_key_bytes)
+        app.state.cipher = cfg.build_cipher()
         background_tasks: set[asyncio.Task[Any]] = set()
         app.state.background_tasks = background_tasks
         # 反向通道：节点长轮询与响应帧的消费靠这条 LISTEN 连接唤醒，并共用本进程的连接池。

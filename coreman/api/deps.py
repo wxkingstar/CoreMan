@@ -51,14 +51,35 @@ def user_to_dict(user: User) -> dict[str, object]:
     }
 
 
+def via_bot_token(request: Request) -> bool:
+    """本次请求是否真的以 bot_token 认证。
+
+    以认证结果为准，而不是 cookie 在不在：过期的残留 bot_token 会回落到管理台会话认证，
+    那时若仍按 cookie 判定，这些接口会用更严的 bot_token 口径给数据——用户明明是正常
+    登录，却看不到本该属于自己的私密记录。
+    """
+    return bool(getattr(request.state, "bot_token_authenticated", False))
+
+
 async def current_user(
     request: Request, response: Response, session: AsyncSession = Depends(get_session)
 ) -> User:
+    unauthorized = ApiError(401, 401, "未登录或会话已过期")
     if request.cookies.get("bot_token"):
         from coreman.api.bot_auth import token_user
 
-        return await token_user(request, session)
-    unauthorized = ApiError(401, 401, "未登录或会话已过期")
+        try:
+            return await token_user(request, session)
+        except ApiError:
+            # bot_token 默认只活一小时，浏览器里很容易留下一枚过期的。认不下来时不能就此
+            # 401：还有管理台会话就继续按会话认人，并顺手把这枚死 cookie 清掉，否则用户
+            # 明明登录着却被一枚残留 cookie 关在门外，且自己没有办法删掉它。
+            response.delete_cookie("bot_token", path="/")
+            if not request.cookies.get(SESSION_COOKIE):
+                raise
+    # 走到这里就是管理台会话认证：即便请求里还躺着一枚认不下来的 bot_token，
+    # 也不能让下游按 bot_token 的口径判定（见 via_bot_token）。
+    request.state.bot_token_authenticated = False
     token = request.cookies.get(SESSION_COOKIE)
     session_id: uuid.UUID | None = (
         unsign_session_id(request.app.state.settings.session_secret, token) if token else None

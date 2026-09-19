@@ -21,7 +21,6 @@ from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import leases
 from coreman.core.bus.notify import Listener, asyncpg_dsn
 from coreman.core.config import get_settings
-from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot
 from coreman.core.db.session import make_session_factory
 from coreman.core.logging import configure_logging, get_logger
@@ -111,9 +110,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
             bot = await session.get(Bot, bot_id)
             if bot is None or not bot.enabled or bot.platform != "feishu":
                 return
-            credentials = decrypt_json(
-                Cipher(cfg.master_key_bytes), bot.credentials_enc, CREDENTIALS_AAD
-            )
+            credentials = decrypt_json(cfg.build_cipher(), bot.credentials_enc, CREDENTIALS_AAD)
             initial_credentials = bot.credentials_enc
             info = BotInfo(bot.id, bot.bot_key, bot.welcome_message)
         app_id, secret = credentials["app_id"], credentials["app_secret"]

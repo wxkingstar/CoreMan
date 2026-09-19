@@ -79,6 +79,9 @@ async def test_statistics_hides_feishu_private_from_bot_token(client, db_session
     assert data["total"]["messages"] == 2
 
     async def token_user(request, session):
+        # 与真实 token_user 一致地标记认证结果：via_bot_token 按它判定，不看 cookie。
+        request.state.bot_token_authenticated = True
+        request.state.admin_session = None
         return actor
 
     monkeypatch.setattr(bot_auth, "token_user", token_user)

@@ -28,7 +28,6 @@ from coreman import __version__
 from coreman.core.bus import instances
 from coreman.core.bus.notify import asyncpg_dsn
 from coreman.core.config import get_settings
-from coreman.core.crypto import Cipher
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.runtime_nodes import transport as runtime_transport
 from coreman.core.settings_store import SettingsStore
@@ -76,7 +75,7 @@ class SchedulerService(Service):
         self._factory = make_session_factory(self._engine)
         self._store = SettingsStore(self._factory)
         self._dsn = asyncpg_dsn(settings.database_url)
-        self._cipher = Cipher(settings.master_key_bytes)
+        self._cipher = settings.build_cipher()
         self._lock_conn: asyncpg.Connection | None = None
         self._bg: list[asyncio.Task[None]] = []
 
@@ -205,6 +204,7 @@ class SchedulerService(Service):
             try:
                 counts = await reaper.run_tick(self._factory, now, chat_logs_factory=self._factory)
                 from coreman.core.chat.bot_collaboration import tick as collaboration_tick
+
                 async with self._factory() as session:
                     counts["bot_collaborations"] = await collaboration_tick(session, now)
                     await session.commit()

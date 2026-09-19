@@ -214,6 +214,24 @@ class _Stream(httpx.AsyncByteStream):
         self._relay.aborted += 1
 
 
+def _leaked_credential_frames(body: dict[str, Any]) -> list[str]:
+    """模型把本轮注入的凭据原样打了出来——思考区、正文与终稿三处都有。
+
+    脚本化场景拿不到逐请求现签的令牌，所以从请求体的 env_vars 里取回来再回显。
+    """
+    token = (body.get("env_vars") or {}).get("BOT_TOKEN_ERP", "")
+    return [
+        ": ping\n\n",
+        _think(f"我打算用 {token} 调 ERP"),
+        _text(f"已调用 ERP，令牌是 {token}"),
+        _tool("Bash", "t1"),
+        _text(f"（完整命令：curl -H 'Cookie: bot_token={token}' https://erp.example）"),
+        FINISH,
+        _chunk(None, usage=USAGE),
+        DONE,
+    ]
+
+
 class FakeRelay:
     """一个假的 relay 实例：/health、/v1/models 与脚本化的流式对话。
 
@@ -265,8 +283,13 @@ class FakeRelay:
             raise httpx.ConnectError("refused", request=request)
         if self.scenario == "http_500":
             return httpx.Response(500, text="boom")
-        self.requests.append(json.loads(request.content or b"{}"))
-        frames = SCENARIOS[self.scenario]()
+        body = json.loads(request.content or b"{}")
+        self.requests.append(body)
+        frames = (
+            _leaked_credential_frames(body)
+            if self.scenario == "leaks_credentials"
+            else SCENARIOS[self.scenario]()
+        )
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, stream=_Stream(self, frames)
         )

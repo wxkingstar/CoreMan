@@ -24,7 +24,6 @@ from coreman.core.bus.notify import RUNTIME_CALL_CHANNEL, Listener, asyncpg_dsn
 from coreman.core.chat.chat_logs import ChatLogWriter
 from coreman.core.chat.openuserid import OpenUseridResolver
 from coreman.core.config import get_settings
-from coreman.core.crypto import Cipher
 from coreman.core.db.models import RelayServer, Task
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.i18n.messages import msg
@@ -85,7 +84,7 @@ class WorkerService(Service):
         self._engine = make_engine(settings.database_url)
         self._factory = make_session_factory(self._engine)
         self._store = SettingsStore(self._factory)
-        self._cipher = Cipher(settings.master_key_bytes)
+        self._cipher = settings.build_cipher()
         self._chat_logs = ChatLogWriter(self._factory)
         # 这两个可注入（测试用假客户端）；没给就在 _start 里建默认的，全进程共享一份缓存/连接池。
         self._openuserid = openuserid

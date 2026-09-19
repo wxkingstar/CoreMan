@@ -12,7 +12,6 @@ from sqlalchemy import select
 from coreman.api.errors import ApiError
 from coreman.core.config import get_settings
 from coreman.core.contacts import runner
-from coreman.core.crypto import Cipher
 from coreman.core.db.models import PlatformApp
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.logging import configure_logging
@@ -53,7 +52,7 @@ async def _contact_sync(app_name: str | None) -> int:
             return 1
         try:
             run = await runner.start_run(factory, apps[0].id, None)
-            done = await runner.execute_run(factory, Cipher(settings.master_key_bytes), run.id)
+            done = await runner.execute_run(factory, settings.build_cipher(), run.id)
         except ApiError as exc:
             print(exc.message, file=sys.stderr)
             return 1

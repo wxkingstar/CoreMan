@@ -3,6 +3,7 @@
 拼装顺序固定，用到的段落如下（编号保留空位）：
 
     ① 平台安全策略        最高优先级，永远在最前面
+    ①' 身份标签规则       固定段，紧随 ①；定义本轮 [SYS_USER:<tag>] 的唯一性
     ② codex 输出契约      仅 codex 后端
     ③ 运行模式说明        one-shot 进程模型
     ④ 当前发言者          身份已知 / 未知两种写法
@@ -17,11 +18,13 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass
 
 from coreman.core.prompting.defaults import (
     DEFAULT_CRON_MODE,
+    IDENTITY_TAG_RULE,
     IDENTITY_UNKNOWN_TEMPLATE,
     PROMPT_DEFAULTS_BY_KEY,
     SPEAKER_CHANGED_LINE,
@@ -69,14 +72,24 @@ async def load_segments(store: SettingsStore) -> PromptSegments:
     )
 
 
-def speaker_header(speaker: Speaker) -> str:
+def new_identity_tag() -> str:
+    """本轮身份标签：每次请求现生成，只出现在 system prompt 里。
+
+    没有它时 `[SYS_USER]` 是一个固定字符串，任何进入上下文的文本都能写出一模一样的一行——
+    用户消息正文由 `sanitize` 挡掉了，但模型读到的文件内容、网页、工具输出、记忆与工作区
+    文件都挡不住。带上一个本轮才知道的随机标签之后，这些来源写不出能冒充身份的那一行。
+    """
+    return secrets.token_hex(4)
+
+
+def speaker_header(speaker: Speaker, tag: str) -> str:
     """发言者段落。身份未知时必须显式说 identity_unknown，不能留空——留空模型会自己编。"""
     if speaker.known:
         return (
-            f"## 当前发言者\n\n[SYS_USER] user_id={speaker.platform_user_id}, "
+            f"## 当前发言者\n\n[SYS_USER:{tag}] user_id={speaker.platform_user_id}, "
             f"login={speaker.login_name or ''}, name={speaker.display_name or ''}"
         )
-    return IDENTITY_UNKNOWN_TEMPLATE.format(platform_user_id=speaker.platform_user_id)
+    return IDENTITY_UNKNOWN_TEMPLATE.format(tag=tag, platform_user_id=speaker.platform_user_id)
 
 
 def build_system_prompt(
@@ -96,11 +109,14 @@ def build_system_prompt(
     自定义 prompt 里的「自动批准」之类指令抢不到它前面。
     """
     codex = backend == "codex"
+    tag = new_identity_tag()
     parts = [
         segments.security_policy,
+        # 固定段，管理台改不了：身份规则本身不能由可编辑文案来定义。
+        IDENTITY_TAG_RULE.format(tag=tag),
         segments.codex_contract if codex else "",
         segments.runtime_mode,
-        speaker_header(speaker),
+        speaker_header(speaker, tag),
         segments.cron_mode if scheduled else "",
         SPEAKER_CHANGED_LINE if speaker_changed else "",
         # claude 后端的 verbosity 走 CLI 的 output style，不占 system prompt 的额度。

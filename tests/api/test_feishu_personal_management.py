@@ -68,6 +68,7 @@ async def test_bot_token_cannot_list_or_revoke_its_owners_grant(
     await login_existing(client, db_session, owner)
 
     async def token_user(request, session):
+        request.state.bot_token_authenticated = True
         request.state.admin_session = None
         return owner
 

@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.main import create_app
+from coreman.core.auth.system_access import token_subject
 from coreman.core.auth.tokens import active_key, issue_token
 from coreman.core.config import Settings
 from coreman.core.crypto import Cipher
@@ -133,11 +134,13 @@ async def test_bot_token_role_csrf_and_disabled_user(
     user = await login_as(client, db_session, role="platform_admin")
     cipher = Cipher(base64.b64decode(MASTER_KEY))
     key = await active_key(db_session, cipher)
+    # sub 是邮箱前缀，不是 login_name：管理 API 按同一口径反查（见 api/bot_auth）。
+    subject = await token_subject(db_session, user)
     token = issue_token(
         key,
         cipher,
         issuer="coreman",
-        login=user.login_name or "",
+        login=subject,
         name=user.display_name,
         audience="coreman",
         ttl=3600,
@@ -146,7 +149,7 @@ async def test_bot_token_role_csrf_and_disabled_user(
         key,
         cipher,
         issuer="coreman",
-        login=user.login_name or "",
+        login=subject,
         name=user.display_name,
         audience="erp",
         ttl=3600,
@@ -159,17 +162,19 @@ async def test_bot_token_role_csrf_and_disabled_user(
     assert (
         await client.post("/api/admin/systems", json={"key": "example", "name": "Example"})
     ).status_code == 201
+    # 认不下来的令牌不再豁免 CSRF，而是回落到标准校验：这里既没会话也没 CSRF 头，
+    # 于是先被 CSRF 挡下（403）。写操作照样进不来，只是拒绝的理由换了一个。
     client.cookies.set("bot_token", wrong_scope)
     assert (
         await client.post("/api/admin/systems", json={"key": "evil", "name": "Evil"})
-    ).status_code == 401
+    ).status_code == 403
     client.cookies.set("bot_token", token)
     user.status = "disabled"
     await db_session.commit()
     assert (await client.get("/api/admin/auth/me")).status_code == 401
     assert (
         await client.post("/api/admin/systems", json={"key": "evil", "name": "Evil"})
-    ).status_code == 401
+    ).status_code == 403
     # JWKS 不需要登录，且只含公钥。
     r = await client.get("/api/.well-known/jwks.json")
     assert r.status_code == 200 and "d" not in r.json()["keys"][0]

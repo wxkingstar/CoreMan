@@ -2,12 +2,18 @@ import asyncio
 import threading
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
 from coreman.core.cron import precheck
 from coreman.core.cron.precheck import PrecheckError, run_precheck, run_precheck_in_thread
 from coreman.core.cron.schedule import next_run
+
+
+def _ctx():
+    """收流只需要出站闸门；这里不注入凭据，所以 redact 是恒等的。"""
+    return SimpleNamespace(redact=lambda text: text)
 
 
 def dt(value: str) -> datetime:
@@ -106,7 +112,7 @@ async def test_partial_cron_reply_is_not_success(finish):
             yield FinishEvent(finish)
 
     with pytest.raises(ValueError, match="incomplete_result"):
-        await CronRunHandler()._consume(stream())
+        await CronRunHandler()._consume(_ctx(), stream())
 
 
 def test_precheck_rebinding_large_value_is_not_quadratic() -> None:
@@ -204,7 +210,7 @@ async def test_oversized_cron_reply_is_truncated_not_failed(monkeypatch) -> None
         yield UsageEvent(5, 7, 0, 0)
         yield FinishEvent("stop")
 
-    reply, usage, _tools, truncated = await CronRunHandler()._consume(stream())
+    reply, usage, _tools, truncated = await CronRunHandler()._consume(_ctx(), stream())
     # 超限之后照样把流收完：终态与用量都在后面。
     assert reply == "123456789a" and truncated and usage is not None and usage.output_tokens == 7
 
@@ -212,7 +218,7 @@ async def test_oversized_cron_reply_is_truncated_not_failed(monkeypatch) -> None
         yield TextDelta("ok")
         yield FinishEvent("stop")
 
-    assert (await CronRunHandler()._consume(short()))[::3] == ("ok", False)
+    assert (await CronRunHandler()._consume(_ctx(), short()))[::3] == ("ok", False)
 
 
 def test_bounded_delivery_chunks_cap_parts_and_append_notice() -> None:
@@ -238,7 +244,7 @@ async def test_cron_stream_classification_keeps_relay_reason() -> None:
         yield RelayErrorEvent("\n\n[codex error] boom")
 
     with pytest.raises(CronStreamError) as caught:
-        await CronRunHandler()._consume(relay_error())
+        await CronRunHandler()._consume(_ctx(), relay_error())
     assert caught.value.code == "x_relay_error"
     assert caught.value.detail == "[codex error] boom" and caught.value.partial == "部分"
 
@@ -248,11 +254,11 @@ async def test_cron_stream_classification_keeps_relay_reason() -> None:
         raise IncompleteResultError("incomplete_result: SSE 未返回确认终态")
 
     with pytest.raises(CronStreamError, match="empty_stream"):
-        await CronRunHandler()._consume(zero_events())
+        await CronRunHandler()._consume(_ctx(), zero_events())
 
     async def transport():
         yield TextDelta("x")
         raise RelayError("连接失败: ConnectError")
 
     with pytest.raises(RelayError, match="连接失败"):
-        await CronRunHandler()._consume(transport())
+        await CronRunHandler()._consume(_ctx(), transport())

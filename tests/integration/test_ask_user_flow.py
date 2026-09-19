@@ -65,7 +65,9 @@ async def test_question_round_creates_state_card_and_log(
     ctx = st.state["context"]
     assert ctx["stream_id"] == s.stream_id and ctx["relay_server_id"] == str(relay_row.id)
     assert ctx["chat_id"] == "zs" and ctx["chat_type"] == "single"
-    assert ctx["system_prompt"] and "env" not in ctx and "credentials" not in ctx
+    # 快照里不留提示词：提交轮按本轮重建身份与授权，存下来的那份只会带着首轮的
+    # 身份标签在库里躺着。凭据同样一个都不能有。
+    assert not {"system_prompt", "env", "credentials"} & set(ctx)
     row = await tasks.get(db_session, t.id)
     assert row and row.status == "succeeded"
     log = (await db_session.execute(select(ChatLog))).scalar_one()

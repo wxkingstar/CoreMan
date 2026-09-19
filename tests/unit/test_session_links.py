@@ -48,10 +48,8 @@ def test_rejects_tampering_other_keys_and_other_purposes():
     tampered = base64.urlsafe_b64encode(bytes(raw)).decode().rstrip("=")
     other_key = Cipher(b"\x08" * 32)
     # 同一把主密钥加密的其它凭据（AAD 不同）也不能冒充查看链接。
-    foreign = CIPHER.encrypt('{"s":"x"}', "feishu_personal.task_capability.v1")
-    foreign_token = base64.urlsafe_b64encode(
-        base64.b64decode(foreign.removeprefix("enc:v1:"))
-    ).decode()
+    foreign = CIPHER.seal('{"s":"x"}', "feishu_personal.task_capability.v1")
+    foreign_token = base64.urlsafe_b64encode(foreign).decode()
     for bad in (tampered, "", "x" * 2000, "!!!", foreign_token):
         assert session_links.read(CIPHER, bad) is None
     assert session_links.read(other_key, token) is None

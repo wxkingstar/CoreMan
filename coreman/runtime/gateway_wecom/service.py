@@ -29,7 +29,6 @@ from coreman import __version__
 from coreman.core.bus import instances, outbox, streams
 from coreman.core.bus.notify import Listener, asyncpg_dsn
 from coreman.core.config import get_settings
-from coreman.core.crypto import Cipher
 from coreman.core.db.models import BotLease
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.runtime.base import HEALTH_PORTS, Service
@@ -94,7 +93,7 @@ class GatewayWecomService(Service):
         settings = get_settings()
         self._engine = make_engine(settings.database_url)
         self.factory: async_sessionmaker[AsyncSession] = make_session_factory(self._engine)
-        self._cipher = Cipher(settings.master_key_bytes)
+        self._cipher = settings.build_cipher()
         self._listener = Listener(asyncpg_dsn(settings.database_url), CHANNELS)
         self.lease_loop = LeaseCoordinator(
             platform=PLATFORM,

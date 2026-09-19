@@ -31,7 +31,8 @@ async def seed_bot(
     effort: str | None = None,
 ) -> tuple[Bot, RelayServer, Cipher]:
     cipher = Cipher(MASTER)
-    creator = User(login_name="creator", display_name="创建者")
+    # 有邮箱才拿得到业务系统令牌（sub 只取邮箱前缀，见 auth/system_access）。
+    creator = User(login_name="creator", display_name="创建者", email="creator@example.test")
     session.add(creator)
     await session.flush()
     # 运行时实例一律挂在节点上（relay.runtime_node_id 恒有值），测试夹具与生产保持一致。

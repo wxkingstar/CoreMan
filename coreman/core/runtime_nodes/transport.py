@@ -282,7 +282,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
     @property
     def cipher(self) -> Cipher:
         if self._cipher is None:
-            self._cipher = Cipher(get_settings().master_key_bytes)
+            self._cipher = get_settings().build_cipher()
         return self._cipher
 
     async def aclose(self) -> None:

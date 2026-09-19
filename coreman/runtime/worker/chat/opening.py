@@ -18,6 +18,7 @@ from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
 from coreman.core.chat import sessions
 from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.redaction import collect_secrets
 from coreman.core.db.models import (
     Bot,
     RelayServer,
@@ -199,6 +200,8 @@ class OpenStage(ChatStageBase):
             session, ctx, intake, info.relay_session_id, system_prompt, env
         )
         ctx.private_turn = wecom_personal.mounted(env)
+        # env 到这里才齐（业务系统 + 协作 + 两套个人工具），出站闸门必须按最终的这一份建。
+        ctx.secrets = collect_secrets(env)
         session_url = await session_link(session, ctx, intake, relay, info.relay_session_id)
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
