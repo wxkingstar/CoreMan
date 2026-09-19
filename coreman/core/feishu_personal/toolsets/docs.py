@@ -1,11 +1,12 @@
-"""云文档：搜索、云空间、文档、评论、电子表格、多维表格、知识库。"""
+"""云文档：搜索、云空间、文档读写与共享、评论、电子表格、多维表格、知识库。"""
 
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, JsonValue, StringConstraints
+from pydantic import Field, JsonValue, StringConstraints, model_validator
 
+from coreman.core.feishu_personal import service
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
     Call,
@@ -45,7 +46,58 @@ class DriveFiles(Page):
 
 
 class ReadDocument(TextPage):
-    document_id: Identifier
+    document_id: Identifier = Field(description="docx token, or a wiki node token for markdown")
+    format: Literal["markdown", "text"] = Field(
+        default="markdown", description="text is plain text of a docx only"
+    )
+    with_block_ids: bool = Field(
+        default=False, description="Markdown with block IDs, for block edits"
+    )
+
+
+Markdown = Annotated[str, StringConstraints(max_length=50000)]
+
+
+class EditDocument(Arguments):
+    document_id: Identifier = Field(description="docx token or wiki node token")
+    command: Literal[
+        "str_replace", "block_replace", "block_delete", "block_insert_after", "overwrite"
+    ] = Field(
+        description=(
+            "str_replace: replace pattern with content; block_*: act on block_id (insert_after"
+            " takes -1 for the end, 0 for the start); overwrite: replace the whole document"
+        )
+    )
+    content: Markdown = Field(default="", description="Markdown")
+    pattern: Annotated[str, StringConstraints(min_length=1, max_length=2000)] | None = Field(
+        default=None, description="Exact text to find, for str_replace"
+    )
+    block_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def complete(self) -> EditDocument:
+        if self.command == "str_replace" and not self.pattern:
+            raise ValueError("str_replace needs pattern")
+        if self.command.startswith("block_") and not self.block_id:
+            raise ValueError(f"{self.command} needs block_id")
+        if self.command in ("block_replace", "block_insert_after", "overwrite") and not (
+            self.content
+        ):
+            raise ValueError(f"{self.command} needs content")
+        return self
+
+
+class ShareDocument(Arguments):
+    token: Identifier = Field(description="Document, sheet, base, folder or wiki node token")
+    doc_type: Literal["docx", "doc", "sheet", "bitable", "file", "folder", "wiki", "mindnote"]
+    member_open_ids: Annotated[list[Identifier], Field(min_length=1, max_length=20)]
+    permission: Literal["view", "edit", "full_access"] = "view"
+    notify: bool = True
+
+
+class CreateFolder(Arguments):
+    name: Title
+    folder_token: Identifier | None = Field(default=None, description="Omit for My Space root")
 
 
 class CreateDocument(Arguments):
@@ -185,6 +237,12 @@ _BLOCKS = {
 }
 
 
+# Same as the official CLI's document fetch.
+_FETCH_EXTRA = (
+    '{"enable_user_cite_reference_map":true,"include_comments":true,"return_html5_block_data":true}'
+)
+
+
 def _items(data: dict[str, Any], key: str) -> dict[str, Any]:
     # Rename the list so the shared paging trims it like every other page.
     rest = {name: value for name, value in data.items() if name != key}
@@ -236,15 +294,97 @@ async def drive_files(args: DriveFiles, call: Call) -> dict[str, Any]:
     "feishu_read_document",
     ReadDocument,
     "docx.raw",
-    "Read an accessible docx document's text by ID.",
+    "Read a document as Markdown (docx or wiki page), or as plain text.",
 )
 async def read_document(args: ReadDocument, call: Call) -> dict[str, Any]:
-    data = await call("docx.raw", path={"document_id": args.document_id})
+    if args.format == "text":
+        data = await call("docx.raw", path={"document_id": args.document_id})
+    else:
+        fetched = await call(
+            "docs.fetch",
+            path={"document_id": args.document_id},
+            json={
+                "format": "markdown",
+                "extra_param": _FETCH_EXTRA,
+                "export_option": {
+                    "export_block_id": args.with_block_ids,
+                    "export_style_attrs": False,
+                    "export_cite_extra_data": False,
+                },
+            },
+        )
+        document = fetched.get("document")
+        rest = {key: value for key, value in fetched.items() if key != "document"}
+        data = {**rest, **(document if isinstance(document, dict) else {})}
     content = data.get("content")
     if isinstance(content, str):
         text, paging = text_page(content, args)
         data = {**data, "content": text, **paging}
     return data
+
+
+@tool(
+    "feishu_edit_document",
+    EditDocument,
+    "docs.update",
+    "Change existing document content with Markdown: replace text or blocks, delete or insert"
+    " blocks, or overwrite. Read it first (with_block_ids for block edits).",
+)
+async def edit_document(args: EditDocument, call: Call) -> dict[str, Any]:
+    body = compact(
+        {
+            "format": "markdown",
+            "command": args.command,
+            "revision_id": -1,
+            "content": args.content or None,
+            "pattern": args.pattern,
+            "block_id": args.block_id,
+        }
+    )
+    return await call("docs.update", path={"document_id": args.document_id}, json=body)
+
+
+@tool(
+    "feishu_share_document",
+    ShareDocument,
+    "drive.share",
+    "Give colleagues (open_id) view or edit access to a document, sheet, base or folder.",
+)
+async def share_document(args: ShareDocument, call: Call) -> dict[str, Any]:
+    params = {"type": args.doc_type, "need_notification": "true" if args.notify else "false"}
+    shared: list[str] = []
+    failed: list[dict[str, Any]] = []
+    for open_id in args.member_open_ids:
+        try:
+            await call(
+                "drive.share",
+                path={"token": args.token},
+                params=params,
+                json={
+                    "member_type": "openid",
+                    "member_id": open_id,
+                    "perm": args.permission,
+                    "type": "user",
+                },
+            )
+            shared.append(open_id)
+        except service.PersonalError as exc:
+            if not shared and not failed and exc.code != "feishu_request_failed":
+                raise  # Permission or authorization problems apply to everyone: say so once.
+            failed.append({"open_id": open_id, **exc.payload()})
+    return {"shared": shared, "failed": failed, "permission": args.permission}
+
+
+@tool(
+    "feishu_create_folder",
+    CreateFolder,
+    "drive.folder",
+    "Create a folder in My Space, at the root unless a parent folder is given.",
+)
+async def create_folder(args: CreateFolder, call: Call) -> dict[str, Any]:
+    return await call(
+        "drive.folder", json={"name": args.name, "folder_token": args.folder_token or ""}
+    )
 
 
 @tool(
@@ -471,9 +611,12 @@ async def wiki_create(args: CreateWikiNode, call: Call) -> dict[str, Any]:
 TOOLS = [
     search_docs,
     drive_files,
+    create_folder,
     read_document,
     create_document,
     append_document,
+    edit_document,
+    share_document,
     document_comments,
     add_document_comment,
     sheet_info,

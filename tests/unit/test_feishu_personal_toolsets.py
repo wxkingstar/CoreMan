@@ -122,6 +122,34 @@ SAMPLES = {
     "feishu_okr_objectives": {"cycle_id": "c1"},
     "feishu_okr_key_results": {"objective_id": "o1"},
     "feishu_attendance": {"start_date": "2026-09-01", "end_date": "2026-09-19"},
+    "feishu_meeting_rooms": {"keyword": "5F"},
+    "feishu_task_add_subtask": {
+        "parent_task_guid": "t-1",
+        "summary": "Draft",
+        "client_token": UUID,
+    },
+    "feishu_edit_document": {
+        "document_id": "doc1",
+        "command": "str_replace",
+        "pattern": "old",
+        "content": "new",
+    },
+    "feishu_share_document": {"token": "doc1", "doc_type": "docx", "member_open_ids": ["ou_1"]},
+    "feishu_create_folder": {"name": "Reports"},
+    "feishu_approval_transfer": {
+        "instance_code": "ins1",
+        "task_id": "task1",
+        "transfer_open_id": "ou_2",
+    },
+    "feishu_approval_templates": {"keyword": "请假"},
+    "feishu_approval_template": {"approval_code": "LEAVE-1"},
+    "feishu_approval_submit": {
+        "approval_code": "LEAVE-1",
+        "form": [{"id": "widget1", "type": "input", "value": "年假"}],
+        "uuid": UUID,
+    },
+    "feishu_approval_recall": {"instance_code": "ins1"},
+    "feishu_approval_remind": {"instance_code": "ins1", "task_ids": ["task1"]},
 }
 SENDING = {
     "feishu_send_message",
@@ -504,3 +532,256 @@ def test_broad_permissions_are_requested_when_they_are_all_the_app_has():
         "all_except_send", {"calendar:calendar", "wiki:wiki", "offline_access"}
     )
     assert requested == ["calendar:calendar", "offline_access", "wiki:wiki"]
+
+
+ORIGINAL = {
+    "message_id": "TWFpbA==",
+    "subject": "Re: 季度预算",
+    "head_from": {"mail_address": "boss@example.com", "name": "老板"},
+    "to": [{"mail_address": "me@example.com"}, {"mail_address": "peer@example.com"}],
+    "cc": [{"mail_address": "fin@example.com"}],
+    "smtp_message_id": "<abc@example.com>",
+    "references": ["<root@example.com>"],
+    "internal_date": "1790000000000",
+    "body_plain_text": _body("请看附件\nSubject: evil\r\nBcc: x@evil.com"),
+    "attachments": [{"id": "a1"}],
+}
+
+
+def _with_original(method, path):
+    if "/messages/" in path and method == "GET":
+        return {"message": ORIGINAL}
+    return _upstream(method, path)
+
+
+def _eml(mock):
+    raw = next(kw["json"]["raw"] for _, path, kw in calls(mock) if path.endswith("/drafts"))
+    return email.message_from_bytes(base64.urlsafe_b64decode(raw), policy=policy.default)
+
+
+async def test_reply_all_threads_quotes_and_addresses_from_the_original(upstream):
+    async def respond(session, cipher, scope, method, path, **kwargs):
+        return _with_original(method, path)
+
+    upstream.side_effect = respond
+    out = await invoke(
+        "feishu_mail_send",
+        {"reply_to_message_id": "TWFpbA==", "reply_all": True, "body": "收到", "uuid": "r1"},
+    )
+    message = _eml(upstream)
+    assert message["To"] == "boss@example.com"
+    # Everyone else on the thread, never the user themself.
+    assert message["Cc"] == "peer@example.com, fin@example.com"
+    assert message["Subject"] == "回复：季度预算"
+    assert message["In-Reply-To"] == "<abc@example.com>"
+    assert message["References"] == "<root@example.com> <abc@example.com>"
+    assert message["X-LMS-Reply-To-Message-Id"] == "TWFpbA=="
+    assert message["Bcc"] is None
+    text = message.get_content()
+    assert text.startswith("收到") and "老板 <boss@example.com> 写道" in text
+    assert "> 请看附件" in text
+    assert out["sent"] is True and out["to"] == ["boss@example.com"]
+
+
+async def test_forward_quotes_the_original_and_says_attachments_stay_behind(upstream):
+    async def respond(session, cipher, scope, method, path, **kwargs):
+        return _with_original(method, path)
+
+    upstream.side_effect = respond
+    out = await invoke(
+        "feishu_mail_create_draft",
+        {"forward_message_id": "TWFpbA==", "to": ["new@example.com"], "body": "供参考"},
+    )
+    message = _eml(upstream)
+    assert message["Subject"] == "转发：季度预算" and message["In-Reply-To"] is None
+    assert "---------- 转发的邮件 ----------" in message.get_content()
+    assert out == {**out, "sent": False, "attachments_not_forwarded": 1}
+    assert not [p for _, p, _ in calls(upstream) if p.endswith("/send")]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"reply_to_message_id": "m1", "forward_message_id": "m2", "body": "x", "uuid": "a"},
+        {"reply_all": True, "to": ["a@example.com"], "subject": "s", "body": "x", "uuid": "a"},
+        {"to": ["a@example.com"], "body": "x", "uuid": "a"},
+        {"forward_message_id": "m2", "body": "x", "uuid": "a"},
+    ],
+)
+async def test_inconsistent_mail_arguments_are_rejected(upstream, args):
+    assert (await invoke("feishu_mail_send", args))["error"] == "invalid_tool_or_arguments"
+    upstream.assert_not_called()
+
+
+async def test_all_day_recurring_event_with_reminders_and_rooms(upstream):
+    await invoke(
+        "feishu_calendar_create_event",
+        {
+            "summary": "周会",
+            "start_time": "2026-09-21",
+            "end_time": "2026-09-21",
+            "recurrence": "FREQ=WEEKLY;BYDAY=MO",
+            "reminder_minutes": [15],
+            "room_ids": ["omm_1"],
+            "idempotency_key": UUID,
+        },
+    )
+    (_, _, _), (_, _, create), (_, rooms_path, rooms) = calls(upstream)
+    body = create["json"]
+    # Feishu all-day events end on the next day; the user gave the last day.
+    assert body["start_time"] == {"date": "2026-09-21"}
+    assert body["end_time"] == {"date": "2026-09-22"}
+    assert body["recurrence"] == "FREQ=WEEKLY;BYDAY=MO"
+    assert body["reminders"] == [{"minutes": 15}]
+    assert rooms_path.endswith("/attendees")
+    assert rooms["json"]["attendees"] == [{"type": "resource", "room_id": "omm_1"}]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"start_time": "2026-09-21", "end_time": "2026-09-21T10:00:00+08:00"},
+        {"start_time": "2026-09-22", "end_time": "2026-09-21"},
+        {"recurrence": "RRULE:FREQ=DAILY"},
+    ],
+)
+async def test_bad_event_times_or_rules_are_rejected(upstream, args):
+    base = {
+        "summary": "x",
+        "start_time": "2026-09-21T09:00:00+08:00",
+        "end_time": "2026-09-21T10:00:00+08:00",
+        "idempotency_key": UUID,
+    }
+    out = await invoke("feishu_calendar_create_event", {**base, **args})
+    assert out["error"] == "invalid_tool_or_arguments"
+    upstream.assert_not_called()
+
+
+async def test_room_search_and_room_busy_times(upstream):
+    await invoke("feishu_meeting_rooms", {"keyword": "5F", "limit": 5})
+    await invoke(
+        "feishu_calendar_freebusy",
+        {**SAMPLES["feishu_calendar_freebusy"], "room_id": "omm_1"},
+    )
+    (_, rooms, search), (_, _, busy) = calls(upstream)
+    assert rooms == "/vc/v1/rooms/search"
+    assert search["json"] == {"keyword": "5F", "page_size": 5, "search_level_name": True}
+    assert busy["json"]["room_id"] == "omm_1" and "user_id" not in busy["json"]
+
+
+async def test_markdown_messages_are_sent_as_rich_text(upstream):
+    await invoke("feishu_send_message", {**SAMPLES["feishu_send_message"], "format": "markdown"})
+    body = calls(upstream)[0][2]["json"]
+    assert body["msg_type"] == "post"
+    assert '"tag": "md"' in body["content"]
+
+
+async def test_subtask_with_due_reminder(upstream):
+    await invoke(
+        "feishu_task_add_subtask",
+        {
+            **SAMPLES["feishu_task_add_subtask"],
+            "due": "2026-09-30T18:00:00+08:00",
+            "remind_minutes_before": 30,
+        },
+    )
+    _, path, kw = calls(upstream)[0]
+    assert path == "/task/v2/tasks/t-1/subtasks"
+    assert kw["json"]["reminders"] == [{"relative_fire_minute": 30}]
+    missing_due = {**SAMPLES["feishu_task_add_subtask"], "remind_minutes_before": 30}
+    assert (await invoke("feishu_task_add_subtask", missing_due))["error"]
+
+
+async def test_documents_are_read_as_markdown_and_edited_by_command(upstream):
+    async def respond(session, cipher, scope, method, path, **kwargs):
+        if path.endswith("/fetch"):
+            return {"document": {"document_id": "doc1", "content": "# 标题\n正文"}}
+        return _upstream(method, path)
+
+    upstream.side_effect = respond
+    out = await invoke("feishu_read_document", {"document_id": "wikcn1", "with_block_ids": True})
+    _, path, kw = calls(upstream)[0]
+    assert path == "/docs_ai/v1/documents/wikcn1/fetch"
+    assert kw["json"]["export_option"]["export_block_id"] is True
+    assert out["content"] == "# 标题\n正文" and out["document_id"] == "doc1"
+    upstream.reset_mock()
+    await invoke("feishu_read_document", {"document_id": "doc1", "format": "text"})
+    assert calls(upstream)[0][1] == "/docx/v1/documents/doc1/raw_content"
+    upstream.reset_mock()
+    await invoke(
+        "feishu_edit_document",
+        {
+            "document_id": "doc1",
+            "command": "block_insert_after",
+            "block_id": "-1",
+            "content": "- a",
+        },
+    )
+    method, path, kw = calls(upstream)[0]
+    assert (method, path) == ("PUT", "/docs_ai/v1/documents/doc1")
+    assert kw["json"] == {
+        "format": "markdown",
+        "command": "block_insert_after",
+        "revision_id": -1,
+        "content": "- a",
+        "block_id": "-1",
+    }
+    for bad in (
+        {"command": "str_replace", "content": "x"},
+        {"command": "block_delete"},
+        {"command": "overwrite"},
+    ):
+        out = await invoke("feishu_edit_document", {"document_id": "doc1", **bad})
+        assert out["error"] == "invalid_tool_or_arguments"
+
+
+async def test_sharing_reports_each_colleague(upstream):
+    async def one_fails(session, cipher, scope, method, path, **kwargs):
+        if kwargs["json"]["member_id"] == "ou_2":
+            raise service.PersonalError("feishu_request_failed", upstream_code=1063001)
+        return {}
+
+    upstream.side_effect = one_fails
+    out = await invoke(
+        "feishu_share_document",
+        {
+            **SAMPLES["feishu_share_document"],
+            "member_open_ids": ["ou_1", "ou_2"],
+            "permission": "edit",
+        },
+    )
+    assert out["shared"] == ["ou_1"]
+    assert out["failed"] == [
+        {"open_id": "ou_2", "error": "feishu_request_failed", "upstream_code": 1063001}
+    ]
+    first = calls(upstream)[0][2]
+    assert first["params"] == {"type": "docx", "need_notification": "true"}
+    assert first["json"] == {
+        "member_type": "openid",
+        "member_id": "ou_1",
+        "perm": "edit",
+        "type": "user",
+    }
+
+
+async def test_approval_form_is_sent_as_the_json_string_feishu_expects(upstream):
+    await invoke(
+        "feishu_approval_submit",
+        {
+            **SAMPLES["feishu_approval_submit"],
+            "approvers": [{"key": "manager_node", "open_ids": ["ou_3"]}],
+        },
+    )
+    body = calls(upstream)[0][2]["json"]
+    assert body["form"] == '[{"id": "widget1", "type": "input", "value": "年假"}]'
+    assert body["node_approver_list"] == [{"key": "manager_node", "value": ["ou_3"]}]
+    assert "node_cc_list" not in body and body["uuid"] == UUID
+
+
+def test_new_daily_tools_follow_the_tiers():
+    everything = endpoints.manifest_scopes()
+    middle = _names("all_except_send", everything)
+    assert {"feishu_approval_submit", "feishu_edit_document", "feishu_meeting_rooms"} <= middle
+    # Granting colleagues access notifies them, like sending.
+    assert "feishu_share_document" not in middle
+    assert "feishu_share_document" in _names("all", everything)

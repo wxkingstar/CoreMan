@@ -52,16 +52,24 @@ class ChatHistory(TimedPage):
     chat_id: Identifier
 
 
+Format = Annotated[
+    Literal["text", "markdown"],
+    Field(description="markdown for headings, lists, bold and links"),
+]
+
+
 class SendMessage(Arguments):
     receive_id: Identifier
     receive_id_type: Literal["open_id", "user_id", "chat_id"]
     text: Text
+    format: Format = "text"
     uuid: Uuid
 
 
 class ReplyMessage(Arguments):
     message_id: Identifier
     text: Text
+    format: Format = "text"
     reply_in_thread: bool = False
     uuid: Uuid
 
@@ -103,8 +111,11 @@ class AddChatMembers(Arguments):
     member_open_ids: OpenIds
 
 
-def _text(value: str) -> str:
-    return json.dumps({"text": value}, ensure_ascii=False)
+def _message(text: str, kind: str) -> dict[str, str]:
+    if kind == "markdown":
+        post = {"zh_cn": {"content": [[{"tag": "md", "text": text}]]}}
+        return {"msg_type": "post", "content": json.dumps(post, ensure_ascii=False)}
+    return {"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)}
 
 
 @tool(
@@ -178,18 +189,13 @@ async def chat_history(args: ChatHistory, call: Call) -> dict[str, Any]:
     "feishu_send_message",
     SendMessage,
     "im.send",
-    "Send a text as this user. Reuse uuid for retries.",
+    "Send a text or Markdown message as this user. Reuse uuid for retries.",
 )
 async def send_message(args: SendMessage, call: Call) -> dict[str, Any]:
     return await call(
         "im.send",
         params={"receive_id_type": args.receive_id_type},
-        json={
-            "receive_id": args.receive_id,
-            "msg_type": "text",
-            "content": _text(args.text),
-            "uuid": args.uuid,
-        },
+        json={"receive_id": args.receive_id, **_message(args.text, args.format), "uuid": args.uuid},
     )
 
 
@@ -204,8 +210,7 @@ async def reply_message(args: ReplyMessage, call: Call) -> dict[str, Any]:
         "im.reply",
         path={"message_id": args.message_id},
         json={
-            "msg_type": "text",
-            "content": _text(args.text),
+            **_message(args.text, args.format),
             "reply_in_thread": args.reply_in_thread,
             "uuid": args.uuid,
         },
