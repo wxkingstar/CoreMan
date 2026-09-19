@@ -169,9 +169,14 @@ onUnmounted(() => { ++generation; stopPolling() })
         >
           {{ scanned ? t('wecomBot.scanned') : t('wecomBot.waiting', { time: expiresAt }) }}
         </p>
-        <p class="muted">
-          {{ t('wecomBot.permissionHint') }}
-        </p>
+        <!-- 手机上创建后紧跟着「确认授权」，点了会把本人的数据权限挂到员工机器人上，必须显眼地提醒。 -->
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          :title="t('wecomBot.skipAuthorizeHint')"
+          data-test="provision-skip-authorize"
+        />
       </template>
       <template v-else-if="row && delivered && !row.verified">
         <el-result
@@ -194,7 +199,8 @@ onUnmounted(() => { ++generation; stopPolling() })
         <el-result
           icon="success"
           :title="t('wecomBot.created', { botId: row.wecom_bot_id })"
-          :sub-title="t('wecomBot.permissionHint')"
+          :sub-title="t('wecomBot.usageModeHint')"
+          data-test="provision-created"
         />
       </template>
       <template v-else-if="finished && row">

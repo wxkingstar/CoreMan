@@ -1,4 +1,4 @@
-"""企业微信个人工具：只在授权人本人的私聊与本人定时任务里，按本人选的档位代本人调用。"""
+"""企业微信个人工具：用本人绑定的授权机器人，只在本人私聊与本人定时任务里按本人选的档位调用。"""
 
 import json
 import uuid
@@ -15,20 +15,24 @@ from coreman.core.db.models import (
     RuntimeNode,
     User,
     UserIdentity,
-    WecomPersonalGrant,
+    WecomPersonalBinding,
 )
 from coreman.core.wecom_personal import gateway, policy, service, tools
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
 
 URL = "/api/runtime/wecom-personal/mcp"
+# 对话所在的 AI 员工机器人。
 WECOM_BOT = "aib-test-bot"
 SECRET = "bot-secret"
+# 本人扫码绑定的授权机器人：工具只用它的凭证。
+PERSONAL_BOT = "aib-personal-bot"
+PERSONAL_SECRET = "personal-secret"
 # 智能机器人回调里的发送者常常是企业主体下的密文 userid。
 SENDER = "wo-sender-000000000000000000000000"
 
 
-def context(authorizer=SENDER, bot=WECOM_BOT):
+def context(authorizer=SENDER, bot=PERSONAL_BOT):
     person = f"授权真人用户身份：\n名字：本人  \nID：{authorizer}\n" if authorizer else ""
     return f"<extra_identity_context>\n机器人身份：\n名字：示例\nID：{bot}\n{person}说明\n"
 
@@ -82,19 +86,27 @@ async def supported(session, bot, capabilities=None):
     await session.commit()
 
 
-async def grant(session, app, bot, user, *, level="readonly", authorizer=SENDER, **kw):
-    row = WecomPersonalGrant(
-        bot_id=bot.id,
+async def bind(session, app, user, *, level="readonly", authorizer=SENDER, **kw):
+    row = WecomPersonalBinding(
         user_id=user.id,
-        status="connected",
+        status="bound",
+        enabled=True,
         authorization_level=level,
+        wecom_bot_id=PERSONAL_BOT,
         authorizer_id=authorizer,
+        authorizer_name="本人",
+        bot_name="本人的机器人",
         verified_at=datetime.now(UTC),
-        bot_fingerprint=service._fingerprint(WECOM_BOT, SECRET),
+        bound_at=datetime.now(UTC),
+        bot_fingerprint=service.fingerprint(PERSONAL_BOT, PERSONAL_SECRET),
     )
     session.add(row)
     await session.flush()
-    row.token_enc = app.state.cipher.encrypt("tok-1", service._aad(row, "token_enc"))
+    row.credentials_enc = app.state.cipher.encrypt(
+        json.dumps({"bot_id": PERSONAL_BOT, "secret": PERSONAL_SECRET}),
+        service.aad(row, "credentials_enc"),
+    )
+    row.token_enc = app.state.cipher.encrypt("tok-1", service.aad(row, "token_enc"))
     for key, item in kw.items():
         setattr(row, key, item)
     await session.commit()
@@ -131,7 +143,7 @@ async def headers(app, task, user):
             ttl_hours=72,
             speaker_user_id=user.id,
         )
-        row = await session.get(WecomPersonalGrant, (task.bot_id, user.id))
+        row = await session.get(WecomPersonalBinding, user.id)
         epoch = row.context_epoch if row else uuid.uuid4()
         await session.commit()
     return {
@@ -155,7 +167,7 @@ async def test_non_private_origins_are_rejected_before_any_http(client, app, db_
     bot, user, task = await setup(
         db_session, app, chat_type="group" if mutate == "group" else "single"
     )
-    await grant(db_session, app, bot, user)
+    await bind(db_session, app, user)
     event = await db_session.get(InboundEvent, task.inbound_event_id)
     if mutate == "feishu":
         bot.platform = "feishu"
@@ -202,7 +214,7 @@ async def test_tiers_decide_which_methods_are_listed_and_callable(
     client, app, db_session, level, allowed, denied
 ):
     bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user, level=level)
+    await bind(db_session, app, user, level=level)
     auth = await headers(app, task, user)
     listed = await client.post(
         URL, headers=auth, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -228,9 +240,7 @@ async def test_tiers_decide_which_methods_are_listed_and_callable(
 
 async def test_authorizer_is_rechecked_and_a_change_disconnects(client, app, db_session):
     bot, user, task = await setup(db_session, app)
-    row = await grant(
-        db_session, app, bot, user, verified_at=datetime.now(UTC) - timedelta(minutes=10)
-    )
+    row = await bind(db_session, app, user, verified_at=datetime.now(UTC) - timedelta(minutes=10))
     auth = await headers(app, task, user)
     with respx.mock as mock:
         mock_whoami(mock)
@@ -246,12 +256,13 @@ async def test_authorizer_is_rechecked_and_a_change_disconnects(client, app, db_
         out = value(await client.post(URL, headers=auth, json=call("todo.list")))
         assert out["error"] == "authorization_changed" and not business.called
     await db_session.refresh(row)
-    assert row.status == "revoked" and row.token_enc is None and row.authorizer_id is None
+    assert row.status == "unbound" and row.error == "authorizer_changed"
+    assert row.token_enc is None and row.credentials_enc is None and row.authorizer_id is None
 
 
 async def test_rotated_bot_credentials_force_a_new_token_and_check(client, app, db_session):
     bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user, bot_fingerprint="old")
+    row = await bind(db_session, app, user, bot_fingerprint="old")
     auth = await headers(app, task, user)
     with respx.mock as mock:
         token = mock.post(gateway.AUTH_URL).mock(
@@ -263,13 +274,15 @@ async def test_rotated_bot_credentials_force_a_new_token_and_check(client, app, 
         assert token.called and whoami.called
         assert route.calls.last.request.headers["Authorization"] == "Bearer tok-2"
     await db_session.refresh(row)
-    assert row.bot_fingerprint == service._fingerprint(WECOM_BOT, SECRET)
+    assert row.bot_fingerprint == service.fingerprint(PERSONAL_BOT, PERSONAL_SECRET)
+    # 换令牌用的是本人授权机器人的凭证，不是对话所在 AI 员工的。
+    assert json.loads(token.calls.last.request.content)["bot_id"] == PERSONAL_BOT
 
 
 @pytest.mark.parametrize("errcode", sorted(gateway.TOKEN_ERRORS))
 async def test_an_expired_token_is_replaced_once(client, app, db_session, errcode):
     bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user)
     auth = await headers(app, task, user)
     with respx.mock as mock:
         mock.post(gateway.AUTH_URL).mock(
@@ -287,21 +300,95 @@ async def test_an_expired_token_is_replaced_once(client, app, db_session, errcod
             "Bearer tok-2",
         ]
     await db_session.refresh(row)
-    assert app.state.cipher.decrypt(row.token_enc, service._aad(row, "token_enc")) == "tok-2"
+    assert app.state.cipher.decrypt(row.token_enc, service.aad(row, "token_enc")) == "tok-2"
 
 
-async def test_business_errors_explain_how_to_authorize(client, app, db_session):
+async def test_business_errors_are_passed_through_without_touching_capabilities(
+    client, app, db_session
+):
     bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user)
     with respx.mock as mock:
         mock.post(gateway.BASE_URL + "/mail/search").mock(
-            return_value=envelope(error={"code": 851013, "message": "未授权"})
+            return_value=envelope(error={"code": 400084, "message": "参数错误"})
         )
         out = value(
             await client.post(URL, headers=await headers(app, task, user), json=call("mail.search"))
         )
-    assert out["error"] == "wecom_error" and out["errcode"] == 851013
-    assert "可使用权限" in out["hint"]
+    assert out["error"] == "wecom_error" and out["errcode"] == 400084
+    assert "capability_state" not in out
+    await db_session.refresh(row)
+    assert row.capabilities == {}
+
+
+@pytest.mark.parametrize(
+    ("errcode", "state"), [(850002, "unauthorized"), (850003, "expired"), (850001, "invalid")]
+)
+async def test_capability_errors_are_recorded_with_renewal_guidance(
+    client, app, db_session, errcode, state
+):
+    bot, user, task = await setup(db_session, app)
+    row = await bind(db_session, app, user, level="all")
+    help_message = "若你是智能机器人创建者，可以[点击这里](https://work.weixin.qq.com/ai/renew)授权"
+    with respx.mock as mock:
+        mock.post(gateway.BASE_URL + "/mail/send").mock(
+            return_value=httpx.Response(
+                200, json={"errcode": errcode, "errmsg": "x", "help_message": help_message}
+            )
+        )
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task, user), json=call("mail.send", {"a": 1})
+            )
+        )
+    assert out["capability_state"] == state
+    assert out["renew_url"] == "https://work.weixin.qq.com/ai/renew"
+    assert "本人的机器人" in out["hint"] and "可使用权限" in out["hint"]
+    await db_session.refresh(row)
+    assert row.capabilities["mail:send"]["state"] == state
+    assert row.capabilities["mail:send"]["renew_url"] == "https://work.weixin.qq.com/ai/renew"
+
+
+async def test_successful_calls_mark_the_capability_usable(client, app, db_session):
+    bot, user, task = await setup(db_session, app)
+    row = await bind(
+        db_session,
+        app,
+        user,
+        level="all_except_send",
+        capabilities={
+            "doc:write": {"state": "expired", "authorized_at": "2026-01-01T00:00:00+00:00"}
+        },
+    )
+    with respx.mock as mock:
+        mock.post(gateway.BASE_URL + "/sheet/contents/update").mock(return_value=envelope({}))
+        value(
+            await client.post(
+                URL,
+                headers=await headers(app, task, user),
+                json=call("sheet.contents.update", {"docid": "d"}),
+            )
+        )
+    await db_session.refresh(row)
+    entry = row.capabilities["doc:write"]
+    # 表格与文档共用「文档」授权；从过期变回可用，说明本人刚续期过，从现在重新起算。
+    assert entry["state"] == "ok"
+    assert datetime.fromisoformat(entry["authorized_at"]) > datetime.now(UTC) - timedelta(minutes=1)
+
+
+async def test_rejected_credentials_unbind_and_ask_to_rebind(client, app, db_session):
+    bot, user, task = await setup(db_session, app)
+    row = await bind(db_session, app, user, token_enc=None)
+    with respx.mock as mock:
+        mock.post(gateway.AUTH_URL).mock(
+            return_value=httpx.Response(200, json={"errcode": 853000, "errmsg": "invalid"})
+        )
+        out = value(
+            await client.post(URL, headers=await headers(app, task, user), json=call("todo.list"))
+        )
+    assert out["error"] == "credentials_rejected" and "重新扫码绑定" in out["hint"]
+    await db_session.refresh(row)
+    assert row.status == "unbound" and row.error == "credentials_rejected"
 
 
 async def test_local_files_and_unknown_arguments_are_refused(client, app, db_session):
@@ -309,7 +396,7 @@ async def test_local_files_and_unknown_arguments_are_refused(client, app, db_ses
         db_session,
         app,
     )
-    await grant(db_session, app, bot, user, level="all")
+    await bind(db_session, app, user, level="all")
     auth = await headers(app, task, user)
     with respx.mock as mock:
         out = value(
@@ -336,7 +423,7 @@ async def test_local_files_and_unknown_arguments_are_refused(client, app, db_ses
 async def test_long_content_is_paged(client, app, db_session, monkeypatch):
     monkeypatch.setattr(tools, "CONTENT_PAGE", 10)
     bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
+    await bind(db_session, app, user)
     auth = await headers(app, task, user)
     with respx.mock as mock:
         mock.post(gateway.BASE_URL + "/doc/contents/get").mock(
@@ -358,7 +445,7 @@ async def test_long_content_is_paged(client, app, db_session, monkeypatch):
 async def test_schema_comes_from_wecom_discovery(client, app, db_session):
     tools._SCHEMAS.clear()
     bot, user, task = await setup(db_session, app)
-    await grant(db_session, app, bot, user)
+    await bind(db_session, app, user)
     document = {
         "methods": {
             "list": {"path": "/todo/list", "description": "列表", "request": {"$ref": "Req"}}
@@ -393,7 +480,7 @@ async def test_schema_comes_from_wecom_discovery(client, app, db_session):
 
 async def test_reconnecting_invalidates_capabilities_of_the_old_generation(client, app, db_session):
     bot, user, task = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user)
     auth = await headers(app, task, user)
     row.context_epoch = uuid.uuid4()
     await db_session.commit()
@@ -404,23 +491,61 @@ async def test_reconnecting_invalidates_capabilities_of_the_old_generation(clien
         assert not mock.calls
 
 
-async def test_my_wecom_lists_own_connections_and_disconnects(client, app, db_session):
-    from tests.api.conftest import login_existing
+async def test_a_paused_binding_offers_no_tools(client, app, db_session):
+    bot, user, task = await setup(db_session, app)
+    await bind(db_session, app, user, enabled=False)
+    auth = await headers(app, task, user)
+    listed = await client.post(
+        URL, headers=auth, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )
+    assert listed.json()["result"]["tools"] == []
 
-    bot, user, _ = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user, level="all_except_send")
-    await login_existing(client, db_session, user)
-    listed = await client.get("/api/me/wecom-authorizations")
-    [item] = listed.json()["data"]["items"]
-    assert item["status"] == "connected" and item["authorization_level"] == "all_except_send"
-    assert item["bot_name"] == bot.name and "token" not in listed.text
-    assert listed.headers["cache-control"] == "no-store"
-    csrf = client.headers.pop("X-CSRF-Token")
-    assert (await client.delete(f"/api/me/wecom-authorizations/{bot.id}")).status_code == 403
-    client.headers["X-CSRF-Token"] = csrf
-    assert (await client.delete(f"/api/me/wecom-authorizations/{bot.id}")).status_code == 200
-    await db_session.refresh(row)
-    assert row.status == "revoked" and row.token_enc is None
+
+async def test_another_member_in_the_same_assistant_never_gets_the_owners_wecom(
+    client, app, db_session
+):
+    """A 绑定了企业微信；B 私聊同一个 AI 员工，拿不到任何企业微信工具，更拿不到 A 的数据。"""
+    bot, owner, _ = await setup(db_session, app)
+    await bind(db_session, app, owner, level="all")
+    other = User(login_name="wecom-other", display_name="Other", source="sync")
+    db_session.add(other)
+    await db_session.flush()
+    other_sender = "wo-other-00000000000000000000000000"
+    db_session.add(
+        UserIdentity(
+            user_id=other.id, platform="wecom", platform_user_id="other", open_id=other_sender
+        )
+    )
+    task = await chat_task(
+        db_session,
+        bot,
+        "看看我的邮件",
+        sender=other_sender,
+        chat_type="single",
+        chat_id=other_sender,
+    )
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    body = {
+        "msgid": "m2",
+        "aibotid": WECOM_BOT,
+        "chattype": "single",
+        "from": {"userid": other_sender},
+    }
+    event.payload = {**event.payload, "raw": {"cmd": "aibot_msg_callback", "body": body}}
+    await db_session.commit()
+    with respx.mock(assert_all_called=False) as mock:
+        # B 冒用 A 的身份签发的能力凭据：来源核验只认 B，直接拒绝。
+        forged = await headers(app, task, owner)
+        assert (await client.post(URL, headers=forged, json=call("mail.search"))).status_code == 403
+        own = await headers(app, task, other)
+        listed = await client.post(
+            URL, headers=own, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        )
+        assert listed.json()["result"]["tools"] == []
+        assert value(await client.post(URL, headers=own, json=call("mail.search")))["error"] == (
+            "authorization_changed"
+        )
+        assert not mock.calls
 
 
 async def test_scheduled_capability_revalidates_the_job(app, client, db_session, db_engine):
@@ -430,7 +555,7 @@ async def test_scheduled_capability_revalidates_the_job(app, client, db_session,
     from tests.api.test_personal_schedules import claim
 
     bot, user, _ = await setup(db_session, app)
-    row = await grant(db_session, app, bot, user)
+    row = await bind(db_session, app, user)
     db_session.add(BotMember(bot_id=bot.id, user_id=user.id))
     db_session.add(UserReached(bot_id=bot.id, user_id=user.id, platform_chat_id=SENDER))
     job = CronJob(

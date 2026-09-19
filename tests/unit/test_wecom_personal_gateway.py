@@ -115,10 +115,58 @@ async def test_oversized_responses_are_rejected(monkeypatch):
 
 
 def test_identity_is_parsed_from_the_whoami_context():
-    assert gateway.parse_identity(CONTEXT) == gateway.Identity("aib-demo", "wo-demo-user_1")
+    identity = gateway.parse_identity(CONTEXT)
+    assert identity is not None
+    assert (identity.bot_id, identity.authorizer_id) == ("aib-demo", "wo-demo-user_1")
+    assert identity.bot_name == "示例机器人"
     unauthorized = "机器人身份：\n名字：示例\nID：aib-demo\n"
-    assert gateway.parse_identity(unauthorized) == gateway.Identity("aib-demo", None)
+    assert gateway.parse_identity(unauthorized) == gateway.Identity("aib-demo", None, "示例")
     assert gateway.parse_identity("something else") is None
+
+
+@pytest.mark.parametrize(
+    ("text", "url"),
+    [
+        (
+            "当前机器人「文档」使用权限已过期\n若你是智能机器人创建者，可以"
+            "[点击这里](https://work.weixin.qq.com/ai/auth?bot=aib-demo&biz=doc)授权",
+            "https://work.weixin.qq.com/ai/auth?bot=aib-demo&biz=doc",
+        ),
+        ("去 https://open.work.weixin.qq.com/devtool/query?e=850002 查错误码", None),
+        ("[钓鱼](https://example.com/work.weixin.qq.com)", None),
+        ("[明文](http://work.weixin.qq.com/ai/auth)", None),
+        (None, None),
+    ],
+)
+def test_help_link_only_accepts_wecom_authorization_pages(text, url):
+    assert gateway.help_link(text) == url
+
+
+@respx.mock
+async def test_capability_errors_carry_the_renewal_link():
+    body = {
+        "errcode": 850003,
+        "errmsg": "authorization expired",
+        "help_message": "若你是智能机器人创建者，可以[点击这里](https://work.weixin.qq.com/ai/x)授权",
+    }
+    respx.post(gateway.BASE_URL + "/doc/search").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(gateway.GatewayError) as exc:
+        await gateway.invoke("tok", "/doc/search", {})
+    assert (exc.value.code, exc.value.errcode) == ("wecom_error", 850003)
+    assert exc.value.help_url == "https://work.weixin.qq.com/ai/x"
+    inner = {
+        "error": {
+            "code": 850002,
+            "message": "no authorization",
+            "help_message": body["help_message"],
+        }
+    }
+    respx.post(gateway.BASE_URL + "/mail/search").mock(
+        return_value=httpx.Response(200, json={"errcode": 0, "results_json": json.dumps(inner)})
+    )
+    with pytest.raises(gateway.GatewayError) as exc:
+        await gateway.invoke("tok", "/mail/search", {})
+    assert (exc.value.errcode, exc.value.help_url) == (850002, "https://work.weixin.qq.com/ai/x")
 
 
 @respx.mock

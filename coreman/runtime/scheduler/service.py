@@ -115,6 +115,7 @@ class SchedulerService(Service):
                 ("scheduler-alerts", self._alerts_loop()),
                 ("scheduler-relay-health", self._relay_health_loop()),
                 ("scheduler-wecom-provisions", self._wecom_provisions_loop()),
+                ("scheduler-wecom-personal", self._wecom_personal_loop()),
             )
         ]
         self.ready = True
@@ -310,6 +311,27 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("wecom_provisions_sweep_failed")
             await self._sleep(provisions.POLL_SECONDS)
+
+    async def _wecom_personal_loop(self) -> None:
+        """企业微信个人授权：替离开页面的本人取回扫码结果，并在授权估计到期前提醒本人。"""
+        from coreman.core.chat.openuserid import OpenUseridResolver
+        from coreman.core.wecom_personal import binding, reminders
+
+        resolver = OpenUseridResolver(self._factory, self._cipher)
+        base_url = get_settings().public_base_url
+        next_reminder = 0.0
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    await binding.sweep(self._factory, self._cipher, resolver)
+                    if asyncio.get_running_loop().time() >= next_reminder:
+                        next_reminder = asyncio.get_running_loop().time() + 600
+                        sent = await reminders.remind(self._factory, base_url)
+                        if sent:
+                            self._log.info("wecom_personal_reminders_sent", count=sent)
+            except Exception:
+                self._log.exception("wecom_personal_sweep_failed")
+            await self._sleep(binding.POLL_SECONDS)
 
     async def _objects_loop(self) -> None:
         from coreman.core.object_store import object_store

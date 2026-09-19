@@ -27,7 +27,7 @@ from coreman.core.db.models import (
     RuntimeNode,
     Task,
     User,
-    WecomPersonalGrant,
+    WecomPersonalBinding,
 )
 from coreman.core.errors import ApiError
 from coreman.core.feishu_personal import policy
@@ -334,13 +334,14 @@ class CronRunHandler:
         backend: str,
         env: dict[str, str],
     ) -> str:
-        grant = await session.get(WecomPersonalGrant, (bot.id, actor.id), populate_existing=True)
+        binding = await session.get(WecomPersonalBinding, actor.id, populate_existing=True)
         if (
             node is None
             or not node.is_active
             or not wecom_policy.runtime_supported(node.capabilities, backend)
-            or grant is None
-            or grant.status != "connected"
+            or binding is None
+            or binding.status != "bound"
+            or not binding.enabled
         ):
             return ""
         try:
@@ -354,10 +355,10 @@ class CronRunHandler:
             ctx.cipher,
             task_id=ctx.task.id,
             user_id=str(actor.id),
-            context_epoch=grant.context_epoch,
+            context_epoch=binding.context_epoch,
             base_session_id=None,
         )
-        return wecom_guidance(grant, scheduled=True)
+        return wecom_guidance(binding, scheduled=True)
 
     async def _consume(
         self, ctx: TaskContext, gen: AsyncGenerator[SseEvent, None]

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessage } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -282,10 +282,14 @@ describe('BotForm', () => {
     expect(bots.create).not.toHaveBeenCalled()
     const dialog = wrapper.findComponent(WecomProvisionDialog)
     expect((dialog.props() as { visible: boolean }).visible).toBe(true)
+    const alert = vi.spyOn(ElMessageBox, 'alert').mockResolvedValue('confirm' as never)
     dialog.vm.$emit('succeeded', { id: 'p1', status: 'succeeded', wecom_bot_id: 'aib-1', verified: true })
     await flushPromises()
     expect(bots.create).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'wecom_bot', credentials: {}, wecom_provision_id: 'p1' }))
     expect(wrapper.emitted('saved')).toBeTruthy()
+    // 创建后单独提醒改「多人使用」，不随弹窗关闭一闪而过。
+    expect(alert).toHaveBeenCalledWith(i18n.global.t('wecomBot.usageModeHint'), expect.any(String), expect.objectContaining({ type: 'warning' }))
+    alert.mockRestore()
     wrapper.unmount()
 
     // 兜底：同一页面改为手动填写 Bot ID 与 Secret，直接创建（后端同样先校验）。

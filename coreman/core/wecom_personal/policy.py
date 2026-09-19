@@ -1,8 +1,8 @@
 """每次调用都重新核验来源；身份只来自持久化的入站事件或定时任务，绝不取自调用方参数。
 
-两种来源可以用到企业微信个人工具：本人与机器人的已验证私聊；本人创建、以本人身份运行、
-结果只发本人私聊的定时任务。企业微信那边机器人代表的是「授权人」，所以还要另外核对授权人
-就是本人（见 service.verify）。
+两种来源可以用到企业微信个人工具：本人与任意企业微信 AI 员工的已验证私聊；本人创建、以本人身份
+运行、结果只发本人私聊的定时任务。工具用的是本人自己的授权机器人凭证（见 service），与对话所在的
+AI 员工无关，所以这里只核验「是不是本人」。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
     UserReached,
-    WecomPersonalGrant,
+    WecomPersonalBinding,
 )
 from coreman.core.feishu_personal.policy import self_only
 
@@ -220,8 +220,14 @@ async def scheduled_scope(session: AsyncSession, task_id: int, actor: str) -> Sc
         )
     )
     reached = await session.get(UserReached, (bot.id, user.id), populate_existing=True)
-    grant = await session.get(WecomPersonalGrant, (bot.id, user.id), populate_existing=True)
-    if identity is None or reached is None or grant is None or grant.status != "connected":
+    binding = await session.get(WecomPersonalBinding, user.id, populate_existing=True)
+    if (
+        identity is None
+        or reached is None
+        or binding is None
+        or binding.status != "bound"
+        or not binding.enabled
+    ):
         raise ValueError("personal_grant_required")
     return Scope(task, bot, user.id, frozenset(), reached.platform_chat_id)
 

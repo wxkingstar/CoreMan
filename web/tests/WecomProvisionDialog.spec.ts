@@ -50,7 +50,9 @@ describe('WecomProvisionDialog', () => {
     expect(document.querySelector('[data-test="provision-secret-warning"]')).not.toBeNull()
     expect(document.querySelector('.provision a')).toBeNull()
     expect(text()).not.toContain(URL)
-    expect(text()).toContain(i18n.global.t('wecomBot.permissionHint'))
+    // 员工机器人不该点「确认授权」：扫码时就提醒跳过，不再引导去授权。
+    expect(document.querySelector('[data-test="provision-skip-authorize"]')?.textContent).toContain(i18n.global.t('wecomBot.skipAuthorizeHint'))
+    expect(text()).not.toContain(i18n.global.t('wecomBot.usageModeHint'))
 
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
@@ -59,6 +61,9 @@ describe('WecomProvisionDialog', () => {
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
     expect(wrapper.emitted('succeeded')?.[0]?.[0]).toMatchObject({ id: 'p1', wecom_bot_id: 'aib-1' })
+    // 建好后提醒改成「多人使用」，并撤掉误点的「确认授权」。
+    expect(document.querySelector('[data-test="provision-created"]')?.textContent).toContain(i18n.global.t('wecomBot.usageModeHint'))
+    expect(document.querySelector('[data-test="provision-skip-authorize"]')).toBeNull()
     wrapper.unmount()
   })
 

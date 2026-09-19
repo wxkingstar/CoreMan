@@ -2,7 +2,7 @@
 
 方法很多、参数也多，所以只给模型两个工具：`wecom_method_schema` 查某个方法的参数说明（取自
 企业微信的服务发现，随企业微信更新），`wecom_call` 调用。放行与否只看这里的白名单和本人选的
-档位；企业微信那边是否授权了这项能力，以调用结果为准。
+档位；企业微信那边是否授权了这项能力，以调用结果为准，结果同时记进本人的能力状态。
 """
 
 from __future__ import annotations
@@ -13,12 +13,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import WecomPersonalGrant
+from coreman.core.db.models import WecomPersonalBinding
 from coreman.core.wecom_personal import gateway, service
-from coreman.core.wecom_personal.policy import Scope
 
 Kind = Literal["read", "write", "send"]
 
@@ -202,9 +199,9 @@ def _find(node: Any, path: str) -> dict[str, Any] | None:
     return None
 
 
-async def _schema(token: str, bot_id: uuid.UUID, name: str) -> dict[str, Any]:
+async def _schema(token: str, owner: uuid.UUID, name: str) -> dict[str, Any]:
     service_name = name.split(".", 1)[0]
-    key = (bot_id, service_name)
+    key = (owner, service_name)
     cached = _SCHEMAS.get(key)
     if cached is None or cached[0] <= time.monotonic():
         document = await gateway.discovery(token, service_name)
@@ -250,20 +247,37 @@ def _bounded(data: Any) -> dict[str, Any]:
     return {**result, "content_trust": "external_untrusted_data"}
 
 
-def _failure(exc: gateway.GatewayError) -> dict[str, Any]:
-    return {
+def _failure(row: WecomPersonalBinding, exc: gateway.GatewayError) -> dict[str, Any]:
+    state = service.STATE_BY_ERRCODE.get(exc.errcode or 0)
+    result: dict[str, Any] = {
         "error": "wecom_error",
         "errcode": exc.errcode,
         "message": exc.message,
-        "hint": "如果是没有权限或授权过期，" + service.AUTHORIZE_HINT,
     }
+    if state:
+        result["capability_state"] = state
+        result["hint"] = (
+            "这项能力在企业微信里"
+            + {"expired": "已过期", "invalid": "链接失效"}.get(state, "未授权")
+            + "。照实告诉用户："
+            + service.renew_hint(row)
+            + "续期后在 CoreMan「我的企业微信」页面点「我已续期」。"
+        )
+        if exc.help_url:
+            result["renew_url"] = exc.help_url
+            result["hint"] += (
+                "也可以把 renew_url 这个企业微信授权链接原样发给用户，在电脑上打开续期。"
+            )
+    return result
+
+
+def _kind(name: str) -> str:
+    return METHODS[name].kind
 
 
 async def dispatch(
-    session: AsyncSession,
     cipher: Cipher,
-    scope: Scope,
-    row: WecomPersonalGrant,
+    row: WecomPersonalBinding,
     name: str,
     arguments: Any,
 ) -> dict[str, Any]:
@@ -279,13 +293,15 @@ async def dispatch(
         return {
             "error": "outside_selected_authorization",
             "hint": (
-                "本人选择的档位不允许这个操作；需要的话请本人重新发送“连接企业微信”选择更高档位。"
+                "本人选择的档位不允许这个操作；需要的话请本人发送“连接企业微信”选择更高档位，"
+                "或在 CoreMan「我的企业微信」页面调整。"
             ),
         }
+    key = service.capability_key(method.split(".", 1)[0], _kind(method))
     try:
         if name == "wecom_method_schema":
             return await service.call(
-                session, cipher, row, scope, lambda token: _schema(token, scope.bot.id, method)
+                cipher, row, lambda token: _schema(token, row.user_id, method)
             )
         payload = arguments.get("arguments", {})
         offset = arguments.get("content_offset", 0)
@@ -304,11 +320,11 @@ async def dispatch(
                 ),
             }
         path = METHODS[method].path
-        result = await service.call(
-            session, cipher, row, scope, lambda token: gateway.invoke(token, path, payload)
-        )
+        result = await service.call(cipher, row, lambda token: gateway.invoke(token, path, payload))
     except gateway.GatewayError as exc:
-        return _failure(exc)
+        service.record_error(row, key, exc)
+        return _failure(row, exc)
+    service.record(row, key)
     if isinstance(result, dict):
         result = _content_page(result, offset)
     return _bounded(result)

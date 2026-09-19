@@ -1,30 +1,35 @@
-"""企业微信个人工具的授权状态与调用。
+"""企业微信个人工具：成员本人的授权绑定、核对与调用。
 
-企业微信的「可使用权限」由成员在机器人编辑页授权，之后机器人代这位成员执行，调用里不带发言人。
-所以连接时要向企业微信核对「授权人就是本人私聊的发送者」，此后每隔几分钟再核一次：
-授权换了人、机器人换了凭证，本人的连接立刻作废，绝不拿别人的授权替本人干活。
+企业微信的「可使用权限」绑在机器人上，机器人代表创建它的成员，调用里不带发言人。所以每位成员
+自己扫码建一个只负责取数的「授权机器人」（扫码时点「确认授权」即授予全部能力），CoreMan 托管它的
+凭证：这位成员在任意企业微信 AI 员工的私聊里，工具都用这份凭证、以本人身份执行。
+
+绑定时向企业微信核对「授权人就是本人」，之后每隔几分钟再核一次：授权机器人被删、Secret 被重置
+或换了授权人，这份绑定立刻作废，绝不拿别人的授权替本人干活。
+
+能力授权按子项（例如「搜索与获取邮件」「发送邮件」）各自计时约 7 天，持续调用也不会顺延，企业微信
+也没有查询到期时间的接口。这里按调用结果记录每项的状态（850002 未授权、850003 已过期、850001
+链接失效），并按「最近一次授权时间 + 7 天」估算到期，用来提前提醒本人去续期。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.chat.identity import resolve_speaker
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import WecomPersonalGrant
+from coreman.core.db.models import WecomPersonalBinding
 from coreman.core.wecom_personal import gateway
-from coreman.core.wecom_personal.policy import Scope, bot_credentials
-
-if TYPE_CHECKING:
-    from coreman.core.chat.openuserid import OpenUseridResolver
 
 LEVELS = ("readonly", "all_except_send", "all")
 LEVEL_TITLES = {
@@ -32,19 +37,29 @@ LEVEL_TITLES = {
     "all_except_send": "读写（不含发邮件、共享文档）",
     "all": "全部（含发邮件、共享文档）",
 }
-SELECTION_TTL = timedelta(minutes=10)
-# 复核授权人的间隔：每次调用都核会多一倍请求，太久又会让换了授权人的机器人多干几轮活。
+# 复核授权人的间隔：每次调用都核会多一倍请求，太久又会让失效的绑定多干几轮活。
 VERIFY_INTERVAL = timedelta(minutes=5)
-AUTHORIZE_HINT = (
-    "请在企业微信「工作台 → 智能机器人」中找到这个机器人，进入「可使用权限」为需要的能力授权"
-    "（文档权限有效期 7 天，到期需重新授权）。"
-)
+# 企业微信能力授权的有效期：按子项各自计时，调用不顺延。
+AUTH_TTL = timedelta(days=7)
+# 页面与提醒按这个顺序列能力；键是企业微信网关的服务名。
+SERVICES = {
+    "contact": "通讯录",
+    "todo": "待办",
+    "calendar": "日程",
+    "meeting": "会议",
+    "doc": "文档与表格",
+    "mail": "邮件",
+    "disk": "微盘",
+}
+# 表格与文档共用「文档」这项授权。
+SERVICE_ALIASES = {"sheet": "doc"}
+STATE_BY_ERRCODE = {850001: "invalid", 850002: "unauthorized", 850003: "expired"}
+# 企业微信的时间参数按企业所在时区解释。
+_CN = ZoneInfo("Asia/Shanghai")
 RETENTION_NOTICE = (
-    "企业微信的「可使用权限」绑定在机器人上：机器人代表在编辑页完成授权的那位成员操作，"
-    "所以只有授权人本人能连接，只在你和机器人的私聊里生效，群聊不会使用；"
-    "你本人创建、结果只发给你本人的定时任务也可以使用。"
-    "连接期间的私聊与普通私聊一样保留在对话记录中，但只有你本人能查看，机器人管理员也看不到；"
-    "断开连接会停止后续使用，但不会删除已有记录，也不会取消企业微信里的授权。"
+    "授权机器人代表你本人：只在你与 AI 员工的企业微信私聊、以及你本人创建且只发给你本人的"
+    "定时任务里使用，群聊不会使用。使用期间的私聊与普通私聊一样保留在对话记录中，但只有你本人"
+    "能查看，机器人管理员也看不到。暂停或解除绑定会停止后续使用，但不会删除已有记录。"
 )
 
 
@@ -54,186 +69,152 @@ class PersonalError(Exception):
         super().__init__(code)
 
 
-def _aad(row: WecomPersonalGrant, field: str) -> str:
-    return f"wecom_personal_grants.{field}:{row.bot_id}:{row.user_id}"
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
-def _fingerprint(bot_id: str, secret: str) -> str:
+def _iso(value: datetime) -> str:
+    return value.isoformat()
+
+
+def _parse(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def aad(row: WecomPersonalBinding, field: str) -> str:
+    return f"wecom_personal_bindings.{field}:{row.user_id}"
+
+
+def fingerprint(bot_id: str, secret: str) -> str:
     return hashlib.sha256(f"{bot_id}:{secret}".encode()).hexdigest()
 
 
-def _clear(row: WecomPersonalGrant, status: str = "revoked") -> None:
-    row.context_epoch = uuid.uuid4()
-    row.status = status
-    row.token_enc = None
-    row.authorizer_id = None
-    row.verified_at = None
-    row.selection_chat_id = None
-    row.selection_task_id = None
-    row.selection_expires_at = None
+def renew_hint(row: WecomPersonalBinding | None) -> str:
+    name = (row.bot_name if row else None) or "你的授权机器人"
+    return (
+        f"请在电脑端企业微信「工作台 → 智能机器人 → {name} → 可使用权限」中授权或续期对应能力"
+        "（手机端不支持在这里授权）。"
+    )
 
 
-async def _lock(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    digest = hashlib.sha256(f"wecom-personal:{bot_id}:{user_id}".encode()).digest()
+async def _lock(session: AsyncSession, user_id: uuid.UUID) -> None:
+    digest = hashlib.sha256(f"wecom-personal-binding:{user_id}".encode()).digest()
     key = int.from_bytes(digest[:8], "big", signed=True)
     await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
-async def existing_row(
-    session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID
-) -> WecomPersonalGrant | None:
-    """加锁读取，不为没连接过的人建记录。连接、复核、断开与调用都按这把锁串行。"""
-    await _lock(session, bot_id, user_id)
-    return (
+async def load(
+    session: AsyncSession, user_id: uuid.UUID, *, create: bool = False
+) -> WecomPersonalBinding | None:
+    """加锁读取本人的绑定。绑定、复核、调用与解除都按这把锁串行。"""
+    await _lock(session, user_id)
+    if create:
+        await session.execute(
+            insert(WecomPersonalBinding).values(user_id=user_id).on_conflict_do_nothing()
+        )
+    row: WecomPersonalBinding | None = (
         await session.scalars(
-            select(WecomPersonalGrant)
-            .where(WecomPersonalGrant.bot_id == bot_id, WecomPersonalGrant.user_id == user_id)
+            select(WecomPersonalBinding)
+            .where(WecomPersonalBinding.user_id == user_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
     ).one_or_none()
-
-
-async def _row(session: AsyncSession, scope: Scope) -> WecomPersonalGrant:
-    await _lock(session, scope.bot.id, scope.user_id)
-    await session.execute(
-        insert(WecomPersonalGrant)
-        .values(
-            bot_id=scope.bot.id,
-            user_id=scope.user_id,
-            status="revoked",
-            authorization_level="readonly",
-        )
-        .on_conflict_do_nothing()
-    )
-    row = await existing_row(session, scope.bot.id, scope.user_id)
-    assert row is not None
     return row
 
 
-def _credentials(cipher: Cipher, scope: Scope) -> tuple[str, str]:
-    try:
-        return bot_credentials(cipher, scope.bot)
-    except ValueError as exc:
-        raise PersonalError("wecom_bot_unavailable") from exc
+def usable(row: WecomPersonalBinding | None) -> bool:
+    return row is not None and row.status == "bound" and row.enabled
 
 
-def _upstream(exc: gateway.GatewayError) -> PersonalError:
-    if exc.code == "credentials_rejected":
-        return PersonalError("wecom_bot_unavailable")
-    return PersonalError("upstream_unavailable")
+def credentials(cipher: Cipher, row: WecomPersonalBinding) -> tuple[str, str]:
+    if row.status != "bound" or not row.credentials_enc:
+        raise PersonalError("authorization_required")
+    data = json.loads(cipher.decrypt(row.credentials_enc, aad(row, "credentials_enc")))
+    bot_id, secret = data.get("bot_id"), data.get("secret")
+    if not isinstance(bot_id, str) or not isinstance(secret, str) or not bot_id or not secret:
+        raise PersonalError("authorization_required")
+    return bot_id, secret
 
 
-async def begin_selection(session: AsyncSession, scope: Scope) -> None:
-    """本人发了「连接企业微信」：旧连接作废，等本人在卡片上选档位。"""
-    row = await _row(session, scope)
-    _clear(row, "selecting")
-    row.selection_chat_id = scope.chat_id
-    row.selection_task_id = scope.task.id
-    row.selection_expires_at = datetime.now(UTC) + SELECTION_TTL
-
-
-async def _same_member(
-    session: AsyncSession, scope: Scope, authorizer_id: str, resolver: OpenUseridResolver | None
-) -> bool:
-    if authorizer_id in scope.sender_ids:
-        return True
-    # 授权人 ID 与回调里的发送者 ID 可能一个明文一个密文：落到同一位员工也算。
-    speaker = await resolve_speaker(
-        session, platform="wecom", platform_user_id=authorizer_id, resolver=resolver
-    )
-    return speaker.known and speaker.user_id == scope.user_id
-
-
-async def _authorizer(cipher: Cipher, scope: Scope) -> tuple[str, gateway.Identity]:
-    bot_id, secret = _credentials(cipher, scope)
-    try:
-        token = await gateway.fetch_token(bot_id, secret)
-        return token, await gateway.whoami(token)
-    except gateway.GatewayError as exc:
-        raise _upstream(exc) from exc
-
-
-async def _check(
-    session: AsyncSession,
-    scope: Scope,
-    identity: gateway.Identity,
-    bot_id: str,
-    resolver: OpenUseridResolver | None,
-) -> None:
-    if identity.bot_id != bot_id:
-        raise PersonalError("identity_mismatch")
-    if not identity.authorizer_id:
-        raise PersonalError("not_authorized")
-    if not await _same_member(session, scope, identity.authorizer_id, resolver):
-        raise PersonalError("not_authorizer")
-
-
-async def precheck(
-    session: AsyncSession,
-    cipher: Cipher,
-    scope: Scope,
-    *,
-    resolver: OpenUseridResolver | None = None,
-) -> None:
-    """发卡片之前先问一次企业微信：不是授权人就直接说明，不发卡片、也不留授权记录。"""
-    _, identity = await _authorizer(cipher, scope)
-    await _check(session, scope, identity, _credentials(cipher, scope)[0], resolver)
-
-
-async def choose(
-    session: AsyncSession,
-    cipher: Cipher,
-    scope: Scope,
-    level: str,
-    *,
-    selection_task_id: int,
-    resolver: OpenUseridResolver | None = None,
-) -> dict[str, Any]:
-    """本人在卡片上选了档位：向企业微信核对授权人，是本人才连接。"""
-    row = await _row(session, scope)
-    if (
-        level not in LEVELS
-        or row.status != "selecting"
-        or row.selection_chat_id != scope.chat_id
-        or row.selection_task_id != selection_task_id
-        or not row.selection_expires_at
-        or row.selection_expires_at <= datetime.now(UTC)
-    ):
-        raise PersonalError("selection_required")
-    bot_id, secret = _credentials(cipher, scope)
-    # 网络或企业微信暂时不可用时原样抛出：卡片仍然有效，本人可以再点一次。
-    token, identity = await _authorizer(cipher, scope)
-    try:
-        await _check(session, scope, identity, bot_id, resolver)
-    except PersonalError:
-        _clear(row)
-        raise
-    assert identity.authorizer_id is not None
+def _rotate(row: WecomPersonalBinding) -> None:
     row.context_epoch = uuid.uuid4()
-    row.status = "connected"
-    row.authorization_level = level
+
+
+def unbind(row: WecomPersonalBinding, error: str | None = None) -> None:
+    """删掉托管的凭证；企业微信里的授权机器人要本人自己删除。"""
+    _rotate(row)
+    row.status = "unbound"
+    row.credentials_enc = row.token_enc = None
+    row.wecom_bot_id = row.authorizer_id = row.authorizer_name = None
+    row.bot_fingerprint = ""
+    row.verified_at = row.bound_at = row.reminded_at = None
+    row.capabilities = {}
+    row.error = error
+
+
+def bind(
+    row: WecomPersonalBinding,
+    cipher: Cipher,
+    *,
+    bot_id: str,
+    secret: str,
+    token: str,
+    identity: gateway.Identity,
+) -> None:
+    """换成一份新核对过的凭证：旧凭证、旧令牌与签出去的能力凭据一并作废。"""
+    now = _now()
+    _rotate(row)
+    row.status = "bound"
+    row.enabled = True
+    row.wecom_bot_id = bot_id
+    row.credentials_enc = cipher.encrypt(
+        json.dumps({"bot_id": bot_id, "secret": secret}), aad(row, "credentials_enc")
+    )
+    row.bot_fingerprint = fingerprint(bot_id, secret)
+    row.token_enc = cipher.encrypt(token, aad(row, "token_enc"))
     row.authorizer_id = identity.authorizer_id
-    row.verified_at = datetime.now(UTC)
-    row.token_enc = cipher.encrypt(token, _aad(row, "token_enc"))
-    row.bot_fingerprint = _fingerprint(bot_id, secret)
-    row.selection_chat_id = row.selection_task_id = row.selection_expires_at = None
-    return state(row)
+    row.authorizer_name = identity.authorizer_name
+    row.bot_name = identity.bot_name
+    row.verified_at = row.bound_at = now
+    row.reminded_at = None
+    row.capabilities = {}
+    row.error = None
+
+
+def set_level(row: WecomPersonalBinding, level: str) -> None:
+    if level not in LEVELS:
+        raise PersonalError("invalid_level")
+    if row.status != "bound":
+        raise PersonalError("authorization_required")
+    _rotate(row)
+    row.authorization_level = level
+    row.enabled = True
+
+
+def set_enabled(row: WecomPersonalBinding, enabled: bool) -> None:
+    if row.status != "bound":
+        raise PersonalError("authorization_required")
+    if row.enabled != enabled:
+        _rotate(row)
+    row.enabled = enabled
 
 
 async def _with_token[T](
-    cipher: Cipher,
-    row: WecomPersonalGrant,
-    credentials: tuple[str, str],
-    call: Callable[[str], Awaitable[T]],
+    cipher: Cipher, row: WecomPersonalBinding, call: Callable[[str], Awaitable[T]]
 ) -> T:
-    """用保存的令牌调用；令牌过期或无效就重新签名换一个，再试一次。"""
-    bot_id, secret = credentials
-    token = cipher.decrypt(row.token_enc, _aad(row, "token_enc")) if row.token_enc else None
+    """用保存的令牌调用；令牌过期或无效就用凭证重新签名换一个，再试一次。"""
+    bot_id, secret = credentials(cipher, row)
+    token = cipher.decrypt(row.token_enc, aad(row, "token_enc")) if row.token_enc else None
     for attempt in range(2):
         if token is None:
             token = await gateway.fetch_token(bot_id, secret)
-            row.token_enc = cipher.encrypt(token, _aad(row, "token_enc"))
+            row.token_enc = cipher.encrypt(token, aad(row, "token_enc"))
         try:
             return await call(token)
         except gateway.GatewayError as exc:
@@ -243,78 +224,231 @@ async def _with_token[T](
     raise AssertionError("unreachable")
 
 
-async def verify(
-    session: AsyncSession, cipher: Cipher, row: WecomPersonalGrant, scope: Scope
-) -> tuple[str, str]:
-    """确认本人的连接仍然有效：机器人凭证没换、企业微信里的授权人仍是本人。"""
-    if row.status != "connected" or not row.authorizer_id:
-        raise PersonalError("authorization_required")
-    credentials = _credentials(cipher, scope)
-    fingerprint = _fingerprint(*credentials)
-    now = datetime.now(UTC)
+async def verify(cipher: Cipher, row: WecomPersonalBinding) -> None:
+    """确认绑定仍然有效：凭证没被拒、授权机器人代表的仍是本人。"""
+    bot_id, secret = credentials(cipher, row)
+    now = _now()
+    current = fingerprint(bot_id, secret)
     if (
-        row.bot_fingerprint == fingerprint
+        row.bot_fingerprint == current
         and row.verified_at is not None
         and now - row.verified_at < VERIFY_INTERVAL
     ):
-        return credentials
-    if row.bot_fingerprint != fingerprint:
-        # 凭证换了：旧令牌签给的是旧 Secret，重换并重新核对授权人。
+        return
+    if row.bot_fingerprint != current:
+        # 凭证换过：旧令牌签给的是旧 Secret，重新换取并核对授权人。
         row.token_enc = None
-        row.bot_fingerprint = fingerprint
+        row.bot_fingerprint = current
     try:
-        identity = await _with_token(cipher, row, credentials, gateway.whoami)
+        identity = await _with_token(cipher, row, gateway.whoami)
     except gateway.GatewayError as exc:
-        raise _upstream(exc) from exc
-    if identity.bot_id != credentials[0] or identity.authorizer_id != row.authorizer_id:
-        _clear(row)
+        if exc.code == "credentials_rejected":
+            # 授权机器人被删除或重置了 Secret：凭证再也用不了，只能重新扫码绑定。
+            unbind(row, "credentials_rejected")
+            raise PersonalError("credentials_rejected") from exc
+        raise PersonalError("upstream_unavailable") from exc
+    if identity.bot_id != bot_id or identity.authorizer_id != row.authorizer_id:
+        unbind(row, "authorizer_changed")
         raise PersonalError("authorization_changed")
     row.verified_at = now
-    return credentials
 
 
 async def call[T](
-    session: AsyncSession,
-    cipher: Cipher,
-    row: WecomPersonalGrant,
-    scope: Scope,
-    invoke: Callable[[str], Awaitable[T]],
+    cipher: Cipher, row: WecomPersonalBinding, invoke: Callable[[str], Awaitable[T]]
 ) -> T:
-    """复核之后以授权人（本人）身份调用企业微信；业务错误原样抛给调用方处理。"""
-    credentials = await verify(session, cipher, row, scope)
+    """复核之后以本人身份调用；企业微信的业务错误原样抛给调用方。"""
+    await verify(cipher, row)
     try:
-        return await _with_token(cipher, row, credentials, invoke)
+        return await _with_token(cipher, row, invoke)
     except gateway.GatewayError as exc:
         if exc.code == "wecom_error":
             raise
-        raise _upstream(exc) from exc
+        if exc.code == "credentials_rejected":
+            unbind(row, "credentials_rejected")
+            raise PersonalError("credentials_rejected") from exc
+        raise PersonalError("upstream_unavailable") from exc
 
 
-async def revoke_grant(
-    session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID
-) -> dict[str, Any]:
-    """只断开 CoreMan 这一侧；企业微信里的授权要本人在机器人编辑页取消。"""
-    row = await existing_row(session, bot_id, user_id)
-    if row is not None:
-        _clear(row)
-    return {"status": "revoked"}
+# ---------------------------------------------------------------- 能力状态
 
 
-def state(row: WecomPersonalGrant) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    status = row.status
-    if status == "selecting" and (
-        row.selection_expires_at is None or row.selection_expires_at <= now
-    ):
-        status = "expired"
+def capability_key(service: str, kind: str) -> str:
+    return f"{SERVICE_ALIASES.get(service, service)}:{kind}"
+
+
+def record(
+    row: WecomPersonalBinding,
+    key: str,
+    *,
+    errcode: int | None = None,
+    help_url: str | None = None,
+) -> None:
+    """按一次调用的结果更新这项能力的状态；errcode 为空表示成功。"""
+    now = _now()
+    caps = dict(row.capabilities or {})
+    raw = caps.get(key)
+    previous: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    entry: dict[str, Any] = {**previous, "checked_at": _iso(now)}
+    if errcode is None:
+        if previous.get("state") != "ok" or not previous.get("authorized_at"):
+            # 第一次见到成功：扫码时点「确认授权」会一次授予全部能力，按绑定时间起算；
+            # 从失败变成功，说明本人刚在企业微信里授权或续期过。
+            fresh = not previous and row.bound_at is not None and now - row.bound_at < AUTH_TTL
+            entry["authorized_at"] = _iso(row.bound_at if fresh and row.bound_at else now)
+        entry["state"] = "ok"
+        entry.pop("renew_url", None)
+    else:
+        entry["state"] = STATE_BY_ERRCODE.get(errcode, "error")
+        entry["errcode"] = errcode
+        if help_url:
+            entry["renew_url"] = help_url
+    caps[key] = entry
+    row.capabilities = caps
+
+
+def record_error(row: WecomPersonalBinding, key: str, exc: gateway.GatewayError) -> None:
+    """只记录企业微信明确的能力授权错误；参数错误、网络问题不改变能力状态。"""
+    if exc.code == "wecom_error" and exc.errcode in STATE_BY_ERRCODE:
+        record(row, key, errcode=exc.errcode, help_url=exc.help_url)
+
+
+def expires_at(entry: dict[str, Any]) -> datetime | None:
+    if entry.get("state") != "ok":
+        return None
+    start = _parse(entry.get("authorized_at"))
+    return start + AUTH_TTL if start else None
+
+
+def next_expiry(row: WecomPersonalBinding) -> datetime | None:
+    moments = [
+        moment
+        for entry in (row.capabilities or {}).values()
+        if isinstance(entry, dict) and (moment := expires_at(entry)) is not None
+    ]
+    return min(moments) if moments else None
+
+
+def mark_renewed(row: WecomPersonalBinding) -> None:
+    """本人说已在企业微信里续期：当前能用的各项从现在重新起算。"""
+    now = _iso(_now())
+    caps = dict(row.capabilities or {})
+    for key, entry in caps.items():
+        if isinstance(entry, dict) and entry.get("state") == "ok":
+            caps[key] = {**entry, "authorized_at": now}
+    row.capabilities = caps
+    row.reminded_at = None
+
+
+def _window() -> tuple[str, str]:
+    today = _now().astimezone(_CN).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = today + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    return today.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _recent() -> tuple[str, str]:
+    now = _now().astimezone(_CN)
+    return (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"), now.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def probe_calls(row: WecomPersonalBinding) -> dict[str, tuple[str, dict[str, Any]]]:
+    """每项能力一次只读调用，参数取实测可用的最小集合。"""
+    begin, end = _window()
+    since, until = _recent()
+    calls: dict[str, tuple[str, dict[str, Any]]] = {
+        "todo": ("/todo/list", {"limit": 1}),
+        "calendar": ("/calendar/schedules/list", {"begin_time": begin, "end_time": end}),
+        "meeting": ("/meeting/list", {"begin_time": begin, "end_time": end, "limit": 1}),
+        "doc": ("/doc/search", {"keywords": ["周报"], "limit": 1}),
+        "mail": ("/mail/search", {"begin_time": since, "end_time": until}),
+        "disk": ("/disk/files/list", {"limit": 1}),
+    }
+    if row.authorizer_name:
+        calls["contact"] = ("/contact/users/search", {"keywords": [row.authorizer_name]})
+    return calls
+
+
+async def probe(cipher: Cipher, row: WecomPersonalBinding) -> None:
+    """逐项试一次只读调用并记录状态。企业微信暂时不可用时保留原状态。"""
+    await verify(cipher, row)
+
+    async def one(service: str, path: str, payload: dict[str, Any]) -> None:
+        try:
+            await _with_token(cipher, row, lambda token: gateway.invoke(token, path, payload))
+        except gateway.GatewayError as exc:
+            record_error(row, capability_key(service, "read"), exc)
+            return
+        record(row, capability_key(service, "read"))
+
+    await asyncio.gather(
+        *(one(service, path, payload) for service, (path, payload) in probe_calls(row).items())
+    )
+
+
+def summary(row: WecomPersonalBinding) -> dict[str, list[str]]:
+    """哪些能力现在用不了：给提示词与提醒用的可读名单。"""
+    out: dict[str, list[str]] = {"unauthorized": [], "expired": [], "invalid": []}
+    for key, entry in (row.capabilities or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        state = entry.get("state")
+        if state in out:
+            service, _, kind = key.partition(":")
+            suffix = {"write": "（写入）", "send": "（发送）"}.get(kind, "")
+            label = SERVICES.get(service, service) + suffix
+            if label not in out[state]:
+                out[state].append(label)
+    return out
+
+
+def state(row: WecomPersonalBinding | None) -> dict[str, Any]:
+    """「我的企业微信」页面看到的全部状态；加密字段一律不下发。"""
+    if row is None:
+        return {
+            "status": "unbound",
+            "enabled": False,
+            "authorization_level": "readonly",
+            "wecom_bot_id": None,
+            "bot_name": None,
+            "authorizer_name": None,
+            "bound_at": None,
+            "verified_at": None,
+            "next_expiry": None,
+            "error": None,
+            "capabilities": [],
+            "retention_notice": RETENTION_NOTICE,
+        }
+    caps = row.capabilities or {}
+    services = []
+    for service in SERVICES:
+        kinds: dict[str, Any] = {}
+        for key, entry in caps.items():
+            name, _, kind = key.partition(":")
+            if name != service or not isinstance(entry, dict):
+                continue
+            moment = expires_at(entry)
+            kinds[kind] = {
+                "state": entry.get("state", "unknown"),
+                "checked_at": entry.get("checked_at"),
+                "expires_at": _iso(moment) if moment else None,
+                "renew_url": entry.get("renew_url"),
+            }
+        services.append(
+            {"service": service, **{k: kinds.get(k) for k in ("read", "write", "send")}}
+        )
+    moment = next_expiry(row) if row.status == "bound" else None
     return {
-        "status": status,
+        "status": row.status,
+        "enabled": bool(row.enabled) and row.status == "bound",
         "authorization_level": row.authorization_level,
-        "verified_at": row.verified_at.isoformat() if row.verified_at else None,
-        "selection_expires_at": (
-            row.selection_expires_at.isoformat()
-            if status == "selecting" and row.selection_expires_at
-            else None
-        ),
+        "wecom_bot_id": row.wecom_bot_id,
+        "bot_name": row.bot_name,
+        "authorizer_name": row.authorizer_name,
+        "bound_at": _iso(row.bound_at) if row.bound_at else None,
+        "verified_at": _iso(row.verified_at) if row.verified_at else None,
+        "next_expiry": _iso(moment) if moment else None,
+        "error": row.error,
+        "capabilities": services if row.status == "bound" else [],
         "retention_notice": RETENTION_NOTICE,
     }

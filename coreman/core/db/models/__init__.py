@@ -81,8 +81,11 @@ from coreman.core.db.models.scheduling import CronJob, CronRun, Escalation
 from coreman.core.db.models.storage import StoredObject
 from coreman.core.db.models.wecom_bots import WECOM_PROVISION_STATUSES, WecomBotProvision
 from coreman.core.db.models.wecom_personal import (
+    WECOM_BINDING_STATUSES,
     WECOM_PERSONAL_LEVELS,
     WECOM_PERSONAL_STATUSES,
+    WECOM_SCAN_STATUSES,
+    WecomPersonalBinding,
     WecomPersonalGrant,
 )
 
@@ -96,6 +99,9 @@ __all__ = [
     "WECOM_PERSONAL_LEVELS",
     "WECOM_PERSONAL_STATUSES",
     "WecomPersonalGrant",
+    "WECOM_BINDING_STATUSES",
+    "WECOM_SCAN_STATUSES",
+    "WecomPersonalBinding",
     "FeishuPersonalGrant",
     "RuntimeNode",
     "RuntimeInstallLink",
