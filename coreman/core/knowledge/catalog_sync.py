@@ -146,11 +146,15 @@ async def sync_catalog(
     )
     if source is None or source.git_url != url:
         raise ValueError("来源未登记或地址不一致，请先在管理台登记来源")
-    created = updated = 0
+    created = updated = skipped = 0
     for entry in entries:
         skill = await session.scalar(
             select(Skill).where(Skill.name == entry["name"]).with_for_update()
         )
+        if skill is not None and skill.deleted_at is not None:
+            # 管理员删除过的技能不再导入；要恢复就在目录里用同名新建。
+            skipped += 1
+            continue
         if skill is not None and skill.source_id != source.id:
             raise ValueError("插件名称已属于其他来源，同步已撤销")
         if skill is None:
@@ -173,7 +177,16 @@ async def sync_catalog(
         actor_login=actor.login_name if actor else "cli",
         target_type="skill_source",
         target_id=str(source.id),
-        diff={"created": [None, created], "updated": [None, updated]},
+        diff={
+            "created": [None, created],
+            "updated": [None, updated],
+            "skipped": [None, skipped],
+        },
     )
     await session.flush()
-    return {"created": created, "updated": updated, "unchanged": len(entries) - created - updated}
+    return {
+        "created": created,
+        "updated": updated,
+        "unchanged": len(entries) - created - updated - skipped,
+        "skipped": skipped,
+    }

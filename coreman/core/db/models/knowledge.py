@@ -66,6 +66,8 @@ class Skill(TimestampMixin, Base):
     mcp_config_enc: Mapped[str | None] = mapped_column(Text)
     security_prompt_template: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # 删除留墓碑：来源再同步时不重新导入；安装与审批历史仍指向这一行。
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revision: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     __mapper_args__ = {"version_id_col": revision}
 

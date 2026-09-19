@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
@@ -95,7 +95,11 @@ async def bot_skills(
         await session.execute(
             select(BotSkill, Skill)
             .join(Skill, Skill.id == BotSkill.skill_id)
-            .where(BotSkill.bot_id == bot_id)
+            # 目录已删除的技能只剩历史行，不再列出；仍在生效的行照常显示，便于停用。
+            .where(
+                BotSkill.bot_id == bot_id,
+                or_(Skill.deleted_at.is_(None), BotSkill.status != "uninstalled"),
+            )
             .order_by(Skill.name)
         )
     ).all()
@@ -156,8 +160,9 @@ async def install(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bot = await admin_bot(session, bot_id, actor)
-    skill = await session.get(Skill, skill_id)
-    if skill is None:
+    # 共享锁与目录删除的行锁互斥：删除与新申请并发时只有一个成功。
+    skill = await session.get(Skill, skill_id, with_for_update={"read": True})
+    if skill is None or skill.deleted_at is not None:
         raise not_found("技能不存在")
     if await session.scalar(
         select(SkillApproval.id).where(
@@ -276,12 +281,29 @@ async def approvals(
         session, select(SkillApproval).order_by(SkillApproval.requested_at.desc()), params
     )
     names = await bot_names(session, (row.bot_id for row in page["items"]))
+    # 带上技能名：目录里已删除的技能不在技能列表中，历史申请也要能看出是哪个。
+    skill_names = dict(
+        (
+            await session.execute(
+                select(Skill.id, Skill.name).where(
+                    Skill.id.in_({row.skill_id for row in page["items"]})
+                )
+            )
+        )
+        .tuples()
+        .all()
+    )
     return {
         "code": 0,
         "data": {
             **page,
             "items": [
-                {**approval_out(row), "bot_name": names.get(row.bot_id)} for row in page["items"]
+                {
+                    **approval_out(row),
+                    "bot_name": names.get(row.bot_id),
+                    "skill_name": skill_names.get(row.skill_id),
+                }
+                for row in page["items"]
             ],
         },
     }
