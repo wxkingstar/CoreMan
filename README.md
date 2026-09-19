@@ -123,7 +123,7 @@ Linux 需要用户级 systemd，Debian / Ubuntu 还要先安装 `python3-venv`�
 - **执行边界**：AI CLI 以 Runtime 所属系统用户的权限运行。请为 Runtime 准备独立、最小权限的系统用户，按需隔离文件和网络；提示词约束不能代替操作系统隔离。信任模型见 [安全说明](SECURITY.md)。
 - **升级与备份**：用 `./deploy/coreman build` 构建新版本，再用 `./deploy/coreman upgrade all <标签>` 滚动升级，详见 [运行维护](docs/operations.md)。定期备份 `.env` 和数据库；`MASTER_KEY` 丢失后，库里加密保存的凭证无法解密。
 
-项目仍处于早期阶段（当前发布版本 0.1.0），`main` 分支持续加入新功能，变更见 [CHANGELOG](CHANGELOG.md)。
+项目仍处于早期阶段（当前发布版本 0.2.0），`main` 分支持续加入新功能，变更见 [CHANGELOG](CHANGELOG.md)。
 
 ## 文档
 
