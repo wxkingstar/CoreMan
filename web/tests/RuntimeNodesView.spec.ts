@@ -125,6 +125,32 @@ it('requires the project root before creating a one-time install command', async
   expect(wrapper.find('[id=tab-links]').exists()).toBe(false)
   wrapper.unmount()
 })
+// 文案里的 | 会被 vue-i18n 当成复数分隔符，提示曾只剩「sh 换成」。
+it('renders the full --replace hint in every locale', async () => {
+  const wrapper = mountPage('platform_admin'); await flushPromises()
+  await wrapper.get('[data-test="install-runtime"]').trigger('click'); await flushPromises()
+  await (wrapper.vm as unknown as { create: () => Promise<void> }).create(); await flushPromises()
+  const hint = () => wrapper.get('[data-test="runtime-replace-hint"]')
+  expect(hint().text()).toBe('目标机器已装过 Runtime 时，把命令末尾的 | sh 换成 | sh -s -- --replace：先停止原 Runtime 并整体备份原安装目录，再用本链接重装。')
+  expect(hint().findAll('code').map((c) => c.text())).toEqual(['| sh', '| sh -s -- --replace'])
+  try {
+    for (const [locale, text] of [['en', 'replace the trailing | sh with | sh -s -- --replace: the existing'], ['ja', '末尾の | sh を | sh -s -- --replace に変えてください。']] as const) {
+      i18n.global.locale.value = locale; await flushPromises()
+      expect(hint().text()).toContain(text)
+    }
+  } finally {
+    i18n.global.locale.value = 'zh'
+  }
+  wrapper.unmount()
+})
+it('keeps literal pipes out of every translation message', () => {
+  const pipes: string[] = []
+  const walk = (node: unknown, path: string) => {
+    if (typeof node === 'string') { if (node.includes('|')) pipes.push(path) } else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) walk(v, path ? `${path}.${k}` : k)
+  }
+  walk(i18n.global.messages.value, '')
+  expect(pipes).toEqual([])
+})
 // 停用会级联停掉该节点全部运行时并取消进行中的调用，误触一次代价很大。
 it('asks before disabling or draining a runtime and explains the impact', async () => {
   const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')

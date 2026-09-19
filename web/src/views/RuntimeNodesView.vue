@@ -646,7 +646,21 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           :rows="4"
           readonly
           data-test="runtime-install-command"
-        /><p>{{ t('runtimeNodes.expires') }}: {{ formatDateTime(generated.expires_at) }}</p><small>{{ t('runtimeNodes.credentialHint') }}</small><p><small data-test="runtime-replace-hint">{{ t('runtimeNodes.replaceHint') }}</small></p>
+        /><p>{{ t('runtimeNodes.expires') }}: {{ formatDateTime(generated.expires_at) }}</p><small>{{ t('runtimeNodes.credentialHint') }}</small><p>
+          <!-- 命令片段走插槽：文案里的 | 会被 vue-i18n 当成复数分隔符截断。 -->
+          <i18n-t
+            keypath="runtimeNodes.replaceHint"
+            tag="small"
+            data-test="runtime-replace-hint"
+          >
+            <template #from>
+              <code>| sh</code>
+            </template>
+            <template #to>
+              <code>| sh -s -- --replace</code>
+            </template>
+          </i18n-t>
+        </p>
       </template>
       <template #footer>
         <el-button @click="dialog = false">
