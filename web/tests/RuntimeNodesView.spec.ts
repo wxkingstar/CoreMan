@@ -246,3 +246,27 @@ it('shows the reported Git host allowlist and flags entries that are not host na
   expect(rows[1].text()).not.toContain('不是主机名')
   wrapper.unmount()
 })
+// 代理同样只能在节点侧改：管理台只读展示来源，两处都没有代理时给风险提示。
+it('shows which proxy the CLIs inherit and warns when none is in effect', async () => {
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
+    { ...base, id: 'n1', name: 'configured', proxy: { source: 'coreman', url: 'http://127.0.0.1:18080', pending: true } },
+    { ...base, id: 'n2', name: 'inherited', proxy: { source: 'environment', url: 'http://192.0.2.9:3128', pending: false } },
+    { ...base, id: 'n3', name: 'direct', proxy: { source: 'none', url: '', pending: false } },
+    { ...base, id: 'n4', name: 'legacy', proxy: null },
+  ] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  for (const icon of wrapper.findAll('.el-table__expand-icon')) await icon.trigger('click')
+  await flushPromises()
+  const rows = wrapper.findAll('[data-test="runtime-proxy"]')
+  expect(rows).toHaveLength(4)
+  expect(rows[0].findAll('.el-tag').map(tag => tag.text())).toEqual(['CoreMan 配置', 'http://127.0.0.1:18080'])
+  expect(rows[0].text()).toContain('重启 Daemon 后生效')
+  expect(rows[1].findAll('.el-tag').map(tag => tag.text())).toEqual(['继承自服务环境', 'http://192.0.2.9:3128'])
+  expect(rows[1].text()).not.toContain('重启 Daemon 后生效')
+  expect(rows[2].findAll('.el-tag')[0].classes()).toContain('el-tag--warning')
+  expect(rows[2].text()).toContain('Claude / Codex 直连 AI 服务')
+  expect(rows[3].text()).toContain('未上报（节点版本较旧）')
+  expect(rows[3].text()).not.toContain('直连 AI 服务')
+  wrapper.unmount()
+})

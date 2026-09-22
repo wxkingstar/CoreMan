@@ -41,6 +41,8 @@ class RuntimeNode(TimestampMixin, Base):
     active_calls: Mapped[int | None] = mapped_column(Integer)
     # 节点 config.json 的 git_hosts 白名单，由心跳上报、只读展示；旧节点不上报时为空。
     git_hosts: Mapped[list[str] | None] = mapped_column(JSONB)
+    # CLI 继承到的出站代理 {source, url, pending}，由心跳上报、只读展示；旧节点不上报时为空。
+    proxy: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):

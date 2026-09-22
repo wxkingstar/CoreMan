@@ -123,6 +123,33 @@ class RootChangeResult(BaseModel):
     status: Literal["applied", "failed"]
 
 
+class ProxyState(BaseModel):
+    """节点启动时定下的出站代理：config.json 的 proxy 优先，否则沿用服务环境的变量。"""
+
+    source: Literal["coreman", "environment", "none"]
+    url: str = Field(default="", max_length=500)
+    # config.json 的 proxy 已被改成别的值，重启 Daemon 才会生效。
+    pending: StrictBool = False
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def printable(cls, value: object) -> str:
+        # 手工改坏的配置只影响展示。节点已去掉账号密码，这里再兜底一次，密码不落库。
+        text = "".join(c for c in str(value or "") if c.isprintable()).strip()[:500]
+        scheme, sep, rest = text.partition("://")
+        if not sep:
+            scheme, rest = "", text
+        netloc, slash, path = rest.partition("/")
+        if "@" in netloc:
+            netloc = netloc.rsplit("@", 1)[1]
+        return scheme + sep + netloc + slash + path
+
+    @field_validator("pending", mode="before")
+    @classmethod
+    def flag(cls, value: object) -> bool:
+        return value is True
+
+
 class HeartbeatIn(BaseModel):
     claude: Capability
     codex: Capability
@@ -136,8 +163,17 @@ class HeartbeatIn(BaseModel):
     active_calls: int | None = Field(default=None, ge=0, le=1024)
     # 节点 config.json 的 Git 主机白名单，只读展示；旧节点不上报时为空。
     git_hosts: list[str] | None = None
+    # CLI 实际继承到的出站代理，只读展示；旧节点不上报时为空（管理台显示为未知）。
+    proxy: ProxyState | None = None
     root_edit_supported: bool = False
     root_change_result: RootChangeResult | None = None
+
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def known_proxy(cls, value: object) -> object:
+        # 只用于展示的字段不能让心跳被拒：新节点上报了本版本不认识的来源时按未知处理。
+        sources = ("coreman", "environment", "none")
+        return value if isinstance(value, dict) and value.get("source") in sources else None
 
     @field_validator("git_hosts", mode="before")
     @classmethod
@@ -375,6 +411,7 @@ async def heartbeat(
             max_concurrent=body.max_concurrent,
             active_calls=body.active_calls,
             git_hosts=body.git_hosts,
+            proxy=body.proxy.model_dump() if body.proxy else None,
             capabilities={p: getattr(body, p).model_dump() for p in ("claude", "codex")},
         )
     )

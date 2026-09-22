@@ -262,6 +262,38 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     >{{ t('runtimeNodes.nodeGitHostsInvalid', { hosts: invalidGitHosts(row).join(', ') }) }}</small>
                     <small class="git-hosts-hint">{{ t('runtimeNodes.nodeGitHostsHint') }}</small>
                   </div>
+                  <div
+                    class="node-proxy"
+                    data-test="runtime-proxy"
+                  >
+                    <span>{{ t('runtimeNodes.nodeProxy') }}:</span>
+                    <span v-if="row.proxy == null">{{ t('runtimeNodes.nodeProxyUnknown') }}</span>
+                    <template v-else-if="row.proxy.source === 'none'">
+                      <el-tag
+                        size="small"
+                        type="warning"
+                      >
+                        {{ t('runtimeNodes.nodeProxyNone') }}
+                      </el-tag>
+                      <small class="node-proxy-risk">{{ t('runtimeNodes.nodeProxyNoneHint') }}</small>
+                    </template>
+                    <template v-else>
+                      <el-tag size="small">
+                        {{ t(row.proxy.source === 'coreman' ? 'runtimeNodes.nodeProxyCoreman' : 'runtimeNodes.nodeProxyEnv') }}
+                      </el-tag>
+                      <el-tag
+                        size="small"
+                        type="info"
+                      >
+                        {{ row.proxy.url }}
+                      </el-tag>
+                    </template>
+                    <small
+                      v-if="row.proxy?.pending"
+                      class="node-proxy-risk"
+                    >{{ t('runtimeNodes.nodeProxyPending') }}</small>
+                    <small class="git-hosts-hint">{{ t('runtimeNodes.nodeProxyHint') }}</small>
+                  </div>
                   <el-alert
                     v-if="['supervised', 'systemd-user-session'].includes(row.service_status)"
                     type="warning"
@@ -698,6 +730,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .git-hosts .el-tag { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; }
 .git-hosts-invalid, .git-hosts-hint { flex-basis: 100%; }
 .git-hosts-invalid { color: var(--el-color-danger); }
+.node-proxy { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 1em 0; }
+.node-proxy .el-tag { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.node-proxy-risk { flex-basis: 100%; color: var(--el-color-warning); }
 .backend-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--el-border-color-lighter); }
 .backend-models { width: 100%; overflow-wrap: anywhere; font-size: 13px; }
 @media (max-width: 640px) { .page-header { align-items: flex-start; flex-direction: column; } .node-detail { padding: 12px; } }

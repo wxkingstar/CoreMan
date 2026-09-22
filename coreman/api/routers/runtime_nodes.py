@@ -293,6 +293,7 @@ async def list_nodes(
                 "active_calls": n.active_calls if online(n) else None,
                 "team_id": str(n.team_id) if n.team_id else None,
                 "git_hosts": n.git_hosts,
+                "proxy": n.proxy,
                 "team_name": names.get(n.team_id) if n.team_id else None,
                 "backends": backends,
             }

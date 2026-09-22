@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -290,3 +291,93 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
     assert reports[0]["status"] == "healthy"
+
+
+@pytest.mark.parametrize("key", ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"])
+def test_configured_proxy_overrides_the_service_environment(daemon, monkeypatch, key):
+    """Everything the CLIs do inherits this environment, so all four variables must agree."""
+    from runtime_daemon.daemon import PROXY_ENV_KEYS
+
+    for name in PROXY_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(key, "http://198.51.100.7:3128")
+    daemon.config["proxy"] = "http://127.0.0.1:18080"
+    daemon.apply_proxy()
+    assert [os.environ[name] for name in PROXY_ENV_KEYS] == ["http://127.0.0.1:18080"] * 4
+    assert daemon.proxy == {"source": "coreman", "url": "http://127.0.0.1:18080", "pending": False}
+
+
+@pytest.mark.parametrize("key", ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"])
+def test_without_configured_proxy_the_environment_is_kept_and_reported(daemon, monkeypatch, key):
+    from runtime_daemon.daemon import PROXY_ENV_KEYS
+
+    for name in PROXY_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(key, " http://198.51.100.7:3128 ")
+    daemon.apply_proxy()
+    assert daemon.proxy == {
+        "source": "environment",
+        "url": "http://198.51.100.7:3128",
+        "pending": False,
+    }
+    # An inherited proxy is reported, never rewritten: the other variables stay as they were.
+    assert [name for name in PROXY_ENV_KEYS if name in os.environ] == [key]
+
+
+def test_no_proxy_anywhere_is_reported_as_none(daemon, monkeypatch):
+    from runtime_daemon.daemon import PROXY_ENV_KEYS
+
+    for name in PROXY_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    daemon.config["proxy"] = "   "
+    daemon.apply_proxy()
+    assert daemon.proxy == {"source": "none", "url": "", "pending": False}
+
+
+def test_proxy_edited_in_config_is_pending_until_the_daemon_restarts(daemon, monkeypatch):
+    from runtime_daemon.daemon import PROXY_ENV_KEYS
+
+    for name in PROXY_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    daemon.config["proxy"] = "http://127.0.0.1:18080"
+    daemon.apply_proxy()
+    daemon.save()
+    assert daemon.proxy_state()["pending"] is False
+    edited = {**json.loads(daemon.config_path.read_text()), "proxy": "http://127.0.0.1:18081"}
+    daemon.config_path.write_text(json.dumps(edited))
+    assert daemon.proxy_state() == {
+        "source": "coreman",
+        "url": "http://127.0.0.1:18080",
+        "pending": True,
+    }
+    # An unreadable config.json only costs the pending flag, never the heartbeat.
+    daemon.config_path.write_text("{ not json")
+    assert daemon.proxy_state()["pending"] is False
+
+
+@pytest.mark.parametrize(
+    "url,shown",
+    [
+        ("http://user:s3cret@proxy.example:3128", "http://proxy.example:3128"),
+        ("http://p%40ss:w@rd@[::1]:8080/", "http://[::1]:8080/"),
+        ("proxy.example:3128", "proxy.example:3128"),
+        ("http://proxy.example:3128", "http://proxy.example:3128"),
+    ],
+)
+def test_reported_proxy_never_carries_credentials(daemon, monkeypatch, url, shown):
+    """The console shows where traffic goes; the password stays on the node."""
+    from runtime_daemon.daemon import PROXY_ENV_KEYS
+
+    for name in PROXY_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", url)
+    daemon.apply_proxy()
+    assert daemon.proxy["url"] == shown
+    assert os.environ["https_proxy"] == url
+    daemon.config["proxy"] = url
+    daemon.apply_proxy()
+    assert daemon.proxy["url"] == shown
+    assert os.environ["HTTPS_PROXY"] == url
+    # Redaction is display-only: the pending check still compares the real values.
+    daemon.save()
+    assert daemon.proxy_state()["pending"] is False
