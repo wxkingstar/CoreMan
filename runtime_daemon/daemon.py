@@ -79,6 +79,21 @@ HEAL_DEFER_ROUNDS = 30
 # Enrollment rejections worth retrying; any other 4xx will not change with the same token.
 RETRYABLE_ENROLL_STATUSES = {408, 429}
 
+# 出站代理变量：大小写两套都写，curl 等程序只认小写的那两个。HTTPS 在前，读取时优先它。
+PROXY_ENV_KEYS: tuple[str, ...] = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+
+
+def redact_proxy_url(url: str) -> str:
+    """The proxy address without its credentials: only the host and port leave the node."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        scheme, rest = "", url
+    netloc, slash, path = rest.partition("/")
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    return scheme + sep + netloc + slash + path
+
+
 # 运行时控制类环境变量黑名单，与 coreman/core/bots/env_policy.py 逐项一致（守护进程是独立包，
 # 不能 import coreman；各条目的理由见那边的注释）。tests/unit/test_env_policy.py 校验两份相同。
 # 请求 env 会原样并入免审批运行的 CLI 进程，命中任一条就拒绝整个请求。
@@ -445,6 +460,8 @@ class Daemon:
         self.log_rotator = LogRotator()
         self.socket_failures: dict[str, int] = {}
         self.heal_deferrals: dict[str, int] = {}
+        # 生效中的出站代理（prepare 时确定，重启才会变），供心跳上报与管理台展示。
+        self.proxy: dict[str, str | bool] = {"source": "none", "url": "", "pending": False}
 
     def socket_path(self, provider: str) -> Path:
         # Keep under Unix's 104-byte sockaddr limit, including long macOS home paths.
@@ -452,6 +469,36 @@ class Daemon:
 
     def save(self) -> None:
         atomic_write(self.config_path, json.dumps(self.config, indent=2), durable=True)
+
+    def apply_proxy(self) -> None:
+        """Decide the outbound proxy once, before any driver inherits the environment.
+
+        The configured proxy wins and overwrites the four variables; without one the
+        service environment's own proxy is kept and only reported. Everything the CLIs
+        do inherits this environment, so the choice cannot change without a restart.
+        """
+        configured = str(self.config.get("proxy") or "").strip()
+        if configured:
+            for key in PROXY_ENV_KEYS:
+                os.environ[key] = configured
+            shown = redact_proxy_url(configured)
+            self.proxy = {"source": "coreman", "url": shown, "pending": False}
+            return
+        values = (os.environ.get(key, "").strip() for key in PROXY_ENV_KEYS)
+        inherited = next((value for value in values if value), "")
+        self.proxy = {
+            "source": "environment" if inherited else "none",
+            "url": redact_proxy_url(inherited),
+            "pending": False,
+        }
+
+    def proxy_state(self) -> dict[str, str | bool]:
+        """The applied proxy, flagged as pending when config.json has been edited since."""
+        configured = str(self.config.get("proxy") or "").strip()
+        with contextlib.suppress(OSError, ValueError):
+            on_disk = str(json.loads(self.config_path.read_text()).get("proxy") or "").strip()
+            return {**self.proxy, "pending": on_disk != configured}
+        return dict(self.proxy)
 
     def apply_root_change(self, change: dict | None) -> None:
         """Durable acknowledgement: retries/restarts never reapply a completed request.
@@ -540,10 +587,7 @@ class Daemon:
                     link.unlink()
                 link.symlink_to(executable)
         os.environ["PATH"] = str(bin_dir) + os.pathsep + configured_path
-        proxy = self.config.get("proxy")
-        if proxy:
-            for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-                os.environ[key] = proxy
+        self.apply_proxy()
 
     async def api(
         self, path: str, body: dict, *, retry: bool = False, budget: float | None = None
@@ -926,6 +970,8 @@ class Daemon:
             "active_calls": len([task for task in self.tasks.values() if not task.done()]),
             # Read-only in the console, so a rejected Git source can be explained there.
             "git_hosts": self.git_hosts,
+            # Which proxy the CLIs inherit, so the console can warn when there is none.
+            "proxy": self.proxy_state(),
             "root_edit_supported": True,
             "root_change_result": self.config.get("root_change_result"),
         }

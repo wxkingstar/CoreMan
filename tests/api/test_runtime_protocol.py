@@ -279,6 +279,46 @@ async def test_heartbeat_git_hosts_are_listed_without_rejecting_a_bad_config(cli
     assert await listed({"git_hosts": []}) == []
 
 
+async def test_heartbeat_proxy_state_is_listed_and_legacy_nodes_stay_unknown(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}
+
+    async def listed(extra):
+        response = await client.post("/api/runtime/heartbeat", headers=headers, json=beat | extra)
+        assert response.status_code == 200
+        nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+        return next(n for n in nodes if n["id"] == body["node_id"])["proxy"]
+
+    # Older nodes do not report it: shown as unknown, not as "no proxy in effect".
+    assert await listed({}) is None
+    configured = {"source": "coreman", "url": "http://127.0.0.1:18080", "pending": True}
+    assert await listed({"proxy": configured}) == configured
+    inherited = {"source": "environment", "url": "http://192.0.2.9:3128"}
+    assert await listed({"proxy": inherited}) == {**inherited, "pending": False}
+    assert await listed({"proxy": {"source": "none"}}) == {
+        "source": "none",
+        "url": "",
+        "pending": False,
+    }
+    # A hand-edited config.json must not take the node offline, and a display-only field
+    # from a newer node that this platform does not understand counts as unknown.
+    odd = {"source": "environment", "url": "http://a\x1b.example", "pending": "yes"}
+    assert await listed({"proxy": odd}) == {
+        "source": "environment",
+        "url": "http://a.example",
+        "pending": False,
+    }
+    assert await listed({"proxy": {"source": "socks", "url": "socks5://x"}}) is None
+    assert await listed({"proxy": "http://127.0.0.1:18080"}) is None
+    # Credentials in an inherited proxy variable never reach the database.
+    secret = {"source": "environment", "url": "http://user:s3cret@proxy.example:3128/"}
+    assert await listed({"proxy": secret}) == {
+        "source": "environment",
+        "url": "http://proxy.example:3128/",
+        "pending": False,
+    }
+
+
 async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omission(
     client, db_session
 ):

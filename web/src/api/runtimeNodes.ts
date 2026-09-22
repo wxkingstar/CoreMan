@@ -15,6 +15,8 @@ export interface RuntimeNode {
   max_concurrent: number | null; active_calls: number | null
   /** 节点 config.json 的 Git 主机白名单（只读）；旧版 Daemon 未上报时为 null。 */
   git_hosts: string[] | null
+  /** CLI 继承到的出站代理（只读）；旧版 Daemon 未上报时为 null。pending 表示配置改过、重启后才生效。 */
+  proxy: { source: 'coreman' | 'environment' | 'none'; url: string; pending: boolean } | null
   capabilities: Record<string, Capability>; backends: RelayOut[]
 }
 export interface InstallLink {
