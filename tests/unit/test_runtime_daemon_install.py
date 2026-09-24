@@ -82,6 +82,12 @@ def test_service_definitions_do_not_restart_configuration_errors(tmp_path):
     assert lifecycle.fatal_exit_status("systemd-user") == EXIT_CONFIG
 
 
+def test_systemd_working_directory_is_not_quoted(tmp_path):
+    # systemd 不解析 WorkingDirectory= 的引号，带引号时报 "path is not absolute" 并拒绝整个 unit。
+    unit = install_service.systemd_unit({"release": "/srv/rt/50%/release-1"}, tmp_path / "c.json")
+    assert "WorkingDirectory=/srv/rt/50%%/release-1\n" in unit
+
+
 def test_supervisor_stops_when_the_daemon_reports_a_configuration_error(tmp_path, monkeypatch):
     release = tmp_path / "release"
     python = release / ".venv/bin/python"

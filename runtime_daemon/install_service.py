@@ -53,6 +53,12 @@ def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
+def systemd_path(value: str) -> str:
+    # WorkingDirectory= 等路径型设置不做引号解析，加引号会被当成相对路径而拒绝整个 unit；
+    # 只转义说明符 %。
+    return value.replace("%", "%%")
+
+
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, check=True, **kwargs)
 
@@ -146,7 +152,7 @@ def systemd_unit(cfg: dict, config_path: Path) -> str:
             "After=network-online.target",
             "[Service]",
             "Type=simple",
-            "WorkingDirectory=" + systemd_quote(str(release)),
+            "WorkingDirectory=" + systemd_path(str(release)),
             "Environment=" + systemd_quote("HOME=" + str(Path.home())),
             "Environment="
             + systemd_quote("PATH=" + (cfg.get("path") or os.environ.get("PATH", ""))),
