@@ -64,6 +64,28 @@ async def test_directory_pagination_rejects_incomplete_or_repeated_page(monkeypa
         await client.aclose()
 
 
+async def test_directory_pagination_accepts_empty_page_without_items(monkeypatch):
+    # 没有直属成员的部门：飞书只返回 has_more=false，不带 items。
+    client = FeishuClient("x", "y")
+    pages = iter(
+        [
+            {"code": 0, "data": {"has_more": False}},
+            {"code": 0, "data": {"items": "broken", "has_more": False}},
+        ]
+    )
+
+    async def call(*args, **kwargs):
+        return next(pages)
+
+    monkeypatch.setattr(client, "call", call)
+    try:
+        assert await client.pages("/users", {}) == []
+        with pytest.raises(FeishuError, match="invalid directory page"):
+            await client.pages("/users", {})
+    finally:
+        await client.aclose()
+
+
 def test_feishu_directory_requires_stable_user_id_and_preserves_identity():
     row = {
         "user_id": "u",

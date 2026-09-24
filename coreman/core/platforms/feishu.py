@@ -193,9 +193,10 @@ class FeishuClient:
                 "GET", path, params={**params, "page_size": 50, "page_token": page_token}
             )
             data = body.get("data")
-            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            # 结果为空时飞书省略 items（如没有直属成员的部门只返回 has_more=false）。
+            batch = data.get("items", []) if isinstance(data, dict) else None
+            if not isinstance(batch, list):
                 raise FeishuError(-2, "invalid directory page")
-            batch = data["items"]
             if any(not isinstance(row, dict) for row in batch):
                 raise FeishuError(-2, "invalid directory item")
             items.extend(batch)
