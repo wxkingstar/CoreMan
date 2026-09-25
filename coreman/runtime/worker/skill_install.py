@@ -264,6 +264,8 @@ class SkillInstallHandler:
                     payload["git_access_token"] = ctx.cipher.decrypt(
                         source.access_token_enc, SOURCE_TOKEN_AAD
                     )
+                    if source.git_username:
+                        payload["git_username"] = source.git_username
             needs_code = row.installed_at is None or inputs["reinstall_code"]
             relay_version = relay.version
             await session.commit()

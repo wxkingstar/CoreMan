@@ -31,6 +31,7 @@ class SkillSource(TimestampMixin, Base):
     label: Mapped[str] = mapped_column(Text)
     git_url: Mapped[str | None] = mapped_column(Text)
     access_token_enc: Mapped[str | None] = mapped_column(Text)
+    git_username: Mapped[str | None] = mapped_column(Text)
     categories: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     version: Mapped[int] = mapped_column(Integer, server_default=text("1"))

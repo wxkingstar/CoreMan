@@ -3,6 +3,7 @@ import type { skillEditorZh } from './skillEditor'
 const skillEditorEn = {
   projectToken: 'Project Access Token (optional)', tokenPreserve: 'Configured; leave blank to keep the current token', tokenPlaceholder: 'Paste a project access token with read_repository permission',
   tokenHint: 'Encrypted and never displayed again. SSH URLs are converted to HTTPS URLs for the same repository when authenticating with a token. The token is not stored in the repository URL.', removeToken: 'Remove saved token',
+  gitUsername: 'Git username (optional)', gitUsernameHint: 'Sent with the token for HTTPS authentication. Leave blank to use oauth2 (GitLab); for Alibaba Cloud Codeup, enter the Yunxiao account name that owns the token.',
   modifiedMask: 'The mask was modified. Cancel and reopen to keep the original value, or enter a complete new value. Do not edit individual dots.',
   intro: 'Sync skills from source repositories, configure and enable them in the catalog, then install them for AI employees.',
   allSources: 'All sources', newSkill: 'Create skill', editSkill: 'Edit skill',

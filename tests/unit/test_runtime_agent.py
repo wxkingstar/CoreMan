@@ -256,6 +256,42 @@ def test_command_errors_do_not_echo_output_or_credentials():
     assert "3" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "fatal: could not read Username for 'https://git.example.com': terminal prompts disabled",
+        "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'x'",
+    ],
+)
+def test_git_auth_failures_get_a_fixed_hint(output):
+    with pytest.raises(agent_module.OperationError) as exc:
+        agent_module.run_command(
+            ["/bin/sh", "-c", f'echo "{output}" synthetic-secret; exit 128'],
+            git_auth=True,
+        )
+    assert str(exc.value) == agent_module.GIT_AUTH_FAILURE
+    with pytest.raises(agent_module.OperationError) as exc:
+        agent_module.run_command(["/bin/sh", "-c", "echo not found; exit 128"], git_auth=True)
+    assert "128" in str(exc.value)
+
+
+@pytest.mark.parametrize("username", ["a:b", "a b", 3])
+def test_skill_install_rejects_invalid_git_username(agent, monkeypatch, username):
+    bot = agent.root / "bad-user-bot"
+    bot.mkdir()
+    monkeypatch.setattr(agent_module, "run_command", lambda *a, **k: pytest.fail("ran"))
+    with pytest.raises(agent_module.OperationError):
+        agent.install_skill(
+            {
+                "project_dir": str(bot),
+                "git_url": "https://github.com/example/tools.git",
+                "skill_name": "query",
+                "git_access_token": "test-token",
+                "git_username": username,
+            }
+        )
+
+
 def test_commands_do_not_inherit_agent_identity(monkeypatch):
     import sys
 
@@ -399,7 +435,8 @@ def test_automatic_memory_report_reads_only_assigned_workspaces(agent, monkeypat
     assert [row["content"] for row in sent] == ["mine"]
 
 
-def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
+@pytest.mark.parametrize("username", [None, "demo-user"])
+def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch, username):
     bot = agent.root / "token-bot"
     bot.mkdir()
     source = bot / ".agents/skills/query"
@@ -423,21 +460,22 @@ def test_skill_token_only_reaches_git_clone_not_installer(agent, monkeypatch):
                 )
 
     monkeypatch.setattr(agent_module, "run_command", run)
-    agent.install_skill(
-        {
-            "project_dir": str(bot),
-            "git_url": "https://github.com/example/tools.git",
-            "skill_name": "query",
-            "git_access_token": "test-token",
-        }
-    )
+    data = {
+        "project_dir": str(bot),
+        "git_url": "https://github.com/example/tools.git",
+        "skill_name": "query",
+        "git_access_token": "test-token",
+    }
+    if username:
+        data["git_username"] = username
+    agent.install_skill(data)
     clone, install = calls
     assert clone[0][0] == "git" and "clone" in clone[0]
     assert "test-token" not in str(clone[0])
     assert {"credential.helper=", "http.proxy=", "http.followRedirects=false"} <= set(clone[0])
     # GIT_CONFIG_COUNT 要 Git 2.31+，旧版会静默忽略、克隆时不带令牌。
     assert "GIT_CONFIG_COUNT" not in clone[1]["env_override"]
-    assert answers == ["oauth2\n", "test-token\n"]
+    assert answers == [f"{username or 'oauth2'}\n", "test-token\n"]
     assert "env_override" not in install[1]
     assert "test-token" not in str(install)
     assert install[0][4].startswith("/")

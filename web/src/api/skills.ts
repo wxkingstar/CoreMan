@@ -1,6 +1,6 @@
 import { call, http } from './client'
 
-export interface Source { has_access_token?: boolean; id: string; key: string; label: string; git_url: string | null; categories: Record<string, string>; sort_order: number; version: number }
+export interface Source { has_access_token?: boolean; id: string; key: string; label: string; git_url: string | null; git_username?: string | null; categories: Record<string, string>; sort_order: number; version: number }
 export interface SkillInput {
   name: string; source_id: string; description: string; category: string | null; security_level: 'public' | 'internal'; version: string | null
   env_groups: string[]; selectable_env_groups: Record<string, string>; data_sources: Record<string, string> | null

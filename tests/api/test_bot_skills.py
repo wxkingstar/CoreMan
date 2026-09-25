@@ -104,6 +104,36 @@ async def test_public_install_secret_layer_and_uninstall(
     assert await installs.effective_env(db_session, cipher, bot) == {"MANUAL_KEY": "manual"}
 
 
+@pytest.mark.parametrize("username", [None, "demo-user"])
+async def test_install_forwards_source_token_with_its_git_username(
+    client, db_session, db_engine, monkeypatch, username
+):
+    from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD
+
+    bot, skill, cipher = await prepare(client, db_session)
+    source = await db_session.get(SkillSource, skill.source_id)
+    source.access_token_enc = cipher.encrypt("synthetic-source-token", SOURCE_TOKEN_AAD)
+    source.git_username = username
+    await db_session.commit()
+    calls = []
+
+    async def agent(relay, cipher, operation, payload):
+        calls.append(payload)
+        return {"success": True}
+
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    result = await client.post(
+        f"/api/admin/bots/{bot.id}/skills/{skill.id}/install",
+        json={"user_env_vars": {"API_KEY": "synthetic-user-secret"}},
+    )
+    assert result.status_code == 200, result.text
+    task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert task.status == "succeeded", task.error_message
+    assert calls[0]["git_access_token"] == "synthetic-source-token"
+    # 未填用户名时不下发，节点沿用 oauth2，旧节点也不受影响。
+    assert calls[0].get("git_username") == username
+
+
 async def test_internal_approval_binds_scope_actor_and_catalog(
     client, db_session, db_engine, monkeypatch
 ):

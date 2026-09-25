@@ -22,6 +22,21 @@ class CatalogAccessError(ValueError):
     """Fixed, credential-free diagnostics for repository authentication failures."""
 
 
+# 服务器不认令牌时，有的直接回 401，有的让 Git 再要用户名，而终端提示已关闭。
+AUTH_FAILURE_MARKERS = (
+    b"401",
+    b"http basic: access denied",
+    b"authentication failed",
+    b"could not read username",
+    b"could not read password",
+    b"terminal prompts disabled",
+)
+AUTH_FAILURE_MESSAGE = (
+    "Git 认证失败。请检查 token 是否有效、是否过期或已撤销、是否有读取仓库的权限，"
+    "以及 Git 用户名：GitLab 留空（使用 oauth2），阿里云云效 Codeup 填令牌所属的云效账号名。"
+)
+
+
 def read_json(root: Path, path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     if not resolved.is_relative_to(root.resolve()) or not resolved.is_file():
@@ -61,7 +76,9 @@ def read_catalog(root: Path) -> list[dict[str, str | None]]:
     return result
 
 
-def fetch_catalog(url: str, access_token: str | None = None) -> list[dict[str, str | None]]:
+def fetch_catalog(
+    url: str, access_token: str | None = None, username: str | None = None
+) -> list[dict[str, str | None]]:
     git_url(url)
     # 不继承全局 Git hook/credential helper、模板或代理，仓库对象不是代码指令。
     env = {
@@ -74,10 +91,12 @@ def fetch_catalog(url: str, access_token: str | None = None) -> list[dict[str, s
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_TERMINAL_PROMPT="0",
         GIT_LFS_SKIP_SMUDGE="1",
+        # 报错按英文识别，中文环境下的 Git 会把 "Authentication failed" 等译掉。
+        LANGUAGE="en",
     )
     if access_token:
         url = https_repository(url)
-        env.update(token_git_env(url, access_token))
+        env.update(token_git_env(url, access_token, username))
     with tempfile.TemporaryDirectory(prefix="coreman-catalog-") as directory:
         root = Path(directory) / "repo"
         with (Path(directory) / "git-error").open("w+b") as errors:
@@ -119,14 +138,8 @@ def fetch_catalog(url: str, access_token: str | None = None) -> list[dict[str, s
                         "的 read_repository 权限，"
                         "并确认项目角色至少为 Reporter。"
                     ) from None
-                if any(
-                    marker in diagnostic
-                    for marker in (b"401", b"http basic: access denied", b"authentication failed")
-                ):
-                    raise CatalogAccessError(
-                        "Git 认证失败。请检查 token 是否有效、是否过期或已撤销，"
-                        "以及 read_repository 权限。"
-                    ) from None
+                if any(marker in diagnostic for marker in AUTH_FAILURE_MARKERS):
+                    raise CatalogAccessError(AUTH_FAILURE_MESSAGE) from None
                 raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
             except (subprocess.SubprocessError, OSError):
                 raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
