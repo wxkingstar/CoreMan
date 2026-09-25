@@ -23,7 +23,7 @@ from coreman.core.bots.secrets import decrypt_json, encrypt_json, mask_dict, mer
 from coreman.core.db.models import BotSkill, EnvPreset, Skill, SkillApproval, SkillSource, User
 from coreman.core.knowledge import skill_policy as policy
 from coreman.core.knowledge.catalog_sync import CatalogAccessError, fetch_catalog, sync_catalog
-from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
+from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, git_username, https_repository
 from coreman.core.masking import mask_secret
 from coreman.core.timeutils import utcnow
 
@@ -50,6 +50,7 @@ class SourceIn(BaseModel):
     sort_order: int = Field(default=0, ge=0, le=10000)
     access_token: str | None = Field(default=None, max_length=2000, repr=False)
     remove_access_token: bool = False
+    git_username: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def token_valid(self) -> SourceIn:
@@ -72,6 +73,11 @@ class SourceIn(BaseModel):
     @classmethod
     def url_valid(cls, value: str | None) -> str | None:
         return policy.git_url(value)
+
+    @field_validator("git_username")
+    @classmethod
+    def username_valid(cls, value: str | None) -> str | None:
+        return git_username(value.strip() if value else value)
 
 
 class EnvField(BaseModel):
@@ -182,7 +188,16 @@ def source_out(row: SkillSource) -> dict[str, Any]:
     return {
         **{
             key: getattr(row, key)
-            for key in ("id", "key", "label", "git_url", "categories", "sort_order", "version")
+            for key in (
+                "id",
+                "key",
+                "label",
+                "git_url",
+                "git_username",
+                "categories",
+                "sort_order",
+                "version",
+            )
         },
         "has_access_token": bool(row.access_token_enc),
     }
@@ -299,7 +314,7 @@ async def sync_source(
     require_if_match(request, row.version)
     if not row.git_url:
         raise ApiError(422, 422, "请先为来源填写 Git 仓库地址")
-    url = row.git_url
+    url, username = row.git_url, row.git_username
     token = (
         request.app.state.cipher.decrypt(row.access_token_enc, SOURCE_TOKEN_AAD)
         if row.access_token_enc
@@ -309,7 +324,7 @@ async def sync_source(
     await session.commit()
     try:
         entries = (
-            await asyncio.to_thread(fetch_catalog, url, token)
+            await asyncio.to_thread(fetch_catalog, url, token, username)
             if token
             else await asyncio.to_thread(fetch_catalog, url)
         )

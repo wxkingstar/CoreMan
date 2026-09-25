@@ -9,12 +9,12 @@ const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
 const busy = ref(false), sourceVisible = ref(false)
 const selectedSource = ref<Source | null>(null)
-const sourceForm = reactive({ key: '', label: '', git_url: '', categories: {} as Record<string, string>, sort_order: 0, access_token: '', remove_access_token: false })
+const sourceForm = reactive({ key: '', label: '', git_url: '', git_username: '', categories: {} as Record<string, string>, sort_order: 0, access_token: '', remove_access_token: false })
 const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 
 /** 打开来源对话框：已保存的项目令牌不回显，只能保留、替换或移除。 */
-function open(row: Source | null) { selectedSource.value = row; Object.assign(sourceForm, { key: row?.key ?? '', label: row?.label ?? '', git_url: row?.git_url ?? '', categories: row?.categories ?? {}, sort_order: row?.sort_order ?? 0, access_token: '', remove_access_token: false }); sourceVisible.value = true }
-async function saveSource() { busy.value = true; try { await skills.sourceSave(selectedSource.value, { ...sourceForm, git_url: sourceForm.git_url || null }); sourceVisible.value = false; sourceForm.access_token = ''; emit('saved') } catch (e) { fail(e) } finally { busy.value = false } }
+function open(row: Source | null) { selectedSource.value = row; Object.assign(sourceForm, { key: row?.key ?? '', label: row?.label ?? '', git_url: row?.git_url ?? '', git_username: row?.git_username ?? '', categories: row?.categories ?? {}, sort_order: row?.sort_order ?? 0, access_token: '', remove_access_token: false }); sourceVisible.value = true }
+async function saveSource() { busy.value = true; try { await skills.sourceSave(selectedSource.value, { ...sourceForm, git_url: sourceForm.git_url || null, git_username: sourceForm.git_username.trim() || null }); sourceVisible.value = false; sourceForm.access_token = ''; emit('saved') } catch (e) { fail(e) } finally { busy.value = false } }
 defineExpose({ open, saveSource, sourceForm })
 </script>
 
@@ -81,6 +81,17 @@ defineExpose({ open, saveSource, sourceForm })
           >
             {{ t('skillEditor.removeToken') }}
           </el-checkbox>
+        </el-form-item>
+        <el-form-item
+          class="full-width"
+          :label="t('skillEditor.gitUsername')"
+        >
+          <el-input
+            v-model="sourceForm.git_username"
+            autocomplete="off"
+            placeholder="oauth2"
+          />
+          <span class="hint">{{ t('skillEditor.gitUsernameHint') }}</span>
         </el-form-item>
         <el-form-item :label="t('infra.sortOrder')">
           <el-input-number

@@ -82,18 +82,35 @@ def operation_message(exc: OperationError) -> str:
     return str(exc)[:200]
 
 
-def git_askpass(directory: Path, token: str) -> dict[str, str]:
+# 服务器不认令牌时，有的直接回 401，有的让 Git 再要用户名，而终端提示已关闭。
+GIT_AUTH_FAILURE_MARKERS = (
+    b"401",
+    b"http basic: access denied",
+    b"authentication failed",
+    b"could not read username",
+    b"could not read password",
+    b"terminal prompts disabled",
+)
+GIT_AUTH_FAILURE = "Git 认证失败，请检查技能来源的 token 与 Git 用户名"
+
+
+def git_askpass(directory: Path, token: str, username: str = "oauth2") -> dict[str, str]:
     """令牌经 GIT_ASKPASS 交给 Git：只在环境变量里，不进命令行。
 
     不用 GIT_CONFIG_COUNT 注入请求头：它要 Git 2.31+，旧版静默忽略，克隆就不带令牌。
+    用户名默认 oauth2（GitLab 约定）；云效 Codeup 等要填令牌所属账号名。
     """
     script = directory / "askpass"
     script.write_text(
-        '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "oauth2";; '
+        '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "$COREMAN_GIT_USERNAME";; '
         '*) printf "%s\\n" "$COREMAN_GIT_TOKEN";; esac\n'
     )
     script.chmod(0o700)
-    return {"GIT_ASKPASS": str(script), "COREMAN_GIT_TOKEN": token}
+    return {
+        "GIT_ASKPASS": str(script),
+        "COREMAN_GIT_USERNAME": username,
+        "COREMAN_GIT_TOKEN": token,
+    }
 
 
 def run_command(
@@ -103,8 +120,12 @@ def run_command(
     *,
     env_override: dict[str, str] | None = None,
     stderr_to_stdout: bool = True,
+    git_auth: bool = False,
 ) -> str:
-    """不通过 shell；超时终止整个进程组，不把命令输出（可能有凭证）放进异常。"""
+    """不通过 shell；超时终止整个进程组，不把命令输出（可能有凭证）放进异常。
+
+    git_auth 时输出里有 Git 认证失败的特征，就报固定的认证失败提示，而不是退出码。
+    """
     with tempfile.TemporaryFile() as output:
         proc = subprocess.Popen(
             command,
@@ -143,6 +164,11 @@ def run_command(
                 proc.wait(timeout=3)
             raise OperationError("操作超时，子进程已停止") from exc
         if rc:
+            if git_auth and stderr_to_stdout:
+                output.seek(0)
+                diagnostic = output.read(MAX_BODY).lower()
+                if any(marker in diagnostic for marker in GIT_AUTH_FAILURE_MARKERS):
+                    raise OperationError(GIT_AUTH_FAILURE)
             raise OperationError(f"操作失败（退出码 {rc}）")
         output.seek(0)
         return output.read(MAX_BODY).decode(errors="replace")
@@ -559,6 +585,7 @@ class Agent:
                 command += ["--skill", skill]
             access_token = data.get("git_access_token")
             if access_token:
+                username = data.get("git_username") or "oauth2"
                 if (
                     not isinstance(access_token, str)
                     or len(access_token) > 2000
@@ -566,6 +593,13 @@ class Agent:
                     or not url.startswith("https://")
                 ):
                     raise OperationError("Git token 或 HTTPS 仓库地址无效")
+                if (
+                    not isinstance(username, str)
+                    or len(username) > 200
+                    or ":" in username
+                    or any(c.isspace() or ord(c) < 32 for c in username)
+                ):
+                    raise OperationError("Git 用户名无效")
                 env = {
                     key: value
                     for key, value in os.environ.items()
@@ -576,6 +610,8 @@ class Agent:
                     GIT_CONFIG_GLOBAL=os.devnull,
                     GIT_TERMINAL_PROMPT="0",
                     GIT_LFS_SKIP_SMUDGE="1",
+                    # 报错按英文识别，中文环境下的 Git 会把 "Authentication failed" 等译掉。
+                    LANGUAGE="en",
                 )
                 # Git 2.32 以前不认 GIT_CONFIG_GLOBAL、仍读 ~/.gitconfig，这里的设置都放在
                 # 命令行里压过它；http.proxy 置空，令牌不经代理。
@@ -591,7 +627,7 @@ class Agent:
                 options = [arg for item in config for arg in ("-c", item)]
                 # The installer sees a local checkout, never the repository token.
                 with tempfile.TemporaryDirectory(prefix="coreman-skill-") as directory:
-                    env.update(git_askpass(Path(directory), access_token))
+                    env.update(git_askpass(Path(directory), access_token, username))
                     checkout = str(Path(directory) / "repo")
                     run_command(
                         ["git", *options, "clone", "--depth", "1", "--template=", "--"]
@@ -599,6 +635,7 @@ class Agent:
                         path,
                         timeout=180,
                         env_override=env,
+                        git_auth=True,
                     )
                     command[4] = checkout
                     run_command(command + ["-y"], path, timeout=300)

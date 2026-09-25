@@ -53,4 +53,8 @@ Agent 执行安装器与探针时移除全部 COREMAN_ 环境变量，避免子�
 
 GitLab 私有仓库要求 token 具备 `read_repository` 且项目角色至少为 Reporter；只有 `read_api` 和 Guest 无法拉取代码。同步会针对 Git 403 和认证失败返回固定的可操作提示，不回显远端输出。
 
+### Git 用户名
+
+令牌随 HTTPS Basic 认证发送，用户名默认是 `oauth2`，这是 GitLab 的约定（GitLab 不校验用户名）。有的服务要求用户名是令牌所属的账号，例如阿里云云效 Codeup 要填令牌所属的云效账号名，用 `oauth2` 会返回 401。这类来源在编辑面板的「Git 用户名」里填写账号名；留空仍用 `oauth2`。用户名不是机密，明文保存在 `skill_sources.git_username`，同步目录和安装技能都使用它。服务器拒绝令牌时，Git 可能报 `could not read Username`（终端提示已关闭），同步和安装都会把它识别为认证失败，提示检查 token 与用户名。
+
 安装任务仅向同一来源仓库传递 token，独立仓库覆盖地址不匹配时拒绝安装。运行时节点先用 token 克隆到临时目录，再对本地副本执行技能安装，安装器不接收 token。来源目录同步直接由管理服务完成，不依赖运行时节点更新。

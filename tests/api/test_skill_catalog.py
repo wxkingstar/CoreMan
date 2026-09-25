@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 
 from coreman.core.db.models import AuditLog, EnvPreset, Skill
@@ -262,11 +263,13 @@ async def test_source_access_token_encrypted_preserved_scoped_and_removed(
         "label": "Token source",
         "git_url": "git@git.example.com:group/repo.git",
         "access_token": token,
+        "git_username": " demo-user ",
     }
     response = await client.post("/api/admin/skill-sources", json=body)
     assert response.status_code == 200, response.text
     row = response.json()["data"]
     assert row["has_access_token"] is True
+    assert row["git_username"] == "demo-user"
     assert token not in response.text and "access_token_enc" not in response.text
     stored = await db_session.get(SkillSource, uuid.UUID(row["id"]))
     assert token not in stored.access_token_enc
@@ -278,11 +281,11 @@ async def test_source_access_token_encrypted_preserved_scoped_and_removed(
     seen = []
     monkeypatch.setattr(
         "coreman.api.routers.skill_catalog.fetch_catalog",
-        lambda url, value: seen.append((url, value)) or [],
+        lambda *args: seen.append(args) or [],
     )
     response = await client.post(path + "/sync", headers={"If-Match": "2"})
     assert response.status_code == 200
-    assert seen == [(body["git_url"], token)]
+    assert seen == [(body["git_url"], token, "demo-user")]
     response = await client.put(
         path, json=body | {"git_url": "https://other.example/other.git"}, headers={"If-Match": "2"}
     )
@@ -311,3 +314,20 @@ async def test_source_token_rejects_invalid_secret_without_echoing_it(client, db
     )
     assert response.status_code == 422
     assert "glpat-secret" not in response.text
+
+
+@pytest.mark.parametrize(("username", "status"), [("", 200), ("a:b", 422), ("a b", 422)])
+async def test_source_git_username_is_optional_and_validated(client, db_session, username, status):
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.post(
+        "/api/admin/skill-sources",
+        json={
+            "key": "user_source",
+            "label": "User",
+            "git_url": "https://git.example.com/repo.git",
+            "git_username": username,
+        },
+    )
+    assert response.status_code == status, response.text
+    if status == 200:
+        assert response.json()["data"]["git_username"] is None

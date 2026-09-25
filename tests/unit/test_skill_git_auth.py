@@ -39,6 +39,7 @@ def test_catalog_fetch_uses_https_auth_without_token_in_arguments(monkeypatch):
     assert "GIT_TRACE" not in kwargs["env"]
     assert kwargs["stderr"].closed
     assert kwargs["env"]["GIT_CONFIG_COUNT"] == "4"
+    assert kwargs["env"]["LANGUAGE"] == "en"
 
 
 @pytest.mark.parametrize(
@@ -64,4 +65,54 @@ def test_catalog_reports_access_denied_without_echoing_git_output(monkeypatch):
         fetch_catalog("https://git.example.com/group/repo.git", "test-token")
     assert "read_repository" in str(caught.value)
     assert "Reporter" in str(caught.value)
+    assert "SECRET" not in str(caught.value)
+
+
+def test_token_auth_uses_configured_git_username():
+    url = "https://git.example.com/group/repo.git"
+    env = token_git_env(url, "test-token", "demo-user")
+    header = env[f"GIT_CONFIG_VALUE_{int(env['GIT_CONFIG_COUNT']) - 1}"]
+    assert header == "Authorization: Basic " + base64.b64encode(b"demo-user:test-token").decode()
+    blank = token_git_env(url, "test-token", "")
+    assert blank == token_git_env(url, "test-token")
+
+
+@pytest.mark.parametrize("username", ["a:b", "a b", "a\nb", "x" * 201])
+def test_token_auth_rejects_invalid_git_username(username):
+    with pytest.raises(ValueError):
+        token_git_env("https://git.example.com/group/repo.git", "test-token", username)
+
+
+def test_catalog_passes_git_username_to_auth_header(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "coreman.core.knowledge.catalog_sync.subprocess.run",
+        lambda cmd, **kwargs: calls.append(kwargs["env"]),
+    )
+    monkeypatch.setattr("coreman.core.knowledge.catalog_sync.read_catalog", lambda root: [])
+    fetch_catalog("https://git.example.com/group/repo.git", "test-token", "demo-user")
+    expected = base64.b64encode(b"demo-user:test-token").decode()
+    assert any(value.endswith(expected) for value in calls[0].values())
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        b"fatal: could not read Username for 'https://git.example.com': "
+        b"terminal prompts disabled SECRET",
+        b"remote: HTTP Basic: Access denied SECRET\nfatal: Authentication failed",
+    ],
+)
+def test_catalog_reports_auth_failure_with_username_hint(monkeypatch, stderr):
+    from coreman.core.knowledge.catalog_sync import CatalogAccessError
+
+    def denied(cmd, **kwargs):
+        kwargs["stderr"].write(stderr)
+        kwargs["stderr"].flush()
+        raise subprocess.CalledProcessError(128, cmd)
+
+    monkeypatch.setattr("coreman.core.knowledge.catalog_sync.subprocess.run", denied)
+    with pytest.raises(CatalogAccessError) as caught:
+        fetch_catalog("https://git.example.com/group/repo.git", "test-token", "demo-user")
+    assert "认证失败" in str(caught.value) and "用户名" in str(caught.value)
     assert "SECRET" not in str(caught.value)

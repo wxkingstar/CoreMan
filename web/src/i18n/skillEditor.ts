@@ -1,6 +1,7 @@
 export const skillEditorZh = {
   projectToken: 'Project Access Token（可选）', tokenPreserve: '已配置；留空保留原 token', tokenPlaceholder: '粘贴有 read_repository 权限的项目访问令牌',
   tokenHint: '加密保存，不回显。使用 token 时将 SSH 地址转换为同一仓库的 HTTPS 地址进行认证；不会把 token 写入仓库地址。', removeToken: '移除已保存的 token',
+  gitUsername: 'Git 用户名（可选）', gitUsernameHint: '随 token 一起用于 HTTPS 认证。留空使用 oauth2（GitLab）；阿里云云效 Codeup 填令牌所属的云效账号名。',
 
   modifiedMask: '掩码已被修改。请取消并重新打开编辑以保留原值，或填写完整新值；不要局部修改圆点。',
   intro: '从来源仓库同步技能，在目录中配置并启用，再为 AI 员工安装。',
@@ -41,6 +42,7 @@ export const skillEditorZh = {
 export const skillEditorJa = {
   projectToken: 'Project Access Token（任意）', tokenPreserve: '設定済み。空欄で既存の token を保持', tokenPlaceholder: 'read_repository 権限のあるプロジェクトトークン',
   tokenHint: '暗号化して保存し、値は返しません。SSH アドレスは同じリポジトリの HTTPS アドレスに変換して認証します。URL に token は含めません。', removeToken: '保存済みの token を削除',
+  gitUsername: 'Git ユーザー名（任意）', gitUsernameHint: 'token と一緒に HTTPS 認証に使います。空欄なら oauth2（GitLab）。Alibaba Cloud Codeup ではトークン所有者の Yunxiao アカウント名を入力します。',
 
   modifiedMask: 'マスクが変更されています。キャンセルして開き直すか、完全な新しい値を入力してください。マスクの一部は編集できません。',
   intro: 'ソースからスキルを同期し、カタログで設定・有効化してから AI 社員にインストールします。',
