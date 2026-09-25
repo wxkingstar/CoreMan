@@ -25,6 +25,17 @@ def mount_spa(app: FastAPI, dist_dir: Path) -> None:
         candidate = (dist_dir / full_path).resolve() if full_path else index
         if full_path and candidate.is_file() and resolved_dist_dir in candidate.parents:
             return FileResponse(candidate)
+        if _looks_like_file(full_path):
+            # 前端路由不含点号；隐藏路径（/.git/config、/.env）与带扩展名的路径回退首页会返回 200，
+            # 扫描器会误报为敏感文件可读，这里直接 404。
+            return JSONResponse(status_code=404, content={"code": 404, "message": "文件不存在"})
         if index.is_file():
             return FileResponse(index)
         return JSONResponse(status_code=404, content={"code": 404, "message": "管理台未构建"})
+
+
+def _looks_like_file(full_path: str) -> bool:
+    segments = [segment for segment in full_path.split("/") if segment]
+    return any(segment.startswith(".") for segment in segments) or (
+        bool(segments) and "." in segments[-1]
+    )

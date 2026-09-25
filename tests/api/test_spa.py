@@ -33,6 +33,11 @@ async def test_spa_served_with_fallback(
             assert "coreman spa" in (await c.get("/bots/123")).text
             assert (await c.get("/assets/app.js")).text == "console.log(1)"
             assert (await c.get("/api/x")).status_code == 404
+            # 隐藏路径与不存在的文件不回退首页，避免被当成敏感文件可读。
+            for path in ("/.git/config", "/.env", "/x/.ssh/id_rsa", "/pyproject.toml", "/a.php"):
+                r = await c.get(path)
+                assert r.status_code == 404, path
+                assert "coreman spa" not in r.text
 
 
 async def test_spa_missing_dist_returns_json(client: httpx.AsyncClient) -> None:
