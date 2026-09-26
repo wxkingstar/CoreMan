@@ -46,6 +46,28 @@ def should_trigger(ctx):
 
 管理 API：`/api/admin/cron-jobs`（GET/POST）、`/{id}`（PUT/DELETE）、`/{id}/run`、`/{id}/disable`、`/{id}/cancel-run`、`/{id}/runs`、`/precheck/test`。修改需 If-Match。SMTP：`/api/admin/notification-settings`（GET/PUT），首次版本为 0。
 
+## 成员本人任务（技能）
+
+成员可以在飞书或企业微信里与 AI 员工的**私聊**中，让 AI 员工用 `coreman-cron` 技能创建和管理自己的定时任务，不需要机器人管理员权限。任务归本人所有、以本人身份运行，其余规则与上文一致。
+
+- **凭据**：已验证的本人私聊里，每一轮下发 `COREMAN_SCHEDULE_URL`（`/api/runtime/personal-schedules`）与 `COREMAN_SCHEDULE_TOKEN`。凭据用主密钥封装，只指明这一轮的任务、本人与会话；每次调用都重新核验持久化的私聊来源，会话切换、任务结束或权限收回即失效，30 分钟过期。接口不接受任何用户参数，所以只能管理本人在这个机器人上的任务。群聊、协作和定时执行都不下发，机器人或技能自带的同名变量会被丢弃。
+- **需要本人确认**：新建、修改、重新启用只生成草稿，并在私聊里发确认卡片（飞书为卡片按钮；企业微信先发一条完整说明，再发按钮卡片），只有本人在同一私聊里点击才生效，确认有效期 30 分钟。确认时按当时的规则重新校验；卡片发出后任务被改过则不生效。暂停、删除、立即运行和查看直接执行。
+- **接收人**：默认只发本人私聊。可以另加私聊过这个机器人、仍启用且绑定了平台身份的同事（最多 20 位），以及本人在里面和机器人说过话的群（最多 10 个）；每次执行前重查本人是否仍在这些群里说过话，否则跳过并停用。不支持邮件和群 Webhook。只要接收人里有别人，执行时就不挂载本人的飞书或企业微信个人工具。
+- **执行前检查**：可以附带 `should_trigger(ctx)` 脚本，规则同上文；`/precheck/test` 可以用示例上下文试跑。
+- **限制**：每人每个机器人最多 10 个启用中的任务、5 个待确认草稿；周期任务相邻两次至少间隔 1 小时，一次性任务须在 1 分钟之后、30 天之内；时间按北京时间；指令最多 8000 字。
+
+| 方法与路径 | 作用 |
+|---|---|
+| `GET /api/runtime/personal-schedules` | 本人在这个机器人上的任务与限制 |
+| `GET …/recipients?q=` | 可选的同事与群 |
+| `POST …/drafts` | 新建草稿；带 `job_id` 为修改草稿 |
+| `POST …/{id}/resume` | 重新启用（发确认卡片） |
+| `POST …/{id}/pause`、`DELETE …/{id}`、`POST …/{id}/run` | 暂停、删除、立即运行 |
+| `GET …/{id}/runs` | 最近的运行记录与投递状态 |
+| `POST …/precheck/test` | 试跑执行前检查 |
+
+请求头 `Authorization: Bearer $COREMAN_SCHEDULE_TOKEN`，浏览器来源（带 `Origin`）一律拒绝。草稿字段：`name`、`prompt`、`cron_expression` 或 `run_at`（带时区的 ISO 8601）二选一，可选 `expires_at`、`include_self`、`recipient_user_ids`、`recipient_chat_ids`、`precheck_script`。
+
 ## 验证边界
 
 本地使用一次性 PostgreSQL、FakeRelay、模拟 HTTP/SMTP 测试；不读取真实 .env 内容，不发送真实平台消息。真实 SMTP、Webhook、企微通知应用与平台回调需在目标环境中验证。

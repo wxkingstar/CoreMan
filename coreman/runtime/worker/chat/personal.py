@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -133,17 +132,6 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
     return True
 
 
-def _now_line() -> str:
-    now = datetime.now(UTC)
-    return (
-        "当前时间：北京时间 "
-        + now.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M（%A）")
-        + "，UTC "
-        + now.strftime("%Y-%m-%dT%H:%MZ")
-        + "。"
-    )
-
-
 def feishu_guidance(row: FeishuPersonalGrant | None, base_url: str, *, scheduled: bool) -> str:
     manage = "授权管理：[我的飞书](" + base_url + "/my-feishu)。"
     if row is not None and row.status == "connected" and row.token_enc:
@@ -187,20 +175,6 @@ def feishu_guidance(row: FeishuPersonalGrant | None, base_url: str, *, scheduled
     )
 
 
-def schedule_guidance(base_url: str) -> str:
-    return (
-        "\n\n## 本人定时任务\n"
-        + _now_line()
-        + "\n用户希望你定期或在将来某个时间自动完成一件事（例如“每个工作日 9 点总结我的飞书"
-        "未读消息”）时，调用 schedule_propose 拟好任务名称、执行时间（五字段 cron，按北京时间；"
-        "或一次性的具体时间）和每次执行时要完成的完整指令。系统会给用户发确认卡片，"
-        "用户点“确认创建”后才生效；在此之前不要说已经创建。结果只发到这个私聊。"
-        "用 schedule_list 查看用户已有的定时任务；暂停或删除请打开 [我的定时任务]("
-        + base_url
-        + "/self-reminders)。"
-    )
-
-
 async def configure(
     session: AsyncSession,
     ctx: TaskContext,
@@ -227,9 +201,5 @@ async def configure(
         context_epoch=row.context_epoch if row else policy.NO_GRANT_EPOCH,
         base_session_id=base_session_id,
     )
-    return (
-        system_prompt
-        + feishu_guidance(row, base_url, scheduled=False)
-        + schedule_guidance(base_url),
-        env,
-    )
+    # 本人定时任务的说明由 chat.schedules 统一追加（飞书与企业微信共用）。
+    return system_prompt + feishu_guidance(row, base_url, scheduled=False), env

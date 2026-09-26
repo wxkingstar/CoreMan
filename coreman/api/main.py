@@ -43,6 +43,7 @@ from coreman.api.routers import (
     model_catalog,
     notification_settings,
     objects,
+    personal_schedules,
     platform_apps,
     relay_agent,
     relay_servers,
@@ -147,6 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat_logs.router)
     app.include_router(cron_jobs.router)
     app.include_router(self_reminders.router)
+    app.include_router(personal_schedules.router)
     app.include_router(notification_settings.router)
     app.include_router(announcements.router)
     app.include_router(runtime.router)

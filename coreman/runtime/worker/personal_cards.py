@@ -288,47 +288,71 @@ async def handle_schedule(
         or draft.get("user_id") != str(scope.user_id)
         or draft.get("chat_id") != scope.chat_id
         or draft.get("origin_task_id") != original.id
+        or draft.get("platform", "feishu") != "feishu"
     ):
         return "ignored"
+    result, text = await settle(
+        session, ctx, bot, state, user_id=scope.user_id, chat_id=scope.chat_id, verb=verb
+    )
+    if text:
+        await _schedule_card(session, bot, inbound, text)
+    return result
+
+
+async def settle(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    state: InteractionState,
+    *,
+    user_id: uuid.UUID,
+    chat_id: str,
+    verb: str,
+) -> tuple[str, str]:
+    """两个平台共用：按本人的点击确认或取消草稿，返回 (结果, 要换到卡片上的文字)。
+
+    调用方已证明点击者就是草稿的本人、点在草稿来源的那个私聊里。
+    """
+    draft = state.state
+    action = draft.get("action") or "create"
+    title = schedules.ACTION_TITLES.get(action, "创建")
+    name = str(draft.get("name") or "")
     now = utcnow()
     if state.status != "open" or (state.expires_at is not None and state.expires_at <= now):
         # 重复点击或回放：不覆盖已经给出的结果。
         if state.status in ("submitted", "cancelled"):
-            return "expired"
+            return "expired", ""
         state.status = "expired"
-        await _schedule_card(
-            session, bot, inbound, "这张确认卡片已过期，没有创建定时任务。需要的话请重新告诉我。"
-        )
-        return "expired"
-    name = str(draft.get("name") or "")
+        return "expired", f"这张确认卡片已过期，没有{title}定时任务。需要的话请重新告诉我。"
     if verb == "cancel":
         state.status = "cancelled"
-        await _schedule_card(session, bot, inbound, f"已取消，没有创建「{name}」。")
-        return "personal_schedule_cancelled"
-    actor = await session.get(User, scope.user_id, with_for_update=True, populate_existing=True)
+        return "personal_schedule_cancelled", f"已取消，没有{title}「{name}」。"
+    actor = await session.get(User, user_id, with_for_update=True, populate_existing=True)
     try:
         if actor is None:
             raise ApiError(403, 403, "reminder_actor_unavailable")
-        job = await schedules.create_confirmed(session, bot, actor, scope.chat_id, draft, now)
+        job = await schedules.apply_confirmed(session, bot, actor, chat_id, draft, now)
     except schedules.ScheduleError as exc:
         state.status = "cancelled"
-        await _schedule_card(session, bot, inbound, f"没有创建「{name}」：{exc.message}")
-        return "personal_schedule_rejected"
+        return "personal_schedule_rejected", f"没有{title}「{name}」：{exc.message}"
     except ApiError:
         state.status = "cancelled"
-        await _schedule_card(
-            session, bot, inbound, f"没有创建「{name}」：你当前不能使用这个机器人的定时任务。"
+        return (
+            "personal_schedule_rejected",
+            f"没有{title}「{name}」：你当前不能使用这个机器人的定时任务。",
         )
-        return "personal_schedule_rejected"
     state.status = "submitted"
     manage = ctx.public_base_url.rstrip("/") + "/self-reminders"
-    await _schedule_card(
-        session,
-        bot,
-        inbound,
-        f"**已创建定时任务「{job.name}」**\n执行时间："
+    targets = draft.get("recipient_labels") or [schedules.SELF_LABEL]
+    delivered = (
+        "结果只发到这个私聊。"
+        if targets == [schedules.SELF_LABEL]
+        else "结果发给：" + "、".join(targets) + "。"
+    )
+    return (
+        "personal_schedule_" + {"create": "created", "update": "updated"}.get(action, "resumed"),
+        f"**已{title}定时任务「{job.name}」**\n执行时间："
         + schedules.describe(job.schedule_kind, job.cron_expression, job.run_at)
         + f"\n下次运行：{schedules.shown(job.next_run_at)}"
-        + f"\n结果只发到这个私聊。[查看或管理]({manage})",
+        + f"\n{delivered}[查看或管理]({manage})",
     )
-    return "personal_schedule_created"
