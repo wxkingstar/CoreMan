@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
-import { useCompactLayout } from '@/composables/useCompactLayout'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
@@ -20,14 +19,13 @@ import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
 import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
-import { FolderOpened } from '@element-plus/icons-vue'
+import { DocumentCopy, FolderOpened, InfoFilled } from '@element-plus/icons-vue'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 const botFormRef = ref<InstanceType<typeof BotForm>>()
 async function closeForm(done: () => void) { if (!botFormRef.value || await botFormRef.value.confirmDiscard()) done() }
 const { t } = useI18n()
 const detailTab = ref('overview')
-const compact = useCompactLayout()
 const detailError = ref('')
 const route = useRoute()
 const router = useRouter()
@@ -55,6 +53,15 @@ const credRows = computed(() => Object.entries(bot.value?.credentials ?? {}))
 // 而 el-input 里的值只是 DOM property（进不了页面文本），长串还会被输入框宽度截掉。
 const envFullRows = computed(() => Object.entries(bot.value?.env_vars_full ?? {}))
 
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(t('common.copied'))
+  } catch (e) {
+    fail(e)
+  }
+}
 
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
@@ -215,73 +222,156 @@ onMounted(async () => {
           name="overview"
           :label="t('workspace.overview')"
         >
-          <el-alert
-            :title="t('workspace.enabledHint')"
-            type="info"
-            :closable="false"
-          />
-          <el-descriptions
+          <div
             id="employee-overview"
-            :title="t('bots.detail.title')"
-            :column="compact ? 1 : 2"
-            border
+            class="overview"
           >
-            <el-descriptions-item :label="t('bots.detail.relay')">
-              <template v-if="bot.relay_name">
-                <div>{{ bot.relay_name }}</div>
-                <div class="muted">
-                  {{ bot.relay_url }}
-                </div>
-              </template>
-              <span v-else>—</span>
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.model')">
-              {{ bot.model }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.workingDir')">
-              <div class="workspace-path-row">
-                <span class="workspace-path">{{ bot.working_dir }}</span>
-                <el-button
-                  v-if="perms?.can_edit"
-                  :icon="FolderOpened"
-                  class="workspace-open"
-                  text
-                  size="small"
-                  type="primary"
-                  @click="workspaceVisible = true"
+            <section class="ov-card ov-profile">
+              <h3 class="ov-title">
+                {{ t('bots.detail.profile') }}
+              </h3>
+              <p
+                class="ov-desc"
+                :class="{ 'is-empty': !bot.description }"
+              >
+                {{ bot.description || t('bots.detail.noDescription') }}
+              </p>
+              <div class="ov-welcome">
+                <span class="ov-label">{{ t('bots.detail.welcome') }}</span>
+                <blockquote
+                  v-if="bot.welcome_message"
+                  class="ov-quote"
                 >
-                  {{ t('workspaceFiles.open') }}
-                </el-button>
+                  {{ bot.welcome_message }}
+                </blockquote>
+                <span
+                  v-else
+                  class="ov-empty"
+                >{{ t('bots.detail.noWelcome') }}</span>
               </div>
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.verbosity')">
-              {{ t(`bots.verbosityLevels.${bot.verbosity_level}`) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.effort')">
-              {{ bot.effort_level ?? t('bots.effortNone') }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.sseTimeout')">
-              {{ bot.sse_timeout_seconds }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.team')">
-              {{ bot.team_name ?? '—' }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.creator')">
-              {{ bot.created_by_name ?? '—' }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.createdAt')">
-              {{ formatDateTime(bot.created_at) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.updatedAt')">
-              {{ formatDateTime(bot.updated_at) }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.description')">
-              {{ bot.description || '—' }}
-            </el-descriptions-item>
-            <el-descriptions-item :label="t('bots.detail.welcome')">
-              {{ bot.welcome_message ?? '—' }}
-            </el-descriptions-item>
-          </el-descriptions>
+            </section>
+
+            <div class="ov-grid">
+              <section class="ov-card">
+                <h3 class="ov-title">
+                  {{ t('bots.detail.runtimeGroup') }}
+                </h3>
+                <dl class="ov-list">
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.relay') }}</dt>
+                    <dd>
+                      <template v-if="bot.relay_name">
+                        <div class="ov-strong">
+                          {{ bot.relay_name }}
+                        </div>
+                        <div class="ov-sub ov-mono">
+                          {{ bot.relay_url }}
+                        </div>
+                      </template>
+                      <span
+                        v-else
+                        class="ov-empty"
+                      >{{ t('bots.detail.noRelay') }}</span>
+                    </dd>
+                  </div>
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.model') }}</dt>
+                    <dd>
+                      <code class="ov-chip">{{ bot.model }}</code>
+                    </dd>
+                  </div>
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.workingDir') }}</dt>
+                    <dd>
+                      <div class="ov-path">
+                        <code class="ov-mono">{{ bot.working_dir }}</code>
+                        <el-button
+                          :icon="DocumentCopy"
+                          :aria-label="t('bots.detail.copy')"
+                          :title="t('bots.detail.copy')"
+                          class="ov-icon-btn"
+                          text
+                          size="small"
+                          @click="copyText(bot.working_dir)"
+                        />
+                      </div>
+                      <el-button
+                        v-if="perms?.can_edit"
+                        :icon="FolderOpened"
+                        class="workspace-open"
+                        size="small"
+                        @click="workspaceVisible = true"
+                      >
+                        {{ t('workspaceFiles.open') }}
+                      </el-button>
+                    </dd>
+                  </div>
+                </dl>
+                <p class="ov-hint">
+                  <el-icon><InfoFilled /></el-icon>
+                  <span>{{ t('workspace.enabledHint') }}</span>
+                </p>
+              </section>
+
+              <section class="ov-card">
+                <h3 class="ov-title">
+                  {{ t('bots.detail.behaviorGroup') }}
+                </h3>
+                <dl class="ov-list">
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.verbosity') }}</dt>
+                    <dd class="ov-inline">
+                      <span
+                        class="ov-meter"
+                        aria-hidden="true"
+                      >
+                        <i
+                          v-for="n in 4"
+                          :key="n"
+                          :class="{ on: n <= bot.verbosity_level }"
+                        />
+                      </span>
+                      {{ t(`bots.verbosityLevels.${bot.verbosity_level}`) }}
+                    </dd>
+                  </div>
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.effort') }}</dt>
+                    <dd>
+                      <span :class="{ 'ov-empty': !bot.effort_level }">{{ bot.effort_level ?? t('bots.effortNone') }}</span>
+                    </dd>
+                  </div>
+                  <div class="ov-row">
+                    <dt>{{ t('bots.detail.sseTimeoutLabel') }}</dt>
+                    <dd>{{ t('bots.detail.seconds', { n: bot.sse_timeout_seconds }) }}</dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <dl
+              class="ov-meta"
+              :aria-label="t('bots.detail.ownership')"
+            >
+              <div>
+                <dt>{{ t('bots.detail.team') }}</dt>
+                <dd :class="{ 'ov-empty': !bot.team_name }">
+                  {{ bot.team_name ?? t('bots.detail.noTeam') }}
+                </dd>
+              </div>
+              <div>
+                <dt>{{ t('bots.detail.creator') }}</dt>
+                <dd>{{ bot.created_by_name ?? '—' }}</dd>
+              </div>
+              <div>
+                <dt>{{ t('bots.detail.createdAt') }}</dt>
+                <dd>{{ formatDateTime(bot.created_at) }}</dd>
+              </div>
+              <div>
+                <dt>{{ t('bots.detail.updatedAt') }}</dt>
+                <dd>{{ formatDateTime(bot.updated_at) }}</dd>
+              </div>
+            </dl>
+          </div>
         </el-tab-pane>
         <el-tab-pane
           name="capabilities"
@@ -506,9 +596,46 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.workspace-path-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
-.workspace-path { min-width: 0; overflow-wrap: anywhere; }
-.workspace-open { flex-shrink: 0; vertical-align: middle; }
+.overview { display: grid; gap: 16px; }
+.ov-card { min-width: 0; padding: 20px 22px; border: 1px solid var(--cm-border); border-radius: 12px; background: var(--cm-surface); }
+.el-main .ov-title { margin: 0 0 14px; font-size: 13px; line-height: 20px; font-weight: 600; letter-spacing: .02em; color: var(--cm-muted); }
+.ov-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
+.ov-desc { margin: 0 0 16px; font-size: 15px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ov-desc.is-empty, .ov-empty { color: var(--el-text-color-placeholder); }
+.ov-welcome { display: flex; flex-direction: column; gap: 6px; padding-top: 14px; border-top: 1px dashed var(--cm-border); }
+.ov-label { font-size: 12px; color: var(--cm-muted); }
+.ov-quote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--el-color-primary-light-5); border-radius: 0 6px 6px 0; background: var(--cm-brand-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ov-list { display: grid; margin: 0; }
+.ov-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; padding: 12px 0; border-top: 1px solid var(--el-border-color-lighter); }
+.ov-row:first-child { padding-top: 0; border-top: 0; }
+.ov-row dt { color: var(--cm-muted); font-size: 13px; line-height: 22px; }
+.ov-row dd { margin: 0; min-width: 0; line-height: 22px; }
+.ov-strong { font-weight: 600; overflow-wrap: anywhere; }
+.ov-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+.ov-sub { margin-top: 2px; color: var(--cm-muted); }
+.ov-chip { display: inline-block; max-width: 100%; padding: 1px 8px; border-radius: 6px; background: var(--el-fill-color-light); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+.ov-path { display: flex; align-items: flex-start; gap: 4px; }
+.ov-path code { padding-top: 1px; }
+.ov-icon-btn { flex-shrink: 0; margin-top: -3px; }
+.workspace-open { margin-top: 8px; }
+.ov-inline { display: flex; align-items: center; gap: 8px; }
+.ov-meter { display: inline-flex; gap: 3px; }
+.ov-meter i { width: 12px; height: 6px; border-radius: 3px; background: var(--el-border-color-lighter); }
+.ov-meter i.on { background: var(--el-color-primary); }
+.ov-hint { display: flex; align-items: flex-start; gap: 6px; margin: 16px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--el-fill-color-light); color: var(--cm-muted); font-size: 12px; line-height: 18px; }
+.ov-hint .el-icon { flex-shrink: 0; margin-top: 2px; }
+.ov-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 24px; margin: 0; padding: 14px 22px; border: 1px solid var(--cm-border); border-radius: 12px; background: var(--el-fill-color-light); }
+.ov-meta dt { font-size: 12px; color: var(--cm-muted); }
+.ov-meta dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+@media (max-width: 960px) {
+  .ov-grid { grid-template-columns: minmax(0, 1fr); }
+  .ov-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .ov-card { padding: 16px; }
+  .ov-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ov-meta { padding: 14px 16px; }
+}
 
 .configuration-actions { margin: 16px 0; }
 
