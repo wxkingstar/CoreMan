@@ -130,7 +130,7 @@ CoreMan is at an early stage (latest release 0.2.0) and `main` keeps gaining fea
 Documents are in Chinese unless marked otherwise.
 
 - Concepts and structure: [Glossary](docs/glossary.md) · [Architecture and service topology](docs/architecture.md#service-topology) (English)
-- Integrations and features: [Feishu](docs/feishu.md) · [WeCom](docs/wecom.md) · [Skills and approval](docs/skills-management.md) · [Memory](docs/memories.md) · [Scheduled tasks](docs/cron-jobs.md) · [Human escalation](docs/escalations.md) · [Feishu AI employee collaboration](docs/features/feishu-bot-collaboration.md)
+- Integrations and features: [Feishu](docs/feishu.md) · [WeCom](docs/wecom.md) · [Skills and approval](docs/skills-management.md) · [Memory](docs/memories.md) · [Scheduled tasks](docs/cron-jobs.md) · [Human escalation](docs/escalations.md) · [Feishu AI employee collaboration](docs/features/feishu-bot-collaboration.md) · [Asking colleagues](docs/features/feishu-human-collaboration.md)
 - Operations and integration: [Operations](docs/operations.md) · [Infrastructure API](docs/infrastructure-api.md) · [Object storage](docs/object-storage.md) · [Statistics and health reports](docs/statistics-and-health.md) · [IM reply deadlines](docs/im-reply-lifecycle.md)
 - Runtime environments: [Runtime Daemon](runtime_daemon/README.md) · [Linux environment manual](docs/environment-creation/README.md)
 - Development: [CONTRIBUTING.md](CONTRIBUTING.md) (English)

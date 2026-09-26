@@ -103,6 +103,11 @@ async def do_stop(
     stopped = await _clear_states(session, bot_id, session_key, platform_user_id)
     # Ingress may have already cancelled the running collaboration before the fast lane runs.
     stopped += int(bool(ctx.task.payload.get("interrupted_previous_task")))
+    from coreman.core.chat.human_collaboration import stop_for
+
+    # Questions waiting on colleagues belong to whoever asked; others cannot withdraw them.
+    if platform_user_id:
+        stopped += await stop_for(session, bot_id, session_key, platform_user_id)
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1

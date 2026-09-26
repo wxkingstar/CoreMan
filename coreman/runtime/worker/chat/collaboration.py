@@ -167,6 +167,10 @@ async def configure(
         if not k.startswith(("COREMAN_COLLABORATION_", "COREMAN_BOT_HELP_"))
     }
     phase = ctx.task.payload.get("collaboration_phase")
+    if phase == "human_resume":
+        from coreman.runtime.worker.chat.human_collaboration import RESUME_POLICY as HUMAN_RESUME
+
+        return system_prompt + HUMAN_RESUME, env
     if phase:
         row = await session.get(BotCollaboration, uuid.UUID(ctx.task.payload["collaboration_id"]))
         assert row is not None
@@ -177,12 +181,12 @@ async def configure(
         return system_prompt + protocol, env
     if (
         intake.bot.platform != "feishu"
-        or intake.chat_type != "group"
+        or intake.chat_type not in ("group", "single")
         or intake.speaker.user_id is None
     ):
         return system_prompt, env
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
-    route = await session.scalar(
+    peers = intake.chat_type == "group" and await session.scalar(
         select(BotCollaborationPartner.id)
         .where(
             BotCollaborationPartner.source_bot_id == intake.bot.id,
@@ -191,9 +195,13 @@ async def configure(
         )
         .limit(1)
     )
-    if route is None:
+    from coreman.core.chat import human_collaboration
+
+    colleagues = await human_collaboration.has_partners(session, intake.bot.id)
+    if not peers and not colleagues:
         return system_prompt, env
-    from coreman.core.chat.collaboration_tools import POLICY
+    ctx.bot_peers_mounted = bool(peers)
+    from coreman.core.chat.collaboration_tools import HUMAN_POLICY, POLICY
 
     env["COREMAN_COLLABORATION_URL"] = (
         ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
@@ -201,7 +209,7 @@ async def configure(
     env["COREMAN_COLLABORATION_TOKEN"] = service.issue_capability(
         ctx.cipher, task_id=ctx.task.id, user_id=str(intake.speaker.user_id)
     )
-    return system_prompt + POLICY, env
+    return system_prompt + POLICY + (HUMAN_POLICY if colleagues else ""), env
 
 
 async def final_transition(

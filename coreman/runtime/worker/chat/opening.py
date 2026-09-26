@@ -155,6 +155,16 @@ class OpenStage(ChatStageBase):
                 or collaboration.status != ("helper_running" if phase == "helper" else "resuming")
             ):
                 raise ValueError("collaboration cancelled before dispatch")
+        if ctx.task.payload.get("human_collaboration_id"):
+            from coreman.core.db.models import HumanCollaboration
+
+            asked = await session.get(
+                HumanCollaboration,
+                uuid.UUID(ctx.task.payload["human_collaboration_id"]),
+                populate_existing=True,
+            )
+            if asked is None or asked.status != "resuming" or asked.resume_task_id != ctx.task.id:
+                raise ValueError("collaboration cancelled before dispatch")
         relay = current_relay
         intake = replace(intake, bot=bot, relay=relay)
         if intake.speaker.known:

@@ -12,6 +12,7 @@ import BotHealthReport from '@/components/BotHealthReport.vue'
 import BotMemories from '@/components/BotMemories.vue'
 import BotSkills from '@/components/BotSkills.vue'
 import BotCollaborators from '@/components/BotCollaborators.vue'
+import BotHumanCollaborators from '@/components/BotHumanCollaborators.vue'
 import FeishuAppPanel from '@/components/feishuApp/FeishuAppPanel.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
 import BotAllowedUsersDialog from '@/components/bot/BotAllowedUsersDialog.vue'
@@ -529,13 +530,19 @@ onMounted(async () => {
           :label="t('collaboration.title')"
           lazy
         >
-          <BotCollaborators
-            v-if="bot.platform === 'feishu'"
-            :bot-id="botId"
-            :source-name="bot.name"
-            :can-edit="!!perms?.can_edit"
-            :active="detailTab === 'collaboration'"
-          />
+          <template v-if="bot.platform === 'feishu'">
+            <BotCollaborators
+              :bot-id="botId"
+              :source-name="bot.name"
+              :can-edit="!!perms?.can_edit"
+              :active="detailTab === 'collaboration'"
+            />
+            <BotHumanCollaborators
+              :bot-id="botId"
+              :can-edit="!!perms?.can_edit"
+              :active="detailTab === 'collaboration'"
+            />
+          </template>
           <el-empty
             v-else
             :description="t('collaboration.platform')"

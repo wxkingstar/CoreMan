@@ -180,6 +180,14 @@ from coreman.core.db.models.bot_collaboration import (
     BotCollaboration,
     BotCollaborationPartner,
     BotCollaborationRoute,
+    BotHumanPartner,
+    HumanCollaboration,
 )
 
-__all__ += ["BotCollaboration", "BotCollaborationPartner", "BotCollaborationRoute"]
+__all__ += [
+    "BotCollaboration",
+    "BotCollaborationPartner",
+    "BotCollaborationRoute",
+    "BotHumanPartner",
+    "HumanCollaboration",
+]

@@ -209,6 +209,11 @@ class SchedulerService(Service):
                 async with self._factory() as session:
                     counts["bot_collaborations"] = await collaboration_tick(session, now)
                     await session.commit()
+                from coreman.core.chat.human_collaboration import tick as human_tick
+
+                async with self._factory() as session:
+                    counts["human_collaborations"] = await human_tick(session, now, self._cipher)
+                    await session.commit()
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds

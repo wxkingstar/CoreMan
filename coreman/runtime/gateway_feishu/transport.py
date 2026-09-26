@@ -121,6 +121,7 @@ class FeishuTransport:
         kind: str,
         key: str,
         reply_to: str | None = None,
+        receive_id_type: str = "chat_id",
     ) -> str:
         payload = json.dumps(content, ensure_ascii=False)
         if len(payload.encode()) > 30_000:
@@ -134,7 +135,7 @@ class FeishuTransport:
             result = await self.call(
                 "POST",
                 "/open-apis/im/v1/messages",
-                params={"receive_id_type": "chat_id"},
+                params={"receive_id_type": receive_id_type},
                 json={**body, "receive_id": api_id(chat_id)},
             )
         return api_id((result.get("data") or {}).get("message_id"))
@@ -448,7 +449,28 @@ class FeishuTransport:
                         await outbox.mark_skipped(session, item.id, str(exc))
                         await session.commit()
                         return True
+                asked = None
+                if item.payload.get("_human_collaboration_id"):
+                    from coreman.core.db.models import HumanCollaboration
+
+                    asked = await session.get(
+                        HumanCollaboration,
+                        uuid.UUID(item.payload["_human_collaboration_id"]),
+                        populate_existing=True,
+                    )
+                    phase = item.payload.get("_human_phase")
+                    # Questions and reminders stop once the ask ends; closing notices still go.
+                    if asked is None or (phase in ("ask", "remind") and asked.status != "waiting"):
+                        await outbox.mark_skipped(session, item.id, "collaboration inactive")
+                        await session.commit()
+                        return True
                 await self._send_item(item)
+                if asked is not None:
+                    mid = item.payload.get("_feishu_message_id")
+                    if item.payload.get("_human_phase") == "ask":
+                        asked.request_message_id = mid
+                    elif item.payload.get("_human_phase") == "remind":
+                        asked.reminder_message_id = mid
                 if item.payload.get("_typing_task_id"):
                     await typing(self, int(item.payload["_typing_task_id"]), done=True)
                 await session.flush()
@@ -465,6 +487,23 @@ class FeishuTransport:
             return True
 
     async def _send_item(self, item: OutboxItem) -> None:
+        if item.payload.get("_human_collaboration_id"):
+            # The platform-owned at node is the only way a colleague is notified in a group.
+            rows: list[list[dict[str, Any]]] = []
+            if item.payload.get("_mention_user_id"):
+                rows.append([{"tag": "at", "user_id": item.payload["_mention_user_id"]}])
+            rows.append([{"tag": "md", "text": item.payload["markdown"]}])
+            direct = item.target.get("user_id")
+            mid = await self.send(
+                str(direct or item.target.get("chat_id") or ""),
+                {"zh_cn": {"title": "", "content": rows}},
+                kind="post",
+                key=f"outbox:{item.id}",
+                reply_to=item.target.get("message_id"),
+                receive_id_type="user_id" if direct else "chat_id",
+            )
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
         if item.payload.get("_collaboration_id") or item.payload.get("_collaboration_setup_id"):
             # A separate at node preserves a real notification; Markdown occupies its own row.
             # Keep old durable text items deliverable during a rolling upgrade.

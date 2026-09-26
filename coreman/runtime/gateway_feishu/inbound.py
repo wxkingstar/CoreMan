@@ -221,6 +221,7 @@ def _normalize_event(
             "chat_type": chat_type,
             "message_id": mid,
             "parent_id": message.get("parent_id"),
+            "root_id": message.get("root_id"),
             "create_time": message.get("create_time"),
         },
         raw=raw,
