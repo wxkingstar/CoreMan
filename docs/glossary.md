@@ -100,6 +100,9 @@ CoreMan 不使用额外的消息中间件，进程之间只通过 PostgreSQL 表
 **人工求助（escalation）**
 ：外部调用方（通常是 AI 员工的技能）通过基础设施 API 向指定员工提问并等待人工回复。通知经通知应用或飞书机器人发出，回复经平台应用回调收回，含排队、催办、追问与到期规则，见 [人工求助](escalations.md)。
 
+**协作伙伴（collaboration partner）**
+：飞书 AI 员工在任务中可以求助的对象，由此 AI 员工的管理者配置：其他飞书 AI 员工（只在双方同在的群里）或人类同事（群里 @，否则私聊；定时任务中私聊）。求助登记后本轮结束，收到真实平台答复才续跑，见 [飞书 AI 员工协作](features/feishu-bot-collaboration.md) 与 [向同事求助](features/feishu-human-collaboration.md)。
+
 **定时任务（cron job）**
 ：按 cron 表达式以创建者身份运行 AI 员工，可带执行前检查脚本与结果通知，见 [定时任务](cron-jobs.md)。
 

@@ -14,17 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.auth.system_access import build_system_access
 from coreman.core.bus import tasks
 from coreman.core.chat import chat_logs
+from coreman.core.chat import human_collaboration as human
+from coreman.core.chat.bot_collaboration import issue_capability
 from coreman.core.chat.chat_logs import ChatLogEntry
+from coreman.core.chat.collaboration_tools import CRON_POLICY
 from coreman.core.chat.redaction import collect_secrets
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
-from coreman.core.cron.precheck import PrecheckError, run_precheck_in_thread
+from coreman.core.cron.precheck import PrecheckError, PrecheckResult, run_precheck_in_thread
 from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
     Bot,
     CronJob,
     CronRun,
     FeishuPersonalGrant,
+    HumanCollaboration,
     RelayServer,
     RuntimeNode,
     Task,
@@ -109,26 +113,43 @@ class CronRunHandler:
         session_id = uuid.uuid4()
         execution_model: str | None = None
         execution_relay_id: uuid.UUID | None = None
+        # 同事答复后的续跑：不重跑执行前检查，沿用原执行的 Relay 会话，不再挂载求助工具。
+        asked_id = ctx.task.payload.get("human_collaboration_id")
+        collaborating = False
         try:
-            # precheck 只接收非敏感快照，不注入 bot env / token / 任意 Python 对象。
-            # 解释器在独立线程里跑：同进程其它任务的心跳、SSE 消费与取消传导不能跟着停摆。
             started = time.monotonic()
-            result = await run_precheck_in_thread(
-                config.get("precheck_script"),
-                {
-                    "now": utcnow().isoformat(),
-                    "scheduled_at": ctx.task.payload.get("scheduled_at"),
-                    "bot_id": str(ctx.task.bot_id),
-                    "user_id": str(ctx.task.user_id),
-                    "job_name": config.get("name"),
-                },
-                float(config.get("precheck_timeout_seconds", 30)),
-            )
+            if asked_id:
+                result = PrecheckResult(True, "", "collaboration_reply")
+            else:
+                # precheck 只接收非敏感快照，不注入 bot env / token / 任意 Python 对象。
+                # 解释器在独立线程里跑：同进程其它任务的心跳、SSE 消费与取消传导不能跟着停摆。
+                result = await run_precheck_in_thread(
+                    config.get("precheck_script"),
+                    {
+                        "now": utcnow().isoformat(),
+                        "scheduled_at": ctx.task.payload.get("scheduled_at"),
+                        "bot_id": str(ctx.task.bot_id),
+                        "user_id": str(ctx.task.user_id),
+                        "job_name": config.get("name"),
+                    },
+                    float(config.get("precheck_timeout_seconds", 30)),
+                )
             meta = {"elapsed_ms": int((time.monotonic() - started) * 1000), "reason": result.reason}
             if not result.trigger:
                 await self._finish(ctx, "skipped", "", None, meta, None, [], session_id)
                 return
             async with ctx.session_factory() as session:
+                asked = (
+                    await session.get(HumanCollaboration, uuid.UUID(asked_id)) if asked_id else None
+                )
+                if asked_id and (
+                    asked is None
+                    or asked.status != "resuming"
+                    or asked.resume_task_id != ctx.task.id
+                ):
+                    raise ApiError(409, 409, "collaboration_inactive")
+                if asked is not None and asked.relay_session_id is not None:
+                    session_id = asked.relay_session_id
                 job_id = uuid.UUID(ctx.task.payload["cron_job_id"])
                 job = await session.get(CronJob, job_id)
                 bot = await session.scalar(
@@ -138,7 +159,8 @@ class CronRunHandler:
                 run = await session.scalar(select(CronRun).where(CronRun.task_id == ctx.task.id))
                 if (
                     job is None
-                    or not job.enabled
+                    # 续跑属于已经开始的那次执行：一次性任务跑完即停用、任务到期都不拦它。
+                    or (not asked_id and not job.enabled)
                     or job.bot_id != ctx.task.bot_id
                     or job.running_task_id != ctx.task.id
                     or bot is None
@@ -147,7 +169,7 @@ class CronRunHandler:
                     or run is None
                     or run.status != "running"
                     or run.executed_by != actor.id
-                    or (job.expires_at is not None and job.expires_at <= utcnow())
+                    or (not asked_id and job.expires_at is not None and job.expires_at <= utcnow())
                 ):
                     raise ApiError(403, 403, "job_or_actor_unavailable")
                 if job.execution_mode == "personal_ai":
@@ -181,17 +203,43 @@ class CronRunHandler:
                     bot_env=await effective_env(session, ctx.cipher, bot),
                 )
                 env.update(access.env)
+                # 求助入口只由平台逐次签发，机器人或技能自带的同名变量一律丢弃。
+                env = {
+                    k: v
+                    for k, v in env.items()
+                    if not k.startswith(("COREMAN_COLLABORATION_", "COREMAN_BOT_HELP_"))
+                }
                 backend = backend_of(bot.model, relay.model_provider)
-                personal_prompt = await self._personal_tools(
-                    session, ctx, job, bot, actor, relay, backend, config, env
+                # 续跑的指令里带着同事的原话：与对话续跑一致，不挂本人的飞书或企业微信个人工具。
+                personal_prompt = (
+                    ""
+                    if asked is not None
+                    else await self._personal_tools(
+                        session, ctx, job, bot, actor, relay, backend, config, env
+                    )
                 )
                 if personal_prompt or job.execution_mode == "personal_ai":
                     run.private = True
+                if asked is not None:
+                    personal_prompt += human.CRON_RESUME_POLICY
+                elif bot.platform == "feishu" and await human.has_partners(session, bot.id):
+                    env["COREMAN_COLLABORATION_URL"] = (
+                        ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
+                    )
+                    env["COREMAN_COLLABORATION_TOKEN"] = issue_capability(
+                        ctx.cipher, task_id=ctx.task.id, user_id=str(actor.id)
+                    )
+                    personal_prompt += CRON_POLICY
+                    collaborating = True
                 # 定时执行同样带着本人的业务系统令牌与个人工具凭据，出站闸门一视同仁。
                 ctx.secrets = collect_secrets(env)
-                prompt = str(config["prompt"])
-                if result.prompt_appendix:
-                    prompt += "\n\n" + result.prompt_appendix
+                if asked is not None:
+                    # 续跑的指令是开始执行时写好的 JSON：原任务、问题和同事答复。
+                    prompt = run.prompt
+                else:
+                    prompt = str(config["prompt"])
+                    if result.prompt_appendix:
+                        prompt += "\n\n" + result.prompt_appendix
                 run.prompt = prompt
                 request = ChatRequest(
                     model=bot.model,
@@ -242,24 +290,35 @@ class CronRunHandler:
             gen = client.chat_stream(request, total_timeout=float(bot.sse_timeout_seconds))
             stop = asyncio.create_task(ctx.cancel_event.wait())
             consume = asyncio.create_task(self._consume(ctx, gen))
+            # 登记求助后由平台断流，不依赖模型自己停下，也不让它继续消耗。
+            handoff = asyncio.create_task(
+                self._handoff(ctx) if collaborating else asyncio.Event().wait()
+            )
             try:
                 # 兜底：正常由 chat_stream 的 total_timeout 先到期并给出分类错误；
                 # 不再额外封顶 2 小时，与对话一样允许到 sse_timeout_seconds 上限。
                 async with asyncio.timeout(bot.sse_timeout_seconds + 60):
                     ready, _ = await asyncio.wait(
-                        {stop, consume}, return_when=asyncio.FIRST_COMPLETED
+                        {stop, consume, handoff}, return_when=asyncio.FIRST_COMPLETED
                     )
                     if stop in ready:
                         raise asyncio.CancelledError()
-                    reply, usage, tools, truncated = consume.result()
-                    if truncated:
-                        ctx.log.warning("cron_result_truncated", limit=RESULT_MAX_CHARS)
-                        reply += msg("cron_result_truncated", ctx.locale, limit=RESULT_MAX_CHARS)
-                    status = "success"
+                    if handoff in ready and consume not in ready:
+                        # 说明文字在收尾时按求助账本生成。
+                        reply, status = "", "success"
+                    else:
+                        reply, usage, tools, truncated = consume.result()
+                        if truncated:
+                            ctx.log.warning("cron_result_truncated", limit=RESULT_MAX_CHARS)
+                            reply += msg(
+                                "cron_result_truncated", ctx.locale, limit=RESULT_MAX_CHARS
+                            )
+                        status = "success"
             finally:
                 stop.cancel()
                 consume.cancel()
-                await asyncio.gather(stop, consume, return_exceptions=True)
+                handoff.cancel()
+                await asyncio.gather(stop, consume, handoff, return_exceptions=True)
                 await gen.aclose()
                 await client.aclose()
         except PrecheckError as exc:
@@ -376,6 +435,16 @@ class CronRunHandler:
         )
         return wecom_guidance(binding, scheduled=True)
 
+    @staticmethod
+    async def _handoff(ctx: TaskContext) -> None:
+        """每秒看一次任务记录：求助登记成功后返回，由调用方关闭模型流。"""
+        while True:
+            await asyncio.sleep(1)
+            async with ctx.session_factory() as session:
+                task = await session.get(Task, ctx.task.id)
+                if task is not None and task.payload.get("collaboration_handoff"):
+                    return
+
     async def _consume(
         self, ctx: TaskContext, gen: AsyncGenerator[SseEvent, None]
     ) -> tuple[str, UsageEvent | None, list[str], bool]:
@@ -456,6 +525,17 @@ class CronRunHandler:
     ) -> None:
         unlogged: ChatLogEntry | None = None
         async with ctx.session_factory() as session:
+            # 求助账本先于 job 加锁，与收取答复、调度看护同一锁序（账本 → job → task → run）。
+            asked_id = ctx.task.payload.get("human_collaboration_id")
+            asked = await session.scalar(
+                select(HumanCollaboration)
+                .where(
+                    HumanCollaboration.id == uuid.UUID(asked_id)
+                    if asked_id
+                    else HumanCollaboration.source_task_id == ctx.task.id
+                )
+                .with_for_update()
+            )
             # 全部路径遵循 job → task → run 锁序，且终态、记录、出站在同一提交中。
             job = await session.scalar(
                 select(CronJob)
@@ -477,6 +557,22 @@ class CronRunHandler:
                 return
             if task.cancel_requested_at is not None:
                 status, error, reply, detail = "failed", "cancelled", "", None
+            if asked is not None and not asked_id and asked.status == "pending":
+                # 这次执行登记了求助：干净交接后才发出问题，推送内容换成等待说明。
+                if status == "success":
+                    asked.relay_session_id = relay_session_id
+                    await human.send_ask(session, asked)
+                    helper = await session.get(User, asked.helper_user_id)
+                    reply = human.cron_handoff_text(
+                        helper.display_name if helper else "同事", asked.question
+                    )
+                else:
+                    await human.close(
+                        session, asked, "cancelled", "定时执行未正常结束", notify=False
+                    )
+            elif asked is not None and asked_id and asked.status == "resuming":
+                asked.status = "completed" if status == "success" else "failed"
+                asked.error = None if status == "success" else (error or status)
             now = utcnow()
             run.status, run.reply = status, reply or None
             run.error_message = f"{error}: {detail}" if error and detail else error

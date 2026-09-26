@@ -161,6 +161,18 @@ async def _enqueue_task(
         )
         if active:
             command = "stop"
+    if (
+        message.platform == "feishu"
+        and message.sender.platform_user_id
+        and command is None
+        and is_cancel_word(text_of(message))
+    ):
+        from coreman.core.chat.human_collaboration import active_for_origin
+
+        if await active_for_origin(
+            session, bot.id, message.chat_id, message.sender.platform_user_id
+        ):
+            command = "stop"
     if command in GATEWAY_COMMANDS:
         new = NewTask(
             bot_id=bot.id,
@@ -181,7 +193,15 @@ async def _enqueue_task(
             inbound_event_id=event_id,
             dedupe_key=f"inbound:{event_id}",
         )
-    if message.platform == "feishu" and message.chat_type == "group":
+    helper_reply = False
+    if message.platform == "feishu" and message.chat_type == "group" and new.kind == "chat":
+        from coreman.core.chat.human_collaboration import is_helper_reply
+
+        # A colleague answering a platform ask is feedback, not a new request for this group.
+        helper_reply = await is_helper_reply(
+            session, bot.id, message.reply_context, message.sender.platform_user_id
+        )
+    if message.platform == "feishu" and message.chat_type == "group" and not helper_reply:
         from coreman.core.chat.bot_collaboration import admit_human
 
         admission = await admit_human(

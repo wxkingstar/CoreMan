@@ -225,6 +225,9 @@ async def delete(
         if task and task.status in tasks.OPEN:
             task.cancel_requested_at = utcnow()
     name = job.name
+    from coreman.core.chat.human_collaboration import cancel_for_job
+
+    await cancel_for_job(session, job.id, "定时任务已删除")
     await session.delete(job)
     await session.commit()
     return {"code": 0, "data": {"deleted": str(job_id), "name": name}}

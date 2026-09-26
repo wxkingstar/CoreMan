@@ -41,7 +41,10 @@ class ContentStage(ChatStageBase):
         reply_context = pre.intake.inbound.reply_context
         parent_id = reply_context.get("parent_id")
         has_parent = "parent_id" in reply_context and parent_id is not None and parent_id != ""
-        if pre.intake.bot.platform == "feishu" and has_parent:
+        # Resuming after a colleague's reply: its attachments live on that reply message, and
+        # the origin text is already inside the prepared JSON, so the origin quote is not re-read.
+        media_message_id = ctx.task.payload.get("human_reply_message_id")
+        if pre.intake.bot.platform == "feishu" and has_parent and not media_message_id:
             from coreman.runtime.worker.chat.feishu_quote import enrich
 
             async with ctx.session_factory() as session:
@@ -67,7 +70,7 @@ class ContentStage(ChatStageBase):
             credentials = decrypt_json(ctx.cipher, pre.intake.bot.credentials_enc, CREDENTIALS_AAD)
             fetcher = FeishuMediaFetcher(
                 FeishuClient(credentials.get("app_id", ""), credentials.get("app_secret", "")),
-                message_id=pre.intake.inbound.platform_msg_id,
+                message_id=media_message_id or pre.intake.inbound.platform_msg_id,
             )
         else:
             fetcher = ctx.media_fetcher or MediaFetcher()

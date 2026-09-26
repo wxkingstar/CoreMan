@@ -25,6 +25,8 @@ BUSINESS_TABLES = [
     "feishu_personal_grants",
     "wecom_personal_grants",
     "wecom_personal_bindings",
+    "human_collaborations",
+    "bot_human_partners",
     "bot_collaborations",
     "bot_collaboration_routes",
     "bot_collaboration_partners",

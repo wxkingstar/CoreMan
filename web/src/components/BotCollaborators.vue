@@ -11,7 +11,7 @@ const loading = ref(false), optionsLoading = ref(false), busy = ref(false), visi
 const error = ref(''), formError = ref(''), optionsError = ref(''), target = ref('')
 let listSequence = 0
 let generation = 0, optionsGeneration = 0
-let query = ''
+const query = ref('')
 let controller = new AbortController()
 const permitted = computed(() => props.active && props.canEdit)
 function stop() { controller.abort(); controller = new AbortController(); generation++; optionsGeneration++; listSequence++ }
@@ -34,7 +34,7 @@ watch(() => [props.botId, props.active, props.canEdit], () => {
 onBeforeUnmount(stop)
 async function search(q = '') {
  if (!permitted.value || !visible.value) return
- query = q
+ query.value = q
  const epoch = ++optionsGeneration
  optionsLoading.value = true; optionsError.value = ''
  try { const result = await collaboration.options(props.botId, q, controller.signal); if (epoch === optionsGeneration) peers.value = result.filter(peer => peer.id !== props.botId) }
@@ -115,6 +115,9 @@ function status(row: CollaborationRoute) {
       :description="t('collaboration.noAccess')"
     />
     <template v-else>
+      <h3 class="section-title">
+        {{ t('collaboration.aiTitle') }}
+      </h3>
       <div class="partners-heading">
         <p>{{ t('collaboration.intro') }}</p>
         <el-button
@@ -239,6 +242,14 @@ function status(row: CollaborationRoute) {
               />
             </el-select>
           </el-form-item>
+          <!-- A remote select stays closed while it has no options; say so instead of nothing. -->
+          <el-alert
+            v-if="!optionsLoading && !optionsError && !peers.length"
+            data-test="no-peers"
+            :title="query ? t('collaboration.noPeers') : t('collaboration.noAiPeers')"
+            type="warning"
+            :closable="false"
+          />
           <el-alert
             :title="t('collaboration.usageHint')"
             type="info"
@@ -286,6 +297,7 @@ function status(row: CollaborationRoute) {
 :global(.collaboration-drawer > .el-drawer__header), :global(.collaboration-drawer > .el-drawer__footer) { flex: 0 0 auto; }
 :global(.collaboration-drawer > .el-drawer__body) { flex: 1 1 0; min-height: 0; overflow-y: auto; }
 
+.section-title { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
 .partners-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
 .partners-heading p { max-width: 70ch; margin: 0; color: var(--el-text-color-secondary); line-height: 1.7; }
 .partner-list { padding: 0; margin: 16px 0; list-style: none; }

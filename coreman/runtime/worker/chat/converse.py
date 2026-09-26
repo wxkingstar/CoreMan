@@ -52,7 +52,10 @@ class ConverseStage(ChatStageBase):
         guarded = bool(
             pre.request.env_vars.get("COREMAN_COLLABORATION_TOKEN")
             or ctx.task.payload.get("collaboration_id")
+            or ctx.task.payload.get("human_collaboration_id")
         )
+        # 工具数封顶只针对机器人之间的协作（可能互相求助成环）；只挂同事求助的轮次不封顶。
+        capped = bool(ctx.task.payload.get("collaboration_id") or ctx.bot_peers_mounted)
         try:
             while True:
                 if ctx.cancel_event.is_set():
@@ -91,7 +94,7 @@ class ConverseStage(ChatStageBase):
                     silent_since = now
                     self._apply(ctx, pre, out, event)
                     await pre.writer.flush()
-                    if guarded and out.tool_events >= 64:
+                    if capped and out.tool_events >= 64:
                         out.cancelled, out.reason = True, "collaboration_budget_exhausted"
                         return out
                 elif not done and now - silent_since >= self.SILENT_WARN_SECONDS:

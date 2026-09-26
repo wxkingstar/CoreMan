@@ -35,6 +35,12 @@ it('saves once with only a partner, closes and confirms enabled success', async 
  expect(collaboration.create).toHaveBeenCalledExactlyOnceWith('b1', 'b2'); complete(row); await flushPromises()
  expect(w.findComponent({ name: 'ElDrawer' }).props('modelValue')).toBe(false); expect(toast).toHaveBeenCalledWith('协作伙伴已保存并启用'); expect(collaboration.update).not.toHaveBeenCalled(); expect(w.text()).toContain('已启用'); w.unmount()
 })
+it('explains an empty candidate list instead of a silent closed select', async () => {
+ vi.mocked(collaboration.options).mockResolvedValue([]); const w = await openPanel()
+ expect(w.get('[data-test="no-peers"]').text()).toContain('当前没有其他飞书 AI 员工')
+ await w.findComponent({ name: 'ElSelect' }).props('remoteMethod')('库存'); await flushPromises()
+ expect(w.get('[data-test="no-peers"]').text()).toContain('没有匹配的飞书 AI 员工'); w.unmount()
+})
 it('allows unavailable partners and disables only already-added options', async () => {
  vi.mocked(collaboration.options).mockResolvedValue([{ ...peer, available: false, enabled: false }, { ...peer, id: 'b4', name: 'Existing' }]); vi.mocked(collaboration.list).mockResolvedValue([{ ...row, target_bot_id: 'b4' }])
  const w = await openPanel(); const options = w.findAllComponents({ name: 'ElOption' }); expect(options[0].props('disabled')).toBe(false); expect(options[0].props('label')).toContain('暂不可用'); expect(options[1].props('disabled')).toBe(true)

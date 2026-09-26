@@ -177,6 +177,18 @@ class FinalizeStage(ChatStageBase):
                     else BotCollaboration.source_task_id == ctx.task.id
                 )
                 await session.scalar(select(BotCollaboration).where(condition).with_for_update())
+                from coreman.core.db.models import HumanCollaboration
+
+                hid = ctx.task.payload.get("human_collaboration_id")
+                await session.scalar(
+                    select(HumanCollaboration)
+                    .where(
+                        HumanCollaboration.id == uuid.UUID(hid)
+                        if hid
+                        else HumanCollaboration.source_task_id == ctx.task.id
+                    )
+                    .with_for_update()
+                )
             # Cancellation wins even when it lands between the last SSE frame and finalization.
             current = await session.get(Task, ctx.task.id, with_for_update=True)
             if current and current.cancel_requested_at:
@@ -199,6 +211,9 @@ class FinalizeStage(ChatStageBase):
                 from coreman.runtime.worker.chat.collaboration import final_transition
 
                 verdict, collaboration_silent = await final_transition(session, ctx, pre, verdict)
+                from coreman.runtime.worker.chat import human_collaboration
+
+                verdict = await human_collaboration.final_transition(session, ctx, pre, verdict)
             entry = (
                 log_entry(
                     ctx,

@@ -53,6 +53,10 @@ class IntakeStage(ChatStageBase):
             from coreman.runtime.worker.chat.collaboration import resolve
 
             return await resolve(session, ctx)
+        if ctx.task.payload.get("human_collaboration_id"):
+            from coreman.runtime.worker.chat import human_collaboration
+
+            return await human_collaboration.resolve(session, ctx)
         return await self._intake(session, ctx)
 
     def _needs_content(self) -> bool:
@@ -99,6 +103,13 @@ class IntakeStage(ChatStageBase):
             from coreman.runtime.worker.feishu_escalations import consume_reply
 
             if await consume_reply(session, ctx, bot, inbound, speaker, parts, text):
+                return None
+            from coreman.runtime.worker.chat import human_collaboration
+
+            # Before the whitelist: the asked colleague need not be allowed to use this bot.
+            if await human_collaboration.consume_reply(
+                session, ctx, bot, inbound, speaker, parts, text
+            ):
                 return None
         relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
         intake = Intake(
