@@ -514,6 +514,9 @@ async def delete_job(
     if row.running_task_id:
         raise ApiError(409, 409, "执行中的任务不能删除，请先取消运行")
     await _audit(session, request, actor, "cron.delete", row)
+    from coreman.core.chat.human_collaboration import cancel_for_job
+
+    await cancel_for_job(session, row.id, "定时任务已删除")
     await session.delete(row)
     await session.commit()
     return {"code": 0}

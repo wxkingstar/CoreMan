@@ -210,8 +210,13 @@ class CronRunHandler:
                     if not k.startswith(("COREMAN_COLLABORATION_", "COREMAN_BOT_HELP_"))
                 }
                 backend = backend_of(bot.model, relay.model_provider)
-                personal_prompt = await self._personal_tools(
-                    session, ctx, job, bot, actor, relay, backend, config, env
+                # 续跑的指令里带着同事的原话：与对话续跑一致，不挂本人的飞书或企业微信个人工具。
+                personal_prompt = (
+                    ""
+                    if asked is not None
+                    else await self._personal_tools(
+                        session, ctx, job, bot, actor, relay, backend, config, env
+                    )
                 )
                 if personal_prompt or job.execution_mode == "personal_ai":
                     run.private = True

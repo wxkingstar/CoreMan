@@ -404,6 +404,7 @@ class FeishuTransport:
             )
 
     async def consume_one(self) -> bool:
+        delivered: tuple[str, str, str] | None = None
         async with self.factory() as session:
             item = await outbox.claim_next(session, bot_id=self.bot_id)
             if item is None:
@@ -449,28 +450,31 @@ class FeishuTransport:
                         await outbox.mark_skipped(session, item.id, str(exc))
                         await session.commit()
                         return True
-                asked = None
                 if item.payload.get("_human_collaboration_id"):
                     from coreman.core.db.models import HumanCollaboration
 
+                    # Read only: this transaction holds the outbox row while sending, and close()
+                    # may hold the ledger row while it waits for that outbox row.
                     asked = await session.get(
                         HumanCollaboration,
                         uuid.UUID(item.payload["_human_collaboration_id"]),
                         populate_existing=True,
                     )
-                    phase = item.payload.get("_human_phase")
                     # Questions and reminders stop once the ask ends; closing notices still go.
-                    if asked is None or (phase in ("ask", "remind") and asked.status != "waiting"):
+                    if asked is None or (
+                        item.payload.get("_human_phase") in ("ask", "remind")
+                        and asked.status != "waiting"
+                    ):
                         await outbox.mark_skipped(session, item.id, "collaboration inactive")
                         await session.commit()
                         return True
                 await self._send_item(item)
-                if asked is not None:
-                    mid = item.payload.get("_feishu_message_id")
-                    if item.payload.get("_human_phase") == "ask":
-                        asked.request_message_id = mid
-                    elif item.payload.get("_human_phase") == "remind":
-                        asked.reminder_message_id = mid
+                if item.payload.get("_human_phase") in ("ask", "remind"):
+                    delivered = (
+                        str(item.payload["_human_collaboration_id"]),
+                        str(item.payload["_human_phase"]),
+                        str(item.payload["_feishu_message_id"]),
+                    )
                 if item.payload.get("_typing_task_id"):
                     await typing(self, int(item.payload["_typing_task_id"]), done=True)
                 await session.flush()
@@ -484,7 +488,15 @@ class FeishuTransport:
                 if status == "failed" and item.payload.get("_typing_task_id"):
                     await typing(self, int(item.payload["_typing_task_id"]), done=True)
             await session.commit()
-            return True
+        if delivered is not None:
+            from coreman.core.chat.human_collaboration import record_delivery
+
+            # Only after the outbox commit: the ledger lock is never taken while holding the
+            # outbox row. A crash in between is backfilled from the outbox by the scheduler.
+            async with self.factory() as session:
+                await record_delivery(session, uuid.UUID(delivered[0]), *delivered[1:])
+                await session.commit()
+        return True
 
     async def _send_item(self, item: OutboxItem) -> None:
         if item.payload.get("_human_collaboration_id"):

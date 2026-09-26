@@ -441,24 +441,26 @@ async def close(
     if row.status not in HUMAN_ACTIVE:
         return
     previous = row.status
+    await sync_message_ids(session, row)
     row.status, row.error = status, error
     if row.resume_task_id:
         await tasks.request_cancel(session, row.resume_task_id, error[:200])
-    item = await session.get(OutboxItem, row.request_outbox_id) if row.request_outbox_id else None
-    if item and item.status == "pending":
-        await outbox.mark_skipped(session, item.id, error)
+    if row.request_outbox_id:
+        # SKIP LOCKED: the gateway holds a claimed ask's row while sending. Waiting for it here
+        # would hold this ledger row across the send; record_delivery tells the colleague instead.
+        item = await session.scalar(
+            select(OutboxItem)
+            .where(OutboxItem.id == row.request_outbox_id)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        if item and item.status == "pending":
+            await outbox.mark_skipped(session, item.id, error)
     if not notify:
         return
     _, helper_name, _ = await _names(session, row)
-    if previous == "waiting" and row.request_message_id:
-        await _notice(
-            session,
-            row,
-            "closed",
-            f"这条求助{TERMINAL_TEXT.get(status, '已结束')}（{error}），无需再回复，谢谢。",
-            reply_to=row.request_message_id,
-            chat_id=row.origin_chat_id or "",
-        )
+    if previous == "waiting":
+        await closed_notice(session, row)
     if not notify_origin_side:
         return
     consequence = (
@@ -472,6 +474,55 @@ async def close(
         f"向「{helper_name}」的求助{TERMINAL_TEXT.get(status, '已结束')}：{error}。{consequence}",
         cipher=cipher,
     )
+
+
+async def closed_notice(session: AsyncSession, row: HumanCollaboration) -> None:
+    """Tell the colleague a delivered question is over; idempotent per ask."""
+    if not row.request_message_id or row.status in HUMAN_ACTIVE:
+        return
+    await _notice(
+        session,
+        row,
+        "closed",
+        f"这条求助{TERMINAL_TEXT.get(row.status, '已结束')}（{row.error}），无需再回复，谢谢。",
+        reply_to=row.request_message_id,
+        chat_id=row.origin_chat_id or "",
+    )
+
+
+async def _sent_message_id(session: AsyncSession, **where: Any) -> str | None:
+    item = await session.scalar(
+        select(OutboxItem).filter_by(**where).execution_options(populate_existing=True)
+    )
+    mid = (item.payload or {}).get("_feishu_message_id") if item else None
+    return str(mid) if item and item.status == "sent" and mid else None
+
+
+async def sync_message_ids(session: AsyncSession, row: HumanCollaboration) -> None:
+    """Backfill message ids from committed outbox items (plain reads, never waits on a send)."""
+    if row.request_message_id is None and row.request_outbox_id:
+        row.request_message_id = await _sent_message_id(session, id=row.request_outbox_id)
+    if row.reminded_at is not None and row.reminder_message_id is None:
+        row.reminder_message_id = await _sent_message_id(
+            session, dedupe_key=f"human-collaboration:{row.id}:remind"
+        )
+
+
+async def record_delivery(
+    session: AsyncSession, row_id: uuid.UUID, phase: str, message_id: str
+) -> None:
+    """Called by the gateway after the outbox commit, never inside it."""
+    row = await session.get(
+        HumanCollaboration, row_id, with_for_update=True, populate_existing=True
+    )
+    if row is None:
+        return
+    if phase == "ask":
+        row.request_message_id = row.request_message_id or message_id
+        # Closed while the question was in flight: the colleague still hears it ended.
+        await closed_notice(session, row)
+    elif phase == "remind":
+        row.reminder_message_id = row.reminder_message_id or message_id
 
 
 def delivery_error(item: OutboxItem) -> str:
@@ -601,6 +652,41 @@ async def start_resume(
     row.resume_task_id, row.status = task.id, "resuming"
 
 
+async def resume_failed(
+    session: AsyncSession, row: HumanCollaboration, reason: str, *, cipher: Cipher | None = None
+) -> None:
+    """The colleague answered but the continuation did not finish (for example a newer group
+    message superseded it): hand the answer itself to the originator instead of dropping it."""
+    if row.status != "resuming":
+        return
+    row.status, row.error = "failed", reason
+    _, helper_name, _ = await _names(session, row)
+    await notify_origin(
+        session,
+        row,
+        f"「{helper_name}」已答复，但未能继续处理（{reason}）。答复原文：\n\n{row.response or ''}",
+        cipher=cipher,
+    )
+
+
+async def cancel_for_job(session: AsyncSession, job_id: uuid.UUID, reason: str) -> None:
+    """A deleted job withdraws its open question; whoever deletes it already knows.
+
+    Callers hold the job lock, the reverse of the scheduler's ledger -> job order, so rows the
+    scheduler holds right now are skipped; its next round closes them once the job is gone.
+    """
+    rows = await session.scalars(
+        select(HumanCollaboration)
+        .where(
+            HumanCollaboration.cron_job_id == job_id,
+            HumanCollaboration.status.in_(HUMAN_ACTIVE),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    for row in rows:
+        await close(session, row, "cancelled", reason, notify_origin_side=False)
+
+
 async def record_reply(
     session: AsyncSession,
     row: HumanCollaboration,
@@ -658,6 +744,15 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher | None = Non
             await close(session, row, "cancelled", str(exc), cipher=cipher)
             count += 1
             continue
+        await sync_message_ids(session, row)
+        if (
+            row.origin_kind == "cron"
+            and row.status in WAITING
+            and (await session.get(CronJob, row.cron_job_id) if row.cron_job_id else None) is None
+        ):
+            await close(session, row, "cancelled", "定时任务已删除", notify_origin_side=False)
+            count += 1
+            continue
         source = await session.get(Task, row.source_task_id)
         if row.status == "pending":
             # finalize normally sends; this covers a crash between handoff and the send.
@@ -668,7 +763,8 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher | None = Non
                 await send_ask(session, row)
                 count += 1
             continue
-        if row.status in ("waiting", "answered") and row.expires_at <= now:
+        # Only an unanswered ask expires; an answer waiting for a busy job keeps waiting.
+        if row.status == "waiting" and row.expires_at <= now:
             await close(session, row, "timed_out", f"{_hours()} 小时内未收到答复", cipher=cipher)
             count += 1
             continue
@@ -679,7 +775,7 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher | None = Non
         if row.status == "resuming":
             running = await session.get(Task, row.resume_task_id) if row.resume_task_id else None
             if running is None or running.status in ("failed", "cancelled", "timed_out"):
-                row.status, row.error = "failed", "续跑任务中断"
+                await resume_failed(session, row, "续跑任务中断", cipher=cipher)
                 count += 1
             elif running.status == "succeeded":
                 row.status = "completed"

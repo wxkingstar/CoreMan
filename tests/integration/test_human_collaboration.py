@@ -429,6 +429,78 @@ async def test_revoked_partner_cancels_waiting_ask(db_session, db_engine):
     assert row.status == "cancelled" and "协作名单" in row.error
 
 
+async def test_close_never_waits_on_an_ask_being_sent(db_session, db_engine):
+    import asyncio
+
+    from sqlalchemy import text
+
+    from coreman.core.db.session import make_session_factory
+
+    bot, origin, helper, partner, task = await setup(db_session)
+    row = await register(db_session, task, origin, helper, member=False)
+    from coreman.runtime.worker.chat.human_collaboration import final_transition
+
+    await final_transition(
+        db_session,
+        build_ctx(db_engine, task),
+        SimpleNamespace(intake=SimpleNamespace(chat_type="group")),
+        Verdict("success", "succeeded", None, None, ""),
+    )
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    async with factory() as gateway:
+        # The gateway's claim holds the outbox row for the whole Feishu call.
+        await gateway.execute(
+            text("UPDATE outbox SET status='sending' WHERE id=:id"), {"id": row.request_outbox_id}
+        )
+        await asyncio.wait_for(human.stop_for(db_session, bot.id, "group", "asker-id"), 3)
+        await db_session.commit()
+        assert row.status == "cancelled"
+        await gateway.execute(
+            text(
+                "UPDATE outbox SET status='sent', payload = payload || "
+                """'{"_feishu_message_id": "om_late"}'::jsonb WHERE id=:id"""
+            ),
+            {"id": row.request_outbox_id},
+        )
+        await gateway.commit()
+    async with factory() as gateway:
+        await human.record_delivery(gateway, row.id, "ask", "om_late")
+        await gateway.commit()
+    await db_session.refresh(row)
+    assert row.request_message_id == "om_late"
+    closed = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"human-collaboration:{row.id}:closed")
+    )
+    assert closed.target["message_id"] == "om_late"
+
+
+async def test_superseded_continuation_hands_the_answer_to_the_requester(db_session, db_engine):
+    from coreman.runtime.worker.chat.human_collaboration import final_transition
+
+    bot, origin, helper, partner, task = await setup(db_session)
+    row = await register(db_session, task, origin, helper)
+    await handoff(db_session, db_engine, task, row)
+    await tasks.finish(db_session, task.id, status="succeeded")
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    await human.record_reply(db_session, row, event=event, text="口径=在库-锁定")
+    await db_session.commit()
+    resumed = await db_session.get(Task, row.resume_task_id)
+    await final_transition(
+        db_session,
+        build_ctx(db_engine, resumed),
+        SimpleNamespace(),
+        Verdict("stopped", "cancelled", "superseded", None, ""),
+    )
+    assert row.status == "failed" and "接替" in row.error
+    notice = await db_session.scalar(
+        select(OutboxItem).where(
+            OutboxItem.dedupe_key == f"human-collaboration:{row.id}:origin:failed"
+        )
+    )
+    assert "口径=在库-锁定" in notice.payload["text"]
+
+
 async def test_pausing_colleague_after_answer_keeps_the_continuation(db_session, db_engine):
     bot, origin, helper, partner, task = await setup(db_session)
     row = await register(db_session, task, origin, helper)
@@ -555,7 +627,9 @@ async def test_resume_runs_through_the_worker_in_the_current_group_session(db_se
     assert stream.reply_context == origin_event.reply_context
 
 
-async def test_cron_run_hands_off_then_follow_up_run_delivers_result(db_session, db_engine):
+async def test_cron_run_hands_off_then_follow_up_run_delivers_result(
+    db_session, db_engine, monkeypatch
+):
     import asyncio
 
     from coreman.core.chat.collaboration_tools import invoke
@@ -585,6 +659,8 @@ async def test_cron_run_hands_off_then_follow_up_run_delivers_result(db_session,
     task = await claim(db_session)
     slow = FakeRelay("normal", first_byte_delay=5)
     ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: slow.client())
+    personal = AsyncMock(return_value="")
+    monkeypatch.setattr(CronRunHandler, "_personal_tools", personal)
     running = asyncio.create_task(CronRunHandler().run(ctx))
     try:
         for _ in range(200):
@@ -636,6 +712,8 @@ async def test_cron_run_hands_off_then_follow_up_run_delivers_result(db_session,
     await CronRunHandler().run(
         build_ctx(db_engine, follow, relay_client_factory=lambda _: fake.client())
     )
+    # The continuation carries the colleague's words, so the owner's personal tools stay off.
+    assert personal.await_count == 1
     body = fake.requests[0]
     assert body["session_id"] == str(row.relay_session_id)
     assert "COREMAN_COLLABORATION_TOKEN" not in body.get("env_vars", {})
@@ -733,6 +811,9 @@ async def test_cron_ask_resumes_as_collaboration_run(db_session, busy):
     await human.record_reply(db_session, row, event=reply, text="盘点漏扫 3 箱")
     if busy:
         assert row.status == "answered"
+        # An answer that arrived keeps waiting for the job, even past the ask's deadline.
+        await human.tick(db_session, datetime.now(UTC) + timedelta(hours=30))
+        assert row.status == "answered"
         job.running_task_id = None
         await human.tick(db_session, datetime.now(UTC))
     assert row.status == "resuming"
@@ -744,3 +825,55 @@ async def test_cron_ask_resumes_as_collaboration_run(db_session, busy):
     prompt = json.loads(run.prompt)
     assert prompt["original_task"] == "汇总库存异常"
     assert prompt["colleague_reply"] == "盘点漏扫 3 箱"
+
+
+@pytest.mark.parametrize("held", [False, True])
+async def test_deleting_the_job_withdraws_its_open_ask(db_session, held):
+    bot, origin, helper, partner, _ = await setup(db_session)
+    job = CronJob(
+        bot_id=bot.id, name="日报", cron_expression="0 9 * * *", prompt="p", created_by=origin.id
+    )
+    db_session.add(job)
+    await db_session.flush()
+    source = await tasks.enqueue(
+        db_session,
+        NewTask(
+            bot_id=bot.id,
+            kind="cron_run",
+            user_id=origin.id,
+            payload={"cron_job_id": str(job.id), "config": {}},
+        ),
+    )
+    row = await human.request_help(
+        db_session,
+        task=source,
+        source=None,
+        actor=origin.id,
+        target_key=f"human:{helper.id}",
+        question="?",
+        cipher=None,
+    )
+    await human.send_ask(db_session, row)
+    row.request_message_id = "om_ask"
+    await db_session.commit()
+    if not held:
+        await human.cancel_for_job(db_session, job.id, "定时任务已删除")
+    # Held by the scheduler at deletion time: its next round notices the job is gone.
+    await db_session.delete(job)
+    await db_session.commit()
+    if held:
+        await human.tick(db_session, datetime.now(UTC))
+    await db_session.refresh(row)
+    assert row.status == "cancelled" and row.error == "定时任务已删除"
+    keys = set(
+        await db_session.scalars(
+            select(OutboxItem.dedupe_key).where(
+                OutboxItem.dedupe_key.like(f"human-collaboration:{row.id}:%")
+            )
+        )
+    )
+    # The colleague is told; the job's recipients are not (whoever deleted it knows).
+    assert f"human-collaboration:{row.id}:closed" in keys
+    assert not await db_session.scalar(
+        select(OutboxItem.id).where(OutboxItem.dedupe_key.like(f"cron:hc-{row.id}%"))
+    )

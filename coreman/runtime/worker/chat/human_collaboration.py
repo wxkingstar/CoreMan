@@ -169,9 +169,14 @@ async def final_transition(
     if row is None:
         return verdict
     if hid:
-        if row.status == "resuming":
-            row.status = "completed" if verdict.task_status == "succeeded" else "failed"
-            row.error = None if row.status == "completed" else verdict.error_code
+        if row.status == "resuming" and verdict.task_status == "succeeded":
+            row.status = "completed"
+        elif row.status == "resuming":
+            reason = {
+                "superseded": "群里的新消息接替了这一轮",
+                "user_stop": "有人发送了停止",
+            }.get(verdict.error_code or "", "续跑未正常完成")
+            await service.resume_failed(session, row, reason, cipher=ctx.cipher)
         return verdict
     if row.status != "pending":
         return verdict
