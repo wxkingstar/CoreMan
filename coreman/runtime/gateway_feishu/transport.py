@@ -19,6 +19,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 from coreman.core.bus import outbox, streams
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, TaskStream
+from coreman.core.feishu_cards.compile import (
+    Compiled,
+    compile_reply,
+    image_urls,
+    plain_text,
+    simple_cards,
+)
+from coreman.core.feishu_cards.thinking import thinking_panel
+from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.runtime.gateway_feishu.cards import (
     interaction_card,
@@ -39,6 +48,18 @@ _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0
 OUTBOX_PER_ROUND = 20
 # 同一 bot 两次平台调用之间至少隔这么久，避免触发飞书的接口频控。
 CALL_SPACING_SECONDS = 0.3
+# 卡片内容本身有问题（字段不认、体积或元素超限）：原样重试没有意义，立即降级成简化卡。
+# 一条回复最多上传这么多张远程图片，免得一条回复拖住整个出站循环。
+IMAGES_PER_REPLY = 9
+# 卡片内容本身有问题（字段不认、体积或元素超限、JSON 非法）：原样重试没有意义，立即降级。
+# CardKit 与发消息接口各有一套码；-2 是本地判定的体积超限或 JSON 非法。
+CARD_CONTENT_ERRORS = frozenset({-2, 10002, 200220, 200860, 300121, 300301, 300305, 230025, 230099})
+log = get_logger(__name__)
+
+
+def card_json(content: Any) -> str:
+    """发给飞书的 JSON：紧凑写法（和编译器算体积的口径一致），NaN / Infinity 直接拒绝。"""
+    return json.dumps(content, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 def api_id(value: Any) -> str:
@@ -80,6 +101,8 @@ class FeishuTransport:
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
         self._round_fenced = False
         self.images = RemoteImages(self.upload_image, transport=image_transport)
+        # 机器人的富卡片开关；子进程每轮从库里刷新。
+        self.rich_cards = True
 
     async def fence(self) -> None:
         async with self.factory() as session:
@@ -123,7 +146,10 @@ class FeishuTransport:
         reply_to: str | None = None,
         receive_id_type: str = "chat_id",
     ) -> str:
-        payload = json.dumps(content, ensure_ascii=False)
+        try:
+            payload = card_json(content)
+        except ValueError as exc:
+            raise FeishuError(-2, "invalid message json") from exc
         if len(payload.encode()) > 30_000:
             raise FeishuError(-2, "message too large")
         body = {"msg_type": kind, "content": payload, "uuid": stable_uuid(key)}
@@ -181,16 +207,24 @@ class FeishuTransport:
             for row in rows:
                 try:
                     await self.push(row)
-                except FeishuError as exc:
+                except LeaseLost:
+                    raise
+                except Exception as exc:  # noqa: BLE001 一条回复出问题不能卡住后面的回复
+                    code = exc.code if isinstance(exc, FeishuError) else None
+                    if code is None:
+                        log.warning(
+                            "feishu_push_failed", task_id=row.task_id, error=type(exc).__name__
+                        )
                     async with self.factory() as session:
                         delivery = await session.get(FeishuDelivery, row.task_id)
-                        assert delivery is not None
+                        if delivery is None:
+                            continue
                         delivery.failures += 1
-                        delivery.last_error = str(exc)
+                        delivery.last_error = str(exc) if code is not None else type(exc).__name__
                         delivery.retry_at = datetime.now(UTC) + timedelta(
                             seconds=min(120, 2 ** min(delivery.failures, 7))
                         )
-                        if delivery.failures >= 6 or exc.code in {230013, -2}:
+                        if delivery.failures >= 6 or code in {230013, -2}:
                             delivery.fallback = True
                         await session.commit()
             await clean_finished(self)
@@ -265,7 +299,9 @@ class FeishuTransport:
             if row.is_complete:
                 async with self.factory() as session:
                     answer = row.final_text if row.final_text is not None else row.pending_text
-                    await self.enqueue_final(session, row, visible_parts("", answer)[1], start=0)
+                    await self.enqueue_final(
+                        session, row, plain_text(visible_parts("", answer)[1]), start=0
+                    )
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
                 if not visible_parts("", answer)[1].strip() and not row.pending_card:
@@ -320,23 +356,32 @@ class FeishuTransport:
             row.final_text if row.is_complete and row.final_text is not None else row.pending_text
         )
         thinking, answer = visible_parts(row.thinking_md, answer)
+        compiled: Compiled | None = None
+        summary = ""
         if row.is_complete:
-            # 只在终稿换图：流式期间远程图片先显示为链接，下载上传不拖慢打字。
-            answer = await self.images.localize(answer)
-        card = stream_card(
-            thinking,
-            answer,
-            streaming=not (row.is_complete or expired),
-            session_url=row.session_url,
-            heading=heading,
-        )
+            compiled = await self.final_cards(
+                thinking, answer, session_url=row.session_url, heading=heading
+            )
+            card, summary = compiled.cards[0], compiled.summary
+        else:
+            card = stream_card(
+                thinking,
+                answer,
+                streaming=not expired,
+                session_url=row.session_url,
+                heading=heading,
+            )
         if (row.is_complete or expired) and not delivery.is_static:
+            config: dict[str, Any] = {"streaming_mode": False}
+            if summary:
+                # 关流式不会改写自定义摘要，消息列表的预览要在这里一起写上。
+                config["summary"] = {"content": summary}
             await self.call(
                 "PATCH",
                 f"/open-apis/cardkit/v1/cards/{card_id}/settings",
                 json={
                     "sequence": await self.sequence(row.task_id),
-                    "settings": json.dumps({"config": {"streaming_mode": False}}),
+                    "settings": json.dumps({"config": config}, ensure_ascii=False),
                 },
             )
             async with self.factory() as session:
@@ -346,16 +391,15 @@ class FeishuTransport:
                 await session.commit()
             delivery.is_static = True
         if delivery.is_static:
-            seq = await self.sequence(row.task_id)
-            await self.call(
-                "PUT",
-                f"/open-apis/cardkit/v1/cards/{card_id}",
-                json={
-                    "sequence": seq,
-                    "uuid": stable_uuid(f"card:{row.task_id}:{seq}"),
-                    "card": {"type": "card_json", "data": json.dumps(card, ensure_ascii=False)},
-                },
-            )
+            try:
+                await self.put_card(row.task_id, card_id, card)
+            except FeishuError as exc:
+                if compiled is None or exc.code not in CARD_CONTENT_ERRORS:
+                    raise
+                # 富卡片飞书不认：整条换成只有 markdown 的简化卡（放不下就分几张），回答完整送达。
+                log.warning("feishu_rich_card_rejected", code=exc.code, task_id=row.task_id)
+                compiled = await self.plain_cards(thinking, answer, row.session_url, heading)
+                await self.put_card(row.task_id, card_id, compiled.cards[0])
         else:
             elements = card["body"]["elements"]
             for element_id, content in [
@@ -375,9 +419,89 @@ class FeishuTransport:
             saved.failures, saved.retry_at, saved.last_error = 0, None, None
             await streams.mark_pushed(session, row.task_id, row.version)
             if row.is_complete:
-                await self.enqueue_final(session, row, visible_parts("", answer)[1], start=1)
+                await self.enqueue_cards(session, row, compiled)
                 await streams.mark_finish_pushed(session, row.task_id)
             await session.commit()
+
+    async def put_card(self, task_id: int, card_id: str, card: dict[str, Any]) -> None:
+        seq = await self.sequence(task_id)
+        await self.call(
+            "PUT",
+            f"/open-apis/cardkit/v1/cards/{card_id}",
+            json={
+                "sequence": seq,
+                "uuid": stable_uuid(f"card:{task_id}:{seq}"),
+                "card": {"type": "card_json", "data": card_json(card)},
+            },
+        )
+
+    async def final_cards(
+        self,
+        thinking: str,
+        answer: str,
+        *,
+        session_url: str | None,
+        heading: str,
+    ) -> Compiled:
+        """终稿编译成若干张卡；关掉富卡片或编译自检不过时用简化卡。"""
+        prefix = [thinking_panel(thinking, session_url=session_url, heading=heading)]
+        # 正文图片照旧内嵌并另起一行保留原图链接；块里的图片（实体卡等）再单独换 key。
+        answer = await self.images.localize(answer)
+        if self.rich_cards:
+            images = await self.image_keys(image_urls(answer))
+            # 编译是纯 CPU 活，放到线程里，别让超长回复挡住租约心跳和其他回复。
+            compiled = await asyncio.to_thread(compile_reply, answer, prefix=prefix, images=images)
+            if not compiled.problems:
+                return compiled
+            log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+        return await self.plain_cards(thinking, answer, session_url, heading, localized=True)
+
+    async def plain_cards(
+        self,
+        thinking: str,
+        answer: str,
+        session_url: str | None,
+        heading: str,
+        *,
+        localized: bool = False,
+    ) -> Compiled:
+        prefix = [thinking_panel(thinking, session_url=session_url, heading=heading)]
+        body = answer if localized else await self.images.localize(answer)
+        cards = await asyncio.to_thread(simple_cards, body, prefix=prefix)
+        summary = str(((cards[0].get("config") or {}).get("summary") or {}).get("content") or "")
+        texts = [_card_markdown(card) for card in cards]
+        return Compiled(cards, summary, texts)
+
+    async def image_keys(self, urls: list[str]) -> dict[str, str]:
+        """回复里的远程图片逐个上传换 img_key；失败的不进映射，渲染时退化成链接。"""
+        keys: dict[str, str] = {}
+        for url in urls[:IMAGES_PER_REPLY]:
+            key = await self.images.key_for(url)
+            if key:
+                keys[url] = key
+        return keys
+
+    async def enqueue_cards(
+        self, session: AsyncSession, row: TaskStream, compiled: Compiled | None
+    ) -> None:
+        """续卡（主卡装不下的部分）和待发的选择卡，依次排进出站队列。
+
+        每张续卡带上自己的降级文本：飞书拒收时只把这一张改发成普通消息。
+        """
+        cards = compiled.cards[1:] if compiled else []
+        texts = compiled.texts[1:] if compiled else []
+        for index, card in enumerate(cards, 1):
+            text = texts[index - 1] if index - 1 < len(texts) else ""
+            await outbox.add(
+                session,
+                bot_id=row.bot_id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"{row.task_id}:more:{index}",
+                target={"chat_id": row.reply_context.get("chat_id")},
+                payload={"card": card, "_fallback_markdown": text, "_typing_task_id": row.task_id},
+            )
+        await self.enqueue_final(session, row, "", start=0)
 
     async def enqueue_final(
         self, session: AsyncSession, row: TaskStream, answer: str, *, start: int
@@ -390,7 +514,7 @@ class FeishuTransport:
                 kind="send",
                 dedupe_key=f"{row.task_id}:overflow:{index}",
                 target={"chat_id": row.reply_context.get("chat_id")},
-                payload={"markdown": chunk, "_typing_task_id": row.task_id},
+                payload={"markdown": chunk, "_typing_task_id": row.task_id, "_plain": True},
             )
         if row.pending_card:
             await outbox.add(
@@ -487,6 +611,13 @@ class FeishuTransport:
                     status = await outbox.mark_failed(session, item.id, str(exc))
                 if status == "failed" and item.payload.get("_typing_task_id"):
                     await typing(self, int(item.payload["_typing_task_id"]), done=True)
+            except LeaseLost:
+                raise
+            except Exception as exc:  # noqa: BLE001 一条出站出问题不能卡住后面的出站
+                log.warning("feishu_outbox_failed", item_id=item.id, error=type(exc).__name__)
+                status = await outbox.mark_failed(session, item.id, type(exc).__name__)
+                if status == "failed" and item.payload.get("_typing_task_id"):
+                    await typing(self, int(item.payload["_typing_task_id"]), done=True)
             await session.commit()
         if delivered is not None:
             from coreman.core.chat.human_collaboration import record_delivery
@@ -557,17 +688,65 @@ class FeishuTransport:
             raise FeishuError(-2, "unsupported outbox kind")
         chat = str(item.target.get("chat_id") or "")
         if isinstance(card, dict):
-            mid = await self.send(
-                chat, interaction_card(card), kind="interactive", key=f"outbox:{item.id}"
-            )
-            item.payload = {**item.payload, "_feishu_message_id": mid}
-        else:
-            for index, chunk in enumerate(
-                split_utf8(str(item.payload.get("markdown") or item.payload.get("text") or "…"))
-            ):
-                await self.send(
-                    chat,
-                    post_content(await self.images.localize(chunk)),
-                    kind="post",
-                    key=f"outbox:{item.id}:{index}",
+            fallback = item.payload.get("_fallback_markdown")
+            try:
+                mid = await self.send(
+                    chat, interaction_card(card), kind="interactive", key=f"outbox:{item.id}"
                 )
+            except FeishuError as exc:
+                if not isinstance(fallback, str) or exc.code not in CARD_CONTENT_ERRORS:
+                    raise
+                log.warning("feishu_outbox_card_rejected", code=exc.code, item_id=item.id)
+                await self.send_posts(chat, fallback, f"outbox:{item.id}")
+                return
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+        elif isinstance(item.payload.get("markdown"), str) and not item.payload.get("_plain"):
+            # Markdown 消息（定时任务结果等）也优先用卡片；某张被拒只把那一张改发成 post。
+            await self.send_markdown_cards(chat, item.payload["markdown"], key=f"outbox:{item.id}")
+        else:
+            text = str(item.payload.get("markdown") or item.payload.get("text") or "…")
+            await self.send_posts(chat, text, f"outbox:{item.id}")
+
+    async def send_posts(self, chat: str, markdown: str, key: str) -> None:
+        for index, chunk in enumerate(split_utf8(markdown)):
+            await self.send(
+                chat,
+                post_content(await self.images.localize(chunk)),
+                kind="post",
+                key=f"{key}:{index}",
+            )
+
+    async def send_markdown_cards(self, chat: str, markdown: str, *, key: str) -> None:
+        """一段 Markdown 编译成若干张卡依次发出；富卡片自检不过时用简化卡。
+
+        某张卡被飞书拒收时，只把这一张的降级文本改发成普通消息，已发出的不重发。
+        """
+        body = await self.images.localize(markdown)
+        compiled: Compiled | None = None
+        if self.rich_cards:
+            images = await self.image_keys(image_urls(body))
+            compiled = await asyncio.to_thread(compile_reply, body, images=images)
+            if compiled.problems:
+                log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+                compiled = None
+        if compiled is None:
+            cards = await asyncio.to_thread(simple_cards, body)
+            compiled = Compiled(cards, "", [_card_markdown(c) for c in cards])
+        for index, card in enumerate(compiled.cards):
+            try:
+                await self.send(chat, card, kind="interactive", key=f"{key}:card:{index}")
+            except FeishuError as exc:
+                if exc.code not in CARD_CONTENT_ERRORS:
+                    raise
+                log.warning("feishu_card_rejected", code=exc.code, index=index)
+                text = compiled.texts[index] if index < len(compiled.texts) else ""
+                await self.send_posts(chat, text or plain_text(markdown), f"{key}:post:{index}")
+
+
+def _card_markdown(card: dict[str, Any]) -> str:
+    """简化卡里的正文（全是 markdown 组件）；改发普通消息时用。"""
+    return "\n\n".join(
+        str(e.get("content") or "")
+        for e in (card.get("body") or {}).get("elements") or []
+        if e.get("tag") == "markdown" and e.get("element_id") != "thinking"
+    )

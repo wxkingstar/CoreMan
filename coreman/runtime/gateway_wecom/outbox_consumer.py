@@ -27,6 +27,7 @@ from coreman.core.bus import outbox
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
+from coreman.core.richtext.degrade import readable
 from coreman.runtime.gateway_wecom.ws_client import (
     DeliveryNotSent,
     DeliveryRejected,
@@ -132,7 +133,7 @@ class OutboxConsumer:
                 else {
                     "chatid": chat_id,
                     "msgtype": "markdown",
-                    "markdown": {"content": str(payload.get("markdown") or "")},
+                    "markdown": {"content": readable(str(payload.get("markdown") or ""))},
                 }
             )
             frame: dict[str, Any] = {

@@ -39,7 +39,7 @@ const editBot: BotOut = {
   relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1',
   model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/sales_bot',
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
-  welcome_message: null, notify_webhook_url: 'ht••••-1',
+  welcome_message: null, rich_cards: true, notify_webhook_url: 'ht••••-1',
   member_count: 0, allowed_user_count: 0,
   permissions: {
     role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true,
@@ -133,6 +133,23 @@ describe('BotForm', () => {
     // 关键点：axios 会 JSON.stringify 请求体，undefined 会让这个键整个消失。
     const body = vi.mocked(bots.patch).mock.calls[0][1]
     expect(Object.keys(JSON.parse(JSON.stringify(body)) as Record<string, unknown>)).toEqual(['team_id'])
+  })
+
+  it('shows the rich card switch only for Feishu and patches it when toggled', async () => {
+    const wecom = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(wecom.find('[data-test="rich-cards"]').exists()).toBe(false)
+    wecom.unmount()
+    const feishuBot: BotOut = { ...editBot, platform: 'feishu', credentials: { app_id: 'cli_1', app_secret: '••••••••' } }
+    vi.mocked(bots.patch).mockResolvedValue({ ...feishuBot, rich_cards: false, version: 2 })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: feishuBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    wrapper.get('[data-test="rich-cards"]').findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', false)
+    await flushPromises()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.patch).toHaveBeenCalledWith('b1', { rich_cards: false }, 1)
+    wrapper.unmount()
   })
 
   it('keeps notification destinations out of the employee editor', async () => {

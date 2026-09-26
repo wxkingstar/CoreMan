@@ -697,6 +697,8 @@ export default {
     envAddRow: '変数を追加',
     envInvalid: '環境変数の形式が正しくありません',
     welcome: 'ウェルカムメッセージ',
+    richCards: 'リッチカード返信',
+    richCardsHint: '返信のグラフ・表・指標などを Feishu カードで表示します。オフにすると通常のテキストカードになります。',
     webhook: '通知 Webhook',
 
     enabled: '作成後に有効化',

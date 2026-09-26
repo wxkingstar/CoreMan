@@ -90,6 +90,7 @@ NON_NULLABLE = (
     "sse_timeout_seconds",
     "credentials",
     "env_vars",
+    "rich_cards",
 )
 
 
@@ -152,6 +153,7 @@ class BotIn(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
+    rich_cards: bool = True
     enabled: bool = True
 
     @field_validator("env_vars")
@@ -188,6 +190,7 @@ class BotPatch(BaseModel):
     env_vars: dict[str, str] | None = None
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
+    rich_cards: bool | None = None
 
     @field_validator("env_vars")
     @classmethod
@@ -233,6 +236,7 @@ def _public(bot: Bot) -> dict[str, Any]:
         "sse_timeout_seconds": bot.sse_timeout_seconds,
         "welcome_message": bot.welcome_message,
         "notify_webhook_url": bot.notify_webhook_url,
+        "rich_cards": bot.rich_cards,
     }
 
 
@@ -357,6 +361,7 @@ async def build_out(
         "effort_level": bot.effort_level,
         "sse_timeout_seconds": bot.sse_timeout_seconds,
         "welcome_message": bot.welcome_message,
+        "rich_cards": bot.rich_cards,
         "member_count": len(member_ids),
         "allowed_user_count": allowed_count,
         "permissions": dataclasses.asdict(perms),
@@ -525,6 +530,7 @@ async def create_bot(
         env_vars_enc=encrypt_json(cipher, body.env_vars, ENV_AAD),
         welcome_message=body.welcome_message,
         notify_webhook_url=body.notify_webhook_url,
+        rich_cards=body.rich_cards,
     )
     session.add(bot)
     await session.flush()

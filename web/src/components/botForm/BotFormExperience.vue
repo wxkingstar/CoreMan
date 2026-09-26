@@ -29,6 +29,17 @@ const { mode, form, fieldErrors } = useBotFormContext()
   </el-form-item>
 
   <el-form-item
+    v-if="form.platform === 'feishu'"
+    :label="t('bots.richCards')"
+    data-test="rich-cards"
+  >
+    <el-switch v-model="form.rich_cards" />
+    <div class="muted">
+      {{ t('bots.richCardsHint') }}
+    </div>
+  </el-form-item>
+
+  <el-form-item
     v-if="mode === 'create'"
     :label="t('bots.enabled')"
     data-test="enabled"

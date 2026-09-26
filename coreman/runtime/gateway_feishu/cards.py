@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import urlparse
+
+from coreman.core.feishu_cards.compile import card_shell, streaming_text
+from coreman.core.feishu_cards.thinking import thinking_panel
 
 THINKING_BYTES = 4000
 ANSWER_BYTES = 16000
@@ -70,10 +72,11 @@ def post_content(markdown: str) -> dict[str, Any]:
     return {"zh_cn": {"title": "", "content": rows}}
 
 
-def thinking_preview(thinking: str) -> str:
-    # Five logical lines; client wrapping depends on its viewport and font size.
-    lines = [line for line in thinking.splitlines() if line.strip()]
-    return "\n".join(line[-240:] for line in lines[-5:]) or "正在思考，请稍候…"
+STREAMING_CONFIG: dict[str, Any] = {
+    "print_frequency_ms": {"default": 70, "android": 70, "ios": 70, "pc": 70},
+    "print_step": {"default": 1, "android": 1, "ios": 1, "pc": 1},
+    "print_strategy": "fast",
+}
 
 
 def stream_card(
@@ -84,56 +87,21 @@ def stream_card(
     session_url: str | None = None,
     heading: str = "🤔 思考过程",
 ) -> dict[str, Any]:
+    """流式卡片：思考面板 + 一个 answer markdown。
+
+    正文里的 card: 块先显示成可读的 Markdown、没写完的块显示占位，终稿时整卡换成富卡片；
+    外壳与终稿一致（宽度、留白、配色），替换时不会跳动。
+    """
     thinking, answer = visible_parts(thinking, answer)
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {
-            "streaming_mode": streaming,
-            "update_multi": True,
-            "streaming_config": {
-                "print_frequency_ms": {"default": 70, "android": 70, "ios": 70, "pc": 70},
-                "print_step": {"default": 1, "android": 1, "ios": 1, "pc": 1},
-                "print_strategy": "fast",
-            },
-        },
-        "body": {
-            "elements": [
-                {
-                    "tag": "collapsible_panel",
-                    "element_id": "thinking_panel",
-                    "expanded": False,
-                    "header": {"title": {"tag": "plain_text", "content": heading}},
-                    "background_color": "grey",
-                    "border": {"color": "grey", "corner_radius": "8px"},
-                    "padding": "8px",
-                    "elements": [
-                        {
-                            "tag": "markdown",
-                            "element_id": "thinking",
-                            "content": thinking_preview(thinking),
-                            "text_size": "notation",
-                        }
-                    ],
-                },
-                {
-                    "tag": "markdown",
-                    "element_id": "answer",
-                    "content": remote_images_as_links(split_utf8(answer)[0]) or "…",
-                },
-            ]
-        },
-    }
-    if session_url and urlparse(session_url).scheme in {"http", "https"}:
-        # Use a native URL button; do not interpolate the URL into model Markdown.
-        card["body"]["elements"][0]["elements"].append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "查看完整思考过程"},
-                "type": "default",
-                "behaviors": [{"type": "open_url", "default_url": session_url}],
-            }
-        )
-    return card
+    content = remote_images_as_links(split_utf8(streaming_text(answer))[0]) or "…"
+    return card_shell(
+        [
+            thinking_panel(thinking, session_url=session_url, heading=heading),
+            {"tag": "markdown", "element_id": "answer", "content": content},
+        ],
+        streaming=streaming,
+        streaming_config=STREAMING_CONFIG,
+    )
 
 
 def interaction_card(card: dict[str, Any]) -> dict[str, Any]:

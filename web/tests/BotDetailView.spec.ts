@@ -14,7 +14,7 @@ const bot = (over: Record<string, unknown> = {}) => ({
   enabled: true, team_id: 't1', team_name: '销售', created_by: 'me', created_by_name: 'U',
   relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1', model: 'vllm/claude-sonnet-4-6',
   backend: 'claude', working_dir: '/data/skills/sales_bot', verbosity_level: 1, effort_level: null,
-  sse_timeout_seconds: 3600, welcome_message: null, notify_webhook_url: 'ht••••-1',
+  sse_timeout_seconds: 3600, welcome_message: null, rich_cards: true, notify_webhook_url: 'ht••••-1',
   member_count: 1, allowed_user_count: 0, permissions: perms(), version: 1,
   created_at: '2026-09-10T00:00:00Z', updated_at: '2026-09-10T00:00:00Z', system_prompt: '你是销售',
   credentials: { bot_id: 'we••••-1', secret: 'we••••ue' }, env_vars: { DB_PASSWORD: 'pw••••56' }, ...over,

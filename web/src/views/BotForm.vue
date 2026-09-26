@@ -59,6 +59,7 @@ function emptyForm(): BotIn {
     credentials: credDefaults('feishu'),
     env_vars: {},
     welcome_message: null,
+    rich_cards: true,
     enabled: true,
   }
 }
@@ -188,6 +189,7 @@ function fillFromBot(b: BotOut): void {
     credentials: { ...credDefaults(b.platform), ...(b.credentials ?? {}) },
     env_vars: { ...(b.env_vars ?? {}) },
     welcome_message: b.welcome_message,
+    rich_cards: b.rich_cards,
     // 后端只在 can_view_sensitive 时下发（且是脱敏值）；没下发就按空处理。
     enabled: b.enabled,
   } satisfies BotIn)
@@ -231,6 +233,7 @@ function changedFields(b: BotOut): BotPatch {
   if (p.effort_level !== b.effort_level) out.effort_level = p.effort_level
   if (p.sse_timeout_seconds !== b.sse_timeout_seconds) out.sse_timeout_seconds = p.sse_timeout_seconds
   if (p.welcome_message !== b.welcome_message) out.welcome_message = p.welcome_message
+  if (p.rich_cards !== b.rich_cards) out.rich_cards = p.rich_cards
   // 后端没下发的敏感字段一律不比：表单里是空值，提交就等于清空线上配置。
   if (b.system_prompt !== undefined && p.system_prompt !== b.system_prompt) out.system_prompt = p.system_prompt
   if (b.credentials !== undefined && !sameDict(p.credentials, b.credentials)) out.credentials = p.credentials

@@ -8,6 +8,7 @@ from typing import Literal
 
 from coreman.core.db.models import TaskStream
 from coreman.core.i18n.messages import msg
+from coreman.core.richtext.degrade import readable
 
 MAX_CONTENT_BYTES = 20480
 LONG_RUN_SECONDS = 60
@@ -69,13 +70,13 @@ def render_wecom_stream(
 def _render(view: StreamView, now: datetime, locale: str, limit: int) -> str:
     thinking = view.thinking_md
     if view.is_complete:
-        text = view.final_text or ""
+        text = readable(view.final_text or "")
         if not thinking and not text:
             return truncate_utf8(msg("processing_done", locale), limit)
         indicator = ""
     elif view.pending_text:
         # 有正文了才闭合思考块，并挂运行指示器。
-        text = view.pending_text
+        text = readable(view.pending_text, final=False)
         elapsed = (now - view.running_since).total_seconds()
         key = "running_indicator_long" if elapsed >= LONG_RUN_SECONDS else "running_indicator"
         indicator = msg(key, locale)

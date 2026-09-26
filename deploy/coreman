@@ -653,6 +653,8 @@ usage() {
   rollback <tag>              回退到保留的镜像标签，不回退数据库
   skills sync URL --source KEY 同步已登记的技能目录
   contact-sync [--app 名称]     同步企业微信通讯录
+  feishu-cards preview --to 成员 [--bot 标识] [--sample 名称] [--stream] [--apply]
+                              飞书富卡片真机预览；不加 --apply 只做飞书校验
   help                        本说明
 环境变量: DRY_RUN=1 只打印 compose 命令；COREMAN_ENV_FILE 指定 .env 路径；COREMAN_IMAGE_TAG 覆盖部署标签；
   COREMAN_WAIT_TIMEOUT 为 up 等待健康的秒数（默认 300）；COREMAN_STATE_DIR 为状态文件目录（默认仓库根目录）
@@ -672,6 +674,7 @@ main() {
     upgrade) cmd_upgrade "$@" ;;
     skills) compose run --rm migrate /app/.venv/bin/python -m coreman.cli skills "$@" ;;
     contact-sync) cmd_contact_sync "$@" ;;
+    feishu-cards) compose run --rm migrate /app/.venv/bin/python -m coreman.cli feishu-cards "$@" ;;
     help|-h|--help) usage ;;
     *) usage; return 1 ;;
   esac

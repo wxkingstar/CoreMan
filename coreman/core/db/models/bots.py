@@ -84,6 +84,8 @@ class Bot(TimestampMixin, Base):
     env_vars_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
     welcome_message: Mapped[str | None] = mapped_column(Text)
     notify_webhook_url: Mapped[str | None] = mapped_column(Text)
+    # 飞书回复用富卡片（图表、表格、指标块等）；关掉就回到单个 markdown 的卡片。
+    rich_cards: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")
