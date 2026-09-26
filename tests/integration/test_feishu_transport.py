@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -497,9 +498,7 @@ async def test_thinking_heading_animates_without_new_content(db_session, db_engi
     ]
     import json
 
-    assert (
-        json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考中.."
-    )
+    assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考中.."
     assert not any(path.endswith("/content") for _, path, _ in api.calls)
     api.calls.clear()
     await transport.round()
@@ -509,3 +508,83 @@ async def test_thinking_heading_animates_without_new_content(db_session, db_engi
     await transport.round()
     patches = [body for _, path, body in api.calls if path.endswith("/elements/thinking_panel")]
     assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程"
+
+
+class ImageAPI(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if path == "/open-apis/im/v1/images":
+            self.calls.append((method, path, {"files": kwargs.get("files"), **kwargs["data"]}))
+            return {"data": {"image_key": "img_v3_up"}}
+        return await super().call(method, path, **kwargs)
+
+
+def image_host():
+    import httpx
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    return httpx.MockTransport(lambda request: httpx.Response(200, content=png))
+
+
+async def test_final_answer_embeds_uploaded_image_and_keeps_download_link(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), ImageAPI()
+    transport = FeishuTransport(
+        factory,
+        api,
+        bot_id=bot.id,
+        instance_id="old",
+        generation=generation,
+        image_transport=image_host(),
+    )
+    url = "https://oss.example/avatar.png?Signature=s"
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text=f"头像：![头像]({url})")
+        await session.commit()
+    await transport.round()
+    # 流式期间不下载，远程图片先显示成链接，不是裂图。
+    assert not [c for c in api.calls if c[1] == "/open-apis/im/v1/images"]
+    streamed = [c[2]["content"] for c in api.calls if c[1].endswith("/elements/answer/content")]
+    assert streamed[-1] == f"头像：[🖼️ 头像]({url})"
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text=f"头像：![头像]({url})")
+        await session.commit()
+    await transport.round()
+    uploads = [c for c in api.calls if c[1] == "/open-apis/im/v1/images"]
+    assert len(uploads) == 1 and uploads[0][2]["image_type"] == "message"
+    final = json.loads(
+        next(c for c in reversed(api.calls) if c[0] == "PUT" and c[1].endswith("/cards/card1"))[2][
+            "card"
+        ]["data"]
+    )
+    assert final["body"]["elements"][1]["content"] == (
+        f"头像：![头像](img_v3_up)\n[查看原图]({url})"
+    )
+
+
+async def test_fallback_post_sends_image_as_native_node(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), ImageAPI()
+    transport = FeishuTransport(
+        factory,
+        api,
+        bot_id=bot.id,
+        instance_id="old",
+        generation=generation,
+        image_transport=image_host(),
+    )
+    url = "https://oss.example/chart.png"
+    async with factory() as session:
+        session.add(FeishuDelivery(task_id=row.task_id, fallback=True))
+        await streams.complete(session, row.task_id, final_text=f"图表如下\n![图表]({url})")
+        await session.commit()
+    await transport.round()
+    posts = [
+        json.loads(c[2]["content"])
+        for c in api.calls
+        if c[1] == "/open-apis/im/v1/messages" and c[2].get("msg_type") == "post"
+    ]
+    assert posts[-1]["zh_cn"]["content"] == [
+        [{"tag": "md", "text": "图表如下"}],
+        [{"tag": "img", "image_key": "img_v3_up"}],
+        [{"tag": "md", "text": f"[查看原图]({url})"}],
+    ]

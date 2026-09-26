@@ -84,3 +84,27 @@ def test_personal_selection_card_uses_explicit_levels_and_callback_roundtrip():
     assert message.card_action["level"] == "all"
     # The callback itself does not attest that the source chat was private.
     assert message.chat_type == "group"
+
+
+def test_remote_images_render_as_links_until_uploaded():
+    from coreman.runtime.gateway_feishu.cards import post_content
+
+    card = stream_card("", "头像：\n![头像](https://oss.example/a.png?Signature=x&e=1)")
+    answer = card["body"]["elements"][1]["content"]
+    assert "![" not in answer
+    assert "[🖼️ 头像](https://oss.example/a.png?Signature=x&e=1)" in answer
+    # image_key 图片原样保留，卡片 Markdown 原生渲染。
+    assert (
+        "![头像](img_v3_abc)"
+        in stream_card("", "![头像](img_v3_abc)")["body"]["elements"][1]["content"]
+    )
+
+    content = post_content(
+        "前言\n![a](img_v3_1)\n[查看原图](https://oss.example/a)\n![b](https://x.example/b.png)"
+    )
+    rows = content["zh_cn"]["content"]
+    assert rows[0] == [{"tag": "md", "text": "前言"}]
+    assert rows[1] == [{"tag": "img", "image_key": "img_v3_1"}]
+    assert rows[2][0]["tag"] == "md" and "![" not in rows[2][0]["text"]
+    assert "[🖼️ b](https://x.example/b.png)" in rows[2][0]["text"]
+    assert post_content("")["zh_cn"]["content"] == [[{"tag": "md", "text": "…"}]]

@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic as heading_clock
 from typing import Any
 
+import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
@@ -21,10 +22,12 @@ from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, Ta
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.runtime.gateway_feishu.cards import (
     interaction_card,
+    post_content,
     split_utf8,
     stream_card,
     visible_parts,
 )
+from coreman.runtime.gateway_feishu.images import RemoteImages
 from coreman.runtime.gateway_feishu.reactions import clean_finished, typing
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
@@ -63,6 +66,7 @@ class FeishuTransport:
         generation: int,
         guard: AsyncConnection | None = None,
         credentials_fingerprint: str | None = None,
+        image_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
@@ -75,6 +79,7 @@ class FeishuTransport:
         self._output_held = False
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
         self._round_fenced = False
+        self.images = RemoteImages(self.upload_image, transport=image_transport)
 
     async def fence(self) -> None:
         async with self.factory() as session:
@@ -98,6 +103,15 @@ class FeishuTransport:
             await self.fence()
         self._last_call = time.monotonic()
         return await self.client.call(method, path, **kwargs)
+
+    async def upload_image(self, name: str, data: bytes, mime: str) -> str:
+        result = await self.call(
+            "POST",
+            "/open-apis/im/v1/images",
+            data={"image_type": "message"},
+            files={"image": (name, data, mime)},
+        )
+        return api_id((result.get("data") or {}).get("image_key"))
 
     async def send(
         self,
@@ -304,8 +318,12 @@ class FeishuTransport:
         answer = (
             row.final_text if row.is_complete and row.final_text is not None else row.pending_text
         )
+        thinking, answer = visible_parts(row.thinking_md, answer)
+        if row.is_complete:
+            # 只在终稿换图：流式期间远程图片先显示为链接，下载上传不拖慢打字。
+            answer = await self.images.localize(answer)
         card = stream_card(
-            row.thinking_md,
+            thinking,
             answer,
             streaming=not (row.is_complete or expired),
             session_url=row.session_url,
@@ -498,7 +516,7 @@ class FeishuTransport:
             ):
                 await self.send(
                     chat,
-                    {"zh_cn": {"title": "", "content": [[{"tag": "md", "text": chunk}]]}},
+                    post_content(await self.images.localize(chunk)),
                     kind="post",
                     key=f"outbox:{item.id}:{index}",
                 )

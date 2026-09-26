@@ -81,3 +81,39 @@ async def test_https_pin_preserves_tls_hostname(monkeypatch):
         assert (await client.get("https://system.example/")).status_code == 200
         with pytest.raises(httpx.ConnectError):
             await client.get("http://system.example/")
+
+
+async def test_public_transport_rejects_private_targets_on_every_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coreman.core.relay.safe_transport import PublicTransport
+
+    answers = {"img.example": "93.184.216.34", "inner.example": "10.0.0.9"}
+    calls = []
+
+    async def resolve(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (answers.get(host, host), 443))]
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+
+    def handle(request):
+        calls.append(request)
+        if request.url.path == "/hop":
+            return httpx.Response(302, headers={"Location": "https://inner.example/a.png"})
+        return httpx.Response(200, content=b"ok")
+
+    transport = PublicTransport(transport=httpx.MockTransport(handle))
+    async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+        response = await client.get("https://img.example/a.png")
+        assert response.status_code == 200
+        assert calls[0].url.host == "93.184.216.34"
+        assert calls[0].extensions["sni_hostname"] == "img.example"
+        for url in (
+            "https://img.example/hop",
+            "https://inner.example/a.png",
+            "http://127.0.0.1/a.png",
+            "http://[::ffff:10.0.0.1]/a.png",
+        ):
+            with pytest.raises(httpx.ConnectError):
+                await client.get(url)
+    assert len(calls) == 2

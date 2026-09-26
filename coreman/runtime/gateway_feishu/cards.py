@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 THINKING_BYTES = 4000
 ANSWER_BYTES = 16000
 _THINK = re.compile(r"<think>(.*?)</think>", re.S | re.I)
+# Markdown 图片：远程地址飞书不渲染，只认上传后得到的 image_key。
+REMOTE_IMAGE = re.compile(r'!\[([^\]\n]*)\]\(\s*<?(https?://[^\s<>()]+)>?(?:\s+"[^"\n]*")?\s*\)')
+KEY_IMAGE = re.compile(r"!\[([^\]\n]*)\]\((img_[A-Za-z0-9_-]{1,240})\)")
 
 
 def split_utf8(value: str, limit: int = ANSWER_BYTES) -> list[str]:
@@ -44,6 +47,27 @@ def visible_parts(thinking: str, answer: str) -> tuple[str, str]:
             break
     thinking = "\n".join([thinking, *hidden]).strip()
     return thinking, answer
+
+
+def remote_images_as_links(markdown: str) -> str:
+    """没换成 image_key 的远程图片改成链接，免得客户端显示一张裂图。"""
+    return REMOTE_IMAGE.sub(lambda m: f"[🖼️ {m.group(1).strip() or '图片'}]({m.group(2)})", markdown)
+
+
+def post_content(markdown: str) -> dict[str, Any]:
+    """富文本消息：md 标签不支持图片，image_key 图片各占一段 img 节点。"""
+    rows: list[list[dict[str, Any]]] = []
+    last = 0
+    for match in KEY_IMAGE.finditer(markdown):
+        text = markdown[last : match.start()].strip("\n")
+        if text.strip():
+            rows.append([{"tag": "md", "text": remote_images_as_links(text)}])
+        rows.append([{"tag": "img", "image_key": match.group(2)}])
+        last = match.end()
+    tail = markdown[last:].strip("\n")
+    if tail.strip() or not rows:
+        rows.append([{"tag": "md", "text": remote_images_as_links(tail) or "…"}])
+    return {"zh_cn": {"title": "", "content": rows}}
 
 
 def thinking_preview(thinking: str) -> str:
@@ -94,7 +118,7 @@ def stream_card(
                 {
                     "tag": "markdown",
                     "element_id": "answer",
-                    "content": split_utf8(answer)[0] or "…",
+                    "content": remote_images_as_links(split_utf8(answer)[0]) or "…",
                 },
             ]
         },
