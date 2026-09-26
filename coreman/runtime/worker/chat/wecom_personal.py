@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,7 +22,7 @@ from coreman.core.chat.commands import command_text
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, RuntimeNode, Task, WecomPersonalBinding
 from coreman.core.relay.models import backend_of
-from coreman.core.wecom.cards import notice_card
+from coreman.core.wecom.cards import clip, notice_card
 from coreman.core.wecom_personal import binding, policy, service
 from coreman.core.wecom_personal.cards import (
     CARD_PREFIX,
@@ -452,3 +453,91 @@ async def configure(
         base_session_id=base_session_id,
     )
     return system_prompt + guidance(row, scheduled=False), env
+
+
+async def handle_schedule(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    inbound: InboundEvent,
+    action: dict[str, Any],
+) -> str:
+    """本人确认或取消定时任务草稿。只有草稿来源私聊里的本人点了才算数。"""
+    from sqlalchemy import select
+
+    from coreman.core import personal_schedules as schedules
+    from coreman.core.db.models import InteractionState
+    from coreman.runtime.worker.personal_cards import settle
+
+    task_id = str(action.get("task_id") or "")
+    parsed = schedules.parse_wecom_card_task_id(task_id)
+    verb = str(action.get("event_key") or "")
+    if parsed is None or verb not in ("confirm", "cancel"):
+        return "ignored"
+    origin, state_id = parsed
+    original = await session.get(Task, origin)
+    if (
+        original is None
+        or original.bot_id != bot.id
+        or original.kind != "chat"
+        or original.payload.get("collaboration_id")
+        or original.payload.get("collaboration_phase")
+        or ctx.task.kind != "card_action"
+        or ctx.task.status not in tasks.ACTIVE
+        or ctx.task.cancel_requested_at
+    ):
+        return "ignored"
+    scope = await _card_scope(session, ctx, bot, inbound, original)
+    if scope is None:
+        return "ignored"
+    state = await session.scalar(
+        select(InteractionState)
+        .where(
+            InteractionState.id == state_id,
+            InteractionState.kind == schedules.KIND,
+            InteractionState.bot_id == bot.id,
+        )
+        .with_for_update()
+    )
+    draft = state.state if state else {}
+    if (
+        state is None
+        or draft.get("platform") != "wecom"
+        or draft.get("user_id") != str(scope.user_id)
+        or draft.get("chat_id") != scope.chat_id
+        or draft.get("origin_task_id") != original.id
+    ):
+        return "ignored"
+    result, text = await settle(
+        session, ctx, bot, state, user_id=scope.user_id, chat_id=scope.chat_id, verb=verb
+    )
+    if text:
+        icon = str(await ctx.settings_store.get("card_icon_url", default="") or "")
+        title = {
+            "expired": "卡片已过期",
+            "personal_schedule_cancelled": "已取消",
+            "personal_schedule_rejected": "没有生效",
+        }.get(result, "定时任务已生效")
+        # 卡片正文是纯文本且有字数上限：去掉 markdown 链接与加粗。
+        plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", "", text).replace("**", "").strip()
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="wecom",
+            kind="card_update",
+            dedupe_key=f"{inbound.id}:card_update",
+            target={
+                "req_id": str((inbound.reply_context or {}).get("req_id") or ""),
+                "task_id": task_id,
+            },
+            payload={
+                "card": notice_card(
+                    task_id,
+                    title=title,
+                    desc=clip(plain, 110),
+                    icon_url=icon,
+                    source_desc="定时任务",
+                )
+            },
+        )
+    return result

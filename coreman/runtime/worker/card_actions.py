@@ -99,10 +99,17 @@ class CardActionHandler:
                 )
                 await session.commit()
                 return
-            if bot.platform == "wecom" and task_id.startswith("wecom_personal@"):
-                from coreman.runtime.worker.chat.wecom_personal import handle_selection
+            if bot.platform == "wecom" and task_id.startswith(
+                ("wecom_personal@", "wecom_schedule@")
+            ):
+                from coreman.runtime.worker.chat import wecom_personal
 
-                result = await handle_selection(session, ctx, bot, inbound, action)
+                handle = (
+                    wecom_personal.handle_schedule
+                    if task_id.startswith("wecom_schedule@")
+                    else wecom_personal.handle_selection
+                )
+                result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}
                 )

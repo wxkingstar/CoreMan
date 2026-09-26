@@ -56,7 +56,9 @@ async def test_private_chat_keeps_the_assistant_and_adds_personal_tools(db_sessi
     }
     prompt, env = await configure(db_session, ctx, intake, base, "你是销售", initial)
     assert prompt.startswith("你是销售")
-    assert "## 本人飞书" in prompt and "连接飞书" in prompt and "## 本人定时任务" in prompt
+    assert "## 本人飞书" in prompt and "连接飞书" in prompt
+    # 本人定时任务的说明改由 chat.schedules 追加，飞书与企业微信共用。
+    assert "## 本人定时任务" not in prompt
     assert env["BOT_TOKEN_ERP"] == "business-token" and env["STATIC_SECRET"] == "bot-secret"
     assert env[policy.PREFIX + "URL"].endswith("/api/runtime/feishu-personal/mcp")
     capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])
