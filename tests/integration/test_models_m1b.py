@@ -11,20 +11,24 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     for r in rows:
         by_provider.setdefault(r.provider, []).append(r)
     assert set(by_provider) == {"claude", "codex"}
-    assert {r.model for r in by_provider["claude"]} == {
+    assert {r.model for r in by_provider["claude"] if not r.retired} == {
+        "claude-opus-5-5",
         "claude-sonnet-5",
-        "claude-opus-5",
         "claude-haiku-4-5-20251001",
         "claude-fable-5-1",
     }
-    assert {r.model for r in by_provider["codex"]} == {
+    assert {r.model for r in by_provider["claude"] if r.retired} == {"claude-opus-5"}
+    assert {r.model for r in by_provider["codex"] if not r.retired} == {
+        "codex/gpt-6-sol",
         "codex/gpt-6-astra",
+    }
+    assert {r.model for r in by_provider["codex"] if r.retired} == {
         "codex/gpt-5.6-sol",
         "codex/gpt-5.6-terra",
         "codex/gpt-5.6-luna",
     }
-    assert sum(1 for r in by_provider["claude"] if r.is_default) == 1
-    assert next(r.model for r in by_provider["codex"] if r.is_default) == "codex/gpt-6-astra"
+    assert [r.model for r in by_provider["claude"] if r.is_default] == ["claude-opus-5-5"]
+    assert [r.model for r in by_provider["codex"] if r.is_default] == ["codex/gpt-6-sol"]
 
 
 async def test_relay_unique_name_defaults_and_version(db_session: AsyncSession) -> None:

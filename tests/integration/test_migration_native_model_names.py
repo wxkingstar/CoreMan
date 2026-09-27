@@ -107,7 +107,7 @@ def test_0023_renames_seeded_models_and_merges_heartbeat_rows(migrated_database:
                 (insert_price, {"model": "claude-opus-4-6", "day": DAY, "usd": 16}),
             )
         )
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0023")
         catalog = asyncio.run(
             _rows(
                 migrated_database,

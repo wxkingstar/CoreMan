@@ -57,7 +57,7 @@ async def test_list_probe_and_models_without_legacy_fields(
     assert not LEGACY_FIELDS & set(data["relay"])
     models = (await client.get(f"/api/admin/relay-servers/{relay.id}/models")).json()["data"]
     assert models["provider"] == "claude" and "claude-extra" in models["models"]
-    assert models["default"] == "claude-sonnet-5"
+    assert models["default"] == "claude-opus-5-5"
 
 
 async def test_manual_relay_management_routes_are_gone(
