@@ -51,15 +51,15 @@ _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0
 OUTBOX_PER_ROUND = 20
 # 同一 bot 两次平台调用之间至少隔这么久：每张卡片不超过飞书的 10 次/秒，整个应用也远低于
 # 单接口 50 次/秒。推送按机器人串行（子进程只有两条库连接），所以间隔决定了并发回复时的刷新快慢。
-CALL_SPACING_SECONDS = 0.1
+CALL_SPACING_SECONDS = 0.125
 # 流式模式开启 10 分钟后飞书自动关闭；提前续开，打字机效果不中断。
 STREAM_RENEW_SECONDS = 9 * 60
+# 流式卡片刚创建时的布局：只有一个占位的 answer 正文段。
+INITIAL_LAYOUT = ({"kind": "text", "ids": ["answer"], "text": "…", "digest": ""},)
 # 流式已被关闭：重新开启后重试。
 STREAM_CLOSED = frozenset({200510, 200850, 300309})
 # 卡片上的组件和记下的布局对不上（删不到、插不进）：整卡重建。
 LAYOUT_DRIFT = frozenset({300121, 300301, 300314, 300315, 10002, 200220})
-# 流式卡片除正文单元外的大致体积：外壳、思考面板与会话按钮。
-STREAM_SHELL_BYTES = 3_000
 # 卡片内容本身有问题（字段不认、体积或元素超限）：原样重试没有意义，立即降级成简化卡。
 # 一条回复最多上传这么多张远程图片，免得一条回复拖住整个出站循环。
 IMAGES_PER_REPLY = 9
@@ -370,7 +370,7 @@ class FeishuTransport:
         )
         thinking, answer = visible_parts(row.thinking_md, answer)
         if not row.is_complete and not delivery.is_static:
-            await self.stream_update(row, delivery, card_id, thinking, answer)
+            await self.stream_update(row, delivery, card_id, thinking, answer, heading)
             if visible_parts("", answer)[1].strip():
                 await typing(self, row.task_id, done=True)
             async with self.factory() as session:
@@ -440,8 +440,12 @@ class FeishuTransport:
         card_id: str,
         thinking: str,
         answer: str,
+        heading: str,
     ) -> None:
-        """流式期间的一次推送：思考面板变了才推，正文按单元增量更新（feishu_cards/stream.py）。"""
+        """流式期间的一次推送：思考面板变了才推，正文按单元增量更新（feishu_cards/stream.py）。
+
+        卡片内容飞书不收（体积、组件数、字段）时暂停增量，只更新思考面板，收尾整卡替换。
+        """
         state = dict(delivery.layout or {})
         now = time.time()
         since = float(state.get("since") or delivery.created_at.timestamp())
@@ -452,35 +456,45 @@ class FeishuTransport:
         if preview != state.get("thinking"):
             await self.put_text(row.task_id, card_id, "thinking", preview)
             state["thinking"] = preview
-        layout = state.get("units") or [
-            {"kind": "text", "ids": ["answer"], "text": "…", "digest": ""}
-        ]
         units = await asyncio.to_thread(stream_units, answer)
-        steps = plan(
-            layout,
-            units,
-            anchor="thinking_panel",
-            shown=STREAM_SHELL_BYTES,
-            show=remote_images_as_links,
-        )
-        if steps.actions:
+        # 还没有可显示的正文（只有思考、标题栏或半行围栏）：保持占位，别把 answer 删掉。
+        if units and not state.get("paused"):
+            layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
+            shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
+            shell["body"]["elements"] = shell["body"]["elements"][:1]
+            steps = plan(
+                layout,
+                units,
+                anchor="thinking_panel",
+                shown=len(card_json(shell).encode()),
+                show=remote_images_as_links,
+            )
             try:
-                await self.call(
-                    "POST",
-                    f"/open-apis/cardkit/v1/cards/{card_id}/batch_update",
-                    json={
-                        "sequence": await self.sequence(row.task_id),
-                        "actions": card_json(steps.actions),
-                    },
-                )
+                if steps.actions:
+                    try:
+                        await self.call(
+                            "POST",
+                            f"/open-apis/cardkit/v1/cards/{card_id}/batch_update",
+                            json={
+                                "sequence": await self.sequence(row.task_id),
+                                "actions": card_json(steps.actions),
+                            },
+                        )
+                    except FeishuError as exc:
+                        if exc.code not in LAYOUT_DRIFT:
+                            raise
+                        log.warning(
+                            "feishu_stream_layout_rebuilt", code=exc.code, task_id=row.task_id
+                        )
+                        steps = await self.rebuild_stream(row, card_id, thinking, units, heading)
+                for element_id, content in steps.texts:
+                    await self.put_text(row.task_id, card_id, element_id, content)
+                state["units"] = steps.layout
             except FeishuError as exc:
-                if exc.code not in LAYOUT_DRIFT:
+                if exc.code not in CARD_CONTENT_ERRORS | LAYOUT_DRIFT:
                     raise
-                log.warning("feishu_stream_layout_rebuilt", code=exc.code, task_id=row.task_id)
-                steps = await self.rebuild_stream(row, card_id, thinking, units)
-        for element_id, content in steps.texts:
-            await self.put_text(row.task_id, card_id, element_id, content)
-        state["units"] = steps.layout
+                log.warning("feishu_stream_paused", code=exc.code, task_id=row.task_id)
+                state["paused"] = True
         async with self.factory() as session:
             saved = await session.get(FeishuDelivery, row.task_id)
             assert saved is not None
@@ -489,20 +503,28 @@ class FeishuTransport:
         delivery.layout = state
 
     async def rebuild_stream(
-        self, row: TaskStream, card_id: str, thinking: str, units: list[StreamUnit]
+        self,
+        row: TaskStream,
+        card_id: str,
+        thinking: str,
+        units: list[StreamUnit],
+        heading: str,
     ) -> Any:
         """布局对不上时整卡重建：流式模式保持开启，之后照常增量更新。"""
+        shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
+        panel = shell["body"]["elements"][0]
+        shell["body"]["elements"] = [panel]
         steps = plan(
             [],
             units,
             anchor="thinking_panel",
-            shown=STREAM_SHELL_BYTES,
+            shown=len(card_json(shell).encode()),
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        card = stream_card(thinking, "", session_url=row.session_url, heading="🤔 思考中...")
-        card["body"]["elements"] = [card["body"]["elements"][0], *elements]
-        await self.put_card(row.task_id, card_id, card)
+        shell["body"]["elements"] = [panel, *elements]
+        shell["config"]["streaming_mode"] = True
+        await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
         return steps
 

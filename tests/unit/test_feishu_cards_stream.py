@@ -99,11 +99,23 @@ def test_two_half_charts_become_one_row_when_the_second_finishes() -> None:
 
 
 def test_budget_freezes_growth_instead_of_overflowing() -> None:
-    long = "很长的一段说明。" * 4000
+    note = '```card:note\n{"text": "口径"}\n```'
+    long = "很长的一段说明。" * 1500 + f"\n\n{note}\n\n" + "另一段很长的说明。" * 1500
+    card = FakeCard()
     steps = plan(INITIAL, stream_units(long), anchor="thinking_panel", shown=2_000)
+    card.apply(steps.actions, steps.texts)
     assert steps.frozen
-    size = sum(len(c.encode()) for _, c in steps.texts)
-    assert size <= STREAM_BUDGET
+    shown = sum(len(json.dumps(c, ensure_ascii=False).encode()) for c in card.content.values())
+    assert shown + 2_000 <= STREAM_BUDGET
+
+
+def test_clipped_text_is_not_resent() -> None:
+    long = "很长的一段说明。" * 2000
+    first = plan(INITIAL, stream_units(long), anchor="thinking_panel", shown=2_000)
+    again = plan(
+        first.layout, stream_units(long + "再多一点"), anchor="thinking_panel", shown=2_000
+    )
+    assert first.texts and again.texts == []
 
 
 def test_unchanged_text_produces_no_calls() -> None:

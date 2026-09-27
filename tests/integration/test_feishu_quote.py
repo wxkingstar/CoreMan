@@ -92,9 +92,7 @@ async def test_same_chat_delivered_card_is_quoted_after_session_reset(
     await run(db_engine, task, relay)
 
     content = relay.requests[0]["messages"][1]["content"]
-    assert content == msg(
-        "quote_text_prefix", quoted="父卡片的最终答案", text="继续解释"
-    )
+    assert content == msg("quote_text_prefix", quoted="父卡片的最终答案", text="继续解释")
     assert "思考内容" not in content
 
 

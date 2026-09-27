@@ -1035,3 +1035,139 @@ async def test_sequence_conflict_bumps_the_local_sequence(db_session, db_engine)
     async with factory() as session:
         delivery = await session.get(FeishuDelivery, row.task_id)
         assert delivery.sequence >= 1000 and delivery.failures == 1
+
+
+class CardKit(FakeAPI):
+    """记住卡片上根层级的组件：删不存在的、插到不存在的位置、写不存在的正文都按飞书报错。"""
+
+    def __init__(self):
+        super().__init__()
+        self.roots: list[str] = []
+        self.text: dict[str, str] = {}
+
+    def _load(self, card):
+        self.roots = [e["element_id"] for e in card["body"]["elements"]]
+        self.text = {
+            e["element_id"]: e["content"]
+            for e in card["body"]["elements"]
+            if e["tag"] == "markdown"
+        }
+
+    async def call(self, method, path, **kwargs):
+        body = kwargs.get("json") or {}
+        if path == "/open-apis/cardkit/v1/cards" and method == "POST":
+            self._load(json.loads(body["data"]))
+        elif method == "PUT" and path == "/open-apis/cardkit/v1/cards/card1":
+            card = json.loads(body["card"]["data"])
+            from coreman.core.feishu_cards.sanitize import validate_card
+
+            if validate_card(card):
+                self.calls.append((method, path, body))
+                raise FeishuError(200220)
+            self._load(card)
+        elif path.endswith("/batch_update"):
+            from coreman.core.feishu_cards.compile import card_shell
+            from coreman.core.feishu_cards.sanitize import validate_card
+
+            for action in json.loads(body["actions"]):
+                params = action["params"]
+                if action["action"] == "delete_elements":
+                    if any(i not in self.roots for i in params["element_ids"]):
+                        self.calls.append((method, path, body))
+                        raise FeishuError(300314)
+                    self.roots = [i for i in self.roots if i not in params["element_ids"]]
+                else:
+                    target = params["target_element_id"]
+                    elements = params["elements"]
+                    if target not in self.roots or validate_card(card_shell(elements)):
+                        self.calls.append((method, path, body))
+                        raise FeishuError(300315)
+                    at = self.roots.index(target) + 1
+                    self.roots[at:at] = [e["element_id"] for e in elements]
+                    for e in elements:
+                        if e["tag"] == "markdown":
+                            self.text[e["element_id"]] = e["content"]
+        elif method == "PUT" and path.endswith("/content"):
+            element = path.split("/elements/")[1].split("/")[0]
+            if element != "thinking" and element not in self.roots:
+                self.calls.append((method, path, body))
+                raise FeishuError(300314)
+            self.text[element] = body["content"]
+        return await super().call(method, path, **kwargs)
+
+
+async def stream_steps(factory, transport, row, texts, thinking="think"):
+    for pending in texts:
+        async with factory() as session:
+            await streams.update(session, row.task_id, pending_text=pending, thinking_md=thinking)
+            await session.commit()
+        await transport.round()
+        async with factory() as session:
+            delivery = await session.get(FeishuDelivery, row.task_id)
+            assert delivery.failures == 0, delivery.last_error
+
+
+async def test_thinking_only_first_push_keeps_the_answer_placeholder(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), CardKit()
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await stream_steps(factory, transport, row, ["", "第一句", "第一句，第二句"], thinking="step 2")
+    assert "answer" in api.roots
+    assert api.text["answer"] == "第一句，第二句"
+
+
+async def test_reply_opening_with_a_header_streams_normally(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), CardKit()
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    header = '```card:header\n{"title": "日报"}\n```\n\n'
+    await stream_steps(
+        factory, transport, row, [header[:20], header, header + "正文开始", header + "正文开始了"]
+    )
+    assert api.text["answer"] == "正文开始了"
+
+
+async def test_samples_stream_without_layout_errors(db_session, db_engine):
+    from coreman.core.feishu_cards.samples import SAMPLES
+
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), CardKit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    text = "".join(SAMPLES.values())
+    await stream_steps(factory, transport, row, [text[:end] for end in range(40, len(text), 90)])
+    assert not [
+        c for c in api.calls if c[1] == "/open-apis/cardkit/v1/cards/card1" and c[0] == "PUT"
+    ]
+
+
+async def test_half_chart_over_quota_is_not_nested_in_a_row(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), CardKit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    chart = (
+        '```card:chart\n{"chart": "bar", "size": "half", "x": ["a", "b"], '
+        '"series": [{"values": [1, 2]}]}\n```'
+    )
+    text = "\n\n".join([chart] * 8)
+    await stream_steps(
+        factory, transport, row, [text[:end] for end in range(60, len(text) + 60, 60)]
+    )
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert not delivery.layout.get("paused")

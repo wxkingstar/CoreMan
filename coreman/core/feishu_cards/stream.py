@@ -17,13 +17,17 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from coreman.core.feishu_cards.compile import (
-    _HALF,
     PENDING_LABELS,
     _Builder,
+    _cost,
     _degraded,
+    _size,
+    card_shell,
+    count_elements,
 )
 from coreman.core.feishu_cards.components import two_columns
 from coreman.core.feishu_cards.context import RenderContext
+from coreman.core.feishu_cards.sanitize import validate_card
 from coreman.core.logging import get_logger
 from coreman.core.richtext.blocks import split
 from coreman.core.richtext.schema import HeaderBlock
@@ -31,10 +35,15 @@ from coreman.core.richtext.schema import HeaderBlock
 log = get_logger(__name__)
 # 第一段正文沿用流式卡片创建时的 answer 组件。
 FIRST_TEXT_ID = "answer"
-# 流式期间整卡的体积预算：超了就停止插入新块、停止加长正文，收尾时再整卡换成完整的富卡片。
-STREAM_BUDGET = 24_000
+# 流式期间整卡的体积预算（紧凑 JSON、按转义后计）：超了就停止插入新块、停止加长正文，
+# 收尾时再整卡换成完整的富卡片（终稿按 28KB 分卡）。
+STREAM_BUDGET = 26_000
+# 流式期间单元里的组件总数上限（飞书整卡 200，外壳和思考面板另占十来个）。
+MAX_STREAM_ELEMENTS = 170
 # 单段正文在流式期间最多显示这么多（字节），和旧行为一致。
 TEXT_LIMIT = 16_000
+# 一个 markdown 组件除正文外的 JSON 开销（tag、element_id 等）。
+_TEXT_OVERHEAD = 64
 
 UnitKind = Literal["text", "block"]
 
@@ -69,34 +78,48 @@ def _digest(elements: list[dict[str, Any]]) -> str:
 
 
 def _renamed(elements: list[dict[str, Any]], prefix: str) -> list[dict[str, Any]]:
-    """组件 id 按单元位置重新编号：位置不变 id 就不变，同一张卡里也不会撞号。"""
+    """组件 id 按单元位置重新编号：位置不变 id 就不变，同一张卡里也不会撞号。
+
+    只动组件（带 tag 的节点）的 element_id；表格行、图表 spec 里恰好叫 element_id 的数据不碰。
+    """
     counter = [0]
 
-    def walk(node: Any) -> Any:
+    def walk(node: Any, inside_data: bool) -> Any:
         if isinstance(node, dict):
-            out = {k: walk(v) for k, v in node.items()}
-            if "element_id" in out:
+            out = {k: walk(v, inside_data or k in {"chart_spec", "rows"}) for k, v in node.items()}
+            if not inside_data and "tag" in out and "element_id" in out:
                 out["element_id"] = f"{prefix}_{counter[0]}"
                 counter[0] += 1
             return out
         if isinstance(node, list):
-            return [walk(v) for v in node]
+            return [walk(v, inside_data) for v in node]
         return node
 
-    return [walk(e) for e in elements]
+    return [walk(e, False) for e in elements]
 
 
 def _text_id(index: int) -> str:
     return FIRST_TEXT_ID if index == 0 else f"s{index}_t"
 
 
+def _valid(elements: list[dict[str, Any]]) -> bool:
+    """插进卡片之前自检：飞书拒收的组件（表格进了容器、嵌套过深等）不能发，否则卡片会卡住。"""
+    return not validate_card(card_shell(elements))
+
+
+def _fallback(kind: str, model: Any, raw: str) -> list[dict[str, Any]]:
+    """块渲染不合法时的退路：一个 markdown 组件显示它的降级文本。"""
+    content = _degraded(kind, model, raw)[:TEXT_LIMIT] or "…"
+    return [{"tag": "markdown", "element_id": "f", "content": content}]
+
+
 def stream_units(text: str, *, allow_reply: bool = False) -> list[StreamUnit]:
     """流式正文 → 单元列表。正文段原样交给打字机（不做规范化，保证前缀稳定）。"""
     ctx = RenderContext(allow_reply=allow_reply)
     units: list[StreamUnit] = []
-    half: tuple[list[dict[str, Any]], str] | None = None
+    half: list[dict[str, Any]] | None = None
 
-    def add_block(elements: list[dict[str, Any]], digest: str) -> None:
+    def add_block(elements: list[dict[str, Any]]) -> None:
         index = len(units)
         named = _renamed(elements, f"s{index}")
         units.append(
@@ -104,14 +127,14 @@ def stream_units(text: str, *, allow_reply: bool = False) -> list[StreamUnit]:
                 "block",
                 tuple(e["element_id"] for e in named),
                 elements=tuple(named),
-                digest=digest,
+                digest=_digest(elements),
             )
         )
 
     def flush_half() -> None:
         nonlocal half
         if half is not None:
-            add_block(*half)
+            add_block(half)
             half = None
 
     for seg in split(text, final=False):
@@ -124,33 +147,43 @@ def stream_units(text: str, *, allow_reply: bool = False) -> list[StreamUnit]:
                 continue  # 标题栏流式期间不显示，也不闪占位
             flush_half()
             label = PENDING_LABELS.get(seg.block or "", "⏳ 正在生成…")
-            element = {
-                "tag": "markdown",
-                "element_id": "p",
-                "content": f"<font color='grey'>{label}</font>",
-            }
-            add_block([element], f"pending:{label}")
+            add_block(
+                [
+                    {
+                        "tag": "markdown",
+                        "element_id": "p",
+                        "content": f"<font color='grey'>{label}</font>",
+                    }
+                ]
+            )
             continue
         if seg.kind == "invalid":
             flush_half()
-            element = {"tag": "markdown", "element_id": "x", "content": f"```json\n{seg.text}\n```"}
-            add_block([element], _digest([element]))
+            content = f"```json\n{seg.text}\n```"[:TEXT_LIMIT]
+            add_block([{"tag": "markdown", "element_id": "x", "content": content}])
             continue
         if seg.model is None or not seg.block or isinstance(seg.model, HeaderBlock):
             continue
         elements, is_half = _block_elements(seg.block, seg.model, seg.text, ctx)
         if not elements:
             continue
+        if not _valid(elements):
+            log.warning("feishu_stream_block_invalid", kind=seg.block)
+            elements, is_half = _fallback(seg.block, seg.model, seg.text), False
         if is_half and half is not None:
-            row = [two_columns(half[0], elements, ctx)]
-            half = None
-            add_block(row, _digest(row))
+            row = [two_columns(half, elements, ctx)]
+            if _valid(row):
+                half = None
+                add_block(row)
+                continue
+            flush_half()
+            add_block(elements)
         elif is_half:
             flush_half()
-            half = (elements, _digest(elements))
+            half = elements
         else:
             flush_half()
-            add_block(elements, _digest(elements))
+            add_block(elements)
     flush_half()
     return units
 
@@ -158,17 +191,28 @@ def stream_units(text: str, *, allow_reply: bool = False) -> list[StreamUnit]:
 def _block_elements(
     kind: str, model: Any, raw: str, ctx: RenderContext
 ) -> tuple[list[dict[str, Any]], bool]:
-    """复用终稿的块渲染（含降级），保证流式期间看到的和收尾后一致。"""
+    """复用终稿的块渲染（含降级），保证流式期间看到的和收尾后一致。
+
+    只有原生渲染的半宽块才算半宽（和终稿一致）；降级成 Markdown 的不参与并排。
+    """
     builder = _Builder(ctx)
     try:
         builder.block(kind, model, raw)
     except Exception:  # noqa: BLE001 渲染出错只降级这一块
         log.warning("feishu_stream_block_failed", exc_info=True)
         builder.add_markdown(_degraded(kind, model, raw))
+    native_half = builder._half is not None
     builder.finish()
     elements = [e for unit in builder.units for e in unit.elements]
-    is_half = getattr(model, "size", "full") == "half" and kind in _HALF
-    return elements, is_half and len(builder.units) == 1
+    return elements, native_half
+
+
+def _text_size(content: str) -> int:
+    return _cost(content) + _TEXT_OVERHEAD
+
+
+def _block_size(unit: StreamUnit) -> int:
+    return _size(list(unit.elements))
 
 
 def plan(
@@ -185,9 +229,13 @@ def plan(
         layout: 上次推送后记下的单元（`StreamUnit.record()` 的列表）
         units: 这次算出的单元
         anchor: 第一个单元前面那个组件的 id（思考面板）
-        shown: 卡片除单元以外的体积（字节）；加上单元超过流式预算就冻结，不再加长或插入
+        shown: 卡片除单元以外的体积（紧凑 JSON 字节）；加上单元超过流式预算就冻结
         show: 正文段显示前的处理（如远程图片改成链接）；布局里记的是处理前的原文
     """
+
+    def display(text: str) -> str:
+        return _clip(show(text)) or "…"
+
     same = 0
     while same < min(len(layout), len(units)):
         old, new = layout[same], units[same]
@@ -198,28 +246,45 @@ def plan(
         same += 1
     out = Plan()
     budget = STREAM_BUDGET - shown
-    used = sum(_unit_size(u) for u in units[:same])
+    # 先按卡片现状记账（正文段按上次推上去的内容），再逐项判断加长和插入放不放得下。
+    used = count = 0
+    for record, unit in zip(layout[:same], units[:same], strict=True):
+        if unit.kind == "block":
+            used += _block_size(unit)
+            count += count_elements(list(unit.elements))
+        else:
+            used += _text_size(display(str(record.get("text") or "")))
+            count += 1
     kept: list[dict[str, Any]] = []
-    for index in range(same):
-        record, unit = layout[index], units[index]
-        if unit.kind != "text" or unit.text == record.get("text"):
+    for record, unit in zip(layout[:same], units[:same], strict=True):
+        if unit.kind == "block":
             kept.append(unit.record())
             continue
-        grown = used - len(str(record.get("text") or "").encode()) + len(unit.text.encode())
+        old_shown, new_shown = display(str(record.get("text") or "")), display(unit.text)
+        if new_shown == old_shown:
+            kept.append(unit.record())
+            continue
+        grown = used - _text_size(old_shown) + _text_size(new_shown)
         if grown > budget:
             # 放不下了：卡片上保持旧文本，收尾整卡替换时再完整显示。
             out.frozen = True
             kept.append(record)
             continue
-        out.texts.append((unit.ids[0], _clip(show(unit.text)) or "…"))
+        used = grown
+        out.texts.append((unit.ids[0], new_shown))
         kept.append(unit.record())
     added: list[StreamUnit] = []
     for unit in units[same:]:
-        if used + _unit_size(unit) > budget:
+        if unit.kind == "text":
+            size, n = _text_size(display(unit.text)), 1
+        else:
+            size, n = _block_size(unit), count_elements(list(unit.elements))
+        if used + size > budget or count + n > MAX_STREAM_ELEMENTS:
             out.frozen = True
             break
         added.append(unit)
-        used += _unit_size(unit)
+        used += size
+        count += n
     removed = [i for record in layout[same:] for i in (record.get("ids") or [])]
     if removed:
         out.actions.append({"action": "delete_elements", "params": {"element_ids": removed}})
@@ -227,8 +292,9 @@ def plan(
         elements: list[dict[str, Any]] = []
         for unit in added:
             if unit.kind == "text":
-                content = _clip(show(unit.text)) or "…"
-                elements.append({"tag": "markdown", "element_id": unit.ids[0], "content": content})
+                elements.append(
+                    {"tag": "markdown", "element_id": unit.ids[0], "content": display(unit.text)}
+                )
             else:
                 elements.extend(unit.elements)
         target = kept[-1]["ids"][-1] if kept else anchor
@@ -244,12 +310,6 @@ def plan(
         )
     out.layout = kept + [u.record() for u in added]
     return out
-
-
-def _unit_size(unit: StreamUnit) -> int:
-    return len(unit.text.encode()) + len(
-        json.dumps(list(unit.elements), ensure_ascii=False).encode()
-    )
 
 
 def _clip(text: str) -> str:
