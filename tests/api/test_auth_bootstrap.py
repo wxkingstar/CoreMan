@@ -152,5 +152,22 @@ async def test_renewal_reissues_session_cookie(
     assert unsign_session_id(secret, renewed.cookies[SESSION_COOKIE]) == row.id
     await db_session.refresh(row)
     assert row.expires_at > old_expiry
+    # CSRF cookie 跟着续期，值不变，否则登录满 7 天后它先于会话过期
+    assert renewed.cookies[CSRF_COOKIE] == login.cookies[CSRF_COOKIE]
+    assert "max-age=604800" in next(
+        h.lower() for h in renewed.headers.get_list("set-cookie") if h.startswith(CSRF_COOKIE)
+    )
     # 新 cookie 仍可用
     assert (await client.get("/api/admin/auth/me")).status_code == 200
+
+
+async def test_missing_csrf_cookie_is_reissued_for_live_session(client: httpx.AsyncClient) -> None:
+    """会话还活着但 CSRF cookie 已过期：下一次请求补发，写操作随即恢复，不用重新登录。"""
+    await _login(client)
+    client.cookies.delete(CSRF_COOKIE)
+    assert (await client.post("/api/admin/auth/logout")).status_code == 403
+    me = await client.get("/api/admin/auth/me")
+    assert me.status_code == 200 and me.cookies.get(CSRF_COOKIE)
+    csrf = client.cookies[CSRF_COOKIE]
+    out = await client.post("/api/admin/auth/logout", headers={CSRF_HEADER: csrf})
+    assert out.status_code == 200
