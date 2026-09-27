@@ -86,9 +86,10 @@ BUSINESS_TABLES = [
 
 SEED_MODEL_CATALOG = text(
     "INSERT INTO model_catalog"
-    " (provider, model, display_name, is_default, supports_xhigh, supports_max, sort_order)"
-    " VALUES (:provider, :model, :display_name, :is_default, :supports_xhigh, :supports_max,"
-    " :sort_order)"
+    " (provider, model, display_name, is_default, retired, supports_xhigh, supports_max,"
+    " sort_order)"
+    " VALUES (:provider, :model, :display_name, :is_default, :retired, :supports_xhigh,"
+    " :supports_max, :sort_order)"
     " ON CONFLICT DO NOTHING"
 )
 
@@ -102,7 +103,8 @@ def alembic_config(database_url: str) -> Config:
 
 @functools.cache
 def model_catalog_seed() -> list[dict[str, object]]:
-    """迁移 0003 里的模型目录种子，套上 0023 的改名与 0043 的档位标记（只读脚本目录，不连库）。
+    """迁移 0003 里的模型目录种子，套上 0023 的改名、0043 的档位标记与 0051 的新增和退役
+    （只读脚本目录，不连库）。
 
     `model_catalog` 也列在 BUSINESS_TABLES 里（用例可以增删目录行，不清理会串味），但它同时
     是迁移写入的参考数据；TRUNCATE 之后按这份唯一来源补回，每个用例才都从「迁移后」状态起跑。
@@ -113,9 +115,11 @@ def model_catalog_seed() -> list[dict[str, object]]:
     seed = scripts.get_revision("0003")
     renames = scripts.get_revision("0023")
     efforts = scripts.get_revision("0043")
+    refresh = scripts.get_revision("0051")
     assert seed is not None and renames is not None and efforts is not None
+    assert refresh is not None
     native = dict(renames.module.RENAMES)
-    rows = []
+    rows: list[dict[str, object]] = []
     for p, m, d, df, s in seed.module.SEED_MODELS:
         model = native.get(m, m)
         xhigh, max_ = efforts.module.known(model) or (False, False)
@@ -125,9 +129,27 @@ def model_catalog_seed() -> list[dict[str, object]]:
                 "model": model,
                 "display_name": d,
                 "is_default": df,
+                "retired": False,
                 "supports_xhigh": xhigh,
                 "supports_max": max_,
                 "sort_order": s,
+            }
+        )
+    for provider, (new, display_name, replaced) in refresh.module.REPLACEMENTS.items():
+        mine = [r for r in rows if r["provider"] == provider]
+        for r in mine:
+            r["is_default"] = False
+            r["retired"] = refresh.module.base_name(str(r["model"])) in replaced
+        rows.append(
+            {
+                "provider": provider,
+                "model": new,
+                "display_name": display_name,
+                "is_default": True,
+                "retired": False,
+                "supports_xhigh": True,
+                "supports_max": True,
+                "sort_order": max(int(str(r["sort_order"])) for r in mine) + 10,
             }
         )
     return rows

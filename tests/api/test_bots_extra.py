@@ -91,7 +91,7 @@ async def test_switch_relay_resolves_model(
     d = r.json()["data"]
     assert (
         d["old_model"] == "claude-sonnet-5"
-        and d["new_model"] == "codex/gpt-6-astra"
+        and d["new_model"] == "codex/gpt-6-sol"
         and d["bot"]["backend"] == "codex"
     )
     v = d["bot"]["version"]
@@ -104,10 +104,10 @@ async def test_switch_relay_resolves_model(
     ).status_code == 422
     r = await client.post(
         f"/api/admin/bots/{bot['id']}/switch-relay",
-        json={"relay_server_id": ids["claude01"], "model": "claude-opus-5"},
+        json={"relay_server_id": ids["claude01"], "model": "claude-opus-5-5"},
         headers={"If-Match": f'"{v}"'},
     )
-    assert r.status_code == 200 and r.json()["data"]["new_model"] == "claude-opus-5"
+    assert r.status_code == 200 and r.json()["data"]["new_model"] == "claude-opus-5-5"
     audit = (
         (
             await db_session.execute(
@@ -117,7 +117,7 @@ async def test_switch_relay_resolves_model(
         .scalars()
         .all()
     )
-    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6-astra"]
+    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6-sol"]
 
 
 async def test_switch_relay_permissions_and_effort_downgrade(
@@ -127,7 +127,7 @@ async def test_switch_relay_permissions_and_effort_downgrade(
     # codex 实例的默认模型改成只支持到 xhigh，自动换过去时 max 降到 xhigh。
     row = (
         await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "codex/gpt-6-astra")
+            select(ModelCatalog).where(ModelCatalog.model == "codex/gpt-6-sol")
         )
     ).scalar_one()
     row.supports_max = False
@@ -227,11 +227,11 @@ async def test_same_relay_model_switch_skips_relay_visibility(
     await db_session.refresh(bot)
     r = await client.post(
         f"/api/admin/bots/{bot.id}/switch-relay",
-        json={"relay_server_id": str(hidden.id), "model": "claude-opus-5"},
+        json={"relay_server_id": str(hidden.id), "model": "claude-opus-5-5"},
         headers={"If-Match": f'"{bot.version}"'},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["data"]["new_model"] == "claude-opus-5"
+    assert r.json()["data"]["new_model"] == "claude-opus-5-5"
     moved = await client.post(
         f"/api/admin/bots/{bot.id}/switch-relay",
         json={"relay_server_id": str(hidden2.id)},
@@ -246,7 +246,9 @@ async def test_switch_relay_explicit_model_without_xhigh_is_422(
     """显式带 model 时没有自动降档这回事：模型不支持 xhigh 就 422（页面对话框总是显式带模型）。"""
     bot, ids, _ = await _setup(client, db_session)
     row = (
-        await db_session.execute(select(ModelCatalog).where(ModelCatalog.model == "claude-opus-5"))
+        await db_session.execute(
+            select(ModelCatalog).where(ModelCatalog.model == "claude-opus-5-5")
+        )
     ).scalar_one()
     row.supports_xhigh = False
     await db_session.commit()
@@ -258,7 +260,7 @@ async def test_switch_relay_explicit_model_without_xhigh_is_422(
     assert r.status_code == 200, r.text
     bad = await client.post(
         f"/api/admin/bots/{bot['id']}/switch-relay",
-        json={"relay_server_id": ids["claude01"], "model": "claude-opus-5"},
+        json={"relay_server_id": ids["claude01"], "model": "claude-opus-5-5"},
         headers={"If-Match": f'"{r.json()["data"]["version"]}"'},
     )
     assert bad.status_code == 422 and bad.json()["message"] == "该模型不支持 xhigh"

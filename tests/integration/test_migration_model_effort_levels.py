@@ -50,7 +50,7 @@ def test_0043_sets_known_effort_support_and_downgrades_bots(migrated_database: s
                 (INSERT_BOT, {"key": "kimi", "model": "kimi/kimi-k2.5", "effort": "xhigh"}),
             )
         )
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0043")
         catalog = asyncio.run(
             _rows(
                 migrated_database,

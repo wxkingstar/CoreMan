@@ -101,6 +101,7 @@ def test_fit_effort_steps_down_to_highest_supported() -> None:
 @pytest.mark.parametrize(
     ("model", "xhigh", "max_"),
     [
+        ("claude-opus-5-5", True, True),
         ("claude-opus-5", True, True),
         ("claude-sonnet-5", True, True),
         ("claude-fable-5-1", True, True),
@@ -110,6 +111,7 @@ def test_fit_effort_steps_down_to_highest_supported() -> None:
         ("vllm/claude-sonnet-4-6", False, True),
         ("claude-opus-4-5-20251101", False, False),
         ("claude-haiku-4-5-20251001", False, False),
+        ("codex/gpt-6-sol", True, True),
         ("codex/gpt-6-astra", True, True),
         ("codex/gpt-5.6-luna", True, True),
         ("codex/gpt-5.5", True, False),
