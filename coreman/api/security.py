@@ -55,7 +55,7 @@ def new_csrf_token() -> str:
 def refresh_session_cookie(
     response: Response, *, secret: str, session_id: uuid.UUID, secure: bool
 ) -> None:
-    """续期：只重签 session cookie（新时间戳 + 新 Max-Age），CSRF cookie 保持不变。"""
+    """续期：重签 session cookie（新时间戳 + 新 Max-Age）。CSRF cookie 由调用方另行续期。"""
     response.set_cookie(
         SESSION_COOKIE,
         sign_session_id(secret, session_id),
@@ -67,11 +67,9 @@ def refresh_session_cookie(
     )
 
 
-def set_login_cookies(
-    response: Response, *, secret: str, session_id: uuid.UUID, secure: bool
-) -> str:
-    refresh_session_cookie(response, secret=secret, session_id=session_id, secure=secure)
-    csrf = new_csrf_token()
+def set_csrf_cookie(response: Response, csrf: str, *, secure: bool) -> None:
+    """CSRF cookie 与 session cookie 同寿命；续期时必须一起重发，否则会话还活着、
+    CSRF cookie 却在登录满 SESSION_MAX_AGE 后过期，所有写请求都会 403。"""
     response.set_cookie(
         CSRF_COOKIE,
         csrf,
@@ -81,6 +79,14 @@ def set_login_cookies(
         samesite="lax",
         path="/",
     )
+
+
+def set_login_cookies(
+    response: Response, *, secret: str, session_id: uuid.UUID, secure: bool
+) -> str:
+    refresh_session_cookie(response, secret=secret, session_id=session_id, secure=secure)
+    csrf = new_csrf_token()
+    set_csrf_cookie(response, csrf, secure=secure)
     return csrf
 
 

@@ -11,9 +11,12 @@ from sqlalchemy.orm import selectinload
 
 from coreman.api.errors import ApiError
 from coreman.api.security import (
+    CSRF_COOKIE,
     SESSION_COOKIE,
     SESSION_MAX_AGE,
+    new_csrf_token,
     refresh_session_cookie,
+    set_csrf_cookie,
     unsign_session_id,
 )
 from coreman.core.db.models import AdminSession, User
@@ -101,6 +104,8 @@ async def current_user(
         or row.user.status != "active"
     ):
         raise unauthorized
+    secure = request.app.state.settings.public_base_url.startswith("https://")
+    csrf = request.cookies.get(CSRF_COOKIE)
     if row.last_seen_at is None or now - row.last_seen_at > _RENEW_INTERVAL:
         row.last_seen_at = now
         row.expires_at = now + timedelta(seconds=SESSION_MAX_AGE)
@@ -109,7 +114,13 @@ async def current_user(
             response,
             secret=request.app.state.settings.session_secret,
             session_id=row.id,
-            secure=request.app.state.settings.public_base_url.startswith("https://"),
+            secure=secure,
         )
+        # CSRF cookie 跟着一起续期（值不变），否则登录满 7 天后它先过期，会话却还活着。
+        set_csrf_cookie(response, csrf or new_csrf_token(), secure=secure)
+    elif not csrf:
+        # 已经丢了 CSRF cookie 的会话（旧版本留下的，或被浏览器清掉）：补发一枚，
+        # 下一次写请求就能通过，不必让用户重新登录。
+        set_csrf_cookie(response, new_csrf_token(), secure=secure)
     request.state.admin_session = row
     return row.user
