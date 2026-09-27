@@ -118,7 +118,7 @@ async def test_normal_round_trip_new_session_then_resume(
     viewer = f"http://localhost/api/admin/runtime-nodes/{relay_row.runtime_node_id}/claude/session/"
     assert (
         s.final_text.startswith(f"📎 查看实时聊天记录：[链接>>]({viewer}")
-        and "你好，世界。" in s.final_text
+        and "你好，世界\n\n。" in s.final_text
     )
     assert (
         "🔧 **Bash**" in s.thinking_md

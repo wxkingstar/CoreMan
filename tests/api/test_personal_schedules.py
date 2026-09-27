@@ -360,7 +360,7 @@ async def test_private_runs_hidden_from_other_admins(app, client, db_session, db
     listed = (await client.get("/api/admin/chat-logs")).json()["data"]["items"]
     assert [item["id"] for item in listed] == [log.id]
     runs = (await client.get(f"/api/admin/cron-jobs/{job.id}/runs")).json()["data"]["items"]
-    assert runs[0]["reply"] == "你好，世界。"
+    assert runs[0]["reply"] == "你好，世界\n\n。"
 
 
 async def test_admins_see_member_schedules_only_to_disable_them(app, client, db_session):

@@ -221,6 +221,23 @@ async def test_oversized_cron_reply_is_truncated_not_failed(monkeypatch) -> None
     assert (await CronRunHandler()._consume(_ctx(), short()))[::3] == ("ok", False)
 
 
+async def test_cron_reply_separates_messages_around_tools() -> None:
+    from coreman.core.relay.sse import FinishEvent, TextDelta, ToolUseStart
+    from coreman.runtime.worker.cron_handler import CronRunHandler
+
+    async def stream():
+        yield ToolUseStart("Bash", "t0")
+        yield TextDelta("先查库存。")
+        yield ToolUseStart("Bash", "t1")
+        yield ToolUseStart("Bash", "t2")
+        yield TextDelta("库存充足")
+        yield TextDelta("。")
+        yield FinishEvent("stop")
+
+    reply, _usage, tools, _truncated = await CronRunHandler()._consume(_ctx(), stream())
+    assert reply == "先查库存。\n\n库存充足。" and tools == ["Bash"]
+
+
 def test_bounded_delivery_chunks_cap_parts_and_append_notice() -> None:
     from coreman.core.cron.delivery import bounded_chunks, chunks
 

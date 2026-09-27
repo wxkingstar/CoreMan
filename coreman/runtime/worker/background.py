@@ -154,7 +154,8 @@ class BackgroundPusher:
         self.pushed_count += 1
         # 推过一段就等于「用户刚收到动静」：静默从这一刻重新计，阈值也全部重新可用。
         self._last_activity, self._fired = now, set()
-        return [self.cap(msg("bg_progress_prefix", self.locale) + delta)]
+        # 上一段推完才补上的段间空行会落在这一段开头，前缀自带空行，去掉免得空两遍。
+        return [self.cap(msg("bg_progress_prefix", self.locale) + delta.lstrip("\n"))]
 
     def heartbeat(self, now: float) -> str | None:
         """提交轮静默心跳：静默跨过每个阈值各推一次；任何推送都让静默计时从头再来。

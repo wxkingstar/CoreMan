@@ -147,7 +147,7 @@ async def test_image_message_reaches_the_model_and_is_answered(
     try:
         req = await stack.ws.send_media("bot1", msgtype="image", url=url, aeskey=KEY, msgid="e2e-1")
         finish = await stack.ws.wait_frame(_finished(req), timeout=30)
-        assert "你好，世界。" in finish["body"]["stream"]["content"]
+        assert "你好，世界\n\n。" in finish["body"]["stream"]["content"]
         # 模型收到的是 content parts：提示语 + data URI 图片，原始 url/aeskey 不外传。
         content = relays["normal"].requests[0]["messages"][1]["content"]
         assert content[0] == {"type": "text", "text": msg("media_prompt_image")}

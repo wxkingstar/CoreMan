@@ -187,6 +187,18 @@ class SseParser:
         )
 
 
+def paragraph_gap(before: str, after: str) -> str:
+    """工具调用前后是两条 assistant 消息，relay 却把正文首尾相接地吐出来；接缝处补足空行。
+
+    只补差额：前一段已经以换行收尾、或后一段以换行开头，都算进这两行里。
+    """
+    if not before.strip():
+        return ""
+    trailing = len(before) - len(before.rstrip("\n"))
+    leading = len(after) - len(after.lstrip("\n"))
+    return "\n" * max(0, 2 - trailing - leading)
+
+
 def _obj(value: Any) -> dict[str, Any]:
     """不是 JSON 对象就当空对象，省得每处都写 isinstance。"""
     return value if isinstance(value, dict) else {}
