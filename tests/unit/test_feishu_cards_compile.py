@@ -71,7 +71,9 @@ def test_adjacent_half_blocks_share_one_row() -> None:
 def test_lone_half_block_is_rendered_full_width() -> None:
     text = '```card:chart\n{"chart": "pie", "size": "half", "items": [["a", 1], ["b", 2]]}\n```'
     body = compile_reply(text).cards[0]["body"]["elements"]
-    assert body[0]["tag"] == "chart"
+    # 落单的半宽图表占整行，仍放在面板里。
+    assert len(body) == 1 and tags(body[0]).count("chart") == 1
+    assert body[0]["tag"] == "interactive_container"
 
 
 def test_sixth_chart_degrades_to_a_data_table() -> None:

@@ -19,6 +19,7 @@ from coreman.core.feishu_cards import style
 from coreman.core.feishu_cards.charts import render_chart
 from coreman.core.feishu_cards.components import (
     columns,
+    panel,
     render_actions,
     render_callout,
     render_header,
@@ -417,7 +418,9 @@ class _Builder:
     def render(self, kind: str, model: BaseModel, *, half: bool) -> list[dict[str, Any]]:
         ctx = self.ctx
         if isinstance(model, ChartBlock):
-            return render_chart(model, ctx, half=half)
+            elements = render_chart(model, ctx, half=half)
+            # 并排的图表各自放进圆角面板：两栏对齐、层次清楚（与设计稿一致）。
+            return [panel(elements, ctx)] if half and elements else elements
         if isinstance(model, KpiBlock):
             return render_kpi(model, ctx)
         if isinstance(model, CalloutBlock):
