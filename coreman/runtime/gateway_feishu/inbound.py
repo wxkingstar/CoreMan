@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from coreman.core.chat.card_replies import REPLY_BUTTON
+from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
     AudioPart,
@@ -21,6 +23,59 @@ from coreman.core.wecom.messages import (
 )
 
 _RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+# 选择卡片的题目 key 与选项 id（choice_answer、opt_0 这类），都是我们自己生成的短标识。
+_CHOICE_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+
+
+def _reply_click(
+    raw: dict[str, Any], click: ReplyClick, *, bot_id: uuid.UUID, context: dict[str, Any]
+) -> InboundMessage | None:
+    """回复按钮：当作点击人在卡片所在会话里发给机器人的下一句话，内容就是按钮上的字。
+
+    会话类型先按群记：飞书回调不带会话类型，网关应答前再按真实私聊记录改判（见
+    `gateway_feishu.reply_buttons.settle`）；提问人以外的人点击也在那里拒绝。群里视同 @ 了
+    机器人，回答引用这张卡片。去重键按「卡片消息 + 按钮行」：同一行只算一次。
+    """
+    header = raw.get("header") or {}
+    event = raw.get("event") or {}
+    operator = event.get("operator") or {}
+    ctx = event.get("context") or {}
+    user_id = str(operator.get("user_id") or "")
+    chat_id = str(ctx.get("open_chat_id") or "")
+    message_id = str(ctx.get("open_message_id") or "")
+    event_id = str(header.get("event_id") or "")
+    if not user_id or not chat_id or not message_id or not event_id:
+        return None
+    union_id = operator.get("union_id")
+    return InboundMessage(
+        platform="feishu",
+        bot_id=bot_id,
+        kind="message",
+        chat_type="group",
+        chat_id=chat_id,
+        sender=Sender(
+            platform_user_id=user_id,
+            open_id=operator.get("open_id"),
+            union_id=union_id if isinstance(union_id, str) and union_id else None,
+        ),
+        message_id=f"action:{message_id}:{click.row}" if click.row else f"action:{event_id}",
+        mentions_bot=True,
+        parts=[TextPart(text=click.text)],
+        reply_context={
+            **context,
+            "chat_id": chat_id,
+            "chat_type": "group",
+            "message_id": message_id,
+            REPLY_BUTTON: {
+                "message_id": message_id,
+                "row": click.row,
+                "buttons": list(click.buttons),
+                "label": click.text,
+                "requester": click.requester,
+            },
+        },
+        raw=raw,
+    )
 
 
 def _normalize_event(
@@ -66,6 +121,9 @@ def _normalize_event(
         value = action.get("value") or {}
         if not isinstance(value, dict):
             return None
+        click = parse_reply(value)
+        if click is not None:
+            return _reply_click(raw, click, bot_id=bot_id, context=context)
         task_id = str(value.get("task_id") or "")
         if (
             not parse_task_id(task_id) and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
@@ -85,6 +143,17 @@ def _normalize_event(
                 selected[str(key)] = [entry]
             elif isinstance(entry, list) and all(isinstance(v, str) for v in entry):
                 selected[str(key)] = entry
+        if not form:
+            # 单选题的一排按钮：选项写在按钮自己的 value 里，折成与表单提交一样的形状，
+            # 后面的选择流程不用区分是按钮还是下拉框。
+            question, option = value.get("question"), value.get("option")
+            if (
+                isinstance(question, str)
+                and isinstance(option, str)
+                and _CHOICE_KEY.fullmatch(question)
+                and _CHOICE_KEY.fullmatch(option)
+            ):
+                selected[question] = [option]
         return InboundMessage(
             platform="feishu",
             bot_id=bot_id,

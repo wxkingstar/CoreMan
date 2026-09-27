@@ -92,6 +92,8 @@ async def resolve_feishu_event_speaker(
 
     Raw event and normalized columns must agree with the current bot app.
     App-specific open_id is comparison evidence, never a global lookup key.
+    A reply-button click (`card.action.trigger`) is checked the same way against its operator;
+    its chat type is decided server-side by the gateway, so only the chat id is compared.
     """
     pid = event.sender_platform_user_id or ""
     unknown = Speaker(pid, None, None, None)
@@ -100,11 +102,25 @@ async def resolve_feishu_event_speaker(
         raw = event.payload.get("raw") or {}
         header = raw.get("header") or {}
         source = raw.get("event") or {}
-        raw_sender = source.get("sender") or {}
-        ids = raw_sender.get("sender_id") or {}
-        message = source.get("message") or {}
+        if header.get("event_type") == "card.action.trigger":
+            ids = source.get("operator") or {}
+            context = source.get("context") or {}
+            raw_sender_type: object = "user"  # 回调的 operator 只会是人
+            origin_ok = context.get("open_chat_id") == event.chat_id
+        else:
+            raw_sender = source.get("sender") or {}
+            ids = raw_sender.get("sender_id") or {}
+            message = source.get("message") or {}
+            raw_chat_type = message.get("chat_type")
+            raw_sender_type = raw_sender.get("sender_type")
+            origin_ok = (
+                header.get("event_type") == "im.message.receive_v1"
+                and message.get("chat_id") == event.chat_id
+                and message.get("message_id") == event.platform_msg_id
+                and isinstance(raw_chat_type, str)
+                and {"p2p": "single", "group": "group"}.get(raw_chat_type) == event.chat_type
+            )
         union_id = ids.get("union_id")
-        raw_chat_type = message.get("chat_type")
         if not union_id and not sender.get("union_id"):
             return await resolve_speaker(session, platform="feishu", platform_user_id=pid)
         credentials = decrypt_json(cipher, bot.credentials_enc, CREDENTIALS_AAD)
@@ -117,12 +133,8 @@ async def resolve_feishu_event_speaker(
             or not credentials.get("app_id")
             or not credentials.get("app_secret")
             or header.get("app_id") != credentials["app_id"]
-            or header.get("event_type") != "im.message.receive_v1"
-            or message.get("chat_id") != event.chat_id
-            or message.get("message_id") != event.platform_msg_id
-            or not isinstance(raw_chat_type, str)
-            or {"p2p": "single", "group": "group"}.get(raw_chat_type) != event.chat_type
-            or raw_sender.get("sender_type") != "user"
+            or not origin_ok
+            or raw_sender_type != "user"
             or sender.get("sender_type") != "user"
             or not event.sender_open_id
             or ids.get("open_id") != event.sender_open_id

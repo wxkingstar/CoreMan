@@ -8,6 +8,7 @@ from typing import Any
 
 from coreman.core.feishu_cards.compile import card_shell, streaming_text
 from coreman.core.feishu_cards.thinking import thinking_panel
+from coreman.core.wecom.cards import clip
 
 THINKING_BYTES = 4000
 ANSWER_BYTES = 16000
@@ -106,6 +107,58 @@ def stream_card(
     )
 
 
+# 单选题选项不多时一排按钮点一下就提交，不用「下拉框 + 提交」两步；多选、选项多的仍用表单。
+ONE_TAP_OPTIONS = range(2, 5)
+# 按钮文字的上限（飞书是 100 字）：选择题选项本来就截到 11 字，限流切换卡的实例名不截，
+# 在这里兜底；完整的名字在卡片正文里。
+BUTTON_TEXT_CHARS = 40
+
+
+def _one_tap(checkbox: dict[str, Any], options: list[Any]) -> bool:
+    return checkbox.get("mode") != 1 and len(options) in ONE_TAP_OPTIONS
+
+
+def _choice_buttons(
+    card: dict[str, Any],
+    checkbox: dict[str, Any],
+    submit: dict[str, Any],
+    options: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """每个选项一个按钮；value 带齐表单提交时回调里有的东西（task_id、event_key），外加
+    题目 key 与选项 id，入站折成同样的 `selected`，选择流程不用区分按钮还是表单。"""
+    base = {
+        "task_id": str(card.get("task_id") or ""),
+        "event_key": str(submit.get("key") or ""),
+        "question": str(checkbox.get("question_key") or "choice_answer"),
+    }
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [
+                    {
+                        "tag": "button",
+                        "type": "default",
+                        "size": "small",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": clip(str(option.get("text") or "…"), BUTTON_TEXT_CHARS),
+                        },
+                        "behaviors": [
+                            {"type": "callback", "value": {**base, "option": str(option["id"])}}
+                        ],
+                    }
+                ],
+            }
+            for option in options
+        ],
+    }
+
+
 def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
     if card.get("schema") == "2.0":
         return {key: value for key, value in card.items() if key != "task_id"}
@@ -117,7 +170,10 @@ def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
         elements.append({"tag": "markdown", "content": str(card["sub_title_text"])})
     checkbox = card.get("checkbox") or {}
     submit = card.get("submit_button") or {}
-    if checkbox and not checkbox.get("disable") and submit:
+    options = checkbox.get("option_list") or []
+    if checkbox and not checkbox.get("disable") and submit and _one_tap(checkbox, options):
+        elements.append(_choice_buttons(card, checkbox, submit, options))
+    elif checkbox and not checkbox.get("disable") and submit:
         elements.append(
             {
                 "tag": "form",

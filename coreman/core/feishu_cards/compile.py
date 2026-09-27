@@ -47,6 +47,8 @@ from coreman.core.richtext.schema import (
     ItemBlock,
     KpiBlock,
     MarkdownChild,
+    PeopleBlock,
+    TableBlock,
     kind_of,
 )
 
@@ -56,6 +58,8 @@ MAX_ELEMENTS = 190
 # 单个 markdown 组件的上限；再长就按段落拆成多个组件。
 MAX_MARKDOWN_BYTES = 12_000
 SUMMARY_CHARS = 60
+# 一条回复最多解析这么多个人名，免得一张大表拖出一次超长的查询。
+MAX_PEOPLE = 200
 PENDING_LABELS = {
     "chart": "📊 正在生成图表…",
     "table": "📋 正在生成表格…",
@@ -97,6 +101,43 @@ def image_urls(text: str) -> list[str]:
                     elif isinstance(child, MarkdownChild):
                         urls.extend(markdown_image_urls(child.text))
     return [u for u in dict.fromkeys(urls) if u.startswith(("http://", "https://"))]
+
+
+def scan(text: str) -> tuple[list[str], list[str]]:
+    """编译前要先办的两件事一次扫出来：要上传的图片、要查库的人名（网关放到线程里调）。"""
+    return image_urls(text), people_names(text)
+
+
+def people_names(text: str) -> list[str]:
+    """回复里要换成飞书 user_id 的人：people 块（含并排栏里的）与表格 person 列的单元格。
+
+    网关按这份名单查库，查到的交给编译器显示成头像和名字，查不到的按文字显示。
+    """
+    names: list[str] = []
+    for seg in split(text, final=True):
+        if seg.kind != "block":
+            continue
+        model = seg.model
+        if isinstance(model, PeopleBlock):
+            names.extend(model.users)
+        elif isinstance(model, ColumnsBlock):
+            names.extend(
+                user
+                for col in model.columns
+                for child in col
+                if isinstance(child, PeopleBlock)
+                for user in child.users
+            )
+        elif isinstance(model, TableBlock):
+            keys = [c.key for c in model.columns if c.type == "person"]
+            for row in model.rows:
+                for key in keys:
+                    cell = row.get(key)
+                    for value in cell if isinstance(cell, list) else [cell]:
+                        if isinstance(value, str):
+                            names.append(value)
+    # 保留原样：渲染时按模型写的原文查映射，归一化（大小写、空白）由查库那一侧做。
+    return [n for n in dict.fromkeys(names) if n.strip()][:MAX_PEOPLE]
 
 
 def summary_of(text: str) -> str:
@@ -505,13 +546,18 @@ def compile_reply(
     people: Mapping[str, str] | None = None,
     final: bool = True,
     summary: str | None = None,
+    requester: str | None = None,
 ) -> Compiled:
     """一条回复 → 若干张卡。`prefix` 是放在主卡最前面的组件（思考面板）。
 
+    `requester` 只在提问人自己的对话回复里给（这一轮提问人的飞书 user_id）：给了才有可点的
+    回复按钮，而且只有他能点（见 `reply_buttons`）。
+
     编译器自身出错也不抛：返回简化卡并在 problems 里注明，调用方照常发送。
     """
+    ctx = RenderContext(images=images or {}, people=people or {}, requester=requester or None)
     try:
-        return _compile(text, prefix, images or {}, people or {}, final, summary)
+        return _compile(text, prefix, ctx, final, summary)
     except Exception as exc:  # noqa: BLE001 编译器的 bug 不能让回复发不出去
         log.warning("feishu_card_compile_failed", exc_info=True)
         cards = simple_cards(text, prefix=prefix, summary=summary)
@@ -524,12 +570,10 @@ def compile_reply(
 def _compile(
     text: str,
     prefix: Sequence[dict[str, Any]],
-    images: Mapping[str, str],
-    people: Mapping[str, str],
+    ctx: RenderContext,
     final: bool,
     summary: str | None,
 ) -> Compiled:
-    ctx = RenderContext(images=images, people=people)
     builder = _Builder(ctx)
     for seg in split(text, final=final):
         builder.segment(seg, final=final)

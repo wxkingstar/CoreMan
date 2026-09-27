@@ -113,9 +113,12 @@ def _fallback(kind: str, model: Any, raw: str) -> list[dict[str, Any]]:
     return [{"tag": "markdown", "element_id": "f", "content": content}]
 
 
-def stream_units(text: str, *, allow_reply: bool = False) -> list[StreamUnit]:
-    """流式正文 → 单元列表。正文段原样交给打字机（不做规范化，保证前缀稳定）。"""
-    ctx = RenderContext(allow_reply=allow_reply)
+def stream_units(text: str) -> list[StreamUnit]:
+    """流式正文 → 单元列表。正文段原样交给打字机（不做规范化，保证前缀稳定）。
+
+    流式期间不给提问人：回复按钮先显示成灰字，收尾整卡替换时才变成可点的按钮。
+    """
+    ctx = RenderContext()
     units: list[StreamUnit] = []
     half: list[dict[str, Any]] | None = None
 

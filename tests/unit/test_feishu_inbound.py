@@ -130,3 +130,78 @@ def test_sender_preserves_union_id_without_inventing_user_id():
     assert message is not None
     assert message.sender.model_dump().get("union_id") == "on_stable"
     assert message.sender.platform_user_id == ""
+
+
+def _click_event(value, *, user_id="employee", event_id="ev_click"):
+    return {
+        "header": {
+            "app_id": "cli_a",
+            "event_type": "card.action.trigger",
+            "event_id": event_id,
+            "tenant_key": "tenant",
+        },
+        "event": {
+            "operator": {"user_id": user_id, "open_id": "ou_employee", "union_id": "on_employee"},
+            "context": {"open_chat_id": "oc_group", "open_message_id": "om_card"},
+            "action": {"tag": "button", "value": value},
+        },
+    }
+
+
+def _rendered_value(requester="employee"):
+    from coreman.core.feishu_cards.compile import compile_reply
+
+    text = '```card:actions\n{"buttons": [{"text": "继续分析退款原因", "reply": true}]}\n```'
+    card = compile_reply(text, requester=requester).cards[0]
+    [row] = card["body"]["elements"]
+    return row["columns"][0]["elements"][0]["behaviors"][0]["value"]
+
+
+def test_reply_button_click_becomes_the_askers_next_message():
+    value = _rendered_value()
+    message = normalize_event(_click_event(value), **KW)
+    assert message is not None
+    # 会话类型先按群记，网关应答前按真实私聊记录改判；群里视同 @ 了机器人。
+    assert message.kind == "message" and message.chat_type == "group"
+    assert message.mentions_bot
+    # 发出去的就是按钮上的字。
+    assert [p.model_dump() for p in message.parts] == [{"type": "text", "text": "继续分析退款原因"}]
+    assert message.chat_id == "oc_group"
+    assert message.sender.platform_user_id == "employee"
+    # 与打字的消息一样带上 union_id，身份按同一套规则核验。
+    assert message.sender.union_id == "on_employee"
+    # 回答引用被点的那张卡片；置灰要用的信息跟着入站走，等这一轮真正开始再用。
+    assert message.reply_context["message_id"] == "om_card"
+    assert message.reply_context["reply_button"] == {
+        "message_id": "om_card",
+        "row": value["row"],
+        "buttons": value["buttons"],
+        "label": "继续分析退款原因",
+        "requester": "employee",
+    }
+    # 同一行只算一次：平台重推、连点都落到同一个去重键上。
+    again = normalize_event(_click_event(value, event_id="ev_again"), **KW)
+    assert again is not None
+    assert again.message_id == message.message_id == f"action:om_card:{value['row']}"
+    # 找不到按钮行：退回按事件去重。
+    message = normalize_event(_click_event({**value, "row": None}), **KW)
+    assert message is not None and message.message_id == "action:ev_click"
+
+
+def test_value_cannot_choose_the_chat_type():
+    """value 里写的会话类型一律不认：飞书回调不带它，只能由服务端判定。"""
+    message = normalize_event(_click_event({**_rendered_value(), "chat": "single"}), **KW)
+    assert message is not None and message.chat_type == "group"
+    assert message.reply_context["chat_type"] == "group"
+
+
+def test_malformed_or_anonymous_reply_clicks_are_dropped():
+    value = _rendered_value()
+    assert normalize_event(_click_event(value, user_id=""), **KW) is None
+    assert normalize_event(_click_event({**value, "text": "x" * 41}), **KW) is None
+    assert normalize_event(_click_event({**value, "text": ""}), **KW) is None
+    assert normalize_event(_click_event({**value, "requester": None}), **KW) is None
+    raw = _click_event(value)
+    raw["event"]["context"] = {"open_chat_id": "oc_group"}
+    assert normalize_event(raw, **KW) is None
+    assert normalize_event(_click_event(value), **{**KW, "app_id": "other"}) is None

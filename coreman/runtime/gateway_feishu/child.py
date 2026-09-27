@@ -25,9 +25,9 @@ from coreman.core.db.models import Bot
 from coreman.core.db.session import make_session_factory
 from coreman.core.logging import configure_logging, get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
-from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.gateway_feishu.channel import DurableChannel
 from coreman.runtime.gateway_feishu.inbound import normalize_event
+from coreman.runtime.gateway_feishu.reply_buttons import Outcome, admit
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
 
 
@@ -133,7 +133,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
         )
         await transport.fence()
 
-        async def accept(raw: dict[str, Any]) -> None:
+        async def accept(raw: dict[str, Any]) -> Outcome | None:
             await transport.fence()
             assert channel is not None
             identity = channel.bot_identity
@@ -151,11 +151,13 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
                 allow_bot=True,
             )
             if message is None:
-                return
+                return None
             async with factory() as session:
                 await session.execute(text("SET LOCAL statement_timeout = 1500"))
-                await enqueue_inbound(session, info, message, lease_generation=generation)
+                # 回复按钮：提问人以外的人点击直接拒绝；会话类型按真实私聊记录改判。
+                outcome = await admit(session, info, message, lease_generation=generation)
                 await session.commit()
+            return outcome
 
         channel = DurableChannel(
             accept=accept,

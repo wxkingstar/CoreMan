@@ -63,3 +63,23 @@ async def test_actual_sdk_dispatcher_preserves_header_and_waits_for_handler():
     await asyncio.to_thread(channel.dispatcher._do_without_validation, payload)
     assert accepted[0]["header"]["app_id"] == "cli_a"
     assert accepted[0]["event"]["message"]["message_id"] == "om1"
+
+
+async def test_card_toasts_report_what_happened_to_the_click():
+    results = iter(["queued", "duplicate", "not_requester", None, "unexpected"])
+
+    async def accept(raw):
+        return next(results)
+
+    channel = DurableChannel(accept=accept, app_id="cli_test", app_secret="synthetic")
+    toasts = [
+        (await asyncio.to_thread(channel._on_p2_card_action_trigger, {})).toast for _ in range(5)
+    ]
+    # 已收下不等于已发送：worker 还可能拒绝（停用、白名单），所以说「已收到」。
+    assert [(t.type, t.content) for t in toasts] == [
+        ("success", "已收到"),
+        ("info", "已选过"),
+        ("warning", "只有提问人可以选择"),
+        ("info", "✓"),
+        ("info", "✓"),
+    ]

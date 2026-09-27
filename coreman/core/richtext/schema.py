@@ -401,12 +401,18 @@ class NoteBlock(_Model):
 class Button(_Model):
     text: str = Field(min_length=1, max_length=40)
     url: str | None = None
-    reply: str | None = Field(default=None, max_length=500)
+    # 回复按钮的标记：true 或任意字符串都算。点了发出去的永远是看得见的 text，
+    # 字符串的内容不会发出去（不能有按钮上看不到的话）。
+    reply: bool | str | None = None
     style: Literal["primary", "danger", "default"] = "default"
+
+    @property
+    def is_reply(self) -> bool:
+        return self.reply is True or isinstance(self.reply, str)
 
     @model_validator(mode="after")
     def _one_action(self) -> Button:
-        if bool(self.url) == bool(self.reply):
+        if bool(self.url) == self.is_reply:
             raise ValueError("按钮要么给 url，要么给 reply")
         return self
 
