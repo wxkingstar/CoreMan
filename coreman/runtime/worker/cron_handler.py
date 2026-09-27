@@ -58,6 +58,7 @@ from coreman.core.relay.sse import (
     TextDelta,
     ToolUseStart,
     UsageEvent,
+    paragraph_gap,
 )
 from coreman.core.timeutils import utcnow
 from coreman.core.wecom_personal import policy as wecom_policy
@@ -465,6 +466,7 @@ class CronRunHandler:
         usage = None
         finished = False
         tools: list[str] = []
+        after_tool = False
         try:
             async for event in gen:
                 if isinstance(event, AskUserQuestionEvent):
@@ -482,16 +484,22 @@ class CronRunHandler:
                     continue
                 events += 1
                 if isinstance(event, TextDelta):
+                    text = event.text
+                    if after_tool:
+                        # 与对话链路一致：工具前后的两条 assistant 消息之间空一行。
+                        text, after_tool = paragraph_gap("".join(parts), text) + text, False
                     room = RESULT_MAX_CHARS - size
-                    if len(event.text) > room:
+                    if len(text) > room:
                         truncated = True
                     if room > 0:
-                        parts.append(event.text[:room])
-                    size += min(len(event.text), max(room, 0))
+                        parts.append(text[:room])
+                    size += min(len(text), max(room, 0))
                 elif isinstance(event, UsageEvent):
                     usage = event
-                elif isinstance(event, ToolUseStart) and event.name not in tools:
-                    tools.append(event.name)
+                elif isinstance(event, ToolUseStart):
+                    after_tool = True
+                    if event.name not in tools:
+                        tools.append(event.name)
         except RelayError as exc:
             if not errors and not isinstance(exc, IncompleteResultError):
                 raise

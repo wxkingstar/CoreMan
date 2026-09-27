@@ -163,3 +163,13 @@ def test_ask_user_bad_json_flushes_nothing() -> None:
         )
     )
     assert p.flush() == []
+
+
+def test_paragraph_gap_only_tops_up_missing_newlines() -> None:
+    from coreman.core.relay.sse import paragraph_gap
+
+    assert paragraph_gap("", "正文") == "" and paragraph_gap(" \n", "正文") == ""
+    assert paragraph_gap("拉取中。", "已拉完。") == "\n\n"
+    assert paragraph_gap("拉取中。\n", "已拉完。") == "\n"
+    assert paragraph_gap("拉取中。", "\n已拉完。") == "\n"
+    assert paragraph_gap("拉取中。\n\n", "已拉完。") == ""

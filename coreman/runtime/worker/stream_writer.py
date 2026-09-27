@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from coreman.core.bus import streams
+from coreman.core.relay.sse import paragraph_gap
 from coreman.core.wecom.thinking import ThinkingCollector
 from coreman.runtime.worker.context import TaskContext
 
@@ -35,6 +36,16 @@ class StreamWriter:
         self.delivery: streams.Completion | None = None
 
     def add_text(self, delta: str) -> None:
+        end = len(self.pending_text)
+        if self.boundaries and self.boundaries[-1] == end:
+            # 工具之后的正文是新一条 assistant 消息，另起一段；切分点挪到空行之后，
+            # 下一段从正文开始，分段推送时不带前导空行。
+            gap = paragraph_gap(self.pending_text, delta)
+            if gap:
+                self.pending_text += gap
+                self.boundaries = [
+                    len(self.pending_text) if b == end else b for b in self.boundaries
+                ]
         self.pending_text += delta
 
     def add_thinking(self, text: str) -> None:

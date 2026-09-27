@@ -126,7 +126,7 @@ async def test_wecom_message_round_trip_and_stop(
         content = finish["body"]["stream"]["content"]
         assert content.startswith("<think>\n")
         assert "</think>" in content
-        assert "你好，世界。" in content
+        assert "你好，世界\n\n。" in content
         assert content.endswith(msg("done_suffix"))
         assert "🔧 **Bash**" in content
         assert "📎 查看实时聊天记录" in content

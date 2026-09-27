@@ -41,7 +41,7 @@ async def test_cron_fresh_identity_atomic_log_and_delivery(
     ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
     await CronRunHandler().run(ctx)
     run = await db_session.scalar(select(CronRun))
-    assert run is not None and run.status == "success" and run.reply == "你好，世界。"
+    assert run is not None and run.status == "success" and run.reply == "你好，世界\n\n。"
     assert run.prompt == "请生成日报" and run.input_tokens == 100
     assert len(fake.requests) == 1
     env = fake.requests[0]["env_vars"]
