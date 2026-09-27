@@ -26,6 +26,7 @@ dependencies = [
   "boto3>=1.43.93,<2",
   "lark-oapi>=1.7.3,<2",
   "prometheus-client>=0.21,<1",
+  "markdown-it-py>=3,<5",
 ]
 
 [dependency-groups]

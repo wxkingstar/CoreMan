@@ -2,6 +2,9 @@
 
 另有 `wecom-bots audit`：只读检查每个企业微信 AI 员工机器人是否带着创建者本人的企业微信数据
 权限（扫码创建时点了「确认授权」就会带上）。
+
+`feishu-cards preview`：把样例或指定文件编译成飞书富卡片，用某个 AI 员工发给指定成员做
+真机视觉回归；默认只校验不发送。
 """
 
 from __future__ import annotations
@@ -162,8 +165,41 @@ async def _wecom_bots_audit() -> int:
     return 0
 
 
+def _preview_texts(args: argparse.Namespace) -> dict[str, str] | None:
+    """预览内容：--file 文件、--sample 某个样例，都不给就是全部样例。"""
+    from coreman.core.feishu_cards.samples import SAMPLES
+
+    if args.file:
+        with open(args.file, encoding="utf-8") as fh:
+            return {args.file: fh.read()}
+    if args.sample:
+        if args.sample not in SAMPLES:
+            print(f"没有样例 {args.sample}，可选：{'、'.join(SAMPLES)}", file=sys.stderr)
+            return None
+        return {args.sample: SAMPLES[args.sample]}
+    return dict(SAMPLES)
+
+
+async def _feishu_preview(args: argparse.Namespace, texts: dict[str, str]) -> int:
+    from coreman.core.feishu_cards import preview
+
+    settings = get_settings()
+    engine = make_engine(settings.database_url)
+    try:
+        target = await preview.resolve(make_session_factory(engine), bot_key=args.bot, to=args.to)
+        ok = await preview.run(
+            target, settings.build_cipher(), texts, apply=args.apply, stream=args.stream
+        )
+    except preview.PreviewError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        await engine.dispose()
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI 入口：contact-sync、skills sync、wecom-bots audit。"""
+    """CLI 入口：contact-sync、skills sync、wecom-bots audit、feishu-cards preview。"""
     parser = argparse.ArgumentParser(prog="coreman.cli", description="CoreMan 运维命令")
     sub = parser.add_subparsers(dest="command", required=True)
     cs = sub.add_parser("contact-sync", help="同步企业微信通讯录")
@@ -176,7 +212,19 @@ def main(argv: list[str] | None = None) -> int:
     wecom = sub.add_parser("wecom-bots", help="企业微信 AI 员工机器人检查")
     wecom_ops = wecom.add_subparsers(dest="operation", required=True)
     wecom_ops.add_parser("audit", help="只读检查机器人是否带着创建者的企业微信数据权限")
+    cards = sub.add_parser("feishu-cards", help="飞书富卡片")
+    cards_ops = cards.add_subparsers(dest="operation", required=True)
+    pv = cards_ops.add_parser("preview", help="编译样例或文件并发给指定成员，做真机视觉回归")
+    pv.add_argument("--to", required=True, help="接收人的登录名或姓名（需有飞书身份）")
+    pv.add_argument("--bot", default=None, help="AI 员工标识（只有一个飞书 AI 员工时可省略）")
+    pv.add_argument("--sample", default=None, help="只发某个样例；不给则发全部样例")
+    pv.add_argument("--file", default=None, help="改用这个 Markdown 文件的内容")
+    pv.add_argument("--stream", action="store_true", help="第一张卡按线上流程流式发送")
+    pv.add_argument("--apply", action="store_true", help="真正发送；不加只做飞书校验")
     args = parser.parse_args(argv)
+    if args.command == "feishu-cards" and args.operation == "preview":
+        texts = _preview_texts(args)
+        return 2 if texts is None else asyncio.run(_feishu_preview(args, texts))
     if args.command == "wecom-bots" and args.operation == "audit":
         return asyncio.run(_wecom_bots_audit())
     if args.command == "skills" and args.operation == "sync":

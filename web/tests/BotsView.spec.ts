@@ -9,7 +9,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 const { bot } = vi.hoisted(() => {
   const perms = { role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true, can_switch_relay: true, can_toggle: true, can_delete: true, can_manage_members: true, can_reassign_team: false }
   return {
-    bot: { id: 'b1', bot_key: 'sales_bot', platform: 'wecom', name: '销售助手', description: '', avatar_url: null, enabled: true, team_id: 't1', team_name: '销售', created_by: 'me', created_by_name: 'U', relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/data/skills/sales_bot', verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600, welcome_message: null, notify_webhook_url: null, member_count: 0, allowed_user_count: 0, permissions: perms, version: 1, created_at: '', updated_at: '' },
+    bot: { id: 'b1', bot_key: 'sales_bot', platform: 'wecom', name: '销售助手', description: '', avatar_url: null, enabled: true, team_id: 't1', team_name: '销售', created_by: 'me', created_by_name: 'U', relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/data/skills/sales_bot', verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600, welcome_message: null, rich_cards: true, notify_webhook_url: null, member_count: 0, allowed_user_count: 0, permissions: perms, version: 1, created_at: '', updated_at: '' },
   }
 })
 

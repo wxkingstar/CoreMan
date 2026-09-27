@@ -277,7 +277,12 @@ async def test_bad_card_does_not_block_notices_and_final_falls_back(db_session, 
     async with factory() as session:
         final = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key != "unrelated"))
         assert final.status == "sent"
-        assert final.payload == {"markdown": "visible", "_typing_task_id": row.task_id}
+        # 兜底入队的正文按 post 发，不再尝试卡片。
+        assert final.payload == {
+            "markdown": "visible",
+            "_typing_task_id": row.task_id,
+            "_plain": True,
+        }
         assert (await session.get(TaskStream, row.task_id)).finish_pushed_at
 
 
@@ -588,3 +593,292 @@ async def test_fallback_post_sends_image_as_native_node(db_session, db_engine):
         [{"tag": "img", "image_key": "img_v3_up"}],
         [{"tag": "md", "text": f"[查看原图]({url})"}],
     ]
+
+
+RICH_ANSWER = (
+    "GMV 比上周 <font color='green'>↑12.6%</font>。\n\n"
+    '```card:chart\n{"chart": "line", "title": "近 3 天", "x": ["a", "b", "c"], '
+    '"series": [{"name": "GMV", "values": [1, 2, 3]}]}\n```'
+)
+
+
+def card_puts(api):
+    return [
+        json.loads(body["card"]["data"])
+        for method, path, body in api.calls
+        if method == "PUT" and path == "/open-apis/cardkit/v1/cards/card1"
+    ]
+
+
+def tags_of(node):
+    if isinstance(node, dict):
+        return ([node["tag"]] if "tag" in node else []) + [
+            t for v in node.values() for t in tags_of(v)
+        ]
+    if isinstance(node, list):
+        return [t for v in node for t in tags_of(v)]
+    return []
+
+
+async def finish(factory, row, answer):
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text=answer)
+        await session.commit()
+
+
+async def test_final_answer_is_compiled_into_rich_card_with_summary(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await finish(factory, row, RICH_ANSWER)
+    await transport.round()
+    [final] = card_puts(api)
+    assert "chart" in tags_of(final)
+    assert final["body"]["elements"][0]["tag"] == "collapsible_panel"
+    assert final["config"]["summary"] == {"content": "GMV 比上周 ↑12.6%。"}
+    settings = [
+        json.loads(body["settings"])
+        for method, path, body in api.calls
+        if path == "/open-apis/cardkit/v1/cards/card1/settings"
+    ]
+    assert settings[-1]["config"] == {
+        "streaming_mode": False,
+        "summary": {"content": "GMV 比上周 ↑12.6%。"},
+    }
+
+
+async def test_rich_cards_switch_off_sends_plain_markdown_card(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    transport.rich_cards = False
+    await transport.round()
+    await finish(factory, row, RICH_ANSWER)
+    await transport.round()
+    [final] = card_puts(api)
+    assert "chart" not in tags_of(final)
+    body = json.dumps(final, ensure_ascii=False)
+    assert "```card" not in body and "近 3 天" in body
+
+
+async def test_rejected_rich_card_falls_back_to_plain_card_in_place(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class RejectRich(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            body = kwargs.get("json") or {}
+            if method == "PUT" and path.endswith("/cards/card1") and "chart" in json.dumps(body):
+                self.calls.append((method, path, body))
+                raise FeishuError(200220)
+            return await super().call(method, path, **kwargs)
+
+    api = RejectRich()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await finish(factory, row, RICH_ANSWER)
+    await transport.round()
+    rich, plain = card_puts(api)
+    assert "chart" in tags_of(rich) and "chart" not in tags_of(plain)
+    async with factory() as session:
+        assert (await session.get(TaskStream, row.task_id)).finish_pushed_at is not None
+        assert not (await session.get(FeishuDelivery, row.task_id)).fallback
+        assert await session.scalar(select(OutboxItem)) is None
+
+
+async def test_long_answer_spills_into_continuation_cards(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    answer = "\n\n".join(f"## 第 {i} 节\n\n" + "很长的说明。" * 800 for i in range(12))
+    await finish(factory, row, answer)
+    await transport.round()
+    async with factory() as session:
+        more = list(await session.scalars(select(OutboxItem).order_by(OutboxItem.id)))
+    assert more and all(item.payload["card"]["schema"] == "2.0" for item in more)
+    assert [item.dedupe_key for item in more] == [
+        f"{row.task_id}:more:{i}" for i in range(1, len(more) + 1)
+    ]
+    sent = [
+        json.loads(body["content"])
+        for _, path, body in api.calls
+        if path == "/open-apis/im/v1/messages"
+        and body.get("msg_type") == "interactive"
+        and "schema" in json.loads(body["content"])
+    ]
+    assert len(sent) == len(more)
+    assert "第 11 节" in json.dumps(sent[-1], ensure_ascii=False)
+
+
+async def test_outbox_markdown_is_sent_as_card_and_falls_back_to_post(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="cron:1",
+            target={"chat_id": "oc1"},
+            payload={"markdown": RICH_ANSWER},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    sends = [b for _, p, b in api.calls if p == "/open-apis/im/v1/messages"]
+    cards = [json.loads(b["content"]) for b in sends if b["msg_type"] == "interactive"]
+    assert any("chart" in tags_of(c) for c in cards)
+
+    class RejectCards(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            body = kwargs.get("json") or {}
+            if body.get("msg_type") == "interactive" and "schema" in body.get("content", ""):
+                self.calls.append((method, path, body))
+                raise FeishuError(200220)
+            return await super().call(method, path, **kwargs)
+
+    api = RejectCards()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="cron:2",
+            target={"chat_id": "oc1"},
+            payload={"markdown": RICH_ANSWER},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    posts = [
+        b for _, p, b in api.calls if p == "/open-apis/im/v1/messages" and b["msg_type"] == "post"
+    ]
+    assert posts and "```card" not in posts[0]["content"]
+    async with factory() as session:
+        item = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key == "cron:2"))
+        assert item.status == "sent"
+
+
+async def test_a_reply_that_crashes_rendering_does_not_block_other_replies(
+    db_session, db_engine, monkeypatch
+):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        task = await tasks.enqueue(session, NewTask(bot_id=bot.id, kind="chat", payload={}))
+        other = await streams.create(
+            session,
+            task_id=task.id,
+            bot_id=bot.id,
+            platform="feishu",
+            stream_id="s2",
+            reply_context={"chat_id": "oc2", "message_id": "om_in2"},
+            lease_generation=generation,
+            running_since=datetime.now(UTC),
+        )
+        await streams.update(session, task.id, pending_text="second", thinking_md="t")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    real = transport.final_cards
+
+    async def crash_first(thinking, answer, **kwargs):
+        if answer == "poison":
+            raise RuntimeError("renderer bug")
+        return await real(thinking, answer, **kwargs)
+
+    monkeypatch.setattr(transport, "final_cards", crash_first)
+    await transport.round()
+    await finish(factory, row, "poison")
+    await finish(factory, other, "healthy answer")
+    await transport.round()
+    async with factory() as session:
+        assert (await session.get(TaskStream, other.task_id)).finish_pushed_at is not None
+        broken = await session.get(FeishuDelivery, row.task_id)
+        assert broken.failures == 1 and broken.last_error == "RuntimeError"
+
+
+async def test_rejected_continuation_card_is_resent_as_its_own_text_only(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class RejectContinuation(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            body = kwargs.get("json") or {}
+            content = body.get("content", "")
+            if body.get("msg_type") == "interactive" and "第 11 节" in content:
+                self.calls.append((method, path, body))
+                raise FeishuError(230099)
+            return await super().call(method, path, **kwargs)
+
+    api = RejectContinuation()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    answer = "\n\n".join(f"## 第 {i} 节\n\n" + "很长的说明。" * 800 for i in range(12))
+    await finish(factory, row, answer)
+    await transport.round()
+    posts = [
+        b["content"]
+        for _, p, b in api.calls
+        if p == "/open-apis/im/v1/messages" and b.get("msg_type") == "post"
+    ]
+    assert posts and all("第 0 节" not in p for p in posts)
+    assert any("第 11 节" in p for p in posts)
+    async with factory() as session:
+        assert {i.status for i in await session.scalars(select(OutboxItem))} == {"sent"}
+
+
+async def test_outbox_rejection_mid_series_resends_only_that_card(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class RejectSecond(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            body = kwargs.get("json") or {}
+            if body.get("msg_type") == "interactive" and "第 6 节" in body.get("content", ""):
+                self.calls.append((method, path, body))
+                raise FeishuError(200860)
+            return await super().call(method, path, **kwargs)
+
+    api = RejectSecond()
+    text = "\n\n".join(f"## 第 {i} 节\n\n" + "定时任务结果。" * 700 for i in range(10))
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="cron:long",
+            target={"chat_id": "oc1"},
+            payload={"markdown": text},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    sent = [b for _, p, b in api.calls if p == "/open-apis/im/v1/messages"]
+    posts = [b["content"] for b in sent if b["msg_type"] == "post"]
+    cards = [b["content"] for b in sent if b["msg_type"] == "interactive"]
+    assert posts and all("第 0 节" not in p for p in posts)
+    assert any("第 6 节" in p for p in posts)
+    assert sum("第 0 节" in c for c in cards) == 1

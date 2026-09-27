@@ -695,6 +695,8 @@ export default {
     envAddRow: '新增变量',
     envInvalid: '环境变量格式不正确',
     welcome: '欢迎语',
+    richCards: '富卡片回复',
+    richCardsHint: '回复里的图表、表格、指标块等用飞书卡片展示；关闭后只显示为普通文字卡片。',
     webhook: '通知 Webhook',
 
     enabled: '创建后启用',

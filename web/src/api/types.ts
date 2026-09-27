@@ -87,6 +87,7 @@ export interface BotOut {
   verbosity_level: number; effort_level: EffortLevel | null
   sse_timeout_seconds: number
   welcome_message: string | null
+  rich_cards: boolean
   member_count: number; allowed_user_count: number
   permissions: BotPermissions; version: number; created_at: string; updated_at: string
   // 敏感字段：只有 permissions.can_view_sensitive / can_view_env_full 时后端才下发。
@@ -105,6 +106,8 @@ export interface BotIn {
   sse_timeout_seconds: number
   credentials: Record<string, string>; env_vars: Record<string, string>
   welcome_message: string | null
+  /** 飞书回复用富卡片（图表、表格、指标块等）。 */
+  rich_cards: boolean
   enabled: boolean
   /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
   feishu_registration_id?: string | null

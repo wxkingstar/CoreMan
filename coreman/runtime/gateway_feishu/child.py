@@ -181,6 +181,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
                 if current is None or current.credentials_enc != initial_credentials:
                     break
                 info.welcome_message = current.welcome_message
+                transport.rich_cards = current.rich_cards
                 more = await transport.round()  # 租约围栏在这一轮开头查一次
             except LeaseLost:
                 raise

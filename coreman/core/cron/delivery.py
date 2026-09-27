@@ -34,6 +34,13 @@ def chunks(text: str, limit: int) -> list[str]:
     return result
 
 
+def chat_parts(platform: str, content: str, notice: str) -> list[str]:
+    """发到聊天里的分片。飞书整段交给网关：网关按卡片预算分卡，不会把一个 card: 块切成两半。"""
+    if platform == "feishu" and len(content.encode()) <= CHAT_PART_BYTES * CHAT_MAX_PARTS:
+        return [content]
+    return bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
+
+
 def bounded_chunks(text: str, limit: int, max_parts: int, notice: str) -> list[str]:
     """按 `limit` 字节分片，最多 `max_parts` 片；放不下时截断正文并在末尾附 `notice`。"""
     data = text.encode("utf-8")
@@ -86,7 +93,7 @@ async def enqueue_result(
             continue
         assert ident is not None
         if reached is not None:
-            parts = bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
+            parts = chat_parts(bot.platform, content, notice)
             for index, part in enumerate(parts):
                 item = await outbox.add(
                     session,
@@ -124,9 +131,7 @@ async def enqueue_result(
             if item:
                 ids.append(item.id)
     for chat_id in dict.fromkeys(config.get("target_chats", [])):
-        for index, part in enumerate(
-            bounded_chunks(content, CHAT_PART_BYTES, CHAT_MAX_PARTS, notice)
-        ):
+        for index, part in enumerate(chat_parts(bot.platform, content, notice)):
             item = await outbox.add(
                 session,
                 bot_id=bot.id,

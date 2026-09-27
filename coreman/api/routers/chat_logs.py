@@ -22,6 +22,7 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
 from coreman.core.db.models import Bot, BotMember, ChatLog, CronRun, User
+from coreman.core.richtext.degrade import readable
 from coreman.core.timeutils import aware_utc
 
 router = APIRouter(
@@ -112,6 +113,11 @@ def _preview(value: str | None) -> str | None:
     return None if value is None else value[:PREVIEW_CHARS]
 
 
+def _readable(value: str | None) -> str | None:
+    """飞书富卡片的 card: 块在管理台显示成普通 Markdown。"""
+    return None if value is None else readable(value)
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -138,7 +144,7 @@ def chat_log_out(
         "task_id": row.task_id,
         "message_type": row.message_type,
         "message_preview": _preview(row.message_content),
-        "response_preview": _preview(row.response_content),
+        "response_preview": _preview(_readable(row.response_content)),
         "tools_used": list(row.tools_used or []),
         "status": row.status,
         "error_code": row.error_code,
@@ -155,7 +161,7 @@ def chat_log_out(
             "message_content": row.message_content,
             "quoted_content": row.quoted_content,
             "file_info": row.file_info,
-            "response_content": row.response_content,
+            "response_content": _readable(row.response_content),
             "error_message": row.error_message,
             "relay_server_id": str(row.relay_server_id) if row.relay_server_id else None,
             # Numeric 列读出来是 Decimal，直接进 JSON 会 500。
