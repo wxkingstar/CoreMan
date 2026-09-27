@@ -624,7 +624,10 @@ async def test_resume_runs_through_the_worker_in_the_current_group_session(db_se
     # The final answer replies to the original question, not to the colleague's message.
     stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == resumed.id))
     origin_event = await db_session.get(InboundEvent, task.inbound_event_id)
-    assert stream.reply_context == origin_event.reply_context
+    # Reply buttons in that answer belong to the original asker, not to the colleague.
+    context = dict(stream.reply_context)
+    assert context.pop("requester_user_id") == origin_event.sender_platform_user_id
+    assert context == origin_event.reply_context
 
 
 async def test_cron_run_hands_off_then_follow_up_run_delivers_result(

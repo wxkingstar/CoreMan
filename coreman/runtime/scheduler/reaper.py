@@ -26,6 +26,7 @@ from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
 from coreman.core.bus.tasks import ACTIVE
 from coreman.core.chat import chat_logs, interactions
+from coreman.core.chat.card_replies import is_click
 from coreman.core.chat.chat_logs import ChatLogEntry, ChatLogWriter
 from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
@@ -313,6 +314,7 @@ def _lost_entry(
         error_code=LOST_ERROR_CODE,
         error_message=LOST_ERROR_MESSAGE,
         latency_ms=int((now - request_at).total_seconds() * 1000),
+        reach=not is_click(message),
     )
 
 

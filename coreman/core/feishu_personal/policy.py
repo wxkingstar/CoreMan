@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
 from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.reachability import private_chat
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
@@ -30,6 +31,7 @@ from coreman.core.db.models import (
     UserIdentity,
     UserReached,
 )
+from coreman.core.feishu_cards.reply_buttons import parse_reply
 
 AAD = "feishu_personal.task_capability.v1"
 PREFIX = "COREMAN_FEISHU_PERSONAL_"
@@ -128,6 +130,48 @@ async def task_scope(session: AsyncSession, task_id: int, actor: str) -> Scope:
     return await verified_origin_scope(session, task, actor)
 
 
+def _verified_message(header: dict[str, Any], source: dict[str, Any], event: InboundEvent) -> None:
+    """私聊里打字发来的消息：原始事件就是 p2p 消息，发送人与落库的列一致。"""
+    message, sender = source.get("message") or {}, source.get("sender") or {}
+    if not isinstance(message, dict) or not isinstance(sender, dict):
+        raise ValueError("verified_private_origin_required")
+    ids = sender.get("sender_id") or {}
+    if not isinstance(ids, dict):
+        raise ValueError("verified_private_origin_required")
+    if (
+        not header.get("tenant_key")
+        or not header.get("app_id")
+        or sender.get("sender_type") != "user"
+        or message.get("chat_type") != "p2p"
+        or message.get("chat_id") != event.chat_id
+        or ids.get("open_id") != event.sender_open_id
+        or ids.get("user_id") != event.sender_platform_user_id
+    ):
+        raise ValueError("verified_private_origin_required")
+
+
+def _verified_click(header: dict[str, Any], source: dict[str, Any], event: InboundEvent) -> None:
+    """回复按钮点出来的消息：原始回调是提问人本人点的回复按钮，会话与点击人与落库的列一致。
+
+    是不是私聊由调用方另按私聊记录核验（回调本身不带会话类型）。
+    """
+    operator, context = source.get("operator") or {}, source.get("context") or {}
+    action = source.get("action") or {}
+    if not isinstance(operator, dict) or not isinstance(context, dict):
+        raise ValueError("verified_private_origin_required")
+    click = parse_reply(action.get("value") if isinstance(action, dict) else None)
+    if (
+        click is None
+        or not header.get("tenant_key")
+        or not header.get("app_id")
+        or context.get("open_chat_id") != event.chat_id
+        or operator.get("open_id") != event.sender_open_id
+        or operator.get("user_id") != event.sender_platform_user_id
+        or click.requester != event.sender_platform_user_id
+    ):
+        raise ValueError("verified_private_origin_required")
+
+
 async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -> Scope:
     """Validate a durable private origin. Callers must separately validate task lifecycle."""
     event = await session.get(InboundEvent, task.inbound_event_id)
@@ -149,27 +193,19 @@ async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -
     header, source = raw.get("header") or {}, raw.get("event") or {}
     if not isinstance(header, dict) or not isinstance(source, dict):
         raise ValueError("verified_private_origin_required")
-    message, sender = source.get("message") or {}, source.get("sender") or {}
-    if not isinstance(message, dict) or not isinstance(sender, dict):
-        raise ValueError("verified_private_origin_required")
-    ids = sender.get("sender_id") or {}
-    if not isinstance(ids, dict):
-        raise ValueError("verified_private_origin_required")
-    if (
-        not header.get("tenant_key")
-        or not header.get("app_id")
-        or sender.get("sender_type") != "user"
-        or message.get("chat_type") != "p2p"
-        or message.get("chat_id") != event.chat_id
-        or ids.get("open_id") != event.sender_open_id
-        or ids.get("user_id") != event.sender_platform_user_id
-    ):
-        raise ValueError("verified_private_origin_required")
+    click = header.get("event_type") == "card.action.trigger"
+    if click:
+        _verified_click(header, source, event)
+    else:
+        _verified_message(header, source, event)
     speaker = await resolve_speaker(
         session, platform="feishu", platform_user_id=event.sender_platform_user_id
     )
     if not speaker.known or str(speaker.user_id) != actor or speaker.user_id is None:
         raise ValueError("personal_actor_mismatch")
+    # 回调不带会话类型：按钮点击只有落在本人与本机器人的私聊里（真实私聊消息留下的记录）才算。
+    if click and not await private_chat(session, task.bot_id, speaker.user_id, event.chat_id):
+        raise ValueError("verified_private_origin_required")
     bot = await session.get(Bot, task.bot_id, populate_existing=True)
     allowed = list(
         await session.scalars(

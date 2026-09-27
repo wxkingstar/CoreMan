@@ -33,7 +33,7 @@ orange=warning, red=problem. At most one, put it first.
 - table: {"columns": [{"key", "title", \
 "type"?: text|number|money|percent|date|person|tag|markdown, "align"?}], \
 "rows": [{key: value}], "title"?} — only when you need column types; plain Markdown tables \
-are converted automatically.
+are converted automatically. `person` cells hold an email or login name (or a list of them).
 - callout: {"level": info|success|warning|danger, "title"?, "text"} — a highlighted note or \
 warning.
 - item: {"title", "image"?: https URL, "eyebrow"?, "meta"?: [strings], "code"?, \
@@ -41,10 +41,17 @@ warning.
 picture and details.
 - timeline: {"steps": [{"time"?, "text", "status": done|current|warning|error|pending}]}.
 - columns: {"columns": [[child blocks], [child blocks]]} — 2–3 side-by-side columns; a child \
-is {"type": "markdown", "text"} or any of kpi/chart/callout/item/timeline/note with a "type" \
-field.
+is {"type": "markdown", "text"} or any of kpi/chart/callout/item/timeline/people/note with a \
+"type" field.
+- people: {"users": [emails or login names], "title"?} — colleagues shown with avatar and \
+name; nobody is notified. Names that cannot be matched are shown as plain text.
 - note: {"text"} — footnote, data source or caveat.
-- actions: {"buttons": [{"text", "url"}]} — link buttons (http/https only).
+- actions: {"buttons": [{"text": "…", "url": "…"} or {"text": "…", "reply": true}, ...], \
+each with "style"?: primary|danger|default} — up to 6 buttons, text at most 40 characters. \
+`url` opens an http/https link. A `"reply": true` button sends its own text to you as the \
+asker's next message, so write the text as a complete short request (e.g. "Break down by \
+category"); only the person who asked this question can click it. Use them for likely \
+follow-ups, never to confirm an irreversible action.
 
 Rules:
 - Each block's JSON must be complete and valid; write it in one go and do not edit it \

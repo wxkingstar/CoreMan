@@ -22,10 +22,11 @@ from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, Ta
 from coreman.core.feishu_cards.compile import (
     Compiled,
     compile_reply,
-    image_urls,
     plain_text,
+    scan,
     simple_cards,
 )
+from coreman.core.feishu_cards.people import resolve_people
 from coreman.core.feishu_cards.stream import StreamUnit, plan, stream_units
 from coreman.core.feishu_cards.thinking import thinking_panel, thinking_preview
 from coreman.core.logging import get_logger
@@ -41,6 +42,7 @@ from coreman.runtime.gateway_feishu.cards import (
 )
 from coreman.runtime.gateway_feishu.images import RemoteImages
 from coreman.runtime.gateway_feishu.reactions import clean_finished, typing
+from coreman.runtime.gateway_feishu.reply_buttons import mark_used
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
@@ -383,8 +385,14 @@ class FeishuTransport:
         compiled: Compiled | None = None
         summary = ""
         if row.is_complete:
+            # 回复按钮只放在提问人自己的对话回复里：worker 开流时写下了这一轮的提问人。
+            requester = row.reply_context.get("requester_user_id")
             compiled = await self.final_cards(
-                thinking, answer, session_url=row.session_url, heading=heading
+                thinking,
+                answer,
+                session_url=row.session_url,
+                heading=heading,
+                requester=requester if isinstance(requester, str) and requester else None,
             )
             card, summary = compiled.cards[0], compiled.summary
         else:
@@ -574,15 +582,25 @@ class FeishuTransport:
         *,
         session_url: str | None,
         heading: str,
+        requester: str | None = None,
     ) -> Compiled:
         """终稿编译成若干张卡；关掉富卡片或编译自检不过时用简化卡。"""
         prefix = [thinking_panel(thinking, session_url=session_url, heading=heading)]
         # 正文图片照旧内嵌并另起一行保留原图链接；块里的图片（实体卡等）再单独换 key。
         answer = await self.images.localize(answer)
         if self.rich_cards:
-            images = await self.image_keys(image_urls(answer))
-            # 编译是纯 CPU 活，放到线程里，别让超长回复挡住租约心跳和其他回复。
-            compiled = await asyncio.to_thread(compile_reply, answer, prefix=prefix, images=images)
+            # 切块与编译都是纯 CPU 活，放到线程里，别让超长回复挡住租约心跳和其他回复。
+            urls, names = await asyncio.to_thread(scan, answer)
+            images = await self.image_keys(urls)
+            people = await self.people_ids(names)
+            compiled = await asyncio.to_thread(
+                compile_reply,
+                answer,
+                prefix=prefix,
+                images=images,
+                people=people,
+                requester=requester,
+            )
             if not compiled.problems:
                 return compiled
             log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
@@ -612,6 +630,13 @@ class FeishuTransport:
             if key:
                 keys[url] = key
         return keys
+
+    async def people_ids(self, names: list[str]) -> dict[str, str]:
+        """people 块与表格 person 列里的人换成飞书 user_id；查不到的按文字显示。"""
+        if not names:
+            return {}
+        async with self.factory() as session:
+            return await resolve_people(session, names)
 
     async def enqueue_cards(
         self, session: AsyncSession, row: TaskStream, compiled: Compiled | None
@@ -805,6 +830,9 @@ class FeishuTransport:
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
             return
+        if item.kind == "card_update" and "_reply_used" in item.payload:
+            await mark_used(self, item)
+            return
         card = item.payload.get("card")
         if item.kind == "card_update":
             mid = api_id(item.target.get("message_id"))
@@ -834,6 +862,7 @@ class FeishuTransport:
             item.payload = {**item.payload, "_feishu_message_id": mid}
         elif isinstance(item.payload.get("markdown"), str) and not item.payload.get("_plain"):
             # Markdown 消息（定时任务结果等）也优先用卡片；某张被拒只把那一张改发成 post。
+            # 这些不是提问人自己的对话回复，回复按钮只显示成文字。
             await self.send_markdown_cards(chat, item.payload["markdown"], key=f"outbox:{item.id}")
         else:
             text = str(item.payload.get("markdown") or item.payload.get("text") or "…")
@@ -856,8 +885,10 @@ class FeishuTransport:
         body = await self.images.localize(markdown)
         compiled: Compiled | None = None
         if self.rich_cards:
-            images = await self.image_keys(image_urls(body))
-            compiled = await asyncio.to_thread(compile_reply, body, images=images)
+            urls, names = await asyncio.to_thread(scan, body)
+            images = await self.image_keys(urls)
+            people = await self.people_ids(names)
+            compiled = await asyncio.to_thread(compile_reply, body, images=images, people=people)
             if compiled.problems:
                 log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
                 compiled = None

@@ -35,7 +35,7 @@ def _ctx() -> RenderContext:
     return RenderContext(
         images={IMAGE: "img_v3_demo"},
         people={"alice@example.com": "ou_alice", "bob": "ou_bob"},
-        allow_reply=True,
+        requester="u_asker",
     )
 
 
@@ -473,8 +473,9 @@ def test_actions_buttons_row() -> None:
     block = ActionsBlock.model_validate(
         [
             {"text": "查看详情", "url": "https://example.com/order/1", "style": "primary"},
-            {"text": "继续分析", "reply": "继续分析退款原因"},
-            {"text": "撤销", "reply": "撤销", "style": "danger"},
+            {"text": "继续分析退款原因", "reply": True},
+            # 旧写法：reply 写成字符串也只是个标记，发出去的仍是按钮上的字。
+            {"text": "撤销", "reply": "把所有商品下架", "style": "danger"},
             {"text": "坏链接", "url": "javascript:void(0)"},
         ]
     )
@@ -488,25 +489,42 @@ def test_actions_buttons_row() -> None:
     assert buttons[0]["behaviors"] == [
         {"type": "open_url", "default_url": "https://example.com/order/1"}
     ]
+    # 回复按钮的 value：要发的话就是按钮文字，只有提问人能点；带上按钮行与行内回复按钮的 ID，
+    # 点过之后据此置灰。没有会话类型：那由服务端判定。
+    reply_ids = [buttons[1]["element_id"], buttons[2]["element_id"]]
     assert buttons[1]["behaviors"] == [
-        {"type": "callback", "value": {"action": "reply", "reply": "继续分析退款原因"}}
+        {
+            "type": "callback",
+            "value": {
+                "action": "reply",
+                "text": "继续分析退款原因",
+                "requester": "u_asker",
+                "row": row["element_id"],
+                "buttons": reply_ids,
+            },
+        }
     ]
-    assert buttons[1]["text"] == {"tag": "plain_text", "content": "继续分析"}
+    assert buttons[2]["behaviors"][0]["value"]["text"] == "撤销"
+    assert "把所有商品下架" not in json.dumps(row, ensure_ascii=False)
+    assert all("hover_tips" not in b for b in buttons)
     _assert_card_ok([row])
 
 
-def test_reply_buttons_are_skipped_until_callbacks_are_supported() -> None:
+def test_reply_buttons_without_a_requester_are_text_only() -> None:
+    """不是提问人自己的对话回复（定时任务结果、推给别人的消息）：回复按钮不可点，只留文字。"""
     block = ActionsBlock.model_validate(
-        [{"text": "打开", "url": "https://example.com"}, {"text": "继续", "reply": "继续"}]
+        [{"text": "打开", "url": "https://example.com"}, {"text": "展开明细", "reply": True}]
     )
-    [row] = c.render_actions(block, RenderContext())
+    row, hint = c.render_actions(block, RenderContext())
     assert [col["elements"][0]["text"]["content"] for col in row["columns"]] == ["打开"]
-    assert (
-        c.render_actions(
-            ActionsBlock.model_validate([{"text": "继续", "reply": "继续"}]), RenderContext()
-        )
-        == []
+    assert hint["content"] == "<font color='grey'>「展开明细」</font>"
+    only = c.render_actions(
+        ActionsBlock.model_validate([{"text": "展开<明细>", "reply": True}]), RenderContext()
     )
+    assert _tags(only) == ["markdown"]
+    assert "callback" not in json.dumps(only)
+    assert "&#60;明细>" in only[0]["content"]
+    _assert_card_ok(only)
 
 
 def test_actions_all_invalid_links_render_nothing() -> None:
@@ -718,7 +736,7 @@ def test_every_renderer_in_one_card_is_valid() -> None:
         *c.render_timeline(TimelineBlock.model_validate([{"time": "9/1", "text": "a"}]), ctx),
         *c.render_people(PeopleBlock(users=["bob", "dave"]), ctx),
         *c.render_note(NoteBlock(text="口径"), ctx),
-        *c.render_actions(ActionsBlock.model_validate([{"text": "好", "reply": "好"}]), ctx),
+        *c.render_actions(ActionsBlock.model_validate([{"text": "好", "reply": True}]), ctx),
         *c.render_table(_table(), ctx),
         *c.render_raw(RawBlock(elements=[{"tag": "hr"}]), ctx),
         c.two_columns(c.render_kpi(half, ctx), c.render_callout(CalloutBlock(text="t"), ctx), ctx),

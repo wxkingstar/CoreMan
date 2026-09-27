@@ -17,7 +17,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from coreman.core.feishu_cards import sanitize, style
+from coreman.core.feishu_cards import reply_buttons, sanitize, style
 from coreman.core.feishu_cards.context import RenderContext
 from coreman.core.feishu_cards.markdown import normalize
 from coreman.core.richtext.schema import (
@@ -130,11 +130,16 @@ def _column(
 
 
 def _column_set(
-    ctx: RenderContext, columns: list[Element], *, flex_mode: str, spacing: str
+    ctx: RenderContext,
+    columns: list[Element],
+    *,
+    flex_mode: str,
+    spacing: str,
+    element_id: str | None = None,
 ) -> Element:
     return {
         "tag": "column_set",
-        "element_id": ctx.new_id("cols"),
+        "element_id": element_id or ctx.new_id("cols"),
         "flex_mode": flex_mode,
         "horizontal_spacing": spacing,
         "columns": columns,
@@ -447,31 +452,43 @@ def render_people(block: PeopleBlock, ctx: RenderContext) -> list[dict[str, Any]
 
 
 def render_actions(block: ActionsBlock, ctx: RenderContext) -> list[dict[str, Any]]:
-    """一排按钮：链接按钮直接跳转；回复按钮走回调，把 reply 当作点击人的下一句话。"""
+    """一排按钮：链接按钮直接跳转；回复按钮走回调，把按钮上的字当作提问人的下一句话。
+
+    回复按钮只在提问人自己的对话回复里可点（`ctx.requester`），value 带上这一行和行内回复按钮
+    的 element_id，点过之后据此置灰。其余出口（定时任务结果、推给别人的消息）回复按钮只显示
+    成灰字，不带任何点击行为。
+    """
+    row = ctx.new_id("cols")
+    requester = ctx.requester
+    links = [b for b in block.buttons if b.url and sanitize.is_http_url(b.url)]
+    replies = [b for b in block.buttons if b.is_reply]
+    kept = [b for b in block.buttons if b in links or (requester and b in replies)]
+    ids = [ctx.new_id("btn") for _ in kept]
+    reply_ids = [bid for bid, b in zip(ids, kept, strict=True) if b.is_reply]
     cols: list[Element] = []
-    for button in block.buttons:
-        if button.url:
-            if not sanitize.is_http_url(button.url):
-                continue
-            behaviors: list[dict[str, Any]] = [
-                {"type": "open_url", "default_url": button.url.strip()}
-            ]
-        elif button.reply and ctx.allow_reply:
-            behaviors = [{"type": "callback", "value": {"action": "reply", "reply": button.reply}}]
-        else:
-            continue
+    for bid, button in zip(ids, kept, strict=True):
         node: Element = {
             "tag": "button",
-            "element_id": ctx.new_id("btn"),
+            "element_id": bid,
             "type": BUTTON_TYPES.get(button.style, "default"),
             "size": "small",
             "text": {"tag": "plain_text", "content": button.text},
-            "behaviors": behaviors,
         }
+        if button.is_reply and requester:
+            value = reply_buttons.reply_value(
+                button.text, requester=requester, row=row, buttons=reply_ids
+            )
+            node["behaviors"] = [{"type": "callback", "value": value}]
+        else:
+            node["behaviors"] = [{"type": "open_url", "default_url": str(button.url).strip()}]
         cols.append(_column(ctx, [node], width="auto"))
-    if not cols:
-        return []
-    return [_column_set(ctx, cols, flex_mode="flow", spacing="8px")]
+    out: list[Element] = []
+    if cols:
+        out.append(_column_set(ctx, cols, flex_mode="flow", spacing="8px", element_id=row))
+    if replies and not requester:
+        hints = " · ".join(f"「{_inline(b.text)}」" for b in replies)
+        out.append(_md(ctx, _font(hints, "grey"), size=style.TEXT_NOTE))
+    return out
 
 
 # ---------------------------------------------------------------- 表格

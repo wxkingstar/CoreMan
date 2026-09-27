@@ -241,8 +241,12 @@ class OpenStage(ChatStageBase):
             verbosity_level=bot.verbosity_level,
             env_vars=env,
         )
+        reply_context = dict(intake.inbound.reply_context or {})
+        if bot.platform == "feishu":
+            # 飞书回复卡片里的回复按钮只有这一轮的提问人能点：网关编译终稿时从这里取。
+            reply_context["requester_user_id"] = intake.speaker.platform_user_id
         stream_kwargs: dict[str, Any] = {
-            "reply_context": intake.inbound.reply_context,
+            "reply_context": reply_context,
             "session_url": session_url,
             "platform": bot.platform,
         }
@@ -254,6 +258,12 @@ class OpenStage(ChatStageBase):
             session,
             log_entry(ctx, intake, status=CHAT_LOG_RUNNING, relay_session_id=info.relay_session_id),
         )
+        if bot.platform == "feishu" and ctx.task.inbound_event_id == intake.inbound.id:
+            from coreman.core.chat.card_replies import enqueue_used
+
+            # 点回复按钮带来的这一轮过了入站的各道关、真正开始了，才把那一行按钮置灰；
+            # 被拒的点击（停用、白名单、命令）不改卡片。
+            await enqueue_used(session, bot.id, intake.inbound)
         if (
             info.is_new
             and bot.platform != "feishu"

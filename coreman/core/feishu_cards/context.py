@@ -19,13 +19,15 @@ _ID_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
 class RenderContext:
     """images：远程图片 URL → 上传后的 img_key；没有映射的图片渲染成链接。
 
-    people：邮箱 / 登录名 → 飞书 user_id；没有映射的人按名字文字显示。
+    people：邮箱 / 登录名 / 姓名 → 飞书 user_id；没有映射的人按名字文字显示。
+
+    requester：这一轮提问人的飞书 user_id。只有提问人自己的对话回复才给，给了才渲染回复按钮，
+    并写进按钮的回调，别人点了网关直接拒绝（见 reply_buttons）；其余出口回复按钮只显示文字。
     """
 
     images: Mapping[str, str] = field(default_factory=dict)
     people: Mapping[str, str] = field(default_factory=dict)
-    # 回复按钮要网关接住回调才能用；没接上之前渲染时直接略过，免得点了报「操作失败」。
-    allow_reply: bool = False
+    requester: str | None = None
     tables: int = 0
     charts: int = 0
     _seq: dict[str, int] = field(default_factory=dict)

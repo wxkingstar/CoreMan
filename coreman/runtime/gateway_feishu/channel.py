@@ -20,12 +20,27 @@ from lark_oapi.core.json import JSON
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
+# 回复按钮点击的应答：已收下（worker 还可能拒绝，所以不说「已发送」）、这一行点过了、
+# 只有提问人能点。选择题等其他卡片点击照旧只回一个对勾，结果由后续卡片更新。
+TOASTS: dict[str, dict[str, str]] = {
+    "queued": {"type": "success", "content": "已收到"},
+    "duplicate": {"type": "info", "content": "已选过"},
+    "not_requester": {"type": "warning", "content": "只有提问人可以选择"},
+}
+DEFAULT_TOAST = {"type": "info", "content": "✓"}
+
+
+def card_toast(accepted: object) -> dict[str, str]:
+    """回调应答里的 toast：按 accept 报告的点击结果选文案。"""
+    toast = TOASTS.get(accepted) if isinstance(accepted, str) else None
+    return dict(toast or DEFAULT_TOAST)
+
 
 class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.typed marker
     def __init__(
         self,
         *,
-        accept: Callable[[dict[str, Any]], Awaitable[None]],
+        accept: Callable[[dict[str, Any]], Awaitable[object]],
         app_id: str,
         app_secret: str,
         encrypt_key: str = "",
@@ -58,7 +73,8 @@ class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.type
             .build()
         )
 
-    def _persist_before_ack(self, data: Any) -> None:
+    def _persist_before_ack(self, data: Any) -> object:
+        """落库提交之后才应答；返回 accept 的结果（回复按钮点击的处理结果，其余为 None）。"""
         if threading.get_ident() == self._application_thread:
             raise RuntimeError("durable event callback requires transport thread")
         try:
@@ -68,12 +84,12 @@ class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.type
         except (ValueError, TypeError) as exc:
             raise RuntimeError("invalid platform event") from exc
 
-        async def persist() -> None:
-            await self._accept(raw)
+        async def persist() -> object:
+            return await self._accept(raw)
 
         future = asyncio.run_coroutine_threadsafe(persist(), self._application_loop)
         try:
-            future.result(timeout=self._ack_timeout)
+            return future.result(timeout=self._ack_timeout)
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise RuntimeError("durable inbox timed out; redelivery required") from None
@@ -85,8 +101,9 @@ class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.type
         self._persist_before_ack(data)
 
     def _on_p2_card_action_trigger(self, data: Any) -> P2CardActionTriggerResponse:
-        self._persist_before_ack(data)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "✓"}})
+        # 3 秒应答窗口：这里只落库，改卡片（置灰已点的按钮）交给出站循环。
+        accepted = self._persist_before_ack(data)
+        return P2CardActionTriggerResponse({"toast": card_toast(accepted)})
 
     def _on_p2_bot_added(self, data: Any) -> None:
         self._persist_before_ack(data)

@@ -84,11 +84,21 @@ class ChatLogEntry:
     cost_usd: float | None = None
     response_at: datetime | None = None
     private: bool = False
+    # 不是列：这一轮能不能证明私聊可达。卡片按钮点出来的轮次不能（见 `_reach`）。
+    reach: bool = True
+
+
+# ChatLogEntry 里不落库的字段。
+_NOT_COLUMNS = frozenset({"reach"})
 
 
 def row_values(entry: ChatLogEntry) -> dict[str, Any]:
     """一行的列值：超长正文截断，工具去重。"""
-    values = {f.name: getattr(entry, f.name) for f in dataclasses.fields(entry)}
+    values = {
+        f.name: getattr(entry, f.name)
+        for f in dataclasses.fields(entry)
+        if f.name not in _NOT_COLUMNS
+    }
     for key, limit in LIMITS.items():
         value = values[key]
         if isinstance(value, str) and len(value) > limit:
@@ -118,8 +128,11 @@ async def _with_cost(session: AsyncSession, entry: ChatLogEntry, values: dict[st
 
 
 async def _reach(session: AsyncSession, entry: ChatLogEntry) -> None:
-    """只有真实私聊才证明个人推送可达；群聊和 cron 都不能写入这个凭据。"""
-    if entry.user_id is None or entry.chat_type != "single":
+    """只有真实私聊才证明个人推送可达；群聊、cron 和卡片按钮点出来的轮次都不能写入这个凭据。
+
+    按钮点击的会话类型本身就是按这份记录判定的，不能反过来再写它。
+    """
+    if entry.user_id is None or entry.chat_type != "single" or not entry.reach:
         return
     stmt = insert(UserReached).values(
         bot_id=entry.bot_id, user_id=entry.user_id, platform_chat_id=entry.chat_id or ""

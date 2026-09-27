@@ -21,9 +21,16 @@ def test_prompt_only_for_feishu_with_switch_on() -> None:
 
 
 def test_prompt_documents_every_block_type_the_model_may_write() -> None:
-    # raw 是给技能作者的进阶入口，不教给模型；people 要等人员解析接上（交互那一期）再开放。
-    for kind in BLOCK_KINDS - {"raw", "people"}:
+    # raw 是给技能作者的进阶入口，不教给模型。
+    for kind in BLOCK_KINDS - {"raw"}:
         assert f"- {kind}:" in RICH_CARDS_PROMPT, kind
+
+
+def test_prompt_documents_reply_buttons_and_people_lookup() -> None:
+    assert '{"text": "…", "reply": true}' in RICH_CARDS_PROMPT
+    assert "sends its own text" in RICH_CARDS_PROMPT
+    assert "only the person who asked" in RICH_CARDS_PROMPT
+    assert "nobody is notified" in RICH_CARDS_PROMPT
 
 
 def test_feishu_cron_result_is_not_split_across_blocks() -> None:

@@ -186,9 +186,15 @@ async def _feishu_preview(args: argparse.Namespace, texts: dict[str, str]) -> in
     settings = get_settings()
     engine = make_engine(settings.database_url)
     try:
-        target = await preview.resolve(make_session_factory(engine), bot_key=args.bot, to=args.to)
+        factory = make_session_factory(engine)
+        target = await preview.resolve(factory, bot_key=args.bot, to=args.to)
         ok = await preview.run(
-            target, settings.build_cipher(), texts, apply=args.apply, stream=args.stream
+            target,
+            settings.build_cipher(),
+            texts,
+            apply=args.apply,
+            stream=args.stream,
+            people=await preview.people_of(factory, texts),
         )
     except preview.PreviewError as exc:
         print(str(exc), file=sys.stderr)

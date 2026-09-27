@@ -76,7 +76,8 @@ REPRICING = """找到 **14 件**上架超 60 天、比同款成交价高 10% 以
 
 ```card:actions
 {"buttons": [{"text": "查看调价明细", "url": "https://example.com/pricing", "style": "primary"},
- {"text": "打开商品后台", "url": "https://example.com/admin"}]}
+ {"text": "打开商品后台", "url": "https://example.com/admin"},
+ {"text": "只列出手袋品类的调价商品", "reply": true}]}
 ```
 """
 
@@ -96,6 +97,10 @@ LOGISTICS = """```card:timeline
 
 > Hi, thank you for your patience! Your bag has passed authentication and is now clearing
 > customs. We expect delivery by Oct 1 and will send tracking updates as it moves.
+
+```card:people
+{"title": "跟进人", "users": ["ops@example.com", "customs@example.com"]}
+```
 
 ```card:note
 {"text": "物流数据每 30 分钟同步一次。"}

@@ -1,6 +1,6 @@
 # 飞书富卡片输出（Card JSON 2.0 优先）
 
-状态：第 1 期（渲染核心）已实现，第 2、3 期待做
+状态：第 1 期（渲染核心）与第 3 期（交互）已实现，第 2 期待做
 日期：2026-09-26
 
 ## 1. 目标与原则
@@ -242,11 +242,12 @@ coreman/core/richtext        平台无关：切块、校验块 JSON、降级成 
 ## 8. 交互（`actions` 块）
 
 - **`url` 按钮**：用 `open_url`。
-- **`reply` 按钮**：
-  - 点击后走 `callback`，value 带 `{task_id, reply_id}`；
-  - 网关把它当作点击人发来的下一句话，交给同一会话；
-  - 回调立即返回 toast「已发送」。
-- **收尾后禁用**：点击过的按钮组在收尾后标记为已选，也就是按钮置灰并写明谁点了哪一个。流式期间收到回调时，先关闭流式模式再更新卡片（飞书要求）。
+- **`reply` 按钮**（`{"text": "…", "reply": true}`）：
+  - 所见即所发：发出去的就是按钮文字，`reply` 只是标记；
+  - 只出现在提问人自己的对话回复里，也只有提问人能点；value 带 `{action:"reply", text, requester, row, buttons}`（见 12.2），不带会话类型；
+  - 网关把它当作提问人发来的下一句话，交给同一会话，回答引用这张卡片；会话类型由服务端按真实私聊记录判定；
+  - 回调立即返回 toast：「已收到」「已选过」或「只有提问人可以选择」。
+- **点过即禁用**：这一轮真正开始后，点过的按钮行置灰并写明谁点了哪一个；被拒的点击不改卡片。按钮只出现在终稿里，终稿之前已关闭流式模式，不会撞上「流式期间回调不能更新卡片」。
 - **危险操作确认**：继续使用现有的 AskUserQuestion 选择卡片。单题且选项不超过 4 个时，改用一排按钮，点一下就提交，不再需要「下拉框 + 提交」。
 
 ## 9. 其他出口
@@ -316,9 +317,26 @@ coreman/core/richtext        平台无关：切块、校验块 JSON、降级成 
 - 打字参数：每 40 毫秒 2 个字（约 50 字/秒），`fast` 策略。
 - 预览命令的 `--stream` 走同一套增量布局。
 
+## 12.3 第 3 期实现记录
+
+- **所见即所发**：块模型里 `reply` 是标记（`true` 或任意字符串），发出去的是按钮文字（≤40 字）；value 里只有 `text`，没有别的可发内容。
+- **只在提问人的回复里、只让提问人点**：worker 开流时把 `intake.speaker.platform_user_id` 写进流的 `reply_context.requester_user_id`（人工协作续跑的轮次也是原提问人，不取任务入站事件的发送人）。网关编译终稿（含续卡）时传 `compile_reply(requester=…)`，写进 value 的 `requester`；没有它（兜底回复、旧流）或出站 Markdown（定时任务、个人推送、通知）一律不渲染可点的回复按钮，只留灰字。应答时点击人不是 `requester` 就拒绝，不入队，与选择题的 `card_not_initiator` 一致。value 由渲染器生成，raw 块的回调在裁剪时去掉；卡片默认不允许转发后交互。
+- **会话类型**：value 不带、也不信任回调里的任何说法。应答时查 `user_reached`（点击人对应的成员与本机器人）：记录的私聊会话正是 `open_chat_id` 才按私聊，否则按群（`coreman/core/chat/reachability.private_chat`）。`user_reached` 只由真实私聊消息的轮次写入：`ChatLogEntry.reach`（不落库）在点击轮次为 False，`_reach` 跳过，worker 收尾与 reaper 收尸都一样。
+- **身份与个人工具**：点击的 Sender 带 `union_id`，原始回调（含 `tenant_key`）随入站保存；`resolve_feishu_event_speaker` 对 `card.action.trigger` 按 operator 做与消息同样的比对（app_id、open_id、user_id、union_id、会话 ID）。`feishu_personal.policy.verified_origin_scope` 接受点击：原始回调是本人点的回复按钮、会话与点击人与落库的列一致，且会话是本人与本机器人的私聊记录；因此在已核验私聊里点按钮，与打字一样有个人工具和个人定时任务。提醒（`reminders.verified_origin`）仍只认打字的私聊消息。
+- **去重**：`platform_msg_id` 为 `action:<卡片消息 ID>:<按钮行>`（只有提问人能点，一行只算一次），按钮行缺失时退回 `action:<event_id>`。
+- **应答**：`gateway_feishu.reply_buttons.admit` 在应答窗口里判定并入队，返回 `queued` / `duplicate` / `not_requester`，`DurableChannel` 据此回 toast「已收到」「已选过」「只有提问人可以选择」；其他卡片照旧「✓」。
+- **置灰**：点击元数据（卡片消息、按钮行、行内回复按钮、按钮文字、提问人）放在入站的 `reply_context.reply_button`。这一轮在 `OpenStage` 开流、写进行中日志的同一事务里，才由 `card_replies.enqueue_used` 排一条 `card_update` 出站（payload 带 `_reply_used`，按「消息 + 按钮行」去重）；停用、白名单、命令等在此之前结束的点击不改卡片。出站循环执行：
+  - 流式主卡：按 `feishu_deliveries.message_id` 找到 card_id，`batch_update` 里对行内回复按钮 `partial_update_element`（`disabled` + `disabled_tips`），再 `add_elements insert_after` 按钮行加一行「已选择」（element_id 为 `<按钮行>_used`，重放时撞 ID 即视为已完成）。序号走 `transport.sequence()`。
+  - 续卡：出站记录里有卡片 JSON 和 `_feishu_message_id`，原地标记后 `PATCH /im/v1/messages/:id`，并把改过的卡存回出站记录。
+  - 限制：流式投递记录随 `task_streams` 在完成 1 小时后清理，之后点主卡照常处理但不置灰（去重仍有效）。要覆盖，需要把 card_id 和序号存到寿命更长的地方（卡片实体 14 天有效）。
+- **选择题按钮**：`interaction_card()` 对单选题、选项 2–4 个（含「其他」）渲染一排按钮，value 为 `{task_id, event_key, question, option}`，按钮文字截到 40 字；入站在没有 `form_value` 时折成 `selected = {question: [option]}`，与表单提交同形，`card_actions` 与 `choice_flow` 不变。
+- **人员**：`compile.people_names()` 收集 people 块（含并排栏子块）与表格 person 列的名字（与图片地址一起在线程里扫出，`compile.scan`），网关用 `feishu_cards.people.resolve_people()` 查库（在职、非引导账号、有飞书身份；邮箱 > 登录名 > 唯一的姓名），映射按模型写的原文做键。
+
 ## 13. 待真机确认
 
 - `sequence` 能否跳号；`batch_update` 是否原子。
 - markdown 的 `content` 能否为空串，用于新段占位；不行就用零宽字符。
 - 不设 `summary` 时，关闭流式后消息预览显示哪段内容。
 - 流式打字参数的最佳值。
+- 回复按钮：`batch_update` 里对按钮 `partial_update_element` 设 `disabled` / `disabled_tips` 是否生效；markdown 里 `<person id='user_id' show_avatar=false>` 的显示；续卡（卡片 JSON 消息）整卡 PATCH 后按钮是否置灰；三种 toast 的显示；点击后「输入中」表情加在卡片消息上、回答引用卡片的观感。
+- 选择题按钮在手机上的换行效果（flow 布局）。

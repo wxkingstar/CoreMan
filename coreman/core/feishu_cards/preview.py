@@ -12,7 +12,7 @@ import json
 import math
 import struct
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,7 +23,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, User, UserIdentity
-from coreman.core.feishu_cards.compile import compile_reply, image_urls
+from coreman.core.feishu_cards.compile import (
+    compile_reply,
+    image_urls,
+    people_names,
+)
+from coreman.core.feishu_cards.people import resolve_people
 from coreman.core.feishu_cards.samples import SAMPLE_IMAGE_URL
 from coreman.core.feishu_cards.thinking import thinking_panel
 from coreman.core.platforms.feishu import BASE_URL, FeishuClient
@@ -36,6 +41,15 @@ class Target:
     bot: Bot
     receive_id: str
     name: str
+
+
+async def people_of(factory: async_sessionmaker[Any], texts: Mapping[str, str]) -> dict[str, str]:
+    """样例里的 people 块和表格 person 列按线上同样的规则解析成飞书 user_id。"""
+    names = list(dict.fromkeys(n for text in texts.values() for n in people_names(text)))
+    if not names:
+        return {}
+    async with factory() as session:
+        return await resolve_people(session, names)
 
 
 class PreviewError(RuntimeError):
@@ -129,9 +143,13 @@ async def run(
     *,
     apply: bool,
     stream: bool,
+    people: Mapping[str, str] | None = None,
     echo: Echo = print,
 ) -> bool:
-    """逐条编译、校验，`apply` 时发送。返回是否全部成功。"""
+    """逐条编译、校验，`apply` 时发送。返回是否全部成功。
+
+    回复按钮照线上打开，提问人就是接收人：点了就是真的以他的身份给机器人发了一句话。
+    """
     creds = decrypt_json(cipher, target.bot.credentials_enc, CREDENTIALS_AAD)
     client = FeishuClient(creds["app_id"], creds["app_secret"])
     try:
@@ -149,7 +167,13 @@ async def run(
                 images[SAMPLE_IMAGE_URL] = key
         prefix = [thinking_panel("🔎 查询数据\n📊 汇总分析\n✍️ 整理结论")]
         for index, (name, text) in enumerate(texts.items()):
-            compiled = compile_reply(text, prefix=prefix, images=images)
+            compiled = compile_reply(
+                text,
+                prefix=prefix,
+                images=images,
+                people=people,
+                requester=target.receive_id,
+            )
             sizes = [len(json.dumps(c, ensure_ascii=False).encode()) for c in compiled.cards]
             echo(f"[{name}] {len(compiled.cards)} 张卡，{sizes} 字节")
             for problem in compiled.problems:

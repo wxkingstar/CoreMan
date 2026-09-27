@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+from coreman.core.chat.card_replies import is_click
 from coreman.core.chat.chat_logs import ChatLogEntry
 from coreman.core.chat.content import BuiltContent
 from coreman.core.db.models import CHAT_LOG_RUNNING
@@ -55,6 +56,7 @@ def log_entry(
         stream_id=ctx.stream_id,
         task_id=ctx.task.id,
         private=ctx.private_turn,
+        reach=not is_click(intake.inbound.payload or {}),
         # chat_logs 的可见范围比一次对话大（管理台、统计、体检都读它），所以正文三列也要
         # 过一遍出站闸门：模型复述的凭据不能留在库里。
         message_content=ctx.redact(content.text if content else intake.text),
