@@ -26,12 +26,15 @@ from coreman.core.feishu_cards.compile import (
     plain_text,
     simple_cards,
 )
-from coreman.core.feishu_cards.thinking import thinking_panel
+from coreman.core.feishu_cards.stream import StreamUnit, plan, stream_units
+from coreman.core.feishu_cards.thinking import thinking_panel, thinking_preview
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.runtime.gateway_feishu.cards import (
+    STREAMING_CONFIG,
     interaction_card,
     post_content,
+    remote_images_as_links,
     split_utf8,
     stream_card,
     visible_parts,
@@ -46,8 +49,17 @@ _OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"
 _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
 # 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
 OUTBOX_PER_ROUND = 20
-# 同一 bot 两次平台调用之间至少隔这么久，避免触发飞书的接口频控。
-CALL_SPACING_SECONDS = 0.3
+# 同一 bot 两次平台调用之间至少隔这么久：每张卡片不超过飞书的 10 次/秒，整个应用也远低于
+# 单接口 50 次/秒。推送按机器人串行（子进程只有两条库连接），所以间隔决定了并发回复时的刷新快慢。
+CALL_SPACING_SECONDS = 0.1
+# 流式模式开启 10 分钟后飞书自动关闭；提前续开，打字机效果不中断。
+STREAM_RENEW_SECONDS = 9 * 60
+# 流式已被关闭：重新开启后重试。
+STREAM_CLOSED = frozenset({200510, 200850, 300309})
+# 卡片上的组件和记下的布局对不上（删不到、插不进）：整卡重建。
+LAYOUT_DRIFT = frozenset({300121, 300301, 300314, 300315, 10002, 200220})
+# 流式卡片除正文单元外的大致体积：外壳、思考面板与会话按钮。
+STREAM_SHELL_BYTES = 3_000
 # 卡片内容本身有问题（字段不认、体积或元素超限）：原样重试没有意义，立即降级成简化卡。
 # 一条回复最多上传这么多张远程图片，免得一条回复拖住整个出站循环。
 IMAGES_PER_REPLY = 9
@@ -219,6 +231,14 @@ class FeishuTransport:
                         delivery = await session.get(FeishuDelivery, row.task_id)
                         if delivery is None:
                             continue
+                        if code == 200810:
+                            # 有人正在点这张卡：稍后再试，不算失败。
+                            delivery.retry_at = datetime.now(UTC) + timedelta(seconds=2)
+                            await session.commit()
+                            continue
+                        if code == 300317:
+                            # 本地序号落后于飞书（接管、回滚）：一次抬高，下一轮就能继续。
+                            delivery.sequence += 1000
                         delivery.failures += 1
                         delivery.last_error = str(exc) if code is not None else type(exc).__name__
                         delivery.retry_at = datetime.now(UTC) + timedelta(
@@ -343,19 +363,23 @@ class FeishuTransport:
                 await session.merge(delivery)
                 await session.commit()
         heading = await self.animate_heading(row, card_id)
-        # 官方流式模式 10 分钟后自动关闭；提前关闭后仍可更新同一卡片。
-        # https://open.feishu.cn/document/cardkit-v1/streaming-updates-openapi-overview
-        expired = datetime.now(UTC) - delivery.created_at >= timedelta(minutes=9)
-        if (
-            row.version <= row.pushed_version
-            and not row.is_complete
-            and (not expired or delivery.is_static)
-        ):
+        if row.version <= row.pushed_version and not row.is_complete:
             return
         answer = (
             row.final_text if row.is_complete and row.final_text is not None else row.pending_text
         )
         thinking, answer = visible_parts(row.thinking_md, answer)
+        if not row.is_complete and not delivery.is_static:
+            await self.stream_update(row, delivery, card_id, thinking, answer)
+            if visible_parts("", answer)[1].strip():
+                await typing(self, row.task_id, done=True)
+            async with self.factory() as session:
+                saved = await session.get(FeishuDelivery, row.task_id)
+                assert saved is not None
+                saved.failures, saved.retry_at, saved.last_error = 0, None, None
+                await streams.mark_pushed(session, row.task_id, row.version)
+                await session.commit()
+            return
         compiled: Compiled | None = None
         summary = ""
         if row.is_complete:
@@ -364,14 +388,11 @@ class FeishuTransport:
             )
             card, summary = compiled.cards[0], compiled.summary
         else:
+            # 升级前就已改成整卡替换的流式卡片：沿用旧路径直到结束。
             card = stream_card(
-                thinking,
-                answer,
-                streaming=not expired,
-                session_url=row.session_url,
-                heading=heading,
+                thinking, answer, streaming=False, session_url=row.session_url, heading=heading
             )
-        if (row.is_complete or expired) and not delivery.is_static:
+        if row.is_complete and not delivery.is_static:
             config: dict[str, Any] = {"streaming_mode": False}
             if summary:
                 # 关流式不会改写自定义摘要，消息列表的预览要在这里一起写上。
@@ -400,17 +421,6 @@ class FeishuTransport:
                 log.warning("feishu_rich_card_rejected", code=exc.code, task_id=row.task_id)
                 compiled = await self.plain_cards(thinking, answer, row.session_url, heading)
                 await self.put_card(row.task_id, card_id, compiled.cards[0])
-        else:
-            elements = card["body"]["elements"]
-            for element_id, content in [
-                ("thinking", elements[0]["elements"][0]["content"]),
-                ("answer", elements[1]["content"]),
-            ]:
-                await self.call(
-                    "PUT",
-                    f"/open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
-                    json={"sequence": await self.sequence(row.task_id), "content": content},
-                )
         if visible_parts("", answer)[1].strip() or (row.is_complete and not row.pending_card):
             await typing(self, row.task_id, done=True)
         async with self.factory() as session:
@@ -422,6 +432,106 @@ class FeishuTransport:
                 await self.enqueue_cards(session, row, compiled)
                 await streams.mark_finish_pushed(session, row.task_id)
             await session.commit()
+
+    async def stream_update(
+        self,
+        row: TaskStream,
+        delivery: FeishuDelivery,
+        card_id: str,
+        thinking: str,
+        answer: str,
+    ) -> None:
+        """流式期间的一次推送：思考面板变了才推，正文按单元增量更新（feishu_cards/stream.py）。"""
+        state = dict(delivery.layout or {})
+        now = time.time()
+        since = float(state.get("since") or delivery.created_at.timestamp())
+        if now - since >= STREAM_RENEW_SECONDS:
+            await self.renew_streaming(row.task_id, card_id)
+            state["since"] = now
+        preview = thinking_preview(thinking)
+        if preview != state.get("thinking"):
+            await self.put_text(row.task_id, card_id, "thinking", preview)
+            state["thinking"] = preview
+        layout = state.get("units") or [
+            {"kind": "text", "ids": ["answer"], "text": "…", "digest": ""}
+        ]
+        units = await asyncio.to_thread(stream_units, answer)
+        steps = plan(
+            layout,
+            units,
+            anchor="thinking_panel",
+            shown=STREAM_SHELL_BYTES,
+            show=remote_images_as_links,
+        )
+        if steps.actions:
+            try:
+                await self.call(
+                    "POST",
+                    f"/open-apis/cardkit/v1/cards/{card_id}/batch_update",
+                    json={
+                        "sequence": await self.sequence(row.task_id),
+                        "actions": card_json(steps.actions),
+                    },
+                )
+            except FeishuError as exc:
+                if exc.code not in LAYOUT_DRIFT:
+                    raise
+                log.warning("feishu_stream_layout_rebuilt", code=exc.code, task_id=row.task_id)
+                steps = await self.rebuild_stream(row, card_id, thinking, units)
+        for element_id, content in steps.texts:
+            await self.put_text(row.task_id, card_id, element_id, content)
+        state["units"] = steps.layout
+        async with self.factory() as session:
+            saved = await session.get(FeishuDelivery, row.task_id)
+            assert saved is not None
+            saved.layout = state
+            await session.commit()
+        delivery.layout = state
+
+    async def rebuild_stream(
+        self, row: TaskStream, card_id: str, thinking: str, units: list[StreamUnit]
+    ) -> Any:
+        """布局对不上时整卡重建：流式模式保持开启，之后照常增量更新。"""
+        steps = plan(
+            [],
+            units,
+            anchor="thinking_panel",
+            shown=STREAM_SHELL_BYTES,
+            show=remote_images_as_links,
+        )
+        elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
+        card = stream_card(thinking, "", session_url=row.session_url, heading="🤔 思考中...")
+        card["body"]["elements"] = [card["body"]["elements"][0], *elements]
+        await self.put_card(row.task_id, card_id, card)
+        steps.actions, steps.texts = [], []
+        return steps
+
+    async def renew_streaming(self, task_id: int, card_id: str) -> None:
+        """重新开启流式模式（飞书从这一刻重新计 10 分钟）。"""
+        config = {"streaming_mode": True, "streaming_config": STREAMING_CONFIG}
+        await self.call(
+            "PATCH",
+            f"/open-apis/cardkit/v1/cards/{card_id}/settings",
+            json={
+                "sequence": await self.sequence(task_id),
+                "settings": card_json({"config": config}),
+            },
+        )
+
+    async def put_text(self, task_id: int, card_id: str, element_id: str, content: str) -> None:
+        """流式写入一段文本；流式模式已被关掉时续开后重试一次。"""
+        path = f"/open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content"
+        try:
+            await self.call(
+                "PUT", path, json={"sequence": await self.sequence(task_id), "content": content}
+            )
+        except FeishuError as exc:
+            if exc.code not in STREAM_CLOSED:
+                raise
+            await self.renew_streaming(task_id, card_id)
+            await self.call(
+                "PUT", path, json={"sequence": await self.sequence(task_id), "content": content}
+            )
 
     async def put_card(self, task_id: int, card_id: str, card: dict[str, Any]) -> None:
         seq = await self.sequence(task_id)

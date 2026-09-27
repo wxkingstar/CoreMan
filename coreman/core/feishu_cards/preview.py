@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, User, UserIdentity
-from coreman.core.feishu_cards.compile import compile_reply, image_urls, streaming_text
+from coreman.core.feishu_cards.compile import compile_reply, image_urls
 from coreman.core.feishu_cards.samples import SAMPLE_IMAGE_URL
 from coreman.core.feishu_cards.thinking import thinking_panel
 from coreman.core.platforms.feishu import BASE_URL, FeishuClient
@@ -177,28 +177,40 @@ async def run(
 
 
 async def _stream(api: _Api, receive_id: str, text: str, final: dict[str, Any]) -> bool:
-    """和线上一样：流式卡片逐段打字，结束时关流式、写摘要、整卡换成富卡片。"""
+    """和线上一样：先流式打字、块写完即插入，结束时关流式、写摘要、整卡换成富卡片。"""
     from coreman.core.feishu_cards.compile import card_shell
+    from coreman.core.feishu_cards.stream import plan, stream_units
 
-    panel = final["body"]["elements"][0] if final["body"]["elements"] else None
     elements: list[dict[str, Any]] = []
+    panel = final["body"]["elements"][0] if final["body"]["elements"] else None
     if panel and panel.get("tag") == "collapsible_panel":
         elements.append(panel)
     elements.append({"tag": "markdown", "element_id": "answer", "content": "…"})
-    card_id = await api.create(card_shell(elements, streaming=True))
+    streaming = card_shell(elements, streaming=True, streaming_config=STREAMING)
+    card_id = await api.create(streaming)
     if card_id is None or not await api.send(receive_id, card_id):
         return False
+    layout: list[dict[str, Any]] = [{"kind": "text", "ids": ["answer"], "text": "…"}]
     seq = 0
-    step = max(1, len(text) // 12)
-    for end in range(step, len(text) + step, step):
-        seq += 1
-        content = streaming_text(text[:end]) or "…"
-        await api.call(
-            "PUT",
-            f"/open-apis/cardkit/v1/cards/{card_id}/elements/answer/content",
-            json={"sequence": seq, "content": content},
-        )
-        await asyncio.sleep(0.5)
+    step = max(8, len(text) // 40)
+    for end in [*range(step, len(text), step), len(text)]:
+        steps = plan(layout, stream_units(text[:end]), anchor="thinking_panel", shown=3_000)
+        if steps.actions:
+            seq += 1
+            await api.call(
+                "POST",
+                f"/open-apis/cardkit/v1/cards/{card_id}/batch_update",
+                json={"sequence": seq, "actions": json.dumps(steps.actions, ensure_ascii=False)},
+            )
+        for element_id, content in steps.texts:
+            seq += 1
+            await api.call(
+                "PUT",
+                f"/open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
+                json={"sequence": seq, "content": content},
+            )
+        layout = steps.layout
+        await asyncio.sleep(0.35)
     config: dict[str, Any] = {"streaming_mode": False}
     summary = (final.get("config") or {}).get("summary")
     if summary:
@@ -219,8 +231,16 @@ async def _stream(api: _Api, receive_id: str, text: str, final: dict[str, Any]) 
         },
     )
     if done is not None:
-        api.echo("  ✓ 已流式发送并整卡替换为富卡片")
+        api.echo("  ✓ 已流式发送（块写完即插入），并整卡替换为富卡片")
     return done is not None
+
+
+# 与网关一致的打字参数（gateway_feishu/cards.py 的 STREAMING_CONFIG）。
+STREAMING: dict[str, Any] = {
+    "print_frequency_ms": {"default": 40},
+    "print_step": {"default": 2},
+    "print_strategy": "fast",
+}
 
 
 def sample_image_png(size: int = 240) -> bytes:

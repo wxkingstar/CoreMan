@@ -106,7 +106,7 @@ async def test_card_identity_and_sequence_survive_takeover(db_session, db_engine
         assert (await session.get(FeishuDelivery, row.task_id)).is_static
 
 
-async def test_nine_minute_stream_becomes_static_without_completion(db_session, db_engine):
+async def test_long_stream_renews_streaming_instead_of_going_static(db_session, db_engine):
     bot, row, generation = await seed(db_session)
     factory, api = make_session_factory(db_engine), FakeAPI()
     transport = FeishuTransport(
@@ -116,19 +116,27 @@ async def test_nine_minute_stream_becomes_static_without_completion(db_session, 
     async with factory() as session:
         delivery = await session.get(FeishuDelivery, row.task_id)
         delivery.created_at = datetime.now(UTC) - timedelta(minutes=10)
-        await session.commit()
-    await transport.round()
-    async with factory() as session:
-        assert (await session.get(FeishuDelivery, row.task_id)).is_static
-        stream = await session.get(TaskStream, row.task_id)
-        assert not stream.is_complete and stream.finish_pushed_at is None
-    assert any(method == "PUT" and path.endswith("/cards/card1") for method, path, _ in api.calls)
-    # 普通卡片在 10 分钟后继续接收增量与终稿，始终只发送一张卡片。
-    async with factory() as session:
         await streams.update(session, row.task_id, pending_text="after ten minutes")
         await session.commit()
     await transport.round()
-    assert any("after ten minutes" in str(body) for _, _, body in api.calls)
+    renewals = [
+        json.loads(body["settings"])
+        for method, path, body in api.calls
+        if path == "/open-apis/cardkit/v1/cards/card1/settings"
+    ]
+    assert renewals and renewals[-1]["config"]["streaming_mode"] is True
+    async with factory() as session:
+        assert not (await session.get(FeishuDelivery, row.task_id)).is_static
+    # 续开之后仍是逐字的流式文本更新，而不是整卡替换。
+    assert any(
+        method == "PUT"
+        and path.endswith("/elements/answer/content")
+        and body["content"] == "after ten minutes"
+        for method, path, body in api.calls
+    )
+    assert not any(
+        method == "PUT" and path.endswith("/cards/card1") for method, path, _ in api.calls
+    )
     async with factory() as session:
         await streams.complete(session, row.task_id, final_text="long task completed")
         await session.commit()
@@ -882,3 +890,148 @@ async def test_outbox_rejection_mid_series_resends_only_that_card(db_session, db
     assert posts and all("第 0 节" not in p for p in posts)
     assert any("第 6 节" in p for p in posts)
     assert sum("第 0 节" in c for c in cards) == 1
+
+
+def batch_actions(api):
+    return [
+        json.loads(body["actions"])
+        for method, path, body in api.calls
+        if path == "/open-apis/cardkit/v1/cards/card1/batch_update"
+    ]
+
+
+def content_puts(api, element_id=None):
+    return [
+        (path.split("/elements/")[1].split("/")[0], body["content"])
+        for method, path, body in api.calls
+        if method == "PUT"
+        and path.endswith("/content")
+        and (element_id is None or f"/elements/{element_id}/" in path)
+    ]
+
+
+async def test_finished_block_is_inserted_while_streaming(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    chart = '```card:chart\n{"chart": "bar", "x": ["a", "b"], "series": [{"values": [1, 2]}]}\n```'
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text=f"结论先行。\n\n{chart}\n\n后文")
+        await session.commit()
+    await transport.round()
+    [actions] = batch_actions(api)
+    added = [e for a in actions if a["action"] == "add_elements" for e in a["params"]["elements"]]
+    assert "chart" in tags_of(added)
+    # 图表后面的正文是一个新的正文段，之后在它上面继续打字。
+    text_ids = [e["element_id"] for e in added if e["tag"] == "markdown"]
+    async with factory() as session:
+        await streams.update(
+            session, row.task_id, pending_text=f"结论先行。\n\n{chart}\n\n后文继续写"
+        )
+        await session.commit()
+    await transport.round()
+    assert content_puts(api, text_ids[-1])[-1][1] == "后文继续写"
+    async with factory() as session:
+        layout = (await session.get(FeishuDelivery, row.task_id)).layout
+    assert [u["kind"] for u in layout["units"]] == ["text", "block", "text"]
+
+
+async def test_unchanged_thinking_is_not_pushed_again(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="hello world")
+        await session.commit()
+    await transport.round()
+    assert len(content_puts(api, "thinking")) == 1
+
+
+async def test_layout_drift_rebuilds_the_streaming_card(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class DriftOnce(FakeAPI):
+        failed = False
+
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/batch_update") and not self.failed:
+                self.failed = True
+                self.calls.append((method, path, kwargs.get("json") or {}))
+                raise FeishuError(300314)
+            return await super().call(method, path, **kwargs)
+
+    api = DriftOnce()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.update(
+            session,
+            row.task_id,
+            pending_text='前文\n\n```card:note\n{"text": "口径"}\n```\n\n后文',
+        )
+        await session.commit()
+    await transport.round()
+    [rebuilt] = card_puts(api)
+    assert rebuilt["config"]["streaming_mode"] is True
+    body = json.dumps(rebuilt, ensure_ascii=False)
+    assert "口径" in body and "后文" in body
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.failures == 0 and len(delivery.layout["units"]) == 3
+
+
+async def test_closed_stream_is_reopened_and_text_retried(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class ClosedOnce(FakeAPI):
+        closed = True
+
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/elements/answer/content") and self.closed:
+                self.closed = False
+                self.calls.append((method, path, kwargs.get("json") or {}))
+                raise FeishuError(200850)
+            return await super().call(method, path, **kwargs)
+
+    api = ClosedOnce()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    settings = [
+        json.loads(body["settings"]) for _, path, body in api.calls if path.endswith("/settings")
+    ]
+    assert settings and settings[-1]["config"]["streaming_mode"] is True
+    assert content_puts(api, "answer")[-1][1] == "hello"
+    sequences = [body["sequence"] for _, _, body in api.calls if "sequence" in body]
+    assert sequences == sorted(set(sequences))
+
+
+async def test_sequence_conflict_bumps_the_local_sequence(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+
+    class Behind(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/content"):
+                self.calls.append((method, path, kwargs.get("json") or {}))
+                raise FeishuError(300317)
+            return await super().call(method, path, **kwargs)
+
+    transport = FeishuTransport(
+        factory, Behind(), bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.sequence >= 1000 and delivery.failures == 1

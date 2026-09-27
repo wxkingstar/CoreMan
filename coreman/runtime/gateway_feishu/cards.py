@@ -72,9 +72,11 @@ def post_content(markdown: str) -> dict[str, Any]:
     return {"zh_cn": {"title": "", "content": rows}}
 
 
+# 打字速度约 50 字/秒：跟得上模型的输出，积压少，新增量到达时不会一下子跳出一大段。
+# （飞书默认 70ms/1 字 ≈ 14 字/秒，远慢于模型，配合 fast 策略会一顿一顿地整段上屏。）
 STREAMING_CONFIG: dict[str, Any] = {
-    "print_frequency_ms": {"default": 70, "android": 70, "ios": 70, "pc": 70},
-    "print_step": {"default": 1, "android": 1, "ios": 1, "pc": 1},
+    "print_frequency_ms": {"default": 40, "android": 40, "ios": 40, "pc": 40},
+    "print_step": {"default": 2, "android": 2, "ios": 2, "pc": 2},
     "print_strategy": "fast",
 }
 
