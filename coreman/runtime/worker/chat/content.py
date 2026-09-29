@@ -48,7 +48,7 @@ class ContentStage(ChatStageBase):
             from coreman.runtime.worker.chat.feishu_quote import enrich
 
             async with ctx.session_factory() as session:
-                parts, enriched_text = await enrich(
+                enriched = await enrich(
                     session,
                     bot=pre.intake.bot,
                     cipher=ctx.cipher,
@@ -57,8 +57,10 @@ class ContentStage(ChatStageBase):
                     parts=parts,
                     text=pre.intake.text,
                 )
+            parts, enriched_text = enriched.parts, enriched.text
+            quoted_message_id = enriched.media_message_id
         else:
-            enriched_text = pre.intake.text
+            enriched_text, quoted_message_id = pre.intake.text, None
 
         fetcher: MediaFetcher
         owns_fetcher = pre.intake.bot.platform == "feishu" or ctx.media_fetcher is None
@@ -71,6 +73,7 @@ class ContentStage(ChatStageBase):
             fetcher = FeishuMediaFetcher(
                 FeishuClient(credentials.get("app_id", ""), credentials.get("app_secret", "")),
                 message_id=media_message_id or pre.intake.inbound.platform_msg_id,
+                quoted_message_id=quoted_message_id,
             )
         else:
             fetcher = ctx.media_fetcher or MediaFetcher()

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
@@ -35,6 +35,7 @@ from coreman.core.db.models import (
     BotLease,
     ChatLog,
     ChatSession,
+    FeishuSentMessage,
     InboundEvent,
     InteractionState,
     OutboxItem,
@@ -56,8 +57,8 @@ INSTANCE_DEAD_SECONDS = 60
 INSTANCE_PURGE_DAYS = 7
 STREAM_RETENTION_HOURS = 1
 OUTBOX_RETENTION_DAYS = 7
-# 保留期：终态任务与入站事件留 90 天（审计看 chat_logs，不靠这两张表）；
-# 失败 / 跳过的出站条目留 30 天给人排查。
+# 保留期：终态任务与入站事件留 90 天（审计看 chat_logs，不靠这两张表），机器人发出的飞书消息
+# 正文（供引用回读）同样 90 天；失败 / 跳过的出站条目留 30 天给人排查。
 TASK_RETENTION_DAYS = 90
 INBOUND_RETENTION_DAYS = 90
 OUTBOX_FAILED_RETENTION_DAYS = 30
@@ -436,6 +437,26 @@ async def cleanup_inbound_events(
     return await _affected(session, stmt)
 
 
+async def cleanup_feishu_sent(
+    session: AsyncSession, now: datetime, *, limit: int = RETENTION_BATCH
+) -> int:
+    """超过保留期的飞书发出消息正文删一批：再老的消息被引用就走飞书接口现读。"""
+    cutoff = now - timedelta(days=INBOUND_RETENTION_DAYS)
+    doomed = (
+        select(FeishuSentMessage.bot_id, FeishuSentMessage.message_id)
+        .where(FeishuSentMessage.created_at < cutoff)
+        .order_by(FeishuSentMessage.created_at)
+        .limit(limit)
+        .correlate(None)
+    )
+    stmt = (
+        delete(FeishuSentMessage)
+        .where(tuple_(FeishuSentMessage.bot_id, FeishuSentMessage.message_id).in_(doomed))
+        .returning(FeishuSentMessage.message_id)
+    )
+    return await _affected(session, stmt)
+
+
 async def recover_outbox_attempts(session: AsyncSession, now: datetime) -> int:
     """网关在等回执时丢下的出站尝试放回队列（结果未知按普通失败退避重发）。"""
     return await outbox.recover_abandoned(session)
@@ -513,6 +534,7 @@ async def run_retention(
         "old_tasks": cleanup_tasks,
         "old_inbound_events": cleanup_inbound_events,
         "old_outbox": cleanup_outbox,
+        "old_feishu_sent": cleanup_feishu_sent,
     }
     counts: dict[str, int] = {}
     for key, job in jobs.items():

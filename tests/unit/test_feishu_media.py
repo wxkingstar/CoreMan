@@ -112,3 +112,30 @@ async def test_feishu_resource_http_failures_have_bounded_categories(status, rea
 
     assert caught.value.reason == reason
     assert "upstream.invalid" not in str(caught.value)
+
+
+async def test_quoted_message_resources_are_allowed_only_when_named():
+    """引用时放行的只有核对过同会话的那一条被引用消息，其余消息照旧拒绝。"""
+    paths = []
+
+    def handler(request):
+        if "access_token" in request.url.path:
+            return httpx.Response(
+                200, json={"code": 0, "tenant_access_token": "synthetic", "expire": 7200}
+            )
+        paths.append(request.url.path)
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn", transport=httpx.MockTransport(handler)
+    ) as http:
+        client = FeishuClient("cli", "secret", http=http)
+        fetcher = FeishuMediaFetcher(client, message_id="om_1", quoted_message_id="om_parent")
+        await fetcher.fetch_image({"message_id": "om_parent", "file_key": "img_q"})
+        assert paths == ["/open-apis/im/v1/messages/om_parent/resources/img_q"]
+        with pytest.raises(MediaError):
+            await fetcher.fetch_image({"message_id": "om_other", "file_key": "img_q"})
+        plain = FeishuMediaFetcher(client, message_id="om_1")
+        with pytest.raises(MediaError):
+            await plain.fetch_image({"message_id": "om_parent", "file_key": "img_q"})
+        assert len(paths) == 1

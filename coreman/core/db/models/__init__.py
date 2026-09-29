@@ -89,7 +89,7 @@ from coreman.core.db.models.wecom_personal import (
     WecomPersonalGrant,
 )
 
-from .feishu import FeishuDelivery
+from .feishu import FeishuDelivery, FeishuSentMessage
 from .pricing import ModelPrice
 
 __all__ = [
@@ -110,6 +110,7 @@ __all__ = [
     "RuntimeChunk",
     "AlertState",
     "FeishuDelivery",
+    "FeishuSentMessage",
     "ModelPrice",
     "SkillSource",
     "Skill",

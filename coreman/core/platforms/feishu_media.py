@@ -1,4 +1,7 @@
-"""飞书消息资源下载只使用 message_id/file_key，拒绝任意 URL 与跨消息引用。"""
+"""飞书消息资源下载只使用 message_id/file_key，拒绝任意 URL 与跨消息引用。
+
+放行的只有当前这条消息，以及（引用时）已核对与它在同一会话的被引用消息。
+"""
 
 from __future__ import annotations
 
@@ -52,9 +55,17 @@ async def _rejection(response: httpx.Response) -> MediaError:
 
 
 class FeishuMediaFetcher(MediaFetcher):
-    def __init__(self, client: FeishuClient, *, message_id: str, max_bytes: int = MAX_BYTES):
+    def __init__(
+        self,
+        client: FeishuClient,
+        *,
+        message_id: str,
+        quoted_message_id: str | None = None,
+        max_bytes: int = MAX_BYTES,
+    ):
         self.client = client
         self.message_id = message_id
+        self.allowed = {message_id, *([quoted_message_id] if quoted_message_id else [])}
         self.max_bytes = max_bytes
 
     async def aclose(self) -> None:
@@ -64,7 +75,7 @@ class FeishuMediaFetcher(MediaFetcher):
         self, ref: dict[str, Any], kind: str, budget: float
     ) -> tuple[bytes, httpx.Headers]:
         mid, key = str(ref.get("message_id") or ""), str(ref.get("file_key") or "")
-        if mid != self.message_id or not _ID.fullmatch(mid) or not _ID.fullmatch(key):
+        if mid not in self.allowed or not _ID.fullmatch(mid) or not _ID.fullmatch(key):
             raise MediaError("download_failed", "invalid message resource")
         try:
             async with asyncio.timeout(budget):

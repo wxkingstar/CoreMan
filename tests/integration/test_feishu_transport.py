@@ -8,7 +8,14 @@ from sqlalchemy.pool import NullPool
 
 from coreman.core.bus import instances, leases, outbox, streams, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.db.models import Bot, FeishuDelivery, OutboxItem, TaskStream, User
+from coreman.core.db.models import (
+    Bot,
+    FeishuDelivery,
+    FeishuSentMessage,
+    OutboxItem,
+    TaskStream,
+    User,
+)
 from coreman.core.db.session import make_session_factory
 from coreman.core.platforms.feishu import FeishuError
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
@@ -1171,3 +1178,33 @@ async def test_half_chart_over_quota_is_not_nested_in_a_row(db_session, db_engin
     async with factory() as session:
         delivery = await session.get(FeishuDelivery, row.task_id)
         assert not delivery.layout.get("paused")
+
+
+async def test_sent_messages_are_archived_for_later_quotes(db_session, db_engine):
+    """流式回复收尾时存下终稿正文，出站消息发出时存下里面的文字；思考过程不进存档。"""
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        # 流式卡片发出时只是卡片实体引用，还没有正文可存。
+        assert await session.get(FeishuSentMessage, (bot.id, "om_1")) is None
+        await streams.complete(session, row.task_id, final_text="最终答案")
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="cron:1",
+            target={"chat_id": "oc1"},
+            payload={"markdown": "定时结果 42"},
+        )
+        await session.commit()
+    await transport.round()
+    async with factory() as session:
+        rows = {r.message_id: r for r in (await session.scalars(select(FeishuSentMessage)))}
+    assert rows.pop("om_1").text == "最终答案"
+    assert [r.text for r in rows.values()] == ["定时结果 42"]
+    assert all(r.chat_id == "oc1" for r in rows.values())
