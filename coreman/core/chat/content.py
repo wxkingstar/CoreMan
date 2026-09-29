@@ -264,12 +264,14 @@ class ContentBuilder:
             )
         if kind == "file":
             ref = dict(refs[0]) if refs else {}
-            unknown = msg("unknown_filename", self.locale)
+            # 飞书的引用在内容里就带着文件名；下载失败时模型至少还知道引用的是哪个文件。
+            given = ref.get("filename") if isinstance(ref.get("filename"), str) else None
+            unknown = given or msg("unknown_filename", self.locale)
             fetched: Media | None = None
             if _has_ref(ref):
                 await self._hint("downloading_quote_file")
                 try:
-                    fetched = await self.fetcher.fetch_file(ref, filename=None)
+                    fetched = await self.fetcher.fetch_file(ref, filename=given)
                 except MediaError:
                     # 引用的附件同样只是上下文：拿不到就只留一句「引用了文件」。
                     fetched = None

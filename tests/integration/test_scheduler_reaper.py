@@ -12,6 +12,7 @@ from coreman.core.db.models import (
     BotLease,
     ChatLog,
     ChatSession,
+    FeishuSentMessage,
     InboundEvent,
     OutboxItem,
     ProcessInstance,
@@ -432,10 +433,37 @@ async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(
     await db_session.commit()
     # batch=1：逼出分批循环，每批一个短事务
     counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
-    assert counts == {"old_tasks": 1, "old_inbound_events": 2, "old_outbox": 2}
+    assert counts == {
+        "old_tasks": 1,
+        "old_inbound_events": 2,
+        "old_outbox": 2,
+        "old_feishu_sent": 0,
+    }
     async with make_session_factory(db_engine)() as s:
         assert set((await s.execute(select(Task.id))).scalars()) == {queued_id, recent_id}
         # 还被排队任务引用的入站事件留着；任务先删掉的那条、没有任务的那条都删了
         assert set((await s.execute(select(InboundEvent.id))).scalars()) == {event_ids[1]}
         keys = set((await s.execute(select(OutboxItem.dedupe_key))).scalars())
         assert keys == {"failed-new", "pending-old"}
+
+
+async def test_retention_drops_old_feishu_sent_messages(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot = await _bot(db_session)
+    now = datetime.now(UTC)
+    for mid, age in (("om_old", 91), ("om_new", 89)):
+        db_session.add(
+            FeishuSentMessage(
+                bot_id=bot.id,
+                message_id=mid,
+                chat_id="oc1",
+                text=mid,
+                created_at=now - timedelta(days=age),
+            )
+        )
+    await db_session.commit()
+    counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
+    assert counts["old_feishu_sent"] == 1
+    async with make_session_factory(db_engine)() as s:
+        assert set((await s.execute(select(FeishuSentMessage.message_id))).scalars()) == {"om_new"}

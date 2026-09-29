@@ -14,11 +14,19 @@ from typing import Any
 
 import httpx
 from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from coreman.core.bus import outbox, streams
 from coreman.core.chat.reachability import private_target_valid
-from coreman.core.db.models import Bot, BotLease, FeishuDelivery, OutboxItem, TaskStream
+from coreman.core.db.models import (
+    Bot,
+    BotLease,
+    FeishuDelivery,
+    FeishuSentMessage,
+    OutboxItem,
+    TaskStream,
+)
 from coreman.core.feishu_cards.compile import (
     Compiled,
     compile_reply,
@@ -31,6 +39,7 @@ from coreman.core.feishu_cards.stream import StreamUnit, plan, stream_units
 from coreman.core.feishu_cards.thinking import thinking_panel, thinking_preview
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
+from coreman.core.platforms.feishu_content import bounded, sent_text
 from coreman.runtime.gateway_feishu.cards import (
     STREAMING_CONFIG,
     interaction_card,
@@ -178,7 +187,32 @@ class FeishuTransport:
                 params={"receive_id_type": receive_id_type},
                 json={**body, "receive_id": api_id(chat_id)},
             )
-        return api_id((result.get("data") or {}).get("message_id"))
+        data = result.get("data") or {}
+        mid = api_id(data.get("message_id"))
+        chat = data.get("chat_id") or (chat_id if receive_id_type == "chat_id" else "")
+        await self.remember(mid, chat, sent_text(kind, content))
+        return mid
+
+    async def remember(self, message_id: object, chat_id: object, text: str | None) -> None:
+        """发出消息的正文存档，有人引用它时 worker 从这里读；存不上不影响已经发出的消息。"""
+        if not (text and text.strip() and isinstance(message_id, str) and message_id):
+            return
+        if not isinstance(chat_id, str) or not chat_id:
+            return
+        values = {"chat_id": chat_id, "text": bounded(text)}
+        try:
+            async with self.factory() as session:
+                await session.execute(
+                    insert(FeishuSentMessage)
+                    .values(bot_id=self.bot_id, message_id=message_id, **values)
+                    .on_conflict_do_update(
+                        index_elements=[FeishuSentMessage.bot_id, FeishuSentMessage.message_id],
+                        set_=values,
+                    )
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 存档只为日后引用，不能让已发出的消息被当成失败重发
+            log.warning("feishu_sent_record_failed", error=type(exc).__name__)
 
     async def round(self) -> bool:
         """推一轮流卡片、发一批出站；返回 True 表示出站还没发完（调用方别等兜底，接着来）。
@@ -429,6 +463,9 @@ class FeishuTransport:
                 log.warning("feishu_rich_card_rejected", code=exc.code, task_id=row.task_id)
                 compiled = await self.plain_cards(thinking, answer, row.session_url, heading)
                 await self.put_card(row.task_id, card_id, compiled.cards[0])
+        if row.is_complete:
+            # 流式卡片发出时只是个卡片实体引用，正文到这里才定下来。
+            await self.remember(delivery.message_id, row.reply_context.get("chat_id"), answer)
         if visible_parts("", answer)[1].strip() or (row.is_complete and not row.pending_card):
             await typing(self, row.task_id, done=True)
         async with self.factory() as session:
