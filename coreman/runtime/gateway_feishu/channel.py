@@ -11,6 +11,7 @@ import asyncio
 import concurrent.futures
 import json
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -19,6 +20,45 @@ from lark_oapi.core.enum import LogLevel
 from lark_oapi.core.json import JSON
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+from lark_oapi.ws import client as ws_client
+
+from coreman.core.logging import get_logger
+
+# 长连接断了飞书不会重投卡片回调，断连到重连之间的点击直接报「目标回调服务当前未在线」，
+# 所以尽量缩短这段时间。websockets 默认 20 秒一次心跳、20 秒没回应才判断断开；
+# 重连前随机等待和失败后的重试间隔由飞书下发（约 30 秒、120 秒）。每个机器人一个子进程、
+# 一条连接，同时重连的只有这台机器上的几条，不需要那么长的错峰。
+WS_PING_INTERVAL_SECONDS = 10
+WS_PING_TIMEOUT_SECONDS = 10
+RECONNECT_JITTER_SECONDS = 2
+RECONNECT_INTERVAL_SECONDS = 10
+_sdk_connect_kwargs = ws_client._ws_connect_kwargs
+
+
+def _connect_kwargs() -> dict[str, Any]:
+    return {
+        **_sdk_connect_kwargs(),
+        "ping_interval": WS_PING_INTERVAL_SECONDS,
+        "ping_timeout": WS_PING_TIMEOUT_SECONDS,
+    }
+
+
+_sdk_configure = ws_client.Client._configure
+
+
+def _configure(self: Any, conf: Any) -> None:
+    """飞书每次握手都会下发重连参数；照收，只把等待时间压短。"""
+    _sdk_configure(self, conf)
+    _shorten_reconnect(self)
+
+
+def _shorten_reconnect(client: Any) -> None:
+    client._reconnect_nonce = min(client._reconnect_nonce, RECONNECT_JITTER_SECONDS)
+    client._reconnect_interval = min(client._reconnect_interval, RECONNECT_INTERVAL_SECONDS)
+
+
+ws_client._ws_connect_kwargs = _connect_kwargs
+ws_client.Client._configure = _configure
 
 # 回复按钮点击的应答：已收下（worker 还可能拒绝，所以不说「已发送」）、这一行点过了、
 # 只有提问人能点。选择题等其他卡片点击照旧只回一个对勾，结果由后续卡片更新。
@@ -58,6 +98,23 @@ class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.type
             verification_token=verification_token,
             log_level=LogLevel.ERROR,
         )
+        self._log = get_logger(__name__).bind(app_id=app_id)
+        self._lost_at: float | None = None
+        self.on("reconnecting", self._on_reconnecting)
+        self.on("reconnected", self._on_reconnected)
+
+    def _on_reconnecting(self) -> None:
+        """SDK 判定连接断开、开始重连时调用（在它的 WS 线程上），随后才读重连参数。"""
+        self._lost_at = time.monotonic()
+        client = getattr(self, "_ws_client", None)
+        if client is not None:  # 首次连接就失败时还没收到过飞书下发的参数
+            _shorten_reconnect(client)
+        self._log.warning("feishu_ws_reconnecting")
+
+    def _on_reconnected(self) -> None:
+        lost_at, self._lost_at = self._lost_at, None
+        offline = round(time.monotonic() - lost_at, 1) if lost_at is not None else None
+        self._log.warning("feishu_ws_reconnected", offline_s=offline)
 
     def _build_dispatcher(self) -> Any:
         return (
