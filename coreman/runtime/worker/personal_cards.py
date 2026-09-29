@@ -18,67 +18,37 @@ from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 
 OPTIONS = (
-    (
-        "all",
-        "全部权限（含发送消息）",
-        "消息、日程、邮件、任务、云文档、审批等应用已开通的个人数据，可读取、创建、修改和删除；"
-        "可按你的明确要求以你的身份发消息和邮件。",
-    ),
-    (
-        "all_except_send",
-        "全部权限（不含发送消息）",
-        "消息、日程、邮件、任务、云文档、审批等应用已开通的个人数据，可读取、创建、修改和删除；"
-        "不会以你的身份发消息或邮件。",
-    ),
-    ("messages_readonly", "仅读取消息", "搜索和读取你有权限访问的私聊、群聊消息；不发送消息。"),
+    ("all", "全部权限，可代发消息"),
+    ("all_except_send", "全部权限，不代发消息"),
+    ("messages_readonly", "仅读消息"),
+    ("no_messages", "除消息外全部权限"),
 )
 
 
 def selection_card(task_id: int, *, remote_revoked: bool = True) -> dict[str, Any]:
     elements: list[dict[str, Any]] = [
-        {"tag": "markdown", "content": "选择本次允许 AI 员工使用的范围，点击后获取授权链接。"}
-    ]
-    for index, (level, title, description) in enumerate(OPTIONS, 1):
-        elements.extend(
-            [
-                {"tag": "markdown", "content": f"**{index}. {title}**\n{description}"},
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": f"选择{title}"},
-                    "type": "primary" if index == 1 else "default",
-                    "behaviors": [
-                        {
-                            "type": "callback",
-                            "value": {
-                                "task_id": f"personal:{task_id}",
-                                "level": level,
-                                "event_key": "personal_authorize",
-                            },
-                        }
-                    ],
-                },
-            ]
-        )
-    elements.append(
         {
-            "tag": "markdown",
-            "content": (
-                "仅限本人私聊使用 · 选择有效期 10 分钟\n实际可执行的操作以系统已接入的工具为准。"
-                + "\n"
-                + service.RETENTION_NOTICE
-            ),
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": f"{index}. {title}"},
+            "type": "primary" if index == 1 else "default",
+            "width": "fill",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "task_id": f"personal:{task_id}",
+                        "level": level,
+                        "event_key": "personal_authorize",
+                    },
+                }
+            ],
         }
-    )
+        for index, (level, title) in enumerate(OPTIONS, 1)
+    ]
+    note = "10 分钟内有效 · " + service.RETENTION_NOTICE
     if not remote_revoked:
-        elements.append(
-            {
-                "tag": "markdown",
-                "content": (
-                    "旧授权在 CoreMan 中已停止访问，飞书端凭证撤销尚未确认。"
-                    "本次仍按新选择限制访问。"
-                ),
-            }
-        )
+        note += "\n旧授权已停用，飞书端撤销未确认。"
+    elements.append({"tag": "markdown", "content": f"<font color='grey'>{note}</font>"})
     return {
         "schema": "2.0",
         "header": {
@@ -156,7 +126,7 @@ async def handle_selection(
             return "ignored"
     except (ValueError, TypeError, KeyError, AttributeError):
         return "ignored"
-    choice = {"all": "1", "all_except_send": "2", "messages_readonly": "3"}[str(level)]
+    choice = str(next(i for i, option in enumerate(OPTIONS, 1) if option[0] == level))
     title = next(option[1] for option in OPTIONS if option[0] == level)
     try:
         result = await service.choose_authorization(
@@ -169,9 +139,7 @@ async def handle_selection(
         elements = [
             {
                 "tag": "markdown",
-                "content": (
-                    f"**已选择：{title}**\n点击下方按钮完成飞书授权，然后回到私聊回复“已授权”。"
-                ),
+                "content": f"**已选择：{title}**\n授权后回私聊回复“已授权”。",
             },
             {
                 "tag": "button",
@@ -179,7 +147,6 @@ async def handle_selection(
                 "text": {"tag": "plain_text", "content": "前往飞书授权"},
                 "behaviors": [{"type": "open_url", "default_url": result["authorization_url"]}],
             },
-            {"tag": "markdown", "content": "历史授权不会扩大本次选择的范围。"},
         ]
         outcome = "personal_authorization_pending"
     except (service.PersonalError, ValueError) as exc:
@@ -196,7 +163,7 @@ async def handle_selection(
         if getattr(exc, "code", "") == "app_scope_discovery_permission_missing":
             text = (
                 "应用缺少权限查询能力，请管理员开通 application:application:self_manage "
-                "后重试，或重新连接并选择仅读取消息。"
+                "后重试，或重新连接并选择仅读消息。"
             )
         elif getattr(exc, "code", "") == "app_send_permission_missing":
             text = (

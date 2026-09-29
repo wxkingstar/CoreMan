@@ -37,6 +37,22 @@ def test_middle_tier_preserves_writes_but_excludes_all_message_sending_forms():
     assert select_scopes("all", writes + sends + writes) == sorted(set(writes + sends))
 
 
+def test_no_messages_tier_is_the_middle_tier_without_any_chat_permission():
+    kept = ["docx:document", "calendar:calendar.event:create", "calendar:calendar.event:reply"]
+    dropped = [
+        "search:message",
+        "im:message:readonly",
+        "im:message.p2p_msg:get_as_user",
+        "im:chat:read",
+        "im:chat:create_by_user",
+        "im:message.send_as_user",
+        "mail:user_mailbox.message:send",
+    ]
+    assert select_scopes("no_messages", kept + dropped + ["offline_access"]) == sorted(
+        kept + ["offline_access"]
+    )
+
+
 def test_invalid_tier_and_corrupt_scope_fail_closed():
     with pytest.raises(ValueError, match="invalid_permission_level"):
         select_scopes("unknown", [])

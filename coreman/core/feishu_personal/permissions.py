@@ -6,7 +6,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-LEVELS = ("messages_readonly", "all_except_send", "all")
+LEVELS = ("messages_readonly", "all_except_send", "all", "no_messages")
 MESSAGE_SCOPES = frozenset(
     {
         "offline_access",
@@ -25,6 +25,11 @@ _SEND = re.compile(r"(?:^|[.:_])(send|reply|forward)(?:$|[.:_])")
 NOT_SENDING = frozenset({"calendar:calendar.event:reply"})
 
 
+def is_message_scope(scope: str) -> bool:
+    """Chat and message permissions, which the no-messages tier never asks for."""
+    return scope.startswith("im:") or scope == "search:message"
+
+
 class PermissionsError(ValueError):
     """Sanitized discovery failure; never include upstream secrets or payloads."""
 
@@ -40,6 +45,7 @@ def select_scopes(level: str, available: list[str]) -> list[str]:
 
     Broad IM message grants combine read and send, so they cannot be requested
     for the middle tier. Other write/delete/group permissions remain available.
+    The no-messages tier is the middle tier without any chat or message permission.
     OAuth grants alone cannot prevent sending via a future composite permission:
     the service must independently prohibit send/reply/forward operations.
     """
@@ -52,10 +58,12 @@ def select_scopes(level: str, available: list[str]) -> list[str]:
         raise PermissionsError()
     if level == "messages_readonly":
         scopes &= MESSAGE_SCOPES
-    elif level == "all_except_send":
+    elif level in ("all_except_send", "no_messages"):
         scopes = {
             s for s in scopes if s != "im:message" and (s in NOT_SENDING or not _SEND.search(s))
         }
+        if level == "no_messages":
+            scopes = {s for s in scopes if not is_message_scope(s)}
     return sorted(scopes)
 
 

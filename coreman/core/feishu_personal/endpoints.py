@@ -2,8 +2,9 @@
 
 Every request is matched back to this list before the owner's token leaves the server, so a
 tool can never reach a path that is not registered here. `kind` decides which authorization
-tier may call it: `read` for every tier, `write` for the two "all" tiers, `send` (anything that
-delivers a message or mail to someone else) only for the tier that includes sending.
+tier may call it: `read` for every tier, `write` for the two "all" tiers and the no-messages
+tier, `send` (anything that delivers a message or mail to someone else) only for the tier that
+includes sending. The no-messages tier never reaches chats or messages (`/im/` APIs).
 
 `scopes` lists every user permission Feishu accepts for the API; holding any one of them in
 the owner's selected and actually granted scopes is enough. The first is the one the app
@@ -21,8 +22,10 @@ from coreman.core.feishu_personal.permissions import MESSAGE_SCOPES
 
 Kind = Literal["read", "write", "send"]
 LEVELS_BY_KIND: dict[str, frozenset[str]] = {
-    "read": frozenset({"legacy_readonly", "messages_readonly", "all_except_send", "all"}),
-    "write": frozenset({"all_except_send", "all"}),
+    "read": frozenset(
+        {"legacy_readonly", "messages_readonly", "all_except_send", "all", "no_messages"}
+    ),
+    "write": frozenset({"all_except_send", "all", "no_messages"}),
     "send": frozenset({"all"}),
 }
 # Grants made before tiers existed were issued for this fixed read-only set.
@@ -667,6 +670,8 @@ def denied(endpoint: Endpoint, level: str, scopes: set[str] | frozenset[str]) ->
         return "outside_selected_authorization"
     if level == "messages_readonly" and not MESSAGE_SCOPES.intersection(endpoint.scopes):
         return "outside_selected_authorization"
+    if level == "no_messages" and endpoint.path.startswith("/im/"):
+        return "outside_selected_authorization"
     if level == "legacy_readonly":
         if LEGACY_SCOPES.intersection(endpoint.scopes):
             return None
@@ -677,12 +682,13 @@ def denied(endpoint: Endpoint, level: str, scopes: set[str] | frozenset[str]) ->
 
 
 def request_scopes(level: str, allowed: set[str] | frozenset[str]) -> list[str]:
-    """What the top two tiers ask the owner to grant: only what the tools use.
+    """What the tiers built from app permissions ask the owner to grant: only what the tools use.
 
     `allowed` is the app's enabled user permissions already narrowed to the tier. Apps
     often enable hundreds of permissions and Feishu refuses an authorization request with
     too many (error 20084), so each API contributes one permission the app has, the most
-    specific one first, plus the fixed message-read set and the extra field permissions.
+    specific one first, plus the fixed message-read set (unless the tier dropped it) and the
+    extra field permissions.
     """
     chosen = set(allowed & (MESSAGE_SCOPES | EXTRA_SCOPES | {"offline_access"}))
     for endpoint in ENDPOINTS.values():

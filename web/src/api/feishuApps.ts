@@ -48,7 +48,7 @@ export interface FeishuAppVersion {
   bot: { menu_enabled: boolean; menu_display_strategy: number | null; menus: FeishuMenu[] } | null
 }
 export interface FeishuSlashCommand { command_id: string; command: string; description: string; icon_key: string | null; update_time: string | null }
-export type FeishuPersonalLevel = 'messages_readonly' | 'all_except_send' | 'all'
+export type FeishuPersonalLevel = 'messages_readonly' | 'all_except_send' | 'all' | 'no_messages'
 export interface FeishuAppOverview {
   app_id: string
   app: {

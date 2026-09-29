@@ -3,7 +3,7 @@ export interface FeishuAuthorization {
   bot_id: string
   bot_name: string
   status: 'connected' | 'selecting' | 'pending' | 'expired' | 'revoked'
-  authorization_level?: 'legacy_readonly' | 'messages_readonly' | 'all_except_send' | 'all'
+  authorization_level?: 'legacy_readonly' | 'messages_readonly' | 'all_except_send' | 'all' | 'no_messages'
   requested_scopes?: string[]
   missing_scopes?: string[]
   scopes: string[]

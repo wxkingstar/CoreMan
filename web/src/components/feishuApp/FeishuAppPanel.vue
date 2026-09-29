@@ -13,7 +13,7 @@ import { formatDateTime } from '@/utils/format'
 
 const props = defineProps<{ botId: string }>()
 const { t } = useI18n()
-const LEVELS: FeishuPersonalLevel[] = ['messages_readonly', 'all_except_send', 'all']
+const LEVELS: FeishuPersonalLevel[] = ['messages_readonly', 'all_except_send', 'all', 'no_messages']
 /** 取应用访问凭证阶段的失败：凭证错、应用不存在或已停用，而不是缺权限。 */
 const CREDENTIAL_ERRORS = new Set([10003, 10012, 10013, 10014, 10015, 99991543, 99991663, 99991665])
 

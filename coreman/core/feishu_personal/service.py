@@ -199,12 +199,7 @@ async def existing_row(
     return await _locked(session, scope, app_id, secret)
 
 
-RETENTION_NOTICE = (
-    "授权只在你和机器人的私聊里生效，群聊不会使用；"
-    "你本人创建、结果只发给你本人的定时任务也可以使用。"
-    "私聊内容和回答与普通私聊一样保留在对话记录中，只有你本人能查看；"
-    "撤销授权会停止后续读取，但不会删除已有记录。"
-)
+RETENTION_NOTICE = "仅私聊可用，对话记录仅你可见；撤销后停止读取，不删已有记录。"
 
 
 def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
@@ -230,11 +225,7 @@ def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
     }
 
 
-SELECTION_PROMPT = (
-    "请选择卡片中的授权范围，点击后生成授权链接。个人授权仅限本人与机器人的私聊使用。"
-    + "\n"
-    + RETENTION_NOTICE
-)
+SELECTION_PROMPT = "请在卡片中选择授权范围。" + RETENTION_NOTICE
 
 
 async def _revoke_remote(cipher: Cipher, row: FeishuPersonalGrant, secret: str) -> bool:
@@ -280,7 +271,7 @@ async def choose_authorization(
         or cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")) != str(selection_task_id)
     ):
         raise PersonalError("selection_required")
-    levels = {"1": "all", "2": "all_except_send", "3": "messages_readonly"}
+    levels = {"1": "all", "2": "all_except_send", "3": "messages_readonly", "4": "no_messages"}
     if choice not in levels:
         raise PersonalError("selection_required")
     level = levels[choice]
