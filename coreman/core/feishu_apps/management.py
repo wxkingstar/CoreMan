@@ -142,12 +142,14 @@ def personal_levels(user_scopes: list[str]) -> dict[str, bool]:
     except personal_permissions.PermissionsError:
         broad = set()
     broad -= manifest.PROTOCOL_SCOPES
+    no_messages = {scope for scope in broad if not personal_permissions.is_message_scope(scope)}
     # 第 3 档按固定消息范围申请；auth:user.id:read 是协议层授权项，应用权限列表里本来就没有。
     readonly = personal_permissions.MESSAGE_SCOPES - manifest.PROTOCOL_SCOPES
     return {
         "messages_readonly": readonly <= available,
         "all_except_send": bool(broad),
         "all": bool(broad) and {"im:message", "im:message.send_as_user"} <= available,
+        "no_messages": bool(no_messages),
     }
 
 

@@ -171,7 +171,7 @@ async def test_personal_card_binds_verified_owner_and_current_selection(
         await policy.task_scope(db_session, click.id, str(user.id))
 
 
-@pytest.mark.parametrize("level", ["all", "all_except_send", "messages_readonly"])
+@pytest.mark.parametrize("level", ["all", "all_except_send", "messages_readonly", "no_messages"])
 async def test_card_tier_preserves_authoritative_state_and_rotates_context(
     db_session, app, db_engine, monkeypatch, level
 ):
@@ -209,6 +209,7 @@ async def test_card_tier_preserves_authoritative_state_and_rotates_context(
                 *permissions.MESSAGE_SCOPES,
                 "im:message",
                 "im:message.send_as_user",
+                "docx:document:readonly",
             ]
         ),
     )
@@ -219,4 +220,5 @@ async def test_card_tier_preserves_authoritative_state_and_rotates_context(
     assert row.context_epoch != selection_epoch
     assert row.status == "pending" and row.token_enc is None
     assert ("im:message.send_as_user" in row.requested_scopes) == (level == "all")
+    assert ("im:message:readonly" in row.requested_scopes) == (level != "no_messages")
     assert http.await_count == 1

@@ -104,6 +104,7 @@ async def test_overview_combines_app_versions_grants_and_commands():
         "messages_readonly": True,
         "all_except_send": True,
         "all": False,
+        "no_messages": True,
     }
     online = data["versions"]["online"]
     assert online["version"] == "1.0.3" and online["visibility"]["open_ids"] == ["ou_1"]
@@ -285,4 +286,5 @@ def test_personal_levels_ignore_protocol_scopes():
         "messages_readonly": True,
         "all_except_send": True,
         "all": False,
+        "no_messages": True,
     }

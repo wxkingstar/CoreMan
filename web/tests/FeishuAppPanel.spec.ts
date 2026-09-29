@@ -27,7 +27,7 @@ function overview(over: Partial<FeishuAppOverview> = {}): FeishuAppOverview {
     scopes: [{ scope: 'im:message:send_as_bot', token_types: ['tenant'], level: 1, granted: true }],
     missing_scopes: { tenant: [], user: ['im:message.send_as_user'] },
     pending_grants: ['contact:user.employee_id:readonly'],
-    personal_levels: { messages_readonly: true, all_except_send: true, all: false },
+    personal_levels: { messages_readonly: true, all_except_send: true, all: false, no_messages: true },
     personal_connections: 2,
     versions: {
       online: { version_id: 'oav_1', version: '1.0.2', status: 1, create_time: null, publish_time: '1758000000', remark: null, update_remark: null, visibility: { is_all: true, open_ids: [], department_ids: [] }, events: [], bot: { menu_enabled: true, menu_display_strategy: 1, menus: [{ menu_id: 'm1', parent_menu_id: null, name: '文档', kind: 'link', pc_url: 'https://doc', mobile_url: 'https://doc', event_key: null, sort: 0 }] } },

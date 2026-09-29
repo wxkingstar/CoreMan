@@ -51,7 +51,8 @@ async def test_connection_shows_choices_without_contacting_oauth(
 
 
 @pytest.mark.parametrize(
-    "choice,expected", [("1", "all"), ("2", "all_except_send"), ("3", "messages_readonly")]
+    "choice,expected",
+    [("1", "all"), ("2", "all_except_send"), ("3", "messages_readonly"), ("4", "no_messages")],
 )
 async def test_chosen_level_controls_requested_scopes(
     db_session, app, monkeypatch, choice, expected
@@ -80,6 +81,9 @@ async def test_chosen_level_controls_requested_scopes(
     requested = set(http.call_args.kwargs["data"]["scope"].split())
     assert ("docx:document:write_only" in requested) == (choice != "3")
     assert ("im:message.send_as_user" in requested) == (choice == "1")
+    # The no-messages tier asks for nothing that reads private or group chats.
+    assert ("im:message:readonly" in requested) == (choice != "4")
+    assert not (choice == "4" and any(permissions.is_message_scope(s) for s in requested))
     # Permissions no tool uses are never requested, however many the app enabled.
     assert "aily:session:read" not in requested
 
@@ -243,7 +247,11 @@ EVENTS = "/calendar/v4/calendars/cal1/events"
 
 @pytest.mark.parametrize(
     "level,expected",
-    [("messages_readonly", "outside_selected_authorization"), ("all_except_send", None)],
+    [
+        ("messages_readonly", "outside_selected_authorization"),
+        ("all_except_send", None),
+        ("no_messages", None),
+    ],
 )
 async def test_writes_need_a_tier_that_allows_them(db_session, app, monkeypatch, level, expected):
     bot, user, task = await setup(db_session, app)
@@ -398,3 +406,33 @@ async def test_refused_authorization_keeps_feishus_code(db_session, app, monkeyp
     with pytest.raises(service.PersonalError) as caught:
         await service.choose_authorization(db_session, app.state.cipher, scope, "2")
     assert caught.value.payload() == {"error": "authorization_unavailable", "upstream_code": 20084}
+
+
+async def test_no_messages_tier_never_reads_chats_even_with_granted_scopes(
+    db_session, app, monkeypatch
+):
+    bot, user, task = await setup(db_session, app)
+    scopes = ["im:message:readonly", "search:message", "im:chat:read", "docx:document:readonly"]
+    await grant(
+        db_session,
+        app,
+        bot,
+        user,
+        authorization_level="no_messages",
+        scopes=scopes,
+        requested_scopes=scopes,
+    )
+    scope = await policy.task_scope(db_session, task.id, str(user.id))
+    monkeypatch.setattr(service, "_http", AsyncMock(return_value={"code": 0, "data": {}}))
+    for method, path in (
+        ("GET", "/im/v1/messages"),
+        ("POST", "/im/v1/messages/search"),
+        ("GET", "/im/v1/chats"),
+    ):
+        with pytest.raises(service.PersonalError, match="outside_selected_authorization"):
+            await service.api_request(db_session, app.state.cipher, scope, method, path)
+    service._http.assert_not_called()
+    await service.api_request(
+        db_session, app.state.cipher, scope, "GET", "/docx/v1/documents/doc1/raw_content"
+    )
+    assert service._http.call_count == 1

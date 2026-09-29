@@ -168,7 +168,12 @@ def test_personal_selection_card_uses_explicit_levels_and_callback_roundtrip():
     card = selection_card(123)
     buttons = [e for e in card["body"]["elements"] if e["tag"] == "button"]
     values = [b["behaviors"][0]["value"] for b in buttons]
-    assert [v["level"] for v in values] == ["all", "all_except_send", "messages_readonly"]
+    assert [v["level"] for v in values] == [
+        "all",
+        "all_except_send",
+        "messages_readonly",
+        "no_messages",
+    ]
     assert buttons[0]["type"] == "primary"
     assert all(v["task_id"] == "personal:123" for v in values)
     raw = {
