@@ -178,13 +178,29 @@ def _localized(value: object) -> Any:
     return None
 
 
+def _rendered(node: object, depth: int = 0) -> str:
+    """飞书渲染后的内部结构：`{tag, property: {content | elements}}`，逐层取文字按原顺序拼起来。"""
+    if depth > 6:
+        return ""
+    if isinstance(node, list):
+        return "".join(_rendered(n, depth + 1) for n in node[:50])
+    prop = node.get("property") if isinstance(node, dict) else None
+    if not isinstance(prop, dict):
+        return ""
+    content = prop.get("content")
+    if isinstance(content, str):
+        return content
+    return _rendered(prop.get("elements"), depth + 1)
+
+
 def _cell(value: object) -> str:
     if isinstance(value, bool | int | float):
         return str(value)
     if isinstance(value, str):
         return value.replace("\n", " ")
     if isinstance(value, dict):
-        return _plain(value)
+        # 按 user_card_content 读回的卡片，表格单元格不是发送时的字符串，而是渲染后的结构。
+        return (_plain(value) or _rendered(value)).replace("\n", " ")
     if isinstance(value, list):
         return "、".join(t for t in (_cell(v) for v in value[:20]) if t)
     return ""
