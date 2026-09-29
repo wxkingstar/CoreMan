@@ -160,3 +160,45 @@ def test_sent_text_skips_card_entity_references() -> None:
     assert (
         sent_text("post", {"zh_cn": {"content": [[{"tag": "md", "text": "**粗**"}]]}}) == "**粗**"
     )
+
+
+def _rendered_cell(*pieces: tuple[str, str]) -> dict:
+    """按 user_card_content 读回的表格单元格：渲染后的内部结构，不是发送时的字符串。"""
+    return {
+        "id": "x1",
+        "tag": "markdown",
+        "property": {
+            "elements": [
+                {"id": f"e{i}", "tag": tag, "property": {"content": text, "textAlign": "left"}}
+                for i, (tag, text) in enumerate(pieces)
+            ],
+            "markdownElements": [],
+            "originTag": "lark_md",
+            "textAlign": "left",
+        },
+    }
+
+
+def test_table_cells_read_back_in_rendered_form() -> None:
+    card = {
+        "schema": "2.0",
+        "body": {
+            "elements": [
+                {
+                    "tag": "table",
+                    "columns": [
+                        {"name": "c0", "display_name": "阶段", "data_type": "lark_md"},
+                        {"name": "c1", "display_name": "人数", "data_type": "lark_md"},
+                    ],
+                    "rows": [
+                        {
+                            "c0": _rendered_cell(("plain_text", "首页"), ("inlineCode", "(A)")),
+                            "c1": _rendered_cell(("plain_text", "100")),
+                        },
+                        {"c0": _rendered_cell(("plain_text", "下单")), "c1": "3"},
+                    ],
+                }
+            ]
+        },
+    }
+    assert card_text(card) == "| 阶段 | 人数 |\n| 首页(A) | 100 |\n| 下单 | 3 |"
