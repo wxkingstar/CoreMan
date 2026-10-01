@@ -5,6 +5,7 @@ from sqlalchemy import select
 from structlog.testing import capture_logs
 
 from coreman.core.db.models import (
+    Bot,
     BotSkill,
     EnvPreset,
     RelayServer,
@@ -191,6 +192,48 @@ async def test_internal_approval_binds_scope_actor_and_catalog(
     assert approval.status == "approved"
 
 
+async def test_internal_install_without_security_policy(client, db_session, db_engine, monkeypatch):
+    bot, skill, _ = await prepare(client, db_session, internal=True)
+    bot_id, skill_id = bot.id, skill.id
+    path = f"/api/admin/bots/{bot_id}/skills/{skill_id}/install"
+    # 显式清空覆盖目录模板：技能自身已做约束时申请可不附加安全约束。
+    result = await client.post(
+        path,
+        json={
+            "selected_env_groups": ["erp"],
+            "user_env_vars": {"API_KEY": "secret"},
+            "requested_security_prompt": "  ",
+        },
+    )
+    assert result.status_code == 200, result.text
+    approval = result.json()["data"]["approval"]
+    assert approval["requested_security_prompt"] == ""
+    await login_as(client, db_session, role="ai_committee")
+    review_path = f"/api/admin/skill-approvals/{approval['id']}/review"
+    assert (
+        await client.post(review_path, json={"decision": "approve"}, headers={"If-Match": "1"})
+    ).status_code == 422
+    result = await client.post(
+        review_path,
+        json={"decision": "approve", "approved_databases": ["erp"]},
+        headers={"If-Match": "1"},
+    )
+    assert result.status_code == 200, result.text
+    row = await db_session.get(SkillApproval, uuid.UUID(approval["id"]))
+    assert row.approved_security_prompt is None
+
+    async def agent(*args):
+        return {"success": True}
+
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert task.status == "succeeded", task.error_message
+    db_session.expire_all()
+    installed = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert installed.status == "installed" and installed.security_prompt is None
+    assert "安全约束" not in (await db_session.get(Bot, bot_id)).merged_system_prompt
+
+
 async def test_install_cancelled_during_agent_cannot_resurrect(
     client, db_session, db_engine, monkeypatch
 ):
@@ -216,8 +259,6 @@ async def test_install_cancelled_during_agent_cannot_resurrect(
 async def test_approved_install_policy_survives_edit_and_lost_task(
     client, db_session, db_engine, monkeypatch
 ):
-    from coreman.core.db.models import Bot
-
     bot, skill, cipher = await prepare(client, db_session, internal=True)
     bot_id, skill_id = bot.id, skill.id
     path = f"/api/admin/bots/{bot_id}/skills/{skill_id}"

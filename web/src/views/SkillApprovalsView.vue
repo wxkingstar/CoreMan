@@ -137,7 +137,7 @@ onMounted(async () => { await load(); try { catalog.value = await allSkills() } 
         </el-form-item>
         <el-form-item :label="t('skill.requestedPolicy')">
           <p class="policy">
-            {{ selected?.requested_security_prompt }}
+            {{ selected?.requested_security_prompt || t('skill.noPolicy') }}
           </p>
         </el-form-item>
         <el-form-item :label="t('skill.policy')">
@@ -145,6 +145,7 @@ onMounted(async () => { await load(); try { catalog.value = await allSkills() } 
             v-model="form.approved_security_prompt"
             type="textarea"
             :rows="6"
+            :placeholder="t('skill.policyHint')"
           />
         </el-form-item>
         <el-form-item :label="t('skill.comment')">
