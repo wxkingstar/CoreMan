@@ -277,6 +277,7 @@ async function remove(row: Installed) {
           type="textarea"
           :rows="6"
           maxlength="16000"
+          :placeholder="t('skill.policyHint')"
         />
       </el-form-item>
       <el-checkbox v-model="form.reinstall_code">

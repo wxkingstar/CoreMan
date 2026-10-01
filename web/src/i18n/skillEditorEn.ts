@@ -29,7 +29,7 @@ const skillEditorEn = {
   publish: 'Enable in skill catalog', publishHint: 'Once enabled, AI employee administrators can install this skill. Saving does not install it automatically.',
   sourceDialogHint: 'A source can contain multiple skills. After saving, sync from the source list, then configure and enable skills in the catalog.',
   sourceLabelHint: 'e.g. Internal skill library', repositoryHint: 'Supports HTTPS and SSH Git URLs. For private repositories, configure a Project Access Token below. May be blank for MCP groups.',
-  saveSource: 'Save source', presetLabelHint: 'e.g. ERP read-only connection', requiredBasics: 'Enter a skill identifier and select a source.', policyRequired: 'Enter default security constraints for skills that require approval.',
+  saveSource: 'Save source', presetLabelHint: 'e.g. ERP read-only connection', requiredBasics: 'Enter a skill identifier and select a source.',
   presetRequired: 'Enter a preset name and identifier.', editMode: 'Environment variable editor mode', pairs: 'Key-value pairs', raw: '.env text',
   pairsHint: 'Add variables individually. Existing secrets are masked; keep the mask to leave a value unchanged.',
   rawHint: 'Paste KEY=value. Supports comments, export, quotes, and multiline quoted values. Quote values containing #. Commands and variable expansion are not executed. Saved secrets remain masked.',

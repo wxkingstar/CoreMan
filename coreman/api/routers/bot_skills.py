@@ -185,9 +185,11 @@ async def install(
     )
     inputs["reinstall_code"] = body.reinstall_code
     if skill.security_level == "internal":
-        policy = body.requested_security_prompt or skill.security_prompt_template or ""
-        if not policy.strip():
-            raise ApiError(422, 422, "内部技能必须填写申请安全约束")
+        # 安全约束可选：技能自身已做约束时可留空；未传字段才回落到目录模板。
+        policy = body.requested_security_prompt
+        if policy is None:
+            policy = skill.security_prompt_template or ""
+        policy = policy.strip()
         if skill.selectable_env_groups and not body.selected_env_groups:
             raise ApiError(422, 422, "请选择申请的数据库范围")
         row = SkillApproval(
@@ -360,9 +362,12 @@ async def review(
             or inputs["working_dir"] != bot.working_dir
         ):
             raise ApiError(409, 409, "机器人实例或工作目录已变更，请重新申请")
-        policy = body.approved_security_prompt or row.requested_security_prompt
-        if not policy.strip() or (row.requested_databases and not body.approved_databases):
-            raise ApiError(422, 422, "批准时必须明确安全约束与数据库范围")
+        if row.requested_databases and not body.approved_databases:
+            raise ApiError(422, 422, "批准时必须选择数据库范围")
+        policy = body.approved_security_prompt
+        if policy is None:
+            policy = row.requested_security_prompt
+        policy = policy.strip() or None
         row.approved_databases, row.approved_security_prompt = body.approved_databases, policy
         row.status = "approved"
         inputs.update(
