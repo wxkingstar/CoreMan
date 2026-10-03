@@ -1,6 +1,7 @@
 """个人凭证的校验规则：键名、请求体、提交值、卡片 ID 与本轮令牌。"""
 
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -83,11 +84,15 @@ def test_capability_round_trip_and_expiry():
         chat_id="oc_private",
         chat_type="single",
         session_key="oc_private",
+        relay_session_id=uuid.uuid4(),
         event_id=11,
         cron_job_id=None,
     )
     token = policy.issue_capability(CIPHER, cap, ttl_seconds=60)
     assert policy.read_capability(CIPHER, token) == cap
+    cron = replace(cap, origin_kind="cron", session_key=None, relay_session_id=None)
+    token = policy.issue_capability(CIPHER, cron, ttl_seconds=60)
+    assert policy.read_capability(CIPHER, token) == cron
     expired = policy.issue_capability(CIPHER, cap, ttl_seconds=-1)
     with pytest.raises(ValueError):
         policy.read_capability(CIPHER, expired)

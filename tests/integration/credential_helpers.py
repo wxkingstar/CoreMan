@@ -6,7 +6,7 @@ import uuid
 
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.db.models import PlatformApp, Task, User, UserIdentity, UserReached
+from coreman.core.db.models import ChatSession, PlatformApp, Task, User, UserIdentity, UserReached
 from coreman.core.personal_credentials import policy, service
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
@@ -17,6 +17,7 @@ FIELDS = [
 ]
 BODY = {"fields": FIELDS, "purpose": "查询你在 Demo 系统里的订单"}
 VALUES = {"DEMO_USERNAME": "alice", "DEMO_PIN": "pin-778899"}
+DEMO_RELAY_SESSION = uuid.UUID("00000000-0000-4000-8000-0000000000a1")
 
 
 async def owner(session, *, platform="feishu", chat_type="single", reached=True):  # type: ignore[no-untyped-def]
@@ -40,7 +41,9 @@ async def owner(session, *, platform="feishu", chat_type="single", reached=True)
     return bot, user, task, cipher
 
 
-def cap_for(bot, user, task) -> policy.Capability:  # type: ignore[no-untyped-def]
+def cap_for(  # type: ignore[no-untyped-def]
+    bot, user, task, relay_session_id: uuid.UUID | None = DEMO_RELAY_SESSION
+) -> policy.Capability:
     message = task.payload["message"]
     return policy.Capability(
         task_id=task.id,
@@ -50,9 +53,25 @@ def cap_for(bot, user, task) -> policy.Capability:  # type: ignore[no-untyped-de
         chat_id=message["chat_id"],
         chat_type=message["chat_type"],
         session_key=task.session_key,
+        relay_session_id=relay_session_id,
         event_id=task.inbound_event_id,
         cron_job_id=None,
     )
+
+
+async def seed_chat_session(  # type: ignore[no-untyped-def]
+    session, bot, task, relay_session_id: uuid.UUID = DEMO_RELAY_SESSION
+) -> None:
+    """来源那一轮开轮时留下的会话映射：续接只在它仍指向同一个 relay 会话时才进行。"""
+    session.add(
+        ChatSession(
+            bot_id=bot.id,
+            session_key=task.session_key,
+            relay_session_id=relay_session_id,
+            backend="claude",
+        )
+    )
+    await session.commit()
 
 
 async def resume_task(session, origin: Task, user: User) -> Task:  # type: ignore[no-untyped-def]
@@ -84,6 +103,7 @@ def cron_cap(bot, user, task) -> policy.Capability:  # type: ignore[no-untyped-d
         chat_id=f"cron:{job_id}",
         chat_type="cron",
         session_key=None,
+        relay_session_id=None,
         event_id=None,
         cron_job_id=job_id,
     )

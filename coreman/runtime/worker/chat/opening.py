@@ -221,7 +221,9 @@ class OpenStage(ChatStageBase):
         )
         from coreman.runtime.worker.chat import credentials
 
-        extra, env, personal_secrets = await credentials.configure(session, ctx, intake, extra, env)
+        extra, env, personal_secrets = await credentials.configure(
+            session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
+        )
         from coreman.core.prompting.rich_cards import with_rich_cards
 
         extra = with_rich_cards(extra, intake.bot.platform, intake.bot.rich_cards)

@@ -1,9 +1,11 @@
 """本人触发的轮次注入本人的凭证；别人、协作轮拿不到；模型复述时出站被拦。"""
 
+import uuid
+
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.chat.redaction import PLACEHOLDER
-from coreman.core.db.models import InboundEvent, User, UserIdentity
+from coreman.core.db.models import ChatSession, InboundEvent, User, UserIdentity
 from coreman.core.personal_credentials import policy, store
 from coreman.core.prompting import Speaker
 from coreman.runtime.worker.chat import credentials
@@ -37,6 +39,10 @@ async def test_private_turn_gets_own_credentials_and_echo_is_masked(
         "chat",
         "oc_private",
     )
+    # 令牌记着本轮用的 relay 会话：续接时凭它确认对话没有被重置过。
+    chat_session = await db_session.get(ChatSession, (bot.id, task.session_key))
+    assert cap.relay_session_id == chat_session.relay_session_id
+    assert fake.requests[0]["session_id"] == str(cap.relay_session_id)
     prompt = fake.requests[0]["messages"][0]["content"]
     assert "`$DEMO_PIN`" in prompt and "pin-778899" not in prompt and "alice" not in prompt
     stream = await stream_of(db_session, task.id)
@@ -84,6 +90,7 @@ async def test_collaboration_turns_get_nothing(
             intake,
             "",
             {"COREMAN_CREDENTIAL_TOKEN": "forged"},
+            relay_session_id=uuid.uuid4(),
         )
         assert (extra, env, secrets) == ("", {}, frozenset())
 

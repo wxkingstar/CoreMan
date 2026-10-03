@@ -19,6 +19,7 @@ from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
+    ChatSession,
     CredentialRequest,
     RelayServer,
     User,
@@ -29,6 +30,9 @@ from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.runtime.worker.chat_handler import ChatTaskHandler, Intake, Prepared
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound
+
+SAVED_NOTICE = "凭证已保存，下次对话时生效。"
+RESET_NOTICE = "凭证已保存。对话已重置，请重新发起刚才的请求。"
 
 
 class CredentialResumeHandler(ChatTaskHandler):
@@ -102,6 +106,18 @@ class CredentialResumeHandler(ChatTaskHandler):
                 session, ctx.task.id, status="failed", error_code="relay_unavailable"
             )
             return None
+        session_key = row.origin_session_key or row.origin_chat_id
+        current = await session.get(ChatSession, (bot.id, session_key), populate_existing=True)
+        if current is None or current.relay_session_id != row.origin_relay_session_id:
+            # 提问之后对话被重置或切走：续接会落进另一个对话，上下文对不上，只保存、请用户重新发起。
+            await self._saved_notice(session, bot, row, RESET_NOTICE)
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="cancelled",
+                error_code="credential_resume_session_changed",
+            )
+            return None
         inbound = await load_inbound(session, ctx.task)
         # 与 store.save 返回的键名同序（已排序），保存通知和续接消息列出的顺序一致。
         text = cards.resume_text(sorted(str(field["key"]) for field in row.fields))
@@ -112,14 +128,16 @@ class CredentialResumeHandler(ChatTaskHandler):
             speaker,
             row.origin_chat_id,
             row.origin_chat_type,
-            row.origin_session_key or row.origin_chat_id,
+            session_key,
             text,
             RESUME_KIND,
         )
         return intake, relay, [{"type": "text", "text": text}]
 
     @staticmethod
-    async def _saved_notice(session: AsyncSession, bot: Bot, row: CredentialRequest) -> None:
+    async def _saved_notice(
+        session: AsyncSession, bot: Bot, row: CredentialRequest, text: str = SAVED_NOTICE
+    ) -> None:
         """续不下去时只告诉用户凭证已保存：提交时已经承诺过会继续，不能悄悄收场。"""
         if not row.delivery_chat_id:
             return
@@ -130,7 +148,7 @@ class CredentialResumeHandler(ChatTaskHandler):
             kind="send",
             dedupe_key=f"credential-request:{row.id}:resume-skipped",
             target={"chat_id": row.delivery_chat_id},
-            payload={"markdown": "凭证已保存，下次对话时生效。"},
+            payload={"markdown": text},
         )
 
     def _needs_content(self) -> bool:

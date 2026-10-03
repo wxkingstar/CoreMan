@@ -80,6 +80,7 @@ submit()：核对提交人 → 加密写入 personal_credentials → 续接原�
 | `origin_task_id` | 发起索取的那一轮任务 |
 | `origin_chat_id` / `origin_chat_type` | 来源会话；定时任务为 `cron:<job_id>` |
 | `origin_session_key` / `origin_event_id` | 来源轮次的会话键与入站事件，续接轮沿用；不建外键，避免挡住入站事件的保留期清理 |
+| `origin_relay_session_id` | 来源轮次用的 relay 会话（可空，定时任务为空）：续接前核对它仍是该会话键当前的会话，重置或切换后不再续接（评审裁定 R26）；同一对话内的去重也要求它相同 |
 | `delivery_chat_id` | 表单或链接实际发到的会话，「已保存」等通知也发到这里 |
 | `cron_job_id` | 来源是定时任务时填 |
 | `fields` | JSONB：`[{key, label, secret, placeholder}]`，**不含任何值** |
@@ -110,7 +111,7 @@ submit()：核对提交人 → 加密写入 personal_credentials → 续接原�
 
 - `COREMAN_CREDENTIAL_URL` = `{PUBLIC_BASE_URL}/api/runtime/credentials/requests`
 - `COREMAN_CREDENTIAL_TOKEN`：用 `Cipher` 加密的声明，写法与定时任务的能力令牌相同。
-  - 声明内容：`task_id`、`user_id`、`bot_id`、`base_session_id`、`origin_kind`、`chat_id`、`chat_type`、过期时间。
+  - 声明内容：`task_id`、`user_id`、`bot_id`、`base_session_id`、`origin_kind`、`chat_id`、`chat_type`、`relay`（本轮的 relay 会话，定时任务为空）、过期时间。
   - 过期时间与 `BOT_TOKEN_*` 一致：本轮超时 + 300 秒。
 
 `COREMAN_CREDENTIAL_` 加入 `is_reserved_key` 的保留前缀，机器人 env 和技能预设里的同名变量一律丢弃。
@@ -227,6 +228,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
   - 发言者设为发起人，会话类型取来源会话的。
   - 用户消息是系统生成的固定文本：「[CoreMan] 用户已通过安全表单提交 DEMO_USERNAME、DEMO_PASSWORD，已作为环境变量注入本轮，值不会出现在对话中。请继续完成之前的任务。」
 - **开轮守卫**：在 `_resolve` 里加锁检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务，发起人仍为 active 并在白名单内；不满足时结束任务，只发「已保存，下次对话生效」。AI 员工已停用时 `submit()` 不排续接任务。
+- **会话核对**：同在 `_resolve` 里，按 `(bot_id, origin_session_key)` 读 `ChatSession`，它的 `relay_session_id` 必须等于请求的 `origin_relay_session_id`。用户在表单打开期间重置、清除或切换了会话（行不存在或不相等，请求里没记也算），续接会落进另一个对话、没有那个任务的上下文，所以不续接：结束任务（`cancelled`，`credential_resume_session_changed`），只发「凭证已保存。对话已重置，请重新发起刚才的请求。」，与机器人协作的续接处理一致。
 - **来源是定时任务**：不续接，只私信「已保存，下次执行时生效」。
 - **一次填写，所有在等的都续接**：被 7.3 第 7 步结算的请求各自按来源续接，所以两个对话会话在等同一组键时，填一张表单两边都会继续。
 

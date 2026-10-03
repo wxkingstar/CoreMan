@@ -127,10 +127,17 @@ def _target(chat_id: str, user_id: uuid.UUID, recipient: UserIdentity | None) ->
 
 
 def _same_origin(row: CredentialRequest, cap: Capability) -> bool:
-    """只有同一个对话会话、或同一个定时任务，才能复用已发出的表单：续接要回到各自的来源。"""
+    """只有同一个对话（会话键和 relay 会话都相同）、或同一个定时任务，才能复用已发出的表单。
+
+    续接要回到各自的来源；/reset 之后的新对话不能接手重置前发出的表单。
+    """
     if cap.origin_kind == "cron":
         return row.origin_kind == "cron" and row.cron_job_id == cap.cron_job_id
-    return row.origin_kind == "chat" and row.origin_session_key == cap.session_key
+    return (
+        row.origin_kind == "chat"
+        and row.origin_session_key == cap.session_key
+        and row.origin_relay_session_id == cap.relay_session_id
+    )
 
 
 async def open_request(
@@ -177,6 +184,7 @@ async def open_request(
         origin_chat_id=cap.chat_id,
         origin_chat_type=cap.chat_type,
         origin_session_key=cap.session_key,
+        origin_relay_session_id=cap.relay_session_id,
         cron_job_id=cap.cron_job_id,
         delivery_chat_id=delivery,
         fields=[f.model_dump() for f in parsed.fields],

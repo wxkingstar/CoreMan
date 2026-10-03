@@ -1,14 +1,31 @@
 """提交之后在原会话续接：发言者是发起人、消息里只有键名、凭证在 env 里、企微走主动推送。"""
 
-from sqlalchemy import select
+import uuid
+
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.db.models import ChatLog, CredentialRequest, OutboxItem, RelayServer, Task
+from coreman.core.db.models import (
+    ChatLog,
+    ChatSession,
+    CredentialRequest,
+    OutboxItem,
+    RelayServer,
+    Task,
+)
 from coreman.core.personal_credentials import service
 from coreman.runtime.worker.credential_resume import CredentialResumeHandler
 from tests.fakes.fake_relay import FakeRelay
-from tests.integration.credential_helpers import BODY, VALUES, cap_for, login_app, owner
+from tests.integration.credential_helpers import (
+    BODY,
+    DEMO_RELAY_SESSION,
+    VALUES,
+    cap_for,
+    login_app,
+    owner,
+    seed_chat_session,
+)
 from tests.integration.test_chat_handler import stream_of
 from tests.integration.worker_helpers import build_ctx
 
@@ -16,6 +33,7 @@ from tests.integration.worker_helpers import build_ctx
 async def _submitted(session, platform="wecom"):
     bot, user, task, cipher = await owner(session, platform=platform)
     await login_app(session, platform)
+    await seed_chat_session(session, bot, task)
     opened = await service.open_request(
         session, cipher, cap_for(bot, user, task), BODY, base_url="http://localhost"
     )
@@ -42,6 +60,8 @@ async def test_resume_continues_as_owner_with_keys_only(
     assert "已通过安全表单提交 DEMO_PIN、DEMO_USERNAME" in body["messages"][1]["content"]
     assert "pin-778899" not in body["messages"][1]["content"]
     assert body["env_vars"]["DEMO_PIN"] == "pin-778899"
+    # 续接的是提问的那个对话，而不是另起一个空会话。
+    assert body["session_id"] == str(DEMO_RELAY_SESSION)
     stream = await stream_of(db_session, claimed.id)
     assert stream.delivery_mode == "proactive"
     done = await db_session.get(Task, claimed.id, populate_existing=True)
@@ -150,3 +170,46 @@ async def test_resume_tells_the_user_when_the_relay_is_unavailable(
     [notice] = await _saved_notices(db_session, row)
     assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
     assert notice.payload["markdown"] == "凭证已保存，下次对话时生效。"
+
+
+async def _assert_conversation_reset(
+    db_engine: AsyncEngine, db_session: AsyncSession, row: CredentialRequest, claimed: Task
+) -> None:
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await db_session.get(Task, claimed.id, populate_existing=True)
+    assert done.status == "cancelled" and done.error_code == "credential_resume_session_changed"
+    assert fake.requests == []
+    [notice] = await _saved_notices(db_session, row)
+    assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
+    assert notice.payload["markdown"] == "凭证已保存。对话已重置，请重新发起刚才的请求。"
+
+
+async def test_resume_is_not_dispatched_after_the_session_was_reset(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    chat_session = await db_session.get(ChatSession, (bot.id, claimed.session_key))
+    chat_session.relay_session_id = uuid.uuid4()
+    await db_session.commit()
+    await _assert_conversation_reset(db_engine, db_session, row, claimed)
+
+
+async def test_resume_is_not_dispatched_after_the_session_was_cleared(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    await db_session.execute(delete(ChatSession).where(ChatSession.bot_id == bot.id))
+    await db_session.commit()
+    await _assert_conversation_reset(db_engine, db_session, row, claimed)
+
+
+async def test_resume_needs_the_session_the_request_was_asked_in(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    row.origin_relay_session_id = None
+    await db_session.commit()
+    await _assert_conversation_reset(db_engine, db_session, row, claimed)

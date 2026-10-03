@@ -65,6 +65,7 @@ def upgrade():
         sa.Column("origin_chat_id", sa.Text(), nullable=False),
         sa.Column("origin_chat_type", sa.Text(), nullable=False),
         sa.Column("origin_session_key", sa.Text()),
+        sa.Column("origin_relay_session_id", sa.Uuid()),
         sa.Column("cron_job_id", sa.Uuid()),
         sa.Column("delivery_chat_id", sa.Text()),
         sa.Column("fields", JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),

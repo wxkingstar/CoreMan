@@ -73,6 +73,8 @@ class CredentialRequest(TimestampMixin, Base):
     origin_chat_id: Mapped[str] = mapped_column(Text)
     origin_chat_type: Mapped[str] = mapped_column(Text)
     origin_session_key: Mapped[str | None] = mapped_column(Text)
+    # 提问那一轮用的 relay 会话：续接前核对它仍是该会话键当前的会话。
+    origin_relay_session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     cron_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 表单或链接实际发到的会话；「已保存」等通知也发到这里。
     delivery_chat_id: Mapped[str | None] = mapped_column(Text)

@@ -87,7 +87,13 @@ async def _apply(
 
 
 async def configure(
-    session: AsyncSession, ctx: TaskContext, intake: Intake, extra: str, env: dict[str, str]
+    session: AsyncSession,
+    ctx: TaskContext,
+    intake: Intake,
+    extra: str,
+    env: dict[str, str],
+    *,
+    relay_session_id: uuid.UUID,
 ) -> tuple[str, dict[str, str], frozenset[str]]:
     payload = ctx.task.payload
     user_id = intake.speaker.user_id
@@ -105,6 +111,7 @@ async def configure(
         chat_id=intake.chat_id,
         chat_type=intake.chat_type,
         session_key=intake.session_key,
+        relay_session_id=relay_session_id,
         event_id=intake.inbound.id,
         cron_job_id=None,
     )
@@ -133,6 +140,7 @@ async def configure_cron(
         chat_id=f"cron:{job_id}",
         chat_type="cron",
         session_key=None,
+        relay_session_id=None,
         event_id=None,
         cron_job_id=job_id,
     )

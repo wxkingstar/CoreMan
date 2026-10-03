@@ -11,7 +11,14 @@ from coreman.core.bus import tasks
 from coreman.core.db.models import CredentialRequest, OutboxItem, UserIdentity
 from coreman.core.personal_credentials import service
 from coreman.core.personal_credentials.policy import CredentialError
-from tests.integration.credential_helpers import BODY, cap_for, cron_cap, login_app, owner
+from tests.integration.credential_helpers import (
+    BODY,
+    DEMO_RELAY_SESSION,
+    cap_for,
+    cron_cap,
+    login_app,
+    owner,
+)
 
 BASE = "https://coreman.example.com"
 
@@ -68,6 +75,35 @@ async def test_a_pending_form_is_reused_only_by_the_same_origin(db_session):
         await service.open_request(db_session, cipher, other_job, BODY, base_url=BASE)
     ).status == "form_sent"
     assert len((await db_session.scalars(select(CredentialRequest))).all()) == 4
+
+
+async def test_request_remembers_the_relay_session_that_asked(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    chat = await service.open_request(
+        db_session, cipher, cap_for(bot, user, task), BODY, base_url=BASE
+    )
+    cron = await service.open_request(
+        db_session, cipher, cron_cap(bot, user, task), BODY, base_url=BASE
+    )
+    await db_session.commit()
+    asked = await db_session.get(CredentialRequest, chat.request_id)
+    scheduled = await db_session.get(CredentialRequest, cron.request_id)
+    assert asked.origin_relay_session_id == DEMO_RELAY_SESSION
+    assert scheduled.origin_relay_session_id is None
+
+
+async def test_a_form_asked_before_a_reset_is_not_reused_by_the_new_conversation(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    before = cap_for(bot, user, task)
+    after = cap_for(bot, user, task, relay_session_id=uuid.uuid4())
+    first = await service.open_request(db_session, cipher, before, BODY, base_url=BASE)
+    second = await service.open_request(db_session, cipher, after, BODY, base_url=BASE)
+    same = await service.open_request(db_session, cipher, after, BODY, base_url=BASE)
+    await db_session.commit()
+    assert (first.status, second.status) == ("form_sent", "form_sent")
+    assert second.request_id != first.request_id
+    assert (same.status, same.request_id) == ("already_pending", second.request_id)
+    assert len((await db_session.scalars(select(CredentialRequest))).all()) == 2
 
 
 async def test_dm_record_without_platform_identity_is_not_a_private_delivery(db_session):

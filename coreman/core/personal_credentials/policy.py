@@ -134,6 +134,8 @@ class Capability:
     chat_id: str
     chat_type: str
     session_key: str | None
+    # 本轮用的 relay 会话（定时任务没有）：续接前凭它确认对话没有被重置或切走。
+    relay_session_id: uuid.UUID | None
     event_id: int | None
     cron_job_id: uuid.UUID | None
 
@@ -147,6 +149,7 @@ def issue_capability(cipher: Cipher, cap: Capability, *, ttl_seconds: int) -> st
         "chat": cap.chat_id,
         "chat_type": cap.chat_type,
         "session_key": cap.session_key,
+        "relay": str(cap.relay_session_id) if cap.relay_session_id else None,
         "event": cap.event_id,
         "cron": str(cap.cron_job_id) if cap.cron_job_id else None,
         "exp": time.time() + ttl_seconds,
@@ -166,6 +169,7 @@ def read_capability(cipher: Cipher, token: str) -> Capability:
         chat_id=str(data["chat"]),
         chat_type=str(data["chat_type"]),
         session_key=data.get("session_key"),
+        relay_session_id=uuid.UUID(data["relay"]) if data.get("relay") else None,
         event_id=int(data["event"]) if data.get("event") is not None else None,
         cron_job_id=uuid.UUID(data["cron"]) if data.get("cron") else None,
     )
