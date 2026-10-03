@@ -79,6 +79,8 @@ submit()：核对提交人 → 加密写入 personal_credentials → 续接原�
 | `origin_kind` | `chat` 或 `cron` |
 | `origin_task_id` | 发起索取的那一轮任务 |
 | `origin_chat_id` / `origin_chat_type` | 来源会话；定时任务为 `cron:<job_id>` |
+| `origin_session_key` / `origin_event_id` | 来源轮次的会话键与入站事件，续接轮沿用；不建外键，避免挡住入站事件的保留期清理 |
+| `delivery_chat_id` | 表单或链接实际发到的会话，「已保存」等通知也发到这里 |
 | `cron_job_id` | 来源是定时任务时填 |
 | `fields` | JSONB：`[{key, label, secret, placeholder}]`，**不含任何值** |
 | `purpose` | agent 写的用途说明，限长 300 字 |
@@ -135,8 +137,9 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 已发出表单 | `202 {"status":"form_sent","request_id":"…"}` |
 | 同一用户在本 AI 员工下已有键集合完全相同的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发 |
 | 键名不合法 | `422`，逐个说明原因 |
-| 无法送达（企微未配置登录应用、飞书既无私聊也无来源群等） | `409`，附原因，请求记为 `cancelled` |
-| 令牌无效或过期 | `403` |
+| 无法送达（企微未配置登录应用、定时任务来源且没有私聊记录等） | `409`，附原因，不创建请求 |
+| 令牌无效或过期 | `401` |
+| 来源任务已结束、用户已停用或 AI 员工已停用 | `403` |
 
 两种成功响应都附带一句给 agent 的话：「已向用户发送安全表单。请简短告诉用户去填写，然后结束本轮；用户提交后会自动续接。」
 
@@ -180,7 +183,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 ### 7.1 飞书回调：在网关里立即封存
 
 - `gateway_feishu/inbound.py` 的卡片回调白名单加入 `credential@` 前缀。
-- 解析到这类回调时，`normalize_event` 在**写库之前**完成三件事：
+- 解析到这类回调时，`normalize_event` 在**写库之前**完成三件事（调用方没有传入加密器时直接丢弃这条回调，宁可丢也不落明文）：
   1. 把 `form_value` 序列化后用 `credential_requests.sealed:{id}` 加密，放进 `card_action = {"task_id", "card_type": "credential", "sealed": …}`；
   2. 把 `raw.event.action.form_value` 替换为空对象；
   3. 不生成 `selected`。
@@ -216,11 +219,12 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 
 ### 7.4 续接
 
-- **来源是对话**：`tasks.enqueue(kind="chat", user_id=发起人, session_key=origin_chat_id, dedupe_key="credential-request:{id}:resume", payload={"credential_request_id", "serialize_session": True})`，与同事求助的续接方式一致。
-- **新增 `IntakeStage._resolve` 分支**：遇到 `credential_request_id` 时交给 `credentials.resolve`。
+- **来源是对话**：排一个新任务类型 `credential_resume`：`user_id=发起人`、`session_key=origin_session_key`、`inbound_event_id=origin_event_id`、`dedupe_key="credential-request:{id}:resume"`、`payload={"credential_request_id", "serialize_session": True}`。
+  - 用独立类型而不是 `chat`：滚动升级时旧 worker 不认识它，会直接失败；如果用 `chat`，旧 worker 会把来源消息当新消息再跑一遍。
+  - 处理器 `CredentialResumeHandler` 继承 `ChatTaskHandler`，写法与 `ChoiceSubmitHandler` 相同：覆盖 `_resolve`；企业微信的流从创建起就是主动推送（续接轮没有可用的 `req_id`），飞书沿用来源事件的回复上下文。
   - 发言者设为发起人，会话类型取来源会话的。
   - 用户消息是系统生成的固定文本：「[CoreMan] 用户已通过安全表单提交 DEMO_USERNAME、DEMO_PASSWORD，已作为环境变量注入本轮，值不会出现在对话中。请继续完成之前的任务。」
-- **开轮守卫**：仿照 `opening.py` 对同事求助的检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务；AI 员工停用时不续接，只发「已保存，下次对话生效」。
+- **开轮守卫**：在 `_resolve` 里加锁检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务，发起人仍为 active 并在白名单内；不满足时结束任务，只发「已保存，下次对话生效」。AI 员工已停用时 `submit()` 不排续接任务。
 - **来源是定时任务**：不续接，只私信「已保存，下次执行时生效」。
 
 ## 8. 注入
@@ -250,7 +254,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 ### 8.3 出站脱敏
 
 - `secret` 字段的值强制加入本轮 `ctx.secrets`，不再依赖键名里有没有 token、password 等标记。
-- 长度阈值降到 6 位：在 `redaction.py` 中新增按值收集的入口，阈值作为参数。
+- 长度阈值为 6 位：由 `store.injected` 按值收集后与 `collect_secrets(env)` 合并，`redaction.py` 不用改。
 - 覆盖范围与现有机制相同：IM 投递、`chat_logs`、分类、定时任务结果。
 
 ### 8.4 提示词
@@ -286,7 +290,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 
 | 情况 | 处理 |
 |---|---|
-| 私聊和来源群都发不出去，或企微未配置登录应用 | 接口返回 `409` 并附原因，请求记为 `cancelled`，由 agent 告诉用户 |
+| 没有可发送的会话，或企微未配置登录应用 | 接口返回 `409` 并附原因，不创建请求，由 agent 告诉用户 |
 | 表单过期后才提交 | 拒绝；卡片或页面提示重新发起 |
 | 重复点击或重复提交 | 行锁加状态检查，第二次提示「已提交」 |
 | 非发起人点卡片或打开链接 | 卡片 toast「只有发起人可以提交」；页面返回 403 |
