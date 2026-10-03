@@ -143,6 +143,34 @@ const en = {
     resumed: 'Resumed',
     pausedDone: 'Paused',
   },
+  myCredentials: {
+    intro: "Personal credentials you saved for each AI employee. They are stored encrypted and injected only when you talk to that AI employee or run a scheduled task you created. Nobody, administrators included, can see the content of secret fields.",
+    refresh: "Refresh",
+    empty: "No personal credentials yet. An AI employee sends you a secure form when it needs one.",
+    label: "Name", key: "Variable", value: "Value", hidden: "Set (hidden)",
+    updatedAt: "Updated", lastUsedAt: "Last used", never: "Never",
+    update: "Update", delete: "Delete",
+    updateTitle: "Update “{label}”",
+    updatePrompt: "Enter the new value. It is stored encrypted and never shown again.",
+    confirmDelete: "Delete “{label}” ({key})? The AI employee will ask you again when it needs it.",
+    updated: "Updated", deleted: "Deleted",
+  },
+  credentialRequest: {
+    title: "Personal credential",
+    from: "Requested by AI employee “{bot}”",
+    purpose: "Purpose:",
+    submit: "Submit encrypted",
+    required: "Please fill in “{label}”",
+    saved: "Saved",
+    savedHint: "You can go back to the chat. The AI employee will continue the task.",
+    expiresAt: "Valid until {time}",
+    loadError: "Cannot open this form",
+    closed: {
+      submitted: "This form has already been submitted.",
+      expired: "This form has expired. Ask the AI employee to send a new one.",
+      cancelled: "This form is no longer valid. Ask the AI employee to send a new one.",
+    },
+  },
   platforms: { wecom: 'WeCom', feishu: 'Feishu' },
   wecomBot: {
     bot: 'WeCom bot',
@@ -425,7 +453,7 @@ const en = {
   layout: { logout: 'Sign out', darkMode: 'Dark mode', language: 'Language' },
   menu: {
     selfReminders: "My scheduled tasks",
-    myFeishu: "My Feishu", myWecom: "My WeCom", skills: 'Skills', skillApprovals: 'Skill approvals', credentials: 'APIs and keys', home: 'Workspace', bots: 'AI employees', relays: 'Runtime management', users: 'Teams and users', apps: 'Platform apps', cron: 'Scheduled tasks', announcements: 'Announcements', chatLogs: 'Conversation logs', statistics: 'Usage statistics', approvals: 'Approvals', systems: 'Business systems', runtime: 'Platform status', audit: 'Audit logs', settings: 'Settings' },
+    myFeishu: "My Feishu", myWecom: "My WeCom", myCredentials: "My credentials", skills: 'Skills', skillApprovals: 'Skill approvals', credentials: 'APIs and keys', home: 'Workspace', bots: 'AI employees', relays: 'Runtime management', users: 'Teams and users', apps: 'Platform apps', cron: 'Scheduled tasks', announcements: 'Announcements', chatLogs: 'Conversation logs', statistics: 'Usage statistics', approvals: 'Approvals', systems: 'Business systems', runtime: 'Platform status', audit: 'Audit logs', settings: 'Settings' },
 
   users: { title: 'Teams and users', tabUsers: 'Users', tabTeams: 'Teams', keyword: 'Keyword', team: 'Team', role: 'Role', status: 'Status', unassigned: 'Unassigned only', name: 'Name', email: 'Email', departments: 'Departments', botAccessible: 'Accept help requests', lastLogin: 'Last sign-in', edit: 'Edit', position: 'Position', skills: 'Skills', locale: 'Language', roles: { platform_admin: 'Platform administrator', ai_committee: 'AI committee', team_lead: 'Team lead', member: 'Member' }, statuses: { active: 'Enabled', disabled: 'Disabled' }, sources: { sync: 'Synced', bootstrap: 'Bootstrap', manual: 'Manual' }, noTeam: 'Unassigned', deptTree: 'Department tree', pickerPlaceholder: 'Search users by name or account' },
   teams: { slug: 'Identifier', nameZh: 'Chinese name', nameJa: 'Japanese name', nameEn: 'English name', sortOrder: 'Sort order', memberCount: 'Members', rules: 'Rules', addRule: 'Add rule', platform: 'Platform', anyPlatform: 'Any platform', pathContains: 'Path contains', deleteConfirm: 'Delete this team?', hasMembers: 'This team still has {count} members. Move them before deleting.' },
