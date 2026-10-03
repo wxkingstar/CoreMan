@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.db.models import ChatLog, CredentialRequest, OutboxItem, Task
+from coreman.core.db.models import ChatLog, CredentialRequest, OutboxItem, RelayServer, Task
 from coreman.core.personal_credentials import service
 from coreman.runtime.worker.credential_resume import CredentialResumeHandler
 from tests.fakes.fake_relay import FakeRelay
@@ -104,3 +104,49 @@ async def test_resume_is_dropped_when_owner_is_no_longer_active(
         )
     )
     assert [item.payload["markdown"] for item in notice] == ["凭证已保存，下次对话时生效。"]
+
+
+async def _saved_notices(session: AsyncSession, row: CredentialRequest) -> list[OutboxItem]:
+    found = await session.scalars(
+        select(OutboxItem).where(
+            OutboxItem.dedupe_key == f"credential-request:{row.id}:resume-skipped"
+        )
+    )
+    return list(found)
+
+
+async def test_resume_tells_the_user_when_the_bot_was_disabled_after_submit(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    bot.enabled = False
+    await db_session.commit()
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await db_session.get(Task, claimed.id, populate_existing=True)
+    assert done.status == "cancelled" and done.error_code == "credential_resume_inactive"
+    assert fake.requests == []
+    [notice] = await _saved_notices(db_session, row)
+    assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
+    assert notice.payload["markdown"] == "凭证已保存，下次对话时生效。"
+
+
+async def test_resume_tells_the_user_when_the_relay_is_unavailable(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    relay = await db_session.get(RelayServer, bot.relay_server_id)
+    relay.is_active = False
+    await db_session.commit()
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await db_session.get(Task, claimed.id, populate_existing=True)
+    assert done.status == "failed" and done.error_code == "relay_unavailable"
+    assert fake.requests == []
+    [notice] = await _saved_notices(db_session, row)
+    assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
+    assert notice.payload["markdown"] == "凭证已保存，下次对话时生效。"

@@ -51,11 +51,18 @@ class CredentialResumeHandler(ChatTaskHandler):
         )
         if (
             bot is None
-            or not bot.enabled
             or row is None
             or row.status != "submitted"
             or row.resume_task_id != ctx.task.id
         ):
+            # 请求已不再指向这个任务（或机器人没了）：这条续接过时了，没有要告诉用户的。
+            await tasks.finish(
+                session, ctx.task.id, status="cancelled", error_code="credential_resume_inactive"
+            )
+            return None
+        if not bot.enabled:
+            # 停用的机器人网关没在跑，这条通知要等重新启用才会发出，总好过什么都不说。
+            await self._saved_notice(session, bot, row)
             await tasks.finish(
                 session, ctx.task.id, status="cancelled", error_code="credential_resume_inactive"
             )
@@ -83,22 +90,14 @@ class CredentialResumeHandler(ChatTaskHandler):
             or user.status != "active"
             or (allowed and row.user_id not in allowed)
         ):
-            if row.delivery_chat_id:
-                await outbox.add(
-                    session,
-                    bot_id=bot.id,
-                    platform=bot.platform,
-                    kind="send",
-                    dedupe_key=f"credential-request:{row.id}:resume-skipped",
-                    target={"chat_id": row.delivery_chat_id},
-                    payload={"markdown": "凭证已保存，下次对话时生效。"},
-                )
+            await self._saved_notice(session, bot, row)
             await tasks.finish(
                 session, ctx.task.id, status="cancelled", error_code="credential_owner_changed"
             )
             return None
         relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
         if relay is None or not relay.is_active:
+            await self._saved_notice(session, bot, row)
             await tasks.finish(
                 session, ctx.task.id, status="failed", error_code="relay_unavailable"
             )
@@ -118,6 +117,21 @@ class CredentialResumeHandler(ChatTaskHandler):
             RESUME_KIND,
         )
         return intake, relay, [{"type": "text", "text": text}]
+
+    @staticmethod
+    async def _saved_notice(session: AsyncSession, bot: Bot, row: CredentialRequest) -> None:
+        """续不下去时只告诉用户凭证已保存：提交时已经承诺过会继续，不能悄悄收场。"""
+        if not row.delivery_chat_id:
+            return
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform=bot.platform,
+            kind="send",
+            dedupe_key=f"credential-request:{row.id}:resume-skipped",
+            target={"chat_id": row.delivery_chat_id},
+            payload={"markdown": "凭证已保存，下次对话时生效。"},
+        )
 
     def _needs_content(self) -> bool:
         """续接消息是系统写好的成品文本，没有媒体要下载。"""
