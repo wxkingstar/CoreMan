@@ -81,7 +81,7 @@ async def test_switches_to_background_and_pushes_increments(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     SCENARIOS["long"] = _long_scenario
-    bot, _, _ = await seed_bot(db_session, verbosity=1)
+    bot, _, _ = await seed_bot(db_session, verbosity=4)
     await db_session.commit()
     t = await chat_task(db_session, bot, "慢任务")
     fake = FakeRelay("long", chunk_delay=0.15)
@@ -93,7 +93,7 @@ async def test_switches_to_background_and_pushes_increments(
     assert s.delivery_mode == "proactive" and s.is_complete
     assert s.background_state["mode"] == "incremental"
     assert (
-        msg("timeout_background_low") in s.background_state["finish_suffix"]
+        msg("timeout_background_progress") in s.background_state["finish_suffix"]
         and s.session_url in s.background_state["finish_suffix"]
     )
     assert msg("timeout_pre_warning") in s.thinking_md
@@ -154,7 +154,7 @@ async def test_switch_keeps_the_offset_the_gateway_already_delivered(
     assert row.background_state["offset"] == delivered
     assert supervisor.pusher.offset == delivered
     # 超时提示与切换时刻照常补上，模式也按 verbosity 落定
-    assert msg("timeout_background_low") in row.background_state["finish_suffix"]
+    assert msg("timeout_background_progress") in row.background_state["finish_suffix"]
     assert row.background_state["switched_at"] and row.background_state["mode"] == "incremental"
 
 
@@ -183,11 +183,11 @@ async def test_gateway_proactive_is_adopted_before_agent_timeout(db_engine, db_s
     assert row.background_state["finish_suffix"] == "drain"
 
 
-async def test_high_verbosity_pushes_only_final(
+async def test_terse_levels_push_only_final(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     SCENARIOS["long"] = _long_scenario
-    bot, _, _ = await seed_bot(db_session, verbosity=3)
+    bot, _, _ = await seed_bot(db_session, verbosity=1)
     await db_session.commit()
     t = await chat_task(db_session, bot, "慢任务")
     ctx = build_ctx(
@@ -198,7 +198,7 @@ async def test_high_verbosity_pushes_only_final(
     assert len(items) == 1 and "段落7。" in items[0].payload["markdown"]
     s = await stream_of(db_session, t.id)
     assert (
-        msg("timeout_background_high") in s.background_state["finish_suffix"]
+        msg("timeout_background_final") in s.background_state["finish_suffix"]
         and s.background_state["mode"] == "final_only"
     )
 
@@ -430,7 +430,7 @@ async def test_switch_does_not_overwrite_a_gateway_switch_committed_while_it_rea
     row = await stream_of(db_session, tid)
     assert row.background_state["offset"] == delivered
     assert supervisor.pusher.offset == delivered
-    assert msg("timeout_background_low") in row.background_state["finish_suffix"]
+    assert msg("timeout_background_progress") in row.background_state["finish_suffix"]
 
 
 @pytest.mark.parametrize("platform", ["wecom", "feishu"])

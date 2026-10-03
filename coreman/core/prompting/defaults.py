@@ -73,10 +73,25 @@ DEFAULT_RUNTIME_TAIL = (
     "Do not claim that unregistered background work will continue after this request."
 )
 
+# 输出详细度：1 极简、2 简洁、3 标准；4 详细即模型默认，不加任何说明。
 DEFAULT_VERBOSITY: dict[int, str] = {
-    2: "Give a concise answer with the result and essential supporting details.",
-    3: "Use plain, natural language. Present conclusions without private reasoning.",
-    4: "Keep the answer minimal, but include the result and any required user action.",
+    1: """# Response Length: Minimal
+
+Answer in as few words as possible. When a yes or no, a number, a name or a short phrase \
+answers the question, reply with only that. Add no explanation, background, headings, lists, \
+tables, summaries or offers of further help unless the user asks for them. After doing a task, \
+state only the result and anything the user must do.""",
+    2: """# Response Length: Brief
+
+Reply like someone of few words in an ordinary conversation: one to three short sentences of \
+plain spoken language. Give the answer first and add a short reason only when the answer would \
+be unclear without it. Avoid headings, tables and long lists, and skip background, caveats and \
+recaps.""",
+    3: """# Response Length: Standard
+
+Give the answer first, then briefly explain the key points, usually in one short paragraph or a \
+few bullets. Cover what matters most rather than everything: leave out exhaustive background, \
+rare edge cases and repetition. The user can ask for more detail.""",
 }
 
 # 固定段：不进 settings，管理台改不了。本轮标签由 build_system_prompt 现生成。
@@ -115,7 +130,7 @@ PROMPT_DEFAULTS_BY_KEY: dict[str, str] = {
     "prompt_runtime_mode": DEFAULT_RUNTIME_MODE,
     "prompt_cron_mode": DEFAULT_CRON_MODE,
     "prompt_runtime_tail": DEFAULT_RUNTIME_TAIL,
+    "prompt_verbosity_1": DEFAULT_VERBOSITY[1],
     "prompt_verbosity_2": DEFAULT_VERBOSITY[2],
     "prompt_verbosity_3": DEFAULT_VERBOSITY[3],
-    "prompt_verbosity_4": DEFAULT_VERBOSITY[4],
 }

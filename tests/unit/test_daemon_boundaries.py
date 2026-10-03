@@ -123,7 +123,7 @@ async def test_takeover_error_keeps_full_reason(offset):
         bot_id=uuid.uuid4(),
         platform="wecom",
         chat_id="c",
-        verbosity_level=1,
+        verbosity_level=4,
         session_url="http://fake/s",
     )
     push = AsyncMock()

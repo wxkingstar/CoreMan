@@ -16,7 +16,8 @@ PROMPT_SETTING_KEYS: tuple[str, ...] = tuple(PROMPT_DEFAULTS_BY_KEY)
 
 SETTING_DEFAULTS: dict[str, Any] = {
     "bootstrap_admin_enabled": True,
-    "default_verbosity_level": 1,
+    # 4 档（详细）即模型默认，不加篇幅说明。
+    "default_verbosity_level": 4,
     "default_effort_level": None,
     "session_ttl_hours": 72,
     "jwt_issuer": "coreman",
@@ -73,9 +74,9 @@ class SettingsPatch(BaseModel):
     prompt_runtime_mode: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_cron_mode: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_runtime_tail: str | None = Field(default=None, min_length=1, max_length=20000)
+    prompt_verbosity_1: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_2: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_verbosity_3: str | None = Field(default=None, min_length=1, max_length=20000)
-    prompt_verbosity_4: str | None = Field(default=None, min_length=1, max_length=20000)
 
     @model_validator(mode="before")
     @classmethod
