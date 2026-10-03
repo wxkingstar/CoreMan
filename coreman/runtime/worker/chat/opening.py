@@ -241,7 +241,6 @@ class OpenStage(ChatStageBase):
             session_id=str(info.relay_session_id),
             backend=backend,
             effort=bot.effort_level,
-            verbosity_level=bot.verbosity_level,
             env_vars=env,
         )
         reply_context = dict(intake.inbound.reply_context or {})

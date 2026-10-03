@@ -182,7 +182,7 @@ async def health_report(
                             system_prompt=build_system_prompt(
                                 segments=await load_segments(store),
                                 backend=backend,
-                                verbosity_level=1,
+                                verbosity_level=4,
                                 bot_prompt=current_bot.merged_system_prompt,
                                 speaker=speaker,
                                 speaker_changed=False,

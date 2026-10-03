@@ -906,7 +906,7 @@ async def test_rejected_proactive_finish_frame_queues_the_missing_gap(
                 background_state={
                     "mode": "incremental",
                     "offset": len(full),
-                    "finish_suffix": msg("timeout_background_low"),
+                    "finish_suffix": msg("timeout_background_progress"),
                     "switched_at": datetime.now(UTC).isoformat(),
                 },
             )

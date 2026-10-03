@@ -6,7 +6,7 @@ def test_proactive_completion_has_one_marker_and_keeps_content():
     result = pusher().finish("NEPTUNE" + msg("done_suffix"))
     assert result == [msg("bg_done_prefix") + "NEPTUNE"]
     assert pusher().finish(msg("done_suffix")) == [msg("bg_done_plain")]
-    assert pusher(verbosity=3).finish("NEPTUNE" + msg("done_suffix")) == [
+    assert pusher(verbosity=1).finish("NEPTUNE" + msg("done_suffix")) == [
         "NEPTUNE" + msg("done_suffix")
     ]
 

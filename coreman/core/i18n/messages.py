@@ -168,10 +168,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "truncated_suffix": "\n\n📎 内容较长已截断，查看完整内容：[链接>>]({url})",
         "thinking_truncated": "... (思考内容过长，仅显示最新部分) ...",
         "timeout_pre_warning": "⏳ 任务仍在处理中，即将切换为后台运行，完成后自动推送结果...",
-        "timeout_background_low": (
+        "timeout_background_progress": (
             "⏳ 任务耗时较长，仍在后台运行中。后续进展将自动推送，请留意消息通知。"
         ),
-        "timeout_background_high": (
+        "timeout_background_final": (
             "⏳ 任务耗时较长，仍在后台运行中。完成后将自动推送结果，请留意消息通知。"
         ),
         "session_link_suffix": "\n\n📎 查看实时执行过程：[链接>>]({url})",
@@ -441,11 +441,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "⏳ タスクはまだ処理中です。まもなくバックグラウンド実行に切り替わり、"
             "完了後に結果を自動送信します..."
         ),
-        "timeout_background_low": (
+        "timeout_background_progress": (
             "⏳ タスクに時間がかかっており、バックグラウンドで実行中です。"
             "進捗は自動的に送信されます。通知にご注意ください。"
         ),
-        "timeout_background_high": (
+        "timeout_background_final": (
             "⏳ タスクに時間がかかっており、バックグラウンドで実行中です。"
             "完了後に結果を自動送信します。通知にご注意ください。"
         ),

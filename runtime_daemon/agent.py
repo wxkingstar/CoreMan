@@ -28,37 +28,6 @@ import requests
 
 MAX_BODY = 4 * 1024 * 1024
 MAX_MEMORY = 256 * 1024
-OUTPUT_STYLES = {
-    "verbosity-normal.md": (
-        "---\nname: 正常人模式\ndescription: 精简回复，避免不必要的填充和重复总结\n"
-        "keep-coding-instr"
-        "uctions: true\n---\n\nKeep responses focused and to the point. Avoid"
-        " unnecessary filler, repetitive summaries, and over-explanation. "
-        "Use short paragraphs or bullet points. If a one-sentence answer s"
-        "uffices, do not write three.\n"
-    ),
-    "verbosity-quiet.md": (
-        "---\nname: 闷葫芦模式\ndescription: 自然直接，像同事聊天一样\nkeep-coding-instruction"
-        "s: true\n---\n\nRespond like a knowledgeable colleague in casual con"
-        "versation. Use plain, natural language — no formal tone, no corpo"
-        "rate jargon, no unnecessary structure. Skip greetings, pleasantri"
-        "es, and meta-commentary (don't say '让我来分析一下'). Go straight to the"
-        " answer. Use prose over bullet points when it reads more naturall"
-        "y. Keep it concise but always include the complete substantive an"
-        "swer.\n"
-    ),
-    "verbosity-silent.md": (
-        "---\nname: 已读不回模式\ndescription: 极简回复，只保留关键信息\nkeep-coding-instructio"
-        "ns: true\n---\n\nBe extremely terse. No greetings, no filler, no sum"
-        "maries, no sign-offs. Strip all pleasantries and transitions — go"
-        " straight to the substance. Prefer bullet points or short paragra"
-        "phs over long prose.\n\nIMPORTANT: You MUST still provide the full "
-        "substantive answer. 'Minimal' means minimal decoration, NOT minim"
-        "al content. Data, analysis results, key findings, and actionable "
-        "information must be complete. Never reply with just a status like"
-        " '处理完成' or 'Done' — always include the actual result.\n"
-    ),
-}
 
 
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
@@ -460,22 +429,9 @@ class Agent:
                 raise OperationError("仓库文件链接指向工作区外")
         if (directory / "CLAUDE.md").is_file() and not (directory / "AGENTS.md").exists():
             atomic_write(directory / "AGENTS.md", (directory / "CLAUDE.md").read_text())
-        for name, content in OUTPUT_STYLES.items():
-            destination = directory / ".claude/output-styles" / name
-            if not destination.resolve().is_relative_to(directory):
-                raise OperationError("输出样式目录不在工作区内")
-            atomic_write(destination, content)
         from .workspace import remove_legacy_instruction_excludes
 
         remove_legacy_instruction_excludes(directory)
-        exclude = directory / ".git/info/exclude"
-        if (directory / ".git").is_dir():
-            previous = exclude.read_text() if exclude.exists() else ""
-            additions = [
-                name for name in ("/.claude/output-styles/",) if name not in previous.splitlines()
-            ]
-            if additions:
-                atomic_write(exclude, previous.rstrip() + "\n" + "\n".join(additions) + "\n")
 
     def pull(self, data: dict) -> dict:
         url, _ = self.git_source(str(data.get("git_url", "")))

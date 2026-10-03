@@ -74,7 +74,7 @@ class Bot(TimestampMixin, Base):
     git_last_backup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     system_prompt: Mapped[str] = mapped_column(Text, server_default=text("''"))
     merged_system_prompt: Mapped[str] = mapped_column(Text, server_default=text("''"))
-    verbosity_level: Mapped[int] = mapped_column(SmallInteger, server_default=text("1"))
+    verbosity_level: Mapped[int] = mapped_column(SmallInteger, server_default=text("4"))
     effort_level: Mapped[str | None] = mapped_column(Text)
     sse_timeout_seconds: Mapped[int] = mapped_column(Integer, server_default=text("3600"))
     # 已不再读取，下个版本删除：IM 投递时限由平台策略决定（worker 不读此列），

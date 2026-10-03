@@ -142,7 +142,7 @@ class BotIn(BaseModel):
     model: str = Field(min_length=1, max_length=100)
     working_dir: str = Field(min_length=1, max_length=500)
     system_prompt: str = Field(default="", max_length=20000)
-    verbosity_level: int = Field(default=1, ge=1, le=4)
+    verbosity_level: int = Field(default=4, ge=1, le=4)
     effort_level: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     sse_timeout_seconds: int = Field(default=3600, ge=1800, le=43200)
     credentials: dict[str, str] = Field(default_factory=dict)

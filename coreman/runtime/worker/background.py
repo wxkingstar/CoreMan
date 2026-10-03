@@ -28,6 +28,11 @@ from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.stream_writer import StreamWriter
 
 
+def streams_progress(verbosity_level: int) -> bool:
+    """3、4 档（标准、详细）在后台逐段推进展；1、2 档（极简、简洁）只在完成时推一次全文。"""
+    return verbosity_level >= 3
+
+
 @dataclass(frozen=True)
 class Timing:
     """底层固定的投递与推送节奏；测试可整体缩短。
@@ -125,8 +130,8 @@ class BackgroundPusher:
         return truncate_utf8(text, self.timing.max_bytes - len(suffix.encode())) + suffix
 
     def decide(self, now: float, pending_text: str, boundaries: Sequence[int]) -> list[str]:
-        """本次该推的消息（0 或 1 条）。verbosity >2 只在完成时推，全程返回空。"""
-        if self.verbosity_level > 2 or self._started_at is None:
+        """本次该推的消息（0 或 1 条）。1、2 档只在完成时推，全程返回空。"""
+        if not streams_progress(self.verbosity_level) or self._started_at is None:
             return []
         since = now - (self._last_push if self._last_push is not None else self._started_at)
         new_boundaries = [b for b in boundaries if b > self.offset]
@@ -175,8 +180,8 @@ class BackgroundPusher:
         return None
 
     def finish(self, final_text: str) -> list[str]:
-        """完成时补推尾巴；verbosity >2 一次性推全文。"""
-        if self.verbosity_level > 2:
+        """完成时补推尾巴；1、2 档一次性推全文。"""
+        if not streams_progress(self.verbosity_level):
             return [self.cap(final_text)] if final_text else []
         delta = final_text[self.offset :] if len(final_text) > self.offset else ""
         # The completed transcript already has a footer; proactive delivery
@@ -194,7 +199,7 @@ class BackgroundPusher:
 
     def finish_plain(self, final_text: str) -> list[str]:
         """等待用户回答：只补尚未送达的正文和问题，不加成功标记。"""
-        delta = final_text if self.verbosity_level > 2 else final_text[self.offset :]
+        delta = final_text[self.offset :] if streams_progress(self.verbosity_level) else final_text
         return [self.cap(delta)] if delta.strip() else []
 
     def finish_failed(self, text: str) -> list[str]:
@@ -204,7 +209,7 @@ class BackgroundPusher:
         文案，都不能被说成「任务已完成」；只看字数差量的 `finish` 在这两种收尾上会把失败说成
         完成（错误文案比 offset 短，差量为空），甚至一条都不发。这里不看 offset，把终稿整条
         推出去，补一条会话链接（终稿里已经带了就不重复），再按 `max_bytes` 截断。
-        verbosity >2 同理，没有「推全文」的特例。
+        1、2 档同理，没有「推全文」的特例。
         """
         link = (
             msg("session_link_suffix", self.locale, url=self.session_url)
@@ -236,7 +241,7 @@ class TimeoutSupervisor:
         *,
         agent_timeout: float | None,
         timing: Timing = DEFAULT_TIMING,
-        verbosity_level: int = 1,
+        verbosity_level: int = 4,
         session_url: str = "",
         chat_id: str = "",
         platform: str = "wecom",
@@ -287,11 +292,7 @@ class TimeoutSupervisor:
             self.writer.set_thinking_line(msg("timeout_pre_warning", self.ctx.locale))
             await self.writer.flush(force=True)
             return "pre_warning"
-        if (
-            self.agent_timeout is not None
-            and not self.switched
-            and elapsed >= self.agent_timeout
-        ):
+        if self.agent_timeout is not None and not self.switched and elapsed >= self.agent_timeout:
             await self._switch(now)
             return "switched"
         if not self._expired and elapsed >= self.timing.hard_ttl:
@@ -312,7 +313,11 @@ class TimeoutSupervisor:
 
     def finish_suffix(self) -> str:
         """网关给这条流补 finish 时追加的尾巴（超时提示 + 会话链接）。"""
-        key = "timeout_background_low" if self.verbosity_level <= 2 else "timeout_background_high"
+        key = (
+            "timeout_background_progress"
+            if streams_progress(self.verbosity_level)
+            else "timeout_background_final"
+        )
         link = (
             msg("session_link_suffix", self.ctx.locale, url=self.session_url)
             if self.session_url
@@ -346,7 +351,7 @@ class TimeoutSupervisor:
                 else len(self.writer.pending_text)
             )
             state: dict[str, Any] = {
-                "mode": "incremental" if self.verbosity_level <= 2 else "final_only",
+                "mode": "incremental" if streams_progress(self.verbosity_level) else "final_only",
                 "offset": offset,
                 "finish_suffix": self.finish_suffix(),
                 "switched_at": datetime.now(UTC).isoformat(),

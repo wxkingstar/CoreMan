@@ -53,7 +53,7 @@ function emptyForm(): BotIn {
     model: '',
     working_dir: '',
     system_prompt: '',
-    verbosity_level: 1,
+    verbosity_level: 4,
     effort_level: null,
     sse_timeout_seconds: 3600,
     credentials: credDefaults('feishu'),
