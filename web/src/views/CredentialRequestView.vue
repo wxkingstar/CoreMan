@@ -14,6 +14,8 @@ const values = reactive<Record<string, string>>({})
 const error = ref('')
 const busy = ref(false)
 const saved = ref(false)
+/** 服务端按实际结果写的一句话：续接、下次对话或下次执行时生效，不能一律承诺「继续任务」。 */
+const outcome = ref('')
 
 async function load() {
   busy.value = true
@@ -28,7 +30,8 @@ async function submit() {
   if (missing) { error.value = t('credentialRequest.required', { label: missing.label }); return }
   busy.value = true
   try {
-    await personalCredentials.submit(id.value, Object.fromEntries(form.value.fields.map(f => [f.key, values[f.key]])))
+    const result = await personalCredentials.submit(id.value, Object.fromEntries(form.value.fields.map(f => [f.key, values[f.key]])))
+    outcome.value = result.message
     for (const key of Object.keys(values)) values[key] = ''
     saved.value = true
     error.value = ''
@@ -52,7 +55,7 @@ onMounted(load)
       data-test="saved"
       icon="success"
       :title="t('credentialRequest.saved')"
-      :sub-title="t('credentialRequest.savedHint')"
+      :sub-title="outcome || t('credentialRequest.savedHint')"
     />
     <template v-else-if="form">
       <p class="muted">

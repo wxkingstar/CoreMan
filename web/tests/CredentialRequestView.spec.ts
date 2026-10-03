@@ -47,6 +47,27 @@ it('submits every field once and then shows the saved state', async () => {
   wrapper.unmount()
 })
 
+it('shows the outcome the server returned instead of promising a resume', async () => {
+  vi.mocked(personalCredentials.submit).mockResolvedValue({ status: 'saved', keys: ['DEMO_PIN', 'DEMO_USERNAME'], message: '下次执行时生效。' })
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  const saved = wrapper.get('[data-test="saved"]')
+  expect(saved.text()).toContain('下次执行时生效。')
+  expect(saved.text()).not.toContain('继续之前的任务')
+  wrapper.unmount()
+})
+
+it('falls back to the generic hint when the server returned no message', async () => {
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(wrapper.get('[data-test="saved"]').text()).toContain('继续之前的任务')
+  wrapper.unmount()
+})
+
 it('ignores a second submit while the first is still in flight', async () => {
   let finish: (v: { status: string; keys: string[]; message: string }) => void = () => {}
   vi.mocked(personalCredentials.submit).mockReturnValue(new Promise(resolve => { finish = resolve }))
