@@ -250,7 +250,6 @@ class CronRunHandler:
                     session_id=str(session_id),
                     env_vars=env,
                     effort=bot.effort_level,
-                    verbosity_level=bot.verbosity_level,
                     user_content=sanitize_user_input(prompt),
                     system_prompt=build_system_prompt(
                         segments=await load_segments(ctx.settings_store),

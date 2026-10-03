@@ -334,7 +334,7 @@ def test_init_and_prepare_remove_only_legacy_instruction_excludes(agent):
     assert exclude.read_text().count("/.coreman-workspace.json") == 1
     exclude.write_text("/AGENTS.md\ncache/\n")
     agent.prepare_workspace(root)
-    assert exclude.read_text() == "cache/\n/.claude/output-styles/\n"
+    assert exclude.read_text() == "cache/\n"
 
 
 def test_git_cancellation_stops_subprocess(agent, tmp_path, monkeypatch):

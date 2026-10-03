@@ -1,14 +1,8 @@
 import asyncio
-import json
 
 import pytest
 
-from coreman.core.relay.client import (
-    VERBOSITY_OUTPUT_STYLES,
-    ChatRequest,
-    IncompleteResultError,
-    RelayError,
-)
+from coreman.core.relay.client import ChatRequest, IncompleteResultError, RelayError
 from coreman.core.relay.sse import FinishEvent, RelayErrorEvent, TextDelta, ToolUseStart, UsageEvent
 from tests.fakes.fake_relay import FakeRelay
 
@@ -22,7 +16,6 @@ def req(**over: object) -> ChatRequest:
         session_id="11111111-1111-4111-8111-111111111111",
         backend="claude",
         effort="high",
-        verbosity_level=3,
         env_vars={"A": "1"},
     )
     base.update(over)
@@ -37,15 +30,13 @@ def test_to_body_claude_and_codex() -> None:
     ]
     assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
     assert body["max_turns"] == 80
-    assert json.loads(body["settings"]) == {"outputStyle": VERBOSITY_OUTPUT_STYLES[3]}
+    # 输出详细度只在 system prompt 里，不再经 claude --settings 选输出样式。
+    assert "settings" not in body
     assert body["effort"] == "high" and body["env_vars"] == {"A": "1"}
     assert body["session_id"].startswith("1111")
-    codex = req(
-        model="codex/gpt-5.5", backend="codex", verbosity_level=1, effort=None, env_vars={}
-    ).to_body()
+    codex = req(model="codex/gpt-5.5", backend="codex", effort=None, env_vars={}).to_body()
     assert "max_turns" not in codex and "settings" not in codex
     assert "effort" not in codex and "env_vars" not in codex
-    assert "settings" not in req(verbosity_level=1).to_body()
 
 
 async def collect(relay: FakeRelay, **kw: object) -> list[object]:

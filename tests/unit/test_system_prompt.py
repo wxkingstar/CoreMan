@@ -35,7 +35,7 @@ def test_defaults_preserve_security_identity_and_output_contracts() -> None:
     assert DEFAULT_SECURITY_POLICY.startswith("# AI Agent Policy")
     assert "[SYS_USER:<tag>]" in DEFAULT_SECURITY_POLICY
     assert "# Execution Model" in DEFAULT_RUNTIME_MODE and DEFAULT_RUNTIME_TAIL.strip()
-    assert set(DEFAULT_VERBOSITY) == {2, 3, 4} and all(DEFAULT_VERBOSITY.values())
+    assert set(DEFAULT_VERBOSITY) == {1, 2, 3} and all(DEFAULT_VERBOSITY.values())
     assert "imagegen" in DEFAULT_CODEX_CONTRACT or "markdown" in DEFAULT_CODEX_CONTRACT
 
 
@@ -60,8 +60,24 @@ def test_claude_order_known_speaker() -> None:
     assert tag and f"[SYS_USER:{tag[1]}] user_id=zhangsan, login=zhangsan, name=张三" in out
     # 标签规则段必须排在安全策略之后、发言者之前，且它本身不可由管理台文案覆盖。
     assert out.index(IDENTITY_TAG_RULE.format(tag=tag[1])) < out.index("## 当前发言者")
-    assert DEFAULT_CODEX_CONTRACT not in out
-    assert DEFAULT_VERBOSITY[3] not in out and SPEAKER_CHANGED_LINE not in out
+    assert DEFAULT_CODEX_CONTRACT not in out and SPEAKER_CHANGED_LINE not in out
+    # 输出详细度两个后端一样走 system prompt，排在机器人提示词之后、结尾重申之前。
+    assert out.index("你是销售") < out.index(DEFAULT_VERBOSITY[3]) < out.index(DEFAULT_RUNTIME_TAIL)
+
+
+def test_detailed_level_adds_no_length_section() -> None:
+    """4 档（详细）就是模型默认：两个后端都不加篇幅说明。"""
+    for backend in ("claude", "codex"):
+        out = build_system_prompt(
+            segments=SEG,
+            backend=backend,
+            verbosity_level=4,
+            bot_prompt="",
+            speaker=KNOWN,
+            speaker_changed=False,
+        )
+        assert "# Response Length" not in out
+        assert not any(text in out for text in DEFAULT_VERBOSITY.values())
 
 
 def test_codex_order_unknown_speaker_and_change() -> None:

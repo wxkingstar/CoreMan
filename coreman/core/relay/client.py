@@ -9,7 +9,6 @@ POST /v1/chat/completions 的流式对话。
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
@@ -26,9 +25,6 @@ from coreman.core.runtime_nodes.transport import (
 )
 
 _AUTH_MARKERS = ("not logged in", "/login", "401")
-
-# verbosity 档位到 relay settings.outputStyle 的映射；1 档不传 settings。
-VERBOSITY_OUTPUT_STYLES = {2: "verbosity-normal", 3: "verbosity-quiet", 4: "verbosity-silent"}
 
 
 class RelayError(Exception):
@@ -68,14 +64,13 @@ class ChatRequest:
     session_id: str
     backend: str
     effort: str | None = None
-    verbosity_level: int = 1
     env_vars: dict[str, str] = field(default_factory=dict)
     max_turns: int = 80
 
     def to_body(self) -> dict[str, Any]:
         """拼出 POST /v1/chat/completions 的请求体。
 
-        `max_turns` 与 `settings` 仅 claude backend 携带；`effort`、`env_vars` 非空才带；
+        `max_turns` 仅 claude backend 携带；`effort`、`env_vars` 非空才带；
         `session_id` 原样透传（cron 与体检传空字符串）。
         """
         body: dict[str, Any] = {
@@ -91,9 +86,6 @@ class ChatRequest:
         }
         if self.backend == "claude":
             body["max_turns"] = self.max_turns
-            style = VERBOSITY_OUTPUT_STYLES.get(self.verbosity_level)
-            if style:
-                body["settings"] = json.dumps({"outputStyle": style})
         if self.effort:
             body["effort"] = self.effort
         if self.env_vars:

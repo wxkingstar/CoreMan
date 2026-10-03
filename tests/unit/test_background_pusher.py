@@ -6,7 +6,7 @@ from coreman.runtime.worker.background import BackgroundPusher, Timing
 T = Timing(bg_min_interval=10, bg_max_wait=120, bg_degrade_after=3, bg_degraded_interval=90)
 
 
-def pusher(verbosity: int = 1) -> BackgroundPusher:
+def pusher(verbosity: int = 4) -> BackgroundPusher:
     return BackgroundPusher(
         task_id=7,
         bot_id=uuid.uuid4(),
@@ -39,7 +39,7 @@ def test_waiting_for_answer_sends_only_unseen_text_without_success_marker() -> N
     p.start(now=0, pending_len=len("已展示的正文"))
     assert p.finish_plain("已展示的正文\n\n请选择方案") == ["\n\n请选择方案"]
     assert p.finish_plain("已展示的正文") == []
-    quiet = pusher(3)
+    quiet = pusher(1)
     quiet.start(now=0, pending_len=100)
     assert quiet.finish_plain("请选择方案") == ["请选择方案"]
 
@@ -72,7 +72,7 @@ def test_finish_and_truncation() -> None:
     assert p2.finish("已推") == [msg("bg_done_plain")]
     assert p2.finish("已推还有尾巴") == [msg("bg_done_prefix") + "还有尾巴"]
     big = "字" * 10000
-    (only,) = pusher(verbosity=3).finish(big)
+    (only,) = pusher(verbosity=1).finish(big)
     assert (
         only
         and len(only.encode()) <= T.max_bytes
@@ -80,8 +80,8 @@ def test_finish_and_truncation() -> None:
     )
 
 
-def test_high_verbosity_never_streams_progress() -> None:
-    p = pusher(verbosity=3)
+def test_terse_levels_never_stream_progress() -> None:
+    p = pusher(verbosity=1)
     p.start(now=0.0, pending_len=0)
     assert p.decide(500.0, "x" * 100, [10, 50]) == [] and p.pushed_count == 0
     assert p.finish("全文") == ["全文"]
@@ -107,7 +107,7 @@ def test_finish_failed_never_claims_success() -> None:
 
 
 def test_finish_failed_caps_and_ignores_verbosity() -> None:
-    p = pusher(verbosity=3)
+    p = pusher(verbosity=1)
     p.start(now=0.0, pending_len=0)
     (only,) = p.finish_failed("字" * 10000)
     assert len(only.encode()) <= T.max_bytes
@@ -123,7 +123,7 @@ def test_silence_heartbeats_fire_once_per_mark_and_rearm_on_push() -> None:
         bot_id=uuid.uuid4(),
         platform="wecom",
         chat_id="c",
-        verbosity_level=1,
+        verbosity_level=4,
         session_url="",
         timing=timing,
     )

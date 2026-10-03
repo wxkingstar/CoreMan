@@ -27,7 +27,7 @@ async def seed_bot(
     model: str = "vllm/claude-sonnet-4-6",
     env: dict[str, str] | None = None,
     allowed_user_ids: list | None = None,
-    verbosity: int = 1,
+    verbosity: int = 4,
     effort: str | None = None,
 ) -> tuple[Bot, RelayServer, Cipher]:
     cipher = Cipher(MASTER)

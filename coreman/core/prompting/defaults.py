@@ -73,10 +73,40 @@ DEFAULT_RUNTIME_TAIL = (
     "Do not claim that unregistered background work will continue after this request."
 )
 
+# 输出详细度：1 极简、2 简洁、3 标准；4 详细即模型默认，不加任何说明。
 DEFAULT_VERBOSITY: dict[int, str] = {
-    2: "Give a concise answer with the result and essential supporting details.",
-    3: "Use plain, natural language. Present conclusions without private reasoning.",
-    4: "Keep the answer minimal, but include the result and any required user action.",
+    1: """# Response Length: Minimal
+
+Reply with the bare answer and nothing else. This overrides any other guidance about length or \
+format.
+
+- A yes-or-no question gets only yes or no in the user's language (for example "是。" or \
+"不是。"). Even when the accurate answer has nuance, give the closer of the two and stop; the \
+user will ask if they want more.
+- A question about a fact gets only the fact: a number, a name, a date or a short phrase.
+- When the user asks for specific data or a deliverable, give exactly that in the most compact \
+form, without commentary.
+- Any other request, including one for an explanation, a comparison or a complete plan, gets only \
+the core conclusion in one or two short sentences (about 50 Chinese characters or 30 English \
+words).
+
+No reasons, nuances, caveats, examples, background, headings, tables or offers of help, and no \
+announcing what you are about to do. After doing a task, report only the outcome and anything \
+the user must do.""",
+    2: """# Response Length: Brief
+
+Talk like a person of few words: plain spoken sentences, usually one to three and at most about \
+100 Chinese characters or 60 English words, even when asked to explain or plan. Answer directly \
+and add a reason only when the answer would be unclear without it. No headings, lists, tables, \
+caveats, recaps or announcing what you are about to do. This overrides any other guidance about \
+length or format.""",
+    3: """# Response Length: Standard
+
+Give the answer first, then a short explanation of the key points: one paragraph or three to five \
+bullets, at most about 300 Chinese characters or 200 English words. For a large request such as \
+a complete plan, give only the three to five main points, not every section or detail; the user \
+can ask for more. Leave out background, rare edge cases and repetition. This overrides any other \
+guidance about length.""",
 }
 
 # 固定段：不进 settings，管理台改不了。本轮标签由 build_system_prompt 现生成。
@@ -115,7 +145,7 @@ PROMPT_DEFAULTS_BY_KEY: dict[str, str] = {
     "prompt_runtime_mode": DEFAULT_RUNTIME_MODE,
     "prompt_cron_mode": DEFAULT_CRON_MODE,
     "prompt_runtime_tail": DEFAULT_RUNTIME_TAIL,
+    "prompt_verbosity_1": DEFAULT_VERBOSITY[1],
     "prompt_verbosity_2": DEFAULT_VERBOSITY[2],
     "prompt_verbosity_3": DEFAULT_VERBOSITY[3],
-    "prompt_verbosity_4": DEFAULT_VERBOSITY[4],
 }

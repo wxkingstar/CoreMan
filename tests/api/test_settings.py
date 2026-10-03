@@ -166,7 +166,7 @@ async def test_defaults_endpoint_derives_default_model(
     r = await client.get("/api/admin/settings/defaults")
     assert r.status_code == 200 and r.json()["data"] == {
         "default_model": "codex/only",
-        "default_verbosity_level": 1,
+        "default_verbosity_level": 4,
         "default_effort_level": None,
         "wecom_qr_provisioning_enabled": True,
     }

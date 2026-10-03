@@ -31,16 +31,16 @@ const KEYS = [
   'prompt_runtime_mode',
   'prompt_cron_mode',
   'prompt_runtime_tail',
+  'prompt_verbosity_1',
   'prompt_verbosity_2',
   'prompt_verbosity_3',
-  'prompt_verbosity_4',
 ] as const
 
 function empty(): SettingsOut {
   return {
     bootstrap_admin_enabled: true,
     default_model: null,
-    default_verbosity_level: 1,
+    default_verbosity_level: 4,
     default_effort_level: null,
     session_ttl_hours: 72,
     jwt_issuer: 'coreman',
@@ -53,9 +53,9 @@ function empty(): SettingsOut {
     prompt_runtime_mode: '',
     prompt_cron_mode: '',
     prompt_runtime_tail: '',
+    prompt_verbosity_1: '',
     prompt_verbosity_2: '',
     prompt_verbosity_3: '',
-    prompt_verbosity_4: '',
   }
 }
 
