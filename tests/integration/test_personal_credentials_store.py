@@ -156,3 +156,10 @@ async def test_list_update_delete_own(db_session):
     await db_session.commit()
     found = await store.injected(db_session, CIPHER, bot_id=bot.id, user_id=user.id)
     assert found.env == {"DEMO_PIN": "pin-222333"}
+
+
+def test_injected_repr_does_not_leak_values():
+    # 日志、异常回溯、断言失败都会渲染 repr：明文不能跟着出去。
+    found = store.Injected({"DEMO_PIN": "pin-778899"}, frozenset({"pin-778899"}), ("DEMO_PIN",))
+    assert "pin-778899" not in repr(found)
+    assert found.names == ("DEMO_PIN",)

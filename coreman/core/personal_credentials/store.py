@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -24,8 +24,10 @@ LAST_USED_EVERY = timedelta(hours=1)
 
 @dataclass(frozen=True)
 class Injected:
-    env: dict[str, str]
-    secret_values: frozenset[str]
+    """一轮注入的结果。`repr=False` 让任何 `repr`（日志、异常回溯、断言失败）都带不出明文。"""
+
+    env: dict[str, str] = field(repr=False)
+    secret_values: frozenset[str] = field(repr=False)
     names: tuple[str, ...]
 
 
@@ -38,10 +40,10 @@ async def save(
     fields: list[dict[str, Any]],
     values: dict[str, str],
 ) -> list[str]:
-    for field in fields:
-        key = str(field["key"])
+    for spec in fields:
+        key = str(spec["key"])
         enc = cipher.encrypt(values[key], value_aad(bot_id, user_id, key))
-        label, secret = str(field.get("label") or ""), bool(field.get("secret", True))
+        label, secret = str(spec.get("label") or ""), bool(spec.get("secret", True))
         stmt = (
             insert(PersonalCredential)
             .values(
