@@ -3,10 +3,10 @@
 import json
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from coreman.core.bus import tasks
-from coreman.core.db.models import CredentialRequest, OutboxItem
+from coreman.core.db.models import CredentialRequest, OutboxItem, UserIdentity
 from coreman.core.personal_credentials import service
 from coreman.core.personal_credentials.policy import CredentialError
 from tests.integration.credential_helpers import BODY, cap_for, cron_cap, login_app, owner
@@ -38,6 +38,23 @@ async def test_feishu_private_form_is_validated_dm_and_deduplicated(db_session):
     await db_session.commit()
     assert again.status == "already_pending" and again.request_id == row.id
     assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
+
+
+async def test_dm_record_without_platform_identity_is_not_a_private_delivery(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    cap = cap_for(bot, user, task)
+    await db_session.execute(delete(UserIdentity).where(UserIdentity.user_id == user.id))
+    await db_session.commit()
+    # 定时任务只能靠私聊送达，没有本人身份就送不了（先测它：成功发起后同字段请求会被去重）。
+    with pytest.raises(CredentialError) as exc:
+        await service.open_request(
+            db_session, cipher, cron_cap(bot, user, task), BODY, base_url=BASE
+        )
+    assert exc.value.code == "unreachable"
+    await service.open_request(db_session, cipher, cap, BODY, base_url=BASE)
+    await db_session.commit()
+    [item] = (await db_session.scalars(select(OutboxItem))).all()
+    assert item.target == {"chat_id": cap.chat_id}
 
 
 async def test_group_origin_goes_to_dm_with_group_notice(db_session):

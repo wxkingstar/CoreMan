@@ -92,13 +92,19 @@ class Opened:
     request_id: uuid.UUID
 
 
-def _delivery(cap: Capability, reached: UserReached | None) -> tuple[str | None, bool]:
-    """表单发到哪：有私聊记录发私聊；否则对话发回原会话；定时任务没有私聊记录就发不了。"""
-    if reached is not None:
-        return reached.platform_chat_id, True
+def _delivery(
+    cap: Capability, reached: UserReached | None, identity: UserIdentity | None
+) -> tuple[str | None, UserIdentity | None]:
+    """表单发到哪，以及私聊收件人。
+
+    私聊记录要配上本人的平台身份才算私聊送达（发送前凭它复核收件人）；否则对话发回原会话；
+    定时任务没有私聊送达就发不了。第二项非空即私聊。
+    """
+    if reached is not None and identity is not None:
+        return reached.platform_chat_id, identity
     if cap.origin_kind == "chat":
-        return cap.chat_id, False
-    return None, False
+        return cap.chat_id, None
+    return None, None
 
 
 async def open_request(
@@ -126,7 +132,8 @@ async def open_request(
         if sorted(str(f["key"]) for f in existing.fields) == keys:
             return Opened("already_pending", existing.id)
     reached = await session.get(UserReached, (bot.id, user.id), populate_existing=True)
-    delivery, private = _delivery(cap, reached)
+    identity = await _identity(session, user.id, bot.platform)
+    delivery, recipient = _delivery(cap, reached, identity)
     if delivery is None:
         raise CredentialError(
             "unreachable", "没有可以发送表单的会话：请先在私聊里和 AI 员工说一句话，再重新发起"
@@ -135,7 +142,6 @@ async def open_request(
         raise CredentialError(
             "login_unavailable", "企业微信网页登录未配置，无法发送安全表单，请联系管理员"
         )
-    identity = await _identity(session, user.id, bot.platform)
     row = CredentialRequest(
         bot_id=bot.id,
         user_id=user.id,
@@ -155,17 +161,17 @@ async def open_request(
     session.add(row)
     await session.flush()
     target: dict[str, Any] = {"chat_id": delivery}
-    if private and identity is not None:
+    if recipient is not None:
         target |= {
             "recipient_user_id": str(user.id),
-            "recipient_platform_user_id": identity.platform_user_id,
+            "recipient_platform_user_id": recipient.platform_user_id,
         }
     url = page_url(base_url, row.id)
     payload: dict[str, Any]
     if bot.platform == "feishu":
         mention = (
             identity.open_id
-            if identity is not None and not private and cap.chat_type == "group"
+            if identity is not None and recipient is None and cap.chat_type == "group"
             else None
         )
         payload = {
