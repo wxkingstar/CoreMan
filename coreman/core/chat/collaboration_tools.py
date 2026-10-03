@@ -116,7 +116,7 @@ async def task_scope(
     task = await session.get(Task, task_id, populate_existing=True)
     if (
         task is None
-        or task.kind not in ("chat", "cron_run")
+        or task.kind not in (*service.HUMAN_TURN_KINDS, "cron_run")
         or task.status not in tasks.ACTIVE
         or task.cancel_requested_at
         or task.payload.get("collaboration_id")

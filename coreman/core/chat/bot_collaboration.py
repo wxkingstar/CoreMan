@@ -28,9 +28,12 @@ from coreman.core.db.models import (
     OutboxItem,
     Task,
 )
+from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.core.prompting import Speaker
 
 AAD = "bot_collaboration.task_capability"
+# 来源是真人原始消息的轮次：普通对话，或凭证提交后在原对话里续接它的一轮（沿用同一条入站事件）。
+HUMAN_TURN_KINDS = ("chat", RESUME_KIND)
 ACTIVE = (
     "waiting_identity",
     "requested",
@@ -186,7 +189,7 @@ async def request_help(
     task = await session.get(Task, task_id, with_for_update=True, populate_existing=True)
     if (
         not task
-        or task.kind != "chat"
+        or task.kind not in HUMAN_TURN_KINDS
         or task.status not in tasks.ACTIVE
         or task.cancel_requested_at
         or task.payload.get("collaboration_id")

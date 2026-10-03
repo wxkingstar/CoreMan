@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import BotAllowedUser, BotCollaboration
+from tests.integration.credential_helpers import resume_task
 from tests.integration.test_bot_collaboration import setup
 from tests.integration.test_chat_handler import chat_task
 
@@ -113,6 +114,49 @@ async def test_no_discovery_or_delegation_from_descendant(db_session, phase):
     await db_session.commit()
     with pytest.raises(ValueError, match="cannot delegate"):
         await call(db_session, task, actor, "search_collaborators", {})
+
+
+async def test_credential_resume_turn_keeps_collaboration_available(db_session):
+    from coreman.core.chat.collaboration_tools import task_scope
+
+    a, b, actor, route, task = await fresh(db_session)
+    resume = await resume_task(db_session, task, actor)
+    scoped, source = await task_scope(db_session, resume.id, str(actor.id))
+    assert scoped.id == resume.id
+    # 来源是提问那一轮的原始人类消息，授权按它核对。
+    assert source is not None and source.id == task.inbound_event_id
+    found = await call(db_session, resume, actor, "search_collaborators", {"query": "库存"})
+    assert found["items"][0]["id"] == b.bot_key
+    args = {"collaborator_id": b.bot_key, "question": "可用库存?"}
+    result = await call(db_session, resume, actor, "request_collaboration", args)
+    assert result["stop"] is True and result["status"] in ("requested", "waiting_identity")
+    row = await db_session.scalar(
+        select(BotCollaboration).where(BotCollaboration.source_task_id == resume.id)
+    )
+    assert row is not None and row.source_session_key == task.session_key
+
+
+@pytest.mark.parametrize(
+    "key", ["collaboration_id", "collaboration_phase", "human_collaboration_id"]
+)
+async def test_credential_resume_cannot_delegate_from_a_collaboration_turn(db_session, key):
+    from coreman.core.chat.collaboration_tools import task_scope
+
+    a, b, actor, route, task = await fresh(db_session)
+    resume = await resume_task(db_session, task, actor)
+    resume.payload = {**resume.payload, key: "present"}
+    await db_session.commit()
+    with pytest.raises(ValueError, match="cannot delegate"):
+        await task_scope(db_session, resume.id, str(actor.id))
+
+
+async def test_credential_resume_actor_must_match_the_original_speaker(db_session):
+    from coreman.core.chat.collaboration_tools import task_scope
+
+    a, b, actor, route, task = await fresh(db_session)
+    resume = await resume_task(db_session, task, actor)
+    with pytest.raises(ValueError, match="capability actor mismatch"):
+        await task_scope(db_session, resume.id, "00000000-0000-4000-8000-000000000001")
 
 
 async def test_parallel_calls_cannot_reset_or_overspend_budget(db_session, db_engine):
