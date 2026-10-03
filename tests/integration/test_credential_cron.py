@@ -31,7 +31,10 @@ async def test_cron_run_injects_the_actors_credentials(db_engine, db_session):
     assert env["DEMO_PIN"] == "pin-778899"
     cap = policy.read_capability(cipher, env["COREMAN_CREDENTIAL_TOKEN"])
     assert (cap.origin_kind, cap.cron_job_id, cap.user_id) == ("cron", row.id, row.created_by)
-    assert "`$DEMO_PIN`" in fake.requests[0]["messages"][0]["content"]
+    prompt = fake.requests[0]["messages"][0]["content"]
+    assert "`$DEMO_PIN`" in prompt
+    # 定时任务不会续接：提示词不能承诺“提交后自动继续”，要说明下次定时运行才生效。
+    assert "系统会自动让你继续" not in prompt and "下一次定时运行起生效" in prompt
     # 出站闸门：secret 字段的值必须进 ctx.secrets，非 secret 字段不进。
     assert "pin-778899" in ctx.secrets
     assert "alice" not in ctx.secrets

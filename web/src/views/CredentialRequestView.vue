@@ -23,7 +23,7 @@ async function load() {
 }
 /** 提交成功后立即清空输入框：值只在这一次请求里离开浏览器。 */
 async function submit() {
-  if (!form.value) return
+  if (!form.value || busy.value) return
   const missing = form.value.fields.find(f => !(values[f.key] ?? '').trim())
   if (missing) { error.value = t('credentialRequest.required', { label: missing.label }); return }
   busy.value = true

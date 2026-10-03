@@ -11,7 +11,7 @@ from typing import Any
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
-from coreman.core.personal_credentials.policy import CARD_PREFIX, parse_card_task_id, sealed_aad
+from coreman.core.personal_credentials.policy import parse_card_task_id, sealed_aad
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
     AudioPart,
@@ -128,7 +128,8 @@ def _normalize_event(
         if click is not None:
             return _reply_click(raw, click, bot_id=bot_id, context=context)
         task_id = str(value.get("task_id") or "")
-        credential = parse_card_task_id(task_id) is not None
+        request_id = parse_card_task_id(task_id)
+        credential = request_id is not None
         if (
             not credential
             and not parse_task_id(task_id)
@@ -167,7 +168,7 @@ def _normalize_event(
             "event_key": str(value.get("event_key") or ""),
             "selected": selected,
         }
-        if credential:
+        if request_id is not None:
             # 个人凭证：表单值在落库之前加密封存，入站事件与任务载荷里只有密文。
             # 没有加密器就丢弃这次回调——宁可让用户重填，也不能落一份明文。
             if cipher is None:
@@ -178,7 +179,7 @@ def _normalize_event(
                 "card_type": "credential",
                 "sealed": cipher.encrypt(
                     json.dumps(values, ensure_ascii=False),
-                    sealed_aad(task_id[len(CARD_PREFIX) :]),
+                    sealed_aad(request_id),
                 ),
             }
         return InboundMessage(

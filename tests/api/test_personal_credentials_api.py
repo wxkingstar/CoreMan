@@ -1,14 +1,15 @@
 """个人凭证接口：本轮令牌、本人网页提交与管理。响应与错误里都不能出现值。"""
 
+import json
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from coreman.core.db.models import CredentialRequest, User
 from coreman.core.personal_credentials import policy, store
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
-from tests.integration.credential_helpers import BODY, VALUES, cap_for, login_app, owner
+from tests.integration.credential_helpers import BODY, VALUES, cap_for, cron_cap, login_app, owner
 
 URL = "/api/runtime/credentials/requests"
 
@@ -41,6 +42,25 @@ async def test_runtime_request_auth_and_results(client, app, db_session):
     assert "结束本轮" in first.json()["data"]["message"]
     again = await client.post(URL, json=BODY, headers=headers)
     assert again.status_code == 200 and again.json()["data"]["status"] == "already_pending"
+
+
+async def test_runtime_request_body_is_capped_and_creates_nothing(client, app, db_session):
+    bot, user, task, _ = await owner(db_session)
+    headers = {**_bearer(app, cap_for(bot, user, task)), "Content-Type": "application/json"}
+    padded = {**BODY, "purpose": "x" * (64 * 1024)}
+    r = await client.post(URL, content=json.dumps(padded), headers=headers)
+    assert r.status_code == 413
+    assert await db_session.scalar(select(func.count()).select_from(CredentialRequest)) == 0
+    assert (await client.post(URL, content=b"{not json", headers=headers)).status_code == 422
+
+
+async def test_runtime_request_message_for_cron_does_not_promise_resume(client, app, db_session):
+    bot, user, task, _ = await owner(db_session)
+    headers = _bearer(app, cron_cap(bot, user, task))
+    r = await client.post(URL, json=BODY, headers=headers)
+    assert r.status_code == 202, r.text
+    message = r.json()["data"]["message"]
+    assert "下一次定时运行" in message and "续接" in message and "自动续接" not in message
 
 
 async def test_runtime_request_on_wecom_without_login_is_409(client, app, db_session):

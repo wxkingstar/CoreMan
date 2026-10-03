@@ -37,6 +37,10 @@ AGENT_NOTE = (
     "已向用户发送安全表单。请简短告诉用户去填写，然后结束本轮；"
     "用户提交后会自动续接，届时变量已在环境里。"
 )
+AGENT_NOTE_CRON = (
+    "已向用户发送安全表单。定时任务不会因为用户提交而续接：请在输出里说明本次缺少凭证，"
+    "然后结束本轮；用户提交的值从下一次定时运行起生效。"
+)
 
 
 def page_url(base_url: str, request_id: uuid.UUID) -> str:
@@ -111,6 +115,17 @@ def _delivery(
     return None, None
 
 
+def _target(chat_id: str, user_id: uuid.UUID, recipient: UserIdentity | None) -> dict[str, Any]:
+    """出站目标；私聊带上收件人，网关发送前凭它复核。"""
+    target: dict[str, Any] = {"chat_id": chat_id}
+    if recipient is not None:
+        target |= {
+            "recipient_user_id": str(user_id),
+            "recipient_platform_user_id": recipient.platform_user_id,
+        }
+    return target
+
+
 async def open_request(
     session: AsyncSession,
     cipher: Cipher,
@@ -164,12 +179,7 @@ async def open_request(
     )
     session.add(row)
     await session.flush()
-    target: dict[str, Any] = {"chat_id": delivery}
-    if recipient is not None:
-        target |= {
-            "recipient_user_id": str(user.id),
-            "recipient_platform_user_id": recipient.platform_user_id,
-        }
+    target = _target(delivery, user.id, recipient)
     url = page_url(base_url, row.id)
     payload: dict[str, Any]
     if bot.platform == "feishu":
@@ -338,13 +348,21 @@ async def _say(
 ) -> None:
     if not row.delivery_chat_id:
         return
+    # 送达会话就是本人私聊时，和发表单一样带上收件人，网关发送前复核。
+    reached = await session.get(UserReached, (bot.id, row.user_id), populate_existing=True)
+    identity = await _identity(session, row.user_id, bot.platform)
+    private = (
+        identity
+        if reached is not None and reached.platform_chat_id == row.delivery_chat_id
+        else None
+    )
     await outbox.add(
         session,
         bot_id=bot.id,
         platform=bot.platform,
         kind="send",
         dedupe_key=f"credential-request:{row.id}:{tag}",
-        target={"chat_id": row.delivery_chat_id},
+        target=_target(row.delivery_chat_id, row.user_id, private),
         payload={"markdown": markdown},
     )
 

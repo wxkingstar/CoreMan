@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -25,6 +26,7 @@ from coreman.core.personal_credentials.policy import CredentialError
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["personal-credentials"])
+MAX_BODY = 65_536
 _STATUS = {
     "invalid_fields": 422,
     "invalid_values": 422,
@@ -54,9 +56,10 @@ async def create_request(
         cap = policy.read_capability(request.app.state.cipher, auth[7:])
     except (ValueError, KeyError, TypeError, OverflowError):
         raise ApiError(401, 401, "Invalid credential capability") from None
+    raw = await mcp_rpc.read_body(request, MAX_BODY)
     try:
-        body = await request.json()
-    except ValueError:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
         raise ApiError(422, 422, "请求体必须是 JSON") from None
     try:
         opened = await service.open_request(
@@ -76,7 +79,7 @@ async def create_request(
         "data": {
             "status": opened.status,
             "request_id": str(opened.request_id),
-            "message": service.AGENT_NOTE,
+            "message": service.AGENT_NOTE_CRON if cap.origin_kind == "cron" else service.AGENT_NOTE,
         },
     }
 

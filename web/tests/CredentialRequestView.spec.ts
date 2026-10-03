@@ -47,6 +47,20 @@ it('submits every field once and then shows the saved state', async () => {
   wrapper.unmount()
 })
 
+it('ignores a second submit while the first is still in flight', async () => {
+  let finish: (v: { status: string; keys: string[]; message: string }) => void = () => {}
+  vi.mocked(personalCredentials.submit).mockReturnValue(new Promise(resolve => { finish = resolve }))
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledTimes(1)
+  finish({ status: 'saved', keys: ['DEMO_PIN', 'DEMO_USERNAME'], message: '' }); await flushPromises()
+  expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
+  wrapper.unmount()
+})
+
 it('refuses to submit with an empty field', async () => {
   const wrapper = render(); await flushPromises()
   await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')

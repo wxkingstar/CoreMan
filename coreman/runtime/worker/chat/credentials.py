@@ -24,7 +24,7 @@ def _strip(env: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if not key.startswith(policy.ENV_PREFIX)}
 
 
-def guidance(names: tuple[str, ...]) -> str:
+def guidance(names: tuple[str, ...], origin_kind: str) -> str:
     have = (
         "当前发言者已在本 AI 员工保存的个人凭证（环境变量，只给名字）："
         + "、".join(f"`${name}`" for name in names)
@@ -32,6 +32,17 @@ def guidance(names: tuple[str, ...]) -> str:
         if names
         else "当前发言者在本 AI 员工还没有保存个人凭证。"
     )
+    if origin_kind == "cron":
+        # 定时任务没有会话可续：提交后不会再唤醒本轮，新值要等下一次定时运行。
+        after = (
+            "调用成功后在输出里说明本次缺少凭证、已向用户发送安全表单，然后结束本轮；"
+            "这是定时任务，用户提交后不会续接本轮，新值从下一次定时运行起生效。\n"
+        )
+    else:
+        after = (
+            "调用成功后简短告诉用户「已发送安全表单，请填写」，"
+            "然后结束本轮；用户提交后系统会自动让你继续，届时变量已经在环境里。\n"
+        )
     return (
         "\n\n## 个人凭证\n"
         + have
@@ -46,9 +57,8 @@ def guidance(names: tuple[str, ...]) -> str:
         "```\n"
         "`key` 是环境变量名（大写字母、数字、下划线），`label` 是给用户看的名字，"
         "账号这类非机密字段把 `secret` 设为 false。"
-        "调用成功后简短告诉用户「已发送安全表单，请填写」，"
-        "然后结束本轮；用户提交后系统会自动让你继续，届时变量已经在环境里。\n"
-        "规则：不得让用户在聊天里发送密码或密钥；不得打印、回显或记录这些变量的值，"
+        + after
+        + "规则：不得让用户在聊天里发送密码或密钥；不得打印、回显或记录这些变量的值，"
         "不得写入文件、工作区或 URL；只用于当前发言者本人的请求；接口地址与令牌只在本轮有效。"
     )
 
@@ -73,7 +83,7 @@ async def _apply(
     env[policy.ENV_PREFIX + "TOKEN"] = policy.issue_capability(
         ctx.cipher, cap, ttl_seconds=bot.sse_timeout_seconds + policy.CAPABILITY_GRACE
     )
-    return extra + guidance(found.names), env, found.secret_values
+    return extra + guidance(found.names, cap.origin_kind), env, found.secret_values
 
 
 async def configure(

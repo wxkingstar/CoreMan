@@ -6,7 +6,14 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, update
 
-from coreman.core.db.models import AuditLog, CredentialRequest, OutboxItem, Task, User
+from coreman.core.db.models import (
+    AuditLog,
+    CredentialRequest,
+    OutboxItem,
+    Task,
+    User,
+    UserReached,
+)
 from coreman.core.personal_credentials import service, store
 from coreman.core.personal_credentials.policy import CredentialError
 from coreman.core.timeutils import utcnow
@@ -144,4 +151,27 @@ async def test_cron_origin_on_wecom_says_saved_instead_of_resuming(db_session):
     said = await db_session.scalar(
         select(OutboxItem).where(OutboxItem.dedupe_key == f"credential-request:{row.id}:saved")
     )
-    assert said.target == {"chat_id": "oc_private"} and "下次执行时生效" in said.payload["markdown"]
+    assert said.target == {
+        "chat_id": "oc_private",
+        "recipient_user_id": str(user.id),
+        "recipient_platform_user_id": "owner_pid",
+    }
+    assert "下次执行时生效" in said.payload["markdown"]
+
+
+async def test_saved_notice_is_bare_when_delivery_chat_is_no_longer_the_private_chat(db_session):
+    bot, user, task, cipher = await owner(db_session, platform="wecom")
+    await login_app(db_session, "wecom")
+    opened = await service.open_request(
+        db_session, cipher, cron_cap(bot, user, task), BODY, base_url=BASE
+    )
+    await db_session.execute(update(UserReached).values(platform_chat_id="oc_other"))
+    await db_session.commit()
+    await service.submit(db_session, cipher, opened.request_id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    said = await db_session.scalar(
+        select(OutboxItem).where(
+            OutboxItem.dedupe_key == f"credential-request:{opened.request_id}:saved"
+        )
+    )
+    assert said.target == {"chat_id": "oc_private"}

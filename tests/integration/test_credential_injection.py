@@ -89,7 +89,15 @@ async def test_collaboration_turns_get_nothing(
 
 
 def test_guidance_lists_names_and_rules() -> None:
-    text = credentials.guidance(("DEMO_PIN",))
+    text = credentials.guidance(("DEMO_PIN",), "chat")
     assert "`$DEMO_PIN`" in text and "$COREMAN_CREDENTIAL_URL" in text
     assert "不得让用户在聊天里发送密码或密钥" in text
-    assert "还没有保存" in credentials.guidance(())
+    assert "还没有保存" in credentials.guidance((), "chat")
+
+
+def test_guidance_promises_resume_only_for_chat_turns() -> None:
+    chat = credentials.guidance(("DEMO_PIN",), "chat")
+    cron = credentials.guidance(("DEMO_PIN",), "cron")
+    assert "系统会自动让你继续" in chat and "下一次定时运行" not in chat
+    assert "系统会自动让你继续" not in cron and "不会续接本轮" in cron
+    assert "下一次定时运行起生效" in cron and "不得让用户在聊天里发送密码或密钥" in cron
