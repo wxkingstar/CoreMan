@@ -197,6 +197,25 @@ async def active_for_session(
     )
 
 
+async def open_for_session(
+    session: AsyncSession, bot_id: uuid.UUID, session_key: str, kind: str
+) -> list[Task]:
+    """会话里某类尚未结束（排队、已认领或运行中）的任务。"""
+    stmt = (
+        select(Task)
+        .where(
+            Task.bot_id == bot_id,
+            Task.session_key == session_key,
+            Task.kind == kind,
+            Task.status.in_(OPEN),
+        )
+        .order_by(Task.id)
+    )
+    return list(
+        (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
+    )
+
+
 async def defer(session: AsyncSession, task_id: int, *, seconds: float) -> bool:
     """把已认领、未被请求取消的任务放回队列，`seconds` 秒后才能再被认领；返回是否命中。
 

@@ -551,7 +551,7 @@ async def admit_human(
         .where(
             Task.bot_id == bot_id,
             Task.session_key == chat_id,
-            Task.kind == "chat",
+            Task.kind.in_(HUMAN_TURN_KINDS),
             Task.status.in_(tasks.OPEN),
         )
         .order_by(Task.id)

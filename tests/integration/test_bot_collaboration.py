@@ -22,6 +22,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
+from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from tests.integration.credential_helpers import resume_task
@@ -613,6 +614,27 @@ async def test_second_human_replaces_shared_task_without_changing_origin(db_sess
             target_key="helper",
             question="late registration",
         )
+
+
+async def test_group_admission_also_cancels_a_queued_credential_resume(db_session):
+    a, _, actor, _, source, _ = await setup(db_session)
+    await tasks.finish(db_session, source.id, status="succeeded")
+    queued = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id,
+            kind=RESUME_KIND,
+            user_id=actor.id,
+            session_key="group",
+            inbound_event_id=source.inbound_event_id,
+            payload={"credential_request_id": str(uuid.uuid4()), "serialize_session": True},
+        ),
+    )
+    assert queued is not None
+    admission = await service.admit_human(db_session, a.id, "group", "human-id", command="stop")
+    assert admission is not None and admission.interrupted
+    await db_session.refresh(queued)
+    assert queued.cancel_requested_at is not None and queued.cancel_reason == "user_stop"
 
 
 @pytest.mark.parametrize("mutation", ["clear", "replace", "expire"])
