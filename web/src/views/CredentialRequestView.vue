@@ -83,7 +83,7 @@ onMounted(load)
             :show-password="field.secret"
             :placeholder="field.placeholder"
             :maxlength="4096"
-            autocomplete="off"
+            :autocomplete="field.secret ? 'new-password' : 'off'"
           />
         </el-form-item>
         <p class="muted">

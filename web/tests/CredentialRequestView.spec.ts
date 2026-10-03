@@ -29,6 +29,7 @@ it('shows who asks, why, a password box for secret fields and the security note'
   expect(wrapper.text()).toContain('不会发送给 AI 模型')
   expect(wrapper.get('input[data-test="field-DEMO_PIN"]').attributes('type')).toBe('password')
   expect(wrapper.get('input[data-test="field-DEMO_USERNAME"]').attributes('type')).toBe('text')
+  expect(wrapper.get('input[data-test="field-DEMO_PIN"]').attributes('autocomplete')).toBe('new-password')
   wrapper.unmount()
 })
 
@@ -37,9 +38,12 @@ it('submits every field once and then shows the saved state', async () => {
   await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
   await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
   await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledTimes(1)
   expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice', DEMO_PIN: 'pin-778899' })
   expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
-  expect(wrapper.html()).not.toContain('pin-778899')
+  // 输入框此时已卸载，只能检查组件状态：提交成功后每个值都必须被清空。
+  const state = (wrapper.vm as unknown as { values: Record<string, string> }).values
+  expect(Object.values(state)).toEqual(['', ''])
   wrapper.unmount()
 })
 
