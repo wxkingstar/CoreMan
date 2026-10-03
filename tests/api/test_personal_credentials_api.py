@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy import select, update
 
 from coreman.core.db.models import CredentialRequest, User
-from coreman.core.personal_credentials import policy
+from coreman.core.personal_credentials import policy, store
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
 from tests.integration.credential_helpers import BODY, VALUES, cap_for, login_app, owner
@@ -116,3 +116,32 @@ async def test_list_update_delete_own_credentials(client, app, db_session):
     ).status_code == 404
     assert (await client.delete(f"/api/me/credentials/{bot.id}/DEMO_PIN")).status_code == 200
     assert (await client.delete(f"/api/me/credentials/{bot.id}/DEMO_PIN")).status_code == 404
+
+
+async def test_other_users_credentials_are_isolated(client, app, db_session):
+    bot, owner_user, _, cipher = await owner(db_session)
+    await store.save(
+        db_session,
+        cipher,
+        bot_id=bot.id,
+        user_id=owner_user.id,
+        fields=[
+            {"key": "DEMO_USERNAME", "label": "账号", "secret": False},
+            {"key": "DEMO_PIN", "label": "PIN", "secret": True},
+        ],
+        values=VALUES,
+    )
+    await db_session.commit()
+    stranger = User(login_name="stranger", display_name="别人", source="sync")
+    db_session.add(stranger)
+    await db_session.commit()
+    await login_existing(client, db_session, stranger)
+    listed = await client.get("/api/me/credentials")
+    assert listed.status_code == 200 and listed.json()["data"] == []
+    assert "alice" not in listed.text and "pin-778899" not in listed.text
+    for key in VALUES:
+        put = await client.put(f"/api/me/credentials/{bot.id}/{key}", json={"value": "hijacked"})
+        assert put.status_code == 404
+        assert (await client.delete(f"/api/me/credentials/{bot.id}/{key}")).status_code == 404
+    injected = await store.injected(db_session, cipher, bot_id=bot.id, user_id=owner_user.id)
+    assert injected.env == VALUES
