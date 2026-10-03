@@ -46,6 +46,7 @@ from coreman.core.db.models import (
 from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import recover_installations
 from coreman.core.logging import get_logger
+from coreman.core.personal_credentials import service as credential_requests
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
 
@@ -515,6 +516,7 @@ async def run_cleanup(
         # 待答状态到点置 expired。读路径（get_open）本来就按 expires_at 过滤，不靠这一步才正确；
         # 但卡片回调是按 task_id 前缀反查的，那条路没有时间条件，得靠 status 认出「这轮已经过期」。
         "interactions_expired": await _run(factory, interactions.expire_due, now),
+        "credential_requests_expired": await _run(factory, credential_requests.expire_due, now),
         "abandoned_turns": await _run(factory, close_abandoned_turns, now),
     }
 
@@ -535,6 +537,7 @@ async def run_retention(
         "old_inbound_events": cleanup_inbound_events,
         "old_outbox": cleanup_outbox,
         "old_feishu_sent": cleanup_feishu_sent,
+        "old_credential_requests": credential_requests.cleanup,
     }
     counts: dict[str, int] = {}
     for key, job in jobs.items():
