@@ -31,7 +31,7 @@ from coreman.core.db.models import (
     UserReached,
     WecomPersonalBinding,
 )
-from coreman.core.feishu_personal.policy import self_only
+from coreman.core.feishu_personal.policy import PRIVATE_TURN_KINDS, self_only
 
 AAD = "wecom_personal.task_capability.v1"
 PREFIX = "COREMAN_WECOM_PERSONAL_"
@@ -123,7 +123,7 @@ async def task_scope(session: AsyncSession, task_id: int, actor: str) -> Scope:
     task = await session.get(Task, task_id, populate_existing=True)
     if (
         task is None
-        or task.kind != "chat"
+        or task.kind not in PRIVATE_TURN_KINDS
         or task.status not in tasks.ACTIVE
         or task.cancel_requested_at
         or task.payload.get("collaboration_id")

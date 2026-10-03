@@ -224,7 +224,7 @@ async def handle_schedule(
         if (
             original is None
             or original.bot_id != bot.id
-            or original.kind != "chat"
+            or original.kind not in policy.PRIVATE_TURN_KINDS
             or original.payload.get("collaboration_id")
             or original.payload.get("collaboration_phase")
             or ctx.task.kind != "card_action"

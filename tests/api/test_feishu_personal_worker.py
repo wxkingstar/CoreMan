@@ -11,6 +11,7 @@ from coreman.core.prompting.defaults import DEFAULT_RUNTIME_TAIL
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.chat.personal import configure, connect_requested, intercept
 from tests.api.test_feishu_personal import setup
+from tests.integration.credential_helpers import resume_task
 from tests.integration.worker_helpers import build_ctx
 
 SUPPORTED = {"claude": {"feishu_personal_tools_v1": True}}
@@ -68,6 +69,16 @@ async def test_private_chat_keeps_the_assistant_and_adds_personal_tools(db_sessi
     from coreman.core.db.models import FeishuPersonalGrant
 
     assert await db_session.get(FeishuPersonalGrant, (bot.id, user.id)) is None
+
+
+async def test_a_credential_resume_turn_keeps_the_personal_tools(db_session, app, db_engine):
+    bot, user, task = await setup(db_session, app)
+    resume = await resume_task(db_session, task, user)
+    intake = await intake_for(db_session, bot, resume, "已提交凭证")
+    ctx = build_ctx(db_engine, resume)
+    _, env = await configure(db_session, ctx, intake, uuid.uuid4(), "你是销售", {})
+    capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])
+    assert (capability.task_id, capability.actor) == (resume.id, str(user.id))
 
 
 async def test_connected_grant_is_described_and_bound_to_its_generation(db_session, app, db_engine):

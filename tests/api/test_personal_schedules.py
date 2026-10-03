@@ -29,6 +29,7 @@ from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.cron_handler import CronRunHandler
 from tests.api.test_feishu_personal import URL, grant, headers, rpc, setup, value
 from tests.fakes.fake_relay import FakeRelay
+from tests.integration.credential_helpers import resume_task
 from tests.integration.worker_helpers import build_ctx
 
 NOW = datetime(2026, 9, 18, 0, 0, tzinfo=UTC)
@@ -221,6 +222,24 @@ async def test_only_the_owner_confirms_on_the_card(client, app, db_session, db_e
     reached = await db_session.get(UserReached, (bot.id, user.id))
     assert reached.platform_chat_id == "oc_private"
     assert "已创建定时任务" in updates[0].payload["card"]["body"]["elements"][0]["content"]
+
+
+async def test_the_owner_confirms_a_schedule_proposed_in_a_credential_resume_turn(
+    client, app, db_session, db_engine
+):
+    bot, user, task = await setup(db_session, app)
+    resume = await resume_task(db_session, task, user)
+    auth = await headers(app, resume, user)
+    arguments = {"name": "未读汇总", "prompt": "总结未读", "cron_expression": "0 9 * * 1-5"}
+    result = value(await client.post(URL, headers=auth, json=rpc("schedule_propose", arguments)))
+    assert result["status"] == "awaiting_confirmation"
+    state = await db_session.scalar(select(InteractionState))
+    pressed = await click(db_session, bot, resume, "confirm", state.id)
+    await CardActionHandler().run(build_ctx(db_engine, pressed))
+    await db_session.refresh(state)
+    assert state.status == "submitted"
+    job = await db_session.scalar(select(CronJob).where(CronJob.name == "未读汇总"))
+    assert job is not None and job.created_by == user.id
 
 
 async def claim(session):

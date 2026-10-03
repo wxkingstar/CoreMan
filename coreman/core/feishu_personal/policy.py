@@ -32,9 +32,12 @@ from coreman.core.db.models import (
     UserReached,
 )
 from coreman.core.feishu_cards.reply_buttons import parse_reply
+from coreman.core.personal_credentials.service import RESUME_KIND
 
 AAD = "feishu_personal.task_capability.v1"
 PREFIX = "COREMAN_FEISHU_PERSONAL_"
+# 本人私聊的一轮，或凭证提交后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
+PRIVATE_TURN_KINDS = ("chat", RESUME_KIND)
 # 运行时声明了它，才会把个人工具作为附加 MCP 挂上，而不改变机器人原有能力。
 RUNTIME_CAPABILITY = "feishu_personal_tools_v1"
 # `self_reminder` 不调模型；其余模式在归本人所有、只发给本人时可以用本人授权。
@@ -120,7 +123,7 @@ async def task_scope(session: AsyncSession, task_id: int, actor: str) -> Scope:
     task = await session.get(Task, task_id, populate_existing=True)
     if (
         task is None
-        or task.kind != "chat"
+        or task.kind not in PRIVATE_TURN_KINDS
         or task.status not in tasks.ACTIVE
         or task.cancel_requested_at
         or task.payload.get("collaboration_id")

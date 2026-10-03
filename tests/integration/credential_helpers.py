@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from coreman.core.db.models import PlatformApp, User, UserIdentity, UserReached
-from coreman.core.personal_credentials import policy
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
+from coreman.core.db.models import PlatformApp, Task, User, UserIdentity, UserReached
+from coreman.core.personal_credentials import policy, service
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
 
@@ -51,6 +53,25 @@ def cap_for(bot, user, task) -> policy.Capability:  # type: ignore[no-untyped-de
         event_id=task.inbound_event_id,
         cron_job_id=None,
     )
+
+
+async def resume_task(session, origin: Task, user: User) -> Task:  # type: ignore[no-untyped-def]
+    """续接任务：沿用来源那一轮的入站事件与会话，状态为运行中。"""
+    task = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=origin.bot_id,
+            kind=service.RESUME_KIND,
+            user_id=user.id,
+            session_key=origin.session_key,
+            inbound_event_id=origin.inbound_event_id,
+            payload={"credential_request_id": str(uuid.uuid4())},
+        ),
+    )
+    assert task is not None
+    task.status = "running"
+    await session.commit()
+    return task
 
 
 def cron_cap(bot, user, task) -> policy.Capability:  # type: ignore[no-untyped-def]
