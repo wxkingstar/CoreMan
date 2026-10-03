@@ -80,7 +80,7 @@ submit()：核对提交人 → 加密写入 personal_credentials → 续接原�
 | `origin_task_id` | 发起索取的那一轮任务 |
 | `origin_chat_id` / `origin_chat_type` | 来源会话；定时任务为 `cron:<job_id>` |
 | `origin_session_key` / `origin_event_id` | 来源轮次的会话键与入站事件，续接轮沿用；不建外键，避免挡住入站事件的保留期清理 |
-| `origin_relay_session_id` | 来源轮次用的 relay 会话（可空，定时任务为空）：续接前核对它仍是该会话键当前的会话，重置或切换后不再续接（评审裁定 R26）；同一对话内的去重也要求它相同 |
+| `origin_relay_session_id` | 来源轮次用的 relay 会话（可空，定时任务为空）：续接前核对它仍是该会话键当前的会话，重置或切换后不再续接；同一对话内的去重也要求它相同 |
 | `delivery_chat_id` | 表单或链接实际发到的会话，「已保存」等通知也发到这里 |
 | `cron_job_id` | 来源是定时任务时填 |
 | `fields` | JSONB：`[{key, label, secret, placeholder}]`，**不含任何值** |
@@ -136,7 +136,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 结果 | 响应 |
 |---|---|
 | 已发出表单 | `202 {"status":"form_sent","request_id":"…"}` |
-| 同一用户在本 AI 员工下已有键集合完全相同、来源也相同（同一对话会话或同一定时任务）的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发；来源不同则另发一张表单，续接才能回到各自的来源。查重与创建在 `pg_advisory_xact_lock(hashtextextended("credential-request:{bot_id}:{user_id}", 0))` 之下完成（事务提交时释放），并发的相同请求排队，后到的看见先到的表单并复用（评审裁定 R29） |
+| 同一用户在本 AI 员工下已有键集合完全相同、来源也相同（同一对话会话或同一定时任务）的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发；来源不同则另发一张表单，续接才能回到各自的来源。查重与创建在 `pg_advisory_xact_lock(hashtextextended("credential-request:{bot_id}:{user_id}", 0))` 之下完成（事务提交时释放），并发的相同请求排队，后到的看见先到的表单并复用 |
 | 键名不合法 | `422`，逐个说明原因 |
 | 无法送达（企微未配置登录应用、定时任务来源且没有私聊记录等） | `409`，附原因，不创建请求 |
 | 请求体超过 64 KiB | `413`，不创建请求 |
@@ -193,7 +193,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 - 结果：`inbound_events.payload` 和 `tasks.payload` 里都只有密文。
 - 快车道 `CardActionHandler` 新增 `credential@` 分支，依次：
   1. **防伪**：沿用现有校验，outbox 中必须有 `status='sent'` 且消息 ID、`task_id`、会话都对得上的卡片；
-  2. **核对点击人**：`operator` 的 open_id / user_id 必须对应请求的 `user_id`（`UserIdentity`），不符时这次点击被静默忽略（评审裁定 R18）：不提交、不改卡片，飞书只返回统一的受理 toast，发起人的表单保持打开；
+  2. **核对点击人**：`operator` 的 open_id / user_id 必须对应请求的 `user_id`（`UserIdentity`），不符时这次点击被静默忽略：不提交、不改卡片，飞书只返回统一的受理 toast，发起人的表单保持打开；
   3. 解密封存副本并调用 `submit()`；
   4. **擦除副本**：从 `tasks.payload` 和 `inbound_events.payload` 里删掉 `card_action.sealed`，与 `submit()` 在同一事务内；
   5. **更新卡片**：改为「✅ 已保存 DEMO_USERNAME、DEMO_PASSWORD（内容不显示）」，不带任何值。
@@ -218,7 +218,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 4. 逐个字段加密，按 `(bot_id, user_id, env_key)` 插入或覆盖 `personal_credentials`。
 5. 请求置为 `submitted`，写入审计日志（只记键名）。
 6. 续接（第 7.4 节）。
-7. 结算其他在等的请求：锁住（`FOR UPDATE SKIP LOCKED`）同一用户、同一 AI 员工下键全部被刚保存的键覆盖的其他 `open`、未过期请求，各自走第 5–6 步的状态、续接和卡片更新，不再写值，也不再记审计。同一个对话（`origin_session_key` 与 `origin_relay_session_id` 都相同）在这一次提交里只排一个续接任务，其余请求照常标记已提交、卡片也写「会继续」，不再排第二个（评审裁定 R29）。
+7. 结算其他在等的请求：锁住（`FOR UPDATE SKIP LOCKED`）同一用户、同一 AI 员工下键全部被刚保存的键覆盖的其他 `open`、未过期请求，各自走第 5–6 步的状态、续接和卡片更新，不再写值，也不再记审计。同一个对话（`origin_session_key` 与 `origin_relay_session_id` 都相同）在这一次提交里只排一个续接任务，其余请求照常标记已提交、卡片也写「会继续」，不再排第二个。
 
 ### 7.4 续接
 
@@ -228,7 +228,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
   - 发言者设为发起人，会话类型取来源会话的。
   - 用户消息是系统生成的文本：「[CoreMan] 用户已通过安全表单提交 DEMO_USERNAME、DEMO_PASSWORD，已作为环境变量注入本轮，值不会出现在对话中。请继续完成用户的这条原始请求：<原文>」。原文取来源入站事件的文本（`joined_text`，去掉 @ 机器人，最多 2000 字，超出补「…」）；没有文字可引（只有图片等）时退回「请继续完成之前的任务。」。值不进消息，消息里只有键名和用户自己的原话。
 - **开轮守卫**：在 `_resolve` 里加锁检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务，发起人仍为 active 并在白名单内；不满足时结束任务，只发「已保存，下次对话生效」。AI 员工已停用时 `submit()` 不排续接任务。
-- **会话核对（排任务前）**：`_resume` 先按 `(bot_id, origin_session_key)` 读 `ChatSession`，行不存在、请求没记 `origin_relay_session_id` 或两者不相等就不排任务，卡片和企业微信通知落到「下次对话时生效」，不承诺继续。这样重置后新对话的表单和重置前的旧表单被同一次填写结算时，只有新对话续接，旧表单不会再补一句「对话已重置」（评审裁定 R27）。
+- **会话核对（排任务前）**：`_resume` 先按 `(bot_id, origin_session_key)` 读 `ChatSession`，行不存在、请求没记 `origin_relay_session_id` 或两者不相等就不排任务，卡片和企业微信通知落到「下次对话时生效」，不承诺继续。这样重置后新对话的表单和重置前的旧表单被同一次填写结算时，只有新对话续接，旧表单不会再补一句「对话已重置」。
 - **会话核对（开轮前）**：`_resolve` 里再核对一次，覆盖提交之后、任务被认领之前发生的重置：按 `(bot_id, origin_session_key)` 读 `ChatSession`，它的 `relay_session_id` 必须等于请求的 `origin_relay_session_id`。用户在表单打开期间重置、清除或切换了会话（行不存在或不相等，请求里没记也算），续接会落进另一个对话、没有那个任务的上下文，所以不续接：结束任务（`cancelled`，`credential_resume_session_changed`），只发「凭证已保存。对话已重置，请重新发起刚才的请求。」，与机器人协作的续接处理一致。`_resolve` 与开轮之间隔着排队等待，期间换模型、换运行时或清会话，默认的 `get_or_create` 会悄悄建一个空会话，所以 `CredentialResumeHandler._session_info` 在持有 bot 行锁的开轮事务里再核对一次：解析出的会话必须仍是请求记录的那个，否则开轮事务回滚（不留流、记录与新会话映射），任务同样按 `credential_resume_session_changed` 结束并发同一条通知。
 - **取消**：来源那一轮可能还在跑，续接任务因 `serialize_session` 排在它后面。`/stop`（`do_stop`）除了取消活动任务，还对同一 AI 员工、同一会话键下所有未结束（排队、已认领、运行中）的 `credential_resume` 任务请求取消（原因 `user_stop`），并计入「已停止」；飞书群里新的人类请求准入（`admit_human`）取消待处理任务时也涵盖 `credential_resume`（`HUMAN_TURN_KINDS`）。被取消的续接任务被认领时，`_prepare` 的取消检查先于 `_resolve`，直接按取消结束，不会开轮。
 - **转向核对**：relay 会话在中间来过别的消息时不会变，会话核对拦不住；自动续接可能接到那条新请求上，还带着发起人的凭证（群里别人的请求）。`service.newer_turn_by_other`：同一 `(bot, 会话键)` 下存在 `kind=chat`、`id` 大于 `origin_task_id`、入站事件发送者（`sender_platform_user_id`，`IS DISTINCT FROM`）与来源事件发送者不同的任务，就视为已转向。`_resume` 命中时不排任务（卡片写「下次对话时生效」）；`_resolve` 命中时（提交之后才出现）只发「凭证已保存。对话里已有新的请求，请重新发起刚才的请求。」，任务按 `cancelled`、`credential_resume_superseded` 结束。同一个人自己的新消息不挡路，原始请求的引用保证续接不会接错。
@@ -302,7 +302,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 没有可发送的会话，或企微未配置登录应用 | 接口返回 `409` 并附原因，不创建请求，由 agent 告诉用户 |
 | 表单过期后才提交 | 拒绝；卡片或页面提示重新发起 |
 | 重复点击或重复提交 | 行锁加状态检查，第二次提示「已提交」 |
-| 非发起人点卡片或打开链接 | 卡片点击静默忽略（飞书只返回统一的受理 toast，发起人的表单保持打开，评审裁定 R18）；页面返回 403 |
+| 非发起人点卡片或打开链接 | 卡片点击静默忽略（飞书只返回统一的受理 toast，发起人的表单保持打开）；页面返回 403 |
 | 续接前 AI 员工已停用 | 不续接，只通知「已保存」 |
 | 注入时解密失败 | 跳过该条，记录键名 |
 | 凭证失效（例如外部系统返回 401） | agent 用同一个键重新索取，提交后覆盖 |
