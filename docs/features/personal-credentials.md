@@ -126,7 +126,7 @@ curl -sS -X POST "$COREMAN_CREDENTIAL_URL" \
 - **企业微信**：需要一个启用了「登录」能力的自建应用（登录页走 OAuth）。没有时索取接口返回 409，agent 会告诉用户联系管理员。
 - **手机要能访问 `PUBLIC_BASE_URL`**：企业微信用户点链接就是打开这个地址。
 - **飞书**：配置了飞书登录应用时，卡片多一个网页入口，用户也能打开「我的凭证」页；没有时只有卡片表单。
-- **数据库迁移 `0053`**：只新增 `personal_credentials`、`credential_requests` 两张表，不改旧表。运行节点不用升级：节点只拦截几个固定的 `COREMAN_*` 令牌名，新的 `COREMAN_CREDENTIAL_` 前缀原样到达 CLI。
+- **数据库迁移 `0054`**：只新增 `personal_credentials`、`credential_requests` 两张表，不改旧表。运行节点不用升级：节点只拦截几个固定的 `COREMAN_*` 令牌名，新的 `COREMAN_CREDENTIAL_` 前缀原样到达 CLI。
 - 滚动升级期间，旧 worker 不认识 `credential_resume` 任务，认领到就会直接失败（而不是把来源消息当新消息重跑一遍）；升级完成后新提交的续接不受影响。
 
 ## 安全边界

@@ -49,7 +49,7 @@
 
 - **飞书卡片 `task_id`**：`credential@<request uuid>`。
 - **固定安全说明**（6.3 节原文，`{bot}` 换成 AI 员工名）：「🔒 安全说明：此表单的内容直接提交给 CoreMan 加密保存，不经过聊天，不会发送给 AI 模型。只有你本人与「{bot}」对话、或运行你创建的定时任务时才会使用。请勿在此填写飞书、企业微信或邮箱的登录密码。」
-- **迁移**：只新增表，不改旧表；revision `0053`，down_revision `0052`。
+- **迁移**：只新增表，不改旧表；revision `0054`，down_revision `0053`。
 - **命令**：
   - 测试 `uv run pytest <path> -q`，需要 Docker 或 `TEST_DATABASE_URL`；
   - 检查 `uv run ruff check .`、`uv run mypy coreman`；
@@ -61,7 +61,7 @@
 | 文件 | 职责 |
 |---|---|
 | `coreman/core/db/models/personal_credentials.py`（新） | `PersonalCredential`、`CredentialRequest` 两个模型 |
-| `migrations/versions/0053_personal_credentials.py`（新） | 建两张表 |
+| `migrations/versions/0054_personal_credentials.py`（新） | 建两张表 |
 | `coreman/core/personal_credentials/policy.py`（新） | 常量、`CredentialError`、AAD、键名与值校验、请求体解析、本轮令牌 |
 | `coreman/core/personal_credentials/store.py`（新） | 加密写入、按（员工, 用户）注入、本人列表、更新、删除 |
 | `coreman/core/personal_credentials/cards.py`（新） | 飞书表单卡与结果卡、企微链接文案、续接文本 |
@@ -80,12 +80,12 @@
 
 ---
 
-### Task 1: 数据模型与迁移 0053
+### Task 1: 数据模型与迁移 0054
 
 **Files:**
 - Create: `coreman/core/db/models/personal_credentials.py`
 - Modify: `coreman/core/db/models/__init__.py`（末尾追加导出）
-- Create: `migrations/versions/0053_personal_credentials.py`
+- Create: `migrations/versions/0054_personal_credentials.py`
 - Modify: `tests/conftest.py`（`BUSINESS_TABLES` 开头加两张表）
 - Test: `tests/integration/test_personal_credentials_models.py`
 
@@ -278,7 +278,7 @@ __all__ += [
 
 - [ ] **Step 4: 写迁移**
 
-`migrations/versions/0053_personal_credentials.py`：
+`migrations/versions/0054_personal_credentials.py`：
 
 ```python
 """Per-member credentials an agent asks for through a secure form, and the requests themselves.
@@ -290,8 +290,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0053"
-down_revision = "0052"
+revision = "0054"
+down_revision = "0053"
 branch_labels = None
 depends_on = None
 
@@ -399,7 +399,7 @@ Expected: PASS。`test_models_match_migrations` 报差异时，以模型为准�
 - [ ] **Step 6: Commit**
 
 ```bash
-git add coreman/core/db/models/personal_credentials.py coreman/core/db/models/__init__.py coreman/core/db/models/bus.py migrations/versions/0053_personal_credentials.py tests/conftest.py tests/integration/test_personal_credentials_models.py
+git add coreman/core/db/models/personal_credentials.py coreman/core/db/models/__init__.py coreman/core/db/models/bus.py migrations/versions/0054_personal_credentials.py tests/conftest.py tests/integration/test_personal_credentials_models.py
 git commit -m "feat(credentials): add personal credential and request tables"
 ```
 
@@ -4085,7 +4085,7 @@ git commit -m "feat(web): add the secure credential form and my credentials page
    - 企业微信需要一个启用了「登录」能力的自建应用；
    - 手机要能访问 `PUBLIC_BASE_URL`；
    - 飞书有登录应用时卡片多一个网页入口；
-   - 需要数据库迁移 `0053`；运行节点不用升级。
+   - 需要数据库迁移 `0054`；运行节点不用升级。
 6. **安全边界**：
    - 能保证与不能保证的部分，原样采用第 1 节与第 12 节；
    - 明确写出 agent 能通过 shell 读到自己的环境变量。
@@ -4105,7 +4105,7 @@ git commit -m "feat(web): add the secure credential form and my credentials page
 `CHANGELOG.md` 在 `### Added` 下最前面加：
 
 ```markdown
-- Personal credentials. When a task needs the speaker's own account, password or API key, the agent calls `POST /api/runtime/credentials/requests` with the turn's `COREMAN_CREDENTIAL_TOKEN` and the variable names it wants. Feishu users get a Card JSON 2.0 form with password inputs in their private chat; WeCom users get a link to an OAuth-protected page, since WeCom template cards have no text input. The Feishu gateway encrypts the submitted values before the callback is written to `inbound_events` or `tasks`, and the worker removes that sealed copy once it is processed. Values are stored one row per (AI employee, member, variable), each encrypted with the master key and bound to that row, and no API returns them. They are injected as environment variables only into turns the member triggers: their private chat, their @-mentions in groups, scheduled tasks they created, and the turn that resumes the original conversation after they submit. Secret values are always redacted from replies and chat logs whatever the variable is called. Members can view, update and delete their credentials under "我的凭证" (My credentials). The agent can still read its own environment through a shell; see the feature doc for the boundary. Requires database migration `0053`; runtime nodes need no upgrade. See `docs/features/personal-credentials.md`.
+- Personal credentials. When a task needs the speaker's own account, password or API key, the agent calls `POST /api/runtime/credentials/requests` with the turn's `COREMAN_CREDENTIAL_TOKEN` and the variable names it wants. Feishu users get a Card JSON 2.0 form with password inputs in their private chat; WeCom users get a link to an OAuth-protected page, since WeCom template cards have no text input. The Feishu gateway encrypts the submitted values before the callback is written to `inbound_events` or `tasks`, and the worker removes that sealed copy once it is processed. Values are stored one row per (AI employee, member, variable), each encrypted with the master key and bound to that row, and no API returns them. They are injected as environment variables only into turns the member triggers: their private chat, their @-mentions in groups, scheduled tasks they created, and the turn that resumes the original conversation after they submit. Secret values are always redacted from replies and chat logs whatever the variable is called. Members can view, update and delete their credentials under "我的凭证" (My credentials). The agent can still read its own environment through a shell; see the feature doc for the boundary. Requires database migration `0054`; runtime nodes need no upgrade. See `docs/features/personal-credentials.md`.
 ```
 
 - [ ] **Step 3: 全量验证**
