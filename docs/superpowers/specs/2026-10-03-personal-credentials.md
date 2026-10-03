@@ -228,7 +228,8 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
   - 发言者设为发起人，会话类型取来源会话的。
   - 用户消息是系统生成的固定文本：「[CoreMan] 用户已通过安全表单提交 DEMO_USERNAME、DEMO_PASSWORD，已作为环境变量注入本轮，值不会出现在对话中。请继续完成之前的任务。」
 - **开轮守卫**：在 `_resolve` 里加锁检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务，发起人仍为 active 并在白名单内；不满足时结束任务，只发「已保存，下次对话生效」。AI 员工已停用时 `submit()` 不排续接任务。
-- **会话核对**：同在 `_resolve` 里，按 `(bot_id, origin_session_key)` 读 `ChatSession`，它的 `relay_session_id` 必须等于请求的 `origin_relay_session_id`。用户在表单打开期间重置、清除或切换了会话（行不存在或不相等，请求里没记也算），续接会落进另一个对话、没有那个任务的上下文，所以不续接：结束任务（`cancelled`，`credential_resume_session_changed`），只发「凭证已保存。对话已重置，请重新发起刚才的请求。」，与机器人协作的续接处理一致。
+- **会话核对（排任务前）**：`_resume` 先按 `(bot_id, origin_session_key)` 读 `ChatSession`，行不存在、请求没记 `origin_relay_session_id` 或两者不相等就不排任务，卡片和企业微信通知落到「下次对话时生效」，不承诺继续。这样重置后新对话的表单和重置前的旧表单被同一次填写结算时，只有新对话续接，旧表单不会再补一句「对话已重置」（评审裁定 R27）。
+- **会话核对（开轮前）**：`_resolve` 里再核对一次，覆盖提交之后、任务被认领之前发生的重置：按 `(bot_id, origin_session_key)` 读 `ChatSession`，它的 `relay_session_id` 必须等于请求的 `origin_relay_session_id`。用户在表单打开期间重置、清除或切换了会话（行不存在或不相等，请求里没记也算），续接会落进另一个对话、没有那个任务的上下文，所以不续接：结束任务（`cancelled`，`credential_resume_session_changed`），只发「凭证已保存。对话已重置，请重新发起刚才的请求。」，与机器人协作的续接处理一致。
 - **来源是定时任务**：不续接，只私信「已保存，下次执行时生效」。
 - **一次填写，所有在等的都续接**：被 7.3 第 7 步结算的请求各自按来源续接，所以两个对话会话在等同一组键时，填一张表单两边都会继续。
 

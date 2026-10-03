@@ -16,6 +16,7 @@ from coreman.core.bus.tasks import NewTask
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
+    ChatSession,
     CredentialRequest,
     InboundEvent,
     OutboxItem,
@@ -343,6 +344,12 @@ async def _resume(session: AsyncSession, row: CredentialRequest, bot: Bot, user:
     if row.origin_kind != "chat" or not row.origin_session_key or row.origin_event_id is None:
         return False
     if await session.get(InboundEvent, row.origin_event_id) is None:
+        return False
+    # 提问之后对话被重置或切走：续接会落进另一个对话，不排任务，卡片也就不承诺「继续」。
+    current = await session.get(
+        ChatSession, (bot.id, row.origin_session_key), populate_existing=True
+    )
+    if current is None or current.relay_session_id != row.origin_relay_session_id:
         return False
     identity = await _identity(session, user.id, bot.platform)
     task = await tasks.enqueue(

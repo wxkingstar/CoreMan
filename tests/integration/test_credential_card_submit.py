@@ -19,7 +19,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.personal_credentials import policy, service
 from coreman.runtime.worker.card_actions import CardActionHandler
-from tests.integration.credential_helpers import BODY, VALUES, cap_for, owner
+from tests.integration.credential_helpers import BODY, VALUES, cap_for, owner, seed_chat_session
 from tests.integration.worker_helpers import build_ctx
 
 BASE = "https://coreman.example.com"
@@ -64,6 +64,7 @@ async def _click(session, cipher, bot, rid, values, *, clicker="owner_pid"):
 
 async def _prepared(session):
     bot, user, task, cipher = await owner(session)
+    await seed_chat_session(session, bot, task)
     opened = await service.open_request(
         session, cipher, cap_for(bot, user, task), BODY, base_url=BASE
     )

@@ -1,14 +1,16 @@
 """提交：本人、状态、值校验、加密写入、审计、续接与卡片更新；以及取消、过期、清理。"""
 
 import json
+import uuid
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from coreman.core.db.models import (
     AuditLog,
+    ChatSession,
     CredentialRequest,
     OutboxItem,
     Task,
@@ -18,7 +20,15 @@ from coreman.core.db.models import (
 from coreman.core.personal_credentials import service, store
 from coreman.core.personal_credentials.policy import CredentialError
 from coreman.core.timeutils import utcnow
-from tests.integration.credential_helpers import BODY, VALUES, cap_for, cron_cap, login_app, owner
+from tests.integration.credential_helpers import (
+    BODY,
+    VALUES,
+    cap_for,
+    cron_cap,
+    login_app,
+    owner,
+    seed_chat_session,
+)
 from tests.integration.test_chat_handler import chat_task
 
 BASE = "https://coreman.example.com"
@@ -28,6 +38,7 @@ async def _opened(session, **kw):
     bot, user, task, cipher = await owner(session, **kw)
     if kw.get("platform") == "wecom":
         await login_app(session, "wecom")
+    await seed_chat_session(session, bot, task)
     opened = await service.open_request(
         session, cipher, cap_for(bot, user, task), BODY, base_url=BASE
     )
@@ -197,6 +208,7 @@ async def _resumes(session) -> dict[str, Task]:
 
 async def test_filling_a_cron_form_also_settles_the_chat_form_waiting_on_the_same_keys(db_session):
     bot, user, task, cipher = await owner(db_session)
+    await seed_chat_session(db_session, bot, task)
     cron = await _waiting(db_session, cipher, cron_cap(bot, user, task))
     chat = await _waiting(db_session, cipher, cap_for(bot, user, task))
     assert cron.id != chat.id
@@ -232,6 +244,8 @@ async def test_filling_one_form_resumes_every_chat_session_waiting_on_the_keys(d
     group_task = await chat_task(
         db_session, bot, "再查一下", sender="owner_pid", chat_type="group", chat_id="oc_group"
     )
+    await seed_chat_session(db_session, bot, task)
+    await seed_chat_session(db_session, bot, group_task)
     first = await _waiting(db_session, cipher, cap_for(bot, user, task))
     second = await _waiting(db_session, cipher, cap_for(bot, user, group_task))
     assert first.id != second.id
@@ -251,6 +265,7 @@ async def test_filling_one_form_resumes_every_chat_session_waiting_on_the_keys(d
 
 async def test_only_unexpired_forms_whose_keys_are_all_covered_are_settled(db_session):
     bot, user, task, cipher = await owner(db_session)
+    await seed_chat_session(db_session, bot, task)
     chat = cap_for(bot, user, task)
     wider = {
         **BODY,
@@ -268,3 +283,75 @@ async def test_only_unexpired_forms_whose_keys_are_all_covered_are_settled(db_se
     assert (extra_key.status, stale.status) == ("open", "open")
     assert extra_key.resume_task_id is None and stale.resume_task_id is None
     assert list(await _resumes(db_session)) == [str(main.id)]
+
+
+async def _saved_without_resume(session, cipher, bot, user, row, platform):
+    result = await service.submit(session, cipher, row.id, actor_id=user.id, values=VALUES)
+    await session.commit()
+    await session.refresh(row)
+    assert result.status == "saved" and "下次对话时生效" in result.message
+    assert row.status == "submitted" and row.resume_task_id is None
+    assert await _resumes(session) == {}
+    if platform == "wecom":
+        said = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"credential-request:{row.id}:saved")
+        )
+        assert "下次对话时生效" in said.payload["markdown"]
+    else:
+        card = await session.scalar(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+        text = json.dumps(card.payload, ensure_ascii=False)
+        assert "下次对话时生效" in text and "继续之前的任务" not in text
+
+
+@pytest.mark.parametrize("platform", ["feishu", "wecom"])
+async def test_no_resume_is_promised_after_the_session_was_reset(db_session, platform):
+    bot, user, task, cipher, row = await _opened(db_session, platform=platform)
+    chat_session = await db_session.get(ChatSession, (bot.id, task.session_key))
+    chat_session.relay_session_id = uuid.uuid4()
+    await db_session.commit()
+    await _saved_without_resume(db_session, cipher, bot, user, row, platform)
+
+
+async def test_no_resume_is_promised_after_the_session_was_cleared(db_session):
+    bot, user, task, cipher, row = await _opened(db_session)
+    await db_session.execute(delete(ChatSession).where(ChatSession.bot_id == bot.id))
+    await db_session.commit()
+    await _saved_without_resume(db_session, cipher, bot, user, row, "feishu")
+
+
+async def test_no_resume_is_promised_for_a_request_that_recorded_no_session(db_session):
+    bot, user, task, cipher, row = await _opened(db_session)
+    row.origin_relay_session_id = None
+    await db_session.commit()
+    await _saved_without_resume(db_session, cipher, bot, user, row, "feishu")
+
+
+async def test_a_stale_form_from_before_a_reset_does_not_resume_next_to_the_new_one(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    await seed_chat_session(db_session, bot, task)
+    stale = await _waiting(db_session, cipher, cap_for(bot, user, task))
+    # 用户重置对话，新对话为同一组变量又发了一张表单。
+    renewed = uuid.uuid4()
+    chat_session = await db_session.get(ChatSession, (bot.id, task.session_key))
+    chat_session.relay_session_id = renewed
+    await db_session.commit()
+    current = await _waiting(db_session, cipher, cap_for(bot, user, task, relay_session_id=renewed))
+    assert stale.id != current.id
+    await service.submit(db_session, cipher, current.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    await db_session.refresh(stale)
+    await db_session.refresh(current)
+    assert (stale.status, current.status) == ("submitted", "submitted")
+    # 只有新对话那张续接；旧表单不排任务，也就不会再冒出一句「对话已重置，请重新发起」。
+    resumes = await _resumes(db_session)
+    assert list(resumes) == [str(current.id)] and stale.resume_task_id is None
+    cards = {
+        i.target["message_id"]: json.dumps(i.payload, ensure_ascii=False)
+        for i in (
+            await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+        )
+    }
+    assert "AI 员工会继续之前的任务" in cards[f"om_{current.id}"]
+    assert "下次对话时生效" in cards[f"om_{stale.id}"]
+    assert "继续之前的任务" not in cards[f"om_{stale.id}"]
+    assert "对话已重置" not in await _dump_everything(db_session)
