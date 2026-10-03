@@ -4,7 +4,8 @@ import json
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import ProgrammingError
 
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
@@ -146,4 +147,30 @@ async def test_disabled_bot_cancels_the_click_and_copy_is_still_wiped(db_session
     assert row.status == "open"
     done = await db_session.get(Task, click.id, populate_existing=True)
     assert done.status == "cancelled" and done.error_code == "bot_disabled"
+    assert not await _sealed_left(db_session, ev, click)
+
+
+async def _aborting_submit(session, *args, **kwargs):
+    """把当前事务搞成 aborted：之后同一事务里的任何语句都会报 InFailedSQLTransaction。"""
+    await session.execute(text("SELECT * FROM no_such_table"))
+
+
+async def _exploding_submit(session, *args, **kwargs):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize(
+    ("fake", "error"),
+    [(_exploding_submit, RuntimeError), (_aborting_submit, ProgrammingError)],
+)
+async def test_crash_surfaces_the_real_error_and_copy_is_still_wiped(
+    db_session, db_engine, monkeypatch, fake, error
+):
+    bot, user, cipher, row = await _prepared(db_session)
+    ev, click = await _click(db_session, cipher, bot, row.id, VALUES)
+    monkeypatch.setattr(service, "submit", fake)
+    with pytest.raises(error):
+        await CardActionHandler().run(build_ctx(db_engine, click))
+    await db_session.refresh(row)
+    assert row.status == "open"
     assert not await _sealed_left(db_session, ev, click)

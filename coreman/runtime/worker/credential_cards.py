@@ -37,6 +37,21 @@ async def wipe(session: AsyncSession, task_id: int, event_id: int | None) -> Non
         )
 
 
+async def wipe_detached(ctx: TaskContext) -> None:
+    """兜底：另开会话和事务擦本任务的封存副本。
+
+    主流程里的擦除与提交同一事务，处理器一抛异常这个事务连它一起回滚，副本就会留在失败的
+    任务和入站事件里。所以不管怎么退出，最后都在全新的事务里再擦一遍；这一步自己出错只记日志，
+    不盖掉原来的异常。
+    """
+    try:
+        async with ctx.session_factory() as session:
+            await wipe(session, ctx.task.id, ctx.task.inbound_event_id)
+            await session.commit()
+    except Exception:  # noqa: BLE001 擦不掉也不能盖住处理器原本的异常
+        ctx.log.exception("credential_wipe_failed")
+
+
 async def _submit(
     session: AsyncSession, ctx: TaskContext, inbound: InboundEvent, action: dict[str, Any]
 ) -> str:
@@ -77,7 +92,7 @@ async def handle(
     inbound: InboundEvent,
     action: dict[str, Any],
 ) -> str:
-    try:
-        return await _submit(session, ctx, inbound, action)
-    finally:
-        await wipe(session, ctx.task.id, inbound.id)
+    result = await _submit(session, ctx, inbound, action)
+    # 与 submit 同一事务：提交成功时副本一并消失。抛异常的路径由调用方的 wipe_detached 兜底。
+    await wipe(session, ctx.task.id, inbound.id)
+    return result
