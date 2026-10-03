@@ -46,6 +46,7 @@ def is_reserved_key(key: str) -> bool:
             "COREMAN_FEISHU_PERSONAL_",
             "COREMAN_WECOM_PERSONAL_",
             "COREMAN_SCHEDULE_",
+            "COREMAN_CREDENTIAL_",
         )
     )
 
