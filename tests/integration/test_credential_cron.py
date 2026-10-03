@@ -25,11 +25,13 @@ async def test_cron_run_injects_the_actors_credentials(db_engine, db_session):
     await run_tick(make_session_factory(db_engine), now)
     task = await claim(db_session)
     fake = FakeRelay("normal")
-    await CronRunHandler().run(
-        build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
-    )
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
     env = fake.requests[0]["env_vars"]
     assert env["DEMO_PIN"] == "pin-778899"
     cap = policy.read_capability(cipher, env["COREMAN_CREDENTIAL_TOKEN"])
     assert (cap.origin_kind, cap.cron_job_id, cap.user_id) == ("cron", row.id, row.created_by)
     assert "`$DEMO_PIN`" in fake.requests[0]["messages"][0]["content"]
+    # 出站闸门：secret 字段的值必须进 ctx.secrets，非 secret 字段不进。
+    assert "pin-778899" in ctx.secrets
+    assert "alice" not in ctx.secrets
