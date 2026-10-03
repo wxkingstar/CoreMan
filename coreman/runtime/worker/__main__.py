@@ -4,6 +4,7 @@ from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
 from coreman.runtime.worker.commands import CommandHandler
+from coreman.runtime.worker.credential_resume import CredentialResumeHandler
 from coreman.runtime.worker.cron_handler import CronRunHandler
 from coreman.runtime.worker.escalation_media import EscalationMediaHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
@@ -20,6 +21,7 @@ asyncio.run(
             "chat": ChatTaskHandler(),
             "card_action": CardActionHandler(),
             "choice_submit": ChoiceSubmitHandler(),
+            "credential_resume": CredentialResumeHandler(),
             "relay_switch": RelaySwitchHandler(),
         }
     ).run()
