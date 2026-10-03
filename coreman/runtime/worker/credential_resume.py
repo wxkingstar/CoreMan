@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
+from coreman.core.chat import sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import (
     Bot,
@@ -35,8 +36,33 @@ SAVED_NOTICE = "凭证已保存，下次对话时生效。"
 RESET_NOTICE = "凭证已保存。对话已重置，请重新发起刚才的请求。"
 
 
+class _SessionChanged(ValueError):
+    """开轮时发现提问的那个对话已经不在了：不能在另一个会话里续接。"""
+
+
 class CredentialResumeHandler(ChatTaskHandler):
     kind = RESUME_KIND
+
+    async def run(self, ctx: TaskContext) -> None:
+        try:
+            await super().run(ctx)
+        except _SessionChanged:
+            # 开轮事务已随异常回滚（没有流、没有记录、没有新会话），这里另开事务收尾：
+            # 与 `_resolve` 里同一情形一样，告诉用户凭证已保存，任务按取消结掉。
+            async with ctx.session_factory() as session:
+                bot = await session.get(Bot, ctx.task.bot_id)
+                raw_id = ctx.task.payload.get("credential_request_id")
+                row = await session.get(CredentialRequest, uuid.UUID(str(raw_id)))
+                if bot is not None and row is not None:
+                    await self._saved_notice(session, bot, row, RESET_NOTICE)
+                await tasks.finish(
+                    session,
+                    ctx.task.id,
+                    status="cancelled",
+                    error_code="credential_resume_session_changed",
+                    only_active=True,
+                )
+                await session.commit()
 
     async def _resolve(
         self, session: AsyncSession, ctx: TaskContext
@@ -133,6 +159,23 @@ class CredentialResumeHandler(ChatTaskHandler):
             RESUME_KIND,
         )
         return intake, relay, [{"type": "text", "text": text}]
+
+    async def _session_info(
+        self, session: AsyncSession, ctx: TaskContext, intake: Intake, backend: str
+    ) -> sessions.SessionInfo:
+        """开轮时（已持 bot 行锁）再确认一次：续接只进提问的那个 relay 会话，绝不另起新的。
+
+        `_resolve` 的检查与开轮之间隔着排队等待，期间换模型、换运行时、清会话都会让默认的
+        get_or_create 悄悄建一个空会话，续接消息就在没有来源上下文的会话里跑了。
+        """
+        raw_id = ctx.task.payload.get("credential_request_id")
+        row = await session.get(CredentialRequest, uuid.UUID(str(raw_id)))
+        info = await super()._session_info(session, ctx, intake, backend)
+        if row is None or info.relay_session_id != row.origin_relay_session_id:
+            # get_or_create 在会话缺失、后端变了或已过期时会给出新的 id；异常让开轮事务回滚，
+            # 它写进去的新映射不会留下。
+            raise _SessionChanged("credential resume session changed before dispatch")
+        return info
 
     @staticmethod
     async def _saved_notice(

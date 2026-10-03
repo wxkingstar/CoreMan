@@ -1,12 +1,14 @@
 """提交之后在原会话续接：发言者是发起人、消息里只有键名、凭证在 env 里、企微走主动推送。"""
 
 import uuid
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
+    Bot,
     ChatLog,
     ChatSession,
     CredentialRequest,
@@ -15,6 +17,7 @@ from coreman.core.db.models import (
     Task,
 )
 from coreman.core.personal_credentials import service
+from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.credential_resume import CredentialResumeHandler
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.credential_helpers import (
@@ -173,10 +176,14 @@ async def test_resume_tells_the_user_when_the_relay_is_unavailable(
 
 
 async def _assert_conversation_reset(
-    db_engine: AsyncEngine, db_session: AsyncSession, row: CredentialRequest, claimed: Task
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    row: CredentialRequest,
+    claimed: Task,
+    handler: CredentialResumeHandler | None = None,
 ) -> None:
     fake = FakeRelay("normal")
-    await CredentialResumeHandler().run(
+    await (handler or CredentialResumeHandler()).run(
         build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
     )
     done = await db_session.get(Task, claimed.id, populate_existing=True)
@@ -213,3 +220,66 @@ async def test_resume_needs_the_session_the_request_was_asked_in(
     row.origin_relay_session_id = None
     await db_session.commit()
     await _assert_conversation_reset(db_engine, db_session, row, claimed)
+
+
+class _ChangedBeforeOpen(CredentialResumeHandler):
+    """让变化恰好落在 `_resolve` 提交之后、`_open` 拿 bot 行锁之前（会话检查已经放行的窗口）。"""
+
+    def __init__(self, change: Callable[[AsyncSession, uuid.UUID, str], Awaitable[None]]) -> None:
+        super().__init__()
+        self._change = change
+
+    async def _wait_superseded(self, ctx: TaskContext, bot_id: uuid.UUID, session_key: str) -> bool:
+        ready = await super()._wait_superseded(ctx, bot_id, session_key)
+        async with ctx.session_factory() as session:
+            await self._change(session, bot_id, session_key)
+            await session.commit()
+        return ready
+
+
+async def test_resume_is_not_opened_when_the_session_is_reset_after_the_check(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+
+    async def reset(session: AsyncSession, bot_id: uuid.UUID, session_key: str) -> None:
+        chat_session = await session.get(ChatSession, (bot_id, session_key))
+        assert chat_session is not None
+        chat_session.relay_session_id = uuid.uuid4()
+
+    await _assert_conversation_reset(db_engine, db_session, row, claimed, _ChangedBeforeOpen(reset))
+
+
+async def test_resume_does_not_open_a_replacement_session_when_the_session_is_cleared(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+
+    async def clear(session: AsyncSession, bot_id: uuid.UUID, session_key: str) -> None:
+        await session.execute(delete(ChatSession).where(ChatSession.bot_id == bot_id))
+
+    await _assert_conversation_reset(db_engine, db_session, row, claimed, _ChangedBeforeOpen(clear))
+    # 续接不该为失败的这一轮顺手建一个空会话：下一条消息自己会新建。
+    assert (
+        await db_session.scalar(select(ChatSession).where(ChatSession.bot_id == bot.id))
+    ) is None
+
+
+async def test_resume_does_not_open_a_replacement_session_when_the_runtime_changes(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+
+    async def switch_runtime(session: AsyncSession, bot_id: uuid.UUID, session_key: str) -> None:
+        current = await session.get(Bot, bot_id)
+        assert current is not None and current.relay_server_id is not None
+        relay = await session.get(RelayServer, current.relay_server_id)
+        assert relay is not None
+        relay.model_provider = "codex"
+
+    await _assert_conversation_reset(
+        db_engine, db_session, row, claimed, _ChangedBeforeOpen(switch_runtime)
+    )
+    # 原对话的映射原样保留：用户下一条消息按后端变化自行换会话，这里不替它做。
+    kept = await db_session.get(ChatSession, (bot.id, claimed.session_key), populate_existing=True)
+    assert kept is not None and kept.relay_session_id == DEMO_RELAY_SESSION
