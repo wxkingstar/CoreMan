@@ -22,6 +22,7 @@ from coreman.core.chat import interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
 from coreman.core.i18n.messages import msg
+from coreman.core.personal_credentials.policy import CARD_PREFIX
 from coreman.core.wecom.cards import (
     answered_card,
     expired_card,
@@ -85,6 +86,16 @@ class CardActionHandler:
                     )
                     await session.commit()
                     return
+            if bot.platform == "feishu" and task_id.startswith(CARD_PREFIX):
+                from coreman.runtime.worker.credential_cards import handle as handle_credential
+
+                result = await handle_credential(session, ctx, bot, inbound, action)
+                await tasks.finish(
+                    session, ctx.task.id, status="succeeded", result={"card": result}
+                )
+                await session.commit()
+                ctx.log.info("card_action_done", result=result)
+                return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
