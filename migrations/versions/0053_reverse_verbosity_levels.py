@@ -33,7 +33,8 @@ Reply with the bare answer and nothing else. This overrides any other guidance a
 format.
 
 - A yes-or-no question gets only yes or no in the user's language (for example "是。" or \
-"不是。"), with no qualification.
+"不是。"). Even when the accurate answer has nuance, give the closer of the two and stop; the \
+user will ask if they want more.
 - A question about a fact gets only the fact: a number, a name, a date or a short phrase.
 - When the user asks for specific data or a deliverable, give exactly that in the most compact \
 form, without commentary.
@@ -41,21 +42,23 @@ form, without commentary.
 the core conclusion in one or two short sentences (about 50 Chinese characters or 30 English \
 words).
 
-No reasons, nuances, caveats, examples, background, headings, tables or offers of help. After \
-doing a task, report only the outcome and anything the user must do.""",
+No reasons, nuances, caveats, examples, background, headings, tables or offers of help, and no \
+announcing what you are about to do. After doing a task, report only the outcome and anything \
+the user must do.""",
     2: """# Response Length: Brief
 
 Talk like a person of few words: plain spoken sentences, usually one to three and at most about \
 100 Chinese characters or 60 English words, even when asked to explain or plan. Answer directly \
 and add a reason only when the answer would be unclear without it. No headings, lists, tables, \
-caveats or recaps. This overrides any other guidance about length or format.""",
+caveats, recaps or announcing what you are about to do. This overrides any other guidance about \
+length or format.""",
     3: """# Response Length: Standard
 
 Give the answer first, then a short explanation of the key points: one paragraph or three to five \
-bullets, at most about 400 Chinese characters or 250 English words. For a large request such as \
-a complete plan, give only the main points, not every section or detail; the user can ask for \
-more. Leave out background, rare edge cases and repetition. This overrides any other guidance \
-about length.""",
+bullets, at most about 300 Chinese characters or 200 English words. For a large request such as \
+a complete plan, give only the three to five main points, not every section or detail; the user \
+can ask for more. Leave out background, rare edge cases and repetition. This overrides any other \
+guidance about length.""",
 }
 
 
