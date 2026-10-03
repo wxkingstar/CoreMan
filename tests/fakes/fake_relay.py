@@ -232,6 +232,12 @@ def _leaked_credential_frames(body: dict[str, Any]) -> list[str]:
     ]
 
 
+def _leaked_personal_frames(body: dict[str, Any]) -> list[str]:
+    """模型把本轮注入的个人凭证原样打了出来（键名不含 token/password 等标记）。"""
+    value = (body.get("env_vars") or {}).get("DEMO_PIN", "")
+    return [": ping\n\n", _text(f"你的 PIN 是 {value}"), FINISH, _chunk(None, usage=USAGE), DONE]
+
+
 class FakeRelay:
     """一个假的 relay 实例：/health、/v1/models 与脚本化的流式对话。
 
@@ -285,11 +291,12 @@ class FakeRelay:
             return httpx.Response(500, text="boom")
         body = json.loads(request.content or b"{}")
         self.requests.append(body)
-        frames = (
-            _leaked_credential_frames(body)
-            if self.scenario == "leaks_credentials"
-            else SCENARIOS[self.scenario]()
-        )
+        if self.scenario == "leaks_credentials":
+            frames = _leaked_credential_frames(body)
+        elif self.scenario == "leaks_personal":
+            frames = _leaked_personal_frames(body)
+        else:
+            frames = SCENARIOS[self.scenario]()
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, stream=_Stream(self, frames)
         )
