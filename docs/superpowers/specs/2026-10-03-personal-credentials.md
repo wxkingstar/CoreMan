@@ -138,10 +138,11 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 同一用户在本 AI 员工下已有键集合完全相同的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发 |
 | 键名不合法 | `422`，逐个说明原因 |
 | 无法送达（企微未配置登录应用、定时任务来源且没有私聊记录等） | `409`，附原因，不创建请求 |
+| 请求体超过 64 KiB | `413`，不创建请求 |
 | 令牌无效或过期 | `401` |
 | 来源任务已结束、用户已停用或 AI 员工已停用 | `403` |
 
-两种成功响应都附带一句给 agent 的话：「已向用户发送安全表单。请简短告诉用户去填写，然后结束本轮；用户提交后会自动续接。」
+两种成功响应都附带一句给 agent 的话：「已向用户发送安全表单。请简短告诉用户去填写，然后结束本轮；用户提交后会自动续接。」定时任务来源的令牌拿到另一句，不承诺续接：「定时任务不会因为用户提交而续接：请在输出里说明本次缺少凭证，然后结束本轮；用户提交的值从下一次定时运行起生效。」
 
 ### 5.3 校验
 
@@ -159,7 +160,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 - **发送目标**：优先发到本人与该 AI 员工的私聊（`user_reached` 记录，目标里带 `recipient_user_id`，发送前由 `private_target_valid` 重新核验）。来源是群聊时，群里再回一句「已私信你一张安全表单」。
 - **没有私聊记录时**：表单直接发到来源群并 @ 发起人。只有发起人提交有效，第 7.1 节会校验点击人；`password` 输入框的内容只在填写人本地，其他人看不到。
 - **卡片由系统构建**（新模块 `coreman/core/personal_credentials/cards.py`），包含：
-  - 标题：「🔒 AI 员工「{bot_name}」需要你的个人凭证」；
+  - 标题：卡片 header 主标题「🔒 需要你的个人凭证」，副标题「AI 员工「{bot_name}」」；
   - 用途：agent 的 `purpose`，作为纯文本渲染；
   - `form` 容器：每个字段一个 `input`，`name` 为键名，`required: true`，`max_length: 1000`，`secret` 字段用 `input_type: "password"`；
   - 提交按钮：`value.task_id = "credential@<request_id>"`；
@@ -169,7 +170,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 
 ### 6.2 H5 页面（企微必用，飞书可选）
 
-- 页面 `/my-credentials/requests/:id`，在来源会话里发链接，发送方式沿用 `/my-wecom`。来源是群聊时直接发到群里，因为页面只认发起人本人。
+- 页面 `/my-credentials/requests/:id`，发送方式沿用 `/my-wecom`。有私聊记录并且有本人的平台身份时，链接发到私聊（来源是群聊时群里再回一句「已私信你一张安全表单」）；否则发回来源会话，因为页面只认发起人本人。
 - 未登录时跳转企微或飞书 OAuth 登录，登录后回到原页面（`redirect` 限同站路径）。
 - 页面显示 AI 员工名、用途、字段（`secret` 字段用密码框），以及第 6.3 节的说明。
 - 链接里只有随机请求 ID，不带任何身份或个人信息。
@@ -191,7 +192,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 - 结果：`inbound_events.payload` 和 `tasks.payload` 里都只有密文。
 - 快车道 `CardActionHandler` 新增 `credential@` 分支，依次：
   1. **防伪**：沿用现有校验，outbox 中必须有 `status='sent'` 且消息 ID、`task_id`、会话都对得上的卡片；
-  2. **核对点击人**：`operator` 的 open_id / user_id 必须对应请求的 `user_id`（`UserIdentity`），不符时提示「只有发起人可以提交」；
+  2. **核对点击人**：`operator` 的 open_id / user_id 必须对应请求的 `user_id`（`UserIdentity`），不符时这次点击被静默忽略（评审裁定 R18）：不提交、不改卡片，飞书只返回统一的受理 toast，发起人的表单保持打开；
   3. 解密封存副本并调用 `submit()`；
   4. **擦除副本**：从 `tasks.payload` 和 `inbound_events.payload` 里删掉 `card_action.sealed`，与 `submit()` 在同一事务内；
   5. **更新卡片**：改为「✅ 已保存 DEMO_USERNAME、DEMO_PASSWORD（内容不显示）」，不带任何值。
@@ -293,7 +294,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 没有可发送的会话，或企微未配置登录应用 | 接口返回 `409` 并附原因，不创建请求，由 agent 告诉用户 |
 | 表单过期后才提交 | 拒绝；卡片或页面提示重新发起 |
 | 重复点击或重复提交 | 行锁加状态检查，第二次提示「已提交」 |
-| 非发起人点卡片或打开链接 | 卡片 toast「只有发起人可以提交」；页面返回 403 |
+| 非发起人点卡片或打开链接 | 卡片点击静默忽略（飞书只返回统一的受理 toast，发起人的表单保持打开，评审裁定 R18）；页面返回 403 |
 | 续接前 AI 员工已停用 | 不续接，只通知「已保存」 |
 | 注入时解密失败 | 跳过该条，记录键名 |
 | 凭证失效（例如外部系统返回 401） | agent 用同一个键重新索取，提交后覆盖 |
@@ -312,6 +313,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 - agent 用 shell（`env`、`printenv`）读得到自己的环境变量。如果它把值打印出来，值就进入模型上下文；如果被网页或文件里的提示注入诱导，还可能外发。
 - 运行节点上 CLI 自己的会话记录和会话查看器不做脱敏。
 - 用户仍可能无视提示，把密码直接发在聊天里。
+- 企业微信里 agent 仍可以自己发一条样式与系统消息相仿的 markdown 链接，把用户引到别处；只有系统构建的链接消息受保护，用户应使用带固定安全说明的那一条里的链接。
 
 ## 13. 测试
 
