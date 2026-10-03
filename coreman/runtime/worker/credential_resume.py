@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import sessions
+from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import (
     Bot,
@@ -42,6 +43,7 @@ from coreman.runtime.worker.replies import load_inbound
 SAVED_NOTICE = "凭证已保存，下次对话时生效。"
 RESET_NOTICE = "凭证已保存。对话已重置，请重新发起刚才的请求。"
 SUPERSEDED_NOTICE = "凭证已保存。对话里已有新的请求，请重新发起刚才的请求。"
+ANNOUNCED_NOTICE = "凭证已保存，维护结束后请重新发起刚才的请求。"
 
 
 class _SessionChanged(ValueError):
@@ -161,6 +163,16 @@ class CredentialResumeHandler(ChatTaskHandler):
                 ctx.task.id,
                 status="cancelled",
                 error_code="credential_resume_superseded",
+            )
+            return None
+        hit = await find_announcement(session, bot_id=bot.id, relay_server_id=bot.relay_server_id)
+        if hit is not None:
+            # 与 chat 流水线同一口径：维护期不开轮。来源那一轮的 req_id 早已过期，公告不走
+            # reply_once，直接发到表单送达的会话，并告诉用户凭证已保存。
+            ctx.log.info("announcement_intercepted", announcement_id=str(hit.id))
+            await self._saved_notice(session, bot, row, f"{hit.content}\n\n{ANNOUNCED_NOTICE}")
+            await tasks.finish(
+                session, ctx.task.id, status="succeeded", result={"announcement": True}
             )
             return None
         inbound = await load_inbound(session, ctx.task)

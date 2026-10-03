@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
+    Announcement,
     Bot,
     ChatLog,
     ChatSession,
@@ -15,6 +16,7 @@ from coreman.core.db.models import (
     OutboxItem,
     RelayServer,
     Task,
+    TaskStream,
 )
 from coreman.core.personal_credentials import service
 from coreman.runtime.worker.context import TaskContext
@@ -195,6 +197,27 @@ async def test_resume_tells_the_user_when_the_relay_is_unavailable(
     [notice] = await _saved_notices(db_session, row)
     assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
     assert notice.payload["markdown"] == "凭证已保存，下次对话时生效。"
+
+
+async def test_resume_gives_the_announcement_instead_of_running_during_maintenance(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session)
+    db_session.add(Announcement(scope="global", content="全站维护"))
+    await db_session.commit()
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await db_session.get(Task, claimed.id, populate_existing=True)
+    assert done.status == "succeeded" and done.result == {"announcement": True}
+    assert fake.requests == []
+    # 来源那一轮的回复上下文已经过期：不走 reply_once，公告直接发到表单送达的会话。
+    streams = await db_session.scalars(select(TaskStream).where(TaskStream.task_id == claimed.id))
+    assert list(streams) == []
+    [notice] = await _saved_notices(db_session, row)
+    assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
+    assert notice.payload["markdown"] == "全站维护\n\n凭证已保存，维护结束后请重新发起刚才的请求。"
 
 
 async def _assert_conversation_reset(
