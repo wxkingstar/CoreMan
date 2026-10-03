@@ -77,6 +77,19 @@ def test_resume_text_names_keys_only():
     assert cards.resume_text(["DEMO_PIN"]).startswith("[CoreMan] 用户已通过安全表单提交 DEMO_PIN")
 
 
+def test_resume_text_quotes_the_original_request():
+    text = cards.resume_text(["DEMO_PIN"], original="  帮我查订单\n  ")
+    assert text.endswith("请继续完成用户的这条原始请求：帮我查订单")
+    # 没有文字可引（只有图片等）：退回不带引用的说法。
+    assert cards.resume_text(["DEMO_PIN"], original="  ").endswith("请继续完成之前的任务。")
+
+
+def test_resume_text_truncates_a_long_original_request():
+    text = cards.resume_text(["DEMO_PIN"], original="x" * (cards.ORIGINAL_MAX + 500))
+    assert text.endswith("x" * cards.ORIGINAL_MAX + "…")
+    assert "x" * (cards.ORIGINAL_MAX + 1) not in text
+
+
 def test_wecom_link_removes_newlines_and_bare_urls():
     text = cards.wecom_link(
         bot_name="Demo",

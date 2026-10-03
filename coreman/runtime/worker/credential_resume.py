@@ -2,7 +2,8 @@
 
 与普通 chat 的差别只有入口：读凭证请求而不是入站消息（入站事件沿用来源那一轮的），发言者
 固定为发起人；企业微信的流从创建起就是主动推送（续接轮没有可用的 req_id）。凭证照常在开轮时
-按发言者注入（chat/credentials.py），这一轮的消息里只有键名。其余全部复用 ChatTaskHandler。
+按发言者注入（chat/credentials.py），这一轮的消息里只有键名和用户的原始请求。其余全部复用
+ChatTaskHandler。
 """
 
 from __future__ import annotations
@@ -27,13 +28,20 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.personal_credentials import cards
-from coreman.core.personal_credentials.service import RESUME_KIND
-from coreman.runtime.worker.chat_handler import ChatTaskHandler, Intake, Prepared
+from coreman.core.personal_credentials.service import RESUME_KIND, newer_turn_by_other
+from coreman.runtime.worker.chat_handler import (
+    ChatTaskHandler,
+    Intake,
+    Prepared,
+    joined_text,
+    strip_mention,
+)
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound
 
 SAVED_NOTICE = "凭证已保存，下次对话时生效。"
 RESET_NOTICE = "凭证已保存。对话已重置，请重新发起刚才的请求。"
+SUPERSEDED_NOTICE = "凭证已保存。对话里已有新的请求，请重新发起刚才的请求。"
 
 
 class _SessionChanged(ValueError):
@@ -144,9 +152,23 @@ class CredentialResumeHandler(ChatTaskHandler):
                 error_code="credential_resume_session_changed",
             )
             return None
+        if await newer_turn_by_other(session, row):
+            # 提交之后、续接任务运行之前，会话里来了别人的新请求：续接会接到它上面，
+            # 还带着发起人的凭证。只保存、请用户重新发起。
+            await self._saved_notice(session, bot, row, SUPERSEDED_NOTICE)
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="cancelled",
+                error_code="credential_resume_superseded",
+            )
+            return None
         inbound = await load_inbound(session, ctx.task)
+        # 引用来源那一轮的原始请求：会话里可能又来过别的消息，续接要接回它。
+        parts = [p for p in (inbound.payload.get("parts") or []) if isinstance(p, dict)]
+        original = strip_mention(joined_text(parts), bot.name)
         # 与 store.save 返回的键名同序（已排序），保存通知和续接消息列出的顺序一致。
-        text = cards.resume_text(sorted(str(field["key"]) for field in row.fields))
+        text = cards.resume_text(sorted(str(field["key"]) for field in row.fields), original)
         intake = Intake(
             bot,
             relay,

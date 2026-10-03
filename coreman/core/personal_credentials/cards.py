@@ -14,6 +14,8 @@ SECURITY_NOTE = (
     "请勿在此填写飞书、企业微信或邮箱的登录密码。"
 )
 GROUP_NOTICE = "已私信你一张安全表单，请在私聊里填写。"
+# 续接消息里引用的原始请求最多保留的字数。
+ORIGINAL_MAX = 2000
 # 企微链接文案是 Markdown：agent 写的用途与标签里的链接、强调符号一律压平，免得冒充入口。
 # 同时移除裸 URL 并折叠空白，防止多行注入。
 _MARKDOWN = re.compile(r"[\[\]()<>`*_#|]")
@@ -145,8 +147,15 @@ def wecom_link(*, bot_name: str, purpose: str, fields: list[dict[str, Any]], url
     )
 
 
-def resume_text(keys: list[str] | tuple[str, ...]) -> str:
-    return (
+def resume_text(keys: list[str] | tuple[str, ...], original: str = "") -> str:
+    """续接消息：只有键名和用户自己的原始请求（引用它，续接才不会接到会话里别的任务上）。"""
+    head = (
         f"[CoreMan] 用户已通过安全表单提交 {'、'.join(keys)}，已作为环境变量注入本轮，"
-        "值不会出现在对话中。请继续完成之前的任务。"
+        "值不会出现在对话中。"
     )
+    original = original.strip()
+    if not original:
+        return head + "请继续完成之前的任务。"
+    if len(original) > ORIGINAL_MAX:
+        original = original[:ORIGINAL_MAX] + "…"
+    return head + f"请继续完成用户的这条原始请求：{original}"

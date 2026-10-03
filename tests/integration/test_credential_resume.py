@@ -1,4 +1,4 @@
-"""提交之后在原会话续接：发言者是发起人、消息里只有键名、凭证在 env 里、企微走主动推送。"""
+"""提交之后在原会话续接：发起人发言、消息只有键名与原始请求、凭证在 env 里、企微走主动推送。"""
 
 import uuid
 from collections.abc import Awaitable, Callable
@@ -29,19 +29,39 @@ from tests.integration.credential_helpers import (
     owner,
     seed_chat_session,
 )
-from tests.integration.test_chat_handler import stream_of
+from tests.integration.test_chat_handler import chat_task, stream_of
 from tests.integration.worker_helpers import build_ctx
 
 
-async def _submitted(session, platform="wecom"):
-    bot, user, task, cipher = await owner(session, platform=platform)
+async def _newer_turn(session, bot, origin, sender):
+    """来源那一轮之后，同一会话里又有人发了一条新请求（已处理完）。"""
+    message = origin.payload["message"]
+    newer = await chat_task(
+        session,
+        bot,
+        "换一个请求",
+        sender=sender,
+        chat_type=message["chat_type"],
+        chat_id=origin.session_key,
+    )
+    await tasks.finish(session, newer.id, status="succeeded")
+    await session.commit()
+
+
+async def _submitted(session, platform="wecom", *, chat_type="single", before=None, after=None):
+    """before / after：表单提交之前 / 之后，谁在同一会话里发了新请求。"""
+    bot, user, task, cipher = await owner(session, platform=platform, chat_type=chat_type)
     await login_app(session, platform)
     await seed_chat_session(session, bot, task)
     opened = await service.open_request(
         session, cipher, cap_for(bot, user, task), BODY, base_url="http://localhost"
     )
     await session.commit()
+    if before:
+        await _newer_turn(session, bot, task, before)
     await service.submit(session, cipher, opened.request_id, actor_id=user.id, values=VALUES)
+    if after:
+        await _newer_turn(session, bot, task, after)
     await tasks.finish(session, task.id, status="succeeded")
     await session.commit()
     row = await session.get(CredentialRequest, opened.request_id)
@@ -62,6 +82,8 @@ async def test_resume_continues_as_owner_with_keys_only(
     body = fake.requests[0]
     assert "已通过安全表单提交 DEMO_PIN、DEMO_USERNAME" in body["messages"][1]["content"]
     assert "pin-778899" not in body["messages"][1]["content"]
+    # 消息里带着用户的原始请求，续接的是那一条，而不是会话里最近的一条。
+    assert body["messages"][1]["content"].endswith("请继续完成用户的这条原始请求：帮我查订单")
     assert body["env_vars"]["DEMO_PIN"] == "pin-778899"
     # 续接的是提问的那个对话，而不是另起一个空会话。
     assert body["session_id"] == str(DEMO_RELAY_SESSION)
@@ -283,3 +305,58 @@ async def test_resume_does_not_open_a_replacement_session_when_the_runtime_chang
     # 原对话的映射原样保留：用户下一条消息按后端变化自行换会话，这里不替它做。
     kept = await db_session.get(ChatSession, (bot.id, claimed.session_key), populate_existing=True)
     assert kept is not None and kept.relay_session_id == DEMO_RELAY_SESSION
+
+
+async def test_resume_is_not_queued_when_another_user_spoke_after_the_request(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, task, cipher = await owner(db_session, platform="feishu", chat_type="group")
+    await seed_chat_session(db_session, bot, task)
+    opened = await service.open_request(
+        db_session, cipher, cap_for(bot, user, task), BODY, base_url="http://localhost"
+    )
+    await db_session.commit()
+    await _newer_turn(db_session, bot, task, "other_pid")
+    done = await service.submit(
+        db_session, cipher, opened.request_id, actor_id=user.id, values=VALUES
+    )
+    await db_session.commit()
+    # 群里已经转向别人的请求：值照常保存，但不接着做，也不承诺会继续。
+    assert done.status == "saved" and done.message == "下次对话时生效。"
+    row = await db_session.get(CredentialRequest, opened.request_id)
+    assert row is not None and row.status == "submitted" and row.resume_task_id is None
+    queued = await db_session.scalars(select(Task).where(Task.kind == service.RESUME_KIND))
+    assert list(queued) == []
+
+
+async def test_resume_is_dropped_when_another_user_speaks_after_the_submit(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(
+        db_session, "feishu", chat_type="group", after="other_pid"
+    )
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await db_session.get(Task, claimed.id, populate_existing=True)
+    assert done.status == "cancelled" and done.error_code == "credential_resume_superseded"
+    assert fake.requests == []
+    [notice] = await _saved_notices(db_session, row)
+    assert notice.kind == "send" and notice.target == {"chat_id": row.delivery_chat_id}
+    assert notice.payload["markdown"] == "凭证已保存。对话里已有新的请求，请重新发起刚才的请求。"
+
+
+async def test_resume_continues_when_the_same_user_spoke_after_the_request(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, cipher, row, claimed = await _submitted(db_session, "feishu", before="owner_pid")
+    assert row.resume_task_id == claimed.id
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    await CredentialResumeHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    # 同一个人的新消息不挡路；引用的是原始请求，不会续到后来那一条上。
+    content = fake.requests[0]["messages"][1]["content"]
+    assert content.endswith("请继续完成用户的这条原始请求：帮我查订单")
+    assert fake.requests[0]["env_vars"]["DEMO_PIN"] == "pin-778899"

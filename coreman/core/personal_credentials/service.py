@@ -357,6 +357,33 @@ async def _settle(
     return tail
 
 
+async def newer_turn_by_other(session: AsyncSession, row: CredentialRequest) -> bool:
+    """来源那一轮之后，同一会话里是否已有别人发起的新请求。
+
+    relay 会话在这期间不会变，会话核对拦不住；自动续接会接到别人的新请求上，
+    还带着发起人的凭证。同一个人的新消息不算：续接消息引用了他的原始请求。
+    """
+    session_key = row.origin_session_key or row.origin_chat_id
+    if row.origin_task_id is None or row.origin_event_id is None or not session_key:
+        return False
+    origin = await session.get(InboundEvent, row.origin_event_id)
+    if origin is None:
+        return False
+    found = await session.scalar(
+        select(Task.id)
+        .join(InboundEvent, InboundEvent.id == Task.inbound_event_id)
+        .where(
+            Task.bot_id == row.bot_id,
+            Task.session_key == session_key,
+            Task.kind == "chat",
+            Task.id > row.origin_task_id,
+            InboundEvent.sender_platform_user_id.is_distinct_from(origin.sender_platform_user_id),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 async def _resume(session: AsyncSession, row: CredentialRequest, bot: Bot, user: User) -> bool:
     if row.origin_kind != "chat" or not row.origin_session_key or row.origin_event_id is None:
         return False
@@ -367,6 +394,9 @@ async def _resume(session: AsyncSession, row: CredentialRequest, bot: Bot, user:
         ChatSession, (bot.id, row.origin_session_key), populate_existing=True
     )
     if current is None or current.relay_session_id != row.origin_relay_session_id:
+        return False
+    # 提问之后会话里已经转到别人的请求：同样不续接（同一个人的新消息不挡路）。
+    if await newer_turn_by_other(session, row):
         return False
     identity = await _identity(session, user.id, bot.platform)
     task = await tasks.enqueue(
