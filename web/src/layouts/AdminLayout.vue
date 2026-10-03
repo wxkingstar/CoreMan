@@ -16,6 +16,7 @@ export const MENU: readonly MenuItem[] = [
   { key: 'selfReminders', path: '/self-reminders' },
   { key: 'myFeishu', path: '/my-feishu' },
   { key: 'myWecom', path: '/my-wecom' },
+  { key: 'myCredentials', path: '/my-credentials' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
   { key: 'skillApprovals', path: '/skill-approvals', roles: ['ai_committee', 'platform_admin'] },
@@ -36,7 +37,7 @@ export const MENU: readonly MenuItem[] = [
 <script setup lang="ts">
 import BrandLogo from '@/components/BrandLogo.vue'
 import { computed, ref, watch } from 'vue'
-import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, OfficeBuilding, SwitchButton, Moon } from '@element-plus/icons-vue'
+import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, Lock, OfficeBuilding, SwitchButton, Moon } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
@@ -46,16 +47,16 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, chatLogs: ChatDotRound, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'selfReminders'] },
+  { key: 'collaboration', keys: ['bots', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'myCredentials', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]
 const organizationKeys = ['users', 'apps', 'systems', 'credentials']
 function visible(item: MenuItem): boolean { return !item.roles || !!auth.user && item.roles.includes(auth.user.role as Role) }
 const visibleGroups = computed(() => groups.map(group => ({ ...group, items: group.keys.map(key => MENU.find(item => item.key === key)!).filter(visible) })).filter(group => group.items.length))
-const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path)
+const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path.startsWith('/my-credentials/') ? '/my-credentials' : route.path)
 const title = computed(() => t('menu.' + (MENU.find(item => item.path === activePath.value)?.key ?? 'home')))
 watch(() => route.path, () => { mobileOpen.value = false })
 function toggleDark() { dark.value = !dark.value; document.documentElement.classList.toggle('dark', dark.value); try { localStorage.setItem('coreman.dark', dark.value ? '1' : '0') } catch { /* unavailable storage */ } }

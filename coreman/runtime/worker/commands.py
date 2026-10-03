@@ -13,6 +13,7 @@ from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
 from coreman.core.db.models import Bot, BotAllowedUser
 from coreman.core.i18n.messages import msg
+from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound, reply_once
 
@@ -110,6 +111,10 @@ async def do_stop(
         stopped += await stop_for(session, bot_id, session_key, platform_user_id)
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
+            stopped += 1
+    # A credential resume still queued behind the running turn would restart the work once it ends.
+    for t in await tasks.open_for_session(session, bot_id, session_key, RESUME_KIND):
+        if await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1
     return msg("stopped" if stopped else "nothing_running", ctx.locale)
 

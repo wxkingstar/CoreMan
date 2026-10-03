@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from coreman.core.bus import instances, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import sessions
-from coreman.core.db.models import Bot, InboundEvent, TaskStream
+from coreman.core.db.models import Bot, CredentialRequest, InboundEvent, TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.commands import CommandHandler
+from coreman.runtime.worker.credential_resume import CredentialResumeHandler
+from tests.fakes.fake_relay import FakeRelay
 from tests.integration.worker_helpers import build_ctx, seed_bot
 
 
@@ -177,3 +179,71 @@ async def test_reset_resolves_open_userid_before_clearing_states(
     reset2 = await _command_task(db_session, bot, "reset", session_key=stranger)
     await CommandHandler().run(build_ctx(db_engine, reset2))
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
+
+
+async def _queued_resume(db_session: AsyncSession, *, origin_running: bool):  # type: ignore[no-untyped-def]
+    """提交表单时来源那一轮还在跑：续接任务排在它后面。"""
+    from coreman.core.personal_credentials import service
+    from tests.integration.credential_helpers import (
+        BODY,
+        VALUES,
+        cap_for,
+        login_app,
+        owner,
+        seed_chat_session,
+    )
+
+    bot, user, origin, cipher = await owner(db_session, platform="wecom")
+    await login_app(db_session, "wecom")
+    await seed_chat_session(db_session, bot, origin)
+    opened = await service.open_request(
+        db_session, cipher, cap_for(bot, user, origin), BODY, base_url="http://localhost"
+    )
+    await db_session.commit()
+    await service.submit(db_session, cipher, opened.request_id, actor_id=user.id, values=VALUES)
+    if not origin_running:
+        await tasks.finish(db_session, origin.id, status="succeeded")
+    await db_session.commit()
+    row = await db_session.get(CredentialRequest, opened.request_id)
+    assert row is not None and row.resume_task_id is not None
+    resume = await tasks.get(db_session, row.resume_task_id)
+    assert resume is not None and resume.status == "queued"
+    return bot, origin, resume
+
+
+async def test_stop_also_cancels_a_credential_resume_queued_behind_the_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, origin, resume = await _queued_resume(db_session, origin_running=True)
+    stop = await _command_task(db_session, bot, "stop", session_key=origin.session_key)
+    await CommandHandler().run(build_ctx(db_engine, stop))
+    resume = await tasks.get(db_session, resume.id)
+    assert resume and resume.cancel_requested_at is not None
+    assert resume.cancel_reason == "user_stop"
+    # 来源那一轮收尾之后，续接任务被认领也只是按取消结掉，不会再去问模型。
+    await tasks.finish(db_session, origin.id, status="cancelled")
+    await db_session.commit()
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert claimed is not None and claimed.id == resume.id
+    fake = FakeRelay("normal")
+    await CredentialResumeHandler().run(
+        build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
+    )
+    done = await tasks.get(db_session, resume.id)
+    assert done and done.status == "cancelled"
+    assert fake.requests == []
+
+
+async def test_stop_counts_a_queued_credential_resume_as_something_to_stop(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, origin, resume = await _queued_resume(db_session, origin_running=False)
+    stop = await _command_task(db_session, bot, "stop", session_key=origin.session_key)
+    await CommandHandler().run(build_ctx(db_engine, stop))
+    stream = (
+        await db_session.execute(select(TaskStream).where(TaskStream.task_id == stop.id))
+    ).scalar_one()
+    assert stream.final_text == msg("stopped")
+    resume = await tasks.get(db_session, resume.id)
+    assert resume and resume.cancel_requested_at is not None

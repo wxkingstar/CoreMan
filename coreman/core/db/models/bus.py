@@ -33,6 +33,7 @@ TASK_KINDS = (
     "command",
     "card_action",
     "choice_submit",
+    "credential_resume",
     "cron_run",
     "relay_switch",
     "escalation_media",

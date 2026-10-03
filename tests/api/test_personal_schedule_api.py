@@ -26,6 +26,7 @@ from coreman.runtime.worker.chat import schedules as chat_schedules
 from tests.api.test_feishu_personal import setup as feishu_setup
 from tests.api.test_personal_schedules import click as feishu_click
 from tests.api.test_personal_schedules import run_due
+from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import build_ctx
 
@@ -414,3 +415,27 @@ async def test_wecom_private_chat_confirms_with_a_button_card(
     update = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "card_update"))
     assert update.payload["card"]["main_title"]["title"] == "定时任务已生效"
     assert len(update.payload["card"]["sub_title_text"]) <= 110
+
+
+async def test_wecom_credential_resume_turn_can_propose_and_the_owner_confirms(
+    client, app, db_session, db_engine
+):
+    from tests.api.test_wecom_personal import SENDER
+    from tests.api.test_wecom_personal import setup as wecom_setup
+
+    bot, user, task = await wecom_setup(db_session, app)
+    resume = await resume_task(db_session, task, user)
+    await spoke_in_group(db_session, bot, SENDER, chat_id="wr-group", platform="wecom")
+    response = await client.post(
+        URL + "/drafts",
+        headers=await auth(app, resume, user),
+        json=body(run_at=None, cron_expression="0 9 * * 1", recipient_chat_ids=["wr-group"]),
+    )
+    assert response.status_code == 200, response.text
+    card = (await db_session.scalars(select(OutboxItem).order_by(OutboxItem.id))).all()[-1]
+    result = await wecom_click(
+        db_session, db_engine, bot, card.payload["card"]["task_id"], "confirm", SENDER
+    )
+    assert result == "personal_schedule_created"
+    job = await db_session.scalar(select(CronJob))
+    assert job.created_by == user.id and job.reminder_chat_id == SENDER

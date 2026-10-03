@@ -22,6 +22,7 @@ from coreman.core.chat import interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
 from coreman.core.i18n.messages import msg
+from coreman.core.personal_credentials.policy import CARD_PREFIX
 from coreman.core.wecom.cards import (
     answered_card,
     expired_card,
@@ -31,6 +32,8 @@ from coreman.core.wecom.cards import (
 )
 from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
+from coreman.runtime.worker.credential_cards import handle as handle_credential
+from coreman.runtime.worker.credential_cards import wipe_detached
 from coreman.runtime.worker.replies import load_inbound
 
 _DIGITS = re.compile(r"[0-9]+")
@@ -55,6 +58,18 @@ class CardActionHandler:
     kind = "card_action"
 
     async def run(self, ctx: TaskContext) -> None:
+        card_task_id = str((ctx.task.payload.get("card_action") or {}).get("task_id") or "")
+        if not card_task_id.startswith(CARD_PREFIX):
+            await self._run(ctx)
+            return
+        # 带封存值的表单卡：无论从哪个出口退出（含抛异常，那时主事务连擦除一起回滚），
+        # 封存副本都要擦掉。
+        try:
+            await self._run(ctx)
+        finally:
+            await wipe_detached(ctx)
+
+    async def _run(self, ctx: TaskContext) -> None:
         action: dict[str, Any] = dict(ctx.task.payload.get("card_action") or {})
         async with ctx.session_factory() as session:
             bot = await session.get(Bot, ctx.task.bot_id)
@@ -85,6 +100,14 @@ class CardActionHandler:
                     )
                     await session.commit()
                     return
+            if bot.platform == "feishu" and task_id.startswith(CARD_PREFIX):
+                result = await handle_credential(session, ctx, bot, inbound, action)
+                await tasks.finish(
+                    session, ctx.task.id, status="succeeded", result={"card": result}
+                )
+                await session.commit()
+                ctx.log.info("card_action_done", result=result)
+                return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 

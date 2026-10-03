@@ -184,6 +184,12 @@ from coreman.core.db.models.bot_collaboration import (
     BotHumanPartner,
     HumanCollaboration,
 )
+from coreman.core.db.models.personal_credentials import (
+    CREDENTIAL_ORIGINS,
+    CREDENTIAL_REQUEST_STATUSES,
+    CredentialRequest,
+    PersonalCredential,
+)
 
 __all__ += [
     "BotCollaboration",
@@ -191,4 +197,11 @@ __all__ += [
     "BotCollaborationRoute",
     "BotHumanPartner",
     "HumanCollaboration",
+]
+
+__all__ += [
+    "CREDENTIAL_ORIGINS",
+    "CREDENTIAL_REQUEST_STATUSES",
+    "CredentialRequest",
+    "PersonalCredential",
 ]

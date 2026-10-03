@@ -21,6 +21,7 @@ from coreman.core.bus import outbox, tasks
 from coreman.core.chat.commands import command_text
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, RuntimeNode, Task, WecomPersonalBinding
+from coreman.core.feishu_personal.policy import PRIVATE_TURN_KINDS
 from coreman.core.relay.models import backend_of
 from coreman.core.wecom.cards import clip, notice_card
 from coreman.core.wecom_personal import binding, policy, service
@@ -479,7 +480,7 @@ async def handle_schedule(
     if (
         original is None
         or original.bot_id != bot.id
-        or original.kind != "chat"
+        or original.kind not in PRIVATE_TURN_KINDS
         or original.payload.get("collaboration_id")
         or original.payload.get("collaboration_phase")
         or ctx.task.kind != "card_action"

@@ -18,6 +18,7 @@ from coreman.core.db.models import (
     WecomPersonalBinding,
 )
 from coreman.core.wecom_personal import gateway, policy, service, tools
+from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
 
@@ -156,6 +157,22 @@ async def headers(app, task, user):
             base_session_id=info.relay_session_id,
         )
     }
+
+
+async def test_a_credential_resume_keeps_the_owners_private_origin(app, db_session):
+    _, user, task = await setup(db_session, app)
+    resume = await resume_task(db_session, task, user)
+    scope = await policy.task_scope(db_session, resume.id, str(user.id))
+    assert scope.user_id == user.id and scope.chat_id == SENDER
+    with pytest.raises(ValueError, match="personal_actor_mismatch"):
+        await policy.task_scope(db_session, resume.id, str(uuid.uuid4()))
+
+
+async def test_a_credential_resume_of_a_group_origin_gets_no_personal_scope(app, db_session):
+    _, user, task = await setup(db_session, app, chat_type="group")
+    resume = await resume_task(db_session, task, user)
+    with pytest.raises(ValueError, match="wecom_private_chat_required"):
+        await policy.task_scope(db_session, resume.id, str(user.id))
 
 
 async def test_missing_capability_is_unauthorized(client):

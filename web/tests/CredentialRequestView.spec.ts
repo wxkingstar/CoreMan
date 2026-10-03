@@ -1,0 +1,100 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
+import { beforeEach, expect, it, vi } from 'vitest'
+vi.mock('vue-router', async (orig) => ({ ...(await orig<typeof import('vue-router')>()), useRoute: () => ({ params: { id: 'r1' } }) }))
+vi.mock('@/api/personalCredentials', () => ({ personalCredentials: { request: vi.fn(), submit: vi.fn(), list: vi.fn(), update: vi.fn(), remove: vi.fn() } }))
+import { personalCredentials, type CredentialRequest } from '@/api/personalCredentials'
+import CredentialRequestView from '@/views/CredentialRequestView.vue'
+import { i18n } from '@/i18n'
+
+const open: CredentialRequest = {
+  id: 'r1', bot_name: 'Demo 助手', platform: 'wecom', purpose: '查询你在 Demo 系统里的订单',
+  fields: [
+    { key: 'DEMO_USERNAME', label: '账号', secret: false, placeholder: '' },
+    { key: 'DEMO_PIN', label: 'PIN', secret: true, placeholder: '' },
+  ],
+  status: 'open', expires_at: '2026-10-03T02:00:00Z', security_note: '🔒 安全说明：不会发送给 AI 模型。',
+}
+const render = () => mount(CredentialRequestView, { global: { plugins: [ElementPlus, i18n] } })
+
+beforeEach(() => {
+  vi.mocked(personalCredentials.request).mockReset().mockResolvedValue(open)
+  vi.mocked(personalCredentials.submit).mockReset().mockResolvedValue({ status: 'saved', keys: ['DEMO_PIN', 'DEMO_USERNAME'], message: '' })
+})
+
+it('shows who asks, why, a password box for secret fields and the security note', async () => {
+  const wrapper = render(); await flushPromises()
+  expect(wrapper.text()).toContain('Demo 助手')
+  expect(wrapper.text()).toContain('查询你在 Demo 系统里的订单')
+  expect(wrapper.text()).toContain('不会发送给 AI 模型')
+  expect(wrapper.get('input[data-test="field-DEMO_PIN"]').attributes('type')).toBe('password')
+  expect(wrapper.get('input[data-test="field-DEMO_USERNAME"]').attributes('type')).toBe('text')
+  expect(wrapper.get('input[data-test="field-DEMO_PIN"]').attributes('autocomplete')).toBe('new-password')
+  wrapper.unmount()
+})
+
+it('submits every field once and then shows the saved state', async () => {
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledTimes(1)
+  expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice', DEMO_PIN: 'pin-778899' })
+  expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
+  // 输入框此时已卸载，只能检查组件状态：提交成功后每个值都必须被清空。
+  const state = (wrapper.vm as unknown as { values: Record<string, string> }).values
+  expect(Object.values(state)).toEqual(['', ''])
+  wrapper.unmount()
+})
+
+it('shows the outcome the server returned instead of promising a resume', async () => {
+  vi.mocked(personalCredentials.submit).mockResolvedValue({ status: 'saved', keys: ['DEMO_PIN', 'DEMO_USERNAME'], message: '下次执行时生效。' })
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  const saved = wrapper.get('[data-test="saved"]')
+  expect(saved.text()).toContain('下次执行时生效。')
+  expect(saved.text()).not.toContain('继续之前的任务')
+  wrapper.unmount()
+})
+
+it('falls back to the generic hint when the server returned no message', async () => {
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(wrapper.get('[data-test="saved"]').text()).toContain('继续之前的任务')
+  wrapper.unmount()
+})
+
+it('ignores a second submit while the first is still in flight', async () => {
+  let finish: (v: { status: string; keys: string[]; message: string }) => void = () => {}
+  vi.mocked(personalCredentials.submit).mockReturnValue(new Promise(resolve => { finish = resolve }))
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledTimes(1)
+  finish({ status: 'saved', keys: ['DEMO_PIN', 'DEMO_USERNAME'], message: '' }); await flushPromises()
+  expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
+  wrapper.unmount()
+})
+
+it('refuses to submit with an empty field', async () => {
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).not.toHaveBeenCalled()
+  expect(wrapper.get('[data-test="error"]').text()).toContain('PIN')
+  wrapper.unmount()
+})
+
+it('shows a closed form without inputs', async () => {
+  vi.mocked(personalCredentials.request).mockResolvedValue({ ...open, status: 'expired' })
+  const wrapper = render(); await flushPromises()
+  expect(wrapper.find('[data-test="closed"]').exists()).toBe(true)
+  expect(wrapper.find('form').exists()).toBe(false)
+  wrapper.unmount()
+})

@@ -9,7 +9,9 @@ from datetime import datetime
 from typing import Any
 
 from coreman.core.chat.card_replies import REPLY_BUTTON
+from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
+from coreman.core.personal_credentials.policy import parse_card_task_id, sealed_aad
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
     AudioPart,
@@ -87,6 +89,7 @@ def _normalize_event(
     gateway_instance: str,
     now: datetime,
     allow_bot: bool = False,
+    cipher: Cipher | None = None,
 ) -> InboundMessage | None:
     header = raw.get("header") or {}
     if header.get("app_id") != app_id:
@@ -125,8 +128,12 @@ def _normalize_event(
         if click is not None:
             return _reply_click(raw, click, bot_id=bot_id, context=context)
         task_id = str(value.get("task_id") or "")
+        request_id = parse_card_task_id(task_id)
+        credential = request_id is not None
         if (
-            not parse_task_id(task_id) and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
+            not credential
+            and not parse_task_id(task_id)
+            and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")
@@ -154,6 +161,27 @@ def _normalize_event(
                 and _CHOICE_KEY.fullmatch(option)
             ):
                 selected[question] = [option]
+        card_action: dict[str, Any] = {
+            "task_id": task_id,
+            "card_type": "form",
+            "level": str(value.get("level") or ""),
+            "event_key": str(value.get("event_key") or ""),
+            "selected": selected,
+        }
+        if request_id is not None:
+            # 个人凭证：表单值在落库之前加密封存，入站事件与任务载荷里只有密文。
+            # 没有加密器就丢弃这次回调——宁可让用户重填，也不能落一份明文。
+            if cipher is None:
+                return None
+            values = {key: entry[0] for key, entry in selected.items() if len(entry) == 1}
+            card_action = {
+                "task_id": task_id,
+                "card_type": "credential",
+                "sealed": cipher.encrypt(
+                    json.dumps(values, ensure_ascii=False),
+                    sealed_aad(request_id),
+                ),
+            }
         return InboundMessage(
             platform="feishu",
             bot_id=bot_id,
@@ -162,13 +190,7 @@ def _normalize_event(
             chat_id=chat_id,
             sender=Sender(platform_user_id=user_id, open_id=operator.get("open_id")),
             message_id="action:" + str(header["event_id"]),
-            card_action={
-                "task_id": task_id,
-                "card_type": "form",
-                "level": str(value.get("level") or ""),
-                "event_key": str(value.get("event_key") or ""),
-                "selected": selected,
-            },
+            card_action=card_action,
             reply_context={**context, "chat_id": chat_id, "message_id": message_id},
             raw=raw,
         )
@@ -307,6 +329,8 @@ def normalize_event(raw: dict[str, Any], **kwargs: Any) -> InboundMessage | None
             # 回调 token 只属于传输认证，持久审计不保留可复用凭据。
             safe_header = {k: v for k, v in (raw.get("header") or {}).items() if k != "token"}
             safe_event = {k: v for k, v in (raw.get("event") or {}).items() if k != "token"}
+            if (message.card_action or {}).get("card_type") == "credential":
+                safe_event["action"] = {**(safe_event.get("action") or {}), "form_value": {}}
             message.raw = {**raw, "header": safe_header, "event": safe_event}
         return message
     except (ValueError, TypeError, AttributeError, KeyError):

@@ -219,14 +219,19 @@ class OpenStage(ChatStageBase):
         extra, env = await schedules.configure(
             session, ctx, intake, info.relay_session_id, extra, env
         )
+        from coreman.runtime.worker.chat import credentials
+
+        extra, env, personal_secrets = await credentials.configure(
+            session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
+        )
         from coreman.core.prompting.rich_cards import with_rich_cards
 
         extra = with_rich_cards(extra, intake.bot.platform, intake.bot.rich_cards)
         system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
         ctx.private_turn = wecom_personal.mounted(env)
-        # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务），
-        # 出站闸门必须按最终的这一份建。
-        ctx.secrets = collect_secrets(env)
+        # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
+        # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
+        ctx.secrets = collect_secrets(env) | personal_secrets
         session_url = await session_link(session, ctx, intake, relay, info.relay_session_id)
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))

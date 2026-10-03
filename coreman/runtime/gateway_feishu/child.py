@@ -133,6 +133,8 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
         )
         await transport.fence()
 
+        cipher = cfg.build_cipher()
+
         async def accept(raw: dict[str, Any]) -> Outcome | None:
             await transport.fence()
             assert channel is not None
@@ -149,6 +151,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
                 gateway_instance=instance_id,
                 now=datetime.now(UTC),
                 allow_bot=True,
+                cipher=cipher,
             )
             if message is None:
                 return None

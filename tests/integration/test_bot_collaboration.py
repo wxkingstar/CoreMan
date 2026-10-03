@@ -16,13 +16,16 @@ from coreman.core.db.models import (
     BotCollaboration,
     BotCollaborationPartner,
     BotCollaborationRoute,
+    InboundEvent,
     OutboxItem,
     Task,
     User,
     UserIdentity,
 )
+from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
+from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import seed_bot
 
@@ -190,6 +193,61 @@ async def test_real_receipts_required_and_replay_is_idempotent(db_session, messa
     await receipt(db_session, a, mid="reply", union="ub", parent="request")
     assert await service.tick(db_session, datetime.now(UTC)) == 0
     assert await db_session.scalar(select(func.count()).select_from(Task)) == 3
+
+
+async def _help_from(session, task, actor):
+    with (
+        patch("coreman.core.chat.collaboration_setup.check_current_group", new_callable=AsyncMock),
+        patch("coreman.core.chat.collaboration_setup.available", new=AsyncMock(return_value=True)),
+        patch("coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock),
+    ):
+        return await service.request_help(
+            session,
+            task_id=task.id,
+            actor=str(actor.id),
+            target_key="helper",
+            question="库存多少?",
+            cipher=Cipher(b"t" * 32),
+        )
+
+
+async def test_credential_resume_turn_in_a_group_can_ask_a_partner(db_session):
+    a, b, actor, route, task, row = await setup(db_session)
+    row.status = "completed"
+    await tasks.finish(db_session, task.id, status="succeeded")
+    resume = await resume_task(db_session, task, actor)
+    asked = await _help_from(db_session, resume, actor)
+    await db_session.commit()
+    assert asked.id != row.id and asked.source_task_id == resume.id
+    assert asked.origin_user_id == actor.id and asked.source_session_key == "group"
+    assert asked.status in ("requested", "waiting_identity")
+    # 求助消息回复的是提问人的原始群消息（续接任务沿用它的入站事件）。
+    await service.send_message(db_session, asked, route)
+    item = await db_session.get(OutboxItem, asked.request_outbox_id)
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    assert item.target == {"chat_id": "group", "message_id": origin.platform_msg_id}
+
+
+async def test_credential_resume_keeps_the_collaboration_exclusions(db_session):
+    a, b, actor, route, task, row = await setup(db_session)
+    row.status = "completed"
+    await tasks.finish(db_session, task.id, status="succeeded")
+    private = await chat_task(
+        db_session, a, "私聊里提问", sender="human-id", chat_type="single", chat_id="p2p"
+    )
+    from_private = await resume_task(db_session, private, actor)
+    with pytest.raises(ValueError, match="human group task required"):
+        await _help_from(db_session, from_private, actor)
+    nested = await resume_task(db_session, task, actor)
+    nested.payload = {**nested.payload, "collaboration_id": str(row.id)}
+    await db_session.commit()
+    with pytest.raises(ValueError, match="cannot delegate"):
+        await _help_from(db_session, nested, actor)
+    stopped = await resume_task(db_session, task, actor)
+    stopped.status = "succeeded"
+    await db_session.commit()
+    with pytest.raises(ValueError, match="cannot delegate"):
+        await _help_from(db_session, stopped, actor)
 
 
 @pytest.mark.parametrize(
@@ -556,6 +614,27 @@ async def test_second_human_replaces_shared_task_without_changing_origin(db_sess
             target_key="helper",
             question="late registration",
         )
+
+
+async def test_group_admission_also_cancels_a_queued_credential_resume(db_session):
+    a, _, actor, _, source, _ = await setup(db_session)
+    await tasks.finish(db_session, source.id, status="succeeded")
+    queued = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=a.id,
+            kind=RESUME_KIND,
+            user_id=actor.id,
+            session_key="group",
+            inbound_event_id=source.inbound_event_id,
+            payload={"credential_request_id": str(uuid.uuid4()), "serialize_session": True},
+        ),
+    )
+    assert queued is not None
+    admission = await service.admit_human(db_session, a.id, "group", "human-id", command="stop")
+    assert admission is not None and admission.interrupted
+    await db_session.refresh(queued)
+    assert queued.cancel_requested_at is not None and queued.cancel_reason == "user_stop"
 
 
 @pytest.mark.parametrize("mutation", ["clear", "replace", "expire"])

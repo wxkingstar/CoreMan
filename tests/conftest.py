@@ -22,6 +22,8 @@ from coreman.core.db.session import make_engine, make_session_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESS_TABLES = [
+    "credential_requests",
+    "personal_credentials",
     "feishu_personal_grants",
     "wecom_personal_grants",
     "wecom_personal_bindings",

@@ -205,3 +205,40 @@ def test_malformed_or_anonymous_reply_clicks_are_dropped():
     raw["event"]["context"] = {"open_chat_id": "oc_group"}
     assert normalize_event(raw, **KW) is None
     assert normalize_event(_click_event(value), **{**KW, "app_id": "other"}) is None
+
+
+def _form_submit(task_id, form, *, event_id="ev_form"):
+    raw = _click_event({"task_id": task_id}, event_id=event_id)
+    raw["event"]["action"]["form_value"] = form
+    return raw
+
+
+def test_credential_form_is_sealed_before_persistence():
+    from coreman.core.crypto import Cipher
+    from coreman.core.personal_credentials.policy import sealed_aad
+
+    cipher = Cipher(b"\x07" * 32)
+    rid = uuid.uuid4()
+    raw = _form_submit(f"credential@{rid}", {"DEMO_PIN": "pin-778899"})
+    message = normalize_event(raw, cipher=cipher, **KW)
+    assert message is not None and message.kind == "card_action"
+    assert message.card_action["card_type"] == "credential"
+    assert "selected" not in message.card_action
+    assert message.raw["event"]["action"]["form_value"] == {}
+    assert "pin-778899" not in json.dumps(message.model_dump(mode="json"), ensure_ascii=False)
+    opened = cipher.decrypt(message.card_action["sealed"], sealed_aad(rid))
+    assert json.loads(opened) == {"DEMO_PIN": "pin-778899"}
+    # 只改落库副本，不动 SDK 交来的原始对象。
+    assert raw["event"]["action"]["form_value"] == {"DEMO_PIN": "pin-778899"}
+
+
+def test_credential_form_without_cipher_is_dropped():
+    raw = _form_submit(f"credential@{uuid.uuid4()}", {"DEMO_PIN": "pin-778899"})
+    assert normalize_event(raw, **KW) is None
+
+
+def test_malformed_credential_task_id_is_ignored():
+    from coreman.core.crypto import Cipher
+
+    raw = _form_submit("credential@not-a-uuid", {"DEMO_PIN": "x"})
+    assert normalize_event(raw, cipher=Cipher(b"\x07" * 32), **KW) is None

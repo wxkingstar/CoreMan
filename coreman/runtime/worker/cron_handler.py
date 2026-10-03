@@ -233,8 +233,22 @@ class CronRunHandler:
                     )
                     personal_prompt += CRON_POLICY
                     collaborating = True
+                personal_secrets: frozenset[str] = frozenset()
+                if asked is None:
+                    # 本人创建的定时任务算本人触发：注入执行人的个人凭证并下发索取令牌。
+                    from coreman.runtime.worker.chat import credentials
+
+                    personal_prompt, env, personal_secrets = await credentials.configure_cron(
+                        session,
+                        ctx,
+                        bot=bot,
+                        actor_id=actor.id,
+                        job_id=job.id,
+                        extra=personal_prompt,
+                        env=env,
+                    )
                 # 定时执行同样带着本人的业务系统令牌与个人工具凭据，出站闸门一视同仁。
-                ctx.secrets = collect_secrets(env)
+                ctx.secrets = collect_secrets(env) | personal_secrets
                 if asked is not None:
                     # 续跑的指令是开始执行时写好的 JSON：原任务、问题和同事答复。
                     prompt = run.prompt

@@ -31,6 +31,7 @@ from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.worker.chat.models import Verdict
 from tests.fakes.fake_relay import FakeRelay
+from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task, run
 from tests.integration.worker_helpers import MASTER, build_ctx, seed_bot
 
@@ -338,6 +339,40 @@ async def test_colleague_reply_resumes_origin_turn(db_session, db_engine):
         db_session, ctx, SimpleNamespace(), Verdict("success", "succeeded", None, None, "ok")
     )
     assert row.status == "completed"
+
+
+async def test_credential_resume_turn_can_ask_a_colleague_and_continues_after_the_reply(
+    db_session, db_engine
+):
+    from coreman.runtime.worker.chat.human_collaboration import resolve
+
+    bot, origin, helper, partner, task = await setup(db_session)
+    resume = await resume_task(db_session, task, origin)
+    row = await register(db_session, resume, origin, helper)
+    # 求助挂在续接轮上，但来源仍是提问人在群里的原始消息。
+    assert row.source_task_id == resume.id and row.origin_event_id == task.inbound_event_id
+    assert row.origin_user_id == origin.id and row.origin_chat_id == "group"
+    verdict, _ = await handoff(db_session, db_engine, resume, row)
+    assert verdict.log_status == "ask_user" and row.status == "waiting"
+    await tasks.finish(db_session, resume.id, status="succeeded")
+    await tasks.finish(db_session, task.id, status="succeeded")
+    await db_session.commit()
+    reply = await inbound_task(
+        db_session,
+        bot,
+        "口径=在库-锁定",
+        sender="expert-id",
+        chat_type="group",
+        chat_id="group",
+        parent="om_ask",
+    )
+    await run(db_engine, reply, FakeRelay("normal"))
+    await db_session.refresh(row)
+    assert (row.status, row.response) == ("resuming", "口径=在库-锁定")
+    resumed = await db_session.get(Task, row.resume_task_id)
+    assert resumed.session_key == "group" and resumed.user_id == origin.id
+    intake, _, _ = await resolve(db_session, build_ctx(db_engine, resumed))
+    assert intake.inbound.id == task.inbound_event_id and intake.speaker.user_id == origin.id
 
 
 async def test_other_people_quoting_the_ask_stay_ordinary_chat(db_session, db_engine):
