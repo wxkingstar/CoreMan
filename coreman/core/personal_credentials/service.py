@@ -7,21 +7,25 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.audit import record_audit
 from coreman.core.bus import outbox, tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
     CredentialRequest,
+    InboundEvent,
+    OutboxItem,
     PlatformApp,
     Task,
     User,
     UserIdentity,
     UserReached,
 )
-from coreman.core.personal_credentials import cards, policy
+from coreman.core.personal_credentials import cards, policy, store
 from coreman.core.personal_credentials.policy import Capability, CredentialError
 from coreman.core.timeutils import utcnow
 
@@ -211,3 +215,183 @@ async def open_request(
             payload={"markdown": cards.GROUP_NOTICE},
         )
     return Opened("form_sent", row.id)
+
+
+@dataclass(frozen=True)
+class Submitted:
+    status: Literal["saved", "duplicate", "expired", "invalid"]
+    message: str = ""
+    keys: tuple[str, ...] = ()
+
+
+async def submit(
+    session: AsyncSession,
+    cipher: Cipher,
+    request_id: uuid.UUID,
+    *,
+    actor_id: uuid.UUID,
+    values: Any,
+    limit: int = policy.MAX_VALUE,
+    now: datetime | None = None,
+) -> Submitted:
+    now = now or utcnow()
+    row = await session.get(
+        CredentialRequest, request_id, with_for_update=True, populate_existing=True
+    )
+    if row is None:
+        raise CredentialError("not_found", "表单不存在")
+    if row.user_id != actor_id:
+        raise CredentialError("forbidden", "只有发起人本人可以提交")
+    if row.status == "submitted":
+        return Submitted("duplicate", "已经提交过了，无需重复提交")
+    if row.status != "open":
+        return Submitted("expired", "表单已失效，请让 AI 员工重新发起")
+    if row.expires_at <= now:
+        await _close(session, row, "expired")
+        return Submitted("expired", "表单已过期，请让 AI 员工重新发起")
+    bot, user = await _owner(session, row.bot_id, row.user_id)
+    try:
+        cleaned = policy.clean_values(row.fields, values, limit=limit)
+    except CredentialError as exc:
+        return Submitted("invalid", exc.message)
+    keys = await store.save(
+        session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
+    )
+    row.status, row.submitted_at, row.updated_at = "submitted", now, now
+    await record_audit(
+        session,
+        action="personal_credential.saved",
+        actor_id=user.id,
+        actor_login=user.login_name,
+        target_type="bot",
+        target_id=str(bot.id),
+        diff={"keys": keys},
+    )
+    resumed = await _resume(session, row, bot, user)
+    if resumed:
+        tail = "AI 员工会继续之前的任务。"
+    else:
+        tail = "下次执行时生效。" if row.origin_kind == "cron" else "下次对话时生效。"
+    await _update_card(session, bot, row, cards.saved_card(row.id, keys, tail))
+    if bot.platform == "wecom" and not resumed:
+        await _say(session, bot, row, "saved", f"已保存 {'、'.join(keys)}，{tail}")
+    return Submitted("saved", tail, tuple(keys))
+
+
+async def _resume(session: AsyncSession, row: CredentialRequest, bot: Bot, user: User) -> bool:
+    if row.origin_kind != "chat" or not row.origin_session_key or row.origin_event_id is None:
+        return False
+    if await session.get(InboundEvent, row.origin_event_id) is None:
+        return False
+    identity = await _identity(session, user.id, bot.platform)
+    task = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=bot.id,
+            kind=RESUME_KIND,
+            user_id=user.id,
+            session_key=row.origin_session_key,
+            inbound_event_id=row.origin_event_id,
+            dedupe_key=f"credential-request:{row.id}:resume",
+            payload={
+                "credential_request_id": str(row.id),
+                # 来源那一轮可能还没结束：同一会话串行，等它收尾再续接。
+                "serialize_session": True,
+                "bot_key": bot.bot_key,
+                "platform_user_id": identity.platform_user_id if identity else "",
+            },
+        ),
+    )
+    if task is None:
+        return False
+    row.resume_task_id = task.id
+    return True
+
+
+async def _update_card(
+    session: AsyncSession, bot: Bot, row: CredentialRequest, card: dict[str, Any]
+) -> None:
+    """飞书表单卡换成结果卡；没发出去（没有消息 ID）就不动。"""
+    if bot.platform != "feishu" or row.request_outbox_id is None:
+        return
+    item = await session.get(OutboxItem, row.request_outbox_id)
+    mid = (item.payload or {}).get("_feishu_message_id") if item else None
+    if item is None or not mid:
+        return
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="card_update",
+        dedupe_key=f"credential-request:{row.id}:card:{row.status}",
+        target={
+            "message_id": mid,
+            "chat_id": item.target.get("chat_id"),
+            "task_id": policy.card_task_id(row.id),
+        },
+        payload={"card": card},
+    )
+
+
+async def _say(
+    session: AsyncSession, bot: Bot, row: CredentialRequest, tag: str, markdown: str
+) -> None:
+    if not row.delivery_chat_id:
+        return
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform=bot.platform,
+        kind="send",
+        dedupe_key=f"credential-request:{row.id}:{tag}",
+        target={"chat_id": row.delivery_chat_id},
+        payload={"markdown": markdown},
+    )
+
+
+async def _close(
+    session: AsyncSession, row: CredentialRequest, status: str, card: dict[str, Any] | None = None
+) -> None:
+    row.status, row.updated_at = status, utcnow()
+    bot = await session.get(Bot, row.bot_id)
+    if bot is not None:
+        await _update_card(session, bot, row, card or cards.expired_card(row.id))
+
+
+async def cancel(session: AsyncSession, request_id: uuid.UUID, message: str) -> None:
+    row = await session.get(
+        CredentialRequest, request_id, with_for_update=True, populate_existing=True
+    )
+    if row is not None and row.status == "open":
+        await _close(session, row, "cancelled", cards.failed_card(row.id, message))
+
+
+async def expire_due(session: AsyncSession, now: datetime) -> int:
+    rows = (
+        await session.scalars(
+            select(CredentialRequest)
+            .where(CredentialRequest.status == "open", CredentialRequest.expires_at < now)
+            .order_by(CredentialRequest.expires_at)
+            .limit(200)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    for row in rows:
+        await _close(session, row, "expired")
+    return len(rows)
+
+
+async def cleanup(session: AsyncSession, now: datetime, *, limit: int = 500) -> int:
+    doomed = (
+        select(CredentialRequest.id)
+        .where(CredentialRequest.status != "open", CredentialRequest.created_at < now - RETENTION)
+        .order_by(CredentialRequest.created_at)
+        .limit(limit)
+        .scalar_subquery()
+    )
+    result = await session.execute(
+        delete(CredentialRequest)
+        .where(CredentialRequest.id.in_(doomed))
+        .returning(CredentialRequest.id)
+    )
+    return len(result.all())
