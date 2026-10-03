@@ -1,14 +1,16 @@
 """发起索取：送达目标、去重、平台条件与令牌所在轮次。"""
 
+import asyncio
 import json
 import uuid
 from dataclasses import replace
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import CredentialRequest, OutboxItem, UserIdentity
+from coreman.core.db.session import make_session_factory
 from coreman.core.personal_credentials import service
 from coreman.core.personal_credentials.policy import CredentialError
 from tests.integration.credential_helpers import (
@@ -75,6 +77,44 @@ async def test_a_pending_form_is_reused_only_by_the_same_origin(db_session):
         await service.open_request(db_session, cipher, other_job, BODY, base_url=BASE)
     ).status == "form_sent"
     assert len((await db_session.scalars(select(CredentialRequest))).all()) == 4
+
+
+async def test_identical_requests_racing_each_other_create_one_form(db_session, db_engine):
+    bot, user, task, cipher = await owner(db_session)
+    cap = cap_for(bot, user, task)
+    factory = make_session_factory(db_engine)
+
+    async def ask():
+        async with factory() as session:
+            opened = await service.open_request(session, cipher, cap, BODY, base_url=BASE)
+            await session.commit()
+            return opened
+
+    first, second = await asyncio.gather(ask(), ask())
+    assert sorted([first.status, second.status]) == ["already_pending", "form_sent"]
+    assert first.request_id == second.request_id
+    assert len((await db_session.scalars(select(CredentialRequest))).all()) == 1
+    assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
+
+
+async def test_opening_waits_for_the_owner_lock_before_looking_for_a_pending_form(
+    db_session, db_engine
+):
+    bot, user, task, cipher = await owner(db_session)
+    factory = make_session_factory(db_engine)
+    lock = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+    async with factory() as holder:
+        await holder.execute(lock, {"key": f"credential-request:{bot.id}:{user.id}"})
+        opening = asyncio.create_task(
+            service.open_request(db_session, cipher, cap_for(bot, user, task), BODY, base_url=BASE)
+        )
+        try:
+            done, _ = await asyncio.wait({opening}, timeout=0.5)
+            assert not done
+        finally:
+            await holder.commit()
+    opened = await asyncio.wait_for(opening, 5)
+    assert opened.status == "form_sent"
 
 
 async def test_request_remembers_the_relay_session_that_asked(db_session):

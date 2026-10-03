@@ -355,3 +355,37 @@ async def test_a_stale_form_from_before_a_reset_does_not_resume_next_to_the_new_
     assert "下次对话时生效" in cards[f"om_{stale.id}"]
     assert "继续之前的任务" not in cards[f"om_{stale.id}"]
     assert "对话已重置" not in await _dump_everything(db_session)
+
+
+async def test_one_conversation_is_resumed_once_however_many_forms_it_has_open(
+    db_session, monkeypatch
+):
+    bot, user, task, cipher = await owner(db_session)
+    await seed_chat_session(db_session, bot, task)
+    cap = cap_for(bot, user, task)
+    main = await _waiting(db_session, cipher, cap)
+    # 同一对话同时发出的两张表单（并发或重试各发了一张）：绕过去重直接造出第二张。
+    with monkeypatch.context() as patched:
+        patched.setattr(service, "_same_origin", lambda row, cap: False)
+        twin = await _waiting(db_session, cipher, cap)
+    # 同一对话里另一张键被覆盖的表单。
+    narrower = await _waiting(db_session, cipher, cap, {**BODY, "fields": BODY["fields"][1:]})
+    assert len({main.id, twin.id, narrower.id}) == 3
+    result = await service.submit(db_session, cipher, main.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    assert result.status == "saved" and "AI 员工会继续之前的任务" in result.message
+    for row in (main, twin, narrower):
+        await db_session.refresh(row)
+        assert row.status == "submitted"
+    resumes = await _resumes(db_session)
+    assert list(resumes) == [str(main.id)] and main.resume_task_id == resumes[str(main.id)].id
+    assert twin.resume_task_id is None and narrower.resume_task_id is None
+    # 对话只续接一次，所以其余表单的结果卡也都说「会继续」。
+    cards = {
+        i.target["message_id"]: json.dumps(i.payload, ensure_ascii=False)
+        for i in (
+            await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+        )
+    }
+    assert set(cards) == {f"om_{main.id}", f"om_{twin.id}", f"om_{narrower.id}"}
+    assert all("AI 员工会继续之前的任务" in card for card in cards.values())

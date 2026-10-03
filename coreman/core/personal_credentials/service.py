@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.audit import record_audit
@@ -154,6 +154,11 @@ async def open_request(
     parsed = policy.parse_request(body)
     now = now or utcnow()
     keys = sorted(f.key for f in parsed.fields)
+    # 同一人同一员工的并发请求在这里排队：后到的等前一个提交，再看见它发出的表单并复用。
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"credential-request:{bot.id}:{user.id}"},
+    )
     pending = await session.scalars(
         select(CredentialRequest).where(
             CredentialRequest.bot_id == bot.id,
@@ -292,10 +297,11 @@ async def submit(
         target_id=str(bot.id),
         diff={"keys": keys},
     )
-    tail = await _settle(session, bot, user, row, keys, now)
+    resumed: set[tuple[str | None, uuid.UUID | None]] = set()
+    tail = await _settle(session, bot, user, row, keys, now, resumed)
     # 别的对话或定时任务也在等这些键：值已经保存，它们的表单不必再填，各自续接。
     for waiting in await _waiting(session, row, keys, now):
-        await _settle(session, bot, user, waiting, keys, now)
+        await _settle(session, bot, user, waiting, keys, now, resumed)
     return Submitted("saved", tail, tuple(keys))
 
 
@@ -326,16 +332,27 @@ async def _settle(
     row: CredentialRequest,
     keys: list[str],
     now: datetime,
+    resumed: set[tuple[str | None, uuid.UUID | None]],
 ) -> str:
-    """请求已被满足：标记已提交、续接来源对话、把卡片换成结果；返回结果卡与通知的结尾文字。"""
+    """请求已被满足：标记已提交、续接来源对话、把卡片换成结果；返回结果卡与通知的结尾文字。
+
+    `resumed` 记着这一次提交里已经排了续接的对话（会话键 + relay 会话）：一个对话只续接一次，
+    同一对话的其余表单照样标记已提交，卡片也说「会继续」，但不再排第二个任务。
+    """
     row.status, row.submitted_at, row.updated_at = "submitted", now, now
-    resumed = await _resume(session, row, bot, user)
-    if resumed:
+    conversation = (row.origin_session_key, row.origin_relay_session_id)
+    if conversation in resumed:
+        continuing = True
+    else:
+        continuing = await _resume(session, row, bot, user)
+        if continuing:
+            resumed.add(conversation)
+    if continuing:
         tail = "AI 员工会继续之前的任务。"
     else:
         tail = "下次执行时生效。" if row.origin_kind == "cron" else "下次对话时生效。"
     await _update_card(session, bot, row, cards.saved_card(row.id, keys, tail))
-    if bot.platform == "wecom" and not resumed:
+    if bot.platform == "wecom" and not continuing:
         await _say(session, bot, row, "saved", f"已保存 {'、'.join(keys)}，{tail}")
     return tail
 

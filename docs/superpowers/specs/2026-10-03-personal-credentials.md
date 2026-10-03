@@ -136,7 +136,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 结果 | 响应 |
 |---|---|
 | 已发出表单 | `202 {"status":"form_sent","request_id":"…"}` |
-| 同一用户在本 AI 员工下已有键集合完全相同、来源也相同（同一对话会话或同一定时任务）的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发；来源不同则另发一张表单，续接才能回到各自的来源 |
+| 同一用户在本 AI 员工下已有键集合完全相同、来源也相同（同一对话会话或同一定时任务）的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发；来源不同则另发一张表单，续接才能回到各自的来源。查重与创建在 `pg_advisory_xact_lock(hashtextextended("credential-request:{bot_id}:{user_id}", 0))` 之下完成（事务提交时释放），并发的相同请求排队，后到的看见先到的表单并复用（评审裁定 R29） |
 | 键名不合法 | `422`，逐个说明原因 |
 | 无法送达（企微未配置登录应用、定时任务来源且没有私聊记录等） | `409`，附原因，不创建请求 |
 | 请求体超过 64 KiB | `413`，不创建请求 |
@@ -218,7 +218,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 4. 逐个字段加密，按 `(bot_id, user_id, env_key)` 插入或覆盖 `personal_credentials`。
 5. 请求置为 `submitted`，写入审计日志（只记键名）。
 6. 续接（第 7.4 节）。
-7. 结算其他在等的请求：锁住（`FOR UPDATE SKIP LOCKED`）同一用户、同一 AI 员工下键全部被刚保存的键覆盖的其他 `open`、未过期请求，各自走第 5–6 步的状态、续接和卡片更新，不再写值，也不再记审计。
+7. 结算其他在等的请求：锁住（`FOR UPDATE SKIP LOCKED`）同一用户、同一 AI 员工下键全部被刚保存的键覆盖的其他 `open`、未过期请求，各自走第 5–6 步的状态、续接和卡片更新，不再写值，也不再记审计。同一个对话（`origin_session_key` 与 `origin_relay_session_id` 都相同）在这一次提交里只排一个续接任务，其余请求照常标记已提交、卡片也写「会继续」，不再排第二个（评审裁定 R29）。
 
 ### 7.4 续接
 
