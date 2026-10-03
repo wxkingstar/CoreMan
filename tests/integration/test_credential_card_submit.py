@@ -3,6 +3,7 @@
 import json
 import uuid
 
+import pytest
 from sqlalchemy import select
 
 from coreman.core.bus import tasks
@@ -114,4 +115,35 @@ async def test_invalid_values_cancel_the_request(db_session, db_engine):
     assert row.status == "cancelled"
     card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "card_update"))
     assert "提交未成功" in json.dumps(card.payload, ensure_ascii=False)
+    assert not await _sealed_left(db_session, ev, click)
+
+
+@pytest.mark.parametrize("denial", ["unsent", "other_message"])
+async def test_forged_click_is_ignored_and_copy_is_still_wiped(db_session, db_engine, denial):
+    bot, user, cipher, row = await _prepared(db_session)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    if denial == "unsent":
+        item.status = "pending"
+    else:
+        item.payload = {**item.payload, "_feishu_message_id": "om_other"}
+    await db_session.commit()
+    ev, click = await _click(db_session, cipher, bot, row.id, VALUES)
+    await CardActionHandler().run(build_ctx(db_engine, click))
+    await db_session.refresh(row)
+    assert row.status == "open"
+    done = await db_session.get(Task, click.id, populate_existing=True)
+    assert done.result == {"card": "ignored"}
+    assert not await _sealed_left(db_session, ev, click)
+
+
+async def test_disabled_bot_cancels_the_click_and_copy_is_still_wiped(db_session, db_engine):
+    bot, user, cipher, row = await _prepared(db_session)
+    bot.enabled = False
+    await db_session.commit()
+    ev, click = await _click(db_session, cipher, bot, row.id, VALUES)
+    await CardActionHandler().run(build_ctx(db_engine, click))
+    await db_session.refresh(row)
+    assert row.status == "open"
+    done = await db_session.get(Task, click.id, populate_existing=True)
+    assert done.status == "cancelled" and done.error_code == "bot_disabled"
     assert not await _sealed_left(db_session, ev, click)

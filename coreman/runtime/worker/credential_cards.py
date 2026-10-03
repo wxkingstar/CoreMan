@@ -21,18 +21,20 @@ from coreman.runtime.worker.context import TaskContext
 _ERRORS = {"forbidden": "not_owner", "not_found": "ignored"}
 
 
-async def wipe(session: AsyncSession, task_id: int, event_id: int) -> None:
+async def wipe(session: AsyncSession, task_id: int, event_id: int | None) -> None:
     """封存副本用完即删：任务与入站事件按 90 天保留，不留这份密文。"""
     await session.execute(
         text("UPDATE tasks SET payload = payload #- '{card_action,sealed}' WHERE id = :id"),
         {"id": task_id},
     )
-    await session.execute(
-        text(
-            "UPDATE inbound_events SET payload = payload #- '{card_action,sealed}' WHERE id = :id"
-        ),
-        {"id": event_id},
-    )
+    if event_id is not None:
+        await session.execute(
+            text(
+                "UPDATE inbound_events SET payload = payload #- '{card_action,sealed}' "
+                "WHERE id = :id"
+            ),
+            {"id": event_id},
+        )
 
 
 async def _submit(

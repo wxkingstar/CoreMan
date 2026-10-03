@@ -32,6 +32,8 @@ from coreman.core.wecom.cards import (
 )
 from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
+from coreman.runtime.worker.credential_cards import handle as handle_credential
+from coreman.runtime.worker.credential_cards import wipe as wipe_credential
 from coreman.runtime.worker.replies import load_inbound
 
 _DIGITS = re.compile(r"[0-9]+")
@@ -57,10 +59,14 @@ class CardActionHandler:
 
     async def run(self, ctx: TaskContext) -> None:
         action: dict[str, Any] = dict(ctx.task.payload.get("card_action") or {})
+        # 带封存值的表单卡：无论从哪个出口退出，封存副本都要擦掉。
+        credential = str(action.get("task_id") or "").startswith(CARD_PREFIX)
         async with ctx.session_factory() as session:
             bot = await session.get(Bot, ctx.task.bot_id)
             if bot is None or not bot.enabled:
                 ctx.log.warning("bot_disabled")
+                if credential:
+                    await wipe_credential(session, ctx.task.id, ctx.task.inbound_event_id)
                 await tasks.finish(
                     session, ctx.task.id, status="cancelled", error_code="bot_disabled"
                 )
@@ -81,14 +87,14 @@ class CardActionHandler:
                     )
                 )
                 if sent is None:
+                    if credential:
+                        await wipe_credential(session, ctx.task.id, inbound.id)
                     await tasks.finish(
                         session, ctx.task.id, status="succeeded", result={"card": "ignored"}
                     )
                     await session.commit()
                     return
-            if bot.platform == "feishu" and task_id.startswith(CARD_PREFIX):
-                from coreman.runtime.worker.credential_cards import handle as handle_credential
-
+            if bot.platform == "feishu" and credential:
                 result = await handle_credential(session, ctx, bot, inbound, action)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}
