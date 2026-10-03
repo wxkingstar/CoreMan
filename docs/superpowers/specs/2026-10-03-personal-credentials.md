@@ -135,7 +135,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 | 结果 | 响应 |
 |---|---|
 | 已发出表单 | `202 {"status":"form_sent","request_id":"…"}` |
-| 同一用户在本 AI 员工下已有键集合完全相同的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发 |
+| 同一用户在本 AI 员工下已有键集合完全相同、来源也相同（同一对话会话或同一定时任务）的 `open` 请求 | `200 {"status":"already_pending","request_id":"…"}`，不重复发；来源不同则另发一张表单，续接才能回到各自的来源 |
 | 键名不合法 | `422`，逐个说明原因 |
 | 无法送达（企微未配置登录应用、定时任务来源且没有私聊记录等） | `409`，附原因，不创建请求 |
 | 请求体超过 64 KiB | `413`，不创建请求 |
@@ -217,6 +217,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
 4. 逐个字段加密，按 `(bot_id, user_id, env_key)` 插入或覆盖 `personal_credentials`。
 5. 请求置为 `submitted`，写入审计日志（只记键名）。
 6. 续接（第 7.4 节）。
+7. 结算其他在等的请求：锁住（`FOR UPDATE SKIP LOCKED`）同一用户、同一 AI 员工下键全部被刚保存的键覆盖的其他 `open`、未过期请求，各自走第 5–6 步的状态、续接和卡片更新，不再写值，也不再记审计。
 
 ### 7.4 续接
 
@@ -227,6 +228,7 @@ Authorization: Bearer $COREMAN_CREDENTIAL_TOKEN
   - 用户消息是系统生成的固定文本：「[CoreMan] 用户已通过安全表单提交 DEMO_USERNAME、DEMO_PASSWORD，已作为环境变量注入本轮，值不会出现在对话中。请继续完成之前的任务。」
 - **开轮守卫**：在 `_resolve` 里加锁检查，请求必须是 `submitted` 且 `resume_task_id` 等于本任务，发起人仍为 active 并在白名单内；不满足时结束任务，只发「已保存，下次对话生效」。AI 员工已停用时 `submit()` 不排续接任务。
 - **来源是定时任务**：不续接，只私信「已保存，下次执行时生效」。
+- **一次填写，所有在等的都续接**：被 7.3 第 7 步结算的请求各自按来源续接，所以两个对话会话在等同一组键时，填一张表单两边都会继续。
 
 ## 8. 注入
 

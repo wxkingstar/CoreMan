@@ -126,6 +126,13 @@ def _target(chat_id: str, user_id: uuid.UUID, recipient: UserIdentity | None) ->
     return target
 
 
+def _same_origin(row: CredentialRequest, cap: Capability) -> bool:
+    """只有同一个对话会话、或同一个定时任务，才能复用已发出的表单：续接要回到各自的来源。"""
+    if cap.origin_kind == "cron":
+        return row.origin_kind == "cron" and row.cron_job_id == cap.cron_job_id
+    return row.origin_kind == "chat" and row.origin_session_key == cap.session_key
+
+
 async def open_request(
     session: AsyncSession,
     cipher: Cipher,
@@ -148,7 +155,7 @@ async def open_request(
         )
     )
     for existing in pending:
-        if sorted(str(f["key"]) for f in existing.fields) == keys:
+        if sorted(str(f["key"]) for f in existing.fields) == keys and _same_origin(existing, cap):
             return Opened("already_pending", existing.id)
     reached = await session.get(UserReached, (bot.id, user.id), populate_existing=True)
     identity = await _identity(session, user.id, bot.platform)
@@ -267,7 +274,6 @@ async def submit(
     keys = await store.save(
         session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
     )
-    row.status, row.submitted_at, row.updated_at = "submitted", now, now
     await record_audit(
         session,
         action="personal_credential.saved",
@@ -277,6 +283,43 @@ async def submit(
         target_id=str(bot.id),
         diff={"keys": keys},
     )
+    tail = await _settle(session, bot, user, row, keys, now)
+    # 别的对话或定时任务也在等这些键：值已经保存，它们的表单不必再填，各自续接。
+    for waiting in await _waiting(session, row, keys, now):
+        await _settle(session, bot, user, waiting, keys, now)
+    return Submitted("saved", tail, tuple(keys))
+
+
+async def _waiting(
+    session: AsyncSession, row: CredentialRequest, keys: list[str], now: datetime
+) -> list[CredentialRequest]:
+    """同一用户、同一 AI 员工下，键全部被刚保存的值覆盖的其他未过期请求。"""
+    found = await session.scalars(
+        select(CredentialRequest)
+        .where(
+            CredentialRequest.bot_id == row.bot_id,
+            CredentialRequest.user_id == row.user_id,
+            CredentialRequest.id != row.id,
+            CredentialRequest.status == "open",
+            CredentialRequest.expires_at > now,
+        )
+        .order_by(CredentialRequest.created_at)
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    return [r for r in found if {str(f["key"]) for f in r.fields} <= set(keys)]
+
+
+async def _settle(
+    session: AsyncSession,
+    bot: Bot,
+    user: User,
+    row: CredentialRequest,
+    keys: list[str],
+    now: datetime,
+) -> str:
+    """请求已被满足：标记已提交、续接来源对话、把卡片换成结果；返回结果卡与通知的结尾文字。"""
+    row.status, row.submitted_at, row.updated_at = "submitted", now, now
     resumed = await _resume(session, row, bot, user)
     if resumed:
         tail = "AI 员工会继续之前的任务。"
@@ -285,7 +328,7 @@ async def submit(
     await _update_card(session, bot, row, cards.saved_card(row.id, keys, tail))
     if bot.platform == "wecom" and not resumed:
         await _say(session, bot, row, "saved", f"已保存 {'、'.join(keys)}，{tail}")
-    return Submitted("saved", tail, tuple(keys))
+    return tail
 
 
 async def _resume(session: AsyncSession, row: CredentialRequest, bot: Bot, user: User) -> bool:

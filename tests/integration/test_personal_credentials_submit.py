@@ -1,6 +1,7 @@
 """提交：本人、状态、值校验、加密写入、审计、续接与卡片更新；以及取消、过期、清理。"""
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -18,6 +19,7 @@ from coreman.core.personal_credentials import service, store
 from coreman.core.personal_credentials.policy import CredentialError
 from coreman.core.timeutils import utcnow
 from tests.integration.credential_helpers import BODY, VALUES, cap_for, cron_cap, login_app, owner
+from tests.integration.test_chat_handler import chat_task
 
 BASE = "https://coreman.example.com"
 
@@ -175,3 +177,94 @@ async def test_saved_notice_is_bare_when_delivery_chat_is_no_longer_the_private_
         )
     )
     assert said.target == {"chat_id": "oc_private"}
+
+
+async def _waiting(session, cipher, cap, body=BODY):
+    """发一张表单，并让它的飞书卡片带上消息 ID（提交时才会换成结果卡）。"""
+    opened = await service.open_request(session, cipher, cap, body, base_url=BASE)
+    row = await session.get(CredentialRequest, opened.request_id)
+    item = await session.get(OutboxItem, row.request_outbox_id)
+    item.status = "sent"
+    item.payload = {**item.payload, "_feishu_message_id": f"om_{row.id}"}
+    await session.commit()
+    return row
+
+
+async def _resumes(session) -> dict[str, Task]:
+    found = await session.scalars(select(Task).where(Task.kind == "credential_resume"))
+    return {t.payload["credential_request_id"]: t for t in found}
+
+
+async def test_filling_a_cron_form_also_settles_the_chat_form_waiting_on_the_same_keys(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    cron = await _waiting(db_session, cipher, cron_cap(bot, user, task))
+    chat = await _waiting(db_session, cipher, cap_for(bot, user, task))
+    assert cron.id != chat.id
+    result = await service.submit(db_session, cipher, cron.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    assert result.status == "saved" and "下次执行时生效" in result.message
+    await db_session.refresh(cron)
+    await db_session.refresh(chat)
+    assert (cron.status, chat.status) == ("submitted", "submitted")
+    assert chat.submitted_at is not None and cron.resume_task_id is None
+    resumes = await _resumes(db_session)
+    assert list(resumes) == [str(chat.id)] and chat.resume_task_id == resumes[str(chat.id)].id
+    assert resumes[str(chat.id)].session_key == task.session_key
+    cards = {
+        i.target["message_id"]: json.dumps(i.payload, ensure_ascii=False)
+        for i in (
+            await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+        )
+    }
+    assert set(cards) == {f"om_{cron.id}", f"om_{chat.id}"}
+    assert "AI 员工会继续之前的任务" in cards[f"om_{chat.id}"]
+    assert "下次执行时生效" in cards[f"om_{cron.id}"]
+    # 值只写一次，也只记一条审计。
+    audits = await db_session.scalars(
+        select(AuditLog).where(AuditLog.action == "personal_credential.saved")
+    )
+    assert len(audits.all()) == 1
+    assert "pin-778899" not in await _dump_everything(db_session)
+
+
+async def test_filling_one_form_resumes_every_chat_session_waiting_on_the_keys(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    group_task = await chat_task(
+        db_session, bot, "再查一下", sender="owner_pid", chat_type="group", chat_id="oc_group"
+    )
+    first = await _waiting(db_session, cipher, cap_for(bot, user, task))
+    second = await _waiting(db_session, cipher, cap_for(bot, user, group_task))
+    assert first.id != second.id
+    await service.submit(db_session, cipher, first.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    await db_session.refresh(second)
+    assert second.status == "submitted"
+    resumes = await _resumes(db_session)
+    assert set(resumes) == {str(first.id), str(second.id)}
+    assert resumes[str(first.id)].session_key == task.session_key
+    assert resumes[str(second.id)].session_key == group_task.session_key
+    assert resumes[str(second.id)].inbound_event_id == group_task.inbound_event_id
+    # 已经结算的那张表单之后再填，只会得到「已提交」。
+    again = await service.submit(db_session, cipher, second.id, actor_id=user.id, values=VALUES)
+    assert again.status == "duplicate"
+
+
+async def test_only_unexpired_forms_whose_keys_are_all_covered_are_settled(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    chat = cap_for(bot, user, task)
+    wider = {
+        **BODY,
+        "fields": [*BODY["fields"], {"key": "DEMO_EXTRA", "label": "额外", "secret": True}],
+    }
+    main = await _waiting(db_session, cipher, chat)
+    extra_key = await _waiting(db_session, cipher, replace(chat, session_key="oc_a"), wider)
+    stale = await _waiting(db_session, cipher, replace(chat, session_key="oc_b"))
+    stale.expires_at = utcnow() - timedelta(minutes=1)
+    await db_session.commit()
+    await service.submit(db_session, cipher, main.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    await db_session.refresh(extra_key)
+    await db_session.refresh(stale)
+    assert (extra_key.status, stale.status) == ("open", "open")
+    assert extra_key.resume_task_id is None and stale.resume_task_id is None
+    assert list(await _resumes(db_session)) == [str(main.id)]

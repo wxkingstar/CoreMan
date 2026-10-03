@@ -1,6 +1,8 @@
 """发起索取：送达目标、去重、平台条件与令牌所在轮次。"""
 
 import json
+import uuid
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import delete, select
@@ -40,12 +42,40 @@ async def test_feishu_private_form_is_validated_dm_and_deduplicated(db_session):
     assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
 
 
+async def test_a_pending_form_is_reused_only_by_the_same_origin(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    cron = cron_cap(bot, user, task)
+    chat = cap_for(bot, user, task)
+    other_chat = replace(chat, session_key="oc_other")
+    opened = [
+        await service.open_request(db_session, cipher, cap, BODY, base_url=BASE)
+        for cap in (cron, chat, other_chat)
+    ]
+    # 同一个来源再来一次才复用：定时任务按任务，对话按会话。
+    again = [
+        await service.open_request(db_session, cipher, cap, BODY, base_url=BASE)
+        for cap in (cron, chat, other_chat)
+    ]
+    await db_session.commit()
+    assert [o.status for o in opened] == ["form_sent"] * 3
+    assert len({o.request_id for o in opened}) == 3
+    assert [(a.status, a.request_id) for a in again] == [
+        ("already_pending", o.request_id) for o in opened
+    ]
+    # 另一个定时任务也是另一个来源。
+    other_job = replace(cron, cron_job_id=uuid.uuid4())
+    assert (
+        await service.open_request(db_session, cipher, other_job, BODY, base_url=BASE)
+    ).status == "form_sent"
+    assert len((await db_session.scalars(select(CredentialRequest))).all()) == 4
+
+
 async def test_dm_record_without_platform_identity_is_not_a_private_delivery(db_session):
     bot, user, task, cipher = await owner(db_session)
     cap = cap_for(bot, user, task)
     await db_session.execute(delete(UserIdentity).where(UserIdentity.user_id == user.id))
     await db_session.commit()
-    # 定时任务只能靠私聊送达，没有本人身份就送不了（先测它：成功发起后同字段请求会被去重）。
+    # 定时任务只能靠私聊送达，没有本人身份就送不了。
     with pytest.raises(CredentialError) as exc:
         await service.open_request(
             db_session, cipher, cron_cap(bot, user, task), BODY, base_url=BASE
