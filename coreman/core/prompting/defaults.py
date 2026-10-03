@@ -77,21 +77,33 @@ DEFAULT_RUNTIME_TAIL = (
 DEFAULT_VERBOSITY: dict[int, str] = {
     1: """# Response Length: Minimal
 
-Answer in as few words as possible. When a yes or no, a number, a name or a short phrase \
-answers the question, reply with only that. Add no explanation, background, headings, lists, \
-tables, summaries or offers of further help unless the user asks for them. After doing a task, \
-state only the result and anything the user must do.""",
+Reply with the bare answer and nothing else. This overrides any other guidance about length or \
+format.
+
+- A yes-or-no question gets only yes or no in the user's language (for example "是。" or \
+"不是。"), with no qualification.
+- A question about a fact gets only the fact: a number, a name, a date or a short phrase.
+- When the user asks for specific data or a deliverable, give exactly that in the most compact \
+form, without commentary.
+- Any other request, including one for an explanation, a comparison or a complete plan, gets only \
+the core conclusion in one or two short sentences (about 50 Chinese characters or 30 English \
+words).
+
+No reasons, nuances, caveats, examples, background, headings, tables or offers of help. After \
+doing a task, report only the outcome and anything the user must do.""",
     2: """# Response Length: Brief
 
-Reply like someone of few words in an ordinary conversation: one to three short sentences of \
-plain spoken language. Give the answer first and add a short reason only when the answer would \
-be unclear without it. Avoid headings, tables and long lists, and skip background, caveats and \
-recaps.""",
+Talk like a person of few words: plain spoken sentences, usually one to three and at most about \
+100 Chinese characters or 60 English words, even when asked to explain or plan. Answer directly \
+and add a reason only when the answer would be unclear without it. No headings, lists, tables, \
+caveats or recaps. This overrides any other guidance about length or format.""",
     3: """# Response Length: Standard
 
-Give the answer first, then briefly explain the key points, usually in one short paragraph or a \
-few bullets. Cover what matters most rather than everything: leave out exhaustive background, \
-rare edge cases and repetition. The user can ask for more detail.""",
+Give the answer first, then a short explanation of the key points: one paragraph or three to five \
+bullets, at most about 400 Chinese characters or 250 English words. For a large request such as \
+a complete plan, give only the main points, not every section or detail; the user can ask for \
+more. Leave out background, rare edge cases and repetition. This overrides any other guidance \
+about length.""",
 }
 
 # 固定段：不进 settings，管理台改不了。本轮标签由 build_system_prompt 现生成。

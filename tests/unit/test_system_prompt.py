@@ -61,8 +61,8 @@ def test_claude_order_known_speaker() -> None:
     # 标签规则段必须排在安全策略之后、发言者之前，且它本身不可由管理台文案覆盖。
     assert out.index(IDENTITY_TAG_RULE.format(tag=tag[1])) < out.index("## 当前发言者")
     assert DEFAULT_CODEX_CONTRACT not in out and SPEAKER_CHANGED_LINE not in out
-    # 输出详细度两个后端一样走 system prompt，夹在发言者与机器人提示词之间。
-    assert out.index("## 当前发言者") < out.index(DEFAULT_VERBOSITY[3]) < out.index("你是销售")
+    # 输出详细度两个后端一样走 system prompt，排在机器人提示词之后、结尾重申之前。
+    assert out.index("你是销售") < out.index(DEFAULT_VERBOSITY[3]) < out.index(DEFAULT_RUNTIME_TAIL)
 
 
 def test_detailed_level_adds_no_length_section() -> None:

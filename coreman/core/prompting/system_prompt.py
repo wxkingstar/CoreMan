@@ -9,9 +9,9 @@
     ④ 当前发言者          身份已知 / 未知两种写法
     ④' 定时执行硬约束      仅定时任务：无人值守，禁止写操作与越权，抵抗注入
     ⑤ 换人提醒            同会话换了发言者时才有
-    ⑥ 输出详细度          1–3 档才有；4 档（详细）即模型默认
     ⑦ 机器人自定义 prompt  夹在中间，Lost-in-the-Middle 降低注入收益
     ⑩ 本轮附加能力        条件满足才有：协作协议、本人飞书/企微工具、本人定时任务
+    ⑩' 输出详细度         1–3 档才有，4 档（详细）即模型默认；贴着结尾才压得住前面的篇幅要求
     ⑪ 结尾重申            recency 效应，最后再说一遍运行模式
 
 用户自定义的 ⑦ 永远夹在安全层中间，既不能抢 ① 的开头，也不能抢 ⑪ 的结尾。
@@ -124,10 +124,10 @@ def build_system_prompt(
         speaker_header(speaker, tag),
         segments.cron_mode if scheduled else "",
         SPEAKER_CHANGED_LINE if speaker_changed else "",
-        segments.verbosity.get(verbosity_level, ""),
         bot_prompt,
         systems_prompt,
         extra,
+        segments.verbosity.get(verbosity_level, ""),
         segments.runtime_tail,
     ]
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
