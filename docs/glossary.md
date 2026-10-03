@@ -129,5 +129,8 @@ CoreMan 不使用额外的消息中间件，进程之间只通过 PostgreSQL 表
 **请求级环境变量（request-level env）**
 ：每轮对话按发言者重新计算的变量，如 `COREMAN_BOT_KEY`、`COREMAN_PLATFORM`、`COREMAN_CHAT_ID`、`COREMAN_PLATFORM_USER_ID`、`COREMAN_USER_LOGIN`。它们覆盖 AI 员工配置中的同名变量，身份未知时不下发身份类变量。
 
+**个人凭证（personal credential）**
+：AI 员工经安全表单向本人索取的账号、密码或 API Key，按（AI 员工, 用户）逐条加密保存（AAD 绑定行身份），只在本人触发的轮次（本人私聊、群聊中本人 @、本人创建的定时任务、提交后的续接轮）作为环境变量注入。提交不经过聊天；任何接口都不返回密文字段的值。见 [个人凭证](features/personal-credentials.md)。
+
 **API 调用方（API client）**
 ：外部系统调用基础设施 API 使用的标识与密钥，按接口组（scope）授权，请求需签名。
