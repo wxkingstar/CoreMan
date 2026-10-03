@@ -40,7 +40,9 @@ async def save(
     fields: list[dict[str, Any]],
     values: dict[str, str],
 ) -> list[str]:
-    for spec in fields:
+    # 按键名排序再写：同一个人同一个员工的两张表单键集可以交叠且顺序不同，
+    # 并发提交必须以同一顺序取行锁，否则 [A, B] 与 [B, A] 会互相死锁。
+    for spec in sorted(fields, key=lambda f: str(f["key"])):
         key = str(spec["key"])
         enc = cipher.encrypt(values[key], value_aad(bot_id, user_id, key))
         label, secret = str(spec.get("label") or ""), bool(spec.get("secret", True))

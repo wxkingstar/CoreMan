@@ -55,6 +55,28 @@ async def test_save_encrypts_each_value_and_overwrites(db_session):
     assert found.secret_values == frozenset({"pin-000111"})
 
 
+async def test_save_upserts_in_key_order_so_concurrent_forms_cannot_deadlock(
+    db_session, monkeypatch
+):
+    bot, user = await _owner(db_session)
+    written: list[str] = []
+    execute = db_session.execute
+
+    async def recording_execute(stmt, *args, **kwargs):
+        written.append(stmt.compile().params["env_key"])
+        return await execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", recording_execute)
+    # 两张表单字段顺序相反时，行锁必须按同一顺序取，否则并发提交会互相等对方的行锁。
+    forward, backward = FIELDS[::-1], FIELDS
+    values = {"DEMO_USERNAME": "alice", "DEMO_PIN": "pin-778899"}
+    for fields in (forward, backward):
+        await store.save(
+            db_session, CIPHER, bot_id=bot.id, user_id=user.id, fields=fields, values=values
+        )
+    assert written == ["DEMO_PIN", "DEMO_USERNAME"] * 2
+
+
 async def test_injection_is_scoped_and_skips_bad_rows(db_session):
     bot, user = await _owner(db_session)
     other = User(login_name="other", display_name="别人", source="sync")
