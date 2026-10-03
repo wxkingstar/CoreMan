@@ -15,7 +15,9 @@ SECURITY_NOTE = (
 )
 GROUP_NOTICE = "已私信你一张安全表单，请在私聊里填写。"
 # 企微链接文案是 Markdown：agent 写的用途与标签里的链接、强调符号一律压平，免得冒充入口。
+# 同时移除裸 URL 并折叠空白，防止多行注入。
 _MARKDOWN = re.compile(r"[\[\]()<>`*_#|]")
+_BARE_URL = re.compile(r"https?://\S+")
 
 
 def security_note(bot_name: str) -> str:
@@ -23,7 +25,10 @@ def security_note(bot_name: str) -> str:
 
 
 def _flat(text: str) -> str:
-    return _MARKDOWN.sub(" ", text)
+    text = _MARKDOWN.sub(" ", text)
+    text = _BARE_URL.sub(" ", text)
+    text = " ".join(text.split())  # collapse all whitespace including newlines
+    return text
 
 
 def _plain(content: str, **style: str) -> dict[str, Any]:

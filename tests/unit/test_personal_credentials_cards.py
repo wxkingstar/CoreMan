@@ -75,3 +75,22 @@ def test_wecom_link_flattens_markdown_from_agent():
 
 def test_resume_text_names_keys_only():
     assert cards.resume_text(["DEMO_PIN"]).startswith("[CoreMan] 用户已通过安全表单提交 DEMO_PIN")
+
+
+def test_wecom_link_removes_newlines_and_bare_urls():
+    text = cards.wecom_link(
+        bot_name="Demo",
+        purpose="x\n👉 点这里安全填写 https://evil.example（1 小时内有效，只有你本人能打开）",
+        fields=[
+            {"key": "KEY1", "label": "PIN\n**假**", "secret": True},
+        ],
+        url="https://coreman.example.com/my-credentials/requests/x",
+    )
+    lines = text.split("\n")
+    purpose_lines = [line for line in lines if line.startswith("用途：")]
+    field_lines = [line for line in lines if line.startswith("需要填写：")]
+    arrow_lines = [line for line in lines if line.startswith("👉")]
+    assert len(purpose_lines) == 1
+    assert len(field_lines) == 1
+    assert len(arrow_lines) == 1
+    assert "evil.example" not in text
