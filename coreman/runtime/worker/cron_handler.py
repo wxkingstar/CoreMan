@@ -47,12 +47,13 @@ from coreman.core.prompting import (
     load_segments,
     sanitize_user_input,
 )
-from coreman.core.prompting.rich_cards import with_rich_cards
+from coreman.core.prompting.rich_cards import with_reply_images, with_rich_cards
 from coreman.core.relay.client import ChatRequest, IncompleteResultError, RelayError
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
+    ImageDelta,
     RelayErrorEvent,
     SseEvent,
     TextDelta,
@@ -63,6 +64,7 @@ from coreman.core.relay.sse import (
 from coreman.core.timeutils import utcnow
 from coreman.core.wecom_personal import policy as wecom_policy
 from coreman.runtime.worker.chat.personal import feishu_guidance
+from coreman.runtime.worker.chat.reply_images import ReplyImages
 from coreman.runtime.worker.chat.wecom_personal import guidance as wecom_guidance
 from coreman.runtime.worker.context import TaskContext
 
@@ -279,7 +281,11 @@ class CronRunHandler:
                             or ""
                         ),
                         scheduled=True,
-                        extra=with_rich_cards(personal_prompt, bot.platform, bot.rich_cards),
+                        extra=with_reply_images(
+                            with_rich_cards(personal_prompt, bot.platform, bot.rich_cards),
+                            bot.platform,
+                            backend,
+                        ),
                     ),
                 )
                 # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。
@@ -304,7 +310,7 @@ class CronRunHandler:
             client = ctx.relay_client_factory(relay)
             gen = client.chat_stream(request, total_timeout=float(bot.sse_timeout_seconds))
             stop = asyncio.create_task(ctx.cancel_event.wait())
-            consume = asyncio.create_task(self._consume(ctx, gen))
+            consume = asyncio.create_task(self._consume(ctx, gen, bot))
             # 登记求助后由平台断流，不依赖模型自己停下，也不让它继续消耗。
             handoff = asyncio.create_task(
                 self._handoff(ctx) if collaborating else asyncio.Event().wait()
@@ -461,7 +467,7 @@ class CronRunHandler:
                     return
 
     async def _consume(
-        self, ctx: TaskContext, gen: AsyncGenerator[SseEvent, None]
+        self, ctx: TaskContext, gen: AsyncGenerator[SseEvent, None], bot: Bot
     ) -> tuple[str, UsageEvent | None, list[str], bool]:
         """收完整条流再判定；返回 (正文, 用量, 工具, 是否截断过)。
 
@@ -480,6 +486,7 @@ class CronRunHandler:
         finished = False
         tools: list[str] = []
         after_tool = False
+        images = ReplyImages(bot, ctx.cipher)
         try:
             async for event in gen:
                 if isinstance(event, AskUserQuestionEvent):
@@ -496,8 +503,12 @@ class CronRunHandler:
                     finished = event.reason in ("stop", "end_turn", "completed")
                     continue
                 events += 1
-                if isinstance(event, TextDelta):
-                    text = event.text
+                if isinstance(event, TextDelta | ImageDelta):
+                    text = (
+                        event.text
+                        if isinstance(event, TextDelta)
+                        else await images.markdown(event, "".join(parts))
+                    )
                     if after_tool:
                         # 与对话链路一致：工具前后的两条 assistant 消息之间空一行。
                         text, after_tool = paragraph_gap("".join(parts), text) + text, False
@@ -517,6 +528,8 @@ class CronRunHandler:
             if not errors and not isinstance(exc, IncompleteResultError):
                 raise
             finished = False
+        finally:
+            await images.aclose()
         # 模型产出在这唯一一处成形，之后分头走推送、cron_runs.reply 与 chat_logs：
         # 在这里过出站闸门，三条路就都干净了（对话链路的对应位置是 chat/classify）。
         reply = ctx.redact("".join(parts).strip()) or ""

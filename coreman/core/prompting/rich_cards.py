@@ -84,3 +84,19 @@ def with_rich_cards(extra: str, platform: str, enabled: bool) -> str:
     if not segment:
         return extra
     return f"{extra}\n\n{segment}" if extra.strip() else segment
+
+
+# 只有 codex 驱动会把图片随流带回来（生图产物、正文里链接的本地图片），见 relay-codex/images.go。
+REPLY_IMAGES_PROMPT = """# Images in Your Reply
+
+Images you create with the image generation tool are attached to your reply automatically, \
+after your text; never say you cannot deliver them and never paste their file paths. To show \
+another image file from your working directory, put `![short caption](relative/path.png)` on \
+its own line; it is replaced by the image itself."""
+
+
+def with_reply_images(extra: str, platform: str, backend: str) -> str:
+    """飞书机器人走 codex 时，把回复图片的说明段接在附加能力后面。"""
+    if platform != "feishu" or backend != "codex":
+        return extra
+    return f"{extra}\n\n{REPLY_IMAGES_PROMPT}" if extra.strip() else REPLY_IMAGES_PROMPT

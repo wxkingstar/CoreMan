@@ -7,6 +7,8 @@ relay 只发 `: 注释` 与 `data: <json>` 两种帧，以 `data: [DONE]` 收尾
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +29,16 @@ class ThinkingDelta:
     """一段思考过程增量。"""
 
     text: str
+
+
+@dataclass(frozen=True)
+class ImageDelta:
+    """一张要给用户看的图片（relay 扩展字段 `delta.images`，按在正文里的位置出现）。"""
+
+    name: str
+    mime_type: str
+    alt: str
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,7 @@ class FinishEvent:
 SseEvent = (
     TextDelta
     | ThinkingDelta
+    | ImageDelta
     | ToolUseStart
     | AskUserQuestionEvent
     | UsageEvent
@@ -103,7 +116,7 @@ class SseParser:
     _ask_args: str = ""
 
     def feed_line(self, line: str) -> list[SseEvent]:
-        """喂一行，返回这一行产生的事件（顺序：usage、正文/错误、思考、工具、finish）。"""
+        """喂一行，返回这一行产生的事件（顺序：usage、正文/错误、图片、思考、工具、finish）。"""
         line = line.rstrip("\r\n")
         if not line or line.startswith(":") or not line.startswith("data: "):
             return []
@@ -136,6 +149,9 @@ class SseParser:
                 return out
             self.counts["text"] += 1
             out.append(TextDelta(content))
+        for image in delta.get("images") or []:
+            if decoded := _image(image):
+                out.append(decoded)
         thinking = delta.get("thinking")
         if isinstance(thinking, str) and thinking:
             self.counts["thinking"] += 1
@@ -197,6 +213,21 @@ def paragraph_gap(before: str, after: str) -> str:
     trailing = len(before) - len(before.rstrip("\n"))
     leading = len(after) - len(after.lstrip("\n"))
     return "\n" * max(0, 2 - trailing - leading)
+
+
+def _image(value: Any) -> ImageDelta | None:
+    """解不开的图片直接丢弃：base64 不合法或不是图片类型。"""
+    image = _obj(value)
+    mime, data = image.get("mime_type"), image.get("data")
+    if not isinstance(mime, str) or not mime.startswith("image/") or not isinstance(data, str):
+        return None
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw:
+        return None
+    return ImageDelta(str(image.get("name") or "image"), mime, str(image.get("alt") or ""), raw)
 
 
 def _obj(value: Any) -> dict[str, Any]:

@@ -30,6 +30,7 @@ import (
 // "no rollout found" signature on a zero-output resume: that turn is retried
 // once on a new thread and the user is told the earlier context is gone.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
+	images := newTurnImages(workingDir)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -138,6 +139,16 @@ probe:
 		})
 	}
 
+	imageDelta := func(image *openai.Image) {
+		emit(openai.ChatCompletionResponse{
+			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
+			Choices: []openai.ChatCompletionChoice{{
+				Index: 0,
+				Delta: &openai.ChatMessage{Role: "assistant", Images: []*openai.Image{image}},
+			}},
+		})
+	}
+
 	toolCallDelta := func(id, name, args string) {
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
@@ -178,6 +189,12 @@ probe:
 	emittedAnyContent := false
 	turnCompleted := false
 	startedTools := make(map[string]bool)
+	turnThread := func() string {
+		if threadIDSeen != "" {
+			return threadIDSeen
+		}
+		return resumedThread(input)
+	}
 	emitToolStart := func(item *codexItem) {
 		if item == nil || item.ID == "" || startedTools[item.ID] {
 			return
@@ -246,7 +263,15 @@ probe:
 			case "agent_message":
 				if ev.Item.Text != "" {
 					emittedAnyContent = true
-					textDelta(ev.Item.Text)
+					texts, found := images.split(ev.Item.Text, turnThread())
+					for i, text := range texts {
+						if text != "" {
+							textDelta(text)
+						}
+						if i < len(found) {
+							imageDelta(found[i])
+						}
+					}
 					sessionStore.LogDelta(sessionID, ev.Item.Text)
 				}
 			case "reasoning":
@@ -329,6 +354,11 @@ processLines:
 			}
 			handleLine(line)
 		}
+	}
+
+	for _, image := range images.generated(turnThread()) {
+		emittedAnyContent = true
+		imageDelta(image)
 	}
 
 	if !turnCompleted && !turnFailed {

@@ -59,6 +59,16 @@ type ChatMessage struct {
 	ToolCallID string          `json:"tool_call_id,omitempty"`
 	Name       string          `json:"name,omitempty"`
 	Thinking   string          `json:"thinking,omitempty"`
+	// Images is a relay extension: pictures the turn shows the user, in stream order.
+	Images []*Image `json:"images,omitempty"`
+}
+
+// Image is one picture carried in a stream delta; Data is base64.
+type Image struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mime_type"`
+	Alt      string `json:"alt,omitempty"`
+	Data     string `json:"data"`
 }
 
 type ToolCall struct {

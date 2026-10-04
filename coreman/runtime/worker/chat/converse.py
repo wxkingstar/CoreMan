@@ -9,6 +9,7 @@ from coreman.core.db.models import Task
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
+    ImageDelta,
     RelayErrorEvent,
     SseEvent,
     TextDelta,
@@ -18,6 +19,7 @@ from coreman.core.relay.sse import (
 )
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared
+from coreman.runtime.worker.chat.reply_images import ReplyImages
 from coreman.runtime.worker.context import TaskContext
 
 
@@ -44,6 +46,7 @@ class ConverseStage(ChatStageBase):
             pre.request, total_timeout=float(pre.intake.bot.sse_timeout_seconds)
         )
         supervisor = pre.supervisor
+        images = ReplyImages(pre.intake.bot, ctx.cipher)
         stopping = asyncio.ensure_future(ctx.cancel_event.wait())
         pending: asyncio.Task[SseEvent | None] | None = None
         silent_since = ctx.clock()
@@ -93,6 +96,10 @@ class ConverseStage(ChatStageBase):
                         return out
                     silent_since = now
                     self._apply(ctx, pre, out, event)
+                    if isinstance(event, ImageDelta):
+                        out.text_events += 1
+                        writer = pre.writer
+                        writer.add_text(await images.markdown(event, writer.pending_text))
                     await pre.writer.flush()
                     if capped and out.tool_events >= 64:
                         out.cancelled, out.reason = True, "collaboration_budget_exhausted"
@@ -116,6 +123,7 @@ class ConverseStage(ChatStageBase):
                 await asyncio.wait({pending})
             await gen.aclose()
             await client.aclose()
+            await images.aclose()
 
     def _apply(self, ctx: TaskContext, pre: Prepared, out: Outcome, event: SseEvent) -> None:
         if not out.saw_event:
