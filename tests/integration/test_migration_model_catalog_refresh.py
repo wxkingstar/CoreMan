@@ -147,3 +147,73 @@ def test_0051_adds_new_defaults_and_moves_bots_off_replaced_models(
         ("claude-restricted", ["claude-sonnet-5"], 1),
         ("codex-restricted", ["codex/gpt-6-astra", "codex/gpt-6-sol"], 2),
     ]
+
+
+def test_0055_replaces_gpt_6_sol_with_gpt_6_1_sol(migrated_database: str) -> None:
+    cfg = alembic_config(migrated_database)
+    command.downgrade(cfg, "0054")
+    try:
+        asyncio.run(
+            _execute(
+                migrated_database,
+                ("TRUNCATE model_catalog", {}),
+                _model("claude", "claude-opus-5-5", default=True, sort_order=110),
+                _model("codex", "codex/gpt-6-sol", default=True, sort_order=110),
+                _model("codex", "codex/gpt-6-astra", sort_order=100),
+                # 快照日期写法同样算被替代。
+                _model("codex", "codex/gpt-6-sol-2026-09-01"),
+                (
+                    "INSERT INTO users (login_name, display_name) "
+                    "VALUES ('migration-owner', 'Owner')",
+                    {},
+                ),
+                (INSERT_BOT, {"key": "sol", "model": "codex/gpt-6-sol", "effort": "max"}),
+                (INSERT_BOT, {"key": "astra", "model": "codex/gpt-6-astra", "effort": None}),
+                (
+                    INSERT_RELAY,
+                    {
+                        "name": "codex-restricted",
+                        "provider": "codex",
+                        "mode": "restricted",
+                        "models": ["codex/gpt-6-sol", "codex/gpt-6-astra"],
+                    },
+                ),
+            )
+        )
+        command.upgrade(cfg, "0055")
+        catalog = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT provider, model, display_name, is_default, retired, supports_xhigh,"
+                " supports_max, sort_order FROM model_catalog ORDER BY 1, 2",
+            )
+        )
+        bots = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT bot_key, model, effort_level, version FROM bots ORDER BY 1",
+            )
+        )
+        relays = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT name, supported_models, version FROM relay_servers ORDER BY 1",
+            )
+        )
+    finally:
+        command.upgrade(cfg, "head")
+        asyncio.run(_execute(migrated_database, CLEANUP))
+        asyncio.run(_restore_seed(migrated_database))
+
+    assert catalog == [
+        ("claude", "claude-opus-5-5", None, True, False, False, False, 110),
+        ("codex", "codex/gpt-6-astra", None, False, False, False, False, 100),
+        ("codex", "codex/gpt-6-sol", None, False, True, False, False, 110),
+        ("codex", "codex/gpt-6-sol-2026-09-01", None, False, True, False, False, 0),
+        ("codex", "codex/gpt-6.1-sol", "GPT-6.1 Sol (Codex)", True, False, True, True, 120),
+    ]
+    assert bots == [
+        ("astra", "codex/gpt-6-astra", None, 1),
+        ("sol", "codex/gpt-6.1-sol", "max", 2),
+    ]
+    assert relays == [("codex-restricted", ["codex/gpt-6.1-sol", "codex/gpt-6-astra"], 2)]

@@ -19,16 +19,17 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     }
     assert {r.model for r in by_provider["claude"] if r.retired} == {"claude-opus-5"}
     assert {r.model for r in by_provider["codex"] if not r.retired} == {
-        "codex/gpt-6-sol",
+        "codex/gpt-6.1-sol",
         "codex/gpt-6-astra",
     }
     assert {r.model for r in by_provider["codex"] if r.retired} == {
+        "codex/gpt-6-sol",
         "codex/gpt-5.6-sol",
         "codex/gpt-5.6-terra",
         "codex/gpt-5.6-luna",
     }
     assert [r.model for r in by_provider["claude"] if r.is_default] == ["claude-opus-5-5"]
-    assert [r.model for r in by_provider["codex"] if r.is_default] == ["codex/gpt-6-sol"]
+    assert [r.model for r in by_provider["codex"] if r.is_default] == ["codex/gpt-6.1-sol"]
 
 
 async def test_relay_unique_name_defaults_and_version(db_session: AsyncSession) -> None:

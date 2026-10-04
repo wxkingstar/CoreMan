@@ -105,7 +105,7 @@ def alembic_config(database_url: str) -> Config:
 
 @functools.cache
 def model_catalog_seed() -> list[dict[str, object]]:
-    """迁移 0003 里的模型目录种子，套上 0023 的改名、0043 的档位标记与 0051 的新增和退役
+    """迁移 0003 里的模型目录种子，套上 0023 的改名、0043 的档位标记与 0051、0055 的新增和退役
     （只读脚本目录，不连库）。
 
     `model_catalog` 也列在 BUSINESS_TABLES 里（用例可以增删目录行，不清理会串味），但它同时
@@ -118,8 +118,9 @@ def model_catalog_seed() -> list[dict[str, object]]:
     renames = scripts.get_revision("0023")
     efforts = scripts.get_revision("0043")
     refresh = scripts.get_revision("0051")
+    sol = scripts.get_revision("0055")
     assert seed is not None and renames is not None and efforts is not None
-    assert refresh is not None
+    assert refresh is not None and sol is not None
     native = dict(renames.module.RENAMES)
     rows: list[dict[str, object]] = []
     for p, m, d, df, s in seed.module.SEED_MODELS:
@@ -137,11 +138,17 @@ def model_catalog_seed() -> list[dict[str, object]]:
                 "sort_order": s,
             }
         )
-    for provider, (new, display_name, replaced) in refresh.module.REPLACEMENTS.items():
+    replacements = [*refresh.module.REPLACEMENTS.items()]
+    replacements.append(
+        (sol.module.PROVIDER, (sol.module.NEW, sol.module.DISPLAY_NAME, sol.module.REPLACED))
+    )
+    for provider, (new, display_name, replaced) in replacements:
         mine = [r for r in rows if r["provider"] == provider]
         for r in mine:
             r["is_default"] = False
-            r["retired"] = refresh.module.base_name(str(r["model"])) in replaced
+            r["retired"] = (
+                bool(r["retired"]) or refresh.module.base_name(str(r["model"])) in replaced
+            )
         rows.append(
             {
                 "provider": provider,
