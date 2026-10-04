@@ -91,7 +91,7 @@ async def test_switch_relay_resolves_model(
     d = r.json()["data"]
     assert (
         d["old_model"] == "claude-sonnet-5"
-        and d["new_model"] == "codex/gpt-6-sol"
+        and d["new_model"] == "codex/gpt-6.1-sol"
         and d["bot"]["backend"] == "codex"
     )
     v = d["bot"]["version"]
@@ -117,7 +117,7 @@ async def test_switch_relay_resolves_model(
         .scalars()
         .all()
     )
-    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6-sol"]
+    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6.1-sol"]
 
 
 async def test_switch_relay_permissions_and_effort_downgrade(
@@ -127,7 +127,7 @@ async def test_switch_relay_permissions_and_effort_downgrade(
     # codex 实例的默认模型改成只支持到 xhigh，自动换过去时 max 降到 xhigh。
     row = (
         await db_session.execute(
-            select(ModelCatalog).where(ModelCatalog.model == "codex/gpt-6-sol")
+            select(ModelCatalog).where(ModelCatalog.model == "codex/gpt-6.1-sol")
         )
     ).scalar_one()
     row.supports_max = False

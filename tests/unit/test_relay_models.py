@@ -111,6 +111,7 @@ def test_fit_effort_steps_down_to_highest_supported() -> None:
         ("vllm/claude-sonnet-4-6", False, True),
         ("claude-opus-4-5-20251101", False, False),
         ("claude-haiku-4-5-20251001", False, False),
+        ("codex/gpt-6.1-sol", True, True),
         ("codex/gpt-6-sol", True, True),
         ("codex/gpt-6-astra", True, True),
         ("codex/gpt-5.6-luna", True, True),

@@ -11,7 +11,7 @@ async def test_list_seeded_for_member(client: httpx.AsyncClient, db_session: Asy
     r = await client.get("/api/admin/model-catalog", params={"provider": "codex"})
     assert r.status_code == 200
     models = [m["model"] for m in r.json()["data"]]
-    assert models[0] == "codex/gpt-6-sol" and all(m.startswith("codex/") for m in models)
+    assert models[0] == "codex/gpt-6.1-sol" and all(m.startswith("codex/") for m in models)
     assert r.json()["data"][0]["backend"] == "codex"
     created = await client.post(
         "/api/admin/model-catalog", json={"provider": "claude", "model": "x/y"}
@@ -135,7 +135,7 @@ async def test_default_handoff_is_audited(
 ) -> None:
     await login_as(client, db_session, role="ai_committee")
     r = await client.patch(
-        "/api/admin/model-catalog/codex/codex%2Fgpt-6-sol", json={"retired": True}
+        "/api/admin/model-catalog/codex/codex%2Fgpt-6.1-sol", json={"retired": True}
     )
     assert r.status_code == 200
     rows = await db_session.execute(
@@ -144,4 +144,4 @@ async def test_default_handoff_is_audited(
     audit = rows.scalars().first()
     assert audit is not None and audit.diff is not None
     assert audit.diff["retired"] == [False, True]
-    assert audit.diff["default_model"] == ["codex/gpt-6-sol", "codex/gpt-6-astra"]
+    assert audit.diff["default_model"] == ["codex/gpt-6.1-sol", "codex/gpt-6-astra"]
