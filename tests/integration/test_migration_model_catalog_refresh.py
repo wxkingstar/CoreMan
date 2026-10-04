@@ -185,7 +185,7 @@ def test_0055_replaces_gpt_6_sol_with_gpt_6_1_sol(migrated_database: str) -> Non
             _rows(
                 migrated_database,
                 "SELECT provider, model, display_name, is_default, retired, supports_xhigh,"
-                " supports_max, sort_order FROM model_catalog ORDER BY 1, 2",
+                ' supports_max, sort_order FROM model_catalog ORDER BY 1, model COLLATE "C"',
             )
         )
         bots = asyncio.run(
