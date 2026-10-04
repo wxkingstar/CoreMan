@@ -224,9 +224,10 @@ class OpenStage(ChatStageBase):
         extra, env, personal_secrets = await credentials.configure(
             session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
         )
-        from coreman.core.prompting.rich_cards import with_rich_cards
+        from coreman.core.prompting.rich_cards import with_reply_images, with_rich_cards
 
         extra = with_rich_cards(extra, intake.bot.platform, intake.bot.rich_cards)
+        extra = with_reply_images(extra, intake.bot.platform, backend)
         system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
         ctx.private_turn = wecom_personal.mounted(env)
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
