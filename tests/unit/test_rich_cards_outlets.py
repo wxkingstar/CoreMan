@@ -3,7 +3,8 @@
 from datetime import UTC, datetime
 
 from coreman.core.cron.delivery import CHAT_PART_BYTES, chat_parts
-from coreman.core.prompting.rich_cards import RICH_CARDS_PROMPT, rich_cards_prompt, with_rich_cards
+from coreman.core.prompting.rich_cards import RICH_CARDS_PROMPT, rich_cards_prompt
+from coreman.core.richtext.blocks import split
 from coreman.core.richtext.degrade import readable
 from coreman.core.richtext.schema import BLOCK_KINDS
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
@@ -15,9 +16,6 @@ def test_prompt_only_for_feishu_with_switch_on() -> None:
     assert rich_cards_prompt("feishu", True) == RICH_CARDS_PROMPT
     assert rich_cards_prompt("feishu", False) == ""
     assert rich_cards_prompt("wecom", True) == ""
-    assert with_rich_cards("", "feishu", True) == RICH_CARDS_PROMPT
-    assert with_rich_cards("前文", "feishu", True) == f"前文\n\n{RICH_CARDS_PROMPT}"
-    assert with_rich_cards("前文", "wecom", True) == "前文"
 
 
 def test_prompt_documents_every_block_type_the_model_may_write() -> None:
@@ -31,6 +29,13 @@ def test_prompt_documents_reply_buttons_and_people_lookup() -> None:
     assert "sends its own text" in RICH_CARDS_PROMPT
     assert "only the person who asked" in RICH_CARDS_PROMPT
     assert "nobody is notified" in RICH_CARDS_PROMPT
+
+
+def test_prompt_examples_are_valid_blocks() -> None:
+    """模型会照着例子写：例子里的块必须都能通过校验。"""
+    blocks = [s for s in split(RICH_CARDS_PROMPT) if s.kind != "markdown"]
+    assert [s.block for s in blocks] == ["header", "callout", "table", "kpi", "chart"]
+    assert all(s.kind == "block" for s in blocks), [s.error for s in blocks]
 
 
 def test_feishu_cron_result_is_not_split_across_blocks() -> None:

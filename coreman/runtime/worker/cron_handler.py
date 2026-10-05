@@ -47,7 +47,7 @@ from coreman.core.prompting import (
     load_segments,
     sanitize_user_input,
 )
-from coreman.core.prompting.rich_cards import with_reply_images, with_rich_cards
+from coreman.core.prompting.rich_cards import rich_cards_prompt, with_reply_images
 from coreman.core.relay.client import ChatRequest, IncompleteResultError, RelayError
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
@@ -281,11 +281,8 @@ class CronRunHandler:
                             or ""
                         ),
                         scheduled=True,
-                        extra=with_reply_images(
-                            with_rich_cards(personal_prompt, bot.platform, bot.rich_cards),
-                            bot.platform,
-                            backend,
-                        ),
+                        extra=with_reply_images(personal_prompt, bot.platform, backend),
+                        output_format=rich_cards_prompt(bot.platform, bot.rich_cards),
                     ),
                 )
                 # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。

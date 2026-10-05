@@ -224,9 +224,8 @@ class OpenStage(ChatStageBase):
         extra, env, personal_secrets = await credentials.configure(
             session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
         )
-        from coreman.core.prompting.rich_cards import with_reply_images, with_rich_cards
+        from coreman.core.prompting.rich_cards import with_reply_images
 
-        extra = with_rich_cards(extra, intake.bot.platform, intake.bot.rich_cards)
         extra = with_reply_images(extra, intake.bot.platform, backend)
         system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
         ctx.private_turn = wecom_personal.mounted(env)
@@ -357,6 +356,8 @@ class OpenStage(ChatStageBase):
         extra: str = "",
     ) -> str:
         """本轮的 system prompt。续跑时也使用当前身份、配置与系统授权。"""
+        from coreman.core.prompting.rich_cards import rich_cards_prompt
+
         return build_system_prompt(
             segments=await load_segments(ctx.settings_store),
             backend=backend,
@@ -366,6 +367,7 @@ class OpenStage(ChatStageBase):
             speaker_changed=info.speaker_changed,
             systems_prompt=systems_prompt,
             extra=extra,
+            output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
         )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
