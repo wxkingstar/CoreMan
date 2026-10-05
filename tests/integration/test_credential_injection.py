@@ -108,3 +108,13 @@ def test_guidance_promises_resume_only_for_chat_turns() -> None:
     assert "系统会自动让你继续" in chat and "下一次定时运行" not in chat
     assert "系统会自动让你继续" not in cron and "不会续接本轮" in cron
     assert "下一次定时运行起生效" in cron and "不得让用户在聊天里发送密码或密钥" in cron
+
+
+def test_guidance_explains_save_and_one_time_writes() -> None:
+    chat = credentials.guidance(("DEMO_PIN",), "chat")
+    assert "`save` 决定值要不要留下" in chat and "拿不准时用 false" in chat
+    assert "strenv(X)" in chat and "不要 `cat`、`git diff`、`git show`" in chat
+    assert "定时任务里 `save` 必须为 true" in credentials.guidance((), "cron")
+    once = credentials.guidance((), "chat", once=("SSO_SECRET",))
+    assert "本轮有用户刚提交的一次性密钥：`$SSO_SECRET`" in once
+    assert "一次性密钥已不可用" in credentials.guidance((), "chat", once_lost=True)

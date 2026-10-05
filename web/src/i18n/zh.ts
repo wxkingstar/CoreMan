@@ -166,11 +166,13 @@ export default {
   },
   credentialRequest: {
     title: "填写个人凭证",
+    titleOnce: "提供一次性密钥",
     from: "来自 AI 员工「{bot}」",
     purpose: "用途：",
     submit: "加密提交",
     required: "请填写「{label}」",
     saved: "已保存",
+    handedOff: "已交付",
     savedHint: "可以回到聊天里了，AI 员工会继续之前的任务。",
     expiresAt: "有效期至 {time}",
     loadError: "无法打开这张表单",

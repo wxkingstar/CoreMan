@@ -157,11 +157,13 @@ const en = {
   },
   credentialRequest: {
     title: "Personal credential",
+    titleOnce: "One-time secret",
     from: "Requested by AI employee “{bot}”",
     purpose: "Purpose:",
     submit: "Submit encrypted",
     required: "Please fill in “{label}”",
     saved: "Saved",
+    handedOff: "Handed over",
     savedHint: "You can go back to the chat. The AI employee will continue the task.",
     expiresAt: "Valid until {time}",
     loadError: "Cannot open this form",

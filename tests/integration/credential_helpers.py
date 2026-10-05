@@ -15,7 +15,7 @@ FIELDS = [
     {"key": "DEMO_USERNAME", "label": "账号", "secret": False},
     {"key": "DEMO_PIN", "label": "PIN", "secret": True},
 ]
-BODY = {"fields": FIELDS, "purpose": "查询你在 Demo 系统里的订单"}
+BODY = {"fields": FIELDS, "purpose": "查询你在 Demo 系统里的订单", "save": True}
 VALUES = {"DEMO_USERNAME": "alice", "DEMO_PIN": "pin-778899"}
 DEMO_RELAY_SESSION = uuid.UUID("00000000-0000-4000-8000-0000000000a1")
 

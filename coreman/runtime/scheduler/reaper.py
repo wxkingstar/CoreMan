@@ -517,6 +517,8 @@ async def run_cleanup(
         # 但卡片回调是按 task_id 前缀反查的，那条路没有时间条件，得靠 status 认出「这轮已经过期」。
         "interactions_expired": await _run(factory, interactions.expire_due, now),
         "credential_requests_expired": await _run(factory, credential_requests.expire_due, now),
+        # 一次性交付的值正常由续接轮收尾时擦掉；处理器崩溃、任务没被认领就结束的，这里补擦。
+        "credential_handoffs_wiped": await _run(factory, credential_requests.wipe_handoffs, now),
         "abandoned_turns": await _run(factory, close_abandoned_turns, now),
     }
 

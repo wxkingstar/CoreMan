@@ -2,9 +2,9 @@ import { call, http } from '@/api/client'
 
 export interface CredentialField { key: string; label: string; secret: boolean; placeholder: string }
 
-/** AI 员工发起的一次索取。不含任何值。 */
+/** AI 员工发起的一次索取。不含任何值。`save` 为 false 时是一次性交付：不保存，用完即删。 */
 export interface CredentialRequest {
-  id: string; bot_name: string; platform: string; purpose: string; fields: CredentialField[]
+  id: string; bot_name: string; platform: string; purpose: string; fields: CredentialField[]; save: boolean
   status: 'open' | 'submitted' | 'expired' | 'cancelled'; expires_at: string; security_note: string
 }
 

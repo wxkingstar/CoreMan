@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -13,9 +14,14 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher, DecryptError
-from coreman.core.db.models import Bot, PersonalCredential
+from coreman.core.db.models import Bot, CredentialRequest, PersonalCredential
 from coreman.core.logging import get_logger
-from coreman.core.personal_credentials.policy import MIN_REDACT, key_problem, value_aad
+from coreman.core.personal_credentials.policy import (
+    MIN_REDACT,
+    handoff_aad,
+    key_problem,
+    value_aad,
+)
 from coreman.core.timeutils import utcnow
 
 log = get_logger(__name__)
@@ -108,6 +114,27 @@ async def injected(
             .execution_options(synchronize_session=False)
         )
     return Injected(env, frozenset(secrets), tuple(env))
+
+
+def handed_off(cipher: Cipher, row: CredentialRequest) -> Injected:
+    """一次性交付的值，只在它的续接轮开轮时解密。已擦掉或读不出来时为空。"""
+    if row.save or not row.handoff_enc:
+        return Injected({}, frozenset(), ())
+    try:
+        values = json.loads(cipher.decrypt(row.handoff_enc, handoff_aad(row.id)))
+    except (DecryptError, ValueError):
+        log.warning("credential_handoff_unreadable", request_id=str(row.id))
+        return Injected({}, frozenset(), ())
+    secret_keys = {str(f["key"]) for f in row.fields if f.get("secret", True)}
+    env = {
+        key: value
+        for key, value in sorted(values.items())
+        if isinstance(value, str) and not key_problem(key)
+    }
+    secrets = frozenset(
+        value for key, value in env.items() if key in secret_keys and len(value) >= MIN_REDACT
+    )
+    return Injected(env, secrets, tuple(env))
 
 
 async def list_own(

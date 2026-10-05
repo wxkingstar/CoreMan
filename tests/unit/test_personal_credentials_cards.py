@@ -107,3 +107,30 @@ def test_wecom_link_removes_newlines_and_bare_urls():
     assert len(field_lines) == 1
     assert len(arrow_lines) == 1
     assert "evil.example" not in text
+
+
+def test_one_time_form_and_link_say_values_are_not_kept():
+    card = cards.form_card(
+        RID, bot_name="Demo 助手", purpose="写入服务配置", fields=FIELDS, save=False
+    )
+    assert card["header"]["title"]["content"] == "🔑 需要你提供一次性密钥"
+    text = json.dumps(card, ensure_ascii=False)
+    assert "任务结束即删除，不会保存" in text and "加密保存" not in text
+    link = cards.wecom_link(
+        bot_name="Demo 助手", purpose="写入服务配置", fields=FIELDS, url="https://x", save=False
+    )
+    assert "需要你提供一次性密钥" in link and "不会保存" in link
+
+
+def test_handoff_result_cards():
+    done = cards.handoff_card(RID, ["DEMO_PIN"], "AI 员工会继续之前的任务。", continuing=True)
+    assert done["header"]["title"]["content"] == "✅ 已交付"
+    assert "结束后立即删除" in json.dumps(done, ensure_ascii=False)
+    lost = cards.handoff_card(RID, ["DEMO_PIN"], "已丢弃", continuing=False)
+    assert lost["header"]["title"]["content"] == "⚠️ 未使用"
+
+
+def test_one_time_resume_text():
+    text = cards.resume_text(["DEMO_PIN"], "帮我配一下", save=False)
+    assert text.startswith("[CoreMan] 用户已通过安全表单提交一次性密钥 DEMO_PIN")
+    assert "本轮结束即删除" in text and text.endswith("请继续完成用户的这条原始请求：帮我配一下")
