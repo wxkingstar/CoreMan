@@ -1,18 +1,35 @@
 """飞书富卡片输出：告诉模型可以在回复里写 ```card:类型``` 块，由平台渲染成卡片组件。
 
-只在飞书机器人且开着富卡片时挂进 system prompt 的「本轮附加能力」段；块的字段以
-`coreman/core/richtext/schema.py` 为准，这里改字段要同步那边。
+只在飞书机器人且开着富卡片时挂进 system prompt 的输出格式段（详细度之后、结尾重申之前）；
+块的字段以 `coreman/core/richtext/schema.py` 为准，这里改字段要同步那边。
 """
 
 from __future__ import annotations
 
 RICH_CARDS_PROMPT = """# Rich Card Output
 
-Your reply is rendered as a Feishu card. Write normal Markdown; when structured content helps \
-the reader, add a fenced block whose info string is `card:<type>` and whose body is one JSON \
-object. Give data and meaning only — the platform decides colors, sizes and layout, and adapts \
-to light and dark themes. Use blocks when they make the answer clearer, not for decoration; a \
-short plain answer needs none.
+Your reply is rendered as a Feishu card. Write normal Markdown and add card blocks wherever \
+they fit: a fenced block whose info string is `card:<type>` and whose body is one JSON object. \
+Readers scan blocks faster than paragraphs, so prefer a block over prose for anything a block \
+can show. Give data and meaning only — the platform decides colors, sizes and layout, and \
+adapts to light and dark themes.
+
+When to use them:
+- You carried out a task (changed, created, deployed, fixed or checked something): open with a \
+`header` whose title states the outcome in a few words; green when done, orange when done but \
+something is still pending, red when it failed.
+- Anything the reader must do or know before relying on the result (a restart or approval \
+still needed, a risk, a partial failure, a data caveat): a `callout` near the top, not only at \
+the end.
+- Several fields of one result (IDs, names, locations, settings, before and after values): a \
+`table`, or an `item` for one entity with a picture.
+- Headline numbers: `kpi`; trends, comparisons and shares: `chart`.
+- Ordered steps, a process or a history: `timeline`.
+- Colleagues you name: `people`. Likely follow-up requests: `actions` with reply buttons.
+- Skip blocks only for a reply of one or two sentences, small talk, or a question back to the \
+user.
+- If a Response Length section asks for a minimal or brief reply, follow it: add a block only \
+when the user explicitly asks for a chart, a table or similar.
 
 Types:
 - header: {"title", "subtitle"?, "tags"?: [{"text", "color"?}], \
@@ -56,13 +73,31 @@ follow-ups, never to confirm an irreversible action.
 Rules:
 - Each block's JSON must be complete and valid; write it in one go and do not edit it \
 afterwards.
-- State the conclusion in text first, then add the block that supports it.
+- State the conclusion first, in the header or the opening sentence, then add the blocks that \
+support it. Do not repeat in prose what a block already shows.
 - Two adjacent blocks with "size": "half" (chart, kpi, callout) are placed side by side.
 - Put numbers in `values`/`value` as numbers; format labels via `format` instead of strings.
 - Inline colors: `<font color='green|red|orange|blue|grey'>text</font>`, only to mark \
 good/bad/status.
 
-Example:
+Example of a task result:
+```card:header
+{"title": "Config moved to the correct group", "subtitle": "test environment", \
+"color": "orange", "tags": [{"text": "Restart pending", "color": "orange"}]}
+```
+Copied the config to the correct group and checked that it matches the original.
+```card:callout
+{"level": "warning", "title": "Restart needed", "text": "order-api reads this config only at \
+startup; restart it in test to apply the change."}
+```
+```card:table
+{"columns": [{"key": "item", "title": "Item"}, {"key": "value", "title": "Value", \
+"type": "markdown"}], "rows": [{"item": "Group", "value": "`shop.orders`"}, \
+{"item": "Data ID", "value": "`refund-rules.json`"}, \
+{"item": "Old copy", "value": "Kept in `shop.order`"}]}
+```
+
+Example of a data report:
 ```card:kpi
 {"items": [{"label": "Orders", "value": "97", "delta": "+12.6%", "good": true}, \
 {"label": "Refund rate", "value": "2.1%", "delta": "+0.4pt", "good": false}]}
@@ -74,16 +109,8 @@ Example:
 
 
 def rich_cards_prompt(platform: str, enabled: bool) -> str:
-    """飞书且开启富卡片时返回说明段，否则空串（调用方直接拼进 extra）。"""
+    """飞书且开启富卡片时返回说明段（build_system_prompt 的 output_format），否则空串。"""
     return RICH_CARDS_PROMPT if platform == "feishu" and enabled else ""
-
-
-def with_rich_cards(extra: str, platform: str, enabled: bool) -> str:
-    """把说明段接在已有的附加能力后面。"""
-    segment = rich_cards_prompt(platform, enabled)
-    if not segment:
-        return extra
-    return f"{extra}\n\n{segment}" if extra.strip() else segment
 
 
 # 只有 codex 驱动会把图片随流带回来（生图产物、正文里链接的本地图片），见 relay-codex/images.go。

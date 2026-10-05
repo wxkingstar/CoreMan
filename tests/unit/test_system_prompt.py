@@ -151,6 +151,27 @@ def test_extra_sections_stay_before_the_tail() -> None:
         assert "\n\n\n" not in out
 
 
+def test_output_format_sits_after_verbosity_and_before_the_tail() -> None:
+    """富卡片说明要贴近结尾，才压得住机器人 prompt 里的格式习惯；结尾重申仍在最后。"""
+    out = build_system_prompt(
+        segments=SEG,
+        backend="codex",
+        verbosity_level=3,
+        bot_prompt="你是销售",
+        speaker=KNOWN,
+        speaker_changed=False,
+        extra="## 本人飞书\n可以读取。",
+        output_format="# Rich Card Output",
+    )
+    assert (
+        out.index("## 本人飞书")
+        < out.index(DEFAULT_VERBOSITY[3])
+        < out.index("# Rich Card Output")
+        < out.index(DEFAULT_RUNTIME_TAIL.strip())
+    )
+    assert out.endswith(DEFAULT_RUNTIME_TAIL.strip())
+
+
 class _FakeStore:
     """只实现 load_segments 用到的 get()：为了读七个键去连库不值当。"""
 

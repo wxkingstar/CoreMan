@@ -12,6 +12,7 @@
     ⑦ 机器人自定义 prompt  夹在中间，Lost-in-the-Middle 降低注入收益
     ⑩ 本轮附加能力        条件满足才有：协作协议、本人飞书/企微工具、本人定时任务
     ⑩' 输出详细度         1–3 档才有，4 档（详细）即模型默认；贴着结尾才压得住前面的篇幅要求
+    ⑩'' 输出格式          飞书富卡片说明；靠近结尾才压得住前面的格式习惯，篇幅仍以详细度为准
     ⑪ 结尾重申            recency 效应，最后再说一遍运行模式
 
 用户自定义的 ⑦ 永远夹在安全层中间，既不能抢 ① 的开头，也不能抢 ⑪ 的结尾。
@@ -104,6 +105,7 @@ def build_system_prompt(
     systems_prompt: str = "",
     scheduled: bool = False,
     extra: str = "",
+    output_format: str = "",
 ) -> str:
     """按固定顺序拼三明治；空段直接跳过，段间恒为一个空行。
 
@@ -111,7 +113,7 @@ def build_system_prompt(
     自定义 prompt 里的「自动批准」之类指令抢不到它前面。
 
     `extra` 是按本轮条件挂上的能力说明（⑩），必须经这里拼进来，不要在返回值后面再接：
-    接在后面会把 ⑪ 挤出结尾。
+    接在后面会把 ⑪ 挤出结尾。`output_format` 是平台的输出格式说明（⑩''），同理。
     """
     codex = backend == "codex"
     tag = new_identity_tag()
@@ -128,6 +130,7 @@ def build_system_prompt(
         systems_prompt,
         extra,
         segments.verbosity.get(verbosity_level, ""),
+        output_format,
         segments.runtime_tail,
     ]
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
