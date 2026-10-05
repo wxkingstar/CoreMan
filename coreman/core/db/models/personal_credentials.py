@@ -1,7 +1,8 @@
 """个人凭证：按（AI 员工, 用户）逐条加密保存的环境变量，以及一次向本人索取的请求。
 
 值只以密文存在（AAD 绑定行身份，见 core/personal_credentials/policy.py）；请求里只有键名、
-标签与用途，从不存值。来源任务与入站事件不建外键：它们按自己的保留期清理，不能被这里挡住。
+标签与用途，唯一的例外是一次性交付的密文，只留到续接轮结束。来源任务与入站事件不建外键：
+它们按自己的保留期清理，不能被这里挡住。
 """
 
 from __future__ import annotations
@@ -61,6 +62,11 @@ class CredentialRequest(TimestampMixin, Base):
             "expires_at",
             postgresql_where=text("status = 'open'"),
         ),
+        Index(
+            "credential_requests_handoff_idx",
+            "submitted_at",
+            postgresql_where=text("handoff_enc IS NOT NULL"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")
@@ -81,6 +87,10 @@ class CredentialRequest(TimestampMixin, Base):
     # [{key, label, secret, placeholder}]，不含任何值。
     fields: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     purpose: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # false：一次性交付，值不进 personal_credentials，只给提交后的续接轮用一次。
+    save: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # 一次性交付的值（JSON 密文，AAD 绑定本请求）；续接轮结束、或续接不成立时擦掉。
+    handoff_enc: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     request_outbox_id: Mapped[int | None] = mapped_column(

@@ -166,11 +166,13 @@ export default {
   },
   credentialRequest: {
     title: "個人の認証情報の入力",
+    titleOnce: "一度限りのシークレットの入力",
     from: "AI 社員「{bot}」からの依頼",
     purpose: "用途：",
     submit: "暗号化して送信",
     required: "「{label}」を入力してください",
     saved: "保存しました",
+    handedOff: "引き渡しました",
     savedHint: "チャットに戻ってください。AI 社員が作業を続けます。",
     expiresAt: "{time} まで有効",
     loadError: "このフォームを開けません",

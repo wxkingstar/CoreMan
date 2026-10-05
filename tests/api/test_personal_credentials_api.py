@@ -165,3 +165,23 @@ async def test_other_users_credentials_are_isolated(client, app, db_session):
         assert (await client.delete(f"/api/me/credentials/{bot.id}/{key}")).status_code == 404
     injected = await store.injected(db_session, cipher, bot_id=bot.id, user_id=owner_user.id)
     assert injected.env == VALUES
+
+
+async def test_one_time_request_message_and_web_form(client, app, db_session):
+    await login_app(db_session, "wecom")
+    bot, user, task, _ = await owner(db_session, platform="wecom")
+    once = {k: v for k, v in BODY.items() if k != "save"}
+    r = await client.post(URL, json=once, headers=_bearer(app, cap_for(bot, user, task)))
+    assert r.status_code == 202, r.text
+    data = r.json()["data"]
+    assert data["save"] is False and "不会保存" in data["message"]
+    await login_existing(client, db_session, user)
+    got = (await client.get(f"/api/me/credential-requests/{data['request_id']}")).json()["data"]
+    assert got["save"] is False and "不会保存" in got["security_note"]
+
+
+async def test_one_time_request_from_a_scheduled_run_is_422(client, app, db_session):
+    bot, user, task, _ = await owner(db_session)
+    once = {k: v for k, v in BODY.items() if k != "save"}
+    r = await client.post(URL, json=once, headers=_bearer(app, cron_cap(bot, user, task)))
+    assert r.status_code == 422 and "save" in r.json()["message"]

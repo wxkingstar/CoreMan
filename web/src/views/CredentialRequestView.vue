@@ -16,6 +16,8 @@ const busy = ref(false)
 const saved = ref(false)
 /** 服务端按实际结果写的一句话：续接、下次对话或下次执行时生效，不能一律承诺「继续任务」。 */
 const outcome = ref('')
+/** 一次性交付不保存：标题和结果都不能说「个人凭证」「已保存」。 */
+const once = computed(() => form.value?.save === false)
 
 async function load() {
   busy.value = true
@@ -42,7 +44,7 @@ onMounted(load)
 </script>
 <template>
   <section class="credential-request">
-    <h1>{{ t('credentialRequest.title') }}</h1>
+    <h1>{{ once ? t('credentialRequest.titleOnce') : t('credentialRequest.title') }}</h1>
     <el-alert
       v-if="error"
       data-test="error"
@@ -54,7 +56,7 @@ onMounted(load)
       v-if="saved"
       data-test="saved"
       icon="success"
-      :title="t('credentialRequest.saved')"
+      :title="once ? t('credentialRequest.handedOff') : t('credentialRequest.saved')"
       :sub-title="outcome || t('credentialRequest.savedHint')"
     />
     <template v-else-if="form">

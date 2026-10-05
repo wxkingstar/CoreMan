@@ -1,7 +1,8 @@
 """个人凭证的校验规则、加密 AAD 与本轮索取令牌。
 
 索取哪些凭证由 agent 按场景决定，这里只保留技术上必须的约束：键名能当环境变量用、
-不覆盖平台保留与控制类变量；值是单行、有长度上限。
+不覆盖平台保留与控制类变量；值是单行、有长度上限。agent 同时决定值要不要保存
+（`save`）：本人以后还要用的账号密钥才保存，交给它写进服务器或配置的一次性交付不保存。
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ CARD_PREFIX = "credential@"
 CAPABILITY_AAD = "personal_credentials.capability.v1"
 CAPABILITY_GRACE = 300
 REQUEST_TTL = timedelta(hours=1)
+# 一次性交付的值最长留多久：正常在续接轮结束时就擦掉，这是续接任务迟迟没跑完时的兜底。
+HANDOFF_MAX_AGE = timedelta(hours=2)
 MAX_FIELDS = 20
 MAX_VALUE = 4096
 FEISHU_MAX_VALUE = 1000
@@ -45,6 +48,10 @@ def value_aad(bot_id: uuid.UUID | str, user_id: uuid.UUID | str, env_key: str) -
 
 def sealed_aad(request_id: uuid.UUID | str) -> str:
     return f"credential_requests.sealed:{request_id}"
+
+
+def handoff_aad(request_id: uuid.UUID | str) -> str:
+    return f"credential_requests.handoff:{request_id}"
 
 
 def key_problem(key: str) -> str | None:
@@ -71,6 +78,8 @@ class RequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fields: list[FieldSpec] = Field(min_length=1, max_length=MAX_FIELDS)
     purpose: str = Field(min_length=1, max_length=300)
+    # 不填按一次性：判断漏了最多让用户再填一次，不会把服务器密钥当个人凭证长期留着。
+    save: bool = False
 
 
 def parse_request(body: Any) -> RequestBody:

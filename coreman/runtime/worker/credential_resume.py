@@ -29,7 +29,11 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.personal_credentials import cards
-from coreman.core.personal_credentials.service import RESUME_KIND, newer_turn_by_other
+from coreman.core.personal_credentials.service import (
+    RESUME_KIND,
+    drop_finished_handoff,
+    newer_turn_by_other,
+)
 from coreman.runtime.worker.chat_handler import (
     ChatTaskHandler,
     Intake,
@@ -44,6 +48,13 @@ SAVED_NOTICE = "凭证已保存，下次对话时生效。"
 RESET_NOTICE = "凭证已保存。对话已重置，请重新发起刚才的请求。"
 SUPERSEDED_NOTICE = "凭证已保存。对话里已有新的请求，请重新发起刚才的请求。"
 ANNOUNCED_NOTICE = "凭证已保存，维护结束后请重新发起刚才的请求。"
+# 一次性交付续不上时值当场丢弃，不能说「已保存」。
+DISCARDED_NOTICES = {
+    SAVED_NOTICE: "没能继续之前的任务，刚才提交的一次性密钥已丢弃，需要时请让 AI 员工重新发起。",
+    RESET_NOTICE: "对话已重置，刚才提交的一次性密钥已丢弃，请重新发起刚才的请求。",
+    SUPERSEDED_NOTICE: "对话里已有新的请求，刚才提交的一次性密钥已丢弃，请重新发起刚才的请求。",
+    ANNOUNCED_NOTICE: "刚才提交的一次性密钥已丢弃，维护结束后请重新发起刚才的请求。",
+}
 
 
 class _SessionChanged(ValueError):
@@ -54,6 +65,27 @@ class CredentialResumeHandler(ChatTaskHandler):
     kind = RESUME_KIND
 
     async def run(self, ctx: TaskContext) -> None:
+        try:
+            await self._run(ctx)
+        finally:
+            await self._drop_handoff(ctx)
+
+    async def _drop_handoff(self, ctx: TaskContext) -> None:
+        """一次性交付的值只给这一轮：任务结束就擦掉（被放回队列的留到下次认领）。
+
+        处理器异常退出时任务此刻还没写终态，留给清理任务按「续接任务已结束」兜底。
+        """
+        raw_id = ctx.task.payload.get("credential_request_id")
+        if not raw_id:
+            return
+        try:
+            async with ctx.session_factory() as session:
+                await drop_finished_handoff(session, uuid.UUID(str(raw_id)), task_id=ctx.task.id)
+                await session.commit()
+        except Exception:  # noqa: BLE001 擦不掉有清理任务兜底，不能盖住处理器原本的结果
+            ctx.log.exception("credential_handoff_drop_failed")
+
+    async def _run(self, ctx: TaskContext) -> None:
         try:
             await super().run(ctx)
         except _SessionChanged:
@@ -170,7 +202,9 @@ class CredentialResumeHandler(ChatTaskHandler):
             # 与 chat 流水线同一口径：维护期不开轮。来源那一轮的 req_id 早已过期，公告不走
             # reply_once，直接发到表单送达的会话，并告诉用户凭证已保存。
             ctx.log.info("announcement_intercepted", announcement_id=str(hit.id))
-            await self._saved_notice(session, bot, row, f"{hit.content}\n\n{ANNOUNCED_NOTICE}")
+            await self._saved_notice(
+                session, bot, row, ANNOUNCED_NOTICE, prefix=f"{hit.content}\n\n"
+            )
             await tasks.finish(
                 session, ctx.task.id, status="succeeded", result={"announcement": True}
             )
@@ -180,7 +214,9 @@ class CredentialResumeHandler(ChatTaskHandler):
         parts = [p for p in (inbound.payload.get("parts") or []) if isinstance(p, dict)]
         original = strip_mention(joined_text(parts), bot.name)
         # 与 store.save 返回的键名同序（已排序），保存通知和续接消息列出的顺序一致。
-        text = cards.resume_text(sorted(str(field["key"]) for field in row.fields), original)
+        text = cards.resume_text(
+            sorted(str(field["key"]) for field in row.fields), original, save=row.save
+        )
         intake = Intake(
             bot,
             relay,
@@ -213,9 +249,20 @@ class CredentialResumeHandler(ChatTaskHandler):
 
     @staticmethod
     async def _saved_notice(
-        session: AsyncSession, bot: Bot, row: CredentialRequest, text: str = SAVED_NOTICE
+        session: AsyncSession,
+        bot: Bot,
+        row: CredentialRequest,
+        text: str = SAVED_NOTICE,
+        *,
+        prefix: str = "",
     ) -> None:
-        """续不下去时只告诉用户凭证已保存：提交时已经承诺过会继续，不能悄悄收场。"""
+        """续不下去时只告诉用户凭证已保存：提交时已经承诺过会继续，不能悄悄收场。
+
+        一次性交付没有「下次生效」：值在这里当场擦掉，通知改说已丢弃。
+        """
+        if not row.save:
+            row.handoff_enc = None
+            text = DISCARDED_NOTICES[text]
         if not row.delivery_chat_id:
             return
         await outbox.add(
@@ -225,7 +272,7 @@ class CredentialResumeHandler(ChatTaskHandler):
             kind="send",
             dedupe_key=f"credential-request:{row.id}:resume-skipped",
             target={"chat_id": row.delivery_chat_id},
-            payload={"markdown": text},
+            payload={"markdown": prefix + text},
         )
 
     def _needs_content(self) -> bool:

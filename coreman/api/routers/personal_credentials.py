@@ -1,6 +1,7 @@
 """个人凭证接口：agent 用本轮令牌发起索取；本人登录后在网页上提交、查看、更新、删除。
 
-任何响应、错误与审计都不带值；提交值只在 service.submit() 里过一次手就加密落库。
+任何响应、错误与审计都不带值；提交值只在 service.submit() 里过一次手就加密落库
+（一次性交付暂存在请求上，续接轮结束即擦掉）。
 """
 
 from __future__ import annotations
@@ -79,7 +80,8 @@ async def create_request(
         "data": {
             "status": opened.status,
             "request_id": str(opened.request_id),
-            "message": service.AGENT_NOTE_CRON if cap.origin_kind == "cron" else service.AGENT_NOTE,
+            "save": opened.save,
+            "message": service.agent_note(cap, opened.save),
         },
     }
 
@@ -118,9 +120,10 @@ async def get_request(
             "platform": bot.platform if bot else "",
             "purpose": row.purpose,
             "fields": row.fields,
+            "save": row.save,
             "status": status,
             "expires_at": row.expires_at.isoformat(),
-            "security_note": cards.security_note(name),
+            "security_note": cards.security_note(name, save=row.save),
         },
     }
 

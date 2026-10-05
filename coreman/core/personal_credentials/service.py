@@ -1,13 +1,18 @@
-"""索取、提交、续接与过期。飞书卡片与 H5 页面两条提交路径汇入同一个 submit()。"""
+"""索取、提交、续接与过期。飞书卡片与 H5 页面两条提交路径汇入同一个 submit()。
+
+两种索取：`save` 的值存进 personal_credentials，之后本人的每一轮都注入；一次性交付的值
+只在请求行上暂存密文，给提交后的那一个续接轮用，续接轮结束或续接不成立时擦掉。
+"""
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, exists, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.audit import record_audit
@@ -42,6 +47,18 @@ AGENT_NOTE_CRON = (
     "已向用户发送安全表单。定时任务不会因为用户提交而续接：请在输出里说明本次缺少凭证，"
     "然后结束本轮；用户提交的值从下一次定时运行起生效。"
 )
+AGENT_NOTE_ONCE = (
+    "已向用户发送一次性密钥表单。请简短告诉用户去填写，然后结束本轮；用户提交后会自动续接，"
+    "值只在续接的那一轮环境变量里，那一轮结束即删除，不会保存。"
+)
+# 一次性交付续不上时，提交的值当场丢弃。
+DISCARDED = "对话已经变化，提交的内容已丢弃，请让 AI 员工重新发起。"
+
+
+def agent_note(cap: Capability, save: bool) -> str:
+    if cap.origin_kind == "cron":
+        return AGENT_NOTE_CRON
+    return AGENT_NOTE if save else AGENT_NOTE_ONCE
 
 
 def page_url(base_url: str, request_id: uuid.UUID) -> str:
@@ -99,6 +116,7 @@ async def capability_scope(session: AsyncSession, cap: Capability) -> tuple[Bot,
 class Opened:
     status: Literal["form_sent", "already_pending"]
     request_id: uuid.UUID
+    save: bool
 
 
 def _delivery(
@@ -152,6 +170,11 @@ async def open_request(
 ) -> Opened:
     bot, user = await capability_scope(session, cap)
     parsed = policy.parse_request(body)
+    if cap.origin_kind == "cron" and not parsed.save:
+        raise CredentialError(
+            "invalid_fields",
+            "定时任务不会续接，一次性密钥用不上：以后每次运行都要用的凭证请把 save 设为 true",
+        )
     now = now or utcnow()
     keys = sorted(f.key for f in parsed.fields)
     # 同一人同一员工的并发请求在这里排队：后到的等前一个提交，再看见它发出的表单并复用。
@@ -168,8 +191,12 @@ async def open_request(
         )
     )
     for existing in pending:
-        if sorted(str(f["key"]) for f in existing.fields) == keys and _same_origin(existing, cap):
-            return Opened("already_pending", existing.id)
+        if (
+            sorted(str(f["key"]) for f in existing.fields) == keys
+            and existing.save == parsed.save
+            and _same_origin(existing, cap)
+        ):
+            return Opened("already_pending", existing.id, existing.save)
     reached = await session.get(UserReached, (bot.id, user.id), populate_existing=True)
     identity = await _identity(session, user.id, bot.platform)
     delivery, recipient = _delivery(cap, reached, identity)
@@ -195,6 +222,7 @@ async def open_request(
         delivery_chat_id=delivery,
         fields=[f.model_dump() for f in parsed.fields],
         purpose=parsed.purpose,
+        save=parsed.save,
         status="open",
         expires_at=now + policy.REQUEST_TTL,
     )
@@ -217,12 +245,17 @@ async def open_request(
                 fields=row.fields,
                 web_url=url if await login_available(session, "feishu") else None,
                 mention_open_id=mention,
+                save=parsed.save,
             )
         }
     else:
         payload = {
             "markdown": cards.wecom_link(
-                bot_name=bot.name, purpose=parsed.purpose, fields=row.fields, url=url
+                bot_name=bot.name,
+                purpose=parsed.purpose,
+                fields=row.fields,
+                url=url,
+                save=parsed.save,
             )
         }
     item = await outbox.add(
@@ -245,7 +278,7 @@ async def open_request(
             target={"chat_id": cap.chat_id},
             payload={"markdown": cards.GROUP_NOTICE},
         )
-    return Opened("form_sent", row.id)
+    return Opened("form_sent", row.id, row.save)
 
 
 @dataclass(frozen=True)
@@ -285,12 +318,15 @@ async def submit(
         cleaned = policy.clean_values(row.fields, values, limit=limit)
     except CredentialError as exc:
         return Submitted("invalid", exc.message)
-    keys = await store.save(
-        session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
-    )
+    if row.save:
+        keys = await store.save(
+            session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
+        )
+    else:
+        keys = sorted(cleaned)
     await record_audit(
         session,
-        action="personal_credential.saved",
+        action="personal_credential.saved" if row.save else "personal_credential.handed_off",
         actor_id=user.id,
         actor_login=user.login_name,
         target_type="bot",
@@ -299,6 +335,12 @@ async def submit(
     )
     resumed: set[tuple[str | None, uuid.UUID | None]] = set()
     tail = await _settle(session, bot, user, row, keys, now, resumed)
+    if not row.save:
+        # 一次性交付只给自己的续接轮：续不上就不落这份值；也不结算别的表单，
+        # 那些表单等的要么是保存的值，要么是给它们自己那一轮的值。
+        if row.resume_task_id is not None:
+            row.handoff_enc = cipher.encrypt(json.dumps(cleaned), policy.handoff_aad(row.id))
+        return Submitted("saved", tail, tuple(keys))
     # 别的对话或定时任务也在等这些键：值已经保存，它们的表单不必再填，各自续接。
     for waiting in await _waiting(session, row, keys, now):
         await _settle(session, bot, user, waiting, keys, now, resumed)
@@ -308,13 +350,14 @@ async def submit(
 async def _waiting(
     session: AsyncSession, row: CredentialRequest, keys: list[str], now: datetime
 ) -> list[CredentialRequest]:
-    """同一用户、同一 AI 员工下，键全部被刚保存的值覆盖的其他未过期请求。"""
+    """同一用户、同一 AI 员工下，键全部被刚保存的值覆盖的其他未过期、要保存的请求。"""
     found = await session.scalars(
         select(CredentialRequest)
         .where(
             CredentialRequest.bot_id == row.bot_id,
             CredentialRequest.user_id == row.user_id,
             CredentialRequest.id != row.id,
+            CredentialRequest.save.is_(True),
             CredentialRequest.status == "open",
             CredentialRequest.expires_at > now,
         )
@@ -349,11 +392,19 @@ async def _settle(
             resumed.add(conversation)
     if continuing:
         tail = "AI 员工会继续之前的任务。"
+    elif not row.save:
+        tail = DISCARDED
     else:
         tail = "下次执行时生效。" if row.origin_kind == "cron" else "下次对话时生效。"
-    await _update_card(session, bot, row, cards.saved_card(row.id, keys, tail))
+    if row.save:
+        card = cards.saved_card(row.id, keys, tail)
+    else:
+        card = cards.handoff_card(row.id, keys, tail, continuing=continuing)
+    await _update_card(session, bot, row, card)
     if bot.platform == "wecom" and not continuing:
-        await _say(session, bot, row, "saved", f"已保存 {'、'.join(keys)}，{tail}")
+        names = "、".join(keys)
+        notice = f"已保存 {names}，{tail}" if row.save else f"{names} 没有使用：{tail}"
+        await _say(session, bot, row, "saved", notice)
     return tail
 
 
@@ -516,5 +567,39 @@ async def cleanup(session: AsyncSession, now: datetime, *, limit: int = 500) -> 
         delete(CredentialRequest)
         .where(CredentialRequest.id.in_(doomed))
         .returning(CredentialRequest.id)
+    )
+    return len(result.all())
+
+
+async def drop_finished_handoff(
+    session: AsyncSession, request_id: uuid.UUID, *, task_id: int
+) -> None:
+    """续接轮收尾时擦掉一次性交付的值；任务还在排队或运行（例如被放回队列稍后再跑）就先留着。"""
+    still_open = exists().where(Task.id == task_id, Task.status.in_(tasks.OPEN))
+    await session.execute(
+        update(CredentialRequest)
+        .where(
+            CredentialRequest.id == request_id,
+            CredentialRequest.resume_task_id == task_id,
+            CredentialRequest.handoff_enc.is_not(None),
+            ~still_open,
+        )
+        .values(handoff_enc=None)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def wipe_handoffs(session: AsyncSession, now: datetime) -> int:
+    """兜底：续接任务已结束（或不在了）、或提交已超过最长留存时间的一次性交付值一律擦掉。"""
+    live = exists().where(Task.id == CredentialRequest.resume_task_id, Task.status.in_(tasks.OPEN))
+    result = await session.execute(
+        update(CredentialRequest)
+        .where(
+            CredentialRequest.handoff_enc.is_not(None),
+            (CredentialRequest.submitted_at < now - policy.HANDOFF_MAX_AGE) | ~live,
+        )
+        .values(handoff_enc=None)
+        .returning(CredentialRequest.id)
+        .execution_options(synchronize_session=False)
     )
     return len(result.all())

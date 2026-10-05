@@ -13,7 +13,7 @@ const open: CredentialRequest = {
     { key: 'DEMO_USERNAME', label: '账号', secret: false, placeholder: '' },
     { key: 'DEMO_PIN', label: 'PIN', secret: true, placeholder: '' },
   ],
-  status: 'open', expires_at: '2026-10-03T02:00:00Z', security_note: '🔒 安全说明：不会发送给 AI 模型。',
+  save: true, status: 'open', expires_at: '2026-10-03T02:00:00Z', security_note: '🔒 安全说明：不会发送给 AI 模型。',
 }
 const render = () => mount(CredentialRequestView, { global: { plugins: [ElementPlus, i18n] } })
 
@@ -96,5 +96,18 @@ it('shows a closed form without inputs', async () => {
   const wrapper = render(); await flushPromises()
   expect(wrapper.find('[data-test="closed"]').exists()).toBe(true)
   expect(wrapper.find('form').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+it('labels a one-time form as such and never says saved', async () => {
+  vi.mocked(personalCredentials.request).mockResolvedValue({ ...open, save: false })
+  const wrapper = render(); await flushPromises()
+  expect(wrapper.get('h1').text()).toBe('提供一次性密钥')
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  const done = wrapper.get('[data-test="saved"]')
+  expect(done.text()).toContain('已交付')
+  expect(done.text()).not.toContain('已保存')
   wrapper.unmount()
 })
