@@ -228,13 +228,13 @@ onMounted(load)
           <small>{{ t('infra.accessTestUrlHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.enabled')">
-          <el-switch v-model="form.enabled" />
+          <el-switch v-model="form.enabled" /><small class="switch-hint">{{ t('infra.enabledHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.defaultAccess')">
-          <el-switch v-model="form.default_for_all_bots" />
+          <el-switch v-model="form.default_for_all_bots" /><small class="switch-hint">{{ t('infra.defaultAccessHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.restrictBots')">
-          <el-switch v-model="restricted" />
+          <el-switch v-model="restricted" /><small class="switch-hint">{{ t('infra.restrictBotsHint') }}</small>
           <small
             v-if="!restricted"
             data-test="open-to-all-warning"
@@ -260,7 +260,7 @@ onMounted(load)
           </el-select><small>{{ t('infra.emptyWhitelist') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.sortOrder')">
-          <el-input-number v-model="form.sort_order" />
+          <el-input-number v-model="form.sort_order" /><small class="switch-hint">{{ t('infra.sortOrderHint') }}</small>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -278,4 +278,4 @@ onMounted(load)
     </el-dialog>
   </section>
 </template>
-<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px } .open-warning { display:block; width:100%; color:var(--el-color-warning) }</style>
+<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px } .switch-hint { flex:1; min-width:0; margin:0 0 0 12px; line-height:1.5 } .open-warning { display:block; width:100%; color:var(--el-color-warning) }</style>
