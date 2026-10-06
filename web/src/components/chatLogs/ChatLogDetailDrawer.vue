@@ -94,6 +94,34 @@ defineExpose({ open })
           </el-descriptions-item>
         </el-descriptions>
 
+        <template v-if="detail.data.business_tokens?.length">
+          <h4>{{ t('chatLogs.businessTokens') }}</h4>
+          <el-table
+            :data="detail.data.business_tokens"
+            size="small"
+            data-test="business-tokens"
+          >
+            <el-table-column
+              prop="system_key"
+              :label="t('chatLogs.tokenSystem')"
+              width="140"
+            />
+            <el-table-column :label="t('chatLogs.tokenId')">
+              <template #default="{ row }">
+                <span class="mono">{{ row.token_id ?? '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column
+              :label="t('chatLogs.tokenExpires')"
+              width="180"
+            >
+              <template #default="{ row }">
+                {{ row.expires_at ? formatDateTime(row.expires_at) : '—' }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+
         <h4>{{ t('chatLogs.message') }}</h4>
         <MarkdownContent :content="detail.data.message_content ?? detail.data.message_preview ?? '—'" />
         <template v-if="detail.data.quoted_content">
@@ -113,6 +141,7 @@ defineExpose({ open })
 
 <style scoped>
 .chip { margin-right: 6px; }
+.mono { font-family: var(--el-font-family-mono, monospace); word-break: break-all; }
 .body {
   margin: 0 0 12px;
   padding: 8px 12px;

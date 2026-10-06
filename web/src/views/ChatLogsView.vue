@@ -23,6 +23,7 @@ type ChatFilters = {
   status: string
   chat_type: string
   keyword: string
+  token_id: string
   since: string | null
   until: string | null
 }
@@ -40,6 +41,7 @@ const paged = usePaged<ChatLogOut, ChatFilters>((q) => chatLogs.list(clean(q)), 
   status: '',
   chat_type: '',
   keyword: '',
+  token_id: '',
   since: null,
   until: null,
 })
@@ -221,6 +223,18 @@ defineExpose({ paged, openDetail })
           clearable
           maxlength="200"
           style="width: 200px"
+        />
+      </el-form-item>
+      <el-form-item
+        :label="t('chatLogs.tokenId')"
+        data-test="filter-token-id"
+      >
+        <el-input
+          v-model.trim="paged.filters.token_id"
+          clearable
+          maxlength="256"
+          :placeholder="t('chatLogs.tokenIdHint')"
+          style="width: 220px"
         />
       </el-form-item>
       <el-form-item

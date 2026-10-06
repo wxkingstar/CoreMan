@@ -49,6 +49,7 @@ BUSINESS_TABLES = [
     "cron_runs",
     "cron_jobs",
     "escalations",
+    "business_token_issues",
     "bot_system_grants",
     "system_grant_audit",
     "systems",

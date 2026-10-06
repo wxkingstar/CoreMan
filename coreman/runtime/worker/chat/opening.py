@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
 from coreman.core.chat import chat_logs, sessions
 from coreman.core.chat.identity import resolve_speaker
@@ -188,6 +189,16 @@ class OpenStage(ChatStageBase):
             issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
+        )
+        # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
+        await record_issues(
+            session,
+            access.issued,
+            purpose="chat",
+            subject=access.subject or "",
+            task_id=ctx.task.id,
+            bot_id=bot.id,
+            user_id=intake.speaker.user_id,
         )
         env = build_env(
             bot_key=bot.bot_key,

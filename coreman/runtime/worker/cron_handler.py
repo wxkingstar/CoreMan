@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
 from coreman.core.chat import chat_logs
 from coreman.core.chat import human_collaboration as human
@@ -196,6 +197,15 @@ class CronRunHandler:
                     issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
                     external_key=ctx.external_jwt_key,
                     providers=ctx.business_token_providers,
+                )
+                await record_issues(
+                    session,
+                    access.issued,
+                    purpose="cron",
+                    subject=access.subject or "",
+                    task_id=ctx.task.id,
+                    bot_id=bot.id,
+                    user_id=speaker.user_id,
                 )
                 env = build_env(
                     bot_key=bot.bot_key,

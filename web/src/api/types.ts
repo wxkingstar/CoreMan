@@ -183,6 +183,12 @@ export interface ChatLogOut {
   error_message?: string | null
   relay_server_id?: string | null
   cost_usd?: number | null
+  /** 这一轮签发过的业务系统令牌（只有标识，不含令牌），用来和业务系统日志的 token_id 对账。 */
+  business_tokens?: BusinessTokenIssue[]
+}
+export interface BusinessTokenIssue {
+  system_key: string; provider: string; audience: string; subject: string
+  token_id: string | null; issued_at: string | null; expires_at: string | null
 }
 export interface ChatLogByBot {
   bot_id: string; bot_key: string; bot_name?: string | null; total: number

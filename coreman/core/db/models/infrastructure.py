@@ -75,6 +75,44 @@ class SystemGrantAudit(Base):
     )
 
 
+TOKEN_ISSUE_PURPOSES = ("chat", "cron", "health", "access_test")
+
+
+class BusinessTokenIssue(Base):
+    """每次为业务系统签发的令牌：只记令牌标识和签发上下文，不记令牌本身。
+
+    业务系统日志里的 token_id（JWT 的 jti）按它查回是哪个 AI 员工、哪一轮任务、替谁签的。
+    不加外键：机器人、用户删除后签发记录仍要能追溯。
+    """
+
+    __tablename__ = "business_token_issues"
+    __table_args__ = (
+        CheckConstraint("purpose IN ('chat','cron','health','access_test')", name="purpose"),
+        Index(
+            "business_token_issues_token_idx",
+            "token_id",
+            postgresql_where=text("token_id IS NOT NULL"),
+        ),
+        Index("business_token_issues_task_idx", "task_id"),
+        Index("business_token_issues_time_idx", "issued_at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    purpose: Mapped[str] = mapped_column(Text)
+    task_id: Mapped[int | None] = mapped_column(BigInteger)
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    subject: Mapped[str] = mapped_column(Text)
+    system_key: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(Text)
+    audience: Mapped[str] = mapped_column(Text)
+    # JWT 的 jti；外部签发方返回不透明令牌时为空。
+    token_id: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ApiClient(TimestampMixin, Base):
     __tablename__ = "api_clients"
     app_key: Mapped[str] = mapped_column(Text, primary_key=True)

@@ -43,9 +43,11 @@ from coreman.core.db.models.bus import (
 from coreman.core.db.models.feishu_apps import FeishuAppRegistration
 from coreman.core.db.models.feishu_personal import FeishuPersonalGrant, FeishuPersonalSend
 from coreman.core.db.models.infrastructure import (
+    TOKEN_ISSUE_PURPOSES,
     ApiClient,
     BotSystemGrant,
     BusinessSystem,
+    BusinessTokenIssue,
     JwtKey,
 )
 from coreman.core.db.models.interactions import (
@@ -125,6 +127,8 @@ __all__ = [
     "ApiClient",
     "BotSystemGrant",
     "BusinessSystem",
+    "BusinessTokenIssue",
+    "TOKEN_ISSUE_PURPOSES",
     "JwtKey",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",

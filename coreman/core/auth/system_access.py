@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.external_key import ExternalKey
 from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+from coreman.core.auth.token_issues import IssuedRecord
 from coreman.core.auth.token_providers import (
     PLATFORM_AUDIENCE as PLATFORM_AUDIENCE,
 )
@@ -92,6 +93,9 @@ async def user_for_subject(session: AsyncSession, subject: str) -> User | None:
 class SystemAccess:
     env: dict[str, str] = field(default_factory=dict)
     prompt: str = ""
+    subject: str | None = None
+    # 本轮签发成功的令牌（不含令牌本身），调用方按任务上下文写进签发记录（token_issues）。
+    issued: list[IssuedRecord] = field(default_factory=list)
 
 
 # 拿不到唯一 sub 时替代「业务系统访问」段的说明。写成模型对用户的行动指引，不是错误码。
@@ -159,11 +163,12 @@ async def build_system_access(
         return SystemAccess(prompt=SUBJECT_UNAVAILABLE_PROMPTS[exc.reason] if systems else "")
     if not systems:
         # 没有业务系统也下发 sub：提示词把它写成权威身份之一，就不能时有时无。
-        return SystemAccess({"COREMAN_USER_SUBJECT": subject})
+        return SystemAccess({"COREMAN_USER_SUBJECT": subject}, subject=subject)
     ttl_seconds = min(bot.sse_timeout_seconds, task_timeout_seconds or bot.sse_timeout_seconds)
     env: dict[str, str] = {}
     configs: list[dict[str, object]] = []
     lines: list[str] = []
+    issued: list[IssuedRecord] = []
     for system in systems:
         try:
             token = await issue_system_token(
@@ -185,6 +190,15 @@ async def build_system_access(
             continue
         env_var = f"BOT_TOKEN_{system.key.upper()}"
         env[env_var] = token.value
+        issued.append(
+            IssuedRecord(
+                system_key=system.key,
+                provider=system.token_provider,
+                audience=system.token_audience or system.key,
+                token_id=token.token_id,
+                expires_at=token.expires_at,
+            )
+        )
         config: dict[str, object] = {
             "key": system.key,
             "name": system.name,
@@ -213,4 +227,4 @@ async def build_system_access(
         "expires_at 是 UTC Unix 秒，令牌过期后停止调用，并请用户重新发起一轮任务；"
         "本轮运行中的进程不会自动更新令牌。"
     )
-    return SystemAccess(env, prompt)
+    return SystemAccess(env, prompt, subject=subject, issued=issued)
