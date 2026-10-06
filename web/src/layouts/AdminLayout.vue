@@ -237,7 +237,7 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
 <style scoped>
 .layout { min-height: 100vh; }
 .aside { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--cm-border); background: var(--cm-surface); padding: 24px 12px 12px; flex-shrink: 0; }
-.brand { display: flex; align-items: center; gap: 12px; padding: 0 12px 28px; color: var(--cm-text); font-size: 21px; font-weight: 700; text-decoration: none; }
+.brand { display: flex; align-items: center; gap: 12px; height: 72px; margin: -24px -12px 16px; padding: 0 24px; border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); color: var(--cm-text); font-size: 21px; font-weight: 700; text-decoration: none; }
 .brand small { display: block; font-size: 11px; font-weight: 400; color: var(--cm-muted); letter-spacing: 1px; }
 .el-menu { border: 0; background: transparent; }
 :deep(.el-menu-item), :deep(.el-sub-menu__title) { height: 44px; border-radius: 7px; padding-left: 12px !important; margin-bottom: 3px; }
@@ -246,7 +246,7 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
 :deep(.el-sub-menu .el-menu-item) { min-width: 0; padding-left: 42px !important; font-size: 13px; }
 .aside-footer { border-top: 1px solid var(--cm-border); padding: 16px 12px 4px; margin-top: 24px; color: var(--cm-muted); font-size: 12px; }
 .main-shell { min-width: 0; display: flex; flex-direction: column; }
-.header { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 72px; padding: 0 28px; border-bottom: 1px solid var(--cm-border); background: var(--cm-surface); }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 72px; padding: 0 28px; border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); }
 .controls, .breadcrumb { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .controls .el-button { margin: 0; } .user-name { color: var(--cm-muted); font-size: 13px; }
 .breadcrumb { font-weight: 600; }

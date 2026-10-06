@@ -12,6 +12,10 @@ import { i18n } from './i18n'
 import { router } from './router'
 
 try { document.documentElement.classList.toggle('dark', localStorage.getItem('coreman.dark') === '1') } catch { /* storage unavailable */ }
+const themeColor = document.querySelector('meta[name="theme-color"]')
+const syncThemeColor = () => themeColor?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--cm-topbar').trim())
+new MutationObserver(syncThemeColor).observe(document.documentElement, { attributeFilter: ['class'] })
+syncThemeColor()
 
 document.documentElement.lang = i18n.global.locale.value === 'zh' ? 'zh-CN' : i18n.global.locale.value
 createApp(App).use(createPinia()).use(router).use(i18n).use(ElementPlus).mount('#app')
