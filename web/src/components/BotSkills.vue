@@ -4,7 +4,7 @@ import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import LoadState from '@/components/LoadState.vue'
 import TruncatedText from '@/components/TruncatedText.vue'
-import { computed, ref, reactive, watch } from 'vue'
+import { computed, onMounted, ref, reactive } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { allSkills, skills, type Skill, type Installed, type Approval, type InstallInput, type Source, type Preset } from '@/api/skills'
@@ -16,7 +16,7 @@ const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.
 const skillDialog = ref<InstanceType<typeof SkillEditorDialog>>()
 const sources = ref<Source[]>([]), presets = ref<Preset[]>([])
 const loadError = ref('')
-const visible = ref(false), editing = ref(false), busy = ref(false)
+const editing = ref(false), busy = ref(false)
 const catalog = ref<Skill[]>([]), rows = ref<Installed[]>([]), pending = ref<Approval[]>([])
 const selected = ref<Skill | null>(null)
 const databaseOptions = computed(() => Object.entries(selected.value?.selectable_env_groups ?? {}).map(([value, label]) => ({ value, label })))
@@ -29,7 +29,7 @@ async function load() {
   try { const [available, installed] = await Promise.all([allSkills(), skills.installed(props.botId)]); catalog.value = available; rows.value = installed.items; pending.value = installed.pending_approvals }
   catch (e) { loadError.value = errorMessage(e); fail(e) } finally { busy.value = false }
 }
-watch(visible, value => { if (value) void load() })
+onMounted(load)
 async function configure(skill: Skill) {
   if (!manager.value || busy.value) return
   busy.value = true
@@ -58,29 +58,21 @@ async function remove(row: Installed) {
 }
 </script>
 <template>
-  <el-button
-    data-test="skills-open"
-    @click="visible = true"
-  >
-    {{ t('menu.skills') }}
-  </el-button>
-  <el-dialog
-    v-model="visible"
-    :title="t('menu.skills')"
-    width="900px"
-    destroy-on-close
-  >
-    <el-alert
-      :title="t('skill.installHint')"
-      :closable="false"
-      type="info"
-    />
-    <el-button
-      :loading="busy"
-      @click="load"
-    >
-      {{ t('common.refresh') }}
-    </el-button>
+  <section class="cm-panel">
+    <div class="panel-head">
+      <div>
+        <h3>{{ t('menu.skills') }}</h3>
+        <p class="panel-hint">
+          {{ t('skill.installHint') }}
+        </p>
+      </div>
+      <el-button
+        :loading="busy"
+        @click="load"
+      >
+        {{ t('common.refresh') }}
+      </el-button>
+    </div>
     <LoadState
       :error="loadError"
       @retry="load"
@@ -207,7 +199,7 @@ async function remove(row: Installed) {
         </template>
       </el-table-column>
     </el-table>
-  </el-dialog>
+  </section>
   <SkillEditorDialog
     v-if="manager"
     ref="skillDialog"
@@ -299,6 +291,9 @@ async function remove(row: Installed) {
   </el-dialog>
 </template>
 <style scoped>
+.panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 16px; }
+.panel-head h3 { margin: 0 0 6px; }
+.panel-hint { margin: 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.7; }
 /* 全局样式把 h3 的上边距清零，这里给第二个列表留出分节间距 */
 .skill-section-title { margin: 24px 0 12px; }
 .skill-table + .el-alert { margin-top: 16px; }

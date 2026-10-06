@@ -179,12 +179,16 @@ describe('Infrastructure management', () => {
     vi.mocked(systems.grants).mockResolvedValue({ system_keys: ['erp'], version: 7 })
     vi.mocked(systems.saveGrants).mockResolvedValue({ system_keys: [], version: 8 })
     const wrapper = mount(SystemGrants, { props: { botId: 'bot1' }, global: { plugins } })
-    await wrapper.get('button').trigger('click'); await flushPromises()
+    await flushPromises()
     const vm = wrapper.vm as unknown as { options: typeof erp[]; keys: string[]; save: () => Promise<void> }
     expect(vm.options.map(s => s.key)).toEqual(['erp'])
-    vm.keys = []; await vm.save()
+    expect(wrapper.text()).toContain('（1）')
+    vm.keys = []; await vm.save(); await flushPromises()
     expect(systems.saveGrants).toHaveBeenCalledWith('bot1', [], 7)
     expect(wrapper.emitted('saved')).toHaveLength(1)
+    // 保存后页面上直接反映新状态：计数归零，保存按钮回到不可点。
+    expect(wrapper.text()).toContain('（0）')
+    expect(wrapper.get('[data-test="save-grants"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 })

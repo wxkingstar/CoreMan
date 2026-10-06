@@ -10,15 +10,13 @@ import BotSkills from '@/components/BotSkills.vue'
 import { i18n } from '@/i18n'
 
 beforeEach(() => vi.clearAllMocks())
-it('loads only on open and submits a scope without marking the skill installed', async () => {
+it('loads on mount and submits a scope without marking the skill installed', async () => {
   const item = { id: 's1', name: 'query', description: 'Query', enabled: true, security_level: 'internal', selectable_env_groups: { erp: 'ERP' }, user_env_vars: {}, security_prompt_template: 'Read only', default_data_source: null }
   vi.mocked(allSkills).mockResolvedValue([item] as never)
   vi.mocked(skills.installed).mockResolvedValue({ items: [], pending_approvals: [] })
   vi.mocked(skills.install).mockResolvedValue({ status: 'pending_approval' })
   const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
   await flushPromises()
-  expect(skills.installed).not.toHaveBeenCalled()
-  await wrapper.get('[data-test="skills-open"]').trigger('click'); await flushPromises()
   expect(skills.installed).toHaveBeenCalledWith('b1')
   await wrapper.get('[data-test="skill-install-s1"]').trigger('click'); await flushPromises()
   await wrapper.get('[data-test="skill-submit"]').trigger('click'); await flushPromises()
@@ -34,7 +32,7 @@ it('shows disabled catalog entries and lets managers configure them before insta
   const pinia = createPinia()
   useAuthStore(pinia).user = { role: 'platform_admin' } as never
   const wrapper = mount(BotSkills, { props: { botId: 'b1' }, attachTo: document.body, global: { plugins: [pinia, ElementPlus, i18n], stubs: { teleport: true, ElSelect: true } } })
-  await wrapper.get('[data-test="skills-open"]').trigger('click'); await flushPromises()
+  await flushPromises()
   expect(wrapper.text()).toContain('disabled-query')
   expect(wrapper.text()).toContain('已禁用')
   expect(wrapper.find('[data-test="skill-configure-s2"]').exists()).toBe(true)
@@ -60,7 +58,7 @@ it('keeps descriptions and install errors on a single truncated line', async () 
   vi.mocked(allSkills).mockResolvedValue([item] as never)
   vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's1', name: 'query', status: 'failed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: 'git clone failed' }], pending_approvals: [] })
   const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
-  await wrapper.get('[data-test="skills-open"]').trigger('click'); await flushPromises()
+  await flushPromises()
   expect(wrapper.findAll('.truncated-text-preview').map(node => node.text())).toEqual(['安装未完成 · git clone failed', 'Long description'])
   expect(wrapper.find('.el-table p').exists()).toBe(false)
   wrapper.unmount()

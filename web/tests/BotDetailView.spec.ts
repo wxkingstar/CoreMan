@@ -39,6 +39,7 @@ vi.mock('@/api/admin', () => ({
 }))
 
 import { bots } from '@/api/admin'
+import BotAllowedUsersPanel from '@/components/bot/BotAllowedUsersPanel.vue'
 import UserPicker from '@/components/UserPicker.vue'
 import { i18n } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -63,6 +64,11 @@ async function mountDetail(data: ReturnType<typeof bot>, path = '/bots/b1') {
   return wrapper
 }
 
+async function openAccessTab(wrapper: Awaited<ReturnType<typeof mountDetail>>) {
+  ;(wrapper.vm as unknown as { detailTab: string }).detailTab = 'access'
+  await flushPromises()
+}
+
 describe('BotDetailView', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
@@ -73,8 +79,7 @@ describe('BotDetailView', () => {
     expect(wrapper.text()).toContain('we••••ue')
     // 通知目的地已移到定时任务，员工详情不再展示。
     expect(wrapper.text()).not.toContain('ht••••-1')
-    await wrapper.get('[data-test="open-members"]').trigger('click')
-    await flushPromises()
+    await openAccessTab(wrapper)
     expect(document.body.textContent).toContain('李四')
     document.querySelector<HTMLButtonElement>('[data-test="remove-member-u1"]')!.click()
     await flushPromises()
@@ -140,9 +145,8 @@ describe('BotDetailView', () => {
   it('replaces the allowed-user set from the picker', async () => {
     vi.mocked(bots.setAllowedUsers).mockResolvedValue([{ user_id: 'u9', login_name: 'wang', display_name: '王九' }])
     const wrapper = await mountDetail(bot())
-    await wrapper.get('[data-test="open-allowed"]').trigger('click')
-    await flushPromises()
-    wrapper.findComponent(UserPicker).vm.$emit('update:modelValue', ['u9'])
+    await openAccessTab(wrapper)
+    wrapper.findComponent(BotAllowedUsersPanel).findComponent(UserPicker).vm.$emit('update:modelValue', ['u9'])
     await flushPromises()
     document.querySelector<HTMLButtonElement>('[data-test="save-allowed"]')!.click()
     await flushPromises()
