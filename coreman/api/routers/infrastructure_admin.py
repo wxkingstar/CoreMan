@@ -48,6 +48,9 @@ class SystemIn(BaseModel):
     description: str | None = Field(default=None, max_length=5000)
     base_url: str | None = Field(default=None, max_length=2048)
     sitemap_url: str | None = Field(default=None, max_length=2048)
+    token_provider: str = Field(default="builtin", min_length=1, max_length=100)
+    token_audience: str | None = Field(default=None, max_length=2048)
+    access_test_url: str | None = Field(default=None, max_length=2048)
     enabled: bool = True
     sort_order: int = 0
     default_for_all_bots: bool = False
@@ -56,7 +59,12 @@ class SystemIn(BaseModel):
     # 新系统不能在没人确认的情况下对所有机器人开放。
     allowed_bot_ids: list[uuid.UUID] | None = Field(default_factory=list, max_length=500)
 
-    @field_validator("base_url", "sitemap_url")
+    @field_validator("token_audience", "access_test_url", mode="before")
+    @classmethod
+    def normalize_optional(cls, value: Any) -> Any:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("base_url", "sitemap_url", "access_test_url")
     @classmethod
     def valid_url(cls, value: str | None) -> str | None:
         if value:
@@ -121,6 +129,9 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "description",
             "base_url",
             "sitemap_url",
+            "token_provider",
+            "token_audience",
+            "access_test_url",
             "enabled",
             "sort_order",
             "default_for_all_bots",
@@ -182,6 +193,49 @@ async def check_bots(session: AsyncSession, ids: list[uuid.UUID] | None) -> None
             raise ApiError(422, 422, "白名单包含不存在的机器人")
 
 
+def validate_provider_settings(
+    request: Request, values: dict[str, Any], previous: str | None = None
+) -> None:
+    if values.get("token_audience") in RESERVED_SYSTEM_KEYS:
+        raise ApiError(422, 422, "令牌受众为平台保留标识")
+    provider = values["token_provider"]
+    configured = request.app.state.settings.business_token_providers
+    if provider != "builtin" and provider != previous and provider not in configured:
+        raise ApiError(422, 422, "未知令牌签发方")
+    test_url = values["access_test_url"]
+    if test_url:
+        base = urlsplit(values["base_url"] or "")
+        probe = urlsplit(test_url)
+        try:
+            base_origin = (
+                base.scheme,
+                base.hostname,
+                base.port or (443 if base.scheme == "https" else 80),
+            )
+            probe_origin = (
+                probe.scheme,
+                probe.hostname,
+                probe.port or (443 if probe.scheme == "https" else 80),
+            )
+        except ValueError as exc:
+            raise ApiError(422, 422, "无效端口") from exc
+        if not base.hostname or base_origin != probe_origin or probe.fragment:
+            raise ApiError(422, 422, "测试地址必须与系统地址同源且不含片段")
+
+
+@router.get("/token-providers")
+async def list_token_providers(request: Request, user: User = Depends(MANAGERS)) -> dict[str, Any]:
+    providers = request.app.state.settings.business_token_providers
+    return {
+        "code": 0,
+        "data": [{"id": "builtin", "max_token_ttl_seconds": None}]
+        + [
+            {"id": name, "max_token_ttl_seconds": config.max_token_ttl_seconds}
+            for name, config in sorted(providers.items())
+        ],
+    }
+
+
 @router.get("/systems")
 async def list_systems(
     user: User = Depends(current_user),
@@ -207,10 +261,23 @@ async def create_system(
     if await session.get(BusinessSystem, body.key):
         raise ApiError(409, 409, "系统标识已存在")
     await check_bots(session, body.allowed_bot_ids)
+    validate_provider_settings(request, body.model_dump())
     row = BusinessSystem(**body.model_dump())
     session.add(row)
     await persist(session)
-    await audit(session, request, user, "system.create", "system", row.key)
+    await audit(
+        session,
+        request,
+        user,
+        "system.create",
+        "system",
+        row.key,
+        {
+            field: [None, getattr(row, field)]
+            for field in ("token_provider", "token_audience", "access_test_url")
+            if getattr(row, field) is not None
+        },
+    )
     await persist(session, commit=True)
     return {"code": 0, "data": system_out(row)}
 
@@ -233,7 +300,17 @@ async def update_system(
         raise not_found("系统不存在")
     require_if_match(request, row.version)
     await check_bots(session, body.allowed_bot_ids)
-    for field, value in body.model_dump().items():
+    values = body.model_dump()
+    provider_fields = ("token_provider", "token_audience", "access_test_url")
+    for field in provider_fields:
+        if field not in body.model_fields_set:
+            values[field] = getattr(row, field)
+    validate_provider_settings(request, values, row.token_provider)
+    provider_diff = diff_dict(
+        {field: getattr(row, field) for field in provider_fields},
+        {field: values[field] for field in provider_fields},
+    )
+    for field, value in values.items():
         setattr(row, field, value)
     # 白名单变窄时实际删除授权，之后放开也不会悄悄恢复历史授权。
     removed: list[uuid.UUID] = []
@@ -252,6 +329,7 @@ async def update_system(
         )
     # 回收的授权记在审计日志里（原先写入的 system_grant_audit 表没有读者，已弃用）。
     diff = {"granted_bot_ids": [sorted(str(b) for b in removed), []]} if removed else None
+    diff = {**(diff or {}), **provider_diff} or None
     await audit(session, request, user, "system.update", "system", key, diff)
     await persist(session, commit=True)
     set_etag(response, row.version)

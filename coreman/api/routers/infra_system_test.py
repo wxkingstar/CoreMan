@@ -20,7 +20,7 @@ from coreman.core.auth.system_access import (
     SubjectUnavailable,
     token_subject,
 )
-from coreman.core.auth.tokens import issue_token, signing_key
+from coreman.core.auth.token_providers import TokenProviderError, issue_system_token
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
 
@@ -66,9 +66,17 @@ def redirect_target(url: httpx.URL, location: str | None) -> str | None:
 
 
 async def fetch(
-    client: httpx.AsyncClient, url: httpx.URL, token: str | None
+    client: httpx.AsyncClient, url: httpx.URL, token: str | None, auth_mode: str = "cookie"
 ) -> tuple[int, str | None]:
-    headers = {"Cookie": f"bot_token={token}"} if token else {}
+    headers = {}
+    if auth_mode == "bearer":
+        client.cookies.clear()
+    if token:
+        headers = (
+            {"Authorization": f"Bearer {token}"}
+            if auth_mode == "bearer"
+            else {"Cookie": f"bot_token={token}"}
+        )
     async with client.stream("GET", url, headers=headers) as response:
         return response.status_code, redirect_target(url, response.headers.get("location"))
 
@@ -92,6 +100,37 @@ def judge(
             )
         return True, f"目标已识别令牌，登录后跳转到 {target}（令牌用户 {subject}）"
     return False, f"目标未通过访问测试，请检查目标认证配置，以及对方是否有用户 {subject}"
+
+
+def judge_external(
+    subject: str, baseline: tuple[int, str | None], result: tuple[int, str | None]
+) -> tuple[bool, str]:
+    if baseline[0] not in (401, 403):
+        return False, "测试 API 未要求认证（应返回 401 或 403），无法判断令牌是否生效"
+    if 200 <= result[0] < 300:
+        return True, f"目标已识别令牌（令牌用户 {subject}）"
+    return False, "受保护 API 未通过访问测试，请检查签发方、受众和用户权限"
+
+
+def probe_url(system: BusinessSystem) -> httpx.URL:
+    base = httpx.URL(system.base_url or "")
+    if base.scheme not in ("http", "https") or not base.host:
+        raise ValueError("invalid base URL")
+    if system.token_provider == "builtin":
+        return base
+    url = httpx.URL(system.access_test_url or "")
+    if (
+        url.scheme not in ("http", "https")
+        or not url.host
+        or url.username
+        or url.password
+        or url.fragment
+        or (url.scheme, url.host, url.port) != (base.scheme, base.host, base.port)
+        or base.username
+        or base.password
+    ):
+        raise ValueError("external probe must be a same-origin protected API")
+    return url
 
 
 @router.post("/api/admin/systems/test-access")
@@ -124,22 +163,27 @@ async def test_access(
     if not system.base_url:
         raise ApiError(422, 422, "业务系统尚未配置地址")
     try:
-        url = httpx.URL(system.base_url)
+        url = probe_url(system)
         client = make_http(url)
     except ValueError as exc:
         raise ApiError(422, 422, "业务系统地址不允许访问") from exc
     cipher = request.app.state.cipher
-    key = await signing_key(session, cipher, request.app.state.settings.external_jwt_key)
     issuer = str(await request.app.state.settings_store.get("jwt_issuer", default="coreman"))
-    token = issue_token(
-        key,
-        cipher,
-        issuer=issuer,
-        login=subject,
-        name=user.display_name,
-        audience=system.key,
-        ttl=60,
-    )
+    try:
+        issued = await issue_system_token(
+            session,
+            cipher,
+            system=system,
+            subject=subject,
+            name=user.display_name,
+            ttl_seconds=60,
+            issuer=issuer,
+            external_key=request.app.state.settings.external_jwt_key,
+            providers=request.app.state.settings.business_token_providers,
+        )
+    except TokenProviderError:
+        await client.aclose()
+        raise ApiError(422, 422, "令牌签发失败，请管理员检查签发方配置或用户授权") from None
     await record_audit(
         session,
         action="system.test_access",
@@ -155,8 +199,9 @@ async def test_access(
     try:
         async with client:
             baseline = await fetch(client, url, None)
-            result = await fetch(client, url, token)
-        success, message = judge(subject, baseline, result)
+            result = await fetch(client, url, issued.value, issued.auth_mode)
+        judge_result = judge_external if issued.auth_mode == "bearer" else judge
+        success, message = judge_result(subject, baseline, result)
     except httpx.HTTPError:
         success, message = False, "目标连接失败或超时"
     # 只回显跳转目标的主机与路径；不返回 token、页面正文、其余响应头与查询参数：
@@ -166,7 +211,7 @@ async def test_access(
         "status_code": result[0],
         "baseline_status_code": baseline[0],
         "redirect": result[1],
-        "url": str(url),
+        "url": str(url.copy_with(query=None, fragment=None)),
         "user_login": user.login_name,
         "subject": subject,
         "message": message,

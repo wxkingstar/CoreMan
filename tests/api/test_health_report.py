@@ -75,3 +75,51 @@ def test_redactor_overlapping_credentials_keeps_longest_match():
         output.feed("before abcdefgh") + output.feed("123456 after") + output.feed("", final=True)
     )
     assert content == "before [REDACTED] after"
+
+
+async def test_health_token_uses_health_task_timeout_and_external_provider(
+    client, db_session, app, monkeypatch
+):
+    from urllib.parse import parse_qs
+
+    import respx
+
+    from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+    from coreman.core.db.models import BusinessSystem
+
+    bot = await prepare(client, db_session)
+    db_session.add(
+        BusinessSystem(key="erp", name="ERP", token_provider="company", default_for_all_bots=True)
+    )
+    await db_session.commit()
+    app.state.settings.business_token_providers = {
+        "company": HTTPTokenProviderConfig(
+            token_url="https://identity.example/token",
+            client_id="agent",
+            client_secret="health-service-secret",
+            max_token_ttl_seconds=28800,
+        )
+    }
+    requests = []
+
+    class Fake:
+        async def chat_stream(self, request, **kwargs):
+            requests.append(request)
+            yield TextDelta("检查完成")
+            yield FinishEvent("stop")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_report, "make_client", lambda _: Fake())
+    with respx.mock:
+        route = respx.post("https://identity.example/token").respond(
+            200,
+            json={"access_token": "health-issued-token", "token_type": "Bearer", "expires_in": 300},
+        )
+        response = await client.post(f"/api/admin/bots/{bot.id}/health-report")
+    assert "event: done" in response.text
+    fields = parse_qs(route.calls.last.request.content.decode())
+    assert fields == {"username": ["creator"], "audience": ["erp"], "expires_in": ["300"]}
+    assert requests[0].env_vars["BOT_TOKEN_ERP"] == "health-issued-token"
+    assert "health-service-secret" not in repr(requests[0])

@@ -68,10 +68,7 @@ async def test_only_current_user_receives_enabled_whitelisted_system_tokens(
         )
         subject = await token_subject(db_session, user)
         assert access.env["COREMAN_USER_SUBJECT"] == subject
-        assert (
-            claims["sub"] == subject
-            and claims["exp"] - claims["iat"] == bot.sse_timeout_seconds + 300
-        )
+        assert claims["sub"] == subject and claims["exp"] - claims["iat"] == bot.sse_timeout_seconds
     erp = (
         await db_session.execute(select(BusinessSystem).where(BusinessSystem.key == "erp"))
     ).scalar_one()
@@ -217,3 +214,128 @@ async def test_login_name_is_never_a_subject_so_it_cannot_collide_with_an_email_
     # 乙照常拿到自己的 sub：甲的 login_name 不再参与这个命名空间。
     assert await token_subject(db_session, bob) == "zhangsan"
     assert await user_for_subject(db_session, "zhangsan") == bob
+
+
+@pytest.mark.parametrize("configured", [True, False])
+async def test_external_denial_or_removed_provider_does_not_issue_a_local_token(
+    db_session: AsyncSession,
+    configured: bool,
+) -> None:
+    import httpx
+    import respx
+
+    from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+
+    bot, _, cipher = await seed_bot(db_session)
+    alice = await db_session.get(User, bot.created_by)
+    assert alice
+    db_session.add(
+        BusinessSystem(key="erp", name="ERP", default_for_all_bots=True, token_provider="company")
+    )
+    await db_session.commit()
+    cfg = HTTPTokenProviderConfig(
+        token_url="https://identity.example/token",
+        client_id="agent",
+        client_secret="service-secret",
+    )
+    with respx.mock(assert_all_called=configured) as router:
+        route = router.post(cfg.token_url).mock(
+            return_value=httpx.Response(403, json={"message": "DO NOT ECHO"})
+        )
+        access = await build_system_access(
+            db_session,
+            cipher,
+            bot=bot,
+            speaker=Speaker("alice", alice.id, alice.login_name, alice.display_name),
+            issuer="coreman",
+            external_key=None,
+            providers={"company": cfg} if configured else {},
+        )
+        assert route.call_count == int(configured)
+    assert "BOT_TOKEN_ERP" not in access.env
+    assert access.env["COREMAN_USER_SUBJECT"] == await token_subject(db_session, alice)
+    assert "ERP" in access.prompt and "DO NOT ECHO" not in access.prompt
+    assert json.loads(access.env["COREMAN_SYSTEMS"]) == []
+    assert (await db_session.execute(select(JwtKey))).first() is None
+
+
+async def test_external_provider_keeps_token_and_actual_expiry_and_isolates_systems(
+    db_session: AsyncSession,
+) -> None:
+    import time
+    from urllib.parse import parse_qs
+
+    import httpx
+    import respx
+
+    from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+
+    bot, _, cipher = await seed_bot(db_session)
+    bot.sse_timeout_seconds = 43200
+    alice = await db_session.get(User, bot.created_by)
+    assert alice
+    alice.email = "Alice.W@example.com"
+    db_session.add_all(
+        [
+            BusinessSystem(
+                key="erp",
+                name="ERP",
+                default_for_all_bots=True,
+                token_provider="company",
+                token_audience="inventory",
+            ),
+            BusinessSystem(key="cloud", name="Cloud", default_for_all_bots=True),
+            BusinessSystem(
+                key="denied", name="Denied", default_for_all_bots=True, token_provider="company"
+            ),
+        ]
+    )
+    await db_session.commit()
+    cfg = HTTPTokenProviderConfig(
+        token_url="https://identity.example/token",
+        client_id="agent",
+        client_secret="service-secret",
+        max_token_ttl_seconds=28800,
+    )
+    sent = []
+
+    def respond(request):
+        fields = parse_qs(request.content.decode())
+        sent.append(fields)
+        if fields["audience"] == ["denied"]:
+            return httpx.Response(403)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "issued.with.actor-and-roles",
+                "token_type": "Bearer",
+                "expires_in": 1200,
+            },
+        )
+
+    before = int(time.time())
+    with respx.mock:
+        respx.post(cfg.token_url).mock(side_effect=respond)
+        access = await build_system_access(
+            db_session,
+            cipher,
+            bot=bot,
+            speaker=Speaker("alice", alice.id, alice.login_name, alice.display_name),
+            issuer="coreman",
+            external_key=None,
+            providers={"company": cfg},
+        )
+    assert all(f["username"] == ["alice.w"] and f["expires_in"] == ["28800"] for f in sent)
+    assert access.env["BOT_TOKEN_ERP"] == "issued.with.actor-and-roles"
+    assert "BOT_TOKEN_CLOUD" in access.env and "BOT_TOKEN_DENIED" not in access.env
+    assert (
+        "service-secret" not in repr(access) and "issued.with.actor-and-roles" not in access.prompt
+    )
+    configs = {row["key"]: row for row in json.loads(access.env["COREMAN_SYSTEMS"])}
+    assert configs["erp"]["auth_mode"] == "bearer"
+    assert "cookie_name" not in configs["erp"]
+    assert configs["erp"]["audience"] == "inventory"
+    assert configs["erp"]["expires_in"] == 1200
+    assert before + 1200 <= configs["erp"]["expires_at"] <= int(time.time()) + 1200
+    assert configs["cloud"]["cookie_name"] == "bot_token"
+    assert configs["cloud"]["expires_in"] == 43200

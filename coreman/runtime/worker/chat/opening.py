@@ -187,6 +187,7 @@ class OpenStage(ChatStageBase):
             speaker=intake.speaker,
             issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
             external_key=ctx.external_jwt_key,
+            providers=ctx.business_token_providers,
         )
         env = build_env(
             bot_key=bot.bot_key,

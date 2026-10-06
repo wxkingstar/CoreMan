@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -10,6 +11,7 @@ from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from coreman.core.auth.external_key import ExternalKey, load_external_key
+from coreman.core.auth.provider_config import HTTPTokenProviderConfig
 from coreman.core.crypto import DEFAULT_KEY_ID, KID_RE, Cipher
 
 # 引导管理员直接拿到 platform_admin。.env.example 的占位值只由 `deploy/coreman up` 替换，
@@ -77,6 +79,22 @@ class Settings(BaseSettings):
     bot_jwt_public_key: str | None = Field(default=None, alias="BOT_JWT_PUBLIC_KEY")
     bot_jwt_kid: str | None = Field(default=None, alias="BOT_JWT_KID")
     bot_jwt_issuer: str | None = Field(default=None, alias="BOT_JWT_ISSUER")
+    # Deployment-owned credentials; system records only reference a provider name.
+    business_token_providers: dict[str, HTTPTokenProviderConfig] = Field(
+        default_factory=dict, alias="BUSINESS_TOKEN_PROVIDERS", repr=False
+    )
+
+    @field_validator("business_token_providers")
+    @classmethod
+    def _provider_names(
+        cls, value: dict[str, HTTPTokenProviderConfig]
+    ) -> dict[str, HTTPTokenProviderConfig]:
+        if len(value) > 100 or any(
+            name == "builtin" or not re.fullmatch(r"[a-z][a-z0-9_-]{0,49}", name) for name in value
+        ):
+            raise ValueError("invalid business token provider names (builtin is reserved)")
+        return value
+
     _external_jwt_key: ExternalKey | None = PrivateAttr(default=None)
     _previous_master_keys: dict[str, bytes] = PrivateAttr(default_factory=dict)
 

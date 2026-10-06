@@ -9,7 +9,7 @@ import { credentials, systems } from '@/api/infrastructure'
 
 vi.mock('@/api/admin', () => ({ bots: { list: vi.fn().mockResolvedValue({ items: [], total: 0 }) } }))
 vi.mock('@/api/infrastructure', () => ({
-  systems: { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn() },
+  systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn() },
   credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn() },
 }))
 const erp = { key: 'erp', name: 'ERP', description: '', base_url: 'https://erp.example', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null, version: 1 }
@@ -18,6 +18,7 @@ const plugins = [ElementPlus, i18n]
 describe('Infrastructure management', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(systems.providers).mockResolvedValue([{ id: 'builtin', max_token_ttl_seconds: null }, { id: 'issuer', max_token_ttl_seconds: 120 }])
     vi.mocked(systems.list).mockResolvedValue(page)
     vi.mocked(credentials.clients).mockResolvedValue({ items: [], total: 0, page: 1, per_page: 50 })
     vi.mocked(credentials.keys).mockResolvedValue([])
@@ -50,6 +51,33 @@ describe('Infrastructure management', () => {
     await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
     vm.restricted = false; await flushPromises()
     expect(document.querySelector('[data-test="open-to-all-warning"]')?.textContent).toBe(i18n.global.t('infra.openToAllWarning'))
+    wrapper.unmount()
+  })
+  it('loads safe provider choices and saves provider, audience and protected test URL', async () => {
+    vi.mocked(systems.create).mockResolvedValue(erp)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    expect(systems.providers).toHaveBeenCalled()
+    expect(document.querySelector('[data-test="token-provider"]')).not.toBeNull()
+    const vm = wrapper.vm as unknown as { form: { key: string; name: string; token_provider: string; token_audience: string; access_test_url: string } }
+    vm.form.key = 'new'; vm.form.name = 'New'; vm.form.token_provider = 'issuer'
+    vm.form.token_audience = 'erp-api'; vm.form.access_test_url = 'https://erp.example/api/me'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ token_provider: 'issuer', token_audience: 'erp-api', access_test_url: 'https://erp.example/api/me' }))
+    wrapper.unmount()
+  })
+  it('preserves a deployment-removed provider while editing an existing system', async () => {
+    const external = { ...erp, token_provider: 'removed', token_audience: 'erp-api', access_test_url: 'https://erp.example/api/me' }
+    vi.mocked(systems.update).mockResolvedValue(external)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { edit: (row: typeof external) => Promise<void>; save: () => Promise<void>; form: typeof external; providerOptions: { id: string }[] }
+    await vm.edit(external); await flushPromises()
+    expect(vm.providerOptions.map(provider => provider.id)).toContain('removed')
+    vm.form.name = 'Renamed'
+    await vm.save(); await flushPromises()
+    expect(systems.update).toHaveBeenCalledWith(external, expect.objectContaining({ name: 'Renamed', token_provider: 'removed', token_audience: 'erp-api', access_test_url: 'https://erp.example/api/me' }))
     wrapper.unmount()
   })
   it('shows a new client secret once and clears it when the dialog closes', async () => {

@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.external_key import ExternalKey
-from coreman.core.auth.tokens import issue_token, signing_key
+from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+from coreman.core.auth.token_providers import (
+    PLATFORM_AUDIENCE as PLATFORM_AUDIENCE,
+)
+from coreman.core.auth.token_providers import (
+    RESERVED_SYSTEM_KEYS as RESERVED_SYSTEM_KEYS,
+)
+from coreman.core.auth.token_providers import (
+    TokenProviderError,
+    issue_system_token,
+)
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSystemGrant, BusinessSystem, User
 from coreman.core.prompting.system_prompt import Speaker
-
-# 业务系统 key 同时是发言者令牌的 audience。CoreMan 管理 API 自己按 audience="coreman"
-# 接受 bot_token（api/bot_auth.py，且免 CSRF）：若允许登记名为 coreman 的系统，平台就会
-# 为每位发言者签发一枚能以其身份调用管理 API 的令牌，并注入 bot 管理员可控的 CLI。
-PLATFORM_AUDIENCE = "coreman"
-# 创建时拒绝；历史库里若已有同名行，签发与授权也一律跳过。
-RESERVED_SYSTEM_KEYS = frozenset({PLATFORM_AUDIENCE})
 
 
 class SubjectUnavailable(Exception):
@@ -115,8 +119,10 @@ async def build_system_access(
     speaker: Speaker,
     issuer: str,
     external_key: ExternalKey | None,
+    providers: Mapping[str, HTTPTokenProviderConfig] | None = None,
+    task_timeout_seconds: int | None = None,
 ) -> SystemAccess:
-    """external_key 为部署配置的外部签发方密钥（Settings.external_jwt_key），有则用它签。"""
+    """按系统选择签发方；external_key 仅供 builtin，任务预算可由体检等短任务缩小。"""
     if not speaker.known or not speaker.login_name:
         return SystemAccess()
     user = await session.get(User, speaker.user_id, populate_existing=True)
@@ -154,39 +160,57 @@ async def build_system_access(
     if not systems:
         # 没有业务系统也下发 sub：提示词把它写成权威身份之一，就不能时有时无。
         return SystemAccess({"COREMAN_USER_SUBJECT": subject})
-    key = await signing_key(session, cipher, external_key)
-    env = {
-        f"BOT_TOKEN_{system.key.upper()}": issue_token(
-            key,
-            cipher,
-            issuer=issuer,
-            login=subject,
-            name=user.display_name,
-            audience=system.key,
-            ttl=bot.sse_timeout_seconds + 300,
-        )
-        for system in systems
-    }
-    configs = [
-        {
-            "key": s.key,
-            "name": s.name,
-            "description": s.description or "",
-            "base_url": s.base_url or "",
-            "sitemap_url": s.sitemap_url or "",
-            "env_var": f"BOT_TOKEN_{s.key.upper()}",
-            "cookie_name": "bot_token",
+    ttl_seconds = min(bot.sse_timeout_seconds, task_timeout_seconds or bot.sse_timeout_seconds)
+    env: dict[str, str] = {}
+    configs: list[dict[str, object]] = []
+    lines: list[str] = []
+    for system in systems:
+        try:
+            token = await issue_system_token(
+                session,
+                cipher,
+                system=system,
+                subject=subject,
+                name=user.display_name,
+                ttl_seconds=ttl_seconds,
+                issuer=issuer,
+                external_key=external_key,
+                providers=providers,
+            )
+        except TokenProviderError as exc:
+            lines.append(
+                f"- {system.name}: 本轮未获得访问令牌（{exc.code}），请联系管理员检查"
+                "令牌提供方和当前用户授权。不得改用其他身份或历史凭据。"
+            )
+            continue
+        env_var = f"BOT_TOKEN_{system.key.upper()}"
+        env[env_var] = token.value
+        config: dict[str, object] = {
+            "key": system.key,
+            "name": system.name,
+            "description": system.description or "",
+            "base_url": system.base_url or "",
+            "sitemap_url": system.sitemap_url or "",
+            "env_var": env_var,
+            "audience": system.token_audience or system.key,
+            "auth_mode": token.auth_mode,
+            "expires_in": token.expires_in,
+            "expires_at": token.expires_at,
         }
-        for s in systems
-    ]
+        if token.auth_mode == "cookie":
+            config["cookie_name"] = "bot_token"
+        configs.append(config)
+        method = "Authorization: Bearer" if token.auth_mode == "bearer" else "Cookie: bot_token"
+        lines.append(f"- {system.name}: {system.base_url or ''} (env: {env_var}; {method})")
     env["COREMAN_USER_SUBJECT"] = subject
     env["COREMAN_SYSTEMS"] = env["BOT_SYSTEMS_CONFIG"] = json.dumps(configs, ensure_ascii=False)
-    prompt = "## 业务系统访问\n\n" + "\n".join(
-        f"- {s.name}: {s.base_url or ''} (env: BOT_TOKEN_{s.key.upper()})" for s in systems
-    )
+    prompt = "## 业务系统访问\n\n" + "\n".join(lines)
     prompt += (
         "\n\n完整配置见 `$COREMAN_SYSTEMS`（兼容 `$BOT_SYSTEMS_CONFIG`）。"
         "令牌只属于当前发言者（业务系统账号见 `$COREMAN_USER_SUBJECT`），"
         "不得复用此前轮次的值，也不得写入文件、回复或工作区。"
+        "按配置的 auth_mode 使用令牌，只发送到对应业务系统；bearer 使用 Authorization 请求头。"
+        "expires_at 是 UTC Unix 秒，令牌过期后停止调用，并请用户重新发起一轮任务；"
+        "本轮运行中的进程不会自动更新令牌。"
     )
     return SystemAccess(env, prompt)

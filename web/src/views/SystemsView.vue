@@ -7,12 +7,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { bots } from '@/api/admin'
 import { call, http } from '@/api/client'
-import { systems, type BusinessSystem, type SystemInput } from '@/api/infrastructure'
+import { systems, type BusinessSystem, type SystemInput, type TokenProvider } from '@/api/infrastructure'
 import type { BotOut } from '@/api/types'
 
 const { t } = useI18n()
 const rows = ref<BusinessSystem[]>([])
 const botOptions = ref<BotOut[]>([])
+const providerOptions = ref<TokenProvider[]>([{ id: 'builtin', max_token_ttl_seconds: null }])
 const page = ref(1), total = ref(0), busy = ref(false), visible = ref(false), restricted = ref(false)
 const editing = ref<BusinessSystem | null>(null)
 const testing = ref<string | null>(null)
@@ -27,7 +28,7 @@ async function testAccess(row: BusinessSystem) {
   } catch (e) { fail(e) }
   finally { testing.value = null }
 }
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', token_provider: 'builtin', token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
 const form = reactive(empty())
 function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
@@ -41,11 +42,15 @@ async function load() {
 }
 async function edit(row: BusinessSystem | null) {
   editing.value = row
-  Object.assign(form, row ? { ...row, allowed_bot_ids: row.allowed_bot_ids ? [...row.allowed_bot_ids] : null } : empty())
+  Object.assign(form, row ? { ...empty(), ...row, allowed_bot_ids: row.allowed_bot_ids ? [...row.allowed_bot_ids] : null } : empty())
   // 新建默认限定且名单为空：发言者令牌会注入 AI 员工的运行环境，对全部员工开放须管理员主动关闭限定
   restricted.value = !row || row.allowed_bot_ids !== null
   visible.value = true
   try {
+    providerOptions.value = await systems.providers()
+    if (form.token_provider && !providerOptions.value.some(p => p.id === form.token_provider)) {
+      providerOptions.value.push({ id: form.token_provider, max_token_ttl_seconds: null })
+    }
     const all: BotOut[] = []
     for (let p = 1; ; p++) {
       const data = await bots.list({ scope: 'all', page: p, per_page: 200 }); all.push(...data.items)
@@ -58,7 +63,7 @@ async function save() {
   if (busy.value) return
   busy.value = true
   try {
-    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, sitemap_url: form.sitemap_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
+    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, sitemap_url: form.sitemap_url, token_provider: form.token_provider, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
     if (editing.value) {
       if (restricted.value) await ElMessageBox.confirm(t('infra.reclaimWarning'), t('common.confirm'))
       await systems.update(editing.value, body)
@@ -140,7 +145,7 @@ onMounted(load)
           <el-button
             link
             :loading="testing === row.key"
-            :disabled="!row.enabled || !row.base_url"
+            :disabled="!row.enabled || !row.base_url || (row.token_provider && row.token_provider !== 'builtin' && !row.access_test_url)"
             @click="testAccess(row)"
           >
             {{ t('infra.testAccess') }}
@@ -197,6 +202,30 @@ onMounted(load)
         </el-form-item>
         <el-form-item :label="t('infra.sitemapUrl')">
           <el-input v-model="form.sitemap_url" />
+        </el-form-item>
+        <el-form-item :label="t('infra.tokenProvider')">
+          <el-select
+            v-model="form.token_provider"
+            data-test="token-provider"
+            style="width:100%"
+          >
+            <el-option
+              v-for="provider in providerOptions"
+              :key="provider.id"
+              :value="provider.id"
+              :label="provider.id === 'builtin' ? t('infra.builtinProvider') : provider.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('infra.tokenAudience')">
+          <el-input
+            v-model="form.token_audience"
+            :placeholder="form.key"
+          />
+        </el-form-item>
+        <el-form-item :label="t('infra.accessTestUrl')">
+          <el-input v-model="form.access_test_url" />
+          <small>{{ t('infra.accessTestUrlHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.enabled')">
           <el-switch v-model="form.enabled" />
