@@ -15,8 +15,8 @@ import BotCollaborators from '@/components/BotCollaborators.vue'
 import BotHumanCollaborators from '@/components/BotHumanCollaborators.vue'
 import FeishuAppPanel from '@/components/feishuApp/FeishuAppPanel.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
-import BotAllowedUsersDialog from '@/components/bot/BotAllowedUsersDialog.vue'
-import BotMembersDialog from '@/components/bot/BotMembersDialog.vue'
+import BotAllowedUsersPanel from '@/components/bot/BotAllowedUsersPanel.vue'
+import BotMembersPanel from '@/components/bot/BotMembersPanel.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
 import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
@@ -38,8 +38,6 @@ const loading = ref(false)
 const editVisible = ref(false)
 const switchVisible = ref(false)
 const workspaceVisible = ref(false)
-const membersDialog = ref<InstanceType<typeof BotMembersDialog>>()
-const allowedDialog = ref<InstanceType<typeof BotAllowedUsersDialog>>()
 
 const perms = computed(() => bot.value?.permissions ?? null)
 // 敏感字段只有 can_view_sensitive 时后端才下发；没下发就整块不渲染（而不是渲染成空）。
@@ -80,14 +78,6 @@ async function reload(silent = false): Promise<void> {
   } finally {
     if (!silent) loading.value = false
   }
-}
-
-async function openMembers(): Promise<void> {
-  await membersDialog.value?.open()
-}
-
-async function openAllowed(): Promise<void> {
-  await allowedDialog.value?.open()
 }
 
 async function toggle(): Promise<void> {
@@ -374,53 +364,47 @@ onMounted(async () => {
             </dl>
           </div>
         </el-tab-pane>
+        <!-- lazy：首次切到该页签才挂载，各面板挂载即拉数据。 -->
         <el-tab-pane
           name="capabilities"
           :label="t('workspace.capabilities')"
+          lazy
         >
-          <section class="cm-panel">
-            <h3>{{ t('workspace.capabilities') }}</h3><p class="cm-page-intro">
-              {{ t('skill.installHint') }}
-            </p><div class="actions">
-              <BotSkills
-                v-if="perms?.can_edit"
-                :bot-id="botId"
-                @saved="reload(true)"
-              /><BotMemories
-                v-if="perms?.can_edit"
-                :bot-id="botId"
-              />
-            </div><el-empty
-              v-if="!perms?.can_edit"
-              :description="t('common.forbidden')"
+          <template v-if="perms?.can_edit">
+            <BotSkills
+              :bot-id="botId"
+              @saved="reload(true)"
             />
+            <BotMemories :bot-id="botId" />
+          </template>
+          <section
+            v-else
+            class="cm-panel"
+          >
+            <el-empty :description="t('common.forbidden')" />
           </section>
         </el-tab-pane>
         <el-tab-pane
           name="access"
           :label="t('workspace.access')"
+          lazy
         >
-          <section class="cm-panel">
-            <h3>{{ t('workspace.access') }}</h3><p class="cm-page-intro">
-              {{ t('bots.detail.membersHint') }}
-            </p><div class="actions">
-              <el-button
-                data-test="open-members"
-                @click="openMembers"
-              >
-                {{ t('bots.detail.members') }}（{{ bot.member_count }}）
-              </el-button><el-button
-                data-test="open-allowed"
-                @click="openAllowed"
-              >
-                {{ t('bots.detail.allowedUsers') }}（{{ bot.allowed_user_count }}）
-              </el-button><SystemGrants
-                v-if="perms?.can_edit"
-                :bot-id="botId"
-                @saved="reload(true)"
-              />
-            </div>
-          </section>
+          <BotMembersPanel
+            :bot-id="botId"
+            :created-by="bot.created_by"
+            :perms="perms"
+            @changed="reload(true)"
+          />
+          <BotAllowedUsersPanel
+            :bot-id="botId"
+            :perms="perms"
+            @changed="reload(true)"
+          />
+          <SystemGrants
+            v-if="perms?.can_edit"
+            :bot-id="botId"
+            @saved="reload(true)"
+          />
         </el-tab-pane>
         <el-tab-pane
           name="configuration"
@@ -581,21 +565,6 @@ onMounted(async () => {
         :visible="switchVisible"
         @update:visible="switchVisible = $event"
         @switched="onSwitched"
-      />
-
-      <BotMembersDialog
-        ref="membersDialog"
-        :bot-id="botId"
-        :created-by="bot.created_by"
-        :perms="perms"
-        @changed="reload(true)"
-      />
-
-      <BotAllowedUsersDialog
-        ref="allowedDialog"
-        :bot-id="botId"
-        :perms="perms"
-        @changed="reload(true)"
       />
     </template>
     <el-empty v-else-if="!loading" />

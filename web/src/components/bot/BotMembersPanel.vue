@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots } from '@/api/admin'
 import type { BotMemberOut, BotPermissions } from '@/api/types'
@@ -12,7 +12,6 @@ const props = defineProps<{ botId: string; createdBy: string | null; perms: BotP
 /** 协作者变动后通知详情页刷新 member_count。 */
 const emit = defineEmits<{ changed: [] }>()
 const { t } = useI18n()
-const membersVisible = ref(false)
 const busy = ref(false)
 const members = ref<BotMemberOut[]>([])
 const memberPick = ref<string[]>([])
@@ -29,12 +28,6 @@ async function loadMembers(): Promise<void> {
   } catch (e) {
     fail(e)
   }
-}
-
-async function open(): Promise<void> {
-  membersVisible.value = true
-  memberPick.value = []
-  await loadMembers()
 }
 
 async function addMembers(): Promise<void> {
@@ -70,16 +63,13 @@ async function removeMember(userId: string): Promise<void> {
   }
 }
 
-defineExpose({ open })
+onMounted(loadMembers)
 </script>
 
 <template>
-  <el-dialog
-    v-model="membersVisible"
-    :title="t('bots.detail.members')"
-    width="640px"
-  >
-    <p class="muted">
+  <section class="cm-panel">
+    <h3>{{ t('bots.detail.members') }}<span class="count">（{{ members.length }}）</span></h3>
+    <p class="hint">
       {{ t('bots.detail.membersHint') }}
     </p>
     <table class="kv members">
@@ -140,14 +130,18 @@ defineExpose({ open })
         {{ t('bots.detail.addMember') }}
       </el-button>
     </div>
-  </el-dialog>
+  </section>
 </template>
 
 <style scoped>
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
+h3 { margin: 0 0 6px; }
+.count { color: var(--el-text-color-secondary); font-weight: 400; }
+.hint { margin: 0 0 16px; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.7; }
 .kv { border-collapse: collapse; width: 100%; }
 .kv th, .kv td { border: 1px solid var(--el-border-color-lighter); padding: 6px 10px; text-align: left; font-weight: normal; word-break: break-all; }
 .kv th { background: var(--el-fill-color-light); width: 220px; }
 .members th { width: auto; }
-.picker-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.picker-row { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.picker-row > :first-child { flex: 1; min-width: 0; }
 </style>

@@ -2,7 +2,7 @@
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { reactive, ref, watch } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { memories, type MemoryInput, type MemoryRow } from '@/api/memories'
 import { formatDateTime } from '@/utils/format'
@@ -10,7 +10,6 @@ import { formatDateTime } from '@/utils/format'
 const props = defineProps<{ botId: string }>()
 const { t } = useI18n()
 const loadError = ref('')
-const visible = ref(false)
 const editing = ref(false)
 const loading = ref(false)
 const busy = ref(false)
@@ -24,7 +23,8 @@ async function reload() {
   loading.value = true
   try { rows.value = await memories.list(props.botId, deleted.value) } catch (error) { loadError.value = errorMessage(error); fail(error) } finally { loading.value = false }
 }
-watch([visible, deleted], () => { if (visible.value) void reload() })
+onMounted(reload)
+watch(deleted, () => { void reload() })
 async function edit(row?: MemoryRow) {
   try {
     const data = row ? await memories.get(props.botId, row.id) : null
@@ -59,24 +59,11 @@ async function sync(operation: 'collect' | 'deploy') {
 </script>
 
 <template>
-  <el-button
-    data-test="memories-open"
-    @click="visible = true"
-  >
-    {{ t('memory.title') }}
-  </el-button>
-  <el-dialog
-    v-model="visible"
-    :title="t('memory.title')"
-    width="900px"
-    destroy-on-close
-  >
-    <el-alert
-      :title="t('memory.hint')"
-      type="info"
-      :closable="false"
-      show-icon
-    />
+  <section class="cm-panel">
+    <h3>{{ t('memory.title') }}</h3>
+    <p class="panel-hint">
+      {{ t('memory.hint') }}
+    </p>
     <div class="memory-toolbar">
       <el-button
         type="primary"
@@ -160,7 +147,7 @@ async function sync(operation: 'collect' | 'deploy') {
         </template>
       </el-table-column>
     </el-table>
-  </el-dialog>
+  </section>
   <el-dialog
     v-model="editing"
     :title="t('memory.edit')"
@@ -205,6 +192,8 @@ async function sync(operation: 'collect' | 'deploy') {
 </template>
 
 <style scoped>
+h3 { margin: 0 0 6px; }
+.panel-hint { margin: 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.7; }
 .memory-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0; }
 .memory-toolbar .el-button + .el-button { margin-left: 0; }
 </style>

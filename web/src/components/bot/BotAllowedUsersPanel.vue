@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import { ElMessage } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { bots } from '@/api/admin'
 import type { AllowedUserOut, BotPermissions } from '@/api/types'
@@ -11,7 +11,6 @@ const props = defineProps<{ botId: string; perms: BotPermissions | null }>()
 /** 白名单保存后通知详情页刷新 allowed_user_count。 */
 const emit = defineEmits<{ changed: [] }>()
 const { t } = useI18n()
-const allowedVisible = ref(false)
 const busy = ref(false)
 const allowed = ref<AllowedUserOut[]>([])
 const allowedIds = ref<string[]>([])
@@ -30,11 +29,6 @@ async function loadAllowed(): Promise<void> {
   }
 }
 
-async function open(): Promise<void> {
-  allowedVisible.value = true
-  await loadAllowed()
-}
-
 async function saveAllowed(): Promise<void> {
   busy.value = true
   try {
@@ -49,16 +43,13 @@ async function saveAllowed(): Promise<void> {
   }
 }
 
-defineExpose({ open })
+onMounted(loadAllowed)
 </script>
 
 <template>
-  <el-dialog
-    v-model="allowedVisible"
-    :title="t('bots.detail.allowedUsers')"
-    width="640px"
-  >
-    <p class="muted">
+  <section class="cm-panel">
+    <h3>{{ t('bots.detail.allowedUsers') }}<span class="count">（{{ allowed.length }}）</span></h3>
+    <p class="hint">
       {{ t('bots.detail.allowedHint') }}
     </p>
     <template v-if="perms?.can_edit">
@@ -88,10 +79,15 @@ defineExpose({ open })
         —
       </li>
     </ul>
-  </el-dialog>
+  </section>
 </template>
 
 <style scoped>
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
-.picker-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+h3 { margin: 0 0 6px; }
+.count { color: var(--el-text-color-secondary); font-weight: 400; }
+.hint { margin: 0 0 16px; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.7; }
+ul { margin: 0; padding-left: 20px; }
+.picker-row { display: flex; align-items: center; gap: 8px; }
+.picker-row > :first-child { flex: 1; min-width: 0; }
 </style>
