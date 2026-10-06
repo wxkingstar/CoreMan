@@ -20,6 +20,7 @@ from coreman.core.auth.system_access import (
     SubjectUnavailable,
     token_subject,
 )
+from coreman.core.auth.token_issues import IssuedRecord, record_issues
 from coreman.core.auth.token_providers import TokenProviderError, issue_system_token
 from coreman.core.db.models import BusinessSystem, User
 from coreman.core.relay.safe_transport import RegisteredTransport
@@ -192,6 +193,21 @@ async def test_access(
         target_type="system",
         target_id=system.key,
         ip=client_ip(request),
+    )
+    await record_issues(
+        session,
+        [
+            IssuedRecord(
+                system_key=system.key,
+                provider=system.token_provider,
+                audience=system.token_audience or system.key,
+                token_id=issued.token_id,
+                expires_at=issued.expires_at,
+            )
+        ],
+        purpose="access_test",
+        subject=subject,
+        user_id=user.id,
     )
     await session.commit()
     baseline: tuple[int, str | None] = (0, None)

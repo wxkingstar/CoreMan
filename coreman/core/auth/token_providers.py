@@ -42,6 +42,22 @@ class IssuedToken:
     expires_in: int
     expires_at: int
     auth_mode: Literal["cookie", "bearer"]
+    # JWT 的 jti，只用于签发记录和追溯；不透明令牌为空。
+    token_id: str | None = None
+
+
+def jwt_id(value: str) -> str | None:
+    """读出 JWT 的 jti 用于签发记录；不验签，绝不能拿它做认证。不是 JWT 或没有 jti 时返回 None。"""
+    if value.count(".") != 2:
+        return None
+    try:
+        claims = jwt.decode(value, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    jti = claims.get("jti") if isinstance(claims, dict) else None
+    if not isinstance(jti, str) or not 0 < len(jti) <= 256 or not jti.isprintable():
+        return None
+    return jti
 
 
 class TokenProviderError(Exception):
@@ -117,7 +133,7 @@ class HTTPTokenProvider:
         except (httpx.HTTPError, TimeoutError, ValueError, TypeError):
             # Never pass exception text/response bodies through task logs or model prompts.
             raise TokenProviderError("issuer_unavailable") from None
-        return IssuedToken(value, expires, started + expires, "bearer")
+        return IssuedToken(value, expires, started + expires, "bearer", jwt_id(value))
 
 
 class BuiltinTokenProvider:
@@ -151,7 +167,9 @@ class BuiltinTokenProvider:
         )
         # Locally generated claims only; the downstream service still verifies the signature.
         claims = jwt.decode(value, options={"verify_signature": False})
-        return IssuedToken(value, request.ttl_seconds, int(claims["exp"]), "cookie")
+        return IssuedToken(
+            value, request.ttl_seconds, int(claims["exp"]), "cookie", str(claims["jti"])
+        )
 
 
 async def issue_system_token(

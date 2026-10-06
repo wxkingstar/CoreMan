@@ -71,6 +71,29 @@ describe('ChatLogsView', () => {
     wrapper.unmount()
   })
 
+  // 业务系统日志里的 token_id：按它筛出签发它的那一轮，详情里列出本轮签过的令牌标识。
+  it('filters by business token id and lists issued tokens in the detail', async () => {
+    useAuthStore().user = { id: 'u1', login_name: 'zhangsan', display_name: '张三', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
+    vi.mocked(chatLogs.get).mockResolvedValueOnce({
+      ...DETAIL,
+      business_tokens: [{ system_key: 'erp', provider: 'sso', audience: 'erp', subject: 'zhangsan', token_id: 'jti-123', issued_at: '2026-09-11T00:00:00Z', expires_at: '2026-09-11T01:00:00Z' }],
+    })
+    const wrapper = mount(ChatLogsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-test="filter-token-id"]').exists()).toBe(true)
+    const vm = wrapper.vm as unknown as { paged: { filters: { token_id: string }; load: () => Promise<void> }; openDetail: (id: number) => Promise<void> }
+    vm.paged.filters.token_id = 'jti-123'
+    await vm.paged.load()
+    expect(chatLogs.list).toHaveBeenLastCalledWith(expect.objectContaining({ token_id: 'jti-123' }))
+    await vm.openDetail(9)
+    await flushPromises()
+    const text = drawerText()
+    expect(text).toContain(i18n.global.t('chatLogs.businessTokens'))
+    expect(text).toContain('erp')
+    expect(text).toContain('jti-123')
+    wrapper.unmount()
+  })
+
   it('omits the quoted and file blocks when the detail has neither', async () => {
     useAuthStore().user = { id: 'u1', login_name: 'zhangsan', display_name: '张三', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
     vi.mocked(chatLogs.get).mockResolvedValueOnce({ ...DETAIL, quoted_content: null, file_info: null })

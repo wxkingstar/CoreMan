@@ -191,3 +191,52 @@ async def test_running_turns_are_listed_and_counted_apart(
     # 进行中不算成功也不算出错。
     bot = next(b for b in stats["by_bot"] if b["bot_id"] == str(mine.id))
     assert bot["total"] == 2 and bot["success"] + bot["error"] == 1
+
+
+async def test_trace_business_token_id_to_turn(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import BusinessTokenIssue
+    from tests.api.conftest import login_existing
+
+    mine, theirs, creator = await _seed(db_session)
+    logs = {
+        log.bot_id: log
+        for log in await db_session.scalars(select(ChatLog).where(ChatLog.status == "success"))
+    }
+    for i, bot in enumerate((mine, theirs)):
+        logs[bot.id].task_id = 1000 + i
+        db_session.add(
+            BusinessTokenIssue(
+                purpose="chat",
+                task_id=1000 + i,
+                bot_id=bot.id,
+                subject="creator",
+                system_key="erp",
+                provider="sso",
+                audience="erp",
+                token_id=f"jti-{bot.bot_key}",
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+    await db_session.commit()
+    await login_existing(client, db_session, creator)
+    data = (await client.get("/api/admin/chat-logs", params={"token_id": "jti-mine"})).json()
+    assert [d["id"] for d in data["data"]["items"]] == [logs[mine.id].id]
+    stats = await client.get("/api/admin/chat-logs/stats", params={"token_id": "jti-mine"})
+    assert stats.json()["data"]["total"] == 1
+    # 看不见的对话，拿着它的 token_id 也查不到。
+    r = await client.get("/api/admin/chat-logs", params={"token_id": "jti-theirs"})
+    assert r.json()["data"]["total"] == 0
+    r = await client.get("/api/admin/chat-logs", params={"token_id": "nope"})
+    assert r.json()["data"]["total"] == 0
+    detail = (await client.get(f"/api/admin/chat-logs/{logs[mine.id].id}")).json()["data"]
+    tokens = [(t["system_key"], t["token_id"], t["provider"]) for t in detail["business_tokens"]]
+    assert tokens == [("erp", "jti-mine", "sso")]
+    untraced = (
+        await db_session.scalars(
+            select(ChatLog).where(ChatLog.bot_id == mine.id, ChatLog.status == "error")
+        )
+    ).one()
+    d = (await client.get(f"/api/admin/chat-logs/{untraced.id}")).json()["data"]
+    assert d["business_tokens"] == []

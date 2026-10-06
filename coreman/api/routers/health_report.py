@@ -19,6 +19,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.token_issues import record_issues
 from coreman.core.cron.access import require_operator
 from coreman.core.db.models import Bot, RelayServer, User
 from coreman.core.knowledge.installation import effective_env
@@ -164,6 +165,14 @@ async def health_report(
                             external_key=request.app.state.settings.external_jwt_key,
                             providers=request.app.state.settings.business_token_providers,
                             task_timeout_seconds=300,
+                        )
+                        await record_issues(
+                            fresh,
+                            access.issued,
+                            purpose="health",
+                            subject=access.subject or "",
+                            bot_id=current_bot.id,
+                            user_id=current_actor.id,
                         )
                         env = build_env(
                             bot_key=current_bot.bot_key,

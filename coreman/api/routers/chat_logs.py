@@ -21,7 +21,7 @@ from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
-from coreman.core.db.models import Bot, BotMember, ChatLog, CronRun, User
+from coreman.core.db.models import Bot, BotMember, BusinessTokenIssue, ChatLog, CronRun, User
 from coreman.core.richtext.degrade import readable
 from coreman.core.timeutils import aware_utc
 
@@ -81,10 +81,20 @@ def _window(
 
 
 def _filters(
-    user: str | None, status: str | None, chat_type: str | None, keyword: str | None
+    user: str | None,
+    status: str | None,
+    chat_type: str | None,
+    keyword: str | None,
+    token_id: str | None = None,
 ) -> list[ColumnElement[bool]]:
     """Keep list and aggregate queries on the same visible filter set."""
     conds: list[ColumnElement[bool]] = []
+    if token_id:
+        # 业务系统日志里的 token_id（jti）→ 签发它的那一轮任务；可见性仍由 _scope 决定。
+        issued = select(BusinessTokenIssue.task_id).where(
+            BusinessTokenIssue.token_id == token_id, BusinessTokenIssue.task_id.is_not(None)
+        )
+        conds.append(ChatLog.task_id.in_(issued))
     if user:
         like = ChatLog.user_login.ilike(f"%{escape_like(user)}%", escape="\\")
         try:
@@ -180,13 +190,14 @@ async def list_chat_logs(
     since: datetime | None = None,
     until: datetime | None = None,
     keyword: str | None = Query(default=None, max_length=200),
+    token_id: str | None = Query(default=None, max_length=256),
     actor: User = Depends(current_user),
     params: PageParams = Depends(),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
     conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
-    conds += _filters(user, status, chat_type, keyword)
+    conds += _filters(user, status, chat_type, keyword, token_id)
     # request_at 会并列（同一秒的批量写），加 id 兜底保证翻页稳定。
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
@@ -206,6 +217,7 @@ async def chat_log_stats(
     status: str | None = None,
     chat_type: str | None = None,
     keyword: str | None = Query(default=None, max_length=200),
+    token_id: str | None = Query(default=None, max_length=256),
     since: datetime | None = None,
     until: datetime | None = None,
     actor: User = Depends(current_user),
@@ -214,7 +226,7 @@ async def chat_log_stats(
     """概览：总量、按状态、平均时延、token 合计、按 bot 前 50（同样受可见性过滤）。"""
     ids = await accessible_bot_ids(session, actor)
     conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
-    conds += _filters(user, status, chat_type, keyword)
+    conds += _filters(user, status, chat_type, keyword, token_id)
 
     def _tokens(col: Any) -> Any:
         return func.coalesce(func.sum(col), 0)
@@ -304,4 +316,31 @@ async def get_chat_log(
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。
         raise not_found("对话记录不存在")
     names = await bot_names(session, [row.bot_id])
-    return {"code": 0, "data": chat_log_out(row, full=True, bot_name=names.get(row.bot_id))}
+    data = chat_log_out(row, full=True, bot_name=names.get(row.bot_id))
+    data["business_tokens"] = await business_tokens(session, row.task_id)
+    return {"code": 0, "data": data}
+
+
+async def business_tokens(session: AsyncSession, task_id: int | None) -> list[dict[str, Any]]:
+    """这一轮签发过的业务令牌：只有标识和元数据（不含令牌），用来和业务系统日志的 token_id 对账。"""
+    if task_id is None:
+        return []
+    rows = (
+        await session.execute(
+            select(BusinessTokenIssue)
+            .where(BusinessTokenIssue.task_id == task_id)
+            .order_by(BusinessTokenIssue.issued_at, BusinessTokenIssue.id)
+        )
+    ).scalars()
+    return [
+        {
+            "system_key": r.system_key,
+            "provider": r.provider,
+            "audience": r.audience,
+            "subject": r.subject,
+            "token_id": r.token_id,
+            "issued_at": _iso(r.issued_at),
+            "expires_at": _iso(r.expires_at),
+        }
+        for r in rows
+    ]
