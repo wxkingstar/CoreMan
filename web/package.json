@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
+    "@wecom/jssdk": "^2.4.4",
     "axios": "^1.7.7",
     "dompurify": "^3.4.15",
     "element-plus": "^2.8.4",
