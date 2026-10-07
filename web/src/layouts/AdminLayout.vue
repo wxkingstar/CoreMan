@@ -236,8 +236,8 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
 </template>
 <style scoped>
 .layout { min-height: 100vh; }
-.aside { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--cm-border); background: var(--cm-surface); padding: 24px 12px 12px; flex-shrink: 0; }
-.brand { display: flex; align-items: center; gap: 12px; height: 72px; margin: -24px -12px 16px; padding: 0 24px; border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); color: var(--cm-text); font-size: 21px; font-weight: 700; text-decoration: none; }
+.aside { position: sticky; top: 72px; z-index: 11; height: calc(100vh - 72px); overflow-y: auto; border-right: 1px solid var(--cm-border); background: var(--cm-surface); padding: 16px 12px 12px; flex-shrink: 0; }
+.brand { position: fixed; top: 0; left: 0; display: flex; align-items: center; gap: 12px; width: 220px; height: 72px; padding: 0 24px; border-right: 1px solid var(--cm-border); border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); color: var(--cm-text); font-size: 21px; font-weight: 700; text-decoration: none; }
 .brand small { display: block; font-size: 11px; font-weight: 400; color: var(--cm-muted); letter-spacing: 1px; }
 .el-menu { border: 0; background: transparent; }
 :deep(.el-menu-item), :deep(.el-sub-menu__title) { height: 44px; border-radius: 7px; padding-left: 12px !important; margin-bottom: 3px; }
@@ -245,8 +245,8 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
 :deep(.el-menu-item-group__title) { padding: 22px 12px 10px; font-size: 11px; letter-spacing: 1px; color: var(--cm-muted); }
 :deep(.el-sub-menu .el-menu-item) { min-width: 0; padding-left: 42px !important; font-size: 13px; }
 .aside-footer { border-top: 1px solid var(--cm-border); padding: 16px 12px 4px; margin-top: 24px; color: var(--cm-muted); font-size: 12px; }
-.main-shell { min-width: 0; display: flex; flex-direction: column; }
-.header { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 72px; padding: 0 28px; border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); }
+.main-shell { min-width: 0; display: flex; flex-direction: column; padding-top: 72px; }
+.header { position: fixed; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 72px; padding: 0 28px 0 248px; border-bottom: 1px solid var(--cm-border); background: var(--cm-topbar); }
 .controls, .breadcrumb { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .controls .el-button { margin: 0; } .user-name { color: var(--cm-muted); font-size: 13px; }
 .breadcrumb { font-weight: 600; }
@@ -256,5 +256,5 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
 .mobile-navigation h3 { margin: 24px 12px 8px; font-size: 12px; color: var(--cm-muted); }
 .skip-link { position: fixed; top: -100px; left: 16px; z-index: 3000; padding: 10px 18px; background: var(--cm-surface); }.skip-link:focus { top: 10px; }
 @media(max-width:1023px) { .desktop-nav { display: none; } .mobile-toggle { display: inline-flex; } .header { padding: 0 20px; } }
-@media(max-width:600px) { .header { padding: 0 12px; height: 64px; } .controls { gap: 6px; } .user-name, .breadcrumb > span { display: none; } }
+@media(max-width:600px) { .main-shell { padding-top: 64px; } .header { padding: 0 12px; height: 64px; } .controls { gap: 6px; } .user-name, .breadcrumb > span { display: none; } }
 </style>
