@@ -1,5 +1,6 @@
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from coreman.core.prompting.defaults import (
@@ -15,6 +16,7 @@ from coreman.core.prompting.system_prompt import (
     PromptSegments,
     Speaker,
     build_system_prompt,
+    current_time_section,
     load_segments,
     speaker_header,
 )
@@ -273,3 +275,34 @@ def test_identity_tag_is_fresh_per_request() -> None:
         for _ in range(20)
     }
     assert len(tags) > 1
+
+
+def test_current_time_follows_speaker_for_every_run() -> None:
+    """群聊、私聊、定时都要知道今天几号；按北京时间给，业务时区留给组织背景。"""
+    section = current_time_section(datetime(2026, 10, 7, 16, 30, tzinfo=UTC))
+    assert "北京时间 2026-10-08 00:30" in section and "UTC 2026-10-07T16:30Z" in section
+    assert "组织背景" in section
+    for scheduled in (False, True):
+        out = build_system_prompt(
+            segments=SEG,
+            backend="codex",
+            verbosity_level=4,
+            bot_prompt="你是销售",
+            speaker=KNOWN,
+            speaker_changed=False,
+            scheduled=scheduled,
+        )
+        assert out.index("## 当前发言者") < out.index("## 当前时间") < out.index("你是销售")
+
+
+def test_defaults_leave_room_for_explicit_requests() -> None:
+    """极简和简洁两档不能压过用户本轮明确要的格式；定时任务允许按任务说明以本人身份代发。"""
+    from coreman.core.prompting.defaults import DEFAULT_CRON_MODE
+
+    for level in (1, 2):
+        assert "explicitly asks for in this request" in DEFAULT_VERBOSITY[level]
+    assert "closer of the two" not in DEFAULT_VERBOSITY[1]
+    assert "the task prompt itself asks you to send" in DEFAULT_CRON_MODE
+    # 文件交付说明两个后端都要有，不再只写在 codex 输出契约里。
+    assert "Chat users cannot open paths" in DEFAULT_RUNTIME_MODE
+    assert "Chat users cannot open paths" not in DEFAULT_CODEX_CONTRACT

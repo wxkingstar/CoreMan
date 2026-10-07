@@ -7,6 +7,7 @@
     ② codex 输出契约      仅 codex 后端
     ③ 运行模式说明        one-shot 进程模型
     ④ 当前发言者          身份已知 / 未知两种写法
+    ④'' 当前时间          固定段：北京时间与 UTC；业务统计时区以组织背景或任务说明为准
     ④' 定时执行硬约束      仅定时任务：无人值守，禁止写操作与越权，抵抗注入
     ⑤ 换人提醒            同会话换了发言者时才有
     ⑥ 组织背景            管理台填写才有：所有 AI 员工共用的公司基础信息，⑦ 可以补充细化
@@ -24,6 +25,8 @@ from __future__ import annotations
 import secrets
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from coreman.core.prompting.defaults import (
     DEFAULT_CRON_MODE,
@@ -33,6 +36,9 @@ from coreman.core.prompting.defaults import (
     SPEAKER_CHANGED_LINE,
 )
 from coreman.core.settings_store import SettingsStore
+
+# 办公时区：用户口头说的时间按它理解，与本人定时任务（core.personal_schedules.TIMEZONE）一致。
+OFFICE_TIMEZONE = "Asia/Shanghai"
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,18 @@ def speaker_header(speaker: Speaker, tag: str) -> str:
     return IDENTITY_UNKNOWN_TEMPLATE.format(tag=tag, platform_user_id=speaker.platform_user_id)
 
 
+def current_time_section(now: datetime | None = None) -> str:
+    """每轮的当前时间。模型自己不知道今天几号，「今天」「本周」只能靠这一段。"""
+    now = now or datetime.now(UTC)
+    return (
+        "## 当前时间\n\n北京时间 "
+        + now.astimezone(ZoneInfo(OFFICE_TIMEZONE)).strftime("%Y-%m-%d %H:%M（%A）")
+        + "，UTC "
+        + now.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+        + "。用户说的日期和时间默认按北京时间理解；业务数据的统计时区以组织背景或任务说明为准。"
+    )
+
+
 def build_system_prompt(
     *,
     segments: PromptSegments,
@@ -131,6 +149,7 @@ def build_system_prompt(
         segments.codex_contract if codex and not structured_reply else "",
         segments.runtime_mode,
         speaker_header(speaker, tag),
+        current_time_section(),
         segments.cron_mode if scheduled else "",
         SPEAKER_CHANGED_LINE if speaker_changed else "",
         segments.org_context,

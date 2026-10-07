@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,17 +15,6 @@ from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
 
 API_PATH = "/api/runtime/personal-schedules"
-
-
-def _now_line() -> str:
-    now = datetime.now(UTC)
-    return (
-        "当前时间：北京时间 "
-        + now.astimezone(ZoneInfo(schedules.TIMEZONE)).strftime("%Y-%m-%d %H:%M（%A）")
-        + "，UTC "
-        + now.strftime("%Y-%m-%dT%H:%MZ")
-        + "。"
-    )
 
 
 def guidance(base_url: str, platform: str) -> str:
@@ -39,8 +26,7 @@ def guidance(base_url: str, platform: str) -> str:
     )
     return (
         "\n\n## 本人定时任务\n"
-        + _now_line()
-        + "\n用户希望你定期或在将来某个时间自动完成一件事，或者要查看、修改、暂停、删除、立即运行"
+        "用户希望你定期或在将来某个时间自动完成一件事，或者要查看、修改、暂停、删除、立即运行"
         "自己的定时任务时，使用 coreman-cron 技能" + fallback + "。"
         "接口地址与本轮凭据在 `$COREMAN_SCHEDULE_URL`、`$COREMAN_SCHEDULE_TOKEN`，"
         "凭据只属于当前发言者、只在本轮有效，不得写入文件、回复或工作区。"
