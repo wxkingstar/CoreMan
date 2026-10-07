@@ -75,7 +75,7 @@ func ContentPreview(text string, max int) string {
 
 // RedactCollaborationToken prevents CLI diagnostics echoing task credentials.
 func RedactCollaborationToken(text string, env map[string]string) string {
-	for _, key := range []string{"COREMAN_COLLABORATION_TOKEN", "COREMAN_FEISHU_PERSONAL_TOKEN", "COREMAN_WECOM_PERSONAL_TOKEN"} {
+	for _, key := range []string{"COREMAN_COLLABORATION_TOKEN", "COREMAN_FEISHU_PERSONAL_TOKEN", "COREMAN_WECOM_PERSONAL_TOKEN", "COREMAN_SYSTEMS_MCP_TOKEN"} {
 		if token := env[key]; token != "" {
 			text = strings.ReplaceAll(text, token, "[REDACTED]")
 		}

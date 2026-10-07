@@ -62,6 +62,7 @@ from coreman.core.relay.sse import (
     UsageEvent,
     paragraph_gap,
 )
+from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.core.timeutils import utcnow
 from coreman.core.wecom_personal import policy as wecom_policy
 from coreman.runtime.worker.chat.personal import feishu_guidance
@@ -197,6 +198,14 @@ class CronRunHandler:
                     issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
                     external_key=ctx.external_jwt_key,
                     providers=ctx.business_token_providers,
+                    catalog=await catalog_policy.mount_for(
+                        session,
+                        relay=relay,
+                        model=bot.model,
+                        task_id=ctx.task.id,
+                        public_base_url=ctx.public_base_url,
+                        ttl_seconds=bot.sse_timeout_seconds,
+                    ),
                 )
                 await record_issues(
                     session,

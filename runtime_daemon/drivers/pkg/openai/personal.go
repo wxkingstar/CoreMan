@@ -36,3 +36,10 @@ func personalEnabled(env map[string]string, platform, prefix string) bool {
 	}
 	return env["COREMAN_PLATFORM"] == platform && strings.TrimSpace(env[prefix+"_URL"]) != "" && strings.TrimSpace(env[prefix+"_TOKEN"]) != ""
 }
+
+// SystemsCatalogEnabled reports whether this turn mounts the business system
+// catalog MCP server. CoreMan issues its credentials only when the speaker has
+// business systems this turn and the runtime declared systems_catalog_v1.
+func SystemsCatalogEnabled(env map[string]string) bool {
+	return strings.TrimSpace(env["COREMAN_SYSTEMS_MCP_URL"]) != "" && strings.TrimSpace(env["COREMAN_SYSTEMS_MCP_TOKEN"]) != ""
+}

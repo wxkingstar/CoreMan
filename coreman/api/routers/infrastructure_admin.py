@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,7 @@ from coreman.api.infra_auth import INFRA_SCOPES, RETIRED_INFRA_SCOPES
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
+from coreman.api.routers.systems_catalog import refresh_as
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
@@ -34,6 +35,7 @@ from coreman.core.db.models import (
     JwtKey,
     User,
 )
+from coreman.core.systems_catalog.compiler import same_origin
 
 router = APIRouter(
     prefix="/api/admin", tags=["infrastructure"], dependencies=[Depends(verify_csrf)]
@@ -47,7 +49,9 @@ class SystemIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=5000)
     base_url: str | None = Field(default=None, max_length=2048)
-    sitemap_url: str | None = Field(default=None, max_length=2048)
+    openapi_url: str | None = Field(default=None, max_length=2048)
+    # openapi_url 的旧名，本版本仍接受；两者都给时以 openapi_url 为准。
+    sitemap_url: str | None = Field(default=None, max_length=2048, exclude=True)
     token_provider: str = Field(default="builtin", min_length=1, max_length=100)
     token_audience: str | None = Field(default=None, max_length=2048)
     access_test_url: str | None = Field(default=None, max_length=2048)
@@ -59,12 +63,27 @@ class SystemIn(BaseModel):
     # 新系统不能在没人确认的情况下对所有机器人开放。
     allowed_bot_ids: list[uuid.UUID] | None = Field(default_factory=list, max_length=500)
 
-    @field_validator("token_audience", "access_test_url", mode="before")
+    @field_validator(
+        "token_audience", "access_test_url", "openapi_url", "sitemap_url", mode="before"
+    )
     @classmethod
     def normalize_optional(cls, value: Any) -> Any:
         return value.strip() or None if isinstance(value, str) else value
 
-    @field_validator("base_url", "sitemap_url", "access_test_url")
+    @model_validator(mode="after")
+    def legacy_openapi_url(self) -> SystemIn:
+        if "openapi_url" not in self.model_fields_set and "sitemap_url" in self.model_fields_set:
+            self.openapi_url = self.sitemap_url
+            self.model_fields_set.add("openapi_url")
+        return self
+
+    def row_values(self) -> dict[str, Any]:
+        """写库的字段：旧列 sitemap_url 与 openapi_url 同值，滚动升级中的旧进程读到的也一样。"""
+        values = self.model_dump()
+        values["sitemap_url"] = values["openapi_url"]
+        return values
+
+    @field_validator("base_url", "openapi_url", "sitemap_url", "access_test_url")
     @classmethod
     def valid_url(cls, value: str | None) -> str | None:
         if value:
@@ -128,7 +147,8 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "name",
             "description",
             "base_url",
-            "sitemap_url",
+            "openapi_url",
+            "token_delivery",
             "token_provider",
             "token_audience",
             "access_test_url",
@@ -138,7 +158,7 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "allowed_bot_ids",
             "version",
         )
-    }
+    } | {"sitemap_url": row.openapi_url}
 
 
 def client_out(row: ApiClient) -> dict[str, Any]:
@@ -202,6 +222,11 @@ def validate_provider_settings(
     configured = request.app.state.settings.business_token_providers
     if provider != "builtin" and provider != previous and provider not in configured:
         raise ApiError(422, 422, "未知令牌签发方")
+    openapi_url = values.get("openapi_url")
+    if openapi_url and (
+        not same_origin(openapi_url, values["base_url"] or "") or urlsplit(openapi_url).fragment
+    ):
+        raise ApiError(422, 422, "OpenAPI 地址必须与系统地址同源且不含片段")
     test_url = values["access_test_url"]
     if test_url:
         base = urlsplit(values["base_url"] or "")
@@ -261,8 +286,9 @@ async def create_system(
     if await session.get(BusinessSystem, body.key):
         raise ApiError(409, 409, "系统标识已存在")
     await check_bots(session, body.allowed_bot_ids)
-    validate_provider_settings(request, body.model_dump())
-    row = BusinessSystem(**body.model_dump())
+    values = body.row_values()
+    validate_provider_settings(request, values)
+    row = BusinessSystem(**values)
     session.add(row)
     await persist(session)
     await audit(
@@ -279,7 +305,20 @@ async def create_system(
         },
     )
     await persist(session, commit=True)
-    return {"code": 0, "data": system_out(row)}
+    catalog = await catalog_after_save(request, session, user, row)
+    return {"code": 0, "data": {**system_out(row), "catalog": catalog}}
+
+
+async def catalog_after_save(
+    request: Request, session: AsyncSession, user: User, row: BusinessSystem
+) -> dict[str, Any] | None:
+    """保存后立即拉取一次目录。拉取失败不影响保存，结果写在目录状态里返回给管理台。"""
+    if not row.openapi_url or not row.base_url:
+        return None
+    try:
+        return await refresh_as(request, session, user, row)
+    except ApiError as exc:
+        return {"status": "skipped", "error": exc.message}
 
 
 @router.put("/systems/{key}")
@@ -300,7 +339,8 @@ async def update_system(
         raise not_found("系统不存在")
     require_if_match(request, row.version)
     await check_bots(session, body.allowed_bot_ids)
-    values = body.model_dump()
+    values = body.row_values()
+    catalog_source = (row.base_url, row.openapi_url)
     provider_fields = ("token_provider", "token_audience", "access_test_url")
     for field in provider_fields:
         if field not in body.model_fields_set:
@@ -333,7 +373,12 @@ async def update_system(
     await audit(session, request, user, "system.update", "system", key, diff)
     await persist(session, commit=True)
     set_etag(response, row.version)
-    return {"code": 0, "data": system_out(row)}
+    catalog = (
+        await catalog_after_save(request, session, user, row)
+        if (row.base_url, row.openapi_url) != catalog_source
+        else None
+    )
+    return {"code": 0, "data": {**system_out(row), "catalog": catalog}}
 
 
 @router.delete("/systems/{key}")

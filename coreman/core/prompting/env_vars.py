@@ -32,7 +32,15 @@ _ALIASES = {
 RESERVED_KEYS = frozenset(
     set(_ALIASES)
     | set(_ALIASES.values())
-    | {"COREMAN_PLATFORM", "COREMAN_USER_SUBJECT", "COREMAN_SYSTEMS", "BOT_SYSTEMS_CONFIG"}
+    | {
+        "COREMAN_PLATFORM",
+        "COREMAN_USER_SUBJECT",
+        "COREMAN_SYSTEMS",
+        "BOT_SYSTEMS_CONFIG",
+        # 业务系统操作目录 MCP 的地址与本轮凭据（见 core/systems_catalog/policy.py）。
+        "COREMAN_SYSTEMS_MCP_URL",
+        "COREMAN_SYSTEMS_MCP_TOKEN",
+    }
 )
 # 平台按发言者签发的业务系统令牌前缀（见 core/auth/system_access.py）。静态配置里的
 # 同前缀键必然是上一轮或他人的令牌，一律丢弃。

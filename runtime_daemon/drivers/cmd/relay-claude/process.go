@@ -35,7 +35,7 @@ var firstLineTimeout = 90 * time.Second
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") {
 			env = append(env, e)
 		}
 	}
@@ -92,6 +92,7 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 		{"coreman_collaboration", "COREMAN_COLLABORATION", strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
 		{"coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL", openai.FeishuPersonalEnabled(req.EnvVars)},
 		{"coreman_wecom_personal", "COREMAN_WECOM_PERSONAL", openai.WecomPersonalEnabled(req.EnvVars)},
+		{"coreman_systems", "COREMAN_SYSTEMS_MCP", openai.SystemsCatalogEnabled(req.EnvVars)},
 	} {
 		if cfg.enabled {
 			servers[cfg.name] = map[string]any{"type": "http", "url": strings.TrimSpace(req.EnvVars[cfg.prefix+"_URL"]), "headers": map[string]string{"Authorization": "Bearer ${" + cfg.prefix + "_TOKEN}"}}
