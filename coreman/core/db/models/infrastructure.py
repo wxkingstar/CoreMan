@@ -62,6 +62,9 @@ class BotSystemGrant(Base):
     system_key: Mapped[str] = mapped_column(
         Text, ForeignKey("systems.key", ondelete="CASCADE"), primary_key=True
     )
+    # 平台代理调用（token_delivery=proxy）时是否允许 write 级操作；
+    # destructive、financial 一律不开放。
+    allow_write: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     granted_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     granted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
@@ -117,7 +120,7 @@ class SystemCatalog(Base):
     compiler_version: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
-TOKEN_ISSUE_PURPOSES = ("chat", "cron", "health", "access_test", "catalog")
+TOKEN_ISSUE_PURPOSES = ("chat", "cron", "health", "access_test", "catalog", "proxy")
 
 
 class BusinessTokenIssue(Base):
@@ -153,6 +156,36 @@ class BusinessTokenIssue(Base):
     # JWT 的 jti；外部签发方返回不透明令牌时为空。
     token_id: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SystemCall(Base):
+    """平台代理的一次业务系统调用（含被策略拒绝的）：只记元数据，不记参数、响应和令牌。
+
+    `token_id` 是代理令牌的 jti，与 business_token_issues 对账；
+    不加外键，机器人、用户删除后仍可追溯。
+    """
+
+    __tablename__ = "system_calls"
+    __table_args__ = (
+        Index("system_calls_task_idx", "task_id"),
+        Index("system_calls_time_idx", "called_at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    called_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    task_id: Mapped[int | None] = mapped_column(BigInteger)
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    system_key: Mapped[str] = mapped_column(Text)
+    operation_id: Mapped[str] = mapped_column(Text)
+    method: Mapped[str] = mapped_column(Text)
+    risk: Mapped[str] = mapped_column(Text)
+    # ok / http_error / denied / invalid / unreachable
+    outcome: Mapped[str] = mapped_column(Text)
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    token_id: Mapped[str | None] = mapped_column(Text)
 
 
 class ApiClient(TimestampMixin, Base):

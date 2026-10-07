@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
@@ -16,15 +17,16 @@ from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import SubjectUnavailable, granted_systems, token_subject
-from coreman.core.db.models import BusinessSystem, SystemCatalog, Task, User
-from coreman.core.systems_catalog import policy, service, tools
+from coreman.core.db.models import BotSystemGrant, BusinessSystem, SystemCatalog, Task, User
+from coreman.core.systems_catalog import context, policy, service, tools
 
 router = APIRouter(tags=["systems-catalog"])
 admin_router = APIRouter(
     prefix="/api/admin", tags=["systems-catalog"], dependencies=[Depends(verify_csrf)]
 )
 MANAGERS = require_roles("ai_committee", "platform_admin")
-MAX_BODY = 16384
+# Proxied writes carry their request body in the tool arguments.
+MAX_BODY = 262_144
 LINT_SHOWN = 20
 
 
@@ -125,9 +127,9 @@ async def call_tool(
     # Count the call first and commit it: business-system requests below never hold the task lock.
     task = await session.get(Task, capability.task_id, with_for_update=True, populate_existing=True)
     assert task is not None
-    state = dict(task.payload.get(tools.BUDGET_KEY) or {})
+    state = dict(task.payload.get(context.BUDGET_KEY) or {})
     stop = tools.charge(state, name, arguments)
-    task.payload = {**task.payload, tools.BUDGET_KEY: state}
+    task.payload = {**task.payload, context.BUDGET_KEY: state}
     await session.commit()
     if stop is not None:
         return stop
@@ -135,22 +137,31 @@ async def call_tool(
         subject = await token_subject(session, scope.user)
     except SubjectUnavailable as exc:
         return {"error": "subject_unavailable", "reason": exc.reason}
-    ctx = tools.Context(
+    writable = await session.scalars(
+        select(BotSystemGrant.system_key).where(
+            BotSystemGrant.bot_id == scope.bot.id, BotSystemGrant.allow_write
+        )
+    )
+    ctx = context.Context(
         session=session,
         issuance=await issuance(request),
         operator=service.Operator(
             user=scope.user, subject=subject, task_id=task.id, bot_id=scope.bot.id
         ),
         systems=await granted_systems(session, scope.bot.id),
+        writable=frozenset(writable),
+        token_ttl=scope.bot.sse_timeout_seconds,
         perms=dict(state.get("perms") or {}),
+        tokens=dict(state.get("tokens") or {}),
     )
     value = await tools.dispatch(ctx, name, arguments)
-    if ctx.perms_changed:
+    if ctx.perms_changed or ctx.tokens_changed:
         task = await session.get(Task, task.id, with_for_update=True, populate_existing=True)
         assert task is not None
-        current = dict(task.payload.get(tools.BUDGET_KEY) or {})
+        current = dict(task.payload.get(context.BUDGET_KEY) or {})
         current["perms"] = {**(current.get("perms") or {}), **ctx.perms}
-        task.payload = {**task.payload, tools.BUDGET_KEY: current}
+        current["tokens"] = {**(current.get("tokens") or {}), **ctx.tokens}
+        task.payload = {**task.payload, context.BUDGET_KEY: current}
     await session.commit()
     return value
 
@@ -185,7 +196,12 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     if method in ("ping", "tools/list"):
         if params:
             return mcp_rpc.error(rid, -32602, "Invalid params")
-        result = {} if method == "ping" else {"tools": tools.tool_definitions()}
+        if method == "ping":
+            result = {}
+        else:
+            systems = await granted_systems(session, scope.bot.id)
+            proxied = any(system.token_delivery == "proxy" for system in systems)
+            result = {"tools": tools.tool_definitions(proxied=proxied)}
     elif method == "tools/call":
         if (
             set(params) - {"name", "arguments"}

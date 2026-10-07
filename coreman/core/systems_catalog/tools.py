@@ -11,29 +11,24 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
-import time
-from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.system_access import auth_label, auth_mode, token_env_var
-from coreman.core.auth.token_providers import TokenProviderError
 from coreman.core.db.models import BusinessSystem
-from coreman.core.systems_catalog import service
+from coreman.core.systems_catalog import context, proxy, service
+from coreman.core.systems_catalog.context import TRUST, Context
 
 MAX_CALLS = 40
+# Proxied calls have their own, smaller allowance: each one reaches the business system.
+MAX_PROXY_CALLS = 30
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
 SEARCH_PAGE = 10
 L1_MAX = 4000
 L3_MAX = 6000
 MODULE_TEXT = 120
-# A failed permission lookup is retried after this long instead of on every call.
-PERMISSIONS_RETRY_SECONDS = 60
-TRUST = {"content_trust": "system_declared"}
-BUDGET_KEY = "systems_catalog"
 
 
 class Arguments(BaseModel):
@@ -62,10 +57,11 @@ class Describe(Arguments):
     operation_id: str = Field(min_length=1, max_length=100)
 
 
-MODELS: dict[str, type[Arguments]] = {
+MODELS: dict[str, type[BaseModel]] = {
     "systems_browse": Browse,
     "systems_search": Search,
     "systems_describe": Describe,
+    "systems_call": proxy.Call,
 }
 DESCRIPTIONS = {
     "systems_browse": (
@@ -81,10 +77,12 @@ DESCRIPTIONS = {
         "Parameters, request body, response, permission, risk and how to call one operation. "
         "Check this before calling an operation."
     ),
+    "systems_call": proxy.DESCRIPTION,
 }
 
 
-def tool_definitions() -> list[dict[str, Any]]:
+def tool_definitions(*, proxied: bool) -> list[dict[str, Any]]:
+    """`proxied`: this turn has a platform-proxied system, so `systems_call` is listed too."""
     return [
         {
             "name": name,
@@ -92,6 +90,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": _slim(model.model_json_schema()),
         }
         for name, model in MODELS.items()
+        if proxied or name != "systems_call"
     ]
 
 
@@ -115,22 +114,6 @@ def _slim(value: Any) -> Any:
     }
 
 
-@dataclass
-class Context:
-    """One verified call: the member, their systems this turn and the task's catalog state."""
-
-    session: AsyncSession
-    issuance: service.Issuance
-    operator: service.Operator
-    systems: list[BusinessSystem]
-    # task.payload[BUDGET_KEY]["perms"]; the caller persists changes after the call.
-    perms: dict[str, Any] = field(default_factory=dict)
-    perms_changed: bool = False
-
-    def system(self, key: str) -> BusinessSystem | None:
-        return next((s for s in self.systems if s.key == key), None)
-
-
 def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] | None:
     """Count one call in `state` (the task payload section); the stop result when over budget."""
     try:
@@ -143,13 +126,16 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
     seen = dict(state.get("seen") or {})
     seen[fingerprint] = seen.get(fingerprint, 0) + 1
     state["seen"] = seen
-    state["calls"] = int(state.get("calls") or 0) + 1
-    if state["calls"] > MAX_CALLS:
+    counter, limit = (
+        ("proxy_calls", MAX_PROXY_CALLS) if name == "systems_call" else ("calls", MAX_CALLS)
+    )
+    state[counter] = int(state.get(counter) or 0) + 1
+    if state[counter] > limit:
         return {
             "error": "catalog_budget_exhausted",
             "stop": True,
-            "message": f"本轮目录调用已超过 {MAX_CALLS} 次。"
-            "停止调用目录工具，用已经拿到的信息完成回复。",
+            "message": f"本轮{'代理调用' if counter == 'proxy_calls' else '目录调用'}"
+            f"已超过 {limit} 次。停止调用这些工具，用已经拿到的信息完成回复。",
         }
     if seen[fingerprint] > MAX_REPEATS:
         return {
@@ -174,64 +160,6 @@ def _offset(cursor: str | None) -> int:
     return int(cursor) if cursor and cursor.isdigit() else 0
 
 
-async def _held(
-    ctx: Context, system: BusinessSystem, loaded: service.Loaded
-) -> service.Held | None:
-    """The member's permission codes for this system, cached in the task; None = no filtering."""
-    if not isinstance(loaded.compiled.get("permissions"), dict):
-        return None
-    cached = ctx.perms.get(system.key)
-    if isinstance(cached, dict):
-        if isinstance(cached.get("codes"), list):
-            return service.Held(cached["codes"])
-        if cached.get("until", 0) > time.time():
-            return None
-    codes: list[str] | None = None
-    try:
-        token = await service.issue_short_token(ctx.session, ctx.issuance, system, ctx.operator)
-        await ctx.session.commit()
-        codes = await service.held_permissions(loaded, system.base_url or "", token)
-    except TokenProviderError:
-        codes = None
-    ctx.perms[system.key] = (
-        {"codes": codes}
-        if codes is not None
-        else {"until": time.time() + PERMISSIONS_RETRY_SECONDS}
-    )
-    ctx.perms_changed = True
-    return service.Held(codes) if codes is not None else None
-
-
-def _permissions_unknown(loaded: service.Loaded, held: service.Held | None) -> bool:
-    return isinstance(loaded.compiled.get("permissions"), dict) and held is None
-
-
-def _visible(op: dict[str, Any], held: service.Held | None) -> bool:
-    return held is None or held.allows(op.get("permission") or [])
-
-
-async def _catalog(ctx: Context, system: BusinessSystem) -> service.Loaded | None:
-    await service.ensure_fresh(ctx.session, ctx.issuance, system, ctx.operator)
-    return await service.load(ctx.session, system.key)
-
-
-def _unavailable(system: BusinessSystem) -> dict[str, Any]:
-    return {
-        "error": "catalog_unavailable",
-        "system": system.key,
-        "message": "这个系统暂时没有可用的操作目录（未配置或拉取失败）。"
-        "不要猜路径；请告知用户目录不可用，或按系统已有的说明处理。",
-    }
-
-
-def _no_system(key: str) -> dict[str, Any]:
-    return {
-        "error": "system_not_available",
-        "system": key,
-        "message": "本轮没有这个业务系统的访问权限。不带参数调用 systems_browse 查看可用系统。",
-    }
-
-
 async def browse_systems(ctx: Context) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for system in ctx.systems:
@@ -241,19 +169,19 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
             "description": (system.description or "")[:MODULE_TEXT],
             "base_url": system.base_url or "",
         }
-        loaded = await _catalog(ctx, system) if system.openapi_url else None
+        loaded = await context.catalog(ctx, system) if system.openapi_url else None
         if loaded is None:
             item["catalog"] = "unavailable"
         else:
-            held = await _held(ctx, system, loaded)
+            held = await context.held(ctx, system, loaded)
             ops = loaded.compiled["operations"]
-            visible = [m for m in ops if _visible(ops[m], held)]
+            visible = [m for m in ops if context.visible(ops[m], held)]
             item.update(
                 catalog=loaded.status,
                 modules=len({ops[m]["module"] for m in visible}),
                 operations=len(visible),
             )
-            if _permissions_unknown(loaded, held):
+            if context.permissions_unknown(loaded, held):
                 item["permissions_unknown"] = True
         items.append(item)
     return {"systems": items, **TRUST}
@@ -262,14 +190,14 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
 async def browse_modules(
     ctx: Context, system: BusinessSystem, cursor: str | None
 ) -> dict[str, Any]:
-    loaded = await _catalog(ctx, system)
+    loaded = await context.catalog(ctx, system)
     if loaded is None:
-        return _unavailable(system)
-    held = await _held(ctx, system, loaded)
+        return context.unavailable(system)
+    held = await context.held(ctx, system, loaded)
     ops = loaded.compiled["operations"]
     modules: list[dict[str, Any]] = []
     for module in loaded.compiled["modules"]:
-        count = sum(1 for op_id in module["operations"] if _visible(ops[op_id], held))
+        count = sum(1 for op_id in module["operations"] if context.visible(ops[op_id], held))
         if count:
             modules.append(
                 {
@@ -287,7 +215,7 @@ async def browse_modules(
         "modules": [],
         "next_cursor": None,
     }
-    if _permissions_unknown(loaded, held):
+    if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
     for index in range(start, len(modules)):
         result["modules"].append(modules[index])
@@ -301,9 +229,9 @@ async def browse_modules(
 async def browse_operations(
     ctx: Context, system: BusinessSystem, module_name: str, cursor: str | None
 ) -> dict[str, Any]:
-    loaded = await _catalog(ctx, system)
+    loaded = await context.catalog(ctx, system)
     if loaded is None:
-        return _unavailable(system)
+        return context.unavailable(system)
     module = next((m for m in loaded.compiled["modules"] if m["name"] == module_name), None)
     if module is None:
         return {
@@ -311,9 +239,9 @@ async def browse_operations(
             "system": system.key,
             "message": "没有这个模块。用 systems_browse 只传 system 查看模块列表。",
         }
-    held = await _held(ctx, system, loaded)
+    held = await context.held(ctx, system, loaded)
     ops = loaded.compiled["operations"]
-    visible = [op_id for op_id in module["operations"] if _visible(ops[op_id], held)]
+    visible = [op_id for op_id in module["operations"] if context.visible(ops[op_id], held)]
     start = _offset(cursor)
     page = visible[start : start + BROWSE_PAGE]
     result: dict[str, Any] = {
@@ -323,7 +251,7 @@ async def browse_operations(
         "operations": [summary_line(op_id, ops[op_id]) for op_id in page],
         "next_cursor": str(start + BROWSE_PAGE) if start + BROWSE_PAGE < len(visible) else None,
     }
-    if _permissions_unknown(loaded, held):
+    if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
     return {**result, **TRUST}
 
@@ -332,7 +260,7 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
     if args.system is not None:
         system = ctx.system(args.system)
         if system is None:
-            return _no_system(args.system)
+            return context.no_system(args.system)
         targets = [system]
     else:
         targets = [s for s in ctx.systems if s.openapi_url]
@@ -340,20 +268,20 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
     unknown: list[str] = []
     unavailable: list[str] = []
     for system in targets:
-        loaded = await _catalog(ctx, system)
+        loaded = await context.catalog(ctx, system)
         if loaded is None:
             unavailable.append(system.key)
             continue
-        held = await _held(ctx, system, loaded)
-        if _permissions_unknown(loaded, held):
+        held = await context.held(ctx, system, loaded)
+        if context.permissions_unknown(loaded, held):
             unknown.append(system.key)
         ops = loaded.compiled["operations"]
         for op_id, score in loaded.index.search(args.query):
             op = ops[op_id]
-            if (args.risk is None or op["risk"] == args.risk) and _visible(op, held):
+            if (args.risk is None or op["risk"] == args.risk) and context.visible(op, held):
                 scored.append((score, system.key, op_id))
     if args.system is not None and unavailable:
-        return _unavailable(targets[0])
+        return context.unavailable(targets[0])
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     start = _offset(args.cursor)
     page = scored[start : start + SEARCH_PAGE]
@@ -380,13 +308,18 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
     return {**result, **TRUST}
 
 
-def call_template(system: BusinessSystem, op: dict[str, Any], url: str) -> dict[str, Any]:
+def call_template(
+    ctx: Context, system: BusinessSystem, op: dict[str, Any], url: str
+) -> dict[str, Any]:
     if system.token_delivery == "proxy":
+        denied = proxy.policy_error(ctx, system, op)
         return {
             "mode": "proxy",
             "tool": "systems_call",
-            "message": "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数。"
-            "运行环境里没有这个系统的令牌，不要用 curl 直接调用。",
+            "allowed": denied is None,
+            "message": "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数"
+            "（path_params、query、body）。运行环境里没有这个系统的令牌，不要用 curl 直接调用。"
+            + ("" if denied is None else proxy.DENIALS[denied]),
         }
     env_var = token_env_var(system.key)
     mode = auth_mode(system)
@@ -463,19 +396,13 @@ def _fit(result: dict[str, Any]) -> dict[str, Any]:
 
 
 async def describe(ctx: Context, system: BusinessSystem, operation_id: str) -> dict[str, Any]:
-    loaded = await _catalog(ctx, system)
+    loaded = await context.catalog(ctx, system)
     if loaded is None:
-        return _unavailable(system)
+        return context.unavailable(system)
     op = loaded.compiled["operations"].get(operation_id)
-    held = await _held(ctx, system, loaded) if op is not None else None
-    if op is None or not _visible(op, held):
-        return {
-            "error": "operation_not_found",
-            "system": system.key,
-            "operation_id": operation_id,
-            "message": "目录中没有这个操作，或当前用户没有权限使用它。"
-            "用 systems_search 查找，不要猜测路径或改用相近的操作。",
-        }
+    held = await context.held(ctx, system, loaded) if op is not None else None
+    if op is None or not context.visible(op, held):
+        return context.operation_not_found(system, operation_id)
     url = str(loaded.compiled.get("server") or system.base_url or "").rstrip("/") + op["path"]
     detail = op["detail"]
     result: dict[str, Any] = {
@@ -496,9 +423,9 @@ async def describe(ctx: Context, system: BusinessSystem, operation_id: str) -> d
         "body": detail.get("body"),
         "response": detail.get("response"),
         "example": detail.get("example"),
-        "call": call_template(system, op, url),
+        "call": call_template(ctx, system, op, url),
     }
-    if _permissions_unknown(loaded, held):
+    if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
     return {**_fit(result), **TRUST}
 
@@ -522,14 +449,16 @@ async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
             return await browse_systems(ctx)
         system = ctx.system(args.system)
         if system is None:
-            return _no_system(args.system)
+            return context.no_system(args.system)
         if args.module is None:
             return await browse_modules(ctx, system, args.cursor)
         return await browse_operations(ctx, system, args.module, args.cursor)
     if isinstance(args, Search):
         return await search(ctx, args)
+    if isinstance(args, proxy.Call):
+        return await proxy.call(ctx, args)
     assert isinstance(args, Describe)
     system = ctx.system(args.system)
     if system is None:
-        return _no_system(args.system)
+        return context.no_system(args.system)
     return await describe(ctx, system, args.operation_id)

@@ -70,7 +70,7 @@ Authorization: Bearer <BOT_TOKEN_ERP 的值>
 
 ## 签发记录与追溯
 
-每次成功签发业务令牌，CoreMan 都在 `business_token_issues` 表（迁移 `0058`）记一行：用途（`chat`、`cron`、`health`、`access_test`）、任务 ID、AI 员工、用户、`COREMAN_USER_SUBJECT`、业务系统、签发方、受众、到期时间，以及令牌标识 `token_id`。`token_id` 是 JWT 的 `jti`：`builtin` 令牌总是有；外部签发方返回 JWT 时从中读出（不验签，只用于记录），返回不透明令牌时为空。表里不存令牌本身。
+每次成功签发业务令牌，CoreMan 都在 `business_token_issues` 表（迁移 `0058`）记一行：用途（`chat`、`cron`、`health`、`access_test`，以及操作目录拉取的 `catalog`、平台代理调用的 `proxy`，见 [业务系统操作目录](business-system-catalog.md)）、任务 ID、AI 员工、用户、`COREMAN_USER_SUBJECT`、业务系统、签发方、受众、到期时间，以及令牌标识 `token_id`。`token_id` 是 JWT 的 `jti`：`builtin` 令牌总是有；外部签发方返回 JWT 时从中读出（不验签，只用于记录），返回不透明令牌时为空。表里不存令牌本身。
 
 签发记录和本轮对话记录在同一事务里提交；签发失败的系统不记录。写签发记录失败只记一条警告日志，不影响任务。worker 和 API 的日志里另有 `business_tokens_issued` 事件，带任务 ID 和各系统的 `token_id`。
 

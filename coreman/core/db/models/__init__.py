@@ -51,6 +51,7 @@ from coreman.core.db.models.infrastructure import (
     BusinessSystem,
     BusinessTokenIssue,
     JwtKey,
+    SystemCall,
     SystemCatalog,
 )
 from coreman.core.db.models.interactions import (
@@ -135,6 +136,7 @@ __all__ = [
     "TOKEN_DELIVERIES",
     "CATALOG_STATUSES",
     "SystemCatalog",
+    "SystemCall",
     "JwtKey",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",

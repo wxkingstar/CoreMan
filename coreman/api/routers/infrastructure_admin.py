@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -53,6 +53,8 @@ class SystemIn(BaseModel):
     # openapi_url 的旧名，本版本仍接受；两者都给时以 openapi_url 为准。
     sitemap_url: str | None = Field(default=None, max_length=2048, exclude=True)
     token_provider: str = Field(default="builtin", min_length=1, max_length=100)
+    # env：令牌下发到运行环境；proxy：只经平台代理调用（systems_call），令牌不进运行环境。
+    token_delivery: Literal["env", "proxy"] = "env"
     token_audience: str | None = Field(default=None, max_length=2048)
     access_test_url: str | None = Field(default=None, max_length=2048)
     enabled: bool = True
@@ -111,6 +113,8 @@ class SystemCreate(SystemIn):
 
 class GrantsIn(BaseModel):
     system_keys: list[str] = Field(max_length=100)
+    # 允许平台代理执行 write 级操作的系统，须是 system_keys 的子集；省略时保留原设置。
+    write_keys: list[str] | None = Field(default=None, max_length=100)
     comment: str = Field(default="", max_length=2000)
 
 
@@ -300,7 +304,7 @@ async def create_system(
         row.key,
         {
             field: [None, getattr(row, field)]
-            for field in ("token_provider", "token_audience", "access_test_url")
+            for field in ("token_provider", "token_delivery", "token_audience", "access_test_url")
             if getattr(row, field) is not None
         },
     )
@@ -341,7 +345,7 @@ async def update_system(
     await check_bots(session, body.allowed_bot_ids)
     values = body.row_values()
     catalog_source = (row.base_url, row.openapi_url)
-    provider_fields = ("token_provider", "token_audience", "access_test_url")
+    provider_fields = ("token_provider", "token_delivery", "token_audience", "access_test_url")
     for field in provider_fields:
         if field not in body.model_fields_set:
             values[field] = getattr(row, field)
@@ -407,16 +411,16 @@ async def get_grants(
     bot = await load_bot(session, bot_id)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
-    keys = list(
-        (
-            await session.execute(
-                select(BotSystemGrant.system_key)
-                .where(BotSystemGrant.bot_id == bot_id)
-                .order_by(BotSystemGrant.system_key)
-            )
-        ).scalars()
-    )
-    return {"code": 0, "data": {"system_keys": keys, "version": bot.version}}
+    rows = (
+        await session.execute(
+            select(BotSystemGrant.system_key, BotSystemGrant.allow_write)
+            .where(BotSystemGrant.bot_id == bot_id)
+            .order_by(BotSystemGrant.system_key)
+        )
+    ).all()
+    keys = [key for key, _ in rows]
+    writes = [key for key, allowed in rows if allowed]
+    return {"code": 0, "data": {"system_keys": keys, "write_keys": writes, "version": bot.version}}
 
 
 @router.put("/bots/{bot_id}/system-grants")
@@ -432,6 +436,8 @@ async def put_grants(
         raise forbidden()
     require_if_match(request, bot.version)
     keys = sorted(set(body.system_keys))
+    if body.write_keys is not None and not set(body.write_keys) <= set(keys):
+        raise ApiError(422, 422, "允许写入的系统必须在授权列表中")
     systems = list(
         (
             await session.execute(
@@ -451,28 +457,37 @@ async def put_grants(
         for s in systems
     ):
         raise ApiError(403, 403, "申请包含未开放给此机器人的系统")
-    before = list(
-        (
-            await session.execute(
-                delete(BotSystemGrant)
-                .where(BotSystemGrant.bot_id == bot_id)
-                .returning(BotSystemGrant.system_key)
-            )
-        ).scalars()
+    previous = (
+        await session.execute(
+            delete(BotSystemGrant)
+            .where(BotSystemGrant.bot_id == bot_id)
+            .returning(BotSystemGrant.system_key, BotSystemGrant.allow_write)
+        )
+    ).all()
+    before = [key for key, _ in previous]
+    writes_before = sorted(key for key, allowed in previous if allowed)
+    writes = sorted(
+        set(body.write_keys) if body.write_keys is not None else set(writes_before) & set(keys)
     )
     session.add_all(
-        [BotSystemGrant(bot_id=bot_id, system_key=key, granted_by=user.id) for key in keys]
+        [
+            BotSystemGrant(
+                bot_id=bot_id, system_key=key, granted_by=user.id, allow_write=key in writes
+            )
+            for key in keys
+        ]
     )
     bot.version += 1
     await persist(session)
     await notify_bot_changed(session, bot.id)
     # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
     diff = diff_dict(
-        {"system_keys": sorted(before)}, {"system_keys": keys, "comment": body.comment or None}
+        {"system_keys": sorted(before), "write_keys": writes_before},
+        {"system_keys": keys, "write_keys": writes, "comment": body.comment or None},
     )
     await audit(session, request, user, "bot.system_grants", "bot", str(bot_id), diff)
     await persist(session, commit=True)
-    return {"code": 0, "data": {"system_keys": keys, "version": bot.version}}
+    return {"code": 0, "data": {"system_keys": keys, "write_keys": writes, "version": bot.version}}
 
 
 @router.get("/api-clients")
