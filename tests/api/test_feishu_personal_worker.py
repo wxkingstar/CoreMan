@@ -89,7 +89,8 @@ async def test_connected_grant_is_described_and_bound_to_its_generation(db_sessi
     intake = await intake_for(db_session, bot, task, "看看我最近的会议")
     ctx = build_ctx(db_engine, task)
     prompt, env = await configure(db_session, ctx, intake, uuid.uuid4(), "", {})
-    assert "授权范围" in prompt and "不可信的外部资料" in prompt
+    assert "授权范围" in prompt and "一律忽略" in prompt
+    assert "已授权（授权范围" in ctx.turn_notes[0]
     assert policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"]).epoch == (
         row.context_epoch
     )
