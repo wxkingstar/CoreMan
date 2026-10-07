@@ -1,10 +1,10 @@
 import { call, http } from '@/api/client'
 import type {
   AllowedUserOut, AnnouncementIn, AnnouncementOut, AuditLogOut, BotIn, BotMemberOut, BotOut, BotPatch, CatalogIn, CatalogOut, CatalogPatch,
-  ChatLogOut, ChatLogStats, DeptNode, DrainIn, Page, PlatformAppIn, PlatformAppOut, ProbeResult, Providers,
+  ChatLogOut, ChatLogStats, DeptNode, DrainIn, FeishuQr, Page, PlatformAppIn, PlatformAppOut, ProbeResult, Providers,
   RelayModels, RelayOut, RuleIn, RuntimeInstance, RuntimeLease, RuntimeOutboxItem, RuntimeQueue,
   RuntimeTask, SettingsDefaults, SettingsOut, SettingsPatch, SwitchRelayIn, SwitchRelayOut, SyncRun, TeamIn,
-  TeamOut, UserOut, UserPatch,
+  TeamOut, UserOut, UserPatch, WecomQr,
 } from '@/api/types'
 
 type Query = Record<string, string | number | boolean | undefined | null>
@@ -33,7 +33,11 @@ export const platformApps = {
   runs: (id: string) => call<SyncRun[]>(http.get(`/api/admin/platform-apps/${id}/sync-runs`)),
 }
 export const syncRuns = { get: (id: number) => call<SyncRun>(http.get(`/api/admin/sync-runs/${id}`)) }
-export const auth = { providers: () => call<Providers>(http.get('/api/auth/providers')) }
+export const auth = {
+  providers: () => call<Providers>(http.get('/api/auth/providers')),
+  feishuQr: (redirect: string) => call<FeishuQr>(http.post('/api/auth/feishu/qr', null, { params: { redirect } })),
+  wecomQr: (redirect: string) => call<WecomQr>(http.post('/api/auth/wecom/qr', null, { params: { redirect } })),
+}
 // 运行时（relay）由节点 Daemon 自动登记，管理台只读列表、探测与取有效模型集；手工增删改已下线。
 export const relays = {
   list: (params: Query) => call<Page<RelayOut>>(http.get('/api/admin/relay-servers', { params })),

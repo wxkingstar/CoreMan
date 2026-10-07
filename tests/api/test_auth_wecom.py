@@ -214,3 +214,27 @@ def test_safe_redirect_rejects_external_targets() -> None:
         "\\\\evil.com",
     ):
         assert _safe_redirect(bad) == "/"
+
+
+async def test_embedded_qr_returns_panel_params_and_logs_in(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    await _seed(db_session)
+    monkeypatch.setattr(wecom.WeComClient, "user_info_by_code", _fake_userinfo("zhangsan"))
+    first = await client.post("/api/auth/wecom/qr", params={"redirect": "/users"})
+    assert first.status_code == 200 and "coreman_oauth=" in first.headers["set-cookie"]
+    data = first.json()["data"]
+    assert (data["appid"], data["agentid"]) == ("ww1", "1000002")
+    assert data["redirect_uri"] == "http://testserver/api/auth/wecom/callback"
+    # 同一浏览器再领一次（另一个标签页或定时刷新）不能让先领的二维码失效
+    assert (await client.post("/api/auth/wecom/qr")).status_code == 200
+    r = await client.get(
+        "/api/auth/wecom/callback", params={"code": "code-1", "state": data["state"]}
+    )
+    assert r.headers["location"] == "/users" and SESSION_COOKIE in r.cookies
+    sess = (await db_session.execute(select(AdminSession))).scalar_one()
+    assert sess.auth_method == "wecom_qr"
+
+
+async def test_embedded_qr_without_login_app(client: httpx.AsyncClient) -> None:
+    assert (await client.post("/api/auth/wecom/qr")).status_code == 404

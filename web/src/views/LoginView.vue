@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import BrandLogo from '@/components/BrandLogo.vue'
 import LoginCompanions from '@/components/LoginCompanions.vue'
+import LoginScan, { type ScanPlatform } from '@/components/LoginScan.vue'
 import { Moon } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
@@ -28,7 +29,13 @@ const passwordFocused = ref(false)
 const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 const locale = ref<Locale>(getLocale())
-const providers = ref<Providers>({ wecom: false, feishu: false })
+const providers = ref<Providers | null>(null)
+// 配了扫码登录就以扫码为主，账号密码是次要入口；两个都配时可切换，记住上次选的。
+const PLATFORM_KEY = 'coreman.loginPlatform'
+const scanPlatforms = computed(() => (['feishu', 'wecom'] as const).filter((p) => providers.value?.[p]))
+const scanPlatform = ref<ScanPlatform | null>(null)
+const usePassword = ref(false)
+const platformOptions = computed(() => scanPlatforms.value.map((p) => ({ value: p, label: t('login.platforms.' + p) })))
 
 const errorKey = computed(() => {
   const key = route.query.error
@@ -40,6 +47,11 @@ const rules = computed<FormRules>(() => ({
   username: [{ required: true, message: t('login.required', { field: t('login.username') }), trigger: 'blur' }],
   password: [{ required: true, message: t('login.required', { field: t('login.password') }), trigger: 'blur' }],
 }))
+
+function pickPlatform(p: ScanPlatform) {
+  scanPlatform.value = p
+  try { localStorage.setItem(PLATFORM_KEY, p) } catch { /* storage unavailable */ }
+}
 
 function wecomRedirect(): string {
   const r = route.query.redirect
@@ -55,15 +67,20 @@ function goFeishu() {
 }
 
 onMounted(async () => {
+  let loaded: Providers = { wecom: false, feishu: false }
   try {
-    providers.value = await authApi.providers()
-  } catch {
-    providers.value = { wecom: false, feishu: false }
-  }
-  if (errorKey.value) return
+    loaded = await authApi.providers()
+  } catch { /* 取不到按都没配处理 */ }
   // 在企微或飞书客户端里打开（常见于点聊天里的会话链接）时直接走对应的免扫码登录。
-  if (/wxwork/i.test(navigator.userAgent) && providers.value.wecom) goWecom('oauth')
-  else if (/Lark|Feishu/i.test(navigator.userAgent) && providers.value.feishu) goFeishu()
+  // 跳转期间不渲染登录卡片：内嵌二维码会另领 state，和这次跳转抢同一个绑定 cookie。
+  if (!errorKey.value) {
+    if (/wxwork/i.test(navigator.userAgent) && loaded.wecom) return goWecom('oauth')
+    if (/Lark|Feishu/i.test(navigator.userAgent) && loaded.feishu) return goFeishu()
+  }
+  providers.value = loaded
+  let saved: string | null = null
+  try { saved = localStorage.getItem(PLATFORM_KEY) } catch { /* storage unavailable */ }
+  scanPlatform.value = scanPlatforms.value.find((p) => p === saved) ?? scanPlatforms.value[0] ?? null
 })
 
 async function submit() {
@@ -128,14 +145,10 @@ function changeLocale(l: Locale) {
           />
         </el-select>
       </div>
-      <el-card class="login-card cm-controls-large">
-        <template #header>
-          <div class="login-header">
-            <BrandLogo :size="42" /><h2 class="login-title">
-              {{ t('login.title') }}
-            </h2><p>{{ t('login.entryHint') }}</p>
-          </div>
-        </template>
+      <el-card
+        v-if="providers"
+        class="login-card cm-controls-large"
+      >
         <el-alert
           v-if="errorKey"
           type="error"
@@ -143,75 +156,86 @@ function changeLocale(l: Locale) {
           :closable="false"
           class="login-alert"
         />
-        <el-form
-          ref="formRef"
-          :model="form"
-          :rules="rules"
-          label-position="top"
-          @submit.prevent
-        >
-          <el-form-item
-            :label="t('login.username')"
-            prop="username"
+        <el-segmented
+          v-if="platformOptions.length > 1 && !usePassword"
+          :model-value="scanPlatform ?? undefined"
+          :options="platformOptions"
+          block
+          class="platform-switch"
+          data-test="platform-switch"
+          @change="pickPlatform"
+        />
+        <LoginScan
+          v-if="scanPlatform && !usePassword"
+          :key="scanPlatform"
+          :platform="scanPlatform"
+          :redirect="wecomRedirect()"
+          @account="scanPlatform === 'feishu' ? goFeishu() : goWecom('qr')"
+          @password="usePassword = true"
+        />
+        <template v-else>
+          <div class="login-header">
+            <BrandLogo :size="42" /><h2 class="login-title">
+              {{ t('login.title') }}
+            </h2><p>{{ t('login.entryHint') }}</p>
+          </div>
+          <el-form
+            ref="formRef"
+            :model="form"
+            :rules="rules"
+            label-position="top"
+            @submit.prevent
           >
-            <el-input
-              v-model="form.username"
-              data-test="username"
-              autocomplete="username"
-            />
-          </el-form-item>
-          <el-form-item
-            :label="t('login.password')"
-            prop="password"
+            <el-form-item
+              :label="t('login.username')"
+              prop="username"
+            >
+              <el-input
+                v-model="form.username"
+                data-test="username"
+                autocomplete="username"
+              />
+            </el-form-item>
+            <el-form-item
+              :label="t('login.password')"
+              prop="password"
+            >
+              <el-input
+                v-model="form.password"
+                data-test="password"
+                type="password"
+                show-password
+                autocomplete="current-password"
+                @focus="passwordFocused = true"
+                @blur="passwordFocused = false"
+                @keyup.enter="submit"
+              />
+            </el-form-item>
+            <el-button
+              type="primary"
+              native-type="button"
+              :loading="loading"
+              data-test="submit"
+              style="width: 100%"
+              @click="submit"
+            >
+              {{ t('login.submit') }}
+            </el-button>
+          </el-form>
+          <div
+            v-if="scanPlatform"
+            class="back-to-scan"
           >
-            <el-input
-              v-model="form.password"
-              data-test="password"
-              type="password"
-              show-password
-              autocomplete="current-password"
-              @focus="passwordFocused = true"
-              @blur="passwordFocused = false"
-              @keyup.enter="submit"
-            />
-          </el-form-item>
-          <el-button
-            type="primary"
-            native-type="button"
-            :loading="loading"
-            data-test="submit"
-            style="width: 100%"
-            @click="submit"
-          >
-            {{ t('login.submit') }}
-          </el-button>
-        </el-form>
-        <p class="hint">
-          {{ t('login.bootstrapHint') }}
-        </p>
-        <el-divider />
-        <div class="platforms">
-          <el-tooltip
-            :content="t('login.wecomHint')"
-            :disabled="providers.wecom"
-          >
-            <span><el-button
-              :disabled="!providers.wecom"
-              data-test="wecom"
-              @click="goWecom('qr')"
-            >{{ t('login.wecom') }}</el-button></span>
-          </el-tooltip>
-          <el-tooltip
-            :disabled="providers.feishu"
-            :content="t('login.errors.feishu_not_configured')"
-          >
-            <span><el-button
-              :disabled="!providers.feishu"
-              data-test="feishu"
-              @click="goFeishu"
-            >{{ t('login.feishu') }}</el-button></span>
-          </el-tooltip>
-        </div>
+            <el-button
+              link
+              type="primary"
+              data-test="back-to-scan"
+              @click="usePassword = false"
+            >
+              {{ t('login.backToScan', { platform: t('login.platforms.' + scanPlatform) }) }}
+            </el-button>
+          </div>
+        </template>
       </el-card>
       <p class="entry-footer">
         {{ t('login.entryFooter') }}
@@ -226,10 +250,10 @@ function changeLocale(l: Locale) {
 .story-brand { display: flex; align-items: center; gap: 13px; font-size: 27px; font-weight: 720; letter-spacing: -1px; }.story-copy { margin: 58px 0 0; z-index: 1; }.story-copy h1 { font-size: clamp(34px, 3.8vw, 62px); line-height: 1.17; letter-spacing: -2px; white-space: pre-line; font-weight: 650; margin: 0 0 20px; }.story-copy p { color: #506C60; font-size: 15px; max-width: 34em; }
 .companion-scene { margin-top: auto; margin-bottom: auto; }.story-footer { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #506C60; }.story-spark { font-size: 30px; }
 .login-entry { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 48px 64px; min-width: 0; }.login-tools { position: absolute; top: 32px; right: 36px; display: flex; gap: 10px; }.login-tools .el-button { margin: 0; }
-.login-card { width: 380px; max-width: 100%; border: 0; background: transparent; overflow: visible; }.login-card :deep(.el-card__body), .login-card :deep(.el-card__header) { padding: 0; border: 0; }.login-card :deep(.el-card__header) { margin-bottom: 34px; }.login-header { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }.login-title { font-size: 29px; font-weight: 650; margin: 12px 0 0; letter-spacing: -1px; }.login-header p { color: var(--cm-muted); font-size: 14px; margin: 0; }.login-header .coreman-logo { display: none; }
-.login-card :deep(.el-form-item) { margin-bottom: 24px; }.login-card :deep(.el-form-item__label) { padding-bottom: 9px; }.login-alert { margin-bottom: 20px; }.hint { color: var(--cm-muted); font-size: 12px; margin: 18px 0 0; }.platforms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.platforms .el-button { width: 100%; }.entry-footer { position: absolute; bottom: 25px; font-size: 12px; color: var(--cm-muted); margin: 0; }
+.login-card { width: 380px; max-width: 100%; border: 0; background: transparent; overflow: visible; }.login-card :deep(.el-card__body) { padding: 0; }.login-header { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-bottom: 34px; }.login-title { font-size: 29px; font-weight: 650; margin: 12px 0 0; letter-spacing: -1px; }.login-header p { color: var(--cm-muted); font-size: 14px; margin: 0; }.login-header .coreman-logo { display: none; }
+.login-card :deep(.el-form-item) { margin-bottom: 24px; }.login-card :deep(.el-form-item__label) { padding-bottom: 9px; }.login-alert { margin-bottom: 20px; }.platform-switch { margin-bottom: 26px; }.back-to-scan { text-align: center; margin-top: 22px; }.entry-footer { position: absolute; bottom: 25px; font-size: 12px; color: var(--cm-muted); margin: 0; }
 :global(html.dark) .login-story { background: #243F38; color: #E0EED9; }:global(html.dark) .story-copy p, :global(html.dark) .story-footer { color: #B3CBB8; }
 @media(min-width:1600px) { .login-story { padding: 48px 70px 30px; }.story-copy { margin-top: 80px; } }
 @media(max-width:1023px) { .login-page { grid-template-columns: minmax(0,1fr) minmax(360px,1fr); }.login-story { padding: 32px 24px 24px; }.story-copy { margin-top: 70px; }.story-copy h1 { font-size: 38px; }.login-entry { padding: 100px 30px 64px; } }
-@media(max-width:767px) { .login-page { grid-template-columns: 1fr; }.login-story { min-height: auto; padding: 24px 24px 0; }.story-brand { font-size: 22px; }.story-brand :deep(img) { width: 36px; height: 36px; }.story-copy { margin: 26px 0 0; }.story-copy h1 { font-size: 33px; white-space: pre-line; letter-spacing: -1px; max-width: 12em; }.story-copy p { font-size: 13px; margin-bottom: 0; }.companion-scene { max-width: 430px; margin-top: -6px; }.story-footer { display: none; }.login-entry { padding: 88px 24px 64px; }.login-tools { top: 22px; right: 24px; }.login-card :deep(.el-card__header) { margin-bottom: 28px; }.login-title { font-size: 26px; margin-top: 0; } }
+@media(max-width:767px) { .login-page { grid-template-columns: 1fr; }.login-story { min-height: auto; padding: 24px 24px 0; }.story-brand { font-size: 22px; }.story-brand :deep(img) { width: 36px; height: 36px; }.story-copy { margin: 26px 0 0; }.story-copy h1 { font-size: 33px; white-space: pre-line; letter-spacing: -1px; max-width: 12em; }.story-copy p { font-size: 13px; margin-bottom: 0; }.companion-scene { max-width: 430px; margin-top: -6px; }.story-footer { display: none; }.login-entry { padding: 88px 24px 64px; }.login-tools { top: 22px; right: 24px; }.login-header { margin-bottom: 28px; }.login-title { font-size: 26px; margin-top: 0; } }
 </style>
