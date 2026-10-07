@@ -33,7 +33,9 @@ html.dark {
   --el-border-color-light: var(--cm-border); --el-border-color-lighter: #2D3C4D;
 }
 * { box-sizing: border-box; }
-body { margin: 0; color: var(--cm-text); background: var(--cm-bg); font-family: var(--el-font-family); font-size: 14px; line-height: 1.6; }
+/* Safari 26+ ignores theme-color and tints its toolbar with the body background, so body carries the toolbar color and #app paints the page. */
+body { margin: 0; color: var(--cm-text); background: var(--cm-topbar); font-family: var(--el-font-family); font-size: 14px; line-height: 1.6; }
+#app { min-height: 100vh; background: var(--cm-bg); }
 button, input, textarea, select { font: inherit; }
 a { color: var(--el-color-primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
