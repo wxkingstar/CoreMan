@@ -12,7 +12,7 @@ export interface BusinessSystem {
   /** 只在保存的响应里出现：保存后立即拉取目录的结果，未配置 OpenAPI 地址或地址未改动时为 null。 */
   catalog?: SystemCatalog | CatalogSkipped | null
 }
-export type SystemInput = Omit<BusinessSystem, 'version' | 'catalog' | 'sitemap_url' | 'token_delivery'>
+export type SystemInput = Omit<BusinessSystem, 'version' | 'catalog' | 'sitemap_url'>
 export interface CatalogFinding { rule: string; severity: 'error' | 'warn'; path: string; message: string }
 /** 操作目录状态：拉取并编译业务系统的 OpenAPI 描述后的结果。 */
 export interface SystemCatalog {
@@ -29,6 +29,8 @@ export interface ApiClient {
 // external：部署配置的外部签发方密钥（BOT_JWT_*），没有创建时间，也不参与轮换。
 export interface JwtKey { kid: string; is_active: boolean; created_at: string | null; retired_at: string | null; external?: boolean }
 export interface TokenProvider { id: string; max_token_ttl_seconds: number | null }
+/** write_keys：允许平台代理执行写操作的系统，是 system_keys 的子集。 */
+export interface SystemGrantsOut { system_keys: string[]; write_keys: string[]; version: number }
 export const systems = {
   providers: () => call<TokenProvider[]>(http.get('/api/admin/token-providers')),
   list: (page = 1) => call<Page<BusinessSystem>>(http.get('/api/admin/systems', { params: { page } })),
@@ -37,8 +39,8 @@ export const systems = {
   remove: (row: BusinessSystem) => call<null>(http.delete(`/api/admin/systems/${row.key}`, { headers: { 'If-Match': String(row.version) } })),
   catalog: (key: string) => call<SystemCatalog | null>(http.get(`/api/admin/systems/${key}/catalog`)),
   refreshCatalog: (key: string) => call<SystemCatalog | null>(http.post(`/api/admin/systems/${key}/catalog/refresh`)),
-  grants: (id: string) => call<{ system_keys: string[]; version: number }>(http.get(`/api/admin/bots/${id}/system-grants`)),
-  saveGrants: (id: string, keys: string[], version: number) => call<{ system_keys: string[]; version: number }>(http.put(`/api/admin/bots/${id}/system-grants`, { system_keys: keys }, { headers: { 'If-Match': String(version) } })),
+  grants: (id: string) => call<SystemGrantsOut>(http.get(`/api/admin/bots/${id}/system-grants`)),
+  saveGrants: (id: string, keys: string[], version: number, writeKeys: string[]) => call<SystemGrantsOut>(http.put(`/api/admin/bots/${id}/system-grants`, { system_keys: keys, write_keys: writeKeys }, { headers: { 'If-Match': String(version) } })),
 }
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),

@@ -144,6 +144,8 @@ class FakeBusinessSystem:
         self.requests: list[httpx.Request] = []
         self.spec_override: httpx.Response | None = None
         self.documents: dict[str, dict[str, Any]] = {"D1": {"id": "D1", "status": "confirmed"}}
+        # Extra handlers a test adds, keyed by (method, path).
+        self.routes: dict[tuple[str, str], Any] = {}
 
     def body(self) -> bytes:
         if isinstance(self.spec, str):
@@ -178,6 +180,8 @@ class FakeBusinessSystem:
         if self.token(request) is None:
             return httpx.Response(401, json={"code": 401, "message": "login required"})
         path, method = request.url.path, request.method
+        if (method, path) in self.routes:
+            return self.routes[(method, path)](request)  # type: ignore[no-any-return]
         if path == "/openapi.yaml" and method == "GET":
             if self.spec_override is not None:
                 return self.spec_override

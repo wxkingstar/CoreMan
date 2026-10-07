@@ -30,7 +30,7 @@ async function testAccess(row: BusinessSystem) {
   } catch (e) { fail(e) }
   finally { testing.value = null }
 }
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
 const form = reactive(empty())
 function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 // 接入规范随管理台作为公开静态文件发布，管理员可以直接把链接交给新接入的业务系统
@@ -100,7 +100,7 @@ async function save() {
   if (busy.value) return
   busy.value = true
   try {
-    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: form.openapi_url, token_provider: form.token_provider, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
+    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
     let saved: BusinessSystem
     if (editing.value) {
       if (restricted.value) await ElMessageBox.confirm(t('infra.reclaimWarning'), t('common.confirm'))
@@ -320,6 +320,20 @@ onMounted(load)
               :label="provider.id === 'builtin' ? t('infra.builtinProvider') : provider.id"
             />
           </el-select>
+        </el-form-item>
+        <el-form-item :label="t('infra.tokenDelivery')">
+          <el-radio-group
+            v-model="form.token_delivery"
+            data-test="token-delivery"
+          >
+            <el-radio value="env">
+              {{ t('infra.tokenDeliveryEnv') }}
+            </el-radio>
+            <el-radio value="proxy">
+              {{ t('infra.tokenDeliveryProxy') }}
+            </el-radio>
+          </el-radio-group>
+          <small>{{ t(form.token_delivery === 'proxy' ? 'infra.tokenDeliveryProxyHint' : 'infra.tokenDeliveryEnvHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.tokenAudience')">
           <el-input

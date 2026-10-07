@@ -51,6 +51,7 @@ BUSINESS_TABLES = [
     "escalations",
     "business_token_issues",
     "system_catalogs",
+    "system_calls",
     "bot_system_grants",
     "system_grant_audit",
     "systems",

@@ -17,8 +17,8 @@ from coreman.core.systems_catalog.lint import METHODS, lint, operations
 from coreman.core.systems_catalog.refs import MAX_DEPTH, Refs, local
 
 # Bump when the compiled format changes: stored catalogs of an older version are fetched again
-# in full (no If-None-Match) and recompiled on the next check.
-COMPILER_VERSION = 1
+# in full (no If-None-Match) and recompiled on the next check. 2: validation schemas for calls.
+COMPILER_VERSION = 2
 RISKS = ("read", "write", "destructive", "financial")
 DEFAULT_MODULE = "default"
 GUIDE_MAX = 2000
@@ -350,6 +350,93 @@ def _detail(
     return detail
 
 
+# Keys a request validator reads; everything else (descriptions, examples, x-*) is dropped.
+_VALIDATION_KEYS = frozenset(
+    {
+        "$ref",
+        "type",
+        "nullable",
+        "enum",
+        "const",
+        "required",
+        "additionalProperties",
+        "items",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "readOnly",
+    }
+)
+
+
+def validation_schema(schema: Any) -> Any:
+    """The parts of a schema that request validation needs; local `$ref`s stay references."""
+    if isinstance(schema, list):
+        return [validation_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: validation_schema(v) for k, v in schema.items() if k in _VALIDATION_KEYS}
+    if isinstance(schema.get("properties"), dict):
+        out["properties"] = {
+            name: validation_schema(prop) for name, prop in schema["properties"].items()
+        }
+    return out
+
+
+def _validation(item: dict[str, Any], op: dict[str, Any], refs: Refs) -> dict[str, Any]:
+    params: list[dict[str, Any]] = []
+    for raw in _merged_parameters(item, op, refs):
+        param = refs.deref(raw)
+        if isinstance(param, dict) and isinstance(param.get("name"), str):
+            params.append(
+                {
+                    "name": param["name"],
+                    "in": param.get("in"),
+                    "required": param.get("required") is True,
+                    "schema": validation_schema(param.get("schema") or {}),
+                }
+            )
+    body: dict[str, Any] | None = None
+    request = refs.deref(op.get("requestBody"))
+    if (
+        isinstance(request, dict)
+        and isinstance(request.get("content"), dict)
+        and request["content"]
+    ):
+        media = _json_media(request["content"])
+        body = {
+            "required": request.get("required") is True,
+            "json": media is not None,
+            "schema": validation_schema(media[1].get("schema") or {}) if media else None,
+        }
+    return {"params": params, "body": body}
+
+
+def _definitions(operations: dict[str, dict[str, Any]], refs: Refs) -> dict[str, Any]:
+    """Every local `$ref` the validation schemas reach, by reference string."""
+    defs: dict[str, Any] = {}
+    stack: list[Any] = [op["validate"] for op in operations.values()]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and local(ref) and ref not in defs:
+                defs[ref] = validation_schema(refs.target(ref) or {})
+                stack.append(defs[ref])
+            stack.extend(v for k, v in value.items() if k != "$ref")
+        elif isinstance(value, list):
+            stack.extend(value)
+    return defs
+
+
 def _permissions(doc: dict[str, Any], by_id: dict[str, tuple[str, str]]) -> dict[str, Any] | None:
     agent = doc.get("x-agent")
     spec = agent.get("permissions") if isinstance(agent, dict) else None
@@ -410,6 +497,7 @@ def compile_spec(doc: dict[str, Any], *, spec_url: str, base_url: str) -> Compil
             "hint": clip(agent.get("hint"), HINT_MAX),
             "deprecated": op.get("deprecated") is True,
             "detail": _detail(paths[path], op, schemas, refs),
+            "validate": _validation(paths[path], op, refs),
         }
     tag_defs: dict[str, str] = {}
     for tag in doc.get("tags") or []:
@@ -436,6 +524,7 @@ def compile_spec(doc: dict[str, Any], *, spec_url: str, base_url: str) -> Compil
         "permissions": _permissions(doc, by_id),
         "modules": modules,
         "operations": compiled_ops,
+        "defs": _definitions(compiled_ops, refs),
     }
     return Compiled(compiled, findings, len(compiled_ops), hidden, len(modules))
 

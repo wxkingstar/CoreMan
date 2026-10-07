@@ -4,7 +4,7 @@
 
 接入规范和 Spectral 规则集放在 `web/public/integration/`，随管理台作为静态文件发布，无需登录即可访问：`/integration/business-system-openapi-contract.md`、`/integration/business-system-contract.spectral.yaml`。新系统接入时，管理员直接把链接或下载的文件交给对方。
 
-实现状态：一期（拉取、编译、管理台状态、目录 MCP 与提示词）已实现，需要迁移 `0059`，代码在 `coreman/core/systems_catalog/`。二期（代理调用）尚未实现。
+实现状态：一期（拉取、编译、管理台状态、目录 MCP 与提示词，迁移 `0059`）与二期（代理调用，迁移 `0060`）均已实现，代码在 `coreman/core/systems_catalog/`。
 
 ## 背景
 
@@ -51,7 +51,9 @@ cancelDocument  POST /api/stock/documents/{id}/cancel  作废一张已确认的�
 ## 数据模型
 
 - `systems.sitemap_url` 重命名为 `openapi_url`。为了滚动升级，迁移新增 `openapi_url` 列并复制旧值，`sitemap_url` 列保留一个版本给尚未升级的进程读取，新代码写入时两列同值。管理 API 在一个版本内同时接受和输出旧字段名（两者都给时以 `openapi_url` 为准）；`$COREMAN_SYSTEMS` 在一个版本内同时输出 `openapi_url` 和 `sitemap_url`；管理台标签为「OpenAPI 地址」。
-- `systems.token_delivery`：`env`（默认）或 `proxy`，一期只新增字段，管理台在二期开放修改。
+- `systems.token_delivery`：`env`（默认）或 `proxy`，在系统编辑页的「令牌交付方式」修改。
+- `bot_system_grants.allow_write`：平台代理调用时是否允许 `write` 级操作，默认关闭，在 AI 员工的「系统权限」里按系统开启。默认对全部 AI 员工开放、没有勾选记录的系统不能开启写入。
+- 新表 `system_calls`：每次代理调用（含被策略拒绝的）一行，记任务、AI 员工、用户、系统、操作、方法、风险、结果（`ok` / `http_error` / `denied` / `unreachable`）、状态码、耗时和令牌 `jti`，不记参数、响应和令牌。
 - 新表 `system_catalogs`，每个系统一行：
 
 | 字段 | 说明 |
@@ -157,15 +159,23 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 ## 二期：代理调用
 
-新增 `systems_call(system, operation_id, path_params?, query?, body?)`：
+新增 `systems_call(system, operation_id, path_params?, query?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。
 
-- 校验：操作在当前用户可见；参数和请求体按 schema 校验。
-- 风险策略：`read` 直接执行；`write` 需要机器人对该系统的授权开启"允许写入"；`destructive` 与 `financial` 一期不开放。
-- 令牌：服务端在首次调用时签发，缓存到任务结束，不进入运行环境。
-- 响应：JSON 精简后不超过 100k 字符，超出截断并提示分页参数；文件类响应只返回元数据。
-- 审计：记录系统、操作、风险、状态码、耗时、令牌 `jti`。
+- 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径与查询参数、JSON 请求体，必填的请求头或 Cookie 参数无法通过代理调用。
+- 风险策略：`read` 直接执行；`write` 需要机器人对该系统的授权开启"允许写入"；`destructive` 与 `financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
+- 令牌：服务端在首次调用（或首次查权限）时签发，有效期与任务超时一致，签发记录用途为 `proxy`；以任务和系统为 AAD 加密后存在任务里，任务内复用，不进入运行环境、工具结果或日志。
+- 请求：只发往目录里的服务器前缀（与系统地址同源），连接固定到登记的主机，不跟随重定向，不读取环境代理，超时 30 秒，响应最多读 5 MiB。
+- 响应：JSON 精简后不超过 100k 字符（错误响应 4000 字符），超出时从长列表开始截断并提示用分页、筛选参数缩小范围；文件类响应只返回类型和大小；响应正文里出现的令牌值替换为 `[REDACTED]`。结果标注 `content_trust: system_returned_data`。
+- 预算：每个任务最多 30 次代理调用，与 40 次目录调用分开计；相同参数最多重复 2 次。
+- 审计：`system_calls` 记录系统、操作、风险、结果、状态码、耗时、令牌 `jti`；同时写一条 `system_call` 日志。
 
-系统增加 `token_delivery: env | proxy`。切到 `proxy` 后不再签发 `BOT_TOKEN_<KEY>`，同时解决"每轮签发全部系统令牌"和"令牌可被运行时读取"两项审计问题。
+切到 `proxy` 后不再签发 `BOT_TOKEN_<KEY>`，`$COREMAN_SYSTEMS` 里只给系统信息和 `token_delivery: proxy`，同时解决"每轮签发全部系统令牌"和"令牌可被运行时读取"两项审计问题。L0 写成：
+
+```text
+- 库存 (stock)：https://stock.example.com，7 个模块 / 35 个操作（平台代理：用 systems_call 调用）
+```
+
+并追加一段代理规则。运行时不能挂载目录 MCP（未升级）或系统没有 OpenAPI 地址时，代理系统本轮不可用，提示词如实说明，不会退回下发令牌。
 
 ## 管理台
 
@@ -178,7 +188,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 1. 迁移：列重命名，新增 `system_catalogs`。
 2. 上线拉取、编译、管理台状态展示，先让各系统看到检查结果。
 3. 上线 MCP 与提示词规则；令牌仍走环境变量。
-4. 二期上线代理调用，逐个系统切换 `token_delivery`。
+4. 二期上线代理调用（迁移 `0060`）。确认运行时节点都已升级后，逐个系统切换 `token_delivery`，需要写操作的再为对应 AI 员工开启「允许写入」。
 5. 一个版本后移除 `sitemap_url` 兼容字段。
 
 ## 测试

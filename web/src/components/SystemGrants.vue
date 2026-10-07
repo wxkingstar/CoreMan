@@ -10,12 +10,17 @@ const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
 const loading = ref(false), busy = ref(false), version = ref(0), loadError = ref('')
 const keys = ref<string[]>([]), saved = ref<string[]>([]), options = ref<BusinessSystem[]>([])
-const dirty = computed(() => keys.value.length !== saved.value.length || keys.value.some(k => !saved.value.includes(k)))
+// 允许平台代理执行写操作的系统：只对令牌交付方式为「平台代理」且已勾选的系统有意义
+const writes = ref<string[]>([]), savedWrites = ref<string[]>([])
+const same = (a: string[], b: string[]) => a.length === b.length && a.every(k => b.includes(k))
+const dirty = computed(() => !same(keys.value, saved.value) || !same(writes.value.filter(k => keys.value.includes(k)), savedWrites.value))
+function setWrite(key: string, on: boolean) { writes.value = on ? [...new Set([...writes.value, key])] : writes.value.filter(k => k !== key) }
 async function load() {
   loading.value = true; loadError.value = ''
   try {
     const grants = await systems.grants(props.botId)
     keys.value = [...grants.system_keys]; saved.value = grants.system_keys; version.value = grants.version
+    writes.value = [...grants.write_keys]; savedWrites.value = grants.write_keys
     const all: BusinessSystem[] = []
     for (let page = 1; ; page++) { const data = await systems.list(page); all.push(...data.items); if (all.length >= data.total || !data.items.length) break }
     options.value = all.filter(s => s.enabled && (s.allowed_bot_ids === null || s.allowed_bot_ids.includes(props.botId)))
@@ -25,8 +30,9 @@ async function save() {
   if (busy.value) return
   busy.value = true
   try {
-    const grants = await systems.saveGrants(props.botId, keys.value, version.value)
+    const grants = await systems.saveGrants(props.botId, keys.value, version.value, writes.value.filter(k => keys.value.includes(k)))
     saved.value = grants.system_keys; keys.value = [...grants.system_keys]; version.value = grants.version
+    savedWrites.value = grants.write_keys; writes.value = [...grants.write_keys]
     emit('saved'); ElMessage.success(t('common.saved'))
   } catch (e) { ElMessage.error(errorMessage(e)) } finally { busy.value = false }
 }
@@ -47,7 +53,7 @@ onMounted(load)
       <div class="grants-actions">
         <el-button
           :disabled="!dirty || busy"
-          @click="keys = [...saved]"
+          @click="keys = [...saved]; writes = [...savedWrites]"
         >
           {{ t('common.reset') }}
         </el-button><el-button
@@ -70,26 +76,42 @@ onMounted(load)
       v-model="keys"
       class="grants-grid"
     >
-      <el-checkbox
+      <div
         v-for="system in options"
         :key="system.key"
-        :value="system.key"
-        border
-        class="grant-option"
+        class="grant-cell"
       >
-        <span class="grant-name">
-          {{ system.name }}
-          <el-tag
-            v-if="system.default_for_all_bots"
+        <el-checkbox
+          :value="system.key"
+          border
+          class="grant-option"
+        >
+          <span class="grant-name">
+            {{ system.name }}
+            <el-tag
+              v-if="system.default_for_all_bots"
+              size="small"
+              type="info"
+            >{{ t('infra.defaultAccess') }}</el-tag>
+          </span>
+          <span
+            v-if="system.description"
+            class="grant-desc"
+          >{{ system.description }}</span>
+        </el-checkbox>
+        <div
+          v-if="system.token_delivery === 'proxy' && keys.includes(system.key)"
+          class="grant-write"
+        >
+          <el-switch
+            :model-value="writes.includes(system.key)"
+            :data-test="`allow-write-${system.key}`"
             size="small"
-            type="info"
-          >{{ t('infra.defaultAccess') }}</el-tag>
-        </span>
-        <span
-          v-if="system.description"
-          class="grant-desc"
-        >{{ system.description }}</span>
-      </el-checkbox>
+            @update:model-value="(on: string | number | boolean) => setWrite(system.key, on === true)"
+          />
+          <span>{{ t('infra.allowWrite') }}</span>
+        </div>
+      </div>
     </el-checkbox-group>
     <p
       v-else-if="!loading && !loadError"
@@ -107,6 +129,8 @@ onMounted(load)
 .grants-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .grants-actions .el-button { margin-left: 0; }
 .grants-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.grant-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.grant-write { display: flex; align-items: center; gap: 8px; padding-left: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
 .grant-option.el-checkbox { display: flex; align-items: flex-start; height: auto; margin: 0; padding: 14px 16px; border-radius: 8px; }
 .grant-option :deep(.el-checkbox__input) { margin-top: 3px; }
 .grant-option :deep(.el-checkbox__label) { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-left: 10px; white-space: normal; }
