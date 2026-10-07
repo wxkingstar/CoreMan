@@ -131,7 +131,7 @@ export interface AuditLogOut {
 
 /** 提示词段落键的短名，顺序即 `coreman/core/prompting/defaults.py::PROMPT_DEFAULTS_BY_KEY`。 */
 export const PROMPT_SEGMENTS = [
-  'security_policy', 'codex_contract', 'runtime_mode', 'cron_mode', 'runtime_tail',
+  'org_context', 'security_policy', 'codex_contract', 'runtime_mode', 'cron_mode', 'runtime_tail',
   'verbosity_1', 'verbosity_2', 'verbosity_3',
 ] as const
 export type PromptSegment = (typeof PROMPT_SEGMENTS)[number]

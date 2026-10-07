@@ -65,6 +65,44 @@ def test_claude_order_known_speaker() -> None:
     assert out.index("你是销售") < out.index(DEFAULT_VERBOSITY[3]) < out.index(DEFAULT_RUNTIME_TAIL)
 
 
+def test_org_context_sits_before_bot_prompt_for_every_run() -> None:
+    """组织背景对所有员工一样：排在发言者与定时约束之后、机器人提示词之前，⑦ 可以补充细化它。"""
+    seg = PromptSegments(
+        DEFAULT_SECURITY_POLICY,
+        DEFAULT_CODEX_CONTRACT,
+        DEFAULT_RUNTIME_MODE,
+        DEFAULT_RUNTIME_TAIL,
+        DEFAULT_VERBOSITY,
+        org_context="# 公司背景\n\n示例公司做跨境电商",
+    )
+    for scheduled in (False, True):
+        out = build_system_prompt(
+            segments=seg,
+            backend="codex",
+            verbosity_level=4,
+            bot_prompt="你是销售",
+            speaker=KNOWN,
+            speaker_changed=True,
+            scheduled=scheduled,
+        )
+        assert (
+            out.index("## 当前发言者")
+            < out.index(seg.cron_mode if scheduled else SPEAKER_CHANGED_LINE)
+            < out.index("# 公司背景")
+            < out.index("你是销售")
+        )
+    # 没填就整段不出现，也不多出空段。
+    out = build_system_prompt(
+        segments=SEG,
+        backend="claude",
+        verbosity_level=4,
+        bot_prompt="你是销售",
+        speaker=KNOWN,
+        speaker_changed=False,
+    )
+    assert "\n\n\n" not in out and "公司背景" not in out
+
+
 def test_detailed_level_adds_no_length_section() -> None:
     """4 档（详细）就是模型默认：两个后端都不加篇幅说明。"""
     for backend in ("claude", "codex"):
@@ -173,7 +211,7 @@ def test_output_format_sits_after_verbosity_and_before_the_tail() -> None:
 
 
 class _FakeStore:
-    """只实现 load_segments 用到的 get()：为了读七个键去连库不值当。"""
+    """只实现 load_segments 用到的 get()：为了读这几个键去连库不值当。"""
 
     def __init__(self, data: dict[str, str]) -> None:
         self._data = data
@@ -192,6 +230,9 @@ async def test_load_segments_override_and_fallback() -> None:
     assert seg.security_policy == DEFAULT_SECURITY_POLICY
     assert seg.codex_contract == DEFAULT_CODEX_CONTRACT and seg.runtime_mode == DEFAULT_RUNTIME_MODE
     assert seg.verbosity == DEFAULT_VERBOSITY
+    assert seg.org_context == ""
+    store = cast(SettingsStore, _FakeStore({"prompt_org_context": "公司背景"}))
+    assert (await load_segments(store)).org_context == "公司背景"
 
 
 def test_identity_tag_is_fresh_per_request() -> None:
