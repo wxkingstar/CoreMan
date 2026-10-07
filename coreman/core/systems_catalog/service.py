@@ -33,7 +33,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import BusinessSystem, SystemCatalog, User
 from coreman.core.logging import get_logger
 from coreman.core.systems_catalog import fetch, loader
-from coreman.core.systems_catalog.compiler import COMPILER_VERSION, compile_spec
+from coreman.core.systems_catalog.compiler import COMPILER_VERSION, compile_spec, same_origin
 from coreman.core.systems_catalog.search import SearchIndex
 
 log = get_logger(__name__)
@@ -296,7 +296,10 @@ async def held_permissions(loaded: Loaded, base_url: str, token: IssuedToken) ->
     spec = loaded.compiled.get("permissions")
     if not isinstance(spec, dict):
         return None
-    url = httpx.URL(str(loaded.compiled.get("server") or base_url) + str(spec["path"]))
+    target = str(loaded.compiled.get("server") or base_url) + str(spec["path"])
+    if not same_origin(target, base_url):
+        return None
+    url = httpx.URL(target)
     try:
         async with fetch.client_for(url, timeout=PERMISSIONS_TIMEOUT) as client:
             async with client.stream(

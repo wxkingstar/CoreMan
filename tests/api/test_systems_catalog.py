@@ -459,3 +459,20 @@ async def test_unknown_tool_and_bad_arguments(
     assert (await call(client, auth, "systems_call", {}))["error"] == "invalid_tool_or_arguments"
     bad = await call(client, auth, "systems_describe", {"system": "stock"})
     assert bad["error"] == "invalid_tool_or_arguments" and bad["invalid"]
+
+
+async def test_permission_lookup_never_follows_an_old_system_url(
+    client: httpx.AsyncClient, app: Any, db_session: AsyncSession, fake: FakeBusinessSystem
+) -> None:
+    _, member, task = await turn(db_session)
+    await call(client, bearer(app, task, member), "systems_browse", {"system": "stock"})
+    system = await db_session.get(BusinessSystem, "stock")
+    assert system is not None
+    # The URL changed but the catalog was not fetched again yet (still within 10 minutes).
+    system.base_url = "https://stock-new.example.com"
+    await db_session.commit()
+    _, other, second = await turn_again(db_session)
+    before = len(fake.requests)
+    result = await call(client, bearer(app, second, other), "systems_browse", {"system": "stock"})
+    assert result["permissions_unknown"] is True
+    assert len(fake.requests) == before
