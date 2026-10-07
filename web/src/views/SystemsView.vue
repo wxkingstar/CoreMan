@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import { useListQuery } from '@/composables/useListQuery'
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -31,6 +32,23 @@ async function testAccess(row: BusinessSystem) {
 const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', sitemap_url: '', token_provider: 'builtin', token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
 const form = reactive(empty())
 function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
+// 接入规范随管理台作为公开静态文件发布，管理员可以直接把链接交给新接入的业务系统
+const CONTRACT_PATH = '/integration/business-system-openapi-contract.md'
+const RULESET_PATH = '/integration/business-system-contract.spectral.yaml'
+const contractVisible = ref(false), contract = ref('')
+async function openContract() {
+  contractVisible.value = true
+  if (contract.value) return
+  try {
+    const response = await fetch(CONTRACT_PATH)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    contract.value = await response.text()
+  } catch (e) { fail(e) }
+}
+async function copyContractLink() {
+  try { await navigator.clipboard.writeText(new URL(CONTRACT_PATH, window.location.origin).href); ElMessage.success(t('common.copied')) }
+  catch (e) { fail(e) }
+}
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page }, () => { void load() })
 async function load() {
@@ -200,8 +218,15 @@ onMounted(load)
         <el-form-item :label="t('infra.baseUrl')">
           <el-input v-model="form.base_url" />
         </el-form-item>
-        <el-form-item :label="t('infra.sitemapUrl')">
+        <el-form-item :label="t('infra.openapiUrl')">
           <el-input v-model="form.sitemap_url" />
+          <small>{{ t('infra.openapiUrlHint') }}<el-button
+            data-test="open-contract"
+            class="hint-link"
+            link
+            type="primary"
+            @click="openContract"
+          >{{ t('infra.contract') }}</el-button></small>
         </el-form-item>
         <el-form-item :label="t('infra.tokenProvider')">
           <el-select
@@ -276,6 +301,38 @@ onMounted(load)
         </el-button>
       </template>
     </el-dialog>
+    <el-drawer
+      v-model="contractVisible"
+      :title="t('infra.contractTitle')"
+      size="min(760px, 100%)"
+      append-to-body
+    >
+      <div class="contract-actions">
+        <el-button
+          data-test="copy-contract-link"
+          @click="copyContractLink"
+        >
+          {{ t('infra.copyContractLink') }}
+        </el-button><el-button
+          tag="a"
+          :href="CONTRACT_PATH"
+          download
+        >
+          {{ t('infra.downloadContract') }}
+        </el-button><el-button
+          tag="a"
+          :href="RULESET_PATH"
+          download
+        >
+          {{ t('infra.downloadRuleset') }}
+        </el-button>
+      </div>
+      <MarkdownContent
+        v-if="contract"
+        data-test="contract-content"
+        :content="contract"
+      />
+    </el-drawer>
   </section>
 </template>
-<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px } .switch-hint { flex:1; min-width:0; margin:0 0 0 12px; line-height:1.5 } .open-warning { display:block; width:100%; color:var(--el-color-warning) }</style>
+<style scoped>.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px }  small { color:var(--el-text-color-secondary); margin-top:8px } .switch-hint { flex:1; min-width:0; margin:0 0 0 12px; line-height:1.5 } .open-warning { display:block; width:100%; color:var(--el-color-warning) } .contract-actions { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px } .contract-actions .el-button + .el-button { margin-left:0 } .hint-link { margin-left:4px; vertical-align:baseline }</style>

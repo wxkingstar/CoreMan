@@ -1,0 +1,166 @@
+# Spectral ruleset for business-system-openapi-contract.md (v1).
+# Usage: npx @stoplight/spectral-cli lint openapi.yaml --ruleset business-system-contract.spectral.yaml
+extends: [["spectral:oas", "off"]]
+
+aliases:
+  Operation:
+    - "$.paths[*][get,put,post,delete,patch,head,options]"
+  JsonSuccess:
+    - "$.paths[*][get,put,post,delete,patch].responses[?(@property.match(/^2\\d\\d$/))].content['application/json']"
+
+rules:
+  oas3-schema: error
+  path-params: error
+  operation-operationId: error
+  operation-operationId-unique: error
+  operation-tags: error
+  operation-tag-defined: error
+
+  contract-operation-id-pattern:
+    description: operationId must match ^[A-Za-z][A-Za-z0-9_]{0,99}$.
+    severity: error
+    given: "#Operation"
+    then:
+      field: operationId
+      function: pattern
+      functionOptions:
+        match: "^[A-Za-z][A-Za-z0-9_]{0,99}$"
+
+  contract-summary:
+    description: Every operation needs a summary of at most 80 characters.
+    severity: error
+    given: "#Operation"
+    then:
+      - field: summary
+        function: truthy
+      - field: summary
+        function: length
+        functionOptions:
+          max: 80
+
+  contract-permission:
+    description: Every operation declares x-permission (a code, a list of codes, or "none").
+    severity: error
+    given: "#Operation"
+    then:
+      - field: x-permission
+        function: truthy
+      - field: x-permission
+        function: schema
+        functionOptions:
+          schema:
+            oneOf:
+              - { type: string, minLength: 1 }
+              - { type: array, minItems: 1, items: { type: string, minLength: 1 } }
+
+  contract-operation-x-agent:
+    description: Operation-level x-agent must use the documented keys.
+    severity: error
+    given: "#Operation['x-agent']"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          additionalProperties: false
+          properties:
+            risk: { enum: [read, write, destructive, financial] }
+            hidden: { type: boolean }
+            hint: { type: string, maxLength: 500 }
+            extra_permissions: { type: array, items: { type: string, minLength: 1 } }
+
+  contract-root-x-agent:
+    description: Root x-agent must use the documented keys.
+    severity: error
+    given: "$['x-agent']"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          additionalProperties: false
+          properties:
+            guide: { type: string, maxLength: 2000 }
+            permissions:
+              type: object
+              additionalProperties: false
+              required: [operationId, pointer]
+              properties:
+                operationId: { type: string, minLength: 1 }
+                pointer: { type: string, pattern: "^/" }
+
+  contract-root-permissions:
+    description: Declare x-agent.permissions so the catalog can be filtered by the caller's permissions.
+    severity: warn
+    given: "$"
+    then:
+      field: x-agent.permissions
+      function: truthy
+
+  contract-tag-description:
+    description: Every top-level tag needs a description of at most 200 characters.
+    severity: error
+    given: "$.tags[*]"
+    then:
+      - field: description
+        function: truthy
+      - field: description
+        function: length
+        functionOptions:
+          max: 200
+
+  contract-parameter-description:
+    description: Every parameter needs a description.
+    severity: warn
+    given:
+      - "$.paths[*].parameters[*]"
+      - "#Operation.parameters[*]"
+    then:
+      field: description
+      function: truthy
+
+  contract-success-schema:
+    description: JSON success responses need a schema.
+    severity: error
+    given: "#JsonSuccess"
+    then:
+      field: schema
+      function: truthy
+
+  contract-success-not-free-form:
+    description: JSON success responses should not be a bare free-form object.
+    severity: warn
+    given: "#JsonSuccess.schema"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          not:
+            type: object
+            required: [type]
+            properties: { type: { const: object } }
+            not:
+              anyOf:
+                - { required: [properties] }
+                - { required: [allOf] }
+                - { required: [oneOf] }
+                - { required: [anyOf] }
+
+  contract-enum-size:
+    description: Inline enums are limited to 50 values; use x-agent-options for larger value sets.
+    severity: warn
+    given: "$..enum"
+    then:
+      function: length
+      functionOptions:
+        max: 50
+
+  contract-local-refs:
+    description: Only local references (#/...) are supported.
+    severity: error
+    resolved: false
+    given: "$..$ref"
+    then:
+      function: pattern
+      functionOptions:
+        match: "^#/"
