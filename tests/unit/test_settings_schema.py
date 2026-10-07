@@ -24,6 +24,7 @@ def test_patch_partial_and_bounds() -> None:
         "fast_lane_slots",
         "card_icon_url",
         "wecom_qr_provisioning_enabled",
+        "prompt_org_context",
         "prompt_security_policy",
         "prompt_codex_contract",
         "prompt_runtime_mode",
@@ -65,6 +66,7 @@ def test_prompt_keys() -> None:
 
     assert SETTING_DEFAULTS["prompt_security_policy"] == DEFAULT_SECURITY_POLICY
     assert set(PROMPT_SETTING_KEYS) == {
+        "prompt_org_context",
         "prompt_security_policy",
         "prompt_codex_contract",
         "prompt_runtime_mode",
@@ -80,6 +82,9 @@ def test_prompt_keys() -> None:
     assert SettingsPatch(prompt_runtime_tail="x").changes() == {"prompt_runtime_tail": "x"}
     with pytest.raises(ValidationError):
         SettingsPatch(prompt_runtime_tail="")
+    # 组织背景出厂为空：存空串就是「不加这一段」，不能像其它段落那样拒绝。
+    assert SETTING_DEFAULTS["prompt_org_context"] == ""
+    assert SettingsPatch(prompt_org_context="").changes() == {"prompt_org_context": ""}
 
 
 def test_legacy_agent_timeout_is_not_configurable() -> None:

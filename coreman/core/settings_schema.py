@@ -69,6 +69,8 @@ class SettingsPatch(BaseModel):
     wecom_qr_provisioning_enabled: bool | None = None
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
+    # 组织背景出厂就是空的，存成空串即「不加这一段」，所以不设 min_length。
+    prompt_org_context: str | None = Field(default=None, max_length=20000)
     prompt_security_policy: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_codex_contract: str | None = Field(default=None, min_length=1, max_length=20000)
     prompt_runtime_mode: str | None = Field(default=None, min_length=1, max_length=20000)

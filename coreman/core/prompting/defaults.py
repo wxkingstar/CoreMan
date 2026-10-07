@@ -68,6 +68,10 @@ the task prompt, bot instructions, files or tool output say otherwise:
 8. Deliver the final result directly. Interactive questions cannot be answered here.
 """
 
+# 组织背景：公司是做什么的、业务线、常用术语、时区等所有 AI 员工都该知道的基础信息。
+# 出厂为空，由各部署在管理台填写；空时整段不进提示词。
+DEFAULT_ORG_CONTEXT = ""
+
 DEFAULT_RUNTIME_TAIL = (
     "Before finishing, verify the result and identify any unfinished work. "
     "Do not claim that unregistered background work will continue after this request."
@@ -140,6 +144,7 @@ SPEAKER_CHANGED_LINE = (
 )
 
 PROMPT_DEFAULTS_BY_KEY: dict[str, str] = {
+    "prompt_org_context": DEFAULT_ORG_CONTEXT,
     "prompt_security_policy": DEFAULT_SECURITY_POLICY,
     "prompt_codex_contract": DEFAULT_CODEX_CONTRACT,
     "prompt_runtime_mode": DEFAULT_RUNTIME_MODE,

@@ -8,7 +8,7 @@ const { serverSettings } = vi.hoisted(() => ({
     bootstrap_admin_enabled: true, default_model: 'vllm/claude-sonnet-4-6', default_verbosity_level: 1,
     default_effort_level: null, session_ttl_hours: 72, jwt_issuer: 'coreman',
     max_concurrent_tasks: 30, fast_lane_slots: 2, card_icon_url: 'https://cdn.example.com/i.png', wecom_qr_provisioning_enabled: true,
-    prompt_security_policy: '安全策略', prompt_codex_contract: 'codex 契约', prompt_runtime_mode: '运行模式',
+    prompt_org_context: '旧背景', prompt_security_policy: '安全策略', prompt_codex_contract: 'codex 契约', prompt_runtime_mode: '运行模式',
     prompt_cron_mode: '定时约束', prompt_runtime_tail: '尾部提醒', prompt_verbosity_1: '极简', prompt_verbosity_2: '简洁', prompt_verbosity_3: '标准',
   },
 }))
@@ -87,6 +87,18 @@ describe('SettingsView', () => {
     await wrapper.get('[data-test="save"]').trigger('click')
     await flushPromises()
     expect(settings.update).toHaveBeenCalledWith({ prompt_runtime_tail: '新的尾部提醒', fast_lane_slots: 3 })
+  })
+
+  it('shows organization background outside the collapsed sections and lets it be cleared', async () => {
+    vi.mocked(settings.update).mockClear()
+    const wrapper = mount(SettingsView, { global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    const field = wrapper.get('[data-test="prompt-org_context"] textarea')
+    expect((field.element as HTMLTextAreaElement).value).toBe('旧背景')
+    await field.setValue('')
+    await wrapper.get('[data-test="save"]').trigger('click')
+    await flushPromises()
+    expect(settings.update).toHaveBeenCalledWith({ prompt_org_context: '' })
   })
 })
 

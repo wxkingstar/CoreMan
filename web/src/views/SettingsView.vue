@@ -14,6 +14,8 @@ import { EFFORT_LEVELS } from '@/utils/effort'
 const { t } = useI18n()
 
 const VERBOSITY_OPTIONS = [1, 2, 3, 4]
+// 组织背景单独放在折叠区外：它是部署方最常改的一段，而且允许留空；其余段落是出厂文案的覆盖。
+const ADVANCED_PROMPT_SEGMENTS = PROMPT_SEGMENTS.filter((seg) => seg !== 'org_context')
 // 可写设置项：coreman/core/settings_schema.py::SETTING_DEFAULTS 里除只读的 default_model 以外的键。
 // save() 只按这几个键做浅比较，default_model 永远不会进 PUT 请求体。
 const KEYS = [
@@ -26,6 +28,7 @@ const KEYS = [
   'fast_lane_slots',
   'card_icon_url',
   'wecom_qr_provisioning_enabled',
+  'prompt_org_context',
   'prompt_security_policy',
   'prompt_codex_contract',
   'prompt_runtime_mode',
@@ -48,6 +51,7 @@ function empty(): SettingsOut {
     fast_lane_slots: 2,
     card_icon_url: '',
     wecom_qr_provisioning_enabled: true,
+    prompt_org_context: '',
     prompt_security_policy: '',
     prompt_codex_contract: '',
     prompt_runtime_mode: '',
@@ -315,10 +319,24 @@ defineExpose({ form })
           {{ t('common.save') }} · {{ t('workspace.configuration') }}
         </el-button>
       </el-form-item>
-      <el-collapse
+      <el-form-item
         id="settings-prompts"
-        class="prompts"
+        :label="t('settings.prompt.org_context')"
+        data-test="prompt-org_context"
       >
+        <el-input
+          v-model="form.prompt_org_context"
+          type="textarea"
+          :rows="8"
+          :maxlength="20000"
+          :placeholder="t('settings.orgContextPlaceholder')"
+          show-word-limit
+        />
+        <div class="hint">
+          {{ t('settings.orgContextHint') }}
+        </div>
+      </el-form-item>
+      <el-collapse class="prompts">
         <el-collapse-item
           :title="t('settings.prompts')"
           name="prompts"
@@ -332,7 +350,7 @@ defineExpose({ form })
             {{ t('settings.promptHint') }}
           </el-alert>
           <el-form-item
-            v-for="seg in PROMPT_SEGMENTS"
+            v-for="seg in ADVANCED_PROMPT_SEGMENTS"
             :key="seg"
             :label="t(`settings.prompt.${seg}`)"
             :data-test="'prompt-' + seg"
