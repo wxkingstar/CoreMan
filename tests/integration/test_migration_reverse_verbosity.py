@@ -8,7 +8,6 @@ import json
 
 from alembic import command
 
-from coreman.core.prompting.defaults import DEFAULT_VERBOSITY
 from tests.conftest import alembic_config
 from tests.integration.test_migration_native_model_names import _execute, _rows
 
@@ -39,9 +38,11 @@ def _setting(key: str, value: object) -> tuple[str, dict[str, object]]:
     return INSERT_SETTING, {"key": key, "value": json.dumps(value)}
 
 
-def test_0053_factory_text_matches_code() -> None:
-    """downgrade 靠它识别「仍是出厂文案」的覆盖值，必须与代码里的默认值一致。"""
-    assert migration.NEW_FACTORY == DEFAULT_VERBOSITY
+def test_0053_factory_text_is_frozen() -> None:
+    """downgrade 靠它识别「仍是 0053 出厂文案」的覆盖值。它是 0053 发布时的快照，之后代码里的
+    默认文案可以再改，这里不跟着改；只要求三档都在，且是 1–3 档的新写法。"""
+    assert set(migration.NEW_FACTORY) == {1, 2, 3}
+    assert all(text.startswith("# Response Length") for text in migration.NEW_FACTORY.values())
 
 
 def test_0053_reverses_levels_and_moves_prompt_overrides(migrated_database: str) -> None:
