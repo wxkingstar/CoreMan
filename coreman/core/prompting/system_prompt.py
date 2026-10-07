@@ -109,6 +109,7 @@ def build_system_prompt(
     scheduled: bool = False,
     extra: str = "",
     output_format: str = "",
+    structured_reply: bool = False,
 ) -> str:
     """按固定顺序拼三明治；空段直接跳过，段间恒为一个空行。
 
@@ -117,6 +118,9 @@ def build_system_prompt(
 
     `extra` 是按本轮条件挂上的能力说明（⑩），必须经这里拼进来，不要在返回值后面再接：
     接在后面会把 ⑪ 挤出结尾。`output_format` 是平台的输出格式说明（⑩''），同理。
+
+    `structured_reply=True` 表示这一轮的回答由平台按固定格式解析（协作 helper 的纯 JSON），
+    不给人看：codex 输出契约、详细度和输出格式都要求 Markdown 或卡片，会和那份格式打架，一并不加。
     """
     codex = backend == "codex"
     tag = new_identity_tag()
@@ -124,7 +128,7 @@ def build_system_prompt(
         segments.security_policy,
         # 固定段，管理台改不了：身份规则本身不能由可编辑文案来定义。
         IDENTITY_TAG_RULE.format(tag=tag),
-        segments.codex_contract if codex else "",
+        segments.codex_contract if codex and not structured_reply else "",
         segments.runtime_mode,
         speaker_header(speaker, tag),
         segments.cron_mode if scheduled else "",
@@ -133,8 +137,8 @@ def build_system_prompt(
         bot_prompt,
         systems_prompt,
         extra,
-        segments.verbosity.get(verbosity_level, ""),
-        output_format,
+        "" if structured_reply else segments.verbosity.get(verbosity_level, ""),
+        "" if structured_reply else output_format,
         segments.runtime_tail,
     ]
     return "\n\n".join(p.strip() for p in parts if p and p.strip())

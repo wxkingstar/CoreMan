@@ -103,6 +103,29 @@ def test_org_context_sits_before_bot_prompt_for_every_run() -> None:
     assert "\n\n\n" not in out and "公司背景" not in out
 
 
+def test_structured_reply_drops_markdown_and_card_sections() -> None:
+    """协作 helper 的回答是平台解析的 JSON：输出契约、详细度、卡片说明都会和它打架。"""
+    kwargs: dict[str, Any] = {
+        "segments": SEG,
+        "backend": "codex",
+        "verbosity_level": 2,
+        "bot_prompt": "你是库存助手",
+        "speaker": KNOWN,
+        "speaker_changed": False,
+        "extra": "最终回答必须是纯 JSON 对象",
+        "output_format": "# Rich Card Output",
+    }
+    normal = build_system_prompt(**kwargs)
+    assert DEFAULT_CODEX_CONTRACT.strip() in normal and DEFAULT_VERBOSITY[2] in normal
+    assert "# Rich Card Output" in normal
+    out = build_system_prompt(**kwargs, structured_reply=True)
+    assert DEFAULT_CODEX_CONTRACT.strip() not in out and DEFAULT_VERBOSITY[2] not in out
+    assert "# Rich Card Output" not in out
+    # 安全、身份、机器人提示词和协议本身照旧。
+    assert out.startswith("# AI Agent Policy") and "你是库存助手" in out and "纯 JSON" in out
+    assert out.endswith(DEFAULT_RUNTIME_TAIL.strip())
+
+
 def test_detailed_level_adds_no_length_section() -> None:
     """4 档（详细）就是模型默认：两个后端都不加篇幅说明。"""
     for backend in ("claude", "codex"):
