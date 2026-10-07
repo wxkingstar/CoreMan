@@ -80,14 +80,14 @@ onMounted(load)
         v-for="system in options"
         :key="system.key"
         class="grant-cell"
+        :class="{ 'is-checked': keys.includes(system.key) }"
       >
         <el-checkbox
           :value="system.key"
-          border
           class="grant-option"
         >
           <span class="grant-name">
-            {{ system.name }}
+            <span class="grant-title">{{ system.name }}</span>
             <el-tag
               v-if="system.default_for_all_bots"
               size="small"
@@ -97,6 +97,7 @@ onMounted(load)
           <span
             v-if="system.description"
             class="grant-desc"
+            :title="system.description"
           >{{ system.description }}</span>
         </el-checkbox>
         <div
@@ -128,13 +129,18 @@ onMounted(load)
 .grants-hint { margin: 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.7; }
 .grants-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .grants-actions .el-button { margin-left: 0; }
-.grants-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-.grant-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.grant-write { display: flex; align-items: center; gap: 8px; padding-left: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
-.grant-option.el-checkbox { display: flex; align-items: flex-start; height: auto; margin: 0; padding: 14px 16px; border-radius: 8px; }
+/* 卡片等宽等高：同一行靠 stretch 拉齐，各行靠 grid-auto-rows 拉齐；说明最多三行，完整内容看悬停提示 */
+.grants-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); grid-auto-rows: 1fr; gap: 12px; }
+.grant-cell { display: flex; flex-direction: column; min-width: 0; overflow: hidden; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color); transition: border-color .2s, background-color .2s; }
+.grant-cell:hover { border-color: var(--el-color-primary-light-5); }
+.grant-cell.is-checked { border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.grant-option.el-checkbox { display: flex; flex: 1; align-items: flex-start; height: auto; margin: 0; padding: 14px 16px; }
 .grant-option :deep(.el-checkbox__input) { margin-top: 3px; }
-.grant-option :deep(.el-checkbox__label) { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-left: 10px; white-space: normal; }
-.grant-name { display: flex; align-items: center; gap: 8px; font-weight: 500; overflow-wrap: anywhere; }
-.grant-desc { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.grant-option :deep(.el-checkbox__label) { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-left: 10px; white-space: normal; }
+.grant-name { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--el-text-color-primary); font-weight: 500; }
+.grant-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grant-name .el-tag { flex-shrink: 0; }
+.grant-desc { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; color: var(--el-text-color-secondary); font-size: 12px; font-weight: 400; line-height: 1.6; overflow-wrap: anywhere; }
+.grant-write { display: flex; align-items: center; gap: 8px; padding: 8px 16px 8px 40px; border-top: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-secondary); font-size: 12px; }
 @media (max-width: 767px) { .grants-head { flex-direction: column; gap: 12px; } }
 </style>
