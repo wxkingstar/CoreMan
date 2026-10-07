@@ -159,9 +159,10 @@ func TestWecomPersonalMountsAlongsideCollaboration(t *testing.T) {
 	if servers["coreman_collaboration"]["url"] != "https://example.test/collab" || servers["coreman_wecom_personal"]["url"] != "https://example.test/wecom" {
 		t.Fatal("both MCP servers must be mounted", args)
 	}
-	// Only the Feishu server, which this WeCom turn cannot mount, is denied.
+	// Only the Feishu server, which this WeCom turn cannot mount, and the catalog
+	// server, which this turn carries no credentials for, are denied.
 	for i, a := range args {
-		if a == "--disallowedTools" && args[i+1] != "mcp__coreman_feishu_personal" {
+		if a == "--disallowedTools" && args[i+1] != "mcp__coreman_feishu_personal,mcp__coreman_systems" {
 			t.Fatal("mounted server denied", args)
 		}
 	}

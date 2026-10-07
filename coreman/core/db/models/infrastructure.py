@@ -22,17 +22,27 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from coreman.core.db.base import Base, TimestampMixin
+from coreman.core.db.base import Base, TimestampMixin, enum_check
+
+TOKEN_DELIVERIES = ("env", "proxy")
 
 
 class BusinessSystem(TimestampMixin, Base):
     __tablename__ = "systems"
-    __table_args__ = (CheckConstraint("key ~ '^[a-z][a-z0-9_]{0,49}$'", name="key_format"),)
+    __table_args__ = (
+        CheckConstraint("key ~ '^[a-z][a-z0-9_]{0,49}$'", name="key_format"),
+        CheckConstraint(enum_check("token_delivery", TOKEN_DELIVERIES), name="token_delivery"),
+    )
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
     base_url: Mapped[str | None] = mapped_column(Text)
+    # 业务系统按接入规范提供的 OpenAPI 描述地址，与 base_url 同源。
+    openapi_url: Mapped[str | None] = mapped_column(Text)
+    # 已改名为 openapi_url：保留一个版本给滚动升级中的旧进程读，写入时与 openapi_url 同值。
     sitemap_url: Mapped[str | None] = mapped_column(Text)
+    # env：令牌按 BOT_TOKEN_<KEY> 下发到运行环境；proxy：由平台代理调用，令牌不进运行环境。
+    token_delivery: Mapped[str] = mapped_column(Text, server_default=text("'env'"))
     token_provider: Mapped[str] = mapped_column(Text, server_default=text("'builtin'"))
     token_audience: Mapped[str | None] = mapped_column(Text)
     access_test_url: Mapped[str | None] = mapped_column(Text)
@@ -75,7 +85,39 @@ class SystemGrantAudit(Base):
     )
 
 
-TOKEN_ISSUE_PURPOSES = ("chat", "cron", "health", "access_test")
+CATALOG_STATUSES = ("ok", "stale", "error")
+
+
+class SystemCatalog(Base):
+    """业务系统的操作目录：拉取到的 OpenAPI 描述编译后的结果，按系统一行。
+
+    `compiled` 是编译后的目录（见 core/systems_catalog/compiler.py），不保存描述原文；
+    `compiler_version` 落后于当前编译器时，下次复查不带 If-None-Match 重新拉取并编译。
+    """
+
+    __tablename__ = "system_catalogs"
+    __table_args__ = (CheckConstraint(enum_check("status", CATALOG_STATUSES), name="status"),)
+    system_key: Mapped[str] = mapped_column(
+        Text, ForeignKey("systems.key", ondelete="CASCADE"), primary_key=True
+    )
+    spec_url: Mapped[str] = mapped_column(Text)
+    etag: Mapped[str | None] = mapped_column(Text)
+    spec_sha256: Mapped[str | None] = mapped_column(Text)
+    spec_bytes: Mapped[int | None] = mapped_column(Integer)
+    # 最近一次拿到新内容、最近一次复查（含 304 与失败）。
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    operation_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    hidden_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    module_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    lint: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    compiled: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    compiler_version: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+
+
+TOKEN_ISSUE_PURPOSES = ("chat", "cron", "health", "access_test", "catalog")
 
 
 class BusinessTokenIssue(Base):
@@ -87,7 +129,7 @@ class BusinessTokenIssue(Base):
 
     __tablename__ = "business_token_issues"
     __table_args__ = (
-        CheckConstraint("purpose IN ('chat','cron','health','access_test')", name="purpose"),
+        CheckConstraint(enum_check("purpose", TOKEN_ISSUE_PURPOSES), name="purpose"),
         Index(
             "business_token_issues_token_idx",
             "token_id",

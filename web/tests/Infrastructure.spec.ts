@@ -9,10 +9,10 @@ import { credentials, systems } from '@/api/infrastructure'
 
 vi.mock('@/api/admin', () => ({ bots: { list: vi.fn().mockResolvedValue({ items: [], total: 0 }) } }))
 vi.mock('@/api/infrastructure', () => ({
-  systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn() },
+  systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn(), catalog: vi.fn(), refreshCatalog: vi.fn() },
   credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn() },
 }))
-const erp = { key: 'erp', name: 'ERP', description: '', base_url: 'https://erp.example', sitemap_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null, version: 1 }
+const erp = { key: 'erp', name: 'ERP', description: '', base_url: 'https://erp.example', openapi_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null, version: 1 }
 const page = { page: 1, per_page: 50, total: 1, items: [erp] }
 const plugins = [ElementPlus, i18n]
 describe('Infrastructure management', () => {
@@ -96,6 +96,39 @@ describe('Infrastructure management', () => {
     expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/integration/business-system-openapi-contract.md`)
     wrapper.unmount()
     vi.unstubAllGlobals()
+  })
+  it('shows the catalog status when editing and refreshes it on demand', async () => {
+    const withSpec = { ...erp, openapi_url: 'https://erp.example/openapi.json' }
+    const stale = { status: 'stale' as const, error: 'http_503', spec_url: withSpec.openapi_url, spec_bytes: 2048, fetched_at: '2026-10-01T00:00:00Z', checked_at: '2026-10-02T00:00:00Z', module_count: 3, operation_count: 12, hidden_count: 1, lint_errors: 1, lint_warnings: 0, lint: [{ rule: 'contract-summary', severity: 'error' as const, path: '#/paths/~1a/get', message: 'Every operation needs a summary of at most 80 characters.' }] }
+    vi.mocked(systems.list).mockResolvedValue({ ...page, items: [withSpec] })
+    vi.mocked(systems.catalog).mockResolvedValue(stale)
+    vi.mocked(systems.refreshCatalog).mockResolvedValue({ ...stale, status: 'ok', error: null, lint: [], lint_errors: 0 })
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.findAll('button').find(b => b.text() === i18n.global.t('common.edit'))!.trigger('click'); await flushPromises()
+    expect(systems.catalog).toHaveBeenCalledWith('erp')
+    expect(document.querySelector('[data-test="catalog-status"]')?.textContent).toContain(i18n.global.t('infra.catalogStatus.stale'))
+    expect(document.querySelector('[data-test="catalog-summary"]')?.textContent).toContain('12')
+    expect(document.querySelector('[data-test="catalog-lint"]')?.textContent).toContain('contract-summary')
+    document.querySelector<HTMLButtonElement>('[data-test="refresh-catalog"]')!.click(); await flushPromises()
+    expect(systems.refreshCatalog).toHaveBeenCalledWith('erp')
+    expect(document.querySelector('[data-test="catalog-status"]')?.textContent).toContain(i18n.global.t('infra.catalogStatus.ok'))
+    expect(document.querySelector('[data-test="catalog-lint"]')).toBeNull()
+    wrapper.unmount()
+  })
+  it('sends openapi_url and warns when the catalog could not be fetched on save', async () => {
+    vi.mocked(systems.create).mockResolvedValue({ ...erp, catalog: { status: 'skipped', error: '该账号未登记邮箱' } })
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: typeof erp }
+    vm.form.key = 'erp'; vm.form.name = 'ERP'; vm.form.openapi_url = 'https://erp.example/openapi.json'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ openapi_url: 'https://erp.example/openapi.json' }))
+    expect(vi.mocked(systems.create).mock.calls[0][0]).not.toHaveProperty('sitemap_url')
+    expect(document.body.textContent).toContain(i18n.global.t('infra.catalogFailed', { error: '该账号未登记邮箱' }))
+    expect(systems.catalog).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
   it('shows a new client secret once and clears it when the dialog closes', async () => {
     vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })

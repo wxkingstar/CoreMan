@@ -37,6 +37,7 @@ from coreman.core.prompting import (
 )
 from coreman.core.relay.client import ChatRequest
 from coreman.core.relay.models import backend_of
+from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.runtime.worker.background import TimeoutSupervisor
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Intake, Prepared
@@ -189,6 +190,14 @@ class OpenStage(ChatStageBase):
             issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
+            catalog=await catalog_policy.mount_for(
+                session,
+                relay=relay,
+                model=bot.model,
+                task_id=ctx.task.id,
+                public_base_url=ctx.public_base_url,
+                ttl_seconds=bot.sse_timeout_seconds,
+            ),
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(

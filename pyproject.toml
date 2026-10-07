@@ -27,6 +27,7 @@ dependencies = [
   "lark-oapi>=1.7.3,<2",
   "prometheus-client>=0.21,<1",
   "markdown-it-py>=3,<5",
+  "pyyaml>=6.0,<7",
 ]
 
 [dependency-groups]

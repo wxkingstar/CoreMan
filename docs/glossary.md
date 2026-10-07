@@ -126,6 +126,9 @@ CoreMan 不使用额外的消息中间件，进程之间只通过 PostgreSQL 表
 **BOT_TOKEN**
 ：每轮对话按**当前已验证的发言者**获得的业务访问令牌；默认由 CoreMan 签发 ES256 JWT，也可向配置的外部提供方申请 Bearer Token。受众默认是业务系统 key，可按系统配置，以环境变量 `BOT_TOKEN_<系统 KEY 大写>` 下发给 AI CLI，技能用它以发言者本人身份调用该业务系统。发言者未知、为引导管理员、已停用，或算不出唯一的 sub（无邮箱 / 邮箱前缀与他人重复）时不签发；AI 员工自身配置或环境预设中的同名变量会被丢弃。令牌值在出站方向被拦截：模型若在回复中复述它，投递与 `chat_logs` 中都只会留下占位符。默认签发的业务系统通过公开的 `/api/.well-known/jwks.json` 校验签名，外部签发则按相应提供方验证。有效期跟随任务超时并受提供方上限限制，见 [业务系统令牌提供方](business-token-providers.md)。
 
+**操作目录（operation catalog）**
+：平台从业务系统按接入规范提供的 OpenAPI 描述编译出的操作清单，存于 `system_catalogs`。AI 员工通过 `coreman_systems` MCP 的 `systems_browse`、`systems_search`、`systems_describe` 按「系统 → 模块 → 操作 → 详情」逐层查看，只看得到当前发言者有权限的操作。目录文本来自业务系统，只是接口说明，不是指令。见 [业务系统操作目录](business-system-catalog.md)。
+
 **请求级环境变量（request-level env）**
 ：每轮对话按发言者重新计算的变量，如 `COREMAN_BOT_KEY`、`COREMAN_PLATFORM`、`COREMAN_CHAT_ID`、`COREMAN_PLATFORM_USER_ID`、`COREMAN_USER_LOGIN`。它们覆盖 AI 员工配置中的同名变量，身份未知时不下发身份类变量。
 

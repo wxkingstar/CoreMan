@@ -102,6 +102,8 @@ class Capability(BaseModel):
     # 驱动的会话记录可以给本人看：不含环境变量（机器人密钥、访问令牌）。
     # 旧节点没有，本人凭链接查看需等升级。
     owner_session_view_v1: StrictBool = False
+    # 驱动能挂载业务系统操作目录（MCP）。旧节点没有，业务系统沿用原来的一行说明。
+    systems_catalog_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)
     login: Literal["ready", "required", "unknown"] = "unknown"

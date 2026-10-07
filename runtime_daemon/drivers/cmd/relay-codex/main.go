@@ -199,6 +199,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"wecom_personal_tools_v1": true,
 			// Session history omits env vars, so the session owner may view it.
 			"owner_session_view_v1": true,
+			// The business system catalog MCP (coreman_systems) can be mounted.
+			"systems_catalog_v1": true,
 		},
 	})
 }

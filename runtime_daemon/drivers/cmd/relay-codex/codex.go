@@ -44,7 +44,7 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") {
 			continue
 		}
 		env = append(env, e)
@@ -178,6 +178,16 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		out.Args = append(out.Args, "-c", "mcp_servers.coreman_wecom_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_wecom_personal.bearer_token_env_var="COREMAN_WECOM_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_wecom_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=false")
+	}
+
+	// The business system catalog mounts whenever the turn carries its
+	// credentials, in any chat type: it only describes systems the speaker
+	// already has this turn.
+	if openai.SystemsCatalogEnabled(req.EnvVars) {
+		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_SYSTEMS_MCP_URL"]))
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_systems.url="+string(encodedURL), "-c", `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "-c", "mcp_servers.coreman_systems.enabled=true")
+	} else {
+		out.Args = append(out.Args, "-c", `mcp_servers.coreman_systems.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_systems.enabled=false")
 	}
 
 	// Image attachments via codex's native `-i FILE` mechanism. This is
