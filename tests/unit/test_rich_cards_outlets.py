@@ -34,7 +34,7 @@ def test_prompt_documents_reply_buttons_and_people_lookup() -> None:
 def test_prompt_examples_are_valid_blocks() -> None:
     """模型会照着例子写：例子里的块必须都能通过校验。"""
     blocks = [s for s in split(RICH_CARDS_PROMPT) if s.kind != "markdown"]
-    assert [s.block for s in blocks] == ["header", "callout", "table", "kpi", "chart"]
+    assert [s.block for s in blocks] == ["header", "callout", "kpi", "chart"]
     assert all(s.kind == "block" for s in blocks), [s.error for s in blocks]
 
 

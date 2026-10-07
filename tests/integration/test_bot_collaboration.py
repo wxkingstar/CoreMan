@@ -324,6 +324,13 @@ async def test_worker_uses_origin_human_and_resumes_original_session(
     prompt, env = await configure(db_session, ctx, intake, info, "system", {})
     assert "COREMAN_BOT_HELP_TOKEN" not in env
     assert "有限等待" in prompt and "不得调用协作工具" in prompt
+    # helper 的回答由平台按纯 JSON 解析：要求 Markdown 或卡片的段落都不能挂进来。
+    intake.bot.rich_cards = True
+    intake.bot.verbosity_level = 2
+    full = await OpenStage()._system_prompt(ctx, intake, info, "codex", "", prompt)
+    assert "纯 JSON" in full
+    assert "# Rich Card Output" not in full
+    assert "# Response format" not in full and "# Response Length" not in full
     answer = (
         "缺少仓库权限，未能核实库存" if feedback_status == "blocked" else "库存73，预留11，可用62"
     )

@@ -8,36 +8,29 @@ from __future__ import annotations
 
 RICH_CARDS_PROMPT = """# Rich Card Output
 
-Your reply is rendered as a Feishu card. Write normal Markdown and add card blocks wherever \
-they fit: a fenced block whose info string is `card:<type>` and whose body is one JSON object. \
-Readers scan blocks faster than paragraphs, so prefer a block over prose for anything a block \
-can show. Give data and meaning only — the platform decides colors, sizes and layout, and \
-adapts to light and dark themes.
+Your reply is rendered as a Feishu card. Write normal Markdown and add card blocks: a fenced \
+block with info string `card:<type>` and one JSON object as its body. Readers scan blocks \
+faster than paragraphs, so prefer a block over prose for anything a block can show. Give data \
+and meaning only; the platform picks colors, sizes and layout for light and dark themes.
 
 When to use them:
-- You carried out a task (changed, created, deployed, fixed or checked something): open with a \
-`header` whose title states the outcome in a few words; green when done, orange when done but \
-something is still pending, red when it failed.
-- Anything the reader must do or know before relying on the result (a restart or approval \
-still needed, a risk, a partial failure, a data caveat): a `callout` near the top, not only at \
-the end.
-- Several fields of one result (IDs, names, locations, settings, before and after values): a \
-`table`, or an `item` for one entity with a picture.
-- Headline numbers: `kpi`; trends, comparisons and shares: `chart`.
-- Ordered steps, a process or a history: `timeline`.
-- Colleagues you name: `people`. Likely follow-up requests: `actions` with reply buttons.
-- Skip blocks only for a reply of one or two sentences, small talk, or a question back to the \
-user.
-- If a Response Length section asks for a minimal or brief reply, follow it: add a block only \
-when the user explicitly asks for a chart, a table or similar.
+- After carrying out a task (changed, created, deployed, fixed, checked), open with a `header` \
+stating the outcome: green done, orange done with something pending, red failed.
+- What the reader must do or know before relying on the result (restart or approval still \
+needed, risk, partial failure, data caveat): a `callout` near the top.
+- Several fields of one result (IDs, names, settings, before/after): `table`, or `item` for one \
+entity with a picture. Headline numbers: `kpi`. Trends, comparisons, shares: `chart`. Steps or \
+history: `timeline`. Colleagues you name: `people`. Likely follow-ups: `actions` reply buttons.
+- Plain text only for a reply of one or two sentences, small talk, or a question back.
+- When a Response Length section asks for a minimal or brief reply, add a block only if the \
+user explicitly asks for a chart, table or similar.
 
 Types:
 - header: {"title", "subtitle"?, "tags"?: [{"text", "color"?}], \
-"color"?: blue|green|orange|red|grey|turquoise} — card title bar; green=done, \
-orange=warning, red=problem. At most one, put it first.
+"color"?: blue|green|orange|red|grey|turquoise} — at most one, first.
 - kpi: {"items": [{"label", "value", "delta"?, "good"?: true|false, "note"?}], \
-"size"?: full|half} — metric tiles. `good` says whether the change is good (green) or bad \
-(red); arrows follow the sign of `delta`.
+"size"?: full|half} — `good` says whether the change is good (green) or bad (red); arrows \
+follow the sign of `delta`.
 - chart: {"chart": line|area|bar|hbar|pie|donut|funnel|combo|progress|ring|radar|scatter, \
 "title"?, then data: "x": [labels] + "series": [{"name", "values": [numbers or null], \
 "kind"?: bar|line, "axis"?: left|right}] for line/area/bar/combo/radar; \
@@ -49,62 +42,47 @@ orange=warning, red=problem. At most one, put it first.
 "size": full|half}.
 - table: {"columns": [{"key", "title", \
 "type"?: text|number|money|percent|date|person|tag|markdown, "align"?}], \
-"rows": [{key: value}], "title"?} — only when you need column types; plain Markdown tables \
-are converted automatically. `person` cells hold an email or login name (or a list of them).
-- callout: {"level": info|success|warning|danger, "title"?, "text"} — a highlighted note or \
-warning.
+"rows": [{key: value}], "title"?} — only when you need column types; Markdown tables are \
+converted automatically. `person` cells hold an email or login name (or a list).
+- callout: {"level": info|success|warning|danger, "title"?, "text"}.
 - item: {"title", "image"?: https URL, "eyebrow"?, "meta"?: [strings], "code"?, \
-"highlight"?: {"text", "level"}, "tags"?, "link"?} — one entity (product, order, person) with \
-picture and details.
+"highlight"?: {"text", "level"}, "tags"?, "link"?} — one product, order or person.
 - timeline: {"steps": [{"time"?, "text", "status": done|current|warning|error|pending}]}.
 - columns: {"columns": [[child blocks], [child blocks]]} — 2–3 side-by-side columns; a child \
 is {"type": "markdown", "text"} or any of kpi/chart/callout/item/timeline/people/note with a \
 "type" field.
-- people: {"users": [emails or login names], "title"?} — colleagues shown with avatar and \
-name; nobody is notified. Names that cannot be matched are shown as plain text.
+- people: {"users": [emails or login names], "title"?} — avatar and name; nobody is notified; \
+unmatched names stay plain text.
 - note: {"text"} — footnote, data source or caveat.
 - actions: {"buttons": [{"text": "…", "url": "…"} or {"text": "…", "reply": true}, ...], \
 each with "style"?: primary|danger|default} — up to 6 buttons, text at most 40 characters. \
 `url` opens an http/https link. A `"reply": true` button sends its own text to you as the \
-asker's next message, so write the text as a complete short request (e.g. "Break down by \
-category"); only the person who asked this question can click it. Use them for likely \
-follow-ups, never to confirm an irreversible action.
+asker's next message, so write it as a complete short request (e.g. "Break down by \
+category"); only the person who asked can click it. Never use one to confirm an irreversible \
+action.
 
 Rules:
-- Each block's JSON must be complete and valid; write it in one go and do not edit it \
-afterwards.
-- State the conclusion first, in the header or the opening sentence, then add the blocks that \
-support it. Do not repeat in prose what a block already shows.
-- Two adjacent blocks with "size": "half" (chart, kpi, callout) are placed side by side.
-- Put numbers in `values`/`value` as numbers; format labels via `format` instead of strings.
-- Inline colors: `<font color='green|red|orange|blue|grey'>text</font>`, only to mark \
-good/bad/status.
+- The card renders while you stream, so write each block's JSON complete and valid in one go.
+- Conclusion first (header or opening sentence), then supporting blocks; do not repeat in \
+prose what a block shows.
+- Two adjacent "size": "half" blocks (chart, kpi, callout) sit side by side.
+- Numbers go in `values`/`value` as numbers; format them with `format`, not strings.
+- Inline colors: `<font color='green|red|orange|blue|grey'>text</font>`, only for good/bad/status.
 
-Example of a task result:
+Example:
 ```card:header
-{"title": "Config moved to the correct group", "subtitle": "test environment", \
-"color": "orange", "tags": [{"text": "Restart pending", "color": "orange"}]}
+{"title": "Config moved to the correct group", "color": "orange", \
+"tags": [{"text": "Restart pending", "color": "orange"}]}
 ```
-Copied the config to the correct group and checked that it matches the original.
 ```card:callout
-{"level": "warning", "title": "Restart needed", "text": "order-api reads this config only at \
-startup; restart it in test to apply the change."}
+{"level": "warning", "text": "order-api reads this config only at startup; restart it to apply."}
 ```
-```card:table
-{"columns": [{"key": "item", "title": "Item"}, {"key": "value", "title": "Value", \
-"type": "markdown"}], "rows": [{"item": "Group", "value": "`shop.orders`"}, \
-{"item": "Data ID", "value": "`refund-rules.json`"}, \
-{"item": "Old copy", "value": "Kept in `shop.order`"}]}
-```
-
-Example of a data report:
 ```card:kpi
-{"items": [{"label": "Orders", "value": "97", "delta": "+12.6%", "good": true}, \
-{"label": "Refund rate", "value": "2.1%", "delta": "+0.4pt", "good": false}]}
+{"items": [{"label": "Orders", "value": 97, "delta": "+12.6%", "good": true}], "size": "half"}
 ```
 ```card:chart
-{"chart": "line", "title": "GMV, last 7 days (k$)", "x": ["9/19", "9/20", "9/21"], \
-"series": [{"name": "GMV", "values": [214, 231, 298]}], "labels": "last"}
+{"chart": "line", "x": ["9/19", "9/20", "9/21"], \
+"series": [{"name": "GMV", "values": [214, 231, 298]}], "labels": "last", "size": "half"}
 ```"""
 
 

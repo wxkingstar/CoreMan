@@ -238,7 +238,9 @@ class OpenStage(ChatStageBase):
         )
         from coreman.core.prompting.rich_cards import with_reply_images
 
-        extra = with_reply_images(extra, intake.bot.platform, backend)
+        # helper 的回答是交给平台解析的 JSON，不会发到聊天里，图片说明用不上。
+        if ctx.task.payload.get("collaboration_phase") != "helper":
+            extra = with_reply_images(extra, intake.bot.platform, backend)
         system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
         ctx.private_turn = wecom_personal.mounted(env)
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
@@ -380,6 +382,7 @@ class OpenStage(ChatStageBase):
             systems_prompt=systems_prompt,
             extra=extra,
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
+            structured_reply=ctx.task.payload.get("collaboration_phase") == "helper",
         )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
