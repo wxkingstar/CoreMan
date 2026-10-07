@@ -176,12 +176,14 @@ async def test_turn_gets_catalog_lines_and_mcp_credentials(
         await db_session.commit()
         return result
 
-    # Not fetched yet: the old one-line form, but the tools are mounted to fetch on demand.
-    first = await access(mount)
-    assert "- 库存: https://stock.example.com (env: BOT_TOKEN_STOCK; Cookie: bot_token)" in (
-        first.prompt
+    # The listing depends on the grant and the runtime only, never on what the catalog holds:
+    # fetching it must not change the system prompt of a running conversation.
+    line = (
+        "- 库存 (stock)：https://stock.example.com"
+        "（env: BOT_TOKEN_STOCK；Cookie: bot_token，可查操作目录）"
     )
-    assert CATALOG_RULES not in first.prompt
+    first = await access(mount)
+    assert line in first.prompt and first.prompt.endswith(CATALOG_RULES)
     assert first.env[policy.URL_ENV] == "https://coreman.example.com" + URL
     cap = policy.read_capability(bot_cipher(), first.env[policy.TOKEN_ENV])
     assert (cap.task_id, cap.actor) == (task.id, member.id)
@@ -197,14 +199,11 @@ async def test_turn_gets_catalog_lines_and_mcp_credentials(
         service.Operator(member, "zhangsan"),
     )
     second = await access(mount)
-    assert (
-        "- 库存 (stock)：https://stock.example.com，2 个模块 / 6 个操作"
-        "（env: BOT_TOKEN_STOCK；Cookie: bot_token）"
-    ) in second.prompt
-    assert second.prompt.endswith(CATALOG_RULES)
+    assert second.prompt == first.prompt
     # A runtime that cannot mount the tools keeps the old prompt and gets no credentials.
     third = await access(None)
     assert CATALOG_RULES not in third.prompt and policy.URL_ENV not in third.env
+    assert "可查操作目录" not in third.prompt
 
 
 async def test_mount_only_for_runtimes_that_declare_it(db_session: AsyncSession) -> None:

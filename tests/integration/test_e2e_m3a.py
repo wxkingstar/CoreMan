@@ -39,6 +39,7 @@ from tests.fakes.fake_relay import FakeRelay
 from tests.fakes.fake_wecom_ws import FakeWeComWs
 from tests.fakes.runtime_node import attach_node
 from tests.integration.test_e2e_wecom import FAST_WS, _ready, _seed
+from tests.integration.worker_helpers import user_input
 
 KEY = "k" * 32
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x03" * 20
@@ -149,7 +150,7 @@ async def test_image_message_reaches_the_model_and_is_answered(
         finish = await stack.ws.wait_frame(_finished(req), timeout=30)
         assert "你好，世界\n\n。" in finish["body"]["stream"]["content"]
         # 模型收到的是 content parts：提示语 + data URI 图片，原始 url/aeskey 不外传。
-        content = relays["normal"].requests[0]["messages"][1]["content"]
+        content = user_input(relays["normal"].requests[0])
         assert content[0] == {"type": "text", "text": msg("media_prompt_image")}
         assert content[1]["image_url"]["url"] == (
             "data:image/png;base64," + base64.b64encode(PNG).decode()
@@ -202,7 +203,7 @@ async def test_ask_user_question_full_loop(
             timeout=60,
         )
         body = relays["submit"].requests[0]
-        assert body["messages"][1]["content"] == "[用户选择回答]\n1. 用哪个？ -> A"
+        assert user_input(body) == "[用户选择回答]\n1. 用哪个？ -> A"
         assert body["session_id"] == relays["ask"].requests[0]["session_id"]
 
         logs = await _chat_logs(db_engine, 2)

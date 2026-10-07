@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import os
 import re
 
@@ -71,6 +73,7 @@ class Cipher:
             raise ValueError("密钥标识只能是 1-64 位字母、数字或 ._-")
         self._key_id = key_id
         self._aead = _aead(key)
+        self._mac_key = hmac.digest(key, b"coreman-cipher-mac", "sha256")
         self._keys: dict[str, AESGCM] = {key_id: self._aead}
         for kid, value in (previous or {}).items():
             if not KID_RE.match(kid):
@@ -82,6 +85,11 @@ class Cipher:
     @property
     def key_id(self) -> str:
         return self._key_id
+
+    def mac(self, purpose: str, message: str) -> str:
+        """主密钥派生的确定性 HMAC（十六进制）：同一输入永远同一个值，换主密钥后随之改变。"""
+        data = f"{purpose}\0{message}".encode()
+        return hmac.new(self._mac_key, data, hashlib.sha256).hexdigest()
 
     def seal(self, plaintext: str, aad: str) -> bytes:
         """只返回 nonce|ciphertext|tag，不带前缀与密钥标识。

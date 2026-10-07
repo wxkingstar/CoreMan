@@ -37,7 +37,7 @@ from tests.integration.credential_helpers import (
     seed_chat_session,
 )
 from tests.integration.test_chat_handler import chat_task, run, stream_of
-from tests.integration.worker_helpers import build_ctx
+from tests.integration.worker_helpers import build_ctx, turn_block, user_input
 
 BASE = "https://coreman.example.com"
 ONCE = {"fields": FIELDS, "purpose": "把 SSO 密钥写进服务配置"}
@@ -175,9 +175,10 @@ async def test_resume_injects_the_values_once_and_then_drops_them(
     await ctx.chat_logs.drain(5)
     body = fake.requests[0]
     assert body["env_vars"]["DEMO_PIN"] == "pin-778899"
-    assert "已通过安全表单提交一次性密钥 DEMO_PIN、DEMO_USERNAME" in body["messages"][1]["content"]
+    assert "已通过安全表单提交一次性密钥 DEMO_PIN、DEMO_USERNAME" in user_input(body)
     prompt = body["messages"][0]["content"]
-    assert "本轮有用户刚提交的一次性密钥：`$DEMO_PIN`、`$DEMO_USERNAME`" in prompt
+    # 续接轮跑在原会话里，Codex 不会重读 system prompt：一次性密钥的说明写进本轮块。
+    assert "本轮有用户刚提交的一次性密钥：`$DEMO_PIN`、`$DEMO_USERNAME`" in turn_block(body)
     assert "pin-778899" not in prompt
     # 模型把值打了出来：出站照样替换。
     stream = await stream_of(db_session, claimed.id)
@@ -241,7 +242,7 @@ async def test_resume_lost_values_tell_the_agent_to_ask_again(
         build_ctx(db_engine, claimed, relay_client_factory=lambda _r: fake.client())
     )
     assert "DEMO_PIN" not in fake.requests[0]["env_vars"]
-    assert "一次性密钥已不可用" in fake.requests[0]["messages"][0]["content"]
+    assert "一次性密钥已不可用" in turn_block(fake.requests[0])
 
 
 async def test_values_stay_while_the_resume_is_still_queued(db_session: AsyncSession) -> None:

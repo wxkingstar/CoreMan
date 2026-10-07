@@ -13,7 +13,7 @@ from coreman.runtime.worker.chat.models import Intake
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.credential_helpers import FIELDS, VALUES, owner
 from tests.integration.test_chat_handler import chat_task, run, stream_of
-from tests.integration.worker_helpers import build_ctx
+from tests.integration.worker_helpers import build_ctx, turn_block
 
 
 async def _saved(session, **kw):  # type: ignore[no-untyped-def]
@@ -44,7 +44,11 @@ async def test_private_turn_gets_own_credentials_and_echo_is_masked(
     assert cap.relay_session_id == chat_session.relay_session_id
     assert fake.requests[0]["session_id"] == str(cap.relay_session_id)
     prompt = fake.requests[0]["messages"][0]["content"]
-    assert "`$DEMO_PIN`" in prompt and "pin-778899" not in prompt and "alice" not in prompt
+    block = turn_block(fake.requests[0])
+    # 已保存哪些变量会变，写进本轮块；索取方法与规则留在 system prompt。
+    assert "`$DEMO_PIN`" in block and "`$DEMO_PIN`" not in prompt
+    assert "$COREMAN_CREDENTIAL_URL" in prompt
+    assert not any(v in prompt + block for v in ("pin-778899", "alice"))
     stream = await stream_of(db_session, task.id)
     written = "\n".join(filter(None, [stream.final_text, stream.pending_text]))
     assert "pin-778899" not in written and PLACEHOLDER in written
@@ -96,25 +100,25 @@ async def test_collaboration_turns_get_nothing(
 
 
 def test_guidance_lists_names_and_rules() -> None:
-    text = credentials.guidance(("DEMO_PIN",), "chat")
-    assert "`$DEMO_PIN`" in text and "$COREMAN_CREDENTIAL_URL" in text
-    assert "不得让用户在聊天里发送密码或密钥" in text
-    assert "还没有保存" in credentials.guidance((), "chat")
+    text = credentials.guidance("chat")
+    assert "$COREMAN_CREDENTIAL_URL" in text and "不得让用户在聊天里发送密码或密钥" in text
+    assert "`$DEMO_PIN`" in credentials.status(("DEMO_PIN",))
+    assert "还没有保存" in credentials.status(())
 
 
 def test_guidance_promises_resume_only_for_chat_turns() -> None:
-    chat = credentials.guidance(("DEMO_PIN",), "chat")
-    cron = credentials.guidance(("DEMO_PIN",), "cron")
+    chat = credentials.guidance("chat")
+    cron = credentials.guidance("cron")
     assert "系统会自动让你继续" in chat and "下一次定时运行" not in chat
     assert "系统会自动让你继续" not in cron and "不会续接本轮" in cron
     assert "下一次定时运行起生效" in cron and "不得让用户在聊天里发送密码或密钥" in cron
 
 
 def test_guidance_explains_save_and_one_time_writes() -> None:
-    chat = credentials.guidance(("DEMO_PIN",), "chat")
+    chat = credentials.guidance("chat")
     assert "`save` 决定值要不要留下" in chat and "拿不准时用 false" in chat
     assert "strenv(X)" in chat and "不要 `cat`、`git diff`、`git show`" in chat
-    assert "定时任务里 `save` 必须为 true" in credentials.guidance((), "cron")
-    once = credentials.guidance((), "chat", once=("SSO_SECRET",))
+    assert "定时任务里 `save` 必须为 true" in credentials.guidance("cron")
+    once = credentials.status((), once=("SSO_SECRET",))
     assert "本轮有用户刚提交的一次性密钥：`$SSO_SECRET`" in once
-    assert "一次性密钥已不可用" in credentials.guidance((), "chat", once_lost=True)
+    assert "一次性密钥已不可用" in credentials.status((), once_lost=True)

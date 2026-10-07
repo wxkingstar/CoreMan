@@ -45,6 +45,8 @@ from coreman.core.pricing import estimate
 from coreman.core.prompting import (
     build_env,
     build_system_prompt,
+    build_turn_context,
+    identity_tag,
     load_segments,
     sanitize_user_input,
 )
@@ -227,6 +229,8 @@ class CronRunHandler:
                     bot_env=await effective_env(session, ctx.cipher, bot),
                 )
                 env.update(access.env)
+                # 会变的本轮状态进本轮块（与对话同一口径），规则进 system prompt。
+                ctx.turn_notes = [access.note]
                 # 求助入口只由平台逐次签发，机器人或技能自带的同名变量一律丢弃。
                 env = {
                     k: v
@@ -245,7 +249,8 @@ class CronRunHandler:
                 if personal_prompt or job.execution_mode == "personal_ai":
                     run.private = True
                 if asked is not None:
-                    personal_prompt += human.CRON_RESUME_POLICY
+                    # 续跑沿用原执行的会话，Codex 不会重读 system prompt：阶段说明只能进本轮块。
+                    ctx.turn_notes.append(human.CRON_RESUME_POLICY)
                 elif bot.platform == "feishu" and await human.has_partners(session, bot.id):
                     env["COREMAN_COLLABORATION_URL"] = (
                         ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
@@ -279,6 +284,7 @@ class CronRunHandler:
                     if result.prompt_appendix:
                         prompt += "\n\n" + result.prompt_appendix
                 run.prompt = prompt
+                tag = identity_tag(ctx.cipher, session_id)
                 request = ChatRequest(
                     model=bot.model,
                     backend=backend,
@@ -287,12 +293,12 @@ class CronRunHandler:
                     env_vars=env,
                     effort=bot.effort_level,
                     user_content=sanitize_user_input(prompt),
+                    turn_context=build_turn_context(tag=tag, speaker=speaker, notes=ctx.turn_notes),
                     system_prompt=build_system_prompt(
                         segments=await load_segments(ctx.settings_store),
                         backend=backend,
                         verbosity_level=bot.verbosity_level,
-                        speaker=speaker,
-                        speaker_changed=False,
+                        tag=tag,
                         systems_prompt=access.prompt,
                         bot_prompt=(
                             config.get("system_prompt")
@@ -398,7 +404,9 @@ class CronRunHandler:
         config: dict[str, Any],
         env: dict[str, str],
     ) -> str:
-        """本人创建、本人执行、只发本人的任务，可以以本人身份用飞书或企业微信；返回要追加的提示词。
+        """本人创建、本人执行、只发本人的任务，可以以本人身份用飞书或企业微信。
+
+        返回要追加到 system prompt 的规则；授权范围等状态写进 ctx.turn_notes。
 
         不满足就原样跳过，任务照常运行：授权撤销或运行时太旧不该让定时任务失败。
         """
@@ -435,7 +443,9 @@ class CronRunHandler:
             context_epoch=grant.context_epoch,
             base_session_id=None,
         )
-        return feishu_guidance(grant, base_url, scheduled=True)
+        rules, note = feishu_guidance(grant, base_url, scheduled=True)
+        ctx.turn_notes.append(note)
+        return rules
 
     @staticmethod
     async def _wecom_tools(
@@ -471,7 +481,9 @@ class CronRunHandler:
             context_epoch=binding.context_epoch,
             base_session_id=None,
         )
-        return wecom_guidance(binding, scheduled=True)
+        rules, note = wecom_guidance(binding, scheduled=True)
+        ctx.turn_notes.append(note)
+        return rules
 
     @staticmethod
     async def _handoff(ctx: TaskContext) -> None:

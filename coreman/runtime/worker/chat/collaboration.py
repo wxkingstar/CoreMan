@@ -167,23 +167,23 @@ async def configure(
         if not k.startswith(("COREMAN_COLLABORATION_", "COREMAN_BOT_HELP_"))
     }
     phase = ctx.task.payload.get("collaboration_phase")
+    # 协作与续接的阶段说明只管这一轮，写进本轮块：续接轮跑在原会话里，Codex 不会重读 system prompt。
     if phase == "human_resume":
         from coreman.runtime.worker.chat.human_collaboration import RESUME_POLICY as HUMAN_RESUME
 
-        return system_prompt + HUMAN_RESUME, env
+        ctx.turn_notes.append(HUMAN_RESUME)
+        return system_prompt, env
     if phase:
         row = await session.get(BotCollaboration, uuid.UUID(ctx.task.payload["collaboration_id"]))
         assert row is not None
         route = await session.get(BotCollaborationRoute, row.route_id, populate_existing=True)
         assert route is not None
         await service.authorized(session, route, row.origin_platform_user_id, row.origin_user_id)
-        protocol = PHASE_POLICY + (HELPER_POLICY if phase == "helper" else RESUME_POLICY)
-        return system_prompt + protocol, env
-    if (
-        intake.bot.platform != "feishu"
-        or intake.chat_type not in ("group", "single")
-        or intake.speaker.user_id is None
-    ):
+        ctx.turn_notes.append(
+            PHASE_POLICY + (HELPER_POLICY if phase == "helper" else RESUME_POLICY)
+        )
+        return system_prompt, env
+    if intake.bot.platform != "feishu" or intake.chat_type not in ("group", "single"):
         return system_prompt, env
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
     peers = intake.chat_type == "group" and await session.scalar(
@@ -200,16 +200,21 @@ async def configure(
     colleagues = await human_collaboration.has_partners(session, intake.bot.id)
     if not peers and not colleagues:
         return system_prompt, env
-    ctx.bot_peers_mounted = bool(peers)
     from coreman.core.chat.collaboration_tools import HUMAN_POLICY, POLICY
 
+    rules = POLICY + (HUMAN_POLICY if colleagues else "")
+    if intake.speaker.user_id is None:
+        # 规则照挂，system prompt 不因群里换了个身份未知的人而变；求助入口不签发。
+        ctx.turn_notes.append("- 协作：本轮发言者身份未验证，不能向其他 AI 员工或同事求助。")
+        return system_prompt + rules, env
+    ctx.bot_peers_mounted = bool(peers)
     env["COREMAN_COLLABORATION_URL"] = (
         ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
     )
     env["COREMAN_COLLABORATION_TOKEN"] = service.issue_capability(
         ctx.cipher, task_id=ctx.task.id, user_id=str(intake.speaker.user_id)
     )
-    return system_prompt + POLICY + (HUMAN_POLICY if colleagues else ""), env
+    return system_prompt + rules, env
 
 
 async def final_transition(

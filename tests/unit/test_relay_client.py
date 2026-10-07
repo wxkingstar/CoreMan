@@ -83,3 +83,23 @@ def test_to_body_accepts_content_parts() -> None:
         backend="claude",
     )
     assert req.to_body()["messages"][1] == {"role": "user", "content": parts}
+
+
+def test_turn_context_goes_before_the_user_message() -> None:
+    """本轮块不经消毒、发送时才接上：开流后换成带媒体的 content，块也还在最前面。"""
+    req = ChatRequest(
+        model="m",
+        system_prompt="s",
+        user_content="你好",
+        working_dir="/d",
+        session_id="x",
+        backend="claude",
+        turn_context="[SYS_TURN:t]\n[/SYS_TURN:t]",
+    )
+    assert req.to_body()["messages"][1]["content"] == "[SYS_TURN:t]\n[/SYS_TURN:t]\n\n你好"
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+    req.user_content = [image]
+    assert req.to_body()["messages"][1]["content"] == [
+        {"type": "text", "text": "[SYS_TURN:t]\n[/SYS_TURN:t]"},
+        image,
+    ]

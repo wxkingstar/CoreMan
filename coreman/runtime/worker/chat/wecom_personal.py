@@ -399,26 +399,27 @@ async def _reply(
     )
 
 
-def guidance(row: WecomPersonalBinding, *, scheduled: bool) -> str:
-    who = (
-        "本次定时任务以创建者本人的身份运行，"
-        if scheduled
-        else "当前私聊的发言者已绑定自己的企业微信授权机器人，"
-    )
+def guidance(row: WecomPersonalBinding, *, scheduled: bool) -> tuple[str, str]:
+    """返回（规则, 本轮状态）。
+
+    范围与暂时用不了的能力会变，进本轮块；用法与数据规则进 system prompt。
+    """
+    who = "本次定时任务以创建者本人的身份运行，" if scheduled else ""
     problems = _problems(row)
     notice = (
-        f"\n已知暂时用不了的能力：{problems}。用到时照实告诉用户：{service.renew_hint(row)}"
+        f"已知暂时用不了的能力：{problems}。用到时照实告诉用户：{service.renew_hint(row)}"
         if problems
         else ""
     )
-    return (
+    level = service.LEVEL_TITLES.get(row.authorization_level, "仅读取")
+    rules = (
         "\n\n## 本人企业微信\n"
-        + who
-        + "可以按需调用 coreman_wecom_personal 的工具，以本人身份在企业微信里查询和办理事情"
-        f"（本人选择的范围：{service.LEVEL_TITLES.get(row.authorization_level, '仅读取')}）。"
+        "本人已绑定自己的企业微信授权机器人，可以按需调用 coreman_wecom_personal 的工具，"
+        "以本人身份在企业微信里查询和办理事情（本人选择的范围与暂时用不了的能力见本轮块）。"
         "先用 wecom_method_schema 查参数，再用 wecom_call 调用；"
-        "需要同事的 userid 时先搜索通讯录。" + notice + "\n" + DATA_RULES
+        "需要同事的 userid 时先搜索通讯录。\n" + DATA_RULES
     )
+    return rules, f"- 本人企业微信：{who}本人选择的范围：{level}。{notice}"
 
 
 async def configure(
@@ -453,7 +454,9 @@ async def configure(
         context_epoch=row.context_epoch,
         base_session_id=base_session_id,
     )
-    return system_prompt + guidance(row, scheduled=False), env
+    rules, note = guidance(row, scheduled=False)
+    ctx.turn_notes.append(note)
+    return system_prompt + rules, env
 
 
 async def handle_schedule(

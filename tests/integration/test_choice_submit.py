@@ -21,7 +21,7 @@ from coreman.core.wecom.cards import format_answers
 from coreman.runtime.worker.background import Timing
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
 from tests.fakes.fake_relay import FakeRelay
-from tests.integration.worker_helpers import build_ctx, seed_bot
+from tests.integration.worker_helpers import build_ctx, seed_bot, turn_block, user_input
 
 Q = {
     "question": "用哪个？",
@@ -145,8 +145,8 @@ async def test_submit_round_continues_the_session_and_pushes_segments(
     assert body["session_id"] == str(rs)
     # 延续会话，但不得把快照身份当成当前用户；未映射的 zs 必须明确未知。
     assert "SNAPSHOT PROMPT" not in body["messages"][0]["content"]
-    assert "identity_unknown" in body["messages"][0]["content"]
-    assert body["messages"][1]["content"] == format_answers([Q], ["B"])
+    assert "identity_unknown" in turn_block(body)
+    assert user_input(body) == format_answers([Q], ["B"])
     assert body["env_vars"]["COREMAN_SESSION_ID"] == str(rs)
     assert body["env_vars"]["COREMAN_PLATFORM_USER_ID"] == "zs"
     stream = (

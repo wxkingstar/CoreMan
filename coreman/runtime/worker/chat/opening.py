@@ -24,6 +24,7 @@ from coreman.core.db.models import (
     Bot,
     RelayServer,
     Task,
+    User,
 )
 from coreman.core.i18n.messages import msg
 from coreman.core.knowledge.installation import effective_env
@@ -31,7 +32,9 @@ from coreman.core.prompting import (
     Speaker,
     build_env,
     build_system_prompt,
+    build_turn_context,
     env_keys_for_log,
+    identity_tag,
     load_segments,
     sanitize_user_input,
 )
@@ -76,6 +79,18 @@ async def session_link(
     ):
         return ""
     return url
+
+
+async def previous_speaker(session: AsyncSession, info: sessions.SessionInfo) -> Speaker | None:
+    """同一会话里换了人时，上一轮的发言者：本轮块的换人提醒要点名前后两个人。"""
+    if info.previous_speaker_user_id is None:
+        return None
+    user = await session.get(User, info.previous_speaker_user_id)
+    login = user.login_name if user else None
+    name = user.display_name if user else None
+    return Speaker(
+        "", info.previous_speaker_user_id, login, name or (None if login else "上一位发言者")
+    )
 
 
 class OpenStage(ChatStageBase):
@@ -220,9 +235,11 @@ class OpenStage(ChatStageBase):
             bot_env=await effective_env(session, ctx.cipher, bot),
         )
         env.update(access.env)
+        # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
+        ctx.turn_notes = [access.note]
         from coreman.runtime.worker.chat.collaboration import configure
 
-        # 三处都在传入文本后面追加自己的段落：从空串起步，攒出的就是本轮附加能力，
+        # 各处在传入文本后面追加自己的规则：从空串起步，攒出的就是本轮附加能力，
         # 交给 build_system_prompt 放在结尾重申之前。
         extra, env = await configure(session, ctx, intake, info, "", env)
         from coreman.runtime.worker.chat.personal import configure as configure_personal
@@ -250,7 +267,14 @@ class OpenStage(ChatStageBase):
         # helper 的回答是交给平台解析的 JSON，不会发到聊天里，图片说明用不上。
         if ctx.task.payload.get("collaboration_phase") != "helper":
             extra = with_reply_images(extra, intake.bot.platform, backend)
-        system_prompt = await self._system_prompt(ctx, intake, info, backend, access.prompt, extra)
+        tag = identity_tag(ctx.cipher, info.relay_session_id)
+        system_prompt = await self._system_prompt(ctx, intake, backend, tag, access.prompt, extra)
+        turn_context = build_turn_context(
+            tag=tag,
+            speaker=intake.speaker,
+            previous=await previous_speaker(session, info),
+            notes=ctx.turn_notes,
+        )
         ctx.private_turn = wecom_personal.mounted(env)
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
         # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
@@ -267,6 +291,7 @@ class OpenStage(ChatStageBase):
             backend=backend,
             effort=bot.effort_level,
             env_vars=env,
+            turn_context=turn_context,
         )
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":
@@ -373,12 +398,12 @@ class OpenStage(ChatStageBase):
         self,
         ctx: TaskContext,
         intake: Intake,
-        info: sessions.SessionInfo,
         backend: str,
+        tag: str,
         systems_prompt: str = "",
         extra: str = "",
     ) -> str:
-        """本轮的 system prompt。续跑时也使用当前身份、配置与系统授权。"""
+        """本轮的 system prompt（稳定段）。续跑时也使用当前配置与系统授权；身份在本轮块里。"""
         from coreman.core.prompting.rich_cards import rich_cards_prompt
 
         return build_system_prompt(
@@ -386,8 +411,7 @@ class OpenStage(ChatStageBase):
             backend=backend,
             verbosity_level=intake.bot.verbosity_level,
             bot_prompt=intake.bot.merged_system_prompt,
-            speaker=intake.speaker,
-            speaker_changed=info.speaker_changed,
+            tag=tag,
             systems_prompt=systems_prompt,
             extra=extra,
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),

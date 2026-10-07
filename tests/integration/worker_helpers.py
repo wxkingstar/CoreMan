@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -19,6 +21,27 @@ from coreman.core.settings_store import SettingsStore
 from coreman.runtime.worker.context import TaskContext
 
 MASTER = b"\x07" * 32
+# 平台写在用户消息开头的本轮块（发言者与本轮状态），见 prompting.build_turn_context。
+TURN_BLOCK = re.compile(r"\A\[SYS_TURN:([0-9a-f]{8})\]\n.*?\n\[/SYS_TURN:\1\](?:\n\n|\Z)", re.S)
+
+
+def turn_block(body: dict[str, Any]) -> str:
+    """请求体里用户消息开头的本轮块；没有就是空串。"""
+    content = body["messages"][1]["content"]
+    text = content if isinstance(content, str) else str(content[0].get("text", ""))
+    match = TURN_BLOCK.match(text)
+    return match.group(0).strip() if match else ""
+
+
+def user_input(body: dict[str, Any]) -> Any:
+    """请求体里的用户消息去掉开头的本轮块：纯文本是字符串，含媒体是 content parts。"""
+    content = body["messages"][1]["content"]
+    if isinstance(content, str):
+        return TURN_BLOCK.sub("", content, count=1)
+    first = content[0] if content else {}
+    if first.get("type") == "text" and TURN_BLOCK.match(str(first.get("text", "")) + "\n\n"):
+        return content[1:]
+    return content
 
 
 async def seed_bot(

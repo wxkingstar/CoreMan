@@ -29,26 +29,37 @@ def _names(names: tuple[str, ...]) -> str:
     return "、".join(f"`${name}`" for name in names)
 
 
-def guidance(
+def status(
     names: tuple[str, ...],
-    origin_kind: str,
     *,
     once: tuple[str, ...] = (),
     once_lost: bool = False,
 ) -> str:
-    """`once`：本轮注入的一次性密钥；`once_lost`：这是一次性交付的续接轮，但值已经不在了。"""
+    """本轮块里的个人凭证状态。
+
+    `once`：本轮注入的一次性密钥；`once_lost`：这是一次性交付的续接轮，但值已经不在了。
+    """
     have = (
-        "当前发言者已在本 AI 员工保存的个人凭证（环境变量，只给名字）：" + _names(names) + "。"
+        "- 个人凭证：当前发言者已在本 AI 员工保存（环境变量，只给名字）" + _names(names) + "。"
         if names
-        else "当前发言者在本 AI 员工还没有保存个人凭证。"
+        else "- 个人凭证：当前发言者在本 AI 员工还没有保存个人凭证。"
     )
     if once:
         have += (
-            "\n本轮有用户刚提交的一次性密钥：" + _names(once) + "。只在本轮的环境里，"
+            "本轮有用户刚提交的一次性密钥：" + _names(once) + "。只在本轮的环境里，"
             "本轮结束即删除，下一轮不会再有；本轮没能用上就重新索取。"
         )
     elif once_lost:
-        have += "\n用户提交的一次性密钥已不可用（例如等待续接太久已被删除）；仍然需要就重新索取。"
+        have += "用户提交的一次性密钥已不可用（例如等待续接太久已被删除）；仍然需要就重新索取。"
+    return have
+
+
+# 发言者身份未知、或账号不可用（停用、引导管理员）时的本轮状态：规则照挂，稳定段不随人变。
+UNAVAILABLE = "- 个人凭证：本轮发言者身份未验证或账号不可用，不能索取或使用个人凭证。"
+
+
+def guidance(origin_kind: str) -> str:
+    """个人凭证的索取方法与规则（system prompt）；已保存哪些、本轮有没有一次性密钥见 `status`。"""
     if origin_kind == "cron":
         # 定时任务没有会话可续：提交后不会再唤醒本轮，新值要等下一次定时运行。
         keep = "定时任务里 `save` 必须为 true：一次性密钥没有续接轮可用。\n"
@@ -70,8 +81,8 @@ def guidance(
         )
     return (
         "\n\n## 个人凭证\n"
-        + have
-        + "\n任务需要当前发言者本人提供账号、密码或密钥而环境变量里没有，"
+        "已保存的个人凭证会以环境变量注入当前发言者本人触发的轮次，变量名见本轮块。"
+        "\n任务需要当前发言者本人提供账号、密码或密钥而环境变量里没有，"
         "或者调用时提示凭证无效，就向本人索取：\n"
         "```bash\n"
         'curl -sS -X POST "$COREMAN_CREDENTIAL_URL" '
@@ -125,8 +136,10 @@ async def _apply(
     handoff: CredentialRequest | None = None,
 ) -> tuple[str, dict[str, str], frozenset[str]]:
     env = _strip(env)
+    extra += guidance(cap.origin_kind)
     user = await session.get(User, user_id, populate_existing=True)
     if user is None or user.status != "active" or user.source == "bootstrap":
+        ctx.turn_notes.append(UNAVAILABLE)
         return extra, env, _NONE
     found = await store.injected(session, ctx.cipher, bot_id=bot.id, user_id=user_id)
     env.update(found.env)
@@ -141,13 +154,14 @@ async def _apply(
     env[policy.ENV_PREFIX + "TOKEN"] = policy.issue_capability(
         ctx.cipher, cap, ttl_seconds=bot.sse_timeout_seconds + policy.CAPABILITY_GRACE
     )
-    text = guidance(
-        tuple(name for name in found.names if name not in once.env),
-        cap.origin_kind,
-        once=once.names,
-        once_lost=handoff is not None and not once.names,
+    ctx.turn_notes.append(
+        status(
+            tuple(name for name in found.names if name not in once.env),
+            once=once.names,
+            once_lost=handoff is not None and not once.names,
+        )
     )
-    return extra + text, env, found.secret_values | once.secret_values
+    return extra, env, found.secret_values | once.secret_values
 
 
 async def configure(
@@ -161,12 +175,14 @@ async def configure(
 ) -> tuple[str, dict[str, str], frozenset[str]]:
     payload = ctx.task.payload
     user_id = intake.speaker.user_id
-    if (
-        intake.bot.platform not in service.PLATFORMS
-        or user_id is None
-        or any(payload.get(key) for key in _COLLABORATION_KEYS)
+    if intake.bot.platform not in service.PLATFORMS or any(
+        payload.get(key) for key in _COLLABORATION_KEYS
     ):
         return extra, _strip(env), _NONE
+    if user_id is None:
+        # 群里身份未知的人说话：规则照挂，system prompt 不因换人而变；本轮块说明用不了。
+        ctx.turn_notes.append(UNAVAILABLE)
+        return extra + guidance("chat"), _strip(env), _NONE
     cap = policy.Capability(
         task_id=ctx.task.id,
         bot_id=intake.bot.id,

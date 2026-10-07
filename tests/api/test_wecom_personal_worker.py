@@ -354,8 +354,11 @@ async def test_connected_private_chat_adds_tools_on_top_of_the_assistant(
     base = uuid.uuid4()
     initial = {policy.PREFIX + "TOKEN": "forged", "BOT_TOKEN_ERP": "business"}
     prompt, env = await wecom_personal.configure(db_session, ctx, intake, base, "你是助理", initial)
-    assert prompt.startswith("你是助理") and "## 本人企业微信" in prompt and "仅读取" in prompt
-    assert "已过期：邮件" in prompt
+    assert prompt.startswith("你是助理") and "## 本人企业微信" in prompt
+    # 范围与暂时用不了的能力会变，写进本轮块，不进 system prompt。
+    assert "范围：仅读取" not in prompt and "已过期：邮件" not in prompt
+    assert len(ctx.turn_notes) == 1
+    assert "仅读取" in ctx.turn_notes[0] and "已过期：邮件" in ctx.turn_notes[0]
     assert env["BOT_TOKEN_ERP"] == "business"
     assert env[policy.PREFIX + "URL"].endswith("/api/runtime/wecom-personal/mcp")
     capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])

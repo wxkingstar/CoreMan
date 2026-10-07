@@ -97,7 +97,7 @@ async def test_proxied_system_gets_no_runtime_token(
     plain = await build_system_access(
         db_session, Cipher(MASTER), bot=bot, speaker=speaker, issuer="coreman", external_key=None
     )
-    assert "本轮无法调用" in plain.prompt and policy.URL_ENV not in plain.env
+    assert "无法调用" in plain.prompt and policy.URL_ENV not in plain.env
     assert not (await db_session.execute(select(BusinessTokenIssue))).scalars().all()
 
 
