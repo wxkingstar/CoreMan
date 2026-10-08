@@ -138,6 +138,12 @@ PROXY_RULES = (
     "「允许写入」；不可撤销（destructive）和涉及资金（financial）的操作不代理，"
     "请用户本人到业务系统里操作。"
 )
+# 有令牌下发到运行环境的系统时追加：平台拦不住这些调用，只能靠提示词约束高风险操作。
+ENV_RISK_RULES = (
+    "持令牌直接调用的系统，不可撤销（destructive，如删除、作废、过账、冲销）和涉及资金"
+    "（financial，如退款、打款）的操作，执行前先向当前发言者说明要调用的操作、对象和影响，"
+    "等对方在后续消息里明确确认后再执行；定时任务等无人能当场确认的场景不执行，只说明应该怎么做。"
+)
 
 
 @dataclass
@@ -202,6 +208,7 @@ def systems_prompt(systems: list[BusinessSystem], *, mounted: bool) -> str:
             "expires_at 是 UTC Unix 秒，令牌过期后停止调用，并请用户重新发起一轮任务；"
             "本轮运行中的进程不会自动更新令牌。本轮签发失败的系统见本轮块。"
         )
+        prompt += "\n\n" + ENV_RISK_RULES
     if mounted:
         prompt += "\n\n" + CATALOG_RULES
         if any(s.token_delivery == "proxy" and s.openapi_url for s in systems):

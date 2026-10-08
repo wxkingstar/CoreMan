@@ -157,6 +157,8 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 没有配置 `openapi_url`、还没拉取过或目录处于 `error` 的系统，保持现有的一行说明。
 
+令牌下发到运行环境（`env`）的系统，平台拦不住任何调用。只要本轮有这类系统，提示词就追加一段软约束：不可撤销（`destructive`）和涉及资金（`financial`）的操作，先向当前发言者说明操作、对象和影响，对方在后续消息里明确确认后才执行；定时任务这类无人能当场确认的场景不执行。要硬性拦截，需把系统切到平台代理。
+
 ## 二期：代理调用
 
 新增 `systems_call(system, operation_id, path_params?, query?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。

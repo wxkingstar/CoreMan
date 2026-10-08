@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.system_access import PROXY_RULES, build_system_access
+from coreman.core.auth.system_access import ENV_RISK_RULES, PROXY_RULES, build_system_access
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     AuditLog,
@@ -91,7 +91,7 @@ async def test_proxied_system_gets_no_runtime_token(
         access.prompt
     )
     assert access.prompt.endswith(PROXY_RULES)
-    assert "令牌只属于当前发言者" not in access.prompt
+    assert "令牌只属于当前发言者" not in access.prompt and ENV_RISK_RULES not in access.prompt
     assert '"token_delivery": "proxy"' in access.env["COREMAN_SYSTEMS"]
     # Without a runtime that mounts the catalog, the system cannot be used at all.
     plain = await build_system_access(

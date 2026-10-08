@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.system_access import CATALOG_RULES, build_system_access
+from coreman.core.auth.system_access import CATALOG_RULES, ENV_RISK_RULES, build_system_access
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     AuditLog,
@@ -184,6 +184,7 @@ async def test_turn_gets_catalog_lines_and_mcp_credentials(
     )
     first = await access(mount)
     assert line in first.prompt and first.prompt.endswith(CATALOG_RULES)
+    assert ENV_RISK_RULES in first.prompt
     assert first.env[policy.URL_ENV] == "https://coreman.example.com" + URL
     cap = policy.read_capability(bot_cipher(), first.env[policy.TOKEN_ENV])
     assert (cap.task_id, cap.actor) == (task.id, member.id)

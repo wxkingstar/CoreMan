@@ -30,6 +30,13 @@ def oauth_url(app_id: str, callback: str, state: str) -> str:
     )
 
 
+def qr_authorize_url(app_id: str, callback: str, state: str) -> str:
+    """内嵌扫码用的授权地址：飞书扫码组件只认 passport 域下的这个授权页。"""
+    return "https://passport.feishu.cn/suite/passport/oauth/authorize?" + urlencode(
+        {"client_id": app_id, "redirect_uri": callback, "response_type": "code", "state": state}
+    )
+
+
 class FeishuClient:
     def __init__(self, app_id: str, secret: str, *, http: httpx.AsyncClient | None = None):
         self.app_id, self._secret = app_id, secret

@@ -6,8 +6,9 @@ import hashlib
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from coreman.api.deps import client_ip, get_session
+from coreman.api.errors import ApiError
 from coreman.api.routers.platform_apps import decrypt_secret
 from coreman.api.security import _db_ip, create_admin_session, set_login_cookies
 from coreman.core.audit import diff_dict, record_audit
@@ -22,7 +24,12 @@ from coreman.core.contacts.feishu_source import fetch_feishu_user
 from coreman.core.contacts.sync import ContactSyncService, SyncAborted
 from coreman.core.db.models import AuthNonce, PlatformApp, UserIdentity
 from coreman.core.logging import get_logger
-from coreman.core.platforms.feishu import FeishuClient, FeishuError, oauth_url
+from coreman.core.platforms.feishu import (
+    FeishuClient,
+    FeishuError,
+    oauth_url,
+    qr_authorize_url,
+)
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -111,17 +118,18 @@ async def _sync_login_user(
     return ident
 
 
-@router.get("/feishu/start")
-async def feishu_start(
-    request: Request,
-    redirect: str | None = None,
-    session: AsyncSession = Depends(get_session),
-) -> RedirectResponse:
+async def _begin(
+    request: Request, session: AsyncSession, redirect: str | None
+) -> tuple[PlatformApp, str, str] | None:
+    """建一次性 state，返回 (登录应用, state, 绑定值)；未配置登录应用时返回 None。
+
+    同一浏览器沿用已有的绑定值：登录页一打开就领二维码，多个标签页各领一次时不能互相顶掉。
+    """
     app = await _login_app(session)
     if app is None:
-        return _fail("feishu_not_configured")
+        return None
     state = secrets.token_urlsafe(24)
-    bind = secrets.token_urlsafe(24)
+    bind = request.cookies.get(BIND_COOKIE) or secrets.token_urlsafe(24)
     session.add(
         AuthNonce(
             kind="feishu_state",
@@ -139,20 +147,60 @@ async def feishu_start(
         delete(AuthNonce).where(AuthNonce.created_at < datetime.now(UTC) - timedelta(days=1))
     )
     await session.commit()
-    settings = request.app.state.settings
-    callback = f"{settings.public_base_url}/api/auth/feishu/callback"
-    url = oauth_url(app.app_id or "", callback, state)
-    response = RedirectResponse(url, status_code=302)
+    return app, state, bind
+
+
+def _callback_url(request: Request) -> str:
+    return f"{request.app.state.settings.public_base_url}/api/auth/feishu/callback"
+
+
+def _set_bind_cookie(request: Request, response: Response, bind: str) -> None:
     response.set_cookie(
         BIND_COOKIE,
         bind,
         max_age=600,
         httponly=True,
         samesite="lax",
-        secure=settings.public_base_url.startswith("https://"),
+        secure=request.app.state.settings.public_base_url.startswith("https://"),
         path=BIND_PATH,
     )
+
+
+@router.get("/feishu/start")
+async def feishu_start(
+    request: Request,
+    redirect: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    begun = await _begin(request, session, redirect)
+    if begun is None:
+        return _fail("feishu_not_configured")
+    app, state, bind = begun
+    response = RedirectResponse(
+        oauth_url(app.app_id or "", _callback_url(request), state), status_code=302
+    )
+    _set_bind_cookie(request, response, bind)
     return response
+
+
+@router.post("/feishu/qr")
+async def feishu_qr(
+    request: Request,
+    response: Response,
+    redirect: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """登录页内嵌扫码：返回飞书扫码组件用的授权地址。
+
+    扫码确认后前端整页跳到 goto&tmp_code，飞书再带 code/state 回到同一个 callback。
+    """
+    begun = await _begin(request, session, redirect)
+    if begun is None:
+        raise ApiError(404, 404, "尚未配置飞书登录")
+    app, state, bind = begun
+    _set_bind_cookie(request, response, bind)
+    goto = qr_authorize_url(app.app_id or "", _callback_url(request), state)
+    return {"code": 0, "data": {"goto": goto}}
 
 
 @router.get("/feishu/callback")
