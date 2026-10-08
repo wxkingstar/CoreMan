@@ -24,7 +24,12 @@ from coreman.core.cron.access import require_operator
 from coreman.core.db.models import Bot, RelayServer, User
 from coreman.core.knowledge.installation import effective_env
 from coreman.core.prompting import build_env
-from coreman.core.prompting.system_prompt import build_system_prompt, load_segments
+from coreman.core.prompting.system_prompt import (
+    build_system_prompt,
+    build_turn_context,
+    load_segments,
+    new_identity_tag,
+)
 from coreman.core.relay.client import ChatRequest, RelayClient
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import FinishEvent, RelayErrorEvent, TextDelta, ToolUseStart, UsageEvent
@@ -188,6 +193,7 @@ async def health_report(
                         )
                         env.update(access.env)
                         backend = backend_of(current_bot.model, relay.model_provider)
+                        tag = new_identity_tag()
                         chat = ChatRequest(
                             model=current_bot.model,
                             system_prompt=build_system_prompt(
@@ -195,9 +201,11 @@ async def health_report(
                                 backend=backend,
                                 verbosity_level=4,
                                 bot_prompt=current_bot.merged_system_prompt,
-                                speaker=speaker,
-                                speaker_changed=False,
+                                tag=tag,
                                 systems_prompt=access.prompt,
+                            ),
+                            turn_context=build_turn_context(
+                                tag=tag, speaker=speaker, notes=[access.note]
                             ),
                             user_content=PROMPT
                             + (

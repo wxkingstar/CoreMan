@@ -29,7 +29,7 @@ from coreman.core.platforms.feishu_media import FeishuMediaFetcher
 from coreman.core.wecom.media import MediaError
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.test_chat_handler import chat_task, run
-from tests.integration.worker_helpers import seed_bot
+from tests.integration.worker_helpers import seed_bot, user_input
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x02" * 30
 
@@ -108,7 +108,7 @@ async def test_same_chat_delivered_card_is_quoted_after_session_reset(
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
 
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     assert content == msg("quote_text_prefix", quoted="父卡片的最终答案", text="继续解释")
     assert "思考内容" not in content
 
@@ -138,7 +138,7 @@ async def test_sent_outbox_markdown_is_quoted_without_http(
     monkeypatch.setattr(FeishuClient, "call", no_http)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == msg(
+    assert user_input(relay.requests[0]) == msg(
         "quote_text_prefix", quoted="选项卡后续说明", text="为什么"
     )
 
@@ -156,7 +156,7 @@ async def test_deleted_parent_gets_explicit_unavailable_quote(
     monkeypatch.setattr(FeishuClient, "call", deleted)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n继续"
+    assert user_input(relay.requests[0]) == "[引用消息内容不可用]\n\n继续"
 
 
 @pytest.mark.parametrize(
@@ -205,7 +205,7 @@ async def test_official_parent_read_accepts_any_sender_in_the_same_chat_and_is_b
     monkeypatch.setattr(FeishuClient, "call", parent)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     assert calls == [("GET", "/open-apis/im/v1/messages/om_api")]
     assert content == msg("quote_text_prefix", quoted="甲" * 12_000, text="概括")
 
@@ -227,7 +227,7 @@ async def test_present_malformed_parent_is_explicitly_unavailable_without_http(
     monkeypatch.setattr(FeishuClient, "call", no_http)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n继续"
+    assert user_input(relay.requests[0]) == "[引用消息内容不可用]\n\n继续"
 
 
 async def test_empty_parent_is_normal_no_quote_without_http(
@@ -243,7 +243,7 @@ async def test_empty_parent_is_normal_no_quote_without_http(
     monkeypatch.setattr(FeishuClient, "call", no_http)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == "普通消息"
+    assert user_input(relay.requests[0]) == "普通消息"
 
 
 async def test_cross_chat_parent_is_refused_even_when_api_returns_text(
@@ -278,7 +278,7 @@ async def test_cross_chat_parent_is_refused_even_when_api_returns_text(
     monkeypatch.setattr(FeishuClient, "call", wrong_chat)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     assert content == "[引用消息内容不可用]\n\n引用了什么"
     assert "机密" not in content
 
@@ -360,7 +360,7 @@ async def test_human_post_quote_keeps_text_and_images_in_order(
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
     assert calls == [("GET", "/open-apis/im/v1/messages/om_post", GET_PARENT)]
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     if not same_chat:
         assert content == "[引用消息内容不可用]\n\n概括" and fetched == []
         return
@@ -429,7 +429,7 @@ async def test_card_parent_is_read_as_sent_and_never_includes_thinking(
             "[按钮: 看明细]",
         ]
     )
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     assert content == msg("quote_text_prefix", quoted=quoted, text="解释一下")
     assert "内部思考" not in content
 
@@ -444,7 +444,7 @@ async def test_upgrade_placeholder_is_never_passed_off_as_the_quote(
     _serve(monkeypatch, _api_message("om_old", "interactive", degraded, sender_type="app"))
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == "[引用消息内容不可用]\n\n能看到吗"
+    assert user_input(relay.requests[0]) == "[引用消息内容不可用]\n\n能看到吗"
 
 
 @pytest.mark.parametrize("kind", ["image", "file"])
@@ -463,7 +463,7 @@ async def test_media_parent_is_downloaded_from_the_quoted_message(
     fetched = _serve_resources(monkeypatch)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    sent = relay.requests[0]["messages"][1]["content"]
+    sent = user_input(relay.requests[0])
     if kind == "image":
         assert fetched == [("om_media", "img_q", "image")]
         assert sent[0] == {"type": "text", "text": msg("quote_image_prefix", text="看看这个")}
@@ -528,7 +528,7 @@ async def test_merge_forward_lists_each_message_with_its_speaker(
     quoted = "\n".join(
         ["[合并转发的聊天记录]", "张三: @李四 周报发了吗", f"{bot.name}: 发了", "用户 1: [图片]"]
     )
-    assert relay.requests[0]["messages"][1]["content"] == msg(
+    assert user_input(relay.requests[0]) == msg(
         "quote_text_prefix", quoted=quoted, text="总结这段聊天"
     )
 
@@ -540,7 +540,7 @@ async def test_recalled_parent_is_named_as_recalled(db_engine, db_session, monke
     _serve(monkeypatch, _api_message("om_gone", "text", {}, deleted=True))
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == "[引用的消息已撤回]\n\n继续"
+    assert user_input(relay.requests[0]) == "[引用的消息已撤回]\n\n继续"
 
 
 @pytest.mark.parametrize("event_chat", ["oc_same", "oc_other"])
@@ -582,7 +582,7 @@ async def test_refused_group_read_falls_back_to_the_received_event(
     monkeypatch.setattr(FeishuClient, "call", refused)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    content = relay.requests[0]["messages"][1]["content"]
+    content = user_input(relay.requests[0])
     if event_chat == "oc_same":
         assert content == msg(
             "quote_text_prefix", quoted="@小助手 查下昨天的订单", text="按自然日统计"
@@ -614,6 +614,6 @@ async def test_archived_reply_is_quoted_without_http(db_engine, db_session, monk
     monkeypatch.setattr(FeishuClient, "call", no_http)
     relay = FakeRelay("normal")
     await run(db_engine, task, relay)
-    assert relay.requests[0]["messages"][1]["content"] == msg(
+    assert user_input(relay.requests[0]) == msg(
         "quote_text_prefix", quoted="存档里的回复", text="展开讲讲"
     )

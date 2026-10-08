@@ -22,7 +22,7 @@ B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。
 
 ## 渐进式协作工具
 
-系统提示词仅包含稳定协作规则，用户消息及附件保持原始内容。Claude 使用原生系统提示词，Codex 使用每轮 `developer_instructions`；不再把规则拼入 user message。
+系统提示词仅包含稳定协作规则：Claude 使用原生系统提示词，Codex 使用 `developer_instructions`。Codex 只在新建 thread 时读取 `developer_instructions`，续接轮不会再看新的版本，所以协作阶段说明（helper、续接、同事答复续接）写在用户消息开头由平台生成的本轮块（`[SYS_TURN:<tag>]`）里，只放这一轮的阶段与约束；协议规则本身不进用户消息，用户原文及附件保持原样。
 
 运行时通过任务级 HTTP MCP `/api/runtime/collaboration/mcp` 暴露三个工具：
 

@@ -66,6 +66,17 @@ class ChatRequest:
     effort: str | None = None
     env_vars: dict[str, str] = field(default_factory=dict)
     max_turns: int = 80
+    # 平台写的本轮块（发言者与本轮状态，见 prompting.build_turn_context）。不经消毒，
+    # 发送时才接到 `user_content` 前面：开流后 `user_content` 会被换成下载好媒体的版本。
+    turn_context: str = ""
+
+    def user_message(self) -> str | list[dict[str, Any]]:
+        """本轮块在前、用户原文在后；含媒体时本轮块作为第一个 text part。"""
+        if not self.turn_context:
+            return self.user_content
+        if isinstance(self.user_content, str):
+            return f"{self.turn_context}\n\n{self.user_content}"
+        return [{"type": "text", "text": self.turn_context}, *self.user_content]
 
     def to_body(self) -> dict[str, Any]:
         """拼出 POST /v1/chat/completions 的请求体。
@@ -77,7 +88,7 @@ class ChatRequest:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": self.user_content},
+                {"role": "user", "content": self.user_message()},
             ],
             "stream": True,
             "stream_options": {"include_usage": True},

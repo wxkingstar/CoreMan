@@ -15,7 +15,7 @@ from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_media import FakeMedia
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.test_chat_handler import chat_task, stream_of
-from tests.integration.worker_helpers import build_ctx, seed_bot
+from tests.integration.worker_helpers import build_ctx, seed_bot, user_input
 
 KEY = "k" * 32
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x02" * 30
@@ -47,7 +47,7 @@ async def test_image_round_trip(db_engine: AsyncEngine, db_session: AsyncSession
     t = await chat_task(db_session, bot, "", parts=[_image_part(url)])
     await run_with_media(db_engine, t, relay, media)
     body = relay.requests[0]
-    content = body["messages"][1]["content"]
+    content = user_input(body)
     assert content[0] == {"type": "text", "text": msg("media_prompt_image")}
     assert (
         content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(PNG).decode()
@@ -67,7 +67,7 @@ async def test_plain_text_still_sends_a_string(
     relay = FakeRelay("normal")
     t = await chat_task(db_session, bot, "纯文本")
     await run_with_media(db_engine, t, relay, FakeMedia())
-    assert relay.requests[0]["messages"][1]["content"] == "纯文本"
+    assert user_input(relay.requests[0]) == "纯文本"
 
 
 async def test_download_can_be_cancelled_before_relay_starts(db_engine, db_session):
@@ -119,7 +119,7 @@ async def test_file_and_quote_fill_log_fields(
     log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t.id))).scalar_one()
     assert log.message_type == "file"
     assert log.file_info == {"filename": "季报.pdf", "size": 14, "mime": "application/pdf"}
-    assert relay.requests[0]["messages"][1]["content"][1]["file_url"]["filename"] == "季报.pdf"
+    assert user_input(relay.requests[0])[1]["file_url"]["filename"] == "季报.pdf"
     t2 = await chat_task(
         db_session,
         bot,
@@ -132,7 +132,7 @@ async def test_file_and_quote_fill_log_fields(
     await run_with_media(db_engine, t2, relay, media)
     log2 = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t2.id))).scalar_one()
     assert log2.message_type == "text" and log2.quoted_content == "原话在此"
-    assert relay.requests[1]["messages"][1]["content"] == msg(
+    assert user_input(relay.requests[1]) == msg(
         "quote_text_prefix", quoted="原话在此", text="这句什么意思"
     )
 
@@ -259,6 +259,4 @@ async def test_feishu_uses_its_resource_fetcher_with_shared_wecom_fetcher(
     )
     await run_with_media(db_engine, task, relay, FakeMedia())
     assert calls == [{"file_key": "img_test", "message_id": "om_in"}]
-    assert relay.requests[0]["messages"][1]["content"][1]["image_url"]["url"].startswith(
-        "data:image/png;"
-    )
+    assert user_input(relay.requests[0])[1]["image_url"]["url"].startswith("data:image/png;")

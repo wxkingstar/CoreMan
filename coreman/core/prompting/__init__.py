@@ -10,8 +10,9 @@ from coreman.core.prompting.system_prompt import (
     PromptSegments,
     Speaker,
     build_system_prompt,
+    build_turn_context,
+    identity_tag,
     load_segments,
-    speaker_header,
 )
 
 __all__ = [
@@ -19,9 +20,10 @@ __all__ = [
     "Speaker",
     "build_env",
     "build_system_prompt",
+    "build_turn_context",
     "env_keys_for_log",
+    "identity_tag",
     "load_segments",
     "sanitize_parts",
     "sanitize_user_input",
-    "speaker_header",
 ]

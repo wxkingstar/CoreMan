@@ -27,7 +27,7 @@ from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task
-from tests.integration.worker_helpers import seed_bot
+from tests.integration.worker_helpers import seed_bot, user_input
 
 
 async def setup(session):
@@ -322,12 +322,14 @@ async def test_worker_uses_origin_human_and_resumes_original_session(
     # No delegation capability for B; original task did have one.
     info = sessions.SessionInfo(uuid.uuid4(), True, False)
     prompt, env = await configure(db_session, ctx, intake, info, "system", {})
-    assert "COREMAN_BOT_HELP_TOKEN" not in env
-    assert "有限等待" in prompt and "不得调用协作工具" in prompt
+    assert "COREMAN_BOT_HELP_TOKEN" not in env and prompt == "system"
+    # 阶段说明只管这一轮，写进本轮块；协议本身仍由 system prompt 承载。
+    phase = "\n".join(ctx.turn_notes)
+    assert "有限等待" in phase and "不得调用协作工具" in phase
     # helper 的回答由平台按纯 JSON 解析：要求 Markdown 或卡片的段落都不能挂进来。
     intake.bot.rich_cards = True
     intake.bot.verbosity_level = 2
-    full = await OpenStage()._system_prompt(ctx, intake, info, "codex", "", prompt)
+    full = await OpenStage()._system_prompt(ctx, intake, "codex", "a1b2c3d4", "", phase)
     assert "纯 JSON" in full
     assert "# Rich Card Output" not in full
     assert "# Response format" not in full and "# Response Length" not in full
@@ -355,7 +357,8 @@ async def test_worker_uses_origin_human_and_resumes_original_session(
     data = json.loads(intake.text)
     assert data["partner_status"] == feedback_status and answer in data["peer_feedback"]
     resume_prompt, resume_env = await configure(db_session, resumed_ctx, intake, info, "system", {})
-    assert "partner_status=blocked" in resume_prompt and "不能再次" not in intake.text
+    assert resume_prompt == "system" and "不能再次" not in intake.text
+    assert "partner_status=blocked" in "\n".join(resumed_ctx.turn_notes)
     assert not resume_env
 
     assert intake.speaker.user_id == actor.id and intake.bot.id == a.id
@@ -833,7 +836,7 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
     assert fake.requests[0]["session_id"] == fake.requests[1]["session_id"]
     assert fake.requests[0]["session_id"] == str(row.source_relay_session_id)
     for number, request in enumerate(fake.requests):
-        user_text = request["messages"][1]["content"]
+        user_text = user_input(request)
         assert user_text == f"direct turn {number}"
         assert "COREMAN_BOT_HELP_URL" not in str(request["messages"])
         if route_enabled:

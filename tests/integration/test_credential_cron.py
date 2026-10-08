@@ -11,7 +11,7 @@ from tests.fakes.fake_relay import FakeRelay
 from tests.integration.credential_helpers import FIELDS, VALUES
 from tests.integration.test_cron_handler import claim
 from tests.integration.test_cron_scheduler import job
-from tests.integration.worker_helpers import MASTER, build_ctx
+from tests.integration.worker_helpers import MASTER, build_ctx, turn_block
 
 
 async def test_cron_run_injects_the_actors_credentials(db_engine, db_session):
@@ -32,7 +32,7 @@ async def test_cron_run_injects_the_actors_credentials(db_engine, db_session):
     cap = policy.read_capability(cipher, env["COREMAN_CREDENTIAL_TOKEN"])
     assert (cap.origin_kind, cap.cron_job_id, cap.user_id) == ("cron", row.id, row.created_by)
     prompt = fake.requests[0]["messages"][0]["content"]
-    assert "`$DEMO_PIN`" in prompt
+    assert "`$DEMO_PIN`" in turn_block(fake.requests[0])
     # 定时任务不会续接：提示词不能承诺“提交后自动继续”，要说明下次定时运行才生效。
     assert "系统会自动让你继续" not in prompt and "下一次定时运行起生效" in prompt
     # 出站闸门：secret 字段的值必须进 ctx.secrets，非 secret 字段不进。

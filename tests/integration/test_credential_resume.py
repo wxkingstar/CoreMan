@@ -32,7 +32,7 @@ from tests.integration.credential_helpers import (
     seed_chat_session,
 )
 from tests.integration.test_chat_handler import chat_task, stream_of
-from tests.integration.worker_helpers import build_ctx
+from tests.integration.worker_helpers import build_ctx, user_input
 
 
 async def _newer_turn(session, bot, origin, sender):
@@ -82,10 +82,10 @@ async def test_resume_continues_as_owner_with_keys_only(
     await CredentialResumeHandler().run(ctx)
     await ctx.chat_logs.drain(5)
     body = fake.requests[0]
-    assert "已通过安全表单提交 DEMO_PIN、DEMO_USERNAME" in body["messages"][1]["content"]
-    assert "pin-778899" not in body["messages"][1]["content"]
+    assert "已通过安全表单提交 DEMO_PIN、DEMO_USERNAME" in user_input(body)
+    assert "pin-778899" not in user_input(body)
     # 消息里带着用户的原始请求，续接的是那一条，而不是会话里最近的一条。
-    assert body["messages"][1]["content"].endswith("请继续完成用户的这条原始请求：帮我查订单")
+    assert user_input(body).endswith("请继续完成用户的这条原始请求：帮我查订单")
     assert body["env_vars"]["DEMO_PIN"] == "pin-778899"
     # 续接的是提问的那个对话，而不是另起一个空会话。
     assert body["session_id"] == str(DEMO_RELAY_SESSION)
@@ -380,6 +380,6 @@ async def test_resume_continues_when_the_same_user_spoke_after_the_request(
     await CredentialResumeHandler().run(ctx)
     await ctx.chat_logs.drain(5)
     # 同一个人的新消息不挡路；引用的是原始请求，不会续到后来那一条上。
-    content = fake.requests[0]["messages"][1]["content"]
+    content = user_input(fake.requests[0])
     assert content.endswith("请继续完成用户的这条原始请求：帮我查订单")
     assert fake.requests[0]["env_vars"]["DEMO_PIN"] == "pin-778899"

@@ -24,6 +24,15 @@ _LABELS = frozenset(
 )
 _BRACKETS = re.compile(r"\[([^\[\]\n]*)\]")
 _SEPARATORS = re.compile(r"[\s_.\-]+")
+# Platform-written labels that carry the conversation tag, e.g. `[SYS_USER:<tag>]`,
+# `[SYS_TURN:<tag>]` and `[/SYS_TURN:<tag>]`. The tag lives for the whole conversation, so
+# message text may not carry a tagged line at all, guessed or leaked.
+_TAGGED = frozenset({"sysuser", "systurn"})
+
+
+def _impersonates(label: str) -> bool:
+    key = _SEPARATORS.sub("", label)
+    return key in _LABELS or key.split(":", 1)[0].lstrip("/") in _TAGGED
 
 
 def sanitize_user_input(text: str) -> str:
@@ -34,8 +43,7 @@ def sanitize_user_input(text: str) -> str:
     result = []
     for line in visible.split("\n"):
         normalized = unicodedata.normalize("NFKC", line).casefold()
-        labels = _BRACKETS.findall(normalized)
-        if not any(_SEPARATORS.sub("", label) in _LABELS for label in labels):
+        if not any(_impersonates(label) for label in _BRACKETS.findall(normalized)):
             result.append(line)
     return "\n".join(result)
 

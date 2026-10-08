@@ -33,7 +33,7 @@ from coreman.runtime.worker.chat.models import Verdict
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.credential_helpers import resume_task
 from tests.integration.test_chat_handler import chat_task, run
-from tests.integration.worker_helpers import MASTER, build_ctx, seed_bot
+from tests.integration.worker_helpers import MASTER, build_ctx, seed_bot, turn_block
 
 
 async def setup(session, *, chat_type="group"):
@@ -334,7 +334,8 @@ async def test_colleague_reply_resumes_origin_turn(db_session, db_engine):
     assert intake.inbound.id == task.inbound_event_id and intake.speaker.user_id == origin.id
     info = SimpleNamespace(relay_session_id=uuid.uuid4())
     prompt, env = await configure(db_session, ctx, intake, info, "system", {})
-    assert "不得调用协作工具" in prompt and "COREMAN_COLLABORATION_TOKEN" not in env
+    assert prompt == "system" and "COREMAN_COLLABORATION_TOKEN" not in env
+    assert "不得调用协作工具" in "\n".join(ctx.turn_notes)
     await final_transition(
         db_session, ctx, SimpleNamespace(), Verdict("success", "succeeded", None, None, "ok")
     )
@@ -755,7 +756,9 @@ async def test_cron_run_hands_off_then_follow_up_run_delivers_result(
     body = fake.requests[0]
     assert body["session_id"] == str(row.relay_session_id)
     assert "COREMAN_COLLABORATION_TOKEN" not in body.get("env_vars", {})
-    assert "定时任务的续跑" in body["messages"][0]["content"]
+    # 续跑沿用原执行的会话：阶段说明写进本轮块，不进 system prompt。
+    assert "定时任务的续跑" in turn_block(body)
+    assert "定时任务的续跑" not in body["messages"][0]["content"]
     assert "盘点漏扫 3 箱" in json.dumps(body["messages"], ensure_ascii=False)
     second = await db_session.scalar(select(CronRun).where(CronRun.task_id == follow.id))
     await db_session.refresh(row)

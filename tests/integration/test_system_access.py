@@ -210,7 +210,8 @@ async def test_login_name_is_never_a_subject_so_it_cannot_collide_with_an_email_
         issuer="coreman",
         external_key=None,
     )
-    assert alice_access.env == {} and "补全企业邮箱" in alice_access.prompt
+    assert alice_access.env == {} and "补全企业邮箱" in alice_access.note
+    assert "补全企业邮箱" not in alice_access.prompt
     # 乙照常拿到自己的 sub：甲的 login_name 不再参与这个命名空间。
     assert await token_subject(db_session, bob) == "zhangsan"
     assert await user_for_subject(db_session, "zhangsan") == bob

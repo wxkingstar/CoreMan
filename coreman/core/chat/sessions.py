@@ -20,11 +20,13 @@ from coreman.core.db.models import ChatSession
 
 @dataclass(frozen=True)
 class SessionInfo:
-    """本轮用哪个 relay 会话，以及要不要在 system prompt 里加「新会话 / 换人」提示。"""
+    """本轮用哪个 relay 会话，以及要不要在本轮块里加换人提醒。"""
 
     relay_session_id: uuid.UUID
     is_new: bool
     speaker_changed: bool
+    # 换了人时，上一轮的发言者：本轮块的换人提醒要点名前后两个人。
+    previous_speaker_user_id: uuid.UUID | None = None
 
 
 async def get_or_create(
@@ -57,6 +59,7 @@ async def get_or_create(
         and speaker_user_id is not None
         and row.last_speaker_user_id != speaker_user_id
     )
+    previous = row.last_speaker_user_id if speaker_changed and row is not None else None
     sid = row.relay_session_id if (fresh and row is not None) else uuid.uuid4()
     stmt = insert(ChatSession).values(
         bot_id=bot_id,
@@ -77,7 +80,7 @@ async def get_or_create(
             },
         )
     )
-    return SessionInfo(sid, not fresh, speaker_changed)
+    return SessionInfo(sid, not fresh, speaker_changed, previous)
 
 
 async def switch_to(

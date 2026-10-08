@@ -133,47 +133,54 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
     return True
 
 
-def feishu_guidance(row: FeishuPersonalGrant | None, base_url: str, *, scheduled: bool) -> str:
+def feishu_guidance(
+    row: FeishuPersonalGrant | None, base_url: str, *, scheduled: bool
+) -> tuple[str, str]:
+    """返回（规则, 本轮状态）。
+
+    规则进 system prompt，私聊里授权前、授权中、授权后逐字不变；授权状态与档位进本轮块。
+    定时任务只在已授权时挂个人工具，没授权时两样都是空串。
+    """
+    connected = row is not None and row.status == "connected" and bool(row.token_enc)
+    if scheduled and not connected:
+        return "", ""
     manage = "授权管理：[我的飞书](" + base_url + "/my-feishu)。"
-    if row is not None and row.status == "connected" and row.token_enc:
+    connect = (
+        ""
+        if scheduled
+        else "本人还没有授权时，如果用户需要你使用其飞书消息、日程、邮件、任务或文档等，"
+        "请引导用户在私聊里发送“连接飞书”，再点击卡片选择授权范围；不要索要密码或令牌，"
+        "也不要自行选择范围。本人正在完成授权时，用户表示已授权后先调用"
+        " feishu_authorization_status 完成核验，再按需使用 feishu_* 工具。"
+    )
+    rules = (
+        "\n\n## 本人飞书\n"
+        "本人已授权时，可以按需调用 coreman_feishu_personal 的 feishu_* 工具，"
+        "以本人身份使用其飞书里的消息与群、会议妙记、日程、邮件、任务、云文档、审批、OKR 和考勤"
+        "（只列出了本人授权范围内的工具），无需任何命令前缀。授权状态与范围见本轮块。"
+        "需要同事的 open_id 时先用 feishu_search_users 查找；"
+        "时间参数用带时区的 ISO 格式，用户没说时区时按北京时间（+08:00）。"
+        "订会议室先用 feishu_meeting_rooms 找房间、feishu_calendar_freebusy 看是否空闲，"
+        "再在建日程时带上 room_ids；发起审批先用 feishu_approval_templates 找表单、"
+        "feishu_approval_template 看字段，再按字段填好提交；改文档先读出原文再编辑。"
+        "邮件附件、消息里的文件和云空间文件用 feishu_download_* 取得 download_url，"
+        "再用 curl 下载到临时目录，用完即删；要发送或保存本地文件，先用 feishu_prepare_upload"
+        " 取上传链接，curl -T 上传得到 upload_id，再交给 feishu_send_file、feishu_save_to_drive"
+        " 或邮件的 attachment_ids。" + connect + "\n" + DATA_RULES + "\n" + manage
+    )
+    if connected:
+        assert row is not None
         level = LEVEL_TITLES.get(row.authorization_level, row.authorization_level)
-        who = "本次定时任务以创建者本人的身份运行，" if scheduled else "当前私聊的发言者已授权，"
-        return (
-            "\n\n## 本人飞书\n"
-            + who
-            + "可以按需调用 coreman_feishu_personal 的 feishu_* 工具，以本人身份使用其飞书里的"
-            f"消息与群、会议妙记、日程、邮件、任务、云文档、审批、OKR 和考勤（授权范围：{level}；"
-            "只列出了本人授权范围内的工具），无需任何命令前缀。"
-            "需要同事的 open_id 时先用 feishu_search_users 查找；"
-            "时间参数用带时区的 ISO 格式，用户没说时区时按北京时间（+08:00）。"
-            "订会议室先用 feishu_meeting_rooms 找房间、feishu_calendar_freebusy 看是否空闲，"
-            "再在建日程时带上 room_ids；发起审批先用 feishu_approval_templates 找表单、"
-            "feishu_approval_template 看字段，再按字段填好提交；改文档先读出原文再编辑。"
-            "邮件附件、消息里的文件和云空间文件用 feishu_download_* 取得 download_url，"
-            "再用 curl 下载到临时目录，用完即删；要发送或保存本地文件，先用 feishu_prepare_upload"
-            " 取上传链接，curl -T 上传得到 upload_id，再交给 feishu_send_file、feishu_save_to_drive"
-            " 或邮件的 attachment_ids。\n" + DATA_RULES + "\n" + manage
-        )
-    if scheduled:
-        return ""
+        who = "本次定时任务以创建者本人的身份运行，" if scheduled else ""
+        return rules, f"- 本人飞书：{who}已授权（授权范围：{level}）。"
     if (
         row is not None
         and row.status == "pending"
         and row.pending_expires_at
         and row.pending_expires_at > datetime.now(UTC)
     ):
-        return (
-            "\n\n## 本人飞书\n本人正在完成飞书授权。用户表示已授权后，先调用"
-            " feishu_authorization_status 完成核验，再按需使用 feishu_* 工具。\n"
-            + DATA_RULES
-            + "\n"
-            + manage
-        )
-    return (
-        "\n\n## 本人飞书\n当前私聊的发言者还没有授权你访问其飞书。如果用户需要你使用其飞书"
-        "消息、日程、邮件、任务或文档等，请引导用户在私聊里发送“连接飞书”，再点击卡片选择授权范围；"
-        "不要索要密码或令牌，也不要自行选择范围。\n" + manage
-    )
+        return rules, "- 本人飞书：本人正在完成授权，还没有核验。"
+    return rules, "- 本人飞书：本人还没有授权。"
 
 
 async def configure(
@@ -203,4 +210,6 @@ async def configure(
         base_session_id=base_session_id,
     )
     # 本人定时任务的说明由 chat.schedules 统一追加（飞书与企业微信共用）。
-    return system_prompt + feishu_guidance(row, base_url, scheduled=False), env
+    rules, note = feishu_guidance(row, base_url, scheduled=False)
+    ctx.turn_notes.append(note)
+    return system_prompt + rules, env

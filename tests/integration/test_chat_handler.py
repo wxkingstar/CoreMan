@@ -22,10 +22,9 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.i18n.messages import msg
-from coreman.core.prompting.defaults import SPEAKER_CHANGED_LINE
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_relay import FakeRelay
-from tests.integration.worker_helpers import build_ctx, seed_bot
+from tests.integration.worker_helpers import build_ctx, seed_bot, turn_block, user_input
 
 
 def message(
@@ -152,9 +151,10 @@ async def test_normal_round_trip_new_session_then_resume(
     )
     assert (
         "BOT_USER_LOGIN" not in body["env_vars"]
-        and "identity_unknown" in body["messages"][0]["content"]
+        and "identity_unknown" in turn_block(body)
+        and "identity_unknown" not in body["messages"][0]["content"]
     )
-    assert "你是销售" in body["messages"][0]["content"] and body["messages"][1]["content"] == "你好"
+    assert "你是销售" in body["messages"][0]["content"] and user_input(body) == "你好"
     t2 = await chat_task(db_session, bot, "继续")
     await run(db_engine, t2, fake)
     s2 = await stream_of(db_session, t2.id)
@@ -178,10 +178,14 @@ async def test_known_identity_and_group_speaker_change(
         fake,
     )
     sp = fake.requests[0]["messages"][0]["content"]
-    # 身份行带本轮随机标签：注入文本写不出同样的一行。
-    tag = re.search(r"\[SYS_USER:([0-9a-f]{8})\]", sp)
-    assert tag and f"[SYS_USER:{tag[1]}] user_id=zs, login=zhangsan, name=张三" in sp
-    assert SPEAKER_CHANGED_LINE not in sp
+    first = fake.requests[0]["messages"][1]["content"]
+    # 身份行带会话标签、写在用户消息开头的本轮块里；system prompt 只声明标签，不写人。
+    tag = re.search(r"\[SYS_TURN:([0-9a-f]{8})\]", first)
+    assert tag and first.startswith(f"[SYS_TURN:{tag[1]}]\n")
+    assert f"[SYS_USER:{tag[1]}] user_id=zs, login=zhangsan, name=张三" in first
+    assert first.endswith(f"[/SYS_TURN:{tag[1]}]\n\nhi")
+    assert f"identity tag is `{tag[1]}`" in sp and "user_id=zs" not in sp
+    assert "换成了" not in first
     assert (
         fake.requests[0]["env_vars"]["BOT_USER_LOGIN"] == "zhangsan"
         and fake.requests[0]["env_vars"]["AGENT_CHAT_ID"] == "g1"
@@ -196,7 +200,11 @@ async def test_known_identity_and_group_speaker_change(
         await chat_task(db_session, bot, "me too", chat_type="group", chat_id="g1", sender="ls"),
         fake,
     )
-    assert SPEAKER_CHANGED_LINE in fake.requests[1]["messages"][0]["content"]
+    second = fake.requests[1]["messages"][1]["content"]
+    # 群里换人：同一会话、同一标签，本轮块写新的发言者并点名前后两个人；system prompt 逐字不变。
+    assert f"[SYS_USER:{tag[1]}] user_id=ls, login=lisi, name=李四" in second
+    assert "发言者从 张三（zhangsan） 换成了 李四（lisi）" in second
+    assert fake.requests[1]["messages"][0]["content"] == sp
     logs = (await db_session.execute(select(ChatLog).order_by(ChatLog.id))).scalars().all()
     assert [(x.user_login, x.chat_type, x.chat_id) for x in logs] == [
         ("zhangsan", "group", "g1"),
