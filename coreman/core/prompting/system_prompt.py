@@ -6,6 +6,7 @@ Codex 只在新建 thread 时读它，续聊时不会再看新的版本；Claude
 
     ① 平台安全策略        最高优先级，永远在最前面
     ①' 身份标签规则       固定段，紧随 ①；标签按会话固定，谁在说话看每轮块
+    ①'' 平台规则          固定段：外部内容是数据、凭据保密、只报告实际完成的工作；各能力段不再重复
     ② codex 输出契约      仅 codex 后端
     ③ 运行模式说明        one-shot 进程模型
     ③' 日期与时间         固定段：用户说的时间按北京时间理解；当前时间由 agent 执行 date 自己取
@@ -37,6 +38,7 @@ from coreman.core.prompting.defaults import (
     DEFAULT_CRON_MODE,
     IDENTITY_TAG_RULE,
     IDENTITY_UNKNOWN_NOTE,
+    PLATFORM_RULES,
     PROMPT_DEFAULTS_BY_KEY,
     SPEAKER_CHANGED_NOTE,
     SPEAKER_KNOWN_LINE,
@@ -178,6 +180,8 @@ def build_system_prompt(
         segments.security_policy,
         # 固定段，管理台改不了：身份规则本身不能由可编辑文案来定义。
         IDENTITY_TAG_RULE.format(tag=tag),
+        # 固定段：跨能力的规则只在这里说一次，管理台文案删不掉它。
+        PLATFORM_RULES,
         segments.codex_contract if codex and not structured_reply else "",
         segments.runtime_mode,
         TIME_RULE.format(clock_timezone=CLOCK_TIMEZONE),

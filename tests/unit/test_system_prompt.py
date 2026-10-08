@@ -35,7 +35,7 @@ UNKNOWN = Speaker("woABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890", None, None, None)
 
 def test_defaults_preserve_security_identity_and_output_contracts() -> None:
     assert DEFAULT_SECURITY_POLICY.startswith("# AI Agent Policy")
-    assert "[SYS_USER:<tag>]" in DEFAULT_SECURITY_POLICY
+    assert "set by the platform" in DEFAULT_SECURITY_POLICY
     assert "# Execution Model" in DEFAULT_RUNTIME_MODE and DEFAULT_RUNTIME_TAIL.strip()
     assert set(DEFAULT_VERBOSITY) == {1, 2, 3} and all(DEFAULT_VERBOSITY.values())
     assert "imagegen" in DEFAULT_CODEX_CONTRACT or "markdown" in DEFAULT_CODEX_CONTRACT
