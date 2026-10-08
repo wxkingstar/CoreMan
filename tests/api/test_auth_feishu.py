@@ -218,3 +218,32 @@ async def test_separate_contact_sync_app_is_used_for_lookup(client, db_session, 
     )
     assert response.headers["location"] == "/bots"
     assert used == ["cli_test", "cli_contacts"]
+
+
+async def test_embedded_qr_returns_passport_goto_and_logs_in(client, db_session, monkeypatch):
+    await seed(db_session)
+
+    async def info(self, code):
+        return {"user_id": "employee1"}
+
+    monkeypatch.setattr(FeishuClient, "user_info_by_code", info)
+    first = await client.post("/api/auth/feishu/qr", params={"redirect": "/bots"})
+    assert first.status_code == 200 and "coreman_feishu_oauth=" in first.headers["set-cookie"]
+    goto = urlparse(first.json()["data"]["goto"])
+    query = parse_qs(goto.query)
+    assert (goto.netloc, goto.path) == ("passport.feishu.cn", "/suite/passport/oauth/authorize")
+    assert query["client_id"] == ["cli_test"] and query["response_type"] == ["code"]
+    assert query["redirect_uri"] == ["http://testserver/api/auth/feishu/callback"]
+    # 同一浏览器再领一次（另一个标签页或定时刷新）不能让先领的二维码失效
+    second = await client.post("/api/auth/feishu/qr")
+    assert second.status_code == 200
+    response = await client.get(
+        "/api/auth/feishu/callback", params={"code": "qr-code", "state": query["state"][0]}
+    )
+    assert response.headers["location"] == "/bots"
+    assert SESSION_COOKIE in response.headers["set-cookie"]
+
+
+async def test_embedded_qr_without_login_app(client):
+    response = await client.post("/api/auth/feishu/qr")
+    assert response.status_code == 404

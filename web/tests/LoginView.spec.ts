@@ -12,7 +12,20 @@ vi.mock('@/api/client', () => ({
   },
 }))
 vi.mock('@/api/admin', () => ({
-  auth: { providers: vi.fn().mockResolvedValue({ wecom: true, feishu: false }) },
+  auth: {
+    providers: vi.fn().mockResolvedValue({ wecom: false, feishu: false }),
+    feishuQr: vi.fn(),
+    wecomQr: vi.fn(),
+  },
+}))
+const wecomPanel = vi.hoisted(() => ({ options: null as null | { params: Record<string, string>; onLoginSuccess: (r: { code: string }) => void } }))
+vi.mock('@wecom/jssdk', () => ({
+  createWWLoginPanel: vi.fn((options) => { wecomPanel.options = options; return { unmount: vi.fn() } }),
+  WWLoginType: { corpApp: 'CorpApp' },
+  WWLoginRedirectType: { callback: 'callback' },
+  WWLoginPanelSizeType: { small: 'small' },
+  WWLoginLangType: { zh: 'zh', en: 'en' },
+  ColorScheme: { Light: 'light', Dark: 'dark' },
 }))
 
 import { auth as authApi } from '@/api/admin'
@@ -30,12 +43,22 @@ function makeRouter() {
   })
 }
 
+const FEISHU_GOTO = 'https://passport.feishu.cn/suite/passport/oauth/authorize?client_id=cli_x&state=s1'
+
 describe('LoginView', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    vi.mocked(authApi.feishuQr).mockResolvedValue({ goto: FEISHU_GOTO })
+    vi.mocked(authApi.wecomQr).mockResolvedValue({
+      appid: 'ww1', agentid: '1000002', redirect_uri: 'https://example.com/api/auth/wecom/callback', state: 'w1',
+    })
+  })
 
   it('shows validation errors when submitting empty form', async () => {
     const router = makeRouter()
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
     await wrapper.get('[data-test="submit"]').trigger('click')
     await flushPromises()
     // Element Plus 的表单校验错误文案由 @vueuse/core 的 refDebounced(validateState, 100) 控制展示时机，
@@ -57,6 +80,7 @@ describe('LoginView', () => {
       },
     })
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
     await wrapper.get('[data-test="username"]').setValue('admin')
     await wrapper.get('[data-test="password"]').setValue('pw')
     await wrapper.get('[data-test="submit"]').trigger('click')
@@ -78,6 +102,7 @@ describe('LoginView', () => {
       })
     }))
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, makeRouter()] } })
+    await flushPromises()
     await wrapper.get('[data-test="username"]').setValue('admin')
     const password = wrapper.get('[data-test="password"]')
     await password.setValue('pw')
@@ -90,24 +115,97 @@ describe('LoginView', () => {
     await flushPromises()
   })
 
-  it('platform buttons are disabled placeholders', () => {
+  it('shows only the password form when no scan login is configured', async () => {
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, makeRouter()] } })
-    expect(wrapper.get('[data-test="wecom"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-test="feishu"]').attributes('disabled')).toBeDefined()
+    await flushPromises()
+    expect(wrapper.find('[data-test="username"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="feishu-qr"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="back-to-scan"]').exists()).toBe(false)
   })
 
-  it('enables WeCom button when provider available and redirects to start url', async () => {
+  it('leads with the embedded Feishu QR code and signs in with the tmp_code it posts back', async () => {
     const assign = vi.fn()
     vi.stubGlobal('location', { ...window.location, assign })
+    vi.mocked(authApi.providers).mockResolvedValueOnce({ wecom: false, feishu: true })
+    const router = makeRouter()
+    await router.push('/login?redirect=%2Fbots')
+    const wrapper = mount(LoginView, { attachTo: document.body, global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(authApi.feishuQr).toHaveBeenCalledWith('/bots')
+    expect(wrapper.find('[data-test="username"]').exists()).toBe(false)
+    const frame = wrapper.get('[data-test="feishu-qr"]').element as HTMLIFrameElement
+    expect(frame.getAttribute('src')).toBe(
+      'https://passport.feishu.cn/suite/passport/sso/qr?goto=' + encodeURIComponent(FEISHU_GOTO) + '&sdk_version=1.0.3')
+    expect(wrapper.get('[data-test="scan-status"]').text()).toBe('等待扫码')
+    // 不是二维码 iframe 发来的消息一律忽略
+    window.dispatchEvent(new MessageEvent('message', { origin: 'https://passport.feishu.cn', data: { source: 'qrcode', tmp_code: 'x' } }))
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: 'https://evil.example.com', source: frame.contentWindow, data: { source: 'qrcode', tmp_code: 'x' },
+    }))
+    expect(assign).not.toHaveBeenCalled()
+    window.dispatchEvent(new MessageEvent('message', {
+      origin: 'https://passport.feishu.cn', source: frame.contentWindow, data: { source: 'qrcode', tmp_code: 't/1' },
+    }))
+    await flushPromises()
+    expect(assign).toHaveBeenCalledWith(FEISHU_GOTO + '&tmp_code=t%2F1')
+    expect(wrapper.get('[data-test="scan-status"]').text()).toBe('已确认，正在登录…')
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it('switches between the QR code and password sign-in, and the account button opens the authorize page', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    vi.mocked(authApi.providers).mockResolvedValueOnce({ wecom: false, feishu: true })
     const router = makeRouter()
     await router.push('/login?redirect=%2Fusers')
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
     await flushPromises()
-    const btn = wrapper.get('[data-test="wecom"]')
-    expect(btn.attributes('disabled')).toBeUndefined()
-    await btn.trigger('click')
+    await wrapper.get('[data-test="account"]').trigger('click')
+    expect(assign).toHaveBeenCalledWith('/api/auth/feishu/start?redirect=%2Fusers')
+    expect(wrapper.get('[data-test="use-password"]').text()).toBe('没有飞书？用账号密码登录')
+    await wrapper.get('[data-test="use-password"]').trigger('click')
+    expect(wrapper.find('[data-test="username"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="feishu-qr"]').exists()).toBe(false)
+    await wrapper.get('[data-test="back-to-scan"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="feishu-qr"]').exists()).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('embeds the WeCom login panel and finishes sign-in through the callback', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    vi.mocked(authApi.providers).mockResolvedValueOnce({ wecom: true, feishu: false })
+    const router = makeRouter()
+    await router.push('/login?redirect=%2Fusers')
+    const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(authApi.wecomQr).toHaveBeenCalledWith('/users')
+    expect(wecomPanel.options?.params).toMatchObject({
+      appid: 'ww1', agentid: '1000002', state: 'w1', login_type: 'CorpApp', redirect_type: 'callback',
+    })
+    wecomPanel.options?.onLoginSuccess({ code: 'c1' })
+    expect(assign).toHaveBeenCalledWith('/api/auth/wecom/callback?code=c1&state=w1')
+    await wrapper.get('[data-test="account"]').trigger('click')
     expect(assign).toHaveBeenCalledWith('/api/auth/wecom/start?mode=qr&redirect=%2Fusers')
     vi.unstubAllGlobals()
+  })
+
+  it('offers a switch when both platforms are configured and remembers the choice', async () => {
+    vi.mocked(authApi.providers).mockResolvedValue({ wecom: true, feishu: true })
+    const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, makeRouter()] } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="platform-switch"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="feishu-qr"]').exists()).toBe(true)
+    await wrapper.findAll('[data-test="platform-switch"] input')[1].setValue(true)
+    await flushPromises()
+    expect(wrapper.find('[data-test="wecom-qr"]').exists()).toBe(true)
+    expect(localStorage.getItem('coreman.loginPlatform')).toBe('wecom')
+    const again = mount(LoginView, { global: { plugins: [ElementPlus, i18n, makeRouter()] } })
+    await flushPromises()
+    expect(again.find('[data-test="wecom-qr"]').exists()).toBe(true)
+    vi.mocked(authApi.providers).mockResolvedValue({ wecom: false, feishu: false })
   })
 
   it('shows error message from query', async () => {
@@ -122,6 +220,7 @@ describe('LoginView', () => {
     const assign = vi.fn()
     vi.stubGlobal('location', { ...window.location, assign })
     vi.stubGlobal('navigator', { ...window.navigator, userAgent: 'Mozilla/5.0 wxwork/4.1' })
+    vi.mocked(authApi.providers).mockResolvedValue({ wecom: true, feishu: false })
 
     const errorRouter = makeRouter()
     await errorRouter.push('/login?error=user_not_found')
@@ -132,10 +231,15 @@ describe('LoginView', () => {
 
     const cleanRouter = makeRouter()
     await cleanRouter.push('/login')
-    mount(LoginView, { global: { plugins: [ElementPlus, i18n, cleanRouter] } })
+    vi.mocked(authApi.wecomQr).mockClear()
+    const cleanWrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, cleanRouter] } })
     await flushPromises()
     expect(assign).toHaveBeenCalledWith('/api/auth/wecom/start?mode=oauth&redirect=%2F')
+    // 跳转期间不领内嵌二维码，免得和这次跳转抢同一个绑定 cookie
+    expect(authApi.wecomQr).not.toHaveBeenCalled()
+    expect(cleanWrapper.find('.login-card').exists()).toBe(false)
 
+    vi.mocked(authApi.providers).mockResolvedValue({ wecom: false, feishu: false })
     vi.unstubAllGlobals()
   })
 
@@ -167,6 +271,7 @@ describe('LoginView', () => {
     await router.push('/login?redirect=' + encodeURIComponent(link))
     await router.isReady()
     const wrapper = mount(LoginView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
     await wrapper.get('[data-test="username"]').setValue('admin')
     await wrapper.get('[data-test="password"]').setValue('pw')
     await wrapper.get('[data-test="submit"]').trigger('click')

@@ -8,7 +8,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from coreman.api.deps import client_ip, get_session
+from coreman.api.errors import ApiError
 from coreman.api.routers.platform_apps import decrypt_secret
 from coreman.api.security import _db_ip, create_admin_session, set_login_cookies
 from coreman.core.audit import record_audit
@@ -65,18 +66,18 @@ async def providers(session: AsyncSession = Depends(get_session)) -> dict[str, A
     }
 
 
-@router.get("/wecom/start")
-async def wecom_start(
-    request: Request,
-    mode: Mode = "qr",
-    redirect: str | None = None,
-    session: AsyncSession = Depends(get_session),
-) -> RedirectResponse:
+async def _begin(
+    request: Request, session: AsyncSession, mode: Mode, redirect: str | None
+) -> tuple[PlatformApp, str, str] | None:
+    """建一次性 state，返回 (登录应用, state, 绑定值)；未配置登录应用时返回 None。
+
+    同一浏览器沿用已有的绑定值：登录页一打开就领二维码，多个标签页各领一次时不能互相顶掉。
+    """
     app = await _login_app(session)
     if app is None:
-        return _fail("wecom_not_configured")
+        return None
     state = secrets.token_urlsafe(24)
-    bind = secrets.token_urlsafe(24)
+    bind = request.cookies.get(BIND_COOKIE) or secrets.token_urlsafe(24)
     session.add(
         AuthNonce(
             kind="wecom_state",
@@ -93,21 +94,68 @@ async def wecom_start(
         delete(AuthNonce).where(AuthNonce.created_at < datetime.now(UTC) - timedelta(days=1))
     )
     await session.commit()
-    settings = request.app.state.settings
-    callback = f"{settings.public_base_url}/api/auth/wecom/callback"
-    build = qr_login_url if mode == "qr" else oauth_url
-    url = build(app.corp_id or "", app.app_id or "", callback, state)
-    response = RedirectResponse(url, status_code=302)
+    return app, state, bind
+
+
+def _callback_url(request: Request) -> str:
+    return f"{request.app.state.settings.public_base_url}/api/auth/wecom/callback"
+
+
+def _set_bind_cookie(request: Request, response: Response, bind: str) -> None:
     response.set_cookie(
         BIND_COOKIE,
         bind,
         max_age=600,
         httponly=True,
         samesite="lax",
-        secure=settings.public_base_url.startswith("https://"),
+        secure=request.app.state.settings.public_base_url.startswith("https://"),
         path=BIND_PATH,
     )
+
+
+@router.get("/wecom/start")
+async def wecom_start(
+    request: Request,
+    mode: Mode = "qr",
+    redirect: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    begun = await _begin(request, session, mode, redirect)
+    if begun is None:
+        return _fail("wecom_not_configured")
+    app, state, bind = begun
+    build = qr_login_url if mode == "qr" else oauth_url
+    url = build(app.corp_id or "", app.app_id or "", _callback_url(request), state)
+    response = RedirectResponse(url, status_code=302)
+    _set_bind_cookie(request, response, bind)
     return response
+
+
+@router.post("/wecom/qr")
+async def wecom_qr(
+    request: Request,
+    response: Response,
+    redirect: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """登录页内嵌扫码：返回企业微信登录组件（ww.createWWLoginPanel）的参数。
+
+    组件以 callback 方式交回 code，前端再带 code/state 访问同一个 callback。
+    """
+    begun = await _begin(request, session, "qr", redirect)
+    if begun is None:
+        raise ApiError(404, 404, "未配置企业微信登录应用")
+    app, state, bind = begun
+    _set_bind_cookie(request, response, bind)
+    return {
+        "code": 0,
+        "data": {
+            "appid": app.corp_id or "",
+            "agentid": app.app_id or "",
+            "redirect_uri": _callback_url(request),
+            "state": state,
+        },
+    }
 
 
 @router.get("/wecom/callback")
