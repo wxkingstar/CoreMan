@@ -36,16 +36,17 @@ var version = "2.2.0"
 // 1.1.6-not-in-repo incident made version numbers alone untrustworthy).
 var buildCommit = "unknown"
 
-var defaultModel = "claude-sonnet-4-6"
+var defaultModel = "claude-opus-5-5"
 
 // availableModels is what /v1/models returns. Extend as needed; the relay
 // passes any unknown model through to claude (so adding here is purely
 // cosmetic / discovery for clients). IDs are native Claude Code model names;
 // resolveModel still strips any "provider/" prefix a client sends.
 var availableModels = []openai.ModelInfo{
-	{ID: "claude-sonnet-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
-	{ID: "claude-opus-4-6", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
-	{ID: "claude-haiku-4-5-20251001", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-fable-5-1", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-opus-5-5", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-sonnet-5-5", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
+	{ID: "claude-haiku-5-5", Object: "model", Created: 1700000000, OwnedBy: "anthropic"},
 }
 
 var modelAliases = map[string]string{
@@ -235,7 +236,7 @@ func main() {
 	socketPath := flag.String("socket", "", "private Unix socket (Daemon transport)")
 	port := flag.String("port", "50009", "port to listen on")
 	proxy := flag.String("proxy", "", "HTTP/HTTPS proxy URL (e.g. http://127.0.0.1:7890)")
-	model := flag.String("model", "", "default model name (e.g. claude-sonnet-4-6)")
+	model := flag.String("model", "", "default model name (e.g. claude-opus-5-5)")
 	sessionsDir := flag.String("sessions-dir", "sessions", "directory for session log files + attachments")
 	logFilePath := flag.String("log-file", "relay-claude.log", "log file path (use - for stdout only)")
 	showVersion := flag.Bool("version", false, "show version and exit")

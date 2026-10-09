@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.secrets import CREDENTIALS_AAD, ENV_AAD, decrypt_json
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import AuditLog, Bot, BotMember, RelayServer, Team
+from coreman.core.db.models import AuditLog, Bot, BotMember, ModelCatalog, RelayServer, Team
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 from tests.fakes.runtime_node import attach_node
 
@@ -18,7 +18,7 @@ def _bot_body(**over: object) -> dict[str, object]:
         "name": "销售助手",
         "description": "卖货",
         "relay_server_id": None,
-        "model": "claude-sonnet-5",
+        "model": "claude-sonnet-5-5",
         "working_dir": "/data/skills/sales_bot",
         "system_prompt": "你是销售",
         "verbosity_level": 2,
@@ -112,11 +112,13 @@ async def test_create_validations(client: httpx.AsyncClient, db_session: AsyncSe
     assert (
         await client.post("/api/admin/bots", json=_bot_body(model="not/in-catalog"))
     ).status_code == 422
-    # 目录未标 supports_xhigh / supports_max（Haiku 4.5 都不支持）
+    # 目录未标 supports_xhigh / supports_max
+    db_session.add(ModelCatalog(provider="claude", model="claude-basic"))
+    await db_session.commit()
     for effort in ("xhigh", "max"):
         bad = await client.post(
             "/api/admin/bots",
-            json=_bot_body(model="claude-haiku-4-5-20251001", effort_level=effort),
+            json=_bot_body(model="claude-basic", effort_level=effort),
         )
         assert bad.status_code == 422 and bad.json()["message"] == f"该模型不支持 {effort}"
     assert (

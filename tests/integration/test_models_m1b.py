@@ -12,12 +12,16 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
         by_provider.setdefault(r.provider, []).append(r)
     assert set(by_provider) == {"claude", "codex"}
     assert {r.model for r in by_provider["claude"] if not r.retired} == {
+        "claude-fable-5-1",
         "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    }
+    assert {r.model for r in by_provider["claude"] if r.retired} == {
+        "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
-        "claude-fable-5-1",
     }
-    assert {r.model for r in by_provider["claude"] if r.retired} == {"claude-opus-5"}
     assert {r.model for r in by_provider["codex"] if not r.retired} == {
         "codex/gpt-6.1-sol",
         "codex/gpt-6-astra",

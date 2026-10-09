@@ -28,7 +28,7 @@ def _body(**over: object) -> dict[str, object]:
         "name": "销售助手",
         "description": "",
         "relay_server_id": None,
-        "model": "claude-sonnet-5",
+        "model": "claude-sonnet-5-5",
         "working_dir": "/data/skills/wecom_sales",
         "system_prompt": "",
         "verbosity_level": 1,

@@ -108,7 +108,7 @@ def alembic_config(database_url: str) -> Config:
 
 @functools.cache
 def model_catalog_seed() -> list[dict[str, object]]:
-    """迁移 0003 里的模型目录种子，套上 0023 的改名、0043 的档位标记与 0051、0055 的新增和退役
+    """迁移 0003 里的模型目录种子，套上 0023 的改名、0043 的档位标记与 0051、0055、0061 的新增和退役
     （只读脚本目录，不连库）。
 
     `model_catalog` 也列在 BUSINESS_TABLES 里（用例可以增删目录行，不清理会串味），但它同时
@@ -122,8 +122,9 @@ def model_catalog_seed() -> list[dict[str, object]]:
     efforts = scripts.get_revision("0043")
     refresh = scripts.get_revision("0051")
     sol = scripts.get_revision("0055")
+    latest = scripts.get_revision("0061")
     assert seed is not None and renames is not None and efforts is not None
-    assert refresh is not None and sol is not None
+    assert refresh is not None and sol is not None and latest is not None
     native = dict(renames.module.RENAMES)
     rows: list[dict[str, object]] = []
     for p, m, d, df, s in seed.module.SEED_MODELS:
@@ -162,6 +163,25 @@ def model_catalog_seed() -> list[dict[str, object]]:
                 "supports_xhigh": True,
                 "supports_max": True,
                 "sort_order": max(int(str(r["sort_order"])) for r in mine) + 10,
+            }
+        )
+    for r in rows:
+        if r["provider"] == "claude" and latest.module.replacement_of(str(r["model"])):
+            r["retired"] = True
+            r["is_default"] = False
+    for new, (display_name, sort_order, _) in latest.module.LINES.items():
+        if sort_order is None:
+            continue
+        rows.append(
+            {
+                "provider": latest.module.PROVIDER,
+                "model": new,
+                "display_name": display_name,
+                "is_default": False,
+                "retired": False,
+                "supports_xhigh": True,
+                "supports_max": True,
+                "sort_order": sort_order,
             }
         )
     return rows

@@ -1,4 +1,4 @@
-"""迁移 0051：新增 Opus 5.5 / GPT-6 Sol 并设为默认，退役被替代的模型，机器人与白名单跟着换。"""
+"""迁移 0051、0055、0061：新增最新模型、退役被替代的模型，机器人与白名单跟着换。"""
 
 from __future__ import annotations
 
@@ -217,3 +217,92 @@ def test_0055_replaces_gpt_6_sol_with_gpt_6_1_sol(migrated_database: str) -> Non
         ("sol", "codex/gpt-6.1-sol", "max", 2),
     ]
     assert relays == [("codex-restricted", ["codex/gpt-6.1-sol", "codex/gpt-6-astra"], 2)]
+
+
+def test_0061_keeps_only_latest_claude_of_each_line(migrated_database: str) -> None:
+    cfg = alembic_config(migrated_database)
+    command.downgrade(cfg, "0060")
+    try:
+        asyncio.run(
+            _execute(
+                migrated_database,
+                ("TRUNCATE model_catalog", {}),
+                _model("claude", "claude-opus-5-5", default=True, sort_order=110),
+                _model("claude", "claude-sonnet-5", sort_order=100),
+                _model("claude", "claude-haiku-4-5-20251001", sort_order=80),
+                _model("claude", "claude-fable-5-1", sort_order=70),
+                _model("claude", "claude-opus-4-6"),
+                _model("claude", "claude-sonnet-4-6"),
+                _model("claude", "claude-mythos-5-1"),
+                # 节点心跳写入过、又被管理员退役的新模型：取消退役，保留已有显示名。
+                _model("claude", "claude-haiku-5-5", retired=True, display_name="Haiku (node)"),
+                _model("codex", "codex/gpt-6.1-sol", default=True, sort_order=120),
+                (
+                    "INSERT INTO users (login_name, display_name) "
+                    "VALUES ('migration-owner', 'Owner')",
+                    {},
+                ),
+                (INSERT_BOT, {"key": "opus46", "model": "claude-opus-4-6", "effort": "max"}),
+                (INSERT_BOT, {"key": "sonnet5", "model": "claude-sonnet-5", "effort": "xhigh"}),
+                (
+                    INSERT_BOT,
+                    {"key": "haiku", "model": "claude-haiku-4-5-20251001", "effort": None},
+                ),
+                (INSERT_BOT, {"key": "fable", "model": "claude-fable-5-1", "effort": None}),
+                (
+                    INSERT_RELAY,
+                    {
+                        "name": "claude-restricted",
+                        "provider": "claude",
+                        "mode": "restricted",
+                        "models": ["claude-sonnet-4-6", "claude-sonnet-5", "claude-fable-5-1"],
+                    },
+                ),
+            )
+        )
+        command.upgrade(cfg, "0061")
+        catalog = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT provider, model, display_name, is_default, retired, supports_xhigh,"
+                ' supports_max, sort_order FROM model_catalog ORDER BY 1, model COLLATE "C"',
+            )
+        )
+        bots = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT bot_key, model, effort_level, version FROM bots ORDER BY 1",
+            )
+        )
+        relays = asyncio.run(
+            _rows(
+                migrated_database,
+                "SELECT name, supported_models, version FROM relay_servers ORDER BY 1",
+            )
+        )
+    finally:
+        command.upgrade(cfg, "head")
+        asyncio.run(_execute(migrated_database, CLEANUP))
+        asyncio.run(_restore_seed(migrated_database))
+
+    assert catalog == [
+        ("claude", "claude-fable-5-1", None, False, False, False, False, 70),
+        ("claude", "claude-haiku-4-5-20251001", None, False, True, False, False, 80),
+        ("claude", "claude-haiku-5-5", "Haiku (node)", False, False, True, True, 80),
+        ("claude", "claude-mythos-5-1", None, False, False, False, False, 0),
+        ("claude", "claude-opus-4-6", None, False, True, False, False, 0),
+        ("claude", "claude-opus-5-5", None, True, False, False, False, 110),
+        ("claude", "claude-sonnet-4-6", None, False, True, False, False, 0),
+        ("claude", "claude-sonnet-5", None, False, True, False, False, 100),
+        ("claude", "claude-sonnet-5-5", "Claude Sonnet 5.5", False, False, True, True, 100),
+        ("codex", "codex/gpt-6.1-sol", None, True, False, False, False, 120),
+    ]
+    # 机器人改到同系列最新模型，effort_level 原样保留；本就在最新模型上的不动。
+    assert bots == [
+        ("fable", "claude-fable-5-1", None, 1),
+        ("haiku", "claude-haiku-5-5", None, 2),
+        ("opus46", "claude-opus-5-5", "max", 2),
+        ("sonnet5", "claude-sonnet-5-5", "xhigh", 2),
+    ]
+    # 同系列多个退役模型只留一个新模型，占第一个的位置。
+    assert relays == [("claude-restricted", ["claude-sonnet-5-5", "claude-fable-5-1"], 2)]
