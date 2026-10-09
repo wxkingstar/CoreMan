@@ -136,6 +136,32 @@ def exclude_marker(directory):
         replace_file(current, (text + "/" + MARKER + "\n").encode())
 
 
+def link_skills(directory):
+    """让 .claude/skills 整个链接到 .agents/skills，Claude 与 Codex 读同一份技能。
+
+    已有的 .claude/skills 目录里只有指回 .agents/skills 同名技能的链接时，换成整目录链接；
+    放着别的内容就原样保留，安装技能时仍逐个补链接。Git 仓库的布局归仓库管，不动。
+    """
+    canonical, alias = directory / ".agents/skills", directory / ".claude/skills"
+    if (directory / ".git").exists() or alias.is_symlink():
+        return
+    for path in (directory / ".agents", canonical, directory / ".claude"):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            return
+    if alias.exists():
+        if not alias.is_dir() or any(
+            not entry.is_symlink() or os.readlink(entry) != f"../../.agents/skills/{entry.name}"
+            for entry in alias.iterdir()
+        ):
+            return
+        for entry in alias.iterdir():
+            entry.unlink()
+        alias.rmdir()
+    canonical.mkdir(parents=True, exist_ok=True)
+    alias.parent.mkdir(exist_ok=True)
+    alias.symlink_to("../.agents/skills", target_is_directory=True)
+
+
 class InstructionsConflict(Exception):
     """Canonical instruction files require a user merge before initialization."""
 
@@ -205,6 +231,7 @@ class Workspace:
             if not self.owned(root):
                 raise self.error("工作目录属于其他员工或所有权标记无效")
         self.instructions(root)
+        link_skills(root)
         remove_legacy_instruction_excludes(root)
         exclude_marker(root)
         marker.write_text(
