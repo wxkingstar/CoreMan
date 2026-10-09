@@ -56,6 +56,21 @@ async function remove(row: Skill) {
   deleting.value = row.id
   try { await skills.remove(row); ElMessage.success(t('skillEditor.deleted')); await load() } catch (e) { fail(e); await load() } finally { deleting.value = '' }
 }
+/** 为已安装该技能的员工排队重装并刷新环境变量；不满足条件的员工由后端跳过并给出原因。 */
+const upgrading = ref('')
+async function upgrade(row: Skill) {
+  try { await ElMessageBox.confirm(t('skillEditor.upgradeConfirm', { name: row.name }), t('skillEditor.upgrade'), { type: 'warning' }) } catch { return }
+  upgrading.value = row.id
+  try {
+    const { queued, skipped } = await skills.upgrade(row)
+    if (!queued.length && !skipped.length) { ElMessage.info(t('skillEditor.upgradeNone')); return }
+    if (queued.length) ElMessage.success(t('skillEditor.upgradeQueued', { count: queued.length }))
+    if (skipped.length) {
+      const detail = skipped.map(item => `${item.bot_name ?? item.bot_id}（${item.reason}）`).join('；')
+      ElMessage({ type: 'warning', message: t('skillEditor.upgradeSkipped', { count: skipped.length, detail }), duration: 0, showClose: true })
+    }
+  } catch (e) { fail(e) } finally { upgrading.value = '' }
+}
 onMounted(load)
 </script>
 <template>
@@ -199,7 +214,7 @@ onMounted(load)
           <el-table-column
             v-if="manager"
             :label="t('common.actions')"
-            width="130"
+            width="190"
             fixed="right"
           >
             <template #default="{ row }">
@@ -210,6 +225,16 @@ onMounted(load)
                   @click="edit(row)"
                 >
                   {{ t('common.edit') }}
+                </el-button>
+                <el-button
+                  link
+                  type="primary"
+                  :data-test="'upgrade-' + row.name"
+                  :loading="upgrading === row.id"
+                  :disabled="!row.enabled || !!upgrading && upgrading !== row.id"
+                  @click="upgrade(row)"
+                >
+                  {{ t('skillEditor.upgrade') }}
                 </el-button>
                 <el-button
                   link
