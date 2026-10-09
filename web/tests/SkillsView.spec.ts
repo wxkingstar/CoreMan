@@ -1,8 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { expect, it, vi } from 'vitest'
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { role: 'ai_committee' } }) }))
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), remove: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), remove: vi.fn(), upgrade: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
@@ -75,6 +75,30 @@ it('deletes a skill only after confirmation and reloads the catalog either way',
   expect(allSkills).toHaveBeenCalledTimes(1)
   expect(wrapper.find('[data-test="delete-unwanted"]').exists()).toBe(false)
   confirm.mockRestore()
+  wrapper.unmount()
+})
+
+it('upgrades installed AI employees only after confirmation and lists skipped ones', async () => {
+  const row = { id: 's1', revision: 5, name: 'query', source_id: 'source', description: '', category: null, security_level: 'public', version: '2.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false } as Skill
+  vi.mocked(allSkills).mockResolvedValue([row])
+  vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
+  vi.mocked(skills.presets).mockResolvedValue([])
+  vi.mocked(skills.upgrade).mockResolvedValue({ queued: [{ bot_id: 'b1', bot_name: 'demo-bot' }], skipped: [{ bot_id: 'b2', bot_name: 'other-bot', reason: '有待审申请' }] })
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+  const success = vi.spyOn(ElMessage, 'success')
+  const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  await wrapper.get('[data-test="upgrade-query"]').trigger('click')
+  await flushPromises()
+  expect(confirm.mock.calls[0]![0]).toContain('query')
+  expect(skills.upgrade).not.toHaveBeenCalled()
+  confirm.mockResolvedValue('confirm' as never)
+  await wrapper.get('[data-test="upgrade-query"]').trigger('click')
+  await flushPromises()
+  expect(skills.upgrade).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }))
+  expect(String(success.mock.calls.at(-1)![0])).toContain('1')
+  expect(document.body.textContent).toContain('other-bot（有待审申请）')
+  confirm.mockRestore(); success.mockRestore()
   wrapper.unmount()
 })
 

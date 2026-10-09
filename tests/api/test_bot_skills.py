@@ -408,3 +408,71 @@ async def test_check_failure_after_the_node_ran_says_so(client, db_session, db_e
     )
     assert log["error_code"] == "installation_configuration_changed_during_execution"
     assert log["remote"] is True
+
+
+async def test_upgrade_reinstalls_with_previous_scope_and_fresh_env(
+    client, db_session, db_engine, monkeypatch
+):
+    bot, skill, cipher = await prepare(client, db_session, internal=True)
+    bot_id, skill_id = bot.id, skill.id
+    result = await client.post(
+        f"/api/admin/bots/{bot_id}/skills/{skill_id}/install",
+        json={"selected_env_groups": ["erp"], "user_env_vars": {"API_KEY": "secret"}},
+    )
+    approval_id = result.json()["data"]["approval"]["id"]
+    assert (await client.post(f"/api/admin/skills/{skill_id}/upgrade")).status_code == 403
+    await login_as(client, db_session, role="ai_committee")
+    result = await client.post(
+        f"/api/admin/skill-approvals/{approval_id}/review",
+        json={
+            "decision": "approve",
+            "approved_databases": ["erp"],
+            "approved_security_prompt": "Only orders table",
+        },
+        headers={"If-Match": "1"},
+    )
+    calls = []
+
+    async def agent(relay, cipher, operation, payload):
+        calls.append(payload)
+        return {"success": True}
+
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert task.status == "succeeded", task.error_message
+    # 目录与预设都变了：旧审批对应旧修订号，升级要按原范围重新批准并重算环境变量。
+    skill.description, skill.version = "new release", "2.0.0"
+    preset = await db_session.get(EnvPreset, "erp")
+    preset.vars_enc = cipher.encrypt('{"DB_PASSWORD":"rotated"}', installs.PRESET_AAD)
+    await db_session.commit()
+    # 升级人是委员会成员但不是该机器人的管理员。
+    upgrader_id = (await login_as(client, db_session, role="ai_committee")).id
+    result = await client.post(f"/api/admin/skills/{skill_id}/upgrade")
+    assert result.status_code == 200, result.text
+    data = result.json()["data"]
+    assert data["skipped"] == [] and len(data["queued"]) == 1
+    again = (await client.post(f"/api/admin/skills/{skill_id}/upgrade")).json()["data"]
+    assert again["queued"] == [] and len(again["skipped"]) == 1
+    task = await execute(db_session, db_engine, data["queued"][0]["task_id"])
+    assert task.status == "succeeded", task.error_message
+    assert len(calls) == 2
+    db_session.expire_all()
+    row = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert row.status == "installed" and row.version == "2.0.0"
+    assert row.selected_env_groups == ["erp"] and row.security_prompt == "Only orders table"
+    assert row.approved_by == upgrader_id
+    bot = await db_session.get(Bot, bot_id)
+    env = await installs.effective_env(db_session, cipher, bot)
+    assert env["DB_PASSWORD"] == "rotated" and env["API_KEY"] == "secret"
+    assert "Only orders table" in bot.merged_system_prompt
+
+
+async def test_upgrade_skips_disabled_skill_and_uninstalled_bots(client, db_session):
+    bot, skill, _ = await prepare(client, db_session)
+    await login_as(client, db_session, role="platform_admin")
+    result = await client.post(f"/api/admin/skills/{skill.id}/upgrade")
+    assert result.status_code == 200, result.text
+    assert result.json()["data"] == {"queued": [], "skipped": []}
+    skill.enabled = False
+    await db_session.commit()
+    assert (await client.post(f"/api/admin/skills/{skill.id}/upgrade")).status_code == 409

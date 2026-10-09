@@ -21,7 +21,15 @@ from coreman.core.audit import record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, mask_dict
 from coreman.core.bus import tasks
-from coreman.core.db.models import Bot, BotSkill, Skill, SkillApproval, SkillSource, User
+from coreman.core.db.models import (
+    Bot,
+    BotSkill,
+    Skill,
+    SkillApproval,
+    SkillSource,
+    Task,
+    User,
+)
 from coreman.core.knowledge import installation as installs
 from coreman.core.timeutils import utcnow
 
@@ -227,6 +235,143 @@ async def install(
     await audit(session, request, actor, bot, "install_requested", skill_id)
     await session.commit()
     return {"code": 0, "data": {"status": "installing", "task_id": task.id}}
+
+
+async def last_data_source(
+    session: AsyncSession, request: Request, bot_id: uuid.UUID, skill_id: uuid.UUID
+) -> str | None:
+    """安装行不存数据源，取最近一次成功安装任务的输入；任务已被清理时回落到目录默认值。"""
+    task = await session.scalar(
+        select(Task)
+        .where(
+            Task.bot_id == bot_id,
+            Task.kind == "skill_install",
+            Task.status == "succeeded",
+            Task.payload["skill_id"].astext == str(skill_id),
+        )
+        .order_by(Task.id.desc())
+        .limit(1)
+    )
+    if task is None:
+        return None
+    inputs = json.loads(
+        request.app.state.cipher.decrypt(task.payload["inputs_enc"], installs.INPUTS_AAD)
+    )
+    source: str | None = inputs.get("data_source")
+    return source
+
+
+async def upgrade_one(
+    session: AsyncSession, request: Request, actor: User, bot: Bot, skill: Skill, row: BotSkill
+) -> Task:
+    """按上次成功安装的配置重装代码并重算环境变量；内部技能沿用原批准范围与安全约束。"""
+    if await session.scalar(
+        select(SkillApproval.id).where(
+            SkillApproval.bot_id == bot.id,
+            SkillApproval.skill_id == skill.id,
+            SkillApproval.status == "pending",
+        )
+    ):
+        raise ApiError(409, 409, "有待审申请")
+    cipher = request.app.state.cipher
+    groups = list(row.selected_env_groups)
+    inputs = await installs.input_snapshot(
+        session,
+        cipher,
+        bot,
+        skill,
+        selected=groups,
+        source=await last_data_source(session, request, bot.id, skill.id),
+        values=None,
+        requester=actor,
+    )
+    inputs.update(reinstall_code=True, upgrade=True)
+    approval = None
+    if skill.security_level == "internal":
+        policy = row.security_prompt
+        inputs.update(approved_databases=groups, security_prompt=policy)
+        # 由点击升级的委员会成员按原范围重新批准一次，安装任务仍走同一套审批校验。
+        approval = SkillApproval(
+            bot_id=bot.id,
+            skill_id=skill.id,
+            requested_databases=groups,
+            requested_security_prompt=policy or "",
+            reinstall_code=True,
+            skill_revision=skill.revision,
+            request_inputs_enc=cipher.encrypt(
+                json.dumps(inputs, ensure_ascii=False), installs.INPUTS_AAD
+            ),
+            requested_by=actor.id,
+            approved_databases=groups,
+            approved_security_prompt=policy,
+            status="approved",
+            reviewed_by=actor.id,
+            reviewed_at=utcnow(),
+            review_comment="一键升级：沿用原批准范围",
+        )
+        session.add(approval)
+        await session.flush()
+    else:
+        inputs.update(approved_databases=[], security_prompt=None)
+    return await installs.queue(
+        session, cipher, bot=bot, skill=skill, actor=actor, inputs=inputs, approval=approval
+    )
+
+
+@router.post("/skills/{skill_id}/upgrade")
+async def upgrade(
+    skill_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """为已安装该技能的所有 AI 员工重装技能并刷新环境变量；不满足条件的员工跳过并说明原因。"""
+    if actor.role not in ("ai_committee", "platform_admin"):
+        raise forbidden()
+    skill = await session.get(Skill, skill_id, with_for_update={"read": True})
+    if skill is None or skill.deleted_at is not None:
+        raise not_found("技能不存在")
+    if not skill.enabled:
+        raise ApiError(409, 409, "技能已停用，请先启用")
+    bot_ids = list(
+        await session.scalars(
+            select(BotSkill.bot_id)
+            .where(
+                BotSkill.skill_id == skill_id,
+                BotSkill.status != "uninstalled",
+                BotSkill.installed_at.is_not(None),
+            )
+            .order_by(BotSkill.bot_id)
+        )
+    )
+    names = await bot_names(session, bot_ids)
+    queued: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for bot_id in bot_ids:
+        bot = await session.scalar(select(Bot).where(Bot.id == bot_id).with_for_update())
+        row = await session.get(BotSkill, (bot_id, skill_id))
+        if bot is None or row is None:
+            continue
+        item = {"bot_id": bot_id, "bot_name": names.get(bot_id)}
+        try:
+            async with session.begin_nested():
+                task = await upgrade_one(session, request, actor, bot, skill, row)
+        except ApiError as exc:
+            skipped.append({**item, "reason": exc.message})
+            continue
+        queued.append({**item, "task_id": task.id})
+    await record_audit(
+        session,
+        action="skill.upgrade",
+        actor_id=actor.id,
+        actor_login=actor.login_name,
+        target_type="skill",
+        target_id=str(skill_id),
+        diff={"queued": [None, len(queued)], "skipped": [None, len(skipped)]},
+        ip=client_ip(request),
+    )
+    await session.commit()
+    return {"code": 0, "data": {"queued": queued, "skipped": skipped}}
 
 
 @router.delete("/bots/{bot_id}/skills/{skill_id}")

@@ -126,9 +126,16 @@ async def checked(
         raise ValueError("installation_target_changed")
     requester = await session.get(User, uuid.UUID(inputs["requester_id"]))
     actor = await session.get(User, task.user_id) if task.user_id else None
+    # 目录页一键升级由委员会成员发起，不要求其是该机器人的管理员。
+    upgrader = (
+        inputs.get("upgrade")
+        and requester is not None
+        and requester.status == "active"
+        and requester.role in ("ai_committee", "platform_admin")
+    )
     if (
         requester is None
-        or not await installs.bot_admin(session, bot, requester)
+        or not (upgrader or await installs.bot_admin(session, bot, requester))
         or actor is None
         or actor.status != "active"
     ):
