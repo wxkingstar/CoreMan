@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import os
 import uuid
 
 import pytest
@@ -406,3 +407,44 @@ def test_git_backup_pathspec_is_literal(agent, tmp_path, monkeypatch):
             ["git", "ls-files"], cwd=root, check=True, capture_output=True, text=True
         ).stdout
         assert not staged
+
+
+def test_init_links_claude_skills_to_agents_skills(agent):
+    call(agent, "init")
+    p = agent.root / "one"
+    assert (p / ".agents/skills").is_dir()
+    assert os.readlink(p / ".claude/skills") == "../.agents/skills"
+
+
+def test_init_replaces_per_skill_links_with_directory_link(agent):
+    p = agent.root / "one"
+    (p / ".agents/skills/query").mkdir(parents=True)
+    (p / ".claude/skills").mkdir(parents=True)
+    (p / ".claude/skills/query").symlink_to("../../.agents/skills/query")
+    call(agent, "init")
+    assert os.readlink(p / ".claude/skills") == "../.agents/skills"
+    assert (p / ".agents/skills/query").is_dir()
+
+
+def test_init_keeps_claude_only_skills(agent):
+    p = agent.root / "one"
+    (p / ".claude/skills/own").mkdir(parents=True)
+    call(agent, "init")
+    assert not (p / ".claude/skills").is_symlink()
+    assert (p / ".claude/skills/own").is_dir()
+
+
+def test_init_leaves_git_repository_skills_layout(agent):
+    shared_workspace(agent)
+    call(agent, "init")
+    assert not (agent.root / "one/.claude").exists()
+
+
+def test_skill_links_accept_directory_link(agent):
+    call(agent, "init")
+    p = agent.root / "one"
+    (p / ".agents/skills/query").mkdir()
+    (p / ".agents/skills/query/SKILL.md").write_text("# query\n")
+    agent.link_claude_skills(p, "query")
+    assert os.readlink(p / ".claude/skills") == "../.agents/skills"
+    assert (p / ".claude/skills/query/SKILL.md").is_file()
