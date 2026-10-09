@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.db.models import EFFORT_LEVELS, ModelCatalog, RelayServer
 
 # 官方文档里各模型在 high 之上还支持哪些思考档位（2026-09-19 核对；Opus 5.5、GPT-6 Sol
-# 于 2026-09-27 补，GPT-6.1 Sol 于 2026-10-04 补）。
+# 于 2026-09-27 补，GPT-6.1 Sol 于 2026-10-04 补，Sonnet 5.5、Haiku 5.5 于 2026-10-09 补）。
 # Claude：platform.claude.com/docs/en/build-with-claude/effort。Claude Code 的 --effort 用同一套
 #   档位，模型不支持时降到不超过它的最高档（Opus 4.6 的 xhigh 按 high 跑）；Opus 4.5 只有
 #   low/medium/high，Haiku 4.5、Sonnet 4.5 不支持 effort 参数。
@@ -39,9 +39,11 @@ EXTRA_EFFORTS: dict[str, frozenset[str]] = {
     "claude-opus-4-7": _XHIGH_MAX,
     "claude-opus-4-6": _MAX,
     "claude-opus-4-5": _NONE,
+    "claude-sonnet-5-5": _XHIGH_MAX,
     "claude-sonnet-5": _XHIGH_MAX,
     "claude-sonnet-4-6": _MAX,
     "claude-sonnet-4-5": _NONE,
+    "claude-haiku-5-5": _XHIGH_MAX,
     "claude-haiku-4-5": _NONE,
     "gpt-6.1-sol": _XHIGH_MAX,
     "gpt-6-sol": _XHIGH_MAX,

@@ -90,7 +90,7 @@ async def test_switch_relay_resolves_model(
     assert r.status_code == 200, r.text
     d = r.json()["data"]
     assert (
-        d["old_model"] == "claude-sonnet-5"
+        d["old_model"] == "claude-sonnet-5-5"
         and d["new_model"] == "codex/gpt-6.1-sol"
         and d["bot"]["backend"] == "codex"
     )
@@ -117,7 +117,7 @@ async def test_switch_relay_resolves_model(
         .scalars()
         .all()
     )
-    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5", "codex/gpt-6.1-sol"]
+    assert len(audit) == 2 and audit[0].diff["model"] == ["claude-sonnet-5-5", "codex/gpt-6.1-sol"]
 
 
 async def test_switch_relay_permissions_and_effort_downgrade(
@@ -215,7 +215,7 @@ async def test_same_relay_model_switch_skips_relay_visibility(
         created_by=owner.id,
         team_id=team.id,
         relay_server_id=hidden.id,
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         working_dir="/d",
         # 创建者读详情会解密凭证，得是真密文
         credentials_enc=encrypt_json(
