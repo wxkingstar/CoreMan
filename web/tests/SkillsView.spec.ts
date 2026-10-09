@@ -96,7 +96,7 @@ it('upgrades installed AI employees only after confirmation and lists skipped on
   await wrapper.get('[data-test="upgrade-query"]').trigger('click')
   await flushPromises()
   expect(skills.upgrade).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }))
-  expect(String(success.mock.calls.at(-1)![0])).toContain('1')
+  expect(success).toHaveBeenCalledWith(expect.stringContaining('1'))
   expect(document.body.textContent).toContain('other-bot（有待审申请）')
   confirm.mockRestore(); success.mockRestore()
   wrapper.unmount()
