@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
-import os
-import sys
+import multiprocessing
 import time
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,11 +34,59 @@ SHUTDOWN_HARD_SECONDS = 100.0
 SHUTDOWN_DRAIN_SECONDS = 88.0
 
 
+# 子进程从预加载过的 forkserver fork 出来，共享飞书 SDK 等模块的内存（见 preload）。
+FORKSERVER = multiprocessing.get_context("forkserver")
+FORKSERVER.set_forkserver_preload(["coreman.runtime.gateway_feishu.preload"])
+
+
+def run_child_process(bot_id: uuid.UUID, instance_id: str, generation: int) -> None:
+    """子进程入口。child 模块（连带飞书 SDK）只在子进程里导入，supervisor 自己不加载。"""
+    from coreman.runtime.gateway_feishu.child import run_process
+
+    run_process(bot_id, instance_id, generation)
+
+
+class ForkedProcess:
+    """把 multiprocessing 进程包成 supervisor 用的接口（同 asyncio 子进程）。"""
+
+    def __init__(self, process: BaseProcess) -> None:
+        self._process = process
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        if self._returncode is None and self._process.exitcode is not None:
+            self._returncode = self._process.exitcode
+            self._process.close()  # 释放进程哨兵的文件描述符
+        return self._returncode
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            # 进程退出时哨兵变为可读（forkserver 把退出码写进去）。
+            loop = asyncio.get_running_loop()
+            exited = asyncio.Event()
+            sentinel = self._process.sentinel
+            loop.add_reader(sentinel, exited.set)
+            try:
+                await exited.wait()
+            finally:
+                loop.remove_reader(sentinel)
+        returncode = self.returncode
+        assert returncode is not None
+        return returncode
+
+
 @dataclass
 class Child:
     generation: int
     fingerprint: str
-    process: asyncio.subprocess.Process | None = None
+    process: ForkedProcess | None = None
     next_start: float = 0
     delay: float = 5
     started_at: float = 0
@@ -120,20 +169,24 @@ class GatewayFeishuService(Service):
                 self._log.error("feishu_reconcile_failed")
             await asyncio.sleep(self.interval)
 
-    async def spawn(self, bot_id: uuid.UUID, child: Child) -> asyncio.subprocess.Process:
-        return await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "coreman.runtime.gateway_feishu.child",
-            "--bot-id",
-            str(bot_id),
-            "--instance-id",
-            self.instance_id,
-            "--generation",
-            str(child.generation),
-            "--parent-pid",
-            str(os.getpid()),
+    async def spawn(self, bot_id: uuid.UUID, child: Child) -> ForkedProcess:
+        process = FORKSERVER.Process(
+            target=run_child_process,
+            args=(bot_id, self.instance_id, child.generation),
+            daemon=True,
         )
+        # 第一次启动要先拉起 forkserver 并完成预加载（几秒），不能卡住事件循环。
+        starting = asyncio.ensure_future(asyncio.to_thread(process.start))
+        try:
+            await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # 停机取消了调度，线程里的启动却停不下来：等它做完，进程起来了就挂到 child 上，
+            # 排空时照常先停进程再释放租约。
+            with contextlib.suppress(Exception):
+                await starting
+                child.process = ForkedProcess(process)
+            raise
+        return ForkedProcess(process)
 
     async def reconcile(self) -> None:
         await self.lease_loop.round()
