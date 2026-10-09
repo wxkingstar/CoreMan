@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import hashlib
-import os
+import multiprocessing
 import signal
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from lark_oapi.ws import client as ws_client
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -79,7 +79,11 @@ async def _sleep_unless_stopped(stop: asyncio.Event, seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
 
 
-async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent_pid: int) -> None:
+async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> None:
+    # 父进程是 forkserver，它被各子进程持有的管道吊着，supervisor 死了它也不退，父进程号不变；
+    # 所以看 multiprocessing 留给子进程的 supervisor 哨兵。
+    supervisor = multiprocessing.parent_process()
+    assert supervisor is not None  # 只由 supervisor 的 `spawn` 拉起
     cfg = get_settings()
     configure_logging(service="gateway-feishu-child", instance=instance_id, level=cfg.log_level)
     log = get_logger(__name__).bind(bot_id=str(bot_id))
@@ -176,7 +180,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
         listener = Listener(asyncpg_dsn(cfg.database_url), WAKE_CHANNELS)
         await listener.start()
         while not stop.is_set():
-            if os.getppid() != parent_pid:
+            if not supervisor.is_alive():
                 break
             # 独占锁连接的探活放在 try 外面：它断了独占就没了，只能退出让 supervisor 重启。
             await app_guard.execute(text("SELECT 1"))
@@ -221,20 +225,13 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int, parent
             loop.remove_signal_handler(sig)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bot-id", required=True, type=uuid.UUID)
-    parser.add_argument("--instance-id", required=True)
-    parser.add_argument("--generation", required=True, type=int)
-    parser.add_argument("--parent-pid", required=True, type=int)
-    args = parser.parse_args()
+def run_process(bot_id: uuid.UUID, instance_id: str, generation: int) -> None:
+    """forkserver 子进程入口（supervisor 的 `spawn`）。"""
+    # 预加载时关掉了 SDK 的模块级事件循环（见 preload），本进程的长连接另建一个。
+    ws_client.loop = asyncio.new_event_loop()
     try:
-        asyncio.run(run_child(args.bot_id, args.instance_id, args.generation, args.parent_pid))
+        asyncio.run(run_child(bot_id, instance_id, generation))
     except Exception:
         # 子进程默认 traceback 可能携带 SDK 响应；这里只报告失败类型的稳定事件。
         get_logger(__name__).error("feishu_child_failed")
         raise SystemExit(1) from None
-
-
-if __name__ == "__main__":
-    main()
