@@ -517,6 +517,12 @@ cmd_build() {
 
 cmd_contact_sync() { compose run --rm migrate /app/.venv/bin/python -m coreman.cli contact-sync "$@"; }
 
+# 管理命令以 --as 或 COREMAN_CLI_USER 指定的成员身份执行；宿主机设置了 COREMAN_CLI_USER 就带进容器。
+cmd_admin() {
+  compose run --rm ${COREMAN_CLI_USER:+-e "COREMAN_CLI_USER=$COREMAN_CLI_USER"} migrate \
+    /app/.venv/bin/python -m coreman.cli "$@"
+}
+
 managed_prefix() {
   local service="$1" cid hostname
   if [[ "${DRY_RUN:-0}" == "1" ]]; then echo "$service:dry-run:"; return; fi
@@ -655,9 +661,12 @@ usage() {
   contact-sync [--app 名称]     同步企业微信通讯录
   feishu-cards preview --to 成员 [--bot 标识] [--sample 名称] [--stream] [--apply]
                               飞书富卡片真机预览；不加 --apply 只做飞书校验
+  bots|skills|approvals|systems|teams|users|api <操作> … [--as 登录名]
+                              管理后台常用操作的命令行版本，各命令加 --help 查看用法
   help                        本说明
 环境变量: DRY_RUN=1 只打印 compose 命令；COREMAN_ENV_FILE 指定 .env 路径；COREMAN_IMAGE_TAG 覆盖部署标签；
-  COREMAN_WAIT_TIMEOUT 为 up 等待健康的秒数（默认 300）；COREMAN_STATE_DIR 为状态文件目录（默认仓库根目录）
+  COREMAN_WAIT_TIMEOUT 为 up 等待健康的秒数（默认 300）；COREMAN_STATE_DIR 为状态文件目录（默认仓库根目录）；
+  COREMAN_CLI_USER 为管理命令默认的操作人登录名
 EOF
 }
 
@@ -672,7 +681,7 @@ main() {
     migrate) cmd_migrate "$@" ;;
     build) cmd_build "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
-    skills) compose run --rm migrate /app/.venv/bin/python -m coreman.cli skills "$@" ;;
+    skills|bots|approvals|systems|teams|users|api) cmd_admin "$cmd" "$@" ;;
     contact-sync) cmd_contact_sync "$@" ;;
     feishu-cards) compose run --rm migrate /app/.venv/bin/python -m coreman.cli feishu-cards "$@" ;;
     help|-h|--help) usage ;;

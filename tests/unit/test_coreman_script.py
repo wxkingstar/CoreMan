@@ -206,6 +206,22 @@ def test_contact_sync_runs_cli_in_migrate_container(env_file: Path) -> None:
     assert "run --rm migrate /app/.venv/bin/python -m coreman.cli contact-sync --app x" in r.stdout
 
 
+def test_admin_commands_run_cli_with_default_actor(env_file: Path) -> None:
+    env = {**os.environ, "DRY_RUN": "1", "COREMAN_ENV_FILE": str(env_file), "LC_ALL": "C"}
+    env.pop("COREMAN_CLI_USER", None)
+    r = subprocess.run(
+        [str(SCRIPT), "bots", "disable", "sales_bot"], env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert (
+        "run --rm migrate /app/.venv/bin/python -m coreman.cli bots disable sales_bot" in r.stdout
+    )
+    env["COREMAN_CLI_USER"] = "ops"
+    r = subprocess.run([str(SCRIPT), "approvals", "list"], env=env, capture_output=True, text=True)
+    assert "run --rm -e COREMAN_CLI_USER=ops migrate" in r.stdout
+    assert "-m coreman.cli approvals list" in r.stdout
+
+
 def test_up_refuses_unfinished_upgrade_unless_forced(
     env_file: Path, isolated_state_dir: Path
 ) -> None:

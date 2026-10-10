@@ -84,6 +84,10 @@ API 升级先重载 Caddy 的指标隔离规则，再迁移并逐台健康升级
 
 镜像标签优先级：环境变量 `COREMAN_IMAGE_TAG` > `.coreman-image-tag` > .env 中的 `COREMAN_IMAGE_TAG`。
 
+### 管理命令
+
+管理后台的常用操作（AI 员工、技能、技能审批、业务系统、团队与用户）可以用 `./deploy/coreman bots|skills|approvals|systems|teams|users|api …` 在服务器上执行，见 [管理命令](admin-cli.md)。
+
 ### 运行状态
 
 `status` 依次输出 `docker compose ps`、各容器（含已停止的备用网关）的镜像标签与状态、部署标签、未完成的升级、PostgreSQL 客户端连接数与 `max_connections`，最后检查 API `/health`。运行中的 CoreMan 容器使用多个标签时提示混合版本；客户端连接达到 `max_connections` 的 80% 时告警。
