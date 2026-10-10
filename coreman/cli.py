@@ -5,6 +5,9 @@
 
 `feishu-cards preview`：把样例或指定文件编译成飞书富卡片，用某个 AI 员工发给指定成员做
 真机视觉回归；默认只校验不发送。
+
+`bots`、`skills`、`approvals`、`systems`、`teams`、`users`、`api`：管理后台常用操作的命令行版本，
+以 --as 指定的成员身份经同一套管理 API 执行，见 coreman.admin_cli。
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import sys
 
 from sqlalchemy import select
 
+from coreman import admin_cli
 from coreman.api.errors import ApiError
 from coreman.core.config import get_settings
 from coreman.core.contacts import runner
@@ -205,7 +209,8 @@ async def _feishu_preview(args: argparse.Namespace, texts: dict[str, str]) -> in
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI 入口：contact-sync、skills sync、wecom-bots audit、feishu-cards preview。"""
+    """CLI 入口：运维命令（contact-sync、skills sync、wecom-bots audit、feishu-cards preview）
+    与管理命令（见 coreman.admin_cli）。"""
     parser = argparse.ArgumentParser(prog="coreman.cli", description="CoreMan 运维命令")
     sub = parser.add_subparsers(dest="command", required=True)
     cs = sub.add_parser("contact-sync", help="同步企业微信通讯录")
@@ -215,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     sync = operations.add_parser("sync", help="从已登记来源同步技能展示元数据")
     sync.add_argument("url", help="已登记的 marketplace Git 地址")
     sync.add_argument("--source", required=True, help="来源标识")
+    admin_cli.register_skills(operations)
+    admin_cli.register(sub)
     wecom = sub.add_parser("wecom-bots", help="企业微信 AI 员工机器人检查")
     wecom_ops = wecom.add_subparsers(dest="operation", required=True)
     wecom_ops.add_parser("audit", help="只读检查机器人是否带着创建者的企业微信数据权限")
@@ -228,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     pv.add_argument("--stream", action="store_true", help="第一张卡按线上流程流式发送")
     pv.add_argument("--apply", action="store_true", help="真正发送；不加只做飞书校验")
     args = parser.parse_args(argv)
+    if getattr(args, "admin", None):
+        return admin_cli.run(args)
     if args.command == "feishu-cards" and args.operation == "preview":
         texts = _preview_texts(args)
         return 2 if texts is None else asyncio.run(_feishu_preview(args, texts))

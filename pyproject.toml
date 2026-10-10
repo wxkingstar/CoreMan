@@ -30,6 +30,9 @@ dependencies = [
   "pyyaml>=6.0,<7",
 ]
 
+[project.scripts]
+coreman = "coreman.cli:main"
+
 [dependency-groups]
 dev = [
   "pytest>=8.3",
