@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import multiprocessing
+import os
 import signal
 import sys
 import time
@@ -38,6 +39,28 @@ async def test_forked_process_reports_exit_code():
     forked = ForkedProcess(process)
     assert await asyncio.wait_for(forked.wait(), timeout=30) == 3
     assert forked.returncode == 3  # 进程对象已关闭，退出码仍可读
+
+
+async def test_forked_process_waits_for_exit_code_after_sentinel():
+    # 哨兵已可读、退出码却还没就绪：wait 要等到能回收再返回，不能断言失败。
+    read_end, write_end = os.pipe()
+    os.close(write_end)
+    joined = []
+
+    class LateExit:
+        sentinel = read_end
+        exitcode = None
+
+        def join(self):
+            joined.append(True)
+            self.exitcode = 5
+
+        def close(self):
+            os.close(read_end)
+
+    forked = ForkedProcess(LateExit())  # type: ignore[arg-type]
+    assert await asyncio.wait_for(forked.wait(), timeout=5) == 5
+    assert joined == [True]
 
 
 async def test_forked_process_terminate():
