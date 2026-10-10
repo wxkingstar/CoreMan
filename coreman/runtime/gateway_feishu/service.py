@@ -77,6 +77,10 @@ class ForkedProcess:
                 await exited.wait()
             finally:
                 loop.remove_reader(sentinel)
+        if self.returncode is None:
+            # 哨兵可读时进程可能还没到能回收的那一刻（spawn 等启动方式下哨兵是子进程退出时关闭的
+            # 管道，waitpid 稍后才拿得到退出码）：在线程里 join，进程已退出，很快返回。
+            await asyncio.to_thread(self._process.join)
         returncode = self.returncode
         assert returncode is not None
         return returncode
