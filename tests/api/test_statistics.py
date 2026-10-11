@@ -8,19 +8,26 @@ from coreman.core.pricing import estimate
 from tests.api.conftest import login_as
 
 
-async def test_statistics_scope_timezone_and_missing_counts(client, db_session):
+async def test_statistics_platform_wide_timezone_and_missing_counts(client, db_session):
     import uuid
 
-    actor = await login_as(client, db_session)
+    actor = await login_as(client, db_session, display_name="本人")
+    actor.avatar_url = "https://example.com/me.png"
     other = uuid.uuid4()
-    for hour, owner, count in ((15, actor.id, 10), (16, actor.id, None), (17, other, 10000)):
+    rows = (
+        (15, actor.id, "wecom", 10),
+        (16, actor.id, "wecom", None),
+        # 别人的机器人、飞书私聊：统计只给聚合数字，普通成员也计入。
+        (17, other, "feishu", 10000),
+    )
+    for hour, owner, platform, count in rows:
         db_session.add(
             ChatLog(
                 bot_id=uuid.uuid4(),
                 bot_key="bot",
-                platform="wecom",
+                platform=platform,
                 user_id=owner,
-                user_name="visible" if owner == actor.id else "hidden",
+                user_name="me" if owner == actor.id else "other",
                 chat_type="single",
                 message_type="text",
                 status="success",
@@ -35,63 +42,22 @@ async def test_statistics_scope_timezone_and_missing_counts(client, db_session):
     )
     assert result.status_code == 200, result.text
     data = result.json()["data"]
-    assert data["total"]["messages"] == 2 and data["total"]["input_tokens"] == 10
-    assert data["total"]["input_tokens_measured"] == 1
+    assert data["total"]["messages"] == 3 and data["total"]["input_tokens"] == 10010
+    assert data["total"]["input_tokens_measured"] == 2
     assert data["total"]["cost_usd"] is None and data["total"]["cost_usd_measured"] == 0
     assert [row["day"] for row in data["daily"]] == ["2026-09-01", "2026-09-02"]
-    assert "hidden" not in result.text
-    await login_as(client, db_session, role="ai_committee")
-    result = await client.get(
-        "/api/admin/statistics", params={"start": "2026-09-01", "end": "2026-09-02"}
-    )
-    assert result.json()["data"]["total"]["messages"] == 3
+    assert len(data["by_bot"]) == 3
+    # 用户排行按 Token 合计倒序，消息更多的本人排在后面；有账号的用平台姓名和头像。
+    assert [(row["name"], row["tokens"], row["messages"]) for row in data["by_user"]] == [
+        ("other", 10000, 1),
+        ("本人", 10, 2),
+    ]
+    assert [row["avatar_url"] for row in data["by_user"]] == [None, "https://example.com/me.png"]
     assert (
         await client.get(
             "/api/admin/statistics", params={"start": "2020-01-01", "end": "2026-09-02"}
         )
     ).status_code == 422
-
-
-async def test_statistics_hides_feishu_private_from_bot_token(client, db_session, monkeypatch):
-    import uuid
-
-    from coreman.api import bot_auth
-
-    actor = await login_as(client, db_session)
-    for platform in ("wecom", "feishu"):
-        db_session.add(
-            ChatLog(
-                bot_id=uuid.uuid4(),
-                bot_key="bot",
-                platform=platform,
-                user_id=actor.id,
-                user_name="owner",
-                chat_type="single",
-                message_type="text",
-                status="success",
-                request_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
-                input_tokens=7,
-            )
-        )
-    await db_session.commit()
-    params = {"start": "2026-09-01", "end": "2026-09-01"}
-    data = (await client.get("/api/admin/statistics", params=params)).json()["data"]
-    assert data["total"]["messages"] == 2
-
-    async def token_user(request, session):
-        # 与真实 token_user 一致地标记认证结果：via_bot_token 按它判定，不看 cookie。
-        request.state.bot_token_authenticated = True
-        request.state.admin_session = None
-        return actor
-
-    monkeypatch.setattr(bot_auth, "token_user", token_user)
-    client.cookies.set("bot_token", "verified-owner-token")
-    result = await client.get("/api/admin/statistics", params=params)
-    assert result.status_code == 200, result.text
-    data = result.json()["data"]
-    # 令牌可能来自群聊：本人飞书私聊连聚合量也不能透出。
-    assert data["total"]["messages"] == 1 and data["total"]["input_tokens"] == 7
-    assert [row["messages"] for row in data["by_user"]] == [1]
 
 
 async def test_price_permissions_effective_date_and_unknown_usage(client, db_session):

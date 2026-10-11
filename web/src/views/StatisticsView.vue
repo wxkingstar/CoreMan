@@ -14,6 +14,7 @@ const data = ref<Statistics | null>(null), prices = ref<ModelPrice[]>([])
 const busy = ref(false), editing = ref(false), saving = ref(false)
 const range = ref<string[]>([]), timezone = ref('Asia/Shanghai')
 const metric = ref<'messages' | 'users' | 'bots'>('messages')
+const ranking = ref('users')
 const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective_from: new Date().toISOString().slice(0, 10), input_usd: '', output_usd: '', cache_read_usd: '', cache_write_usd: '', version: 0 })
 const price = reactive<ModelPrice>(emptyPrice())
 const money = (value: number | null) => value == null ? t('statistics.unknown') : `$${value.toFixed(6)}`
@@ -205,8 +206,61 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
           </el-table>
         </el-collapse-item>
       </el-collapse>
-      <el-tabs class="ranking-tabs">
-        <el-tab-pane :label="t('statistics.botRanking')">
+      <el-tabs
+        v-model="ranking"
+        class="ranking-tabs"
+      >
+        <el-tab-pane
+          name="users"
+          :label="t('statistics.userRanking')"
+        >
+          <el-table :data="data.by_user">
+            <el-table-column
+              type="index"
+              width="60"
+              label="#"
+            /><el-table-column
+              min-width="180"
+              :label="t('common.name')"
+            >
+              <template #default="{ row }">
+                <div class="user-cell">
+                  <el-avatar
+                    :size="28"
+                    :src="row.avatar_url ?? undefined"
+                  >
+                    {{ (row.name ?? '?').charAt(0) }}
+                  </el-avatar><span>{{ row.name ?? t('statistics.unknown') }}</span>
+                </div>
+              </template>
+            </el-table-column><el-table-column
+              min-width="140"
+              :label="t('statistics.tokens')"
+            >
+              <template #default="{ row }">
+                <strong class="tokens">{{ number(row.tokens) }}</strong>
+              </template>
+            </el-table-column><el-table-column
+              min-width="140"
+              prop="messages"
+              :label="t('statistics.messages')"
+            /><el-table-column
+              min-width="140"
+              prop="bots"
+              :label="t('statistics.bots')"
+            /><el-table-column
+              min-width="140"
+              :label="t('statistics.cost')"
+            >
+              <template #default="{ row }">
+                {{ money(row.cost_usd) }}<small class="coverage">{{ t('statistics.coverage', { n: row.cost_usd_measured, total: row.messages }) }}</small>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane><el-tab-pane
+          name="bots"
+          :label="t('statistics.botRanking')"
+        >
           <el-table :data="data.by_bot">
             <el-table-column
               min-width="140"
@@ -220,29 +274,6 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
               min-width="140"
               prop="users"
               :label="t('statistics.users')"
-            /><el-table-column
-              min-width="140"
-              :label="t('statistics.cost')"
-            >
-              <template #default="{ row }">
-                {{ money(row.cost_usd) }}<small class="coverage">{{ t('statistics.coverage', { n: row.cost_usd_measured, total: row.messages }) }}</small>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-tab-pane><el-tab-pane :label="t('statistics.userRanking')">
-          <el-table :data="data.by_user">
-            <el-table-column
-              min-width="140"
-              prop="name"
-              :label="t('common.name')"
-            /><el-table-column
-              min-width="140"
-              prop="messages"
-              :label="t('statistics.messages')"
-            /><el-table-column
-              min-width="140"
-              prop="bots"
-              :label="t('statistics.bots')"
             /><el-table-column
               min-width="140"
               :label="t('statistics.cost')"
@@ -373,6 +404,9 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
 .axis-label { fill: var(--cm-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grid-line { stroke: var(--cm-border); stroke-width: 1; stroke-dasharray: 3 5; }
 .ranking-tabs { margin: 24px 0; }
+.user-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.user-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tokens { font-weight: 600; font-variant-numeric: tabular-nums; }
 @media (max-width: 800px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) {
   .statistics-filters :deep(.date-range) { flex-basis: 100%; width: 100%; }

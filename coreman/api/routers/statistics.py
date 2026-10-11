@@ -1,4 +1,4 @@
-"""可见范围内的日统计和模型价格，不将未知用量、未知价格伪装成零。"""
+"""全平台日统计和模型价格，不将未知用量、未知价格伪装成零。"""
 
 from __future__ import annotations
 
@@ -12,9 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, current_user, get_session, via_bot_token
+from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden
-from coreman.api.routers.chat_logs import _scope, accessible_bot_ids
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
@@ -47,7 +46,6 @@ def aggregate_out(row: Any) -> dict[str, Any]:
 
 @router.get("/statistics")
 async def statistics(
-    request: Request,
     start: date | None = None,
     end: date | None = None,
     timezone: Literal["UTC", "Asia/Shanghai", "Asia/Tokyo"] = "Asia/Shanghai",
@@ -61,11 +59,8 @@ async def statistics(
         raise ApiError(422, 422, "统计范围须为 1 至 366 天")
     lower = datetime.combine(start, time.min, zone).astimezone(UTC)
     upper = datetime.combine(end + timedelta(days=1), time.min, zone).astimezone(UTC)
-    ids = await accessible_bot_ids(session, actor)
-    conditions = _scope(ids, actor, bot_token=via_bot_token(request)) + [
-        ChatLog.request_at >= lower,
-        ChatLog.request_at < upper,
-    ]
+    # 统计只有聚合数字、不含正文：登录成员都看全平台，不按机器人或私聊可见范围过滤。
+    conditions = [ChatLog.request_at >= lower, ChatLog.request_at < upper]
     # 每条聚合查询有上限；统计不应挤占实时聊天的数据库资源。
     await session.execute(text("SELECT set_config('statement_timeout', '5000', true)"))
     total = (await session.execute(select(*aggregates()).where(*conditions))).mappings().one()
@@ -100,17 +95,25 @@ async def statistics(
         .mappings()
         .all()
     )
+    # 用户排行按四类 Token 合计倒序；未计量的记录不计入合计。
+    measured = [func.coalesce(func.sum(getattr(ChatLog, key)), 0) for key in TOKENS]
+    tokens = measured[0] + measured[1] + measured[2] + measured[3]
     by_user = (
         (
             await session.execute(
                 select(
                     ChatLog.user_id.label("id"),
-                    func.max(ChatLog.user_name).label("name"),
+                    func.coalesce(func.max(User.display_name), func.max(ChatLog.user_name)).label(
+                        "name"
+                    ),
+                    func.max(User.avatar_url).label("avatar_url"),
+                    tokens.label("tokens"),
                     *aggregates(),
                 )
                 .where(*conditions, ChatLog.user_id.is_not(None))
+                .outerjoin(User, User.id == ChatLog.user_id)
                 .group_by(ChatLog.user_id)
-                .order_by(func.count().desc(), ChatLog.user_id)
+                .order_by(tokens.desc(), func.count().desc(), ChatLog.user_id)
                 .limit(50)
             )
         )
