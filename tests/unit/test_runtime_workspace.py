@@ -509,3 +509,34 @@ def test_skill_links_accept_directory_link(agent):
     agent.link_claude_skills(p, "query")
     assert os.readlink(p / ".claude/skills") == "../.agents/skills"
     assert (p / ".claude/skills/query/SKILL.md").is_file()
+
+
+def test_github_token_uses_app_username(agent, monkeypatch):
+    from runtime_daemon import agent as agent_module
+    from runtime_daemon.workspace import Workspace
+
+    users = []
+    original = agent_module.git_askpass
+
+    def capture(directory, token, username="oauth2"):
+        users.append(username)
+        return original(directory, token, username)
+
+    monkeypatch.setattr(agent_module, "git_askpass", capture)
+    monkeypatch.setattr(agent_module, "run_command", lambda *a, **k: "")
+    agent.git_hosts = {"github.com", "gitlab.example.com"}
+    call(agent, "init")
+    for url in ["https://github.com/org/repo.git", "https://gitlab.example.com/org/repo.git"]:
+        ws = Workspace(
+            agent,
+            {
+                "type": "workspace-git-test",
+                "working_dir": "one",
+                "bot_id": 1,
+                "git_url": url,
+                "git_access_token": "t",
+            },
+        )
+        ws.git_config()
+        ws.git(["ls-remote", "--", url], token="t")
+    assert users == ["x-access-token", "oauth2"]

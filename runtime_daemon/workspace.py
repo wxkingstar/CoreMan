@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 CHUNK = 256 * 1024
 MAX_TEXT = 1024 * 1024
@@ -185,6 +186,9 @@ class InstructionsConflict(Exception):
 
 
 class Workspace:
+    # HTTPS 令牌认证的用户名：GitHub 的 App 令牌要求 x-access-token（个人令牌不看用户名）。
+    git_user = "oauth2"
+
     def __init__(self, agent, data):
         self.agent, self.data = agent, data
         from .agent import OperationError
@@ -622,7 +626,7 @@ class Workspace:
 
         with tempfile.TemporaryDirectory(prefix="coreman-git-auth-") as temp:
             if token:
-                env.update(git_askpass(Path(temp), token))
+                env.update(git_askpass(Path(temp), token, self.git_user))
             try:
                 output = run_command(
                     [
@@ -661,6 +665,8 @@ class Workspace:
         url, skill = self.agent.git_source(str(self.data.get("git_url", "")))
         if skill:
             raise self.error("Git 仓库地址无效")
+        if urlsplit(url).hostname == "github.com":
+            self.git_user = "x-access-token"
         return url, str(self.data.get("git_access_token") or "")
 
     def remote_head(self, url, token):

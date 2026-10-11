@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bots.git_token import git_token
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, RelayServer, RuntimeNode
@@ -245,11 +246,7 @@ async def prepare_switch(
             elif mode == "git":
                 if not bot.git_url:
                     raise ApiError(422, 422, "请先配置 Git 备份地址")
-                token = (
-                    cipher.decrypt(bot.git_token_enc, "bots.git_token_enc")
-                    if cipher and bot.git_token_enc
-                    else ""
-                )
+                token = await git_token(session, cipher, bot) if cipher else ""
                 await call_agent(
                     target,
                     cipher,
