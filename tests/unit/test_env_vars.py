@@ -109,3 +109,9 @@ def test_personal_capabilities_cannot_be_static_env(key: str) -> None:
         bot_env={key: "forged"},
     )
     assert key not in env
+
+
+def test_env_value_fits_base64_kubeconfig() -> None:
+    assert skill_policy.env_vars({"KUBECONFIG_B64": "a" * 16000})
+    with pytest.raises(ValueError, match="过长"):
+        skill_policy.env_vars({"KUBECONFIG_B64": "a" * 16001})

@@ -55,7 +55,7 @@ def env_vars(values: dict[str, str]) -> dict[str, str]:
             raise ValueError("环境变量名无效，或试图覆盖运行时身份与授权")
         if is_blocked_env_key(key):
             raise ValueError(f"环境变量会改变运行时的模型端点、代码加载或凭据，不允许配置：{key}")
-        if len(value) > 4000 or "\x00" in value:
+        if len(value) > 16000 or "\x00" in value:
             raise ValueError("环境变量值无效或过长")
     return values
 
