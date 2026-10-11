@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -47,7 +47,6 @@ class FileWriteIn(BaseModel):
 class GitConfigIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     git_url: str = Field(max_length=2048)
-    branch: str = Field(default="main", min_length=1, max_length=200)
     access_token: str | None = Field(default=None, max_length=4096)
 
     @field_validator("git_url")
@@ -69,18 +68,6 @@ class GitConfigIn(BaseModel):
             return value
         raise ValueError("请使用不含凭证的 HTTPS 或 git@host:path 仓库地址")
 
-    @field_validator("branch")
-    @classmethod
-    def safe_branch(cls, value: str) -> str:
-        if (
-            value.startswith(("-", "/", "."))
-            or value.endswith(("/", ".", ".lock"))
-            or any(x in value for x in ("..", "@{", "//", "\\"))
-            or re.search(r"[\s~^:?*\[\x00-\x1f\x7f]", value)
-        ):
-            raise ValueError("分支名称无效")
-        return value
-
 
 class BackupIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -91,6 +78,11 @@ class BackupIn(BaseModel):
     @classmethod
     def default_message(cls, value: Any) -> Any:
         return "备份工作文件" if isinstance(value, str) and not value.strip() else value
+
+
+class AdoptIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: Literal[True]
 
 
 def workspace_out(bot: Bot) -> dict[str, Any]:
@@ -165,6 +157,13 @@ async def invoke(
     except AgentError as exc:
         if getattr(exc, "code", None) == "conflict":
             raise ApiError(409, 409, "文件已被修改，请重新读取后合并您的更改") from exc
+        if getattr(exc, "code", None) == "remote_not_empty":
+            raise ApiError(
+                409,
+                409,
+                "远端仓库已有内容，与当前工作目录不是同一仓库。"
+                "请改用空仓库，或用仓库内容初始化工作目录",
+            ) from exc
         raise ApiError(
             502, 502, "工作目录操作未完成，请检查运行时在线状态、版本及 Git 配置"
         ) from exc
@@ -175,7 +174,6 @@ def git_payload(bot: Bot, cipher: Cipher) -> dict[str, Any]:
         raise ApiError(422, 422, "请先保存 Git 仓库地址")
     return {
         "git_url": bot.git_url,
-        "branch": bot.git_branch,
         "git_access_token": cipher.decrypt(bot.git_token_enc, GIT_TOKEN_AAD)
         if bot.git_token_enc
         else "",
@@ -263,7 +261,7 @@ async def configure_git(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bot = await require_admin(session, bot_id, user, write=True, initialize=True)
-    bot.git_url, bot.git_branch = body.git_url or None, body.branch
+    bot.git_url = body.git_url or None
     if body.access_token is not None:
         bot.git_token_enc = (
             request.app.state.cipher.encrypt(body.access_token, GIT_TOKEN_AAD)
@@ -297,6 +295,9 @@ async def git_test(
     bot = await require_admin(session, bot_id, user)
     cipher = request.app.state.cipher
     data = await invoke(session, bot, cipher, "workspace-git-test", git_payload(bot, cipher))
+    if data.get("branch"):
+        bot.git_branch = data["branch"]
+        await session.commit()
     return {"code": 0, "data": data}
 
 
@@ -320,9 +321,38 @@ async def git_backup(
     if data.get("pushed") is not True:
         raise ApiError(502, 502, "文件尚未上传到远端，请重试备份")
     bot.git_last_backup_at = utcnow()
+    if data.get("branch"):
+        bot.git_branch = data["branch"]
     await audit(session, request, user, bot, "backup")
     await session.commit()
     return {"code": 0, "data": {**data, "last_backup_at": bot.git_last_backup_at}}
+
+
+@router.post("/git/adopt")
+async def git_adopt(
+    bot_id: uuid.UUID,
+    body: AdoptIn,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """放弃工作目录现有文件，用远端仓库默认分支的内容初始化。"""
+    from coreman.core.bots.workspace_transfer import instruction_content
+
+    bot = await require_admin(session, bot_id, user, write=True)
+    cipher = request.app.state.cipher
+    data = await invoke(
+        session,
+        bot,
+        cipher,
+        "workspace-git-adopt",
+        {**git_payload(bot, cipher), "content": instruction_content(bot)},
+    )
+    if data.get("branch"):
+        bot.git_branch = data["branch"]
+    await audit(session, request, user, bot, "git_adopt")
+    await session.commit()
+    return {"code": 0, "data": workspace_out(bot)}
 
 
 @router.post("/initialize")

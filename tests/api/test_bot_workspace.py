@@ -101,7 +101,6 @@ async def test_git_token_encrypted_and_push_required(client, db_session, agent):
         url + "/git",
         json={
             "git_url": "https://github.com/org/repo.git",
-            "branch": "main",
             "access_token": "very-secret",
         },
     )
@@ -154,7 +153,7 @@ async def test_hash_conflict_is_reported_without_runtime_detail(client, db_sessi
 
 async def test_git_token_preserve_clear_and_invalid_input_redaction(client, db_session):
     bot, url = await setup(client, db_session)
-    config = {"git_url": "https://github.com/org/repo.git", "branch": "main"}
+    config = {"git_url": "https://github.com/org/repo.git"}
     assert (
         await client.put(url + "/git", json={**config, "access_token": "secret"})
     ).status_code == 200
@@ -203,3 +202,43 @@ async def test_failed_workspace_allows_instruction_repair_but_not_backup(client,
         )
     ).status_code == 200
     assert (await client.post(url + "/git/backup", json={"files": []})).status_code == 409
+
+
+async def test_git_default_branch_and_adopt_requires_confirmation(client, db_session, agent):
+    bot, url = await setup(client, db_session)
+    config = {"git_url": "https://github.com/org/repo.git"}
+    assert (await client.put(url + "/git", json=config)).status_code == 200
+    agent.return_value = {
+        "success": True,
+        "workspace_protocol": 1,
+        "reachable": True,
+        "branch": "trunk",
+        "empty": False,
+        "linked": False,
+    }
+    result = await client.post(url + "/git/test")
+    assert result.status_code == 200, result.text
+    assert "branch" not in agent.call_args.args[3]
+    await db_session.refresh(bot)
+    assert bot.git_branch == "trunk"
+
+    def remote_not_empty(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1}
+        raise AgentError("refused", code="remote_not_empty")
+
+    agent.side_effect = remote_not_empty
+    result = await client.post(url + "/git/backup", json={"files": ["AGENTS.md"]})
+    assert result.status_code == 409
+    assert "远端仓库已有内容" in result.text
+
+    agent.side_effect = None
+    agent.reset_mock()
+    assert (await client.post(url + "/git/adopt", json={})).status_code == 422
+    assert (await client.post(url + "/git/adopt", json={"confirm": False})).status_code == 422
+    agent.assert_not_called()
+    agent.return_value = {"success": True, "workspace_protocol": 1, "branch": "trunk"}
+    result = await client.post(url + "/git/adopt", json={"confirm": True})
+    assert result.status_code == 200, result.text
+    assert agent.call_args.args[2] == "workspace-git-adopt"
+    assert agent.call_args.args[3]["content"]

@@ -258,7 +258,6 @@ async def prepare_switch(
                         "working_dir": directory,
                         "bot_id": str(bot.id),
                         "git_url": bot.git_url,
-                        "branch": bot.git_branch,
                         "git_access_token": token,
                         "content": instruction_content(bot),
                         "transfer_id": str(operation_id),
