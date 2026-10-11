@@ -12,7 +12,6 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.bots.git_token import git_token
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, RelayServer, RuntimeNode
@@ -21,7 +20,7 @@ from coreman.core.knowledge import memory_transfer
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 
-WorkspaceMode = Literal["copy", "git", "existing"]
+WorkspaceMode = Literal["copy", "existing"]
 CHUNK_SIZE = 256 * 1024
 
 
@@ -217,9 +216,7 @@ async def prepare_switch(
             if not same_directory:
                 if mode == "existing":
                     if not info.get("exists") or not claimable(info):
-                        raise ApiError(
-                            409, 409, "目标目录不存在或属于其他员工，请选择复制或 Git 恢复"
-                        )
+                        raise ApiError(409, 409, "目标目录不存在或属于其他员工，请选择复制当前文件")
                 elif info.get("exists") and not info.get("empty"):
                     raise ApiError(409, 409, "目标目录已有内容，请明确复用本员工目录或选择新的目录")
             bot.workspace_phase = "回收最新记忆"
@@ -241,23 +238,6 @@ async def prepare_switch(
                         "working_dir": directory,
                         "bot_id": str(bot.id),
                         "content": instruction_content(bot),
-                    },
-                )
-            elif mode == "git":
-                if not bot.git_url:
-                    raise ApiError(422, 422, "请先配置 Git 备份地址")
-                token = await git_token(session, cipher, bot) if cipher else ""
-                await call_agent(
-                    target,
-                    cipher,
-                    "workspace-git-restore",
-                    {
-                        "working_dir": directory,
-                        "bot_id": str(bot.id),
-                        "git_url": bot.git_url,
-                        "git_access_token": token,
-                        "content": instruction_content(bot),
-                        "transfer_id": str(operation_id),
                     },
                 )
             elif old:

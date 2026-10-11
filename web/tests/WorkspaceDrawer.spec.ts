@@ -1,10 +1,10 @@
 import { Blob as NodeBlob } from 'node:buffer'
 import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus from 'element-plus'
 import { i18n } from '@/i18n'
 import { ApiError } from '@/api/client'
-vi.mock('@/api/workspace', () => ({ workspace: { get: vi.fn().mockResolvedValue({ directory: '/home/ai/a', state: 'ready', branch: 'main' }), list: vi.fn().mockResolvedValue({ entries: [] }), read: vi.fn().mockResolvedValue({ content: 'original', data: 'b3JpZ2luYWw=', hash: 'h1', editable: true, size: 8, eof: true }), write: vi.fn(), gitStatus: vi.fn().mockResolvedValue({ files: [] }), adopt: vi.fn().mockResolvedValue({}) } }))
+vi.mock('@/api/workspace', () => ({ workspace: { get: vi.fn().mockResolvedValue({ directory: '/home/ai/a', state: 'ready', branch: 'main' }), list: vi.fn().mockResolvedValue({ entries: [] }), read: vi.fn().mockResolvedValue({ content: 'original', data: 'b3JpZ2luYWw=', hash: 'h1', editable: true, size: 8, eof: true }), write: vi.fn(), gitStatus: vi.fn().mockResolvedValue({ files: [] }), gitDiff: vi.fn().mockResolvedValue({ path: 'notes.md', diff: '+hello', truncated: false }) } }))
 import { workspace } from '@/api/workspace'
 import WorkspaceDrawer from '@/components/WorkspaceDrawer.vue'
 describe('WorkspaceDrawer', () => {
@@ -37,19 +37,12 @@ describe('WorkspaceDrawer', () => {
     expect(workspace.write).toHaveBeenLastCalledWith('b1', { path: 'notes.txt', content: 'edit two', expected_hash: 'h2' })
     wrapper.unmount()
   })
-  it('initializes from the repository only after the overwrite phrase is typed', async () => {
+  it('shows the diff of a changed file on demand', async () => {
     const wrapper = mount(WorkspaceDrawer, { props: { botId: 'b1', visible: true }, global: { plugins: [ElementPlus, i18n] } })
     await flushPromises()
-    const vm = wrapper.vm as unknown as { adopt: () => Promise<void> }
-    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockRejectedValueOnce('cancel')
-    await vm.adopt()
-    expect(workspace.adopt).not.toHaveBeenCalled()
-    const validator = prompt.mock.calls[0][2]!.inputValidator!
-    expect(validator('yes')).not.toBe(true)
-    expect(validator(i18n.global.t('workspaceFiles.adoptPhrase'))).toBe(true)
-    prompt.mockResolvedValueOnce({ value: i18n.global.t('workspaceFiles.adoptPhrase'), action: 'confirm' } as never)
-    await vm.adopt()
-    expect(workspace.adopt).toHaveBeenCalledWith('b1')
+    const vm = wrapper.vm as unknown as { openDiff: (p: string) => Promise<void> }
+    await vm.openDiff('notes.md')
+    expect(workspace.gitDiff).toHaveBeenCalledWith('b1', 'notes.md')
     wrapper.unmount()
   })
 })

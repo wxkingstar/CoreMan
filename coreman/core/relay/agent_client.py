@@ -21,10 +21,7 @@ OPERATIONS = {
     "workspace-import",
     "workspace-finish",
     "workspace-git-status",
-    "workspace-git-test",
-    "workspace-git-backup",
-    "workspace-git-restore",
-    "workspace-git-adopt",
+    "workspace-git-diff",
     "ping",
     "status",
     "probe-rate-limits",
@@ -85,20 +82,7 @@ async def call_agent(
     del cipher
     if operation not in OPERATIONS or not relay.is_active or relay.runtime_node_id is None:
         raise AgentError("实例未启用、未绑定运行时节点或操作不支持")
-    timeout = (
-        950
-        if operation
-        in {
-            "pull",
-            "pr",
-            "init",
-            "install-skill",
-            "workspace-git-backup",
-            "workspace-git-restore",
-            "workspace-git-adopt",
-        }
-        else 130
-    )
+    timeout = 950 if operation in {"pull", "pr", "init", "install-skill"} else 130
     try:
         async with make_http(relay) as client:
             async with client.stream(
@@ -117,12 +101,7 @@ async def call_agent(
                 result = json.loads(data)
                 if not isinstance(result, dict) or result.get("success") is not True:
                     code = result.get("code") if isinstance(result, dict) else None
-                    if code not in {
-                        "conflict",
-                        "instructions_conflict",
-                        "operation_failed",
-                        "remote_not_empty",
-                    }:
+                    if code not in {"conflict", "instructions_conflict", "operation_failed"}:
                         code = None
                     raise AgentError(
                         "Agent 未完成操作，请查看该实例状态",

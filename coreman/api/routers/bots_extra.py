@@ -39,7 +39,7 @@ router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depend
 class SwitchRelayIn(BaseModel):
     relay_server_id: uuid.UUID
     model: str | None = Field(default=None, min_length=1, max_length=100)
-    workspace_mode: Literal["copy", "git", "existing"] = "copy"
+    workspace_mode: Literal["copy", "existing"] = "copy"
     target_directory: str | None = Field(default=None, min_length=1, max_length=500)
     allow_stored_memory: bool = False
 
@@ -403,7 +403,6 @@ async def workspace_switch_preview(
             # 旧运行时不报告，按有标记处理：只能使用本员工自己的目录。
             "marked": info.get("marked", True) is not False,
             "source_online": source_online,
-            "git_configured": bool(bot.git_url),
             "memory_snapshot_at": bot.memory_snapshot_at,
         },
     }

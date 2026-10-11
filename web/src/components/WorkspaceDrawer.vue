@@ -1,21 +1,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { workspace, type WorkspaceInfo, type WorkspaceEntry, type WorkspaceFile, type GitStatus, type GitRemote, type GitPreset } from '@/api/workspace'
+import { workspace, type WorkspaceInfo, type WorkspaceEntry, type WorkspaceFile, type GitStatus, type GitDiff } from '@/api/workspace'
 import { ApiError } from '@/api/client'
 import { errorMessage } from '@/utils/errors'
 const props = defineProps<{ botId: string; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean] }>()
 const { t } = useI18n()
 const info = ref<WorkspaceInfo>(); const entries = ref<WorkspaceEntry[]>([]); const folder = ref(''); const path = ref(''); const file = ref<WorkspaceFile>(); const draft = ref(''); const original = ref(''); const busy = ref(false); const error = ref(''); const conflict = ref(false); const truncated = ref(false)
-const tab = ref('files'); const git = ref<GitStatus>(); const gitUrl = ref(''); const remote = ref<GitRemote>(); const token = ref(''); const tokenSource = ref<'manual' | 'preset'>('manual'); const presets = ref<GitPreset[]>([]); const tokenPreset = ref(''); const tokenVar = ref(''); const selected = ref<string[]>([]); const message = ref(''); const imageUrl = ref('')
+const tab = ref('files'); const git = ref<GitStatus>(); const diff = ref<GitDiff>(); const imageUrl = ref('')
 const dirty = computed(() => draft.value !== original.value)
-const presetVars = computed(() => presets.value.find(p => p.group_key === tokenPreset.value)?.vars ?? [])
 let timer: ReturnType<typeof setInterval> | undefined
 async function perform(action: () => Promise<void>) { busy.value = true; error.value = ''; try { await action() } catch (e) { error.value = errorMessage(e) } finally { busy.value = false } }
 async function status() { info.value = await workspace.get(props.botId) }
-async function load() { await perform(async () => { await status(); gitUrl.value = info.value?.git_url ?? ''; tokenPreset.value = info.value?.token_preset ?? ''; tokenVar.value = info.value?.token_var ?? ''; tokenSource.value = tokenPreset.value ? 'preset' : 'manual'; await browse('') }) }
+async function load() { await perform(async () => { await status(); await browse('') }) }
 async function discard() { if (!dirty.value) return true; try { await ElMessageBox.confirm(t('workspaceFiles.discard')); return true } catch { return false } }
 async function close(done?: () => void) { if (busy.value || !await discard()) return; emit('update:visible', false); done?.() }
 async function browse(p: string) { const result = await workspace.list(props.botId, p); entries.value = result.entries; truncated.value = !!result.truncated; folder.value = p }
@@ -50,29 +49,16 @@ async function save() {
 }
 function downloadBlob(blob: Blob, name: string) { const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
 async function download(isDraft = false) { await perform(async () => downloadBlob(isDraft ? new Blob([draft.value], { type: 'text/plain;charset=utf-8' }) : await bytes(path.value), path.value.split('/').pop() || 'file')) }
-async function gitStatus() { await perform(async () => { git.value = await workspace.gitStatus(props.botId); selected.value = [] }) }
-async function probe() { remote.value = undefined; if (info.value?.git_url) remote.value = await workspace.gitTest(props.botId) }
-async function config() { await perform(async () => { await workspace.gitConfig(props.botId, { git_url: gitUrl.value, ...(tokenSource.value === 'preset' ? { token_preset: tokenPreset.value, token_var: tokenVar.value } : { token_preset: null, ...(token.value ? { access_token: token.value } : {}) }) }); token.value = ''; await status(); await probe() }) }
-async function test() { await perform(async () => { await probe(); ElMessage.success(t('workspaceFiles.connected')) }) }
-async function backup() {
-  await perform(async () => {
-    try { const result = await workspace.backup(props.botId, selected.value, message.value); if (result.pushed) ElMessage.success(t('workspaceFiles.backedUp')) } catch (e) { if (e instanceof ApiError && e.status === 409) await probe().catch(() => {}); throw e }
-    await status(); git.value = await workspace.gitStatus(props.botId); selected.value = []
-  })
-}
-async function adopt() {
-  // 已关联时就是一键还原：丢掉长期运行留下的改动，回到仓库最新版本。
-  const phrase = t('workspaceFiles.adoptPhrase'); const action = t(remote.value?.linked ? 'workspaceFiles.reset' : 'workspaceFiles.adopt')
-  try {
-    await ElMessageBox.prompt(t('workspaceFiles.adoptWarning', { branch: remote.value?.branch, phrase }), action, { type: 'warning', confirmButtonText: action, confirmButtonClass: 'el-button--danger', inputPlaceholder: phrase, inputValidator: value => value === phrase || t('workspaceFiles.adoptMismatch', { phrase }) })
-  } catch { return }
-  await perform(async () => { await workspace.adopt(props.botId); ElMessage.success(t('workspaceFiles.adopted')); await status(); await probe(); git.value = await workspace.gitStatus(props.botId); selected.value = []; path.value = ''; file.value = undefined; await browse('') })
-}
+async function gitStatus() { await perform(async () => { git.value = await workspace.gitStatus(props.botId); if (diff.value && !git.value.files?.some(f => f.path === diff.value!.path)) diff.value = undefined }) }
+async function openDiff(p: string) { await perform(async () => { diff.value = await workspace.gitDiff(props.botId, p) }) }
+// 状态码取 git status 的 XY 两位：左边是暂存区，右边是工作区。
+function statusLabel(code: string) { const c = code.trim(); return t(c === '??' ? 'workspaceFiles.gitUntracked' : c.includes('D') ? 'workspaceFiles.gitDeleted' : c.includes('R') ? 'workspaceFiles.gitRenamed' : c.includes('A') ? 'workspaceFiles.gitAdded' : 'workspaceFiles.gitModified') }
+function lineClass(line: string) { return line.startsWith('+++') || line.startsWith('---') ? 'diff-meta' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : line.startsWith('@@') ? 'diff-hunk' : '' }
 async function initialize() { await perform(async () => { await workspace.initialize(props.botId); await status(); await browse('') }) }
-watch(tab, value => { if (value === 'git') { void gitStatus(); void workspace.gitPresets(props.botId).then(rows => { presets.value = rows }).catch(() => {}); void probe().catch(e => { error.value = errorMessage(e) }) } })
+watch(tab, value => { if (value === 'git') void gitStatus() })
 watch(() => props.visible, value => { clearInterval(timer); if (value) { void load(); timer = setInterval(() => { void status().catch(() => {}) }, 3000) } }, { immediate: true })
 onBeforeUnmount(() => { clearInterval(timer); revoke() })
-defineExpose({ openFile, draft, save, adopt })
+defineExpose({ openFile, draft, save, openDiff })
 </script>
 <template>
   <el-drawer
@@ -185,136 +171,84 @@ defineExpose({ openFile, draft, save, adopt })
           :label="t('workspaceFiles.git')"
           name="git"
         >
-          <el-form label-position="top">
-            <el-form-item :label="t('workspaceFiles.url')">
-              <el-input v-model="gitUrl" />
-            </el-form-item><el-form-item :label="t('workspaceFiles.tokenSource')">
-              <el-radio-group v-model="tokenSource">
-                <el-radio value="manual">
-                  {{ t('workspaceFiles.tokenManual') }}
-                </el-radio><el-radio value="preset">
-                  {{ t('workspaceFiles.tokenPreset') }}
-                </el-radio>
-              </el-radio-group>
-            </el-form-item><el-form-item
-              v-if="tokenSource === 'manual'"
-              :label="t('workspaceFiles.token')"
-            >
-              <el-input
-                v-model="token"
-                type="password"
-                show-password
-                autocomplete="new-password"
-              />
-            </el-form-item><template v-else>
-              <el-form-item :label="t('workspaceFiles.preset')">
-                <el-select
-                  v-model="tokenPreset"
-                  :no-data-text="t('workspaceFiles.noPreset')"
-                  @change="tokenVar = presetVars.length === 1 ? presetVars[0] : ''"
-                >
-                  <el-option
-                    v-for="item in presets"
-                    :key="item.group_key"
-                    :label="`${item.label} (${item.group_key})`"
-                    :value="item.group_key"
-                  />
-                </el-select>
-              </el-form-item><el-form-item :label="t('workspaceFiles.presetVar')">
-                <el-select
-                  v-model="tokenVar"
-                  :disabled="!tokenPreset"
-                >
-                  <el-option
-                    v-for="name in presetVars"
-                    :key="name"
-                    :label="name"
-                    :value="name"
-                  />
-                </el-select>
-              </el-form-item>
-            </template>
-          </el-form>
           <div class="file-toolbar">
             <el-button
-              :disabled="busy || !gitUrl || (tokenSource === 'preset' && (!tokenPreset || !tokenVar))"
-              @click="config"
-            >
-              {{ t('workspaceFiles.config') }}
-            </el-button><el-button
-              :disabled="busy || !info?.git_url"
-              @click="test"
-            >
-              {{ t('workspaceFiles.test') }}
-            </el-button><el-button
               :disabled="busy"
               @click="gitStatus"
             >
               {{ t('workspaceFiles.refresh') }}
             </el-button>
           </div>
-          <el-alert
-            v-if="remote && !remote.empty && !remote.linked"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="git-remote"
-            :title="t('workspaceFiles.remoteOccupied')"
-          >
-            <p>{{ t('workspaceFiles.remoteOccupiedHint') }}</p>
-            <el-button
-              type="danger"
-              :disabled="busy"
-              @click="adopt"
-            >
-              {{ t('workspaceFiles.adopt') }}
-            </el-button>
-          </el-alert>
-          <p v-else-if="remote">
-            {{ t(remote.empty ? 'workspaceFiles.remoteEmpty' : 'workspaceFiles.remoteLinked', { branch: remote.branch }) }}
-            <el-button
-              v-if="!remote.empty"
-              type="danger"
-              plain
-              size="small"
-              :disabled="busy"
-              @click="adopt"
-            >
-              {{ t('workspaceFiles.reset') }}
-            </el-button>
-          </p>
-          <p>{{ t('workspaceFiles.lastBackup') }}: {{ info?.last_backup_at || '—' }}</p>
-          <details
-            v-if="git?.excluded?.length"
-            class="git-exclusions"
-          >
-            <summary>{{ t('workspaceFiles.excluded') }} ({{ git.excluded.length }})</summary>
-            <ul>
-              <li
-                v-for="item in git.excluded"
-                :key="item"
-              >
-                <code>{{ item }}</code>
-              </li>
-            </ul>
-          </details>
-          <el-checkbox-group
-            v-model="selected"
-            class="git-files"
-          >
-            <el-checkbox
-              v-for="entry in git?.files"
-              :key="entry.path"
-              :value="entry.path"
-            >
-              {{ entry.status }} {{ entry.path }}
-            </el-checkbox>
-          </el-checkbox-group>
-          <el-input
-            v-model="message"
-            :placeholder="t('workspaceFiles.message')"
-            :aria-label="t('workspaceFiles.message')"
+          <el-empty
+            v-if="git && !git.initialized"
+            :description="t('workspaceFiles.gitNotRepo')"
           />
+          <template v-else-if="git">
+            <dl class="git-summary">
+              <dt>{{ t('workspaceFiles.gitRemote') }}</dt>
+              <dd><code>{{ git.remote || t('workspaceFiles.gitNoRemote') }}</code></dd>
+              <dt>{{ t('workspaceFiles.gitBranch') }}</dt>
+              <dd>
+                <code>{{ git.branch || '—' }}</code>
+                <span v-if="git.upstream"> → <code>{{ git.upstream }}</code></span>
+                <el-tag
+                  v-if="git.ahead"
+                  size="small"
+                  type="warning"
+                >
+                  {{ t('workspaceFiles.gitAhead', { n: git.ahead }) }}
+                </el-tag>
+              </dd>
+              <dt>{{ t('workspaceFiles.gitHead') }}</dt>
+              <dd v-if="git.head">
+                <code>{{ git.head.hash }}</code> {{ git.head.subject }} <span class="git-date">{{ git.head.date }}</span>
+              </dd>
+              <dd v-else>
+                {{ t('workspaceFiles.gitNoCommit') }}
+              </dd>
+            </dl>
+            <div
+              class="file-layout"
+              :class="{ 'file-layout-empty': !git.files?.length }"
+            >
+              <div
+                v-if="git.files?.length"
+                class="file-list"
+              >
+                <el-button
+                  v-for="entry in git.files"
+                  :key="entry.path"
+                  text
+                  :type="diff?.path === entry.path ? 'primary' : undefined"
+                  :disabled="busy || entry.path.endsWith('/')"
+                  @click="openDiff(entry.path)"
+                >
+                  <code class="git-code">{{ entry.status }}</code>{{ entry.path }}
+                  <span class="git-date">{{ statusLabel(entry.status) }}</span>
+                </el-button>
+              </div>
+              <div class="file-editor">
+                <template v-if="diff">
+                  <strong>{{ diff.path }}</strong>
+                  <pre class="git-diff"><span
+                    v-for="(line, index) in diff.diff.split('\n')"
+                    :key="index"
+                    :class="lineClass(line)"
+                  >{{ line }}</span></pre>
+                  <p v-if="diff.truncated">
+                    {{ t('workspaceFiles.gitDiffTruncated') }}
+                  </p>
+                </template>
+                <el-empty
+                  v-else
+                  :description="t(git.files?.length ? 'workspaceFiles.gitSelect' : 'workspaceFiles.gitClean')"
+                />
+              </div>
+            </div>
+            <p v-if="git.truncated">
+              {{ t('workspaceFiles.truncated') }}
+            </p>
+          </template>
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -345,15 +279,7 @@ defineExpose({ openFile, draft, save, adopt })
           >
             {{ t('workspaceFiles.save') }}
           </el-button>
-        </template><el-button
-          v-if="tab === 'git'"
-          type="primary"
-          :loading="busy"
-          :disabled="(!selected.length && !git?.head) || !info?.git_url || (!!remote && !remote.empty && !remote.linked)"
-          @click="backup"
-        >
-          {{ t(selected.length ? 'workspaceFiles.backup' : 'workspaceFiles.retryPush') }}
-        </el-button>
+        </template>
       </div>
     </template>
   </el-drawer>
@@ -369,5 +295,5 @@ defineExpose({ openFile, draft, save, adopt })
 .file-layout.file-layout-empty { grid-template-columns: minmax(0, 1fr); }
 .file-editor-empty { display: flex; align-items: center; justify-content: center; }
 
-.git-remote{margin:12px 0}.git-remote p{margin:4px 0 8px}.git-exclusions{margin:12px 0;color:var(--el-text-color-secondary)}.git-exclusions summary{cursor:pointer}.git-exclusions ul{max-height:160px;overflow:auto;padding-left:20px}.git-exclusions code{overflow-wrap:anywhere}.workspace-content{min-width:0}.workspace-status,.file-toolbar,.workspace-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.workspace-status code{overflow-wrap:anywhere}.file-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px}.file-list{max-height:55vh;overflow:auto;display:flex;flex-direction:column;align-items:stretch}.file-list .el-button{margin:0;justify-content:flex-start;white-space:normal;height:auto;min-height:34px;text-align:left}.file-editor{min-width:0}.file-editor strong{display:block;overflow-wrap:anywhere;margin-bottom:12px}.file-editor img{max-width:100%;max-height:55vh}.git-files{display:flex;flex-direction:column;margin:16px 0;max-height:35vh;overflow:auto}.workspace-actions{justify-content:flex-end;margin:0}@media(max-width:600px){.file-layout{grid-template-columns:1fr}.file-list{max-height:180px}.workspace-actions .el-button{margin:0}}
+.git-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0 0 16px}.git-summary dt{color:var(--el-text-color-secondary)}.git-summary dd{margin:0;overflow-wrap:anywhere}.git-code{margin-right:8px;font-family:monospace}.git-date{margin-left:8px;color:var(--el-text-color-secondary);font-size:12px}.git-diff{margin:0;max-height:55vh;overflow:auto;padding:10px;border:1px solid var(--el-border-color-lighter);border-radius:6px;font-size:12px;line-height:1.5;white-space:pre}.git-diff span{display:block;min-height:1.5em}.git-diff .diff-add{color:var(--el-color-success)}.git-diff .diff-del{color:var(--el-color-danger)}.git-diff .diff-hunk{color:var(--el-color-primary)}.git-diff .diff-meta{color:var(--el-text-color-secondary)}.workspace-content{min-width:0}.workspace-status,.file-toolbar,.workspace-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.workspace-status code{overflow-wrap:anywhere}.file-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px}.file-list{max-height:55vh;overflow:auto;display:flex;flex-direction:column;align-items:stretch}.file-list .el-button{margin:0;justify-content:flex-start;white-space:normal;height:auto;min-height:34px;text-align:left}.file-editor{min-width:0}.file-editor strong{display:block;overflow-wrap:anywhere;margin-bottom:12px}.file-editor img{max-width:100%;max-height:55vh}.workspace-actions{justify-content:flex-end;margin:0}@media(max-width:600px){.file-layout{grid-template-columns:1fr}.file-list{max-height:180px}.workspace-actions .el-button{margin:0}}
 </style>
