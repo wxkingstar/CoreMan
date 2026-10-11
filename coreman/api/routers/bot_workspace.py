@@ -16,13 +16,14 @@ from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
+from coreman.core.bots.git_token import GIT_TAG, GIT_TOKEN_AAD, PRESET_AAD, git_token, preset_token
 from coreman.core.bots.permissions import is_bot_admin
+from coreman.core.bots.secrets import decrypt_json
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotMember, RelayServer, Task, User
+from coreman.core.db.models import Bot, BotMember, EnvPreset, RelayServer, Task, User
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 
-GIT_TOKEN_AAD = "bots.git_token_enc"
 router = APIRouter(
     prefix="/api/admin/bots/{bot_id}/workspace",
     tags=["bot-workspace"],
@@ -48,6 +49,9 @@ class GitConfigIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     git_url: str = Field(max_length=2048)
     access_token: str | None = Field(default=None, max_length=4096)
+    # 令牌取自环境预设：给了 token_preset 就忽略 access_token；不给则改回员工自己的令牌。
+    token_preset: str | None = Field(default=None, max_length=100)
+    token_var: str | None = Field(default=None, max_length=200)
 
     @field_validator("git_url")
     @classmethod
@@ -97,6 +101,8 @@ def workspace_out(bot: Bot) -> dict[str, Any]:
         "git_url": bot.git_url,
         "branch": bot.git_branch,
         "has_token": bool(bot.git_token_enc),
+        "token_preset": bot.git_token_preset,
+        "token_var": bot.git_token_var,
         "last_backup_at": bot.git_last_backup_at,
     }
 
@@ -169,15 +175,10 @@ async def invoke(
         ) from exc
 
 
-def git_payload(bot: Bot, cipher: Cipher) -> dict[str, Any]:
+async def git_payload(session: AsyncSession, bot: Bot, cipher: Cipher) -> dict[str, Any]:
     if not bot.git_url:
         raise ApiError(422, 422, "请先保存 Git 仓库地址")
-    return {
-        "git_url": bot.git_url,
-        "git_access_token": cipher.decrypt(bot.git_token_enc, GIT_TOKEN_AAD)
-        if bot.git_token_enc
-        else "",
-    }
+    return {"git_url": bot.git_url, "git_access_token": await git_token(session, cipher, bot)}
 
 
 async def audit(session: AsyncSession, request: Request, user: User, bot: Bot, action: str) -> None:
@@ -262,6 +263,14 @@ async def configure_git(
 ) -> dict[str, Any]:
     bot = await require_admin(session, bot_id, user, write=True, initialize=True)
     bot.git_url = body.git_url or None
+    if body.token_preset:
+        # 保存时就校验预设开放给 Git 且有这个变量，免得备份时才发现。
+        await preset_token(
+            session, request.app.state.cipher, body.token_preset, body.token_var or ""
+        )
+        bot.git_token_preset, bot.git_token_var = body.token_preset, body.token_var
+    else:
+        bot.git_token_preset = bot.git_token_var = None
     if body.access_token is not None:
         bot.git_token_enc = (
             request.app.state.cipher.encrypt(body.access_token, GIT_TOKEN_AAD)
@@ -271,6 +280,32 @@ async def configure_git(
     await audit(session, request, user, bot, "git_configure")
     await session.commit()
     return {"code": 0, "data": workspace_out(bot)}
+
+
+@router.get("/git/presets")
+async def git_presets(
+    bot_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """可用作 Git 令牌的环境预设：只列打了 git 标签的，只给变量名不给值。"""
+    await require_admin(session, bot_id, user)
+    rows = await session.scalars(
+        select(EnvPreset).where(EnvPreset.tags.contains([GIT_TAG])).order_by(EnvPreset.group_key)
+    )
+    cipher = request.app.state.cipher
+    return {
+        "code": 0,
+        "data": [
+            {
+                "group_key": row.group_key,
+                "label": row.label,
+                "vars": sorted(decrypt_json(cipher, row.vars_enc, PRESET_AAD)),
+            }
+            for row in rows
+        ],
+    }
 
 
 @router.get("/git/status")
@@ -294,7 +329,9 @@ async def git_test(
 ) -> dict[str, Any]:
     bot = await require_admin(session, bot_id, user)
     cipher = request.app.state.cipher
-    data = await invoke(session, bot, cipher, "workspace-git-test", git_payload(bot, cipher))
+    data = await invoke(
+        session, bot, cipher, "workspace-git-test", await git_payload(session, bot, cipher)
+    )
     if data.get("branch"):
         bot.git_branch = data["branch"]
         await session.commit()
@@ -316,7 +353,7 @@ async def git_backup(
         bot,
         cipher,
         "workspace-git-backup",
-        {**git_payload(bot, cipher), **body.model_dump()},
+        {**await git_payload(session, bot, cipher), **body.model_dump()},
     )
     if data.get("pushed") is not True:
         raise ApiError(502, 502, "文件尚未上传到远端，请重试备份")
@@ -346,7 +383,7 @@ async def git_adopt(
         bot,
         cipher,
         "workspace-git-adopt",
-        {**git_payload(bot, cipher), "content": instruction_content(bot)},
+        {**await git_payload(session, bot, cipher), "content": instruction_content(bot)},
     )
     if data.get("branch"):
         bot.git_branch = data["branch"]

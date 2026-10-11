@@ -2,19 +2,20 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { workspace, type WorkspaceInfo, type WorkspaceEntry, type WorkspaceFile, type GitStatus, type GitRemote } from '@/api/workspace'
+import { workspace, type WorkspaceInfo, type WorkspaceEntry, type WorkspaceFile, type GitStatus, type GitRemote, type GitPreset } from '@/api/workspace'
 import { ApiError } from '@/api/client'
 import { errorMessage } from '@/utils/errors'
 const props = defineProps<{ botId: string; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean] }>()
 const { t } = useI18n()
 const info = ref<WorkspaceInfo>(); const entries = ref<WorkspaceEntry[]>([]); const folder = ref(''); const path = ref(''); const file = ref<WorkspaceFile>(); const draft = ref(''); const original = ref(''); const busy = ref(false); const error = ref(''); const conflict = ref(false); const truncated = ref(false)
-const tab = ref('files'); const git = ref<GitStatus>(); const gitUrl = ref(''); const remote = ref<GitRemote>(); const token = ref(''); const selected = ref<string[]>([]); const message = ref(''); const imageUrl = ref('')
+const tab = ref('files'); const git = ref<GitStatus>(); const gitUrl = ref(''); const remote = ref<GitRemote>(); const token = ref(''); const tokenSource = ref<'manual' | 'preset'>('manual'); const presets = ref<GitPreset[]>([]); const tokenPreset = ref(''); const tokenVar = ref(''); const selected = ref<string[]>([]); const message = ref(''); const imageUrl = ref('')
 const dirty = computed(() => draft.value !== original.value)
+const presetVars = computed(() => presets.value.find(p => p.group_key === tokenPreset.value)?.vars ?? [])
 let timer: ReturnType<typeof setInterval> | undefined
 async function perform(action: () => Promise<void>) { busy.value = true; error.value = ''; try { await action() } catch (e) { error.value = errorMessage(e) } finally { busy.value = false } }
 async function status() { info.value = await workspace.get(props.botId) }
-async function load() { await perform(async () => { await status(); gitUrl.value = info.value?.git_url ?? ''; await browse('') }) }
+async function load() { await perform(async () => { await status(); gitUrl.value = info.value?.git_url ?? ''; tokenPreset.value = info.value?.token_preset ?? ''; tokenVar.value = info.value?.token_var ?? ''; tokenSource.value = tokenPreset.value ? 'preset' : 'manual'; await browse('') }) }
 async function discard() { if (!dirty.value) return true; try { await ElMessageBox.confirm(t('workspaceFiles.discard')); return true } catch { return false } }
 async function close(done?: () => void) { if (busy.value || !await discard()) return; emit('update:visible', false); done?.() }
 async function browse(p: string) { const result = await workspace.list(props.botId, p); entries.value = result.entries; truncated.value = !!result.truncated; folder.value = p }
@@ -51,7 +52,7 @@ function downloadBlob(blob: Blob, name: string) { const url = URL.createObjectUR
 async function download(isDraft = false) { await perform(async () => downloadBlob(isDraft ? new Blob([draft.value], { type: 'text/plain;charset=utf-8' }) : await bytes(path.value), path.value.split('/').pop() || 'file')) }
 async function gitStatus() { await perform(async () => { git.value = await workspace.gitStatus(props.botId); selected.value = [] }) }
 async function probe() { remote.value = undefined; if (info.value?.git_url) remote.value = await workspace.gitTest(props.botId) }
-async function config() { await perform(async () => { await workspace.gitConfig(props.botId, { git_url: gitUrl.value, ...(token.value ? { access_token: token.value } : {}) }); token.value = ''; await status(); await probe() }) }
+async function config() { await perform(async () => { await workspace.gitConfig(props.botId, { git_url: gitUrl.value, ...(tokenSource.value === 'preset' ? { token_preset: tokenPreset.value, token_var: tokenVar.value } : { token_preset: null, ...(token.value ? { access_token: token.value } : {}) }) }); token.value = ''; await status(); await probe() }) }
 async function test() { await perform(async () => { await probe(); ElMessage.success(t('workspaceFiles.connected')) }) }
 async function backup() {
   await perform(async () => {
@@ -68,7 +69,7 @@ async function adopt() {
   await perform(async () => { await workspace.adopt(props.botId); ElMessage.success(t('workspaceFiles.adopted')); await status(); await probe(); git.value = await workspace.gitStatus(props.botId); selected.value = []; path.value = ''; file.value = undefined; await browse('') })
 }
 async function initialize() { await perform(async () => { await workspace.initialize(props.botId); await status(); await browse('') }) }
-watch(tab, value => { if (value === 'git') { void gitStatus(); void probe().catch(e => { error.value = errorMessage(e) }) } })
+watch(tab, value => { if (value === 'git') { void gitStatus(); void workspace.gitPresets(props.botId).then(rows => { presets.value = rows }).catch(() => {}); void probe().catch(e => { error.value = errorMessage(e) }) } })
 watch(() => props.visible, value => { clearInterval(timer); if (value) { void load(); timer = setInterval(() => { void status().catch(() => {}) }, 3000) } }, { immediate: true })
 onBeforeUnmount(() => { clearInterval(timer); revoke() })
 defineExpose({ openFile, draft, save, adopt })
@@ -187,18 +188,56 @@ defineExpose({ openFile, draft, save, adopt })
           <el-form label-position="top">
             <el-form-item :label="t('workspaceFiles.url')">
               <el-input v-model="gitUrl" />
-            </el-form-item><el-form-item :label="t('workspaceFiles.token')">
+            </el-form-item><el-form-item :label="t('workspaceFiles.tokenSource')">
+              <el-radio-group v-model="tokenSource">
+                <el-radio value="manual">
+                  {{ t('workspaceFiles.tokenManual') }}
+                </el-radio><el-radio value="preset">
+                  {{ t('workspaceFiles.tokenPreset') }}
+                </el-radio>
+              </el-radio-group>
+            </el-form-item><el-form-item
+              v-if="tokenSource === 'manual'"
+              :label="t('workspaceFiles.token')"
+            >
               <el-input
                 v-model="token"
                 type="password"
                 show-password
                 autocomplete="new-password"
               />
-            </el-form-item>
+            </el-form-item><template v-else>
+              <el-form-item :label="t('workspaceFiles.preset')">
+                <el-select
+                  v-model="tokenPreset"
+                  :no-data-text="t('workspaceFiles.noPreset')"
+                  @change="tokenVar = presetVars.length === 1 ? presetVars[0] : ''"
+                >
+                  <el-option
+                    v-for="item in presets"
+                    :key="item.group_key"
+                    :label="`${item.label} (${item.group_key})`"
+                    :value="item.group_key"
+                  />
+                </el-select>
+              </el-form-item><el-form-item :label="t('workspaceFiles.presetVar')">
+                <el-select
+                  v-model="tokenVar"
+                  :disabled="!tokenPreset"
+                >
+                  <el-option
+                    v-for="name in presetVars"
+                    :key="name"
+                    :label="name"
+                    :value="name"
+                  />
+                </el-select>
+              </el-form-item>
+            </template>
           </el-form>
           <div class="file-toolbar">
             <el-button
-              :disabled="busy || !gitUrl"
+              :disabled="busy || !gitUrl || (tokenSource === 'preset' && (!tokenPreset || !tokenVar))"
               @click="config"
             >
               {{ t('workspaceFiles.config') }}

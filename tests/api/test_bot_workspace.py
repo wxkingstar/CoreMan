@@ -242,3 +242,49 @@ async def test_git_default_branch_and_adopt_requires_confirmation(client, db_ses
     assert result.status_code == 200, result.text
     assert agent.call_args.args[2] == "workspace-git-adopt"
     assert agent.call_args.args[3]["content"]
+
+
+async def test_git_token_from_git_tagged_preset(client, db_session, agent):
+    from coreman.core.db.models import EnvPreset
+
+    bot, url = await setup(client, db_session)
+    cipher = Cipher(b"\x07" * 32)
+    db_session.add_all(
+        [
+            EnvPreset(
+                group_key="github",
+                label="GitHub App",
+                vars_enc=cipher.encrypt('{"GH_TOKEN":"app-token"}', "env_presets.vars_enc"),
+                tags=["git"],
+            ),
+            EnvPreset(
+                group_key="erp",
+                label="ERP",
+                vars_enc=cipher.encrypt('{"DB_PASSWORD":"db-secret"}', "env_presets.vars_enc"),
+            ),
+        ]
+    )
+    await db_session.commit()
+    listed = (await client.get(url + "/git/presets")).json()["data"]
+    assert listed == [{"group_key": "github", "label": "GitHub App", "vars": ["GH_TOKEN"]}]
+    config = {"git_url": "https://github.com/org/repo.git"}
+    # 没打 git 标签的预设、不存在的变量都不能用。
+    for preset, var in [("erp", "DB_PASSWORD"), ("github", "MISSING")]:
+        result = await client.put(
+            url + "/git", json={**config, "token_preset": preset, "token_var": var}
+        )
+        assert result.status_code == 422, result.text
+    result = await client.put(
+        url + "/git", json={**config, "token_preset": "github", "token_var": "GH_TOKEN"}
+    )
+    assert result.status_code == 200, result.text
+    assert "app-token" not in result.text
+    assert result.json()["data"]["token_preset"] == "github"
+    agent.return_value = {"success": True, "workspace_protocol": 1, "branch": "main"}
+    assert (await client.post(url + "/git/test")).status_code == 200
+    assert agent.call_args.args[3]["git_access_token"] == "app-token"
+    # 改回手动填写：清掉预设，用员工自己的令牌。
+    result = await client.put(url + "/git", json={**config, "access_token": "own"})
+    assert result.json()["data"]["token_preset"] is None
+    assert (await client.post(url + "/git/test")).status_code == 200
+    assert agent.call_args.args[3]["git_access_token"] == "own"

@@ -71,6 +71,9 @@ class Bot(TimestampMixin, Base):
     git_url: Mapped[str | None] = mapped_column(Text)
     git_branch: Mapped[str] = mapped_column(Text, server_default=text("'main'"))
     git_token_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
+    # 设了预设就用预设里 git_token_var 这个变量作令牌，不用 git_token_enc。
+    git_token_preset: Mapped[str | None] = mapped_column(Text)
+    git_token_var: Mapped[str | None] = mapped_column(Text)
     git_last_backup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     system_prompt: Mapped[str] = mapped_column(Text, server_default=text("''"))
     merged_system_prompt: Mapped[str] = mapped_column(Text, server_default=text("''"))
