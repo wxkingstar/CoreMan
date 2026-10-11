@@ -52,7 +52,8 @@ async function download(isDraft = false) { await perform(async () => downloadBlo
 async function gitStatus() { await perform(async () => { git.value = await workspace.gitStatus(props.botId); if (diff.value && !git.value.files?.some(f => f.path === diff.value!.path)) diff.value = undefined }) }
 async function openDiff(p: string) { await perform(async () => { diff.value = await workspace.gitDiff(props.botId, p) }) }
 // 状态码取 git status 的 XY 两位：左边是暂存区，右边是工作区。
-function statusLabel(code: string) { const c = code.trim(); return t(c === '??' ? 'workspaceFiles.gitUntracked' : c.includes('D') ? 'workspaceFiles.gitDeleted' : c.includes('R') ? 'workspaceFiles.gitRenamed' : c.includes('A') ? 'workspaceFiles.gitAdded' : 'workspaceFiles.gitModified') }
+function statusKind(code: string) { const c = code.trim(); return c === '??' ? 'untracked' : c.includes('D') ? 'deleted' : c.includes('R') ? 'renamed' : c.includes('A') ? 'added' : 'modified' }
+const statusText: Record<string, string> = { untracked: 'workspaceFiles.gitUntracked', deleted: 'workspaceFiles.gitDeleted', renamed: 'workspaceFiles.gitRenamed', added: 'workspaceFiles.gitAdded', modified: 'workspaceFiles.gitModified' }
 function lineClass(line: string) { return line.startsWith('+++') || line.startsWith('---') ? 'diff-meta' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : line.startsWith('@@') ? 'diff-hunk' : '' }
 async function initialize() { await perform(async () => { await workspace.initialize(props.botId); await status(); await browse('') }) }
 watch(tab, value => { if (value === 'git') void gitStatus() })
@@ -64,7 +65,7 @@ defineExpose({ openFile, draft, save, openDiff })
   <el-drawer
     :model-value="visible"
     :title="t('workspaceFiles.title')"
-    size="min(100vw, 980px)"
+    size="min(100vw, max(980px, 85vw))"
     class="workspace-drawer"
     :before-close="close"
     :close-on-click-modal="false"
@@ -208,24 +209,27 @@ defineExpose({ openFile, draft, save, openDiff })
               </dd>
             </dl>
             <div
-              class="file-layout"
+              class="file-layout git-layout"
               :class="{ 'file-layout-empty': !git.files?.length }"
             >
               <div
                 v-if="git.files?.length"
-                class="file-list"
+                class="git-file-list"
               >
-                <el-button
+                <button
                   v-for="entry in git.files"
                   :key="entry.path"
-                  text
-                  :type="diff?.path === entry.path ? 'primary' : undefined"
+                  type="button"
+                  class="git-file"
+                  :class="[`git-${statusKind(entry.status)}`, { active: diff?.path === entry.path }]"
                   :disabled="busy || entry.path.endsWith('/')"
+                  :title="entry.path"
                   @click="openDiff(entry.path)"
                 >
-                  <code class="git-code">{{ entry.status }}</code>{{ entry.path }}
-                  <span class="git-date">{{ statusLabel(entry.status) }}</span>
-                </el-button>
+                  <code class="git-code">{{ entry.status }}</code>
+                  <span class="git-path">{{ entry.path }}</span>
+                  <span class="git-kind">{{ t(statusText[statusKind(entry.status)]) }}</span>
+                </button>
               </div>
               <div class="file-editor">
                 <template v-if="diff">
@@ -295,5 +299,5 @@ defineExpose({ openFile, draft, save, openDiff })
 .file-layout.file-layout-empty { grid-template-columns: minmax(0, 1fr); }
 .file-editor-empty { display: flex; align-items: center; justify-content: center; }
 
-.git-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0 0 16px}.git-summary dt{color:var(--el-text-color-secondary)}.git-summary dd{margin:0;overflow-wrap:anywhere}.git-code{margin-right:8px;font-family:monospace}.git-date{margin-left:8px;color:var(--el-text-color-secondary);font-size:12px}.git-diff{margin:0;max-height:55vh;overflow:auto;padding:10px;border:1px solid var(--el-border-color-lighter);border-radius:6px;font-size:12px;line-height:1.5;white-space:pre}.git-diff span{display:block;min-height:1.5em}.git-diff .diff-add{color:var(--el-color-success)}.git-diff .diff-del{color:var(--el-color-danger)}.git-diff .diff-hunk{color:var(--el-color-primary)}.git-diff .diff-meta{color:var(--el-text-color-secondary)}.workspace-content{min-width:0}.workspace-status,.file-toolbar,.workspace-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.workspace-status code{overflow-wrap:anywhere}.file-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px}.file-list{max-height:55vh;overflow:auto;display:flex;flex-direction:column;align-items:stretch}.file-list .el-button{margin:0;justify-content:flex-start;white-space:normal;height:auto;min-height:34px;text-align:left}.file-editor{min-width:0}.file-editor strong{display:block;overflow-wrap:anywhere;margin-bottom:12px}.file-editor img{max-width:100%;max-height:55vh}.workspace-actions{justify-content:flex-end;margin:0}@media(max-width:600px){.file-layout{grid-template-columns:1fr}.file-list{max-height:180px}.workspace-actions .el-button{margin:0}}
+.git-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0 0 16px}.git-summary dt{color:var(--el-text-color-secondary)}.git-summary dd{margin:0;overflow-wrap:anywhere}.file-layout.git-layout{grid-template-columns:minmax(320px,2fr) minmax(0,3fr)}.git-file-list{max-height:60vh;overflow:auto;display:flex;flex-direction:column;border:1px solid var(--el-border-color-lighter);border-radius:6px}.git-file{display:flex;align-items:baseline;gap:10px;width:100%;padding:6px 10px;border:0;border-bottom:1px solid var(--el-border-color-extra-light);background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}.git-file:last-child{border-bottom:0}.git-file:hover:not(:disabled){background:var(--el-fill-color-light)}.git-file.active{background:var(--el-color-primary-light-9)}.git-file:disabled{cursor:default}.git-code{flex:none;width:2ch;font-family:monospace;font-weight:600;white-space:pre}.git-path{flex:1;min-width:0;font-family:monospace;font-size:13px;overflow-wrap:anywhere}.git-kind{flex:none;font-size:12px}.git-untracked,.git-added{color:var(--el-color-success)}.git-modified{color:var(--el-color-warning)}.git-deleted{color:var(--el-color-danger)}.git-deleted .git-path{text-decoration:line-through}.git-renamed{color:var(--el-color-primary)}.git-date{margin-left:8px;color:var(--el-text-color-secondary);font-size:12px}.git-diff{margin:0;max-height:55vh;overflow:auto;padding:10px;border:1px solid var(--el-border-color-lighter);border-radius:6px;font-size:12px;line-height:1.5;white-space:pre}.git-diff span{display:block;min-height:1.5em}.git-diff .diff-add{color:var(--el-color-success);background:var(--el-color-success-light-9)}.git-diff .diff-del{color:var(--el-color-danger);background:var(--el-color-danger-light-9)}.git-diff .diff-hunk{color:var(--el-color-primary)}.git-diff .diff-meta{color:var(--el-text-color-secondary)}.workspace-content{min-width:0}.workspace-status,.file-toolbar,.workspace-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.workspace-status code{overflow-wrap:anywhere}.file-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px}.file-list{max-height:55vh;overflow:auto;display:flex;flex-direction:column;align-items:stretch}.file-list .el-button{margin:0;justify-content:flex-start;white-space:normal;height:auto;min-height:34px;text-align:left}.file-editor{min-width:0}.file-editor strong{display:block;overflow-wrap:anywhere;margin-bottom:12px}.file-editor img{max-width:100%;max-height:55vh}.workspace-actions{justify-content:flex-end;margin:0}@media(max-width:600px){.file-layout,.file-layout.git-layout{grid-template-columns:1fr}.file-list{max-height:180px}.workspace-actions .el-button{margin:0}}
 </style>
