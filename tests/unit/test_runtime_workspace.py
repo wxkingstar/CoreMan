@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+import shutil
 import uuid
 
 import pytest
@@ -190,8 +191,21 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     import subprocess
 
     monkeypatch.setenv("PATH", "/opt/homebrew/bin:" + os.environ["PATH"])
+    # 节点用户的全局忽略文件不影响备份。
+    (tmp_path / "xdg/git").mkdir(parents=True)
+    (tmp_path / "xdg/git/ignore").write_text("**/.claude/settings.local.json\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     call(agent, "init")
     call(agent, "write", path="a.txt", content="hello", expected_hash=None)
+    one = agent.root / "one"
+    (one / ".claude/settings.local.json").write_text("{}")
+    # 工作目录自己的 .gitignore 忽略的文件，首次备份时被列出并勾选也能备份。
+    (one / ".gitignore").write_text("out.log\n")
+    (one / "out.log").write_text("log")
+    (one / ".agents/skills/report").mkdir(parents=True)
+    (one / ".agents/skills/report/SKILL.md").write_text("# report\n")
+    (one / ".mcp.json").write_text('{"mcpServers": {}}')
+    (one / "skills-lock.json").write_text("{}")
     bare = tmp_path / "bare.git"
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
     # Test transport uses local bare remote by substituting only the validated remote and
@@ -215,7 +229,17 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     config = {"git_url": "https://github.com/example/repo.git"}
     probe = call(agent, "git-test", **config)
     assert probe["empty"] and probe["branch"] == "main" and not probe["linked"]
-    result = call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md", "a.txt"], **config)
+    # .claude 进 Git；已安装的技能与 MCP 配置不进，换机后重装。
+    status = call(agent, "git-status")
+    listed = {e["path"] for e in status["files"]}
+    assert {".claude/settings.local.json", "out.log", ".gitignore"} <= listed
+    assert not any(p.startswith((".agents/skills", ".claude/skills")) for p in listed)
+    assert not listed & {".mcp.json", "skills-lock.json"}
+    assert {".agents/skills", ".claude/skills", ".mcp.json"} <= set(status["excluded"])
+    for name in [".mcp.json", ".agents/skills/report/SKILL.md", ".claude/skills"]:
+        with pytest.raises(OperationError):
+            call(agent, "git-backup", files=[name], **config)
+    result = call(agent, "git-backup", files=sorted(listed), **config)
     assert result["pushed"] and result["branch"] == "main"
     probe = call(agent, "git-test", **config)
     assert not probe["empty"] and probe["branch"] == "main" and probe["linked"]
@@ -228,6 +252,7 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     assert not (tmp_path / "hook-ran").exists()
     assert not call(agent, "git-status")["files"]
     assert call(agent, "git-backup", files=[], **config)["pushed"]
+    assert ".agents/skills" in call(agent, "git-status")["excluded"]
     # 另一个工作目录与已有内容的仓库无关：不直接推送，改为用仓库内容初始化后再备份。
     call(agent, "init", working_dir="two")
     two = agent.root / "two"
@@ -252,6 +277,19 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     assert latest["head"] == call(agent, "git-status", working_dir="two")["head"]
     assert (two / "new.txt").read_text() == "new" and not (two / "scratch.log").exists()
     assert not call(agent, "git-status", working_dir="two")["files"]
+    # 旧备份里带着技能目录时，以本地已安装的为准。
+    (two / ".agents/skills/old").mkdir()
+    (two / ".agents/skills/old/SKILL.md").write_text("# old\n")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "add", "-f", "--", ".agents/skills"], cwd=two, check=True)
+    subprocess.run([*git, "commit", "-qm", "old"], cwd=two, check=True)
+    subprocess.run([*git, "push", "-q", str(bare), "HEAD:refs/heads/main"], cwd=two, check=True)
+    shutil.rmtree(two / ".agents/skills/old")
+    (two / ".mcp.json").write_text("{}")
+    call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
+    assert (two / ".agents/skills/query").is_dir() and (two / ".mcp.json").is_file()
+    assert not (two / ".agents/skills/old").exists()
+    assert os.readlink(two / ".claude/skills") == "../.agents/skills"
 
 
 def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
@@ -266,7 +304,7 @@ def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
     config = {"git_url": "https://github.com/example/repo.git"}
     assert call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md"], **config)["pushed"]
     assert ["add", "-f", "--", "AGENTS.md", "CLAUDE.md"] in commands
-    (p / "other.md").symlink_to("CLAUDE.md")
+    (p / "other.md").symlink_to("../outside.md")
     with pytest.raises(OperationError):
         call(agent, "git-backup", files=["other.md"], **config)
 

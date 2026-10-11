@@ -25,6 +25,7 @@ from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSkill, RelayServer, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
+from coreman.core.knowledge.installation import reinstall_after_switch
 from coreman.core.relay.models import default_model, effective_models, fit_effort, load_catalog
 
 
@@ -112,6 +113,7 @@ async def switch_relay(
     ):
         raise SwitchError(409, "工作目录操作正在进行，请完成后再切换模型")
     memory_status = "unchanged"
+    moved_skills: list[BotSkill] = []
     requested_directory = target_directory
     target_directory = bot.working_dir
     if not same_relay or changing_directory:
@@ -134,6 +136,7 @@ async def switch_relay(
         for item in installed:
             item.status = "failed"
             item.error_message = "实例已切换，原授权仍保留，请重新安装以确认目标实例代码。"
+            moved_skills.append(item)
     old_relay_id, old_model, old_effort = bot.relay_server_id, bot.model, bot.effort_level
     old_directory = bot.working_dir
     if memory_status != "unchanged":
@@ -147,6 +150,8 @@ async def switch_relay(
         bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)
     # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废。
     await sessions.clear_bot(session, bot.id)
+    if moved_skills and cipher is not None:
+        await reinstall_after_switch(session, cipher, bot=bot, rows=moved_skills, actor=actor)
     await record_audit(
         session,
         action="bot.switch_relay",

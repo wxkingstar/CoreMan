@@ -219,7 +219,23 @@ async def test_copy_moves_real_files_and_memory_before_binding(
     source_node.workspace_root = str(src_root)
     bot.working_dir = str(src_root / bot.bot_key)
     target = await add_node_relay(db_session, name="target", workspace_root=str(dst_root))
+    from coreman.core.bots import switch_relay as switch_module
+    from coreman.core.db.models import BotSkill, Skill, SkillSource
+
+    source_row = SkillSource(key="tools", label="Tools", git_url="https://github.com/example/s.git")
+    db_session.add(source_row)
+    await db_session.flush()
+    skill = Skill(name="query", source_id=source_row.id, enabled=True)
+    db_session.add(skill)
+    await db_session.flush()
+    db_session.add(BotSkill(bot_id=bot.id, skill_id=skill.id, status="installed"))
     await db_session.commit()
+    reinstalled = []
+
+    async def reinstall(session, cipher, *, bot, rows, actor):
+        reinstalled.append((bot.relay_server_id, [r.skill_id for r in rows], actor.id))
+
+    monkeypatch.setattr(switch_module, "reinstall_after_switch", reinstall)
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
     agents = {
         relay.id: Agent(
@@ -281,6 +297,8 @@ async def test_copy_moves_real_files_and_memory_before_binding(
     ).read_text() == "记住交付日期"
     assert seen.index("read-memory") < seen.index("workspace-export") < seen.index("deploy-memory")
     assert folder.exists()
+    # 技能不随文件迁移，绑定新实例后按原配置重装。
+    assert reinstalled == [(target.id, [skill.id], bot.created_by)]
 
 
 async def test_migrating_destination_reservation_blocks_overlapping_new_workspace(db_session):

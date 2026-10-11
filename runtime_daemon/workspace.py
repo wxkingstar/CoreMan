@@ -28,10 +28,18 @@ EXCLUDED = {
     "__pycache__",
     ".venv",
     "venv",
-    ".claude",
     ".codex",
     MARKER,
 }
+
+
+# 由技能安装生成、按员工的技能配置重装即可恢复的内容：不进 Git，换机后自动重装。
+# .mcp.json 还含 MCP 的令牌与请求头（库里加密保存），更不能明文进仓库。
+INSTALLED = (".agents/skills", ".claude/skills", ".mcp.json", "skills-lock.json")
+
+
+def installed(name):
+    return any(name == p or name.startswith(p + "/") for p in INSTALLED)
 
 
 def forbidden(name):
@@ -134,6 +142,16 @@ def exclude_marker(directory):
         current.parent.mkdir(parents=True, exist_ok=True)
         text = previous + ("\n" if previous and not previous.endswith("\n") else "")
         replace_file(current, (text + "/" + MARKER + "\n").encode())
+
+
+def relative_link(root, name):
+    """工作区内的相对链接（如 .claude/skills → ../.agents/skills），可以原样进 Git。"""
+    path = root / name
+    return (
+        path.is_symlink()
+        and not os.path.isabs(os.readlink(path))
+        and path.resolve().is_relative_to(root.resolve())
+    )
 
 
 def link_skills(directory):
@@ -616,6 +634,9 @@ class Workspace:
                         "-c",
                         "core.fsmonitor=false",
                         "-c",
+                        # 节点用户的全局忽略文件（~/.config/git/ignore）不该左右机器人的备份。
+                        "core.excludesFile=/dev/null",
+                        "-c",
                         "protocol.allow=never",
                         "-c",
                         "protocol.https.allow=always",
@@ -684,7 +705,9 @@ class Workspace:
         return self.git(["remote", "get-url", "origin"]) == url
 
     def excluded_paths(self):
-        excluded = []
+        excluded = [
+            p for p in INSTALLED if (self.root / p).exists() or (self.root / p).is_symlink()
+        ]
         for parent, dirs, names in os.walk(self.root, followlinks=False):
             for name in list(dirs) + names:
                 rel = (Path(parent) / name).relative_to(self.root).as_posix()
@@ -695,6 +718,8 @@ class Workspace:
                         excluded.append(rel)
                     if len(excluded) >= 1000:
                         return excluded
+                elif installed(rel) and name in dirs:
+                    dirs.remove(name)
         return excluded
 
     def git_status(self):
@@ -707,9 +732,10 @@ class Workspace:
                 "files": [
                     {"path": e["path"], "status": "??"}
                     for e in export["manifest"]
-                    if "link" not in e or instruction_alias(self.root, e["path"])
+                    if ("link" not in e or relative_link(self.root, e["path"]))
+                    and not installed(e["path"])
                 ][:1000],
-                "excluded": export["excluded"],
+                "excluded": self.excluded_paths(),
             }
         raw = self.git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         # -z preserves quoted/unicode paths. Rename entries have a second source record.
@@ -722,7 +748,7 @@ class Workspace:
                 continue
             status, name = line[:2], line[3:]
             skip = "R" in status or "C" in status
-            if not forbidden(name):
+            if not forbidden(name) and not installed(name):
                 entries.append({"path": name, "status": status})
         branch = self.git(["symbolic-ref", "--quiet", "--short", "HEAD"])
         try:
@@ -748,11 +774,13 @@ class Workspace:
         if not isinstance(files, list) or len(files) > 1000:
             raise self.error("请选择需要备份的文件")
         for name in files:
-            path = self.path(name, allow_link=name in ("AGENTS.md", "CLAUDE.md"))
+            # 链接本身由 path() 校验不越出工作区、不指向敏感文件。
+            path = self.path(name, allow_link=True)
             if (
                 not name
-                or path.is_dir()
-                or (path.is_symlink() and not instruction_alias(self.root, name))
+                or installed(name)
+                or (path.is_dir() and not path.is_symlink())
+                or (path.is_symlink() and not relative_link(self.root, name))
             ):
                 raise self.error("只能备份安全的指定文件")
         branch, empty = self.remote_head(url, token)
@@ -785,12 +813,9 @@ class Workspace:
 
         if self.git(["diff", "--cached", "--name-only"]):
             raise self.error("仓库已有暂存更改，请先处理后备份")
-        ordinary = [name for name in files if name not in {"AGENTS.md", "CLAUDE.md"}]
-        canonical = [name for name in files if name in {"AGENTS.md", "CLAUDE.md"}]
-        if ordinary:
-            self.git(["add", "--", *ordinary])
-        if canonical:
-            self.git(["add", "-f", "--", *canonical])
+        if files:
+            # 选中即备份：工作目录自己的 .gitignore 不会让列出来的文件在这里失败。
+            self.git(["add", "-f", "--", *files])
         if self.git(["diff", "--cached", "--name-only"]):
             message = str(self.data.get("message") or "CoreMan workspace backup")[:1000]
             self.git(
@@ -846,8 +871,7 @@ class Workspace:
     def git_adopt(self):
         """放弃工作目录现有文件，换成远端默认分支的内容（含 .git，之后可直接备份）。
 
-        不进 Git 的配置与缓存（.claude、.codex、.env、所有权标记等）原样保留；
-        仓库里没有 .agents 或 .mcp.json 时也保留本地的，免得已装的技能和 MCP 配置跟着丢。
+        不进 Git 的配置与缓存（.codex、.env、所有权标记等）和已安装的技能、MCP 配置原样保留。
         """
         if not self.root.is_dir() or not self.owned():
             raise self.error("工作目录尚未初始化")
@@ -863,9 +887,10 @@ class Workspace:
             moved, placed = [], []
             try:
                 for entry in list(self.root.iterdir()):
-                    if entry.name not in incoming and (
-                        (forbidden(entry.name) and entry.name != ".git")
-                        or entry.name in {".agents", ".mcp.json"}
+                    if (
+                        entry.name not in incoming
+                        and forbidden(entry.name)
+                        and entry.name != ".git"
                     ):
                         continue
                     entry.rename(previous / entry.name)
@@ -879,6 +904,17 @@ class Workspace:
                 for name in moved:
                     (previous / name).rename(self.root / name)
                 raise
+            # 已安装的技能以本地为准：仓库里旧备份带的技能目录让位给本地这份。
+            for rel in INSTALLED:
+                kept, current = previous / rel, self.root / rel
+                if not (kept.exists() or kept.is_symlink()):
+                    continue
+                if current.is_dir() and not current.is_symlink():
+                    shutil.rmtree(current)
+                elif current.exists() or current.is_symlink():
+                    current.unlink()
+                current.parent.mkdir(parents=True, exist_ok=True)
+                kept.rename(current)
         self.init()
         return {"installed": True, "head": head, "branch": branch}
 

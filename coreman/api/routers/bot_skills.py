@@ -237,30 +237,6 @@ async def install(
     return {"code": 0, "data": {"status": "installing", "task_id": task.id}}
 
 
-async def last_data_source(
-    session: AsyncSession, request: Request, bot_id: uuid.UUID, skill_id: uuid.UUID
-) -> str | None:
-    """安装行不存数据源，取最近一次成功安装任务的输入；任务已被清理时回落到目录默认值。"""
-    task = await session.scalar(
-        select(Task)
-        .where(
-            Task.bot_id == bot_id,
-            Task.kind == "skill_install",
-            Task.status == "succeeded",
-            Task.payload["skill_id"].astext == str(skill_id),
-        )
-        .order_by(Task.id.desc())
-        .limit(1)
-    )
-    if task is None:
-        return None
-    inputs = json.loads(
-        request.app.state.cipher.decrypt(task.payload["inputs_enc"], installs.INPUTS_AAD)
-    )
-    source: str | None = inputs.get("data_source")
-    return source
-
-
 async def upgrade_one(
     session: AsyncSession, request: Request, actor: User, bot: Bot, skill: Skill, row: BotSkill
 ) -> Task:
@@ -281,7 +257,7 @@ async def upgrade_one(
         bot,
         skill,
         selected=groups,
-        source=await last_data_source(session, request, bot.id, skill.id),
+        source=await installs.last_data_source(session, cipher, bot.id, skill.id),
         values=None,
         requester=actor,
     )

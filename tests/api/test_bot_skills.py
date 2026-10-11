@@ -476,3 +476,54 @@ async def test_upgrade_skips_disabled_skill_and_uninstalled_bots(client, db_sess
     skill.enabled = False
     await db_session.commit()
     assert (await client.post(f"/api/admin/skills/{skill.id}/upgrade")).status_code == 409
+
+
+async def test_switch_reinstalls_with_current_approval(client, db_session, db_engine, monkeypatch):
+    from tests.fakes.runtime_node import add_node_relay
+
+    bot, skill, cipher = await prepare(client, db_session, internal=True)
+    bot_id, skill_id, owner_id = bot.id, skill.id, bot.created_by
+    result = await client.post(
+        f"/api/admin/bots/{bot_id}/skills/{skill_id}/install",
+        json={"selected_env_groups": ["erp"], "user_env_vars": {"API_KEY": "secret"}},
+    )
+    approval_id = result.json()["data"]["approval"]["id"]
+    reviewer_id = (await login_as(client, db_session, role="ai_committee")).id
+    result = await client.post(
+        f"/api/admin/skill-approvals/{approval_id}/review",
+        json={"decision": "approve", "approved_databases": ["erp"]},
+        headers={"If-Match": "1"},
+    )
+    calls = []
+
+    async def agent(relay, cipher, operation, payload):
+        calls.append(payload)
+        return {"success": True}
+
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert task.status == "succeeded", task.error_message
+    # 模拟换机：绑定已换到新实例和新目录，技能被标为失败，由换机的员工管理员发起重装。
+    db_session.expire_all()
+    target = await add_node_relay(db_session, name="target")
+    bot = await db_session.get(Bot, bot_id, populate_existing=True)
+    bot.relay_server_id, bot.working_dir = target.id, "/home/ai/moved"
+    row = await db_session.get(BotSkill, (bot_id, skill_id), populate_existing=True)
+    row.status = "failed"
+    owner = await db_session.get(User, owner_id)
+    await installs.reinstall_after_switch(db_session, cipher, bot=bot, rows=[row], actor=owner)
+    await db_session.commit()
+    assert row.status == "installing"
+    task = await execute(db_session, db_engine, row.install_task_id)
+    assert task.status == "succeeded", task.error_message
+    assert task.user_id == owner_id and calls[-1]["project_dir"] == "/home/ai/moved"
+    db_session.expire_all()
+    row = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert row.status == "installed" and row.approved_by == reviewer_id
+    assert row.selected_env_groups == ["erp"]
+    assert (
+        await db_session.scalar(
+            select(SkillApproval.id).where(SkillApproval.id != uuid.UUID(approval_id))
+        )
+        is None
+    )

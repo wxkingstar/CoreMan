@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.events import notify_bot_changed
+from coreman.core.bots.permissions import is_manager
 from coreman.core.bots.secrets import decrypt_json, encrypt_json
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
@@ -133,9 +134,16 @@ async def checked(
         and requester.status == "active"
         and requester.role in ("ai_committee", "platform_admin")
     )
+    # 换机后的自动重装由执行换机的人发起：机器人管理员或 manager。
+    migrator = (
+        inputs.get("migrate")
+        and requester is not None
+        and requester.status == "active"
+        and is_manager(requester)
+    )
     if (
         requester is None
-        or not (upgrader or await installs.bot_admin(session, bot, requester))
+        or not (upgrader or migrator or await installs.bot_admin(session, bot, requester))
         or actor is None
         or actor.status != "active"
     ):
@@ -144,13 +152,22 @@ async def checked(
     if skill.security_level == "internal":
         approval_id = task.payload.get("approval_id")
         approval = await session.get(SkillApproval, uuid.UUID(approval_id)) if approval_id else None
+        # 换机重装沿用当前生效的那次批准；其余安装要由委员会成员本人批准。
+        reviewer_ok = (
+            approval is not None
+            and approval.reviewed_by == row.approved_by
+            and approval.reviewed_at == row.approved_at
+            if inputs.get("migrate")
+            else approval is not None
+            and approval.reviewed_by == actor.id
+            and actor.role in ("ai_committee", "platform_admin")
+        )
         if (
             approval is None
+            or not reviewer_ok
             or approval.status != "approved"
             or approval.bot_id != bot.id
             or approval.skill_id != skill.id
-            or approval.reviewed_by != actor.id
-            or actor.role not in ("ai_committee", "platform_admin")
             or approval.skill_revision != skill.revision
             or set(inputs["selected_env_groups"]) != set(approval.approved_databases or [])
             or inputs["security_prompt"] != approval.approved_security_prompt
