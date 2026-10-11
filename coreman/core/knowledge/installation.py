@@ -115,6 +115,7 @@ async def queue(
     actor: User,
     inputs: dict[str, Any],
     approval: SkillApproval | None = None,
+    identity: str | None = None,
 ) -> Task:
     if not bot.relay_server_id:
         raise ApiError(409, 409, "机器人尚未分配实例")
@@ -126,7 +127,7 @@ async def queue(
         existing = await session.get(Task, row.install_task_id)
         if existing and existing.status in tasks.OPEN:
             raise ApiError(409, 409, "已有安装任务在进行")
-    identity = str(approval.id) if approval else str(uuid.uuid4())
+    identity = identity or (str(approval.id) if approval else str(uuid.uuid4()))
     task = await tasks.enqueue(
         session,
         tasks.NewTask(
@@ -147,6 +148,85 @@ async def queue(
     row.status, row.install_task_id, row.error_message = "installing", task.id, None
     await session.flush()
     return task
+
+
+async def last_data_source(
+    session: AsyncSession, cipher: Cipher, bot_id: uuid.UUID, skill_id: uuid.UUID
+) -> str | None:
+    """安装行不存数据源，取最近一次成功安装任务的输入；任务已被清理时回落到目录默认值。"""
+    task = await session.scalar(
+        select(Task)
+        .where(
+            Task.bot_id == bot_id,
+            Task.kind == "skill_install",
+            Task.status == "succeeded",
+            Task.payload["skill_id"].astext == str(skill_id),
+        )
+        .order_by(Task.id.desc())
+        .limit(1)
+    )
+    if task is None:
+        return None
+    source: str | None = json.loads(cipher.decrypt(task.payload["inputs_enc"], INPUTS_AAD)).get(
+        "data_source"
+    )
+    return source
+
+
+async def reinstall_after_switch(
+    session: AsyncSession, cipher: Cipher, *, bot: Bot, rows: list[BotSkill], actor: User
+) -> None:
+    """换机后按原配置重装技能代码：技能不进 Git，靠重装在新目录里复原。
+
+    内部技能沿用当前生效的那次批准，不重新走审批；排不上队的保持失败，提示手动重装。
+    """
+    for row in rows:
+        skill = await session.get(Skill, row.skill_id)
+        if skill is None or skill.deleted_at is not None:
+            continue
+        try:
+            async with session.begin_nested():
+                approval = None
+                if skill.security_level == "internal":
+                    approval = await session.scalar(
+                        select(SkillApproval).where(
+                            SkillApproval.bot_id == bot.id,
+                            SkillApproval.skill_id == skill.id,
+                            SkillApproval.status == "approved",
+                            SkillApproval.reviewed_by == row.approved_by,
+                            SkillApproval.reviewed_at == row.approved_at,
+                        )
+                    )
+                    if approval is None:
+                        continue
+                inputs = await input_snapshot(
+                    session,
+                    cipher,
+                    bot,
+                    skill,
+                    selected=list(row.selected_env_groups),
+                    source=await last_data_source(session, cipher, bot.id, skill.id),
+                    values=None,
+                    requester=actor,
+                )
+                inputs.update(
+                    reinstall_code=True,
+                    migrate=True,
+                    approved_databases=list(row.approved_databases or []) if approval else [],
+                    security_prompt=row.security_prompt if approval else None,
+                )
+                await queue(
+                    session,
+                    cipher,
+                    bot=bot,
+                    skill=skill,
+                    actor=actor,
+                    inputs=inputs,
+                    approval=approval,
+                    identity=f"migrate:{uuid.uuid4()}",
+                )
+        except ApiError:
+            continue
 
 
 async def notify_approvers(
