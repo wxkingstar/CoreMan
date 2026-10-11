@@ -63,17 +63,6 @@ defineExpose({ open, savePreset })
           />
         </el-form-item>
       </div>
-      <el-form-item :label="t('skillEditor.presetTags')">
-        <el-select
-          v-model="presetForm.tags"
-          multiple
-          filterable
-          allow-create
-          default-first-option
-          :reserve-keyword="false"
-          :placeholder="t('skillEditor.presetTagsHint')"
-        />
-      </el-form-item>
       <SkillEnvEditor
         ref="envEditor"
         v-model="variables"

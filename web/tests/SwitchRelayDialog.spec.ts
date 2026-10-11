@@ -34,7 +34,7 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
-vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: true, git_configured: false, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
+vi.mock('@/api/workspace', () => ({ workspace: { preview: vi.fn().mockResolvedValue({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: true, memory_snapshot_at: null }), get: vi.fn().mockResolvedValue({ state: 'migrating' }) } }))
 import { workspace } from '@/api/workspace'
 import { bots, relays } from '@/api/admin'
 import { ApiError } from '@/api/client'
@@ -141,7 +141,7 @@ describe('SwitchRelayDialog', () => {
     wrapper.unmount()
   })
   it('allows first runtime assignment without a source or stored memory snapshot', async () => {
-    vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: false, git_configured: false, memory_snapshot_at: null })
+    vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: false, memory_snapshot_at: null })
     vi.mocked(bots.switchRelay).mockClear()
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: null, model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
@@ -160,7 +160,7 @@ describe('SwitchRelayDialog', () => {
 
   // 使用已有目录：没有任何员工认领的目录（如另一套机器人系统在用的目录）可以直接接管，被其他员工标记的要拦住。
   it('takes over an unclaimed existing directory but blocks one marked by another employee', async () => {
-    const shared = { directory: '/srv/bots/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, git_configured: false, memory_snapshot_at: null }
+    const shared = { directory: '/srv/bots/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, memory_snapshot_at: null }
     vi.mocked(workspace.preview).mockResolvedValueOnce(shared).mockResolvedValueOnce({ ...shared, marked: true })
     vi.mocked(bots.switchRelay).mockClear()
     const wrapper = mount(SwitchRelayDialog, {

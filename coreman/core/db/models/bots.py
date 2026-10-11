@@ -68,10 +68,10 @@ class Bot(TimestampMixin, Base):
     workspace_operation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     workspace_target_relay_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     workspace_target_dir: Mapped[str | None] = mapped_column(Text)
+    # git_* 六列已不再读取（Git 备份改由 AI 员工自己提交，管理台只读呈现），下个版本删除。
     git_url: Mapped[str | None] = mapped_column(Text)
     git_branch: Mapped[str] = mapped_column(Text, server_default=text("'main'"))
     git_token_enc: Mapped[str] = mapped_column(Text, server_default=text("''"), comment="enc")
-    # 设了预设就用预设里 git_token_var 这个变量作令牌，不用 git_token_enc。
     git_token_preset: Mapped[str | None] = mapped_column(Text)
     git_token_var: Mapped[str | None] = mapped_column(Text)
     git_last_backup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

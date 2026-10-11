@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import os
-import shutil
 import uuid
 
 import pytest
@@ -186,129 +185,6 @@ def test_canonical_alias_edit_and_other_link_block(agent):
         call(agent, "write", path="alias", content="bad", expected_hash=original["hash"])
 
 
-def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
-    import os
-    import subprocess
-
-    monkeypatch.setenv("PATH", "/opt/homebrew/bin:" + os.environ["PATH"])
-    # 节点用户的全局忽略文件不影响备份。
-    (tmp_path / "xdg/git").mkdir(parents=True)
-    (tmp_path / "xdg/git/ignore").write_text("**/.claude/settings.local.json\n")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    call(agent, "init")
-    call(agent, "write", path="a.txt", content="hello", expected_hash=None)
-    one = agent.root / "one"
-    (one / ".claude/settings.local.json").write_text("{}")
-    # 工作目录自己的 .gitignore 忽略的文件，首次备份时被列出并勾选也能备份。
-    (one / ".gitignore").write_text("out.log\n")
-    (one / "out.log").write_text("log")
-    (one / ".agents/skills/report").mkdir(parents=True)
-    (one / ".agents/skills/report/SKILL.md").write_text("# report\n")
-    (one / ".mcp.json").write_text('{"mcpServers": {}}')
-    (one / "skills-lock.json").write_text("{}")
-    bare = tmp_path / "bare.git"
-    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
-    # Test transport uses local bare remote by substituting only the validated remote and
-    # protocol setting. Production rejects file transport unconditionally.
-    from runtime_daemon.workspace import Workspace
-
-    original = Workspace.git
-
-    def local_git(self, args, cwd=None, token=""):
-        args = [str(bare) if a == "https://github.com/example/repo.git" else a for a in args]
-        if args[0] in {"push", "fetch", "ls-remote", "clone"}:
-            args = ["-c", "protocol.file.allow=always", *args]
-        result = original(self, args, cwd, token)
-        return (
-            "https://github.com/example/repo.git"
-            if args == ["remote", "get-url", "origin"]
-            else result
-        )
-
-    monkeypatch.setattr(Workspace, "git", local_git)
-    config = {"git_url": "https://github.com/example/repo.git"}
-    probe = call(agent, "git-test", **config)
-    assert probe["empty"] and probe["branch"] == "main" and not probe["linked"]
-    # .claude 进 Git；已安装的技能与 MCP 配置不进，换机后重装。
-    status = call(agent, "git-status")
-    listed = {e["path"] for e in status["files"]}
-    assert {".claude/settings.local.json", "out.log", ".gitignore"} <= listed
-    assert not any(p.startswith((".agents/skills", ".claude/skills")) for p in listed)
-    assert not listed & {".mcp.json", "skills-lock.json"}
-    assert {".agents/skills", ".claude/skills", ".mcp.json"} <= set(status["excluded"])
-    for name in [".mcp.json", ".agents/skills/report/SKILL.md", ".claude/skills"]:
-        with pytest.raises(OperationError):
-            call(agent, "git-backup", files=[name], **config)
-    result = call(agent, "git-backup", files=sorted(listed), **config)
-    assert result["pushed"] and result["branch"] == "main"
-    probe = call(agent, "git-test", **config)
-    assert not probe["empty"] and probe["branch"] == "main" and probe["linked"]
-    assert call(agent, "git-status")["head"] == result["head"]
-    hook = agent.root / "one" / ".git" / "hooks" / "pre-commit"
-    hook.write_text("#!/bin/sh\ntouch " + str(tmp_path / "hook-ran") + "\n")
-    hook.chmod(0o755)
-    (agent.root / "one" / "a.txt").unlink()
-    call(agent, "git-backup", files=["a.txt"], **config)
-    assert not (tmp_path / "hook-ran").exists()
-    assert not call(agent, "git-status")["files"]
-    assert call(agent, "git-backup", files=[], **config)["pushed"]
-    assert ".agents/skills" in call(agent, "git-status")["excluded"]
-    # 另一个工作目录与已有内容的仓库无关：不直接推送，改为用仓库内容初始化后再备份。
-    call(agent, "init", working_dir="two")
-    two = agent.root / "two"
-    call(agent, "write", working_dir="two", path="new.txt", content="new", expected_hash=None)
-    (two / ".env").write_text("secret")
-    (two / ".agents/skills/query").mkdir(parents=True)
-    assert call(agent, "git-status", working_dir="two")["files"]
-    refused = call(agent, "git-backup", working_dir="two", files=["new.txt"], **config)
-    assert refused["success"] is False and refused["code"] == "remote_not_empty"
-    adopted = call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
-    assert adopted["head"] == call(agent, "git-status")["head"] and adopted["branch"] == "main"
-    assert not (two / "new.txt").exists() and (two / "AGENTS.md").is_file()
-    assert (two / ".env").read_text() == "secret"
-    assert (two / ".agents/skills/query").is_dir()
-    assert call(agent, "git-test", working_dir="two", **config)["linked"]
-    call(agent, "write", working_dir="two", path="new.txt", content="new", expected_hash=None)
-    assert call(agent, "git-backup", working_dir="two", files=["new.txt"], **config)["pushed"]
-    # 已关联的目录一键还原：长期运行留下的修改和新文件都丢弃，回到远端最新版本。
-    (two / "new.txt").write_text("drifted")
-    (two / "scratch.log").write_text("junk")
-    latest = call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
-    assert latest["head"] == call(agent, "git-status", working_dir="two")["head"]
-    assert (two / "new.txt").read_text() == "new" and not (two / "scratch.log").exists()
-    assert not call(agent, "git-status", working_dir="two")["files"]
-    # 旧备份里带着技能目录时，以本地已安装的为准。
-    (two / ".agents/skills/old").mkdir()
-    (two / ".agents/skills/old/SKILL.md").write_text("# old\n")
-    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
-    subprocess.run([*git, "add", "-f", "--", ".agents/skills"], cwd=two, check=True)
-    subprocess.run([*git, "commit", "-qm", "old"], cwd=two, check=True)
-    subprocess.run([*git, "push", "-q", str(bare), "HEAD:refs/heads/main"], cwd=two, check=True)
-    shutil.rmtree(two / ".agents/skills/old")
-    (two / ".mcp.json").write_text("{}")
-    call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
-    assert (two / ".agents/skills/query").is_dir() and (two / ".mcp.json").is_file()
-    assert not (two / ".agents/skills/old").exists()
-    assert os.readlink(two / ".claude/skills") == "../.agents/skills"
-
-
-def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
-    from runtime_daemon.workspace import Workspace
-
-    p = shared_workspace(agent)
-    call(agent, "init")
-    commands = []
-    monkeypatch.setattr(
-        Workspace, "git", lambda self, args, cwd=None, token="": commands.append(args) or ""
-    )
-    config = {"git_url": "https://github.com/example/repo.git"}
-    assert call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md"], **config)["pushed"]
-    assert ["add", "-f", "--", "AGENTS.md", "CLAUDE.md"] in commands
-    (p / "other.md").symlink_to("../outside.md")
-    with pytest.raises(OperationError):
-        call(agent, "git-backup", files=["other.md"], **config)
-
-
 def test_bundle_includes_workspace_module():
     from runtime_daemon.build import ROOT, source_files
 
@@ -380,12 +256,6 @@ def test_memory_operations_enforce_supplied_owner(agent):
     assert agent.dispatch({"type": "read-memory", "working_dir": "one", "bot_id": 1})["success"]
 
 
-def test_git_status_reports_excluded_secrets(agent):
-    call(agent, "init")
-    (agent.root / "one" / ".env").write_text("SECRET")
-    assert ".env" in call(agent, "git-status")["excluded"]
-
-
 def test_init_and_prepare_remove_only_legacy_instruction_excludes(agent):
     root = agent.root / "one"
     (root / ".git/info").mkdir(parents=True)
@@ -437,39 +307,6 @@ def test_git_cancellation_stops_subprocess(agent, tmp_path, monkeypatch):
     assert spawned and all(p.poll() is not None for p in spawned)
 
 
-def test_git_backup_pathspec_is_literal(agent, tmp_path, monkeypatch):
-    import os
-    import subprocess
-
-    from runtime_daemon.workspace import Workspace
-
-    monkeypatch.setenv("PATH", "/opt/homebrew/bin:" + os.environ["PATH"])
-    call(agent, "init")
-    root = agent.root / "one"
-    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
-    (root / ".env").write_text("secret")
-    original = Workspace.git
-
-    def local_git(self, args, cwd=None, token=""):
-        if args[0] == "ls-remote":
-            return ""
-        return original(self, args, cwd, token)
-
-    monkeypatch.setattr(Workspace, "git", local_git)
-    for pattern in ["*", ":(glob)**"]:
-        with pytest.raises(OperationError):
-            call(
-                agent,
-                "git-backup",
-                files=[pattern],
-                git_url="https://github.com/example/repo.git",
-            )
-        staged = subprocess.run(
-            ["git", "ls-files"], cwd=root, check=True, capture_output=True, text=True
-        ).stdout
-        assert not staged
-
-
 def test_init_links_claude_skills_to_agents_skills(agent):
     call(agent, "init")
     p = agent.root / "one"
@@ -511,32 +348,46 @@ def test_skill_links_accept_directory_link(agent):
     assert (p / ".claude/skills/query/SKILL.md").is_file()
 
 
-def test_github_token_uses_app_username(agent, monkeypatch):
-    from runtime_daemon import agent as agent_module
-    from runtime_daemon.workspace import Workspace
+def test_git_view_reports_changes_and_diffs_read_only(agent, tmp_path, monkeypatch):
+    import subprocess
 
-    users = []
-    original = agent_module.git_askpass
-
-    def capture(directory, token, username="oauth2"):
-        users.append(username)
-        return original(directory, token, username)
-
-    monkeypatch.setattr(agent_module, "git_askpass", capture)
-    monkeypatch.setattr(agent_module, "run_command", lambda *a, **k: "")
-    agent.git_hosts = {"github.com", "gitlab.example.com"}
+    monkeypatch.setenv("PATH", "/opt/homebrew/bin:" + os.environ["PATH"])
     call(agent, "init")
-    for url in ["https://github.com/org/repo.git", "https://gitlab.example.com/org/repo.git"]:
-        ws = Workspace(
-            agent,
-            {
-                "type": "workspace-git-test",
-                "working_dir": "one",
-                "bot_id": 1,
-                "git_url": url,
-                "git_access_token": "t",
-            },
-        )
-        ws.git_config()
-        ws.git(["ls-remote", "--", url], token="t")
-    assert users == ["x-access-token", "oauth2"]
+    assert call(agent, "git-status") == {"success": True, "initialized": False}
+    root = agent.root / "one"
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    subprocess.run([*git, "init", "-q", "-b", "main"], cwd=root, check=True)
+    (root / "notes.md").write_text("one\ntwo\n")
+    subprocess.run([*git, "add", "notes.md"], cwd=root, check=True)
+    subprocess.run([*git, "commit", "-qm", "first"], cwd=root, check=True)
+    subprocess.run([*git, "remote", "add", "origin", str(bare)], cwd=root, check=True)
+    subprocess.run([*git, "push", "-q", "-u", "origin", "main"], cwd=root, check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "local"], cwd=root, check=True)
+    # 令牌写在 origin 里的不能原样展示；仓库自带的外部 diff 程序不能被执行。
+    subprocess.run(
+        [*git, "remote", "set-url", "origin", "https://bot:secret@git.example.com/org/r.git"],
+        cwd=root,
+        check=True,
+    )
+    marker = tmp_path / "ext-diff-ran"
+    subprocess.run([*git, "config", "diff.external", f"touch {marker}"], cwd=root, check=True)
+    (root / "notes.md").write_text("one\nthree\n")
+    (root / "new.txt").write_text("hello\n")
+    (root / ".env").write_text("SECRET=1")
+    (root / "drafts").mkdir()
+    (root / "drafts" / "a.md").write_text("a")
+    status = call(agent, "git-status")
+    assert status["initialized"] and status["branch"] == "main"
+    assert status["remote"] == "https://git.example.com/org/r.git"
+    assert status["upstream"] == "origin/main" and status["ahead"] == 1
+    assert status["head"]["subject"] == "local"
+    files = {e["path"]: e["status"] for e in status["files"]}
+    assert files["notes.md"] == " M" and files["new.txt"] == "??" and files["drafts/"] == "??"
+    assert ".env" not in files
+    changed = call(agent, "git-diff", path="notes.md")["diff"]
+    assert "-two" in changed and "+three" in changed and not marker.exists()
+    assert "+hello" in call(agent, "git-diff", path="new.txt")["diff"]
+    with pytest.raises(OperationError):
+        call(agent, "git-diff", path=".env")

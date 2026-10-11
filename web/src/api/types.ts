@@ -119,7 +119,7 @@ export interface BotIn {
   wecom_provision_id?: string | null
 }
 export type BotPatch = Partial<Omit<BotIn, 'bot_key' | 'platform' | 'enabled' | 'feishu_registration_id' | 'wecom_provision_id'>>
-export interface SwitchRelayIn { relay_server_id: string; model?: string | null; workspace_mode?: 'copy' | 'git' | 'existing'; target_directory?: string; allow_stored_memory?: boolean }
+export interface SwitchRelayIn { relay_server_id: string; model?: string | null; workspace_mode?: 'copy' | 'existing'; target_directory?: string; allow_stored_memory?: boolean }
 export interface SwitchRelayOut {
   old_relay_id: string | null; new_relay_id: string
   old_model: string; new_model: string; bot: BotOut

@@ -11,7 +11,6 @@ import re
 import shutil
 import stat
 import subprocess
-import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -34,13 +33,31 @@ EXCLUDED = {
 }
 
 
-# 由技能安装生成、按员工的技能配置重装即可恢复的内容：不进 Git，换机后自动重装。
-# .mcp.json 还含 MCP 的令牌与请求头（库里加密保存），更不能明文进仓库。
-INSTALLED = (".agents/skills", ".claude/skills", ".mcp.json", "skills-lock.json")
+MAX_DIFF = 256 * 1024
 
 
-def installed(name):
-    return any(name == p or name.startswith(p + "/") for p in INSTALLED)
+def redact(url):
+    """远端地址里可能带着令牌（https://user:token@host/...），只展示主机与路径。"""
+    parts = urlsplit(url)
+    if parts.scheme and (parts.username or parts.password):
+        return parts._replace(
+            netloc=parts.hostname + (f":{parts.port}" if parts.port else "")
+        ).geturl()
+    return url
+
+
+def untracked_diff(name, path):
+    header = f"--- /dev/null\n+++ b/{name}\n"
+    if path.is_symlink():
+        return header + f"+{os.readlink(path)}\n\\ 符号链接\n"
+    if path.is_dir():
+        return header + "\\ 未跟踪的目录\n"
+    with path.open("rb") as f:
+        raw = f.read(MAX_DIFF + 1)
+    if b"\0" in raw:
+        return header + "\\ 二进制文件\n"
+    lines = raw[:MAX_DIFF].decode(errors="replace").splitlines()
+    return header + "".join(f"+{line}\n" for line in lines)
 
 
 def forbidden(name):
@@ -145,16 +162,6 @@ def exclude_marker(directory):
         replace_file(current, (text + "/" + MARKER + "\n").encode())
 
 
-def relative_link(root, name):
-    """工作区内的相对链接（如 .claude/skills → ../.agents/skills），可以原样进 Git。"""
-    path = root / name
-    return (
-        path.is_symlink()
-        and not os.path.isabs(os.readlink(path))
-        and path.resolve().is_relative_to(root.resolve())
-    )
-
-
 def link_skills(directory):
     """让 .claude/skills 整个链接到 .agents/skills，Claude 与 Codex 读同一份技能。
 
@@ -186,9 +193,6 @@ class InstructionsConflict(Exception):
 
 
 class Workspace:
-    # HTTPS 令牌认证的用户名：GitHub 的 App 令牌要求 x-access-token（个人令牌不看用户名）。
-    git_user = "oauth2"
-
     def __init__(self, agent, data):
         self.agent, self.data = agent, data
         from .agent import OperationError
@@ -573,8 +577,9 @@ class Workspace:
         shutil.rmtree(stage)
         return {"installed": True}
 
-    def git(self, args, cwd=None, token=""):
-        repo = cwd or self.root
+    def git(self, args):
+        """只读查看工作目录的 Git 状态：不带凭证、不联网，仓库自带的执行类配置一律拒绝。"""
+        repo = self.root
         gitdir = repo / ".git"
         if gitdir.exists() or gitdir.is_symlink():
             if not gitdir.is_dir() or gitdir.is_symlink():
@@ -622,129 +627,53 @@ class Workspace:
                 "GIT_SSH_COMMAND": "ssh -oBatchMode=yes",
             }
         )
-        from .agent import git_askpass, run_command
+        from .agent import run_command
 
-        with tempfile.TemporaryDirectory(prefix="coreman-git-auth-") as temp:
-            if token:
-                env.update(git_askpass(Path(temp), token, self.git_user))
-            try:
-                output = run_command(
-                    [
-                        "git",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "-c",
-                        "credential.helper=",
-                        "-c",
-                        "core.fsmonitor=false",
-                        "-c",
-                        # 节点用户的全局忽略文件（~/.config/git/ignore）不该左右机器人的备份。
-                        "core.excludesFile=/dev/null",
-                        "-c",
-                        "protocol.allow=never",
-                        "-c",
-                        "protocol.https.allow=always",
-                        "-c",
-                        "protocol.ssh.allow=always",
-                        "-c",
-                        "protocol.file.allow=never",
-                        "-c",
-                        "http.followRedirects=false",
-                        *args,
-                    ],
-                    cwd=cwd or self.root,
-                    env_override=env,
-                    stderr_to_stdout=False,
-                    timeout=120,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise self.error("Git 操作失败或超时") from exc
-            return output.rstrip("\n")
+        try:
+            output = run_command(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    # 节点用户的全局忽略文件（~/.config/git/ignore）不该左右这里看到的变更。
+                    "core.excludesFile=/dev/null",
+                    "-c",
+                    "protocol.allow=never",
+                    *args,
+                ],
+                cwd=repo,
+                env_override=env,
+                stderr_to_stdout=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise self.error("Git 操作失败或超时") from exc
+        return output.rstrip("\n")
 
-    def git_config(self):
-        url, skill = self.agent.git_source(str(self.data.get("git_url", "")))
-        if skill:
-            raise self.error("Git 仓库地址无效")
-        if urlsplit(url).hostname == "github.com":
-            self.git_user = "x-access-token"
-        return url, str(self.data.get("git_access_token") or "")
+    def optional(self, args):
+        try:
+            return self.git(args)
+        except self.error:
+            return ""
 
-    def remote_head(self, url, token):
-        """远端默认分支，以及远端是否还没有任何分支（空仓库按 main 新建）。"""
-        self.root.parent.mkdir(parents=True, exist_ok=True)
-        branch, has_head = "", False
-        out = self.git(
-            ["ls-remote", "--symref", "--", url, "HEAD"], cwd=self.root.parent, token=token
-        )
-        for line in out.splitlines():
-            if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
-                branch = line[len("ref: refs/heads/") : -len("\tHEAD")]
-            elif line.endswith("\tHEAD"):
-                has_head = True
-        if not has_head:
-            heads = [
-                line.split("\trefs/heads/", 1)[1]
-                for line in self.git(
-                    ["ls-remote", "--heads", "--", url], cwd=self.root.parent, token=token
-                ).splitlines()
-                if "\trefs/heads/" in line
-            ]
-            if not heads:
-                return "main", True
-            branch = next((b for b in ("main", "master") if b in heads), heads[0])
-        if (
-            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch)
-            or ".." in branch
-            or branch.endswith(("/", "."))
-            or "@{" in branch
-        ):
-            raise self.error("远端默认分支无效")
-        return branch, False
-
-    def linked(self, url):
-        """工作目录已是该仓库的本地副本：有自己的 .git，且 origin 指向配置的地址。"""
+    def is_repo(self):
         gitdir = self.root / ".git"
-        if not gitdir.is_dir() or gitdir.is_symlink():
-            return False
-        if "origin" not in self.git(["remote"]).splitlines():
-            return False
-        return self.git(["remote", "get-url", "origin"]) == url
-
-    def excluded_paths(self):
-        excluded = [
-            p for p in INSTALLED if (self.root / p).exists() or (self.root / p).is_symlink()
-        ]
-        for parent, dirs, names in os.walk(self.root, followlinks=False):
-            for name in list(dirs) + names:
-                rel = (Path(parent) / name).relative_to(self.root).as_posix()
-                if forbidden(rel):
-                    if name in dirs:
-                        dirs.remove(name)
-                    if name not in {".git", MARKER}:
-                        excluded.append(rel)
-                    if len(excluded) >= 1000:
-                        return excluded
-                elif installed(rel) and name in dirs:
-                    dirs.remove(name)
-        return excluded
+        return gitdir.is_dir() and not gitdir.is_symlink()
 
     def git_status(self):
-        if not (self.root / ".git").is_dir() or (self.root / ".git").is_symlink():
-            export = self.export()
-            return {
-                "initialized": False,
-                "branch": "",
-                "head": "",
-                "files": [
-                    {"path": e["path"], "status": "??"}
-                    for e in export["manifest"]
-                    if ("link" not in e or relative_link(self.root, e["path"]))
-                    and not installed(e["path"])
-                ][:1000],
-                "excluded": self.excluded_paths(),
-            }
-        raw = self.git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        # -z preserves quoted/unicode paths. Rename entries have a second source record.
+        """只读呈现：远端地址、分支、最近提交、未推送的提交数，以及有变化的文件。
+
+        提交与推送由 AI 员工自己决定，这里只给管理员判断用。
+        """
+        if not self.is_repo():
+            return {"initialized": False}
+        # -z 保留中文与特殊字符路径；重命名项后面跟着一个原路径记录。未跟踪目录只列一项。
+        raw = self.git(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])
         entries, skip = [], False
         for line in raw.split("\0"):
             if skip:
@@ -754,175 +683,53 @@ class Workspace:
                 continue
             status, name = line[:2], line[3:]
             skip = "R" in status or "C" in status
-            if not forbidden(name) and not installed(name):
+            if not forbidden(name.rstrip("/")):
                 entries.append({"path": name, "status": status})
-        branch = self.git(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        try:
-            head = self.git(["rev-parse", "--verify", "HEAD"])
-        except self.error:
-            head = ""
+        head = self.optional(["log", "-1", "--format=%h%x00%s%x00%cI"]).split("\0")
+        ahead = self.optional(["rev-list", "--count", "@{upstream}..HEAD"])
         return {
             "initialized": True,
-            "branch": branch,
-            "head": head,
+            "remote": redact(self.optional(["remote", "get-url", "origin"])),
+            "branch": self.optional(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+            "upstream": self.optional(
+                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
+            ),
+            "ahead": int(ahead) if ahead.isdigit() else None,
+            "head": {"hash": head[0], "subject": head[1], "date": head[2]}
+            if len(head) == 3
+            else None,
             "files": entries[:1000],
-            "excluded": self.excluded_paths(),
+            "truncated": len(entries) > 1000,
         }
 
-    def git_test(self):
-        url, token = self.git_config()
-        branch, empty = self.remote_head(url, token)
-        return {"reachable": True, "branch": branch, "empty": empty, "linked": self.linked(url)}
-
-    def git_backup(self):
-        url, token = self.git_config()
-        files = self.data.get("files")
-        if not isinstance(files, list) or len(files) > 1000:
-            raise self.error("请选择需要备份的文件")
-        for name in files:
-            # 链接本身由 path() 校验不越出工作区、不指向敏感文件。
-            path = self.path(name, allow_link=True)
-            if (
-                not name
-                or installed(name)
-                or (path.is_dir() and not path.is_symlink())
-                or (path.is_symlink() and not relative_link(self.root, name))
-            ):
-                raise self.error("只能备份安全的指定文件")
-        branch, empty = self.remote_head(url, token)
-        if not empty and not self.linked(url):
-            # 远端已有别的历史：直接提交推送会和工作目录里的文件互相冲突。
-            return {
-                "success": False,
-                "code": "remote_not_empty",
-                "message": "远端仓库已有内容，与当前工作目录不是同一仓库",
-            }
-        created = not (self.root / ".git").exists()
-        if created:
-            self.git(["init", "--initial-branch=" + branch])
-        remotes = self.git(["remote"]).splitlines()
-        if "origin" in remotes:
-            if self.git(["remote", "get-url", "origin"]) != url:
-                raise self.error("当前仓库 origin 与配置地址不同，未自动切换仓库")
+    def git_diff(self):
+        """单个文件相对最近一次提交的改动；未跟踪的文件按全部新增呈现。只读、限长。"""
+        name = self.data.get("path")
+        path = self.path(name, allow_link=True)
+        if not self.is_repo():
+            raise self.error("工作目录不是 Git 仓库")
+        state = self.git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", name])
+        if state.startswith("??"):
+            text = untracked_diff(name, path)
         else:
-            self.git(["remote", "add", "origin", url])
-        try:
-            self.git(["rev-parse", "--verify", "HEAD"])
-            has_head = True
-        except self.error:
-            has_head = False
-        if not has_head:
-            remote_head = self.git(["ls-remote", "--", url, "refs/heads/" + branch], token=token)
-            if remote_head:
-                self.git(["fetch", "--no-tags", "--", url, "refs/heads/" + branch], token=token)
-                self.git(["reset", "--mixed", "FETCH_HEAD"])
-
-        if self.git(["diff", "--cached", "--name-only"]):
-            raise self.error("仓库已有暂存更改，请先处理后备份")
-        if files:
-            # 选中即备份：工作目录自己的 .gitignore 不会让列出来的文件在这里失败。
-            self.git(["add", "-f", "--", *files])
-        if self.git(["diff", "--cached", "--name-only"]):
-            message = str(self.data.get("message") or "CoreMan workspace backup")[:1000]
-            self.git(
-                [
-                    "-c",
-                    "user.name=CoreMan",
-                    "-c",
-                    "user.email=workspace@coreman.local",
-                    "-c",
-                    "commit.gpgsign=false",
-                    "commit",
-                    "-m",
-                    message,
-                ]
-            )
-        head = self.git(["rev-parse", "--verify", "HEAD"])
-        self.git(["push", "--", url, "HEAD:refs/heads/" + branch], token=token)
-        return {"pushed": True, "head": head, "branch": branch}
-
-    def clone(self, url, branch, token, files):
-        self.git(
-            ["clone", "--single-branch", "--branch", branch, "--", url, str(files)],
-            cwd=self.root.parent,
-            token=token,
-        )
-        # Refuse repo entries which would evade the copy policy or escape the workspace.
-        for parent, dirs, names in os.walk(files, followlinks=False):
-            if ".git" in dirs:
-                dirs.remove(".git")
-            for name in dirs + names:
-                path = Path(parent) / name
-                rel = path.relative_to(files).as_posix()
-                if forbidden(rel) or (
-                    path.is_symlink()
-                    and (
-                        os.path.isabs(os.readlink(path)) or not path.resolve().is_relative_to(files)
+            options = ["--no-ext-diff", "--no-textconv", "--no-color"]
+            if self.optional(["rev-parse", "--verify", "HEAD"]):
+                text = self.git(["diff", *options, "HEAD", "--", name])
+            else:
+                text = "\n".join(
+                    part
+                    for part in (
+                        self.git(["diff", "--cached", *options, "--", name]),
+                        self.git(["diff", *options, "--", name]),
                     )
-                ):
-                    raise self.error("仓库包含敏感文件或不安全链接，未恢复")
-        return self.git(["rev-parse", "HEAD"], cwd=files)
-
-    def git_restore(self):
-        url, token = self.git_config()
-        branch, empty = self.remote_head(url, token)
-        if empty:
-            raise self.error("远端仓库为空，无法恢复")
-        with tempfile.TemporaryDirectory(prefix=".coreman-git-", dir=self.root.parent) as temp:
-            files = Path(temp) / "files"
-            head = self.clone(url, branch, token, files)
-            self.install(files)
-        return {"installed": True, "head": head, "branch": branch}
-
-    def git_adopt(self):
-        """放弃工作目录现有文件，换成远端默认分支的内容（含 .git，之后可直接备份）。
-
-        不进 Git 的配置与缓存（.codex、.env、所有权标记等）和已安装的技能、MCP 配置原样保留。
-        """
-        if not self.root.is_dir() or not self.owned():
-            raise self.error("工作目录尚未初始化")
-        url, token = self.git_config()
-        branch, empty = self.remote_head(url, token)
-        if empty:
-            raise self.error("远端仓库为空，请直接备份当前文件")
-        with tempfile.TemporaryDirectory(prefix=".coreman-git-", dir=self.root.parent) as temp:
-            files, previous = Path(temp) / "files", Path(temp) / "previous"
-            head = self.clone(url, branch, token, files)
-            incoming = {entry.name for entry in files.iterdir()}
-            previous.mkdir()
-            moved, placed = [], []
-            try:
-                for entry in list(self.root.iterdir()):
-                    if (
-                        entry.name not in incoming
-                        and forbidden(entry.name)
-                        and entry.name != ".git"
-                    ):
-                        continue
-                    entry.rename(previous / entry.name)
-                    moved.append(entry.name)
-                for name in incoming:
-                    (files / name).rename(self.root / name)
-                    placed.append(name)
-            except BaseException:
-                for name in placed:
-                    (self.root / name).rename(files / name)
-                for name in moved:
-                    (previous / name).rename(self.root / name)
-                raise
-            # 已安装的技能以本地为准：仓库里旧备份带的技能目录让位给本地这份。
-            for rel in INSTALLED:
-                kept, current = previous / rel, self.root / rel
-                if not (kept.exists() or kept.is_symlink()):
-                    continue
-                if current.is_dir() and not current.is_symlink():
-                    shutil.rmtree(current)
-                elif current.exists() or current.is_symlink():
-                    current.unlink()
-                current.parent.mkdir(parents=True, exist_ok=True)
-                kept.rename(current)
-        self.init()
-        return {"installed": True, "head": head, "branch": branch}
+                    if part
+                )
+        raw = text.encode()
+        return {
+            "path": name,
+            "diff": raw[:MAX_DIFF].decode(errors="ignore"),
+            "truncated": len(raw) > MAX_DIFF,
+        }
 
     def dispatch(self):
         name = self.data["type"].removeprefix("workspace-").replace("-", "_")
@@ -938,10 +745,7 @@ class Workspace:
             "import_",
             "finish",
             "git_status",
-            "git_test",
-            "git_backup",
-            "git_restore",
-            "git_adopt",
+            "git_diff",
         }:
             raise self.error("不支持的工作区操作")
         try:
