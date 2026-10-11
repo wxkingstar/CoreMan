@@ -118,7 +118,7 @@ def _check_env_vars(v: dict[str, str]) -> dict[str, str]:
         raise ValueError(
             f"环境变量会改变运行时的模型端点、代码加载或凭据，不允许配置：{', '.join(blocked)}"
         )
-    if any(len(val) > 4000 for val in v.values()):
+    if any(len(val) > 16000 for val in v.values()):
         raise ValueError("环境变量值过长")
     return v
 
