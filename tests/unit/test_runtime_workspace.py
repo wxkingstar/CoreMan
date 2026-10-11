@@ -212,9 +212,13 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(Workspace, "git", local_git)
-    config = {"git_url": "https://github.com/example/repo.git", "branch": "main"}
+    config = {"git_url": "https://github.com/example/repo.git"}
+    probe = call(agent, "git-test", **config)
+    assert probe["empty"] and probe["branch"] == "main" and not probe["linked"]
     result = call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md", "a.txt"], **config)
-    assert result["pushed"]
+    assert result["pushed"] and result["branch"] == "main"
+    probe = call(agent, "git-test", **config)
+    assert not probe["empty"] and probe["branch"] == "main" and probe["linked"]
     assert call(agent, "git-status")["head"] == result["head"]
     hook = agent.root / "one" / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\ntouch " + str(tmp_path / "hook-ran") + "\n")
@@ -224,10 +228,30 @@ def test_git_backup_status_and_no_hooks(agent, tmp_path, monkeypatch):
     assert not (tmp_path / "hook-ran").exists()
     assert not call(agent, "git-status")["files"]
     assert call(agent, "git-backup", files=[], **config)["pushed"]
+    # 另一个工作目录与已有内容的仓库无关：不直接推送，改为用仓库内容初始化后再备份。
     call(agent, "init", working_dir="two")
+    two = agent.root / "two"
     call(agent, "write", working_dir="two", path="new.txt", content="new", expected_hash=None)
+    (two / ".env").write_text("secret")
+    (two / ".agents/skills/query").mkdir(parents=True)
     assert call(agent, "git-status", working_dir="two")["files"]
+    refused = call(agent, "git-backup", working_dir="two", files=["new.txt"], **config)
+    assert refused["success"] is False and refused["code"] == "remote_not_empty"
+    adopted = call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
+    assert adopted["head"] == call(agent, "git-status")["head"] and adopted["branch"] == "main"
+    assert not (two / "new.txt").exists() and (two / "AGENTS.md").is_file()
+    assert (two / ".env").read_text() == "secret"
+    assert (two / ".agents/skills/query").is_dir()
+    assert call(agent, "git-test", working_dir="two", **config)["linked"]
+    call(agent, "write", working_dir="two", path="new.txt", content="new", expected_hash=None)
     assert call(agent, "git-backup", working_dir="two", files=["new.txt"], **config)["pushed"]
+    # 已关联的目录一键还原：长期运行留下的修改和新文件都丢弃，回到远端最新版本。
+    (two / "new.txt").write_text("drifted")
+    (two / "scratch.log").write_text("junk")
+    latest = call(agent, "git-adopt", working_dir="two", content="# x\n", **config)
+    assert latest["head"] == call(agent, "git-status", working_dir="two")["head"]
+    assert (two / "new.txt").read_text() == "new" and not (two / "scratch.log").exists()
+    assert not call(agent, "git-status", working_dir="two")["files"]
 
 
 def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
@@ -239,7 +263,7 @@ def test_git_backup_accepts_shared_instruction_link(agent, monkeypatch):
     monkeypatch.setattr(
         Workspace, "git", lambda self, args, cwd=None, token="": commands.append(args) or ""
     )
-    config = {"git_url": "https://github.com/example/repo.git", "branch": "main"}
+    config = {"git_url": "https://github.com/example/repo.git"}
     assert call(agent, "git-backup", files=["AGENTS.md", "CLAUDE.md"], **config)["pushed"]
     assert ["add", "-f", "--", "AGENTS.md", "CLAUDE.md"] in commands
     (p / "other.md").symlink_to("CLAUDE.md")
@@ -401,7 +425,6 @@ def test_git_backup_pathspec_is_literal(agent, tmp_path, monkeypatch):
                 "git-backup",
                 files=[pattern],
                 git_url="https://github.com/example/repo.git",
-                branch="main",
             )
         staged = subprocess.run(
             ["git", "ls-files"], cwd=root, check=True, capture_output=True, text=True

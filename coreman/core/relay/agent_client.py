@@ -24,6 +24,7 @@ OPERATIONS = {
     "workspace-git-test",
     "workspace-git-backup",
     "workspace-git-restore",
+    "workspace-git-adopt",
     "ping",
     "status",
     "probe-rate-limits",
@@ -87,7 +88,15 @@ async def call_agent(
     timeout = (
         950
         if operation
-        in {"pull", "pr", "init", "install-skill", "workspace-git-backup", "workspace-git-restore"}
+        in {
+            "pull",
+            "pr",
+            "init",
+            "install-skill",
+            "workspace-git-backup",
+            "workspace-git-restore",
+            "workspace-git-adopt",
+        }
         else 130
     )
     try:
@@ -108,7 +117,12 @@ async def call_agent(
                 result = json.loads(data)
                 if not isinstance(result, dict) or result.get("success") is not True:
                     code = result.get("code") if isinstance(result, dict) else None
-                    if code not in {"conflict", "instructions_conflict", "operation_failed"}:
+                    if code not in {
+                        "conflict",
+                        "instructions_conflict",
+                        "operation_failed",
+                        "remote_not_empty",
+                    }:
                         code = None
                     raise AgentError(
                         "Agent 未完成操作，请查看该实例状态",
