@@ -61,6 +61,29 @@ Agent 执行安装器与探针时移除全部 COREMAN_ 环境变量，避免子�
 - Claude Code 自己读取，`${变量名}` 由 Claude 展开，stdio 服务继承员工的环境变量。
 - Codex 由驱动每轮把每个服务转成 `-c mcp_servers.skill_<名字>={...}`；名字带 `skill_` 前缀，避免和节点全局配置里的同名服务合并出错。stdio 服务通过 `env_vars` 拿到员工的环境变量（`COREMAN_` 开头的除外），`env` 中的明文值经进程环境传入，不出现在命令行。http 服务的 `Authorization: Bearer ${变量}` 转为 `bearer_token_env_var`，`${变量}` 形式的请求头转为 `env_http_headers`。Codex 不支持 SSE；command、args、url 中的 `${...}`、`env` 中引用其他变量名（如 `"A": "${B}"`）也无法转换。这些服务在 Codex 下跳过，并在节点日志中记录，本轮其余功能照常。
 
+## 需要 OAuth 登录的 MCP 技能
+
+有的远程 MCP 服务只能 OAuth 登录，不收静态令牌，例如 Figma 官方 MCP（`https://mcp.figma.com/mcp`）。这类服务往往只放行登记过的客户端：Figma 的动态客户端注册对 CoreMan 返回 403，但接受 Codex 和 Claude Code。所以授权交给 AI 员工所在实例上的 CLI 完成，令牌留在该 CLI 自己的凭据存储里（Codex 在节点的 `~/.codex/.credentials.json` 或系统钥匙串，Claude Code 在它的凭据存储），CoreMan 不保存令牌。
+
+**标记**：技能的「需要 OAuth 授权」（`skills.mcp_oauth`）只能用于 http/sse 服务。仓库同步时，没有 `headers` 的远程服务自动标记，带请求头的不标记，以仓库为准。
+
+**按员工命名**：两个 CLI 的令牌都按服务名存放。标记了 OAuth 的技能安装时以 `<技能名>-<员工 ID 前 8 位>` 写入 `.mcp.json`，并删掉同名的旧条目。同一节点上的员工各用各的授权，Codex 下挂载为 `skill_<技能名>-<员工 ID 前 8 位>`。没有标记的 MCP 技能仍用技能名。
+
+**授权流程**（员工的技能列表，限创建者和员工管理员）：
+
+1. 点「授权」，`POST /api/admin/bots/{bot}/skills/{skill}/mcp-login`。平台先 `ping` 确认节点支持（`mcp_oauth: 1`），再让员工所在实例执行 `codex mcp login skill_<名字> --no-browser`（Claude Code 先把同名同配置的服务登记到项目的 local 作用域，再 `claude mcp login <名字> --no-browser`）。CLI 在 pty 里运行，打印授权链接，并在本机回环端口等待回调。平台返回授权链接和会话 ID，链接 10 分钟有效。
+2. 用户在浏览器打开链接，登录要使用的账号并允许访问。浏览器随后跳到 `http://127.0.0.1:<端口>/…` 或 `http://localhost:<端口>/…`，页面打不开是正常的。
+3. 用户把地址栏里的完整地址粘贴回管理台，`POST …/mcp-login/complete`。节点只接受本次会话的回环地址：主机、端口、路径和 `state` 都要一致。它把查询串送到 CLI 的回环端口，由 CLI 换取并保存令牌，以 CLI 的退出码判定成败。成功后在 `bot_skills` 记下授权人、时间和实例（`mcp_authorized_*`），审计记为 `skill.mcp_authorized`。授权码不进审计和日志。
+4. 「撤销授权」`DELETE …/mcp-login` 让 CLI 注销令牌，审计记为 `skill.mcp_revoked`。Linux 上没有系统钥匙串时，Codex 默认模式的注销会失败，节点会改用文件存储模式重试。
+
+**边界**
+
+- 授权的账号由这个 AI 员工使用，所有与它对话的人都以该账号的权限访问。
+- 令牌在实例上：员工换到别的节点或换了 AI 类型，列表会显示「需重新授权」。
+- 令牌由 CLI 自己刷新。刷新失败（被撤销或过期太久）时，工具调用会报认证错误，需要重新授权。
+- 停用技能不会注销 CLI 里的令牌，要先撤销授权再停用。
+- 节点要升级到带 `mcp-login-*` 操作的版本；旧节点会提示升级。已安装的技能在节点升级后要点「升级」或重新安装，才会换成按员工命名的服务名。
+
 ## 从目录删除技能
 
 技能目录的操作列提供「删除」，调用 `DELETE /api/admin/skills/{id}`，仅限委员会和平台管理员，要求 `If-Match` 为当前 revision。仍有 AI 员工安装着该技能（含安装中、安装未完成）或有待审申请时拒绝删除（409），并列出这些员工；须先在员工的技能中停用 / 撤回。

@@ -104,6 +104,7 @@ class SkillIn(BaseModel):
     install_type: Literal["git", "mcp"] = "git"
     external_repo_url: str | None = Field(default=None, max_length=1000)
     mcp_config: dict[str, Any] | None = None
+    mcp_oauth: bool = False
     security_prompt_template: str | None = Field(default=None, max_length=16000)
     enabled: bool = False
 
@@ -132,6 +133,8 @@ class SkillIn(BaseModel):
             raise ValueError("默认数据源不在选项中")
         if self.mcp_config is not None:
             policy.mcp_config(self.mcp_config)
+            if self.mcp_oauth and self.mcp_config.get("type") not in ("http", "sse"):
+                raise ValueError("只有远程（http/sse）MCP 服务可以用 OAuth 授权")
         return self
 
 
@@ -363,7 +366,7 @@ async def apply_skill(session: AsyncSession, row: Skill, body: SkillIn, request:
             json.dumps(body.mcp_config, ensure_ascii=False), MCP_AAD
         )
     if body.install_type != "mcp":
-        row.mcp_config_enc = None
+        row.mcp_config_enc, row.mcp_oauth = None, False
     row.updated_at = utcnow()
 
 

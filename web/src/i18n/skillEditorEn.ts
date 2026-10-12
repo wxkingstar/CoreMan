@@ -40,6 +40,12 @@ const skillEditorEn = {
   rawHint: 'Paste KEY=value. Supports comments, export, quotes, and multiline quoted values. Quote values containing #. Commands and variable expansion are not executed. Saved secrets remain masked.',
   addVariable: 'Add variable', envInvalid: 'Invalid environment variable format.',
   envError: { syntax: 'Invalid format on line {line}. Use KEY=value; variable names must start with an uppercase letter.', duplicate: 'Duplicate variable name on line {line}. Merge or remove duplicates.', quote: 'Unclosed quote on line {line}.', key: 'Invalid variable name at entry {line}. Use uppercase letters, digits, and underscores, starting with a letter.' },
+  mcpOAuth: 'Requires OAuth authorization', mcpOAuthHint: 'Remote MCP servers such as the official Figma MCP sign in with OAuth: after installation, an admin of the AI employee authorizes it from the employee\'s skill list. Remote servers synced from a repository without headers are switched on automatically.',
+  mcpAuthorize: 'Authorize', mcpReauthorize: 'Authorize again', mcpRevoke: 'Revoke', mcpUnauthorized: 'Not authorized', mcpStale: 'Authorize again (the employee moved to another runtime)', mcpAuthorizedBy: 'Authorized by {name}',
+  mcpDialogTitle: 'Authorize {name}', mcpIdentityHint: 'The authorized account is used by this AI employee: everyone who talks to it gets that account\'s access.',
+  mcpStep1: '1. Open the authorization page, sign in with the account to use and allow access. The link is valid for 10 minutes.', mcpOpen: 'Open authorization page', mcpStarting: 'Asking the runtime to start authorization…',
+  mcpStep2: '2. After you allow access, the browser goes to an address starting with http://127.0.0.1 or http://localhost and the page does not load. That is expected. Paste the full address from the address bar here:',
+  mcpComplete: 'Complete authorization', mcpDone: 'Authorized', mcpRevokeConfirm: 'After revoking, this AI employee can no longer use this MCP server. Revoke?', mcpRevoked: 'Authorization revoked',
 }
 
 export default skillEditorEn satisfies { [K in keyof typeof skillEditorZh]: (typeof skillEditorZh)[K] extends string ? string : { [P in keyof (typeof skillEditorZh)[K]]: string } }

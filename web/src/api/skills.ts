@@ -5,11 +5,12 @@ export interface SkillInput {
   name: string; source_id: string; description: string; category: string | null; security_level: 'public' | 'internal'; version: string | null
   env_groups: string[]; selectable_env_groups: Record<string, string>; data_sources: Record<string, string> | null
   default_data_source: string | null; doris_enabled_groups: string[]; user_env_vars: Record<string, { label: string; placeholder: string; required: boolean }>
-  install_type: 'git' | 'mcp'; external_repo_url: string | null; mcp_config?: Record<string, unknown> | null; security_prompt_template: string | null; enabled: boolean
+  install_type: 'git' | 'mcp'; external_repo_url: string | null; mcp_config?: Record<string, unknown> | null; mcp_oauth: boolean; security_prompt_template: string | null; enabled: boolean
 }
 export interface Skill extends SkillInput { id: string; revision: number; has_mcp_config: boolean }
 export interface Preset { group_key: string; label: string; vars: Record<string, string>; tags: string[]; version: number }
-export interface Installed { skill_id: string; name: string; status: string; revision: number; version: string | null; selected_env_groups: string[]; user_env_vars: Record<string, string>; security_prompt: string | null; error_message: string | null }
+export interface Installed { skill_id: string; name: string; status: string; revision: number; version: string | null; selected_env_groups: string[]; user_env_vars: Record<string, string>; security_prompt: string | null; error_message: string | null; mcp_oauth: boolean; mcp_authorized: boolean; mcp_authorized_at: string | null; mcp_authorized_by: string | null }
+export interface McpLogin { session_id: string; authorization_url: string; expires_in: number }
 export interface Approval { bot_name?: string | null; skill_name?: string | null; skill_revision?: number; id: string; bot_id: string; skill_id: string; requested_databases: string[]; requested_security_prompt: string; approved_databases: string[] | null; status: string; version: number; requested_at: string; requested_by: string; reviewed_by: string | null; review_comment: string | null }
 export interface InstallInput { selected_env_groups: string[]; data_source: string | null; user_env_vars: Record<string, string>; requested_security_prompt: string | null; reinstall_code: boolean }
 export interface UpgradeItem { bot_id: string; bot_name: string | null }
@@ -30,6 +31,10 @@ export const skills = {
   installed: (bot: string) => call<{ items: Installed[]; pending_approvals: Approval[] }>(http.get(`${root}/bots/${bot}/skills`)),
   install: (bot: string, skill: string, body: InstallInput) => call<{ status: string }>(http.post(`${root}/bots/${bot}/skills/${skill}/install`, body)),
   uninstall: (bot: string, row: Installed) => call(http.delete(`${root}/bots/${bot}/skills/${row.skill_id}`, match(row.revision))),
+  // 节点要启动 CLI 并等它给出授权链接、或等它换取令牌，比普通请求慢。
+  mcpLoginStart: (bot: string, skill: string) => call<McpLogin>(http.post(`${root}/bots/${bot}/skills/${skill}/mcp-login`, {}, { timeout: 150000 })),
+  mcpLoginComplete: (bot: string, skill: string, body: { session_id: string; callback_url: string }) => call(http.post(`${root}/bots/${bot}/skills/${skill}/mcp-login/complete`, body, { timeout: 150000 })),
+  mcpLogout: (bot: string, skill: string) => call(http.delete(`${root}/bots/${bot}/skills/${skill}/mcp-login`, { timeout: 150000 })),
   approvals: (page = 1) => call<Page<Approval>>(http.get(`${root}/skill-approvals`, { params: { page, per_page: 50 } })),
   review: (row: Approval, body: { decision: 'approve' | 'reject'; approved_databases: string[]; approved_security_prompt: string; comment: string }) => call(http.post(`${root}/skill-approvals/${row.id}/review`, body, match(row.version))),
 }

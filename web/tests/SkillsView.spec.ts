@@ -12,7 +12,7 @@ import SkillSourceDialog from '@/components/skills/SkillSourceDialog.vue'
 import { i18n } from '@/i18n'
 
 it('preserves encrypted MCP configuration and security fields when editing catalog metadata', async () => {
-  const row = { id: 's1', revision: 4, name: 'query', source_id: 'source', description: 'old', category: null, security_level: 'internal', version: '1.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'mcp', external_repo_url: null, security_prompt_template: 'Read only', enabled: true, has_mcp_config: true } as Skill
+  const row = { id: 's1', revision: 4, name: 'query', source_id: 'source', description: 'old', category: null, security_level: 'internal', version: '1.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'mcp', external_repo_url: null, security_prompt_template: 'Read only', enabled: true, has_mcp_config: true, mcp_oauth: false } as Skill
   vi.mocked(allSkills).mockResolvedValue([row])
   vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
   vi.mocked(skills.presets).mockResolvedValue([])
@@ -29,7 +29,7 @@ it('preserves encrypted MCP configuration and security fields when editing catal
 })
 
 it('toggles skill status inline and reloads the catalog when the revision is stale', async () => {
-  const row = { id: 's1', revision: 2, name: 'sample-query', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['shared_tools'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false, has_mcp_config: false } as Skill
+  const row = { id: 's1', revision: 2, name: 'sample-query', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['shared_tools'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false, has_mcp_config: false, mcp_oauth: false } as Skill
   vi.mocked(allSkills).mockResolvedValue([{ ...row }])
   vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
   vi.mocked(skills.presets).mockResolvedValue([])
@@ -55,7 +55,7 @@ it('toggles skill status inline and reloads the catalog when the revision is sta
 })
 
 it('deletes a skill only after confirmation and reloads the catalog either way', async () => {
-  const row = { id: 's1', revision: 5, name: 'unwanted', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false } as Skill
+  const row = { id: 's1', revision: 5, name: 'unwanted', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false, mcp_oauth: false } as Skill
   vi.mocked(allSkills).mockResolvedValue([row])
   vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
   vi.mocked(skills.presets).mockResolvedValue([])
@@ -79,7 +79,7 @@ it('deletes a skill only after confirmation and reloads the catalog either way',
 })
 
 it('upgrades installed AI employees only after confirmation and lists skipped ones', async () => {
-  const row = { id: 's1', revision: 5, name: 'query', source_id: 'source', description: '', category: null, security_level: 'public', version: '2.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false } as Skill
+  const row = { id: 's1', revision: 5, name: 'query', source_id: 'source', description: '', category: null, security_level: 'public', version: '2.0', env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false, mcp_oauth: false } as Skill
   vi.mocked(allSkills).mockResolvedValue([row])
   vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
   vi.mocked(skills.presets).mockResolvedValue([])

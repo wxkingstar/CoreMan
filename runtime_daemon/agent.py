@@ -226,6 +226,7 @@ class Agent:
         self.stop = threading.Event()
         self.background: set[str] = set()
         self.background_lock = threading.Lock()
+        self.mcp_logins = None
         self.http = requests.Session()
         self.http.trust_env = False
 
@@ -510,9 +511,15 @@ class Agent:
             raise OperationError("工作目录不存在")
         if data.get("install_type") == "mcp":
             name, config = data.get("skill_name"), data.get("mcp_config")
+            # 需要 OAuth 的服务按 AI 员工取名：CLI 的令牌按服务名存放，同节点的员工各用各的授权。
+            server = data.get("server_name", name)
             if (
                 not isinstance(name, str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", name)
+                or not isinstance(server, str)
+                or not all(
+                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", value)
+                    for value in (name, server)
+                )
                 or not isinstance(config, dict)
             ):
                 raise OperationError("MCP 配置不合法")
@@ -520,7 +527,10 @@ class Agent:
             if target.is_symlink():
                 raise OperationError("MCP 配置不能是符号链接")
             current = json.loads(target.read_text()) if target.exists() else {}
-            current.setdefault("mcpServers", {})[name] = config
+            servers = current.setdefault("mcpServers", {})
+            if server != name:
+                servers.pop(name, None)
+            servers[server] = config
             atomic_write(target, json.dumps(current, ensure_ascii=False, indent=2))
         else:
             # 技能来源由技能管理员在 CoreMan 目录登记，不再受节点 Git 主机白名单限制；
@@ -599,6 +609,28 @@ class Agent:
                 run_command(command + ["-y"], path, timeout=300)
             self.link_claude_skills(path, skill)
         return {"success": True, "message": "Skill 已安装"}
+
+    def mcp_login(self, kind: str, data: dict) -> dict:
+        """MCP 技能的 OAuth 授权，由本实例的 CLI 完成（见 mcp_oauth）。不占实例锁：等用户授权期间
+        其它操作照常进行。"""
+        from .mcp_oauth import MCPLogins
+
+        path = self.workspace(str(data.get("project_dir", "")))
+        name = data.get("server_name")
+        if not isinstance(name, str):
+            raise OperationError("MCP 服务名不合法")
+        with self.background_lock:
+            if self.mcp_logins is None:
+                env = {k: v for k, v in os.environ.items() if not k.startswith("COREMAN_")}
+                self.mcp_logins = MCPLogins(self.provider, env)
+            logins = self.mcp_logins
+        if kind == "mcp-login-start":
+            return logins.start(path, name)
+        if kind == "mcp-login-complete":
+            return logins.complete(
+                str(data.get("session_id", "")), path, name, str(data.get("callback_url", ""))
+            )
+        return logins.logout(path, name)
 
     def start_background(self, name: str, function) -> dict:
         with self.background_lock:
@@ -955,6 +987,7 @@ class Agent:
                 "memory_protocol": 2,
                 "memory_read": True,
                 "workspace_protocol": 1,
+                "mcp_oauth": 1,
             }
         if kind == "status":
             tasks = self.active_tasks()
@@ -975,6 +1008,8 @@ class Agent:
             return self.start_background(kind, self.health_check)
         if kind == "collect-memory":
             return self.report_memory(data.get("working_dir"))
+        if kind in {"mcp-login-start", "mcp-login-complete", "mcp-logout"}:
+            return self.mcp_login(kind, data)
         with self.lock:
             if cancelled is not None and cancelled.is_set():
                 raise OperationError("操作已取消")

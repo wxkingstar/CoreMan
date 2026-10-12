@@ -11,7 +11,7 @@ const { t } = useI18n()
 const busy = ref(false), visible = ref(false)
 const selected = ref<Skill | null>(null)
 const advanced = ref<string[]>([])
-const empty = (): SkillInput => ({ name: '', source_id: '', description: '', category: null, security_level: 'public', version: null, env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: false })
+const empty = (): SkillInput => ({ name: '', source_id: '', description: '', category: null, security_level: 'public', version: null, env_groups: [], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, mcp_oauth: false, security_prompt_template: null, enabled: false })
 const form = reactive<SkillInput>(empty())
 const selectable = ref<string[]>([]), mcp = ref('')
 const fields = ref<{ key: string; label: string; placeholder: string; required: boolean }[]>([])
@@ -148,6 +148,18 @@ defineExpose({ open, save, form })
               :rows="6"
               :placeholder="selected?.has_mcp_config ? t('skill.preserveConfig') : '{}'"
             />
+          </el-form-item>
+          <el-form-item
+            v-if="form.install_type === 'mcp'"
+            class="full-width"
+          >
+            <el-checkbox
+              v-model="form.mcp_oauth"
+              data-test="skill-mcp-oauth"
+            >
+              {{ t('skillEditor.mcpOAuth') }}
+            </el-checkbox>
+            <span class="hint">{{ t('skillEditor.mcpOAuthHint') }}</span>
           </el-form-item>
         </div>
       </section>

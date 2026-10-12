@@ -65,6 +65,7 @@ class Skill(TimestampMixin, Base):
     install_type: Mapped[str] = mapped_column(Text, server_default=text("'git'"))
     external_repo_url: Mapped[str | None] = mapped_column(Text)
     mcp_config_enc: Mapped[str | None] = mapped_column(Text)
+    mcp_oauth: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     security_prompt_template: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # 删除留墓碑：来源再同步时不重新导入；安装与审批历史仍指向这一行。
@@ -108,6 +109,9 @@ class BotSkill(TimestampMixin, Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     install_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     error_message: Mapped[str | None] = mapped_column(Text)
+    mcp_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mcp_authorized_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    mcp_authorized_relay_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     revision: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     __mapper_args__ = {"version_id_col": revision}
 

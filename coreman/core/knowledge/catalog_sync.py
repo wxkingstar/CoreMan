@@ -17,7 +17,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import Skill, SkillSource, User
 from coreman.core.knowledge.git_auth import https_repository, token_git_env
 from coreman.core.knowledge.installation import MCP_AAD
-from coreman.core.knowledge.skill_policy import git_url, mcp_config, name
+from coreman.core.knowledge.skill_policy import git_url, mcp_config, mcp_needs_oauth, name
 
 
 class CatalogAccessError(ValueError):
@@ -210,6 +210,7 @@ async def sync_catalog(
         # 声明了 MCP 的插件登记为 MCP 技能，配置以仓库为准；其余仍按 Git 技能安装。
         mcp = entry.get("mcp_config")
         install_type = "mcp" if mcp else "git"
+        oauth = mcp is not None and mcp_needs_oauth(mcp)
         if skill is None:
             skill = Skill(
                 name=entry["name"],
@@ -218,6 +219,7 @@ async def sync_catalog(
                 description=entry["description"],
                 version=entry["version"],
                 install_type=install_type,
+                mcp_oauth=oauth,
                 mcp_config_enc=(
                     cipher.encrypt(json.dumps(mcp, ensure_ascii=False), MCP_AAD) if mcp else None
                 ),
@@ -228,6 +230,7 @@ async def sync_catalog(
             skill.description != entry["description"]
             or skill.version != entry["version"]
             or skill.install_type != install_type
+            or skill.mcp_oauth != oauth
             or (
                 mcp
                 and (
@@ -237,7 +240,7 @@ async def sync_catalog(
             )
         ):
             skill.description, skill.version = entry["description"] or "", entry["version"]
-            skill.install_type = install_type
+            skill.install_type, skill.mcp_oauth = install_type, oauth
             skill.mcp_config_enc = (
                 cipher.encrypt(json.dumps(mcp, ensure_ascii=False), MCP_AAD) if mcp else None
             )
