@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 from urllib.parse import urlsplit
 
 from coreman.core.bots.env_policy import is_blocked_env_key
@@ -48,7 +49,7 @@ def git_url(value: str | None) -> str | None:
     return value
 
 
-def mcp_config(value: dict) -> dict:
+def mcp_config(value: dict[str, Any]) -> dict[str, Any]:
     """单个 MCP 服务的配置；管理台编辑与仓库同步共用同一套检查。"""
     if len(json.dumps(value).encode()) > 65536:
         raise ValueError("MCP 配置过大")
