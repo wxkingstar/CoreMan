@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { EnvTextError, parseEnv } from '@/utils/dotenv'
 
 type Mode = 'kv' | 'raw' | 'json'
 interface Row { key: string; value: string }
@@ -18,25 +19,18 @@ function toRows(v: Record<string, string>): Row[] {
   return Object.entries(v).map(([key, value]) => ({ key, value }))
 }
 
+/** 值一律加双引号，含 #、首尾空格、引号、换行的值都能原样读回。 */
 function toRaw(v: Record<string, string>): string {
-  return Object.entries(v).map(([k, val]) => `${k}=${val}`).join('\n')
+  return Object.entries(v).map(([k, val]) => `${k}=${JSON.stringify(val)}`).join('\n')
 }
 
 function fromRows(list: Row[]): Record<string, string> {
   return Object.fromEntries(list.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.value]))
 }
 
-/** 每行一个 `KEY=VALUE`；空行与 `#` 开头的注释跳过；只按第一个 `=` 切，值里可以再有 `=`。 */
+/** 按 .env 语法解析（与技能环境变量同一套）：外层引号是语法不是值，粘贴 `KEY="value"` 存的是 value。 */
 function parseRaw(text: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const s = line.trim()
-    if (!s || s.startsWith('#')) continue
-    const i = s.indexOf('=')
-    if (i <= 0) throw new Error(s)
-    out[s.slice(0, i).trim()] = s.slice(i + 1)
-  }
-  return out
+  return Object.fromEntries(parseEnv(text).map(({ key, value }) => [key, value]))
 }
 
 function parseJson(text: string): Record<string, string> {
@@ -87,7 +81,7 @@ function commitRaw(): void {
   try {
     emit('update:modelValue', parseRaw(rawText.value))
   } catch (e) {
-    emit('invalid', t('bots.envInvalid') + (e instanceof Error ? `: ${e.message}` : ''))
+    emit('invalid', e instanceof EnvTextError ? t(`skillEditor.envError.${e.kind}`, { line: e.line }) : t('bots.envInvalid'))
   }
 }
 
