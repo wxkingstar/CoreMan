@@ -104,7 +104,8 @@ class SkillIn(BaseModel):
     install_type: Literal["git", "mcp"] = "git"
     external_repo_url: str | None = Field(default=None, max_length=1000)
     mcp_config: dict[str, Any] | None = None
-    mcp_oauth: bool = False
+    # 缺省（旧页面、管理命令）保留原值；只有明确传入才改。
+    mcp_oauth: bool | None = None
     security_prompt_template: str | None = Field(default=None, max_length=16000)
     enabled: bool = False
 
@@ -133,8 +134,6 @@ class SkillIn(BaseModel):
             raise ValueError("默认数据源不在选项中")
         if self.mcp_config is not None:
             policy.mcp_config(self.mcp_config)
-            if self.mcp_oauth and self.mcp_config.get("type") not in ("http", "sse"):
-                raise ValueError("只有远程（http/sse）MCP 服务可以用 OAuth 授权")
         return self
 
 
@@ -359,8 +358,16 @@ async def apply_skill(session: AsyncSession, row: Skill, body: SkillIn, request:
         raise ApiError(422, 422, "技能没有 Git 来源")
     if body.install_type == "mcp" and body.mcp_config is None and not row.mcp_config_enc:
         raise ApiError(422, 422, "MCP 技能需要配置")
-    for key, value in body.model_dump(exclude={"mcp_config"}).items():
+    oauth = bool(row.mcp_oauth) if body.mcp_oauth is None else body.mcp_oauth
+    if body.install_type == "mcp" and oauth:
+        config = body.mcp_config
+        if config is None:
+            config = json.loads(request.app.state.cipher.decrypt(row.mcp_config_enc, MCP_AAD))
+        if config.get("type") not in ("http", "sse"):
+            raise ApiError(422, 422, "只有远程（http/sse）MCP 服务可以用 OAuth 授权")
+    for key, value in body.model_dump(exclude={"mcp_config", "mcp_oauth"}).items():
         setattr(row, key, value)
+    row.mcp_oauth = oauth
     if body.mcp_config is not None:
         row.mcp_config_enc = request.app.state.cipher.encrypt(
             json.dumps(body.mcp_config, ensure_ascii=False), MCP_AAD
@@ -395,8 +402,8 @@ async def create_skill(
     if row is None:
         row = Skill()
     else:
-        # 恢复不继承删除前的 MCP 密文：和新建一样，由本次提交的配置决定。
-        row.deleted_at, row.mcp_config_enc = None, None
+        # 恢复不继承删除前的 MCP 密文与标记：和新建一样，由本次提交的配置决定。
+        row.deleted_at, row.mcp_config_enc, row.mcp_oauth = None, None, False
     await apply_skill(session, row, body, request)
     session.add(row)
     await session.flush()

@@ -248,3 +248,44 @@ async def test_editor_rejects_oauth_for_local_servers(admin_client, db_session):
     )
     assert switched.status_code == 200, switched.text
     assert switched.json()["data"]["mcp_oauth"] is False
+
+
+async def test_saving_without_the_flag_keeps_it(admin_client, db_session):
+    """旧页面和管理命令不认识 mcp_oauth，整份替换时不能把它清掉。"""
+    source = SkillSource(key="keep", label="Keep")
+    db_session.add(source)
+    await db_session.commit()
+    body = {
+        "name": "remote-mcp",
+        "source_id": str(source.id),
+        "install_type": "mcp",
+        "mcp_config": REMOTE,
+        "mcp_oauth": True,
+    }
+    created = (await admin_client.post("/api/admin/skills", json=body)).json()["data"]
+    legacy = {key: value for key, value in body.items() if key not in ("mcp_oauth", "mcp_config")}
+    saved = await admin_client.put(
+        f"/api/admin/skills/{created['id']}",
+        json={**legacy, "enabled": True},
+        headers={"If-Match": str(created["revision"])},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["mcp_oauth"] is True
+    turned_off = await admin_client.put(
+        f"/api/admin/skills/{created['id']}",
+        json={**legacy, "mcp_oauth": False},
+        headers={"If-Match": str(saved.json()["data"]["revision"])},
+    )
+    assert turned_off.json()["data"]["mcp_oauth"] is False
+    stdio = await admin_client.put(
+        f"/api/admin/skills/{created['id']}",
+        json={**legacy, "mcp_config": {"command": "npx"}},
+        headers={"If-Match": str(turned_off.json()["data"]["revision"])},
+    )
+    assert stdio.status_code == 200, stdio.text
+    stdio_oauth = await admin_client.put(
+        f"/api/admin/skills/{created['id']}",
+        json={**legacy, "mcp_oauth": True},
+        headers={"If-Match": str(stdio.json()["data"]["revision"])},
+    )
+    assert stdio_oauth.status_code == 422
