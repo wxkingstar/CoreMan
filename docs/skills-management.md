@@ -2,9 +2,9 @@
 
 技能是从 Git 仓库中的插件清单同步到目录、再安装到 AI 员工工作目录的能力包。本文说明技能来源与目录、环境预设、审批与安装任务，以及卸载的边界。
 
-目录同步读取 marketplace.json 的 plugins[].source 与插件 plugin.json 的名称、描述、版本，不执行清单内的指令。新条目默认停用；同步描述与版本不自动改安全等级、预设、审批策略或启用状态。插件常见结构为 `./plugins/{name}/.claude-plugin/plugin.json`。
+目录同步读取 marketplace.json 的 plugins[].source 与插件 plugin.json 的名称、描述、版本，不执行清单内的指令。新条目默认停用；同步描述与版本不自动改安全等级、预设、审批策略或启用状态。插件常见结构为 `./plugins/{name}/.claude-plugin/plugin.json`。声明了 MCP 服务的插件登记为 MCP 技能，见下文「仓库中的 MCP 技能」。
 
-Git 技能安装后以工作目录中的 `.agents/skills/<技能名>` 为唯一副本，Runtime 自动建立 `.claude/skills/<技能名>` 的相对软链接，供 Claude Code 读取。重复安装复用正确链接；同名真实目录、错误链接或工作区外的目标会报错并保留原文件。只有确认 `SKILL.md` 存在并完成链接后才报告安装成功。已有节点须升级 Runtime，已有技能重新执行安装后补齐链接。MCP 安装仍写入 `.mcp.json`。
+Git 技能安装后以工作目录中的 `.agents/skills/<技能名>` 为唯一副本，Runtime 自动建立 `.claude/skills/<技能名>` 的相对软链接，供 Claude Code 读取。重复安装复用正确链接；同名真实目录、错误链接或工作区外的目标会报错并保留原文件。只有确认 `SKILL.md` 存在并完成链接后才报告安装成功。已有节点须升级 Runtime，已有技能重新执行安装后补齐链接。MCP 安装写入工作目录的 `.mcp.json`，Claude Code 直接读取，Codex 由驱动每轮转换后挂载。
 
 public 技能由机器人管理员安装；internal 技能须先获委员会审批。审批绑定具体目录 revision（包版本另存 version），批准数据库范围须是申请子集。目录发生变化的待批申请需重新提交。安装通过持久任务经反向通道调用机器人所属的运行时节点，失败显示原因，不把入队视作安装成功。
 
@@ -39,6 +39,27 @@ Agent 执行安装器与探针时移除全部 COREMAN_ 环境变量，避免子�
 
 环境预设保存时要求掩码与该变量当前原值的完整掩码一致。仍含圆点但被删改、拼接或移到其他变量的掩码会被拒绝，避免将残缺掩码写成实际值；前端提供相同提示。更新密钥需填写完整的新值。
 
+
+## 仓库中的 MCP 技能
+
+同一个技能仓库可以同时放 Git 技能和 MCP 服务，同步后都出现在技能目录里，AI 员工按同样的流程安装、审批和配置环境变量。插件沿用 Claude Code 的插件格式声明 MCP，任选一种：
+
+- plugin.json 的 `mcpServers` 写对象：`{"name": "figma", "mcpServers": {"figma": {...}}}`；
+- plugin.json 的 `mcpServers` 写插件目录内的相对路径，文件内容为 `{"mcpServers": {...}}`；
+- 不写 `mcpServers`，在插件目录放 `.mcp.json`。
+
+插件目录里有 `SKILL.md` 时仍按 Git 技能处理，MCP 声明不导入，已有的技能插件不受影响。一个插件只能声明一个服务，安装时以插件名作为服务名写入员工工作目录的 `.mcp.json`，原服务名不使用。配置检查与管理台手工登记相同：`stdio` 须有 `command`，`http`、`sse` 须是不含用户信息的 HTTPS 地址，`env` 只能是字符串且变量名受平台规则约束。配置不合法时整次同步失败，不会部分导入。
+
+```json
+{"mcpServers": {"figma": {"command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"], "env": {"FIGMA_API_KEY": "${FIGMA_API_KEY}"}}}}
+```
+
+同步以仓库为准：插件新增或去掉 MCP 声明时，目录条目在 Git 与 MCP 两种安装方式之间切换；MCP 配置有变化时覆盖目录里保存的加密配置，管理台对这类条目的手工修改会在下次同步时被覆盖。已安装的员工要点「升级」或重新安装，才会把新配置写入工作目录。密钥不要写进仓库：在技能的「用户需填写的配置」或环境预设里声明变量（如 `FIGMA_API_KEY`），配置里用 `${变量名}` 引用。
+
+运行时两种后端都会加载 `.mcp.json`：
+
+- Claude Code 自己读取，`${变量名}` 由 Claude 展开，stdio 服务继承员工的环境变量。
+- Codex 由驱动每轮把每个服务转成 `-c mcp_servers.skill_<名字>={...}`；名字带 `skill_` 前缀，避免和节点全局配置里的同名服务合并出错。stdio 服务通过 `env_vars` 拿到员工的环境变量（`COREMAN_` 开头的除外），`env` 中的明文值经进程环境传入，不出现在命令行。http 服务的 `Authorization: Bearer ${变量}` 转为 `bearer_token_env_var`，`${变量}` 形式的请求头转为 `env_http_headers`。Codex 不支持 SSE；command、args、url 中的 `${...}`、`env` 中引用其他变量名（如 `"A": "${B}"`）也无法转换。这些服务在 Codex 下跳过，并在节点日志中记录，本轮其余功能照常。
 
 ## 从目录删除技能
 

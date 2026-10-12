@@ -13,9 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.audit import record_audit
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import Skill, SkillSource, User
 from coreman.core.knowledge.git_auth import https_repository, token_git_env
-from coreman.core.knowledge.skill_policy import git_url, name
+from coreman.core.knowledge.installation import MCP_AAD
+from coreman.core.knowledge.skill_policy import git_url, mcp_config, name
 
 
 class CatalogAccessError(ValueError):
@@ -49,7 +51,34 @@ def read_json(root: Path, path: Path) -> dict[str, Any]:
     return value
 
 
-def read_catalog(root: Path) -> list[dict[str, str | None]]:
+def read_mcp(root: Path, plugin_dir: Path, plugin: dict[str, Any]) -> dict[str, Any] | None:
+    """插件声明的 MCP 服务，沿用 Claude Code 插件格式：plugin.json 的 mcpServers
+    （对象或插件内相对路径），缺省时读插件目录的 .mcp.json。一个插件只登记一个服务；
+    插件里有 SKILL.md 时仍是 Git 技能，MCP 声明不导入。"""
+    if any("SKILL.md" in files for _, _, files in os.walk(plugin_dir)):
+        return None
+    declared = plugin.get("mcpServers")
+    if isinstance(declared, str):
+        relative = Path(declared)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("MCP 配置路径不能越界")
+        declared = read_json(root, plugin_dir / relative)
+    elif declared is None:
+        if not (plugin_dir / ".mcp.json").exists():
+            return None
+        declared = read_json(root, plugin_dir / ".mcp.json")
+    if not isinstance(declared, dict):
+        raise ValueError("mcpServers 必须为对象")
+    servers = declared.get("mcpServers", declared)
+    if not isinstance(servers, dict) or len(servers) != 1:
+        raise ValueError("一个插件只能声明一个 MCP 服务")
+    (config,) = servers.values()
+    if not isinstance(config, dict):
+        raise ValueError("MCP 配置必须为对象")
+    return mcp_config(config)
+
+
+def read_catalog(root: Path) -> list[dict[str, Any]]:
     manifest = read_json(root, root / ".claude-plugin/marketplace.json")
     plugins = manifest.get("plugins")
     if not isinstance(plugins, list) or len(plugins) > 500:
@@ -72,13 +101,20 @@ def read_catalog(root: Path) -> list[dict[str, str | None]]:
             raise ValueError("插件描述无效或过长")
         if version is not None and (not isinstance(version, str) or len(version) > 100):
             raise ValueError("插件版本无效")
-        result.append({"name": key, "description": description, "version": version})
+        result.append(
+            {
+                "name": key,
+                "description": description,
+                "version": version,
+                "mcp_config": read_mcp(root, root / relative, plugin),
+            }
+        )
     return result
 
 
 def fetch_catalog(
     url: str, access_token: str | None = None, username: str | None = None
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, Any]]:
     git_url(url)
     # 不继承全局 Git hook/credential helper、模板或代理，仓库对象不是代码指令。
     env = {
@@ -151,7 +187,8 @@ async def sync_catalog(
     *,
     source_key: str,
     url: str,
-    entries: list[dict[str, str | None]],
+    entries: list[dict[str, Any]],
+    cipher: Cipher,
     actor: User | None = None,
 ) -> dict[str, int]:
     source = await session.scalar(
@@ -170,6 +207,9 @@ async def sync_catalog(
             continue
         if skill is not None and skill.source_id != source.id:
             raise ValueError("插件名称已属于其他来源，同步已撤销")
+        # 声明了 MCP 的插件登记为 MCP 技能，配置以仓库为准；其余仍按 Git 技能安装。
+        mcp = entry.get("mcp_config")
+        install_type = "mcp" if mcp else "git"
         if skill is None:
             skill = Skill(
                 name=entry["name"],
@@ -177,11 +217,30 @@ async def sync_catalog(
                 enabled=False,
                 description=entry["description"],
                 version=entry["version"],
+                install_type=install_type,
+                mcp_config_enc=(
+                    cipher.encrypt(json.dumps(mcp, ensure_ascii=False), MCP_AAD) if mcp else None
+                ),
             )
             session.add(skill)
             created += 1
-        elif skill.description != entry["description"] or skill.version != entry["version"]:
+        elif (
+            skill.description != entry["description"]
+            or skill.version != entry["version"]
+            or skill.install_type != install_type
+            or (
+                mcp
+                and (
+                    not skill.mcp_config_enc
+                    or json.loads(cipher.decrypt(skill.mcp_config_enc, MCP_AAD)) != mcp
+                )
+            )
+        ):
             skill.description, skill.version = entry["description"] or "", entry["version"]
+            skill.install_type = install_type
+            skill.mcp_config_enc = (
+                cipher.encrypt(json.dumps(mcp, ensure_ascii=False), MCP_AAD) if mcp else None
+            )
             updated += 1
     await record_audit(
         session,
