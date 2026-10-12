@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -44,6 +45,31 @@ def git_url(value: str | None) -> str | None:
         ):
             raise ValueError("Git 来源须使用 HTTPS 或 git@host:path.git，不能含凭证")
         validate_host(parts.hostname)
+    return value
+
+
+def mcp_config(value: dict) -> dict:
+    """单个 MCP 服务的配置；管理台编辑与仓库同步共用同一套检查。"""
+    if len(json.dumps(value).encode()) > 65536:
+        raise ValueError("MCP 配置过大")
+    kind = value.get("type", "stdio")
+    if kind == "stdio":
+        if not isinstance(value.get("command"), str) or not value["command"]:
+            raise ValueError("MCP stdio 配置缺少 command")
+        args = value.get("args", [])
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise ValueError("MCP args 必须是字符串列表")
+    elif kind in ("http", "sse"):
+        url = urlsplit(str(value.get("url", "")))
+        if url.scheme != "https" or not url.hostname or url.username or url.password:
+            raise ValueError("MCP 远程地址须使用无用户信息的 HTTPS URL")
+        validate_host(url.hostname)
+    else:
+        raise ValueError("MCP 类型无效")
+    env = value.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        raise ValueError("MCP env 必须是字符串字典")
+    env_vars(env)
     return value
 
 

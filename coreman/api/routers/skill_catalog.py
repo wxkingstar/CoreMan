@@ -131,33 +131,7 @@ class SkillIn(BaseModel):
         if self.default_data_source and self.default_data_source not in (self.data_sources or {}):
             raise ValueError("默认数据源不在选项中")
         if self.mcp_config is not None:
-            if len(json.dumps(self.mcp_config).encode()) > 65536:
-                raise ValueError("MCP 配置过大")
-            kind = self.mcp_config.get("type", "stdio")
-            if kind == "stdio":
-                if (
-                    not isinstance(self.mcp_config.get("command"), str)
-                    or not self.mcp_config["command"]
-                ):
-                    raise ValueError("MCP stdio 配置缺少 command")
-                args = self.mcp_config.get("args", [])
-                if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-                    raise ValueError("MCP args 必须是字符串列表")
-            elif kind in ("http", "sse"):
-                from urllib.parse import urlsplit
-
-                url = urlsplit(str(self.mcp_config.get("url", "")))
-                if url.scheme != "https" or not url.hostname or url.username or url.password:
-                    raise ValueError("MCP 远程地址须使用无用户信息的 HTTPS URL")
-                from coreman.core.relay.safe_transport import validate_host
-
-                validate_host(url.hostname)
-            else:
-                raise ValueError("MCP 类型无效")
-            env = self.mcp_config.get("env", {})
-            if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
-                raise ValueError("MCP env 必须是字符串字典")
-            policy.env_vars(env)
+            policy.mcp_config(self.mcp_config)
         return self
 
 
@@ -346,7 +320,12 @@ async def sync_source(
         raise ApiError(409, 409, "技能来源已变更，请刷新后重新同步")
     try:
         result = await sync_catalog(
-            session, source_key=row.key, url=url, entries=entries, actor=actor
+            session,
+            source_key=row.key,
+            url=url,
+            entries=entries,
+            cipher=request.app.state.cipher,
+            actor=actor,
         )
     except ValueError:
         raise ApiError(

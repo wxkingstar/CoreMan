@@ -91,7 +91,13 @@ async def _skills_sync(url: str, source: str) -> int:
     engine = make_engine(settings.database_url)
     try:
         async with make_session_factory(engine)() as session:
-            result = await sync_catalog(session, source_key=source, url=url, entries=entries)
+            result = await sync_catalog(
+                session,
+                source_key=source,
+                url=url,
+                entries=entries,
+                cipher=settings.build_cipher(),
+            )
             await session.commit()
         print(json.dumps(result, ensure_ascii=False))
         return 0

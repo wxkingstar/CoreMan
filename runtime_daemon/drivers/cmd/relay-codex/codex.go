@@ -65,10 +65,11 @@ func cleanEnv(extra map[string]string) []string {
 // session/thread reconciliation. It captures whether this turn is a fresh
 // session or a resume, and whether multipart history needs flattening.
 type codexInput struct {
-	Args      []string // CLI args after `codex`
-	Stdin     string   // body to pipe on stdin
-	IsResume  bool     // true = `codex exec resume <thread_id>` pattern
-	ImagePath []string // images to attach via -i (collected from latest user message)
+	Args      []string          // CLI args after `codex`
+	Stdin     string            // body to pipe on stdin
+	IsResume  bool              // true = `codex exec resume <thread_id>` pattern
+	ImagePath []string          // images to attach via -i (collected from latest user message)
+	Env       map[string]string // literal env values of project MCP servers
 }
 
 // buildCodexInput converts the high-level OpenAI request into a fully-resolved
@@ -189,6 +190,11 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_systems.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_systems.enabled=false")
 	}
+
+	// MCP skills installed into the working directory's .mcp.json.
+	mcpArgs, mcpEnv := projectMCP(req.WorkingDir, req.EnvVars)
+	out.Args = append(out.Args, mcpArgs...)
+	out.Env = mcpEnv
 
 	// Image attachments via codex's native `-i FILE` mechanism. This is
 	// strictly better than embedding `[Image: /path]` in prompt text because
@@ -359,6 +365,9 @@ func launchCodex(input codexInput, workingDir string, envExtra map[string]string
 	// native codex binary) instead of orphaning the native child.
 	proc.SetNewProcessGroup(cmd)
 	cmd.Env = cleanEnv(envExtra)
+	for key, value := range input.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
