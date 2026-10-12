@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -72,6 +73,16 @@ def mcp_config(value: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("MCP env 必须是字符串字典")
     env_vars(env)
     return value
+
+
+def mcp_needs_oauth(config: dict[str, Any]) -> bool:
+    """仓库同步时的推断：不带请求头的远程服务按 OAuth 登录处理（如 Figma 官方 MCP）。"""
+    return config.get("type") in ("http", "sse") and not config.get("headers")
+
+
+def mcp_server_name(skill: Skill, bot_id: uuid.UUID) -> str:
+    """写进 .mcp.json 的服务名。需要 OAuth 的按 AI 员工取名：CLI 的令牌按服务名存放。"""
+    return f"{skill.name[:90]}-{bot_id.hex[:8]}" if skill.mcp_oauth else skill.name
 
 
 def env_vars(values: dict[str, str]) -> dict[str, str]:

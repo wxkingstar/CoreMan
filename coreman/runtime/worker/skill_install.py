@@ -27,7 +27,12 @@ from coreman.core.db.models import (
 )
 from coreman.core.knowledge import installation as installs
 from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, https_repository
-from coreman.core.knowledge.skill_policy import env_vars, selected_groups, user_inputs
+from coreman.core.knowledge.skill_policy import (
+    env_vars,
+    mcp_server_name,
+    selected_groups,
+    user_inputs,
+)
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
@@ -273,6 +278,8 @@ class SkillInstallHandler:
                 payload["mcp_config"] = json.loads(
                     ctx.cipher.decrypt(skill.mcp_config_enc, installs.MCP_AAD)
                 )
+                if skill.mcp_oauth:
+                    payload["server_name"] = mcp_server_name(skill, bot.id)
             else:
                 url = skill.external_repo_url or source.git_url
                 if not url:

@@ -24,6 +24,7 @@ from coreman.core.bus import tasks
 from coreman.core.db.models import (
     Bot,
     BotSkill,
+    RelayServer,
     Skill,
     SkillApproval,
     SkillSource,
@@ -31,6 +32,8 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.knowledge import installation as installs
+from coreman.core.knowledge import skill_policy as policy
+from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(prefix="/api/admin", tags=["skill-install"], dependencies=[Depends(verify_csrf)])
@@ -98,7 +101,7 @@ async def bot_skills(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await admin_bot(session, bot_id, actor, lock=False)
+    bot = await admin_bot(session, bot_id, actor, lock=False)
     rows = (
         await session.execute(
             select(BotSkill, Skill)
@@ -118,6 +121,13 @@ async def bot_skills(
             .order_by(SkillApproval.requested_at)
         )
     )
+    authorizers = {row.mcp_authorized_by for row, _ in rows if row.mcp_authorized_by}
+    names: dict[uuid.UUID, str] = {}
+    if authorizers:
+        for user_id, display_name in await session.execute(
+            select(User.id, User.display_name).where(User.id.in_(authorizers))
+        ):
+            names[user_id] = display_name
     return {
         "code": 0,
         "data": {
@@ -141,6 +151,12 @@ async def bot_skills(
                     "approved_databases": row.approved_databases,
                     "install_task_id": row.install_task_id,
                     "error_message": row.error_message,
+                    "mcp_oauth": skill.install_type == "mcp" and skill.mcp_oauth,
+                    # 令牌在实例的 CLI 里；换了实例（换节点或 AI 类型）就要重新授权。
+                    "mcp_authorized": row.mcp_authorized_at is not None
+                    and row.mcp_authorized_relay_id == bot.relay_server_id,
+                    "mcp_authorized_at": row.mcp_authorized_at,
+                    "mcp_authorized_by": names.get(row.mcp_authorized_by),
                 }
                 for row, skill in rows
             ],
@@ -390,6 +406,126 @@ async def uninstall(
     await audit(session, request, actor, bot, "uninstalled", skill_id)
     await session.commit()
     return {"code": 0, "data": {"status": row.status, "revision": row.revision}}
+
+
+class MCPLoginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=8, max_length=200)
+    callback_url: str = Field(min_length=1, max_length=8000)
+
+
+async def mcp_target(
+    session: AsyncSession, bot_id: uuid.UUID, skill_id: uuid.UUID, actor: User
+) -> tuple[Bot, Skill, RelayServer, dict[str, str]]:
+    """授权的对象：已安装、需要 OAuth 的 MCP 技能，以及员工当前的运行时实例。"""
+    bot = await admin_bot(session, bot_id, actor, lock=False)
+    row = await session.get(BotSkill, (bot_id, skill_id))
+    skill = await session.get(Skill, skill_id)
+    if row is None or skill is None:
+        raise not_found("机器人技能不存在")
+    if skill.install_type != "mcp" or not skill.mcp_oauth:
+        raise ApiError(422, 422, "这个技能不需要 OAuth 授权")
+    if row.status != "installed":
+        raise ApiError(409, 409, "技能安装完成后才能授权")
+    relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
+    if relay is None or not relay.is_active or relay.runtime_node_id is None:
+        raise ApiError(409, 409, "运行时未分配或不可用")
+    payload = {
+        "project_dir": bot.working_dir,
+        "server_name": policy.mcp_server_name(skill, bot.id),
+    }
+    # 下面要等节点和用户授权，不占着数据库事务。
+    await session.commit()
+    return bot, skill, relay, payload
+
+
+async def mcp_call(
+    relay: RelayServer, request: Request, operation: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    cipher = request.app.state.cipher
+    try:
+        if (await call_agent(relay, cipher, "ping")).get("mcp_oauth") != 1:
+            raise ApiError(409, 409, "请先升级运行时节点，再授权 MCP 技能")
+        return await call_agent(relay, cipher, operation, payload)
+    except AgentError as exc:
+        if exc.detail:
+            raise ApiError(422, 422, exc.detail) from exc
+        raise ApiError(502, 502, "授权操作未完成，请检查运行时在线状态") from exc
+
+
+async def mcp_record(
+    session: AsyncSession,
+    request: Request,
+    actor: User,
+    bot: Bot,
+    skill_id: uuid.UUID,
+    relay: RelayServer | None,
+) -> BotSkill:
+    row = await session.get(BotSkill, (bot.id, skill_id), with_for_update=True)
+    if row is None:
+        raise not_found("机器人技能不存在")
+    row.mcp_authorized_at = utcnow() if relay else None
+    row.mcp_authorized_by = actor.id if relay else None
+    row.mcp_authorized_relay_id = relay.id if relay else None
+    await audit(
+        session, request, actor, bot, "mcp_authorized" if relay else "mcp_revoked", skill_id
+    )
+    await session.commit()
+    return row
+
+
+@router.post("/bots/{bot_id}/skills/{skill_id}/mcp-login")
+async def mcp_login_start(
+    bot_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """由员工所在实例的 CLI 发起登录，返回授权链接；用户授权后把回调地址交给 complete。"""
+    _, _, relay, payload = await mcp_target(session, bot_id, skill_id, actor)
+    data = await mcp_call(relay, request, "mcp-login-start", payload)
+    return {
+        "code": 0,
+        "data": {key: data.get(key) for key in ("session_id", "authorization_url", "expires_in")},
+    }
+
+
+@router.post("/bots/{bot_id}/skills/{skill_id}/mcp-login/complete")
+async def mcp_login_complete(
+    bot_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    body: MCPLoginIn,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    bot, _, relay, payload = await mcp_target(session, bot_id, skill_id, actor)
+    await mcp_call(
+        relay,
+        request,
+        "mcp-login-complete",
+        {**payload, "session_id": body.session_id, "callback_url": body.callback_url},
+    )
+    row = await mcp_record(session, request, actor, bot, skill_id, relay)
+    return {
+        "code": 0,
+        "data": {"mcp_authorized_at": row.mcp_authorized_at, "revision": row.revision},
+    }
+
+
+@router.delete("/bots/{bot_id}/skills/{skill_id}/mcp-login")
+async def mcp_logout(
+    bot_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    bot, _, relay, payload = await mcp_target(session, bot_id, skill_id, actor)
+    await mcp_call(relay, request, "mcp-logout", payload)
+    row = await mcp_record(session, request, actor, bot, skill_id, None)
+    return {"code": 0, "data": {"revision": row.revision}}
 
 
 @router.get("/skill-approvals")

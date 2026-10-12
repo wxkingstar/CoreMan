@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { errorMessage } from '@/utils/errors'
 import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
+import McpAuthorizeDialog from '@/components/skills/McpAuthorizeDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import LoadState from '@/components/LoadState.vue'
 import TruncatedText from '@/components/TruncatedText.vue'
@@ -14,6 +15,7 @@ const { t } = useI18n()
 const auth = useAuthStore()
 const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
 const skillDialog = ref<InstanceType<typeof SkillEditorDialog>>()
+const authorizeDialog = ref<InstanceType<typeof McpAuthorizeDialog>>()
 const sources = ref<Source[]>([]), presets = ref<Preset[]>([])
 const loadError = ref('')
 const editing = ref(false), busy = ref(false)
@@ -50,6 +52,15 @@ async function install() {
   if (!selected.value || busy.value) return
   busy.value = true
   try { const result = await skills.install(props.botId, selected.value.id, form); ElMessage.success(t(`skill.status.${result.status}`)); editing.value = false; await load(); emit('saved') } catch (e) { fail(e) } finally { busy.value = false }
+}
+function mcpState(row: Installed) {
+  if (row.mcp_authorized) return t('skillEditor.mcpAuthorizedBy', { name: row.mcp_authorized_by ?? '' })
+  return t(row.mcp_authorized_at ? 'skillEditor.mcpStale' : 'skillEditor.mcpUnauthorized')
+}
+async function revoke(row: Installed) {
+  try { await ElMessageBox.confirm(t('skillEditor.mcpRevokeConfirm'), t('common.confirm')) } catch { return }
+  busy.value = true
+  try { await skills.mcpLogout(props.botId, row.skill_id); ElMessage.success(t('skillEditor.mcpRevoked')); await load() } catch (e) { fail(e) } finally { busy.value = false }
 }
 async function remove(row: Installed) {
   try { await ElMessageBox.confirm(t('skill.removeHint'), t('common.confirm')) } catch { return }
@@ -99,6 +110,15 @@ async function remove(row: Installed) {
           <template v-else>
             {{ t(`skill.status.${row.status}`) }}
           </template>
+          <el-tag
+            v-if="row.mcp_oauth && row.status === 'installed'"
+            class="mcp-state"
+            size="small"
+            :type="row.mcp_authorized ? 'success' : 'warning'"
+            data-test="mcp-state"
+          >
+            {{ mcpState(row) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column
@@ -108,10 +128,30 @@ async function remove(row: Installed) {
         show-overflow-tooltip
       />
       <el-table-column
-        width="150"
+        width="220"
         :label="t('common.actions')"
       >
         <template #default="{ row }">
+          <template v-if="row.mcp_oauth && row.status === 'installed'">
+            <el-button
+              link
+              type="primary"
+              :disabled="busy"
+              data-test="mcp-authorize"
+              @click="authorizeDialog?.open(row)"
+            >
+              {{ t(row.mcp_authorized ? 'skillEditor.mcpReauthorize' : 'skillEditor.mcpAuthorize') }}
+            </el-button>
+            <el-button
+              v-if="row.mcp_authorized"
+              link
+              :disabled="busy"
+              data-test="mcp-revoke"
+              @click="revoke(row)"
+            >
+              {{ t('skillEditor.mcpRevoke') }}
+            </el-button>
+          </template>
           <el-button
             v-if="row.status !== 'uninstalled'"
             link
@@ -207,6 +247,11 @@ async function remove(row: Installed) {
     :presets="presets"
     @saved="load"
   />
+  <McpAuthorizeDialog
+    ref="authorizeDialog"
+    :bot-id="botId"
+    @authorized="load"
+  />
   <el-dialog
     v-model="editing"
     :close-on-click-modal="false"
@@ -297,6 +342,7 @@ async function remove(row: Installed) {
 /* 全局样式把 h3 的上边距清零，这里给第二个列表留出分节间距 */
 .skill-section-title { margin: 24px 0 12px; }
 .skill-table + .el-alert { margin-top: 16px; }
+.mcp-state { margin-left: 8px; }
 .skill-table :deep(.cell) { white-space: nowrap; }
 /* 标签/按钮是原子行内元素，溢出时会被单元格的省略号整体吞掉，故限宽并在内部省略 */
 .skill-table :deep(.cell > .el-tag), .skill-table :deep(.cell > .el-button) { max-width: 100%; }

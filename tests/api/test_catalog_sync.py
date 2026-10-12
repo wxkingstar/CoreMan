@@ -175,3 +175,33 @@ async def test_sync_imports_and_updates_mcp_skills(db_session, tmp_path):
     assert (await sync(entries))["updated"] == 2
     await db_session.refresh(figma)
     assert figma.install_type == "git" and figma.mcp_config_enc is None
+
+
+async def test_sync_marks_remote_servers_without_headers_as_oauth(db_session):
+    url = "https://github.com/example/tools.git"
+    db_session.add(SkillSource(key="tools", label="Tools", git_url=url))
+    await db_session.commit()
+    remote = {"type": "http", "url": "https://mcp.example.com/mcp"}
+    entries = [
+        {"name": "figma", "description": "", "version": None, "mcp_config": remote},
+        {
+            "name": "keyed",
+            "description": "",
+            "version": None,
+            "mcp_config": {**remote, "headers": {"Authorization": "Bearer ${KEY}"}},
+        },
+        {"name": "local", "description": "", "version": None, "mcp_config": FIGMA},
+    ]
+    await sync_catalog(db_session, source_key="tools", url=url, entries=entries, cipher=CIPHER)
+    await db_session.commit()
+    rows = {row.name: row.mcp_oauth for row in await db_session.scalars(select(Skill))}
+    assert rows == {"figma": True, "keyed": False, "local": False}
+    entries[0]["mcp_config"] = {**remote, "headers": {"X-Team": "a"}}
+    result = await sync_catalog(
+        db_session, source_key="tools", url=url, entries=entries, cipher=CIPHER
+    )
+    await db_session.commit()
+    assert result["updated"] == 1
+    figma = await db_session.scalar(select(Skill).where(Skill.name == "figma"))
+    await db_session.refresh(figma)
+    assert figma.mcp_oauth is False

@@ -3,7 +3,7 @@ import { createPinia } from 'pinia'
 import { useAuthStore } from '@/stores/auth'
 import ElementPlus from 'element-plus'
 import { beforeEach, expect, it, vi } from 'vitest'
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { installed: vi.fn(), install: vi.fn(), uninstall: vi.fn(), sources: vi.fn(), presets: vi.fn(), save: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { installed: vi.fn(), install: vi.fn(), uninstall: vi.fn(), sources: vi.fn(), presets: vi.fn(), save: vi.fn(), mcpLoginStart: vi.fn(), mcpLoginComplete: vi.fn(), mcpLogout: vi.fn() } }))
 import { allSkills, skills } from '@/api/skills'
 import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
 import BotSkills from '@/components/BotSkills.vue'
@@ -56,10 +56,42 @@ it('shows disabled catalog entries and lets managers configure them before insta
 it('keeps descriptions and install errors on a single truncated line', async () => {
   const item = { id: 's1', name: 'query', description: 'Long description', enabled: true, security_level: 'public', selectable_env_groups: {}, user_env_vars: {}, security_prompt_template: null, default_data_source: null }
   vi.mocked(allSkills).mockResolvedValue([item] as never)
-  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's1', name: 'query', status: 'failed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: 'git clone failed' }], pending_approvals: [] })
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's1', name: 'query', status: 'failed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: 'git clone failed', mcp_oauth: false, mcp_authorized: false, mcp_authorized_at: null, mcp_authorized_by: null }], pending_approvals: [] })
   const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
   await flushPromises()
   expect(wrapper.findAll('.truncated-text-preview').map(node => node.text())).toEqual(['安装未完成 · git clone failed', 'Long description'])
   expect(wrapper.find('.el-table p').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+it('authorizes an OAuth MCP skill through the runtime and shows who authorized it', async () => {
+  const installed = { skill_id: 's3', name: 'figma', status: 'installed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: null, mcp_oauth: true, mcp_authorized: false, mcp_authorized_at: null, mcp_authorized_by: null }
+  vi.mocked(allSkills).mockResolvedValue([])
+  vi.mocked(skills.installed).mockResolvedValue({ items: [installed], pending_approvals: [] })
+  vi.mocked(skills.mcpLoginStart).mockResolvedValue({ session_id: 'session-1', authorization_url: 'https://auth.example.com/oauth?state=x', expires_in: 600 })
+  vi.mocked(skills.mcpLoginComplete).mockResolvedValue(undefined as never)
+  const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
+  await flushPromises()
+  expect(wrapper.get('[data-test="mcp-state"]').text()).toBe('未授权')
+  expect(wrapper.find('[data-test="mcp-revoke"]').exists()).toBe(false)
+  await wrapper.get('[data-test="mcp-authorize"]').trigger('click'); await flushPromises()
+  expect(skills.mcpLoginStart).toHaveBeenCalledWith('b1', 's3')
+  expect(wrapper.get('[data-test="mcp-open"]').attributes('href')).toBe('https://auth.example.com/oauth?state=x')
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ ...installed, mcp_authorized: true, mcp_authorized_at: '2026-10-12T00:00:00Z', mcp_authorized_by: '王小明' }], pending_approvals: [] })
+  await wrapper.get('textarea[data-test="mcp-callback"]').setValue(' http://127.0.0.1:5000/callback?code=abc&state=x ')
+  await wrapper.get('[data-test="mcp-complete"]').trigger('click'); await flushPromises()
+  expect(skills.mcpLoginComplete).toHaveBeenCalledWith('b1', 's3', { session_id: 'session-1', callback_url: 'http://127.0.0.1:5000/callback?code=abc&state=x' })
+  expect(wrapper.get('[data-test="mcp-state"]').text()).toBe('已由 王小明 授权')
+  expect(wrapper.find('[data-test="mcp-revoke"]').exists()).toBe(true)
+  wrapper.unmount()
+})
+
+it('asks to authorize again after the employee moved to another runtime', async () => {
+  vi.mocked(allSkills).mockResolvedValue([])
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's3', name: 'figma', status: 'installed', revision: 1, version: null, selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: null, mcp_oauth: true, mcp_authorized: false, mcp_authorized_at: '2026-10-12T00:00:00Z', mcp_authorized_by: '王小明' }], pending_approvals: [] })
+  const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
+  await flushPromises()
+  expect(wrapper.get('[data-test="mcp-state"]').text()).toBe('需重新授权（员工换了运行时）')
+  expect(wrapper.get('[data-test="mcp-authorize"]').text()).toBe('授权')
   wrapper.unmount()
 })

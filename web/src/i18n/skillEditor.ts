@@ -43,6 +43,12 @@ export const skillEditorZh = {
   rawHint: '粘贴 KEY=value；支持注释、export、引号与多行引号值。含 # 的值请加引号。不会执行命令或展开变量；已保存密钥仍为掩码。',
   addVariable: '添加变量', envInvalid: '环境变量格式无效。',
   envError: { syntax: '第 {line} 行格式无效，请使用 KEY=value；变量名须以大写字母开头。', duplicate: '第 {line} 行变量名重复，请合并或删除重复项。', quote: '第 {line} 行的引号未闭合。', key: '第 {line} 项变量名无效，请使用大写字母、数字和下划线，且以字母开头。' },
+  mcpOAuth: '需要 OAuth 授权', mcpOAuthHint: '远程 MCP 服务（如 Figma 官方 MCP）用 OAuth 登录：安装后，由员工管理员在员工的技能列表里授权。仓库同步的远程服务没有请求头时自动勾选。',
+  mcpAuthorize: '授权', mcpReauthorize: '重新授权', mcpRevoke: '撤销授权', mcpUnauthorized: '未授权', mcpStale: '需重新授权（员工换了运行时）', mcpAuthorizedBy: '已由 {name} 授权',
+  mcpDialogTitle: '授权 {name}', mcpIdentityHint: '授权的账号由这个 AI 员工使用：所有与它对话的人都以该账号的权限访问。',
+  mcpStep1: '1. 打开授权页面，登录要使用的账号并允许访问。链接 10 分钟内有效。', mcpOpen: '打开授权页面', mcpStarting: '正在让运行时发起授权…',
+  mcpStep2: '2. 授权后浏览器会跳到以 http://127.0.0.1 或 http://localhost 开头的地址，页面打不开是正常的。把地址栏里的完整地址粘贴到这里：',
+  mcpComplete: '完成授权', mcpDone: '授权完成', mcpRevokeConfirm: '撤销后这个 AI 员工将无法使用该 MCP 服务。确认撤销？', mcpRevoked: '已撤销授权',
 }
 export const skillEditorJa = {
   projectToken: 'Project Access Token（任意）', tokenPreserve: '設定済み。空欄で既存の token を保持', tokenPlaceholder: 'read_repository 権限のあるプロジェクトトークン',
@@ -89,4 +95,10 @@ export const skillEditorJa = {
   rawHint: 'KEY=value を貼り付けます。コメント・export・引用符・複数行に対応。# を含む値は引用符で囲んでください。コマンドや変数展開は実行しません。既存の秘密情報はマスクのままです。',
   addVariable: '変数を追加', envInvalid: '環境変数の形式が無効です。',
   envError: { syntax: '{line} 行目が無効です。大文字で始まる KEY=value を使用してください。', duplicate: '{line} 行目の変数名が重複しています。', quote: '{line} 行目の引用符が閉じられていません。', key: '{line} 項目の変数名が無効です。大文字で始まる英大文字・数字・アンダースコアを使用してください。' },
+  mcpOAuth: 'OAuth 認可が必要', mcpOAuthHint: 'リモート MCP サーバー（Figma 公式 MCP など）は OAuth でログインします。インストール後、AI 社員の管理者がスキル一覧から認可します。リポジトリから同期したヘッダーなしのリモートサーバーは自動でオンになります。',
+  mcpAuthorize: '認可', mcpReauthorize: '再認可', mcpRevoke: '認可を取り消す', mcpUnauthorized: '未認可', mcpStale: '再認可が必要（ランタイムが変わりました）', mcpAuthorizedBy: '{name} が認可済み',
+  mcpDialogTitle: '{name} を認可', mcpIdentityHint: '認可したアカウントはこの AI 社員が使います。対話するすべての人がそのアカウントの権限でアクセスします。',
+  mcpStep1: '1. 認可ページを開き、使うアカウントでログインしてアクセスを許可します。リンクは 10 分間有効です。', mcpOpen: '認可ページを開く', mcpStarting: 'ランタイムが認可を開始しています…',
+  mcpStep2: '2. 許可するとブラウザは http://127.0.0.1 または http://localhost で始まるアドレスに移動します。ページが開けないのは正常です。アドレスバーの完全な URL をここに貼り付けてください：',
+  mcpComplete: '認可を完了', mcpDone: '認可しました', mcpRevokeConfirm: '取り消すと、この AI 社員はこの MCP サーバーを使えなくなります。取り消しますか？', mcpRevoked: '認可を取り消しました',
 }
