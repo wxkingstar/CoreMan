@@ -336,6 +336,46 @@ def test_init_leaves_git_repository_skills_layout(agent):
     shared_workspace(agent)
     call(agent, "init")
     assert not (agent.root / "one/.claude").exists()
+    assert not (agent.root / "one/.gitignore").exists()
+
+
+def test_init_writes_gitignore_that_keeps_skills_and_mcp(agent):
+    import subprocess
+
+    call(agent, "init")
+    p = agent.root / "one"
+    (p / ".mcp.json").write_text("{}")
+    (p / ".claude/settings.local.json").write_text("{}")
+    (p / ".env").write_text("A=1\n")
+    subprocess.run(["git", "init", "-q"], cwd=p, check=True)
+    ignored = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "check-ignore",
+            "--no-index",
+            ".mcp.json",
+            ".agents/skills",
+            ".claude/skills",
+            "AGENTS.md",
+            ".claude/settings.local.json",
+            ".env",
+            ".coreman-workspace.json",
+        ],
+        cwd=p,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert ignored == [".claude/settings.local.json", ".env", ".coreman-workspace.json"]
+
+
+def test_init_keeps_existing_gitignore(agent):
+    p = agent.root / "one"
+    p.mkdir()
+    (p / ".gitignore").write_text("own\n")
+    call(agent, "init")
+    assert (p / ".gitignore").read_text() == "own\n"
 
 
 def test_skill_links_accept_directory_link(agent):
