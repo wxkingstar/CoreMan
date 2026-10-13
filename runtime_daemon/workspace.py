@@ -188,6 +188,23 @@ def link_skills(directory):
     alias.symlink_to("../.agents/skills", target_is_directory=True)
 
 
+GITIGNORE = f"""# 技能（.agents、.claude）与 MCP 配置（.mcp.json）随仓库提交，这里只排除本机文件。
+/{MARKER}
+.env
+.env.*
+.claude/settings.local.json
+"""
+
+
+def write_gitignore(directory):
+    """新目录写一份 .gitignore，AI 员工以后 git init 时技能与 MCP 配置一并提交。
+    已有 .gitignore 或已是 Git 仓库的目录归仓库管，不动。"""
+    target = directory / ".gitignore"
+    if (directory / ".git").exists() or target.exists() or target.is_symlink():
+        return
+    replace_file(target, GITIGNORE.encode())
+
+
 class InstructionsConflict(Exception):
     """Canonical instruction files require a user merge before initialization."""
 
@@ -258,6 +275,7 @@ class Workspace:
                 raise self.error("工作目录属于其他员工或所有权标记无效")
         self.instructions(root)
         link_skills(root)
+        write_gitignore(root)
         remove_legacy_instruction_excludes(root)
         exclude_marker(root)
         marker.write_text(
