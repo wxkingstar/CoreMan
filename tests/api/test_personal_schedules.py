@@ -125,7 +125,9 @@ def personal_job(bot, user, **kw):
     return CronJob(**{**values, **kw})
 
 
-async def click(session, bot, original, verb, state_id, *, operator="ou_human"):
+async def click(
+    session, bot, original, verb, state_id, *, operator="ou_human", chat_id="oc_private"
+):
     card = await session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
     card.status = "sent"
     card.payload = {**card.payload, "_feishu_message_id": "om_card"}
@@ -140,10 +142,10 @@ async def click(session, bot, original, verb, state_id, *, operator="ou_human"):
         platform_msg_id=str(uuid.uuid4()),
         kind="card_action",
         chat_type="group",
-        chat_id="oc_private",
+        chat_id=chat_id,
         sender_platform_user_id="human",
         sender_open_id=operator,
-        reply_context={"chat_id": "oc_private", "message_id": "om_card"},
+        reply_context={"chat_id": chat_id, "message_id": "om_card"},
         payload={
             "raw": {
                 "header": {
@@ -153,7 +155,7 @@ async def click(session, bot, original, verb, state_id, *, operator="ou_human"):
                 },
                 "event": {
                     "operator": {"user_id": "human", "open_id": operator},
-                    "context": {"open_chat_id": "oc_private", "open_message_id": "om_card"},
+                    "context": {"open_chat_id": chat_id, "open_message_id": "om_card"},
                     "action": {"value": action},
                 },
             }
@@ -168,7 +170,7 @@ async def click(session, bot, original, verb, state_id, *, operator="ou_human"):
             kind="card_action",
             lane="fast",
             payload={"card_action": action, "platform_user_id": "human"},
-            session_key="oc_private",
+            session_key=chat_id,
             inbound_event_id=event.id,
             dedupe_key=f"click:{event.id}",
         ),

@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,9 @@ from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.chat.personal import owner_data_rules
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import reply_once
+
+if TYPE_CHECKING:
+    from coreman.core.personal_schedules import GroupOrigin
 
 CONNECT_WORDS = (
     "连接企业微信",
@@ -293,6 +296,43 @@ async def _card_scope(
     return scope
 
 
+async def _group_card_scope(
+    session: AsyncSession, ctx: TaskContext, bot: Bot, inbound: InboundEvent, original: Task
+) -> GroupOrigin | None:
+    """群里的定时任务确认卡片：点的人必须就是 `original` 那条群消息的发言人，在同一个群里点。"""
+    from coreman.core import personal_schedules as schedules
+
+    raw = inbound.payload.get("raw") or {}
+    body = raw.get("body") if isinstance(raw, dict) else None
+    sender = body.get("from") if isinstance(body, dict) else None
+    clicker = inbound.sender_platform_user_id or ""
+    if (
+        not isinstance(body, dict)
+        or not isinstance(sender, dict)
+        or raw.get("cmd") != "aibot_event_callback"
+        or body.get("chattype") != "group"
+        or body.get("chatid") != inbound.chat_id
+        or sender.get("userid") != clicker
+        or inbound.platform != "wecom"
+        or inbound.kind != "card_action"
+        or inbound.chat_type != "group"
+        or inbound.bot_id != bot.id
+    ):
+        return None
+    speaker = await resolve_speaker(
+        session, platform="wecom", platform_user_id=clicker, resolver=ctx.openuserid
+    )
+    if not speaker.known or speaker.user_id is None:
+        return None
+    try:
+        scope = await schedules.verified_group_origin(session, original, str(speaker.user_id))
+    except ValueError:
+        return None
+    if clicker not in scope.sender_ids or inbound.chat_id != scope.chat_id:
+        return None
+    return scope
+
+
 async def handle_selection(
     session: AsyncSession,
     ctx: TaskContext,
@@ -464,7 +504,7 @@ async def handle_schedule(
     inbound: InboundEvent,
     action: dict[str, Any],
 ) -> str:
-    """本人确认或取消定时任务草稿。只有草稿来源私聊里的本人点了才算数。"""
+    """本人确认或取消定时任务草稿。只有草稿来源私聊或群里的本人点了才算数。"""
     from sqlalchemy import select
 
     from coreman.core import personal_schedules as schedules
@@ -489,7 +529,9 @@ async def handle_schedule(
         or ctx.task.cancel_requested_at
     ):
         return "ignored"
-    scope = await _card_scope(session, ctx, bot, inbound, original)
+    scope = await (_group_card_scope if inbound.chat_type == "group" else _card_scope)(
+        session, ctx, bot, inbound, original
+    )
     if scope is None:
         return "ignored"
     state = await session.scalar(

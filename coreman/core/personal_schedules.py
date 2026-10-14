@@ -5,7 +5,9 @@
 机器人的同事、本人在里面和机器人说过话的群。只有结果只发本人时，任务运行才能以本人身份用
 飞书或企业微信个人工具（见 feishu_personal.policy.self_only）。
 
-身份只来自已验证的私聊来源（飞书与企业微信各自的 policy.task_scope），从不取自调用方参数。
+身份只来自已验证的来源，从不取自调用方参数：本人私聊（飞书与企业微信各自的 policy.task_scope），
+或群聊里发言人本人打字发来的这一轮（group_scope）。群里发起时确认卡片发在群里、只认发言人本人点，
+结果默认发到这个群；要同时发本人私聊，本人得先私聊过这个机器人。
 新建、修改、重新启用都要本人点确认卡片：模型可能被聊天或工具结果里的内容诱导，而任务以后会
 以本人身份运行。暂停、删除、立即运行、查看不改变「以谁的身份跑什么」，直接执行。
 """
@@ -32,8 +34,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.bus import outbox
+from coreman.core.bus import outbox, tasks
 from coreman.core.chat import interactions
+from coreman.core.chat.identity import resolve_speaker
 from coreman.core.cron.precheck import PrecheckError, validate_script
 from coreman.core.cron.schedule import next_run
 from coreman.core.crypto import Cipher
@@ -74,6 +77,7 @@ CARD_EVENT = "personal_schedule"
 WECOM_CARD_PREFIX = "wecom_schedule"
 ACTION_TITLES = {"create": "创建", "update": "修改", "resume": "启用"}
 SELF_LABEL = "我（私聊）"
+SELF_IN_GROUP = "结果只发到你和机器人的私聊。"
 
 
 class ScheduleError(ValueError):
@@ -95,6 +99,19 @@ class Origin(Protocol):
     def chat_id(self) -> str: ...
     @property
     def scheduled(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class GroupOrigin:
+    """群聊里已核验的发言人本人。任务归他、以他的身份运行；确认卡片发在这个群里。"""
+
+    task: Task
+    bot: Bot
+    user_id: uuid.UUID
+    chat_id: str
+    # 发言人在这次回调里的平台 ID：点确认卡片的必须是其中之一。
+    sender_ids: frozenset[str]
+    scheduled: bool = False
 
 
 class _Arguments(BaseModel):
@@ -412,7 +429,7 @@ def _notice(draft: dict[str, Any]) -> str:
         draft.get("target_chats")
     )
     target = (
-        "结果只发到这个私聊。"
+        (SELF_IN_GROUP if draft.get("chat_type") == "group" else "结果只发到这个私聊。")
         if only_self
         else "结果会发给上面列出的接收人；发给别人时，执行中不会使用你的飞书或企业微信个人工具。"
     )
@@ -562,6 +579,27 @@ async def own_job(
     return job
 
 
+def group_defaults(args: Draft, chat_id: str) -> Draft:
+    """群里发起、没指定接收人时，结果只发到这个群，不需要本人私聊过机器人。"""
+    update: dict[str, Any] = {}
+    if "include_self" not in args.model_fields_set:
+        update["include_self"] = False
+    if "recipient_chat_ids" not in args.model_fields_set:
+        update["recipient_chat_ids"] = [chat_id]
+    return args.model_copy(update=update) if update else args
+
+
+async def private_chat_of(session: AsyncSession, bot: Bot, user_id: uuid.UUID) -> str:
+    """本人与这个机器人的私聊（真实私聊消息留下的记录）：群里发起、要发本人时的投递地址。"""
+    reached = await session.get(UserReached, (bot.id, user_id), populate_existing=True)
+    if reached is None or not reached.platform_chat_id:
+        raise ScheduleError(
+            "private_chat_required",
+            "你还没有私聊过这个机器人，结果没法发给你：先私聊它一次，或者只发到群里",
+        )
+    return reached.platform_chat_id
+
+
 async def open_draft(
     session: AsyncSession,
     origin: Origin,
@@ -574,6 +612,9 @@ async def open_draft(
     """校验草稿、存起来并发确认卡片。返回给模型的只有结果摘要，不会替用户确认。"""
     now = utcnow()
     bot = origin.bot
+    group = isinstance(origin, GroupOrigin)
+    if group:
+        args = group_defaults(args, origin.chat_id)
     try:
         result = plan(args.cron_expression, args.run_at, now)
         expires = expiry(args.expires_at, result, now)
@@ -586,6 +627,8 @@ async def open_draft(
             user_ids=args.recipient_user_ids,
             chat_ids=list(args.recipient_chat_ids),
         )
+        if group and args.include_self:
+            await private_chat_of(session, bot, origin.user_id)
     except ScheduleError as exc:
         return {"error": exc.code, "message": exc.message}
     if (job is None or not job.enabled) and await active_count(
@@ -600,6 +643,7 @@ async def open_draft(
     draft = {
         "user_id": str(origin.user_id),
         "chat_id": origin.chat_id,
+        "chat_type": "group" if group else "single",
         "origin_task_id": origin.task.id,
         "platform": bot.platform,
         "action": action,
@@ -756,14 +800,19 @@ async def apply_confirmed(
     draft: dict[str, Any],
     now: datetime,
 ) -> CronJob:
-    """本人点了确认：按当时的规则重新校验再落库。调用方已证明点击者与私聊来源。"""
+    """本人点了确认：按当时的规则重新校验再落库。调用方已证明点击者与草稿来源（私聊或群）。"""
     await require_schedule_actor(session, bot, actor)
+    group = draft.get("chat_type") == "group"
+    owner = str(actor.id)
+    # 升级前存下的草稿没有接收人字段，按只发本人处理。
+    wanted = [str(uid) for uid in draft.get("target_users", [owner])]
+    if group and owner in wanted:
+        # 要发本人时以本人私聊为锚点；群聊本身不能确立这个地址。
+        chat_id = await private_chat_of(session, bot, actor.id)
+    # 只发别处的群任务以发起的群为锚点，执行前重查本人仍在这个群里和机器人说过话。
     result = plan(draft.get("cron_expression") or None, draft.get("run_at"), now)
     expires = expiry(draft.get("expires_at"), result, now)
     script = check_precheck(draft.get("precheck_script"))
-    owner = str(actor.id)
-    # 升级前存下的草稿没有接收人字段，按只发本人处理。
-    wanted = [str(uid) for uid in draft.get("target_users") or [owner]]
     users, chats, _ = await resolve_targets(
         session,
         bot,
@@ -787,14 +836,15 @@ async def apply_confirmed(
         raise ScheduleError(
             "too_many_schedules", f"每人最多保留 {MAX_ACTIVE} 个启用中的定时任务，请先暂停或删除"
         )
-    # 与本人提醒一样：只有经过验证的本人私聊能确立这个投递地址。
-    await session.execute(
-        insert(UserReached)
-        .values(bot_id=bot.id, user_id=actor.id, platform_chat_id=chat_id)
-        .on_conflict_do_update(
-            index_elements=["bot_id", "user_id"], set_={"platform_chat_id": chat_id}
+    if not group:
+        # 与本人提醒一样：只有经过验证的本人私聊能确立这个投递地址。
+        await session.execute(
+            insert(UserReached)
+            .values(bot_id=bot.id, user_id=actor.id, platform_chat_id=chat_id)
+            .on_conflict_do_update(
+                index_elements=["bot_id", "user_id"], set_={"platform_chat_id": chat_id}
+            )
         )
-    )
     values: dict[str, Any] = {
         "name": str(draft["name"])[:NAME_MAX],
         "reminder_chat_id": chat_id,
@@ -826,9 +876,16 @@ create_confirmed = apply_confirmed
 
 
 async def require_personal(session: AsyncSession, job: CronJob, bot: Bot, actor: User) -> Speaker:
-    """调度与执行前的边界：仍归本人、接收人仍在允许范围内、本人仍可使用这个机器人。"""
+    """调度与执行前的边界：仍归本人、接收人仍在允许范围内、本人仍可使用这个机器人。
+
+    锚点（reminder_chat_id）是本人私聊；群里发起、不发本人的任务，锚点是发起的群，本人得仍在
+    那个群里和机器人说过话。
+    """
     identity = await require_schedule_actor(session, bot, actor)
     reached = await session.get(UserReached, (bot.id, actor.id), populate_existing=True)
+    private = reached is not None and reached.platform_chat_id == job.reminder_chat_id
+    groups = await known_groups(session, bot, actor.id) if job.target_chats or not private else []
+    anchored = private or (actor.id not in job.target_users and job.reminder_chat_id in groups)
     if (
         job.execution_mode != MODE
         or job.bot_id != bot.id
@@ -843,20 +900,17 @@ async def require_personal(session: AsyncSession, job: CronJob, bot: Bot, actor:
         or job.force_run_by not in (None, actor.id)
         or not job.reminder_chat_id
         or not 1 <= len(job.prompt) <= PROMPT_MAX
-        or reached is None
-        or reached.platform_chat_id != job.reminder_chat_id
+        or not anchored
     ):
         raise ApiError(403, 403, "invalid_personal_schedule")
-    if job.target_chats and not set(job.target_chats) <= set(
-        await known_groups(session, bot, actor.id)
-    ):
+    if job.target_chats and not set(job.target_chats) <= set(groups):
         raise ApiError(403, 403, "personal_schedule_chat_unavailable")
     return Speaker(identity.platform_user_id, actor.id, actor.login_name, actor.display_name)
 
 
 # ---- 技能凭据 -----------------------------------------------------------------------------
-# 私聊里下发给 CLI 的短期凭据：只指明任务、本人与签发时的会话。每次调用都按任务重新核验持久化
-# 的私聊来源（发言者就是本人），会话切换、任务结束、权限收回都会让它失效。定时执行不下发。
+# 私聊或群聊里下发给 CLI 的短期凭据：只指明任务、本人与签发时的会话。每次调用都按任务重新核验
+# 持久化的来源（发言者就是本人），会话切换、任务结束、权限收回都会让它失效。协作与定时执行不下发。
 
 AAD = "personal_schedules.capability.v1"
 ENV_PREFIX = "COREMAN_SCHEDULE_"
@@ -890,11 +944,16 @@ def read_capability(cipher: Cipher, token: str) -> Capability:
 
 
 async def origin_scope(session: AsyncSession, task_id: int, actor: str) -> Origin:
-    """本人仍在进行中的已验证私聊。平台由任务所属机器人决定，两边各自核验来源。"""
+    """本人仍在进行中的已验证私聊，或群聊里发言人本人的这一轮。平台由任务所属机器人决定。"""
     task = await session.get(Task, task_id, populate_existing=True)
     bot = await session.get(Bot, task.bot_id) if task else None
-    if bot is None or bot.platform not in PLATFORMS:
+    if task is None or bot is None or bot.platform not in PLATFORMS:
         raise ValueError("private_human_task_required")
+    event = (
+        await session.get(InboundEvent, task.inbound_event_id) if task.inbound_event_id else None
+    )
+    if event is not None and event.chat_type == "group":
+        return await group_scope(session, task, actor)
     if bot.platform == "wecom":
         from coreman.core.wecom_personal import policy as wecom_policy
 
@@ -902,3 +961,86 @@ async def origin_scope(session: AsyncSession, task_id: int, actor: str) -> Origi
     from coreman.core.feishu_personal import policy as feishu_policy
 
     return await feishu_policy.task_scope(session, task_id, actor)
+
+
+async def group_scope(session: AsyncSession, task: Task, actor: str) -> GroupOrigin:
+    """群聊里仍在进行的一轮人类对话；协作对话不算。"""
+    if (
+        task.kind != "chat"
+        or task.status not in tasks.ACTIVE
+        or task.cancel_requested_at
+        or task.payload.get("collaboration_id")
+        or task.payload.get("collaboration_phase")
+    ):
+        raise ValueError("group_human_task_required")
+    return await verified_group_origin(session, task, actor)
+
+
+def _group_message(platform: str, raw: dict[str, Any], event: InboundEvent) -> bool:
+    """原始回调就是这个群里、这位发送人打字发来的消息，与落库的列一致。"""
+    if platform == "feishu":
+        header, source = raw.get("header") or {}, raw.get("event") or {}
+        if not isinstance(header, dict) or not isinstance(source, dict):
+            return False
+        message, sender = source.get("message") or {}, source.get("sender") or {}
+        ids = sender.get("sender_id") if isinstance(sender, dict) else None
+        return (
+            isinstance(message, dict)
+            and isinstance(ids, dict)
+            and bool(header.get("tenant_key") and header.get("app_id"))
+            and sender.get("sender_type") == "user"
+            and message.get("chat_type") == "group"
+            and message.get("chat_id") == event.chat_id
+            and bool(event.sender_open_id)
+            and ids.get("open_id") == event.sender_open_id
+            and ids.get("user_id") == event.sender_platform_user_id
+            and (event.payload.get("sender") or {}).get("sender_type") == "user"
+        )
+    body = raw.get("body")
+    sender = body.get("from") if isinstance(body, dict) else None
+    return (
+        isinstance(body, dict)
+        and isinstance(sender, dict)
+        and raw.get("cmd") == "aibot_msg_callback"
+        and body.get("chattype") == "group"
+        and body.get("chatid") == event.chat_id
+        and sender.get("userid") == event.sender_platform_user_id
+    )
+
+
+async def verified_group_origin(session: AsyncSession, task: Task, actor: str) -> GroupOrigin:
+    """核验持久化的群聊来源：发言人本人打字发来的消息。任务生命周期由调用方另行检查。"""
+    event = (
+        await session.get(InboundEvent, task.inbound_event_id) if task.inbound_event_id else None
+    )
+    bot = await session.get(Bot, task.bot_id, populate_existing=True)
+    if (
+        task.kind != "chat"
+        or event is None
+        or bot is None
+        or bot.platform not in PLATFORMS
+        or event.bot_id != task.bot_id
+        or event.platform != bot.platform
+        or event.chat_type != "group"
+        or event.kind != "message"
+        or task.session_key != event.chat_id
+        or not event.sender_platform_user_id
+    ):
+        raise ValueError("group_chat_required")
+    raw = event.payload.get("raw") or {}
+    if not isinstance(raw, dict) or not _group_message(bot.platform, raw, event):
+        raise ValueError("verified_group_origin_required")
+    speaker = await resolve_speaker(
+        session, platform=bot.platform, platform_user_id=event.sender_platform_user_id
+    )
+    if not speaker.known or speaker.user_id is None or str(speaker.user_id) != actor:
+        raise ValueError("schedule_actor_mismatch")
+    allowed = list(
+        await session.scalars(select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == bot.id))
+    )
+    if not bot.enabled or (allowed and speaker.user_id not in allowed):
+        raise ValueError("schedule_permission_revoked")
+    ids = {event.sender_platform_user_id}
+    if event.sender_open_id:
+        ids.add(event.sender_open_id)
+    return GroupOrigin(task, bot, speaker.user_id, event.chat_id, frozenset(ids))

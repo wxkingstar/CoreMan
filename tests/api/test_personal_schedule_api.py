@@ -1,4 +1,4 @@
-"""技能管理本人定时任务：凭据只在本人已验证私聊里下发，只能管自己的任务，生效要本人点卡片。"""
+"""技能管理本人定时任务：凭据只在本人已验证私聊或群聊发言里下发，只能管自己的任务，生效要本人点卡片。"""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -84,11 +84,36 @@ async def spoke_in_group(session, bot, sender, chat_id="oc_team", platform="feis
     await session.commit()
 
 
+async def feishu_group_turn(session, bot, chat_id="oc_group", sender="human"):
+    """群里本人打字发来的一条消息（原始回调与落库的列一致）。"""
+    task = await chat_task(
+        session, bot, "每天提醒我", sender=sender, chat_type="group", chat_id=chat_id
+    )
+    event = await session.get(InboundEvent, task.inbound_event_id)
+    event.sender_open_id = "ou_" + sender
+    event.payload = {
+        **event.payload,
+        "sender": {**event.payload["sender"], "sender_type": "user"},
+        "raw": {
+            "header": {"tenant_key": "tenant-test", "app_id": "cli_test"},
+            "event": {
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"user_id": sender, "open_id": "ou_" + sender},
+                },
+                "message": {"chat_type": "group", "chat_id": chat_id},
+            },
+        },
+    }
+    await session.commit()
+    return task
+
+
 def body(**kw):
     return {"name": "日报汇总", "prompt": "汇总今天的日报", "cron_expression": "0 18 * * 1-5", **kw}
 
 
-async def test_only_a_verified_private_chat_gets_the_capability(db_session, app, db_engine):
+async def test_private_and_group_turns_get_the_capability(db_session, app, db_engine):
     from tests.api.test_feishu_personal_worker import intake_for
 
     bot, user, task = await feishu_setup(db_session, app)
@@ -104,10 +129,18 @@ async def test_only_a_verified_private_chat_gets_the_capability(db_session, app,
     assert (capability.task_id, capability.actor) == (task.id, str(user.id))
     assert env["KEEP"] == "1"
 
-    group_task = await chat_task(
-        db_session, bot, "每天提醒我", sender="human", chat_type="group", chat_id="oc_group"
-    )
+    group_task = await feishu_group_turn(db_session, bot)
     group_intake = await intake_for(db_session, bot, group_task, "每天提醒我")
+    prompt, env = await chat_schedules.configure(
+        db_session, build_ctx(db_engine, group_task), group_intake, uuid.uuid4(), "", forged
+    )
+    assert "这里是群聊" in prompt and "schedule_propose" not in prompt
+    capability = schedules.read_capability(app.state.cipher, env["COREMAN_SCHEDULE_TOKEN"])
+    assert (capability.task_id, capability.actor) == (group_task.id, str(user.id))
+
+    # 协作对话不下发，哪怕来源是群里的真人消息。
+    group_task.payload = {**group_task.payload, "collaboration_id": str(uuid.uuid4())}
+    await db_session.commit()
     prompt, env = await chat_schedules.configure(
         db_session, build_ctx(db_engine, group_task), group_intake, uuid.uuid4(), "", forged
     )
@@ -129,6 +162,7 @@ async def test_capability_is_bound_to_the_live_private_turn(client, app, db_sess
     task.status = "succeeded"
     await db_session.commit()
     assert (await client.get(URL, headers=headers)).status_code == 403
+    # 群里的消息核验不了原始回调（不是这位发送人打字发来的），也不给凭据。
     group_task = await chat_task(
         db_session, bot, "每天提醒我", sender="human", chat_type="group", chat_id="oc_group"
     )
@@ -336,25 +370,28 @@ async def test_cannot_touch_someone_elses_job(client, app, db_session, db_engine
     assert (await client.get(URL, headers=headers)).json()["data"]["items"] == []
 
 
-async def wecom_click(db_session, db_engine, bot, card_task_id, verb, clicker):
+async def wecom_click(db_session, db_engine, bot, card_task_id, verb, clicker, chat_id=None):
     from tests.api.test_wecom_personal import WECOM_BOT
 
     body_ = {
         "msgid": f"e-{uuid.uuid4()}",
         "aibotid": WECOM_BOT,
-        "chattype": "single",
+        "chattype": "group" if chat_id else "single",
         "from": {"userid": clicker},
         "msgtype": "event",
         "event": {"eventtype": "template_card_event"},
     }
+    if chat_id:
+        body_["chatid"] = chat_id
+    chat_id = chat_id or clicker
     action = {"task_id": card_task_id, "card_type": "button_interaction", "event_key": verb}
     event = InboundEvent(
         bot_id=bot.id,
         platform="wecom",
         platform_msg_id=body_["msgid"],
         kind="card_action",
-        chat_type="single",
-        chat_id=clicker,
+        chat_type=body_["chattype"],
+        chat_id=chat_id,
         sender_platform_user_id=clicker,
         payload={"card_action": action, "raw": {"cmd": "aibot_event_callback", "body": body_}},
         reply_context={"req_id": "click-req"},
@@ -367,8 +404,8 @@ async def wecom_click(db_session, db_engine, bot, card_task_id, verb, clicker):
             bot_id=bot.id,
             kind="card_action",
             lane="fast",
-            payload={"card_action": action, "platform_user_id": clicker, "chat_id": clicker},
-            session_key=clicker,
+            payload={"card_action": action, "platform_user_id": clicker, "chat_id": chat_id},
+            session_key=chat_id,
             inbound_event_id=event.id,
             dedupe_key=f"inbound:{event.id}",
         ),
@@ -439,3 +476,141 @@ async def test_wecom_credential_resume_turn_can_propose_and_the_owner_confirms(
     assert result == "personal_schedule_created"
     job = await db_session.scalar(select(CronJob))
     assert job.created_by == user.id and job.reminder_chat_id == SENDER
+
+
+@pytest.mark.parametrize("clicker", ["owner", "other"])
+async def test_group_speaker_drafts_in_the_group_and_only_they_confirm(
+    client, app, db_session, db_engine, clicker
+):
+    bot, user, _ = await feishu_setup(db_session, app)
+    task = await feishu_group_turn(db_session, bot)
+    headers = await auth(app, task, user)
+    assert (await client.get(URL, headers=headers)).status_code == 200
+
+    # 没指定接收人时只发本群，不需要私聊过机器人。
+    response = await client.post(URL + "/drafts", headers=headers, json=body())
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["recipients"] == ["群 oc_group"]
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert card.target["chat_id"] == "oc_group"
+
+    state = await db_session.scalar(select(InteractionState))
+    operator = "ou_human" if clicker == "owner" else "ou_someone"
+    pressed = await feishu_click(
+        db_session, bot, task, "confirm", state.id, operator=operator, chat_id="oc_group"
+    )
+    await CardActionHandler().run(build_ctx(db_engine, pressed))
+    await db_session.refresh(state)
+    job = await db_session.scalar(select(CronJob))
+    if clicker == "other":
+        assert state.status == "open" and job is None
+        return
+    assert state.status == "submitted"
+    assert job.created_by == user.id
+    assert (job.target_users, job.target_chats) == ([], ["oc_group"])
+    # 群聊不会确立本人私聊地址；锚点是发起的群。
+    assert job.reminder_chat_id == "oc_group"
+    assert await db_session.get(UserReached, (bot.id, user.id)) is None
+    user_row = await db_session.get(User, user.id)
+    await schedules.require_personal(db_session, job, bot, user_row)
+
+    await db_session.execute(OutboxItem.__table__.delete())
+    await db_session.commit()
+    await run_due(db_session, db_engine, job)
+    run = await db_session.scalar(select(CronRun))
+    assert run.status == "success", run.error_message
+    sent = (await db_session.scalars(select(OutboxItem))).all()
+    assert {item.target.get("chat_id") for item in sent} == {"oc_group"}
+
+    # 本人不再在这个群里说过话：锚点失效，执行前跳过。
+    await db_session.execute(
+        InboundEvent.__table__.update()
+        .where(InboundEvent.chat_id == "oc_group")
+        .values(sender_platform_user_id="someone", sender_open_id="ou_someone")
+    )
+    await db_session.commit()
+    with pytest.raises(Exception, match="invalid_personal_schedule"):
+        await schedules.require_personal(db_session, job, bot, user_row)
+
+
+async def test_group_speaker_needs_a_private_chat_only_to_receive_it_themselves(
+    client, app, db_session, db_engine
+):
+    bot, user, _ = await feishu_setup(db_session, app)
+    task = await feishu_group_turn(db_session, bot)
+    headers = await auth(app, task, user)
+    both = body(include_self=True, recipient_chat_ids=["oc_group"])
+    response = await client.post(URL + "/drafts", headers=headers, json=both)
+    assert response.status_code == 422
+    assert response.json()["errors"] == [{"type": "private_chat_required"}]
+
+    db_session.add(UserReached(bot_id=bot.id, user_id=user.id, platform_chat_id="oc_private"))
+    await db_session.commit()
+    response = await client.post(URL + "/drafts", headers=headers, json=both)
+    assert response.status_code == 200, response.text
+    state = await db_session.scalar(select(InteractionState))
+    pressed = await feishu_click(db_session, bot, task, "confirm", state.id, chat_id="oc_group")
+    await CardActionHandler().run(build_ctx(db_engine, pressed))
+    job = await db_session.scalar(select(CronJob))
+    assert (job.target_users, job.target_chats) == ([user.id], ["oc_group"])
+    assert job.reminder_chat_id == "oc_private"
+    reached = await db_session.get(UserReached, (bot.id, user.id), populate_existing=True)
+    assert reached.platform_chat_id == "oc_private"
+
+
+async def test_private_draft_without_self_stays_without_self(client, app, db_session, db_engine):
+    bot, user, task = await feishu_setup(db_session, app)
+    await spoke_in_group(db_session, bot, "human")
+    response = await client.post(
+        URL + "/drafts",
+        headers=await auth(app, task, user),
+        json=body(include_self=False, recipient_chat_ids=["oc_team"]),
+    )
+    assert response.status_code == 200, response.text
+    await confirm(db_session, db_engine, bot, task)
+    job = await db_session.scalar(select(CronJob))
+    assert (job.target_users, job.target_chats) == ([], ["oc_team"])
+
+
+async def test_someone_else_in_the_group_cannot_use_the_speakers_turn(client, app, db_session):
+    bot, user, _ = await feishu_setup(db_session, app)
+    other = await colleague(db_session, bot)
+    task = await feishu_group_turn(db_session, bot)
+    assert (await client.get(URL, headers=await auth(app, task, other))).status_code == 403
+    assert (await client.get(URL, headers=await auth(app, task, user))).status_code == 200
+
+
+@pytest.mark.parametrize("clicker", ["owner", "other"])
+async def test_wecom_group_speaker_confirms_in_the_group(
+    client, app, db_session, db_engine, clicker
+):
+    from tests.api.test_wecom_personal import SENDER
+    from tests.api.test_wecom_personal import setup as wecom_setup
+
+    bot, user, task = await wecom_setup(db_session, app, chat_type="group")
+    response = await client.post(
+        URL + "/drafts",
+        headers=await auth(app, task, user),
+        json=body(run_at=None, cron_expression="0 9 * * 1"),
+    )
+    assert response.status_code == 200, response.text
+    details, card = (await db_session.scalars(select(OutboxItem).order_by(OutboxItem.id))).all()
+    assert details.target["chat_id"] == card.target["chat_id"] == "group-1"
+    who = SENDER if clicker == "owner" else "wo-someone-else"
+    result = await wecom_click(
+        db_session,
+        db_engine,
+        bot,
+        card.payload["card"]["task_id"],
+        "confirm",
+        who,
+        chat_id="group-1",
+    )
+    job = await db_session.scalar(select(CronJob))
+    if clicker == "other":
+        assert result == "ignored" and job is None
+        return
+    assert result == "personal_schedule_created"
+    assert job.created_by == user.id
+    assert (job.target_users, job.target_chats) == ([], ["group-1"])
+    assert job.reminder_chat_id == "group-1"
