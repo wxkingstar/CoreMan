@@ -1,6 +1,6 @@
-"""技能管理本人定时任务的接口：凭据来自本人已验证私聊的这一轮，只能管自己在这个机器人上的任务。
+"""技能管理本人定时任务的接口：凭据来自本人已验证私聊或群聊发言的这一轮，只能管自己在这个机器人上的任务。
 
-身份只由凭据指向的任务核验得出（飞书与企业微信各自核验私聊来源），请求里不接受任何用户参数。
+身份只由凭据指向的任务核验得出（私聊或群聊来源，飞书与企业微信各自核验），请求里不接受任何用户参数。
 新建、修改、重新启用只生成草稿并发确认卡片，本人点确认才落库；暂停、删除、立即运行、查看直接执行。
 """
 
@@ -44,11 +44,11 @@ async def origin(
     try:
         scope = await schedules.origin_scope(session, capability.task_id, capability.actor)
     except (ValueError, KeyError, TypeError):
-        raise ApiError(403, 403, "Verified private owner task required") from None
+        raise ApiError(403, 403, "Verified owner task required") from None
     # 会话被重置或切换后，旧一轮的凭据不再代表当前对话。
     base = await session.get(ChatSession, (scope.bot.id, scope.task.session_key))
     if base is None or base.relay_session_id != capability.session_id:
-        raise ApiError(403, 403, "Private conversation changed")
+        raise ApiError(403, 403, "Conversation changed")
     return scope
 
 

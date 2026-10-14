@@ -1,4 +1,8 @@
-"""Human-only Feishu cards (consent, schedule confirmation), bound to a verified private chat."""
+"""Human-only Feishu cards (consent, schedule confirmation), bound to a verified origin.
+
+Consent cards live in a verified private chat; schedule confirmations may also live in the group
+where the owner asked for the task, and only the owner's click there counts.
+"""
 
 from __future__ import annotations
 
@@ -86,6 +90,39 @@ async def card_owner_scope(
         or operator.get("user_id") != scope.platform_user_id
         or operator.get("open_id") != scope.open_id
         or inbound.sender_open_id != scope.open_id
+    ):
+        return None
+    return scope
+
+
+async def group_card_scope(
+    session: AsyncSession, original: Task, inbound: InboundEvent
+) -> schedules.GroupOrigin | None:
+    """群里的确认卡片：点的人必须就是 `original` 那条群消息的发言人，在同一个群里点。
+
+    调用方另行核验卡片确实是我们发到这个群的。
+    """
+    speaker = await resolve_speaker(
+        session, platform="feishu", platform_user_id=inbound.sender_platform_user_id or ""
+    )
+    if not speaker.known or speaker.user_id is None:
+        return None
+    try:
+        scope = await schedules.verified_group_origin(session, original, str(speaker.user_id))
+    except ValueError:
+        return None
+    raw = inbound.payload.get("raw") or {}
+    header, event = raw.get("header") or {}, raw.get("event") or {}
+    operator, context = event.get("operator") or {}, event.get("context") or {}
+    if (
+        header.get("event_type") != "card.action.trigger"
+        or inbound.chat_id != scope.chat_id
+        or context.get("open_chat_id") != scope.chat_id
+        or context.get("open_message_id") != inbound.reply_context.get("message_id")
+        or operator.get("user_id") != inbound.sender_platform_user_id
+        or operator.get("open_id") != inbound.sender_open_id
+        or operator.get("user_id") not in scope.sender_ids
+        or operator.get("open_id") not in scope.sender_ids
     ):
         return None
     return scope
@@ -215,7 +252,7 @@ async def handle_schedule(
     inbound: InboundEvent,
     action: dict[str, Any],
 ) -> str:
-    """本人确认或取消模型拟好的定时任务。只有卡片发给的那个私聊里的本人点了才算数。"""
+    """本人确认或取消模型拟好的定时任务。只有卡片所在私聊或群里的本人点了才算数。"""
     verb, _, state_id = str(action.get("level") or "").partition(":")
     if verb not in ("confirm", "cancel"):
         return "ignored"
@@ -235,7 +272,12 @@ async def handle_schedule(
             or inbound.bot_id != bot.id
         ):
             return "ignored"
-        scope = await card_owner_scope(session, original, inbound)
+        origin = await session.get(InboundEvent, original.inbound_event_id)
+        scope: policy.Scope | schedules.GroupOrigin | None = (
+            await group_card_scope(session, original, inbound)
+            if origin is not None and origin.chat_type == "group"
+            else await card_owner_scope(session, original, inbound)
+        )
         if scope is None:
             return "ignored"
         state = await session.scalar(
@@ -278,7 +320,7 @@ async def settle(
 ) -> tuple[str, str]:
     """两个平台共用：按本人的点击确认或取消草稿，返回 (结果, 要换到卡片上的文字)。
 
-    调用方已证明点击者就是草稿的本人、点在草稿来源的那个私聊里。
+    调用方已证明点击者就是草稿的本人、点在草稿来源的那个私聊或群里。
     """
     draft = state.state
     action = draft.get("action") or "create"
@@ -312,7 +354,7 @@ async def settle(
     manage = ctx.public_base_url.rstrip("/") + "/self-reminders"
     targets = draft.get("recipient_labels") or [schedules.SELF_LABEL]
     delivered = (
-        "结果只发到这个私聊。"
+        (schedules.SELF_IN_GROUP if draft.get("chat_type") == "group" else "结果只发到这个私聊。")
         if targets == [schedules.SELF_LABEL]
         else "结果发给：" + "、".join(targets) + "。"
     )
