@@ -258,6 +258,10 @@ async def test_external_denial_or_removed_provider_does_not_issue_a_local_token(
     assert "ERP" in access.prompt and "DO NOT ECHO" not in access.prompt
     assert json.loads(access.env["COREMAN_SYSTEMS"]) == []
     assert (await db_session.execute(select(JwtKey))).first() is None
+    # 给用户能照做的说法、不给错误码，并提醒模型其他途径照常可用。
+    assert "数据库" in access.note and "access_denied" not in access.note
+    assert ("开通这个系统的权限" in access.note) is configured
+    assert "CoreMan 管理员" in access.note
 
 
 async def test_external_provider_keeps_token_and_actual_expiry_and_isolates_systems(
@@ -329,6 +333,7 @@ async def test_external_provider_keeps_token_and_actual_expiry_and_isolates_syst
     assert all(f["username"] == ["alice.w"] and f["expires_in"] == ["28800"] for f in sent)
     assert access.env["BOT_TOKEN_ERP"] == "issued.with.actor-and-roles"
     assert "BOT_TOKEN_CLOUD" in access.env and "BOT_TOKEN_DENIED" not in access.env
+    assert "Denied：" in access.note and "ERP" not in access.note
     assert (
         "service-secret" not in repr(access) and "issued.with.actor-and-roles" not in access.prompt
     )

@@ -172,6 +172,24 @@ SUBJECT_UNAVAILABLE_NOTES = {
         "处理账号邮箱冲突。不要尝试用其他账号、推测的账号或历史凭据代替。"
     ),
 }
+# 某些系统签发失败时的本轮说明。签发是每轮按授权预先做的，失败不代表用户要用这些系统：
+# 模型曾因此放着数据库等能完成请求的途径不用，只回一个错误码让用户「找管理员」。
+ISSUE_FAILURE_NOTE = (
+    "- 业务系统：以下系统本轮无法以当前发言者身份调用接口。这只影响这些系统的接口：用户的请求"
+    "能用你已有的其他途径（数据库、技能、文件等）完成时照常完成，不必提起这些系统；确实只能"
+    "靠这些系统时，按下面的说法告诉用户原因和该怎么做，不要只给错误码。"
+    "不得用其他人的令牌或历史令牌调用这些系统。"
+)
+ADMIN_HINT = "平台配置有问题，请用户联系 CoreMan 管理员处理"
+RETRY_HINT = "请用户稍后重新提问；持续出现请联系 CoreMan 管理员"
+ISSUE_FAILURE_HINTS = {
+    "access_denied": (
+        "统一登录拒绝为当前发言者签发该系统的令牌，通常是其账号还没有开通这个系统的权限。"
+        "请用户找该系统的管理员开通权限，开通后重新提问；确认已开通仍不行再联系 CoreMan 管理员"
+    ),
+    "issuer_unavailable": "统一登录服务暂时不可用，" + RETRY_HINT,
+    "invalid_response": "统一登录服务返回异常，" + RETRY_HINT,
+}
 IDENTITY_UNAVAILABLE_NOTE = (
     "- 业务系统：本轮发言者身份未验证或账号不可用，本轮**没有**任何业务系统凭据可用。"
     "不要尝试用其他账号、推测的账号或历史凭据代替。"
@@ -290,10 +308,7 @@ async def build_system_access(
                 providers=providers,
             )
         except TokenProviderError as exc:
-            failures.append(
-                f"- 业务系统 {system.name}（{system.key}）：本轮未获得访问令牌（{exc.code}），"
-                "请联系管理员检查令牌提供方和当前用户授权。不得改用其他身份或历史凭据。"
-            )
+            failures.append(f"  - {system.name}：{ISSUE_FAILURE_HINTS.get(exc.code, ADMIN_HINT)}")
             continue
         env_var = token_env_var(system.key)
         env[env_var] = token.value
@@ -331,4 +346,5 @@ async def build_system_access(
         env[catalog_policy.TOKEN_ENV] = catalog_policy.issue_capability(
             cipher, task_id=catalog.task_id, user_id=user.id, ttl_seconds=catalog.ttl_seconds
         )
-    return SystemAccess(env, prompt, subject=subject, issued=issued, note="\n".join(failures))
+    note = "\n".join([ISSUE_FAILURE_NOTE, *failures]) if failures else ""
+    return SystemAccess(env, prompt, subject=subject, issued=issued, note=note)
