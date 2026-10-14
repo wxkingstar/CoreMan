@@ -376,7 +376,9 @@ class Agent:
                     raise OperationError("记忆总量过大，请按工作目录分别回收")
         return result
 
-    def deploy_memory(self, memories: list[dict], protocol_version: int = 1) -> int:
+    def deploy_memory(
+        self, memories: list[dict], protocol_version: int = 1, overwrite: bool = False
+    ) -> int:
         targets = []
         for row in memories:
             name, content = str(row.get("file_name", "")), str(row.get("content", ""))
@@ -403,7 +405,8 @@ class Agent:
                     or row.get("content_hash") != hashlib.sha256(content.encode()).hexdigest()
                 ):
                     raise OperationError("记忆快照字段或校验值不合法")
-                if target.exists():
+                # overwrite：换机时以源记忆为准，目标上较新的同名文件也覆盖。
+                if target.exists() and not overwrite:
                     if target.stat().st_size > MAX_MEMORY:
                         raise OperationError("目标记忆文件过大，不能覆盖")
                     if target.stat().st_mtime > mtime + 0.001 and (
@@ -987,6 +990,8 @@ class Agent:
                 "memory_protocol": 2,
                 "memory_read": True,
                 "workspace_protocol": 1,
+                # 换机复制可整体替换已有目录、带上 .git，记忆部署可强制覆盖目标。
+                "workspace_replace": True,
                 "mcp_oauth": 1,
             }
         if kind == "status":
@@ -1042,7 +1047,9 @@ class Agent:
                     "success": True,
                     "protocol_version": 2,
                     "count": self.deploy_memory(
-                        data.get("memories", []), data.get("protocol_version", 1)
+                        data.get("memories", []),
+                        data.get("protocol_version", 1),
+                        overwrite=data.get("overwrite") is True,
                     ),
                 }
         raise OperationError("不支持的操作")

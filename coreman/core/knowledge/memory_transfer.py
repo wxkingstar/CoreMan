@@ -77,6 +77,7 @@ async def deploy(
     cipher: Cipher | None,
     *,
     target_directory: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     memories = list(
         await session.scalars(
@@ -90,6 +91,7 @@ async def deploy(
         payload = {
             "protocol_version": 2,
             "bot_id": str(bot.id),
+            "overwrite": overwrite,
             "memories": [
                 {
                     "working_dir": target_directory or bot.working_dir,

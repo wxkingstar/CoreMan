@@ -241,6 +241,67 @@ def test_finish_retry_after_destination_conflict(agent):
     assert call(agent, "finish", transfer_id=transfer)["installed"]
 
 
+def copy_to(agent, target, **finish):
+    manifest = call(agent, "export")["manifest"]
+    transfer = str(uuid.uuid4())
+    call(agent, "import", working_dir=target, transfer_id=transfer, manifest=manifest)
+    for entry in manifest:
+        if "link" not in entry:
+            data = call(agent, "read", path=entry["path"], transfer_id=transfer)["data"]
+            call(
+                agent,
+                "import",
+                working_dir=target,
+                transfer_id=transfer,
+                path=entry["path"],
+                data=data,
+                offset=0,
+            )
+    call(agent, "finish", working_dir=target, transfer_id=transfer, **finish)
+    return manifest
+
+
+def test_transfer_replaces_target_and_carries_git(agent):
+    assert agent.dispatch({"type": "ping"})["workspace_replace"] is True
+    call(agent, "init")
+    source = agent.root / "one"
+    (source / "a.txt").write_text("hello")
+    (source / ".git/objects/ab").mkdir(parents=True)
+    (source / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (source / ".git/objects/ab/cd").write_bytes(b"object")
+    (source / ".git/objects/ab/cd").chmod(0o444)
+    (source / ".env").write_text("SECRET=x")
+    target = agent.root / "two"
+    (target / "node_modules").mkdir(parents=True)
+    (target / "node_modules/x.js").write_text("old")
+    (target / "old.txt").write_text("old")
+    (target / ".git").mkdir()
+    (target / ".git/old").write_text("old")
+
+    manifest = copy_to(agent, "two", replace=True)
+    assert ".git/HEAD" in [entry["path"] for entry in manifest]
+    assert (target / "a.txt").read_text() == "hello"
+    assert not (target / "old.txt").exists() and not (target / "node_modules").exists()
+    assert (target / ".git/HEAD").read_text() == "ref: refs/heads/main\n"
+    assert (target / ".git/objects/ab/cd").read_bytes() == b"object"
+    assert not (target / ".git/old").exists() and not (target / ".env").exists()
+    assert call(agent, "info", working_dir="two")["owned"]
+    assert not [p for p in agent.root.iterdir() if p.name.startswith(".coreman-transfer-")]
+    # 文件管理仍看不到 .git，只有带迁移标识的读取能取到。
+    with pytest.raises(OperationError):
+        call(agent, "read", path=".git/HEAD")
+    assert ".git" not in [entry["name"] for entry in call(agent, "list")["entries"]]
+
+
+def test_transfer_never_replaces_another_employees_directory(agent):
+    call(agent, "init")
+    call(agent, "init", working_dir="two", bot_id=2)
+    (agent.root / "two" / "theirs.txt").write_text("keep")
+    with pytest.raises(OperationError, match="其他员工"):
+        copy_to(agent, "two", replace=True)
+    assert (agent.root / "two" / "theirs.txt").read_text() == "keep"
+
+
 def test_memory_operations_enforce_supplied_owner(agent):
     call(agent, "init")
     with pytest.raises(OperationError):
