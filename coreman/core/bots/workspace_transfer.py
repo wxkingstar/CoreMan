@@ -39,10 +39,11 @@ def claimable(info: dict[str, Any]) -> bool:
     return bool(info.get("owned")) or info.get("marked", True) is False
 
 
-async def require_workspace(relay: RelayServer, cipher: Cipher | None) -> None:
+async def require_workspace(relay: RelayServer, cipher: Cipher | None) -> dict[str, Any]:
     result = await call_agent(relay, cipher, "ping")
     if result.get("workspace_protocol") != 1:
         raise ApiError(409, 409, "请先升级运行时，以支持工作目录管理")
+    return result
 
 
 async def initialize_workspace(session: AsyncSession, bot: Bot, cipher: Cipher | None) -> None:
@@ -110,7 +111,11 @@ async def copy_files(
     directory: str,
     cipher: Cipher | None,
     operation_id: uuid.UUID,
+    *,
+    occupied: bool,
+    capability: dict[str, Any],
 ) -> None:
+    """用源目录完全覆盖目标目录（含 .git）；目标原有内容整体替换掉。"""
     src = {"working_dir": bot.working_dir, "bot_id": str(bot.id)}
     dst: dict[str, Any] = {
         "working_dir": directory,
@@ -121,6 +126,10 @@ async def copy_files(
     manifest = export.get("manifest")
     if not isinstance(manifest, list) or len(manifest) > 10000:
         raise ApiError(502, 502, "源文件清单无效")
+    if not capability.get("workspace_replace") and (
+        occupied or any(".git" in PurePosixPath(entry["path"]).parts for entry in manifest)
+    ):
+        raise ApiError(409, 409, "目标运行时版本较旧，不能覆盖已有目录或复制 .git，请先升级运行时")
     await call_agent(target, cipher, "workspace-import", {**dst, "manifest": manifest})
     for entry in manifest:
         if "link" in entry:
@@ -137,6 +146,7 @@ async def copy_files(
                 "workspace-read",
                 {
                     **src,
+                    "transfer_id": str(operation_id),
                     "path": entry["path"],
                     "offset": offset,
                     "length": CHUNK_SIZE,
@@ -167,6 +177,7 @@ async def copy_files(
             **dst,
             "manifest": manifest,
             "content": instruction_content(bot),
+            "replace": True,
         },
     )
 
@@ -203,7 +214,7 @@ async def prepare_switch(
     await session.commit()
     try:
         async with asyncio.timeout(25 * 60):
-            await require_workspace(target, cipher)
+            capability = await require_workspace(target, cipher)
             info = await call_agent(
                 target,
                 cipher,
@@ -213,11 +224,14 @@ async def prepare_switch(
                     "bot_id": str(bot.id),
                 },
             )
+            occupied = bool(info.get("exists") and not info.get("empty"))
             if not same_directory:
                 if mode == "existing":
                     if not info.get("exists") or not claimable(info):
                         raise ApiError(409, 409, "目标目录不存在或属于其他员工，请选择复制当前文件")
-                elif info.get("exists") and not info.get("empty"):
+                elif occupied and not claimable(info):
+                    raise ApiError(409, 409, "目标目录属于其他员工，不能覆盖，请选择其他目录")
+                elif occupied and not old:
                     raise ApiError(409, 409, "目标目录已有内容，请明确复用本员工目录或选择新的目录")
             bot.workspace_phase = "回收最新记忆"
             await session.commit()
@@ -242,7 +256,16 @@ async def prepare_switch(
                 )
             elif old:
                 await require_workspace(old, cipher)
-                await copy_files(bot, old, target, directory, cipher, operation_id)
+                await copy_files(
+                    bot,
+                    old,
+                    target,
+                    directory,
+                    cipher,
+                    operation_id,
+                    occupied=occupied,
+                    capability=capability,
+                )
             else:
                 await call_agent(
                     target,
@@ -256,7 +279,9 @@ async def prepare_switch(
                 )
             bot.workspace_phase = "部署并校验记忆"
             await session.commit()
-            await memory_transfer.deploy(session, bot, target, cipher, target_directory=directory)
+            await memory_transfer.deploy(
+                session, bot, target, cipher, target_directory=directory, overwrite=True
+            )
             # Reacquire lock before final binding, fail closed on stale operation identity.
             await session.refresh(bot, with_for_update=True)
             if bot.workspace_operation_id != operation_id:

@@ -60,9 +60,10 @@ def untracked_diff(name, path):
     return header + "".join(f"+{line}\n" for line in lines)
 
 
-def forbidden(name):
+def forbidden(name, transfer=False):
+    """transfer=True 用于换机复制：.git 随工作目录一起迁移，文件管理里仍然看不到它。"""
     return any(
-        p in EXCLUDED
+        (p in EXCLUDED and not (transfer and p == ".git"))
         or p.startswith(".env")
         or p.startswith(".coreman-")
         or p.lower().endswith((".pem", ".key", ".p12", ".pfx"))
@@ -237,18 +238,18 @@ class Workspace:
         ):
             raise self.error("工作目录属于其他员工或所有权标记无效")
 
-    def path(self, name, root=None, allow_link=False):
+    def path(self, name, root=None, allow_link=False, transfer=False):
         root = root or self.root
         if not isinstance(name, str) or "\x00" in name or "\\" in name:
             raise self.error("文件路径无效")
         p = PurePosixPath(name)
-        if p.is_absolute() or ".." in p.parts or forbidden(name):
+        if p.is_absolute() or ".." in p.parts or forbidden(name, transfer):
             raise self.error("该文件路径不允许访问")
         target = root / p
         resolved = target.resolve()
         if not resolved.is_relative_to(root.resolve()):
             raise self.error("文件超出工作目录")
-        if forbidden(resolved.relative_to(root.resolve()).as_posix()):
+        if forbidden(resolved.relative_to(root.resolve()).as_posix(), transfer):
             raise self.error("链接目标不允许访问")
         current = root
         for part in p.parts:
@@ -366,7 +367,9 @@ class Workspace:
         return {"entries": entries[:1000], "truncated": len(entries) > 1000}
 
     def read(self):
-        path = self.path(self.data["path"], allow_link=True)
+        path = self.path(
+            self.data["path"], allow_link=True, transfer=bool(self.data.get("transfer_id"))
+        )
         if not path.is_file() or path.stat().st_size > MAX_TOTAL:
             raise self.error("文件类型或大小不支持")
         offset = int(self.data.get("offset", 0))
@@ -416,7 +419,7 @@ class Workspace:
             for name in list(dirs) + files:
                 path = Path(parent) / name
                 rel = path.relative_to(self.root).as_posix()
-                if forbidden(rel):
+                if forbidden(rel, transfer=True):
                     excluded.append(rel)
                     if name in dirs:
                         dirs.remove(name)
@@ -428,7 +431,9 @@ class Workspace:
                     if (
                         os.path.isabs(link)
                         or not path.resolve().is_relative_to(self.root)
-                        or forbidden(path.resolve().relative_to(self.root).as_posix())
+                        or forbidden(
+                            path.resolve().relative_to(self.root).as_posix(), transfer=True
+                        )
                     ):
                         excluded.append(rel)
                         continue
@@ -468,7 +473,7 @@ class Workspace:
         seen, total = set(), 0
         for entry in manifest:
             name = entry["path"]
-            p = self.path(name, root, allow_link="link" in entry)
+            p = self.path(name, root, allow_link="link" in entry, transfer=True)
             if (
                 not name
                 or str(PurePosixPath(name)) != name
@@ -483,7 +488,7 @@ class Workspace:
                 if (
                     os.path.isabs(link)
                     or not target.is_relative_to(root.resolve())
-                    or forbidden(target.relative_to(root.resolve()).as_posix())
+                    or forbidden(target.relative_to(root.resolve()).as_posix(), transfer=True)
                 ):
                     raise self.error("迁移链接越界")
             else:
@@ -515,7 +520,7 @@ class Workspace:
             )
             for entry in manifest:
                 if "link" not in entry and entry["size"] == 0:
-                    p = self.path(entry["path"], files)
+                    p = self.path(entry["path"], files, transfer=True)
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.touch()
         record = json.loads(meta.read_text())
@@ -536,7 +541,7 @@ class Workspace:
         ):
             raise self.error("迁移分块超过大小限制")
         raw = base64.b64decode(self.data["data"], validate=True)
-        p = self.path(entry["path"], files)
+        p = self.path(entry["path"], files, transfer=True)
         received = p.stat().st_size if p.exists() else 0
         if (
             len(raw) > CHUNK
@@ -549,8 +554,8 @@ class Workspace:
             f.write(raw)
         return {"received": received + len(raw)}
 
-    def install(self, files):
-        if self.root.exists():
+    def install(self, files, replace=False):
+        if self.root.exists() and not replace:
             names = [p.name for p in self.root.iterdir()]
             if names and not (names == [MARKER] and self.owned()):
                 raise self.error("目标工作目录非空，未覆盖已有文件")
@@ -558,6 +563,9 @@ class Workspace:
                 (self.root / MARKER).unlink()
             self.root.rmdir()
         self.init(files)
+        if self.root.exists():
+            # 换机「复制当前文件」即完全覆盖：原目录整体挪进暂存目录，随暂存目录一起删除。
+            self.root.rename(files.parent / "replaced")
         files.rename(self.root)
 
     def finish(self):
@@ -578,21 +586,22 @@ class Workspace:
         for entry in record["manifest"]:
             if "link" in entry:
                 continue
-            p = self.path(entry["path"], files)
+            p = self.path(entry["path"], files, transfer=True)
             if not p.is_file() or p.stat().st_size != entry["size"] or digest(p) != entry["hash"]:
                 raise self.error("迁移文件不完整或校验失败")
             p.chmod(int(entry.get("mode", 0o644)) & 0o777)
         for entry in record["manifest"]:
             if "link" in entry:
-                p = self.path(entry["path"], files, allow_link=True)
+                p = self.path(entry["path"], files, allow_link=True, transfer=True)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 if p.is_symlink():
                     if os.readlink(p) != entry["link"]:
                         raise self.error("迁移链接发生变化")
                 else:
                     p.symlink_to(entry["link"])
-        self.install(files)
-        shutil.rmtree(stage)
+        self.install(files, replace=self.data.get("replace") is True)
+        # 被替换的旧目录里可能有删不掉的只读目录；文件已经就位，清理失败不影响结果。
+        shutil.rmtree(stage, ignore_errors=True)
         return {"installed": True}
 
     def git(self, args):

@@ -185,4 +185,31 @@ describe('SwitchRelayDialog', () => {
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
     wrapper.unmount()
   })
+
+  // 复制当前文件：目标已有内容时提示会整体覆盖并允许切换，其他员工的目录仍然拦住。
+  it('copies over an occupied target after warning but never over another employee', async () => {
+    const occupied = { directory: '/home/ai/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, memory_snapshot_at: null }
+    vi.mocked(workspace.preview).mockResolvedValueOnce(occupied).mockResolvedValueOnce({ ...occupied, marked: true })
+    vi.mocked(bots.switchRelay).mockClear()
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/demo' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; checkTarget: () => Promise<void>; confirm: () => Promise<void>; targetDirectory: string }
+    await vm.pick('r2')
+    vm.targetDirectory = '/home/ai/demo'
+    await vm.checkTarget()
+    await flushPromises()
+    expect(document.querySelector('[data-test="workspace-replace"]')!.textContent).toContain('.git')
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
+    await vm.confirm()
+    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'copy' }), 1)
+    await vm.checkTarget()
+    await flushPromises()
+    expect(document.querySelector('[data-test="workspace-unclaimable"]')).not.toBeNull()
+    expect(document.querySelector('[data-test="workspace-replace"]')).toBeNull()
+    expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
+    wrapper.unmount()
+  })
 })

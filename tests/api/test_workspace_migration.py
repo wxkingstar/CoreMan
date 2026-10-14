@@ -301,6 +301,164 @@ async def test_copy_moves_real_files_and_memory_before_binding(
     assert reinstalled == [(target.id, [skill.id], bot.created_by)]
 
 
+async def test_copy_replaces_occupied_target_with_git_and_newer_memory(
+    client, db_session, monkeypatch, tmp_path
+):
+    import os
+    import time
+
+    from coreman.core.bots import switch_relay as switch_module
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import BotSkill, RuntimeNode, Skill, SkillSource
+    from runtime_daemon.agent import Agent, OperationError
+
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    src_root, dst_root = tmp_path / "source", tmp_path / "destination"
+    src_root.mkdir()
+    dst_root.mkdir()
+    source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
+    source_node.workspace_root = str(src_root)
+    bot.working_dir = str(src_root / bot.bot_key)
+    target = await add_node_relay(db_session, name="target", workspace_root=str(dst_root))
+    source_row = SkillSource(key="tools", label="Tools", git_url="https://github.com/example/s.git")
+    db_session.add(source_row)
+    await db_session.flush()
+    skills = [Skill(name=name, source_id=source_row.id, enabled=True) for name in "abc"]
+    db_session.add_all(skills)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            BotSkill(bot_id=bot.id, skill_id=skills[0].id, status="installed"),
+            # 之前重装失败、停在失败状态的也要重装；从没装成功的不算。
+            BotSkill(bot_id=bot.id, skill_id=skills[1].id, status="failed", installed_at=utcnow()),
+            BotSkill(bot_id=bot.id, skill_id=skills[2].id, status="failed"),
+        ]
+    )
+    await db_session.commit()
+    reinstalled = []
+
+    async def reinstall(session, cipher, *, bot, rows, actor):
+        reinstalled.append(sorted(r.skill_id for r in rows))
+
+    monkeypatch.setattr(switch_module, "reinstall_after_switch", reinstall)
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    agents = {
+        relay.id: Agent(
+            root=root,
+            home=tmp_path / home,
+            api_url="http://test",
+            token="x" * 32,
+            relay_id=str(relay.id),
+        )
+        for relay, root, home in [(old, src_root, "home1"), (target, dst_root, "home2")]
+    }
+    agents[old.id].dispatch(
+        {"type": "workspace-init", "working_dir": bot.working_dir, "bot_id": str(bot.id)}
+    )
+    folder = src_root / bot.bot_key
+    (folder / "report.txt").write_text("最新的业务数据")
+    (folder / ".git").mkdir()
+    (folder / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    mem = agents[old.id].memory_dir(bot.working_dir)
+    mem.mkdir(parents=True)
+    (mem / "remember.md").write_text("记住交付日期")
+    # 目标是本员工以前用过的目录：留着旧文件，记忆还比源更新。
+    destination = dst_root / bot.bot_key
+    agents[target.id].dispatch(
+        {"type": "workspace-init", "working_dir": str(destination), "bot_id": str(bot.id)}
+    )
+    (destination / "stale.txt").write_text("旧文件")
+    stale_memory = agents[target.id].memory_dir(str(destination)) / "remember.md"
+    stale_memory.parent.mkdir(parents=True)
+    stale_memory.write_text("旧的目标记忆")
+    later = time.time() + 60
+    os.utime(stale_memory, (later, later))
+
+    async def call(relay, cipher, operation, payload=None):
+        try:
+            result = agents[relay.id].dispatch({"type": operation, **(payload or {})})
+        except OperationError as exc:
+            raise workspace_transfer.AgentError(str(exc)) from exc
+        assert result["success"], result
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == target.id and bot.working_dir == str(destination)
+    assert (destination / "report.txt").read_text() == "最新的业务数据"
+    assert (destination / ".git/HEAD").read_text() == "ref: refs/heads/main\n"
+    assert not (destination / "stale.txt").exists()
+    assert stale_memory.read_text() == "记住交付日期"
+    assert reinstalled == [sorted([skills[0].id, skills[1].id])]
+
+
+async def test_copy_never_replaces_directory_of_another_employee(client, db_session, monkeypatch):
+    from coreman.core.bots import workspace_transfer
+
+    bot, _, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    target = await add_node_relay(db_session, name="target")
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+
+    async def call(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1, "workspace_replace": True}
+        assert operation == "workspace-info"
+        return {"success": True, "exists": True, "empty": False, "owned": False, "marked": True}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 409, response.text
+    assert "其他员工" in response.json()["message"]
+
+
+async def test_copy_over_occupied_target_requires_upgraded_runtime(client, db_session, monkeypatch):
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    target = await add_node_relay(db_session, name="target")
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+
+    async def call(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {
+                "success": True,
+                "memory_protocol": 2,
+                "memory_read": True,
+                "workspace_protocol": 1,
+            }
+        if operation == "workspace-info":
+            return {"success": True, "exists": True, "empty": False, "owned": True}
+        if operation == "read-memory":
+            return {"success": True, "memories": []}
+        assert operation == "workspace-export"
+        return {"success": True, "manifest": []}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 409, response.text
+    assert "升级运行时" in response.json()["message"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id
+
+
 async def test_migrating_destination_reservation_blocks_overlapping_new_workspace(db_session):
     import pytest
 

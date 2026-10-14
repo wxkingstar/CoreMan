@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.audit import diff_dict, record_audit
@@ -130,8 +130,15 @@ async def switch_relay(
             )
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
+        # 装过的都重装，包括之前重装或升级失败、仍停在失败状态的。
         installed = await session.scalars(
-            select(BotSkill).where(BotSkill.bot_id == bot.id, BotSkill.status == "installed")
+            select(BotSkill).where(
+                BotSkill.bot_id == bot.id,
+                or_(
+                    BotSkill.status == "installed",
+                    (BotSkill.status == "failed") & BotSkill.installed_at.is_not(None),
+                ),
+            )
         )
         for item in installed:
             item.status = "failed"

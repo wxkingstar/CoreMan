@@ -335,6 +335,12 @@ def test_memory_v2_conflict_preflight_delete_and_mtime(agent):
     with pytest.raises(agent_module.OperationError, match="不能覆盖"):
         agent.deploy_memory([row], 2)
     assert path.read_text() == "newer local"
+    # 换机时以源记忆为准，较新的目标文件也覆盖。
+    assert agent.dispatch({"type": "ping"})["workspace_replace"] is True
+    agent.deploy_memory([row], 2, overwrite=True)
+    assert path.read_text() == "first"
+    path.write_text("newer local")
+    os.utime(path, (now, now))
     row.update(
         content="", content_hash=hashlib.sha256(b"").hexdigest(), deleted=True, file_mtime=now + 1
     )
