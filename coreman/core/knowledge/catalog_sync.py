@@ -112,9 +112,10 @@ def read_catalog(root: Path) -> list[dict[str, Any]]:
     return result
 
 
-def fetch_catalog(
-    url: str, access_token: str | None = None, username: str | None = None
-) -> list[dict[str, Any]]:
+def clone_repository(
+    url: str, target: Path, access_token: str | None = None, username: str | None = None
+) -> None:
+    """浅克隆到 target。失败只给固定提示，不回显 Git 输出。"""
     git_url(url)
     # 不继承全局 Git hook/credential helper、模板或代理，仓库对象不是代码指令。
     env = {
@@ -133,52 +134,56 @@ def fetch_catalog(
     if access_token:
         url = https_repository(url)
         env.update(token_git_env(url, access_token, username))
+    with tempfile.TemporaryFile() as errors:
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "protocol.file.allow=never",
+                    "-c",
+                    "protocol.ext.allow=never",
+                    "-c",
+                    "http.followRedirects=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--template=",
+                    "--",
+                    url,
+                    str(target),
+                ],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=errors,
+                timeout=180,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            errors.seek(0)
+            diagnostic = errors.read(8192).lower()
+            if any(marker in diagnostic for marker in (b"403", b"not allowed to download code")):
+                raise CatalogAccessError(
+                    "Git 仓库拒绝读取（403）。请检查 Project Access Token "
+                    "的 read_repository 权限，"
+                    "并确认项目角色至少为 Reporter。"
+                ) from None
+            if any(marker in diagnostic for marker in AUTH_FAILURE_MARKERS):
+                raise CatalogAccessError(AUTH_FAILURE_MESSAGE) from None
+            raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
+        except (subprocess.SubprocessError, OSError):
+            raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
+
+
+def fetch_catalog(
+    url: str, access_token: str | None = None, username: str | None = None
+) -> list[dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="coreman-catalog-") as directory:
         root = Path(directory) / "repo"
-        with (Path(directory) / "git-error").open("w+b") as errors:
-            try:
-                subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "protocol.file.allow=never",
-                        "-c",
-                        "protocol.ext.allow=never",
-                        "-c",
-                        "http.followRedirects=false",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "clone",
-                        "--depth",
-                        "1",
-                        "--template=",
-                        "--",
-                        url,
-                        str(root),
-                    ],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=errors,
-                    timeout=180,
-                    check=True,
-                )
-            except subprocess.CalledProcessError:
-                errors.seek(0)
-                diagnostic = errors.read(8192).lower()
-                if any(
-                    marker in diagnostic for marker in (b"403", b"not allowed to download code")
-                ):
-                    raise CatalogAccessError(
-                        "Git 仓库拒绝读取（403）。请检查 Project Access Token "
-                        "的 read_repository 权限，"
-                        "并确认项目角色至少为 Reporter。"
-                    ) from None
-                if any(marker in diagnostic for marker in AUTH_FAILURE_MARKERS):
-                    raise CatalogAccessError(AUTH_FAILURE_MESSAGE) from None
-                raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
-            except (subprocess.SubprocessError, OSError):
-                raise ValueError("无法读取技能仓库，请检查 Git、地址和访问权限") from None
+        clone_repository(url, root, access_token, username)
         return read_catalog(root)
 
 

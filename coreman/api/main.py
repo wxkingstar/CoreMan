@@ -53,6 +53,7 @@ from coreman.api.routers import (
     runtime_protocol,
     self_reminders,
     skill_catalog,
+    skill_local,
     statistics,
     systems_catalog,
     teams,
@@ -143,6 +144,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(bots.router)
     app.include_router(bot_memories.router)
     app.include_router(skill_catalog.router)
+    app.include_router(skill_local.router)
+    app.include_router(skill_local.public_router)
     app.include_router(statistics.router)
     app.include_router(health_report.router)
     app.include_router(bot_skills.router)

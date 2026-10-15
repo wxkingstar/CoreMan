@@ -46,6 +46,14 @@ const skillEditorEn = {
   mcpStep1: '1. Open the authorization page, sign in with the account to use and allow access. The link is valid for 10 minutes.', mcpOpen: 'Open authorization page', mcpStarting: 'Asking the runtime to start authorization…',
   mcpStep2: '2. After you allow access, the browser goes to an address starting with http://127.0.0.1 or http://localhost and the page does not load. That is expected. Paste the full address from the address bar here:',
   mcpComplete: 'Complete authorization', mcpDone: 'Authorized', mcpRevokeConfirm: 'After revoking, this AI employee can no longer use this MCP server. Revoke?', mcpRevoked: 'Authorization revoked',
+  localInstall: 'Install locally', localInstallTitle: 'Install {name} locally',
+  localInstallHint: 'Run this command in your project root: it installs the skill into .agents/skills/{name} and links .claude/skills/{name} to it for Claude Code. Run it in your home directory to use the skill in every project. Run it again to update to the latest version.',
+  localInstallExpires: 'The command carries a temporary credential for you and is valid until {time}. Do not share it. Works on macOS and Linux.',
+  localInstallMcp: 'MCP skills cannot be installed locally.', localInstallDisabled: 'The skill is disabled and cannot be installed locally.',
+  copyCommand: 'Copy command', copyManually: 'Copy failed. Select the text and copy it manually.',
+  envExportTitle: 'Environment variables (platform administrators)',
+  envExportHint: 'Merges the skill presets for the selected databases into export statements, with secrets in plain text. Every view is audited. Do not share.',
+  envExportShow: 'Show plain text', copyExports: 'Copy',
 }
 
 export default skillEditorEn satisfies { [K in keyof typeof skillEditorZh]: (typeof skillEditorZh)[K] extends string ? string : { [P in keyof (typeof skillEditorZh)[K]]: string } }

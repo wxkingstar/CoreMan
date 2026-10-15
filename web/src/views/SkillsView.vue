@@ -3,6 +3,7 @@ import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import TruncatedText from '@/components/TruncatedText.vue'
 import SkillEditorDialog from '@/components/skills/SkillEditorDialog.vue'
+import SkillLocalInstallDialog from '@/components/skills/SkillLocalInstallDialog.vue'
 import SkillPresetDialog from '@/components/skills/SkillPresetDialog.vue'
 import SkillSourceDialog from '@/components/skills/SkillSourceDialog.vue'
 import { useListQuery } from '@/composables/useListQuery'
@@ -14,12 +15,14 @@ import { useAuthStore } from '@/stores/auth'
 const { t } = useI18n()
 const auth = useAuthStore()
 const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
+const platformAdmin = computed(() => auth.user?.role === 'platform_admin')
 const rows = ref<Skill[]>([]), sources = ref<Source[]>([]), presets = ref<Preset[]>([])
 const query = ref('')
 const activeTab = ref('catalog'), sourceFilter = ref(''), syncing = ref(''), syncResult = ref('')
 const skillDialog = ref<InstanceType<typeof SkillEditorDialog>>()
 const sourceDialog = ref<InstanceType<typeof SkillSourceDialog>>()
 const presetDialog = ref<InstanceType<typeof SkillPresetDialog>>()
+const localDialog = ref<InstanceType<typeof SkillLocalInstallDialog>>()
 const filtered = computed(() => rows.value.filter(row => (!sourceFilter.value || row.source_id === sourceFilter.value) && `${row.name} ${row.description}`.toLowerCase().includes(query.value.toLowerCase())))
 const sourceName = (id: string) => sources.value.find(source => source.id === id)?.label ?? '—'
 const sourceCount = (id: string) => rows.value.filter(row => row.source_id === id).length
@@ -212,40 +215,50 @@ onMounted(load)
             </template>
           </el-table-column>
           <el-table-column
-            v-if="manager"
             :label="t('common.actions')"
-            width="190"
+            :width="manager ? 300 : 110"
             fixed="right"
           >
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button
+                  v-if="row.install_type === 'git' && row.enabled || platformAdmin"
                   link
                   type="primary"
-                  @click="edit(row)"
+                  :data-test="'local-install-' + row.name"
+                  @click="localDialog?.open(row)"
                 >
-                  {{ t('common.edit') }}
+                  {{ t('skillEditor.localInstall') }}
                 </el-button>
-                <el-button
-                  link
-                  type="primary"
-                  :data-test="'upgrade-' + row.name"
-                  :loading="upgrading === row.id"
-                  :disabled="!row.enabled || !!upgrading && upgrading !== row.id"
-                  @click="upgrade(row)"
-                >
-                  {{ t('skillEditor.upgrade') }}
-                </el-button>
-                <el-button
-                  link
-                  type="danger"
-                  :data-test="'delete-' + row.name"
-                  :loading="deleting === row.id"
-                  :disabled="!!deleting && deleting !== row.id"
-                  @click="remove(row)"
-                >
-                  {{ t('common.delete') }}
-                </el-button>
+                <template v-if="manager">
+                  <el-button
+                    link
+                    type="primary"
+                    @click="edit(row)"
+                  >
+                    {{ t('common.edit') }}
+                  </el-button>
+                  <el-button
+                    link
+                    type="primary"
+                    :data-test="'upgrade-' + row.name"
+                    :loading="upgrading === row.id"
+                    :disabled="!row.enabled || !!upgrading && upgrading !== row.id"
+                    @click="upgrade(row)"
+                  >
+                    {{ t('skillEditor.upgrade') }}
+                  </el-button>
+                  <el-button
+                    link
+                    type="danger"
+                    :data-test="'delete-' + row.name"
+                    :loading="deleting === row.id"
+                    :disabled="!!deleting && deleting !== row.id"
+                    @click="remove(row)"
+                  >
+                    {{ t('common.delete') }}
+                  </el-button>
+                </template>
               </div>
             </template>
           </el-table-column>
@@ -417,6 +430,7 @@ onMounted(load)
       ref="presetDialog"
       @saved="load"
     />
+    <SkillLocalInstallDialog ref="localDialog" />
   </section>
 </template>
 <style scoped>
