@@ -49,6 +49,14 @@ export const skillEditorZh = {
   mcpStep1: '1. 打开授权页面，登录要使用的账号并允许访问。链接 10 分钟内有效。', mcpOpen: '打开授权页面', mcpStarting: '正在让运行时发起授权…',
   mcpStep2: '2. 授权后浏览器会跳到以 http://127.0.0.1 或 http://localhost 开头的地址，页面打不开是正常的。把地址栏里的完整地址粘贴到这里：',
   mcpComplete: '完成授权', mcpDone: '授权完成', mcpRevokeConfirm: '撤销后这个 AI 员工将无法使用该 MCP 服务。确认撤销？', mcpRevoked: '已撤销授权',
+  localInstall: '本地安装', localInstallTitle: '本地安装 {name}',
+  localInstallHint: '在项目根目录执行下面的命令：技能装到 .agents/skills/{name}，并在 .claude/skills/{name} 建软链供 Claude Code 读取。在用户主目录执行则对所有项目生效。重复执行即更新到最新版本。',
+  localInstallExpires: '命令含你的临时凭证，{time} 前有效，请勿转发。支持 macOS 与 Linux。',
+  localInstallMcp: 'MCP 技能不支持本地安装。', localInstallDisabled: '技能已停用，不能本地安装。',
+  copyCommand: '复制命令', copyManually: '复制失败，请手动选中文本复制',
+  envExportTitle: '环境变量（平台管理员）',
+  envExportHint: '按所选数据库合并技能的环境预设，拼成 export 语句，含明文密钥。每次查看都会记入审计，请勿外传。',
+  envExportShow: '查看明文', copyExports: '复制',
 }
 export const skillEditorJa = {
   projectToken: 'Project Access Token（任意）', tokenPreserve: '設定済み。空欄で既存の token を保持', tokenPlaceholder: 'read_repository 権限のあるプロジェクトトークン',
@@ -101,4 +109,12 @@ export const skillEditorJa = {
   mcpStep1: '1. 認可ページを開き、使うアカウントでログインしてアクセスを許可します。リンクは 10 分間有効です。', mcpOpen: '認可ページを開く', mcpStarting: 'ランタイムが認可を開始しています…',
   mcpStep2: '2. 許可するとブラウザは http://127.0.0.1 または http://localhost で始まるアドレスに移動します。ページが開けないのは正常です。アドレスバーの完全な URL をここに貼り付けてください：',
   mcpComplete: '認可を完了', mcpDone: '認可しました', mcpRevokeConfirm: '取り消すと、この AI 社員はこの MCP サーバーを使えなくなります。取り消しますか？', mcpRevoked: '認可を取り消しました',
+  localInstall: 'ローカルにインストール', localInstallTitle: '{name} をローカルにインストール',
+  localInstallHint: 'プロジェクトのルートで次のコマンドを実行します。スキルを .agents/skills/{name} に入れ、Claude Code 用に .claude/skills/{name} へシンボリックリンクを作ります。ホームディレクトリで実行するとすべてのプロジェクトで使えます。再実行すると最新版に更新します。',
+  localInstallExpires: 'コマンドにはあなたの一時的な資格情報が含まれ、{time} まで有効です。共有しないでください。macOS と Linux に対応しています。',
+  localInstallMcp: 'MCP スキルはローカルにインストールできません。', localInstallDisabled: 'スキルが無効のため、ローカルにインストールできません。',
+  copyCommand: 'コマンドをコピー', copyManually: 'コピーできませんでした。テキストを選択して手動でコピーしてください',
+  envExportTitle: '環境変数（プラットフォーム管理者）',
+  envExportHint: '選択したデータベースに合わせてスキルの環境プリセットをまとめ、export 文にします。秘密情報が平文で含まれます。表示のたびに監査ログに記録されます。共有しないでください。',
+  envExportShow: '平文を表示', copyExports: 'コピー',
 }
