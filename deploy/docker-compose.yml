@@ -195,7 +195,7 @@ services:
     stop_grace_period: 30s
 
   prometheus:
-    image: ghcr.io/prometheus/prometheus:v3.14.0
+    image: ghcr.io/prometheus/prometheus:v3.15.0
     profiles: [monitoring]
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d", "--storage.tsdb.retention.size=1GB"]
     ports: ["127.0.0.1:9090:9090"]
