@@ -173,3 +173,23 @@ async def test_daemon_rewrites_working_dir_only_for_dev_mode(tmp_path, repo, mon
     assert forwarded[0]["working_dir"] == str(repo / ".coreman-worktrees" / "s1")
     assert forwarded[1]["working_dir"] == str(repo)
     assert "worktree" not in forwarded[0] and "worktree" not in forwarded[1]
+
+
+def test_pruned_worktree_returns_to_the_branch_it_took_over(repo):
+    first = worktree.ensure(repo, "s1")
+    (first / "work.txt").write_text("day one")
+    git(first, "add", ".")
+    git(first, "commit", "-q", "-m", "work")
+    git(first, "push", "-q", "origin", "coreman/session-s1")
+    git(repo, "worktree", "remove", str(first))
+    # 新会话接着做之前会话的分支。
+    second = worktree.ensure(repo, "s2")
+    git(second, "switch", "-q", "coreman/session-s1")
+    old = time.time() - worktree.IDLE_SECONDS - 60
+    os.utime(second, (old, old))
+    worktree.refresh(repo)
+    assert not second.exists()
+    assert worktree.ensure(repo, "s2") == second
+    assert git(second, "branch", "--show-current") == "coreman/session-s1"
+    assert (second / "work.txt").read_text() == "day one"
+    assert not (repo / ".coreman-worktrees" / "s2.branch").exists()

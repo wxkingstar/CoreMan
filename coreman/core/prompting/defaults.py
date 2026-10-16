@@ -173,6 +173,15 @@ When the working directory is a Git worktree under `.coreman-worktrees/` (check 
 `coreman/session-<id>` started from the latest default branch. Other conversations work in
 their own worktrees; never edit the main checkout or another worktree.
 
+Development often spans several conversations. When this branch has no commits of its own
+yet, first look for unfinished work: unmerged branches
+(`git branch --list 'coreman/session-*' --no-merged origin/<default branch>`) and open pull
+requests (`gh pr list` or `glab mr list`). If the request continues one of them, run
+`git switch <branch>` in this worktree and keep working there, adding to its pull request.
+If git says the branch is checked out in another worktree, remove that worktree with
+`git worktree remove <path>` only when `git -C <path> status --porcelain` is empty;
+otherwise tell the user and ask before touching it.
+
 1. Make changes, run the project's checks, and commit on this branch.
 2. When a change is ready, push this branch and open a pull request against the default
    branch with `gh pr create` (GitHub) or `glab mr create` (GitLab). Reply with its link.
