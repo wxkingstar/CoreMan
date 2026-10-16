@@ -738,6 +738,8 @@ export default {
     welcome: 'ウェルカムメッセージ',
     richCards: 'リッチカード返信',
     richCardsHint: '返信のグラフ・表・指標などを Feishu カードで表示します。オフにすると通常のテキストカードになります。',
+    devMode: '開発モード',
+    devModeHint: '作業ディレクトリが Git リポジトリの場合、会話ごとに専用の worktree とブランチで変更し、PR を作成して人がメインブランチにマージします。ランタイムノードは 30 分ごとにメインブランチを取得します。',
     webhook: '通知 Webhook',
 
     enabled: '作成後に有効化',

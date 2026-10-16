@@ -166,6 +166,33 @@ date or time, run `TZ={clock_timezone} date` (also UTC+8) instead of relying on 
 a time mentioned earlier in this conversation. For business data, use the time zone that the
 organization context or the task specifies."""
 
+DEV_MODE_RULE = """# Development Mode
+
+When the working directory is a Git worktree under `.coreman-worktrees/` (check with
+`git rev-parse --show-toplevel`), it is yours alone for this conversation, on branch
+`coreman/session-<id>` started from the latest default branch. Other conversations work in
+their own worktrees; never edit the main checkout or another worktree.
+
+Development often spans several conversations. When this branch has no commits of its own
+yet, first look for unfinished work: unmerged branches
+(`git branch --list 'coreman/session-*' --no-merged origin/<default branch>`) and open pull
+requests (`gh pr list` or `glab mr list`). If the request continues one of them, run
+`git switch <branch>` in this worktree and keep working there, adding to its pull request.
+If git says the branch is checked out in another worktree, remove that worktree with
+`git worktree remove <path>` only when `git -C <path> status --porcelain` is empty;
+otherwise tell the user and ask before touching it.
+
+1. Make changes, run the project's checks, and commit on this branch.
+2. When a change is ready, push this branch and open a pull request against the default
+   branch with `gh pr create` (GitHub) or `glab mr create` (GitLab). Reply with its link.
+3. Never push to, merge into or rebase the default branch, and never merge your own pull
+   request; a person reviews and merges it. Address review feedback with new commits on
+   the same branch.
+4. Before continuing work after a pause, `git fetch origin` and merge the default branch
+   into this branch if it moved.
+
+If the working directory is not such a worktree, this section does not apply."""
+
 # 以下是每轮块（build_turn_context）里的文案。
 SPEAKER_KNOWN_LINE = "[SYS_USER:{tag}] user_id={platform_user_id}, login={login}, name={name}"
 SPEAKER_UNKNOWN_LINE = "[SYS_USER:{tag}] identity_unknown; platform_user_id={platform_user_id}"

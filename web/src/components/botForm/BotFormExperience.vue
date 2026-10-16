@@ -40,6 +40,16 @@ const { mode, form, fieldErrors } = useBotFormContext()
   </el-form-item>
 
   <el-form-item
+    :label="t('bots.devMode')"
+    data-test="dev-mode"
+  >
+    <el-switch v-model="form.dev_mode" />
+    <div class="muted">
+      {{ t('bots.devModeHint') }}
+    </div>
+  </el-form-item>
+
+  <el-form-item
     v-if="mode === 'create'"
     :label="t('bots.enabled')"
     data-test="enabled"

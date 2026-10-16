@@ -736,6 +736,8 @@ export default {
     welcome: '欢迎语',
     richCards: '富卡片回复',
     richCardsHint: '回复里的图表、表格、指标块等用飞书卡片展示；关闭后只显示为普通文字卡片。',
+    devMode: '开发模式',
+    devModeHint: '工作目录是 Git 仓库时，每个会话在自己的 worktree 和分支里修改，改完开 PR 由人合并进主干；运行时节点每 30 分钟拉取一次主干。',
     webhook: '通知 Webhook',
 
     enabled: '创建后启用',

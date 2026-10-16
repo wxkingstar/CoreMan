@@ -91,6 +91,7 @@ NON_NULLABLE = (
     "credentials",
     "env_vars",
     "rich_cards",
+    "dev_mode",
 )
 
 
@@ -154,6 +155,7 @@ class BotIn(BaseModel):
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
     rich_cards: bool = True
+    dev_mode: bool = False
     enabled: bool = True
 
     @field_validator("env_vars")
@@ -191,6 +193,7 @@ class BotPatch(BaseModel):
     welcome_message: str | None = Field(default=None, max_length=2000)
     notify_webhook_url: str | None = Field(default=None, max_length=500)
     rich_cards: bool | None = None
+    dev_mode: bool | None = None
 
     @field_validator("env_vars")
     @classmethod
@@ -237,6 +240,7 @@ def _public(bot: Bot) -> dict[str, Any]:
         "welcome_message": bot.welcome_message,
         "notify_webhook_url": bot.notify_webhook_url,
         "rich_cards": bot.rich_cards,
+        "dev_mode": bot.dev_mode,
     }
 
 
@@ -362,6 +366,7 @@ async def build_out(
         "sse_timeout_seconds": bot.sse_timeout_seconds,
         "welcome_message": bot.welcome_message,
         "rich_cards": bot.rich_cards,
+        "dev_mode": bot.dev_mode,
         "member_count": len(member_ids),
         "allowed_user_count": allowed_count,
         "permissions": dataclasses.asdict(perms),
@@ -531,6 +536,7 @@ async def create_bot(
         welcome_message=body.welcome_message,
         notify_webhook_url=body.notify_webhook_url,
         rich_cards=body.rich_cards,
+        dev_mode=body.dev_mode,
     )
     session.add(bot)
     await session.flush()

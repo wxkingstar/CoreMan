@@ -39,7 +39,7 @@ const editBot: BotOut = {
   relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1',
   model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/sales_bot',
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
-  welcome_message: null, rich_cards: true, notify_webhook_url: 'ht••••-1',
+  welcome_message: null, rich_cards: true, dev_mode: false, notify_webhook_url: 'ht••••-1',
   member_count: 0, allowed_user_count: 0,
   permissions: {
     role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true,
@@ -149,6 +149,18 @@ describe('BotForm', () => {
     await wrapper.get('[data-test="submit"]').trigger('click')
     await flushPromises()
     expect(bots.patch).toHaveBeenCalledWith('b1', { rich_cards: false }, 1)
+    wrapper.unmount()
+  })
+
+  it('patches the development mode switch when toggled', async () => {
+    vi.mocked(bots.patch).mockResolvedValue({ ...editBot, dev_mode: true, version: 2 })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: editBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    wrapper.get('[data-test="dev-mode"]').findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+    await flushPromises()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.patch).toHaveBeenCalledWith('b1', { dev_mode: true }, 1)
     wrapper.unmount()
   })
 

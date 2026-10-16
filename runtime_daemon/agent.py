@@ -662,6 +662,17 @@ class Agent:
         threading.Thread(target=work, daemon=True, name=name).start()
         return {"success": True, "message": "任务已启动"}
 
+    def refresh_worktrees(self) -> None:
+        """开发模式的仓库：拉取主干、快进主检出、清理闲置 worktree；一个目录失败不影响其它。"""
+        from . import worktree
+
+        for directory in self.assigned_workspaces():
+            try:
+                worktree.refresh(self.workspace(directory))
+            except OperationError as exc:
+                event = {"event": "worktree_refresh_failed", "message": operation_message(exc)}
+                print(json.dumps(event, ensure_ascii=False), flush=True)
+
     def health_check(self) -> None:
         """探测 AI 接口并上报；由运行时守护进程经本机 socket 实现。"""
         raise OperationError("当前环境不支持健康检查")
@@ -957,6 +968,7 @@ class Agent:
         def loop():
             # 从负无穷起算：monotonic 是开机时长，刚开机的主机也要在启动后立即跑第一轮。
             last_quota, last_memory, last_health = -math.inf, -math.inf, ""
+            last_worktrees = -math.inf
             while not self.stop.is_set():
                 now = time.monotonic()
                 local = time.localtime()
@@ -971,6 +983,9 @@ class Agent:
                         "collect-memory", lambda: self.dispatch({"type": "collect-memory"})
                     )
                     last_memory = now
+                if now - last_worktrees >= 1800:
+                    self.start_background("refresh-worktrees", self.refresh_worktrees)
+                    last_worktrees = now
                 if 9 <= local.tm_hour <= 23 and slot != last_health:
                     self.start_background("health-check", self.health_check)
                     last_health = slot
