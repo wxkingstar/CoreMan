@@ -92,6 +92,7 @@ export interface BotOut {
   sse_timeout_seconds: number
   welcome_message: string | null
   rich_cards: boolean
+  dev_mode: boolean
   member_count: number; allowed_user_count: number
   permissions: BotPermissions; version: number; created_at: string; updated_at: string
   // 敏感字段：只有 permissions.can_view_sensitive / can_view_env_full 时后端才下发。
@@ -112,6 +113,8 @@ export interface BotIn {
   welcome_message: string | null
   /** 飞书回复用富卡片（图表、表格、指标块等）。 */
   rich_cards: boolean
+  /** 开发模式：Git 工作目录按会话建 worktree，改动走 PR 合进主干。 */
+  dev_mode: boolean
   enabled: boolean
   /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
   feishu_registration_id?: string | null

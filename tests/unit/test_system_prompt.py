@@ -286,3 +286,20 @@ def test_defaults_leave_room_for_explicit_requests() -> None:
     # 文件交付说明两个后端都要有，不再只写在 codex 输出契约里。
     assert "Chat users cannot open paths" in DEFAULT_RUNTIME_MODE
     assert "Chat users cannot open paths" not in DEFAULT_CODEX_CONTRACT
+
+
+def test_dev_mode_section_only_when_enabled_and_before_custom_prompt() -> None:
+    def build(dev_mode: bool) -> str:
+        return build_system_prompt(
+            segments=SEG,
+            backend="claude",
+            verbosity_level=4,
+            bot_prompt="你是开发",
+            tag=TAG,
+            dev_mode=dev_mode,
+        )
+
+    assert "# Development Mode" not in build(False)
+    out = build(True)
+    assert out.index("# Date and Time") < out.index("# Development Mode") < out.index("你是开发")
+    assert "never merge your own pull" in out

@@ -103,3 +103,19 @@ def test_turn_context_goes_before_the_user_message() -> None:
         {"type": "text", "text": "[SYS_TURN:t]\n[/SYS_TURN:t]"},
         image,
     ]
+
+
+def test_to_body_sends_worktree_only_in_dev_mode() -> None:
+    def body(worktree: bool) -> dict:
+        return ChatRequest(
+            model="m",
+            system_prompt="s",
+            user_content="hi",
+            working_dir="/d",
+            session_id="x",
+            backend="claude",
+            worktree=worktree,
+        ).to_body()
+
+    assert "worktree" not in body(False)
+    assert body(True)["worktree"] is True

@@ -292,6 +292,7 @@ class CronRunHandler:
                     session_id=str(session_id),
                     env_vars=env,
                     effort=bot.effort_level,
+                    worktree=bot.dev_mode,
                     user_content=sanitize_user_input(prompt),
                     turn_context=build_turn_context(tag=tag, speaker=speaker, notes=ctx.turn_notes),
                     system_prompt=build_system_prompt(
@@ -309,6 +310,7 @@ class CronRunHandler:
                         scheduled=True,
                         extra=with_reply_images(personal_prompt, bot.platform, backend),
                         output_format=rich_cards_prompt(bot.platform, bot.rich_cards),
+                        dev_mode=bot.dev_mode,
                     ),
                 )
                 # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。

@@ -69,6 +69,8 @@ class ChatRequest:
     # 平台写的本轮块（发言者与本轮状态，见 prompting.build_turn_context）。不经消毒，
     # 发送时才接到 `user_content` 前面：开流后 `user_content` 会被换成下载好媒体的版本。
     turn_context: str = ""
+    # 开发模式：节点把 Git 工作目录换成本会话的 worktree。
+    worktree: bool = False
 
     def user_message(self) -> str | list[dict[str, Any]]:
         """本轮块在前、用户原文在后；含媒体时本轮块作为第一个 text part。"""
@@ -81,7 +83,7 @@ class ChatRequest:
     def to_body(self) -> dict[str, Any]:
         """拼出 POST /v1/chat/completions 的请求体。
 
-        `max_turns` 仅 claude backend 携带；`effort`、`env_vars` 非空才带；
+        `max_turns` 仅 claude backend 携带；`effort`、`env_vars` 非空才带，`worktree` 为真才带；
         `session_id` 原样透传（cron 与体检传空字符串）。
         """
         body: dict[str, Any] = {
@@ -101,6 +103,8 @@ class ChatRequest:
             body["effort"] = self.effort
         if self.env_vars:
             body["env_vars"] = dict(self.env_vars)
+        if self.worktree:
+            body["worktree"] = True
         return body
 
 

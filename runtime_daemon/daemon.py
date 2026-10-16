@@ -25,7 +25,7 @@ from pathlib import Path
 
 import httpx
 
-from runtime_daemon import PROTOCOL_VERSION, __version__
+from runtime_daemon import PROTOCOL_VERSION, __version__, worktree
 from runtime_daemon.agent import (
     COMMAND_CANCEL,
     Agent,
@@ -829,6 +829,8 @@ class Daemon:
             directory = self.agents[provider].workspace(data.get("working_dir", ""))
             directory.mkdir(parents=True, exist_ok=True)
             data["working_dir"] = str(directory)
+            if not isinstance(data.get("worktree", False), bool):
+                raise ValueError("worktree 必须是布尔值")
             # API inputs are rooted; CLI tools retain their original permission semantics.
             for extra in data.get("add_dirs") or []:
                 self.agents[provider].workspace(extra)
@@ -859,6 +861,13 @@ class Daemon:
 
         try:
             data = self.validate_command(command)
+            if command["path"] == "/v1/chat/completions" and data.pop("worktree", False):
+                # 开发模式：工作目录是 Git 仓库时换成本会话的 worktree（建时要拉远端，放线程里）。
+                data["working_dir"] = str(
+                    await asyncio.to_thread(
+                        worktree.ensure, Path(data["working_dir"]), data.get("session_id", "")
+                    )
+                )
             env = data.get("env_vars") or {}
             self.task_info[identity] = {
                 "request_id": identity,

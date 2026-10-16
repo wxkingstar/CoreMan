@@ -292,6 +292,7 @@ class OpenStage(ChatStageBase):
             effort=bot.effort_level,
             env_vars=env,
             turn_context=turn_context,
+            worktree=bot.dev_mode,
         )
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":
@@ -416,6 +417,7 @@ class OpenStage(ChatStageBase):
             extra=extra,
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
             structured_reply=ctx.task.payload.get("collaboration_phase") == "helper",
+            dev_mode=intake.bot.dev_mode,
         )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:

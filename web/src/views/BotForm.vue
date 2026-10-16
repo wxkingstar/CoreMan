@@ -60,6 +60,7 @@ function emptyForm(): BotIn {
     env_vars: {},
     welcome_message: null,
     rich_cards: true,
+    dev_mode: false,
     enabled: true,
   }
 }
@@ -190,6 +191,7 @@ function fillFromBot(b: BotOut): void {
     env_vars: { ...(b.env_vars ?? {}) },
     welcome_message: b.welcome_message,
     rich_cards: b.rich_cards,
+    dev_mode: b.dev_mode,
     // 后端只在 can_view_sensitive 时下发（且是脱敏值）；没下发就按空处理。
     enabled: b.enabled,
   } satisfies BotIn)
@@ -234,6 +236,7 @@ function changedFields(b: BotOut): BotPatch {
   if (p.sse_timeout_seconds !== b.sse_timeout_seconds) out.sse_timeout_seconds = p.sse_timeout_seconds
   if (p.welcome_message !== b.welcome_message) out.welcome_message = p.welcome_message
   if (p.rich_cards !== b.rich_cards) out.rich_cards = p.rich_cards
+  if (p.dev_mode !== b.dev_mode) out.dev_mode = p.dev_mode
   // 后端没下发的敏感字段一律不比：表单里是空值，提交就等于清空线上配置。
   if (b.system_prompt !== undefined && p.system_prompt !== b.system_prompt) out.system_prompt = p.system_prompt
   if (b.credentials !== undefined && !sameDict(p.credentials, b.credentials)) out.credentials = p.credentials

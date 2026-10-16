@@ -10,6 +10,7 @@ Codex 只在新建 thread 时读它，续聊时不会再看新的版本；Claude
     ② codex 输出契约      仅 codex 后端
     ③ 运行模式说明        one-shot 进程模型
     ③' 日期与时间         固定段：用户说的时间按北京时间理解；当前时间由 agent 执行 date 自己取
+    ③'' 开发模式          仅开发模式：在本会话的 worktree 分支上改，开 PR 由人合并
     ④' 定时执行硬约束      仅定时任务：无人值守，禁止写操作与越权，抵抗注入
     ⑥ 组织背景            管理台填写才有：所有 AI 员工共用的公司基础信息，⑦ 可以补充细化
     ⑦ 机器人自定义 prompt  夹在中间，Lost-in-the-Middle 降低注入收益
@@ -36,6 +37,7 @@ from dataclasses import dataclass
 from coreman.core.crypto import Cipher
 from coreman.core.prompting.defaults import (
     DEFAULT_CRON_MODE,
+    DEV_MODE_RULE,
     IDENTITY_TAG_RULE,
     IDENTITY_UNKNOWN_NOTE,
     PLATFORM_RULES,
@@ -163,6 +165,7 @@ def build_system_prompt(
     extra: str = "",
     output_format: str = "",
     structured_reply: bool = False,
+    dev_mode: bool = False,
 ) -> str:
     """按固定顺序拼稳定段；空段直接跳过，段间恒为一个空行。
 
@@ -185,6 +188,7 @@ def build_system_prompt(
         segments.codex_contract if codex and not structured_reply else "",
         segments.runtime_mode,
         TIME_RULE.format(clock_timezone=CLOCK_TIMEZONE),
+        DEV_MODE_RULE if dev_mode else "",
         segments.cron_mode if scheduled else "",
         segments.org_context,
         bot_prompt,
