@@ -81,14 +81,27 @@ function installPayload(): InstallInput {
 }
 const filtered = computed(() => nodes.value.filter(n => `${n.name} ${n.hostname} ${n.username} ${n.workspace_root}`.toLowerCase().includes(query.value.toLowerCase())))
 let timer: ReturnType<typeof setInterval> | undefined
+let fetching = false
+/** 按 id 把新数据写进已有行对象：行不重建，展开的详情和其中的组件保持原状，只有变化的字段重绘。 */
+function mergeNodes(next: RuntimeNode[]) {
+  const current = new Map(nodes.value.map(n => [n.id, n]))
+  nodes.value = next.map((n) => {
+    const old = current.get(n.id)
+    if (!old) return n
+    for (const key of Object.keys(old)) if (!(key in n)) delete (old as Record<string, unknown>)[key]
+    return Object.assign(old, n)
+  })
+}
+/** 定时刷新是静默的：不盖加载遮罩、不弹错误，避免表格每 10 秒闪一下。 */
 async function refresh(silent = false) {
-  if (loading.value) return
-  loading.value = true
+  if (fetching) return
+  fetching = true
+  if (!silent) loading.value = true
   try {
-    nodes.value = await runtimeNodes.list()
+    mergeNodes(await runtimeNodes.list())
   } catch (error) {
     if (!silent) ElMessage.error(errorMessage(error))
-  } finally { loading.value = false }
+  } finally { fetching = false; loading.value = false }
 }
 /** 正在提交启停/排空的节点：提交期间禁用该行开关，避免连点。 */
 const pendingId = ref('')

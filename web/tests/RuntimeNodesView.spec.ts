@@ -18,7 +18,8 @@ it('submits a changed project root and explains acknowledgement', async () => {
   wrapper.unmount()
 })
 vi.mock('@/api/runtimeNodes', () => ({ runtimeNodes: {
-  list: vi.fn().mockResolvedValue([{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
+  // 每次返回新对象：页面把刷新结果合并进已有行对象，共用一个对象会让前一个用例的数据漏进后一个。
+  list: vi.fn(async () => [{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
     team_id: null, team_name: null, root_edit_supported: true, capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
   links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), remove: vi.fn(), revokeLink: vi.fn(),
 } }))
@@ -157,7 +158,6 @@ it('asks before disabling or draining a runtime and explains the impact', async 
   const wrapper = mountPage('platform_admin'); await flushPromises()
   await wrapper.get('[data-test="toggle-runtime"]').trigger('click'); await flushPromises()
   expect(confirm).toHaveBeenCalledTimes(1)
-  // 列表 mock 每次返回同一个对象，前面的改名用例可能已经改过名字，这里取当前渲染的名字。
   const name = (wrapper.vm as unknown as { nodes: { name: string }[] }).nodes[0].name
   expect(String(confirm.mock.calls[0][0])).toContain(`「${name}」`)
   expect(String(confirm.mock.calls[0][0])).toContain('取消')
@@ -269,4 +269,25 @@ it('shows which proxy the CLIs inherit and warns when none is in effect', async 
   expect(rows[3].text()).toContain('未上报（节点版本较旧）')
   expect(rows[3].text()).not.toContain('直连 AI 服务')
   wrapper.unmount()
+})
+// 定时刷新只改变化的字段：不盖加载遮罩，行对象不重建，登录状态原地更新。
+it('updates login state in place on the timed refresh without a loading overlay', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  try {
+    const wrapper = mountPage('member'); await flushPromises()
+    const vm = wrapper.vm as unknown as { nodes: { capabilities: Record<string, { login: string }> }[]; loading: boolean }
+    const row = vm.nodes[0]
+    const first = (await vi.mocked(runtimeNodes.list).mock.results[0].value) as { capabilities: Record<string, object> }[]
+    let release: () => void = () => {}
+    vi.mocked(runtimeNodes.list).mockImplementationOnce(() => new Promise((resolve) => {
+      release = () => resolve([{ ...first[0], capabilities: { ...first[0].capabilities, codex: { installed: true, version: 'v2', login: 'ready' } } }] as never)
+    }))
+    vi.advanceTimersByTime(10000)
+    expect(vm.loading).toBe(false)
+    release(); await flushPromises()
+    expect(vm.nodes[0]).toBe(row)
+    expect(row.capabilities.codex.login).toBe('ready')
+    expect(wrapper.text()).not.toContain('待登录')
+    wrapper.unmount()
+  } finally { vi.useRealTimers() }
 })
