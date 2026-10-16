@@ -4,10 +4,8 @@ worktree 放在工作目录下的 `.coreman-worktrees/<会话 id>`，分支 `cor
 路径由会话 id 定死：Claude 的续聊记录按目录存，同一会话换了目录就续不上。
 `.coreman-` 前缀的目录文件管理看不到、换机复制也不带（worktree 元数据里是绝对路径）。
 
-定期刷新：拉取远端、主检出干净且停在默认分支时快进；闲置超过 IDLE_SECONDS、没有未提交
-也没有未推送提交的 worktree 删掉（分支已合进主干的连分支一起删），再用到时按分支重建。
-AI 员工可能把 worktree 切到之前会话的分支上接着做：删的时候在旁边留 `<会话 id>.branch`，
-重建时回到那个分支。
+定期刷新：拉取远端、主检出干净且停在默认分支时快进；只清理分支已合进主干、没有未提交改动、
+闲置超过 IDLE_SECONDS 的 worktree，连分支一起删。没合并的一律留着，由人定期审查要不要保留。
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from .workspace import git_exclude_file, replace_file
 
 DIRECTORY = ".coreman-worktrees"
 BRANCH_PREFIX = "coreman/session-"
-# 开发常常一做几天：闲置一周才删。删掉会丢被忽略的文件（装好的依赖、构建产物），分支和续聊记录都在。
+# 还没有提交的新分支也算「已合并」：闲置一周才删，免得删掉正在用的会话。
 IDLE_SECONDS = 7 * 24 * 3600
 # 没有提交进仓库的技能与项目 MCP 配置只在主检出里：链接进 worktree，并列入本地排除免得误提交。
 SHARED = (".mcp.json", ".agents/skills", ".claude/skills")
@@ -128,28 +126,17 @@ def ensure(repo: Path, session_id: str) -> Path:
     return tree
 
 
-def pointer(tree: Path) -> Path:
-    return tree.with_name(tree.name + ".branch")
-
-
 def create(repo: Path, tree: Path, branch: str) -> None:
     exclude(repo, ["/" + DIRECTORY + "/"])
     git(repo, "worktree", "prune")
     if tree.exists() and any(tree.iterdir()):
         raise OperationError("会话 worktree 目录已存在且不是 worktree")
-    if pointer(tree).is_file():
-        resumed = pointer(tree).read_text().strip()
-        if resumed.startswith(BRANCH_PREFIX) and succeeds(
-            repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{resumed}"
-        ):
-            branch = resumed
     if succeeds(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
         git(repo, "worktree", "add", "--", str(tree), branch)
     else:
         base = fetch(repo)
         start = f"origin/{base}" if base else "HEAD"
         git(repo, "worktree", "add", "--no-track", "-b", branch, "--", str(tree), start)
-    pointer(tree).unlink(missing_ok=True)
 
 
 def refresh(repo: Path, now: float | None = None) -> None:
@@ -170,18 +157,10 @@ def refresh(repo: Path, now: float | None = None) -> None:
 
 def prune(repo: Path, tree: Path, base: str | None) -> None:
     branch = git(tree, "branch", "--show-current")
-    if git(tree, "status", "--porcelain"):
+    if not base or not branch.startswith(BRANCH_PREFIX) or git(tree, "status", "--porcelain"):
         return
-    if branch and git(repo, "rev-list", "--count", branch, "--not", "--remotes") != "0":
+    # 只认分支提交都已在远端主干里（普通合并或快进）；squash / rebase 合并认不出来，留给人处理。
+    if not succeeds(repo, "merge-base", "--is-ancestor", branch, f"origin/{base}"):
         return
-    merged = bool(
-        branch.startswith(BRANCH_PREFIX)
-        and base
-        and succeeds(repo, "merge-base", "--is-ancestor", branch, f"origin/{base}")
-    )
     git(repo, "worktree", "remove", "--", str(tree))
-    if merged:
-        git(repo, "branch", "-D", branch)
-    elif branch.startswith(BRANCH_PREFIX) and branch != BRANCH_PREFIX + tree.name:
-        # 接手的是之前会话的分支：重建时回到它，而不是本会话自己那条空分支。
-        pointer(tree).write_text(branch + "\n")
+    git(repo, "branch", "-D", branch)

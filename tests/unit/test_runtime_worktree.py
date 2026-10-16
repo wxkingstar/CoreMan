@@ -115,23 +115,30 @@ def test_refresh_skips_repositories_without_dev_mode(repo, remote):
     assert (repo / "README.md").read_text() == "one\n"
 
 
-def test_refresh_prunes_only_idle_worktrees_without_unsaved_work(repo):
-    idle = worktree.ensure(repo, "idle")
-    dirty = worktree.ensure(repo, "dirty")
-    (dirty / "draft.txt").write_text("x")
+def test_refresh_prunes_only_idle_merged_worktrees(repo):
+    merged = worktree.ensure(repo, "merged")
+    (merged / "done.txt").write_text("x")
+    git(merged, "add", ".")
+    git(merged, "commit", "-q", "-m", "done")
+    git(merged, "push", "-q", "origin", "coreman/session-merged:main")
+    pushed = worktree.ensure(repo, "pushed")
+    (pushed / "open.txt").write_text("x")
+    git(pushed, "add", ".")
+    git(pushed, "commit", "-q", "-m", "open")
+    git(pushed, "push", "-q", "origin", "coreman/session-pushed")
     unpushed = worktree.ensure(repo, "unpushed")
     (unpushed / "work.txt").write_text("x")
     git(unpushed, "add", ".")
     git(unpushed, "commit", "-q", "-m", "work")
     fresh = worktree.ensure(repo, "fresh")
     old = time.time() - worktree.IDLE_SECONDS - 60
-    for tree in (idle, dirty, unpushed):
+    for tree in (merged, pushed, unpushed):
         os.utime(tree, (old, old))
     worktree.refresh(repo)
-    assert not idle.exists()
-    assert "coreman/session-idle" not in git(repo, "branch")
-    assert dirty.exists() and unpushed.exists() and fresh.exists()
-    assert "coreman/session-unpushed" in git(repo, "branch")
+    assert not merged.exists()
+    assert "coreman/session-merged" not in git(repo, "branch")
+    # 没合并的（推没推送都一样）不清理，由人审查；没闲置够的也不动。
+    assert pushed.exists() and unpushed.exists() and fresh.exists()
 
 
 async def test_daemon_rewrites_working_dir_only_for_dev_mode(tmp_path, repo, monkeypatch):
@@ -173,23 +180,3 @@ async def test_daemon_rewrites_working_dir_only_for_dev_mode(tmp_path, repo, mon
     assert forwarded[0]["working_dir"] == str(repo / ".coreman-worktrees" / "s1")
     assert forwarded[1]["working_dir"] == str(repo)
     assert "worktree" not in forwarded[0] and "worktree" not in forwarded[1]
-
-
-def test_pruned_worktree_returns_to_the_branch_it_took_over(repo):
-    first = worktree.ensure(repo, "s1")
-    (first / "work.txt").write_text("day one")
-    git(first, "add", ".")
-    git(first, "commit", "-q", "-m", "work")
-    git(first, "push", "-q", "origin", "coreman/session-s1")
-    git(repo, "worktree", "remove", str(first))
-    # 新会话接着做之前会话的分支。
-    second = worktree.ensure(repo, "s2")
-    git(second, "switch", "-q", "coreman/session-s1")
-    old = time.time() - worktree.IDLE_SECONDS - 60
-    os.utime(second, (old, old))
-    worktree.refresh(repo)
-    assert not second.exists()
-    assert worktree.ensure(repo, "s2") == second
-    assert git(second, "branch", "--show-current") == "coreman/session-s1"
-    assert (second / "work.txt").read_text() == "day one"
-    assert not (repo / ".coreman-worktrees" / "s2.branch").exists()
