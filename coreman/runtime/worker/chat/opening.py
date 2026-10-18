@@ -262,6 +262,19 @@ class OpenStage(ChatStageBase):
         extra, env, personal_secrets = await credentials.configure(
             session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
         )
+        from coreman.runtime.worker.chat import cloud_proxy
+
+        env = await cloud_proxy.configure(
+            session,
+            ctx,
+            bot=bot,
+            user_id=intake.speaker.user_id,
+            origin_kind="chat",
+            env=env,
+            session_key=intake.session_key,
+            relay_session_id=info.relay_session_id,
+            event_id=intake.inbound.id,
+        )
         from coreman.core.prompting.rich_cards import with_reply_images
 
         # helper 的回答是交给平台解析的 JSON，不会发到聊天里，图片说明用不上。

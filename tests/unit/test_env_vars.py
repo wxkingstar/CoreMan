@@ -115,3 +115,25 @@ def test_env_value_fits_base64_kubeconfig() -> None:
     assert skill_policy.env_vars({"KUBECONFIG_B64": "a" * 16000})
     with pytest.raises(ValueError, match="过长"):
         skill_policy.env_vars({"KUBECONFIG_B64": "a" * 16001})
+
+
+def test_bot_env_cannot_supply_cloud_proxy_or_approvers() -> None:
+    env = build_env(
+        bot_key="b",
+        platform="wecom",
+        chat_id="c",
+        chat_type="single",
+        platform_user_id="u",
+        session_id="s",
+        speaker=Speaker("u", None, None, None),
+        bot_env={
+            "COREMAN_CLOUD_PROXY_URL": "x",
+            "COREMAN_CLOUD_PROXY_TOKEN": "x",
+            "COREMAN_CLOUD_ANY": "x",
+            "COREMAN_APPROVERS": "mallory",
+            "KEEP": "1",
+        },
+    )
+    assert env["KEEP"] == "1"
+    assert not {k for k in env if k.startswith("COREMAN_CLOUD_")} and "COREMAN_APPROVERS" not in env
+    assert is_reserved_key("COREMAN_CLOUD_X") and is_reserved_key("COREMAN_APPROVERS")
