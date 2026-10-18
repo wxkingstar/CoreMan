@@ -789,6 +789,8 @@ export default {
       addedAt: '追加日時',
       allowedUsers: '利用ホワイトリスト',
       allowedHint: '空 = 制限なし。誰でもこのAI スタッフを利用できます。',
+      approvers: 'クラウド操作の承認者',
+      approversHint: 'このAI スタッフによる高リスクな Alibaba Cloud 書き込み操作は、これらの人が Tower で承認します。空の場合は依頼者本人が確認します。',
       save: '保存',
       deleteConfirm: 'このAI スタッフを削除してもよろしいですか？設定とコラボレーター情報も併せて削除されます。',
       deleted: 'AI スタッフを削除しました',

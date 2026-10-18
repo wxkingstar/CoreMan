@@ -25,6 +25,7 @@ vi.mock('@/api/admin', () => ({
     get: vi.fn(),
     members: vi.fn().mockResolvedValue([{ user_id: 'u1', login_name: 'lisi', display_name: '李四', added_at: '', added_by: 'me' }]),
     allowedUsers: vi.fn().mockResolvedValue([]),
+    approvers: vi.fn().mockResolvedValue([]),
     addMember: vi.fn(),
     removeMember: vi.fn().mockResolvedValue(null),
     toggle: vi.fn(),

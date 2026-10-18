@@ -16,6 +16,7 @@ import BotHumanCollaborators from '@/components/BotHumanCollaborators.vue'
 import FeishuAppPanel from '@/components/feishuApp/FeishuAppPanel.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
 import BotAllowedUsersPanel from '@/components/bot/BotAllowedUsersPanel.vue'
+import BotApproversPanel from '@/components/bot/BotApproversPanel.vue'
 import BotMembersPanel from '@/components/bot/BotMembersPanel.vue'
 import { formatDateTime } from '@/utils/format'
 import BotForm from '@/views/BotForm.vue'
@@ -399,6 +400,10 @@ onMounted(async () => {
             :bot-id="botId"
             :perms="perms"
             @changed="reload(true)"
+          />
+          <BotApproversPanel
+            :bot-id="botId"
+            :perms="perms"
           />
           <SystemGrants
             v-if="perms?.can_edit"
