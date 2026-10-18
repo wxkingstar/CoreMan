@@ -38,6 +38,7 @@ from coreman.runtime.scheduler import cron, notifications, reaper
 LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('coreman-scheduler'))"
 LOCK_NAME = "coreman-scheduler"
 MAX_HEARTBEAT_SECONDS = 10.0
+RECONCILE_SECONDS = 300.0
 
 
 class SchedulerService(Service):
@@ -116,6 +117,7 @@ class SchedulerService(Service):
                 ("scheduler-relay-health", self._relay_health_loop()),
                 ("scheduler-wecom-provisions", self._wecom_provisions_loop()),
                 ("scheduler-wecom-personal", self._wecom_personal_loop()),
+                ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
             )
         ]
         self.ready = True
@@ -214,6 +216,11 @@ class SchedulerService(Service):
                 async with self._factory() as session:
                     counts["human_collaborations"] = await human_tick(session, now, self._cipher)
                     await session.commit()
+                from coreman.core.cloud_proxy.resume import tick as approval_tick
+
+                async with self._factory() as session:
+                    counts["approval_resumes"] = await approval_tick(session, now)
+                    await session.commit()
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds
@@ -302,6 +309,24 @@ class SchedulerService(Service):
             except Exception:
                 self._log.error("alerts_evaluation_failed")
             await self._sleep(30)
+
+    async def _tower_reconcile_loop(self) -> None:
+        """回调丢了的审批决定靠它兜底；Tower 没配置时不起作用。"""
+        from coreman.core.cloud_proxy import reconcile
+
+        settings = get_settings()
+        key = settings.tower_sender_key.get_secret_value() if settings.tower_sender_key else ""
+        while not self._stop.is_set():
+            try:
+                if self.is_leader and settings.tower_url and key:
+                    stats = await reconcile.run(
+                        self._factory, self._store, tower_url=settings.tower_url, sender_key=key
+                    )
+                    if stats["matched"]:
+                        self._log.info("tower_reconciled", **stats)
+            except Exception as exc:  # noqa: BLE001 Tower 不可达是常态，下一轮再试；不记异常体以免带出地址
+                self._log.warning("tower_reconcile_failed", error=type(exc).__name__)
+            await self._sleep(RECONCILE_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""
