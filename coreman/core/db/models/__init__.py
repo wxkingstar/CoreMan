@@ -40,6 +40,14 @@ from coreman.core.db.models.bus import (
     TaskStream,
     UserReached,
 )
+from coreman.core.db.models.cloud_proxy import (
+    CLOUD_APPROVAL_STATUSES,
+    CLOUD_OUTCOMES,
+    CLOUD_RISKS,
+    BotApprover,
+    CloudCall,
+    CloudPendingApproval,
+)
 from coreman.core.db.models.feishu_apps import FeishuAppRegistration
 from coreman.core.db.models.feishu_personal import FeishuPersonalGrant, FeishuPersonalSend
 from coreman.core.db.models.infrastructure import (
@@ -137,6 +145,12 @@ __all__ = [
     "CATALOG_STATUSES",
     "SystemCatalog",
     "SystemCall",
+    "CLOUD_APPROVAL_STATUSES",
+    "CLOUD_OUTCOMES",
+    "CLOUD_RISKS",
+    "BotApprover",
+    "CloudCall",
+    "CloudPendingApproval",
     "JwtKey",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",
