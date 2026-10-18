@@ -40,6 +40,8 @@ class TaskContext:
     locale: str = "zh"
     # 管理台对外地址：会话查看链接指向管理台对运行时节点的反向代理。
     public_base_url: str = ""
+    # 云服务代理的部署配置齐全；不齐则不下发代理地址与令牌。
+    cloud_proxy_ready: bool = False
     # 部署配置的外部签发方密钥（BOT_JWT_*）；有则业务系统令牌用它签。
     external_jwt_key: ExternalKey | None = None
     business_token_providers: dict[str, HTTPTokenProviderConfig] = field(

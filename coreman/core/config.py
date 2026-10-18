@@ -12,12 +12,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from coreman.core.auth.external_key import ExternalKey, load_external_key
 from coreman.core.auth.provider_config import HTTPTokenProviderConfig
+from coreman.core.cloud_proxy.risk_policy import CloudProxyPolicy
 from coreman.core.crypto import DEFAULT_KEY_ID, KID_RE, Cipher
 
 # 引导管理员直接拿到 platform_admin。.env.example 的占位值只由 `deploy/coreman up` 替换，
 # 直接 `docker compose up` 或自建编排时仍可能原样生效，这里在进程启动时拒绝。
 BOOTSTRAP_PASSWORD_MIN_LENGTH = 12
 TEMPLATE_PASSWORDS = frozenset({"change-me", "changeme"})
+CLOUD_PROXY_PRODUCTS = ("alidns", "domain", "mse", "slb")
 
 
 def _parse_previous_keys(raw: str, *, current: str) -> dict[str, bytes]:
@@ -83,6 +85,39 @@ class Settings(BaseSettings):
     business_token_providers: dict[str, HTTPTokenProviderConfig] = Field(
         default_factory=dict, alias="BUSINESS_TOKEN_PROVIDERS", repr=False
     )
+
+    # 云签名代理：Tower 审批与阿里云凭据只留在服务端；任一缺失时代理路由返回 503。
+    tower_url: str | None = Field(default=None, alias="TOWER_URL")
+    tower_callback_secret: SecretStr | None = Field(default=None, alias="TOWER_CALLBACK_SECRET")
+    tower_sender_key: SecretStr | None = Field(default=None, alias="TOWER_SENDER_KEY")
+    # 产品 → 该产品在 Tower 的 target key，JSON 对象
+    tower_target_keys: dict[str, SecretStr] = Field(
+        default_factory=dict, alias="TOWER_TARGET_KEYS", repr=False
+    )
+    aliyun_proxy_access_key_id: SecretStr | None = Field(
+        default=None, alias="ALIYUN_PROXY_ACCESS_KEY_ID"
+    )
+    aliyun_proxy_access_key_secret: SecretStr | None = Field(
+        default=None, alias="ALIYUN_PROXY_ACCESS_KEY_SECRET"
+    )
+    # 风险判定的部署参数（JSON，见 docs/tower-approval.md）；可选，缺的部分对应的写操作按高风险
+    cloud_proxy_policy: CloudProxyPolicy | None = Field(default=None, alias="CLOUD_PROXY_POLICY")
+
+    @property
+    def cloud_proxy_ready(self) -> bool:
+        def present(value: SecretStr | str | None) -> bool:
+            if isinstance(value, SecretStr):
+                value = value.get_secret_value()
+            return bool(value)
+
+        return (
+            present(self.tower_url)
+            and present(self.tower_callback_secret)
+            and present(self.tower_sender_key)
+            and present(self.aliyun_proxy_access_key_id)
+            and present(self.aliyun_proxy_access_key_secret)
+            and all(present(self.tower_target_keys.get(p)) for p in CLOUD_PROXY_PRODUCTS)
+        )
 
     @field_validator("business_token_providers")
     @classmethod

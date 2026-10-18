@@ -40,6 +40,8 @@ RESERVED_KEYS = frozenset(
         # 业务系统操作目录 MCP 的地址与本轮凭据（见 core/systems_catalog/policy.py）。
         "COREMAN_SYSTEMS_MCP_URL",
         "COREMAN_SYSTEMS_MCP_TOKEN",
+        # 云服务写操作的审批人名单，由平台按机器人重建。
+        "COREMAN_APPROVERS",
     }
 )
 # 平台按发言者签发的业务系统令牌前缀（见 core/auth/system_access.py）。静态配置里的
@@ -55,6 +57,7 @@ def is_reserved_key(key: str) -> bool:
             "COREMAN_WECOM_PERSONAL_",
             "COREMAN_SCHEDULE_",
             "COREMAN_CREDENTIAL_",
+            "COREMAN_CLOUD_",
         )
     )
 

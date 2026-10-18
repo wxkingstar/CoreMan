@@ -71,6 +71,9 @@ export const bots = {
   allowedUsers: (id: string) => call<AllowedUserOut[]>(http.get(`/api/admin/bots/${id}/allowed-users`)),
   setAllowedUsers: (id: string, userIds: string[]) =>
     call<AllowedUserOut[]>(http.put(`/api/admin/bots/${id}/allowed-users`, { user_ids: userIds })),
+  approvers: (id: string) => call<AllowedUserOut[]>(http.get(`/api/admin/bots/${id}/approvers`)),
+  setApprovers: (id: string, userIds: string[]) =>
+    call<AllowedUserOut[]>(http.put(`/api/admin/bots/${id}/approvers`, { user_ids: userIds })),
 }
 // 公告是运维数据（几十条封顶），后端不分页，直接给数组。
 export const announcements = {

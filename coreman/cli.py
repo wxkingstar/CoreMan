@@ -6,6 +6,8 @@
 `feishu-cards preview`：把样例或指定文件编译成飞书富卡片，用某个 AI 员工发给指定成员做
 真机视觉回归；默认只校验不发送。
 
+`tower reconcile`：回调丢失时翻 Tower 状态接口补上审批决定，见 core.cloud_proxy.reconcile。
+
 `bots`、`skills`、`approvals`、`systems`、`teams`、`users`、`api`：管理后台常用操作的命令行版本，
 以 --as 指定的成员身份经同一套管理 API 执行，见 coreman.admin_cli。
 """
@@ -175,6 +177,33 @@ async def _wecom_bots_audit() -> int:
     return 0
 
 
+async def _tower_reconcile() -> int:
+    from coreman.core.cloud_proxy import reconcile
+    from coreman.core.settings_store import SettingsStore
+
+    settings = get_settings()
+    key = settings.tower_sender_key.get_secret_value() if settings.tower_sender_key else ""
+    if not settings.tower_url or not key:
+        print("缺少 TOWER_URL 或 TOWER_SENDER_KEY 配置，无法对账", file=sys.stderr)
+        return 1
+    configure_logging(
+        service="cli", instance="tower-reconcile", level=settings.log_level, stream=sys.stderr
+    )
+    engine = make_engine(settings.database_url)
+    factory = make_session_factory(engine)
+    try:
+        stats = await reconcile.run(
+            factory, SettingsStore(factory), tower_url=settings.tower_url, sender_key=key
+        )
+    except reconcile.ReconcileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        await engine.dispose()
+    print(json.dumps(stats))
+    return 0
+
+
 def _preview_texts(args: argparse.Namespace) -> dict[str, str] | None:
     """预览内容：--file 文件、--sample 某个样例，都不给就是全部样例。"""
     from coreman.core.feishu_cards.samples import SAMPLES
@@ -231,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     wecom = sub.add_parser("wecom-bots", help="企业微信 AI 员工机器人检查")
     wecom_ops = wecom.add_subparsers(dest="operation", required=True)
     wecom_ops.add_parser("audit", help="只读检查机器人是否带着创建者的企业微信数据权限")
+    tower = sub.add_parser("tower", help="Tower 审批")
+    tower_ops = tower.add_subparsers(dest="operation", required=True)
+    tower_ops.add_parser("reconcile", help="翻 Tower 状态接口，补上丢失回调的审批决定")
     cards = sub.add_parser("feishu-cards", help="飞书富卡片")
     cards_ops = cards.add_subparsers(dest="operation", required=True)
     pv = cards_ops.add_parser("preview", help="编译样例或文件并发给指定成员，做真机视觉回归")
@@ -250,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_wecom_bots_audit())
     if args.command == "skills" and args.operation == "sync":
         return asyncio.run(_skills_sync(args.url, args.source))
+    if args.command == "tower" and args.operation == "reconcile":
+        return asyncio.run(_tower_reconcile())
     if args.command == "contact-sync":
         return asyncio.run(_contact_sync(args.app))
     return 2

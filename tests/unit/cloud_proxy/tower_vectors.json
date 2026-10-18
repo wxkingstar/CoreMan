@@ -1,0 +1,74 @@
+[
+  {
+    "name": "post-json",
+    "method": "POST",
+    "target": "nacos",
+    "url": "https://nacos.internal/v1/configs?env=prod\u0026data_id=users.v1.json",
+    "body_b64": "eyJhIjoxfQ==",
+    "caller": "bot-ops-01",
+    "hash": "3e6e604f3bccf80a81ab9460196da5bdbd655c9e1e6e070a7f0fc328b63fe38b"
+  },
+  {
+    "name": "get-no-query",
+    "method": "GET",
+    "target": "dns",
+    "url": "https://dns.internal/records",
+    "body_b64": "",
+    "caller": "bot-dns",
+    "hash": "e3608ae62504303d8bd016e13113e38f77cc6289c1c970090895a4a92e049335"
+  },
+  {
+    "name": "repeated-keys-keep-order",
+    "method": "DELETE",
+    "target": "allowlist",
+    "url": "https://gw/v1/ip?ip=1.1.1.1\u0026ip=0.0.0.0\u0026a=",
+    "body_b64": "",
+    "caller": "c",
+    "hash": "b1d0c2f791881ba233478c006ccf5793903d4b82a5fa1eb97fd456eacc436a10"
+  },
+  {
+    "name": "escaping",
+    "method": "PUT",
+    "target": "t1",
+    "url": "https://gw/a%20b/c?q=%E4%B8%AD+%E6%96%87\u0026x=~-._*",
+    "body_b64": "5Lit5paH",
+    "caller": "机器人",
+    "hash": "7942d296062adeb28c8d710bd4f690c4ec6ebdaf35a70b837f59c25203833718"
+  },
+  {
+    "name": "key-without-equals",
+    "method": "POST",
+    "target": "t1",
+    "url": "https://gw/p?flag\u0026b=2",
+    "body_b64": "",
+    "caller": "c",
+    "hash": "3c6f86c703fa0ea678a47605c24501ad3e32dcfd800801342a9f4ffd0602cf3b"
+  },
+  {
+    "name": "empty-segment-dropped",
+    "method": "GET",
+    "target": "t1",
+    "url": "https://gw/p?a=1\u0026\u0026b=2",
+    "body_b64": "",
+    "caller": "c",
+    "hash": "401e0c4d020afad3246da50f288b07b1a3c2d881637d6205c785114a48a6d74c"
+  },
+  {
+    "name": "empty-key-kept",
+    "method": "GET",
+    "target": "t1",
+    "url": "https://gw/p?=x\u0026b=2",
+    "body_b64": "",
+    "caller": "c",
+    "hash": "ff1997241c291bcb5b204d0b2fd96804a8ee42dcc4d219346c661a1ee39e3489"
+  },
+  {
+    "name": "invalid-utf8-escape",
+    "method": "GET",
+    "target": "t1",
+    "url": "https://gw/p?a=%FF\u0026b=%EF%BF%BD",
+    "body_b64": "",
+    "caller": "c",
+    "hash": "0107fd4d27ceb7c8809e19112f81560bbbeb965d75ac9c2230b9413cacd4080d"
+  }
+]

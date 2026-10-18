@@ -25,6 +25,12 @@ def test_identity_keys_are_never_treated_as_secrets() -> None:
         assert is_secret_key(key)
 
 
+def test_tower_sender_api_key_is_secret() -> None:
+    """Tower 审批 Skill 的预设下发给 Agent 的发送端 Key 要打码；旧名 TOWER_SENDER_KEY 不命中。"""
+    assert is_secret_key("TOWER_SENDER_API_KEY")
+    assert not is_secret_key("TOWER_SENDER_KEY")
+
+
 def test_collect_skips_short_values() -> None:
     env = {"BOT_TOKEN_ERP": JWT, "X_TOKEN": "short", "COREMAN_BOT_KEY": "sales-bot-key"}
     assert collect_secrets(env) == frozenset({JWT})

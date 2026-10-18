@@ -333,3 +333,38 @@ async def test_members_and_allowed_users(
     assert (await client.get(f"/api/admin/bots/{bot['id']}/members")).json()["data"] == []
     actions = {a.action for a in (await db_session.execute(select(AuditLog))).scalars()}
     assert {"bot.member_add", "bot.member_remove", "bot.allowed_users"} <= actions
+
+
+async def test_approvers_replace_permission_and_audit(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _, creator = await _setup(client, db_session)
+    ok = User(login_name="zhangsan", display_name="张三")
+    disabled = User(login_name="off", display_name="停用", status="disabled")
+    boot = User(login_name="boot", display_name="引导", source="bootstrap")
+    nologin = User(login_name=None, display_name="无登录名")
+    db_session.add_all([ok, disabled, boot, nologin])
+    await db_session.commit()
+    url = f"/api/admin/bots/{bot['id']}/approvers"
+    assert (await client.get(url)).json()["data"] == []
+    for bad in (disabled, boot, nologin):
+        assert (await client.put(url, json={"user_ids": [str(bad.id)]})).status_code == 422
+    r = await client.put(url, json={"user_ids": [str(ok.id), str(ok.id), str(creator.id)]})
+    assert r.status_code == 200, r.text
+    assert {u["login_name"] for u in r.json()["data"]} == {"zhangsan", creator.login_name}
+    assert (await client.get(url)).json()["data"] == r.json()["data"]
+    r = await client.put(url, json={"user_ids": [str(ok.id)]})
+    assert [u["login_name"] for u in r.json()["data"]] == ["zhangsan"]
+    # 无权限的普通成员不能改
+    await login_as(client, db_session, role="member", team_id=creator.team_id)
+    assert (await client.put(url, json={"user_ids": []})).status_code == 403
+    await login_existing(client, db_session, creator)
+    r = await client.put(url, json={"user_ids": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == []
+    audits = [
+        a
+        for a in (await db_session.execute(select(AuditLog))).scalars()
+        if a.action == "bot.approvers"
+    ]
+    assert len(audits) == 3

@@ -19,6 +19,7 @@ from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.reachability import private_chat
+from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
@@ -36,8 +37,8 @@ from coreman.core.personal_credentials.service import RESUME_KIND
 
 AAD = "feishu_personal.task_capability.v1"
 PREFIX = "COREMAN_FEISHU_PERSONAL_"
-# 本人私聊的一轮，或凭证提交后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
-PRIVATE_TURN_KINDS = ("chat", RESUME_KIND)
+# 本人私聊的一轮，或凭证提交、审批决定后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
+PRIVATE_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND)
 # 运行时声明了它，才会把个人工具作为附加 MCP 挂上，而不改变机器人原有能力。
 RUNTIME_CAPABILITY = "feishu_personal_tools_v1"
 # `self_reminder` 不调模型；其余模式在归本人所有、只发给本人时可以用本人授权。

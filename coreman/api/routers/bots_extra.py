@@ -31,7 +31,7 @@ from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import BotAllowedUser, BotMember, RelayServer, User
+from coreman.core.db.models import BotAllowedUser, BotApprover, BotMember, RelayServer, User
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
 
@@ -50,6 +50,12 @@ class MemberIn(BaseModel):
 
 class AllowedUsersIn(BaseModel):
     """整体替换：空数组 = 不限制。"""
+
+    user_ids: list[uuid.UUID] = Field(max_length=500)
+
+
+class ApproversIn(BaseModel):
+    """整体替换：空数组 = 由发起人自己确认。"""
 
     user_ids: list[uuid.UUID] = Field(max_length=500)
 
@@ -97,6 +103,22 @@ async def _allowed_of(session: AsyncSession, bot_id: uuid.UUID) -> list[dict[str
                 select(User)
                 .join(BotAllowedUser, BotAllowedUser.user_id == User.id)
                 .where(BotAllowedUser.bot_id == bot_id)
+                .order_by(User.display_name, User.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_user_out(u) for u in rows]
+
+
+async def _approvers_of(session: AsyncSession, bot_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await session.execute(
+                select(User)
+                .join(BotApprover, BotApprover.user_id == User.id)
+                .where(BotApprover.bot_id == bot_id)
                 .order_by(User.display_name, User.id)
             )
         )
@@ -330,6 +352,75 @@ async def replace_allowed_users(
         )
     await session.commit()
     return {"code": 0, "data": await _allowed_of(session, bot_id)}
+
+
+@router.get("/{bot_id}/approvers")
+async def list_approvers(
+    bot_id: uuid.UUID,
+    _user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    await load_bot(session, bot_id)
+    return {"code": 0, "data": await _approvers_of(session, bot_id)}
+
+
+@router.put("/{bot_id}/approvers")
+async def replace_approvers(
+    bot_id: uuid.UUID,
+    body: ApproversIn,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    bot = await load_bot(session, bot_id)
+    if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
+        raise forbidden()
+    wanted = list(dict.fromkeys(body.user_ids))
+    if wanted:
+        # 与注入时的 approver_logins 同一口径：存下来的人必须真能被注入，
+        # 否则审批人名单里有人却永远收不到审批。
+        found = set(
+            (
+                await session.execute(
+                    select(User.id).where(
+                        User.id.in_(wanted),
+                        User.status == "active",
+                        User.source != "bootstrap",
+                        User.login_name.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        missing = [str(uid) for uid in wanted if uid not in found]
+        if missing:
+            raise ApiError(422, 422, f"用户不存在、已停用或无登录名：{', '.join(missing)}")
+    old = set(
+        (await session.execute(select(BotApprover.user_id).where(BotApprover.bot_id == bot.id)))
+        .scalars()
+        .all()
+    )
+    if old != set(wanted):
+        await session.execute(delete(BotApprover).where(BotApprover.bot_id == bot.id))
+        session.add_all([BotApprover(bot_id=bot.id, user_id=uid) for uid in wanted])
+        await record_audit(
+            session,
+            action="bot.approvers",
+            actor_id=user.id,
+            actor_login=user.login_name,
+            target_type="bot",
+            target_id=str(bot.id),
+            diff={
+                "user_ids": [
+                    sorted(str(uid) for uid in old),
+                    sorted(str(uid) for uid in wanted),
+                ]
+            },
+            ip=client_ip(request),
+        )
+    await session.commit()
+    return {"code": 0, "data": await _approvers_of(session, bot_id)}
 
 
 class WorkspacePreviewIn(BaseModel):

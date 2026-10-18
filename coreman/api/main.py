@@ -24,6 +24,7 @@ from coreman.api.routers import (
     bots,
     bots_extra,
     chat_logs,
+    cloud_proxy,
     cron_jobs,
     departments,
     dev,
@@ -57,6 +58,7 @@ from coreman.api.routers import (
     statistics,
     systems_catalog,
     teams,
+    tower_callback,
     users,
     wecom_app_callback,
     wecom_bots,
@@ -124,6 +126,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(infra_push.router)
     app.include_router(infra_system_test.router)
     app.include_router(systems_catalog.router)
+    app.include_router(cloud_proxy.router)
+    app.include_router(tower_callback.router)
     app.include_router(systems_catalog.admin_router)
     app.include_router(infra_relay.router)
     app.include_router(auth.public_router)

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.identity import resolve_speaker
+from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
@@ -32,8 +33,9 @@ from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.core.prompting import Speaker
 
 AAD = "bot_collaboration.task_capability"
-# 来源是真人原始消息的轮次：普通对话，或凭证提交后在原对话里续接它的一轮（沿用同一条入站事件）。
-HUMAN_TURN_KINDS = ("chat", RESUME_KIND)
+# 来源是真人原始消息的轮次：普通对话，或凭证提交、审批决定后在原对话里续接它的一轮
+# （沿用同一条入站事件）。
+HUMAN_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND)
 ACTIVE = (
     "waiting_identity",
     "requested",

@@ -787,6 +787,8 @@ export default {
       addedAt: '加入时间',
       allowedUsers: '使用白名单',
       allowedHint: '留空 = 不限制，任何人都可以使用该AI 员工。',
+      approvers: '云操作审批人',
+      approversHint: '该AI 员工的高风险阿里云写操作需要这些人在 Tower 中审批。为空时由发起人自己确认。',
       save: '保存',
       deleteConfirm: '确定要删除该AI 员工吗？删除后配置与协作者关系一并移除。',
       deleted: 'AI 员工已删除',
