@@ -11,6 +11,7 @@ from coreman.core.bus import tasks
 from coreman.core.chat import interactions, sessions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
+from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
 from coreman.core.db.models import Bot, BotAllowedUser
 from coreman.core.i18n.messages import msg
 from coreman.core.personal_credentials.service import RESUME_KIND
@@ -88,6 +89,9 @@ async def do_reset(
     try:
         await _clear_states(session, bot_id, session_key, platform_user_id)
         await sessions.clear(session, bot_id, session_key)
+        # 排着的审批续接要回的是被清掉的那个会话，留着只会在空会话里跑
+        for t in await tasks.open_for_session(session, bot_id, session_key, APPROVAL_RESUME_KIND):
+            await tasks.request_cancel(session, t.id, "user_reset")
     except Exception:  # noqa: BLE001
         ctx.log.warning("session_reset_failed")
         return msg("session_reset_failed", ctx.locale)
@@ -112,10 +116,12 @@ async def do_stop(
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1
-    # A credential resume still queued behind the running turn would restart the work once it ends.
-    for t in await tasks.open_for_session(session, bot_id, session_key, RESUME_KIND):
-        if await tasks.request_cancel(session, t.id, "user_stop"):
-            stopped += 1
+    # A credential or approval resume still queued behind the running turn would restart the work
+    # once it ends.
+    for kind in (RESUME_KIND, APPROVAL_RESUME_KIND):
+        for t in await tasks.open_for_session(session, bot_id, session_key, kind):
+            if await tasks.request_cancel(session, t.id, "user_stop"):
+                stopped += 1
     return msg("stopped" if stopped else "nothing_running", ctx.locale)
 
 

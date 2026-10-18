@@ -20,6 +20,7 @@ from coreman.core.chat.bot_collaboration import issue_capability
 from coreman.core.chat.chat_logs import ChatLogEntry
 from coreman.core.chat.collaboration_tools import CRON_POLICY
 from coreman.core.chat.redaction import collect_secrets
+from coreman.core.cloud_proxy import resume as approval_resume
 from coreman.core.cron.access import require_operator
 from coreman.core.cron.delivery import enqueue_result
 from coreman.core.cron.precheck import PrecheckError, PrecheckResult, run_precheck_in_thread
@@ -36,6 +37,7 @@ from coreman.core.db.models import (
     User,
     WecomPersonalBinding,
 )
+from coreman.core.db.models.cloud_proxy import CloudPendingApproval
 from coreman.core.errors import ApiError
 from coreman.core.feishu_personal import policy
 from coreman.core.i18n.messages import msg
@@ -123,11 +125,16 @@ class CronRunHandler:
         execution_relay_id: uuid.UUID | None = None
         # 同事答复后的续跑：不重跑执行前检查，沿用原执行的 Relay 会话，不再挂载求助工具。
         asked_id = ctx.task.payload.get("human_collaboration_id")
+        # Tower 决定回来后的续跑：同样不重跑执行前检查，回到提交审批的那个 Relay 会话。
+        approval_id = ctx.task.payload.get("approval_external_id")
+        resuming = bool(asked_id or approval_id)
         collaborating = False
         try:
             started = time.monotonic()
             if asked_id:
                 result = PrecheckResult(True, "", "collaboration_reply")
+            elif approval_id:
+                result = PrecheckResult(True, "", "approval_resume")
             else:
                 # precheck 只接收非敏感快照，不注入 bot env / token / 任意 Python 对象。
                 # 解释器在独立线程里跑：同进程其它任务的心跳、SSE 消费与取消传导不能跟着停摆。
@@ -158,6 +165,17 @@ class CronRunHandler:
                     raise ApiError(409, 409, "collaboration_inactive")
                 if asked is not None and asked.relay_session_id is not None:
                     session_id = asked.relay_session_id
+                if approval_id:
+                    pending = await session.get(CloudPendingApproval, str(approval_id))
+                    if (
+                        pending is None
+                        or pending.resume_task_id != ctx.task.id
+                        or pending.status not in approval_resume.RESUME_STATUSES
+                    ):
+                        raise ApiError(409, 409, "approval_resume_inactive")
+                    session_id = (
+                        approval_resume.parse_uuid(pending.origin_relay_session_id) or session_id
+                    )
                 job_id = uuid.UUID(ctx.task.payload["cron_job_id"])
                 job = await session.get(CronJob, job_id)
                 bot = await session.scalar(
@@ -168,7 +186,7 @@ class CronRunHandler:
                 if (
                     job is None
                     # 续跑属于已经开始的那次执行：一次性任务跑完即停用、任务到期都不拦它。
-                    or (not asked_id and not job.enabled)
+                    or (not resuming and not job.enabled)
                     or job.bot_id != ctx.task.bot_id
                     or job.running_task_id != ctx.task.id
                     or bot is None
@@ -177,7 +195,7 @@ class CronRunHandler:
                     or run is None
                     or run.status != "running"
                     or run.executed_by != actor.id
-                    or (not asked_id and job.expires_at is not None and job.expires_at <= utcnow())
+                    or (not resuming and job.expires_at is not None and job.expires_at <= utcnow())
                 ):
                     raise ApiError(403, 403, "job_or_actor_unavailable")
                 if job.execution_mode == "personal_ai":
@@ -274,10 +292,23 @@ class CronRunHandler:
                         extra=personal_prompt,
                         env=env,
                     )
+                from coreman.runtime.worker.chat import cloud_proxy
+
+                env = await cloud_proxy.configure(
+                    session,
+                    ctx,
+                    bot=bot,
+                    user_id=actor.id,
+                    origin_kind="cron",
+                    env=env,
+                    cron_job_id=job.id,
+                    # 挂起单记下本次的 Relay 会话，审批续跑才能回到它
+                    relay_session_id=session_id,
+                )
                 # 定时执行同样带着本人的业务系统令牌与个人工具凭据，出站闸门一视同仁。
                 ctx.secrets = collect_secrets(env) | personal_secrets
-                if asked is not None:
-                    # 续跑的指令是开始执行时写好的 JSON：原任务、问题和同事答复。
+                if resuming:
+                    # 续跑的指令在排任务时已写进执行记录：同事答复的 JSON，或审批结果。
                     prompt = run.prompt
                 else:
                     prompt = str(config["prompt"])
