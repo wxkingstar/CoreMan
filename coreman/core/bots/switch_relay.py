@@ -20,13 +20,24 @@ from coreman.core.bots.relay_policy import (
     validate_backend_ready,
     validate_model_for_relay,
 )
-from coreman.core.bots.workspace_transfer import WorkspaceMode, prepare_switch, target_path
+from coreman.core.bots.workspace_transfer import (
+    WorkspaceMode,
+    copy_sessions,
+    prepare_switch,
+    target_path,
+)
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSkill, RelayServer, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
 from coreman.core.knowledge.installation import reinstall_after_switch
-from coreman.core.relay.models import default_model, effective_models, fit_effort, load_catalog
+from coreman.core.relay.models import (
+    backend_of,
+    default_model,
+    effective_models,
+    fit_effort,
+    load_catalog,
+)
 
 
 class SwitchError(Exception):
@@ -113,6 +124,8 @@ async def switch_relay(
     ):
         raise SwitchError(409, "工作目录操作正在进行，请完成后再切换模型")
     memory_status = "unchanged"
+    # 会话文件已在目标运行时上的 relay 会话：原样续用。同一实例同一目录（只换模型）全部续用。
+    carried = {row.relay_session_id for row in await sessions.list_for_bot(session, bot.id)}
     moved_skills: list[BotSkill] = []
     requested_directory = target_directory
     target_directory = bot.working_dir
@@ -130,6 +143,16 @@ async def switch_relay(
             )
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
+        old_relay = (
+            await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
+        )
+        carried = (
+            await copy_sessions(
+                session, bot, old_relay, target, bot.working_dir, target_directory, cipher
+            )
+            if old_relay is not None
+            else set()
+        )
         # 装过的都重装，包括之前重装或升级失败、仍停在失败状态的。
         installed = await session.scalars(
             select(BotSkill).where(
@@ -155,8 +178,10 @@ async def switch_relay(
     if bot.effort_level:
         # 自动换来的模型不支持 xhigh / max 时降到它支持的最高档，否则下发给 relay 的就是非法档位。
         bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)
-    # 换机换模型即换上下文：relay_session_id 在新机器上根本不存在，会话一律作废。
-    await sessions.clear_bot(session, bot.id)
+    # 会话键都保留：带过去的原样续用，带不过去的换新会话、首轮补上原会话最近的对话。
+    await sessions.carry_over(
+        session, bot.id, backend=backend_of(new_model, target.model_provider), keep=carried
+    )
     if moved_skills and cipher is not None:
         await reinstall_after_switch(session, cipher, bot=bot, rows=moved_skills, actor=actor)
     await record_audit(

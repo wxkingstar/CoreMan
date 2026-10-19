@@ -1,7 +1,8 @@
 """chat_sessions：只管 relay_session_id，对话历史由 relay 按 session_id 自持。
 
 所以「清会话」= 删掉这里的映射行，下一轮自然换一个新的 relay 会话；不需要、也无法去 relay
-上删历史。换机、换模型、超 TTL 都走这条路。
+上删历史。超 TTL、/clear 都走这条路。换运行时不清：会话文件带得走的原样续用，带不走的换新
+会话并记下原会话（carry_over），首轮由平台补上原会话最近的对话。
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ class SessionInfo:
     speaker_changed: bool
     # 换了人时，上一轮的发言者：本轮块的换人提醒要点名前后两个人。
     previous_speaker_user_id: uuid.UUID | None = None
+    # 换运行时后的首轮：要续上的原 relay 会话（本轮块带上它最近的对话）。
+    inherited_from: uuid.UUID | None = None
 
 
 async def get_or_create(
@@ -61,6 +64,7 @@ async def get_or_create(
     )
     previous = row.last_speaker_user_id if speaker_changed and row is not None else None
     sid = row.relay_session_id if (fresh and row is not None) else uuid.uuid4()
+    inherited = row.inherited_from if (fresh and row is not None) else None
     stmt = insert(ChatSession).values(
         bot_id=bot_id,
         session_key=session_key,
@@ -77,10 +81,12 @@ async def get_or_create(
                 "backend": backend,
                 "last_speaker_user_id": speaker_user_id,
                 "last_active_at": func.now(),
+                # 续接只在首轮带一次，与本轮同事务提交。
+                "inherited_from": None,
             },
         )
     )
-    return SessionInfo(sid, not fresh, speaker_changed, previous)
+    return SessionInfo(sid, not fresh, speaker_changed, previous, inherited)
 
 
 async def switch_to(
@@ -113,6 +119,7 @@ async def switch_to(
                 "backend": backend,
                 "last_speaker_user_id": speaker_user_id,
                 "last_active_at": func.now(),
+                "inherited_from": None,
             },
         )
     )
@@ -139,6 +146,22 @@ async def clear(session: AsyncSession, bot_id: uuid.UUID, session_key: str) -> b
 async def clear_bot(session: AsyncSession, bot_id: uuid.UUID) -> int:
     """清掉这个机器人的所有会话（换机 / 换模型 / 换工作目录），返回清掉几个。"""
     return await _deleted(session, delete(ChatSession).where(ChatSession.bot_id == bot_id))
+
+
+async def carry_over(
+    session: AsyncSession, bot_id: uuid.UUID, *, backend: str, keep: set[uuid.UUID]
+) -> None:
+    """换运行时后保留每个会话键。
+
+    keep 里的会话文件已在新运行时上，原样续用；其余换一个新的 relay 会话，记下原会话以便首轮
+    补上下文。连换两次还没聊过的，记的仍是最初那条（中间那条没有任何对话）。
+    """
+    for row in await list_for_bot(session, bot_id):
+        if row.relay_session_id in keep and row.backend == backend:
+            continue
+        row.inherited_from = row.inherited_from or row.relay_session_id
+        row.relay_session_id = uuid.uuid4()
+        row.backend = backend
 
 
 async def list_for_bot(session: AsyncSession, bot_id: uuid.UUID) -> list[ChatSession]:

@@ -11,12 +11,21 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
+import time
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-CHUNK = 256 * 1024
+# 换机分块：平台按两端 ping 报的 workspace_chunk 取小，旧平台仍按 256KB 读写。
+CHUNK = 2 * 1024 * 1024
 MAX_TEXT = 1024 * 1024
-MAX_TOTAL = 1024**3
+MAX_TOTAL = 4 * 1024**3
+MAX_FILES = 50000
+# 未推送提交随描述内联传过去；超过这个大小就整仓复制。
+BUNDLE_LIMIT = 8 * 1024 * 1024
+# 换机暂存目录超过这个时长还在，一定是中断的迁移留下的（单次迁移最长 30 分钟）。
+STALE_STAGE = 6 * 3600
+SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 MARKER = ".coreman-workspace.json"
 EXCLUDED = {
     ".git",
@@ -79,6 +88,53 @@ def digest(path):
         for chunk in iter(lambda: f.read(CHUNK), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def cached_digest(cache, path):
+    """换机按块读取时每块都要带整文件哈希；按 inode、大小与修改时间缓存，大文件不再每块重算。"""
+    st = path.stat()
+    key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+    if key not in cache:
+        if len(cache) > 20000:
+            cache.clear()
+        cache[key] = digest(path)
+    return cache[key]
+
+
+def sweep_stages(parent):
+    cutoff = time.time() - STALE_STAGE
+    for stage in parent.glob(".coreman-transfer-*"):
+        if stage.is_dir() and not stage.is_symlink() and stage.stat().st_mtime < cutoff:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def merge_tree(overlay, base):
+    """把 overlay 里的条目挪到 base 上，同名的以 overlay 为准；两边都是目录时逐层合并。"""
+    for entry in list(overlay.iterdir()):
+        target = base / entry.name
+        if (
+            entry.is_dir()
+            and not entry.is_symlink()
+            and target.is_dir()
+            and not target.is_symlink()
+        ):
+            merge_tree(entry, target)
+            continue
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+        entry.rename(target)
+
+
+def clean_in_repo(rel, repos):
+    """rel 是否落在某个可克隆仓库里、且与 HEAD 一致（目标节点克隆即可还原，不必复制）。"""
+    parts = PurePosixPath(rel).parts
+    for i in range(len(parts) - 1, -1, -1):
+        key = "/".join(parts[:i])
+        if key in repos:
+            return "/".join(parts[i:]) in repos[key]
+    return False
 
 
 def instruction_alias(root, name):
@@ -227,6 +283,7 @@ class Workspace:
             if current.resolve() == agent.root:
                 inside = True
         self.root = agent.workspace(str(data.get("working_dir") or ""))
+        self.checked_repos = set()
         self.bot = str(data.get("bot_id") or "")
         if not self.bot:
             raise self.error("缺少员工标识")
@@ -388,7 +445,7 @@ class Workspace:
             "data": base64.b64encode(raw).decode(),
             "content": content,
             "size": size,
-            "hash": digest(path),
+            "hash": cached_digest(self.agent.digests, path),
             "editable": size <= MAX_TEXT
             and content is not None
             and (not path.is_symlink() or bool(instruction_alias(self.root, self.data["path"]))),
@@ -414,13 +471,36 @@ class Workspace:
         return {"hash": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
     def export(self):
+        """换机复制的清单。
+
+        git=True 时，有远端、能在目标节点重新克隆的仓库只带描述（远端、分支、未推送提交的 bundle），
+        仓库里与 HEAD 一致的已跟踪文件不进清单，由目标节点克隆还原；expand 里的仓库仍整仓复制。
+        """
+        git_aware = self.data.get("git") is True
+        expand = self.data.get("expand") or []
+        if not isinstance(expand, list):
+            raise self.error("迁移参数无效")
         manifest, excluded, total = [], [], 0
+        repos, descriptors = {}, []
         for parent, dirs, files in os.walk(self.root, followlinks=False):
+            here = Path(parent)
+            rel_dir = here.relative_to(self.root).as_posix()
+            rel_dir = "" if rel_dir == "." else rel_dir
+            if git_aware and ".git" in dirs and rel_dir not in expand:
+                described = self.describe_repo(here, rel_dir)
+                if described is not None:
+                    descriptors.append(described[0])
+                    repos[rel_dir] = described[1]
+                    dirs.remove(".git")
             for name in list(dirs) + files:
-                path = Path(parent) / name
+                path = here / name
                 rel = path.relative_to(self.root).as_posix()
                 if forbidden(rel, transfer=True):
                     excluded.append(rel)
+                    if name in dirs:
+                        dirs.remove(name)
+                    continue
+                if repos and clean_in_repo(rel, repos):
                     if name in dirs:
                         dirs.remove(name)
                     continue
@@ -445,15 +525,92 @@ class Workspace:
                         {
                             "path": rel,
                             "size": size,
-                            "hash": digest(path),
+                            "hash": cached_digest(self.agent.digests, path),
                             "mode": stat.S_IMODE(path.stat().st_mode) & 0o777,
                         }
                     )
                 elif name in files:
                     excluded.append(rel)
-                if len(manifest) > 10000 or total > MAX_TOTAL:
-                    raise self.error("工作目录超过迁移大小限制")
-        return {"manifest": manifest, "excluded": excluded[:1000], "total_size": total}
+                if len(manifest) > MAX_FILES or total > MAX_TOTAL:
+                    raise self.error(
+                        "工作目录超过迁移上限（5 万个文件或 4G，可从远端重新克隆的仓库不计）"
+                    )
+        return {
+            "manifest": manifest,
+            "excluded": excluded[:1000],
+            "total_size": total,
+            "repos": descriptors,
+        }
+
+    def git_paths(self, args, repo):
+        from .agent import MAX_BODY
+
+        out = self.git(args, repo)
+        # run_command 只读前 MAX_BODY 字节；截断的列表会把改动当成未改动，宁可整仓复制。
+        if len(out.encode()) >= MAX_BODY - 16:
+            raise self.error("Git 输出过长")
+        return {name for name in out.split("\0") if name}
+
+    def describe_repo(self, repo, rel):
+        """能在目标节点重新克隆的仓库：返回 (描述, 与 HEAD 一致的已跟踪文件)。
+
+        否则返回 None，整仓复制。
+        """
+        gitdir = repo / ".git"
+        # 子模块、多工作树、浅克隆与 LFS 都无法靠克隆原样还原。
+        if (repo / ".gitmodules").exists() or any(
+            (gitdir / name).exists() for name in ("shallow", "worktrees", "modules", "lfs")
+        ):
+            return None
+        try:
+            url = self.git(["remote", "get-url", "origin"], repo).strip()
+            # 带凭证、非 HTTPS/SSH 的远端不往外传，整仓复制。
+            self.agent.git_source(url, any_host=True)
+            head = self.git(["rev-parse", "--verify", "HEAD"], repo).strip()
+            # 储藏也克隆不回来。
+            if not SHA.fullmatch(head) or self.optional(
+                ["rev-parse", "--verify", "--quiet", "refs/stash"], repo
+            ):
+                return None
+            branch = self.optional(["symbolic-ref", "--quiet", "--short", "HEAD"], repo)
+            branches = []
+            listing = self.git(
+                [
+                    "for-each-ref",
+                    "--format=%(refname:short)%00%(objectname)%00%(upstream:short)",
+                    "refs/heads",
+                ],
+                repo,
+            )
+            for line in listing.splitlines():
+                name, sha, upstream = line.split("\0")
+                branches.append({"name": name, "sha": sha, "upstream": upstream})
+            local = ["--branches"] if branch else ["--branches", "HEAD"]
+            unpushed = int(self.git(["rev-list", "--count", *local, "--not", "--remotes"], repo))
+            bundle = None
+            if unpushed:
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp) / "repo.bundle"
+                    self.git(["bundle", "create", str(target), *local, "--not", "--remotes"], repo)
+                    if target.stat().st_size > BUNDLE_LIMIT:
+                        return None
+                    bundle = base64.b64encode(target.read_bytes()).decode()
+            tracked = self.git_paths(["ls-files", "-z"], repo)
+            options = ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z"]
+            changed = self.git_paths([*options, "HEAD"], repo)
+            deleted = self.git_paths([*options, "--diff-filter=D", "HEAD"], repo)
+        except (self.error, ValueError):
+            return None
+        descriptor = {
+            "path": rel,
+            "url": url,
+            "head": head,
+            "branch": branch,
+            "branches": branches,
+            "bundle": bundle,
+            "deleted": sorted(deleted),
+        }
+        return descriptor, tracked - changed
 
     def stage(self):
         transfer = self.data.get("transfer_id", "")
@@ -467,19 +624,100 @@ class Workspace:
             raise self.error("暂存目录无效")
         return stage
 
+    def repo_stage(self, stage, repo):
+        rel = repo.get("path") if isinstance(repo, dict) else None
+        if not isinstance(rel, str):
+            raise self.error("仓库描述无效")
+        if rel:
+            self.path(rel, transfer=True)
+        return stage / "repos" / hashlib.sha256(rel.encode()).hexdigest()[:16]
+
+    def clone(self):
+        """换机：按源仓库描述在暂存区重新克隆，带回未推送的提交，还原分支、上游与 HEAD。
+
+        用节点用户自己的 Git 凭证访问远端；失败时平台改为整仓复制。
+        """
+        from .agent import run_command
+
+        stage = self.stage()
+        repo = self.data.get("repo")
+        dest = self.repo_stage(stage, repo)
+        url, _ = self.agent.git_source(str(repo.get("url", "")), any_host=True)
+        head, branch = str(repo.get("head", "")), str(repo.get("branch") or "")
+        branches = repo.get("branches")
+        if (
+            not SHA.fullmatch(head)
+            or not isinstance(branches, list)
+            or len(branches) > 1000
+            or any(not SHA.fullmatch(str(b.get("sha", ""))) for b in branches)
+            or (branch and branch not in [b.get("name") for b in branches])
+        ):
+            raise self.error("仓库描述无效")
+        sweep_stages(self.root.parent)
+        stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(exist_ok=True)
+        deadline = time.monotonic() + 900
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("COREMAN_", "GIT_"))}
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        base = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never"]
+
+        def run(args, *, prefix=base):
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise self.error("克隆超时")
+            return run_command([*prefix, *args], timeout=remaining, env_override=env, git_auth=True)
+
+        def git(*args, prefix=base):
+            return run(["-C", str(dest), *args], prefix=prefix)
+
+        # 只拉提交与目录树，文件内容在检出时按需取，历史很大的仓库也快。
+        run(["clone", "--quiet", "--no-checkout", "--filter=blob:none", "--", url, str(dest)])
+        if repo.get("bundle"):
+            raw = base64.b64decode(str(repo["bundle"]), validate=True)
+            if len(raw) > BUNDLE_LIMIT:
+                raise self.error("仓库描述无效")
+            bundle = dest.parent / (dest.name + ".bundle")
+            bundle.write_bytes(raw)
+            refspecs = ["+refs/*:refs/coreman-transfer/*"]
+            if not branch:
+                refspecs.append("+HEAD:refs/coreman-transfer/HEAD")
+            # 暂存区里我们自己写的 bundle 文件：放开 file 协议只用于这一次读取。
+            local = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"]
+            git("fetch", "--quiet", "--no-tags", str(bundle), *refspecs, prefix=local)
+            bundle.unlink()
+        wanted = set()
+        for item in branches:
+            name, upstream = str(item.get("name", "")), str(item.get("upstream") or "")
+            git("check-ref-format", "--branch", name)
+            git("update-ref", f"refs/heads/{name}", item["sha"])
+            wanted.add(f"refs/heads/{name}")
+            if upstream.startswith("origin/"):
+                git("config", f"branch.{name}.remote", "origin")
+                git("config", f"branch.{name}.merge", "refs/heads/" + upstream[len("origin/") :])
+        if branch:
+            git("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        else:
+            git("update-ref", "--no-deref", "HEAD", head)
+        if git("rev-parse", "HEAD").strip() != head:
+            raise self.error("克隆后的 HEAD 与源仓库不一致")
+        # 克隆自带、源仓库没有的本地分支与 bundle 的临时引用都删掉。
+        refs = git("for-each-ref", "--format=%(refname)", "refs/heads", "refs/coreman-transfer")
+        for ref in refs.split():
+            if ref not in wanted:
+                git("update-ref", "-d", ref)
+        git("reset", "--quiet", "--hard", "HEAD")
+        return {"cloned": True}
+
     def validate_manifest(self, manifest, root):
-        if not isinstance(manifest, list) or len(manifest) > 10000:
+        if not isinstance(manifest, list) or len(manifest) > MAX_FILES:
             raise self.error("迁移清单无效")
         seen, total = set(), 0
         for entry in manifest:
             name = entry["path"]
             p = self.path(name, root, allow_link="link" in entry, transfer=True)
-            if (
-                not name
-                or str(PurePosixPath(name)) != name
-                or name in seen
-                or any(PurePosixPath(name).is_relative_to(PurePosixPath(x)) for x in seen)
-            ):
+            if not name or str(PurePosixPath(name)) != name or name in seen:
                 raise self.error("迁移清单路径冲突")
             seen.add(name)
             if "link" in entry:
@@ -510,11 +748,13 @@ class Workspace:
         stage = self.stage()
         meta = stage / "transfer.json"
         files = stage / "files"
-        if not stage.exists():
+        if not meta.exists():
             manifest = self.data.get("manifest")
             self.validate_manifest(manifest, files)
-            stage.mkdir(mode=0o700, parents=True)
-            files.mkdir()
+            if not stage.exists():
+                sweep_stages(self.root.parent)
+            stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+            files.mkdir(exist_ok=True)
             meta.write_text(
                 json.dumps({"bot_id": self.bot, "target": str(self.root), "manifest": manifest})
             )
@@ -599,16 +839,45 @@ class Workspace:
                         raise self.error("迁移链接发生变化")
                 else:
                     p.symlink_to(entry["link"])
+        self.restore_repos(stage, files)
         self.install(files, replace=self.data.get("replace") is True)
         # 被替换的旧目录里可能有删不掉的只读目录；文件已经就位，清理失败不影响结果。
         shutil.rmtree(stage, ignore_errors=True)
         return {"installed": True}
 
-    def git(self, args):
+    def restore_repos(self, stage, files):
+        """把暂存区克隆好的仓库放回清单复制的文件里：复制来的（改动、未跟踪）文件覆盖克隆结果，
+        源上删掉的已跟踪文件也删掉。内层仓库先放，外层仓库再整体合并上去。"""
+        repos = self.data.get("repos") or []
+        if not isinstance(repos, list):
+            raise self.error("迁移参数无效")
+        for repo in sorted(repos, key=lambda r: -len(PurePosixPath(str(r.get("path"))).parts)):
+            clone = self.repo_stage(stage, repo)
+            if not (clone / ".git").is_dir() or (clone / ".git").is_symlink():
+                raise self.error("仓库尚未克隆完成")
+            rel = repo["path"]
+            overlay = self.path(rel, files, transfer=True) if rel else files
+            if overlay.is_symlink() or (overlay.exists() and not overlay.is_dir()):
+                raise self.error("迁移清单目录冲突")
+            if overlay.exists():
+                merge_tree(overlay, clone)
+            for name in repo.get("deleted") or []:
+                try:
+                    target = self.path(str(name), clone, allow_link=True, transfer=True)
+                except self.error:
+                    continue
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+            if overlay.exists():
+                shutil.rmtree(overlay)
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            clone.rename(overlay)
+
+    def git(self, args, repo=None):
         """只读查看工作目录的 Git 状态：不带凭证、不联网，仓库自带的执行类配置一律拒绝。"""
-        repo = self.root
+        repo = repo or self.root
         gitdir = repo / ".git"
-        if gitdir.exists() or gitdir.is_symlink():
+        if (gitdir.exists() or gitdir.is_symlink()) and repo not in self.checked_repos:
             if not gitdir.is_dir() or gitdir.is_symlink():
                 raise self.error("不支持链接或外部 Git 元数据目录")
             if (gitdir / "commondir").exists():
@@ -643,6 +912,7 @@ class Workspace:
                         "proxy",
                     }:
                         raise self.error("Git 配置含不受支持的执行设置")
+            self.checked_repos.add(repo)
         # Ignore inherited Git config, credential helpers and hooks, including repo config hooks.
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         env.update(
@@ -682,9 +952,9 @@ class Workspace:
             raise self.error("Git 操作失败或超时") from exc
         return output.rstrip("\n")
 
-    def optional(self, args):
+    def optional(self, args, repo=None):
         try:
-            return self.git(args)
+            return self.git(args, repo)
         except self.error:
             return ""
 
@@ -771,6 +1041,7 @@ class Workspace:
             "export",
             "import_",
             "finish",
+            "clone",
             "git_status",
             "git_diff",
         }:

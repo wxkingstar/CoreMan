@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextvars
 import hashlib
 import json
@@ -19,13 +20,21 @@ import subprocess
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 import requests
 
+from .workspace import CHUNK as WORKSPACE_CHUNK
+from .workspace import cached_digest, digest
+
 MAX_BODY = 4 * 1024 * 1024
 MAX_MEMORY = 256 * 1024
+# 换机带走的 Claude 会话文件：单个会话的对话记录、子代理与附件，总量与个数都有上限。
+SESSION_CHUNK = 2 * 1024 * 1024
+SESSION_TOTAL = 512 * 1024 * 1024
+SESSION_FILES = 5000
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
@@ -167,6 +176,7 @@ class Agent:
         model: str = "",
         git_hosts: tuple[str, ...] = ("github.com",),
         home: Path | None = None,
+        sessions_dir: Path | None = None,
     ) -> None:
         if len(token) < 24 or not relay_id:
             raise ValueError("必须配置实例 ID 与 Agent 令牌")
@@ -175,6 +185,9 @@ class Agent:
         self.root, self.home = root.resolve(), home or Path.home()
         self.api_url, self.token, self.relay_id = api_url.rstrip("/"), token, relay_id
         self.provider, self.model = provider, model
+        # 驱动按会话存的附件与用量基线（<sessions_dir>/<会话>/）；不在守护进程里跑时为空。
+        self.sessions_dir = sessions_dir
+        self.digests: dict = {}
         self.git_hosts = set(git_hosts)
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -245,13 +258,147 @@ class Agent:
         """本实例正在执行的任务；由运行时守护进程按其在途调用提供。"""
         return []
 
-    def memory_dir(self, working_dir: str) -> Path:
+    def claude_project_dir(self, working_dir: str) -> Path:
+        """Claude Code 按工作目录存会话与记忆的目录：路径里非字母数字的字符都换成 -。"""
         workspace = self.workspace(working_dir)
         base = (self.home / ".claude/projects").resolve()
-        path = base / str(workspace).replace("/", "-") / "memory"
+        name = re.sub(r"[^A-Za-z0-9]", "-", str(workspace))
+        # 超长路径 Claude Code 会截断再加哈希，这里推算不出来。
+        if len(name) > 200:
+            raise OperationError("工作目录路径过长")
+        path = base / name
         if not path.resolve().is_relative_to(base):
             raise OperationError("记忆路径不合法")
         return path
+
+    def memory_dir(self, working_dir: str) -> Path:
+        return self.claude_project_dir(working_dir) / "memory"
+
+    def session_areas(self, working_dir: str) -> dict[str, Path]:
+        areas = {"project": self.claude_project_dir(working_dir)}
+        if self.sessions_dir is not None:
+            areas["relay"] = self.sessions_dir
+        return areas
+
+    def session_path(self, working_dir: str, area: object, name: object) -> Path:
+        """会话文件只能是 <会话>.jsonl 或 <会话>/ 下的普通文件，不跟随链接。"""
+        areas = self.session_areas(working_dir)
+        if area not in areas or not isinstance(name, str) or "\x00" in name or "\\" in name:
+            raise OperationError("会话文件路径无效")
+        rel = PurePosixPath(name)
+        first = rel.parts[0] if rel.parts else ""
+        if (
+            rel.is_absolute()
+            or ".." in rel.parts
+            or str(rel) != name
+            or not (
+                (
+                    len(rel.parts) == 1
+                    and area == "project"
+                    and name.endswith(".jsonl")
+                    and SESSION_ID.fullmatch(name.removesuffix(".jsonl"))
+                )
+                or (len(rel.parts) > 1 and SESSION_ID.fullmatch(first))
+            )
+        ):
+            raise OperationError("会话文件路径无效")
+        base = areas[str(area)]
+        current = base
+        for part in rel.parts:
+            current = current / part
+            if current.is_symlink():
+                raise OperationError("会话文件不能是链接")
+        return current
+
+    def session_export(self, data: dict) -> dict:
+        """列出要带走的会话文件：Claude 的对话记录与子代理记录，以及驱动存的附件与用量基线。"""
+        working_dir = str(data.get("working_dir") or "")
+        wanted = data.get("sessions")
+        if not isinstance(wanted, list) or len(wanted) > 500:
+            raise OperationError("会话列表无效")
+        files, total = [], 0
+        for sid in wanted:
+            if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
+                raise OperationError("会话列表无效")
+            project = self.claude_project_dir(working_dir)
+            if not (project / f"{sid}.jsonl").is_file():
+                continue
+            candidates = [("project", project / f"{sid}.jsonl")]
+            for area, base in self.session_areas(working_dir).items():
+                folder = base / sid
+                if not folder.is_dir() or folder.is_symlink():
+                    continue
+                for parent, dirs, names in os.walk(folder, followlinks=False):
+                    dirs[:] = [d for d in dirs if not (Path(parent) / d).is_symlink()]
+                    candidates += [
+                        (area, Path(parent) / n)
+                        for n in names
+                        if (Path(parent) / n).is_file() and not (Path(parent) / n).is_symlink()
+                    ]
+            for area, path in candidates:
+                size = path.stat().st_size
+                total += size
+                files.append(
+                    {
+                        "area": area,
+                        "path": path.relative_to(self.session_areas(working_dir)[area]).as_posix(),
+                        "size": size,
+                        "hash": cached_digest(self.digests, path),
+                    }
+                )
+            if len(files) > SESSION_FILES or total > SESSION_TOTAL:
+                raise OperationError("会话文件超过迁移上限")
+        return {"success": True, "files": files}
+
+    def session_read(self, data: dict) -> dict:
+        path = self.session_path(
+            str(data.get("working_dir") or ""), data.get("area"), data.get("path")
+        )
+        offset, length = int(data.get("offset", 0)), int(data.get("length", SESSION_CHUNK))
+        if not path.is_file() or offset < 0 or not 0 < length <= SESSION_CHUNK:
+            raise OperationError("会话文件不存在或读取范围无效")
+        with path.open("rb") as f:
+            f.seek(offset)
+            raw = f.read(length)
+        return {
+            "success": True,
+            "data": base64.b64encode(raw).decode(),
+            "hash": cached_digest(self.digests, path),
+            "size": path.stat().st_size,
+        }
+
+    def session_import(self, data: dict) -> dict:
+        """按块写到临时文件，收齐并核对哈希后原子替换；目标上的同名旧会话以源为准。"""
+        path = self.session_path(
+            str(data.get("working_dir") or ""), data.get("area"), data.get("path")
+        )
+        transfer = str(data.get("transfer_id") or "")
+        size, expected = data.get("size"), str(data.get("hash") or "")
+        if (
+            not re.fullmatch(r"[a-fA-F0-9-]{16,64}", transfer)
+            or not isinstance(size, int)
+            or not 0 <= size <= SESSION_TOTAL
+            or not re.fullmatch("[a-f0-9]{64}", expected)
+        ):
+            raise OperationError("会话迁移参数无效")
+        raw = base64.b64decode(str(data.get("data") or ""), validate=True)
+        part = path.parent / f".{path.name}.coreman-{transfer}"
+        offset = int(data.get("offset", 0))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        received = part.stat().st_size if part.exists() else 0
+        if len(raw) > SESSION_CHUNK or offset != received or received + len(raw) > size:
+            raise OperationError("会话分块大小或顺序不正确")
+        with part.open("ab") as f:
+            f.write(raw)
+        received += len(raw)
+        if received < size:
+            return {"success": True, "received": received}
+        if digest(part) != expected:
+            part.unlink()
+            raise OperationError("会话文件校验失败")
+        part.chmod(0o600)
+        os.replace(part, path)
+        return {"success": True, "received": received, "installed": True}
 
     def assigned_workspaces(self) -> list[str]:
         directories = []
@@ -904,6 +1051,10 @@ class Agent:
                 "workspace_protocol": 1,
                 # 换机复制可整体替换已有目录、带上 .git，记忆部署可强制覆盖目标。
                 "workspace_replace": True,
+                # 换机可在目标节点重新克隆仓库、按 2MB 分块，Claude 会话文件可随之迁移。
+                "workspace_git": 1,
+                "workspace_chunk": WORKSPACE_CHUNK,
+                "session_transfer": 1 if self.provider == "claude" else 0,
                 "mcp_oauth": 1,
             }
         if kind == "status":
@@ -940,6 +1091,16 @@ class Agent:
                 return self.pull(data)
             if kind == "install-skill":
                 return self.install_skill(data)
+            if kind in {"session-export", "session-read", "session-import"}:
+                from .workspace import Workspace
+
+                # 只为本员工自己的工作目录读写会话。
+                Workspace(self, data)
+                if kind == "session-export":
+                    return self.session_export(data)
+                if kind == "session-read":
+                    return self.session_read(data)
+                return self.session_import(data)
             if kind in {"read-memory", "deploy-memory"} and data.get("bot_id") is not None:
                 from .workspace import Workspace
 

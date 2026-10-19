@@ -291,6 +291,7 @@ class RuntimeAgent(Agent):
             provider=provider,
             home=Path(daemon.config.get("home", str(Path.home()))),
             git_hosts=tuple(daemon.git_hosts),
+            sessions_dir=daemon.data_dir / "sessions" / provider,
         )
         self.daemon = daemon
         self.lock = daemon.operations_lock

@@ -516,3 +516,171 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
         headers={"If-Match": str(bot.version)},
     )
     assert result.status_code == 200, result.text
+
+
+async def _real_agents(db_session, tmp_path, monkeypatch):
+    """源、目标各一个真实 Agent；平台对节点的调用直接落到它们身上。"""
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import RuntimeNode
+    from runtime_daemon.agent import Agent, OperationError
+
+    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    src_root, dst_root = tmp_path / "source", tmp_path / "destination"
+    src_root.mkdir()
+    dst_root.mkdir()
+    source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
+    source_node.workspace_root = str(src_root)
+    bot.working_dir = str(src_root / bot.bot_key)
+    target = await add_node_relay(db_session, name="target", workspace_root=str(dst_root))
+    await db_session.commit()
+    agents = {
+        relay.id: Agent(
+            root=root,
+            home=tmp_path / home,
+            api_url="http://test",
+            token="x" * 32,
+            relay_id=str(relay.id),
+            sessions_dir=tmp_path / home / "relay-sessions",
+        )
+        for relay, root, home in [(old, src_root, "home1"), (target, dst_root, "home2")]
+    }
+    seen: list[tuple[str, dict]] = []
+
+    async def call(relay, cipher, operation, payload=None):
+        seen.append((operation, payload or {}))
+        try:
+            result = agents[relay.id].dispatch({"type": operation, **(payload or {})})
+        except OperationError as exc:
+            raise workspace_transfer.AgentError(
+                "Agent 未完成操作", code="operation_failed", detail=str(exc)
+            ) from exc
+        assert result["success"], result
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    agents[old.id].dispatch(
+        {"type": "workspace-init", "working_dir": bot.working_dir, "bot_id": str(bot.id)}
+    )
+    return bot, old, target, agents, seen
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+async def test_switch_reclones_repo_and_keeps_claude_session(
+    client, db_session, monkeypatch, tmp_path
+):
+    import runtime_daemon.agent as agent_module
+    from coreman.core.chat import sessions
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    url = "https://example.com/team/app.git"
+    bare, seed = tmp_path / "remote.git", tmp_path / "seed"
+    _git(tmp_path, "init", "-q", "-b", "main", str(seed))
+    (seed / "app.py").write_text("print(1)\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-q", "-m", "init")
+    _git(tmp_path, "clone", "-q", "--bare", str(seed), str(bare))
+    home = tmp_path / "user-home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(f'[url "file://{bare}"]\n\tinsteadOf = {url}\n')
+    monkeypatch.setenv("HOME", str(home))
+    original = agent_module.run_command
+    monkeypatch.setattr(
+        agent_module,
+        "run_command",
+        lambda command, *a, **kw: original(
+            [c.replace("allow=never", "allow=always") for c in command], *a, **kw
+        ),
+    )
+    repo = tmp_path / "source" / bot.bot_key / "app"
+    _git(tmp_path, "clone", "-q", str(bare), str(repo))
+    _git(repo, "remote", "set-url", "origin", url)
+    (repo / "app.py").write_text("print(2)\n")
+    info = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="u1",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=None,
+    )
+    sid = str(info.relay_session_id)
+    project = agents[old.id].claude_project_dir(bot.working_dir)
+    project.mkdir(parents=True)
+    (project / f"{sid}.jsonl").write_text('{"type":"user"}\n')
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    moved = tmp_path / "destination" / bot.bot_key / "app"
+    assert (moved / "app.py").read_text() == "print(2)\n"
+    assert _git(moved, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    operations = [op for op, _ in seen]
+    assert "workspace-clone" in operations
+    manifest = next(p["manifest"] for op, p in seen if op == "workspace-import" and "manifest" in p)
+    assert not any(e["path"].startswith("app/.git/") for e in manifest)
+    # Claude 会话文件到了新目录，会话映射原样保留：下一轮直接续聊。
+    assert (agents[target.id].claude_project_dir(bot.working_dir) / f"{sid}.jsonl").exists()
+    (row,) = await sessions.list_for_bot(db_session, bot.id)
+    await db_session.refresh(row)
+    assert str(row.relay_session_id) == sid and row.inherited_from is None
+
+
+async def test_switch_falls_back_to_full_copy_when_clone_fails(
+    client, db_session, monkeypatch, tmp_path
+):
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    repo = tmp_path / "source" / bot.bot_key / "app"
+    _git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "app.py").write_text("print(1)\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "remote", "add", "origin", "https://example.com/team/unreachable.git")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    moved = tmp_path / "destination" / bot.bot_key / "app"
+    assert _git(moved, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    exports = [p for op, p in seen if op == "workspace-export"]
+    assert exports[-1]["expand"] == ["app"]
+
+
+async def test_switch_failure_reports_runtime_reason(client, db_session, monkeypatch, tmp_path):
+    from runtime_daemon import workspace
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    monkeypatch.setattr(workspace, "MAX_FILES", 1)
+    folder = tmp_path / "source" / bot.bot_key
+    (folder / "a.txt").write_text("a")
+    (folder / "b.txt").write_text("b")
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 502, response.text
+    assert "超过迁移上限" in response.json()["message"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and "超过迁移上限" in bot.workspace_error
