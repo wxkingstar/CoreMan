@@ -872,7 +872,7 @@ class Agent:
                 now = time.monotonic()
                 local = time.localtime()
                 slot = time.strftime("%Y-%m-%d-%H", local)
-                if now - last_quota >= 1800:
+                if now - last_quota >= 3600:
                     self.start_background("probe-rate-limits", self.probe_rate_limits)
                     last_quota = now
                 if os.environ.get("COREMAN_MEMORY_SYNC", "1") == "1" and now - last_memory >= 3600:

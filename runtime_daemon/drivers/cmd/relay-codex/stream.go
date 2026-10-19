@@ -31,6 +31,7 @@ import (
 // once on a new thread and the user is told the earlier context is gone.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
 	images := newTurnImages(workingDir)
+	turnStarted := time.Now().Add(-time.Second)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -175,11 +176,12 @@ probe:
 		})
 	}
 
-	usageChunk := func(u *openai.UsageInfo) {
+	usageChunk := func(u *openai.UsageInfo, limits any) {
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
-			Choices: []openai.ChatCompletionChoice{},
-			Usage:   u,
+			Choices:     []openai.ChatCompletionChoice{},
+			Usage:       u,
+			XRateLimits: limits,
 		})
 	}
 
@@ -383,7 +385,7 @@ processLines:
 	finishChunk(reason)
 
 	if includeUsage && streamUsage != nil {
-		usageChunk(streamUsage)
+		usageChunk(streamUsage, rolloutRateLimits(turnThread(), turnStarted))
 	}
 
 	sessionStore.LogDone(sessionID, streamUsage)
