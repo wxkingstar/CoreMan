@@ -632,7 +632,7 @@ Claude 验收字段为 loggedIn=true；Codex 的 `login status` 必须表示已�
 
 首次在 `/workspace` 使用 Claude/Codex 时，完成该工作目录的交互初始化与必要信任设置。不得全局自动信任所有路径。CLI 的模型、权限和 MCP 设置使用批准版本支持的配置格式；CoreMan 请求级模型与工作区仍由平台选择。
 
-Claude statusLine 额度探针是可选项：需要时安装链接选择 `install_claude_probe=true`。它在现有 statusLine 命令前串接一层采集脚本，原状态栏照常显示；重复安装沿用记录的原命令，不会重复包装。不要再部署另一套改写 statusLine 的额度探针。未启用时守护进程不排 Claude 额度探测，也不以额度数据缺失判定环境创建失败。
+Claude 额度由驱动从请求返回的 `rate_limit_event` 中读取，无需改动 statusLine，也不要部署改写 statusLine 的额度探针。节点刚启动、尚无请求时没有额度数据，不以此判定环境创建失败。
 
 平台业务令牌按实际发起者/定时创建者归属注入；不在 shell 配置、插件预设或全局 MCP 中固定员工身份。Claude/Codex 登录主体用于模型服务认证，与业务系统操作主体分别管理。
 
@@ -722,8 +722,7 @@ python3 runtime_daemon/build.py --target linux-amd64 --target linux-arm64 \
     "claude_path": "/home/coreman01/.local/bin/claude",
     "codex_path": "/home/coreman01/.npm-global/bin/codex",
     "git_hosts": ["github.com"],
-    "max_concurrent": 4,
-    "install_claude_probe": false
+    "max_concurrent": 4
   }
 }
 ```
@@ -762,7 +761,6 @@ unset INSTALL_URL
 | proxy | 覆盖四个 HTTP(S) 代理变量；留空使用服务环境 |
 | git_hosts | 机器人工作区拉取、推送、备份与创建 PR 允许访问的 Git 主机名列表，不含 scheme/path；技能安装不受此限制 |
 | max_concurrent | 本节点同时领取的任务槽位 |
-| install_claude_probe | 可选额度探针，在原 statusLine 命令前串接采集脚本 |
 | release | 安装器生成的发布包目录 |
 | node_id、node_token、backends | 安装器/注册接口维护的身份与能力映射，不手工伪造 |
 | service_status | 安装器记录的托管方式 |

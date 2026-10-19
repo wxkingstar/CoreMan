@@ -67,7 +67,6 @@ class InstallOptions(BaseModel):
     codex_path: str = Field(default="", max_length=500)
     git_hosts: list[str] = Field(default_factory=lambda: ["github.com"], max_length=30)
     max_concurrent: int = Field(default=10, ge=1, le=32)
-    install_claude_probe: bool = False
     # 平台使用私有 CA 时的 PEM 证书：与 proxy 一样随配置注入安装脚本，
     # 安装脚本取出后写成节点数据目录下的 ca.pem，并在节点配置里记为 ca_file。
     ca_pem: str = Field(default="", max_length=MAX_CA_PEM_BYTES)

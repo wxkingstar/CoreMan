@@ -228,7 +228,12 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats.Snapshot())
+	// rate_limits is the latest subscription quota seen on any request; the
+	// node agent reports it instead of running its own probe.
+	json.NewEncoder(w).Encode(struct {
+		openai.TokenStatsSnapshot
+		RateLimits *rateLimitSnapshot `json:"rate_limits"`
+	}{stats.Snapshot(), rateLimits.snapshot()})
 }
 
 func main() {

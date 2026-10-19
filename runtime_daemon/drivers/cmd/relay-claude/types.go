@@ -25,6 +25,8 @@ type claudeEvent struct {
 	// it over Usage which only counts the main agent.
 	ModelUsage   map[string]claudeModelUsage `json:"modelUsage,omitempty"`
 	TotalCostUSD float64                     `json:"total_cost_usd,omitempty"`
+	// RateLimitInfo is set on `rate_limit_event` lines (subscription accounts).
+	RateLimitInfo json.RawMessage `json:"rate_limit_info,omitempty"`
 }
 
 type claudeModelUsage struct {

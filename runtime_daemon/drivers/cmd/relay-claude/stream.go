@@ -282,6 +282,7 @@ processLines:
 			log.Printf("Failed to parse claude event: %v", err)
 			continue
 		}
+		rateLimits.observe(event.RateLimitInfo)
 
 		if event.Type == "stream_event" && event.Event != nil {
 			var streamEvt streamAPIEvent

@@ -146,6 +146,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		log.Printf("Failed to parse claude event: %v", err)
 		return outcomeContinue
 	}
+	rateLimits.observe(event.RateLimitInfo)
 
 	if event.Type == "stream_event" && event.Event != nil {
 		var streamEvt streamAPIEvent

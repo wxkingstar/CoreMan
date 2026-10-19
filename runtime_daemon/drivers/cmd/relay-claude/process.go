@@ -537,6 +537,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 			log.Printf("Failed to parse claude event: %v", jsonErr)
 			continue
 		}
+		rateLimits.observe(event.RateLimitInfo)
 		events = append(events, event)
 
 		text := extractTextFromEvent(&event)
