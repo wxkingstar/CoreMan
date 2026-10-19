@@ -10,6 +10,7 @@ from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
     ImageDelta,
+    RateLimitEvent,
     RelayErrorEvent,
     SseEvent,
     TextDelta,
@@ -155,6 +156,8 @@ class ConverseStage(ChatStageBase):
         elif isinstance(event, UsageEvent):
             out.usage_events += 1
             out.usage = event
+        elif isinstance(event, RateLimitEvent):
+            out.rate_limits = event.data
         elif isinstance(event, AskUserQuestionEvent):
             out.ask_user, out.questions = True, list(event.questions)
         elif isinstance(event, FinishEvent):

@@ -26,6 +26,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.quota import parse_quota, save_quota
 from coreman.core.wecom.cards import (
     choice_card,
     make_choice_prefix,
@@ -237,6 +238,10 @@ class FinalizeStage(ChatStageBase):
                     content=pre.content,
                 )
             )
+            # 额度来自本轮实际请求，比 Agent 定时上报新；写在这里，下面的额度预警读到的就是它。
+            quota = parse_quota(out.rate_limits) if out.rate_limits else None
+            if quota is not None:
+                await save_quota(session, pre.relay.id, quota)
             # 记录与任务同一事务结束：不会出现任务结束了、记录还停在进行中。
             logged = owned and await chat_logs.finish_turn(session, entry)
             await session.commit()

@@ -58,6 +58,7 @@ type sseTranslator struct {
 	streamDeltaSent bool
 	streamUsage     *openai.UsageInfo
 	sawResult       bool // a result event reached feed (finish chunk emitted)
+	sawRateLimit    bool // a rate_limit_event updated the quota during this request
 	seenToolIDs     map[string]bool
 	fallbackToolSeq int
 
@@ -146,7 +147,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		log.Printf("Failed to parse claude event: %v", err)
 		return outcomeContinue
 	}
-	rateLimits.observe(event.RateLimitInfo)
+	if rateLimits.observe(event.RateLimitInfo) {
+		t.sawRateLimit = true
+	}
 
 	if event.Type == "stream_event" && event.Event != nil {
 		var streamEvt streamAPIEvent
@@ -403,8 +406,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		if includeUsage && t.streamUsage != nil {
 			t.emit(w, flusher, openai.ChatCompletionResponse{
 				ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
-				Choices: []openai.ChatCompletionChoice{},
-				Usage:   t.streamUsage,
+				Choices:     []openai.ChatCompletionChoice{},
+				Usage:       t.streamUsage,
+				XRateLimits: requestRateLimits(t.sawRateLimit),
 			})
 		}
 	}

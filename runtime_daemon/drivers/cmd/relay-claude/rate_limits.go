@@ -43,13 +43,14 @@ type rateLimitStore struct {
 
 var rateLimits = &rateLimitStore{}
 
-func (s *rateLimitStore) observe(raw json.RawMessage) {
+// observe reports whether the event updated a window.
+func (s *rateLimitStore) observe(raw json.RawMessage) bool {
 	if len(raw) == 0 {
-		return
+		return false
 	}
 	var info claudeRateLimitInfo
 	if json.Unmarshal(raw, &info) != nil {
-		return
+		return false
 	}
 	windows := map[string]claudeRateLimitWindow{}
 	// unifiedWindows is marked internal by the CLI; fall back to the top-level
@@ -84,6 +85,20 @@ func (s *rateLimitStore) observe(raw json.RawMessage) {
 		next.ObservedAt = time.Now().UTC().Format(time.RFC3339)
 		s.snap = &next
 	}
+	return changed
+}
+
+// requestRateLimits is the x_rate_limits value for a request's final chunk:
+// the latest quota when this request saw a rate_limit_event, else untyped nil
+// so the field is omitted.
+func requestRateLimits(saw bool) any {
+	if !saw {
+		return nil
+	}
+	if snap := rateLimits.snapshot(); snap != nil {
+		return snap
+	}
+	return nil
 }
 
 func (s *rateLimitStore) snapshot() *rateLimitSnapshot {

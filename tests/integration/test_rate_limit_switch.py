@@ -127,6 +127,34 @@ async def test_warning_without_limit_and_no_candidate(
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
 
 
+async def test_quota_returned_with_the_reply_is_saved_before_the_warning(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, relay, _ = await seed_bot(db_session)
+    stale = datetime.now(UTC) - timedelta(hours=2)
+    relay.rate_limit_5h_used_pct, relay.rate_limit_7d_used_pct = Decimal("91"), Decimal("10")
+    relay.rate_limit_probed_at = stale
+    await db_session.commit()
+    t = await chat_task(db_session, bot, "你好")
+    await run(db_engine, t, FakeRelay("quota"))
+    s = await stream_of(db_session, t.id)
+    # 预警读的是本轮带回的 42.5%，旧的 91% 不再触发提醒。
+    assert "额度提醒" not in s.final_text
+    await db_session.refresh(relay)
+    assert relay.rate_limit_5h_used_pct == Decimal("42.5")
+    assert relay.rate_limit_7d_used_pct == Decimal("6")
+    assert relay.rate_limit_5h_resets_at == datetime.fromtimestamp(1792394400, UTC)
+    assert relay.rate_limit_probed_at and relay.rate_limit_probed_at > stale
+
+    # 格式不对的额度丢弃，不影响这一轮，也不改库。
+    t2 = await chat_task(db_session, bot, "再来")
+    await run(db_engine, t2, FakeRelay("quota_malformed"))
+    s2 = await stream_of(db_session, t2.id)
+    assert "好的" in s2.final_text
+    await db_session.refresh(relay)
+    assert relay.rate_limit_5h_used_pct == Decimal("42.5")
+
+
 async def test_reaper_wins_before_rate_limit_finalization_without_orphan_offer(
     db_engine, db_session
 ):

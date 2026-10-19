@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,30 @@ func TestStatsHandlerIncludesRateLimits(t *testing.T) {
 	limits := body["rate_limits"].(map[string]any)
 	if limits["seven_day"].(map[string]any)["used_percentage"] != 6.0 || limits["five_hour"] != nil {
 		t.Fatalf("rate_limits = %v", limits)
+	}
+}
+
+func TestUsageChunkCarriesThisRequestsRateLimits(t *testing.T) {
+	saved := rateLimits
+	t.Cleanup(func() { rateLimits = saved })
+	rateLimits = &rateLimitStore{}
+	result := `{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":3,"output_tokens":2}}`
+
+	rec := httptest.NewRecorder()
+	tr := newSSETranslator("chatcmpl-rl", 1700000000, "haiku", "", identityMeter{}, "")
+	tr.feed(rec, rec, `{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":7}}}}`, true)
+	tr.feed(rec, rec, result, true)
+	body := rec.Body.String()
+	if !strings.Contains(body, `"x_rate_limits":{"five_hour":{"used_percentage":25,"resets_at":7}`) {
+		t.Fatalf("usage chunk lacks x_rate_limits; SSE output:\n%s", body)
+	}
+
+	// A request that saw no rate_limit_event (API-key login) does not repeat
+	// another request's figures.
+	rec = httptest.NewRecorder()
+	tr = newSSETranslator("chatcmpl-rl2", 1700000000, "haiku", "", identityMeter{}, "")
+	tr.feed(rec, rec, result, true)
+	if body := rec.Body.String(); strings.Contains(body, "x_rate_limits") || !strings.Contains(body, `"usage"`) {
+		t.Fatalf("unexpected SSE output:\n%s", body)
 	}
 }

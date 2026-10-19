@@ -18,6 +18,7 @@ def _chunk(
     finish: str | None = None,
     usage: dict[str, Any] | None = None,
     error: bool = False,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     body: dict[str, Any] = {
         "id": "chatcmpl-fake",
@@ -34,6 +35,7 @@ def _chunk(
         body["usage"] = usage
     if error:
         body["x_relay_error"] = True
+    body.update(extra or {})
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
@@ -42,6 +44,12 @@ USAGE = {
     "completion_tokens": 20,
     "total_tokens": 200,
     "prompt_tokens_details": {"cached_tokens": 80, "cache_creation_tokens": 0},
+}
+# relay-claude 在 usage chunk 上带回的本轮订阅额度（resets_at 为 Unix 秒）。
+QUOTA = {
+    "five_hour": {"used_percentage": 42.5, "resets_at": 1792394400},
+    "seven_day": {"used_percentage": 6, "resets_at": 1792468800},
+    "observed_at": "2026-10-19T02:27:37Z",
 }
 FINISH = _chunk({"role": "", "content": ""}, finish="stop")
 DONE = "data: [DONE]\n\n"
@@ -86,6 +94,18 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
         _tool("Read", "t2"),
         FINISH,
         _chunk(None, usage=USAGE),
+        DONE,
+    ],
+    "quota": lambda: [
+        _text("好的"),
+        FINISH,
+        _chunk(None, usage=USAGE, extra={"x_rate_limits": QUOTA}),
+        DONE,
+    ],
+    "quota_malformed": lambda: [
+        _text("好的"),
+        FINISH,
+        _chunk(None, usage=USAGE, extra={"x_rate_limits": {"five_hour": {"used_percentage": 300}}}),
         DONE,
     ],
     "empty": lambda: [": ping\n\n", FINISH, DONE],
