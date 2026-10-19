@@ -280,6 +280,7 @@ func main() {
 
 	sessionStore = sessions.New(*sessionsDir)
 	sessionStore.StartCleanup(72*time.Hour, 1*time.Hour)
+	resumeMeter = newSessionMeter(sessionStore.AbsDir())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", chatCompletionsHandler)

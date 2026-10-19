@@ -59,6 +59,16 @@ func hasArg(args []string, flag string) bool {
 	return false
 }
 
+// sessionArg returns the session id passed via --resume or --session-id.
+func sessionArg(args []string) string {
+	for i, a := range args {
+		if (a == "--resume" || a == "--session-id") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func replaceArg(args []string, old, new string) []string {
 	result := make([]string, len(args))
 	copy(result, args)
@@ -469,6 +479,7 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 
 			log.Printf("Resume session not found, retrying with --session-id")
 			retryArgs := replaceArg(args, "--resume", "--session-id")
+			resetMeter(sessionArg(retryArgs))
 			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, prompt, workingDir, envVars, watchdogTimeout)
 			if err != nil {
 				ready <- err
@@ -544,6 +555,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 			lastText = text
 		}
 		if event.Type == "result" {
+			meterResult(sessionArg(args), &event)
 			if event.Result != "" {
 				result = event.Result
 			}
@@ -562,6 +574,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 	if hasArg(args, "--resume") && sessionMissing && lastText == "" && result == "" {
 		log.Printf("Resume session not found, retrying with --session-id")
 		retryArgs := replaceArg(args, "--resume", "--session-id")
+		resetMeter(sessionArg(retryArgs))
 		return runClaude(retryArgs, prompt, workingDir, envVars)
 	}
 	return

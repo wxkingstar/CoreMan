@@ -349,6 +349,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 
 	if event.Type == "result" {
 		t.sawResult = true
+		meterResult(t.sessionID, &event)
 
 		// Error results (is_error / subtype=error_*) used to be
 		// indistinguishable from success downstream: extractTextFromEvent only
