@@ -20,6 +20,7 @@ OPERATIONS = {
     "workspace-export",
     "workspace-import",
     "workspace-finish",
+    "workspace-clone",
     "workspace-git-status",
     "workspace-git-diff",
     "ping",
@@ -36,6 +37,9 @@ OPERATIONS = {
     "collect-memory",
     "read-memory",
     "deploy-memory",
+    "session-export",
+    "session-read",
+    "session-import",
 }
 
 
@@ -85,7 +89,11 @@ async def call_agent(
     del cipher
     if operation not in OPERATIONS or not relay.is_active or relay.runtime_node_id is None:
         raise AgentError("实例未启用、未绑定运行时节点或操作不支持")
-    timeout = 950 if operation in {"pull", "pr", "init", "install-skill"} else 130
+    timeout = (
+        950 if operation in {"pull", "pr", "init", "install-skill", "workspace-clone"} else 130
+    )
+    # 换机清单最多 5 万条，其他操作的响应都很小。
+    limit = 32 * 1024 * 1024 if operation == "workspace-export" else 4 * 1024 * 1024
     try:
         async with make_http(relay) as client:
             async with client.stream(
@@ -99,7 +107,7 @@ async def call_agent(
                 data = bytearray()
                 async for part in response.aiter_bytes():
                     data.extend(part)
-                    if len(data) > 4 * 1024 * 1024:
+                    if len(data) > limit:
                         raise AgentError("Agent 响应超过上限")
                 result = json.loads(data)
                 if not isinstance(result, dict) or result.get("success") is not True:

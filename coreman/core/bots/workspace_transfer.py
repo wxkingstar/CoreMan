@@ -13,15 +13,36 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.workspace import reserve_workspace
+from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, RelayServer, RuntimeNode
 from coreman.core.errors import ApiError
 from coreman.core.knowledge import memory_transfer
+from coreman.core.logging import get_logger
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 
+log = get_logger(__name__)
+
 WorkspaceMode = Literal["copy", "existing"]
+# 旧运行时只认 256KB 分块；新运行时在 ping 里报 workspace_chunk。
 CHUNK_SIZE = 256 * 1024
+MAX_CHUNK = 2 * 1024 * 1024
+MAX_FILES = 50000
+SESSION_COPY_TIMEOUT = 5 * 60
+
+
+def failure_message(exc: BaseException) -> str:
+    """换机失败给人看的原因：节点报的固定提示原样带上，不再只说「迁移失败」。"""
+    if isinstance(exc, ApiError):
+        return exc.message
+    if isinstance(exc, TimeoutError):
+        return "迁移超过 25 分钟未完成，原绑定已保留；请稍后重试或在管理台清理大文件后重试"
+    if isinstance(exc, AgentError) and exc.detail:
+        return f"迁移失败：{exc.detail}"
+    if isinstance(exc, AgentError) and exc.code in {"execution_failed", "connection_lost"}:
+        return "迁移中运行时连接中断，原绑定已保留，请确认两端运行时在线后重试"
+    return "文件或记忆迁移失败，请检查运行时后重试"
 
 
 def instruction_content(bot: Bot) -> str:
@@ -104,6 +125,31 @@ async def target_path(
     return str(path)
 
 
+def revision(repo: dict[str, Any] | None) -> dict[str, Any] | None:
+    """仓库描述里决定克隆结果的部分；bundle 的字节每次打包可能不同，不参与比较。"""
+    return {k: v for k, v in repo.items() if k != "bundle"} if repo else None
+
+
+async def transfer_chunks(
+    steps: list[tuple[dict[str, Any], int]],
+    read: Any,
+    write: Any,
+) -> None:
+    """按块从源读、往目标写；写当前块的同时预读下一块，两端各自串行。"""
+    if not steps:
+        return
+    pending = asyncio.ensure_future(read(*steps[0]))
+    try:
+        for index, step in enumerate(steps):
+            chunk = await pending
+            if index + 1 < len(steps):
+                pending = asyncio.ensure_future(read(*steps[index + 1]))
+            await write(*step, chunk)
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
 async def copy_files(
     bot: Bot,
     source: RelayServer,
@@ -115,60 +161,92 @@ async def copy_files(
     occupied: bool,
     capability: dict[str, Any],
 ) -> None:
-    """用源目录完全覆盖目标目录（含 .git）；目标原有内容整体替换掉。"""
+    """用源目录完全覆盖目标目录（含 .git）；目标原有内容整体替换掉。
+
+    两端都支持时，有远端的仓库由目标节点重新克隆，只复制改动、未跟踪文件和未推送的提交；
+    克隆不了的仓库（没有凭证、远端不可达）退回整仓复制。
+    """
     src = {"working_dir": bot.working_dir, "bot_id": str(bot.id)}
     dst: dict[str, Any] = {
         "working_dir": directory,
         "bot_id": str(bot.id),
         "transfer_id": str(operation_id),
     }
-    export = await call_agent(source, cipher, "workspace-export", src)
+    source_capability = await require_workspace(source, cipher)
+    git_aware = bool(source_capability.get("workspace_git") and capability.get("workspace_git"))
+    chunk_size = min(
+        int(source_capability.get("workspace_chunk") or CHUNK_SIZE),
+        int(capability.get("workspace_chunk") or CHUNK_SIZE),
+        MAX_CHUNK,
+    )
+    export = await call_agent(source, cipher, "workspace-export", {**src, "git": git_aware})
+    cloned: list[dict[str, Any]] = []
+    failed: list[str] = []
+    for repo in export.get("repos") or []:
+        try:
+            await call_agent(target, cipher, "workspace-clone", {**dst, "repo": repo})
+        except AgentError as exc:
+            log.warning("workspace_clone_failed", bot_id=str(bot.id), detail=exc.detail)
+            failed.append(repo["path"])
+        else:
+            cloned.append(repo)
+    if failed:
+        export = await call_agent(
+            source, cipher, "workspace-export", {**src, "git": True, "expand": failed}
+        )
+        again = {repo["path"]: repo for repo in export.get("repos") or []}
+        if any(revision(again.get(repo["path"])) != revision(repo) for repo in cloned):
+            raise ApiError(409, 409, "源文件在复制时发生变化，请重试")
     manifest = export.get("manifest")
-    if not isinstance(manifest, list) or len(manifest) > 10000:
+    if not isinstance(manifest, list) or len(manifest) > MAX_FILES:
         raise ApiError(502, 502, "源文件清单无效")
     if not capability.get("workspace_replace") and (
         occupied or any(".git" in PurePosixPath(entry["path"]).parts for entry in manifest)
     ):
         raise ApiError(409, 409, "目标运行时版本较旧，不能覆盖已有目录或复制 .git，请先升级运行时")
     await call_agent(target, cipher, "workspace-import", {**dst, "manifest": manifest})
+    steps: list[tuple[dict[str, Any], int]] = []
     for entry in manifest:
         if "link" in entry:
             continue
-        digest = hashlib.sha256()
         size = entry["size"]
         if not isinstance(size, int) or size < 0:
             raise ApiError(502, 502, "源文件大小无效")
         # Empty files also need creation in staging.
-        for offset in range(0, max(size, 1), CHUNK_SIZE):
-            chunk = await call_agent(
-                source,
-                cipher,
-                "workspace-read",
-                {
-                    **src,
-                    "transfer_id": str(operation_id),
-                    "path": entry["path"],
-                    "offset": offset,
-                    "length": CHUNK_SIZE,
-                },
-            )
-            raw = base64.b64decode(chunk["data"], validate=True)
-            if len(raw) != min(CHUNK_SIZE, size - offset) or chunk["hash"] != entry["hash"]:
-                raise ApiError(409, 409, "源文件在复制时发生变化，请重试")
-            digest.update(raw)
-            await call_agent(
-                target,
-                cipher,
-                "workspace-import",
-                {
-                    **dst,
-                    "path": entry["path"],
-                    "offset": offset,
-                    "data": chunk["data"],
-                },
-            )
-        if digest.hexdigest() != entry["hash"]:
+        steps += [(entry, offset) for offset in range(0, max(size, 1), chunk_size)]
+    digests: dict[str, Any] = {}
+
+    async def read(entry: dict[str, Any], offset: int) -> dict[str, Any]:
+        return await call_agent(
+            source,
+            cipher,
+            "workspace-read",
+            {
+                **src,
+                "transfer_id": str(operation_id),
+                "path": entry["path"],
+                "offset": offset,
+                "length": chunk_size,
+            },
+        )
+
+    async def write(entry: dict[str, Any], offset: int, chunk: dict[str, Any]) -> None:
+        raw = base64.b64decode(chunk["data"], validate=True)
+        size = entry["size"]
+        if len(raw) != min(chunk_size, size - offset) or chunk["hash"] != entry["hash"]:
+            raise ApiError(409, 409, "源文件在复制时发生变化，请重试")
+        digest = digests.setdefault(entry["path"], hashlib.sha256())
+        digest.update(raw)
+        await call_agent(
+            target,
+            cipher,
+            "workspace-import",
+            {**dst, "path": entry["path"], "offset": offset, "data": chunk["data"]},
+        )
+        if offset + chunk_size >= size and digest.hexdigest() != entry["hash"]:
             raise ApiError(502, 502, "文件传输校验失败")
+
+    await transfer_chunks(steps, read, write)
     await call_agent(
         target,
         cipher,
@@ -178,8 +256,121 @@ async def copy_files(
             "manifest": manifest,
             "content": instruction_content(bot),
             "replace": True,
+            "repos": cloned,
         },
     )
+
+
+async def copy_sessions(
+    session: AsyncSession,
+    bot: Bot,
+    source: RelayServer,
+    target: RelayServer,
+    source_dir: str,
+    target_dir: str,
+    cipher: Cipher | None,
+) -> set[uuid.UUID]:
+    """把 Claude 会话文件搬到目标运行时，返回搬成功的 relay 会话；搬不了的由调用方改为文本续接。
+
+    只做 Claude → Claude：Codex 的续聊还依赖本机状态库，单搬文件续不上。尽力而为，失败不影响换机。
+    """
+    if source.model_provider != "claude" or target.model_provider != "claude":
+        return set()
+    rows = [row for row in await sessions.list_for_bot(session, bot.id) if row.backend == "claude"]
+    if not rows:
+        return set()
+    copied: set[uuid.UUID] = set()
+    transfer_id = str(uuid.uuid4())
+    try:
+        async with asyncio.timeout(SESSION_COPY_TIMEOUT):
+            for relay in (source, target):
+                if (await call_agent(relay, cipher, "ping")).get("session_transfer") != 1:
+                    return set()
+            listing = await call_agent(
+                source,
+                cipher,
+                "session-export",
+                {
+                    "working_dir": source_dir,
+                    "bot_id": str(bot.id),
+                    "sessions": [str(row.relay_session_id) for row in rows],
+                },
+            )
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for item in listing.get("files") or []:
+                sid = str(item["path"]).split("/", 1)[0].removesuffix(".jsonl")
+                grouped.setdefault(sid, []).append(item)
+            for sid, items in grouped.items():
+                try:
+                    await copy_session_files(
+                        bot, source, target, source_dir, target_dir, cipher, transfer_id, items
+                    )
+                except (AgentError, ApiError, ValueError, KeyError) as exc:
+                    log.warning(
+                        "session_copy_failed",
+                        bot_id=str(bot.id),
+                        error=type(exc).__name__,
+                        detail=getattr(exc, "detail", None),
+                    )
+                    continue
+                copied.add(uuid.UUID(sid))
+    except (AgentError, ApiError, TimeoutError, ValueError, KeyError) as exc:
+        log.warning("session_copy_skipped", bot_id=str(bot.id), error=type(exc).__name__)
+    return copied
+
+
+async def copy_session_files(
+    bot: Bot,
+    source: RelayServer,
+    target: RelayServer,
+    source_dir: str,
+    target_dir: str,
+    cipher: Cipher | None,
+    transfer_id: str,
+    items: list[dict[str, Any]],
+) -> None:
+    steps = [
+        (item, offset)
+        for item in items
+        for offset in range(0, max(int(item["size"]), 1), MAX_CHUNK)
+    ]
+
+    async def read(item: dict[str, Any], offset: int) -> dict[str, Any]:
+        return await call_agent(
+            source,
+            cipher,
+            "session-read",
+            {
+                "working_dir": source_dir,
+                "bot_id": str(bot.id),
+                "area": item["area"],
+                "path": item["path"],
+                "offset": offset,
+                "length": MAX_CHUNK,
+            },
+        )
+
+    async def write(item: dict[str, Any], offset: int, chunk: dict[str, Any]) -> None:
+        if chunk["hash"] != item["hash"]:
+            raise ApiError(409, 409, "会话文件在复制时发生变化")
+        await call_agent(
+            target,
+            cipher,
+            "session-import",
+            {
+                "working_dir": target_dir,
+                "bot_id": str(bot.id),
+                "transfer_id": transfer_id,
+                "area": item["area"],
+                "path": item["path"],
+                "offset": offset,
+                "size": item["size"],
+                "hash": item["hash"],
+                "data": chunk["data"],
+            },
+        )
+
+    await transfer_chunks(steps, read, write)
 
 
 async def prepare_switch(
@@ -255,7 +446,6 @@ async def prepare_switch(
                     },
                 )
             elif old:
-                await require_workspace(old, cipher)
                 await copy_files(
                     bot,
                     old,
@@ -290,13 +480,19 @@ async def prepare_switch(
             bot.workspace_phase = "完成切换"
             return status
     except (ApiError, AgentError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        log.warning(
+            "workspace_migration_failed",
+            bot_id=str(bot.id),
+            phase=bot.workspace_phase,
+            error=type(exc).__name__,
+            code=getattr(exc, "code", None),
+            detail=getattr(exc, "detail", None),
+        )
         await session.refresh(bot, with_for_update=True)
         if bot.workspace_operation_id != operation_id:
             raise ApiError(409, 409, "迁移状态已更新，请刷新后查看") from exc
         bot.workspace_state, bot.workspace_phase = "failed", "迁移失败，原绑定已保留"
-        bot.workspace_error = (
-            str(exc) if isinstance(exc, ApiError) else "文件或记忆迁移失败，请检查运行时后重试"
-        )
+        bot.workspace_error = failure_message(exc)
         bot.workspace_deadline = None
         await session.commit()
         if isinstance(exc, ApiError):

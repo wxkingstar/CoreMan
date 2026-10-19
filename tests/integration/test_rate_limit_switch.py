@@ -238,7 +238,7 @@ async def test_relay_switch_handler_switches_and_notifies(
     bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
     idle = await _second_relay(db_session)
     creator = await _creator_identity(db_session, bot)
-    await sessions.get_or_create(
+    before = await sessions.get_or_create(
         db_session,
         bot_id=bot.id,
         session_key="zs",
@@ -272,7 +272,11 @@ async def test_relay_switch_handler_switches_and_notifies(
     await RelaySwitchHandler().run(build_ctx(db_engine, t))
     await db_session.refresh(bot)
     assert bot.relay_server_id == idle.id and bot.model == "claude-sonnet-5-5"
-    assert await sessions.list_for_bot(db_session, bot.id) == []
+    # 会话文件没能带过去（测试里节点不在线）：会话键保留，换新会话并记下原会话，首轮续上。
+    (row,) = await sessions.list_for_bot(db_session, bot.id)
+    await db_session.refresh(row)
+    assert row.relay_session_id != before.relay_session_id
+    assert row.inherited_from == before.relay_session_id
     audit = (
         await db_session.execute(select(AuditLog).where(AuditLog.action == "bot.switch_relay"))
     ).scalar_one()

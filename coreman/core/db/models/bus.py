@@ -276,6 +276,8 @@ class ChatSession(Base):
     backend: Mapped[str] = mapped_column(Text)
     last_speaker_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     last_active_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    # 换运行时没能带走原会话时，记下原 relay 会话；新会话首轮带上它最近的对话，随后清空。
+    inherited_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class UserReached(Base):
