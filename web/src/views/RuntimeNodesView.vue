@@ -64,7 +64,7 @@ async function saveEdit() {
 }
 const generated = ref<InstallLink | null>(null)
 const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null,
-  options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', git_hosts: ['github.com'], max_concurrent: 10, install_claude_probe: false } })
+  options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', git_hosts: ['github.com'], max_concurrent: 10 } })
 const CA_PEM_MAX_BYTES = 64 * 1024
 const CA_PEM_RE = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/
 /** 私有 CA 证书即时校验：留空合法（不传该键）；填了就必须是 PEM 证书且不超过 64 KB。 */
@@ -671,11 +671,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   :max="32"
                 />
               </el-form-item>
-              <el-checkbox v-model="form.options.install_claude_probe">
-                {{ t('runtimeNodes.claudeProbe') }}
-              </el-checkbox><p class="muted">
-                {{ t('runtimeNodes.probeHint') }}
-              </p>
             </el-collapse-item>
           </el-collapse>
         </el-form>

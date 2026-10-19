@@ -63,7 +63,7 @@ Daemon 每次启动把随包 certifi 根证书、系统 CA 文件（OpenSSL 编�
 - 后台「编辑」可改节点名称与所属团队（团队同时应用到该节点的 Claude Code、Codex 实例，已绑定的 AI 员工不受影响）；「删除」在没有 AI 员工绑定该节点、也没有员工正在迁入时移除节点及其实例，并让节点凭证失效。删除只清理管理端记录，主机上的 Daemon 需要按上面的卸载步骤自行卸载。
 - Agent 的 Git 主机白名单是 `config.json` 中的 `git_hosts`（只写主机名，不含协议与路径；创建安装链接时可在高级设置中指定，默认 `["github.com"]`），修改后重启服务生效。节点在心跳中上报当前列表，在「运行时管理」展开节点即可查看；写成 URL 等永远匹配不到的条目会被标红。
 - 出站代理只在启动时确定一次：`config.json` 的 `proxy` 非空时覆盖 `HTTP(S)_PROXY` 与小写的两个变量；留空则沿用服务环境自带的代理变量。驱动与 Claude / Codex CLI 都继承这份环境，中间不做增删，因此改代理必须重启服务。节点在心跳中上报生效的代理与来源，在「运行时管理」展开节点即可查看：来自 CoreMan 配置、继承自服务环境，或两处都没有（标为未生效，AI 请求将直连）。`config.json` 改过但未重启时额外提示待生效。注意用户服务不读 `~/.profile`、`~/.bashrc`：systemd 用户服务的环境来自 `/etc/environment`、`~/.config/environment.d/*.conf` 或服务的 `EnvironmentFile`，launchd 则用 plist 的 `EnvironmentVariables`。
-- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。Codex 额度直接向 CLI 查询。Claude 额度 statusLine 探针是可选项，在安装链接中勾选，或在 `config.json` 设置 `install_claude_probe: true` 后重启服务。启用时先备份 settings，再把 statusLine 指向 `~/.cache/claude_rate_limits/capture.sh`；该脚本记下 Claude 传入的额度后，把同一份输入交给原状态栏命令，原状态栏照常显示。守护进程每 30 分钟启动一次短暂的 Claude 交互会话来刷新额度；Claude Code 只在订阅账号的 statusLine 输入中提供额度字段。未启用时不排 Claude 额度探测。
+- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。额度以对话带回为主：Claude 驱动读每次请求的 `rate_limit_event`，Codex 驱动在每轮结束后读该线程 rollout（`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`）里本轮最后一条 `token_count`，都换算成 5 小时与 7 天窗口的使用率，附在最后的 usage chunk 的 `x_rate_limits` 上，worker 在对话收尾时写入实例。没有对话的实例靠 Agent 每小时兜底一次：Codex 调用 `codex app-server` 的 `account/rateLimits/read`，Claude 读驱动 `/v1/stats` 的 `rate_limits`（来自每小时健康检查那次请求，有新数据才上报）。两种兜底都不消耗模型额度。Claude 只有订阅账号有这项数据。
 
 ### 退出码
 
@@ -142,7 +142,7 @@ $MANAGE --register           # 卸载服务后，按保留的身份重新注册
 
 - 默认：停止并删除 systemd unit / launchd plist / `supervise.sh`，清理 socket 目录、`cli-bin`、`state.json`、`trust.pem` 以及非当前的 `release-*`；保留 `config.json`（节点身份，`service_status` 标记为 `uninstalled`）、当前版本、会话与日志。之后可用 `--register` 以同一身份重新注册服务，或直接 `--upgrade <发布包>`。
 - `--purge`：在上述基础上删除整个 `~/.local/share/coreman-runtime`（含身份、会话、日志、CA）。之后请在「运行时管理」中删除该节点（需要先把绑定在它上面的 AI 员工切走）；重新接入需要新的安装链接。
-- 卸载不会改动 CLI 登录与 Claude 设置。启用过 Claude 额度探针时，statusLine 仍指向 `capture.sh` 并继续转交原命令；要恢复原状态栏，把 `~/.cache/claude_rate_limits/statusline-original.json` 中的 `statusLine` 写回 `~/.claude/settings.json`。`~/.claude/settings.before-coreman-probe.json` 是首次启用前的完整备份。
+- 卸载不会改动 CLI 登录与 Claude 设置。旧版本启用过 Claude 额度 statusLine 探针（现已下线）的节点，statusLine 仍指向 `capture.sh` 并继续转交原命令；要恢复原状态栏，把 `~/.cache/claude_rate_limits/statusline-original.json` 中的 `statusLine` 写回 `~/.claude/settings.json`。`~/.claude/settings.before-coreman-probe.json` 是首次启用前的完整备份。
 
 ## 日志
 

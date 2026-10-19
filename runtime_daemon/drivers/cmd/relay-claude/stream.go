@@ -241,6 +241,7 @@ func handleBufferedStreamResponse(w http.ResponseWriter, r *http.Request, args [
 	var streamDeltaSent bool
 	var finalUsage *openai.UsageInfo
 	sawResult := false
+	sawRateLimit := false
 
 	nativeTCs := map[int]*nativeToolCall{}
 	var nativeTCOrder []int
@@ -282,6 +283,9 @@ processLines:
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			log.Printf("Failed to parse claude event: %v", err)
 			continue
+		}
+		if rateLimits.observe(event.RateLimitInfo) {
+			sawRateLimit = true
 		}
 
 		if event.Type == "stream_event" && event.Event != nil {
@@ -558,12 +562,13 @@ processLines:
 
 	if includeUsage && finalUsage != nil {
 		usageChunk := openai.ChatCompletionResponse{
-			ID:      chatID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: []openai.ChatCompletionChoice{},
-			Usage:   finalUsage,
+			ID:          chatID,
+			Object:      "chat.completion.chunk",
+			Created:     created,
+			Model:       model,
+			Choices:     []openai.ChatCompletionChoice{},
+			Usage:       finalUsage,
+			XRateLimits: requestRateLimits(sawRateLimit),
 		}
 		data, _ := json.Marshal(usageChunk)
 		fmt.Fprintf(w, "data: %s\n\n", data)

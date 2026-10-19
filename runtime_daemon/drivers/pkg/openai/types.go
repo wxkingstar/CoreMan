@@ -131,6 +131,9 @@ type ChatCompletionResponse struct {
 	// can log the turn as an error instead of a success, while unknown clients
 	// simply ignore the field.
 	XRelayError bool `json:"x_relay_error,omitempty"`
+	// XRateLimits rides on the final usage chunk: the subscription quota the
+	// CLI reported during this request, so the platform can store it per turn.
+	XRateLimits any `json:"x_rate_limits,omitempty"`
 }
 
 type ChatCompletionChoice struct {

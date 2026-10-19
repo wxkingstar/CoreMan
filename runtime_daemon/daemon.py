@@ -308,6 +308,20 @@ class RuntimeAgent(Agent):
             dict(v) for v in list(self.daemon.task_info.values()) if v["provider"] == self.provider
         ]
 
+    def claude_limits(self) -> dict | None:
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(self.daemon.socket_path(self.provider))),
+            base_url="http://runtime",
+            timeout=10,
+        ) as client:
+            try:
+                response = client.get("/v1/stats")
+                response.raise_for_status()
+                data = response.json().get("rate_limits")
+            except (httpx.HTTPError, ValueError, AttributeError) as exc:
+                raise OperationError("读取驱动额度失败") from exc
+        return data if isinstance(data, dict) else None
+
     def health_check(self) -> None:
         start = time.monotonic()
         status = "unknown"
@@ -791,11 +805,6 @@ class Daemon:
                         self, provider, self.config["backends"][provider]["relay_id"]
                     )
                     self.agents[provider] = agent
-                    if provider == "claude" and self.config.get("install_claude_probe"):
-                        try:
-                            await asyncio.to_thread(agent.install_claude_probe)
-                        except (OSError, ValueError, OperationError):
-                            cap["detail"] = "额度探针安装失败，原配置未覆盖"
                     agent.model = (cap["models"] or [""])[0]
                     if self.config.get("schedules", True):
                         agent.start_schedules()

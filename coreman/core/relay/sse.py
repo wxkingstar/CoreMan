@@ -75,6 +75,13 @@ class RelayErrorEvent:
 
 
 @dataclass(frozen=True)
+class RateLimitEvent:
+    """本轮请求里 CLI 报告的订阅额度（relay 扩展字段 `x_rate_limits`，随 usage chunk 到达）。"""
+
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class FinishEvent:
     """finish_reason 非空的收尾 chunk。"""
 
@@ -89,6 +96,7 @@ SseEvent = (
     | AskUserQuestionEvent
     | UsageEvent
     | RelayErrorEvent
+    | RateLimitEvent
     | FinishEvent
 )
 
@@ -134,6 +142,9 @@ class SseParser:
         usage = chunk.get("usage")
         if isinstance(usage, dict):
             out.append(self._usage(usage))
+        limits = chunk.get("x_rate_limits")
+        if isinstance(limits, dict):
+            out.append(RateLimitEvent(limits))
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             return out

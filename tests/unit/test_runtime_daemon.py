@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from runtime_daemon.agent import COMMAND_CANCEL, Agent, OperationError, run_command
@@ -216,20 +217,7 @@ async def test_management_cancel_kills_child_process_group(tmp_path):
         COMMAND_CANCEL.reset(token)
 
 
-def test_status_command_does_not_override_global_claude_config(daemon, tmp_path):
-    settings = tmp_path / ".claude/settings.json"
-    settings.parent.mkdir()
-    settings.write_text('{"statusLine":{"command":"custom"},"theme":"dark"}')
-    daemon.agents["claude"].install_claude_probe()
-    assert (
-        json.loads(settings.with_name("settings.before-coreman-probe.json").read_text())[
-            "statusLine"
-        ]["command"]
-        == "custom"
-    )
-    assert json.loads(settings.read_text())["theme"] == "dark"
-    # 原状态栏命令由采集脚本转交，不被替换掉。
-    assert "custom" in (tmp_path / ".cache/claude_rate_limits/capture.sh").read_text()
+def test_systemd_quote_escapes_specifiers():
     assert systemd_quote('a b%"') == '"a b%%\\""'
 
 
@@ -291,6 +279,42 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
     assert reports[0]["status"] == "healthy"
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"total_requests": 1, "rate_limits": {"seven_day": {"used_percentage": 6}}}, True),
+        ({"total_requests": 0, "rate_limits": None}, False),
+        # 旧驱动的 /v1/stats 没有该字段。
+        ({"total_requests": 0}, False),
+    ],
+)
+def test_claude_limits_come_from_driver_stats(daemon, monkeypatch, body, expected):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    paths = []
+
+    class LocalClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, path):
+            paths.append(path)
+            return httpx.Response(200, json=body, request=httpx.Request("GET", path))
+
+    monkeypatch.setattr("runtime_daemon.daemon.httpx.Client", LocalClient)
+    agent = RuntimeAgent(daemon, "claude", "test-relay")
+    assert agent.claude_limits() == (body["rate_limits"] if expected else None)
+    assert paths == ["/v1/stats"]
 
 
 @pytest.mark.parametrize("key", ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"])

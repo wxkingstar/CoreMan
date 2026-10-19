@@ -3,6 +3,7 @@ import json
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
+    RateLimitEvent,
     RelayErrorEvent,
     SseParser,
     TextDelta,
@@ -61,6 +62,20 @@ def test_text_thinking_tool_usage_finish() -> None:
     assert p.feed_line("data: [DONE]") == [] and p.done and p.saw_finish
     assert p.counts == {"text": 1, "thinking": 1, "tool": 1, "usage": 1}
     assert p.flush() == []
+
+
+def test_rate_limits_ride_on_the_usage_chunk() -> None:
+    p = SseParser("claude")
+    usage = {"prompt_tokens": 10, "completion_tokens": 2}
+    limits = {"five_hour": {"used_percentage": 25, "resets_at": 7}, "observed_at": "t"}
+    assert p.feed_line(chunk(None, usage=usage, extra={"x_rate_limits": limits})) == [
+        UsageEvent(10, 2, 0, 0),
+        RateLimitEvent(limits),
+    ]
+    assert p.counts["usage"] == 1
+    assert p.feed_line(chunk(None, usage=usage, extra={"x_rate_limits": "bad"})) == [
+        UsageEvent(10, 2, 0, 0)
+    ]
 
 
 def test_usage_without_details_and_negative_clamp() -> None:

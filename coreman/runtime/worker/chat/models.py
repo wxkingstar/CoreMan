@@ -75,6 +75,8 @@ class Outcome:
     usage_events: int = 0
     tools: list[str] = field(default_factory=list)
     usage: UsageEvent | None = None
+    # 运行时随响应带回的订阅额度原样保存，收尾时校验后写入实例。
+    rate_limits: dict[str, Any] | None = None
     saw_event: bool = False
     finish_reason: str | None = None
     relay_error: bool = False

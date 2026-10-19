@@ -422,8 +422,6 @@ export default {
   "concurrency": "最大并发任务",
   "gitHosts": "Git 主机白名单",
   "gitHostsHint": "机器人工作区的拉取、推送、备份与创建 PR 只能访问这些主机，输入主机名后回车添加（如 git.example.com）。技能目录登记的来源不受此限制。安装后可在节点 config.json 的 git_hosts 修改并重启服务。",
-  "claudeProbe": "配置 Claude 额度探针",
-  "probeHint": "启用后备份 Claude 设置，在 statusLine 前串接额度采集，原有状态栏照常显示；每 30 分钟启动一次短暂的 Claude 会话刷新额度。",
   "linkReady": "安装链接已生成",
   "commandHint": "在目标服务器上，以已登录 Claude/Codex 的用户运行以下命令。",
   "credentialHint": "链接包含安装凭证，仅展示一次，默认仅可注册一个新节点；不要分享给不受信的人。",
