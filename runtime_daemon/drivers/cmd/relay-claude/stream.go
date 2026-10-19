@@ -47,6 +47,7 @@ func abortClaudeAndHarvestUsage(cmd *exec.Cmd, lines <-chan string, model, sessi
 				if event.Type != "result" {
 					continue
 				}
+				meterResult(sessionID, &event)
 				if pm := perModelCounts(&event, model); pm != nil {
 					stats.RecordTurn(model, pm)
 					log.Printf("interrupted-turn usage recorded: model=%s session=%s per_model=%+v total_cost=$%.4f",
@@ -428,6 +429,7 @@ processLines:
 
 		if event.Type == "result" {
 			sawResult = true
+			meterResult(sessionID, &event)
 			// Mirror translate.go's error transparency: an error result whose
 			// explanation only lives in Result (nothing streamed yet) must be
 			// surfaced as a content delta, or the turn ends cleanly but empty —
