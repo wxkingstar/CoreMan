@@ -100,6 +100,67 @@ async def test_initialize_failure_persists_and_retry_recovers(client, db_session
     assert recovered.json()["data"]["error"] is None
 
 
+async def test_queued_install_does_not_deadlock_initialize_of_unready_workspace(
+    client, db_session, monkeypatch
+):
+    """未就绪员工上排队、从未认领的安装不拦「初始化 / 重试」：初始化成功后这条安装照常被认领。"""
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.bus import tasks
+    from coreman.core.db.models import ProcessInstance
+    from coreman.core.timeutils import utcnow
+
+    bot, url = await setup(client, db_session)
+    bot.workspace_state = "failed"
+    install = Task(bot_id=bot.id, kind="skill_install", payload={})
+    now = utcnow()
+    db_session.add_all(
+        [
+            install,
+            ProcessInstance(
+                id="worker:install",
+                service="worker",
+                version="t",
+                started_at=now,
+                heartbeat_at=now,
+                capacity=1,
+            ),
+        ]
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        workspace_transfer,
+        "call_agent",
+        AsyncMock(return_value={"success": True, "workspace_protocol": 1, "initialized": True}),
+    )
+    response = await client.post(url + "/initialize")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["state"] == "ready"
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker:install")
+    assert claimed is not None and claimed.id == install.id
+
+
+@pytest.mark.parametrize(
+    "state,status,attempts",
+    [("ready", "queued", 0), ("failed", "queued", 1), ("failed", "claimed", 1)],
+)
+async def test_install_that_may_run_still_blocks_workspace_operations(
+    client, db_session, state, status, attempts
+):
+    """就绪员工排队中的安装马上会跑；认领过的安装可能已在节点上执行：这些仍要等。"""
+    from coreman.core.errors import ApiError
+    from coreman.core.knowledge import memory_transfer
+
+    bot, _ = await setup(client, db_session)
+    bot.workspace_state = state
+    db_session.add(
+        Task(bot_id=bot.id, kind="skill_install", payload={}, status=status, attempts=attempts)
+    )
+    await db_session.commit()
+    with pytest.raises(ApiError) as raised:
+        await memory_transfer.ensure_idle(db_session, bot)
+    assert raised.value.status_code == 409
+
+
 @pytest.mark.parametrize("status", ["claimed", "running"])
 async def test_active_tasks_block_write_but_not_read(client, db_session, agent, status):
     bot, url = await setup(client, db_session)

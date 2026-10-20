@@ -17,14 +17,17 @@ from coreman.core.timeutils import utcnow
 
 
 async def ensure_idle(session: AsyncSession, bot: Bot) -> None:
+    # 排队中的技能安装也要等它跑完再动工作目录。但工作目录未就绪时它根本不会被认领，
+    # 从没认领过的就不拦，否则「初始化 / 重试」和这条安装会互相等；它之后照常执行，
+    # 实例或目录已变的由安装任务自己按「目标已变化」失败收尾。
+    install = (Task.kind == "skill_install") & Task.status.in_(OPEN)
+    if bot.workspace_state != "ready":
+        install &= ~((Task.status == "queued") & (Task.attempts == 0))
     active = await session.scalar(
         select(Task.id)
         .where(
             Task.bot_id == bot.id,
-            (
-                (Task.status.in_(ACTIVE) & Task.kind.not_in(["relay_switch"]))
-                | ((Task.kind == "skill_install") & Task.status.in_(OPEN))
-            ),
+            (Task.status.in_(ACTIVE) & Task.kind.not_in(["relay_switch"])) | install,
         )
         .limit(1)
     )
