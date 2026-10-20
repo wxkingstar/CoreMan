@@ -66,7 +66,7 @@ async def test_migration_retains_collected_memory_when_copy_fails(client, db_ses
     assert response.status_code == 502, response.text
     await db_session.refresh(bot)
     assert bot.relay_server_id == original_id
-    assert bot.workspace_state == "failed"
+    assert bot.workspace_state == "ready"
     assert bot.memory_snapshot_at is not None
     memory = await db_session.scalar(select(Memory).where(Memory.bot_id == bot.id))
     assert memory.content == "latest memory"
@@ -692,6 +692,124 @@ async def test_switch_failure_reports_runtime_reason(client, db_session, monkeyp
     assert "超过迁移上限" in response.json()["message"]
     await db_session.refresh(bot)
     assert bot.relay_server_id == old.id and "超过迁移上限" in bot.workspace_error
+
+
+async def _claim(db_session):
+    from coreman.core.db.models import ProcessInstance
+
+    if await db_session.get(ProcessInstance, "worker:migration") is None:
+        now = utcnow()
+        db_session.add(
+            ProcessInstance(
+                id="worker:migration",
+                service="worker",
+                version="test",
+                started_at=now,
+                heartbeat_at=now,
+                capacity=2,
+            )
+        )
+        await db_session.commit()
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker:migration")
+    await db_session.commit()
+    return claimed
+
+
+async def _failed_switch(client, db_session, monkeypatch, tmp_path):
+    """真实节点上换机失败（源目录文件数超过上限），原绑定保留。"""
+    from runtime_daemon import workspace
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    limit = workspace.MAX_FILES
+    monkeypatch.setattr(workspace, "MAX_FILES", 1)
+    folder = tmp_path / "source" / bot.bot_key
+    (folder / "a.txt").write_text("a")
+    (folder / "b.txt").write_text("b")
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 502, response.text
+    monkeypatch.setattr(workspace, "MAX_FILES", limit)
+    await db_session.refresh(bot)
+    return bot, old, target
+
+
+async def test_failed_migration_keeps_employee_working_on_original_runtime(
+    client, db_session, monkeypatch, tmp_path
+):
+    """迁移失败、原绑定已保留：任务照常认领，失败原因留在工作目录面板，目标不再被预留。"""
+    bot, old, _ = await _failed_switch(client, db_session, monkeypatch, tmp_path)
+    assert bot.relay_server_id == old.id and bot.working_dir.startswith(str(tmp_path / "source"))
+    assert bot.workspace_state == "ready"
+    assert bot.workspace_phase == "迁移失败，原绑定已保留"
+    assert "超过迁移上限" in bot.workspace_error
+    assert bot.workspace_deadline is None and bot.workspace_operation_id is None
+    assert bot.workspace_target_relay_id is None and bot.workspace_target_dir is None
+    panel = (await client.get(f"/api/admin/bots/{bot.id}/workspace")).json()["data"]
+    assert panel["state"] == "ready" and panel["phase"] == "迁移失败，原绑定已保留"
+    assert panel["error"] == bot.workspace_error
+    queued = await tasks.enqueue(db_session, tasks.NewTask(bot_id=bot.id, kind="chat"))
+    await db_session.commit()
+    claimed = await _claim(db_session)
+    assert claimed is not None and claimed.id == queued.id
+
+
+async def test_retry_after_failed_migration_switches_and_clears_error(
+    client, db_session, monkeypatch, tmp_path
+):
+    bot, _, target = await _failed_switch(client, db_session, monkeypatch, tmp_path)
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == target.id
+    assert (tmp_path / "destination" / bot.bot_key / "b.txt").read_text() == "b"
+    assert bot.workspace_state == "ready"
+    assert bot.workspace_error is None and bot.workspace_phase is None
+    assert bot.workspace_target_relay_id is None and bot.workspace_target_dir is None
+    queued = await tasks.enqueue(db_session, tasks.NewTask(bot_id=bot.id, kind="chat"))
+    await db_session.commit()
+    claimed = await _claim(db_session)
+    assert claimed is not None and claimed.id == queued.id
+
+
+async def test_initialize_failure_still_fences_tasks_until_retry(client, db_session, monkeypatch):
+    """初始化失败是原目录本身不可用（如工作说明冲突），和迁移失败不同：任务不认领，直到重试成功。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, _, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    await db_session.commit()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+
+    async def conflict(relay, cipher, operation, payload=None):
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1}
+        raise workspace_transfer.AgentError("Agent 未完成操作", code="instructions_conflict")
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", conflict)
+    url = f"/api/admin/bots/{bot.id}/workspace/initialize"
+    assert (await client.post(url)).status_code == 409
+    await db_session.refresh(bot)
+    assert bot.workspace_state == "failed" and "AGENTS.md" in bot.workspace_error
+    queued = await tasks.enqueue(db_session, tasks.NewTask(bot_id=bot.id, kind="chat"))
+    await db_session.commit()
+    assert await _claim(db_session) is None
+
+    async def merged(relay, cipher, operation, payload=None):
+        return {"success": True, "workspace_protocol": 1, "initialized": True}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", merged)
+    assert (await client.post(url)).status_code == 200
+    await db_session.refresh(bot)
+    assert bot.workspace_state == "ready" and bot.workspace_error is None
+    claimed = await _claim(db_session)
+    assert claimed is not None and claimed.id == queued.id
 
 
 def _untransferred_files(folder):

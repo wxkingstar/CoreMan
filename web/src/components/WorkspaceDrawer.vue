@@ -76,10 +76,11 @@ defineExpose({ openFile, draft, save, openDiff })
           {{ t('workspaceFiles.states.' + info.state, info.state) }}
         </el-tag><span>{{ info?.phase }}</span>
       </div>
+      <!-- 就绪还带着错误＝上次迁移失败、原绑定照常工作，用警告色，不当成故障。 -->
       <el-alert
         v-if="error || info?.error"
         :title="error || info?.error || ''"
-        type="error"
+        :type="!error && info?.state === 'ready' ? 'warning' : 'error'"
         :closable="false"
       />
       <el-button

@@ -538,9 +538,13 @@ async def prepare_switch(
         await session.refresh(bot, with_for_update=True)
         if bot.workspace_operation_id != operation_id:
             raise ApiError(409, 409, "迁移状态已更新，请刷新后查看") from exc
-        bot.workspace_state, bot.workspace_phase = "failed", "迁移失败，原绑定已保留"
+        # 绑定和原目录都没动过，员工继续在原运行时上干活：回到 ready（任务认领只认它），
+        # 原因留在 workspace_error / workspace_phase 给工作目录面板看，重试仍走切换运行时。
+        # 目标预留一并释放，不然目标运行时会一直显示「有员工正在迁移过来」。
+        bot.workspace_state, bot.workspace_phase = "ready", "迁移失败，原绑定已保留"
         bot.workspace_error = failure_message(exc)
-        bot.workspace_deadline = None
+        bot.workspace_deadline, bot.workspace_operation_id = None, None
+        bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
         await session.commit()
         if isinstance(exc, ApiError):
             raise

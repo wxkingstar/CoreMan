@@ -41,6 +41,8 @@ const switchVisible = ref(false)
 const workspaceVisible = ref(false)
 
 const perms = computed(() => bot.value?.permissions ?? null)
+// 工作目录 pending / failed 时任务认领会跳过这个员工：消息只会排队，不提示就没人知道。
+const workspaceBlocked = computed(() => ['pending', 'failed'].includes(bot.value?.workspace_state ?? 'ready'))
 // 敏感字段只有 can_view_sensitive 时后端才下发；没下发就整块不渲染（而不是渲染成空）。
 // env_vars_full 是另一条独立的线（can_view_env_full / AI 委员会，后端 build_out 里与 can_view_sensitive
 // 无关）：不是创建者也不是协作者的委员会成员只会拿到这一个字段，所以它也要能单独把整块撑起来。
@@ -205,6 +207,28 @@ onMounted(async () => {
           </el-button>
         </div>
       </div>
+      <el-alert
+        v-if="workspaceBlocked"
+        data-test="workspace-blocked"
+        class="workspace-blocked"
+        type="error"
+        :title="t('bots.detail.workspaceBlocked')"
+        show-icon
+        :closable="false"
+      >
+        <p v-if="bot.workspace_error">
+          {{ bot.workspace_error }}
+        </p>
+        <p>{{ t('bots.detail.workspaceBlockedHint') }}</p>
+        <el-button
+          v-if="perms?.can_edit"
+          :icon="FolderOpened"
+          size="small"
+          @click="workspaceVisible = true"
+        >
+          {{ t('workspaceFiles.open') }}
+        </el-button>
+      </el-alert>
 
       <el-tabs
         v-model="detailTab"
@@ -599,6 +623,8 @@ onMounted(async () => {
 .ov-path code { padding-top: 1px; }
 .ov-icon-btn { flex-shrink: 0; margin-top: -3px; }
 .workspace-open { margin-top: 8px; }
+.workspace-blocked { margin-bottom: 12px; }
+.workspace-blocked p { margin: 0 0 8px; }
 .ov-inline { display: flex; align-items: center; gap: 8px; }
 .ov-meter { display: inline-flex; gap: 3px; }
 .ov-meter i { width: 12px; height: 6px; border-radius: 3px; background: var(--el-border-color-lighter); }

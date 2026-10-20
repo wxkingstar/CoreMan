@@ -742,6 +742,7 @@ export default {
 
     enabled: '作成後に有効化',
     noRelay: '紐付けなし（あとで切り替え）',
+    workspaceBlocked: '作業ディレクトリ未準備',
     publicPool: '共有プール',
     backend: { claude: 'Claude', codex: 'Codex' },
     saved: '保存しました',
@@ -758,6 +759,8 @@ export default {
       behaviorGroup: '会話パラメーター',
       ownership: '所属',
       noRelay: 'ランタイム未割り当て',
+      workspaceBlocked: '作業ディレクトリが準備できていません：この AI スタッフ宛てのメッセージとタスクは待機したまま実行されません',
+      workspaceBlockedHint: '作業ディレクトリを開いて「Initialize / retry」を押してください。ランタイム未割り当ての場合は、先にランタイムを切り替えてください。',
       noTeam: 'チーム未割り当て',
       seconds: '{n} 秒',
       sseTimeoutLabel: 'SSE タイムアウト',
