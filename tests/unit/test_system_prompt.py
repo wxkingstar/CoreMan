@@ -302,5 +302,6 @@ def test_dev_mode_section_only_when_enabled_and_before_custom_prompt() -> None:
     assert "# Development Mode" not in build(False)
     out = build(True)
     assert out.index("# Date and Time") < out.index("# Development Mode") < out.index("你是开发")
-    assert "never merge your own pull" in out
+    assert "Never push to or rebase the default branch" in out
+    assert "never a shared one" in out
     assert "git switch <branch>" in out
