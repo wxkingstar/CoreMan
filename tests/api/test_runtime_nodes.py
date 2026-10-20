@@ -58,12 +58,13 @@ async def test_claimed_request_gets_read_budget_for_headers(client, db_session, 
         factory=make_session_factory(db_engine),
         cipher=app.state.cipher,
     )
+    # 节点要在 connect 期限内领到请求：0.3 秒在较慢的 CI 机器上来不及，领不到就被取消。
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://node/codex", timeout=httpx.Timeout(2, connect=0.3)
+        transport=transport, base_url="http://node/codex", timeout=httpx.Timeout(4, connect=1.5)
     ) as caller:
         pending = asyncio.create_task(caller.get("/health"))
         command = await poll_command(client, headers)
-        await asyncio.sleep(0.5)  # Exceeds connect budget but not accepted/read budget.
+        await asyncio.sleep(2)  # Exceeds connect budget but not accepted/read budget.
         assert not pending.done()
         response = await client.post(
             f"/api/runtime/calls/{command['id']}/frames",
