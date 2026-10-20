@@ -10,8 +10,9 @@ import { useAuthStore } from '@/stores/auth'
 import ProviderBadge from '@/components/ProviderBadge.vue'
 import RelayLiveStatus from '@/components/RelayLiveStatus.vue'
 import HealthTag from '@/components/HealthTag.vue'
+import QuotaBar from '@/components/QuotaBar.vue'
 import CatalogPanel from '@/views/CatalogPanel.vue'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, pctNum } from '@/utils/format'
 const { t } = useI18n()
 const auth = useAuthStore()
 const canManage = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
@@ -168,6 +169,16 @@ function capabilityState(node: RuntimeNode, provider: string) {
   if (!cap?.installed) return t('runtimeNodes.notInstalled')
   if (!node.online) return t('runtimeNodes.offline')
   return t(`runtimeNodes.login.${cap.login}`)
+}
+/** 列表里直接展示的额度窗口：未安装、未登录或没采到用量的窗口不展示。 */
+function quotaWindows(node: RuntimeNode, provider: string) {
+  const cap = node.capabilities[provider]
+  const backend = node.backends.find(b => b.model_provider === provider)
+  if (!backend || !cap?.installed || cap.login === 'required') return []
+  return [
+    { label: '5h', pct: backend.rate_limit_5h_used_pct, resetsAt: backend.rate_limit_5h_resets_at },
+    { label: '7d', pct: backend.rate_limit_7d_used_pct, resetsAt: backend.rate_limit_7d_resets_at },
+  ].filter(w => pctNum(w.pct) !== null)
 }
 // 与安装链接的校验一致：写成 URL 或带路径的条目永远匹配不到仓库主机。
 const GIT_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
@@ -354,20 +365,36 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 </div>
               </template>
             </el-table-column>
-            <el-table-column
+            <template
               v-for="provider in ['claude', 'codex']"
               :key="provider"
-              min-width="170"
             >
-              <template #header>
-                <ProviderBadge :provider="provider" />
-              </template>
-              <template #default="{ row }: { row: RuntimeNode }">
-                <span>{{ capabilityState(row, provider) }}</span><div class="muted">
-                  {{ row.capabilities[provider]?.version }}
-                </div>
-              </template>
-            </el-table-column>
+              <el-table-column min-width="130">
+                <template #header>
+                  <ProviderBadge :provider="provider" />
+                </template>
+                <template #default="{ row }: { row: RuntimeNode }">
+                  <span>{{ capabilityState(row, provider) }}</span><div class="muted">
+                    {{ row.capabilities[provider]?.version }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column
+                :label="t('runtimeNodes.quotaOf', { name: t(`bots.backend.${provider}`) })"
+                min-width="290"
+              >
+                <template #default="{ row }: { row: RuntimeNode }">
+                  <QuotaBar
+                    v-for="w in quotaWindows(row, provider)"
+                    :key="w.label"
+                    inline
+                    :label="w.label"
+                    :pct="w.pct"
+                    :resets-at="w.resetsAt"
+                  />
+                </template>
+              </el-table-column>
+            </template>
             <el-table-column
               :label="t('runtimeNodes.team')"
               min-width="110"

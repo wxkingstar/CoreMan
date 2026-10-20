@@ -291,3 +291,20 @@ it('updates login state in place on the timed refresh without a loading overlay'
     wrapper.unmount()
   } finally { vi.useRealTimers() }
 })
+// 不展开就能看到额度：已登录的后端显示进度条和重置倒计时，未登录或没采到的窗口不显示。
+it('shows quota bars with reset countdowns only for logged-in backends', async () => {
+  const soon = new Date(Date.now() + 133 * 60000 - 5000).toISOString()
+  const later = new Date(Date.now() + (3 * 1440 + 5 * 60) * 60000 - 5000).toISOString()
+  const backend = (id: string, provider: string, p5: number | null, p7: number | null) => ({ id, model_provider: provider, bot_count: 0, effective_models: [], health_status: 'healthy',
+    rate_limit_5h_used_pct: p5, rate_limit_5h_resets_at: soon, rate_limit_7d_used_pct: p7, rate_limit_7d_resets_at: later })
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: null, team_name: null, online: true, is_active: true, draining: false,
+    capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } },
+    backends: [backend('relay1', 'claude', 81, null), backend('relay2', 'codex', 40, 50)] }] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  const bars = wrapper.findAll('[data-test="quota-bar"]')
+  expect(bars).toHaveLength(1)
+  expect(bars[0].text()).toContain('5h')
+  expect(bars[0].text()).toContain('81%')
+  expect(bars[0].text()).toContain('2 小时 13 分钟后重置')
+  wrapper.unmount()
+})

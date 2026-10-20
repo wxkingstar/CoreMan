@@ -43,6 +43,20 @@ import { i18n } from '@/i18n'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 describe('SwitchRelayDialog', () => {
+  it('shows when each quota window resets, but no stale quota for a logged-out backend', async () => {
+    const resetsAt = new Date(Date.now() + 45 * 60000 - 5000).toISOString()
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      { ...relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'), rate_limit_5h_resets_at: resetsAt },
+      { ...relayRow('r2', 'codex', 'codex/gpt-5.5'), unavailable_reason: 'login_required' },
+    ] } as never)
+    const wrapper = mount(SwitchRelayDialog, { props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6' } as never, visible: true }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    const bars = document.querySelectorAll('[data-test="quota-bar"]')
+    expect(bars).toHaveLength(1)
+    expect(bars[0].textContent).toContain('10%')
+    expect(bars[0].textContent).toContain('45 分钟后重置')
+    wrapper.unmount()
+  })
   it('disables a logged-out backend even when it advertises models', async () => {
     vi.mocked(relays.list).mockResolvedValueOnce({ items: [
       relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'),
