@@ -518,16 +518,20 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
     assert result.status_code == 200, result.text
 
 
-async def _real_agents(db_session, tmp_path, monkeypatch):
-    """源、目标各一个真实 Agent；平台对节点的调用直接落到它们身上。"""
+async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False):
+    """源、目标各一个真实 Agent；平台对节点的调用直接落到它们身上。
+
+    shared=True 时两台节点的项目主目录是同一个目录，相当于挂了同一块共享盘。
+    """
     from coreman.core.bots import workspace_transfer
     from coreman.core.db.models import RuntimeNode
     from runtime_daemon.agent import Agent, OperationError
 
     bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
-    src_root, dst_root = tmp_path / "source", tmp_path / "destination"
+    src_root = tmp_path / "source"
+    dst_root = src_root if shared else tmp_path / "destination"
     src_root.mkdir()
-    dst_root.mkdir()
+    dst_root.mkdir(exist_ok=True)
     source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
     source_node.workspace_root = str(src_root)
     bot.working_dir = str(src_root / bot.bot_key)
@@ -684,3 +688,143 @@ async def test_switch_failure_reports_runtime_reason(client, db_session, monkeyp
     assert "超过迁移上限" in response.json()["message"]
     await db_session.refresh(bot)
     assert bot.relay_server_id == old.id and "超过迁移上限" in bot.workspace_error
+
+
+def _untransferred_files(folder):
+    """换机复制不带的东西：放在共享盘上的这些文件，换机后必须原样还在。"""
+    (folder / ".env").write_text("TOKEN=keep")
+    (folder / "node_modules").mkdir()
+    (folder / "node_modules" / "dep.js").write_text("module.exports = 1")
+    (folder / ".coreman-worktrees" / "s1").mkdir(parents=True)
+    (folder / ".coreman-worktrees" / "s1" / "wip.py").write_text("print(1)")
+    (folder / "report.txt").write_text("业务数据")
+    return [".env", "node_modules/dep.js", ".coreman-worktrees/s1/wip.py", "report.txt"]
+
+
+async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
+    client, db_session, monkeypatch, tmp_path
+):
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    mem = agents[old.id].memory_dir(bot.working_dir)
+    mem.mkdir(parents=True)
+    (mem / "remember.md").write_text("记住交付日期")
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.relay import agent_client
+
+    monkeypatch.setattr(agent_client, "call_agent", workspace_transfer.call_agent)
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    preview = await client.post(
+        f"/api/admin/bots/{bot.id}/workspace/switch-preview",
+        json={"relay_server_id": str(target.id)},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["data"]["shared"] is True
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == target.id and bot.working_dir == str(folder)
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    operations = [op for op, _ in seen]
+    assert "workspace-probe" in operations and "workspace-export" not in operations
+    assert not list(folder.glob(".coreman-probe-*"))
+    # 记忆仍在各节点本地，照常回收并部署到目标节点。
+    assert (agents[target.id].memory_dir(bot.working_dir) / "remember.md").read_text() == (
+        "记住交付日期"
+    )
+
+
+async def test_rate_limit_switch_default_mode_skips_copy_on_shared_storage(
+    db_session, monkeypatch, tmp_path
+):
+    """限流卡片的自动切换不带处理方式（默认复制），共享盘上同样不能复制。"""
+    from coreman.core.bots.switch_relay import switch_relay
+
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    result = await switch_relay(
+        db_session,
+        bot=bot,
+        target=target,
+        model=None,
+        actor=await db_session.get(User, bot.created_by),
+        member_ids=set(),
+        ip=None,
+    )
+    assert result.new_relay_id == target.id
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    assert "workspace-export" not in [op for op, _ in seen]
+
+
+async def test_switch_stops_when_shared_storage_cannot_be_confirmed(
+    client, db_session, monkeypatch, tmp_path
+):
+    """探测出错不能当成不共享去复制：停下换机、保留原绑定，文件不动。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    real = workspace_transfer.call_agent
+
+    async def flaky(relay, cipher, operation, payload=None):
+        if operation == "workspace-probe" and (payload or {}).get("action") == "check":
+            raise workspace_transfer.AgentError("Agent 连接失败（ReadTimeout）")
+        return await real(relay, cipher, operation, payload)
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", flaky)
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 502, response.text
+    assert "无法确认目标目录是否与当前目录共享" in response.json()["message"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    assert "workspace-export" not in [op for op, _ in seen]
+    assert not list(folder.glob(".coreman-probe-*"))
+
+
+async def test_shared_directory_needs_both_runtimes_and_a_found_probe(db_session, monkeypatch):
+    """旧运行时不支持探测按不共享处理；目标找不到探测文件时删掉源上的那份。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, _ = await seed_bot(db_session)
+    target = await add_node_relay(db_session, name="target")
+    calls: list[tuple[str, str | None]] = []
+    capable = {old.id: True, target.id: True}
+
+    async def call(relay, cipher, operation, payload=None):
+        calls.append((operation, (payload or {}).get("action")))
+        if operation == "ping":
+            return {"workspace_probe": 1} if capable[relay.id] else {}
+        return {"found": False} if (payload or {}).get("action") == "check" else {}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    assert not await workspace_transfer.shared_directory(bot, old, target, "/other", None)
+    assert calls == []
+    assert not await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
+    assert [c for c in calls if c[0] == "workspace-probe"] == [
+        ("workspace-probe", "create"),
+        ("workspace-probe", "check"),
+        ("workspace-probe", "remove"),
+    ]
+    calls.clear()
+    capable[target.id] = False
+    assert not await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
+    assert all(op == "ping" for op, _ in calls)

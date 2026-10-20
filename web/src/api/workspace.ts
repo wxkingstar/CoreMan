@@ -4,7 +4,7 @@ export interface WorkspaceEntry { name: string; path: string; type: string; size
 export interface WorkspaceFile { content: string | null; data: string; size: number; hash: string; editable: boolean; eof: boolean }
 export interface GitStatus { initialized: boolean; remote?: string; branch?: string; upstream?: string; ahead?: number | null; head?: { hash: string; subject: string; date: string } | null; files?: { path: string; status: string }[]; truncated?: boolean }
 export interface GitDiff { path: string; diff: string; truncated: boolean }
-export interface SwitchPreview { directory: string; exists: boolean; empty: boolean; owned: boolean; marked: boolean; source_online: boolean; memory_snapshot_at: string | null }
+export interface SwitchPreview { directory: string; exists: boolean; empty: boolean; owned: boolean; marked: boolean; source_online: boolean; shared: boolean; memory_snapshot_at: string | null }
 const base = (id: string) => `/api/admin/bots/${id}/workspace`
 export const workspace = {
   get: (id: string) => call<WorkspaceInfo>(http.get(base(id))),

@@ -23,6 +23,7 @@ OPERATIONS = {
     "workspace-clone",
     "workspace-git-status",
     "workspace-git-diff",
+    "workspace-probe",
     "ping",
     "status",
     "probe-rate-limits",

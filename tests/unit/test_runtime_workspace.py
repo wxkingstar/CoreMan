@@ -492,3 +492,47 @@ def test_git_view_reports_changes_and_diffs_read_only(agent, tmp_path, monkeypat
     assert "+hello" in call(agent, "git-diff", path="new.txt")["diff"]
     with pytest.raises(OperationError):
         call(agent, "git-diff", path=".env")
+
+
+def test_probe_finds_file_only_through_the_same_directory(agent, tmp_path):
+    """共享盘上的两台节点：一台建的随机名文件另一台在同一路径找得到；独立目录找不到。"""
+    shared = Agent(
+        root=agent.root,
+        home=tmp_path / "home2",
+        api_url="https://example.com",
+        token="synthetic-test-token-123456789",
+        relay_id="peer",
+    )
+    elsewhere_root = tmp_path / "elsewhere"
+    elsewhere_root.mkdir()
+    elsewhere = Agent(
+        root=elsewhere_root,
+        home=tmp_path / "home3",
+        api_url="https://example.com",
+        token="synthetic-test-token-123456789",
+        relay_id="other",
+    )
+    assert agent.dispatch({"type": "ping"})["workspace_probe"] == 1
+    call(agent, "init")
+    call(elsewhere, "init")
+    token = uuid.uuid4().hex
+    assert call(agent, "probe", token=token, action="create")["created"]
+    assert call(elsewhere, "probe", token=token, action="check")["found"] is False
+    assert call(shared, "probe", token=token, action="check")["found"] is True
+    # 查到即删，不在员工目录里留下文件。
+    assert not list((agent.root / "one").glob(".coreman-probe-*"))
+    call(agent, "probe", token=token, action="create")
+    call(agent, "probe", token=token, action="remove")
+    assert not list((agent.root / "one").glob(".coreman-probe-*"))
+
+
+def test_probe_rejects_bad_token_missing_directory_and_other_employee(agent):
+    token = uuid.uuid4().hex
+    with pytest.raises(OperationError, match="令牌"):
+        call(agent, "probe", token="../x", action="create")
+    with pytest.raises(OperationError, match="不存在"):
+        call(agent, "probe", token=token, action="create")
+    assert call(agent, "probe", token=token, action="check")["found"] is False
+    call(agent, "init", working_dir="two", bot_id=2)
+    with pytest.raises(OperationError, match="其他员工"):
+        call(agent, "probe", working_dir="two", token=token, action="create")

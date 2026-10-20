@@ -26,6 +26,7 @@ BUNDLE_LIMIT = 8 * 1024 * 1024
 # 换机暂存目录超过这个时长还在，一定是中断的迁移留下的（单次迁移最长 30 分钟）。
 STALE_STAGE = 6 * 3600
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+PROBE_TOKEN = re.compile(r"[0-9a-f]{32}")
 MARKER = ".coreman-workspace.json"
 EXCLUDED = {
     ".git",
@@ -397,6 +398,31 @@ class Workspace:
             "marked": marker.exists() or marker.is_symlink(),
             "workspace_protocol": 1,
         }
+
+    def probe(self):
+        """换机前判断两台节点是不是共用同一个目录：源节点建一个随机名文件，目标节点在同一路径找。
+
+        文件名每次都是新的，NFS 客户端不可能缓存过它，目标查得到就一定是同一份目录；查到即删。
+        """
+        token = self.data.get("token")
+        if not isinstance(token, str) or not PROBE_TOKEN.fullmatch(token):
+            raise self.error("探测令牌无效")
+        path = self.root / f".coreman-probe-{token}"
+        action = self.data.get("action")
+        if action == "create":
+            if not self.root.is_dir():
+                raise self.error("工作目录不存在")
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return {"created": True}
+        if action == "check":
+            found = path.is_file() and not path.is_symlink()
+            if found:
+                path.unlink()
+            return {"found": found}
+        if action == "remove":
+            path.unlink(missing_ok=True)
+            return {"removed": True}
+        raise self.error("不支持的探测操作")
 
     def list(self):
         parent = self.path(self.data.get("path", ""))
@@ -1044,6 +1070,7 @@ class Workspace:
             "clone",
             "git_status",
             "git_diff",
+            "probe",
         }:
             raise self.error("不支持的工作区操作")
         try:
