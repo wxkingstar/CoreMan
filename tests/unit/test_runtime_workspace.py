@@ -519,11 +519,11 @@ def test_probe_finds_file_only_through_the_same_directory(agent, tmp_path):
     assert call(agent, "probe", token=token, action="create")["created"]
     assert call(elsewhere, "probe", token=token, action="check")["found"] is False
     assert call(shared, "probe", token=token, action="check")["found"] is True
-    # 查到即删，不在员工目录里留下文件。
-    assert not list((agent.root / "one").glob(".coreman-probe-*"))
-    call(agent, "probe", token=token, action="create")
+    # 目标只查不删，由建文件的源节点删除。
+    assert list((agent.root / "one").glob(".coreman-probe-*"))
     call(agent, "probe", token=token, action="remove")
     assert not list((agent.root / "one").glob(".coreman-probe-*"))
+    assert call(shared, "probe", token=token, action="check")["found"] is False
 
 
 def test_probe_rejects_bad_token_missing_directory_and_other_employee(agent):

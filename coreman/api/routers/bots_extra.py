@@ -489,7 +489,16 @@ async def workspace_switch_preview(
                 source_online = True
             except (AgentError, ApiError):
                 pass
-        if source_online and source and info.get("owned"):
+        # 与换机同一条件：复制会覆盖非空目录时才探测；同一节点同一目录本来就不复制。
+        if (
+            source_online
+            and source
+            and info.get("exists")
+            and not info.get("empty")
+            and not (
+                source.runtime_node_id == target.runtime_node_id and directory == bot.working_dir
+            )
+        ):
             # 只用于展示；真正换机时还会再探测一次，探测失败那边会拦下。
             with contextlib.suppress(AgentError):
                 shared = await shared_directory(

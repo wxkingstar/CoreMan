@@ -75,28 +75,30 @@ async def shared_directory(
     directory: str,
     cipher: Cipher | None,
 ) -> bool:
-    """源、目标两台节点上的这个目录是不是共享盘上的同一份：源节点建随机名文件，目标节点找得到就是。
+    """源节点的当前目录与目标节点的 `directory` 是不是共享盘上的同一份：源节点在当前目录建随机名
+    文件，目标节点在 `directory` 找得到就是。不要求两边路径相同：同一块盘在各节点可以挂在不同路径。
 
     任一端不支持探测按不共享处理，沿用复制；探测本身出错则抛出，调用方不能当成不共享去复制——
     共享盘上的整目录替换会删掉不随迁移的 .env、依赖目录和开发模式 worktree。
     """
-    if source.runtime_node_id == target.runtime_node_id or directory != bot.working_dir:
-        return False
     for relay in (source, target):
         if (await call_agent(relay, cipher, "ping")).get("workspace_probe") != 1:
             return False
-    probe = {"working_dir": directory, "bot_id": str(bot.id), "token": uuid.uuid4().hex}
-    await call_agent(source, cipher, "workspace-probe", {**probe, "action": "create"})
-    found = False
+    token, owner = uuid.uuid4().hex, str(bot.id)
+    here = {"working_dir": bot.working_dir, "bot_id": owner, "token": token}
+    await call_agent(source, cipher, "workspace-probe", {**here, "action": "create"})
     try:
-        result = await call_agent(target, cipher, "workspace-probe", {**probe, "action": "check"})
-        found = result.get("found") is True
+        result = await call_agent(
+            target,
+            cipher,
+            "workspace-probe",
+            {"working_dir": directory, "bot_id": owner, "token": token, "action": "check"},
+        )
     finally:
-        if not found:
-            # 目标没找到（或没查成）时文件还在源目录，尽力删掉，删不掉不影响结论。
-            with contextlib.suppress(AgentError, TimeoutError):
-                await call_agent(source, cipher, "workspace-probe", {**probe, "action": "remove"})
-    return found
+        # 目标只查不删，由建文件的源节点删；删不掉不影响结论。
+        with contextlib.suppress(AgentError, TimeoutError):
+            await call_agent(source, cipher, "workspace-probe", {**here, "action": "remove"})
+    return result.get("found") is True
 
 
 async def initialize_workspace(session: AsyncSession, bot: Bot, cipher: Cipher | None) -> None:
@@ -456,10 +458,10 @@ async def prepare_switch(
                     raise ApiError(409, 409, "目标目录属于其他员工，不能覆盖，请选择其他目录")
                 elif occupied and not old:
                     raise ApiError(409, 409, "目标目录已有内容，请明确复用本员工目录或选择新的目录")
-            # 目标同一路径已有本员工目录时，它可能就是共享盘上的同一份：是就不复制，「复制」也一样
-            # （限流卡片的自动切换默认就是复制）。
+            # 复制会整体替换非空的目标目录；它可能就是共享盘上的同一份（路径可以不同，归属标记也可能
+            # 被 git clean -x 删掉），先探测，是就不复制。限流卡片的自动切换默认就是复制。
             shared = False
-            if not same_directory and mode == "copy" and old and info.get("owned"):
+            if not same_directory and mode == "copy" and old and occupied:
                 try:
                     shared = await shared_directory(bot, old, target, directory, cipher)
                 except AgentError as exc:

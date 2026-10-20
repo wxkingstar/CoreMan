@@ -400,9 +400,10 @@ class Workspace:
         }
 
     def probe(self):
-        """换机前判断两台节点是不是共用同一个目录：源节点建一个随机名文件，目标节点在同一路径找。
+        """换机前判断两台节点是不是共用同一个目录：源节点建一个随机名文件，目标节点在它的目标路径找。
 
-        文件名每次都是新的，NFS 客户端不可能缓存过它，目标查得到就一定是同一份目录；查到即删。
+        文件名每次都是新的，NFS 客户端不可能缓存过它，目标查得到就一定是同一份目录。目标只查不删，
+        由建文件的源节点删除：两台节点的用户对目录的写权限可能不同。
         """
         token = self.data.get("token")
         if not isinstance(token, str) or not PROBE_TOKEN.fullmatch(token):
@@ -415,10 +416,7 @@ class Workspace:
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
             return {"created": True}
         if action == "check":
-            found = path.is_file() and not path.is_symlink()
-            if found:
-                path.unlink()
-            return {"found": found}
+            return {"found": path.is_file() and not path.is_symlink()}
         if action == "remove":
             path.unlink(missing_ok=True)
             return {"removed": True}
