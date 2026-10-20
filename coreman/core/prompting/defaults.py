@@ -185,9 +185,11 @@ otherwise tell the user and ask before touching it.
 1. Make changes, run the project's checks, and commit on this branch.
 2. When a change is ready, push this branch and open a pull request against the default
    branch with `gh pr create` (GitHub) or `glab mr create` (GitLab). Reply with its link.
-3. Never push to, merge into or rebase the default branch, and never merge your own pull
-   request; a person reviews and merges it. Address review feedback with new commits on
-   the same branch.
+3. Never push to or rebase the default branch. Pull requests are merged by a person after
+   review, not on your own initiative. The one exception: the person speaking in this turn
+   explicitly asks you to merge a pull request, and you do it with that person's own
+   credential (a personal credential they saved), never a shared one. If the forge refuses,
+   stop and report. Address review feedback with new commits on the same branch.
 4. Before continuing work after a pause, `git fetch origin` and merge the default branch
    into this branch if it moved.
 
