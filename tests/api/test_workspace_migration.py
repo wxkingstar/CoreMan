@@ -518,10 +518,11 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
     assert result.status_code == 200, result.text
 
 
-async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False):
+async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False, mount=None):
     """源、目标各一个真实 Agent；平台对节点的调用直接落到它们身上。
 
-    shared=True 时两台节点的项目主目录是同一个目录，相当于挂了同一块共享盘。
+    shared=True 时两台节点的项目主目录是同一个目录，相当于挂了同一块共享盘；再给 mount 时目标
+    节点的项目主目录是指向它的另一个路径，相当于同一块盘在两台节点挂在不同路径。
     """
     from coreman.core.bots import workspace_transfer
     from coreman.core.db.models import RuntimeNode
@@ -532,6 +533,9 @@ async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False):
     dst_root = src_root if shared else tmp_path / "destination"
     src_root.mkdir()
     dst_root.mkdir(exist_ok=True)
+    if mount:
+        dst_root = tmp_path / mount
+        dst_root.symlink_to(src_root)
     source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
     source_node.workspace_root = str(src_root)
     bot.working_dir = str(src_root / bot.bot_key)
@@ -800,31 +804,84 @@ async def test_switch_stops_when_shared_storage_cannot_be_confirmed(
     assert not list(folder.glob(".coreman-probe-*"))
 
 
-async def test_shared_directory_needs_both_runtimes_and_a_found_probe(db_session, monkeypatch):
-    """旧运行时不支持探测按不共享处理；目标找不到探测文件时删掉源上的那份。"""
+async def test_switch_skips_copy_when_shared_storage_is_mounted_at_another_path(
+    client, db_session, monkeypatch, tmp_path
+):
+    """同一块盘在源节点挂在 source、目标节点挂在 mnt-b：路径不同也要认出是同一份目录。"""
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True, mount="mnt-b"
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == target.id
+    assert bot.working_dir == str(tmp_path / "mnt-b" / bot.bot_key)
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    assert "workspace-export" not in [op for op, _ in seen]
+    assert not list(folder.glob(".coreman-probe-*"))
+
+
+async def test_switch_skips_copy_on_shared_storage_after_marker_was_cleaned(
+    client, db_session, monkeypatch, tmp_path
+):
+    """归属标记被 git clean -x 之类删掉后，同一份目录看起来无人认领，复制前仍要先探测。"""
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    (folder / ".coreman-workspace.json").unlink()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    assert "workspace-export" not in [op for op, _ in seen]
+
+
+async def test_shared_directory_needs_both_runtimes_and_cleans_up_on_the_source(
+    db_session, monkeypatch
+):
+    """旧运行时不支持探测按不共享处理；探测文件不管找没找到都由源节点删除。"""
     from coreman.core.bots import workspace_transfer
 
     bot, old, _ = await seed_bot(db_session)
     target = await add_node_relay(db_session, name="target")
-    calls: list[tuple[str, str | None]] = []
+    calls: list[tuple[str, str | None, str | None]] = []
     capable = {old.id: True, target.id: True}
+    found = {"value": False}
 
     async def call(relay, cipher, operation, payload=None):
-        calls.append((operation, (payload or {}).get("action")))
+        payload = payload or {}
+        side = "source" if relay.id == old.id else "target"
+        calls.append((operation, payload.get("action"), side))
         if operation == "ping":
             return {"workspace_probe": 1} if capable[relay.id] else {}
-        return {"found": False} if (payload or {}).get("action") == "check" else {}
+        return {"found": found["value"]} if payload.get("action") == "check" else {}
 
     monkeypatch.setattr(workspace_transfer, "call_agent", call)
-    assert not await workspace_transfer.shared_directory(bot, old, target, "/other", None)
-    assert calls == []
-    assert not await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
-    assert [c for c in calls if c[0] == "workspace-probe"] == [
-        ("workspace-probe", "create"),
-        ("workspace-probe", "check"),
-        ("workspace-probe", "remove"),
+    probes = [
+        ("workspace-probe", "create", "source"),
+        ("workspace-probe", "check", "target"),
+        ("workspace-probe", "remove", "source"),
     ]
+    assert not await workspace_transfer.shared_directory(bot, old, target, "/elsewhere", None)
+    assert [c for c in calls if c[0] == "workspace-probe"] == probes
+    calls.clear()
+    found["value"] = True
+    assert await workspace_transfer.shared_directory(bot, old, target, "/elsewhere", None)
+    assert [c for c in calls if c[0] == "workspace-probe"] == probes
     calls.clear()
     capable[target.id] = False
     assert not await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
-    assert all(op == "ping" for op, _ in calls)
+    assert all(op == "ping" for op, _, _ in calls)
