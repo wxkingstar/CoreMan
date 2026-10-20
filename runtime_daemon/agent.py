@@ -1055,6 +1055,8 @@ class Agent:
                 "workspace_git": 1,
                 "workspace_chunk": WORKSPACE_CHUNK,
                 "session_transfer": 1 if self.provider == "claude" else 0,
+                # 换机前可探测两台节点是否共用同一个工作目录（共享盘），是就不复制文件。
+                "workspace_probe": 1,
                 "mcp_oauth": 1,
             }
         if kind == "status":

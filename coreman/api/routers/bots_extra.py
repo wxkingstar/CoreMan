@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import datetime
 from typing import Any, Literal
@@ -438,7 +439,11 @@ async def workspace_switch_preview(
 ) -> dict[str, Any]:
     from coreman.core.bots.permissions import relay_allowed_for_bot
     from coreman.core.bots.relay_policy import relay_available, relay_visible
-    from coreman.core.bots.workspace_transfer import require_workspace, target_path
+    from coreman.core.bots.workspace_transfer import (
+        require_workspace,
+        shared_directory,
+        target_path,
+    )
     from coreman.core.relay.agent_client import AgentError, call_agent
 
     bot = await load_bot(session, bot_id)
@@ -475,7 +480,7 @@ async def workspace_switch_preview(
         )
     except AgentError as exc:
         raise ApiError(502, 502, "无法检查目标目录，请检查运行时连接") from exc
-    source_online = False
+    source_online = shared = False
     if bot.relay_server_id:
         source = await session.get(RelayServer, bot.relay_server_id)
         if source:
@@ -484,6 +489,12 @@ async def workspace_switch_preview(
                 source_online = True
             except (AgentError, ApiError):
                 pass
+        if source_online and source and info.get("owned"):
+            # 只用于展示；真正换机时还会再探测一次，探测失败那边会拦下。
+            with contextlib.suppress(AgentError):
+                shared = await shared_directory(
+                    bot, source, target, directory, request.app.state.cipher
+                )
     return {
         "code": 0,
         "data": {
@@ -494,6 +505,8 @@ async def workspace_switch_preview(
             # 旧运行时不报告，按有标记处理：只能使用本员工自己的目录。
             "marked": info.get("marked", True) is not False,
             "source_online": source_online,
+            # 与当前运行时共享同一个目录（共享盘）：换机不复制文件。
+            "shared": shared,
             "memory_snapshot_at": bot.memory_snapshot_at,
         },
     }

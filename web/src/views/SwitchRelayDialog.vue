@@ -272,7 +272,10 @@ defineExpose({ pick, confirm, checkTarget })
             :disabled="saving"
           />
         </el-form-item>
-        <el-form-item :label="t('workspaceFiles.mode')">
+        <el-form-item
+          v-if="!preview?.shared"
+          :label="t('workspaceFiles.mode')"
+        >
           <el-select
             v-model="workspaceMode"
             :disabled="saving"
@@ -303,7 +306,14 @@ defineExpose({ pick, confirm, checkTarget })
             :closable="false"
           />
           <el-alert
-            v-if="preview.exists && !preview.empty && workspaceMode !== 'existing' && !unclaimable"
+            v-if="preview.shared"
+            :title="t('workspaceFiles.shared')"
+            type="info"
+            :closable="false"
+            data-test="workspace-shared"
+          />
+          <el-alert
+            v-if="preview.exists && !preview.empty && workspaceMode !== 'existing' && !unclaimable && !preview.shared"
             :title="bot.relay_server_id ? t('workspaceFiles.replace') : t('workspaceFiles.occupied')"
             type="warning"
             :closable="false"
