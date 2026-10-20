@@ -38,6 +38,7 @@ const editBot: BotOut = {
   created_by: 'me', created_by_name: 'U',
   relay_server_id: 'r1', relay_name: 'claude01', relay_url: 'http://h:1',
   model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/sales_bot',
+  workspace_state: 'ready', workspace_error: null,
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
   welcome_message: null, rich_cards: true, dev_mode: false, notify_webhook_url: 'ht••••-1',
   member_count: 0, allowed_user_count: 0,

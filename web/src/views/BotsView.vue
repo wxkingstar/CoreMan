@@ -318,7 +318,16 @@ onMounted(async () => {
         :label="t('bots.relay')"
       >
         <template #default="{ row }: { row: BotOut }">
-          {{ row.relay_name ?? '—' }}
+          <div>{{ row.relay_name ?? '—' }}</div>
+          <!-- pending / failed 的员工任务不会被认领，列表里也要看得出来。 -->
+          <el-tag
+            v-if="['pending', 'failed'].includes(row.workspace_state)"
+            data-test="workspace-blocked"
+            size="small"
+            type="danger"
+          >
+            {{ t('bots.workspaceBlocked') }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column

@@ -746,6 +746,7 @@ export default {
 
     enabled: '创建后启用',
     noRelay: '不绑定（后续再切换）',
+    workspaceBlocked: '工作目录未就绪',
     publicPool: '公共池',
     backend: { claude: 'Claude', codex: 'Codex' },
     saved: '已保存',
@@ -762,6 +763,8 @@ export default {
       behaviorGroup: '对话参数',
       ownership: '归属',
       noRelay: '未绑定运行时',
+      workspaceBlocked: '工作目录未就绪：发给该员工的消息和任务会一直排队，不会执行',
+      workspaceBlockedHint: '请打开工作目录点「初始化 / 重试」；还没有绑定运行时的，先切换运行时。',
       noTeam: '未分配团队',
       seconds: '{n} 秒',
       sseTimeoutLabel: 'SSE 超时',

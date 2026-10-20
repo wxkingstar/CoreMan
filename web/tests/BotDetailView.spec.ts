@@ -88,6 +88,20 @@ describe('BotDetailView', () => {
     wrapper.unmount()
   })
 
+  // 工作目录 pending / failed 时任务不会被认领；迁移失败（ready 带着错误）照常工作，不报警。
+  it('warns prominently only while the workspace keeps tasks from running', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    let wrapper = await mountDetail(bot({ workspace_state: 'failed', workspace_error: 'AGENTS.md 与 CLAUDE.md 内容不一致' }))
+    const alert = wrapper.find('[data-test="workspace-blocked"]')
+    expect(alert.exists()).toBe(true)
+    expect(alert.text()).toContain(i18n.global.t('bots.detail.workspaceBlocked'))
+    expect(alert.text()).toContain('AGENTS.md 与 CLAUDE.md 内容不一致')
+    wrapper.unmount()
+    wrapper = await mountDetail(bot({ workspace_state: 'ready', workspace_error: '迁移失败：目标离线' }))
+    expect(wrapper.find('[data-test="workspace-blocked"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('hides sensitive section and write buttons for outsiders', async () => {
     useAuthStore().user = { id: 'x', login_name: 'x', display_name: 'X', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
     const data = bot({ permissions: perms({ role: null, can_view_sensitive: false, can_edit: false, can_switch_relay: false, can_toggle: false, can_delete: false, can_manage_members: false }) })

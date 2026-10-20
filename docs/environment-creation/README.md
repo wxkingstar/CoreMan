@@ -887,6 +887,7 @@ PY
 | 手工 curl 正常、服务 TLS 失败 | Daemon 只信任 config.json 的 ca_file 与系统 CA（生成安装链接时可填私有 CA）；CLI 与 npm 仍读 systemd drop-in 里的 CA 环境变量，修改后重启服务 |
 | 登录后平台仍待登录 | 核对实际 HOME、CLI path、用户；Daemon 约每 60 秒重新发现 CLI |
 | 已在线但任务失败 | 查看 runtime.log 与 claude.log/codex.log，核对登录、模型、代理、插件与工作目录 |
+| 员工不回复、任务一直排队 | 打开 AI 员工详情页，顶部提示「工作目录未就绪」时按提示在工作目录面板初始化，或先切换运行时；换运行时失败不会让员工停工 |
 | npm 写系统目录/权限错误 | 确认运行用户与 ~/.npmrc，使用显式 --prefix |
 | npx 找不到技能安装器 | 检查 Node PATH、npm 网络和目录权限，不只检查 CLI 入口存在 |
 | Runtime 安装目录只读 | 去掉 HOME/.local 下过度共享，确保安装与缓存目录独立可写 |

@@ -88,6 +88,8 @@ export interface BotOut {
   created_by: string; created_by_name: string | null
   relay_server_id: string | null; relay_name: string | null; relay_url: string | null
   model: string; backend: Backend; working_dir: string
+  // pending / failed 时任务不会被认领：详情页要显著提示。
+  workspace_state: string; workspace_error: string | null
   verbosity_level: number; effort_level: EffortLevel | null
   sse_timeout_seconds: number
   welcome_message: string | null
