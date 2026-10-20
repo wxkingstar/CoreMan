@@ -8,7 +8,8 @@ import { bots, relays } from '@/api/admin'
 
 import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
 import HealthTag from '@/components/HealthTag.vue'
-import { pctColor, pctNum } from '@/utils/format'
+import QuotaBar from '@/components/QuotaBar.vue'
+import { pctNum } from '@/utils/format'
 import { backendOf } from '@/utils/models'
 
 const props = defineProps<{ bot: BotOut; visible: boolean }>()
@@ -50,6 +51,8 @@ const target = computed(() => relayList.value.find((r) => r.id === targetId.valu
 const unchanged = computed(() => targetId.value === props.bot.relay_server_id && model.value === props.bot.model && targetDirectory.value === props.bot.working_dir)
 // 跨 backend（claude ↔ codex）要红字强提示：会话上下文与工具链都不一样。
 const backendChanged = computed(() => !!target.value && !!model.value && backendOf(model.value) !== props.bot.backend)
+// 未安装或未登录的后端采不到额度，库里留着的是旧值，不展示。
+const hasQuota = (row: RelayOut) => !['not_installed', 'login_required'].includes(row.unavailable_reason ?? '')
 
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
@@ -123,7 +126,7 @@ defineExpose({ pick, confirm, checkTarget })
     :close-on-click-modal="false"
     :model-value="visible"
     :title="t('bots.switch.title')"
-    width="900px"
+    width="1200px"
     class="workspace-switch-dialog"
     :close-on-press-escape="!saving"
     :show-close="!saving"
@@ -148,7 +151,7 @@ defineExpose({ pick, confirm, checkTarget })
         </template>
       </el-table-column>
       <el-table-column
-        min-width="140"
+        min-width="200"
         :label="t('relays.name')"
       >
         <template #default="{ row }: { row: RelayOut }">
@@ -194,33 +197,33 @@ defineExpose({ pick, confirm, checkTarget })
       </el-table-column>
       <el-table-column
         :label="t('relays.rate5h')"
-        width="120"
+        width="170"
       >
         <template #default="{ row }: { row: RelayOut }">
-          <el-progress
-            v-if="pctNum(row.rate_limit_5h_used_pct) !== null"
-            :percentage="pctNum(row.rate_limit_5h_used_pct) ?? 0"
-            :color="pctColor(row.rate_limit_5h_used_pct)"
+          <QuotaBar
+            v-if="hasQuota(row) && pctNum(row.rate_limit_5h_used_pct) !== null"
+            :pct="row.rate_limit_5h_used_pct"
+            :resets-at="row.rate_limit_5h_resets_at"
           />
           <span v-else>—</span>
         </template>
       </el-table-column>
       <el-table-column
         :label="t('relays.rate7d')"
-        width="120"
+        width="170"
       >
         <template #default="{ row }: { row: RelayOut }">
-          <el-progress
-            v-if="pctNum(row.rate_limit_7d_used_pct) !== null"
-            :percentage="pctNum(row.rate_limit_7d_used_pct) ?? 0"
-            :color="pctColor(row.rate_limit_7d_used_pct)"
+          <QuotaBar
+            v-if="hasQuota(row) && pctNum(row.rate_limit_7d_used_pct) !== null"
+            :pct="row.rate_limit_7d_used_pct"
+            :resets-at="row.rate_limit_7d_resets_at"
           />
           <span v-else>—</span>
         </template>
       </el-table-column>
       <el-table-column
         :label="t('relays.healthTitle')"
-        width="90"
+        width="100"
       >
         <template #default="{ row }: { row: RelayOut }">
           <HealthTag :status="row.health_status" />

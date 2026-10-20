@@ -363,7 +363,7 @@ const en = {
     nodeProxyPending: 'proxy in config.json has changed; restart the daemon to apply it.',
     nodeProxyHint: 'The HTTP(S) proxy set on the install link wins; leaving it blank keeps the service environment’s own proxy variables. After installation, edit proxy in the node config.json and restart the service.',
     supervised: 'Currently supervised by a process. Use the host service manager to start automatically at boot.',
-    quota: 'Quota used', bots: 'Bots', noModels: 'No models discovered yet', notInstalled: 'Not installed', offline: 'Offline', online: 'Online', team: 'Team', state: 'State', draining: 'Draining',
+    quota: 'Quota used', quotaOf: '{name} quota', bots: 'Bots', noModels: 'No models discovered yet', notInstalled: 'Not installed', offline: 'Offline', online: 'Online', team: 'Team', state: 'State', draining: 'Draining',
     enable: 'Enable runtime', resume: 'Resume tasks', drain: 'Drain tasks', concurrencyUsage: 'Concurrency {n} / {total}', disableTitle: 'Disable runtime', disableConfirm: 'Disabling stops Claude Code and Codex on this runtime from accepting work and immediately cancels every call in progress. AI employees bound to it cannot reply. Disable "{name}"?', drainConfirm: '"{name}" will stop accepting new calls; calls in progress will finish. Drain it?', links: 'Installation links', name: 'Name', expires: 'Expires at', revoke: 'Revoke',
     installHint: 'Run the installation command as the target user. Supports Linux, macOS, and existing chroot/nspawn environments.',
     rootHint: 'An absolute path on the target machine. All projects will be created under this directory.', nameAuto: 'Defaults to user at host', validHours: 'Validity in hours',
@@ -465,7 +465,7 @@ const en = {
   },
   relayAgent: { liveStatus: 'Live tasks', refresh: 'Refresh', quotaProbe: 'Probe quota', healthCheck: 'Model health check', probeQueued: 'Probe queued. The agent will report the results.', noTasks: 'No tasks currently running', process: 'Process', bot: 'AI employee', user: 'Initiator', chat: 'Conversation' },
   relays: {
-    tabCatalog: 'Model catalog', name: 'Name', provider: 'Model provider', rate5h: '5-hour limit', rate7d: '7-day limit', healthTitle: 'Health', probe: 'Probe', team: 'Team', publicPool: 'Shared pool', health: { healthy: 'Healthy', down: 'Offline', auth_fail: 'Authentication failed', timeout: 'Timed out', unknown: 'Unknown' },
+    tabCatalog: 'Model catalog', name: 'Name', provider: 'Model provider', rate5h: '5-hour limit', rate7d: '7-day limit', resetIn: 'resets in {time}', resetDone: 'Reset', durationDays: '{n}d', durationHours: '{n}h', durationMinutes: '{n}m', healthTitle: 'Health', probe: 'Probe', team: 'Team', publicPool: 'Shared pool', health: { healthy: 'Healthy', down: 'Offline', auth_fail: 'Authentication failed', timeout: 'Timed out', unknown: 'Unknown' },
   },
   catalog: { title: 'Model catalog', model: 'Model', displayName: 'Display name', backend: 'Backend', isDefault: 'Default', retired: 'Retired', xhigh: 'xhigh', max: 'max', sortOrder: 'Sort order', add: 'Add model', deleteConfirm: 'Delete this model?' },
   bots: {

@@ -47,6 +47,19 @@ export function pctNum(value: Pct): number | null {
   return Number.isNaN(n) ? null : n
 }
 
+/**
+ * 距离限额重置还有多久，拆成天/小时/分（不足一分钟按一分钟算）。
+ * 采集到的重置时刻可能早已过去，此时返回 'done'；空值或非法时间返回 null。
+ */
+export function resetCountdown(resetsAt: string | null | undefined, now: number): { d: number; h: number; m: number } | 'done' | null {
+  if (!resetsAt) return null
+  const at = new Date(resetsAt).getTime()
+  if (Number.isNaN(at)) return null
+  if (at <= now) return 'done'
+  const minutes = Math.ceil((at - now) / 60000)
+  return { d: Math.floor(minutes / 1440), h: Math.floor(minutes / 60) % 24, m: minutes % 60 }
+}
+
 /** 限额进度条配色：>90% 红、60–90% 橙、其余绿。 */
 export function pctColor(value: Pct): string {
   const n = pctNum(value) ?? 0

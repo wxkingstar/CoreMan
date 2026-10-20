@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDateTime } from '@/utils/format'
+import { formatBytes, formatDateTime, resetCountdown } from '@/utils/format'
 
 describe('formatDateTime', () => {
   it('renders in Asia/Shanghai regardless of host timezone', () => {
@@ -30,5 +30,22 @@ describe('formatBytes', () => {
     // file_info.size 是后端透传的 JSON，缺字段时上层会传进 NaN。
     expect(formatBytes(Number.NaN)).toBe('—')
     expect(formatBytes(-1)).toBe('—')
+  })
+})
+
+describe('resetCountdown', () => {
+  const now = Date.parse('2026-10-21T00:00:00Z')
+  it('splits the time left into days, hours and minutes', () => {
+    expect(resetCountdown('2026-10-21T02:13:00Z', now)).toEqual({ d: 0, h: 2, m: 13 })
+    expect(resetCountdown('2026-10-24T05:00:00Z', now)).toEqual({ d: 3, h: 5, m: 0 })
+    // 不足一分钟按一分钟算，别显示成 0 分钟。
+    expect(resetCountdown('2026-10-21T00:00:20Z', now)).toEqual({ d: 0, h: 0, m: 1 })
+  })
+  it('reports a reset time that has already passed', () => {
+    expect(resetCountdown('2026-10-20T23:59:00Z', now)).toBe('done')
+  })
+  it('handles empty or invalid values', () => {
+    expect(resetCountdown(null, now)).toBe(null)
+    expect(resetCountdown('not a date', now)).toBe(null)
   })
 })
