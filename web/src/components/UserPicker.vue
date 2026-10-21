@@ -59,6 +59,7 @@ defineExpose({ search, options })
     :model-value="modelValue"
     multiple
     filterable
+    :reserve-keyword="false"
     remote
     :remote-method="search"
     :loading="loading"

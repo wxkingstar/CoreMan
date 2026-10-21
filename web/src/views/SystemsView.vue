@@ -367,6 +367,7 @@ onMounted(load)
             v-model="form.allowed_bot_ids"
             multiple
             filterable
+            :reserve-keyword="false"
             style="width:100%"
           >
             <el-option

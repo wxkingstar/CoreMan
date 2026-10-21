@@ -180,6 +180,7 @@ defineExpose({ open, save, form })
               v-model="form.env_groups"
               multiple
               filterable
+              :reserve-keyword="false"
               :placeholder="t('skillEditor.optional')"
             >
               <el-option
@@ -218,6 +219,7 @@ defineExpose({ open, save, form })
                   v-model="selectable"
                   multiple
                   filterable
+                  :reserve-keyword="false"
                   allow-create
                 >
                   <el-option

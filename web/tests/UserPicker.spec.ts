@@ -43,4 +43,13 @@ describe('UserPicker', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('王九 (wang)')
   })
+
+  it('clears the typed keyword after picking a user', () => {
+    // 多选默认保留关键字：输拼音选中人后，拼音还留在输入框里要手动删。
+    const wrapper = mount(UserPicker, {
+      props: { modelValue: [] },
+      global: { plugins: [ElementPlus, i18n] },
+    })
+    expect(wrapper.findComponent({ name: 'ElSelect' }).props('reserveKeyword')).toBe(false)
+  })
 })
