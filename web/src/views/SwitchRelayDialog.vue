@@ -68,13 +68,25 @@ async function reloadVersion(): Promise<void> {
   }
 }
 
+/** 目标运行时上的默认目录，与后端 target_path 同一规则：保留当前目录相对项目主目录的路径，
+ * 共享盘上就是同一个目录；不在主目录下时才落到 bot_key。 */
+function defaultDirectory(id: string): string {
+  const root = relayList.value.find(r => r.id === id)?.workspace_root || '/home/ai'
+  const current = relayList.value.find(r => r.id === props.bot.relay_server_id)?.workspace_root
+  const prefix = current ? current.replace(/\/+$/, '') + '/' : ''
+  const relative = prefix && props.bot.working_dir?.startsWith(prefix)
+    ? props.bot.working_dir.slice(prefix.length)
+    : props.bot.bot_key || 'project'
+  return `${root.replace(/\/+$/, '')}/${relative}`
+}
+
 /** 选中一台 relay：载入它的有效模型集，当前模型还在集合里就留着，否则落到该 relay 的默认模型。 */
 async function pick(id: string): Promise<void> {
   if (id !== props.bot.relay_server_id && relayList.value.find(r => r.id === id)?.unavailable_reason !== null) return
   targetId.value = id
   preview.value = undefined
   allowStoredMemory.value = false
-  targetDirectory.value = id === props.bot.relay_server_id ? props.bot.working_dir : `${relayList.value.find(r => r.id === id)?.workspace_root || '/home/ai'}/${props.bot.bot_key || 'project'}`
+  targetDirectory.value = id === props.bot.relay_server_id ? props.bot.working_dir : defaultDirectory(id)
   try {
     const info = await relays.models(id)
     models.value = info.models

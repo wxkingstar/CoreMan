@@ -132,7 +132,7 @@ async def switch_relay(
     if not same_relay or changing_directory:
         try:
             target_directory = await target_path(session, bot, target, requested_directory)
-            memory_status = await prepare_switch(
+            memory_status, reused = await prepare_switch(
                 session,
                 bot,
                 target,
@@ -153,20 +153,22 @@ async def switch_relay(
             if old_relay is not None
             else set()
         )
-        # 装过的都重装，包括之前重装或升级失败、仍停在失败状态的。
-        installed = await session.scalars(
-            select(BotSkill).where(
-                BotSkill.bot_id == bot.id,
-                or_(
-                    BotSkill.status == "installed",
-                    (BotSkill.status == "failed") & BotSkill.installed_at.is_not(None),
-                ),
+        # 装过的都重装，包括之前重装或升级失败、仍停在失败状态的。还是原来那个目录（共享盘、
+        # 同一节点）时技能代码都在，不重装。
+        if not reused:
+            installed = await session.scalars(
+                select(BotSkill).where(
+                    BotSkill.bot_id == bot.id,
+                    or_(
+                        BotSkill.status == "installed",
+                        (BotSkill.status == "failed") & BotSkill.installed_at.is_not(None),
+                    ),
+                )
             )
-        )
-        for item in installed:
-            item.status = "failed"
-            item.error_message = "实例已切换，原授权仍保留，请重新安装以确认目标实例代码。"
-            moved_skills.append(item)
+            for item in installed:
+                item.status = "failed"
+                item.error_message = "实例已切换，原授权仍保留，请重新安装以确认目标实例代码。"
+                moved_skills.append(item)
     old_relay_id, old_model, old_effort = bot.relay_server_id, bot.model, bot.effort_level
     old_directory = bot.working_dir
     if memory_status != "unchanged":

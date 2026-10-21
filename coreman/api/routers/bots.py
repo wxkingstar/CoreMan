@@ -685,9 +685,9 @@ async def patch_bot(
 
         with session.no_autoflush:
             await rebuild_prompt(session, bot)
-    # 换模型（可能连后端都换了）或换工作目录 = 换上下文，旧 relay 会话必须作废。
-    # 以「值真的变了」为准：把原值重新提交一遍不该把用户正在进行的对话清掉。
-    if before["model"] != bot.model or before["working_dir"] != bot.working_dir:
+    # 换工作目录 = 换上下文，旧 relay 会话必须作废；以「值真的变了」为准。换模型不清：与在
+    # 同一运行时上切换模型一样接着原会话聊，后端变了的由 get_or_create 自动换新会话。
+    if before["working_dir"] != bot.working_dir:
         await sessions.clear_bot(session, bot.id)
     diff = diff_dict(before, _public(bot), AUDIT_MASKED_KEYS)
     if after_creds != before_creds:

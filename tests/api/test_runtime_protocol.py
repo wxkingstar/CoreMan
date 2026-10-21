@@ -323,7 +323,12 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
     client, db_session
 ):
     _, body, headers = await enrollment(client, db_session)
-    flags = ("feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1")
+    flags = (
+        "feishu_personal_tools_v1",
+        "wecom_personal_tools_v1",
+        "owner_session_view_v1",
+        "resume_fallback_v1",
+    )
     for declared in (dict.fromkeys(flags, True), {}):
         response = await client.post(
             "/api/runtime/heartbeat",

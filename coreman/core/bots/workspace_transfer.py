@@ -78,12 +78,17 @@ async def shared_directory(
     """源节点的当前目录与目标节点的 `directory` 是不是共享盘上的同一份：源节点在当前目录建随机名
     文件，目标节点在 `directory` 找得到就是。不要求两边路径相同：同一块盘在各节点可以挂在不同路径。
 
-    任一端不支持探测按不共享处理，沿用复制；探测本身出错则抛出，调用方不能当成不共享去复制——
-    共享盘上的整目录替换会删掉不随迁移的 .env、依赖目录和开发模式 worktree。
+    任一端不支持探测、或探测本身出错都抛出，调用方不能当成不共享去复制——共享盘上的整目录
+    替换会删掉不随迁移的 .env、依赖目录和开发模式 worktree。
     """
     for relay in (source, target):
         if (await call_agent(relay, cipher, "ping")).get("workspace_probe") != 1:
-            return False
+            raise ApiError(
+                409,
+                409,
+                "目标目录已有内容，但运行时版本较旧、无法确认是否与当前目录共享，为避免误覆盖"
+                "已停止换机；请先升级两端运行时，或改用「使用已有目录」",
+            )
     token, owner = uuid.uuid4().hex, str(bot.id)
     here = {"working_dir": bot.working_dir, "bot_id": owner, "token": token}
     await call_agent(source, cipher, "workspace-probe", {**here, "action": "create"})
@@ -416,8 +421,11 @@ async def prepare_switch(
     mode: WorkspaceMode = "copy",
     directory: str,
     allow_stored_memory: bool = False,
-) -> str:
+) -> tuple[str, bool]:
     """Caller owns bot row lock. Intermediate commits persist fence and recovered memory.
+
+    返回记忆状态，以及目标是不是原来那个目录（同一节点同一目录，或共享盘上的同一份）：
+    是的话文件一个没动，技能也都还在。
 
     Final binding and ready state remain caller-transactional. A process crash leaves a
     durable fence; retry is allowed after the 30 minute deadline (work has a 25m timeout).
@@ -525,7 +533,7 @@ async def prepare_switch(
                 raise ApiError(409, 409, "迁移状态已变化，请刷新后重试")
             await reserve_workspace(session, target.id, directory, bot_id=bot.id)
             bot.workspace_phase = "完成切换"
-            return status
+            return status, same_directory or shared
     except (ApiError, AgentError, TimeoutError, ValueError, KeyError, OSError) as exc:
         log.warning(
             "workspace_migration_failed",

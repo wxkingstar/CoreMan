@@ -36,8 +36,8 @@ from tests.integration.worker_helpers import build_ctx, seed_bot
 def _skip_memory_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
     """这里只看限流切换流程；实例都挂在节点上，记忆迁移另有 test_memory_transfer 覆盖，不连节点。"""
 
-    async def not_configured(*_args: object, **_kwargs: object) -> str:
-        return "not_configured"
+    async def not_configured(*_args: object, **_kwargs: object) -> tuple[str, bool]:
+        return "not_configured", False
 
     monkeypatch.setattr(switch_relay, "prepare_switch", not_configured)
 

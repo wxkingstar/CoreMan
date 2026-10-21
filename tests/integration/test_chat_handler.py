@@ -162,6 +162,39 @@ async def test_normal_round_trip_new_session_then_resume(
     assert fake.requests[1]["session_id"] == body["session_id"]
 
 
+async def test_first_turn_after_switch_carries_history(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.chat import sessions
+
+    bot, _, _ = await seed_bot(db_session)
+    fake = FakeRelay("normal")
+    await run(db_engine, await chat_task(db_session, bot, "第一问"), fake)
+    sid = fake.requests[0]["session_id"]
+    # 会话文件带到了新运行时：原生续聊，续接文本只交给驱动备用，不进本轮块。
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep={uuid.UUID(sid)})
+    await db_session.commit()
+    await run(db_engine, await chat_task(db_session, bot, "第二问"), fake)
+    native = fake.requests[1]
+    assert native["session_id"] == sid
+    assert "第一问" in native["resume_fallback"] and "第一问" not in turn_block(native)
+    # 只在首轮带一次。
+    await run(db_engine, await chat_task(db_session, bot, "第三问"), fake)
+    assert "resume_fallback" not in fake.requests[2]
+    # 带不过去：换新会话，续接文本直接进本轮块；首轮失败的话下一轮仍带上。
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep=set())
+    await db_session.commit()
+    fake.scenario = "relay_error"
+    await run(db_engine, await chat_task(db_session, bot, "第四问"), fake)
+    fake.scenario = "normal"
+    await run(db_engine, await chat_task(db_session, bot, "第五问"), fake)
+    for text in fake.requests[3:5]:
+        assert text["session_id"] != sid and "resume_fallback" not in text
+        assert "第三问" in turn_block(text)
+    await run(db_engine, await chat_task(db_session, bot, "第六问"), fake)
+    assert "上下文续接" not in turn_block(fake.requests[5])
+
+
 async def test_known_identity_and_group_speaker_change(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

@@ -499,8 +499,8 @@ async def workspace_switch_preview(
                 source.runtime_node_id == target.runtime_node_id and directory == bot.working_dir
             )
         ):
-            # 只用于展示；真正换机时还会再探测一次，探测失败那边会拦下。
-            with contextlib.suppress(AgentError):
+            # 只用于展示；真正换机时还会再探测一次，探测失败或旧版本那边会拦下。
+            with contextlib.suppress(AgentError, ApiError):
                 shared = await shared_directory(
                     bot, source, target, directory, request.app.state.cipher
                 )

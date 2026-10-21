@@ -267,6 +267,7 @@ def test_both_drivers_declare_additive_personal_tools():
         assert "feishu_personal_tools_v1" in module.DRIVER_CAPABILITIES[provider]
         assert "wecom_personal_tools_v1" in module.DRIVER_CAPABILITIES[provider]
         assert "owner_session_view_v1" in module.DRIVER_CAPABILITIES[provider]
+    assert "resume_fallback_v1" in module.DRIVER_CAPABILITIES["claude"]
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])

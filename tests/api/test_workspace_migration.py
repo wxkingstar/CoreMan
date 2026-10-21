@@ -453,8 +453,9 @@ async def test_copy_over_occupied_target_requires_upgraded_runtime(client, db_se
         json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
         headers={"If-Match": str(bot.version)},
     )
+    # 旧运行时报不出 workspace_probe：分不清是不是共享盘，覆盖前就拦下。
     assert response.status_code == 409, response.text
-    assert "升级运行时" in response.json()["message"]
+    assert "升级两端运行时" in response.json()["message"]
     await db_session.refresh(bot)
     assert bot.relay_server_id == old.id
 
@@ -507,7 +508,7 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
 
     async def prepared(*args, **kwargs):
         assert kwargs["directory"] == "/data/skills/recovered"
-        return "transferred"
+        return "transferred", False
 
     monkeypatch.setattr(switch_relay, "prepare_switch", prepared)
     result = await client.post(
@@ -643,11 +644,11 @@ async def test_switch_reclones_repo_and_keeps_claude_session(
     assert "workspace-clone" in operations
     manifest = next(p["manifest"] for op, p in seen if op == "workspace-import" and "manifest" in p)
     assert not any(e["path"].startswith("app/.git/") for e in manifest)
-    # Claude 会话文件到了新目录，会话映射原样保留：下一轮直接续聊。
+    # Claude 会话文件到了新目录，会话映射原样保留：下一轮直接续聊，续不上时驱动用续接文本兜底。
     assert (agents[target.id].claude_project_dir(bot.working_dir) / f"{sid}.jsonl").exists()
     (row,) = await sessions.list_for_bot(db_session, bot.id)
     await db_session.refresh(row)
-    assert str(row.relay_session_id) == sid and row.inherited_from is None
+    assert str(row.relay_session_id) == sid and str(row.inherited_from) == sid
 
 
 async def test_switch_falls_back_to_full_copy_when_clone_fails(
@@ -834,8 +835,25 @@ async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
     mem = agents[old.id].memory_dir(bot.working_dir)
     mem.mkdir(parents=True)
     (mem / "remember.md").write_text("记住交付日期")
+    from coreman.core.bots import switch_relay as switch_module
     from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import BotSkill, Skill, SkillSource
     from coreman.core.relay import agent_client
+
+    source_row = SkillSource(key="tools", label="Tools", git_url="https://github.com/example/s.git")
+    db_session.add(source_row)
+    await db_session.flush()
+    skill = Skill(name="query", source_id=source_row.id, enabled=True)
+    db_session.add(skill)
+    await db_session.flush()
+    db_session.add(BotSkill(bot_id=bot.id, skill_id=skill.id, status="installed"))
+    await db_session.commit()
+    reinstalled = []
+
+    async def reinstall(session, cipher, *, bot, rows, actor):
+        reinstalled.append(rows)
+
+    monkeypatch.setattr(switch_module, "reinstall_after_switch", reinstall)
 
     monkeypatch.setattr(agent_client, "call_agent", workspace_transfer.call_agent)
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
@@ -861,6 +879,9 @@ async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
     assert (agents[target.id].memory_dir(bot.working_dir) / "remember.md").read_text() == (
         "记住交付日期"
     )
+    # 还是同一份目录，技能代码都在：不重装，状态不变。
+    row = await db_session.get(BotSkill, (bot.id, skill.id), populate_existing=True)
+    assert row.status == "installed" and reinstalled == []
 
 
 async def test_rate_limit_switch_default_mode_skips_copy_on_shared_storage(
@@ -970,8 +991,11 @@ async def test_switch_skips_copy_on_shared_storage_after_marker_was_cleaned(
 async def test_shared_directory_needs_both_runtimes_and_cleans_up_on_the_source(
     db_session, monkeypatch
 ):
-    """旧运行时不支持探测按不共享处理；探测文件不管找没找到都由源节点删除。"""
+    """旧运行时不支持探测时拒绝（不能当成不共享去复制）；探测文件不管找没找到都由源节点删除。"""
+    import pytest
+
     from coreman.core.bots import workspace_transfer
+    from coreman.core.errors import ApiError
 
     bot, old, _ = await seed_bot(db_session)
     target = await add_node_relay(db_session, name="target")
@@ -1001,5 +1025,7 @@ async def test_shared_directory_needs_both_runtimes_and_cleans_up_on_the_source(
     assert [c for c in calls if c[0] == "workspace-probe"] == probes
     calls.clear()
     capable[target.id] = False
-    assert not await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
+    with pytest.raises(ApiError) as caught:
+        await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
+    assert caught.value.status_code == 409 and "升级" in caught.value.message
     assert all(op == "ping" for op, _, _ in calls)

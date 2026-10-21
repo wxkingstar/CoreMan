@@ -475,7 +475,7 @@ async def test_close_cancels_source_while_help_is_only_registered(db_engine, db_
     assert row.status in ("cancelled", "timed_out")
 
 
-async def test_resume_rechecks_runtime_after_resolve_before_dispatch(db_engine, db_session):
+async def test_resume_follows_a_runtime_switch_only_with_the_source_session(db_engine, db_session):
     from dataclasses import replace
 
     from coreman.runtime.worker.chat.collaboration import resolve
@@ -500,9 +500,14 @@ async def test_resume_rechecks_runtime_after_resolve_before_dispatch(db_engine, 
     ctx = build_ctx(db_engine, resume)
     intake, relay, parts = await resolve(db_session, ctx)
     # Simulates _open's fresh locked bot/relay snapshot after an administrator switched it.
+    # The session files moved with it (mapping kept): resume continues on the new runtime.
     switched = SimpleNamespace(id=uuid.uuid4())
     intake = replace(intake, relay=switched)
-    with pytest.raises(ValueError, match="runtime changed"):
+    info = await OpenStage()._session_info(db_session, ctx, intake, "claude")
+    assert info.relay_session_id == row.source_relay_session_id
+    # They could not move (switch started a new session): the old conversation is gone.
+    await sessions.carry_over(db_session, a.id, backend="claude", keep=set())
+    with pytest.raises(ValueError, match="source session changed"):
         await OpenStage()._session_info(db_session, ctx, intake, "claude")
 
 

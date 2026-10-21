@@ -19,8 +19,8 @@ def _skip_memory_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
     """这些用例只看切换规则；记忆迁移另有 test_memory_transfer 覆盖，这里不连节点。"""
     from coreman.core.bots import switch_relay
 
-    async def not_configured(*args: object, **kwargs: object) -> str:
-        return "not_configured"
+    async def not_configured(*args: object, **kwargs: object) -> tuple[str, bool]:
+        return "not_configured", False
 
     monkeypatch.setattr(switch_relay, "prepare_switch", not_configured)
 

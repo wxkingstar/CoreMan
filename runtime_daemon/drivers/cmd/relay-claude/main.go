@@ -121,6 +121,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if req.SessionID != "" && req.ResumeFallback != "" {
+		resumeFallbacks.Store(req.SessionID, req.ResumeFallback)
+		defer resumeFallbacks.Delete(req.SessionID)
+	}
 
 	model := resolveModel(req.Model)
 	if model == "" {
@@ -217,6 +221,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"owner_session_view_v1": true,
 			// The business system catalog MCP (coreman_systems) can be mounted.
 			"systems_catalog_v1": true,
+			// A resume_fallback note is used when --resume finds no session.
+			"resume_fallback_v1": true,
 		},
 	})
 }

@@ -34,7 +34,8 @@ type ChatCompletionRequest struct {
 	PermissionMode   string            `json:"permission_mode,omitempty"`
 	AllowedTools     string            `json:"allowed_tools,omitempty"` // comma-separated
 	AddDirs          []string          `json:"add_dirs,omitempty"`
-	Settings         string            `json:"settings,omitempty"` // JSON string passed verbatim to `claude --settings` (shallow-merged into existing settings.json)
+	Settings         string            `json:"settings,omitempty"`        // JSON string passed verbatim to `claude --settings` (shallow-merged into existing settings.json)
+	ResumeFallback   string            `json:"resume_fallback,omitempty"` // turn-block note used only if --resume finds no session and the turn starts a new one
 }
 
 type StreamOptions struct {

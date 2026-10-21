@@ -9,7 +9,7 @@ from tests.api.conftest import login_as
 from tests.api.test_bots import _bot_body, _team
 
 
-async def test_patch_model_clears_sessions_and_notifies(
+async def test_patch_model_keeps_sessions_and_notifies(
     client: httpx.AsyncClient, db_session: AsyncSession, migrated_database: str
 ) -> None:
     team = await _team(db_session)
@@ -45,7 +45,9 @@ async def test_patch_model_clears_sessions_and_notifies(
             headers={"If-Match": f'"{created["version"] + 1}"'},
         )
         assert r.status_code == 200, r.text
-        assert (await db_session.execute(select(ChatSession))).scalars().all() == []
+        assert (
+            len((await db_session.execute(select(ChatSession))).scalars().all()) == 1
+        )  # 换模型也接着原会话聊
         r = await client.post(f"/api/admin/bots/{created['id']}/toggle")
         assert r.status_code == 200
         got = await listener.wait("config_changed", timeout=2.0)
