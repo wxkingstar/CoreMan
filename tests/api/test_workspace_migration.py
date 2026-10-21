@@ -1,5 +1,6 @@
 """Workspace migration fences execution and retains recovered memory on failure."""
 
+import uuid
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -519,7 +520,9 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
     assert result.status_code == 200, result.text
 
 
-async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False, mount=None):
+async def _real_agents(
+    db_session, tmp_path, monkeypatch, *, shared=False, mount=None, provider="claude"
+):
     """源、目标各一个真实 Agent；平台对节点的调用直接落到它们身上。
 
     shared=True 时两台节点的项目主目录是同一个目录，相当于挂了同一块共享盘；再给 mount 时目标
@@ -529,7 +532,8 @@ async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False, mount
     from coreman.core.db.models import RuntimeNode
     from runtime_daemon.agent import Agent, OperationError
 
-    bot, old, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    model = "codex/gpt-6.1-sol" if provider == "codex" else "claude-sonnet-5-5"
+    bot, old, _ = await seed_bot(db_session, model=model)
     src_root = tmp_path / "source"
     dst_root = src_root if shared else tmp_path / "destination"
     src_root.mkdir()
@@ -540,7 +544,9 @@ async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False, mount
     source_node = await db_session.get(RuntimeNode, old.runtime_node_id)
     source_node.workspace_root = str(src_root)
     bot.working_dir = str(src_root / bot.bot_key)
-    target = await add_node_relay(db_session, name="target", workspace_root=str(dst_root))
+    target = await add_node_relay(
+        db_session, name="target", provider=provider, workspace_root=str(dst_root)
+    )
     await db_session.commit()
     agents = {
         relay.id: Agent(
@@ -549,6 +555,7 @@ async def _real_agents(db_session, tmp_path, monkeypatch, *, shared=False, mount
             api_url="http://test",
             token="x" * 32,
             relay_id=str(relay.id),
+            provider=provider,
             sessions_dir=tmp_path / home / "relay-sessions",
         )
         for relay, root, home in [(old, src_root, "home1"), (target, dst_root, "home2")]
@@ -649,6 +656,84 @@ async def test_switch_reclones_repo_and_keeps_claude_session(
     (row,) = await sessions.list_for_bot(db_session, bot.id)
     await db_session.refresh(row)
     assert str(row.relay_session_id) == sid and str(row.inherited_from) == sid
+
+
+async def test_codex_session_moves_with_its_rollout(db_session, monkeypatch, tmp_path):
+    from coreman.core.bots.workspace_transfer import copy_sessions
+    from coreman.core.chat import sessions
+
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    bot, old, target, agents, _ = await _real_agents(
+        db_session, tmp_path, monkeypatch, provider="codex"
+    )
+    sids = []
+    for key in ("u1", "u2"):
+        info = await sessions.get_or_create(
+            db_session,
+            bot_id=bot.id,
+            session_key=key,
+            backend="codex",
+            ttl_hours=72,
+            speaker_user_id=None,
+        )
+        sids.append(str(info.relay_session_id))
+    await db_session.commit()
+    source, thread = agents[old.id], str(uuid.uuid4())
+    rollout = f"2026/10/21/rollout-2026-10-21T08-00-00-{thread}.jsonl"
+    (source.codex_sessions_dir() / rollout).parent.mkdir(parents=True)
+    (source.codex_sessions_dir() / rollout).write_text('{"type":"session_meta"}\n' * 100)
+    (source.sessions_dir / sids[0]).mkdir(parents=True)
+    (source.sessions_dir / sids[0] / "codex_thread.txt").write_text(thread)
+    (source.sessions_dir / sids[0] / "codex_usage.json").write_text('{"output_tokens": 1}')
+    # 第二个会话的 thread 在源机上已没有 rollout：带不过去，由调用方改为文本续接。
+    (source.sessions_dir / sids[1]).mkdir(parents=True)
+    (source.sessions_dir / sids[1] / "codex_thread.txt").write_text(str(uuid.uuid4()))
+    target_dir = str(tmp_path / "destination" / bot.bot_key)
+    agents[target.id].dispatch(
+        {"type": "workspace-init", "working_dir": target_dir, "bot_id": str(bot.id)}
+    )
+
+    copied = await copy_sessions(db_session, bot, old, target, bot.working_dir, target_dir, None)
+
+    assert copied == {uuid.UUID(sids[0])}
+    moved = agents[target.id]
+    assert (moved.codex_sessions_dir() / rollout).read_text() == (
+        source.codex_sessions_dir() / rollout
+    ).read_text()
+    assert (moved.sessions_dir / sids[0] / "codex_thread.txt").read_text() == thread
+    assert (moved.sessions_dir / sids[0] / "codex_usage.json").exists()
+
+
+async def test_codex_sessions_stay_text_carried_with_old_runtime(db_session, monkeypatch, tmp_path):
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.chat import sessions
+
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, provider="codex"
+    )
+    await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="u1",
+        backend="codex",
+        ttl_hours=72,
+        speaker_user_id=None,
+    )
+    await db_session.commit()
+    real = workspace_transfer.call_agent
+
+    async def legacy(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "ping" and relay.id == target.id:
+            result = {k: v for k, v in result.items() if k != "session_transfer_codex"}
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", legacy)
+    copied = await workspace_transfer.copy_sessions(
+        db_session, bot, old, target, bot.working_dir, bot.working_dir, None
+    )
+    assert copied == set()
+    assert "session-export" not in [op for op, _ in seen]
 
 
 async def test_switch_falls_back_to_full_copy_when_clone_fails(

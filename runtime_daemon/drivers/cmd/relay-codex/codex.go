@@ -311,7 +311,8 @@ func flattenForFreshSession(messages []openai.ChatMessage, sessionDir string) (p
 // exits 1 with EMPTY stdout — the "no rollout found for thread id ..." text
 // goes to stderr only, so no parseable error event ever reaches the handlers.
 // The closure drops the stale session→thread binding and rebuilds the input
-// as a brand-new session with the full message history replayed.
+// as a brand-new session with the full message history replayed, plus the
+// platform's text continuation when the request carries one.
 func newRebuildFresh(threads *threadMap, req *openai.ChatCompletionRequest, model, sessionDir string) func() codexInput {
 	return func() codexInput {
 		threads.Forget(req.SessionID)
@@ -321,7 +322,9 @@ func newRebuildFresh(threads *threadMap, req *openai.ChatCompletionRequest, mode
 		if meter != nil {
 			meter.Forget(req.SessionID)
 		}
-		return buildCodexInput(req, model, "", sessionDir)
+		input := buildCodexInput(req, model, "", sessionDir)
+		input.Stdin = withResumeFallback(input.Stdin, req.ResumeFallback)
+		return input
 	}
 }
 

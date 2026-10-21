@@ -71,6 +71,7 @@ func TestThreadWriteFailureKeepsPublishedMapping(t *testing.T) {
 	if err := tm.Set("s", "new"); err == nil {
 		t.Fatal("expected write failure")
 	}
+	tm.rootDir = root
 	if got := tm.Get("s"); got != "old" {
 		t.Fatal(got)
 	}

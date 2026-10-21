@@ -31,6 +31,8 @@ CHUNK_SIZE = 256 * 1024
 MAX_CHUNK = 2 * 1024 * 1024
 MAX_FILES = 50000
 SESSION_COPY_TIMEOUT = 5 * 60
+# 会话随换机迁移所需的节点能力位，按后端区分。
+SESSION_CAPABILITY = {"claude": "session_transfer", "codex": "session_transfer_codex"}
 
 
 def failure_message(exc: BaseException) -> str:
@@ -309,13 +311,16 @@ async def copy_sessions(
     target_dir: str,
     cipher: Cipher | None,
 ) -> set[uuid.UUID]:
-    """把 Claude 会话文件搬到目标运行时，返回搬成功的 relay 会话；搬不了的由调用方改为文本续接。
+    """把会话文件搬到目标运行时，返回搬成功的 relay 会话；搬不了的由调用方改为文本续接。
 
-    只做 Claude → Claude：Codex 的续聊还依赖本机状态库，单搬文件续不上。尽力而为，失败不影响换机。
+    只做同后端：Claude → Claude 搬对话记录，Codex → Codex 搬 thread 的 rollout 与绑定（Codex
+    凭 rollout 自行补上本机状态库）。两端都要报对应能力位，老节点不报就全部文本续接。
+    尽力而为，失败不影响换机。
     """
-    if source.model_provider != "claude" or target.model_provider != "claude":
+    provider = source.model_provider
+    if provider not in SESSION_CAPABILITY or target.model_provider != provider:
         return set()
-    rows = [row for row in await sessions.list_for_bot(session, bot.id) if row.backend == "claude"]
+    rows = [row for row in await sessions.list_for_bot(session, bot.id) if row.backend == provider]
     if not rows:
         return set()
     copied: set[uuid.UUID] = set()
@@ -323,7 +328,8 @@ async def copy_sessions(
     try:
         async with asyncio.timeout(SESSION_COPY_TIMEOUT):
             for relay in (source, target):
-                if (await call_agent(relay, cipher, "ping")).get("session_transfer") != 1:
+                ping = await call_agent(relay, cipher, "ping")
+                if ping.get(SESSION_CAPABILITY[provider]) != 1:
                     return set()
             listing = await call_agent(
                 source,
@@ -337,7 +343,10 @@ async def copy_sessions(
             )
             grouped: dict[str, list[dict[str, Any]]] = {}
             for item in listing.get("files") or []:
-                sid = str(item["path"]).split("/", 1)[0].removesuffix(".jsonl")
+                # 老节点不报 session，Claude 的路径以会话 id 开头。
+                sid = item.get("session") or str(item["path"]).split("/", 1)[0].removesuffix(
+                    ".jsonl"
+                )
                 grouped.setdefault(sid, []).append(item)
             for sid, items in grouped.items():
                 try:

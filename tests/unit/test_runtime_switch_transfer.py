@@ -273,3 +273,70 @@ def test_session_paths_and_hash_are_checked(agent):
     (agent.root / "one/.coreman-workspace.json").write_text('{"bot_id": "b2"}')
     with pytest.raises(OperationError):
         agent.dispatch({"type": "session-export", **base, "sessions": []})
+
+
+@pytest.fixture
+def codex_agent(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    return Agent(
+        root=root,
+        home=tmp_path / "home",
+        api_url="https://example.com",
+        token="synthetic-test-token-123456789",
+        relay_id="test",
+        provider="codex",
+        sessions_dir=tmp_path / "relay-sessions",
+    )
+
+
+def test_codex_ping_and_session_areas(codex_agent, tmp_path, monkeypatch):
+    ping = codex_agent.dispatch({"type": "ping"})
+    assert ping["session_transfer_codex"] == 1 and ping["session_transfer"] == 0
+    assert codex_agent.codex_sessions_dir() == tmp_path / "home/.codex/sessions"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    assert codex_agent.codex_sessions_dir() == tmp_path / "codex-home/sessions"
+
+
+def test_codex_rollout_paths_are_checked(codex_agent):
+    call(codex_agent, "init", "one")
+    base = {"working_dir": "one", "bot_id": "b1"}
+    thread = str(uuid.uuid4())
+    for area, path in [
+        ("codex", f"2026/10/21/rollout-x-{thread}.jsonl"),
+        ("codex", f"2026/10/rollout-2026-10-21T08-00-00-{thread}.jsonl"),
+        ("codex", f"../2026/10/21/rollout-2026-10-21T08-00-00-{thread}.jsonl"),
+        ("codex", "2026/10/21/rollout-2026-10-21T08-00-00-not-a-thread.jsonl"),
+        ("project", f"{thread}.jsonl"),
+    ]:
+        with pytest.raises(OperationError):
+            codex_agent.dispatch({"type": "session-read", **base, "area": area, "path": path})
+
+
+def test_codex_export_needs_a_bound_unique_rollout(codex_agent):
+    call(codex_agent, "init", "one")
+    sessions = codex_agent.codex_sessions_dir()
+    bound, unbound, linked = (str(uuid.uuid4()) for _ in range(3))
+    thread, other = str(uuid.uuid4()), str(uuid.uuid4())
+    rollout = f"2026/10/21/rollout-2026-10-21T08-00-00-{thread}.jsonl"
+    (sessions / rollout).parent.mkdir(parents=True)
+    (sessions / rollout).write_text("{}\n")
+    elsewhere = sessions.parent / f"rollout-2026-10-21T08-00-00-{other}.jsonl"
+    elsewhere.write_text("{}\n")
+    (sessions / f"2026/10/21/rollout-2026-10-21T09-00-00-{other}.jsonl").symlink_to(elsewhere)
+    for sid, value in [(bound, thread), (linked, other)]:
+        (codex_agent.sessions_dir / sid).mkdir(parents=True)
+        (codex_agent.sessions_dir / sid / "codex_thread.txt").write_text(value + "\n")
+    listing = codex_agent.dispatch(
+        {
+            "type": "session-export",
+            "working_dir": "one",
+            "bot_id": "b1",
+            "sessions": [bound, unbound, linked],
+        }
+    )
+    assert {(f["session"], f["area"], f["path"]) for f in listing["files"]} == {
+        (bound, "codex", rollout),
+        (bound, "relay", f"{bound}/codex_thread.txt"),
+    }

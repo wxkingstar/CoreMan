@@ -68,6 +68,7 @@ DRIVER_CAPABILITIES = {
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
         "systems_catalog_v1",
+        "resume_fallback_v1",
     ),
 }
 CONTROL_LEASE_SECONDS = 40.0

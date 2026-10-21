@@ -201,6 +201,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"owner_session_view_v1": true,
 			// The business system catalog MCP (coreman_systems) can be mounted.
 			"systems_catalog_v1": true,
+			// A resume_fallback note is used when a resumed thread has no rollout.
+			"resume_fallback_v1": true,
 		},
 	})
 }
