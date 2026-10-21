@@ -51,7 +51,7 @@ def instruction_content(bot: Bot) -> str:
         f"# {bot.name}\n\n## 职责\n{bot.description or '协助团队完成工作任务。'}\n\n"
         "## 工作约定\n在当前员工工作目录中保存工作文件。遵循平台提供的任务说明和授权范围。\n"
         "不要把口令、令牌和环境变量写入文件或 Git。\n\n"
-        "## 记忆\n使用平台提供的持久记忆；换机时由平台回收并部署记忆。\n"
+        "## 记忆\n持久记忆在本目录的 `.coreman-memory/`（`MEMORY.md` 为索引），换运行时也保留。\n"
     )
 
 
@@ -487,6 +487,7 @@ async def prepare_switch(
                 cipher,
                 allow_stored=allow_stored_memory and mode != "copy",
             )
+            await memory_transfer.require_shared_layout(session, bot, target, capability)
             bot.workspace_phase = "共享存储，跳过文件复制" if shared else "准备目标工作文件"
             await session.commit()  # Snapshot survives subsequent transfer failure.
             if same_directory or shared or mode == "existing":

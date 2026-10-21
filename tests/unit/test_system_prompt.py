@@ -305,3 +305,23 @@ def test_dev_mode_section_only_when_enabled_and_before_custom_prompt() -> None:
     assert "Never push to or rebase the default branch" in out
     assert "never a shared one" in out
     assert "git switch <branch>" in out
+
+
+def test_memory_section_only_for_codex_with_a_memory_directory() -> None:
+    def build(backend: str, memory_dir: str) -> str:
+        return build_system_prompt(
+            segments=SEG,
+            backend=backend,
+            verbosity_level=4,
+            bot_prompt="你是助理",
+            tag=TAG,
+            memory_dir=memory_dir,
+        )
+
+    path = "/srv/workspaces/sales/.coreman-memory"
+    out = build("codex", path)
+    assert out.index("# Date and Time") < out.index("# Persistent Memory") < out.index("你是助理")
+    assert f"`{path}/MEMORY.md`" in out
+    assert "# Persistent Memory" not in build("codex", "")
+    # Claude Code 自带记忆说明，守护进程已把目录指到同一处。
+    assert "# Persistent Memory" not in build("claude", path)

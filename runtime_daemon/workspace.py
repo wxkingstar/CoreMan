@@ -28,6 +28,8 @@ STALE_STAGE = 6 * 3600
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 PROBE_TOKEN = re.compile(r"[0-9a-f]{32}")
 MARKER = ".coreman-workspace.json"
+# 员工记忆：Claude 与 Codex 共用；`.coreman-` 前缀让文件管理看不到、换机复制不带（经平台库部署）。
+MEMORY_DIR = ".coreman-memory"
 EXCLUDED = {
     ".git",
     ".ssh",
@@ -207,17 +209,20 @@ def remove_legacy_instruction_excludes(directory):
             replace_file(current, updated.encode())
 
 
-def exclude_marker(directory):
-    """Git 仓库里把所有权标记列入本地排除：共用目录的另一套系统部署时可能 git clean -fd，
-    不排除就会删掉标记；也免得它出现在 git status 里、被误提交。"""
+def exclude_private(directory):
+    """Git 仓库里把所有权标记和记忆目录列入本地排除：共用目录的另一套系统部署时可能
+    git clean -fd，不排除就会删掉它们；也免得它们出现在 git status 里、被误提交。"""
     if not (directory / ".git").is_dir() or (directory / ".git").is_symlink():
         return
     current = git_exclude_file(directory)
     previous = current.read_text() if current.is_file() else ""
-    if "/" + MARKER not in previous.splitlines():
+    missing = [
+        line for line in ("/" + MARKER, "/" + MEMORY_DIR + "/") if line not in previous.splitlines()
+    ]
+    if missing:
         current.parent.mkdir(parents=True, exist_ok=True)
         text = previous + ("\n" if previous and not previous.endswith("\n") else "")
-        replace_file(current, (text + "/" + MARKER + "\n").encode())
+        replace_file(current, (text + "".join(line + "\n" for line in missing)).encode())
 
 
 def link_skills(directory):
@@ -248,6 +253,7 @@ def link_skills(directory):
 
 GITIGNORE = f"""# 技能（.agents、.claude）与 MCP 配置（.mcp.json）随仓库提交，这里只排除本机文件。
 /{MARKER}
+/{MEMORY_DIR}/
 .env
 .env.*
 .claude/settings.local.json
@@ -336,7 +342,7 @@ class Workspace:
         link_skills(root)
         write_gitignore(root)
         remove_legacy_instruction_excludes(root)
-        exclude_marker(root)
+        exclude_private(root)
         marker.write_text(
             json.dumps(
                 {
@@ -346,6 +352,9 @@ class Workspace:
                 }
             )
         )
+        # 暂存目录还要整体挪到目标位置，链接要指向最终路径：只在正式目录上建。
+        if root == self.root:
+            self.agent.ensure_memory_layout(str(root))
         return {"initialized": True, "owned": True, "workspace_protocol": 1}
 
     def instructions(self, root):

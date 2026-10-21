@@ -106,6 +106,8 @@ class Capability(BaseModel):
     systems_catalog_v1: StrictBool = False
     # Claude 驱动 --resume 找不到会话时，用平台带的续接文本开新会话。旧节点没有，会从空会话开始。
     resume_fallback_v1: StrictBool = False
+    # 记忆在工作目录的 .coreman-memory/，Claude 与 Codex 共用。旧节点没有，Codex 读不到记忆。
+    memory_layout_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)
     login: Literal["ready", "required", "unknown"] = "unknown"

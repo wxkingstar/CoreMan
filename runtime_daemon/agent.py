@@ -190,6 +190,8 @@ class Agent:
         self.digests: dict = {}
         self.git_hosts = set(git_hosts)
         self.lock = threading.Lock()
+        # 记忆目录迁移另用一把锁：聊天前也要确保布局，不能等工作目录操作的长锁。
+        self.memory_lock = threading.Lock()
         self.stop = threading.Event()
         self.background: set[str] = set()
         self.background_lock = threading.Lock()
@@ -258,21 +260,83 @@ class Agent:
         """本实例正在执行的任务；由运行时守护进程按其在途调用提供。"""
         return []
 
-    def claude_project_dir(self, working_dir: str) -> Path:
-        """Claude Code 按工作目录存会话与记忆的目录：路径里非字母数字的字符都换成 -。"""
-        workspace = self.workspace(working_dir)
+    def project_dir_for(self, path: Path) -> Path:
+        """Claude Code 按目录存会话与记忆的位置：路径里非字母数字的字符都换成 -。"""
         base = (self.home / ".claude/projects").resolve()
-        name = re.sub(r"[^A-Za-z0-9]", "-", str(workspace))
+        name = re.sub(r"[^A-Za-z0-9]", "-", str(path))
         # 超长路径 Claude Code 会截断再加哈希，这里推算不出来。
         if len(name) > 200:
             raise OperationError("工作目录路径过长")
-        path = base / name
-        if not path.resolve().is_relative_to(base):
+        project = base / name
+        if not project.resolve().is_relative_to(base):
             raise OperationError("记忆路径不合法")
-        return path
+        return project
+
+    def claude_project_dir(self, working_dir: str) -> Path:
+        """会话记录按 Claude 的启动目录存。"""
+        return self.project_dir_for(self.workspace(working_dir))
 
     def memory_dir(self, working_dir: str) -> Path:
-        return self.claude_project_dir(working_dir) / "memory"
+        """员工的记忆在工作目录的 .coreman-memory/，Claude 与 Codex 读写同一份。"""
+        return self.ensure_memory_layout(working_dir)
+
+    def legacy_memory_dir(self, workspace: Path) -> Path:
+        """Claude Code 自带记忆的位置：在 Git 仓库里按仓库根目录推算（各 worktree 共用），
+        否则按工作目录本身。只在工作区根以内找仓库。"""
+        current = workspace
+        while current != self.root and current.is_relative_to(self.root):
+            if (current / ".git").exists():
+                return self.project_dir_for(current) / "memory"
+            current = current.parent
+        return self.project_dir_for(workspace) / "memory"
+
+    def ensure_memory_layout(self, working_dir: str) -> Path:
+        """建中立记忆目录；Claude 原来的记忆目录合并进来后改名留底，原位置换成指向这里的链接。
+
+        链接是兜底：新守护进程给 Claude 传 autoMemoryDirectory，用不到它；退回旧版 Agent、
+        守护进程或 Claude Code 时，沿链接读写的仍是同一份。可重复执行。
+        """
+        from .workspace import MEMORY_DIR, exclude_private
+
+        workspace = self.workspace(working_dir)
+        target = workspace / MEMORY_DIR
+        try:
+            legacy = self.legacy_memory_dir(workspace)
+        except OperationError:
+            legacy = None
+        if (
+            target.is_dir()
+            and not target.is_symlink()
+            and (legacy is None or (legacy.is_symlink() and legacy.resolve() == target))
+        ):
+            return target
+        with self.memory_lock:
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise OperationError("记忆目录不能是链接或文件")
+            target.mkdir(exist_ok=True)
+            exclude_private(workspace)
+            # 路径过长推算不出 Claude 的目录：只跳过兜底链接，记忆照常读写。
+            if legacy is None:
+                return target
+            if legacy.is_symlink():
+                if legacy.resolve() == target:
+                    return target
+                raise OperationError("Claude 记忆目录已链接到别处，请核对后处理")
+            if legacy.is_dir():
+                for path in legacy.glob("*.md"):
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    dest = target / path.name
+                    newer = path.stat().st_mtime > dest.stat().st_mtime if dest.exists() else True
+                    if newer and not (dest.is_file() and dest.read_bytes() == path.read_bytes()):
+                        atomic_write(dest, path.read_text(encoding="utf-8"))
+                        os.utime(dest, (path.stat().st_atime, path.stat().st_mtime))
+                legacy.rename(legacy.with_name(f"memory.migrated-{int(time.time())}"))
+            elif legacy.exists():
+                raise OperationError("Claude 记忆目录位置被文件占用，请核对后处理")
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.symlink_to(target, target_is_directory=True)
+            return target
 
     def session_areas(self, working_dir: str) -> dict[str, Path]:
         areas = {"project": self.claude_project_dir(working_dir)}
@@ -481,7 +545,7 @@ class Agent:
     def deploy_memory(
         self, memories: list[dict], protocol_version: int = 1, overwrite: bool = False
     ) -> int:
-        targets = []
+        targets, directories = [], {}
         for row in memories:
             name, content = str(row.get("file_name", "")), str(row.get("content", ""))
             if (
@@ -490,7 +554,10 @@ class Agent:
                 or len(content.encode()) > MAX_MEMORY
             ):
                 raise OperationError("记忆文件名或大小不合法")
-            directory = self.memory_dir(str(row.get("working_dir", "")))
+            working_dir = str(row.get("working_dir", ""))
+            if working_dir not in directories:
+                directories[working_dir] = self.memory_dir(working_dir)
+            directory = directories[working_dir]
             target = directory / name
             if target.is_symlink():
                 raise OperationError("记忆目标不能是符号链接")
@@ -1058,6 +1125,8 @@ class Agent:
                 # 换机前可探测两台节点是否共用同一个工作目录（共享盘），是就不复制文件。
                 "workspace_probe": 1,
                 "mcp_oauth": 1,
+                # 记忆放在工作目录的 .coreman-memory/，Claude 与 Codex 共用。
+                "memory_layout": 2,
             }
         if kind == "status":
             tasks = self.active_tasks()

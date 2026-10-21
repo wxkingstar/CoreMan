@@ -261,7 +261,7 @@ async def test_copy_moves_real_files_and_memory_before_binding(
     (folder / "empty.txt").write_text("")
     (folder / "latest.txt").symlink_to("report.txt")
     mem = source.memory_dir(bot.working_dir)
-    mem.mkdir(parents=True)
+    mem.mkdir(parents=True, exist_ok=True)
     (mem / "remember.md").write_text("记住交付日期")
     seen = []
 
@@ -360,7 +360,7 @@ async def test_copy_replaces_occupied_target_with_git_and_newer_memory(
     (folder / ".git").mkdir()
     (folder / ".git/HEAD").write_text("ref: refs/heads/main\n")
     mem = agents[old.id].memory_dir(bot.working_dir)
-    mem.mkdir(parents=True)
+    mem.mkdir(parents=True, exist_ok=True)
     (mem / "remember.md").write_text("记住交付日期")
     # 目标是本员工以前用过的目录：留着旧文件，记忆还比源更新。
     destination = dst_root / bot.bot_key
@@ -369,7 +369,7 @@ async def test_copy_replaces_occupied_target_with_git_and_newer_memory(
     )
     (destination / "stale.txt").write_text("旧文件")
     stale_memory = agents[target.id].memory_dir(str(destination)) / "remember.md"
-    stale_memory.parent.mkdir(parents=True)
+    stale_memory.parent.mkdir(parents=True, exist_ok=True)
     stale_memory.write_text("旧的目标记忆")
     later = time.time() + 60
     os.utime(stale_memory, (later, later))
@@ -626,7 +626,7 @@ async def test_switch_reclones_repo_and_keeps_claude_session(
     )
     sid = str(info.relay_session_id)
     project = agents[old.id].claude_project_dir(bot.working_dir)
-    project.mkdir(parents=True)
+    project.mkdir(parents=True, exist_ok=True)
     (project / f"{sid}.jsonl").write_text('{"type":"user"}\n')
     await db_session.commit()
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
@@ -833,7 +833,7 @@ async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
     folder = tmp_path / "source" / bot.bot_key
     kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
     mem = agents[old.id].memory_dir(bot.working_dir)
-    mem.mkdir(parents=True)
+    mem.mkdir(parents=True, exist_ok=True)
     (mem / "remember.md").write_text("记住交付日期")
     from coreman.core.bots import switch_relay as switch_module
     from coreman.core.bots import workspace_transfer
@@ -875,7 +875,7 @@ async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
     operations = [op for op, _ in seen]
     assert "workspace-probe" in operations and "workspace-export" not in operations
     assert not list(folder.glob(".coreman-probe-*"))
-    # 记忆仍在各节点本地，照常回收并部署到目标节点。
+    # 记忆就在共享目录里，照常回收、部署，写回的是同一份。
     assert (agents[target.id].memory_dir(bot.working_dir) / "remember.md").read_text() == (
         "记住交付日期"
     )
