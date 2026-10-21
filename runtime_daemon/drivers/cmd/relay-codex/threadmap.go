@@ -14,46 +14,33 @@ import (
 //
 // Persistence is one tiny file per session: <sessionsDir>/<session_id>/codex_thread.txt
 // — same directory we already use for that session's attachments. Durability uses a synced temporary file and atomic rename,
-// followed by directory sync before publishing the in-memory mapping.
+// followed by directory sync.
 type threadMap struct {
 	mu      sync.RWMutex
-	memory  map[string]string // session_id → thread_id (in-process cache)
 	rootDir string
 }
 
 func newThreadMap(rootDir string) *threadMap {
-	return &threadMap{
-		memory:  make(map[string]string),
-		rootDir: rootDir,
-	}
+	return &threadMap{rootDir: rootDir}
 }
 
 // Get returns the codex thread_id bound to a client session_id, or "" if
-// no binding exists. Reads the on-disk file lazily on first lookup.
+// no binding exists. The on-disk file is the source of truth and is read on
+// every lookup: a runtime switch can replace it under a running relay (the
+// session carried back from another node may be bound to a newer thread), so
+// a cached value could resume a stale copy of the conversation.
 func (t *threadMap) Get(sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	tid, ok := t.memory[sessionID]
-	if ok {
-		return tid
-	}
-
-	path := t.path(sessionID)
-	data, err := os.ReadFile(path)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	data, err := os.ReadFile(t.path(sessionID))
 	if err != nil {
 		return ""
 	}
-	tid = strings.TrimSpace(string(data))
-	if tid == "" {
-		return ""
-	}
-
-	t.memory[sessionID] = tid
-	return tid
+	return strings.TrimSpace(string(data))
 }
 
 // Set binds a session_id to a codex thread_id and writes through to disk.
@@ -106,7 +93,6 @@ func (t *threadMap) Set(sessionID, threadID string) error {
 	if err != nil {
 		return fmt.Errorf("sync thread directory: %w", err)
 	}
-	t.memory[sessionID] = threadID
 	return nil
 }
 
@@ -117,7 +103,6 @@ func (t *threadMap) Forget(sessionID string) {
 		return
 	}
 	t.mu.Lock()
-	delete(t.memory, sessionID)
 	_ = os.Remove(t.path(sessionID))
 	t.mu.Unlock()
 }

@@ -95,9 +95,12 @@ func (m *usageMeter) perTurn(sessionID string, cur codexUsage) (input, output, c
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	last, ok := m.memory[sessionID]
+	// Disk first: it survives restarts, and a runtime switch can replace it
+	// under a running relay when the session is carried back from another
+	// node. Memory only covers a baseline whose store() failed.
+	last, ok := m.load(sessionID)
 	if !ok {
-		last = m.load(sessionID) // read-through from disk on first turn after a restart
+		last = m.memory[sessionID]
 	}
 
 	input = max(b.Uncached-last.Uncached, 0)
@@ -129,11 +132,11 @@ func (m *usageMeter) Forget(sessionID string) {
 	_ = os.Remove(m.path(sessionID))
 }
 
-func (m *usageMeter) load(sessionID string) meterBaseline {
+func (m *usageMeter) load(sessionID string) (meterBaseline, bool) {
 	var b meterBaseline
 	data, err := os.ReadFile(m.path(sessionID))
 	if err != nil {
-		return b // no baseline yet (new session, or reaped by cleanup) — zero is correct
+		return b, false // no baseline yet (new session, or reaped by cleanup) — zero is correct
 	}
 	if err := json.Unmarshal(data, &b); err != nil {
 		// A corrupt baseline must NOT silently read as zero — that would re-bill
@@ -142,9 +145,9 @@ func (m *usageMeter) load(sessionID string) meterBaseline {
 		// unreachable barring external tampering/FS damage; surface it loudly so
 		// the one-off over-count is at least detectable.
 		log.Printf("[usageMeter] corrupt baseline %s: %v — treating as empty (turn may over-count once)", m.path(sessionID), err)
-		return meterBaseline{}
+		return meterBaseline{}, true
 	}
-	return b
+	return b, true
 }
 
 func (m *usageMeter) store(sessionID string, b meterBaseline) {

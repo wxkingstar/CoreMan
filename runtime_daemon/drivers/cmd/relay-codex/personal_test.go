@@ -124,7 +124,7 @@ func TestHealthAdvertisesAdditivePersonalTools(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.Capabilities["feishu_personal_tools_v1"] || !body.Capabilities["owner_session_view_v1"] {
+	if !body.Capabilities["feishu_personal_tools_v1"] || !body.Capabilities["owner_session_view_v1"] || !body.Capabilities["resume_fallback_v1"] {
 		t.Fatal("missing capability", recorder.Body.String())
 	}
 	if _, ok := body.Capabilities["feishu_personal_restricted_v1"]; ok {

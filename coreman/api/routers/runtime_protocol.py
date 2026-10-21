@@ -104,7 +104,8 @@ class Capability(BaseModel):
     owner_session_view_v1: StrictBool = False
     # 驱动能挂载业务系统操作目录（MCP）。旧节点没有，业务系统沿用原来的一行说明。
     systems_catalog_v1: StrictBool = False
-    # Claude 驱动 --resume 找不到会话时，用平台带的续接文本开新会话。旧节点没有，会从空会话开始。
+    # 驱动续不上原会话时（Claude --resume 找不到会话、Codex 找不到 rollout），用平台带的续接文本
+    # 开新会话。旧节点没有，会从空会话开始。
     resume_fallback_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)

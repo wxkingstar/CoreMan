@@ -35,6 +35,10 @@ SESSION_CHUNK = 2 * 1024 * 1024
 SESSION_TOTAL = 512 * 1024 * 1024
 SESSION_FILES = 5000
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Codex 把一个 thread 的完整记录存在 sessions/年/月/日/rollout-<开始时间>-<thread>.jsonl。
+CODEX_ROLLOUT = re.compile(
+    r"\d{4}/\d{2}/\d{2}/rollout-[0-9T-]{1,40}-(" + SESSION_ID.pattern + r")\.jsonl"
+)
 
 
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
@@ -274,33 +278,61 @@ class Agent:
     def memory_dir(self, working_dir: str) -> Path:
         return self.claude_project_dir(working_dir) / "memory"
 
+    def codex_sessions_dir(self) -> Path:
+        """Codex 存 thread 记录的目录；驱动与 Codex CLI 继承守护进程的环境，同样认 CODEX_HOME。"""
+        home = os.environ.get("CODEX_HOME")
+        return (Path(home) if home else self.home / ".codex") / "sessions"
+
     def session_areas(self, working_dir: str) -> dict[str, Path]:
-        areas = {"project": self.claude_project_dir(working_dir)}
+        if self.provider == "codex":
+            areas = {"codex": self.codex_sessions_dir()}
+        else:
+            areas = {"project": self.claude_project_dir(working_dir)}
         if self.sessions_dir is not None:
             areas["relay"] = self.sessions_dir
         return areas
 
+    def codex_rollout(self, sid: str) -> Path | None:
+        """relay 会话绑定的 Codex thread 记录：驱动把 thread id 记在 <会话>/codex_thread.txt。
+
+        实测 Codex CLI 0.160 / 0.163：目标机只要有这份 rollout（相对路径不变）就能 resume，
+        状态库里的 thread 行由 Codex 按 thread id 扫 sessions 目录自行补上，不用动 state_5.sqlite。
+        """
+        if self.sessions_dir is None:
+            return None
+        marker = self.sessions_dir / sid / "codex_thread.txt"
+        if not marker.is_file() or marker.is_symlink():
+            return None
+        thread = marker.read_text(errors="replace").strip()
+        if not SESSION_ID.fullmatch(thread):
+            return None
+        base = self.codex_sessions_dir()
+        matches = [
+            path
+            for path in base.glob(f"*/*/*/rollout-*-{thread}.jsonl")
+            if CODEX_ROLLOUT.fullmatch(path.relative_to(base).as_posix())
+            and path.is_file()
+            and not path.is_symlink()
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def session_path(self, working_dir: str, area: object, name: object) -> Path:
-        """会话文件只能是 <会话>.jsonl 或 <会话>/ 下的普通文件，不跟随链接。"""
+        """会话文件只能是 <会话>.jsonl、<会话>/ 下的普通文件或 Codex 的 rollout，不跟随链接。"""
         areas = self.session_areas(working_dir)
         if area not in areas or not isinstance(name, str) or "\x00" in name or "\\" in name:
             raise OperationError("会话文件路径无效")
         rel = PurePosixPath(name)
         first = rel.parts[0] if rel.parts else ""
-        if (
-            rel.is_absolute()
-            or ".." in rel.parts
-            or str(rel) != name
-            or not (
-                (
-                    len(rel.parts) == 1
-                    and area == "project"
-                    and name.endswith(".jsonl")
-                    and SESSION_ID.fullmatch(name.removesuffix(".jsonl"))
-                )
-                or (len(rel.parts) > 1 and SESSION_ID.fullmatch(first))
-            )
-        ):
+        if area == "codex":
+            valid = bool(CODEX_ROLLOUT.fullmatch(name))
+        else:
+            valid = (
+                len(rel.parts) == 1
+                and area == "project"
+                and name.endswith(".jsonl")
+                and bool(SESSION_ID.fullmatch(name.removesuffix(".jsonl")))
+            ) or (len(rel.parts) > 1 and bool(SESSION_ID.fullmatch(first)))
+        if rel.is_absolute() or ".." in rel.parts or str(rel) != name or not valid:
             raise OperationError("会话文件路径无效")
         base = areas[str(area)]
         current = base
@@ -311,7 +343,8 @@ class Agent:
         return current
 
     def session_export(self, data: dict) -> dict:
-        """列出要带走的会话文件：Claude 的对话记录与子代理记录，以及驱动存的附件与用量基线。"""
+        """列出要带走的会话文件：Claude 的对话记录与子代理记录（Codex 是 thread 的 rollout），
+        以及驱动存的附件、用量基线与 Codex thread 绑定。每项带上所属 relay 会话。"""
         working_dir = str(data.get("working_dir") or "")
         wanted = data.get("sessions")
         if not isinstance(wanted, list) or len(wanted) > 500:
@@ -320,10 +353,16 @@ class Agent:
         for sid in wanted:
             if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
                 raise OperationError("会话列表无效")
-            project = self.claude_project_dir(working_dir)
-            if not (project / f"{sid}.jsonl").is_file():
-                continue
-            candidates = [("project", project / f"{sid}.jsonl")]
+            if self.provider == "codex":
+                rollout = self.codex_rollout(sid)
+                if rollout is None:
+                    continue
+                candidates = [("codex", rollout)]
+            else:
+                project = self.claude_project_dir(working_dir)
+                if not (project / f"{sid}.jsonl").is_file():
+                    continue
+                candidates = [("project", project / f"{sid}.jsonl")]
             for area, base in self.session_areas(working_dir).items():
                 folder = base / sid
                 if not folder.is_dir() or folder.is_symlink():
@@ -340,6 +379,7 @@ class Agent:
                 total += size
                 files.append(
                     {
+                        "session": sid,
                         "area": area,
                         "path": path.relative_to(self.session_areas(working_dir)[area]).as_posix(),
                         "size": size,
@@ -1055,6 +1095,8 @@ class Agent:
                 "workspace_git": 1,
                 "workspace_chunk": WORKSPACE_CHUNK,
                 "session_transfer": 1 if self.provider == "claude" else 0,
+                # Codex 会话（thread 的 rollout 与绑定）也能随换机迁移，目标机原生续聊。
+                "session_transfer_codex": 1 if self.provider == "codex" else 0,
                 # 换机前可探测两台节点是否共用同一个工作目录（共享盘），是就不复制文件。
                 "workspace_probe": 1,
                 "mcp_oauth": 1,
