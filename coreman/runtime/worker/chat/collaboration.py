@@ -104,8 +104,6 @@ async def resolve(
         bot = await session.get(Bot, ctx.task.bot_id)
         if bot is None:
             raise ValueError("collaboration bot missing")
-        if phase == "resume" and bot.relay_server_id != row.source_relay_id:
-            raise ValueError("原机器人运行时已变更，不能恢复旧会话")
     except ValueError as exc:
         await service.close(session, row, "cancelled", str(exc))
         await tasks.finish(

@@ -185,7 +185,22 @@ async def test_carry_over_keeps_moved_sessions_and_hands_others_their_history(
     assert note is not None
     assert note.index("张三：第一个问题") < note.index("你：第二个回答")
     await db_session.commit()
-    # 只在首轮带一次。
+    # 首轮没成功收尾：下一轮仍带上。
+    retry = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="b",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=None,
+    )
+    assert retry.relay_session_id == first.relay_session_id
+    assert retry.inherited_from == stuck.relay_session_id
+    # 成功收尾后不再带。
+    await sessions.settle_carry(
+        db_session, bot_id=bot.id, session_key="b", relay_session_id=first.relay_session_id
+    )
+    await db_session.commit()
     second = await sessions.get_or_create(
         db_session,
         bot_id=bot.id,

@@ -393,9 +393,10 @@ class OpenStage(ChatStageBase):
             )
             if row is None:
                 raise ValueError("collaboration missing")
-            # _open holds the bot lock and has refreshed intake.relay.
-            # The earlier resolve transaction cannot fence an intervening runtime switch.
-            if intake.relay is None or intake.relay.id != row.source_relay_id:
+            # _open holds the bot lock and has refreshed intake.relay. An intervening runtime
+            # switch is fine while the session key still maps to the source session: the switch
+            # keeps a mapping only when that session's files moved to the new runtime.
+            if intake.relay is None:
                 raise ValueError("collaboration runtime changed before dispatch")
             from coreman.core.db.models import ChatSession
 

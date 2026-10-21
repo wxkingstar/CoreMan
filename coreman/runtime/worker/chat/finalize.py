@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from coreman.core.bots.permissions import can_switch_relay
 from coreman.core.bus import outbox, streams, tasks
-from coreman.core.chat import chat_logs, interactions
+from coreman.core.chat import chat_logs, interactions, sessions
 from coreman.core.chat.rate_limit import (
     is_rate_limited,
     pick_idle_server,
@@ -244,6 +244,17 @@ class FinalizeStage(ChatStageBase):
                 await save_quota(session, pre.relay.id, quota)
             # 记录与任务同一事务结束：不会出现任务结束了、记录还停在进行中。
             logged = owned and await chat_logs.finish_turn(session, entry)
+            if (
+                owned
+                and pre.info.inherited_from is not None
+                and verdict.log_status in ("success", "ask_user")
+            ):
+                await sessions.settle_carry(
+                    session,
+                    bot_id=intake.bot.id,
+                    session_key=intake.session_key,
+                    relay_session_id=pre.info.relay_session_id,
+                )
             await session.commit()
         if not owned:
             ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)

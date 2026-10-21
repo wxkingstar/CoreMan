@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Delete, delete, func, select
+from sqlalchemy import CursorResult, Delete, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,12 +81,28 @@ async def get_or_create(
                 "backend": backend,
                 "last_speaker_user_id": speaker_user_id,
                 "last_active_at": func.now(),
-                # 续接只在首轮带一次，与本轮同事务提交。
-                "inherited_from": None,
+                # 续接留到这一轮成功收尾（settle_carry）才清：首轮失败的话下一轮仍要带上。
+                # 换了新会话的（超 TTL、换后端）不再续接。
+                "inherited_from": inherited,
             },
         )
     )
     return SessionInfo(sid, not fresh, speaker_changed, previous, inherited)
+
+
+async def settle_carry(
+    session: AsyncSession, *, bot_id: uuid.UUID, session_key: str, relay_session_id: uuid.UUID
+) -> None:
+    """换运行时后的首轮成功了：上下文已进了新会话，之后不再附续接。"""
+    await session.execute(
+        update(ChatSession)
+        .where(
+            ChatSession.bot_id == bot_id,
+            ChatSession.session_key == session_key,
+            ChatSession.relay_session_id == relay_session_id,
+        )
+        .values(inherited_from=None)
+    )
 
 
 async def switch_to(
