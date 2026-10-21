@@ -121,6 +121,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if req.SessionID != "" && req.ResumeFallback != "" {
+		resumeFallbacks.Store(req.SessionID, req.ResumeFallback)
+		defer resumeFallbacks.Delete(req.SessionID)
+	}
 
 	model := resolveModel(req.Model)
 	if model == "" {

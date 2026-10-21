@@ -227,6 +227,23 @@ describe('SwitchRelayDialog', () => {
     wrapper.unmount()
   })
 
+  // 默认目录保留当前目录相对项目主目录的路径（目录名不一定等于 bot_key），共享盘上才是同一个目录。
+  it('defaults the target directory to the same path under the target root', async () => {
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      { ...relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'), workspace_root: '/srv/ws' },
+      { ...relayRow('r2', 'claude', 'vllm/claude-sonnet-4-6'), workspace_root: '/mnt/ws/' },
+    ] } as never)
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', bot_key: 'demo', working_dir: '/srv/ws/team/Demo-BI' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; targetDirectory: string }
+    await vm.pick('r2')
+    expect(vm.targetDirectory).toBe('/mnt/ws/team/Demo-BI')
+    wrapper.unmount()
+  })
+
   // 共享存储：目标与当前运行时共用同一目录，不提示覆盖、不让选处理方式，直接切换。
   it('switches over shared storage without offering to copy', async () => {
     const same = { directory: '/home/ai/demo', exists: true, empty: false, owned: true, marked: true, source_online: true, shared: true, memory_snapshot_at: null }

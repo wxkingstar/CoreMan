@@ -155,11 +155,14 @@ async def carry_over(
 
     keep 里的会话文件已在新运行时上，原样续用；其余换一个新的 relay 会话，记下原会话以便首轮
     补上下文。连换两次还没聊过的，记的仍是最初那条（中间那条没有任何对话）。
+
+    原样续用的也记下自己（inherited_from == relay_session_id）：首轮把续接文本交给驱动备用，
+    目标上实际续不上（--resume 找不到会话）时驱动才用它，不至于悄悄从空会话开始。
     """
     for row in await list_for_bot(session, bot_id):
+        row.inherited_from = row.inherited_from or row.relay_session_id
         if row.relay_session_id in keep and row.backend == backend:
             continue
-        row.inherited_from = row.inherited_from or row.relay_session_id
         row.relay_session_id = uuid.uuid4()
         row.backend = backend
 

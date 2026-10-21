@@ -480,7 +480,8 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			log.Printf("Resume session not found, retrying with --session-id")
 			retryArgs := replaceArg(args, "--resume", "--session-id")
 			resetMeter(sessionArg(retryArgs))
-			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, prompt, workingDir, envVars, watchdogTimeout)
+			retryPrompt := withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, retryPrompt, workingDir, envVars, watchdogTimeout)
 			if err != nil {
 				ready <- err
 				return
@@ -576,7 +577,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 		log.Printf("Resume session not found, retrying with --session-id")
 		retryArgs := replaceArg(args, "--resume", "--session-id")
 		resetMeter(sessionArg(retryArgs))
-		return runClaude(retryArgs, prompt, workingDir, envVars)
+		return runClaude(retryArgs, withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs))), workingDir, envVars)
 	}
 	return
 }

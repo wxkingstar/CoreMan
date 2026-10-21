@@ -643,11 +643,11 @@ async def test_switch_reclones_repo_and_keeps_claude_session(
     assert "workspace-clone" in operations
     manifest = next(p["manifest"] for op, p in seen if op == "workspace-import" and "manifest" in p)
     assert not any(e["path"].startswith("app/.git/") for e in manifest)
-    # Claude 会话文件到了新目录，会话映射原样保留：下一轮直接续聊。
+    # Claude 会话文件到了新目录，会话映射原样保留：下一轮直接续聊，续不上时驱动用续接文本兜底。
     assert (agents[target.id].claude_project_dir(bot.working_dir) / f"{sid}.jsonl").exists()
     (row,) = await sessions.list_for_bot(db_session, bot.id)
     await db_session.refresh(row)
-    assert str(row.relay_session_id) == sid and row.inherited_from is None
+    assert str(row.relay_session_id) == sid and str(row.inherited_from) == sid
 
 
 async def test_switch_falls_back_to_full_copy_when_clone_fails(

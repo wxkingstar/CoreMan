@@ -237,6 +237,7 @@ class OpenStage(ChatStageBase):
         env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
         ctx.turn_notes = [access.note]
+        resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
 
@@ -246,8 +247,11 @@ class OpenStage(ChatStageBase):
                 session_key=intake.session_key,
                 relay_session_id=info.inherited_from,
             )
-            if carried:
+            if carried and info.inherited_from != info.relay_session_id:
                 ctx.turn_notes.append(carried)
+            elif carried:
+                # 会话文件已带到新运行时，原生续聊；驱动续不上时才把它放进本轮块。
+                resume_fallback = carried
         from coreman.runtime.worker.chat.collaboration import configure
 
         # 各处在传入文本后面追加自己的规则：从空串起步，攒出的就是本轮附加能力，
@@ -317,6 +321,7 @@ class OpenStage(ChatStageBase):
             env_vars=env,
             turn_context=turn_context,
             worktree=bot.dev_mode,
+            resume_fallback=resume_fallback,
         )
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":

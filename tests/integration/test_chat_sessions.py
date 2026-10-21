@@ -166,7 +166,9 @@ async def test_carry_over_keeps_moved_sessions_and_hands_others_their_history(
         ttl_hours=72,
         speaker_user_id=None,
     )
-    assert again.relay_session_id == moved.relay_session_id and again.inherited_from is None
+    # 带过去的原样续用，也记下自己：首轮续接文本交给驱动备用。
+    assert again.relay_session_id == moved.relay_session_id
+    assert again.inherited_from == moved.relay_session_id
     first = await sessions.get_or_create(
         db_session,
         bot_id=bot.id,
