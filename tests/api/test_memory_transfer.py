@@ -147,3 +147,57 @@ async def test_switch_rejects_target_directory_owned_by_another_bot(
         headers={"If-Match": str(bot.version)},
     )
     assert result.status_code == 409
+
+
+async def test_codex_target_without_shared_memory_is_refused_only_when_memory_exists(db_session):
+    from coreman.core.errors import ApiError
+
+    bot, _, _ = await seed_bot(db_session)
+    codex = await add_node_relay(db_session, name="codex", provider="codex")
+    claude = await add_node_relay(db_session, name="claude")
+    old_runtime = {"success": True, "memory_protocol": 2}
+    # 没有记忆时 Codex 读不到也不缺什么。
+    await memory_transfer.require_shared_layout(db_session, bot, codex, old_runtime)
+    db_session.add(
+        Memory(
+            bot_id=bot.id,
+            file_name="gone.md",
+            content="",
+            content_hash=content_hash(""),
+            deleted_at=utcnow(),
+        )
+    )
+    await db_session.flush()
+    await memory_transfer.require_shared_layout(db_session, bot, codex, old_runtime)
+    db_session.add(
+        Memory(
+            bot_id=bot.id,
+            file_name="kept.md",
+            content="记住交付日期",
+            content_hash=content_hash("记住交付日期"),
+        )
+    )
+    await db_session.flush()
+    with pytest.raises(ApiError, match="Codex 读不到"):
+        await memory_transfer.require_shared_layout(db_session, bot, codex, old_runtime)
+    await memory_transfer.require_shared_layout(
+        db_session, bot, codex, {**old_runtime, "memory_layout": 2}
+    )
+    # Claude 目标照旧部署到原位置。
+    await memory_transfer.require_shared_layout(db_session, bot, claude, old_runtime)
+
+
+async def test_codex_prompt_names_the_memory_directory_only_on_capable_runtimes(db_session):
+    from coreman.core.db.models import RuntimeNode
+    from coreman.core.knowledge import memory
+
+    codex = await add_node_relay(db_session, name="codex", provider="codex")
+    node = await db_session.get(RuntimeNode, codex.runtime_node_id)
+    assert await memory.prompt_dir(db_session, codex, "codex", "/srv/w/sales") == ""
+    node.capabilities = {"codex": {"memory_layout_v1": True}}
+    await db_session.flush()
+    assert (
+        await memory.prompt_dir(db_session, codex, "codex", "/srv/w/sales")
+        == "/srv/w/sales/.coreman-memory"
+    )
+    assert await memory.prompt_dir(db_session, codex, "claude", "/srv/w/sales") == ""

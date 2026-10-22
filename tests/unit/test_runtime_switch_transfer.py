@@ -181,11 +181,12 @@ def test_ping_reports_transfer_capabilities(agent):
     assert ping["session_transfer"] == 1
 
 
-def test_memory_dir_matches_claude_project_naming(agent):
+def test_legacy_memory_dir_matches_claude_project_naming(agent):
     folder = agent.root / "sales_bot.v2"
     folder.mkdir()
-    name = agent.memory_dir(str(folder)).parent.name
+    name = agent.legacy_memory_dir(folder).parent.name
     assert name == str(folder).replace("/", "-").replace("_", "-").replace(".", "-")
+    assert agent.memory_dir(str(folder)) == folder / ".coreman-memory"
 
 
 def test_claude_session_files_move_to_new_directory(agent):
@@ -193,7 +194,7 @@ def test_claude_session_files_move_to_new_directory(agent):
     call(agent, "init", "two")
     sid, other = str(uuid.uuid4()), str(uuid.uuid4())
     project = agent.claude_project_dir(str(agent.root / "one"))
-    project.mkdir(parents=True)
+    project.mkdir(parents=True, exist_ok=True)
     (project / f"{sid}.jsonl").write_text('{"type":"user"}\n' * 1000)
     (project / sid / "subagents").mkdir(parents=True)
     (project / sid / "subagents/a.jsonl").write_text("{}\n")

@@ -41,6 +41,7 @@ from coreman.core.db.models.cloud_proxy import CloudPendingApproval
 from coreman.core.errors import ApiError
 from coreman.core.feishu_personal import policy
 from coreman.core.i18n.messages import msg
+from coreman.core.knowledge import memory
 from coreman.core.knowledge.installation import effective_env
 from coreman.core.personal_schedules import require_personal
 from coreman.core.pricing import estimate
@@ -342,6 +343,9 @@ class CronRunHandler:
                         extra=with_reply_images(personal_prompt, bot.platform, backend),
                         output_format=rich_cards_prompt(bot.platform, bot.rich_cards),
                         dev_mode=bot.dev_mode,
+                        memory_dir=await memory.prompt_dir(
+                            session, relay, backend, bot.working_dir
+                        ),
                     ),
                 )
                 # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。

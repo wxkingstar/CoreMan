@@ -10,12 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import Bot, Memory, RelayServer
+from coreman.core.db.models import Bot, Memory, RelayServer, RuntimeNode
 from coreman.core.errors import ApiError
 from coreman.core.timeutils import aware_utc
 
 MAX_FILE_BYTES = 256 * 1024
 MAX_BATCH_BYTES = 4 * 1024 * 1024
+# 节点把员工记忆放在工作目录的这个子目录里，Claude 与 Codex 共用。
+MEMORY_DIR = ".coreman-memory"
+RUNTIME_CAPABILITY = "memory_layout_v1"
 
 
 def file_name(value: str) -> str:
@@ -43,6 +46,7 @@ def content_hash(content: str) -> str:
 class MemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     working_dir: str = Field(min_length=1, max_length=500)
+    # 已废弃：记忆不再放在 Claude 的项目目录里。旧 Agent 仍会带上，收下不用。
     project_dir_name: str | None = Field(default=None, max_length=1000)
     file_name: str = Field(min_length=1, max_length=200)
     content: str = Field(max_length=MAX_FILE_BYTES)
@@ -150,3 +154,16 @@ async def collect(
         bot.memory_snapshot_at = now
     await session.flush()
     return result
+
+
+async def prompt_dir(
+    session: AsyncSession, relay: RelayServer | None, backend: str, directory: str
+) -> str:
+    """要写进 Codex 提示的记忆目录；节点还不支持共用记忆时为空，不提。"""
+    if backend != "codex" or relay is None or relay.runtime_node_id is None:
+        return ""
+    node = await session.get(RuntimeNode, relay.runtime_node_id, populate_existing=True)
+    capability = ((node.capabilities if node else None) or {}).get(backend) or {}
+    if not isinstance(capability, dict) or capability.get(RUNTIME_CAPABILITY) is not True:
+        return ""
+    return str(PurePosixPath(directory) / MEMORY_DIR)

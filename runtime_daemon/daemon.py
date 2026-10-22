@@ -769,6 +769,8 @@ class Daemon:
     async def discover(self) -> None:
         for provider in PROVIDERS:
             cap = await asyncio.to_thread(cli_status, provider)
+            # 守护进程自己的能力，不看驱动：记忆在工作目录的 .coreman-memory/，两种后端共用。
+            cap["memory_layout_v1"] = True
             if cap["installed"]:
                 try:
                     await self.heal_driver(provider)
@@ -866,6 +868,23 @@ class Daemon:
                 )
         return data
 
+    async def attach_memory(self, provider: str, data: dict) -> None:
+        """聊天前确保员工的记忆布局（首次会把 Claude 原来的记忆迁过来），Claude 再用
+        autoMemoryDirectory 指向它。在换成开发模式 worktree 之前做，各 worktree 共用主目录这份。
+        布局异常时不拦聊天，Claude 退回原来的记忆位置。"""
+        agent = self.agents[provider]
+        try:
+            directory = await asyncio.to_thread(agent.ensure_memory_layout, data["working_dir"])
+        except (OperationError, OSError) as exc:
+            LOG.warning("memory layout unavailable: %s", operation_message(exc))
+            return
+        if provider != "claude":
+            return
+        settings = json.loads(data["settings"]) if data.get("settings") else {}
+        if not isinstance(settings, dict):
+            raise ValueError("settings 必须是 JSON 对象")
+        data["settings"] = json.dumps({**settings, "autoMemoryDirectory": str(directory)})
+
     async def execute(self, command: dict) -> None:
         identity, provider = command["id"], command["provider"]
         frames = FrameBatcher(lambda batch: self.send_frames(identity, batch))
@@ -873,6 +892,8 @@ class Daemon:
 
         try:
             data = self.validate_command(command)
+            if command["path"] == "/v1/chat/completions":
+                await self.attach_memory(provider, data)
             if command["path"] == "/v1/chat/completions" and data.pop("worktree", False):
                 # 开发模式：工作目录是 Git 仓库时换成本会话的 worktree（建时要拉远端，放线程里）。
                 data["working_dir"] = str(

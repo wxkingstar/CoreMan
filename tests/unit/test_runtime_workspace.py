@@ -60,8 +60,8 @@ def test_init_takes_over_shared_workspace_without_changing_layout(agent):
     assert not (p / "CLAUDE.md").is_symlink()
     assert (p / "AGENTS.md").readlink().as_posix() == "CLAUDE.md"
     assert not list(p.glob("CLAUDE.md.preserved-*"))
-    # 对方部署时 git clean -fd 不带 -x：标记列入本地排除才不会被删。
-    assert (p / ".git/info/exclude").read_text() == "/.coreman-workspace.json\n"
+    # 对方部署时 git clean -fd 不带 -x：标记和记忆列入本地排除才不会被删。
+    assert (p / ".git/info/exclude").read_text() == "/.coreman-workspace.json\n/.coreman-memory/\n"
     info = call(agent, "info")
     assert info["owned"] and info["marked"]
     other = agent.dispatch({"type": "workspace-info", "working_dir": "one", "bot_id": 2})
@@ -323,9 +323,12 @@ def test_init_and_prepare_remove_only_legacy_instruction_excludes(agent):
     exclude = root / ".git/info/exclude"
     exclude.write_text("# keep\n/AGENTS.md\nAGENTS.md\nsecret.txt\n")
     call(agent, "init")
-    assert exclude.read_text() == "# keep\nsecret.txt\n/.coreman-workspace.json\n"
+    assert exclude.read_text() == (
+        "# keep\nsecret.txt\n/.coreman-workspace.json\n/.coreman-memory/\n"
+    )
     call(agent, "init")
     assert exclude.read_text().count("/.coreman-workspace.json") == 1
+    assert exclude.read_text().count("/.coreman-memory/") == 1
     exclude.write_text("/AGENTS.md\ncache/\n")
     agent.prepare_workspace(root)
     assert exclude.read_text() == "cache/\n"

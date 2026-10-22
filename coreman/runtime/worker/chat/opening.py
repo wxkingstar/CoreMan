@@ -27,6 +27,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.knowledge import memory
 from coreman.core.knowledge.installation import effective_env
 from coreman.core.prompting import (
     Speaker,
@@ -296,7 +297,15 @@ class OpenStage(ChatStageBase):
         if ctx.task.payload.get("collaboration_phase") != "helper":
             extra = with_reply_images(extra, intake.bot.platform, backend)
         tag = identity_tag(ctx.cipher, info.relay_session_id)
-        system_prompt = await self._system_prompt(ctx, intake, backend, tag, access.prompt, extra)
+        system_prompt = await self._system_prompt(
+            ctx,
+            intake,
+            backend,
+            tag,
+            access.prompt,
+            extra,
+            memory_dir=await memory.prompt_dir(session, relay, backend, bot.working_dir),
+        )
         turn_context = build_turn_context(
             tag=tag,
             speaker=intake.speaker,
@@ -433,6 +442,7 @@ class OpenStage(ChatStageBase):
         tag: str,
         systems_prompt: str = "",
         extra: str = "",
+        memory_dir: str = "",
     ) -> str:
         """本轮的 system prompt（稳定段）。续跑时也使用当前配置与系统授权；身份在本轮块里。"""
         from coreman.core.prompting.rich_cards import rich_cards_prompt
@@ -448,6 +458,7 @@ class OpenStage(ChatStageBase):
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
             structured_reply=ctx.task.payload.get("collaboration_phase") == "helper",
             dev_mode=intake.bot.dev_mode,
+            memory_dir=memory_dir,
         )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:

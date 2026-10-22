@@ -40,6 +40,7 @@ from coreman.core.prompting.defaults import (
     DEV_MODE_RULE,
     IDENTITY_TAG_RULE,
     IDENTITY_UNKNOWN_NOTE,
+    MEMORY_RULE,
     PLATFORM_RULES,
     PROMPT_DEFAULTS_BY_KEY,
     SPEAKER_CHANGED_NOTE,
@@ -166,6 +167,7 @@ def build_system_prompt(
     output_format: str = "",
     structured_reply: bool = False,
     dev_mode: bool = False,
+    memory_dir: str = "",
 ) -> str:
     """按固定顺序拼稳定段；空段直接跳过，段间恒为一个空行。
 
@@ -177,6 +179,9 @@ def build_system_prompt(
 
     `structured_reply=True` 表示这一轮的回答由平台按固定格式解析（协作 helper 的纯 JSON），
     不给人看：codex 输出契约、详细度和输出格式都要求 Markdown 或卡片，会和那份格式打架，一并不加。
+
+    `memory_dir` 是员工记忆目录的绝对路径，节点支持共用记忆时才给；只对 Codex 说明，
+    Claude Code 自带记忆说明。
     """
     codex = backend == "codex"
     parts = [
@@ -189,6 +194,7 @@ def build_system_prompt(
         segments.runtime_mode,
         TIME_RULE.format(clock_timezone=CLOCK_TIMEZONE),
         DEV_MODE_RULE if dev_mode else "",
+        MEMORY_RULE.format(memory_dir=memory_dir) if codex and memory_dir else "",
         segments.cron_mode if scheduled else "",
         segments.org_context,
         bot_prompt,
