@@ -106,6 +106,28 @@ async def test_rate_limited_reply_gets_table_and_offer_for_admin(
     assert len((await db_session.execute(select(InteractionState))).scalars().all()) == 1
 
 
+async def test_codex_rate_limit_offers_codex_target(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, relay, _ = await seed_bot(db_session)
+    relay.model_provider = "codex"
+    relay.rate_limit_5h_used_pct, relay.rate_limit_7d_used_pct = Decimal("100"), Decimal("80")
+    relay.rate_limit_probed_at = datetime.now(UTC)
+    idle = await _second_relay(db_session)
+    idle.model_provider = "codex"
+    await db_session.commit()
+    await _creator_identity(db_session, bot)
+    t = await chat_task(db_session, bot, "跑一下")
+    await run(db_engine, t, FakeRelay("codex_rate_limit"))
+    s = await stream_of(db_session, t.id)
+    assert "**📊 服务器额度总览**" in s.final_text and f"| {idle.name} |" in s.final_text
+    st = await interactions.get_open(
+        db_session, kind="relay_switch", scope_key=interactions.choice_scope(bot.id, "zs")
+    )
+    assert st is not None and st.state["target_relay_id"] == str(idle.id)
+    assert s.pending_card is not None
+
+
 async def test_warning_without_limit_and_no_candidate(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

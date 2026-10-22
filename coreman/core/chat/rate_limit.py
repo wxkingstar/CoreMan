@@ -22,7 +22,11 @@ from coreman.core.db.models import Bot, RelayServer, User
 from coreman.core.i18n.messages import msg
 
 # 中间那个 `·` 是 relay 原样透传的告示里的字符，不是连字符：拿 `-` 去匹配一条都认不出来。
-RATE_LIMIT_PATTERN = re.compile(r"You've hit your(?: \w+)? limit · resets")
+# 后半是 Codex 的报错（驱动以 `[codex error] …` 回传）：撇号是弯引号 `’`，后面接 `.` 或
+# `for <模型>`，没有 `· resets`。
+RATE_LIMIT_PATTERN = re.compile(
+    r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
+)
 WARN_5H_PCT = 90
 WARN_7D_PCT = 95
 # claude 与 minimax 的模型可以互换着跑（同一套 Anthropic 协议），codex 只能落回 codex。

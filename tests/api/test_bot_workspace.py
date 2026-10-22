@@ -159,6 +159,25 @@ async def test_install_that_may_run_still_blocks_workspace_operations(
     with pytest.raises(ApiError) as raised:
         await memory_transfer.ensure_idle(db_session, bot)
     assert raised.value.status_code == 409
+    assert "（技能安装 1 个）" in raised.value.message
+
+
+async def test_busy_reason_lists_running_tasks(client, db_session):
+    """换机被正在跑的任务挡下时，原因里写明是哪些任务、各几个。"""
+    from coreman.core.errors import ApiError
+    from coreman.core.knowledge import memory_transfer
+
+    bot, _ = await setup(client, db_session)
+    for kind in ("chat", "chat", "cron_run", "command"):
+        db_session.add(Task(bot_id=bot.id, kind=kind, payload={}, status="running"))
+    db_session.add(Task(bot_id=bot.id, kind="relay_switch", payload={}, status="running"))
+    await db_session.commit()
+    with pytest.raises(ApiError) as raised:
+        await memory_transfer.ensure_idle(db_session, bot)
+    assert raised.value.message == (
+        "机器人还有任务在执行（对话 2 个、定时任务 1 个、其他任务 1 个），"
+        "请等它们结束或先停止，再迁移工作目录与记忆"
+    )
 
 
 @pytest.mark.parametrize("status", ["claimed", "running"])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus.tasks import ACTIVE, OPEN
@@ -16,6 +16,8 @@ from coreman.core.knowledge.memory import MAX_BATCH_BYTES, MemoryInput, collect
 from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.timeutils import utcnow
 
+_TASK_LABELS = {"chat": "对话", "cron_run": "定时任务", "skill_install": "技能安装"}
+
 
 async def ensure_idle(session: AsyncSession, bot: Bot) -> None:
     # 排队中的技能安装也要等它跑完再动工作目录。但工作目录未就绪时它根本不会被认领，
@@ -24,16 +26,25 @@ async def ensure_idle(session: AsyncSession, bot: Bot) -> None:
     install = (Task.kind == "skill_install") & Task.status.in_(OPEN)
     if bot.workspace_state != "ready":
         install &= ~((Task.status == "queued") & (Task.attempts == 0))
-    active = await session.scalar(
-        select(Task.id)
+    rows = await session.execute(
+        select(Task.kind, func.count())
         .where(
             Task.bot_id == bot.id,
             (Task.status.in_(ACTIVE) & Task.kind.not_in(["relay_switch"])) | install,
         )
-        .limit(1)
+        .group_by(Task.kind)
     )
-    if active is not None:
-        raise ApiError(409, 409, "请先等待或停止正在执行的任务，再迁移工作目录与记忆")
+    # 说清楚卡在哪：换机失败的回执里只有这一句原因，用户得知道等的是谁。
+    counts = dict.fromkeys([*_TASK_LABELS.values(), "其他任务"], 0)
+    for kind, n in rows:
+        counts[_TASK_LABELS.get(kind, "其他任务")] += n
+    if any(counts.values()):
+        running = "、".join(f"{label} {n} 个" for label, n in counts.items() if n)
+        raise ApiError(
+            409,
+            409,
+            f"机器人还有任务在执行（{running}），请等它们结束或先停止，再迁移工作目录与记忆",
+        )
 
 
 async def recover(

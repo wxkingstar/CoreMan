@@ -46,7 +46,16 @@ def test_pattern_and_helpers() -> None:
     assert is_rate_limited("blah You've hit your limit · resets 3pm")
     assert is_rate_limited("You've hit your weekly limit · resets Monday")
     assert not is_rate_limited("You've hit your limit - resets")
-    assert RATE_LIMIT_PATTERN.pattern == r"You've hit your(?: \w+)? limit · resets"
+    # Codex：弯撇号，接 `.` 或 `for <模型>`。
+    assert is_rate_limited(
+        "\n\n[codex error] You’ve hit your usage limit. Upgrade to Pro, or try again at 3:00 PM."
+    )
+    assert is_rate_limited("[codex error] You’ve hit your usage limit for gpt-6-sol. Switch to")
+    assert is_rate_limited("You've hit your usage limit.")
+    assert not is_rate_limited("[codex error] usage limit reached for this session")
+    assert RATE_LIMIT_PATTERN.pattern == (
+        r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
+    )
     assert allowed_providers("claude") == {"claude", "minimax"} and allowed_providers("codex") == {
         "codex"
     }

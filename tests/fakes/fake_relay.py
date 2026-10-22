@@ -198,6 +198,12 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
     ],
     # relay 撞上额度限制时把 Anthropic 的英文告示原样当正文回来。
     "rate_limit": lambda: [_text("You've hit your limit · resets 3pm"), FINISH, DONE],
+    # Codex 撞额度：驱动把 CLI 报错以 `[codex error]` 标记回传，撇号是弯引号。
+    "codex_rate_limit": lambda: [
+        _text("\n\n[codex error] You’ve hit your usage limit. Try again at 3:00 PM."),
+        FINISH,
+        DONE,
+    ],
     "slow": lambda: SCENARIOS["normal"](),
 }
 
