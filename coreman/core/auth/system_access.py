@@ -128,8 +128,9 @@ def auth_label(mode: str) -> str:
 
 # 目录可用时追加在「业务系统访问」段末尾；只约束标注了「可查操作目录」的系统。
 CATALOG_RULES = (
-    "标注「可查操作目录」的系统，调用前先用 systems_search 或 systems_browse 找到操作，"
-    "再用 systems_describe 确认参数和调用方式；只调用目录中出现的操作，不要猜路径。"
+    "标注「可查操作目录」的系统，做具体事情时先用 systems_search 定位操作，再用 systems_describe "
+    "确认参数、权限和调用方式，然后调用；只有用户问系统整体能做什么时才用 systems_browse 分层浏览。"
+    "只调用目录中出现的操作，不要猜路径。"
 )
 # 有平台代理的系统时再追加：这些系统的令牌不进运行环境。
 PROXY_RULES = (

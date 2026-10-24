@@ -258,13 +258,16 @@ async def test_layered_tools_with_permission_filter(
             "name": "库存",
             "description": "",
             "base_url": BASE_URL,
+            "call_mode": "env",
             "catalog": "ok",
             "modules": 1,
             "operations": 2,
+            "permission_check": "filtered",
         }
     ]
+    # No groups declared: the module list, as before, with completeness information.
     modules = await call(client, auth, "systems_browse", {"system": "stock"})
-    assert modules["guide"].startswith("时间为 UTC")
+    assert modules["view"] == "modules" and modules["guide"].startswith("时间为 UTC")
     assert modules["modules"] == [
         {
             "name": "documents",
@@ -272,13 +275,21 @@ async def test_layered_tools_with_permission_filter(
             "operations": 2,
         }
     ]
+    assert (modules["total"], modules["has_more"], modules["next_cursor"]) == (1, False, None)
+    assert modules["permission_check"] == "filtered" and "destructive" in modules["call_rules"]
+    guide = await call(client, auth, "systems_browse", {"system": "stock", "view": "guide"})
+    assert guide["guide"] == modules["guide"]
     ops = await call(client, auth, "systems_browse", {"system": "stock", "module": "documents"})
     assert ops["operations"] == [
         "getMe  GET /api/stock/me  当前调用者身份与权限码",
         "listDocuments  GET /api/stock/documents  按状态分页查询出入库单据",
     ]
+    assert ops["total"] == 2 and ops["has_more"] is False
     found = await call(client, auth, "systems_search", {"query": "作废单据"})
     assert [item["operation"].split()[0] for item in found["items"]] == ["listDocuments", "getMe"]
+    # Both match mostly through their module's description ("…确认、作废、查询").
+    assert [item["match"] for item in found["items"]] == ["module", "module"]
+    assert found["total"] == 2 and found["has_more"] is False
     nothing = await call(client, auth, "systems_search", {"query": "退款"})
     assert nothing["items"] == [] and "message" in nothing
     hidden = await call(
@@ -295,6 +306,8 @@ async def test_layered_tools_with_permission_filter(
     )
     assert detail["url"] == BASE_URL + "/api/stock/documents"
     assert detail["parameters"][0]["enum"] == ["draft", "confirmed", "cancelled"]
+    assert detail["permission_check"] == "filtered" and "omitted" not in detail
+    assert detail["system_guide"].startswith("时间为 UTC")
     assert detail["call"]["mode"] == "env" and detail["call"]["token_env"] == "BOT_TOKEN_STOCK"
     assert '"Cookie: bot_token=$BOT_TOKEN_STOCK"' in detail["call"]["curl"]
     assert detail["content_trust"] == "system_declared"
@@ -320,8 +333,10 @@ async def test_wildcards_unknown_permissions_and_search(
     found = await call(client, auth, "systems_search", {"query": "作废 单据", "system": "stock"})
     assert found["items"][0] == {
         "system": "stock",
+        "module": "documents",
         "operation": "cancelDocument  POST /api/stock/documents/{id}/cancel  "
-        "作废一张已确认的单据并回滚库存  [destructive]",
+        "作废一张已确认的单据并回滚库存  [destructive; 需确认]",
+        "match": "summary",
     }
     reads = await call(client, auth, "systems_search", {"query": "统计 出入库", "risk": "read"})
     assert reads["items"][0]["operation"].startswith("dailyReport  POST /api/stock/reports/daily")
@@ -337,6 +352,7 @@ async def test_wildcards_unknown_permissions_and_search(
     auth2 = bearer(app, task2, other)
     systems = await call(client, auth2, "systems_browse", {})
     assert systems["systems"][0]["permissions_unknown"] is True
+    assert systems["systems"][0]["permission_check"] == "unknown"
     assert systems["systems"][0]["operations"] == 6
 
 
