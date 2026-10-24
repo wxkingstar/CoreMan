@@ -134,18 +134,35 @@ HAND: dict[tuple[str, str], list[Module]] = {
             "承运商选项",
             "承运商下拉选项（只读），供其他模块选择承运商",
             ["承运商", "carrier", "物流商"],
-            [("listCarrierOptions", "get", "查询承运商选项列表（编码 + 名称）", "read")],
+            [("listCarrierOptions", "get", "List enabled carriers", "read")],
         ),
         (
+            # English-only summaries: only the module description names the subject in Chinese,
+            # while another module's operation mentions 承运商 in its own summary.
             "Ops Carriers",
             "承运商管理",
             "承运商主数据维护：新增、修改、停用承运商及其服务线路",
             ["承运商", "carrier", "物流商"],
             [
-                ("listCarriers", "get", "分页查询承运商主数据（含停用）", "read"),
-                ("createCarrier", "post", "新增一个承运商", "write"),
-                ("updateCarrier", "put", "修改承运商资料与服务线路", "write"),
-                ("disableCarrier", "post", "停用一个承运商", "destructive"),
+                ("listCarriers", "get", "Ops list of all carriers with KPI", "read"),
+                ("createCarrier", "post", "Create a new carrier", "write"),
+                ("updateCarrier", "put", "Update carrier information", "write"),
+                ("disableCarrier", "post", "Disable a carrier", "destructive"),
+            ],
+        ),
+        (
+            "Packages",
+            "包裹",
+            "订单包裹：运单修改与轨迹刷新",
+            ["包裹", "package"],
+            [
+                (
+                    "updatePackageTracking",
+                    "patch",
+                    "修改未完结订单单个包裹的承运商与运单号",
+                    "write",
+                ),
+                ("refreshPackageTracking", "post", "按需刷新单个包裹的物流轨迹", "write"),
             ],
         ),
     ],
@@ -229,7 +246,6 @@ BULK: dict[tuple[str, str], list[tuple[str, str, str]]] = {
         ("Shipments", "发货", "发货单"),
         ("Tracking", "物流跟踪", "轨迹查询"),
         ("ShippingRates", "运费", "运费模板"),
-        ("Labels", "面单", "面单打印"),
     ],
     ("payment", "支付"): [
         ("Payments", "支付单", "支付记录"),

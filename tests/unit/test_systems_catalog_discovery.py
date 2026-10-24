@@ -251,10 +251,14 @@ async def test_module_by_display_name_or_unique_alias(described: Catalogs) -> No
 
 # (query, operations any of which should rank first, how many results may come before it)
 TASKS = [
-    ("列出当前 Market", {"listMarkets"}, 0),
+    # listSubscriptionPlans ("按 market 列出订阅计划") covers both words as well.
+    ("列出当前 Market", {"listMarkets"}, 1),
     ("market", {"listMarkets"}, 0),
     ("listMarkets", {"listMarkets"}, 0),
+    # The carrier operations are summarized in English and only their modules say 承运商;
+    # updatePackageTracking mentions 承运商 in its own summary and must not come first.
     ("查询承运商", {"listCarrierOptions", "listCarriers"}, 0),
+    ("管理承运商", {"listCarriers", "createCarrier", "updateCarrier", "disableCarrier"}, 1),
     ("carrier", {"listCarrierOptions", "listCarriers"}, 0),
     ("中止同步作业", {"abortSyncJob"}, 0),
     ("商品导入", {"createProductImport"}, 2),

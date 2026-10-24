@@ -5,13 +5,20 @@ the words in its description:
 
 0. the whole query is an operationId or an alias of the operation;
 1. the whole query is a module's name, display name or alias;
-2. query terms appear in the operationId, summary, aliases or module names;
-3. query terms appear only in descriptions, paths or module descriptions.
+2. query terms appear in the operationId, summary, aliases, or the module's names or description;
+3. query terms appear only in the operation's description, path or module limits.
 
-Within a tier, operations covering more of the query come first; on a tie, the one whose
-operationId or aliases carry more of the query, then the less risky one (a lookup before a
-change), then BM25. Every tier is kept: an exact match ranks first without hiding the other
-related operations.
+A module description counts with the names: it is the module's summary, and it is often the only
+place an English-only module is described in Chinese.
+
+Within a tier, operations covering more of the query come first. Coverage is counted per query
+unit, each English word or run of Chinese characters weighing the same, so two stray bigrams of a
+Chinese phrase cannot outweigh the English word the user typed. On a tie: more of the query in
+the module's names and description, so operations of the module that is about the subject come
+before others that only mention it; then more of it in the operation's own operationId, aliases
+and summary, which orders the operations within that module; then the less risky operation (a
+lookup before a change); then BM25. Every tier is kept: an exact match ranks first without hiding
+the other related operations.
 """
 
 from __future__ import annotations
@@ -30,13 +37,14 @@ B = 0.75
 # Fields in the order their name is reported as the match reason when they tie.
 FIELDS = ("operation_id", "alias", "summary", "module", "description")
 STRONG = frozenset(FIELDS[:4])
+OWN = frozenset(FIELDS[:3])
 RISK_ORDER = {"read": 0, "write": 1, "destructive": 2, "financial": 3}
 
 
 class Hit(NamedTuple):
     op_id: str
-    # Ascending sort key: (tier, -coverage, -named, risk, -bm25).
-    key: tuple[int, float, int, int, float]
+    # Ascending sort key: (tier, -coverage, -module coverage, -own coverage, risk, -bm25).
+    key: tuple[int, float, float, float, int, float]
     match: str
 
 
@@ -62,6 +70,17 @@ def tokens(text: str) -> list[str]:
         else:
             out.extend(run[i : i + 2] for i in range(len(run) - 1))
     return out
+
+
+def units(text: str) -> list[set[str]]:
+    """The query's words and Chinese runs, each as the set of its search tokens."""
+    out = [set(tokens(word)) for word in _WORD.findall(text)]
+    out += [set(tokens(run)) for run in _CJK.findall(text)]
+    return [unit for unit in out if unit]
+
+
+def _coverage(parts: list[set[str]], found: set[str]) -> float:
+    return sum(len(unit & found) / len(unit) for unit in parts) / len(parts) if parts else 0.0
 
 
 def normalize(text: str) -> str:
@@ -92,7 +111,7 @@ class SearchIndex:
             self.risk[op_id] = RISK_ORDER.get(op.get("risk", ""), len(RISK_ORDER))
             module = modules.get(self.module_of[op_id]) or {"name": self.module_of[op_id]}
             body = tokens(op.get("description", ""))
-            body += tokens(module.get("description", "")) + tokens(module.get("limits", ""))
+            body += tokens(module.get("limits", ""))
             for segment in str(op.get("path", "")).split("/"):
                 if segment and not segment.startswith("{"):
                     body += tokens(segment)
@@ -100,7 +119,7 @@ class SearchIndex:
                 "operation_id": tokens(op_id),
                 "alias": tokens(" ".join(op.get("aliases") or [])),
                 "summary": tokens(op.get("summary", "")),
-                "module": tokens(" ".join(_module_names(module))),
+                "module": tokens(" ".join([*_module_names(module), module.get("description", "")])),
                 "description": body,
             }
             words = (
@@ -137,6 +156,7 @@ class SearchIndex:
 
     def search(self, query: str) -> list[Hit]:
         terms = set(tokens(query))
+        parts = units(query)
         whole = normalize(query)
         exact = self.exact.get(whole, set())
         in_module = self.module_exact.get(whole, set())
@@ -158,8 +178,15 @@ class SearchIndex:
                 tier, match = 3, "description"
             else:
                 continue
-            coverage = len(strong) / len(terms) if terms else 0.0
-            named = matched["operation_id"] + matched["alias"]
-            hits.append(Hit(op_id, (tier, -coverage, -named, self.risk[op_id], -score), match))
+            own = set().union(*(terms & fields[name] for name in OWN)) if terms else set()
+            key = (
+                tier,
+                -_coverage(parts, strong),
+                -_coverage(parts, terms & fields["module"]),
+                -_coverage(parts, own),
+                self.risk[op_id],
+                -score,
+            )
+            hits.append(Hit(op_id, key, match))
         hits.sort(key=lambda hit: (hit.key, hit.op_id))
         return hits

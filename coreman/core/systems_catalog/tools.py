@@ -487,7 +487,7 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
         targets = [system]
     else:
         targets = [s for s in ctx.systems if s.openapi_url]
-    hits: list[tuple[tuple[int, float, int, int, float], str, str, str]] = []
+    hits: list[tuple[tuple[int, float, float, float, int, float], str, str, str]] = []
     unknown: list[str] = []
     unavailable: list[str] = []
     catalogs: dict[str, tuple[BusinessSystem, service.Loaded]] = {}

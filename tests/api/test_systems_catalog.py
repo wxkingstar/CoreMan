@@ -287,8 +287,8 @@ async def test_layered_tools_with_permission_filter(
     assert ops["total"] == 2 and ops["has_more"] is False
     found = await call(client, auth, "systems_search", {"query": "作废单据"})
     assert [item["operation"].split()[0] for item in found["items"]] == ["listDocuments", "getMe"]
-    # "单据" is in listDocuments' summary; getMe only shares its module description.
-    assert [item["match"] for item in found["items"]] == ["summary", "description"]
+    # Both match mostly through their module's description ("…确认、作废、查询").
+    assert [item["match"] for item in found["items"]] == ["module", "module"]
     assert found["total"] == 2 and found["has_more"] is False
     nothing = await call(client, auth, "systems_search", {"query": "退款"})
     assert nothing["items"] == [] and "message" in nothing
