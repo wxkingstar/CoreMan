@@ -8,6 +8,7 @@ structural subset of the OpenAPI schema: enough to compile the catalog, not a fu
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,8 @@ _SUCCESS = re.compile(r"^2\d\d$")
 _TEMPLATE = re.compile(r"\{([^{}/]+)\}")
 _OPENAPI = re.compile(r"^3\.[01]\.\d+")
 _IN = ("query", "header", "path", "cookie")
+# Ticket and decision numbers such as REQ-2231 or D-17: they mean nothing to the agent.
+_TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 
 RULES: dict[str, str] = {
     "oas3-schema": ERROR,
@@ -34,11 +37,14 @@ RULES: dict[str, str] = {
     "operation-tag-defined": ERROR,
     "contract-operation-id-pattern": ERROR,
     "contract-summary": ERROR,
+    "contract-summary-plain": WARN,
     "contract-permission": ERROR,
     "contract-operation-x-agent": ERROR,
     "contract-root-x-agent": ERROR,
     "contract-root-permissions": WARN,
     "contract-tag-description": ERROR,
+    "contract-tag-extensions": ERROR,
+    "contract-tag-groups": ERROR,
     "contract-parameter-description": WARN,
     "contract-success-schema": ERROR,
     "contract-success-not-free-form": WARN,
@@ -64,6 +70,14 @@ class Finding:
             "path": self.path,
             "message": self.message,
         }
+
+
+def _aliases(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= 10
+        and all(_non_empty_string(v) and len(v) <= 40 for v in value)
+    )
 
 
 def operations(doc: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -99,6 +113,7 @@ class _Linter:
         self.structure()
         self.root_agent()
         self.tags()
+        self.tag_groups()
         ids: dict[str, list[str]] = {}
         for path, method, op in operations(self.doc):
             here = ("paths", path, method)
@@ -245,6 +260,7 @@ class _Linter:
         for index, tag in enumerate(tags):
             if not isinstance(tag, dict):
                 continue
+            self.tag_extensions(tag, index)
             description = tag.get("description")
             if not description:
                 self.add(
@@ -258,6 +274,51 @@ class _Linter:
                     pointer("tags", index, "description"),
                     "Every top-level tag needs a description of at most 200 characters.",
                 )
+
+    def tag_extensions(self, tag: dict[str, Any], index: int) -> None:
+        message = "Tag x-displayName and x-agent must use the documented keys."
+        display = tag.get("x-displayName")
+        if "x-displayName" in tag and not (isinstance(display, str) and 1 <= len(display) <= 60):
+            self.add("contract-tag-extensions", pointer("tags", index, "x-displayName"), message)
+        if "x-agent" not in tag:
+            return
+        agent = tag["x-agent"]
+        if not isinstance(agent, dict):
+            self.add("contract-tag-extensions", pointer("tags", index, "x-agent"), message)
+            return
+        valid: dict[str, Callable[[Any], bool]] = {
+            "aliases": _aliases,
+            "limits": lambda v: _non_empty_string(v) and len(v) <= 200,
+        }
+        for key, value in agent.items():
+            check = valid.get(key)
+            if check is None or not check(value):
+                self.add("contract-tag-extensions", pointer("tags", index, "x-agent", key), message)
+
+    def tag_groups(self) -> None:
+        if "x-tagGroups" not in self.doc:
+            return
+        groups = self.doc["x-tagGroups"]
+        message = "x-tagGroups is a list of {name, tags, description?}."
+        if not isinstance(groups, list):
+            self.add("contract-tag-groups", pointer("x-tagGroups"), message)
+            return
+        for index, group in enumerate(groups):
+            valid = (
+                isinstance(group, dict)
+                and not set(group) - {"name", "tags", "description"}
+                and _non_empty_string(group.get("name"))
+                and len(group["name"]) <= 60
+                and isinstance(group.get("tags"), list)
+                and len(group["tags"]) >= 1
+                and all(_non_empty_string(t) for t in group["tags"])
+                and (
+                    "description" not in group
+                    or (isinstance(group["description"], str) and len(group["description"]) <= 200)
+                )
+            )
+            if not valid:
+                self.add("contract-tag-groups", pointer("x-tagGroups", index), message)
 
     def defined_tags(self) -> set[str]:
         tags = self.doc.get("tags")
@@ -317,6 +378,13 @@ class _Linter:
                 pointer(*here, "summary"),
                 "Every operation needs a summary of at most 80 characters.",
             )
+        if isinstance(summary, str) and _TICKET.search(summary):
+            self.add(
+                "contract-summary-plain",
+                pointer(*here, "summary"),
+                "Keep ticket and decision numbers (like REQ-123) out of summaries; "
+                "put them in description or internal metadata.",
+            )
         permission = op.get("x-permission")
         valid = _non_empty_string(permission) or (
             isinstance(permission, list)
@@ -342,10 +410,11 @@ class _Linter:
         if not isinstance(agent, dict):
             self.add("contract-operation-x-agent", pointer(*where), message)
             return
-        valid = {
+        valid: dict[str, Callable[[Any], bool]] = {
             "risk": lambda v: v in ("read", "write", "destructive", "financial"),
             "hidden": lambda v: isinstance(v, bool),
             "hint": lambda v: isinstance(v, str) and len(v) <= 500,
+            "aliases": _aliases,
             "extra_permissions": lambda v: (
                 isinstance(v, list) and all(_non_empty_string(p) for p in v)
             ),

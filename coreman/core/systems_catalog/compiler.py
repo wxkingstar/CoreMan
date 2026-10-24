@@ -18,7 +18,8 @@ from coreman.core.systems_catalog.refs import MAX_DEPTH, Refs, local
 
 # Bump when the compiled format changes: stored catalogs of an older version are fetched again
 # in full (no If-None-Match) and recompiled on the next check. 2: validation schemas for calls.
-COMPILER_VERSION = 2
+# 3: module groups, display names, aliases and module limits.
+COMPILER_VERSION = 3
 RISKS = ("read", "write", "destructive", "financial")
 DEFAULT_MODULE = "default"
 GUIDE_MAX = 2000
@@ -32,6 +33,11 @@ RESPONSE_DEPTH = 3
 MAX_PROPERTIES = 40
 MAX_VARIANTS = 10
 EXAMPLE_MAX = 1000
+DISPLAY_MAX = 60
+ALIAS_MAX = 40
+MAX_ALIASES = 10
+LIMITS_MAX = 200
+UNGROUPED = "其他"
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,17 @@ def permission_codes(value: Any) -> list[str]:
     if isinstance(value, list):
         return [p for p in value if isinstance(p, str) and p and p != "none"]
     return []
+
+
+def aliases(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = clip(item, ALIAS_MAX)
+        if text and text not in out:
+            out.append(text)
+    return out[:MAX_ALIASES]
 
 
 def scalar_preview(value: Any) -> Any:
@@ -451,6 +468,58 @@ def _permissions(doc: dict[str, Any], by_id: dict[str, tuple[str, str]]) -> dict
     return {"operation_id": op_id, "pointer": ptr, "method": "GET", "path": found[0]}
 
 
+def _module(name: str, tag: dict[str, Any], operation_ids: list[str]) -> dict[str, Any]:
+    agent = tag.get("x-agent") if isinstance(tag.get("x-agent"), dict) else {}
+    assert isinstance(agent, dict)
+    display = clip(tag.get("x-displayName"), DISPLAY_MAX)
+    return {
+        "name": name,
+        "display_name": display if display != name else "",
+        "description": clip(tag.get("description"), TEXT_MAX),
+        "aliases": aliases(agent.get("aliases")),
+        "limits": clip(agent.get("limits"), LIMITS_MAX),
+        "operations": operation_ids,
+    }
+
+
+def _groups(doc: dict[str, Any], modules: list[str]) -> list[dict[str, Any]]:
+    """`x-tagGroups` over the modules that have operations; the rest go to one last group.
+
+    A module listed in several groups stays in the first. Without declared groups: empty.
+    """
+    declared = doc.get("x-tagGroups")
+    if not isinstance(declared, list):
+        return []
+    known = set(modules)
+    placed: set[str] = set()
+    groups: list[dict[str, Any]] = []
+    for entry in declared:
+        if not isinstance(entry, dict) or not isinstance(entry.get("tags"), list):
+            continue
+        name = clip(entry.get("name"), DISPLAY_MAX)
+        members = [
+            t for t in entry["tags"] if isinstance(t, str) and t in known and t not in placed
+        ]
+        if not name or not members or any(g["name"] == name for g in groups):
+            continue
+        placed.update(members)
+        groups.append(
+            {
+                "name": name,
+                "description": clip(entry.get("description"), TEXT_MAX),
+                "modules": members,
+            }
+        )
+    rest = [m for m in modules if m not in placed]
+    if groups and rest:
+        other = next((g for g in groups if g["name"] == UNGROUPED), None)
+        if other is None:
+            groups.append({"name": UNGROUPED, "description": "", "modules": rest})
+        else:
+            other["modules"] += rest
+    return groups
+
+
 def compile_spec(doc: dict[str, Any], *, spec_url: str, base_url: str) -> Compiled:
     refs = Refs(doc)
     schemas = Schemas(refs)
@@ -495,24 +564,22 @@ def compile_spec(doc: dict[str, Any], *, spec_url: str, base_url: str) -> Compil
             else [],
             "risk": risk,
             "hint": clip(agent.get("hint"), HINT_MAX),
+            "aliases": aliases(agent.get("aliases")),
             "deprecated": op.get("deprecated") is True,
             "detail": _detail(paths[path], op, schemas, refs),
             "validate": _validation(paths[path], op, refs),
         }
-    tag_defs: dict[str, str] = {}
+    tag_defs: dict[str, dict[str, Any]] = {}
     for tag in doc.get("tags") or []:
         if isinstance(tag, dict) and isinstance(tag.get("name"), str):
-            tag_defs.setdefault(tag["name"], clip(tag.get("description"), TEXT_MAX))
+            tag_defs.setdefault(tag["name"], tag)
     grouped: dict[str, list[str]] = {}
     for op_id, op in compiled_ops.items():
         grouped.setdefault(op["module"], []).append(op_id)
     order = [name for name in tag_defs if name in grouped] + [
         name for name in grouped if name not in tag_defs
     ]
-    modules = [
-        {"name": name, "description": tag_defs.get(name, ""), "operations": grouped[name]}
-        for name in order
-    ]
+    modules = [_module(name, tag_defs.get(name) or {}, grouped[name]) for name in order]
     agent = doc.get("x-agent") if isinstance(doc.get("x-agent"), dict) else {}
     assert isinstance(agent, dict)
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
@@ -522,6 +589,7 @@ def compile_spec(doc: dict[str, Any], *, spec_url: str, base_url: str) -> Compil
         "guide": clip(agent.get("guide"), GUIDE_MAX),
         "server": server_url(doc, spec_url, base_url),
         "permissions": _permissions(doc, by_id),
+        "groups": _groups(doc, order),
         "modules": modules,
         "operations": compiled_ops,
         "defs": _definitions(compiled_ops, refs),
