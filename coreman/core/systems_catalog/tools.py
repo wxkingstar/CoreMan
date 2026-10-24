@@ -19,16 +19,26 @@ from coreman.core.auth.system_access import auth_label, auth_mode, token_env_var
 from coreman.core.db.models import BusinessSystem
 from coreman.core.systems_catalog import context, proxy, service
 from coreman.core.systems_catalog.context import TRUST, Context
+from coreman.core.systems_catalog.search import normalize
 
 MAX_CALLS = 40
 # Proxied calls have their own, smaller allowance: each one reaches the business system.
 MAX_PROXY_CALLS = 30
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
+MODULE_PAGE = 25
+GROUP_PAGE = 30
 SEARCH_PAGE = 10
-L1_MAX = 4000
+# A module page also stops at this many characters, so long module texts cannot swell it.
+L1_MAX = 6000
 L3_MAX = 6000
+EXPAND_MAX = 12000
 MODULE_TEXT = 120
+# A longer guide is shown as an excerpt, with view="guide" for the full text.
+GUIDE_INLINE = 600
+GUIDE_EXCERPT = 200
+# describe repeats a guide this short; a longer one is referenced.
+GUIDE_IN_DETAIL = 300
 
 
 class Arguments(BaseModel):
@@ -41,13 +51,20 @@ Cursor = Field(default=None, max_length=20, description="next_cursor from the pr
 
 class Browse(Arguments):
     system: str | None = Field(default=None, max_length=50, description="System key, e.g. stock")
-    module: str | None = Field(default=None, max_length=200)
+    group: str | None = Field(default=None, max_length=100, description="Business group name")
+    module: str | None = Field(default=None, max_length=200, description="Module name")
+    view: Literal["groups", "modules", "guide"] | None = Field(
+        default=None,
+        description="With system only: groups (default when declared), modules (every module, "
+        "paged) or guide (the system's full conventions)",
+    )
     cursor: str | None = Cursor
 
 
 class Search(Arguments):
     query: str = Field(min_length=1, max_length=200)
     system: str | None = Field(default=None, max_length=50, description="System key, e.g. stock")
+    module: str | None = Field(default=None, max_length=200, description="Only this module")
     risk: Literal["read", "write", "destructive", "financial"] | None = None
     cursor: str | None = Cursor
 
@@ -55,6 +72,9 @@ class Search(Arguments):
 class Describe(Arguments):
     system: str = SystemKey
     operation_id: str = Field(min_length=1, max_length=100)
+    expand: Literal["parameters", "body", "response", "example"] | None = Field(
+        default=None, description="Return this part in full when the detail lists it as omitted"
+    )
 
 
 MODELS: dict[str, type[BaseModel]] = {
@@ -65,17 +85,25 @@ MODELS: dict[str, type[BaseModel]] = {
 }
 DESCRIPTIONS = {
     "systems_browse": (
-        "Browse business system operations level by level. No arguments: systems available this "
-        "turn. With system: its guide and modules. With system and module: one-line summaries of "
-        "the module's operations, 20 per page."
+        'Overview of business systems, for questions like "what can this system do". To find '
+        "the operation for a concrete task, use systems_search instead. No arguments: systems "
+        "available this turn. With system: its business groups with module and operation counts "
+        'and call rules (modules directly when it declares no groups); view="modules" pages '
+        'through every module, view="guide" returns the system\'s full conventions. With '
+        "group: that group's modules. With module: one-line operation summaries, 20 per page. "
+        "Lists carry total and next_cursor; has_more=true means the list is incomplete."
     ),
     "systems_search": (
-        "Search operations by keywords (Chinese or English) across this turn's systems, or one "
-        "system; optionally filter by risk. Returns one-line summaries, up to 10 per page."
+        "Default first step: find operations by keywords, operationId, module name or alias "
+        "(Chinese or English) across this turn's systems, then systems_describe the one you "
+        "pick. Optionally filter by system, module or risk. Best matches first, up to 10 per "
+        "page, each with its module and why it matched; a marker such as [financial; 不代理] "
+        "says the operation needs confirmation or cannot be called this turn."
     ),
     "systems_describe": (
         "Parameters, request body, response, permission, risk and how to call one operation. "
-        "Check this before calling an operation."
+        "Check this before calling an operation. When `omitted` lists trimmed parts, call again "
+        "with expand to get one of them in full."
     ),
     "systems_call": proxy.DESCRIPTION,
 }
@@ -147,17 +175,140 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
     return None
 
 
-def summary_line(op_id: str, op: dict[str, Any]) -> str:
+CALL_NOTES = {"risk_not_allowed": "不代理", "write_not_allowed": "未开启写入"}
+
+
+def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
+    """Whether this turn may call the operation, from the catalog's risk and the call mode."""
+    if system.token_delivery == "proxy":
+        denied = proxy.policy_error(ctx, system, op)
+        return CALL_NOTES.get(denied or "", "")
+    return "需确认" if op["risk"] in proxy.NEVER_PROXIED else ""
+
+
+def call_rules(ctx: Context, system: BusinessSystem) -> str:
+    if system.token_delivery == "proxy":
+        writes = "已开启" if system.key in ctx.writable else "未开启，需管理员开启「允许写入」"
+        return (
+            f"平台代理：用 systems_call 调用。读操作直接执行；写操作{writes}；"
+            "destructive、financial 不代理，需用户本人在业务系统里操作。"
+        )
+    return (
+        "持令牌直接调用（按 systems_describe 的 curl 模板）。destructive、financial 先向当前发言者"
+        "说明并等对方明确确认；定时任务中不执行。"
+    )
+
+
+def summary_line(op_id: str, op: dict[str, Any], note: str = "") -> str:
     line = f"{op_id}  {op['method']} {op['path']}  {op.get('summary') or ''}".rstrip()
-    if op.get("risk") and op["risk"] != "read":
-        line += f"  [{op['risk']}]"
+    marks = [op["risk"]] if op.get("risk") and op["risk"] != "read" else []
+    if note:
+        marks.append(note)
+    if marks:
+        line += f"  [{'; '.join(marks)}]"
     if op.get("deprecated"):
         line += "  [deprecated]"
     return line
 
 
-def _offset(cursor: str | None) -> int:
-    return int(cursor) if cursor and cursor.isdigit() else 0
+def permission_check(loaded: service.Loaded, held: service.Held | None) -> str:
+    """filtered: lists show only what the member may use; unknown: the lookup failed, so nothing
+    was filtered; not_declared: the system offers no lookup, being listed says nothing about
+    permission. The business system checks every call either way."""
+    if not isinstance(loaded.compiled.get("permissions"), dict):
+        return "not_declared"
+    return "unknown" if held is None else "filtered"
+
+
+def _tag(*parts: str) -> str:
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:8]
+
+
+def _cursor(tag: str, offset: int) -> str:
+    return f"{tag}.{offset}"
+
+
+def _offset(cursor: str | None, tag: str) -> int | None:
+    """Start of the page a cursor points at; None when it belongs to another catalog version.
+
+    Bare numbers are cursors from before versioning and are taken as they are.
+    """
+    if not cursor:
+        return 0
+    if cursor.isdigit():
+        return int(cursor)
+    found, _, offset = cursor.partition(".")
+    if found != tag or not offset.isdigit():
+        return None
+    return int(offset)
+
+
+def _expired(system: str | None) -> dict[str, Any]:
+    return {
+        "error": "cursor_expired",
+        "system": system,
+        "message": "目录已更新，这个翻页位置不再有效。去掉 cursor 从第一页重新开始。",
+    }
+
+
+def _paged(items: list[Any], start: int, size: int, tag: str) -> dict[str, Any]:
+    end = start + size
+    more = end < len(items)
+    return {
+        "total": len(items),
+        "has_more": more,
+        "next_cursor": _cursor(tag, end) if more else None,
+    }
+
+
+def _module_item(module: dict[str, Any], visible: list[str], ops: dict[str, Any]) -> dict[str, Any]:
+    item: dict[str, Any] = {"name": module["name"]}
+    if module.get("display_name"):
+        item["display_name"] = module["display_name"]
+    item["description"] = (module.get("description") or "")[:MODULE_TEXT]
+    item["operations"] = len(visible)
+    risks: dict[str, int] = {}
+    for op_id in visible:
+        if ops[op_id]["risk"] != "read":
+            risks[ops[op_id]["risk"]] = risks.get(ops[op_id]["risk"], 0) + 1
+    if risks:
+        item["risks"] = risks
+    if module.get("limits"):
+        item["limits"] = module["limits"]
+    return item
+
+
+def _visible_modules(
+    loaded: service.Loaded, held: service.Held | None
+) -> list[tuple[dict[str, Any], list[str]]]:
+    ops = loaded.compiled["operations"]
+    out: list[tuple[dict[str, Any], list[str]]] = []
+    for module in loaded.compiled["modules"]:
+        visible = [op_id for op_id in module["operations"] if context.visible(ops[op_id], held)]
+        if visible:
+            out.append((module, visible))
+    return out
+
+
+def _module_named(loaded: service.Loaded, name: str) -> dict[str, Any]:
+    modules: list[dict[str, Any]] = loaded.compiled["modules"]
+    return next((m for m in modules if m["name"] == name), {})
+
+
+def _find_module(loaded: service.Loaded, name: str) -> dict[str, Any] | None:
+    """By stable name; otherwise by a display name or alias that names exactly one module."""
+    found = _module_named(loaded, name)
+    if found:
+        return found
+    modules: list[dict[str, Any]] = loaded.compiled["modules"]
+    wanted = normalize(name)
+    matches = [
+        m
+        for m in modules
+        if wanted
+        in {normalize(label) for label in [m.get("display_name") or "", *(m.get("aliases") or [])]}
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 async def browse_systems(ctx: Context) -> dict[str, Any]:
@@ -168,60 +319,124 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
             "name": system.name,
             "description": (system.description or "")[:MODULE_TEXT],
             "base_url": system.base_url or "",
+            "call_mode": system.token_delivery,
         }
         loaded = await context.catalog(ctx, system) if system.openapi_url else None
         if loaded is None:
             item["catalog"] = "unavailable"
         else:
             held = await context.held(ctx, system, loaded)
-            ops = loaded.compiled["operations"]
-            visible = [m for m in ops if context.visible(ops[m], held)]
+            modules = _visible_modules(loaded, held)
             item.update(
                 catalog=loaded.status,
-                modules=len({ops[m]["module"] for m in visible}),
-                operations=len(visible),
+                modules=len(modules),
+                operations=sum(len(visible) for _, visible in modules),
+                permission_check=permission_check(loaded, held),
             )
+            names = {m["name"] for m, _ in modules}
+            groups = [g for g in loaded.compiled.get("groups") or [] if names & set(g["modules"])]
+            if groups:
+                item["groups"] = len(groups)
             if context.permissions_unknown(loaded, held):
                 item["permissions_unknown"] = True
         items.append(item)
     return {"systems": items, **TRUST}
 
 
-async def browse_modules(
-    ctx: Context, system: BusinessSystem, cursor: str | None
+def _guide(guide: str) -> dict[str, Any]:
+    if len(guide) <= GUIDE_INLINE:
+        return {"guide": guide}
+    return {
+        "guide": guide[:GUIDE_EXCERPT] + "…",
+        "guide_truncated": True,
+        "guide_chars": len(guide),
+        "guide_hint": '系统说明较长，这里只是开头。用 view="guide" 查看全文。',
+    }
+
+
+async def browse_system(
+    ctx: Context,
+    system: BusinessSystem,
+    *,
+    view: str | None,
+    group: str | None,
+    cursor: str | None,
 ) -> dict[str, Any]:
     loaded = await context.catalog(ctx, system)
     if loaded is None:
         return context.unavailable(system)
+    guide = loaded.compiled.get("guide") or ""
+    if view == "guide":
+        return {"system": system.key, "name": system.name, "guide": guide, **TRUST}
     held = await context.held(ctx, system, loaded)
     ops = loaded.compiled["operations"]
-    modules: list[dict[str, Any]] = []
-    for module in loaded.compiled["modules"]:
-        count = sum(1 for op_id in module["operations"] if context.visible(ops[op_id], held))
-        if count:
-            modules.append(
-                {
-                    "name": module["name"],
-                    "description": (module.get("description") or "")[:MODULE_TEXT],
-                    "operations": count,
-                }
-            )
-    start = _offset(cursor)
+    modules = _visible_modules(loaded, held)
+    by_name = {m["name"]: (m, visible) for m, visible in modules}
+    groups = [
+        (g, [by_name[name] for name in g["modules"] if name in by_name])
+        for g in loaded.compiled.get("groups") or []
+    ]
+    groups = [(g, members) for g, members in groups if members]
+    tag = _tag(loaded.sha, view or "", group or "")
+    start = _offset(cursor, tag)
+    if start is None:
+        return _expired(system.key)
     result: dict[str, Any] = {
         "system": system.key,
         "name": system.name,
-        "guide": (loaded.compiled.get("guide") or "") if start == 0 else "",
         "catalog": loaded.status,
-        "modules": [],
-        "next_cursor": None,
+        "call_mode": system.token_delivery,
+        "call_rules": call_rules(ctx, system),
+        "permission_check": permission_check(loaded, held),
+        "total_modules": len(modules),
+        "total_operations": sum(len(visible) for _, visible in modules),
     }
     if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
-    for index in range(start, len(modules)):
-        result["modules"].append(modules[index])
+    if group is not None:
+        chosen = next((members for g, members in groups if g["name"] == group), None)
+        if chosen is None:
+            return {
+                "error": "group_not_found",
+                "system": system.key,
+                "groups": [g["name"] for g, _ in groups],
+                "message": "没有这个业务分组。从 groups 里选一个，或用 systems_search 直接查找。",
+                **TRUST,
+            }
+        listed, result["group"] = chosen, group
+    elif view != "modules" and groups:
+        page = groups[start : start + GROUP_PAGE]
+        result.update(
+            view="groups",
+            **({"guide": ""} if start else _guide(guide)),
+            groups=[
+                {
+                    "name": g["name"],
+                    **({"description": g["description"]} if g.get("description") else {}),
+                    "modules": len(members),
+                    "operations": sum(len(visible) for _, visible in members),
+                }
+                for g, members in page
+            ],
+            **_paged(groups, start, GROUP_PAGE, tag),
+            hint='传 group 查看组内模块；view="modules" 分页列出全部模块；'
+            "找具体操作直接用 systems_search。",
+        )
+        return {**result, **TRUST}
+    else:
+        listed = modules
+        result["view"] = "modules"
+        if view == "groups":
+            result["message"] = "这个系统没有声明业务分组，下面按模块列出。"
+        result.update({"guide": ""} if start else _guide(guide))
+    result["modules"] = []
+    result.update(_paged(listed, start, MODULE_PAGE, tag))
+    for index in range(start, min(start + MODULE_PAGE, len(listed))):
+        module, visible = listed[index]
+        result["modules"].append(_module_item(module, visible, ops))
         if len(json.dumps(result, ensure_ascii=False)) > L1_MAX and len(result["modules"]) > 1:
             result["modules"].pop()
-            result["next_cursor"] = str(index)
+            result.update(has_more=True, next_cursor=_cursor(tag, index))
             break
     return {**result, **TRUST}
 
@@ -232,7 +447,7 @@ async def browse_operations(
     loaded = await context.catalog(ctx, system)
     if loaded is None:
         return context.unavailable(system)
-    module = next((m for m in loaded.compiled["modules"] if m["name"] == module_name), None)
+    module = _find_module(loaded, module_name)
     if module is None:
         return {
             "error": "module_not_found",
@@ -242,14 +457,22 @@ async def browse_operations(
     held = await context.held(ctx, system, loaded)
     ops = loaded.compiled["operations"]
     visible = [op_id for op_id in module["operations"] if context.visible(ops[op_id], held)]
-    start = _offset(cursor)
+    tag = _tag(loaded.sha, module["name"])
+    start = _offset(cursor, tag)
+    if start is None:
+        return _expired(system.key)
     page = visible[start : start + BROWSE_PAGE]
     result: dict[str, Any] = {
         "system": system.key,
         "module": module["name"],
+        **({"display_name": module["display_name"]} if module.get("display_name") else {}),
         "description": module.get("description") or "",
-        "operations": [summary_line(op_id, ops[op_id]) for op_id in page],
-        "next_cursor": str(start + BROWSE_PAGE) if start + BROWSE_PAGE < len(visible) else None,
+        **({"limits": module["limits"]} if module.get("limits") else {}),
+        "operations": [
+            summary_line(op_id, ops[op_id], call_note(ctx, system, ops[op_id])) for op_id in page
+        ],
+        **_paged(visible, start, BROWSE_PAGE, tag),
+        "permission_check": permission_check(loaded, held),
     }
     if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
@@ -264,46 +487,66 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
         targets = [system]
     else:
         targets = [s for s in ctx.systems if s.openapi_url]
-    scored: list[tuple[float, str, str]] = []
+    hits: list[tuple[tuple[int, float, int, int, float], str, str, str]] = []
     unknown: list[str] = []
     unavailable: list[str] = []
+    catalogs: dict[str, tuple[BusinessSystem, service.Loaded]] = {}
+    module_found = args.module is None
     for system in targets:
         loaded = await context.catalog(ctx, system)
         if loaded is None:
             unavailable.append(system.key)
             continue
+        catalogs[system.key] = (system, loaded)
+        only: str | None = None
+        if args.module is not None:
+            module = _find_module(loaded, args.module)
+            if module is None:
+                continue
+            only, module_found = module["name"], True
         held = await context.held(ctx, system, loaded)
         if context.permissions_unknown(loaded, held):
             unknown.append(system.key)
         ops = loaded.compiled["operations"]
-        for op_id, score in loaded.index.search(args.query):
-            op = ops[op_id]
-            if (args.risk is None or op["risk"] == args.risk) and context.visible(op, held):
-                scored.append((score, system.key, op_id))
+        for hit in loaded.index.search(args.query):
+            op = ops[hit.op_id]
+            if (
+                (only is None or op["module"] == only)
+                and (args.risk is None or op["risk"] == args.risk)
+                and context.visible(op, held)
+            ):
+                hits.append((hit.key, system.key, hit.op_id, hit.match))
     if args.system is not None and unavailable:
         return context.unavailable(targets[0])
-    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-    start = _offset(args.cursor)
-    page = scored[start : start + SEARCH_PAGE]
-    lines: list[dict[str, str]] = []
-    for _, key, op_id in page:
-        loaded = await service.load(ctx.session, key)
-        if loaded is not None:
-            lines.append(
-                {
-                    "system": key,
-                    "operation": summary_line(op_id, loaded.compiled["operations"][op_id]),
-                }
-            )
-    result: dict[str, Any] = {
-        "items": lines,
-        "next_cursor": str(start + SEARCH_PAGE) if start + SEARCH_PAGE < len(scored) else None,
-    }
+    hits.sort(key=lambda item: (item[0], item[1], item[2]))
+    tag = _tag(
+        args.query,
+        args.module or "",
+        args.risk or "",
+        *sorted(f"{key}:{loaded.sha}" for key, (_, loaded) in catalogs.items()),
+    )
+    start = _offset(args.cursor, tag)
+    if start is None:
+        return _expired(args.system)
+    items: list[dict[str, str]] = []
+    for _, key, op_id, match in hits[start : start + SEARCH_PAGE]:
+        system, loaded = catalogs[key]
+        op = loaded.compiled["operations"][op_id]
+        module = _module_named(loaded, op["module"])
+        item = {"system": key, "module": op["module"]}
+        if module.get("display_name"):
+            item["module_name"] = module["display_name"]
+        item["operation"] = summary_line(op_id, op, call_note(ctx, system, op))
+        item["match"] = match
+        items.append(item)
+    result: dict[str, Any] = {"items": items, **_paged(hits, start, SEARCH_PAGE, tag)}
     if unknown:
         result["permissions_unknown"] = unknown
     if unavailable:
         result["catalog_unavailable"] = unavailable
-    if not scored:
+    if not module_found:
+        result["message"] = "没有这个模块。去掉 module，或用 systems_browse 查看模块列表。"
+    elif not hits:
         result["message"] = "没有匹配的操作。换个关键词，或用 systems_browse 按模块查看。"
     return {**result, **TRUST}
 
@@ -361,14 +604,19 @@ def _trim(schema: Any, depth: int) -> Any:
     return out
 
 
+def _size(value: dict[str, Any]) -> int:
+    return len(json.dumps(value, ensure_ascii=False))
+
+
 def _fit(result: dict[str, Any]) -> dict[str, Any]:
-    """Shrink a detail to L3_MAX characters: shallower schemas first, then drop parts."""
+    """Shrink a detail to L3_MAX characters: shallower schemas first, then drop parts.
 
-    def size(value: dict[str, Any]) -> int:
-        return len(json.dumps(value, ensure_ascii=False))
-
-    if size(result) <= L3_MAX:
+    Method, path, risk, permissions, hint and the call template are never touched. Every part
+    that was shortened is named in `omitted`, so it can be fetched with expand.
+    """
+    if _size(result) <= L3_MAX:
         return result
+    trimmed = dict(result)
     for body_depth, response_depth in ((3, 2), (2, 1), (1, 0), (0, 0)):
         trimmed = dict(result)
         if isinstance(result.get("body"), dict):
@@ -381,21 +629,50 @@ def _fit(result: dict[str, Any]) -> dict[str, Any]:
                 **result["response"],
                 "schema": _trim(result["response"]["schema"], response_depth),
             }
-        trimmed["truncated"] = True
-        if size(trimmed) <= L3_MAX:
-            return trimmed
-    trimmed = {k: v for k, v in trimmed.items() if k not in ("response", "example")}
-    for param in trimmed.get("parameters") or []:
-        param.pop("enum", None)
-        if "description" in param:
-            param["description"] = param["description"][:60]
-    if size(trimmed) > L3_MAX:
-        trimmed.pop("body", None)
-        trimmed["description"] = (trimmed.get("description") or "")[:300]
+        if _size(trimmed) <= L3_MAX:
+            break
+    else:
+        trimmed = {k: v for k, v in trimmed.items() if k not in ("response", "example")}
+        trimmed["parameters"] = [dict(p) for p in trimmed.get("parameters") or []]
+        for param in trimmed["parameters"]:
+            param.pop("enum", None)
+            if "description" in param:
+                param["description"] = param["description"][:60]
+        if _size(trimmed) > L3_MAX:
+            trimmed.pop("body", None)
+            trimmed["description"] = (trimmed.get("description") or "")[:300]
+    omitted = [
+        part
+        for part in ("parameters", "body", "response", "example")
+        if result.get(part) is not None and trimmed.get(part) != result.get(part)
+    ]
+    if trimmed.get("description") != result.get("description"):
+        omitted.append("description")
+    trimmed["truncated"] = True
+    trimmed["omitted"] = omitted
+    trimmed["omitted_hint"] = (
+        "以上部分为控制长度做了精简或省略；需要时用 expand 取其中一项的完整内容"
+        "（description 随 expand=parameters 一起返回）。"
+    )
     return trimmed
 
 
-async def describe(ctx: Context, system: BusinessSystem, operation_id: str) -> dict[str, Any]:
+def _expanded(header: dict[str, Any], part: str, value: Any) -> dict[str, Any]:
+    result = {**header, "expand": part, part: value}
+    if part in ("body", "response") and isinstance(value, dict) and "schema" in value:
+        for depth in (4, 3, 2, 1, 0):
+            if _size(result) <= EXPAND_MAX:
+                break
+            result[part] = {**value, "schema": _trim(value["schema"], depth)}
+            result["truncated"] = True
+    elif part == "example" and isinstance(value, str) and len(value) > EXPAND_MAX:
+        result[part], result["truncated"] = value[:EXPAND_MAX], True
+    return result
+
+
+async def describe(
+    ctx: Context, system: BusinessSystem, operation_id: str, expand: str | None = None
+) -> dict[str, Any]:
     loaded = await context.catalog(ctx, system)
     if loaded is None:
         return context.unavailable(system)
@@ -405,17 +682,36 @@ async def describe(ctx: Context, system: BusinessSystem, operation_id: str) -> d
         return context.operation_not_found(system, operation_id)
     url = str(loaded.compiled.get("server") or system.base_url or "").rstrip("/") + op["path"]
     detail = op["detail"]
-    result: dict[str, Any] = {
+    module = _module_named(loaded, op["module"])
+    header: dict[str, Any] = {
         "system": system.key,
         "operation_id": operation_id,
         "module": op["module"],
-        "method": op["method"],
-        "path": op["path"],
+    }
+    if module.get("display_name"):
+        header["module_name"] = module["display_name"]
+    header.update(
+        method=op["method"],
+        path=op["path"],
+        risk=op["risk"],
+        permission=op.get("permission") or [],
+        permission_check=permission_check(loaded, held),
+    )
+    if expand is not None:
+        value: Any = (
+            {
+                "description": op.get("description") or "",
+                "parameters": detail.get("parameters") or [],
+            }
+            if expand == "parameters"
+            else detail.get(expand)
+        )
+        return {**_expanded(header, expand, value), **TRUST}
+    result: dict[str, Any] = {
+        **header,
         "url": url,
         "summary": op.get("summary") or "",
         "description": op.get("description") or "",
-        "risk": op["risk"],
-        "permission": op.get("permission") or [],
         "extra_permissions": op.get("extra_permissions") or [],
         "hint": op.get("hint") or "",
         "deprecated": bool(op.get("deprecated")),
@@ -425,6 +721,16 @@ async def describe(ctx: Context, system: BusinessSystem, operation_id: str) -> d
         "example": detail.get("example"),
         "call": call_template(ctx, system, op, url),
     }
+    if module.get("limits"):
+        result["module_limits"] = module["limits"]
+    guide = loaded.compiled.get("guide") or ""
+    if guide and len(guide) <= GUIDE_IN_DETAIL:
+        result["system_guide"] = guide
+    elif guide:
+        result["system_guide"] = (
+            f"系统通用约定（时区、金额单位、分页等）共 {len(guide)} 字，未读过时用 "
+            f'systems_browse(system="{system.key}", view="guide") 查看。'
+        )
     if context.permissions_unknown(loaded, held):
         result["permissions_unknown"] = True
     return {**_fit(result), **TRUST}
@@ -444,14 +750,19 @@ async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
         return {"error": "invalid_tool_or_arguments", "invalid": problems}
     if isinstance(args, Browse):
         if args.system is None:
-            if args.module is not None:
-                return {"error": "invalid_tool_or_arguments", "invalid": ["module: needs system"]}
+            if args.module is not None or args.group is not None or args.view is not None:
+                return {
+                    "error": "invalid_tool_or_arguments",
+                    "invalid": ["group, module and view need system"],
+                }
             return await browse_systems(ctx)
         system = ctx.system(args.system)
         if system is None:
             return context.no_system(args.system)
         if args.module is None:
-            return await browse_modules(ctx, system, args.cursor)
+            return await browse_system(
+                ctx, system, view=args.view, group=args.group, cursor=args.cursor
+            )
         return await browse_operations(ctx, system, args.module, args.cursor)
     if isinstance(args, Search):
         return await search(ctx, args)
@@ -461,4 +772,4 @@ async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
     system = ctx.system(args.system)
     if system is None:
         return context.no_system(args.system)
-    return await describe(ctx, system, args.operation_id)
+    return await describe(ctx, system, args.operation_id, args.expand)
