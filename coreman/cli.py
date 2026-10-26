@@ -31,7 +31,7 @@ from coreman.core.logging import configure_logging
 
 
 async def _contact_sync(app_name: str | None) -> int:
-    """找到唯一一个具备通讯录同步能力的企微应用并同步；多条候选时要求 --app 指定。
+    """找到唯一一个具备通讯录同步能力的平台应用（企业微信或飞书）并同步；多条候选时要求 --app 指定。
 
     Args:
         app_name: --app 指定的平台应用名称，None 表示不限定
@@ -50,7 +50,6 @@ async def _contact_sync(app_name: str | None) -> int:
     try:
         async with factory() as session:
             stmt = select(PlatformApp).where(
-                PlatformApp.platform == "wecom",
                 PlatformApp.enabled.is_(True),
                 PlatformApp.capabilities.any("contact_sync"),  # type: ignore[arg-type]
             )
@@ -58,8 +57,10 @@ async def _contact_sync(app_name: str | None) -> int:
                 stmt = stmt.where(PlatformApp.name == app_name)
             apps = (await session.execute(stmt)).scalars().all()
         if len(apps) != 1:
+            names = "、".join(f"{a.name}（{a.platform}）" for a in apps)
             print(
-                f"匹配到 {len(apps)} 个具备通讯录同步能力的企微应用，请用 --app 指定名称",
+                f"匹配到 {len(apps)} 个具备通讯录同步能力的平台应用，请用 --app 指定名称"
+                + (f"：{names}" if names else ""),
                 file=sys.stderr,
             )
             return 1
@@ -248,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     与管理命令（见 coreman.admin_cli）。"""
     parser = argparse.ArgumentParser(prog="coreman.cli", description="CoreMan 运维命令")
     sub = parser.add_subparsers(dest="command", required=True)
-    cs = sub.add_parser("contact-sync", help="同步企业微信通讯录")
+    cs = sub.add_parser("contact-sync", help="同步企业微信或飞书通讯录")
     cs.add_argument("--app", default=None, help="平台应用名称（多个应用时必填）")
     skills = sub.add_parser("skills", help="技能目录维护")
     operations = skills.add_subparsers(dest="operation", required=True)

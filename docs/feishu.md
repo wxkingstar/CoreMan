@@ -15,7 +15,7 @@ CoreMan 使用企业自建应用。为同一企业部署：平台身份以 `user
 
 登录重定向地址为 `{PUBLIC_BASE_URL}/api/auth/feishu/callback`。管理台的平台应用启用对应能力，先完整同步通讯录再使用员工登录。通讯录同步先读取应用的授权范围，仅个人授权时直接获取该成员，不读取无权访问的根部门。需要 contact:contact.base:readonly（授权范围查询）、contact:user.base:readonly、contact:user.employee_id:readonly；部门范围还需相应部门读取权限。要把邮箱同步进来还需 contact:user.email:readonly（启用飞书邮箱时企业邮箱需 contact:user.employee:readonly）：没有邮箱时登录名退回飞书 user_id，业务系统令牌的主体也只能用它，按邮箱前缀认人的业务系统会找不到用户。当前不支持基于用户组的通讯录范围，遇到此类范围会中止同步，避免误停用成员。邮箱与手机号若分别匹配不同账号，同步整体中止，需先处理冲突。
 
-员工扫码时若还没有同步进来，CoreMan 会用具备通讯录同步能力的飞书应用（优先登录应用本身）按 user_id 只补这一个人再登录：不建部门、不停用任何人，部门只关联已同步过的部门，团队规则照常生效，审计记为 `user.login_sync`。此人不在应用通讯录范围内、已离职或归并冲突时，登录页仍提示「未找到匹配的账号」，API 日志 `feishu_login_unknown_user` 带 `user_id`，飞书返回的错误码见 `feishu_login_sync_failed`。新部门与离职停用仍靠完整同步。
+员工扫码时若还没有同步进来，CoreMan 会用具备通讯录同步能力的飞书应用（优先登录应用本身）按 user_id 只补这一个人再登录：不建部门、不停用任何人，部门只关联已同步过的部门，团队规则照常生效，审计记为 `user.login_sync`。此人不在应用通讯录范围内、已离职或归并冲突时，登录页仍提示「未找到匹配的账号」，API 日志 `feishu_login_unknown_user` 带 `user_id`，飞书返回的错误码见 `feishu_login_sync_failed`。新部门与离职停用仍靠完整同步：scheduler 默认每 24 小时自动全量同步一次（`CONTACT_SYNC_INTERVAL_HOURS`，0 关闭），也可以在管理台点「同步」或运行 `./deploy/coreman contact-sync --app <应用名称>`，规则见 [企业微信接入](wecom.md) 的「在 CoreMan 中配置与验证」。
 
 新建飞书员工默认扫码创建应用（见下文「扫码创建与管理飞书应用」），也可以在「更多设置」中打开「手动填写凭证」使用已有应用。一个应用只能绑定一个 CoreMan 机器人。需要人工求助回复时，通知/回调平台应用必须与唯一启用机器人的 app_id 一致。求助接收人引用当前通知回复；普通聊天不被求助流程截取。
 

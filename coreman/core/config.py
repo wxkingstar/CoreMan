@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     )
     # 风险判定的部署参数（JSON，见 docs/tower-approval.md）；可选，缺的部分对应的写操作按高风险
     cloud_proxy_policy: CloudProxyPolicy | None = Field(default=None, alias="CLOUD_PROXY_POLICY")
+    # scheduler 对每个带通讯录同步能力的平台应用做全量同步的间隔（小时）；0 关闭定时同步
+    contact_sync_interval_hours: float = Field(
+        default=24.0, ge=0, alias="CONTACT_SYNC_INTERVAL_HOURS"
+    )
 
     @property
     def cloud_proxy_ready(self) -> bool:

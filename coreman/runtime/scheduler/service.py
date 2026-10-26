@@ -13,14 +13,15 @@
 | `cleanup_seconds` | 删过期的流 / 过期会话，清早已停掉的实例行 |
 | `retention_seconds` | 按保留期分批删终态任务、入站事件与出站条目 |
 
-cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次。
+cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次；通讯录每
+`CONTACT_SYNC_INTERVAL_HOURS` 全量同步一次（每 5 分钟看一眼是否到期）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
@@ -32,13 +33,14 @@ from coreman.core.db.session import make_engine, make_session_factory
 from coreman.core.runtime_nodes import transport as runtime_transport
 from coreman.core.settings_store import SettingsStore
 from coreman.runtime.base import HEALTH_PORTS, Service
-from coreman.runtime.scheduler import cron, notifications, reaper
+from coreman.runtime.scheduler import contacts, cron, notifications, reaper
 
 # hashtext 把锁名压成 int4，pg_try_advisory_lock 隐式提升成 bigint；同名即同锁，跨实例通用。
 LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('coreman-scheduler'))"
 LOCK_NAME = "coreman-scheduler"
 MAX_HEARTBEAT_SECONDS = 10.0
 RECONCILE_SECONDS = 300.0
+CONTACT_SYNC_CHECK_SECONDS = 300.0
 
 
 class SchedulerService(Service):
@@ -118,6 +120,7 @@ class SchedulerService(Service):
                 ("scheduler-wecom-provisions", self._wecom_provisions_loop()),
                 ("scheduler-wecom-personal", self._wecom_personal_loop()),
                 ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
+                ("scheduler-contact-sync", self._contact_sync_loop()),
             )
         ]
         self.ready = True
@@ -327,6 +330,25 @@ class SchedulerService(Service):
             except Exception as exc:  # noqa: BLE001 Tower 不可达是常态，下一轮再试；不记异常体以免带出地址
                 self._log.warning("tower_reconcile_failed", error=type(exc).__name__)
             await self._sleep(RECONCILE_SECONDS)
+
+    async def _contact_sync_loop(self) -> None:
+        """通讯录定时全量同步：上次全量同步之后入职的员工不必等管理员手动点同步才进库。"""
+        hours = get_settings().contact_sync_interval_hours
+        if not hours:
+            return
+        interval = timedelta(hours=hours)
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    counts = await contacts.run_due(
+                        self._factory, self._cipher, datetime.now(UTC), interval
+                    )
+                    hits = {key: value for key, value in counts.items() if value}
+                    if hits:
+                        self._log.info("contact_sync_tick", **hits)
+            except Exception:
+                self._log.exception("contact_sync_tick_failed")
+            await self._sleep(CONTACT_SYNC_CHECK_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""
