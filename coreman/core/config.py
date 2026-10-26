@@ -50,16 +50,20 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
     )
 
-    database_url: str = Field(alias="DATABASE_URL")
+    # 含密钥的普通 str 字段一律 repr=False：Settings 对象被写进日志或异常信息时
+    # （比如误传给 create_async_engine，ArgumentError 会带上它的 repr）不带出明文。
+    database_url: str = Field(alias="DATABASE_URL", repr=False)
     public_base_url: str = Field(alias="PUBLIC_BASE_URL")
-    master_key: str = Field(alias="MASTER_KEY")
+    master_key: str = Field(alias="MASTER_KEY", repr=False)
     # 主密钥的标识，写进新密文（enc:v2:<kid>:...）。所有进程必须配同一个值。
     master_key_id: str = Field(default=DEFAULT_KEY_ID, alias="MASTER_KEY_ID")
     # 轮换期间保留的历史密钥，`kid:base64` 逗号分隔，只用于解密旧行。
-    master_keys_previous: str = Field(default="", alias="MASTER_KEYS_PREVIOUS")
-    session_secret: str = Field(alias="SESSION_SECRET", min_length=16)
+    master_keys_previous: str = Field(default="", alias="MASTER_KEYS_PREVIOUS", repr=False)
+    session_secret: str = Field(alias="SESSION_SECRET", min_length=16, repr=False)
     bootstrap_admin_username: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_USERNAME")
-    bootstrap_admin_password: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_PASSWORD")
+    bootstrap_admin_password: str | None = Field(
+        default=None, alias="BOOTSTRAP_ADMIN_PASSWORD", repr=False
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     object_storage: Literal["local", "s3"] = Field(default="local", alias="OBJECT_STORAGE")
     object_storage_root: str = Field(default="/data/storage", alias="OBJECT_STORAGE_ROOT")
