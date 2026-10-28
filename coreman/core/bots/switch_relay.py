@@ -22,7 +22,6 @@ from coreman.core.bots.relay_policy import (
 )
 from coreman.core.bots.workspace_transfer import (
     WorkspaceMode,
-    copy_sessions,
     prepare_switch,
     target_path,
 )
@@ -132,7 +131,8 @@ async def switch_relay(
     if not same_relay or changing_directory:
         try:
             target_directory = await target_path(session, bot, target, requested_directory)
-            memory_status, reused = await prepare_switch(
+            # 会话文件在 prepare_switch 里随最后一步搬完，搬不过去的下面改为文本续接。
+            memory_status, reused, carried = await prepare_switch(
                 session,
                 bot,
                 target,
@@ -143,16 +143,6 @@ async def switch_relay(
             )
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
-        old_relay = (
-            await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
-        )
-        carried = (
-            await copy_sessions(
-                session, bot, old_relay, target, bot.working_dir, target_directory, cipher
-            )
-            if old_relay is not None
-            else set()
-        )
         # 装过的都重装，包括之前重装或升级失败、仍停在失败状态的。还是原来那个目录（共享盘、
         # 同一节点）时技能代码都在，不重装。
         if not reused:

@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -31,6 +32,8 @@ CHUNK_SIZE = 256 * 1024
 MAX_CHUNK = 2 * 1024 * 1024
 MAX_FILES = 50000
 SESSION_COPY_TIMEOUT = 5 * 60
+# 各会话的文件互不相干，并行搬；每个会话内部仍按块串行。
+SESSION_COPY_CONCURRENCY = 4
 # 会话随换机迁移所需的节点能力位，按后端区分。
 SESSION_CAPABILITY = {"claude": "session_transfer", "codex": "session_transfer_codex"}
 
@@ -310,12 +313,13 @@ async def copy_sessions(
     source_dir: str,
     target_dir: str,
     cipher: Cipher | None,
+    progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> set[uuid.UUID]:
     """把会话文件搬到目标运行时，返回搬成功的 relay 会话；搬不了的由调用方改为文本续接。
 
     只做同后端：Claude → Claude 搬对话记录，Codex → Codex 搬 thread 的 rollout 与绑定（Codex
     凭 rollout 自行补上本机状态库）。两端都要报对应能力位，老节点不报就全部文本续接。
-    尽力而为，失败不影响换机。
+    尽力而为，失败不影响换机。`progress(已完成, 总数)` 在每个会话搬完后调用。
     """
     provider = source.model_provider
     if provider not in SESSION_CAPABILITY or target.model_provider != provider:
@@ -348,20 +352,36 @@ async def copy_sessions(
                     ".jsonl"
                 )
                 grouped.setdefault(sid, []).append(item)
-            for sid, items in grouped.items():
-                try:
-                    await copy_session_files(
-                        bot, source, target, source_dir, target_dir, cipher, transfer_id, items
-                    )
-                except (AgentError, ApiError, ValueError, KeyError) as exc:
-                    log.warning(
-                        "session_copy_failed",
-                        bot_id=str(bot.id),
-                        error=type(exc).__name__,
-                        detail=getattr(exc, "detail", None),
-                    )
-                    continue
-                copied.add(uuid.UUID(sid))
+            limit = asyncio.Semaphore(SESSION_COPY_CONCURRENCY)
+
+            async def one(sid: str, items: list[dict[str, Any]]) -> str | None:
+                async with limit:
+                    try:
+                        await copy_session_files(
+                            bot, source, target, source_dir, target_dir, cipher, transfer_id, items
+                        )
+                    except (AgentError, ApiError, ValueError, KeyError) as exc:
+                        log.warning(
+                            "session_copy_failed",
+                            bot_id=str(bot.id),
+                            error=type(exc).__name__,
+                            detail=getattr(exc, "detail", None),
+                        )
+                        return None
+                    return sid
+
+            # 进度回调会提交数据库会话，只在这一个协程里调，不进并行的搬运协程。
+            jobs = [asyncio.ensure_future(one(sid, items)) for sid, items in grouped.items()]
+            try:
+                for done, finished in enumerate(asyncio.as_completed(jobs), 1):
+                    sid = await finished
+                    if sid is not None:
+                        copied.add(uuid.UUID(sid))
+                    if progress is not None:
+                        await progress(done, len(jobs))
+            finally:
+                for job in jobs:
+                    job.cancel()
     except (AgentError, ApiError, TimeoutError, ValueError, KeyError) as exc:
         log.warning("session_copy_skipped", bot_id=str(bot.id), error=type(exc).__name__)
     return copied
@@ -430,11 +450,12 @@ async def prepare_switch(
     mode: WorkspaceMode = "copy",
     directory: str,
     allow_stored_memory: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, set[uuid.UUID]]:
     """Caller owns bot row lock. Intermediate commits persist fence and recovered memory.
 
-    返回记忆状态，以及目标是不是原来那个目录（同一节点同一目录，或共享盘上的同一份）：
-    是的话文件一个没动，技能也都还在。
+    返回记忆状态、目标是不是原来那个目录（同一节点同一目录，或共享盘上的同一份：是的话文件
+    一个没动，技能也都还在），以及会话文件已搬到目标运行时的 relay 会话。
+    每一步都写进 workspace_phase 并提交，管理台据此显示进度。
 
     Final binding and ready state remain caller-transactional. A process crash leaves a
     durable fence; retry is allowed after the 30 minute deadline (work has a 25m timeout).
@@ -475,10 +496,12 @@ async def prepare_switch(
                     raise ApiError(409, 409, "目标目录属于其他员工，不能覆盖，请选择其他目录")
                 elif occupied and not old:
                     raise ApiError(409, 409, "目标目录已有内容，请明确复用本员工目录或选择新的目录")
-            # 复制会整体替换非空的目标目录；它可能就是共享盘上的同一份（路径可以不同，归属标记也可能
-            # 被 git clean -x 删掉），先探测，是就不复制。限流卡片的自动切换默认就是复制。
+            # 目标目录可能就是共享盘上的同一份（路径可以不同，归属标记也可能被 git clean -x 删掉），
+            # 先探测：是就不复制、不重装技能，两种处理方式结果一样。限流卡片的自动切换默认就是复制。
             shared = False
-            if not same_directory and mode == "copy" and old and occupied:
+            if not same_directory and old and occupied:
+                bot.workspace_phase = "确认是否为共享存储"
+                await session.commit()
                 try:
                     shared = await shared_directory(bot, old, target, directory, cipher)
                 except AgentError as exc:
@@ -537,13 +560,25 @@ async def prepare_switch(
             await memory_transfer.deploy(
                 session, bot, target, cipher, target_directory=directory, overwrite=True
             )
+            carried: set[uuid.UUID] = set()
+            if old is not None:
+                bot.workspace_phase = "迁移会话记录"
+                await session.commit()
+
+                async def report(done: int, total: int) -> None:
+                    bot.workspace_phase = f"迁移会话记录（{done}/{total}）"
+                    await session.commit()
+
+                carried = await copy_sessions(
+                    session, bot, old, target, bot.working_dir, directory, cipher, report
+                )
             # Reacquire lock before final binding, fail closed on stale operation identity.
             await session.refresh(bot, with_for_update=True)
             if bot.workspace_operation_id != operation_id:
                 raise ApiError(409, 409, "迁移状态已变化，请刷新后重试")
             await reserve_workspace(session, target.id, directory, bot_id=bot.id)
             bot.workspace_phase = "完成切换"
-            return status, same_directory or shared
+            return status, same_directory or shared, carried
     except (ApiError, AgentError, TimeoutError, ValueError, KeyError, OSError) as exc:
         log.warning(
             "workspace_migration_failed",
