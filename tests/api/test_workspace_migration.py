@@ -509,7 +509,7 @@ async def test_expired_same_runtime_directory_migration_can_retry(client, db_ses
 
     async def prepared(*args, **kwargs):
         assert kwargs["directory"] == "/data/skills/recovered"
-        return "transferred", False
+        return "transferred", False, set()
 
     monkeypatch.setattr(switch_relay, "prepare_switch", prepared)
     result = await client.post(
@@ -965,6 +965,46 @@ async def test_switch_over_shared_storage_skips_copy_even_when_asked_to_copy(
         "记住交付日期"
     )
     # 还是同一份目录，技能代码都在：不重装，状态不变。
+    row = await db_session.get(BotSkill, (bot.id, skill.id), populate_existing=True)
+    assert row.status == "installed" and reinstalled == []
+
+
+async def test_existing_mode_on_shared_storage_behaves_like_copy(
+    client, db_session, monkeypatch, tmp_path
+):
+    """共享盘上选「使用已有目录」与「复制当前文件」结果一样：识别为同一份，技能不重装。"""
+    bot, old, target, agents, seen = await _real_agents(
+        db_session, tmp_path, monkeypatch, shared=True
+    )
+    folder = tmp_path / "source" / bot.bot_key
+    kept = {name: (folder / name).read_text() for name in _untransferred_files(folder)}
+    from coreman.core.bots import switch_relay as switch_module
+    from coreman.core.db.models import BotSkill, Skill, SkillSource
+
+    source_row = SkillSource(key="tools", label="Tools", git_url="https://github.com/example/s.git")
+    db_session.add(source_row)
+    await db_session.flush()
+    skill = Skill(name="query", source_id=source_row.id, enabled=True)
+    db_session.add(skill)
+    await db_session.flush()
+    db_session.add(BotSkill(bot_id=bot.id, skill_id=skill.id, status="installed"))
+    await db_session.commit()
+    reinstalled = []
+
+    async def reinstall(session, cipher, *, bot, rows, actor):
+        reinstalled.append(rows)
+
+    monkeypatch.setattr(switch_module, "reinstall_after_switch", reinstall)
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "existing"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    assert {name: (folder / name).read_text() for name in kept} == kept
+    operations = [op for op, _ in seen]
+    assert "workspace-probe" in operations and "workspace-export" not in operations
     row = await db_session.get(BotSkill, (bot.id, skill.id), populate_existing=True)
     assert row.status == "installed" and reinstalled == []
 

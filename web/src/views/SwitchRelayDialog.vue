@@ -26,21 +26,40 @@ const targetDirectory = ref('')
 const allowStoredMemory = ref(false)
 const preview = ref<SwitchPreview>()
 const checking = ref(false)
-const progress = ref('')
+/** 换机经过的每一步：后端每进一步就更新 workspace_phase，这里轮询记下来，带上起始时间。 */
+const steps = ref<{ phase: string; at: number }[]>([])
+const now = ref(Date.now())
 let progressTimer: ReturnType<typeof setInterval> | undefined
+let checkTimer: ReturnType<typeof setTimeout> | undefined
+let checkSeq = 0
 const moving = computed(() => !!targetId.value && (targetId.value !== props.bot.relay_server_id || targetDirectory.value !== props.bot.working_dir))
 // 使用已有目录：本员工的，或没有任何员工认领（如另一套机器人系统在用的目录，直接接管）。
 // 复制当前文件会整体覆盖目标目录，但不能覆盖其他员工的目录。
 const unclaimable = computed(() => !!preview.value && (workspaceMode.value === 'existing' ? !preview.value.exists || (!preview.value.owned && preview.value.marked) : preview.value.exists && !preview.value.empty && !preview.value.owned && preview.value.marked))
 const takeover = computed(() => !!preview.value && workspaceMode.value === 'existing' && preview.value.exists && !preview.value.owned && !preview.value.marked)
 const targetBlocked = computed(() => moving.value && (!preview.value || unclaimable.value || (workspaceMode.value !== 'existing' && preview.value.exists && !preview.value.empty && !props.bot.relay_server_id) || (!!props.bot.relay_server_id && !preview.value.source_online && (!allowStoredMemory.value || !preview.value.memory_snapshot_at || workspaceMode.value === 'copy'))))
-watch(targetDirectory, () => { preview.value = undefined })
+// 选中目标或改了目录就自动检查（输入时防抖），不用再点按钮；共享盘直接判出来，处理方式不用选。
+watch(targetDirectory, () => {
+  preview.value = undefined
+  clearTimeout(checkTimer)
+  checkTimer = setTimeout(() => { void checkTarget() }, 600)
+})
 async function checkTarget() {
-  if (!targetId.value || !targetDirectory.value) return
+  clearTimeout(checkTimer)
+  if (!moving.value || !targetId.value || !targetDirectory.value) return
+  const seq = ++checkSeq
   checking.value = true
-  try { preview.value = await workspace.preview(props.bot.id, targetId.value, targetDirectory.value) } catch (e) { fail(e) } finally { checking.value = false }
+  try {
+    const result = await workspace.preview(props.bot.id, targetId.value, targetDirectory.value)
+    if (seq === checkSeq) preview.value = result
+  } catch (e) { if (seq === checkSeq) fail(e) } finally { if (seq === checkSeq) checking.value = false }
 }
-onBeforeUnmount(() => clearInterval(progressTimer))
+function track(phase: string | null | undefined): void {
+  now.value = Date.now()
+  if (phase && steps.value[steps.value.length - 1]?.phase !== phase) steps.value.push({ phase, at: now.value })
+}
+const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 1000))
+onBeforeUnmount(() => { clearInterval(progressTimer); clearTimeout(checkTimer) })
 const models = ref<string[]>([])
 const model = ref<string>('')
 /** If-Match 用的版本号：版本冲突后刷新成最新值。 */
@@ -87,6 +106,7 @@ async function pick(id: string): Promise<void> {
   preview.value = undefined
   allowStoredMemory.value = false
   targetDirectory.value = id === props.bot.relay_server_id ? props.bot.working_dir : defaultDirectory(id)
+  void checkTarget()
   try {
     const info = await relays.models(id)
     models.value = info.models
@@ -101,7 +121,11 @@ async function pick(id: string): Promise<void> {
 async function confirm(): Promise<void> {
   if (!targetId.value || !model.value || unchanged.value || targetBlocked.value || (targetId.value !== props.bot.relay_server_id && target.value?.unavailable_reason !== null)) return
   saving.value = true
-  progressTimer = setInterval(() => { void workspace.get(props.bot.id).then(s => { progress.value = s.phase || t('workspaceFiles.states.' + s.state, s.state) }).catch(() => {}) }, 3000)
+  steps.value = [{ phase: t('workspaceFiles.starting'), at: Date.now() }]
+  progressTimer = setInterval(() => {
+    now.value = Date.now()
+    void workspace.get(props.bot.id).then(s => { if (s.state === 'migrating') track(s.phase) }).catch(() => {})
+  }, 1000)
   try {
     const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value, ...(moving.value ? { workspace_mode: workspaceMode.value, target_directory: targetDirectory.value, allow_stored_memory: allowStoredMemory.value } : {}) }, version.value)
     ElMessage.success(t('bots.switch.done'))
@@ -304,22 +328,14 @@ defineExpose({ pick, confirm, checkTarget })
             />
           </el-select>
         </el-form-item>
-        <el-form-item>
-          <el-button
-            :loading="checking"
-            :disabled="saving || !targetDirectory"
-            data-test="check-workspace"
-            @click="checkTarget"
-          >
-            {{ t('workspaceFiles.check') }}
-          </el-button>
-        </el-form-item>
+        <p
+          v-if="moving && checking"
+          class="muted"
+          data-test="checking-workspace"
+        >
+          {{ t('workspaceFiles.checking') }}
+        </p>
         <template v-if="preview">
-          <el-alert
-            :title="t('workspaceFiles.checked')"
-            type="success"
-            :closable="false"
-          />
           <el-alert
             v-if="preview.shared"
             :title="t('workspaceFiles.shared')"
@@ -363,12 +379,26 @@ defineExpose({ pick, confirm, checkTarget })
         </template>
       </template>
     </el-form>
-    <el-alert
+    <div
       v-if="saving"
-      :title="progress || t('workspaceFiles.progress')"
-      type="info"
-      :closable="false"
-    />
+      class="switch-steps"
+      data-test="switch-steps"
+    >
+      <p class="muted">
+        {{ t('workspaceFiles.progress') }}
+      </p>
+      <ol>
+        <li
+          v-for="(step, i) in steps"
+          :key="i"
+          :class="{ current: i === steps.length - 1 }"
+        >
+          <span>{{ i === steps.length - 1 ? '…' : '✓' }}</span>
+          {{ step.phase }}
+          <span class="muted">{{ seconds(step.at, steps[i + 1]?.at ?? now) }}s</span>
+        </li>
+      </ol>
+    </div>
 
     <el-alert
       :title="t('bots.switch.warnings')"
@@ -409,6 +439,10 @@ defineExpose({ pick, confirm, checkTarget })
 <style scoped>
 .switch-form { margin-top: 12px; }
 .backend-change { margin-top: 8px; }
+.switch-steps { margin: 8px 0; }
+.switch-steps ol { list-style: none; padding: 0; margin: 4px 0 0; }
+.switch-steps li { padding: 2px 0; }
+.switch-steps li.current { font-weight: 600; }
 </style>
 
 <style>
