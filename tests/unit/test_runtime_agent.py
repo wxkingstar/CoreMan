@@ -1,6 +1,7 @@
 import json
 import subprocess
 import threading
+from datetime import UTC, datetime
 
 import pytest
 
@@ -115,10 +116,44 @@ def run_schedule_once(agent, monkeypatch) -> list[str]:
     return started
 
 
-def test_quota_probe_is_scheduled_for_both_providers(agent, monkeypatch):
-    assert "probe-rate-limits" in run_schedule_once(agent, monkeypatch)
+def test_quota_refresh_is_scheduled_for_both_providers(agent, monkeypatch):
+    # Claude 的额度随健康检查上报，不再单独排额度探测。
+    started = run_schedule_once(agent, monkeypatch)
+    assert "health-check" in started and "probe-rate-limits" not in started
     agent.provider = "codex"
     assert "probe-rate-limits" in run_schedule_once(agent, monkeypatch)
+
+
+def test_claude_check_skips_when_a_conversation_just_refreshed_quota(agent, monkeypatch):
+    driver = {"value": None}
+    monkeypatch.setattr(agent, "claude_limits", lambda: driver["value"])
+    calls = []
+    monkeypatch.setattr(agent, "health_check", lambda: calls.append("health"))
+    monkeypatch.setattr(agent, "probe_rate_limits", lambda: calls.append("probe"))
+    monkeypatch.setattr(agent_module.time, "time", lambda: 1_800_000_000)
+
+    def stamp(age):
+        moment = datetime.fromtimestamp(1_800_000_000 - age, UTC)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 还没有任何请求：照常检查。
+    agent.check_claude()
+    assert calls == ["health", "probe"]
+    # 5 分钟前的对话带回过额度：跳过。
+    calls.clear()
+    driver["value"] = {"five_hour": {"used_percentage": 1}, "observed_at": stamp(300)}
+    agent.check_claude()
+    assert calls == []
+    # 15 分钟以前的：照常检查。
+    driver["value"]["observed_at"] = stamp(16 * 60)
+    agent.check_claude()
+    assert calls == ["health", "probe"]
+    # 刚上报过的是上次检查自己的数据，不算对话刷新。
+    calls.clear()
+    driver["value"]["observed_at"] = stamp(60)
+    agent.claude_observed_at = stamp(60)
+    agent.check_claude()
+    assert calls == ["health", "probe"]
 
 
 def test_background_failure_log_keeps_operation_messages_only(agent, capsys):

@@ -63,7 +63,7 @@ Daemon 每次启动把随包 certifi 根证书、系统 CA 文件（OpenSSL 编�
 - 后台「编辑」可改节点名称与所属团队（团队同时应用到该节点的 Claude Code、Codex 实例，已绑定的 AI 员工不受影响）；「删除」在没有 AI 员工绑定该节点、也没有员工正在迁入时移除节点及其实例，并让节点凭证失效。删除只清理管理端记录，主机上的 Daemon 需要按上面的卸载步骤自行卸载。
 - Agent 的 Git 主机白名单是 `config.json` 中的 `git_hosts`（只写主机名，不含协议与路径；创建安装链接时可在高级设置中指定，默认 `["github.com"]`），修改后重启服务生效。节点在心跳中上报当前列表，在「运行时管理」展开节点即可查看；写成 URL 等永远匹配不到的条目会被标红。
 - 出站代理只在启动时确定一次：`config.json` 的 `proxy` 非空时覆盖 `HTTP(S)_PROXY` 与小写的两个变量；留空则沿用服务环境自带的代理变量。驱动与 Claude / Codex CLI 都继承这份环境，中间不做增删，因此改代理必须重启服务。节点在心跳中上报生效的代理与来源，在「运行时管理」展开节点即可查看：来自 CoreMan 配置、继承自服务环境，或两处都没有（标为未生效，AI 请求将直连）。`config.json` 改过但未重启时额外提示待生效。注意用户服务不读 `~/.profile`、`~/.bashrc`：systemd 用户服务的环境来自 `/etc/environment`、`~/.config/environment.d/*.conf` 或服务的 `EnvironmentFile`，launchd 则用 plist 的 `EnvironmentVariables`。
-- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。额度以对话带回为主：Claude 驱动读每次请求的 `rate_limit_event`，Codex 驱动在每轮结束后读该线程 rollout（`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`）里本轮最后一条 `token_count`，都换算成 5 小时与 7 天窗口的使用率，附在最后的 usage chunk 的 `x_rate_limits` 上，worker 在对话收尾时写入实例。没有对话的实例靠 Agent 每小时兜底一次：Codex 调用 `codex app-server` 的 `account/rateLimits/read`，Claude 读驱动 `/v1/stats` 的 `rate_limits`（来自每小时健康检查那次请求，有新数据才上报）。两种兜底都不消耗模型额度。Claude 只有订阅账号有这项数据。
+- Git/Skill/MCP、记忆同步和额度/健康探测由安装包内的 Agent 负责。额度以对话带回为主：Claude 驱动读每次请求的 `rate_limit_event`，Codex 驱动在每轮结束后读该线程 rollout（`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`）里本轮最后一条 `token_count`，都换算成 5 小时与 7 天窗口的使用率，附在最后的 usage chunk 的 `x_rate_limits` 上，worker 在对话收尾时写入实例。没有对话的实例靠 Agent 兜底：Codex 每小时调用 `codex app-server` 的 `account/rateLimits/read`，不消耗模型额度；Claude 全天每 15 分钟做一次健康检查，检查完读驱动 `/v1/stats` 的 `rate_limits` 上报（有新数据才上报），15 分钟内已有对话带回额度时跳过这次检查。Claude 只有订阅账号有这项数据。
 
 ### 退出码
 
