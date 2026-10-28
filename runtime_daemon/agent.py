@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -30,6 +31,8 @@ from .workspace import cached_digest, digest
 
 MAX_BODY = 4 * 1024 * 1024
 MAX_MEMORY = 256 * 1024
+# Claude 健康检查间隔；对话在这段时间内已带回额度时跳过本次检查。
+CLAUDE_CHECK_INTERVAL = 15 * 60
 # 换机带走的 Claude 会话文件：单个会话的对话记录、子代理与附件，总量与个数都有上限。
 SESSION_CHUNK = 2 * 1024 * 1024
 SESSION_TOTAL = 512 * 1024 * 1024
@@ -906,6 +909,18 @@ class Agent:
         if self.provider != "codex":
             self.claude_observed_at = data.get("observed_at")
 
+    def check_claude(self) -> None:
+        """健康检查顺带刷新额度；对话刚带回过额度（worker 已写库）就不再发检查请求。"""
+        data = self.claude_limits()
+        observed = data.get("observed_at") if data else None
+        # 与已上报的不同，说明是检查之外的对话刷新的。
+        if observed and observed != self.claude_observed_at:
+            at = datetime.fromisoformat(observed.replace("Z", "+00:00")).timestamp()
+            if time.time() - at < CLAUDE_CHECK_INTERVAL:
+                return
+        self.health_check()
+        self.probe_rate_limits()
+
     def codex_limits(self) -> dict:
         proc = subprocess.Popen(
             ["codex", "app-server"],
@@ -1121,12 +1136,13 @@ class Agent:
         def loop():
             # 从负无穷起算：monotonic 是开机时长，刚开机的主机也要在启动后立即跑第一轮。
             last_quota, last_memory, last_health = -math.inf, -math.inf, ""
-            last_worktrees = -math.inf
+            last_worktrees, last_claude = -math.inf, -math.inf
             while not self.stop.is_set():
                 now = time.monotonic()
                 local = time.localtime()
                 slot = time.strftime("%Y-%m-%d-%H", local)
-                if now - last_quota >= 3600:
+                # Claude 的额度由 check_claude 随健康检查上报。
+                if self.provider == "codex" and now - last_quota >= 3600:
                     self.start_background("probe-rate-limits", self.probe_rate_limits)
                     last_quota = now
                 if os.environ.get("COREMAN_MEMORY_SYNC", "1") == "1" and now - last_memory >= 3600:
@@ -1137,7 +1153,11 @@ class Agent:
                 if now - last_worktrees >= 1800:
                     self.start_background("refresh-worktrees", self.refresh_worktrees)
                     last_worktrees = now
-                if 9 <= local.tm_hour <= 23 and slot != last_health:
+                if self.provider == "claude":
+                    if now - last_claude >= CLAUDE_CHECK_INTERVAL:
+                        self.start_background("health-check", self.check_claude)
+                        last_claude = now
+                elif 9 <= local.tm_hour <= 23 and slot != last_health:
                     self.start_background("health-check", self.health_check)
                     last_health = slot
                 self.stop.wait(10)
