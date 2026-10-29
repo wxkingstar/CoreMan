@@ -341,20 +341,21 @@ class RuntimeAgent(Agent):
                     # Probe stays under the selected project root and cannot execute tools.
                     directory = self.root / ".coreman-health"
                     directory.mkdir(exist_ok=True)
-                    response = client.post(
-                        "/v1/chat/completions",
-                        json={
-                            "model": self.model,
-                            "stream": False,
-                            "session_id": "",
-                            "working_dir": str(directory),
-                            "max_turns": 1,
-                            "permission_mode": "plan" if self.provider == "claude" else "read-only",
-                            "messages": [
-                                {"role": "user", "content": "Reply OK. Do not use any tools."}
-                            ],
-                        },
-                    )
+                    probe = {
+                        "stream": False,
+                        "session_id": "",
+                        "working_dir": str(directory),
+                        "max_turns": 1,
+                        "permission_mode": "plan" if self.provider == "claude" else "read-only",
+                        "messages": [
+                            {"role": "user", "content": "Reply OK. Do not use any tools."}
+                        ],
+                    }
+                    # Claude 用驱动的默认模型：模型列表第一个未必是账号能直接用的
+                    # （如需要额外付费的模型），检查失败就拿不到额度。
+                    if self.provider != "claude":
+                        probe["model"] = self.model
+                    response = client.post("/v1/chat/completions", json=probe)
                     body = response.json()
                     text = json.dumps(body).lower()
                     if response.status_code in {401, 403} or any(

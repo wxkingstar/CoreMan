@@ -281,3 +281,26 @@ func TestBufferedStreamReadyErrorEmitsInStreamErrorChunk(t *testing.T) {
 		t.Errorf("body missing [DONE]:\n%s", s)
 	}
 }
+
+// A failed result (here: the account needs extra credits for the model) comes
+// back as text; the non-stream reply flags it so the health check reports down.
+func TestNonStreamFlagsFailedResultAsRelayError(t *testing.T) {
+	for _, tc := range []struct {
+		result string
+		want   bool
+	}{
+		{`{"type":"result","subtype":"success","is_error":true,"result":"Credit balance required"}`, true},
+		{`{"type":"result","subtype":"success","result":"OK"}`, false},
+	} {
+		writeFakeClaude(t, "/bin/cat >/dev/null\necho '"+tc.result+"'\n")
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		handleNonStreamResponse(w, r, []string{"--model", "m"}, "hi", "chat-h", 1, "m", false, "", nil, "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", w.Code, w.Body.String())
+		}
+		if got := strings.Contains(w.Body.String(), `"x_relay_error":true`); got != tc.want {
+			t.Errorf("result %s: x_relay_error=%v, want %v (%s)", tc.result, got, tc.want, w.Body.String())
+		}
+	}
+}

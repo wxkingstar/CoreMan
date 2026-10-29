@@ -245,8 +245,12 @@ def test_no_persistent_claude_modes_in_release_source():
     assert '"socket"' in source
 
 
-@pytest.mark.parametrize("provider,mode", [("claude", "plan"), ("codex", "read-only")])
-def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provider, mode):
+@pytest.mark.parametrize(
+    "provider,mode,model",
+    # Claude 交给驱动选默认模型，不用模型列表第一个。
+    [("claude", "plan", None), ("codex", "read-only", "test-model")],
+)
+def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provider, mode, model):
     from runtime_daemon.daemon import RuntimeAgent
 
     daemon.socket_dir = daemon.data_dir
@@ -278,6 +282,7 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
     monkeypatch.setattr(agent, "report", lambda endpoint, body: reports.append(body))
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
+    assert captured[0].get("model") == model
     assert reports[0]["status"] == "healthy"
 
 
