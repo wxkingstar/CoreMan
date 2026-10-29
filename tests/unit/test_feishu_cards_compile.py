@@ -55,6 +55,11 @@ def test_header_block_becomes_card_header_and_summary() -> None:
     assert card["config"]["summary"] == {"content": "经营日报 · 9 月 25 日"}
     assert card["config"]["width_mode"] == "fill"
     assert "header" not in tags(card["body"])
+    # 副标题放正文第一行：header 里的 subtitle 在窄屏只显示一行且点不开。
+    assert "subtitle" not in card["header"]
+    first = card["body"]["elements"][0]
+    assert first["tag"] == "div"
+    assert first["text"]["content"] == "数据截至 23:59"
 
 
 def test_adjacent_half_blocks_share_one_row() -> None:

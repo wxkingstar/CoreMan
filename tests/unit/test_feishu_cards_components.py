@@ -107,7 +107,6 @@ def test_header_maps_title_tags_template_and_icon() -> None:
     )
     assert c.render_header(block) == {
         "title": {"tag": "plain_text", "content": "日报"},
-        "subtitle": {"tag": "plain_text", "content": "数据截至 23:59"},
         "text_tag_list": [
             {
                 "tag": "text_tag",

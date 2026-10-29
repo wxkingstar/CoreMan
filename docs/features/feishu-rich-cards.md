@@ -28,7 +28,7 @@ AI 员工编辑页 →「更多设置」→ 体验 →「富卡片回复」，�
 
 | 类型 | 用途 | 主要字段 |
 |---|---|---|
-| `header` | 卡片标题栏（放在最前面，只取第一个） | `title`、`subtitle`、`tags[{text,color}]`、`color`（green 完成、orange 警告、red 异常） |
+| `header` | 卡片标题栏（放在最前面，只取第一个；`subtitle` 显示为正文第一行灰字，因为飞书标题栏的副标题只显示一行、窄屏截断后点不开） | `title`、`subtitle`、`tags[{text,color}]`、`color`（green 完成、orange 警告、red 异常） |
 | `kpi` | 指标块，一行 2–4 个，手机上自动 2×2 | `items[{label,value,delta,good,note}]`、`columns`、`size` |
 | `chart` | 图表 | 见下文 |
 | `table` | 需要列类型时的表格（普通 GFM 表格会自动转换） | `columns[{key,title,type,align}]`、`rows`、`page_size`、`title` |
