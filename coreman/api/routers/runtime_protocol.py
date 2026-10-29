@@ -340,6 +340,7 @@ async def enroll(
             capabilities={},
             heartbeat_at=now(),
             protocol_version=body.protocol,
+            ip=client_ip(request),
         )
         session.add(node)
         await session.flush()
@@ -412,6 +413,7 @@ async def heartbeat(
         .where(RuntimeNode.id == node.id)
         .values(
             heartbeat_at=now(),
+            ip=client_ip(request),
             version=body.version,
             service_status=body.service_status,
             protocol_version=body.protocol,

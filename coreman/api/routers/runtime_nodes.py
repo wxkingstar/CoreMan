@@ -273,6 +273,7 @@ async def list_nodes(
                 "name": n.name,
                 "hostname": n.hostname,
                 "username": n.username,
+                "ip": str(n.ip) if n.ip else None,
                 "platform": n.platform,
                 "architecture": n.architecture,
                 "environment": n.environment,

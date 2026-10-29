@@ -249,6 +249,25 @@ async def test_heartbeat_concurrency_is_listed_and_legacy_nodes_stay_unknown(cli
     assert (await client.post(endpoint, headers=headers, json=invalid)).status_code == 422
 
 
+async def test_node_source_ip_is_recorded_on_enroll_and_heartbeat(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+
+    async def listed():
+        nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+        return next(n for n in nodes if n["id"] == body["node_id"])["ip"]
+
+    # 测试客户端经 ASGITransport 连入，来源地址固定为 127.0.0.1。
+    assert await listed() == "127.0.0.1"
+    node = await db_session.get(RuntimeNode, uuid.UUID(body["node_id"]))
+    node.ip = None
+    await db_session.commit()
+    assert await listed() is None
+    beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}
+    response = await client.post("/api/runtime/heartbeat", headers=headers, json=beat)
+    assert response.status_code == 200
+    assert await listed() == "127.0.0.1"
+
+
 async def test_heartbeat_git_hosts_are_listed_without_rejecting_a_bad_config(client, db_session):
     _, body, headers = await enrollment(client, db_session)
     beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}

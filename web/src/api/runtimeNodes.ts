@@ -8,6 +8,8 @@ export interface RuntimeNode {
   root_edit_supported?: boolean
   root_change?: { id: string; path: string; status: 'pending' | 'applied' | 'failed' } | null
   id: string; name: string; hostname: string; username: string
+  /** 最近一次注册或心跳的来源 IP（经 NAT 时是出口 IP）；升级前未记录时为 null。 */
+  ip: string | null
   platform: string; architecture: string; environment: string; workspace_root: string
   version: string; online: boolean; is_active: boolean; draining: boolean
   heartbeat_at: string | null; service_status: string; team_id: string | null; team_name: string | null
