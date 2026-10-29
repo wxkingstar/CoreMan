@@ -27,7 +27,9 @@ user explicitly asks for a chart, table or similar.
 
 Types:
 - header: {"title", "subtitle"?, "tags"?: [{"text", "color"?}], \
-"color"?: blue|green|orange|red|grey|turquoise} — at most one, first.
+"color"?: blue|green|orange|red|grey|turquoise} — at most one, first. The title is one short \
+conclusion (about 20 Chinese characters or 40 letters) because phone screens cut a long title; \
+put figures and details in `subtitle`, a `callout` or the body.
 - kpi: {"items": [{"label", "value", "delta"?, "good"?: true|false, "note"?}], \
 "size"?: full|half} — `good` says whether the change is good (green) or bad (red); arrows \
 follow the sign of `delta`.

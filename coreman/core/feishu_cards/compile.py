@@ -28,6 +28,7 @@ from coreman.core.feishu_cards.components import (
     render_note,
     render_people,
     render_raw,
+    render_subtitle,
     render_table,
     render_timeline,
     two_columns,
@@ -422,6 +423,8 @@ class _Builder:
         if isinstance(model, HeaderBlock):
             if self.header is None:
                 self.header = render_header(model)
+                if model.subtitle:
+                    self.add(_Unit(render_subtitle(model, self.ctx), model.subtitle))
             else:
                 self.add_markdown(text)
             return

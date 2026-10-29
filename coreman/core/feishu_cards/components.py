@@ -212,10 +212,8 @@ def columns(cols: list[list[dict[str, Any]]], ctx: RenderContext) -> dict[str, A
 
 
 def render_header(block: HeaderBlock) -> dict[str, Any]:
-    """卡片的 header 字段（不是 body 里的组件）。"""
+    """卡片的 header 字段（不是 body 里的组件）。副标题不放这里，见 render_subtitle。"""
     header: dict[str, Any] = {"title": {"tag": "plain_text", "content": block.title}}
-    if block.subtitle:
-        header["subtitle"] = {"tag": "plain_text", "content": block.subtitle}
     if block.tags:
         header["text_tag_list"] = [
             {
@@ -231,6 +229,14 @@ def render_header(block: HeaderBlock) -> dict[str, Any]:
     if icon:
         header["icon"] = icon
     return header
+
+
+def render_subtitle(block: HeaderBlock, ctx: RenderContext) -> list[dict[str, Any]]:
+    """副标题作正文第一行灰字。飞书 header 的 subtitle 只显示一行，窄屏截断后点不开。"""
+    if not block.subtitle:
+        return []
+    text = {"tag": "plain_text", "content": block.subtitle, "text_color": "grey"}
+    return [{"tag": "div", "element_id": ctx.new_id("subtitle"), "text": text}]
 
 
 # ---------------------------------------------------------------- 指标块
