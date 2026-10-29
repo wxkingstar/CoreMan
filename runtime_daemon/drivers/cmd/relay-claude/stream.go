@@ -661,6 +661,13 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, args []stri
 		}},
 		Usage: usage,
 	}
+	// A failed result (credits required, usage limit, API error) carries the
+	// explanation as text; flag it so the health check does not count it as a reply.
+	for i := range events {
+		if events[i].Type == "result" && events[i].IsError {
+			resp.XRelayError = true
+		}
+	}
 
 	sessionStore.LogDelta(sessionID, fullText)
 	sessionStore.LogDone(sessionID, usage)
