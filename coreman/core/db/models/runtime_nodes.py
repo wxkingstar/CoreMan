@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, Uuid, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, TimestampMixin
@@ -43,6 +43,8 @@ class RuntimeNode(TimestampMixin, Base):
     git_hosts: Mapped[list[str] | None] = mapped_column(JSONB)
     # CLI 继承到的出站代理 {source, url, pending}，由心跳上报、只读展示；旧节点不上报时为空。
     proxy: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # 最近一次注册或心跳的来源 IP（平台看到的地址，经 NAT 时是出口 IP）。
+    ip: Mapped[str | None] = mapped_column(INET)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):

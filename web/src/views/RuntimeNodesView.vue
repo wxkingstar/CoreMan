@@ -80,7 +80,7 @@ function installPayload(): InstallInput {
   const pem = ca_pem.trim()
   return { ...form, options: pem ? { ...options, ca_pem: pem } : options }
 }
-const filtered = computed(() => nodes.value.filter(n => `${n.name} ${n.hostname} ${n.username} ${n.workspace_root}`.toLowerCase().includes(query.value.toLowerCase())))
+const filtered = computed(() => nodes.value.filter(n => `${n.name} ${n.hostname} ${n.username} ${n.ip ?? ''} ${n.workspace_root}`.toLowerCase().includes(query.value.toLowerCase())))
 let timer: ReturnType<typeof setInterval> | undefined
 let fetching = false
 /** 按 id 把新数据写进已有行对象：行不重建，展开的详情和其中的组件保持原状，只有变化的字段重绘。 */
@@ -360,6 +360,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               <template #default="{ row }: { row: RuntimeNode }">
                 <strong>{{ row.name }}</strong><div class="muted">
                   {{ row.username }}@{{ row.hostname }}
+                </div><div
+                  v-if="row.ip"
+                  class="muted"
+                >
+                  IP {{ row.ip }}
                 </div><div class="muted">
                   {{ row.platform }} / {{ row.architecture }} / {{ row.environment }}
                 </div>
