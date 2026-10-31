@@ -1,6 +1,8 @@
 import { call, http } from './client'
 import type { RelayOut } from './types'
 export interface Capability {
+  /** CLI 登录的账号邮箱；旧版 Daemon 未上报或读不到时缺省或为空。 */
+  account?: string
   installed: boolean; version: string; login: 'ready' | 'required' | 'unknown'
   health: string; detail: string; models: string[]
 }

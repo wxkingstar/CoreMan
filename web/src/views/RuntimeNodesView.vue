@@ -381,6 +381,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 <template #default="{ row }: { row: RuntimeNode }">
                   <span>{{ capabilityState(row, provider) }}</span><div class="muted">
                     {{ row.capabilities[provider]?.version }}
+                  </div><div
+                    v-if="row.capabilities[provider]?.account"
+                    class="muted"
+                  >
+                    {{ row.capabilities[provider]?.account }}
                   </div>
                 </template>
               </el-table-column>

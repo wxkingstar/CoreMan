@@ -20,7 +20,7 @@ it('submits a changed project root and explains acknowledgement', async () => {
 vi.mock('@/api/runtimeNodes', () => ({ runtimeNodes: {
   // 每次返回新对象：页面把刷新结果合并进已有行对象，共用一个对象会让前一个用例的数据漏进后一个。
   list: vi.fn(async () => [{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
-    team_id: null, team_name: null, root_edit_supported: true, capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
+    team_id: null, team_name: null, root_edit_supported: true, capabilities: { claude: { installed: true, version: 'v1', login: 'ready', account: 'ops@example.com' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }]),
   links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), remove: vi.fn(), revokeLink: vi.fn(),
 } }))
 vi.mock('@/api/admin', () => ({ relays: { probe: vi.fn() }, teams: { list: vi.fn().mockResolvedValue([{ id: 'team1', slug: 'dev', name_zh: '研发', name_ja: null, name_en: null }]) }, catalog: { list: vi.fn().mockResolvedValue([]) } }))
@@ -37,6 +37,7 @@ it('shows one runtime with separate Claude/Codex login states', async () => {
   expect(wrapper.text()).toContain('Codex / GPT')
   expect(wrapper.text()).toContain('已登录')
   expect(wrapper.text()).toContain('待登录')
+  expect(wrapper.text()).toContain('ops@example.com')
   expect(wrapper.find('[data-test="install-runtime"]').exists()).toBe(false)
   expect(wrapper.find('[data-test="edit-runtime"]').exists()).toBe(false)
   expect(wrapper.find('[data-test="delete-runtime"]').exists()).toBe(false)
