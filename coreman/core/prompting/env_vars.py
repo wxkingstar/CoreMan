@@ -58,6 +58,8 @@ def is_reserved_key(key: str) -> bool:
             "COREMAN_SCHEDULE_",
             "COREMAN_CREDENTIAL_",
             "COREMAN_CLOUD_",
+            # 业务系统 MCP 的挂载表（见 core/auth/system_access.py）。
+            "COREMAN_SYSTEM_MCP",
         )
     )
 

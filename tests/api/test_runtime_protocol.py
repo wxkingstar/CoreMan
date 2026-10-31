@@ -347,6 +347,7 @@ async def test_heartbeat_preserves_personal_mode_capability_and_clears_on_omissi
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
         "resume_fallback_v1",
+        "system_mcp_v1",
     )
     for declared in (dict.fromkeys(flags, True), {}):
         response = await client.post(

@@ -80,6 +80,11 @@ func RedactCollaborationToken(text string, env map[string]string) string {
 			text = strings.ReplaceAll(text, token, "[REDACTED]")
 		}
 	}
+	for key, token := range env {
+		if strings.HasPrefix(key, SpeakerTokenPrefix) && token != "" {
+			text = strings.ReplaceAll(text, token, "[REDACTED]")
+		}
+	}
 	return text
 }
 

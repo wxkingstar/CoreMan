@@ -44,7 +44,7 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") || strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
 			continue
 		}
 		env = append(env, e)
@@ -189,6 +189,18 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		out.Args = append(out.Args, "-c", "mcp_servers.coreman_systems.url="+string(encodedURL), "-c", `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "-c", "mcp_servers.coreman_systems.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_systems.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_systems.enabled=false")
+	}
+
+	// Business systems served as MCP servers, each with the speaker's own
+	// token for this turn; a system whose token was not issued is disabled.
+	for _, m := range openai.SystemMCPs(req.EnvVars) {
+		prefix := "mcp_servers." + openai.SystemMCPName(m.Key)
+		if m.URL != "" {
+			encodedURL, _ := json.Marshal(m.URL)
+			out.Args = append(out.Args, "-c", prefix+".url="+string(encodedURL), "-c", prefix+`.bearer_token_env_var="`+openai.SystemMCPTokenEnv(m.Key)+`"`, "-c", prefix+".enabled=true")
+		} else {
+			out.Args = append(out.Args, "-c", prefix+`.url="http://127.0.0.1:1/disabled"`, "-c", prefix+".enabled=false")
+		}
 	}
 
 	// MCP skills installed into the working directory's .mcp.json.

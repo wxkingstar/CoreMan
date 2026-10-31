@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,11 +30,14 @@ from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.db.models import (
     ApiClient,
     Bot,
+    BotSkill,
     BotSystemGrant,
     BusinessSystem,
     JwtKey,
+    Skill,
     User,
 )
+from coreman.core.knowledge import installation as installs
 from coreman.core.systems_catalog.compiler import same_origin
 
 router = APIRouter(
@@ -53,8 +56,12 @@ class SystemIn(BaseModel):
     # openapi_url 的旧名，本版本仍接受；两者都给时以 openapi_url 为准。
     sitemap_url: str | None = Field(default=None, max_length=2048, exclude=True)
     token_provider: str = Field(default="builtin", min_length=1, max_length=100)
-    # env：令牌下发到运行环境；proxy：只经平台代理调用（systems_call），令牌不进运行环境。
-    token_delivery: Literal["env", "proxy"] = "env"
+    # env：令牌下发到运行环境；proxy：只经平台代理调用（systems_call），令牌不进运行环境；
+    # mcp：系统是一个 MCP 服务（mcp_url），运行时每轮带着发言者令牌挂载。
+    token_delivery: Literal["env", "proxy", "mcp"] = "env"
+    mcp_url: str | None = Field(default=None, max_length=2048)
+    # 授权给机器人时自动安装的技能；要能不经审批、不填参数直接装上。
+    companion_skill_id: uuid.UUID | None = None
     token_audience: str | None = Field(default=None, max_length=2048)
     access_test_url: str | None = Field(default=None, max_length=2048)
     enabled: bool = True
@@ -66,7 +73,7 @@ class SystemIn(BaseModel):
     allowed_bot_ids: list[uuid.UUID] | None = Field(default_factory=list, max_length=500)
 
     @field_validator(
-        "token_audience", "access_test_url", "openapi_url", "sitemap_url", mode="before"
+        "token_audience", "access_test_url", "openapi_url", "sitemap_url", "mcp_url", mode="before"
     )
     @classmethod
     def normalize_optional(cls, value: Any) -> Any:
@@ -97,6 +104,22 @@ class SystemIn(BaseModel):
                 or url.password
             ):
                 raise ValueError("请输入不带凭证的 HTTP(S) 地址")
+        return value
+
+    @field_validator("mcp_url")
+    @classmethod
+    def valid_mcp_url(cls, value: str | None) -> str | None:
+        if value:
+            url = urlsplit(value)
+            if (
+                url.scheme != "https"
+                or not url.hostname
+                or url.username
+                or url.password
+                or url.fragment
+                or any(c.isspace() for c in value)
+            ):
+                raise ValueError("MCP 地址须为不带凭证和片段的 HTTPS 地址")
         return value
 
 
@@ -153,6 +176,8 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "base_url",
             "openapi_url",
             "token_delivery",
+            "mcp_url",
+            "companion_skill_id",
             "token_provider",
             "token_audience",
             "access_test_url",
@@ -252,6 +277,32 @@ def validate_provider_settings(
             raise ApiError(422, 422, "测试地址必须与系统地址同源且不含片段")
 
 
+async def validate_delivery(session: AsyncSession, values: dict[str, Any]) -> None:
+    if values["token_delivery"] == "mcp":
+        if not values.get("mcp_url"):
+            raise ApiError(422, 422, "MCP 系统必须填写 MCP 地址")
+        if values.get("openapi_url"):
+            raise ApiError(422, 422, "MCP 系统不使用 OpenAPI 操作目录")
+    elif values.get("mcp_url"):
+        raise ApiError(422, 422, "只有 MCP 交付的系统可以填写 MCP 地址")
+    skill_id = values.get("companion_skill_id")
+    if skill_id:
+        # 默认授权所有机器人的系统没有授权动作，配套技能无从自动安装。
+        if values.get("default_for_all_bots"):
+            raise ApiError(422, 422, "默认授权所有机器人的系统不能设置配套技能")
+        problem = installs.companion_problem(await session.get(Skill, skill_id))
+        if problem:
+            raise ApiError(422, 422, problem)
+
+
+def delivery_audit(values: dict[str, Any]) -> dict[str, Any]:
+    skill_id = values.get("companion_skill_id")
+    return {
+        "mcp_url": values.get("mcp_url"),
+        "companion_skill_id": str(skill_id) if skill_id else None,
+    }
+
+
 @router.get("/token-providers")
 async def list_token_providers(request: Request, user: User = Depends(MANAGERS)) -> dict[str, Any]:
     providers = request.app.state.settings.business_token_providers
@@ -292,6 +343,7 @@ async def create_system(
     await check_bots(session, body.allowed_bot_ids)
     values = body.row_values()
     validate_provider_settings(request, values)
+    await validate_delivery(session, values)
     row = BusinessSystem(**values)
     session.add(row)
     await persist(session)
@@ -303,9 +355,20 @@ async def create_system(
         "system",
         row.key,
         {
-            field: [None, getattr(row, field)]
-            for field in ("token_provider", "token_delivery", "token_audience", "access_test_url")
-            if getattr(row, field) is not None
+            field: [None, value]
+            for field, value in (
+                {
+                    field: getattr(row, field)
+                    for field in (
+                        "token_provider",
+                        "token_delivery",
+                        "token_audience",
+                        "access_test_url",
+                    )
+                }
+                | delivery_audit(values)
+            ).items()
+            if value is not None
         },
     )
     await persist(session, commit=True)
@@ -346,13 +409,16 @@ async def update_system(
     values = body.row_values()
     catalog_source = (row.base_url, row.openapi_url)
     provider_fields = ("token_provider", "token_delivery", "token_audience", "access_test_url")
-    for field in provider_fields:
+    # 旧管理台不认识 MCP 两项，不传时沿用库里的值。
+    for field in (*provider_fields, "mcp_url", "companion_skill_id"):
         if field not in body.model_fields_set:
             values[field] = getattr(row, field)
     validate_provider_settings(request, values, row.token_provider)
+    await validate_delivery(session, values)
     provider_diff = diff_dict(
-        {field: getattr(row, field) for field in provider_fields},
-        {field: values[field] for field in provider_fields},
+        {field: getattr(row, field) for field in provider_fields}
+        | delivery_audit({"mcp_url": row.mcp_url, "companion_skill_id": row.companion_skill_id}),
+        {field: values[field] for field in provider_fields} | delivery_audit(values),
     )
     for field, value in values.items():
         setattr(row, field, value)
@@ -397,6 +463,10 @@ async def delete_system(
         raise not_found("系统不存在")
     require_if_match(request, row.version)
     await session.delete(row)
+    # 已随系统装上的技能留给机器人，改按手动安装处理。
+    await session.execute(
+        update(BotSkill).where(BotSkill.installed_by_system == key).values(installed_by_system=None)
+    )
     await audit(session, request, user, "system.delete", "system", key)
     await persist(session, commit=True)
     return {"code": 0, "data": None}
@@ -477,17 +547,81 @@ async def put_grants(
             for key in keys
         ]
     )
+    installed, uninstalled = await sync_companions(
+        session,
+        request,
+        user,
+        bot,
+        systems,
+        set(before),
+        set(before) - set(keys),
+    )
     bot.version += 1
     await persist(session)
     await notify_bot_changed(session, bot.id)
     # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
     diff = diff_dict(
         {"system_keys": sorted(before), "write_keys": writes_before},
-        {"system_keys": keys, "write_keys": writes, "comment": body.comment or None},
+        {
+            "system_keys": keys,
+            "write_keys": writes,
+            "comment": body.comment or None,
+            "companion_installed": installed or None,
+            "companion_uninstalled": uninstalled or None,
+        },
     )
     await audit(session, request, user, "bot.system_grants", "bot", str(bot_id), diff)
     await persist(session, commit=True)
     return {"code": 0, "data": {"system_keys": keys, "write_keys": writes, "version": bot.version}}
+
+
+async def sync_companions(
+    session: AsyncSession,
+    request: Request,
+    user: User,
+    bot: Bot,
+    granted: list[BusinessSystem],
+    before: set[str],
+    removed: set[str],
+) -> tuple[list[str], list[str]]:
+    """新授权的系统装上配套技能，撤销的系统卸掉随它装上的技能。返回两边的技能 id。
+
+    仍被其他已授权系统用作配套的技能不卸载。
+    """
+    installed: list[str] = []
+    for system in granted:
+        if system.key in before or system.companion_skill_id is None:
+            continue
+        skill = await session.get(Skill, system.companion_skill_id)
+        if skill is None:
+            continue
+        if await installs.install_companion(
+            session,
+            request.app.state.cipher,
+            bot=bot,
+            skill=skill,
+            actor=user,
+            system_key=system.key,
+        ):
+            installed.append(str(skill.id))
+    uninstalled: list[str] = []
+    if removed:
+        rows = list(
+            await session.scalars(
+                select(BotSkill).where(
+                    BotSkill.bot_id == bot.id,
+                    BotSkill.installed_by_system.in_(removed),
+                    BotSkill.status != "uninstalled",
+                )
+            )
+        )
+        still_needed = {s.companion_skill_id for s in granted}
+        for row in rows:
+            if row.skill_id in still_needed:
+                continue
+            await installs.uninstall(session, bot, row, user)
+            uninstalled.append(str(row.skill_id))
+    return installed, uninstalled
 
 
 @router.get("/api-clients")

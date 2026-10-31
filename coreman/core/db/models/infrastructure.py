@@ -24,7 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
-TOKEN_DELIVERIES = ("env", "proxy")
+TOKEN_DELIVERIES = ("env", "proxy", "mcp")
 
 
 class BusinessSystem(TimestampMixin, Base):
@@ -41,8 +41,14 @@ class BusinessSystem(TimestampMixin, Base):
     openapi_url: Mapped[str | None] = mapped_column(Text)
     # 已改名为 openapi_url：保留一个版本给滚动升级中的旧进程读，写入时与 openapi_url 同值。
     sitemap_url: Mapped[str | None] = mapped_column(Text)
-    # env：令牌按 BOT_TOKEN_<KEY> 下发到运行环境；proxy：由平台代理调用，令牌不进运行环境。
+    # env：令牌按 BOT_TOKEN_<KEY> 下发到运行环境；proxy：由平台代理调用，令牌不进运行环境；
+    # mcp：系统本身是一个 MCP 服务（mcp_url），运行时每轮带着发言者令牌挂载它。
     token_delivery: Mapped[str] = mapped_column(Text, server_default=text("'env'"))
+    mcp_url: Mapped[str | None] = mapped_column(Text)
+    # 授权给机器人时自动安装的技能，一般是这个系统的用法说明。
+    companion_skill_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("skills.id", ondelete="SET NULL")
+    )
     token_provider: Mapped[str] = mapped_column(Text, server_default=text("'builtin'"))
     token_audience: Mapped[str | None] = mapped_column(Text)
     access_test_url: Mapped[str | None] = mapped_column(Text)

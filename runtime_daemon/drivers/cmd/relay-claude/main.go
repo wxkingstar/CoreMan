@@ -221,6 +221,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"owner_session_view_v1": true,
 			// The business system catalog MCP (coreman_systems) can be mounted.
 			"systems_catalog_v1": true,
+			// Business systems served as MCP servers (system_<key>) can be mounted.
+			"system_mcp_v1": true,
 			// A resume_fallback note is used when --resume finds no session.
 			"resume_fallback_v1": true,
 		},

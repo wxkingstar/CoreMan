@@ -24,8 +24,16 @@ from coreman.core.auth.token_providers import (
     issue_system_token,
 )
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotSystemGrant, BusinessSystem, User
+from coreman.core.db.models import (
+    Bot,
+    BotSystemGrant,
+    BusinessSystem,
+    RelayServer,
+    RuntimeNode,
+    User,
+)
 from coreman.core.prompting.system_prompt import Speaker
+from coreman.core.relay.models import backend_of
 from coreman.core.systems_catalog import policy as catalog_policy
 
 
@@ -117,6 +125,27 @@ def token_env_var(system_key: str) -> str:
     return f"BOT_TOKEN_{system_key.upper()}"
 
 
+# 驱动能按 COREMAN_SYSTEM_MCPS 把 mcp 系统挂成 system_<key>。旧节点上这类系统一律显示不可用。
+MCP_RUNTIME_CAPABILITY = "system_mcp_v1"
+# 本轮要挂载的 MCP 系统：[{"key", "url"}]，url 为空表示本轮签发失败、驱动要显式禁用它。
+# 令牌和 env 系统一样放在 BOT_TOKEN_<KEY>，驱动按 key 找到它作为 Bearer 发送。
+MCP_MOUNTS_ENV = "COREMAN_SYSTEM_MCPS"
+
+
+def mcp_server_name(system_key: str) -> str:
+    return f"system_{system_key}"
+
+
+async def mcp_runtime_supported(session: AsyncSession, *, relay: RelayServer, model: str) -> bool:
+    if relay.runtime_node_id is None:
+        return False
+    node = await session.get(RuntimeNode, relay.runtime_node_id, populate_existing=True)
+    if node is None or not node.is_active:
+        return False
+    capability = (node.capabilities or {}).get(backend_of(model, relay.model_provider)) or {}
+    return isinstance(capability, dict) and capability.get(MCP_RUNTIME_CAPABILITY) is True
+
+
 def auth_mode(system: BusinessSystem) -> str:
     """内置签发方走 Cookie，外部签发方一律 Bearer（与 token_providers 的签发结果一致）。"""
     return "cookie" if system.token_provider == "builtin" else "bearer"
@@ -197,13 +226,24 @@ IDENTITY_UNAVAILABLE_NOTE = (
 )
 
 
-def systems_prompt(systems: list[BusinessSystem], *, mounted: bool) -> str:
+def systems_prompt(
+    systems: list[BusinessSystem], *, mounted: bool, mcp_supported: bool = False
+) -> str:
     """「业务系统访问」段。只用机器人的授权与运行时能力，不碰发言者和目录内容：
     同一会话里逐字不变（目录刷新、换人都不会改它）。"""
     if not systems:
         return ""
     lines = []
     for system in systems:
+        if system.token_delivery == "mcp":
+            lines.append(
+                f"- {system.name} ({system.key})：MCP 服务 `{mcp_server_name(system.key)}`"
+                "（用它的工具调用，平台已按当前发言者鉴权，不需要也拿不到令牌）"
+                if mcp_supported
+                else f"- {system.name}: 无法调用。这个系统只通过 MCP 提供，当前运行环境不支持。"
+                "不得改用其他身份或历史凭据。"
+            )
+            continue
         catalog = "，可查操作目录" if mounted and system.openapi_url else ""
         if system.token_delivery == "proxy":
             lines.append(
@@ -220,7 +260,7 @@ def systems_prompt(systems: list[BusinessSystem], *, mounted: bool) -> str:
         )
     prompt = "## 业务系统访问\n\n" + "\n".join(lines)
     prompt += "\n\n完整配置见 `$COREMAN_SYSTEMS`（兼容 `$BOT_SYSTEMS_CONFIG`）。"
-    if any(system.token_delivery != "proxy" for system in systems):
+    if any(system.token_delivery == "env" for system in systems):
         prompt += (
             "令牌每轮按当前发言者重新签发（业务系统账号见 `$COREMAN_USER_SUBJECT`）。"
             "按配置的 auth_mode 使用令牌，只发送到对应业务系统；bearer 使用 Authorization 请求头。"
@@ -246,15 +286,17 @@ async def build_system_access(
     providers: Mapping[str, HTTPTokenProviderConfig] | None = None,
     task_timeout_seconds: int | None = None,
     catalog: catalog_policy.Mount | None = None,
+    mcp_supported: bool = False,
 ) -> SystemAccess:
     """按系统选择签发方；external_key 仅供 builtin，任务预算可由体检等短任务缩小。
 
     `catalog`：本轮的运行时能挂载操作目录 MCP 时由调用方给出，凭据随 env 下发。
+    `mcp_supported`：本轮的运行时能挂载 mcp 系统；不能时这些系统不签发。
     """
     systems = await granted_systems(session, bot.id)
     # 目录工具只挂给能挂载它的运行时，而且至少一个系统配了 OpenAPI 地址：没配的系统挂上也查不到。
     mounted = catalog is not None and any(system.openapi_url for system in systems)
-    prompt = systems_prompt(systems, mounted=mounted)
+    prompt = systems_prompt(systems, mounted=mounted, mcp_supported=mcp_supported)
     unavailable = SystemAccess(prompt=prompt, note=IDENTITY_UNAVAILABLE_NOTE if systems else "")
     if not speaker.known or not speaker.login_name:
         return unavailable
@@ -281,7 +323,10 @@ async def build_system_access(
     configs: list[dict[str, object]] = []
     failures: list[str] = []
     issued: list[IssuedRecord] = []
+    mounts: list[dict[str, str]] = []
     for system in systems:
+        if system.token_delivery == "mcp" and not mcp_supported:
+            continue
         if system.token_delivery == "proxy":
             # 令牌不进运行环境：由目录 MCP 的 systems_call 在首次调用时由服务端签发。
             configs.append(
@@ -310,6 +355,8 @@ async def build_system_access(
             )
         except TokenProviderError as exc:
             failures.append(f"  - {system.name}：{ISSUE_FAILURE_HINTS.get(exc.code, ADMIN_HINT)}")
+            if system.token_delivery == "mcp":
+                mounts.append({"key": system.key, "url": ""})
             continue
         env_var = token_env_var(system.key)
         env[env_var] = token.value
@@ -322,6 +369,20 @@ async def build_system_access(
                 expires_at=token.expires_at,
             )
         )
+        if system.token_delivery == "mcp":
+            # 不写令牌变量名：模型应当用 MCP 工具，而不是拿令牌自己去调。
+            mounts.append({"key": system.key, "url": system.mcp_url or ""})
+            configs.append(
+                {
+                    "key": system.key,
+                    "name": system.name,
+                    "description": system.description or "",
+                    "token_delivery": "mcp",
+                    "mcp_server": mcp_server_name(system.key),
+                    "expires_at": token.expires_at,
+                }
+            )
+            continue
         config: dict[str, object] = {
             "key": system.key,
             "name": system.name,
@@ -342,6 +403,8 @@ async def build_system_access(
         configs.append(config)
     env["COREMAN_USER_SUBJECT"] = subject
     env["COREMAN_SYSTEMS"] = env["BOT_SYSTEMS_CONFIG"] = json.dumps(configs, ensure_ascii=False)
+    if mounts:
+        env[MCP_MOUNTS_ENV] = json.dumps(mounts)
     if catalog is not None and mounted:
         env[catalog_policy.URL_ENV] = catalog.url
         env[catalog_policy.TOKEN_ENV] = catalog_policy.issue_capability(
