@@ -128,12 +128,8 @@ def token_env_var(system_key: str) -> str:
 # 驱动能按 COREMAN_SYSTEM_MCPS 把 mcp 系统挂成 system_<key>。旧节点上这类系统一律显示不可用。
 MCP_RUNTIME_CAPABILITY = "system_mcp_v1"
 # 本轮要挂载的 MCP 系统：[{"key", "url"}]，url 为空表示本轮签发失败、驱动要显式禁用它。
+# 令牌和 env 系统一样放在 BOT_TOKEN_<KEY>，驱动按 key 找到它作为 Bearer 发送。
 MCP_MOUNTS_ENV = "COREMAN_SYSTEM_MCPS"
-MCP_TOKEN_ENV_PREFIX = "COREMAN_SYSTEM_MCP_TOKEN_"
-
-
-def mcp_token_env(system_key: str) -> str:
-    return MCP_TOKEN_ENV_PREFIX + system_key.upper()
 
 
 def mcp_server_name(system_key: str) -> str:
@@ -362,11 +358,7 @@ async def build_system_access(
             if system.token_delivery == "mcp":
                 mounts.append({"key": system.key, "url": ""})
             continue
-        env_var = (
-            mcp_token_env(system.key)
-            if system.token_delivery == "mcp"
-            else token_env_var(system.key)
-        )
+        env_var = token_env_var(system.key)
         env[env_var] = token.value
         issued.append(
             IssuedRecord(

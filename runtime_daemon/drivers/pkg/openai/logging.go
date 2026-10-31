@@ -81,7 +81,7 @@ func RedactCollaborationToken(text string, env map[string]string) string {
 		}
 	}
 	for key, token := range env {
-		if strings.HasPrefix(key, SystemMCPTokenPrefix) && token != "" {
+		if strings.HasPrefix(key, SpeakerTokenPrefix) && token != "" {
 			text = strings.ReplaceAll(text, token, "[REDACTED]")
 		}
 	}

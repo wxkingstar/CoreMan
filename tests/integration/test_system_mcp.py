@@ -64,10 +64,10 @@ async def test_mcp_system_is_mounted_with_the_speakers_token(db_session: AsyncSe
         external_key=None,
         mcp_supported=True,
     )
-    token = access.env["COREMAN_SYSTEM_MCP_TOKEN_LOOKUP"]
+    token = access.env["BOT_TOKEN_LOOKUP"]
     claims = await verify_token(db_session, token, issuer="coreman", audience="mcp")
     assert claims["sub"] == access.subject
-    assert "BOT_TOKEN_LOOKUP" not in access.env and "BOT_TOKEN_ERP" in access.env
+    assert "BOT_TOKEN_ERP" in access.env
     assert json.loads(access.env[MCP_MOUNTS_ENV]) == [{"key": "lookup", "url": MCP_URL}]
     configs = {c["key"]: c for c in json.loads(access.env["COREMAN_SYSTEMS"])}
     # 模型拿到服务名，拿不到令牌变量名，只能走 MCP 工具。
@@ -82,7 +82,7 @@ async def test_mcp_system_is_unavailable_on_old_runtimes(db_session: AsyncSessio
     access = await build_system_access(
         db_session, cipher, bot=bot, speaker=speaker, issuer="coreman", external_key=None
     )
-    assert not any(key.startswith("COREMAN_SYSTEM_MCP") for key in access.env)
+    assert MCP_MOUNTS_ENV not in access.env and "BOT_TOKEN_LOOKUP" not in access.env
     assert [c["key"] for c in json.loads(access.env["COREMAN_SYSTEMS"])] == ["erp"]
     assert "Lookup: 无法调用" in access.prompt
     assert [record.system_key for record in access.issued] == ["erp"]
@@ -99,7 +99,7 @@ async def test_failed_issue_disables_the_mount(db_session: AsyncSession) -> None
         external_key=None,
         mcp_supported=True,
     )
-    assert "COREMAN_SYSTEM_MCP_TOKEN_LOOKUP" not in access.env
+    assert "BOT_TOKEN_LOOKUP" not in access.env
     assert json.loads(access.env[MCP_MOUNTS_ENV]) == [{"key": "lookup", "url": ""}]
     assert "Lookup" in access.note
 

@@ -8,8 +8,9 @@ import (
 	"strings"
 )
 
-// SystemMCPTokenPrefix names each business system MCP's token for this turn.
-const SystemMCPTokenPrefix = "COREMAN_SYSTEM_MCP_TOKEN_"
+// SpeakerTokenPrefix names the speaker's business system tokens for this
+// turn, BOT_TOKEN_<KEY>; systems served as MCP servers use the same names.
+const SpeakerTokenPrefix = "BOT_TOKEN_"
 
 var systemMCPKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,49}$`)
 
@@ -25,7 +26,7 @@ type SystemMCP struct {
 func SystemMCPName(key string) string { return "system_" + key }
 
 // SystemMCPTokenEnv is the env var holding the speaker's token for key.
-func SystemMCPTokenEnv(key string) string { return SystemMCPTokenPrefix + strings.ToUpper(key) }
+func SystemMCPTokenEnv(key string) string { return SpeakerTokenPrefix + strings.ToUpper(key) }
 
 // SystemMCPs parses COREMAN_SYSTEM_MCPS, which CoreMan sets only for turns on
 // runtimes that declared system_mcp_v1. Entries with an invalid or repeated

@@ -13,8 +13,8 @@ func TestSystemMCPsValidatesEachMount(t *testing.T) {
 			`{"key":"notoken","url":"https://mcp.example.test/mcp"},` +
 			`{"key":"Bad-Key","url":"https://mcp.example.test/mcp"},` +
 			`{"key":"lookup","url":"https://other.example.test/mcp"}]`,
-		"COREMAN_SYSTEM_MCP_TOKEN_LOOKUP": "token-lookup",
-		"COREMAN_SYSTEM_MCP_TOKEN_PLAIN":  "token-plain",
+		"BOT_TOKEN_LOOKUP": "token-lookup",
+		"BOT_TOKEN_PLAIN":  "token-plain",
 	}
 	want := []SystemMCP{
 		{Key: "lookup", URL: "https://mcp.example.test/mcp"},
@@ -34,7 +34,7 @@ func TestSystemMCPsValidatesEachMount(t *testing.T) {
 }
 
 func TestSystemMCPTokensAreRedacted(t *testing.T) {
-	env := map[string]string{"COREMAN_SYSTEM_MCP_TOKEN_LOOKUP": "secret-value"}
+	env := map[string]string{"BOT_TOKEN_LOOKUP": "secret-value"}
 	if got := RedactCollaborationToken("auth secret-value failed", env); got != "auth [REDACTED] failed" {
 		t.Fatalf("token not redacted: %s", got)
 	}
