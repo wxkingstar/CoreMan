@@ -244,11 +244,29 @@ async def optional_capabilities(client: httpx.AsyncClient) -> dict:
     return declared if isinstance(declared, dict) else {}
 
 
+def login_account(provider: str, status: dict) -> str:
+    """CLI 当前登录的账号邮箱；读不到时为空，不影响登录状态。"""
+    try:
+        if provider == "claude":
+            if status.get("email"):
+                return str(status["email"])[:255]
+            data = json.loads((Path.home() / ".claude.json").read_text())
+            return str((data.get("oauthAccount") or {}).get("emailAddress") or "")[:255]
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        data = json.loads((codex_home / "auth.json").read_text())
+        payload = ((data.get("tokens") or {}).get("id_token") or "").split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return str(claims.get("email") or "")[:255]
+    except (OSError, ValueError, IndexError, AttributeError):
+        return ""
+
+
 def cli_status(provider: str) -> dict:
     path = shutil.which(provider)
     result = {
         "installed": bool(path),
         "version": "",
+        "account": "",
         "login": "unknown",
         "health": "unknown",
         "models": [],
@@ -266,6 +284,7 @@ def cli_status(provider: str) -> dict:
             else [path, "login", "status"]
         )
         proc = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        data = {}
         if provider == "claude":
             data = json.loads(proc.stdout)
             result["login"] = "ready" if data.get("loggedIn") else "required"
@@ -275,6 +294,8 @@ def cli_status(provider: str) -> dict:
                 result["login"] = "ready"
             elif "not logged in" in output:
                 result["login"] = "required"
+        if result["login"] == "ready":
+            result["account"] = login_account(provider, data)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         result["detail"] = "CLI 状态检测失败，请查看本机登录状态"
     return result

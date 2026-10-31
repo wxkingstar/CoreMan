@@ -111,6 +111,8 @@ class Capability(BaseModel):
     memory_layout_v1: StrictBool = False
     installed: bool = False
     version: str = Field(default="", max_length=100)
+    # CLI 登录的账号邮箱，只用于展示；旧节点不上报时为空。
+    account: str = Field(default="", max_length=255)
     login: Literal["ready", "required", "unknown"] = "unknown"
     health: Literal["healthy", "down", "auth_fail", "timeout", "unknown"] = "unknown"
     detail: str = Field(default="", max_length=255)

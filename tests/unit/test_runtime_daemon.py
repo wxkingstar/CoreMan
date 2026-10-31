@@ -235,6 +235,32 @@ def test_cli_detection_keeps_unknown_distinct(monkeypatch):
     assert cli_status("codex")["login"] == "required"
 
 
+def test_cli_status_reports_login_account(monkeypatch, tmp_path):
+    from runtime_daemon.daemon import cli_status
+
+    payload = base64.urlsafe_b64encode(json.dumps({"email": "dev@example.com"}).encode()).decode()
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": f"h.{payload.rstrip('=')}.s"}})
+    )
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr("runtime_daemon.daemon.shutil.which", lambda _: "/fake/cli")
+    responses = iter(
+        [
+            SimpleNamespace(stdout="codex test", stderr="", returncode=0),
+            SimpleNamespace(stdout="Logged in using ChatGPT", stderr="", returncode=0),
+            SimpleNamespace(stdout="2.0 (Claude Code)", stderr="", returncode=0),
+            SimpleNamespace(
+                stdout=json.dumps({"loggedIn": True, "email": "ops@example.com"}),
+                stderr="",
+                returncode=0,
+            ),
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: next(responses))
+    assert cli_status("codex")["account"] == "dev@example.com"
+    assert cli_status("claude")["account"] == "ops@example.com"
+
+
 def test_no_persistent_claude_modes_in_release_source():
     root = Path(__file__).parents[2] / "runtime_daemon/drivers/cmd/relay-claude"
     assert not list(root.glob("channel*"))
