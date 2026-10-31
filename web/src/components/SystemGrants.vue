@@ -5,6 +5,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { systems, type BusinessSystem } from '@/api/infrastructure'
+import { allSkills } from '@/api/skills'
 const props = defineProps<{ botId: string }>()
 const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
@@ -15,6 +16,13 @@ const writes = ref<string[]>([]), savedWrites = ref<string[]>([])
 const same = (a: string[], b: string[]) => a.length === b.length && a.every(k => b.includes(k))
 const dirty = computed(() => !same(keys.value, saved.value) || !same(writes.value.filter(k => keys.value.includes(k)), savedWrites.value))
 function setWrite(key: string, on: boolean) { writes.value = on ? [...new Set([...writes.value, key])] : writes.value.filter(k => k !== key) }
+// 配套技能：保存后新授权的系统会自动安装，撤销的系统会卸掉随它装上的技能
+const skillNames = ref<Record<string, string>>({})
+function companionChange(system: BusinessSystem): 'install' | 'uninstall' | null {
+  if (!system.companion_skill_id) return null
+  const now = keys.value.includes(system.key), before = saved.value.includes(system.key)
+  return now && !before ? 'install' : !now && before ? 'uninstall' : null
+}
 async function load() {
   loading.value = true; loadError.value = ''
   try {
@@ -24,6 +32,10 @@ async function load() {
     const all: BusinessSystem[] = []
     for (let page = 1; ; page++) { const data = await systems.list(page); all.push(...data.items); if (all.length >= data.total || !data.items.length) break }
     options.value = all.filter(s => s.enabled && (s.allowed_bot_ids === null || s.allowed_bot_ids.includes(props.botId)))
+    // 技能名只用于提示，取不到时提示里不写名字
+    if (options.value.some(s => s.companion_skill_id)) {
+      void allSkills().then(rows => { skillNames.value = Object.fromEntries(rows.map(s => [s.id, s.name])) }, () => {})
+    }
   } catch (e) { loadError.value = errorMessage(e); ElMessage.error(loadError.value) } finally { loading.value = false }
 }
 async function save() {
@@ -111,6 +123,13 @@ onMounted(load)
             @update:model-value="(on: string | number | boolean) => setWrite(system.key, on === true)"
           />
           <span>{{ t('infra.allowWrite') }}</span>
+        </div>
+        <div
+          v-if="companionChange(system)"
+          class="grant-write"
+          :data-test="`companion-${system.key}`"
+        >
+          {{ t(companionChange(system) === 'install' ? 'infra.companionWillInstall' : 'infra.companionWillUninstall', { name: skillNames[system.companion_skill_id ?? ''] ?? '' }) }}
         </div>
       </div>
     </el-checkbox-group>

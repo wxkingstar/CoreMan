@@ -6,8 +6,11 @@ import SystemsView from '@/views/SystemsView.vue'
 import CredentialsView from '@/views/CredentialsView.vue'
 import SystemGrants from '@/components/SystemGrants.vue'
 import { credentials, systems } from '@/api/infrastructure'
+import { allSkills } from '@/api/skills'
 
 vi.mock('@/api/admin', () => ({ bots: { list: vi.fn().mockResolvedValue({ items: [], total: 0 }) } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn().mockResolvedValue([]) }))
+const guide = { id: 'sk1', name: 'lookup-guide', enabled: true, security_level: 'public', user_env_vars: {} }
 vi.mock('@/api/infrastructure', () => ({
   systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn(), catalog: vi.fn(), refreshCatalog: vi.fn() },
   credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn() },
@@ -272,6 +275,38 @@ describe('Infrastructure management', () => {
     expect(document.body.textContent).toContain(i18n.global.t('infra.tokenDeliveryProxyHint'))
     document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
     expect(systems.update).toHaveBeenCalledWith(expect.objectContaining({ key: 'erp' }), expect.objectContaining({ token_delivery: 'proxy' }))
+    wrapper.unmount()
+  })
+  it('creates an MCP system with a companion skill and drops the hidden OpenAPI URL', async () => {
+    vi.mocked(allSkills).mockResolvedValue([guide, { ...guide, id: 'sk2', name: 'needs-input', user_env_vars: { API_KEY: { label: 'Key', placeholder: '', required: true } } }] as never)
+    vi.mocked(systems.create).mockResolvedValue(erp)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: Record<string, unknown>; companionOptions: { id: string }[] }
+    expect(vm.companionOptions.map(s => s.id)).toEqual(['sk1'])
+    vm.form.key = 'lookup'; vm.form.name = 'Lookup'; vm.form.openapi_url = 'https://erp.example/openapi.json'
+    vm.form.token_delivery = 'mcp'; await flushPromises()
+    expect(document.querySelector('[data-test="openapi-url"]')).toBeNull()
+    expect(document.body.textContent).toContain(i18n.global.t('infra.tokenDeliveryMcpHint'))
+    vm.form.mcp_url = 'https://mcp.example.test/mcp'; vm.form.companion_skill_id = 'sk1'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ token_delivery: 'mcp', mcp_url: 'https://mcp.example.test/mcp', openapi_url: '', companion_skill_id: 'sk1' }))
+    wrapper.unmount()
+  })
+  it('tells which companion skill a grant change installs or removes', async () => {
+    const lookup = { ...erp, key: 'lookup', name: 'Lookup', token_delivery: 'mcp' as const, mcp_url: 'https://mcp.example.test/mcp', companion_skill_id: 'sk1' }
+    const other = { ...lookup, key: 'other', name: 'Other' }
+    vi.mocked(allSkills).mockResolvedValue([guide] as never)
+    vi.mocked(systems.list).mockResolvedValue({ ...page, total: 2, items: [lookup, other] })
+    vi.mocked(systems.grants).mockResolvedValue({ system_keys: ['other'], write_keys: [], version: 2 })
+    const wrapper = mount(SystemGrants, { props: { botId: 'bot1' }, global: { plugins } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="companion-lookup"]').exists()).toBe(false)
+    const vm = wrapper.vm as unknown as { keys: string[] }
+    vm.keys = ['lookup']; await flushPromises()
+    expect(wrapper.get('[data-test="companion-lookup"]').text()).toBe(i18n.global.t('infra.companionWillInstall', { name: 'lookup-guide' }))
+    expect(wrapper.get('[data-test="companion-other"]').text()).toBe(i18n.global.t('infra.companionWillUninstall', { name: 'lookup-guide' }))
     wrapper.unmount()
   })
 })

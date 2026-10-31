@@ -119,6 +119,15 @@ async function remove(row: Installed) {
           >
             {{ mcpState(row) }}
           </el-tag>
+          <el-tag
+            v-if="row.installed_by_system && row.status !== 'uninstalled'"
+            class="mcp-state"
+            size="small"
+            type="info"
+            data-test="installed-by-system"
+          >
+            {{ t('infra.installedBySystem', { key: row.installed_by_system }) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column

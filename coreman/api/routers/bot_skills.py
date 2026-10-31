@@ -156,6 +156,8 @@ async def bot_skills(
                     and row.mcp_authorized_relay_id == bot.relay_server_id,
                     "mcp_authorized_at": row.mcp_authorized_at,
                     "mcp_authorized_by": names.get(row.mcp_authorized_by),
+                    # 随授权业务系统自动安装时的系统 key；撤销授权会一并卸载。
+                    "installed_by_system": row.installed_by_system,
                 }
                 for row, skill in rows
             ],

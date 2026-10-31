@@ -50,7 +50,7 @@ CoreMan 接受 JWT 或不透明 Bearer 令牌，完整转交签发结果，不�
 
 实际响应 `expires_in` 必须为正整数且不超过申请时长。提供方可返回更短时长；配置的上限不是已获批的有效期。CoreMan 以请求开始时间保守计算到期时间，拒绝已过期响应。
 
-仍通过 `BOT_TOKEN_<系统 KEY 大写>` 向本轮 CLI 注入令牌；`COREMAN_SYSTEMS`（兼容 `BOT_SYSTEMS_CONFIG`）包含 `env_var`、`audience`、`auth_mode`、`expires_in` 和 `expires_at`。`expires_at` 是 UTC Unix 秒。外部提供方的 `auth_mode` 是 `bearer`：
+仍通过 `BOT_TOKEN_<系统 KEY 大写>` 向本轮 CLI 注入令牌（令牌交付方式为 MCP 服务的系统同样如此，由驱动作为 Bearer 发给系统的 MCP，见 [业务系统 MCP 交付](features/system-mcp.md)）；`COREMAN_SYSTEMS`（兼容 `BOT_SYSTEMS_CONFIG`）包含 `env_var`、`audience`、`auth_mode`、`expires_in` 和 `expires_at`。`expires_at` 是 UTC Unix 秒。外部提供方的 `auth_mode` 是 `bearer`：
 
 ```text
 Authorization: Bearer <BOT_TOKEN_ERP 的值>
