@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
 from coreman.core.chat import chat_logs
@@ -226,6 +226,9 @@ class CronRunHandler:
                         task_id=ctx.task.id,
                         public_base_url=ctx.public_base_url,
                         ttl_seconds=bot.sse_timeout_seconds,
+                    ),
+                    mcp_supported=await mcp_runtime_supported(
+                        session, relay=relay, model=bot.model
                     ),
                 )
                 await record_issues(

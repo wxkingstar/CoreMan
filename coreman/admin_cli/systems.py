@@ -21,6 +21,8 @@ SYSTEM_FIELDS = (
     "openapi_url",
     "token_provider",
     "token_delivery",
+    "mcp_url",
+    "companion_skill_id",
     "token_audience",
     "access_test_url",
     "enabled",
@@ -35,6 +37,8 @@ OPTIONS = {
     "openapi_url": "openapi_url",
     "provider": "token_provider",
     "delivery": "token_delivery",
+    "mcp_url": "mcp_url",
+    "companion_skill": "companion_skill_id",
     "audience": "token_audience",
     "test_url": "access_test_url",
     "sort": "sort_order",
@@ -49,7 +53,13 @@ def system_options(p: argparse.ArgumentParser, *, create: bool) -> None:
     p.add_argument("--openapi-url", help="OpenAPI 描述地址（须与系统地址同源）")
     p.add_argument("--provider", help="令牌签发方，默认 builtin")
     p.add_argument(
-        "--delivery", choices=("env", "proxy"), help="env 令牌进运行环境；proxy 只经平台代理"
+        "--delivery",
+        choices=("env", "proxy", "mcp"),
+        help="env 令牌进运行环境；proxy 只经平台代理；mcp 系统是一个 MCP 服务，每轮按发言者挂载",
+    )
+    p.add_argument("--mcp-url", help="MCP 地址（--delivery mcp 时必填，HTTPS；传空串清除）")
+    p.add_argument(
+        "--companion-skill", help="配套技能 id：授权给员工时自动安装，撤销时一并卸载；传空串清除"
     )
     p.add_argument("--audience", help="令牌受众，默认为系统标识")
     p.add_argument("--test-url", help="访问测试地址（须与系统地址同源）")
@@ -135,6 +145,8 @@ async def show(c: AdminClient, args: argparse.Namespace) -> int:
             ("系统地址", "base_url"),
             ("OpenAPI 地址", "openapi_url"),
             ("令牌下发", "token_delivery"),
+            ("MCP 地址", "mcp_url"),
+            ("配套技能", "companion_skill_id"),
             ("签发方", "token_provider"),
             ("令牌受众", "token_audience"),
             ("测试地址", "access_test_url"),
@@ -170,8 +182,15 @@ def report_catalog(data: dict[str, Any]) -> None:
         print(f"操作目录：{catalog.get('status')} {catalog.get('error') or ''}".rstrip())
 
 
+def system_changes(args: argparse.Namespace) -> dict[str, Any]:
+    updates = changed(args, OPTIONS)
+    if updates.get("companion_skill_id") == "":
+        updates["companion_skill_id"] = None
+    return updates
+
+
 async def create(c: AdminClient, args: argparse.Namespace) -> int:
-    body = {"key": args.key, **changed(args, OPTIONS), "enabled": not args.disabled}
+    body = {"key": args.key, **system_changes(args), "enabled": not args.disabled}
     data = await c.request("POST", SYSTEMS, body=body)
     if args.json:
         output.dump(data)
@@ -189,7 +208,7 @@ async def put(c: AdminClient, row: dict[str, Any], updates: dict[str, Any]) -> d
 
 
 async def set_system(c: AdminClient, args: argparse.Namespace) -> int:
-    updates = changed(args, OPTIONS)
+    updates = system_changes(args)
     if not updates:
         raise CliError("没有要修改的字段，见 --help")
     data = await put(c, await c.system(args.key), updates)

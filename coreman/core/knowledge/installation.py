@@ -27,6 +27,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.errors import ApiError
 from coreman.core.knowledge.skill_policy import selected_groups, user_inputs
+from coreman.core.timeutils import utcnow
 
 INPUTS_AAD = "skill_install.inputs"
 USER_ENV_AAD = "bot_skills.user_env_vars_enc"
@@ -148,6 +149,70 @@ async def queue(
     row.status, row.install_task_id, row.error_message = "installing", task.id, None
     await session.flush()
     return task
+
+
+async def uninstall(session: AsyncSession, bot: Bot, row: BotSkill, actor: User) -> None:
+    """取消在途安装、撤回待审申请并标记卸载；调用方负责通知与审计。"""
+    if row.install_task_id:
+        await tasks.request_cancel(session, row.install_task_id, "skill_uninstalled")
+    pending = list(
+        await session.scalars(
+            select(SkillApproval)
+            .where(
+                SkillApproval.bot_id == bot.id,
+                SkillApproval.skill_id == row.skill_id,
+                SkillApproval.status == "pending",
+            )
+            .with_for_update()
+        )
+    )
+    for approval in pending:
+        approval.status, approval.reviewed_by, approval.reviewed_at = (
+            "withdrawn",
+            actor.id,
+            utcnow(),
+        )
+    row.status, row.install_task_id, row.security_prompt = "uninstalled", None, None
+    row.approved_databases, row.approved_by, row.approved_at = [], None, None
+    await session.flush()
+    await rebuild_prompt(session, bot)
+
+
+def companion_problem(skill: Skill | None) -> str | None:
+    """能否作为业务系统的配套技能：授权时要能不经审批、不填输入直接装上。"""
+    if skill is None or skill.deleted_at is not None:
+        return "配套技能不存在"
+    if not skill.enabled:
+        return "配套技能已停用"
+    if skill.security_level == "internal":
+        return "配套技能需要审批，不能随系统自动安装"
+    try:
+        user_inputs(skill, {})
+        selected_groups(skill, [], None)
+    except ValueError:
+        return "配套技能需要填写安装参数，不能随系统自动安装"
+    return None
+
+
+async def install_companion(
+    session: AsyncSession, cipher: Cipher, *, bot: Bot, skill: Skill, actor: User, system_key: str
+) -> bool:
+    """授权业务系统时装上它的配套技能。已装、正在装或待审的不动，返回是否排了安装。"""
+    row = await session.get(BotSkill, (bot.id, skill.id))
+    if row is not None and row.status in ("installed", "installing", "pending_approval"):
+        return False
+    problem = companion_problem(skill)
+    if problem:
+        raise ApiError(409, 409, problem)
+    inputs = await input_snapshot(
+        session, cipher, bot, skill, selected=[], source=None, values=None, requester=actor
+    )
+    inputs.update(reinstall_code=True, approved_databases=[], security_prompt=None)
+    await queue(session, cipher, bot=bot, skill=skill, actor=actor, inputs=inputs)
+    row = await session.get(BotSkill, (bot.id, skill.id))
+    assert row is not None
+    row.installed_by_system = system_key
+    return True
 
 
 async def last_data_source(

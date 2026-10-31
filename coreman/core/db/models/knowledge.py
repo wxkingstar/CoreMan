@@ -112,6 +112,8 @@ class BotSkill(TimestampMixin, Base):
     mcp_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     mcp_authorized_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     mcp_authorized_relay_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 因授权业务系统而自动安装时记下系统 key；撤销授权只卸载这样装上的。手动安装为空。
+    installed_by_system: Mapped[str | None] = mapped_column(Text)
     revision: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     __mapper_args__ = {"version_id_col": revision}
 

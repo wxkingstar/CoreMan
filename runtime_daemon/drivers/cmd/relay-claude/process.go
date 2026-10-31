@@ -35,7 +35,7 @@ var firstLineTimeout = 90 * time.Second
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") && !strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
 			env = append(env, e)
 		}
 	}
@@ -109,6 +109,16 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 		} else {
 			// Deny a stale server even if a resumed session or local config remembers it.
 			denied = append(denied, "mcp__"+cfg.name)
+		}
+	}
+	// Business systems served as MCP servers, each with the speaker's own
+	// token for this turn; a system whose token was not issued is denied.
+	for _, m := range openai.SystemMCPs(req.EnvVars) {
+		name := openai.SystemMCPName(m.Key)
+		if m.URL != "" {
+			servers[name] = map[string]any{"type": "http", "url": m.URL, "headers": map[string]string{"Authorization": "Bearer ${" + openai.SystemMCPTokenEnv(m.Key) + "}"}}
+		} else {
+			denied = append(denied, "mcp__"+name)
 		}
 	}
 	if len(servers) > 0 {

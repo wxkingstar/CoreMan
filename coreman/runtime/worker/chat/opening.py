@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.system_access import build_system_access
+from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
 from coreman.core.chat import chat_logs, sessions
@@ -214,6 +214,7 @@ class OpenStage(ChatStageBase):
                 public_base_url=ctx.public_base_url,
                 ttl_seconds=bot.sse_timeout_seconds,
             ),
+            mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(

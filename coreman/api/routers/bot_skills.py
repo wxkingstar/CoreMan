@@ -20,7 +20,6 @@ from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, mask_dict
-from coreman.core.bus import tasks
 from coreman.core.db.models import (
     Bot,
     BotSkill,
@@ -197,6 +196,10 @@ async def install(
     ):
         raise ApiError(409, 409, "技能已有待审申请，请先审核或撤回")
     cipher = request.app.state.cipher
+    existing = await session.get(BotSkill, (bot_id, skill_id))
+    if existing is not None:
+        # 手动安装过的技能归员工自己管，撤销业务系统授权时不再连带卸载。
+        existing.installed_by_system = None
     inputs = await installs.input_snapshot(
         session,
         cipher,
@@ -379,29 +382,7 @@ async def uninstall(
     if row is None:
         raise not_found("机器人技能不存在")
     require_if_match(request, row.revision)
-    if row.install_task_id:
-        await tasks.request_cancel(session, row.install_task_id, "skill_uninstalled")
-    pending = list(
-        await session.scalars(
-            select(SkillApproval)
-            .where(
-                SkillApproval.bot_id == bot_id,
-                SkillApproval.skill_id == skill_id,
-                SkillApproval.status == "pending",
-            )
-            .with_for_update()
-        )
-    )
-    for approval in pending:
-        approval.status, approval.reviewed_by, approval.reviewed_at = (
-            "withdrawn",
-            actor.id,
-            utcnow(),
-        )
-    row.status, row.install_task_id, row.security_prompt = "uninstalled", None, None
-    row.approved_databases, row.approved_by, row.approved_at = [], None, None
-    await session.flush()
-    await installs.rebuild_prompt(session, bot)
+    await installs.uninstall(session, bot, row, actor)
     await notify_bot_changed(session, bot.id)
     await audit(session, request, actor, bot, "uninstalled", skill_id)
     await session.commit()
