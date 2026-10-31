@@ -6,8 +6,12 @@ export interface BusinessSystem {
   /** openapi_url 的旧名，后端保留一个版本；管理台只用 openapi_url。 */
   sitemap_url?: string | null
   token_provider?: string; token_audience?: string | null; access_test_url?: string | null
-  /** env：令牌按 BOT_TOKEN_<KEY> 下发；proxy：平台代理调用。 */
-  token_delivery?: 'env' | 'proxy'
+  /** env：令牌按 BOT_TOKEN_<KEY> 下发；proxy：平台代理调用；mcp：系统是一个 MCP 服务，每轮按发言者挂载。 */
+  token_delivery?: 'env' | 'proxy' | 'mcp'
+  /** token_delivery 为 mcp 时的 MCP 地址。 */
+  mcp_url?: string | null
+  /** 授权给 AI 员工时自动安装的技能，撤销授权时一并卸载。 */
+  companion_skill_id?: string | null
   enabled: boolean; sort_order: number; default_for_all_bots: boolean; allowed_bot_ids: string[] | null; version: number
   /** 只在保存的响应里出现：保存后立即拉取目录的结果，未配置 OpenAPI 地址或地址未改动时为 null。 */
   catalog?: SystemCatalog | CatalogSkipped | null

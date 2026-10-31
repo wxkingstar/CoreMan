@@ -122,6 +122,11 @@ async def test_grant_installs_and_revoke_uninstalls_the_companion(client, db_ses
     assert task is not None and task.kind == "skill_install"
     manual = await db_session.get(BotSkill, (bot.id, kept.id), populate_existing=True)
     assert manual is not None and manual.install_task_id is None
+    listed = (await client.get(f"/api/admin/bots/{bot.id}/skills")).json()["data"]["items"]
+    assert {i["name"]: i["installed_by_system"] for i in listed} == {
+        "lookup-guide": "lookup",
+        "kept-guide": None,
+    }
 
     r = await client.put(
         path, json={"system_keys": []}, headers={"If-Match": str(r.json()["data"]["version"])}

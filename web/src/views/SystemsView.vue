@@ -3,12 +3,13 @@ import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { useListQuery } from '@/composables/useListQuery'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { bots } from '@/api/admin'
 import { call, http } from '@/api/client'
 import { systems, type BusinessSystem, type SystemCatalog, type SystemInput, type TokenProvider } from '@/api/infrastructure'
+import { allSkills, type Skill } from '@/api/skills'
 import { formatBytes, formatDateTime } from '@/utils/format'
 import type { BotOut } from '@/api/types'
 
@@ -30,8 +31,12 @@ async function testAccess(row: BusinessSystem) {
   } catch (e) { fail(e) }
   finally { testing.value = null }
 }
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', mcp_url: '', companion_skill_id: null, token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
 const form = reactive(empty())
+const deliveryHints = { env: 'infra.tokenDeliveryEnvHint', proxy: 'infra.tokenDeliveryProxyHint', mcp: 'infra.tokenDeliveryMcpHint' } as const
+// 配套技能要能在授权时直接装上：已启用、免审批、没有必填参数（后端同样校验）
+const skillOptions = ref<Skill[]>([])
+const companionOptions = computed(() => skillOptions.value.filter(s => s.id === form.companion_skill_id || (s.enabled && s.security_level === 'public' && !Object.values(s.user_env_vars ?? {}).some(v => v.required))))
 function fail(e: unknown) { ElMessage.error(errorMessage(e)) }
 // 接入规范随管理台作为公开静态文件发布，管理员可以直接把链接交给新接入的业务系统
 const CONTRACT_PATH = '/integration/business-system-openapi-contract.md'
@@ -84,6 +89,7 @@ async function edit(row: BusinessSystem | null) {
   restricted.value = !row || row.allowed_bot_ids !== null
   visible.value = true
   try {
+    void allSkills().then(rows => { skillOptions.value = rows }, fail)
     providerOptions.value = await systems.providers()
     if (form.token_provider && !providerOptions.value.some(p => p.id === form.token_provider)) {
       providerOptions.value.push({ id: form.token_provider, max_token_ttl_seconds: null })
@@ -100,7 +106,9 @@ async function save() {
   if (busy.value) return
   busy.value = true
   try {
-    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
+    // MCP 系统不用操作目录，其他方式不用 MCP 地址：隐藏的字段不提交旧值
+    const mcp = form.token_delivery === 'mcp'
+    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: mcp ? '' : form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, mcp_url: mcp ? form.mcp_url : '', companion_skill_id: form.companion_skill_id || null, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
     let saved: BusinessSystem
     if (editing.value) {
       if (restricted.value) await ElMessageBox.confirm(t('infra.reclaimWarning'), t('common.confirm'))
@@ -242,7 +250,10 @@ onMounted(load)
         <el-form-item :label="t('infra.baseUrl')">
           <el-input v-model="form.base_url" />
         </el-form-item>
-        <el-form-item :label="t('infra.openapiUrl')">
+        <el-form-item
+          v-if="form.token_delivery !== 'mcp'"
+          :label="t('infra.openapiUrl')"
+        >
           <el-input
             v-model="form.openapi_url"
             data-test="openapi-url"
@@ -256,7 +267,7 @@ onMounted(load)
           >{{ t('infra.contract') }}</el-button></small>
         </el-form-item>
         <el-form-item
-          v-if="editing && editing.openapi_url"
+          v-if="editing && editing.openapi_url && form.token_delivery !== 'mcp'"
           :label="t('infra.catalogTitle')"
         >
           <div
@@ -332,8 +343,40 @@ onMounted(load)
             <el-radio value="proxy">
               {{ t('infra.tokenDeliveryProxy') }}
             </el-radio>
+            <el-radio value="mcp">
+              {{ t('infra.tokenDeliveryMcp') }}
+            </el-radio>
           </el-radio-group>
-          <small>{{ t(form.token_delivery === 'proxy' ? 'infra.tokenDeliveryProxyHint' : 'infra.tokenDeliveryEnvHint') }}</small>
+          <small>{{ t(deliveryHints[form.token_delivery ?? 'env']) }}</small>
+        </el-form-item>
+        <el-form-item
+          v-if="form.token_delivery === 'mcp'"
+          :label="t('infra.mcpUrl')"
+        >
+          <el-input
+            v-model="form.mcp_url"
+            data-test="mcp-url"
+            placeholder="https://"
+          />
+          <small>{{ t('infra.mcpUrlHint') }}</small>
+        </el-form-item>
+        <el-form-item :label="t('infra.companionSkill')">
+          <el-select
+            v-model="form.companion_skill_id"
+            data-test="companion-skill"
+            clearable
+            filterable
+            :disabled="form.default_for_all_bots"
+            style="width:100%"
+          >
+            <el-option
+              v-for="skill in companionOptions"
+              :key="skill.id"
+              :value="skill.id"
+              :label="skill.name"
+            />
+          </el-select>
+          <small>{{ t(form.default_for_all_bots ? 'infra.companionSkillDefaultHint' : 'infra.companionSkillHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.tokenAudience')">
           <el-input

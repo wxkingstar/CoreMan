@@ -95,3 +95,12 @@ it('asks to authorize again after the employee moved to another runtime', async 
   expect(wrapper.get('[data-test="mcp-authorize"]').text()).toBe('授权')
   wrapper.unmount()
 })
+
+it("marks skills installed together with a business system", async () => {
+  vi.mocked(allSkills).mockResolvedValue([])
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: "s1", name: "lookup-guide", status: "installed", revision: 1, version: null, selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: null, mcp_oauth: false, mcp_authorized: false, mcp_authorized_at: null, mcp_authorized_by: null, installed_by_system: "lookup" }], pending_approvals: [] })
+  const wrapper = mount(BotSkills, { props: { botId: "b1" }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
+  await flushPromises()
+  expect(wrapper.get("[data-test=\"installed-by-system\"]").text()).toBe(i18n.global.t("infra.installedBySystem", { key: "lookup" }))
+  wrapper.unmount()
+})

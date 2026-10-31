@@ -42,6 +42,8 @@ Agent 执行安装器与探针时移除全部 COREMAN_ 环境变量，避免子�
 
 ## 仓库中的 MCP 技能
 
+> 需要按发言者鉴权的 MCP 不要做成技能，登记成令牌交付方式为「MCP 服务」的业务系统，用法说明做成它的配套技能，见 [业务系统 MCP 交付](features/system-mcp.md)。
+
 同一个技能仓库可以同时放 Git 技能和 MCP 服务，同步后都出现在技能目录里，AI 员工按同样的流程安装、审批和配置环境变量。插件沿用 Claude Code 的插件格式声明 MCP，任选一种：
 
 - plugin.json 的 `mcpServers` 写对象：`{"name": "figma", "mcpServers": {"figma": {...}}}`；
