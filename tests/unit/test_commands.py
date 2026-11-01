@@ -37,3 +37,10 @@ def test_cancel_words() -> None:
 
     assert is_cancel_word(" 取消 ") and is_cancel_word("Cancel")
     assert not is_cancel_word("取消订单") and not is_cancel_word("stop")
+
+
+def test_quiet_words() -> None:
+    assert classify_command("安静") == "quiet"
+    assert classify_command("/mute") == "quiet"
+    assert classify_command("可以说话了") == "unquiet"
+    assert classify_command("安静一点好吗") is None

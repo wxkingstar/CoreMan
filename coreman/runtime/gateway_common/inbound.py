@@ -31,6 +31,7 @@ class InboundBot(Protocol):
     id: uuid.UUID
     bot_key: str
     welcome_message: str | None
+    # 飞书子进程的快照另带 `observe`（群聊旁听开关），其余快照没有，按关闭处理。
 
 
 def _obj(container: dict[str, Any], key: str) -> dict[str, Any]:
@@ -69,6 +70,18 @@ async def enqueue_inbound(
         log.debug("inbound_duplicate", bot_key=bot.bot_key, platform_msg_id=message.message_id)
         return None
     event_id = int(row[0])
+    # 群聊旁听（只有飞书子进程的快照带 observe）：每条群消息都记账；没 @ 的到此为止，
+    # 由延后的判断任务决定要不要开口。
+    if (
+        getattr(bot, "observe", False)
+        and message.kind == "message"
+        and message.chat_type == "group"
+    ):
+        from coreman.core.chat import group_observe
+
+        await group_observe.note(session, bot.id, message, event_id)
+        if not message.mentions_bot:
+            return None
     # Bot receipts are retained for collaboration reconciliation, never human intake.
     if message.sender.sender_type == "bot":
         return None

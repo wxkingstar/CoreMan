@@ -89,6 +89,7 @@ def _normalize_event(
     gateway_instance: str,
     now: datetime,
     allow_bot: bool = False,
+    observe: bool = False,
     cipher: Cipher | None = None,
 ) -> InboundMessage | None:
     header = raw.get("header") or {}
@@ -212,7 +213,8 @@ def _normalize_event(
     mentioned = bool(bot_open_id) and any(
         isinstance(m, dict) and (m.get("id") or {}).get("open_id") == bot_open_id for m in mentions
     )
-    if chat_type == "group" and not mentioned:
+    # 没 @ 的群消息只有开了群聊旁听的机器人才收：落库后只更新旁听状态，不建对话任务。
+    if chat_type == "group" and not mentioned and not observe:
         return None
     try:
         content = json.loads(message.get("content") or "{}")

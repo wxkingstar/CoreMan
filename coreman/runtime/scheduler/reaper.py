@@ -36,6 +36,7 @@ from coreman.core.db.models import (
     ChatLog,
     ChatSession,
     FeishuSentMessage,
+    GroupObserveDecision,
     InboundEvent,
     InteractionState,
     OutboxItem,
@@ -63,6 +64,8 @@ OUTBOX_RETENTION_DAYS = 7
 TASK_RETENTION_DAYS = 90
 INBOUND_RETENTION_DAYS = 90
 OUTBOX_FAILED_RETENTION_DAYS = 30
+# 群聊旁听的判断记录带群消息摘录，只为复核留一个月。
+OBSERVE_DECISION_RETENTION_DAYS = 30
 # 保留期清理分批删：每批一个短事务，一轮最多这么多批——积压几十万行时也不会长时间持锁。
 RETENTION_BATCH = 1000
 RETENTION_MAX_BATCHES = 20
@@ -523,6 +526,25 @@ async def run_cleanup(
     }
 
 
+async def cleanup_observe_decisions(
+    session: AsyncSession, now: datetime, *, limit: int = RETENTION_BATCH
+) -> int:
+    cutoff = now - timedelta(days=OBSERVE_DECISION_RETENTION_DAYS)
+    doomed = (
+        select(GroupObserveDecision.id)
+        .where(GroupObserveDecision.created_at < cutoff)
+        .order_by(GroupObserveDecision.id)
+        .limit(limit)
+        .correlate(None)
+    )
+    stmt = (
+        delete(GroupObserveDecision)
+        .where(GroupObserveDecision.id.in_(doomed))
+        .returning(GroupObserveDecision.id)
+    )
+    return await _affected(session, stmt)
+
+
 async def run_retention(
     factory: async_sessionmaker[AsyncSession],
     now: datetime,
@@ -539,6 +561,7 @@ async def run_retention(
         "old_inbound_events": cleanup_inbound_events,
         "old_outbox": cleanup_outbox,
         "old_feishu_sent": cleanup_feishu_sent,
+        "old_observe_decisions": cleanup_observe_decisions,
         "old_credential_requests": credential_requests.cleanup,
     }
     counts: dict[str, int] = {}

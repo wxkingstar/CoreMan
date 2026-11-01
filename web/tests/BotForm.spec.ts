@@ -41,6 +41,7 @@ const editBot: BotOut = {
   workspace_state: 'ready', workspace_error: null,
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
   welcome_message: null, rich_cards: true, dev_mode: false, notify_webhook_url: 'ht••••-1',
+  group_observe: 'off', group_observe_scope: '', group_observe_ready: false,
   member_count: 0, allowed_user_count: 0,
   permissions: {
     role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true,

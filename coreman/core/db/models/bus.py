@@ -39,6 +39,7 @@ TASK_KINDS = (
     "relay_switch",
     "escalation_media",
     "skill_install",
+    "group_observe",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")

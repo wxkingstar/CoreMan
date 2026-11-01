@@ -241,6 +241,14 @@ class OpenStage(ChatStageBase):
         env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
         ctx.turn_notes = [access.note]
+        from coreman.core.chat import group_observe
+
+        if intake.chat_type == "group" and group_observe.observing(bot):
+            # 开了旁听的机器人看得到整段群聊：@ 它的回合和主动插话的回合都带上最近的记录。
+            lines = await group_observe.transcript(session, bot, intake.chat_id)
+            ctx.turn_notes.append(group_observe.transcript_note(lines))
+            if ctx.task.payload.get("origin") == "observe":
+                ctx.turn_notes.append(group_observe.INTERJECT_NOTE)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
@@ -476,6 +484,9 @@ class OpenStage(ChatStageBase):
             return {
                 "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
             }
+        if ctx.task.payload.get("origin") == "observe":
+            # 插话回合不推流式卡片：网关等终稿出来再发，终稿是「不说话」就什么也不发。
+            return {"reply_context": {**intake.inbound.reply_context, "_observe": True}}
         return {}
 
     def _after_supervisor(self, pre: Prepared) -> None:

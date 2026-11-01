@@ -1208,3 +1208,29 @@ async def test_sent_messages_are_archived_for_later_quotes(db_session, db_engine
     assert rows.pop("om_1").text == "最终答案"
     assert [r.text for r in rows.values()] == ["定时结果 42"]
     assert all(r.chat_id == "oc1" for r in rows.values())
+
+
+async def test_observe_turn_sends_only_the_final_and_never_no_reply(db_session, db_engine):
+    from coreman.core.chat.group_observe import NO_REPLY
+
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        stream = await session.get(TaskStream, row.task_id)
+        stream.reply_context = {**stream.reply_context, "_observe": True}
+        await session.commit()
+    api = FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    # 插话回合不出「思考中」卡片，也不加表情。
+    assert api.calls == []
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text=NO_REPLY)
+        await session.commit()
+    await transport.round()
+    assert api.calls == []
+    async with factory() as session:
+        done = await session.get(TaskStream, row.task_id, populate_existing=True)
+        assert done.finish_pushed_at is not None

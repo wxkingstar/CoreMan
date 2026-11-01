@@ -39,6 +39,7 @@ class Bot(TimestampMixin, Base):
             "effort_level IN ('low','medium','high','xhigh','max')", name="effort_level"
         ),
         CheckConstraint("sse_timeout_seconds BETWEEN 1800 AND 43200", name="sse_timeout_seconds"),
+        CheckConstraint("group_observe IN ('off','shadow','on')", name="group_observe"),
         # 唯一约束在这里给全名（不再在列上写 unique=True），保证 alembic check 只看到一个同名约束。
         UniqueConstraint("bot_key", name="uq_bots_bot_key"),
         Index("bots_relay_idx", "relay_server_id"),
@@ -91,6 +92,10 @@ class Bot(TimestampMixin, Base):
     rich_cards: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 开发模式：工作目录是 Git 仓库时每个会话在自己的 worktree 里改，改完开 PR 合进主干。
     dev_mode: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # 飞书群聊旁听：off 只处理 @；shadow 判断并记录但不发言；on 判断该说话时主动插话。
+    group_observe: Mapped[str] = mapped_column(Text, server_default=text("'off'"))
+    # 旁听职责说明：交给判断模型的「它负责什么、什么时候该说话」，不是整段系统提示。
+    group_observe_scope: Mapped[str] = mapped_column(Text, server_default=text("''"))
     # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")

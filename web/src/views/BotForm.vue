@@ -193,6 +193,8 @@ function fillFromBot(b: BotOut): void {
     welcome_message: b.welcome_message,
     rich_cards: b.rich_cards,
     dev_mode: b.dev_mode,
+    group_observe: b.group_observe,
+    group_observe_scope: b.group_observe_scope,
     // 后端只在 can_view_sensitive 时下发（且是脱敏值）；没下发就按空处理。
     enabled: b.enabled,
   } satisfies BotIn)
@@ -238,6 +240,10 @@ function changedFields(b: BotOut): BotPatch {
   if (p.welcome_message !== b.welcome_message) out.welcome_message = p.welcome_message
   if (p.rich_cards !== b.rich_cards) out.rich_cards = p.rich_cards
   if (p.dev_mode !== b.dev_mode) out.dev_mode = p.dev_mode
+  if (p.group_observe !== undefined && p.group_observe !== b.group_observe) out.group_observe = p.group_observe
+  if (p.group_observe_scope !== undefined && p.group_observe_scope !== b.group_observe_scope) {
+    out.group_observe_scope = p.group_observe_scope
+  }
   // 后端没下发的敏感字段一律不比：表单里是空值，提交就等于清空线上配置。
   if (b.system_prompt !== undefined && p.system_prompt !== b.system_prompt) out.system_prompt = p.system_prompt
   if (b.credentials !== undefined && !sameDict(p.credentials, b.credentials)) out.credentials = p.credentials
@@ -407,6 +413,7 @@ onMounted(async () => {
 provide(botFormKey, {
   mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
   modelOptions, supportedEfforts: supportedEffortList, sensitiveVisible, credKeys, manualCredentials, wecomQrEnabled, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
+  observeReady: computed(() => props.bot?.group_observe_ready ?? false),
 })
 
 defineExpose({ form, selectRelay, modelOptions, confirmDiscard, moreOpen })

@@ -45,6 +45,10 @@ TENANT_SCOPES: tuple[str, ...] = (
     "application:app_slash_command:write",
 )
 
+# 群聊旁听：接收群里所有用户和其他机器人的消息（高级权限，需企业管理员审核）。只有开启旁听的
+# 机器人才申请、才算缺失，其余机器人不打扰管理员。
+OBSERVE_SCOPES: tuple[str, ...] = ("im:message.group_msg.include_bot:read",)
+
 # OAuth 协议层面的授权项：用户授权时随令牌下发，但不会出现在应用的权限列表里。
 PROTOCOL_SCOPES = frozenset({"offline_access", "auth:user.id:read"})
 
@@ -80,10 +84,14 @@ TENANT_EVENTS: tuple[str, ...] = (
 CALLBACKS: tuple[str, ...] = ("card.action.trigger",)
 
 
-def addons() -> dict[str, Any]:
+def tenant_scopes(*, observe: bool = False) -> tuple[str, ...]:
+    return TENANT_SCOPES + OBSERVE_SCOPES if observe else TENANT_SCOPES
+
+
+def addons(*, observe: bool = False) -> dict[str, Any]:
     return {
         "preset": True,
-        "scopes": {"tenant": list(TENANT_SCOPES), "user": list(USER_SCOPES)},
+        "scopes": {"tenant": list(tenant_scopes(observe=observe)), "user": list(USER_SCOPES)},
         "events": {"items": {"tenant": list(TENANT_EVENTS)}},
         "callbacks": {"items": list(CALLBACKS)},
     }
@@ -96,9 +104,9 @@ def encode_addons(value: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
 
 
-def missing_scopes(granted: list[str], *, kind: str) -> list[str]:
+def missing_scopes(granted: list[str], *, kind: str, observe: bool = False) -> list[str]:
     """清单里有、应用当前没开通的权限；用于提示「补齐权限」。"""
-    wanted = TENANT_SCOPES if kind == "tenant" else USER_SCOPES
+    wanted = tenant_scopes(observe=observe) if kind == "tenant" else USER_SCOPES
     have = set(granted)
     missing = set(wanted) - have - PROTOCOL_SCOPES
     if kind == "user":

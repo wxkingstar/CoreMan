@@ -83,6 +83,7 @@ export interface BotPermissions {
   can_switch_relay: boolean; can_toggle: boolean; can_delete: boolean
   can_manage_members: boolean; can_reassign_team: boolean
 }
+export type GroupObserveMode = 'off' | 'shadow' | 'on'
 export interface BotOut {
   id: string; bot_key: string; platform: Platform; name: string; description: string
   avatar_url: string | null; enabled: boolean
@@ -97,6 +98,10 @@ export interface BotOut {
   welcome_message: string | null
   rich_cards: boolean
   dev_mode: boolean
+  group_observe: GroupObserveMode
+  group_observe_scope: string
+  /** 部署配了判断服务（OPENAI_API_KEY）才能开启群聊旁听。 */
+  group_observe_ready: boolean
   member_count: number; allowed_user_count: number
   permissions: BotPermissions; version: number; created_at: string; updated_at: string
   // 敏感字段：只有 permissions.can_view_sensitive / can_view_env_full 时后端才下发。
@@ -119,6 +124,9 @@ export interface BotIn {
   rich_cards: boolean
   /** 开发模式：Git 工作目录按会话建 worktree，改动走 PR 合进主干。 */
   dev_mode: boolean
+  /** 群聊旁听（只能在编辑时修改）：off 只处理 @；shadow 只判断并记录；on 判断该说话时主动插话。 */
+  group_observe?: GroupObserveMode
+  group_observe_scope?: string
   enabled: boolean
   /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
   feishu_registration_id?: string | null
@@ -163,6 +171,11 @@ export interface SettingsOut extends PromptSettings {
   card_icon_url: string
   /** 允许扫码创建企业微信机器人；关闭后新建企微员工只能手动填写凭证。 */
   wecom_qr_provisioning_enabled: boolean
+  /** 群聊旁听：判断概率阈值、防抖时长、最长等待、机器人连续发言熔断。 */
+  group_observe_threshold: number
+  group_observe_quiet_seconds: number
+  group_observe_max_wait_seconds: number
+  group_observe_bot_streak_limit: number
 }
 /** default_model 只读：PUT 带这个键后端会 422。 */
 export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>

@@ -438,6 +438,7 @@ async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(
         "old_inbound_events": 2,
         "old_outbox": 2,
         "old_feishu_sent": 0,
+        "old_observe_decisions": 0,
         "old_credential_requests": 0,
     }
     async with make_session_factory(db_engine)() as s:
@@ -468,3 +469,25 @@ async def test_retention_drops_old_feishu_sent_messages(
     assert counts["old_feishu_sent"] == 1
     async with make_session_factory(db_engine)() as s:
         assert set((await s.execute(select(FeishuSentMessage.message_id))).scalars()) == {"om_new"}
+
+
+async def test_retention_drops_month_old_observe_decisions(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import GroupObserveDecision
+
+    bot = await _bot(db_session)
+    now = datetime.now(UTC)
+    for age in (31, 29):
+        db_session.add(
+            GroupObserveDecision(
+                bot_id=bot.id,
+                chat_id="oc1",
+                mode="shadow",
+                outcome="below_threshold",
+                created_at=now - timedelta(days=age),
+            )
+        )
+    await db_session.commit()
+    counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
+    assert counts["old_observe_decisions"] == 1

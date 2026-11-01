@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from coreman.core.bus import outbox, streams
+from coreman.core.chat.group_observe import NO_REPLY
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import (
     Bot,
@@ -340,6 +341,16 @@ class FeishuTransport:
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
             return
+        if row.reply_context.get("_observe"):
+            # 群聊旁听的插话回合：不出「思考中」，终稿出来再整张发；agent 决定不说话就不发。
+            if not row.is_complete:
+                return
+            final = row.final_text if row.final_text is not None else row.pending_text
+            if visible_parts("", final)[1].strip() in ("", NO_REPLY):
+                async with self.factory() as session:
+                    await streams.mark_finish_pushed(session, row.task_id)
+                    await session.commit()
+                return
         async with self.factory() as session:
             delivery = await session.get(FeishuDelivery, row.task_id)
             if delivery is None:

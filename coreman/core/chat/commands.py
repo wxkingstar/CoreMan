@@ -9,9 +9,12 @@ from typing import Literal
 RESET_WORDS = ("reset", "new", "clear", "重置", "清空")
 STOP_WORDS = ("stop", "停止", "暂停", "停")
 HELP_WORDS = ("help", "帮助", "?", "？")
+# 群聊旁听：群里 @ 机器人说这些，它在这个群暂时只在被 @ 时说话 / 恢复主动发言。
+QUIET_WORDS = ("安静", "别说话", "闭嘴", "quiet", "mute")
+UNQUIET_WORDS = ("可以说话了", "unmute")
 GATEWAY_COMMANDS = ("reset", "stop")
 CANCEL_WORDS = ("取消", "cancel")
-Command = Literal["reset", "stop", "help"]
+Command = Literal["reset", "stop", "help", "quiet", "unquiet"]
 _KEEP = {"\n", "\r", "\t", " "}
 
 
@@ -34,6 +37,10 @@ def classify_command(text: str) -> Command | None:
         return "reset"
     if s in HELP_WORDS:
         return "help"
+    if s in QUIET_WORDS:
+        return "quiet"
+    if s in UNQUIET_WORDS:
+        return "unquiet"
     if re.sub(r"[^\w一-鿿]", "", s) in STOP_WORDS:
         return "stop"
     return None

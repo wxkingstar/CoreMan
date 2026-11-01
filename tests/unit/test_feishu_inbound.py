@@ -242,3 +242,17 @@ def test_malformed_credential_task_id_is_ignored():
 
     raw = _form_submit("credential@not-a-uuid", {"DEMO_PIN": "x"})
     assert normalize_event(raw, cipher=Cipher(b"\x07" * 32), **KW) is None
+
+
+def test_group_observe_admits_unmentioned_group_messages():
+    other = copy.deepcopy(RAW)
+    other["event"]["message"]["mentions"] = []
+    other["event"]["message"]["content"] = json.dumps({"text": "who has last week's GMV?"})
+    assert normalize_event(other, **KW) is None
+    message = normalize_event(other, **{**KW, "observe": True})
+    assert message is not None
+    assert not message.mentions_bot
+    assert message.parts[0].text == "who has last week's GMV?"
+    # 私聊不受影响；@ 它的消息照旧 mentions_bot。
+    mentioned = normalize_event(RAW, **{**KW, "observe": True})
+    assert mentioned is not None and mentioned.mentions_bot

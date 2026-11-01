@@ -89,6 +89,7 @@ def build_url(
     desc: str | None = None,
     avatars: list[str] | None = None,
     app_id: str | None = None,
+    observe: bool = False,
 ) -> str:
     parsed = urlparse(verification_uri)
     if parsed.scheme != "https" or parsed.hostname not in _URL_HOSTS or parsed.username:
@@ -103,7 +104,7 @@ def build_url(
         params["name"] = [name]
     if desc:
         params["desc"] = [desc]
-    params["addons"] = [manifest.encode_addons(manifest.addons())]
+    params["addons"] = [manifest.encode_addons(manifest.addons(observe=observe))]
     if app_id:
         # 更新已绑定的应用：确认页只允许补齐该应用的配置。
         params["clientID"] = [app_id]
@@ -119,6 +120,7 @@ async def begin(
     desc: str | None = None,
     avatars: list[str] | None = None,
     app_id: str | None = None,
+    observe: bool = False,
     http: httpx.AsyncClient | None = None,
 ) -> Begin:
     init = await _post({"action": "init"}, http=http)
@@ -143,7 +145,7 @@ async def begin(
         expires_in = max(60, min(1800, int(body.get("expires_in", 600))))
     except (TypeError, ValueError) as exc:
         raise RegistrationError("upstream_unavailable") from exc
-    url = build_url(uri, name=name, desc=desc, avatars=avatars, app_id=app_id)
+    url = build_url(uri, name=name, desc=desc, avatars=avatars, app_id=app_id, observe=observe)
     return Begin(device_code, url, interval, expires_in)
 
 
