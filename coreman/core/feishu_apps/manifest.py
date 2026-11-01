@@ -49,6 +49,12 @@ TENANT_SCOPES: tuple[str, ...] = (
 # 机器人才申请、才算缺失，其余机器人不打扰管理员。
 OBSERVE_SCOPES: tuple[str, ...] = ("im:message.group_msg.include_bot:read",)
 
+# 机器人之间求助：收到其他机器人 @ 自己的消息、确认双方都在当前群（已含在 TENANT_SCOPES）。
+COLLABORATION_SCOPES: tuple[str, ...] = (
+    "im:message.group_at_msg.include_bot:readonly",
+    "im:chat.members:read",
+)
+
 # OAuth 协议层面的授权项：用户授权时随令牌下发，但不会出现在应用的权限列表里。
 PROTOCOL_SCOPES = frozenset({"offline_access", "auth:user.id:read"})
 

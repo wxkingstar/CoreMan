@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock
 
 from coreman.core.chat.bot_collaboration import issue_capability
 from tests.integration.test_collaboration_tools import fresh
@@ -10,7 +11,10 @@ async def headers(app, db_session):
     return {"Authorization": f"Bearer {token}"}, task, b
 
 
-async def test_mcp_lifecycle_discovery_and_auth(client, app, db_session):
+async def test_mcp_lifecycle_discovery_and_auth(client, app, db_session, monkeypatch):
+    from coreman.core.chat import collaboration_setup
+
+    monkeypatch.setattr(collaboration_setup, "in_chat", AsyncMock(return_value=True))
     auth, task, peer = await headers(app, db_session)
     url = "/api/runtime/collaboration/mcp"
     body = {
