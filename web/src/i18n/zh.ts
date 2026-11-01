@@ -463,7 +463,7 @@ export default {
     time: '时间', outcome: '结果', probability: '概率', lastMessage: '最后一条消息', review: '复核',
     should: '该说', shouldNot: '不该说', loadMore: '加载更多', noMessages: '没有记录群消息',
     kinds: { self: '它自己', bot: '机器人', human: '同事' },
-    outcomes: { interject: '会插话', sent: '已插话', vetoed: '会插话（回答时改主意）', failed: '会插话（回复失败）', below_threshold: '不插话', refused: '模型拒答', error: '判断失败', busy: '正在回复，跳过', muted: '已静音', bot_streak: '机器人连续发言，暂停', unconfigured: '未配置判断服务' },
+    outcomes: { interject: '会插话', sent: '已插话', vetoed: '会插话（回答时改主意）', failed: '会插话（回复失败）', yielded: '会插话（让给同群更合适的机器人）', below_threshold: '不插话', refused: '模型拒答', error: '判断失败', busy: '正在回复，跳过', muted: '已静音', bot_streak: '机器人连续发言，暂停', unconfigured: '未配置判断服务' },
   },
   memory: { status: '状态', title: '记忆管理', hint: '编辑先保存到管理台，部署后才更新运行时文件。回收不会覆盖更新的记录，删除的内容不会自动复活。每文件最多 256 KiB。', filename: '文件名', filenameHint: '请填写不含路径的 .md 文件名', collect: '从运行时回收', deploy: '部署到运行时', deployHint: '将管理台内容和删除记录同步到当前运行时；运行时文件较新时会拒绝覆盖。确认部署？', deleteHint: '删除管理台内容并保留删除标记；部署后删除运行时文件。确认删除？', showDeleted: '显示已删除', modified: '文件更新时间', deleted: '已删除', saved: '已保存', restore: '重新编写', edit: '编辑记忆', content: '内容', done: '已处理 {count} 个文件' },
   smtp: {"title": "邮件通知", "hint": "用于定时任务结果通知。密码加密保存；更换服务器或账号时需要重新填写密码。保存配置不会发送测试邮件。", "host": "SMTP 服务器", "port": "端口", "security": "加密方式", "sender": "发件邮箱", "username": "认证账号", "password": "认证密码", "saved": "已保存，留空保留", "unset": "尚未设置"},

@@ -465,7 +465,7 @@ export default {
     time: '日時', outcome: '結果', probability: '確率', lastMessage: '最後のメッセージ', review: '確認',
     should: '発言すべき', shouldNot: 'すべきでない', loadMore: 'さらに読み込む', noMessages: 'グループメッセージの記録なし',
     kinds: { self: '本人', bot: 'ボット', human: '同僚' },
-    outcomes: { interject: '発言する', sent: '発言済み', vetoed: '発言する（回答時に取りやめ）', failed: '発言する（返信失敗）', below_threshold: '発言しない', refused: 'モデルが拒否', error: '判断失敗', busy: '返信中のためスキップ', muted: 'ミュート中', bot_streak: 'ボットの連続発言で一時停止', unconfigured: '判断サービス未設定' },
+    outcomes: { interject: '発言する', sent: '発言済み', vetoed: '発言する（回答時に取りやめ）', failed: '発言する（返信失敗）', yielded: '発言する（より適したボットに譲った）', below_threshold: '発言しない', refused: 'モデルが拒否', error: '判断失敗', busy: '返信中のためスキップ', muted: 'ミュート中', bot_streak: 'ボットの連続発言で一時停止', unconfigured: '判断サービス未設定' },
   },
   memory: { status: '状態', title: 'メモリ管理', hint: '編集は管理画面に保存され、デプロイ後にインスタンスへ反映されます。収集時に新しい内容は上書きされず、削除した内容も自動復元されません。1 ファイル最大 256 KiB。', filename: 'ファイル名', filenameHint: 'パスを含まない .md ファイル名を入力してください', collect: 'インスタンスから収集', deploy: 'インスタンスへ反映', deployHint: '保存内容と削除を現在のインスタンスへ反映します。対象ファイルの方が新しい場合は上書きしません。実行しますか？', deleteHint: '管理画面の内容を削除します。インスタンスのファイルは次回デプロイ時に削除されます。続けますか？', showDeleted: '削除済みを表示', modified: 'ファイル更新日時', deleted: '削除済み', saved: '保存済み', restore: '再作成', edit: 'メモリを編集', content: '内容', done: '{count} 件のファイルを処理しました' },
   smtp: {"title": "メール通知", "hint": "定期タスクの結果を送信します。パスワードは暗号化して保存します。サーバーやアカウントの変更時は再入力してください。保存時にテストメールは送信しません。", "host": "SMTP サーバー", "port": "ポート", "security": "暗号化", "sender": "送信元", "username": "認証アカウント", "password": "認証パスワード", "saved": "保存済み。空欄で保持", "unset": "未設定"},
