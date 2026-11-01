@@ -245,9 +245,15 @@ class OpenStage(ChatStageBase):
 
         if intake.chat_type == "group" and group_observe.observing(bot):
             # 开了旁听的机器人看得到整段群聊：@ 它的回合和主动插话的回合都带上最近的记录。
-            lines = await group_observe.transcript(session, bot, intake.chat_id)
-            ctx.turn_notes.append(group_observe.transcript_note(lines))
-            if ctx.task.payload.get("origin") == "observe":
+            # 本轮这条消息已在正文里，记录里去掉，免得模型分不清哪条是本轮要处理的。
+            interject = ctx.task.payload.get("origin") == "observe"
+            lines = [
+                line
+                for line in await group_observe.transcript(session, bot, intake.chat_id)
+                if line.event_id is None or line.event_id != ctx.task.inbound_event_id
+            ]
+            ctx.turn_notes.append(group_observe.transcript_note(lines, interject=interject))
+            if interject:
                 ctx.turn_notes.append(group_observe.INTERJECT_NOTE)
         resume_fallback = ""
         if info.inherited_from is not None:

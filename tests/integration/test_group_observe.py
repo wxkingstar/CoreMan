@@ -257,8 +257,9 @@ async def _interjection_turn(db_engine, db_session, scenario, monkeypatch):
         ],
     )
     bot = await observing_bot(db_session)
+    await say(db_session, bot, "om0", "今天中午吃什么", user="u2")
     await say(db_session, bot, "om1", "上周退货率多少？有人知道吗")
-    (observe,) = await tasks_of(db_session, bot, "group_observe")
+    observe = (await tasks_of(db_session, bot, "group_observe"))[-1]
     await quiet_down(db_session, bot)
     await run_observe(db_engine, db_session, observe, FakeDecider(0.9))
     await instances.register(
@@ -290,7 +291,9 @@ async def test_interjection_turn_sees_the_group_and_may_stay_silent(
     )
     turn = body["messages"][-1]["content"]
     turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
-    assert "最近的群聊记录" in turn and "上周退货率多少？有人知道吗" in turn
+    assert "所在的话题" in turn and "今天中午吃什么" in turn
+    # 本轮要回应的消息只在正文出现一次，不在记录里重复。
+    assert turn.count("上周退货率多少？有人知道吗") == 1
     assert group_observe.NO_REPLY in turn  # 插话规则在本轮块里
     assert stream.reply_context["_observe"] is True
     assert stream.final_text == group_observe.NO_REPLY
@@ -377,3 +380,32 @@ async def test_a_late_judgement_yields_once_another_bot_has_taken_the_message(
         select(GroupObserveDecision).where(GroupObserveDecision.bot_id == ops.id)
     )
     assert row.outcome == "yielded"
+
+
+async def test_mention_turn_reads_the_transcript_as_background_only(
+    db_engine, db_session, monkeypatch
+):
+    from coreman.core.bus import instances, tasks
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.fakes import fake_relay
+
+    bot = await observing_bot(db_session)
+    await say(db_session, bot, "om1", "上周退货率多少？", user="u2")
+    await say(db_session, bot, "om2", "帮我查下昨天订单量", mentions_bot=True)
+    await instances.register(
+        db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
+    )
+    await db_session.commit()
+    turn = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert turn is not None and turn.kind == "chat"
+    relay = fake_relay.FakeRelay("normal")
+    ctx = build_ctx(db_engine, turn, relay_client_factory=lambda _r: relay.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    content = relay.requests[0]["messages"][-1]["content"]
+    content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    assert "只作背景参考" in content and "不是本轮任务" in content
+    assert "上周退货率多少？" in content
+    assert content.count("帮我查下昨天订单量") == 1
+    assert group_observe.NO_REPLY not in content  # @ 它的回合没有插话规则
