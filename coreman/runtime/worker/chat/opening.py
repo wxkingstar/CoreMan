@@ -270,31 +270,36 @@ class OpenStage(ChatStageBase):
             elif carried:
                 # 会话文件已带到新运行时，原生续聊；驱动续不上时才把它放进本轮块。
                 resume_fallback = carried
-        from coreman.runtime.worker.chat.collaboration import configure
-
         # 各处在传入文本后面追加自己的规则：从空串起步，攒出的就是本轮附加能力，
         # 交给 build_system_prompt 放在结尾重申之前。
-        extra, env = await configure(session, ctx, intake, info, "", env)
-        from coreman.runtime.worker.chat.personal import configure as configure_personal
-
-        extra, env = await configure_personal(
-            session, ctx, intake, info.relay_session_id, extra, env
-        )
         from coreman.runtime.worker.chat import wecom_personal
 
-        extra, env = await wecom_personal.configure(
-            session, ctx, intake, info.relay_session_id, extra, env
-        )
-        from coreman.runtime.worker.chat import schedules
+        extra = ""
+        personal_secrets: frozenset[str] = frozenset()
+        if ctx.task.payload.get("origin") != "observe":
+            # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
+            # 真要做就由它认领、等对方 @ 它，走正常回合。
+            from coreman.runtime.worker.chat.collaboration import configure
 
-        extra, env = await schedules.configure(
-            session, ctx, intake, info.relay_session_id, extra, env
-        )
-        from coreman.runtime.worker.chat import credentials
+            extra, env = await configure(session, ctx, intake, info, extra, env)
+            from coreman.runtime.worker.chat.personal import configure as configure_personal
 
-        extra, env, personal_secrets = await credentials.configure(
-            session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
-        )
+            extra, env = await configure_personal(
+                session, ctx, intake, info.relay_session_id, extra, env
+            )
+            extra, env = await wecom_personal.configure(
+                session, ctx, intake, info.relay_session_id, extra, env
+            )
+            from coreman.runtime.worker.chat import schedules
+
+            extra, env = await schedules.configure(
+                session, ctx, intake, info.relay_session_id, extra, env
+            )
+            from coreman.runtime.worker.chat import credentials
+
+            extra, env, personal_secrets = await credentials.configure(
+                session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
+            )
         from coreman.runtime.worker.chat import cloud_proxy
 
         env = await cloud_proxy.configure(

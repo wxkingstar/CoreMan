@@ -18,7 +18,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.db.session import make_session_factory
 from coreman.core.platforms.feishu import FeishuError
-from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
+from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost, api_id
 
 
 @pytest.fixture(autouse=True)
@@ -1234,3 +1234,26 @@ async def test_observe_turn_sends_only_the_final_and_never_no_reply(db_session, 
     async with factory() as session:
         done = await session.get(TaskStream, row.task_id, populate_existing=True)
         assert done.finish_pushed_at is not None
+
+
+async def test_outbox_short_reply_quotes_the_message_it_answers(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="observe:1",
+            target={"chat_id": "oc1", "message_id": "om_9"},
+            payload={"text": "我看一下。", "_reply": True},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    target = f"/open-apis/im/v1/messages/{api_id('om_9')}/reply"
+    (body,) = [b for _, p, b in api.calls if p == target]
+    assert body["msg_type"] == "text" and json.loads(body["content"]) == {"text": "我看一下。"}

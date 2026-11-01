@@ -87,6 +87,8 @@ class Outcome:
     cancelled: bool = False
     reason: str | None = None
     error: Exception | None = None
+    # 主动插话跑得久，已经在群里先回过「我看一下」。
+    observe_acked: bool = False
 
     @property
     def counted(self) -> int:

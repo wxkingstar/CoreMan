@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+from coreman.core.bus import outbox
+from coreman.core.chat import group_observe
 from coreman.core.db.models import Task
+from coreman.core.i18n.messages import msg
 from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
@@ -60,6 +63,7 @@ class ConverseStage(ChatStageBase):
         )
         # 工具数封顶只针对机器人之间的协作（可能互相求助成环）；只挂同事求助的轮次不封顶。
         capped = bool(ctx.task.payload.get("collaboration_id") or ctx.bot_peers_mounted)
+        observe = ctx.task.payload.get("origin") == "observe"
         try:
             while True:
                 if ctx.cancel_event.is_set():
@@ -87,6 +91,14 @@ class ConverseStage(ChatStageBase):
                         if task.payload.get("collaboration_handoff"):
                             out.collaboration_handoff = True
                             return out
+                if observe:
+                    elapsed = now - (out.request_started or now)
+                    if elapsed >= group_observe.INTERJECT_LIMIT_SECONDS:
+                        out.cancelled, out.reason = True, "observe_timeout"
+                        return out
+                    if not out.observe_acked and elapsed >= group_observe.INTERJECT_ACK_SECONDS:
+                        await self._observe_ack(ctx, pre)
+                        out.observe_acked = True
                 if await supervisor.tick(now) == "expired":
                     # 硬 TTL：返回即可，finally 会断连（=让 relay 杀掉这一轮 CLI）。
                     out.cancelled, out.reason = True, "hard_ttl"
@@ -125,6 +137,23 @@ class ConverseStage(ChatStageBase):
             await gen.aclose()
             await client.aclose()
             await images.aclose()
+
+    async def _observe_ack(self, ctx: TaskContext, pre: Prepared) -> None:
+        """插话回合跑久了：引用触发消息回一句「我看一下」，让大家知道有人在处理。"""
+        message_id = pre.intake.inbound.reply_context.get("message_id")
+        if pre.intake.bot.platform != "feishu" or not message_id:
+            return
+        async with ctx.session_factory() as session:
+            await outbox.add(
+                session,
+                bot_id=pre.intake.bot.id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"{ctx.task.id}:observe_ack",
+                target={"chat_id": pre.intake.chat_id, "message_id": message_id},
+                payload={"text": msg("observe_ack", ctx.locale), "_reply": True},
+            )
+            await session.commit()
 
     def _apply(self, ctx: TaskContext, pre: Prepared, out: Outcome, event: SseEvent) -> None:
         if not out.saw_event:

@@ -30,9 +30,9 @@ SETTING_DEFAULTS: dict[str, Any] = {
     # 飞书群聊旁听：判断概率高于阈值才插话；群里安静这么久才判断，一直有人说话时最长等这么久；
     # 最近一条人类消息之后机器人消息连续这么多条就停止主动插话（防机器人之间无限接话）。
     "group_observe_threshold": 0.3,
-    "group_observe_quiet_seconds": 8,
+    "group_observe_quiet_seconds": 15,
     "group_observe_max_wait_seconds": 60,
-    "group_observe_bot_streak_limit": 6,
+    "group_observe_bot_streak_limit": 3,
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
