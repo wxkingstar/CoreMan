@@ -83,6 +83,7 @@ async def start(
     name: str | None = None,
     description: str | None = None,
     avatar_url: str | None = None,
+    observe: bool = False,
 ) -> FeishuAppRegistration:
     await _rate_limit(session, user)
     # 同一个人同一目标只保留一个进行中的二维码。
@@ -104,7 +105,7 @@ async def start(
             desc=(description or "").strip()[:200] or None,
             avatars=[avatar_url] if avatar_url and avatar_url.startswith("https://") else None,
             app_id=app_id,
-            observe=bot is not None and bot.group_observe != "off",
+            observe=observe or (bot is not None and bot.group_observe != "off"),
         )
     except registration.RegistrationError as exc:
         raise ApiError(502, 502, f"飞书暂时无法创建应用（{exc.code}）") from exc

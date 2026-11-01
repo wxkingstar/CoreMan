@@ -1,10 +1,12 @@
 import { inject, type ComputedRef, type InjectionKey, type Ref } from 'vue'
-import type { BotIn, EffortLevel, RelayOut, TeamOut } from '@/api/types'
+import type { BotIn, BotOut, EffortLevel, RelayOut, TeamOut } from '@/api/types'
 
 /** BotForm 与其分区子组件共享的表单状态和联动逻辑；状态只在 BotForm 里维护一份。 */
 export interface BotFormContext {
   mode: 'create' | 'edit'
   botId?: string
+  /** 编辑时载入的机器人（表单在 BotForm 挂载后才填入，子组件初始化时要看原值用这个）。 */
+  savedBot?: BotOut
   form: BotIn
   fieldErrors: Record<string, string>
   isManager: ComputedRef<boolean>

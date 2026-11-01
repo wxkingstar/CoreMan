@@ -376,6 +376,7 @@ async def test_group_observe_switch_rules(
     from types import SimpleNamespace
 
     from coreman.api.routers import bots as bots_router
+    from coreman.api.routers import feishu_apps as feishu_app_routes
 
     bot, _, _ = await _setup(client, db_session)
 
@@ -399,6 +400,18 @@ async def test_group_observe_switch_rules(
     assert (await patch(body)).status_code == 409  # 部署没配判断服务
     ready = SimpleNamespace(decision_ready=True)
     monkeypatch.setattr(bots_router, "get_settings", lambda: ready)
+    permission = {"status": "missing"}
+
+    async def observe_permission(cipher: object, bot: object) -> str:
+        return permission["status"]
+
+    monkeypatch.setattr(feishu_app_routes, "observe_permission", observe_permission)
+    r = await patch(body)
+    assert r.status_code == 409 and "扫码补齐" in r.json()["message"]  # 飞书应用没开通权限
+    permission["status"] = "pending"
+    r = await patch(body)
+    assert r.status_code == 409 and "管理员审核" in r.json()["message"]
+    permission["status"] = "granted"
     r = await patch(body)
     assert r.status_code == 200
     assert r.json()["data"]["group_observe"] == "shadow" and r.json()["data"]["group_observe_ready"]

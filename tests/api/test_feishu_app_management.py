@@ -323,3 +323,23 @@ async def test_default_commands_endpoint_adds_missing_builtins(
         select(AuditLog).where(AuditLog.action == "bot.feishu_app_command_defaults")
     )
     assert audit is not None
+
+
+async def test_observe_permission_reports_missing_pending_and_granted(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:
+    feishu, _, bot = await _setup(client, db_session, monkeypatch)
+    url = f"/api/admin/bots/{bot.id}/feishu-app/observe-permission"
+    r = await client.get(url)
+    assert r.status_code == 200 and r.json()["data"] == {"status": "missing"}
+
+    app = feishu.routes[("GET", management.V6_APP)][1]["data"]["app"]  # type: ignore[index]
+    app["scopes"].append(  # type: ignore[index]
+        {"scope": "im:message.group_msg.include_bot:read", "token_types": ["tenant"]}
+    )
+    grant = {"scope_name": "im:message.group_msg.include_bot:read", "grant_status": 0}
+    feishu.routes[("GET", management.V6_SCOPES)] = (200, {"code": 0, "data": {"scopes": [grant]}})
+    assert (await client.get(url)).json()["data"] == {"status": "pending"}
+
+    grant["grant_status"] = 1
+    assert (await client.get(url)).json()["data"] == {"status": "granted"}
