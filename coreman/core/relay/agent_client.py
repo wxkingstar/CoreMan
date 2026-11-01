@@ -41,6 +41,11 @@ OPERATIONS = {
     "session-export",
     "session-read",
     "session-import",
+    "seat-create",
+    "seat-login-start",
+    "seat-login-complete",
+    "seat-activate",
+    "seat-remove",
 }
 
 

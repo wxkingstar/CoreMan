@@ -27,6 +27,7 @@ from coreman.core.bots.relay_policy import backend_unavailable_reason, relay_vis
 from coreman.core.db.models import Bot, ModelCatalog, RelayServer, RuntimeNode, Team, User
 from coreman.core.relay import probe
 from coreman.core.relay.client import RelayClient
+from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import default_model, effective_models
 
 router = APIRouter(
@@ -57,7 +58,7 @@ async def relay_out(
     node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
     return {
         "id": str(relay.id),
-        "name": f"{node.name} / {relay.model_provider}" if node else relay.name,
+        "name": relay_label(relay, node),
         "runtime_node_id": str(node.id) if node else None,
         "runtime_name": node.name if node else None,
         "workspace_root": node.workspace_root if node else None,
@@ -78,6 +79,7 @@ async def relay_out(
         "rate_limit_7d_used_pct": _pct(relay.rate_limit_7d_used_pct),
         "rate_limit_7d_resets_at": relay.rate_limit_7d_resets_at,
         "rate_limit_probed_at": relay.rate_limit_probed_at,
+        "seat_quotas": relay.seat_quotas or {},
         "health_status": relay.health_status,
         "health_checked_at": relay.health_checked_at,
         "health_detail": relay.health_detail,
@@ -152,10 +154,11 @@ async def list_relays(
     params: PageParams = Depends(),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    # 按给人看的名字（节点名 / provider）排，内部名是节点 id，排出来没有规律。
     stmt = (
         select(RelayServer)
-        .where(RelayServer.runtime_node_id.is_not(None))
-        .order_by(RelayServer.name)
+        .join(RuntimeNode, RuntimeNode.id == RelayServer.runtime_node_id)
+        .order_by(RuntimeNode.name, RelayServer.model_provider, RelayServer.id)
     )
     if user.role not in MANAGER_ROLES:
         stmt = stmt.where(RelayServer.visibility == "all")

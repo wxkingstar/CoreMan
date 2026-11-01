@@ -50,13 +50,23 @@ def _ctx() -> NS:
 
 @pytest.mark.parametrize("reason", [None, "length", "error"])
 def test_unconfirmed_terminal_is_not_success(reason):
-    pre = NS(writer=NS(pending_text="partial"), session_url="http://fake/s", relay=NS(name="test"))
+    pre = NS(
+        writer=NS(pending_text="partial"),
+        session_url="http://fake/s",
+        relay=NS(name="test"),
+        relay_label="test",
+    )
     verdict = ChatTaskHandler()._classify(_ctx(), pre, Outcome(text_events=1, finish_reason=reason))
     assert verdict.task_status == "failed"
 
 
 def _classify(text: str, out: Outcome) -> Verdict:
-    pre = NS(writer=NS(pending_text=text), session_url="http://fake/s", relay=NS(name="test"))
+    pre = NS(
+        writer=NS(pending_text=text),
+        session_url="http://fake/s",
+        relay=NS(name="test"),
+        relay_label="test",
+    )
     return ChatTaskHandler()._classify(_ctx(), pre, out)
 
 

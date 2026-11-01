@@ -53,6 +53,7 @@ from coreman.api.routers import (
     runtime,
     runtime_nodes,
     runtime_protocol,
+    runtime_seats,
     self_reminders,
     skill_catalog,
     skill_local,
@@ -168,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(runtime.router)
     app.include_router(runtime_nodes.router)
     app.include_router(runtime_protocol.router)
+    app.include_router(runtime_seats.router)
     app.include_router(feishu_personal.router)
     app.include_router(feishu_apps.router)
     app.include_router(wecom_bots.router)

@@ -96,6 +96,14 @@ def test_quota_table_verbatim() -> None:
     )
 
 
+def test_quota_table_uses_labels() -> None:
+    cur, other = _relay("claude01", pct5=95, pct7=40), _relay("claude02", pct5=10, pct7=75)
+    table = quota_table(
+        [cur, other], current_id=cur.id, now=NOW, labels={cur.id: "runtime-02 / claude"}
+    )
+    assert "| runtime-02 / claude ⭐ |" in table and "| claude02 |" in table
+
+
 def test_quota_warning_variants() -> None:
     both = _relay("a", pct5=92, pct7=96)
     assert quota_warning(both, NOW) == (

@@ -26,6 +26,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.labels import load_nodes, relay_label, signed_in
 from coreman.core.relay.quota import parse_quota, save_quota
 from coreman.core.wecom.cards import (
     choice_card,
@@ -69,18 +70,29 @@ class FinalizeStage(ChatStageBase):
             relays = list(
                 (
                     await session.execute(
-                        select(RelayServer)
-                        .where(RelayServer.is_active.is_(True))
-                        .order_by(RelayServer.name)
+                        select(RelayServer).where(RelayServer.is_active.is_(True))
                     )
                 ).scalars()
+            )
+            nodes = await load_nodes(session, relays)
+            labels = {r.id: relay_label(r, nodes.get(r.runtime_node_id)) for r in relays}
+            # 没装或没登录这种 AI 的实例既不列进额度表、也不推荐：额度是旧值，切过去也用不了。
+            relays = sorted(
+                (
+                    r
+                    for r in relays
+                    if r.id == pre.relay.id or signed_in(r, nodes.get(r.runtime_node_id))
+                ),
+                key=lambda r: labels[r.id],
             )
             current = next((r for r in relays if r.id == pre.relay.id), None)
             if current is None:
                 # 这一轮跑完的工夫实例被下线了：额度数据已经无从谈起，终稿原样交付。
                 return verdict, None
             note = (
-                quota_table(relays, current_id=current.id, now=now, locale=ctx.locale)
+                quota_table(
+                    relays, current_id=current.id, now=now, locale=ctx.locale, labels=labels
+                )
                 if limited
                 else quota_warning(current, now, ctx.locale)
             )
@@ -126,9 +138,9 @@ class FinalizeStage(ChatStageBase):
                 "platform_user_id": pre.intake.speaker.platform_user_id,
                 "user_id": str(user.id),
                 "current_relay_id": str(current.id),
-                "current_name": current.name,
+                "current_name": labels[current.id],
                 "target_relay_id": str(target.id),
-                "target_name": target.name,
+                "target_name": labels[target.id],
                 "target_pct_7d": pct,
                 "chat_id": pre.intake.chat_id,
                 "chat_type": pre.intake.chat_type,
@@ -149,8 +161,8 @@ class FinalizeStage(ChatStageBase):
         ctx.log.info("relay_switch_offered", target=target.name, prefix=prefix)
         return verdict, switch_offer_card(
             task_id=question_task_id(prefix, 0),
-            current_name=current.name,
-            target_name=target.name,
+            current_name=labels[current.id],
+            target_name=labels[target.id],
             pct_text=f"{pct:.0f}%" if pct is not None else msg("rl_pct_unknown", ctx.locale),
             icon_url=await self._icon_url(ctx),
             locale=ctx.locale,

@@ -10,7 +10,7 @@ import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
 import HealthTag from '@/components/HealthTag.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { pctNum } from '@/utils/format'
-import { backendOf } from '@/utils/models'
+import { backendOf, selectableRelays } from '@/utils/models'
 
 const props = defineProps<{ bot: BotOut; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; switched: [SwitchRelayOut] }>()
@@ -143,7 +143,7 @@ async function confirm(): Promise<void> {
 onMounted(async () => {
   loading.value = true
   try {
-    relayList.value = (await relays.list({ is_active: true, per_page: 200 })).items
+    relayList.value = selectableRelays((await relays.list({ is_active: true, per_page: 200 })).items, props.bot.relay_server_id)
   } catch (e) {
     fail(e)
   } finally {

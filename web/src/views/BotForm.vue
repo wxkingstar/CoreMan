@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { errorMessage, fieldErrorMap, isVersionConflict } from '@/utils/errors'
 import { fitEffort, supportedEfforts } from '@/utils/effort'
+import { selectableRelays } from '@/utils/models'
 import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { computed, nextTick, onMounted, provide, reactive, ref, watch } from 'vue'
@@ -377,7 +378,7 @@ async function reloadVersion(): Promise<void> {
 onMounted(async () => {
   try {
     const [relayPage, rows] = await Promise.all([relays.list({ is_active: true, per_page: 200 }), catalog.list()])
-    relayList.value = relayPage.items
+    relayList.value = selectableRelays(relayPage.items, props.bot?.relay_server_id)
     catalogRows.value = rows
   } catch (e) {
     fail(e)

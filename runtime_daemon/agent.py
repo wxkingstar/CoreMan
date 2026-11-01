@@ -45,6 +45,10 @@ CODEX_ROLLOUT = re.compile(
 
 
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
+# 席位的增删、登录与切换，见 RuntimeAgent.seat_operation 与 seats.py。
+SEAT_OPERATIONS = frozenset(
+    {"seat-create", "seat-login-start", "seat-login-complete", "seat-activate", "seat-remove"}
+)
 
 
 class OperationError(Exception):
@@ -847,6 +851,10 @@ class Agent:
             )
         return logins.logout(path, name)
 
+    def seat_operation(self, kind: str, data: dict) -> dict:
+        """席位管理；由运行时守护进程实现。"""
+        raise OperationError("当前环境不支持席位管理")
+
     def start_background(self, name: str, function) -> dict:
         with self.background_lock:
             if name in self.background:
@@ -1209,6 +1217,8 @@ class Agent:
             return self.report_memory(data.get("working_dir"))
         if kind in {"mcp-login-start", "mcp-login-complete", "mcp-logout"}:
             return self.mcp_login(kind, data)
+        if kind in SEAT_OPERATIONS:
+            return self.seat_operation(kind, data)
         with self.lock:
             if cancelled is not None and cancelled.is_set():
                 raise OperationError("操作已取消")

@@ -69,6 +69,7 @@ from coreman.core.feishu_apps import service as feishu_apps
 from coreman.core.logging import get_logger
 from coreman.core.masking import is_masked, mask_secret
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
+from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import backend_of
 from coreman.core.wecom_bots import service as wecom_provisions
 from coreman.core.wecom_bots import verify as wecom_verify
@@ -366,13 +367,7 @@ async def build_out(
         "relay_server_id": str(bot.relay_server_id) if bot.relay_server_id else None,
         # 名字无条件给（bot 管理员总得知道自己的机器人跑在哪台上），地址按 relay 可见性给：
         # visibility='admins' 的实例，relay_servers 对普通成员连存在性都不透，这里也不能透。
-        "relay_name": (
-            f"{node.name} / {relay.model_provider}"
-            if node and relay
-            else relay.name
-            if relay
-            else None
-        ),
+        "relay_name": relay_label(relay, node) if relay else None,
         "relay_url": relay.relay_url if relay and relay_visible(user, relay) else None,
         "model": bot.model,
         "backend": backend_of(bot.model, relay.model_provider if relay else None),

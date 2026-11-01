@@ -345,6 +345,7 @@ export default {
     published: '{version} の公開を申請しました。承認後に反映されます',
     publishRemarkDefault: 'CoreMan 管理画面から申請',
   },
+  runtimeSeats: { title: 'シート管理 · {name}', manage: 'シート', hint: '1 台のランタイムで複数のアカウントにログインでき、同時に使うのは 1 つです。切り替え後の新しい会話は新しいシートを使い、進行中の会話は元のシートで最後まで実行します。会話・プラグイン・設定はシート間で共有します。認可済みの MCP スキルは新しいシートで再認可が必要です。', upgrade: 'シートを管理するには Runtime を更新してください', notInstalled: '未インストール', defaultSeat: '既定のシート', label: '名前', account: 'アカウント', login: 'ログイン状態', quota: '利用枠', current: '使用中', add: 'シートを追加', labelPlaceholder: '例：山田さんのシート', signIn: 'ログイン', signInAgain: '再ログイン', activate: 'このシートを使う', remove: '削除', activateConfirm: '{provider} をシート「{name}」に切り替えますか？新しい会話はこのシートのアカウントを使います。', removeConfirm: 'シート「{name}」を削除しますか？ノード上でログアウトし設定ディレクトリを削除します。共有の会話は残ります。', activated: '切り替えました', removed: '削除しました', created: '追加しました。ログインしてください', loginTitle: 'ログイン · {name}', loginOpen: '認可ページを開く', loginClaudeHint: 'このシートのアカウントでブラウザから認可し、ページに表示されたコードを下に貼り付けてください。', loginCodexHint: 'このシートのアカウントでブラウザからログインし、下のワンタイムコードを入力して「完了」を押してください。', code: 'コード', userCode: 'ワンタイムコード', finish: 'ログインを完了', codexDone: '完了', loggedIn: 'ログインしました', expires: '{n} 分間有効' },
   runtimeNodes: {
     unavailable: { disabled: 'ランタイム無効', root_pending: 'ルート変更の反映待ち', not_installed: '未インストール', login_required: '未ログイン', unknown: '状態不明。Runtime を更新しログインを確認してください' },
     rootEditHint: '絶対パスを指定してください（/ やシンボリックリンクは不可）。利用中・移行中の AI 社員を先に移してください。既存ファイルは移動せず、Runtime の確認後に反映します。',

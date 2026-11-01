@@ -19,6 +19,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -47,6 +48,7 @@ from runtime_daemon.logs import (
     configure_logging,
     rotate_copytruncate,
 )
+from runtime_daemon.seats import SeatLogins, Seats
 from runtime_daemon.tls import build_trust_bundle, client_context
 
 LOG = logging.getLogger("coreman-runtime")
@@ -246,15 +248,20 @@ async def optional_capabilities(client: httpx.AsyncClient) -> dict:
     return declared if isinstance(declared, dict) else {}
 
 
-def login_account(provider: str, status: dict) -> str:
+def login_account(provider: str, status: dict, env: dict | None = None) -> str:
     """CLI 当前登录的账号邮箱；读不到时为空，不影响登录状态。"""
+    env = os.environ if env is None else env
     try:
         if provider == "claude":
             if status.get("email"):
                 return str(status["email"])[:255]
-            data = json.loads((Path.home() / ".claude.json").read_text())
+            config_dir = env.get("CLAUDE_CONFIG_DIR")
+            state = (
+                Path(config_dir) / ".claude.json" if config_dir else Path.home() / ".claude.json"
+            )
+            data = json.loads(state.read_text())
             return str((data.get("oauthAccount") or {}).get("emailAddress") or "")[:255]
-        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        codex_home = Path(env.get("CODEX_HOME") or Path.home() / ".codex")
         data = json.loads((codex_home / "auth.json").read_text())
         payload = ((data.get("tokens") or {}).get("id_token") or "").split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
@@ -263,7 +270,8 @@ def login_account(provider: str, status: dict) -> str:
         return ""
 
 
-def cli_status(provider: str) -> dict:
+def cli_status(provider: str, env: dict | None = None) -> dict:
+    """CLI 的安装与登录状态；env 给定时按该环境（席位）查登录。"""
     path = shutil.which(provider)
     result = {
         "installed": bool(path),
@@ -285,7 +293,7 @@ def cli_status(provider: str) -> dict:
             if provider == "claude"
             else [path, "login", "status"]
         )
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=15, env=env)
         data = {}
         if provider == "claude":
             data = json.loads(proc.stdout)
@@ -297,7 +305,7 @@ def cli_status(provider: str) -> dict:
             elif "not logged in" in output:
                 result["login"] = "required"
         if result["login"] == "ready":
-            result["account"] = login_account(provider, data)
+            result["account"] = login_account(provider, data, env)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         result["detail"] = "CLI 状态检测失败，请查看本机登录状态"
     return result
@@ -333,6 +341,44 @@ class RuntimeAgent(Agent):
         return [
             dict(v) for v in list(self.daemon.task_info.values()) if v["provider"] == self.provider
         ]
+
+    def seat_operation(self, kind: str, data: dict) -> dict:
+        """席位的增删、登录与切换（见 seats）。不占实例锁：等管理员授权期间其它操作照常。"""
+        seats, provider = self.daemon.seats, self.provider
+        if kind == "seat-create":
+            seat_id = seats.create(provider, data.get("label"))
+            result = {"success": True, "seat_id": seat_id}
+        elif kind == "seat-login-start":
+            seat_id = seats.require(provider, data.get("seat_id"))
+            result = self.daemon.seat_logins.start(
+                provider, seat_id, seats.env(provider, seat_id), self.home
+            )
+        elif kind == "seat-login-complete":
+            seat_id = seats.require(provider, data.get("seat_id"))
+            result = self.daemon.seat_logins.complete(
+                str(data.get("session_id", "")), provider, seat_id, data.get("code")
+            )
+        elif kind == "seat-activate":
+            seat_id = seats.require(provider, data.get("seat_id"))
+            if seat_id == seats.active(provider):
+                return {
+                    "success": True,
+                    "message": "已是当前席位",
+                    "seats": self.daemon.seat_states(provider),
+                }
+            if cli_status(provider, seats.env(provider, seat_id))["login"] != "ready":
+                raise OperationError("该席位未登录，请先登录")
+            seats.activate(provider, seat_id)
+            self.daemon.rotate_driver(provider)
+            with self.background_lock:
+                self.mcp_logins = None  # MCP 授权跟着 CLI 的当前席位走
+            result = {"success": True, "message": "已切换"}
+        else:
+            seats.remove(provider, seats.require(provider, data.get("seat_id")))
+            result = {"success": True, "message": "已移除"}
+        # 结果带上最新的席位状态，管理台不必等下一次心跳。
+        self.daemon.capabilities[provider]["seats"] = self.daemon.seat_states(provider)
+        return {**result, "seats": self.daemon.capabilities[provider]["seats"]}
 
     def claude_limits(self) -> dict | None:
         with httpx.Client(
@@ -485,12 +531,18 @@ class FrameBatcher:
 
 class Daemon:
     def __init__(self, config_path: Path) -> None:
-        import threading
-
         self.config_path = config_path
         self.config = json.loads(config_path.read_text())
         self.data_dir = config_path.parent
         self.drivers: dict[str, subprocess.Popen] = {}
+        # 换席位时起新驱动接新对话；旧驱动等它手上的对话结束再停（见 rotate_driver）。
+        self.driver_gen = {p: 0 for p in PROVIDERS}
+        self.retired: list[tuple[str, int, subprocess.Popen]] = []
+        self.driver_lock = threading.RLock()
+        self.seats = Seats(
+            self.data_dir, self.config, self.save, Path(self.config.get("home", str(Path.home())))
+        )
+        self.seat_logins = SeatLogins()
         self.agents: dict[str, RuntimeAgent] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.task_info: dict[str, dict] = {}
@@ -514,9 +566,10 @@ class Daemon:
         # 生效中的出站代理（prepare 时确定，重启才会变），供心跳上报与管理台展示。
         self.proxy: dict[str, str | bool] = {"source": "none", "url": "", "pending": False}
 
-    def socket_path(self, provider: str) -> Path:
+    def socket_path(self, provider: str, gen: int | None = None) -> Path:
         # Keep under Unix's 104-byte sockaddr limit, including long macOS home paths.
-        return self.socket_dir / (provider + ".sock")
+        gen = self.driver_gen[provider] if gen is None else gen
+        return self.socket_dir / (provider + (f"-{gen}" if gen else "") + ".sock")
 
     def save(self) -> None:
         atomic_write(self.config_path, json.dumps(self.config, indent=2), durable=True)
@@ -639,6 +692,8 @@ class Daemon:
                 link.symlink_to(executable)
         os.environ["PATH"] = str(bin_dir) + os.pathsep + configured_path
         self.apply_proxy()
+        for provider in PROVIDERS:
+            self.seats.apply_env(provider)
 
     async def api(
         self, path: str, body: dict, *, retry: bool = False, budget: float | None = None
@@ -713,6 +768,10 @@ class Daemon:
         self.save()
 
     def start_driver(self, provider: str) -> None:
+        with self.driver_lock:
+            self._start_driver(provider)
+
+    def _start_driver(self, provider: str) -> None:
         existing = self.drivers.get(provider)
         if existing and existing.poll() is None:
             return
@@ -752,6 +811,64 @@ class Daemon:
         self.log_rotator.watch(log_path)
         self.socket_failures[provider] = 0
         self.heal_deferrals[provider] = 0
+
+    def rotate_driver(self, provider: str) -> None:
+        """换席位：新驱动（继承新席位的环境）在新 socket 上接新请求，在途请求留在旧驱动上跑完。"""
+        with self.driver_lock:
+            process = self.drivers.pop(provider, None)
+            if process is not None and process.poll() is None:
+                self.retired.append((provider, self.driver_gen[provider], process))
+            self.driver_gen[provider] += 1
+            self._start_driver(provider)
+        self.socket_failures[provider] = 0
+        self.reap_retired()
+
+    def reap_retired(self) -> None:
+        """停掉已经没有在途请求的旧驱动。"""
+        with self.driver_lock:
+            busy = {
+                (info["provider"], info.get("driver_gen")) for info in list(self.task_info.values())
+            }
+            keep = []
+            for provider, gen, process in self.retired:
+                if (provider, gen) in busy and process.poll() is None:
+                    keep.append((provider, gen, process))
+                    continue
+                if process.poll() is None:
+                    process.terminate()
+                    threading.Thread(
+                        target=self.finish_process, args=(process,), daemon=True
+                    ).start()
+                self.socket_path(provider, gen).unlink(missing_ok=True)
+            self.retired = keep
+
+    @staticmethod
+    def finish_process(process: subprocess.Popen, timeout: float = 15) -> None:
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    def seat_states(self, provider: str) -> list[dict]:
+        """各席位的账号与登录状态；当前席位直接用发现时查到的结果。"""
+        cap, active = self.capabilities[provider], self.seats.active(provider)
+        states = []
+        for seat_id in self.seats.ids(provider):
+            if seat_id == active:
+                status = {"account": cap.get("account", ""), "login": cap.get("login", "unknown")}
+            else:
+                status = cli_status(provider, self.seats.env(provider, seat_id))
+            states.append(
+                {
+                    "id": seat_id,
+                    "label": self.seats.label(provider, seat_id),
+                    "account": status.get("account", ""),
+                    "login": status.get("login", "unknown"),
+                    "active": seat_id == active,
+                }
+            )
+        return states
 
     def driver_fault(self, provider: str) -> str:
         """Why a live driver can no longer be reached; empty when fine or not running."""
@@ -839,6 +956,9 @@ class Daemon:
                         agent.start_schedules()
                 self.agents[provider].model = (cap["models"] or [""])[0]
             self.capabilities[provider] = cap
+            if cap["installed"]:
+                cap["seat_switch_v1"] = True
+                cap["seats"] = await asyncio.to_thread(self.seat_states, provider)
 
     def validate_command(self, command: dict) -> dict:
         provider = command["provider"]
@@ -936,12 +1056,14 @@ class Daemon:
                 "started_at": time.time(),
                 "working_dir": data.get("working_dir", ""),
             }
+            gen = self.driver_gen[provider]
+            if command["path"] != "/":
+                # 经驱动的请求记下驱动代次：换席位后旧驱动等这些请求结束才停。
+                self.task_info[identity]["driver_gen"] = gen
             if command["path"] == "/":
                 operation_name = str(data.get("type"))[:40]
                 if data.get("type") in {"status", "ping"}:
                     self.task_info.pop(identity, None)
-                import threading
-
                 cancelled = threading.Event()
                 token = COMMAND_CANCEL.set(cancelled)
                 operation = asyncio.create_task(
@@ -967,7 +1089,7 @@ class Daemon:
                 await frames.add(json.dumps(result).encode(), status_code=200)
             else:
                 async with httpx.AsyncClient(
-                    transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path(provider))),
+                    transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path(provider, gen))),
                     base_url="http://runtime",
                     timeout=httpx.Timeout(120, connect=10),
                 ) as local:
@@ -1000,6 +1122,8 @@ class Daemon:
         finally:
             self.task_info.pop(identity, None)
             self.slots_freed.set()
+            if self.retired:
+                self.reap_retired()
 
     @property
     def max_concurrent(self) -> int:
@@ -1201,7 +1325,7 @@ class Daemon:
                     await asyncio.gather(self.discovery_task, return_exceptions=True)
                 for agent in self.agents.values():
                     agent.stop.set()
-                for proc in self.drivers.values():
+                for proc in [*self.drivers.values(), *(p for _, _, p in self.retired)]:
                     if proc.poll() is None:
                         proc.terminate()
                         try:
@@ -1212,6 +1336,8 @@ class Daemon:
                 self.log_rotator.stop()
                 for provider in PROVIDERS:
                     self.socket_path(provider).unlink(missing_ok=True)
+                for provider, gen, _ in self.retired:
+                    self.socket_path(provider, gen).unlink(missing_ok=True)
 
 
 def main() -> None:

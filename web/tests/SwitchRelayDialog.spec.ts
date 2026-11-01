@@ -60,19 +60,17 @@ describe('SwitchRelayDialog', () => {
     expect(bars[0].textContent).toContain('45 分钟后重置')
     wrapper.unmount()
   })
-  it('disables a logged-out backend even when it advertises models', async () => {
+  it('hides a logged-out backend but keeps the current one listed', async () => {
     vi.mocked(relays.list).mockResolvedValueOnce({ items: [
-      relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'),
+      { ...relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'), unavailable_reason: 'login_required' },
       { ...relayRow('r2', 'codex', 'codex/gpt-5.5'), unavailable_reason: 'login_required' },
+      relayRow('r3', 'claude', 'vllm/claude-sonnet-4-6'),
     ] } as never)
-    vi.mocked(bots.switchRelay).mockClear()
     const wrapper = mount(SwitchRelayDialog, { props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6' } as never, visible: true }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
     await flushPromises()
-    expect(document.querySelector('[data-test="pick-r2"] input')!.hasAttribute('disabled')).toBe(true)
-    expect(document.body.textContent).toContain('未登录')
-    await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
-    await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
-    expect(bots.switchRelay).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-test="pick-r1"]')).not.toBeNull()
+    expect(document.querySelector('[data-test="pick-r2"]')).toBeNull()
+    expect(document.querySelector('[data-test="pick-r3"]')).not.toBeNull()
     wrapper.unmount()
   })
   // 挂载时会预选当前 relay（「同一台只换模型」的入口），此时直接确认就是空操作：

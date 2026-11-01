@@ -1,10 +1,20 @@
 import { call, http } from './client'
 import type { RelayOut } from './types'
+/** 节点上同一种 AI 的一个登录账号；default 是 CLI 原来的位置。 */
+export interface SeatState {
+  id: string; label: string; account: string; login: 'ready' | 'required' | 'unknown'; active: boolean
+}
 export interface Capability {
   /** CLI 登录的账号邮箱；旧版 Daemon 未上报或读不到时缺省或为空。 */
   account?: string
   installed: boolean; version: string; login: 'ready' | 'required' | 'unknown'
   health: string; detail: string; models: string[]
+  /** 节点支持多席位切换；旧版 Daemon 缺省。 */
+  seat_switch_v1?: boolean; seats?: SeatState[]
+}
+/** 节点上的 CLI 发起的登录：Claude 要把浏览器页面上的认证码贴回来，Codex 在浏览器里输入 user_code。 */
+export interface SeatLogin {
+  session_id: string; authorization_url: string; user_code: string; needs_code: boolean; expires_in: number
 }
 export interface RuntimeNode {
   root_edit_supported?: boolean
@@ -40,4 +50,17 @@ export const runtimeNodes = {
   patch: (id: string, body: { name?: string; workspace_root?: string; team_id?: string | null; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
   remove: (id: string) => call<null>(http.delete(`${base}/${id}`)),
   createLink: (body: InstallInput) => call<InstallLink>(http.post(`${base}/install-links`, body)),
+}
+const seatBase = (node: string, provider: string) => `${base}/${node}/${provider}/seats`
+export const runtimeSeats = {
+  create: (node: string, provider: string, label: string) =>
+    call<{ seat_id: string; seats: SeatState[] }>(http.post(seatBase(node, provider), { label })),
+  startLogin: (node: string, provider: string, seat: string) =>
+    call<SeatLogin>(http.post(`${seatBase(node, provider)}/${seat}/login`)),
+  completeLogin: (node: string, provider: string, seat: string, body: { session_id: string; code?: string }) =>
+    call<{ seats: SeatState[] }>(http.post(`${seatBase(node, provider)}/${seat}/login/complete`, body)),
+  activate: (node: string, provider: string, seat: string) =>
+    call<{ seats: SeatState[] }>(http.post(`${seatBase(node, provider)}/${seat}/activate`)),
+  remove: (node: string, provider: string, seat: string) =>
+    call<{ seats: SeatState[] }>(http.delete(`${seatBase(node, provider)}/${seat}`)),
 }

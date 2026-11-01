@@ -12,10 +12,15 @@ import RelayLiveStatus from '@/components/RelayLiveStatus.vue'
 import HealthTag from '@/components/HealthTag.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
 import CatalogPanel from '@/views/CatalogPanel.vue'
+import RuntimeSeatsDialog from '@/components/RuntimeSeatsDialog.vue'
 import { formatDateTime, pctNum } from '@/utils/format'
 const { t } = useI18n()
 const auth = useAuthStore()
 const canManage = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
+// 席位（节点上登录的账号）只有平台管理员能管。
+const isAdmin = computed(() => auth.user?.role === 'platform_admin')
+const seatNodeId = ref('')
+const seatNode = computed(() => nodes.value.find(n => n.id === seatNodeId.value))
 const nodes = ref<RuntimeNode[]>([])
 const teamList = ref<TeamOut[]>([])
 const query = ref('')
@@ -449,6 +454,15 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   >
                     {{ t('common.edit') }}
                   </el-button>
+                  <el-button
+                    v-if="isAdmin"
+                    text
+                    type="primary"
+                    data-test="runtime-seats"
+                    @click="seatNodeId = row.id"
+                  >
+                    {{ t('runtimeSeats.manage') }}
+                  </el-button>
                   <el-switch
                     :model-value="row.is_active"
                     :aria-label="t('runtimeNodes.enable')"
@@ -486,6 +500,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <CatalogPanel />
       </el-tab-pane>
     </el-tabs>
+    <RuntimeSeatsDialog
+      v-if="seatNode"
+      :node="seatNode"
+      :visible="!!seatNode"
+      @update:visible="seatNodeId = $event ? seatNodeId : ''"
+      @changed="refresh(true)"
+    />
     <el-dialog
       v-model="editDialog"
       :title="t('runtimeNodes.edit')"

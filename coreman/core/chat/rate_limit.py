@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 
@@ -92,8 +92,12 @@ def quota_table(
     current_id: uuid.UUID | None,
     now: datetime,
     locale: str = "zh",
+    labels: Mapping[uuid.UUID, str] | None = None,
 ) -> str:
-    """全部在用实例的额度总览；每台两行，第二行是采集时间与两个倒计时。停用的不列。"""
+    """全部在用实例的额度总览；每台两行，第二行是采集时间与两个倒计时。停用的不列。
+
+    `labels` 是给人看的实例名（见 `coreman.core.relay.labels`），缺的退回内部名。
+    """
     lines = [msg("rl_quota_title", locale)]
     lines.append(msg("rl_quota_head", locale))
     # 分隔行只有管道与横线，没有可翻译的字：markdown 不校验宽度，两种语言共用一行。
@@ -101,7 +105,8 @@ def quota_table(
     for r in relays:
         if not r.is_active:
             continue
-        name = f"{r.name} ⭐" if r.id == current_id else r.name
+        label = (labels or {}).get(r.id, r.name)
+        name = f"{label} ⭐" if r.id == current_id else label
         lines.append(
             f"| {name} | {r.model_provider} "
             f"| {fmt_pct(r.rate_limit_5h_used_pct)} | {fmt_pct(r.rate_limit_7d_used_pct)} |"

@@ -55,6 +55,8 @@ export interface RelayOut {
   rate_limit_5h_used_pct: Pct; rate_limit_5h_resets_at: string | null
   rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null
   rate_limit_probed_at: string | null
+  /** 没在用的席位上次采集到的额度，按席位 id；当前席位的额度在上面几列。 */
+  seat_quotas?: Record<string, { rate_limit_5h_used_pct: Pct; rate_limit_5h_resets_at: string | null; rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null }>
   health_status: HealthStatus; health_checked_at: string | null; health_detail: string | null
   health_latency_ms: number | null; health_fail_count: number
   relay_version: string | null; relay_mode: string | null
