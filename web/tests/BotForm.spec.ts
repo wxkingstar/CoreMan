@@ -55,21 +55,21 @@ const editBot: BotOut = {
 describe('BotForm', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
-  it('keeps the runtime selected but selects no backend when none are ready', async () => {
+  it('hides backends the node reports as signed out, and runtimes with none signed in', async () => {
     vi.mocked(relays.list).mockResolvedValueOnce({ items: [
       { id: 'offline-ai', name: 'demo-node / codex', runtime_node_id: 'demo-node', runtime_name: 'demo-node', model_provider: 'codex', unavailable_reason: 'login_required', effective_models: ['codex/gpt-5.5'] },
+      { id: 'ready-ai', name: 'runtime-02 / claude', runtime_node_id: 'runtime-02', runtime_name: 'runtime-02', model_provider: 'claude', unavailable_reason: null, effective_models: ['vllm/claude-sonnet-4-6'] },
+      { id: 'missing-ai', name: 'runtime-02 / codex', runtime_node_id: 'runtime-02', runtime_name: 'runtime-02', model_provider: 'codex', unavailable_reason: 'not_installed', effective_models: [] },
     ] } as never)
     const wrapper = mount(BotForm, { props: { mode: 'create' }, global: { plugins: [ElementPlus, i18n] } })
     await flushPromises()
-    const vm = wrapper.vm as unknown as { selectRuntime: (id: string) => Promise<void>; selectRelay: (id: string) => Promise<void>; selectedRuntime: string; form: { relay_server_id: string | null } }
-    await vm.selectRuntime('demo-node')
-    expect(vm.selectedRuntime).toBe('demo-node')
-    expect(vm.form.relay_server_id).toBeNull()
-    await vm.selectRelay('offline-ai')
-    expect(vm.form.relay_server_id).toBeNull()
-    const option = wrapper.findAllComponents({ name: 'ElOption' }).find(o => o.props('value') === 'offline-ai')!
-    expect(option.props('disabled')).toBe(true)
-    expect(option.props('label')).toContain('未登录')
+    const vm = wrapper.vm as unknown as { selectRuntime: (id: string) => Promise<void>; runtimeGroups: { id: string; name: string }[]; form: { relay_server_id: string | null } }
+    expect(vm.runtimeGroups).toEqual([{ id: 'runtime-02', name: 'runtime-02' }])
+    await vm.selectRuntime('runtime-02')
+    expect(vm.form.relay_server_id).toBe('ready-ai')
+    const values = wrapper.findAllComponents({ name: 'ElOption' }).map(o => o.props('value'))
+    expect(values).not.toContain('offline-ai')
+    expect(values).not.toContain('missing-ai')
     wrapper.unmount()
   })
 

@@ -345,6 +345,7 @@ export default {
     published: '已提交发布 {version}，审核通过后生效',
     publishRemarkDefault: '由 CoreMan 管理台提交',
   },
+  runtimeSeats: { title: '席位管理 · {name}', manage: '席位', hint: '同一台运行时可以登录多个账号，一次只用一个。切换后新对话用新席位，进行中的对话在原席位上跑完；会话、插件与设置各席位共用。已授权的 MCP 技能需要在新席位上重新授权。', upgrade: '请先升级 Runtime，再管理席位', notInstalled: '未安装', defaultSeat: '默认席位', label: '名称', account: '账号', login: '登录状态', quota: '额度', current: '当前', add: '添加席位', labelPlaceholder: '例如：张三的席位', signIn: '登录', signInAgain: '重新登录', activate: '设为当前', remove: '移除', activateConfirm: '把 {provider} 切换到席位「{name}」？新对话将用这个席位的账号。', removeConfirm: '移除席位「{name}」？会在节点上退出该账号并删除它的配置目录，共用的会话不受影响。', activated: '已切换', removed: '已移除', created: '已添加，请登录', loginTitle: '登录席位 · {name}', loginOpen: '打开授权页面', loginClaudeHint: '在浏览器里用这个席位的账号授权，把页面上显示的认证码粘贴到下面。', loginCodexHint: '在浏览器里用这个席位的账号登录，并输入下面的一次性代码；完成后点「我已完成」。', code: '认证码', userCode: '一次性代码', finish: '完成登录', codexDone: '我已完成', loggedIn: '登录完成', expires: '{n} 分钟内有效' },
   runtimeNodes: {
     unavailable: { disabled: '运行时未启用', root_pending: '主目录修改等待生效', not_installed: '未安装', login_required: '未登录', unknown: '状态未知，请升级 Runtime 并确认登录' },
     rootEditHint: '使用绝对路径（不能是 / 或符号链接）。有 AI 员工绑定或迁入时需先切换运行时；修改不搬动原目录文件，等待 Runtime 确认后生效。',
