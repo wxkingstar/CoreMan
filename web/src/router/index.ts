@@ -88,6 +88,20 @@ setUnauthorizedHandler(() => {
   }
 })
 
+// 发布后旧页面里的懒加载分片已被新哈希替换，import 会 404，导航被静默拒绝，表现为菜单点了没反应。
+// 遇到这种错误就整页跳到目标地址，顺便拿到新版本；同一目标 10 秒内只重载一次，避免分片真缺失时循环刷新。
+const CHUNK_ERROR = /dynamically imported module|Importing a module script failed|Unable to preload CSS/
+const CHUNK_RELOAD_KEY = 'coreman.chunkReload'
+router.onError((error, to) => {
+  if (!CHUNK_ERROR.test(String(error?.message ?? error))) return
+  try {
+    const last = JSON.parse(sessionStorage.getItem(CHUNK_RELOAD_KEY) ?? 'null') as { path: string, at: number } | null
+    if (last && last.path === to.fullPath && Date.now() - last.at < 10_000) return
+    sessionStorage.setItem(CHUNK_RELOAD_KEY, JSON.stringify({ path: to.fullPath, at: Date.now() }))
+  } catch { /* unavailable storage */ }
+  window.location.assign(to.fullPath)
+})
+
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (!auth.loaded) {

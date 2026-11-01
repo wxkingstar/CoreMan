@@ -95,4 +95,26 @@ describe('router guard', () => {
     expect(router.currentRoute.value.fullPath).toBe('/runtimes')
     expect(router.currentRoute.value.name).toBe('relays')
   })
+
+  // 发布后旧分片 404：整页跳到目标地址拿新版本，同一目标短时间内不重复重载。
+  it('reloads the target page once when a lazy route chunk fails to load', async () => {
+    const assign = vi.fn()
+    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, assign })
+    sessionStorage.clear()
+    vi.mocked(api.me).mockResolvedValue({
+      id: 'u1', login_name: 'admin', display_name: 'Admin', role: 'platform_admin', locale: 'zh',
+      email: null, avatar_url: null, source: 'bootstrap', team_id: null,
+    })
+    router.addRoute({
+      path: '/stale-chunk',
+      component: () => Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Stale-abc.js')),
+    })
+    await expect(router.push('/stale-chunk')).rejects.toThrow('dynamically imported module')
+    expect(assign).toHaveBeenCalledWith('/stale-chunk')
+
+    await expect(router.push('/stale-chunk')).rejects.toThrow('dynamically imported module')
+    expect(assign).toHaveBeenCalledTimes(1)
+    vi.mocked(api.me).mockReset()
+    vi.restoreAllMocks()
+  })
 })
