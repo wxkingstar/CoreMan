@@ -559,7 +559,6 @@ onMounted(async () => {
           <template v-if="bot.platform === 'feishu'">
             <BotCollaborators
               :bot-id="botId"
-              :source-name="bot.name"
               :can-edit="!!perms?.can_edit"
               :active="detailTab === 'collaboration'"
             />

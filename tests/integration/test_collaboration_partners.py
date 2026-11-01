@@ -1,4 +1,4 @@
-"""Partner intent is global; membership and transport proof belong to the current request."""
+"""No partner setup: membership and transport proof belong to the current request."""
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
@@ -17,7 +17,7 @@ from coreman.core.db.models import (
     BotCollaborationRoute,
     OutboxItem,
 )
-from tests.integration.test_collaboration_tools import fresh
+from tests.integration.test_collaboration_tools import call, fresh
 
 
 async def invoke_request(session, task, actor, key):
@@ -37,9 +37,7 @@ async def test_discovery_does_not_require_group_route(db_session):
     a, b, actor, route, task = await fresh(db_session)
     route.chat_id = "another-group"
     await db_session.commit()
-    result = await invoke(
-        db_session, task_id=task.id, actor=str(actor.id), name="search_collaborators", arguments={}
-    )
+    result = await call(db_session, task, actor, "search_collaborators", {})
     assert [row["id"] for row in result["items"]] == [b.bot_key]
 
 
@@ -123,18 +121,14 @@ async def test_lazy_identity_probe_is_single_and_no_ai_request_until_verified(
 
 
 async def test_ready_transport_proof_is_not_bound_to_first_requester(db_session, monkeypatch):
-    from coreman.core.db.models import BotCollaborationPartner, User
+    from coreman.core.db.models import User
 
     a, b, actor, route, task = await fresh(db_session)
     previous_human = await db_session.get(User, a.created_by)
     previous_human.status = "disabled"
-    partner = await db_session.scalar(
-        select(BotCollaborationPartner).where(BotCollaborationPartner.source_bot_id == a.id)
-    )
     route.setup = {
         "runtime_request": True,
         "status": "ready",
-        "partner_id": str(partner.id),
         "actor_id": str(previous_human.id),
         "source_fingerprint": setup_service.fingerprint(a),
         "target_fingerprint": setup_service.fingerprint(b),

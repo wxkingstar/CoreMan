@@ -27,30 +27,24 @@ async def fresh(session):
     return a, b, actor, route, task
 
 
-async def call(session, task, actor, name, args):
+async def call(session, task, actor, name, args, *, here=True):
+    """`here`: what Feishu answers when asked whether each peer is in the group."""
     from coreman.core.chat.collaboration_tools import invoke
 
-    if name == "request_collaboration":
-        with (
-            patch(
-                "coreman.core.chat.collaboration_setup.check_current_group", new_callable=AsyncMock
-            ),
-            patch(
-                "coreman.core.chat.collaboration_setup.available", new=AsyncMock(return_value=True)
-            ),
-            patch("coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock),
-        ):
-            result = await invoke(
-                session,
-                task_id=task.id,
-                actor=str(actor.id),
-                name=name,
-                arguments=args,
-                cipher=Cipher(b"t" * 32),
-            )
-    else:
+    presence = AsyncMock(side_effect=here) if callable(here) else AsyncMock(return_value=here)
+    with (
+        patch("coreman.core.chat.collaboration_setup.in_chat", new=presence),
+        patch("coreman.core.chat.collaboration_setup.check_current_group", new_callable=AsyncMock),
+        patch("coreman.core.chat.collaboration_setup.available", new=AsyncMock(return_value=True)),
+        patch("coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock),
+    ):
         result = await invoke(
-            session, task_id=task.id, actor=str(actor.id), name=name, arguments=args
+            session,
+            task_id=task.id,
+            actor=str(actor.id),
+            name=name,
+            arguments=args,
+            cipher=Cipher(b"t" * 32),
         )
     await session.commit()
     return result
@@ -85,6 +79,32 @@ async def test_revocation_hides_peer_and_blocks_cached_detail(db_session):
     assert (await call(db_session, task, actor, "search_collaborators", {}))["items"] == []
     detail = await call(db_session, task, actor, "get_collaborator", {"id": b.bot_key})
     assert detail["error"]
+
+
+async def test_peers_outside_the_group_or_closed_to_help_are_hidden(db_session):
+    a, b, actor, route, task = await fresh(db_session)
+    assert (await call(db_session, task, actor, "search_collaborators", {}, here=False))[
+        "items"
+    ] == []
+    detail = await call(db_session, task, actor, "get_collaborator", {"id": b.bot_key}, here=False)
+    assert detail["error"] == "peer not in current group"
+    b.accept_bot_help = False
+    await db_session.commit()
+    assert (await call(db_session, task, actor, "search_collaborators", {}))["items"] == []
+    args = {"collaborator_id": b.bot_key, "question": "可用库存?"}
+    result = await call(db_session, task, actor, "request_collaboration", args)
+    assert result["error"] == "peer does not accept help requests"
+
+
+async def test_unverifiable_presence_is_reported_not_listed(db_session):
+    a, b, actor, route, task = await fresh(db_session)
+
+    async def denied(*_args, **_kwargs):
+        raise ValueError("无法确认「B」是否在当前群：应用缺少群成员查询权限")
+
+    result = await call(db_session, task, actor, "search_collaborators", {}, here=denied)
+    assert result["items"] == []
+    assert "群成员查询权限" in result["unverified"][0]
 
 
 async def test_repeat_search_cancels_instead_of_unbounded_retry(db_session):
@@ -228,7 +248,7 @@ async def test_worker_tool_loop_is_cut_off(db_session, db_engine, monkeypatch):
 
 
 async def test_search_pages_and_detail_size_are_bounded(db_session):
-    from coreman.core.db.models import Bot, BotCollaborationPartner, BotCollaborationRoute
+    from coreman.core.db.models import Bot, BotCollaborationRoute
 
     a, b, actor, route, task = await fresh(db_session)
     b.description = "库存" * 3000
@@ -247,7 +267,6 @@ async def test_search_pages_and_detail_size_are_bounded(db_session):
         )
         db_session.add(peer)
         await db_session.flush()
-        db_session.add(BotCollaborationPartner(source_bot_id=a.id, target_bot_id=peer.id))
         db_session.add(
             BotCollaborationRoute(
                 source_bot_id=a.id,
