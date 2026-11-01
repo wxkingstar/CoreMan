@@ -219,8 +219,12 @@ def _message_text(payload: dict[str, Any]) -> str:
     return "\n".join(str(p.get("text") or "") for p in parts if p.get("type") == "text").strip()
 
 
-def transcript_note(lines: list[Line]) -> str:
-    """交给 agent 的本轮块：最近群聊记录。只有开了旁听的机器人才有（以前只看得到 @ 它的话）。"""
+def transcript_note(lines: list[Line], *, interject: bool = False) -> str:
+    """交给 agent 的本轮块：最近群聊记录。只有开了旁听的机器人才有（以前只看得到 @ 它的话）。
+
+    记录只是背景：本轮要处理的是本轮块之后那条消息（调用方要先把它从 `lines` 里去掉）。
+    @ 它的回合尤其要说清楚，否则模型会把记录里别人更早的问题当成本轮需求一起做掉。
+    """
     if not lines:
         return ""
     body = "\n".join(
@@ -228,7 +232,19 @@ def transcript_note(lines: list[Line]) -> str:
         f"{'（机器人）' if line.sender_kind == 'bot' else ''}: {line.text}"
         for line in lines
     )
-    return "最近的群聊记录（从早到晚，供理解上下文；只回应与你有关的部分）：\n" + body
+    if interject:
+        head = (
+            "这个群在本轮消息之前的聊天记录（从早到晚）。本轮要回应的是本轮块之后那条消息"
+            "所在的话题；记录用来理解这个话题，其他话题不要回应："
+        )
+    else:
+        head = (
+            "这个群在本轮消息之前的聊天记录（从早到晚，只作背景参考）。本轮只处理本轮块之后"
+            "当前发言人发来的这条消息；记录里更早的问题和请求不是本轮任务，不要去处理或回答，"
+            "除非这条消息是在接着记录里的内容说（例如「上面那个」「刚才说的」「你看下」，"
+            "这时指的通常是记录里最近的相关消息）："
+        )
+    return head + "\n" + body
 
 
 INTERJECT_NOTE = (

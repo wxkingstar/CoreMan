@@ -109,6 +109,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Group observing no longer makes an @-mention turn treat the group transcript as a to-do list. The transcript now says it is background only: the turn handles just the message after the turn block, and earlier questions and requests in the transcript are not its task unless that message follows up on them ("the one above", "take a look"). Interjection turns are told to respond to the topic of that message. The message being handled is left out of the transcript, so it appears once. No database migration.
+
 - Group observing now recognises who is speaking and answers when called by name. The recent group transcript looked people up by `open_id`, which Feishu issues per app, so a message received by the AI employee's own app never matched the `open_id` stored by contact sync and every person showed up as "colleague N"; the judgement therefore could not tell, for example, that the person the employee assists was asking. People are now matched by their tenant-wide `user_id`. The decision instruction also treats a last message that calls the employee by name ("<name>, are you there?", "<name>, take a look") as looking for it, even when it only asks whether it is there; on the earlier 65-case set this added no wrong interjections. No database migration.
 
 - Feishu card subtitles no longer get cut off on phones. Feishu shows a header subtitle on one line and offers no way to expand it, so a `card:header` subtitle is now the first line of the card body in grey text, where it wraps. The rich-card prompt also asks for a short header title and puts figures and details in the subtitle, a callout or the body. No database migration; runtime nodes need no upgrade.
