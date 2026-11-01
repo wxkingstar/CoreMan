@@ -79,7 +79,9 @@ class IntakeStage(ChatStageBase):
         chat_type = str(message.get("chat_type") or inbound.chat_type)
         session_key = ctx.task.session_key or chat_id
         sender = message.get("sender") or {}
-        if sender.get("sender_type", "user") != "user":
+        # 群聊旁听的插话回合：没人 @ 它，是它自己判断要说话，触发的消息可以来自其他机器人。
+        observe = ctx.task.payload.get("origin") == "observe"
+        if sender.get("sender_type", "user") != "user" and not observe:
             await tasks.finish(
                 session, ctx.task.id, status="cancelled", error_code="bot_requires_collaboration"
             )
@@ -99,7 +101,7 @@ class IntakeStage(ChatStageBase):
                 resolver=ctx.openuserid,
             )
         text = strip_mention(joined_text(parts), bot.name)
-        if bot.platform == "feishu":
+        if bot.platform == "feishu" and not observe:
             from coreman.runtime.worker.feishu_escalations import consume_reply
 
             if await consume_reply(session, ctx, bot, inbound, speaker, parts, text):
@@ -123,6 +125,8 @@ class IntakeStage(ChatStageBase):
             text,
             message_type_of(parts),
         )
+        if observe:
+            return await self._observe_intake(session, ctx, intake, parts)
         if await self._announced(session, ctx, intake):
             return None
         if await self._denied(session, ctx, intake):
@@ -168,6 +172,32 @@ class IntakeStage(ChatStageBase):
             return None
         return intake, relay, parts
 
+    async def _observe_intake(
+        self,
+        session: AsyncSession,
+        ctx: TaskContext,
+        intake: Intake,
+        parts: list[dict[str, Any]],
+    ) -> tuple[Intake, RelayServer, list[dict[str, Any]]] | None:
+        """插话回合：公告、命令、待答、个人工具这些拦截都是给「有人在对它说话」准备的，跳过；
+        白名单不通过、运行时不可用、开关已关时一声不吭地结束，不在群里回任何话。"""
+        from coreman.core.chat.group_observe import observing
+
+        stmt = select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == intake.bot.id)
+        allowed = set((await session.execute(stmt)).scalars())
+        reason = None
+        if not observing(intake.bot) or intake.bot.group_observe != "on":
+            reason = "observe_off"
+        elif allowed and intake.speaker.user_id not in allowed:
+            reason = "observe_not_allowed"
+        elif intake.relay is None or not intake.relay.is_active:
+            reason = "relay_unavailable"
+        if reason is not None:
+            await tasks.finish(session, ctx.task.id, status="cancelled", error_code=reason)
+            return None
+        assert intake.relay is not None
+        return intake, intake.relay, parts
+
     async def _announced(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
         """公告命中：直接以公告回复并结束，不进 AI、不落 chat_logs、不动会话与状态。"""
         hit = await find_announcement(
@@ -210,7 +240,17 @@ class IntakeStage(ChatStageBase):
         if command is None:
             return False
         pid = intake.speaker.platform_user_id
-        if command == "reset":
+        if command in ("quiet", "unquiet"):
+            from coreman.core.chat import group_observe
+
+            # 只对开了旁听的机器人在群里有意义；其余情况当普通消息交给 AI。
+            if intake.chat_type != "group" or not group_observe.observing(intake.bot):
+                return False
+            await group_observe.set_muted(
+                session, intake.bot.id, intake.chat_id, command == "quiet"
+            )
+            text = msg("observe_muted" if command == "quiet" else "observe_unmuted", ctx.locale)
+        elif command == "reset":
             text = await do_reset(session, ctx, intake.bot.id, intake.session_key, pid)
         elif command == "stop":
             text = await do_stop(session, ctx, intake.bot.id, intake.session_key, pid)

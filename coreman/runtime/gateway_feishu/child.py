@@ -36,6 +36,8 @@ class BotInfo:
     id: uuid.UUID
     bot_key: str
     welcome_message: str | None
+    # 群聊旁听开着（shadow / on）：网关放行没 @ 机器人的群消息。
+    observe: bool = False
 
 
 # 子进程连接池：出站那一路一条会话，入站 ack 那一路一条会话。常驻的应用独占锁连接走单独的
@@ -116,7 +118,9 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                 return
             credentials = decrypt_json(cfg.build_cipher(), bot.credentials_enc, CREDENTIALS_AAD)
             initial_credentials = bot.credentials_enc
-            info = BotInfo(bot.id, bot.bot_key, bot.welcome_message)
+            info = BotInfo(
+                bot.id, bot.bot_key, bot.welcome_message, observe=bot.group_observe != "off"
+            )
         app_id, secret = credentials["app_id"], credentials["app_secret"]
         app_guard = await guard_engine.connect()
         exclusive = await app_guard.scalar(
@@ -155,6 +159,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                 gateway_instance=instance_id,
                 now=datetime.now(UTC),
                 allow_bot=True,
+                observe=info.observe,
                 cipher=cipher,
             )
             if message is None:
@@ -190,6 +195,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                 if current is None or current.credentials_enc != initial_credentials:
                     break
                 info.welcome_message = current.welcome_message
+                info.observe = current.group_observe != "off"
                 transport.rich_cards = current.rich_cards
                 more = await transport.round()  # 租约围栏在这一轮开头查一次
             except LeaseLost:

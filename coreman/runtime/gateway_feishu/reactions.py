@@ -26,7 +26,11 @@ async def typing(transport: FeishuTransport, task_id: int, *, done: bool = False
             delivery.reaction_done = True
             await session.commit()
         mid = row.reply_context.get("message_id")
-        if not mid or row.reply_context.get("_collaboration_helper"):
+        if (
+            not mid
+            or row.reply_context.get("_collaboration_helper")
+            or row.reply_context.get("_observe")
+        ):
             return
         if delivery.reaction_done and not delivery.reaction_id:
             return

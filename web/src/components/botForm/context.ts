@@ -22,6 +22,8 @@ export interface BotFormContext {
   manualCredentials: Ref<boolean>
   /** 平台设置允许扫码创建企业微信机器人。 */
   wecomQrEnabled: Ref<boolean>
+  /** 部署配了群聊旁听的判断服务（编辑已有机器人时由后端告知）。 */
+  observeReady: ComputedRef<boolean>
   onBotKeyInput: () => void
   onPlatformChange: () => void
   onEnvInvalid: (message: string) => void

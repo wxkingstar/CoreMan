@@ -28,6 +28,10 @@ const KEYS = [
   'fast_lane_slots',
   'card_icon_url',
   'wecom_qr_provisioning_enabled',
+  'group_observe_threshold',
+  'group_observe_quiet_seconds',
+  'group_observe_max_wait_seconds',
+  'group_observe_bot_streak_limit',
   'prompt_org_context',
   'prompt_security_policy',
   'prompt_codex_contract',
@@ -51,6 +55,10 @@ function empty(): SettingsOut {
     fast_lane_slots: 2,
     card_icon_url: '',
     wecom_qr_provisioning_enabled: true,
+    group_observe_threshold: 0.3,
+    group_observe_quiet_seconds: 8,
+    group_observe_max_wait_seconds: 60,
+    group_observe_bot_streak_limit: 6,
     prompt_org_context: '',
     prompt_security_policy: '',
     prompt_codex_contract: '',
@@ -84,6 +92,8 @@ function apply(data: SettingsOut): void {
 }
 
 type NumberKey = 'session_ttl_hours' | 'max_concurrent_tasks' | 'fast_lane_slots'
+  | 'group_observe_threshold' | 'group_observe_quiet_seconds' | 'group_observe_max_wait_seconds'
+  | 'group_observe_bot_streak_limit'
 
 /** el-input-number 清空时发 undefined；这些键后端不接受 null，保持原值不动。 */
 function setNumber(key: NumberKey, v: number | null | undefined): void {
@@ -310,6 +320,47 @@ defineExpose({ form })
         </div>
       </el-form-item>
 
+      <el-form-item
+        :label="t('settings.groupObserve')"
+        data-test="group-observe-settings"
+      >
+        <div class="observe-settings">
+          <span>{{ t('settings.observeThreshold') }}</span>
+          <el-input-number
+            :model-value="form.group_observe_threshold"
+            :min="0.05"
+            :max="0.95"
+            :step="0.05"
+            :precision="2"
+            @update:model-value="setNumber('group_observe_threshold', $event)"
+          />
+          <span>{{ t('settings.observeQuiet') }}</span>
+          <el-input-number
+            :model-value="form.group_observe_quiet_seconds"
+            :min="1"
+            :max="600"
+            @update:model-value="setNumber('group_observe_quiet_seconds', $event)"
+          />
+          <span>{{ t('settings.observeMaxWait') }}</span>
+          <el-input-number
+            :model-value="form.group_observe_max_wait_seconds"
+            :min="1"
+            :max="3600"
+            @update:model-value="setNumber('group_observe_max_wait_seconds', $event)"
+          />
+          <span>{{ t('settings.observeStreak') }}</span>
+          <el-input-number
+            :model-value="form.group_observe_bot_streak_limit"
+            :min="1"
+            :max="100"
+            @update:model-value="setNumber('group_observe_bot_streak_limit', $event)"
+          />
+        </div>
+        <div class="hint">
+          {{ t('settings.groupObserveHint') }}
+        </div>
+      </el-form-item>
+
       <el-form-item class="settings-actions">
         <el-button
           :loading="saving"
@@ -398,6 +449,7 @@ defineExpose({ form })
 </template>
 
 <style scoped>
+.observe-settings { display: grid; grid-template-columns: max-content max-content; gap: 8px 12px; align-items: center; }
 .settings-form { max-width: 720px; }
 .prompts { margin-bottom: 18px; }
 .prompt-hint { margin-bottom: 12px; }

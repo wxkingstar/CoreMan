@@ -368,3 +368,40 @@ async def test_approvers_replace_permission_and_audit(
         if a.action == "bot.approvers"
     ]
     assert len(audits) == 3
+
+
+async def test_group_observe_switch_rules(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from coreman.api.routers import bots as bots_router
+
+    bot, _, _ = await _setup(client, db_session)
+
+    async def patch(body: dict[str, object]) -> httpx.Response:
+        current = (await client.get(f"/api/admin/bots/{bot['id']}")).json()["data"]
+        return await client.patch(
+            f"/api/admin/bots/{bot['id']}",
+            json=body,
+            headers={"If-Match": f'"{current["version"]}"'},
+        )
+
+    assert (await patch({"group_observe": "on"})).status_code == 422  # 只支持飞书
+    row = await db_session.get(Bot, uuid.UUID(str(bot["id"])))
+    assert row is not None
+    row.platform = "feishu"
+    await db_session.commit()
+    assert (await patch({"group_observe": "shadow"})).status_code == 422  # 先写职责说明
+    body = {"group_observe": "shadow", "group_observe_scope": "负责订单数据"}
+    unready = SimpleNamespace(decision_ready=False)
+    monkeypatch.setattr(bots_router, "get_settings", lambda: unready)
+    assert (await patch(body)).status_code == 409  # 部署没配判断服务
+    ready = SimpleNamespace(decision_ready=True)
+    monkeypatch.setattr(bots_router, "get_settings", lambda: ready)
+    r = await patch(body)
+    assert r.status_code == 200
+    assert r.json()["data"]["group_observe"] == "shadow" and r.json()["data"]["group_observe_ready"]
+    listed = await client.get(f"/api/admin/bots/{bot['id']}/group-observe/decisions")
+    assert listed.status_code == 200 and listed.json()["data"] == {"items": [], "chats": []}
+    assert (await patch({"group_observe": "off"})).status_code == 200

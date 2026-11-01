@@ -51,6 +51,7 @@ from coreman.core.bots.secrets import (
 )
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
+from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     BOT_KEY_RE,
@@ -92,6 +93,8 @@ NON_NULLABLE = (
     "env_vars",
     "rich_cards",
     "dev_mode",
+    "group_observe",
+    "group_observe_scope",
 )
 
 
@@ -194,6 +197,8 @@ class BotPatch(BaseModel):
     notify_webhook_url: str | None = Field(default=None, max_length=500)
     rich_cards: bool | None = None
     dev_mode: bool | None = None
+    group_observe: Literal["off", "shadow", "on"] | None = None
+    group_observe_scope: str | None = Field(default=None, max_length=2000)
 
     @field_validator("env_vars")
     @classmethod
@@ -241,7 +246,20 @@ def _public(bot: Bot) -> dict[str, Any]:
         "notify_webhook_url": bot.notify_webhook_url,
         "rich_cards": bot.rich_cards,
         "dev_mode": bot.dev_mode,
+        "group_observe": bot.group_observe,
+        "group_observe_scope": bot.group_observe_scope,
     }
+
+
+def _check_group_observe(bot: Bot, mode: str, scope: str) -> None:
+    if mode == "off":
+        return
+    if bot.platform != "feishu":
+        raise ApiError(422, 422, "群聊旁听只支持飞书机器人")
+    if not scope.strip():
+        raise ApiError(422, 422, "开启群聊旁听前请先填写旁听职责说明")
+    if not get_settings().decision_ready:
+        raise ApiError(409, 409, "部署未配置判断服务（OPENAI_API_KEY），不能开启群聊旁听")
 
 
 async def load_bot(session: AsyncSession, bot_id: uuid.UUID) -> Bot:
@@ -367,6 +385,10 @@ async def build_out(
         "welcome_message": bot.welcome_message,
         "rich_cards": bot.rich_cards,
         "dev_mode": bot.dev_mode,
+        "group_observe": bot.group_observe,
+        "group_observe_scope": bot.group_observe_scope,
+        # 部署配了判断服务才能开旁听；管理台据此提示。
+        "group_observe_ready": get_settings().decision_ready,
         "member_count": len(member_ids),
         "allowed_user_count": allowed_count,
         "permissions": dataclasses.asdict(perms),
@@ -657,6 +679,12 @@ async def patch_bot(
             await _relay_of(session, bot),
             changes.get("model", bot.model),
             changes.get("effort_level", bot.effort_level),
+        )
+    if "group_observe" in changes or "group_observe_scope" in changes:
+        _check_group_observe(
+            bot,
+            changes.get("group_observe", bot.group_observe),
+            changes.get("group_observe_scope", bot.group_observe_scope),
         )
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录操作正在进行，请完成后再编辑")

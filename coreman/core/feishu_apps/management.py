@@ -189,7 +189,7 @@ def _command_out(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def overview(client: FeishuClient) -> dict[str, Any]:
+async def overview(client: FeishuClient, *, observe: bool = False) -> dict[str, Any]:
     params = {"lang": "zh_cn", "user_id_type": "open_id"}
     app_data, app_error = await _read(client.call("GET", V6_APP, params=params))
     raw_app = _dict(app_data).get("app")
@@ -242,7 +242,11 @@ async def overview(client: FeishuClient) -> dict[str, Any]:
         "scopes": scopes,
         # 读不到应用时权限列表是空的，不能据此说「缺少全部权限」。
         "missing_scopes": {
-            "tenant": manifest.missing_scopes(sorted(tenant), kind="tenant") if app else [],
+            "tenant": (
+                manifest.missing_scopes(sorted(tenant), kind="tenant", observe=observe)
+                if app
+                else []
+            ),
             "user": manifest.missing_scopes(sorted(user), kind="user") if app else [],
         },
         "pending_grants": sorted(scope for scope, granted in grants.items() if not granted),

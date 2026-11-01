@@ -76,6 +76,8 @@ class ChatTaskHandler(
         intake, relay, parts = resolved
         if ctx.task.attempts > 1 and await self._outdated(ctx, intake):
             return None
+        if ctx.task.payload.get("origin") == "observe" and await self._observe_yields(ctx, intake):
+            return None
         # supersede 必须先提交再等：被替代的任务跑在另一条连接上，看不见未提交的取消标记。
         async with ctx.session_factory() as session:
             await tasks.supersede(
@@ -109,6 +111,28 @@ class ChatTaskHandler(
             )
         ctx.log.info("task_started", bot_key=intake.bot.bot_key, chat_type=intake.chat_type)
         return pre
+
+    async def _observe_yields(self, ctx: TaskContext, intake: Intake) -> bool:
+        """插话回合从不替代别的回合：同一个群里已有别的回复在排队或在跑（多半是有人 @ 了它），
+        就让给那一轮，自己不说了。"""
+        async with ctx.session_factory() as session:
+            others = [
+                t
+                for t in await tasks.open_for_session(
+                    session, intake.bot.id, intake.session_key, "chat"
+                )
+                if t.id != ctx.task.id
+            ]
+            if others:
+                await tasks.finish(
+                    session,
+                    ctx.task.id,
+                    status="cancelled",
+                    error_code="observe_yielded",
+                    only_active=True,
+                )
+            await session.commit()
+        return bool(others)
 
     async def _session_busy(self, ctx: TaskContext, intake: Intake) -> None:
         """上一轮迟迟停不下来：新消息不丢，放回队列稍后再认领；重排到头才告诉用户。

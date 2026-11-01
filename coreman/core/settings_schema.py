@@ -27,6 +27,12 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "card_icon_url": "",
     # 扫码创建企业微信机器人依赖未公开接口：出问题时关掉，新建企微员工只允许手动填写凭证。
     "wecom_qr_provisioning_enabled": True,
+    # 飞书群聊旁听：判断概率高于阈值才插话；群里安静这么久才判断，一直有人说话时最长等这么久；
+    # 最近一条人类消息之后机器人消息连续这么多条就停止主动插话（防机器人之间无限接话）。
+    "group_observe_threshold": 0.3,
+    "group_observe_quiet_seconds": 8,
+    "group_observe_max_wait_seconds": 60,
+    "group_observe_bot_streak_limit": 6,
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
@@ -67,6 +73,10 @@ class SettingsPatch(BaseModel):
     # 卡片来源图标：空串 = 不放图标（企微 source.icon_url 省略）；只认 http(s) 绝对地址。
     card_icon_url: str | None = Field(default=None, max_length=512, pattern=r"^(https?://\S+)?$")
     wecom_qr_provisioning_enabled: bool | None = None
+    group_observe_threshold: float | None = Field(default=None, gt=0, lt=1)
+    group_observe_quiet_seconds: int | None = Field(default=None, ge=1, le=600)
+    group_observe_max_wait_seconds: int | None = Field(default=None, ge=1, le=3600)
+    group_observe_bot_streak_limit: int | None = Field(default=None, ge=1, le=100)
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
     # 组织背景出厂就是空的，存成空串即「不加这一段」，所以不设 min_length。

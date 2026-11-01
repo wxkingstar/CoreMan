@@ -210,6 +210,12 @@ from coreman.core.db.models.bot_collaboration import (
     BotHumanPartner,
     HumanCollaboration,
 )
+from coreman.core.db.models.group_observe import (
+    DECISION_REVIEWS,
+    GROUP_OBSERVE_MODES,
+    GroupObserveDecision,
+    GroupObserveState,
+)
 from coreman.core.db.models.personal_credentials import (
     CREDENTIAL_ORIGINS,
     CREDENTIAL_REQUEST_STATUSES,
@@ -230,4 +236,12 @@ __all__ += [
     "CREDENTIAL_REQUEST_STATUSES",
     "CredentialRequest",
     "PersonalCredential",
+]
+
+
+__all__ += [
+    "DECISION_REVIEWS",
+    "GROUP_OBSERVE_MODES",
+    "GroupObserveDecision",
+    "GroupObserveState",
 ]

@@ -204,7 +204,7 @@ async def feishu_app_overview(
     app_id = bot_app_id(cipher, bot)
     client = client_for(cipher, bot)
     try:
-        data = await management.overview(client)
+        data = await management.overview(client, observe=bot.group_observe != "off")
     finally:
         await client.aclose()
     origin = (

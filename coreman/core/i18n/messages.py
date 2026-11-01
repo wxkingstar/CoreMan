@@ -40,6 +40,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "task_stopped_suffix": "\n\n⏹ 任务已被用户停止。",
         "superseded_suffix": "\n\n⏹ 已收到新消息，上一个任务自动停止。",
         "session_busy": "⚠️ 上一轮任务迟迟未能停止，这条消息暂时无法处理，请稍后重新发送。",
+        "observe_muted": "好的，接下来 2 小时我在这个群里只在被 @ 时说话。",
+        "observe_unmuted": "好的，需要我的时候我会主动说话。",
         "help": HELP_ZH,
         "no_permission": "⚠️ 抱歉，您没有使用此机器人的权限。\n\n如需开通权限，请联系管理员。",
         "unsupported_message": "暂不支持该类型的消息，请发送文字。",
@@ -463,6 +465,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "⏳ タスクの実行がタイムアウトしたため、バックグラウンド待機を終了しました{link}"
         ),
         "long_task_done": "✅ 返信を生成しました（所要 {seconds} 秒）。上の内容をご確認ください。",
+        "observe_muted": (
+            "承知しました。これから 2 時間、このグループでは @ されたときだけ発言します。"
+        ),
+        "observe_unmuted": "承知しました。必要なときは自分から発言します。",
         "session_busy": (
             "⚠️ 前回のタスクが停止しないため、このメッセージを処理できませんでした。"
             "しばらくしてから再送してください。"

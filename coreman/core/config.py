@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     )
     # 风险判定的部署参数（JSON，见 docs/tower-approval.md）；可选，缺的部分对应的写操作按高风险
     cloud_proxy_policy: CloudProxyPolicy | None = Field(default=None, alias="CLOUD_PROXY_POLICY")
+    # 飞书群聊旁听的判断服务：平台进程直接调用，不经运行时节点。没配密钥时不能开启旁听。
+    decision_provider: Literal["openai"] = Field(default="openai", alias="DECISION_PROVIDER")
+    decision_model: str = Field(default="gpt-6-luna", alias="DECISION_MODEL")
+    openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     # scheduler 对每个带通讯录同步能力的平台应用做全量同步的间隔（小时）；0 关闭定时同步
     contact_sync_interval_hours: float = Field(
         default=24.0, ge=0, alias="CONTACT_SYNC_INTERVAL_HOURS"
@@ -122,6 +126,10 @@ class Settings(BaseSettings):
             and present(self.aliyun_proxy_access_key_secret)
             and all(present(self.tower_target_keys.get(p)) for p in CLOUD_PROXY_PRODUCTS)
         )
+
+    @property
+    def decision_ready(self) -> bool:
+        return bool(self.openai_api_key and self.openai_api_key.get_secret_value())
 
     @field_validator("business_token_providers")
     @classmethod

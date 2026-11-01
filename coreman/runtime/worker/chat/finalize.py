@@ -264,6 +264,11 @@ class FinalizeStage(ChatStageBase):
             if not logged:
                 ctx.chat_logs.submit_finish(entry)
             return
+        if ctx.task.payload.get("origin") == "observe":
+            await self._finish_observe(ctx, pre, verdict)
+            if not logged:
+                ctx.chat_logs.submit_finish(entry)
+            return
         logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
@@ -312,6 +317,32 @@ class FinalizeStage(ChatStageBase):
             tools=len(out.tools),
         )
         await self._after_finalize(ctx, pre, verdict)
+
+    async def _finish_observe(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
+        """插话回合收尾：只有成功且 agent 没有改主意才发；出错、超时、被停一律不在群里出声。"""
+        from coreman.core.chat import group_observe
+        from coreman.core.db.models import GroupObserveDecision
+
+        # 成功的终稿带着「✅ 回复已生成」：主动插话不要这句（话少），判断「不说话」也要先剥掉它。
+        body = verdict.final_text.removesuffix(msg("done_suffix", ctx.locale)).strip()
+        spoke = (
+            verdict.log_status == "success" and bool(body) and group_observe.NO_REPLY not in body
+        )
+        sent = body if spoke else group_observe.NO_REPLY
+        done = await pre.writer.complete(sent)
+        if spoke:
+            await self._push_if_proactive(ctx, pre, replace(verdict, final_text=sent), done)
+        async with ctx.session_factory() as session:
+            decision_id = ctx.task.payload.get("observe_decision_id")
+            row = await session.get(GroupObserveDecision, decision_id) if decision_id else None
+            if row is not None:
+                row.outcome = (
+                    "sent" if spoke else "vetoed" if verdict.log_status == "success" else "failed"
+                )
+            if spoke:
+                await group_observe.mark_spoke(session, pre.intake.bot.id, pre.intake.chat_id)
+            await session.commit()
+        ctx.log.info("observe_turn_finished", spoke=spoke, status=verdict.log_status)
 
     async def _notify_long_task(
         self,

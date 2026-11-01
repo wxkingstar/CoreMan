@@ -10,6 +10,7 @@ import type { BotOut, SwitchRelayOut } from '@/api/types'
 import SystemGrants from '@/components/SystemGrants.vue'
 import BotHealthReport from '@/components/BotHealthReport.vue'
 import BotMemories from '@/components/BotMemories.vue'
+import BotGroupObserve from '@/components/BotGroupObserve.vue'
 import BotSkills from '@/components/BotSkills.vue'
 import BotCollaborators from '@/components/BotCollaborators.vue'
 import BotHumanCollaborators from '@/components/BotHumanCollaborators.vue'
@@ -536,6 +537,18 @@ onMounted(async () => {
           <FeishuAppPanel
             v-if="detailTab === 'feishu-app'"
             :bot-id="botId"
+          />
+        </el-tab-pane>
+        <el-tab-pane
+          v-if="bot.platform === 'feishu' && perms?.can_edit && bot.group_observe !== 'off'"
+          name="group-observe"
+          :label="t('groupObserve.tab')"
+          lazy
+        >
+          <BotGroupObserve
+            v-if="detailTab === 'group-observe'"
+            :bot-id="botId"
+            :mode="bot.group_observe"
           />
         </el-tab-pane>
         <el-tab-pane
