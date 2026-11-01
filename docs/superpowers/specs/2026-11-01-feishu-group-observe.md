@@ -70,9 +70,9 @@
 | 设置 | 默认 | 说明 |
 |---|---|---|
 | `group_observe_threshold` | 0.3 | 判断概率高于它才介入 |
-| `group_observe_quiet_seconds` | 8 | 群里安静这么久才判断（防抖） |
+| `group_observe_quiet_seconds` | 15（原 8） | 群里安静这么久才判断（防抖） |
 | `group_observe_max_wait_seconds` | 60 | 一直有人说话时，最长等这么久也要判断一次 |
-| `group_observe_bot_streak_limit` | 6 | 熔断：最近一条人类消息之后，群里机器人消息（含所有机器人）连续达到这么多条，就停止主动插话，直到有人说话（§4.5） |
+| `group_observe_bot_streak_limit` | 3（原 6） | 熔断：最近一条人类消息之后，群里机器人消息（含所有机器人）连续达到这么多条，就停止主动插话，直到有人说话（§4.5） |
 
 判断与插话带的最近群消息（20 条、30 分钟内）和「安静」的静音时长（2 小时）是代码里的常量（`core/chat/group_observe.py`），不做成设置。
 

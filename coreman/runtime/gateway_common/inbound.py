@@ -17,6 +17,7 @@ from coreman.core.bus import outbox
 from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command, is_cancel_word
 from coreman.core.db.models import InboundEvent, Task
+from coreman.core.i18n.messages import msg
 from coreman.core.logging import get_logger
 from coreman.core.wecom.messages import InboundMessage, text_of
 
@@ -227,4 +228,46 @@ async def _enqueue_task(
         if admission is not None:
             new.payload["serialize_session"] = True
             new.payload["interrupted_previous_task"] = admission.interrupted
+    if message.chat_type == "group" and new.kind == "chat" and not helper_reply:
+        await _queue_behind_others(session, bot, message, new, event_id)
     return await enqueue(session, new)
+
+
+async def _queue_behind_others(
+    session: AsyncSession, bot: InboundBot, message: InboundMessage, new: NewTask, event_id: int
+) -> None:
+    """群里同一个机器人只有一条会话：别人交代的事还没做完时，这条排在后面，不打断它。
+
+    同一个人接着发的消息仍按原样替换自己上一条；主动插话不算（谁 @ 它都让给谁）。
+    飞书上引用这条消息回一句「先做完手上的再处理」，免得对方以为没人理。
+    """
+    from sqlalchemy import select
+
+    sender = message.sender.platform_user_id or ""
+    others = await session.scalar(
+        select(Task.id)
+        .where(
+            Task.bot_id == bot.id,
+            Task.session_key == new.session_key,
+            Task.kind == "chat",
+            Task.status.in_(("queued", "claimed", "running")),
+            Task.cancel_requested_at.is_(None),
+            Task.payload["origin"].astext.is_distinct_from("observe"),
+            Task.payload["platform_user_id"].astext.is_distinct_from(sender),
+        )
+        .limit(1)
+    )
+    if others is None:
+        return
+    new.payload["serialize_session"] = True
+    message_id = message.reply_context.get("message_id")
+    if message.platform == "feishu" and message_id:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"inbound:{event_id}:queued",
+            target={"chat_id": message.chat_id, "message_id": message_id},
+            payload={"text": msg("group_queued"), "_reply": True},
+        )

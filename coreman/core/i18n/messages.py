@@ -195,6 +195,15 @@ MESSAGES: dict[str, dict[str, str]] = {
         "cron_result_truncated": "\n\n…（结果过长，已截断，仅保留前 {limit} 个字符）",
         "cron_delivery_truncated": "\n\n…（内容过长，已截断，完整结果见定时任务运行记录）",
         "queued_notice": "⏳ 当前使用人数较多，您的请求已排队 {seconds} 秒，现在开始处理…",
+        "observe_ack": "我看一下。",
+        "observe_timeout": "这个要多花些时间，需要的话 @我，我接着处理。",
+        "observe_ack_vetoed": "看了一下，这个不需要我处理。",
+        "observe_ack_failed": "这个我没处理成，需要的话 @我 再看。",
+        "observe_intro": (
+            "（我是{name}，会留意群里的消息，和我职责相关的会主动回答；"
+            "不需要我时 @我 说「安静」。）"
+        ),
+        "group_queued": "收到，我先把手上的事做完，接着就处理这个。",
         "worker_lost": "任务执行进程异常中断，请重试。",
         "drain_suffix": "\n\n⏳ 服务切换中，任务继续在后台处理，稍后自动推送结果",
         "processing_done": "处理完成。",
@@ -490,6 +499,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "queued_notice": (
             "⏳ 現在利用者が多いため、リクエストは {seconds} 秒待機しました。処理を開始します…"
         ),
+        "observe_ack": "確認します。",
+        "observe_timeout": (
+            "少し時間がかかります。必要なら @メンション してください。続けて対応します。"
+        ),
+        "observe_ack_vetoed": "確認しましたが、これは私の対応は不要です。",
+        "observe_ack_failed": "うまく対応できませんでした。必要なら @メンション で再度確認します。",
+        "observe_intro": (
+            "（{name}です。グループのメッセージを見ていて、担当に関わるものには自分から答えます。"
+            "不要なときは @メンション で「静かに」と伝えてください。）"
+        ),
+        "group_queued": "了解です。今の作業が終わったら続けてこれに対応します。",
         "worker_lost": "タスクの実行プロセスが異常終了しました。再試行してください。",
         "drain_suffix": (
             "\n\n⏳ サービス切替中です。"

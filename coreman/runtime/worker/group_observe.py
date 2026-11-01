@@ -52,10 +52,10 @@ class GroupObserveHandler:
             return
         event_id = int(ctx.task.payload.get("event_id") or 0)
         store = ctx.settings_store
-        quiet = float(await store.get("group_observe_quiet_seconds", default=8))
+        quiet = float(await store.get("group_observe_quiet_seconds", default=15))
         max_wait = float(await store.get("group_observe_max_wait_seconds", default=60))
         threshold = float(await store.get("group_observe_threshold", default=0.3))
-        streak_limit = int(await store.get("group_observe_bot_streak_limit", default=6))
+        streak_limit = int(await store.get("group_observe_bot_streak_limit", default=3))
         now = datetime.now(UTC)
         async with ctx.session_factory() as session:
             bot = await session.get(Bot, ctx.task.bot_id)

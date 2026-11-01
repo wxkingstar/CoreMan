@@ -12,10 +12,12 @@ from coreman.core.db.models import (
     Bot,
     GroupObserveDecision,
     GroupObserveState,
+    OutboxItem,
     Task,
     User,
     UserIdentity,
 )
+from coreman.core.i18n.messages import msg
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.worker.group_observe import GroupObserveHandler
@@ -241,7 +243,23 @@ async def test_busy_session_waits_for_the_reply(db_engine, db_session):
     assert done.status == "queued" and decider.calls == []
 
 
-async def _interjection_turn(db_engine, db_session, scenario, monkeypatch):
+def record_schedule_configure(monkeypatch):
+    """记下本轮有没有挂定时任务能力（插话回合只答不做，不该挂）。"""
+    from coreman.runtime.worker.chat import schedules
+
+    calls: list[str] = []
+
+    async def configure(session, ctx, intake, relay_session_id, extra, env):
+        calls.append("schedules")
+        return extra, env
+
+    monkeypatch.setattr(schedules, "configure", configure)
+    return calls
+
+
+async def _interjection_turn(
+    db_engine, db_session, scenario, monkeypatch, *, interjected_before=False
+):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.fakes import fake_relay
@@ -262,6 +280,12 @@ async def _interjection_turn(db_engine, db_session, scenario, monkeypatch):
     observe = (await tasks_of(db_session, bot, "group_observe"))[-1]
     await quiet_down(db_session, bot)
     await run_observe(db_engine, db_session, observe, FakeDecider(0.9))
+    if interjected_before:
+        await db_session.execute(
+            update(GroupObserveState)
+            .where(GroupObserveState.bot_id == bot.id)
+            .values(last_interjected_at=datetime.now(UTC) - timedelta(days=1))
+        )
     await instances.register(
         db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
     )
@@ -286,12 +310,16 @@ async def _interjection_turn(db_engine, db_session, scenario, monkeypatch):
 async def test_interjection_turn_sees_the_group_and_may_stay_silent(
     db_engine, db_session, monkeypatch
 ):
+    configured = record_schedule_configure(monkeypatch)
     body, stream, decision, state = await _interjection_turn(
         db_engine, db_session, "observe_silent", monkeypatch
     )
     turn = body["messages"][-1]["content"]
     turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
     assert "所在的话题" in turn and "今天中午吃什么" in turn
+    # 只答不做：插话回合不挂定时任务、个人凭证这些有后果的能力。
+    assert "只答不做" in turn
+    assert configured == []
     # 本轮要回应的消息只在正文出现一次，不在记录里重复。
     assert turn.count("上周退货率多少？有人知道吗") == 1
     assert group_observe.NO_REPLY in turn  # 插话规则在本轮块里
@@ -307,7 +335,8 @@ async def test_interjection_turn_that_speaks_counts_as_a_bot_message(
     _, stream, decision, state = await _interjection_turn(
         db_engine, db_session, "normal", monkeypatch
     )
-    assert stream.final_text == "你好，世界\n\n。"  # 主动插话不带「✅ 回复已生成」
+    # 主动插话不带「✅ 回复已生成」；在这个群第一次主动说话，末尾附上旁听说明。
+    assert stream.final_text == "你好，世界\n\n。\n\n" + msg("observe_intro", name="销售")
     assert decision.outcome == "sent"
     assert state.last_interjected_at is not None and state.bot_streak == 1
 
@@ -389,6 +418,7 @@ async def test_mention_turn_reads_the_transcript_as_background_only(
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.fakes import fake_relay
 
+    configured = record_schedule_configure(monkeypatch)
     bot = await observing_bot(db_session)
     await say(db_session, bot, "om1", "上周退货率多少？", user="u2")
     await say(db_session, bot, "om2", "帮我查下昨天订单量", mentions_bot=True)
@@ -409,3 +439,55 @@ async def test_mention_turn_reads_the_transcript_as_background_only(
     assert "上周退货率多少？" in content
     assert content.count("帮我查下昨天订单量") == 1
     assert group_observe.NO_REPLY not in content  # @ 它的回合没有插话规则
+    assert configured == ["schedules"]  # @ 回合照常挂定时任务等能力
+
+
+async def test_a_slow_interjection_says_it_is_looking_then_answers(
+    db_engine, db_session, monkeypatch
+):
+    monkeypatch.setattr(group_observe, "INTERJECT_ACK_SECONDS", 0)
+    _, stream, decision, _ = await _interjection_turn(db_engine, db_session, "normal", monkeypatch)
+    ack = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert ack.payload == {"text": msg("observe_ack"), "_reply": True}
+    assert ack.target == {"chat_id": CHAT, "message_id": "om1"}
+    assert stream.final_text.startswith("你好，世界") and decision.outcome == "sent"
+
+
+async def test_an_interjection_that_runs_too_long_claims_the_work_instead(
+    db_engine, db_session, monkeypatch
+):
+    monkeypatch.setattr(group_observe, "INTERJECT_LIMIT_SECONDS", 0)
+    _, stream, _, state = await _interjection_turn(db_engine, db_session, "normal", monkeypatch)
+    assert stream.final_text.startswith(msg("observe_timeout"))
+    assert state.bot_streak == 1
+
+
+async def test_later_interjections_in_the_same_group_skip_the_intro(
+    db_engine, db_session, monkeypatch
+):
+    _, stream, _, _ = await _interjection_turn(
+        db_engine, db_session, "normal", monkeypatch, interjected_before=True
+    )
+    assert stream.final_text == "你好，世界\n\n。"
+
+
+async def test_another_persons_mention_waits_instead_of_stopping_the_current_task(db_session):
+    bot = await observing_bot(db_session)
+    first = await say(db_session, bot, "om1", "帮我导出上周订单", mentions_bot=True, user="u1")
+    assert not first.payload.get("serialize_session")
+    second = await say(db_session, bot, "om2", "帮我查下库存", mentions_bot=True, user="u2")
+    assert second.payload["serialize_session"] is True
+    notice = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert notice.payload == {"text": msg("group_queued"), "_reply": True}
+    assert notice.target == {"chat_id": CHAT, "message_id": "om2"}
+    # 同一个人接着发：仍按原样替换自己上一条（这里还有别人的任务在排，所以一起排队）。
+    third = await say(db_session, bot, "om3", "改成导出本周", mentions_bot=True, user="u1")
+    assert third.payload["serialize_session"] is True
+
+
+async def test_the_same_persons_follow_up_still_replaces_their_own_task(db_session):
+    bot = await observing_bot(db_session)
+    await say(db_session, bot, "om1", "帮我导出上周订单", mentions_bot=True, user="u1")
+    again = await say(db_session, bot, "om2", "改成导出本周", mentions_bot=True, user="u1")
+    assert not again.payload.get("serialize_session")
+    assert await db_session.scalar(select(OutboxItem)) is None

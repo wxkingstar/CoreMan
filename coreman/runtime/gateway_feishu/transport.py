@@ -895,6 +895,17 @@ class FeishuTransport:
         if item.kind not in {"send", "welcome"}:
             raise FeishuError(-2, "unsupported outbox kind")
         chat = str(item.target.get("chat_id") or "")
+        if item.payload.get("_reply") and item.target.get("message_id"):
+            # 群里对某条消息的简短回应（旁听插话的「我看一下」、排队提示）：引用那条消息回复。
+            mid = await self.send(
+                chat,
+                {"text": str(item.payload.get("text") or "")},
+                kind="text",
+                key=f"outbox:{item.id}",
+                reply_to=item.target.get("message_id"),
+            )
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
         if isinstance(card, dict):
             fallback = item.payload.get("_fallback_markdown")
             try:
