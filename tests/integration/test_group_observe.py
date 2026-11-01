@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 from coreman.core.chat import group_observe
 from coreman.core.chat.decider import Decision
 from coreman.core.db.models import (
+    Bot,
     GroupObserveDecision,
     GroupObserveState,
     Task,
@@ -306,3 +307,73 @@ async def test_interjection_turn_that_speaks_counts_as_a_bot_message(
     assert stream.final_text == "你好，世界\n\n。"  # 主动插话不带「✅ 回复已生成」
     assert decision.outcome == "sent"
     assert state.last_interjected_at is not None and state.bot_streak == 1
+
+
+async def another_observing_bot(session, first, key, name):
+    """同一个群里再开一个旁听的机器人（同一位创建者、同一个运行时）。"""
+    bot = Bot(
+        bot_key=key,
+        platform="feishu",
+        name=name,
+        created_by=first.created_by,
+        relay_server_id=first.relay_server_id,
+        model=first.model,
+        working_dir=f"/data/skills/{key}",
+        system_prompt=f"你是{name}",
+        merged_system_prompt=f"你是{name}",
+        credentials_enc=first.credentials_enc,
+        env_vars_enc=first.env_vars_enc,
+        group_observe="on",
+        group_observe_scope=f"负责{name}",
+    )
+    session.add(bot)
+    await session.commit()
+    return bot
+
+
+async def judge(db_engine, session, bot, probability):
+    (observe,) = await tasks_of(session, bot, "group_observe")
+    await run_observe(db_engine, session, observe, FakeDecider(probability))
+    rows = await tasks_of(session, bot, "group_observe")
+    return [task for task in rows if task.payload.get("decision_id")]
+
+
+async def test_several_bots_wanting_to_speak_leave_it_to_the_most_suitable(db_engine, db_session):
+    sales = await observing_bot(db_session)
+    ops = await another_observing_bot(db_session, sales, "ops_bot", "运维")
+    for bot in (sales, ops):
+        await say(db_session, bot, "om1", "上周退货率多少？有人知道吗")
+        await quiet_down(db_session, bot)
+    (sales_pick,) = await judge(db_engine, db_session, sales, 0.6)
+    (ops_pick,) = await judge(db_engine, db_session, ops, 0.9)
+    # 还没选出谁接话：谁都没进 agent 回合。
+    assert await tasks_of(db_session, sales, "chat") == []
+    assert await tasks_of(db_session, ops, "chat") == []
+    await run_observe(db_engine, db_session, sales_pick, None)
+    await run_observe(db_engine, db_session, ops_pick, None)
+    assert await tasks_of(db_session, sales, "chat") == []
+    (turn,) = await tasks_of(db_session, ops, "chat")
+    rows = {row.bot_id: row for row in await db_session.scalars(select(GroupObserveDecision))}
+    assert rows[sales.id].outcome == "yielded" and rows[sales.id].task_id is None
+    assert rows[ops.id].outcome == "interject" and rows[ops.id].task_id == turn.id
+
+
+async def test_a_late_judgement_yields_once_another_bot_has_taken_the_message(
+    db_engine, db_session
+):
+    sales = await observing_bot(db_session)
+    ops = await another_observing_bot(db_session, sales, "ops_bot", "运维")
+    for bot in (sales, ops):
+        await say(db_session, bot, "om1", "上周退货率多少？有人知道吗")
+        await quiet_down(db_session, bot)
+    (sales_pick,) = await judge(db_engine, db_session, sales, 0.6)
+    await run_observe(db_engine, db_session, sales_pick, None)
+    assert len(await tasks_of(db_session, sales, "chat")) == 1
+    # 运维判断得晚，概率再高也不再插一句。
+    (ops_pick,) = await judge(db_engine, db_session, ops, 0.95)
+    await run_observe(db_engine, db_session, ops_pick, None)
+    assert await tasks_of(db_session, ops, "chat") == []
+    row = await db_session.scalar(
+        select(GroupObserveDecision).where(GroupObserveDecision.bot_id == ops.id)
+    )
+    assert row.outcome == "yielded"

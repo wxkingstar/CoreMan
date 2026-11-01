@@ -63,7 +63,8 @@ class GroupObserveDecision(Base):
     chat_id: Mapped[str] = mapped_column(Text)
     event_id: Mapped[int | None] = mapped_column(BigInteger)
     mode: Mapped[str] = mapped_column(Text)
-    # interject / below_threshold / refused / error / busy / muted / bot_streak / vetoed ...
+    # interject / below_threshold / refused / error / busy / muted / bot_streak / vetoed /
+    # yielded ...
     outcome: Mapped[str] = mapped_column(Text)
     probability: Mapped[float | None] = mapped_column(Float)
     model: Mapped[str | None] = mapped_column(Text)

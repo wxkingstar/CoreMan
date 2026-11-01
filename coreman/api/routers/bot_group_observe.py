@@ -25,8 +25,8 @@ router = APIRouter(
     dependencies=[Depends(verify_csrf)],
 )
 
-# 「会插话」：模型判断该说话（shadow 下只记录，on 下发出或被 agent 否决）。
-WOULD_SPEAK = ("interject", "sent", "vetoed", "failed")
+# 「会插话」：模型判断该说话（shadow 下只记录，on 下发出、被 agent 否决或让给同群别的机器人）。
+WOULD_SPEAK = ("interject", "sent", "vetoed", "failed", "yielded")
 
 
 async def require_admin(session: AsyncSession, bot_id: uuid.UUID, actor: User) -> Bot:
