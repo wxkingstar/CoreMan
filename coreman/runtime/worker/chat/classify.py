@@ -63,7 +63,7 @@ class ClassifyStage(ChatStageBase):
                 "failed",
                 "runtime_busy",
                 f"RelayBusyError: {out.error}",
-                msg("runtime_busy", locale, relay=pre.relay.name),
+                msg("runtime_busy", locale, relay=pre.relay_label or pre.relay.name),
             )
         if out.error is not None:
             name = type(out.error).__name__
@@ -72,7 +72,7 @@ class ClassifyStage(ChatStageBase):
                 "failed",
                 name,
                 f"{name}: {out.error}",
-                msg("relay_error", locale, relay=pre.relay.name),
+                msg("relay_error", locale, relay=pre.relay_label or pre.relay.name),
             )
         if out.ask_user:
             if not out.questions:
@@ -106,7 +106,7 @@ class ClassifyStage(ChatStageBase):
 
     def _incomplete(self, ctx: TaskContext, pre: Prepared, text: str) -> Verdict:
         """没拿到确认终态：已经流出的正文照留（驱动常把失败原因写在里面），后面接一句错误说明。"""
-        notice = msg("relay_error", ctx.locale, relay=pre.relay.name)
+        notice = msg("relay_error", ctx.locale, relay=pre.relay_label or pre.relay.name)
         return Verdict(
             "error",
             "failed",

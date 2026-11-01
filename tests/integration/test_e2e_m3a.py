@@ -276,7 +276,7 @@ async def test_rate_limit_offer_and_switch(
         req = await stack.ws.send_message("bot1", text="跑报表", msgid="e2e-rl")
         finish = await stack.ws.wait_frame(_finished(req), timeout=30)
         text = finish["body"]["stream"]["content"]
-        assert "📊 服务器额度总览" in text and "| fake ⭐ |" in text
+        assert "📊 服务器额度总览" in text and "| fake / claude ⭐ |" in text
         await stack.ws.wait_frame(_sent("template_card"), timeout=30)
         card = stack.ws.sent_cards()[0]["template_card"]
         assert card["checkbox"]["question_key"] == "ratelimit_switch_choice"

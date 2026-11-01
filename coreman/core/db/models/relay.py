@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -19,7 +20,7 @@ from sqlalchemy import (
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, TimestampMixin
@@ -66,6 +67,8 @@ class RelayServer(TimestampMixin, Base):
     rate_limit_7d_used_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     rate_limit_7d_resets_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_limit_probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 节点上没在用的席位最后一次采集到的额度：{席位 id: {上面五列}}。当前席位的额度在上面五列。
+    seat_quotas: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     health_status: Mapped[str] = mapped_column(Text, server_default=text("'unknown'"))
     health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     health_detail: Mapped[str | None] = mapped_column(Text)

@@ -57,6 +57,8 @@ class Prepared:
     supervisor: TimeoutSupervisor
     # 开流之后才组装（下载要写提示行），所以这里可空：`_prepare` 交出去之前一定已填上。
     content: BuiltContent | None = None
+    # 给人看的实例名（节点名 / provider），出错提示里用它，不用内部名。
+    relay_label: str = ""
 
 
 @dataclass

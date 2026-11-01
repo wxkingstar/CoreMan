@@ -22,7 +22,8 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.audit import diff_dict, record_audit
-from coreman.core.db.models import Announcement, Bot, RelayServer, User
+from coreman.core.db.models import Announcement, Bot, RelayServer, RuntimeNode, User
+from coreman.core.relay.labels import relay_label
 from coreman.core.timeutils import aware_utc
 
 router = APIRouter(
@@ -76,13 +77,17 @@ def time_status(row: Announcement, now: datetime) -> str:
 
 
 def _out(
-    row: Announcement, relay: RelayServer | None, bot: Bot | None, now: datetime
+    row: Announcement,
+    relay: RelayServer | None,
+    node: RuntimeNode | None,
+    bot: Bot | None,
+    now: datetime,
 ) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "scope": row.scope,
         "relay_server_id": str(row.relay_server_id) if row.relay_server_id else None,
-        "relay_name": relay.name if relay else None,
+        "relay_name": relay_label(relay, node) if relay else None,
         "bot_id": str(row.bot_id) if row.bot_id else None,
         "bot_key": bot.bot_key if bot else None,
         "bot_name": bot.name if bot else None,
@@ -130,8 +135,13 @@ async def _load(session: AsyncSession, ann_id: uuid.UUID) -> Announcement:
 
 async def _one(session: AsyncSession, row: Announcement) -> dict[str, Any]:
     relay = await session.get(RelayServer, row.relay_server_id) if row.relay_server_id else None
+    node = (
+        await session.get(RuntimeNode, relay.runtime_node_id)
+        if relay and relay.runtime_node_id
+        else None
+    )
     bot = await session.get(Bot, row.bot_id) if row.bot_id else None
-    return _out(row, relay, bot, datetime.now(UTC))
+    return _out(row, relay, node, bot, datetime.now(UTC))
 
 
 async def _audit(
@@ -159,17 +169,18 @@ async def _audit(
 async def list_announcements(
     _: User = Depends(_MANAGERS), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    relay, bot = aliased(RelayServer), aliased(Bot)
+    relay, node, bot = aliased(RelayServer), aliased(RuntimeNode), aliased(Bot)
     stmt = (
-        select(Announcement, relay, bot)
+        select(Announcement, relay, node, bot)
         .outerjoin(relay, relay.id == Announcement.relay_server_id)
+        .outerjoin(node, node.id == relay.runtime_node_id)
         .outerjoin(bot, bot.id == Announcement.bot_id)
         # updated_at 会并列（同一批次改的），补 id 兜底保证顺序稳定。
         .order_by(Announcement.is_active.desc(), Announcement.updated_at.desc(), Announcement.id)
     )
     now = datetime.now(UTC)
     rows = (await session.execute(stmt)).all()
-    return {"code": 0, "data": [_out(a, r, b, now) for a, r, b in rows]}
+    return {"code": 0, "data": [_out(a, r, n, b, now) for a, r, n, b in rows]}
 
 
 @router.post("", status_code=201)

@@ -93,6 +93,21 @@ class EnrollIn(BaseModel):
     _root = field_validator("workspace_root")(absolute_root)
 
 
+class SeatState(BaseModel):
+    """节点上一个席位（同一种 AI 的一个登录账号）的状态，只用于管理台展示与切换。"""
+
+    id: str = Field(pattern=r"^(default|[a-f0-9]{12})$")
+    label: str = Field(default="", max_length=60)
+    account: str = Field(default="", max_length=255)
+    login: Literal["ready", "required", "unknown"] = "unknown"
+    active: StrictBool = False
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def printable(cls, value: object) -> str:
+        return "".join(c for c in str(value or "") if c.isprintable()).strip()[:60]
+
+
 class Capability(BaseModel):
     # 驱动能在原有能力之上附加挂载本人飞书工具（MCP）。旧节点上报的
     # feishu_personal_restricted_v1 是替换式的受限模式，已不再使用，按未知字段丢弃。
@@ -111,6 +126,9 @@ class Capability(BaseModel):
     resume_fallback_v1: StrictBool = False
     # 记忆在工作目录的 .coreman-memory/，Claude 与 Codex 共用。旧节点没有，Codex 读不到记忆。
     memory_layout_v1: StrictBool = False
+    # 节点能在多个席位之间切换（见 runtime_daemon/seats.py）。旧节点没有，管理台提示升级。
+    seat_switch_v1: StrictBool = False
+    seats: list[SeatState] = Field(default_factory=list, max_length=21)
     installed: bool = False
     version: str = Field(default="", max_length=100)
     # CLI 登录的账号邮箱，只用于展示；旧节点不上报时为空。

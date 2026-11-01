@@ -23,6 +23,7 @@ from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
     Bot,
     RelayServer,
+    RuntimeNode,
     Task,
     User,
 )
@@ -40,6 +41,7 @@ from coreman.core.prompting import (
     sanitize_user_input,
 )
 from coreman.core.relay.client import ChatRequest
+from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import backend_of
 from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.runtime.worker.background import TimeoutSupervisor
@@ -387,6 +389,12 @@ class OpenStage(ChatStageBase):
             session_url,
             started,
             supervisor,
+            relay_label=relay_label(
+                relay,
+                await session.get(RuntimeNode, relay.runtime_node_id)
+                if relay.runtime_node_id
+                else None,
+            ),
         )
         self._after_supervisor(pre)
         return pre

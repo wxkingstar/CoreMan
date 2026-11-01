@@ -19,6 +19,7 @@ from coreman.core.db.models import (
     InteractionState,
     OutboxItem,
     RelayServer,
+    RuntimeNode,
     Team,
     User,
     UserIdentity,
@@ -76,7 +77,8 @@ async def test_rate_limited_reply_gets_table_and_offer_for_admin(
     await run(db_engine, t, fake)
     s = await stream_of(db_session, t.id)
     assert "**📊 服务器额度总览**" in s.final_text and "| sales_bot" not in s.final_text
-    assert f"| {relay.name} ⭐ |" in s.final_text and f"| {idle.name} |" in s.final_text
+    # 给人看的是「节点名 / 类型」，不是实例内部名。
+    assert "| node-1 / claude ⭐ |" in s.final_text and "| r-idle / claude |" in s.final_text
     st = await interactions.get_open(
         db_session, kind="relay_switch", scope_key=interactions.choice_scope(bot.id, "zs")
     )
@@ -88,7 +90,8 @@ async def test_rate_limited_reply_gets_table_and_offer_for_admin(
     assert st.expires_at and st.expires_at - datetime.now(UTC) < timedelta(minutes=31)
     assert (
         st.state["target_relay_id"] == str(idle.id)
-        and st.state["current_name"] == relay.name
+        and st.state["current_name"] == "node-1 / claude"
+        and st.state["target_name"] == "r-idle / claude"
         and st.state["target_pct_7d"] == 5.0
     )
     card = s.pending_card
@@ -120,7 +123,7 @@ async def test_codex_rate_limit_offers_codex_target(
     t = await chat_task(db_session, bot, "跑一下")
     await run(db_engine, t, FakeRelay("codex_rate_limit"))
     s = await stream_of(db_session, t.id)
-    assert "**📊 服务器额度总览**" in s.final_text and f"| {idle.name} |" in s.final_text
+    assert "**📊 服务器额度总览**" in s.final_text and "| r-idle / codex |" in s.final_text
     st = await interactions.get_open(
         db_session, kind="relay_switch", scope_key=interactions.choice_scope(bot.id, "zs")
     )
@@ -147,6 +150,26 @@ async def test_warning_without_limit_and_no_candidate(
     s2 = await stream_of(db_session, t2.id)
     assert "📊 服务器额度总览" in s2.final_text and s2.pending_card is None
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
+
+
+async def test_signed_out_runtime_is_neither_listed_nor_offered(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """节点报告没登录的实例：额度是旧值、切过去也用不了，额度表不列、切换卡不推荐。"""
+    bot, relay, _ = await seed_bot(db_session)
+    relay.rate_limit_5h_used_pct, relay.rate_limit_7d_used_pct = Decimal("100"), Decimal("80")
+    relay.rate_limit_probed_at = datetime.now(UTC)
+    idle = await _second_relay(db_session)
+    node = await db_session.get(RuntimeNode, idle.runtime_node_id)
+    assert node is not None
+    node.capabilities = {"claude": {"installed": True, "login": "required"}}
+    await db_session.commit()
+    await _creator_identity(db_session, bot)
+    t = await chat_task(db_session, bot, "跑一下")
+    await run(db_engine, t, FakeRelay("rate_limit"))
+    s = await stream_of(db_session, t.id)
+    assert "| node-1 / claude ⭐ |" in s.final_text and "r-idle" not in s.final_text
+    assert s.pending_card is None
 
 
 async def test_quota_returned_with_the_reply_is_saved_before_the_warning(
