@@ -411,7 +411,7 @@ onMounted(async () => {
 
 // 身份、运行配置、凭据与环境三个分区是子组件，共享这里维护的同一份表单状态与联动逻辑。
 provide(botFormKey, {
-  mode: props.mode, botId: props.bot?.id, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
+  mode: props.mode, botId: props.bot?.id, savedBot: props.bot, form, fieldErrors, isManager, teamList, relayList, runtimeGroups, selectedRuntime, runtimeBackends,
   modelOptions, supportedEfforts: supportedEffortList, sensitiveVisible, credKeys, manualCredentials, wecomQrEnabled, onBotKeyInput, onPlatformChange, onEnvInvalid, selectRuntime, selectRelay,
   observeReady: computed(() => props.bot?.group_observe_ready ?? false),
 })

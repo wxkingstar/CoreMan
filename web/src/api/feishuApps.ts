@@ -8,6 +8,8 @@ export interface FeishuRegistrationIn {
   description?: string
   avatar_url?: string | null
   reuse?: boolean
+  /** 补齐权限时连同群聊旁听的权限一起申请。 */
+  observe?: boolean
 }
 export interface FeishuRegistration {
   id: string
@@ -80,6 +82,9 @@ export interface FeishuBotIn {
 export interface FeishuVisibilityIn { visible_to_all: boolean; user_ids: string[]; department_ids: string[] }
 export interface FeishuPublishIn { version: string; changelog: string; remark: string }
 
+/** 群聊旁听要的飞书权限：已授权 / 应用没开通 / 待管理员审核。 */
+export type ObservePermission = 'granted' | 'missing' | 'pending'
+
 const registrations = '/api/admin/feishu-app-registrations'
 const app = (botId: string) => `/api/admin/bots/${encodeURIComponent(botId)}/feishu-app`
 export const feishuApps = {
@@ -97,6 +102,8 @@ export const feishuApps = {
   updateVisibility: (botId: string, body: FeishuVisibilityIn) => call<{ ok: true; publish_required: boolean }>(http.patch(`${app(botId)}/visibility`, body)),
   publish: (botId: string, body: FeishuPublishIn) => call<{ version_id: string | null; version: string }>(http.post(`${app(botId)}/publish`, body)),
   applyScopes: (botId: string) => call<{ ok: true }>(http.post(`${app(botId)}/scopes/apply`)),
+  observePermission: (botId: string) =>
+    call<{ status: ObservePermission }>(http.get(`${app(botId)}/observe-permission`)),
   createCommand: (botId: string, body: { command: string; description: string; icon_key: string | null }) =>
     call<{ command_id: string }>(http.post(`${app(botId)}/slash-commands`, body)),
   updateCommand: (botId: string, commandId: string, body: { description: string; icon_key: string | null }) =>

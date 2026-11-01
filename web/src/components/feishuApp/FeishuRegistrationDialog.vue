@@ -15,6 +15,8 @@ const props = defineProps<{
   preset?: Pick<FeishuRegistrationIn, 'name' | 'description' | 'avatar_url'>
   /** 扫码完成后调用方还有工作（例如创建员工）时展示的忙碌文案。 */
   busy?: boolean
+  /** 补齐权限时连同群聊旁听的权限一起申请。 */
+  observe?: boolean
 }>()
 const visible = defineModel<boolean>('visible', { required: true })
 const emit = defineEmits<{ succeeded: [FeishuRegistration] }>()
@@ -59,7 +61,7 @@ async function start(reuse = true): Promise<void> {
   try {
     const body: FeishuRegistrationIn = props.purpose === 'create'
       ? { purpose: 'create', reuse, ...props.preset }
-      : { purpose: 'update', bot_id: props.botId }
+      : { purpose: 'update', bot_id: props.botId, ...(props.observe ? { observe: true } : {}) }
     await show(await feishuApps.startRegistration(body), current)
   } catch (e) {
     if (current === generation) error.value = errorMessage(e)

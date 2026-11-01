@@ -252,6 +252,7 @@ async def test_update_refreshes_rotated_secret_for_bot_admin_only(
     assert r.status_code == 201, r.text
     started = r.json()["data"]
     assert fake.begins[-1]["app_id"] == "cli_bound"
+    assert fake.begins[-1]["observe"] is False
 
     fake.results.append(registration.Poll("succeeded", "cli_bound", "rotated", "ou"))
     await _due(db_session, started["id"])
@@ -266,6 +267,18 @@ async def test_update_refreshes_rotated_secret_for_bot_admin_only(
         "encrypt_key": "ek",
     }
 
+    started = (
+        await client.post(
+            "/api/admin/feishu-app-registrations", json={"purpose": "update", "bot_id": bot_id}
+        )
+    ).json()["data"]
+    assert fake.begins[-1]["observe"] is False
+    # 开启群聊旁听前补齐权限：连同旁听权限一起申请。
+    await client.post(
+        "/api/admin/feishu-app-registrations",
+        json={"purpose": "update", "bot_id": bot_id, "observe": True},
+    )
+    assert fake.begins[-1]["observe"] is True
     started = (
         await client.post(
             "/api/admin/feishu-app-registrations", json={"purpose": "update", "bot_id": bot_id}

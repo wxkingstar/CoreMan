@@ -87,6 +87,8 @@ class RegistrationIn(BaseModel):
     avatar_url: str | None = Field(default=None, max_length=500)
     # 新建时优先复用本人扫码创建、还没被员工使用的应用。
     reuse: bool = True
+    # 补齐权限时连同群聊旁听的权限一起申请（旁听还没打开时由开启入口传入）。
+    observe: bool = False
 
 
 @router.post("/feishu-app-registrations", status_code=201)
@@ -116,7 +118,13 @@ async def start_registration(
             raise ApiError(422, 422, "补齐权限需要指定机器人")
         bot = await admin_feishu_bot(session, body.bot_id, user)
         row = await registrations.start(
-            session, cipher, user, purpose="update", bot=bot, app_id=bot_app_id(cipher, bot)
+            session,
+            cipher,
+            user,
+            purpose="update",
+            bot=bot,
+            app_id=bot_app_id(cipher, bot),
+            observe=body.observe,
         )
     await _audit(
         session,
@@ -252,6 +260,32 @@ class BaseInfoIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=200)
     help_use: str | None = Field(default=None, pattern=_HTTPS)
+
+
+OBSERVE_PERMISSION_ERRORS = {
+    "missing": "飞书应用还没有「获取群组中所有消息」权限，请先在群聊旁听设置里扫码补齐",
+    "pending": "「获取群组中所有消息」权限还在等企业管理员审核，审核通过后才能开启群聊旁听",
+}
+
+
+async def observe_permission(cipher: Cipher, bot: Bot) -> str:
+    """机器人的飞书应用有没有群聊旁听要的权限（见 management.observe_permission）。"""
+    client = client_for(cipher, bot)
+    try:
+        return await management.observe_permission(client)
+    finally:
+        await client.aclose()
+
+
+@router.get("/bots/{bot_id}/feishu-app/observe-permission")
+async def feishu_app_observe_permission(
+    bot_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    bot = await admin_feishu_bot(session, bot_id, user)
+    return {"code": 0, "data": {"status": await observe_permission(_cipher(request), bot)}}
 
 
 @router.patch("/bots/{bot_id}/feishu-app/base")

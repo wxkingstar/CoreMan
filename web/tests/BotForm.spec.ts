@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn().mockResolvedValue('data:image/png;base64,qr') } }))
 vi.mock('@/api/feishuApps', () => ({
-  feishuApps: { startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn() },
+  feishuApps: { startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn(), observePermission: vi.fn(), applyScopes: vi.fn() },
 }))
 vi.mock('@/api/wecomBots', () => ({
   wecomBots: { startProvision: vi.fn(), provision: vi.fn(), cancelProvision: vi.fn() },
@@ -151,6 +151,24 @@ describe('BotForm', () => {
     await wrapper.get('[data-test="submit"]').trigger('click')
     await flushPromises()
     expect(bots.patch).toHaveBeenCalledWith('b1', { rich_cards: false }, 1)
+    wrapper.unmount()
+  })
+
+  it('blocks turning group observing on until the Feishu app has the permission, and scans to add it', async () => {
+    const feishuBot: BotOut = { ...editBot, platform: 'feishu', group_observe_ready: true, credentials: { app_id: 'cli_1', app_secret: '••••••••' } }
+    vi.mocked(feishuApps.observePermission).mockResolvedValueOnce({ status: 'missing' }).mockResolvedValueOnce({ status: 'granted' })
+    vi.mocked(feishuApps.startRegistration).mockResolvedValue({ id: 'reg2', purpose: 'update', status: 'pending', bot_id: 'b1', app_id: 'cli_1', url: 'https://open.feishu.cn/page/launcher?user_code=B', expires_at: '', retry_after: 30, error: null, created_at: null, reused: false })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: feishuBot }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(feishuApps.observePermission).toHaveBeenCalledWith('b1')
+    const radios = () => wrapper.get('[data-test="group-observe"]').findAll('input[type="radio"]')
+    expect(radios().map((r) => (r.element as HTMLInputElement).disabled)).toEqual([false, true, true])
+    await wrapper.get('[data-test="observe-scan"]').trigger('click')
+    await flushPromises()
+    expect(feishuApps.startRegistration).toHaveBeenLastCalledWith({ purpose: 'update', bot_id: 'b1', observe: true })
+    wrapper.findComponent(FeishuRegistrationDialog).vm.$emit('succeeded', { id: 'reg2', status: 'consumed' })
+    await flushPromises()
+    expect(radios().map((r) => (r.element as HTMLInputElement).disabled)).toEqual([false, false, false])
     wrapper.unmount()
   })
 

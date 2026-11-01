@@ -27,6 +27,7 @@ from coreman.api.bot_permissions import (
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
+from coreman.api.routers import feishu_apps as feishu_app_routes
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
@@ -681,6 +682,11 @@ async def patch_bot(
             changes.get("group_observe", bot.group_observe),
             changes.get("group_observe_scope", bot.group_observe_scope),
         )
+        # 从关闭到打开时确认飞书会推全部群消息：没有权限打开了也收不到，机器人看起来毫无反应。
+        if bot.group_observe == "off" and changes.get("group_observe", "off") != "off":
+            status = await feishu_app_routes.observe_permission(_cipher(request), bot)
+            if status in feishu_app_routes.OBSERVE_PERMISSION_ERRORS:
+                raise ApiError(409, 409, feishu_app_routes.OBSERVE_PERMISSION_ERRORS[status])
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录操作正在进行，请完成后再编辑")
     if "working_dir" in changes and changes["working_dir"] != bot.working_dir:
