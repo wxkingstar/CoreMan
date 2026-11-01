@@ -8,7 +8,13 @@ from sqlalchemy import select, update
 
 from coreman.core.chat import group_observe
 from coreman.core.chat.decider import Decision
-from coreman.core.db.models import GroupObserveDecision, GroupObserveState, Task
+from coreman.core.db.models import (
+    GroupObserveDecision,
+    GroupObserveState,
+    Task,
+    User,
+    UserIdentity,
+)
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.worker.group_observe import GroupObserveHandler
@@ -126,6 +132,24 @@ async def test_bot_messages_count_until_a_human_speaks(db_session):
     await say(db_session, bot, "om3", "收到")
     await db_session.refresh(state)
     assert state.bot_streak == 0
+
+
+async def test_transcript_names_people_by_user_id_not_app_scoped_open_id(db_session):
+    bot = await observing_bot(db_session)
+    person = User(login_name="lilei", display_name="李雷")
+    db_session.add(person)
+    await db_session.flush()
+    # 通讯录同步应用的 open_id 与机器人应用收到的不同；user_id 全企业一致。
+    db_session.add(
+        UserIdentity(
+            user_id=person.id, platform="feishu", platform_user_id="u1", open_id="ou_sync_app"
+        )
+    )
+    await db_session.commit()
+    await say(db_session, bot, "om1", "小数在吗")
+    await say(db_session, bot, "om2", "我也在", user="u2")
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    assert [line.sender for line in lines] == ["李雷", "同事 1"]
 
 
 async def test_only_the_latest_message_judges(db_engine, db_session):
