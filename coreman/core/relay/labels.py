@@ -29,7 +29,8 @@ def signed_in(relay: RelayServer, node: RuntimeNode | None) -> bool:
 
 async def load_nodes(
     session: AsyncSession, relays: Iterable[RelayServer]
-) -> dict[uuid.UUID, RuntimeNode]:
+) -> dict[uuid.UUID | None, RuntimeNode]:
+    """按实例的 runtime_node_id 取节点；键允许 None，调用方直接 .get(relay.runtime_node_id)。"""
     ids = {r.runtime_node_id for r in relays if r.runtime_node_id}
     if not ids:
         return {}
