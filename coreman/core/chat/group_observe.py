@@ -166,26 +166,28 @@ async def transcript(
             .limit(CONTEXT_LIMIT)
         )
     ).all()
-    open_ids = {
-        str(oid)
+    # open_id 按应用区分，通讯录里存的是同步应用的 open_id，对不上机器人自己的应用；
+    # user_id 全企业一致，按它认人。
+    user_ids = {
+        str(uid)
         for _, _, payload in inbound
-        if (oid := ((payload or {}).get("sender") or {}).get("open_id"))
+        if (uid := ((payload or {}).get("sender") or {}).get("platform_user_id"))
     }
     names: dict[str, str] = {}
-    if open_ids:
+    if user_ids:
         rows = await session.execute(
-            select(UserIdentity.open_id, User.display_name)
+            select(UserIdentity.platform_user_id, User.display_name)
             .join(User, User.id == UserIdentity.user_id)
-            .where(UserIdentity.platform == "feishu", UserIdentity.open_id.in_(open_ids))
+            .where(UserIdentity.platform == "feishu", UserIdentity.platform_user_id.in_(user_ids))
         )
-        names = {str(oid): str(name) for oid, name in rows.all() if oid and name}
+        names = {str(uid): str(name) for uid, name in rows.all() if uid and name}
     aliases: dict[str, str] = {}
     lines: list[Line] = []
     for event_id, received_at, payload in reversed(inbound):
         payload = payload or {}
         sender = payload.get("sender") or {}
         kind = "bot" if sender.get("sender_type") == "bot" else "human"
-        key = str(sender.get("open_id") or sender.get("platform_user_id") or event_id)
+        key = str(sender.get("platform_user_id") or sender.get("open_id") or event_id)
         if key in names:
             label = names[key]
         else:
