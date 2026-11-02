@@ -78,4 +78,20 @@ describe('RuntimeSeatsDialog', () => {
     expect(q('[data-test="remove-default"]')).toBeNull()
     wrapper.unmount()
   })
+
+  it('signs OpenCode seats in with an API key', async () => {
+    vi.mocked(runtimeSeats.startLogin).mockResolvedValueOnce({ session_id: 's2', authorization_url: 'https://opencode.ai/auth', user_code: '', needs_code: true, expires_in: 900 } as never)
+    const wrapper = mount(RuntimeSeatsDialog, {
+      props: { node: { id: 'n1', name: 'runtime-02', capabilities: { opencode: { installed: true, login: 'required', seat_switch_v1: true, seats: [seat('default', '', true, 'required')] } }, backends: [] } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    expect(q('[data-test="seats-opencode"]')?.textContent).toContain('OpenCode')
+    q<HTMLButtonElement>('[data-test="seats-opencode"] button')!.click()
+    await flushPromises()
+    expect(runtimeSeats.startLogin).toHaveBeenCalledWith('n1', 'opencode', 'default')
+    expect(document.body.textContent).toContain('OpenCode Go')
+    expect(q<HTMLInputElement>('[data-test="seat-login-code"] input, input[data-test="seat-login-code"]')?.placeholder).toBe('API Key')
+    wrapper.unmount()
+  })
 })

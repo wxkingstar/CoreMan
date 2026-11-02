@@ -180,10 +180,10 @@ def build_system_prompt(
     `structured_reply=True` 表示这一轮的回答由平台按固定格式解析（协作 helper 的纯 JSON），
     不给人看：codex 输出契约、详细度和输出格式都要求 Markdown 或卡片，会和那份格式打架，一并不加。
 
-    `memory_dir` 是员工记忆目录的绝对路径，节点支持共用记忆时才给；只对 Codex 说明，
-    Claude Code 自带记忆说明。
+    `memory_dir` 是员工记忆目录的绝对路径，节点支持共用记忆时才给；只对 Codex / OpenCode 说明，
+    Claude Code 自带记忆说明。输出契约同样只给这两种后端。
     """
-    codex = backend == "codex"
+    codex = backend in {"codex", "opencode"}
     parts = [
         segments.security_policy,
         # 固定段，管理台改不了：身份规则本身不能由可编辑文案来定义。

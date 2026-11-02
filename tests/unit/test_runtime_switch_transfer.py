@@ -2,6 +2,8 @@
 
 import base64
 import hashlib
+import json
+import os
 import subprocess
 import uuid
 
@@ -341,3 +343,58 @@ def test_codex_export_needs_a_bound_unique_rollout(codex_agent):
         (bound, "codex", rollout),
         (bound, "relay", f"{bound}/codex_thread.txt"),
     }
+
+
+def test_opencode_export_writes_the_session_next_to_its_binding(tmp_path, monkeypatch):
+    """OpenCode 的会话在它的数据库里：导出成文件随绑定一起搬，目标机驱动续聊前导入。"""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "$@ data=$XDG_DATA_HOME" >> "$FAKE_LOG"\n'
+        'if [ "$2" = ses_gone0000000 ]; then echo "Error: Session not found" >&2; exit 1; fi\n'
+        'printf \'{"info":{"id":"%s"},"messages":[]}\' "$2"\n'
+    )
+    fake.chmod(0o755)
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("OPENCODE_SEAT_HOME", str(tmp_path / "seat"))
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    agent = Agent(
+        root=root,
+        home=tmp_path / "home",
+        api_url="https://example.com",
+        token="synthetic-test-token-123456789",
+        relay_id="test",
+        provider="opencode",
+        sessions_dir=tmp_path / "relay-sessions",
+    )
+    call(agent, "init", "one")
+    ping = agent.dispatch({"type": "ping"})
+    assert ping["session_transfer_opencode"] == 1 and ping["session_transfer_codex"] == 0
+    bound, gone, unbound, invalid = (str(uuid.uuid4()) for _ in range(4))
+    for sid, value in [(bound, "ses_abc1234567"), (gone, "ses_gone0000000"), (invalid, "../x")]:
+        (agent.sessions_dir / sid).mkdir(parents=True)
+        (agent.sessions_dir / sid / "opencode_session.txt").write_text(value)
+    listing = agent.dispatch(
+        {
+            "type": "session-export",
+            "working_dir": "one",
+            "bot_id": "b1",
+            "sessions": [bound, gone, unbound, invalid],
+        }
+    )
+    assert {(f["session"], f["area"], f["path"]) for f in listing["files"]} == {
+        (bound, "relay", f"{bound}/opencode_session.txt"),
+        (bound, "relay", f"{bound}/opencode_import.json"),
+    }
+    exported = agent.sessions_dir / bound / "opencode_import.json"
+    assert json.loads(exported.read_text())["info"]["id"] == "ses_abc1234567"
+    # 用席位的数据目录跑 opencode；非法的会话 ID 不会交给 CLI。
+    assert log.read_text().splitlines() == [
+        f"export ses_abc1234567 data={tmp_path / 'seat'}",
+        f"export ses_gone0000000 data={tmp_path / 'seat'}",
+    ]

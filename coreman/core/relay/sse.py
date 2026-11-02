@@ -15,6 +15,9 @@ from typing import Any
 
 # codex 后端没有 x_relay_error，只能靠正文里的这两个标记判定异常。
 CODEX_ERROR_MARKERS = ("\n\n[codex error] ", "⚠️ [codex] 进程异常退出")
+# opencode 驱动轮内报的错（模型调用失败、额度用尽）同样写在正文里。
+OPENCODE_ERROR_MARKERS = ("\n\n[opencode error] ",)
+ERROR_MARKERS = {"codex": CODEX_ERROR_MARKERS, "opencode": OPENCODE_ERROR_MARKERS}
 
 
 @dataclass(frozen=True)
@@ -152,8 +155,8 @@ class SseParser:
         delta = _obj(choice.get("delta"))
         content = delta.get("content")
         if isinstance(content, str) and content:
-            if chunk.get("x_relay_error") or (
-                self.backend == "codex" and any(m in content for m in CODEX_ERROR_MARKERS)
+            if chunk.get("x_relay_error") or any(
+                m in content for m in ERROR_MARKERS.get(self.backend, ())
             ):
                 self.saw_error = True
                 out.append(RelayErrorEvent(content))

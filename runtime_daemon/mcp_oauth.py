@@ -1,8 +1,10 @@
-"""MCP 技能的 OAuth 登录：由本实例的 Codex / Claude Code 完成授权，令牌留在 CLI 自己的凭据存储。
+"""MCP 技能的 OAuth 登录：由本实例的 Codex / Claude Code / OpenCode 完成授权，令牌留在 CLI 自己的
+凭据存储。
 
 Figma 等服务只接受登记过的 MCP 客户端，CoreMan 不能自己当 OAuth 客户端。两个 CLI 的
 `mcp login --no-browser` 都会打印授权链接，并在本机回环端口等回调：这里启动登录、取回链接，
 管理台把用户浏览器停在的回调地址交回来后，原样送到那个回环端口，CLI 自己换取并保存令牌。
+OpenCode 的 `mcp auth` 没有 --no-browser，BROWSER 设成 true 时同样只打印链接（实测 1.19）。
 令牌按服务名区分，安装时每个 AI 员工用自己的服务名，授权互不共用。
 """
 
@@ -57,8 +59,9 @@ def toml_string(value: str) -> str:
 
 
 def cli_name(provider: str, name: str) -> str:
-    # Codex 驱动以 skill_<名字> 挂载 .mcp.json 里的服务（见 relay-codex/project_mcp.go）。
-    return f"skill_{name}" if provider == "codex" else name
+    # Codex / OpenCode 驱动以 skill_<名字> 挂载 .mcp.json 里的服务（见 relay-*/project_mcp.go、
+    # relay-opencode/config.go）。
+    return f"skill_{name}" if provider in ("codex", "opencode") else name
 
 
 def server_config(project: Path, name: str) -> dict:
@@ -85,6 +88,10 @@ class MCPLogins:
         self.lock = threading.Lock()
 
     def command(self, action: str, name: str, config: dict, *extra: str) -> list[str]:
+        if self.provider == "opencode":
+            # 服务经 OPENCODE_CONFIG_CONTENT 登记（见 cli_env），与驱动挂载时同名同地址。
+            verb = {"login": "auth", "logout": "logout"}[action]
+            return ["opencode", "mcp", verb, cli_name("opencode", name)]
         if self.provider == "codex":
             server = cli_name("codex", name)
             return [
@@ -98,12 +105,24 @@ class MCPLogins:
             ]
         return ["claude", "mcp", action, name, *extra]
 
-    def run(self, command: list[str], project: Path, timeout: int = 30) -> int:
+    def cli_env(self, name: str, config: dict) -> dict[str, str]:
+        """运行 CLI 的环境；OpenCode 要在配置层里登记这个服务，席位目录也换成它的数据目录。"""
+        if self.provider != "opencode":
+            return self.env
+        from .seats import cli_env
+
+        server = {"type": "remote", "url": config["url"], "enabled": True}
+        layer = {"mcp": {cli_name("opencode", name): server}}
+        return {**cli_env(self.env), "OPENCODE_CONFIG_CONTENT": json.dumps(layer)}
+
+    def run(
+        self, command: list[str], project: Path, timeout: int = 30, env: dict | None = None
+    ) -> int:
         try:
             return subprocess.run(
                 command,
                 cwd=project,
-                env=self.env,
+                env=self.env if env is None else env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -186,9 +205,19 @@ class MCPLogins:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 4000, 0, 0))
         try:
             proc = subprocess.Popen(
-                self.command("login", name, config, "--no-browser"),
+                self.command(
+                    "login",
+                    name,
+                    config,
+                    *(() if self.provider == "opencode" else ("--no-browser",)),
+                ),
                 cwd=project,
-                env={**self.env, "TERM": "dumb", "NO_COLOR": "1"},
+                env={
+                    **self.cli_env(name, config),
+                    "TERM": "dumb",
+                    "NO_COLOR": "1",
+                    "BROWSER": "true",
+                },
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -282,6 +311,10 @@ class MCPLogins:
         config = server_config(project, name)
         if self.provider == "claude":
             failed = self.run(self.command("logout", name, config), project)
+        elif self.provider == "opencode":
+            failed = self.run(
+                self.command("logout", name, config), project, env=self.cli_env(name, config)
+            )
         else:
             # 没有系统钥匙串的 Linux 上，Codex 默认模式删除令牌会失败；按文件存储再删一次。
             failed = self.run(self.command("logout", name, config), project) and self.run(

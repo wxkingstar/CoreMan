@@ -35,7 +35,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
-from coreman.core.relay.models import known_effort_flags
+from coreman.core.relay.models import BACKENDS, known_effort_flags
 from coreman.core.runtime_nodes.bundle import stale_bundle_reason
 from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
@@ -182,6 +182,8 @@ class ProxyState(BaseModel):
 class HeartbeatIn(BaseModel):
     claude: Capability
     codex: Capability
+    # 协议 2 的节点从支持 OpenCode 的版本起上报；旧节点缺省为未安装。
+    opencode: Capability = Field(default_factory=Capability)
     version: str = Field(max_length=100)
     service_status: Literal[
         "systemd-user", "systemd-user-session", "systemd", "launchd", "supervised", "foreground"
@@ -366,24 +368,9 @@ async def enroll(
         )
         session.add(node)
         await session.flush()
+        # OpenCode 的 relay 等节点心跳报告装了 CLI 再建（ensure_backends），没装的节点不多一行。
         for provider in ("claude", "codex"):
-            agent_token = hmac.new(
-                body.node_token.encode(), provider.encode(), hashlib.sha256
-            ).hexdigest()
-            session.add(
-                RelayServer(
-                    runtime_node_id=node.id,
-                    name=f"{node.id}/{provider}",
-                    model_provider=provider,
-                    team_id=link.team_id,
-                    visibility=link.visibility,
-                    supported_models_mode="restricted",
-                    supported_models=[],
-                    agent_token_enc=request.app.state.cipher.encrypt(
-                        agent_token, "relay_servers.agent_token_enc"
-                    ),
-                )
-            )
+            session.add(new_relay(request, node, provider, body.node_token))
         link.node_id, link.used_at = node.id, now()
         await record_audit(
             session,
@@ -409,6 +396,44 @@ async def enroll(
             "protocol": PROTOCOL_VERSION,
         },
     }
+
+
+def new_relay(request: Request, node: RuntimeNode, provider: str, node_token: str) -> RelayServer:
+    """节点上一种 AI 后端的 relay；节点 Agent 的令牌由节点令牌按 provider 派生。"""
+    agent_token = hmac.new(node_token.encode(), provider.encode(), hashlib.sha256).hexdigest()
+    return RelayServer(
+        runtime_node_id=node.id,
+        name=f"{node.id}/{provider}",
+        model_provider=provider,
+        team_id=node.team_id,
+        visibility=node.visibility,
+        supported_models_mode="restricted",
+        supported_models=[],
+        agent_token_enc=request.app.state.cipher.encrypt(
+            agent_token, "relay_servers.agent_token_enc"
+        ),
+    )
+
+
+async def ensure_backends(
+    session: AsyncSession, request: Request, node: RuntimeNode, body: HeartbeatIn
+) -> dict[str, dict[str, str]]:
+    """节点各后端的 relay；报告已安装却还没有 relay 的后端（注册之后才支持的，如 OpenCode）
+    在这里补建。心跳带的是节点令牌，派生出的 Agent 令牌与节点自己算的一致。返回给节点补进
+    config.json 的 backends。"""
+    relays = {
+        r.model_provider: r
+        for r in await session.scalars(
+            select(RelayServer).where(RelayServer.runtime_node_id == node.id)
+        )
+    }
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+    for provider in BACKENDS:
+        if provider not in relays and getattr(body, provider).installed:
+            relays[provider] = new_relay(request, node, provider, token)
+            session.add(relays[provider])
+    await session.flush()
+    return {provider: {"relay_id": str(r.id)} for provider, r in relays.items()}
 
 
 @router.post("/heartbeat")
@@ -443,7 +468,7 @@ async def heartbeat(
             active_calls=body.active_calls,
             git_hosts=body.git_hosts,
             proxy=body.proxy.model_dump() if body.proxy else None,
-            capabilities={p: getattr(body, p).model_dump() for p in ("claude", "codex")},
+            capabilities={p: getattr(body, p).model_dump() for p in BACKENDS},
         )
     )
     from sqlalchemy.dialects.postgresql import insert
@@ -451,8 +476,9 @@ async def heartbeat(
     from coreman.core.relay.models import load_catalog
 
     catalog = await load_catalog(session)
+    backends = await ensure_backends(session, request, node, body)
 
-    for provider in ("claude", "codex"):
+    for provider in BACKENDS:
         cap = getattr(body, provider)
         # CLI discovery never overrides the real inference health probe's result.
         values: dict[str, Any] = {
@@ -460,10 +486,10 @@ async def heartbeat(
             "relay_version": cap.version,
             "relay_mode": "v1",
         }
-        if provider == "codex":
+        if provider != "claude":
             # The bundled driver advertises discovery defaults, not an account
-            # allowlist. Codex forwards arbitrary model IDs to the CLI, so let
-            # installed daemon backends follow the admin-managed catalog.
+            # allowlist. Codex and OpenCode forward arbitrary model IDs to the CLI,
+            # so let installed daemon backends follow the admin-managed catalog.
             # Reconcile on every heartbeat for existing nodes as well as new ones.
             values["supported_models_mode"] = "inherit" if cap.installed else "restricted"
         elif cap.installed:
@@ -531,6 +557,7 @@ async def heartbeat(
             "draining": node.draining,
             "protocol": PROTOCOL_VERSION,
             "root_change": node.root_change,
+            "backends": backends,
         },
     }
 

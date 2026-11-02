@@ -376,3 +376,47 @@ async def test_heartbeat_personal_capability_requires_boolean(client, db_session
         },
     )
     assert response.status_code == 422
+
+
+async def test_heartbeat_adds_opencode_relay_once_the_cli_is_installed(client, db_session):
+    """注册时没有 OpenCode：节点装上 CLI 后心跳补建它的 relay，并把 relay_id 交给节点。"""
+    from coreman.core.db.models import RelayServer
+
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    endpoint = "/api/runtime/heartbeat"
+    beat = {"claude": {}, "codex": {}, "version": "test", "service_status": "foreground"}
+
+    async def relays() -> dict[str, RelayServer]:
+        rows = await db_session.scalars(
+            select(RelayServer)
+            .where(RelayServer.runtime_node_id == node_id)
+            .execution_options(populate_existing=True)
+        )
+        return {r.model_provider: r for r in rows}
+
+    legacy = await client.post(endpoint, headers=headers, json=beat)
+    assert legacy.status_code == 200, legacy.text
+    assert set(legacy.json()["data"]["backends"]) == {"claude", "codex"}
+    assert set(await relays()) == {"claude", "codex"}
+
+    installed = {
+        **beat,
+        "opencode": {
+            "installed": True,
+            "login": "ready",
+            "models": ["opencode/opencode-go/kimi-k3"],
+        },
+    }
+    first = await client.post(endpoint, headers=headers, json=installed)
+    assert first.status_code == 200, first.text
+    again = await client.post(endpoint, headers=headers, json=installed)
+    backends = again.json()["data"]["backends"]
+    rows = await relays()
+    assert set(rows) == {"claude", "codex", "opencode"}
+    assert first.json()["data"]["backends"]["opencode"] == backends["opencode"]
+    assert backends["opencode"]["relay_id"] == str(rows["opencode"].id)
+    assert rows["opencode"].supported_models_mode == "inherit"
+    assert rows["opencode"].visibility == rows["claude"].visibility
+    node = await db_session.get(RuntimeNode, node_id, populate_existing=True)
+    assert node.capabilities["opencode"]["installed"] is True

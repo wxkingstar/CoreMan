@@ -88,15 +88,17 @@ async def recover(
 async def require_shared_layout(
     session: AsyncSession, bot: Bot, target: RelayServer, capability: dict[str, Any]
 ) -> None:
-    """旧版运行时只把记忆放在 Claude 的目录里，换到它上面的 Codex 读不到，员工会像失忆了一样：
-    有记忆时不让换过去。Claude 目标照旧部署到原位置，不受影响。"""
-    if target.model_provider != "codex" or capability.get("memory_layout") == 2:
+    """旧版运行时只把记忆放在 Claude 的目录里，换到它上面的 Codex / OpenCode 读不到，员工会像失忆
+    了一样：有记忆时不让换过去。Claude 目标照旧部署到原位置，不受影响。"""
+    if target.model_provider not in {"codex", "opencode"} or capability.get("memory_layout") == 2:
         return
     kept = await session.scalar(
         select(Memory.id).where(Memory.bot_id == bot.id, Memory.deleted_at.is_(None)).limit(1)
     )
     if kept is not None:
-        raise ApiError(409, 409, "目标运行时版本较旧，Codex 读不到员工的记忆，请先升级目标运行时")
+        raise ApiError(
+            409, 409, "目标运行时版本较旧，Codex / OpenCode 读不到员工的记忆，请先升级目标运行时"
+        )
 
 
 async def deploy(

@@ -31,7 +31,7 @@ from pathlib import Path
 EXIT_CONFIG = 78
 SERVICE_NAME = "coreman-runtime"
 LAUNCHD_LABEL = "org.coreman.runtime"
-PROVIDERS = ("claude", "codex")
+PROVIDERS = ("claude", "codex", "opencode")
 # sockaddr_un.sun_path is 104 bytes on macOS and 108 on Linux, both including the NUL.
 SOCKET_PATH_LIMIT = 100
 BUNDLE_LIMIT = 150 * 1024 * 1024

@@ -159,8 +159,8 @@ async def collect(
 async def prompt_dir(
     session: AsyncSession, relay: RelayServer | None, backend: str, directory: str
 ) -> str:
-    """要写进 Codex 提示的记忆目录；节点还不支持共用记忆时为空，不提。"""
-    if backend != "codex" or relay is None or relay.runtime_node_id is None:
+    """要写进 Codex / OpenCode 提示的记忆目录（它们没有自带记忆）；节点还不支持共用记忆时为空。"""
+    if backend not in {"codex", "opencode"} or relay is None or relay.runtime_node_id is None:
         return ""
     node = await session.get(RuntimeNode, relay.runtime_node_id, populate_existing=True)
     capability = ((node.capabilities if node else None) or {}).get(backend) or {}

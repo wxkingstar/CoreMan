@@ -1,15 +1,17 @@
 <script setup lang="ts">
+import { providerIcon, providerLabel } from '@/utils/models'
+
 defineProps<{ provider: string }>()
 </script>
 <template>
   <span class="provider-badge">
     <img
-      :src="provider === 'claude' ? '/providers/claude.svg' : '/providers/openai.svg'"
+      :src="providerIcon(provider)"
       alt=""
       width="22"
       height="22"
     >
-    <span>{{ provider === 'claude' ? 'Claude Code' : 'Codex / GPT' }}</span>
+    <span>{{ providerLabel(provider) }}</span>
   </span>
 </template>
 <style scoped>
