@@ -53,12 +53,20 @@ def test_pattern_and_helpers() -> None:
     assert is_rate_limited("[codex error] You’ve hit your usage limit for gpt-6-sol. Switch to")
     assert is_rate_limited("You've hit your usage limit.")
     assert not is_rate_limited("[codex error] usage limit reached for this session")
+    # OpenCode：驱动以 `[opencode error] …` 回传模型服务的额度告示（实测免费额度的原文）。
+    assert is_rate_limited(
+        "\n\n[opencode error] Free usage limit reached. Free models work in OpenCode"
+    )
+    assert is_rate_limited("[opencode error] Go usage limit reached, resets in 2h")
+    assert not is_rate_limited("Usage limit reached in the report I wrote")
     assert RATE_LIMIT_PATTERN.pattern == (
         r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
+        r"|\[opencode error\] .*\b[Uu]sage limit reached\b"
     )
     assert allowed_providers("claude") == {"claude", "minimax"} and allowed_providers("codex") == {
         "codex"
     }
+    assert allowed_providers("opencode") == {"opencode"}
     assert allowed_providers("minimax") == {"minimax"}
     assert (
         fmt_pct(None) == "-"

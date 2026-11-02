@@ -102,8 +102,16 @@ another image file from your working directory, put `![short caption](relative/p
 its own line; it is replaced by the image itself."""
 
 
+# opencode 驱动只把正文里链接的本地图片随流带回来（没有生图工具），见 relay-opencode/images.go。
+LINKED_IMAGES_PROMPT = """# Images in Your Reply
+
+To show an image file from your working directory, put `![short caption](relative/path.png)` \
+on its own line; it is replaced by the image itself. Never paste bare image file paths."""
+
+
 def with_reply_images(extra: str, platform: str, backend: str) -> str:
-    """飞书机器人走 codex 时，把回复图片的说明段接在附加能力后面。"""
-    if platform != "feishu" or backend != "codex":
+    """飞书机器人走 codex / opencode 时，把回复图片的说明段接在附加能力后面。"""
+    prompt = {"codex": REPLY_IMAGES_PROMPT, "opencode": LINKED_IMAGES_PROMPT}.get(backend)
+    if platform != "feishu" or prompt is None:
         return extra
-    return f"{extra}\n\n{REPLY_IMAGES_PROMPT}" if extra.strip() else REPLY_IMAGES_PROMPT
+    return f"{extra}\n\n{prompt}" if extra.strip() else prompt

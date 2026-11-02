@@ -40,6 +40,7 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import RuntimeCall, RuntimeChunk, RuntimeNode
 from coreman.core.db.session import make_session_factory
+from coreman.core.relay.models import BACKENDS
 
 MAX_REQUEST = 64 * 1024 * 1024
 MAX_RESPONSE = 128 * 1024 * 1024
@@ -296,7 +297,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
         prefix = f"/{self.provider}"
         if path.startswith(prefix + "/"):
             path = path[len(prefix) :]
-        if self.provider not in {"claude", "codex"}:
+        if self.provider not in BACKENDS:
             raise httpx.RequestError("运行时 AI 类型无效", request=request)
         call_id = uuid.uuid4()
         payload = json.dumps(

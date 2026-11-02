@@ -22,15 +22,17 @@ from coreman.core.db.models import Bot, RelayServer, User
 from coreman.core.i18n.messages import msg
 
 # 中间那个 `·` 是 relay 原样透传的告示里的字符，不是连字符：拿 `-` 去匹配一条都认不出来。
-# 后半是 Codex 的报错（驱动以 `[codex error] …` 回传）：撇号是弯引号 `’`，后面接 `.` 或
-# `for <模型>`，没有 `· resets`。
+# 中段是 Codex 的报错（驱动以 `[codex error] …` 回传）：撇号是弯引号 `’`，后面接 `.` 或
+# `for <模型>`，没有 `· resets`。最后是 OpenCode 的模型服务（驱动以 `[opencode error] …` 回传），
+# 实测免费额度用尽为 `Free usage limit reached.`，OpenCode Go 的套餐额度按同一措辞匹配。
 RATE_LIMIT_PATTERN = re.compile(
     r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
+    r"|\[opencode error\] .*\b[Uu]sage limit reached\b"
 )
 WARN_5H_PCT = 90
 WARN_7D_PCT = 95
-# claude 与 minimax 的模型可以互换着跑（同一套 Anthropic 协议），codex 只能落回 codex。
-_PROVIDER_SETS = {"claude": {"claude", "minimax"}, "codex": {"codex"}}
+# claude 与 minimax 的模型可以互换着跑（同一套 Anthropic 协议），codex、opencode 只能落回自己。
+_PROVIDER_SETS = {"claude": {"claude", "minimax"}, "codex": {"codex"}, "opencode": {"opencode"}}
 
 
 def is_rate_limited(text: str) -> bool:

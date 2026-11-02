@@ -38,7 +38,7 @@ export interface WecomQr { appid: string; agentid: string; redirect_uri: string;
 export type HealthStatus = 'healthy' | 'down' | 'auth_fail' | 'timeout' | 'unknown'
 export type ModelsMode = 'inherit' | 'restricted'
 export type Visibility = 'all' | 'admins'
-export type Backend = 'claude' | 'codex'
+export type Backend = 'claude' | 'codex' | 'opencode'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 /** 限额百分比：后端是 Numeric 列，序列化后可能是数字也可能是数字字符串，取值一律过 Number()。 */
 export type Pct = number | string | null

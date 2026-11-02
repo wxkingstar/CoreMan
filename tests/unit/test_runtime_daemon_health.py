@@ -248,7 +248,7 @@ def declare_capabilities(daemon, monkeypatch, provider: str, capabilities: dict)
     )
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("provider", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize(
     "flag", ["feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1"]
 )
@@ -271,6 +271,26 @@ def test_both_drivers_declare_additive_personal_tools():
     assert "resume_fallback_v1" in module.DRIVER_CAPABILITIES["codex"]
     assert "system_mcp_v1" in module.DRIVER_CAPABILITIES["claude"]
     assert "system_mcp_v1" in module.DRIVER_CAPABILITIES["codex"]
+    assert {"resume_fallback_v1", "system_mcp_v1"} <= set(module.DRIVER_CAPABILITIES["opencode"])
+
+
+async def test_opencode_waits_for_its_relay_then_starts_an_agent(healing_daemon, monkeypatch):
+    """注册早于 OpenCode 支持的节点：装上 CLI 先照常上报，心跳补来 relay 后再起 Agent。"""
+    daemon = healing_daemon
+    declare_capabilities(daemon, monkeypatch, "opencode", {"system_mcp_v1": True})
+    saved = []
+    monkeypatch.setattr(daemon, "save", lambda: saved.append(dict(daemon.config["backends"])))
+    await daemon.discover()
+    assert daemon.capabilities["opencode"]["installed"] is True
+    assert daemon.capabilities["opencode"]["system_mcp_v1"] is True
+    assert "opencode" not in daemon.agents
+    daemon.add_backends({"opencode": {"relay_id": "relay-opencode"}, "other": {"relay_id": "x"}})
+    daemon.add_backends({"claude": {"relay_id": "replaced"}, "opencode": "bad"})
+    assert daemon.config["backends"]["opencode"] == {"relay_id": "relay-opencode"}
+    assert daemon.config["backends"]["claude"] == {"relay_id": "relay-claude"}
+    assert len(saved) == 1 and "other" not in daemon.config["backends"]
+    await daemon.discover()
+    assert daemon.agents["opencode"].relay_id == "relay-opencode"
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])

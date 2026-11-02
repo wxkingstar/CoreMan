@@ -42,6 +42,8 @@ SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 CODEX_ROLLOUT = re.compile(
     r"\d{4}/\d{2}/\d{2}/rollout-[0-9T-]{1,40}-(" + SESSION_ID.pattern + r")\.jsonl"
 )
+# OpenCode 的会话 ID，如 ses_e68056cc4ffeIw6ZYIMfdVNORM。
+OPENCODE_SESSION = re.compile(r"ses_[A-Za-z0-9]{10,60}")
 
 
 COMMAND_CANCEL = contextvars.ContextVar("coreman_command_cancel", default=None)
@@ -357,6 +359,10 @@ class Agent:
     def session_areas(self, working_dir: str) -> dict[str, Path]:
         if self.provider == "codex":
             areas = {"codex": self.codex_sessions_dir()}
+        elif self.provider == "opencode":
+            # OpenCode 的会话在它的数据库里：导出成驱动会话目录里的文件随之搬走
+            # （见 opencode_export）。
+            areas = {}
         else:
             areas = {"project": self.claude_project_dir(working_dir)}
         if self.sessions_dir is not None:
@@ -386,6 +392,36 @@ class Agent:
             and not path.is_symlink()
         ]
         return matches[0] if len(matches) == 1 else None
+
+    def opencode_export(self, sid: str) -> bool:
+        """把 relay 会话绑定的 OpenCode 会话导出到 <会话>/opencode_import.json；目标节点的驱动
+        下一轮续聊前导入（实测 opencode import 保留会话 ID，已有同 ID 会话时合并不丢消息）。"""
+        if self.sessions_dir is None:
+            return False
+        folder = self.sessions_dir / sid
+        marker = folder / "opencode_session.txt"
+        if folder.is_symlink() or not marker.is_file() or marker.is_symlink():
+            return False
+        session = marker.read_text(errors="replace").strip()
+        if not OPENCODE_SESSION.fullmatch(session):
+            return False
+        from .seats import cli_env
+
+        try:
+            result = subprocess.run(
+                ["opencode", "export", session],
+                cwd=self.home,
+                env=cli_env(dict(os.environ)),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode != 0 or not result.stdout.strip().startswith(b"{"):
+            return False
+        atomic_write(folder / "opencode_import.json", result.stdout.decode(errors="replace"))
+        return True
 
     def session_path(self, working_dir: str, area: object, name: object) -> Path:
         """会话文件只能是 <会话>.jsonl、<会话>/ 下的普通文件或 Codex 的 rollout，不跟随链接。"""
@@ -429,6 +465,10 @@ class Agent:
                 if rollout is None:
                     continue
                 candidates = [("codex", rollout)]
+            elif self.provider == "opencode":
+                if not self.opencode_export(sid):
+                    continue
+                candidates = []
             else:
                 project = self.claude_project_dir(working_dir)
                 if not (project / f"{sid}.jsonl").is_file():
@@ -1192,6 +1232,8 @@ class Agent:
                 "session_transfer": 1 if self.provider == "claude" else 0,
                 # Codex 会话（thread 的 rollout 与绑定）也能随换机迁移，目标机原生续聊。
                 "session_transfer_codex": 1 if self.provider == "codex" else 0,
+                # OpenCode 会话导出成文件随换机迁移，目标机驱动导入后原生续聊。
+                "session_transfer_opencode": 1 if self.provider == "opencode" else 0,
                 # 换机前可探测两台节点是否共用同一个工作目录（共享盘），是就不复制文件。
                 "workspace_probe": 1,
                 "mcp_oauth": 1,

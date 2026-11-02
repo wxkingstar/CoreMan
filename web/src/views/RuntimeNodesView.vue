@@ -14,6 +14,7 @@ import QuotaBar from '@/components/QuotaBar.vue'
 import CatalogPanel from '@/views/CatalogPanel.vue'
 import RuntimeSeatsDialog from '@/components/RuntimeSeatsDialog.vue'
 import { formatDateTime, pctNum } from '@/utils/format'
+import { BACKENDS } from '@/utils/models'
 const { t } = useI18n()
 const auth = useAuthStore()
 const canManage = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
@@ -376,7 +377,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               </template>
             </el-table-column>
             <template
-              v-for="provider in ['claude', 'codex']"
+              v-for="provider in BACKENDS"
               :key="provider"
             >
               <el-table-column min-width="130">
@@ -394,7 +395,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   </div>
                 </template>
               </el-table-column>
+              <!-- OpenCode Go 的额度只在 OpenCode 控制台看得到，CLI 不报，不占一列。 -->
               <el-table-column
+                v-if="provider !== 'opencode'"
                 :label="t('runtimeNodes.quotaOf', { name: t(`bots.backend.${provider}`) })"
                 min-width="290"
               >

@@ -18,7 +18,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.db.models import Bot, ChatLog, ModelPrice, User
-from coreman.core.relay.models import backend_of
+from coreman.core.relay.models import Backend, backend_of
 
 router = APIRouter(prefix="/api/admin", tags=["statistics"], dependencies=[Depends(verify_csrf)])
 TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
@@ -138,7 +138,7 @@ async def statistics(
 
 class PriceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["claude", "codex"]
+    provider: Backend
     model: str = Field(min_length=1, max_length=100)
     effective_from: date
     input_usd: Decimal = Field(ge=0, le=99999, decimal_places=4)

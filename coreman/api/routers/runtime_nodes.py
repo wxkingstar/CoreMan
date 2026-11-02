@@ -37,6 +37,7 @@ from coreman.core.db.models import (
     Team,
     User,
 )
+from coreman.core.relay.models import Backend
 from coreman.core.runtime_nodes.common import (
     MAX_CA_PEM_BYTES,
     absolute_root,
@@ -554,7 +555,7 @@ async def session_view(
     request: Request,
     response: Response,
     node_id: uuid.UUID,
-    provider: Literal["claude", "codex"],
+    provider: Backend,
     session_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
@@ -627,7 +628,7 @@ async def session_view(
 async def session_events(
     request: Request,
     node_id: uuid.UUID,
-    provider: Literal["claude", "codex"],
+    provider: Backend,
     session_id: str,
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
