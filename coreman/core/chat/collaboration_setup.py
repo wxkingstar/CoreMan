@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -19,7 +20,6 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
-    BotCollaborationPartner,
     BotCollaborationRoute,
     BotMember,
     InboundEvent,
@@ -32,6 +32,10 @@ from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.runtime_nodes.transport import online
 
 PROBE_SECONDS = 300
+# 搜索同群伙伴时的「在不在群」缓存：(机器人, 凭证指纹, 群) -> (结果, 过期时刻)。
+# 只缓存明确的在/不在；登记求助时另行实时核对。
+PRESENCE_TTL = 300.0
+_presence: dict[tuple[uuid.UUID, str, str], tuple[bool, float]] = {}
 
 
 def credentials(bot: Bot, cipher: Cipher) -> dict[str, str]:
@@ -198,46 +202,58 @@ async def begin(
     await session.flush()
 
 
+async def in_chat(bot: Bot, chat_id: str, cipher: Cipher, *, cached: bool = False) -> bool:
+    """用机器人自己的凭证问飞书它在不在这个群；查不清时抛出可直接告诉人的原因。"""
+    key = (bot.id, fingerprint(bot), chat_id)
+    hit = _presence.get(key)
+    if cached and hit and hit[1] > time.monotonic():
+        return hit[0]
+    config = credentials(bot, cipher)
+    client = FeishuClient(config["app_id"], config["app_secret"])
+    try:
+        async with asyncio.timeout(10):
+            token = await client.get_token()
+            body = await client.call(
+                "GET",
+                f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}/members/is_in_chat",
+                token=token,
+            )
+        member = (body.get("data") or {}).get("is_in_chat")
+        if not isinstance(member, bool):
+            raise FeishuError(-2, "invalid membership response")
+    except FeishuError as exc:
+        if exc.code == 99991672:
+            raise ValueError(
+                f"无法确认「{bot.name}」是否在当前群：应用缺少群成员查询权限，"
+                "请管理员开启 im:chat.members:read 并发布应用"
+            ) from None
+        if exc.code == 232010:
+            raise ValueError(f"无法确认「{bot.name}」是否在当前群：应用与群不在同一租户") from None
+        raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群") from None
+    except (TimeoutError, TypeError, AttributeError):
+        raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群") from None
+    finally:
+        await client.aclose()
+    _presence[key] = (member, time.monotonic() + PRESENCE_TTL)
+    return member
+
+
 async def check_current_group(source: Bot, target: Bot, chat_id: str, cipher: Cipher) -> None:
     """One bounded check per bot using that bot's own tenant token; never list groups."""
     configs = [credentials(bot, cipher) for bot in (source, target)]
     if configs[0]["app_id"] == configs[1]["app_id"]:
         raise ValueError("两个 AI 员工不能使用同一个飞书应用建立协作")
 
-    async def check(bot: Bot, config: dict[str, str]) -> None:
-        client = FeishuClient(config["app_id"], config["app_secret"])
+    async def check(bot: Bot) -> None:
         try:
-            async with asyncio.timeout(10):
-                token = await client.get_token()
-                body = await client.call(
-                    "GET",
-                    f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}/members/is_in_chat",
-                    token=token,
-                )
-            member = (body.get("data") or {}).get("is_in_chat")
-            if member is False:
-                raise ValueError(f"「{bot.name}」不在当前群，请先将其加入群聊后重新发起任务")
-            if member is not True:
-                raise FeishuError(-2, "invalid membership response")
-        except FeishuError as exc:
-            if exc.code == 99991672:
-                raise ValueError(
-                    f"无法确认「{bot.name}」是否在当前群：应用缺少群成员查询权限，"
-                    "请管理员开启 im:chat.members:read 并发布应用，本轮不再重试"
-                ) from None
-            if exc.code == 232010:
-                raise ValueError(
-                    f"无法确认「{bot.name}」是否在当前群：应用与群不在同一租户，本轮不再重试"
-                ) from None
-            raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群，本轮不再重试") from None
-        except (TimeoutError, TypeError, AttributeError):
-            raise ValueError(f"暂时无法确认「{bot.name}」是否在当前群，本轮不再重试") from None
-        finally:
-            await client.aclose()
+            member = await in_chat(bot, chat_id, cipher)
+        except ValueError as exc:
+            raise ValueError(f"{exc}，本轮不再重试") from None
+        if not member:
+            raise ValueError(f"「{bot.name}」不在当前群，请先将其加入群聊后重新发起任务")
 
     results = await asyncio.gather(
-        *(check(bot, config) for bot, config in zip((source, target), configs, strict=True)),
-        return_exceptions=True,
+        *(check(bot) for bot in (source, target)), return_exceptions=True
     )
     for result in results:
         if isinstance(result, BaseException):
@@ -250,7 +266,6 @@ async def begin_runtime(
     source: Bot,
     target: Bot,
     actor_id: uuid.UUID,
-    partner: BotCollaborationPartner,
     cipher: Cipher,
 ) -> None:
     """Lazy transport handshake after membership and original-human ACL checks."""
@@ -270,11 +285,10 @@ async def begin_runtime(
         "reason": None,
         "probe_id": probe,
         "actor_id": str(actor_id),
-        "partner_id": str(partner.id),
         "runtime_request": True,
         "expires_at": (
             datetime.now(UTC)
-            + timedelta(seconds=min(PROBE_SECONDS, max(30, partner.timeout_seconds)))
+            + timedelta(seconds=min(PROBE_SECONDS, max(30, route.timeout_seconds)))
         ).isoformat(),
         "chat_name": route.chat_id,
         "source_fingerprint": fingerprint(source),
@@ -332,18 +346,8 @@ async def _current(
     except (ValueError, TypeError, AttributeError):
         actor = None
     if meta.get("runtime_request"):
-        try:
-            partner = await session.get(
-                BotCollaborationPartner,
-                uuid.UUID(meta.get("partner_id", "")),
-                populate_existing=True,
-            )
-        except (ValueError, TypeError):
-            partner = None
-        if not partner or partner.source_bot_id != source.id or partner.target_bot_id != target.id:
-            raise ValueError("permission_revoked")
         # The current requesting human is checked separately for every ledger operation.
-        if not partner.enabled or partner.archived:
+        if not target.accept_bot_help:
             raise ValueError("permission_revoked")
         if meta.get("status") == "pending":
             if not actor or actor.status != "active":

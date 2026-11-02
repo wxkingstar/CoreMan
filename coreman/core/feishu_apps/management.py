@@ -264,6 +264,11 @@ async def overview(client: FeishuClient, *, observe: bool = False) -> dict[str, 
 
 async def observe_permission(client: FeishuClient) -> str:
     """群聊旁听要的权限：granted；missing（应用没开通，需扫码补齐）；pending（待管理员审核）。"""
+    return await scope_permission(client, manifest.OBSERVE_SCOPES)
+
+
+async def scope_permission(client: FeishuClient, scopes: tuple[str, ...]) -> str:
+    """应用有没有这组租户权限，口径同 observe_permission。"""
     app = _dict((await _write(client.call("GET", V6_APP, params={"lang": "zh_cn"}))).get("app"))
     tenant = {
         item["scope"]
@@ -272,7 +277,7 @@ async def observe_permission(client: FeishuClient) -> str:
         and isinstance(item.get("scope"), str)
         and "tenant" in _strings(item.get("token_types"))
     }
-    if not set(manifest.OBSERVE_SCOPES) <= tenant:
+    if not set(scopes) <= tenant:
         return "missing"
     grants = await _write(client.call("GET", V6_SCOPES))
     # 授权列表里没列出的按已授权处理，只有明确未授权才算待审核。
@@ -281,7 +286,7 @@ async def observe_permission(client: FeishuClient) -> str:
         for item in grants.get("scopes") or []
         if isinstance(item, dict) and item.get("grant_status") != 1
     }
-    return "pending" if pending & set(manifest.OBSERVE_SCOPES) else "granted"
+    return "pending" if pending & set(scopes) else "granted"
 
 
 async def _write(coro: Any) -> dict[str, Any]:

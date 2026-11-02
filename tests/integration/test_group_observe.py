@@ -45,7 +45,9 @@ async def observing_bot(session, mode="on"):
     return bot
 
 
-async def say(session, bot, mid, text, *, sender_type="user", mentions_bot=False, user="u1"):
+async def say(
+    session, bot, mid, text, *, sender_type="user", mentions_bot=False, user="u1", mentions=None
+):
     raw = {
         "event": {
             "message": {
@@ -54,6 +56,7 @@ async def say(session, bot, mid, text, *, sender_type="user", mentions_bot=False
                 "chat_type": "group",
                 "message_type": "text",
                 "content": json.dumps({"text": text}),
+                "mentions": mentions or [],
             }
         }
     }
@@ -135,6 +138,20 @@ async def test_bot_messages_count_until_a_human_speaks(db_session):
     await say(db_session, bot, "om3", "收到")
     await db_session.refresh(state)
     assert state.bot_streak == 0
+
+
+async def test_bots_mentioning_someone_else_never_trigger_a_judgement(db_session):
+    """AI 员工之间求助、答复的 @ 消息只记上下文，旁听的第三个机器人不插话，也不吞掉人的待判断。"""
+    bot = await observing_bot(db_session)
+    await say(db_session, bot, "om1", "谁能拉一下上周的 GMV？")
+    pending = (await db_session.get(GroupObserveState, (bot.id, CHAT))).pending_since
+    peer = [{"key": "@_user_1", "id": {"open_id": "ou_other_bot"}, "name": "库存助手"}]
+    await say(
+        db_session, bot, "om2", "@库存助手 请核对库存", sender_type="bot", user="a", mentions=peer
+    )
+    assert len(await tasks_of(db_session, bot, "group_observe")) == 1
+    state = await db_session.get(GroupObserveState, (bot.id, CHAT), populate_existing=True)
+    assert state.pending_since == pending and state.bot_streak == 1
 
 
 async def test_transcript_names_people_by_user_id_not_app_scoped_open_id(db_session):

@@ -17,7 +17,6 @@ from coreman.core.chat import sessions
 from coreman.core.db.models import (
     Bot,
     BotCollaboration,
-    BotCollaborationPartner,
     BotCollaborationRoute,
     InboundEvent,
     RelayServer,
@@ -183,12 +182,15 @@ async def configure(
     if intake.bot.platform != "feishu" or intake.chat_type not in ("group", "single"):
         return system_prompt, env
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
+    # 不用配置伙伴：还有别的飞书 AI 员工可能被求助就挂上入口；在不在这个群、
+    # 发起人能不能用，由搜索与登记时检查，开流前不逐个问飞书。
     peers = intake.chat_type == "group" and await session.scalar(
-        select(BotCollaborationPartner.id)
+        select(Bot.id)
         .where(
-            BotCollaborationPartner.source_bot_id == intake.bot.id,
-            BotCollaborationPartner.enabled.is_(True),
-            BotCollaborationPartner.archived.is_(False),
+            Bot.id != intake.bot.id,
+            Bot.platform == "feishu",
+            Bot.enabled.is_(True),
+            Bot.accept_bot_help.is_(True),
         )
         .limit(1)
     )

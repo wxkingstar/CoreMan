@@ -26,7 +26,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
-from coreman.core.feishu_apps import management
+from coreman.core.feishu_apps import management, manifest
 from coreman.core.feishu_apps import service as registrations
 from coreman.core.knowledge import installation
 from coreman.core.platforms.feishu import FeishuClient
@@ -273,6 +273,15 @@ async def observe_permission(cipher: Cipher, bot: Bot) -> str:
     client = client_for(cipher, bot)
     try:
         return await management.observe_permission(client)
+    finally:
+        await client.aclose()
+
+
+async def collaboration_permission(cipher: Cipher, bot: Bot) -> str:
+    """机器人之间求助要的权限，口径同 observe_permission。"""
+    client = client_for(cipher, bot)
+    try:
+        return await management.scope_permission(client, manifest.COLLABORATION_SCOPES)
     finally:
         await client.aclose()
 

@@ -96,6 +96,8 @@ class Bot(TimestampMixin, Base):
     group_observe: Mapped[str] = mapped_column(Text, server_default=text("'off'"))
     # 旁听职责说明：交给判断模型的「它负责什么、什么时候该说话」，不是整段系统提示。
     group_observe_scope: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # 同群的其他飞书 AI 员工能不能 @ 它求助；求助时它以触发人的身份执行。
+    accept_bot_help: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")

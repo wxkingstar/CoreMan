@@ -15,7 +15,6 @@ from coreman.core.chat import human_collaboration as human
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
-    BotCollaborationPartner,
     BotHumanPartner,
     CronJob,
     CronRun,
@@ -206,7 +205,6 @@ async def test_private_chat_lists_colleagues_but_never_other_employees(db_sessio
     )
     db_session.add(peer)
     await db_session.flush()
-    db_session.add(BotCollaborationPartner(source_bot_id=bot.id, target_bot_id=peer.id))
     await db_session.commit()
     page = await call(db_session, task, origin, "search_collaborators", {})
     assert [item["type"] for item in page["items"]] == ["human"]

@@ -1,3 +1,4 @@
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +65,10 @@ def test_setup_rejects_user_and_missing_union():
             )
 
 
+def peer(name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, id=uuid.uuid4(), credentials_enc=f"enc-{name}")
+
+
 @pytest.mark.asyncio
 async def test_membership_uses_each_bots_own_explicit_token(monkeypatch):
     from coreman.core.chat import collaboration_setup as service
@@ -88,9 +93,7 @@ async def test_membership_uses_each_bots_own_explicit_token(monkeypatch):
     monkeypatch.setattr(
         service, "credentials", lambda bot, _: {"app_id": bot.name, "app_secret": "s"}
     )
-    await service.check_current_group(
-        SimpleNamespace(name="A"), SimpleNamespace(name="B"), "oc_current", object()
-    )
+    await service.check_current_group(peer("A"), peer("B"), "oc_current", object())
     assert calls == [
         (name, "GET", "/open-apis/im/v1/chats/oc_current/members/is_in_chat", f"token-{name}")
         for name in ("A", "B")
@@ -141,7 +144,46 @@ async def test_membership_false_is_distinct_from_unverifiable(monkeypatch, outco
         service, "credentials", lambda bot, _: {"app_id": bot.name, "app_secret": "s"}
     )
     with pytest.raises(ValueError, match=reason):
-        await service.check_current_group(
-            SimpleNamespace(name="A"), SimpleNamespace(name="B"), "oc_current", object()
-        )
+        await service.check_current_group(peer("A"), peer("B"), "oc_current", object())
     assert calls == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_search_presence_is_cached_but_registration_rechecks(monkeypatch):
+    from coreman.core.chat import collaboration_setup as service
+    from coreman.core.platforms.feishu import FeishuError
+
+    answers = [True, False, FeishuError(99991672)]
+    calls = []
+
+    class Client:
+        def __init__(self, app_id, secret):
+            pass
+
+        async def get_token(self):
+            return "t"
+
+        async def call(self, method, path, *, token):
+            calls.append(path)
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return {"data": {"is_in_chat": answer}}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(service, "FeishuClient", Client)
+    monkeypatch.setattr(service, "credentials", lambda bot, _: {"app_id": "x", "app_secret": "s"})
+    bot = peer("B")
+    assert await service.in_chat(bot, "oc", object(), cached=True) is True
+    assert await service.in_chat(bot, "oc", object(), cached=True) is True
+    assert len(calls) == 1
+    # Registration asks Feishu again; an answer that cannot be verified is never cached.
+    assert await service.in_chat(bot, "oc", object()) is False
+    assert await service.in_chat(bot, "oc", object(), cached=True) is False
+    assert len(calls) == 2
+    with pytest.raises(ValueError, match="im:chat.members:read"):
+        await service.in_chat(bot, "oc", object())
+    assert await service.in_chat(bot, "oc", object(), cached=True) is False
+    assert len(calls) == 3

@@ -62,6 +62,22 @@ async def note(
     """
     now = datetime.now(UTC)
     human = message.sender.sender_type != "bot"
+    # 机器人 @ 了别人（多是 AI 员工之间求助、答复）：只记上下文，不排判断，免得第三个插话。
+    mentions = ((message.raw.get("event") or {}).get("message") or {}).get("mentions")
+    if not human and mentions and not message.mentions_bot:
+        stmt = insert(GroupObserveState).values(
+            bot_id=bot_id, chat_id=message.chat_id, bot_streak=1, last_message_at=now
+        )
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[GroupObserveState.bot_id, GroupObserveState.chat_id],
+                set_={
+                    "bot_streak": GroupObserveState.__table__.c.bot_streak + 1,
+                    "last_message_at": now,
+                },
+            )
+        )
+        return
     pending = not message.mentions_bot
     values: dict[str, Any] = {
         "bot_id": bot_id,

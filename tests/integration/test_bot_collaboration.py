@@ -14,7 +14,6 @@ from coreman.core.db.models import (
     Bot,
     BotAllowedUser,
     BotCollaboration,
-    BotCollaborationPartner,
     BotCollaborationRoute,
     InboundEvent,
     OutboxItem,
@@ -63,7 +62,6 @@ async def setup(session):
         timeout_seconds=300,
     )
     session.add(route)
-    session.add(BotCollaborationPartner(source_bot_id=a.id, target_bot_id=b.id))
     await session.commit()
     task = await chat_task(
         session, a, "需要B数据", sender="human-id", chat_type="group", chat_id="group"
@@ -809,12 +807,10 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
     from tests.fakes.fake_relay import FakeRelay
     from tests.integration.test_chat_handler import run
 
-    a, _, actor, route, initial, row = await setup(db_session)
+    a, b, actor, route, initial, row = await setup(db_session)
     row.status = "completed"
-    partner = await db_session.scalar(
-        select(BotCollaborationPartner).where(BotCollaborationPartner.source_bot_id == a.id)
-    )
-    partner.enabled = route_enabled
+    # 唯一的另一个飞书 AI 员工关掉求助时，不挂协作入口。
+    b.accept_bot_help = route_enabled
     await tasks.finish(db_session, initial.id, status="succeeded")
     await db_session.commit()
     fake = FakeRelay("normal")
