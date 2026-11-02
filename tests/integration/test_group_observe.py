@@ -30,9 +30,11 @@ class FakeDecider:
     def __init__(self, probability: float | None = 0.9):
         self.probability = probability
         self.calls: list[dict] = []
+        self.instructions: list[str | None] = []
 
-    async def should_interject(self, state):
+    async def should_interject(self, state, *, instruction=None):
         self.calls.append(state)
+        self.instructions.append(instruction)
         return Decision(probability=self.probability, model="fake", latency_ms=5, input_tokens=10)
 
 

@@ -32,6 +32,17 @@ INSTRUCTION = (
     "也算否：不要重复自己。"
 )
 
+# 调度员的第一段判断：只问是不是有事要安排人，选谁由调度回合决定。
+DISPATCH_INSTRUCTION = (
+    "群里有一位 AI 调度员 `bot.name`，负责把同事提出的事交给合适的 AI 员工去做，团队情况见 "
+    "`bot.role`。判断：`recent_messages` 最后一条消息是不是在请人办一件具体的事（查数据、"
+    "排查问题、改东西、做东西），需要调度员安排人处理？"
+    "是：有人提出了明确的请求、问题或报障，或者在补充、追问之前安排过的事；并且还没有同事回答、"
+    "认领或说在处理，也没有点名问某个具体的人或 @ 某个 AI 员工。"
+    "否：闲聊、表情、确认致谢、通知公告、讨论观点、已被回答或有人认领、点名问某个具体的人、"
+    "@ 了某个 AI 员工、对机器人消息的致谢。"
+)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -44,7 +55,9 @@ class Decision:
 
 
 class Decider(Protocol):
-    async def should_interject(self, state: dict[str, Any]) -> Decision: ...
+    async def should_interject(
+        self, state: dict[str, Any], *, instruction: str = INSTRUCTION
+    ) -> Decision: ...
 
 
 class OpenAIDecider:
@@ -53,11 +66,13 @@ class OpenAIDecider:
         self.model = model
         self._http = http
 
-    async def should_interject(self, state: dict[str, Any]) -> Decision:
+    async def should_interject(
+        self, state: dict[str, Any], *, instruction: str = INSTRUCTION
+    ) -> Decision:
         body = {
             "model": self.model,
             "input": json.dumps(state, ensure_ascii=False),
-            "questions": [{"type": "predicate", "name": "interject", "instructions": INSTRUCTION}],
+            "questions": [{"type": "predicate", "name": "interject", "instructions": instruction}],
         }
         started = time.monotonic()
 

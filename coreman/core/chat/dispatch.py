@@ -1,0 +1,287 @@
+"""群聊调度员：调度回合的本轮块、决定的校验，以及把决定记成任务。
+
+第一段（判断要不要调度）沿用旁听的判断任务，只换判断题；判断为是时排一个调度回合
+（`origin = dispatch`）。调度员在这一轮读群聊、员工名录和这个群最近的任务，按固定格式输出
+一个 JSON 决定；平台在这里校验并落库。第一期（试运行）只记录「会这样分派」：任务状态是
+`shadow`，不交接、不往群里发任何消息。
+见 docs/superpowers/specs/2026-11-02-group-dispatcher-and-work-tasks.md。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from coreman.core.crypto import Cipher
+from coreman.core.db.models import Bot, BotAllowedUser, WorkTask, WorkTaskEvent
+
+ORIGIN = "dispatch"
+LIMIT_SECONDS = 60
+MAX_TASKS = 3
+TITLE_LIMIT = 30
+SUMMARY_LIMIT = 120
+BRIEF_LIMIT = 4000
+QUESTION_LIMIT = 100
+RECENT_TASKS = 10
+ACTIONS = ("create", "append", "clarify", "none")
+# 调度员记录在 group_observe_decisions.outcome 里的结果。
+OUTCOMES = {
+    "create": "dispatched",
+    "append": "dispatch_append",
+    "clarify": "dispatch_clarify",
+    "none": "dispatch_none",
+}
+
+
+def session_key(chat_id: str) -> str:
+    """调度回合的会话键：每个群一条，调度员记得自己在这个群分派过什么，也不和 @ 它的对话混。"""
+    return f"dispatch:{chat_id}"
+
+
+@dataclass(frozen=True)
+class Employee:
+    key: str
+    name: str
+    role: str
+    bot_id: uuid.UUID
+
+
+async def employees(
+    session: AsyncSession,
+    dispatcher: Bot,
+    chat_id: str,
+    requester_id: uuid.UUID | None,
+    cipher: Cipher,
+) -> tuple[list[Employee], list[str]]:
+    """这个群里能接任务的 AI 员工，以及查不清在不在群的原因。
+
+    条件同机器人协作的候选：本平台的飞书 AI 员工、已启用、不是调度员、发起人在它的白名单里
+    （白名单为空表示人人可用），并且确实在这个群（用它自己的凭证问飞书，结果短时缓存）。
+    """
+    from coreman.core.chat.collaboration_tools import present
+
+    bots = list(
+        await session.scalars(
+            select(Bot)
+            .where(
+                Bot.platform == "feishu",
+                Bot.enabled.is_(True),
+                Bot.id != dispatcher.id,
+                Bot.group_role == "member",
+            )
+            .order_by(Bot.name)
+        )
+    )
+    allowed: dict[uuid.UUID, set[uuid.UUID]] = {}
+    rows = await session.execute(
+        select(BotAllowedUser.bot_id, BotAllowedUser.user_id).where(
+            BotAllowedUser.bot_id.in_([b.id for b in bots])
+        )
+    )
+    for bot_id, user_id in rows.all():
+        allowed.setdefault(bot_id, set()).add(user_id)
+    usable = [b for b in bots if not allowed.get(b.id) or requester_id in allowed[b.id]]
+    here, unverified = await present(usable, chat_id, cipher)
+    return [
+        Employee(
+            key=b.bot_key,
+            name=b.name,
+            role=(b.group_observe_scope or b.description or "").strip()[:600],
+            bot_id=b.id,
+        )
+        for b in here
+    ], unverified
+
+
+async def recent_tasks(session: AsyncSession, chat_id: str) -> list[WorkTask]:
+    return list(
+        await session.scalars(
+            select(WorkTask)
+            .where(WorkTask.chat_id == chat_id)
+            .order_by(WorkTask.id.desc())
+            .limit(RECENT_TASKS)
+        )
+    )
+
+
+def note(
+    staff: list[Employee],
+    unverified: list[str],
+    tasks: list[WorkTask],
+    names: dict[uuid.UUID, str],
+) -> str:
+    """调度回合的本轮块：员工名录、这个群最近的任务和输出格式。"""
+    roster = "\n".join(f"- `{e.key}`（{e.name}）：{e.role or '没有写职责说明'}" for e in staff)
+    lines = [
+        "这一轮没有人 @ 你：判断模型认为最后一条消息是在请人办事，需要你调度。"
+        "你是调度员，只负责安排，自己不回答、不查询、不动手。",
+        "这个群里能接任务的 AI 员工（标识：职责）：",
+        roster or "- （没有）",
+    ]
+    if unverified:
+        lines.append("没能确认是否在群里的员工不在上面：" + "；".join(unverified[:5]))
+    if tasks:
+        lines.append("这个群最近的任务（从新到旧）：")
+        for t in tasks:
+            who = names.get(t.assignee_bot_id, "未分派") if t.assignee_bot_id else "未分派"
+            lines.append(
+                f"- {t.code}（{t.created_at:%m-%d}，{who}，{t.status}）{t.title}：{t.summary}"
+            )
+    lines.append(
+        "怎么决定：\n"
+        "- create：交给最合适的一位员工。能一个人做完的不拆；确实分属不同员工、能各自交付时才拆，"
+        f"最多 {MAX_TASKS} 件。\n"
+        "- append：最后一条是在补充或追问上面某个任务（例如提到了任务编号，或明显在接着说那件事），"
+        "追加给原来的员工，不新建。\n"
+        "- clarify：需求不清、选错代价高时，问一句。\n"
+        "- none：其实不需要安排人（闲聊、已经有人在处理、点名问了具体的人、没有合适的员工）。\n"
+        "只输出一个 JSON 代码块，不要输出其他内容：\n"
+        "```json\n"
+        '{"action": "create", "reason": "一句话依据",\n'
+        ' "tasks": [{"title": "≤30 字的标题", "assignee": "员工标识",\n'
+        '            "summary": "给人看的一句话：要做什么",\n'
+        '            "brief": "给执行员工的要求：背景、要做什么、怎么算完成、注意事项",\n'
+        '            "related": ["相关的任务编号"]}],\n'
+        ' "task_code": "append 时填已有任务编号", "note": "append 时补充的内容",\n'
+        ' "question": "clarify 时问的一句话"}\n'
+        "```"
+    )
+    return "\n".join(lines)
+
+
+@dataclass
+class Plan:
+    action: str
+    reason: str = ""
+    tasks: list[dict[str, Any]] = field(default_factory=list)
+    task_code: str = ""
+    note: str = ""
+    question: str = ""
+
+
+_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
+
+
+def parse(text: str, staff: list[Employee], known_codes: set[str]) -> Plan:
+    """校验调度员的输出；不合格抛 ValueError（原因写进判断记录）。"""
+    match = _FENCE.search(text or "")
+    raw = match.group(1) if match else (text or "").strip()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("not_json") from None
+    if not isinstance(data, dict) or data.get("action") not in ACTIONS:
+        raise ValueError("bad_action")
+    plan = Plan(action=str(data["action"]), reason=str(data.get("reason") or "")[:300])
+    keys = {e.key for e in staff}
+    if plan.action == "create":
+        items = data.get("tasks")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_TASKS:
+            raise ValueError("bad_tasks")
+        for item in items:
+            if not isinstance(item, dict) or item.get("assignee") not in keys:
+                raise ValueError("unknown_assignee")
+            title = str(item.get("title") or "").strip()
+            if not title:
+                raise ValueError("missing_title")
+            related = [c for c in item.get("related") or [] if isinstance(c, str)]
+            plan.tasks.append(
+                {
+                    "title": title[:TITLE_LIMIT],
+                    "assignee": item["assignee"],
+                    "summary": str(item.get("summary") or "").strip()[:SUMMARY_LIMIT],
+                    "brief": str(item.get("brief") or "").strip()[:BRIEF_LIMIT],
+                    "related": [c for c in related if c in known_codes][:5],
+                }
+            )
+    elif plan.action == "append":
+        plan.task_code = str(data.get("task_code") or "").strip()
+        plan.note = str(data.get("note") or "").strip()[:BRIEF_LIMIT]
+        if plan.task_code not in known_codes or not plan.note:
+            raise ValueError("bad_append")
+    elif plan.action == "clarify":
+        plan.question = str(data.get("question") or "").strip()[:QUESTION_LIMIT]
+        if not plan.question:
+            raise ValueError("missing_question")
+    return plan
+
+
+async def record(
+    session: AsyncSession,
+    *,
+    plan: Plan,
+    dispatcher: Bot,
+    chat_id: str,
+    event_id: int | None,
+    requester_id: uuid.UUID | None,
+    requester_name: str,
+    staff: list[Employee],
+    decision_id: int | None,
+    chat_task_id: int,
+) -> list[str]:
+    """试运行：把决定记成任务和事件（状态 shadow），不交接、不发消息；返回涉及的任务编号。"""
+    by_key = {e.key: e for e in staff}
+    actor = {"actor_type": "bot", "actor_id": str(dispatcher.id), "chat_task_id": chat_task_id}
+    detail = {"reason": plan.reason, "decision_id": decision_id}
+    codes: list[str] = []
+    if plan.action == "create":
+        created: list[WorkTask] = []
+        for item in plan.tasks:
+            who = by_key[item["assignee"]]
+            row = WorkTask(
+                title=item["title"],
+                summary=item["summary"],
+                status="shadow",
+                platform="feishu",
+                chat_id=chat_id,
+                origin_event_id=event_id,
+                requester_user_id=requester_id,
+                requester_name=requester_name,
+                assignee_bot_id=who.bot_id,
+                dispatcher_bot_id=dispatcher.id,
+                decision_id=decision_id,
+                related_codes=item["related"],
+                brief=item["brief"],
+            )
+            session.add(row)
+            created.append(row)
+        await session.flush()
+        siblings = [r.code for r in created]
+        for row, item in zip(created, plan.tasks, strict=True):
+            if len(created) > 1:
+                row.related_codes = [*row.related_codes, *(c for c in siblings if c != row.code)]
+            session.add(
+                WorkTaskEvent(
+                    work_task_id=row.id,
+                    kind="created",
+                    human_text=f"试运行：调度员会交给{by_key[item['assignee']].name}",
+                    agent_detail=detail,
+                    **actor,
+                )
+            )
+            codes.append(row.code)
+    elif plan.action == "append":
+        target = await session.scalar(
+            select(WorkTask).where(WorkTask.code == plan.task_code, WorkTask.chat_id == chat_id)
+        )
+        if target is not None:
+            session.add(
+                WorkTaskEvent(
+                    work_task_id=target.id,
+                    kind="comment",
+                    human_text=f"试运行：调度员会补充给原执行员工：{plan.note[:60]}",
+                    agent_detail={**detail, "note": plan.note},
+                    **actor,
+                )
+            )
+            target.updated_at = datetime.now(UTC)
+            codes.append(target.code)
+    await session.flush()
+    return codes

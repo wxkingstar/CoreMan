@@ -238,7 +238,9 @@ class OpenStage(ChatStageBase):
             speaker=intake.speaker,
             bot_env=await effective_env(session, ctx.cipher, bot),
         )
-        env.update(access.env)
+        if ctx.task.payload.get("origin") != "dispatch":
+            # 调度员只安排不干活：调度回合不挂业务系统令牌。
+            env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
         ctx.turn_notes = [access.note]
         from coreman.core.chat import group_observe
@@ -247,6 +249,7 @@ class OpenStage(ChatStageBase):
             # 开了旁听的机器人看得到整段群聊：@ 它的回合和主动插话的回合都带上最近的记录。
             # 本轮这条消息已在正文里，记录里去掉，免得模型分不清哪条是本轮要处理的。
             interject = ctx.task.payload.get("origin") == "observe"
+            # 调度回合和插话一样，记录之后那条消息就是要安排的事。
             lines = [
                 line
                 for line in await group_observe.transcript(session, bot, intake.chat_id)
@@ -255,6 +258,8 @@ class OpenStage(ChatStageBase):
             ctx.turn_notes.append(group_observe.transcript_note(lines, interject=interject))
             if interject:
                 ctx.turn_notes.append(group_observe.INTERJECT_NOTE)
+            elif ctx.task.payload.get("origin") == "dispatch":
+                ctx.turn_notes.append(await self._dispatch_note(session, ctx, intake))
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
@@ -276,7 +281,7 @@ class OpenStage(ChatStageBase):
 
         extra = ""
         personal_secrets: frozenset[str] = frozenset()
-        if ctx.task.payload.get("origin") != "observe":
+        if ctx.task.payload.get("origin") not in ("observe", "dispatch"):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。
             from coreman.runtime.worker.chat.collaboration import configure
@@ -489,14 +494,30 @@ class OpenStage(ChatStageBase):
             memory_dir=memory_dir,
         )
 
+    async def _dispatch_note(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> str:
+        """调度回合的本轮块：群里能接任务的员工和这个群最近的任务；员工名录也存进任务载荷，
+        收尾校验决定时用同一份。"""
+        from coreman.core.chat import dispatch
+
+        staff, unverified = await dispatch.employees(
+            session, intake.bot, intake.chat_id, intake.speaker.user_id, ctx.cipher
+        )
+        recent = await dispatch.recent_tasks(session, intake.chat_id)
+        ids = {t.assignee_bot_id for t in recent if t.assignee_bot_id}
+        names = {b.id: b.name for b in await session.scalars(select(Bot).where(Bot.id.in_(ids)))}
+        ctx.dispatch_staff = staff
+        ctx.dispatch_codes = {t.code for t in recent}
+        return dispatch.note(staff, unverified, recent, names)
+
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""
         if ctx.task.payload.get("collaboration_phase") == "helper":
             return {
                 "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
             }
-        if ctx.task.payload.get("origin") == "observe":
+        if ctx.task.payload.get("origin") in ("observe", "dispatch"):
             # 插话回合不推流式卡片：网关等终稿出来再发，终稿是「不说话」就什么也不发。
+            # 调度回合的终稿一律是「不说话」：它的决定由平台记录，不往群里发。
             return {"reply_context": {**intake.inbound.reply_context, "_observe": True}}
         return {}
 

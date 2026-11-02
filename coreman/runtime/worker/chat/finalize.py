@@ -281,6 +281,11 @@ class FinalizeStage(ChatStageBase):
             if not logged:
                 ctx.chat_logs.submit_finish(entry)
             return
+        if ctx.task.payload.get("origin") == "dispatch":
+            await self._finish_dispatch(ctx, pre, verdict, out)
+            if not logged:
+                ctx.chat_logs.submit_finish(entry)
+            return
         logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
@@ -380,6 +385,58 @@ class FinalizeStage(ChatStageBase):
             reason=out.reason,
             acked=out.observe_acked,
         )
+
+    async def _finish_dispatch(
+        self, ctx: TaskContext, pre: Prepared, verdict: Verdict, out: Outcome
+    ) -> None:
+        """调度回合收尾：校验调度员的决定并记录；试运行只记成 shadow 任务，群里什么也不发。"""
+        from coreman.core.chat import dispatch, group_observe
+        from coreman.core.db.models import GroupObserveDecision
+
+        await pre.writer.complete(group_observe.NO_REPLY)
+        intake = pre.intake
+        result: dict[str, Any] = {"raw": (verdict.final_text or "")[:8000]}
+        outcome = "dispatch_failed"
+        async with ctx.session_factory() as session:
+            decision_id = ctx.task.payload.get("observe_decision_id")
+            row = await session.get(GroupObserveDecision, decision_id) if decision_id else None
+            if verdict.log_status != "success" or out.reason == "dispatch_timeout":
+                result["error"] = out.reason or verdict.error_code or verdict.log_status
+            else:
+                try:
+                    plan = dispatch.parse(
+                        verdict.final_text, ctx.dispatch_staff, ctx.dispatch_codes
+                    )
+                except ValueError as exc:
+                    outcome, result["error"] = "dispatch_invalid", str(exc)
+                else:
+                    outcome = dispatch.OUTCOMES[plan.action]
+                    result["plan"] = {
+                        "action": plan.action,
+                        "reason": plan.reason,
+                        "tasks": plan.tasks,
+                        "task_code": plan.task_code,
+                        "note": plan.note,
+                        "question": plan.question,
+                    }
+                    result["codes"] = await dispatch.record(
+                        session,
+                        plan=plan,
+                        dispatcher=intake.bot,
+                        chat_id=intake.chat_id,
+                        event_id=intake.inbound.id,
+                        requester_id=intake.speaker.user_id,
+                        requester_name=intake.speaker.display_name or "",
+                        staff=ctx.dispatch_staff,
+                        decision_id=decision_id,
+                        chat_task_id=ctx.task.id,
+                    )
+            result["staff"] = [e.key for e in ctx.dispatch_staff]
+            if row is not None:
+                row.outcome = outcome
+                row.dispatch = result
+            await session.commit()
+        ctx.log.info("dispatch_turn_finished", outcome=outcome, codes=result.get("codes"))
 
     async def _notify_long_task(
         self,

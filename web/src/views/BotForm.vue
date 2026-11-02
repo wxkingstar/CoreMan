@@ -195,6 +195,7 @@ function fillFromBot(b: BotOut): void {
     dev_mode: b.dev_mode,
     group_observe: b.group_observe,
     group_observe_scope: b.group_observe_scope,
+    group_role: b.group_role,
     // 后端只在 can_view_sensitive 时下发（且是脱敏值）；没下发就按空处理。
     enabled: b.enabled,
   } satisfies BotIn)
@@ -241,6 +242,7 @@ function changedFields(b: BotOut): BotPatch {
   if (p.rich_cards !== b.rich_cards) out.rich_cards = p.rich_cards
   if (p.dev_mode !== b.dev_mode) out.dev_mode = p.dev_mode
   if (p.group_observe !== undefined && p.group_observe !== b.group_observe) out.group_observe = p.group_observe
+  if (p.group_role !== undefined && p.group_role !== b.group_role) out.group_role = p.group_role
   if (p.group_observe_scope !== undefined && p.group_observe_scope !== b.group_observe_scope) {
     out.group_observe_scope = p.group_observe_scope
   }

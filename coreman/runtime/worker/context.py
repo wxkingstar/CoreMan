@@ -63,6 +63,9 @@ class TaskContext:
     # 各能力写给本轮块的状态（授权状态、已保存的凭证、续接阶段等），一条一段。会变的内容只能
     # 放这里，不能拼进 system prompt：稳定段一变，Codex 要换 thread、Claude 要重写缓存。
     turn_notes: list[str] = field(default_factory=list)
+    # 调度回合开流时给调度员看的员工名录与任务编号；收尾校验决定用同一份，不重新查。
+    dispatch_staff: list[Any] = field(default_factory=list)
+    dispatch_codes: set[str] = field(default_factory=set)
     # init=False：由 __post_init__ 绑好任务字段再交出去，调用方不该也不能自己传。
     log: structlog.stdlib.BoundLogger = field(init=False, repr=False, compare=False)
 

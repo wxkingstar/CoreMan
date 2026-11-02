@@ -65,6 +65,7 @@ from coreman.api.routers import (
     wecom_app_callback,
     wecom_bots,
     wecom_personal,
+    work_tasks,
 )
 from coreman.api.routers import settings as settings_router
 from coreman.api.spa import mount_spa
@@ -150,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(bots.router)
     app.include_router(bot_memories.router)
     app.include_router(bot_group_observe.router)
+    app.include_router(work_tasks.router)
     app.include_router(skill_catalog.router)
     app.include_router(skill_local.router)
     app.include_router(skill_local.public_router)

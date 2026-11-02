@@ -418,3 +418,8 @@ async def test_group_observe_switch_rules(
     listed = await client.get(f"/api/admin/bots/{bot['id']}/group-observe/decisions")
     assert listed.status_code == 200 and listed.json()["data"] == {"items": [], "chats": []}
     assert (await patch({"group_observe": "off"})).status_code == 200
+    # 调度员第一期只能试运行：开启被拒，试运行可以。
+    assert (await patch({"group_role": "dispatcher", "group_observe": "on"})).status_code == 422
+    r = await patch({"group_role": "dispatcher", "group_observe": "shadow"})
+    assert r.status_code == 200 and r.json()["data"]["group_role"] == "dispatcher"
+    assert (await patch({"group_observe": "on"})).status_code == 422

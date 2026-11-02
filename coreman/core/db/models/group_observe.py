@@ -73,6 +73,8 @@ class GroupObserveDecision(Base):
     # 交给判断模型的输入（群消息摘录），复核时展开看。
     state: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     task_id: Mapped[int | None] = mapped_column(BigInteger)
+    # 调度员的判断：调度回合的原始决定与校验结果（普通员工为空）。
+    dispatch: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     review: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
