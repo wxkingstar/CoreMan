@@ -2,13 +2,20 @@
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from coreman.core.chat import decider as decider_mod
 from coreman.core.chat import dispatch, group_observe
-from coreman.core.db.models import GroupObserveDecision, TaskStream, WorkTask, WorkTaskEvent
+from coreman.core.db.models import (
+    GroupObserveDecision,
+    GroupObserveState,
+    TaskStream,
+    WorkTask,
+    WorkTaskEvent,
+)
 from tests.integration.test_group_observe import (
     CHAT,
     FakeDecider,
@@ -201,3 +208,32 @@ def test_parse_accepts_append_clarify_and_trims():
     assert len(long.tasks[0]["title"]) == dispatch.TITLE_LIMIT
     with pytest.raises(ValueError, match="not_json"):
         dispatch.parse("不是 JSON", STAFF, set())
+
+
+@pytest.mark.parametrize(
+    ("seen_ago", "skipped"), [(timedelta(0), True), (timedelta(hours=2), False)]
+)
+async def test_members_leave_groups_with_a_dispatcher_to_it(
+    db_engine, db_session, seen_ago, skipped
+):
+    """群里有调度员（且它也收到了这批消息）时成员不判断；调度员早已不在这个群就照常判断。"""
+    member = await observing_bot(db_session)
+    other = await another_bot(db_session, member, "dispatcher_bot", "调度员")
+    other.group_role, other.group_observe = "dispatcher", "shadow"
+    db_session.add(
+        GroupObserveState(
+            bot_id=other.id, chat_id=CHAT, last_message_at=datetime.now(UTC) - seen_ago
+        )
+    )
+    await db_session.commit()
+    await say(db_session, member, "om1", "谁能查一下这个 IP 在不在白名单？")
+    (observe,) = await tasks_of(db_session, member, "group_observe")
+    await quiet_down(db_session, member)
+    decider = FakeDecider(0.9)
+    done = await run_observe(db_engine, db_session, observe, decider)
+    if skipped:
+        assert done.result == {"skipped": "dispatcher"} and decider.calls == []
+        state = await db_session.get(GroupObserveState, (member.id, CHAT), populate_existing=True)
+        assert state.pending_since is None
+    else:
+        assert len(decider.calls) == 1

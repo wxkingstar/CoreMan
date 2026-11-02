@@ -10,6 +10,7 @@ shadow 只记录。每次判断（含跳过）都写进 `group_observe_decisions
 
 调度员（`group_role = dispatcher`）换一道判断题：是不是有事要安排人。判断为是时不插话，
 排一个调度回合（见 core/chat/dispatch），试运行和开启都排，调度回合自己决定记录还是交接。
+群里有调度员时，其他成员在这个群不再判断，被 @ 照常回答。
 """
 
 from __future__ import annotations
@@ -33,6 +34,9 @@ BUSY_MAX_ATTEMPTS = 60
 # 同群还有别的机器人开着旁听时，判断该说话后等这么久再选谁接话。各机器人判断同一条消息
 # 的时间差在一两秒内（同时收到、同样的安静时长）；晚于这个窗口才判断完的，见到已有人接话就让开。
 PICK_DELAY_SECONDS = 3.0
+# 调度员和成员各自收到同一条消息，记账先后差一点：调度员最近一条消息早于这一批开始不超过这么久，
+# 就算它也收到了（还在群里）。
+DISPATCHER_SEEN_SLACK = timedelta(minutes=1)
 
 
 class GroupObserveHandler:
@@ -72,6 +76,13 @@ class GroupObserveHandler:
             if state is None or state.pending_since is None:
                 # 已被更早的任务一起判断过，或期间有人 @ 了它。
                 await self._finish(session, ctx, "succeeded", None, {"skipped": "nothing_pending"})
+                return
+            if not dispatcher and await self._has_dispatcher(
+                session, bot, chat_id, state.pending_since
+            ):
+                # 群里有调度员：由它判断、安排人，成员在这个群不旁听（被 @ 照常回答）。
+                state.pending_since = None
+                await self._finish(session, ctx, "succeeded", None, {"skipped": "dispatcher"})
                 return
             waited = (now - state.pending_since).total_seconds()
             idle = (now - (state.last_message_at or now)).total_seconds()
@@ -242,6 +253,24 @@ class GroupObserveHandler:
                 Bot.enabled.is_(True),
                 Bot.platform == "feishu",
                 Bot.group_observe == "on",
+            )
+        )
+        return bool(count)
+
+    async def _has_dispatcher(self, session: Any, bot: Bot, chat_id: str, since: datetime) -> bool:
+        """这个群里有开着旁听的调度员，且它也收到了这一批消息（还在群里）。"""
+        count = await session.scalar(
+            select(func.count())
+            .select_from(GroupObserveState)
+            .join(Bot, Bot.id == GroupObserveState.bot_id)
+            .where(
+                GroupObserveState.chat_id == chat_id,
+                GroupObserveState.bot_id != bot.id,
+                GroupObserveState.last_message_at >= since - DISPATCHER_SEEN_SLACK,
+                Bot.enabled.is_(True),
+                Bot.platform == "feishu",
+                Bot.group_observe != "off",
+                Bot.group_role == "dispatcher",
             )
         )
         return bool(count)

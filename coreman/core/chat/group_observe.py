@@ -56,15 +56,15 @@ def task_session_key(chat_id: str) -> str:
 async def note(
     session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage, event_id: int
 ) -> None:
-    """一条群消息落库后记账：人说话清零机器人连发计数；没 @ 的消息排一个判断任务。
+    """一条群消息落库后记账：人说话清零机器人连发计数；人没 @ 它的消息排一个判断任务。
 
     @ 机器人的消息照常走对话，清掉待判断：回答完不再主动补一句。
     """
     now = datetime.now(UTC)
     human = message.sender.sender_type != "bot"
-    # 机器人 @ 了别人（多是 AI 员工之间求助、答复）：只记上下文，不排判断，免得第三个插话。
-    mentions = ((message.raw.get("event") or {}).get("message") or {}).get("mentions")
-    if not human and mentions and not message.mentions_bot:
+    # 别的机器人发的消息（插话、答复、AI 员工之间求助）只记上下文，不排判断：
+    # 该不该接话只看人说了什么；人那条还没判断的照旧等着。
+    if not human and not message.mentions_bot:
         stmt = insert(GroupObserveState).values(
             bot_id=bot_id, chat_id=message.chat_id, bot_streak=1, last_message_at=now
         )
