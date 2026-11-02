@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import EFFORT_LEVELS, ModelCatalog, RelayServer
+from coreman.core.runtime_nodes.common import BACKENDS as BACKENDS
+from coreman.core.runtime_nodes.common import Backend as Backend
 
 # 官方文档里各模型在 high 之上还支持哪些思考档位（2026-09-19 核对；Opus 5.5、GPT-6 Sol
 # 于 2026-09-27 补，GPT-6.1 Sol 于 2026-10-04 补，Sonnet 5.5、Haiku 5.5 于 2026-10-09 补）。
@@ -59,11 +60,6 @@ EXTRA_EFFORTS: dict[str, frozenset[str]] = {
 }
 # 快照日期后缀：claude-haiku-4-5-20251001、gpt-5.2-2025-12-11。
 _SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
-
-
-Backend = Literal["claude", "codex", "opencode"]
-# 节点上的 AI 后端（CLI）。provider 与 CLI 命令同名，驱动在 drivers/cmd/relay-<provider>。
-BACKENDS: tuple[Backend, ...] = ("claude", "codex", "opencode")
 
 
 def backend_of(model: str, provider: str | None = None) -> Backend:

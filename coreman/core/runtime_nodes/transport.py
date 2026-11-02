@@ -40,7 +40,7 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import RuntimeCall, RuntimeChunk, RuntimeNode
 from coreman.core.db.session import make_session_factory
-from coreman.core.relay.models import BACKENDS
+from coreman.core.runtime_nodes.common import BACKENDS
 
 MAX_REQUEST = 64 * 1024 * 1024
 MAX_RESPONSE = 128 * 1024 * 1024
