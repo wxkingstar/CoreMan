@@ -48,12 +48,12 @@ from runtime_daemon.logs import (
     configure_logging,
     rotate_copytruncate,
 )
-from runtime_daemon.seats import SeatLogins, Seats
+from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
-PROVIDERS = ("claude", "codex")
+PROVIDERS = ("claude", "codex", "opencode")
 # Only the driver's /health may grant these; anything but a literal true is false.
 # The retired feishu_personal_restricted_v1 is never forwarded, so servers that
 # still expect the restricted mode send no personal credentials to this node.
@@ -67,6 +67,14 @@ DRIVER_CAPABILITIES = {
         "system_mcp_v1",
     ),
     "codex": (
+        "feishu_personal_tools_v1",
+        "wecom_personal_tools_v1",
+        "owner_session_view_v1",
+        "systems_catalog_v1",
+        "resume_fallback_v1",
+        "system_mcp_v1",
+    ),
+    "opencode": (
         "feishu_personal_tools_v1",
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
@@ -118,6 +126,7 @@ BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
     "OPENAI_",
     "CLAUDE_",
     "CODEX_",
+    "OPENCODE_",
     "LD_",
     "DYLD_",
     "PYTHON",
@@ -248,9 +257,22 @@ async def optional_capabilities(client: httpx.AsyncClient) -> dict:
     return declared if isinstance(declared, dict) else {}
 
 
+def opencode_auth(env: dict | None = None) -> dict:
+    """OpenCode 的凭据（auth.json，按服务商分键）；读不到时为空。"""
+    try:
+        data = json.loads(opencode_auth_file(dict(os.environ if env is None else env)).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def login_account(provider: str, status: dict, env: dict | None = None) -> str:
-    """CLI 当前登录的账号邮箱；读不到时为空，不影响登录状态。"""
+    """CLI 当前登录的账号邮箱；读不到时为空，不影响登录状态。
+
+    OpenCode 没有账号，显示已登录的服务商。"""
     env = os.environ if env is None else env
+    if provider == "opencode":
+        return ", ".join(sorted(str(k) for k in opencode_auth(env)))[:255]
     try:
         if provider == "claude":
             if status.get("email"):
@@ -288,6 +310,12 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
     try:
         version = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
         result["version"] = (version.stdout or version.stderr).strip()[:100]
+        if provider == "opencode":
+            # 登录即 auth.json 里有凭据（OpenCode Go 等的 API Key）；没有登录状态命令可问。
+            result["login"] = "ready" if opencode_auth(env) else "required"
+            if result["login"] == "ready":
+                result["account"] = login_account(provider, {}, env)
+            return result
         command = (
             [path, "auth", "status", "--json"]
             if provider == "claude"
@@ -946,7 +974,8 @@ class Daemon:
                     cap["detail"] = "AI API 启动中或不可用"
                 except (httpx.HTTPError, OSError, ValueError):
                     cap["detail"] = "AI API 启动中或不可用"
-                if provider not in self.agents:
+                # 注册之后才支持的后端（如 OpenCode）要等服务端在心跳里补建 relay。
+                if provider not in self.agents and provider in self.config["backends"]:
                     agent = RuntimeAgent(
                         self, provider, self.config["backends"][provider]["relay_id"]
                     )
@@ -954,7 +983,8 @@ class Daemon:
                     agent.model = (cap["models"] or [""])[0]
                     if self.config.get("schedules", True):
                         agent.start_schedules()
-                self.agents[provider].model = (cap["models"] or [""])[0]
+                if provider in self.agents:
+                    self.agents[provider].model = (cap["models"] or [""])[0]
             self.capabilities[provider] = cap
             if cap["installed"]:
                 cap["seat_switch_v1"] = True
@@ -1176,12 +1206,29 @@ class Daemon:
             "root_change_result": self.config.get("root_change_result"),
         }
 
+    def add_backends(self, backends: object) -> None:
+        """服务端为节点补建的 relay（注册后才装的后端）记进 config；下一轮发现时启用。"""
+        if not isinstance(backends, dict):
+            return
+        added = {
+            provider: {"relay_id": str(item["relay_id"])}
+            for provider, item in backends.items()
+            if provider in PROVIDERS
+            and provider not in self.config["backends"]
+            and isinstance(item, dict)
+            and item.get("relay_id")
+        }
+        if added:
+            self.config["backends"].update(added)
+            self.save()
+
     async def heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
             delay = HEARTBEAT_SECONDS
             try:
                 result = await self.api("/api/runtime/heartbeat", self.heartbeat_body())
                 self.apply_root_change(result.get("root_change"))
+                self.add_backends(result.get("backends"))
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in REJECTED_STATUSES:
                     delay = REJECTED_BACKOFF_MAX

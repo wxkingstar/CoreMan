@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n'
 import type { EffortLevel } from '@/api/types'
 import { useBotFormContext } from '@/components/botForm/context'
 import { EFFORT_LEVELS } from '@/utils/effort'
+import { providerLabel } from '@/utils/models'
 
 /** part：新建时拆成「必填」（运行时）与「更多设置」两块；编辑时不传，整块展示。 */
 defineProps<{ part?: 'essential' | 'extra' }>()
@@ -60,7 +61,7 @@ const {
           v-for="backend in runtimeBackends"
           :key="backend.id"
           :value="backend.id"
-          :label="`${backend.model_provider === 'claude' ? 'Claude Code' : 'Codex / GPT'}${backend.unavailable_reason !== null ? ' · ' + t('runtimeNodes.unavailable.' + (backend.unavailable_reason ?? 'unknown')) : ''}`"
+          :label="`${providerLabel(backend.model_provider)}${backend.unavailable_reason !== null ? ' · ' + t('runtimeNodes.unavailable.' + (backend.unavailable_reason ?? 'unknown')) : ''}`"
           :disabled="backend.unavailable_reason !== null || !backend.effective_models.length"
         />
       </el-select>

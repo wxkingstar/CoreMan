@@ -7,15 +7,16 @@ import ProviderBadge from '@/components/ProviderBadge.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { errorMessage } from '@/utils/errors'
 import { pctNum } from '@/utils/format'
+import { BACKENDS } from '@/utils/models'
 
 /** 一台运行时上各 AI 的席位（登录的账号）：添加、登录、切换当前席位、移除。只给平台管理员。 */
 const props = defineProps<{ node: RuntimeNode; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; changed: [] }>()
 const { t } = useI18n()
 
-const PROVIDERS = ['claude', 'codex'] as const
+const PROVIDERS = BACKENDS
 const seats = reactive<Record<string, SeatState[]>>({})
-const labels = reactive<Record<string, string>>({ claude: '', codex: '' })
+const labels = reactive<Record<string, string>>(Object.fromEntries(BACKENDS.map(p => [p, ''])))
 const busy = ref('')
 watch(() => [props.visible, props.node] as const, () => {
   if (!props.visible) return
@@ -76,6 +77,11 @@ async function remove(provider: string, seat: SeatState) {
 
 const login = reactive({ visible: false, provider: '', seat: null as SeatState | null, data: null as SeatLogin | null, code: '' })
 const loginMinutes = computed(() => Math.round((login.data?.expires_in ?? 0) / 60))
+// OpenCode 没有浏览器授权：在 OpenCode 控制台生成 OpenCode Go 的 API Key 贴回来。
+const loginHint = computed(() => {
+  if (login.provider === 'opencode') return t('runtimeSeats.loginOpencodeHint')
+  return login.data?.needs_code ? t('runtimeSeats.loginClaudeHint') : t('runtimeSeats.loginCodexHint')
+})
 async function startLogin(provider: string, seat: SeatState) {
   busy.value = `login-${seat.id}`
   try {
@@ -243,7 +249,7 @@ async function finishLogin() {
       width="560px"
     >
       <template v-if="login.data">
-        <p>{{ login.data.needs_code ? t('runtimeSeats.loginClaudeHint') : t('runtimeSeats.loginCodexHint') }}</p>
+        <p>{{ loginHint }}</p>
         <p>
           <el-link
             type="primary"
@@ -265,7 +271,7 @@ async function finishLogin() {
         <el-input
           v-if="login.data.needs_code"
           v-model="login.code"
-          :placeholder="t('runtimeSeats.code')"
+          :placeholder="login.provider === 'opencode' ? t('runtimeSeats.apiKey') : t('runtimeSeats.code')"
           data-test="seat-login-code"
           @keyup.enter="finishLogin"
         />

@@ -17,14 +17,14 @@ import pytest
 
 import runtime_daemon.daemon as module
 from runtime_daemon.agent import OperationError
-from runtime_daemon.seats import DEFAULT, SeatLogins, Seats
+from runtime_daemon.seats import DEFAULT, SeatLogins, Seats, cli_env
 from tests.unit.runtime_daemon_support import make_daemon
 
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     # 席位写的是进程环境；monkeypatch 记下原值，用例结束还原。
-    for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+    for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_SEAT_HOME", "XDG_DATA_HOME"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -185,6 +185,46 @@ def test_codex_device_login_waits_for_the_browser(tmp_path, cli):
     (seats.directory("codex", seat) / "browser-done").write_text("")
     assert logins.complete(started["session_id"], "codex", seat, None)["success"] is True
     assert (seats.directory("codex", seat) / "auth.json").exists()
+
+
+def test_opencode_seat_logs_in_with_an_api_key_kept_on_the_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    seats, _ = make_seats(tmp_path)
+    seat = seats.create("opencode", "Go 套餐")
+    directory = seats.directory("opencode", seat)
+    env = seats.env("opencode", seat)
+    assert env["OPENCODE_SEAT_HOME"] == str(directory) and "XDG_DATA_HOME" not in env
+    # opencode 只在运行时把席位目录当数据目录，会话库仍在默认位置，各席位共用。
+    run = cli_env(env)
+    assert run["XDG_DATA_HOME"] == str(directory) and "OPENCODE_SEAT_HOME" not in run
+    assert run["OPENCODE_DB"] == str(tmp_path / "home/.local/share/opencode/opencode.db")
+    assert module.cli_status("opencode", env)["login"] in {"required", "unknown"}
+
+    logins = SeatLogins()
+    started = logins.start("opencode", seat, env, tmp_path)
+    assert started["needs_code"] is True and started["authorization_url"].startswith("https://")
+    with pytest.raises(OperationError, match="格式"):
+        logins.complete(started["session_id"], "opencode", seat, "short")
+    with pytest.raises(OperationError, match="过期"):
+        logins.complete("other", "opencode", seat, "sk-go-1234567890")
+    (directory / "opencode").mkdir()
+    (directory / "opencode/auth.json").write_text('{"openrouter": {"type": "api", "key": "x"}}')
+    assert logins.complete(started["session_id"], "opencode", seat, " sk-go-1234567890 ")["success"]
+    auth = directory / "opencode/auth.json"
+    assert json.loads(auth.read_text()) == {
+        "openrouter": {"type": "api", "key": "x"},
+        "opencode-go": {"type": "api", "key": "sk-go-1234567890"},
+    }
+    assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+    with pytest.raises(OperationError, match="过期"):
+        logins.complete(started["session_id"], "opencode", seat, "sk-go-1234567890")
+    # 默认席位不受影响；登录状态按席位读 auth.json。
+    assert not (tmp_path / "home/.local/share/opencode/auth.json").exists()
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/bin/echo")
+    status = module.cli_status("opencode", env)
+    assert status["login"] == "ready" and status["account"] == "opencode-go, openrouter"
+    seats.remove("opencode", seat)
+    assert not directory.exists()
 
 
 def sleeping_process() -> subprocess.Popen:

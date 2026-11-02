@@ -39,7 +39,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
 # 派生键：读取时由其它表算出，不落 settings 表、不可写入。库里遗留的同名行一律忽略。
 DERIVED_SETTING_KEYS = ("default_model",)
 # 平台默认模型按这个 provider 顺序取第一个有默认值的。
-DEFAULT_MODEL_PROVIDERS = ("claude", "codex")
+DEFAULT_MODEL_PROVIDERS = ("claude", "codex", "opencode")
 # 任何登录用户都能读的键：新建机器人表单要用它们做默认值（default_model 为派生键），
 # 并决定新建企微员工时是扫码还是手动填写凭证。
 PUBLIC_DEFAULT_KEYS = (

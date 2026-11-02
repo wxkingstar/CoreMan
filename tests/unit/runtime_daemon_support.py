@@ -156,6 +156,7 @@ def release_files(install_service: str = "") -> dict[str, tuple[str, int]]:
         "runtime_daemon/requirements.txt": ("pip\n", 0o644),
         "runtime_daemon/bin/runtime-claude": (driver, 0o755),
         "runtime_daemon/bin/runtime-codex": (driver, 0o755),
+        "runtime_daemon/bin/runtime-opencode": (driver, 0o755),
         "wheels/README": ("offline wheels\n", 0o644),
     }
 

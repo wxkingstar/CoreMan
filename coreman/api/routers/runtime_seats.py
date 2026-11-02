@@ -11,7 +11,7 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -25,11 +25,12 @@ from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.db.models import RelayServer, RuntimeNode, User
 from coreman.core.relay.agent_client import AgentError, call_agent
+from coreman.core.relay.models import Backend
 from coreman.core.runtime_nodes.transport import online
 
 router = APIRouter(prefix="/api/admin/runtime-nodes", dependencies=[Depends(verify_csrf)])
 ADMINS = require_roles("platform_admin")
-Provider = Literal["claude", "codex"]
+Provider = Backend
 SEAT_ID = r"^(default|[a-f0-9]{12})$"
 QUOTA_COLUMNS = (
     "rate_limit_5h_used_pct",

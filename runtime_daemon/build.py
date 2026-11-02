@@ -101,7 +101,7 @@ def main():
             shutil.copy2(ROOT / "runtime_daemon/drivers/SOURCE.json", bundle / "SOURCE.json")
             shutil.copytree(wheels, bundle / "wheels")
             (bundle / MANIFEST_NAME).write_text(manifest)
-            for provider in ("claude", "codex"):
+            for provider in ("claude", "codex", "opencode"):
                 subprocess.run(
                     [
                         "go",

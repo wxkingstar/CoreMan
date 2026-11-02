@@ -27,11 +27,13 @@ FAKE_CLI = textwrap.dedent(
     args = sys.argv[1:]
     with open(os.environ["FAKE_LOG"], "a") as log:
         log.write(json.dumps({{"cli": os.path.basename(sys.argv[0]), "args": args,
-                               "tty": os.isatty(0), "cwd": os.getcwd()}}) + "\\n")
+                               "tty": os.isatty(0), "cwd": os.getcwd(),
+                               "config": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                               "data": os.environ.get("XDG_DATA_HOME")}}) + "\\n")
     if args[:2] == ["mcp", "logout"]:
         needs_file = os.environ.get("FAKE_LOGOUT_NEEDS_FILE")
         sys.exit(1 if needs_file and "file" not in " ".join(args) else 0)
-    if args[:2] != ["mcp", "login"]:
+    if args[:2] not in (["mcp", "login"], ["mcp", "auth"]):
         sys.exit(0)
     result = {{}}
     done = threading.Event()
@@ -68,7 +70,7 @@ FAKE_CLI = textwrap.dedent(
 def cli(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name in ("codex", "claude"):
+    for name in ("codex", "claude", "opencode"):
         script = bin_dir / name
         script.write_text(FAKE_CLI.format(python=sys.executable))
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
@@ -327,3 +329,39 @@ def test_abandoned_sessions_end_on_their_own(agent, cli, monkeypatch):
     session = agent.mcp_logins.sessions[result["session_id"]]
     assert session.proc.wait(timeout=5) is not None
     assert agent.mcp_logins.sessions == {}
+
+
+def test_opencode_login_registers_the_server_in_the_config_layer(agent, cli, monkeypatch):
+    """OpenCode 的 mcp auth 没有 --no-browser：服务经配置层登记，与驱动挂载同名同地址。"""
+    agent.provider = "opencode"
+    seat = agent.root.parent / "seat"
+    monkeypatch.setenv("OPENCODE_SEAT_HOME", str(seat))
+    path = project(agent, {"figma-1a2b3c4d": REMOTE})
+    result = start(agent, path)
+    login = calls(cli)[0]
+    assert login["cli"] == "opencode" and login["args"] == ["mcp", "auth", "skill_figma-1a2b3c4d"]
+    assert json.loads(login["config"]) == {
+        "mcp": {
+            "skill_figma-1a2b3c4d": {
+                "type": "remote",
+                "url": "https://mcp.example.com/mcp",
+                "enabled": True,
+            }
+        }
+    }
+    # 席位目录只在运行 opencode 时换成它的数据目录。
+    assert login["data"] == str(seat)
+    done = agent.dispatch(
+        {
+            "type": "mcp-login-complete",
+            "project_dir": str(path),
+            "server_name": "figma-1a2b3c4d",
+            "session_id": result["session_id"],
+            "callback_url": callback(result),
+        }
+    )
+    assert done["success"]
+    agent.dispatch(
+        {"type": "mcp-logout", "project_dir": str(path), "server_name": "figma-1a2b3c4d"}
+    )
+    assert calls(cli)[-1]["args"] == ["mcp", "logout", "skill_figma-1a2b3c4d"]

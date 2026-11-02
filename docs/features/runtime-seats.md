@@ -1,6 +1,6 @@
 # 运行时席位
 
-一台运行时上的 Claude Code 或 Codex 可以登录多个账号（席位），同一时间只用其中一个。某个账号的额度用完时，平台管理员在管理台把这台机器切到另一个席位，机器上的 AI 员工不用换运行时，接着工作。整个过程不需要登录到运行时机器上。
+一台运行时上的 Claude Code、Codex 或 OpenCode 可以登录多个账号（席位），同一时间只用其中一个。某个账号的额度用完时，平台管理员在管理台把这台机器切到另一个席位，机器上的 AI 员工不用换运行时，接着工作。整个过程不需要登录到运行时机器上。
 
 ## 管理入口
 
@@ -11,6 +11,7 @@
 - **登录**：节点上的 CLI 发起登录，管理台给出授权链接。
   - Claude：在浏览器里用这个席位的账号授权，把页面上显示的认证码贴回管理台，点「完成登录」。
   - Codex：设备码登录。在浏览器里用这个席位的账号登录并输入管理台显示的一次性代码，再点「我已完成」。
+  - OpenCode：没有浏览器授权。在 OpenCode 控制台生成 OpenCode Go 的 API Key，贴回管理台，节点写进该席位的 `opencode/auth.json`。见 [OpenCode 运行时](opencode-runtime.md)。
   - 令牌由 CLI 自己保存在该席位目录里，平台不保存。登录会话 15 分钟有效。
 - **设为当前**：只能选已登录的席位。新对话用新席位；切换时正在进行的对话在原席位上跑完。
 - **移除**：不能移除当前席位。节点会在该席位上退出登录并删除它的配置目录。
@@ -23,6 +24,7 @@
 |---|---|
 | Claude | `projects/`（会话与记忆）、`plugins/`、`skills/`、`agents/`、`commands/`、`hooks/`、`settings.json`、`CLAUDE.md` |
 | Codex | `sessions/`、`archived_sessions/`、`prompts/`、`skills/`、`config.toml`、`AGENTS.md` |
+| OpenCode | 会话库（驱动用 `OPENCODE_DB` 指向默认位置）；席位目录经 `OPENCODE_SEAT_HOME` 给出，只在运行 `opencode` 时作为 `XDG_DATA_HOME` |
 
 不共用的有：CLI 自己的全局状态文件（Claude 的 `.claude.json`，其中包括用户级 MCP 配置），以及 MCP 技能的 OAuth 令牌。已授权的 MCP 技能切到新席位后需要重新授权。
 

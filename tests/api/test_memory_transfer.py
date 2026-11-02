@@ -178,7 +178,7 @@ async def test_codex_target_without_shared_memory_is_refused_only_when_memory_ex
         )
     )
     await db_session.flush()
-    with pytest.raises(ApiError, match="Codex 读不到"):
+    with pytest.raises(ApiError, match="Codex / OpenCode 读不到"):
         await memory_transfer.require_shared_layout(db_session, bot, codex, old_runtime)
     await memory_transfer.require_shared_layout(
         db_session, bot, codex, {**old_runtime, "memory_layout": 2}

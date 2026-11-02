@@ -35,7 +35,11 @@ SESSION_COPY_TIMEOUT = 5 * 60
 # 各会话的文件互不相干，并行搬；每个会话内部仍按块串行。
 SESSION_COPY_CONCURRENCY = 4
 # 会话随换机迁移所需的节点能力位，按后端区分。
-SESSION_CAPABILITY = {"claude": "session_transfer", "codex": "session_transfer_codex"}
+SESSION_CAPABILITY = {
+    "claude": "session_transfer",
+    "codex": "session_transfer_codex",
+    "opencode": "session_transfer_opencode",
+}
 
 
 def failure_message(exc: BaseException) -> str:
@@ -318,7 +322,8 @@ async def copy_sessions(
     """把会话文件搬到目标运行时，返回搬成功的 relay 会话；搬不了的由调用方改为文本续接。
 
     只做同后端：Claude → Claude 搬对话记录，Codex → Codex 搬 thread 的 rollout 与绑定（Codex
-    凭 rollout 自行补上本机状态库）。两端都要报对应能力位，老节点不报就全部文本续接。
+    凭 rollout 自行补上本机状态库），OpenCode → OpenCode 搬导出的会话与绑定（目标机驱动导入）。
+    两端都要报对应能力位，老节点不报就全部文本续接。
     尽力而为，失败不影响换机。`progress(已完成, 总数)` 在每个会话搬完后调用。
     """
     provider = source.model_provider

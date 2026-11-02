@@ -4,6 +4,10 @@
 一个配置目录，经 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 交给 CLI。凭据与账号状态各席位分开，会话、
 插件、技能、设置等用软链指回默认席位，换席位后员工的会话照常续上。
 
+OpenCode 的凭据在数据目录（`$XDG_DATA_HOME/opencode/auth.json`），整台节点改 XDG_DATA_HOME 会连带
+别的程序，所以席位目录放在 `OPENCODE_SEAT_HOME`，只在运行 opencode 时换成它的 XDG_DATA_HOME
+（`cli_env`，驱动里同样处理）；会话库用 OPENCODE_DB 固定在默认位置，各席位共用。
+
 当前席位写进守护进程自己的环境变量：之后启动的驱动、健康检查、技能安装、MCP 授权都用它。
 登录由节点上的 CLI 完成（见 `SeatLogins`），令牌留在该席位目录里，不经过 CoreMan。
 """
@@ -11,6 +15,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import secrets
@@ -29,7 +34,8 @@ from .agent import OperationError
 
 DEFAULT = "default"
 SEAT_ID = re.compile(r"(?:default|[a-f0-9]{12})")
-ENV_KEY = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+SEAT_HOME_ENV = "OPENCODE_SEAT_HOME"
+ENV_KEY = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "opencode": SEAT_HOME_ENV}
 # 指回默认席位的条目：（名字，是否目录）。目录先在默认席位建好，免得 CLI 在新席位里另建一份。
 SHARED = {
     "claude": (
@@ -50,7 +56,54 @@ SHARED = {
         ("config.toml", False),
         ("AGENTS.md", False),
     ),
+    # 会话库经 OPENCODE_DB 共用，席位目录里只有各自的凭据（auth.json、mcp-auth.json）。
+    "opencode": (),
 }
+# OpenCode Go 的 API Key 在控制台生成；管理员贴回来写进席位的 auth.json。
+OPENCODE_KEYS_URL = "https://opencode.ai/auth"
+OPENCODE_PROVIDER = "opencode-go"
+
+
+def opencode_data_home(env: dict) -> Path:
+    """OpenCode 默认的数据根目录（不含席位）：XDG_DATA_HOME 或 ~/.local/share。"""
+    base = env.get("XDG_DATA_HOME")
+    return Path(base) if base else Path(env.get("HOME") or Path.home()) / ".local/share"
+
+
+def cli_env(env: dict[str, str]) -> dict[str, str]:
+    """运行 opencode 的环境：席位目录换成它的 XDG_DATA_HOME，会话库仍用默认位置。"""
+    seat = env.get(SEAT_HOME_ENV)
+    if not seat:
+        return env
+    out = {k: v for k, v in env.items() if k != SEAT_HOME_ENV}
+    out["OPENCODE_DB"] = str(opencode_data_home(env) / "opencode/opencode.db")
+    out["XDG_DATA_HOME"] = seat
+    return out
+
+
+def opencode_auth_file(env: dict) -> Path:
+    """该环境（席位）下 OpenCode 的 auth.json。"""
+    return Path(cli_env(env).get("XDG_DATA_HOME") or opencode_data_home(env)) / "opencode/auth.json"
+
+
+def save_opencode_key(env: dict, key: str) -> None:
+    """把 OpenCode Go 的 API Key 写进该席位的 auth.json，保留其它服务商的凭据。"""
+    path = opencode_auth_file(env)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data[OPENCODE_PROVIDER] = {"type": "api", "key": key}
+    tmp = path.with_name(f".auth-{secrets.token_hex(4)}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, path)
+
+
 MAX_SEATS = 20
 MAX_LABEL = 60
 
@@ -80,6 +133,8 @@ class Seats:
         base = self.base[ENV_KEY[provider]]
         if base:
             return Path(base)
+        if provider == "opencode":
+            return opencode_data_home({**os.environ, "HOME": str(self.home)})
         return self.home / (".claude" if provider == "claude" else ".codex")
 
     def directory(self, provider: str, seat_id: str) -> Path | None:
@@ -171,17 +226,19 @@ class Seats:
                 raise OperationError("当前席位不能移除，请先切换到其它席位")
             directory = self.directory(provider, seat_id)
             assert directory is not None
-            command = ["claude", "auth", "logout"] if provider == "claude" else ["codex", "logout"]
+            # OpenCode 的 API Key 没有远端会话可注销，删掉目录就没了。
+            command = {"claude": ["claude", "auth", "logout"], "codex": ["codex", "logout"]}
             try:
-                subprocess.run(
-                    command,
-                    env=self.env(provider, seat_id),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    start_new_session=True,
-                )
+                if provider in command:
+                    subprocess.run(
+                        command[provider],
+                        env=self.env(provider, seat_id),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=30,
+                        start_new_session=True,
+                    )
             except (OSError, subprocess.SubprocessError):
                 pass  # 删掉目录令牌也就没了；远端会话随令牌过期
             # 软链指向默认席位的共用内容：只删链接本身，不进去删。
@@ -219,11 +276,14 @@ class SeatLogins:
     """在 pty 里跑 CLI 的登录命令，把授权链接交给管理台，再把认证码送回 CLI。
 
     Claude：浏览器授权后页面给出认证码，贴回来写进 CLI 的输入；Codex：设备码登录，浏览器里输入
-    一次性代码即完成，这边只等 CLI 退出。
+    一次性代码即完成，这边只等 CLI 退出。OpenCode：没有登录命令可驱动，管理员在 OpenCode 控制台
+    生成 OpenCode Go 的 API Key 贴回来，直接写进席位的 auth.json（只落在节点上）。
     """
 
     def __init__(self) -> None:
         self.sessions: dict[str, LoginSession] = {}
+        # OpenCode 等 API Key 的登录：key → (席位, 运行环境, 开始时间)。
+        self.pending_keys: dict[str, tuple[str, dict[str, str], float]] = {}
         self.lock = threading.Lock()
 
     def close(self, key: str) -> None:
@@ -275,7 +335,48 @@ class SeatLogins:
                 break
         return ESCAPES.sub("", session.output.decode(errors="replace"))
 
+    def start_key_login(self, seat_id: str, env: dict[str, str]) -> dict:
+        now = time.monotonic()
+        with self.lock:
+            for key, (seat, _, created) in list(self.pending_keys.items()):
+                if seat == seat_id or now - created > SESSION_TTL:
+                    self.pending_keys.pop(key)
+            if len(self.pending_keys) >= MAX_SESSIONS:
+                raise OperationError("进行中的登录过多，请稍后再试")
+            key = secrets.token_urlsafe(24)
+            self.pending_keys[key] = (seat_id, env, now)
+        return {
+            "success": True,
+            "session_id": key,
+            "authorization_url": OPENCODE_KEYS_URL,
+            "user_code": "",
+            "needs_code": True,
+            "expires_in": SESSION_TTL,
+        }
+
+    def complete_key_login(self, key: str, seat_id: str, code: object) -> dict:
+        with self.lock:
+            pending = self.pending_keys.get(key)
+            if (
+                pending is None
+                or pending[0] != seat_id
+                or time.monotonic() - pending[2] > SESSION_TTL
+            ):
+                raise OperationError("登录已过期，请重新开始")
+        text = str(code or "").strip()
+        if not CODE.fullmatch(text):
+            raise OperationError("API Key 格式不对，请复制 OpenCode 控制台里的完整 Key")
+        try:
+            save_opencode_key(pending[1], text)
+        except OSError:
+            raise OperationError("无法写入 OpenCode 凭据") from None
+        with self.lock:
+            self.pending_keys.pop(key, None)
+        return {"success": True, "message": "登录完成"}
+
     def start(self, provider: str, seat_id: str, env: dict[str, str], cwd: Path) -> dict:
+        if provider == "opencode":
+            return self.start_key_login(seat_id, env)
         with self.lock:
             self.reap()
             for key, session in list(self.sessions.items()):
@@ -331,6 +432,8 @@ class SeatLogins:
         }
 
     def complete(self, key: str, provider: str, seat_id: str, code: object) -> dict:
+        if provider == "opencode":
+            return self.complete_key_login(key, seat_id, code)
         with self.lock:
             self.reap()
             session = self.sessions.get(key)

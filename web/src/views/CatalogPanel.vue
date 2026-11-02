@@ -170,7 +170,7 @@ onMounted(load)
           <template #default="{ row }: { row: CatalogOut }">
             <el-tag
               size="small"
-              :type="row.backend === 'codex' ? 'warning' : 'primary'"
+              :type="row.backend === 'codex' ? 'warning' : row.backend === 'opencode' ? 'success' : 'primary'"
             >
               {{ row.backend }}
             </el-tag>

@@ -61,11 +61,22 @@ EXTRA_EFFORTS: dict[str, frozenset[str]] = {
 _SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
 
-def backend_of(model: str, provider: str | None = None) -> Literal["claude", "codex"]:
-    """按模型名前缀判断后端：codex/ 开头走 codex，其余走 claude。"""
-    if provider in {"claude", "codex"}:
-        return "codex" if provider == "codex" else "claude"
-    return "codex" if model.startswith("codex/") else "claude"
+Backend = Literal["claude", "codex", "opencode"]
+# 节点上的 AI 后端（CLI）。provider 与 CLI 命令同名，驱动在 drivers/cmd/relay-<provider>。
+BACKENDS: tuple[Backend, ...] = ("claude", "codex", "opencode")
+
+
+def backend_of(model: str, provider: str | None = None) -> Backend:
+    """按 provider 或模型名前缀判断后端：codex/、opencode/ 开头各走自己的后端，其余走 claude。"""
+    if provider == "codex" or provider == "opencode":
+        return provider
+    if provider == "claude":
+        return "claude"
+    if model.startswith("codex/"):
+        return "codex"
+    if model.startswith("opencode/"):
+        return "opencode"
+    return "claude"
 
 
 def catalog_sorted(rows: Sequence[ModelCatalog]) -> list[ModelCatalog]:
