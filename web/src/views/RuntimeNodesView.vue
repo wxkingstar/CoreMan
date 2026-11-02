@@ -176,6 +176,10 @@ function capabilityState(node: RuntimeNode, provider: string) {
   if (!node.online) return t('runtimeNodes.offline')
   return t(`runtimeNodes.login.${cap.login}`)
 }
+/** 版本号只留数字部分：列头已标明是哪个 CLI，「2.1.310 (Claude Code)」「codex-cli 0.164.0」不用再重复。 */
+function shortVersion(version?: string | null) {
+  return version?.match(/\d+(?:\.\d+)+\S*/)?.[0] ?? version
+}
 /** 列表里直接展示的额度窗口：未安装、未登录或没采到用量的窗口不展示。 */
 function quotaWindows(node: RuntimeNode, provider: string) {
   const cap = node.capabilities[provider]
@@ -386,7 +390,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 </template>
                 <template #default="{ row }: { row: RuntimeNode }">
                   <span>{{ capabilityState(row, provider) }}</span><div class="muted">
-                    {{ row.capabilities[provider]?.version }}
+                    {{ shortVersion(row.capabilities[provider]?.version) }}
                   </div><div
                     v-if="row.capabilities[provider]?.account"
                     class="muted"
@@ -399,13 +403,12 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               <el-table-column
                 v-if="provider !== 'opencode'"
                 :label="t('runtimeNodes.quotaOf', { name: t(`bots.backend.${provider}`) })"
-                min-width="290"
+                min-width="160"
               >
                 <template #default="{ row }: { row: RuntimeNode }">
                   <QuotaBar
                     v-for="w in quotaWindows(row, provider)"
                     :key="w.label"
-                    inline
                     :label="w.label"
                     :pct="w.pct"
                     :resets-at="w.resetsAt"
