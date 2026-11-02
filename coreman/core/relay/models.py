@@ -68,8 +68,10 @@ BACKENDS: tuple[Backend, ...] = ("claude", "codex", "opencode")
 
 def backend_of(model: str, provider: str | None = None) -> Backend:
     """按 provider 或模型名前缀判断后端：codex/、opencode/ 开头各走自己的后端，其余走 claude。"""
-    if provider == "codex" or provider == "opencode":
-        return provider
+    if provider == "codex":
+        return "codex"
+    if provider == "opencode":
+        return "opencode"
     if provider == "claude":
         return "claude"
     if model.startswith("codex/"):
