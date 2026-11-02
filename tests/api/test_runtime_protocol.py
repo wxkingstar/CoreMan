@@ -420,3 +420,42 @@ async def test_heartbeat_adds_opencode_relay_once_the_cli_is_installed(client, d
     assert rows["opencode"].visibility == rows["claude"].visibility
     node = await db_session.get(RuntimeNode, node_id, populate_existing=True)
     assert node.capabilities["opencode"]["installed"] is True
+
+
+async def test_heartbeat_clears_its_own_login_failure_and_sends_probe_models(client, db_session):
+    """心跳记的未登录在登录恢复后清掉，推理检查记的失败不动；心跳返回各后端的检查模型。"""
+    from coreman.core.db.models import RelayServer
+    from coreman.core.relay.models import default_model, load_catalog
+
+    expected = default_model("codex", await load_catalog(db_session))
+    assert expected
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    endpoint = "/api/runtime/heartbeat"
+
+    def beat(login: str) -> dict:
+        codex = {"installed": True, "login": login, "models": ["codex/gpt-5.5"]}
+        return {"claude": {}, "codex": codex, "version": "test", "service_status": "foreground"}
+
+    async def codex() -> RelayServer:
+        return await db_session.scalar(
+            select(RelayServer)
+            .where(RelayServer.runtime_node_id == node_id, RelayServer.model_provider == "codex")
+            .execution_options(populate_existing=True)
+        )
+
+    response = await client.post(endpoint, headers=headers, json=beat("required"))
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["probe_models"]["codex"] == expected
+    relay = await codex()
+    assert (relay.health_status, relay.health_detail) == ("auth_fail", "AI 未安装或未登录")
+
+    await client.post(endpoint, headers=headers, json=beat("ready"))
+    relay = await codex()
+    assert (relay.health_status, relay.health_detail) == ("unknown", None)
+
+    relay.health_status, relay.health_detail = "auth_fail", "codex: token expired"
+    await db_session.commit()
+    await client.post(endpoint, headers=headers, json=beat("ready"))
+    relay = await codex()
+    assert (relay.health_status, relay.health_detail) == ("auth_fail", "codex: token expired")

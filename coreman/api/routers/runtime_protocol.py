@@ -35,7 +35,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
-from coreman.core.relay.models import BACKENDS, known_effort_flags
+from coreman.core.relay.models import BACKENDS, default_model, known_effort_flags
 from coreman.core.runtime_nodes.bundle import stale_bundle_reason
 from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
 from coreman.core.runtime_nodes.transport import (
@@ -58,6 +58,8 @@ router = APIRouter(prefix="/api/runtime", tags=["runtime-daemon"])
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 # 长轮询最多挂起的秒数（只有节点带 wait 才挂起）；一批响应帧与待消费分片的上限。
+# 心跳按 CLI 未安装 / 未登录记下的健康详情；登录恢复后据此认出并清掉。
+HEARTBEAT_HEALTH_DETAIL = "AI 未安装或未登录"
 MAX_POLL_WAIT = 25.0
 MAX_BATCH_FRAMES = 64
 MAX_BUFFERED_CHUNKS = 128
@@ -509,7 +511,7 @@ async def heartbeat(
         if not cap.installed or cap.login == "required":
             values.update(
                 health_status="down" if not cap.installed else "auth_fail",
-                health_detail=cap.detail or "AI 未安装或未登录",
+                health_detail=cap.detail or HEARTBEAT_HEALTH_DETAIL,
                 health_checked_at=now(),
             )
         await session.execute(
@@ -517,6 +519,19 @@ async def heartbeat(
             .where(RelayServer.runtime_node_id == node.id, RelayServer.model_provider == provider)
             .values(**values)
         )
+        if cap.installed and cap.login == "ready":
+            # 心跳自己记的「未安装/未登录」，登录恢复后清掉，等下一次推理检查给结论；
+            # 否则一次偶发的未登录会一直挂着。推理检查记的结果不动。
+            await session.execute(
+                update(RelayServer)
+                .where(
+                    RelayServer.runtime_node_id == node.id,
+                    RelayServer.model_provider == provider,
+                    RelayServer.health_status.in_(("down", "auth_fail")),
+                    RelayServer.health_detail.in_((HEARTBEAT_HEALTH_DETAIL, "未安装 CLI")),
+                )
+                .values(health_status="unknown", health_detail=None, health_checked_at=now())
+            )
         for model in cap.models:
             await session.execute(
                 insert(ModelCatalog)
@@ -558,6 +573,8 @@ async def heartbeat(
             "protocol": PROTOCOL_VERSION,
             "root_change": node.root_change,
             "backends": backends,
+            # 节点健康检查用的模型：驱动发现的列表第一个未必是账号能用的。
+            "probe_models": {p: default_model(p, catalog) for p in BACKENDS},
         },
     }
 

@@ -47,6 +47,8 @@ export type Pct = number | string | null
 export interface RelayOut {
   unavailable_reason?: 'disabled' | 'root_pending' | 'not_installed' | 'login_required' | 'unknown' | null
   runtime_node_id?: string | null; runtime_name?: string | null; workspace_root?: string | null
+  /** 节点心跳是否新鲜（与运行时页的「在线」同源）。 */
+  runtime_online?: boolean
   id: string; name: string; relay_url: string
   model_provider: string; supported_models_mode: ModelsMode; supported_models: string[] | null
   effective_models: string[]; default_model: string | null

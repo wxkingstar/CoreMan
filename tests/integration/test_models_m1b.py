@@ -10,7 +10,7 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     by_provider: dict[str, list[ModelCatalog]] = {}
     for r in rows:
         by_provider.setdefault(r.provider, []).append(r)
-    assert set(by_provider) == {"claude", "codex"}
+    assert set(by_provider) == {"claude", "codex", "opencode"}
     assert {r.model for r in by_provider["claude"] if not r.retired} == {
         "claude-fable-5-1",
         "claude-opus-5-5",
@@ -34,6 +34,9 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     }
     assert [r.model for r in by_provider["claude"] if r.is_default] == ["claude-opus-5-5"]
     assert [r.model for r in by_provider["codex"] if r.is_default] == ["codex/gpt-6.1-sol"]
+    assert [r.model for r in by_provider["opencode"] if r.is_default] == [
+        "opencode/opencode-go/kimi-k3"
+    ]
 
 
 async def test_relay_unique_name_defaults_and_version(db_session: AsyncSession) -> None:
