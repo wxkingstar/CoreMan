@@ -142,18 +142,19 @@ async def test_bot_messages_count_until_a_human_speaks(db_session):
     assert state.bot_streak == 0
 
 
-async def test_bots_mentioning_someone_else_never_trigger_a_judgement(db_session):
-    """AI 员工之间求助、答复的 @ 消息只记上下文，旁听的第三个机器人不插话，也不吞掉人的待判断。"""
+async def test_bot_messages_never_trigger_a_judgement(db_session):
+    """别的机器人发的消息（插话、答复、互相 @ 求助）只记上下文，不排判断，不吞人的待判断。"""
     bot = await observing_bot(db_session)
     await say(db_session, bot, "om1", "谁能拉一下上周的 GMV？")
     pending = (await db_session.get(GroupObserveState, (bot.id, CHAT))).pending_since
+    await say(db_session, bot, "om2", "我看一下。", sender_type="bot", user="a")
     peer = [{"key": "@_user_1", "id": {"open_id": "ou_other_bot"}, "name": "库存助手"}]
     await say(
-        db_session, bot, "om2", "@库存助手 请核对库存", sender_type="bot", user="a", mentions=peer
+        db_session, bot, "om3", "@库存助手 请核对库存", sender_type="bot", user="a", mentions=peer
     )
     assert len(await tasks_of(db_session, bot, "group_observe")) == 1
     state = await db_session.get(GroupObserveState, (bot.id, CHAT), populate_existing=True)
-    assert state.pending_since == pending and state.bot_streak == 1
+    assert state.pending_since == pending and state.bot_streak == 2
 
 
 async def test_transcript_names_people_by_user_id_not_app_scoped_open_id(db_session):
@@ -229,9 +230,10 @@ async def test_below_threshold_stays_quiet(db_engine, db_session):
 
 async def test_bot_streak_and_mute_skip_the_model(db_engine, db_session):
     bot = await observing_bot(db_session)
-    for i in range(6):
+    await say(db_session, bot, "om0", "谁看下库存？")
+    for i in range(1, 6):
         await say(db_session, bot, f"om{i}", f"机器人消息 {i}", sender_type="bot", user="b")
-    observe = (await tasks_of(db_session, bot, "group_observe"))[-1]
+    (observe,) = await tasks_of(db_session, bot, "group_observe")
     await quiet_down(db_session, bot)
     decider = FakeDecider()
     done = await run_observe(db_engine, db_session, observe, decider)
