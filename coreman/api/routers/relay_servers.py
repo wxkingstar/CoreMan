@@ -29,6 +29,7 @@ from coreman.core.relay import probe
 from coreman.core.relay.client import RelayClient
 from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import default_model, effective_models
+from coreman.core.runtime_nodes.transport import online
 
 router = APIRouter(
     prefix="/api/admin/relay-servers", tags=["relay-servers"], dependencies=[Depends(verify_csrf)]
@@ -62,6 +63,8 @@ async def relay_out(
         "runtime_node_id": str(node.id) if node else None,
         "runtime_name": node.name if node else None,
         "workspace_root": node.workspace_root if node else None,
+        # 节点心跳是否新鲜，与运行时页的「在线」同源。
+        "runtime_online": bool(node and online(node)),
         "unavailable_reason": backend_unavailable_reason(relay, node),
         "relay_url": relay.relay_url,
         "model_provider": relay.model_provider,

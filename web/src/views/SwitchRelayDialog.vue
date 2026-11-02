@@ -7,7 +7,6 @@ import { workspace, type SwitchPreview } from '@/api/workspace'
 import { bots, relays } from '@/api/admin'
 
 import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
-import HealthTag from '@/components/HealthTag.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { pctNum } from '@/utils/format'
 import { backendOf, selectableRelays } from '@/utils/models'
@@ -72,6 +71,12 @@ const unchanged = computed(() => targetId.value === props.bot.relay_server_id &&
 const backendChanged = computed(() => !!target.value && !!model.value && backendOf(model.value) !== props.bot.backend)
 // 未安装或未登录的后端采不到额度，库里留着的是旧值，不展示。
 const hasQuota = (row: RelayOut) => !['not_installed', 'login_required'].includes(row.unavailable_reason ?? '')
+/** 状态列与运行时页同源（节点心跳里的在线与 CLI 登录状态），不用推理检查的结果。 */
+function runtimeState(row: RelayOut): { type: 'success' | 'danger' | 'warning'; label: string } {
+  if (!row.runtime_online) return { type: 'danger', label: t('runtimeNodes.offline') }
+  if (row.unavailable_reason) return { type: 'warning', label: t('runtimeNodes.unavailable.' + row.unavailable_reason) }
+  return { type: 'success', label: t('relays.health.healthy') }
+}
 
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
@@ -262,7 +267,12 @@ defineExpose({ pick, confirm, checkTarget })
         width="100"
       >
         <template #default="{ row }: { row: RelayOut }">
-          <HealthTag :status="row.health_status" />
+          <el-tag
+            :type="runtimeState(row).type"
+            size="small"
+          >
+            {{ runtimeState(row).label }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column

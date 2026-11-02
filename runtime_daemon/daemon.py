@@ -292,6 +292,31 @@ def login_account(provider: str, status: dict, env: dict | None = None) -> str:
         return ""
 
 
+AUTH_FAILURE_MARKERS = (
+    "not logged in",
+    "authentication_error",
+    "oauth token",
+    "failed to authenticate",
+    "oauth session expired",
+)
+
+
+def probe_error(status_code: int, body: object) -> str:
+    """健康检查请求的失败原因；成功返回空串。只看错误本身，不拿模型的正常回复去匹配。"""
+    if not isinstance(body, dict):
+        return f"HTTP {status_code}"
+    error = body.get("error")
+    if error:
+        message = error.get("message") if isinstance(error, dict) else None
+        return str(message or error)
+    if body.get("x_relay_error"):
+        try:
+            return str(body["choices"][0]["message"]["content"]) or "驱动返回错误"
+        except (KeyError, IndexError, TypeError):
+            return "驱动返回错误"
+    return "" if status_code == 200 else f"HTTP {status_code}"
+
+
 def cli_status(provider: str, env: dict | None = None) -> dict:
     """CLI 的安装与登录状态；env 给定时按该环境（席位）查登录。"""
     path = shutil.which(provider)
@@ -355,6 +380,9 @@ class RuntimeAgent(Agent):
             sessions_dir=daemon.data_dir / "sessions" / provider,
         )
         self.daemon = daemon
+        # 服务端在心跳里给的检查模型（模型目录的默认模型）。驱动发现的列表只是默认值，
+        # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
+        self.probe_model = ""
         self.lock = daemon.operations_lock
         self.http.trust_env = False
         if daemon.trust_file:
@@ -424,7 +452,8 @@ class RuntimeAgent(Agent):
 
     def health_check(self) -> None:
         start = time.monotonic()
-        status = "unknown"
+        status, detail = "unknown", ""
+        model = self.probe_model or self.model
         try:
             with httpx.Client(
                 transport=httpx.HTTPTransport(uds=str(self.daemon.socket_path(self.provider))),
@@ -433,8 +462,8 @@ class RuntimeAgent(Agent):
             ) as client:
                 health = client.get("/health")
                 if health.status_code != 200:
-                    status = "down"
-                elif self.model:
+                    status, detail = "down", f"驱动 /health 返回 HTTP {health.status_code}"
+                elif model:
                     # Probe stays under the selected project root and cannot execute tools.
                     directory = self.root / ".coreman-health"
                     directory.mkdir(exist_ok=True)
@@ -451,35 +480,28 @@ class RuntimeAgent(Agent):
                     # Claude 用驱动的默认模型：模型列表第一个未必是账号能直接用的
                     # （如需要额外付费的模型），检查失败就拿不到额度。
                     if self.provider != "claude":
-                        probe["model"] = self.model
+                        probe["model"] = model
                     response = client.post("/v1/chat/completions", json=probe)
-                    body = response.json()
-                    text = json.dumps(body).lower()
-                    if response.status_code in {401, 403} or any(
-                        x in text
-                        for x in (
-                            "not logged in",
-                            "authentication_error",
-                            "oauth token",
-                            "failed to authenticate",
-                            "oauth session expired",
-                        )
-                    ):
-                        status = "auth_fail"
-                    elif (
-                        response.status_code != 200
-                        or body.get("error")
-                        or body.get("x_relay_error")
-                    ):
-                        status = "down"
-                    else:
+                    error = probe_error(response.status_code, response.json())
+                    if not error:
                         status = "healthy"
+                    elif response.status_code in {401, 403} or any(
+                        x in error.lower() for x in AUTH_FAILURE_MARKERS
+                    ):
+                        status, detail = "auth_fail", error
+                    else:
+                        status, detail = "down", error
         except httpx.TimeoutException:
-            status = "timeout"
-        except (httpx.HTTPError, OSError, ValueError):
-            status = "down"
+            status, detail = "timeout", "检查请求超时"
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            status, detail = "down", f"{type(exc).__name__}: {exc}"
         self.report(
-            "relay/health", {"status": status, "latency_ms": int((time.monotonic() - start) * 1000)}
+            "relay/health",
+            {
+                "status": status,
+                "detail": detail[:255] or None,
+                "latency_ms": int((time.monotonic() - start) * 1000),
+            },
         )
 
 
@@ -1222,6 +1244,14 @@ class Daemon:
             self.config["backends"].update(added)
             self.save()
 
+    def apply_probe_models(self, models: object) -> None:
+        """服务端给的健康检查模型（模型目录的默认模型）；旧服务端不下发时沿用驱动发现的第一个。"""
+        if not isinstance(models, dict):
+            return
+        for provider, agent in self.agents.items():
+            model = models.get(provider)
+            agent.probe_model = model if isinstance(model, str) else ""
+
     async def heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
             delay = HEARTBEAT_SECONDS
@@ -1229,6 +1259,7 @@ class Daemon:
                 result = await self.api("/api/runtime/heartbeat", self.heartbeat_body())
                 self.apply_root_change(result.get("root_change"))
                 self.add_backends(result.get("backends"))
+                self.apply_probe_models(result.get("probe_models"))
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in REJECTED_STATUSES:
                     delay = REJECTED_BACKOFF_MAX

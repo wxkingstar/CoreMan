@@ -436,3 +436,74 @@ def test_reported_proxy_never_carries_credentials(daemon, monkeypatch, url, show
     # Redaction is display-only: the pending check still compares the real values.
     daemon.save()
     assert daemon.proxy_state()["pending"] is False
+
+
+@pytest.mark.parametrize(
+    "status_code,body,expected",
+    [
+        (200, {"choices": [{"message": {"content": "OK, no OAuth token needed"}}]}, ""),
+        (500, {"error": {"message": "codex: model not supported"}}, "codex: model not supported"),
+        (
+            200,
+            {"choices": [{"message": {"content": "Not logged in"}}], "x_relay_error": True},
+            "Not logged in",
+        ),
+        (502, {}, "HTTP 502"),
+        (200, [], "HTTP 200"),
+    ],
+)
+def test_probe_error_only_reads_the_error(status_code, body, expected):
+    """正常回复里出现认证相关字样不算失败；失败时带回错误原文。"""
+    from runtime_daemon.daemon import probe_error
+
+    assert probe_error(status_code, body) == expected
+
+
+@pytest.mark.parametrize(
+    "response,status,detail",
+    [
+        (
+            {"error": {"message": "codex: model not supported"}},
+            "down",
+            "codex: model not supported",
+        ),
+        ({"error": {"message": "Failed to authenticate"}}, "auth_fail", "Failed to authenticate"),
+    ],
+)
+def test_health_probe_uses_server_model_and_reports_detail(
+    daemon, monkeypatch, response, status, detail
+):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    daemon.config["home"] = str(daemon.data_dir)
+    captured = []
+
+    class LocalClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, path):
+            return SimpleNamespace(status_code=200)
+
+        def post(self, path, json):
+            captured.append(json)
+            return SimpleNamespace(status_code=500, json=lambda: response)
+
+    monkeypatch.setattr("runtime_daemon.daemon.httpx.Client", LocalClient)
+    agent = RuntimeAgent(daemon, "codex", "test-relay")
+    daemon.agents["codex"] = agent
+    agent.model = "codex/gpt-5.5"
+    daemon.apply_probe_models({"codex": "codex/gpt-6.1-sol"})
+    reports = []
+    monkeypatch.setattr(agent, "report", lambda endpoint, body: reports.append(body))
+    agent.health_check()
+    assert captured[0]["model"] == "codex/gpt-6.1-sol"
+    assert (reports[0]["status"], reports[0]["detail"]) == (status, detail)
