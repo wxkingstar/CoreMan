@@ -222,6 +222,11 @@ from coreman.core.db.models.personal_credentials import (
     CredentialRequest,
     PersonalCredential,
 )
+from coreman.core.db.models.work_tasks import (
+    WORK_TASK_STATUSES,
+    WorkTask,
+    WorkTaskEvent,
+)
 
 __all__ += [
     "BotCollaboration",
@@ -230,6 +235,8 @@ __all__ += [
     "BotHumanPartner",
     "HumanCollaboration",
 ]
+
+__all__ += ["WORK_TASK_STATUSES", "WorkTask", "WorkTaskEvent"]
 
 __all__ += [
     "CREDENTIAL_ORIGINS",

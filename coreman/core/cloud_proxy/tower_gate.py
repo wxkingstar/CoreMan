@@ -55,7 +55,7 @@ def _query_unescape(seg: bytes) -> bytes:
         if c == 0x25:  # '%'
             if i + 2 >= len(seg) or seg[i + 1] not in _HEX or seg[i + 2] not in _HEX:
                 raise ValueError("query 里有不合法的 % 转义")
-            out.append(int(seg[i + 1:i + 3], 16))
+            out.append(int(seg[i + 1 : i + 3], 16))
             i += 3
             continue
         out.append(0x20 if c == 0x2B else c)
@@ -130,8 +130,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def redeem(tower_url, api_key, token, req_hash, caller, timeout=10.0) -> str:
     payload = json.dumps({"token": token, "request_hash": req_hash, "caller": caller}).encode()
-    req = urllib.request.Request(tower_url.rstrip("/") + "/v1/tokens/redeem", data=payload, method="POST",
-                                 headers={"Content-Type": "application/json", "X-API-Key": api_key})
+    req = urllib.request.Request(
+        tower_url.rstrip("/") + "/v1/tokens/redeem",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json", "X-API-Key": api_key},
+    )
     # 不吃环境里的 HTTP(S)_PROXY：请求里带着目标系统的 API Key 和令牌，不能让环境变量把它改道出去。
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     rejected = None
@@ -139,8 +143,12 @@ def redeem(tower_url, api_key, token, req_hash, caller, timeout=10.0) -> str:
         try:
             with opener.open(req, timeout=timeout) as resp:
                 data = json.loads(resp.read(64 << 10) or b"{}")
-                if resp.status == 200 and isinstance(data, dict) and isinstance(data.get("approval_id"), str) \
-                        and data["approval_id"]:
+                if (
+                    resp.status == 200
+                    and isinstance(data, dict)
+                    and isinstance(data.get("approval_id"), str)
+                    and data["approval_id"]
+                ):
                     return data["approval_id"]
         except urllib.error.HTTPError as e:
             with e:  # 读完就关，别把连接留给 GC
@@ -161,16 +169,30 @@ def redeem(tower_url, api_key, token, req_hash, caller, timeout=10.0) -> str:
 
 async def _respond(send, status, body):
     raw = json.dumps(body, ensure_ascii=False).encode()
-    await send({"type": "http.response.start", "status": status,
-                "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", b"application/json; charset=utf-8")],
+        }
+    )
     await send({"type": "http.response.body", "body": raw})
 
 
 class TowerGate:
     """ASGI 中间件。protected(scope) 决定哪些请求要审批——由业务系统决定，不由 Agent 判断。"""
 
-    def __init__(self, app, *, tower_url, api_key, target, caller_of, protected=lambda scope: True,
-                 max_body=DEFAULT_MAX_BODY):
+    def __init__(
+        self,
+        app,
+        *,
+        tower_url,
+        api_key,
+        target,
+        caller_of,
+        protected=lambda scope: True,
+        max_body=DEFAULT_MAX_BODY,
+    ):
         self.app = app
         self.tower_url = tower_url
         self.api_key = api_key
@@ -186,8 +208,15 @@ class TowerGate:
         headers = dict(scope.get("headers") or [])
         token = headers.get(HEADER.encode(), b"").decode().strip()
         if not token:
-            await _respond(send, 428, {"error": "approval_required", "target": self.target,
-                                       "message": "该操作需要经 Tower 审批，请提交审批并带上令牌重试"})
+            await _respond(
+                send,
+                428,
+                {
+                    "error": "approval_required",
+                    "target": self.target,
+                    "message": "该操作需要经 Tower 审批，请提交审批并带上令牌重试",
+                },
+            )
             return
         caller = self.caller_of(scope)
         if not caller:
@@ -203,7 +232,9 @@ class TowerGate:
             if not msg.get("more_body"):
                 break
         raw_path = scope.get("raw_path")
-        path = raw_path.decode("latin-1") if raw_path else urllib.parse.quote(scope.get("path", "/"))
+        path = (
+            raw_path.decode("latin-1") if raw_path else urllib.parse.quote(scope.get("path", "/"))
+        )
         # query 按原始字节交给规范化，不先解码成 str，免得非 ASCII 字节被改写。
         query = scope.get("query_string") or b""
         try:
@@ -213,7 +244,9 @@ class TowerGate:
             await _respond(send, 400, {"error": "bad_query"})
             return
         try:
-            approval_id = await asyncio.to_thread(redeem, self.tower_url, self.api_key, token, req_hash, caller)
+            approval_id = await asyncio.to_thread(
+                redeem, self.tower_url, self.api_key, token, req_hash, caller
+            )
         except TowerGateError as e:
             await _respond(send, e.status, {"error": e.code})
             return

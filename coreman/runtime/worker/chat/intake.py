@@ -79,8 +79,9 @@ class IntakeStage(ChatStageBase):
         chat_type = str(message.get("chat_type") or inbound.chat_type)
         session_key = ctx.task.session_key or chat_id
         sender = message.get("sender") or {}
-        # 群聊旁听的插话回合：没人 @ 它，是它自己判断要说话，触发的消息可以来自其他机器人。
-        observe = ctx.task.payload.get("origin") == "observe"
+        # 群聊旁听的插话回合与调度回合：没人 @ 它，是它自己判断要说话；
+        # 触发的消息可以来自其他机器人。
+        observe = ctx.task.payload.get("origin") in ("observe", "dispatch")
         if sender.get("sender_type", "user") != "user" and not observe:
             await tasks.finish(
                 session, ctx.task.id, status="cancelled", error_code="bot_requires_collaboration"
@@ -186,7 +187,11 @@ class IntakeStage(ChatStageBase):
         stmt = select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == intake.bot.id)
         allowed = set((await session.execute(stmt)).scalars())
         reason = None
-        if not observing(intake.bot) or intake.bot.group_observe != "on":
+        if ctx.task.payload.get("origin") == "dispatch":
+            # 调度回合在试运行时也跑（只记录不交接），但调度员身份或旁听被关掉就不跑了。
+            if not observing(intake.bot) or intake.bot.group_role != "dispatcher":
+                reason = "observe_off"
+        elif not observing(intake.bot) or intake.bot.group_observe != "on":
             reason = "observe_off"
         elif allowed and intake.speaker.user_id not in allowed:
             reason = "observe_not_allowed"

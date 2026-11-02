@@ -7,6 +7,9 @@ shadow 只记录。每次判断（含跳过）都写进 `group_observe_decisions
 同一个群里有几个机器人开着旁听时，同一条消息可能都判断该说话。插话回合排队前先等
 `PICK_DELAY_SECONDS` 让别的机器人判断完，再选概率最高的那个（并列取先判断的）接话；
 其余记为 yielded，不进 agent 回合——没说话的机器人就没做事，不会有人做了事却没同步出来。
+
+调度员（`group_role = dispatcher`）换一道判断题：是不是有事要安排人。判断为是时不插话，
+排一个调度回合（见 core/chat/dispatch），试运行和开启都排，调度回合自己决定记录还是交接。
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from sqlalchemy import func, select, text
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.chat import decider as decider_mod
-from coreman.core.chat import group_observe
+from coreman.core.chat import dispatch, group_observe
 from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, GroupObserveDecision, GroupObserveState, InboundEvent, Task
 from coreman.runtime.worker.context import TaskContext
@@ -63,6 +66,8 @@ class GroupObserveHandler:
                 await self._finish(session, ctx, "cancelled", "observe_off")
                 return
             mode = bot.group_observe
+            dispatcher = bot.group_role == "dispatcher"
+            busy_key = dispatch.session_key(chat_id) if dispatcher else chat_id
             state = await session.get(GroupObserveState, (bot.id, chat_id), with_for_update=True)
             if state is None or state.pending_since is None:
                 # 已被更早的任务一起判断过，或期间有人 @ 了它。
@@ -80,7 +85,7 @@ class GroupObserveHandler:
                 )
                 await session.commit()
                 return
-            if await self._busy(session, bot.id, chat_id):
+            if await self._busy(session, bot.id, busy_key):
                 # 正在回复：等它说完再看，待判断保留（更新的消息由它自己的任务等）。
                 if not latest:
                     await self._finish(
@@ -120,7 +125,12 @@ class GroupObserveHandler:
                 await self._record(session, bot, chat_id, event_id, mode, "unconfigured")
                 await self._finish(session, ctx, "succeeded", None, {"skipped": "unconfigured"})
             return
-        decision = await decider.should_interject(payload)
+        decision = await decider.should_interject(
+            payload,
+            instruction=(
+                decider_mod.DISPATCH_INSTRUCTION if dispatcher else decider_mod.INSTRUCTION
+            ),
+        )
         if decision.error:
             outcome = "error"
         elif decision.refused:
@@ -135,7 +145,21 @@ class GroupObserveHandler:
                 session, bot, chat_id, event_id, mode, outcome, decision=decision, state=payload
             )
             turn: Task | None = None
-            if outcome == "interject" and mode == "on" and anchor is not None:
+            if outcome == "interject" and dispatcher and anchor is not None:
+                if await self._busy(session, bot.id, busy_key):
+                    row.outcome = "busy"
+                else:
+                    turn = await self._enqueue_turn(
+                        session,
+                        bot,
+                        chat_id,
+                        anchor.event_id,
+                        row.id,
+                        origin=dispatch.ORIGIN,
+                        session_key=busy_key,
+                    )
+                    row.task_id = turn.id if turn else None
+            elif outcome == "interject" and mode == "on" and anchor is not None:
                 if await self._busy(session, bot.id, chat_id):
                     # 判断期间有人 @ 了它：交给那一轮。
                     row.outcome = "busy"
@@ -247,7 +271,15 @@ class GroupObserveHandler:
         return bool(await tasks.open_for_session(session, bot_id, chat_id, "chat"))
 
     async def _enqueue_turn(
-        self, session: Any, bot: Bot, chat_id: str, event_id: int | None, decision_id: int
+        self,
+        session: Any,
+        bot: Bot,
+        chat_id: str,
+        event_id: int | None,
+        decision_id: int,
+        *,
+        origin: str = "observe",
+        session_key: str | None = None,
     ) -> Task | None:
         event = await session.get(InboundEvent, event_id) if event_id else None
         if event is None:
@@ -261,10 +293,10 @@ class GroupObserveHandler:
                     "message": event.payload,
                     "bot_key": bot.bot_key,
                     "platform_user_id": event.sender_platform_user_id,
-                    "origin": "observe",
+                    "origin": origin,
                     "observe_decision_id": decision_id,
                 },
-                session_key=chat_id,
+                session_key=session_key or chat_id,
                 inbound_event_id=event.id,
                 dedupe_key=f"observe-turn:{decision_id}",
             ),

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from coreman.core.bus import outbox
-from coreman.core.chat import group_observe
+from coreman.core.chat import dispatch, group_observe
 from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.sse import (
@@ -64,6 +64,7 @@ class ConverseStage(ChatStageBase):
         # 工具数封顶只针对机器人之间的协作（可能互相求助成环）；只挂同事求助的轮次不封顶。
         capped = bool(ctx.task.payload.get("collaboration_id") or ctx.bot_peers_mounted)
         observe = ctx.task.payload.get("origin") == "observe"
+        dispatching = ctx.task.payload.get("origin") == dispatch.ORIGIN
         try:
             while True:
                 if ctx.cancel_event.is_set():
@@ -91,6 +92,9 @@ class ConverseStage(ChatStageBase):
                         if task.payload.get("collaboration_handoff"):
                             out.collaboration_handoff = True
                             return out
+                if dispatching and now - (out.request_started or now) >= dispatch.LIMIT_SECONDS:
+                    out.cancelled, out.reason = True, "dispatch_timeout"
+                    return out
                 if observe:
                     elapsed = now - (out.request_started or now)
                     if elapsed >= group_observe.INTERJECT_LIMIT_SECONDS:

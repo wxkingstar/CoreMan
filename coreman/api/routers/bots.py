@@ -97,6 +97,7 @@ NON_NULLABLE = (
     "dev_mode",
     "group_observe",
     "group_observe_scope",
+    "group_role",
 )
 
 
@@ -201,6 +202,7 @@ class BotPatch(BaseModel):
     dev_mode: bool | None = None
     group_observe: Literal["off", "shadow", "on"] | None = None
     group_observe_scope: str | None = Field(default=None, max_length=2000)
+    group_role: Literal["member", "dispatcher"] | None = None
 
     @field_validator("env_vars")
     @classmethod
@@ -250,10 +252,17 @@ def _public(bot: Bot) -> dict[str, Any]:
         "dev_mode": bot.dev_mode,
         "group_observe": bot.group_observe,
         "group_observe_scope": bot.group_observe_scope,
+        "group_role": bot.group_role,
     }
 
 
-def _check_group_observe(bot: Bot, mode: str, scope: str) -> None:
+def _check_group_observe(bot: Bot, mode: str, scope: str, role: str) -> None:
+    if role == "dispatcher":
+        if bot.platform != "feishu":
+            raise ApiError(422, 422, "调度员只支持飞书机器人")
+        if mode == "on":
+            # 第一期只记录「会这样分派」：交接、群里发言在第二期。
+            raise ApiError(422, 422, "调度员目前只能试运行，暂不支持开启")
     if mode == "off":
         return
     if bot.platform != "feishu":
@@ -383,6 +392,7 @@ async def build_out(
         "dev_mode": bot.dev_mode,
         "group_observe": bot.group_observe,
         "group_observe_scope": bot.group_observe_scope,
+        "group_role": bot.group_role,
         # 部署配了判断服务才能开旁听；管理台据此提示。
         "group_observe_ready": get_settings().decision_ready,
         "member_count": len(member_ids),
@@ -676,11 +686,12 @@ async def patch_bot(
             changes.get("model", bot.model),
             changes.get("effort_level", bot.effort_level),
         )
-    if "group_observe" in changes or "group_observe_scope" in changes:
+    if changes.keys() & {"group_observe", "group_observe_scope", "group_role"}:
         _check_group_observe(
             bot,
             changes.get("group_observe", bot.group_observe),
             changes.get("group_observe_scope", bot.group_observe_scope),
+            changes.get("group_role", bot.group_role),
         )
         # 从关闭到打开时确认飞书会推全部群消息：没有权限打开了也收不到，机器人看起来毫无反应。
         if bot.group_observe == "off" and changes.get("group_observe", "off") != "off":

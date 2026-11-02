@@ -21,6 +21,11 @@ const requesting = ref(false)
 const savedOff = savedBot?.group_observe === 'off'
 const blocked = (): boolean => savedOff && permission.value !== 'granted'
 
+// 调度员目前只能试运行：切成调度员时把「开启」退回到「试运行」。
+function onRoleChange(role: string | number | boolean | undefined): void {
+  if (role === 'dispatcher' && form.group_observe === 'on') form.group_observe = 'shadow'
+}
+
 async function checkPermission(): Promise<void> {
   if (!botId) return
   checking.value = true
@@ -92,6 +97,26 @@ onMounted(() => {
 
   <template v-if="form.platform === 'feishu' && mode === 'edit'">
     <el-form-item
+      :label="t('groupObserve.role')"
+      data-test="group-role"
+      :error="fieldErrors.group_role"
+    >
+      <el-radio-group
+        v-model="form.group_role"
+        @change="onRoleChange"
+      >
+        <el-radio-button value="member">
+          {{ t('groupObserve.roles.member') }}
+        </el-radio-button>
+        <el-radio-button value="dispatcher">
+          {{ t('groupObserve.roles.dispatcher') }}
+        </el-radio-button>
+      </el-radio-group>
+      <div class="muted">
+        {{ form.group_role === 'dispatcher' ? t('groupObserve.dispatcherHint') : t('groupObserve.memberHint') }}
+      </div>
+    </el-form-item>
+    <el-form-item
       :label="t('groupObserve.mode')"
       data-test="group-observe"
       :error="fieldErrors.group_observe"
@@ -111,7 +136,7 @@ onMounted(() => {
         </el-radio-button>
         <el-radio-button
           value="on"
-          :disabled="blocked()"
+          :disabled="blocked() || form.group_role === 'dispatcher'"
         >
           {{ t('groupObserve.modes.on') }}
         </el-radio-button>
@@ -193,7 +218,7 @@ onMounted(() => {
     </el-form-item>
     <el-form-item
       v-if="form.group_observe !== 'off'"
-      :label="t('groupObserve.scope')"
+      :label="form.group_role === 'dispatcher' ? t('groupObserve.teamScope') : t('groupObserve.scope')"
       data-test="group-observe-scope"
       :error="fieldErrors.group_observe_scope"
     >
@@ -202,10 +227,10 @@ onMounted(() => {
         type="textarea"
         :rows="3"
         maxlength="2000"
-        :placeholder="t('groupObserve.scopePlaceholder')"
+        :placeholder="form.group_role === 'dispatcher' ? t('groupObserve.teamScopePlaceholder') : t('groupObserve.scopePlaceholder')"
       />
       <div class="muted">
-        {{ t('groupObserve.scopeHint') }}
+        {{ form.group_role === 'dispatcher' ? t('groupObserve.teamScopeHint') : t('groupObserve.scopeHint') }}
       </div>
     </el-form-item>
   </template>

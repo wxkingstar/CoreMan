@@ -40,6 +40,7 @@ class Bot(TimestampMixin, Base):
         ),
         CheckConstraint("sse_timeout_seconds BETWEEN 1800 AND 43200", name="sse_timeout_seconds"),
         CheckConstraint("group_observe IN ('off','shadow','on')", name="group_observe"),
+        CheckConstraint("group_role IN ('member','dispatcher')", name="group_role"),
         # 唯一约束在这里给全名（不再在列上写 unique=True），保证 alembic check 只看到一个同名约束。
         UniqueConstraint("bot_key", name="uq_bots_bot_key"),
         Index("bots_relay_idx", "relay_server_id"),
@@ -96,6 +97,8 @@ class Bot(TimestampMixin, Base):
     group_observe: Mapped[str] = mapped_column(Text, server_default=text("'off'"))
     # 旁听职责说明：交给判断模型的「它负责什么、什么时候该说话」，不是整段系统提示。
     group_observe_scope: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # 群聊角色：member 普通员工；dispatcher 调度员，旁听时只判断要不要分派、分派给谁，自己不干活。
+    group_role: Mapped[str] = mapped_column(Text, server_default=text("'member'"))
     # 同群的其他飞书 AI 员工能不能 @ 它求助；求助时它以触发人的身份执行。
     accept_bot_help: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
