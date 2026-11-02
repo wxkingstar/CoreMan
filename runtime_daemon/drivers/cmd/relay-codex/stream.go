@@ -25,26 +25,52 @@ import (
 //	item.completed reasoning→ thinking delta with the reasoning text
 //	turn.completed          → finish_reason chunk + usage chunk
 //	error / turn.failed     → server_error response and stream end
+//	error "Reconnecting..." → logged only (codex retries on its own)
+//
+// A thread near its context window is compacted first (compaction.go).
 //
 // Resume failures preserve the existing binding, except the verified
 // "no rollout found" signature on a zero-output resume: that turn is retried
 // once on a new thread and the user is told the earlier context is gone.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
 	images := newTurnImages(workingDir)
+	flusher, ok := w.(http.Flusher)
+	sseOpen := false
+	openSSE := func() {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, ": ping\n\n")
+		flusher.Flush()
+		sseOpen = true
+	}
+
+	// A thread being compacted (or due for it) holds the turn back; the user is
+	// told why the answer is slow, and leaving does not stop the compaction.
+	if job := ensureCompaction(resumedThread(input), workingDir, model); job != nil && ok {
+		openSSE()
+		writeTextChunk(w, flusher, chatID, created, model, compactingNotice)
+		if !awaitCompaction(r.Context(), job, func() {
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		}) {
+			return
+		}
+	}
+
 	turnStarted := time.Now().Add(-time.Second)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
-		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
+		if sseOpen {
+			emitCodexFailure(w, flusher, chatID, created, model, err.Error())
+		} else {
+			openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
+		}
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("Streaming not supported by ResponseWriter")
 		proc.KillGroup(cmd)
@@ -52,9 +78,9 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInp
 		}
 		return
 	}
-
-	fmt.Fprintf(w, ": ping\n\n")
-	flusher.Flush()
+	if !sseOpen {
+		openSSE()
+	}
 
 	// Codex turns can take >30s on shell commands; without periodic keepalive
 	// the client's idle-read timeout will fire.
@@ -304,11 +330,15 @@ probe:
 			}
 
 		case "error", "turn.failed":
-			turnFailed = true
 			errMsg := ev.Message
 			if errMsg == "" && len(ev.Error) > 0 {
 				errMsg = string(ev.Error)
 			}
+			if ev.Type == "error" && isCodexRetryNotice(errMsg) {
+				log.Printf("[CODEX RETRY] %s", errMsg)
+				return
+			}
+			turnFailed = true
 			log.Printf("[CODEX ERROR] %s", errMsg)
 			// CODEX-3: some codex versions attach usage to the failure event.
 			// Record it when present so failed turns still get metered; most
@@ -393,12 +423,20 @@ processLines:
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
+	// Compact while the user reads the answer rather than at their next message.
+	if turnCompleted {
+		ensureCompaction(turnThread(), workingDir, model)
+	}
+
 	_ = threadIDSeen // captured for clarity in logs above
 }
 
 // handleNonStreamResponse runs codex to completion and returns one OpenAI
 // chat.completion JSON. Failures preserve the existing session binding.
 func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codexInput, chatID string, created int64, model string, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() codexInput) {
+	if job := ensureCompaction(resumedThread(input), workingDir, model); job != nil && !awaitCompaction(r.Context(), job, nil) {
+		return
+	}
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -465,10 +503,15 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 					usage = openai.BuildUsageInfo(inp, out, cr, 0)
 				}
 			case "error", "turn.failed":
-				errorMsg = ev.Message
-				if errorMsg == "" && len(ev.Error) > 0 {
-					errorMsg = string(ev.Error)
+				msg := ev.Message
+				if msg == "" && len(ev.Error) > 0 {
+					msg = string(ev.Error)
 				}
+				if ev.Type == "error" && isCodexRetryNotice(msg) {
+					log.Printf("[CODEX RETRY] %s", msg)
+					continue
+				}
+				errorMsg = msg
 				// CODEX-3: failure events may still carry usage — meter them.
 				if ev.Usage != nil {
 					inp, out, cr := turnUsage(sessionID, ev.Usage)
@@ -529,6 +572,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", "Empty response from codex")
 		return
 	}
+	ensureCompaction(threadIDSeen, workingDir, model)
 	if rebuilt {
 		body = staleThreadNotice + body
 	}
@@ -558,6 +602,24 @@ func logCodexRaw(line string) {
 	if openai.DebugLogging() {
 		log.Printf("[CODEX RAW] %s", openai.Truncate(line, 500))
 	}
+}
+
+// isCodexRetryNotice reports codex's own retry notices, e.g. "Reconnecting...
+// 2/2 (stream disconnected before completion: websocket closed by server
+// before response.completed)". They arrive as error events, yet codex then
+// falls back from WebSockets to HTTPS by itself and the turn usually
+// completes; a turn that really fails still ends in turn.failed or without
+// turn.completed.
+func isCodexRetryNotice(msg string) bool {
+	return strings.HasPrefix(strings.TrimSpace(msg), "Reconnecting...")
+}
+
+// writeTextChunk writes one assistant text delta to an open SSE stream.
+func writeTextChunk(w http.ResponseWriter, f http.Flusher, id string, created int64, model, text string) {
+	data, _ := json.Marshal(openai.ChatCompletionResponse{ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+		Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("assistant", text)}}})
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	f.Flush()
 }
 
 // isStaleThreadErr reports whether a codex stderr line says the resumed thread
