@@ -475,6 +475,11 @@ def test_probe_error_only_reads_the_error(status_code, body, expected):
             "API Error: 400 This organization has been disabled.",
         ),
         (
+            {"error": {"message": "Your account is on hold and can't use Claude Code."}},
+            "auth_fail",
+            "Your account is on hold and can't use Claude Code.",
+        ),
+        (
             {"error": {"message": "OAuth token revoked · Please run /login"}},
             "auth_fail",
             "OAuth token revoked · Please run /login",

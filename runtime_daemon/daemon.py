@@ -298,11 +298,13 @@ AUTH_FAILURE_MARKERS = (
     "oauth token",
     "failed to authenticate",
     "oauth session expired",
-    # 凭据文件还在、auth status 仍报已登录，但账号已不可用（令牌吊销、组织或账号停用）。
+    # 凭据文件还在、auth status 仍报已登录，但账号已不可用（令牌吊销、组织或账号停用、账号被暂停）。
     "/login",
     "invalid api key",
     "token revoked",
     "has been disabled",
+    "account is on hold",
+    "claude.ai/restricted",
     "api error: 401",
     "api error: 403",
 )
