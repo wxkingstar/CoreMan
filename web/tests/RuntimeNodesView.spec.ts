@@ -349,3 +349,11 @@ it('marks private runtimes and lets the owner switch visibility', async () => {
   expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { visibility: 'all' })
   wrapper.unmount()
 })
+it('shows seats to platform admins and AI committee, not to leads or members who own a runtime', async () => {
+  for (const [role, visible] of [['platform_admin', true], ['ai_committee', true], ['team_lead', false], ['member', false]] as const) {
+    const wrapper = mountPage(role); await flushPromises()
+    expect(wrapper.find('[data-test="edit-runtime"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="runtime-seats"]').exists()).toBe(visible)
+    wrapper.unmount()
+  }
+})

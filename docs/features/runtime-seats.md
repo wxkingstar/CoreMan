@@ -1,10 +1,10 @@
 # 运行时席位
 
-一台运行时上的 Claude Code、Codex 或 OpenCode 可以登录多个账号（席位），同一时间只用其中一个。某个账号的额度用完时，平台管理员在管理台把这台机器切到另一个席位，机器上的 AI 员工不用换运行时，接着工作。整个过程不需要登录到运行时机器上。
+一台运行时上的 Claude Code、Codex 或 OpenCode 可以登录多个账号（席位），同一时间只用其中一个。某个账号的额度用完时，平台管理员或 AI 委员会成员在管理台把这台机器切到另一个席位，机器上的 AI 员工不用换运行时，接着工作。整个过程不需要登录到运行时机器上。
 
 ## 管理入口
 
-「运行时管理」节点列表的操作列里点「席位」（只有平台管理员能看到）。弹框按 AI 类型分别列出席位：名称、账号、登录状态、额度，以及「登录」「设为当前」「移除」。
+「运行时管理」节点列表的操作列里点「席位」（平台管理员和 AI 委员会能看到，团队负责人和普通成员看不到，自己注册的私有运行时也一样）。弹框按 AI 类型分别列出席位：名称、账号、登录状态、额度，以及「登录」「设为当前」「移除」。
 
 - **默认席位**：CLI 原来的位置（`~/.claude` / `~/.codex`，或服务环境给定的 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`）。不能移除。
 - **添加席位**：填一个名称（最多 60 字）。节点在 `<数据目录>/seats/<AI 类型>/<席位 id>/` 建配置目录，然后点「登录」。
@@ -37,6 +37,6 @@
 - 当前席位写进守护进程的环境变量，之后启动的驱动、健康检查、技能安装和 MCP 授权都继承它。
 - 切换时守护进程在新 socket 上起一个继承新席位环境的驱动，接后续请求；旧驱动等它手上的请求结束再停。
 - 节点在心跳的 `capabilities.<AI>.seats` 上报各席位的账号与登录状态，并声明 `seat_switch_v1`。
-- 接口：`POST /api/admin/runtime-nodes/{节点}/{AI}/seats`，以及 `…/seats/{席位}/login`、`…/login/complete`、`…/activate`、`DELETE …/seats/{席位}`，都只给平台管理员，并记审计（`runtime.seat_create`、`runtime.seat_login`、`runtime.seat_activate`、`runtime.seat_remove`）。
+- 接口：`POST /api/admin/runtime-nodes/{节点}/{AI}/seats`，以及 `…/seats/{席位}/login`、`…/login/complete`、`…/activate`、`DELETE …/seats/{席位}`，给平台管理员和 AI 委员会，并记审计（`runtime.seat_create`、`runtime.seat_login`、`runtime.seat_activate`、`runtime.seat_remove`）。
 
 需要数据库迁移 `0069`，运行时节点也要升级；未升级的节点在弹框里提示先升级。

@@ -18,8 +18,6 @@ import { BACKENDS } from '@/utils/models'
 const { t } = useI18n()
 const auth = useAuthStore()
 const canManage = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
-// 席位（节点上登录的账号）只有平台管理员能管。
-const isAdmin = computed(() => auth.user?.role === 'platform_admin')
 /** 普通成员只能管自己注册的节点；有一行能管就显示操作列。 */
 const anyManaged = computed(() => canManage.value || nodes.value.some(n => n.can_manage))
 /** 仅管理员可见只给管理员选；普通成员在公开与私有之间选。 */
@@ -481,7 +479,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     {{ t('common.edit') }}
                   </el-button>
                   <el-button
-                    v-if="isAdmin"
+                    v-if="canManage"
                     text
                     type="primary"
                     data-test="runtime-seats"
