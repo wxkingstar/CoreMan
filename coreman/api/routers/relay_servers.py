@@ -1,7 +1,8 @@
 """运行时实例（relay_servers）：列表、健康探测与目录预填、有效模型集。
 
 实例由运行时节点注册时自动创建（每个节点按 AI 类型各一行），管理台不再手工增删改。
-读：任何登录用户，但 `visibility='admins'` 的实例只对 ai_committee / platform_admin 可见；
+读：任何登录用户，但 `visibility='admins'` 的实例只对 ai_committee / platform_admin 可见，
+`visibility='private'` 的实例只对所有者本人可见；
 探测：ai_committee / platform_admin。
 """
 
@@ -23,7 +24,11 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.model_catalog import load_catalog
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
-from coreman.core.bots.relay_policy import backend_unavailable_reason, relay_visible
+from coreman.core.bots.relay_policy import (
+    backend_unavailable_reason,
+    relay_visible,
+    relay_visible_clause,
+)
 from coreman.core.db.models import Bot, ModelCatalog, RelayServer, RuntimeNode, Team, User
 from coreman.core.relay import probe
 from coreman.core.relay.client import RelayClient
@@ -36,7 +41,6 @@ router = APIRouter(
 )
 # B008：同 platform_apps，require_roles(...) 不能写进参数默认值里，挪成模块级单例。
 _MANAGERS = require_roles("ai_committee", "platform_admin")
-MANAGER_ROLES = ("ai_committee", "platform_admin")
 
 
 async def load_relay(session: AsyncSession, relay_id: uuid.UUID) -> RelayServer:
@@ -163,8 +167,7 @@ async def list_relays(
         .join(RuntimeNode, RuntimeNode.id == RelayServer.runtime_node_id)
         .order_by(RuntimeNode.name, RelayServer.model_provider, RelayServer.id)
     )
-    if user.role not in MANAGER_ROLES:
-        stmt = stmt.where(RelayServer.visibility == "all")
+    stmt = stmt.where(relay_visible_clause(user))
     if team_id is not None:
         stmt = stmt.where(RelayServer.team_id == team_id)
     if model_provider:

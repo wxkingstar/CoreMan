@@ -49,4 +49,5 @@ async def test_bundle_bytes_checksum_no_store_and_revocation(client, db_session,
     ).status_code == 200
     assert (await client.get(url)).status_code == 401
     await login_as(client, db_session, role="member")
-    assert (await client.get("/api/admin/runtime-nodes/install-links")).status_code == 403
+    # 成员只看到自己生成的安装链接。
+    assert (await client.get("/api/admin/runtime-nodes/install-links")).json()["data"] == []

@@ -709,7 +709,7 @@ python3 runtime_daemon/build.py --target linux-amd64 --target linux-arm64 \
 
 ### 11.2 生成安装链接
 
-使用已认证的平台管理员/允许管理运行时的角色生成安装链接。接口为 `POST /api/admin/runtime-nodes/install-links`，请求示例：
+任何已登录用户都可以生成安装链接，把自己的机器注册为运行时；生成链接的人就是节点的所有者，所有者与平台管理员、AI 委员会可以编辑、启停、删除它。接口为 `POST /api/admin/runtime-nodes/install-links`，请求示例：
 
 ```json
 {
@@ -727,7 +727,7 @@ python3 runtime_daemon/build.py --target linux-amd64 --target linux-arm64 \
 }
 ```
 
-需要团队归属时添加实际 team_id；`visibility` 选择 admins 或 all。根据机器资源和模型账号容量填写 max_concurrent，默认 4、允许 1–32，不等于吞吐保证。CLI 路径必须通过 `command -v` 实测后填写。
+需要团队归属时添加实际 team_id；`visibility` 默认 all（公开，所有人可选），private 为私有（只有所有者能为 AI 员工选用，管理员也不能），admins 为仅管理员可见。普通成员不能指定 team_id，也不能选 admins。根据机器资源和模型账号容量填写 max_concurrent，默认 4、允许 1–32，不等于吞吐保证。CLI 路径必须通过 `command -v` 实测后填写。
 
 通过已有管理会话调用接口，遵守其 CSRF 校验，不把账号口令或 Cookie 填入文档。返回的安装链接包含一次性秘密，按凭据处理；不放 Git、聊天记录或普通访问日志。
 

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import ColumnElement, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import RelayServer, RuntimeNode, User
@@ -17,8 +18,22 @@ MANAGER_ROLES = ("ai_committee", "platform_admin")
 
 
 def relay_visible(user: User, relay: RelayServer) -> bool:
-    """visibility='admins' 的实例只对 managers 可见（bots 路由复用）。"""
+    """能否选这个实例（bots 路由复用）：visibility='admins' 只对 managers，
+    'private' 只对所有者本人，managers 也不例外。"""
+    if relay.visibility == "private":
+        return relay.owner_id == user.id
     return relay.visibility == "all" or user.role in MANAGER_ROLES
+
+
+def relay_visible_clause(user: User) -> ColumnElement[bool]:
+    """relay_visible 的 SQL 版，用于列表查询。"""
+    clause = or_(
+        RelayServer.visibility == "all",
+        and_(RelayServer.visibility == "private", RelayServer.owner_id == user.id),
+    )
+    if user.role in MANAGER_ROLES:
+        clause = or_(clause, RelayServer.visibility == "admins")
+    return clause
 
 
 def relay_available(relay: RelayServer) -> bool:
