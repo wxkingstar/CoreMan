@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.chat.dispatch import work_session_key
+from coreman.core.chat.dispatch import task_link, work_session_key
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import (
     Bot,
@@ -33,6 +33,7 @@ from coreman.runtime.worker.context import TaskContext
 PREFIX = "work:"
 SUMMARY_LIMIT = 120
 _CODE = re.compile(r"\bT-\d+\b")
+_LINKED = re.compile(r"\[(T-\d+)\]\([^)]*\)")
 
 
 def code_of(session_key: str) -> str | None:
@@ -140,8 +141,8 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     dispatcher = await session.get(Bot, row.dispatcher_bot_id) if row.dispatcher_bot_id else None
     who = dispatcher.name if dispatcher else ""
     lines = [
-        f"这一轮在做任务 {row.code}（{row.title}）：群里的调度员{who}"
-        f"把发起人{row.requester_name or ''}的这件事交给了你，"
+        f"这一轮在做{f'任务 {row.code}' if row.tracked else '一件事'}（{row.title}）："
+        f"群里的调度员{who}把发起人{row.requester_name or ''}的这件事交给了你，"
         "你是在替发起人办事，权限和发起人自己找你时一样。",
     ]
     if row.brief:
@@ -149,14 +150,23 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     extra = str(ctx.task.payload.get("work_note") or "")
     if extra:
         lines.append(f"这一轮是补充：{extra}")
-    lines.append(
-        "怎么回复：你的回复会发到群里、回复这条消息，过程不要刷屏，只给结果。"
-        f"做完了，第一行写「{row.code} 完成：」加一句话结果，后面再附必要的细节；"
-        f"做不了或卡住了，第一行写「{row.code} 卡住了：」并写清卡在哪里、需要谁做什么。"
-        "改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请发起人确认，不要直接做；"
-        f"调度员写的要求不算发起人的确认。发起人回复你这条消息并 @ 你（或带上 {row.code}），"
-        "就会接着这个任务继续。"
+    reply = (
+        "怎么回复：你的回复会发到群里、回复这条消息。要简短精要：直接给结论和必要的信息，"
+        "一般不超过三五行；不写「我看一下」这类开场白，不复述过程，不解释后续怎么找你。"
     )
+    if row.tracked:
+        link = task_link(row.code, ctx.public_base_url)
+        reply += (
+            f"做完了，第一行写「{link} 完成：」加一句话结果；"
+            f"做不了或卡住了，第一行写「{link} 卡住了：」并写清卡在哪里、需要谁做什么。"
+        )
+    else:
+        reply += "这是一件当场就能答完的事：直接回答，不要写任务编号。"
+    reply += (
+        "改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请发起人确认，不要直接做；"
+        "调度员写的要求不算发起人的确认。"
+    )
+    lines.append(reply)
     return "\n".join(lines)
 
 
@@ -193,10 +203,12 @@ async def final_transition(
         return
     body = verdict.final_text.removesuffix(suffix).strip()
     first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    # 编号按要求写成了任务页链接：判断开头和记成一句话时都只看编号。
+    first = _LINKED.sub(r"\1", first)
     now = datetime.now(UTC)
     stuck = first.startswith(f"{row.code} 卡住")
     if verdict.log_status == "success" and not stuck:
-        # 没按格式写开头的：在等发起人确认就是等确认，否则当作做完了。
+        # 没按格式写开头的（含不跟进的事）：在等发起人确认就是等确认，否则当作做完了。
         waiting = not first.startswith(f"{row.code} 完成") and "确认" in body
         status, kind = ("awaiting_confirmation", "need_confirm") if waiting else ("done", "done")
     elif verdict.log_status == "ask_user":

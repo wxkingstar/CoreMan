@@ -439,6 +439,7 @@ class FinalizeStage(ChatStageBase):
                         chat_task_id=ctx.task.id,
                         live=live,
                         requester_pid=intake.speaker.platform_user_id,
+                        base_url=ctx.public_base_url,
                     )
             result["staff"] = [e.key for e in ctx.dispatch_staff]
             if line:

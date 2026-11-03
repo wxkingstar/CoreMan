@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -84,6 +85,8 @@ class WorkTask(Base):
     brief: Mapped[str] = mapped_column(Text, server_default=text("''"))
     # 完成时的任务记要（Agent 层），后续相关任务的背景。
     digest: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # 要不要在群里跟进：简单的事照样记下，但群里不出编号、调度员不发言，执行员工直接回复。
+    tracked: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

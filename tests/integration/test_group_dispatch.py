@@ -280,6 +280,7 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
                 "assignee": "data_bot",
                 "summary": "算出上周退货率",
                 "brief": "口径按退货单数除以签收单数",
+                "track": True,
             }
         ],
     )
@@ -288,7 +289,9 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     )
     (task,) = list(await db_session.scalars(select(WorkTask)))
     assert task.status == "queued"
-    assert stream.final_text == f"@数据助手 查上周退货率（{task.code}）"  # 群里回一行
+    assert task.tracked
+    link = f"[{task.code}](http://localhost/work-tasks/{task.code})"  # 点开看任务页
+    assert stream.final_text == f"@数据助手 查上周退货率（{link}）"  # 群里回一行
     assert decision.dispatch["said"] == stream.final_text
     from coreman.core.db.models import Task
 
@@ -298,12 +301,12 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     assert handoff.inbound_event_id == task.origin_event_id
 
     done, body, reply = await _run_work_turn(
-        db_engine, db_session, monkeypatch, staff[0].bot_id, f"{task.code} 完成：上周退货率 4.2%"
+        db_engine, db_session, monkeypatch, staff[0].bot_id, f"{link} 完成：上周退货率 4.2%"
     )
     assert done.status == "succeeded"
     turn = body["messages"][-1]["content"]
     turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
-    assert "口径按退货单数除以签收单数" in turn and f"「{task.code} 完成：」" in turn
+    assert "口径按退货单数除以签收单数" in turn and f"「{link} 完成：」" in turn
     assert reply.reply_context["message_id"] == "om1"  # 回复发起人的原消息
     await db_session.refresh(task)
     assert task.status == "done" and task.summary == f"{task.code} 完成：上周退货率 4.2%"
@@ -316,6 +319,32 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
         )
     ]
     assert kinds == ["created", "started", "done"]
+
+
+async def test_simple_requests_are_answered_directly_without_a_task_code(
+    db_engine, db_session, monkeypatch
+):
+    answer = plan(
+        action="create",
+        reason="问办法",
+        tasks=[{"title": "说明白名单办理方式", "assignee": "ops_bot", "summary": "说明找谁"}],
+    )
+    _, _, stream, decision, _, staff = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, answer, mode="on"
+    )
+    (task,) = list(await db_session.scalars(select(WorkTask)))
+    assert not task.tracked and task.status == "queued"  # 没写 track：照样交接、记下
+    assert stream.final_text == group_observe.NO_REPLY  # 调度员不发言
+    assert "said" not in decision.dispatch
+
+    done, body, _ = await _run_work_turn(
+        db_engine, db_session, monkeypatch, staff[1].bot_id, "找运维开通，发来页面上的 IP 即可。"
+    )
+    turn = body["messages"][-1]["content"]
+    turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
+    assert "不要写任务编号" in turn and task.code not in turn
+    await db_session.refresh(task)
+    assert task.status == "done" and task.summary == "找运维开通，发来页面上的 IP 即可。"
 
 
 async def test_live_dispatcher_asks_in_the_group_when_unclear(db_engine, db_session, monkeypatch):
