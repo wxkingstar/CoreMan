@@ -109,6 +109,7 @@ async def headers(app, task, user):
             user_id=str(user.id),
             context_epoch=epoch,
             base_session_id=sid,
+            ttl_seconds=1800,
         )
     }
 

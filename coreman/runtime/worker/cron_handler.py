@@ -482,6 +482,7 @@ class CronRunHandler:
             user_id=str(actor.id),
             context_epoch=grant.context_epoch,
             base_session_id=None,
+            ttl_seconds=bot.sse_timeout_seconds + policy.CAPABILITY_GRACE,
         )
         rules, note = feishu_guidance(grant, base_url, scheduled=True)
         ctx.turn_notes.append(note)

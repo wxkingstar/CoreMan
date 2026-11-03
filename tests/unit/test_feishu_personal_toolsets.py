@@ -106,6 +106,11 @@ SAMPLES = {
         "record_id": "rec1",
         "fields": {"A": 2},
     },
+    "feishu_base_batch_update_records": {
+        "app_token": "app1",
+        "table_id": "tbl1",
+        "records": [{"record_id": "rec1", "fields": {"A": 2}}],
+    },
     "feishu_base_delete_record": {"app_token": "app1", "table_id": "tbl1", "record_id": "rec1"},
     "feishu_wiki_spaces": {},
     "feishu_wiki_node": {"token": "wik1"},
