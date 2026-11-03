@@ -33,8 +33,8 @@ STAFF = [
 ]
 
 
-async def dispatcher_bot(session):
-    bot = await observing_bot(session, mode="shadow")
+async def dispatcher_bot(session, mode="shadow"):
+    bot = await observing_bot(session, mode=mode)
     bot.group_role = "dispatcher"
     bot.group_observe_scope = "运营团队的工作群"
     await session.commit()
@@ -45,7 +45,7 @@ def plan(**data):
     return "```json\n" + json.dumps(data, ensure_ascii=False) + "\n```"
 
 
-async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str):
+async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str, mode="shadow"):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.fakes import fake_relay
@@ -60,7 +60,7 @@ async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str):
             fake_relay.DONE,
         ],
     )
-    bot = await dispatcher_bot(db_session)
+    bot = await dispatcher_bot(db_session, mode)
     # 员工都换成真实存在的机器人，任务的执行员工外键才挂得上。
     staff = []
     for item in STAFF:
@@ -237,3 +237,114 @@ async def test_members_leave_groups_with_a_dispatcher_to_it(
         assert state.pending_since is None
     else:
         assert len(decider.calls) == 1
+
+
+async def _run_work_turn(db_engine, db_session, monkeypatch, assignee_id, answer: str):
+    from coreman.core.bus import tasks
+    from coreman.core.db.models import Task
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.fakes import fake_relay
+
+    monkeypatch.setitem(
+        fake_relay.SCENARIOS,
+        "work_answer",
+        lambda: [
+            fake_relay._text(answer),
+            fake_relay.FINISH,
+            fake_relay._chunk(None, usage=fake_relay.USAGE),
+            fake_relay.DONE,
+        ],
+    )
+    turn = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert turn is not None and turn.bot_id == assignee_id
+    relay = fake_relay.FakeRelay("work_answer")
+    ctx = build_ctx_for(db_engine, turn, relay)
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == turn.id))
+    done = await db_session.get(Task, turn.id, populate_existing=True)
+    assert relay.requests, (done.status, done.error_code, done.error_message)
+    return done, relay.requests[0], stream
+
+
+async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back(
+    db_engine, db_session, monkeypatch
+):
+    answer = plan(
+        action="create",
+        reason="数据问题",
+        tasks=[
+            {
+                "title": "查上周退货率",
+                "assignee": "data_bot",
+                "summary": "算出上周退货率",
+                "brief": "口径按退货单数除以签收单数",
+            }
+        ],
+    )
+    bot, _, stream, decision, _, staff = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, answer, mode="on"
+    )
+    (task,) = list(await db_session.scalars(select(WorkTask)))
+    assert task.status == "queued"
+    assert stream.final_text == f"@数据助手 查上周退货率（{task.code}）"  # 群里回一行
+    assert decision.dispatch["said"] == stream.final_text
+    from coreman.core.db.models import Task
+
+    (handoff,) = list(await db_session.scalars(select(Task).where(Task.bot_id == staff[0].bot_id)))
+    assert handoff.session_key == dispatch.work_session_key(task.code)
+    assert handoff.payload["work_task_id"] == task.id
+    assert handoff.inbound_event_id == task.origin_event_id
+
+    done, body, reply = await _run_work_turn(
+        db_engine, db_session, monkeypatch, staff[0].bot_id, f"{task.code} 完成：上周退货率 4.2%"
+    )
+    assert done.status == "succeeded"
+    turn = body["messages"][-1]["content"]
+    turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
+    assert "口径按退货单数除以签收单数" in turn and f"「{task.code} 完成：」" in turn
+    assert reply.reply_context["message_id"] == "om1"  # 回复发起人的原消息
+    await db_session.refresh(task)
+    assert task.status == "done" and task.summary == f"{task.code} 完成：上周退货率 4.2%"
+    kinds = [
+        e.kind
+        for e in await db_session.scalars(
+            select(WorkTaskEvent)
+            .where(WorkTaskEvent.work_task_id == task.id)
+            .order_by(WorkTaskEvent.id)
+        )
+    ]
+    assert kinds == ["created", "started", "done"]
+
+
+async def test_live_dispatcher_asks_in_the_group_when_unclear(db_engine, db_session, monkeypatch):
+    answer = plan(action="clarify", reason="不清楚", question="要看线上还是门店？")
+    _, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, answer, mode="on"
+    )
+    assert stream.final_text == "要看线上还是门店？"
+    assert decision.outcome == "dispatch_clarify"
+
+
+async def test_mentions_carrying_a_task_code_continue_that_task(db_session):
+    from coreman.runtime.worker.chat import work
+
+    first = await observing_bot(db_session)
+    assignee = await another_bot(db_session, first, "data_bot", "数据助手")
+    row = WorkTask(
+        title="查退货率",
+        status="done",
+        platform="feishu",
+        chat_id=CHAT,
+        assignee_bot_id=assignee.id,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    expected = dispatch.work_session_key(row.code)
+    same = await work.continued(db_session, assignee, CHAT, f"{row.code} 再加个渠道", None)
+    assert same == expected
+    quoted = await work.continued(db_session, assignee, CHAT, "确认", f"{row.code} 完成：…")
+    assert quoted == expected
+    assert await work.continued(db_session, first, CHAT, row.code, None) is None  # 不是它的任务
+    assert await work.continued(db_session, assignee, "oc_other", row.code, None) is None

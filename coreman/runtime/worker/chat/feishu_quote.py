@@ -75,7 +75,7 @@ def _text_quote(text: str) -> dict[str, Any]:
     return {"type": "quote", "kind": "text", "text": bounded(text), "refs": []}
 
 
-async def _persisted_text(
+async def persisted_text(
     session: AsyncSession, *, bot: Bot, chat_id: str, parent_id: str
 ) -> str | None:
     archived = await session.scalar(
@@ -282,7 +282,7 @@ async def enrich(
         return _note(parts, text, UNAVAILABLE)
     if any(part.get("type") == "quote" for part in parts):
         return Enriched(parts, text)
-    quoted = await _persisted_text(session, bot=bot, chat_id=chat_id, parent_id=parent_id)
+    quoted = await persisted_text(session, bot=bot, chat_id=chat_id, parent_id=parent_id)
     if quoted is not None:
         return Enriched([*parts, _text_quote(quoted)], text)
     # 不在官方 HTTP 往返期间占着数据库事务/连接。

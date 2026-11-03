@@ -21,11 +21,6 @@ const requesting = ref(false)
 const savedOff = savedBot?.group_observe === 'off'
 const blocked = (): boolean => savedOff && permission.value !== 'granted'
 
-// 调度员目前只能试运行：切成调度员时把「开启」退回到「试运行」。
-function onRoleChange(role: string | number | boolean | undefined): void {
-  if (role === 'dispatcher' && form.group_observe === 'on') form.group_observe = 'shadow'
-}
-
 async function checkPermission(): Promise<void> {
   if (!botId) return
   checking.value = true
@@ -103,7 +98,6 @@ onMounted(() => {
     >
       <el-radio-group
         v-model="form.group_role"
-        @change="onRoleChange"
       >
         <el-radio-button value="member">
           {{ t('groupObserve.roles.member') }}
@@ -136,7 +130,7 @@ onMounted(() => {
         </el-radio-button>
         <el-radio-button
           value="on"
-          :disabled="blocked() || form.group_role === 'dispatcher'"
+          :disabled="blocked()"
         >
           {{ t('groupObserve.modes.on') }}
         </el-radio-button>

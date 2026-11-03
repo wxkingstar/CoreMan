@@ -457,7 +457,7 @@ export default {
   statistics: {"start": "开始日期", "end": "结束日期", "hint": "汇总全平台的对话与定时执行记录，只含聚合数字、不含对话内容。金额是已有计量记录的估算小计，未计量部分不按零计算；用户排行按 Token 合计倒序，排行最多 50 项。", "messages": "消息 / 执行记录", "users": "活跃用户", "bots": "活跃AI 员工", "cost": "成本估算（USD）", "coverage": "已计量 {n} / {total} 条", "unknown": "未计量", "input_tokens": "输入 Token", "output_tokens": "输出 Token", "cache_read_tokens": "缓存读取 Token", "cache_creation_tokens": "缓存写入 Token", "trend": "每日使用趋势", "botRanking": "AI 员工排行", "userRanking": "用户排行", "tokens": "Token 合计", "prices": "模型价格", "priceHint": "单位为 USD / 百万 Token，生效日按 UTC。请填写实际采用的价格；保存只影响之后写入的成本快照，不重新计算历史记录。缓存类型无法计量时不估价。", "model": "完整模型标识", "effective": "生效日期", "provider": "模型后端", "input_usd": "输入单价", "output_usd": "输出单价", "cache_read_usd": "缓存读取单价", "cache_write_usd": "缓存写入单价"},
   skill: {disabledHint: "来源同步的技能默认禁用。请先配置授权方式和运行环境，并启用后再安装。", configureEnable: "配置并启用", emptyCatalog: "暂无已启用的技能，请联系技能管理员在技能目录中配置并启用。", "packageVersion": "安装包版本", "security": "授权方式", "public": "直接安装", "internal": "需审核", "remove": "停用 / 撤回", "removeHint": "停止后续 CoreMan 请求注入此技能的凭据并撤回待审申请。运行时代码、MCP 文件及其中的静态凭据保留；运行中的操作可能继续。外部账号须单独撤权。确认停用？", "installHint": "提交后由运行时执行安装，刷新查看状态。内部技能须经审核，批准范围以审核结果为准。", "available": "可安装技能", "configureInstall": "配置并安装", "databases": "数据库范围", "dataSource": "数据源", "policy": "安全约束", "reinstall": "安装 / 更新代码", "requester": "申请人", "comment": "审核意见", "review": "审核申请", "decision": "审核决定", "approve": "批准", "reject": "拒绝", "requestedPolicy": "申请的安全约束", "policyHint": "可选。技能已自带约束时可留空；填写的内容会追加到 AI 员工的系统提示词。", "noPolicy": "未填写", "catalog": "技能目录", "sources": "技能来源", "presets": "环境预设", "repository": "仓库地址", "presetHint": "已有值仅显示掩码；保留掩码代表不修改。更改预设后须重新安装技能才会更新运行配置。", "duplicateKey": "配置标识不能重复", "fixedGroups": "固定环境组", "selectableGroups": "可申请的数据库组", "dorisGroups": "支持 Doris 的数据库组", "installType": "安装方式", "repositoryOverride": "独立仓库地址（空则使用来源）", "mcpConfig": "MCP 配置（JSON）", "preserveConfig": "留空保留已保存的加密配置", "userFields": "用户需填写的配置", "required": "必填", "status": {"installed": "已安装", "pending_approval": "等待审核", "installing": "安装中", "failed": "安装未完成", "uninstalled": "已停用", "pending": "等待审核", "approved": "已批准", "rejected": "已拒绝", "withdrawn": "已撤回"}},
   workTasks: {
-    title: '任务', hint: '调度员分派的任务。目前是试运行：只记录「会交给谁」，还没有真的交接。',
+    title: '任务', hint: '调度员分派的任务。调度员试运行时只记录「会交给谁」；开启后任务会交给执行员工去做，完成后在群里回复结果。',
     search: '搜索编号、标题或描述', allStatuses: '全部状态', code: '编号', taskTitle: '标题', status: '状态',
     assignee: '执行员工', requester: '发起人', dispatcher: '调度员', created: '创建时间', updated: '更新时间',
     summary: '要做什么', related: '相关任务', timeline: '时间线', noEvents: '还没有记录',
@@ -469,7 +469,7 @@ export default {
   groupObserve: {
     role: '群聊角色', roles: { member: '普通员工', dispatcher: '调度员' },
     memberHint: '普通员工：开了旁听后自己判断要不要主动接话。',
-    dispatcherHint: '调度员：只负责把群里的事分派给合适的 AI 员工，自己不干活。目前只能试运行：只记录「会交给谁」，记在「任务」页里，不在群里发言、也不真的交接。',
+    dispatcherHint: '调度员：只负责把群里的事分派给合适的 AI 员工，自己不干活。试运行只把「会交给谁」记在「任务」页里，不在群里发言；开启后在群里回一行分派，任务交给执行员工以发起人的身份去做，做完回复原消息。',
     teamScope: '团队简介', teamScopePlaceholder: '例如：这个群是运营团队的工作群，日常有数据查询、后台操作、报表需求，也会有服务器和权限问题。',
     teamScopeHint: '交给判断模型的团队背景：这个群一般在聊什么、有哪些类型的需求。选谁去做由调度员根据各员工的旁听职责说明决定。',
     tab: '群聊旁听', title: '旁听判断记录', mode: '群聊旁听',

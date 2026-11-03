@@ -2,8 +2,9 @@
 
 第一段（判断要不要调度）沿用旁听的判断任务，只换判断题；判断为是时排一个调度回合
 （`origin = dispatch`）。调度员在这一轮读群聊、员工名录和这个群最近的任务，按固定格式输出
-一个 JSON 决定；平台在这里校验并落库。第一期（试运行）只记录「会这样分派」：任务状态是
-`shadow`，不交接、不往群里发任何消息。
+一个 JSON 决定；平台在这里校验并落库。试运行（旁听开关 `shadow`）只记录「会这样分派」：
+任务状态是 `shadow`，不交接、不往群里发任何消息。开启（`on`）时群里回一行简述，任务在内部
+直接交给执行员工：排一轮它的对话（会话键 `work:<编号>`），以发起人的身份去做。
 见 docs/superpowers/specs/2026-11-02-group-dispatcher-and-work-tasks.md。
 """
 
@@ -19,6 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.bus import tasks as bus
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotAllowedUser, WorkTask, WorkTaskEvent
 
@@ -43,6 +45,11 @@ OUTCOMES = {
 def session_key(chat_id: str) -> str:
     """调度回合的会话键：每个群一条，调度员记得自己在这个群分派过什么，也不和 @ 它的对话混。"""
     return f"dispatch:{chat_id}"
+
+
+def work_session_key(code: str) -> str:
+    """执行员工做任务的会话键：每个任务一条，补充和追问续上同一个会话，不和群里的 @ 互相打断。"""
+    return f"work:{code}"
 
 
 @dataclass(frozen=True)
@@ -225,12 +232,20 @@ async def record(
     staff: list[Employee],
     decision_id: int | None,
     chat_task_id: int,
-) -> list[str]:
-    """试运行：把决定记成任务和事件（状态 shadow），不交接、不发消息；返回涉及的任务编号。"""
+    live: bool = False,
+    requester_pid: str = "",
+) -> tuple[list[str], str | None]:
+    """把决定记成任务和事件；返回涉及的任务编号，以及要回在群里的一行（不发言时为 None）。
+
+    试运行（`live = False`）：任务状态 shadow，不交接、不发消息。开启时任务直接排进执行员工
+    的队列，追加的补充也排一轮给原执行员工。
+    """
     by_key = {e.key: e for e in staff}
     actor = {"actor_type": "bot", "actor_id": str(dispatcher.id), "chat_task_id": chat_task_id}
     detail = {"reason": plan.reason, "decision_id": decision_id}
+    trial = "" if live else "试运行："
     codes: list[str] = []
+    line: str | None = None
     if plan.action == "create":
         created: list[WorkTask] = []
         for item in plan.tasks:
@@ -238,7 +253,7 @@ async def record(
             row = WorkTask(
                 title=item["title"],
                 summary=item["summary"],
-                status="shadow",
+                status="queued" if live else "shadow",
                 platform="feishu",
                 chat_id=chat_id,
                 origin_event_id=event_id,
@@ -257,16 +272,24 @@ async def record(
         for row, item in zip(created, plan.tasks, strict=True):
             if len(created) > 1:
                 row.related_codes = [*row.related_codes, *(c for c in siblings if c != row.code)]
+            name = by_key[item["assignee"]].name
             session.add(
                 WorkTaskEvent(
                     work_task_id=row.id,
                     kind="created",
-                    human_text=f"试运行：调度员会交给{by_key[item['assignee']].name}",
+                    human_text=f"{trial}调度员{'交给' if live else '会交给'}{name}",
                     agent_detail=detail,
                     **actor,
                 )
             )
             codes.append(row.code)
+        if live:
+            for row in created:
+                await hand_off(session, row, event_id=event_id, requester_pid=requester_pid)
+            line = "\n".join(
+                f"@{by_key[item['assignee']].name} {item['title']}（{row.code}）"
+                for row, item in zip(created, plan.tasks, strict=True)
+            )
     elif plan.action == "append":
         target = await session.scalar(
             select(WorkTask).where(WorkTask.code == plan.task_code, WorkTask.chat_id == chat_id)
@@ -276,12 +299,65 @@ async def record(
                 WorkTaskEvent(
                     work_task_id=target.id,
                     kind="comment",
-                    human_text=f"试运行：调度员会补充给原执行员工：{plan.note[:60]}",
+                    human_text=(
+                        f"{trial}调度员{'补充' if live else '会补充'}给原执行员工：{plan.note[:60]}"
+                    ),
                     agent_detail={**detail, "note": plan.note},
                     **actor,
                 )
             )
             target.updated_at = datetime.now(UTC)
             codes.append(target.code)
+            assignee = (
+                await session.get(Bot, target.assignee_bot_id) if target.assignee_bot_id else None
+            )
+            # 试运行期间记下的任务没有真的交出去，开启后也不续它：那件事从没人做过。
+            if live and assignee is not None and target.status != "shadow":
+                await hand_off(
+                    session, target, event_id=event_id, requester_pid=requester_pid, note=plan.note
+                )
+                line = f"补充给 @{assignee.name} 了（{target.code}）"
+    elif plan.action == "clarify" and live:
+        line = plan.question
     await session.flush()
-    return codes
+    return codes, line
+
+
+async def hand_off(
+    session: AsyncSession,
+    row: WorkTask,
+    *,
+    event_id: int | None,
+    requester_pid: str,
+    note: str = "",
+) -> None:
+    """把任务交给执行员工：排一轮它的对话，回复挂在 `event_id` 那条群消息上。
+
+    不靠飞书把调度员那条 @ 推给执行员工（机器人之间的推送要额外权限）。这一轮以发起人的
+    身份做，执行员工的回合里会再核对一遍发起人和白名单。
+    """
+    if row.assignee_bot_id is None or event_id is None:
+        return
+    bot = await session.get(Bot, row.assignee_bot_id)
+    if bot is None:
+        return
+    row.status, row.closed_at, row.updated_at = "queued", None, datetime.now(UTC)
+    await bus.enqueue(
+        session,
+        bus.NewTask(
+            bot_id=bot.id,
+            kind="chat",
+            user_id=row.requester_user_id,
+            inbound_event_id=event_id,
+            session_key=work_session_key(row.code),
+            dedupe_key=f"work:{row.id}:{event_id}",
+            payload={
+                "work_task_id": row.id,
+                "work_note": note,
+                "bot_key": bot.bot_key,
+                "platform_user_id": requester_pid,
+                # 同一个任务的补充排在上一轮之后，不替代正在做的那一轮。
+                "serialize_session": True,
+            },
+        ),
+    )
