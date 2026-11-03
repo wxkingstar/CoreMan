@@ -37,6 +37,8 @@ from coreman.core.personal_credentials.service import RESUME_KIND
 
 AAD = "feishu_personal.task_capability.v1"
 PREFIX = "COREMAN_FEISHU_PERSONAL_"
+# 工具凭证覆盖整轮：机器人的单轮上限（sse_timeout_seconds）再加这点余量。
+CAPABILITY_GRACE = 300
 # 本人私聊的一轮，或凭证提交、审批决定后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
 PRIVATE_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND)
 # 运行时声明了它，才会把个人工具作为附加 MCP 挂上，而不改变机器人原有能力。
@@ -83,11 +85,12 @@ def issue_capability(
     user_id: str,
     context_epoch: uuid.UUID,
     base_session_id: uuid.UUID | None,
+    ttl_seconds: int,
 ) -> str:
     claims: dict[str, Any] = {
         "task": task_id,
         "actor": user_id,
-        "exp": time.time() + 1800,
+        "exp": time.time() + ttl_seconds,
         "epoch": str(context_epoch),
     }
     if base_session_id is not None:

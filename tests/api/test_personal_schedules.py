@@ -446,6 +446,7 @@ async def test_scheduled_capability_revalidates_the_job(app, client, db_session,
         user_id=str(user.id),
         context_epoch=(await grant_epoch(db_session, bot, user)),
         base_session_id=None,
+        ttl_seconds=1800,
     )
     auth = {"Authorization": "Bearer " + token}
     listed = await client.post(

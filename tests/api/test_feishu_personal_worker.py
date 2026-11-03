@@ -71,6 +71,23 @@ async def test_private_chat_keeps_the_assistant_and_adds_personal_tools(db_sessi
     assert await db_session.get(FeishuPersonalGrant, (bot.id, user.id)) is None
 
 
+async def test_the_capability_lasts_as_long_as_the_bot_allows_a_turn(
+    db_session, app, db_engine, monkeypatch
+):
+    bot, _, task = await setup(db_session, app)
+    bot.sse_timeout_seconds = 7200
+    intake = await intake_for(db_session, bot, task, "把这张表批量更新一下")
+    ctx = build_ctx(db_engine, task)
+    _, env = await configure(db_session, ctx, intake, uuid.uuid4(), "你是销售", {})
+    token = env[policy.PREFIX + "TOKEN"]
+    now = policy.time.time()
+    monkeypatch.setattr(policy.time, "time", lambda: now + 7200)
+    assert policy.read_capability(ctx.cipher, token).task_id == task.id
+    monkeypatch.setattr(policy.time, "time", lambda: now + 7200 + policy.CAPABILITY_GRACE + 1)
+    with pytest.raises(ValueError, match="expired_capability"):
+        policy.read_capability(ctx.cipher, token)
+
+
 async def test_a_credential_resume_turn_keeps_the_personal_tools(db_session, app, db_engine):
     bot, user, task = await setup(db_session, app)
     resume = await resume_task(db_session, task, user)
@@ -319,6 +336,7 @@ async def _without_grant(app, task, user):
         user_id=str(user.id),
         context_epoch=policy.NO_GRANT_EPOCH,
         base_session_id=info.relay_session_id,
+        ttl_seconds=1800,
     )
     return {"Authorization": "Bearer " + token}
 
@@ -448,6 +466,7 @@ async def test_chat_capability_cannot_name_a_scheduled_task(db_session, app, cli
         user_id=str(user.id),
         context_epoch=policy.NO_GRANT_EPOCH,
         base_session_id=None,
+        ttl_seconds=1800,
     )
     response = await client.post(
         URL, headers={"Authorization": "Bearer " + token}, json=rpc("schedule_list")

@@ -296,6 +296,19 @@ class UpdateRecord(RecordFields):
     record_id: Identifier
 
 
+class RecordUpdate(Arguments):
+    record_id: Identifier
+    fields: dict[FieldName, JsonValue] = Field(
+        min_length=1, max_length=200, description="Field name to value, shaped by field type"
+    )
+
+
+class BatchUpdateRecords(Arguments):
+    app_token: Identifier
+    table_id: Identifier
+    records: list[RecordUpdate] = Field(min_length=1, max_length=1000)
+
+
 class RecordRef(Arguments):
     app_token: Identifier
     table_id: Identifier
@@ -758,6 +771,21 @@ async def base_update(args: UpdateRecord, call: Call) -> dict[str, Any]:
     )
 
 
+@tool(
+    "feishu_base_batch_update_records",
+    BatchUpdateRecords,
+    "bitable.batch_update",
+    "Update up to 1000 Base records in one call; each record lists only the fields to change.",
+)
+async def base_batch_update(args: BatchUpdateRecords, call: Call) -> dict[str, Any]:
+    return await call(
+        "bitable.batch_update",
+        path={"app_token": args.app_token, "table_id": args.table_id},
+        params={"user_id_type": "open_id"},
+        json={"records": [record.model_dump() for record in args.records]},
+    )
+
+
 @tool("feishu_base_delete_record", RecordRef, "bitable.delete", "Delete a Base record.")
 async def base_delete(args: RecordRef, call: Call) -> dict[str, Any]:
     return await call(
@@ -834,6 +862,7 @@ TOOLS = [
     base_create_field,
     base_create,
     base_update,
+    base_batch_update,
     base_delete,
     wiki_spaces,
     wiki_node,

@@ -524,6 +524,9 @@ ENDPOINTS: dict[str, Endpoint] = {
     "bitable.update": _e(
         "PUT", _TABLE + "/records/{record_id}", "write", "bitable:app", "base:record:update"
     ),
+    "bitable.batch_update": _e(
+        "POST", _TABLE + "/records/batch_update", "write", "bitable:app", "base:record:update"
+    ),
     "bitable.delete": _e(
         "DELETE", _TABLE + "/records/{record_id}", "write", "bitable:app", "base:record:delete"
     ),

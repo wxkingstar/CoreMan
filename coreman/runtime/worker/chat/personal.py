@@ -216,6 +216,7 @@ async def configure(
         user_id=str(scope.user_id),
         context_epoch=row.context_epoch if row else policy.NO_GRANT_EPOCH,
         base_session_id=base_session_id,
+        ttl_seconds=scope.bot.sse_timeout_seconds + policy.CAPABILITY_GRACE,
     )
     # 本人定时任务的说明由 chat.schedules 统一追加（飞书与企业微信共用）。
     rules, note = feishu_guidance(row, base_url, scheduled=False)
