@@ -418,7 +418,7 @@ const en = {
     status: { installed: 'Installed', pending_approval: 'Awaiting approval', installing: 'Installing', failed: 'Installation incomplete', uninstalled: 'Deactivated', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected', withdrawn: 'Withdrawn' },
   },
   workTasks: {
-    title: 'Tasks', hint: 'Tasks assigned by dispatchers. Currently a trial: it only records who would be assigned; nothing is handed over yet.',
+    title: 'Tasks', hint: 'Tasks assigned by dispatchers. In trial mode a dispatcher only records who would be assigned; when on, tasks are handed to the assignee, which replies in the group when done.',
     search: 'Search code, title or summary', allStatuses: 'All statuses', code: 'Code', taskTitle: 'Title', status: 'Status',
     assignee: 'Assignee', requester: 'Requester', dispatcher: 'Dispatcher', created: 'Created', updated: 'Updated',
     summary: 'What to do', related: 'Related tasks', timeline: 'Timeline', noEvents: 'Nothing recorded yet',
@@ -430,7 +430,7 @@ const en = {
   groupObserve: {
     role: 'Group role', roles: { member: 'Employee', dispatcher: 'Dispatcher' },
     memberHint: 'Employee: with observing on, it decides on its own whether to speak up.',
-    dispatcherHint: 'Dispatcher: only routes requests in the group to the right AI employee and does no work itself. Currently trial only: it records who it would assign on the Tasks page, without speaking in the group or handing anything over.',
+    dispatcherHint: 'Dispatcher: only routes requests in the group to the right AI employee and does no work itself. In trial mode it only records who it would assign on the Tasks page and stays silent; when on, it posts a one-line assignment in the group and the assignee works on the task as the requester, replying to the original message when done.',
     teamScope: 'Team overview', teamScopePlaceholder: 'For example: the operations team group; usual requests are data lookups, admin console operations and reports, plus some server and permission issues.',
     teamScopeHint: 'Background for the decision model: what this group usually discusses and what kinds of requests come up. Who does the work is decided by the dispatcher from each employee\'s observing scope.',
     tab: 'Group observing', title: 'Observing decisions', mode: 'Group observing',

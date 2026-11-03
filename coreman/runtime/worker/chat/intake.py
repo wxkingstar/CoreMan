@@ -57,6 +57,10 @@ class IntakeStage(ChatStageBase):
             from coreman.runtime.worker.chat import human_collaboration
 
             return await human_collaboration.resolve(session, ctx)
+        if ctx.task.payload.get("work_task_id"):
+            from coreman.runtime.worker.chat import work
+
+            return await work.resolve(session, ctx)
         return await self._intake(session, ctx)
 
     def _needs_content(self) -> bool:
@@ -114,6 +118,19 @@ class IntakeStage(ChatStageBase):
                 session, ctx, bot, inbound, speaker, parts, text
             ):
                 return None
+            if chat_type == "group":
+                # 接着调度员派给它的某个任务说：续进那个任务的会话。
+                from coreman.runtime.worker.chat import work
+                from coreman.runtime.worker.chat.feishu_quote import persisted_text
+
+                parent = inbound.reply_context.get("parent_id")
+                quoted = (
+                    await persisted_text(session, bot=bot, chat_id=chat_id, parent_id=parent)
+                    if isinstance(parent, str) and parent
+                    else None
+                )
+                continued = await work.continued(session, bot, chat_id, text, quoted)
+                session_key = continued or session_key
         relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
         intake = Intake(
             bot,

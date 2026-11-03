@@ -227,6 +227,11 @@ class FinalizeStage(ChatStageBase):
                 from coreman.runtime.worker.chat import human_collaboration
 
                 verdict = await human_collaboration.final_transition(session, ctx, pre, verdict)
+                from coreman.runtime.worker.chat import work
+
+                await work.final_transition(
+                    session, ctx, intake, verdict, msg("done_suffix", ctx.locale)
+                )
             entry = (
                 log_entry(
                     ctx,
@@ -389,12 +394,14 @@ class FinalizeStage(ChatStageBase):
     async def _finish_dispatch(
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict, out: Outcome
     ) -> None:
-        """调度回合收尾：校验调度员的决定并记录；试运行只记成 shadow 任务，群里什么也不发。"""
+        """调度回合收尾：校验调度员的决定并记录。试运行只记成 shadow 任务，群里什么也不发；
+        开启时任务交给执行员工，群里回原消息一行（分派、补充给谁，或问一句）。出错一律不出声。"""
         from coreman.core.chat import dispatch, group_observe
         from coreman.core.db.models import GroupObserveDecision
 
-        await pre.writer.complete(group_observe.NO_REPLY)
         intake = pre.intake
+        live = intake.bot.group_observe == "on"
+        line: str | None = None
         result: dict[str, Any] = {"raw": (verdict.final_text or "")[:8000]}
         outcome = "dispatch_failed"
         async with ctx.session_factory() as session:
@@ -419,7 +426,7 @@ class FinalizeStage(ChatStageBase):
                         "note": plan.note,
                         "question": plan.question,
                     }
-                    result["codes"] = await dispatch.record(
+                    result["codes"], line = await dispatch.record(
                         session,
                         plan=plan,
                         dispatcher=intake.bot,
@@ -430,13 +437,26 @@ class FinalizeStage(ChatStageBase):
                         staff=ctx.dispatch_staff,
                         decision_id=decision_id,
                         chat_task_id=ctx.task.id,
+                        live=live,
+                        requester_pid=intake.speaker.platform_user_id,
                     )
             result["staff"] = [e.key for e in ctx.dispatch_staff]
+            if line:
+                result["said"] = line
             if row is not None:
                 row.outcome = outcome
                 row.dispatch = result
             await session.commit()
-        ctx.log.info("dispatch_turn_finished", outcome=outcome, codes=result.get("codes"))
+        sent = line or group_observe.NO_REPLY
+        done = await pre.writer.complete(sent)
+        if line:
+            await self._push_if_proactive(ctx, pre, replace(verdict, final_text=sent), done)
+            async with ctx.session_factory() as session:
+                await group_observe.mark_spoke(session, intake.bot.id, intake.chat_id)
+                await session.commit()
+        ctx.log.info(
+            "dispatch_turn_finished", outcome=outcome, codes=result.get("codes"), spoke=bool(line)
+        )
 
     async def _notify_long_task(
         self,

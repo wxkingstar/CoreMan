@@ -260,6 +260,14 @@ class OpenStage(ChatStageBase):
                 ctx.turn_notes.append(group_observe.INTERJECT_NOTE)
             elif ctx.task.payload.get("origin") == "dispatch":
                 ctx.turn_notes.append(await self._dispatch_note(session, ctx, intake))
+        from coreman.runtime.worker.chat import work
+
+        if work.code_of(intake.session_key):
+            # 调度员派的任务：每轮都带上任务和回复规则，再记一笔「开始处理」。
+            work_note = await work.note(session, ctx, intake)
+            if work_note:
+                ctx.turn_notes.append(work_note)
+                await work.mark_started(session, ctx, intake)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context

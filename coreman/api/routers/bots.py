@@ -260,9 +260,6 @@ def _check_group_observe(bot: Bot, mode: str, scope: str, role: str) -> None:
     if role == "dispatcher":
         if bot.platform != "feishu":
             raise ApiError(422, 422, "调度员只支持飞书机器人")
-        if mode == "on":
-            # 第一期只记录「会这样分派」：交接、群里发言在第二期。
-            raise ApiError(422, 422, "调度员目前只能试运行，暂不支持开启")
     if mode == "off":
         return
     if bot.platform != "feishu":
