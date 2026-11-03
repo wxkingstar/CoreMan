@@ -165,6 +165,54 @@ def test_external_jwt_key_misconfiguration_fails_at_startup(
     assert "PRIVATE KEY" not in str(info.value)
 
 
+def test_repr_and_str_hide_every_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings 被误写进日志或异常信息时（如误传给 create_async_engine），不能带出任何密钥。"""
+    private, public = _pem_pair()
+    master_key = base64.b64encode(secrets.token_bytes(32)).decode()
+    previous_key = base64.b64encode(secrets.token_bytes(32)).decode()
+    secret_values = {
+        "db-password": "db-pass-7f3a91c2",
+        "MASTER_KEY": master_key,
+        "MASTER_KEYS_PREVIOUS": previous_key,
+        "SESSION_SECRET": "session-secret-5b8e2d40",
+        "BOOTSTRAP_ADMIN_PASSWORD": "bootstrap-pass-c41d09ae",
+        "S3_ACCESS_KEY": "s3-access-0e6f1b77",
+        "S3_SECRET_KEY": "s3-secret-9a2c4e13",
+        "S3_SESSION_TOKEN": "s3-session-d83b6f05",
+        "client_secret": "provider-secret-2f7d8a61",
+        # PEM 的首尾行是公开的固定格式，只查私钥正文。
+        "BOT_JWT_PRIVATE_KEY": private.splitlines()[1],
+    }
+    _env(
+        monkeypatch,
+        DATABASE_URL=f"postgresql+asyncpg://u:{secret_values['db-password']}@localhost/coreman",
+        MASTER_KEY=master_key,
+        MASTER_KEYS_PREVIOUS=f"k0:{previous_key}",
+        SESSION_SECRET=secret_values["SESSION_SECRET"],
+        BOOTSTRAP_ADMIN_USERNAME="admin",
+        BOOTSTRAP_ADMIN_PASSWORD=secret_values["BOOTSTRAP_ADMIN_PASSWORD"],
+        OBJECT_STORAGE="s3",
+        S3_BUCKET="bucket",
+        S3_ACCESS_KEY=secret_values["S3_ACCESS_KEY"],
+        S3_SECRET_KEY=secret_values["S3_SECRET_KEY"],
+        S3_SESSION_TOKEN=secret_values["S3_SESSION_TOKEN"],
+        BOT_JWT_PRIVATE_KEY=private,
+        BOT_JWT_PUBLIC_KEY=public,
+        BOT_JWT_KID="k",
+        BOT_JWT_ISSUER="i",
+        BUSINESS_TOKEN_PROVIDERS=(
+            '{"company": {"token_url": "https://identity.example/token", "client_id": "c",'
+            f' "client_secret": "{secret_values["client_secret"]}"}}}}'
+        ),
+    )
+    s = Settings()
+    provider = s.business_token_providers["company"]
+    assert provider.client_secret.get_secret_value() == secret_values["client_secret"]
+    for text in (repr(s), str(s)):
+        for name, value in secret_values.items():
+            assert value not in text, name
+
+
 OLD_KEY = base64.b64encode(b"\x04" * 32).decode()
 
 
