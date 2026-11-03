@@ -9,7 +9,7 @@ import { errorMessage } from '@/utils/errors'
 import { pctNum } from '@/utils/format'
 import { BACKENDS } from '@/utils/models'
 
-/** 一台运行时上各 AI 的席位（登录的账号）：添加、登录、切换当前席位、移除。只给平台管理员。 */
+/** 一台运行时上各 AI 的席位（登录的账号）：添加、登录、切换当前席位、移除。只给平台管理员与 AI 委员会。 */
 const props = defineProps<{ node: RuntimeNode; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; changed: [] }>()
 const { t } = useI18n()

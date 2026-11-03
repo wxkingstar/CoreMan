@@ -1,4 +1,5 @@
-"""运行时席位：一个节点上同一种 AI 登录多个账号，由平台管理员在管理台添加、登录、切换、移除。
+"""运行时席位：一个节点上同一种 AI 登录多个账号，
+由平台管理员与 AI 委员会在管理台添加、登录、切换、移除。
 
 席位与登录状态以节点为准（节点在心跳的 capabilities.<AI>.seats 里上报，操作结果也会带回最新
 清单）；登录由节点上的 CLI 完成，令牌留在节点，平台只转交授权链接与浏览器页面上的认证码。
@@ -29,7 +30,7 @@ from coreman.core.relay.models import Backend
 from coreman.core.runtime_nodes.transport import online
 
 router = APIRouter(prefix="/api/admin/runtime-nodes", dependencies=[Depends(verify_csrf)])
-ADMINS = require_roles("platform_admin")
+MANAGERS = require_roles("ai_committee", "platform_admin")
 Provider = Backend
 SEAT_ID = r"^(default|[a-f0-9]{12})$"
 QUOTA_COLUMNS = (
@@ -155,7 +156,7 @@ async def create_seat(
     provider: Provider,
     body: SeatIn,
     request: Request,
-    actor: User = Depends(ADMINS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     _, relay = await target(session, node_id, provider)
@@ -183,7 +184,7 @@ async def start_login(
     provider: Provider,
     seat_id: str,
     request: Request,
-    actor: User = Depends(ADMINS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """节点上的 CLI 发起登录，返回授权链接（Codex 另给一次性代码）。"""
@@ -201,7 +202,7 @@ async def complete_login(
     seat_id: str,
     body: LoginCompleteIn,
     request: Request,
-    actor: User = Depends(ADMINS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     _, relay = await target(session, node_id, provider)
@@ -223,7 +224,7 @@ async def activate_seat(
     provider: Provider,
     seat_id: str,
     request: Request,
-    actor: User = Depends(ADMINS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """切换当前席位：新对话用新席位，节点上进行中的对话在原席位上跑完。"""
@@ -251,7 +252,7 @@ async def remove_seat(
     provider: Provider,
     seat_id: str,
     request: Request,
-    actor: User = Depends(ADMINS),
+    actor: User = Depends(MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     _, relay = await target(session, node_id, provider)

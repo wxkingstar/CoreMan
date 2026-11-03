@@ -1,8 +1,9 @@
-"""运行时席位：平台管理员在管理台给节点添加账号、远程登录、切换当前席位、移除。"""
+"""运行时席位：平台管理员与 AI 委员会在管理台给节点添加账号、远程登录、切换当前席位、移除。"""
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from coreman.api.routers import runtime_seats
@@ -134,11 +135,46 @@ async def test_admin_adds_signs_in_and_switches_a_seat(client, db_session, monke
     ]
 
 
-async def test_only_platform_admins_manage_seats(client, db_session, monkeypatch):
+async def test_ai_committee_manages_seats(client, db_session, monkeypatch):
     node, _ = await prepare(client, db_session, role="ai_committee")
     calls = fake_node(monkeypatch)
     response = await client.post(base(node), json={"label": "张三"})
-    assert response.status_code == 403
+    assert response.status_code == 201
+    response = await client.post(f"{base(node)}/{SEAT}/login")
+    assert response.status_code == 200
+    response = await client.post(
+        f"{base(node)}/{SEAT}/login/complete", json={"session_id": "login-1", "code": "abc"}
+    )
+    assert response.status_code == 200
+    response = await client.post(f"{base(node)}/{SEAT}/activate")
+    assert response.status_code == 200
+    response = await client.post(f"{base(node)}/default/activate")
+    assert response.status_code == 200
+    response = await client.delete(f"{base(node)}/{SEAT}")
+    assert response.status_code == 200
+    assert [op for op, _ in calls] == [
+        "seat-create",
+        "seat-login-start",
+        "seat-login-complete",
+        "seat-activate",
+        "seat-activate",
+        "seat-remove",
+    ]
+
+
+@pytest.mark.parametrize("role", ["team_lead", "member"])
+async def test_leads_and_members_cannot_manage_seats(client, db_session, monkeypatch, role):
+    node, _ = await prepare(client, db_session, role=role)
+    calls = fake_node(monkeypatch)
+    requests = [
+        client.post(base(node), json={"label": "张三"}),
+        client.post(f"{base(node)}/{SEAT}/login"),
+        client.post(f"{base(node)}/{SEAT}/login/complete", json={"session_id": "login-1"}),
+        client.post(f"{base(node)}/{SEAT}/activate"),
+        client.delete(f"{base(node)}/{SEAT}"),
+    ]
+    for request in requests:
+        assert (await request).status_code == 403
     assert calls == []
 
 
