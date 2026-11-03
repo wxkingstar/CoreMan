@@ -468,6 +468,17 @@ def test_probe_error_only_reads_the_error(status_code, body, expected):
             "codex: model not supported",
         ),
         ({"error": {"message": "Failed to authenticate"}}, "auth_fail", "Failed to authenticate"),
+        # 账号停用、令牌吊销时 auth status 仍报已登录，只能靠推理检查认出来。
+        (
+            {"error": {"message": "API Error: 400 This organization has been disabled."}},
+            "auth_fail",
+            "API Error: 400 This organization has been disabled.",
+        ),
+        (
+            {"error": {"message": "OAuth token revoked · Please run /login"}},
+            "auth_fail",
+            "OAuth token revoked · Please run /login",
+        ),
     ],
 )
 def test_health_probe_uses_server_model_and_reports_detail(
