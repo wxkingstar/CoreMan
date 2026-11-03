@@ -321,6 +321,20 @@ it('shows quota bars with reset countdowns only for logged-in backends', async (
   expect(bars[0].text()).toContain('2 小时 13 分钟后重置')
   wrapper.unmount()
 })
+// 账号被停用时本地凭据还在、auth status 仍报已登录：以推理检查的认证失败为准，旧额度不再展示。
+it('shows login invalid and hides stale quota when the inference check fails auth', async () => {
+  const later = new Date(Date.now() + 3 * 3600000).toISOString()
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: null, team_name: null, visibility: 'all', can_manage: true, online: true, is_active: true, draining: false,
+    capabilities: { claude: { installed: true, version: 'v1', login: 'ready', account: 'ops@example.com' } },
+    backends: [{ id: 'relay1', model_provider: 'claude', bot_count: 0, effective_models: [], health_status: 'auth_fail', health_detail: 'This organization has been disabled.',
+      rate_limit_5h_used_pct: 1, rate_limit_5h_resets_at: later, rate_limit_7d_used_pct: 97, rate_limit_7d_resets_at: later }] }] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  expect(wrapper.text()).toContain('登录失效')
+  expect(wrapper.text()).not.toContain('已登录')
+  expect(wrapper.get('[data-test="auth-detail"]').text()).toContain('has been disabled')
+  expect(wrapper.findAll('[data-test="quota-bar"]')).toHaveLength(0)
+  wrapper.unmount()
+})
 
 // 普通成员注册时默认公开，可改为私有；不能指定团队，也没有「仅管理员」选项。
 it('lets a member install a public or private runtime of their own', async () => {

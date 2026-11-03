@@ -381,7 +381,7 @@ const en = {
     credentialHint: 'The link contains installation credentials and is shown only once. By default, it can register one new node. Share it only with trusted people.',
     replaceHint: 'If the target machine already runs a runtime, replace the trailing {from} with {to}: the existing runtime is stopped and its whole install directory is backed up before this link installs a new one.',
     createLink: 'Generate installation command', copyCommand: 'Copy installation command', rootRequired: 'Enter a valid absolute project root path', copyManually: 'Could not copy. Select and copy the command manually.',
-    login: { ready: 'Signed in', required: 'Sign-in required', unknown: 'Sign-in status unknown' }, linkState: { ready: 'Ready to install', used: 'Used', expired: 'Expired', revoked: 'Revoked' },
+    login: { ready: 'Signed in', required: 'Sign-in required', unknown: 'Sign-in status unknown', failed: 'Sign-in invalid' }, linkState: { ready: 'Ready to install', used: 'Used', expired: 'Expired', revoked: 'Revoked' },
   },
   workspace: {
     attention: 'Needs attention', approvalSample: 'Pending requests among the latest 50 applications. See Skill approvals for all records.', revision: 'Catalog revision for this request',

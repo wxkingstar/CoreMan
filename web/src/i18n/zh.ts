@@ -441,7 +441,8 @@ export default {
   "login": {
     "ready": "已登录",
     "required": "待登录",
-    "unknown": "登录状态待确认"
+    "unknown": "登录状态待确认",
+    "failed": "登录失效"
   },
   "linkState": {
     "ready": "可安装",

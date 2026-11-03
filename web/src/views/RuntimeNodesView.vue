@@ -178,17 +178,22 @@ function capabilityState(node: RuntimeNode, provider: string) {
   const cap = node.capabilities[provider]
   if (!cap?.installed) return t('runtimeNodes.notInstalled')
   if (!node.online) return t('runtimeNodes.offline')
+  if (cap.login === 'ready' && authFailed(node, provider)) return t('runtimeNodes.login.failed')
   return t(`runtimeNodes.login.${cap.login}`)
+}
+/** 本地凭据还在（auth status 报已登录），但推理检查被拒：账号已被停用、令牌已吊销等。 */
+function authFailed(node: RuntimeNode, provider: string) {
+  return node.backends.find(b => b.model_provider === provider)?.health_status === 'auth_fail'
 }
 /** 版本号只留数字部分：列头已标明是哪个 CLI，「2.1.310 (Claude Code)」「codex-cli 0.164.0」不用再重复。 */
 function shortVersion(version?: string | null) {
   return version?.match(/\d+(?:\.\d+)+\S*/)?.[0] ?? version
 }
-/** 列表里直接展示的额度窗口：未安装、未登录或没采到用量的窗口不展示。 */
+/** 列表里直接展示的额度窗口：未安装、未登录、认证失败或没采到用量的窗口不展示（认证失败时库里是失效前的旧值）。 */
 function quotaWindows(node: RuntimeNode, provider: string) {
   const cap = node.capabilities[provider]
   const backend = node.backends.find(b => b.model_provider === provider)
-  if (!backend || !cap?.installed || cap.login === 'required') return []
+  if (!backend || !cap?.installed || cap.login === 'required' || authFailed(node, provider)) return []
   return [
     { label: '5h', pct: backend.rate_limit_5h_used_pct, resetsAt: backend.rate_limit_5h_resets_at },
     { label: '7d', pct: backend.rate_limit_7d_used_pct, resetsAt: backend.rate_limit_7d_resets_at },
@@ -404,7 +409,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                   <ProviderBadge :provider="provider" />
                 </template>
                 <template #default="{ row }: { row: RuntimeNode }">
-                  <span>{{ capabilityState(row, provider) }}</span><div class="muted">
+                  <span :class="{ 'auth-failed': row.online && authFailed(row, provider) }">{{ capabilityState(row, provider) }}</span><div
+                    v-if="row.online && authFailed(row, provider)"
+                    class="muted auth-detail"
+                    data-test="auth-detail"
+                  >
+                    {{ row.backends.find(b => b.model_provider === provider)?.health_detail }}
+                  </div><div class="muted">
                     {{ shortVersion(row.capabilities[provider]?.version) }}
                   </div><div
                     v-if="row.capabilities[provider]?.account"
@@ -853,6 +864,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .toolbar { display: flex; gap: 12px; margin: 12px 0 20px; max-width: 520px; }
 .visibility-tag { margin-left: 6px; }
 .muted, small { color: var(--el-text-color-secondary); font-size: 12px; }
+.auth-failed { color: var(--el-color-danger); }
+.auth-detail { max-width: 220px; overflow-wrap: anywhere; }
 .field-hint { width: 100%; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }
 .row-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }
