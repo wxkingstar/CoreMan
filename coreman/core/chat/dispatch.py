@@ -52,6 +52,11 @@ def work_session_key(code: str) -> str:
     return f"work:{code}"
 
 
+def task_link(code: str, base_url: str) -> str:
+    """群里出现的任务编号：带上管理台任务页的链接，点开能看任务内容。"""
+    return f"[{code}]({base_url.rstrip('/')}/work-tasks/{code})" if base_url else code
+
+
 @dataclass(frozen=True)
 class Employee:
     key: str
@@ -145,6 +150,9 @@ def note(
         "怎么决定：\n"
         "- create：交给最合适的一位员工。能一个人做完的不拆；确实分属不同员工、能各自交付时才拆，"
         f"最多 {MAX_TASKS} 件。\n"
+        "  track：要不要在群里跟进。一问一答、查个数、说明办法这类当场能答完的，填 false："
+        "你不发言，员工直接回复，群里不出任务编号。要多步处理、要等确认或别人配合、"
+        "可能做很久、之后还要追问进展的，才填 true。\n"
         "- append：最后一条是在补充或追问上面某个任务（例如提到了任务编号，或明显在接着说那件事），"
         "追加给原来的员工，不新建。\n"
         "- clarify：需求不清、选错代价高时，问一句。\n"
@@ -152,7 +160,7 @@ def note(
         "只输出一个 JSON 代码块，不要输出其他内容：\n"
         "```json\n"
         '{"action": "create", "reason": "一句话依据",\n'
-        ' "tasks": [{"title": "≤30 字的标题", "assignee": "员工标识",\n'
+        ' "tasks": [{"title": "≤30 字的标题", "assignee": "员工标识", "track": false,\n'
         '            "summary": "给人看的一句话：要做什么",\n'
         '            "brief": "给执行员工的要求：背景、要做什么、怎么算完成、注意事项",\n'
         '            "related": ["相关的任务编号"]}],\n'
@@ -203,6 +211,8 @@ def parse(text: str, staff: list[Employee], known_codes: set[str]) -> Plan:
                 {
                     "title": title[:TITLE_LIMIT],
                     "assignee": item["assignee"],
+                    # 没写当作不跟进：宁可少一个编号，也不在群里多刷一行。
+                    "track": item.get("track") is True,
                     "summary": str(item.get("summary") or "").strip()[:SUMMARY_LIMIT],
                     "brief": str(item.get("brief") or "").strip()[:BRIEF_LIMIT],
                     "related": [c for c in related if c in known_codes][:5],
@@ -234,11 +244,12 @@ async def record(
     chat_task_id: int,
     live: bool = False,
     requester_pid: str = "",
+    base_url: str = "",
 ) -> tuple[list[str], str | None]:
     """把决定记成任务和事件；返回涉及的任务编号，以及要回在群里的一行（不发言时为 None）。
 
     试运行（`live = False`）：任务状态 shadow，不交接、不发消息。开启时任务直接排进执行员工
-    的队列，追加的补充也排一轮给原执行员工。
+    的队列，追加的补充也排一轮给原执行员工。不跟进的任务照样交接，但调度员不发言。
     """
     by_key = {e.key: e for e in staff}
     actor = {"actor_type": "bot", "actor_id": str(dispatcher.id), "chat_task_id": chat_task_id}
@@ -264,6 +275,7 @@ async def record(
                 decision_id=decision_id,
                 related_codes=item["related"],
                 brief=item["brief"],
+                tracked=item["track"],
             )
             session.add(row)
             created.append(row)
@@ -286,9 +298,14 @@ async def record(
         if live:
             for row in created:
                 await hand_off(session, row, event_id=event_id, requester_pid=requester_pid)
-            line = "\n".join(
-                f"@{by_key[item['assignee']].name} {item['title']}（{row.code}）"
-                for row, item in zip(created, plan.tasks, strict=True)
+            line = (
+                "\n".join(
+                    f"@{by_key[item['assignee']].name} {item['title']}"
+                    f"（{task_link(row.code, base_url)}）"
+                    for row, item in zip(created, plan.tasks, strict=True)
+                    if row.tracked
+                )
+                or None
             )
     elif plan.action == "append":
         target = await session.scalar(
@@ -316,7 +333,8 @@ async def record(
                 await hand_off(
                     session, target, event_id=event_id, requester_pid=requester_pid, note=plan.note
                 )
-                line = f"补充给 @{assignee.name} 了（{target.code}）"
+                if target.tracked:
+                    line = f"补充给 @{assignee.name} 了（{task_link(target.code, base_url)}）"
     elif plan.action == "clarify" and live:
         line = plan.question
     await session.flush()
