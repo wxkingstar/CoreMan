@@ -99,13 +99,14 @@ async def test_abandoned_execution_is_failed_without_replay(client, db_session, 
             await pending
 
 
-async def enrollment(client, db_session):
-    await login_as(client, db_session, role="platform_admin")
+async def enrollment(client, db_session, role="platform_admin", user_team=None, **link):
+    await login_as(client, db_session, role=role, team_id=user_team)
     response = await client.post(
         "/api/admin/runtime-nodes/install-links",
         json={
             "workspace_root": "/home/ai/projects",
             "name": "Test runtime",
+            **link,
         },
     )
     assert response.status_code == 200, response.text
@@ -528,9 +529,12 @@ async def test_reverse_stream_cross_session_and_cancel(client, db_session, app, 
 
 async def test_install_revocation_expiry_permissions_and_script_quoting(client, db_session):
     await login_as(client, db_session, role="member")
-    assert (
-        await client.post("/api/admin/runtime-nodes/install-links", json={"workspace_root": "/x"})
-    ).status_code == 403
+    for scope in ({"team_id": str(uuid.uuid4())}, {"visibility": "admins"}):
+        assert (
+            await client.post(
+                "/api/admin/runtime-nodes/install-links", json={"workspace_root": "/x", **scope}
+            )
+        ).status_code == 403
     await login_as(client, db_session, role="platform_admin")
     path = "/data/projects space;literal$(echo)"
     response = await client.post(
@@ -984,6 +988,76 @@ async def test_members_cannot_edit_or_delete_runtime(client, db_session):
     url = f"/api/admin/runtime-nodes/{body['node_id']}"
     assert (await client.patch(url, json={"team_id": None})).status_code == 403
     assert (await client.delete(url)).status_code == 403
+
+
+async def test_member_registers_own_runtime_public_by_default(client, db_session):
+    link, body, _ = await enrollment(client, db_session, role="member")
+    assert link["visibility"] == "all"
+    url = f"/api/admin/runtime-nodes/{body['node_id']}"
+    nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+    mine = next(n for n in nodes if n["id"] == body["node_id"])
+    assert mine["visibility"] == "all" and mine["can_manage"] is True
+    assert mine["owner_name"] == "测试用户"
+    relays = list(
+        await db_session.scalars(
+            select(RelayServer).where(RelayServer.runtime_node_id == uuid.UUID(body["node_id"]))
+        )
+    )
+    assert {(r.visibility, r.owner_id) for r in relays} == {("all", uuid.UUID(mine["owner_id"]))}
+    # 所有者能改名、改私有、停用，不能指定团队或设成仅管理员可见。
+    assert (await client.patch(url, json={"name": "我的电脑"})).status_code == 200
+    assert (await client.patch(url, json={"team_id": str(uuid.uuid4())})).status_code == 403
+    assert (await client.patch(url, json={"visibility": "admins"})).status_code == 403
+    assert (await client.patch(url, json={"visibility": "private"})).status_code == 200
+    for r in relays:
+        await db_session.refresh(r)
+    assert {r.visibility for r in relays} == {"private"}
+    links = (await client.get("/api/admin/runtime-nodes/install-links")).json()["data"]
+    assert [x["id"] for x in links] == [link["id"]]
+    # 别的成员看不到这台私有节点，也看不到这条安装链接。
+    await login_as(client, db_session, role="member")
+    assert (await client.get("/api/admin/runtime-nodes/install-links")).json()["data"] == []
+    assert (
+        await client.delete(f"/api/admin/runtime-nodes/install-links/{link['id']}")
+    ).status_code == 404
+    assert (await client.patch(url, json={"name": "x"})).status_code == 404
+    assert (await client.delete(url)).status_code == 404
+    nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+    assert body["node_id"] not in {n["id"] for n in nodes}
+
+
+async def test_private_runtime_is_selectable_by_owner_only(client, db_session):
+    from tests.api.test_bots import _bot_body, _team
+
+    team = await _team(db_session)
+    _, body, _ = await enrollment(
+        client, db_session, role="member", user_team=team.id, visibility="private"
+    )
+    claude = await db_session.scalar(
+        select(RelayServer).where(
+            RelayServer.runtime_node_id == uuid.UUID(body["node_id"]),
+            RelayServer.model_provider == "claude",
+        )
+    )
+    bot = {**_bot_body(), "relay_server_id": str(claude.id), "working_dir": "/home/ai/projects/b"}
+
+    async def relay_ids():
+        page = (await client.get("/api/admin/relay-servers?per_page=200")).json()["data"]
+        return {r["id"] for r in page["items"]}
+
+    # 所有者：列表里有，创建时过了可见性校验，卡在 AI 状态未知。
+    assert str(claude.id) in await relay_ids()
+    response = await client.post("/api/admin/bots", json=bot)
+    assert response.status_code == 422 and "AI 状态未知" in response.text
+    # 其他成员与管理员都选不到；管理员仍能在运行时页管理这台节点。
+    for role in ("member", "platform_admin"):
+        await login_as(client, db_session, role=role, team_id=team.id)
+        assert str(claude.id) not in await relay_ids()
+        response = await client.post("/api/admin/bots", json=bot)
+        assert response.status_code == 422 and "未注册或不可用" in response.text
+    nodes = (await client.get("/api/admin/runtime-nodes")).json()["data"]
+    node = next(n for n in nodes if n["id"] == body["node_id"])
+    assert node["visibility"] == "private" and node["can_manage"] is True
 
 
 async def test_private_scheduled_run_session_is_owner_only(app, client, db_session):

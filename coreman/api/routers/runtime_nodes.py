@@ -1,5 +1,8 @@
 """运行时节点管理端：安装链接、节点列表、编辑/启停/排空/删除、会话查看器。
 
+任何登录用户都能生成安装链接、把自己的电脑注册为运行时；节点归链接的创建人所有，
+所有者与 ai_committee / platform_admin 可以编辑、启停、删除它。私有节点只有所有者能选。
+
 节点自身调用的协议接口（安装脚本、注册、心跳、领取命令、回传响应帧）见 runtime_protocol.py。
 """
 
@@ -22,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import client_ip, current_user, get_session, via_bot_token
 from coreman.api.errors import ApiError, forbidden, not_found
-from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core import session_links
 from coreman.core.audit import record_audit
@@ -54,7 +56,6 @@ from coreman.core.runtime_nodes.transport import (
 
 router = APIRouter(prefix="/api/admin/runtime-nodes", dependencies=[Depends(verify_csrf)])
 MANAGER_ROLES = ("ai_committee", "platform_admin")
-MANAGERS = require_roles(*MANAGER_ROLES)
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 CA_FILE_HINT = "coreman-ca.pem"
@@ -106,11 +107,14 @@ class InstallOptions(BaseModel):
         return value
 
 
+Visibility = Literal["all", "admins", "private"]
+
+
 class InstallIn(BaseModel):
     name: str = Field(default="", max_length=100)
     workspace_root: str = Field(default="/home/ai", min_length=2, max_length=400)
     team_id: uuid.UUID | None = None
-    visibility: Literal["all", "admins"] = "all"
+    visibility: Visibility = "all"
     options: InstallOptions = Field(default_factory=InstallOptions)
 
     _root = field_validator("workspace_root")(absolute_root)
@@ -127,8 +131,42 @@ class NodePatch(BaseModel):
 
     # 显式传 null 表示改为公共池；不传表示不改团队。
     team_id: uuid.UUID | None = None
+    visibility: Visibility | None = None
     is_active: bool | None = None
     draining: bool | None = None
+
+
+def is_manager(user: User) -> bool:
+    return user.role in MANAGER_ROLES
+
+
+def can_manage_node(user: User, node: RuntimeNode) -> bool:
+    return is_manager(user) or (node.owner_id is not None and node.owner_id == user.id)
+
+
+def check_scope(user: User, team_id: uuid.UUID | None, visibility: str | None) -> None:
+    """普通成员注册或编辑自己的节点时，不能指定团队，也不能设成仅管理员可见。"""
+    if is_manager(user):
+        return
+    if team_id is not None:
+        raise ApiError(403, 403, "只有管理员可以把运行时分配给团队")
+    if visibility == "admins":
+        raise ApiError(403, 403, "只有管理员可以设为仅管理员可见")
+
+
+async def load_managed_node(
+    session: AsyncSession, user: User, node_id: uuid.UUID, *, key_share: bool
+) -> RuntimeNode:
+    node = await session.scalar(
+        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update(key_share=key_share)
+    )
+    if not node:
+        raise not_found("运行时不存在")
+    if not can_manage_node(user, node):
+        if node.visibility == "all":
+            raise forbidden()
+        raise not_found("运行时不存在")
+    return node
 
 
 def _plain(value: Any) -> Any:
@@ -151,6 +189,7 @@ def link_out(link: RuntimeInstallLink) -> dict[str, Any]:
         "name": link.name,
         "workspace_root": link.workspace_root,
         "team_id": str(link.team_id) if link.team_id else None,
+        "visibility": link.visibility,
         "state": state,
         "expires_at": link.expires_at,
         "created_at": link.created_at,
@@ -162,9 +201,10 @@ def link_out(link: RuntimeInstallLink) -> dict[str, Any]:
 async def create_link(
     body: InstallIn,
     request: Request,
-    actor: User = Depends(MANAGERS),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    check_scope(actor, body.team_id, body.visibility)
     if body.team_id and not await session.get(Team, body.team_id):
         raise ApiError(422, 422, "团队不存在")
     token = secrets.token_urlsafe(32)
@@ -189,6 +229,7 @@ async def create_link(
         target_id=str(link.id),
         diff={
             "workspace_root": [None, body.workspace_root],
+            "visibility": [None, body.visibility],
             **({"ca_pem": [None, "provided"]} if body.options.ca_pem else {}),
         },
         ip=client_ip(request),
@@ -210,11 +251,12 @@ async def create_link(
 
 @router.get("/install-links")
 async def list_links(
-    _: User = Depends(MANAGERS), session: AsyncSession = Depends(get_session)
+    user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    rows = await session.scalars(
-        select(RuntimeInstallLink).order_by(RuntimeInstallLink.created_at.desc()).limit(200)
-    )
+    stmt = select(RuntimeInstallLink).order_by(RuntimeInstallLink.created_at.desc()).limit(200)
+    if not is_manager(user):
+        stmt = stmt.where(RuntimeInstallLink.created_by == user.id)
+    rows = await session.scalars(stmt)
     return {"code": 0, "data": [link_out(r) for r in rows]}
 
 
@@ -222,11 +264,11 @@ async def list_links(
 async def revoke_link(
     link_id: uuid.UUID,
     request: Request,
-    actor: User = Depends(MANAGERS),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     link = await session.get(RuntimeInstallLink, link_id)
-    if not link:
+    if not link or not (is_manager(actor) or link.created_by == actor.id):
         raise not_found("安装链接不存在")
     link.revoked_at = now()
     await record_audit(
@@ -250,8 +292,8 @@ async def list_nodes(
     from coreman.core.relay.models import load_catalog
 
     stmt = select(RuntimeNode).order_by(RuntimeNode.created_at.desc()).limit(200)
-    if user.role not in {"ai_committee", "platform_admin"}:
-        stmt = stmt.where(RuntimeNode.visibility == "all")
+    if not is_manager(user):
+        stmt = stmt.where(or_(RuntimeNode.visibility == "all", RuntimeNode.owner_id == user.id))
     nodes = list(await session.scalars(stmt))
     relays = list(
         await session.scalars(
@@ -261,6 +303,13 @@ async def list_nodes(
     catalog = await load_catalog(session)
     names = await team_names(session, {n.team_id for n in nodes if n.team_id})
     counts = await bot_counts(session, {r.id for r in relays})
+    owner_ids = {n.owner_id for n in nodes if n.owner_id}
+    owners: dict[uuid.UUID, str] = {}
+    if owner_ids:
+        rows = await session.execute(
+            select(User.id, User.display_name).where(User.id.in_(owner_ids))
+        )
+        owners = {row[0]: row[1] for row in rows.all()}
     data = []
     for n in nodes:
         backends = [
@@ -296,6 +345,10 @@ async def list_nodes(
                 "git_hosts": n.git_hosts,
                 "proxy": n.proxy,
                 "team_name": names.get(n.team_id) if n.team_id else None,
+                "visibility": n.visibility,
+                "owner_id": str(n.owner_id) if n.owner_id else None,
+                "owner_name": owners.get(n.owner_id) if n.owner_id else None,
+                "can_manage": can_manage_node(user, n),
                 "backends": backends,
             }
         )
@@ -307,19 +360,18 @@ async def patch_node(
     node_id: uuid.UUID,
     body: NodePatch,
     request: Request,
-    actor: User = Depends(MANAGERS),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    node = await session.scalar(
-        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update(key_share=True)
-    )
-    if not node:
-        raise not_found("运行时不存在")
+    node = await load_managed_node(session, actor, node_id, key_share=True)
     changes = {
         k: v
         for k, v in body.model_dump(exclude_unset=True).items()
         if v is not None or k == "team_id"
     }
+    if "team_id" in changes and changes["team_id"] != node.team_id:
+        check_scope(actor, changes["team_id"], None)
+    check_scope(actor, None, changes.get("visibility"))
     if changes.get("team_id") and not await session.get(Team, changes["team_id"]):
         raise ApiError(422, 422, "团队不存在")
     diff = {k: [_plain(getattr(node, k)), _plain(v)] for k, v in changes.items()}
@@ -350,9 +402,9 @@ async def patch_node(
         node.root_change = {"id": str(uuid.uuid4()), "path": root, "status": "pending"}
     for key, value in changes.items():
         setattr(node, key, value)
-    # 实例的团队与启停跟随节点：创建/切换 AI 员工时按实例的团队做可用范围校验。
-    # 已绑定的 AI 员工不受团队变更影响。
-    relay_values = {k: changes[k] for k in ("team_id", "is_active") if k in changes}
+    # 实例的团队、可见性与启停跟随节点：创建/切换 AI 员工时按实例的团队与可见性做可用范围校验。
+    # 已绑定的 AI 员工不受团队与可见性变更影响。
+    relay_values = {k: changes[k] for k in ("team_id", "visibility", "is_active") if k in changes}
     if relay_values:
         await session.execute(
             update(RelayServer).where(RelayServer.runtime_node_id == node_id).values(**relay_values)
@@ -386,18 +438,14 @@ async def patch_node(
 async def delete_node(
     node_id: uuid.UUID,
     request: Request,
-    actor: User = Depends(MANAGERS),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """删除节点及其 Claude/Codex 实例；仍有 AI 员工使用（含迁移目标）时拒绝。
 
     节点凭证随之失效，主机上的 Daemon 之后只会收到 401，需在主机上卸载。
     """
-    node = await session.scalar(
-        select(RuntimeNode).where(RuntimeNode.id == node_id).with_for_update()
-    )
-    if not node:
-        raise not_found("运行时不存在")
+    node = await load_managed_node(session, actor, node_id, key_share=False)
     # 与创建/切换 AI 员工时的工作目录分配共用同一把锁，避免删除期间有员工绑到该节点上。
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),

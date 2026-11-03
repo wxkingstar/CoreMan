@@ -1,5 +1,5 @@
 import { call, http } from './client'
-import type { RelayOut } from './types'
+import type { RelayOut, Visibility } from './types'
 /** 节点上同一种 AI 的一个登录账号；default 是 CLI 原来的位置。 */
 export interface SeatState {
   id: string; label: string; account: string; login: 'ready' | 'required' | 'unknown'; active: boolean
@@ -31,15 +31,19 @@ export interface RuntimeNode {
   git_hosts: string[] | null
   /** CLI 继承到的出站代理（只读）；旧版 Daemon 未上报时为 null。pending 表示配置改过、重启后才生效。 */
   proxy: { source: 'coreman' | 'environment' | 'none'; url: string; pending: boolean } | null
+  /** private 只有所有者能选；所有者是生成安装链接的人，迁移前注册的可能为空。 */
+  visibility: Visibility; owner_id: string | null; owner_name: string | null
+  /** 当前用户是所有者或管理员，可以编辑、启停、删除。 */
+  can_manage: boolean
   capabilities: Record<string, Capability>; backends: RelayOut[]
 }
 export interface InstallLink {
-  id: string; name: string; workspace_root: string; team_id: string | null
+  id: string; name: string; workspace_root: string; team_id: string | null; visibility: Visibility
   state: 'ready' | 'used' | 'expired' | 'revoked'; expires_at: string; created_at: string
   node_id: string | null; command?: string; url?: string
 }
 export interface InstallInput {
-  name: string; workspace_root: string; team_id: string | null
+  name: string; workspace_root: string; team_id: string | null; visibility: Visibility
   /** ca_pem：私有 CA 证书（PEM，≤64 KB）；留空时不传该键。 */
   options: { control_proxy?: string; environment?: string; proxy: string; ca_pem?: string; claude_path: string; codex_path: string; git_hosts: string[]; max_concurrent: number }
 }
@@ -47,7 +51,7 @@ const base = '/api/admin/runtime-nodes'
 export const runtimeNodes = {
   list: () => call<RuntimeNode[]>(http.get(base)),
   /** team_id 传 null 表示改为公共池；不传表示不改团队。 */
-  patch: (id: string, body: { name?: string; workspace_root?: string; team_id?: string | null; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
+  patch: (id: string, body: { name?: string; workspace_root?: string; team_id?: string | null; visibility?: Visibility; is_active?: boolean; draining?: boolean }) => call<null>(http.patch(`${base}/${id}`, body)),
   remove: (id: string) => call<null>(http.delete(`${base}/${id}`)),
   createLink: (body: InstallInput) => call<InstallLink>(http.post(`${base}/install-links`, body)),
 }

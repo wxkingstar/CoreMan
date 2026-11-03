@@ -20,7 +20,7 @@ it('submits a changed project root and explains acknowledgement', async () => {
 vi.mock('@/api/runtimeNodes', () => ({ runtimeNodes: {
   // 每次返回新对象：页面把刷新结果合并进已有行对象，共用一个对象会让前一个用例的数据漏进后一个。
   list: vi.fn(async () => [{ id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false,
-    team_id: null, team_name: null, root_edit_supported: true, capabilities: { claude: { installed: true, version: '2.1.310 (Claude Code)', login: 'ready', account: 'ops@example.com' }, codex: { installed: true, version: 'codex-cli 0.164.0', login: 'required' }, opencode: { installed: true, version: '1.19.5', login: 'ready', account: 'opencode-go' } }, backends: [] }]),
+    team_id: null, team_name: null, visibility: 'all', owner_id: null, owner_name: null, can_manage: true, root_edit_supported: true, capabilities: { claude: { installed: true, version: '2.1.310 (Claude Code)', login: 'ready', account: 'ops@example.com' }, codex: { installed: true, version: 'codex-cli 0.164.0', login: 'required' }, opencode: { installed: true, version: '1.19.5', login: 'ready', account: 'opencode-go' } }, backends: [] }]),
   links: vi.fn().mockResolvedValue([]), createLink: vi.fn().mockResolvedValue({ id: 'link1', command: 'curl -fsSL https://example.test/install | sh', expires_at: '2026-09-14T00:00:00Z' }), patch: vi.fn(), remove: vi.fn(), revokeLink: vi.fn(),
 } }))
 vi.mock('@/api/admin', () => ({ relays: { probe: vi.fn() }, teams: { list: vi.fn().mockResolvedValue([{ id: 'team1', slug: 'dev', name_zh: '研发', name_ja: null, name_en: null }]) }, catalog: { list: vi.fn().mockResolvedValue([]) } }))
@@ -31,6 +31,8 @@ function mountPage(role: string) {
   return mount(RuntimeNodesView, { global: { plugins: [ElementPlus, i18n] } })
 }
 it('shows one runtime with separate Claude/Codex login states', async () => {
+  const [node] = await vi.mocked(runtimeNodes.list)()
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ ...node, can_manage: false }] as never)
   const wrapper = mountPage('member'); await flushPromises()
   expect(wrapper.text()).toContain('AI Server')
   expect(wrapper.text()).toContain('Claude Code')
@@ -47,7 +49,8 @@ it('shows one runtime with separate Claude/Codex login states', async () => {
   expect(wrapper.text()).toContain('0.164.0')
   expect(wrapper.text()).not.toContain('(Claude Code)')
   expect(wrapper.text()).not.toContain('codex-cli')
-  expect(wrapper.find('[data-test="install-runtime"]').exists()).toBe(false)
+  // 人人都能把自己的电脑注册为运行时；别人的节点不能编辑、删除。
+  expect(wrapper.find('[data-test="install-runtime"]').exists()).toBe(true)
   expect(wrapper.find('[data-test="edit-runtime"]').exists()).toBe(false)
   expect(wrapper.find('[data-test="delete-runtime"]').exists()).toBe(false)
   wrapper.unmount()
@@ -78,7 +81,7 @@ it('moves a runtime between a team and the shared pool', async () => {
   vm.editForm.team_id = 'team1'
   await vm.saveEdit(); await flushPromises()
   expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { team_id: 'team1' })
-  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: 'team1', team_name: '研发', capabilities: {}, backends: [] }] as never)
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: 'team1', team_name: '研发', visibility: 'all', can_manage: true, capabilities: {}, backends: [] }] as never)
   await (wrapper.vm as unknown as { refresh: (silent?: boolean) => Promise<void> }).refresh(); await flushPromises()
   await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
   expect(vm.editForm.team_id).toBe('team1')
@@ -102,7 +105,7 @@ it('keeps the entered name when saving fails', async () => {
 it('blocks deleting a runtime that still has bots and confirms otherwise', async () => {
   const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
   const backend = { id: 'relay1', model_provider: 'claude', bot_count: 2, effective_models: [], health_status: 'healthy' }
-  const busy = { id: 'node1', name: 'AI Server', team_id: null, team_name: null, online: true, is_active: true, draining: false, capabilities: {}, backends: [backend] }
+  const busy = { id: 'node1', name: 'AI Server', team_id: null, team_name: null, visibility: 'all', can_manage: true, online: true, is_active: true, draining: false, capabilities: {}, backends: [backend] }
   vi.mocked(runtimeNodes.list).mockResolvedValueOnce([busy] as never)
   const wrapper = mountPage('platform_admin'); await flushPromises()
   await wrapper.get('[data-test="delete-runtime"]').trigger('click'); await flushPromises()
@@ -187,7 +190,7 @@ it('asks before disabling or draining a runtime and explains the impact', async 
 })
 it('re-enables and resumes a runtime without asking', async () => {
   const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
-  const stopped = { id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: false, draining: true,
+  const stopped = { id: 'node1', name: 'AI Server', hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: false, draining: true, visibility: 'all', can_manage: true,
     capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } }, backends: [] }
   vi.mocked(runtimeNodes.list).mockResolvedValueOnce([stopped] as never).mockResolvedValueOnce([stopped] as never)
   const wrapper = mountPage('platform_admin'); await flushPromises()
@@ -200,7 +203,7 @@ it('re-enables and resumes a runtime without asking', async () => {
   wrapper.unmount()
 })
 it('shows node concurrency only when the daemon reports it', async () => {
-  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, visibility: 'all', can_manage: true, capabilities: {}, backends: [] }
   vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
     { ...base, id: 'n1', name: 'busy', max_concurrent: 10, active_calls: 3 },
     { ...base, id: 'n2', name: 'quiet', max_concurrent: null, active_calls: null },
@@ -235,7 +238,7 @@ it('validates the optional private CA certificate and only sends it when filled'
 })
 // 节点白名单只能在节点 config.json 修改；管理台只读展示，方便解释「Git 来源不在白名单内」。
 it('shows the reported Git host allowlist and flags entries that are not host names', async () => {
-  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, visibility: 'all', can_manage: true, capabilities: {}, backends: [] }
   vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
     { ...base, id: 'n1', name: 'reported', git_hosts: ['github.com', 'https://git.corp.example/'] },
     { ...base, id: 'n2', name: 'legacy', git_hosts: null },
@@ -258,7 +261,7 @@ it('shows the reported Git host allowlist and flags entries that are not host na
 })
 // 代理同样只能在节点侧改：管理台只读展示来源，两处都没有代理时给风险提示。
 it('shows which proxy the CLIs inherit and warns when none is in effect', async () => {
-  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, capabilities: {}, backends: [] }
+  const base = { hostname: 'host1', username: 'ai', platform: 'linux', architecture: 'arm64', environment: 'host', workspace_root: '/work', online: true, is_active: true, draining: false, visibility: 'all', can_manage: true, capabilities: {}, backends: [] }
   vi.mocked(runtimeNodes.list).mockResolvedValueOnce([
     { ...base, id: 'n1', name: 'configured', proxy: { source: 'coreman', url: 'http://127.0.0.1:18080', pending: true } },
     { ...base, id: 'n2', name: 'inherited', proxy: { source: 'environment', url: 'http://192.0.2.9:3128', pending: false } },
@@ -307,7 +310,7 @@ it('shows quota bars with reset countdowns only for logged-in backends', async (
   const later = new Date(Date.now() + (3 * 1440 + 5 * 60) * 60000 - 5000).toISOString()
   const backend = (id: string, provider: string, p5: number | null, p7: number | null) => ({ id, model_provider: provider, bot_count: 0, effective_models: [], health_status: 'healthy',
     rate_limit_5h_used_pct: p5, rate_limit_5h_resets_at: soon, rate_limit_7d_used_pct: p7, rate_limit_7d_resets_at: later })
-  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: null, team_name: null, online: true, is_active: true, draining: false,
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ id: 'node1', name: 'AI Server', team_id: null, team_name: null, visibility: 'all', can_manage: true, online: true, is_active: true, draining: false,
     capabilities: { claude: { installed: true, version: 'v1', login: 'ready' }, codex: { installed: true, version: 'v2', login: 'required' } },
     backends: [backend('relay1', 'claude', 81, null), backend('relay2', 'codex', 40, 50)] }] as never)
   const wrapper = mountPage('member'); await flushPromises()
@@ -316,5 +319,33 @@ it('shows quota bars with reset countdowns only for logged-in backends', async (
   expect(bars[0].text()).toContain('5h')
   expect(bars[0].text()).toContain('81%')
   expect(bars[0].text()).toContain('2 小时 13 分钟后重置')
+  wrapper.unmount()
+})
+
+// 普通成员注册时默认公开，可改为私有；不能指定团队，也没有「仅管理员」选项。
+it('lets a member install a public or private runtime of their own', async () => {
+  const wrapper = mountPage('member'); await flushPromises()
+  await wrapper.get('[data-test="install-runtime"]').trigger('click'); await flushPromises()
+  const vm = wrapper.vm as unknown as { form: { visibility: string }; visibilityOptions: string[]; create: () => Promise<void> }
+  expect(vm.form.visibility).toBe('all')
+  expect(vm.visibilityOptions).toEqual(['all', 'private'])
+  expect(document.body.textContent).not.toContain('团队')
+  vm.form.visibility = 'private'
+  await vm.create()
+  expect(runtimeNodes.createLink).toHaveBeenCalledWith(expect.objectContaining({ visibility: 'private', team_id: null }))
+  wrapper.unmount()
+})
+it('marks private runtimes and lets the owner switch visibility', async () => {
+  const [node] = await vi.mocked(runtimeNodes.list)()
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([{ ...node, visibility: 'private', owner_name: '小王' }] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  expect(wrapper.get('[data-test="runtime-visibility"]').text()).toBe('私有')
+  expect(wrapper.text()).toContain('所有者: 小王')
+  await wrapper.get('[data-test="edit-runtime"]').trigger('click'); await flushPromises()
+  const vm = wrapper.vm as unknown as { editForm: { visibility: string }; saveEdit: () => Promise<void> }
+  expect(vm.editForm.visibility).toBe('private')
+  vm.editForm.visibility = 'all'
+  await vm.saveEdit()
+  expect(runtimeNodes.patch).toHaveBeenCalledWith('node1', { visibility: 'all' })
   wrapper.unmount()
 })

@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { runtimeNodes, type RuntimeNode, type InstallInput, type InstallLink } from '@/api/runtimeNodes'
 import { relays, teams } from '@/api/admin'
-import type { TeamOut, RelayOut } from '@/api/types'
+import type { TeamOut, RelayOut, Visibility } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import ProviderBadge from '@/components/ProviderBadge.vue'
 import RelayLiveStatus from '@/components/RelayLiveStatus.vue'
@@ -20,6 +20,10 @@ const auth = useAuthStore()
 const canManage = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
 // 席位（节点上登录的账号）只有平台管理员能管。
 const isAdmin = computed(() => auth.user?.role === 'platform_admin')
+/** 普通成员只能管自己注册的节点；有一行能管就显示操作列。 */
+const anyManaged = computed(() => canManage.value || nodes.value.some(n => n.can_manage))
+/** 仅管理员可见只给管理员选；普通成员在公开与私有之间选。 */
+const visibilityOptions = computed<Visibility[]>(() => canManage.value ? ['all', 'private', 'admins'] : ['all', 'private'])
 const seatNodeId = ref('')
 const seatNode = computed(() => nodes.value.find(n => n.id === seatNodeId.value))
 const nodes = ref<RuntimeNode[]>([])
@@ -31,7 +35,7 @@ const creating = ref(false)
 const dialog = ref(false)
 const editDialog = ref(false)
 const editId = ref('')
-const editForm = reactive({ name: '', workspace_root: '', team_id: null as string | null })
+const editForm = reactive({ name: '', workspace_root: '', team_id: null as string | null, visibility: 'all' as Visibility })
 const editingNode = computed(() => nodes.value.find(n => n.id === editId.value))
 const rootEditable = computed(() => !!editingNode.value?.root_edit_supported && editingNode.value?.root_change?.status !== 'pending')
 const saving = ref(false)
@@ -40,6 +44,7 @@ function openEdit(node: RuntimeNode) {
   editForm.name = node.name
   editForm.workspace_root = node.workspace_root ?? ''
   editForm.team_id = node.team_id
+  editForm.visibility = node.visibility
   editDialog.value = true
 }
 /** 只提交有变化的字段；团队清空即改回公共池（team_id: null）。 */
@@ -48,7 +53,7 @@ async function saveEdit() {
   if (!name || name.length > 100 || saving.value) return
   const node = nodes.value.find(n => n.id === editId.value)
   const teamId = editForm.team_id || null
-  const body: { name?: string; workspace_root?: string; team_id?: string | null } = {}
+  const body: { name?: string; workspace_root?: string; team_id?: string | null; visibility?: Visibility } = {}
   const root = editForm.workspace_root.trim()
   if (root !== (node?.workspace_root ?? '')) {
     if (!rootEditable.value || !root.startsWith('/') || root === '/' || root.split('/').includes('..')) {
@@ -58,6 +63,7 @@ async function saveEdit() {
   }
   if (name !== node?.name) body.name = name
   if (teamId !== (node?.team_id ?? null)) body.team_id = teamId
+  if (editForm.visibility !== node?.visibility) body.visibility = editForm.visibility
   if (!Object.keys(body).length) { editDialog.value = false; return }
   saving.value = true
   try {
@@ -70,7 +76,7 @@ async function saveEdit() {
   finally { saving.value = false }
 }
 const generated = ref<InstallLink | null>(null)
-const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null,
+const form = reactive({ name: '', workspace_root: '/home/ai', team_id: null as string | null, visibility: 'all' as Visibility,
   options: { control_proxy: '', environment: 'auto', proxy: '', ca_pem: '', claude_path: '', codex_path: '', git_hosts: ['github.com'], max_concurrent: 10 } })
 const CA_PEM_MAX_BYTES = 64 * 1024
 const CA_PEM_RE = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/
@@ -213,7 +219,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         </p>
       </div>
       <el-button
-        v-if="canManage"
         type="primary"
         data-test="install-runtime"
         @click="dialog = true; generated = null"
@@ -240,7 +245,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           :description="t('runtimeNodes.empty')"
         >
           <el-button
-            v-if="canManage"
             type="primary"
             @click="dialog = true; generated = null"
           >
@@ -368,7 +372,20 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               min-width="210"
             >
               <template #default="{ row }: { row: RuntimeNode }">
-                <strong>{{ row.name }}</strong><div class="muted">
+                <strong>{{ row.name }}</strong><el-tag
+                  v-if="row.visibility !== 'all'"
+                  size="small"
+                  type="warning"
+                  class="visibility-tag"
+                  data-test="runtime-visibility"
+                >
+                  {{ t(row.visibility === 'private' ? 'runtimeNodes.visibilityPrivate' : 'runtimeNodes.visibilityAdmins') }}
+                </el-tag><div
+                  v-if="row.owner_name"
+                  class="muted"
+                >
+                  {{ t('runtimeNodes.owner') }}: {{ row.owner_name }}
+                </div><div class="muted">
                   {{ row.username }}@{{ row.hostname }}
                 </div><div
                   v-if="row.ip"
@@ -446,12 +463,15 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               </template>
             </el-table-column>
             <el-table-column
-              v-if="canManage"
+              v-if="anyManaged"
               :label="t('common.actions')"
               min-width="290"
             >
               <template #default="{ row }: { row: RuntimeNode }">
-                <div class="row-actions">
+                <div
+                  v-if="row.can_manage"
+                  class="row-actions"
+                >
                   <el-button
                     text
                     type="primary"
@@ -567,7 +587,28 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             {{ t('runtimeNodes.rootPending') }}
           </p>
         </el-form-item>
-        <el-form-item :label="t('runtimeNodes.team')">
+        <el-form-item :label="t('runtimeNodes.visibility')">
+          <el-radio-group
+            v-model="editForm.visibility"
+            :disabled="saving"
+            data-test="runtime-edit-visibility"
+          >
+            <el-radio
+              v-for="item in visibilityOptions"
+              :key="item"
+              :value="item"
+            >
+              {{ t(`runtimeNodes.visibility${item === 'all' ? 'All' : item === 'private' ? 'Private' : 'Admins'}`) }}
+            </el-radio>
+          </el-radio-group>
+          <p class="muted field-hint">
+            {{ t('runtimeNodes.visibilityHint') }}
+          </p>
+        </el-form-item>
+        <el-form-item
+          v-if="canManage"
+          :label="t('runtimeNodes.team')"
+        >
           <el-select
             v-model="editForm.team_id"
             clearable
@@ -634,7 +675,27 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
               :placeholder="t('runtimeNodes.nameAuto')"
             />
           </el-form-item>
-          <el-form-item :label="t('runtimeNodes.team')">
+          <el-form-item :label="t('runtimeNodes.visibility')">
+            <el-radio-group
+              v-model="form.visibility"
+              data-test="runtime-visibility-input"
+            >
+              <el-radio
+                v-for="item in visibilityOptions"
+                :key="item"
+                :value="item"
+              >
+                {{ t(`runtimeNodes.visibility${item === 'all' ? 'All' : item === 'private' ? 'Private' : 'Admins'}`) }}
+              </el-radio>
+            </el-radio-group>
+            <p class="muted field-hint">
+              {{ t('runtimeNodes.visibilityHint') }}
+            </p>
+          </el-form-item>
+          <el-form-item
+            v-if="canManage"
+            :label="t('runtimeNodes.team')"
+          >
             <el-select
               v-model="form.team_id"
               clearable
@@ -792,6 +853,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .page-header h2 { margin: 0 0 8px; }
 .toolbar { display: flex; gap: 12px; margin: 12px 0 20px; max-width: 520px; }
+.visibility-tag { margin-left: 6px; }
 .muted, small { color: var(--el-text-color-secondary); font-size: 12px; }
 .field-hint { width: 100%; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }

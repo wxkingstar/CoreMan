@@ -356,6 +356,7 @@ async def enroll(
             name=link.name or f"{body.username}@{body.hostname}",
             team_id=link.team_id,
             visibility=link.visibility,
+            owner_id=link.created_by,
             workspace_root=body.workspace_root,
             hostname=body.hostname,
             username=body.username,
@@ -409,6 +410,7 @@ def new_relay(request: Request, node: RuntimeNode, provider: str, node_token: st
         model_provider=provider,
         team_id=node.team_id,
         visibility=node.visibility,
+        owner_id=node.owner_id,
         supported_models_mode="restricted",
         supported_models=[],
         agent_token_enc=request.app.state.cipher.encrypt(

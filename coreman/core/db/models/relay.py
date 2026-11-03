@@ -38,7 +38,7 @@ class RelayServer(TimestampMixin, Base):
         CheckConstraint(
             "supported_models_mode IN ('inherit','restricted')", name="supported_models_mode"
         ),
-        CheckConstraint("visibility IN ('all','admins')", name="visibility"),
+        CheckConstraint("visibility IN ('all','admins','private')", name="visibility"),
         CheckConstraint(
             "health_status IN ('healthy','down','auth_fail','timeout','unknown')",
             name="health_status",
@@ -58,6 +58,8 @@ class RelayServer(TimestampMixin, Base):
     supported_models: Mapped[list[str] | None] = mapped_column(ARRAY(Text()))
     team_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("teams.id"))
     visibility: Mapped[str] = mapped_column(Text, server_default=text("'all'"))
+    # 与节点的 owner_id 同步；visibility='private' 时只有他能选这个实例。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
     description: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 节点按 AI 类型派生的上报令牌（密文），用于 /api/infra/relay/* 与记忆上报的 Bearer 校验。
