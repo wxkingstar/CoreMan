@@ -3,7 +3,8 @@
 飞书的限制（均来自官方文档）：
 - v7 修改接口只允许应用改自己，且只支持「开发者后台创建」的自建应用；
 - 应用有版本在审核中时不能修改；
-- 基础信息、机器人能力与菜单、可用范围等要提交发布并审核通过后才在线上生效；
+- 基础信息、机器人能力与菜单等要提交发布并审核通过后才在线上生效；
+- 可用范围走应用管理接口（需管理员权限，按需申请），读的是线上实际名单，改完立即生效；
 - 斜杠指令不需要发布，客户端约 5 分钟后生效。
 这里只做参数整形与脱敏的错误映射，权限判断由路由层负责。
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from coreman.core.errors import ApiError
@@ -23,6 +25,18 @@ V6_APP = "/open-apis/application/v6/applications/me"
 V6_SCOPES = "/open-apis/application/v6/scopes"
 SLASH = "/open-apis/application/v7/app_slash_commands"
 AVATAR_UPLOAD = "/open-apis/application/v7/app_avatar/upload"
+VISIBILITY_GET = "/open-apis/application/v2/app/visibility"
+VISIBILITY_PAGE = 1000
+VISIBILITY_BATCH = 100
+# 可用范围接口返回的名单 → 是否为成员（成员取 user_id，其余取 id）。
+_VISIBILITY_LISTS = {
+    "users": True,
+    "departments": False,
+    "groups": False,
+    "invisible_users": True,
+    "invisible_departments": False,
+    "invisible_groups": False,
+}
 MENU_TYPES = {"link": 1, "event": 2, "submenu": 3, "message": 4}
 MENU_KINDS = {value: key for key, value in MENU_TYPES.items()}
 _VERSION = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
@@ -33,9 +47,13 @@ _UNDER_REVIEW = {210010, 210020, 210040, 210302}
 _MISSING_SCOPE = {99991672, 99991640, 210017, 210007, 210037}
 
 
-def v7(app_id: str, action: str) -> str:
+def _check_app_id(app_id: str) -> None:
     if not re.fullmatch(r"cli_[A-Za-z0-9]+", app_id):
         raise ApiError(422, 422, "飞书应用 ID 格式不正确")
+
+
+def v7(app_id: str, action: str) -> str:
+    _check_app_id(app_id)
     return f"/open-apis/application/v7/applications/{app_id}/{action}"
 
 
@@ -370,25 +388,80 @@ async def update_bot(
     await _write(client.call("PATCH", v7(app_id, "ability"), json={"bot": bot}))
 
 
+async def get_visibility(client: FeishuClient, app_id: str) -> dict[str, Any]:
+    """应用线上实际生效的可用与禁用名单（含企业管理后台改的）；成员为 user_id，部门为自定义 ID。"""
+    _check_app_id(app_id)
+    lists: dict[str, list[str]] = {key: [] for key in _VISIBILITY_LISTS}
+    is_all = False
+    token: str | None = None
+    while True:
+        params: dict[str, Any] = {"app_id": app_id, "user_page_size": VISIBILITY_PAGE}
+        if token:
+            params["user_page_token"] = token
+        data = await _write(client.call("GET", VISIBILITY_GET, params=params))
+        is_all = is_all or bool(data.get("is_visible_to_all"))
+        for key, members in _VISIBILITY_LISTS.items():
+            lists[key].extend(_member_ids(data.get(key)) if members else _ids(data.get(key)))
+        next_token = data.get("user_page_token")
+        if not data.get("has_more_users") or not isinstance(next_token, str) or next_token == token:
+            break
+        token = next_token
+    return {"is_all": is_all, **{key: list(dict.fromkeys(ids)) for key, ids in lists.items()}}
+
+
+def _member_ids(items: Any) -> list[str]:
+    out: list[str] = []
+    for item in items if isinstance(items, list) else []:
+        value = item.get("user_id") or item.get("open_id") if isinstance(item, dict) else None
+        if isinstance(value, str) and value:
+            out.append(value)
+    return out
+
+
+def _ids(items: Any) -> list[str]:
+    out: list[str] = []
+    for item in items if isinstance(items, list) else []:
+        value = item.get("id") if isinstance(item, dict) else None
+        if isinstance(value, str) and value:
+            out.append(value)
+    return out
+
+
 async def update_visibility(
     client: FeishuClient,
     app_id: str,
     *,
-    visible_to_all: bool,
-    user_ids: list[str],
-    department_ids: list[str],
+    visible_to_all: bool | None = None,
+    add_users: Sequence[str] = (),
+    remove_users: Sequence[str] = (),
+    add_departments: Sequence[str] = (),
+    remove_departments: Sequence[str] = (),
 ) -> None:
-    visibility: dict[str, Any] = {"is_visible_to_all": visible_to_all}
-    if not visible_to_all:
-        visibility["visible_list"] = {"user_ids": user_ids, "department_ids": department_ids}
-    await _write(
-        client.call(
-            "PATCH",
-            v7(app_id, "config"),
-            params={"user_id_type": "user_id", "department_id_type": "department_id"},
-            json={"visibility": visibility},
+    """增量修改可用名单，线上立即生效、不需要发布。飞书每个列表一次最多 100 个，超出分批。"""
+    _check_app_id(app_id)
+    pending = {
+        ("add_visible_list", "user_ids"): list(add_users),
+        ("add_visible_list", "department_ids"): list(add_departments),
+        ("del_visible_list", "user_ids"): list(remove_users),
+        ("del_visible_list", "department_ids"): list(remove_departments),
+    }
+    body: dict[str, Any] = {} if visible_to_all is None else {"is_visible_to_all": visible_to_all}
+    while True:
+        for (group, field), ids in pending.items():
+            if ids:
+                body.setdefault(group, {})[field] = ids[:VISIBILITY_BATCH]
+                del ids[:VISIBILITY_BATCH]
+        if not body:
+            return
+        await _write(
+            client.call(
+                "PATCH",
+                f"/open-apis/application/v6/applications/{app_id}/visibility",
+                params={"user_id_type": "user_id", "department_id_type": "department_id"},
+                json=body,
+            )
         )
-    )
+        body = {}
 
 
 def next_version(current: str | None) -> str:

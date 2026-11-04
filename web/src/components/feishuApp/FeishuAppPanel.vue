@@ -21,6 +21,10 @@ const overview = ref<FeishuAppOverview | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const registrationVisible = ref(false)
+/** 从可用范围面板发起的扫码：连同管理可用范围的权限一起申请。 */
+const registrationForVisibility = ref(false)
+/** 扫码补齐后重新挂载可用范围面板，重新读权限与名单。 */
+const visibilityKey = ref(0)
 const applying = ref(false)
 const publishing = ref(false)
 const publishForm = reactive({ version: '', changelog: '', remark: '' })
@@ -80,7 +84,13 @@ async function publish(): Promise<void> {
 function onUpdated(): void {
   registrationVisible.value = false
   ElMessage.success(t('feishuApp.updated'))
+  visibilityKey.value += 1
   void load()
+}
+
+function openRegistration(forVisibility = false): void {
+  registrationForVisibility.value = forVisibility
+  registrationVisible.value = true
 }
 
 onMounted(load)
@@ -141,7 +151,7 @@ onMounted(load)
             </el-button>
             <el-button
               data-test="feishu-app-update"
-              @click="registrationVisible = true"
+              @click="openRegistration()"
             >
               {{ t('feishuApp.scanUpdate') }}
             </el-button>
@@ -211,7 +221,7 @@ onMounted(load)
             </el-alert>
             <el-button
               type="primary"
-              @click="registrationVisible = true"
+              @click="openRegistration()"
             >
               {{ t('feishuApp.scanUpdate') }}
             </el-button>
@@ -283,10 +293,9 @@ onMounted(load)
           @changed="load"
         />
         <FeishuAppVisibility
+          :key="visibilityKey"
           :bot-id="botId"
-          :overview="overview"
-          :disabled="underReview"
-          @changed="load"
+          @scan="openRegistration(true)"
         />
         <FeishuAppCommands
           :bot-id="botId"
@@ -364,6 +373,7 @@ onMounted(load)
       v-model:visible="registrationVisible"
       purpose="update"
       :bot-id="botId"
+      :visibility="registrationForVisibility"
       @succeeded="onUpdated"
     />
   </div>
