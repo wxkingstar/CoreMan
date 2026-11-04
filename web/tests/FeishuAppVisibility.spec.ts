@@ -15,6 +15,8 @@ import { i18n } from '@/i18n'
 function current(over: Partial<Extract<FeishuVisibility, { permission: 'granted' }>> = {}): FeishuVisibility {
   return {
     permission: 'granted',
+    platform_app: '飞书登录',
+    via: 'platform',
     visible_to_all: false,
     users: [
       { feishu_id: 'fs_1', id: 'u1', display_name: '张三', login_name: 'zhangsan' },
@@ -39,15 +41,16 @@ describe('FeishuAppVisibility', () => {
   })
 
   it('asks for the admin permissions before showing anything', async () => {
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing', platform_app: '飞书登录', via: null })
     const wrapper = mountIt()
     await flushPromises()
     expect(wrapper.text()).toContain(i18n.global.t('feishuApp.visibilityMissing'))
+    expect(wrapper.get('[data-test="visibility-platform-hint"]').text()).toBe(i18n.global.t('feishuApp.visibilityPlatformHint', { name: '飞书登录' }))
     await wrapper.get('[data-test="visibility-scan"]').trigger('click')
     expect(wrapper.emitted('scan')).toHaveLength(1)
     wrapper.unmount()
 
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'pending' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'pending', platform_app: null, via: null })
     const pending = mountIt()
     await flushPromises()
     expect(pending.text()).toContain(i18n.global.t('feishuApp.visibilityPending'))
@@ -61,6 +64,7 @@ describe('FeishuAppVisibility', () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const wrapper = mountIt()
     await flushPromises()
+    expect(wrapper.get('[data-test="visibility-source"]').text()).toBe(i18n.global.t('feishuApp.visibilityViaPlatform', { name: '飞书登录' }))
     const users = wrapper.findAll('[data-test="visibility-user"]')
     expect(users.map((u) => u.text())).toEqual(['张三 (zhangsan)', i18n.global.t('feishuApp.visibilityUnknownUser', { id: 'fs_x' })])
     // 没同步进 CoreMan 的成员不能在这里移除。

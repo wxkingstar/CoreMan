@@ -394,14 +394,16 @@ def print_visibility(bot: dict[str, Any], data: dict[str, Any], as_json: bool) -
         return
     if data["permission"] == "missing":
         raise CliError(
-            f"{bot['name']} 的飞书应用还没有管理可用范围的权限，"
-            "请在管理后台「飞书应用 → 可用范围」扫码补齐"
+            f"飞书登录应用和 {bot['name']} 的应用都还没有管理可用范围的权限：给登录应用开通"
+            "「获取应用信息」「管理应用可见范围」即可管理所有机器人，"
+            "或在管理后台「飞书应用 → 可用范围」为这个机器人扫码补齐"
         )
     if data["permission"] == "pending":
         raise CliError(f"{bot['name']} 的飞书应用管理可用范围的权限还在等企业管理员审核")
     output.fields(
         data,
         [
+            ("权限来源", _source),
             ("范围", lambda d: "全员可用" if d["visible_to_all"] else "指定成员和部门"),
             ("成员", lambda d: [_person(u) for u in d["users"]]),
             ("部门", lambda d: [_dept(x) for x in d["departments"]]),
@@ -409,6 +411,12 @@ def print_visibility(bot: dict[str, Any], data: dict[str, Any], as_json: bool) -
             ("禁用名单", lambda d: _blocked(d["invisible"])),
         ],
     )
+
+
+def _source(d: dict[str, Any]) -> str:
+    if d.get("via") == "platform":
+        return f"飞书登录应用「{d['platform_app']}」"
+    return "本机器人的飞书应用"
 
 
 def _blocked(inv: dict[str, Any]) -> list[str]:
