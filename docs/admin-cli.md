@@ -69,6 +69,17 @@ coreman bots allowed-clear sales_bot
 
 `allowed-remove` 移空白名单时会拒绝执行，因为那等于对所有人放开；确实要这样请用 `allowed-clear`。
 
+飞书应用可用范围（读写的是飞书线上实际生效的名单，增删立即生效，不需要发布版本）：
+
+```bash
+coreman bots visibility sales_bot
+coreman bots visibility-add sales_bot alice bob --dept 销售部
+coreman bots visibility-remove sales_bot bob --dept /公司/销售部
+coreman bots visibility-all sales_bot --yes
+```
+
+成员写登录名、邮箱、姓名或 id，须有飞书账号；部门写名称、完整路径、飞书部门 ID 或 id，须是同步进来的飞书通讯录部门。当前全员可用时，`visibility-add` 会拒绝执行，因为添加名单等于收窄范围；确实要只给这些人用请加 `--restrict`。应用需要先有管理可用范围的权限（见[飞书接入](feishu.md)），没有时命令会提示到管理后台扫码补齐。
+
 技能与业务系统授权：
 
 ```bash

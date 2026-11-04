@@ -1,4 +1,4 @@
-"""AI 员工：查看、启停、改配置、环境变量、协作者与白名单、技能安装、业务系统授权。"""
+"""AI 员工：查看、启停、改配置、环境变量、协作者与白名单、飞书可用范围、技能安装、业务系统授权。"""
 
 from __future__ import annotations
 
@@ -70,6 +70,22 @@ def register(sub: Any) -> None:
         p.add_argument("users", nargs="+", metavar="成员", help="登录名、邮箱、姓名或 id")
     leaf(ops, "allowed", "列出使用白名单（空 = 不限制）", allowed).add_argument("bot")
     leaf(ops, "allowed-clear", "清空使用白名单（不再限制）", allowed_clear).add_argument("bot")
+
+    leaf(ops, "visibility", "查看飞书应用线上实际生效的可用范围", visibility).add_argument("bot")
+    p = visibility_target(
+        ops, "visibility-add", "把成员或部门加入飞书可用范围（立即生效）", visibility_add
+    )
+    p.add_argument(
+        "--restrict",
+        action="store_true",
+        help="当前全员可用时，改为只给这些成员和部门用（其他人立即无法使用）",
+    )
+    visibility_target(
+        ops, "visibility-remove", "把成员或部门移出飞书可用范围（立即生效）", visibility_remove
+    )
+    p = leaf(ops, "visibility-all", "把飞书可用范围改为全员可用（立即生效）", visibility_all)
+    p.add_argument("bot")
+    add_yes(p)
 
     leaf(ops, "skills", "列出已装技能与待审申请", skills).add_argument("bot")
     p = leaf(ops, "skill-install", "安装或重装技能（内部技能会提交审批）", skill_install)
@@ -352,6 +368,107 @@ async def allowed_clear(c: AdminClient, args: argparse.Namespace) -> int:
 
 async def bot_skills(c: AdminClient, bot: dict[str, Any]) -> dict[str, Any]:
     return await c.get(f"/api/admin/bots/{bot['id']}/skills")  # type: ignore[no-any-return]
+
+
+def visibility_target(ops: Any, name: str, help_text: str, handler: Any) -> argparse.ArgumentParser:
+    p = leaf(ops, name, help_text, handler)
+    p.add_argument("bot")
+    p.add_argument("users", nargs="*", metavar="成员", help="登录名、邮箱、姓名或 id")
+    p.add_argument("--dept", action="append", metavar="部门", help="部门名称、路径或 id，可重复")
+    return p
+
+
+def _person(u: dict[str, Any]) -> str:
+    if not u["display_name"]:
+        return f"未同步成员（{u['feishu_id']}）"
+    return f"{u['display_name']}（{u['login_name']}）" if u["login_name"] else u["display_name"]
+
+
+def _dept(d: dict[str, Any]) -> str:
+    return d["name"] or f"未同步部门（{d['feishu_id']}）"
+
+
+def print_visibility(bot: dict[str, Any], data: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        output.dump(data)
+        return
+    if data["permission"] == "missing":
+        raise CliError(
+            f"{bot['name']} 的飞书应用还没有管理可用范围的权限，"
+            "请在管理后台「飞书应用 → 可用范围」扫码补齐"
+        )
+    if data["permission"] == "pending":
+        raise CliError(f"{bot['name']} 的飞书应用管理可用范围的权限还在等企业管理员审核")
+    output.fields(
+        data,
+        [
+            ("范围", lambda d: "全员可用" if d["visible_to_all"] else "指定成员和部门"),
+            ("成员", lambda d: [_person(u) for u in d["users"]]),
+            ("部门", lambda d: [_dept(x) for x in d["departments"]]),
+            ("用户组", lambda d: f"{len(d['groups'])} 个" if d["groups"] else None),
+            ("禁用名单", lambda d: _blocked(d["invisible"])),
+        ],
+    )
+
+
+def _blocked(inv: dict[str, Any]) -> list[str]:
+    groups = [f"{len(inv['groups'])} 个用户组"] if inv["groups"] else []
+    return [_person(u) for u in inv["users"]] + [_dept(x) for x in inv["departments"]] + groups
+
+
+async def visibility(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    print_visibility(bot, await c.get(f"{BOTS}/{bot['id']}/feishu-app/visibility"), args.json)
+    return 0
+
+
+async def _visibility_targets(
+    c: AdminClient, args: argparse.Namespace
+) -> tuple[list[str], list[str]]:
+    users = [(await c.user(ref))["id"] for ref in args.users]
+    depts = [(await c.department(ref, platform="feishu"))["id"] for ref in args.dept or []]
+    if not users and not depts:
+        raise CliError("请至少给出一位成员或一个部门（--dept）")
+    return users, depts
+
+
+async def _update_visibility(
+    c: AdminClient, bot: dict[str, Any], body: dict[str, Any], as_json: bool
+) -> int:
+    data = await c.request("PATCH", f"{BOTS}/{bot['id']}/feishu-app/visibility", body=body)
+    if not as_json:
+        print(f"已更新 {bot['name']} 的飞书可用范围，立即生效：")
+    print_visibility(bot, data, as_json)
+    return 0
+
+
+async def visibility_add(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    users, depts = await _visibility_targets(c, args)
+    body: dict[str, Any] = {"add_user_ids": users, "add_department_ids": depts}
+    if args.restrict:
+        body["visible_to_all"] = False
+    else:
+        current = await c.get(f"{BOTS}/{bot['id']}/feishu-app/visibility")
+        if current.get("visible_to_all"):
+            raise CliError(
+                f"{bot['name']} 当前全员可用，添加名单不会生效；"
+                "确实要改为只给这些成员和部门用，请加 --restrict"
+            )
+    return await _update_visibility(c, bot, body, args.json)
+
+
+async def visibility_remove(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    users, depts = await _visibility_targets(c, args)
+    body = {"remove_user_ids": users, "remove_department_ids": depts}
+    return await _update_visibility(c, bot, body, args.json)
+
+
+async def visibility_all(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    require_yes(args, f"把 {bot['name']} 改为全员可用")
+    return await _update_visibility(c, bot, {"visible_to_all": True}, args.json)
 
 
 async def skills(c: AdminClient, args: argparse.Namespace) -> int:

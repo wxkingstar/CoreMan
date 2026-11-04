@@ -108,6 +108,21 @@ class AdminClient:
         )
         return one(found, ref, "成员", lambda u: f"{u['login_name']}（{u['display_name']}）")
 
+    async def department(self, ref: str, *, platform: str) -> dict[str, Any]:
+        """按 id、平台部门 ID、完整路径或名称找通讯录部门。"""
+        found: list[dict[str, Any]] = []
+        stack = list(await self.get("/api/admin/departments", platform=platform))
+        while stack:
+            node = stack.pop()
+            found.append(node)
+            stack.extend(node.get("children") or [])
+        matched = (
+            [d for d in found if ref in (d["id"], d["platform_dept_id"])]
+            or [d for d in found if d["path"] == ref]
+            or [d for d in found if d["name"] == ref]
+        )
+        return one(matched, ref, "部门", lambda d: f"{d['path']}（{d['platform_dept_id']}）")
+
     async def team(self, ref: str) -> dict[str, Any]:
         """按 id、slug 或中文名找团队。"""
         rows = await self.get("/api/admin/teams")

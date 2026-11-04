@@ -49,6 +49,10 @@ TENANT_SCOPES: tuple[str, ...] = (
 # 机器人才申请、才算缺失，其余机器人不打扰管理员。
 OBSERVE_SCOPES: tuple[str, ...] = ("im:message.group_msg.include_bot:read",)
 
+# 在 CoreMan 里管理可用范围：读线上实际名单、增量增删（企业管理员权限，需审核）。这组权限还能
+# 读改企业内其他应用的可用范围，所以只在管理员要在 CoreMan 管可用范围时按需申请，不进默认清单。
+VISIBILITY_SCOPES: tuple[str, ...] = ("admin:app.info:readonly", "admin:app.visibility")
+
 # 机器人之间求助：收到其他机器人 @ 自己的消息、确认双方都在当前群（已含在 TENANT_SCOPES）。
 COLLABORATION_SCOPES: tuple[str, ...] = (
     "im:message.group_at_msg.include_bot:readonly",
@@ -94,10 +98,11 @@ def tenant_scopes(*, observe: bool = False) -> tuple[str, ...]:
     return TENANT_SCOPES + OBSERVE_SCOPES if observe else TENANT_SCOPES
 
 
-def addons(*, observe: bool = False) -> dict[str, Any]:
+def addons(*, observe: bool = False, visibility: bool = False) -> dict[str, Any]:
+    tenant = tenant_scopes(observe=observe) + (VISIBILITY_SCOPES if visibility else ())
     return {
         "preset": True,
-        "scopes": {"tenant": list(tenant_scopes(observe=observe)), "user": list(USER_SCOPES)},
+        "scopes": {"tenant": list(tenant), "user": list(USER_SCOPES)},
         "events": {"items": {"tenant": list(TENANT_EVENTS)}},
         "callbacks": {"items": list(CALLBACKS)},
     }
