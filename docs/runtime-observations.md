@@ -36,6 +36,8 @@ No new host polling daemon, local automation, process termination, queue or conc
 
 Each quota window has its original `observed_at`. Refreshing one window does not refresh another. An empty or failed read updates read outcome/attempt time without making an old usage figure fresh. Legacy numeric values without typed provenance are historical. Reset deadlines and freshness still apply to observed percentages, including a genuine zero.
 
+For older consumers with only one shared quota timestamp, the timestamp conservatively follows the oldest retained numeric window. Typed consumers can use each window's own observation time.
+
 `applicability=not_applicable` requires explicit upstream policy or plan evidence, never a price, a missing percentage, failed authentication or account hold. Current explicit plan defaults cover Codex Pro without a returned five-hour window, and verified Claude Ultra without a returned five-hour window. A real returned window takes precedence over defaults, including temporary restrictions. Unknown Claude verification remains unknown; no verification state is invented. Weekly usage remains unavailable if the provider does not return it.
 
 Policy references checked on 2026-11-04: [Codex pricing](https://learn.chatgpt.com/docs/pricing), [Claude Ultra](https://support.claude.com/en/articles/17728952-what-is-the-ultra-plan). Provider policy can change; explicit returned windows take precedence.

@@ -122,6 +122,8 @@ async def test_real_window_wins_over_plan_default_and_has_own_time(db_session):
     assert windows["five_hour"]["observed_at"] == older.isoformat()
     assert windows["seven_day"]["observed_at"] == now.isoformat()
     assert windows["seven_day"]["used_percentage"] == 0
+    assert relay.rate_limit_probed_at == older
+    assert relay.quota_observation["last_success_at"] == now.isoformat()
 
 
 async def test_empty_and_failed_quota_reads_never_refresh_old_values(db_session):

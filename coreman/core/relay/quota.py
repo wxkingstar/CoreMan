@@ -155,8 +155,22 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
                 values[f"rate_limit_{label}_resets_at"] = None
     if successful_times:
         latest = max(successful_times)
-        values["rate_limit_probed_at"] = latest
-        metadata["last_success_at"] = latest.isoformat()
+        previous_success = previous.get("last_success_at")
+        metadata["last_success_at"] = max(
+            latest, datetime.fromisoformat(previous_success) if previous_success else latest
+        ).isoformat()
+        # Old consumers have only one timestamp. Use the oldest retained
+        # numeric window, so a new weekly read cannot repaint an old 5h value.
+        legacy_times = [
+            datetime.fromisoformat(windows[name]["observed_at"])
+            for name, label in (("five_hour", "5h"), ("seven_day", "7d"))
+            if values.get(
+                f"rate_limit_{label}_used_pct", getattr(relay, f"rate_limit_{label}_used_pct")
+            )
+            is not None
+            and windows.get(name, {}).get("observed_at")
+        ]
+        values["rate_limit_probed_at"] = min(legacy_times) if legacy_times else latest
     if not successful_times and not applicability and quota.read_status == "observed":
         metadata["read_status"] = "no_data"
     metadata["windows"] = windows
