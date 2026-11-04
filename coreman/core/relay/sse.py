@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,6 +92,13 @@ class FinishEvent:
     reason: str
 
 
+@dataclass(frozen=True)
+class RuntimeObservationEvent:
+    """Node-attested driver generation, not a provider's user-visible output."""
+
+    seat_id: str
+
+
 SseEvent = (
     TextDelta
     | ThinkingDelta
@@ -101,6 +109,7 @@ SseEvent = (
     | RelayErrorEvent
     | RateLimitEvent
     | FinishEvent
+    | RuntimeObservationEvent
 )
 
 
@@ -142,6 +151,11 @@ class SseParser:
         if not isinstance(chunk, dict):
             return []
         out: list[SseEvent] = []
+        runtime = chunk.get("x_runtime")
+        if isinstance(runtime, dict):
+            seat = runtime.get("seat_id")
+            if isinstance(seat, str) and re.fullmatch(r"default|[a-f0-9]{12}", seat):
+                out.append(RuntimeObservationEvent(seat))
         usage = chunk.get("usage")
         if isinstance(usage, dict):
             out.append(self._usage(usage))

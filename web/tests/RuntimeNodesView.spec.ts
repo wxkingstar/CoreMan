@@ -304,7 +304,7 @@ it('updates login state in place on the timed refresh without a loading overlay'
     wrapper.unmount()
   } finally { vi.useRealTimers() }
 })
-// 不展开就能看到额度：已登录的后端显示进度条和重置倒计时，未登录或没采到的窗口不显示。
+// 不展开就能看到额度：缺失窗口明确标注，旧数字标成历史，未登录后端不展示。
 it('shows quota bars with reset countdowns only for logged-in backends', async () => {
   const soon = new Date(Date.now() + 133 * 60000 - 5000).toISOString()
   const later = new Date(Date.now() + (3 * 1440 + 5 * 60) * 60000 - 5000).toISOString()
@@ -315,9 +315,12 @@ it('shows quota bars with reset countdowns only for logged-in backends', async (
     backends: [backend('relay1', 'claude', 81, null), backend('relay2', 'codex', 40, 50)] }] as never)
   const wrapper = mountPage('member'); await flushPromises()
   const bars = wrapper.findAll('[data-test="quota-bar"]')
-  expect(bars).toHaveLength(1)
+  expect(bars).toHaveLength(2)
   expect(bars[0].text()).toContain('5h')
   expect(bars[0].text()).toContain('81%')
+  expect(bars[0].text()).toContain('历史')
+  expect(bars[1].text()).toContain('7d')
+  expect(bars[1].text()).toContain('未提供')
   expect(bars[0].text()).toContain('2 小时 13 分钟后重置')
   wrapper.unmount()
 })

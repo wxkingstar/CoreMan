@@ -20,7 +20,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -941,31 +940,88 @@ class Agent:
         """返回驱动记下的最新 Claude 额度；由运行时守护进程经本机 socket 实现。"""
         raise OperationError("当前环境不支持 Claude 额度采集")
 
+    def quota_context(self) -> dict:
+        return {}
+
+    def browser_snapshot(self, capture: bool, event: bool) -> dict:
+        raise OperationError("当前节点不支持浏览器监控")
+
     def probe_rate_limits(self) -> None:
-        if self.provider == "codex":
-            limits = self.codex_limits()
-        else:
-            # 驱动从每次对话（含每小时健康检查）的 rate_limit_event 记下额度；
-            # 没有新数据时不上报，平台的采集时间如实反映数据新旧。
-            data = self.claude_limits()
-            if not data or data.get("observed_at") == self.claude_observed_at:
+        context = self.quota_context()
+        try:
+            if self.provider == "codex":
+                limits = self.codex_limits()
+            elif self.provider == "opencode":
+                self.report(
+                    "relay/rate-limits",
+                    {
+                        "rate_limits": {
+                            **context,
+                            "source": "probe",
+                            "read_status": "unsupported",
+                            "error_code": "provider_quota_not_integrated",
+                        }
+                    },
+                )
                 return
-            limits = {k: data[k] for k in ("five_hour", "seven_day") if data.get(k)}
+            else:
+                data = self.claude_limits()
+                if not data:
+                    self.report(
+                        "relay/rate-limits",
+                        {
+                            "rate_limits": {
+                                **context,
+                                "source": "driver_cache",
+                                "read_status": "no_data",
+                            }
+                        },
+                    )
+                    return
+                if data.get("observed_at") == self.claude_observed_at:
+                    return
+                limits = {
+                    k: data[k]
+                    for k in (
+                        "five_hour",
+                        "seven_day",
+                        "observed_at",
+                        "plan_type",
+                        "account_verified",
+                        "window_applicability",
+                    )
+                    if data.get(k) is not None
+                }
+        except OperationError:
+            self.report(
+                "relay/rate-limits",
+                {
+                    "rate_limits": {
+                        **context,
+                        "source": "probe",
+                        "read_status": "error",
+                        "error_code": "quota_read_failed",
+                    }
+                },
+            )
+            raise
         if not isinstance(limits, dict):
             raise OperationError("额度数据格式不正确")
-        self.report("relay/rate-limits", {"rate_limits": limits})
+        self.report(
+            "relay/rate-limits",
+            {
+                "rate_limits": {
+                    **context,
+                    **limits,
+                    "source": "probe" if self.provider == "codex" else "driver_cache",
+                }
+            },
+        )
         if self.provider != "codex":
             self.claude_observed_at = data.get("observed_at")
 
     def check_claude(self) -> None:
-        """健康检查顺带刷新额度；对话刚带回过额度（worker 已写库）就不再发检查请求。"""
-        data = self.claude_limits()
-        observed = data.get("observed_at") if data else None
-        # 与已上报的不同，说明是检查之外的对话刷新的。
-        if observed and observed != self.claude_observed_at:
-            at = datetime.fromisoformat(observed.replace("Z", "+00:00")).timestamp()
-            if time.time() - at < CLAUDE_CHECK_INTERVAL:
-                return
+        """空闲兜底检查顺带读取额度；调度器用真实会话观测时间决定是否跳过。"""
         self.health_check()
         self.probe_rate_limits()
 
@@ -1031,6 +1087,9 @@ class Agent:
         buckets = result.get("rateLimitsByLimitId") or {}
         data = buckets.get("codex") or result.get("rateLimits") or {}
         out = {}
+        plan = data.get("planType") or result.get("planType")
+        if isinstance(plan, str) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,40}", plan):
+            out["plan_type"] = plan
         for key in ("primary", "secondary"):
             window = data.get(key) or {}
             duration = window.get("windowDurationMins")
@@ -1040,7 +1099,10 @@ class Agent:
                     "used_percentage": window["usedPercent"],
                     "resets_at": window.get("resetsAt"),
                 }
-        if not out:
+        if not any(name in out for name in ("five_hour", "seven_day")):
+            if out.get("plan_type"):
+                out["read_status"] = "no_data"
+                return out
             raise OperationError("Codex 额度窗口缺失")
         return out
 
@@ -1183,12 +1245,10 @@ class Agent:
     def start_schedules(self) -> None:
         def loop():
             # 从负无穷起算：monotonic 是开机时长，刚开机的主机也要在启动后立即跑第一轮。
-            last_quota, last_memory, last_health = -math.inf, -math.inf, ""
-            last_worktrees, last_claude = -math.inf, -math.inf
+            last_quota, last_memory, last_health = -math.inf, -math.inf, -math.inf
+            last_worktrees = -math.inf
             while not self.stop.is_set():
                 now = time.monotonic()
-                local = time.localtime()
-                slot = time.strftime("%Y-%m-%d-%H", local)
                 # Claude 的额度由 check_claude 随健康检查上报。
                 if self.provider == "codex" and now - last_quota >= 3600:
                     self.start_background("probe-rate-limits", self.probe_rate_limits)
@@ -1201,13 +1261,16 @@ class Agent:
                 if now - last_worktrees >= 1800:
                     self.start_background("refresh-worktrees", self.refresh_worktrees)
                     last_worktrees = now
-                if self.provider == "claude":
-                    if now - last_claude >= CLAUDE_CHECK_INTERVAL:
-                        self.start_background("health-check", self.check_claude)
-                        last_claude = now
-                elif 9 <= local.tm_hour <= 23 and slot != last_health:
-                    self.start_background("health-check", self.health_check)
-                    last_health = slot
+                recent_model = getattr(self, "last_model_check", 0)
+                if (
+                    now - last_health >= CLAUDE_CHECK_INTERVAL
+                    and time.time() - recent_model >= CLAUDE_CHECK_INTERVAL
+                ):
+                    self.start_background(
+                        "health-check",
+                        self.check_claude if self.provider == "claude" else self.health_check,
+                    )
+                    last_health = now
                 self.stop.wait(10)
 
         threading.Thread(target=loop, daemon=True, name="coreman-agent-schedules").start()
@@ -1253,6 +1316,14 @@ class Agent:
             }
         if kind == "probe-rate-limits":
             return self.start_background(kind, self.probe_rate_limits)
+        if kind == "browser-snapshot":
+            if (
+                set(data) - {"type", "capture", "event"}
+                or type(data.get("capture", False)) is not bool
+                or type(data.get("event", False)) is not bool
+            ):
+                raise OperationError("浏览器监控参数无效")
+            return self.browser_snapshot(data.get("capture", False), data.get("event", False))
         if kind == "health-check":
             return self.start_background(kind, self.health_check)
         if kind == "collect-memory":

@@ -12,6 +12,7 @@ from coreman.core.db.models import RelayServer
 from coreman.core.runtime_nodes.transport import ReverseTransport
 
 OPERATIONS = {
+    "browser-snapshot",
     "workspace-info",
     "workspace-init",
     "workspace-list",

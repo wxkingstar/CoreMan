@@ -129,7 +129,7 @@ def active_seat(node: RuntimeNode, provider: str) -> str:
 
 
 def dump_quota(relay: RelayServer) -> dict[str, Any]:
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"quota_observation": relay.quota_observation}
     for column in QUOTA_COLUMNS:
         value = getattr(relay, column)
         if isinstance(value, Decimal):
@@ -141,6 +141,10 @@ def dump_quota(relay: RelayServer) -> dict[str, Any]:
 
 
 def load_quota(relay: RelayServer, saved: dict[str, Any]) -> None:
+    relay.quota_observation = saved.get("quota_observation")
+    relay.model_health, relay.last_model_failure, relay.driver_health = None, None, None
+    relay.health_status, relay.health_detail, relay.health_checked_at = "unknown", None, None
+    relay.health_fail_count, relay.health_latency_ms = 0, None
     for column in QUOTA_COLUMNS:
         value = saved.get(column)
         if value is not None and column.endswith("_pct"):

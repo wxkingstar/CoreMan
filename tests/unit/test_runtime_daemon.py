@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,6 +75,60 @@ def command(data, path="/v1/chat/completions"):
         "path": path,
         "body": base64.b64encode(json.dumps(data).encode()).decode(),
     }
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("recent", [True, False])
+def test_all_providers_use_fifteen_minute_idle_fallback(daemon, monkeypatch, provider, recent):
+    from runtime_daemon import agent as module
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.config["node_token"] = "test-token"
+    runtime = RuntimeAgent(daemon, provider, "test-relay")
+    runtime.last_model_check = time.time() if recent else time.time() - 901
+    calls = []
+    runtime.start_background = lambda name, action: calls.append(name)
+
+    class Stop:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, _):
+            self.stopped = True
+
+    runtime.stop = Stop()
+
+    class InlineThread:
+        def __init__(self, *, target, **_):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(module.threading, "Thread", InlineThread)
+    runtime.start_schedules()
+    assert ("health-check" in calls) is not recent
+
+
+def test_recent_activity_only_suppresses_matching_seat(daemon):
+    current = time.time() - 10
+    daemon.apply_model_activity(
+        {"claude": {"observed_at": "2026-01-01T00:00:00Z", "seat_id": "retired"}}
+    )
+    assert not getattr(daemon.agents["claude"], "last_model_check", 0)
+    from datetime import datetime
+
+    daemon.apply_model_activity(
+        {
+            "claude": {
+                "observed_at": datetime.fromtimestamp(current, UTC).isoformat(),
+                "seat_id": daemon.seats.active("claude"),
+            }
+        }
+    )
+    assert daemon.agents["claude"].last_model_check == current
 
 
 def test_root_change_is_durable_and_updates_agents(daemon, tmp_path):
@@ -276,7 +331,10 @@ def test_no_persistent_claude_modes_in_release_source():
     # Claude 交给驱动选默认模型，不用模型列表第一个。
     [("claude", "plan", None), ("codex", "read-only", "test-model")],
 )
-def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provider, mode, model):
+@pytest.mark.parametrize("content", ["OK", "", "Some other reply"])
+def test_health_probe_uses_provider_permission_mode(
+    daemon, monkeypatch, provider, mode, model, content
+):
     from runtime_daemon.daemon import RuntimeAgent
 
     daemon.socket_dir = daemon.data_dir
@@ -299,7 +357,9 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
 
         def post(self, path, json):
             captured.append(json)
-            return SimpleNamespace(status_code=200, json=lambda: {"choices": []})
+            return SimpleNamespace(
+                status_code=200, json=lambda: {"choices": [{"message": {"content": content}}]}
+            )
 
     monkeypatch.setattr("runtime_daemon.daemon.httpx.Client", LocalClient)
     agent = RuntimeAgent(daemon, provider, "test-relay")
@@ -309,7 +369,10 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
     assert captured[0].get("model") == model
-    assert reports[0]["status"] == "healthy"
+    assert reports[0]["status"] == ("healthy" if content == "OK" else "unknown")
+    assert reports[0]["reply_verified"] is (content == "OK")
+    assert reports[0]["check_kind"] == "model"
+    assert reports[0]["driver_status"] == "healthy"
 
 
 @pytest.mark.parametrize(

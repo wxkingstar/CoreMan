@@ -5,7 +5,7 @@ import type { Pct } from '@/api/types'
 import { formatDateTime, pctColor, pctNum, resetCountdown } from '@/utils/format'
 
 /** 一个限额窗口的用量进度条和重置倒计时；没采到用量时由调用方决定不渲染。inline：倒计时和进度条同一行，否则另起一行。 */
-const props = defineProps<{ pct: Pct; resetsAt: string | null; label?: string; inline?: boolean }>()
+const props = defineProps<{ pct: Pct; resetsAt: string | null; label?: string; inline?: boolean; state?: string; observedAt?: string | null }>()
 
 const { t } = useI18n()
 
@@ -39,13 +39,22 @@ const reset = computed(() => {
       class="quota-label"
     >{{ label }}</span>
     <el-progress
+      v-if="pctNum(pct) !== null && !['not_applicable', 'unsupported'].includes(state ?? '')"
       class="quota-track"
       :percentage="Math.min(100, Math.max(0, value))"
       :color="pctColor(pct)"
       :show-text="false"
       :stroke-width="6"
     />
-    <span class="quota-pct">{{ value }}%</span>
+    <span
+      v-if="pctNum(pct) !== null && !['not_applicable', 'unsupported'].includes(state ?? '')"
+      class="quota-pct"
+    >{{ value }}%</span>
+    <small v-if="state && state !== 'fresh'">{{ t('runtimeMonitor.quotaState.' + state) }}</small>
+    <small
+      v-if="observedAt"
+      class="quota-reset"
+    >{{ t('runtimeMonitor.observedAt') }} {{ formatDateTime(observedAt) }}</small>
     <small
       v-if="reset"
       class="quota-reset"

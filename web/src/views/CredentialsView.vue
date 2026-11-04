@@ -15,7 +15,8 @@ const editing = ref<ApiClient | null>(null)
 const form = reactive({ app_key: '', name: '', scopes: [] as string[], enabled: true })
 const formRef = ref<FormInstance>()
 const formSession = ref(0)
-const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'escalations']
+const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'escalations', 'runtime-browser']
+const scopeLabel = (scope: string) => scope === 'runtime-browser' ? t('runtimeMonitor.browserScope') : t('infra.scopeNames.' + scope)
 function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
@@ -119,7 +120,7 @@ onMounted(load)
                   :key="scope"
                   size="small"
                 >
-                  {{ scopes.includes(scope) ? t('infra.scopeNames.' + scope) : scope }}
+                  {{ scopes.includes(scope) ? scopeLabel(scope) : scope }}
                 </el-tag>
                 <span v-if="!row.scopes.length">—</span>
               </div>
@@ -256,7 +257,7 @@ onMounted(load)
               v-for="scope in scopes"
               :key="scope"
               :value="scope"
-              :label="t('infra.scopeNames.' + scope)"
+              :label="scopeLabel(scope)"
             />
           </el-select>
         </el-form-item>

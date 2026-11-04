@@ -2,6 +2,8 @@
 
 一个独立的系统用户环境安装一个 Daemon，可同时提供 Claude Code 与 Codex。Daemon 主动连接 CoreMan；目标机器无需开放入站端口。
 
+驱动与模型健康、额度观测时间和可选浏览器截图的接口及升级顺序见 [Runtime observations](../docs/runtime-observations.md)。浏览器采集默认关闭；模型状态优先复用真实会话，空闲时每 15 分钟兜底检查。
+
 ## 系统要求
 
 - 操作系统：Linux 或 macOS，amd64 / arm64。**不支持 Windows**（包括原生 Windows；WSL2 内的 Linux 发行版按 Linux 处理，但未做系统服务验收）。

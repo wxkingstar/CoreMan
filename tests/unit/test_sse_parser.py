@@ -5,12 +5,24 @@ from coreman.core.relay.sse import (
     FinishEvent,
     RateLimitEvent,
     RelayErrorEvent,
+    RuntimeObservationEvent,
     SseParser,
     TextDelta,
     ThinkingDelta,
     ToolUseStart,
     UsageEvent,
 )
+
+
+def test_node_seat_attestation_is_not_a_model_response():
+    parser = SseParser("codex")
+    assert parser.feed_line('data: {"x_runtime":{"seat_id":"default"},"choices":[]}') == [
+        RuntimeObservationEvent("default")
+    ]
+    assert not parser.saw_finish and not parser.saw_error
+    assert (
+        parser.feed_line('data: {"x_runtime":{"seat_id":"../../credentials"},"choices":[]}') == []
+    )
 
 
 def chunk(

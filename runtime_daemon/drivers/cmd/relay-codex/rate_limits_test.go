@@ -74,3 +74,20 @@ func TestRolloutRateLimitsOmitsWhenUnavailable(t *testing.T) {
 		t.Fatalf("nil must be omitted, got %s", b)
 	}
 }
+
+func TestProWeeklyWindowDoesNotInventFiveHourUsage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	rolloutPaths.Delete(testThread)
+	writeRollout(t, home, tokenCount("2026-10-19T03:59:33Z", `{"plan_type":"pro","primary":{"used_percent":0,"window_minutes":10080}}`))
+	snap := rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	if snap.PlanType != "pro" || snap.FiveHour != nil || snap.SevenDay.UsedPercentage != 0 || snap.WindowApplicability["five_hour"] != "not_applicable" {
+		t.Fatalf("unexpected pro policy: %+v", snap)
+	}
+	// A real returned window takes precedence over the plan default.
+	writeRollout(t, home, tokenCount("2026-10-19T04:00:00Z", `{"plan_type":"pro","primary":{"used_percent":5,"window_minutes":300}}`))
+	snap = rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	if snap.FiveHour == nil || snap.WindowApplicability["five_hour"] != "" {
+		t.Fatalf("actual window discarded: %+v", snap)
+	}
+}

@@ -29,6 +29,7 @@ type rolloutLine struct {
 }
 
 type codexRateLimitSet struct {
+	PlanType  string            `json:"plan_type"`
 	LimitID   string            `json:"limit_id"`
 	Primary   *codexLimitWindow `json:"primary"`
 	Secondary *codexLimitWindow `json:"secondary"`
@@ -46,9 +47,11 @@ type quotaWindow struct {
 }
 
 type rateLimitSnapshot struct {
-	FiveHour   *quotaWindow `json:"five_hour,omitempty"`
-	SevenDay   *quotaWindow `json:"seven_day,omitempty"`
-	ObservedAt string       `json:"observed_at"`
+	PlanType            string            `json:"plan_type,omitempty"`
+	WindowApplicability map[string]string `json:"window_applicability,omitempty"`
+	FiveHour            *quotaWindow      `json:"five_hour,omitempty"`
+	SevenDay            *quotaWindow      `json:"seven_day,omitempty"`
+	ObservedAt          string            `json:"observed_at"`
 }
 
 var rolloutPaths sync.Map // thread id → rollout path
@@ -111,7 +114,7 @@ func rolloutRateLimits(threadID string, since time.Time) any {
 		if limits.LimitID != "" && limits.LimitID != "codex" {
 			continue
 		}
-		snap := rateLimitSnapshot{ObservedAt: line.Timestamp.UTC().Format(time.RFC3339)}
+		snap := rateLimitSnapshot{ObservedAt: line.Timestamp.UTC().Format(time.RFC3339), PlanType: limits.PlanType}
 		for _, w := range []*codexLimitWindow{limits.Primary, limits.Secondary} {
 			if w == nil || w.UsedPercent == nil {
 				continue
@@ -126,6 +129,9 @@ func rolloutRateLimits(threadID string, since time.Time) any {
 		}
 		if snap.FiveHour == nil && snap.SevenDay == nil {
 			return nil
+		}
+		if snap.FiveHour == nil && (limits.PlanType == "pro" || limits.PlanType == "pro_200" || limits.PlanType == "pro_100" || limits.PlanType == "pro_500") {
+			snap.WindowApplicability = map[string]string{"five_hour": "not_applicable"}
 		}
 		return &snap
 	}

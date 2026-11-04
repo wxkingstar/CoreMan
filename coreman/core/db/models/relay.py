@@ -69,6 +69,7 @@ class RelayServer(TimestampMixin, Base):
     rate_limit_7d_used_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     rate_limit_7d_resets_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_limit_probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quota_observation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # 节点上没在用的席位最后一次采集到的额度：{席位 id: {上面五列}}。当前席位的额度在上面五列。
     seat_quotas: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     health_status: Mapped[str] = mapped_column(Text, server_default=text("'unknown'"))
@@ -76,6 +77,9 @@ class RelayServer(TimestampMixin, Base):
     health_detail: Mapped[str | None] = mapped_column(Text)
     health_latency_ms: Mapped[int | None] = mapped_column(Integer)
     health_fail_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    driver_health: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    model_health: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    last_model_failure: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     relay_version: Mapped[str | None] = mapped_column(Text)
     relay_mode: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, server_default=text("1"))

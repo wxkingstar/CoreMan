@@ -67,7 +67,7 @@ describe('RuntimeSeatsDialog', () => {
     await type('[data-test="seat-login-code"]', ' abc#state ')
     await click('[data-test="seat-login-finish"]')
     expect(runtimeSeats.completeLogin).toHaveBeenCalledWith('n1', 'claude', 'aaaaaaaaaaaa', { session_id: 's1', code: 'abc#state' })
-    expect(document.querySelectorAll('[data-test="quota-bar"]').length).toBe(3)
+    expect(document.querySelectorAll('[data-test="quota-bar"]').length).toBe(4)
 
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce('confirm' as never)
     await click('[data-test="activate-aaaaaaaaaaaa"]')

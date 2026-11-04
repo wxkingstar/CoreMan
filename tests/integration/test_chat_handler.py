@@ -127,6 +127,9 @@ async def test_normal_round_trip_new_session_then_resume(
     assert s.stream_id.startswith("bot:sales_bot|user:zs|ts:")
     row = await tasks.get(db_session, t1.id)
     assert row and row.status == "succeeded"
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health["check_kind"] == "conversation"
+    assert relay_row.model_health["reply_verified"] is True
     log = (await db_session.execute(select(ChatLog))).scalar_one()
     assert (
         log.status == "success"
@@ -248,13 +251,16 @@ async def test_known_identity_and_group_speaker_change(
 async def test_relay_error_empty_and_tools_only(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
-    bot, _, _ = await seed_bot(db_session)
+    bot, relay_row, _ = await seed_bot(db_session)
     t = await chat_task(db_session, bot, "a")
     await run(db_engine, t, FakeRelay("relay_error"))
     s = await stream_of(db_session, t.id)
     assert s.is_complete and "⚠️ claude exited" in (s.final_text or "")
     log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t.id))).scalar_one()
     assert log.status == "error" and log.error_code == "x_relay_error"
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health["status"] == "down"
+    failed_at = relay_row.model_health["observed_at"]
     t2 = await chat_task(db_session, bot, "b")
     await run(db_engine, t2, FakeRelay("empty"))
     log2 = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == t2.id))).scalar_one()
@@ -262,6 +268,9 @@ async def test_relay_error_empty_and_tools_only(
         log2.status == "error" and log2.error_code == "empty_stream" and log2.input_tokens is None
     )
     assert (await stream_of(db_session, t2.id)).final_text.startswith("⚠️ AI 服务返回了空回复")  # type: ignore[union-attr]
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health["observed_at"] == failed_at
+    assert relay_row.last_model_failure["observed_at"] == failed_at
     t3 = await chat_task(db_session, bot, "c")
     await run(db_engine, t3, FakeRelay("tools_only"))
     assert "调用了 2 次工具" in ((await stream_of(db_session, t3.id)).final_text or "")

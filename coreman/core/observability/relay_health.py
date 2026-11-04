@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.db.models import RelayServer
 from coreman.core.relay.client import RelayClient
+from coreman.core.relay.observations import HealthObservation
 
 
 async def read_health(relay: RelayServer) -> tuple[str, int]:
@@ -65,6 +66,11 @@ async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
                     health_fail_count=0
                     if status == "healthy"
                     else RelayServer.health_fail_count + 1,
+                    driver_health=HealthObservation(
+                        status=status, check_kind="driver", latency_ms=latency
+                    )
+                    .model_copy(update={"observed_at": now})
+                    .model_dump(mode="json"),
                 )
                 .returning(RelayServer.id)
             )

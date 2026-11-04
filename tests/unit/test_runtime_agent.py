@@ -124,7 +124,7 @@ def test_quota_refresh_is_scheduled_for_both_providers(agent, monkeypatch):
     assert "probe-rate-limits" in run_schedule_once(agent, monkeypatch)
 
 
-def test_claude_check_skips_when_a_conversation_just_refreshed_quota(agent, monkeypatch):
+def test_quota_cache_alone_does_not_suppress_model_check(agent, monkeypatch):
     driver = {"value": None}
     monkeypatch.setattr(agent, "claude_limits", lambda: driver["value"])
     calls = []
@@ -139,11 +139,12 @@ def test_claude_check_skips_when_a_conversation_just_refreshed_quota(agent, monk
     # 还没有任何请求：照常检查。
     agent.check_claude()
     assert calls == ["health", "probe"]
-    # 5 分钟前的对话带回过额度：跳过。
+    # 缓存时间不能证明模型刚成功调用；是否跳过由席位匹配的 model_activity 决定。
     calls.clear()
     driver["value"] = {"five_hour": {"used_percentage": 1}, "observed_at": stamp(300)}
     agent.check_claude()
-    assert calls == []
+    assert calls == ["health", "probe"]
+    calls.clear()
     # 15 分钟以前的：照常检查。
     driver["value"]["observed_at"] = stamp(16 * 60)
     agent.check_claude()
@@ -189,16 +190,25 @@ def test_claude_quota_is_reported_only_when_the_driver_saw_new_data(agent, monke
     monkeypatch.setattr(agent, "claude_limits", lambda: driver["value"])
     reports = []
     monkeypatch.setattr(agent, "report", lambda *a: reports.append(a))
-    # 节点刚启动、还没有请求：不上报，也不报错。
+    # 无数据单独上报，不伪造额度值或成功观测时间。
     agent.probe_rate_limits()
     window = {"used_percentage": 57.5, "resets_at": 1792468800}
     driver["value"] = {"seven_day": window, "five_hour": None, "observed_at": "t1"}
     agent.probe_rate_limits()
     agent.probe_rate_limits()
-    assert reports == [("relay/rate-limits", {"rate_limits": {"seven_day": window}})]
+    assert reports == [
+        (
+            "relay/rate-limits",
+            {"rate_limits": {"source": "driver_cache", "read_status": "no_data"}},
+        ),
+        (
+            "relay/rate-limits",
+            {"rate_limits": {"seven_day": window, "observed_at": "t1", "source": "driver_cache"}},
+        ),
+    ]
     driver["value"] = {"seven_day": window, "observed_at": "t2"}
     agent.probe_rate_limits()
-    assert len(reports) == 2
+    assert len(reports) == 3
 
 
 def test_failed_quota_report_is_retried(agent, monkeypatch):
@@ -218,9 +228,12 @@ def test_failed_quota_report_is_retried(agent, monkeypatch):
     assert len(reports) == 1
 
 
-def test_plain_agent_has_no_claude_quota_source(agent):
+def test_plain_agent_has_no_claude_quota_source(agent, monkeypatch):
+    reports = []
+    monkeypatch.setattr(agent, "report", lambda *args: reports.append(args))
     with pytest.raises(agent_module.OperationError):
         agent.probe_rate_limits()
+    assert reports[0][1]["rate_limits"]["read_status"] == "error"
 
 
 def test_command_errors_do_not_echo_output_or_credentials():
