@@ -1,5 +1,6 @@
 import base64
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -116,3 +117,75 @@ async def test_signed_report_and_server_list(
     assert [row["id"] for row in rows] == [str(relay.id)]
     assert rows[0]["runtime_node_id"] == str(relay.runtime_node_id)
     assert not LEGACY_FIELDS & set(rows[0])
+
+
+def test_client_metadata_is_allowlisted_and_keeps_its_own_time() -> None:
+    from coreman.api.routers.infra_relay import client_metadata
+
+    now = datetime.now(UTC)
+    raw = {
+        "claude": {
+            "installed": True,
+            "login": "ready",
+            "version": "1.0",
+            "account": "private",
+            "token": "private",
+            "seats": ["private"],
+        }
+    }
+    assert client_metadata(raw, "claude", now) == {
+        "installed": True,
+        "login": "ready",
+        "version": "1.0",
+        "observed_at": now,
+    }
+    assert client_metadata(raw, "opencode", now) == {}
+    assert client_metadata(None, "claude", now) == {}
+
+
+async def test_signed_list_projects_node_capabilities(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from tests.fakes.runtime_node import add_node
+
+    await login_as(client, db_session, role="platform_admin")
+    credentials = (
+        await client.post(
+            "/api/admin/api-clients",
+            json={"app_key": "metadata-reader", "name": "Metadata reader", "scopes": ["relay"]},
+        )
+    ).json()["data"]
+    now = datetime.now(UTC)
+    node = await add_node(
+        db_session,
+        heartbeat_at=now,
+        capabilities={
+            "opencode": {
+                "installed": True,
+                "login": "required",
+                "version": "1.2",
+                "account": "private",
+            }
+        },
+    )
+    relay = await add_node_relay(db_session, node=node, provider="opencode")
+    await db_session.commit()
+    path = "/api/infra/relay/servers"
+    ts = str(int(time.time()))
+    response = await client.get(
+        path,
+        headers={
+            "X-App-Key": "metadata-reader",
+            "X-Timestamp": ts,
+            "X-Signature": sign_request(
+                "GET", path, {}, ts, "metadata-reader", credentials["secret"]
+            ),
+        },
+    )
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    metadata = next(r["client_metadata"] for r in rows if r["id"] == str(relay.id))
+    assert metadata["installed"] is True
+    assert metadata["login"] == "required" and metadata["version"] == "1.2"
+    assert datetime.fromisoformat(metadata["observed_at"].replace("Z", "+00:00")) == now
+    assert set(metadata) == {"installed", "login", "version", "observed_at"}

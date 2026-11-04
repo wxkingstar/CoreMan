@@ -16,7 +16,7 @@ from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.api.infra_auth import require_scope, signed_client
 from coreman.core.crypto import DecryptError
-from coreman.core.db.models import RelayServer
+from coreman.core.db.models import RelayServer, RuntimeNode
 from coreman.core.relay.models import effective_models, load_catalog
 from coreman.core.relay.quota import Quota, save_quota
 
@@ -117,13 +117,14 @@ async def health(
 )
 async def servers(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     stmt = (
-        select(RelayServer)
+        select(RelayServer, RuntimeNode.capabilities, RuntimeNode.heartbeat_at)
+        .outerjoin(RuntimeNode, RuntimeNode.id == RelayServer.runtime_node_id)
         .where(RelayServer.is_active, RelayServer.runtime_node_id.is_not(None))
         .order_by(RelayServer.name)
     )
     catalog = await load_catalog(session)
     data = []
-    for r in (await session.execute(stmt)).scalars():
+    for r, capabilities, heartbeat_at in (await session.execute(stmt)).all():
         item = {
             key: getattr(r, key)
             for key in (
@@ -152,6 +153,24 @@ async def servers(session: AsyncSession = Depends(get_session)) -> dict[str, Any
             effective_supported_models=effective_models(r, catalog),
             supported_models=effective_models(r, catalog),
             team=str(r.team_id) if r.team_id else None,
+            client_metadata=client_metadata(capabilities, r.model_provider, heartbeat_at),
         )
         data.append(item)
     return {"success": True, "code": 0, "data": data}
+
+
+def client_metadata(
+    capabilities: object, provider: str, observed_at: datetime | None
+) -> dict[str, Any]:
+    """Project only non-secret client facts; heartbeat is not an inference check."""
+    capability = capabilities.get(provider) if isinstance(capabilities, dict) else None
+    if not isinstance(capability, dict):
+        return {}
+    result: dict[str, Any] = {"observed_at": observed_at}
+    if isinstance(capability.get("installed"), bool):
+        result["installed"] = capability["installed"]
+    login = capability.get("login")
+    result["login"] = login if login in ("ready", "required", "unknown") else "unknown"
+    version = capability.get("version")
+    result["version"] = version[:100] if isinstance(version, str) else ""
+    return result
