@@ -118,6 +118,28 @@ async def test_repeat_search_cancels_instead_of_unbounded_retry(db_session):
     assert task.cancel_requested_at is not None
 
 
+async def test_overlong_context_gets_field_feedback_and_retry(db_session):
+    a, b, actor, route, task = await fresh(db_session)
+    args = {"collaborator_id": b.bot_key, "question": "可用库存?", "context": "背景" * 815}
+    bad = await call(db_session, task, actor, "request_collaboration", args)
+    assert bad["stop"] is False
+    assert "context 最多 900 字符，实际 1630" in bad["error"]
+    await db_session.refresh(task)
+    assert "collaboration_attempt_error" not in task.payload
+    args["context"] = "只读核对"
+    ok = await call(db_session, task, actor, "request_collaboration", args)
+    assert ok["collaboration_id"]
+
+
+async def test_combined_length_is_retryable(db_session):
+    a, b, actor, route, task = await fresh(db_session)
+    args = {"collaborator_id": b.bot_key, "question": "问" * 3500, "context": "景" * 800}
+    bad = await call(db_session, task, actor, "request_collaboration", args)
+    assert bad["stop"] is False and "合计最多 4000" in bad["error"]
+    args["question"] = "可用库存?"
+    assert (await call(db_session, task, actor, "request_collaboration", args))["collaboration_id"]
+
+
 async def test_distinct_bad_calls_share_failure_budget(db_session):
     a, b, actor, route, task = await fresh(db_session)
     for n in range(3):
