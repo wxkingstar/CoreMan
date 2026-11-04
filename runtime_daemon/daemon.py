@@ -549,7 +549,7 @@ class RuntimeAgent(Agent):
                 "detail": detail[:255] or None,
                 "latency_ms": int((time.monotonic() - start) * 1000),
                 "check_kind": kind,
-                "requested_model": model or None,
+                "requested_model": (model or None) if self.provider != "claude" else None,
                 "model": actual_model,
                 "reply_verified": verified,
                 "seat_id": seat_id,

@@ -373,6 +373,7 @@ def test_health_probe_uses_provider_permission_mode(
     assert reports[0]["reply_verified"] is (content == "OK")
     assert reports[0]["check_kind"] == "model"
     assert reports[0]["driver_status"] == "healthy"
+    assert reports[0]["requested_model"] == model
 
 
 @pytest.mark.parametrize(
