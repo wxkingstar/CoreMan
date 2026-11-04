@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.bot_permissions import can_create_bot
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
+from coreman.api.routers.platform_apps import decrypt_secret
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.bots.events import notify_bot_changed
@@ -23,6 +24,7 @@ from coreman.core.db.models import (
     Department,
     FeishuAppRegistration,
     FeishuPersonalGrant,
+    PlatformApp,
     User,
     UserIdentity,
 )
@@ -441,9 +443,67 @@ async def update_feishu_app_bot(
 
 
 VISIBILITY_PERMISSION_ERRORS = {
-    "missing": "飞书应用还没有管理可用范围的权限，请在「可用范围」里扫码补齐",
+    "missing": (
+        "飞书登录应用和这个机器人的应用都还没有管理可用范围的权限：给登录应用开通一次即可"
+        "管理所有机器人，或在「可用范围」里为这个机器人扫码补齐"
+    ),
     "pending": "管理可用范围的权限还在等企业管理员审核，审核通过后才能在 CoreMan 管理可用范围",
 }
+
+
+def platform_client_for(cipher: Cipher, app: PlatformApp) -> FeishuClient:
+    """以平台应用（飞书登录应用）的凭证建客户端；测试会替换这个工厂。"""
+    return FeishuClient(app.app_id or "", decrypt_secret(cipher, app))
+
+
+async def _login_app(session: AsyncSession) -> PlatformApp | None:
+    """启用且具备登录能力的飞书平台应用（同扫码登录取的那个）。"""
+    stmt = select(PlatformApp).where(
+        PlatformApp.platform == "feishu",
+        PlatformApp.enabled.is_(True),
+        PlatformApp.capabilities.any("login"),  # type: ignore[arg-type]
+    )
+    return (await session.execute(stmt.order_by(PlatformApp.created_at))).scalars().first()
+
+
+async def _visibility_access(
+    session: AsyncSession, request: Request, bot: Bot, app_id: str
+) -> tuple[FeishuClient | None, dict[str, Any], dict[str, Any] | None]:
+    """找能读写这个机器人可用范围的应用，顺带读出当前名单。
+
+    可用范围接口能读写企业内任意应用，所以优先用飞书登录应用：它开通一次两个权限就能管理
+    所有机器人。登录应用没有权限（或没配置）时退回机器人自己的应用。返回（客户端、权限说明、
+    当前名单）；客户端为 None 表示两边都没有权限，否则由调用方关闭。权限说明含 permission、
+    via（platform / self）与 platform_app（登录应用名称）。
+    """
+    cipher = _cipher(request)
+    login = await _login_app(session)
+    info: dict[str, Any] = {"platform_app": login.name if login else None}
+    if login is not None and login.app_id:
+        client = platform_client_for(cipher, login)
+        try:
+            raw = await management.get_visibility(client, app_id)
+        except ApiError as exc:
+            await client.aclose()
+            # 只在「没权限」时退回机器人自己的应用；其他失败照常报出来，不能说成缺权限。
+            if exc.status_code != 409:
+                raise
+        except BaseException:
+            await client.aclose()
+            raise
+        else:
+            return client, {**info, "permission": "granted", "via": "platform"}, raw
+    client = client_for(cipher, bot)
+    try:
+        permission = await management.scope_permission(client, manifest.VISIBILITY_SCOPES)
+        if permission != "granted":
+            await client.aclose()
+            return None, {**info, "permission": permission, "via": None}, None
+        raw = await management.get_visibility(client, app_id)
+    except BaseException:
+        await client.aclose()
+        raise
+    return client, {**info, "permission": "granted", "via": "self"}, raw
 
 
 async def _people(session: AsyncSession, feishu_ids: list[str]) -> list[dict[str, Any]]:
@@ -505,19 +565,14 @@ async def feishu_app_visibility(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """线上实际生效的可用范围；应用还没有管理权限时只返回 permission（missing / pending）。"""
-    cipher = _cipher(request)
+    """线上实际生效的可用范围；没有可用权限时只返回权限说明（见 _visibility_access）。"""
     bot = await admin_feishu_bot(session, bot_id, user)
-    app_id = bot_app_id(cipher, bot)
-    client = client_for(cipher, bot)
-    try:
-        permission = await management.scope_permission(client, manifest.VISIBILITY_SCOPES)
-        if permission != "granted":
-            return {"code": 0, "data": {"permission": permission}}
-        raw = await management.get_visibility(client, app_id)
-    finally:
-        await client.aclose()
-    return {"code": 0, "data": await _visibility_out(session, raw)}
+    app_id = bot_app_id(_cipher(request), bot)
+    client, info, raw = await _visibility_access(session, request, bot, app_id)
+    if client is None or raw is None:
+        return {"code": 0, "data": info}
+    await client.aclose()
+    return {"code": 0, "data": {**info, **await _visibility_out(session, raw)}}
 
 
 class VisibilityIn(BaseModel):
@@ -588,12 +643,10 @@ async def update_feishu_app_visibility(
     remove_users = await _feishu_user_ids(session, body.remove_user_ids)
     add_departments = await _feishu_department_ids(session, body.add_department_ids)
     remove_departments = await _feishu_department_ids(session, body.remove_department_ids)
-    client = client_for(cipher, bot)
+    client, info, before = await _visibility_access(session, request, bot, app_id)
+    if client is None or before is None:
+        raise ApiError(409, 409, VISIBILITY_PERMISSION_ERRORS[info["permission"]])
     try:
-        permission = await management.scope_permission(client, manifest.VISIBILITY_SCOPES)
-        if permission != "granted":
-            raise ApiError(409, 409, VISIBILITY_PERMISSION_ERRORS[permission])
-        before = await management.get_visibility(client, app_id)
         if body.visible_to_all is False and before["is_all"] and not (add_users or add_departments):
             raise ApiError(422, 422, "改为部分成员可见时，请至少添加一位成员或一个部门")
         await management.update_visibility(
@@ -620,9 +673,10 @@ async def update_feishu_app_visibility(
             "users_removed": [remove_users or None, None],
             "departments_added": [None, add_departments or None],
             "departments_removed": [remove_departments or None, None],
+            "via": [None, info["via"]],
         },
     )
-    return {"code": 0, "data": await _visibility_out(session, after)}
+    return {"code": 0, "data": {**info, **await _visibility_out(session, after)}}
 
 
 class PublishIn(BaseModel):

@@ -78,7 +78,7 @@ coreman bots visibility-remove sales_bot bob --dept /公司/销售部
 coreman bots visibility-all sales_bot --yes
 ```
 
-成员写登录名、邮箱、姓名或 id，须有飞书账号；部门写名称、完整路径、飞书部门 ID 或 id，须是同步进来的飞书通讯录部门。当前全员可用时，`visibility-add` 会拒绝执行，因为添加名单等于收窄范围；确实要只给这些人用请加 `--restrict`。应用需要先有管理可用范围的权限（见[飞书接入](feishu.md)），没有时命令会提示到管理后台扫码补齐。
+成员写登录名、邮箱、姓名或 id，须有飞书账号；部门写名称、完整路径、飞书部门 ID 或 id，须是同步进来的飞书通讯录部门。当前全员可用时，`visibility-add` 会拒绝执行，因为添加名单等于收窄范围；确实要只给这些人用请加 `--restrict`。读写优先用飞书登录应用，它没有权限时用机器人自己的应用（`visibility` 的「权限来源」一行写明）；两边都没有权限时命令会提示如何开通（见[飞书接入](feishu.md)）。
 
 技能与业务系统授权：
 

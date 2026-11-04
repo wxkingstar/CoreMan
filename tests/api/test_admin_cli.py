@@ -354,7 +354,7 @@ async def test_feishu_visibility_commands(cli, db_session, monkeypatch):
         },
     )
     code, out, _ = await cli("bots", "visibility", "fs_bot", "--as", "ops")
-    assert "爱丽丝（alice）" in out
+    assert "爱丽丝（alice）" in out and "本机器人的飞书应用" in out
     feishu.calls.clear()
     code, _, err = await cli("bots", "visibility-remove", "fs_bot", "alice", "--as", "ops")
     assert code == 0, err

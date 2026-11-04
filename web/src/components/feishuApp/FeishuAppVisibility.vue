@@ -133,6 +133,13 @@ onMounted(async () => {
       show-icon
     />
     <template v-else-if="state && state.permission !== 'granted'">
+      <p
+        v-if="state.permission === 'missing'"
+        class="muted"
+        data-test="visibility-platform-hint"
+      >
+        {{ state.platform_app ? t('feishuApp.visibilityPlatformHint', { name: state.platform_app }) : t('feishuApp.visibilityNoPlatformHint') }}
+      </p>
       <el-alert
         :type="state.permission === 'pending' ? 'info' : 'warning'"
         :title="t(state.permission === 'pending' ? 'feishuApp.visibilityPending' : 'feishuApp.visibilityMissing')"
@@ -150,6 +157,12 @@ onMounted(async () => {
       </el-button>
     </template>
     <template v-else-if="granted">
+      <p
+        class="muted"
+        data-test="visibility-source"
+      >
+        {{ granted.via === 'platform' ? t('feishuApp.visibilityViaPlatform', { name: granted.platform_app }) : t('feishuApp.visibilityViaSelf') }}
+      </p>
       <div
         class="row"
         data-test="visibility-current"
