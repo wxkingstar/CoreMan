@@ -22,6 +22,7 @@ import socket
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -519,7 +520,24 @@ class RuntimeAgent(Agent):
                     if not error:
                         try:
                             content = body["choices"][0]["message"]["content"]
-                            verified = isinstance(content, str) and content.strip() == "OK"
+                            # Tolerate presentation punctuation/case, but never
+                            # a sentence, extra words, or Unicode lookalikes.
+                            normalized = (
+                                content.strip()
+                                if isinstance(content, str) and len(content) <= 128
+                                else ""
+                            )
+                            while normalized and unicodedata.category(normalized[0]).startswith(
+                                "P"
+                            ):
+                                normalized = normalized[1:].lstrip()
+                            while normalized and unicodedata.category(normalized[-1]).startswith(
+                                "P"
+                            ):
+                                normalized = normalized[:-1].rstrip()
+                            verified = (
+                                normalized.isascii() and normalized.strip().casefold() == "ok"
+                            )
                         except (KeyError, IndexError, TypeError):
                             verified = False
                         status, detail = (
@@ -527,7 +545,7 @@ class RuntimeAgent(Agent):
                             if verified
                             else (
                                 "unknown",
-                                "Model reply did not match the expected health response",
+                                "模型回复未通过探活校验",
                             )
                         )
                         candidate = body.get("x_actual_model") if isinstance(body, dict) else None
@@ -573,9 +591,6 @@ class RuntimeAgent(Agent):
     def probe_rate_limits(self) -> None:
         with self.daemon.driver_lock:
             super().probe_rate_limits()
-
-    def browser_snapshot(self, capture: bool, event: bool) -> dict:
-        return self.daemon.browser_monitor.snapshot(capture, event)
 
 
 class FrameBatcher:
@@ -672,11 +687,6 @@ class Daemon:
         self.task_info: dict[str, dict] = {}
         self.capabilities = {p: {"installed": False} for p in PROVIDERS}
         self.operations_lock = threading.Lock()
-        from .browser_monitor import BrowserMonitor
-
-        self.browser_monitor = BrowserMonitor(
-            enabled=self.config.get("browser_monitor_enabled") is True
-        )
         self.stopping = asyncio.Event()
         self.http = None
         self.lock_file = None
@@ -1090,7 +1100,6 @@ class Daemon:
                         agent.start_schedules()
                 if provider in self.agents:
                     self.agents[provider].model = (cap["models"] or [""])[0]
-            cap["browser_monitor_v1"] = self.browser_monitor.enabled
             if self.seats.active(provider) != metadata_seat:
                 for key in ("plan_type", "account_verified"):
                     cap.pop(key, None)
@@ -1201,7 +1210,7 @@ class Daemon:
                 self.task_info[identity]["driver_gen"] = gen
             if command["path"] == "/":
                 operation_name = str(data.get("type"))[:40]
-                if data.get("type") in {"status", "ping", "browser-snapshot"}:
+                if data.get("type") in {"status", "ping"}:
                     self.task_info.pop(identity, None)
                 cancelled = threading.Event()
                 token = COMMAND_CANCEL.set(cancelled)

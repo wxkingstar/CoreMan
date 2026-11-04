@@ -1,14 +1,10 @@
-import time
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.auth.signatures import sign_request
 from coreman.core.relay.observations import HealthObservation, save_health
 from coreman.core.relay.quota import Quota, QuotaWindow, save_quota
-from tests.api.conftest import login_as
 from tests.fakes.runtime_node import add_node, add_node_relay
 
 
@@ -79,16 +75,20 @@ async def test_late_health_report_does_not_replace_newer_model_result(db_session
 
 
 @pytest.mark.parametrize(
-    "provider,plan,verified,expected",
+    "provider,plan,verified",
     [
-        ("codex", "pro", None, "not_applicable"),
-        ("claude", "ultra", True, "not_applicable"),
-        ("claude", "ultra", False, "unknown"),
-        ("claude", "max", True, "unknown"),
+        ("codex", "pro", None),
+        ("codex", "pro_100", None),
+        ("codex", "pro_200", None),
+        ("codex", "pro_500", None),
+        ("claude", "ultra", True),
+        ("claude", "ultra", False),
+        ("claude", "max_20x", True),
+        ("claude", "max", True),
     ],
 )
-async def test_quota_applicability_uses_explicit_plan_evidence(
-    db_session, provider, plan, verified, expected
+async def test_missing_window_remains_unknown_despite_plan_aliases(
+    db_session, provider, plan, verified
 ):
     relay = await add_node_relay(db_session, provider=provider)
     await save_quota(
@@ -97,12 +97,12 @@ async def test_quota_applicability_uses_explicit_plan_evidence(
         Quota(plan_type=plan, account_verified=verified, seven_day=QuotaWindow(used_percentage=17)),
     )
     await db_session.refresh(relay)
-    assert relay.quota_observation["windows"]["five_hour"]["applicability"] == expected
+    assert relay.quota_observation["windows"]["five_hour"]["applicability"] == "unknown"
     assert relay.rate_limit_5h_used_pct is None
     assert relay.rate_limit_7d_used_pct == 17
 
 
-async def test_real_window_wins_over_plan_default_and_has_own_time(db_session):
+async def test_real_window_wins_over_explicit_applicability_and_has_own_time(db_session):
     relay = await add_node_relay(db_session, provider="codex")
     now = datetime.now(UTC)
     older = now - timedelta(minutes=30)
@@ -111,6 +111,7 @@ async def test_real_window_wins_over_plan_default_and_has_own_time(db_session):
         relay.id,
         Quota(
             plan_type="pro",
+            window_applicability={"five_hour": "not_applicable"},
             observed_at=now,
             five_hour=QuotaWindow(used_percentage=4, observed_at=older),
             seven_day=QuotaWindow(used_percentage=0),
@@ -124,6 +125,16 @@ async def test_real_window_wins_over_plan_default_and_has_own_time(db_session):
     assert windows["seven_day"]["used_percentage"] == 0
     assert relay.rate_limit_probed_at == older
     assert relay.quota_observation["last_success_at"] == now.isoformat()
+
+
+async def test_only_explicit_upstream_policy_marks_window_not_applicable(db_session):
+    relay = await add_node_relay(db_session, provider="codex")
+    await save_quota(
+        db_session, relay.id, Quota(window_applicability={"five_hour": "not_applicable"})
+    )
+    await db_session.refresh(relay)
+    assert relay.quota_observation["windows"]["five_hour"]["applicability"] == "not_applicable"
+    assert relay.rate_limit_5h_used_pct is None
 
 
 async def test_empty_and_failed_quota_reads_never_refresh_old_values(db_session):
@@ -172,48 +183,20 @@ async def test_retired_seat_cannot_repaint_active_seat(db_session):
     assert relay.rate_limit_7d_used_pct == 12
 
 
-async def test_browser_scope_opt_in_and_no_store(
-    client: httpx.AsyncClient, db_session, monkeypatch
-):
-    await login_as(client, db_session, role="platform_admin")
-    credentials = {}
-    for scope in ("relay", "runtime-browser"):
-        credentials[scope] = (
-            await client.post(
-                "/api/admin/api-clients",
-                json={"app_key": scope + "-reader", "name": scope, "scopes": [scope]},
-            )
-        ).json()["data"]["secret"]
-    node = await add_node(db_session, capabilities={"claude": {"browser_monitor_v1": True}})
-    relay = await add_node_relay(db_session, node=node)
-    await db_session.commit()
-    path = f"/api/infra/relay/servers/{relay.id}/browser-snapshot"
-
-    def headers(scope):
-        ts = str(int(time.time()))
-        return {
-            "X-App-Key": scope + "-reader",
-            "X-Timestamp": ts,
-            "X-Signature": sign_request("GET", path, {}, ts, scope + "-reader", credentials[scope]),
-        }
-
-    assert (await client.get(path, headers=headers("relay"))).status_code == 403
-    calls = []
-
-    async def snapshot(*args):
-        calls.append(args)
-        return {
-            "success": True,
-            "state": "ok",
-            "observed_at": datetime.now(UTC).isoformat(),
-            "items": [],
-        }
-
-    monkeypatch.setattr("coreman.api.routers.infra_relay.call_agent", snapshot)
-    response = await client.get(path, headers=headers("runtime-browser"))
-    assert response.status_code == 200, response.text
-    assert response.headers["cache-control"] == "no-store"
-    assert calls[0][2:] == ("browser-snapshot", {"capture": False, "event": False})
-    node.capabilities = {"claude": {"browser_monitor_v1": False}}
-    await db_session.commit()
-    assert (await client.get(path, headers=headers("runtime-browser"))).status_code == 409
+@pytest.mark.parametrize("kind", ["legacy", "driver", "model", "conversation"])
+async def test_legacy_reports_without_seat_id_work_with_advertised_active_seat(db_session, kind):
+    node = await add_node(
+        db_session, capabilities={"codex": {"seats": [{"id": "aaaaaaaaaaaa", "active": True}]}}
+    )
+    relay = await add_node_relay(db_session, node=node, provider="codex")
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(status="healthy", check_kind=kind, reply_verified=True),
+    )
+    await save_quota(db_session, relay.id, Quota(seven_day=QuotaWindow(used_percentage=23)))
+    await db_session.refresh(relay)
+    assert relay.health_status == "healthy"
+    assert relay.rate_limit_7d_used_pct == 23
+    if kind in {"model", "conversation"}:
+        assert relay.model_health["reply_verified"] is True

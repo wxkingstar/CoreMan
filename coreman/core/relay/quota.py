@@ -97,17 +97,8 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
                 "status": "legacy",
             }
     applicability = {str(key): str(value) for key, value in quota.window_applicability.items()}
-    # Policy only applies with explicit plan evidence. A real returned window
-    # wins over a default policy, including temporary account restrictions.
-    plan = (quota.plan_type or "").lower()
-    if plan in ("pro", "pro_100", "pro_200", "pro_500") and relay.model_provider == "codex":
-        applicability.setdefault("five_hour", "not_applicable")
-    if (
-        relay.model_provider == "claude"
-        and plan in ("ultra", "max_20x", "max20x")
-        and quota.account_verified is True
-    ):
-        applicability.setdefault("five_hour", "not_applicable")
+    # Plan labels and missing percentages are not upstream window policy.
+    # Only explicit window_applicability can mark a window not_applicable.
     values: dict[str, Any] = {}
     successful_times = []
     for name, label in (("five_hour", "5h"), ("seven_day", "7d")):

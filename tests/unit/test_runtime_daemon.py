@@ -78,25 +78,31 @@ def command(data, path="/v1/chat/completions"):
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "opencode"])
-@pytest.mark.parametrize("recent", [True, False])
-def test_all_providers_use_fifteen_minute_idle_fallback(daemon, monkeypatch, provider, recent):
+@pytest.mark.parametrize("age", [10, 901, 3599, 3601])
+@pytest.mark.parametrize("hour", [0, 8, 9, 23])
+def test_provider_idle_fallback_preserves_existing_cadence(
+    daemon, monkeypatch, provider, age, hour
+):
     from runtime_daemon import agent as module
     from runtime_daemon.daemon import RuntimeAgent
 
     daemon.config["node_token"] = "test-token"
     runtime = RuntimeAgent(daemon, provider, "test-relay")
-    runtime.last_model_check = time.time() if recent else time.time() - 901
+    wall = 1800000000
+    runtime.last_model_check = wall - age
     calls = []
     runtime.start_background = lambda name, action: calls.append(name)
 
     class Stop:
         stopped = False
+        rounds = 0
 
         def is_set(self):
             return self.stopped
 
         def wait(self, _):
-            self.stopped = True
+            self.rounds += 1
+            self.stopped = self.rounds >= 3
 
     runtime.stop = Stop()
 
@@ -108,8 +114,14 @@ def test_all_providers_use_fifteen_minute_idle_fallback(daemon, monkeypatch, pro
             self.target()
 
     monkeypatch.setattr(module.threading, "Thread", InlineThread)
+    monkeypatch.setattr(module.time, "time", lambda: wall)
+    monkeypatch.setattr(
+        module.time, "localtime", lambda: time.struct_time((2026, 11, 4, hour, 0, 0, 2, 308, -1))
+    )
     runtime.start_schedules()
-    assert ("health-check" in calls) is not recent
+    expected = (age >= 900) if provider == "claude" else (9 <= hour <= 23 and age >= 3600)
+    assert ("health-check" in calls) is expected
+    assert calls.count("health-check") == int(expected)
 
 
 def test_recent_activity_only_suppresses_matching_seat(daemon):
@@ -331,9 +343,24 @@ def test_no_persistent_claude_modes_in_release_source():
     # Claude 交给驱动选默认模型，不用模型列表第一个。
     [("claude", "plan", None), ("codex", "read-only", "test-model")],
 )
-@pytest.mark.parametrize("content", ["OK", "", "Some other reply"])
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("OK", True),
+        ("OK.", True),
+        ("ok!", True),
+        (" ( Ok！ ) ", True),
+        ("", False),
+        ("Some other reply", False),
+        ("OK, ready", False),
+        ("ΟΚ", False),
+        ("ｏｋ", False),
+        ("OK", False),
+        ("!" * 1000 + "OK", False),
+    ],
+)
 def test_health_probe_uses_provider_permission_mode(
-    daemon, monkeypatch, provider, mode, model, content
+    daemon, monkeypatch, provider, mode, model, content, expected
 ):
     from runtime_daemon.daemon import RuntimeAgent
 
@@ -369,8 +396,8 @@ def test_health_probe_uses_provider_permission_mode(
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
     assert captured[0].get("model") == model
-    assert reports[0]["status"] == ("healthy" if content == "OK" else "unknown")
-    assert reports[0]["reply_verified"] is (content == "OK")
+    assert reports[0]["status"] == ("healthy" if expected else "unknown")
+    assert reports[0]["reply_verified"] is expected
     assert reports[0]["check_kind"] == "model"
     assert reports[0]["driver_status"] == "healthy"
     assert reports[0]["requested_model"] == model

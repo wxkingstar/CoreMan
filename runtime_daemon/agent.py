@@ -943,9 +943,6 @@ class Agent:
     def quota_context(self) -> dict:
         return {}
 
-    def browser_snapshot(self, capture: bool, event: bool) -> dict:
-        raise OperationError("当前节点不支持浏览器监控")
-
     def probe_rate_limits(self) -> None:
         context = self.quota_context()
         try:
@@ -1245,7 +1242,8 @@ class Agent:
     def start_schedules(self) -> None:
         def loop():
             # 从负无穷起算：monotonic 是开机时长，刚开机的主机也要在启动后立即跑第一轮。
-            last_quota, last_memory, last_health = -math.inf, -math.inf, -math.inf
+            last_quota, last_memory, last_claude = -math.inf, -math.inf, -math.inf
+            last_health = ""
             last_worktrees = -math.inf
             while not self.stop.is_set():
                 now = time.monotonic()
@@ -1262,15 +1260,25 @@ class Agent:
                     self.start_background("refresh-worktrees", self.refresh_worktrees)
                     last_worktrees = now
                 recent_model = getattr(self, "last_model_check", 0)
-                if (
-                    now - last_health >= CLAUDE_CHECK_INTERVAL
+                if self.provider == "claude" and (
+                    now - last_claude >= CLAUDE_CHECK_INTERVAL
                     and time.time() - recent_model >= CLAUDE_CHECK_INTERVAL
                 ):
                     self.start_background(
                         "health-check",
-                        self.check_claude if self.provider == "claude" else self.health_check,
+                        self.check_claude,
                     )
-                    last_health = now
+                    last_claude = now
+                elif self.provider != "claude":
+                    local = time.localtime()
+                    slot = time.strftime("%Y-%m-%d-%H", local)
+                    if (
+                        9 <= local.tm_hour <= 23
+                        and slot != last_health
+                        and time.time() - recent_model >= 3600
+                    ):
+                        self.start_background("health-check", self.health_check)
+                        last_health = slot
                 self.stop.wait(10)
 
         threading.Thread(target=loop, daemon=True, name="coreman-agent-schedules").start()
@@ -1316,14 +1324,6 @@ class Agent:
             }
         if kind == "probe-rate-limits":
             return self.start_background(kind, self.probe_rate_limits)
-        if kind == "browser-snapshot":
-            if (
-                set(data) - {"type", "capture", "event"}
-                or type(data.get("capture", False)) is not bool
-                or type(data.get("event", False)) is not bool
-            ):
-                raise OperationError("浏览器监控参数无效")
-            return self.browser_snapshot(data.get("capture", False), data.get("event", False))
         if kind == "health-check":
             return self.start_background(kind, self.health_check)
         if kind == "collect-memory":

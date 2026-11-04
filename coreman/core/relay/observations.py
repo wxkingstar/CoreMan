@@ -122,13 +122,16 @@ def telemetry_view(relay: RelayServer) -> dict[str, Any]:
 async def matches_active_seat(
     session: AsyncSession, relay: RelayServer, seat_id: str | None
 ) -> bool:
+    # Legacy runtime releases advertise seats but omit seat_id in telemetry.
+    # Only an explicitly mismatched seat is rejected during API-first rollout.
+    if seat_id is None:
+        return True
     node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
     seats = (
         ((node.capabilities or {}).get(relay.model_provider) or {}).get("seats", []) if node else []
     )
     active = next((s.get("id") for s in seats if s.get("active")), None)
-    # Legacy nodes without seat metadata remain readable. Seat-aware nodes
-    # must supply provenance; an old generation cannot repaint the new seat.
+    # Explicit provenance from a retired seat cannot repaint the active seat.
     return active is None or seat_id == active
 
 
@@ -140,33 +143,33 @@ def provider_failure(message: str) -> tuple[str, str, str]:
             ("account is on hold", "account_on_hold", "claude.ai/restricted"),
             "auth_fail",
             "account_restricted",
-            "Account is on hold",
+            "账号受限或被暂停使用",
         ),
         (
             ("session has expired", "session_expired", "oauth session expired"),
             "auth_fail",
             "session_expired",
-            "Login session has expired",
+            "登录会话已过期，请重新登录",
         ),
         (
             ("usage limit", "quota exceeded"),
             "down",
             "quota_limited",
-            "Subscription usage limit reached",
+            "已触发订阅额度限制",
         ),
         (
             ("too many requests", "rate limit"),
             "down",
             "rate_limited",
-            "Provider rate limited the request",
+            "模型服务短时限流",
         ),
         (
             ("not logged in", "authentication_error", "invalid api key", "401", "403"),
             "auth_fail",
             "authentication_error",
-            "Provider authentication failed",
+            "模型服务认证失败",
         ),
     ):
         if any(marker in text for marker in markers):
             return status, code, detail
-    return "down", "model_request_failed", "Model request failed"
+    return "down", "model_request_failed", "模型调用失败"
