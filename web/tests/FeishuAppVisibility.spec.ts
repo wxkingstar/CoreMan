@@ -1,20 +1,24 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
+import { createPinia, type Pinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/admin', () => ({
   departments: { tree: vi.fn().mockResolvedValue([]) },
   users: { list: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, per_page: 20 }) },
 }))
-vi.mock('@/api/feishuApps', () => ({ feishuApps: { visibility: vi.fn(), updateVisibility: vi.fn() } }))
+vi.mock('@/api/feishuApps', () => ({ feishuApps: { visibility: vi.fn(), updateVisibility: vi.fn(), setVisibilityManager: vi.fn() } }))
 
 import { feishuApps, type FeishuVisibility } from '@/api/feishuApps'
 import FeishuAppVisibility from '@/components/feishuApp/FeishuAppVisibility.vue'
 import { i18n } from '@/i18n'
+import { useAuthStore } from '@/stores/auth'
 
 function current(over: Partial<Extract<FeishuVisibility, { permission: 'granted' }>> = {}): FeishuVisibility {
   return {
     permission: 'granted',
+    manager: null,
+    via: 'self',
     visible_to_all: false,
     users: [
       { feishu_id: 'fs_1', id: 'u1', display_name: '张三', login_name: 'zhangsan' },
@@ -27,8 +31,14 @@ function current(over: Partial<Extract<FeishuVisibility, { permission: 'granted'
   }
 }
 
-function mountIt() {
-  return mount(FeishuAppVisibility, { props: { botId: 'b1' }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+function mountIt(pinia: Pinia = createPinia()) {
+  return mount(FeishuAppVisibility, { props: { botId: 'b1' }, global: { plugins: [pinia, ElementPlus, i18n] }, attachTo: document.body })
+}
+
+function asPlatformAdmin(): Pinia {
+  const pinia = createPinia()
+  useAuthStore(pinia).user = { role: 'platform_admin' } as never
+  return pinia
 }
 
 describe('FeishuAppVisibility', () => {
@@ -39,7 +49,7 @@ describe('FeishuAppVisibility', () => {
   })
 
   it('asks for the admin permissions before showing anything', async () => {
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing', manager: null, via: null })
     const wrapper = mountIt()
     await flushPromises()
     expect(wrapper.text()).toContain(i18n.global.t('feishuApp.visibilityMissing'))
@@ -47,7 +57,7 @@ describe('FeishuAppVisibility', () => {
     expect(wrapper.emitted('scan')).toHaveLength(1)
     wrapper.unmount()
 
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'pending' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'pending', manager: null, via: null })
     const pending = mountIt()
     await flushPromises()
     expect(pending.text()).toContain(i18n.global.t('feishuApp.visibilityPending'))
@@ -97,5 +107,35 @@ describe('FeishuAppVisibility', () => {
     expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('feishuApp.visibilityRequired'))
     expect(feishuApps.updateVisibility).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+
+  it('shows who manages a bot and lets platform admins pick the manager app', async () => {
+    vi.mocked(feishuApps.visibility).mockResolvedValue(current({ via: 'manager', manager: { id: 'm1', name: '管家' } }))
+    const managed = mountIt(asPlatformAdmin())
+    await flushPromises()
+    expect(managed.get('[data-test="visibility-source"]').text()).toContain(i18n.global.t('feishuApp.visibilityManagedBy', { name: '管家' }))
+    expect(managed.find('[data-test="visibility-manager-set"]').exists()).toBe(false)
+    managed.unmount()
+
+    // 普通成员看不到指定入口。
+    vi.mocked(feishuApps.visibility).mockResolvedValue(current())
+    const member = mountIt()
+    await flushPromises()
+    expect(member.find('[data-test="visibility-source"]').exists()).toBe(false)
+    member.unmount()
+
+    vi.mocked(feishuApps.setVisibilityManager).mockResolvedValue({ manager: { id: 'b1', name: '自己' } })
+    const admin = mountIt(asPlatformAdmin())
+    await flushPromises()
+    await admin.get('[data-test="visibility-manager-set"]').trigger('click')
+    await flushPromises()
+    expect(feishuApps.setVisibilityManager).toHaveBeenCalledWith('b1')
+    expect(admin.text()).toContain(i18n.global.t('feishuApp.visibilityManagerTag'))
+    vi.mocked(feishuApps.setVisibilityManager).mockResolvedValue({ manager: null })
+    await admin.get('[data-test="visibility-manager-clear"]').trigger('click')
+    await flushPromises()
+    expect(feishuApps.setVisibilityManager).toHaveBeenLastCalledWith(null)
+    expect(admin.find('[data-test="visibility-manager-set"]').exists()).toBe(true)
+    admin.unmount()
   })
 })

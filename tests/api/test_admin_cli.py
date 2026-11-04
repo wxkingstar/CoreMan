@@ -362,3 +362,13 @@ async def test_feishu_visibility_commands(cli, db_session, monkeypatch):
     assert json.loads(patch[0].content) == {"del_visible_list": {"user_ids": ["fs_alice"]}}
     assert (await cli("bots", "visibility-all", "fs_bot", "--as", "ops"))[0] == 1
     assert (await cli("bots", "visibility-all", "fs_bot", "--yes", "--as", "ops"))[0] == 0
+
+    code, out, err = await cli("bots", "visibility-manager", "fs_bot", "--as", "ops")
+    assert code == 0 and "飞书助手" in out, err
+    code, out, _ = await cli("bots", "visibility", "fs_bot", "--as", "ops")
+    assert "本机器人的飞书应用" in out
+    code, out, err = await cli("bots", "visibility-manager", "--clear", "--as", "ops")
+    assert code == 0 and "已取消" in out, err
+    # 只有平台管理员能指定。
+    code, _, err = await cli("bots", "visibility-manager", "fs_bot", "--as", "alice")
+    assert code == 1 and err.strip()

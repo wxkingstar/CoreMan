@@ -84,8 +84,10 @@ export interface FeishuBotIn {
 /** 可用范围里的成员 / 部门；id 为空表示还没同步进 CoreMan，只能在飞书里认。 */
 export interface FeishuVisibilityUser { feishu_id: string; id: string | null; display_name: string | null; login_name: string | null }
 export interface FeishuVisibilityDepartment { feishu_id: string; id: string | null; name: string | null; path: string | null }
-/** 线上实际生效的可用范围；应用还没有管理权限时只有 permission。 */
-export type FeishuVisibility =
+/** 读写可用范围用的权限来源：manager 为平台指定的可用范围管理应用（代管），self 为机器人自己的应用。 */
+export interface FeishuVisibilitySource { manager: { id: string; name: string } | null; via: 'manager' | 'self' | null }
+/** 线上实际生效的可用范围；没有可用权限时只有 permission 与来源。 */
+export type FeishuVisibility = FeishuVisibilitySource & (
   | { permission: 'missing' | 'pending' }
   | {
       permission: 'granted'
@@ -95,6 +97,7 @@ export type FeishuVisibility =
       groups: string[]
       invisible: { users: FeishuVisibilityUser[]; departments: FeishuVisibilityDepartment[]; groups: string[] }
     }
+)
 /** 增量修改：visible_to_all 不给表示不切换全员 / 部分成员。 */
 export interface FeishuVisibilityPatch {
   visible_to_all?: boolean
@@ -124,6 +127,9 @@ export const feishuApps = {
   updateBot: (botId: string, body: FeishuBotIn) => call<{ ok: true; publish_required: boolean }>(http.patch(`${app(botId)}/bot`, body)),
   visibility: (botId: string) => call<FeishuVisibility>(http.get(`${app(botId)}/visibility`)),
   updateVisibility: (botId: string, body: FeishuVisibilityPatch) => call<FeishuVisibility>(http.patch(`${app(botId)}/visibility`, body)),
+  /** 指定可用范围管理应用（平台管理员），null 为取消。 */
+  setVisibilityManager: (botId: string | null) =>
+    call<{ manager: { id: string; name: string } | null }>(http.put('/api/admin/feishu-visibility-manager', { bot_id: botId })),
   publish: (botId: string, body: FeishuPublishIn) => call<{ version_id: string | null; version: string }>(http.post(`${app(botId)}/publish`, body)),
   applyScopes: (botId: string) => call<{ ok: true }>(http.post(`${app(botId)}/scopes/apply`)),
   observePermission: (botId: string) =>

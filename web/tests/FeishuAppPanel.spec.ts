@@ -1,5 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessage } from 'element-plus'
+import { createPinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn().mockResolvedValue('data:image/png;base64,qr') } }))
@@ -44,13 +45,13 @@ function overview(over: Partial<FeishuAppOverview> = {}): FeishuAppOverview {
 }
 
 function mountPanel() {
-  return mount(FeishuAppPanel, { props: { botId: 'b1' }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+  return mount(FeishuAppPanel, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n] }, attachTo: document.body })
 }
 
 describe('FeishuAppPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing', manager: null, via: null })
     vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
     vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
   })
