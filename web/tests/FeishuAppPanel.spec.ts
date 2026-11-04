@@ -50,7 +50,7 @@ function mountPanel() {
 describe('FeishuAppPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing' })
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing', platform_app: null, via: null })
     vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
     vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
   })
