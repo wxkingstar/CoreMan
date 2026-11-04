@@ -1,7 +1,7 @@
-"""管理后台的命令行版本：AI 员工、技能管理、技能审批、业务系统、团队与用户。
+"""管理后台的命令行版本：覆盖管理后台各页面的操作，按页面分模块注册命令组。
 
 在 API 镜像里运行，以 --as 指定的成员身份操作，权限与审计和管理后台一致，见 client.py。
-其余管理后台操作可以用 `api` 命令直接调接口。
+没有专用命令的接口可以用 `api` 命令直接调。
 """
 
 from __future__ import annotations
@@ -12,7 +12,17 @@ import json
 import sys
 from typing import Any
 
-from coreman.admin_cli import approvals, bots, org, output, skills, systems
+from coreman.admin_cli import (
+    approvals,
+    bots,
+    org,
+    output,
+    platform,
+    runtimes,
+    schedules,
+    skills,
+    systems,
+)
 from coreman.admin_cli.base import group, leaf, read_text
 from coreman.admin_cli.client import AdminClient, CliError, connect
 
@@ -25,6 +35,9 @@ def register(sub: Any) -> None:
     approvals.register(sub)
     systems.register(sub)
     org.register(sub)
+    schedules.register(sub)
+    runtimes.register(sub)
+    platform.register(sub)
     ops = group(sub, "api", "直接调用管理 API（覆盖其余管理后台操作）")
     for method in ("get", "post", "put", "patch", "delete"):
         p = leaf(ops, method, f"{method.upper()} 请求，输出返回的 data", raw)
