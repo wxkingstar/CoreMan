@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from coreman.admin_cli import output
+from coreman.admin_cli import bot_extras, output
 from coreman.admin_cli.base import (
     add_yes,
     changed,
@@ -112,6 +112,7 @@ def register(sub: Any) -> None:
     p.add_argument("bot")
     p.add_argument("systems", nargs="+", metavar="系统标识")
     p.add_argument("--comment", default="")
+    bot_extras.register(ops)
 
 
 LIST_COLUMNS: list[output.Column] = [
