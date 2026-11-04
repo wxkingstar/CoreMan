@@ -12,15 +12,12 @@ import {
 } from '@/api/feishuApps'
 import type { DeptNode } from '@/api/types'
 import UserPicker from '@/components/UserPicker.vue'
-import { useAuthStore } from '@/stores/auth'
 import { errorMessage } from '@/utils/errors'
 
 const props = defineProps<{ botId: string }>()
 /** 应用还没有管理可用范围的权限：请父组件打开扫码补齐（连同这组权限一起申请）。 */
 const emit = defineEmits<{ scan: [] }>()
 const { t } = useI18n()
-const auth = useAuthStore()
-const platformAdmin = computed(() => auth.user?.role === 'platform_admin')
 
 const state = ref<FeishuVisibility | null>(null)
 const loading = ref(false)
@@ -33,23 +30,6 @@ const tree = ref<DeptNode[]>([])
 
 const granted = computed(() => (state.value?.permission === 'granted' ? state.value : null))
 const showPicker = computed(() => !!granted.value && (!granted.value.visible_to_all || restricting.value))
-/** 这个机器人就是平台的可用范围管理应用。 */
-const isManager = computed(() => state.value?.manager?.id === props.botId)
-const settingManager = ref(false)
-
-async function setManager(botId: string | null): Promise<void> {
-  settingManager.value = true
-  try {
-    const { manager } = await feishuApps.setVisibilityManager(botId)
-    if (state.value) state.value = { ...state.value, manager }
-    ElMessage.success(t(botId ? 'feishuApp.visibilityManagerSet' : 'feishuApp.visibilityManagerCleared'))
-  } catch (e) {
-    ElMessage.error(errorMessage(e))
-  } finally {
-    settingManager.value = false
-  }
-}
-
 const hasInvisible = computed(() => {
   const inv = granted.value?.invisible
   return !!inv && (inv.users.length > 0 || inv.departments.length > 0 || inv.groups.length > 0)
@@ -156,8 +136,9 @@ onMounted(async () => {
       <p
         v-if="state.permission === 'missing'"
         class="muted"
+        data-test="visibility-platform-hint"
       >
-        {{ t('feishuApp.visibilityManagerHint') }}
+        {{ state.platform_app ? t('feishuApp.visibilityPlatformHint', { name: state.platform_app }) : t('feishuApp.visibilityNoPlatformHint') }}
       </p>
       <el-alert
         :type="state.permission === 'pending' ? 'info' : 'warning'"
@@ -176,39 +157,12 @@ onMounted(async () => {
       </el-button>
     </template>
     <template v-else-if="granted">
-      <div
-        v-if="granted.via === 'manager' || isManager || platformAdmin"
-        class="row source"
+      <p
+        class="muted"
         data-test="visibility-source"
       >
-        <span
-          v-if="granted.via === 'manager' && granted.manager"
-          class="muted"
-        >{{ t('feishuApp.visibilityManagedBy', { name: granted.manager.name }) }}</span>
-        <template v-else-if="isManager">
-          <el-tag type="success">
-            {{ t('feishuApp.visibilityManagerTag') }}
-          </el-tag>
-          <el-button
-            v-if="platformAdmin"
-            size="small"
-            :loading="settingManager"
-            data-test="visibility-manager-clear"
-            @click="setManager(null)"
-          >
-            {{ t('feishuApp.visibilityManagerClear') }}
-          </el-button>
-        </template>
-        <el-button
-          v-else-if="platformAdmin"
-          size="small"
-          :loading="settingManager"
-          data-test="visibility-manager-set"
-          @click="setManager(botId)"
-        >
-          {{ t('feishuApp.visibilityManagerSetButton') }}
-        </el-button>
-      </div>
+        {{ granted.via === 'platform' ? t('feishuApp.visibilityViaPlatform', { name: granted.platform_app }) : t('feishuApp.visibilityViaSelf') }}
+      </p>
       <div
         class="row"
         data-test="visibility-current"
@@ -360,6 +314,5 @@ onMounted(async () => {
 .label { font-weight: 600; min-width: 72px; }
 .tags { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
 .scan { margin-top: 12px; }
-.source { align-items: center; }
 .add-form { margin-top: 12px; max-width: 640px; }
 </style>

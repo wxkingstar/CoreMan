@@ -16,6 +16,7 @@ from coreman.core.db.models import (
     Department,
     FeishuAppRegistration,
     FeishuPersonalGrant,
+    PlatformApp,
     Team,
     User,
     UserIdentity,
@@ -32,8 +33,9 @@ class Feishu:
 
     def __init__(self) -> None:
         self.calls: list[httpx.Request] = []
-        # 每次建客户端用的是哪个机器人的应用：区分「自己」与「管理应用代管」。
-        self.used: list[uuid.UUID] = []
+        # 每次建客户端用的是哪个应用：bot（机器人自己）或 platform（飞书登录应用）。
+        self.used: list[str] = []
+        self.platform_routes: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
         self.routes: dict[tuple[str, str], tuple[int, dict[str, object]]] = {
             ("GET", management.V6_APP): (
                 200,
@@ -58,16 +60,26 @@ class Feishu:
         }
 
     def client(self, cipher: Cipher, bot: Bot) -> FeishuClient:
-        self.used.append(bot.id)
+        self.used.append("bot")
+        return self._client({})
 
+    def platform_client(self, cipher: Cipher, app: PlatformApp) -> FeishuClient:
+        """飞书登录应用的客户端：platform_routes 里有的路径按它返回，其余同机器人。"""
+        self.used.append("platform")
+        return self._client(self.platform_routes)
+
+    def _client(
+        self, overrides: dict[tuple[str, str], tuple[int, dict[str, object]]]
+    ) -> FeishuClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("tenant_access_token/internal"):
                 return httpx.Response(
                     200, json={"code": 0, "tenant_access_token": "t", "expire": 7200}
                 )
             self.calls.append(request)
-            status, body = self.routes.get(
-                (request.method, request.url.path), (200, {"code": 0, "data": {}})
+            key = (request.method, request.url.path)
+            status, body = overrides.get(key) or self.routes.get(
+                key, (200, {"code": 0, "data": {}})
             )
             return httpx.Response(status, json=body)
 
@@ -80,6 +92,7 @@ class Feishu:
 async def _setup(client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch):  # type: ignore[no-untyped-def]
     feishu = Feishu()
     monkeypatch.setattr(router, "client_for", feishu.client)
+    monkeypatch.setattr(router, "platform_client_for", feishu.platform_client)
     team = Team(slug=f"t{uuid.uuid4().hex[:6]}", name_zh="团队")
     db_session.add(team)
     await db_session.commit()
@@ -193,7 +206,7 @@ async def test_visibility_needs_admin_scopes_then_reads_and_patches_incrementall
     # 应用还没有管理可用范围的权限：只报状态，修改被拒，且不碰飞书的可用范围接口。
     r = await client.get(path)
     assert r.status_code == 200
-    assert r.json()["data"] == {"manager": None, "permission": "missing", "via": None}
+    assert r.json()["data"] == {"platform_app": None, "permission": "missing", "via": None}
     r = await client.patch(path, json=add)
     assert r.status_code == 409 and "扫码补齐" in r.json()["message"]
     assert not [c for c in feishu.calls if "visibility" in c.url.path]
@@ -258,72 +271,58 @@ async def test_visibility_needs_admin_scopes_then_reads_and_patches_incrementall
     assert r.status_code == 200 and r.json()["data"]["visible_to_all"] is True
 
 
-async def test_visibility_manager_app_serves_bots_without_the_scopes(
+async def test_visibility_prefers_the_login_app_and_falls_back_to_the_bot(
     client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
 ) -> None:
-    feishu, owner, bot = await _setup(client, db_session, monkeypatch)
-    manager = Bot(
-        bot_key=f"mg{uuid.uuid4().hex[:6]}",
-        platform="feishu",
-        name="管家",
-        created_by=owner.id,
-        model="m",
-        working_dir="/w",
-        credentials_enc=encrypt_json(
-            CIPHER, {"app_id": "cli_mgr", "app_secret": "s"}, CREDENTIALS_AAD
-        ),
+    feishu, _, bot = await _setup(client, db_session, monkeypatch)
+    db_session.add(
+        PlatformApp(
+            platform="feishu",
+            name="飞书登录",
+            capabilities=["login"],
+            app_id="cli_login",
+            secret_enc=CIPHER.encrypt("s", "platform_apps.secret_enc"),
+        )
     )
-    db_session.add(manager)
     await db_session.commit()
     path = f"/api/admin/bots/{bot.id}/feishu-app/visibility"
-    put = "/api/admin/feishu-visibility-manager"
 
-    # 只有平台管理员能指定；所选机器人的应用没有权限时拒绝。
-    assert (await client.put(put, json={"bot_id": str(manager.id)})).status_code == 403
-    admin = await login_as(client, db_session, role="platform_admin", login_name="padmin")
-    r = await client.put(put, json={"bot_id": str(manager.id)})
-    assert r.status_code == 409 and "不能代管" in r.json()["message"]
-    await login_existing(client, db_session, owner)
-    r = await client.get(path)
-    assert r.status_code == 200, r.text
-    assert r.json()["data"] == {"manager": None, "permission": "missing", "via": None}
-
-    app = feishu.routes[("GET", management.V6_APP)][1]["data"]["app"]  # type: ignore[index]
-    for scope in manifest.VISIBILITY_SCOPES:
-        app["scopes"].append({"scope": scope, "token_types": ["tenant"]})  # type: ignore[index]
-    await login_existing(client, db_session, admin)
-    r = await client.put(put, json={"bot_id": str(manager.id)})
-    assert r.status_code == 200 and r.json()["data"]["manager"]["name"] == "管家"
-    audits = list(
-        await db_session.scalars(select(AuditLog).where(AuditLog.action == "settings.update"))
+    # 登录应用没开通权限：退回机器人自己的应用，它也没有就报缺权限。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        400,
+        {"code": 99991672, "msg": "app scope missing"},
     )
-    assert [a.diff for a in audits] == [{router.VISIBILITY_MANAGER_KEY: [None, str(manager.id)]}]
+    r = await client.get(path)
+    assert r.json()["data"] == {"platform_app": "飞书登录", "permission": "missing", "via": None}
+    assert feishu.used == ["platform", "bot"]
+    r = await client.patch(path, json={"visible_to_all": True})
+    assert r.status_code == 409 and "登录应用" in r.json()["message"]
 
-    # 代管：用管理应用的凭证，查的是这个机器人自己的 app_id，不再检查它自己的权限。
-    await login_existing(client, db_session, owner)
-    feishu.calls.clear()
+    # 登录应用有权限：查改的都是这个机器人的 app_id，不碰机器人自己的应用。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {"code": 0, "data": {"is_visible_to_all": 0, "users": [], "has_more_users": 0}},
+    )
     feishu.used.clear()
+    feishu.calls.clear()
     r = await client.get(path)
     assert r.status_code == 200, r.text
-    data = r.json()["data"]
-    assert data["via"] == "manager" and data["manager"]["id"] == str(manager.id)
-    assert feishu.used == [manager.id]
-    assert [c.url.path for c in feishu.calls] == [management.VISIBILITY_GET]
+    assert r.json()["data"]["via"] == "platform" and r.json()["data"]["permission"] == "granted"
+    assert feishu.used == ["platform"]
     assert feishu.calls[0].url.params["app_id"] == "cli_bound"
     r = await client.patch(path, json={"visible_to_all": True})
-    assert r.status_code == 200 and r.json()["data"]["via"] == "manager"
-    assert {c.url.path for c in feishu.calls if c.method == "PATCH"} == {
+    assert r.status_code == 200 and r.json()["data"]["via"] == "platform"
+    assert [c.url.path for c in feishu.calls if c.method == "PATCH"] == [
         "/open-apis/application/v6/applications/cli_bound/visibility"
-    }
+    ]
+    assert set(feishu.used) == {"platform"}
 
-    # 管理应用自己的可用范围用自己的凭证；取消后各机器人回到自己的应用。
-    r = await client.get(f"/api/admin/bots/{manager.id}/feishu-app/visibility")
-    assert r.json()["data"]["via"] == "self"
-    await login_existing(client, db_session, admin)
-    assert (await client.put(put, json={"bot_id": None})).status_code == 200
-    await login_existing(client, db_session, owner)
-    r = await client.get(path)
-    assert r.json()["data"]["via"] == "self" and r.json()["data"]["manager"] is None
+    # 别的失败照常报错，不能当成缺权限退回。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        500,
+        {"code": 1, "msg": "internal"},
+    )
+    assert (await client.get(path)).status_code == 502
 
 
 async def test_menu_validation_and_feishu_rejections_are_explained(

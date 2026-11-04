@@ -86,15 +86,6 @@ def register(sub: Any) -> None:
     p = leaf(ops, "visibility-all", "把飞书可用范围改为全员可用（立即生效）", visibility_all)
     p.add_argument("bot")
     add_yes(p)
-    p = leaf(
-        ops,
-        "visibility-manager",
-        "指定可用范围管理应用：由它代管所有飞书机器人的可用范围（平台管理员）",
-        visibility_manager,
-    )
-    target = p.add_mutually_exclusive_group(required=True)
-    target.add_argument("bot", nargs="?", help="已获得可用范围管理权限的飞书机器人")
-    target.add_argument("--clear", action="store_true", help="取消，各机器人改用自己的应用")
 
     leaf(ops, "skills", "列出已装技能与待审申请", skills).add_argument("bot")
     p = leaf(ops, "skill-install", "安装或重装技能（内部技能会提交审批）", skill_install)
@@ -403,9 +394,9 @@ def print_visibility(bot: dict[str, Any], data: dict[str, Any], as_json: bool) -
         return
     if data["permission"] == "missing":
         raise CliError(
-            f"{bot['name']} 的飞书应用还没有管理可用范围的权限：请在管理后台"
-            "「飞书应用 → 可用范围」扫码补齐，或由平台管理员用 "
-            "`coreman bots visibility-manager` 指定一个已有权限的机器人代管"
+            f"飞书登录应用和 {bot['name']} 的应用都还没有管理可用范围的权限：给登录应用开通"
+            "「获取应用信息」「管理应用可见范围」即可管理所有机器人，"
+            "或在管理后台「飞书应用 → 可用范围」为这个机器人扫码补齐"
         )
     if data["permission"] == "pending":
         raise CliError(f"{bot['name']} 的飞书应用管理可用范围的权限还在等企业管理员审核")
@@ -423,23 +414,9 @@ def print_visibility(bot: dict[str, Any], data: dict[str, Any], as_json: bool) -
 
 
 def _source(d: dict[str, Any]) -> str:
-    if d.get("via") == "manager" and d.get("manager"):
-        return f"由可用范围管理应用「{d['manager']['name']}」代管"
+    if d.get("via") == "platform":
+        return f"飞书登录应用「{d['platform_app']}」"
     return "本机器人的飞书应用"
-
-
-async def visibility_manager(c: AdminClient, args: argparse.Namespace) -> int:
-    bot_id = None if args.clear else (await c.bot(args.bot))["id"]
-    data = await c.request("PUT", "/api/admin/feishu-visibility-manager", body={"bot_id": bot_id})
-    if args.json:
-        output.dump(data)
-    elif data["manager"]:
-        print(
-            f"已指定 {data['manager']['name']} 为可用范围管理应用，由它代管所有飞书机器人的可用范围"
-        )
-    else:
-        print("已取消可用范围管理应用，各机器人改用自己的飞书应用管理可用范围")
-    return 0
 
 
 def _blocked(inv: dict[str, Any]) -> list[str]:
