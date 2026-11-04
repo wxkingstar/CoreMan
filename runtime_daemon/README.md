@@ -2,6 +2,8 @@
 
 一个独立的系统用户环境安装一个 Daemon，可同时提供 Claude Code 与 Codex。Daemon 主动连接 CoreMan；目标机器无需开放入站端口。
 
+可选浏览器观测及独立授权边界见 [Browser observations（草稿）](../docs/runtime-browser-observations.md)。默认关闭，不随升级自动开启；当前未接入 Console 消费端。
+
 ## 系统要求
 
 - 操作系统：Linux 或 macOS，amd64 / arm64。**不支持 Windows**（包括原生 Windows；WSL2 内的 Linux 发行版按 Linux 处理，但未做系统服务验收）。

@@ -513,6 +513,9 @@ class RuntimeAgent(Agent):
             },
         )
 
+    def browser_snapshot(self, capture: bool, event: bool) -> dict:
+        return self.daemon.browser_monitor.snapshot(capture, event)
+
 
 class FrameBatcher:
     """Coalesces one call's response bytes: flush at 16 KiB or 50 ms after the first byte.
@@ -607,6 +610,11 @@ class Daemon:
         self.task_info: dict[str, dict] = {}
         self.capabilities = {p: {"installed": False} for p in PROVIDERS}
         self.operations_lock = threading.Lock()
+        from .browser_monitor import BrowserMonitor
+
+        self.browser_monitor = BrowserMonitor(
+            enabled=self.config.get("browser_monitor_enabled") is True
+        )
         self.stopping = asyncio.Event()
         self.http = None
         self.lock_file = None
@@ -1016,6 +1024,7 @@ class Daemon:
                         agent.start_schedules()
                 if provider in self.agents:
                     self.agents[provider].model = (cap["models"] or [""])[0]
+            cap["browser_monitor_v1"] = self.browser_monitor.enabled
             self.capabilities[provider] = cap
             if cap["installed"]:
                 cap["seat_switch_v1"] = True
@@ -1123,7 +1132,7 @@ class Daemon:
                 self.task_info[identity]["driver_gen"] = gen
             if command["path"] == "/":
                 operation_name = str(data.get("type"))[:40]
-                if data.get("type") in {"status", "ping"}:
+                if data.get("type") in {"status", "ping", "browser-snapshot"}:
                     self.task_info.pop(identity, None)
                 cancelled = threading.Event()
                 token = COMMAND_CANCEL.set(cancelled)

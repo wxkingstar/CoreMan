@@ -8,20 +8,24 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session
+from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError
 from coreman.api.infra_auth import require_scope, signed_client
+from coreman.core.audit import record_audit
 from coreman.core.crypto import DecryptError
-from coreman.core.db.models import RelayServer
+from coreman.core.db.models import RelayServer, RuntimeNode
+from coreman.core.relay.agent_client import AgentError, call_agent
 from coreman.core.relay.models import effective_models, load_catalog
 from coreman.core.relay.quota import Quota, save_quota
 
 router = APIRouter(tags=["infra-relay"])
 RELAY_SCOPE = require_scope("relay")
+BROWSER_SCOPE = require_scope("runtime-browser")
 
 
 class ReportTarget(BaseModel):
@@ -155,3 +159,57 @@ async def servers(session: AsyncSession = Depends(get_session)) -> dict[str, Any
         )
         data.append(item)
     return {"success": True, "code": 0, "data": data}
+
+
+@router.get(
+    "/api/infra/relay/servers/{server_id}/browser-snapshot", dependencies=[Depends(BROWSER_SCOPE)]
+)
+async def browser_snapshot(
+    server_id: uuid.UUID,
+    request: Request,
+    capture: bool = False,
+    event: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> JSONResponse:
+    """Read existing browser observations through the node's existing encrypted channel.
+
+    The dedicated scope is deliberately separate from health/quota access.
+    Node opt-in, per-node sampling limits and same-user endpoint ownership are
+    enforced again on the node. Never launch a browser or accept a URL/command.
+    """
+    relay = await session.scalar(
+        select(RelayServer).where(RelayServer.id == server_id, RelayServer.is_active)
+    )
+    node = (
+        await session.get(RuntimeNode, relay.runtime_node_id)
+        if relay and relay.runtime_node_id
+        else None
+    )
+    if relay is None or node is None or not node.is_active:
+        raise ApiError(404, 404, "运行时不存在或未启用")
+    capability = (node.capabilities or {}).get(relay.model_provider) or {}
+    if capability.get("browser_monitor_v1") is not True:
+        raise ApiError(409, 409, "节点未开启浏览器监控或需要升级")
+    try:
+        result = await call_agent(
+            relay,
+            request.app.state.cipher,
+            "browser-snapshot",
+            {"capture": capture, "event": event},
+        )
+    except AgentError:
+        raise ApiError(502, 502, "浏览器观测读取失败") from None
+    await record_audit(
+        session,
+        action="runtime.browser_snapshot",
+        actor_login=request.state.api_client.app_key,
+        target_type="runtime_node",
+        target_id=str(node.id),
+        diff={"capture": capture, "event": event},
+        ip=client_ip(request),
+    )
+    await session.commit()
+    return JSONResponse(
+        {"code": 0, "data": result},
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
