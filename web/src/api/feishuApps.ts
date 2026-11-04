@@ -10,6 +10,8 @@ export interface FeishuRegistrationIn {
   reuse?: boolean
   /** 补齐权限时连同群聊旁听的权限一起申请。 */
   observe?: boolean
+  /** 补齐权限时连同管理可用范围的权限一起申请。 */
+  visibility?: boolean
 }
 export interface FeishuRegistration {
   id: string
@@ -79,7 +81,34 @@ export interface FeishuBotIn {
   menu_display_strategy: 1 | 2 | 3 | null
   menus: FeishuMenu[]
 }
-export interface FeishuVisibilityIn { visible_to_all: boolean; user_ids: string[]; department_ids: string[] }
+/** 可用范围里的成员 / 部门；id 为空表示还没同步进 CoreMan，只能在飞书里认。 */
+export interface FeishuVisibilityUser { feishu_id: string; id: string | null; display_name: string | null; login_name: string | null }
+export interface FeishuVisibilityDepartment { feishu_id: string; id: string | null; name: string | null; path: string | null }
+/**
+ * 读写可用范围用的哪个应用：platform 为飞书登录应用（开通一次即可管理所有机器人），self 为机器人自己的应用。
+ * platform_app 为登录应用的名称，没有配置登录应用时为 null。
+ */
+export interface FeishuVisibilitySource { platform_app: string | null; via: 'platform' | 'self' | null }
+/** 线上实际生效的可用范围；没有可用权限时只有 permission 与来源。 */
+export type FeishuVisibility = FeishuVisibilitySource & (
+  | { permission: 'missing' | 'pending' }
+  | {
+      permission: 'granted'
+      visible_to_all: boolean
+      users: FeishuVisibilityUser[]
+      departments: FeishuVisibilityDepartment[]
+      groups: string[]
+      invisible: { users: FeishuVisibilityUser[]; departments: FeishuVisibilityDepartment[]; groups: string[] }
+    }
+)
+/** 增量修改：visible_to_all 不给表示不切换全员 / 部分成员。 */
+export interface FeishuVisibilityPatch {
+  visible_to_all?: boolean
+  add_user_ids?: string[]
+  remove_user_ids?: string[]
+  add_department_ids?: string[]
+  remove_department_ids?: string[]
+}
 export interface FeishuPublishIn { version: string; changelog: string; remark: string }
 
 /** 群聊旁听要的飞书权限：已授权 / 应用没开通 / 待管理员审核。 */
@@ -99,7 +128,8 @@ export const feishuApps = {
     return call<{ avatar_url: string; publish_required: boolean }>(http.post(`${app(botId)}/avatar`, form))
   },
   updateBot: (botId: string, body: FeishuBotIn) => call<{ ok: true; publish_required: boolean }>(http.patch(`${app(botId)}/bot`, body)),
-  updateVisibility: (botId: string, body: FeishuVisibilityIn) => call<{ ok: true; publish_required: boolean }>(http.patch(`${app(botId)}/visibility`, body)),
+  visibility: (botId: string) => call<FeishuVisibility>(http.get(`${app(botId)}/visibility`)),
+  updateVisibility: (botId: string, body: FeishuVisibilityPatch) => call<FeishuVisibility>(http.patch(`${app(botId)}/visibility`, body)),
   publish: (botId: string, body: FeishuPublishIn) => call<{ version_id: string | null; version: string }>(http.post(`${app(botId)}/publish`, body)),
   applyScopes: (botId: string) => call<{ ok: true }>(http.post(`${app(botId)}/scopes/apply`)),
   observePermission: (botId: string) =>

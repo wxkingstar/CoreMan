@@ -9,7 +9,7 @@ vi.mock('@/api/admin', () => ({
 }))
 vi.mock('@/api/feishuApps', () => ({
   feishuApps: {
-    overview: vi.fn(), updateBase: vi.fn(), uploadAvatar: vi.fn(), updateBot: vi.fn(), updateVisibility: vi.fn(),
+    overview: vi.fn(), updateBase: vi.fn(), uploadAvatar: vi.fn(), updateBot: vi.fn(), updateVisibility: vi.fn(), visibility: vi.fn(),
     publish: vi.fn(), applyScopes: vi.fn(), createCommand: vi.fn(), updateCommand: vi.fn(), deleteCommand: vi.fn(), addDefaultCommands: vi.fn(),
     startRegistration: vi.fn(), registration: vi.fn(), cancelRegistration: vi.fn(),
   },
@@ -50,6 +50,7 @@ function mountPanel() {
 describe('FeishuAppPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(feishuApps.visibility).mockResolvedValue({ permission: 'missing', platform_app: null, via: null })
     vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
     vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
   })
@@ -93,7 +94,17 @@ describe('FeishuAppPanel', () => {
     await wrapper.get('[data-test="feishu-app-update"]').trigger('click')
     await flushPromises()
     const dialog = wrapper.findComponent(FeishuRegistrationDialog)
-    expect((dialog.props() as { visible: boolean; purpose: string; botId: string })).toMatchObject({ visible: true, purpose: 'update', botId: 'b1' })
+    expect((dialog.props() as { visible: boolean; purpose: string; botId: string })).toMatchObject({ visible: true, purpose: 'update', botId: 'b1', visibility: false })
+    wrapper.unmount()
+  })
+
+  it('scans with the availability permissions from the availability panel', async () => {
+    vi.mocked(feishuApps.overview).mockResolvedValue(overview())
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.get('[data-test="visibility-scan"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent(FeishuRegistrationDialog).props()).toMatchObject({ visible: true, visibility: true })
     wrapper.unmount()
   })
 

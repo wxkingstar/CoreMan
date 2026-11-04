@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.routers import feishu_apps as feishu_routes
 from coreman.cli import main
-from coreman.core.bots.secrets import ENV_AAD, decrypt_json
+from coreman.core.bots.secrets import CREDENTIALS_AAD, ENV_AAD, decrypt_json, encrypt_json
 from coreman.core.db.models import (
     AdminSession,
     AuditLog,
@@ -20,14 +22,18 @@ from coreman.core.db.models import (
     BotSkill,
     BotSystemGrant,
     BusinessSystem,
+    Department,
     EnvPreset,
     Skill,
     SkillApproval,
     SkillSource,
     Team,
     User,
+    UserIdentity,
 )
+from coreman.core.feishu_apps import management, manifest
 from coreman.core.knowledge import installation as installs
+from tests.api.test_feishu_app_management import CIPHER, Feishu
 from tests.integration.worker_helpers import seed_bot
 
 
@@ -286,3 +292,73 @@ async def test_raw_api_reaches_other_admin_endpoints(cli, db_session):
         "api", "put", f"/api/admin/teams/{uuid.uuid4()}", "--data", "{", "--as", "ops"
     )
     assert code == 1 and "JSON" in err
+
+
+async def test_feishu_visibility_commands(cli, db_session, monkeypatch):
+    feishu = Feishu()
+    monkeypatch.setattr(feishu_routes, "client_for", feishu.client)
+    app = feishu.routes[("GET", management.V6_APP)][1]["data"]["app"]
+    app["scopes"] += [{"scope": s, "token_types": ["tenant"]} for s in manifest.VISIBILITY_SCOPES]
+    feishu.routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {"code": 0, "data": {"is_visible_to_all": 1, "has_more_users": 0}},
+    )
+    ops = await add_user(db_session, "ops", "platform_admin")
+    alice = await add_user(db_session, "alice", display_name="爱丽丝")
+    db_session.add_all(
+        [
+            UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="fs_alice"),
+            Department(platform="feishu", platform_dept_id="D7", name="销售部", path="/D7"),
+            Bot(
+                bot_key="fs_bot",
+                platform="feishu",
+                name="飞书助手",
+                created_by=ops.id,
+                model="m",
+                working_dir="/w",
+                credentials_enc=encrypt_json(
+                    CIPHER, {"app_id": "cli_bound", "app_secret": "s"}, CREDENTIALS_AAD
+                ),
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    code, out, err = await cli("bots", "visibility", "fs_bot", "--as", "ops")
+    assert code == 0 and "全员可用" in out, err
+    # 全员可用时直接加名单等于收窄，必须显式 --restrict。
+    code, _, err = await cli("bots", "visibility-add", "fs_bot", "alice", "--as", "ops")
+    assert code == 1 and "--restrict" in err
+    code, _, err = await cli("bots", "visibility-add", "fs_bot", "--as", "ops")
+    assert code == 1 and "至少" in err
+    feishu.calls.clear()
+    code, out, err = await cli(
+        "bots", "visibility-add", "fs_bot", "alice", "--dept", "销售部", "--restrict", "--as", "ops"
+    )
+    assert code == 0 and "立即生效" in out, err
+    patch = [c for c in feishu.calls if c.method == "PATCH"]
+    assert json.loads(patch[0].content) == {
+        "is_visible_to_all": False,
+        "add_visible_list": {"user_ids": ["fs_alice"], "department_ids": ["D7"]},
+    }
+
+    feishu.routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {
+            "code": 0,
+            "data": {
+                "is_visible_to_all": 0,
+                "users": [{"user_id": "fs_alice"}],
+                "has_more_users": 0,
+            },
+        },
+    )
+    code, out, _ = await cli("bots", "visibility", "fs_bot", "--as", "ops")
+    assert "爱丽丝（alice）" in out and "本机器人的飞书应用" in out
+    feishu.calls.clear()
+    code, _, err = await cli("bots", "visibility-remove", "fs_bot", "alice", "--as", "ops")
+    assert code == 0, err
+    patch = [c for c in feishu.calls if c.method == "PATCH"]
+    assert json.loads(patch[0].content) == {"del_visible_list": {"user_ids": ["fs_alice"]}}
+    assert (await cli("bots", "visibility-all", "fs_bot", "--as", "ops"))[0] == 1
+    assert (await cli("bots", "visibility-all", "fs_bot", "--yes", "--as", "ops"))[0] == 0

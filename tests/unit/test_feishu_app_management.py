@@ -113,7 +113,7 @@ async def test_overview_combines_app_versions_grants_and_commands():
     assert data["slash_commands"] is None and data["errors"]["slash_commands"] == 99991672
 
 
-async def test_bot_menus_visibility_publish_and_commands_use_documented_bodies():
+async def test_bot_menus_publish_and_commands_use_documented_bodies():
     calls: list[httpx.Request] = []
     client = _client(
         {
@@ -153,9 +153,6 @@ async def test_bot_menus_visibility_publish_and_commands_use_documented_bodies()
         menu_display_strategy=None,
         menus=None,
     )
-    await management.update_visibility(
-        client, "cli_a", visible_to_all=False, user_ids=["u1"], department_ids=["d1"]
-    )
     assert await management.publish(
         client, "cli_a", version="1.0.4", changelog="更新菜单", remark="CoreMan"
     ) == {"version_id": "oav_new", "version": "1.0.4"}
@@ -187,22 +184,87 @@ async def test_bot_menus_visibility_publish_and_commands_use_documented_bodies()
         }
     }
     assert bodies[1][2] == {"bot": {"enable": True, "bot_menu_enable": False, "bot_menus": []}}
-    assert calls[2].url.params["user_id_type"] == "user_id"
-    assert calls[2].url.params["department_id_type"] == "department_id"
-    assert bodies[2][2] == {
-        "visibility": {
-            "is_visible_to_all": False,
-            "visible_list": {"user_ids": ["u1"], "department_ids": ["d1"]},
-        }
-    }
-    assert bodies[3][2]["pc_default_ability"] == "bot" and bodies[3][2]["version"] == "1.0.4"
+    assert bodies[2][2]["pc_default_ability"] == "bot" and bodies[2][2]["version"] == "1.0.4"
     # 图标必须在顶层：放在 description 里会被飞书忽略（实测）。
-    assert bodies[4][2] == {
+    assert bodies[3][2] == {
         "command": "report",
         "description": {"default_value": "生成日报", "i18n": {"zh_cn": "生成日报"}},
         "icon": {"icon_key": "ai-doc_outlined"},
     }
-    assert bodies[5][:2] == ("DELETE", f"{management.SLASH}/7374")
+    assert bodies[4][:2] == ("DELETE", f"{management.SLASH}/7374")
+
+
+async def test_visibility_reads_all_pages_and_patches_in_batches():
+    calls: list[httpx.Request] = []
+    pages = iter(
+        [
+            {
+                "users": [{"user_id": "u1", "open_id": "ou_1"}, {"open_id": "ou_2"}],
+                "departments": [{"id": "d1"}],
+                "groups": [{"id": "g1"}],
+                "invisible_users": [{"user_id": "u9"}],
+                "is_visible_to_all": 0,
+                "has_more_users": 1,
+                "user_page_token": "p2",
+            },
+            {
+                "users": [{"user_id": "u3"}],
+                "departments": [{"id": "d1"}],
+                "is_visible_to_all": 0,
+                "has_more_users": 0,
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == TOKEN:
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "t", "expire": 7200})
+        calls.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"code": 0, "data": next(pages)})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    http = httpx.AsyncClient(
+        base_url="https://open.feishu.cn", transport=httpx.MockTransport(handler)
+    )
+    client = FeishuClient("cli_a", "s", http=http)
+    current = await management.get_visibility(client, "cli_a")
+    assert current == {
+        "is_all": False,
+        "users": ["u1", "ou_2", "u3"],
+        "departments": ["d1"],
+        "groups": ["g1"],
+        "invisible_users": ["u9"],
+        "invisible_departments": [],
+        "invisible_groups": [],
+    }
+    assert calls[0].url.path == management.VISIBILITY_GET
+    assert calls[0].url.params["app_id"] == "cli_a" and "user_page_token" not in calls[0].url.params
+    assert calls[1].url.params["user_page_token"] == "p2"
+
+    calls.clear()
+    many = [f"u{i}" for i in range(150)]
+    await management.update_visibility(
+        client, "cli_a", visible_to_all=False, add_users=many, remove_departments=["d1"]
+    )
+    bodies = [json.loads(c.content) for c in calls]
+    assert [c.url.path for c in calls] == [
+        "/open-apis/application/v6/applications/cli_a/visibility"
+    ] * 2
+    assert calls[0].url.params["user_id_type"] == "user_id"
+    assert calls[0].url.params["department_id_type"] == "department_id"
+    assert bodies[0] == {
+        "is_visible_to_all": False,
+        "add_visible_list": {"user_ids": many[:100]},
+        "del_visible_list": {"department_ids": ["d1"]},
+    }
+    assert bodies[1] == {"add_visible_list": {"user_ids": many[100:]}}
+
+    calls.clear()
+    await management.update_visibility(client, "cli_a", visible_to_all=True)
+    assert [json.loads(c.content) for c in calls] == [{"is_visible_to_all": True}]
+    with pytest.raises(ApiError):
+        await management.get_visibility(client, "bad id")
 
 
 async def test_avatar_upload_is_multipart_and_requires_https_url():
@@ -288,3 +350,12 @@ def test_personal_levels_ignore_protocol_scopes():
         "all": False,
         "no_messages": True,
     }
+
+
+def test_visibility_scopes_are_only_requested_on_demand():
+    default = manifest.addons()["scopes"]["tenant"]
+    wanted = manifest.addons(visibility=True)["scopes"]["tenant"]
+    assert not set(manifest.VISIBILITY_SCOPES) & set(default)
+    assert set(manifest.VISIBILITY_SCOPES) <= set(wanted)
+    # 不进「缺少权限」提示：只有要在 CoreMan 管可用范围时才申请。
+    assert not set(manifest.VISIBILITY_SCOPES) & set(manifest.missing_scopes([], kind="tenant"))

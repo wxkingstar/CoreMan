@@ -16,11 +16,12 @@ from coreman.core.db.models import (
     Department,
     FeishuAppRegistration,
     FeishuPersonalGrant,
+    PlatformApp,
     Team,
     User,
     UserIdentity,
 )
-from coreman.core.feishu_apps import management
+from coreman.core.feishu_apps import management, manifest
 from coreman.core.platforms.feishu import FeishuClient
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 
@@ -32,6 +33,9 @@ class Feishu:
 
     def __init__(self) -> None:
         self.calls: list[httpx.Request] = []
+        # 每次建客户端用的是哪个应用：bot（机器人自己）或 platform（飞书登录应用）。
+        self.used: list[str] = []
+        self.platform_routes: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
         self.routes: dict[tuple[str, str], tuple[int, dict[str, object]]] = {
             ("GET", management.V6_APP): (
                 200,
@@ -56,14 +60,26 @@ class Feishu:
         }
 
     def client(self, cipher: Cipher, bot: Bot) -> FeishuClient:
+        self.used.append("bot")
+        return self._client({})
+
+    def platform_client(self, cipher: Cipher, app: PlatformApp) -> FeishuClient:
+        """飞书登录应用的客户端：platform_routes 里有的路径按它返回，其余同机器人。"""
+        self.used.append("platform")
+        return self._client(self.platform_routes)
+
+    def _client(
+        self, overrides: dict[tuple[str, str], tuple[int, dict[str, object]]]
+    ) -> FeishuClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("tenant_access_token/internal"):
                 return httpx.Response(
                     200, json={"code": 0, "tenant_access_token": "t", "expire": 7200}
                 )
             self.calls.append(request)
-            status, body = self.routes.get(
-                (request.method, request.url.path), (200, {"code": 0, "data": {}})
+            key = (request.method, request.url.path)
+            status, body = overrides.get(key) or self.routes.get(
+                key, (200, {"code": 0, "data": {}})
             )
             return httpx.Response(status, json=body)
 
@@ -76,6 +92,7 @@ class Feishu:
 async def _setup(client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch):  # type: ignore[no-untyped-def]
     feishu = Feishu()
     monkeypatch.setattr(router, "client_for", feishu.client)
+    monkeypatch.setattr(router, "platform_client_for", feishu.platform_client)
     team = Team(slug=f"t{uuid.uuid4().hex[:6]}", name_zh="团队")
     db_session.add(team)
     await db_session.commit()
@@ -172,7 +189,7 @@ async def test_only_bot_admins_manage_feishu_bots(
     assert (await client.get(f"/api/admin/bots/{wecom.id}/feishu-app")).status_code == 422
 
 
-async def test_visibility_maps_coreman_people_to_feishu_ids(
+async def test_visibility_needs_admin_scopes_then_reads_and_patches_incrementally(
     client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
 ) -> None:
     feishu, owner, bot = await _setup(client, db_session, monkeypatch)
@@ -183,34 +200,129 @@ async def test_visibility_maps_coreman_people_to_feishu_ids(
     await db_session.flush()
     db_session.add(UserIdentity(user_id=member.id, platform="feishu", platform_user_id="fs_u1"))
     await db_session.commit()
-
     path = f"/api/admin/bots/{bot.id}/feishu-app/visibility"
-    r = await client.patch(
-        path, json={"visible_to_all": False, "user_ids": [str(stranger.id)], "department_ids": []}
-    )
-    assert r.status_code == 422 and "没有飞书账号" in r.json()["message"]
-    r = await client.patch(
-        path,
-        json={
-            "visible_to_all": False,
-            "user_ids": [str(member.id)],
-            "department_ids": [str(dept.id)],
+    add = {"add_user_ids": [str(member.id)], "add_department_ids": [str(dept.id)]}
+
+    # 应用还没有管理可用范围的权限：只报状态，修改被拒，且不碰飞书的可用范围接口。
+    r = await client.get(path)
+    assert r.status_code == 200
+    assert r.json()["data"] == {"platform_app": None, "permission": "missing", "via": None}
+    r = await client.patch(path, json=add)
+    assert r.status_code == 409 and "扫码补齐" in r.json()["message"]
+    assert not [c for c in feishu.calls if "visibility" in c.url.path]
+
+    app = feishu.routes[("GET", management.V6_APP)][1]["data"]["app"]  # type: ignore[index]
+    for scope in manifest.VISIBILITY_SCOPES:
+        app["scopes"].append({"scope": scope, "token_types": ["tenant"]})  # type: ignore[index]
+    feishu.routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {
+            "code": 0,
+            "data": {
+                "is_visible_to_all": 0,
+                "users": [{"user_id": "fs_u1", "open_id": "ou_1"}, {"user_id": "fs_x"}],
+                "departments": [{"id": "D100"}, {"id": "D999"}],
+                "invisible_users": [{"user_id": "fs_u1"}],
+                "has_more_users": 0,
+            },
         },
     )
+    r = await client.get(path)
     assert r.status_code == 200, r.text
-    assert r.json()["data"]["publish_required"] is True
-    sent = json.loads(feishu.calls[-1].content)
-    assert sent == {
-        "visibility": {
-            "is_visible_to_all": False,
-            "visible_list": {"user_ids": ["fs_u1"], "department_ids": ["D100"]},
-        }
+    data = r.json()["data"]
+    assert data["permission"] == "granted" and data["visible_to_all"] is False
+    assert data["users"] == [
+        {"feishu_id": "fs_u1", "id": str(member.id), "display_name": "成员", "login_name": "m1"},
+        {"feishu_id": "fs_x", "id": None, "display_name": None, "login_name": None},
+    ]
+    assert [d["name"] for d in data["departments"]] == ["销售部", None]
+    assert data["invisible"]["users"][0]["display_name"] == "成员"
+    assert feishu.calls[-1].url.params["app_id"] == "cli_bound"
+
+    assert (await client.patch(path, json={})).status_code == 422
+    r = await client.patch(path, json={"add_user_ids": [str(stranger.id)]})
+    assert r.status_code == 422 and "没有飞书账号" in r.json()["message"]
+
+    feishu.calls.clear()
+    r = await client.patch(path, json={**add, "remove_user_ids": [str(member.id)]})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["users"][0]["display_name"] == "成员"
+    sent = [c for c in feishu.calls if c.method == "PATCH"]
+    assert len(sent) == 1
+    assert sent[0].url.path == "/open-apis/application/v6/applications/cli_bound/visibility"
+    assert json.loads(sent[0].content) == {
+        "add_visible_list": {"user_ids": ["fs_u1"], "department_ids": ["D100"]},
+        "del_visible_list": {"user_ids": ["fs_u1"]},
     }
-    assert feishu.calls[-1].url.path == "/open-apis/application/v7/applications/cli_bound/config"
     audit = await db_session.scalar(
         select(AuditLog).where(AuditLog.action == "bot.feishu_app_visibility")
     )
     assert audit is not None and audit.target_id == str(bot.id)
+    assert audit.diff["users_added"] == [None, ["fs_u1"]]
+
+    # 当前全员可见时改为部分成员，必须同时给出名单。
+    feishu.routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {"code": 0, "data": {"is_visible_to_all": 1, "has_more_users": 0}},
+    )
+    r = await client.patch(path, json={"visible_to_all": False})
+    assert r.status_code == 422 and "至少添加" in r.json()["message"]
+    r = await client.patch(path, json={"visible_to_all": True})
+    assert r.status_code == 200 and r.json()["data"]["visible_to_all"] is True
+
+
+async def test_visibility_prefers_the_login_app_and_falls_back_to_the_bot(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:
+    feishu, _, bot = await _setup(client, db_session, monkeypatch)
+    db_session.add(
+        PlatformApp(
+            platform="feishu",
+            name="飞书登录",
+            capabilities=["login"],
+            app_id="cli_login",
+            secret_enc=CIPHER.encrypt("s", "platform_apps.secret_enc"),
+        )
+    )
+    await db_session.commit()
+    path = f"/api/admin/bots/{bot.id}/feishu-app/visibility"
+
+    # 登录应用没开通权限：退回机器人自己的应用，它也没有就报缺权限。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        400,
+        {"code": 99991672, "msg": "app scope missing"},
+    )
+    r = await client.get(path)
+    assert r.json()["data"] == {"platform_app": "飞书登录", "permission": "missing", "via": None}
+    assert feishu.used == ["platform", "bot"]
+    r = await client.patch(path, json={"visible_to_all": True})
+    assert r.status_code == 409 and "登录应用" in r.json()["message"]
+
+    # 登录应用有权限：查改的都是这个机器人的 app_id，不碰机器人自己的应用。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        200,
+        {"code": 0, "data": {"is_visible_to_all": 0, "users": [], "has_more_users": 0}},
+    )
+    feishu.used.clear()
+    feishu.calls.clear()
+    r = await client.get(path)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["via"] == "platform" and r.json()["data"]["permission"] == "granted"
+    assert feishu.used == ["platform"]
+    assert feishu.calls[0].url.params["app_id"] == "cli_bound"
+    r = await client.patch(path, json={"visible_to_all": True})
+    assert r.status_code == 200 and r.json()["data"]["via"] == "platform"
+    assert [c.url.path for c in feishu.calls if c.method == "PATCH"] == [
+        "/open-apis/application/v6/applications/cli_bound/visibility"
+    ]
+    assert set(feishu.used) == {"platform"}
+
+    # 别的失败照常报错，不能当成缺权限退回。
+    feishu.platform_routes[("GET", management.VISIBILITY_GET)] = (
+        500,
+        {"code": 1, "msg": "internal"},
+    )
+    assert (await client.get(path)).status_code == 502
 
 
 async def test_menu_validation_and_feishu_rejections_are_explained(
