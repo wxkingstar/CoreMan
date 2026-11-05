@@ -130,6 +130,7 @@ class Capability(BaseModel):
     memory_layout_v1: StrictBool = False
     # 节点能在多个席位之间切换（见 runtime_daemon/seats.py）。旧节点没有，管理台提示升级。
     seat_switch_v1: StrictBool = False
+    browser_monitor_v1: StrictBool = False
     seats: list[SeatState] = Field(default_factory=list, max_length=21)
     installed: bool = False
     version: str = Field(default="", max_length=100)

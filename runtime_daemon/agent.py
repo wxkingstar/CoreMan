@@ -941,6 +941,9 @@ class Agent:
         """返回驱动记下的最新 Claude 额度；由运行时守护进程经本机 socket 实现。"""
         raise OperationError("当前环境不支持 Claude 额度采集")
 
+    def browser_snapshot(self, capture: bool, event: bool) -> dict:
+        raise OperationError("当前节点不支持浏览器监控")
+
     def probe_rate_limits(self) -> None:
         if self.provider == "codex":
             limits = self.codex_limits()
@@ -1253,6 +1256,14 @@ class Agent:
             }
         if kind == "probe-rate-limits":
             return self.start_background(kind, self.probe_rate_limits)
+        if kind == "browser-snapshot":
+            if (
+                set(data) - {"type", "capture", "event"}
+                or type(data.get("capture", False)) is not bool
+                or type(data.get("event", False)) is not bool
+            ):
+                raise OperationError("浏览器监控参数无效")
+            return self.browser_snapshot(data.get("capture", False), data.get("event", False))
         if kind == "health-check":
             return self.start_background(kind, self.health_check)
         if kind == "collect-memory":
