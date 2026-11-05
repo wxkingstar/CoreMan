@@ -184,11 +184,31 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 
 // launchClaude starts a `claude` subprocess and returns its stdout-line
 // channel along with a stderr-completion signal. The channel closes after
-// cmd.Wait. sessErrCh receives true if the "No conversation found" stderr
-// marker was seen — used to drive the resume-retry path. watchdogTimeout is
+// cmd.Wait. sessErrCh receives the exit result and whether the "No conversation
+// found" marker was seen — used to drive the resume-retry path. watchdogTimeout is
 // passed by value (callers snapshot firstLineTimeout synchronously) so the
 // watchdog goroutine never reads the package var concurrently.
-func launchClaude(args []string, prompt, workingDir string, envVars map[string]string, watchdogTimeout time.Duration) (*exec.Cmd, <-chan string, <-chan bool, error) {
+type claudeProcessResult struct {
+	SessionMissing bool
+	Err            error
+}
+
+// Expose fixed diagnostic codes, never arbitrary stderr (which may contain
+// prompts, credentials, paths or personal data).
+func claudeStderrReason(line string) string {
+	line = strings.ToLower(line)
+	switch {
+	case strings.Contains(line, "session has expired"), strings.Contains(line, "oauth session expired"):
+		return "session_expired: Claude login session has expired"
+	case strings.Contains(line, "account is on hold"), strings.Contains(line, "account_on_hold"):
+		return "account_on_hold: Claude account is on hold"
+	case strings.Contains(line, "not logged in"), strings.Contains(line, "failed to authenticate"):
+		return "authentication_error: Claude authentication failed"
+	}
+	return ""
+}
+
+func launchClaude(args []string, prompt, workingDir string, envVars map[string]string, watchdogTimeout time.Duration) (*exec.Cmd, <-chan string, <-chan claudeProcessResult, error) {
 	cmd := exec.Command("claude", args...)
 	// Own process group so KillGroup can reap the whole tree (node wrapper +
 	// native claude binary) instead of orphaning the native child.
@@ -211,7 +231,9 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		return nil, nil, nil, fmt.Errorf("failed to start claude: %v", err)
 	}
 
-	sessErrCh := make(chan bool, 1)
+	sessErrCh := make(chan claudeProcessResult, 1)
+	var sessionMissing bool
+	var failureReason string
 	var stderrDone sync.WaitGroup
 	stderrDone.Add(1)
 	go func() {
@@ -227,6 +249,9 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		private := openai.PersonalPrivate(envVars)
 		for s.Scan() {
 			line := s.Text()
+			if reason := claudeStderrReason(line); reason != "" {
+				failureReason = reason
+			}
 			// Personal turns resume sessions too: match the marker on the raw
 			// line, and keep only the private preview out of the log.
 			if strings.Contains(line, "No conversation found with session ID") {
@@ -242,7 +267,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 			log.Printf("Claude stderr scanner error: %v", err)
 			io.Copy(io.Discard, stderrPipe) //nolint:errcheck // backstop drain
 		}
-		sessErrCh <- found
+		sessionMissing = found
 	}()
 
 	// First-line watchdog: a CLI that never prints a single stdout line (bad
@@ -289,9 +314,15 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 			log.Printf("Claude stdout scanner error (stream truncated): %v", err)
 		}
 		stderrDone.Wait()
-		if err := proc.Wait(cmd); err != nil {
-			log.Printf("Claude command error: %v", err)
+		waitErr := proc.Wait(cmd)
+		if waitErr != nil {
+			log.Printf("Claude command error: %v", waitErr)
+			waitErr = fmt.Errorf("Claude process failed (exit code %d)", cmd.ProcessState.ExitCode())
+			if failureReason != "" {
+				waitErr = fmt.Errorf("%s: %w", failureReason, waitErr)
+			}
 		}
+		sessErrCh <- claudeProcessResult{SessionMissing: sessionMissing, Err: waitErr}
 	}()
 
 	return cmd, lines, sessErrCh, nil
@@ -473,8 +504,8 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			// justifies the --session-id retry: retrying against an existing
 			// session re-runs the turn at best and produces a second empty
 			// stream at worst.
-			sessionMissing := <-sessErrCh
-			if !sessionMissing {
+			completion := <-sessErrCh
+			if !completion.SessionMissing {
 				if sawResult {
 					log.Printf("Resume run ended with a result and no content (session exists); forwarding %d buffered event(s) instead of retrying", len(buffered))
 					ready <- nil
@@ -483,7 +514,11 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 					}
 					return
 				}
-				ready <- fmt.Errorf("claude exited without a usable event%s (session exists; crash or first-line watchdog kill, check relay logs)", lastOutputNote(buffered))
+				if completion.Err != nil {
+					ready <- fmt.Errorf("%w%s", completion.Err, lastOutputNote(buffered))
+				} else {
+					ready <- fmt.Errorf("claude exited without a usable event%s (session exists; crash or first-line watchdog kill, check relay logs)", lastOutputNote(buffered))
+				}
 				return
 			}
 
@@ -523,8 +558,12 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 
 		firstLine, ok := <-innerLines
 		if !ok {
-			go func() { <-sessErrCh }()
-			ready <- fmt.Errorf("claude exited without producing any output (crash or first-line watchdog kill, check relay logs)")
+			completion := <-sessErrCh
+			if completion.Err != nil {
+				ready <- completion.Err
+			} else {
+				ready <- fmt.Errorf("claude exited without producing any output (crash or first-line watchdog kill, check relay logs)")
+			}
 			return
 		}
 		go func() { <-sessErrCh }()
@@ -582,12 +621,17 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 	// Retry with --session-id only when the session is actually missing (stderr
 	// marker) — a blind retry on any empty output re-runs the turn against an
 	// existing session and hides the original failure.
-	sessionMissing := <-sessErrCh
-	if hasArg(args, "--resume") && sessionMissing && lastText == "" && result == "" {
+	completion := <-sessErrCh
+	if hasArg(args, "--resume") && completion.SessionMissing && lastText == "" && result == "" {
 		log.Printf("Resume session not found, retrying with --session-id")
 		retryArgs := replaceArg(args, "--resume", "--session-id")
 		resetMeter(sessionArg(retryArgs))
 		return runClaude(retryArgs, withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs))), workingDir, envVars)
+	}
+	// Preserve structured API errors/content already returned by the CLI.
+	// Only an otherwise empty response needs the safe process diagnostic.
+	if lastText == "" && result == "" {
+		err = completion.Err
 	}
 	return
 }

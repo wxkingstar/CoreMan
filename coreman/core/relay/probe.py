@@ -11,6 +11,7 @@ from coreman.core.db.models import ModelCatalog, RelayServer
 from coreman.core.logging import get_logger
 from coreman.core.relay.client import RelayClient, RelayError, RelayHealth
 from coreman.core.relay.models import known_effort_flags
+from coreman.core.relay.observations import HealthObservation
 
 log = get_logger(__name__)
 
@@ -43,6 +44,13 @@ async def probe_relay(
         health_checked_at=datetime.now(UTC),
         health_latency_ms=health.latency_ms,
         health_fail_count=0 if health.status == "healthy" else RelayServer.health_fail_count + 1,
+        driver_health=HealthObservation(
+            status=health.status,
+            detail=health.detail,
+            check_kind="driver",
+            observed_at=datetime.now(UTC),
+            latency_ms=health.latency_ms,
+        ).model_dump(mode="json"),
     )
     if health.status == "healthy":
         values.update(relay_version=health.version, relay_mode=health.mode)

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,6 +76,72 @@ def command(data, path="/v1/chat/completions"):
         "path": path,
         "body": base64.b64encode(json.dumps(data).encode()).decode(),
     }
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("age", [10, 901, 3599, 3601])
+@pytest.mark.parametrize("hour", [0, 8, 9, 23])
+def test_provider_idle_fallback_preserves_existing_cadence(
+    daemon, monkeypatch, provider, age, hour
+):
+    from runtime_daemon import agent as module
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.config["node_token"] = "test-token"
+    runtime = RuntimeAgent(daemon, provider, "test-relay")
+    wall = 1800000000
+    runtime.last_model_check = wall - age
+    calls = []
+    runtime.start_background = lambda name, action: calls.append(name)
+
+    class Stop:
+        stopped = False
+        rounds = 0
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, _):
+            self.rounds += 1
+            self.stopped = self.rounds >= 3
+
+    runtime.stop = Stop()
+
+    class InlineThread:
+        def __init__(self, *, target, **_):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(module.threading, "Thread", InlineThread)
+    monkeypatch.setattr(module.time, "time", lambda: wall)
+    monkeypatch.setattr(
+        module.time, "localtime", lambda: time.struct_time((2026, 11, 4, hour, 0, 0, 2, 308, -1))
+    )
+    runtime.start_schedules()
+    expected = (age >= 900) if provider == "claude" else (9 <= hour <= 23 and age >= 3600)
+    assert ("health-check" in calls) is expected
+    assert calls.count("health-check") == int(expected)
+
+
+def test_recent_activity_only_suppresses_matching_seat(daemon):
+    current = time.time() - 10
+    daemon.apply_model_activity(
+        {"claude": {"observed_at": "2026-01-01T00:00:00Z", "seat_id": "retired"}}
+    )
+    assert not getattr(daemon.agents["claude"], "last_model_check", 0)
+    from datetime import datetime
+
+    daemon.apply_model_activity(
+        {
+            "claude": {
+                "observed_at": datetime.fromtimestamp(current, UTC).isoformat(),
+                "seat_id": daemon.seats.active("claude"),
+            }
+        }
+    )
+    assert daemon.agents["claude"].last_model_check == pytest.approx(current, abs=1e-6, rel=0)
 
 
 def test_root_change_is_durable_and_updates_agents(daemon, tmp_path):
@@ -276,7 +344,25 @@ def test_no_persistent_claude_modes_in_release_source():
     # Claude 交给驱动选默认模型，不用模型列表第一个。
     [("claude", "plan", None), ("codex", "read-only", "test-model")],
 )
-def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provider, mode, model):
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("OK", True),
+        ("OK.", True),
+        ("ok!", True),
+        (" ( Ok！ ) ", True),
+        ("", False),
+        ("Some other reply", False),
+        ("OK, ready", False),
+        ("ΟΚ", False),
+        ("ｏｋ", False),
+        ("OK", False),
+        ("!" * 1000 + "OK", False),
+    ],
+)
+def test_health_probe_uses_provider_permission_mode(
+    daemon, monkeypatch, provider, mode, model, content, expected
+):
     from runtime_daemon.daemon import RuntimeAgent
 
     daemon.socket_dir = daemon.data_dir
@@ -299,7 +385,9 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
 
         def post(self, path, json):
             captured.append(json)
-            return SimpleNamespace(status_code=200, json=lambda: {"choices": []})
+            return SimpleNamespace(
+                status_code=200, json=lambda: {"choices": [{"message": {"content": content}}]}
+            )
 
     monkeypatch.setattr("runtime_daemon.daemon.httpx.Client", LocalClient)
     agent = RuntimeAgent(daemon, provider, "test-relay")
@@ -309,7 +397,11 @@ def test_health_probe_uses_provider_permission_mode(daemon, monkeypatch, provide
     agent.health_check()
     assert captured[0]["permission_mode"] == mode
     assert captured[0].get("model") == model
-    assert reports[0]["status"] == "healthy"
+    assert reports[0]["status"] == ("healthy" if expected else "unknown")
+    assert reports[0]["reply_verified"] is expected
+    assert reports[0]["check_kind"] == "model"
+    assert reports[0]["driver_status"] == "healthy"
+    assert reports[0]["requested_model"] == model
 
 
 @pytest.mark.parametrize(
@@ -346,6 +438,65 @@ def test_claude_limits_come_from_driver_stats(daemon, monkeypatch, body, expecte
     agent = RuntimeAgent(daemon, "claude", "test-relay")
     assert agent.claude_limits() == (body["rate_limits"] if expected else None)
     assert paths == ["/v1/stats"]
+
+
+@pytest.mark.parametrize("blocked_at", ["driver", "report"])
+def test_quota_io_leaves_driver_lock_free(daemon, monkeypatch, blocked_at):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    agent = RuntimeAgent(daemon, "claude", "test-relay")
+    entered, release = threading.Event(), threading.Event()
+    reports = []
+
+    def block(stage):
+        if blocked_at == stage:
+            entered.set()
+            assert release.wait(5)
+
+    def read(path):
+        assert path == daemon.socket_path("claude", 0)
+        block("driver")
+        return {"observed_at": "t1", "seven_day": {"used_percentage": 6}}
+
+    def report(endpoint, body):
+        block("report")
+        reports.append(body["rate_limits"])
+
+    monkeypatch.setattr(agent, "claude_limits", read)
+    monkeypatch.setattr(agent, "report", report)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        probe = executor.submit(agent.probe_rate_limits)
+        try:
+            assert entered.wait(5)
+            acquired = daemon.driver_lock.acquire(timeout=0.5)
+            assert acquired
+            daemon.driver_lock.release()
+        finally:
+            release.set()
+        probe.result(timeout=5)
+    assert reports[0]["seat_id"] == "default"
+
+
+def test_quota_read_from_retired_generation_is_not_reported(daemon, monkeypatch):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    agent = RuntimeAgent(daemon, "claude", "test-relay")
+    reports = []
+
+    def read(path):
+        assert path == daemon.socket_path("claude", 0)
+        with daemon.driver_lock:
+            daemon.driver_gen["claude"] += 1
+        return {"observed_at": "t1", "seven_day": {"used_percentage": 6}}
+
+    monkeypatch.setattr(agent, "claude_limits", read)
+    monkeypatch.setattr(agent, "report", lambda *args: reports.append(args))
+    agent.probe_rate_limits()
+    assert reports == []
 
 
 @pytest.mark.parametrize("key", ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"])

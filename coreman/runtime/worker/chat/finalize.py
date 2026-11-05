@@ -26,7 +26,9 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.client import RelayBusyError, RelayError
 from coreman.core.relay.labels import load_nodes, relay_label, signed_in
+from coreman.core.relay.observations import HealthObservation, provider_failure, save_health
 from coreman.core.relay.quota import parse_quota, save_quota
 from coreman.core.wecom.cards import (
     choice_card,
@@ -257,8 +259,58 @@ class FinalizeStage(ChatStageBase):
             )
             # 额度来自本轮实际请求，比 Agent 定时上报新；写在这里，下面的额度预警读到的就是它。
             quota = parse_quota(out.rate_limits) if out.rate_limits else None
-            if quota is not None:
-                await save_quota(session, pre.relay.id, quota)
+            if out.rate_limits and quota is None:
+                from coreman.core.relay.quota import Quota
+
+                quota = Quota(
+                    read_status="error",
+                    error_code="invalid_provider_quota",
+                    seat_id=out.runtime_seat_id,
+                )
+            if owned and quota is not None:
+                await save_quota(
+                    session, pre.relay.id, quota.model_copy(update={"source": "conversation"})
+                )
+            # Actual provider output proves inference; cancellations, queue
+            # waits and business/tool failures do not prove a model failure.
+            observation = None
+            if (
+                owned
+                and not out.cancelled
+                and not out.relay_error
+                and out.error is None
+                and out.finish_reason
+                and (out.text_events > 0 or out.ask_user)
+            ):
+                observation = HealthObservation(
+                    status="healthy",
+                    check_kind="conversation",
+                    requested_model=pre.request.model,
+                    seat_id=out.runtime_seat_id,
+                    reply_verified=True,
+                )
+            elif (
+                owned
+                and not out.cancelled
+                and (
+                    out.relay_error
+                    or isinstance(out.error, RelayError)
+                    and not isinstance(out.error, RelayBusyError)
+                )
+            ):
+                status, code, detail = provider_failure(
+                    str(out.error or verdict.error_message or "")
+                )
+                observation = HealthObservation(
+                    status=status,
+                    error_code=code,
+                    detail=detail,
+                    check_kind="conversation",
+                    requested_model=pre.request.model,
+                    seat_id=out.runtime_seat_id,
+                )
+            if observation is not None:
+                await save_health(session, pre.relay.id, observation)
             # 记录与任务同一事务结束：不会出现任务结束了、记录还停在进行中。
             logged = owned and await chat_logs.finish_turn(session, entry)
             if (

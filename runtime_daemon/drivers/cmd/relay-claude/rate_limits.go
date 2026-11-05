@@ -26,6 +26,7 @@ type claudeRateLimitWindow struct {
 type quotaWindow struct {
 	UsedPercentage float64 `json:"used_percentage"`
 	ResetsAt       int64   `json:"resets_at,omitempty"`
+	ObservedAt     string  `json:"observed_at,omitempty"`
 }
 
 type rateLimitSnapshot struct {
@@ -73,7 +74,7 @@ func (s *rateLimitStore) observe(raw json.RawMessage) bool {
 			continue
 		}
 		// Same rounding as the CLI's own statusLine used_percentage.
-		q := &quotaWindow{UsedPercentage: math.Round(*w.Utilization*1000) / 10, ResetsAt: w.ResetsAt}
+		q := &quotaWindow{UsedPercentage: math.Round(*w.Utilization*1000) / 10, ResetsAt: w.ResetsAt, ObservedAt: time.Now().UTC().Format(time.RFC3339)}
 		switch name {
 		case "five_hour":
 			next.FiveHour, changed = q, true

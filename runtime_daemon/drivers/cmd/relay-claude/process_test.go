@@ -351,3 +351,26 @@ exit 0
 		t.Errorf("claude invoked %d times, want 1 (no blind retry)", n)
 	}
 }
+
+func TestNonStreamExitRetainsSafeFailureReason(t *testing.T) {
+	writeFakeClaude(t, `echo "$*" >> "$ARGSLOG"
+echo 'Your Claude session has expired. Sign in again to continue (claude auth login).' >&2
+echo 'private-token-and-user-prompt' >&2
+exit 1`)
+	_, env, count := newArgsLog(t)
+	_, _, _, _, _, _, err := runClaude([]string{"--resume", "sess-x"}, "private-prompt", "", env)
+	if err == nil || !strings.Contains(err.Error(), "session_expired") || !strings.Contains(err.Error(), "exit code 1") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("unexpected diagnostic: %v", err)
+	}
+	if count() != 1 {
+		t.Fatal("an expired login must not rerun the task")
+	}
+}
+
+func TestNonStreamUnknownExitDoesNotReturnStderr(t *testing.T) {
+	writeFakeClaude(t, "echo 'private-unrecognized-error' >&2\nexit 7")
+	_, _, _, _, _, _, err := runClaude(nil, "private-prompt", "", nil)
+	if err == nil || !strings.Contains(err.Error(), "exit code 7") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("unexpected diagnostic: %v", err)
+	}
+}
