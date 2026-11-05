@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from typing import Any
 
 from coreman.admin_cli import output
-from coreman.admin_cli.base import add_yes, changed, leaf, pairs, read_text, require_yes
+from coreman.admin_cli.base import add_yes, changed, leaf, on_off, pairs, read_text, require_yes
 from coreman.admin_cli.client import AdminClient, CliError
 
 SKILLS = "/api/admin/skills"
@@ -64,6 +65,7 @@ def register(ops: Any) -> None:
     p.add_argument("--var", action="append", metavar="KEY=VALUE", help="新增或修改变量，可重复")
     p.add_argument("--unset", action="append", metavar="KEY", help="删除变量，可重复")
     p.add_argument("--tag", action="append", metavar="标签", help="替换全部标签，可重复")
+    register_more(ops)
 
 
 async def source_keys(c: AdminClient) -> dict[str, str]:
@@ -267,4 +269,150 @@ async def preset_set(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(data)
     else:
         print(f"已保存环境组 {args.group}：{'、'.join(sorted(data['vars'])) or '无变量'}")
+    return 0
+
+
+# ---- 新建技能、来源维护、环境变量导出与本地安装 ----
+
+
+def register_more(ops: Any) -> None:
+    p = leaf(ops, "create", "在目录中新建技能（默认停用）", create_skill)
+    p.add_argument("name", help="技能名称：字母数字下划线连字符")
+    p.add_argument("--source", required=True, help="来源标识")
+    p.add_argument("--description")
+    p.add_argument("--category")
+    p.add_argument("--security-level", choices=("public", "internal"), help="internal 安装需审批")
+    p.add_argument("--version", dest="skill_version")
+    p.add_argument("--repo", help="技能自己的 Git 仓库地址（覆盖来源仓库）")
+    p.add_argument("--install-type", choices=("git", "mcp"), help="安装方式，默认 git")
+    p.add_argument("--mcp-config-file", metavar="文件", help="MCP 服务配置（JSON）")
+    p.add_argument("--mcp-oauth", type=on_off, metavar="on|off", help="远程 MCP 由节点 OAuth 授权")
+    p.add_argument("--security-prompt-file", metavar="文件", help="内部技能的安全约束模板")
+    p.add_argument("--enable", action="store_true", help="新建后直接启用")
+    p = leaf(ops, "source-add", "新建技能来源", source_add)
+    p.add_argument("key", help="来源标识")
+    p.add_argument("--label", required=True, help="显示名称")
+    source_options(p)
+    p = leaf(ops, "source-set", "修改技能来源（只改给出的字段）", source_set)
+    p.add_argument("key", help="来源标识")
+    p.add_argument("--label")
+    source_options(p)
+    p.add_argument("--remove-token", action="store_true", help="移除访问令牌")
+    p = leaf(
+        ops, "env-exports", "导出技能环境组的明文 export 语句（平台管理员，记审计）", env_exports
+    )
+    p.add_argument("skill")
+    p.add_argument("--db", action="append", metavar="组", help="选用的可选数据库，可重复")
+    p.add_argument("--data-source", choices=("mysql", "doris"), help="数据源，默认按技能配置")
+    leaf(
+        ops, "local-install", "生成在本机安装技能的命令（30 分钟内有效）", local_install
+    ).add_argument("skill")
+
+
+def source_options(p: Any) -> None:
+    p.add_argument("--git-url", help="来源 Git 仓库地址")
+    p.add_argument("--username", help="访问仓库用的 Git 用户名")
+    p.add_argument("--token-file", metavar="文件", help="访问令牌；- 表示从标准输入读")
+    p.add_argument("--sort", type=int, help="排序")
+    p.add_argument(
+        "--category", action="append", metavar="KEY=名称", help="分类名称，可重复；替换全部分类"
+    )
+
+
+async def create_skill(c: AdminClient, args: argparse.Namespace) -> int:
+    source = next((s for s in await c.get(SOURCES) if s["key"] == args.source), None)
+    if source is None:
+        raise CliError(f"找不到技能来源：{args.source}")
+    body: dict[str, Any] = {
+        "name": args.name,
+        "source_id": source["id"],
+        "enabled": args.enable,
+        **changed(
+            args,
+            {
+                "description": "description",
+                "category": "category",
+                "security_level": "security_level",
+                "skill_version": "version",
+                "repo": "external_repo_url",
+                "install_type": "install_type",
+                "mcp_oauth": "mcp_oauth",
+            },
+        ),
+    }
+    if args.mcp_config_file is not None:
+        try:
+            body["mcp_config"] = json.loads(read_text(args.mcp_config_file))
+        except json.JSONDecodeError as exc:
+            raise CliError(f"MCP 配置不是合法 JSON：{exc}") from None
+    if args.security_prompt_file is not None:
+        body["security_prompt_template"] = read_text(args.security_prompt_file)
+    data = await c.request("POST", SKILLS, body=body)
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已新建技能 {data['name']}（{'启用' if data['enabled'] else '停用'}）")
+    return 0
+
+
+def source_changes(args: argparse.Namespace) -> dict[str, Any]:
+    updates = changed(
+        args,
+        {"label": "label", "git_url": "git_url", "username": "git_username", "sort": "sort_order"},
+    )
+    if args.category is not None:
+        updates["categories"] = pairs(args.category)
+    if args.token_file is not None:
+        updates["access_token"] = read_text(args.token_file).strip()
+    return updates
+
+
+async def source_add(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await c.request("POST", SOURCES, body={"key": args.key, **source_changes(args)})
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已新建技能来源 {data['key']}；用 skills source-sync {data['key']} 同步技能目录")
+    return 0
+
+
+async def source_set(c: AdminClient, args: argparse.Namespace) -> int:
+    updates = source_changes(args)
+    if args.remove_token:
+        updates["remove_access_token"] = True
+    if not updates:
+        raise CliError("没有要修改的字段，见 --help")
+    source = next((s for s in await c.get(SOURCES) if s["key"] == args.key), None)
+    if source is None:
+        raise CliError(f"找不到技能来源：{args.key}")
+    # PUT 是整份替换；访问令牌不回传，缺省时服务端保留原令牌。
+    fields = ("key", "label", "git_url", "git_username", "categories", "sort_order")
+    body = {key: source[key] for key in fields} | updates
+    data = await c.request("PUT", f"{SOURCES}/{source['id']}", body=body, version=source["version"])
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已更新技能来源 {args.key}：{'、'.join(updates)}")
+    return 0
+
+
+async def env_exports(c: AdminClient, args: argparse.Namespace) -> int:
+    skill = await c.skill(args.skill)
+    body = {"selected_env_groups": args.db or [], "data_source": args.data_source}
+    data = await c.request("POST", f"{SKILLS}/{skill['id']}/env-exports", body=body)
+    if args.json:
+        output.dump(data)
+    else:
+        print(data["text"])
+    return 0
+
+
+async def local_install(c: AdminClient, args: argparse.Namespace) -> int:
+    skill = await c.skill(args.skill)
+    data = await c.request("POST", f"{SKILLS}/{skill['id']}/local-install")
+    if args.json:
+        output.dump(data)
+    else:
+        print(data["command"])
+        print(f"# 有效期至 {data['expires_at']}，命令里的令牌只属于你本人，不要转发")
     return 0

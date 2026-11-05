@@ -187,9 +187,11 @@ otherwise tell the user and ask before touching it.
    branch with `gh pr create` (GitHub) or `glab mr create` (GitLab). Reply with its link.
 3. Never push to or rebase the default branch. Pull requests are merged by a person after
    review, not on your own initiative. The one exception: the person speaking in this turn
-   explicitly asks you to merge a pull request, and you do it with that person's own
-   credential (a personal credential they saved), never a shared one. If the forge refuses,
-   stop and report. Address review feedback with new commits on the same branch.
+   explicitly asks you to merge a pull request, and you do it as that person: with their own
+   credential (a personal credential they saved), or through a tool that checks that
+   person's own authorization (for example a release service called with their identity),
+   never a shared one. If the forge or the service refuses, stop and report. Address review
+   feedback with new commits on the same branch.
 4. Before continuing work after a pause, `git fetch origin` and merge the default branch
    into this branch if it moved.
 
