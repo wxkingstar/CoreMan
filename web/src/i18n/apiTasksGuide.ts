@@ -106,7 +106,7 @@ export const apiTasksGuideEn: typeof apiTasksGuideZh = {
   rules: {
     title: 'How people and programs share a chat',
     r1Title: 'People first', r1: 'The API turn waits behind turns already in the chat and never interrupts anyone; if the owner writes in Feishu while it runs, their message replaces it. Others mentioning the employee in a group queue behind it as usual.',
-    r2Title: 'No more than the owner can do', r2: 'Business system access, personal credentials and the allow list are the token owner\'s, exactly as when they ask in Feishu; Feishu personal tools (the owner's own docs, messages and so on) are only offered on messages the owner sends in Feishu, not on API turns. The employee asks for confirmation in Feishu before anything with consequences.',
+    r2Title: 'No more than the owner can do', r2: 'Business system access, personal credentials and the allow list are the token owner\'s, exactly as when they ask in Feishu; Feishu personal tools (the owner\'s own docs, messages and so on) are only offered on messages the owner sends in Feishu, not on API turns. The employee asks for confirmation in Feishu before anything with consequences.',
     r3Title: 'Checked again before running', r3: 'If the token is revoked, the switch turned off, the owner removed from the allow list or the group, or the alias unbound while queued, the turn does not run and the chat is told why.',
     r4Title: 'Everyone in the chat can see it', r4: 'The task (cut at 500 characters) and the reply appear in the chat; in a group, every member sees them.',
   },
