@@ -154,6 +154,12 @@ async def create(
     await session.execute(
         select(PersonalAccessToken.id).where(PersonalAccessToken.id == token.id).with_for_update()
     )
+    if request_id is not None:
+        # 同一个 request_id 的并发重试：先到的那个可能刚建完，拿到锁后再回放一次，
+        # 不能因为它占了名额就给重试回 429。
+        replay = await _replay(session, token, request_id, (bot.id, prompt, target, alias))
+        if replay is not None:
+            return replay, False
     open_count = await session.scalar(
         select(func.count())
         .select_from(ApiTask)

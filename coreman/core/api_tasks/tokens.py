@@ -65,6 +65,8 @@ async def mint(
             raise TokenError(422, "只能选择飞书 AI 员工")
         if not await allowed_to_use(session, bot, user.id):
             raise TokenError(403, f"你不在「{bot.name}」的可用名单里")
+    # 锁住本人的用户行再数：同一个人并发建令牌在这里排队，上限不会被挤破。
+    await session.execute(select(User.id).where(User.id == user.id).with_for_update())
     active = await session.scalar(
         select(func.count())
         .select_from(PersonalAccessToken)

@@ -47,7 +47,7 @@ export const apiTasksGuideZh = {
   rules: {
     title: '人和程序怎么共处',
     r1Title: '人优先', r1: 'API 这一轮排在会话里已有的轮次后面，不打断人；它在跑时本人在飞书里发新消息，会替代它。群里其他人找 AI 员工，按群聊规则排在后面。',
-    r2Title: '权限不超过本人', r2: '业务系统权限、个人凭证、白名单都按令牌所有人算，和他本人在飞书里找 AI 员工时一样。有后果的操作，AI 员工会先在飞书里请人确认。',
+    r2Title: '权限不超过本人', r2: '业务系统权限、个人凭证、白名单都按令牌所有人算，和他本人在飞书里找 AI 员工时一样；飞书个人授权的工具（读写本人的飞书文档、消息等）只在飞书里本人发来的消息上提供，API 发起的轮次里没有。有后果的操作，AI 员工会先在飞书里请人确认。',
     r3Title: '开轮前再查一遍', r3: '排队期间令牌被吊销、开关被关、本人被移出白名单或群、别名被解绑，这一轮都不会执行，会在会话里说明原因。',
     r4Title: '会话里的人都看得到', r4: '任务内容（超过 500 字截断）和回复会出现在会话里；在群里承接时，群里所有人都能看到。',
   },
@@ -106,7 +106,7 @@ export const apiTasksGuideEn: typeof apiTasksGuideZh = {
   rules: {
     title: 'How people and programs share a chat',
     r1Title: 'People first', r1: 'The API turn waits behind turns already in the chat and never interrupts anyone; if the owner writes in Feishu while it runs, their message replaces it. Others mentioning the employee in a group queue behind it as usual.',
-    r2Title: 'No more than the owner can do', r2: 'Business system access, personal credentials and the allow list are the token owner\'s, exactly as when they ask in Feishu. The employee asks for confirmation in Feishu before anything with consequences.',
+    r2Title: 'No more than the owner can do', r2: 'Business system access, personal credentials and the allow list are the token owner\'s, exactly as when they ask in Feishu; Feishu personal tools (the owner's own docs, messages and so on) are only offered on messages the owner sends in Feishu, not on API turns. The employee asks for confirmation in Feishu before anything with consequences.',
     r3Title: 'Checked again before running', r3: 'If the token is revoked, the switch turned off, the owner removed from the allow list or the group, or the alias unbound while queued, the turn does not run and the chat is told why.',
     r4Title: 'Everyone in the chat can see it', r4: 'The task (cut at 500 characters) and the reply appear in the chat; in a group, every member sees them.',
   },
@@ -165,7 +165,7 @@ export const apiTasksGuideJa: typeof apiTasksGuideZh = {
   rules: {
     title: '人とプログラムの共存',
     r1Title: '人を優先', r1: 'API のターンはチャット内の既存ターンの後に並び、人を中断しません。実行中に本人が Feishu で発言すると置き換えられます。グループで他の人が AI 社員を指名した場合は通常どおり後ろに並びます。',
-    r2Title: '本人の権限を超えない', r2: '業務システムの権限、個人の認証情報、許可リストはトークン所有者のものが使われ、本人が Feishu で依頼したときと同じです。影響のある操作は、AI 社員が先に Feishu で確認を求めます。',
+    r2Title: '本人の権限を超えない', r2: '業務システムの権限、個人の認証情報、許可リストはトークン所有者のものが使われ、本人が Feishu で依頼したときと同じです。Feishu の個人ツール（本人のドキュメントやメッセージなど）は本人が Feishu で送ったメッセージでのみ提供され、API のターンでは使えません。影響のある操作は、AI 社員が先に Feishu で確認を求めます。',
     r3Title: '実行前にもう一度確認', r3: '待機中にトークンの失効、スイッチのオフ、許可リストやグループからの除外、エイリアスの解除があった場合、そのターンは実行されず、チャットで理由が伝えられます。',
     r4Title: 'チャットの全員に見える', r4: 'タスク内容（500 文字で切り詰め）と返信はチャットに表示され、グループでは全員が見られます。',
   },

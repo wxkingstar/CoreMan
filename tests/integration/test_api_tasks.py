@@ -59,6 +59,15 @@ async def _create(session, minted, owner, **kw):  # type: ignore[no-untyped-def]
     return row, created
 
 
+async def _trigger_sent(session, row):  # type: ignore[no-untyped-def]
+    """网关已经发出触发消息：worker 才会开轮。"""
+    item = await session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"api-task:{row.id}:trigger")
+    )
+    item.status = "sent"
+    await session.commit()
+
+
 async def _claim(session):  # type: ignore[no-untyped-def]
     await instances.register(
         session, instance_id="worker-test", service="worker", version="dev", capacity=8
@@ -95,6 +104,7 @@ async def test_p2p_round_trip_runs_in_private_chat_and_returns_reply(db_engine, 
     assert "**张三** 通过 API 发起（令牌：脚本）" in trigger.payload["markdown"]
     assert (await service.view(db_session, row))["status"] == "queued"
 
+    await _trigger_sent(db_session, row)
     task = await _claim(db_session)
     assert task.payload["api_task_id"] == str(row.id) and task.session_key == "p2p-zs"
     fake = await _run(db_engine, task)
@@ -172,6 +182,7 @@ async def test_revoked_before_run_is_refused_in_the_chat(db_engine, db_session):
     row, _ = await _create(db_session, minted, owner)
     minted.row.revoked_at = utcnow()
     await db_session.commit()
+    await _trigger_sent(db_session, row)
     task = await _claim(db_session)
     fake = await _run(db_engine, task)
     assert fake.requests == []
@@ -215,6 +226,7 @@ async def test_group_turn_rechecks_membership_and_never_replies_to_synthetic_ids
     conversation = {"target": "chat", "alias": "值班"}
     with patch.object(human_collaboration, "in_group", new=AsyncMock(return_value=True)):
         row, _ = await _create(db_session, minted, owner, conversation=conversation)
+    await _trigger_sent(db_session, row)
     task = await _claim(db_session)
     with patch.object(human_collaboration, "in_group", new=AsyncMock(return_value=False)):
         fake = await _run(db_engine, task)
@@ -250,3 +262,24 @@ async def test_group_alias_commands(db_engine, db_session):
     )
     await _run(db_engine, second)
     assert await db_session.scalar(select(BotConversationAlias)) is None
+
+
+async def test_reply_waits_until_the_trigger_is_sent(db_engine, db_session):
+    _, owner, minted = await _setup(db_session)
+    row, _ = await _create(db_session, minted, owner)
+    task = await _claim(db_session)
+    fake = await _run(db_engine, task)
+    # 触发消息还在发送队列里：不开轮，放回队列稍后再认领。
+    assert fake.requests == []
+    queued = await tasks.get(db_session, task.id)
+    await db_session.refresh(queued)
+    assert queued.status == "queued" and queued.run_after > utcnow()
+
+
+async def test_concurrent_retry_replays_instead_of_hitting_the_limit(db_session):
+    _, owner, minted = await _setup(db_session)
+    for i in range(service.MAX_OPEN_PER_TOKEN):
+        await _create(db_session, minted, owner, request_id=f"r-{i}")
+    # 已满时用同一个 request_id 重试：回放原任务，不回 429。
+    again, created = await _create(db_session, minted, owner, request_id="r-0")
+    assert not created and again.request_id == "r-0"
