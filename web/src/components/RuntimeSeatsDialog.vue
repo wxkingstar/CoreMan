@@ -6,7 +6,7 @@ import { runtimeSeats, type RuntimeNode, type SeatLogin, type SeatState } from '
 import ProviderBadge from '@/components/ProviderBadge.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { errorMessage } from '@/utils/errors'
-import { pctNum } from '@/utils/format'
+import { quotaWindows as observedQuotaWindows } from '@/utils/runtimeTelemetry'
 import { BACKENDS } from '@/utils/models'
 
 /** 一台运行时上各 AI 的席位（登录的账号）：添加、登录、切换当前席位、移除。只给平台管理员与 AI 委员会。 */
@@ -33,10 +33,7 @@ function quotaWindows(provider: string, seat: SeatState) {
   if (!backend || seat.login === 'required') return []
   const source = seat.active ? backend : backend.seat_quotas?.[seat.id]
   if (!source) return []
-  return [
-    { label: '5h', pct: source.rate_limit_5h_used_pct, resetsAt: source.rate_limit_5h_resets_at },
-    { label: '7d', pct: source.rate_limit_7d_used_pct, resetsAt: source.rate_limit_7d_resets_at },
-  ].filter(w => pctNum(w.pct) !== null)
+  return observedQuotaWindows(source, provider)
 }
 
 async function run(key: string, action: () => Promise<{ seats: SeatState[] }>, provider: string, done?: string) {
@@ -181,6 +178,8 @@ async function finishLogin() {
                 :label="w.label"
                 :pct="w.pct"
                 :resets-at="w.resetsAt"
+                :state="w.state"
+                :observed-at="w.observedAt"
               />
             </template>
           </el-table-column>

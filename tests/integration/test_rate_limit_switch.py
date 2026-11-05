@@ -190,6 +190,9 @@ async def test_quota_returned_with_the_reply_is_saved_before_the_warning(
     assert relay.rate_limit_7d_used_pct == Decimal("6")
     assert relay.rate_limit_5h_resets_at == datetime.fromtimestamp(1792394400, UTC)
     assert relay.rate_limit_probed_at and relay.rate_limit_probed_at > stale
+    assert relay.quota_observation["windows"]["five_hour"]["observed_at"] == (
+        "2026-10-19T02:27:37+00:00"
+    )
 
     # 格式不对的额度丢弃，不影响这一轮，也不改库。
     t2 = await chat_task(db_session, bot, "再来")

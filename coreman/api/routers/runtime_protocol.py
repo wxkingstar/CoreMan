@@ -137,6 +137,8 @@ class Capability(BaseModel):
     account: str = Field(default="", max_length=255)
     login: Literal["ready", "required", "unknown"] = "unknown"
     health: Literal["healthy", "down", "auth_fail", "timeout", "unknown"] = "unknown"
+    plan_type: str | None = Field(default=None, max_length=40, pattern=r"^[a-zA-Z0-9_.-]+$")
+    account_verified: StrictBool | None = None
     detail: str = Field(default="", max_length=255)
     models: list[str] = Field(default_factory=list, max_length=100)
 
@@ -577,6 +579,16 @@ async def heartbeat(
             "backends": backends,
             # 节点健康检查用的模型：驱动发现的列表第一个未必是账号能用的。
             "probe_models": {p: default_model(p, catalog) for p in BACKENDS},
+            "model_activity": {
+                r.model_provider: {
+                    "observed_at": r.model_health.get("observed_at"),
+                    "seat_id": r.model_health.get("seat_id"),
+                }
+                for r in await session.scalars(
+                    select(RelayServer).where(RelayServer.runtime_node_id == node.id)
+                )
+                if r.model_health and r.model_health.get("observed_at")
+            },
         },
     }
 

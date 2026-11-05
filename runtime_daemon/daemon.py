@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import shutil
 import signal
@@ -21,6 +22,7 @@ import socket
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -298,6 +300,8 @@ AUTH_FAILURE_MARKERS = (
     "oauth token",
     "failed to authenticate",
     "oauth session expired",
+    "session has expired",
+    "session_expired",
     # 凭据文件还在、auth status 仍报已登录，但账号已不可用（令牌吊销、组织或账号停用、账号被暂停）。
     "/login",
     "invalid api key",
@@ -360,6 +364,12 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
         if provider == "claude":
             data = json.loads(proc.stdout)
             result["login"] = "ready" if data.get("loggedIn") else "required"
+            plan = data.get("subscriptionType")
+            if isinstance(plan, str) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,40}", plan):
+                result["plan_type"] = plan
+            verified = data.get("accountVerified")
+            if isinstance(verified, bool):
+                result["account_verified"] = verified
         else:
             output = (proc.stdout + proc.stderr).lower()
             if proc.returncode == 0 and "logged in" in output:
@@ -433,8 +443,11 @@ class RuntimeAgent(Agent):
                 }
             if cli_status(provider, seats.env(provider, seat_id))["login"] != "ready":
                 raise OperationError("该席位未登录，请先登录")
-            seats.activate(provider, seat_id)
-            self.daemon.rotate_driver(provider)
+            with self.daemon.driver_lock:
+                seats.activate(provider, seat_id)
+                for key in ("plan_type", "account_verified"):
+                    self.daemon.capabilities[provider].pop(key, None)
+                self.daemon.rotate_driver(provider)
             with self.background_lock:
                 self.mcp_logins = None  # MCP 授权跟着 CLI 的当前席位走
             result = {"success": True, "message": "已切换"}
@@ -445,9 +458,10 @@ class RuntimeAgent(Agent):
         self.daemon.capabilities[provider]["seats"] = self.daemon.seat_states(provider)
         return {**result, "seats": self.daemon.capabilities[provider]["seats"]}
 
-    def claude_limits(self) -> dict | None:
+    def claude_limits(self, socket_path: Path | None = None) -> dict | None:
+        path = socket_path or self.daemon.socket_path(self.provider)
         with httpx.Client(
-            transport=httpx.HTTPTransport(uds=str(self.daemon.socket_path(self.provider))),
+            transport=httpx.HTTPTransport(uds=str(path)),
             base_url="http://runtime",
             timeout=10,
         ) as client:
@@ -462,17 +476,28 @@ class RuntimeAgent(Agent):
     def health_check(self) -> None:
         start = time.monotonic()
         status, detail = "unknown", ""
+        kind, verified, actual_model = "driver", False, None
+        driver_status = None
         model = self.probe_model or self.model
+        with self.daemon.driver_lock:
+            generation = self.daemon.driver_gen[self.provider]
+            seat_id = self.daemon.driver_seats.get(
+                (self.provider, generation), self.daemon.seats.active(self.provider)
+            )
+            socket_path = self.daemon.socket_path(self.provider, generation)
         try:
             with httpx.Client(
-                transport=httpx.HTTPTransport(uds=str(self.daemon.socket_path(self.provider))),
+                transport=httpx.HTTPTransport(uds=str(socket_path)),
                 base_url="http://runtime",
                 timeout=90,
             ) as client:
                 health = client.get("/health")
+                if health.status_code == 200:
+                    driver_status, status = "healthy", "healthy"
                 if health.status_code != 200:
                     status, detail = "down", f"驱动 /health 返回 HTTP {health.status_code}"
                 elif model:
+                    kind = "model"
                     # Probe stays under the selected project root and cannot execute tools.
                     directory = self.root / ".coreman-health"
                     directory.mkdir(exist_ok=True)
@@ -491,9 +516,41 @@ class RuntimeAgent(Agent):
                     if self.provider != "claude":
                         probe["model"] = model
                     response = client.post("/v1/chat/completions", json=probe)
-                    error = probe_error(response.status_code, response.json())
+                    body = response.json()
+                    error = probe_error(response.status_code, body)
                     if not error:
-                        status = "healthy"
+                        try:
+                            content = body["choices"][0]["message"]["content"]
+                            # Tolerate presentation punctuation/case, but never
+                            # a sentence, extra words, or Unicode lookalikes.
+                            normalized = (
+                                content.strip()
+                                if isinstance(content, str) and len(content) <= 128
+                                else ""
+                            )
+                            while normalized and unicodedata.category(normalized[0]).startswith(
+                                "P"
+                            ):
+                                normalized = normalized[1:].lstrip()
+                            while normalized and unicodedata.category(normalized[-1]).startswith(
+                                "P"
+                            ):
+                                normalized = normalized[:-1].rstrip()
+                            verified = (
+                                normalized.isascii() and normalized.strip().casefold() == "ok"
+                            )
+                        except (KeyError, IndexError, TypeError):
+                            verified = False
+                        status, detail = (
+                            ("healthy", "")
+                            if verified
+                            else (
+                                "unknown",
+                                "模型回复未通过探活校验",
+                            )
+                        )
+                        candidate = body.get("x_actual_model") if isinstance(body, dict) else None
+                        actual_model = candidate[:150] if isinstance(candidate, str) else None
                     elif response.status_code in {401, 403} or any(
                         x in error.lower() for x in AUTH_FAILURE_MARKERS
                     ):
@@ -510,7 +567,44 @@ class RuntimeAgent(Agent):
                 "status": status,
                 "detail": detail[:255] or None,
                 "latency_ms": int((time.monotonic() - start) * 1000),
+                "check_kind": kind,
+                "requested_model": (model or None) if self.provider != "claude" else None,
+                "model": actual_model,
+                "reply_verified": verified,
+                "seat_id": seat_id,
+                "driver_status": driver_status,
             },
+        )
+        if self.daemon.driver_gen[self.provider] == generation:
+            self.last_model_check = time.time()
+
+    def probe_rate_limits(self) -> None:
+        with self.daemon.driver_lock:
+            generation = self.daemon.driver_gen[self.provider]
+            seat_id = self.daemon.driver_seats.get(
+                (self.provider, generation), self.daemon.seats.active(self.provider)
+            )
+            socket_path = self.daemon.socket_path(self.provider, generation)
+
+        def read_limits() -> dict | None:
+            if self.provider == "codex":
+                return self.codex_limits(env=self.daemon.seats.env(self.provider, seat_id))
+            return self.claude_limits(socket_path)
+
+        cap = self.daemon.capabilities.get(self.provider) or {}
+        context = {
+            "seat_id": seat_id,
+            **{
+                key: cap[key]
+                for key in ("plan_type", "account_verified")
+                if cap.get(key) is not None
+            },
+        }
+        self._probe_rate_limits(
+            context,
+            read_limits,
+            generation=generation,
+            is_current=lambda: self.daemon.driver_gen[self.provider] == generation,
         )
 
 
@@ -596,6 +690,7 @@ class Daemon:
         self.drivers: dict[str, subprocess.Popen] = {}
         # 换席位时起新驱动接新对话；旧驱动等它手上的对话结束再停（见 rotate_driver）。
         self.driver_gen = {p: 0 for p in PROVIDERS}
+        self.driver_seats: dict[tuple[str, int], str] = {}
         self.retired: list[tuple[str, int, subprocess.Popen]] = []
         self.driver_lock = threading.RLock()
         self.seats = Seats(
@@ -831,6 +926,7 @@ class Daemon:
             self._start_driver(provider)
 
     def _start_driver(self, provider: str) -> None:
+        self.driver_seats[(provider, self.driver_gen[provider])] = self.seats.active(provider)
         existing = self.drivers.get(provider)
         if existing and existing.poll() is None:
             return
@@ -878,6 +974,8 @@ class Daemon:
             if process is not None and process.poll() is None:
                 self.retired.append((provider, self.driver_gen[provider], process))
             self.driver_gen[provider] += 1
+            if provider in self.agents:
+                self.agents[provider].last_model_check = 0
             self._start_driver(provider)
         self.socket_failures[provider] = 0
         self.reap_retired()
@@ -968,6 +1066,7 @@ class Daemon:
 
     async def discover(self) -> None:
         for provider in PROVIDERS:
+            metadata_seat = self.seats.active(provider)
             cap = await asyncio.to_thread(cli_status, provider)
             # 守护进程自己的能力，不看驱动：记忆在工作目录的 .coreman-memory/，两种后端共用。
             cap["memory_layout_v1"] = True
@@ -1016,6 +1115,9 @@ class Daemon:
                         agent.start_schedules()
                 if provider in self.agents:
                     self.agents[provider].model = (cap["models"] or [""])[0]
+            if self.seats.active(provider) != metadata_seat:
+                for key in ("plan_type", "account_verified"):
+                    cap.pop(key, None)
             self.capabilities[provider] = cap
             if cap["installed"]:
                 cap["seat_switch_v1"] = True
@@ -1163,6 +1265,21 @@ class Daemon:
                             status_code=response.status_code,
                             content_type=response.headers.get("content-type", "application/json"),
                         )
+                        if (
+                            command["path"] == "/v1/chat/completions"
+                            and data.get("stream")
+                            and response.status_code == 200
+                        ):
+                            seat = self.driver_seats.get(
+                                (provider, gen), self.seats.active(provider)
+                            )
+                            await frames.add(
+                                (
+                                    "data: "
+                                    + json.dumps({"x_runtime": {"seat_id": seat}, "choices": []})
+                                    + "\n\n"
+                                ).encode()
+                            )
                         async for part in response.aiter_bytes():
                             await frames.add(part)
             await frames.finish()
@@ -1261,6 +1378,28 @@ class Daemon:
             model = models.get(provider)
             agent.probe_model = model if isinstance(model, str) else ""
 
+    def apply_model_activity(self, activity: object) -> None:
+        if not isinstance(activity, dict):
+            return
+        from datetime import datetime
+
+        for provider, value in activity.items():
+            agent = self.agents.get(provider)
+            if (
+                agent is None
+                or not isinstance(value, dict)
+                or value.get("seat_id") != self.seats.active(provider)
+            ):
+                continue
+            try:
+                checked = datetime.fromisoformat(
+                    str(value.get("observed_at")).replace("Z", "+00:00")
+                ).timestamp()
+            except (ValueError, TypeError):
+                continue
+            if checked <= time.time() + 30:
+                agent.last_model_check = max(getattr(agent, "last_model_check", 0), checked)
+
     async def heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
             delay = HEARTBEAT_SECONDS
@@ -1269,6 +1408,7 @@ class Daemon:
                 self.apply_root_change(result.get("root_change"))
                 self.add_backends(result.get("backends"))
                 self.apply_probe_models(result.get("probe_models"))
+                self.apply_model_activity(result.get("model_activity"))
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in REJECTED_STATUSES:
                     delay = REJECTED_BACKOFF_MAX

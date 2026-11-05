@@ -59,6 +59,8 @@ async def relay_out(
     bot_counts: dict[uuid.UUID, int],
 ) -> dict[str, Any]:
     """对外视图。目录、团队名、bot 计数由调用方批量查好传进来，避免列表里逐行查库。"""
+    from coreman.core.relay.observations import telemetry_view
+
     eff = effective_models(relay, catalog)
     node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
     return {
@@ -98,6 +100,7 @@ async def relay_out(
         "version": relay.version,
         "created_at": relay.created_at,
         "updated_at": relay.updated_at,
+        **telemetry_view(relay),
     }
 
 

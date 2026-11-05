@@ -15,6 +15,7 @@ from coreman.core.relay.sse import (
     ImageDelta,
     RateLimitEvent,
     RelayErrorEvent,
+    RuntimeObservationEvent,
     SseEvent,
     TextDelta,
     ThinkingDelta,
@@ -160,6 +161,9 @@ class ConverseStage(ChatStageBase):
             await session.commit()
 
     def _apply(self, ctx: TaskContext, pre: Prepared, out: Outcome, event: SseEvent) -> None:
+        if isinstance(event, RuntimeObservationEvent):
+            out.runtime_seat_id = event.seat_id
+            return
         if not out.saw_event:
             # 单独记一个「见过帧」的标志：`counted` 不数 FinishEvent，用它判首帧会重复触发。
             out.saw_event = True
@@ -190,7 +194,7 @@ class ConverseStage(ChatStageBase):
             out.usage_events += 1
             out.usage = event
         elif isinstance(event, RateLimitEvent):
-            out.rate_limits = event.data
+            out.rate_limits = {**event.data, "seat_id": out.runtime_seat_id}
         elif isinstance(event, AskUserQuestionEvent):
             out.ask_user, out.questions = True, list(event.questions)
         elif isinstance(event, FinishEvent):

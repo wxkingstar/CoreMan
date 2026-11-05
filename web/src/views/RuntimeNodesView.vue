@@ -9,11 +9,12 @@ import type { TeamOut, RelayOut, Visibility } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import ProviderBadge from '@/components/ProviderBadge.vue'
 import RelayLiveStatus from '@/components/RelayLiveStatus.vue'
-import HealthTag from '@/components/HealthTag.vue'
 import QuotaBar from '@/components/QuotaBar.vue'
+import RuntimeTelemetry from '@/components/RuntimeTelemetry.vue'
+import { quotaWindows as observedQuotaWindows, modelHealth } from '@/utils/runtimeTelemetry'
 import CatalogPanel from '@/views/CatalogPanel.vue'
 import RuntimeSeatsDialog from '@/components/RuntimeSeatsDialog.vue'
-import { formatDateTime, pctNum } from '@/utils/format'
+import { formatDateTime } from '@/utils/format'
 import { BACKENDS } from '@/utils/models'
 const { t } = useI18n()
 const auth = useAuthStore()
@@ -183,7 +184,8 @@ function capabilityState(node: RuntimeNode, provider: string) {
 }
 /** 本地凭据还在（auth status 报已登录），但推理检查被拒：账号已被停用、令牌已吊销等。 */
 function authFailed(node: RuntimeNode, provider: string) {
-  return node.backends.find(b => b.model_provider === provider)?.health_status === 'auth_fail'
+  const backend = node.backends.find(b => b.model_provider === provider)
+  return modelHealth(backend?.model_health) === 'auth_fail' || backend?.health_status === 'auth_fail'
 }
 /** 版本号只留数字部分：列头已标明是哪个 CLI，「2.1.310 (Claude Code)」「codex-cli 0.164.0」不用再重复。 */
 function shortVersion(version?: string | null) {
@@ -194,10 +196,7 @@ function quotaWindows(node: RuntimeNode, provider: string) {
   const cap = node.capabilities[provider]
   const backend = node.backends.find(b => b.model_provider === provider)
   if (!backend || !cap?.installed || cap.login === 'required' || authFailed(node, provider)) return []
-  return [
-    { label: '5h', pct: backend.rate_limit_5h_used_pct, resetsAt: backend.rate_limit_5h_resets_at },
-    { label: '7d', pct: backend.rate_limit_7d_used_pct, resetsAt: backend.rate_limit_7d_resets_at },
-  ].filter(w => pctNum(w.pct) !== null)
+  return observedQuotaWindows(backend, provider)
 }
 // 与安装链接的校验一致：写成 URL 或带路径的条目永远匹配不到仓库主机。
 const GIT_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
@@ -346,8 +345,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     :key="backend.id"
                     class="backend-detail"
                   >
-                    <ProviderBadge :provider="backend.model_provider" /><HealthTag :status="backend.health_status" />
-                    <span>{{ t('runtimeNodes.quota') }}: 5h {{ backend.rate_limit_5h_used_pct == null ? '—' : `${backend.rate_limit_5h_used_pct}%` }} / 7d {{ backend.rate_limit_7d_used_pct == null ? '—' : `${backend.rate_limit_7d_used_pct}%` }}</span>
+                    <ProviderBadge :provider="backend.model_provider" /><RuntimeTelemetry :backend="backend" />
                     <span>{{ t('runtimeNodes.bots') }}: {{ backend.bot_count }}</span>
                     <RelayLiveStatus
                       v-if="canManage && row.online && row.is_active"
@@ -438,6 +436,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     :label="w.label"
                     :pct="w.pct"
                     :resets-at="w.resetsAt"
+                    :state="w.state"
+                    :observed-at="w.observedAt"
                   />
                 </template>
               </el-table-column>

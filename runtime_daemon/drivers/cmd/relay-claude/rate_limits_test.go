@@ -33,6 +33,7 @@ func TestRateLimitStoreReadsUnifiedWindows(t *testing.T) {
 func TestRateLimitStoreFallsBackAndKeepsOtherWindow(t *testing.T) {
 	s := &rateLimitStore{}
 	s.observe(json.RawMessage(`{"unifiedWindows":{"five_hour":{"utilization":0.1,"resetsAt":1},"seven_day":{"utilization":0.2,"resetsAt":2}}}`))
+	s.snap.SevenDay.ObservedAt = "2026-01-01T00:00:00Z"
 	// No unifiedWindows: the top-level figure updates only the named window.
 	s.observe(json.RawMessage(`{"rateLimitType":"five_hour","utilization":0.9,"resetsAt":3}`))
 	got := s.snapshot()
@@ -41,6 +42,9 @@ func TestRateLimitStoreFallsBackAndKeepsOtherWindow(t *testing.T) {
 	}
 	if got.SevenDay.UsedPercentage != 20 {
 		t.Fatalf("seven_day lost: %+v", got.SevenDay)
+	}
+	if got.SevenDay.ObservedAt != "2026-01-01T00:00:00Z" || got.FiveHour.ObservedAt == got.SevenDay.ObservedAt {
+		t.Fatal("updating one window must not refresh the other window's timestamp")
 	}
 	// Events without figures (or for other buckets) change nothing.
 	before := got.ObservedAt
@@ -89,7 +93,7 @@ func TestUsageChunkCarriesThisRequestsRateLimits(t *testing.T) {
 	tr.feed(rec, rec, `{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":7}}}}`, true)
 	tr.feed(rec, rec, result, true)
 	body := rec.Body.String()
-	if !strings.Contains(body, `"x_rate_limits":{"five_hour":{"used_percentage":25,"resets_at":7}`) {
+	if !strings.Contains(body, `"x_rate_limits":{"five_hour":{"used_percentage":25,"resets_at":7,"observed_at":`) {
 		t.Fatalf("usage chunk lacks x_rate_limits; SSE output:\n%s", body)
 	}
 

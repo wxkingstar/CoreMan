@@ -45,6 +45,10 @@ export type Pct = number | string | null
 
 /** 运行时列表项：旧的手工部署字段（主机、端口、SSH/chroot、agent 令牌）后端已不再下发。 */
 export interface RelayOut {
+  driver_health?: RuntimeHealthObservation | null
+  model_health?: RuntimeHealthObservation | null
+  last_model_failure?: RuntimeHealthObservation | null
+  quota_observation?: QuotaObservation | null
   unavailable_reason?: 'disabled' | 'root_pending' | 'not_installed' | 'login_required' | 'unknown' | null
   runtime_node_id?: string | null; runtime_name?: string | null; workspace_root?: string | null
   /** 节点心跳是否新鲜（与运行时页的「在线」同源）。 */
@@ -58,11 +62,25 @@ export interface RelayOut {
   rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null
   rate_limit_probed_at: string | null
   /** 没在用的席位上次采集到的额度，按席位 id；当前席位的额度在上面几列。 */
-  seat_quotas?: Record<string, { rate_limit_5h_used_pct: Pct; rate_limit_5h_resets_at: string | null; rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null }>
+  seat_quotas?: Record<string, { rate_limit_5h_used_pct: Pct; rate_limit_5h_resets_at: string | null; rate_limit_7d_used_pct: Pct; rate_limit_7d_resets_at: string | null; quota_observation?: QuotaObservation | null }>
   health_status: HealthStatus; health_checked_at: string | null; health_detail: string | null
   health_latency_ms: number | null; health_fail_count: number
   relay_version: string | null; relay_mode: string | null
   bot_count: number; version: number; created_at: string; updated_at: string
+}
+
+export interface RuntimeHealthObservation {
+  status: HealthStatus; observed_at: string | null; check_kind: string
+  reply_verified?: boolean; requested_model?: string | null; model?: string | null
+  detail?: string | null; error_code?: string | null; seat_id?: string | null
+}
+export interface QuotaObservation {
+  plan_type?: string | null; account_verified?: boolean | null
+  read_status?: string; error_code?: string | null; last_attempt_at?: string | null
+  windows?: Partial<Record<'five_hour' | 'seven_day', {
+    used_percentage?: number | null; resets_at?: string | null; observed_at?: string | null
+    applicability?: string; status?: string
+  }>>
 }
 
 export interface RelayModels { provider: string; mode: ModelsMode; models: string[]; default: string | null }
