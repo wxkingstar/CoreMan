@@ -73,7 +73,7 @@ PRODUCTS: dict[str, Product] = {
     ),
     "slb": Product(
         key="slb",
-        endpoint="slb.aliyuncs.com",
+        endpoint="slb.us-east-1.aliyuncs.com",
         version="2014-05-15",
         read_actions=frozenset({"DescribeAccessControlListAttribute"}),
         write_actions=frozenset({"AddAccessControlListEntry"}),
