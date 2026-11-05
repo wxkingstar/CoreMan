@@ -13,6 +13,8 @@
 | notify | POST `/api/infra/notify/user` | — |
 | systems | POST `/api/infra/systems/test-access` | — |
 
+`/api/infra/tasks`（给 AI 员工下任务、查结果）不用签名，而用成员的个人 API 令牌（`Authorization: Bearer`），任务以令牌所有人的身份在飞书会话里运行，见 [通过 API 驱动 AI 员工](features/api-tasks.md)。
+
 头：`X-App-Key`、`X-Timestamp`（秒，±600 秒）、`X-Signature`。算法是 SHA256(`METHOD + path + params + timestamp + app_key + app_secret`)；path 去掉前导 `/`，query 与 body 合并排序，PHP urlencode 编码标量键值，标量数组展开 `key[0]=value`，嵌套结构跳过。签名兼容旧规则，业务字段仍单独验证。密钥轮换即时使旧签名失效。
 
 推送正文 `{bot_key, chat_id, content, request_id?}`，当前只接受 markdown。通知正文 `{user_login | platform_user_id, content, msgtype?, platform_app_id?, request_id?}`，旧入口可用 `wework_user_id`；只允许单个已绑定的启用用户，不能传 `@all` 或 `|` 广播。当前通知平台为企微，正文上限 2048 UTF-8 字节；机器人推送上限 20480 字节。多个通知应用时必须指定一个应用 ID。

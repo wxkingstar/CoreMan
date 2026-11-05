@@ -101,6 +101,8 @@ class Bot(TimestampMixin, Base):
     group_role: Mapped[str] = mapped_column(Text, server_default=text("'member'"))
     # 同群的其他飞书 AI 员工能不能 @ 它求助；求助时它以触发人的身份执行。
     accept_bot_help: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # 允许成员用个人令牌通过 API 给它下任务；任务在本人私聊或绑定了别名的群里承接。
+    api_access: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # 已不再读写，下个版本删除：不通过 API 配置或展示，列暂留只为兼容现有数据库。
     custom_command_modules: Mapped[list[str]] = mapped_column(
         ARRAY(Text()), server_default=text("'{}'::text[]")

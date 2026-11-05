@@ -1,6 +1,7 @@
 import { workspaceFilesZh, workspaceFilesEn } from './workspaceFiles'
 import { createI18n } from 'vue-i18n'
 import { collaborationZh, collaborationEn, collaborationJa } from './collaboration'
+import { apiAccessZh, apiAccessEn, apiAccessJa } from './apiAccess'
 import ja from './ja'
 import en from './en'
 import skillEditorEn from './skillEditorEn'
@@ -19,7 +20,7 @@ function saved(): Locale {
   }
 }
 
-export const i18n = createI18n({ legacy: false, locale: saved(), fallbackLocale: 'zh', messages: { zh: { ...zh, workspaceFiles: workspaceFilesZh, collaboration: collaborationZh, skillEditor: skillEditorZh }, ja: { ...ja, workspaceFiles: workspaceFilesEn, collaboration: collaborationJa, skillEditor: skillEditorJa }, en: { ...en, workspaceFiles: workspaceFilesEn, collaboration: collaborationEn, skillEditor: skillEditorEn } } })
+export const i18n = createI18n({ legacy: false, locale: saved(), fallbackLocale: 'zh', messages: { zh: { ...zh, workspaceFiles: workspaceFilesZh, collaboration: collaborationZh, apiAccess: apiAccessZh, skillEditor: skillEditorZh }, ja: { ...ja, workspaceFiles: workspaceFilesEn, collaboration: collaborationJa, apiAccess: apiAccessJa, skillEditor: skillEditorJa }, en: { ...en, workspaceFiles: workspaceFilesEn, collaboration: collaborationEn, apiAccess: apiAccessEn, skillEditor: skillEditorEn } } })
 
 export function getLocale(): Locale {
   return i18n.global.locale.value as Locale

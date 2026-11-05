@@ -61,6 +61,10 @@ class IntakeStage(ChatStageBase):
             from coreman.runtime.worker.chat import work
 
             return await work.resolve(session, ctx)
+        if ctx.task.payload.get("api_task_id"):
+            from coreman.runtime.worker.chat import api
+
+            return await api.resolve(session, ctx)
         return await self._intake(session, ctx)
 
     def _needs_content(self) -> bool:
@@ -258,6 +262,16 @@ class IntakeStage(ChatStageBase):
 
     async def _command(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
         """内置命令就地处理，不二次入队、不落 chat_logs（命令不是一轮对话）。"""
+        from coreman.runtime.worker.chat import api
+
+        reply = await api.alias_command(session, intake)
+        if reply is not None:
+            ctx.log.info("builtin_command", command="api_alias")
+            await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=reply)
+            await tasks.finish(
+                session, ctx.task.id, status="succeeded", result={"command": "api_alias"}
+            )
+            return True
         command = classify_command(intake.text)
         if command is None:
             return False

@@ -1,4 +1,4 @@
-"""定时任务、公告、我的提醒与「我的」个人设置（个人凭证、飞书个人授权、企业微信绑定）。"""
+"""定时任务、公告、我的提醒与「我的」个人设置（个人凭证、飞书个人授权、企业微信绑定、API 令牌）。"""
 
 from __future__ import annotations
 
@@ -717,7 +717,9 @@ async def delete_reminder(c: AdminClient, args: argparse.Namespace) -> int:
 
 
 def register_me(sub: Any) -> None:
-    ops = group(sub, "me", "我的个人设置：个人凭证、飞书个人授权、企业微信绑定（只能管自己的）")
+    ops = group(
+        sub, "me", "我的个人设置：个人凭证、飞书个人授权、企业微信绑定、API 令牌（只能管自己的）"
+    )
     leaf(ops, "credentials", "列出我交给 AI 员工的个人凭证（保密项不显示值）", credentials)
     p = leaf(ops, "credential-set", "更新一项个人凭证的值", credential_set)
     p.add_argument("bot", help="AI 员工名称或 id")
@@ -760,6 +762,17 @@ def register_me(sub: Any) -> None:
     p.add_argument("--no-wait", action="store_true", help="只打印链接，不等待")
     leaf(ops, "wecom-scan-cancel", "取消进行中的扫码绑定", wecom_scan_cancel)
     p = leaf(ops, "wecom-unbind", "解除企业微信绑定（删除托管的凭证）", wecom_unbind)
+    add_yes(p)
+
+    leaf(ops, "api-tokens", "列出我的 API 令牌（不显示明文）", api_tokens)
+    p = leaf(ops, "api-token-create", "新建 API 令牌：明文只打印这一次", api_token_create)
+    p.add_argument("name", help="名称，给自己认是哪一枚")
+    p.add_argument(
+        "--bot", action="append", required=True, metavar="AI 员工", help="可驱动的 AI 员工，可重复"
+    )
+    p.add_argument("--days", type=int, default=90, metavar="天", help="有效期，1–365，默认 90")
+    p = leaf(ops, "api-token-revoke", "吊销一枚 API 令牌（立即失效）", api_token_revoke)
+    p.add_argument("token", help="名称、前缀或 id")
     add_yes(p)
 
 
@@ -988,4 +1001,65 @@ async def wecom_unbind(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(data)
     else:
         print("已解除企业微信绑定；企业微信里的授权机器人请自行删除")
+    return 0
+
+
+# ---- 我的 API 令牌 ----
+
+API_TOKEN_STATUS = {"active": "有效", "expired": "已过期", "revoked": "已吊销"}
+
+
+async def api_tokens(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{ME}/api-tokens")
+    if args.json:
+        output.dump(rows)
+    else:
+        output.table(
+            rows,
+            [
+                ("名称", "name"),
+                ("前缀", "prefix"),
+                ("AI 员工", lambda r: "、".join(b["name"] for b in r["bots"])),
+                ("状态", lambda r: API_TOKEN_STATUS.get(r["status"], r["status"])),
+                ("到期", "expires_at"),
+                ("最近使用", "last_used_at"),
+            ],
+            empty="（还没有 API 令牌）",
+        )
+    return 0
+
+
+async def api_token_create(c: AdminClient, args: argparse.Namespace) -> int:
+    bot_ids = [(await c.bot(ref))["id"] for ref in args.bot]
+    data = await c.request(
+        "POST",
+        f"{ME}/api-tokens",
+        body={"name": args.name, "bot_ids": bot_ids, "days": args.days},
+    )
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已新建令牌「{data['name']}」，到期 {data['expires_at']}。明文只显示这一次：")
+        print(data["token"])
+    return 0
+
+
+def _token_matches(row: dict[str, Any], ref: str) -> bool:
+    return ref in (row["id"], row["name"]) or (len(ref) >= 8 and row["prefix"].startswith(ref))
+
+
+async def api_token_revoke(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{ME}/api-tokens")
+    row = one(
+        [r for r in rows if _token_matches(r, args.token)],
+        args.token,
+        "API 令牌",
+        lambda r: f"{r['name']}（{r['prefix']}…）",
+    )
+    require_yes(args, f"吊销令牌 {row['name']}")
+    data = await c.request("DELETE", f"{ME}/api-tokens/{row['id']}")
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已吊销令牌 {row['name']}")
     return 0

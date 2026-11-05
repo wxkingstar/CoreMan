@@ -170,6 +170,14 @@ coreman bots bot-help demo-bot
 coreman bots bot-help-set demo-bot off                 # 关闭会取消进行中的求助
 ```
 
+API 驱动（目前只支持飞书员工；群别名在群里用 `/api 绑定 <别名>` 绑定）：
+
+```bash
+coreman bots api-access demo-bot
+coreman bots api-access-set demo-bot on
+coreman bots api-alias-remove demo-bot 值班群 --yes
+```
+
 群聊旁听：
 
 ```bash
@@ -460,6 +468,14 @@ coreman me wecom-unbind --yes --as alice
 ```
 
 飞书个人授权要在飞书私聊里给 AI 员工发「连接飞书」，再由本人点击授权卡片完成，命令行只能查看和撤销。
+
+API 令牌（外部程序以本人身份给 AI 员工下任务，见 [通过 API 驱动 AI 员工](features/api-tasks.md)）。明文只在新建时打印一次：
+
+```bash
+coreman me api-tokens --as alice
+coreman me api-token-create 工单系统 --bot demo-bot --bot 销售 --days 90 --as alice
+coreman me api-token-revoke 工单系统 --yes --as alice       # 名称、前缀（至少 8 位）或 id
+```
 
 ## 平台设置
 

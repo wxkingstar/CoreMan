@@ -127,6 +127,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(wecom_app_callback.router)
     app.include_router(infra_notify.router)
     app.include_router(infra_push.router)
+    from coreman.api.routers import api_tasks, bot_api_access
+
+    app.include_router(api_tasks.router)
+    app.include_router(bot_api_access.router)
     app.include_router(infra_system_test.router)
     app.include_router(systems_catalog.router)
     app.include_router(cloud_proxy.router)
