@@ -152,7 +152,7 @@ def test_quota_cache_alone_does_not_suppress_model_check(agent, monkeypatch):
     # 刚上报过的是上次检查自己的数据，不算对话刷新。
     calls.clear()
     driver["value"]["observed_at"] = stamp(60)
-    agent.claude_observed_at = stamp(60)
+    agent._claude_quota_cursor = (None, stamp(60))
     agent.check_claude()
     assert calls == ["health", "probe"]
 

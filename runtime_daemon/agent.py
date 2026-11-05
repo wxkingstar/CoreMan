@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -208,7 +209,7 @@ class Agent:
         self.background: set[str] = set()
         self.background_lock = threading.Lock()
         self.mcp_logins = None
-        self.claude_observed_at = None
+        self._claude_quota_cursor: tuple[int | None, str | None] | None = None
         self.http = requests.Session()
         self.http.trust_env = False
 
@@ -940,95 +941,74 @@ class Agent:
         """返回驱动记下的最新 Claude 额度；由运行时守护进程经本机 socket 实现。"""
         raise OperationError("当前环境不支持 Claude 额度采集")
 
-    def quota_context(self) -> dict:
-        return {}
-
     def probe_rate_limits(self) -> None:
-        context = self.quota_context()
-        try:
-            if self.provider == "codex":
-                limits = self.codex_limits()
-            elif self.provider == "opencode":
-                self.report(
-                    "relay/rate-limits",
-                    {
-                        "rate_limits": {
-                            **context,
-                            "source": "probe",
-                            "read_status": "unsupported",
-                            "error_code": "provider_quota_not_integrated",
-                        }
-                    },
-                )
-                return
-            else:
-                data = self.claude_limits()
-                if not data:
-                    self.report(
-                        "relay/rate-limits",
-                        {
-                            "rate_limits": {
-                                **context,
-                                "source": "driver_cache",
-                                "read_status": "no_data",
-                            }
-                        },
-                    )
-                    return
-                if data.get("observed_at") == self.claude_observed_at:
-                    return
-                limits = {
-                    k: data[k]
-                    for k in (
-                        "five_hour",
-                        "seven_day",
-                        "observed_at",
-                        "plan_type",
-                        "account_verified",
-                        "window_applicability",
-                    )
-                    if data.get(k) is not None
-                }
-        except OperationError:
-            self.report(
-                "relay/rate-limits",
+        read_limits = self.codex_limits if self.provider == "codex" else self.claude_limits
+        self._probe_rate_limits({}, read_limits)
+
+    def _probe_rate_limits(
+        self,
+        context: dict,
+        read_limits: Callable[[], dict | None],
+        *,
+        generation: int | None = None,
+        is_current: Callable[[], bool] | None = None,
+    ) -> None:
+        def publish(limits: dict) -> bool:
+            if is_current is not None and not is_current():
+                return False
+            self.report("relay/rate-limits", {"rate_limits": {**context, **limits}})
+            return True
+
+        if self.provider == "opencode":
+            publish(
                 {
-                    "rate_limits": {
-                        **context,
-                        "source": "probe",
-                        "read_status": "error",
-                        "error_code": "quota_read_failed",
-                    }
-                },
+                    "source": "probe",
+                    "read_status": "unsupported",
+                    "error_code": "provider_quota_not_integrated",
+                }
             )
+            return
+        try:
+            limits = read_limits()
+        except OperationError:
+            publish({"source": "probe", "read_status": "error", "error_code": "quota_read_failed"})
             raise
+        if self.provider == "claude" and not limits:
+            publish({"source": "driver_cache", "read_status": "no_data"})
+            return
         if not isinstance(limits, dict):
             raise OperationError("额度数据格式不正确")
-        self.report(
-            "relay/rate-limits",
-            {
-                "rate_limits": {
-                    **context,
-                    **limits,
-                    "source": "probe" if self.provider == "codex" else "driver_cache",
-                }
-            },
+        if self.provider == "codex":
+            publish({**limits, "source": "probe"})
+            return
+        cursor = (generation, limits.get("observed_at"))
+        if cursor == self._claude_quota_cursor:
+            return
+        fields = (
+            "five_hour",
+            "seven_day",
+            "observed_at",
+            "plan_type",
+            "account_verified",
+            "window_applicability",
         )
-        if self.provider != "codex":
-            self.claude_observed_at = data.get("observed_at")
+        data = {k: limits[k] for k in fields if limits.get(k) is not None}
+        if publish({**data, "source": "driver_cache"}):
+            self._claude_quota_cursor = cursor
 
     def check_claude(self) -> None:
         """空闲兜底检查顺带读取额度；调度器用真实会话观测时间决定是否跳过。"""
         self.health_check()
         self.probe_rate_limits()
 
-    def codex_limits(self) -> dict:
+    def codex_limits(self, env: dict[str, str] | None = None) -> dict:
         proc = subprocess.Popen(
             ["codex", "app-server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
         result = None
         try:

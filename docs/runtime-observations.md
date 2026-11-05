@@ -33,7 +33,7 @@ No independent quota helper, host polling daemon, local automation, process term
 
 ## Quota evidence
 
-Each window retains its own `observed_at`. Refreshing weekly usage does not refresh five-hour usage. Empty/failed reads record attempt/result without refreshing previous percentages. Genuine zero usage remains observable. Old consumers' shared quota timestamp conservatively follows the oldest retained numeric window.
+Each window retains its own `observed_at`. Refreshing weekly usage does not refresh five-hour usage. Empty/failed reads record attempt/result without refreshing previous percentages. Genuine zero usage remains observable. Out-of-order checks compare timestamps supplied by the node. The legacy quota warning uses server receipt time for values returned by a live conversation, while the observation retains the node timestamp. The shared legacy timestamp follows the oldest retained numeric window under that policy.
 
 `not_applicable` requires an explicit upstream `window_applicability` value. Provider name, price, plan aliases (`pro`, `pro_100`, `pro_200`, `pro_500`, `ultra`, `max_20x`), verification flags, missing percentages, authentication failure and account hold do not establish window policy. A returned window takes precedence over an explicit not-applicable marker. Missing windows stay unknown or historical with their original timestamps; weekly availability is not invented.
 

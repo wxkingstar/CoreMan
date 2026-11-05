@@ -53,6 +53,11 @@ def parse_quota(value: Any) -> Quota | None:
         return None
 
 
+def _older_node_observation(at: datetime | None, previous: dict[str, Any]) -> bool:
+    prior = previous.get("node_observed_at")
+    return at is not None and prior is not None and at < datetime.fromisoformat(prior)
+
+
 async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -> None:
     """A failed/empty read never repaints old quota as fresh. Each window owns its time."""
     relay = await session.scalar(
@@ -67,12 +72,13 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
     if at > now + timedelta(seconds=30):
         return
     previous = dict(relay.quota_observation or {})
-    previous_attempt = previous.get("observed_at")
-    if previous_attempt and datetime.fromisoformat(previous_attempt) > at:
+    # Receipt timestamps, including legacy columns, cannot order node observations.
+    if _older_node_observation(quota.observed_at, previous):
         return
     metadata = {
         **previous,
         "observed_at": at.isoformat(),
+        "node_observed_at": quota.observed_at.isoformat() if quota.observed_at else None,
         "last_attempt_at": now.isoformat(),
         "source": quota.source,
         "read_status": quota.read_status,
@@ -104,17 +110,29 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
     for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = getattr(quota, name)
         used = window.used_percentage if window else None
+        node_observed = (window.observed_at if window else None) or quota.observed_at
+        prior = windows.get(name) or {}
+        if (used is not None or applicability.get(name) == "not_applicable") and (
+            _older_node_observation(node_observed, prior)
+            or (node_observed is not None and node_observed > now + timedelta(seconds=30))
+        ):
+            continue
         if used is not None:
-            observed = window.observed_at or at
-            if observed > now + timedelta(seconds=30):
-                continue
-            prior = windows.get(name) or {}
-            if prior.get("observed_at") and datetime.fromisoformat(prior["observed_at"]) > observed:
-                continue
+            observed = node_observed or now
+            node_stamp = node_observed.isoformat() if node_observed else None
+            legacy_stamp = observed.isoformat()
+            if node_stamp is not None and node_stamp == prior.get("node_observed_at"):
+                legacy_stamp = prior.get("legacy_observed_at") or legacy_stamp
+            elif quota.source == "conversation" and (
+                quota.observed_at is None or node_observed == quota.observed_at
+            ):
+                legacy_stamp = now.isoformat()
             windows[name] = {
                 "used_percentage": used,
                 "resets_at": window.resets_at.isoformat() if window.resets_at else None,
                 "observed_at": observed.isoformat(),
+                "node_observed_at": node_stamp,
+                "legacy_observed_at": legacy_stamp,
                 "applicability": "applicable",
                 "status": "observed",
             }
@@ -125,7 +143,8 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
             windows[name] = {
                 "used_percentage": None,
                 "resets_at": None,
-                "observed_at": at.isoformat(),
+                "observed_at": (node_observed or now).isoformat(),
+                "node_observed_at": node_observed.isoformat() if node_observed else None,
                 "applicability": "not_applicable",
                 "status": "not_applicable",
             }
@@ -135,7 +154,7 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
             # Retain historical figures with their original time. Legacy
             # numeric columns are cleared on a partial successful report so
             # their shared timestamp cannot make a missing window look fresh.
-            prior = dict(windows.get(name) or {})
+            prior = dict(prior)
             prior.update(
                 status="not_provided",
                 applicability=applicability.get(name, prior.get("applicability", "unknown")),
@@ -146,14 +165,13 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
                 values[f"rate_limit_{label}_resets_at"] = None
     if successful_times:
         latest = max(successful_times)
-        previous_success = previous.get("last_success_at")
-        metadata["last_success_at"] = max(
-            latest, datetime.fromisoformat(previous_success) if previous_success else latest
-        ).isoformat()
+        metadata["last_success_at"] = latest.isoformat()
         # Old consumers have only one timestamp. Use the oldest retained
         # numeric window, so a new weekly read cannot repaint an old 5h value.
         legacy_times = [
-            datetime.fromisoformat(windows[name]["observed_at"])
+            datetime.fromisoformat(
+                windows[name].get("legacy_observed_at") or windows[name]["observed_at"]
+            )
             for name, label in (("five_hour", "5h"), ("seven_day", "7d"))
             if values.get(
                 f"rate_limit_{label}_used_pct", getattr(relay, f"rate_limit_{label}_used_pct")

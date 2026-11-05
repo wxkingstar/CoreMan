@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
@@ -437,6 +438,65 @@ def test_claude_limits_come_from_driver_stats(daemon, monkeypatch, body, expecte
     agent = RuntimeAgent(daemon, "claude", "test-relay")
     assert agent.claude_limits() == (body["rate_limits"] if expected else None)
     assert paths == ["/v1/stats"]
+
+
+@pytest.mark.parametrize("blocked_at", ["driver", "report"])
+def test_quota_io_leaves_driver_lock_free(daemon, monkeypatch, blocked_at):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    agent = RuntimeAgent(daemon, "claude", "test-relay")
+    entered, release = threading.Event(), threading.Event()
+    reports = []
+
+    def block(stage):
+        if blocked_at == stage:
+            entered.set()
+            assert release.wait(5)
+
+    def read(path):
+        assert path == daemon.socket_path("claude", 0)
+        block("driver")
+        return {"observed_at": "t1", "seven_day": {"used_percentage": 6}}
+
+    def report(endpoint, body):
+        block("report")
+        reports.append(body["rate_limits"])
+
+    monkeypatch.setattr(agent, "claude_limits", read)
+    monkeypatch.setattr(agent, "report", report)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        probe = executor.submit(agent.probe_rate_limits)
+        try:
+            assert entered.wait(5)
+            acquired = daemon.driver_lock.acquire(timeout=0.5)
+            assert acquired
+            daemon.driver_lock.release()
+        finally:
+            release.set()
+        probe.result(timeout=5)
+    assert reports[0]["seat_id"] == "default"
+
+
+def test_quota_read_from_retired_generation_is_not_reported(daemon, monkeypatch):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    agent = RuntimeAgent(daemon, "claude", "test-relay")
+    reports = []
+
+    def read(path):
+        assert path == daemon.socket_path("claude", 0)
+        with daemon.driver_lock:
+            daemon.driver_gen["claude"] += 1
+        return {"observed_at": "t1", "seven_day": {"used_percentage": 6}}
+
+    monkeypatch.setattr(agent, "claude_limits", read)
+    monkeypatch.setattr(agent, "report", lambda *args: reports.append(args))
+    agent.probe_rate_limits()
+    assert reports == []
 
 
 @pytest.mark.parametrize("key", ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"])

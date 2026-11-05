@@ -137,6 +137,50 @@ async def test_only_explicit_upstream_policy_marks_window_not_applicable(db_sess
     assert relay.rate_limit_5h_used_pct is None
 
 
+async def test_server_receipt_time_does_not_order_dated_node_windows(db_session):
+    relay = await add_node_relay(db_session)
+    node_at = datetime.now(UTC) - timedelta(minutes=5)
+    await save_quota(db_session, relay.id, Quota(seven_day=QuotaWindow(used_percentage=90)))
+    await save_quota(
+        db_session,
+        relay.id,
+        Quota(observed_at=node_at, seven_day=QuotaWindow(used_percentage=15)),
+    )
+    # A late, older upstream window cannot replace the accepted node reading.
+    await save_quota(
+        db_session,
+        relay.id,
+        Quota(
+            seven_day=QuotaWindow(used_percentage=90, observed_at=node_at - timedelta(seconds=1))
+        ),
+    )
+    await db_session.refresh(relay)
+    assert relay.rate_limit_7d_used_pct == 15
+    assert relay.quota_observation["windows"]["seven_day"]["observed_at"] == node_at.isoformat()
+
+
+async def test_reply_does_not_freshen_a_cached_window_carried_with_a_new_window(db_session):
+    relay = await add_node_relay(db_session)
+    now = datetime.now(UTC)
+    older = now - timedelta(hours=2)
+    cached = QuotaWindow(used_percentage=24, observed_at=older)
+    await save_quota(db_session, relay.id, Quota(five_hour=cached, observed_at=older))
+    await save_quota(
+        db_session,
+        relay.id,
+        Quota(
+            five_hour=cached,
+            seven_day=QuotaWindow(used_percentage=16),
+            observed_at=now,
+            source="conversation",
+        ),
+    )
+    await db_session.refresh(relay)
+    assert relay.rate_limit_probed_at == older
+    assert relay.quota_observation["windows"]["five_hour"]["observed_at"] == older.isoformat()
+    assert relay.quota_observation["windows"]["seven_day"]["observed_at"] == now.isoformat()
+
+
 async def test_empty_and_failed_quota_reads_never_refresh_old_values(db_session):
     relay = await add_node_relay(db_session)
     older = datetime.now(UTC) - timedelta(hours=1)

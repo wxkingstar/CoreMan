@@ -458,9 +458,10 @@ class RuntimeAgent(Agent):
         self.daemon.capabilities[provider]["seats"] = self.daemon.seat_states(provider)
         return {**result, "seats": self.daemon.capabilities[provider]["seats"]}
 
-    def claude_limits(self) -> dict | None:
+    def claude_limits(self, socket_path: Path | None = None) -> dict | None:
+        path = socket_path or self.daemon.socket_path(self.provider)
         with httpx.Client(
-            transport=httpx.HTTPTransport(uds=str(self.daemon.socket_path(self.provider))),
+            transport=httpx.HTTPTransport(uds=str(path)),
             base_url="http://runtime",
             timeout=10,
         ) as client:
@@ -577,20 +578,34 @@ class RuntimeAgent(Agent):
         if self.daemon.driver_gen[self.provider] == generation:
             self.last_model_check = time.time()
 
-    def quota_context(self) -> dict:
+    def probe_rate_limits(self) -> None:
+        with self.daemon.driver_lock:
+            generation = self.daemon.driver_gen[self.provider]
+            seat_id = self.daemon.driver_seats.get(
+                (self.provider, generation), self.daemon.seats.active(self.provider)
+            )
+            socket_path = self.daemon.socket_path(self.provider, generation)
+
+        def read_limits() -> dict | None:
+            if self.provider == "codex":
+                return self.codex_limits(env=self.daemon.seats.env(self.provider, seat_id))
+            return self.claude_limits(socket_path)
+
         cap = self.daemon.capabilities.get(self.provider) or {}
-        return {
-            "seat_id": self.daemon.seats.active(self.provider),
+        context = {
+            "seat_id": seat_id,
             **{
                 key: cap[key]
                 for key in ("plan_type", "account_verified")
                 if cap.get(key) is not None
             },
         }
-
-    def probe_rate_limits(self) -> None:
-        with self.daemon.driver_lock:
-            super().probe_rate_limits()
+        self._probe_rate_limits(
+            context,
+            read_limits,
+            generation=generation,
+            is_current=lambda: self.daemon.driver_gen[self.provider] == generation,
+        )
 
 
 class FrameBatcher:
