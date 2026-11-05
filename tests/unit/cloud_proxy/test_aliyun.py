@@ -98,8 +98,13 @@ def test_product_endpoints() -> None:
     assert endpoint_for(PRODUCTS["mse"], CloudProxyPolicy()) is None
     policy = CloudProxyPolicy.model_validate({"mse": {"endpoint": "mse.cn-hangzhou.aliyuncs.com"}})
     assert endpoint_for(PRODUCTS["mse"], policy) == "mse.cn-hangzhou.aliyuncs.com"
-    assert endpoint_for(PRODUCTS["slb"], None) == "slb.aliyuncs.com"
+    assert endpoint_for(PRODUCTS["slb"], None) == "slb.us-east-1.aliyuncs.com"
     assert PRODUCTS["slb"].version == "2014-05-15"
+
+
+def test_slb_uses_us_east_1_regional_endpoint() -> None:
+    # 中心地址会解析到其他地域，跨地域调用偶发不可达；ACL 都在 us-east-1
+    assert PRODUCTS["slb"].endpoint == "slb.us-east-1.aliyuncs.com"
 
 
 def test_classify() -> None:

@@ -310,7 +310,7 @@ async def test_low_risk_write_goes_straight_through(
     tower: tuple[FakeTower, str],
 ) -> None:
     *_, auth = ctx
-    route = ok_route(aliyun_mock, "slb.aliyuncs.com", {"RequestId": "r1"})
+    route = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {"RequestId": "r1"})
     r = await client.post(SLB, content=LOW, headers=auth)
     assert r.status_code == 200, r.text
     assert sent_form(route)["AclEntrys"] == json.dumps([{"entry": "8.8.8.8", "comment": "tmp"}])
@@ -323,7 +323,7 @@ async def test_aliyun_5xx_is_502_without_retry(
     client: httpx.AsyncClient, db_session: AsyncSession, ctx: Any, aliyun_mock: respx.MockRouter
 ) -> None:
     *_, auth = ctx
-    route = aliyun_mock.post("https://slb.aliyuncs.com/").mock(
+    route = aliyun_mock.post("https://slb.us-east-1.aliyuncs.com/").mock(
         return_value=httpx.Response(503, json={"Code": "ServiceUnavailable"})
     )
     r = await client.post(SLB, content=LOW, headers=auth)
@@ -337,7 +337,9 @@ async def test_aliyun_unreachable(
     client: httpx.AsyncClient, db_session: AsyncSession, ctx: Any, aliyun_mock: respx.MockRouter
 ) -> None:
     *_, auth = ctx
-    aliyun_mock.post("https://slb.aliyuncs.com/").mock(side_effect=httpx.ConnectError("down"))
+    aliyun_mock.post("https://slb.us-east-1.aliyuncs.com/").mock(
+        side_effect=httpx.ConnectError("down")
+    )
     r = await client.post(SLB, content=LOW, headers=auth)
     assert r.status_code == 502 and r.json()["error"] == "aliyun_unreachable"
     [row] = await calls(db_session)
@@ -475,7 +477,7 @@ async def test_token_redeemed_then_forwarded(
 ) -> None:
     bot, _, _, auth = ctx
     first = (await client.post(SLB, content=HIGH, headers=auth)).json()
-    route = ok_route(aliyun_mock, "slb.aliyuncs.com", {"RequestId": "r1"})
+    route = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {"RequestId": "r1"})
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 200, r.text
     [(payload, api_key)] = tower[0].requests
@@ -503,7 +505,7 @@ async def test_redeem_rejection_passes_through(
 ) -> None:
     *_, auth = ctx
     tower[0].reply = (403, {"error": "request_mismatch"})
-    route = ok_route(aliyun_mock, "slb.aliyuncs.com", {})
+    route = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {})
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 403 and r.json() == {"error": "request_mismatch"}
     assert not route.called
@@ -523,7 +525,7 @@ async def test_tower_unreachable_is_503(
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     configure(app, f"http://127.0.0.1:{port}")
-    route = ok_route(aliyun_mock, "slb.aliyuncs.com", {})
+    route = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {})
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 503 and r.json() == {"error": "tower_unavailable"}
     assert not route.called
@@ -552,7 +554,7 @@ async def test_redeemed_call_is_recorded_before_aliyun_returns(
     *_, auth = ctx
     first = (await client.post(SLB, content=HIGH, headers=auth)).json()
     # 出站中途出现任何意外（这里用异常模拟进程在出站时被打断）：令牌已消耗，记录必须已经提交
-    aliyun_mock.post("https://slb.aliyuncs.com/").mock(side_effect=RuntimeError("killed"))
+    aliyun_mock.post("https://slb.us-east-1.aliyuncs.com/").mock(side_effect=RuntimeError("killed"))
     with pytest.raises(RuntimeError):
         await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     db_session.expire_all()
@@ -570,7 +572,9 @@ async def test_redeemed_then_unreachable_updates_the_same_row(
     client: httpx.AsyncClient, db_session: AsyncSession, ctx: Any, aliyun_mock: respx.MockRouter
 ) -> None:
     *_, auth = ctx
-    aliyun_mock.post("https://slb.aliyuncs.com/").mock(side_effect=httpx.ConnectError("down"))
+    aliyun_mock.post("https://slb.us-east-1.aliyuncs.com/").mock(
+        side_effect=httpx.ConnectError("down")
+    )
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 502
     [row] = await calls(db_session)
@@ -592,7 +596,7 @@ async def test_executed_marks_this_tasks_pending_row(
     mine = (await client.post(SLB, content=HIGH, headers=auth)).json()
     theirs = (await client.post(SLB, content=HIGH, headers=other_auth)).json()
     assert mine["external_id"] != theirs["external_id"]
-    ok_route(aliyun_mock, "slb.aliyuncs.com", {})
+    ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {})
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 200
     db_session.expire_all()
@@ -621,7 +625,7 @@ async def test_hash_path_follows_public_base_url_prefix(
     db_session.expire_all()
     pending = await db_session.get(CloudPendingApproval, first["external_id"])
     assert pending is not None and pending.request_hash == agent_hash
-    ok_route(aliyun_mock, "slb.aliyuncs.com", {})
+    ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {})
     r = await client.post(SLB, content=HIGH, headers={**auth, "X-Tower-Approval": "twa_abc"})
     assert r.status_code == 200
     assert tower[0].requests[-1][0]["request_hash"] == agent_hash
@@ -640,6 +644,6 @@ async def test_slow_upstream_hits_total_timeout(
         await asyncio.sleep(1)
         return httpx.Response(200, json={})
 
-    aliyun_mock.post("https://slb.aliyuncs.com/").mock(side_effect=slow)
+    aliyun_mock.post("https://slb.us-east-1.aliyuncs.com/").mock(side_effect=slow)
     r = await client.post(SLB, content=LOW, headers=auth)
     assert r.status_code == 502 and r.json()["error"] == "aliyun_unreachable"
