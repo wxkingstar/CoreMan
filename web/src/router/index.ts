@@ -27,6 +27,7 @@ export const router = createRouter({
         { path: 'my-credentials', name: 'my-credentials', component: () => import('@/views/MyCredentialsView.vue') },
         { path: 'my-credentials/requests/:id', name: 'credential-request', component: () => import('@/views/CredentialRequestView.vue') },
         { path: 'my-api-tokens', name: 'my-api-tokens', component: () => import('@/views/MyApiTokensView.vue') },
+        { path: 'api-tasks-guide', name: 'api-tasks-guide', component: () => import('@/views/ApiTasksGuideView.vue') },
         { path: 'statistics', name: 'statistics', component: () => import('@/views/StatisticsView.vue') },
         { path: 'systems', name: 'systems', component: () => import('@/views/SystemsView.vue'), meta: { roles: ['ai_committee', 'platform_admin'] } },
         { path: 'credentials', name: 'credentials', component: () => import('@/views/CredentialsView.vue'), meta: { roles: ['platform_admin'] } },

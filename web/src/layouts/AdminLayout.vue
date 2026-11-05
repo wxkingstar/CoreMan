@@ -58,7 +58,7 @@ const groups = [
 const organizationKeys = ['users', 'apps', 'systems', 'credentials']
 function visible(item: MenuItem): boolean { return !item.roles || !!auth.user && item.roles.includes(auth.user.role as Role) }
 const visibleGroups = computed(() => groups.map(group => ({ ...group, items: group.keys.map(key => MENU.find(item => item.key === key)!).filter(visible) })).filter(group => group.items.length))
-const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path.startsWith('/my-credentials/') ? '/my-credentials' : route.path.startsWith('/work-tasks/') ? '/work-tasks' : route.path)
+const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path.startsWith('/my-credentials/') ? '/my-credentials' : route.path.startsWith('/work-tasks/') ? '/work-tasks' : route.path === '/api-tasks-guide' ? '/my-api-tokens' : route.path)
 const title = computed(() => t('menu.' + (MENU.find(item => item.path === activePath.value)?.key ?? 'home')))
 watch(() => route.path, () => { mobileOpen.value = false })
 function toggleDark() { dark.value = !dark.value; document.documentElement.classList.toggle('dark', dark.value); try { localStorage.setItem('coreman.dark', dark.value ? '1' : '0') } catch { /* unavailable storage */ } }

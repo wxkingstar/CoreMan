@@ -76,6 +76,12 @@ onMounted(load)
       >
         {{ t('apiAccess.tokens.refresh') }}
       </el-button>
+      <el-button
+        data-test="open-guide"
+        @click="$router.push('/api-tasks-guide')"
+      >
+        {{ t('apiAccess.tokens.guide') }}
+      </el-button>
     </div>
     <el-alert
       v-if="error"

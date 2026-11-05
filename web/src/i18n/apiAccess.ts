@@ -2,7 +2,7 @@
 export const apiAccessZh = {
   tokens: {
     intro: '外部程序（自己的脚本、CI、工单系统）可以用 API 令牌以你的身份给 AI 员工下任务。任务在你和 AI 员工的私聊里，或者绑定了别名的群里承接：会话里能看到「通过 API 发起」和回复，你可以接着在飞书里往下推进。令牌只能驱动你选的 AI 员工，而且对方要开启「允许 API 驱动」。',
-    create: '新建令牌', refresh: '刷新', empty: '还没有 API 令牌。',
+    create: '新建令牌', refresh: '刷新', guide: '使用手册（图解 · 给 Agent 的版本）', empty: '还没有 API 令牌。',
     name: '名称', namePlaceholder: '例如：工单系统', prefix: '前缀', bots: '可驱动的 AI 员工', days: '有效期（天）',
     status: '状态', expiresAt: '到期', lastUsedAt: '最近使用', never: '未使用', createdAt: '创建时间',
     statuses: { active: '有效', expired: '已过期', revoked: '已吊销' },
@@ -20,14 +20,14 @@ export const apiAccessZh = {
     alias: '别名', chatId: '群 chat_id', createdBy: '绑定人', createdAt: '绑定时间',
     empty: '还没有群别名。', remove: '解绑', removeConfirm: '解绑别名「{alias}」？之后不能再用它在这个群发起任务。',
     noAccess: '仅此 AI 员工的管理者可以查看和配置 API 驱动。', platform: '目前只有飞书 AI 员工支持 API 驱动。',
-    loading: '正在加载…', retry: '重试', cancel: '取消', confirm: '确定',
+    loading: '正在加载…', retry: '重试', cancel: '取消', confirm: '确定', guide: '查看使用手册',
   },
 }
 
 export const apiAccessEn: typeof apiAccessZh = {
   tokens: {
     intro: 'External programs (your scripts, CI, ticketing systems) can use an API token to give AI employees tasks as you. Tasks run in your direct chat with the employee, or in a group that has an alias: the chat shows "started via API" and the reply, and you can keep going in Feishu. A token can drive only the employees you choose, and they must have "Allow API driving" on.',
-    create: 'New token', refresh: 'Refresh', empty: 'No API tokens yet.',
+    create: 'New token', refresh: 'Refresh', guide: 'Guide (diagrams · version for agents)', empty: 'No API tokens yet.',
     name: 'Name', namePlaceholder: 'For example: ticketing system', prefix: 'Prefix', bots: 'AI employees it can drive', days: 'Valid for (days)',
     status: 'Status', expiresAt: 'Expires', lastUsedAt: 'Last used', never: 'Never', createdAt: 'Created',
     statuses: { active: 'Active', expired: 'Expired', revoked: 'Revoked' },
@@ -45,14 +45,14 @@ export const apiAccessEn: typeof apiAccessZh = {
     alias: 'Alias', chatId: 'Group chat_id', createdBy: 'Bound by', createdAt: 'Bound at',
     empty: 'No group aliases yet.', remove: 'Unbind', removeConfirm: 'Unbind alias "{alias}"? It can no longer be used to start tasks in that group.',
     noAccess: 'Only managers of this employee can view and configure API driving.', platform: 'Only Feishu employees support API driving for now.',
-    loading: 'Loading…', retry: 'Retry', cancel: 'Cancel', confirm: 'Confirm',
+    loading: 'Loading…', retry: 'Retry', cancel: 'Cancel', confirm: 'Confirm', guide: 'Open the guide',
   },
 }
 
 export const apiAccessJa: typeof apiAccessZh = {
   tokens: {
     intro: '外部プログラム（自分のスクリプト、CI、チケットシステム）は API トークンを使って、あなたとして AI 社員にタスクを依頼できます。タスクはあなたと AI 社員の個別チャット、またはエイリアスを設定したグループで実行され、「API から開始」と返信が表示されるので、そのまま Feishu で続けられます。トークンで操作できるのは選んだ AI 社員だけで、相手側で「API からの操作を許可」が有効である必要があります。',
-    create: 'トークンを作成', refresh: '更新', empty: 'API トークンはまだありません。',
+    create: 'トークンを作成', refresh: '更新', guide: '利用ガイド（図解 · エージェント向け版）', empty: 'API トークンはまだありません。',
     name: '名前', namePlaceholder: '例：チケットシステム', prefix: 'プレフィックス', bots: '操作できる AI 社員', days: '有効期間（日）',
     status: '状態', expiresAt: '有効期限', lastUsedAt: '最終使用', never: '未使用', createdAt: '作成日時',
     statuses: { active: '有効', expired: '期限切れ', revoked: '失効済み' },
@@ -70,6 +70,6 @@ export const apiAccessJa: typeof apiAccessZh = {
     alias: 'エイリアス', chatId: 'グループ chat_id', createdBy: '設定者', createdAt: '設定日時',
     empty: 'グループエイリアスはまだありません。', remove: '解除', removeConfirm: 'エイリアス「{alias}」を解除しますか？以後そのグループでタスクを開始できなくなります。',
     noAccess: 'この AI 社員の管理者のみが API 操作を表示・設定できます。', platform: '現在 API 操作に対応しているのは Feishu の AI 社員のみです。',
-    loading: '読み込み中…', retry: '再試行', cancel: 'キャンセル', confirm: '確認',
+    loading: '読み込み中…', retry: '再試行', cancel: 'キャンセル', confirm: '確認', guide: '利用ガイドを開く',
   },
 }

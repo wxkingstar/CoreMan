@@ -2,7 +2,9 @@
 
 外部程序（自己的脚本、CI、工单系统）可以用成员的「API 令牌」给 AI 员工下任务，并拿回结果。任务以令牌所有人本人的身份运行，在飞书会话里承接：会话里能看到「通过 API 发起」和 AI 员工的回复，人可以接着在飞书里往下推进。
 
-目前只支持飞书 AI 员工。设计见 [2026-11-06-api-driven-tasks.md](../superpowers/specs/2026-11-06-api-driven-tasks.md)。
+目前只支持飞书 AI 员工。
+
+管理台「API 令牌」→「使用手册」是给人看的图解（全景图、飞书里的样子、时序、状态）。给 Agent 的版本随管理台公开发布在 `/integration/api-tasks-agent-guide.md`：手册页里「给 Agent 的版本」会把地址替换成当前 CoreMan 的地址，复制全文交给 Agent，或者把链接交给它自己读。设计见 [2026-11-06-api-driven-tasks.md](../superpowers/specs/2026-11-06-api-driven-tasks.md)。
 
 ## 准备
 

@@ -59,6 +59,14 @@ async function remove(row: ApiAlias) {
     <template v-else>
       <p class="intro">
         {{ t('apiAccess.bot.intro') }}
+        <el-button
+          link
+          type="primary"
+          data-test="open-guide"
+          @click="$router.push('/api-tasks-guide')"
+        >
+          {{ t('apiAccess.bot.guide') }}
+        </el-button>
       </p>
       <el-alert
         v-if="error"
