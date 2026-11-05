@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from coreman.api.routers.runtime_protocol import Capability
 from coreman.core.auth.signatures import sign_request
 from tests.api.conftest import login_as
 from tests.fakes.runtime_node import add_node, add_node_relay
@@ -20,7 +21,8 @@ async def test_browser_scope_opt_in_and_no_store(
                 json={"app_key": scope + "-reader", "name": scope, "scopes": [scope]},
             )
         ).json()["data"]["secret"]
-    node = await add_node(db_session, capabilities={"claude": {"browser_monitor_v1": True}})
+    capability = Capability.model_validate({"browser_monitor_v1": True}).model_dump()
+    node = await add_node(db_session, capabilities={"claude": capability})
     relay = await add_node_relay(db_session, node=node)
     await db_session.commit()
     path = f"/api/infra/relay/servers/{relay.id}/browser-snapshot"
