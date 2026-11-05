@@ -29,10 +29,11 @@ type rolloutLine struct {
 }
 
 type codexRateLimitSet struct {
-	PlanType  string            `json:"plan_type"`
-	LimitID   string            `json:"limit_id"`
-	Primary   *codexLimitWindow `json:"primary"`
-	Secondary *codexLimitWindow `json:"secondary"`
+	PlanType            string            `json:"plan_type"`
+	LimitID             string            `json:"limit_id"`
+	Primary             *codexLimitWindow `json:"primary"`
+	Secondary           *codexLimitWindow `json:"secondary"`
+	WindowApplicability map[string]string `json:"window_applicability"`
 }
 
 type codexLimitWindow struct {
@@ -127,11 +128,20 @@ func rolloutRateLimits(threadID string, since time.Time) any {
 				snap.SevenDay = q
 			}
 		}
-		if snap.FiveHour == nil && snap.SevenDay == nil {
-			return nil
+		for key, window := range map[string]*quotaWindow{"five_hour": snap.FiveHour, "seven_day": snap.SevenDay} {
+			if window != nil {
+				continue
+			}
+			switch value := limits.WindowApplicability[key]; value {
+			case "applicable", "not_applicable", "unknown":
+				if snap.WindowApplicability == nil {
+					snap.WindowApplicability = make(map[string]string)
+				}
+				snap.WindowApplicability[key] = value
+			}
 		}
-		if snap.FiveHour == nil && (limits.PlanType == "pro" || limits.PlanType == "pro_200" || limits.PlanType == "pro_100" || limits.PlanType == "pro_500") {
-			snap.WindowApplicability = map[string]string{"five_hour": "not_applicable"}
+		if snap.FiveHour == nil && snap.SevenDay == nil && len(snap.WindowApplicability) == 0 {
+			return nil
 		}
 		return &snap
 	}

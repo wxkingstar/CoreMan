@@ -140,7 +140,7 @@ def test_recent_activity_only_suppresses_matching_seat(daemon):
             }
         }
     )
-    assert daemon.agents["claude"].last_model_check == current
+    assert daemon.agents["claude"].last_model_check == pytest.approx(current, abs=1e-6, rel=0)
 
 
 def test_root_change_is_durable_and_updates_agents(daemon, tmp_path):

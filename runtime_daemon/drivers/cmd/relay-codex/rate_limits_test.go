@@ -81,11 +81,16 @@ func TestProWeeklyWindowDoesNotInventFiveHourUsage(t *testing.T) {
 	rolloutPaths.Delete(testThread)
 	writeRollout(t, home, tokenCount("2026-10-19T03:59:33Z", `{"plan_type":"pro","primary":{"used_percent":0,"window_minutes":10080}}`))
 	snap := rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
-	if snap.PlanType != "pro" || snap.FiveHour != nil || snap.SevenDay.UsedPercentage != 0 || snap.WindowApplicability["five_hour"] != "not_applicable" {
-		t.Fatalf("unexpected pro policy: %+v", snap)
+	if snap.PlanType != "pro" || snap.FiveHour != nil || snap.SevenDay == nil || snap.SevenDay.UsedPercentage != 0 || len(snap.WindowApplicability) != 0 {
+		t.Fatalf("plan name alone must not imply window policy: %+v", snap)
 	}
-	// A real returned window takes precedence over the plan default.
-	writeRollout(t, home, tokenCount("2026-10-19T04:00:00Z", `{"plan_type":"pro","primary":{"used_percent":5,"window_minutes":300}}`))
+	writeRollout(t, home, tokenCount("2026-10-19T04:00:00Z", `{"window_applicability":{"five_hour":"not_applicable","seven_day":"unrecognized","other":"not_applicable"}}`))
+	snap = rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	if len(snap.WindowApplicability) != 1 || snap.WindowApplicability["five_hour"] != "not_applicable" {
+		t.Fatalf("only explicit, known window policy should be forwarded: %+v", snap)
+	}
+	// A numeric observation takes precedence over an explicit marker.
+	writeRollout(t, home, tokenCount("2026-10-19T04:00:01Z", `{"window_applicability":{"five_hour":"not_applicable"},"primary":{"used_percent":5,"window_minutes":300}}`))
 	snap = rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
 	if snap.FiveHour == nil || snap.WindowApplicability["five_hour"] != "" {
 		t.Fatalf("actual window discarded: %+v", snap)

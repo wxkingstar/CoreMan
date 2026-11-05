@@ -139,7 +139,6 @@ class Capability(BaseModel):
     health: Literal["healthy", "down", "auth_fail", "timeout", "unknown"] = "unknown"
     plan_type: str | None = Field(default=None, max_length=40, pattern=r"^[a-zA-Z0-9_.-]+$")
     account_verified: StrictBool | None = None
-    browser_monitor_v1: StrictBool = False
     detail: str = Field(default="", max_length=255)
     models: list[str] = Field(default_factory=list, max_length=100)
 
