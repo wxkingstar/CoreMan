@@ -57,10 +57,12 @@ from coreman.core.prompting.rich_cards import rich_cards_prompt, with_reply_imag
 from coreman.core.relay.client import ChatRequest, IncompleteResultError, RelayError
 from coreman.core.relay.models import backend_of
 from coreman.core.relay.sse import (
+    ActualModelEvent,
     AskUserQuestionEvent,
     FinishEvent,
     ImageDelta,
     RelayErrorEvent,
+    RuntimeObservationEvent,
     SseEvent,
     TextDelta,
     ToolUseStart,
@@ -559,6 +561,8 @@ class CronRunHandler:
         images = ReplyImages(bot, ctx.cipher)
         try:
             async for event in gen:
+                if isinstance(event, ActualModelEvent | RuntimeObservationEvent):
+                    continue
                 if isinstance(event, AskUserQuestionEvent):
                     raise CronStreamError(
                         "interactive_answer_required",

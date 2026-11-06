@@ -109,7 +109,7 @@ async def test_normal_round_trip_new_session_then_resume(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     bot, relay_row, _ = await seed_bot(db_session, env={"DB_PASSWORD": "pw"})
-    fake = FakeRelay("normal")
+    fake = FakeRelay("normal_observed_model")
     t1 = await chat_task(db_session, bot, "你好")
     await run(db_engine, t1, fake)
     s = await stream_of(db_session, t1.id)
@@ -282,7 +282,7 @@ async def test_relay_error_empty_and_tools_only(
 async def test_unconfirmed_streams_keep_relay_reason_link_and_partial_text(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
-    bot, _, _ = await seed_bot(db_session)
+    bot, relay_row, _ = await seed_bot(db_session)
     t = await chat_task(db_session, bot, "a")
     await run(db_engine, t, FakeRelay("relay_error_no_finish"))
     s = await stream_of(db_session, t.id)
@@ -300,6 +300,14 @@ async def test_unconfirmed_streams_keep_relay_reason_link_and_partial_text(
     assert log3.status == "error" and log3.error_code == "incomplete_result"
     assert "半截" in ((await stream_of(db_session, t3.id)).final_text or "")
     assert (await tasks.get(db_session, t3.id)).status == "failed"  # type: ignore[union-attr]
+    t4 = await chat_task(db_session, bot, "d")
+    await run(db_engine, t4, FakeRelay("error_finish"))
+    assert (await tasks.get(db_session, t4.id)).status == "failed"  # type: ignore[union-attr]
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health["status"] == "down"
+    assert relay_row.model_health["error_code"] == "model_request_failed"
+    assert relay_row.model_health["reply_verified"] is False
+    assert relay_row.last_model_failure == relay_row.model_health
 
 
 async def test_whitelist_unsupported_help_and_disabled(

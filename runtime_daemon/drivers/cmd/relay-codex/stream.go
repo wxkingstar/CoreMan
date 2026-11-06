@@ -60,7 +60,7 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInp
 		}
 	}
 
-	turnStarted := time.Now()
+	turn := beginTurnRollout(input)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		if sseOpen {
@@ -123,7 +123,7 @@ probe:
 				log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread session_id=%s", sessionID)
 				rebuilt = true
 				input = rebuildFresh()
-				turnStarted = time.Now()
+				turn = beginTurnRollout(input)
 				cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
 				if err != nil {
 					emitCodexFailure(w, flusher, chatID, created, model, "codex could not start a new session: "+err.Error())
@@ -420,12 +420,12 @@ processLines:
 	}
 	actualModel := ""
 	if turnCompleted && !turnFailed {
-		actualModel = rolloutTurnModel(rollout, turnStarted)
+		actualModel = turn.model(turnThread(), rollout)
 	}
 	finishChunk(reason, actualModel)
 
 	if includeUsage && streamUsage != nil {
-		usageChunk(streamUsage, rolloutRateLimits(rollout, turnStarted.Add(-time.Second)))
+		usageChunk(streamUsage, rolloutRateLimits(rollout, turn.started.Add(-time.Second)))
 	}
 
 	sessionStore.LogDone(sessionID, streamUsage)
@@ -447,7 +447,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	if job := ensureCompaction(resumedThread(input), workingDir, model); job != nil && !awaitCompaction(r.Context(), job, nil) {
 		return
 	}
-	turnStarted := time.Now()
+	turn := beginTurnRollout(input)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -550,7 +550,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 			log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread (non-stream) session_id=%s", sessionID)
 			rebuilt = true
 			input = rebuildFresh()
-			turnStarted = time.Now()
+			turn = beginTurnRollout(input)
 			cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
 			if err != nil {
 				openai.WriteError(w, http.StatusInternalServerError, "server_error", "codex could not start a new session: "+err.Error())
@@ -588,7 +588,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	if thread == "" {
 		thread = resumedThread(input)
 	}
-	actualModel := rolloutTurnModel(readRolloutTail(thread), turnStarted)
+	actualModel := turn.model(thread, readRolloutTail(thread))
 	ensureCompaction(threadIDSeen, workingDir, model)
 	if rebuilt {
 		body = staleThreadNotice + body

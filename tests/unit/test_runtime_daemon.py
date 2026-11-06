@@ -674,3 +674,39 @@ def test_health_probe_uses_server_model_and_reports_detail(
     agent.health_check()
     assert captured[0]["model"] == "codex/gpt-6.1-sol"
     assert (reports[0]["status"], reports[0]["detail"]) == (status, detail)
+
+
+def test_health_probe_discards_result_when_driver_replaced(daemon, monkeypatch):
+    from runtime_daemon.daemon import RuntimeAgent
+
+    daemon.socket_dir = daemon.data_dir
+    daemon.config["node_token"] = "test-token"
+    daemon.config["home"] = str(daemon.data_dir)
+    agent = RuntimeAgent(daemon, "codex", "test-relay")
+    agent.model = "test-model"
+
+    class LocalClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, path):
+            return SimpleNamespace(status_code=200)
+
+        def post(self, path, json):
+            daemon.driver_gen["codex"] += 1
+            return SimpleNamespace(
+                status_code=200, json=lambda: {"choices": [{"message": {"content": "OK"}}]}
+            )
+
+    reports = []
+    monkeypatch.setattr("runtime_daemon.daemon.httpx.Client", LocalClient)
+    monkeypatch.setattr(agent, "report", lambda endpoint, body: reports.append(body))
+    agent.health_check()
+    assert reports == []
+    assert not getattr(agent, "last_model_check", 0)

@@ -279,7 +279,8 @@ class FinalizeStage(ChatStageBase):
                 and not out.cancelled
                 and not out.relay_error
                 and out.error is None
-                and out.finish_reason
+                and not out.collaboration_handoff
+                and verdict.log_status in ("success", "ask_user")
                 and (out.text_events > 0 or out.ask_user)
             ):
                 observation = HealthObservation(
@@ -295,6 +296,8 @@ class FinalizeStage(ChatStageBase):
                 and not out.cancelled
                 and (
                     out.relay_error
+                    or out.finish_reason == "error"
+                    and verdict.log_status == "failed"
                     or isinstance(out.error, RelayError)
                     and not isinstance(out.error, RelayBusyError)
                 )

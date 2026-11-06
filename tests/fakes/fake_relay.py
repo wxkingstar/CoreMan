@@ -75,8 +75,8 @@ def _tool(name: str, tid: str, args: str = "") -> str:
     )
 
 
-SCENARIOS: dict[str, Callable[[], list[str]]] = {
-    "normal": lambda: [
+def _normal(*, actual_model: str | None = None) -> list[str]:
+    return [
         ": ping\n\n",
         _think("先想"),
         _think("再想"),
@@ -84,10 +84,18 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
         _text("，世界"),
         _tool("Bash", "t1"),
         _text("。"),
-        FINISH,
-        _chunk(None, usage=USAGE, extra={"x_actual_model": "claude-observed"}),
+        _chunk(None, finish="stop", extra={"x_actual_model": actual_model})
+        if actual_model
+        else FINISH,
+        _chunk(None, usage=USAGE),
         DONE,
-    ],
+    ]
+
+
+SCENARIOS: dict[str, Callable[[], list[str]]] = {
+    "normal": _normal,
+    "normal_observed_model": lambda: _normal(actual_model="claude-observed"),
+    "error_finish": lambda: [_text("半截"), _chunk(None, finish="error"), DONE],
     "tools_only": lambda: [
         ": ping\n\n",
         _tool("Bash", "t1"),

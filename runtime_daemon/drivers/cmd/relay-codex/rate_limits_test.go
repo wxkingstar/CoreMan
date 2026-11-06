@@ -118,3 +118,37 @@ func TestRolloutTurnModelIgnoresPriorContextAndUsesReroute(t *testing.T) {
 		t.Fatalf("rerouted model = %q", got)
 	}
 }
+
+func TestTurnRolloutModelRecoversContextOutsideTail(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	rolloutPaths.Delete(testThread)
+	since, _ := time.Parse(time.RFC3339, "2026-10-19T03:59:00Z")
+	old := `{"timestamp":"2026-10-19T03:58:59Z","type":"turn_context","payload":{"model":"old"}}`
+	current := `{"timestamp":"2026-10-19T03:59:02Z","type":"turn_context","payload":{"model":"current"}}`
+	reroute := `{"timestamp":"2026-10-19T03:59:09Z","type":"event_msg","payload":{"type":"model_reroute","to_model":"rerouted"}}`
+	large := `{"type":"response_item","payload":{"output":"` + strings.Repeat("x", rolloutTailBytes) + `"}}`
+
+	writeRollout(t, home, old)
+	resumed := beginTurnRollout(codexInput{IsResume: true, Args: []string{"exec", "resume", testThread}})
+	resumed.started = since
+	fresh := turnRollout{started: since}
+	writeRollout(t, home, old, current, large)
+	tail := readRolloutTail(testThread)
+	if got := rolloutTurnModel(tail, since); got != "" {
+		t.Fatalf("unexpected evidence in tail: %q", got)
+	}
+	for _, turn := range []turnRollout{resumed, fresh} {
+		if got := turn.model(testThread, tail); got != "current" {
+			t.Fatalf("long turn model = %q", got)
+		}
+	}
+	writeRollout(t, home, old, current, reroute, large)
+	if got := resumed.model(testThread, readRolloutTail(testThread)); got != "rerouted" {
+		t.Fatalf("reroute before tail = %q", got)
+	}
+	writeRollout(t, home, old, current, strings.Repeat("x", maxTurnRolloutBytes))
+	if got := resumed.model(testThread, readRolloutTail(testThread)); got != "" {
+		t.Fatalf("evidence beyond the read bound: %q", got)
+	}
+}

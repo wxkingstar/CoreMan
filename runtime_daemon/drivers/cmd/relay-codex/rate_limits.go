@@ -18,6 +18,27 @@ import (
 // The rollout is Codex's internal format: anything unexpected yields no field and
 // the node agent's app-server poll still covers the instance.
 const rolloutTailBytes = 256 << 10
+const maxTurnRolloutBytes = 4 << 20
+
+type turnRollout struct {
+	started  time.Time
+	threadID string
+	before   os.FileInfo
+}
+
+// Capture the end of an existing rollout before launching a resumed turn so a
+// long reply can still find its own context without reading previous turns.
+func beginTurnRollout(input codexInput) turnRollout {
+	turn := turnRollout{}
+	if input.IsResume {
+		turn.threadID = resumedThread(input)
+	}
+	if path := rolloutPath(turn.threadID); path != "" {
+		turn.before, _ = os.Stat(path)
+	}
+	turn.started = time.Now()
+	return turn
+}
 
 type rolloutLine struct {
 	Timestamp time.Time `json:"timestamp"`
@@ -95,11 +116,49 @@ func readRolloutTail(threadID string) [][]byte {
 	if offset < 0 {
 		offset = 0
 	}
-	data, err := io.ReadAll(io.NewSectionReader(f, offset, info.Size()-offset))
+	return readRolloutRange(f, offset, info.Size()-offset)
+}
+
+func readRolloutRange(f *os.File, offset, size int64) [][]byte {
+	data, err := io.ReadAll(io.NewSectionReader(f, offset, size))
 	if err != nil {
 		return nil
 	}
 	return bytes.Split(data, []byte("\n"))
+}
+
+func (turn turnRollout) model(threadID string, tail [][]byte) string {
+	if model := rolloutTurnModel(tail, turn.started); model != "" {
+		return model
+	}
+	if turn.threadID != "" && (threadID != turn.threadID || turn.before == nil) {
+		return ""
+	}
+	path := rolloutPath(threadID)
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	var offset int64
+	if turn.before != nil {
+		if !os.SameFile(info, turn.before) {
+			return ""
+		}
+		offset = turn.before.Size()
+	}
+	size := info.Size() - offset
+	if size <= rolloutTailBytes || size > maxTurnRolloutBytes {
+		return ""
+	}
+	return rolloutTurnModel(readRolloutRange(f, offset, size), turn.started)
 }
 
 // rolloutTurnModel takes the CLI's effective turn model from this request's

@@ -567,6 +567,8 @@ class RuntimeAgent(Agent):
             status, detail = "timeout", "检查请求超时"
         except (httpx.HTTPError, OSError, ValueError) as exc:
             status, detail = "down", f"{type(exc).__name__}: {exc}"
+        if self.daemon.driver_gen[self.provider] != generation:
+            return
         self.report(
             "relay/health",
             {
