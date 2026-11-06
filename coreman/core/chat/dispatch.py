@@ -132,23 +132,45 @@ async def employees(
 
 async def human_count(bot: Bot, chat_id: str, cipher: Cipher) -> int | None:
     """群里的真人数（飞书群信息里的 user_count，不含机器人）；查不到时返回 None。"""
-    key = (str(bot.id), chat_id)
-    cached = _HUMANS.get(key)
-    if cached is not None and cached[0] > time.monotonic():
-        return cached[1]
-    count: int | None = None
+    hit, cached = _cached_humans(str(bot.id), chat_id)
+    if hit:
+        return cached
     try:
         config = decrypt_json(cipher, bot.credentials_enc, CREDENTIALS_AAD)
-        client = FeishuClient(config["app_id"], config["app_secret"])
-        try:
-            async with asyncio.timeout(5):
-                body = await client.call("GET", f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}")
-        finally:
-            await client.aclose()
+    except (ValueError, KeyError, TypeError):
+        return _remember_humans(str(bot.id), chat_id, None)
+    client = FeishuClient(config["app_id"], config["app_secret"])
+    try:
+        return await human_count_with(client, str(bot.id), chat_id)
+    finally:
+        await client.aclose()
+
+
+async def human_count_with(client: Any, bot_id: str, chat_id: str) -> int | None:
+    """同 `human_count`，用调用方已有的飞书客户端（网关进程里用它自己的那个）。"""
+    hit, cached = _cached_humans(bot_id, chat_id)
+    if hit:
+        return cached
+    count: int | None = None
+    try:
+        async with asyncio.timeout(5):
+            body = await client.call("GET", f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}")
         value = (body.get("data") or {}).get("user_count")
         count = int(value) if value is not None else None
     except (FeishuError, ValueError, KeyError, TypeError, TimeoutError):
         count = None
+    return _remember_humans(bot_id, chat_id, count)
+
+
+def _cached_humans(bot_id: str, chat_id: str) -> tuple[bool, int | None]:
+    cached = _HUMANS.get((bot_id, chat_id))
+    if cached is not None and cached[0] > time.monotonic():
+        return True, cached[1]
+    return False, None
+
+
+def _remember_humans(bot_id: str, chat_id: str, count: int | None) -> int | None:
+    key = (bot_id, chat_id)
     _HUMANS[key] = (time.monotonic() + HUMANS_TTL_SECONDS, count)
     _HUMANS.move_to_end(key)
     while len(_HUMANS) > 2048:
