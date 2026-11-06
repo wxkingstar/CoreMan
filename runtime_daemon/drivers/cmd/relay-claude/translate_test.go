@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestFinishReportsMainAssistantModel(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tr := newSSETranslator("chatcmpl-model", 1700000000, "requested", "", identityMeter{}, "")
+	for _, line := range []string{
+		`{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-observed"}}}`,
+		`{"type":"assistant","parent_tool_use_id":"tool_1","message":{"model":"claude-child"}}`,
+		`{"type":"assistant","message":{"model":"<synthetic>"}}`,
+		`{"type":"result","subtype":"success"}`,
+	} {
+		tr.feed(rec, rec, line, false)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"model":"requested"`) || !strings.Contains(body, `"x_actual_model":"claude-observed"`) {
+		t.Fatalf("missing main assistant model in finish: %s", body)
+	}
+}
+
 // TestErrorResultSurfacesErrorText: a result with is_error=true and no prior
 // streamed delta must emit the error explanation (claude puts it in Result)
 // as a content delta before the finish chunk — not end an empty turn.

@@ -60,7 +60,7 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, input codexInp
 		}
 	}
 
-	turnStarted := time.Now().Add(-time.Second)
+	turn := beginTurnRollout(input)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		if sseOpen {
@@ -123,6 +123,7 @@ probe:
 				log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread session_id=%s", sessionID)
 				rebuilt = true
 				input = rebuildFresh()
+				turn = beginTurnRollout(input)
 				cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
 				if err != nil {
 					emitCodexFailure(w, flusher, chatID, created, model, "codex could not start a new session: "+err.Error())
@@ -193,9 +194,10 @@ probe:
 		})
 	}
 
-	finishChunk := func(reason string) {
+	finishChunk := func(reason, actualModel string) {
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
+			XActualModel: actualModel,
 			Choices: []openai.ChatCompletionChoice{{
 				Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &reason,
 			}},
@@ -412,10 +414,18 @@ processLines:
 	if turnFailed {
 		reason = "error"
 	}
-	finishChunk(reason)
+	var rollout [][]byte
+	if turnCompleted || (includeUsage && streamUsage != nil) {
+		rollout = readRolloutTail(turnThread())
+	}
+	actualModel := ""
+	if turnCompleted && !turnFailed {
+		actualModel = turn.model(turnThread(), rollout)
+	}
+	finishChunk(reason, actualModel)
 
 	if includeUsage && streamUsage != nil {
-		usageChunk(streamUsage, rolloutRateLimits(turnThread(), turnStarted))
+		usageChunk(streamUsage, rolloutRateLimits(rollout, turn.started.Add(-time.Second)))
 	}
 
 	sessionStore.LogDone(sessionID, streamUsage)
@@ -437,6 +447,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	if job := ensureCompaction(resumedThread(input), workingDir, model); job != nil && !awaitCompaction(r.Context(), job, nil) {
 		return
 	}
+	turn := beginTurnRollout(input)
 	cmd, lines, waitErr, stderrTail, err := launchCodex(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -539,6 +550,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 			log.Printf("[CODEX] resumed thread has no rollout; forgetting the binding and starting a new thread (non-stream) session_id=%s", sessionID)
 			rebuilt = true
 			input = rebuildFresh()
+			turn = beginTurnRollout(input)
 			cmd, lines, waitErr, stderrTail, err = launchCodex(input, workingDir, envVars)
 			if err != nil {
 				openai.WriteError(w, http.StatusInternalServerError, "server_error", "codex could not start a new session: "+err.Error())
@@ -572,6 +584,11 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", "Empty response from codex")
 		return
 	}
+	thread := threadIDSeen
+	if thread == "" {
+		thread = resumedThread(input)
+	}
+	actualModel := turn.model(thread, readRolloutTail(thread))
 	ensureCompaction(threadIDSeen, workingDir, model)
 	if rebuilt {
 		body = staleThreadNotice + body
@@ -579,6 +596,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 
 	resp := openai.ChatCompletionResponse{
 		ID: chatID, Object: "chat.completion", Created: created, Model: model,
+		XActualModel: actualModel,
 		Choices: []openai.ChatCompletionChoice{{
 			Index:        0,
 			Message:      openai.NewChatMessage("assistant", body),

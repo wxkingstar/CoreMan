@@ -99,6 +99,11 @@ class RuntimeObservationEvent:
     seat_id: str
 
 
+@dataclass(frozen=True)
+class ActualModelEvent:
+    model: str
+
+
 SseEvent = (
     TextDelta
     | ThinkingDelta
@@ -110,6 +115,7 @@ SseEvent = (
     | RateLimitEvent
     | FinishEvent
     | RuntimeObservationEvent
+    | ActualModelEvent
 )
 
 
@@ -156,6 +162,9 @@ class SseParser:
             seat = runtime.get("seat_id")
             if isinstance(seat, str) and re.fullmatch(r"default|[a-f0-9]{12}", seat):
                 out.append(RuntimeObservationEvent(seat))
+        model = chunk.get("x_actual_model")
+        if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,150}", model):
+            out.append(ActualModelEvent(model))
         usage = chunk.get("usage")
         if isinstance(usage, dict):
             out.append(self._usage(usage))

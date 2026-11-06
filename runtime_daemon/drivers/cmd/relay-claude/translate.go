@@ -42,12 +42,13 @@ const (
 // behavioral change is that terminal control (kill vs interrupt) is delegated
 // to the caller via the returned lineOutcome.
 type sseTranslator struct {
-	private   bool
-	chatID    string
-	created   int64
-	model     string
-	sessionID string
-	meter     usageMeter
+	private     bool
+	chatID      string
+	created     int64
+	model       string
+	actualModel string
+	sessionID   string
+	meter       usageMeter
 	// meterModel is the model that stats accounting is attributed to. For a
 	// persistent channel worker this is the worker's spawn-time boundModel: a
 	// hot model switch changes the request `model` immediately, but the running
@@ -146,6 +147,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
 		log.Printf("Failed to parse claude event: %v", err)
 		return outcomeContinue
+	}
+	if model := event.observedModel(); model != "" {
+		t.actualModel = model
 	}
 	if rateLimits.observe(event.RateLimitInfo) {
 		t.sawRateLimit = true
@@ -288,6 +292,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		finishReason := "stop"
 		t.emit(w, flusher, openai.ChatCompletionResponse{
 			ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
+			XActualModel: t.actualModel,
 			Choices: []openai.ChatCompletionChoice{
 				{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finishReason},
 			},
@@ -402,6 +407,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 			Choices: []openai.ChatCompletionChoice{
 				{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finishReason},
 			},
+			XActualModel: t.actualModel,
 		})
 
 		if includeUsage && t.streamUsage != nil {

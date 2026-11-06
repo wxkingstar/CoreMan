@@ -10,6 +10,7 @@ from coreman.core.chat import dispatch, group_observe
 from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.sse import (
+    ActualModelEvent,
     AskUserQuestionEvent,
     FinishEvent,
     ImageDelta,
@@ -163,6 +164,9 @@ class ConverseStage(ChatStageBase):
     def _apply(self, ctx: TaskContext, pre: Prepared, out: Outcome, event: SseEvent) -> None:
         if isinstance(event, RuntimeObservationEvent):
             out.runtime_seat_id = event.seat_id
+            return
+        if isinstance(event, ActualModelEvent):
+            out.actual_model = event.model
             return
         if not out.saw_event:
             # 单独记一个「见过帧」的标志：`counted` 不数 FinishEvent，用它判首帧会重复触发。

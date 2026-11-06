@@ -135,6 +135,8 @@ type ChatCompletionResponse struct {
 	// XRateLimits rides on the final usage chunk: the subscription quota the
 	// CLI reported during this request, so the platform can store it per turn.
 	XRateLimits any `json:"x_rate_limits,omitempty"`
+	// XActualModel is an observed execution model, independent of the requested model.
+	XActualModel string `json:"x_actual_model,omitempty"`
 }
 
 type ChatCompletionChoice struct {

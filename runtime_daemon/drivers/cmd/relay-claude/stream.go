@@ -240,6 +240,7 @@ func handleBufferedStreamResponse(w http.ResponseWriter, r *http.Request, args [
 	var filter toolCallFilter
 	var streamDeltaSent bool
 	var finalUsage *openai.UsageInfo
+	var actualModel string
 	sawResult := false
 	sawRateLimit := false
 
@@ -283,6 +284,9 @@ processLines:
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			log.Printf("Failed to parse claude event: %v", err)
 			continue
+		}
+		if observed := event.observedModel(); observed != "" {
+			actualModel = observed
 		}
 		if rateLimits.observe(event.RateLimitInfo) {
 			sawRateLimit = true
@@ -342,10 +346,11 @@ processLines:
 
 					finishReason := "stop"
 					finishChunk := openai.ChatCompletionResponse{
-						ID:      chatID,
-						Object:  "chat.completion.chunk",
-						Created: created,
-						Model:   model,
+						ID:           chatID,
+						Object:       "chat.completion.chunk",
+						Created:      created,
+						Model:        model,
+						XActualModel: actualModel,
 						Choices: []openai.ChatCompletionChoice{
 							{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finishReason},
 						},
@@ -533,10 +538,11 @@ processLines:
 
 		finishReason := "tool_calls"
 		finishChunk := openai.ChatCompletionResponse{
-			ID:      chatID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
+			ID:           chatID,
+			Object:       "chat.completion.chunk",
+			Created:      created,
+			Model:        model,
+			XActualModel: actualModel,
 			Choices: []openai.ChatCompletionChoice{
 				{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finishReason},
 			},
@@ -547,10 +553,11 @@ processLines:
 	} else {
 		finishReason := "stop"
 		finishChunk := openai.ChatCompletionResponse{
-			ID:      chatID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
+			ID:           chatID,
+			Object:       "chat.completion.chunk",
+			Created:      created,
+			Model:        model,
+			XActualModel: actualModel,
 			Choices: []openai.ChatCompletionChoice{
 				{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &finishReason},
 			},
@@ -666,6 +673,9 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, args []stri
 	for i := range events {
 		if events[i].Type == "result" && events[i].IsError {
 			resp.XRelayError = true
+		}
+		if observed := events[i].observedModel(); observed != "" {
+			resp.XActualModel = observed
 		}
 	}
 

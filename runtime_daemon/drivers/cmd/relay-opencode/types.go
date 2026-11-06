@@ -23,15 +23,16 @@ type opencodeEvent struct {
 }
 
 type opencodePart struct {
-	ID     string          `json:"id"`
-	Type   string          `json:"type"`
-	Text   string          `json:"text"`
-	Tool   string          `json:"tool"`
-	CallID string          `json:"callID"`
-	State  *opencodeState  `json:"state"`
-	Reason string          `json:"reason"`
-	Tokens *opencodeTokens `json:"tokens"`
-	Cost   float64         `json:"cost"`
+	ID        string          `json:"id"`
+	MessageID string          `json:"messageID"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Tool      string          `json:"tool"`
+	CallID    string          `json:"callID"`
+	State     *opencodeState  `json:"state"`
+	Reason    string          `json:"reason"`
+	Tokens    *opencodeTokens `json:"tokens"`
+	Cost      float64         `json:"cost"`
 }
 
 type opencodeState struct {

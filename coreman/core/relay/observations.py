@@ -56,6 +56,15 @@ async def save_health(
         return
     at = observation.observed_at or datetime.now(UTC)
     data = observation.model_dump(mode="json")
+    if (
+        observation.check_kind == "model"
+        and observation.status in ("down", "auth_fail", "timeout")
+        and not observation.error_code
+        and observation.detail
+    ):
+        _, code, _ = provider_failure(observation.detail)
+        if code != "model_request_failed":
+            data["error_code"] = code
     data["observed_at"] = at.isoformat()
     data["reply_verified"] = bool(
         observation.reply_verified

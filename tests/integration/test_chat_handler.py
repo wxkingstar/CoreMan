@@ -109,7 +109,7 @@ async def test_normal_round_trip_new_session_then_resume(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     bot, relay_row, _ = await seed_bot(db_session, env={"DB_PASSWORD": "pw"})
-    fake = FakeRelay("normal")
+    fake = FakeRelay("normal_observed_model")
     t1 = await chat_task(db_session, bot, "你好")
     await run(db_engine, t1, fake)
     s = await stream_of(db_session, t1.id)
@@ -130,6 +130,8 @@ async def test_normal_round_trip_new_session_then_resume(
     await db_session.refresh(relay_row)
     assert relay_row.model_health["check_kind"] == "conversation"
     assert relay_row.model_health["reply_verified"] is True
+    assert relay_row.model_health["model"] == "claude-observed"
+    assert relay_row.model_health["requested_model"] != "claude-observed"
     log = (await db_session.execute(select(ChatLog))).scalar_one()
     assert (
         log.status == "success"
@@ -313,6 +315,28 @@ async def test_unconfirmed_streams_keep_relay_reason_link_and_partial_text(
     assert log3.status == "error" and log3.error_code == "incomplete_result"
     assert "半截" in ((await stream_of(db_session, t3.id)).final_text or "")
     assert (await tasks.get(db_session, t3.id)).status == "failed"  # type: ignore[union-attr]
+
+
+async def test_error_finish_records_model_failure(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, relay_row, _ = await seed_bot(db_session)
+    assert relay_row.model_health is None
+    assert relay_row.last_model_failure is None
+
+    task = await chat_task(db_session, bot, "a")
+    await run(db_engine, task, FakeRelay("error_finish"))
+
+    result = await tasks.get(db_session, task.id)
+    assert result is not None and result.status == "failed"
+    log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == task.id))).scalar_one()
+    assert log.status == "error" and log.error_code == "incomplete_result"
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health is not None
+    assert relay_row.model_health["status"] == "down"
+    assert relay_row.model_health["error_code"] == "model_request_failed"
+    assert relay_row.model_health["reply_verified"] is False
+    assert relay_row.last_model_failure == relay_row.model_health
 
 
 async def test_whitelist_unsupported_help_and_disabled(

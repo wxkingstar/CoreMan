@@ -80,6 +80,7 @@ class Outcome:
     # 运行时随响应带回的订阅额度原样保存，收尾时校验后写入实例。
     rate_limits: dict[str, Any] | None = None
     runtime_seat_id: str | None = None
+    actual_model: str | None = None
     saw_event: bool = False
     finish_reason: str | None = None
     relay_error: bool = False
