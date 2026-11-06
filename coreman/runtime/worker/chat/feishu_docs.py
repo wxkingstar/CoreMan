@@ -20,7 +20,8 @@ from coreman.runtime.worker.context import TaskContext
 RULES = (
     "\n\n## 群里的飞书文档\n"
     "群里有人发飞书文档、知识库、电子表格或多维表格链接并需要你看内容时，用 coreman_feishu_docs"
-    " 的工具读取（只收链接，不收 token）。你只能读到本群看得到的文档。"
+    " 的工具读取（只收链接，不收 token），不要用浏览器、curl 或浏览器类技能打开飞书链接："
+    "那里没有飞书登录，只会跳到登录页。你只能读到本群看得到的文档。"
     "返回 no_access 且 can_request_access 为 true 时，可以调用 feishu_doc_request_access"
     " 请提问人放行，然后简短告诉他去点卡片并结束本轮，他确认后会自动继续；"
     "can_request_access 为 false 时按 hint 说明怎么办，不要换别的办法绕过。\n"
