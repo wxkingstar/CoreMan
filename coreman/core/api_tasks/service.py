@@ -32,6 +32,7 @@ from coreman.core.db.models import (
     UserIdentity,
     UserReached,
 )
+from coreman.core.i18n.messages import MESSAGES
 from coreman.core.wecom.messages import InboundMessage, Sender, TextPart
 
 PROMPT_MAX = 20000
@@ -280,6 +281,21 @@ LOG_FAILED = ("error", "timeout", "failed")
 REPLY_LIMIT = LIMITS["response_content"]
 
 
+# 飞书卡片的完成标记（「✅ 回复已生成」等，各语言一份）：给人看的，不返回给调用的程序。
+DONE_SUFFIXES = tuple(
+    {table["done_suffix"] for table in MESSAGES.values() if "done_suffix" in table}
+)
+
+
+def clean_reply(text: str | None) -> str | None:
+    if text is None:
+        return None
+    for suffix in DONE_SUFFIXES:
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
 def _status(task: Task | None, log: ChatLog | None) -> str:
     if task is None:
         return "expired" if log is None else ("failed" if log.status != "success" else "succeeded")
@@ -332,7 +348,7 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         if asked is not None:
             status = "waiting_user"
     finished = status not in ("queued", "running")
-    reply = log.response_content if finished and log is not None else None
+    reply = clean_reply(log.response_content) if finished and log is not None else None
     conversation: dict[str, Any] = {"target": row.target}
     if row.alias:
         conversation["alias"] = row.alias
