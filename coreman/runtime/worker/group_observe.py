@@ -10,6 +10,7 @@ shadow 只记录。每次判断（含跳过）都写进 `group_observe_decisions
 
 调度员（`group_role = dispatcher`）换一道判断题：是不是有事要安排人。判断为是时不插话，
 排一个调度回合（见 core/chat/dispatch），试运行和开启都排，调度回合自己决定记录还是交接。
+群里只有一位真人时不问判断模型，每批消息都排调度回合（判断记录为 `solo`）。
 群里有调度员时，其他成员在这个群不再判断，被 @ 照常回答。
 """
 
@@ -126,37 +127,43 @@ class GroupObserveHandler:
             async with ctx.session_factory() as session:
                 await self._finish(session, ctx, "succeeded", None, {"skipped": "self_last"})
             return
-        decider = self._get_decider()
         payload: dict[str, Any] = {
             "bot": {"name": bot.name, "role": bot.group_observe_scope or bot.description},
             "recent_messages": [line.out() for line in lines],
         }
-        if decider is None:
-            async with ctx.session_factory() as session:
-                await self._record(session, bot, chat_id, event_id, mode, "unconfigured")
-                await self._finish(session, ctx, "succeeded", None, {"skipped": "unconfigured"})
-            return
-        decision = await decider.should_interject(
-            payload,
-            instruction=(
-                decider_mod.DISPATCH_INSTRUCTION if dispatcher else decider_mod.INSTRUCTION
-            ),
-        )
-        if decision.error:
-            outcome = "error"
-        elif decision.refused:
-            outcome = "refused"
-        elif decision.probability is None or decision.probability <= threshold:
-            outcome = "below_threshold"
+        # 单人群：那位真人说的每句话都由调度员回应，不用判断模型筛。
+        solo = dispatcher and await dispatch.human_count(bot, chat_id, ctx.cipher) == 1
+        decision: decider_mod.Decision | None = None
+        if solo:
+            outcome = "solo"
         else:
-            outcome = "interject"
+            decider = self._get_decider()
+            if decider is None:
+                async with ctx.session_factory() as session:
+                    await self._record(session, bot, chat_id, event_id, mode, "unconfigured")
+                    await self._finish(session, ctx, "succeeded", None, {"skipped": "unconfigured"})
+                return
+            decision = await decider.should_interject(
+                payload,
+                instruction=(
+                    decider_mod.DISPATCH_INSTRUCTION if dispatcher else decider_mod.INSTRUCTION
+                ),
+            )
+            if decision.error:
+                outcome = "error"
+            elif decision.refused:
+                outcome = "refused"
+            elif decision.probability is None or decision.probability <= threshold:
+                outcome = "below_threshold"
+            else:
+                outcome = "interject"
         anchor = next((line for line in reversed(lines) if line.event_id is not None), None)
         async with ctx.session_factory() as session:
             row = await self._record(
                 session, bot, chat_id, event_id, mode, outcome, decision=decision, state=payload
             )
             turn: Task | None = None
-            if outcome == "interject" and dispatcher and anchor is not None:
+            if outcome in ("interject", "solo") and dispatcher and anchor is not None:
                 if await self._busy(session, bot.id, busy_key):
                     row.outcome = "busy"
                 else:
@@ -168,6 +175,7 @@ class GroupObserveHandler:
                         row.id,
                         origin=dispatch.ORIGIN,
                         session_key=busy_key,
+                        solo=solo,
                     )
                     row.task_id = turn.id if turn else None
             elif outcome == "interject" and mode == "on" and anchor is not None:
@@ -202,8 +210,8 @@ class GroupObserveHandler:
             "group_observe_decided",
             outcome=outcome,
             mode=mode,
-            probability=decision.probability,
-            latency_ms=decision.latency_ms,
+            probability=decision.probability if decision else None,
+            latency_ms=decision.latency_ms if decision else None,
         )
 
     async def _pick(self, ctx: TaskContext, chat_id: str, decision_id: int) -> None:
@@ -309,6 +317,7 @@ class GroupObserveHandler:
         *,
         origin: str = "observe",
         session_key: str | None = None,
+        solo: bool = False,
     ) -> Task | None:
         event = await session.get(InboundEvent, event_id) if event_id else None
         if event is None:
@@ -324,6 +333,7 @@ class GroupObserveHandler:
                     "platform_user_id": event.sender_platform_user_id,
                     "origin": origin,
                     "observe_decision_id": decision_id,
+                    **({"solo": True} if solo else {}),
                 },
                 session_key=session_key or chat_id,
                 inbound_event_id=event.id,

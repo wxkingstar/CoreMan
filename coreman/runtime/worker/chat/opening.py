@@ -526,7 +526,9 @@ class OpenStage(ChatStageBase):
         names = {b.id: b.name for b in await session.scalars(select(Bot).where(Bot.id.in_(ids)))}
         ctx.dispatch_staff = staff
         ctx.dispatch_codes = {t.code for t in recent}
-        return dispatch.note(staff, unverified, recent, names)
+        return dispatch.note(
+            staff, unverified, recent, names, solo=bool(ctx.task.payload.get("solo"))
+        )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""

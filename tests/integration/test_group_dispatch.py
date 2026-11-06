@@ -45,7 +45,9 @@ def plan(**data):
     return "```json\n" + json.dumps(data, ensure_ascii=False) + "\n```"
 
 
-async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str, mode="shadow"):
+async def _dispatch_turn(
+    db_engine, db_session, monkeypatch, answer: str, mode="shadow", humans: int | None = None
+):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.fakes import fake_relay
@@ -70,14 +72,20 @@ async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str, mode="
     async def employees(session, dispatcher, chat_id, requester_id, cipher):
         return staff, []
 
+    async def human_count(bot, chat_id, cipher):
+        return humans
+
     monkeypatch.setattr(dispatch, "employees", employees)
+    monkeypatch.setattr(dispatch, "human_count", human_count)
     configured = record_schedule_configure(monkeypatch)
     await say(db_session, bot, "om1", "上周退货率多少？谁帮我查一下")
     (observe,) = await tasks_of(db_session, bot, "group_observe")
     await quiet_down(db_session, bot)
     decider = FakeDecider(0.9)
     await run_observe(db_engine, db_session, observe, decider)
-    assert decider.instructions == [decider_mod.DISPATCH_INSTRUCTION]
+    # 单人群不问判断模型，直接排调度回合。
+    expected = [] if humans == 1 else [decider_mod.DISPATCH_INSTRUCTION]
+    assert decider.instructions == expected
     await instances.register(
         db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
     )
@@ -85,6 +93,7 @@ async def _dispatch_turn(db_engine, db_session, monkeypatch, answer: str, mode="
     turn = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
     await db_session.commit()
     assert turn is not None and turn.payload["origin"] == "dispatch"
+    assert turn.payload.get("solo", False) is (humans == 1)
     assert turn.session_key == dispatch.session_key(CHAT)
     relay = fake_relay.FakeRelay("dispatch_plan")
     ctx = build_ctx_for(db_engine, turn, relay)
@@ -193,6 +202,18 @@ async def test_ordinary_observers_keep_the_interjection_question(db_engine, db_s
 def test_parse_rejects_bad_decisions(data, error):
     with pytest.raises(ValueError, match=error):
         dispatch.parse(json.dumps(data), STAFF, {"T-1"})
+
+
+def test_reply_is_only_for_single_person_groups():
+    with pytest.raises(ValueError, match="bad_action"):
+        dispatch.parse(plan(action="reply", text="不客气"), STAFF, set())
+    with pytest.raises(ValueError, match="missing_text"):
+        dispatch.parse(plan(action="reply"), STAFF, set(), solo=True)
+    replied = dispatch.parse(plan(action="reply", text="不客气" * 200), STAFF, set(), solo=True)
+    assert replied.action == "reply" and len(replied.text) == dispatch.REPLY_LIMIT
+    note = dispatch.note(STAFF, [], [], {}, solo=True)
+    assert "只有一位真人" in note and "reply" in note and "- none" not in note
+    assert "reply" not in dispatch.note(STAFF, [], [], {})
 
 
 def test_parse_accepts_append_clarify_and_trims():
@@ -321,7 +342,7 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     assert kinds == ["created", "started", "done"]
 
 
-async def test_simple_requests_are_answered_directly_without_a_task_code(
+async def test_simple_requests_say_who_took_it_without_a_task_code(
     db_engine, db_session, monkeypatch
 ):
     answer = plan(
@@ -334,8 +355,9 @@ async def test_simple_requests_are_answered_directly_without_a_task_code(
     )
     (task,) = list(await db_session.scalars(select(WorkTask)))
     assert not task.tracked and task.status == "queued"  # 没写 track：照样交接、记下
-    assert stream.final_text == group_observe.NO_REPLY  # 调度员不发言
-    assert "said" not in decision.dispatch
+    assert stream.final_text == "交给 @运维助手 了：说明白名单办理方式"  # 说交给谁，不带编号
+    assert task.code not in stream.final_text
+    assert decision.dispatch["said"] == stream.final_text
 
     done, body, _ = await _run_work_turn(
         db_engine, db_session, monkeypatch, staff[1].bot_id, "找运维开通，发来页面上的 IP 即可。"
@@ -354,6 +376,32 @@ async def test_live_dispatcher_asks_in_the_group_when_unclear(db_engine, db_sess
     )
     assert stream.final_text == "要看线上还是门店？"
     assert decision.outcome == "dispatch_clarify"
+
+
+async def test_single_person_group_gets_a_direct_reply_without_judging(
+    db_engine, db_session, monkeypatch
+):
+    answer = plan(action="reply", reason="致谢", text="不客气，有事随时说。")
+    _, body, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, answer, mode="on", humans=1
+    )
+    turn = body["messages"][-1]["content"]
+    turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
+    assert "只有一位真人" in turn
+    assert stream.final_text == "不客气，有事随时说。"
+    assert decision.outcome == "dispatch_reply" and decision.probability is None
+    assert list(await db_session.scalars(select(WorkTask))) == []
+
+
+async def test_groups_with_several_people_still_reject_a_direct_reply(
+    db_engine, db_session, monkeypatch
+):
+    answer = plan(action="reply", text="不客气")
+    _, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, answer, mode="on", humans=3
+    )
+    assert stream.final_text == group_observe.NO_REPLY
+    assert decision.outcome == "dispatch_invalid"
 
 
 async def test_mentions_carrying_a_task_code_continue_that_task(db_session):

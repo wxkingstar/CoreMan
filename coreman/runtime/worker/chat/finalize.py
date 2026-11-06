@@ -447,7 +447,7 @@ class FinalizeStage(ChatStageBase):
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict, out: Outcome
     ) -> None:
         """调度回合收尾：校验调度员的决定并记录。试运行只记成 shadow 任务，群里什么也不发；
-        开启时任务交给执行员工，群里回原消息一行（分派、补充给谁，或问一句）。出错一律不出声。"""
+        开启时任务交给执行员工，群里回原消息一行（分派、补充给谁，问一句，或单人群里直接回一句）。出错一律不出声。"""
         from coreman.core.chat import dispatch, group_observe
         from coreman.core.db.models import GroupObserveDecision
 
@@ -464,7 +464,10 @@ class FinalizeStage(ChatStageBase):
             else:
                 try:
                     plan = dispatch.parse(
-                        verdict.final_text, ctx.dispatch_staff, ctx.dispatch_codes
+                        verdict.final_text,
+                        ctx.dispatch_staff,
+                        ctx.dispatch_codes,
+                        solo=bool(ctx.task.payload.get("solo")),
                     )
                 except ValueError as exc:
                     outcome, result["error"] = "dispatch_invalid", str(exc)
@@ -477,6 +480,7 @@ class FinalizeStage(ChatStageBase):
                         "task_code": plan.task_code,
                         "note": plan.note,
                         "question": plan.question,
+                        "text": plan.text,
                     }
                     result["codes"], line = await dispatch.record(
                         session,
