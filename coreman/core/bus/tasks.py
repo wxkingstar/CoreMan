@@ -248,9 +248,18 @@ async def defer(session: AsyncSession, task_id: int, *, seconds: float) -> bool:
 
 
 async def has_newer(
-    session: AsyncSession, bot_id: uuid.UUID, session_key: str, *, task_id: int, kind: str
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    session_key: str,
+    *,
+    task_id: int,
+    kind: str,
+    exclude_api: bool = False,
 ) -> bool:
-    """同会话里是否已有比 `task_id` 更晚入队的同类任务（不论状态）。"""
+    """同会话里是否已有比 `task_id` 更晚入队的同类任务（不论状态）。
+
+    `exclude_api`：不算 API 发起的任务（载荷带 `api_task_id`），只看人发来的消息。
+    """
     stmt = (
         select(Task.id)
         .where(
@@ -261,6 +270,8 @@ async def has_newer(
         )
         .limit(1)
     )
+    if exclude_api:
+        stmt = stmt.where(Task.payload["api_task_id"].astext.is_(None))
     return (await session.scalar(stmt)) is not None
 
 

@@ -283,3 +283,22 @@ async def test_concurrent_retry_replays_instead_of_hitting_the_limit(db_session)
     # 已满时用同一个 request_id 重试：回放原任务，不回 429。
     again, created = await _create(db_session, minted, owner, request_id="r-0")
     assert not created and again.request_id == "r-0"
+
+
+async def test_deferred_api_turn_is_not_superseded_by_the_next_api_task(db_engine, db_session):
+    _, owner, minted = await _setup(db_session)
+    first, _ = await _create(db_session, minted, owner, request_id="a")
+    task = await _claim(db_session)
+    await _run(db_engine, task)  # 触发消息未发出：放回队列
+    second, _ = await _create(db_session, minted, owner, request_id="b")
+    await _trigger_sent(db_session, first)
+    queued = await tasks.get(db_session, task.id)
+    queued.run_after = utcnow()
+    await db_session.commit()
+    again = await _claim(db_session)
+    assert again.id == task.id and again.attempts == 2
+    fake = await _run(db_engine, again)
+    # 后面排着的是另一条 API 任务，不是人的新消息：第一条照常执行。
+    assert len(fake.requests) == 1
+    assert (await service.view(db_session, first))["status"] == "succeeded"
+    assert (await service.view(db_session, second))["status"] == "queued"

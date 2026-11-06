@@ -174,6 +174,9 @@ class ChatTaskHandler(
                 intake.session_key,
                 task_id=ctx.task.id,
                 kind=ctx.task.kind,
+                # API 发起的轮次只让人的新消息替代：同一会话里排在后面的另一条 API 任务
+                # 不算（等触发消息时会放回队列，不能因此被后一条挤掉）。
+                exclude_api=bool(ctx.task.payload.get("api_task_id")),
             )
             if newer:
                 await tasks.finish(
