@@ -297,6 +297,7 @@ async def test_the_askers_click_lets_only_them_read_the_document(
     prompt, env = await configure(db_session, ctx, intake, uuid.uuid4(), "你是助理", {})
     await db_session.commit()
     assert "## 群里的飞书文档" in prompt and env[policy.PREFIX + "URL"].endswith(URL)
+    assert "不要用浏览器" in prompt
     assert "同意以他的身份读取" in ctx.turn_notes[0]
     await db_session.refresh(row)
     assert row.status == "approved" and row.decided_at is not None
