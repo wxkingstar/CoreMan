@@ -38,6 +38,8 @@ class BotInfo:
     welcome_message: str | None
     # 群聊旁听开着（shadow / on）：网关放行没 @ 机器人的群消息。
     observe: bool = False
+    # 开着旁听（on）的调度员：单人群里收到消息就打「处理中」表情。
+    dispatch_live: bool = False
 
 
 # 子进程连接池：出站那一路一条会话，入站 ack 那一路一条会话。常驻的应用独占锁连接走单独的
@@ -81,6 +83,10 @@ async def _sleep_unless_stopped(stop: asyncio.Event, seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
 
 
+def _dispatch_live(bot: Bot) -> bool:
+    return bot.group_role == "dispatcher" and bot.group_observe == "on"
+
+
 async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> None:
     # 父进程是 forkserver，它被各子进程持有的管道吊着，supervisor 死了它也不退，父进程号不变；
     # 所以看 multiprocessing 留给子进程的 supervisor 哨兵。
@@ -119,7 +125,11 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
             credentials = decrypt_json(cfg.build_cipher(), bot.credentials_enc, CREDENTIALS_AAD)
             initial_credentials = bot.credentials_enc
             info = BotInfo(
-                bot.id, bot.bot_key, bot.welcome_message, observe=bot.group_observe != "off"
+                bot.id,
+                bot.bot_key,
+                bot.welcome_message,
+                observe=bot.group_observe != "off",
+                dispatch_live=_dispatch_live(bot),
             )
         app_id, secret = credentials["app_id"], credentials["app_secret"]
         app_guard = await guard_engine.connect()
@@ -169,6 +179,14 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                 # 回复按钮：提问人以外的人点击直接拒绝；会话类型按真实私聊记录改判。
                 outcome = await admit(session, info, message, lease_generation=generation)
                 await session.commit()
+            if (
+                info.dispatch_live
+                and message.kind == "message"
+                and message.chat_type == "group"
+                and message.sender.sender_type != "bot"
+                and not message.mentions_bot
+            ):
+                transport.acks.start(message.chat_id, message.message_id)
             return outcome
 
         channel = DurableChannel(
@@ -196,6 +214,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                     break
                 info.welcome_message = current.welcome_message
                 info.observe = current.group_observe != "off"
+                info.dispatch_live = _dispatch_live(current)
                 transport.rich_cards = current.rich_cards
                 more = await transport.round()  # 租约围栏在这一轮开头查一次
             except LeaseLost:

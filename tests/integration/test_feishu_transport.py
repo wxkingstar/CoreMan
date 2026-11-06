@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -1292,6 +1293,71 @@ async def test_dispatch_turn_clears_typing_after_its_line_is_sent(db_session, db
         await transport.round()
     assert any("/reactions" not in path for _, path, _ in api.calls)  # 安排的那一行发出去了
     assert len(_reactions(api, "POST")) == 1 and len(_reactions(api, "DELETE")) == 1
+
+
+async def _instant_acks(transport, monkeypatch, *message_ids, humans=1):
+    from coreman.core.chat import dispatch
+
+    async def human_count_with(client, bot_id, chat_id):
+        return humans
+
+    monkeypatch.setattr(dispatch, "human_count_with", human_count_with)
+    for mid in message_ids:
+        transport.acks.start("oc1", mid)
+    await asyncio.gather(*list(transport.acks._tasks))
+
+
+async def test_single_person_group_gets_the_emoji_on_receipt_and_loses_it_with_the_line(
+    db_session, db_engine, monkeypatch
+):
+    factory, api, transport, row = await _dispatch_stream(db_session, db_engine)
+    # 网关收到这一批的两句就打表情；第三句在调度回合之后才到，属于下一批。
+    await _instant_acks(transport, monkeypatch, "om_0", "om_in", "om_next")
+    assert len(_reactions(api, "POST")) == 3
+    await transport.round()
+    assert len(_reactions(api, "POST")) == 3  # 调度回合不再另打
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text="交给 @数据助手 了：查退货率")
+        await session.commit()
+    for _ in range(3):
+        await transport.round()
+    deleted = _reactions(api, "DELETE")
+    assert len(deleted) == 2 and not any(api_id("om_next") in p for p in deleted)
+    assert len(_reactions(api, "POST")) == 3  # 发安排的那一行时也没再打
+    assert transport.acks.has("oc1", "om_next") and not transport.acks.has("oc1", "om_in")
+
+
+async def test_emoji_on_receipt_is_cleared_when_the_dispatcher_stays_silent(
+    db_session, db_engine, monkeypatch
+):
+    from coreman.core.chat.group_observe import NO_REPLY
+
+    factory, api, transport, row = await _dispatch_stream(db_session, db_engine)
+    await _instant_acks(transport, monkeypatch, "om_in")
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text=NO_REPLY)
+        await session.commit()
+    await transport.round()
+    assert len(_reactions(api, "POST")) == 1 and len(_reactions(api, "DELETE")) == 1
+    assert all("/reactions" in path for _, path, _ in api.calls)
+
+
+async def test_groups_with_several_people_get_no_emoji_on_receipt(
+    db_session, db_engine, monkeypatch
+):
+    _, api, transport, _ = await _dispatch_stream(db_session, db_engine)
+    await _instant_acks(transport, monkeypatch, "om_in", humans=3)
+    assert api.calls == [] and not transport.acks.has("oc1", "om_in")
+
+
+async def test_stale_emoji_on_receipt_is_cleared_after_a_while(db_session, db_engine, monkeypatch):
+    from coreman.runtime.gateway_feishu import acks
+
+    _, api, transport, _ = await _dispatch_stream(db_session, db_engine)
+    await _instant_acks(transport, monkeypatch, "om_in")
+    monkeypatch.setattr(acks, "ACK_TTL_SECONDS", -1)
+    await transport.round()
+    assert len(_reactions(api, "DELETE")) == 1 and not transport.acks.has("oc1", "om_in")
 
 
 async def test_outbox_short_reply_quotes_the_message_it_answers(db_session, db_engine):

@@ -127,6 +127,10 @@ class FeishuTransport:
         self.images = RemoteImages(self.upload_image, transport=image_transport)
         # 机器人的富卡片开关；子进程每轮从库里刷新。
         self.rich_cards = True
+        # 调度员在单人群里收到消息就打的「处理中」表情（见 acks.py）。
+        from coreman.runtime.gateway_feishu.acks import Acks
+
+        self.acks = Acks(self)
 
     async def fence(self) -> None:
         async with self.factory() as session:
@@ -235,6 +239,7 @@ class FeishuTransport:
 
     async def _deliver(self) -> bool:
         self._round_fenced = True
+        await self.acks.expire()
         try:
             async with self.factory() as session:
                 rows = list(
@@ -334,11 +339,16 @@ class FeishuTransport:
             self._headings.pop(row.task_id, None)
         return title
 
-    async def _ensure_delivery(self, task_id: int) -> None:
+    async def _ensure_delivery(self, task_id: int, *, typing_done: bool = False) -> None:
         async with self.factory() as session:
-            if await session.get(FeishuDelivery, task_id) is None:
-                session.add(FeishuDelivery(task_id=task_id))
-                await session.commit()
+            delivery = await session.get(FeishuDelivery, task_id)
+            if delivery is None:
+                delivery = FeishuDelivery(task_id=task_id)
+                session.add(delivery)
+            if typing_done:
+                # 这一轮的表情另有人管（网关收到消息时打的），不再打。
+                delivery.reaction_done = True
+            await session.commit()
 
     async def push(self, row: TaskStream) -> None:
         if row.reply_context.get("_collaboration_helper"):
@@ -351,20 +361,29 @@ class FeishuTransport:
             # 群聊旁听的插话回合：不出「思考中」，终稿出来再整张发；agent 决定不说话就不发。
             # 调度回合一开始就在原消息上打「处理中」表情，不说话时也要撤掉。
             dispatching = bool(row.reply_context.get("_dispatch"))
+            chat_id = row.reply_context.get("chat_id")
+            anchor = row.reply_context.get("message_id")
+            # 单人群里网关收到消息时已经打过表情：这一轮不再另打，结束时撤掉那一批。
+            acked = dispatching and self.acks.has(chat_id, anchor)
             if not row.is_complete:
-                if dispatching:
+                if dispatching and not acked:
                     await self._ensure_delivery(row.task_id)
                     await typing(self, row.task_id)
                 return
             final = row.final_text if row.final_text is not None else row.pending_text
             if visible_parts("", final)[1].strip() in ("", NO_REPLY):
-                if dispatching:
+                if acked:
+                    await self.acks.clear(chat_id, anchor)
+                elif dispatching:
                     await self._ensure_delivery(row.task_id)
                     await typing(self, row.task_id, done=True)
                 async with self.factory() as session:
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
                 return
+            if acked:
+                await self.acks.clear(chat_id, anchor)
+                await self._ensure_delivery(row.task_id, typing_done=True)
         await self._ensure_delivery(row.task_id)
         await typing(self, row.task_id)
         async with self.factory() as session:
