@@ -274,8 +274,12 @@ def _definition(item: Tool) -> dict[str, Any]:
     return {
         "name": item.name,
         "description": item.description + note,
-        "inputSchema": _slim(item.args.model_json_schema()),
+        "inputSchema": input_schema(item.args),
     }
+
+
+def input_schema(args: type[Arguments]) -> dict[str, Any]:
+    return cast(dict[str, Any], _slim(args.model_json_schema()))
 
 
 def _slim(value: Any) -> Any:

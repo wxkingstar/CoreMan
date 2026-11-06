@@ -61,6 +61,12 @@ class ContentStage(ChatStageBase):
             quoted_message_id = enriched.media_message_id
         else:
             enriched_text, quoted_message_id = pre.intake.text, None
+        if pre.intake.bot.platform == "feishu" and pre.intake.chat_type == "group":
+            from coreman.runtime.worker.chat.feishu_docs import remember_links
+
+            async with ctx.session_factory() as session:
+                await remember_links(session, ctx.task.id, enriched_text)
+                await session.commit()
 
         fetcher: MediaFetcher
         owns_fetcher = pre.intake.bot.platform == "feishu" or ctx.media_fetcher is None

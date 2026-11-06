@@ -228,11 +228,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"commit":  buildCommit,
 		"capabilities": map[string]bool{
 			"feishu_personal_tools_v1": true,
-			"wecom_personal_tools_v1":  true,
-			"owner_session_view_v1":    true,
-			"systems_catalog_v1":       true,
-			"system_mcp_v1":            true,
-			"resume_fallback_v1":       true,
+			// Feishu group chats can mount the group docs MCP (coreman_feishu_docs).
+			"feishu_group_docs_v1":    true,
+			"wecom_personal_tools_v1": true,
+			"owner_session_view_v1":   true,
+			"systems_catalog_v1":      true,
+			"system_mcp_v1":           true,
+			"resume_fallback_v1":      true,
 		},
 	})
 }

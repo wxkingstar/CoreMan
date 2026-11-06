@@ -114,6 +114,8 @@ class Capability(BaseModel):
     # 驱动能在原有能力之上附加挂载本人飞书工具（MCP）。旧节点上报的
     # feishu_personal_restricted_v1 是替换式的受限模式，已不再使用，按未知字段丢弃。
     feishu_personal_tools_v1: StrictBool = False
+    # 驱动能在飞书群聊里挂载群文档工具（MCP，coreman_feishu_docs）。旧节点没有，群里读不了文档。
+    feishu_group_docs_v1: StrictBool = False
     # 驱动能在原有能力之上附加挂载本人企业微信工具（MCP）。
     wecom_personal_tools_v1: StrictBool = False
     # 驱动的会话记录可以给本人看：不含环境变量（机器人密钥、访问令牌）。

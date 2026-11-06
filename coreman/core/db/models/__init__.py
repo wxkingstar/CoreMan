@@ -55,6 +55,7 @@ from coreman.core.db.models.cloud_proxy import (
     CloudPendingApproval,
 )
 from coreman.core.db.models.feishu_apps import FeishuAppRegistration
+from coreman.core.db.models.feishu_docs import DOC_CONSENT_STATUSES, FeishuDocConsent
 from coreman.core.db.models.feishu_personal import FeishuPersonalGrant, FeishuPersonalSend
 from coreman.core.db.models.infrastructure import (
     CATALOG_STATUSES,
@@ -122,6 +123,8 @@ __all__ = [
     "WECOM_BINDING_STATUSES",
     "WECOM_SCAN_STATUSES",
     "WecomPersonalBinding",
+    "DOC_CONSENT_STATUSES",
+    "FeishuDocConsent",
     "FeishuPersonalGrant",
     "FeishuPersonalSend",
     "RuntimeNode",

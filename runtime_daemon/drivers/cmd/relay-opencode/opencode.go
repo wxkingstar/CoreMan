@@ -53,7 +53,7 @@ func resolveUploadDir(workingDir, sessionsAbsDir, sessionID string) string {
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") || strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") || strings.HasPrefix(e, "OPENCODE_CONFIG_CONTENT=") || strings.HasPrefix(e, "OPENCODE_PERMISSION=") || strings.HasPrefix(e, seatHomeEnv+"=") {
+		if strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_FEISHU_DOCS_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") || strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") || strings.HasPrefix(e, "OPENCODE_CONFIG_CONTENT=") || strings.HasPrefix(e, "OPENCODE_PERMISSION=") || strings.HasPrefix(e, seatHomeEnv+"=") {
 			continue
 		}
 		env = append(env, e)
@@ -64,8 +64,9 @@ func cleanEnv(extra map[string]string) []string {
 	env = append(env, "OPENCODE_DISABLE_AUTOUPDATE=1")
 	feishu := openai.FeishuPersonalEnabled(extra)
 	wecom := openai.WecomPersonalEnabled(extra)
+	docs := openai.FeishuDocsEnabled(extra)
 	for k, v := range extra {
-		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) {
+		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) || (strings.HasPrefix(k, "COREMAN_FEISHU_DOCS_") && !docs) {
 			continue
 		}
 		if strings.HasPrefix(k, "OPENCODE_") || k == "XDG_DATA_HOME" {
