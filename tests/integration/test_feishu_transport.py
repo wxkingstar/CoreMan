@@ -1236,6 +1236,64 @@ async def test_observe_turn_sends_only_the_final_and_never_no_reply(db_session, 
         assert done.finish_pushed_at is not None
 
 
+class _ReactionAPI(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if "/reactions" in path:
+            self.calls.append((method, path, kwargs.get("json")))
+            return {"data": {"reaction_id": "reaction1"}}
+        return await super().call(method, path, **kwargs)
+
+
+async def _dispatch_stream(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        stream = await session.get(TaskStream, row.task_id)
+        stream.reply_context = {**stream.reply_context, "_observe": True, "_dispatch": True}
+        await session.commit()
+    api = _ReactionAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    return factory, api, transport, row
+
+
+def _reactions(api, method):
+    return [path for m, path, _ in api.calls if m == method and "/reactions" in path]
+
+
+async def test_dispatch_turn_shows_typing_at_once_and_clears_it_when_silent(db_session, db_engine):
+    from coreman.core.chat.group_observe import NO_REPLY
+
+    factory, api, transport, row = await _dispatch_stream(db_session, db_engine)
+    await transport.round()
+    # 调度回合一开始就在原消息上打「处理中」，但不出「思考中」卡片。
+    assert len(_reactions(api, "POST")) == 1
+    assert all("/reactions" in path for _, path, _ in api.calls)
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text=NO_REPLY)
+        await session.commit()
+    await transport.round()
+    assert len(_reactions(api, "DELETE")) == 1  # 决定不说话：表情撤掉
+    assert all("/reactions" in path for _, path, _ in api.calls)  # 也不往群里发东西
+    async with factory() as session:
+        done = await session.get(TaskStream, row.task_id, populate_existing=True)
+        assert done.finish_pushed_at is not None
+
+
+async def test_dispatch_turn_clears_typing_after_its_line_is_sent(db_session, db_engine):
+    factory, api, transport, row = await _dispatch_stream(db_session, db_engine)
+    await transport.round()
+    assert len(_reactions(api, "POST")) == 1
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text="交给 @数据助手 了：查退货率")
+        await session.commit()
+    for _ in range(3):
+        await transport.round()
+    assert any("/reactions" not in path for _, path, _ in api.calls)  # 安排的那一行发出去了
+    assert len(_reactions(api, "POST")) == 1 and len(_reactions(api, "DELETE")) == 1
+
+
 async def test_outbox_short_reply_quotes_the_message_it_answers(db_session, db_engine):
     bot, _row, generation = await seed(db_session)
     factory, api = make_session_factory(db_engine), FakeAPI()

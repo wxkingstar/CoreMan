@@ -334,6 +334,12 @@ class FeishuTransport:
             self._headings.pop(row.task_id, None)
         return title
 
+    async def _ensure_delivery(self, task_id: int) -> None:
+        async with self.factory() as session:
+            if await session.get(FeishuDelivery, task_id) is None:
+                session.add(FeishuDelivery(task_id=task_id))
+                await session.commit()
+
     async def push(self, row: TaskStream) -> None:
         if row.reply_context.get("_collaboration_helper"):
             if row.is_complete:
@@ -343,21 +349,23 @@ class FeishuTransport:
             return
         if row.reply_context.get("_observe"):
             # 群聊旁听的插话回合：不出「思考中」，终稿出来再整张发；agent 决定不说话就不发。
+            # 调度回合一开始就在原消息上打「处理中」表情，不说话时也要撤掉。
+            dispatching = bool(row.reply_context.get("_dispatch"))
             if not row.is_complete:
+                if dispatching:
+                    await self._ensure_delivery(row.task_id)
+                    await typing(self, row.task_id)
                 return
             final = row.final_text if row.final_text is not None else row.pending_text
             if visible_parts("", final)[1].strip() in ("", NO_REPLY):
+                if dispatching:
+                    await self._ensure_delivery(row.task_id)
+                    await typing(self, row.task_id, done=True)
                 async with self.factory() as session:
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
                 return
-        async with self.factory() as session:
-            delivery = await session.get(FeishuDelivery, row.task_id)
-            if delivery is None:
-                delivery = FeishuDelivery(task_id=row.task_id)
-                session.add(delivery)
-                await session.commit()
-                await session.refresh(delivery)
+        await self._ensure_delivery(row.task_id)
         await typing(self, row.task_id)
         async with self.factory() as session:
             delivery = await session.get(FeishuDelivery, row.task_id)

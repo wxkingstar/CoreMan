@@ -11,6 +11,7 @@ shadow 只记录。每次判断（含跳过）都写进 `group_observe_decisions
 调度员（`group_role = dispatcher`）换一道判断题：是不是有事要安排人。判断为是时不插话，
 排一个调度回合（见 core/chat/dispatch），试运行和开启都排，调度回合自己决定记录还是交接。
 群里只有一位真人时不问判断模型，每批消息都排调度回合（判断记录为 `solo`）。
+调度员等群安静的时长比旁听默认值短（见 `dispatch.QUIET_SECONDS`），单人群更短。
 群里有调度员时，其他成员在这个群不再判断，被 @ 照常回答。
 """
 
@@ -64,6 +65,14 @@ class GroupObserveHandler:
         max_wait = float(await store.get("group_observe_max_wait_seconds", default=60))
         threshold = float(await store.get("group_observe_threshold", default=0.3))
         streak_limit = int(await store.get("group_observe_bot_streak_limit", default=3))
+        # 单人群（调度员才查）：在加锁之前查，查飞书最多几秒，不能让入站记账等着这把锁。
+        async with ctx.session_factory() as session:
+            first = await session.get(Bot, ctx.task.bot_id)
+        solo = (
+            first is not None
+            and first.group_role == "dispatcher"
+            and await dispatch.human_count(first, chat_id, ctx.cipher) == 1
+        )
         now = datetime.now(UTC)
         async with ctx.session_factory() as session:
             bot = await session.get(Bot, ctx.task.bot_id)
@@ -72,6 +81,9 @@ class GroupObserveHandler:
                 return
             mode = bot.group_observe
             dispatcher = bot.group_role == "dispatcher"
+            solo = solo and dispatcher
+            if dispatcher:
+                quiet = min(quiet, dispatch.SOLO_QUIET_SECONDS if solo else dispatch.QUIET_SECONDS)
             busy_key = dispatch.session_key(chat_id) if dispatcher else chat_id
             state = await session.get(GroupObserveState, (bot.id, chat_id), with_for_update=True)
             if state is None or state.pending_since is None:
@@ -132,7 +144,6 @@ class GroupObserveHandler:
             "recent_messages": [line.out() for line in lines],
         }
         # 单人群：那位真人说的每句话都由调度员回应，不用判断模型筛。
-        solo = dispatcher and await dispatch.human_count(bot, chat_id, ctx.cipher) == 1
         decision: decider_mod.Decision | None = None
         if solo:
             outcome = "solo"
