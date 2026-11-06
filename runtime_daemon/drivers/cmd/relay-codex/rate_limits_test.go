@@ -37,7 +37,7 @@ func TestRolloutRateLimitsReadsThisTurnsFigure(t *testing.T) {
 		`{"timestamp":"2026-10-19T03:59:34.000Z","type":"event_msg","payload":{"type":"task_complete"}}`,
 	)
 	since, _ := time.Parse(time.RFC3339, "2026-10-19T03:59:00Z")
-	got, _ := json.Marshal(rolloutRateLimits(testThread, since))
+	got, _ := json.Marshal(rolloutRateLimits(readRolloutTail(testThread), since))
 	want := `{"five_hour":{"used_percentage":12.5,"resets_at":5},"seven_day":{"used_percentage":6,"resets_at":1792894969},"observed_at":"2026-10-19T03:59:33Z"}`
 	if string(got) != want {
 		t.Fatalf("got %s\nwant %s", got, want)
@@ -45,7 +45,7 @@ func TestRolloutRateLimitsReadsThisTurnsFigure(t *testing.T) {
 
 	// The newest figure predates the turn (e.g. it failed before calling the
 	// model): no field rather than a stale one.
-	if v := rolloutRateLimits(testThread, since.Add(time.Hour)); v != nil {
+	if v := rolloutRateLimits(readRolloutTail(testThread), since.Add(time.Hour)); v != nil {
 		t.Fatalf("stale figure returned: %v", v)
 	}
 }
@@ -56,7 +56,7 @@ func TestRolloutRateLimitsOmitsWhenUnavailable(t *testing.T) {
 	rolloutPaths.Delete(testThread)
 	since := time.Time{}
 	for _, thread := range []string{"", "../x", "*", testThread} {
-		if v := rolloutRateLimits(thread, since); v != nil {
+		if v := rolloutRateLimits(readRolloutTail(thread), since); v != nil {
 			t.Fatalf("thread %q: %v", thread, v)
 		}
 	}
@@ -65,12 +65,12 @@ func TestRolloutRateLimitsOmitsWhenUnavailable(t *testing.T) {
 		tokenCount("2026-10-19T03:59:33Z", `null`),
 		tokenCount("2026-10-19T03:59:34Z", `{"limit_id":"other","primary":{"used_percent":90,"window_minutes":300}}`),
 	)
-	if v := rolloutRateLimits(testThread, since); v != nil {
+	if v := rolloutRateLimits(readRolloutTail(testThread), since); v != nil {
 		t.Fatalf("got %v", v)
 	}
 	if b, _ := json.Marshal(struct {
 		X any `json:"x,omitempty"`
-	}{rolloutRateLimits(testThread, since)}); string(b) != `{}` {
+	}{rolloutRateLimits(readRolloutTail(testThread), since)}); string(b) != `{}` {
 		t.Fatalf("nil must be omitted, got %s", b)
 	}
 }
@@ -80,19 +80,41 @@ func TestProWeeklyWindowDoesNotInventFiveHourUsage(t *testing.T) {
 	t.Setenv("CODEX_HOME", home)
 	rolloutPaths.Delete(testThread)
 	writeRollout(t, home, tokenCount("2026-10-19T03:59:33Z", `{"plan_type":"pro","primary":{"used_percent":0,"window_minutes":10080}}`))
-	snap := rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	snap := rolloutRateLimits(readRolloutTail(testThread), time.Time{}).(*rateLimitSnapshot)
 	if snap.PlanType != "pro" || snap.FiveHour != nil || snap.SevenDay == nil || snap.SevenDay.UsedPercentage != 0 || len(snap.WindowApplicability) != 0 {
 		t.Fatalf("plan name alone must not imply window policy: %+v", snap)
 	}
 	writeRollout(t, home, tokenCount("2026-10-19T04:00:00Z", `{"window_applicability":{"five_hour":"not_applicable","seven_day":"unrecognized","other":"not_applicable"}}`))
-	snap = rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	snap = rolloutRateLimits(readRolloutTail(testThread), time.Time{}).(*rateLimitSnapshot)
 	if len(snap.WindowApplicability) != 1 || snap.WindowApplicability["five_hour"] != "not_applicable" {
 		t.Fatalf("only explicit, known window policy should be forwarded: %+v", snap)
 	}
 	// A numeric observation takes precedence over an explicit marker.
 	writeRollout(t, home, tokenCount("2026-10-19T04:00:01Z", `{"window_applicability":{"five_hour":"not_applicable"},"primary":{"used_percent":5,"window_minutes":300}}`))
-	snap = rolloutRateLimits(testThread, time.Time{}).(*rateLimitSnapshot)
+	snap = rolloutRateLimits(readRolloutTail(testThread), time.Time{}).(*rateLimitSnapshot)
 	if snap.FiveHour == nil || snap.WindowApplicability["five_hour"] != "" {
 		t.Fatalf("actual window discarded: %+v", snap)
+	}
+}
+
+func TestRolloutTurnModelIgnoresPriorContextAndUsesReroute(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	rolloutPaths.Delete(testThread)
+	since, _ := time.Parse(time.RFC3339, "2026-10-19T03:59:00Z")
+	old := `{"timestamp":"2026-10-19T03:58:59.900Z","type":"turn_context","payload":{"model":"old"}}`
+	current := `{"timestamp":"2026-10-19T03:59:02.100Z","type":"turn_context","payload":{"model":"current"}}`
+	reroute := `{"timestamp":"2026-10-19T03:59:09Z","type":"event_msg","payload":{"type":"model_reroute","to_model":"rerouted"}}`
+	writeRollout(t, home, old)
+	if got := rolloutTurnModel(readRolloutTail(testThread), since); got != "" {
+		t.Fatalf("prior turn model leaked: %q", got)
+	}
+	writeRollout(t, home, old, current)
+	if got := rolloutTurnModel(readRolloutTail(testThread), since); got != "current" {
+		t.Fatalf("turn model = %q", got)
+	}
+	writeRollout(t, home, old, current, reroute)
+	if got := rolloutTurnModel(readRolloutTail(testThread), since); got != "rerouted" {
+		t.Fatalf("rerouted model = %q", got)
 	}
 }

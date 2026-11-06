@@ -24,6 +24,8 @@ type rolloutLine struct {
 	Type      string    `json:"type"`
 	Payload   struct {
 		Type       string             `json:"type"`
+		Model      string             `json:"model"`
+		ToModel    string             `json:"to_model"`
 		RateLimits *codexRateLimitSet `json:"rate_limits"`
 	} `json:"payload"`
 }
@@ -75,9 +77,7 @@ func rolloutPath(threadID string) string {
 	return matches[0]
 }
 
-// rolloutRateLimits returns the quota this turn reported (token_count written
-// at or after since), or untyped nil so the field is omitted.
-func rolloutRateLimits(threadID string, since time.Time) any {
+func readRolloutTail(threadID string) [][]byte {
 	path := rolloutPath(threadID)
 	if path == "" {
 		return nil
@@ -99,7 +99,34 @@ func rolloutRateLimits(threadID string, since time.Time) any {
 	if err != nil {
 		return nil
 	}
-	lines := bytes.Split(data, []byte("\n"))
+	return bytes.Split(data, []byte("\n"))
+}
+
+// rolloutTurnModel takes the CLI's effective turn model from this request's
+// rollout context. The request model and any prior turn's context are ignored.
+func rolloutTurnModel(lines [][]byte, since time.Time) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !bytes.Contains(lines[i], []byte(`"turn_context"`)) &&
+			!bytes.Contains(lines[i], []byte(`"model_reroute"`)) {
+			continue
+		}
+		var line rolloutLine
+		if json.Unmarshal(lines[i], &line) != nil || line.Timestamp.IsZero() || line.Timestamp.Before(since) {
+			continue
+		}
+		if line.Type == "event_msg" && line.Payload.Type == "model_reroute" && line.Payload.ToModel != "" {
+			return line.Payload.ToModel
+		}
+		if line.Type == "turn_context" {
+			return line.Payload.Model
+		}
+	}
+	return ""
+}
+
+// rolloutRateLimits returns the quota this turn reported (token_count written
+// at or after since), or untyped nil so the field is omitted.
+func rolloutRateLimits(lines [][]byte, since time.Time) any {
 	for i := len(lines) - 1; i >= 0; i-- {
 		if !bytes.Contains(lines[i], []byte(`"rate_limits"`)) {
 			continue

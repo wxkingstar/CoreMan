@@ -27,6 +27,7 @@ const staleSessionNotice = "[opencode] 之前的会话记录已不存在，已�
 type turn struct {
 	sessionID  string // the client session
 	opencode   string // the opencode session seen in events
+	messageID  string // the assistant message that supplied the latest text
 	tokens     turnTokens
 	finished   bool // a step ended with a reason other than tool-calls
 	failed     bool
@@ -58,11 +59,16 @@ func parseLine(raw string, envVars map[string]string) (ev opencodeEvent, ok bool
 func (t *turn) observe(ev opencodeEvent) {
 	if ev.SessionID != "" && ev.SessionID != t.opencode {
 		t.opencode = ev.SessionID
+		t.messageID = ""
 		if err := bindSession(t.sessionID, ev.SessionID); err != nil {
 			t.persistErr = "session persistence failed: " + err.Error()
 		}
 	}
 	switch ev.Type {
+	case "text":
+		if ev.Part != nil && ev.Part.Text != "" && ev.SessionID == t.opencode {
+			t.messageID = ev.Part.MessageID
+		}
 	case "step_finish":
 		t.tokens.add(ev.Part)
 		if ev.Part != nil && ev.Part.Reason != "tool-calls" {
@@ -390,11 +396,15 @@ loop:
 		textDelta("")
 	}
 	reason := "stop"
+	actualModel := ""
 	if t.failed {
 		reason = "error"
+	} else {
+		actualModel = observedModel(r.Context(), t.opencode, t.messageID)
 	}
 	emit(openai.ChatCompletionResponse{ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
-		Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &reason}}})
+		XActualModel: actualModel,
+		Choices:      []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("", ""), FinishReason: &reason}}})
 
 	usage := t.usage(model)
 	if includeUsage && usage != nil {
@@ -507,8 +517,9 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input openc
 	finish := "stop"
 	resp := openai.ChatCompletionResponse{
 		ID: chatID, Object: "chat.completion", Created: created, Model: model,
-		Choices: []openai.ChatCompletionChoice{{Index: 0, Message: openai.NewChatMessage("assistant", body), FinishReason: &finish}},
-		Usage:   usage,
+		XActualModel: observedModel(r.Context(), t.opencode, t.messageID),
+		Choices:      []openai.ChatCompletionChoice{{Index: 0, Message: openai.NewChatMessage("assistant", body), FinishReason: &finish}},
+		Usage:        usage,
 	}
 	sessionStore.LogDelta(sessionID, body)
 	sessionStore.LogDone(sessionID, usage)

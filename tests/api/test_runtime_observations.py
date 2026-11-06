@@ -20,7 +20,7 @@ async def test_driver_success_cannot_overwrite_model_failure(db_session: AsyncSe
             status="auth_fail",
             check_kind="model",
             observed_at=failed,
-            error_code="session_expired",
+            detail="Your Claude session has expired. Sign in again to continue",
             driver_status="healthy",
         ),
     )

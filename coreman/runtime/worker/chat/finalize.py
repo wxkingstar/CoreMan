@@ -286,6 +286,7 @@ class FinalizeStage(ChatStageBase):
                     status="healthy",
                     check_kind="conversation",
                     requested_model=pre.request.model,
+                    model=out.actual_model,
                     seat_id=out.runtime_seat_id,
                     reply_verified=True,
                 )

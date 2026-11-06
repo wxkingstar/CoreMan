@@ -26,7 +26,38 @@ type claudeEvent struct {
 	ModelUsage   map[string]claudeModelUsage `json:"modelUsage,omitempty"`
 	TotalCostUSD float64                     `json:"total_cost_usd,omitempty"`
 	// RateLimitInfo is set on `rate_limit_event` lines (subscription accounts).
-	RateLimitInfo json.RawMessage `json:"rate_limit_info,omitempty"`
+	RateLimitInfo   json.RawMessage `json:"rate_limit_info,omitempty"`
+	ParentToolUseID string          `json:"parent_tool_use_id,omitempty"`
+}
+
+// Main assistant events identify the model Claude actually used. Child-tool
+// messages and the configured request model cannot identify the main reply.
+func (ev claudeEvent) observedModel() string {
+	if ev.ParentToolUseID != "" {
+		return ""
+	}
+	message := ev.Message
+	switch ev.Type {
+	case "assistant":
+	case "stream_event":
+		var start struct {
+			Type    string          `json:"type"`
+			Message json.RawMessage `json:"message"`
+		}
+		if json.Unmarshal(ev.Event, &start) != nil || start.Type != "message_start" {
+			return ""
+		}
+		message = start.Message
+	default:
+		return ""
+	}
+	var fields struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(message, &fields) == nil && fields.Model != "<synthetic>" {
+		return fields.Model
+	}
+	return ""
 }
 
 type claudeModelUsage struct {

@@ -550,7 +550,10 @@ class RuntimeAgent(Agent):
                             )
                         )
                         candidate = body.get("x_actual_model") if isinstance(body, dict) else None
-                        actual_model = candidate[:150] if isinstance(candidate, str) else None
+                        if isinstance(candidate, str) and re.fullmatch(
+                            r"[A-Za-z0-9._:/-]{1,150}", candidate
+                        ):
+                            actual_model = candidate
                     elif response.status_code in {401, 403} or any(
                         x in error.lower() for x in AUTH_FAILURE_MARKERS
                     ):

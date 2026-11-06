@@ -85,7 +85,7 @@ SCENARIOS: dict[str, Callable[[], list[str]]] = {
         _tool("Bash", "t1"),
         _text("。"),
         FINISH,
-        _chunk(None, usage=USAGE),
+        _chunk(None, usage=USAGE, extra={"x_actual_model": "claude-observed"}),
         DONE,
     ],
     "tools_only": lambda: [

@@ -130,6 +130,8 @@ async def test_normal_round_trip_new_session_then_resume(
     await db_session.refresh(relay_row)
     assert relay_row.model_health["check_kind"] == "conversation"
     assert relay_row.model_health["reply_verified"] is True
+    assert relay_row.model_health["model"] == "claude-observed"
+    assert relay_row.model_health["requested_model"] != "claude-observed"
     log = (await db_session.execute(select(ChatLog))).scalar_one()
     assert (
         log.status == "success"

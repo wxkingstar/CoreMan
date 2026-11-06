@@ -1,6 +1,7 @@
 import json
 
 from coreman.core.relay.sse import (
+    ActualModelEvent,
     AskUserQuestionEvent,
     FinishEvent,
     RateLimitEvent,
@@ -12,6 +13,16 @@ from coreman.core.relay.sse import (
     ToolUseStart,
     UsageEvent,
 )
+
+
+def test_observed_model_is_separate_from_compatibility_model():
+    parser = SseParser("codex")
+    assert parser.feed_line('data: {"model":"requested","choices":[]}') == []
+    assert parser.feed_line('data: {"x_actual_model":"gpt-6.1-sol","choices":[]}') == [
+        ActualModelEvent("gpt-6.1-sol")
+    ]
+    assert parser.feed_line('data: {"x_actual_model":"<synthetic>","choices":[]}') == []
+    assert not any(parser.counts.values())
 
 
 def test_node_seat_attestation_is_not_a_model_response():
