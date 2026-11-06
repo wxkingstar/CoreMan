@@ -56,6 +56,7 @@ def offer_card(
             "tag": "button",
             "text": {"tag": "plain_text", "content": msg(label, locale)},
             "type": kind,
+            "width": "fill",
             "behaviors": [{"type": "callback", "value": {"task_id": tid, "event_key": key}}],
         }
 
@@ -75,26 +76,10 @@ def offer_card(
                     + msg("busy_default", locale)
                     + "</font>",
                 },
-                {
-                    "tag": "column_set",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "auto",
-                            "elements": [button(STOP, "busy_opt_stop", "primary")],
-                        },
-                        {
-                            "tag": "column",
-                            "width": "auto",
-                            "elements": [button(WAIT, "busy_opt_wait", "default")],
-                        },
-                        {
-                            "tag": "column",
-                            "width": "auto",
-                            "elements": [button(PROGRESS, "busy_opt_progress", "default")],
-                        },
-                    ],
-                },
+                # 竖着排、撑满宽度：手机上三个并排会把文字截成「停下，先做…」。
+                button(STOP, "busy_opt_stop", "primary"),
+                button(WAIT, "busy_opt_wait", "default"),
+                button(PROGRESS, "busy_opt_progress", "default"),
             ]
         },
         "task_id": tid,

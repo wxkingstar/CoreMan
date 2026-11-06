@@ -222,3 +222,15 @@ def test_progress_of_a_message_still_waiting_in_line() -> None:
 def test_progress_without_steps_or_text_only_says_how_long() -> None:
     text = busy_choice.progress_text(status="running", seconds=42, thinking_md="", reply_text="")
     assert text == "上一条已经处理了 42 秒。"
+
+
+def test_feishu_buttons_stack_full_width() -> None:
+    elements = busy_choice.offer_card("feishu", 7)["body"]["elements"]
+    buttons = [e for e in elements if e["tag"] == "button"]
+    assert [b["behaviors"][0]["value"]["event_key"] for b in buttons] == [
+        busy_choice.STOP,
+        busy_choice.WAIT,
+        busy_choice.PROGRESS,
+    ]
+    assert all(b["width"] == "fill" for b in buttons)
+    assert all(e["tag"] != "column_set" for e in elements)
