@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -344,3 +345,27 @@ async def test_status_follows_a_failed_chat_log(db_session):
     view = await service.view(db_session, row)
     assert view["status"] == "failed" and view["error_code"] == "collaboration_failed"
     assert view["error_message"] == "协作伙伴权限已变更"
+
+
+async def test_credential_form_handoff_reports_waiting_user(db_session):
+    from coreman.core.db.models import CredentialRequest
+
+    bot, owner, minted = await _setup(db_session)
+    row, _ = await _create(db_session, minted, owner)
+    await tasks.finish(db_session, row.task_id, status="succeeded")
+    await db_session.commit()
+    assert (await service.view(db_session, row))["status"] == "succeeded"
+    db_session.add(
+        CredentialRequest(
+            bot_id=bot.id,
+            user_id=owner.id,
+            origin_kind="chat",
+            origin_task_id=row.task_id,
+            origin_chat_id="p2p-zs",
+            origin_chat_type="single",
+            expires_at=utcnow() + timedelta(minutes=30),
+        )
+    )
+    await db_session.commit()
+    view = await service.view(db_session, row)
+    assert view["status"] == "waiting_user" and view["reply_truncated"] is False

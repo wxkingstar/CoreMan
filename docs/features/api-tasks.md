@@ -33,14 +33,14 @@ curl -X POST https://coreman.example.com/api/infra/tasks \
 | `GET /api/infra/tasks/{id}` | 查询。只能查这枚令牌自己发起的任务。 |
 | `POST /api/infra/tasks/{id}/cancel` | 取消未结束的任务。 |
 
-返回的 `data`：`id`、`request_id`、`bot_key`、`status`、`conversation`、`reply`（结束后的最终回复，已脱敏）、`error_code`、`error_message`、`created_at`、`finished_at`。
+返回的 `data`：`id`、`request_id`、`bot_key`、`status`、`conversation`、`reply`（结束后的最终回复，已脱敏；超过 50000 字截断，`reply_truncated` 为 true）、`error_code`、`error_message`、`created_at`、`finished_at`。
 
 | `status` | 含义 |
 |---|---|
 | `queued` | 排队中（含同一会话里前面还有人的轮次在跑） |
 | `running` | 执行中 |
 | `succeeded` | 完成 |
-| `waiting_user` | AI 员工在飞书里向人提问；之后在飞书里继续，API 不再更新这一轮 |
+| `waiting_user` | AI 员工在飞书里向人提问，或发了凭证表单等人填写；之后在飞书里继续，API 不再更新这一轮 |
 | `failed` | 失败（`api_unavailable` 表示开轮前复核没通过，原因在 `error_message`） |
 | `superseded` | 被本人在飞书里的新消息替代 |
 | `cancelled` | 被取消 |

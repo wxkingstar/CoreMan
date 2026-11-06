@@ -17,12 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.api_tasks import SYNTHETIC_PREFIX, aliases
 from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.bus import outbox, tasks
+from coreman.core.chat.chat_logs import LIMITS
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     ApiTask,
     Bot,
     BotAllowedUser,
     ChatLog,
+    CredentialRequest,
     InboundEvent,
     PersonalAccessToken,
     Task,
@@ -275,6 +277,7 @@ async def create(
 
 
 LOG_FAILED = ("error", "timeout", "failed")
+REPLY_LIMIT = LIMITS["response_content"]
 
 
 def _status(task: Task | None, log: ChatLog | None) -> str:
@@ -316,7 +319,20 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
     )
     bot = await session.get(Bot, row.bot_id)
     status = _status(task, log)
+    if status == "succeeded" and row.task_id is not None:
+        # 这一轮向本人发了凭证表单就收尾了：要等人在飞书里填完才会继续。
+        asked = await session.scalar(
+            select(CredentialRequest.id)
+            .where(
+                CredentialRequest.origin_task_id == row.task_id,
+                CredentialRequest.status.in_(("open", "submitted")),
+            )
+            .limit(1)
+        )
+        if asked is not None:
+            status = "waiting_user"
     finished = status not in ("queued", "running")
+    reply = log.response_content if finished and log is not None else None
     conversation: dict[str, Any] = {"target": row.target}
     if row.alias:
         conversation["alias"] = row.alias
@@ -326,7 +342,9 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         "bot_key": bot.bot_key if bot else None,
         "status": status,
         "conversation": conversation,
-        "reply": log.response_content if finished and log is not None else None,
+        "reply": reply,
+        # 对话记录最多存 50000 字：超长的回复在这里被截断，完整内容在飞书会话里。
+        "reply_truncated": reply is not None and len(reply) >= REPLY_LIMIT,
         "error_code": (
             (log.error_code if log else None) or (task.error_code if task else None)
             if status == "failed"
