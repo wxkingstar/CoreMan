@@ -896,11 +896,14 @@ class FeishuTransport:
             raise FeishuError(-2, "unsupported outbox kind")
         chat = str(item.target.get("chat_id") or "")
         if item.payload.get("_reply") and item.target.get("message_id"):
-            # 群里对某条消息的简短回应（旁听插话的「我看一下」、排队提示）：引用那条消息回复。
+            # 群里对某条消息的简短回应（旁听插话的「我看一下」、排队提示、要不要停下上一条的
+            # 选择卡片）：引用那条消息回复。
             mid = await self.send(
                 chat,
-                {"text": str(item.payload.get("text") or "")},
-                kind="text",
+                interaction_card(card)
+                if isinstance(card, dict)
+                else {"text": str(item.payload.get("text") or "")},
+                kind="interactive" if isinstance(card, dict) else "text",
                 key=f"outbox:{item.id}",
                 reply_to=item.target.get("message_id"),
             )

@@ -230,7 +230,76 @@ async def _enqueue_task(
             new.payload["interrupted_previous_task"] = admission.interrupted
     if message.chat_type == "group" and new.kind == "chat" and not helper_reply:
         await _queue_behind_others(session, bot, message, new, event_id)
-    return await enqueue(session, new)
+    offer = (
+        new.kind == "chat"
+        and not helper_reply
+        and not new.payload.get("serialize_session")
+        and await _queue_behind_own(session, bot, message, new)
+    )
+    task = await enqueue(session, new)
+    if task is not None and offer:
+        await _offer_busy_choice(session, bot, message, task.id, event_id)
+    return task
+
+
+async def _queue_behind_own(
+    session: AsyncSession, bot: InboundBot, message: InboundMessage, new: NewTask
+) -> bool:
+    """同一个人上一条还没做完：这条排在后面，不再直接停掉上一条；返回要不要发选择卡片。
+
+    这个人前面已经有一条在等他选的，就只排队不再发卡：连发几条不刷一串卡片。
+    """
+    from sqlalchemy import select
+
+    sender = message.sender.platform_user_id or ""
+    if not sender:
+        return False
+    own = (
+        select(Task.id)
+        .where(
+            Task.bot_id == bot.id,
+            Task.session_key == new.session_key,
+            Task.kind == "chat",
+            Task.status.in_(("queued", "claimed", "running")),
+            Task.cancel_requested_at.is_(None),
+            Task.payload["origin"].astext.is_distinct_from("observe"),
+            Task.payload["platform_user_id"].astext == sender,
+        )
+        .limit(1)
+    )
+    if await session.scalar(own) is None:
+        return False
+    new.payload["serialize_session"] = True
+    waiting = await session.scalar(
+        own.where(Task.status == "queued", Task.payload["busy_offer"].astext == "true")
+    )
+    if waiting is not None:
+        return False
+    new.payload["busy_offer"] = True
+    return True
+
+
+async def _offer_busy_choice(
+    session: AsyncSession, bot: InboundBot, message: InboundMessage, task_id: int, event_id: int
+) -> None:
+    from coreman.core.chat import busy_choice
+
+    target: dict[str, Any] = {"chat_id": message.chat_id}
+    payload: dict[str, Any] = {"card": busy_choice.offer_card(message.platform, task_id)}
+    message_id = message.reply_context.get("message_id")
+    if message.platform == "feishu" and message_id:
+        # 引用这条消息发卡：群里一眼看出问的是哪一条。
+        target["message_id"] = message_id
+        payload["_reply"] = True
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform=message.platform,
+        kind="send",
+        dedupe_key=f"inbound:{event_id}:busy",
+        target=target,
+        payload=payload,
+    )
 
 
 async def _queue_behind_others(
@@ -238,7 +307,7 @@ async def _queue_behind_others(
 ) -> None:
     """群里同一个机器人只有一条会话：别人交代的事还没做完时，这条排在后面，不打断它。
 
-    同一个人接着发的消息仍按原样替换自己上一条；主动插话不算（谁 @ 它都让给谁）。
+    同一个人接着发的消息见 `_queue_behind_own`；主动插话不算（谁 @ 它都让给谁）。
     飞书上引用这条消息回一句「先做完手上的再处理」，免得对方以为没人理。
     """
     from sqlalchemy import select
