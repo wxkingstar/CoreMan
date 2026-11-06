@@ -1,0 +1,163 @@
+"""上一条还在处理时又发了一条：新消息排队，卡片让本人选停下上一条还是等它做完。"""
+
+import uuid
+from types import SimpleNamespace
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from coreman.core.bus import instances, tasks
+from coreman.core.chat import busy_choice
+from coreman.core.db.models import Bot, OutboxItem, Task
+from coreman.core.i18n.messages import msg
+from coreman.core.wecom.messages import InboundMessage
+from coreman.runtime.gateway_common.inbound import enqueue_inbound
+from coreman.runtime.worker.card_actions import CardActionHandler
+from tests.integration.worker_helpers import build_ctx, seed_bot
+
+
+async def _say(session: AsyncSession, bot: Bot, text: str, *, user: str = "zs") -> Task:
+    mid = f"m-{uuid.uuid4()}"
+    message = InboundMessage(
+        platform=bot.platform,
+        bot_id=bot.id,
+        kind="message",
+        chat_type="single",
+        chat_id=user,
+        sender={"platform_user_id": user},
+        message_id=mid,
+        parts=[{"type": "text", "text": text}],
+        reply_context={"chat_id": user, "chat_type": "single", "message_id": mid},
+    )
+    snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None)
+    task = await enqueue_inbound(session, snapshot, message, lease_generation=1)
+    await session.commit()
+    assert task is not None
+    return task
+
+
+async def _click(
+    engine: AsyncEngine, session: AsyncSession, bot: Bot, target: Task, key: str, *, user="zs"
+) -> OutboxItem | None:
+    message = InboundMessage(
+        platform="wecom",
+        bot_id=bot.id,
+        kind="card_action",
+        chat_type="single",
+        chat_id="zs",
+        sender={"platform_user_id": user},
+        message_id=f"a-{uuid.uuid4()}",
+        card_action={
+            "task_id": busy_choice.card_task_id(target.id),
+            "card_type": "button_interaction",
+            "event_key": key,
+        },
+        reply_context={"chat_id": "zs", "chat_type": "single", "req_id": "r1"},
+    )
+    snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None)
+    task = await enqueue_inbound(session, snapshot, message, lease_generation=1)
+    await session.commit()
+    assert task is not None
+    await instances.register(
+        session, instance_id="worker-test", service="worker", version="dev", capacity=8
+    )
+    claimed = await tasks.claim(session, lane="fast", instance_id="worker-test")
+    await session.commit()
+    assert claimed and claimed.id == task.id
+    await CardActionHandler().run(build_ctx(engine, claimed))
+    return await session.scalar(
+        select(OutboxItem).where(OutboxItem.kind == "card_update").order_by(OutboxItem.id.desc())
+    )
+
+
+async def _refresh(session: AsyncSession, task: Task) -> Task:
+    row = await session.get(Task, task.id, populate_existing=True)
+    assert row is not None
+    return row
+
+
+async def test_a_second_message_waits_and_offers_a_choice(db_session: AsyncSession) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    assert not first.payload.get("serialize_session")
+    assert await db_session.scalar(select(OutboxItem)) is None
+
+    second = await _say(db_session, bot, "改成导出本周")
+    assert second.payload["serialize_session"] is True
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert card.target == {"chat_id": "zs"}
+    assert card.payload["card"] == busy_choice.offer_card("wecom", second.id)
+    assert card.payload["card"]["main_title"]["title"] == msg("busy_title")
+
+    # 连着再发：照样排队，但不再刷一张卡。
+    third = await _say(db_session, bot, "再加上退货")
+    assert third.payload["serialize_session"] is True
+    sends = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).all()
+    assert len(sends) == 1
+    assert (await _refresh(db_session, first)).cancel_requested_at is None
+
+
+async def test_feishu_card_quotes_the_new_message(db_session: AsyncSession) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    bot.platform = "feishu"
+    await db_session.commit()
+    await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert card.payload["_reply"] is True
+    assert card.target["message_id"] == second.payload["message"]["message_id"]
+    assert card.payload["card"]["task_id"] == busy_choice.card_task_id(second.id)
+
+
+async def test_stop_cancels_the_running_message(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    await db_session.execute(update(Task).where(Task.id == first.id).values(status="running"))
+    await db_session.commit()
+    second = await _say(db_session, bot, "改成导出本周")
+
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.STOP)
+    first = await _refresh(db_session, first)
+    assert first.cancel_requested_at is not None and first.cancel_reason == "user_stop"
+    assert (await _refresh(db_session, second)).cancel_requested_at is None
+    assert reply is not None
+    assert reply.payload["card"]["main_title"]["title"] == msg("busy_stopped_title")
+
+
+async def test_wait_leaves_the_running_message_alone(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.WAIT)
+    assert (await _refresh(db_session, first)).cancel_requested_at is None
+    assert reply is not None
+    assert reply.payload["card"]["main_title"]["title"] == msg("busy_wait_title")
+
+
+async def test_someone_else_cannot_stop_it(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.STOP, user="ls")
+    assert reply is None
+    assert (await _refresh(db_session, first)).cancel_requested_at is None
+
+
+async def test_a_late_click_only_says_it_has_started(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    await db_session.execute(update(Task).where(Task.id == first.id).values(status="succeeded"))
+    await db_session.execute(update(Task).where(Task.id == second.id).values(status="running"))
+    await db_session.commit()
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.STOP)
+    assert reply is not None
+    assert reply.payload["card"]["main_title"]["title"] == msg("busy_late_title")

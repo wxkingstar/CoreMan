@@ -501,14 +501,16 @@ async def test_another_persons_mention_waits_instead_of_stopping_the_current_tas
     notice = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
     assert notice.payload == {"text": msg("group_queued"), "_reply": True}
     assert notice.target == {"chat_id": CHAT, "message_id": "om2"}
-    # 同一个人接着发：仍按原样替换自己上一条（这里还有别人的任务在排，所以一起排队）。
+    # 同一个人接着发：这里还有别人的任务在排，照样排在后面。
     third = await say(db_session, bot, "om3", "改成导出本周", mentions_bot=True, user="u1")
     assert third.payload["serialize_session"] is True
 
 
-async def test_the_same_persons_follow_up_still_replaces_their_own_task(db_session):
+async def test_the_same_persons_follow_up_waits_and_asks_whether_to_stop(db_session):
     bot = await observing_bot(db_session)
     await say(db_session, bot, "om1", "帮我导出上周订单", mentions_bot=True, user="u1")
     again = await say(db_session, bot, "om2", "改成导出本周", mentions_bot=True, user="u1")
-    assert not again.payload.get("serialize_session")
-    assert await db_session.scalar(select(OutboxItem)) is None
+    assert again.payload["serialize_session"] is True
+    card = await db_session.scalar(select(OutboxItem))
+    assert card.payload["card"]["task_id"] == f"busy@{again.id}"
+    assert card.target == {"chat_id": CHAT, "message_id": "om2"}

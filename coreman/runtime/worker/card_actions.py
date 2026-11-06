@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.chat import interactions
+from coreman.core.chat import busy_choice, interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
 from coreman.core.i18n.messages import msg
@@ -30,6 +30,7 @@ from coreman.core.wecom.cards import (
     parse_task_id,
     waiting_card,
 )
+from coreman.runtime.worker.busy_choice import handle as handle_busy
 from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.credential_cards import handle as handle_credential
@@ -133,6 +134,16 @@ class CardActionHandler:
                     else wecom_personal.handle_selection
                 )
                 result = await handle(session, ctx, bot, inbound, action)
+                await tasks.finish(
+                    session, ctx.task.id, status="succeeded", result={"card": result}
+                )
+                await session.commit()
+                ctx.log.info("card_action_done", result=result)
+                return
+            if task_id.startswith(busy_choice.CARD_PREFIX):
+                result, card = await handle_busy(session, ctx, bot, action, icon)
+                if card is not None:
+                    await self._reply_card(session, bot, inbound, task_id, card)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}
                 )
