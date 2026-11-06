@@ -31,6 +31,7 @@ from coreman.api.routers import (
     dev,
     escalations,
     feishu_apps,
+    feishu_docs,
     feishu_personal,
     health,
     health_report,
@@ -177,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(runtime_protocol.router)
     app.include_router(runtime_seats.router)
     app.include_router(feishu_personal.router)
+    app.include_router(feishu_docs.router)
     app.include_router(feishu_apps.router)
     app.include_router(wecom_bots.router)
     app.include_router(wecom_personal.router)

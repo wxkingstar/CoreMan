@@ -440,6 +440,7 @@ async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(
         "old_feishu_sent": 0,
         "old_observe_decisions": 0,
         "old_credential_requests": 0,
+        "old_doc_consents": 0,
     }
     async with make_session_factory(db_engine)() as s:
         assert set((await s.execute(select(Task.id))).scalars()) == {queued_id, recent_id}

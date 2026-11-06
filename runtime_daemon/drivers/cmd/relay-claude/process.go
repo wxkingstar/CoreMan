@@ -35,14 +35,15 @@ var firstLineTimeout = 90 * time.Second
 func cleanEnv(extra map[string]string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") && !strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
+		if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "COREMAN_COLLABORATION_") && !strings.HasPrefix(e, "COREMAN_BOT_HELP_") && !strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_FEISHU_DOCS_") && !strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") && !strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") && !strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
 			env = append(env, e)
 		}
 	}
 	feishu := openai.FeishuPersonalEnabled(extra)
 	wecom := openai.WecomPersonalEnabled(extra)
+	docs := openai.FeishuDocsEnabled(extra)
 	for k, v := range extra {
-		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) {
+		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) || (strings.HasPrefix(k, "COREMAN_FEISHU_DOCS_") && !docs) {
 			continue
 		}
 		env = append(env, k+"="+v)
@@ -102,6 +103,7 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 		{"coreman_collaboration", "COREMAN_COLLABORATION", strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(req.EnvVars["COREMAN_COLLABORATION_TOKEN"]) != ""},
 		{"coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL", openai.FeishuPersonalEnabled(req.EnvVars)},
 		{"coreman_wecom_personal", "COREMAN_WECOM_PERSONAL", openai.WecomPersonalEnabled(req.EnvVars)},
+		{"coreman_feishu_docs", "COREMAN_FEISHU_DOCS", openai.FeishuDocsEnabled(req.EnvVars)},
 		{"coreman_systems", "COREMAN_SYSTEMS_MCP", openai.SystemsCatalogEnabled(req.EnvVars)},
 	} {
 		if cfg.enabled {

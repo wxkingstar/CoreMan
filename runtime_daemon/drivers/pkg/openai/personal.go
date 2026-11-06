@@ -37,6 +37,13 @@ func personalEnabled(env map[string]string, platform, prefix string) bool {
 	return env["COREMAN_PLATFORM"] == platform && strings.TrimSpace(env[prefix+"_URL"]) != "" && strings.TrimSpace(env[prefix+"_TOKEN"]) != ""
 }
 
+// FeishuDocsEnabled reports whether this turn mounts the Feishu group docs
+// MCP server. Only Feishu group chats qualify; the server authenticates the
+// task capability and revalidates the turn's origin itself.
+func FeishuDocsEnabled(env map[string]string) bool {
+	return env["COREMAN_PLATFORM"] == "feishu" && env["COREMAN_CHAT_TYPE"] == "group" && strings.TrimSpace(env["COREMAN_FEISHU_DOCS_URL"]) != "" && strings.TrimSpace(env["COREMAN_FEISHU_DOCS_TOKEN"]) != ""
+}
+
 // SystemsCatalogEnabled reports whether this turn mounts the business system
 // catalog MCP server. CoreMan issues its credentials only when the speaker has
 // business systems this turn and the runtime declared systems_catalog_v1.

@@ -22,7 +22,7 @@ from coreman.core.feishu_personal import permissions
 from coreman.core.feishu_personal import service as personal_service
 
 # 应用身份：员工身份识别（user_id 是卡片归属与身份校验的依据）、通讯录姓名，
-# 以及后台管理应用基础信息、能力、可用范围与发布版本。
+# 后台管理应用基础信息、能力、可用范围与发布版本，以及群里只读文档。
 TENANT_SCOPES: tuple[str, ...] = (
     "contact:user.employee_id:readonly",
     "contact:user.base:readonly",
@@ -43,6 +43,13 @@ TENANT_SCOPES: tuple[str, ...] = (
     "application:bot.menu:write",
     "application:app_slash_command:read",
     "application:app_slash_command:write",
+    # 群里读文档（见 feishu_docs）：先查本群是不是协作者、链接分享是否对本群开放，再只读正文。
+    "docs:permission.member:retrieve",
+    "docs:permission.setting:read",
+    "docx:document:readonly",
+    "wiki:wiki:readonly",
+    "sheets:spreadsheet:readonly",
+    "bitable:app:readonly",
 )
 
 # 群聊旁听：接收群里所有用户和其他机器人的消息（高级权限，需企业管理员审核）。只有开启旁听的

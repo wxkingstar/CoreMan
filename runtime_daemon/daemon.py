@@ -62,6 +62,7 @@ PROVIDERS = ("claude", "codex", "opencode")
 DRIVER_CAPABILITIES = {
     "claude": (
         "feishu_personal_tools_v1",
+        "feishu_group_docs_v1",
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
         "systems_catalog_v1",
@@ -70,6 +71,7 @@ DRIVER_CAPABILITIES = {
     ),
     "codex": (
         "feishu_personal_tools_v1",
+        "feishu_group_docs_v1",
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
         "systems_catalog_v1",
@@ -78,6 +80,7 @@ DRIVER_CAPABILITIES = {
     ),
     "opencode": (
         "feishu_personal_tools_v1",
+        "feishu_group_docs_v1",
         "wecom_personal_tools_v1",
         "owner_session_view_v1",
         "systems_catalog_v1",
