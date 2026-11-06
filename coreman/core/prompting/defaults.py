@@ -232,6 +232,12 @@ SPEAKER_CHANGED_NOTE = (
     "丢弃之前缓存的身份值。"
 )
 
+STOPPED_PREVIOUS_NOTE = (
+    "- 用户在上一条还没做完时发了这条消息，并选择停下上一条：上一条已被中途停止，"
+    "不要接着做它，按这条消息处理；上一条已经做完的部分（改过的文件、跑过的命令、发出的消息）"
+    "不会自动撤回，这条要用到时以实际状态为准。"
+)
+
 PROMPT_DEFAULTS_BY_KEY: dict[str, str] = {
     "prompt_org_context": DEFAULT_ORG_CONTEXT,
     "prompt_security_policy": DEFAULT_SECURITY_POLICY,
