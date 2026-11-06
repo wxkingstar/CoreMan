@@ -1,6 +1,7 @@
 """上一条还在处理时又发了一条：新消息排队，卡片让本人选停下上一条还是等它做完。"""
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import select, update
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, tasks
 from coreman.core.chat import busy_choice
-from coreman.core.db.models import Bot, OutboxItem, Task
+from coreman.core.db.models import Bot, OutboxItem, Task, TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
@@ -174,3 +175,50 @@ async def test_a_late_click_only_says_it_has_started(
     reply = await _click(db_engine, db_session, bot, second, busy_choice.STOP)
     assert reply is not None
     assert reply.payload["card"]["main_title"]["title"] == msg("busy_late_title")
+
+
+async def test_progress_reports_the_running_message_and_keeps_the_buttons(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    await db_session.execute(update(Task).where(Task.id == first.id).values(status="running"))
+    db_session.add(
+        TaskStream(
+            task_id=first.id,
+            bot_id=bot.id,
+            platform="wecom",
+            stream_id="s1",
+            reply_context={},
+            lease_generation=1,
+            running_since=datetime.now(UTC) - timedelta(minutes=6, seconds=3),
+            thinking_md="🤔 开始\n🔧 **Bash**\n🔧 **Read**",
+            pending_text="我先查一下订单表。\n\n正在汇总上周的退货数据",
+        )
+    )
+    await db_session.commit()
+    second = await _say(db_session, bot, "进展怎么样了？")
+
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
+    assert reply is not None
+    card = reply.payload["card"]
+    assert card["card_type"] == "button_interaction"
+    assert [b["key"] for b in card["button_list"]] == [
+        busy_choice.STOP,
+        busy_choice.WAIT,
+        busy_choice.PROGRESS,
+    ]
+    assert card["sub_title_text"].startswith("上一条已经处理了 6 分 ")
+    assert "做了 2 步。" in card["sub_title_text"]
+    assert "最近写到：正在汇总上周的退货数据" in card["sub_title_text"]
+    assert (await _refresh(db_session, first)).cancel_requested_at is None
+
+
+def test_progress_of_a_message_still_waiting_in_line() -> None:
+    text = busy_choice.progress_text(status="queued", seconds=0, thinking_md="", reply_text="")
+    assert text == msg("busy_progress_queued")
+
+
+def test_progress_without_steps_or_text_only_says_how_long() -> None:
+    text = busy_choice.progress_text(status="running", seconds=42, thinking_md="", reply_text="")
+    assert text == "上一条已经处理了 42 秒。"
