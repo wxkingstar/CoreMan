@@ -30,7 +30,7 @@ from coreman.core.platforms.feishu_content import mention_names, render
 from coreman.core.wecom.messages import InboundMessage
 
 # 入站时先按默认安静时长排队，worker 到点再按管理台设置决定是否再等。
-FIRST_DELAY_SECONDS = 8
+FIRST_DELAY_SECONDS = 3
 # 判断与插话带的最近群消息：最多这么多条，且只取这段时间内的。
 CONTEXT_LIMIT = 20
 CONTEXT_WINDOW = timedelta(minutes=30)

@@ -404,6 +404,31 @@ async def test_groups_with_several_people_still_reject_a_direct_reply(
     assert decision.outcome == "dispatch_invalid"
 
 
+@pytest.mark.parametrize(
+    ("humans", "quiet_for", "judged"),
+    [(3, 5, False), (3, 9, True), (1, 4, True), (1, 2, False)],
+)
+async def test_dispatcher_waits_less_for_the_group_to_go_quiet(
+    db_engine, db_session, monkeypatch, humans, quiet_for, judged
+):
+    """调度员比旁听默认的 15 秒等得短：多人群 8 秒，单人群 3 秒。"""
+
+    async def human_count(bot, chat_id, cipher):
+        return humans
+
+    monkeypatch.setattr(dispatch, "human_count", human_count)
+    bot = await dispatcher_bot(db_session)
+    await say(db_session, bot, "om1", "上周退货率多少？")
+    (observe,) = await tasks_of(db_session, bot, "group_observe")
+    await quiet_down(db_session, bot, seconds=quiet_for)
+    decider = FakeDecider(0.1)
+    done = await run_observe(db_engine, db_session, observe, decider)
+    decided = await db_session.scalar(select(GroupObserveDecision))
+    assert (decided is not None) is judged
+    if not judged:
+        assert done.run_after > datetime.now(UTC)  # 还没安静够：延后再看
+
+
 async def test_mentions_carrying_a_task_code_continue_that_task(db_session):
     from coreman.runtime.worker.chat import work
 

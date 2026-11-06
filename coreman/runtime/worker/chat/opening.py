@@ -536,10 +536,20 @@ class OpenStage(ChatStageBase):
             return {
                 "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
             }
-        if ctx.task.payload.get("origin") in ("observe", "dispatch"):
+        if ctx.task.payload.get("origin") == "observe":
             # 插话回合不推流式卡片：网关等终稿出来再发，终稿是「不说话」就什么也不发。
-            # 调度回合的终稿一律是「不说话」：它的决定由平台记录，不往群里发。
             return {"reply_context": {**intake.inbound.reply_context, "_observe": True}}
+        if ctx.task.payload.get("origin") == "dispatch":
+            # 调度回合同样只发终稿（安排的那一行）。开启时一开始就在原消息上打「处理中」表情，
+            # 让发消息的人马上知道有人接了，终稿发出或决定不说话时撤掉；试运行群里不留痕迹。
+            live = intake.bot.group_observe == "on"
+            return {
+                "reply_context": {
+                    **intake.inbound.reply_context,
+                    "_observe": True,
+                    **({"_dispatch": True} if live else {}),
+                }
+            }
         return {}
 
     def _after_supervisor(self, pre: Prepared) -> None:

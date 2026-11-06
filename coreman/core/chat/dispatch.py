@@ -51,6 +51,10 @@ OUTCOMES = {
     "reply": "dispatch_reply",
     "none": "dispatch_none",
 }
+# 调度员等群安静的时长（秒）：比旁听的默认值短，单人群更短（只有一个人在说，不用等别人接话）。
+# 只会缩短，管理台把旁听安静时长调得更短时以那个为准。
+QUIET_SECONDS = 8
+SOLO_QUIET_SECONDS = 3
 # 群里真人数：按群短时缓存，人员进出群时最多这么久后才反映出来。
 HUMANS_TTL_SECONDS = 300
 _HUMANS: OrderedDict[tuple[str, str], tuple[float, int | None]] = OrderedDict()
