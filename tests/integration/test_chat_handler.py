@@ -248,6 +248,21 @@ async def test_known_identity_and_group_speaker_change(
     ]
 
 
+async def test_turn_after_the_user_stopped_the_previous_one_says_so(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.prompting.defaults import STOPPED_PREVIOUS_NOTE
+
+    bot, _, _ = await seed_bot(db_session)
+    fake = FakeRelay("normal")
+    await run(db_engine, await chat_task(db_session, bot, "hi"), fake)
+    assert STOPPED_PREVIOUS_NOTE not in fake.requests[0]["messages"][1]["content"]
+    task = await chat_task(db_session, bot, "改成导出本周")
+    task.payload = {**task.payload, "stopped_previous": True}
+    await run(db_engine, task, fake)
+    assert STOPPED_PREVIOUS_NOTE in turn_block(fake.requests[1])
+
+
 async def test_relay_error_empty_and_tools_only(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

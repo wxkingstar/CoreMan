@@ -57,8 +57,8 @@ async def handle(
         ctx.log.warning("busy_choice_unknown", choice=choice)
         return "ignored", None
     # 只停这个人自己排在前面的消息；群里别人交代的事照样做完。
-    ahead = await session.scalars(
-        select(Task.id).where(
+    ahead = await session.execute(
+        select(Task.id, Task.status).where(
             Task.bot_id == bot.id,
             Task.session_key == target.session_key,
             Task.kind == "chat",
@@ -67,6 +67,11 @@ async def handle(
             Task.payload["platform_user_id"].astext == clicker,
         )
     )
-    for task_id in list(ahead):
-        await tasks.request_cancel(session, task_id, "user_stop")
+    started = False
+    for tid, status in list(ahead):
+        if await tasks.request_cancel(session, tid, "user_stop"):
+            started = started or status in tasks.ACTIVE
+    if started:
+        # 停下的是已经开跑的：新一轮的本轮块据此告诉模型上一条做到一半被停了，别接着做它。
+        target.payload = {**target.payload, "stopped_previous": True}
     return "stop", card("stopped")

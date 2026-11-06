@@ -268,6 +268,10 @@ class OpenStage(ChatStageBase):
             if work_note:
                 ctx.turn_notes.append(work_note)
                 await work.mark_started(session, ctx, intake)
+        if ctx.task.payload.get("stopped_previous"):
+            from coreman.core.prompting.defaults import STOPPED_PREVIOUS_NOTE
+
+            ctx.turn_notes.append(STOPPED_PREVIOUS_NOTE)
         if ctx.task.payload.get("api_task_id"):
             from coreman.runtime.worker.chat import api
 

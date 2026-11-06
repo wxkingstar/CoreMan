@@ -121,9 +121,22 @@ async def test_stop_cancels_the_running_message(
     reply = await _click(db_engine, db_session, bot, second, busy_choice.STOP)
     first = await _refresh(db_session, first)
     assert first.cancel_requested_at is not None and first.cancel_reason == "user_stop"
-    assert (await _refresh(db_session, second)).cancel_requested_at is None
+    second = await _refresh(db_session, second)
+    assert second.cancel_requested_at is None
+    assert second.payload["stopped_previous"] is True
     assert reply is not None
     assert reply.payload["card"]["main_title"]["title"] == msg("busy_stopped_title")
+
+
+async def test_stopping_a_message_that_never_started_adds_no_note(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    await _click(db_engine, db_session, bot, second, busy_choice.STOP)
+    assert (await _refresh(db_session, first)).cancel_requested_at is not None
+    assert not (await _refresh(db_session, second)).payload.get("stopped_previous")
 
 
 async def test_wait_leaves_the_running_message_alone(
