@@ -254,11 +254,11 @@ async def has_newer(
     *,
     task_id: int,
     kind: str,
-    exclude_api: bool = False,
 ) -> bool:
-    """同会话里是否已有比 `task_id` 更晚入队的同类任务（不论状态）。
+    """同会话里是否已有比 `task_id` 更晚入队、会替代它的同类任务（不论状态）。
 
-    `exclude_api`：不算 API 发起的任务（载荷带 `api_task_id`），只看人发来的消息。
+    排队等前面做完的任务（载荷 `serialize_session`：群里别人交代的事、API 发起的轮次）
+    不算：它们本来就排在后面，不能因为前一条被放回队列就把它挤掉。
     """
     stmt = (
         select(Task.id)
@@ -270,8 +270,7 @@ async def has_newer(
         )
         .limit(1)
     )
-    if exclude_api:
-        stmt = stmt.where(Task.payload["api_task_id"].astext.is_(None))
+    stmt = stmt.where(Task.payload["serialize_session"].astext.is_distinct_from("true"))
     return (await session.scalar(stmt)) is not None
 
 

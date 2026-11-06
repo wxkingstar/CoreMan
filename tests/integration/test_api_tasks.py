@@ -302,3 +302,45 @@ async def test_deferred_api_turn_is_not_superseded_by_the_next_api_task(db_engin
     assert len(fake.requests) == 1
     assert (await service.view(db_session, first))["status"] == "succeeded"
     assert (await service.view(db_session, second))["status"] == "queued"
+
+
+async def test_queued_followers_never_supersede_a_deferred_turn(db_session):
+    bot, _, _ = await _setup(db_session)
+    first = await tasks.enqueue(
+        db_session, tasks.NewTask(bot_id=bot.id, kind="chat", session_key="oc_g")
+    )
+    # 群里别人交代的事、API 发起的轮次都排在后面等：不算替代前一条。
+    await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=bot.id, kind="chat", session_key="oc_g", payload={"serialize_session": True}
+        ),
+    )
+    assert not await tasks.has_newer(db_session, bot.id, "oc_g", task_id=first.id, kind="chat")
+    # 同一个人接着发的消息（不排队）照样替代。
+    await tasks.enqueue(db_session, tasks.NewTask(bot_id=bot.id, kind="chat", session_key="oc_g"))
+    assert await tasks.has_newer(db_session, bot.id, "oc_g", task_id=first.id, kind="chat")
+
+
+async def test_status_follows_a_failed_chat_log(db_session):
+    bot, owner, minted = await _setup(db_session)
+    row, _ = await _create(db_session, minted, owner)
+    await tasks.finish(db_session, row.task_id, status="succeeded")
+    db_session.add(
+        ChatLog(
+            bot_id=bot.id,
+            bot_key=bot.bot_key,
+            platform="feishu",
+            chat_type="single",
+            message_type="text",
+            task_id=row.task_id,
+            status="error",
+            error_code="collaboration_failed",
+            error_message="协作伙伴权限已变更",
+            request_at=utcnow(),
+        )
+    )
+    await db_session.commit()
+    view = await service.view(db_session, row)
+    assert view["status"] == "failed" and view["error_code"] == "collaboration_failed"
+    assert view["error_message"] == "协作伙伴权限已变更"

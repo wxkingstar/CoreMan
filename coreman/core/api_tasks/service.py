@@ -274,6 +274,9 @@ async def create(
     return stored, True
 
 
+LOG_FAILED = ("error", "timeout", "failed")
+
+
 def _status(task: Task | None, log: ChatLog | None) -> str:
     if task is None:
         return "expired" if log is None else ("failed" if log.status != "success" else "succeeded")
@@ -285,7 +288,14 @@ def _status(task: Task | None, log: ChatLog | None) -> str:
     if task.status == "running":
         return "running"
     if task.status == "succeeded":
-        return "waiting_user" if log is not None and log.status == "ask_user" else "succeeded"
+        # 对话记录在任务写完终态之后还可能被改成失败（例如协作在收尾时被拒）：以它为准。
+        if log is not None and log.status == "ask_user":
+            return "waiting_user"
+        if log is not None and log.status in LOG_FAILED:
+            return "failed"
+        if log is not None and log.status == "stopped":
+            return "cancelled"
+        return "succeeded"
     if task.status == "cancelled":
         superseded = "superseded" in (task.error_code, task.cancel_reason)
         return "superseded" if superseded else "cancelled"
@@ -317,7 +327,11 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         "status": status,
         "conversation": conversation,
         "reply": log.response_content if finished and log is not None else None,
-        "error_code": (task.error_code if task else None) if status == "failed" else None,
+        "error_code": (
+            (log.error_code if log else None) or (task.error_code if task else None)
+            if status == "failed"
+            else None
+        ),
         "error_message": (
             (log.error_message if log else None) or (task.error_message if task else None)
             if status == "failed"
