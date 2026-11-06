@@ -194,6 +194,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			// Feishu personal tools mount on top of the bot's normal
 			// capabilities, as in relay-claude.
 			"feishu_personal_tools_v1": true,
+			// Feishu group chats can mount the group docs MCP (coreman_feishu_docs).
+			"feishu_group_docs_v1": true,
 			// WeCom personal tools are an independent server that mounts the
 			// same way.
 			"wecom_personal_tools_v1": true,

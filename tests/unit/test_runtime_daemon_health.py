@@ -250,7 +250,13 @@ def declare_capabilities(daemon, monkeypatch, provider: str, capabilities: dict)
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize(
-    "flag", ["feishu_personal_tools_v1", "wecom_personal_tools_v1", "owner_session_view_v1"]
+    "flag",
+    [
+        "feishu_personal_tools_v1",
+        "feishu_group_docs_v1",
+        "wecom_personal_tools_v1",
+        "owner_session_view_v1",
+    ],
 )
 @pytest.mark.parametrize("advertised", [None, False, "true", True])
 async def test_personal_capability_comes_only_from_driver_health(
@@ -266,6 +272,7 @@ def test_both_drivers_declare_additive_personal_tools():
     for provider in module.PROVIDERS:
         assert "feishu_personal_tools_v1" in module.DRIVER_CAPABILITIES[provider]
         assert "wecom_personal_tools_v1" in module.DRIVER_CAPABILITIES[provider]
+        assert "feishu_group_docs_v1" in module.DRIVER_CAPABILITIES[provider]
         assert "owner_session_view_v1" in module.DRIVER_CAPABILITIES[provider]
     assert "resume_fallback_v1" in module.DRIVER_CAPABILITIES["claude"]
     assert "resume_fallback_v1" in module.DRIVER_CAPABILITIES["codex"]

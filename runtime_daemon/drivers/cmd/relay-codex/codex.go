@@ -44,7 +44,7 @@ func cleanEnv(extra map[string]string) []string {
 	for _, e := range os.Environ() {
 		// Filter codex-internal vars that would otherwise inherit and
 		// potentially conflict with the child's own session bookkeeping.
-		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") || strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
+		if strings.HasPrefix(e, "CODEX_RUN_ID=") || strings.HasPrefix(e, "CODEX_SESSION_ID=") || strings.HasPrefix(e, "COREMAN_COLLABORATION_") || strings.HasPrefix(e, "COREMAN_BOT_HELP_") || strings.HasPrefix(e, "COREMAN_FEISHU_PERSONAL_") || strings.HasPrefix(e, "COREMAN_FEISHU_DOCS_") || strings.HasPrefix(e, "COREMAN_WECOM_PERSONAL_") || strings.HasPrefix(e, "COREMAN_SYSTEMS_MCP_") || strings.HasPrefix(e, "COREMAN_SYSTEM_MCP") {
 			continue
 		}
 		env = append(env, e)
@@ -52,8 +52,9 @@ func cleanEnv(extra map[string]string) []string {
 	// Each personal tools credential reaches only a turn that mounts its server.
 	feishu := openai.FeishuPersonalEnabled(extra)
 	wecom := openai.WecomPersonalEnabled(extra)
+	docs := openai.FeishuDocsEnabled(extra)
 	for k, v := range extra {
-		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) {
+		if (strings.HasPrefix(k, "COREMAN_FEISHU_PERSONAL_") && !feishu) || (strings.HasPrefix(k, "COREMAN_WECOM_PERSONAL_") && !wecom) || (strings.HasPrefix(k, "COREMAN_FEISHU_DOCS_") && !docs) {
 			continue
 		}
 		env = append(env, k+"="+v)
@@ -179,6 +180,14 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 		out.Args = append(out.Args, "-c", "mcp_servers.coreman_wecom_personal.url="+string(encodedURL), "-c", `mcp_servers.coreman_wecom_personal.bearer_token_env_var="COREMAN_WECOM_PERSONAL_TOKEN"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_wecom_personal.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_wecom_personal.enabled=false")
+	}
+
+	// Feishu group docs mount only in Feishu group chats.
+	if openai.FeishuDocsEnabled(req.EnvVars) {
+		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_FEISHU_DOCS_URL"]))
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_feishu_docs.url="+string(encodedURL), "-c", `mcp_servers.coreman_feishu_docs.bearer_token_env_var="COREMAN_FEISHU_DOCS_TOKEN"`, "-c", "mcp_servers.coreman_feishu_docs.enabled=true")
+	} else {
+		out.Args = append(out.Args, "-c", `mcp_servers.coreman_feishu_docs.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_feishu_docs.enabled=false")
 	}
 
 	// The business system catalog mounts whenever the turn carries its

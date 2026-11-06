@@ -105,6 +105,7 @@ func buildTurnConfig(req *openai.ChatCompletionRequest, systemFile string) (stri
 		strings.TrimSpace(env["COREMAN_COLLABORATION_URL"]) != "" && strings.TrimSpace(env["COREMAN_COLLABORATION_TOKEN"]) != "")
 	mount("coreman_feishu_personal", "COREMAN_FEISHU_PERSONAL_URL", "COREMAN_FEISHU_PERSONAL_TOKEN", openai.FeishuPersonalEnabled(env))
 	mount("coreman_wecom_personal", "COREMAN_WECOM_PERSONAL_URL", "COREMAN_WECOM_PERSONAL_TOKEN", openai.WecomPersonalEnabled(env))
+	mount("coreman_feishu_docs", "COREMAN_FEISHU_DOCS_URL", "COREMAN_FEISHU_DOCS_TOKEN", openai.FeishuDocsEnabled(env))
 	mount("coreman_systems", "COREMAN_SYSTEMS_MCP_URL", "COREMAN_SYSTEMS_MCP_TOKEN", openai.SystemsCatalogEnabled(env))
 	for _, m := range openai.SystemMCPs(env) {
 		if m.URL != "" {

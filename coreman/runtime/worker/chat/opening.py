@@ -314,6 +314,11 @@ class OpenStage(ChatStageBase):
             extra, env = await schedules.configure(
                 session, ctx, intake, info.relay_session_id, extra, env
             )
+            from coreman.runtime.worker.chat import feishu_docs
+
+            extra, env = await feishu_docs.configure(
+                session, ctx, intake, info.relay_session_id, extra, env
+            )
             from coreman.runtime.worker.chat import credentials
 
             extra, env, personal_secrets = await credentials.configure(
