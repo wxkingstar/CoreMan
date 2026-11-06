@@ -15,6 +15,12 @@ from coreman.core.db.models.account import (
     UserIdentity,
 )
 from coreman.core.db.models.alert import AlertState
+from coreman.core.db.models.api_tasks import (
+    API_TASK_TARGETS,
+    ApiTask,
+    BotConversationAlias,
+    PersonalAccessToken,
+)
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
     EFFORT_LEVELS,
@@ -252,3 +258,5 @@ __all__ += [
     "GroupObserveDecision",
     "GroupObserveState",
 ]
+
+__all__ += ["API_TASK_TARGETS", "ApiTask", "BotConversationAlias", "PersonalAccessToken"]

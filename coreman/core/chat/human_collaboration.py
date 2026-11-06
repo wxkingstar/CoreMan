@@ -21,6 +21,7 @@ from urllib.parse import quote
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import reply_to
 from coreman.core.bus import outbox, tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
@@ -325,7 +326,7 @@ async def send_ask(session: AsyncSession, row: HumanCollaboration) -> None:
         )
         target = {
             "chat_id": row.origin_chat_id,
-            "message_id": origin.platform_msg_id if origin else None,
+            "message_id": reply_to(origin.platform_msg_id) if origin else None,
         }
         payload["_mention_user_id"] = row.helper_platform_user_id
         payload["markdown"] = (
@@ -405,7 +406,7 @@ async def notify_origin(
             platform="feishu",
             kind="send",
             dedupe_key=f"human-collaboration:{row.id}:origin:{row.status}",
-            target={"chat_id": row.origin_chat_id, "message_id": origin.platform_msg_id},
+            target={"chat_id": row.origin_chat_id, "message_id": reply_to(origin.platform_msg_id)},
             payload={"text": text},
         )
         return

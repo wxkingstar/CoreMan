@@ -262,3 +262,43 @@ async def test_me_commands_keep_values_off_the_command_line(cli, db_session, tmp
     code, _, err = await cli("me", "wecom-unbind", "--as", "alice")
     assert code == 1 and "--yes" in err
     assert (await cli("me", "wecom-unbind", "--yes", "--as", "alice"))[0] == 0
+
+
+async def test_api_token_and_api_access_commands(cli, db_session):  # noqa: F811
+    from coreman.core.db.models import BotConversationAlias, PersonalAccessToken
+
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    await add_user(db_session, "alice")
+    db_session.add(BotConversationAlias(bot_id=bot.id, alias="订单异常", chat_id="oc_g"))
+    await db_session.commit()
+
+    code, out, err = await cli(
+        "me", "api-token-create", "脚本", "--bot", "sales_bot", "--days", "30", "--as", "alice"
+    )
+    assert code == 0, err
+    plaintext = out.strip().splitlines()[-1]
+    assert plaintext.startswith("cmt_")
+    code, out, _ = await cli("me", "api-tokens", "--as", "alice")
+    assert code == 0 and "脚本" in out and "有效" in out and plaintext not in out
+    code, _, err = await cli("me", "api-token-revoke", "脚本", "--as", "alice")
+    assert code == 1 and "--yes" in err
+    code, out, _ = await cli("me", "api-token-revoke", "脚本", "--yes", "--as", "alice")
+    assert code == 0 and "已吊销" in out
+    token = await db_session.scalar(select(PersonalAccessToken))
+    await db_session.refresh(token)
+    assert token.revoked_at is not None
+
+    code, _, _ = await cli("bots", "api-access-set", "sales_bot", "on", "--as", "alice")
+    assert code == 1
+    code, out, err = await cli("bots", "api-access-set", "sales_bot", "on", "--as", "creator")
+    assert code == 0, err
+    await db_session.refresh(bot)
+    assert bot.api_access is True
+    code, out, _ = await cli("bots", "api-access", "sales_bot", "--as", "creator")
+    assert code == 0 and "订单异常" in out
+    code, out, err = await cli(
+        "bots", "api-alias-remove", "sales_bot", "订单异常", "--yes", "--as", "creator"
+    )
+    assert code == 0, err
+    assert await db_session.scalar(select(BotConversationAlias)) is None

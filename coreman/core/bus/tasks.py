@@ -248,9 +248,18 @@ async def defer(session: AsyncSession, task_id: int, *, seconds: float) -> bool:
 
 
 async def has_newer(
-    session: AsyncSession, bot_id: uuid.UUID, session_key: str, *, task_id: int, kind: str
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    session_key: str,
+    *,
+    task_id: int,
+    kind: str,
 ) -> bool:
-    """同会话里是否已有比 `task_id` 更晚入队的同类任务（不论状态）。"""
+    """同会话里是否已有比 `task_id` 更晚入队、会替代它的同类任务（不论状态）。
+
+    排队等前面做完的任务（载荷 `serialize_session`：群里别人交代的事、API 发起的轮次）
+    不算：它们本来就排在后面，不能因为前一条被放回队列就把它挤掉。
+    """
     stmt = (
         select(Task.id)
         .where(
@@ -261,6 +270,7 @@ async def has_newer(
         )
         .limit(1)
     )
+    stmt = stmt.where(Task.payload["serialize_session"].astext.is_distinct_from("true"))
     return (await session.scalar(stmt)) is not None
 
 

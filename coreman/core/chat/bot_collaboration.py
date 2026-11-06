@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import reply_to
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
@@ -296,7 +297,9 @@ async def send_message(
     if response and (request_item is None or not request_item.payload.get("_feishu_message_id")):
         raise ValueError("request delivery not confirmed")
     reply_mid = (
-        str(request_item.payload["_feishu_message_id"]) if request_item else origin.platform_msg_id
+        str(request_item.payload["_feishu_message_id"])
+        if request_item
+        else reply_to(origin.platform_msg_id)
     )
     mention = route.source_open_id if response else route.target_open_id
     text = (row.response if response else row.question) or ""
@@ -359,7 +362,7 @@ async def close(session: AsyncSession, row: BotCollaboration, status: str, error
         platform="feishu",
         kind="send",
         dedupe_key=f"collaboration:{row.id}:closed",
-        target={"chat_id": route.chat_id, "message_id": origin.platform_msg_id},
+        target={"chat_id": route.chat_id, "message_id": reply_to(origin.platform_msg_id)},
         payload={"text": f"本次协作已停止：{error}。未获得完整反馈，不能给出完成结论。"},
     )
 

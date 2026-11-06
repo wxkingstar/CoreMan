@@ -17,6 +17,7 @@ export const MENU: readonly MenuItem[] = [
   { key: 'myFeishu', path: '/my-feishu' },
   { key: 'myWecom', path: '/my-wecom' },
   { key: 'myCredentials', path: '/my-credentials' },
+  { key: 'myApiTokens', path: '/my-api-tokens' },
   { key: 'relays', path: '/runtimes' },
   { key: 'skills', path: '/skills' },
   { key: 'skillApprovals', path: '/skill-approvals', roles: ['ai_committee', 'platform_admin'] },
@@ -48,16 +49,16 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, myApiTokens: Key, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'workTasks', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'myCredentials', 'selfReminders'] },
+  { key: 'collaboration', keys: ['bots', 'workTasks', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'myCredentials', 'myApiTokens', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]
 const organizationKeys = ['users', 'apps', 'systems', 'credentials']
 function visible(item: MenuItem): boolean { return !item.roles || !!auth.user && item.roles.includes(auth.user.role as Role) }
 const visibleGroups = computed(() => groups.map(group => ({ ...group, items: group.keys.map(key => MENU.find(item => item.key === key)!).filter(visible) })).filter(group => group.items.length))
-const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path.startsWith('/my-credentials/') ? '/my-credentials' : route.path.startsWith('/work-tasks/') ? '/work-tasks' : route.path)
+const activePath = computed(() => route.path.startsWith('/bots/') ? '/bots' : route.path.startsWith('/my-credentials/') ? '/my-credentials' : route.path.startsWith('/work-tasks/') ? '/work-tasks' : route.path === '/api-tasks-guide' ? '/my-api-tokens' : route.path)
 const title = computed(() => t('menu.' + (MENU.find(item => item.path === activePath.value)?.key ?? 'home')))
 watch(() => route.path, () => { mobileOpen.value = false })
 function toggleDark() { dark.value = !dark.value; document.documentElement.classList.toggle('dark', dark.value); try { localStorage.setItem('coreman.dark', dark.value ? '1' : '0') } catch { /* unavailable storage */ } }

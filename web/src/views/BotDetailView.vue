@@ -13,6 +13,7 @@ import BotMemories from '@/components/BotMemories.vue'
 import BotGroupObserve from '@/components/BotGroupObserve.vue'
 import BotSkills from '@/components/BotSkills.vue'
 import BotCollaborators from '@/components/BotCollaborators.vue'
+import BotApiAccess from '@/components/BotApiAccess.vue'
 import BotHumanCollaborators from '@/components/BotHumanCollaborators.vue'
 import FeishuAppPanel from '@/components/feishuApp/FeishuAppPanel.vue'
 import EnvVarsEditor from '@/components/EnvVarsEditor.vue'
@@ -571,6 +572,18 @@ onMounted(async () => {
           <el-empty
             v-else
             :description="t('collaboration.platform')"
+          />
+        </el-tab-pane>
+        <el-tab-pane
+          v-if="bot.platform === 'feishu' && perms?.can_edit"
+          name="api-access"
+          :label="t('apiAccess.bot.tab')"
+          lazy
+        >
+          <BotApiAccess
+            :bot-id="botId"
+            :can-edit="!!perms?.can_edit"
+            :active="detailTab === 'api-access'"
           />
         </el-tab-pane>
       </el-tabs>

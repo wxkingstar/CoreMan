@@ -616,6 +616,7 @@ export default {
     myFeishu: "我的飞书",
     myWecom: "我的企业微信",
     myCredentials: "我的凭证",
+    myApiTokens: "API 令牌",
     skills: "技能管理",
     skillApprovals: "技能审批",
     credentials: "接口与密钥",

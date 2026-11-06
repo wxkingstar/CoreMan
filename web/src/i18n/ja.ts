@@ -617,6 +617,7 @@ export default {
     myFeishu: "マイ飛書",
     myWecom: "マイ WeCom",
     myCredentials: "マイ認証情報",
+    myApiTokens: "API トークン",
     skills: "スキル管理",
     skillApprovals: "スキル承認",
     credentials: "API と署名鍵",

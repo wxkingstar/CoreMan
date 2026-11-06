@@ -34,3 +34,4 @@ CLAUDE.local.md
 
 # Local audit evidence can contain private conversations and credentials.
 /outputs/
+.gstack/

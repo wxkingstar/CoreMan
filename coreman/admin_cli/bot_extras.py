@@ -714,6 +714,17 @@ def _register_collaboration(ops: Any) -> None:
     _bot_arg(p)
     p.add_argument("enabled", type=on_off, metavar="on|off", help="关闭会取消进行中的求助")
 
+    leaf(ops, "api-access", "查看「允许 API 驱动」和群别名", api_access).add_argument("bot")
+    p = leaf(ops, "api-access-set", "开关「允许 API 驱动」", api_access_set)
+    _bot_arg(p)
+    p.add_argument(
+        "enabled", type=on_off, metavar="on|off", help="关闭后新调用被拒，排队中的 API 轮次不再执行"
+    )
+    p = leaf(ops, "api-alias-remove", "解绑一个群别名", api_alias_remove)
+    _bot_arg(p)
+    p.add_argument("alias", help="别名")
+    add_yes(p)
+
 
 HUMAN_COLUMNS: list[output.Column] = [
     ("姓名", "name"),
@@ -830,6 +841,61 @@ async def bot_help_set(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(data)
     else:
         _print_bot_help(data)
+    return 0
+
+
+# ---- API 驱动 ---------------------------------------------------------------------------
+
+
+def _print_api_access(data: dict[str, Any]) -> None:
+    output.fields(data, [("允许 API 驱动", "enabled")])
+    print()
+    output.table(
+        data["aliases"],
+        [
+            ("群别名", "alias"),
+            ("群 chat_id", "chat_id"),
+            ("绑定人", "created_by"),
+            ("绑定时间", "created_at"),
+        ],
+        empty="（还没有群别名：在群里 @ AI 员工发「/api 绑定 <别名>」）",
+    )
+
+
+async def api_access(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.get(f"{BOTS}/{bot['id']}/api-access")
+    if args.json:
+        output.dump(data)
+    else:
+        _print_api_access(data)
+    return 0
+
+
+async def api_access_set(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.request(
+        "PATCH", f"{BOTS}/{bot['id']}/api-access", body={"enabled": args.enabled}
+    )
+    if args.json:
+        output.dump(data)
+    else:
+        _print_api_access(data)
+    return 0
+
+
+async def api_alias_remove(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.get(f"{BOTS}/{bot['id']}/api-access")
+    row = one(
+        [a for a in data["aliases"] if a["alias"] == args.alias],
+        args.alias,
+        "群别名",
+        lambda a: a["alias"],
+    )
+    require_yes(args, f"解绑群别名 {row['alias']}")
+    await c.request("DELETE", f"{BOTS}/{bot['id']}/api-aliases/{row['id']}")
+    print(f"已解绑 {bot['name']} 的群别名 {row['alias']}")
     return 0
 
 

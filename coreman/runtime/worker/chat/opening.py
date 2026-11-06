@@ -268,6 +268,12 @@ class OpenStage(ChatStageBase):
             if work_note:
                 ctx.turn_notes.append(work_note)
                 await work.mark_started(session, ctx, intake)
+        if ctx.task.payload.get("api_task_id"):
+            from coreman.runtime.worker.chat import api
+
+            api_note = await api.note(session, ctx)
+            if api_note:
+                ctx.turn_notes.append(api_note)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
