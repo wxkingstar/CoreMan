@@ -120,6 +120,8 @@ async def test_p2p_round_trip_runs_in_private_chat_and_returns_reply(db_engine, 
     assert log.user_id == owner.id and log.session_key == "p2p-zs"
     view = await service.view(db_session, row)
     assert view["status"] == "succeeded" and "你好，世界" in view["reply"]
+    # 飞书卡片的完成标记只给人看，不返回给调用的程序。
+    assert not view["reply"].endswith("✅ 回复已生成")
 
 
 async def test_create_checks_bot_permissions_and_conversation(db_session):
@@ -369,3 +371,10 @@ async def test_credential_form_handoff_reports_waiting_user(db_session):
     await db_session.commit()
     view = await service.view(db_session, row)
     assert view["status"] == "waiting_user" and view["reply_truncated"] is False
+
+
+def test_clean_reply_strips_only_the_trailing_done_marker():
+    assert service.clean_reply("结论。\n\n✅ 回复已生成") == "结论。"
+    assert service.clean_reply("結論。\n\n✅ 返信を生成しました") == "結論。"
+    assert service.clean_reply("✅ 回复已生成 不在结尾") == "✅ 回复已生成 不在结尾"
+    assert service.clean_reply(None) is None
