@@ -296,8 +296,7 @@ class FinalizeStage(ChatStageBase):
                 and not out.cancelled
                 and (
                     out.relay_error
-                    or out.finish_reason == "error"
-                    and verdict.log_status == "failed"
+                    or (out.finish_reason == "error" and verdict.log_status == "error")
                     or isinstance(out.error, RelayError)
                     and not isinstance(out.error, RelayBusyError)
                 )
