@@ -18,6 +18,8 @@ BUDGET_KEY = "systems_catalog"
 # A failed permission lookup is retried after this long instead of on every call.
 PERMISSIONS_RETRY_SECONDS = 60
 PROXY_TOKEN_AAD = "systems_catalog.proxy_token.v1"
+# Default variable the anonymous catalog's call templates read the caller's own credential from.
+DIRECT_TOKEN_ENV = "SYSTEMS_TOKEN"
 # A cached proxy token this close to expiry is replaced before use.
 TOKEN_MARGIN_SECONDS = 30
 
@@ -45,6 +47,8 @@ class Context:
     perms_changed: bool = False
     tokens_changed: bool = False
     anonymous: bool = False
+    # Anonymous only: the caller's own environment variable named in its call templates.
+    token_env: str = DIRECT_TOKEN_ENV
 
     def system(self, key: str) -> BusinessSystem | None:
         return next((s for s in self.systems if s.key == key), None)

@@ -4,6 +4,7 @@ read-only catalog MCP, and admin refresh."""
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -36,6 +37,8 @@ MAX_BODY = 262_144
 PUBLIC_PATH = "/api/systems/mcp"
 # Catalog tools take a few short arguments; the anonymous endpoint accepts nothing larger.
 PUBLIC_MAX_BODY = 16_384
+# `?token_env=` names the caller's own variable for the curl templates; a name, never a value.
+TOKEN_ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 LINT_SHOWN = 20
 
 
@@ -247,6 +250,9 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
         raise not_found("Not found")
     if "origin" in request.headers:
         raise ApiError(403, 403, "Browser origins are not supported")
+    token_env = request.query_params.get("token_env", context.DIRECT_TOKEN_ENV)
+    if not TOKEN_ENV.fullmatch(token_env):
+        raise ApiError(400, 400, "token_env must be an environment variable name")
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, PUBLIC_MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -271,6 +277,7 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
             operator=None,
             systems=await catalog_systems(session),
             anonymous=True,
+            token_env=token_env,
         )
         value = await tools.dispatch(ctx, params["name"], params.get("arguments", {}))
         result = {

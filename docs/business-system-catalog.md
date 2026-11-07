@@ -223,15 +223,24 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 默认关闭：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 才开放，未开放时返回 404。目录不按权限过滤，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。
 - 系统范围：已启用、并且配了系统地址与 OpenAPI 地址的系统，不看 AI 员工授权和允许范围。最终能调什么由业务系统按调用方令牌对应用户的权限判定。
 - 只读已存的目录，不为匿名请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
-- 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板固定引用调用方本机的 `$SYSTEMS_TOKEN`（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
+- 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板引用调用方本机的环境变量（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。变量名默认 `SYSTEMS_TOKEN`，可在接入地址上用 `?token_env=<变量名>` 指定（字母、数字、下划线，不以数字开头，最长 64 字符，否则 400），只传变量名，不传令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
 - 没有调用预算和重复限制：匿名调用不关联任务。
 
-本机接入：
+本机接入：端点是标准的 MCP Streamable HTTP（只用 POST，返回 JSON，不需要认证头），支持远程 HTTP MCP 的客户端都能接，只要填同一个地址：
 
-```bash
-claude mcp add --transport http coreman-systems https://coreman.example.com/api/systems/mcp
-export SYSTEMS_TOKEN="<你的个人访问令牌>"
+```text
+https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN
 ```
+
+`SSO_TOKEN` 换成本机已有的令牌变量名；不带 `token_env` 时模板引用 `$SYSTEMS_TOKEN`。令牌只留在本机环境变量里，Agent 按模板执行 curl 时由 shell 展开。
+
+| 客户端 | 接入方式 |
+|---|---|
+| Claude Code | `claude mcp add --transport http coreman-systems '<地址>'` |
+| Codex | `codex mcp add coreman_systems --url '<地址>'`，或在 `~/.codex/config.toml` 写 `[mcp_servers.coreman_systems]` 加 `url = "<地址>"` |
+| 其他（JSON 配置） | `{"mcpServers": {"coreman-systems": {"type": "http", "url": "<地址>"}}}`，字段名以客户端文档为准 |
+
+Codex 的 `--bearer-token-env-var` 这类认证参数不要配：端点不需要认证，令牌不应发给 CoreMan。
 
 ## 管理台
 

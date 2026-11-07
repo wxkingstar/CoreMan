@@ -176,8 +176,6 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
 
 
 CALL_NOTES = {"risk_not_allowed": "不代理", "write_not_allowed": "未开启写入"}
-# The anonymous catalog's call templates read the caller's own credential from this variable.
-DIRECT_TOKEN_ENV = "SYSTEMS_TOKEN"
 
 
 def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
@@ -580,7 +578,7 @@ def call_template(
             + ("" if denied is None else proxy.DENIALS[denied]),
         }
     if ctx.anonymous:
-        env_var, mode = DIRECT_TOKEN_ENV, "bearer"
+        env_var, mode = ctx.token_env, "bearer"
     else:
         env_var, mode = token_env_var(system.key), auth_mode(system)
     header = (
