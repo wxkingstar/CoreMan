@@ -226,12 +226,21 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板引用调用方本机的环境变量（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。变量名默认 `SYSTEMS_TOKEN`，可在接入地址上用 `?token_env=<变量名>` 指定（字母、数字、下划线，不以数字开头，最长 64 字符，否则 400），只传变量名，不传令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
 - 没有调用预算和重复限制：匿名调用不关联任务。
 
-本机接入：
+本机接入：端点是标准的 MCP Streamable HTTP（只用 POST，返回 JSON，不需要认证头），支持远程 HTTP MCP 的客户端都能接，只要填同一个地址：
 
-```bash
-claude mcp add --transport http coreman-systems 'https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN'
-# SSO_TOKEN 是本机已有的个人访问令牌变量；不带 token_env 时模板引用 $SYSTEMS_TOKEN
+```text
+https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN
 ```
+
+`SSO_TOKEN` 换成本机已有的令牌变量名；不带 `token_env` 时模板引用 `$SYSTEMS_TOKEN`。令牌只留在本机环境变量里，Agent 按模板执行 curl 时由 shell 展开。
+
+| 客户端 | 接入方式 |
+|---|---|
+| Claude Code | `claude mcp add --transport http coreman-systems '<地址>'` |
+| Codex | `codex mcp add coreman_systems --url '<地址>'`，或在 `~/.codex/config.toml` 写 `[mcp_servers.coreman_systems]` 加 `url = "<地址>"` |
+| 其他（JSON 配置） | `{"mcpServers": {"coreman-systems": {"type": "http", "url": "<地址>"}}}`，字段名以客户端文档为准 |
+
+Codex 的 `--bearer-token-env-var` 这类认证参数不要配：端点不需要认证，令牌不应发给 CoreMan。
 
 ## 管理台
 
