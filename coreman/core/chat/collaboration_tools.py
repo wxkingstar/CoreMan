@@ -107,7 +107,7 @@ class Help(Arguments):
     )
     context: str = Field(
         default="",
-        max_length=900,
+        max_length=3000,
         description="仅填写伙伴完成任务必需的背景和业务标识；不重复 question，不传令牌",
     )
 

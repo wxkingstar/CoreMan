@@ -120,10 +120,10 @@ async def test_repeat_search_cancels_instead_of_unbounded_retry(db_session):
 
 async def test_overlong_context_gets_field_feedback_and_retry(db_session):
     a, b, actor, route, task = await fresh(db_session)
-    args = {"collaborator_id": b.bot_key, "question": "可用库存?", "context": "背景" * 815}
+    args = {"collaborator_id": b.bot_key, "question": "可用库存?", "context": "背景" * 1501}
     bad = await call(db_session, task, actor, "request_collaboration", args)
     assert bad["stop"] is False
-    assert "context 最多 900 字符，实际 1630" in bad["error"]
+    assert "context 最多 3000 字符，实际 3002" in bad["error"]
     await db_session.refresh(task)
     assert "collaboration_attempt_error" not in task.payload
     args["context"] = "只读核对"
@@ -407,3 +407,10 @@ async def test_registered_handoff_survives_eof_before_poll(db_session, db_engine
     assert row.status == "waiting_helper"
     await db_session.refresh(task)
     assert task.status == "succeeded"
+
+
+async def test_handoff_sized_context_is_accepted(db_session):
+    # 交接类求助常带 PR、分支、测试链接与验收结论，约 1.6k 字的背景应能直接登记。
+    a, b, actor, route, task = await fresh(db_session)
+    args = {"collaborator_id": b.bot_key, "question": "请审核上线安排", "context": "背景" * 815}
+    assert (await call(db_session, task, actor, "request_collaboration", args))["collaboration_id"]
