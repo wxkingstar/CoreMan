@@ -125,6 +125,32 @@ async def test_unfetched_catalog_is_reported_not_fetched(
     assert fake.requests == []
 
 
+async def test_token_env_names_the_callers_variable(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,  # noqa: F811
+    public: None,
+) -> None:
+    await fetched(db_session)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "systems_describe",
+            "arguments": {"system": "stock", "operation_id": "listDocuments"},
+        },
+    }
+    r = await client.post(PUBLIC_PATH + "?token_env=MY_PAT", json=body)
+    detail = json.loads(r.json()["result"]["content"][0]["text"])
+    assert detail["call"]["token_env"] == "MY_PAT"
+    assert '"Authorization: Bearer $MY_PAT"' in detail["call"]["curl"]
+    assert "MY_PAT 是调用方本机的环境变量" in detail["call"]["notes"]
+    for bad in ("1PAT", "A-B", "$(id)", "A" * 65):
+        bad_r = await client.post(PUBLIC_PATH, params={"token_env": bad}, json=body)
+        assert bad_r.status_code == 400
+
+
 async def test_rejects_browsers_and_large_bodies(
     client: httpx.AsyncClient,
     public: None,
