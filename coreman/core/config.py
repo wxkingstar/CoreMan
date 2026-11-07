@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     business_token_providers: dict[str, HTTPTokenProviderConfig] = Field(
         default_factory=dict, alias="BUSINESS_TOKEN_PROVIDERS", repr=False
     )
+    # 匿名只读的操作目录 MCP（/api/systems/mcp）：列出所有已启用系统的目录，调用方用自己的令牌直连
+    # 业务系统。目录不按权限过滤，只在入口限定内网访问的部署里开启。
+    systems_catalog_public: bool = Field(default=False, alias="SYSTEMS_CATALOG_PUBLIC")
 
     # 云签名代理：Tower 审批与阿里云凭据只留在服务端；任一缺失时代理路由返回 503。
     tower_url: str | None = Field(default=None, alias="TOWER_URL")

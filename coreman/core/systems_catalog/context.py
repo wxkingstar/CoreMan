@@ -24,11 +24,16 @@ TOKEN_MARGIN_SECONDS = 30
 
 @dataclass
 class Context:
-    """One verified call: the member, their systems this turn and the task's catalog state."""
+    """One verified call: the member, their systems this turn and the task's catalog state.
+
+    `anonymous` is the read-only catalog with no member, task or tokens (`operator` is None): it
+    serves stored catalogs only, never filters by permission, and the caller reaches the business
+    system directly with its own credential.
+    """
 
     session: AsyncSession
     issuance: service.Issuance
-    operator: service.Operator
+    operator: service.Operator | None
     systems: list[BusinessSystem]
     # Systems whose grant allows write-level proxied calls for this AI employee.
     writable: frozenset[str] = frozenset()
@@ -39,13 +44,20 @@ class Context:
     tokens: dict[str, Any] = field(default_factory=dict)
     perms_changed: bool = False
     tokens_changed: bool = False
+    anonymous: bool = False
 
     def system(self, key: str) -> BusinessSystem | None:
         return next((s for s in self.systems if s.key == key), None)
 
+    @property
+    def member(self) -> service.Operator:
+        """The verified member; only paths that issue tokens or record calls ask for it."""
+        assert self.operator is not None
+        return self.operator
+
 
 def _aad(ctx: Context, system: BusinessSystem) -> str:
-    return f"{PROXY_TOKEN_AAD}:{ctx.operator.task_id}:{system.key}"
+    return f"{PROXY_TOKEN_AAD}:{ctx.member.task_id}:{system.key}"
 
 
 async def proxy_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
@@ -71,7 +83,7 @@ async def proxy_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
         ctx.session,
         ctx.issuance,
         system,
-        ctx.operator,
+        ctx.member,
         ttl_seconds=ctx.token_ttl,
         purpose="proxy",
     )
@@ -88,7 +100,7 @@ async def proxy_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
 
 async def held(ctx: Context, system: BusinessSystem, loaded: service.Loaded) -> service.Held | None:
     """The member's permission codes for this system, cached in the task; None = no filtering."""
-    if not isinstance(loaded.compiled.get("permissions"), dict):
+    if ctx.anonymous or not isinstance(loaded.compiled.get("permissions"), dict):
         return None
     cached = ctx.perms.get(system.key)
     if isinstance(cached, dict):
@@ -101,7 +113,7 @@ async def held(ctx: Context, system: BusinessSystem, loaded: service.Loaded) -> 
         if system.token_delivery == "proxy":
             token = await proxy_token(ctx, system)
         else:
-            token = await service.issue_short_token(ctx.session, ctx.issuance, system, ctx.operator)
+            token = await service.issue_short_token(ctx.session, ctx.issuance, system, ctx.member)
             await ctx.session.commit()
         codes = await service.held_permissions(loaded, system.base_url or "", token)
     except TokenProviderError:
@@ -112,8 +124,10 @@ async def held(ctx: Context, system: BusinessSystem, loaded: service.Loaded) -> 
     return service.Held(codes) if codes is not None else None
 
 
-def permissions_unknown(loaded: service.Loaded, codes: service.Held | None) -> bool:
-    return isinstance(loaded.compiled.get("permissions"), dict) and codes is None
+def permissions_unknown(ctx: Context, loaded: service.Loaded, codes: service.Held | None) -> bool:
+    return (
+        not ctx.anonymous and isinstance(loaded.compiled.get("permissions"), dict) and codes is None
+    )
 
 
 def visible(op: dict[str, Any], codes: service.Held | None) -> bool:
@@ -121,7 +135,9 @@ def visible(op: dict[str, Any], codes: service.Held | None) -> bool:
 
 
 async def catalog(ctx: Context, system: BusinessSystem) -> service.Loaded | None:
-    await service.ensure_fresh(ctx.session, ctx.issuance, system, ctx.operator)
+    # The anonymous catalog has nobody to fetch as: it serves what tasks and admins last fetched.
+    if not ctx.anonymous:
+        await service.ensure_fresh(ctx.session, ctx.issuance, system, ctx.member)
     return await service.load(ctx.session, system.key)
 
 

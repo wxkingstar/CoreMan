@@ -215,6 +215,24 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 并追加一段代理规则。运行时不能挂载目录 MCP（未升级）或系统没有 OpenAPI 地址时，代理系统本轮不可用，提示词如实说明，不会退回下发令牌。
 
+## 匿名只读目录
+
+给不经过 AI 员工的调用方（例如成员本机的 Claude Code、Codex）用：从 CoreMan 拿到各系统的操作目录，再用自己的令牌直连业务系统。CoreMan 只提供目录，不签发令牌、不代理调用，调用方的令牌不经过 CoreMan。
+
+- 端点 `POST /api/systems/mcp`，无需认证，工具与上文相同但只有 `systems_browse`、`systems_search`、`systems_describe`（`systems_call` 不提供）。带 `Origin` 头的请求拒绝，请求体最大 16 KiB，`GET` 返回 405。
+- 默认关闭：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 才开放，未开放时返回 404。目录不按权限过滤，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。
+- 系统范围：已启用、并且配了系统地址与 OpenAPI 地址的系统，不看 AI 员工授权和允许范围。最终能调什么由业务系统按调用方令牌对应用户的权限判定。
+- 只读已存的目录，不为匿名请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
+- 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板固定引用调用方本机的 `$SYSTEMS_TOKEN`（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
+- 没有调用预算和重复限制：匿名调用不关联任务。
+
+本机接入：
+
+```bash
+claude mcp add --transport http coreman-systems https://coreman.example.com/api/systems/mcp
+export SYSTEMS_TOKEN="<你的个人访问令牌>"
+```
+
 ## 管理台
 
 - 系统编辑页：「OpenAPI 地址」输入框，保存时地址有变化就以当前管理员身份拉取一次（失败不影响保存，结果随保存响应返回）；「刷新目录」按钮（`POST /api/admin/systems/{key}/catalog/refresh`，记审计 `system.catalog_refresh`）。目录状态由 `GET /api/admin/systems/{key}/catalog` 读取。
