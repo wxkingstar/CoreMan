@@ -1,8 +1,10 @@
-# CoreMan API 任务：给 Agent 的使用说明（v1）
+# 通过 API 驱动 AI 员工（v1）
+
+> 给成员：在管理台「API 令牌」新建一枚令牌、选好要驱动的 AI 员工，再把这一页的链接（或 Markdown 原文）和令牌交给你的 Agent 或脚本。管理台「API 令牌 → 使用手册」有图解版。
 
 你（一个 Agent 或脚本）可以通过这套接口，以某个成员的身份给 CoreMan 里的飞书 AI 员工下一件事，并拿回结果。这件事会在飞书会话里进行：会话里的人能看到你发起了什么、AI 员工怎么回答的，也可以在飞书里接着往下推进。
 
-文中的 `{{COREMAN_BASE_URL}}` 是 CoreMan 的地址，也就是你拿到这份文档的地址里 `/integration/` 之前的那一段。
+本文里的 CoreMan 地址是 `{{COREMAN_BASE_URL}}`。
 
 ## 1. 开始前要有的三样东西
 
@@ -134,6 +136,7 @@ BASE = "{{COREMAN_BASE_URL}}"
 HEADERS = {"Authorization": f"Bearer {os.environ['COREMAN_API_TOKEN']}"}
 DONE = {"succeeded", "waiting_user", "failed", "superseded", "cancelled"}
 
+
 def run(bot_key: str, prompt: str, request_id: str, conversation: dict | None = None) -> dict:
     body = {"bot_key": bot_key, "prompt": prompt, "request_id": request_id}
     if conversation:
@@ -149,6 +152,7 @@ def run(bot_key: str, prompt: str, request_id: str, conversation: dict | None = 
         r.raise_for_status()
         task = r.json()["data"]
     return task
+
 
 task = run("demo-bot", "整理今天的告警", "alert-2026-11-06", {"target": "chat", "alias": "值班群"})
 print(task["status"], task["reply"] or task["error_message"])

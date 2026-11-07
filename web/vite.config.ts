@@ -7,7 +7,11 @@ export default defineConfig({
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   server: {
     port: 5173,
-    proxy: { '/api': process.env.COREMAN_API_TARGET || 'http://127.0.0.1:8000', '/health': process.env.COREMAN_API_TARGET || 'http://127.0.0.1:8000' },
+    // /docs 与 /integration/ 下的两份说明由 API 渲染（源文件在 coreman/docs_site/pages/），开发时一并代理。
+    proxy: Object.fromEntries(
+      ['/api', '/health', '/docs', '/integration/api-tasks-agent-guide.md', '/integration/business-system-openapi-contract.md']
+        .map((path) => [path, process.env.COREMAN_API_TARGET || 'http://127.0.0.1:8000']),
+    ),
   },
   build: { outDir: 'dist', emptyOutDir: true },
   test: {

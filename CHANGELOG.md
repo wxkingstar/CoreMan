@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Documentation site at `/docs`, for people and for agents, without login. Each topic is a page with search, a page list and the page's outline: an overview, connecting a local Claude Code or Codex to the anonymous business system catalog MCP, driving AI employees through the API, and the business system OpenAPI integration spec. Agents read `/docs/llms.txt` (an index in llms.txt format), `/docs/llms-full.txt` (every page in one file) or `/docs/<page>.md`; a page URL with `?for=ai` or `Accept: text/markdown` also returns Markdown. CoreMan's address is filled in from `PUBLIC_BASE_URL`. The pages are Markdown files under `coreman/docs_site/pages/` rendered by the API, which are now the single source of `/integration/api-tasks-agent-guide.md` and `/integration/business-system-openapi-contract.md`; both addresses keep working. A deployment that only exposes the console on an internal network serves the docs there too. See `docs/docs-site.md`. No database migration; runtime nodes need no upgrade.
+
 ### Changed
 
 - The anonymous catalog MCP takes `?token_env=<NAME>` on its URL to name the caller's own environment variable in the `systems_describe` curl templates, so a member can point it at a variable they already have (for example `.../api/systems/mcp?token_env=SSO_TOKEN`) instead of copying the token into `SYSTEMS_TOKEN`. Only the name travels; an invalid name returns 400. The default stays `SYSTEMS_TOKEN`. No database migration.
