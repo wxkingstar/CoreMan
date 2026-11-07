@@ -424,7 +424,9 @@ class CardActionHandler:
             NewTask(
                 bot_id=bot.id,
                 kind="relay_switch",
-                lane="fast",
+                # 切换要等员工手上这一轮结束，可能很久，不占快车道的槽位。
+                lane="normal",
+                priority=5,
                 payload={
                     "state_id": str(st.id),
                     "bot_key": bot.bot_key,

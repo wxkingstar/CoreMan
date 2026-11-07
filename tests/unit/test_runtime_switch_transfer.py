@@ -398,3 +398,23 @@ def test_opencode_export_writes_the_session_next_to_its_binding(tmp_path, monkey
         f"export ses_abc1234567 data={tmp_path / 'seat'}",
         f"export ses_gone0000000 data={tmp_path / 'seat'}",
     ]
+
+
+def test_oversized_codex_session_is_skipped_without_dropping_the_others(codex_agent, monkeypatch):
+    """一个几百 MB 的长会话超过单会话上限：只跳过它，其余会话照常带走（以前整次导出报错）。"""
+    monkeypatch.setattr(agent_module, "SESSION_ONE_TOTAL", 1024)
+    call(codex_agent, "init", "one")
+    sessions = codex_agent.codex_sessions_dir()
+    small, big = str(uuid.uuid4()), str(uuid.uuid4())
+    for sid, size in [(small, 10), (big, 4096)]:
+        thread = str(uuid.uuid4())
+        rollout = sessions / f"2026/11/06/rollout-2026-11-06T08-00-00-{thread}.jsonl"
+        rollout.parent.mkdir(parents=True, exist_ok=True)
+        rollout.write_text("x" * size)
+        (codex_agent.sessions_dir / sid).mkdir(parents=True)
+        (codex_agent.sessions_dir / sid / "codex_thread.txt").write_text(thread)
+    listing = codex_agent.dispatch(
+        {"type": "session-export", "working_dir": "one", "bot_id": "b1", "sessions": [small, big]}
+    )
+    assert {f["session"] for f in listing["files"]} == {small}
+    assert [item["session"] for item in listing["skipped"]] == [big]

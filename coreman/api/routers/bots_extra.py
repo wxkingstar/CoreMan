@@ -29,10 +29,21 @@ from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
-from coreman.core.bots.switch_relay import SwitchError
+from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import ACTIVE, OPEN, NewTask
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import BotAllowedUser, BotApprover, BotMember, RelayServer, User
+from coreman.core.db.models import (
+    Bot,
+    BotAllowedUser,
+    BotApprover,
+    BotMember,
+    RelayServer,
+    Task,
+    User,
+)
+from coreman.core.timeutils import utcnow
 
 router = APIRouter(prefix="/api/admin/bots", tags=["bots"], dependencies=[Depends(verify_csrf)])
 
@@ -135,10 +146,16 @@ async def switch_relay(
     body: SwitchRelayIn,
     request: Request,
     response: Response,
+    background: bool = False,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """换机 / 换模型。判定与副作用都在领域服务里，worker 的限流自动切换走的是同一条路。"""
+    """换机 / 换模型。判定与副作用都在领域服务里，worker 的限流自动切换走的是同一条路。
+
+    `background=true` 且要换实例或目录时不在请求里迁移：判定通过就排一个切换作业，返回 202 与
+    task_id，由 worker 执行（不要求员工空闲，等手上这一轮结束），进度与结论用 switch-jobs 查。
+    只换模型、或不带 background 的旧调用方，仍当场完成。
+    """
     bot = await load_bot(session, bot_id)
     member_ids = await member_ids_of(session, bot.id)
     # 权限判定必须先于 If-Match：无权的人漏带版本号时该看到 403，而不是 428/409 那种
@@ -147,6 +164,10 @@ async def switch_relay(
         raise forbidden()
     require_if_match(request, bot.version)
     target = await session.get(RelayServer, body.relay_server_id)
+    if background and target is not None and is_moving(bot, target, body.target_directory):
+        return await _start_switch_job(
+            session, bot, target, body, user, member_ids, request, response
+        )
     try:
         result = await domain_switch_relay(
             session,
@@ -177,6 +198,117 @@ async def switch_relay(
             "bot": await build_out(session, _cipher(request), bot, user),
         },
     }
+
+
+async def _start_switch_job(
+    session: AsyncSession,
+    bot: Bot,
+    target: RelayServer,
+    body: SwitchRelayIn,
+    user: User,
+    member_ids: set[uuid.UUID],
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    try:
+        await validate_switch(
+            session, bot=bot, target=target, model=body.model, actor=user, member_ids=member_ids
+        )
+    except SwitchError as exc:
+        raise ApiError(exc.status, exc.code, exc.message) from exc
+    await session.refresh(bot, with_for_update=True)
+    running = await session.scalar(
+        select(Task.id)
+        .where(Task.bot_id == bot.id, Task.kind == "relay_switch", Task.status.in_(OPEN))
+        .limit(1)
+    )
+    if running is not None:
+        raise ApiError(409, 409, "这位 AI 员工已有一个切换在进行，请等它结束或先取消")
+    if bot.workspace_state in {"migrating", "initializing", "busy"} and (
+        bot.workspace_deadline is None or bot.workspace_deadline > utcnow()
+    ):
+        raise ApiError(409, 409, "工作目录操作正在进行，请等待完成")
+    task = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=bot.id,
+            kind="relay_switch",
+            lane="normal",
+            priority=5,
+            user_id=user.id,
+            payload={
+                "origin": "admin",
+                "user_id": str(user.id),
+                "target_relay_server_id": str(target.id),
+                "model": body.model,
+                "workspace_mode": body.workspace_mode,
+                "target_directory": body.target_directory,
+                "allow_stored_memory": body.allow_stored_memory,
+                "ip": client_ip(request),
+            },
+        ),
+    )
+    if task is None:  # 没有 dedupe_key，不会撞重
+        raise ApiError(500, 500, "切换作业创建失败")
+    await session.commit()
+    response.status_code = 202
+    return {"code": 0, "data": {"task_id": task.id}}
+
+
+async def _switch_job(session: AsyncSession, bot_id: uuid.UUID, task_id: int) -> Task:
+    task = await session.get(Task, task_id, populate_existing=True)
+    if task is None or task.bot_id != bot_id or task.kind != "relay_switch":
+        raise not_found("切换作业不存在")
+    return task
+
+
+@router.get("/{bot_id}/switch-jobs/{task_id}")
+async def switch_job(
+    bot_id: uuid.UUID,
+    task_id: int,
+    request: Request,
+    response: Response,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """切换作业的进度与结论：进行中看工作目录的阶段；结束后 result.ok 区分成功与被规则挡下。"""
+    bot = await load_bot(session, bot_id)
+    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
+        raise forbidden()
+    task = await _switch_job(session, bot.id, task_id)
+    data: dict[str, Any] = {
+        "task_id": task.id,
+        "status": task.status,
+        "phase": bot.workspace_phase,
+        "result": task.result,
+        # 失败（进程中断等）与取消时给人看的原因；被规则挡下的原因在 result.message 里。
+        "error": (task.error_message or task.cancel_reason) if task.status != "succeeded" else None,
+    }
+    if task.status == "succeeded" and (task.result or {}).get("ok"):
+        await session.refresh(bot)
+        set_etag(response, bot.version)
+        data["bot"] = await build_out(session, _cipher(request), bot, user)
+    return {"code": 0, "data": data}
+
+
+@router.post("/{bot_id}/switch-jobs/{task_id}/cancel")
+async def cancel_switch_job(
+    bot_id: uuid.UUID,
+    task_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """取消切换：还在排队的直接作废；已经在跑的只在等待员工手上这一轮时生效，开始迁移后跑完为止。"""
+    bot = await load_bot(session, bot_id)
+    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
+        raise forbidden()
+    task = await _switch_job(session, bot.id, task_id)
+    if task.status == "queued":
+        await tasks.finish(session, task.id, status="cancelled", error_message="已取消")
+    elif task.status in ACTIVE:
+        await tasks.request_cancel(session, task.id, "已取消")
+    await session.commit()
+    return {"code": 0, "data": {"task_id": task.id}}
 
 
 @router.post("/{bot_id}/toggle")
@@ -444,6 +576,7 @@ async def workspace_switch_preview(
         shared_directory,
         target_path,
     )
+    from coreman.core.knowledge.memory_transfer import active_counts
     from coreman.core.relay.agent_client import AgentError, call_agent
 
     bot = await load_bot(session, bot_id)
@@ -517,5 +650,10 @@ async def workspace_switch_preview(
             # 与当前运行时共享同一个目录（共享盘）：换机不复制文件。
             "shared": shared,
             "memory_snapshot_at": bot.memory_snapshot_at,
+            # 切换会先等这些进行中的任务结束（按类别计数），排队中的不等。
+            "active_tasks": await active_counts(session, bot.id),
+            # 目标实例的推理检查结果：登录失效、额度用完时切过去也回不了话，提前看到。
+            "target_health": target.health_status,
+            "target_health_detail": target.health_detail,
         },
     }

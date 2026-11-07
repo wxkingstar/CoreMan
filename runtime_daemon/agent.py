@@ -33,10 +33,13 @@ MAX_BODY = 4 * 1024 * 1024
 MAX_MEMORY = 256 * 1024
 # Claude 健康检查间隔；对话在这段时间内已带回额度时跳过本次检查。
 CLAUDE_CHECK_INTERVAL = 15 * 60
-# 换机带走的 Claude 会话文件：单个会话的对话记录、子代理与附件，总量与个数都有上限。
+# 换机带走的会话文件：单个会话的对话记录、子代理与附件，总量与个数都有上限。超限的那个会话
+# 不带（平台改为文本续接），其余照常带走；整次导出另有总上限。
 SESSION_CHUNK = 2 * 1024 * 1024
 SESSION_TOTAL = 512 * 1024 * 1024
 SESSION_FILES = 5000
+SESSION_ONE_TOTAL = 256 * 1024 * 1024
+SESSION_ONE_FILES = 1000
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Codex 把一个 thread 的完整记录存在 sessions/年/月/日/rollout-<开始时间>-<thread>.jsonl。
 CODEX_ROLLOUT = re.compile(
@@ -456,7 +459,7 @@ class Agent:
         wanted = data.get("sessions")
         if not isinstance(wanted, list) or len(wanted) > 500:
             raise OperationError("会话列表无效")
-        files, total = [], 0
+        files, total, skipped = [], 0, []
         for sid in wanted:
             if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
                 raise OperationError("会话列表无效")
@@ -485,21 +488,29 @@ class Agent:
                         for n in names
                         if (Path(parent) / n).is_file() and not (Path(parent) / n).is_symlink()
                     ]
-            for area, path in candidates:
-                size = path.stat().st_size
-                total += size
+            sizes = [(area, path, path.stat().st_size) for area, path in candidates]
+            size = sum(n for _area, _path, n in sizes)
+            # 一个超大的会话（长会话的 rollout 可达数百 MB）不能拖垮其他会话：只跳过它自己。
+            if (
+                len(sizes) > SESSION_ONE_FILES
+                or size > SESSION_ONE_TOTAL
+                or len(files) + len(sizes) > SESSION_FILES
+                or total + size > SESSION_TOTAL
+            ):
+                skipped.append({"session": sid, "size": size, "files": len(sizes)})
+                continue
+            total += size
+            for area, path, n in sizes:
                 files.append(
                     {
                         "session": sid,
                         "area": area,
                         "path": path.relative_to(self.session_areas(working_dir)[area]).as_posix(),
-                        "size": size,
+                        "size": n,
                         "hash": cached_digest(self.digests, path),
                     }
                 )
-            if len(files) > SESSION_FILES or total > SESSION_TOTAL:
-                raise OperationError("会话文件超过迁移上限")
-        return {"success": True, "files": files}
+        return {"success": True, "files": files, "skipped": skipped}
 
     def session_read(self, data: dict) -> dict:
         path = self.session_path(

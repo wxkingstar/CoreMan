@@ -350,6 +350,13 @@ async def copy_sessions(
                     "sessions": [str(row.relay_session_id) for row in rows],
                 },
             )
+            if listing.get("skipped"):
+                # 超过单会话上限的不搬（如几百 MB 的长会话），它们首轮改为文本续接。
+                log.warning(
+                    "session_copy_oversized",
+                    bot_id=str(bot.id),
+                    sessions=[item.get("session") for item in listing["skipped"]],
+                )
             grouped: dict[str, list[dict[str, Any]]] = {}
             for item in listing.get("files") or []:
                 # 老节点不报 session，Claude 的路径以会话 id 开头。
@@ -455,6 +462,8 @@ async def prepare_switch(
     mode: WorkspaceMode = "copy",
     directory: str,
     allow_stored_memory: bool = False,
+    drain: bool = False,
+    cancelled: asyncio.Event | None = None,
 ) -> tuple[str, bool, set[uuid.UUID]]:
     """Caller owns bot row lock. Intermediate commits persist fence and recovered memory.
 
@@ -464,23 +473,32 @@ async def prepare_switch(
 
     Final binding and ready state remain caller-transactional. A process crash leaves a
     durable fence; retry is allowed after the 30 minute deadline (work has a 25m timeout).
+
+    `drain=True`（后台切换作业）：不要求员工空闲，先隔离（不再认领新任务），再等已在跑的
+    这一轮结束；`cancelled` 置位时放弃。同步调用仍要求空闲，有任务在跑直接 409。
     """
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         if bot.workspace_deadline is None or bot.workspace_deadline > utcnow():
             raise ApiError(409, 409, "工作目录操作正在进行，请等待完成")
-    await memory_transfer.ensure_idle(session, bot)
+    if not drain:
+        await memory_transfer.ensure_idle(session, bot)
     old = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     same_directory = bool(
         old and old.runtime_node_id == target.runtime_node_id and directory == bot.working_dir
     )
     operation_id = uuid.uuid4()
     bot.workspace_state, bot.workspace_error = "migrating", None
-    bot.workspace_phase = "检查目标目录"
+    bot.workspace_phase = "等待进行中的任务结束" if drain else "检查目标目录"
     bot.workspace_operation_id = operation_id
     bot.workspace_target_relay_id, bot.workspace_target_dir = target.id, directory
     bot.workspace_deadline = utcnow() + timedelta(minutes=30)
     await session.commit()
     try:
+        if drain:
+            await memory_transfer.drain(session, bot, cancelled=cancelled)
+            bot.workspace_phase = "检查目标目录"
+            bot.workspace_deadline = utcnow() + timedelta(minutes=30)
+            await session.commit()
         async with asyncio.timeout(25 * 60):
             capability = await require_workspace(target, cipher)
             info = await call_agent(
@@ -607,3 +625,19 @@ async def prepare_switch(
         if isinstance(exc, ApiError):
             raise
         raise ApiError(502, 502, bot.workspace_error) from exc
+
+
+async def release_fence(session: AsyncSession, bot_id: uuid.UUID, reason: str) -> bool:
+    """切换作业中途没了（worker 被杀、发布重启、未预期的异常）时解除迁移隔离。
+
+    绑定只在作业最后一个事务里改，中途断掉时员工仍在原运行时上：回到 ready 让任务照常认领，
+    原因留给工作目录面板。不在迁移中的不动。返回是否解除了。
+    """
+    bot = await session.get(Bot, bot_id, with_for_update=True, populate_existing=True)
+    if bot is None or bot.workspace_state != "migrating":
+        return False
+    bot.workspace_state, bot.workspace_phase = "ready", "切换中断，原绑定已保留"
+    bot.workspace_error = reason
+    bot.workspace_deadline, bot.workspace_operation_id = None, None
+    bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
+    return True

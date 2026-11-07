@@ -868,6 +868,11 @@ export default {
       backendChange: '目标模型与当前模型分属不同后端（Claude ↔ Codex），提示词与工具行为差异较大，请确认。',
       confirm: '确认切换',
       done: '已切换',
+      waitTasks: '切换会先等员工手上进行中的任务结束（{tasks}），排队中的消息切换完成后在新运行时处理。',
+      targetUnhealthy: '目标运行时最近一次检查不正常，切过去可能无法回复：{detail}',
+      cancelJob: '取消切换',
+      cancelRequested: '已请求取消；正在迁移的步骤会跑完，等待中的会立即停下。',
+      failed: '切换未完成，原绑定已保留',
     },
   },
   audit: {

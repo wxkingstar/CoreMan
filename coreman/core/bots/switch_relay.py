@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 
@@ -58,7 +59,7 @@ class SwitchResult:
     memory_status: str = "unchanged"
 
 
-async def switch_relay(
+async def validate_switch(
     session: AsyncSession,
     *,
     bot: Bot,
@@ -66,13 +67,11 @@ async def switch_relay(
     model: str | None,
     actor: User,
     member_ids: set[uuid.UUID],
-    ip: str | None,
-    cipher: Cipher | None = None,
-    workspace_mode: WorkspaceMode = "copy",
-    target_directory: str | None = None,
-    allow_stored_memory: bool = False,
-) -> SwitchResult:
-    """把机器人换到 `target` 上（可同时指定模型），成功返回换前换后的快照。"""
+) -> str:
+    """只做判定、不改任何东西：权限、目标可用、团队、后端就绪、模型；返回换过去用的模型。
+
+    后台切换作业在入队前先用它把能当场拒绝的都拒绝掉，作业执行时 switch_relay 还会再判一次。
+    """
     if not can_switch_relay(actor, bot, member_ids):
         raise SwitchError(403, "没有权限执行该操作")
     # 换到当前这台不做可见性/团队校验：同 relay 换模型走的也是这个入口，机器人本来就在上面
@@ -111,6 +110,43 @@ async def switch_relay(
         if picked is None:
             raise SwitchError(422, "目标运行时没有可用模型")
         new_model = picked
+    return new_model
+
+
+def is_moving(bot: Bot, target: RelayServer, target_directory: str | None) -> bool:
+    """换到另一个实例或另一个目录：要动工作目录，走后台作业；只换模型的当场完成。"""
+    return target.id != bot.relay_server_id or bool(
+        target_directory and target_directory != bot.working_dir
+    )
+
+
+async def switch_relay(
+    session: AsyncSession,
+    *,
+    bot: Bot,
+    target: RelayServer | None,
+    model: str | None,
+    actor: User,
+    member_ids: set[uuid.UUID],
+    ip: str | None,
+    cipher: Cipher | None = None,
+    workspace_mode: WorkspaceMode = "copy",
+    target_directory: str | None = None,
+    allow_stored_memory: bool = False,
+    drain: bool = False,
+    cancelled: asyncio.Event | None = None,
+) -> SwitchResult:
+    """把机器人换到 `target` 上（可同时指定模型），成功返回换前换后的快照。
+
+    `drain=True` 用于后台切换作业：不要求员工空闲，隔离后等已在跑的这一轮结束再迁移。
+    """
+    new_model = await validate_switch(
+        session, bot=bot, target=target, model=model, actor=actor, member_ids=member_ids
+    )
+    if target is None:  # validate_switch 已拒绝，这里只为收窄类型
+        raise SwitchError(422, "目标运行时未注册或不可用")
+    same_relay = target.id == bot.relay_server_id
+    catalog = await load_catalog(session)
     expected_version = bot.version
     await session.refresh(bot, with_for_update=True)
     if bot.version != expected_version:
@@ -140,6 +176,8 @@ async def switch_relay(
                 mode=workspace_mode,
                 directory=target_directory,
                 allow_stored_memory=allow_stored_memory,
+                drain=drain,
+                cancelled=cancelled,
             )
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
