@@ -208,9 +208,9 @@ async def _record(
 ) -> None:
     ctx.session.add(
         SystemCall(
-            task_id=ctx.operator.task_id,
-            bot_id=ctx.operator.bot_id,
-            user_id=ctx.operator.user.id,
+            task_id=ctx.member.task_id,
+            bot_id=ctx.member.bot_id,
+            user_id=ctx.member.user.id,
             system_key=system.key,
             operation_id=operation_id,
             method=op["method"],
@@ -224,7 +224,7 @@ async def _record(
     await ctx.session.commit()
     log.info(
         "system_call",
-        task_id=ctx.operator.task_id,
+        task_id=ctx.member.task_id,
         system=system.key,
         operation=operation_id,
         risk=op["risk"],

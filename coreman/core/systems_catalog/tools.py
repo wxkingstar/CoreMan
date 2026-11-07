@@ -176,17 +176,29 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
 
 
 CALL_NOTES = {"risk_not_allowed": "不代理", "write_not_allowed": "未开启写入"}
+# The anonymous catalog's call templates read the caller's own credential from this variable.
+DIRECT_TOKEN_ENV = "SYSTEMS_TOKEN"
 
 
 def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
     """Whether this turn may call the operation, from the catalog's risk and the call mode."""
-    if system.token_delivery == "proxy":
+    if system.token_delivery == "proxy" and not ctx.anonymous:
         denied = proxy.policy_error(ctx, system, op)
         return CALL_NOTES.get(denied or "", "")
     return "需确认" if op["risk"] in proxy.NEVER_PROXIED else ""
 
 
+def call_mode(ctx: Context, system: BusinessSystem) -> str:
+    return "direct" if ctx.anonymous else system.token_delivery
+
+
 def call_rules(ctx: Context, system: BusinessSystem) -> str:
+    if ctx.anonymous:
+        return (
+            "调用方直连：平台不签发令牌、不代理。用你自己在这个系统可用的令牌（例如统一登录的"
+            "个人访问令牌）按 systems_describe 的 curl 模板直接调用，能做什么由业务系统按令牌"
+            "本人的权限判定。destructive、financial 先向用户说明并等对方明确确认。"
+        )
     if system.token_delivery == "proxy":
         writes = "已开启" if system.key in ctx.writable else "未开启，需管理员开启「允许写入」"
         return (
@@ -211,10 +223,13 @@ def summary_line(op_id: str, op: dict[str, Any], note: str = "") -> str:
     return line
 
 
-def permission_check(loaded: service.Loaded, held: service.Held | None) -> str:
+def permission_check(ctx: Context, loaded: service.Loaded, held: service.Held | None) -> str:
     """filtered: lists show only what the member may use; unknown: the lookup failed, so nothing
     was filtered; not_declared: the system offers no lookup, being listed says nothing about
-    permission. The business system checks every call either way."""
+    permission; not_checked: the anonymous catalog lists everything. The business system checks
+    every call either way."""
+    if ctx.anonymous:
+        return "not_checked"
     if not isinstance(loaded.compiled.get("permissions"), dict):
         return "not_declared"
     return "unknown" if held is None else "filtered"
@@ -319,7 +334,7 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
             "name": system.name,
             "description": (system.description or "")[:MODULE_TEXT],
             "base_url": system.base_url or "",
-            "call_mode": system.token_delivery,
+            "call_mode": call_mode(ctx, system),
         }
         loaded = await context.catalog(ctx, system) if system.openapi_url else None
         if loaded is None:
@@ -331,13 +346,13 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
                 catalog=loaded.status,
                 modules=len(modules),
                 operations=sum(len(visible) for _, visible in modules),
-                permission_check=permission_check(loaded, held),
+                permission_check=permission_check(ctx, loaded, held),
             )
             names = {m["name"] for m, _ in modules}
             groups = [g for g in loaded.compiled.get("groups") or [] if names & set(g["modules"])]
             if groups:
                 item["groups"] = len(groups)
-            if context.permissions_unknown(loaded, held):
+            if context.permissions_unknown(ctx, loaded, held):
                 item["permissions_unknown"] = True
         items.append(item)
     return {"systems": items, **TRUST}
@@ -385,13 +400,13 @@ async def browse_system(
         "system": system.key,
         "name": system.name,
         "catalog": loaded.status,
-        "call_mode": system.token_delivery,
+        "call_mode": call_mode(ctx, system),
         "call_rules": call_rules(ctx, system),
-        "permission_check": permission_check(loaded, held),
+        "permission_check": permission_check(ctx, loaded, held),
         "total_modules": len(modules),
         "total_operations": sum(len(visible) for _, visible in modules),
     }
-    if context.permissions_unknown(loaded, held):
+    if context.permissions_unknown(ctx, loaded, held):
         result["permissions_unknown"] = True
     if group is not None:
         chosen = next((members for g, members in groups if g["name"] == group), None)
@@ -472,9 +487,9 @@ async def browse_operations(
             summary_line(op_id, ops[op_id], call_note(ctx, system, ops[op_id])) for op_id in page
         ],
         **_paged(visible, start, BROWSE_PAGE, tag),
-        "permission_check": permission_check(loaded, held),
+        "permission_check": permission_check(ctx, loaded, held),
     }
-    if context.permissions_unknown(loaded, held):
+    if context.permissions_unknown(ctx, loaded, held):
         result["permissions_unknown"] = True
     return {**result, **TRUST}
 
@@ -505,7 +520,7 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
                 continue
             only, module_found = module["name"], True
         held = await context.held(ctx, system, loaded)
-        if context.permissions_unknown(loaded, held):
+        if context.permissions_unknown(ctx, loaded, held):
             unknown.append(system.key)
         ops = loaded.compiled["operations"]
         for hit in loaded.index.search(args.query):
@@ -554,7 +569,7 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
 def call_template(
     ctx: Context, system: BusinessSystem, op: dict[str, Any], url: str
 ) -> dict[str, Any]:
-    if system.token_delivery == "proxy":
+    if system.token_delivery == "proxy" and not ctx.anonymous:
         denied = proxy.policy_error(ctx, system, op)
         return {
             "mode": "proxy",
@@ -564,8 +579,10 @@ def call_template(
             "（path_params、query、body）。运行环境里没有这个系统的令牌，不要用 curl 直接调用。"
             + ("" if denied is None else proxy.DENIALS[denied]),
         }
-    env_var = token_env_var(system.key)
-    mode = auth_mode(system)
+    if ctx.anonymous:
+        env_var, mode = DIRECT_TOKEN_ENV, "bearer"
+    else:
+        env_var, mode = token_env_var(system.key), auth_mode(system)
     header = (
         f"Authorization: Bearer ${env_var}" if mode == "bearer" else f"Cookie: bot_token=${env_var}"
     )
@@ -574,12 +591,18 @@ def call_template(
     if body:
         content_type = body.get("content_type") or "application/json"
         parts += ["-H", shlex.quote(f"Content-Type: {content_type}"), "-d", "'<请求体>'"]
+    notes = "替换路径中的 {参数}，查询参数拼在 URL 上；令牌只用变量引用，不要写出它的值。"
+    if ctx.anonymous:
+        notes += (
+            f"{env_var} 是调用方本机的环境变量，放你自己在这个系统可用的令牌"
+            "（例如统一登录的个人访问令牌）；平台不提供令牌。"
+        )
     return {
-        "mode": "env",
+        "mode": "direct" if ctx.anonymous else "env",
         "token_env": env_var,
         "auth": auth_label(mode),
         "curl": " ".join(parts),
-        "notes": "替换路径中的 {参数}，查询参数拼在 URL 上；令牌只用变量引用，不要写出它的值。",
+        "notes": notes,
     }
 
 
@@ -695,7 +718,7 @@ async def describe(
         path=op["path"],
         risk=op["risk"],
         permission=op.get("permission") or [],
-        permission_check=permission_check(loaded, held),
+        permission_check=permission_check(ctx, loaded, held),
     )
     if expand is not None:
         value: Any = (
@@ -731,7 +754,7 @@ async def describe(
             f"系统通用约定（时区、金额单位、分页等）共 {len(guide)} 字，未读过时用 "
             f'systems_browse(system="{system.key}", view="guide") 查看。'
         )
-    if context.permissions_unknown(loaded, held):
+    if context.permissions_unknown(ctx, loaded, held):
         result["permissions_unknown"] = True
     return {**_fit(result), **TRUST}
 
@@ -767,6 +790,8 @@ async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
     if isinstance(args, Search):
         return await search(ctx, args)
     if isinstance(args, proxy.Call):
+        if ctx.anonymous:
+            return {"error": "invalid_tool_or_arguments"}
         return await proxy.call(ctx, args)
     assert isinstance(args, Describe)
     system = ctx.system(args.system)

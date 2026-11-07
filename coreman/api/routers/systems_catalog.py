@@ -1,4 +1,5 @@
-"""Business system operation catalog: the task-scoped MCP for AI employees, and admin refresh."""
+"""Business system operation catalog: the task-scoped MCP for AI employees, the anonymous
+read-only catalog MCP, and admin refresh."""
 
 from __future__ import annotations
 
@@ -16,7 +17,12 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
-from coreman.core.auth.system_access import SubjectUnavailable, granted_systems, token_subject
+from coreman.core.auth.system_access import (
+    SubjectUnavailable,
+    catalog_systems,
+    granted_systems,
+    token_subject,
+)
 from coreman.core.db.models import BotSystemGrant, BusinessSystem, SystemCatalog, Task, User
 from coreman.core.systems_catalog import context, policy, service, tools
 
@@ -27,6 +33,9 @@ admin_router = APIRouter(
 MANAGERS = require_roles("ai_committee", "platform_admin")
 # Proxied writes carry their request body in the tool arguments.
 MAX_BODY = 262_144
+PUBLIC_PATH = "/api/systems/mcp"
+# Catalog tools take a few short arguments; the anonymous endpoint accepts nothing larger.
+PUBLIC_MAX_BODY = 16_384
 LINT_SHOWN = 20
 
 
@@ -223,4 +232,58 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
 
 @router.get(policy.API_PATH)
 async def no_sse() -> Response:
+    return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})
+
+
+@router.post(PUBLIC_PATH)
+async def public_mcp(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
+    """Anonymous, read-only catalog of every enabled system: browse, search and describe.
+
+    Nothing here issues a token or reaches a business system. Lists are not filtered by
+    permission; the caller calls the system directly with its own credential and the system
+    decides. Off unless the deployment sets SYSTEMS_CATALOG_PUBLIC.
+    """
+    if not request.app.state.settings.systems_catalog_public:
+        raise not_found("Not found")
+    if "origin" in request.headers:
+        raise ApiError(403, 403, "Browser origins are not supported")
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, PUBLIC_MAX_BODY))
+    if isinstance(parsed, Response):
+        return parsed
+    rid, method, params = parsed
+    if method == "initialize":
+        return mcp_rpc.initialize(rid, params, "coreman-systems")
+    result: dict[str, Any]
+    if method in ("ping", "tools/list"):
+        if params:
+            return mcp_rpc.error(rid, -32602, "Invalid params")
+        result = {} if method == "ping" else {"tools": tools.tool_definitions(proxied=False)}
+    elif method == "tools/call":
+        if (
+            set(params) - {"name", "arguments"}
+            or not isinstance(params.get("name"), str)
+            or not isinstance(params.get("arguments", {}), dict)
+        ):
+            return mcp_rpc.error(rid, -32602, "Invalid params")
+        ctx = context.Context(
+            session=session,
+            issuance=await issuance(request),
+            operator=None,
+            systems=await catalog_systems(session),
+            anonymous=True,
+        )
+        value = await tools.dispatch(ctx, params["name"], params.get("arguments", {}))
+        result = {
+            "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
+            "isError": "error" in value,
+        }
+    else:
+        return mcp_rpc.error(rid, -32601, "Method not found")
+    return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
+
+
+@router.get(PUBLIC_PATH)
+async def public_no_sse(request: Request) -> Response:
+    if not request.app.state.settings.systems_catalog_public:
+        raise not_found("Not found")
     return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})

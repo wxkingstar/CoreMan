@@ -121,6 +121,24 @@ async def granted_systems(session: AsyncSession, bot_id: uuid.UUID) -> list[Busi
     )
 
 
+async def catalog_systems(session: AsyncSession) -> list[BusinessSystem]:
+    """匿名目录列出的系统：已启用且配了系统地址和 OpenAPI 地址，不看 AI 员工授权。"""
+    return list(
+        (
+            await session.execute(
+                select(BusinessSystem)
+                .where(
+                    BusinessSystem.enabled,
+                    BusinessSystem.key.not_in(RESERVED_SYSTEM_KEYS),
+                    BusinessSystem.base_url.is_not(None),
+                    BusinessSystem.openapi_url.is_not(None),
+                )
+                .order_by(BusinessSystem.sort_order, BusinessSystem.key)
+            )
+        ).scalars()
+    )
+
+
 def token_env_var(system_key: str) -> str:
     return f"BOT_TOKEN_{system_key.upper()}"
 
