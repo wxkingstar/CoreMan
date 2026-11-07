@@ -4,7 +4,7 @@
 
 目前只支持飞书 AI 员工。
 
-管理台「API 令牌」→「使用手册」是给人看的图解（全景图、飞书里的样子、时序、状态）。给 Agent 的版本随管理台公开发布在 `/integration/api-tasks-agent-guide.md`：手册页里「给 Agent 的版本」会把地址替换成当前 CoreMan 的地址，复制全文交给 Agent，或者把链接交给它自己读。设计见 [2026-11-06-api-driven-tasks.md](../superpowers/specs/2026-11-06-api-driven-tasks.md)。
+管理台「API 令牌」→「使用手册」是给人看的图解（全景图、飞书里的样子、时序、状态）。给 Agent 的版本是文档站的一页（源文件 `coreman/docs_site/pages/api-tasks.md`，网页 `/docs/api-tasks`，Markdown `/docs/api-tasks.md`），原地址 `/integration/api-tasks-agent-guide.md` 继续可用：手册页里「给 Agent 的版本」会把地址替换成当前 CoreMan 的地址，复制全文交给 Agent，或者把链接交给它自己读。设计见 [2026-11-06-api-driven-tasks.md](../superpowers/specs/2026-11-06-api-driven-tasks.md)。
 
 ## 准备
 

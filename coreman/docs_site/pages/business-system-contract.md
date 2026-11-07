@@ -191,4 +191,4 @@ paths:
 npx @stoplight/spectral-cli lint api/openapi.yaml --ruleset business-system-contract.spectral.yaml
 ```
 
-规则集 `business-system-contract.spectral.yaml` 与本文发布在同一目录，也可以在 CoreMan 管理台「业务系统」编辑页下载。规则集只覆盖能静态检查的部分；`x-permission` 与代码实现是否一致，需要系统自己的测试保证。
+规则集发布在 `{{COREMAN_BASE_URL}}/integration/business-system-contract.spectral.yaml`，也可以在 CoreMan 管理台「业务系统」编辑页下载。规则集只覆盖能静态检查的部分；`x-permission` 与代码实现是否一致，需要系统自己的测试保证。

@@ -29,6 +29,7 @@ from coreman.api.routers import (
     cron_jobs,
     departments,
     dev,
+    docs_site,
     escalations,
     feishu_apps,
     feishu_docs,
@@ -114,6 +115,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app)
     app.include_router(alert_settings.router)
     app.include_router(health.router)
+    app.include_router(docs_site.router)
     app.include_router(metrics.router)
     app.include_router(objects.router)
     app.include_router(infrastructure_admin.public_router)
