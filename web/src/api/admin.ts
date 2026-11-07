@@ -3,7 +3,7 @@ import type {
   AllowedUserOut, AnnouncementIn, AnnouncementOut, AuditLogOut, BotIn, BotMemberOut, BotOut, BotPatch, CatalogIn, CatalogOut, CatalogPatch,
   ChatLogOut, ChatLogStats, DeptNode, DrainIn, FeishuQr, Page, PlatformAppIn, PlatformAppOut, ProbeResult, Providers,
   RelayModels, RelayOut, RuleIn, RuntimeInstance, RuntimeLease, RuntimeOutboxItem, RuntimeQueue,
-  RuntimeTask, SettingsDefaults, SettingsOut, SettingsPatch, SwitchRelayIn, SwitchRelayOut, SyncRun, TeamIn,
+  RuntimeTask, SettingsDefaults, SettingsOut, SettingsPatch, SwitchJobOut, SwitchRelayIn, SwitchRelayOut, SyncRun, TeamIn,
   TeamOut, UserOut, UserPatch, WecomQr,
 } from '@/api/types'
 
@@ -64,6 +64,11 @@ export const bots = {
   remove: (id: string) => call<null>(http.delete(`/api/admin/bots/${id}`)),
   switchRelay: (id: string, body: SwitchRelayIn, version: number) =>
     call<SwitchRelayOut>(http.post(`/api/admin/bots/${id}/switch-relay`, body, { timeout: 1800000, headers: { 'If-Match': `"${version}"` } })),
+  /** 换实例或目录：排一个后台切换作业，立即返回 task_id，之后用 switchJob 轮询。 */
+  startSwitch: (id: string, body: SwitchRelayIn, version: number) =>
+    call<{ task_id: number }>(http.post(`/api/admin/bots/${id}/switch-relay`, body, { params: { background: true }, headers: { 'If-Match': `"${version}"` } })),
+  switchJob: (id: string, taskId: number) => call<SwitchJobOut>(http.get(`/api/admin/bots/${id}/switch-jobs/${taskId}`)),
+  cancelSwitch: (id: string, taskId: number) => call<{ task_id: number }>(http.post(`/api/admin/bots/${id}/switch-jobs/${taskId}/cancel`)),
   toggle: (id: string) => call<BotOut>(http.post(`/api/admin/bots/${id}/toggle`)),
   members: (id: string) => call<BotMemberOut[]>(http.get(`/api/admin/bots/${id}/members`)),
   addMember: (id: string, userId: string) => call<BotMemberOut>(http.post(`/api/admin/bots/${id}/members`, { user_id: userId })),

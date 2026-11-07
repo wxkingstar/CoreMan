@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -45,6 +48,54 @@ async def ensure_idle(session: AsyncSession, bot: Bot) -> None:
             409,
             f"机器人还有任务在执行（{running}），请等它们结束或先停止，再迁移工作目录与记忆",
         )
+
+
+DRAIN_POLL_SECONDS = 3.0
+
+
+async def active_counts(session: AsyncSession, bot_id: Any) -> dict[str, int]:
+    """员工手上已被认领、正在执行的任务数（按类别）；切换任务自己不算。"""
+    rows = await session.execute(
+        select(Task.kind, func.count())
+        .where(Task.bot_id == bot_id, Task.status.in_(ACTIVE), Task.kind != "relay_switch")
+        .group_by(Task.kind)
+    )
+    counts: dict[str, int] = {}
+    for kind, n in rows:
+        label = _TASK_LABELS.get(kind, "其他任务")
+        counts[label] = counts.get(label, 0) + n
+    return counts
+
+
+async def drain(
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    cancelled: asyncio.Event | None = None,
+    poll: float | None = None,
+    extend: timedelta = timedelta(minutes=30),
+) -> None:
+    """切换用的 ensure_idle：员工已处于迁移隔离（不再认领新任务），等已在跑的这一轮结束。
+
+    排队中的不等，切换完成后在新实例上执行。等多久由任务自身的超时决定（用户定：默认等它跑完），
+    期间不断延长隔离期限，免得被当成过期的迁移；`cancelled` 置位时放弃切换。
+    """
+    poll = DRAIN_POLL_SECONDS if poll is None else poll
+    while True:
+        if cancelled is not None and cancelled.is_set():
+            raise ApiError(409, 409, "切换已取消，原绑定已保留")
+        counts = await active_counts(session, bot.id)
+        if not counts:
+            return
+        running = "、".join(f"{label} {n} 个" for label, n in counts.items())
+        bot.workspace_phase = f"等待进行中的任务结束（{running}）"
+        bot.workspace_deadline = utcnow() + extend
+        await session.commit()
+        if cancelled is None:
+            await asyncio.sleep(poll)
+        else:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(cancelled.wait(), poll)
 
 
 async def recover(

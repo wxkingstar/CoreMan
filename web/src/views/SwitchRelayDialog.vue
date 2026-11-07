@@ -6,7 +6,7 @@ import { useI18n } from 'vue-i18n'
 import { workspace, type SwitchPreview } from '@/api/workspace'
 import { bots, relays } from '@/api/admin'
 
-import type { BotOut, RelayOut, SwitchRelayOut } from '@/api/types'
+import type { BotOut, RelayOut, SwitchJobOut, SwitchRelayOut } from '@/api/types'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { pctNum } from '@/utils/format'
 import { backendOf, selectableRelays } from '@/utils/models'
@@ -31,6 +31,11 @@ const now = ref(Date.now())
 let progressTimer: ReturnType<typeof setInterval> | undefined
 let checkTimer: ReturnType<typeof setTimeout> | undefined
 let checkSeq = 0
+/** 正在等的后台切换作业；关掉对话框不取消它，切换在后台照常完成。 */
+const jobId = ref<number | null>(null)
+let unmounted = false
+const activeTasks = computed(() => Object.entries(preview.value?.active_tasks ?? {}).map(([kind, n]) => `${kind} ${n}`).join('、'))
+const targetUnhealthy = computed(() => !!preview.value?.target_health && ['down', 'auth_fail', 'timeout'].includes(preview.value.target_health))
 const moving = computed(() => !!targetId.value && (targetId.value !== props.bot.relay_server_id || targetDirectory.value !== props.bot.working_dir))
 // 使用已有目录：本员工的，或没有任何员工认领（如另一套机器人系统在用的目录，直接接管）。
 // 复制当前文件会整体覆盖目标目录，但不能覆盖其他员工的目录。
@@ -58,7 +63,7 @@ function track(phase: string | null | undefined): void {
   if (phase && steps.value[steps.value.length - 1]?.phase !== phase) steps.value.push({ phase, at: now.value })
 }
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 1000))
-onBeforeUnmount(() => { clearInterval(progressTimer); clearTimeout(checkTimer) })
+onBeforeUnmount(() => { unmounted = true; clearInterval(progressTimer); clearTimeout(checkTimer) })
 const models = ref<string[]>([])
 const model = ref<string>('')
 /** If-Match 用的版本号：版本冲突后刷新成最新值。 */
@@ -123,24 +128,62 @@ async function pick(id: string): Promise<void> {
   }
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/** 轮询后台切换作业直到结束；网络抖动时继续等，对话框关掉就不再等（作业照常在后台完成）。 */
+async function waitJob(id: number): Promise<SwitchJobOut | null> {
+  for (;;) {
+    await sleep(1000)
+    if (unmounted) return null
+    try {
+      const job = await bots.switchJob(props.bot.id, id)
+      now.value = Date.now()
+      if (['succeeded', 'failed', 'cancelled'].includes(job.status)) return job
+      track(job.phase)
+    } catch { /* 下一秒再查 */ }
+  }
+}
+
+async function cancelJob(): Promise<void> {
+  if (jobId.value === null) return
+  try {
+    await bots.cancelSwitch(props.bot.id, jobId.value)
+    ElMessage.info(t('bots.switch.cancelRequested'))
+  } catch (e) { fail(e) }
+}
+
 async function confirm(): Promise<void> {
   if (!targetId.value || !model.value || unchanged.value || targetBlocked.value || (targetId.value !== props.bot.relay_server_id && target.value?.unavailable_reason !== null)) return
   saving.value = true
   steps.value = [{ phase: t('workspaceFiles.starting'), at: Date.now() }]
-  progressTimer = setInterval(() => {
-    now.value = Date.now()
-    void workspace.get(props.bot.id).then(s => { if (s.state === 'migrating') track(s.phase) }).catch(() => {})
-  }, 1000)
+  progressTimer = setInterval(() => { now.value = Date.now() }, 1000)
   try {
-    const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value, ...(moving.value ? { workspace_mode: workspaceMode.value, target_directory: targetDirectory.value, allow_stored_memory: allowStoredMemory.value } : {}) }, version.value)
-    ElMessage.success(t('bots.switch.done'))
-    emit('switched', result)
-    emit('update:visible', false)
+    if (!moving.value) {
+      // 只换模型：当场完成。
+      const result = await bots.switchRelay(props.bot.id, { relay_server_id: targetId.value, model: model.value }, version.value)
+      ElMessage.success(t('bots.switch.done'))
+      emit('switched', result)
+      emit('update:visible', false)
+      return
+    }
+    const { task_id: id } = await bots.startSwitch(props.bot.id, { relay_server_id: targetId.value, model: model.value, workspace_mode: workspaceMode.value, target_directory: targetDirectory.value, allow_stored_memory: allowStoredMemory.value }, version.value)
+    jobId.value = id
+    const job = await waitJob(id)
+    if (job === null) return
+    const result = job.result
+    if (job.status === 'succeeded' && result?.ok && job.bot) {
+      ElMessage.success(t('bots.switch.done'))
+      emit('switched', { old_relay_id: result.old_relay_id ?? null, new_relay_id: result.new_relay_id ?? '', old_model: result.old_model ?? '', new_model: result.new_model ?? '', bot: job.bot })
+      emit('update:visible', false)
+    } else {
+      ElMessage.error(result?.message || job.error || t('bots.switch.failed'))
+    }
   } catch (e) {
     if (isVersionConflict(e)) await reloadVersion()
     else fail(e)
   } finally {
     saving.value = false
+    jobId.value = null
     clearInterval(progressTimer)
   }
 }
@@ -347,6 +390,20 @@ defineExpose({ pick, confirm, checkTarget })
         </p>
         <template v-if="preview">
           <el-alert
+            v-if="activeTasks"
+            :title="t('bots.switch.waitTasks', { tasks: activeTasks })"
+            type="info"
+            :closable="false"
+            data-test="switch-wait-tasks"
+          />
+          <el-alert
+            v-if="targetUnhealthy"
+            :title="t('bots.switch.targetUnhealthy', { detail: preview.target_health_detail || preview.target_health })"
+            type="warning"
+            :closable="false"
+            data-test="switch-target-unhealthy"
+          />
+          <el-alert
             v-if="preview.shared"
             :title="t('workspaceFiles.shared')"
             type="info"
@@ -427,6 +484,14 @@ defineExpose({ pick, confirm, checkTarget })
 
     <template #footer>
       <el-button
+        v-if="saving && jobId !== null"
+        data-test="switch-cancel-job"
+        @click="cancelJob"
+      >
+        {{ t('bots.switch.cancelJob') }}
+      </el-button>
+      <el-button
+        v-else
         data-test="switch-cancel"
         :disabled="saving"
         @click="emit('update:visible', false)"

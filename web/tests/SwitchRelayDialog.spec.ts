@@ -31,6 +31,14 @@ vi.mock('@/api/admin', () => ({
       old_model: 'vllm/claude-sonnet-4-6', new_model: 'codex/gpt-5.5',
       bot: { id: 'b1', version: 2 },
     }),
+    // 换实例或目录走后台切换作业：先拿 task_id，再轮询到结束。
+    startSwitch: vi.fn().mockResolvedValue({ task_id: 9 }),
+    switchJob: vi.fn().mockResolvedValue({
+      task_id: 9, status: 'succeeded', phase: null, error: null,
+      result: { ok: true, old_relay_id: 'r1', new_relay_id: 'r2', old_model: 'vllm/claude-sonnet-4-6', new_model: 'codex/gpt-5.5' },
+      bot: { id: 'b1', version: 2 },
+    }),
+    cancelSwitch: vi.fn().mockResolvedValue({ task_id: 9 }),
   },
 }))
 
@@ -76,7 +84,7 @@ describe('SwitchRelayDialog', () => {
   // 挂载时会预选当前 relay（「同一台只换模型」的入口），此时直接确认就是空操作：
   // 后端照样写一条 diff 为空的 bot.switch_relay 审计，所以前端要拦住。
   it('refuses to submit while neither relay nor model changed', async () => {
-    vi.mocked(bots.switchRelay).mockClear()
+    vi.mocked(bots.startSwitch).mockClear()
     const bot0 = { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude' }
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: bot0 as never, visible: true },
@@ -87,7 +95,7 @@ describe('SwitchRelayDialog', () => {
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
     await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
     await flushPromises()
-    expect(bots.switchRelay).not.toHaveBeenCalled()
+    expect(bots.startSwitch).not.toHaveBeenCalled()
     // 换一台就恢复正常。
     // 选中后自动检查目标目录，不用再点按钮。
     await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
@@ -95,7 +103,7 @@ describe('SwitchRelayDialog', () => {
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
     await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
     await flushPromises()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
     wrapper.unmount()
   })
 
@@ -113,7 +121,7 @@ describe('SwitchRelayDialog', () => {
     await (wrapper.vm as unknown as { checkTarget: () => Promise<void> }).checkTarget()
     await (wrapper.vm as unknown as { confirm: () => Promise<void> }).confirm()
     await flushPromises()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', { relay_server_id: 'r2', model: 'codex/gpt-5.5', workspace_mode: 'copy', target_directory: '/home/ai/project', allow_stored_memory: false }, 1)
     expect(wrapper.emitted('switched')).toBeTruthy()
     wrapper.unmount()
   })
@@ -122,8 +130,8 @@ describe('SwitchRelayDialog', () => {
   it('reloads the version after a version conflict and shows other 409s verbatim', async () => {
     const warning = vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
     const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
-    vi.mocked(bots.switchRelay).mockClear()
-    vi.mocked(bots.switchRelay)
+    vi.mocked(bots.startSwitch).mockClear()
+    vi.mocked(bots.startSwitch)
       .mockRejectedValueOnce(new ApiError(409, VERSION_CONFLICT_CODE, '机器人已被其他操作修改，请刷新后重试'))
       .mockRejectedValueOnce(new ApiError(409, 409, '该实例工作目录已属于另一个机器人'))
     const bot = { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude' }
@@ -147,7 +155,7 @@ describe('SwitchRelayDialog', () => {
     expect(error).not.toHaveBeenCalledWith(i18n.global.t('common.conflict'))
     await vm.confirm()
     await flushPromises()
-    expect(vi.mocked(bots.switchRelay).mock.calls.map((c) => c[2])).toEqual([1, 7, 7])
+    expect(vi.mocked(bots.startSwitch).mock.calls.map((c) => c[2])).toEqual([1, 7, 7])
     expect(wrapper.emitted('switched')).toBeTruthy()
     warning.mockRestore()
     error.mockRestore()
@@ -155,7 +163,7 @@ describe('SwitchRelayDialog', () => {
   })
   it('allows first runtime assignment without a source or stored memory snapshot', async () => {
     vi.mocked(workspace.preview).mockResolvedValueOnce({ directory: '/home/ai/project', exists: false, empty: true, owned: false, marked: false, source_online: false, shared: false, memory_snapshot_at: null })
-    vi.mocked(bots.switchRelay).mockClear()
+    vi.mocked(bots.startSwitch).mockClear()
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: null, model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
       global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
@@ -166,7 +174,7 @@ describe('SwitchRelayDialog', () => {
     await flushPromises()
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
     await vm.confirm()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ relay_server_id: 'r2', allow_stored_memory: false }), 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', expect.objectContaining({ relay_server_id: 'r2', allow_stored_memory: false }), 1)
     wrapper.unmount()
   })
 
@@ -174,7 +182,7 @@ describe('SwitchRelayDialog', () => {
   it('takes over an unclaimed existing directory but blocks one marked by another employee', async () => {
     const shared = { directory: '/srv/bots/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, shared: false, memory_snapshot_at: null }
     vi.mocked(workspace.preview).mockResolvedValueOnce(fresh).mockResolvedValueOnce(shared).mockResolvedValueOnce({ ...shared, marked: true })
-    vi.mocked(bots.switchRelay).mockClear()
+    vi.mocked(bots.startSwitch).mockClear()
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/demo' } as never, visible: true },
       global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
@@ -190,7 +198,7 @@ describe('SwitchRelayDialog', () => {
     expect(document.querySelector('[data-test="workspace-takeover"]')).not.toBeNull()
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
     await vm.confirm()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'existing', target_directory: '/srv/bots/demo' }), 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'existing', target_directory: '/srv/bots/demo' }), 1)
     await vm.checkTarget()
     await flushPromises()
     expect(document.querySelector('[data-test="workspace-unclaimable"]')).not.toBeNull()
@@ -203,7 +211,7 @@ describe('SwitchRelayDialog', () => {
   it('copies over an occupied target after warning but never over another employee', async () => {
     const occupied = { directory: '/home/ai/demo', exists: true, empty: false, owned: false, marked: false, source_online: true, shared: false, memory_snapshot_at: null }
     vi.mocked(workspace.preview).mockResolvedValueOnce(fresh).mockResolvedValueOnce(occupied).mockResolvedValueOnce({ ...occupied, marked: true })
-    vi.mocked(bots.switchRelay).mockClear()
+    vi.mocked(bots.startSwitch).mockClear()
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/demo' } as never, visible: true },
       global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
@@ -218,12 +226,46 @@ describe('SwitchRelayDialog', () => {
     expect(document.querySelector('[data-test="workspace-replace"]')!.textContent).toContain('.git')
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(false)
     await vm.confirm()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'copy' }), 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', expect.objectContaining({ workspace_mode: 'copy' }), 1)
     await vm.checkTarget()
     await flushPromises()
     expect(document.querySelector('[data-test="workspace-unclaimable"]')).not.toBeNull()
     expect(document.querySelector('[data-test="workspace-replace"]')).toBeNull()
     expect(document.querySelector('[data-test="switch-confirm"]')!.hasAttribute('disabled')).toBe(true)
+    wrapper.unmount()
+  })
+
+  // 后台作业被规则挡下（如目标目录属于别人）：显示后端原因，不当成切换成功。
+  it('shows the reason when the background switch is refused', async () => {
+    const error = vi.spyOn(ElMessage, 'error').mockReturnValue({ close: () => {} })
+    vi.mocked(bots.switchJob).mockResolvedValueOnce({ task_id: 9, status: 'succeeded', phase: null, error: null, result: { ok: false, message: '目标目录属于其他员工' } })
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { pick: (id: string) => Promise<void>; confirm: () => Promise<void> }
+    await vm.pick('r2')
+    await flushPromises()
+    await vm.confirm()
+    expect(error).toHaveBeenCalledWith('目标目录属于其他员工')
+    expect(wrapper.emitted('switched')).toBeFalsy()
+    error.mockRestore()
+    wrapper.unmount()
+  })
+
+  // 预检：员工手上有任务在跑时提示会先等它结束；目标实例检查不正常时提前警告。
+  it('warns about running tasks and an unhealthy target before switching', async () => {
+    vi.mocked(workspace.preview).mockResolvedValueOnce({ ...fresh, active_tasks: { 对话: 1 }, target_health: 'auth_fail', target_health_detail: 'login expired' })
+    const wrapper = mount(SwitchRelayDialog, {
+      props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
+      global: { plugins: [ElementPlus, i18n] }, attachTo: document.body,
+    })
+    await flushPromises()
+    await (wrapper.vm as unknown as { pick: (id: string) => Promise<void> }).pick('r2')
+    await flushPromises()
+    expect(document.querySelector('[data-test="switch-wait-tasks"]')!.textContent).toContain('对话 1')
+    expect(document.querySelector('[data-test="switch-target-unhealthy"]')!.textContent).toContain('login expired')
     wrapper.unmount()
   })
 
@@ -249,8 +291,8 @@ describe('SwitchRelayDialog', () => {
     const same = { directory: '/home/ai/project', exists: true, empty: false, owned: true, marked: true, source_online: true, shared: true, memory_snapshot_at: null }
     vi.mocked(workspace.preview).mockClear().mockResolvedValueOnce(same)
     vi.mocked(workspace.get).mockResolvedValueOnce({ directory: '/home/ai/project', state: 'migrating', phase: '迁移会话记录（1/3）' })
-    let finish: (value: never) => void = () => {}
-    vi.mocked(bots.switchRelay).mockClear().mockReturnValueOnce(new Promise((resolve) => { finish = resolve }))
+    vi.mocked(bots.startSwitch).mockClear()
+    vi.mocked(bots.switchJob).mockResolvedValueOnce({ task_id: 9, status: 'running', phase: '迁移会话记录（1/3）', result: null, error: null })
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     const wrapper = mount(SwitchRelayDialog, {
       props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6', backend: 'claude', working_dir: '/home/ai/project' } as never, visible: true },
@@ -271,10 +313,11 @@ describe('SwitchRelayDialog', () => {
     const steps = document.querySelector('[data-test="switch-steps"]')!.textContent
     expect(steps).toContain(i18n.global.t('workspaceFiles.starting'))
     expect(steps).toContain('迁移会话记录（1/3）')
-    finish({ old_relay_id: 'r1', new_relay_id: 'r2', bot: { id: 'b1', version: 2 } } as never)
+    await vi.advanceTimersByTimeAsync(1000)
     await pending
+    expect(wrapper.emitted('switched')).toBeTruthy()
     vi.useRealTimers()
-    expect(bots.switchRelay).toHaveBeenCalledWith('b1', expect.objectContaining({ relay_server_id: 'r2', target_directory: '/home/ai/project' }), 1)
+    expect(bots.startSwitch).toHaveBeenCalledWith('b1', expect.objectContaining({ relay_server_id: 'r2', target_directory: '/home/ai/project' }), 1)
     wrapper.unmount()
   })
 })

@@ -163,6 +163,15 @@ export interface SwitchRelayOut {
   old_relay_id: string | null; new_relay_id: string
   old_model: string; new_model: string; bot: BotOut
 }
+/** 后台切换作业：result.ok=false 是被规则挡下（message 是原因），status=failed/cancelled 看 error。 */
+export interface SwitchJobOut {
+  task_id: number
+  status: 'queued' | 'claimed' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  phase: string | null
+  result: { ok: boolean; message?: string; old_relay_id?: string | null; new_relay_id?: string; old_model?: string; new_model?: string } | null
+  error: string | null
+  bot?: BotOut
+}
 export interface BotMemberOut { user_id: string; login_name: string | null; display_name: string; added_at: string; added_by: string | null }
 export interface AllowedUserOut { user_id: string; login_name: string | null; display_name: string }
 

@@ -269,8 +269,9 @@ async def test_ratelimit_switch_branches(db_engine: AsyncEngine, db_session: Asy
         "rl_switching_desc", current="r1", target="r2"
     )
     sw = (await db_session.execute(select(Task).where(Task.kind == "relay_switch"))).scalar_one()
+    # 切换要等员工手上这一轮结束，可能很久：排在普通车道，不占快车道槽位。
     assert (
-        sw.lane == "fast"
+        sw.lane == "normal"
         and sw.payload["target_relay_server_id"] == state["target_relay_id"]
         and sw.dedupe_key == f"relay_switch:{st.id}"
     )

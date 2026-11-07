@@ -16,14 +16,16 @@ from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
 
-# 认领语句只 RETURNING id，随后按主键取回 ORM 行。
+# 认领语句只 RETURNING id，随后按主键取回 ORM 行。工作目录未就绪的员工不认领任务；切换作业例外，
+# 它本身就是让员工离开未就绪状态的途径（初始化失败、未分配运行时），被别的迁移占着时它自己会拒绝。
 _CLAIM_SQL = text(
     """
 UPDATE tasks SET status='claimed', claimed_by=:instance, claimed_at=now(), heartbeat_at=now(),
                  attempts=attempts+1
 WHERE id = (SELECT candidate.id FROM tasks candidate
             JOIN bots workspace_bot ON workspace_bot.id=candidate.bot_id
-            WHERE workspace_bot.workspace_state='ready' AND candidate.status='queued'
+            WHERE (workspace_bot.workspace_state='ready' OR candidate.kind='relay_switch')
+            AND candidate.status='queued'
             AND candidate.lane=:lane AND candidate.run_after<=now()
             AND (candidate.kind='command'
                  OR candidate.payload->>'serialize_session' IS DISTINCT FROM 'true'

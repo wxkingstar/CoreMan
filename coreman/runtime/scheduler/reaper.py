@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
+from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
 from coreman.core.bus.tasks import ACTIVE
@@ -130,7 +131,10 @@ async def reap_lost_tasks(
         stream = await streams.get(session, task.id)
         # 日志先攒好：finish 之后 task 的属性会被过期掉，再读要多打一次 SELECT。
         # 定时执行的记录由 cron 看护按执行记录收尾，这里不碰。
-        turn = task.kind not in {"cron_run", "escalation_media", "skill_install"}
+        # 管理台发起的切换作业也不是对话轮次。
+        turn = task.kind not in {"cron_run", "escalation_media", "skill_install"} and not (
+            task.kind == "relay_switch" and (task.payload or {}).get("origin") == "admin"
+        )
         entry = _lost_entry(task, stream, bot, now) if turn else None
         task_id = task.id
         await tasks.finish(
@@ -140,6 +144,9 @@ async def reap_lost_tasks(
             error_code=LOST_ERROR_CODE,
             error_message=LOST_ERROR_MESSAGE,
         )
+        if task.kind == "relay_switch":
+            # 切换作业断了：绑定只在最后一个事务里改，员工仍在原运行时上，解除迁移隔离。
+            await release_fence(session, task.bot_id, "切换中断，原绑定已保留，请重试")
         if task.kind == "choice_submit":
             try:
                 state_id = uuid.UUID(str(task.payload.get("state_id")))
