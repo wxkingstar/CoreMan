@@ -53,6 +53,32 @@ def task_session_key(chat_id: str) -> str:
     return f"observe:{chat_id}"
 
 
+async def _addressed_to_colleague(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> bool:
+    """调度员收到的这条消息是不是 @ 了某位 AI 员工：那位员工自己会回答，调度员旁观就好。
+
+    飞书的 open_id 按应用区分，调度员拿到的对不上员工的记录，所以按名字认。
+    """
+    event = message.raw.get("event") or {}
+    names = set(mention_names((event.get("message") or {}).get("mentions")).values())
+    if not names or await session.scalar(select(Bot.group_role).where(Bot.id == bot_id)) != (
+        "dispatcher"
+    ):
+        return False
+    found = await session.scalar(
+        select(Bot.id)
+        .where(
+            Bot.platform == "feishu",
+            Bot.enabled.is_(True),
+            Bot.group_role == "member",
+            Bot.name.in_(names),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 async def note(
     session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage, event_id: int
 ) -> None:
@@ -64,15 +90,21 @@ async def note(
     human = message.sender.sender_type != "bot"
     # 别的机器人发的消息（插话、答复、AI 员工之间求助）只记上下文，不排判断：
     # 该不该接话只看人说了什么；人那条还没判断的照旧等着。
-    if not human and not message.mentions_bot:
+    # 调度员收到 @ 了 AI 员工的消息也一样只记上下文：人已经点名了，不用它安排。
+    if not message.mentions_bot and (
+        not human or await _addressed_to_colleague(session, bot_id, message)
+    ):
         stmt = insert(GroupObserveState).values(
-            bot_id=bot_id, chat_id=message.chat_id, bot_streak=1, last_message_at=now
+            bot_id=bot_id,
+            chat_id=message.chat_id,
+            bot_streak=0 if human else 1,
+            last_message_at=now,
         )
         await session.execute(
             stmt.on_conflict_do_update(
                 index_elements=[GroupObserveState.bot_id, GroupObserveState.chat_id],
                 set_={
-                    "bot_streak": GroupObserveState.__table__.c.bot_streak + 1,
+                    "bot_streak": 0 if human else GroupObserveState.__table__.c.bot_streak + 1,
                     "last_message_at": now,
                 },
             )
