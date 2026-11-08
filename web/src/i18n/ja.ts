@@ -982,6 +982,7 @@ export default {
     states: { disconnected: '未接続', connecting: '接続中', subscribed: '購読中', kicked: '引き継がれました', auth_failed: '認証失敗' },
   },
   settings: {
+    busyConfirmMinutes: '待機メッセージの確認（分）', busyConfirmHint: '待機中のメッセージがこの時間を超えたら、始める前にカードで確認します。0 で無効。',
     groupObserve: 'グループ傍聴', observeThreshold: '判断しきい値', observeQuiet: '静かになるまでの待機（秒）', observeMaxWait: '最大待機（秒）', observeStreak: 'ボット連続発言の上限', groupObserveHint: '判断モデルの確率がしきい値を超えたときだけ発言します。下げるほど積極的になります。グループが静かになってから判断し、会話が続く場合も最大待機時間で判断します。最後の人のメッセージ以降、ボットのメッセージが上限に達すると、ボット同士の無限の応酬を防ぐため自発的な発言を止めます。',
     title: '設定',
     bootstrapEnabled: 'ブートストラップログイン',
