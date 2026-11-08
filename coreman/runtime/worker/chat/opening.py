@@ -386,6 +386,9 @@ class OpenStage(ChatStageBase):
         if bot.platform == "feishu":
             # 飞书回复卡片里的回复按钮只有这一轮的提问人能点：网关编译终稿时从这里取。
             reply_context["requester_user_id"] = intake.speaker.platform_user_id
+            if code := work.code_of(intake.session_key):
+                # 回复存档时记下任务编号：有人回复这条，就续进这个任务的会话。
+                reply_context["_work_code"] = code
         stream_kwargs: dict[str, Any] = {
             "reply_context": reply_context,
             "session_url": session_url,

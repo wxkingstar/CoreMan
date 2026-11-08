@@ -133,7 +133,15 @@ class IntakeStage(ChatStageBase):
                     if isinstance(parent, str) and parent
                     else None
                 )
-                continued = await work.continued(session, bot, chat_id, text, quoted)
+                continued = await work.continued(
+                    session,
+                    bot,
+                    chat_id,
+                    text,
+                    quoted,
+                    parent_id=parent if isinstance(parent, str) and parent else None,
+                    speaker_id=speaker.user_id,
+                )
                 session_key = continued or session_key
         relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
         intake = Intake(

@@ -1211,6 +1211,26 @@ async def test_sent_messages_are_archived_for_later_quotes(db_session, db_engine
     assert all(r.chat_id == "oc1" for r in rows.values())
 
 
+async def test_sent_archive_records_the_work_task_the_reply_answered(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        stream = await session.get(TaskStream, row.task_id)
+        stream.reply_context = {**stream.reply_context, "_work_code": "T-7"}
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text="结果")
+        await session.commit()
+    await transport.round()
+    async with factory() as session:
+        saved = await session.get(FeishuSentMessage, (bot.id, "om_1"))
+    assert saved is not None and saved.work_code == "T-7"
+
+
 async def test_observe_turn_sends_only_the_final_and_never_no_reply(db_session, db_engine):
     from coreman.core.chat.group_observe import NO_REPLY
 

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from coreman.core.chat import decider as decider_mod
 from coreman.core.chat import dispatch, group_observe
 from coreman.core.db.models import (
+    FeishuSentMessage,
     GroupObserveDecision,
     GroupObserveState,
     TaskStream,
@@ -440,13 +441,151 @@ async def test_mentions_carrying_a_task_code_continue_that_task(db_session):
         platform="feishu",
         chat_id=CHAT,
         assignee_bot_id=assignee.id,
+        requester_user_id=first.created_by,
     )
     db_session.add(row)
     await db_session.commit()
     expected = dispatch.work_session_key(row.code)
-    same = await work.continued(db_session, assignee, CHAT, f"{row.code} 再加个渠道", None)
+    ask = {"speaker_id": first.created_by}
+    same = await work.continued(db_session, assignee, CHAT, f"{row.code} 再加个渠道", None, **ask)
     assert same == expected
-    quoted = await work.continued(db_session, assignee, CHAT, "确认", f"{row.code} 完成：…")
+    quoted = await work.continued(db_session, assignee, CHAT, "确认", f"{row.code} 完成：…", **ask)
     assert quoted == expected
-    assert await work.continued(db_session, first, CHAT, row.code, None) is None  # 不是它的任务
-    assert await work.continued(db_session, assignee, "oc_other", row.code, None) is None
+    assert await work.continued(db_session, first, CHAT, row.code, None, **ask) is None  # 不是它的
+    assert await work.continued(db_session, assignee, "oc_other", row.code, None, **ask) is None
+    # 不是发起人：任务会话里有按发起人权限查到的内容，不让别人续进去。
+    assert (
+        await work.continued(db_session, assignee, CHAT, row.code, None, speaker_id=uuid.uuid4())
+        is None
+    )
+
+
+async def _untracked_task(db_session, assignee, requester_id, **fields):
+    row = WorkTask(
+        title="查退货率",
+        status="done",
+        platform="feishu",
+        chat_id=CHAT,
+        assignee_bot_id=assignee.id,
+        requester_user_id=requester_id,
+        tracked=False,
+        **fields,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    return row
+
+
+async def test_replying_to_an_answer_without_a_code_continues_that_task(db_session):
+    from coreman.runtime.worker.chat import work
+
+    first = await observing_bot(db_session)
+    assignee = await another_bot(db_session, first, "data_bot", "数据助手")
+    row = await _untracked_task(db_session, assignee, first.created_by)
+    db_session.add_all(
+        [
+            FeishuSentMessage(
+                bot_id=assignee.id,
+                message_id="om_answer",
+                chat_id=CHAT,
+                text="上周退货率 4.2%",
+                work_code=row.code,
+            ),
+            FeishuSentMessage(
+                bot_id=assignee.id, message_id="om_plain", chat_id=CHAT, text="普通回答"
+            ),
+        ]
+    )
+    await db_session.commit()
+    expected = dispatch.work_session_key(row.code)
+    ask = {"speaker_id": first.created_by}
+    assert (
+        await work.continued(
+            db_session, assignee, CHAT, "那上上周呢", "4.2%", parent_id="om_answer", **ask
+        )
+        == expected
+    )
+    other = {"speaker_id": uuid.uuid4()}
+    assert (
+        await work.continued(
+            db_session, assignee, CHAT, "那上上周呢", "4.2%", parent_id="om_answer", **other
+        )
+        is None
+    )
+    # 回复的是别的消息：明确不是在接这件事，也不走两小时的就近续接。
+    assert (
+        await work.continued(
+            db_session,
+            assignee,
+            CHAT,
+            "这个呢",
+            "普通回答",
+            parent_id="om_plain",
+            speaker_id=first.created_by,
+        )
+        is None
+    )
+
+
+async def test_plain_mention_continues_the_recent_untracked_task_of_the_same_person(db_session):
+    from coreman.runtime.worker.chat import work
+
+    first = await observing_bot(db_session)
+    assignee = await another_bot(db_session, first, "data_bot", "数据助手")
+    row = await _untracked_task(db_session, assignee, first.created_by)
+    expected = dispatch.work_session_key(row.code)
+    ask = {"speaker_id": first.created_by}
+    assert await work.continued(db_session, assignee, CHAT, "那上上周呢", None, **ask) == expected
+    assert (
+        await work.continued(
+            db_session, assignee, CHAT, "那上上周呢", None, speaker_id=uuid.uuid4()
+        )
+        is None
+    )  # 别人问的不算
+    assert await work.continued(db_session, first, CHAT, "那上上周呢", None, **ask) is None
+
+    row.updated_at = datetime.now(UTC) - timedelta(minutes=121)
+    await db_session.commit()
+    assert await work.continued(db_session, assignee, CHAT, "那上上周呢", None, **ask) is None
+
+    # 跟进的任务一样：用户不一定记得带编号。
+    row.updated_at, row.tracked = datetime.now(UTC), True
+    await db_session.commit()
+    assert await work.continued(db_session, assignee, CHAT, "那上上周呢", None, **ask) == expected
+
+
+async def test_new_task_note_carries_results_of_related_finished_tasks(db_session):
+    from types import SimpleNamespace
+
+    from coreman.runtime.worker.chat import work
+
+    first = await observing_bot(db_session)
+    assignee = await another_bot(db_session, first, "data_bot", "数据助手")
+    done = await _untracked_task(db_session, assignee, first.created_by, summary="一句话")
+    db_session.add(
+        WorkTaskEvent(
+            work_task_id=done.id,
+            kind="done",
+            actor_type="bot",
+            agent_detail={"reply": "上周退货率 4.2%，主要是渠道 A"},
+        )
+    )
+    running = await _untracked_task(db_session, assignee, first.created_by)
+    running.status = "running"
+    new = await _untracked_task(db_session, assignee, first.created_by, brief="加个渠道维度")
+    new.related_codes = [done.code, running.code]
+    await db_session.commit()
+    handed = SimpleNamespace(task=SimpleNamespace(payload={"work_task_id": new.id}))
+    text = await work.note(
+        db_session, handed, SimpleNamespace(session_key=dispatch.work_session_key(new.code))
+    )
+    assert "上周退货率 4.2%，主要是渠道 A" in text
+    assert running.code not in text
+    assert "接着找你" not in text
+
+    # 不是交接、是发起人接着问的那一轮：提醒员工问的可能是另一件事。
+    asked = SimpleNamespace(task=SimpleNamespace(payload={}))
+    text = await work.note(
+        db_session, asked, SimpleNamespace(session_key=dispatch.work_session_key(new.code))
+    )
+    assert "接着找你" in text
