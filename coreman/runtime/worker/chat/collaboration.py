@@ -206,7 +206,6 @@ async def configure(
         # 规则照挂，system prompt 不因群里换了个身份未知的人而变；求助入口不签发。
         ctx.turn_notes.append("- 协作：本轮发言者身份未验证，不能向其他 AI 员工或同事求助。")
         return system_prompt + rules, env
-    ctx.bot_peers_mounted = bool(peers)
     env["COREMAN_COLLABORATION_URL"] = (
         ctx.public_base_url.rstrip("/") + "/api/runtime/collaboration/mcp"
     )

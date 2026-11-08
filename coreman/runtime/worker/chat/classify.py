@@ -121,12 +121,14 @@ class ClassifyStage(ChatStageBase):
 
     def _cancelled(self, ctx: TaskContext, text: str, reason: str | None) -> Verdict:
         if reason == "collaboration_budget_exhausted":
+            notice = "本轮调用已达到安全上限，为避免重复消耗已停止。尚未确认任务完成。"
             return Verdict(
                 "stopped",
                 "cancelled",
                 reason,
                 "协作调用达到安全上限",
-                "本轮调用已达到安全上限，为避免重复消耗已停止。尚未确认任务完成。",
+                # 已经写出的进度照留，群里才看得出停在哪一步。
+                f"{text.rstrip()}\n\n{notice}" if text.strip() else notice,
             )
         if reason == "user_stop":
             return Verdict(

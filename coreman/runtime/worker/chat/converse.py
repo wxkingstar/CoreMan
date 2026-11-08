@@ -63,8 +63,10 @@ class ConverseStage(ChatStageBase):
             or ctx.task.payload.get("collaboration_id")
             or ctx.task.payload.get("human_collaboration_id")
         )
-        # 工具数封顶只针对机器人之间的协作（可能互相求助成环）；只挂同事求助的轮次不封顶。
-        capped = bool(ctx.task.payload.get("collaboration_id") or ctx.bot_peers_mounted)
+        # 工具数封顶只针对机器人之间的协作（可能互相求助成环）：帮忙/续接轮次一开始就封顶；
+        # 发起方要等本轮真的调用过协作工具（任务上记了协作计数）才封顶，只是挂着入口的
+        # 长任务（群里有别的 AI 员工）不受限。
+        capped = bool(ctx.task.payload.get("collaboration_id"))
         observe = ctx.task.payload.get("origin") == "observe"
         dispatching = ctx.task.payload.get("origin") == dispatch.ORIGIN
         try:
@@ -94,6 +96,7 @@ class ConverseStage(ChatStageBase):
                         if task.payload.get("collaboration_handoff"):
                             out.collaboration_handoff = True
                             return out
+                        capped = capped or bool(task.payload.get("collaboration_budget"))
                 if dispatching and now - (out.request_started or now) >= dispatch.LIMIT_SECONDS:
                     out.cancelled, out.reason = True, "dispatch_timeout"
                     return out
