@@ -18,7 +18,7 @@ import jwt
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTRACT = ROOT / "web/public/integration/business-system-openapi-contract.md"
+CONTRACT = ROOT / "coreman/docs_site/pages/business-system-contract.md"
 BASE_URL = "https://stock.example.com"
 SPEC_URL = BASE_URL + "/openapi.yaml"
 

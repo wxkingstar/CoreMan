@@ -1,8 +1,8 @@
 # 业务系统操作目录
 
-让机器人按需、分层地了解业务系统提供哪些操作、参数是什么，不用自己读整份 API 描述去猜。业务系统只需按 [业务系统 OpenAPI 接入规范](../web/public/integration/business-system-openapi-contract.md) 提供描述，平台不为单个系统写适配器。
+让机器人按需、分层地了解业务系统提供哪些操作、参数是什么，不用自己读整份 API 描述去猜。业务系统只需按 [业务系统 OpenAPI 接入规范](../coreman/docs_site/pages/business-system-contract.md) 提供描述，平台不为单个系统写适配器。
 
-接入规范和 Spectral 规则集放在 `web/public/integration/`，随管理台作为静态文件发布，无需登录即可访问：`/integration/business-system-openapi-contract.md`、`/integration/business-system-contract.spectral.yaml`。新系统接入时，管理员直接把链接或下载的文件交给对方。
+接入规范是文档站的一页（源文件 `coreman/docs_site/pages/business-system-contract.md`，见 [文档站](docs-site.md)），无需登录即可访问：`/docs/business-system-contract`，原地址 `/integration/business-system-openapi-contract.md` 继续返回 Markdown。Spectral 规则集仍是管理台静态文件 `web/public/integration/business-system-contract.spectral.yaml`，发布在 `/integration/business-system-contract.spectral.yaml`。新系统接入时，管理员直接把链接或下载的文件交给对方。
 
 实现状态：一期（拉取、编译、管理台状态、目录 MCP 与提示词，迁移 `0059`）与二期（代理调用，迁移 `0060`）均已实现，代码在 `coreman/core/systems_catalog/`。
 
@@ -225,6 +225,8 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 只读已存的目录，不为匿名请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
 - 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板引用调用方本机的环境变量（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。变量名默认 `SYSTEMS_TOKEN`，可在接入地址上用 `?token_env=<变量名>` 指定（字母、数字、下划线，不以数字开头，最长 64 字符，否则 400），只传变量名，不传令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
 - 没有调用预算和重复限制：匿名调用不关联任务。
+
+给成员看的接入说明在文档站 `/docs/systems-catalog-mcp`（源文件 `coreman/docs_site/pages/systems-catalog-mcp.md`），改动时两边一起改。
 
 本机接入：端点是标准的 MCP Streamable HTTP（只用 POST，返回 JSON，不需要认证头），支持远程 HTTP MCP 的客户端都能接，只要填同一个地址：
 

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<meta name="description" content="__DESCRIPTION__">
+<link rel="alternate" type="text/markdown" href="__MD_URL__" title="Markdown">
+<link rel="alternate" type="text/plain" href="/docs/llms.txt" title="llms.txt">
+<link rel="icon" href="/coreman-mark.svg" type="image/svg+xml">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7; --panel: #fff; --soft: #eef2ff; --text: #1d2129; --muted: #5c6370;
+  --line: #e1e4ea; --brand: #3451b2; --brand-deep: #1f2d5c; --link: #3451b2;
+  --code-bg: #f1f3f6; --pre-bg: #1b2033; --pre-text: #dfe3ee; --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --panel: #181b22; --soft: #222a44; --text: #e3e6ed; --muted: #9aa1ad;
+    --line: #2a2f3a; --brand: #8ea2ff; --brand-deep: #0d1020; --link: #9cb0ff;
+    --code-bg: #232733; --pre-bg: #0b0d14; --pre-text: #d6dbe6;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 16px;
+  min-height: 60px; padding: 10px 24px; background: var(--brand-deep); color: #f3f5fb; }
+.brand { display: flex; align-items: center; gap: 10px; color: inherit; font-weight: 700; }
+.brand:hover { text-decoration: none; }
+.brand img { width: 28px; height: 28px; }
+.ai-links { display: flex; gap: 14px; font-size: 13px; }
+.ai-links a { color: #c9d3ff; }
+.search { position: relative; margin-left: auto; width: min(320px, 40vw); }
+.search input { width: 100%; height: 36px; padding: 0 12px; border: 1px solid rgba(255,255,255,.22);
+  border-radius: 8px; outline: 0; color: #f3f5fb; background: rgba(255,255,255,.08); font: inherit; }
+.search input::placeholder { color: rgba(243,245,251,.6); }
+.results { position: absolute; top: 42px; right: 0; left: 0; max-height: 60vh; overflow: auto; padding: 6px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+.results[hidden] { display: none; }
+.results a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--text); }
+.results a small { display: block; color: var(--muted); }
+.results a:hover, .results a.sel { background: var(--soft); text-decoration: none; }
+.results .empty { padding: 6px 10px; color: var(--muted); }
+.layout { display: grid; grid-template-columns: 240px minmax(0, 900px); gap: 32px; max-width: 1200px;
+  margin: 0 auto; padding: 28px 24px 80px; }
+.sidebar { position: sticky; top: 88px; align-self: start; max-height: calc(100vh - 108px); overflow: auto; }
+.sidebar a { display: block; padding: 6px 12px; border-left: 3px solid var(--line); color: var(--muted); font-size: 14px; }
+.sidebar a:hover { color: var(--text); text-decoration: none; }
+.sidebar a.page.active { color: var(--brand); font-weight: 600; background: var(--soft); border-left-color: var(--brand); border-radius: 0 8px 8px 0; }
+.sidebar .toc { font-size: 13px; padding: 3px 12px 3px 24px; }
+.sidebar .toc.l3 { padding-left: 36px; }
+main { min-width: 0; }
+article { padding: 32px 36px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.source { float: right; margin: 6px 0 0 12px; font-size: 13px; }
+h1 { margin: 0 0 14px; font-size: 30px; line-height: 1.25; }
+h2 { margin: 36px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 22px; line-height: 1.3; }
+h3 { margin: 26px 0 8px; font-size: 17px; }
+h1, h2, h3, h4 { scroll-margin-top: 80px; }
+p, ul, ol { margin: 10px 0; }
+blockquote { margin: 14px 0; padding: 10px 16px; border-left: 4px solid var(--brand); background: var(--soft); border-radius: 0 8px 8px 0; }
+blockquote p { margin: 4px 0; }
+code { padding: 1px 6px; border-radius: 5px; background: var(--code-bg); font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-word; }
+pre { position: relative; margin: 14px 0; padding: 16px 18px; overflow: auto; border-radius: 10px; background: var(--pre-bg); color: var(--pre-text); }
+pre code { padding: 0; background: none; color: inherit; word-break: normal; white-space: pre; }
+.copy { position: absolute; top: 8px; right: 8px; padding: 2px 10px; border: 1px solid rgba(255,255,255,.25); border-radius: 6px;
+  background: rgba(255,255,255,.08); color: var(--pre-text); font-size: 12px; cursor: pointer; }
+.table-wrap { overflow-x: auto; margin: 14px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { background: var(--code-bg); }
+@media (max-width: 860px) {
+  .topbar { flex-wrap: wrap; padding: 10px 16px; }
+  .search { width: 100%; margin-left: 0; order: 3; }
+  .layout { grid-template-columns: 1fr; gap: 16px; padding: 16px; }
+  .sidebar { position: static; max-height: none; }
+  .sidebar .toc-list { display: none; }
+  article { padding: 20px 18px; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/docs"><img src="/coreman-mark.svg" alt="">CoreMan 文档</a>
+  <nav class="ai-links" aria-label="给 AI 的入口"><a href="/docs/llms.txt">llms.txt</a><a href="/docs/llms-full.txt">llms-full.txt</a></nav>
+  <div class="search">
+    <input id="q" type="search" placeholder="搜索文档（按 / 聚焦）" autocomplete="off" aria-label="搜索文档">
+    <div id="results" class="results" hidden></div>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar"><nav aria-label="文档">__NAV__</nav></aside>
+  <main>
+    <article>
+      <a class="source" href="__MD_URL__">Markdown 原文</a>
+      __BODY__
+    </article>
+  </main>
+</div>
+<script id="search-index" type="application/json">__SEARCH_INDEX__</script>
+<script>
+(function () {
+  document.querySelectorAll('article table').forEach(function (t) {
+    var w = document.createElement('div'); w.className = 'table-wrap'; t.parentNode.insertBefore(w, t); w.appendChild(t);
+  });
+  document.querySelectorAll('article pre').forEach(function (pre) {
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'copy'; b.textContent = '复制';
+    b.addEventListener('click', function () {
+      navigator.clipboard.writeText((pre.querySelector('code') || pre).textContent.trimEnd()).then(function () {
+        b.textContent = '已复制'; setTimeout(function () { b.textContent = '复制'; }, 1500);
+      });
+    });
+    pre.appendChild(b);
+  });
+  var index = JSON.parse(document.getElementById('search-index').textContent);
+  var q = document.getElementById('q'), box = document.getElementById('results'), sel = 0, hits = [];
+  function esc(s) { return s.replace(/[&<>"]/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; }); }
+  function draw() {
+    var term = q.value.trim().toLowerCase();
+    if (!term) { box.hidden = true; return; }
+    hits = index.filter(function (e) { return (e.t + ' ' + e.p).toLowerCase().indexOf(term) >= 0; }).slice(0, 12);
+    sel = 0;
+    box.innerHTML = hits.length ? hits.map(function (e, i) {
+      return '<a href="' + esc(e.u) + '"' + (i === 0 ? ' class="sel"' : '') + '>' + esc(e.t) + (e.p ? '<small>' + esc(e.p) + '</small>' : '') + '</a>';
+    }).join('') : '<div class="empty">没有匹配的标题</div>';
+    box.hidden = false;
+  }
+  q.addEventListener('input', draw);
+  q.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { q.value = ''; box.hidden = true; q.blur(); return; }
+    if (!hits.length) return;
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      sel = (sel + (ev.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length;
+      box.querySelectorAll('a').forEach(function (a, i) { a.classList.toggle('sel', i === sel); });
+    } else if (ev.key === 'Enter') { location.href = hits[sel].u; box.hidden = true; }
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === '/' && document.activeElement !== q) { ev.preventDefault(); q.focus(); }
+  });
+  document.addEventListener('click', function (ev) { if (!ev.target.closest('.search')) box.hidden = true; });
+})();
+</script>
+</body>
+</html>
