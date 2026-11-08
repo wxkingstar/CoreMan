@@ -8,14 +8,27 @@
 from __future__ import annotations
 
 import re
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from coreman.core.bus import tasks
+from coreman.core.db.models import Task, TaskStream
 from coreman.core.i18n.messages import msg
 
 CARD_PREFIX = "busy@"
 STOP = "busy_stop"
 WAIT = "busy_wait"
 PROGRESS = "busy_progress"
+RESUME = "busy_resume"
+DROP = "busy_drop"
+# 等确认的消息最多留这么久，没人回就作废。
+HOLD_SECONDS = 2 * 60 * 60
+# 这么久没有新动作才提示，工具跑一两分钟不吐字是常态。
+QUIET_NOTICE_SECONDS = 120
 _TASK_ID = re.compile(r"busy@([1-9][0-9]{0,18})")
 
 
@@ -86,6 +99,58 @@ def offer_card(
     }
 
 
+def stale_card(
+    platform: str, task_id: int, *, lines: list[str], minutes: int, locale: str = "zh"
+) -> dict[str, Any]:
+    """排队的消息等得太久：列出来问还要不要做。不点不做，直接发新消息算继续。"""
+    tid = card_task_id(task_id)
+    title = msg("busy_stale_title", locale, m=minutes)
+    shown = [f"· {_clip(line, 60)}" for line in lines[-5:]]
+    if len(lines) > 5:
+        shown.insert(0, msg("busy_stale_more", locale, n=len(lines) - 5))
+    listing = "\n".join(shown)
+    hint = msg("busy_stale_hint", locale, h=HOLD_SECONDS // 3600)
+    if platform == "wecom":
+        return {
+            "card_type": "button_interaction",
+            "source": {"desc": msg("card_source_ai", locale)},
+            "main_title": {"title": title},
+            "sub_title_text": f"{listing}\n{hint}",
+            "button_list": [
+                {"text": msg("busy_opt_resume", locale), "style": 1, "key": RESUME},
+                {"text": msg("busy_opt_drop", locale), "style": 2, "key": DROP},
+            ],
+            "task_id": tid,
+        }
+
+    def button(key: str, label: str, kind: str) -> dict[str, Any]:
+        return {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": msg(label, locale)},
+            "type": kind,
+            "width": "fill",
+            "behaviors": [{"type": "callback", "value": {"task_id": tid, "event_key": key}}],
+        }
+
+    return {
+        "schema": "2.0",
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": title}},
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": listing},
+                {"tag": "markdown", "content": f"<font color='grey'>{hint}</font>"},
+                button(RESUME, "busy_opt_resume", "primary"),
+                button(DROP, "busy_opt_drop", "default"),
+            ]
+        },
+        "task_id": tid,
+    }
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def result_card(
     platform: str,
     task_id: str,
@@ -132,7 +197,13 @@ def _elapsed(seconds: float, locale: str) -> str:
 
 
 def progress_text(
-    *, status: str, seconds: float, thinking_md: str, reply_text: str, locale: str = "zh"
+    *,
+    status: str,
+    seconds: float,
+    thinking_md: str,
+    reply_text: str,
+    quiet_seconds: float = 0.0,
+    locale: str = "zh",
 ) -> str:
     """上一条的进度：用了多久、做了几步、最近写到哪句。只读实时状态，不调用模型。"""
     if status == "queued":
@@ -141,11 +212,60 @@ def progress_text(
     text = msg("busy_progress_elapsed", locale, elapsed=_elapsed(seconds, locale))
     if steps:
         text += msg("busy_progress_steps", locale, steps=steps)
+    if quiet_seconds >= QUIET_NOTICE_SECONDS:
+        text += msg("busy_progress_quiet", locale, elapsed=_elapsed(quiet_seconds, locale))
     text += "。"
     lines = [line.strip() for line in reply_text.splitlines() if line.strip()]
     if lines:
         recent = lines[-1].lstrip("#>*- ").strip()
-        if len(recent) > 50:
-            recent = recent[:49] + "…"
+        recent = _clip(recent, 50)
         text += "\n" + msg("busy_progress_recent", locale, recent=recent)
     return text
+
+
+async def progress_of(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    session_key: str,
+    sender: str,
+    *,
+    before_task_id: int,
+    min_running: float = 0.0,
+    locale: str = "zh",
+) -> str:
+    """这个人排在前面的那条（优先正在跑的）现在到哪了。
+
+    `min_running` 大于 0：没在跑或刚开始跑时返回空串，发卡时不必多说一句。
+    """
+    rows = list(
+        await session.scalars(
+            select(Task)
+            .where(
+                Task.bot_id == bot_id,
+                Task.session_key == session_key,
+                Task.kind == "chat",
+                Task.status.in_(tasks.OPEN),
+                Task.cancel_requested_at.is_(None),
+                Task.id < before_task_id,
+                Task.payload["platform_user_id"].astext == sender,
+            )
+            .order_by(Task.id)
+        )
+    )
+    if not rows:
+        return "" if min_running else msg("busy_progress_done", locale)
+    ahead = next((row for row in rows if row.status in tasks.ACTIVE), rows[0])
+    stream = await session.get(TaskStream, ahead.id, populate_existing=True)
+    now = datetime.now(UTC)
+    since = (stream.running_since if stream else None) or ahead.started_at or ahead.claimed_at
+    seconds = (now - since).total_seconds() if since else 0.0
+    if min_running and (ahead.status not in tasks.ACTIVE or seconds < min_running):
+        return ""
+    return progress_text(
+        status=ahead.status,
+        seconds=seconds,
+        thinking_md=stream.thinking_md if stream else "",
+        reply_text=stream.pending_text if stream else "",
+        quiet_seconds=(now - stream.updated_at).total_seconds() if stream else 0.0,
+        locale=locale,
+    )

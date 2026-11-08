@@ -28,6 +28,7 @@ def test_patch_partial_and_bounds() -> None:
         "group_observe_quiet_seconds",
         "group_observe_max_wait_seconds",
         "group_observe_bot_streak_limit",
+        "busy_confirm_minutes",
         "prompt_org_context",
         "prompt_security_policy",
         "prompt_codex_contract",

@@ -25,6 +25,7 @@ from dataclasses import replace
 from coreman.core.bus import tasks
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.background import DEFAULT_TIMING, Timing
+from coreman.runtime.worker.chat import queued_batch
 from coreman.runtime.worker.chat.classify import ClassifyStage
 from coreman.runtime.worker.chat.content import ContentStage
 from coreman.runtime.worker.chat.converse import ConverseStage
@@ -63,6 +64,14 @@ class ChatTaskHandler(
 
     async def _prepare(self, ctx: TaskContext) -> Prepared | None:
         started = ctx.clock()
+        if ctx.task.payload.get("stale_hold"):
+            # 等确认的消息又被认领，只可能是到期了还没人回：不做了。
+            async with ctx.session_factory() as session:
+                await tasks.finish(
+                    session, ctx.task.id, status="cancelled", error_code="stale_expired"
+                )
+                await session.commit()
+            return None
         async with ctx.session_factory() as session:
             current = await tasks.get(session, ctx.task.id)
             if current and current.cancel_requested_at:
@@ -78,6 +87,14 @@ class ChatTaskHandler(
             return None
         if ctx.task.payload.get("origin") == "observe" and await self._observe_yields(ctx, intake):
             return None
+        if queued_batch.is_plain(ctx.task):
+            async with ctx.session_factory() as session:
+                head, entries = await queued_batch.gather(session, ctx, intake)
+                held = await queued_batch.hold_if_stale(session, ctx, intake, head, entries)
+                await session.commit()
+            if held:
+                return None
+            intake, parts = queued_batch.apply(intake, parts, entries)
         # supersede 必须先提交再等：被替代的任务跑在另一条连接上，看不见未提交的取消标记。
         async with ctx.session_factory() as session:
             await tasks.supersede(
