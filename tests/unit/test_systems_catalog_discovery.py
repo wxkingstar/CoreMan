@@ -326,6 +326,26 @@ async def test_module_and_risk_filters_and_no_results(described: Catalogs) -> No
 # What may be called --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("risk", "env_note", "anonymous_note"),
+    [
+        ("read", "", ""),
+        ("write", "需确认", ""),
+        ("destructive", "需确认", "需确认"),
+        ("financial", "需确认", "需确认"),
+    ],
+)
+def test_env_systems_mark_every_non_read_operation(
+    described: Catalogs, risk: str, env_note: str, anonymous_note: str
+) -> None:
+    env = described.ctx()
+    system = env.systems[0]
+    assert tools.call_note(env, system, {"risk": risk}) == env_note
+    assert "risk=read" in tools.call_rules(env, system)
+    env.anonymous = True
+    assert tools.call_note(env, system, {"risk": risk}) == anonymous_note
+
+
 async def test_refunds_show_queries_and_what_needs_a_person(described: Catalogs) -> None:
     env = described.ctx()
     module = await run(env, "systems_browse", {"system": "ops", "module": "Refunds"})

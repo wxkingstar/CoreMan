@@ -180,10 +180,12 @@ CALL_NOTES = {"risk_not_allowed": "不代理", "write_not_allowed": "未开启�
 
 def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
     """Whether this turn may call the operation, from the catalog's risk and the call mode."""
-    if system.token_delivery == "proxy" and not ctx.anonymous:
+    if ctx.anonymous:
+        return "需确认" if op["risk"] in proxy.NEVER_PROXIED else ""
+    if system.token_delivery == "proxy":
         denied = proxy.policy_error(ctx, system, op)
         return CALL_NOTES.get(denied or "", "")
-    return "需确认" if op["risk"] in proxy.NEVER_PROXIED else ""
+    return "需确认" if op["risk"] != "read" else ""
 
 
 def call_mode(ctx: Context, system: BusinessSystem) -> str:
@@ -204,8 +206,9 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
             "destructive、financial 不代理，需用户本人在业务系统里操作。"
         )
     return (
-        "持令牌直接调用（按 systems_describe 的 curl 模板）。destructive、financial 先向当前发言者"
-        "说明并等对方明确确认；定时任务中不执行。"
+        "持令牌直接调用（按 systems_describe 的 curl 模板）。risk=read 直接执行；其余操作先向"
+        "当前发言者说明对象和数量、修改前后值、影响和恢复方式，等对方在后续消息中明确确认；"
+        "定时任务中不执行。"
     )
 
 
