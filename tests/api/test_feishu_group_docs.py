@@ -256,7 +256,7 @@ async def test_reasons_say_what_is_missing(client, app, db_session):
                 URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
             )
         )
-    assert cannot["reason"] == "asker_cannot_open"
+    assert cannot["reason"] == "asker_cannot_open" and "申请权限" in cannot["hint"]
     await connected_scopes(db_session, ["search:message"])
     with respx.mock as mock:
         tenant(mock)
