@@ -29,7 +29,7 @@ def test_to_body_claude_and_codex() -> None:
         {"role": "user", "content": "hi"},
     ]
     assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
-    assert body["max_turns"] == 100
+    assert body["max_turns"] == 200
     # 输出详细度只在 system prompt 里，不再经 claude --settings 选输出样式。
     assert "settings" not in body
     assert body["effort"] == "high" and body["env_vars"] == {"A": "1"}
