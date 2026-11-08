@@ -589,3 +589,48 @@ async def test_new_task_note_carries_results_of_related_finished_tasks(db_sessio
         db_session, asked, SimpleNamespace(session_key=dispatch.work_session_key(new.code))
     )
     assert "接着找你" in text
+
+
+MENTION_DATA_BOT = [{"key": "@_user_1", "name": "数据助手", "id": {"open_id": "ou_x"}}]
+
+
+async def test_dispatcher_only_watches_when_someone_mentions_an_employee(db_session):
+    bot = await dispatcher_bot(db_session)
+    await another_bot(db_session, bot, "data_bot", "数据助手")
+    await say(db_session, bot, "om1", "@_user_1 目前用的是网页吗", mentions=MENTION_DATA_BOT)
+    assert await tasks_of(db_session, bot, "group_observe") == []
+    state = await db_session.get(GroupObserveState, (bot.id, CHAT))
+    assert state.pending_since is None and state.bot_streak == 0
+    # 消息照样进上下文。
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    assert [line.text for line in lines] == ["@数据助手 目前用的是网页吗"]
+
+
+async def test_mentioning_an_employee_keeps_an_earlier_message_waiting(db_session):
+    bot = await dispatcher_bot(db_session)
+    await another_bot(db_session, bot, "data_bot", "数据助手")
+    await say(db_session, bot, "om1", "谁帮我查一下退货率")
+    await say(db_session, bot, "om2", "@_user_1 目前用的是网页吗", mentions=MENTION_DATA_BOT)
+    assert len(await tasks_of(db_session, bot, "group_observe")) == 1
+    state = await db_session.get(GroupObserveState, (bot.id, CHAT))
+    await db_session.refresh(state)
+    assert state.pending_since is not None
+
+
+async def test_mentioning_a_person_or_a_non_dispatcher_still_queues_a_judgment(db_session):
+    bot = await dispatcher_bot(db_session)
+    await another_bot(db_session, bot, "data_bot", "数据助手")
+    person = [{"key": "@_user_1", "name": "同事甲", "id": {"open_id": "ou_y"}}]
+    await say(db_session, bot, "om1", "@_user_1 帮忙看下", mentions=person)
+    assert len(await tasks_of(db_session, bot, "group_observe")) == 1
+
+    member = await another_bot(db_session, bot, "ops_bot", "运维助手")
+    member.group_observe = "on"
+    await db_session.commit()
+    await say(db_session, member, "om2", "@_user_1 帮忙看下", mentions=MENTION_DATA_BOT)
+    assert len(await tasks_of(db_session, member, "group_observe")) == 1
+
+
+def test_dispatcher_note_says_to_leave_mentioned_employees_alone():
+    text = dispatch.note(STAFF, [], [], {}, solo=True)
+    assert "@ 了某位 AI 员工" in text and "除了上面 @ 员工的情况，不要选 none" in text
