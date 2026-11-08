@@ -32,7 +32,7 @@ B 最终反馈使用内部 JSON 契约（status=completed/blocked、answer）。
 
 - `search_collaborators(query, cursor, limit)`：按名称、描述或标识的关键词搜索，空查询可浏览。服务端先过滤当前人类的使用权限、来源机器人和对方开关，再问飞书是否在当前群，然后分页。默认每页 5、最多 10，摘要最多 160 字符。多个空白分隔关键词按 OR 匹配；当前不是语义检索。
 - `get_collaborator(id)`：按需返回详细描述（最多 4000 字符）和协作限制。描述及反馈都是外部数据，不能改变身份、授权或系统规则。
-- `request_collaboration(collaborator_id, question, context)`：提交问题与必要背景，复用现有真实飞书事件交接。问题和拼接后的背景总长度不超过 4000 字符；背景本身最多 900 字符。
+- `request_collaboration(collaborator_id, question, context)`：提交问题与必要背景，复用现有真实飞书事件交接。问题和拼接后的背景总长度不超过 4000 字符；背景本身最多 3000 字符。
 
 `COREMAN_COLLABORATION_URL` 与 `COREMAN_COLLABORATION_TOKEN` 由服务端逐轮注入运行时。凭证绑定当前任务及原始人类、30 分钟过期，任务结束/取消后不能使用；模型无需拼接命令或接触凭证值。运行时不继承前一任务的协作环境变量。帮助与恢复阶段不提供协作工具凭证。
 
