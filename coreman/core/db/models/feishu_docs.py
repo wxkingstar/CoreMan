@@ -24,7 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, enum_check
 
-DOC_CONSENT_STATUSES = ("pending", "approved", "declined", "expired")
+# awaiting_auth：提问人授权还差一步，授权完成后续接；resumed：已续接。
+DOC_CONSENT_STATUSES = ("pending", "approved", "declined", "expired", "awaiting_auth", "resumed")
 
 
 class FeishuDocConsent(Base):

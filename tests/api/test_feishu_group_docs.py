@@ -1,4 +1,4 @@
-"""群里读飞书文档：A 层只读本群看得到的，B 层要提问人逐篇放行。"""
+"""群里读飞书文档：先用应用身份读本群看得到的，读不到再以提问人本人身份读他发过的链接。"""
 
 import json
 import uuid
@@ -158,13 +158,26 @@ async def test_link_sharing_counts_only_when_this_group_can_open_it(
     assert ("content" in out) is readable
     assert route.called is readable
     if not readable:
-        assert out["error"] == "no_access" and out["can_request_access"] is False
+        # 提问人还没连接飞书：记下这一轮，授权完成后自动续接。
+        assert out["error"] == "no_access" and out["reason"] == "not_connected"
+        row = (await db_session.scalars(select(FeishuDocConsent))).one()
+        assert (row.status, row.tokens, row.origin_task_id) == (
+            "awaiting_auth",
+            ["DocToken1234"],
+            task.id,
+        )
 
 
-async def test_unreadable_document_offers_consent_only_to_a_connected_asker(
-    client, app, db_session
-):
-    bot, user, task = await group(db_session, app)
+def user_fetch(mock, status=200):
+    body = {"code": 0, "data": {"document": {"content": "# 方案"}}}
+    if status != 200:
+        body = {"code": 1063002, "msg": "permission denied"}
+    return mock.post(f"{OPEN}/docs_ai/v1/documents/DocToken1234/fetch").mock(
+        return_value=httpx.Response(status, json=body)
+    )
+
+
+async def connected(db_session, app, bot, user, **kw):
     await grant(
         db_session,
         app,
@@ -173,47 +186,124 @@ async def test_unreadable_document_offers_consent_only_to_a_connected_asker(
         authorization_level="all",
         scopes=READ_SCOPES,
         requested_scopes=READ_SCOPES,
+        **kw,
     )
+
+
+async def test_a_connected_asker_reads_directly_without_a_card(client, app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
     with respx.mock as mock:
         tenant(mock)
         permissions(mock)
+        fetched = user_fetch(mock)
+        for path in ("members", "public"):
+            mock.get(f"{OPEN}/drive/v1/permissions/OtherToken99/{path}").mock(
+                return_value=httpx.Response(403, json={"code": 1063002, "msg": "denied"})
+            )
         out = value(
             await client.post(
                 URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
             )
         )
-        assert out["can_request_access"] is True
-        # 不是提问人这条消息里的链接，不能请求放行。
+        # 不是本群有人发过的链接，不能以提问人身份读。
         other = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": OTHER})
+            )
+        )
+    assert out["content"] == "# 方案" and out["read_as"] == "requester"
+    assert out["can_offer_share"] is True
+    assert fetched.calls[0].request.headers["authorization"] == "Bearer user-secret"
+    assert "user-secret" not in json.dumps(out)
+    assert other["reason"] == "link_not_from_chat"
+    assert (await db_session.scalars(select(FeishuDocConsent))).all() == []
+
+
+async def test_links_posted_earlier_in_this_group_can_be_read(client, app, db_session):
+    bot, user, earlier = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    await tasks.finish(db_session, earlier.id, status="succeeded")
+    await db_session.commit()
+    task = await chat_task(
+        db_session, bot, "按文档改", sender="human", chat_type="group", chat_id="oc_group"
+    )
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    origin = await db_session.get(InboundEvent, earlier.inbound_event_id)
+    event.payload, event.sender_open_id = origin.payload, origin.sender_open_id
+    await db_session.commit()
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        user_fetch(mock)
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
+            )
+        )
+    assert out["read_as"] == "requester"
+
+
+async def test_reasons_say_what_is_missing(client, app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        user_fetch(mock, status=403)
+        cannot = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
+            )
+        )
+    assert cannot["reason"] == "asker_cannot_open"
+    await connected_scopes(db_session, ["search:message"])
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        lacking = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
+            )
+        )
+    assert lacking["reason"] == "scope_missing"
+
+
+async def connected_scopes(db_session, scopes):
+    from coreman.core.db.models import FeishuPersonalGrant
+
+    row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
+    row.scopes = row.requested_scopes = scopes
+    await db_session.commit()
+
+
+async def test_offer_share_posts_a_share_only_card(client, app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        tenant(mock)
+        outside = value(
             await client.post(
                 URL,
                 headers=await headers(app, task),
-                json=rpc("feishu_doc_request_access", {"urls": [OTHER]}),
+                json=rpc("feishu_doc_offer_share", {"urls": [OTHER]}),
             )
         )
-        assert other["error"] == "link_not_in_message"
         asked = value(
             await client.post(
                 URL,
                 headers=await headers(app, task),
-                json=rpc("feishu_doc_request_access", {"urls": [DOC]}),
+                json=rpc("feishu_doc_offer_share", {"urls": [DOC]}),
             )
         )
-        again = value(
-            await client.post(
-                URL,
-                headers=await headers(app, task),
-                json=rpc("feishu_doc_request_access", {"urls": [DOC]}),
-            )
-        )
-    assert asked["status"] == "access_requested" and again["status"] == "already_requested"
+    assert outside["error"] == "link_not_from_chat"
+    assert asked["status"] == "access_requested"
     row = (await db_session.scalars(select(FeishuDocConsent))).one()
     assert (row.status, row.tokens, row.share_offered) == ("pending", ["DocToken1234"], True)
     item = await db_session.get(OutboxItem, row.card_outbox_id)
     card = json.dumps(item.payload["card"], ensure_ascii=False)
-    assert item.target == {"chat_id": "oc_group"}
     assert "<at id=ou_human></at>" in card and DOC in card
-    assert '"requester": "human"' in card and consent.SHARE in card
+    assert consent.SHARE in card and consent.ONCE not in card
 
 
 async def click(db_session, bot, origin, label, *, card_message="om_card", sender="human"):
@@ -289,9 +379,7 @@ async def pending_card(db_session, app, bot, user, task):
     return row
 
 
-async def test_the_askers_click_lets_only_them_read_the_document(
-    client, app, db_session, db_engine
-):
+async def test_an_old_cards_click_is_still_recorded(app, db_session, db_engine):
     bot, user, task = await group(db_session, app)
     row = await pending_card(db_session, app, bot, user, task)
     turn = await click(db_session, bot, task, consent.ONCE)
@@ -301,26 +389,10 @@ async def test_the_askers_click_lets_only_them_read_the_document(
     prompt, env = await configure(db_session, ctx, intake, uuid.uuid4(), "你是助理", {})
     await db_session.commit()
     assert "## 群里的飞书文档" in prompt and env[policy.PREFIX + "URL"].endswith(URL)
-    assert "不要用浏览器" in prompt
-    assert "同意以他的身份读取" in ctx.turn_notes[0]
+    assert "不要用浏览器" in prompt and "不用另外申请" in prompt
+    assert consent.ONCE in ctx.turn_notes[0]
     await db_session.refresh(row)
     assert row.status == "approved" and row.decided_at is not None
-    with respx.mock as mock:
-        tenant(mock)
-        permissions(mock)
-        fetched = mock.post(f"{OPEN}/docs_ai/v1/documents/DocToken1234/fetch").mock(
-            return_value=httpx.Response(
-                200, json={"code": 0, "data": {"document": {"content": "# 方案"}}}
-            )
-        )
-        out = value(
-            await client.post(
-                URL, headers=await headers(app, turn), json=rpc("feishu_doc_read", {"url": DOC})
-            )
-        )
-    assert out["content"] == "# 方案" and out["read_as"] == "requester"
-    assert fetched.calls[0].request.headers["authorization"] == "Bearer user-secret"
-    assert "user-secret" not in json.dumps(out)
 
 
 async def test_someone_elses_click_or_turn_does_not_use_the_consent(
@@ -347,7 +419,7 @@ async def test_someone_elses_click_or_turn_does_not_use_the_consent(
                 URL, headers=await headers(app, turn), json=rpc("feishu_doc_read", {"url": DOC})
             )
         )
-    assert out["error"] == "no_access"
+    assert out["error"] == "no_access" and out["reason"] == "unknown_speaker"
 
 
 async def test_share_click_adds_this_group_as_a_reader(app, db_session, db_engine):
@@ -386,7 +458,7 @@ async def test_decline_records_the_refusal(app, db_session, db_engine):
     await configure(db_session, ctx, intake, uuid.uuid4(), "", {})
     await db_session.commit()
     await db_session.refresh(row)
-    assert row.status == "declined" and "拒绝" in ctx.turn_notes[0]
+    assert row.status == "declined" and "不把" in ctx.turn_notes[0]
 
 
 @pytest.mark.parametrize("denial", ["private", "observe", "old_runtime", "wecom"])
@@ -463,3 +535,114 @@ async def test_unknown_speaker_gets_only_the_app_layer(app, db_session, db_engin
     ctx.turn_notes = []
     _, env = await configure(db_session, ctx, intake, uuid.uuid4(), "", {})
     assert policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"]).chat_id == "oc_group"
+
+
+async def test_quoted_and_forwarded_links_are_remembered(app, db_session):
+    _, _, task = await setup(db_session, app, chat_type="group")
+    parts = [
+        {"type": "text", "text": "按文档改"},
+        {"type": "quote", "kind": "text", "text": f"结构：{DOC}业务：{OTHER}", "refs": []},
+    ]
+    await remember_links(db_session, task.id, "按文档改", parts)
+    await db_session.commit()
+    row = await db_session.get(Task, task.id, populate_existing=True)
+    assert row.payload["doc_links"] == ["DocToken1234", "OtherToken99"]
+
+
+async def test_authorization_finished_later_resumes_the_turn(app, db_session, db_engine):
+    from coreman.core.db.models import FeishuPersonalGrant
+    from coreman.core.feishu_docs import resume
+    from coreman.core.feishu_personal import service
+
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
+    row.status, row.token_enc = "pending", None
+    row.pending_enc = app.state.cipher.encrypt(
+        json.dumps({"device_code": "device", "url": "https://accounts.feishu.cn/verify"}),
+        service._aad(row, "pending_enc"),
+    )
+    row.pending_expires_at = consent.utcnow() + consent.PENDING_TTL
+    row.next_poll_at = None
+    await db_session.commit()
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        mock.post(f"{OPEN}/authen/v2/oauth/token").mock(
+            return_value=httpx.Response(200, json={"error": "authorization_pending"})
+        )
+        async with app.state.session_factory() as session:
+            scope = await policy.scope(
+                session, policy.Capability(task.id, "oc_group", uuid.uuid4())
+            )
+            state = await access_state(session, app, scope)
+            await session.commit()
+    assert state == "authorization_pending"
+    waiting = FeishuDocConsent(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_group",
+        tokens=["DocToken1234"],
+        urls=[DOC],
+        status="awaiting_auth",
+        share_offered=False,
+        shared=False,
+        origin_task_id=task.id,
+        expires_at=consent.utcnow() + resume.AWAIT_TTL,
+    )
+    db_session.add(waiting)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id), populate_existing=True)
+    row.next_poll_at = None  # 到了下一次该查的时候
+    await db_session.commit()
+    await tasks.finish(db_session, task.id, status="succeeded")
+    await db_session.commit()
+    with respx.mock as mock:
+        mock.post(f"{OPEN}/authen/v2/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "user-secret",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                    "scope": " ".join(READ_SCOPES),
+                },
+            )
+        )
+        mock.get(f"{OPEN}/authen/v1/user_info").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "user_id": "human",
+                        "open_id": "ou_human",
+                        "tenant_key": "tenant-test",
+                    },
+                },
+            )
+        )
+        async with app.state.session_factory() as session:
+            assert await resume.tick(session, consent.utcnow(), app.state.cipher) == 1
+            await session.commit()
+    await db_session.refresh(waiting)
+    assert waiting.status == "resumed"
+    again = (
+        await db_session.scalars(
+            select(Task).where(Task.payload[resume.PAYLOAD_KEY].astext == str(waiting.id))
+        )
+    ).one()
+    assert again.inbound_event_id == task.inbound_event_id and again.kind == "chat"
+    assert again.payload["serialize_session"] is True and "doc_links" not in again.payload
+    again.status = "running"  # 被 worker 认领后开轮
+    await db_session.commit()
+    intake = await intake_for(db_session, bot, again, "看下", SUPPORTED)
+    ctx = build_ctx(db_engine, again)
+    ctx.turn_notes = []
+    await configure(db_session, ctx, intake, uuid.uuid4(), "", {})
+    assert "自动续接" in ctx.turn_notes[-1]
+
+
+async def access_state(session, app, scope):
+    from coreman.core.feishu_docs import access
+
+    return (await access.asker_state(session, app.state.cipher, scope)).status

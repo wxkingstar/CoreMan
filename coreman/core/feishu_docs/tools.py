@@ -13,7 +13,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_docs import access, consent, links
+from coreman.core.feishu_docs import access, consent, links, resume
 from coreman.core.feishu_docs.links import Link, LinkError
 from coreman.core.feishu_docs.policy import DocsScope
 from coreman.core.feishu_personal.service import PersonalError
@@ -66,10 +66,10 @@ _SPECS: dict[str, tuple[type[Arguments], str]] = {
     ),
     "feishu_doc_sheet_read": (SheetRead, "Read cell ranges of a spreadsheet link."),
     "feishu_doc_base_records": (BaseRecords, "List records of a Base (bitable) table link."),
-    "feishu_doc_request_access": (
+    "feishu_doc_offer_share": (
         RequestAccess,
-        "Ask the person who asked to let you read these links as them, when a read"
-        " returned can_request_access. Sends a confirmation card; then end your turn.",
+        "Optional, after a read with can_offer_share: post a button so the asker can share"
+        " these links with this group in one click. Do not wait for it; answer as usual.",
     ),
 }
 
@@ -95,6 +95,7 @@ async def _resolve(call: Call, link: Link) -> tuple[str, str]:
 async def _read_any(
     session: AsyncSession, cipher: Cipher, scope: DocsScope, link: Link, read: Reader
 ) -> dict[str, Any]:
+    """先用应用身份读（本群看得到才行），不行就直接以提问人本人身份读（他发过的链接才行）。"""
     client = access.app_client(cipher, scope)
     try:
         if await access.chat_can_see(client, link, scope.chat_id):
@@ -104,31 +105,71 @@ async def _read_any(
                 return {**await read(app, kind, token, True), "read_as": "app"}
             except PersonalError:
                 pass
-        if await access.approved(session, scope, link.token) is not None:
-            who = await access.requester(session, scope)
-            if who is not None:
-                user = Call(session, cipher, who.scope)
-                kind, token = await _resolve(user, link)
-                return {**await read(user, kind, token, False), "read_as": "requester"}
     finally:
         await client.aclose()
-    return await _no_access(session, scope, link)
+    if link.token not in await access.allowed_tokens(session, scope):
+        return _no_access("link_not_from_chat")
+    state = await access.asker_state(session, cipher, scope)
+    who = state.requester
+    if who is None:
+        if state.status in WAITING:
+            await resume.wait_for_authorization(session, scope, link)
+        return _no_access(state.status)
+    if not who.reaches(*access.READ_ENDPOINTS[link.kind]):
+        await resume.wait_for_authorization(session, scope, link)
+        return _no_access("scope_missing")
+    user = Call(session, cipher, who.scope)
+    try:
+        kind, token = await _resolve(user, link)
+        data = await read(user, kind, token, False)
+    except PersonalError as exc:
+        if getattr(exc, "code", "") in (
+            "unsupported_type",
+            "not_a_spreadsheet",
+            "not_a_base",
+            "table_id_required",
+        ):
+            raise
+        return {**_no_access("asker_cannot_open"), "upstream": exc.payload()}
+    return {
+        **data,
+        "read_as": "requester",
+        "can_offer_share": who.reaches(access.SHARE_ENDPOINT),
+    }
 
 
-async def _no_access(session: AsyncSession, scope: DocsScope, link: Link) -> dict[str, Any]:
-    who = await access.requester(session, scope)
-    in_message = link.token in access.allowed_tokens(scope)
-    can = bool(who and in_message and who.reaches(*access.READ_ENDPOINTS[link.kind]))
-    if can:
-        hint = "可调用 feishu_doc_request_access 请提问人放行，然后简短说明并结束本轮。"
-    elif not in_message:
-        hint = "只能为提问人这条消息（或它引用的消息）里的链接请求放行。"
-    else:
-        hint = (
-            "本群看不到这篇文档。请文档所有者把它共享给本群；"
-            "或请提问人私聊 AI 员工发送“连接飞书”并授权文档权限后再试。"
-        )
-    return {"error": "no_access", "can_request_access": can, "hint": hint}
+# 调用方用错了工具或参数：如实返回，不算「他打不开」。
+_CALLER_ERRORS = ("unsupported_type", "not_a_spreadsheet", "not_a_base", "table_id_required")
+# 提问人授权还差一步：记下这一轮，授权完成后自动续接。
+WAITING = frozenset({"not_connected", "authorization_pending"})
+_HINTS = {
+    "link_not_from_chat": (
+        "这个链接不是本群有人发过的，不能以提问人身份读取。请提问人把链接发到群里。"
+    ),
+    "unknown_speaker": (
+        "本群看不到这篇文档，提问人也不是平台成员，没法以他的身份读。请文档所有者把它共享给本群。"
+    ),
+    "not_connected": (
+        "本群看不到这篇文档，提问人还没连接飞书。请他私聊你发送“连接飞书”并授权；"
+        "授权完成后会自动接着处理这条消息，不用再发链接。简短说明后结束本轮。"
+    ),
+    "authorization_pending": (
+        "提问人的飞书授权还没完成。请他在飞书授权页点同意；"
+        "完成后会自动接着处理这条消息，不用再发链接。简短说明后结束本轮。"
+    ),
+    "scope_missing": (
+        "提问人的飞书授权不含读取这类文档。请他私聊你发送“连接飞书”，选一个包含文档的范围；"
+        "完成后会自动接着处理。简短说明后结束本轮。"
+    ),
+    "asker_cannot_open": (
+        "已经以提问人身份试过，他本人也打不开这篇文档。"
+        "请文档所有者把它共享给提问人或本群，然后再发一次。"
+    ),
+}
+
+
+def _no_access(reason: str) -> dict[str, Any]:
+    return {"error": "no_access", "reason": reason, "hint": _HINTS[reason]}
 
 
 async def _document(
@@ -167,7 +208,7 @@ async def dispatch(
         return {"error": "invalid_tool_or_arguments", "invalid": problems}
     try:
         if isinstance(args, RequestAccess):
-            return await _request(session, scope, args)
+            return await _request(session, cipher, scope, args)
         assert isinstance(args, (DocRead, SheetRead, BaseRecords))
         link = links.parse(args.url)
     except LinkError as exc:
@@ -218,27 +259,19 @@ async def dispatch(
     return bounded({**data, "content_trust": "external_untrusted_data"})
 
 
-async def _request(session: AsyncSession, scope: DocsScope, args: RequestAccess) -> dict[str, Any]:
+async def _request(
+    session: AsyncSession, cipher: Cipher, scope: DocsScope, args: RequestAccess
+) -> dict[str, Any]:
     targets = [links.parse(url) for url in args.urls]
-    who = await access.requester(session, scope)
-    if who is None:
-        return {
-            "error": "requester_not_connected",
-            "hint": "提问人还没有连接飞书：请他私聊 AI 员工发送“连接飞书”并授权文档权限后再试。",
-        }
-    allowed = access.allowed_tokens(scope)
+    who = (await access.asker_state(session, cipher, scope)).requester
+    if who is None or not who.reaches(access.SHARE_ENDPOINT):
+        return {"error": "share_unavailable", "hint": "提问人没有可用的飞书授权，不能代他共享。"}
+    allowed = await access.allowed_tokens(session, scope)
     outside = [link.url for link in targets if link.token not in allowed]
     if outside:
-        return {"error": "link_not_in_message", "urls": outside}
-    lacking = [link.url for link in targets if not who.reaches(*access.READ_ENDPOINTS[link.kind])]
-    if lacking:
-        return {
-            "error": "requester_permission_missing",
-            "urls": lacking,
-            "hint": "提问人的飞书授权不含读取这类文档：请他私聊发送“连接飞书”重新选择授权范围。",
-        }
+        return {"error": "link_not_from_chat", "urls": outside}
     result = await consent.request(session, scope, who, targets)
     return {
         "status": result.status,
-        "note": "已在群里请提问人确认。请简短告诉他去点卡片，然后结束本轮；他确认后会自动继续。",
+        "note": "已在群里给提问人发了「共享给本群」按钮，点不点都不影响本轮，照常回答即可。",
     }

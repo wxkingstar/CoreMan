@@ -219,6 +219,11 @@ class SchedulerService(Service):
                 async with self._factory() as session:
                     counts["human_collaborations"] = await human_tick(session, now, self._cipher)
                     await session.commit()
+                from coreman.core.feishu_docs.resume import tick as docs_tick
+
+                async with self._factory() as session:
+                    counts["feishu_doc_resumes"] = await docs_tick(session, now, self._cipher)
+                    await session.commit()
                 from coreman.core.cloud_proxy.resume import tick as approval_tick
 
                 async with self._factory() as session:
