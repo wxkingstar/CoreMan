@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.chat import interactions
+from coreman.core.chat import alert_sources, interactions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.commands import classify_command, is_cancel_word
 from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
@@ -90,7 +90,8 @@ class IntakeStage(ChatStageBase):
         # 群聊旁听的插话回合与调度回合：没人 @ 它，是它自己判断要说话；
         # 触发的消息可以来自其他机器人。
         observe = ctx.task.payload.get("origin") in ("observe", "dispatch")
-        if sender.get("sender_type", "user") != "user" and not observe:
+        alert = ctx.task.payload.get("origin") == alert_sources.ORIGIN
+        if sender.get("sender_type", "user") != "user" and not observe and not alert:
             await tasks.finish(
                 session, ctx.task.id, status="cancelled", error_code="bot_requires_collaboration"
             )
@@ -98,7 +99,17 @@ class IntakeStage(ChatStageBase):
         platform_user_id = str(
             sender.get("platform_user_id") or inbound.sender_platform_user_id or ""
         )
-        if bot.platform == "feishu":
+        if alert:
+            resolved = await alert_sources.resolve_speaker(
+                session, bot=bot, event=inbound, source_id=ctx.task.payload.get("alert_source_id")
+            )
+            if resolved is None or bot.group_observe != "on":
+                await tasks.finish(
+                    session, ctx.task.id, status="cancelled", error_code="alert_source_unavailable"
+                )
+                return None
+            speaker = resolved
+        elif bot.platform == "feishu":
             speaker = await resolve_feishu_event_speaker(
                 session, bot=bot, event=inbound, cipher=ctx.cipher
             )
@@ -110,7 +121,7 @@ class IntakeStage(ChatStageBase):
                 resolver=ctx.openuserid,
             )
         text = strip_mention(joined_text(parts), bot.name)
-        if bot.platform == "feishu" and not observe:
+        if bot.platform == "feishu" and not observe and not alert:
             from coreman.runtime.worker.feishu_escalations import consume_reply
 
             if await consume_reply(session, ctx, bot, inbound, speaker, parts, text):
@@ -149,6 +160,14 @@ class IntakeStage(ChatStageBase):
         )
         if observe:
             return await self._observe_intake(session, ctx, intake, parts)
+        if alert:
+            # 排查回合不走命令、公告、白名单这些「有人在说话」的拦截，运行时不可用时不在群里回话。
+            if relay is None or not relay.is_active:
+                await tasks.finish(
+                    session, ctx.task.id, status="cancelled", error_code="relay_unavailable"
+                )
+                return None
+            return intake, relay, parts
         if await self._announced(session, ctx, intake):
             return None
         if await self._denied(session, ctx, intake):

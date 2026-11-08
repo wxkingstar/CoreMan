@@ -26,7 +26,15 @@ router = APIRouter(
 )
 
 # 「会插话」：模型判断该说话（shadow 下只记录，on 下发出、被 agent 否决或让给同群别的机器人）。
-WOULD_SPEAK = ("interject", "sent", "vetoed", "failed", "yielded")
+WOULD_SPEAK = (
+    "interject",
+    "sent",
+    "vetoed",
+    "failed",
+    "yielded",
+    "would_intervene",
+    "alert_intervene",
+)
 
 
 async def require_admin(session: AsyncSession, bot_id: uuid.UUID, actor: User) -> Bot:

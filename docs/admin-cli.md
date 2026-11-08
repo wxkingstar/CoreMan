@@ -184,6 +184,10 @@ coreman bots api-alias-remove demo-bot 值班群 --yes
 coreman bots observe-set demo-bot --mode shadow --scope "库存与发货问题" [--role member|dispatcher]
 coreman bots observe-decisions demo-bot [--chat 群id] [--would-speak|--silent] [--limit 50] [--before 记录id] [--messages]
 coreman bots observe-review demo-bot 记录id should|should_not|none
+coreman bots alert-source-list demo-bot
+coreman bots alert-source-add demo-bot --chat 群id --sender-union-id 机器人union_id --service-user svc-demo [--dedupe-seconds 600]
+coreman bots alert-source-set demo-bot 来源id [--service-user svc-demo] [--dedupe-seconds 600] [--enable|--disable]
+coreman bots alert-source-remove demo-bot 来源id
 ```
 
 开启旁听前须填旁听职责说明，且飞书应用要有「获取群组中所有消息」权限，见下面的 `observe-permission` 与 `feishu-app-scan --observe`。
