@@ -49,6 +49,10 @@ def test_links_are_parsed_from_feishu_urls_only():
             links.parse(bad)
     text = f"看下 [方案]({DOC}) 和 {OTHER}，还有 {DOC}?from=x"
     assert [item.token for item in links.find(text)] == ["DocToken1234", "OtherToken99"]
+    glued = f"结构不合理。\n{DOC}这是新结构，{OTHER}这是业务流程"
+    assert [item.token for item in links.find(glued)] == ["DocToken1234", "OtherToken99"]
+    base = links.find("见 https://example.feishu.cn/base/BaseToken123?table=tblAbc这张表")[0]
+    assert (base.token, base.table) == ("BaseToken123", "tblAbc")
 
 
 async def group(db_session, app, text=f"帮我总结 {DOC}"):
