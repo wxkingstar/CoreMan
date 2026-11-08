@@ -47,4 +47,6 @@ class FeishuSentMessage(Base):
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)
     chat_id: Mapped[str] = mapped_column(Text)
     text: Mapped[str] = mapped_column(Text)
+    # 这条是某个任务的回复时记下任务编号：有人回复它，就续进那个任务的会话（群里可能不显示编号）。
+    work_code: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

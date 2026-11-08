@@ -981,6 +981,7 @@ export default {
     states: { disconnected: '未连接', connecting: '连接中', subscribed: '已订阅', kicked: '已被顶替', auth_failed: '认证失败' },
   },
   settings: {
+    busyConfirmMinutes: '排队消息确认（分钟）', busyConfirmHint: '排队的消息等了这么久，开工前先发卡片问还要不要做；0 表示不问。',
     groupObserve: '群聊旁听', observeThreshold: '判断阈值', observeQuiet: '安静多久再判断（秒）', observeMaxWait: '最长等待（秒）', observeStreak: '机器人连续发言上限', groupObserveHint: '判断模型给出的概率高于阈值才插话，调低更主动；群里安静这么久才判断，一直有人说话时最长等这么久；最近一条人类消息之后机器人消息连续达到上限就暂停主动插话，防止机器人之间无限接话。',
     title: '设置',
     bootstrapEnabled: '引导登录',

@@ -32,6 +32,7 @@ const KEYS = [
   'group_observe_quiet_seconds',
   'group_observe_max_wait_seconds',
   'group_observe_bot_streak_limit',
+  'busy_confirm_minutes',
   'prompt_org_context',
   'prompt_security_policy',
   'prompt_codex_contract',
@@ -59,6 +60,7 @@ function empty(): SettingsOut {
     group_observe_quiet_seconds: 15,
     group_observe_max_wait_seconds: 60,
     group_observe_bot_streak_limit: 3,
+    busy_confirm_minutes: 10,
     prompt_org_context: '',
     prompt_security_policy: '',
     prompt_codex_contract: '',
@@ -94,6 +96,7 @@ function apply(data: SettingsOut): void {
 type NumberKey = 'session_ttl_hours' | 'max_concurrent_tasks' | 'fast_lane_slots'
   | 'group_observe_threshold' | 'group_observe_quiet_seconds' | 'group_observe_max_wait_seconds'
   | 'group_observe_bot_streak_limit'
+  | 'busy_confirm_minutes'
 
 /** el-input-number 清空时发 undefined；这些键后端不接受 null，保持原值不动。 */
 function setNumber(key: NumberKey, v: number | null | undefined): void {
@@ -358,6 +361,17 @@ defineExpose({ form })
         </div>
         <div class="hint">
           {{ t('settings.groupObserveHint') }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('settings.busyConfirmMinutes')">
+        <el-input-number
+          :model-value="form.busy_confirm_minutes"
+          :min="0"
+          :max="1440"
+          @update:model-value="setNumber('busy_confirm_minutes', $event)"
+        />
+        <div class="hint">
+          {{ t('settings.busyConfirmHint') }}
         </div>
       </el-form-item>
 

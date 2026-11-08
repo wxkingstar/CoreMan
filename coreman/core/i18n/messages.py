@@ -206,7 +206,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "group_queued": "收到，我先把手上的事做完，接着就处理这个。",
         "busy_title": "上一条还在处理",
         "busy_ask": "要先停下它，马上处理这条吗？",
-        "busy_default": "不选的话，上一条做完会接着处理这条。",
+        "busy_default": "不选的话，上一条做完会接着处理这条；等得久的话，开工前会再问你一次。",
+        "busy_stale_title": "这些消息等了 {m} 分钟，还要处理吗？",
+        "busy_stale_more": "……前面还有 {n} 条",
+        "busy_stale_hint": "不点就不处理，{h} 小时后作废。想改需求直接发新消息，会和这些一起处理。",
+        "busy_opt_resume": "继续处理",
+        "busy_opt_drop": "不用了",
+        "busy_resumed_title": "好的，马上处理",
+        "busy_resumed_desc": "这些消息会合在一起处理。",
+        "busy_dropped_title": "好的，不处理了",
+        "busy_dropped_desc": "需要的话请重新发送。",
+        "busy_progress_quiet": "，最近 {elapsed} 没有新动作",
         "busy_opt_stop": "停下，先做这条",
         "busy_opt_wait": "等它做完",
         "busy_opt_progress": "看看进度",
@@ -534,7 +544,23 @@ MESSAGES: dict[str, dict[str, str]] = {
         "group_queued": "了解です。今の作業が終わったら続けてこれに対応します。",
         "busy_title": "前のメッセージを処理中です",
         "busy_ask": "前の作業を止めて、すぐにこちらに対応しますか？",
-        "busy_default": "選ばない場合は、前の作業が終わり次第こちらに対応します。",
+        "busy_default": (
+            "選ばない場合は、前の作業が終わり次第こちらに対応します。"
+            "長く待った場合は、始める前にもう一度確認します。"
+        ),
+        "busy_stale_title": "{m} 分待っているメッセージがあります。対応しますか？",
+        "busy_stale_more": "……ほかに {n} 件",
+        "busy_stale_hint": (
+            "押さない場合は対応せず、{h} 時間後に無効になります。"
+            "変更があれば新しいメッセージを送ると、まとめて対応します。"
+        ),
+        "busy_opt_resume": "対応する",
+        "busy_opt_drop": "不要",
+        "busy_resumed_title": "すぐに対応します",
+        "busy_resumed_desc": "これらのメッセージはまとめて対応します。",
+        "busy_dropped_title": "対応を取りやめました",
+        "busy_dropped_desc": "必要な場合はもう一度送ってください。",
+        "busy_progress_quiet": "、直近 {elapsed} は動きがありません",
         "busy_opt_stop": "止めてこちらを先に",
         "busy_opt_wait": "終わるまで待つ",
         "busy_opt_progress": "進捗を見る",

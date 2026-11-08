@@ -34,7 +34,8 @@ WHERE id = (SELECT candidate.id FROM tasks candidate
                      AND prior.session_key=candidate.session_key AND prior.id<>candidate.id
                      AND (prior.status IN ('claimed','running') OR
                           (prior.status='queued' AND prior.id<candidate.id
-                           AND prior.cancel_requested_at IS NULL))
+                           AND prior.cancel_requested_at IS NULL
+                           AND prior.payload->>'stale_hold' IS DISTINCT FROM 'true'))
                  ))
             ORDER BY candidate.priority DESC, candidate.id LIMIT 1
             FOR UPDATE OF candidate SKIP LOCKED FOR SHARE OF workspace_bot SKIP LOCKED)
@@ -216,6 +217,15 @@ async def open_for_session(
     return list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+
+
+async def release_hold(session: AsyncSession, task: Task) -> None:
+    """等确认的排队消息放行：立刻可认领，不再问第二次。调用方持有行锁。"""
+    payload = {k: v for k, v in task.payload.items() if k != "stale_hold"}
+    task.payload = {**payload, "stale_confirmed": True}
+    task.run_after = func.now()
+    await session.flush()
+    await notify(session, "tasks_queued", {"lane": task.lane, "bot_id": str(task.bot_id)})
 
 
 async def defer(session: AsyncSession, task_id: int, *, seconds: float) -> bool:

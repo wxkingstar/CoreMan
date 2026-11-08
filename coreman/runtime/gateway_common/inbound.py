@@ -254,6 +254,29 @@ async def _queue_behind_own(
     sender = message.sender.platform_user_id or ""
     if not sender:
         return False
+    held = await session.scalar(
+        select(Task)
+        .where(
+            Task.bot_id == bot.id,
+            Task.session_key == new.session_key,
+            Task.kind == "chat",
+            Task.status == "queued",
+            Task.cancel_requested_at.is_(None),
+            Task.payload["stale_hold"].astext == "true",
+            Task.payload["platform_user_id"].astext == sender,
+        )
+        .order_by(Task.id)
+        .limit(1)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if held is not None:
+        # 在等确认时又发了新消息：算回答了，和等着的那些合在一起马上处理。
+        from coreman.core.bus.tasks import release_hold
+
+        await release_hold(session, held)
+        new.payload["serialize_session"] = True
+        return False
     own = (
         select(Task.id)
         .where(
@@ -285,7 +308,17 @@ async def _offer_busy_choice(
     from coreman.core.chat import busy_choice
 
     target: dict[str, Any] = {"chat_id": message.chat_id}
-    payload: dict[str, Any] = {"card": busy_choice.offer_card(message.platform, task_id)}
+    progress = await busy_choice.progress_of(
+        session,
+        bot.id,
+        message.chat_id,
+        message.sender.platform_user_id or "",
+        before_task_id=task_id,
+        min_running=60,
+    )
+    payload: dict[str, Any] = {
+        "card": busy_choice.offer_card(message.platform, task_id, progress=progress)
+    }
     message_id = message.reply_context.get("message_id")
     if message.platform == "feishu" and message_id:
         # 引用这条消息发卡：群里一眼看出问的是哪一条。

@@ -198,13 +198,22 @@ class FeishuTransport:
         await self.remember(mid, chat, sent_text(kind, content))
         return mid
 
-    async def remember(self, message_id: object, chat_id: object, text: str | None) -> None:
+    async def remember(
+        self,
+        message_id: object,
+        chat_id: object,
+        text: str | None,
+        *,
+        work_code: object = None,
+    ) -> None:
         """发出消息的正文存档，有人引用它时 worker 从这里读；存不上不影响已经发出的消息。"""
         if not (text and text.strip() and isinstance(message_id, str) and message_id):
             return
         if not isinstance(chat_id, str) or not chat_id:
             return
         values = {"chat_id": chat_id, "text": bounded(text)}
+        if isinstance(work_code, str) and work_code:
+            values["work_code"] = work_code
         try:
             async with self.factory() as session:
                 await session.execute(
@@ -503,7 +512,12 @@ class FeishuTransport:
                 await self.put_card(row.task_id, card_id, compiled.cards[0])
         if row.is_complete:
             # 流式卡片发出时只是个卡片实体引用，正文到这里才定下来。
-            await self.remember(delivery.message_id, row.reply_context.get("chat_id"), answer)
+            await self.remember(
+                delivery.message_id,
+                row.reply_context.get("chat_id"),
+                answer,
+                work_code=row.reply_context.get("_work_code"),
+            )
         if visible_parts("", answer)[1].strip() or (row.is_complete and not row.pending_card):
             await typing(self, row.task_id, done=True)
         async with self.factory() as session:

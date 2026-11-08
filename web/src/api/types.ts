@@ -209,6 +209,7 @@ export interface SettingsOut extends PromptSettings {
   group_observe_quiet_seconds: number
   group_observe_max_wait_seconds: number
   group_observe_bot_streak_limit: number
+  busy_confirm_minutes: number
 }
 /** default_model 只读：PUT 带这个键后端会 422。 */
 export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>
