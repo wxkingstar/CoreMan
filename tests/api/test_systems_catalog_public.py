@@ -95,6 +95,7 @@ async def test_lists_every_enabled_catalog_without_tokens(
     assert detail["url"] == BASE_URL + "/api/stock/documents/{id}/cancel"
     assert detail["call"]["mode"] == "direct" and detail["call"]["token_env"] == "SYSTEMS_TOKEN"
     assert '"Authorization: Bearer $SYSTEMS_TOKEN"' in detail["call"]["curl"]
+    assert "需要在本机配置环境变量 SYSTEMS_TOKEN" in detail["call"]["notes"]
     assert (await call(client, "systems_browse", {"system": "off"}))["error"] == (
         "system_not_available"
     )
