@@ -87,9 +87,20 @@ def offer_card(
 
 
 def result_card(
-    platform: str, task_id: str, *, title: str, desc: str, icon_url: str = "", locale: str = "zh"
+    platform: str,
+    task_id: str,
+    *,
+    title: str,
+    desc: str,
+    summary: str = "",
+    icon_url: str = "",
+    locale: str = "zh",
 ) -> dict[str, Any]:
-    """点过之后把卡片换成这张：按钮没了，只留结果。"""
+    """点过之后把卡片换成这张：按钮没了，只留结果。
+
+    `summary` 是飞书会话列表里的预览：这张卡在上一条的回复之后，会把那边的「生成中」盖掉，
+    选了「等它做完」就得在预览里说清上一条还在跑，不然看着像挂了。
+    """
     if platform == "wecom":
         from coreman.core.wecom.cards import notice_card
 
@@ -101,12 +112,15 @@ def result_card(
             source_desc=msg("card_source_ai", locale),
             locale=locale,
         )
-    return {
+    card: dict[str, Any] = {
         "schema": "2.0",
         "header": {"template": "grey", "title": {"tag": "plain_text", "content": title}},
         "body": {"elements": [{"tag": "markdown", "content": desc}]},
         "task_id": task_id,
     }
+    if summary:
+        card["config"] = {"summary": {"content": summary}}
+    return card
 
 
 def _elapsed(seconds: float, locale: str) -> str:

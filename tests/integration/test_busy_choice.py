@@ -38,10 +38,17 @@ async def _say(session: AsyncSession, bot: Bot, text: str, *, user: str = "zs") 
 
 
 async def _click(
-    engine: AsyncEngine, session: AsyncSession, bot: Bot, target: Task, key: str, *, user="zs"
+    engine: AsyncEngine,
+    session: AsyncSession,
+    bot: Bot,
+    target: Task,
+    key: str,
+    *,
+    user="zs",
+    message_id: str = "",
 ) -> OutboxItem | None:
     message = InboundMessage(
-        platform="wecom",
+        platform=bot.platform,
         bot_id=bot.id,
         kind="card_action",
         chat_type="single",
@@ -53,7 +60,12 @@ async def _click(
             "card_type": "button_interaction",
             "event_key": key,
         },
-        reply_context={"chat_id": "zs", "chat_type": "single", "req_id": "r1"},
+        reply_context={
+            "chat_id": "zs",
+            "chat_type": "single",
+            "req_id": "r1",
+            **({"message_id": message_id} if message_id else {}),
+        },
     )
     snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None)
     task = await enqueue_inbound(session, snapshot, message, lease_generation=1)
@@ -234,3 +246,29 @@ def test_feishu_buttons_stack_full_width() -> None:
     ]
     assert all(b["width"] == "fill" for b in buttons)
     assert all(e["tag"] != "column_set" for e in elements)
+
+
+async def test_feishu_wait_keeps_a_working_preview(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    bot.platform = "feishu"
+    await db_session.commit()
+    await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    # 飞书只认已经发出去的卡：模拟网关发送成功，回填平台消息 id。
+    offer = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    offer.status = "sent"
+    offer.payload = {**offer.payload, "_feishu_message_id": "om-card"}
+    await db_session.commit()
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.WAIT, message_id="om-card")
+    assert reply is not None
+    card = reply.payload["card"]
+    assert card["header"]["title"]["content"] == msg("busy_wait_title")
+    # 会话列表预览得说上一条还在跑，不然盖掉「生成中」后看着像挂了。
+    assert card["config"]["summary"]["content"] == msg("busy_wait_summary")
+
+
+def test_other_results_keep_the_default_preview() -> None:
+    card = busy_choice.result_card("feishu", "busy@1", title="t", desc="d")
+    assert "config" not in card

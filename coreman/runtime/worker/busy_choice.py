@@ -37,12 +37,13 @@ async def handle(
         ctx.log.info("busy_choice_ignored", target_task_id=target_id)
         return "ignored", None
 
-    def card(key: str) -> dict[str, Any]:
+    def card(key: str, summary: str = "") -> dict[str, Any]:
         return busy_choice.result_card(
             bot.platform,
             card_task_id,
             title=msg(f"busy_{key}_title", ctx.locale),
             desc=msg(f"busy_{key}_desc", ctx.locale),
+            summary=summary,
             icon_url=icon,
             locale=ctx.locale,
         )
@@ -53,7 +54,7 @@ async def handle(
         return "late", card("late")
     choice = str(action.get("event_key") or "")
     if choice == busy_choice.WAIT:
-        return "wait", card("wait")
+        return "wait", card("wait", msg("busy_wait_summary", ctx.locale))
     if choice == busy_choice.PROGRESS:
         progress = await _progress(session, bot, target, clicker, ctx.locale)
         return "progress", busy_choice.offer_card(
