@@ -254,12 +254,19 @@ async def test_worker_stops_model_after_registered_handoff(db_session, db_engine
 
 
 async def test_worker_tool_loop_is_cut_off(db_session, db_engine, monkeypatch):
-    from tests.fakes.fake_relay import DONE, FINISH, SCENARIOS, FakeRelay, _tool
-    from tests.integration.test_chat_handler import run
+    from tests.fakes.fake_relay import DONE, FINISH, SCENARIOS, FakeRelay, _text, _tool
+    from tests.integration.test_chat_handler import run, stream_of
 
     a, b, actor, route, task = await fresh(db_session)
+    # 本轮已经调用过协作工具：之后的工具循环要封顶。
+    task.payload = {**task.payload, "collaboration_budget": {"calls": 1, "seen": {}}}
+    await db_session.commit()
     monkeypatch.setitem(
-        SCENARIOS, "loop", lambda: [_tool("Bash", f"t{n}") for n in range(100)] + [FINISH, DONE]
+        SCENARIOS,
+        "loop",
+        lambda: (
+            [_text("第一步已完成")] + [_tool("Bash", f"t{n}") for n in range(100)] + [FINISH, DONE]
+        ),
     )
     fake = FakeRelay("loop")
     await run(db_engine, task, fake)
@@ -267,6 +274,26 @@ async def test_worker_tool_loop_is_cut_off(db_session, db_engine, monkeypatch):
     assert task.status == "cancelled"
     assert task.error_code == "collaboration_budget_exhausted"
     assert fake.aborted == 1
+    stream = await stream_of(db_session, task.id)
+    assert "第一步已完成" in (stream.final_text or "")
+
+
+async def test_long_turn_with_peers_mounted_is_not_capped(db_session, db_engine, monkeypatch):
+    """群里有别的 AI 员工、但本轮没调用协作工具：写代码这类长任务不能被 64 次封顶截停。"""
+    from tests.fakes.fake_relay import DONE, FINISH, SCENARIOS, FakeRelay, _text, _tool
+    from tests.integration.test_chat_handler import run
+
+    a, b, actor, route, task = await fresh(db_session)
+    monkeypatch.setitem(
+        SCENARIOS,
+        "long",
+        lambda: [_tool("Bash", f"t{n}") for n in range(100)] + [_text("做完了"), FINISH, DONE],
+    )
+    fake = FakeRelay("long")
+    await run(db_engine, task, fake)
+    await db_session.refresh(task)
+    assert task.status == "succeeded"
+    assert fake.aborted == 0
 
 
 async def test_search_pages_and_detail_size_are_bounded(db_session):
