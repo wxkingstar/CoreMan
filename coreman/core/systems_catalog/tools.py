@@ -594,6 +594,8 @@ def call_template(
         notes += (
             f"{env_var} 是调用方本机的环境变量，放你自己在这个系统可用的令牌"
             "（例如统一登录的个人访问令牌）；平台不提供令牌。"
+            f"变量为空或调用返回 401 时，明确告诉用户：需要在本机配置环境变量 {env_var}，"
+            "写进 shell 启动文件后重开 Agent；不要改用别的凭据。"
         )
     return {
         "mode": "direct" if ctx.anonymous else "env",
