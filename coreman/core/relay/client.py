@@ -65,7 +65,7 @@ class ChatRequest:
     backend: str
     effort: str | None = None
     env_vars: dict[str, str] = field(default_factory=dict)
-    max_turns: int = 80
+    max_turns: int = 100
     # 平台写的本轮块（发言者与本轮状态，见 prompting.build_turn_context）。不经消毒，
     # 发送时才接到 `user_content` 前面：开流后 `user_content` 会被换成下载好媒体的版本。
     turn_context: str = ""
