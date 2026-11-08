@@ -772,3 +772,32 @@ async def test_leaked_credentials_never_reach_delivery_or_chat_logs(
     assert log.response_content and token not in log.response_content
     # 机器人自己配的密钥同样拦住（env 里任何凭据类键都算）。
     assert "bot-level-secret-value" not in written
+
+
+async def test_a_resumed_turn_reruns_the_same_message(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """续接（如提问人授权完成后）用同一条入站消息再开一轮：照常跑完、另起一条流。"""
+    bot, _, _ = await seed_bot(db_session)
+    first = await chat_task(db_session, bot, "看下文档")
+    await run(db_engine, first, FakeRelay("normal_observed_model"))
+    again = await tasks.enqueue(
+        db_session,
+        NewTask(
+            bot_id=bot.id,
+            kind="chat",
+            payload={**first.payload, "feishu_docs_resume": "x", "serialize_session": True},
+            session_key=first.session_key,
+            inbound_event_id=first.inbound_event_id,
+            dedupe_key="resume-test",
+        ),
+    )
+    await db_session.commit()
+    assert again
+    claimed = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert claimed and claimed.id == again.id
+    await run(db_engine, claimed, FakeRelay("normal_observed_model"))
+    row = await tasks.get(db_session, again.id)
+    assert row and row.status == "succeeded"
+    assert (await stream_of(db_session, again.id)).is_complete

@@ -65,7 +65,7 @@ class ContentStage(ChatStageBase):
             from coreman.runtime.worker.chat.feishu_docs import remember_links
 
             async with ctx.session_factory() as session:
-                await remember_links(session, ctx.task.id, enriched_text)
+                await remember_links(session, ctx.task.id, enriched_text, parts)
                 await session.commit()
 
         fetcher: MediaFetcher

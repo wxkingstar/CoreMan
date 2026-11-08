@@ -1,8 +1,9 @@
-"""B 层放行：系统发固定格式的卡片，提问人点回复按钮，点击作为他的下一句话回到本群。
+"""「共享给本群」卡片：提问人一键把文档共享给本群，以后群里谁发链接都能直接读。
 
-卡片外框、说明和按钮都由这里渲染，AI 员工只能决定为哪些链接发起。回复按钮只有提问人能点
-（网关按按钮里的提问人拒绝别人），同一行只算一次；点击开启的那一轮先在这里记下决定，
-再照常交给 AI 员工继续。
+读取本身不再要卡片（提问人发的链接直接以他的身份读），这张卡片是可选的。卡片外框、说明和
+按钮都由这里渲染，AI 员工只能决定为哪些链接发起。回复按钮只有提问人能点（网关按按钮里的
+提问人拒绝别人），同一行只算一次；点击开启的那一轮先在这里记下决定，再照常交给 AI 员工。
+旧版卡片上的「仅本次读取」「共享给本群并读取」点击仍按原意处理。
 """
 
 from __future__ import annotations
@@ -34,14 +35,15 @@ APPROVED_TTL = timedelta(hours=1)
 RETENTION = timedelta(days=30)
 MAX_LINKS = 5
 ONCE = "仅本次读取"
-SHARE = "共享给本群并读取"
+SHARE = "共享给本群"
+SHARE_AND_READ = "共享给本群并读取"
 DECLINE = "不用了"
-LABELS = (ONCE, SHARE, DECLINE)
+LABELS = (ONCE, SHARE, SHARE_AND_READ, DECLINE)
 ROW = "consent_row"
-_BUTTON_IDS = {ONCE: "consent_once", SHARE: "consent_share", DECLINE: "consent_no"}
+_BUTTON_IDS = {SHARE: "consent_share", DECLINE: "consent_no"}
 NOTICE = (
-    "本群看不到这些文档，AI 员工需要以你的身份读取，回答会发在本群，"
-    "群里其他人不一定有权限查看原文。只读，不会修改或转发文档。"
+    "这些文档本群看不到，刚才是以你的身份读的。共享给本群（只读）后，"
+    "群里谁发链接 AI 员工都能直接读，文档里的评论也能看到。"
 )
 
 
@@ -74,9 +76,9 @@ def _button(label: str, *, requester: str, kind: str, ids: list[str]) -> dict[st
 def card(
     row: FeishuDocConsent, *, bot_name: str, mention_open_id: str, requester: str
 ) -> dict[str, Any]:
-    labels = [ONCE, *([SHARE] if row.share_offered else []), DECLINE]
+    labels = [SHARE, DECLINE]
     ids = [_BUTTON_IDS[label] for label in labels]
-    kinds = {ONCE: "primary", SHARE: "default", DECLINE: "default"}
+    kinds = {SHARE: "primary", DECLINE: "default"}
     listed = "\n".join(f"- {url}" for url in row.urls)
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": f"<at id={mention_open_id}></at> {NOTICE}"},
@@ -93,8 +95,8 @@ def card(
         {
             "tag": "markdown",
             "content": (
-                "<font color='grey'>「仅本次读取」1 小时内、只在你在本群提问时有效；"
-                "「共享给本群」会把本群加为文档的可阅读协作者。只有你能点，30 分钟内有效。</font>"
+                "<font color='grey'>会把本群加为文档的可阅读协作者，不通知其他人；"
+                "需要你有分享权限。只有你能点，30 分钟内有效。</font>"
             ),
             "text_size": style.TEXT_NOTE,
         },
@@ -104,7 +106,7 @@ def card(
         "task_id": card_task_id(row.id),
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "读取文档需要你同意"},
+            "title": {"tag": "plain_text", "content": "把文档共享给本群？"},
             "subtitle": {"tag": "plain_text", "content": f"AI 员工「{bot_name}」"},
         },
         "body": {"elements": elements},
@@ -125,7 +127,7 @@ async def request(
     *,
     now: datetime | None = None,
 ) -> Requested:
-    """为提问人这条消息里的几篇文档发放行卡片；同样的几篇已有未过期的卡片就复用。"""
+    """为提问人发过的几篇文档发「共享给本群」卡片；同样的几篇已有未过期的卡片就复用。"""
     assert scope.speaker_user_id is not None
     now = now or utcnow()
     tokens = sorted({link.token for link in targets})
@@ -187,21 +189,16 @@ class Decision:
     def note(self) -> str:
         listed = "、".join(self.urls)
         if self.label == DECLINE:
-            return (
-                f"- 飞书文档放行：提问人拒绝了以他的身份读取 {listed}。"
-                "不要再读取或请求读取这些文档，按现有信息回答或说明读不到。"
-            )
+            return f"- 飞书文档：提问人选择不把 {listed} 共享给本群。照常回答，不要再提共享。"
         parts = [
-            f"- 飞书文档放行：提问人同意以他的身份读取 {listed}（1 小时内、只在他提问时有效）。"
-            "请用 coreman_feishu_docs 的工具读取后，继续回答他原来的问题。"
+            f"- 飞书文档：提问人点了「{self.label}」（{listed}）。"
+            "这些文档按需用 coreman_feishu_docs 的工具读取，继续回答他原来的问题。"
         ]
         if self.shared:
             parts.append("已把本群加为这些文档的可阅读协作者：" + "、".join(self.shared) + "。")
         if self.share_failed:
             parts.append(
-                "共享给本群没有成功（多半是他没有分享权限）："
-                + "、".join(self.share_failed)
-                + "，仍可按本次放行读取。"
+                "共享给本群没有成功（多半是他没有分享权限）：" + "、".join(self.share_failed) + "。"
             )
         return "".join(parts)
 
@@ -271,14 +268,15 @@ async def apply_click(
     row = await _card_row(session, scope, message_id, now)
     if row is None or row.user_id != scope.speaker_user_id:
         return None
-    if label == SHARE and not row.share_offered:
+    sharing = label in (SHARE, SHARE_AND_READ)
+    if sharing and not row.share_offered:
         return None
     decision = Decision(label, tuple(row.urls))
     if label == DECLINE:
         row.status = "declined"
     else:
         row.status, row.expires_at = "approved", now + APPROVED_TTL
-        if label == SHARE:
+        if sharing:
             who = await access.requester(session, scope)
             shared: list[str] = []
             failed: list[str] = []
@@ -303,7 +301,7 @@ async def apply_click(
 async def expire_due(session: AsyncSession, now: datetime) -> int:
     result = await session.execute(
         update(FeishuDocConsent)
-        .where(FeishuDocConsent.status.in_(("pending", "approved")))
+        .where(FeishuDocConsent.status.in_(("pending", "approved", "awaiting_auth")))
         .where(FeishuDocConsent.expires_at < now)
         .values(status="expired")
         .returning(FeishuDocConsent.id)

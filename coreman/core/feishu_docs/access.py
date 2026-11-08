@@ -8,17 +8,22 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import BotAllowedUser, FeishuDocConsent, FeishuPersonalGrant
+from coreman.core.db.models import (
+    BotAllowedUser,
+    FeishuPersonalGrant,
+    InboundEvent,
+    Task,
+)
 from coreman.core.feishu_docs.links import Link
 from coreman.core.feishu_docs.policy import DocsScope
-from coreman.core.feishu_personal import endpoints, policy
+from coreman.core.feishu_personal import endpoints, policy, service
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 
@@ -45,6 +50,7 @@ SHARE_ENDPOINT = "drive.share"
 _CHAT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _ANYONE = frozenset({"anyone_readable", "anyone_editable"})
 _TENANT = frozenset({"tenant_readable", "tenant_editable"})
+RECENT_LINKS = timedelta(hours=24)
 
 
 def app_client(cipher: Cipher, scope: DocsScope) -> FeishuClient:
@@ -175,28 +181,81 @@ async def requester(session: AsyncSession, scope: DocsScope) -> Requester | None
     return Requester(personal, grant.authorization_level, granted)
 
 
-async def approved(
-    session: AsyncSession, scope: DocsScope, token: str, now: datetime | None = None
-) -> FeishuDocConsent | None:
-    """本人在本群对这篇文档的放行，仍在有效期内。"""
-    if scope.speaker_user_id is None:
-        return None
-    found = await session.scalars(
-        select(FeishuDocConsent)
+async def allowed_tokens(
+    session: AsyncSession, scope: DocsScope, now: datetime | None = None
+) -> set[str]:
+    """可以以提问人身份读取的文档：本群真人消息（含引用、合并转发）里出现过的链接。
+
+    本条消息之外，再算上本群近 24 小时里真人发过的：用户常在后面一句才说「按文档改」。
+    文档正文里出现的链接不算，免得被文档内容带着去读别的。
+    """
+    found = _tokens(scope.task.payload)
+    since = (now or datetime.now(UTC)) - RECENT_LINKS
+    rows = await session.scalars(
+        select(Task.payload)
+        .join(InboundEvent, InboundEvent.id == Task.inbound_event_id)
         .where(
-            FeishuDocConsent.bot_id == scope.bot.id,
-            FeishuDocConsent.chat_id == scope.chat_id,
-            FeishuDocConsent.user_id == scope.speaker_user_id,
-            FeishuDocConsent.status == "approved",
-            FeishuDocConsent.expires_at > (now or datetime.now(UTC)),
-            FeishuDocConsent.tokens.any(token),  # type: ignore[arg-type]
+            Task.bot_id == scope.bot.id,
+            Task.payload.has_key("doc_links"),
+            InboundEvent.bot_id == scope.bot.id,
+            InboundEvent.chat_id == scope.chat_id,
+            InboundEvent.received_at >= since,
         )
-        .limit(1)
+        .limit(200)
     )
-    return found.first()
+    for payload in rows:
+        found |= _tokens(payload)
+    return found
 
 
-def allowed_tokens(scope: DocsScope) -> set[str]:
-    """提问人这条消息（含引用的消息）里出现的文档 token：只有它们能请求放行。"""
-    raw = scope.task.payload.get("doc_links")
+def _tokens(payload: dict[str, Any] | None) -> set[str]:
+    raw = (payload or {}).get("doc_links")
     return {str(item) for item in raw} if isinstance(raw, list) else set()
+
+
+@dataclass(frozen=True)
+class AskerState:
+    """提问人能不能以本人身份读：connected 时带上授权；其余给出具体原因。"""
+
+    status: str
+    requester: Requester | None = None
+
+
+async def asker_state(session: AsyncSession, cipher: Cipher, scope: DocsScope) -> AskerState:
+    """提问人的飞书授权现状。授权正在进行时顺手查一次结果，点完同意就能直接用。"""
+    if scope.speaker_user_id is None:
+        return AskerState("unknown_speaker")
+    who = await requester(session, scope)
+    if who is not None:
+        return AskerState("connected", who)
+    grant = await session.get(
+        FeishuPersonalGrant, (scope.bot.id, scope.speaker_user_id), populate_existing=True
+    )
+    if grant is None or grant.platform_user_id != scope.event.sender_platform_user_id:
+        return AskerState("not_connected")
+    if grant.status != "pending":
+        return AskerState("not_connected")
+    personal = policy.Scope(
+        scope.task,
+        scope.bot,
+        scope.speaker_user_id,
+        grant.tenant_key,
+        grant.app_id,
+        grant.open_id,
+        grant.platform_user_id,
+        scope.chat_id,
+        None,
+    )
+    try:
+        await service.authorization_status(session, cipher, personal)
+    except (PersonalError, ValueError):
+        return AskerState("not_connected")
+    who = await requester(session, scope)
+    if who is not None:
+        return AskerState("connected", who)
+    still = await session.get(
+        FeishuPersonalGrant, (scope.bot.id, scope.speaker_user_id), populate_existing=True
+    )
+    return AskerState(
+        "authorization_pending" if still and still.status == "pending" else "not_connected"
+    )
