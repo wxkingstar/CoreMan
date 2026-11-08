@@ -19,7 +19,8 @@ PERMISSION_TYPES: dict[Kind, str] = {
     "base": "bitable",
 }
 _HOSTS = (".feishu.cn", ".larksuite.com", ".larkoffice.com", ".feishu.net")
-_URL = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z]+/[A-Za-z0-9]+[^\s<>\"'()\[\]）】，。]*")
+# 只认 ASCII：链接后面常直接接中文（「…MnGb这是结构」），token 到第一个非字母数字处为止。
+_URL = re.compile(r"https://[A-Za-z0-9.-]+/[A-Za-z]+/[A-Za-z0-9]+(?:\?[A-Za-z0-9_=&%.-]*)?")
 _TOKEN = re.compile(r"[A-Za-z0-9]{8,64}\Z")
 _PARAM = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 MAX_LINKS = 20

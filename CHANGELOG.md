@@ -140,6 +140,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Feishu document links in group messages are recognized when text follows them without a space (for example a link followed directly by a Chinese description). The link pattern used to swallow those characters into the document token, so the link was dropped, the bot could not ask the speaker for consent, and it asked them to resend the links on separate lines. Tokens now stop at the first character that is not a letter or digit. No database migration.
 - API task replies (`GET /api/infra/tasks/{id}`) no longer end with the Feishu card's completion marker ("✅ 回复已生成" and its Japanese counterpart). The marker is for people reading the chat; programs now get only the employee's answer. No database migration.
 - Group observing no longer makes an @-mention turn treat the group transcript as a to-do list. The transcript now says it is background only: the turn handles just the message after the turn block, and earlier questions and requests in the transcript are not its task unless that message follows up on them ("the one above", "take a look"). Interjection turns are told to respond to the topic of that message. The message being handled is left out of the transcript, so it appears once. No database migration.
 
