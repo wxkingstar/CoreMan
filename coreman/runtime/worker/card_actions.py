@@ -13,7 +13,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
@@ -92,7 +92,11 @@ class CardActionHandler:
                         OutboxItem.payload["_feishu_message_id"].astext
                         == str(inbound.reply_context.get("message_id") or ""),
                         OutboxItem.payload["card"]["task_id"].astext == task_id,
-                        OutboxItem.target["chat_id"].astext == inbound.chat_id,
+                        or_(
+                            OutboxItem.target["chat_id"].astext == inbound.chat_id,
+                            OutboxItem.target["user_id"].astext
+                            == str(inbound.sender_platform_user_id or ""),
+                        ),
                     )
                 )
                 if sent is None:
