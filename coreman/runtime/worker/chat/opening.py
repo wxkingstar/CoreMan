@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
-from coreman.core.chat import chat_logs, sessions
+from coreman.core.chat import alert_sources, chat_logs, sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.redaction import collect_secrets
 from coreman.core.db.models import (
@@ -243,6 +243,8 @@ class OpenStage(ChatStageBase):
             env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
         ctx.turn_notes = [access.note]
+        if ctx.task.payload.get("origin") == alert_sources.ORIGIN:
+            ctx.turn_notes.append(alert_sources.ALERT_NOTE)
         from coreman.core.chat import group_observe
 
         if intake.chat_type == "group" and group_observe.observing(bot):
@@ -299,7 +301,7 @@ class OpenStage(ChatStageBase):
 
         extra = ""
         personal_secrets: frozenset[str] = frozenset()
-        if ctx.task.payload.get("origin") not in ("observe", "dispatch"):
+        if ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。
             from coreman.runtime.worker.chat.collaboration import configure

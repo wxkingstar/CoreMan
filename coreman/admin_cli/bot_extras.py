@@ -923,6 +923,83 @@ def _register_observe(ops: Any) -> None:
     _bot_arg(p)
     p.add_argument("decision", type=int, metavar="记录 id")
     p.add_argument("review", choices=("should", "should_not", "none"), help="none 为清除标注")
+    p = leaf(ops, "alert-source-list", "列出告警来源", alert_source_list)
+    _bot_arg(p)
+    p = leaf(ops, "alert-source-add", "登记告警来源（需要平台管理角色）", alert_source_add)
+    _bot_arg(p)
+    p.add_argument("--chat", required=True, metavar="群 id")
+    p.add_argument("--sender-union-id", required=True, help="告警机器人的飞书 union_id")
+    p.add_argument("--service-user", required=True, help="服务用户：id、登录名或邮箱")
+    p.add_argument("--dedupe-seconds", type=int, default=600, help="同名告警的去重窗口（秒）")
+    p = leaf(ops, "alert-source-set", "修改告警来源（只改给出的字段）", alert_source_set)
+    _bot_arg(p)
+    p.add_argument("source", metavar="来源 id")
+    p.add_argument("--service-user", help="服务用户：id、登录名或邮箱")
+    p.add_argument("--dedupe-seconds", type=int, help="同名告警的去重窗口（秒）")
+    enabled = p.add_mutually_exclusive_group()
+    enabled.add_argument("--enable", action="store_true", help="启用")
+    enabled.add_argument("--disable", action="store_true", help="停用")
+    p = leaf(ops, "alert-source-remove", "删除告警来源", alert_source_remove)
+    _bot_arg(p)
+    p.add_argument("source", metavar="来源 id")
+
+
+async def alert_source_list(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.get(f"{BOTS}/{bot['id']}/alert-sources")
+    if args.json:
+        output.dump(data)
+        return 0
+    output.table(
+        data["items"],
+        [
+            ("id", "id"),
+            ("群", "chat_id"),
+            ("发送者", "sender_union_id"),
+            ("服务用户", "service_user_id"),
+            ("启用", "enabled"),
+            ("去重秒数", "dedupe_seconds"),
+        ],
+        empty="（还没有告警来源）",
+    )
+    return 0
+
+
+async def alert_source_add(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    user = await c.user(args.service_user)
+    data = await c.request(
+        "POST",
+        f"{BOTS}/{bot['id']}/alert-sources",
+        body={
+            "chat_id": args.chat,
+            "sender_union_id": args.sender_union_id,
+            "service_user_id": user["id"],
+            "dedupe_seconds": args.dedupe_seconds,
+        },
+    )
+    return _done(args, data, f"已登记告警来源 {data['id']}")
+
+
+async def alert_source_set(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    body: dict[str, Any] = {}
+    if args.service_user:
+        body["service_user_id"] = (await c.user(args.service_user))["id"]
+    if args.dedupe_seconds is not None:
+        body["dedupe_seconds"] = args.dedupe_seconds
+    if args.enable or args.disable:
+        body["enabled"] = args.enable
+    if not body:
+        raise CliError("没有要修改的字段，见 --help")
+    data = await c.request("PATCH", f"{BOTS}/{bot['id']}/alert-sources/{args.source}", body=body)
+    return _done(args, data, f"已更新告警来源 {args.source}")
+
+
+async def alert_source_remove(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.request("DELETE", f"{BOTS}/{bot['id']}/alert-sources/{args.source}")
+    return _done(args, data, f"已删除告警来源 {args.source}")
 
 
 async def observe_set(c: AdminClient, args: argparse.Namespace) -> int:

@@ -182,6 +182,8 @@ __all__ = [
     "TASK_LANES",
     "TASK_STATUSES",
     "AdminSession",
+    "BotAlertSource",
+    "BotAlertState",
     "Announcement",
     "AuditLog",
     "AuthNonce",
@@ -212,6 +214,7 @@ __all__ = [
     "UserReached",
 ]
 
+from coreman.core.db.models.alert_source import BotAlertSource, BotAlertState
 from coreman.core.db.models.bot_collaboration import (
     BotCollaboration,
     BotCollaborationPartner,

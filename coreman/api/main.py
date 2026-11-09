@@ -19,6 +19,7 @@ from coreman.api.routers import (
     auth,
     auth_feishu,
     auth_wecom,
+    bot_alert_sources,
     bot_group_observe,
     bot_memories,
     bot_skills,
@@ -158,6 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(bots.router)
     app.include_router(bot_memories.router)
     app.include_router(bot_group_observe.router)
+    app.include_router(bot_alert_sources.router)
     app.include_router(work_tasks.router)
     app.include_router(skill_catalog.router)
     app.include_router(skill_local.router)

@@ -81,6 +81,13 @@ async def enqueue_inbound(
         from coreman.core.chat import group_observe
 
         await group_observe.note(session, bot.id, message, event_id)
+        from coreman.core.chat import alert_sources
+
+        source = await alert_sources.match(session, bot.id, message)
+        if source is not None:
+            return await alert_sources.trigger(
+                session, bot.bot_key, source, message, payload, event_id
+            )
         if not message.mentions_bot:
             return None
     # Bot receipts are retained for collaboration reconciliation, never human intake.
