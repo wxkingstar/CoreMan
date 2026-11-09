@@ -1433,7 +1433,12 @@ class DmUnreachable(FakeAPI):
 
 
 async def test_card_is_sent_to_a_user_id(db_session, db_engine):
-    api = FakeAPI()
+    class Capture(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            self.params = getattr(self, "params", []) + [kwargs.get("params")]
+            return await super().call(method, path, **kwargs)
+
+    api = Capture()
     await _direct_card_round(db_session, db_engine, api, {})
     sent = [
         b
@@ -1441,6 +1446,8 @@ async def test_card_is_sent_to_a_user_id(db_session, db_engine):
         if p == "/open-apis/im/v1/messages" and b["msg_type"] == "interactive"
     ]
     assert len(sent) == 1
+    assert {"receive_id_type": "user_id"} in api.params
+    assert sent[0]["receive_id"] == "human"
 
 
 async def test_unreachable_dm_falls_back_to_a_group_notice(db_session, db_engine):
