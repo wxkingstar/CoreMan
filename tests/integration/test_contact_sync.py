@@ -334,3 +334,26 @@ async def test_merge_one_links_known_departments_and_disables_nobody(db_engine):
         )
         assert paths == ["公司/技术/服务端"]
         assert len(list(await session.scalars(select(Department)))) == 3
+
+
+async def test_sync_never_touches_service_users(db_engine: AsyncEngine) -> None:
+    factory = make_session_factory(db_engine)
+    async with factory() as s:
+        s.add(
+            User(
+                login_name="svc-demo",
+                display_name="服务",
+                email="svc-demo@example.com",
+                source="service",
+            )
+        )
+        await s.commit()
+    await ContactSyncService(factory).apply(
+        _dir([_user("u1", "同邮箱", "3", email="svc-demo@example.com")])
+    )
+    async with factory() as s:
+        service = (await s.execute(select(User).where(User.login_name == "svc-demo"))).scalar_one()
+        assert service.source == "service" and service.status == "active"
+        assert service.display_name == "服务"
+        idents = await s.execute(select(UserIdentity).where(UserIdentity.user_id == service.id))
+        assert idents.first() is None

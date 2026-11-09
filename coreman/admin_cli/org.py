@@ -68,6 +68,10 @@ def register(sub: Any) -> None:
     leaf(ops, "show", "查看用户详情", show_user).add_argument(
         "user", help="登录名、邮箱、姓名或 id"
     )
+    p = leaf(ops, "service-create", "建服务用户（不能登录，只给系统触发的回合用）", service_create)
+    p.add_argument("login", help="登录名，要等于邮箱前缀")
+    p.add_argument("--name", required=True, help="显示名")
+    p.add_argument("--email", required=True, help="邮箱")
     p = leaf(ops, "set", "修改用户（只改给出的字段；改过的字段通讯录同步不再覆盖）", set_user)
     p.add_argument("user")
     p.add_argument("--team", help="团队 slug 或名称；none 为移出团队")
@@ -230,6 +234,16 @@ async def list_users(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(rows)
     else:
         output.table(rows, USER_COLUMNS)
+    return 0
+
+
+async def service_create(c: AdminClient, args: argparse.Namespace) -> int:
+    body = {"login_name": args.login, "display_name": args.name, "email": args.email}
+    user = await c.request("POST", f"{USERS}/service", body=body)
+    if args.json:
+        output.dump(user)
+    else:
+        print(f"已创建服务用户 {user['login_name']}（{user['id']}）")
     return 0
 
 

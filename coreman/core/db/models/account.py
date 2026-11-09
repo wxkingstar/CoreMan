@@ -64,7 +64,7 @@ class User(TimestampMixin, Base):
         CheckConstraint(
             "role IN ('platform_admin','ai_committee','team_lead','member')", name="role"
         ),
-        CheckConstraint("source IN ('sync','bootstrap','manual')", name="source"),
+        CheckConstraint("source IN ('sync','bootstrap','manual','service')", name="source"),
         Index(
             "users_email_uk",
             func.lower(text("email")),
