@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +22,7 @@ from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import busy_choice, interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
+from coreman.core.feishu_personal import inflow
 from coreman.core.i18n.messages import msg
 from coreman.core.personal_credentials.policy import CARD_PREFIX
 from coreman.core.wecom.cards import (
@@ -116,11 +118,10 @@ class CardActionHandler:
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
-                handle = (
-                    handle_schedule
-                    if action.get("event_key") == "personal_schedule"
-                    else handle_selection
-                )
+                handle: Callable[..., Awaitable[str]] = {
+                    "personal_schedule": handle_schedule,
+                    inflow.UPGRADE_EVENT: inflow.handle_upgrade,
+                }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}

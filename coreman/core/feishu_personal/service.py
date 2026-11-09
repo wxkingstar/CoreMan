@@ -250,6 +250,50 @@ async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -
     return {"status": "selecting", "prompt": SELECTION_PROMPT, "remote_revoked": remote_revoked}
 
 
+async def _scopes_for_level(row: FeishuPersonalGrant, secret: str, level: str) -> list[str]:
+    available = (
+        list(permissions.MESSAGE_SCOPES)
+        if level == "messages_readonly"
+        else await permissions.app_user_scopes(row.app_id, secret, http=_http)
+    )
+    if level == "all" and not {"im:message", "im:message.send_as_user"}.issubset(available):
+        raise PersonalError("app_send_permission_missing")
+    if level == "messages_readonly" and not (
+        permissions.MESSAGE_SCOPES - {"offline_access"}
+    ).issubset(available):
+        raise PersonalError("app_message_permission_missing")
+    selected = permissions.select_scopes(level, available)
+    if level != "messages_readonly":
+        # Not everything the app enabled: Feishu refuses requests with too many permissions.
+        selected = endpoints.request_scopes(level, set(selected))
+    if not selected:
+        raise PersonalError("authorization_unavailable")
+    return selected
+
+
+async def begin_in_flow(
+    session: AsyncSession, cipher: Cipher, scope: Scope, level: str
+) -> dict[str, Any]:
+    """用到时发起授权：不选档位。已有未过期的授权流程就复用，旧令牌在这里才作废。"""
+    row, secret = await _row(session, cipher, scope)
+    if (
+        row.status == "pending"
+        and row.pending_enc
+        and row.pending_expires_at
+        and row.pending_expires_at > datetime.now(UTC)
+    ):
+        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
+        return {"status": "pending", "authorization_url": pending["url"], "reused": True}
+    selected = await _scopes_for_level(row, secret, level)
+    row.remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
+    row.authorization_level, row.requested_scopes = level, selected
+    return await _start_authorization(row, secret, cipher)
+
+
+async def existing_or_create(session: AsyncSession, cipher: Cipher, scope: Scope) -> None:
+    await _row(session, cipher, scope)
+
+
 async def choose_authorization(
     session: AsyncSession,
     cipher: Cipher,
@@ -275,23 +319,7 @@ async def choose_authorization(
     if choice not in levels:
         raise PersonalError("selection_required")
     level = levels[choice]
-    available = (
-        list(permissions.MESSAGE_SCOPES)
-        if level == "messages_readonly"
-        else await permissions.app_user_scopes(row.app_id, secret, http=_http)
-    )
-    if level == "all" and not {"im:message", "im:message.send_as_user"}.issubset(available):
-        raise PersonalError("app_send_permission_missing")
-    if level == "messages_readonly" and not (
-        permissions.MESSAGE_SCOPES - {"offline_access"}
-    ).issubset(available):
-        raise PersonalError("app_message_permission_missing")
-    selected = permissions.select_scopes(level, available)
-    if level != "messages_readonly":
-        # Not everything the app enabled: Feishu refuses requests with too many permissions.
-        selected = endpoints.request_scopes(level, set(selected))
-    if not selected:
-        raise PersonalError("authorization_unavailable")
+    selected = await _scopes_for_level(row, secret, level)
     row.authorization_level = level
     row.requested_scopes = selected
     # Only this worker-owned path can select a level; MCP has no level argument.
