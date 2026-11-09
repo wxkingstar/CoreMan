@@ -200,6 +200,9 @@ class OpenStage(ChatStageBase):
             writer.set_thinking_line(msg("queued_notice", ctx.locale, seconds=queued))
         backend = backend_of(bot.model, relay.model_provider)
         info = await self._session_info(session, ctx, intake, backend)
+        # An alert turn is started by external text with nobody watching, so read-only is enforced
+        # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
+        alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -208,7 +211,9 @@ class OpenStage(ChatStageBase):
             issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
-            catalog=await catalog_policy.mount_for(
+            catalog=None
+            if alert_turn
+            else await catalog_policy.mount_for(
                 session,
                 relay=relay,
                 model=bot.model,
@@ -236,14 +241,14 @@ class OpenStage(ChatStageBase):
             platform_user_id=intake.speaker.platform_user_id,
             session_id=str(info.relay_session_id),
             speaker=intake.speaker,
-            bot_env=await effective_env(session, ctx.cipher, bot),
+            bot_env={} if alert_turn else await effective_env(session, ctx.cipher, bot),
         )
         if ctx.task.payload.get("origin") != "dispatch":
             # 调度员只安排不干活：调度回合不挂业务系统令牌。
             env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
         ctx.turn_notes = [access.note]
-        if ctx.task.payload.get("origin") == alert_sources.ORIGIN:
+        if alert_turn:
             ctx.turn_notes.append(alert_sources.ALERT_NOTE)
         from coreman.core.chat import group_observe
 
@@ -336,7 +341,7 @@ class OpenStage(ChatStageBase):
             session,
             ctx,
             bot=bot,
-            user_id=intake.speaker.user_id,
+            user_id=None if alert_turn else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,
