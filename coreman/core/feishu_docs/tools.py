@@ -13,10 +13,11 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_docs import access, consent, links
+from coreman.core.feishu_docs import access, consent, links, write_policy, write_tools
 from coreman.core.feishu_docs.links import Link, LinkError
 from coreman.core.feishu_docs.policy import DocsScope
 from coreman.core.feishu_personal import inflow
+from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
@@ -27,6 +28,7 @@ from coreman.core.feishu_personal.toolbase import (
     bounded,
     input_schema,
 )
+from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.feishu_personal.toolsets import docs
 
 Url = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
@@ -76,7 +78,9 @@ _SPECS: dict[str, tuple[type[Arguments], str]] = {
 
 
 def definitions() -> list[dict[str, Any]]:
-    return [_definition(name, *spec) for name, spec in _SPECS.items()]
+    return [_definition(name, *spec) for name, spec in _SPECS.items()] + [
+        TOOLS[name].definition() for name in write_policy.GROUP_TOOLS
+    ]
 
 
 async def _resolve(call: Call, link: Link) -> tuple[str, str]:
@@ -188,8 +192,18 @@ async def _document(
 
 
 async def dispatch(
-    session: AsyncSession, cipher: Cipher, scope: DocsScope, name: str, arguments: Any
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: DocsScope,
+    name: str,
+    arguments: Any,
+    files: FileRelay | None = None,
 ) -> dict[str, Any]:
+    if name in write_policy.GROUP_TOOLS and isinstance(arguments, dict):
+        try:
+            return await write_tools.dispatch(session, cipher, scope, name, arguments, files)
+        except PersonalError as exc:
+            return exc.payload()
     spec = _SPECS.get(name)
     if spec is None or not isinstance(arguments, dict):
         return {"error": "invalid_tool_or_arguments"}
