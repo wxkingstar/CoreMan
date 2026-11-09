@@ -234,6 +234,16 @@ async def test_alert_turn_gets_no_write_credentials(db_engine, db_session):
     assert policy.TOKEN_ENV not in env and policy.URL_ENV not in env
     assert "SKILL_WRITE_TOKEN" not in env
     assert "s3cret-value" not in env.values()
+    assert env["COREMAN_USER_SUBJECT"] == "svc-demo"
+
+
+async def test_refresh_speaker_drops_disabled_service_user(db_session):
+    bot, service, source = await setup(db_session)
+    speaker = alert_sources.Speaker(f"alert:{source.id}", service.id, "svc-demo", "svc")
+    assert (await alert_sources.refresh_speaker(db_session, speaker)).known
+    service.status = "disabled"
+    await db_session.commit()
+    assert not (await alert_sources.refresh_speaker(db_session, speaker)).known
 
 
 def test_alert_key_priority():

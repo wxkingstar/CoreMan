@@ -190,6 +190,14 @@ async def trigger(
     return task
 
 
+async def refresh_speaker(session: AsyncSession, speaker: Speaker) -> Speaker:
+    """Recheck the service user just before the turn starts; an unusable one loses its identity."""
+    user = await session.get(User, speaker.user_id, populate_existing=True)
+    if user is None or user.status != "active" or user.source == "bootstrap":
+        return Speaker(speaker.platform_user_id, None, None, None)
+    return Speaker(speaker.platform_user_id, user.id, user.login_name, user.display_name)
+
+
 async def resolve_speaker(
     session: AsyncSession, *, bot: Bot, event: InboundEvent, source_id: object
 ) -> Speaker | None:

@@ -188,8 +188,14 @@ class OpenStage(ChatStageBase):
         relay = current_relay
         intake = replace(intake, bot=bot, relay=relay)
         if intake.speaker.known:
-            fresh_speaker = await resolve_speaker(
-                session, platform=bot.platform, platform_user_id=intake.speaker.platform_user_id
+            # A service user has no platform identity to look up, so an alert turn rechecks the
+            # user itself.
+            fresh_speaker = (
+                await alert_sources.refresh_speaker(session, intake.speaker)
+                if ctx.task.payload.get("origin") == alert_sources.ORIGIN
+                else await resolve_speaker(
+                    session, platform=bot.platform, platform_user_id=intake.speaker.platform_user_id
+                )
             )
             if fresh_speaker.user_id != intake.speaker.user_id:
                 fresh_speaker = Speaker(intake.speaker.platform_user_id, None, None, None)
