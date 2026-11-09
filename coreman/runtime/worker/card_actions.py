@@ -117,12 +117,13 @@ class CardActionHandler:
                 return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.core.feishu_docs import confirm
+                from coreman.runtime.worker.group_write_cards import handle as handle_group_write
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
                 handle: Callable[..., Awaitable[str]] = {
                     "personal_schedule": handle_schedule,
                     inflow.UPGRADE_EVENT: inflow.handle_upgrade,
-                    confirm.CARD_EVENT: confirm.handle,
+                    confirm.CARD_EVENT: handle_group_write,
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
