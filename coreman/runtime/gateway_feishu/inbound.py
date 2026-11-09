@@ -30,6 +30,39 @@ _RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _CHOICE_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
+_CARD_TEXT_TAGS = {"text", "a", "md", "markdown", "plain_text", "lark_md", "code_block"}
+_CARD_TEXT_LIMIT = 16_000
+
+
+def _card_text(card: dict[str, Any]) -> str:
+    """Readable text of a card sent by another bot.
+
+    Links keep their label only: alert cards put signed console URLs in `href`, and those must
+    not reach the model.
+    """
+    out: list[str] = []
+    title = card.get("title")
+    if isinstance(title, str) and title.strip():
+        out.append(" ".join(title.split()) + "\n")
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            text = node.get("text")
+            value = text if isinstance(text, str) else node.get("content")
+            if node.get("tag") in _CARD_TEXT_TAGS and isinstance(value, str):
+                out.append(value)
+                return
+            for key, item in node.items():
+                if key != "href":
+                    walk(item)
+
+    walk(card.get("elements"))
+    return "".join(out)[:_CARD_TEXT_LIMIT].strip()
+
+
 def _reply_click(
     raw: dict[str, Any], click: ReplyClick, *, bot_id: uuid.UUID, context: dict[str, Any]
 ) -> InboundMessage | None:
@@ -291,6 +324,8 @@ def _normalize_event(
                 if kind == "image"
                 else FilePart(ref=ref, filename=content.get("file_name"))
             )
+    elif kind == "interactive" and sender_type == "bot":
+        parts.append(TextPart(text=_card_text(content)))
     elif kind == "audio":
         parts.append(AudioPart(ref={}))
     else:
