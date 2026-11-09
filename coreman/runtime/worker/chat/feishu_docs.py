@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import RuntimeNode
-from coreman.core.feishu_docs import consent, links, policy, resume
+from coreman.core.feishu_docs import confirm, consent, links, policy, resume
 from coreman.core.relay.models import backend_of
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
@@ -77,6 +77,9 @@ async def configure(
         ctx.turn_notes.append(decision.note())
     if ctx.task.payload.get(resume.PAYLOAD_KEY):
         ctx.turn_notes.append(RESUMED_NOTE)
+    result = ctx.task.payload.get(confirm.RESULT_KEY)
+    if isinstance(result, str):
+        ctx.turn_notes.append("- 飞书操作：" + result)
     if not await _runtime_supported(session, intake):
         return system_prompt, env
     base_url = ctx.public_base_url.rstrip("/")

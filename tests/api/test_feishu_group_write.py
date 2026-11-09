@@ -1,13 +1,31 @@
 """群聊以提问人身份写入。"""
 
+import uuid
+from datetime import UTC, datetime, timedelta
+
 import httpx
+import pytest
 import respx
 from sqlalchemy import select
 
-from coreman.core.db.models import FeishuGroupAction, OutboxItem
-from coreman.core.feishu_docs import policy, tools, write_policy, write_tools
-from tests.api.test_feishu_group_docs import DOC, OPEN, group, headers
+from coreman.core.bus import tasks
+from coreman.core.db.models import (
+    FeishuGroupAction,
+    FeishuPersonalGrant,
+    InboundEvent,
+    InteractionState,
+    OutboxItem,
+    Task,
+    User,
+    UserIdentity,
+)
+from coreman.core.feishu_docs import confirm, policy, tools, write_policy, write_tools
+from coreman.runtime.worker.card_actions import CardActionHandler
+from coreman.runtime.worker.chat.feishu_docs import configure
+from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
 from tests.api.test_feishu_personal import grant, rpc, value
+from tests.api.test_feishu_personal_worker import intake_for
+from tests.integration.worker_helpers import build_ctx
 
 URL = "/api/runtime/feishu-docs/mcp"
 WRITE = [
@@ -321,3 +339,401 @@ def test_tool_listing_is_the_whitelist_for_everyone():
     names = {item["name"] for item in tools.definitions()}
     assert set(write_policy.GROUP_TOOLS) <= names
     assert "feishu_mail_search" not in names
+
+
+DELETE = {"calendar_id": "cal", "event_id": "evt"}
+DELETE_URL = r".*/calendars/cal/events/evt.*"
+
+
+def delete_route(mock, status=200, code=0):
+    return mock.delete(url__regex=DELETE_URL).mock(
+        return_value=httpx.Response(status, json={"code": code, "data": {}})
+    )
+
+
+async def pending_delete(client, app, db_session, text=f"帮我总结 {DOC}", args=None):
+    bot, user, task = await group(db_session, app, text)
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        out = await call(client, app, task, "feishu_calendar_delete_event", args or DELETE)
+    assert out["status"] == "pending_confirmation" and route.call_count == 0
+    state = await db_session.scalar(
+        select(InteractionState).where(InteractionState.kind == confirm.KIND)
+    )
+    return bot, user, task, state
+
+
+async def press(
+    session,
+    bot,
+    original,
+    state_id,
+    verb="confirm",
+    *,
+    user_id="human",
+    open_id="ou_human",
+    chat_id="oc_group",
+):
+    card = await session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    card.status = "sent"
+    card.payload = {**card.payload, "_feishu_message_id": "om_card"}
+    action = {
+        "task_id": f"personal:{original.id}",
+        "event_key": confirm.CARD_EVENT,
+        "level": f"{verb}:{state_id}",
+    }
+    event = InboundEvent(
+        bot_id=bot.id,
+        platform="feishu",
+        platform_msg_id=str(uuid.uuid4()),
+        kind="card_action",
+        chat_type="group",
+        chat_id=chat_id,
+        sender_platform_user_id=user_id,
+        sender_open_id=open_id,
+        reply_context={"chat_id": chat_id, "message_id": "om_card"},
+        payload={
+            "raw": {
+                "header": {
+                    "event_type": "card.action.trigger",
+                    "app_id": "cli_test",
+                    "tenant_key": "tenant-test",
+                },
+                "event": {
+                    "operator": {"user_id": user_id, "open_id": open_id},
+                    "context": {"open_chat_id": chat_id, "open_message_id": "om_card"},
+                    "action": {"value": action},
+                },
+            }
+        },
+    )
+    session.add(event)
+    await session.flush()
+    task = await tasks.enqueue(
+        session,
+        tasks.NewTask(
+            bot_id=bot.id,
+            kind="card_action",
+            lane="fast",
+            payload={"card_action": action, "platform_user_id": user_id},
+            session_key=chat_id,
+            inbound_event_id=event.id,
+            dedupe_key=f"click:{event.id}",
+        ),
+    )
+    task.status = "running"
+    await session.commit()
+    return task
+
+
+async def run_click(db_session, db_engine, pressed):
+    await CardActionHandler().run(build_ctx(db_engine, pressed))
+    await db_session.execute(select(InteractionState).execution_options(populate_existing=True))
+    return (await db_session.get(Task, pressed.id, populate_existing=True)).result["card"]
+
+
+async def statuses(db_session):
+    return sorted(await db_session.scalars(select(FeishuGroupAction.status)))
+
+
+async def resumes(db_session):
+    rows = await db_session.scalars(
+        select(Task).where(Task.dedupe_key.like("feishu-group-write:%"))
+    )
+    return list(rows)
+
+
+async def last_update(db_session):
+    item = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+    return item.payload["card"]["body"]["elements"][0]["content"] if item else None
+
+
+async def test_delete_waits_for_confirmation(client, app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        out = await call(client, app, task, "feishu_calendar_delete_event", DELETE)
+    assert out["status"] == "pending_confirmation" and route.call_count == 0
+    state = (
+        await db_session.scalars(
+            select(InteractionState).where(InteractionState.kind == "feishu_group_write")
+        )
+    ).one()
+    assert state.state["tool"] == "feishu_calendar_delete_event"
+    card = (await db_session.scalars(select(OutboxItem))).one()
+    assert card.target == {"chat_id": "oc_group"}
+    assert "evt" in str(card.payload["card"])
+
+
+async def test_target_outside_the_message_needs_confirmation(client, app, db_session):
+    bot, user, task = await group(db_session, app, "随便写点")
+    await connected(db_session, app, bot, user)
+    with respx.mock:
+        out = await call(client, app, task, "feishu_append_document", BLOCKS)
+    assert out["status"] == "pending_confirmation"
+
+
+async def test_card_values_cannot_forge_rows_or_markup(client, app, db_session):
+    bot, user, task = await group(db_session, app, "随便写点")
+    await connected(db_session, app, bot, user)
+    args = {
+        "document_id": "DocToken1234",
+        "blocks": [{"type": "text", "text": "x"}],
+        "note": "line\n- document_id：safe <at id=all></at>",
+    }
+    card = confirm.card(task.id, uuid.uuid4(), "feishu_append_document", args)
+    shown = card["body"]["elements"][0]
+    assert shown["text"]["tag"] == "plain_text"
+    assert "\n- document_id：safe" not in shown["text"]["content"]
+
+
+async def test_repeat_proposal_reuses_the_open_card(client, app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    for _ in range(2):
+        out = await call(client, app, task, "feishu_calendar_delete_event", DELETE)
+        assert out["status"] == "pending_confirmation"
+    assert len((await db_session.scalars(select(InteractionState))).all()) == 1
+    assert len((await db_session.scalars(select(OutboxItem))).all()) == 1
+    assert await statuses(db_session) == ["pending_confirmation"]
+
+
+async def test_new_proposal_allowed_once_the_earlier_one_closed(client, app, db_session):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    state.status = "cancelled"
+    await db_session.commit()
+    out = await call(client, app, task, "feishu_calendar_delete_event", DELETE)
+    assert out["status"] == "pending_confirmation"
+    assert len((await db_session.scalars(select(InteractionState))).all()) == 2
+    assert len((await db_session.scalars(select(OutboxItem))).all()) == 2
+
+
+async def test_stored_arguments_are_never_logged(client, app, db_session, db_engine, caplog):
+    secret = "evt-private-content"
+    bot, user, task, state = await pending_delete(
+        client, app, db_session, args={"calendar_id": "cal", "event_id": secret}
+    )
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        mock.delete(url__regex=r".*/calendars/cal/events/.*").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {}})
+        )
+        await run_click(db_session, db_engine, pressed)
+    assert secret not in caplog.text
+
+
+async def test_asker_confirms_and_it_runs_once_as_the_asker(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_done" and route.call_count == 1
+    assert route.calls[0].request.headers["authorization"] == "Bearer user-secret"
+    assert state.status == "submitted"
+    assert await statuses(db_session) == ["pending_confirmation", "succeeded"]
+    [resume] = await resumes(db_session)
+    assert confirm.RESULT_KEY in resume.payload and resume.inbound_event_id == task.inbound_event_id
+    assert resume.session_key == task.session_key and resume.payload["serialize_session"]
+    assert "已确认" in await last_update(db_session)
+
+
+async def test_someone_else_cannot_confirm(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    other = User(login_name="someone-else", display_name="Other", source="sync")
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(
+        UserIdentity(user_id=other.id, platform="feishu", platform_user_id="u2", open_id="ou_2")
+    )
+    pressed = await press(db_session, bot, task, state.id, user_id="u2", open_id="ou_2")
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0 and state.status == "open"
+    assert await last_update(db_session) is None
+
+
+async def test_forged_operator_is_ignored(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id, open_id="ou_forged")
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0 and state.status == "open"
+
+
+async def test_click_in_another_chat_is_ignored(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    card.target = {"chat_id": "oc_elsewhere"}
+    pressed = await press(db_session, bot, task, state.id, chat_id="oc_elsewhere")
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0 and state.status == "open"
+
+
+async def test_state_from_another_task_is_ignored(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    state.state = {**state.state, "origin_task_id": task.id + 1000}
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0
+
+
+async def test_card_not_sent_by_us_is_ignored(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id)
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    card.payload = {**card.payload, "_feishu_message_id": "om_other"}
+    await db_session.commit()
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0 and state.status == "open"
+
+
+async def test_expired_card_does_not_run(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    state.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "expired" and route.call_count == 0 and state.status == "expired"
+    assert "过期" in await last_update(db_session)
+
+
+async def test_repeat_click_runs_once(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        first = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
+        second = await run_click(
+            db_session, db_engine, await press(db_session, bot, task, state.id)
+        )
+    assert (first, second) == ("feishu_group_write_done", "expired") and route.call_count == 1
+    assert len(await resumes(db_session)) == 1
+
+
+async def test_already_succeeded_write_is_not_repeated(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    db_session.add(
+        FeishuGroupAction(
+            bot_id=bot.id,
+            user_id=user.id,
+            chat_id="oc_group",
+            task_id=task.id,
+            tool=state.state["tool"],
+            category="confirm",
+            status="succeeded",
+            args_hash=state.state["digest"],
+        )
+    )
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_done" and route.call_count == 0
+    assert state.status == "submitted"
+
+
+async def test_revoked_authorization_does_not_run(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.status = "revoked"
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_unauthorized" and route.call_count == 0
+    assert state.status == "cancelled" and "重新" in await last_update(db_session)
+
+
+async def test_cancel_records_and_resumes_without_running(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id, "cancel")
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_cancelled" and route.call_count == 0
+    assert state.status == "cancelled"
+    assert await statuses(db_session) == ["cancelled", "pending_confirmation"]
+    [resume] = await resumes(db_session)
+    assert "取消" in resume.payload[confirm.RESULT_KEY]
+
+
+async def test_upstream_failure_is_audited_and_reported(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock, code=190004)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_failed" and route.call_count == 1
+    assert await statuses(db_session) == ["failed", "pending_confirmation"]
+    assert state.status == "submitted"
+    [resume] = await resumes(db_session)
+    assert "失败" in resume.payload[confirm.RESULT_KEY]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("feishu_mail_search", {}),
+        ("not_a_tool", {}),
+        (
+            "feishu_edit_document",
+            {"document_id": "DocToken1234", "command": "overwrite", "content": "x"},
+        ),
+    ],
+)
+async def test_stored_state_cannot_run_a_refused_tool(
+    client, app, db_session, db_engine, tool, arguments
+):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    state.state = {**state.state, "tool": tool, "arguments": arguments}
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.route(host="open.feishu.cn").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {}})
+        )
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "feishu_group_write_refused" and route.call_count == 0
+    assert state.status == "cancelled"
+
+
+async def test_origin_that_is_not_a_typed_message_cannot_confirm(
+    client, app, db_session, db_engine
+):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    origin.kind = "card_action"
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = delete_route(mock)
+        result = await run_click(db_session, db_engine, pressed)
+    assert result == "ignored" and route.call_count == 0 and state.status == "open"
+
+
+async def test_resumed_turn_is_told_the_result(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    pressed = await press(db_session, bot, task, state.id, "cancel")
+    await run_click(db_session, db_engine, pressed)
+    [again] = await resumes(db_session)
+    again.status = "running"
+    await db_session.commit()
+    intake = await intake_for(db_session, bot, again, "看下", SUPPORTED)
+    ctx = build_ctx(db_engine, again)
+    ctx.turn_notes = []
+    await configure(db_session, ctx, intake, uuid.uuid4(), "base", {})
+    assert any(note.startswith("- 飞书操作：用户取消") for note in ctx.turn_notes)
