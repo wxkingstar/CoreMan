@@ -14,12 +14,8 @@ from tests.api.test_feishu_personal_worker import intake_for
 from tests.integration.worker_helpers import build_ctx
 
 
-async def test_agent_cannot_choose_or_start_authorization(client, app, db_session):
+async def test_agent_cannot_choose_the_authorization_level(client, app, db_session):
     _, user, task = await setup(db_session, app)
-    result = value(
-        await client.post(URL, headers=await headers(app, task, user), json=rpc("feishu_authorize"))
-    )
-    assert result["status"] == "selection_required"
     result = value(
         await client.post(
             URL,

@@ -129,6 +129,32 @@ async def chat_can_see(client: FeishuClient, link: Link, chat_id: str) -> bool:
     return (chat.get("data") or {}).get("external") is False
 
 
+def group_scope(cipher: Cipher, scope: DocsScope) -> policy.Scope:
+    """群里发授权卡用的本人身份；身份字段来自已校验的原始事件。"""
+    if scope.speaker_user_id is None:
+        raise PersonalError("authorization_unavailable")
+    raw = scope.event.payload.get("raw") or {}
+    header, source = raw.get("header") or {}, raw.get("event") or {}
+    tenant = header.get("tenant_key") or (source.get("operator") or {}).get("tenant_key")
+    if not tenant:
+        raise PersonalError("authorization_unavailable")
+    try:
+        app_id, _ = policy.app_credentials(cipher, scope.bot)
+    except ValueError:
+        raise PersonalError("feishu_app_unavailable") from None
+    return policy.Scope(
+        scope.task,
+        scope.bot,
+        scope.speaker_user_id,
+        str(tenant),
+        app_id,
+        str(scope.event.sender_open_id),
+        str(scope.event.sender_platform_user_id),
+        scope.chat_id,
+        scope.event,
+    )
+
+
 @dataclass(frozen=True)
 class Requester:
     """连接过飞书的提问人：个人工具的 Scope 与他当前的档位、权限。"""

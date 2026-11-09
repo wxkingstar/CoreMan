@@ -13,9 +13,11 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_docs import access, consent, links, resume
+from coreman.core.feishu_docs import access, consent, links, write_policy, write_tools
 from coreman.core.feishu_docs.links import Link, LinkError
 from coreman.core.feishu_docs.policy import DocsScope
+from coreman.core.feishu_personal import inflow
+from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
@@ -26,6 +28,7 @@ from coreman.core.feishu_personal.toolbase import (
     bounded,
     input_schema,
 )
+from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.feishu_personal.toolsets import docs
 
 Url = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
@@ -75,7 +78,9 @@ _SPECS: dict[str, tuple[type[Arguments], str]] = {
 
 
 def definitions() -> list[dict[str, Any]]:
-    return [_definition(name, *spec) for name, spec in _SPECS.items()]
+    return [_definition(name, *spec) for name, spec in _SPECS.items()] + [
+        TOOLS[name].definition() for name in write_policy.GROUP_TOOLS
+    ]
 
 
 async def _resolve(call: Call, link: Link) -> tuple[str, str]:
@@ -111,18 +116,33 @@ async def _read_any(
         return _no_access("link_not_from_chat")
     state = await access.asker_state(session, cipher, scope)
     who = state.requester
-    if who is None:
-        if state.status in WAITING:
-            await resume.wait_for_authorization(session, scope, link)
-        return _no_access(state.status)
-    if not who.reaches(*access.READ_ENDPOINTS[link.kind]):
-        await resume.wait_for_authorization(session, scope, link)
-        return _no_access("scope_missing")
+    if who is None and state.status == "unknown_speaker":
+        return _no_access("unknown_speaker")
+
+    async def ask_authorization() -> dict[str, Any]:
+        result = await inflow.request(
+            session,
+            cipher,
+            access.group_scope(cipher, scope),
+            purpose="读取群里的飞书文档",
+            endpoints_needed=access.READ_ENDPOINTS[link.kind],
+        )
+        if result.get("status") == "already_connected":
+            # 刚判过不够，这里不该已够；真遇到了也不能当作授权成功。
+            return _no_access("asker_cannot_open")
+        return result
+
+    if who is None or not who.reaches(*access.READ_ENDPOINTS[link.kind]):
+        return await ask_authorization()
     user = Call(session, cipher, who.scope)
     try:
         kind, token = await _resolve(user, link)
         data = await read(user, kind, token, False)
     except PersonalError as exc:
+        if exc.code == "authorization_required":
+            # 令牌刷新失败等：授权已失效，等同没连接。
+            await session.flush()
+            return await ask_authorization()
         if getattr(exc, "code", "") in (
             "unsupported_type",
             "not_a_spreadsheet",
@@ -140,26 +160,12 @@ async def _read_any(
 
 # 调用方用错了工具或参数：如实返回，不算「他打不开」。
 _CALLER_ERRORS = ("unsupported_type", "not_a_spreadsheet", "not_a_base", "table_id_required")
-# 提问人授权还差一步：记下这一轮，授权完成后自动续接。
-WAITING = frozenset({"not_connected", "authorization_pending"})
 _HINTS = {
     "link_not_from_chat": (
         "这个链接不是本群有人发过的，不能以提问人身份读取。请提问人把链接发到群里。"
     ),
     "unknown_speaker": (
         "本群看不到这篇文档，提问人也不是平台成员，没法以他的身份读。请文档所有者把它共享给本群。"
-    ),
-    "not_connected": (
-        "本群看不到这篇文档，提问人还没连接飞书。请他私聊你发送“连接飞书”并授权；"
-        "授权完成后会自动接着处理这条消息，不用再发链接。简短说明后结束本轮。"
-    ),
-    "authorization_pending": (
-        "提问人的飞书授权还没完成。请他在飞书授权页点同意；"
-        "完成后会自动接着处理这条消息，不用再发链接。简短说明后结束本轮。"
-    ),
-    "scope_missing": (
-        "提问人的飞书授权不含读取这类文档。请他私聊你发送“连接飞书”，选一个包含文档的范围；"
-        "完成后会自动接着处理。简短说明后结束本轮。"
     ),
     "asker_cannot_open": (
         "已经以提问人身份试过，他本人也打不开这篇文档；应用没法替他向文档所有者申请。"
@@ -194,8 +200,18 @@ async def _document(
 
 
 async def dispatch(
-    session: AsyncSession, cipher: Cipher, scope: DocsScope, name: str, arguments: Any
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: DocsScope,
+    name: str,
+    arguments: Any,
+    files: FileRelay | None = None,
 ) -> dict[str, Any]:
+    if name in write_policy.GROUP_TOOLS and isinstance(arguments, dict):
+        try:
+            return await write_tools.dispatch(session, cipher, scope, name, arguments, files)
+        except PersonalError as exc:
+            return exc.payload()
     spec = _SPECS.get(name)
     if spec is None or not isinstance(arguments, dict):
         return {"error": "invalid_tool_or_arguments"}

@@ -175,3 +175,19 @@ async def test_crash_surfaces_the_real_error_and_copy_is_still_wiped(
     await db_session.refresh(row)
     assert row.status == "open"
     assert not await _sealed_left(db_session, ev, click)
+
+
+@pytest.mark.parametrize(
+    ("target_user", "result"), [("owner_pid", "saved"), ("someone_else", "ignored")]
+)
+async def test_click_on_a_card_sent_to_a_user_id_is_matched_by_clicker(
+    db_session, db_engine, target_user, result
+):
+    bot, user, cipher, row = await _prepared(db_session)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    item.target = {"user_id": target_user}
+    await db_session.commit()
+    ev, click = await _click(db_session, cipher, bot, row.id, VALUES)
+    await CardActionHandler().run(build_ctx(db_engine, click))
+    done = await db_session.get(Task, click.id, populate_existing=True)
+    assert done.result == {"card": result}

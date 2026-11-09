@@ -78,6 +78,8 @@ IMAGES_PER_REPLY = 9
 # 卡片内容本身有问题（字段不认、体积或元素超限、JSON 非法）：原样重试没有意义，立即降级。
 # CardKit 与发消息接口各有一套码；-2 是本地判定的体积超限或 JSON 非法。
 CARD_CONTENT_ERRORS = frozenset({-2, 10002, 200220, 200860, 300121, 300301, 300305, 230025, 230099})
+# 机器人无法私信该用户（用户未与机器人建立可达会话等）；真机验证时核对错误码。
+DM_UNREACHABLE = frozenset({230013})
 log = get_logger(__name__)
 
 
@@ -936,6 +938,38 @@ class FeishuTransport:
         if item.kind not in {"send", "welcome"}:
             raise FeishuError(-2, "unsupported outbox kind")
         chat = str(item.target.get("chat_id") or "")
+        direct_user = item.target.get("user_id")
+        if isinstance(card, dict) and direct_user:
+            try:
+                mid = await self.send(
+                    str(direct_user),
+                    interaction_card(card),
+                    kind="interactive",
+                    key=f"outbox:{item.id}",
+                    receive_id_type="user_id",
+                )
+            except FeishuError as exc:
+                back = item.payload.get("_dm_fallback")
+                if exc.code not in DM_UNREACHABLE or not isinstance(back, dict):
+                    raise
+                # 私信不可达：回群里 @ 本人说明，卡片不再重发。
+                await self.send(
+                    str(back["chat_id"]),
+                    {
+                        "zh_cn": {
+                            "title": "",
+                            "content": [
+                                [{"tag": "at", "user_id": back["user_id"]}],
+                                [{"tag": "md", "text": back["text"]}],
+                            ],
+                        }
+                    },
+                    kind="post",
+                    key=f"outbox:{item.id}:fallback",
+                )
+                return
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
         if item.payload.get("_reply") and item.target.get("message_id"):
             # 群里对某条消息的简短回应（旁听插话的「我看一下」、排队提示、要不要停下上一条的
             # 选择卡片）：引用那条消息回复。

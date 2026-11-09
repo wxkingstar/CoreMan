@@ -7,13 +7,13 @@ tier and granted permissions reach, and every call is checked again server-side.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import ValidationError
+from pydantic import StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_personal import endpoints, service
+from coreman.core.feishu_personal import endpoints, inflow, service
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, Call, Page, Tool, bounded
@@ -23,10 +23,17 @@ TOOLS: dict[str, Tool] = {item.name: item for item in ALL}
 if len(TOOLS) != len(ALL):
     raise RuntimeError("duplicate personal tool name")
 
+
+class Authorize(Arguments):
+    need: Literal["general", "read_messages", "send_messages"] = "general"
+    purpose: Annotated[str, StringConstraints(max_length=60)] = ""
+
+
 _AUTH: dict[str, tuple[str, str]] = {
     "feishu_authorize": (
-        "authorize",
-        "Get the user-selected link; otherwise ask them to connect and choose in chat.",
+        "",
+        "Call when the user needs Feishu data or actions you cannot reach yet: sends a "
+        "one-click authorization card; the conversation resumes by itself.",
     ),
     "feishu_authorization_status": (
         "authorization_status",
@@ -40,11 +47,12 @@ _AUTH: dict[str, tuple[str, str]] = {
 
 
 def _auth_definition(name: str) -> dict[str, Any]:
-    return {
-        "name": name,
-        "description": _AUTH[name][1],
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-    }
+    schema = (
+        Authorize.model_json_schema()
+        if name == "feishu_authorize"
+        else {"type": "object", "properties": {}, "additionalProperties": False}
+    )
+    return {"name": name, "description": _AUTH[name][1], "inputSchema": schema}
 
 
 def definitions(
@@ -81,6 +89,13 @@ async def dispatch(
         if scope.scheduled:
             return {"error": "invalid_tool_or_arguments"}
         try:
+            if name == "feishu_authorize":
+                asked = Authorize.model_validate(arguments)
+                return bounded(
+                    await inflow.request(
+                        session, cipher, scope, need=asked.need, purpose=asked.purpose
+                    )
+                )
             Arguments.model_validate(arguments)
         except ValidationError:
             return {"error": "invalid_tool_or_arguments"}

@@ -200,6 +200,10 @@ async def existing_row(
 
 
 RETENTION_NOTICE = "仅私聊可用，对话记录仅你可见；撤销后停止读取，不删已有记录。"
+GROUP_RETENTION_NOTICE = (
+    "本次由群聊触发，以你的身份完成的操作结果群成员可见；"
+    "私聊的对话记录仅你可见；撤销后停止读取，不删已有记录。"
+)
 
 
 def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
@@ -250,6 +254,50 @@ async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -
     return {"status": "selecting", "prompt": SELECTION_PROMPT, "remote_revoked": remote_revoked}
 
 
+async def _scopes_for_level(row: FeishuPersonalGrant, secret: str, level: str) -> list[str]:
+    available = (
+        list(permissions.MESSAGE_SCOPES)
+        if level == "messages_readonly"
+        else await permissions.app_user_scopes(row.app_id, secret, http=_http)
+    )
+    if level == "all" and not {"im:message", "im:message.send_as_user"}.issubset(available):
+        raise PersonalError("app_send_permission_missing")
+    if level == "messages_readonly" and not (
+        permissions.MESSAGE_SCOPES - {"offline_access"}
+    ).issubset(available):
+        raise PersonalError("app_message_permission_missing")
+    selected = permissions.select_scopes(level, available)
+    if level != "messages_readonly":
+        # Not everything the app enabled: Feishu refuses requests with too many permissions.
+        selected = endpoints.request_scopes(level, set(selected))
+    if not selected:
+        raise PersonalError("authorization_unavailable")
+    return selected
+
+
+async def begin_in_flow(
+    session: AsyncSession, cipher: Cipher, scope: Scope, level: str
+) -> dict[str, Any]:
+    """用到时发起授权：不选档位。已有未过期的授权流程就复用，旧令牌在这里才作废。"""
+    row, secret = await _row(session, cipher, scope)
+    if (
+        row.status == "pending"
+        and row.pending_enc
+        and row.pending_expires_at
+        and row.pending_expires_at > datetime.now(UTC)
+    ):
+        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
+        return {"status": "pending", "authorization_url": pending["url"], "reused": True}
+    selected = await _scopes_for_level(row, secret, level)
+    row.remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
+    row.authorization_level, row.requested_scopes = level, selected
+    return await _start_authorization(row, secret, cipher)
+
+
+async def ensure_grant_row(session: AsyncSession, cipher: Cipher, scope: Scope) -> None:
+    await _row(session, cipher, scope)
+
+
 async def choose_authorization(
     session: AsyncSession,
     cipher: Cipher,
@@ -275,23 +323,7 @@ async def choose_authorization(
     if choice not in levels:
         raise PersonalError("selection_required")
     level = levels[choice]
-    available = (
-        list(permissions.MESSAGE_SCOPES)
-        if level == "messages_readonly"
-        else await permissions.app_user_scopes(row.app_id, secret, http=_http)
-    )
-    if level == "all" and not {"im:message", "im:message.send_as_user"}.issubset(available):
-        raise PersonalError("app_send_permission_missing")
-    if level == "messages_readonly" and not (
-        permissions.MESSAGE_SCOPES - {"offline_access"}
-    ).issubset(available):
-        raise PersonalError("app_message_permission_missing")
-    selected = permissions.select_scopes(level, available)
-    if level != "messages_readonly":
-        # Not everything the app enabled: Feishu refuses requests with too many permissions.
-        selected = endpoints.request_scopes(level, set(selected))
-    if not selected:
-        raise PersonalError("authorization_unavailable")
+    selected = await _scopes_for_level(row, secret, level)
     row.authorization_level = level
     row.requested_scopes = selected
     # Only this worker-owned path can select a level; MCP has no level argument.
@@ -344,30 +376,6 @@ async def _start_authorization(
         "status": "pending",
         "authorization_url": url,
         "expires_at": row.pending_expires_at.isoformat(),
-    }
-
-
-async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
-    row, _ = await _row(session, cipher, scope)
-    if row.status == "connected" and row.token_enc:
-        return _state(row, cipher)
-    if (
-        row.status == "pending"
-        and row.pending_enc
-        and row.pending_expires_at
-        and row.pending_expires_at > datetime.now(UTC)
-    ):
-        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
-        return {
-            **_state(row, cipher),
-            "status": "pending",
-            "authorization_url": pending["url"],
-            "expires_at": row.pending_expires_at.isoformat(),
-        }
-    return {
-        "retention_notice": RETENTION_NOTICE,
-        "status": "selection_required",
-        "prompt": "请发送连接飞书，再由本人点击授权卡片选择范围。",
     }
 
 

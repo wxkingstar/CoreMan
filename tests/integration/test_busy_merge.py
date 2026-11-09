@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from coreman.core.bus import instances, tasks
 from coreman.core.chat import busy_choice
 from coreman.core.db.models import Bot, InboundEvent, OutboxItem, Task
+from coreman.core.feishu_docs import resume
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.worker.card_actions import CardActionHandler
@@ -305,3 +306,36 @@ def test_progress_says_how_long_it_has_been_quiet() -> None:
         quiet_seconds=1800,
     )
     assert "30 分 0 秒" in text and "没有新动作" in text
+
+
+async def test_a_resume_task_is_not_merged_into_an_earlier_head(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    relay = FakeRelay()
+    head = await _say(db_session, bot, "第一条")
+    resumed = await _say(db_session, bot, "原来那条")
+    resumed.payload = {**resumed.payload, resume.PAYLOAD_KEY: "wait-1", "serialize_session": True}
+    await db_session.commit()
+    claimed = await _claim(db_session)
+    assert claimed and claimed.id == head.id
+    await run(db_engine, claimed, relay)
+    row = await _row(db_session, resumed)
+    assert row.status == "queued" and row.error_code is None
+    assert row.payload[resume.PAYLOAD_KEY] == "wait-1"
+    assert "原来那条" not in _sent(relay)
+
+
+async def test_a_resume_task_does_not_gather_later_messages(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    relay = FakeRelay()
+    head = await _say(db_session, bot, "原来那条")
+    head.payload = {**head.payload, resume.CONFIRM_RESULT_KEY: "已确认"}
+    await db_session.commit()
+    later = await _say(db_session, bot, "后来一条")
+    claimed = await _claim(db_session)
+    assert claimed and claimed.id == head.id
+    await run(db_engine, claimed, relay)
+    assert (await _row(db_session, later)).error_code is None
