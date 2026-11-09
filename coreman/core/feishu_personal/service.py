@@ -200,6 +200,10 @@ async def existing_row(
 
 
 RETENTION_NOTICE = "仅私聊可用，对话记录仅你可见；撤销后停止读取，不删已有记录。"
+GROUP_RETENTION_NOTICE = (
+    "本次由群聊触发，以你的身份完成的操作结果群成员可见；"
+    "私聊的对话记录仅你可见；撤销后停止读取，不删已有记录。"
+)
 
 
 def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 """群聊可用的个人工具白名单：不在表里的一律不可用。
 
 locate 只返回定位字段；create 直接执行；target 目标可信才直接执行；confirm 一律确认。
+create / target 显式指定了放到哪里（文件夹、知识库、清单、父任务、日历）时，这个位置也要可信，
+否则转确认：文档内容可能诱导把提问人的内容写进别人共享的位置。
 """
 
 from __future__ import annotations
@@ -42,6 +44,17 @@ TARGET_FIELD: dict[str, str] = {
     "feishu_rename_file": "token",
     "feishu_copy_file": "token",
     "feishu_task_comment": "task_guid",
+}
+CONTAINER_FIELDS: dict[str, tuple[str, ...]] = {
+    "feishu_create_document": ("folder_token",),
+    "feishu_create_sheet": ("folder_token",),
+    "feishu_create_folder": ("folder_token",),
+    "feishu_save_to_drive": ("folder_token",),
+    "feishu_copy_file": ("folder_token",),
+    "feishu_wiki_create_node": ("space_id", "parent_node_token"),
+    "feishu_task_create": ("tasklist_guid",),
+    "feishu_task_add_subtask": ("parent_task_guid",),
+    "feishu_calendar_create_event": ("calendar_id",),
 }
 GROUP_TOOLS: dict[str, str] = {
     **dict.fromkeys(_LOCATE.split(), "locate"),

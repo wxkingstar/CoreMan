@@ -25,6 +25,12 @@ TARGET_LEVEL = {
     "read_messages": "all_except_send",
     "send_messages": "all",
 }
+_LEVEL_TEXT = {
+    "all": "全部权限（可代发消息）",
+    "all_except_send": "全部权限（不代发消息）",
+    "no_messages": "全部权限（不含消息）",
+    "messages_readonly": "只读消息",
+}
 _RANK = {"general": 0, "read_messages": 0, "send_messages": 1}
 _APP_UNAVAILABLE = (
     "app_send_permission_missing",
@@ -55,10 +61,38 @@ def _reaches(row: FeishuPersonalGrant, keys: Iterable[str]) -> bool:
     )
 
 
-def link_card(url: str, purpose: str) -> dict[str, Any]:
+def _target_level(row: FeishuPersonalGrant, need: str) -> str:
+    """要去的档位。当前已连接且档位够（只是缺权限）时留在原档，绝不因升级而降档。"""
+    return row.authorization_level if satisfied(row, need) else TARGET_LEVEL[need]
+
+
+async def _gap(cipher: Cipher, bot: Any, row: FeishuPersonalGrant) -> str | None:
+    """档位够的授权，按这一档还到不了哪些接口：user=应用开了本人没授予，app=应用没开，None=不差。"""
+    _, secret = policy.app_credentials(cipher, bot)
+    available = await permissions.app_user_scopes(row.app_id, secret, http=service._http)
+    allowed = set(permissions.select_scopes(row.authorization_level, available))
+    granted = frozenset(row.requested_scopes or []) & frozenset(row.scopes or [])
+    app_lacks = False
+    for endpoint in endpoints.ENDPOINTS.values():
+        level = row.authorization_level
+        if (
+            endpoints.denied(endpoint, level, frozenset(endpoint.scopes) | endpoint.also)
+            is not None
+            or endpoints.denied(endpoint, level, granted) is None
+        ):
+            continue
+        if allowed.intersection(endpoint.scopes) and endpoint.also <= allowed:
+            return "user"
+        if not set(available).intersection(endpoint.scopes) or not endpoint.also <= set(available):
+            app_lacks = True
+    return "app" if app_lacks else None
+
+
+def link_card(url: str, purpose: str, level: str, *, group: bool = False) -> dict[str, Any]:
     head = f"要继续「{purpose}」，需要你授权一次飞书。" if purpose else "需要你授权一次飞书。"
     return _card(
-        head + "\n范围：全部权限（不代发消息）。点完后会自动继续，不用回到这里回复。",
+        head + f"\n范围：{_LEVEL_TEXT[level]}。点完后会自动继续，不用回到这里回复。",
+        group,
         {
             "tag": "button",
             "type": "primary",
@@ -68,11 +102,14 @@ def link_card(url: str, purpose: str) -> dict[str, Any]:
     )
 
 
-def upgrade_card(task_id: int, wait_id: Any, purpose: str) -> dict[str, Any]:
+def upgrade_card(
+    task_id: int, wait_id: Any, purpose: str, level: str, *, group: bool = False
+) -> dict[str, Any]:
     head = f"要继续「{purpose}」，当前飞书授权不够。" if purpose else "当前飞书授权不够。"
     return {
         **_card(
-            head + "\n点击后原授权会被替换，完成后自动继续。",
+            head + f"\n范围：{_LEVEL_TEXT[level]}。点击后原授权会被替换，完成后自动继续。",
+            group,
             {
                 "tag": "button",
                 "type": "primary",
@@ -93,7 +130,8 @@ def upgrade_card(task_id: int, wait_id: Any, purpose: str) -> dict[str, Any]:
     }
 
 
-def _card(text: str, button: dict[str, Any]) -> dict[str, Any]:
+def _card(text: str, group: bool, button: dict[str, Any]) -> dict[str, Any]:
+    notice = service.GROUP_RETENTION_NOTICE if group else service.RETENTION_NOTICE
     return {
         "schema": "2.0",
         "header": {"template": "turquoise", "title": {"tag": "plain_text", "content": "飞书授权"}},
@@ -103,7 +141,7 @@ def _card(text: str, button: dict[str, Any]) -> dict[str, Any]:
                 button,
                 {
                     "tag": "markdown",
-                    "content": f"<font color='grey'>{service.RETENTION_NOTICE}</font>",
+                    "content": f"<font color='grey'>{notice}</font>",
                 },
             ]
         },
@@ -167,7 +205,20 @@ async def request(
     assert row is not None
     connected = row.status == "connected" and bool(row.token_enc)
     if satisfied(row, need) and _reaches(row, keys):
-        return {"status": "already_connected"}
+        if keys:
+            return {"status": "already_connected"}
+        # 私聊 feishu_authorize 不带接口：user_permission_missing 后靠这里找出缺的权限。
+        try:
+            gap = await _gap(cipher, scope.bot, row)
+        except (PersonalError, ValueError):
+            gap = None
+        if gap is None:
+            return {"status": "already_connected"}
+        if gap == "app":
+            return {
+                "status": "app_permission_missing",
+                "hint": "这个机器人的飞书应用权限不足，请联系机器人管理员补齐。",
+            }
     if connected and keys:
         _, secret = policy.app_credentials(cipher, scope.bot)
         available = set(await permissions.app_user_scopes(row.app_id, secret, http=service._http))
@@ -223,15 +274,18 @@ async def request(
     if offered_elsewhere or link_alive:
         # 同一个人同一时刻只留一张有效卡片，这个聊天只登记等待。
         return sent
+    group = scope.event is not None and scope.event.chat_type == "group"
     if begun is None:
         # 已连接但不够：旧令牌留着，用户点「升级授权」后才作废。
-        card = upgrade_card(scope.task.id, wait.id, purpose)
+        card = upgrade_card(
+            scope.task.id, wait.id, purpose, _target_level(row, wait.need), group=group
+        )
         await _send(session, scope, card, f"feishu-auth:{wait.id}:upgrade")
         return {
             "status": "upgrade_offered",
             "hint": "升级授权卡片已私信发给提问人，点完后会自动继续。简短说明后结束本轮。",
         }
-    card = link_card(begun["authorization_url"], purpose)
+    card = link_card(begun["authorization_url"], purpose, row.authorization_level, group=group)
     await _send(session, scope, card, f"feishu-auth:{wait.id}:link:{row.context_epoch}")
     return sent
 
@@ -280,8 +334,23 @@ async def handle_upgrade(
         wait.chat_id,
         event,
     )
+    if satisfied(row, wait.need):
+        try:
+            gap = await _gap(ctx.cipher, bot, row)
+        except (PersonalError, ValueError):
+            gap = "user"  # 查不到就按原流程走，发起授权时会如实报错。
+        if gap != "user":
+            # 卡片发出后本人已经用别的途径授权够了：不替换令牌，交给 tick 续接。
+            for other in await _live(session, scope):
+                if other.status == "offered" and satisfied(row, other.need):
+                    other.status = "waiting"
+            wait.status = "waiting"
+            await _update(session, bot, inbound, "你已经授权过了，会自动继续。")
+            return "personal_authorization_already"
     try:
-        begun = await service.begin_in_flow(session, ctx.cipher, scope, TARGET_LEVEL[wait.need])
+        begun = await service.begin_in_flow(
+            session, ctx.cipher, scope, _target_level(row, wait.need)
+        )
     except (PersonalError, ValueError):
         await _update(session, bot, inbound, "暂时无法生成授权链接，请稍后再试。")
         return "personal_authorization_unavailable"

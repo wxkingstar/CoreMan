@@ -151,6 +151,8 @@ async def _resume(session: AsyncSession, origin: Task, state: InteractionState, 
                 **{k: v for k, v in origin.payload.items() if k != resume.PAYLOAD_KEY},
                 confirm.RESULT_KEY: note,
                 "serialize_session": True,
+                # 用户刚点完确认卡，不再问「还要不要做」。
+                "stale_confirmed": True,
             },
         ),
     )

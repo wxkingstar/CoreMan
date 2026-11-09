@@ -9,7 +9,7 @@ import respx
 from sqlalchemy import select
 
 from coreman.core.db.models import FeishuAuthWait, FeishuPersonalGrant, OutboxItem
-from coreman.core.feishu_personal import inflow, policy, service
+from coreman.core.feishu_personal import endpoints, inflow, policy, service
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.chat import personal
 from tests.api.test_feishu_personal import URL, grant, headers, rpc, setup, value
@@ -424,3 +424,181 @@ def test_guidance_names_the_tool_and_is_stable_across_states():
     assert rules[0] == rules[1] == rules[2]
     assert "feishu_authorize" in rules[0] and "发送“连接飞书”" not in rules[0]
     assert personal.feishu_guidance(None, "https://example.com", scheduled=True) == ("", "")
+
+
+EVERY_SCOPE = sorted(
+    {s for e in endpoints.ENDPOINTS.values() for s in (*e.scopes, *e.also)}
+    | {"im:message", "im:message.send_as_user", "offline_access"}
+)
+
+
+def _app_has(monkeypatch, granted):
+    async def scopes(*a, **k):
+        return list(granted)
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+
+
+def _click(n=1):
+    return SimpleNamespace(
+        id=n,
+        chat_id="oc_private",
+        reply_context={"message_id": "om_card"},
+        sender_platform_user_id="human",
+        sender_open_id="ou_human",
+        payload={"raw": {"header": {"tenant_key": "tenant-test"}}},
+    )
+
+
+async def _card_text(db_session):
+    return str((await db_session.scalars(select(OutboxItem))).one().payload["card"])
+
+
+async def test_link_card_states_the_level_it_requests(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+    _app_has(monkeypatch, EVERY_SCOPE)
+    with respx.mock as mock:
+        device(mock)
+        scope = await private_scope(db_session, task, user)
+        await inflow.request(db_session, app.state.cipher, scope, need="send_messages")
+    text = await _card_text(db_session)
+    assert "可代发消息" in text and "不代发" not in text
+    assert service.RETENTION_NOTICE in text
+
+
+async def test_upgrade_card_states_the_level_it_requests(app, db_session):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="messages_readonly")
+    await db_session.commit()
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope, need="general")
+    assert "全部权限（不代发消息）" in await _card_text(db_session)
+
+
+async def test_group_triggered_card_does_not_claim_private_only(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+    _stub_scopes(monkeypatch)
+    scope = await private_scope(db_session, task, user)
+    scope.event.chat_type = "group"
+    scope.event.chat_id = "oc_group"
+    with respx.mock as mock:
+        device(mock)
+        await inflow.request(db_session, app.state.cipher, scope)
+    text = await _card_text(db_session)
+    assert service.GROUP_RETENTION_NOTICE in text and service.RETENTION_NOTICE not in text
+    assert "群" in service.GROUP_RETENTION_NOTICE
+
+
+async def test_upgrade_never_lowers_an_all_user(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    have = [s for s in EVERY_SCOPE if s not in ("docx:document:create", "docx:document")]
+    await grant(db_session, app, bot, user, authorization_level="all")
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.requested_scopes, row.scopes = have, have
+    await db_session.commit()
+    _app_has(monkeypatch, EVERY_SCOPE)
+    scope = await private_scope(db_session, task, user)
+    out = await inflow.request(
+        db_session, app.state.cipher, scope, need="general", endpoints_needed=("docx.create",)
+    )
+    assert out["status"] == "upgrade_offered"
+    assert "可代发消息" in await _card_text(db_session)
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
+    with respx.mock as mock:
+        device(mock)
+        _revoke(mock)
+        done = await inflow.handle_upgrade(
+            db_session, SimpleNamespace(cipher=app.state.cipher), bot, _click(), action
+        )
+    assert done == "personal_authorization_pending"
+    assert row.authorization_level == "all"
+
+
+async def _private_grant(db_session, app, bot, user, level, granted):
+    await grant(db_session, app, bot, user, authorization_level=level)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.requested_scopes, row.scopes = list(granted), list(granted)
+    await db_session.commit()
+    return row
+
+
+async def test_private_authorize_offers_upgrade_when_the_app_has_more(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await _private_grant(db_session, app, bot, user, "all_except_send", ["docx:document"])
+    _app_has(monkeypatch, EVERY_SCOPE)
+    scope = await private_scope(db_session, task, user)
+    out = await inflow.request(db_session, app.state.cipher, scope)
+    assert out["status"] == "upgrade_offered"
+    assert (await db_session.scalars(select(FeishuAuthWait))).one().status == "offered"
+
+
+async def test_private_authorize_names_a_missing_app_permission(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    limited = ["docx:document", "docx:document:create", "offline_access"]
+    await _private_grant(db_session, app, bot, user, "all_except_send", limited)
+    _app_has(monkeypatch, limited)
+    scope = await private_scope(db_session, task, user)
+    out = await inflow.request(db_session, app.state.cipher, scope)
+    assert out["status"] == "app_permission_missing"
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+
+
+async def test_private_authorize_with_nothing_missing_is_already_connected(
+    app, db_session, monkeypatch
+):
+    bot, user, task = await setup(db_session, app)
+    await _private_grant(db_session, app, bot, user, "all", EVERY_SCOPE)
+    _app_has(monkeypatch, EVERY_SCOPE)
+    scope = await private_scope(db_session, task, user)
+    out = await inflow.request(db_session, app.state.cipher, scope)
+    assert out["status"] == "already_connected"
+
+
+async def test_upgrade_click_after_connecting_elsewhere_keeps_the_token(
+    app, db_session, monkeypatch
+):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="messages_readonly")
+    await db_session.commit()
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope, need="general")
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    # 卡片发出后本人用别的途径（如「连接飞书」）已经授权够了。
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.authorization_level = "all_except_send"
+    row.requested_scopes, row.scopes = EVERY_SCOPE, EVERY_SCOPE
+    await db_session.commit()
+    token = row.token_enc
+    _app_has(monkeypatch, EVERY_SCOPE)
+    action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
+    with respx.mock as mock:
+        route = device(mock)
+        done = await inflow.handle_upgrade(
+            db_session, SimpleNamespace(cipher=app.state.cipher), bot, _click(), action
+        )
+    assert done == "personal_authorization_already" and route.call_count == 0
+    assert row.token_enc == token and row.status == "connected" and wait.status == "waiting"
+    update = (
+        await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "card_update"))
+    ).one()
+    assert "已经授权" in str(update.payload["card"])
+
+
+async def test_upgrade_click_with_a_real_gap_still_replaces_the_token(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await _private_grant(db_session, app, bot, user, "all_except_send", ["docx:document"])
+    _app_has(monkeypatch, EVERY_SCOPE)
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope)
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
+    with respx.mock as mock:
+        route = device(mock)
+        _revoke(mock)
+        done = await inflow.handle_upgrade(
+            db_session, SimpleNamespace(cipher=app.state.cipher), bot, _click(), action
+        )
+    assert done == "personal_authorization_pending" and route.call_count == 1

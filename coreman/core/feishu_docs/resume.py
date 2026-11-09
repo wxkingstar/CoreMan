@@ -80,7 +80,13 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
     resumed = 0
     for row in rows:
         origin = await session.get(Task, row.origin_task_id) if row.origin_task_id else None
-        if origin is None or origin.inbound_event_id is None:
+        if (
+            origin is None
+            or origin.inbound_event_id is None
+            # 用户已经叫停的那一轮，授权完成也不再接着做。
+            or origin.cancel_requested_at
+            or origin.status == "cancelled"
+        ):
             row.status = "expired"
             continue
         await _poll(session, cipher, row, origin, now)
@@ -101,6 +107,8 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
                     PAYLOAD_KEY: str(row.id),
                     # 来源那一轮可能还没结束：同一会话串行，等它收尾再续接。
                     "serialize_session": True,
+                    # 从原消息算起等得再久也是用户刚点完授权，不再问「还要不要做」。
+                    "stale_confirmed": True,
                 },
             ),
         )

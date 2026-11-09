@@ -747,3 +747,35 @@ async def access_state(session, app, scope):
     from coreman.core.feishu_docs import access
 
     return (await access.asker_state(session, app.state.cipher, scope)).status
+
+
+async def test_lapsed_authorization_on_read_sends_a_card(client, app, db_session, monkeypatch):
+    from datetime import timedelta
+
+    from coreman.core.db.models import FeishuPersonalGrant
+    from coreman.core.timeutils import utcnow
+
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.expires_at = utcnow() - timedelta(hours=1)
+    await db_session.commit()
+
+    async def scopes(*a, **k):
+        return READ_SCOPES + ["offline_access"]
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        mock.post(service.TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"error": "invalid_grant"})
+        )
+        device(mock)
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
+            )
+        )
+    assert out["status"] == "authorization_sent"
+    assert (await db_session.scalars(select(FeishuAuthWait))).one().status == "waiting"

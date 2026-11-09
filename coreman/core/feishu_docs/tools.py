@@ -118,7 +118,8 @@ async def _read_any(
     who = state.requester
     if who is None and state.status == "unknown_speaker":
         return _no_access("unknown_speaker")
-    if who is None or not who.reaches(*access.READ_ENDPOINTS[link.kind]):
+
+    async def ask_authorization() -> dict[str, Any]:
         result = await inflow.request(
             session,
             cipher,
@@ -127,14 +128,21 @@ async def _read_any(
             endpoints_needed=access.READ_ENDPOINTS[link.kind],
         )
         if result.get("status") == "already_connected":
-            # reaches() 刚判过不够，这里不该已够；真遇到了也不能当作授权成功。
+            # 刚判过不够，这里不该已够；真遇到了也不能当作授权成功。
             return _no_access("asker_cannot_open")
         return result
+
+    if who is None or not who.reaches(*access.READ_ENDPOINTS[link.kind]):
+        return await ask_authorization()
     user = Call(session, cipher, who.scope)
     try:
         kind, token = await _resolve(user, link)
         data = await read(user, kind, token, False)
     except PersonalError as exc:
+        if exc.code == "authorization_required":
+            # 令牌刷新失败等：授权已失效，等同没连接。
+            await session.flush()
+            return await ask_authorization()
         if getattr(exc, "code", "") in (
             "unsupported_type",
             "not_a_spreadsheet",

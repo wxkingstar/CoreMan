@@ -23,12 +23,16 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.feishu_docs import confirm, policy, resume, tools, write_policy, write_tools
+from coreman.core.feishu_personal import endpoints, service
+from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.card_actions import CardActionHandler
+from coreman.runtime.worker.chat import queued_batch
 from coreman.runtime.worker.chat.feishu_docs import RULES, configure
 from coreman.runtime.worker.chat.personal import configure as personal_configure
 from coreman.runtime.worker.chat.personal import feishu_guidance
 from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
+from tests.api.test_feishu_inflow import device
 from tests.api.test_feishu_personal import grant, rpc, value
 from tests.api.test_feishu_personal import setup as personal_setup
 from tests.api.test_feishu_personal_worker import intake_for
@@ -117,8 +121,6 @@ async def test_tools_outside_the_whitelist_are_unavailable(client, app, db_sessi
 
 
 async def test_without_authorization_a_private_card_goes_out(client, app, db_session, monkeypatch):
-    from coreman.core.feishu_personal import service
-
     bot, user, task = await group(db_session, app, f"写到 {DOC}")
 
     async def scopes(*a, **k):
@@ -866,3 +868,268 @@ async def test_the_resume_note_is_added_for_an_authorized_private_turn(db_sessio
     ctx.turn_notes = []
     await personal_configure(db_session, ctx, intake, uuid.uuid4(), "p", {})
     assert any("自动续接" in note for note in ctx.turn_notes)
+
+
+FOLDER = "FolderToken1"
+CLIENT = "11111111-1111-4111-8111-111111111111"
+ALL_SCOPES = sorted(
+    {s for e in endpoints.ENDPOINTS.values() for s in (*e.scopes, *e.also)} | {"offline_access"}
+)
+
+
+async def fully_connected(db_session, app, bot, user):
+    await connected(db_session, app, bot, user)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.requested_scopes, row.scopes = ALL_SCOPES, ALL_SCOPES
+    await db_session.commit()
+
+
+def test_container_fields_exist_on_the_argument_models():
+    for name, fields in write_policy.CONTAINER_FIELDS.items():
+        assert name in write_policy.GROUP_TOOLS
+        for field in fields:
+            assert field in TOOLS[name].args.model_fields, (name, field)
+
+
+def test_every_container_argument_is_listed():
+    known = {
+        "folder_token",
+        "space_id",
+        "parent_node_token",
+        "tasklist_guid",
+        "parent_task_guid",
+        "calendar_id",
+    }
+    for name, category in write_policy.GROUP_TOOLS.items():
+        if category in ("create", "target"):
+            present = known & set(TOOLS[name].args.model_fields)
+            assert present == set(write_policy.CONTAINER_FIELDS.get(name, ())), name
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("feishu_create_document", {"title": "周报", "folder_token": "EvilFolder12"}),
+        ("feishu_create_sheet", {"title": "表", "folder_token": "EvilFolder12"}),
+        ("feishu_create_folder", {"name": "夹", "folder_token": "EvilFolder12"}),
+        ("feishu_wiki_create_node", {"space_id": "EvilSpace123", "title": "页"}),
+        (
+            "feishu_task_create",
+            {"summary": "任务", "tasklist_guid": "EvilList1234", "client_token": CLIENT},
+        ),
+        (
+            "feishu_task_add_subtask",
+            {"summary": "子", "parent_task_guid": "EvilTask1234", "client_token": CLIENT},
+        ),
+        (
+            "feishu_calendar_create_event",
+            {
+                "calendar_id": "EvilCalendar",
+                "idempotency_key": CLIENT,
+                "summary": "会",
+                "start_time": "2026-11-10T10:00:00+08:00",
+                "end_time": "2026-11-10T11:00:00+08:00",
+            },
+        ),
+    ],
+)
+async def test_untrusted_container_needs_confirmation(client, app, db_session, name, args):
+    bot, user, task = await group(db_session, app, "新建一个")
+    await fully_connected(db_session, app, bot, user)
+    with respx.mock:
+        out = await call(client, app, task, name, args)
+    assert out["status"] == "pending_confirmation"
+
+
+async def test_no_container_still_runs_directly(client, app, db_session):
+    bot, user, task = await group(db_session, app, "新建一篇")
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = mock.post(f"{OPEN}/docx/v1/documents").mock(
+            return_value=httpx.Response(
+                200, json={"code": 0, "data": {"document": {"document_id": "DocToken1234"}}}
+            )
+        )
+        out = await call(client, app, task, "feishu_create_document", {"title": "周报"})
+    assert "error" not in out and out.get("status") != "pending_confirmation"
+    assert route.call_count == 1
+
+
+async def test_a_linked_container_runs_directly(client, app, db_session):
+    bot, user, task = await group(db_session, app, "放这里")
+    task.payload = {**task.payload, "doc_links": [FOLDER]}
+    await db_session.commit()
+    await fully_connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = mock.post(f"{OPEN}/docx/v1/documents").mock(
+            return_value=httpx.Response(
+                200, json={"code": 0, "data": {"document": {"document_id": "DocToken1234"}}}
+            )
+        )
+        out = await call(
+            client, app, task, "feishu_create_document", {"title": "周报", "folder_token": FOLDER}
+        )
+    assert out.get("status") != "pending_confirmation" and route.call_count == 1
+
+
+async def test_a_folder_created_this_turn_is_trusted(client, app, db_session):
+    bot, user, task = await group(db_session, app, "建个文件夹放进去")
+    await fully_connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        mock.post(f"{OPEN}/drive/v1/files/create_folder").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {"token": FOLDER}})
+        )
+        route = mock.post(f"{OPEN}/docx/v1/documents").mock(
+            return_value=httpx.Response(
+                200, json={"code": 0, "data": {"document": {"document_id": "DocToken1234"}}}
+            )
+        )
+        await call(client, app, task, "feishu_create_folder", {"name": "夹"})
+        out = await call(
+            client, app, task, "feishu_create_document", {"title": "周报", "folder_token": FOLDER}
+        )
+    assert out.get("status") != "pending_confirmation" and route.call_count == 1
+
+
+async def test_the_space_of_a_linked_wiki_page_is_trusted(client, app, db_session):
+    bot, user, task = await group(db_session, app, f"在 {WIKI} 下面建一页")
+    await fully_connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        mock.get(f"{OPEN}/wiki/v2/spaces/get_node").mock(
+            return_value=httpx.Response(
+                200,
+                json={"code": 0, "data": {"node": {"obj_token": "X", "space_id": "SpaceId12345"}}},
+            )
+        )
+        route = mock.post(f"{OPEN}/wiki/v2/spaces/SpaceId12345/nodes").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {"node": {}}})
+        )
+        out = await call(
+            client,
+            app,
+            task,
+            "feishu_wiki_create_node",
+            {"space_id": "SpaceId12345", "title": "页"},
+        )
+    assert out.get("status") != "pending_confirmation" and route.call_count == 1
+
+
+async def test_copy_to_an_untrusted_folder_needs_confirmation(client, app, db_session):
+    bot, user, task = await group(db_session, app, f"复制 {DOC}")
+    await fully_connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = mock.post(f"{OPEN}/drive/v1/files/DocToken1234/copy").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {}})
+        )
+        mock.get(f"{OPEN}/wiki/v2/spaces/get_node").mock(
+            return_value=httpx.Response(200, json={"code": 131005, "msg": "not found"})
+        )
+        out = await call(
+            client,
+            app,
+            task,
+            "feishu_copy_file",
+            {
+                "token": "DocToken1234",
+                "type": "docx",
+                "name": "副本",
+                "folder_token": "EvilFolder12",
+            },
+        )
+    assert out["status"] == "pending_confirmation" and route.call_count == 0
+
+
+async def test_lapsed_authorization_sends_a_card(client, app, db_session, monkeypatch):
+    bot, user, task = await group(db_session, app, f"写到 {DOC}")
+    await fully_connected(db_session, app, bot, user)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.expires_at = utcnow() - timedelta(hours=1)
+    await db_session.commit()
+
+    async def scopes(*a, **k):
+        return ALL_SCOPES
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+    with respx.mock as mock:
+        mock.post(service.TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"error": "invalid_grant"})
+        )
+        device(mock)
+        out = await call(client, app, task, "feishu_append_document", BLOCKS)
+    assert out["status"] == "authorization_sent"
+    assert (await db_session.scalars(select(FeishuAuthWait))).one().status == "waiting"
+    item = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    assert item.target == {"user_id": "human"}
+
+
+async def _waiting(db_session, bot, user, task):
+    wait = FeishuAuthWait(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_group",
+        origin_task_id=task.id,
+        need="general",
+        status="waiting",
+        expires_at=utcnow() + resume.AWAIT_TTL,
+    )
+    db_session.add(wait)
+    await db_session.commit()
+    return wait
+
+
+async def test_tick_does_not_resume_a_stopped_origin(app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    task.cancel_requested_at = utcnow()
+    await db_session.commit()
+    wait = await _waiting(db_session, bot, user, task)
+    async with app.state.session_factory() as session:
+        assert await resume.tick(session, utcnow(), app.state.cipher) == 0
+        await session.commit()
+    await db_session.refresh(wait)
+    assert wait.status == "expired"
+
+
+async def test_tick_does_not_resume_a_cancelled_origin(app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    task.status = "cancelled"
+    await db_session.commit()
+    wait = await _waiting(db_session, bot, user, task)
+    async with app.state.session_factory() as session:
+        assert await resume.tick(session, utcnow(), app.state.cipher) == 0
+        await session.commit()
+    await db_session.refresh(wait)
+    assert wait.status == "expired"
+
+
+def _intake():
+    return SimpleNamespace()
+
+
+def _stale_ctx():
+    async def get(key, default=None):
+        return 10
+
+    return SimpleNamespace(settings_store=SimpleNamespace(get=get))
+
+
+async def test_resumed_turn_is_not_held_as_stale(app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    await _waiting(db_session, bot, user, task)
+    async with app.state.session_factory() as session:
+        assert await resume.tick(session, utcnow(), app.state.cipher) == 1
+        await session.commit()
+    again = await db_session.scalar(select(Task).where(Task.dedupe_key.like("feishu-auth:%")))
+    assert again.payload["stale_confirmed"] is True
+    old = queued_batch.Entry("x", datetime.now(UTC) - timedelta(hours=1))
+    assert not await queued_batch.hold_if_stale(db_session, _stale_ctx(), _intake(), again, [old])
+
+
+async def test_confirm_resume_is_not_held_as_stale(client, app, db_session, db_engine):
+    bot, _, task, state = await pending_delete(client, app, db_session)
+    click = await press(db_session, bot, task, state.id, "cancel")
+    await run_click(db_session, db_engine, click)
+    again = (await resumes(db_session))[0]
+    assert again.payload["stale_confirmed"] is True
