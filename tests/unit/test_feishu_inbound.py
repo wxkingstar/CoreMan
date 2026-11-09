@@ -256,3 +256,46 @@ def test_group_observe_admits_unmentioned_group_messages():
     # 私聊不受影响；@ 它的消息照旧 mentions_bot。
     mentioned = normalize_event(RAW, **{**KW, "observe": True})
     assert mentioned is not None and mentioned.mentions_bot
+
+
+def _card_event(sender_type: str, card: dict) -> dict:
+    raw = copy.deepcopy(RAW)
+    raw["event"]["sender"] = {"sender_type": sender_type, "sender_id": {"open_id": "ou_other"}}
+    raw["event"]["message"].update(
+        message_type="interactive", content=json.dumps(card), mentions=[]
+    )
+    return raw
+
+
+def test_card_from_another_bot_becomes_text_without_link_targets():
+    card = {
+        "title": "Monitor   alert",
+        "elements": [
+            [
+                {"tag": "text", "text": "Memory usage\n"},
+                {"tag": "a", "href": "https://example.com/?token=signed", "text": "instance-1"},
+            ],
+            [{"tag": "button", "text": {"tag": "plain_text", "content": "Details"}}],
+            [{"tag": "img", "image_key": "img_1"}],
+        ],
+    }
+    message = normalize_event(_card_event("bot", card), **KW, allow_bot=True, observe=True)
+    assert message is not None
+    assert message.parts[0].text == "Monitor alert\nMemory usage\ninstance-1Details"
+    assert "signed" not in message.parts[0].text
+
+
+def test_card_text_is_bounded_and_tolerates_unknown_shapes():
+    long_card = {"elements": [[{"tag": "text", "text": "x" * 20_000}]]}
+    message = normalize_event(_card_event("bot", long_card), **KW, allow_bot=True, observe=True)
+    assert len(message.parts[0].text) == 16_000
+    odd = normalize_event(
+        _card_event("bot", {"elements": "nope", "title": 3}), **KW, allow_bot=True, observe=True
+    )
+    assert odd.parts[0].text == ""
+
+
+def test_card_from_a_person_stays_unsupported():
+    message = normalize_event(_card_event("user", {"title": "t"}), **KW, observe=True)
+    assert message is not None
+    assert message.parts[0].type != "text"
