@@ -30,6 +30,7 @@ from coreman.runtime.worker.chat.personal import configure as personal_configure
 from coreman.runtime.worker.chat.personal import feishu_guidance
 from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
 from tests.api.test_feishu_personal import grant, rpc, value
+from tests.api.test_feishu_personal import setup as personal_setup
 from tests.api.test_feishu_personal_worker import intake_for
 from tests.integration.worker_helpers import build_ctx
 
@@ -857,8 +858,6 @@ async def test_write_tools_are_refused_outside_ordinary_group_turns(
 
 
 async def test_the_resume_note_is_added_for_an_authorized_private_turn(db_session, app, db_engine):
-    from tests.api.test_feishu_personal import setup as personal_setup
-
     bot, user, task = await personal_setup(db_session, app)
     task.payload = {**task.payload, resume.PAYLOAD_KEY: "wait-id"}
     await db_session.commit()
