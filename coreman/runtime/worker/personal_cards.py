@@ -176,7 +176,7 @@ async def handle_selection(
         elements = [
             {
                 "tag": "markdown",
-                "content": f"**已选择：{title}**\n授权后回私聊回复“已授权”。",
+                "content": f"**已选择：{title}**\n授权后会自动继续。",
             },
             {
                 "tag": "button",

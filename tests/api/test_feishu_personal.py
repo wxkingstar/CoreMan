@@ -130,16 +130,27 @@ def available_personal_scopes(monkeypatch):
     monkeypatch.setattr(permissions, "app_user_scopes", scopes)
 
 
-async def test_mcp_cannot_start_authorization_without_human_selection(client, app, db_session):
+async def test_mcp_authorize_never_returns_a_link_to_the_agent(client, app, db_session):
     _, user, task = await setup(db_session, app)
     with respx.mock as mock:
+        mock.post("https://accounts.feishu.cn/oauth/v1/device_authorization").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "device_code": "device",
+                    "verification_uri_complete": "https://accounts.feishu.cn/verify",
+                    "expires_in": 600,
+                    "interval": 5,
+                },
+            )
+        )
         out = value(
             await client.post(
                 URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
             )
         )
-        assert out["status"] == "selection_required"
-        assert not mock.calls
+    assert out["status"] == "authorization_sent"
+    assert "authorization_url" not in out and "accounts.feishu.cn" not in json.dumps(out)
 
 
 async def test_long_mail_bodies_fit_in_one_tool_call(client, app, db_session):
@@ -283,14 +294,6 @@ async def test_device_authorization_is_durable_encrypted_and_read_only(client, a
             )
         )
         await start_selected(db_session, app, task, user)
-        out = value(
-            await client.post(
-                URL, headers=await headers(app, task, user), json=rpc("feishu_authorize")
-            )
-        )
-    assert out["status"] == "pending" and out["authorization_url"].startswith(
-        "https://accounts.feishu.cn/"
-    )
     from urllib.parse import parse_qs
 
     scopes = parse_qs(route.calls[0].request.content.decode())["scope"][0]
@@ -299,7 +302,7 @@ async def test_device_authorization_is_durable_encrypted_and_read_only(client, a
 
     row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
     assert row.pending_enc.startswith("enc:") and "device-secret" not in row.pending_enc
-    assert "device-secret" not in json.dumps(out) and row.user_id == user.id
+    assert row.user_id == user.id
 
 
 @pytest.mark.parametrize("mismatch", ["user", "tenant", "open_id"])

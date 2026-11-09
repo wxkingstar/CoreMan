@@ -13,9 +13,10 @@ from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.core.db.models import ChatSession
 from coreman.core.feishu_docs import policy, tools
+from coreman.core.feishu_personal import files
 
 router = APIRouter(tags=["feishu-docs"])
-MAX_BODY = 16_384
+MAX_BODY = 262_144
 
 
 @router.post("/api/runtime/feishu-docs/mcp")
@@ -58,7 +59,12 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             return mcp_rpc.error(rid, -32602, "Invalid params")
         try:
             value = await tools.dispatch(
-                session, cipher, scope, params["name"], params.get("arguments", {})
+                session,
+                cipher,
+                scope,
+                params["name"],
+                params.get("arguments", {}),
+                files.FileRelay(request.app.state.settings, cipher),
             )
         except Exception:
             # 上游异常可能带着令牌或文档内容，不进全局日志。

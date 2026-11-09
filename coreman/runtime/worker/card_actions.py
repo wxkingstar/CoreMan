@@ -10,10 +10,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
@@ -21,6 +22,7 @@ from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import busy_choice, interactions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
+from coreman.core.feishu_personal import inflow
 from coreman.core.i18n.messages import msg
 from coreman.core.personal_credentials.policy import CARD_PREFIX
 from coreman.core.wecom.cards import (
@@ -92,7 +94,11 @@ class CardActionHandler:
                         OutboxItem.payload["_feishu_message_id"].astext
                         == str(inbound.reply_context.get("message_id") or ""),
                         OutboxItem.payload["card"]["task_id"].astext == task_id,
-                        OutboxItem.target["chat_id"].astext == inbound.chat_id,
+                        or_(
+                            OutboxItem.target["chat_id"].astext == inbound.chat_id,
+                            OutboxItem.target["user_id"].astext
+                            == str(inbound.sender_platform_user_id or ""),
+                        ),
                     )
                 )
                 if sent is None:
@@ -110,13 +116,15 @@ class CardActionHandler:
                 ctx.log.info("card_action_done", result=result)
                 return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
+                from coreman.core.feishu_docs import confirm
+                from coreman.runtime.worker.group_write_cards import handle as handle_group_write
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
-                handle = (
-                    handle_schedule
-                    if action.get("event_key") == "personal_schedule"
-                    else handle_selection
-                )
+                handle: Callable[..., Awaitable[str]] = {
+                    "personal_schedule": handle_schedule,
+                    inflow.UPGRADE_EVENT: inflow.handle_upgrade,
+                    confirm.CARD_EVENT: handle_group_write,
+                }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
                     session, ctx.task.id, status="succeeded", result={"card": result}

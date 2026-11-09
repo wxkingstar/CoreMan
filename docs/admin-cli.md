@@ -471,7 +471,7 @@ coreman me wecom-scan-cancel --as alice
 coreman me wecom-unbind --yes --as alice
 ```
 
-飞书个人授权要在飞书私聊里给 AI 员工发「连接飞书」，再由本人点击授权卡片完成，命令行只能查看和撤销。
+飞书个人授权由本人点击授权卡片完成（用到飞书能力时 AI 员工会自动私信发卡，也可私聊发「连接飞书」手动选范围），命令行只能查看和撤销。
 
 API 令牌（外部程序以本人身份给 AI 员工下任务，见 [通过 API 驱动 AI 员工](features/api-tasks.md)）。明文只在新建时打印一次：
 

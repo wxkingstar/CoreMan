@@ -1401,3 +1401,79 @@ async def test_outbox_short_reply_quotes_the_message_it_answers(db_session, db_e
     target = f"/open-apis/im/v1/messages/{api_id('om_9')}/reply"
     (body,) = [b for _, p, b in api.calls if p == target]
     assert body["msg_type"] == "text" and json.loads(body["content"]) == {"text": "我看一下。"}
+
+
+async def _direct_card_round(db_session, db_engine, api, payload):
+    bot, _row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="direct:1",
+            target={"user_id": "human"},
+            payload={"card": {"title": "t", "task_id": "x"}, **payload},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    return factory
+
+
+class DmUnreachable(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if (kwargs.get("params") or {}).get("receive_id_type") == "user_id":
+            self.calls.append((method, path, kwargs.get("json") or {}))
+            raise FeishuError(230013)
+        return await super().call(method, path, **kwargs)
+
+
+async def test_card_is_sent_to_a_user_id(db_session, db_engine):
+    class Capture(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            self.params = getattr(self, "params", []) + [kwargs.get("params")]
+            return await super().call(method, path, **kwargs)
+
+    api = Capture()
+    await _direct_card_round(db_session, db_engine, api, {})
+    sent = [
+        b
+        for _, p, b in api.calls
+        if p == "/open-apis/im/v1/messages" and b["msg_type"] == "interactive"
+    ]
+    assert len(sent) == 1
+    assert {"receive_id_type": "user_id"} in api.params
+    assert sent[0]["receive_id"] == "human"
+
+
+async def test_unreachable_dm_falls_back_to_a_group_notice(db_session, db_engine):
+    api = DmUnreachable()
+    factory = await _direct_card_round(
+        db_session,
+        db_engine,
+        api,
+        {"_dm_fallback": {"chat_id": "oc1", "user_id": "human", "text": "请私聊授权"}},
+    )
+    posts = [
+        b for _, p, b in api.calls if p == "/open-apis/im/v1/messages" and b["msg_type"] == "post"
+    ]
+    assert len(posts) == 1
+    assert json.loads(posts[0]["content"])["zh_cn"]["content"][0] == [
+        {"tag": "at", "user_id": "human"}
+    ]
+    async with factory() as session:
+        item = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key == "direct:1"))
+        assert item.status == "sent"
+
+
+async def test_unreachable_dm_without_fallback_still_fails(db_session, db_engine):
+    api = DmUnreachable()
+    factory = await _direct_card_round(db_session, db_engine, api, {})
+    assert not [b for _, p, b in api.calls if b.get("msg_type") == "post"]
+    async with factory() as session:
+        item = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key == "direct:1"))
+        assert item.status != "sent"
