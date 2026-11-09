@@ -25,8 +25,8 @@ CHAT = "oc_group"
 ALERT_BOT = "on_alert_bot"
 
 
-async def setup(session, mode="on"):
-    bot, _, _ = await seed_bot(session)
+async def setup(session, mode="on", env=None):
+    bot, _, _ = await seed_bot(session, env=env)
     bot.platform = "feishu"
     bot.group_observe = mode
     bot.group_observe_scope = "处理线上问题"
@@ -214,6 +214,26 @@ async def test_intake_cancels_when_service_user_disabled(db_engine, db_session):
     task = await db_session.get(Task, task.id, populate_existing=True)
     assert task.status == "cancelled" and task.error_code == "alert_source_unavailable"
     assert await db_session.get(Bot, bot.id) is not None
+
+
+async def test_alert_turn_gets_no_write_credentials(db_engine, db_session):
+    from coreman.core.cloud_proxy import policy
+    from coreman.runtime.worker.chat.handler import ChatTaskHandler
+    from tests.fakes.fake_relay import FakeRelay
+
+    bot, _, _ = await setup(db_session, env={"SKILL_WRITE_TOKEN": "s3cret-value"})
+    task = await alert(db_session, bot, "m1", "告警名称: x")
+    await db_session.execute(update(Task).where(Task.id == task.id).values(status="running"))
+    await db_session.commit()
+    task = await db_session.get(Task, task.id, populate_existing=True)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: fake.client())
+    ctx.cloud_proxy_ready = True
+    await ChatTaskHandler().run(ctx)
+    env = fake.requests[0]["env_vars"]
+    assert policy.TOKEN_ENV not in env and policy.URL_ENV not in env
+    assert "SKILL_WRITE_TOKEN" not in env
+    assert "s3cret-value" not in env.values()
 
 
 def test_alert_key_priority():
