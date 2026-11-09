@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.db.models import Bot, FeishuGroupAction, InboundEvent, InteractionState, Task
+from coreman.core.feishu_docs import resume
 from coreman.core.feishu_docs import write_policy as wp
 from coreman.core.feishu_docs.policy import DocsScope
 from coreman.core.timeutils import utcnow
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 CARD_EVENT = "feishu_group_write"
 KIND = "feishu_group_write"
 TTL = timedelta(minutes=10)
-RESULT_KEY = "feishu_group_write_result"
+RESULT_KEY = resume.CONFIRM_RESULT_KEY
 MAX_VALUE = 500
 TITLES = {
     "feishu_calendar_update_event": "修改日程",
@@ -110,6 +111,16 @@ async def propose(
 ) -> dict[str, Any]:
     from coreman.core.feishu_docs import write_tools
 
+    raw = scope.event.payload.get("raw") or {}
+    if (
+        scope.event.kind != "message"
+        or (raw.get("header") or {}).get("event_type") == "card.action.trigger"
+    ):
+        # 点卡片开的回合过不了 group_card_scope 的来源核验，发出去的确认卡永远点不动。
+        return {
+            "error": "confirmation_unavailable",
+            "hint": "这一轮由卡片按钮触发，无法发确认卡。请提问人直接发一条消息说明要做的事。",
+        }
     # 按任务串行，同参数并发提议时只出一张卡。
     await session.scalar(select(Task.id).where(Task.id == scope.task.id).with_for_update())
     prefix = f"{scope.task.id}:{digest}:"
@@ -254,6 +265,7 @@ async def handle(
             item = None
     if item is None or (name == "feishu_edit_document" and args.command == "overwrite"):
         state.status = "cancelled"
+        write_tools.record(session, docs_scope, name, "confirm", target, "failed", digest)
         await _update(session, bot, inbound, "这项操作不允许在群里执行，没有执行。")
         return "feishu_group_write_refused"
     requester = await access.requester(session, docs_scope)
@@ -289,7 +301,11 @@ async def _resume(session: AsyncSession, origin: Task, state: InteractionState, 
             session_key=origin.session_key,
             inbound_event_id=origin.inbound_event_id,
             dedupe_key=f"feishu-group-write:{state.id}:resume",
-            payload={**origin.payload, RESULT_KEY: note, "serialize_session": True},
+            payload={
+                **{k: v for k, v in origin.payload.items() if k != resume.PAYLOAD_KEY},
+                RESULT_KEY: note,
+                "serialize_session": True,
+            },
         ),
     )
 

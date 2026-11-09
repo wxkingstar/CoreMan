@@ -19,6 +19,8 @@ from coreman.core.feishu_personal.service import PersonalError
 AWAIT_TTL = inflow.WAIT_TTL
 BATCH = 20
 PAYLOAD_KEY = "feishu_auth_resume"
+# 确认卡续接的标记，定义在这里免得和 confirm 互相导入。
+CONFIRM_RESULT_KEY = "feishu_group_write_result"
 
 
 async def _poll(
@@ -95,7 +97,7 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
                 inbound_event_id=origin.inbound_event_id,
                 dedupe_key=f"feishu-auth:{row.id}:resume",
                 payload={
-                    **origin.payload,
+                    **{k: v for k, v in origin.payload.items() if k != CONFIRM_RESULT_KEY},
                     PAYLOAD_KEY: str(row.id),
                     # 来源那一轮可能还没结束：同一会话串行，等它收尾再续接。
                     "serialize_session": True,

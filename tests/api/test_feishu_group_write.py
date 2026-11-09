@@ -1,5 +1,6 @@
 """群聊以提问人身份写入。"""
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -10,6 +11,7 @@ from sqlalchemy import select
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
+    FeishuAuthWait,
     FeishuGroupAction,
     FeishuPersonalGrant,
     InboundEvent,
@@ -19,7 +21,8 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
-from coreman.core.feishu_docs import confirm, policy, tools, write_policy, write_tools
+from coreman.core.feishu_docs import confirm, policy, resume, tools, write_policy, write_tools
+from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat.feishu_docs import configure
 from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
@@ -510,18 +513,30 @@ async def test_new_proposal_allowed_once_the_earlier_one_closed(client, app, db_
     assert len((await db_session.scalars(select(OutboxItem))).all()) == 2
 
 
-async def test_stored_arguments_are_never_logged(client, app, db_session, db_engine, caplog):
-    secret = "evt-private-content"
-    bot, user, task, state = await pending_delete(
-        client, app, db_session, args={"calendar_id": "cal", "event_id": secret}
-    )
-    pressed = await press(db_session, bot, task, state.id)
+async def test_stored_arguments_are_never_logged(
+    client, app, db_session, db_engine, caplog, capsys
+):
+    caplog.set_level(logging.INFO)
+    secret = "private-document-body"
+    bot, user, task = await group(db_session, app, "随便写点")
+    await connected(db_session, app, bot, user)
+    args = {"document_id": "DocToken1234", "blocks": [{"type": "text", "text": secret}]}
     with respx.mock as mock:
-        mock.delete(url__regex=r".*/calendars/cal/events/.*").mock(
-            return_value=httpx.Response(200, json={"code": 0, "data": {}})
-        )
-        await run_click(db_session, db_engine, pressed)
-    assert secret not in caplog.text
+        route = append(mock)
+        out = await call(client, app, task, "feishu_append_document", args)
+        assert out["status"] == "pending_confirmation"
+        state = await db_session.scalar(select(InteractionState))
+        pressed = await press(db_session, bot, task, state.id)
+        assert await run_click(db_session, db_engine, pressed) == "feishu_group_write_done"
+    assert route.call_count == 1
+    assert secret not in caplog.text and secret not in capsys.readouterr().out
+
+
+def test_long_values_are_truncated_on_the_card():
+    text = confirm._lines({"content": "x" * 600, "short": "y"})
+    long_row, short_row = text.split("\n")
+    assert long_row == "- content：" + '"' + "x" * (confirm.MAX_VALUE - 1) + "…"
+    assert short_row == '- short："y"'
 
 
 async def test_asker_confirms_and_it_runs_once_as_the_asker(client, app, db_session, db_engine):
@@ -709,6 +724,8 @@ async def test_stored_state_cannot_run_a_refused_tool(
         result = await run_click(db_session, db_engine, pressed)
     assert result == "feishu_group_write_refused" and route.call_count == 0
     assert state.status == "cancelled"
+    assert await statuses(db_session) == ["failed", "pending_confirmation"]
+    assert "不允许" in await last_update(db_session)
 
 
 async def test_origin_that_is_not_a_typed_message_cannot_confirm(
@@ -737,3 +754,57 @@ async def test_resumed_turn_is_told_the_result(client, app, db_session, db_engin
     ctx.turn_notes = []
     await configure(db_session, ctx, intake, uuid.uuid4(), "base", {})
     assert any(note.startswith("- 飞书操作：用户取消") for note in ctx.turn_notes)
+
+
+async def test_confirm_resume_drops_the_auth_resume_marker(client, app, db_session, db_engine):
+    bot, user, task, state = await pending_delete(client, app, db_session)
+    task.payload = {**task.payload, resume.PAYLOAD_KEY: "earlier-wait"}
+    await db_session.commit()
+    pressed = await press(db_session, bot, task, state.id, "cancel")
+    await run_click(db_session, db_engine, pressed)
+    [again] = await resumes(db_session)
+    assert confirm.RESULT_KEY in again.payload and resume.PAYLOAD_KEY not in again.payload
+
+
+async def test_auth_resume_drops_the_confirm_result(app, db_session):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    task.payload = {**task.payload, confirm.RESULT_KEY: "用户取消了这次操作，不要重试。"}
+    wait = FeishuAuthWait(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_group",
+        origin_task_id=task.id,
+        need="general",
+        status="waiting",
+        expires_at=utcnow() + resume.AWAIT_TTL,
+    )
+    db_session.add(wait)
+    await db_session.commit()
+    async with app.state.session_factory() as session:
+        assert await resume.tick(session, utcnow(), app.state.cipher) == 1
+        await session.commit()
+    again = await db_session.scalar(select(Task).where(Task.dedupe_key.like("feishu-auth:%")))
+    assert again.payload[resume.PAYLOAD_KEY] == str(wait.id)
+    assert confirm.RESULT_KEY not in again.payload
+
+
+@pytest.mark.parametrize("via", ["kind", "raw"])
+async def test_turn_opened_by_a_card_click_refuses_to_propose(app, db_session, via):
+    # 经 MCP 入口时 policy.scope 已先挡掉这种回合（403），这里直接测 propose 自身。
+    bot, user, task = await group(db_session, app)
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    if via == "kind":
+        event.kind = "card_action"
+    else:
+        raw = event.payload["raw"]
+        header = {**raw["header"], "event_type": "card.action.trigger"}
+        event.payload = {**event.payload, "raw": {**raw, "header": header}}
+    await db_session.commit()
+    scope = policy.DocsScope(task, bot, event, "oc_group", user.id)
+    tool = "feishu_calendar_delete_event"
+    out = await confirm.propose(db_session, scope, tool, DELETE, None, "digest")
+    assert out["error"] == "confirmation_unavailable" and out["hint"]
+    assert (await db_session.scalars(select(InteractionState))).all() == []
+    assert (await db_session.scalars(select(OutboxItem))).all() == []
+    assert await statuses(db_session) == []
