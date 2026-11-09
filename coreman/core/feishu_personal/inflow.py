@@ -285,6 +285,10 @@ async def handle_upgrade(
     except (PersonalError, ValueError):
         await _update(session, bot, inbound, "暂时无法生成授权链接，请稍后再试。")
         return "personal_authorization_unavailable"
+    # 一个人只有一张卡：这一点同时放行他在其他聊天里等着的几轮。
+    for other in await _live(session, scope):
+        if other.status == "offered":
+            other.status = "waiting"
     wait.status = "waiting"
     await _update(
         session,

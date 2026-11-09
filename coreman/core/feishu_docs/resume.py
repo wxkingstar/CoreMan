@@ -1,75 +1,28 @@
-"""提问人的飞书授权还差一步时，记下这一轮；授权完成后自动续接，不用他再发一遍。
+"""提问人的飞书授权还差一步时，等他完成后自动续接。私聊和群聊共用。
 
-飞书授权是设备码流程：用户点完同意后，要有人来查一次结果才会落库。私聊里由 AI 员工
-核验，群里没人会去查，所以看护进程替这些等待中的提问人查，查到已连接就续接原来那条消息。
+飞书授权是设备码流程：用户点完同意后要有人查一次才落库，看护进程替他查。
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, FeishuDocConsent, FeishuPersonalGrant, Task
-from coreman.core.feishu_docs.links import Link
-from coreman.core.feishu_docs.policy import DocsScope
-from coreman.core.feishu_personal import policy, service
+from coreman.core.db.models import Bot, FeishuAuthWait, FeishuPersonalGrant, Task
+from coreman.core.feishu_personal import inflow, policy, service
 from coreman.core.feishu_personal.service import PersonalError
-from coreman.core.timeutils import utcnow
 
-AWAIT_TTL = timedelta(minutes=30)
+AWAIT_TTL = inflow.WAIT_TTL
 BATCH = 20
-PAYLOAD_KEY = "feishu_docs_resume"
-
-
-async def wait_for_authorization(
-    session: AsyncSession, scope: DocsScope, link: Link, *, now: datetime | None = None
-) -> None:
-    """本群本人只留一条等待：同一段时间里问的几篇文档并到一起，续接最近这一轮。"""
-    if scope.speaker_user_id is None:
-        return
-    now = now or utcnow()
-    row = (
-        await session.scalars(
-            select(FeishuDocConsent)
-            .where(
-                FeishuDocConsent.bot_id == scope.bot.id,
-                FeishuDocConsent.chat_id == scope.chat_id,
-                FeishuDocConsent.user_id == scope.speaker_user_id,
-                FeishuDocConsent.status == "awaiting_auth",
-                FeishuDocConsent.expires_at > now,
-            )
-            .with_for_update()
-            .limit(1)
-        )
-    ).first()
-    if row is None:
-        session.add(
-            FeishuDocConsent(
-                bot_id=scope.bot.id,
-                user_id=scope.speaker_user_id,
-                chat_id=scope.chat_id,
-                tokens=[link.token],
-                urls=[link.url],
-                status="awaiting_auth",
-                share_offered=False,
-                shared=False,
-                origin_task_id=scope.task.id,
-                expires_at=now + AWAIT_TTL,
-            )
-        )
-        await session.flush()
-        return
-    if link.token not in row.tokens:
-        row.tokens, row.urls = [*row.tokens, link.token], [*row.urls, link.url]
-    row.origin_task_id, row.expires_at = scope.task.id, now + AWAIT_TTL
+PAYLOAD_KEY = "feishu_auth_resume"
 
 
 async def _poll(
-    session: AsyncSession, cipher: Cipher, row: FeishuDocConsent, origin: Task, now: datetime
+    session: AsyncSession, cipher: Cipher, row: FeishuAuthWait, origin: Task, now: datetime
 ) -> None:
     """授权进行中且到了该查的时候，查一次飞书的授权结果。"""
     grant = await session.get(
@@ -104,15 +57,20 @@ async def _poll(
 
 
 async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
-    """替等待中的提问人查授权结果；已连接的续接原来那一轮。返回续接的条数。"""
+    """替等待中的提问人查授权结果；已连接且档位够的续接原来那一轮。返回续接的条数。"""
+    expired = await session.scalars(
+        select(FeishuAuthWait)
+        .where(FeishuAuthWait.status.in_(("offered", "waiting")), FeishuAuthWait.expires_at <= now)
+        .with_for_update(skip_locked=True)
+        .limit(BATCH)
+    )
+    for row in expired:
+        row.status = "expired"
     rows = list(
         await session.scalars(
-            select(FeishuDocConsent)
-            .where(
-                FeishuDocConsent.status == "awaiting_auth",
-                FeishuDocConsent.expires_at > now,
-            )
-            .order_by(FeishuDocConsent.created_at)
+            select(FeishuAuthWait)
+            .where(FeishuAuthWait.status == "waiting", FeishuAuthWait.expires_at > now)
+            .order_by(FeishuAuthWait.created_at)
             .with_for_update(skip_locked=True)
             .limit(BATCH)
         )
@@ -125,9 +83,8 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
             continue
         await _poll(session, cipher, row, origin, now)
         grant = await session.get(FeishuPersonalGrant, (row.bot_id, row.user_id))
-        if grant is None or grant.status != "connected" or not grant.token_enc:
+        if not inflow.satisfied(grant, row.need):
             continue
-        payload = {key: value for key, value in origin.payload.items() if key != "doc_links"}
         task = await tasks.enqueue(
             session,
             tasks.NewTask(
@@ -136,15 +93,15 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
                 user_id=origin.user_id,
                 session_key=origin.session_key,
                 inbound_event_id=origin.inbound_event_id,
-                dedupe_key=f"feishu-docs:{row.id}:resume",
+                dedupe_key=f"feishu-auth:{row.id}:resume",
                 payload={
-                    **payload,
+                    **origin.payload,
                     PAYLOAD_KEY: str(row.id),
                     # 来源那一轮可能还没结束：同一会话串行，等它收尾再续接。
                     "serialize_session": True,
                 },
             ),
         )
-        row.status, row.decided_at = "resumed", now
+        row.status = "resumed"
         resumed += task is not None
     return resumed

@@ -263,3 +263,53 @@ async def test_a_group_origin_card_goes_to_the_user_only(app, db_session, monkey
     assert "accounts.feishu.cn" in str(item.payload["card"])
     rows = [i for i in await db_session.scalars(select(OutboxItem)) if "chat_id" in i.target]
     assert not any("accounts.feishu.cn" in str(i.payload.get("card")) for i in rows)
+
+
+async def test_one_click_releases_every_chat_waiting_for_the_upgrade(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="messages_readonly")
+    await db_session.commit()
+    _stub_scopes(monkeypatch)
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope)
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    elsewhere = FeishuAuthWait(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_group",
+        origin_task_id=task.id,
+        need="general",
+        status="offered",
+        expires_at=utcnow() + inflow.WAIT_TTL,
+    )
+    stale = FeishuAuthWait(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_old",
+        origin_task_id=task.id,
+        need="general",
+        status="offered",
+        expires_at=utcnow() - timedelta(minutes=1),
+    )
+    db_session.add_all([elsewhere, stale])
+    await db_session.commit()
+    click = SimpleNamespace(
+        id=1,
+        chat_id="oc_private",
+        reply_context={"message_id": "om_card"},
+        sender_platform_user_id="human",
+        sender_open_id="ou_human",
+        payload={"raw": {"header": {"tenant_key": "tenant-test"}}},
+    )
+    action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
+    with respx.mock as mock:
+        device(mock)
+        _revoke(mock)
+        out = await inflow.handle_upgrade(
+            db_session, SimpleNamespace(cipher=app.state.cipher), bot, click, action
+        )
+    assert out == "personal_authorization_pending"
+    await db_session.refresh(elsewhere)
+    await db_session.refresh(stale)
+    assert wait.status == "waiting" and elsewhere.status == "waiting"
+    assert stale.status == "offered"
