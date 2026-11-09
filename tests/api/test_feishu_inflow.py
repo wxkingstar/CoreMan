@@ -1,5 +1,7 @@
 """用到飞书能力时自动发授权卡。"""
 
+from dataclasses import replace
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -8,6 +10,7 @@ from sqlalchemy import select
 
 from coreman.core.db.models import FeishuAuthWait, FeishuPersonalGrant, OutboxItem
 from coreman.core.feishu_personal import inflow, policy, service
+from coreman.core.timeutils import utcnow
 from tests.api.test_feishu_personal import grant, setup
 
 DEVICE = "https://accounts.feishu.cn/oauth/v1/device_authorization"
@@ -104,13 +107,14 @@ async def test_upgrade_click_is_bound_to_the_waiting_owner(app, db_session, monk
     action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
     ctx = SimpleNamespace(cipher=app.state.cipher)
 
-    def click(sender):
+    def click(sender, tenant="tenant-test"):
         return SimpleNamespace(
             id=1,
             chat_id="oc_private",
             reply_context={"message_id": "om_card"},
             sender_platform_user_id=sender,
             sender_open_id="ou_" + sender,
+            payload={"raw": {"header": {"tenant_key": tenant}}},
         )
 
     out = await inflow.handle_upgrade(db_session, ctx, bot, click("stranger"), action)
@@ -129,3 +133,133 @@ async def test_upgrade_click_is_bound_to_the_waiting_owner(app, db_session, monk
         )
         out = await inflow.handle_upgrade(db_session, ctx, bot, click("human"), action)
     assert out == "personal_authorization_pending" and wait.status == "waiting"
+
+
+def _stub_scopes(monkeypatch):
+    async def scopes(*a, **k):
+        return ["docx:document", "offline_access"]
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+
+
+def _revoke(mock):
+    mock.post("https://accounts.feishu.cn/oauth/v1/revoke").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+
+async def test_a_live_flow_elsewhere_sends_no_second_card(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+    _stub_scopes(monkeypatch)
+    with respx.mock as mock:
+        device(mock)
+        scope = await private_scope(db_session, task, user)
+        await inflow.request(db_session, app.state.cipher, scope)
+        other = replace(scope, chat_id="oc_other")
+        out = await inflow.request(db_session, app.state.cipher, other)
+    assert out["status"] == "authorization_sent"
+    assert len(list(await db_session.scalars(select(OutboxItem)))) == 1
+    waits = list(await db_session.scalars(select(FeishuAuthWait)))
+    assert {w.chat_id for w in waits} == {"oc_private", "oc_other"}
+
+
+async def test_an_expired_device_flow_issues_a_fresh_card(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+    _stub_scopes(monkeypatch)
+    with respx.mock as mock:
+        route = device(mock)
+        scope = await private_scope(db_session, task, user)
+        await inflow.request(db_session, app.state.cipher, scope)
+        row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+        row.pending_expires_at = utcnow() - timedelta(minutes=1)
+        await db_session.flush()
+        out = await inflow.request(db_session, app.state.cipher, scope)
+    assert out["status"] == "authorization_sent" and route.call_count == 2
+    assert len(list(await db_session.scalars(select(OutboxItem)))) == 2
+    assert len(list(await db_session.scalars(select(FeishuAuthWait)))) == 1
+
+
+async def test_a_double_click_keeps_the_link(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="messages_readonly")
+    await db_session.commit()
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope)
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    action = {"level": str(wait.id), "event_key": inflow.UPGRADE_EVENT}
+    ctx = SimpleNamespace(cipher=app.state.cipher)
+    _stub_scopes(monkeypatch)
+    with respx.mock as mock:
+        route = device(mock)
+        _revoke(mock)
+        for n in (1, 2):
+            click = SimpleNamespace(
+                id=n,
+                chat_id="oc_private",
+                reply_context={"message_id": "om_card"},
+                sender_platform_user_id="human",
+                sender_open_id="ou_human",
+                payload={"raw": {"header": {"tenant_key": "tenant-test"}}},
+            )
+            out = await inflow.handle_upgrade(db_session, ctx, bot, click, action)
+            assert out == "personal_authorization_pending"
+    assert route.call_count == 1
+
+
+async def test_a_request_error_leaves_no_wait(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+
+    async def scopes(*a, **k):
+        return []
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+    scope = await private_scope(db_session, task, user)
+    out = await inflow.request(db_session, app.state.cipher, scope)
+    assert out["status"] == "app_permission_missing"
+    assert list(await db_session.scalars(select(FeishuAuthWait))) == []
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+
+
+async def test_a_click_from_another_tenant_is_ignored(app, db_session):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user, authorization_level="messages_readonly")
+    await db_session.commit()
+    scope = await private_scope(db_session, task, user)
+    await inflow.request(db_session, app.state.cipher, scope)
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    card = (await db_session.scalars(select(OutboxItem))).one().payload["card"]
+    value = card["body"]["elements"][1]["behaviors"][0]["value"]
+    click = SimpleNamespace(
+        id=1,
+        chat_id="oc_private",
+        reply_context={"message_id": "om_card"},
+        sender_platform_user_id="human",
+        sender_open_id="ou_human",
+        payload={"raw": {"header": {"tenant_key": "other-tenant"}}},
+    )
+    out = await inflow.handle_upgrade(
+        db_session, SimpleNamespace(cipher=app.state.cipher), bot, click, value
+    )
+    assert out == "ignored" and wait.status == "offered"
+
+
+async def test_a_group_origin_card_goes_to_the_user_only(app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+    _stub_scopes(monkeypatch)
+    scope = await private_scope(db_session, task, user)
+    scope.event.chat_type = "group"
+    scope.event.chat_id = "oc_group"
+    with respx.mock as mock:
+        device(mock)
+        await inflow.request(db_session, app.state.cipher, scope)
+    item = (await db_session.scalars(select(OutboxItem))).one()
+    assert item.target == {"user_id": "human"}
+    fallback = item.payload["_dm_fallback"]
+    assert fallback["chat_id"] == "oc_group" and "http" not in str(fallback)
+    assert "accounts.feishu.cn" in str(item.payload["card"])
+    rows = [i for i in await db_session.scalars(select(OutboxItem)) if "chat_id" in i.target]
+    assert not any("accounts.feishu.cn" in str(i.payload.get("card")) for i in rows)

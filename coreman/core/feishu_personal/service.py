@@ -290,7 +290,7 @@ async def begin_in_flow(
     return await _start_authorization(row, secret, cipher)
 
 
-async def existing_or_create(session: AsyncSession, cipher: Cipher, scope: Scope) -> None:
+async def ensure_grant_row(session: AsyncSession, cipher: Cipher, scope: Scope) -> None:
     await _row(session, cipher, scope)
 
 

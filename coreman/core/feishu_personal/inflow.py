@@ -25,6 +25,12 @@ TARGET_LEVEL = {
     "read_messages": "all_except_send",
     "send_messages": "all",
 }
+_RANK = {"general": 0, "read_messages": 0, "send_messages": 1}
+_APP_UNAVAILABLE = (
+    "app_send_permission_missing",
+    "app_message_permission_missing",
+    "authorization_unavailable",
+)
 _ENOUGH = {
     "general": ("all", "all_except_send", "no_messages"),
     "read_messages": ("all", "all_except_send", "messages_readonly"),
@@ -154,7 +160,7 @@ async def request(
     endpoints_needed: Iterable[str] = (),
 ) -> dict[str, Any]:
     keys = tuple(endpoints_needed)
-    await service.existing_or_create(session, cipher, scope)
+    await service.ensure_grant_row(session, cipher, scope)
     row = await session.get(
         FeishuPersonalGrant, (scope.bot.id, scope.user_id), populate_existing=True
     )
@@ -172,25 +178,52 @@ async def request(
     live = await _live(session, scope)
     now = utcnow()
     same = next((w for w in live if w.chat_id == scope.chat_id), None)
-    if same is not None:
-        # 同一聊天里已有等待：只刷新归属任务和有效期，不再发第二张卡。
-        same.origin_task_id, same.expires_at = scope.task.id, now + WAIT_TTL
-        return {
-            "status": "authorization_sent",
-            "hint": "授权卡片已发到与你的私聊，点完后会自动继续。简短说明后结束本轮。",
-        }
-    wait = FeishuAuthWait(
-        bot_id=scope.bot.id,
-        user_id=scope.user_id,
-        chat_id=scope.chat_id,
-        origin_task_id=scope.task.id,
-        need=need,
-        status="offered" if connected else "waiting",
-        expires_at=now + WAIT_TTL,
+    offered_elsewhere = any(w.status == "offered" for w in live)
+    link_alive = (
+        row.status == "pending"
+        and row.pending_expires_at is not None
+        and row.pending_expires_at > now
     )
-    session.add(wait)
-    await session.flush()
-    if connected:
+    sent = {
+        "status": "authorization_sent",
+        "hint": "授权卡片已发到与你的私聊，点完后会自动继续。简短说明后结束本轮。",
+    }
+    if not (offered_elsewhere or link_alive) and not connected:
+        # 没有可用的卡片：先发起授权，失败就不留等待记录。
+        try:
+            begun = await service.begin_in_flow(session, cipher, scope, TARGET_LEVEL[need])
+        except PersonalError as exc:
+            if exc.code not in _APP_UNAVAILABLE:
+                raise
+            return {
+                "status": "app_permission_missing",
+                "hint": "这个机器人的飞书应用权限不足以发起授权，请联系机器人管理员。",
+            }
+    else:
+        begun = None
+    wait_status = "offered" if connected and not link_alive else "waiting"
+    if same is not None:
+        same.origin_task_id, same.expires_at = scope.task.id, now + WAIT_TTL
+        same.status = wait_status
+        if _RANK[need] > _RANK[same.need]:
+            same.need = need
+        wait = same
+    else:
+        wait = FeishuAuthWait(
+            bot_id=scope.bot.id,
+            user_id=scope.user_id,
+            chat_id=scope.chat_id,
+            origin_task_id=scope.task.id,
+            need=need,
+            status=wait_status,
+            expires_at=now + WAIT_TTL,
+        )
+        session.add(wait)
+        await session.flush()
+    if offered_elsewhere or link_alive:
+        # 同一个人同一时刻只留一张有效卡片，这个聊天只登记等待。
+        return sent
+    if begun is None:
         # 已连接但不够：旧令牌留着，用户点「升级授权」后才作废。
         card = upgrade_card(scope.task.id, wait.id, purpose)
         await _send(session, scope, card, f"feishu-auth:{wait.id}:upgrade")
@@ -198,13 +231,16 @@ async def request(
             "status": "upgrade_offered",
             "hint": "升级授权卡片已私信发给提问人，点完后会自动继续。简短说明后结束本轮。",
         }
-    begun = await service.begin_in_flow(session, cipher, scope, TARGET_LEVEL[need])
     card = link_card(begun["authorization_url"], purpose)
-    await _send(session, scope, card, f"feishu-auth:{wait.id}:link")
-    return {
-        "status": "authorization_sent",
-        "hint": "授权卡片已私信发给提问人，点完后会自动继续。简短说明后结束本轮。",
-    }
+    await _send(session, scope, card, f"feishu-auth:{wait.id}:link:{row.context_epoch}")
+    return sent
+
+
+def _click_tenant(inbound: Any) -> str | None:
+    raw = inbound.payload.get("raw") or {}
+    header, event = raw.get("header") or {}, raw.get("event") or {}
+    operator = event.get("operator") or {}
+    return header.get("tenant_key") or operator.get("tenant_key")
 
 
 async def handle_upgrade(
@@ -223,11 +259,14 @@ async def handle_upgrade(
         row is None
         or inbound.sender_platform_user_id != row.platform_user_id
         or inbound.sender_open_id != row.open_id
+        or _click_tenant(inbound) != row.tenant_key
     ):
         return "ignored"
     origin = await session.get(Task, wait.origin_task_id) if wait.origin_task_id else None
     event = await session.get(InboundEvent, origin.inbound_event_id) if origin else None
-    if wait.status != "offered" or wait.expires_at <= utcnow() or origin is None:
+    if wait.status in AUTH_WAIT_LIVE and wait.expires_at <= utcnow():
+        wait.status = "expired"
+    if wait.status not in AUTH_WAIT_LIVE or origin is None:
         await _update(session, bot, inbound, "这张卡片已过期，再告诉我一次要做的事就行。")
         return "expired"
     scope = policy.Scope(
