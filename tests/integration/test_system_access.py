@@ -345,3 +345,23 @@ async def test_external_provider_keeps_token_and_actual_expiry_and_isolates_syst
     assert before + 1200 <= configs["erp"]["expires_at"] <= int(time.time()) + 1200
     assert configs["cloud"]["cookie_name"] == "bot_token"
     assert configs["cloud"]["expires_in"] == 43200
+
+
+async def test_service_user_gets_system_token(db_session: AsyncSession) -> None:
+    bot, _, cipher = await seed_bot(db_session)
+    service = User(
+        login_name="svc-demo", display_name="服务", email="svc-demo@example.test", source="service"
+    )
+    db_session.add(service)
+    db_session.add(BusinessSystem(key="cloud", name="Cloud", default_for_all_bots=True))
+    await db_session.commit()
+    speaker = Speaker("", service.id, service.login_name, service.display_name)
+    access = await build_system_access(
+        db_session, cipher, bot=bot, speaker=speaker, issuer="coreman", external_key=None
+    )
+    await db_session.commit()
+    assert access.env["COREMAN_USER_SUBJECT"] == "svc-demo"
+    claims = await verify_token(
+        db_session, access.env["BOT_TOKEN_CLOUD"], issuer="coreman", audience="cloud"
+    )
+    assert claims["sub"] == "svc-demo"

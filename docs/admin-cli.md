@@ -304,6 +304,7 @@ coreman teams delete sales --yes
 
 coreman users list [--keyword 词] [--team 团队] [--unassigned] [--role 角色] [--status active|disabled]
 coreman users show alice
+coreman users service-create svc-demo --name 演示服务账号 --email svc-demo@example.com  # 平台管理角色；邮箱前缀要等于登录名
 coreman users set alice --team sales --role team_lead --bot-accessible on
 coreman users enable|disable alice
 ```

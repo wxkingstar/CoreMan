@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import or_, select
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +24,7 @@ from coreman.api.permissions import MANUAL_TRACKED, can_edit_user
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
 from coreman.core.audit import diff_dict, record_audit
-from coreman.core.bots.permissions import MANAGER_ROLES
+from coreman.core.bots.permissions import MANAGER_ROLES, is_manager
 from coreman.core.db.models import Department, Team, User, UserDepartment
 
 router = APIRouter(prefix="/api/admin/users", tags=["users"], dependencies=[Depends(verify_csrf)])
@@ -139,6 +140,79 @@ async def _render(session: AsyncSession, users: list[User], *, full: bool) -> li
         user_out(u, names.get(u.team_id) if u.team_id else None, paths.get(u.id, []), full=full)
         for u in users
     ]
+
+
+SERVICE_LOGIN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+class ServiceUserIn(BaseModel):
+    login_name: str = Field(max_length=64)
+    display_name: str = Field(min_length=1, max_length=200)
+    email: str = Field(max_length=254)
+
+    @field_validator("display_name", "email")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _identity(self) -> ServiceUserIn:
+        if not SERVICE_LOGIN.fullmatch(self.login_name):
+            raise ValueError("登录名只能用小写字母、数字、点、下划线和短横线")
+        prefix, at, domain = self.email.partition("@")
+        if not at or not domain or prefix.lower() != self.login_name:
+            raise ValueError("邮箱前缀必须等于登录名")
+        if not self.display_name:
+            raise ValueError("显示名不能为空")
+        return self
+
+
+@router.post("/service")
+async def create_service_user(
+    body: ServiceUserIn,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """建服务用户：没有平台身份，不能登录，通讯录同步碰不到，只被系统触发的回合使用。
+
+    业务系统令牌的 sub 取邮箱前缀，这里提前拒绝重名，否则令牌会因前缀冲突签发失败。
+    """
+    if actor.status != "active" or not is_manager(actor):
+        raise forbidden()
+    clash = await session.scalar(
+        select(User.id)
+        .where(
+            or_(
+                User.login_name == body.login_name,
+                func.lower(func.split_part(User.email, "@", 1)) == body.login_name,
+            )
+        )
+        .limit(1)
+    )
+    if clash is not None:
+        raise ApiError(409, 409, "登录名或邮箱前缀已被占用")
+    user = User(
+        login_name=body.login_name,
+        display_name=body.display_name,
+        email=body.email,
+        source="service",
+    )
+    session.add(user)
+    await session.flush()
+    await record_audit(
+        session,
+        action="user.service_create",
+        actor_id=actor.id,
+        actor_login=actor.login_name,
+        target_type="user",
+        target_id=str(user.id),
+        diff={"login_name": body.login_name, "source": "service"},
+        ip=client_ip(request),
+    )
+    await session.commit()
+    created = await _load(session, user.id)
+    return {"code": 0, "data": (await _render(session, [created], full=True))[0]}
 
 
 @router.get("")
