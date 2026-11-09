@@ -157,6 +157,7 @@ probe:
 	}
 
 	thinkingDelta := func(text string) {
+		text = capToolDetail(text)
 		sessionStore.LogThinking(sessionID, text)
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
@@ -234,6 +235,7 @@ probe:
 			return
 		}
 		startedTools[item.ID] = true
+		arguments = capToolArguments(arguments)
 		toolCallDelta(item.ID, name, arguments)
 		// Count each native tool once while preserving its process details.
 		// Progress remains thinking content and never creates another tool start.

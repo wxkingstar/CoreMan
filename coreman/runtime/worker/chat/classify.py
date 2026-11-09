@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from coreman.core.i18n.messages import msg
-from coreman.core.relay.client import IncompleteResultError, RelayBusyError
+from coreman.core.relay.client import (
+    IncompleteResultError,
+    RelayBusyError,
+    RelayInterruptedError,
+)
 from coreman.core.wecom.cards import question_brief
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
@@ -64,6 +68,14 @@ class ClassifyStage(ChatStageBase):
                 "runtime_busy",
                 f"RelayBusyError: {out.error}",
                 msg("runtime_busy", locale, relay=pre.relay_label or pre.relay.name),
+            )
+        if isinstance(out.error, RelayInterruptedError):
+            return Verdict(
+                "error",
+                "failed",
+                "run_interrupted",
+                f"RelayInterruptedError: {out.error}",
+                msg("run_interrupted", locale, relay=pre.relay_label or pre.relay.name),
             )
         if out.error is not None:
             name = type(out.error).__name__

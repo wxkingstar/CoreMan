@@ -16,6 +16,7 @@ from coreman.core.relay.client import (
     RelayBusyError,
     RelayClient,
     RelayError,
+    RelayInterruptedError,
 )
 from coreman.core.runtime_nodes.transport import TOTAL_TIMEOUT_EXTENSION, RuntimeQueueTimeout
 from coreman.runtime.gateway_wecom.ws_client import (
@@ -112,6 +113,30 @@ async def test_queue_timeout_surfaces_as_busy_and_declares_total_timeout() -> No
             ]
     # 反向通道按这个总时限排队并计算调用期限
     assert seen == [5400]
+
+
+async def test_node_error_code_survives_as_interrupted_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("execution_failed", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fake"
+    ) as http:
+        client = RelayClient("http://fake", http=http)
+        with pytest.raises(RelayInterruptedError, match="execution_failed"):
+            [
+                e
+                async for e in client.chat_stream(
+                    ChatRequest("m", "s", "u", "/tmp", "s", "claude"), total_timeout=5
+                )
+            ]
+
+
+def test_interrupted_run_tells_the_user_how_to_continue() -> None:
+    verdict = _classify("", Outcome(error=RelayInterruptedError("运行时中断: execution_failed")))
+    assert verdict.error_code == "run_interrupted" and verdict.task_status == "failed"
+    assert verdict.final_text == msg("run_interrupted", "zh", relay="test")
+    assert "execution_failed" in (verdict.error_message or "")
 
 
 def test_busy_runtime_is_classified_apart_from_connection_errors() -> None:

@@ -19,6 +19,7 @@ import httpx
 from coreman.core.db.models import RelayServer
 from coreman.core.relay.sse import SseEvent, SseParser
 from coreman.core.runtime_nodes.transport import (
+    NODE_ERRORS,
     TOTAL_TIMEOUT_EXTENSION,
     ReverseTransport,
     RuntimeQueueTimeout,
@@ -33,6 +34,10 @@ class RelayError(Exception):
 
 class IncompleteResultError(RelayError):
     """流正常读完，却既没有确认终态（finish_reason），也没有 relay 回传的错误。"""
+
+
+class RelayInterruptedError(RelayError):
+    """节点上报调用已失败：任务执行到一半中断，消息里带节点的错误码。"""
 
 
 class RelayBusyError(RelayError):
@@ -274,6 +279,8 @@ class RelayClient:
         except RuntimeQueueTimeout as exc:
             raise RelayBusyError(str(exc)) from exc
         except httpx.HTTPError as exc:
+            if str(exc) in NODE_ERRORS:
+                raise RelayInterruptedError(f"运行时中断: {exc}") from exc
             raise RelayError(f"连接失败: {type(exc).__name__}") from exc
         for event in parser.flush():
             yield event
