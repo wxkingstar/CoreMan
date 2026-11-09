@@ -52,6 +52,8 @@ LEASE_SECONDS = 40
 # 兜底轮询才领到。消费者读库间隔不超过 1 秒，租约最旧也远不到 LEASE_SECONDS。
 LEASE_REFRESH_SECONDS = 10
 TERMINAL = {"done", "failed", "cancelled"}
+# 反向通道把节点的错误帧当作连接错误抛出，异常文本就是帧里的错误码。
+NODE_ERRORS = {"execution_failed", "connection_lost", "control_lost", "response_too_large"}
 # 有 LISTEN 时通知是主路径，轮询只兜底丢通知；没有监听连接时只能靠轮询。
 FALLBACK_POLL_SECONDS = 1.0
 UNLISTENED_POLL_SECONDS = 0.25

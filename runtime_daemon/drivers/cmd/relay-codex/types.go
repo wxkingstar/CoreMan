@@ -1,6 +1,30 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+// maxToolDetailBytes bounds what one tool item adds to the stream. A file_change
+// item carries the whole file: a run of them on large files outpaces the reverse
+// channel's buffer and fails the turn, while the worker only needs the tool name.
+const maxToolDetailBytes = 16 * 1024
+
+func capToolArguments(arguments string) string {
+	if len(arguments) <= maxToolDetailBytes {
+		return arguments
+	}
+	return fmt.Sprintf(`{"truncated":true,"bytes":%d}`, len(arguments))
+}
+
+func capToolDetail(text string) string {
+	if len(text) <= maxToolDetailBytes {
+		return text
+	}
+	kept := strings.ToValidUTF8(text[:maxToolDetailBytes], "")
+	return fmt.Sprintf("%s\n…（内容过长已截断，共 %d 字节）\n", kept, len(text))
+}
 
 // codexEvent is one parsed line of `codex exec --json`. Codex's event schema
 // is item-oriented: every assistant message, command execution, file edit,

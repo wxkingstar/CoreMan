@@ -9,7 +9,7 @@ import httpx
 
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import RelayServer
-from coreman.core.runtime_nodes.transport import ReverseTransport
+from coreman.core.runtime_nodes.transport import NODE_ERRORS, ReverseTransport
 
 OPERATIONS = {
     "workspace-info",
@@ -47,10 +47,6 @@ OPERATIONS = {
     "seat-activate",
     "seat-remove",
 }
-
-
-# 反向通道把节点的错误帧当作连接错误抛出，异常文本就是帧里的错误码。
-NODE_ERRORS = {"execution_failed", "connection_lost", "control_lost", "response_too_large"}
 
 
 class AgentError(Exception):
