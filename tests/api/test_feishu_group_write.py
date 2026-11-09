@@ -1186,3 +1186,8 @@ async def test_confirmed_save_keeps_the_upload_bound_to_the_grant(
         route = upload_route(mock)
         assert await run_click(db_session, db_engine, click) == "feishu_group_write_failed"
     assert route.call_count == 0
+
+
+def test_group_rules_allow_the_askers_own_follow_up():
+    assert "以提问人身份读到的内容可以用于完成提问人这次明确要求的事" in RULES
+    assert "没有他的明确要求时不写进共享记忆或共享文件" in RULES
