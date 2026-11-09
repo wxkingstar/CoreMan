@@ -11,7 +11,8 @@ from sqlalchemy import select
 from coreman.core.db.models import FeishuAuthWait, FeishuPersonalGrant, OutboxItem
 from coreman.core.feishu_personal import inflow, policy, service
 from coreman.core.timeutils import utcnow
-from tests.api.test_feishu_personal import grant, setup
+from coreman.runtime.worker.chat import personal
+from tests.api.test_feishu_personal import URL, grant, headers, rpc, setup, value
 
 DEVICE = "https://accounts.feishu.cn/oauth/v1/device_authorization"
 
@@ -313,3 +314,113 @@ async def test_one_click_releases_every_chat_waiting_for_the_upgrade(app, db_ses
     await db_session.refresh(stale)
     assert wait.status == "waiting" and elsewhere.status == "waiting"
     assert stale.status == "offered"
+
+
+async def _no_grant_headers(app, task, user):
+    from coreman.core.chat import sessions
+
+    async with app.state.session_factory() as session:
+        info = await sessions.get_or_create(
+            session,
+            bot_id=task.bot_id,
+            session_key=task.session_key,
+            backend="claude",
+            ttl_hours=72,
+            speaker_user_id=user.id,
+        )
+        await session.commit()
+    token = policy.issue_capability(
+        app.state.cipher,
+        task_id=task.id,
+        user_id=str(user.id),
+        context_epoch=policy.NO_GRANT_EPOCH,
+        base_session_id=info.relay_session_id,
+        ttl_seconds=1800,
+    )
+    return {"Authorization": "Bearer " + token}
+
+
+async def test_private_chat_authorize_tool_sends_the_card(client, app, db_session, monkeypatch):
+    bot, user, task = await setup(db_session, app)
+    await db_session.commit()
+
+    async def scopes(*a, **k):
+        return ["docx:document", "offline_access"]
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+    with respx.mock as mock:
+        device(mock)
+        out = value(
+            await client.post(
+                URL,
+                headers=await headers(app, task, user),
+                json=rpc("feishu_authorize", {"purpose": "查日程"}),
+            )
+        )
+    assert out["status"] == "authorization_sent"
+
+
+async def test_not_yet_connected_user_can_authorize_with_the_no_grant_capability(
+    client, app, db_session, monkeypatch
+):
+    bot, user, task = await setup(db_session, app)
+    # setup 不建授权记录，首轮能力里带的是「无授权」纪元。
+    assert await db_session.get(FeishuPersonalGrant, (bot.id, user.id)) is None
+    await db_session.commit()
+    auth = await _no_grant_headers(app, task, user)
+
+    async def scopes(*a, **k):
+        return ["docx:document", "offline_access"]
+
+    monkeypatch.setattr(service.permissions, "app_user_scopes", scopes)
+    with respx.mock as mock:
+        device(mock)
+        out = value(await client.post(URL, headers=auth, json=rpc("feishu_authorize")))
+    assert out["status"] == "authorization_sent"
+    # 发起授权换了纪元，本轮旧能力不再有效；续接时配置阶段会签发新能力。
+    again = value(await client.post(URL, headers=auth, json=rpc("feishu_authorization_status")))
+    assert again["error"] == "authorization_changed"
+
+
+async def test_fresh_capability_after_resume_reaches_data_tools(client, app, db_session):
+    bot, user, task = await setup(db_session, app)
+    await grant(db_session, app, bot, user)
+    names = {
+        tool["name"]
+        for tool in (
+            await client.post(
+                URL,
+                headers=await headers(app, task, user),
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            )
+        ).json()["result"]["tools"]
+    }
+    assert "feishu_search_messages" in names
+
+
+async def test_authorize_arguments_are_validated(client, app, db_session):
+    _, user, task = await setup(db_session, app)
+    for args in ({"need": "everything"}, {"level": "all"}, {"purpose": "x" * 61}):
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task, user), json=rpc("feishu_authorize", args)
+            )
+        )
+        assert out["error"] == "invalid_tool_or_arguments"
+
+
+def test_guidance_names_the_tool_and_is_stable_across_states():
+    connected = SimpleNamespace(status="connected", token_enc=b"x", authorization_level="all")
+    pending = SimpleNamespace(
+        status="pending",
+        token_enc=None,
+        pending_expires_at=utcnow() + timedelta(minutes=5),
+        authorization_level="all",
+    )
+    rules = [
+        personal.feishu_guidance(row, "https://example.com", scheduled=False)[0]
+        for row in (None, pending, connected)
+    ]
+    assert rules[0] == rules[1] == rules[2]
+    assert "feishu_authorize" in rules[0] and "请引导用户在私聊里发送“连接飞书”" not in rules[0]
+    assert personal.feishu_guidance(None, "https://example.com", scheduled=True) == ("", "")

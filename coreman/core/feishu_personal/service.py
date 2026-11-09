@@ -375,30 +375,6 @@ async def _start_authorization(
     }
 
 
-async def authorize(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
-    row, _ = await _row(session, cipher, scope)
-    if row.status == "connected" and row.token_enc:
-        return _state(row, cipher)
-    if (
-        row.status == "pending"
-        and row.pending_enc
-        and row.pending_expires_at
-        and row.pending_expires_at > datetime.now(UTC)
-    ):
-        pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
-        return {
-            **_state(row, cipher),
-            "status": "pending",
-            "authorization_url": pending["url"],
-            "expires_at": row.pending_expires_at.isoformat(),
-        }
-    return {
-        "retention_notice": RETENTION_NOTICE,
-        "status": "selection_required",
-        "prompt": "请发送连接飞书，再由本人点击授权卡片选择范围。",
-    }
-
-
 async def authorization_status(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> dict[str, Any]:
