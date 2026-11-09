@@ -26,6 +26,7 @@ from coreman.core.feishu_docs import confirm, policy, resume, tools, write_polic
 from coreman.core.feishu_personal import endpoints, service
 from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.timeutils import utcnow
+from coreman.runtime.worker import group_write_cards
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat import queued_batch
 from coreman.runtime.worker.chat.feishu_docs import RULES, configure
@@ -1133,3 +1134,55 @@ async def test_confirm_resume_is_not_held_as_stale(client, app, db_session, db_e
     await run_click(db_session, db_engine, click)
     again = (await resumes(db_session))[0]
     assert again.payload["stale_confirmed"] is True
+
+
+async def _pending_save(client, app, db_session, monkeypatch, tmp_path):
+    monkeypatch.setattr(app.state.settings, "object_storage_root", str(tmp_path))
+    monkeypatch.setattr(group_write_cards, "get_settings", lambda: app.state.settings)
+    bot, user, task = await group(db_session, app, "存到云盘")
+    await fully_connected(db_session, app, bot, user)
+    prepared = await call(client, app, task, "feishu_prepare_upload", {"filename": "a.pdf"})
+    path = prepared["upload_url"].removeprefix("http://testserver")
+    stored = (await client.put(path, content=b"%PDF-1.4 plan")).json()
+    args = {"upload_id": stored["upload_id"], "folder_token": "EvilFolder12"}
+    with respx.mock:
+        out = await call(client, app, task, "feishu_save_to_drive", args)
+    assert out["status"] == "pending_confirmation"
+    state = await db_session.scalar(
+        select(InteractionState).where(InteractionState.kind == confirm.KIND)
+    )
+    return bot, user, task, state
+
+
+def upload_route(mock):
+    return mock.post(f"{OPEN}/drive/v1/files/upload_all").mock(
+        return_value=httpx.Response(200, json={"code": 0, "data": {"file_token": "FileToken123"}})
+    )
+
+
+async def test_confirmed_save_to_drive_uploads_as_the_asker(
+    client, app, db_session, db_engine, monkeypatch, tmp_path
+):
+    bot, _, task, state = await _pending_save(client, app, db_session, monkeypatch, tmp_path)
+    click = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = upload_route(mock)
+        assert await run_click(db_session, db_engine, click) == "feishu_group_write_done"
+    assert route.call_count == 1
+    assert route.calls[0].request.headers["authorization"] == "Bearer user-secret"
+    assert b"%PDF-1.4 plan" in route.calls[0].request.content
+    assert b"EvilFolder12" in route.calls[0].request.content
+
+
+async def test_confirmed_save_keeps_the_upload_bound_to_the_grant(
+    client, app, db_session, db_engine, monkeypatch, tmp_path
+):
+    bot, user, task, state = await _pending_save(client, app, db_session, monkeypatch, tmp_path)
+    row = await db_session.get(FeishuPersonalGrant, (bot.id, user.id))
+    row.context_epoch = uuid.uuid4()  # 重新授权后，旧 upload_id 作废
+    await db_session.commit()
+    click = await press(db_session, bot, task, state.id)
+    with respx.mock as mock:
+        route = upload_route(mock)
+        assert await run_click(db_session, db_engine, click) == "feishu_group_write_failed"
+    assert route.call_count == 0

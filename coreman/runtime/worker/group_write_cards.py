@@ -10,10 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
+from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, FeishuGroupAction, InboundEvent, InteractionState, Task
 from coreman.core.feishu_docs import access, confirm, resume, write_tools
 from coreman.core.feishu_docs import write_policy as wp
 from coreman.core.feishu_docs.policy import DocsScope
+from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.feishu_personal.tools import TOOLS
@@ -123,7 +125,9 @@ async def handle(
     state.status = "submitted"
     await session.commit()
     try:
-        await item.run(args, Call(session, ctx.cipher, requester.scope))
+        # 存到云空间要读中转的文件；upload_id 仍按提问人当前授权校验。
+        relay = FileRelay(get_settings(), ctx.cipher)
+        await item.run(args, Call(session, ctx.cipher, requester.scope, relay))
     except PersonalError as exc:
         write_tools.record(
             session, docs_scope, name, "confirm", target, "failed", digest, exc.upstream_code
