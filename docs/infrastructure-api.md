@@ -10,6 +10,7 @@
 | relay | POST `/api/infra/relay/rate-limits`、`health` | — |
 | relay | GET `/api/infra/relay/servers` | `/api/robot/clawrelay-servers` |
 | push | POST `/api/infra/push` | — |
+| verification-results | POST `/api/infra/work-tasks/{code}/verification-results` | — |
 | notify | POST `/api/infra/notify/user` | — |
 | systems | POST `/api/infra/systems/test-access` | — |
 
@@ -20,6 +21,8 @@
 推送正文 `{bot_key, chat_id, content, request_id?}`，当前只接受 markdown。通知正文 `{user_login | platform_user_id, content, msgtype?, platform_app_id?, request_id?}`，旧入口可用 `wework_user_id`；只允许单个已绑定的启用用户，不能传 `@all` 或 `|` 广播。当前通知平台为企微，正文上限 2048 UTF-8 字节；机器人推送上限 20480 字节。多个通知应用时必须指定一个应用 ID。
 
 **返回成功表示已入队，不表示平台已送达。** `data.outbox_id` 可在运行状态页查询和重试。提供签名正文里的 request_id 后，同一调用方用同一编号和相同内容重试不会新增出站项；同编号换内容返回 409。不提供编号时每次视作新请求。企微应用侧启用 1800 秒重复消息检查，窗口内同收件人同正文也可能被平台合并；不承诺跨无限时间窗口的恰好一次送达。
+
+验证回传使用专用 `verification-results` 凭证。路径中的 `code` 是原飞书工单编号。正文包含委托验证工单 UUID `request_id`、原执行员工 `bot_key`、`project`、`command`、40 位 `sha`、`status`（`passed`、`failed`、`error`）、验证工单 `issue_url`、失败用例 `failures` 和日志摘要 `log`。CoreMan 将结果写入原工单时间线，并把续办排在原任务会话中，以原发起人的身份继续。相同编号和内容重放只返回原结果。工单取消、执行员工变更或相同编号的结果内容不同会返回 409。
 
 系统授权测试正文 `{system_key}`。以下 Cookie 测试规则适用于 `builtin`；外部签发方使用同源受保护 API 的 Bearer 测试，详见 [业务系统令牌提供方](business-token-providers.md)。除了服务签名，还须提供当前真实管理员的已验证会话或有效 CoreMan bot_token；普通会话写操作仍需 CSRF。旧 email_prefix/user_name 只能与当前用户一致。管理台使用 `/api/admin/systems/test-access`。只测试管理员预先登记的系统地址，不跟随重定向，DNS 解析后固定目标地址，保留 TLS 主机校验。同一地址先不带令牌、再带令牌各请求一次：带令牌得到 2xx，或跳转去向与不带令牌时不同且不是登录页（很多后台登录后首页照样跳到默认页或别的子系统），算令牌已被识别；两次跳到同一处或去了登录页算未生效；不带令牌就能打开时提示无法判断。测试令牌存活 60 秒，只回显跳转目标的主机与路径（`redirect`）和两次的状态码，不返回令牌、页面正文、其余响应头与查询参数。
 

@@ -43,6 +43,7 @@ from coreman.api.routers import (
     infra_push,
     infra_relay,
     infra_system_test,
+    infra_verification,
     infrastructure_admin,
     metrics,
     model_catalog,
@@ -130,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(escalations.router)
     app.include_router(wecom_app_callback.router)
     app.include_router(infra_notify.router)
+    app.include_router(infra_verification.router)
     app.include_router(infra_push.router)
     from coreman.api.routers import api_tasks, bot_api_access
 
