@@ -422,5 +422,5 @@ def test_guidance_names_the_tool_and_is_stable_across_states():
         for row in (None, pending, connected)
     ]
     assert rules[0] == rules[1] == rules[2]
-    assert "feishu_authorize" in rules[0] and "请引导用户在私聊里发送“连接飞书”" not in rules[0]
+    assert "feishu_authorize" in rules[0] and "发送“连接飞书”" not in rules[0]
     assert personal.feishu_guidance(None, "https://example.com", scheduled=True) == ("", "")

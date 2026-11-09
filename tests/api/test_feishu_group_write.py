@@ -3,6 +3,7 @@
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -24,7 +25,9 @@ from coreman.core.db.models import (
 from coreman.core.feishu_docs import confirm, policy, resume, tools, write_policy, write_tools
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.card_actions import CardActionHandler
-from coreman.runtime.worker.chat.feishu_docs import configure
+from coreman.runtime.worker.chat.feishu_docs import RULES, configure
+from coreman.runtime.worker.chat.personal import configure as personal_configure
+from coreman.runtime.worker.chat.personal import feishu_guidance
 from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
 from tests.api.test_feishu_personal import grant, rpc, value
 from tests.api.test_feishu_personal_worker import intake_for
@@ -808,3 +811,59 @@ async def test_turn_opened_by_a_card_click_refuses_to_propose(app, db_session, v
     assert (await db_session.scalars(select(InteractionState))).all() == []
     assert (await db_session.scalars(select(OutboxItem))).all() == []
     assert await statuses(db_session) == []
+
+
+def test_group_rules_cover_writing():
+    for phrase in (
+        "以提问人身份",
+        "pending_confirmation",
+        "authorization_sent",
+        "confirmation_unavailable",
+        "write_limit_reached",
+    ):
+        assert phrase in RULES
+
+
+def test_guidance_never_tells_users_to_send_the_connect_phrase():
+    for scheduled in (False, True):
+        rules, _ = feishu_guidance(
+            SimpleNamespace(status="connected", token_enc=b"x", authorization_level="all"),
+            "https://example.com",
+            scheduled=scheduled,
+        )
+        assert "发送“连接飞书”" not in rules
+    assert "发送“连接飞书”" not in feishu_guidance(None, "https://example.com", scheduled=False)[0]
+    assert "发送“连接飞书”" not in RULES
+
+
+@pytest.mark.parametrize(
+    "excluded", [{"origin": "observe"}, {"origin": "dispatch"}, {"collaboration_phase": "help"}]
+)
+async def test_write_tools_are_refused_outside_ordinary_group_turns(
+    client, app, db_session, excluded
+):
+    bot, user, task = await group(db_session, app, f"写到 {DOC}")
+    await connected(db_session, app, bot, user)
+    task.payload = {**task.payload, **excluded}
+    await db_session.commit()
+    with respx.mock as mock:
+        route = append(mock)
+        response = await client.post(
+            URL,
+            headers=await headers(app, task),
+            json=rpc("feishu_append_document", BLOCKS),
+        )
+    assert response.status_code == 403 and route.call_count == 0
+
+
+async def test_the_resume_note_is_added_for_an_authorized_private_turn(db_session, app, db_engine):
+    from tests.api.test_feishu_personal import setup as personal_setup
+
+    bot, user, task = await personal_setup(db_session, app)
+    task.payload = {**task.payload, resume.PAYLOAD_KEY: "wait-id"}
+    await db_session.commit()
+    intake = await intake_for(db_session, bot, task, "继续")
+    ctx = build_ctx(db_engine, task)
+    ctx.turn_notes = []
+    await personal_configure(db_session, ctx, intake, uuid.uuid4(), "p", {})
+    assert any("自动续接" in note for note in ctx.turn_notes)
