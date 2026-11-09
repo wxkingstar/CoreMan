@@ -10,7 +10,15 @@ from tests.api.test_feishu_group_docs import DOC, OPEN, group, headers
 from tests.api.test_feishu_personal import grant, rpc, value
 
 URL = "/api/runtime/feishu-docs/mcp"
-WRITE = ["docx:document", "drive:drive", "docx:document:create", "wiki:node:read", "wiki:wiki"]
+WRITE = [
+    "docx:document",
+    "drive:drive",
+    "docx:document:create",
+    "wiki:node:read",
+    "wiki:wiki",
+    "task:task:read",
+    "calendar:calendar",
+]
 WIKI = "https://example.feishu.cn/wiki/WikiNode1234"
 BLOCKS = {"document_id": "DocToken1234", "blocks": [{"type": "text", "text": "hello"}]}
 
@@ -254,6 +262,59 @@ async def test_already_connected_is_not_reported_as_success(client, app, db_sess
     monkeypatch.setattr(write_tools.inflow, "request", request)
     out = await call(client, app, task, "feishu_append_document", BLOCKS)
     assert out["error"] == "no_access"
+
+
+async def test_prepare_upload_is_not_a_write(client, app, db_session):
+    bot, user, task = await group(db_session, app, "传个文件")
+    await connected(db_session, app, bot, user)
+    args = {"filename": "a.pdf"}
+    first = await call(client, app, task, "feishu_prepare_upload", args)
+    second = await call(client, app, task, "feishu_prepare_upload", args)
+    assert first["upload_url"] and second["upload_url"]
+    assert first["content_trust"] == "external_untrusted_data"
+    assert list(await db_session.scalars(select(FeishuGroupAction))) == []
+
+
+async def test_locate_output_is_trimmed_and_marked(client, app, db_session):
+    bot, user, task = await group(db_session, app, "看看任务")
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        mock.get(f"{OPEN}/task/v2/tasks").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"items": [{"guid": "g1", "summary": "周报", "description": "正文"}]},
+                },
+            )
+        )
+        out = await call(client, app, task, "feishu_task_list", {})
+    assert out["items"] == [{"guid": "g1", "summary": "周报"}]
+    assert out["content_trust"] == "external_untrusted_data"
+
+
+async def test_create_with_attendees_needs_confirmation(client, app, db_session):
+    bot, user, task = await group(db_session, app, "约个会")
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        route = mock.post(url__regex=r".*/calendar/v4/.*").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {}})
+        )
+        out = await call(
+            client,
+            app,
+            task,
+            "feishu_calendar_create_event",
+            {
+                "calendar_id": "cal_1",
+                "summary": "周会",
+                "start_time": "2026-11-10T09:00:00+08:00",
+                "end_time": "2026-11-10T10:00:00+08:00",
+                "attendee_open_ids": ["ou_other"],
+                "idempotency_key": "k1",
+            },
+        )
+    assert out["status"] == "pending_confirmation" and route.call_count == 0
 
 
 def test_tool_listing_is_the_whitelist_for_everyone():

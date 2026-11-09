@@ -136,6 +136,9 @@ async def dispatch(
                 "content_trust": "external_untrusted_data",
             }
         )
+    if name == "feishu_prepare_upload":
+        # 只签发短期上传链接，飞书侧什么都没写：不审计、不去重、不占写入额度。
+        return bounded({**await item.run(args, call), "content_trust": "external_untrusted_data"})
     digest = wp.args_hash(arguments)
     field = wp.TARGET_FIELD.get(name)
     target = str(getattr(args, field)) if field else None
