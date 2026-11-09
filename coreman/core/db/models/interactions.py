@@ -33,6 +33,7 @@ INTERACTION_KINDS = (
     "session_switch",
     "self_reminder",
     "personal_schedule",
+    "feishu_group_write",
 )
 INTERACTION_STATUSES = ("open", "submitted", "cancelled", "expired")
 ANNOUNCEMENT_SCOPES = ("global", "relay", "bot")
