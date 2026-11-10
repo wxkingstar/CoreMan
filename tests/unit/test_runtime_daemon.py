@@ -39,6 +39,34 @@ async def test_control_lease_does_not_cancel_short_outages(daemon, monkeypatch, 
         await asyncio.gather(watcher, active, return_exceptions=True)
 
 
+async def test_control_lease_loss_is_logged_once_with_last_poll_error(daemon, monkeypatch, caplog):
+    import runtime_daemon.daemon as module
+
+    caplog.set_level("WARNING", logger="coreman-runtime")
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    daemon.note_poll_failure("ConnectTimeout")
+    clock.now = 12.0
+    daemon.note_poll_failure("ReadTimeout")
+    daemon.control_deadline = 40
+    clock.now = 45.0
+    daemon.tasks["one"] = asyncio.create_task(asyncio.sleep(60))
+    watcher = asyncio.create_task(daemon.watch_control_lease())
+    try:
+        await asyncio.sleep(0.6)
+    finally:
+        daemon.stopping.set()
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages.count("Control poll failed: ConnectTimeout") == 1
+    lost = [m for m in messages if m.startswith("Control lease lost")]
+    assert lost == [
+        "Control lease lost: no successful poll for 45s (last error: ReadTimeout); "
+        "cancelling 1 running request(s)"
+    ]
+
+
 async def test_frame_retry_deadline_includes_inflight_request(daemon, monkeypatch):
     import httpx
 
