@@ -4,8 +4,8 @@
 就不提交。仓库令牌只在平台进程里：节点只经已有的工作区只读操作（Git 状态、列目录、读文件）交出内容，
 不需要升级节点，节点也碰不到 GitHub。
 
-不备份的员工：根目录自己就是带远端的 Git 仓库（规则随那个仓库维护），以及停用、未分配运行时、
-工作目录不在就绪状态的员工。读取失败（节点离线等）的员工保留仓库里上一次的内容，下一轮再试；
+不备份的员工：根目录自己就是带远端的 Git 仓库，或节点拒绝在其中执行 git 的仓库（规则随那个仓库
+维护），以及停用、未分配运行时、工作目录不在就绪状态的员工。读取失败（节点离线等）的员工保留仓库里上一次的内容，下一轮再试；
 已删除员工的目录也原样保留。提交前把常见格式的令牌、私钥与 `password: ...` 一类赋值
 替换成 [REDACTED]。
 """
@@ -100,7 +100,14 @@ async def collect(relay: RelayServer, bot: Bot) -> Collected | None:
 
     if (await call_agent(relay, None, "ping")).get("workspace_protocol") != 1:
         raise BackupError("运行时版本过旧，不支持读取工作目录")
-    status = await call("workspace-git-status")
+    try:
+        status = await call("workspace-git-status")
+    except AgentError as exc:
+        # 节点只在根目录确有 .git 时才执行 git；拒绝执行（仓库配置了凭证助手、url 改写等）
+        # 或执行失败，说明它自己是个仓库，规则随那个仓库维护。
+        if exc.detail and "Git" in exc.detail:
+            return None
+        raise
     if status.get("initialized") and status.get("remote"):
         return None
     out, total = Collected(), 0
@@ -287,6 +294,8 @@ async def run(
                 collected = await collect(relay, bot)
         except (AgentError, BackupError, TimeoutError) as exc:
             reason = str(exc) or "读取超时"
+            if isinstance(exc, AgentError) and exc.detail:
+                reason = f"{reason}：{exc.detail}"
             bots[bot.bot_key] = {"status": "failed", "reason": reason}
             log.warning("rules_backup_bot_failed", bot_key=bot.bot_key, reason=reason)
             continue
