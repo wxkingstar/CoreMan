@@ -64,6 +64,21 @@ def test_plain_directory_and_empty_session_stay_in_place(tmp_path, repo):
     assert worktree.ensure(repo, "") == repo
 
 
+def test_repository_without_commits_stays_in_place_until_first_commit(tmp_path):
+    # 刚 git init、远端拉不下来：没有起点可建 worktree，这一轮在工作目录里跑而不是失败。
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    git(empty, "init", "-q", "-b", "main")
+    git(empty, "remote", "add", "origin", str(tmp_path / "missing.git"))
+    assert worktree.ensure(empty, "s1") == empty
+    assert not (empty / ".coreman-worktrees" / "s1").exists()
+
+    (empty / "README.md").write_text("one\n")
+    git(empty, "add", ".")
+    git(empty, "commit", "-q", "-m", "init")
+    assert worktree.ensure(empty, "s1") == empty / ".coreman-worktrees" / "s1"
+
+
 def test_session_gets_own_worktree_from_latest_default_branch(repo, remote):
     push_upstream(remote, "two\n")
     tree = worktree.ensure(repo, "s1")
