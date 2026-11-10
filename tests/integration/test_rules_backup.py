@@ -39,6 +39,10 @@ NODES: dict[str, dict[str, Any]] = {
         }
     ),
     "/w/repo": {"git": {"initialized": True, "remote": "https://example.com/r.git"}, "files": {}},
+    # 节点拒绝在这个仓库里执行 git（配置了凭证助手）：它自己是仓库
+    "/w/locked": {"git_error": "Git 配置含不受支持的执行或凭证设置", "files": {}},
+    # 与 Git 无关的失败照常记为失败，并带上节点的说明
+    "/w/foreign": {"git_error": "工作目录属于其他员工或所有权标记无效", "files": {}},
 }
 
 
@@ -72,6 +76,12 @@ def agent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict]]:
         if node is None:
             raise AgentError("Agent 连接失败（ConnectError）")
         if operation == "workspace-git-status":
+            if "git_error" in node:
+                raise AgentError(
+                    "Agent 未完成操作，请查看该实例状态",
+                    code="operation_failed",
+                    detail=node["git_error"],
+                )
             return {"success": True, **node["git"]}
         if operation == "workspace-list":
             return {"success": True, "entries": entries_of(node["files"], payload["path"])}
@@ -147,6 +157,8 @@ async def seed(engine: AsyncEngine) -> None:
                 bot("alpha", "/w/alpha"),
                 bot("repo", "/w/repo", dev_mode=True),
                 bot("offline", "/w/offline"),
+                bot("locked", "/w/locked"),
+                bot("foreign", "/w/foreign"),
                 bot("disabled", "/w/alpha", enabled=False),
                 bot("moving", "/w/alpha", workspace_state="migrating"),
             ]
@@ -191,6 +203,11 @@ async def test_backup_commits_rule_documents_once(db_engine: AsyncEngine, agent)
     assert report["inactive"] == 2
     assert report["bots"]["repo"] == {"status": "own_repo"}
     assert report["bots"]["offline"]["status"] == "failed"
+    assert report["bots"]["locked"] == {"status": "own_repo"}
+    assert report["bots"]["foreign"] == {
+        "status": "failed",
+        "reason": "Agent 未完成操作，请查看该实例状态：工作目录属于其他员工或所有权标记无效",
+    }
     alpha = report["bots"]["alpha"]
     assert alpha["status"] == "updated" and alpha["files"] == 3 and alpha["redacted"] == 2
     assert sorted(alpha["skipped"]) == ["docs/huge.md", "docs/logo.png"]
