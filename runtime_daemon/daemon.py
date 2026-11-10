@@ -714,6 +714,10 @@ class Daemon:
         self.http = None
         self.lock_file = None
         self.control_deadline = float("inf")
+        # 轮询连不上平台的起始时刻与最近一次原因（只记类型或状态码），控制租约过期时写进日志。
+        self.poll_failing_since: float | None = None
+        self.poll_error = ""
+        self.lease_lost = False
         self.abandoned: set[str] = set()
         self.cancel_requested: set[str] = set()
         self.slots_freed = asyncio.Event()
@@ -892,6 +896,15 @@ class Daemon:
     async def watch_control_lease(self) -> None:
         while not self.stopping.is_set():
             if time.monotonic() >= self.control_deadline:
+                if not self.lease_lost:
+                    self.lease_lost = True
+                    LOG.warning(
+                        "Control lease lost: no successful poll for %.0fs (last error: %s); "
+                        "cancelling %d running request(s)",
+                        time.monotonic() - self.control_deadline + CONTROL_LEASE_SECONDS,
+                        self.poll_error or "poll pending",
+                        len(self.tasks),
+                    )
                 self.abandoned.update(self.tasks)
                 await self.cancel_all()
             await asyncio.sleep(0.25)
@@ -1475,7 +1488,15 @@ class Daemon:
         # With free slots the round is always finished, so claimed commands are never lost.
         result = await request
         self.server_protocol = int(result.get("protocol") or 1)
+        last_success = self.control_deadline - CONTROL_LEASE_SECONDS
         self.control_deadline = time.monotonic() + CONTROL_LEASE_SECONDS
+        if self.poll_failing_since is not None or self.lease_lost:
+            LOG.warning(
+                "Control poll recovered: %.0fs since the previous successful poll (last error: %s)",
+                time.monotonic() - last_success,
+                self.poll_error or "poll pending",
+            )
+        self.poll_failing_since, self.poll_error, self.lease_lost = None, "", False
         self.write_state(True)
         self.abandoned.difference_update(abandoned)
         for identity in result["cancelled"]:
@@ -1494,6 +1515,13 @@ class Daemon:
         for command in result["commands"]:
             self.tasks[command["id"]] = asyncio.create_task(self.execute(command))
         return result
+
+    def note_poll_failure(self, reason: str) -> None:
+        """记下轮询失败的原因：只在连续失败的第一次写日志，恢复时再写一条。"""
+        if self.poll_failing_since is None:
+            self.poll_failing_since = time.monotonic()
+            LOG.warning("Control poll failed: %s", reason)
+        self.poll_error = reason
 
     async def cancel_all(self) -> None:
         current, self.tasks = self.tasks, {}
@@ -1533,6 +1561,7 @@ class Daemon:
                     try:
                         result = await self.poll_once()
                     except httpx.HTTPStatusError as exc:
+                        self.note_poll_failure(f"HTTP {exc.response.status_code}")
                         # The independent lease watchdog owns cancellation.
                         if exc.response.status_code in REJECTED_STATUSES:
                             rejected_backoff = min(
@@ -1542,7 +1571,8 @@ class Daemon:
                         else:
                             await self.pause(2)
                         continue
-                    except (httpx.HTTPError, KeyError, ValueError):
+                    except (httpx.HTTPError, KeyError, ValueError) as exc:
+                        self.note_poll_failure(type(exc).__name__)
                         await self.pause(2)
                         continue
                     rejected_backoff = 0.0
