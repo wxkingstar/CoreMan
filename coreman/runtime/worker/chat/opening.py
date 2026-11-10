@@ -263,9 +263,16 @@ class OpenStage(ChatStageBase):
             # 本轮这条消息已在正文里，记录里去掉，免得模型分不清哪条是本轮要处理的。
             interject = ctx.task.payload.get("origin") == "observe"
             # 调度回合和插话一样，记录之后那条消息就是要安排的事。
+            # 插话和调度回合处理的是一批消息：把这一批（判断时的起点之后）标成【新】。
+            since = ctx.task.payload.get("observe_since")
             lines = [
                 line
-                for line in await group_observe.transcript(session, bot, intake.chat_id)
+                for line in await group_observe.transcript(
+                    session,
+                    bot,
+                    intake.chat_id,
+                    new_since=datetime.fromisoformat(since) if since else None,
+                )
                 if line.event_id is None or line.event_id != ctx.task.inbound_event_id
             ]
             ctx.turn_notes.append(group_observe.transcript_note(lines, interject=interject))

@@ -111,11 +111,12 @@ async def note(
         )
         return
     pending = not message.mentions_bot
+    # 用数据库的 now()：和这条消息的 received_at 同一事务、同一个值，判断时按它认出这一批。
     values: dict[str, Any] = {
         "bot_id": bot_id,
         "chat_id": message.chat_id,
         "bot_streak": 0 if human else 1,
-        "pending_since": now if pending else None,
+        "pending_since": func.now() if pending else None,
         "last_event_id": event_id if pending else None,
         "last_message_at": now,
     }
@@ -125,7 +126,7 @@ async def note(
         index_elements=[GroupObserveState.bot_id, GroupObserveState.chat_id],
         set_={
             "bot_streak": 0 if human else table.c.bot_streak + 1,
-            "pending_since": func.coalesce(table.c.pending_since, now) if pending else None,
+            "pending_since": func.coalesce(table.c.pending_since, func.now()) if pending else None,
             "last_event_id": event_id if pending else table.c.last_event_id,
             "last_message_at": now,
         },
@@ -173,24 +174,41 @@ async def mark_spoke(session: AsyncSession, bot_id: uuid.UUID, chat_id: str) -> 
 
 @dataclass(frozen=True)
 class Line:
-    """群消息摘录的一行。`event_id` 只有别人发的消息才有，用来定插话回复哪一条。"""
+    """群消息摘录的一行。`event_id` 只有别人发的消息才有，用来定插话回复哪一条。
+
+    `new`：这一批待判断的消息（上次判断之后别人新发的）。
+    """
 
     at: datetime
     sender: str
     sender_kind: str  # human / bot / self
     text: str
     event_id: int | None = None
+    new: bool = False
 
-    def out(self) -> dict[str, str]:
-        return {"sender": self.sender, "sender_kind": self.sender_kind, "text": self.text}
+    def out(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "sender": self.sender,
+            "sender_kind": self.sender_kind,
+            "text": self.text,
+        }
+        if self.new:
+            out["new"] = True
+        return out
 
 
 async def transcript(
-    session: AsyncSession, bot: Bot, chat_id: str, *, now: datetime | None = None
+    session: AsyncSession,
+    bot: Bot,
+    chat_id: str,
+    *,
+    now: datetime | None = None,
+    new_since: datetime | None = None,
 ) -> list[Line]:
     """最近的群消息（别人发的入站消息 + 本机器人自己发的），按时间排好。
 
     发言人用通讯录名字，认不出的按出场顺序叫「同事 N」，其他机器人叫「机器人 N」。
+    给了 `new_since`（这一批的 `pending_since`）时，此后别人发的消息标为 `new`。
     """
     since = (now or datetime.now(UTC)) - CONTEXT_WINDOW
     inbound = (
@@ -250,7 +268,8 @@ async def transcript(
             label = aliases[key]
         text = _message_text(payload)
         if text:
-            lines.append(Line(received_at, label, kind, text[:TEXT_LIMIT], int(event_id)))
+            new = new_since is not None and received_at >= new_since
+            lines.append(Line(received_at, label, kind, text[:TEXT_LIMIT], int(event_id), new))
     for created_at, text in reversed(sent):
         if text:
             lines.append(Line(created_at, bot.name, "self", str(text)[:TEXT_LIMIT]))
@@ -280,11 +299,20 @@ def transcript_note(lines: list[Line], *, interject: bool = False) -> str:
     if not lines:
         return ""
     body = "\n".join(
-        f"- {line.sender}{'（你）' if line.sender_kind == 'self' else ''}"
+        f"- {'【新】' if line.new else ''}{line.sender}"
+        f"{'（你）' if line.sender_kind == 'self' else ''}"
         f"{'（机器人）' if line.sender_kind == 'bot' else ''}: {line.text}"
         for line in lines
     )
-    if interject:
+    if any(line.new for line in lines):
+        # 插话或调度回合，判断的是好几条新消息（例如它忙着回复上一条时群里陆续发的）。
+        head = (
+            "这个群在本轮消息之前的聊天记录（从早到晚）。标【新】的和本轮块之后那条消息，"
+            "是你上次看群之后新来的一批（可能是你忙着回复别的消息时陆续发的，你那时的回复"
+            "没看到它们）：这一批里需要你回应的，在这一轮里一并处理，几件事就分别说清对应哪条；"
+            "记录里其他内容用来理解上下文，不要回应："
+        )
+    elif interject:
         head = (
             "这个群在本轮消息之前的聊天记录（从早到晚）。本轮要回应的是本轮块之后那条消息"
             "所在的话题；记录用来理解这个话题，其他话题不要回应："

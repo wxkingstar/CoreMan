@@ -264,6 +264,70 @@ async def test_busy_session_waits_for_the_reply(db_engine, db_session):
     assert done.status == "queued" and decider.calls == []
 
 
+async def test_messages_sent_during_a_reply_are_judged_together_after_it(db_engine, db_session):
+    from coreman.core.db.models import FeishuSentMessage, InboundEvent
+
+    bot = await observing_bot(db_session)
+    await say(db_session, bot, "om1", "@销售 昨天订单多少", mentions_bot=True)
+    for i, text in enumerate(["上周退货率呢", "哈哈", "顺便看下库存", "华东的"], start=2):
+        await say(db_session, bot, f"om{i}", text)
+    # 整段挪到过去：群里已经安静了一会儿。
+    shift = timedelta(seconds=30)
+    await db_session.execute(
+        update(InboundEvent)
+        .where(InboundEvent.bot_id == bot.id)
+        .values(received_at=InboundEvent.received_at - shift)
+    )
+    await db_session.execute(
+        update(GroupObserveState)
+        .where(GroupObserveState.bot_id == bot.id)
+        .values(
+            pending_since=GroupObserveState.pending_since - shift,
+            last_message_at=GroupObserveState.last_message_at - shift,
+        )
+    )
+    await db_session.commit()
+    *older, latest = await tasks_of(db_session, bot, "group_observe")
+    decider = FakeDecider(0.9)
+    for task in older:
+        done = await run_observe(db_engine, db_session, task, decider)
+        assert done.result == {"skipped": "newer_message"}
+    # 第 1 条还在回复：等它做完。
+    waiting = await run_observe(db_engine, db_session, latest, decider)
+    assert waiting.status == "queued" and decider.calls == []
+
+    (reply,) = await tasks_of(db_session, bot, "chat")
+    await db_session.execute(update(Task).where(Task.id == reply.id).values(status="succeeded"))
+    db_session.add(
+        FeishuSentMessage(bot_id=bot.id, message_id="om_reply", chat_id=CHAT, text="昨天 120 单")
+    )
+    await db_session.commit()
+    done = await run_observe(db_engine, db_session, waiting, decider)
+    assert done.status == "succeeded"
+    # 它最后发的回复不算答过这一批：第 2–5 条作为一批交给判断，只判断一次。
+    (state,) = decider.calls
+    new = [m["text"] for m in state["recent_messages"] if m.get("new")]
+    assert new == ["上周退货率呢", "哈哈", "顺便看下库存", "华东的"]
+    assert state["recent_messages"][-1]["sender_kind"] == "self"
+    turn = (await tasks_of(db_session, bot, "chat"))[-1]
+    assert turn.payload["origin"] == "observe" and turn.payload["observe_since"]
+    assert turn.inbound_event_id == latest.inbound_event_id
+
+
+def test_a_batch_of_new_messages_is_handled_together_in_the_turn():
+    now = datetime.now(UTC)
+    lines = [
+        group_observe.Line(now, "李雷", "human", "昨天订单多少", 1),
+        group_observe.Line(now, "销售", "self", "昨天 120 单"),
+        group_observe.Line(now, "李雷", "human", "上周退货率呢", 2, new=True),
+    ]
+    note = group_observe.transcript_note(lines, interject=True)
+    assert "【新】李雷: 上周退货率呢" in note and "- 李雷: 昨天订单多少" in note
+    assert "一并处理" in note
+    # 只有一条新消息（就是本轮那条）时照旧回应它所在的话题。
+    assert "所在的话题" in group_observe.transcript_note(lines[:2], interject=True)
+
+
 def record_schedule_configure(monkeypatch):
     """记下本轮有没有挂定时任务能力（插话回合只答不做，不该挂）。"""
     from coreman.runtime.worker.chat import schedules
@@ -337,7 +401,8 @@ async def test_interjection_turn_sees_the_group_and_may_stay_silent(
     )
     turn = body["messages"][-1]["content"]
     turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
-    assert "所在的话题" in turn and "今天中午吃什么" in turn
+    # 两条是同一批：记录里那条标成【新】，一并看要不要回应。
+    assert "一并处理" in turn and "【新】" in turn and "今天中午吃什么" in turn
     # 只答不做：插话回合不挂定时任务、个人凭证这些有后果的能力。
     assert "只答不做" in turn
     assert configured == []
