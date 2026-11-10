@@ -26,6 +26,7 @@ WRITABLE = frozenset(
         "pending_card",
         "session_url",
         "segment_boundaries",
+        "plan",
         "background_state",
         "delivery_mode",
     }

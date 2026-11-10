@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"clawrelay-api/pkg/openai"
 )
 
 // maxToolDetailBytes bounds what one tool item adds to the stream. A file_change
@@ -112,4 +114,32 @@ func (item *codexItem) UnmarshalJSON(data []byte) error {
 	}
 	item.Raw = append(json.RawMessage(nil), data...)
 	return nil
+}
+
+// codexPlan turns a todo_list item into relay plan items. Codex only reports
+// done or not; the first unfinished step is the one being worked on.
+func codexPlan(raw json.RawMessage) []openai.PlanItem {
+	var items []struct {
+		Text      string `json:"text"`
+		Completed bool   `json:"completed"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	plan := make([]openai.PlanItem, 0, len(items))
+	current := false
+	for _, item := range items {
+		if item.Text == "" {
+			continue
+		}
+		status := "completed"
+		if !item.Completed {
+			status = "pending"
+			if !current {
+				status, current = "in_progress", true
+			}
+		}
+		plan = append(plan, openai.PlanItem{Text: item.Text, Status: status})
+	}
+	return plan
 }

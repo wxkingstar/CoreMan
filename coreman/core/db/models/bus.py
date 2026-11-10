@@ -202,6 +202,8 @@ class TaskStream(Base):
     segment_boundaries: Mapped[list[int]] = mapped_column(
         ARRAY(Integer), server_default=text("'{}'")
     )
+    # agent 自己的任务清单：[{"text", "status"}]，status 为 pending / in_progress / completed。
+    plan: Mapped[list[dict[str, str]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     running_since: Mapped[datetime] = _ts()
     is_complete: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     completed_at: Mapped[datetime | None] = _ts()

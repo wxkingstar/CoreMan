@@ -48,7 +48,7 @@ func cleanEnv(extra map[string]string) []string {
 		}
 		env = append(env, k+"="+v)
 	}
-	return env
+	return append(env, todoToolsEnv)
 }
 
 func hasArg(args []string, flag string) bool {

@@ -8,6 +8,7 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from time import monotonic as heading_clock
 from typing import Any
@@ -36,6 +37,7 @@ from coreman.core.feishu_cards.compile import (
     simple_cards,
 )
 from coreman.core.feishu_cards.people import resolve_people
+from coreman.core.feishu_cards.plan import PLAN_BOX_ID, plan_box
 from coreman.core.feishu_cards.stream import StreamUnit, plan, stream_units
 from coreman.core.feishu_cards.thinking import thinking_panel, thinking_preview
 from coreman.core.logging import get_logger
@@ -476,6 +478,7 @@ class FeishuTransport:
                 session_url=row.session_url,
                 heading=heading,
                 requester=requester if isinstance(requester, str) and requester else None,
+                plan=row.plan,
             )
             card, summary = compiled.cards[0], compiled.summary
         else:
@@ -510,7 +513,9 @@ class FeishuTransport:
                     raise
                 # 富卡片飞书不认：整条换成只有 markdown 的简化卡（放不下就分几张），回答完整送达。
                 log.warning("feishu_rich_card_rejected", code=exc.code, task_id=row.task_id)
-                compiled = await self.plain_cards(thinking, answer, row.session_url, heading)
+                compiled = await self.plain_cards(
+                    thinking, answer, row.session_url, heading, plan=row.plan
+                )
                 await self.put_card(row.task_id, card_id, compiled.cards[0])
         if row.is_complete:
             # 流式卡片发出时只是个卡片实体引用，正文到这里才定下来。
@@ -555,16 +560,18 @@ class FeishuTransport:
         if preview != state.get("thinking"):
             await self.put_text(row.task_id, card_id, "thinking", preview)
             state["thinking"] = preview
+        await self.push_plan(row, card_id, state)
+        anchor = PLAN_BOX_ID if state.get("plan") else "thinking_panel"
         units = await asyncio.to_thread(stream_units, answer)
         # 还没有可显示的正文（只有思考、标题栏或半行围栏）：保持占位，别把 answer 删掉。
         if units and not state.get("paused"):
             layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
             shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-            shell["body"]["elements"] = shell["body"]["elements"][:1]
+            shell["body"]["elements"] = _prefix(thinking, row.session_url, heading, row.plan)
             steps = plan(
                 layout,
                 units,
-                anchor="thinking_panel",
+                anchor=anchor,
                 shown=len(card_json(shell).encode()),
                 show=remote_images_as_links,
             )
@@ -611,21 +618,49 @@ class FeishuTransport:
     ) -> Any:
         """布局对不上时整卡重建：流式模式保持开启，之后照常增量更新。"""
         shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-        panel = shell["body"]["elements"][0]
-        shell["body"]["elements"] = [panel]
+        prefix = _prefix(thinking, row.session_url, heading, row.plan)
+        shell["body"]["elements"] = prefix
         steps = plan(
             [],
             units,
-            anchor="thinking_panel",
+            anchor=prefix[-1]["element_id"],
             shown=len(card_json(shell).encode()),
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        shell["body"]["elements"] = [panel, *elements]
+        shell["body"]["elements"] = [*prefix, *elements]
         shell["config"]["streaming_mode"] = True
         await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
         return steps
+
+    async def push_plan(self, row: TaskStream, card_id: str, state: dict[str, Any]) -> None:
+        """任务清单变了就整块替换（第一次插在思考面板后面）；推不上不影响正文。"""
+        box = plan_box(row.plan)
+        if box is None or row.plan == state.get("plan"):
+            return
+        try:
+            if state.get("plan"):
+                await self.call(
+                    "PUT",
+                    f"/open-apis/cardkit/v1/cards/{card_id}/elements/{PLAN_BOX_ID}",
+                    json={"sequence": await self.sequence(row.task_id), "element": card_json(box)},
+                )
+            else:
+                await self.call(
+                    "POST",
+                    f"/open-apis/cardkit/v1/cards/{card_id}/elements",
+                    json={
+                        "type": "insert_after",
+                        "target_element_id": "thinking_panel",
+                        "sequence": await self.sequence(row.task_id),
+                        "elements": card_json([box]),
+                    },
+                )
+        except FeishuError as exc:
+            log.warning("feishu_plan_push_failed", code=exc.code, task_id=row.task_id)
+            return
+        state["plan"] = list(row.plan)
 
     async def renew_streaming(self, task_id: int, card_id: str) -> None:
         """重新开启流式模式（飞书从这一刻重新计 10 分钟）。"""
@@ -674,9 +709,10 @@ class FeishuTransport:
         session_url: str | None,
         heading: str,
         requester: str | None = None,
+        plan: Sequence[dict[str, str]] = (),
     ) -> Compiled:
         """终稿编译成若干张卡；关掉富卡片或编译自检不过时用简化卡。"""
-        prefix = [thinking_panel(thinking, session_url=session_url, heading=heading)]
+        prefix = _prefix(thinking, session_url, heading, plan)
         # 正文图片照旧内嵌并另起一行保留原图链接；块里的图片（实体卡等）再单独换 key。
         answer = await self.images.localize(answer)
         if self.rich_cards:
@@ -695,7 +731,9 @@ class FeishuTransport:
             if not compiled.problems:
                 return compiled
             log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
-        return await self.plain_cards(thinking, answer, session_url, heading, localized=True)
+        return await self.plain_cards(
+            thinking, answer, session_url, heading, localized=True, plan=plan
+        )
 
     async def plain_cards(
         self,
@@ -705,8 +743,9 @@ class FeishuTransport:
         heading: str,
         *,
         localized: bool = False,
+        plan: Sequence[dict[str, str]] = (),
     ) -> Compiled:
-        prefix = [thinking_panel(thinking, session_url=session_url, heading=heading)]
+        prefix = _prefix(thinking, session_url, heading, plan)
         body = answer if localized else await self.images.localize(answer)
         cards = await asyncio.to_thread(simple_cards, body, prefix=prefix)
         summary = str(((cards[0].get("config") or {}).get("summary") or {}).get("content") or "")
@@ -1050,3 +1089,12 @@ def _card_markdown(card: dict[str, Any]) -> str:
         for e in (card.get("body") or {}).get("elements") or []
         if e.get("tag") == "markdown" and e.get("element_id") != "thinking"
     )
+
+
+def _prefix(
+    thinking: str, session_url: str | None, heading: str, plan: Sequence[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """卡片最前面的固定组件：思考面板，有任务清单时再跟一个清单面板。"""
+    box = plan_box(plan)
+    panel = thinking_panel(thinking, session_url=session_url, heading=heading)
+    return [panel, box] if box else [panel]

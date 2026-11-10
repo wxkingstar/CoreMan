@@ -23,6 +23,7 @@ class StreamWriter:
         pending_text: 已累计的正文
         boundaries: 工具调用处的正文切分点，网关按它分段推送
         extra_lines: 排队 / 预警一类的提示行，恒排在思考区最前面
+        plan: agent 自己的任务清单（最后一份），[{"text", "status"}]
     """
 
     def __init__(self, ctx: TaskContext, *, min_interval: float = 0.5) -> None:
@@ -31,7 +32,8 @@ class StreamWriter:
         self.pending_text = ""
         self.boundaries: list[int] = []
         self.extra_lines: list[str] = []
-        self._last_written: tuple[str, str, tuple[int, ...]] | None = None
+        self.plan: list[dict[str, str]] = []
+        self._last_written: tuple[str, str, tuple[int, ...], str] | None = None
         self._last_flush = -1e9
         self.delivery: streams.Completion | None = None
 
@@ -54,6 +56,11 @@ class StreamWriter:
     def add_tool(self, name: str) -> None:
         self.thinking.add_tool_call(name)
         self.boundaries.append(len(self.pending_text))
+
+    def set_plan(self, items: tuple[tuple[str, str], ...]) -> None:
+        self.plan = [
+            {"text": self.ctx.redact(text) or "", "status": status} for text, status in items
+        ]
 
     def set_thinking_line(self, text: str) -> None:
         self.extra_lines.append(text)
@@ -81,7 +88,7 @@ class StreamWriter:
     async def flush(self, force: bool = False) -> bool:
         """写一次增量；被节流或内容未变时返回 False（不写库）。"""
         text, boundaries = self.visible()
-        state = (self.thinking_md(), text, tuple(boundaries))
+        state = (self.thinking_md(), text, tuple(boundaries), repr(self.plan))
         now = self.ctx.clock()
         if not force and (
             state == self._last_written or now - self._last_flush < self.min_interval
@@ -94,6 +101,7 @@ class StreamWriter:
                 thinking_md=state[0],
                 pending_text=state[1],
                 segment_boundaries=list(state[2]),
+                plan=self.plan,
             )
             await session.commit()
         self.delivery = delivery
@@ -116,6 +124,7 @@ class StreamWriter:
                 thinking_md=self.thinking_md(),
                 pending_text=text,
                 segment_boundaries=boundaries,
+                plan=self.plan,
             )
             done = await streams.complete(
                 session,

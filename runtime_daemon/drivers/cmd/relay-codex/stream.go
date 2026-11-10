@@ -220,6 +220,25 @@ probe:
 	emittedAnyContent := false
 	turnCompleted := false
 	startedTools := make(map[string]bool)
+	lastPlan := ""
+	planDelta := func(item *codexItem) {
+		if item == nil || item.Type != "todo_list" {
+			return
+		}
+		plan := codexPlan(item.Items)
+		encoded, _ := json.Marshal(plan)
+		if len(plan) == 0 || string(encoded) == lastPlan {
+			return
+		}
+		lastPlan = string(encoded)
+		emit(openai.ChatCompletionResponse{
+			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
+			Choices: []openai.ChatCompletionChoice{{
+				Index: 0,
+				Delta: &openai.ChatMessage{Role: "assistant", Plan: plan},
+			}},
+		})
+	}
 	turnThread := func() string {
 		if threadIDSeen != "" {
 			return threadIDSeen
@@ -281,6 +300,7 @@ probe:
 
 		case "item.started", "item.updated":
 			emitToolStart(ev.Item)
+			planDelta(ev.Item)
 
 		case "item.completed":
 			if ev.Item == nil {
@@ -289,6 +309,7 @@ probe:
 			// File changes are completion-only in the native protocol. Also cover
 			// missing start frames while deduplicating normal start/completion pairs.
 			emitToolStart(ev.Item)
+			planDelta(ev.Item)
 			switch ev.Item.Type {
 			case "file_change", "web_search", "mcp_tool_call", "collab_tool_call", "todo_list":
 				thinkingDelta("\n\n工具结果 · " + ev.Item.Type + "\n" + string(ev.Item.Raw) + "\n")

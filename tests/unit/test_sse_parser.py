@@ -4,6 +4,7 @@ from coreman.core.relay.sse import (
     ActualModelEvent,
     AskUserQuestionEvent,
     FinishEvent,
+    PlanUpdate,
     RateLimitEvent,
     RelayErrorEvent,
     RuntimeObservationEvent,
@@ -211,3 +212,18 @@ def test_paragraph_gap_only_tops_up_missing_newlines() -> None:
     assert paragraph_gap("拉取中。\n", "已拉完。") == "\n"
     assert paragraph_gap("拉取中。", "\n已拉完。") == "\n"
     assert paragraph_gap("拉取中。\n\n", "已拉完。") == ""
+
+
+def test_plan_delta_keeps_known_statuses_only() -> None:
+    p = SseParser("codex")
+    plan = [
+        {"text": "读取订单", "status": "completed"},
+        {"text": "汇总", "status": "in_progress"},
+        {"text": "", "status": "pending"},
+        {"text": "未知", "status": "blocked"},
+        "garbage",
+    ]
+    assert p.feed_line(chunk({"role": "assistant", "content": None, "plan": plan})) == [
+        PlanUpdate((("读取订单", "completed"), ("汇总", "in_progress")))
+    ]
+    assert p.feed_line(chunk({"role": "assistant", "content": None, "plan": []})) == []
