@@ -31,8 +31,8 @@ from coreman.core.db.models import Bot, GroupObserveDecision, GroupObserveState,
 from coreman.runtime.worker.context import TaskContext
 
 BUSY_RETRY_SECONDS = 5.0
-# 一直有回复在跑（例如长任务）时最多重排这么多次，之后放弃这一批，等下一条消息。
-BUSY_MAX_ATTEMPTS = 60
+# 有回复在跑时一直等它做完再判断这一批；等了这么久还没做完（卡住或排了很长的队）才放弃。
+BUSY_MAX_WAIT = timedelta(minutes=30)
 # 同群还有别的机器人开着旁听时，判断该说话后等这么久再选谁接话。各机器人判断同一条消息
 # 的时间差在一两秒内（同时收到、同样的安静时长）；晚于这个窗口才判断完的，见到已有人接话就让开。
 PICK_DELAY_SECONDS = 3.0
@@ -110,13 +110,13 @@ class GroupObserveHandler:
                 await session.commit()
                 return
             if await self._busy(session, bot.id, busy_key):
-                # 正在回复：等它说完再看，待判断保留（更新的消息由它自己的任务等）。
+                # 正在回复：等它说完再把这一批一起判断，待判断保留（更新的消息由它自己的任务等）。
                 if not latest:
                     await self._finish(
                         session, ctx, "succeeded", None, {"skipped": "newer_message"}
                     )
                     return
-                if ctx.task.attempts < BUSY_MAX_ATTEMPTS:
+                if now - state.pending_since < BUSY_MAX_WAIT:
                     await tasks.defer(session, ctx.task.id, seconds=BUSY_RETRY_SECONDS)
                     await session.commit()
                     return
@@ -125,6 +125,7 @@ class GroupObserveHandler:
                 await self._finish(session, ctx, "succeeded", None, {"skipped": "busy"})
                 return
             # 这一批由本任务判断：之后来的消息重新开始攒。
+            since = state.pending_since
             state.pending_since = None
             muted = state.muted_until is not None and state.muted_until > now
             streak = state.bot_streak
@@ -133,11 +134,12 @@ class GroupObserveHandler:
                 await self._record(session, bot, chat_id, event_id, mode, outcome)
                 await self._finish(session, ctx, "succeeded", None, {"skipped": outcome})
                 return
-            lines = await group_observe.transcript(session, bot, chat_id, now=now)
+            lines = await group_observe.transcript(session, bot, chat_id, now=now, new_since=since)
             await session.commit()
-        if not lines or lines[-1].sender_kind == "self":
+        # 它自己最后说话不算答过：那多半是在回复上一批，写的时候还没看到这一批。
+        if not any(line.new for line in lines):
             async with ctx.session_factory() as session:
-                await self._finish(session, ctx, "succeeded", None, {"skipped": "self_last"})
+                await self._finish(session, ctx, "succeeded", None, {"skipped": "nothing_new"})
             return
         payload: dict[str, Any] = {
             "bot": {"name": bot.name, "role": bot.group_observe_scope or bot.description},
@@ -184,6 +186,7 @@ class GroupObserveHandler:
                         chat_id,
                         anchor.event_id,
                         row.id,
+                        since,
                         origin=dispatch.ORIGIN,
                         session_key=busy_key,
                         solo=solo,
@@ -204,6 +207,7 @@ class GroupObserveHandler:
                                 "chat_id": chat_id,
                                 "decision_id": row.id,
                                 "anchor_event_id": anchor.event_id,
+                                "since": since.isoformat(),
                             },
                             session_key=group_observe.task_session_key(chat_id),
                             inbound_event_id=event_id or None,
@@ -212,7 +216,9 @@ class GroupObserveHandler:
                         ),
                     )
                 else:
-                    turn = await self._enqueue_turn(session, bot, chat_id, anchor.event_id, row.id)
+                    turn = await self._enqueue_turn(
+                        session, bot, chat_id, anchor.event_id, row.id, since
+                    )
                     row.task_id = turn.id if turn else None
             await self._finish(
                 session, ctx, "succeeded", None, {"outcome": row.outcome, "decision_id": row.id}
@@ -253,7 +259,15 @@ class GroupObserveHandler:
                 row.outcome = "busy"
             else:
                 anchor = ctx.task.payload.get("anchor_event_id")
-                turn = await self._enqueue_turn(session, bot, chat_id, anchor, row.id)
+                since = ctx.task.payload.get("since")
+                turn = await self._enqueue_turn(
+                    session,
+                    bot,
+                    chat_id,
+                    anchor,
+                    row.id,
+                    datetime.fromisoformat(since) if since else None,
+                )
                 row.task_id = turn.id if turn else None
             await self._finish(
                 session, ctx, "succeeded", None, {"outcome": row.outcome, "decision_id": row.id}
@@ -325,6 +339,7 @@ class GroupObserveHandler:
         chat_id: str,
         event_id: int | None,
         decision_id: int,
+        since: datetime | None,
         *,
         origin: str = "observe",
         session_key: str | None = None,
@@ -344,6 +359,8 @@ class GroupObserveHandler:
                     "platform_user_id": event.sender_platform_user_id,
                     "origin": origin,
                     "observe_decision_id": decision_id,
+                    # 这一批的起点：回合里把它之后的群消息标成【新】，一并处理。
+                    **({"observe_since": since.isoformat()} if since else {}),
                     **({"solo": True} if solo else {}),
                 },
                 session_key=session_key or chat_id,
