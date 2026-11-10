@@ -164,6 +164,20 @@ async def test_wait_leaves_the_running_message_alone(
     assert reply.payload["card"]["main_title"]["title"] == msg("busy_wait_title")
 
 
+async def test_cancel_drops_the_new_message_only(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "改成导出本周")
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.CANCEL)
+    assert (await _refresh(db_session, first)).cancel_requested_at is None
+    dropped = await _refresh(db_session, second)
+    assert (dropped.status, dropped.error_code) == ("cancelled", "user_dropped")
+    assert reply is not None
+    assert reply.payload["card"]["main_title"]["title"] == msg("busy_dropped_title")
+
+
 async def test_someone_else_cannot_stop_it(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
@@ -216,9 +230,10 @@ async def test_progress_reports_the_running_message_and_keeps_the_buttons(
     card = reply.payload["card"]
     assert card["card_type"] == "button_interaction"
     assert [b["key"] for b in card["button_list"]] == [
-        busy_choice.STOP,
         busy_choice.WAIT,
+        busy_choice.STOP,
         busy_choice.PROGRESS,
+        busy_choice.CANCEL,
     ]
     assert card["sub_title_text"].startswith("上一条已经处理了 6 分 ")
     assert "做了 2 步。" in card["sub_title_text"]
@@ -240,9 +255,10 @@ def test_feishu_buttons_stack_full_width() -> None:
     elements = busy_choice.offer_card("feishu", 7)["body"]["elements"]
     buttons = [e for e in elements if e["tag"] == "button"]
     assert [b["behaviors"][0]["value"]["event_key"] for b in buttons] == [
-        busy_choice.STOP,
         busy_choice.WAIT,
+        busy_choice.STOP,
         busy_choice.PROGRESS,
+        busy_choice.CANCEL,
     ]
     assert all(b["width"] == "fill" for b in buttons)
     assert all(e["tag"] != "column_set" for e in elements)

@@ -1,4 +1,4 @@
-"""上一条还在处理时又来了新消息：新消息先排队，卡片让发消息的人选「停下上一条」还是「等它做完」。
+"""上一条还在处理时又来了新消息：新消息先排队，卡片让发消息的人选「等它做完」「停下上一条」还是「放弃这条」。
 
 不点也行：新消息本来就排在后面，上一条做完自动接着处理；只有点「停下」才会动正在跑的任务。
 「看看进度」只读上一条的实时状态回一句，卡片和按钮都留着，可以再点。
@@ -25,6 +25,7 @@ WAIT = "busy_wait"
 PROGRESS = "busy_progress"
 RESUME = "busy_resume"
 DROP = "busy_drop"
+CANCEL = "busy_cancel"
 # 等确认的消息最多留这么久，没人回就作废。
 HOLD_SECONDS = 2 * 60 * 60
 # 这么久没有新动作才提示，工具跑一两分钟不吐字是常态。
@@ -57,9 +58,10 @@ def offer_card(
             },
             "sub_title_text": f"{progress}\n{sub}" if progress else sub,
             "button_list": [
-                {"text": msg("busy_opt_stop", locale), "style": 1, "key": STOP},
-                {"text": msg("busy_opt_wait", locale), "style": 2, "key": WAIT},
+                {"text": msg("busy_opt_wait", locale), "style": 1, "key": WAIT},
+                {"text": msg("busy_opt_stop", locale), "style": 2, "key": STOP},
                 {"text": msg("busy_opt_progress", locale), "style": 2, "key": PROGRESS},
+                {"text": msg("busy_opt_cancel", locale), "style": 2, "key": CANCEL},
             ],
             "task_id": tid,
         }
@@ -90,9 +92,10 @@ def offer_card(
                     + "</font>",
                 },
                 # 竖着排、撑满宽度：手机上三个并排会把文字截成「停下，先做…」。
-                button(STOP, "busy_opt_stop", "primary"),
-                button(WAIT, "busy_opt_wait", "default"),
+                button(WAIT, "busy_opt_wait", "primary"),
+                button(STOP, "busy_opt_stop", "default"),
                 button(PROGRESS, "busy_opt_progress", "default"),
+                button(CANCEL, "busy_opt_cancel", "default"),
             ]
         },
         "task_id": tid,
