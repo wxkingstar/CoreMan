@@ -118,6 +118,11 @@ class Settings(BaseSettings):
         default=24.0, ge=0, alias="CONTACT_SYNC_INTERVAL_HOURS"
     )
 
+    # 员工规则文档（AGENTS.md、CLAUDE.md、docs/）每日备份到这个 GitHub 仓库（owner/name），
+    # 令牌只需该仓库的 Contents 读写权限。任一缺失时不备份。
+    rules_backup_repo: str | None = Field(default=None, alias="RULES_BACKUP_REPO")
+    rules_backup_token: SecretStr | None = Field(default=None, alias="RULES_BACKUP_TOKEN")
+
     @property
     def cloud_proxy_ready(self) -> bool:
         def present(value: SecretStr | str | None) -> bool:

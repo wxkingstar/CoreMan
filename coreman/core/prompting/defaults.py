@@ -197,6 +197,26 @@ otherwise tell the user and ask before touching it.
 
 If the working directory is not such a worktree, this section does not apply."""
 
+# 固定段，只给非开发模式的员工：规则文档按 AGENTS.md 索引 + docs/ 分篇存放，用到时再读。
+# 根目录自己就是带远端的 Git 仓库时由那个仓库的约定说了算，所以留给 agent 自己判断。
+RULES_LAYOUT_RULE = """# Rule Documents
+
+Keep the durable rules you are given or work out in your working directory, laid out so they
+load only when needed:
+
+- `AGENTS.md` (`CLAUDE.md` is the same file) stays short: what you do, the few rules that
+  apply to every task, and an index of rule documents with one line each saying when to read
+  it.
+- Put the detailed rules for each topic in `docs/<topic>.md` and reference it from that
+  index, e.g. "Before handling refunds, read `docs/refunds.md`." Open a document only when the
+  task needs it.
+- When you add or change a rule, update its document and its index line together. When a
+  section of `AGENTS.md` grows beyond a few lines, move it into `docs/`.
+- Never put secrets, tokens or personal data in these files.
+
+If your working directory has its own `.git` with a remote, follow that repository's
+conventions instead; this section does not apply."""
+
 # 固定段，只给 Codex：Claude Code 自带记忆说明，守护进程已把它的记忆目录指到同一处。
 MEMORY_RULE = """# Persistent Memory
 

@@ -661,6 +661,7 @@ usage() {
   contact-sync [--app 名称]     同步企业微信或飞书通讯录
   feishu-cards preview --to 成员 [--bot 标识] [--sample 名称] [--stream] [--apply]
                               飞书富卡片真机预览；不加 --apply 只做飞书校验
+  rules-backup [--apply]      立即备份员工规则文档到 GitHub；不加 --apply 只列出改动
   bots|skills|approvals|systems|teams|users|api <操作> … [--as 登录名]
                               管理后台常用操作的命令行版本，各命令加 --help 查看用法
   help                        本说明
@@ -684,6 +685,7 @@ main() {
     skills|bots|approvals|systems|teams|users|api) cmd_admin "$cmd" "$@" ;;
     contact-sync) cmd_contact_sync "$@" ;;
     feishu-cards) compose run --rm migrate /app/.venv/bin/python -m coreman.cli feishu-cards "$@" ;;
+    rules-backup) compose run --rm migrate /app/.venv/bin/python -m coreman.cli rules-backup "$@" ;;
     help|-h|--help) usage ;;
     *) usage; return 1 ;;
   esac

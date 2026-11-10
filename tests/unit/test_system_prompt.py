@@ -300,6 +300,12 @@ def test_dev_mode_section_only_when_enabled_and_before_custom_prompt() -> None:
         )
 
     assert "# Development Mode" not in build(False)
+    # 非开发模式的员工按 AGENTS.md 索引 + docs/ 分篇存规则；开发模式的根目录本身就是仓库。
+    plain = build(False)
+    rules = plain.index("# Rule Documents")
+    assert plain.index("# Date and Time") < rules < plain.index("你是开发")
+    assert "`docs/<topic>.md`" in plain
+    assert "# Rule Documents" not in build(True)
     out = build(True)
     assert out.index("# Date and Time") < out.index("# Development Mode") < out.index("你是开发")
     assert "Never push to or rebase the default branch" in out

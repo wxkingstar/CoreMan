@@ -14,7 +14,8 @@
 | `retention_seconds` | 按保留期分批删终态任务、入站事件与出站条目 |
 
 cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次；通讯录每
-`CONTACT_SYNC_INTERVAL_HOURS` 全量同步一次（每 5 分钟看一眼是否到期）。
+`CONTACT_SYNC_INTERVAL_HOURS` 全量同步一次（每 5 分钟看一眼是否到期）；配了 `RULES_BACKUP_REPO`
+与令牌时，员工规则文档每天备份一次（每 10 分钟看一眼是否到期）。
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ LOCK_NAME = "coreman-scheduler"
 MAX_HEARTBEAT_SECONDS = 10.0
 RECONCILE_SECONDS = 300.0
 CONTACT_SYNC_CHECK_SECONDS = 300.0
+RULES_BACKUP_CHECK_SECONDS = 600.0
 
 
 class SchedulerService(Service):
@@ -121,6 +123,7 @@ class SchedulerService(Service):
                 ("scheduler-wecom-personal", self._wecom_personal_loop()),
                 ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
                 ("scheduler-contact-sync", self._contact_sync_loop()),
+                ("scheduler-rules-backup", self._rules_backup_loop()),
             )
         ]
         self.ready = True
@@ -354,6 +357,36 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("contact_sync_tick_failed")
             await self._sleep(CONTACT_SYNC_CHECK_SECONDS)
+
+    async def _rules_backup_loop(self) -> None:
+        """员工规则文档每日备份到共用 GitHub 仓库；没配仓库或令牌时不起作用。"""
+        from coreman.core.bots import rules_backup
+
+        settings = get_settings()
+        repo = settings.rules_backup_repo or ""
+        token = (
+            settings.rules_backup_token.get_secret_value() if settings.rules_backup_token else ""
+        )
+        if not repo or not token:
+            return
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    report = await rules_backup.run_due(
+                        self._factory, self._store, repo, token, datetime.now(UTC)
+                    )
+                    if report is not None:
+                        statuses = [b["status"] for b in report.get("bots", {}).values()]
+                        self._log.info(
+                            "rules_backup_done",
+                            commit=report.get("commit"),
+                            changed_files=report.get("changed_files"),
+                            error=report.get("error"),
+                            **{s: statuses.count(s) for s in set(statuses)},
+                        )
+            except Exception:
+                self._log.exception("rules_backup_failed")
+            await self._sleep(RULES_BACKUP_CHECK_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""
