@@ -1,4 +1,4 @@
-"""「上一条还在处理」卡片的点击：停下上一条先做这条、等它做完，或者看看上一条的进度。
+"""「上一条还在处理」卡片的点击：等它做完再做这条、停下上一条先做这条、看看上一条的进度，或者放弃这条。
 
 只认发这条消息的本人点；别人点了不回卡（回了就等于替他把卡改掉）。
 """
@@ -65,6 +65,9 @@ async def handle(
         return "ignored", None
     if choice in (busy_choice.RESUME, busy_choice.DROP):
         return "late", card("late")
+    if choice == busy_choice.CANCEL:
+        await tasks.finish(session, target.id, status="cancelled", error_code="user_dropped")
+        return "drop", card("dropped")
     if choice == busy_choice.WAIT:
         # 明确说了要等：轮到时不再问一次。
         target.payload = {**target.payload, "busy_wait": True}
