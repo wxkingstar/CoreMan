@@ -1477,3 +1477,88 @@ async def test_unreachable_dm_without_fallback_still_fails(db_session, db_engine
     async with factory() as session:
         item = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key == "direct:1"))
         assert item.status != "sent"
+
+
+PLAN = [
+    {"text": "读取订单", "status": "completed"},
+    {"text": "汇总", "status": "in_progress"},
+]
+
+
+def element_calls(api, method):
+    return [
+        body
+        for m, path, body in api.calls
+        if m == method
+        and path.startswith("/open-apis/cardkit/v1/cards/card1/elements")
+        and not path.endswith("/content")
+    ]
+
+
+async def test_plan_box_is_inserted_then_replaced_and_kept_in_the_final(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.update(session, row.task_id, plan=PLAN, pending_text="hello!")
+        await session.commit()
+    await transport.round()
+    [insert] = element_calls(api, "POST")
+    assert insert["type"] == "insert_after" and insert["target_element_id"] == "thinking_panel"
+    [box] = json.loads(insert["elements"])
+    assert box["element_id"] == "plan_box"
+    assert [e["checked"] for e in box["elements"] if e["tag"] == "checker"] == [True, False]
+    # 清单没变：不再推。
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="hello!!")
+        await session.commit()
+    await transport.round()
+    assert len(element_calls(api, "POST")) == 1 and not element_calls(api, "PUT")
+    done = [{**item, "status": "completed"} for item in PLAN]
+    async with factory() as session:
+        await streams.update(session, row.task_id, plan=done)
+        await session.commit()
+    await transport.round()
+    [replace] = element_calls(api, "PUT")
+    assert "**任务清单** 2/2" in replace["element"]
+    await finish(factory, row, "完成了。")
+    await transport.round()
+    final = card_puts(api)[-1]
+    assert [e["element_id"] for e in final["body"]["elements"][:2]] == [
+        "thinking_panel",
+        "plan_box",
+    ]
+
+
+class PlanCardKit(CardKit):
+    """另外认插入组件接口：按 insert_after 放进根层级。"""
+
+    async def call(self, method, path, **kwargs):
+        body = kwargs.get("json") or {}
+        if method == "POST" and path == "/open-apis/cardkit/v1/cards/card1/elements":
+            at = self.roots.index(body["target_element_id"]) + 1
+            self.roots[at:at] = [e["element_id"] for e in json.loads(body["elements"])]
+        return await super().call(method, path, **kwargs)
+
+
+async def test_answer_streams_below_the_plan(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), PlanCardKit()
+    async with factory() as session:
+        await streams.update(session, row.task_id, pending_text="")
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.update(session, row.task_id, plan=PLAN)
+        await session.commit()
+    await transport.round()
+    chart = '```card:chart\n{"chart": "bar", "x": ["a", "b"], "series": [{"values": [1, 2]}]}\n```'
+    await stream_steps(factory, transport, row, ["结论。", f"结论。\n\n{chart}\n\n后文"])
+    assert api.roots[:2] == ["thinking_panel", "plan_box"]
+    assert len(api.roots) > 3

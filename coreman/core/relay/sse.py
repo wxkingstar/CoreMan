@@ -53,6 +53,34 @@ class ToolUseStart:
     tool_id: str
 
 
+PLAN_STATUSES = frozenset({"pending", "in_progress", "completed"})
+PLAN_MAX_ITEMS = 20
+PLAN_TEXT_CHARS = 200
+
+
+@dataclass(frozen=True)
+class PlanUpdate:
+    """agent 自己的任务清单（relay 扩展字段 `delta.plan`），每次变化都整份重发，以最后一份为准。
+
+    items 里每项是 `{"text", "status"}`，status 只有 pending / in_progress / completed。
+    """
+
+    items: tuple[tuple[str, str], ...]
+
+
+def _plan(value: Any) -> PlanUpdate | None:
+    if not isinstance(value, list):
+        return None
+    items = []
+    for item in value[:PLAN_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        text, status = str(item.get("text") or "").strip(), item.get("status")
+        if text and status in PLAN_STATUSES:
+            items.append((text[:PLAN_TEXT_CHARS], str(status)))
+    return PlanUpdate(tuple(items)) if items else None
+
+
 @dataclass(frozen=True)
 class AskUserQuestionEvent:
     """AskUserQuestion 工具的完整问卷（arguments 拼完后才产出）。"""
@@ -109,6 +137,7 @@ SseEvent = (
     | ThinkingDelta
     | ImageDelta
     | ToolUseStart
+    | PlanUpdate
     | AskUserQuestionEvent
     | UsageEvent
     | RelayErrorEvent
@@ -189,6 +218,8 @@ class SseParser:
         for image in delta.get("images") or []:
             if decoded := _image(image):
                 out.append(decoded)
+        if plan := _plan(delta.get("plan")):
+            out.append(plan)
         thinking = delta.get("thinking")
         if isinstance(thinking, str) and thinking:
             self.counts["thinking"] += 1

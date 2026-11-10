@@ -62,6 +62,16 @@ type ChatMessage struct {
 	Thinking   string          `json:"thinking,omitempty"`
 	// Images is a relay extension: pictures the turn shows the user, in stream order.
 	Images []*Image `json:"images,omitempty"`
+	// Plan is a relay extension: the turn's whole task list, sent again each
+	// time it changes (the latest one wins).
+	Plan []PlanItem `json:"plan,omitempty"`
+}
+
+// PlanItem is one step of the agent's own task list.
+type PlanItem struct {
+	Text string `json:"text"`
+	// Status is pending, in_progress or completed.
+	Status string `json:"status"`
 }
 
 // Image is one picture carried in a stream delta; Data is base64.

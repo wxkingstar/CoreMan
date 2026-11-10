@@ -72,3 +72,14 @@ func TestNativeToolEventsEmitOneStartPerItem(t *testing.T) {
 		t.Error("MCP arguments lost")
 	}
 }
+
+func TestCodexPlanMarksFirstUnfinishedCurrent(t *testing.T) {
+	plan := codexPlan([]byte(`[{"text":"a","completed":true},{"text":"b","completed":false},{"text":"c","completed":false},{"text":"","completed":false}]`))
+	got := ""
+	for _, item := range plan {
+		got += item.Text + "=" + item.Status + ";"
+	}
+	if got != "a=completed;b=in_progress;c=pending;" {
+		t.Fatalf("plan = %s", got)
+	}
+}

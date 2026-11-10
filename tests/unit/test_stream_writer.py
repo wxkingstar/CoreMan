@@ -37,3 +37,13 @@ def test_existing_newlines_count_toward_the_gap() -> None:
     w.add_tool("Bash")
     w.add_text("\n\n第三段")
     assert w.pending_text == "第一段\n\n第二段\n\n第三段"
+
+
+def test_plan_is_the_latest_list() -> None:
+    w = writer()
+    w.set_plan((("读取", "in_progress"), ("汇总", "pending")))
+    w.set_plan((("读取", "completed"), ("汇总", "in_progress")))
+    assert w.plan == [
+        {"text": "读取", "status": "completed"},
+        {"text": "汇总", "status": "in_progress"},
+    ]

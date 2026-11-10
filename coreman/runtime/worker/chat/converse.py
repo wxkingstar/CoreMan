@@ -14,6 +14,7 @@ from coreman.core.relay.sse import (
     AskUserQuestionEvent,
     FinishEvent,
     ImageDelta,
+    PlanUpdate,
     RateLimitEvent,
     RelayErrorEvent,
     RuntimeObservationEvent,
@@ -194,6 +195,8 @@ class ConverseStage(ChatStageBase):
             out.tool_events += 1
             out.tools.append(event.name)
             writer.add_tool(event.name)
+        elif isinstance(event, PlanUpdate):
+            writer.set_plan(event.items)
         elif isinstance(event, RelayErrorEvent):
             out.relay_error = True
             writer.add_text(event.text)

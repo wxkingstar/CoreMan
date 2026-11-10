@@ -69,6 +69,7 @@ type sseTranslator struct {
 	askUserArgs     strings.Builder
 
 	toolBlocks map[int]*toolBlock
+	plan       taskPlan
 
 	aggType  string
 	aggBuf   strings.Builder
@@ -233,6 +234,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		if streamEvt.Type == "content_block_stop" {
 			if tb, ok := t.toolBlocks[streamEvt.Index]; ok {
 				sessionStore.LogToolUse(t.sessionID, tb.Name, tb.ID, tb.Args.String())
+				if isTaskTool(tb.Name) {
+					t.plan.call(tb.ID, tb.Name, tb.Args.String())
+				}
 				if tb.Name != "AskUserQuestion" && tb.Args.Len() > 0 {
 					t.progress(w, flusher, "\n\n工具参数 · "+tb.Name+"\n"+tb.Args.String()+"\n")
 				}
@@ -251,6 +255,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 				Type    string          `json:"type"`
 				ToolID  string          `json:"tool_use_id"`
 				Content json.RawMessage `json:"content"`
+				IsError bool            `json:"is_error"`
 			} `json:"content"`
 		}
 		if json.Unmarshal(event.Message, &message) == nil {
@@ -261,6 +266,15 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 						content = string(block.Content)
 					}
 					t.progress(w, flusher, "\n\n工具结果 · "+block.ToolID+"\n"+content+"\n")
+					if !block.IsError && t.plan.result(block.ToolID, toolResultText(block.Content)) {
+						t.emit(w, flusher, openai.ChatCompletionResponse{
+							ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
+							Choices: []openai.ChatCompletionChoice{{
+								Index: 0,
+								Delta: &openai.ChatMessage{Role: "assistant", Plan: t.plan.items()},
+							}},
+						})
+					}
 				}
 			}
 		}
