@@ -11,6 +11,7 @@ worktree 放在工作目录下的 `.coreman-worktrees/<会话 id>`，分支 `cor
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
 import time
@@ -19,6 +20,8 @@ from pathlib import Path
 
 from .agent import OperationError, run_command
 from .workspace import git_exclude_file, replace_file
+
+LOG = logging.getLogger("coreman-runtime")
 
 DIRECTORY = ".coreman-worktrees"
 BRANCH_PREFIX = "coreman/session-"
@@ -117,8 +120,11 @@ def ensure(repo: Path, session_id: str) -> Path:
     tree = repo / DIRECTORY / session_id
     if not (tree / ".git").is_file():
         with locked(repo):
-            if not (tree / ".git").is_file():
-                create(repo, tree, BRANCH_PREFIX + session_id)
+            if not (tree / ".git").is_file() and not create(repo, tree, BRANCH_PREFIX + session_id):
+                # 仓库还没有任何提交（刚 git init、远端没拉下来）：没有起点可建 worktree，
+                # 这一轮直接在工作目录里跑，等有了提交再按会话分开。
+                LOG.warning("worktree skipped: repository has no commits yet")
+                return repo
     # 每轮都补：worktree 建好之后才在主检出装的技能也要看得到。
     link_shared(repo, tree)
     # 记下最近一次使用，定期清理按它判断闲置。
@@ -126,17 +132,24 @@ def ensure(repo: Path, session_id: str) -> Path:
     return tree
 
 
-def create(repo: Path, tree: Path, branch: str) -> None:
+def create(repo: Path, tree: Path, branch: str) -> bool:
+    """建会话 worktree；仓库没有任何提交可作起点时不建，返回 False。"""
     exclude(repo, ["/" + DIRECTORY + "/"])
     git(repo, "worktree", "prune")
     if tree.exists() and any(tree.iterdir()):
         raise OperationError("会话 worktree 目录已存在且不是 worktree")
     if succeeds(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
         git(repo, "worktree", "add", "--", str(tree), branch)
+        return True
+    base = fetch(repo)
+    if base:
+        start = f"origin/{base}"
+    elif succeeds(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"):
+        start = "HEAD"
     else:
-        base = fetch(repo)
-        start = f"origin/{base}" if base else "HEAD"
-        git(repo, "worktree", "add", "--no-track", "-b", branch, "--", str(tree), start)
+        return False
+    git(repo, "worktree", "add", "--no-track", "-b", branch, "--", str(tree), start)
+    return True
 
 
 def refresh(repo: Path, now: float | None = None) -> None:
