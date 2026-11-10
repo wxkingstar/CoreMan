@@ -8,6 +8,9 @@
 
 `tower reconcile`：回调丢失时翻 Tower 状态接口补上审批决定，见 core.cloud_proxy.reconcile。
 
+`rules-backup [--apply]`：立即备份一轮员工规则文档（scheduler 每天自动跑），
+见 core.bots.rules_backup。
+
 `bots`、`skills`、`approvals`、`systems`、`teams`、`users`、`api`：管理后台常用操作的命令行版本，
 以 --as 指定的成员身份经同一套管理 API 执行，见 coreman.admin_cli。
 """
@@ -205,6 +208,39 @@ async def _tower_reconcile() -> int:
     return 0
 
 
+async def _rules_backup(apply: bool) -> int:
+    from datetime import UTC, datetime
+
+    from coreman.core.bots import rules_backup
+    from coreman.core.runtime_nodes import transport as runtime_transport
+    from coreman.core.settings_store import SettingsStore
+
+    settings = get_settings()
+    repo = settings.rules_backup_repo or ""
+    token = settings.rules_backup_token.get_secret_value() if settings.rules_backup_token else ""
+    if not repo or not token:
+        print("缺少 RULES_BACKUP_REPO 或 RULES_BACKUP_TOKEN 配置", file=sys.stderr)
+        return 1
+    configure_logging(
+        service="cli", instance="rules-backup", level=settings.log_level, stream=sys.stderr
+    )
+    engine = make_engine(settings.database_url)
+    factory = make_session_factory(engine)
+    runtime_transport.configure(factory)
+    try:
+        report = await rules_backup.run(factory, repo, token, datetime.now(UTC), apply=apply)
+        if apply:
+            await SettingsStore(factory).set(rules_backup.STATE_KEY, report)
+    except rules_backup.BackupError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        runtime_transport.configure(None)
+        await engine.dispose()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _preview_texts(args: argparse.Namespace) -> dict[str, str] | None:
     """预览内容：--file 文件、--sample 某个样例，都不给就是全部样例。"""
     from coreman.core.feishu_cards.samples import SAMPLES
@@ -264,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     tower = sub.add_parser("tower", help="Tower 审批")
     tower_ops = tower.add_subparsers(dest="operation", required=True)
     tower_ops.add_parser("reconcile", help="翻 Tower 状态接口，补上丢失回调的审批决定")
+    backup = sub.add_parser("rules-backup", help="立即备份员工规则文档到共用 GitHub 仓库")
+    backup.add_argument("--apply", action="store_true", help="真正提交；不加只读取并列出改动")
     cards = sub.add_parser("feishu-cards", help="飞书富卡片")
     cards_ops = cards.add_subparsers(dest="operation", required=True)
     pv = cards_ops.add_parser("preview", help="编译样例或文件并发给指定成员，做真机视觉回归")
@@ -287,6 +325,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_tower_reconcile())
     if args.command == "contact-sync":
         return asyncio.run(_contact_sync(args.app))
+    if args.command == "rules-backup":
+        return asyncio.run(_rules_backup(args.apply))
     return 2
 
 

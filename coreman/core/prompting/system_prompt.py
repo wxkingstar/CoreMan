@@ -43,6 +43,7 @@ from coreman.core.prompting.defaults import (
     MEMORY_RULE,
     PLATFORM_RULES,
     PROMPT_DEFAULTS_BY_KEY,
+    RULES_LAYOUT_RULE,
     SPEAKER_CHANGED_NOTE,
     SPEAKER_KNOWN_LINE,
     SPEAKER_UNKNOWN_LINE,
@@ -193,7 +194,8 @@ def build_system_prompt(
         segments.codex_contract if codex and not structured_reply else "",
         segments.runtime_mode,
         TIME_RULE.format(clock_timezone=CLOCK_TIMEZONE),
-        DEV_MODE_RULE if dev_mode else "",
+        # 开发模式的根目录本身就是仓库，规则随仓库维护；其余员工按 docs/ 分篇存规则。
+        DEV_MODE_RULE if dev_mode else RULES_LAYOUT_RULE,
         MEMORY_RULE.format(memory_dir=memory_dir) if codex and memory_dir else "",
         segments.cron_mode if scheduled else "",
         segments.org_context,
