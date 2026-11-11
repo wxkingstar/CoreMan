@@ -134,6 +134,8 @@ class FeishuTransport:
         self.images = RemoteImages(self.upload_image, transport=image_transport)
         # 机器人的富卡片开关；子进程每轮从库里刷新。
         self.rich_cards = True
+        # 这个机器人是个人助理：日志里不写卡片内容的片段。每轮开头刷新。
+        self._private = False
         # 调度员在单人群里收到消息就打的「处理中」表情（见 acks.py）。
         from coreman.runtime.gateway_feishu.acks import Acks
 
@@ -260,6 +262,7 @@ class FeishuTransport:
         await self.acks.expire()
         try:
             async with self.factory() as session:
+                self._private = await sealed.guard_logs(session, self.bot_id)
                 rows = list(
                     await session.scalars(
                         select(TaskStream)
@@ -754,10 +757,17 @@ class FeishuTransport:
             )
             if not compiled.problems:
                 return compiled
-            log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+            self._warn_invalid_card(compiled.problems)
         return await self.plain_cards(
             thinking, answer, session_url, heading, localized=True, plan=plan
         )
+
+    def _warn_invalid_card(self, problems: list[str]) -> None:
+        if self._private:
+            # 校验说明里带着卡片里的键与取值（模型写的内容）：个人助理的只记条数。
+            log.warning("feishu_rich_card_invalid", problem_count=len(problems))
+        else:
+            log.warning("feishu_rich_card_invalid", problems=problems[:5])
 
     async def plain_cards(
         self,
@@ -1127,7 +1137,7 @@ class FeishuTransport:
             people = await self.people_ids(names)
             compiled = await asyncio.to_thread(compile_reply, body, images=images, people=people)
             if compiled.problems:
-                log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+                self._warn_invalid_card(compiled.problems)
                 compiled = None
         if compiled is None:
             cards = await asyncio.to_thread(simple_cards, body)

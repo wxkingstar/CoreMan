@@ -71,11 +71,11 @@ RETURNING id
 )
 _RELEASED_SQL = text(
     f"""
-SELECT f.dedupe_key, count(q.id) FROM outbox f
+SELECT f.dedupe_key, count(q.id), f.bot_id FROM outbox f
 LEFT JOIN outbox q ON q.bot_id=f.bot_id AND q.status IN ('pending','sending')
   AND q.id>f.id AND {_group_sql("q")} = {_group_sql("f")}
 WHERE f.id=:id AND {_group_sql("f")} IS NOT NULL
-GROUP BY f.dedupe_key
+GROUP BY f.dedupe_key, f.bot_id
 """
 )
 
@@ -215,6 +215,10 @@ async def _note_permanent_failure(session: AsyncSession, item_id: int, error: st
     if row is None or not row[1]:
         return
     dedupe_key, released = str(row[0]), int(row[1])
+    detail: dict[str, Any] = {"error": error[:200]}
+    if row[2] is not None and await sealed.owner_of(session, row[2]) is not None:
+        # 报错原文可能带出消息片段：个人助理的只记开头的代码与长度（同 last_error）。
+        detail = {"error": sealed.code_only(error), "error_length": len(error)}
     after_commit(
         session,
         lambda: log.warning(
@@ -222,7 +226,7 @@ async def _note_permanent_failure(session: AsyncSession, item_id: int, error: st
             outbox_id=item_id,
             dedupe_key=dedupe_key,
             released=released,
-            error=error[:200],
+            **detail,
         ),
     )
 

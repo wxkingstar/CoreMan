@@ -49,7 +49,7 @@ from coreman.core.db.models import (
     Task,
     TaskStream,
 )
-from coreman.core.logging import get_logger
+from coreman.core.logging import get_logger, mark_private_content
 
 log = get_logger(__name__)
 
@@ -334,6 +334,16 @@ async def owner_of(session: AsyncSession, bot_id: uuid.UUID) -> uuid.UUID | None
     owner: uuid.UUID | None = row[1] if row[0] == "assistant" else None
     _OWNERS[bot_id] = (owner, now + keys.KEY_TTL_SECONDS)
     return owner
+
+
+async def guard_logs(session: AsyncSession, bot_id: uuid.UUID | None) -> bool:
+    """开始处理某个机器人的内容时调用：是个人助理就让这段处理里的日志不带异常文字。
+
+    返回是不是个人助理，调用方据此决定自己的日志字段写原文还是只写代码与长度。
+    """
+    private = bot_id is not None and await owner_of(session, bot_id) is not None
+    mark_private_content(private)
+    return private
 
 
 async def _cipher(session: AsyncSession, bot_id: uuid.UUID, *, create_key: bool) -> Cipher | None:

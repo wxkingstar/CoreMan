@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import sys
+import traceback
+from contextvars import ContextVar
 from typing import Any, TextIO
 
 import structlog
@@ -36,6 +39,11 @@ class RedactingFormatter(logging.Formatter):
         self._inner = inner
 
     def format(self, record: logging.LogRecord) -> str:
+        if record.exc_info and _private_content.get():
+            # `log.exception` 还会让标准库在消息后面再附一份 traceback：处理个人助理的内容时
+            # 不附（JSON 行里已有类型与调用栈，见 strip_exception_text）。
+            record = copy.copy(record)
+            record.exc_info, record.exc_text = None, None
         text = self._inner.format(record) if self._inner else super().format(record)
         return redact_url_credentials(text)
 
@@ -56,6 +64,38 @@ def scrub_secrets(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]
         lowered = key.lower()
         if key != "event" and any(marker in lowered for marker in _SECRET_MARKERS):
             event_dict[key] = "***"
+    return event_dict
+
+
+# 当前这段处理（一个任务、网关的一轮推送）经手的是个人助理的内容：异常文字可能夹带对话片段
+# （校验错误回显输入值、取值失败带出原值），日志里只留异常类型与调用栈。
+_private_content: ContextVar[bool] = ContextVar("coreman_private_content", default=False)
+
+
+def mark_private_content(on: bool = True) -> None:
+    """标记（或取消）当前上下文正在处理个人助理的内容；随 asyncio 任务与 `to_thread` 继承。"""
+    _private_content.set(on)
+
+
+def private_content() -> bool:
+    return _private_content.get()
+
+
+def strip_exception_text(_: Any, __: str, event_dict: EventDict) -> EventDict:
+    """处理个人助理的内容时，`exc_info` 换成「类型 + 调用栈」，不带异常消息。"""
+    exc_info = event_dict.get("exc_info")
+    if not exc_info or not _private_content.get():
+        return event_dict
+    if isinstance(exc_info, BaseException):
+        exc: BaseException | None = exc_info
+    elif isinstance(exc_info, tuple):
+        exc = exc_info[1]
+    else:
+        exc = sys.exc_info()[1]
+    del event_dict["exc_info"]
+    if exc is not None:
+        frames = "".join(traceback.format_tb(exc.__traceback__))
+        event_dict["exception"] = f"{type(exc).__name__}\n{frames}".rstrip()
     return event_dict
 
 
@@ -99,6 +139,7 @@ def configure_logging(
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
             scrub_secrets,  # type: ignore[list-item]
+            strip_exception_text,
             structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(ensure_ascii=False),
         ],

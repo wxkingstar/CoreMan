@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from coreman import __version__
+from coreman.core.assistants import sealed
 from coreman.core.bus import instances, streams, tasks
 from coreman.core.bus.notify import RUNTIME_CALL_CHANNEL, Listener, asyncpg_dsn
 from coreman.core.chat import chat_logs
@@ -269,6 +270,8 @@ class WorkerService(Service):
         try:
             async with self._factory() as session:
                 await tasks.start(session, ctx.task.id)
+                # 个人助理的任务：这之后的异常日志只留类型与调用栈（每个任务各自一个上下文）。
+                await sealed.guard_logs(session, ctx.task.bot_id)
                 await session.commit()
             handler = self._handlers.get(ctx.task.kind)
             if handler is None:
