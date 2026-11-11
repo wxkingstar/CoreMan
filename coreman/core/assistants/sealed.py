@@ -9,12 +9,20 @@
 - 整值列：`{"_sealed": <密文>}`。
 - 文本列：密文串本身。
 - `{"_sealed": ""}` 是墓碑：密钥销毁之后写入，内容已丢弃。
+
+内容本身可能长得像封装（任务结果恰好是 `{"_sealed": …}`、正文以 `enc:v2:` 开头）。所以：
+- 封存不看值的形状：交来的值一律当明文整体加密，`_sealed` 键也收进密文。唯一的例外由调用方
+  明说（`seal_dict(..., envelope=True)`）：flush 钩子确认这个值是从库里读出、尚未还原的封装
+  改出来的。
+- 还原只认库里读出的值，且 `_sealed` 必须是本模块写出的格式（墓碑或数据密钥的密文）；已经
+  还原在内存里的值靠行上的标记（`_OPENED`）认出来，不再解第二次。
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -29,7 +37,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from coreman.core.assistants import keys
 from coreman.core.config import get_settings
-from coreman.core.crypto import Cipher, is_encrypted, key_id_of
+from coreman.core.crypto import PREFIX_V2, Cipher, key_id_of
 from coreman.core.db.models import (
     Bot,
     ChatLog,
@@ -129,8 +137,29 @@ def aad(table: str, column: str, bot_id: uuid.UUID) -> str:
     return f"{table}.{column}:{bot_id}"
 
 
+# 数据密钥的标识：`d<代数>`，见 keys.data_key_id。
+_DATA_KID = re.compile(r"^d[0-9]+$")
+
+
+def is_token(value: object) -> bool:
+    """是不是数据密钥写出的密文串（`enc:v2:d<代数>:…`）。"""
+    if not isinstance(value, str) or not value.startswith(PREFIX_V2):
+        return False
+    kid = key_id_of(value)
+    return kid is not None and _DATA_KID.match(kid) is not None
+
+
 def is_sealed(value: object) -> bool:
-    return isinstance(value, dict) and isinstance(value.get(SEALED), str)
+    """库里读出的值是不是封装：`_sealed` 是墓碑（空串）或数据密钥的密文。
+
+    `_sealed` 是别的东西（任意字符串、数字）时不算封装，按普通内容原样返回，而不是按篡改
+    报错：助理的行里没封存过的值本来就原样返回（比如记录转成助理之前写下的行），能改库的人
+    直接写明文也是同样的效果，报错挡不住什么，只会让一行读不出来。
+    """
+    if not isinstance(value, dict):
+        return False
+    token = value.get(SEALED)
+    return token == "" or is_token(token)
 
 
 def _dumps(value: Any) -> str:
@@ -164,12 +193,21 @@ def _keep(spec: JsonSpec, value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def seal_dict(cipher: Cipher, aad_: str, value: dict[str, Any], spec: JsonSpec) -> dict[str, Any]:
-    if is_sealed(value):
-        # 已经是封装（可能被追加了别的键）：先还原，杂散的键一起收进密文。
+def seal_dict(
+    cipher: Cipher, aad_: str, value: dict[str, Any], spec: JsonSpec, *, envelope: bool = False
+) -> dict[str, Any]:
+    """封存一个字典。
+
+    Args:
+        envelope: `value` 是库里读出、尚未还原的封装（可能被追加或删掉了明文键）：先还原，
+            杂散的键一起收进密文。只能由确知来历的调用方传真——不凭值的形状判断，否则内容里
+            带一个 `_sealed` 键就能让自己原样落库
+    """
+    if envelope:
         value = open_dict(cipher, aad_, value, spec)
     keep = _keep(spec, value)
-    rest = {k: v for k, v in value.items() if k not in keep and k != SEALED}
+    # 内容自带的 `_sealed` 键不留在外面（哪怕下划线开头的键留明文），随其余部分进密文。
+    rest = {k: v for k, v in value.items() if k not in keep}
     out: dict[str, Any] = {SEALED: cipher.encrypt(_dumps(rest), aad_), **keep}
     for root, child in spec.mirrors:
         inner = rest.get(root)
@@ -188,7 +226,7 @@ def open_dict(cipher: Cipher, aad_: str, value: dict[str, Any], spec: JsonSpec) 
 
 
 def seal_whole(cipher: Cipher, aad_: str, value: Any) -> Any:
-    if value is None or is_sealed(value):
+    if value is None:
         return value
     return {SEALED: cipher.encrypt(_dumps(value), aad_)}
 
@@ -204,7 +242,7 @@ def seal_text(cipher: Cipher, aad_: str, value: str | None) -> str | None:
 
 
 def open_text(cipher: Cipher, aad_: str, value: Any) -> Any:
-    if not isinstance(value, str) or not is_encrypted(value):
+    if not is_token(value):
         return value
     return _decrypt(cipher, value, aad_)
 
@@ -214,6 +252,9 @@ def open_text(cipher: Cipher, aad_: str, value: Any) -> Any:
 # 行上的标记（InstanceState.info）：还原时用的数据密钥、内容读不出来。
 _CIPHER = "sealed_cipher"
 _LOCKED = "sealed_locked"
+# 行上的标记：列名 → 已经还原（或刚由 flush 写入）的明文对象。按对象身份比对：属性从库里
+# 重新加载后是另一个对象，才会再还原；仍是这个对象就说明是明文，不管它长得像不像封装。
+_OPENED = "sealed_opened"
 # flush 期间被换成密文的属性，flush 之后换回明文。
 _RESTORE = "sealed_restore"
 _master: Cipher | None = None
@@ -292,8 +333,18 @@ def _open(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:
 
 def _looks_sealed(kind: Kind, value: Any) -> bool:
     if isinstance(kind, Text):
-        return isinstance(value, str) and is_encrypted(value)
+        return is_token(value)
     return is_sealed(value)
+
+
+def _raw(state: Any, column: str) -> bool:
+    """这一列在内存里的值是库里读出的原样：没还原过，也不是还没落库的改动。"""
+    value = state.dict.get(column)
+    return (
+        value is not None
+        and value is not state.info.get(_OPENED, {}).get(column)
+        and column not in state.committed_state
+    )
 
 
 def _nothing(kind: Kind, value: Any) -> bool:
@@ -361,7 +412,7 @@ async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None 
         return True
     state = sa_inspect(row)
     values = state.dict
-    pending = [c for c, kind in spec.items() if _looks_sealed(kind, values.get(c))]
+    pending = [c for c, kind in spec.items() if _raw(state, c) and _looks_sealed(kind, values[c])]
     bot_id = values.get("bot_id")
     if bot_id is None or (not pending and _CIPHER not in state.info):
         return not state.info.get(_LOCKED, False)
@@ -381,10 +432,12 @@ async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None 
         for column in targets:
             set_committed_value(row, column, _blank(spec[column], values[column]))
         state.info.pop(_CIPHER, None)
+        state.info.pop(_OPENED, None)
         state.info[_LOCKED] = True
         return False
     for column, value in opened.items():
         set_committed_value(row, column, value)
+        state.info.setdefault(_OPENED, {})[column] = value
     state.info[_CIPHER] = cipher
     state.info.pop(_LOCKED, None)
     return True
@@ -455,6 +508,22 @@ def _changed(state: Any, spec: dict[str, Kind], *, new: bool) -> list[str]:
     return out
 
 
+def _from_envelope(state: Any, column: str, value: Any) -> bool:
+    """要写的字典是不是从库里读出、尚未还原的封装改出来的（追加或删掉了明文键）。
+
+    凭行的状态判断，不凭值的形状：这一列改动之前的值必须是库里读出的原样封装（不是还原过的
+    明文），且新值带着同一段密文。
+    """
+    old = state.committed_state.get(column)
+    return (
+        isinstance(value, dict)
+        and old is not state.info.get(_OPENED, {}).get(column)
+        and is_sealed(old)
+        and old[SEALED] != ""
+        and value.get(SEALED) == old[SEALED]
+    )
+
+
 @event.listens_for(Session, "before_flush")
 def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
     """助理的行经 ORM 新建或改了内容列：落库前换成密文。
@@ -491,8 +560,13 @@ def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
                 try:
                     if cipher is None:
                         raise ContentLocked("所有者的数据密钥不可用")
-                    stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
-                    kept = plain
+                    aad_ = aad(table, column, bot_id)
+                    if isinstance(kind, JsonSpec) and _from_envelope(state, column, plain):
+                        stored = seal_dict(cipher, aad_, plain, kind, envelope=True)
+                        kept = open_dict(cipher, aad_, stored, kind)
+                    else:
+                        stored = _seal(cipher, aad_, kind, plain)
+                        kept = plain
                 except ContentLocked:
                     stored, kept, dropped = _dropped(kind, plain), _blank(kind, plain), True
                 setattr(row, column, stored)
@@ -509,3 +583,4 @@ def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
 def _unseal_after_flush(session: Session, flush_context: Any) -> None:
     for row, column, plain in session.info.pop(_RESTORE, []):
         set_committed_value(row, column, plain)
+        sa_inspect(row).info.setdefault(_OPENED, {})[column] = plain

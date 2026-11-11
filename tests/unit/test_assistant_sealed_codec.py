@@ -100,7 +100,8 @@ def test_underscore_keys_stay_plain_and_card_task_id_is_mirrored() -> None:
 def test_resealing_an_envelope_absorbs_stray_keys() -> None:
     spec = sealed.JsonSpec(plain=frozenset({"stale_hold"}))
     out = sealed.seal_dict(CIPHER, AAD, {"message": "a"}, spec)
-    again = sealed.seal_dict(CIPHER, AAD, {**out, "note": SECRET, "stale_hold": True}, spec)
+    edited = {**out, "note": SECRET, "stale_hold": True}
+    again = sealed.seal_dict(CIPHER, AAD, edited, spec, envelope=True)
     assert set(again) == {"_sealed", "stale_hold"} and SECRET not in _text(again)
     assert sealed.open_dict(CIPHER, AAD, again, spec) == {
         "message": "a",
