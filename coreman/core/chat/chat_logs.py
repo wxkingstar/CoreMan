@@ -259,13 +259,24 @@ async def close_running(
     await session.flush()
     try:
         async with session.begin_nested():
+            message = error_message[:limit] if error_message else None
+            if message:
+                # 只有 task_id：先查到这一行属于谁，再决定要不要封存。
+                bot_id = await session.scalar(
+                    select(ChatLog.bot_id)
+                    .where(ChatLog.task_id == task_id, ChatLog.status == CHAT_LOG_RUNNING)
+                    .limit(1)
+                )
+                message = (
+                    await sealed.seal_values(session, ChatLog, bot_id, {"error_message": message})
+                )["error_message"]
             closed = await session.scalar(
                 update(ChatLog)
                 .where(ChatLog.task_id == task_id, ChatLog.status == CHAT_LOG_RUNNING)
                 .values(
                     status=status,
                     error_code=error_code,
-                    error_message=error_message[:limit] if error_message else None,
+                    error_message=message,
                     latency_ms=elapsed_ms(),
                 )
                 .returning(ChatLog.id)

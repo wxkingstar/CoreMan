@@ -86,6 +86,7 @@ async def persisted_text(
             FeishuSentMessage.chat_id == chat_id,
         )
     )
+    archived = await sealed.open_value(session, FeishuSentMessage, "text", bot.id, archived)
     if isinstance(archived, str) and archived.strip():
         return archived
     # 存档上线前发出的消息：流（回复结束后留一小时）和出站队列（留七天）里可能还有原文。

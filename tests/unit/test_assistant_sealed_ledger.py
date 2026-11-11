@@ -85,16 +85,17 @@ RAW_STATEMENTS = {
     "coreman/runtime/worker/chat/feishu_docs.py": 1,  # `payload || …` 追加明文键 doc_links
     "coreman/runtime/worker/credential_cards.py": 2,  # `#-` 之后对助理的行再经 ORM 删一次
 }
-# 允许出现 insert / update / 构造这六个模型的文件：内容列都经过 sealed.seal_values，或只写元数据。
-WRITE_FILES = {
-    "coreman/core/api_tasks/service.py",
-    "coreman/core/bus/outbox.py",
-    "coreman/core/bus/streams.py",
-    "coreman/core/bus/tasks.py",
-    "coreman/core/chat/chat_logs.py",
-    "coreman/runtime/gateway_common/inbound.py",
-    "coreman/runtime/gateway_feishu/transport.py",
-    "coreman/runtime/scheduler/reaper.py",
+# 文件 → insert / update / 构造这六个模型的语句条数：内容列都经过 sealed.seal_values，或只写元数据。
+# 在已登记的文件里新增一条写语句同样会失败。
+WRITE_STATEMENTS = {
+    "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
+    "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
+    "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
+    "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态
+    "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
+    "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存
+    "coreman/runtime/gateway_feishu/transport.py": 1,  # 已发消息的正文存档，封存
+    "coreman/runtime/scheduler/reaper.py": 1,  # 结掉漏网的进行中记录，报错信息封存
 }
 
 
@@ -188,4 +189,4 @@ def test_every_raw_statement_on_content_is_reviewed() -> None:
 
 
 def test_writes_stay_in_the_sealing_layer() -> None:
-    assert set(_count(_is_write)) == WRITE_FILES
+    assert _count(_is_write) == WRITE_STATEMENTS

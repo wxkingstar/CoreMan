@@ -3049,7 +3049,7 @@ git commit -m "个人助理：chat_logs 的消息与回复正文加密入库"
 - Produces: 行为不变的四处修补；台账测试 `REVIEWED_READS`、`WRITE_FILES`——以后新增一处取整行或写入，测试会失败，逼着决定要不要还原或封存。
 
 **实现时的修正（以代码为准）：**
-- 台账测试改为按语法树扫描，不用正则，并从两张表扩到四张：`ENTITY_SELECTS`（实体出现在 `select(...)` 任意位置的条数，正则只认第一个参数）、`COLUMN_REFERENCES`（语句里直接引用 `<模型>.<内容列>` 的次数——只取内容列、按内容列过滤、`returning` 内容列都算）、`RAW_STATEMENTS`（提到这六张表与内容列名的裸 SQL 条数）、`WRITE_FILES`。内容列与表名取自 `sealed.COLUMNS`，以后登记新列会自动纳入。故意各加一处未登记的读、只取列、写、裸 SQL，四条用例全部失败，已验证后撤掉。
+- 台账测试改为按语法树扫描，不用正则，并从两张表扩到四张：`ENTITY_SELECTS`（实体出现在 `select(...)` 任意位置的条数，正则只认第一个参数）、`COLUMN_REFERENCES`（语句里直接引用 `<模型>.<内容列>` 的次数——只取内容列、按内容列过滤、`returning` 内容列都算）、`RAW_STATEMENTS`（提到这六张表与内容列名的裸 SQL 条数）、`WRITE_STATEMENTS`（Task 13 起由文件集合改成按文件计数：在已登记的文件里新增一条写语句同样会失败）。内容列与表名取自 `sealed.COLUMNS`，以后登记新列会自动纳入。故意各加一处未登记的读、只取列、写、裸 SQL，四条用例全部失败，已验证后撤掉。
 - 行为用例多两条：`reap_lost_tasks` 收尸（载荷里的会话信息与半截正文都要读到明文）、`queued_batch.gather` 合并排队消息；巡检类用例另开会话执行，拿到的才是库里读出、尚未还原的行。
 - 扫描另外盘出、计划的表里没有的引用：`coreman/core/feishu_docs/access.py` 只取 `Task.payload` 一列后读 `doc_links`（明文键，封装顶层就有，不用还原）；`coreman/runtime/worker/busy_choice.py`、`coreman/core/chat/busy_choice.py` 按 `platform_user_id` 过滤（明文键）。都不需要改代码，已记入台账。
 
@@ -3851,6 +3851,10 @@ git commit -m "个人助理：主密钥轮换后重新包裹数据密钥"
 **Interfaces:**
 - Consumes: Task 3 的 `COLUMNS`（已含 `Task.error_message`、`ChatLog.file_info` / `error_message`、`FeishuSentMessage.text`）；`sealed.seal_values`、`sealed.open_value`；Task 5 的 `tasks.finish(..., bot_id=None)`；Task 7 起 `transport.py` 已导入 `sealed`，Task 10 起 `reaper.py`、`feishu_quote.py` 已导入 `sealed`。
 - Produces: 这四列对助理记录是密文；读取处拿到明文。`error_code`、`status`、`work_code`、`chat_id` 保持明文。`coreman/core/chat/group_observe.py:229` 读存档只发生在群聊旁听里，助理不涉及，不改。
+
+**实现时的修正（以代码为准）：**
+- 步骤与代码按计划实现，用例照搬。`tasks.finish` 与 `close_running` 在调用方没给 `bot_id` 时按主键查归属的那条语句，由随后的「调用方传入 bot_id」一笔去掉（见文末「普通机器人路径上的开销」）。
+- `tasks.finish` 是 Core 语句，默认会把写入的值同步到会话里已有的任务对象上：同一会话里结束之后不重新取行、直接读 `task.result` / `task.error_message`，读到的是封存后的值。盘点过现有代码没有这样读的（都是结束前读，或 `session.get` 重新取，重新取会自动还原）；以后新增时要先 `tasks.get`。
 
 - [ ] **Step 1: 写失败测试**
 

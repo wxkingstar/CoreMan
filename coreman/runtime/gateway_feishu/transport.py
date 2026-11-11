@@ -223,12 +223,14 @@ class FeishuTransport:
             values["work_code"] = work_code
         try:
             async with self.factory() as session:
+                # 个人助理发出的正文加密存档；chat_id、work_code 不是内容列，原样写入。
+                stored = await sealed.seal_values(session, FeishuSentMessage, self.bot_id, values)
                 await session.execute(
                     insert(FeishuSentMessage)
-                    .values(bot_id=self.bot_id, message_id=message_id, **values)
+                    .values(bot_id=self.bot_id, message_id=message_id, **stored)
                     .on_conflict_do_update(
                         index_elements=[FeishuSentMessage.bot_id, FeishuSentMessage.message_id],
-                        set_=values,
+                        set_=stored,
                     )
                 )
                 await session.commit()

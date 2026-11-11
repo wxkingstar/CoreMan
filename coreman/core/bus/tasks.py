@@ -168,12 +168,21 @@ async def finish(
     改回 succeeded（守卫与 UPDATE 同一条语句，不存在读后写的窗口）。
 
     Args:
-        bot_id: 任务所属的机器人，封存 `result` 时用；没传且有结果要写时按主键查一次
+        bot_id: 任务所属的机器人，封存 `result` 与 `error_message` 时用；没传且有这两样要写时
+            按主键查一次
     """
+    # 截断按明文长度做，在加密之前。
+    message = error_message[:5000] if error_message else None
+    content: dict[str, Any] = {}
     if result is not None:
+        content["result"] = result
+    if message is not None:
+        content["error_message"] = message
+    if content:
         if bot_id is None:
             bot_id = await session.scalar(select(Task.bot_id).where(Task.id == task_id))
-        result = (await sealed.seal_values(session, Task, bot_id, {"result": result}))["result"]
+        stored = await sealed.seal_values(session, Task, bot_id, content)
+        result, message = stored.get("result"), stored.get("error_message")
     stmt = update(Task).where(Task.id == task_id)
     if only_active:
         stmt = stmt.where(Task.status.in_(ACTIVE))
@@ -184,7 +193,7 @@ async def finish(
                 finished_at=func.now(),
                 result=result,
                 error_code=error_code,
-                error_message=error_message[:5000] if error_message else None,
+                error_message=message,
             ).returning(Task.id, Task.kind, Task.started_at, Task.finished_at)
         )
     ).first()

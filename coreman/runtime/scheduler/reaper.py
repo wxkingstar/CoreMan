@@ -230,7 +230,7 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
     cutoff = now - timedelta(seconds=ABANDONED_TURN_GRACE_SECONDS)
     rows = (
         await session.execute(
-            select(ChatLog.id, Task.status, Task.error_code, Task.error_message)
+            select(ChatLog.id, ChatLog.bot_id, Task.status, Task.error_code, Task.error_message)
             .outerjoin(Task, Task.id == ChatLog.task_id)
             .where(
                 ChatLog.status == CHAT_LOG_RUNNING,
@@ -244,21 +244,24 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
             .with_for_update(of=ChatLog, skip_locked=True)
         )
     ).all()
-    for log_id, task_status, error_code, error_message in rows:
+    for log_id, bot_id, task_status, error_code, error_message in rows:
         code: str | None
         message: str | None
         if task_status is None:
             status, code, message = "error", "task_missing", "任务记录已不存在（如机器人已删除）"
         else:
             status = TASK_TO_LOG_STATUS.get(task_status, "error")
-            code, message = error_code, error_message[:5000] if error_message else None
+            # 这里只取了任务的一列：先还原成明文，再按对话记录这一列重新封存（两列的 AAD 不同）。
+            plain = await sealed.open_value(session, Task, "error_message", bot_id, error_message)
+            code, message = error_code, plain[:5000] if plain else None
+        stored = await sealed.seal_values(session, ChatLog, bot_id, {"error_message": message})
         await session.execute(
             update(ChatLog)
             .where(ChatLog.id == log_id)
             .values(
                 status=status,
                 error_code=code,
-                error_message=message,
+                error_message=stored["error_message"],
                 latency_ms=chat_logs.elapsed_ms(),
             )
         )
