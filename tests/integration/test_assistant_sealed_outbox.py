@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import keys, sealed
 from coreman.core.bus import instances, leases, outbox
-from coreman.core.db.models import Bot, OutboxItem
+from coreman.core.db.models import Bot, BotLease, OutboxItem
 from coreman.core.db.session import make_session_factory
 from coreman.runtime.gateway_feishu.transport import FeishuTransport
 from tests.integration.assistant_helpers import SECRET, raw, seed_assistant, seed_standard
@@ -115,7 +115,9 @@ async def _transport(
     await instances.register(
         session, instance_id="gw", service="gateway-feishu", version="test", capacity=None
     )
-    await leases.ensure_rows(session, "feishu")
+    # 助理记录的连接按应用认领，没有自己的 bot_leases 行；这里只测内容加密，直接放一行当围栏。
+    session.add(BotLease(bot_id=bot.id, platform="feishu"))
+    await session.flush()
     lease = await leases.acquire(session, bot_id=bot.id, platform="feishu", instance_id="gw")
     await session.commit()
     api = FakeAPI()
