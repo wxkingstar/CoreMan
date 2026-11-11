@@ -203,7 +203,7 @@ async def test_a_late_click_only_says_it_has_started(
     assert reply.payload["card"]["main_title"]["title"] == msg("busy_late_title")
 
 
-async def test_progress_reports_the_running_message_and_keeps_the_buttons(
+async def test_progress_shows_a_progress_card_and_drops_the_new_message(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     bot, _r, _c = await seed_bot(db_session)
@@ -228,36 +228,58 @@ async def test_progress_reports_the_running_message_and_keeps_the_buttons(
     reply = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
     assert reply is not None
     card = reply.payload["card"]
-    assert card["card_type"] == "button_interaction"
-    assert [b["key"] for b in card["button_list"]] == [
-        busy_choice.WAIT,
-        busy_choice.STOP,
-        busy_choice.PROGRESS,
-        busy_choice.CANCEL,
-    ]
-    assert "\n上一条已经处理了 6 分 " in card["sub_title_text"]
-    assert "做了 2 步。" in card["sub_title_text"]
-    assert "最近写到：正在汇总上周的退货数据" in card["sub_title_text"]
+    # 看完进度这条就放弃：卡上没有按钮，上一条不受影响。
+    assert "button_list" not in card
+    assert card["main_title"]["title"] == msg("busy_progress_title")
+    desc = card["sub_title_text"]
+    assert desc.startswith("已处理 6 分 ")
+    assert " · 做了 2 步\n" in desc
+    assert "最近几步：Bash → Read" in desc
+    assert "最近写到：正在汇总上周的退货数据" in desc
+    assert desc.endswith(msg("busy_progress_dropped"))
     assert (await _refresh(db_session, first)).cancel_requested_at is None
-    # 第一次点：卡片上有一行看得出刚刷新过。
-    assert card["sub_title_text"].startswith(msg("busy_progress_first"))
+    dropped = await _refresh(db_session, second)
+    assert (dropped.status, dropped.error_code) == ("cancelled", "user_dropped")
 
-    # 上一条没有新动作时再点：明说没有新进展，而不是一张看着一样的卡。
-    again = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
-    assert again is not None
-    assert again.payload["card"]["sub_title_text"].startswith("🔄 第 2 次查看：和 ")
-    assert "没有新进展" in again.payload["card"]["sub_title_text"]
 
-    await db_session.execute(
-        update(TaskStream)
-        .where(TaskStream.task_id == first.id)
-        .values(thinking_md="🤔 开始\n🔧 **Bash**\n🔧 **Read**\n🔧 **Edit**")
-    )
+async def test_progress_after_the_previous_one_finished_keeps_the_new_message(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _r, _c = await seed_bot(db_session)
+    first = await _say(db_session, bot, "导出上周订单")
+    second = await _say(db_session, bot, "进展怎么样了？")
+    await db_session.execute(update(Task).where(Task.id == first.id).values(status="succeeded"))
     await db_session.commit()
-    moved = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
-    assert moved is not None
-    assert moved.payload["card"]["sub_title_text"].startswith("🔄 第 3 次查看：比 ")
-    assert "做了 3 步。" in moved.payload["card"]["sub_title_text"]
+
+    reply = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
+    assert reply is not None
+    card = reply.payload["card"]
+    assert card["main_title"]["title"] == msg("busy_prevdone_title")
+    assert "button_list" not in card
+    assert (await _refresh(db_session, second)).status == "queued"
+
+
+def test_feishu_progress_card_shows_steps_and_recent_lines() -> None:
+    view = busy_choice.Progress(
+        status="running",
+        seconds=1368,
+        quiet_seconds=451,
+        thinking_md="🤔 开始\n🔧 **Bash**\n🔧 **Bash**\n🔧 **Read**\n💭 想一下\n🔧 **Edit**",
+        reply_text="# 小结\n- 改好了\n```\n测试在重跑",
+        mark="m",
+    )
+    card = busy_choice.progress_card("feishu", 7, view)
+    assert card["header"]["title"]["content"] == msg("busy_progress_title")
+    assert card["config"]["summary"]["content"] == "已处理 22 分 48 秒 · 做了 4 步"
+    texts = [e["content"] for e in card["body"]["elements"] if e["tag"] == "markdown"]
+    assert texts[0] == (
+        "**已处理 22 分 48 秒 · 做了 4 步**\n<font color='orange'>最近 7 分 31 秒 没有新动作</font>"
+    )
+    assert texts[1].endswith("\nBash ×2 → Read → Edit")
+    assert texts[2].endswith("\n小结\n改好了\n测试在重跑")
+    assert msg("busy_ask") not in "".join(texts)
+    assert msg("busy_progress_dropped") in texts[-1]
+    assert all(e["tag"] in ("markdown", "hr") for e in card["body"]["elements"])
 
 
 def test_progress_of_a_message_still_waiting_in_line() -> None:

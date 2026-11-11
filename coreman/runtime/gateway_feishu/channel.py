@@ -69,7 +69,7 @@ TOASTS: dict[str, dict[str, str]] = {
     "not_requester": {"type": "warning", "content": "只有提问人可以选择"},
     "busy_wait": {"type": "success", "content": "好的，排在后面"},
     "busy_stop": {"type": "info", "content": "正在停下上一条…"},
-    "busy_progress": {"type": "info", "content": "正在刷新进度…"},
+    "busy_progress": {"type": "info", "content": "正在查看进度…"},
     "busy_cancel": {"type": "info", "content": "正在放弃这条…"},
     "busy_resume": {"type": "success", "content": "好的，继续处理"},
     "busy_drop": {"type": "info", "content": "好的，不处理了"},
