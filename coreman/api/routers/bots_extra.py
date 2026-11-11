@@ -28,6 +28,7 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_bot_changed
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.records import is_assistant
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
@@ -366,6 +367,8 @@ async def add_member(
     bot = await load_bot(session, bot_id)
     if not can_manage_members(user, bot):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, "个人助理只属于本人，不能添加成员或可用人")
     target = await session.get(User, body.user_id)
     if target is None or target.status != "active":
         raise ApiError(422, 422, "用户不存在或已停用")
@@ -441,6 +444,8 @@ async def replace_allowed_users(
     bot = await load_bot(session, bot_id)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, "个人助理只属于本人，不能添加成员或可用人")
     wanted = list(dict.fromkeys(body.user_ids))  # 前端重复勾选不该变成主键冲突
     if wanted:
         # 与协作者同口径：停用的账号不能进白名单（否则停用只挡登录，机器人照用）。

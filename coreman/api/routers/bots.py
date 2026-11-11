@@ -30,6 +30,7 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers import feishu_apps as feishu_app_routes
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.records import locked_changes, visible_to
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.env_policy import blocked_env_keys
 from coreman.core.bots.events import notify_bot_changed as notify_bot_changed  # 再导出
@@ -432,7 +433,12 @@ async def list_bots(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     # created_at 有并列（同一批次创建），补 id 兜底，保证翻页顺序稳定。
-    stmt = select(Bot).order_by(Bot.created_at.desc(), Bot.id)
+    # 个人助理只对所有者可见，任何范围、任何角色都一样。
+    stmt = (
+        select(Bot)
+        .where(or_(Bot.kind == "standard", Bot.owner_id == user.id))
+        .order_by(Bot.created_at.desc(), Bot.id)
+    )
     if scope == "mine":
         stmt = stmt.where(
             or_(
@@ -643,6 +649,8 @@ async def get_bot(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bot = await load_bot(session, bot_id)
+    if not visible_to(bot, user):
+        raise not_found("机器人不存在")
     return {"code": 0, "data": await build_out(session, _cipher(request), bot, user)}
 
 
@@ -664,6 +672,9 @@ async def patch_bot(
     changes = body.changes()
     if not changes:
         raise ApiError(422, 422, "至少修改一个字段")
+    locked = locked_changes(bot, changes)
+    if locked:
+        raise ApiError(422, 422, f"个人助理不支持修改：{', '.join(locked)}")
     # 脱敏值 = 这一项没改（同 credentials/env_vars 的合并口径）；显式 null 仍然是清空。
     if is_masked(changes.get("notify_webhook_url")):
         del changes["notify_webhook_url"]
