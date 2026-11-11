@@ -56,3 +56,34 @@ async def seed_standard(session: AsyncSession) -> Bot:
 async def raw(session: AsyncSession, sql: str, **params: Any) -> Any:
     """原始 SQL 取一个值：绕开会话的自动还原，看到的就是库里存的。"""
     return (await session.execute(text(sql), params)).scalar_one()
+
+
+async def into_assistant(session: AsyncSession, bot: Bot, owner: User) -> Bot:
+    """把现成的飞书普通机器人改成 `owner` 的个人助理：复用各功能已有的造数函数。
+
+    之前写下的行保持明文；调用方在这之后不再经 ORM 改内容列（否则要先签发数据密钥）。
+    """
+    from coreman.core.assistants import sealed
+    from coreman.core.assistants.records import ASSISTANT_FIXED
+
+    app = PlatformApp(
+        platform="feishu",
+        name=f"个人助理-{uuid.uuid4().hex[:6]}",
+        capabilities=["assistant"],
+        app_id=f"cli_{uuid.uuid4().hex[:10]}",
+        secret_enc="x",
+    )
+    session.add(app)
+    await session.flush()
+    bot.kind, bot.owner_id, bot.created_by, bot.platform_app_id = (
+        "assistant",
+        owner.id,
+        owner.id,
+        app.id,
+    )
+    bot.team_id = None
+    for name, value in ASSISTANT_FIXED.items():
+        setattr(bot, name, value)
+    await session.commit()
+    sealed.forget()
+    return bot

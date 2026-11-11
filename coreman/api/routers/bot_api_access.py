@@ -14,6 +14,7 @@ from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import load_bot
 from coreman.api.security import verify_csrf
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.chat import collaboration_setup as setup
 from coreman.core.db.models import Bot, BotConversationAlias, User
@@ -100,6 +101,8 @@ async def set_api_access(
 ) -> dict[str, Any]:
     """关掉后新的调用一律拒绝，排队中的 API 轮次开轮时结掉；正在跑的跑完。"""
     bot = await _bot(session, user, bot_id, lock=True)
+    if body.enabled and is_assistant(bot):
+        raise ApiError(422, 422, unsupported("API 驱动"))
     if bot.api_access != body.enabled:
         bot.api_access = body.enabled
         await _audit(session, request, user, bot, "bot.api_access", {"api_access": body.enabled})

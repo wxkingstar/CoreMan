@@ -25,6 +25,11 @@ def is_assistant(bot: Bot) -> bool:
     return bot.kind == "assistant"
 
 
+def unsupported(feature: str) -> str:
+    """助理暂未开放的功能在入口处拒绝时，给用户或模型看的原因。"""
+    return f"个人助理暂不支持{feature}"
+
+
 def locked_changes(bot: Bot, changes: Mapping[str, object]) -> list[str]:
     """这次修改里助理记录不允许动的字段名；普通记录恒为空。"""
     if not is_assistant(bot):

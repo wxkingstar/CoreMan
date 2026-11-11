@@ -105,6 +105,8 @@ async def employees(
                 Bot.enabled.is_(True),
                 Bot.id != dispatcher.id,
                 Bot.group_role == "member",
+                # 个人助理只属于所有者，不接调度员派的活。
+                Bot.kind == "standard",
             )
             .order_by(Bot.name)
         )

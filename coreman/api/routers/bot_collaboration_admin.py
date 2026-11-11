@@ -16,6 +16,7 @@ from coreman.api.routers import feishu_apps as feishu_app_routes
 from coreman.api.routers.bots import load_bot
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.chat import bot_collaboration as collaboration
 from coreman.core.chat import collaboration_setup as setup
@@ -106,6 +107,8 @@ async def set_bot_help(
 ) -> dict[str, Any]:
     """B 侧开关：关掉后其他 AI 员工搜不到它，进行中的求助一并取消。"""
     bot = await source_bot(session, user, bot_id, lock=True)
+    if body.enabled and is_assistant(bot):
+        raise ApiError(422, 422, unsupported("被其他 AI 员工求助"))
     if bot.accept_bot_help != body.enabled:
         bot.accept_bot_help = body.enabled
         if not body.enabled:
