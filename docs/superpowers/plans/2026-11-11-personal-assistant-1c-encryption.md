@@ -4208,12 +4208,15 @@ git commit -m "个人助理：报错信息、附件信息与已发消息存档�
 
 ## 交付后的状态与遗留
 
-- 助理记录在六张表里的内容列是密文：五张表的正文列，加上 `tasks.error_message`、`chat_logs.error_message`、`chat_logs.file_info`、`feishu_sent_messages.text`。`destroy_key` 之后永久不可读，各入口的行为见「密钥已销毁时各入口的行为」。
+- 助理记录在六张表里的内容列是密文：五张表的正文列，加上 `tasks.error_message`、`chat_logs.error_message`、`chat_logs.file_info`、`feishu_sent_messages.text`、`task_streams.activity` 的说明文字。`destroy_key` 之后永久不可读，各入口的行为见「密钥已销毁时各入口的行为」。
 - 1F 停用流程调用 `keys.destroy_key(session, owner_id)`；重新开通时调用 `keys.ensure_key(session, cipher, owner_id)` 签发下一代密钥（本计划已实现）。旧一代的内容按已锁定处理，新内容正常。
 - 设计文档第二节需要同步改三处：AAD 写法改成「表名.列名:bot_id」；`assistant_keys` 加 `generation` 与重新签发；加密范围表补上上面四列。
 - 仍以明文落库、本期不做的内容：
   - `cron_jobs.prompt` / `cron_runs.prompt` 及执行结果：助理的定时任务属于第 2 期，届时一并处理。
-  - 各表的 `error_code`、`status`、`chat_logs.user_name` / `user_login`、`outbox.target`、`reply_context`、`outbox.last_error`（平台错误码与网关写的固定说明）：元数据，供调度、告警与排障使用。
+  - 各表的 `error_code`、`status`、`chat_logs.user_name` / `user_login`、`outbox.target`、`reply_context`：元数据，供调度、告警与排障使用。`outbox.last_error`、`tasks.cancel_reason` 同样不加密，但助理的行只留开头的代码（见「载荷里被 SQL 直接读取的字段」）。
+  - **`feishu_deliveries.layout`（交付前盘出，未处理）**：飞书网关流式推卡片时把思考预览（最后五行）、各段正文的文本、任务清单存在这一列（`coreman/runtime/gateway_feishu/transport.py` 的流式推送与 `push_plan`，`coreman/core/feishu_cards/stream.py` 的 `StreamUnit.record`），助理的每一次流式回复都会经过，明文保留到流被清理（结束后约一小时）。这张表没有 `bot_id` 列，flush 钩子管不到，需要单独设计（按流的 `bot_id` 封存，或只存摘要不存文本）。同表的 `last_error` 存的是飞书错误说明。
+  - 六张表之外带内容的表，助理用到相应功能时会明文落库：`interaction_states.state`（提问卡片的题目与选项）、`human_collaborations` / `bot_collaborations` 的 `question` / `response`、`api_tasks.prompt`、`work_tasks`、`memories`。本期不涉及，各功能接入助理时逐个决定。
+  - 日志流：`outbox._note_permanent_failure` 把报错原文的前 200 字写进 `outbox_dependents_released` 告警，助理的条目没有改写。
 - 真机未验证：本计划只有自动化测试；端到端在 1F。
 
 ## 自查记录
