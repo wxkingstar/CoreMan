@@ -1,7 +1,8 @@
 """上一条还在处理时又来了新消息：新消息先排队，卡片让发消息的人选「等它做完」「停下上一条」还是「放弃这条」。
 
 不点也行：新消息本来就排在后面，上一条做完自动接着处理；只有点「停下」才会动正在跑的任务。
-「看看进度」只读上一条的实时状态回一句，卡片和按钮都留着，可以再点。
+「看看进度」读上一条的实时状态换成一张进度卡，同时放弃这条：问进度的消息看完就没用了，
+卡上不再留按钮。
 卡片的 task_id 是 `busy@<新消息的任务 id>`，飞书与企微共用。
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +33,22 @@ HOLD_SECONDS = 2 * 60 * 60
 # 这么久没有新动作才提示，工具跑一两分钟不吐字是常态。
 QUIET_NOTICE_SECONDS = 120
 _TASK_ID = re.compile(r"busy@([1-9][0-9]{0,18})")
+_TOOL_LINE = re.compile(r"^🔧 \*\*(.+)\*\*$", re.MULTILINE)
+# 进度卡上最多列这么多步、这么多行正文。
+_RECENT_TOOLS = 4
+_RECENT_LINES = 3
+
+
+@dataclass(frozen=True)
+class Progress:
+    """排在前面那条此刻的状态。"""
+
+    status: str
+    seconds: float
+    quiet_seconds: float
+    thinking_md: str
+    reply_text: str
+    mark: str
 
 
 def card_task_id(task_id: int) -> str:
@@ -45,7 +63,7 @@ def parse_card_task_id(value: str) -> int | None:
 def offer_card(
     platform: str, task_id: int, *, progress: str = "", locale: str = "zh"
 ) -> dict[str, Any]:
-    """`progress` 是点过「看看进度」后的进度说明，放在问句前面；按钮照旧。"""
+    """`progress` 是发卡时上一条已经跑了一阵的进度说明，放在问句前面。"""
     tid = card_task_id(task_id)
     if platform == "wecom":
         sub = msg("busy_default", locale)
@@ -200,19 +218,92 @@ def _elapsed(seconds: float, locale: str) -> str:
     return msg("busy_elapsed_sec", locale, s=secs)
 
 
-def viewed_note(seen: dict[str, Any], mark: str, now: datetime, locale: str = "zh") -> str:
-    """点「看看进度」后放在进度前面的一行：卡片上总得有处看得出刚刷新过。
+def _recent_tools(thinking_md: str) -> str:
+    """最近几步用的工具，连着重复的合成一项：`Bash ×3 → Read → Edit`。"""
+    runs: list[list[Any]] = []
+    for name in _TOOL_LINE.findall(thinking_md):
+        if runs and runs[-1][0] == name:
+            runs[-1][1] += 1
+        else:
+            runs.append([name, 1])
+    return " → ".join(
+        f"{name} ×{count}" if count > 1 else str(name) for name, count in runs[-_RECENT_TOOLS:]
+    )
 
-    上一条卡在同一步时，重算出来的进度只差几秒，看着像没点上；所以第二次起明说
-    和上次查看相比有没有新进展。`seen` 是上次查看留下的 `progress_seen`。
+
+def _recent_lines(reply_text: str) -> list[str]:
+    lines = [line.strip().lstrip("#>*-` ").strip() for line in reply_text.splitlines()]
+    return [_clip(line, 120) for line in lines if line][-_RECENT_LINES:]
+
+
+def progress_card(
+    platform: str, task_id: int, view: Progress, *, icon_url: str = "", locale: str = "zh"
+) -> dict[str, Any]:
+    """点过「看看进度」后换上的卡：用时、步数、最近几步、最近写到的几行。
+
+    这条消息同时被放弃，所以没有按钮，末尾说明要处理请重新发。
     """
-    count = int(seen.get("count") or 0) + 1
-    try:
-        last = datetime.fromisoformat(str(seen.get("at") or ""))
-    except ValueError:
-        return msg("busy_progress_first", locale)
-    key = "busy_progress_same" if seen.get("mark") == mark else "busy_progress_moved"
-    return msg(key, locale, n=count, elapsed=_elapsed((now - last).total_seconds(), locale))
+    tid = card_task_id(task_id)
+    title = msg("busy_progress_title", locale)
+    if view.status == "queued":
+        head = msg("busy_progress_queued", locale)
+    else:
+        head = msg("busy_progress_head", locale, elapsed=_elapsed(view.seconds, locale))
+        steps = view.thinking_md.count("🔧")
+        if steps:
+            head += msg("busy_progress_head_steps", locale, steps=steps)
+    quiet = (
+        msg("busy_progress_quiet_line", locale, elapsed=_elapsed(view.quiet_seconds, locale))
+        if view.status != "queued" and view.quiet_seconds >= QUIET_NOTICE_SECONDS
+        else ""
+    )
+    tools = _recent_tools(view.thinking_md)
+    lines = _recent_lines(view.reply_text)
+    dropped = msg("busy_progress_dropped", locale)
+    if platform == "wecom":
+        detail = [
+            head,
+            quiet,
+            f"{msg('busy_progress_tools', locale)}：{tools}" if tools else "",
+            f"{msg('busy_progress_wrote', locale)}：{lines[-1]}" if lines else "",
+            dropped,
+        ]
+        return result_card(
+            platform,
+            tid,
+            title=title,
+            desc="\n".join(line for line in detail if line),
+            icon_url=icon_url,
+            locale=locale,
+        )
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": f"**{head}**" + (f"\n<font color='orange'>{quiet}</font>" if quiet else ""),
+        }
+    ]
+    if tools:
+        elements.append(
+            {"tag": "markdown", "content": f"**{msg('busy_progress_tools', locale)}**\n{tools}"}
+        )
+    if lines:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**{msg('busy_progress_wrote', locale)}**\n" + "\n".join(lines),
+            }
+        )
+    elements += [
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"<font color='grey'>{dropped}</font>"},
+    ]
+    return {
+        "schema": "2.0",
+        "config": {"summary": {"content": head}},
+        "header": {"template": "wathet", "title": {"tag": "plain_text", "content": title}},
+        "body": {"elements": elements},
+        "task_id": tid,
+    }
 
 
 def progress_text(
@@ -283,6 +374,33 @@ async def progress_view(
     locale: str = "zh",
 ) -> tuple[str, str]:
     """`progress_of` 的进度说明，外加一个进展标记：步骤和写出的字都没变，标记就不变。"""
+    view = await progress_snapshot(
+        session, bot_id, session_key, sender, before_task_id=before_task_id
+    )
+    if view is None:
+        return ("" if min_running else msg("busy_progress_done", locale)), ""
+    if min_running and (view.status not in tasks.ACTIVE or view.seconds < min_running):
+        return "", ""
+    text = progress_text(
+        status=view.status,
+        seconds=view.seconds,
+        thinking_md=view.thinking_md,
+        reply_text=view.reply_text,
+        quiet_seconds=view.quiet_seconds,
+        locale=locale,
+    )
+    return text, view.mark
+
+
+async def progress_snapshot(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    session_key: str,
+    sender: str,
+    *,
+    before_task_id: int,
+) -> Progress | None:
+    """这个人排在前面的那条（优先正在跑的）此刻的状态；前面已经没有在办的返回 None。"""
     rows = list(
         await session.scalars(
             select(Task)
@@ -299,23 +417,18 @@ async def progress_view(
         )
     )
     if not rows:
-        return ("" if min_running else msg("busy_progress_done", locale)), ""
+        return None
     ahead = next((row for row in rows if row.status in tasks.ACTIVE), rows[0])
     stream = await session.get(TaskStream, ahead.id, populate_existing=True)
     now = datetime.now(UTC)
     since = (stream.running_since if stream else None) or ahead.started_at or ahead.claimed_at
-    seconds = (now - since).total_seconds() if since else 0.0
-    if min_running and (ahead.status not in tasks.ACTIVE or seconds < min_running):
-        return "", ""
     thinking_md = stream.thinking_md if stream else ""
     reply_text = stream.pending_text if stream else ""
-    mark = f"{ahead.id}:{ahead.status}:{len(thinking_md)}:{len(reply_text)}"
-    text = progress_text(
+    return Progress(
         status=ahead.status,
-        seconds=seconds,
+        seconds=(now - since).total_seconds() if since else 0.0,
+        quiet_seconds=(now - stream.updated_at).total_seconds() if stream else 0.0,
         thinking_md=thinking_md,
         reply_text=reply_text,
-        quiet_seconds=(now - stream.updated_at).total_seconds() if stream else 0.0,
-        locale=locale,
+        mark=f"{ahead.id}:{ahead.status}:{len(thinking_md)}:{len(reply_text)}",
     )
-    return text, mark
