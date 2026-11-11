@@ -157,6 +157,17 @@ class FeishuClient:
                     raise FeishuError(-2, "resource too large")
                 yield chunk
 
+    async def leave_chat(self, chat_id: str) -> None:
+        """机器人把自己移出群。任何成员都可以主动退群，不要求是群主或管理员。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", chat_id):
+            raise FeishuError(-2, "invalid chat identifier")
+        await self.call(
+            "DELETE",
+            f"/open-apis/im/v1/chats/{chat_id}/members",
+            params={"member_id_type": "app_id"},
+            json={"id_list": [self.app_id]},
+        )
+
     async def notify_user(
         self, user_id: str, content: str, *, key: str, markdown: bool = False
     ) -> str:
