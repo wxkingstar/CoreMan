@@ -71,6 +71,7 @@ BUSINESS_TABLES = [
     "tasks",
     "inbound_events",
     "bot_leases",
+    "app_leases",
     "process_instances",
     "bot_allowed_users",
     "bot_members",

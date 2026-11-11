@@ -89,6 +89,37 @@ class BotLease(Base):
     released_at: Mapped[datetime | None] = _ts()
     connection_state: Mapped[str] = mapped_column(Text, server_default=text("'disconnected'"))
 
+    @property
+    def key(self) -> uuid.UUID:
+        """租约扫描器用的通用键（见 gateway_common.lease_loop）。"""
+        return self.bot_id
+
+
+class AppLease(Base):
+    """个人助理应用的连接租约：一个应用一条长连接，同时只被一个飞书网关实例持有。"""
+
+    __tablename__ = "app_leases"
+    __table_args__ = (
+        CheckConstraint(enum_check("connection_state", CONNECTION_STATES), name="connection_state"),
+    )
+    app_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("platform_apps.id", ondelete="CASCADE"), primary_key=True
+    )
+    holder_instance: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("process_instances.id", ondelete="SET NULL")
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    acquired_at: Mapped[datetime | None] = _ts()
+    heartbeat_at: Mapped[datetime | None] = _ts()
+    drain_requested_by: Mapped[str | None] = mapped_column(Text)
+    drain_requested_at: Mapped[datetime | None] = _ts()
+    released_at: Mapped[datetime | None] = _ts()
+    connection_state: Mapped[str] = mapped_column(Text, server_default=text("'disconnected'"))
+
+    @property
+    def key(self) -> uuid.UUID:
+        return self.app_id
+
 
 class InboundEvent(Base):
     """平台回调落库后的唯一事实；(bot_id, platform_msg_id) 唯一做平台重投去重。"""
