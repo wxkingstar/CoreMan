@@ -3048,6 +3048,11 @@ git commit -m "个人助理：chat_logs 的消息与回复正文加密入库"
 - Consumes: `sealed.open_row` / `open_rows` / `open_value` / `is_opened`；`SealedSession.scalar` / `get`。
 - Produces: 行为不变的四处修补；台账测试 `REVIEWED_READS`、`WRITE_FILES`——以后新增一处取整行或写入，测试会失败，逼着决定要不要还原或封存。
 
+**实现时的修正（以代码为准）：**
+- 台账测试改为按语法树扫描，不用正则，并从两张表扩到四张：`ENTITY_SELECTS`（实体出现在 `select(...)` 任意位置的条数，正则只认第一个参数）、`COLUMN_REFERENCES`（语句里直接引用 `<模型>.<内容列>` 的次数——只取内容列、按内容列过滤、`returning` 内容列都算）、`RAW_STATEMENTS`（提到这六张表与内容列名的裸 SQL 条数）、`WRITE_FILES`。内容列与表名取自 `sealed.COLUMNS`，以后登记新列会自动纳入。故意各加一处未登记的读、只取列、写、裸 SQL，四条用例全部失败，已验证后撤掉。
+- 行为用例多两条：`reap_lost_tasks` 收尸（载荷里的会话信息与半截正文都要读到明文）、`queued_batch.gather` 合并排队消息；巡检类用例另开会话执行，拿到的才是库里读出、尚未还原的行。
+- 扫描另外盘出、计划的表里没有的引用：`coreman/core/feishu_docs/access.py` 只取 `Task.payload` 一列后读 `doc_links`（明文键，封装顶层就有，不用还原）；`coreman/runtime/worker/busy_choice.py`、`coreman/core/chat/busy_choice.py` 按 `platform_user_id` 过滤（明文键）。都不需要改代码，已记入台账。
+
 - [ ] **Step 1: 写失败测试（行为）**
 
 `tests/integration/test_assistant_sealed_scattered.py`：

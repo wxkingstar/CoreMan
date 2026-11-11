@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
+from coreman.core.assistants import sealed
 from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
@@ -125,6 +126,8 @@ async def reap_lost_tasks(
     lost = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    # 个人助理的载荷是密文：后面要从里面取会话与消息信息写记录、通知用户。
+    await sealed.open_rows(session, lost)
     writer = None if chat_logs_factory is None else ChatLogWriter(chat_logs_factory)
     for task in lost:
         bot = await session.get(Bot, task.bot_id)
@@ -191,6 +194,8 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
         )
     )
     for task, stream in rows:
+        # 个人助理的载荷与半截正文是密文：还原后再拼终稿（读不出来就走兜底文案）。
+        await sealed.open_rows(session, [task, stream])
         final = stream.final_text or stream.pending_text or msg("stream_recovered")
         activity = None
         if task.status != "succeeded":

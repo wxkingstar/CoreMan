@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import busy_choice
 from coreman.core.db.models import InboundEvent, Task
@@ -86,6 +87,7 @@ async def gather(
             .with_for_update(of=Task)
         )
         for task, received_at in rows.all():
+            await sealed.open_row(session, task)
             text = _mergeable_text(task, intake.bot.name)
             if (
                 text is None
