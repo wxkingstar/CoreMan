@@ -26,6 +26,13 @@ from coreman.core.db.base import Base, TimestampMixin
 from coreman.core.db.models.account import PLATFORM_CHECK
 
 BOT_KEY_RE = r"^[a-z0-9][a-z0-9_-]{1,49}$"
+BOT_KINDS = ("standard", "assistant")
+# 助理记录必须有所有者和所属应用，且只能是飞书；普通记录不能带这两列。
+ASSISTANT_SHAPE = (
+    "(kind = 'standard' AND owner_id IS NULL AND platform_app_id IS NULL) OR "
+    "(kind = 'assistant' AND owner_id IS NOT NULL AND platform_app_id IS NOT NULL "
+    "AND platform = 'feishu')"
+)
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
@@ -47,6 +54,16 @@ class Bot(TimestampMixin, Base):
         # 早先漏建：这两列都是外键，级联删除与「我创建的机器人」列表都要走它们（迁移 0004 补）。
         Index("bots_team_id_idx", "team_id"),
         Index("bots_created_by_idx", "created_by"),
+        CheckConstraint("kind IN ('standard','assistant')", name="kind"),
+        CheckConstraint(ASSISTANT_SHAPE, name="assistant_shape"),
+        Index("bots_platform_app_idx", "platform_app_id"),
+        # 一人同时只有一条启用的助理记录。
+        Index(
+            "bots_assistant_owner_uq",
+            "owner_id",
+            unique=True,
+            postgresql_where=text("kind = 'assistant' AND enabled"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")
@@ -59,6 +76,13 @@ class Bot(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     team_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("teams.id"))
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"))
+    # standard 普通员工；assistant 个人助理（一人一条，只接所有者的私聊）。
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'standard'"))
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
+    # 助理记录共用的飞书应用；应用凭证以 platform_apps 为准，credentials_enc 是它的副本。
+    platform_app_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("platform_apps.id")
+    )
     relay_server_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("relay_servers.id"))
     model: Mapped[str] = mapped_column(Text)
     working_dir: Mapped[str] = mapped_column(Text)

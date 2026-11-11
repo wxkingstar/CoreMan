@@ -23,6 +23,7 @@ from coreman.core.db.models.api_tasks import (
 )
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
+    BOT_KINDS,
     EFFORT_LEVELS,
     Bot,
     BotAllowedUser,
@@ -164,6 +165,7 @@ __all__ = [
     "JwtKey",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",
+    "BOT_KINDS",
     "CAPABILITIES",
     "CHAT_LOG_RUNNING",
     "CHAT_LOG_STATUSES",
