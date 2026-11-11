@@ -10,6 +10,7 @@ import base64
 import os
 import time
 import uuid
+from typing import Any
 
 from sqlalchemy import event, func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -97,6 +98,24 @@ async def ensure_key(
     return True
 
 
+_KEY_ROW = select(AssistantKey.dek_enc, AssistantKey.destroyed_at, AssistantKey.generation)
+
+
+def _unwrap(info: dict[Any, Any], cipher: Cipher, owner_id: uuid.UUID, row: Any) -> Cipher:
+    """把查到的密钥行解成 Cipher 并按需进缓存；`info` 是会话的 info 字典。"""
+    if row is None:
+        raise KeyMissing("所有者没有数据密钥")
+    if row[1] is not None or not row[0]:
+        raise KeyDestroyed("所有者的数据密钥已销毁")
+    data = Cipher(
+        base64.b64decode(cipher.decrypt(row[0], wrap_aad(owner_id))),
+        key_id=data_key_id(int(row[2])),
+    )
+    if owner_id not in info.get(_FRESH, ()):
+        _CACHE[owner_id] = (data, _now() + KEY_TTL_SECONDS)
+    return data
+
+
 async def data_cipher(session: AsyncSession, cipher: Cipher, owner_id: uuid.UUID) -> Cipher:
     """用所有者的数据密钥构造的 Cipher。
 
@@ -109,24 +128,24 @@ async def data_cipher(session: AsyncSession, cipher: Cipher, owner_id: uuid.UUID
     if hit is not None:
         return hit
     _CACHE.pop(owner_id, None)
-    row = (
-        await session.execute(
-            select(AssistantKey.dek_enc, AssistantKey.destroyed_at, AssistantKey.generation).where(
-                AssistantKey.user_id == owner_id
-            )
-        )
-    ).first()
-    if row is None:
-        raise KeyMissing("所有者没有数据密钥")
-    if row[1] is not None or not row[0]:
-        raise KeyDestroyed("所有者的数据密钥已销毁")
-    data = Cipher(
-        base64.b64decode(cipher.decrypt(row[0], wrap_aad(owner_id))),
-        key_id=data_key_id(int(row[2])),
-    )
-    if owner_id not in session.info.get(_FRESH, ()):
-        _CACHE[owner_id] = (data, _now() + KEY_TTL_SECONDS)
-    return data
+    row = (await session.execute(_KEY_ROW.where(AssistantKey.user_id == owner_id))).first()
+    return _unwrap(session.info, cipher, owner_id, row)
+
+
+def data_cipher_sync(session: Session, cipher: Cipher, owner_id: uuid.UUID) -> Cipher:
+    """`data_cipher` 的同步版：给 flush 钩子用，走会话当前事务的同步连接。只取用，不签发。
+
+    Raises:
+        KeyMissing: 没有密钥行
+        KeyDestroyed: 密钥已销毁
+        DecryptError: 主密钥解不开包裹
+    """
+    hit = cached(owner_id)
+    if hit is not None:
+        return hit
+    _CACHE.pop(owner_id, None)
+    row = session.connection().execute(_KEY_ROW.where(AssistantKey.user_id == owner_id)).first()
+    return _unwrap(session.info, cipher, owner_id, row)
 
 
 async def destroy_key(session: AsyncSession, owner_id: uuid.UUID) -> None:

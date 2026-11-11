@@ -424,33 +424,85 @@ def is_opened(row: Any) -> bool:
     return row is not None and _CIPHER in sa_inspect(row).info
 
 
+def _owner_sync(session: Session, bot_id: uuid.UUID) -> uuid.UUID | None:
+    """`owner_of` 的同步版：给 flush 钩子用。缓存没有时走会话当前事务的同步连接查一次。"""
+    now = time.monotonic()
+    hit = _OWNERS.get(bot_id)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    for pending in session.new:
+        # 记录与它的内容行在同一次 flush 里新建：库里还查不到，也不进缓存。
+        if isinstance(pending, Bot) and pending.id == bot_id:
+            return pending.owner_id if pending.kind == "assistant" else None
+    row = (
+        session.connection().execute(select(Bot.kind, Bot.owner_id).where(Bot.id == bot_id)).first()
+    )
+    if row is None:
+        return None
+    owner: uuid.UUID | None = row[1] if row[0] == "assistant" else None
+    _OWNERS[bot_id] = (owner, now + keys.KEY_TTL_SECONDS)
+    return owner
+
+
+def _changed(state: Any, spec: dict[str, Kind], *, new: bool) -> list[str]:
+    """这次 flush 要写的、有内容的内容列。新建的行看有没有值，已有的行看属性历史。"""
+    out: list[str] = []
+    for column, kind in spec.items():
+        if column not in state.dict or _nothing(kind, state.dict[column]):
+            continue
+        if new or state.attrs[column].history.has_changes():
+            out.append(column)
+    return out
+
+
 @event.listens_for(Session, "before_flush")
 def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
-    """还原过的行被改了内容列：落库前换回密文。只做本地加密，不查库。"""
+    """助理的行经 ORM 新建或改了内容列：落库前换成密文。
+
+    按行的 `bot_id` 判断归属，不看行上有没有还原标记——新建的行、读出时内容为空的行、已锁定
+    的行都要管。没有内容列要写的行直接跳过，不查库；归属与数据密钥先查进程内缓存，缓存没有
+    才用当前事务的同步连接各查一次（只取用，不签发）。密钥取不到时内容丢弃：JSONB 留墓碑、
+    文本写空，内存里同样置空并标为已锁定。
+    """
     restore: list[tuple[Any, str, Any]] = []
     session.info[_RESTORE] = restore
-    for row in session.dirty:
-        spec = COLUMNS.get(type(row))
-        if spec is None:
-            continue
-        state = sa_inspect(row)
-        cipher = state.info.get(_CIPHER)
-        bot_id = state.dict.get("bot_id")
-        if cipher is None or bot_id is None:
-            continue
-        table = str(row.__tablename__)
-        for column, kind in spec.items():
-            if column not in state.dict or not state.attrs[column].history.has_changes():
+    for rows, new in ((session.new, True), (session.dirty, False)):
+        for row in rows:
+            spec = COLUMNS.get(type(row))
+            if spec is None:
                 continue
-            plain = state.dict[column]
-            if _nothing(kind, plain):
+            state = sa_inspect(row)
+            columns = _changed(state, spec, new=new)
+            if not columns:
                 continue
+            bot_id = row.bot_id
+            owner = _owner_sync(session, bot_id) if bot_id is not None else None
+            if owner is None:
+                continue
+            table = str(row.__tablename__)
             try:
-                stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
-            except ContentLocked:
-                continue
-            setattr(row, column, stored)
-            restore.append((row, column, plain))
+                cipher: Cipher | None = keys.data_cipher_sync(session, master(), owner)
+            except keys.KeyUnavailable:
+                cipher = None
+            dropped = False
+            for column in columns:
+                kind = spec[column]
+                plain = state.dict[column]
+                try:
+                    if cipher is None:
+                        raise ContentLocked("所有者的数据密钥不可用")
+                    stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
+                    kept = plain
+                except ContentLocked:
+                    stored, kept, dropped = _dropped(kind, plain), _blank(kind, plain), True
+                setattr(row, column, stored)
+                restore.append((row, column, kept))
+            if dropped:
+                log.warning("assistant_content_dropped", table=table, bot_id=str(bot_id))
+                state.info.pop(_CIPHER, None)
+                state.info[_LOCKED] = True
+            elif cipher is not None:
+                state.info[_CIPHER] = cipher
 
 
 @event.listens_for(Session, "after_flush_postexec")

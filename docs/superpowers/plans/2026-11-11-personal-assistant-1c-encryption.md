@@ -4,7 +4,7 @@
 
 **Goal:** `bots.kind='assistant'` 的记录在 `inbound_events`、`tasks`、`task_streams`、`outbox`、`chat_logs` 里的内容列（以及报错信息、附件信息、`feishu_sent_messages` 的正文存档）写库前用所有者的数据密钥加密、读出时解密；销毁密钥后内容永久不可读，重新签发后旧内容仍不可读；普通机器人的行完全不变。
 
-**Architecture:** 每人一把 256 位数据密钥，用平台主密钥包裹后存新表 `assistant_keys`。新模块 `coreman/core/assistants/sealed.py` 负责按 `bot_id` 找所有者、封存与还原内容列。写入在 bus 层的写函数里封存；经 ORM 改已读出的行由 `before_flush` 钩子重新封存。读取由会话类 `SealedSession` 的 `get` / `scalar` / `refresh` 自动还原，其余取法（`scalars`、`execute`、只取列）在点名的位置显式还原。调用方拿到的始终是明文。
+**Architecture:** 每人一把 256 位数据密钥，用平台主密钥包裹后存新表 `assistant_keys`。新模块 `coreman/core/assistants/sealed.py` 负责按 `bot_id` 找所有者、封存与还原内容列。写入在 bus 层的写函数里封存；经 ORM 新建或修改的行由 `before_flush` 钩子按行的 `bot_id` 判断归属后封存（不依赖行上的还原标记）。读取由会话类 `SealedSession` 的 `get` / `scalar` / `refresh` 自动还原，其余取法（`scalars`、`execute`、只取列）在点名的位置显式还原。调用方拿到的始终是明文。
 
 **Tech Stack:** Python、SQLAlchemy async（ORM 事件、`AsyncSession` 子类）、Alembic、PostgreSQL JSONB、AES-256-GCM（`coreman/core/crypto.py` 的 `Cipher`）、pytest。
 
@@ -90,7 +90,7 @@
 | `chat_logs` | `close_running`（`error_message`） | `coreman/core/chat/chat_logs.py:238` | 13 |
 | `chat_logs` | 巡检结掉漏网的进行中记录（`error_message`） | `coreman/runtime/scheduler/reaper.py:247` | 13 |
 | `feishu_sent_messages` | `remember`（`insert(FeishuSentMessage)`） | `coreman/runtime/gateway_feishu/transport.py:205` | 13 |
-| 六张表 | 经 ORM 改已读出的行（`task.payload = {...}`、`item.payload = {...}` 等约 25 处） | `sealed.py` 的 `before_flush` 钩子 | 4 |
+| 六张表 | 经 ORM 新建（`session.add`）或修改的行（`task.payload = {...}`、`item.payload = {...}` 等约 25 处），含读出时内容为空的行与已锁定的行 | `sealed.py` 的 `before_flush` 钩子，按 `bot_id` 判断归属 | 4 |
 
 `streams.create`（`TaskStream(...)`）建流时没有内容，不需要封存。`switch_to_proactive` 只写元数据。Task 10 的台账测试保证这六个模型的 `insert` / `update` / 构造不出现在上表之外的文件。
 
@@ -1118,6 +1118,8 @@ git commit -m "个人助理：内容列封存形式的编解码"
 - Modify: `tests/integration/conftest.py`（加夹具 `assistant_master`）
 - Test: `tests/integration/test_assistant_sealed_rows.py`
 - Test: `tests/integration/test_orm_flush_reseal_probe.py`（Step 0，先于其它步骤）
+- Test: `tests/integration/test_assistant_orm_flush.py`（钩子按归属封存：已锁定的行、读出时内容为空的行、`session.add` 新建的行、冷缓存、普通机器人不变且缓存后不查库）
+- Modify: `coreman/core/assistants/keys.py`（加同步取用 `data_cipher_sync`，与 `data_cipher` 共用解包逻辑 `_unwrap`）
 
 **Interfaces:**
 - Consumes: Task 2 的 `keys.data_cipher` / `ensure_key` / `cached` / `KeyMissing` / `KeyDestroyed` / `KEY_TTL_SECONDS`；Task 3 的编解码。
@@ -1129,6 +1131,8 @@ git commit -m "个人助理：内容列封存形式的编解码"
   - `async open_rows(session: AsyncSession, rows: Iterable[Any], *, viewer: uuid.UUID | None = None) -> None`
   - `async open_value(session: AsyncSession, model: type, column: str, bot_id: uuid.UUID, value: Any) -> Any`（只取了一列时用；读不出来返回该列的空值）
   - `is_locked(row: Any) -> bool`、`is_opened(row: Any) -> bool`
+- Produces（flush 钩子）: `before_flush` 遍历 `session.new` 与 `session.dirty` 里属于 `COLUMNS` 的行。没有内容列要写（新建行看有没有非空值，已有行看属性历史）就跳过、不查库；否则按 `bot_id` 取归属（`_owner_sync`：进程内缓存 → 同一次 flush 里新建的 `Bot` → 用当前事务的同步连接查 `bots`，结果按 TTL 缓存，普通机器人缓存为「不加密」）。助理的行用 `keys.data_cipher_sync(session, master(), owner)` 取数据密钥（缓存 → 同步连接读 `assistant_keys`；只取用，不签发、不重新签发）后封存；密钥取不到（没有、已销毁）或原值是旧一代密文时内容丢弃：JSONB 写墓碑、文本写空，记 `assistant_content_dropped`，内存里同样置空并标为已锁定。`after_flush_postexec` 把内存里的值换回明文（丢弃的换成空值）且不标脏。
+- Produces（`coreman.core.assistants.keys`）: `data_cipher_sync(session: Session, cipher: Cipher, owner_id: uuid.UUID) -> Cipher`；另有 `after_commit` / `after_rollback` 监听清掉会话上的「刚插入」标记，提交后的密钥才能进缓存。
 - Produces（`coreman.core.assistants.session`）: `class SealedSession(AsyncSession)`；`make_session_factory` 产出的会话都是它。
 - Produces（测试）: `tests.integration.assistant_helpers.seed_assistant(session) -> tuple[Bot, User]`、`seed_standard(session) -> Bot`、`raw(session, sql, **params) -> Any`、`MASTER_KEY: bytes`、`SECRET: str`；夹具 `assistant_master`。
 
@@ -1855,33 +1859,85 @@ def is_opened(row: Any) -> bool:
     return row is not None and _CIPHER in sa_inspect(row).info
 
 
+def _owner_sync(session: Session, bot_id: uuid.UUID) -> uuid.UUID | None:
+    """`owner_of` 的同步版：给 flush 钩子用。缓存没有时走会话当前事务的同步连接查一次。"""
+    now = time.monotonic()
+    hit = _OWNERS.get(bot_id)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    for pending in session.new:
+        # 记录与它的内容行在同一次 flush 里新建：库里还查不到，也不进缓存。
+        if isinstance(pending, Bot) and pending.id == bot_id:
+            return pending.owner_id if pending.kind == "assistant" else None
+    row = (
+        session.connection().execute(select(Bot.kind, Bot.owner_id).where(Bot.id == bot_id)).first()
+    )
+    if row is None:
+        return None
+    owner: uuid.UUID | None = row[1] if row[0] == "assistant" else None
+    _OWNERS[bot_id] = (owner, now + keys.KEY_TTL_SECONDS)
+    return owner
+
+
+def _changed(state: Any, spec: dict[str, Kind], *, new: bool) -> list[str]:
+    """这次 flush 要写的、有内容的内容列。新建的行看有没有值，已有的行看属性历史。"""
+    out: list[str] = []
+    for column, kind in spec.items():
+        if column not in state.dict or _nothing(kind, state.dict[column]):
+            continue
+        if new or state.attrs[column].history.has_changes():
+            out.append(column)
+    return out
+
+
 @event.listens_for(Session, "before_flush")
 def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
-    """还原过的行被改了内容列：落库前换回密文。只做本地加密，不查库。"""
+    """助理的行经 ORM 新建或改了内容列：落库前换成密文。
+
+    按行的 `bot_id` 判断归属，不看行上有没有还原标记——新建的行、读出时内容为空的行、已锁定
+    的行都要管。没有内容列要写的行直接跳过，不查库；归属与数据密钥先查进程内缓存，缓存没有
+    才用当前事务的同步连接各查一次（只取用，不签发）。密钥取不到时内容丢弃：JSONB 留墓碑、
+    文本写空，内存里同样置空并标为已锁定。
+    """
     restore: list[tuple[Any, str, Any]] = []
     session.info[_RESTORE] = restore
-    for row in session.dirty:
-        spec = COLUMNS.get(type(row))
-        if spec is None:
-            continue
-        state = sa_inspect(row)
-        cipher = state.info.get(_CIPHER)
-        bot_id = state.dict.get("bot_id")
-        if cipher is None or bot_id is None:
-            continue
-        table = str(row.__tablename__)
-        for column, kind in spec.items():
-            if column not in state.dict or not state.attrs[column].history.has_changes():
+    for rows, new in ((session.new, True), (session.dirty, False)):
+        for row in rows:
+            spec = COLUMNS.get(type(row))
+            if spec is None:
                 continue
-            plain = state.dict[column]
-            if _nothing(kind, plain):
+            state = sa_inspect(row)
+            columns = _changed(state, spec, new=new)
+            if not columns:
                 continue
+            bot_id = row.bot_id
+            owner = _owner_sync(session, bot_id) if bot_id is not None else None
+            if owner is None:
+                continue
+            table = str(row.__tablename__)
             try:
-                stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
-            except ContentLocked:
-                continue
-            setattr(row, column, stored)
-            restore.append((row, column, plain))
+                cipher: Cipher | None = keys.data_cipher_sync(session, master(), owner)
+            except keys.KeyUnavailable:
+                cipher = None
+            dropped = False
+            for column in columns:
+                kind = spec[column]
+                plain = state.dict[column]
+                try:
+                    if cipher is None:
+                        raise ContentLocked("所有者的数据密钥不可用")
+                    stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
+                    kept = plain
+                except ContentLocked:
+                    stored, kept, dropped = _dropped(kind, plain), _blank(kind, plain), True
+                setattr(row, column, stored)
+                restore.append((row, column, kept))
+            if dropped:
+                log.warning("assistant_content_dropped", table=table, bot_id=str(bot_id))
+                state.info.pop(_CIPHER, None)
+                state.info[_LOCKED] = True
+            elif cipher is not None:
+                state.info[_CIPHER] = cipher
 
 
 @event.listens_for(Session, "after_flush_postexec")
@@ -1957,7 +2013,7 @@ Expected: 无新增报错。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add coreman/core/assistants coreman/core/db/session.py tests/integration/assistant_helpers.py tests/integration/conftest.py tests/integration/test_assistant_sealed_rows.py
+git add coreman/core/assistants coreman/core/db/session.py tests/integration/assistant_helpers.py tests/integration/conftest.py tests/integration/test_assistant_sealed_rows.py tests/integration/test_orm_flush_reseal_probe.py tests/integration/test_assistant_orm_flush.py
 git commit -m "个人助理：内容列按行封存与还原，会话读取时自动解密"
 ```
 
