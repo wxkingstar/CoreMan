@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import outbox
 from coreman.core.db.models import (
     AlertState,
+    AppLease,
     Bot,
     BotLease,
     OutboxItem,
@@ -182,9 +183,33 @@ async def tick(session: AsyncSession, now: datetime) -> None:
     for identity, state, heartbeat in await session.execute(
         select(Bot.id, BotLease.connection_state, BotLease.heartbeat_at)
         .outerjoin(BotLease, BotLease.bot_id == Bot.id)
-        .where(Bot.enabled)
+        .where(Bot.enabled, Bot.kind == "standard")
     ):
         key = f"gateway:{identity}"
+        seen.add(key)
+        disconnected = (
+            state != "subscribed" or heartbeat is None or now - heartbeat > timedelta(seconds=30)
+        )
+        await observe(
+            session,
+            key,
+            disconnected,
+            "alert_gateway",
+            now,
+            delay=0 if state in {"kicked", "auth_failed"} else 300,
+        )
+    # 个人助理：连接按应用认领，一条连接服务该应用下所有人，告警也按应用报。
+    for identity, state, heartbeat in await session.execute(
+        select(PlatformApp.id, AppLease.connection_state, AppLease.heartbeat_at)
+        .outerjoin(AppLease, AppLease.app_id == PlatformApp.id)
+        .where(
+            PlatformApp.platform == "feishu",
+            PlatformApp.enabled,
+            PlatformApp.capabilities.contains(["assistant"]),
+            PlatformApp.app_id.is_not(None),
+        )
+    ):
+        key = f"gateway:app:{identity}"
         seen.add(key)
         disconnected = (
             state != "subscribed" or heartbeat is None or now - heartbeat > timedelta(seconds=30)
