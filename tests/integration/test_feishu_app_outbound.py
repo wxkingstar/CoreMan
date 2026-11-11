@@ -19,11 +19,12 @@ from coreman.core.db.models import (
     FeishuSentMessage,
     OutboxItem,
     PlatformApp,
+    TaskStream,
     User,
 )
 from coreman.core.db.session import make_session_factory
 from coreman.runtime.gateway_feishu.app_outbound import AppOutbound
-from coreman.runtime.gateway_feishu.transport import LeaseLost
+from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost
 from tests.integration.assistant_helpers import raw
 from tests.integration.test_feishu_transport import FakeAPI
 
@@ -224,3 +225,54 @@ async def test_losing_the_app_lease_stops_every_delivery(db_session, db_engine):
     with pytest.raises(LeaseLost):
         await outbound.transport(zhang.id).round()
     assert api.calls == [] and await _statuses(db_session) == {"notice:zhang": "pending"}
+
+
+async def _reply_in_progress(session, bot, chat_id):
+    task = await tasks.enqueue(session, NewTask(bot_id=bot.id, kind="chat", payload={}))
+    await streams.create(
+        session,
+        task_id=task.id,
+        bot_id=bot.id,
+        platform="feishu",
+        stream_id=f"s-{chat_id}",
+        reply_context={"chat_id": chat_id, "message_id": "om_in"},
+        lease_generation=0,
+        running_since=datetime.now(UTC),
+    )
+    await streams.update(session, task.id, bot_id=bot.id, pending_text="正在查")
+    return task.id
+
+
+async def test_unreadable_streams_are_closed_instead_of_staying_due(db_session, db_engine):
+    app, zhang, _, _, standard, generation = await _seed(db_session)
+    locked = await _reply_in_progress(db_session, zhang, "oc_zhang")
+    plain = await _reply_in_progress(db_session, standard, "oc_std")
+    await keys.destroy_key(db_session, zhang.owner_id)
+    await db_session.commit()
+    keys.forget()
+    factory = make_session_factory(db_engine)
+    api = FakeAPI()
+    outbound = AppOutbound(factory, api, app=app.id, instance_id="gw-a", generation=generation)
+    assert [bot_id for bot_id, _ in await outbound.due()] == [zhang.id]
+    assert await outbound.round() is False
+    # 数据密钥已销毁：这条回复永远读不出来，不推送，收尾之后不再算有活。
+    assert api.calls == []
+    assert await outbound.due() == []
+    pushed = dict(
+        (await db_session.execute(select(TaskStream.task_id, TaskStream.finish_pushed_at))).all()
+    )
+    assert pushed[locked] is not None and pushed[plain] is None
+
+    async def no_fence():
+        return None
+
+    # 普通机器人读得出来的流照常推送，不会被当成读不出来的收尾。
+    transport = FeishuTransport(
+        factory, api, bot_id=standard.id, instance_id="gw-a", generation=1, lease_fence=no_fence
+    )
+    await transport.round()
+    assert any(path == "/open-apis/cardkit/v1/cards" for _, path, _ in api.calls)
+    still = await db_session.scalar(
+        select(TaskStream.finish_pushed_at).where(TaskStream.task_id == plain)
+    )
+    assert still is None

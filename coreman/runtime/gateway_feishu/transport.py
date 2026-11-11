@@ -281,9 +281,19 @@ class FeishuTransport:
                         .limit(50)
                     )
                 )
-                # 个人助理的内容还原成明文；读不出来的（数据密钥已销毁）不推。
+                # 个人助理的内容还原成明文；读不出来的（数据密钥已销毁）不推，直接收尾：
+                # 这条回复再也读不出来，留着不收尾每一轮都会被当成还有活。
                 await sealed.open_rows(session, rows)
+                locked = [row.task_id for row in rows if sealed.is_locked(row)]
+                for task_id in locked:
+                    await streams.mark_finish_pushed(session, task_id)
+                if locked:
+                    await session.commit()
+                    log.warning("feishu_stream_locked", count=len(locked), code=sealed.LOCKED_CODE)
                 rows = [row for row in rows if not sealed.is_locked(row)]
+            for task_id in locked:
+                # 入站消息上的「处理中」表情跟着撤掉（没打过就什么也不做）。
+                await typing(self, task_id, done=True)
             active_ids = {row.task_id for row in rows}
             self._headings = {
                 key: value for key, value in self._headings.items() if key in active_ids
