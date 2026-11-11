@@ -18,7 +18,7 @@
 - 接口名沿用总览：`coreman.core.assistants.keys.data_cipher(session, cipher, owner_id) -> Cipher`、`coreman.core.assistants.keys.destroy_key(session, owner_id) -> None`。
 - 数据密钥只在平台进程内解开：不写入任务载荷、环境变量、日志、异常消息。
 - 进程内缓存 TTL 为 60 秒（`keys.KEY_TTL_SECONDS`）：别的进程销毁密钥后，本进程最迟 60 秒后读不出、写不进。
-- 状态、时间、类型、长度、路由信息（`reply_context`、`outbox.target`）等元数据保持明文。
+- 状态、时间、类型、长度、路由信息（`outbox.target`、`reply_context` 里的路由键）等元数据保持明文。
 - 不做：转录加密（1E）、审批表（1D）、知识库（第 2 期）、存量数据迁移（本期之前没有助理记录）。
 - 验证命令：`uv run pytest <路径>`、`uv run ruff check .`、`uv run mypy coreman`、`uv run alembic check`（`TEST_DATABASE_URL` 按本机配置）。
 
@@ -4252,7 +4252,7 @@ git commit -m "个人助理：报错信息、附件信息与已发消息存档�
 | `human_collaborations.*`、`bot_collaborations.*`、`bot_collaboration_routes.setup`、`api_tasks.prompt`、`work_tasks.*`、`work_task_events.*`、`memories.*`、`cron_jobs.*`、`cron_runs.*` | 入口已对助理关闭 |
 | `group_observe_decisions.*`、`feishu_group_actions.*`、`feishu_doc_consents.*`、`bot_alert_sources.*` | 只在群聊里产生；助理的群聊旁听固定为关。「助理不收群消息」本身由 1B 网关保证，本计划没有实现 |
 | `wecom_personal_*`、`wecom_bot_provisions.*` | 助理只能是飞书（检查约束） |
-| `inbound_events.reply_context`、`task_streams.reply_context` / `background_state`、`outbox.target`、`chat_sessions.*`、`user_reached.*`、各表的 `status` / `error_code` / `kind` / `chat_id` / `session_key`、`chat_logs.user_name` / `user_login` / `platform_user_id` | 只有元数据（路由、状态、身份标识），供调度、告警与排障使用 |
+| `inbound_events.reply_context` 的路由键（按钮文字等内容键在 1B 起进密文）、`task_streams.reply_context`（助理只留路由键） / `background_state`、`outbox.target`、`chat_sessions.*`、`user_reached.*`、各表的 `status` / `error_code` / `kind` / `chat_id` / `session_key`、`chat_logs.user_name` / `user_login` / `platform_user_id` | 只有元数据（路由、状态、身份标识），供调度、告警与排障使用 |
 | `tasks.cancel_reason`、`outbox.last_error` | 只有元数据：助理的行只留开头的代码 |
 | `feishu_deliveries.last_error` | 只有元数据：固定说明加数字码，或异常类型名 |
 | `business_token_issues.*`、`system_calls.*`、`cloud_calls.*`、`feishu_personal_sends.*`、`feishu_auth_waits.*` | 只有元数据：调用了哪个系统的哪个操作、哈希与结果代码，没有请求与响应正文（`feishu_personal_sends.result` 未逐个字段验证） |
