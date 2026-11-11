@@ -83,7 +83,8 @@ def offer_card(
         },
         "body": {
             "elements": [
-                *([{"tag": "markdown", "content": progress}] if progress else []),
+                # 进度单独成块，和下面的问句分开。
+                *([{"tag": "markdown", "content": progress}, {"tag": "hr"}] if progress else []),
                 {
                     "tag": "markdown",
                     "content": msg("busy_ask", locale)
@@ -199,6 +200,21 @@ def _elapsed(seconds: float, locale: str) -> str:
     return msg("busy_elapsed_sec", locale, s=secs)
 
 
+def viewed_note(seen: dict[str, Any], mark: str, now: datetime, locale: str = "zh") -> str:
+    """点「看看进度」后放在进度前面的一行：卡片上总得有处看得出刚刷新过。
+
+    上一条卡在同一步时，重算出来的进度只差几秒，看着像没点上；所以第二次起明说
+    和上次查看相比有没有新进展。`seen` 是上次查看留下的 `progress_seen`。
+    """
+    count = int(seen.get("count") or 0) + 1
+    try:
+        last = datetime.fromisoformat(str(seen.get("at") or ""))
+    except ValueError:
+        return msg("busy_progress_first", locale)
+    key = "busy_progress_same" if seen.get("mark") == mark else "busy_progress_moved"
+    return msg(key, locale, n=count, elapsed=_elapsed((now - last).total_seconds(), locale))
+
+
 def progress_text(
     *,
     status: str,
@@ -240,6 +256,29 @@ async def progress_of(
 
     `min_running` 大于 0：没在跑或刚开始跑时返回空串，发卡时不必多说一句。
     """
+    text, _mark = await progress_view(
+        session,
+        bot_id,
+        session_key,
+        sender,
+        before_task_id=before_task_id,
+        min_running=min_running,
+        locale=locale,
+    )
+    return text
+
+
+async def progress_view(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    session_key: str,
+    sender: str,
+    *,
+    before_task_id: int,
+    min_running: float = 0.0,
+    locale: str = "zh",
+) -> tuple[str, str]:
+    """`progress_of` 的进度说明，外加一个进展标记：步骤和写出的字都没变，标记就不变。"""
     rows = list(
         await session.scalars(
             select(Task)
@@ -256,19 +295,23 @@ async def progress_of(
         )
     )
     if not rows:
-        return "" if min_running else msg("busy_progress_done", locale)
+        return ("" if min_running else msg("busy_progress_done", locale)), ""
     ahead = next((row for row in rows if row.status in tasks.ACTIVE), rows[0])
     stream = await session.get(TaskStream, ahead.id, populate_existing=True)
     now = datetime.now(UTC)
     since = (stream.running_since if stream else None) or ahead.started_at or ahead.claimed_at
     seconds = (now - since).total_seconds() if since else 0.0
     if min_running and (ahead.status not in tasks.ACTIVE or seconds < min_running):
-        return ""
-    return progress_text(
+        return "", ""
+    thinking_md = stream.thinking_md if stream else ""
+    reply_text = stream.pending_text if stream else ""
+    mark = f"{ahead.id}:{ahead.status}:{len(thinking_md)}:{len(reply_text)}"
+    text = progress_text(
         status=ahead.status,
         seconds=seconds,
-        thinking_md=stream.thinking_md if stream else "",
-        reply_text=stream.pending_text if stream else "",
+        thinking_md=thinking_md,
+        reply_text=reply_text,
         quiet_seconds=(now - stream.updated_at).total_seconds() if stream else 0.0,
         locale=locale,
     )
+    return text, mark

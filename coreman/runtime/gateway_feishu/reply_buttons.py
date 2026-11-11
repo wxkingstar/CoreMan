@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import copy
 import uuid
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.chat import busy_choice
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
 from coreman.core.db.models import FeishuDelivery, OutboxItem, TaskStream
@@ -35,7 +36,27 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 # 点击的结果，决定回调应答里的 toast。
-Outcome = Literal["queued", "duplicate", "not_requester"]
+Outcome = Literal[
+    "queued",
+    "duplicate",
+    "not_requester",
+    "busy_wait",
+    "busy_stop",
+    "busy_progress",
+    "busy_cancel",
+    "busy_resume",
+    "busy_drop",
+]
+_BUSY_KEYS = frozenset(
+    {
+        busy_choice.WAIT,
+        busy_choice.STOP,
+        busy_choice.PROGRESS,
+        busy_choice.CANCEL,
+        busy_choice.RESUME,
+        busy_choice.DROP,
+    }
+)
 
 
 async def settle(session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage) -> bool:
@@ -61,16 +82,27 @@ def is_reply_click(message: InboundMessage) -> bool:
     return message.kind == "message" and REPLY_BUTTON in message.reply_context
 
 
+def _busy_click(message: InboundMessage) -> Outcome | None:
+    action = message.card_action or {}
+    if (
+        message.kind != "card_action"
+        or busy_choice.parse_card_task_id(str(action.get("task_id") or "")) is None
+    ):
+        return None
+    key = action.get("event_key")
+    return cast("Outcome", key) if key in _BUSY_KEYS else None
+
+
 async def admit(
     session: AsyncSession, bot: InboundBot, message: InboundMessage, *, lease_generation: int
 ) -> Outcome | None:
     """应答窗口里的入站落库：回复按钮先判定提问人与会话类型。返回回复按钮点击的结果，
-    其余事件返回 None。调用方负责提交。"""
+    「上一条还在处理」卡片的点击返回点的是哪个按钮，其余事件返回 None。调用方负责提交。"""
     if not await settle(session, bot.id, message):
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        return None
+        return _busy_click(message)
     return "queued" if task is not None else "duplicate"
 
 

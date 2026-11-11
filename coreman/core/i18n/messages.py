@@ -231,6 +231,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "busy_progress_steps": "，做了 {steps} 步",
         "busy_progress_recent": "最近写到：{recent}",
         "busy_progress_done": "上一条已经处理完了，马上处理这条。",
+        "busy_progress_first": "🔄 进度已刷新",
+        "busy_progress_same": "🔄 第 {n} 次查看：和 {elapsed}前相比没有新进展，还在做同一步。",
+        "busy_progress_moved": "🔄 第 {n} 次查看：比 {elapsed}前有新进展。",
         "busy_elapsed_min": "{m} 分 {s} 秒",
         "busy_elapsed_sec": "{s} 秒",
         "busy_stopped_title": "好的，先做这条",
@@ -582,6 +585,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "busy_progress_steps": "、{steps} ステップ実行済み",
         "busy_progress_recent": "直近の内容：{recent}",
         "busy_progress_done": "前の作業は終わりました。すぐにこちらに対応します。",
+        "busy_progress_first": "🔄 進捗を更新しました",
+        "busy_progress_same": (
+            "🔄 {n} 回目の確認：{elapsed}前から進展はなく、同じ作業を続けています。"
+        ),
+        "busy_progress_moved": "🔄 {n} 回目の確認：{elapsed}前から進展があります。",
         "busy_elapsed_min": "{m}分{s}秒",
         "busy_elapsed_sec": "{s}秒",
         "busy_stopped_title": "こちらを先に対応します",

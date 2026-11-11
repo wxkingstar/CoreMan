@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -73,7 +74,7 @@ async def handle(
         target.payload = {**target.payload, "busy_wait": True}
         return "wait", card("wait", msg("busy_wait_summary", ctx.locale))
     if choice == busy_choice.PROGRESS:
-        progress = await busy_choice.progress_of(
+        progress, mark = await busy_choice.progress_view(
             session,
             bot.id,
             str(target.session_key),
@@ -81,8 +82,20 @@ async def handle(
             before_task_id=target.id,
             locale=ctx.locale,
         )
+        seen = target.payload.get("progress_seen")
+        seen = seen if isinstance(seen, dict) else {}
+        now = datetime.now(UTC)
+        note = busy_choice.viewed_note(seen, mark, now, ctx.locale)
+        target.payload = {
+            **target.payload,
+            "progress_seen": {
+                "count": int(seen.get("count") or 0) + 1,
+                "mark": mark,
+                "at": now.isoformat(),
+            },
+        }
         return "progress", busy_choice.offer_card(
-            bot.platform, target.id, progress=progress, locale=ctx.locale
+            bot.platform, target.id, progress=f"{note}\n{progress}", locale=ctx.locale
         )
     if choice != busy_choice.STOP:
         ctx.log.warning("busy_choice_unknown", choice=choice)
