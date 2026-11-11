@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
@@ -90,6 +91,7 @@ async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
     }
     if new.run_after is not None:
         values["run_after"] = new.run_after
+    values = await sealed.seal_values(session, Task, new.bot_id, values)
     stmt = insert(Task).values(**values)
     if new.dedupe_key is not None:
         stmt = stmt.on_conflict_do_nothing(index_elements=[Task.dedupe_key])
@@ -102,7 +104,20 @@ async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
 
 async def claim(session: AsyncSession, *, lane: str, instance_id: str) -> Task | None:
     row = (await session.execute(_CLAIM_SQL, {"instance": instance_id, "lane": lane})).first()
-    return None if row is None else await get(session, int(row[0]))
+    if row is None:
+        return None
+    task = await get(session, int(row[0]))
+    if task is not None and sealed.is_locked(task):
+        # 个人助理的数据密钥已销毁：内容读不出来，不交给处理器。
+        await finish(
+            session,
+            task.id,
+            status="failed",
+            error_code=sealed.LOCKED_CODE,
+            error_message="所有者的数据密钥已销毁，任务内容不可读",
+        )
+        return None
+    return task
 
 
 async def get(session: AsyncSession, task_id: int) -> Task | None:
@@ -145,12 +160,20 @@ async def finish(
     error_code: str | None = None,
     error_message: str | None = None,
     only_active: bool = False,
+    bot_id: uuid.UUID | None = None,
 ) -> bool:
     """写终态；返回是否真的写进去了。
 
     `only_active=True` 时加 `status IN ACTIVE` 守卫：被 reaper 收割过的行不得再被原持有者
     改回 succeeded（守卫与 UPDATE 同一条语句，不存在读后写的窗口）。
+
+    Args:
+        bot_id: 任务所属的机器人，封存 `result` 时用；没传且有结果要写时按主键查一次
     """
+    if result is not None:
+        if bot_id is None:
+            bot_id = await session.scalar(select(Task.bot_id).where(Task.id == task_id))
+        result = (await sealed.seal_values(session, Task, bot_id, {"result": result}))["result"]
     stmt = update(Task).where(Task.id == task_id)
     if only_active:
         stmt = stmt.where(Task.status.in_(ACTIVE))
@@ -195,9 +218,11 @@ async def active_for_session(
         .where(Task.bot_id == bot_id, Task.session_key == session_key, Task.status.in_(ACTIVE))
         .order_by(Task.id)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    await sealed.open_rows(session, rows)
+    return rows
 
 
 async def open_for_session(
@@ -214,9 +239,11 @@ async def open_for_session(
         )
         .order_by(Task.id)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    await sealed.open_rows(session, rows)
+    return rows
 
 
 async def release_hold(session: AsyncSession, task: Task) -> None:
