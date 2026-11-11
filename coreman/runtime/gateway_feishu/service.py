@@ -53,10 +53,7 @@ def run_child_process(bot_id: uuid.UUID, instance_id: str, generation: int) -> N
 
 def run_app_process(app_id: uuid.UUID, instance_id: str, generation: int) -> None:
     """个人助理应用连接的子进程入口；同样只在子进程里导入 SDK。"""
-    # app_child 在后续提交里才加入；在那之前类型检查找不到这个模块。
-    from coreman.runtime.gateway_feishu.app_child import (  # type: ignore[import-untyped,unused-ignore]
-        run_process,
-    )
+    from coreman.runtime.gateway_feishu.app_child import run_process
 
     run_process(app_id, instance_id, generation)
 

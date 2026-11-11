@@ -8,6 +8,7 @@ import hashlib
 import multiprocessing
 import signal
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -53,16 +54,15 @@ ERROR_BACKOFF_SECONDS = 5.0
 WAKE_CHANNELS = ("stream_updated", "outbox_added")
 
 
-async def wait_for_work(
-    listener: Listener, bot_id: uuid.UUID, stop: asyncio.Event, poll_seconds: float
+async def wait_for_notice(
+    listener: Listener, wanted: Callable[[str], bool], stop: asyncio.Event, poll_seconds: float
 ) -> None:
-    """睡到本 bot 有流 / 出站通知、收到停止信号，或兜底轮询到点为止。
+    """睡到有 `wanted` 认的 bot 的流 / 出站通知、收到停止信号，或兜底轮询到点为止。
 
-    所有飞书子进程都听同样的通道：别的 bot 的通知不算数，继续睡满剩下的时间。
+    所有飞书子进程都听同样的通道：不认的 bot 的通知不算数，继续睡满剩下的时间。
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + poll_seconds
-    target = str(bot_id)
     while not stop.is_set():
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -74,8 +74,16 @@ async def wait_for_work(
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         payloads = [p for task in waiters if task in done for p in task.result()]
-        if any(p.get("bot_id") == target for p in payloads):
+        if any(wanted(str(p.get("bot_id") or "")) for p in payloads):
             return
+
+
+async def wait_for_work(
+    listener: Listener, bot_id: uuid.UUID, stop: asyncio.Event, poll_seconds: float
+) -> None:
+    """睡到本 bot 有流 / 出站通知、收到停止信号，或兜底轮询到点为止。"""
+    target = str(bot_id)
+    await wait_for_notice(listener, lambda value: value == target, stop, poll_seconds)
 
 
 async def _sleep_unless_stopped(stop: asyncio.Event, seconds: float) -> None:
@@ -120,7 +128,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
     try:
         async with factory() as session:
             bot = await session.get(Bot, bot_id)
-            if bot is None or not bot.enabled or bot.platform != "feishu":
+            if bot is None or not bot.enabled or bot.platform != "feishu" or bot.kind != "standard":
                 return
             credentials = decrypt_json(cfg.build_cipher(), bot.credentials_enc, CREDENTIALS_AAD)
             initial_credentials = bot.credentials_enc
