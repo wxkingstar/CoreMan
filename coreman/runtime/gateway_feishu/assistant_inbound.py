@@ -6,8 +6,29 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from coreman.core.assistants import sealed
+from coreman.core.assistants.routing import assistant_for
+from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.reachability import private_chat_of
+from coreman.core.crypto import Cipher
+from coreman.core.i18n.messages import msg
+from coreman.core.logging import get_logger
+from coreman.core.platforms.feishu import FeishuClient, FeishuError
+from coreman.runtime.gateway_feishu.child import BotInfo
+from coreman.runtime.gateway_feishu.inbound import normalize_event
+from coreman.runtime.gateway_feishu.reply_buttons import Outcome, admit
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,3 +82,134 @@ def triage(raw: dict[str, Any], *, app_id: str) -> Triage:
         user_id = str(_obj(event, "operator").get("user_id") or "")
         return Triage("private", platform_user_id=user_id, click=True) if user_id else _IGNORE
     return _IGNORE
+
+
+class AssistantInbound:
+    """一个助理应用连接的入站处理；`accept` 交给 `DurableChannel`，落库提交之后才应答。"""
+
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        client: FeishuClient,
+        app: uuid.UUID,
+        feishu_app_id: str,
+        instance_id: str,
+        generation: int,
+        cipher: Cipher,
+        fence: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.factory, self.client = factory, client
+        # app 是 platform_apps.id；feishu_app_id 是飞书的 App ID（事件头里的 app_id）。
+        self.app, self.feishu_app_id = app, feishu_app_id
+        self.instance_id, self.generation = instance_id, generation
+        self.cipher = cipher
+        self._fence = fence
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def accept(self, raw: dict[str, Any]) -> Outcome | None:
+        await self._fence()
+        found = triage(raw, app_id=self.feishu_app_id)
+        if found.kind == "ignore":
+            if found.reason:
+                log.info("assistant_event_dropped", reason=found.reason)
+            return None
+        if found.kind == "leave":
+            # 退群与私信是两次平台调用，不占应答窗口。
+            self._background(
+                self.leave_group(found.chat_id, found.platform_user_id, found.event_id)
+            )
+            return None
+        async with self.factory() as session:
+            await session.execute(text("SET LOCAL statement_timeout = 1500"))
+            speaker = await resolve_speaker(
+                session, platform="feishu", platform_user_id=found.platform_user_id
+            )
+            bot = (
+                None
+                if speaker.user_id is None
+                else await assistant_for(session, self.app, speaker.user_id)
+            )
+            if bot is None:
+                await self.on_unprovisioned(
+                    session,
+                    platform_user_id=found.platform_user_id,
+                    user_id=speaker.user_id,
+                    raw=raw,
+                )
+                await session.commit()
+                return None
+            # 之后经手的是这个人的私聊内容：这段处理里的日志不带异常文字。
+            await sealed.guard_logs(session, bot.id)
+            message = normalize_event(
+                raw,
+                bot_id=bot.id,
+                app_id=self.feishu_app_id,
+                bot_open_id="",
+                gateway_instance=self.instance_id,
+                now=datetime.now(UTC),
+                cipher=self.cipher,
+            )
+            if message is None:
+                return None
+            if found.click and not await private_chat_of(
+                session, bot.id, "feishu", found.platform_user_id, message.chat_id
+            ):
+                # 卡片不在操作人与自己助理的私聊里：不是所有者在点。
+                return "not_requester"
+            info = BotInfo(bot.id, bot.bot_key, bot.welcome_message)
+            # 落库走与普通机器人相同的入口：助理的入站事件与任务载荷在那里按所有者封存。
+            outcome = await admit(session, info, message, lease_generation=self.generation)
+            await session.commit()
+            return outcome
+
+    async def on_unprovisioned(
+        self,
+        session: AsyncSession,
+        *,
+        platform_user_id: str,
+        user_id: uuid.UUID | None,
+        raw: dict[str, Any],
+    ) -> None:
+        """发送人没有启用的助理记录。本期只记日志并丢弃；开通卡片由开通与停用那一期接在这里。
+
+        `user_id` 为 None 表示通讯录里认不出这个人。调用点在应答窗口内，返回后由调用方提交。
+        """
+        header = raw.get("header")
+        log.info(
+            "assistant_unprovisioned",
+            app=str(self.app),
+            known_user=user_id is not None,
+            event_type=header.get("event_type") if isinstance(header, dict) else None,
+        )
+
+    async def leave_group(self, chat_id: str, platform_user_id: str, event_id: str) -> None:
+        """被拉进群：把自己移出去，再私信拉群的人说明只支持私聊。两步各自尽力而为。"""
+        try:
+            await self.client.leave_chat(chat_id)
+        except FeishuError as exc:
+            log.warning("assistant_leave_failed", code=exc.code)
+        if not platform_user_id:
+            return
+        try:
+            await self.client.notify_user(
+                platform_user_id,
+                msg("assistant_private_only"),
+                key=f"assistant-leave:{event_id or chat_id}",
+            )
+        except FeishuError as exc:
+            log.info("assistant_leave_notice_failed", code=exc.code)
+
+    def _background(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def aclose(self) -> None:
+        """退出前等后台的平台调用做完，最多 5 秒；没做完的取消。"""
+        if not self._tasks:
+            return
+        _, pending = await asyncio.wait(set(self._tasks), timeout=5)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
