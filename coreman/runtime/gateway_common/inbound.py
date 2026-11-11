@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox
 from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command, is_cancel_word
@@ -48,6 +49,7 @@ async def enqueue_inbound(
     调用方负责提交；提交之后 `tasks_queued` / `outbox_added` 通知才会发出。
     """
     payload = message.model_dump(mode="json")
+    stored = await sealed.seal_values(session, InboundEvent, bot.id, {"payload": payload})
     stmt = (
         insert(InboundEvent)
         .values(
@@ -59,7 +61,7 @@ async def enqueue_inbound(
             chat_id=message.chat_id,
             sender_platform_user_id=message.sender.platform_user_id or None,
             sender_open_id=message.sender.open_id,
-            payload=payload,
+            payload=stored["payload"],
             reply_context=message.reply_context,
         )
         .on_conflict_do_nothing(index_elements=[InboundEvent.bot_id, InboundEvent.platform_msg_id])
