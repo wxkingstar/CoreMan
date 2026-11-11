@@ -145,7 +145,7 @@
 |---|---|
 | 读 | 零：值不是封装就原样返回，不查归属 |
 | 写入口（`seal_values`、flush 钩子） | 有内容列要写时查一次归属（`bots.kind, owner_id`，按主键），结果按 `bot_id` 在进程内缓存 60 秒。稳定状态下每个机器人每个进程每分钟最多一条 |
-| `tasks.finish`、`close_running`、`amend_response` | 不多语句。现有调用点（带 `result` 或 `error_message` 的 `tasks.finish` 43 处、`close_running` 3 处、`submit_amend` 1 处）全部传入 `bot_id`，没有拿不到的；回退查询只留作兜底。`tests/integration/test_assistant_standard_overhead.py` 数语句并逐个检查调用点，新增调用点漏传会失败 |
+| `tasks.finish`、`close_running`、`amend_response` | 不多语句。现有调用点（带 `result` 或 `error_message` 的 `tasks.finish` 42 处、`close_running` 3 处、`submit_amend` 1 处）全部传入 `bot_id`，没有拿不到的；回退查询只留作兜底。`tests/integration/test_assistant_standard_overhead.py` 数语句并逐个检查调用点，新增调用点漏传会失败 |
 | `outbox.last_error`、`tasks.cancel_reason` | 值本来就是代码时原样写入；是自由文字时同一条语句里多一个按主键的 `EXISTS` 子查询，不多往返 |
 
 ### 密钥已销毁时各入口的行为
@@ -155,6 +155,7 @@
 | `SealedSession.get` / `scalar` / `refresh`、`sealed.open_rows` | 不抛错。内容列置空（字典只剩明文键，文本为空串或 NULL），`sealed.is_locked(row)` 为真。这些调用遍布巡检与列表，抛错会让一个人的销毁拖垮所有人的循环 |
 | `tasks.claim` | 任务置 `failed`，`error_code='content_locked'`，返回 `None`，不交给处理器 |
 | 飞书网关 `consume_one` | 条目置 `skipped`，`last_error='content_locked'` |
+| 企微网关 `OutboxConsumer._handle` | 同上。助理记录只能是飞书（`bots` 的检查约束），它的条目正常到不了这里；仍加同样的判断，不留「读不出来的内容被当成空消息发出去」的路径。判断只是读行上的一个标记，普通条目没有开销 |
 | `streams.pending_for_bot` / `active_for_bot`、飞书网关 `_deliver` | 跳过该行 |
 | 对话记录接口 | 正文字段为 `null`，带 `content_locked: true` |
 | 任何写入 | 不抛错。内容丢弃：字典写成墓碑加明文键，文本写空；行与元数据照常落库，状态机照走。记一条 `assistant_content_dropped` 告警 |
