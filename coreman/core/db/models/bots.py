@@ -80,9 +80,7 @@ class Bot(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(Text, server_default=text("'standard'"))
     owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
     # 助理记录共用的飞书应用；应用凭证以 platform_apps 为准，credentials_enc 是它的副本。
-    platform_app_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("platform_apps.id")
-    )
+    platform_app_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("platform_apps.id"))
     relay_server_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("relay_servers.id"))
     model: Mapped[str] = mapped_column(Text)
     working_dir: Mapped[str] = mapped_column(Text)
