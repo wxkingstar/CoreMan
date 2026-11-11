@@ -53,8 +53,8 @@
 
 ### 数据模型
 
-- `bots` 加列 `kind`（`standard` / `assistant`，默认 `standard`）与 `owner_id`。部分唯一索引：`kind='assistant' AND enabled` 时 `(owner_id, 租户)` 唯一。
-- 应用凭证放进现有的 `platform_apps`，新增能力值 `assistant`。`bots` 加列 `platform_app_id`；助理记录的 `credentials_enc` 留空。
+- `bots` 加列 `kind`（`standard` / `assistant`，默认 `standard`）与 `owner_id`。部分唯一索引：`kind='assistant' AND enabled` 时 `owner_id` 唯一（一个部署对应一个飞书企业）。
+- 应用凭证以现有的 `platform_apps` 为准，新增能力值 `assistant`。`bots` 加列 `platform_app_id`；助理记录的 `credentials_enc` 是应用凭证的副本，应用凭证变更时在同一事务里同步到该应用下的全部助理记录。这样约 20 处按记录读取飞书凭证的代码不需要改。
 - 飞书个人授权沿用 `feishu_personal_grants`（主键仍是机器人 × 人），档位固定为 `all`，授权时带上离线访问权限。
 
 ### 网关改造
@@ -66,7 +66,6 @@
 - 群消息一律丢弃，不入库。收到进群事件时退群，并私信拉群的人说明这个应用只支持私聊。退群接口需要新封装，应用清单补群成员写权限。
 - 卡片回调按操作人的用户编号路由，只认记录的所有者。
 - 出站：同一进程认领该应用下所有助理记录的待发消息，出站锁仍按记录。
-- 读取应用凭证的位置（核心、工作进程、接口共约 20 处）统一改为经一个函数取：有 `platform_app_id` 时读应用表，否则读记录自身。
 
 应用密钥轮换会让该应用下所有助理的个人授权同时失效（授权行的指纹含密钥）。轮换前提前通知，轮换后各人重新授权一次。
 
