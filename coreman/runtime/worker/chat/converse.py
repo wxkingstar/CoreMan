@@ -131,6 +131,10 @@ class ConverseStage(ChatStageBase):
                     # 静默只提醒、不中断：工具跑十几分钟不吐字是正常的，中断才是事故。
                     ctx.log.warning("sse_silent", seconds=int(now - silent_since))
                     silent_since = now
+                    if pre.writer.check_stuck():
+                        # 命令行很久没有任何事件、又不在已知长等待里：卡片标「疑似卡住」，不中断。
+                        ctx.log.warning("cli_suspected_stuck")
+                        await pre.writer.flush(force=True)
                 await supervisor.on_progress(now, pre.writer.pending_text, pre.writer.boundaries)
                 if out.ask_user:
                     return out
@@ -194,7 +198,7 @@ class ConverseStage(ChatStageBase):
         elif isinstance(event, ToolUseStart):
             out.tool_events += 1
             out.tools.append(event.name)
-            writer.add_tool(event.name)
+            writer.add_tool(event.name, event.summary, event.command)
         elif isinstance(event, PlanUpdate):
             writer.set_plan(event.items)
         elif isinstance(event, RelayErrorEvent):

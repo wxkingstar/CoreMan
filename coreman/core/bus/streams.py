@@ -27,6 +27,7 @@ WRITABLE = frozenset(
         "session_url",
         "segment_boundaries",
         "plan",
+        "activity",
         "background_state",
         "delivery_mode",
     }
@@ -173,7 +174,10 @@ async def complete(
     *,
     final_text: str,
     pending_card: dict[str, Any] | None = None,
+    activity: dict[str, Any] | None = None,
 ) -> Completion:
+    """收尾。`activity` 给了就整份替换（中断原因随终态一起写，网关据此标红）。"""
+    extra: dict[str, Any] = {} if activity is None else {"activity": activity}
     row = (
         await session.execute(
             sa_update(TaskStream)
@@ -183,6 +187,7 @@ async def complete(
                 completed_at=func.now(),
                 final_text=final_text,
                 pending_card=pending_card,
+                **extra,
                 version=TaskStream.version + 1,
                 updated_at=func.now(),
             )

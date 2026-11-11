@@ -26,7 +26,7 @@ from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
 from coreman.core.bus.tasks import ACTIVE
-from coreman.core.chat import chat_logs, interactions
+from coreman.core.chat import chat_logs, interactions, liveness
 from coreman.core.chat.card_replies import is_click
 from coreman.core.chat.chat_logs import ChatLogEntry, ChatLogWriter
 from coreman.core.db.models import (
@@ -192,9 +192,11 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
     )
     for task, stream in rows:
         final = stream.final_text or stream.pending_text or msg("stream_recovered")
+        activity = None
         if task.status != "succeeded":
             final += "\n\n" + msg("stream_interrupted")
-        await streams.complete(session, task.id, final_text=final)
+            activity = liveness.interrupted_activity(stream.activity, liveness.REASON_RECOVERED)
+        await streams.complete(session, task.id, final_text=final, activity=activity)
         if stream.delivery_mode != "stream" or stream.finish_pushed_at is not None:
             bot = await session.get(Bot, task.bot_id)
             chat_id = stream.reply_context.get("chat_id") or _chat_id(task)
@@ -274,7 +276,12 @@ async def _tell_user(
     if stream is not None and not stream.is_complete:
         # 推得出去就把已经写了一半的正文带上，用户至少看得到中断前的内容。
         prefix = f"{stream.pending_text}\n\n" if pushable and stream.pending_text else ""
-        await streams.complete(session, task.id, final_text=prefix + lost)
+        await streams.complete(
+            session,
+            task.id,
+            final_text=prefix + lost,
+            activity=liveness.interrupted_activity(stream.activity, liveness.REASON_WORKER_LOST),
+        )
     if pushable:
         return
     chat_id = _chat_id(task)

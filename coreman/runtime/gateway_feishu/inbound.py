@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from coreman.core.chat import busy_choice
+from coreman.core.chat import busy_choice, liveness
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
@@ -170,6 +170,7 @@ def _normalize_event(
             and not parse_task_id(task_id)
             and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
             and busy_choice.parse_card_task_id(task_id) is None
+            and liveness.parse_live_task_id(task_id) is None
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")

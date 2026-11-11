@@ -61,6 +61,9 @@ type sseTranslator struct {
 	sawResult       bool // a result event reached feed (finish chunk emitted)
 	sawRateLimit    bool // a rate_limit_event updated the quota during this request
 	seenToolIDs     map[string]bool
+	// pendingTools: streamed tool_use blocks whose start is held until the
+	// block's arguments are complete, so the start can say what the tool does.
+	pendingTools    map[string]bool
 	fallbackToolSeq int
 
 	askUserComplete bool
@@ -86,15 +89,16 @@ func newSSETranslator(chatID string, created int64, model, sessionID string, met
 		meterModel = model
 	}
 	return &sseTranslator{
-		chatID:      chatID,
-		created:     created,
-		model:       model,
-		sessionID:   sessionID,
-		meter:       meter,
-		meterModel:  meterModel,
-		seenToolIDs: map[string]bool{},
-		askUserIdx:  -1,
-		toolBlocks:  map[int]*toolBlock{},
+		chatID:       chatID,
+		created:      created,
+		model:        model,
+		sessionID:    sessionID,
+		meter:        meter,
+		meterModel:   meterModel,
+		seenToolIDs:  map[string]bool{},
+		pendingTools: map[string]bool{},
+		askUserIdx:   -1,
+		toolBlocks:   map[int]*toolBlock{},
 	}
 }
 
@@ -179,19 +183,11 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 					log.Printf("[ASK_USER_QUESTION] detected at index=%d", streamEvt.Index)
 					return outcomeContinue
 				}
+				// The start is emitted at content_block_stop, once the arguments
+				// are complete: the tool only runs after that, and the start can
+				// then carry what it is doing (e.g. "waiting for CI").
 				t.seenToolIDs[block.ID] = true
-				tc := openai.ToolCall{
-					ID:       block.ID,
-					Type:     "function",
-					Function: openai.ToolCallFunction{Name: block.Name, Arguments: ""},
-				}
-				t.emit(w, flusher, openai.ChatCompletionResponse{
-					ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
-					Choices: []openai.ChatCompletionChoice{{
-						Index: 0,
-						Delta: &openai.ChatMessage{Role: "assistant", ToolCalls: []openai.ToolCall{tc}},
-					}},
-				})
+				t.pendingTools[block.ID] = true
 			}
 		}
 		if streamEvt.Type == "content_block_delta" && streamEvt.Delta != nil {
@@ -233,6 +229,9 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		}
 		if streamEvt.Type == "content_block_stop" {
 			if tb, ok := t.toolBlocks[streamEvt.Index]; ok {
+				if t.pendingTools[tb.ID] {
+					t.emitToolStart(w, flusher, tb.ID, tb.Name, []byte(tb.Args.String()))
+				}
 				sessionStore.LogToolUse(t.sessionID, tb.Name, tb.ID, tb.Args.String())
 				if isTaskTool(tb.Name) {
 					t.plan.call(tb.ID, tb.Name, tb.Args.String())
@@ -330,6 +329,12 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 					if id == "" {
 						id = t.fallbackToolID(msg.ID, index)
 					}
+					if t.pendingTools[id] {
+						// Streamed start whose block stop never came: the complete
+						// assistant message carries the arguments instead.
+						t.emitToolStart(w, flusher, id, c.Name, c.Input)
+						continue
+					}
 					if t.seenToolIDs[id] {
 						continue
 					}
@@ -338,18 +343,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 					if len(c.Input) > 0 {
 						t.progress(w, flusher, "\n\n工具参数 · "+c.Name+"\n"+string(c.Input)+"\n")
 					}
-					tc := openai.ToolCall{
-						ID:       id,
-						Type:     "function",
-						Function: openai.ToolCallFunction{Name: c.Name, Arguments: ""},
-					}
-					t.emit(w, flusher, openai.ChatCompletionResponse{
-						ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
-						Choices: []openai.ChatCompletionChoice{{
-							Index: 0,
-							Delta: &openai.ChatMessage{Role: "assistant", ToolCalls: []openai.ToolCall{tc}},
-						}},
-					})
+					t.emitToolStart(w, flusher, id, c.Name, c.Input)
 				}
 			}
 		}
@@ -449,6 +443,26 @@ func (t *sseTranslator) fallbackToolID(messageID string, index int) string {
 }
 
 // progress stays on the process channel, never masquerading as answer text.
+// emitToolStart sends one tool start, with the summary and command the
+// platform shows as "what it is doing / waiting on".
+func (t *sseTranslator) emitToolStart(w http.ResponseWriter, flusher http.Flusher, id, name string, input []byte) {
+	delete(t.pendingTools, id)
+	summary, arguments := toolCallDetail(name, input)
+	tc := openai.ToolCall{
+		ID:       id,
+		Type:     "function",
+		Function: openai.ToolCallFunction{Name: name, Arguments: arguments},
+		Summary:  summary,
+	}
+	t.emit(w, flusher, openai.ChatCompletionResponse{
+		ID: t.chatID, Object: "chat.completion.chunk", Created: t.created, Model: t.model,
+		Choices: []openai.ChatCompletionChoice{{
+			Index: 0,
+			Delta: &openai.ChatMessage{Role: "assistant", ToolCalls: []openai.ToolCall{tc}},
+		}},
+	})
+}
+
 func (t *sseTranslator) progress(w http.ResponseWriter, flusher http.Flusher, content string) {
 	sessionStore.LogThinking(t.sessionID, content)
 	t.emit(w, flusher, openai.ChatCompletionResponse{

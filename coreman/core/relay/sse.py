@@ -47,10 +47,17 @@ class ImageDelta:
 
 @dataclass(frozen=True)
 class ToolUseStart:
-    """一次工具调用开始。"""
+    """一次工具调用开始。
+
+    summary 是节点给的一句话说明（relay 扩展字段 `x_summary`，如 Claude Bash 的 description），
+    command 是参数里的命令（用来认出已知的长等待）；老节点两个都可能没有，只显示工具名。
+    两者都可能带凭据，展示前由 worker 脱敏。
+    """
 
     name: str
     tool_id: str
+    summary: str = ""
+    command: str = ""
 
 
 PLAN_STATUSES = frozenset({"pending", "in_progress", "completed"})
@@ -233,7 +240,7 @@ class SseParser:
                 self._ask_id, self._ask_args = str(call.get("id") or ""), str(args or "")
             elif name:
                 self.counts["tool"] += 1
-                out.append(ToolUseStart(str(name), str(call.get("id") or name)))
+                out.append(_tool_start(call, str(name), args))
             elif self._ask_id is not None and isinstance(args, str):
                 self._ask_args += args
         reason = choice.get("finish_reason")
@@ -281,6 +288,20 @@ def paragraph_gap(before: str, after: str) -> str:
     trailing = len(before) - len(before.rstrip("\n"))
     leading = len(after) - len(after.lstrip("\n"))
     return "\n" * max(0, 2 - trailing - leading)
+
+
+def _tool_start(call: dict[str, Any], name: str, args: Any) -> ToolUseStart:
+    from coreman.core.chat.liveness import COMMAND_CHARS, SUMMARY_CHARS, first_line, tool_detail
+
+    description, command = tool_detail(args if isinstance(args, str) else "")
+    summary = call.get("x_summary")
+    summary = summary.strip() if isinstance(summary, str) and summary.strip() else description
+    return ToolUseStart(
+        name,
+        str(call.get("id") or name),
+        first_line(summary, SUMMARY_CHARS),
+        command[:COMMAND_CHARS],
+    )
 
 
 def _image(value: Any) -> ImageDelta | None:

@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from coreman.core.bus import outbox, streams
+from coreman.core.chat import liveness
 from coreman.core.chat.group_observe import NO_REPLY
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import (
@@ -120,7 +121,8 @@ class FeishuTransport:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
         self._last_call = 0.0
-        self._headings: dict[int, tuple[float, int, str]] = {}
+        # 每张卡最后推上去的状态行，和下次最早可以重试的时刻（推失败时退避）。
+        self._headings: dict[int, tuple[str, float]] = {}
         # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
@@ -318,22 +320,22 @@ class FeishuTransport:
             await session.commit()
             return delivery.sequence
 
-    async def animate_heading(self, row: TaskStream, card_id: str) -> str:
+    async def update_heading(self, row: TaskStream, card_id: str) -> str:
+        """卡片顶部的状态行（思考面板的标题）：变了才改，不定时刷新。
+
+        时间只精确到分钟，内容来自 worker 写下的最后动作，所以只在有新事件、跨过静默阈值、
+        标上疑似卡住时才会变；收尾时整卡替换，不在这里改。
+        """
+        title = self.status_heading(row)
+        if row.is_complete:
+            self._headings.pop(row.task_id, None)
+            return title
         now = heading_clock()
         previous = self._headings.get(row.task_id)
-        answer = (
-            row.final_text if row.is_complete and row.final_text is not None else row.pending_text
-        )
-        active = not row.is_complete and not visible_parts("", answer)[1].strip()
-        if previous and now - previous[0] < 3 and (active == bool(previous[2].endswith("."))):
-            return previous[2]
-        frame = (previous[1] + 1) % 3 if previous else 0
-        title = "🤔 思考中" + "." * (frame + 1) if active else "🤔 思考过程"
-        if previous and previous[2] == title:
+        if previous and (previous[0] == title or now < previous[1]):
             return title
         # Only patch the header: preserve the reader's expanded state and body.
         # Cosmetic failures must never prevent the real answer from being sent.
-        self._headings[row.task_id] = (now, frame, title)
         try:
             await self.call(
                 "PATCH",
@@ -347,10 +349,19 @@ class FeishuTransport:
                 },
             )
         except FeishuError:
-            self._headings[row.task_id] = (now + 12, frame, title)
-        if row.is_complete:
-            self._headings.pop(row.task_id, None)
+            self._headings[row.task_id] = (previous[0] if previous else "", now + 12)
+            return title
+        self._headings[row.task_id] = (title, 0.0)
         return title
+
+    @staticmethod
+    def status_heading(row: TaskStream) -> str:
+        return liveness.status_heading(
+            running_since=row.running_since,
+            activity=row.activity,
+            complete=row.is_complete,
+            now=datetime.now(UTC),
+        )
 
     async def _ensure_delivery(self, task_id: int, *, typing_done: bool = False) -> None:
         async with self.factory() as session:
@@ -409,6 +420,7 @@ class FeishuTransport:
                     await self.enqueue_final(
                         session, row, plain_text(visible_parts("", answer)[1]), start=0
                     )
+                    await self.enqueue_interrupt_notice(session, row)
                     await streams.mark_finish_pushed(session, row.task_id)
                     await session.commit()
                 if not visible_parts("", answer)[1].strip() and not row.pending_card:
@@ -427,13 +439,15 @@ class FeishuTransport:
                             "",
                             "",
                             session_url=row.session_url,
-                            heading="🤔 思考过程" if row.is_complete else "🤔 思考中.",
+                            heading=self.status_heading(row),
+                            task_id=None if row.is_complete else row.task_id,
                         ),
                         ensure_ascii=False,
                     ),
                 },
             )
             delivery.card_id = api_id((result.get("data") or {}).get("card_id"))
+            self._headings[row.task_id] = (self.status_heading(row), 0.0)
             async with self.factory() as session:
                 await session.merge(delivery)
                 await session.commit()
@@ -449,7 +463,7 @@ class FeishuTransport:
             async with self.factory() as session:
                 await session.merge(delivery)
                 await session.commit()
-        heading = await self.animate_heading(row, card_id)
+        heading = await self.update_heading(row, card_id)
         if row.version <= row.pushed_version and not row.is_complete:
             return
         answer = (
@@ -534,6 +548,7 @@ class FeishuTransport:
             await streams.mark_pushed(session, row.task_id, row.version)
             if row.is_complete:
                 await self.enqueue_cards(session, row, compiled)
+                await self.enqueue_interrupt_notice(session, row)
                 await streams.mark_finish_pushed(session, row.task_id)
             await session.commit()
 
@@ -567,7 +582,10 @@ class FeishuTransport:
         if units and not state.get("paused"):
             layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
             shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-            shell["body"]["elements"] = _prefix(thinking, row.session_url, heading, row.plan)
+            shell["body"]["elements"] = [
+                *_prefix(thinking, row.session_url, heading, row.plan),
+                liveness.live_button(row.task_id),
+            ]
             steps = plan(
                 layout,
                 units,
@@ -628,7 +646,7 @@ class FeishuTransport:
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        shell["body"]["elements"] = [*prefix, *elements]
+        shell["body"]["elements"] = [*prefix, *elements, liveness.live_button(row.task_id)]
         shell["config"]["streaming_mode"] = True
         await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
@@ -790,6 +808,38 @@ class FeishuTransport:
             )
         await self.enqueue_final(session, row, "", start=0)
 
+    async def enqueue_interrupt_notice(self, session: AsyncSession, row: TaskStream) -> None:
+        """中断了（失联、读超时、硬超时、恢复补的终态）：群里 @ 提问人一次。
+
+        卡片标题已经标红，单聊里看得到；群里卡片容易被刷上去，提问人不一定在看，所以 @ 一下。
+        幂等键按任务定，收尸、恢复重复走到这里也只发一条。
+        """
+        reason = (row.activity or {}).get("interrupted")
+        requester = row.reply_context.get("requester_user_id")
+        if (
+            not isinstance(reason, str)
+            or not reason
+            or row.reply_context.get("chat_type") != "group"
+            or not isinstance(requester, str)
+            or not requester
+        ):
+            return
+        await outbox.add(
+            session,
+            bot_id=row.bot_id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"{row.task_id}:interrupted",
+            target={
+                "chat_id": row.reply_context.get("chat_id"),
+                "message_id": row.reply_context.get("message_id"),
+            },
+            payload={
+                "markdown": liveness.interrupt_notice(reason),
+                "_mention_user_id": requester,
+            },
+        )
+
     async def enqueue_final(
         self, session: AsyncSession, row: TaskStream, answer: str, *, start: int
     ) -> None:
@@ -917,7 +967,7 @@ class FeishuTransport:
         return True
 
     async def _send_item(self, item: OutboxItem) -> None:
-        if item.payload.get("_human_collaboration_id"):
+        if item.payload.get("_human_collaboration_id") or item.payload.get("_mention_user_id"):
             # The platform-owned at node is the only way a colleague is notified in a group.
             rows: list[list[dict[str, Any]]] = []
             if item.payload.get("_mention_user_id"):

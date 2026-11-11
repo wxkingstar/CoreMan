@@ -4,11 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from coreman.core.bus import instances, leases, outbox, streams, tasks
 from coreman.core.bus.tasks import NewTask
+from coreman.core.chat import liveness
 from coreman.core.db.models import (
     Bot,
     FeishuDelivery,
@@ -498,7 +500,16 @@ async def test_permanent_outbox_failure_ends_typing(db_session, db_engine):
         assert delivery.reaction_done and delivery.reaction_id is None
 
 
-async def test_thinking_heading_animates_without_new_content(db_session, db_engine, monkeypatch):
+def _headings(api):
+    return [
+        json.loads(body["partial_element"])["header"]["title"]["content"]
+        for _, path, body in api.calls
+        if path.endswith("/elements/thinking_panel")
+    ]
+
+
+async def test_status_line_changes_only_with_activity(db_session, db_engine):
+    """状态行不做动画：没有新事件就不改卡；静默过阈值改一次 ⚠️，来了新动作再改回来。"""
     bot, row, generation = await seed(db_session)
     await streams.update(db_session, row.task_id, pending_text="", thinking_md="waiting")
     await db_session.commit()
@@ -506,29 +517,94 @@ async def test_thinking_heading_animates_without_new_content(db_session, db_engi
     transport = FeishuTransport(
         factory, api, bot_id=bot.id, instance_id="old", generation=generation
     )
-    clock = [100.0]
-    monkeypatch.setattr(
-        "coreman.runtime.gateway_feishu.transport.heading_clock", lambda: clock[0], raising=False
-    )
     await transport.round()
+    created = [body for _, path, body in api.calls if path == "/open-apis/cardkit/v1/cards"]
+    assert "⏳ 进行中" in created[0]["data"] and "看看进度" in created[0]["data"]
     api.calls.clear()
-    clock[0] += 3
     await transport.round()
-    patches = [
-        body for method, path, body in api.calls if path.endswith("/elements/thinking_panel")
-    ]
-    import json
+    await transport.round()
+    assert _headings(api) == []
 
-    assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考中.."
-    assert not any(path.endswith("/content") for _, path, _ in api.calls)
-    api.calls.clear()
-    await transport.round()
-    assert not any(path.endswith("/elements/thinking_panel") for _, path, _ in api.calls)
-    await streams.update(db_session, row.task_id, pending_text="answer")
+    old = datetime.now(UTC) - timedelta(minutes=liveness.QUIET_SECONDS // 60 + 1)
+    await streams.update(
+        db_session,
+        row.task_id,
+        activity={"at": liveness.iso(old), "label": "运行命令：跑测试"},
+    )
     await db_session.commit()
     await transport.round()
-    patches = [body for _, path, body in api.calls if path.endswith("/elements/thinking_panel")]
-    assert json.loads(patches[-1]["partial_element"])["header"]["title"]["content"] == "🤔 思考过程"
+    await transport.round()
+    quiet = _headings(api)
+    assert len(quiet) == 1 and quiet[0].startswith("⚠️ ") and "后没有新动作" in quiet[0]
+
+    api.calls.clear()
+    await streams.update(
+        db_session,
+        row.task_id,
+        activity={"at": liveness.iso(datetime.now(UTC)), "label": "思考"},
+    )
+    await db_session.commit()
+    await transport.round()
+    back = _headings(api)
+    assert len(back) == 1 and back[0].startswith("⏳ 进行中") and "（思考）" in back[0]
+
+
+async def test_known_long_wait_is_not_reported_quiet(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    started = datetime.now(UTC) - timedelta(minutes=8)
+    activity, _line = liveness.tool_activity("Bash", "", "gh run watch 42", started)
+    await streams.update(db_session, row.task_id, activity=activity)
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    created = [body for _, path, body in api.calls if path == "/open-apis/cardkit/v1/cards"]
+    assert "等 GitHub Actions 跑完" in created[0]["data"]
+    assert "通常 5–10 分钟 · 预计" in created[0]["data"]
+    assert "⚠️" not in created[0]["data"]
+
+
+async def test_interrupted_turn_marks_card_and_mentions_requester_once(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    await db_session.execute(
+        sa_update(TaskStream)
+        .where(TaskStream.task_id == row.task_id)
+        .values(
+            reply_context={
+                "chat_id": "oc1",
+                "message_id": "om_in",
+                "chat_type": "group",
+                "requester_user_id": "u_asker",
+            }
+        )
+    )
+    await streams.complete(
+        db_session,
+        row.task_id,
+        final_text="partial",
+        activity=liveness.interrupted_activity({}, liveness.REASON_WORKER_LOST),
+    )
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await transport.round()
+    cards = [body for _, path, body in api.calls if path == "/open-apis/cardkit/v1/cards/card1"]
+    assert "❌ 已中断：处理进程失联" in cards[-1]["card"]["data"]
+    assert '"color":"red"' in cards[-1]["card"]["data"]
+    assert "看看进度" not in cards[-1]["card"]["data"]
+    posts = [
+        body
+        for _, path, body in api.calls
+        if path.endswith("/reply") and body.get("msg_type") == "post"
+    ]
+    assert len(posts) == 1
+    assert '"user_id":"u_asker"' in posts[0]["content"]
+    assert "处理进程失联" in posts[0]["content"]
 
 
 class ImageAPI(FakeAPI):
