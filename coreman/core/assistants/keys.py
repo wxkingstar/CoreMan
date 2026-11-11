@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from coreman.core.crypto import Cipher
+from coreman.core.crypto import Cipher, key_id_of
 from coreman.core.db.models import AssistantKey
 
 KEY_TTL_SECONDS = 60.0
@@ -166,3 +166,32 @@ async def destroy_key(session: AsyncSession, owner_id: uuid.UUID) -> None:
 def _settle_fresh(session: Session) -> None:
     """事务结束：提交后的密钥已在库里，可以进缓存；回滚后的已不存在。两种情况都不再算「刚插入」。"""
     session.info.pop(_FRESH, None)
+
+
+async def rewrap(session: AsyncSession, cipher: Cipher) -> tuple[int, int]:
+    """主密钥轮换之后：把不是当前主密钥包裹的数据密钥重新包裹一遍。
+
+    内容密文只认数据密钥，不用动。返回（已是当前主密钥的行数，本次重新包裹的行数）；
+    调用方提交才生效。全部跑完后，旧主密钥才能从 `MASTER_KEYS_PREVIOUS` 里移除。
+    """
+    rows = (
+        (
+            await session.execute(
+                select(AssistantKey).where(AssistantKey.dek_enc.is_not(None)).with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    current = changed = 0
+    for row in rows:
+        assert row.dek_enc is not None
+        if key_id_of(row.dek_enc) == cipher.key_id:
+            current += 1
+            continue
+        aad = wrap_aad(row.user_id)
+        row.dek_enc = cipher.encrypt(cipher.decrypt(row.dek_enc, aad), aad)
+        changed += 1
+    await session.flush()
+    forget()
+    return current, changed

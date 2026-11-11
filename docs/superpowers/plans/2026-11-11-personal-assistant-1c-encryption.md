@@ -3657,6 +3657,8 @@ git commit -m "个人助理：对话记录接口只对所有者解密"
   - `async keys.rewrap(session: AsyncSession, cipher: Cipher) -> tuple[int, int]`：返回（已由当前主密钥包裹的行数，本次重新包裹的行数）；调用方决定提交还是回滚。
   - 命令 `python -m coreman.cli assistant-keys rewrap [--apply]`：不加 `--apply` 只统计。
 
+**实现时的修正（以代码为准）：** 多一条用例直接跑命令函数：不加 `--apply` 只统计、库里不变，加了才改由当前主密钥包裹。
+
 - [ ] **Step 1: 写失败测试**
 
 ```python
