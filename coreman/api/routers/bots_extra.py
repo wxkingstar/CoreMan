@@ -28,7 +28,7 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_bot_changed
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
-from coreman.core.assistants.records import is_assistant
+from coreman.core.assistants.records import is_assistant, visible_to
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
@@ -256,6 +256,17 @@ async def _start_switch_job(
     return {"code": 0, "data": {"task_id": task.id}}
 
 
+async def _job_bot(session: AsyncSession, bot_id: uuid.UUID, user: User) -> Bot:
+    """切换作业接口的机器人：作业的结果与报错是任务内容，个人助理的只有所有者能看——
+    其他人（含管理员）得到与「机器人不存在」相同的回答。"""
+    bot = await load_bot(session, bot_id)
+    if not visible_to(bot, user):
+        raise not_found("机器人不存在")
+    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
+        raise forbidden()
+    return bot
+
+
 async def _switch_job(session: AsyncSession, bot_id: uuid.UUID, task_id: int) -> Task:
     task = await session.get(Task, task_id, populate_existing=True)
     if task is None or task.bot_id != bot_id or task.kind != "relay_switch":
@@ -273,9 +284,7 @@ async def switch_job(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """切换作业的进度与结论：进行中看工作目录的阶段；结束后 result.ok 区分成功与被规则挡下。"""
-    bot = await load_bot(session, bot_id)
-    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
-        raise forbidden()
+    bot = await _job_bot(session, bot_id, user)
     task = await _switch_job(session, bot.id, task_id)
     data: dict[str, Any] = {
         "task_id": task.id,
@@ -300,9 +309,7 @@ async def cancel_switch_job(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """取消切换：还在排队的直接作废；已经在跑的只在等待员工手上这一轮时生效，开始迁移后跑完为止。"""
-    bot = await load_bot(session, bot_id)
-    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
-        raise forbidden()
+    bot = await _job_bot(session, bot_id, user)
     task = await _switch_job(session, bot.id, task_id)
     if task.status == "queued":
         await tasks.finish(
