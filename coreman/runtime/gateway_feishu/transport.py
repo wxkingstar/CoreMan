@@ -440,7 +440,6 @@ class FeishuTransport:
                             "",
                             session_url=row.session_url,
                             heading=self.status_heading(row),
-                            task_id=None if row.is_complete else row.task_id,
                         ),
                         ensure_ascii=False,
                     ),
@@ -582,10 +581,7 @@ class FeishuTransport:
         if units and not state.get("paused"):
             layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
             shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-            shell["body"]["elements"] = [
-                *_prefix(thinking, row.session_url, heading, row.plan),
-                liveness.live_button(row.task_id),
-            ]
+            shell["body"]["elements"] = _prefix(thinking, row.session_url, heading, row.plan)
             steps = plan(
                 layout,
                 units,
@@ -646,7 +642,7 @@ class FeishuTransport:
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        shell["body"]["elements"] = [*prefix, *elements, liveness.live_button(row.task_id)]
+        shell["body"]["elements"] = [*prefix, *elements]
         shell["config"]["streaming_mode"] = True
         await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
