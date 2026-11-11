@@ -18,6 +18,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox, streams
 from coreman.core.chat import liveness
 from coreman.core.chat.group_observe import NO_REPLY
@@ -269,6 +270,9 @@ class FeishuTransport:
                         .limit(50)
                     )
                 )
+                # 个人助理的内容还原成明文；读不出来的（数据密钥已销毁）不推。
+                await sealed.open_rows(session, rows)
+                rows = [row for row in rows if not sealed.is_locked(row)]
             active_ids = {row.task_id for row in rows}
             self._headings = {
                 key: value for key, value in self._headings.items() if key in active_ids

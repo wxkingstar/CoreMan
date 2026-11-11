@@ -308,7 +308,10 @@ class WorkerService(Service):
                 stream = await streams.get(session, ctx.task.id)
                 if stream is not None and not stream.is_complete:
                     await streams.complete(
-                        session, ctx.task.id, final_text=msg("relay_error", ctx.locale, relay="?")
+                        session,
+                        ctx.task.id,
+                        final_text=msg("relay_error", ctx.locale, relay="?"),
+                        bot_id=ctx.task.bot_id,
                     )
                 await session.commit()
         except Exception:  # noqa: BLE001 记不下失败也不能再抛一层

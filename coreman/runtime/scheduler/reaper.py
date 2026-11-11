@@ -196,7 +196,9 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
         if task.status != "succeeded":
             final += "\n\n" + msg("stream_interrupted")
             activity = liveness.interrupted_activity(stream.activity, liveness.REASON_RECOVERED)
-        await streams.complete(session, task.id, final_text=final, activity=activity)
+        await streams.complete(
+            session, task.id, final_text=final, activity=activity, bot_id=task.bot_id
+        )
         if stream.delivery_mode != "stream" or stream.finish_pushed_at is not None:
             bot = await session.get(Bot, task.bot_id)
             chat_id = stream.reply_context.get("chat_id") or _chat_id(task)
@@ -281,6 +283,7 @@ async def _tell_user(
             task.id,
             final_text=prefix + lost,
             activity=liveness.interrupted_activity(stream.activity, liveness.REASON_WORKER_LOST),
+            bot_id=task.bot_id,
         )
     if pushable:
         return

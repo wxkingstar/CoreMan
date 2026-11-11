@@ -15,6 +15,7 @@ from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import TaskStream
 
@@ -32,6 +33,25 @@ WRITABLE = frozenset(
         "delivery_mode",
     }
 )
+
+
+async def _sealed_fields(
+    session: AsyncSession, task_id: int, bot_id: uuid.UUID | None, fields: dict[str, Any]
+) -> dict[str, Any]:
+    """把内容列封存；没有内容要写时不查库。调用方没给 bot_id 就按主键查这条流属于谁。"""
+    if not any(fields.get(column) for column in sealed.COLUMNS[TaskStream]):
+        return fields
+    if bot_id is None:
+        bot_id = await session.scalar(
+            select(TaskStream.bot_id).where(TaskStream.task_id == task_id)
+        )
+    return await sealed.seal_values(session, TaskStream, bot_id, fields)
+
+
+async def _readable(session: AsyncSession, rows: list[TaskStream]) -> list[TaskStream]:
+    """内容还原成明文；读不出来的行（数据密钥已销毁）不交给网关。"""
+    await sealed.open_rows(session, rows)
+    return [row for row in rows if not sealed.is_locked(row)]
 
 
 async def create(
@@ -71,11 +91,18 @@ async def create(
     return row
 
 
-async def update_state(session: AsyncSession, task_id: int, **fields: Any) -> Completion:
-    """写入允许的增量字段并 version+1；返回原子更新后的投递状态，同事务 notify stream_updated。"""
+async def update_state(
+    session: AsyncSession, task_id: int, *, bot_id: uuid.UUID | None = None, **fields: Any
+) -> Completion:
+    """写入允许的增量字段并 version+1；返回原子更新后的投递状态，同事务 notify stream_updated。
+
+    Args:
+        bot_id: 这条流所属的机器人，封存内容列时用；没传且有内容要写时按主键查一次
+    """
     bad = set(fields) - WRITABLE
     if bad:
         raise ValueError(f"不可写字段: {sorted(bad)}")
+    fields = await _sealed_fields(session, task_id, bot_id, fields)
     row = (
         await session.execute(
             sa_update(TaskStream)
@@ -96,9 +123,11 @@ async def update_state(session: AsyncSession, task_id: int, **fields: Any) -> Co
     return Completion(int(row[0]), str(row[2]), row[3], row[4])
 
 
-async def update(session: AsyncSession, task_id: int, **fields: Any) -> int:
+async def update(
+    session: AsyncSession, task_id: int, *, bot_id: uuid.UUID | None = None, **fields: Any
+) -> int:
     """兼容调用方只读取新版本号。"""
-    return (await update_state(session, task_id, **fields)).version
+    return (await update_state(session, task_id, bot_id=bot_id, **fields)).version
 
 
 def offset_of(state: dict[str, Any] | None) -> int:
@@ -175,9 +204,13 @@ async def complete(
     final_text: str,
     pending_card: dict[str, Any] | None = None,
     activity: dict[str, Any] | None = None,
+    bot_id: uuid.UUID | None = None,
 ) -> Completion:
     """收尾。`activity` 给了就整份替换（中断原因随终态一起写，网关据此标红）。"""
     extra: dict[str, Any] = {} if activity is None else {"activity": activity}
+    stored = await _sealed_fields(
+        session, task_id, bot_id, {"final_text": final_text, "pending_card": pending_card}
+    )
     row = (
         await session.execute(
             sa_update(TaskStream)
@@ -185,8 +218,8 @@ async def complete(
             .values(
                 is_complete=True,
                 completed_at=func.now(),
-                final_text=final_text,
-                pending_card=pending_card,
+                final_text=stored["final_text"],
+                pending_card=stored["pending_card"],
                 **extra,
                 version=TaskStream.version + 1,
                 updated_at=func.now(),
@@ -222,9 +255,10 @@ async def pending_for_bot(
         .order_by(TaskStream.task_id)
         .limit(limit)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    return await _readable(session, rows)
 
 
 async def bots_with_pending(session: AsyncSession, bot_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
@@ -251,9 +285,10 @@ async def active_for_bot(session: AsyncSession, bot_id: uuid.UUID) -> list[TaskS
         )
         .order_by(TaskStream.task_id)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    return await _readable(session, rows)
 
 
 async def mark_pushed(session: AsyncSession, task_id: int, version: int) -> None:

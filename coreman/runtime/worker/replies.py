@@ -78,4 +78,4 @@ async def reply_once(
     session: AsyncSession, ctx: TaskContext, *, reply_context: dict[str, Any], text: str
 ) -> None:
     await open_stream(session, ctx, reply_context=reply_context)
-    await streams.complete(session, ctx.task.id, final_text=text)
+    await streams.complete(session, ctx.task.id, final_text=text, bot_id=ctx.task.bot_id)
