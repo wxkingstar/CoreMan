@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import CHAT_LOG_RUNNING, ChatLog, UserReached
 from coreman.core.logging import get_logger
 from coreman.core.pricing import estimate
@@ -154,7 +155,10 @@ async def _insert_once(session: AsyncSession, entry: ChatLogEntry, values: dict[
         )
         if existing is not None:
             return
-    session.add(ChatLog(**values))
+    # 用语句插入而不是 session.add：个人助理的内容列在这里封存（首次写入时签发数据密钥），
+    # 不再经过 flush 钩子——钩子只取用密钥、不签发，也不该把已封存的值再封一次。
+    stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
+    await session.execute(insert(ChatLog).values(**stored))
     await _reach(session, entry)
 
 
@@ -163,10 +167,11 @@ async def _finish(session: AsyncSession, entry: ChatLogEntry) -> None:
     values = row_values(entry)
     await _with_cost(session, entry, values)
     if entry.task_id is not None:
+        stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
         updated = await session.scalar(
             update(ChatLog)
             .where(ChatLog.task_id == entry.task_id, ChatLog.status == CHAT_LOG_RUNNING)
-            .values(**values)
+            .values(**stored)
             .returning(ChatLog.id)
         )
         if updated is not None:
@@ -184,9 +189,11 @@ async def open_turn(session: AsyncSession, entry: ChatLogEntry) -> bool:
     await session.flush()
     try:
         async with session.begin_nested():
+            # 封存放在保存点里：出错只回滚保存点，不弄挂对话。
+            stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
             await session.execute(
                 insert(ChatLog)
-                .values(**values)
+                .values(**stored)
                 .on_conflict_do_nothing(
                     # 谓词必须是字面量：写成绑定参数时，同一预备语句执行几次后 PostgreSQL
                     # 换用通用计划，就认不出这个部分唯一索引，插入直接报错。
@@ -310,10 +317,15 @@ class ChatLogWriter:
         text = response_content[:limit] if response_content else response_content
 
         async def run(session: AsyncSession) -> None:
+            # 只有 task_id：先按它查到这一行属于谁。
+            bot_id = await session.scalar(
+                select(ChatLog.bot_id).where(ChatLog.task_id == task_id).limit(1)
+            )
+            stored = await sealed.seal_values(session, ChatLog, bot_id, {"response_content": text})
             await session.execute(
                 update(ChatLog)
                 .where(ChatLog.task_id == task_id, ChatLog.status != CHAT_LOG_RUNNING)
-                .values(response_content=text)
+                .values(response_content=stored["response_content"])
             )
 
         return await self._attempt(run)
