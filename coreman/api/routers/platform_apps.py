@@ -17,10 +17,11 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.apps import sync_bot_credentials
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.contacts import runner
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import CAPABILITIES, ContactSyncRun, PlatformApp, User
+from coreman.core.db.models import CAPABILITIES, Bot, ContactSyncRun, PlatformApp, User
 from coreman.core.masking import is_masked, mask_secret
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.platforms.wecom import WeComClient, WeComError
@@ -62,6 +63,8 @@ class PlatformAppIn(BaseModel):
             raise ValueError("企微应用必须填写 corp_id")
         if self.platform == "feishu" and not self.app_id:
             raise ValueError("飞书应用必须填写 app_id")
+        if "assistant" in self.capabilities and self.platform != "feishu":
+            raise ValueError("个人助理应用只支持飞书")
         return self
 
 
@@ -245,6 +248,9 @@ async def update_app(
     require_if_match(request, app.version)
     before = _plain(cipher, app)
     _apply(cipher, app, body, before)
+    if "assistant" in app.capabilities and app.enabled:
+        await session.flush()
+        await sync_bot_credentials(session, cipher, app)
     await record_audit(
         session,
         action="platform_app.update",
@@ -269,6 +275,8 @@ async def delete_app(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     app = await load_app(session, app_id)
+    if await session.scalar(select(Bot.id).where(Bot.platform_app_id == app.id).limit(1)):
+        raise ApiError(409, 409, "还有个人助理在使用这个应用，请先停用它们")
     snapshot = _public(app)  # 密钥字段一个都不进审计
     await session.delete(app)
     await record_audit(

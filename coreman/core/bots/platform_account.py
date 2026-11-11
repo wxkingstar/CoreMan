@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.apps import assistant_app_ids
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import Bot
@@ -27,7 +28,10 @@ async def reserve_feishu_app(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
         {"key": f"feishu-app-assignment:{app_id}"},
     )
-    query = select(Bot).where(Bot.platform == "feishu")
+    if app_id in await assistant_app_ids(session):
+        raise ApiError(409, 409, "该飞书应用是个人助理应用，不能分配给普通机器人")
+    # 助理记录共用应用，本来就会重复，只和普通记录比对。
+    query = select(Bot).where(Bot.platform == "feishu", Bot.kind == "standard")
     if bot_id is not None:
         query = query.where(Bot.id != bot_id)
     for other in await session.scalars(query):
