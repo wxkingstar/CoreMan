@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from coreman.core.assistants.session import SealedSession
+
 # 建连超时：库不可达（防火墙丢包、主机宕机）时尽快失败，而不是挂在 TCP 握手上；asyncpg 默认 60 秒。
 CONNECT_TIMEOUT_SECONDS = 10.0
 # 单条语句的客户端上限：兜住半开连接上永远等不到回包的查询（pool_pre_ping 只在借出时探一次）。
@@ -41,4 +43,5 @@ def make_engine(
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(engine, expire_on_commit=False)
+    # SealedSession：个人助理的内容列读出时自动还原，见 core/assistants/sealed.py。
+    return async_sessionmaker(engine, class_=SealedSession, expire_on_commit=False)

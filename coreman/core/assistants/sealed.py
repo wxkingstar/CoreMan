@@ -13,13 +13,25 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import event, select
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
+
+from coreman.core.assistants import keys
+from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher, is_encrypted, key_id_of
 from coreman.core.db.models import (
+    Bot,
     ChatLog,
     FeishuSentMessage,
     InboundEvent,
@@ -27,6 +39,9 @@ from coreman.core.db.models import (
     Task,
     TaskStream,
 )
+from coreman.core.logging import get_logger
+
+log = get_logger(__name__)
 
 SEALED = "_sealed"
 LOCKED_CODE = "content_locked"
@@ -192,3 +207,253 @@ def open_text(cipher: Cipher, aad_: str, value: Any) -> Any:
     if not isinstance(value, str) or not is_encrypted(value):
         return value
     return _decrypt(cipher, value, aad_)
+
+
+# ---- 按行封存与还原 --------------------------------------------------------
+
+# 行上的标记（InstanceState.info）：还原时用的数据密钥、内容读不出来。
+_CIPHER = "sealed_cipher"
+_LOCKED = "sealed_locked"
+# flush 期间被换成密文的属性，flush 之后换回明文。
+_RESTORE = "sealed_restore"
+_master: Cipher | None = None
+# bot_id → (所有者；普通机器人为 None, 过期时刻)。
+_OWNERS: dict[uuid.UUID, tuple[uuid.UUID | None, float]] = {}
+
+
+def use_master(cipher: Cipher | None) -> None:
+    """指定平台主密钥（测试用）；None 表示回到配置里的那一把。"""
+    global _master  # noqa: PLW0603
+    _master = cipher
+
+
+def master() -> Cipher:
+    return _master or get_settings().build_cipher()
+
+
+def forget() -> None:
+    """清本进程的所有者缓存。"""
+    _OWNERS.clear()
+
+
+async def owner_of(session: AsyncSession, bot_id: uuid.UUID) -> uuid.UUID | None:
+    """助理记录的所有者；普通机器人（或记录不存在）返回 None。结果在进程内缓存一个 TTL。"""
+    now = time.monotonic()
+    hit = _OWNERS.get(bot_id)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    row = (await session.execute(select(Bot.kind, Bot.owner_id).where(Bot.id == bot_id))).first()
+    if row is None:
+        # 不缓存「不存在」：记录可能只是还没提交。
+        return None
+    owner: uuid.UUID | None = row[1] if row[0] == "assistant" else None
+    _OWNERS[bot_id] = (owner, now + keys.KEY_TTL_SECONDS)
+    return owner
+
+
+async def _cipher(session: AsyncSession, bot_id: uuid.UUID, *, create_key: bool) -> Cipher | None:
+    """这条记录的数据密钥；普通机器人返回 None。取不到时抛 ContentLocked。"""
+    owner = await owner_of(session, bot_id)
+    if owner is None:
+        return None
+    hit = keys.cached(owner)
+    if hit is not None:
+        return hit
+    try:
+        return await keys.data_cipher(session, master(), owner)
+    except keys.KeyDestroyed:
+        raise ContentLocked("所有者的数据密钥已销毁") from None
+    except keys.KeyMissing:
+        if not create_key:
+            raise ContentLocked("所有者没有数据密钥") from None
+    # 首次用到时生成第 1 代。reissue=False：已销毁的密钥只能由开通流程显式重新签发。
+    await keys.ensure_key(session, master(), owner, reissue=False)
+    try:
+        return await keys.data_cipher(session, master(), owner)
+    except keys.KeyUnavailable:
+        raise ContentLocked("所有者的数据密钥已销毁") from None
+
+
+def _seal(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:
+    if isinstance(kind, JsonSpec):
+        return seal_dict(cipher, aad_, value, kind)
+    if isinstance(kind, Whole):
+        return seal_whole(cipher, aad_, value)
+    return seal_text(cipher, aad_, value)
+
+
+def _open(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:
+    if isinstance(kind, JsonSpec):
+        return open_dict(cipher, aad_, value, kind)
+    if isinstance(kind, Whole):
+        return open_whole(cipher, aad_, value)
+    return open_text(cipher, aad_, value)
+
+
+def _looks_sealed(kind: Kind, value: Any) -> bool:
+    if isinstance(kind, Text):
+        return isinstance(value, str) and is_encrypted(value)
+    return is_sealed(value)
+
+
+def _nothing(kind: Kind, value: Any) -> bool:
+    """没有内容可封存：字典列哪怕是空的也要封（靠封装认出这是助理的行）。"""
+    if value is None:
+        return True
+    if isinstance(kind, JsonSpec):
+        return not isinstance(value, dict)
+    return value in ("", [], {})
+
+
+def _blank(kind: Kind, value: Any) -> Any:
+    """读不出来时给调用方的值：字典只剩明文键，其余为该列的空值。"""
+    if isinstance(kind, JsonSpec):
+        return _keep(kind, value) if isinstance(value, dict) else {}
+    return copy.copy(kind.blank)
+
+
+def _dropped(kind: Kind, value: Any) -> Any:
+    """密钥销毁之后写入：内容丢弃，JSONB 列留下墓碑。"""
+    if isinstance(kind, JsonSpec):
+        return {**_keep(kind, value), SEALED: ""}
+    if isinstance(kind, Whole):
+        return {SEALED: ""}
+    return kind.blank
+
+
+async def seal_values(
+    session: AsyncSession, model: type, bot_id: uuid.UUID | None, values: dict[str, Any]
+) -> dict[str, Any]:
+    """把 `values` 里的内容列封存后返回新字典；普通机器人、没有内容要写时原样返回。
+
+    首次为某个所有者写入时生成其数据密钥。密钥已销毁时不抛错：内容丢弃，其余列照常返回，
+    调用方的状态机照走。
+    """
+    spec = COLUMNS[model]
+    touched = [c for c, kind in spec.items() if c in values and not _nothing(kind, values[c])]
+    if not touched or bot_id is None:
+        return values
+    table = str(model.__tablename__)  # type: ignore[attr-defined]
+    try:
+        cipher = await _cipher(session, bot_id, create_key=True)
+    except ContentLocked:
+        log.warning("assistant_content_dropped", table=table, bot_id=str(bot_id))
+        return {**values, **{c: _dropped(spec[c], values[c]) for c in touched}}
+    if cipher is None:
+        return values
+    return {
+        **values,
+        **{c: _seal(cipher, aad(table, c, bot_id), spec[c], values[c]) for c in touched},
+    }
+
+
+async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None = None) -> bool:
+    """把一行里封存的内容列还原成明文（不标脏）；返回内容是否可读。
+
+    普通机器人的行、已经还原过的行原样返回。读不出来（密钥已销毁、墓碑、`viewer` 不是所有者）
+    时不抛错：内容列置空，`is_locked(row)` 为真。主密钥配错、密文被改仍抛 `DecryptError`。
+
+    Args:
+        viewer: 给了就只对所有者本人还原（接口输出正文时用）；不给按运行时对待，一律还原
+    """
+    spec = COLUMNS.get(type(row)) if row is not None else None
+    if spec is None:
+        return True
+    state = sa_inspect(row)
+    values = state.dict
+    pending = [c for c, kind in spec.items() if _looks_sealed(kind, values.get(c))]
+    bot_id = values.get("bot_id")
+    if bot_id is None or (not pending and _CIPHER not in state.info):
+        return not state.info.get(_LOCKED, False)
+    targets = pending
+    try:
+        if viewer is not None and await owner_of(session, bot_id) not in (None, viewer):
+            # 不是本人：连已经还原在内存里的也收回去。
+            targets = [c for c in spec if c in values]
+            raise ContentLocked("只有所有者本人可以读取")
+        cipher = await _cipher(session, bot_id, create_key=False)
+        if cipher is None:
+            # 普通机器人的正文恰好长得像密文。
+            return True
+        table = str(row.__tablename__)
+        opened = {c: _open(cipher, aad(table, c, bot_id), spec[c], values[c]) for c in pending}
+    except ContentLocked:
+        for column in targets:
+            set_committed_value(row, column, _blank(spec[column], values[column]))
+        state.info.pop(_CIPHER, None)
+        state.info[_LOCKED] = True
+        return False
+    for column, value in opened.items():
+        set_committed_value(row, column, value)
+    state.info[_CIPHER] = cipher
+    state.info.pop(_LOCKED, None)
+    return True
+
+
+async def open_rows(
+    session: AsyncSession, rows: Iterable[Any], *, viewer: uuid.UUID | None = None
+) -> None:
+    for row in rows:
+        await open_row(session, row, viewer=viewer)
+
+
+async def open_value(
+    session: AsyncSession, model: type, column: str, bot_id: uuid.UUID, value: Any
+) -> Any:
+    """只取了一列时还原这个值；读不出来返回该列的空值。"""
+    kind = COLUMNS[model][column]
+    if not _looks_sealed(kind, value):
+        return value
+    try:
+        cipher = await _cipher(session, bot_id, create_key=False)
+        if cipher is None:
+            return value
+        table = str(model.__tablename__)  # type: ignore[attr-defined]
+        return _open(cipher, aad(table, column, bot_id), kind, value)
+    except ContentLocked:
+        return _blank(kind, value)
+
+
+def is_locked(row: Any) -> bool:
+    """这一行的内容读不出来（已置空）。"""
+    return row is not None and bool(sa_inspect(row).info.get(_LOCKED))
+
+
+def is_opened(row: Any) -> bool:
+    """这一行是助理的行，且内容已还原成明文。"""
+    return row is not None and _CIPHER in sa_inspect(row).info
+
+
+@event.listens_for(Session, "before_flush")
+def _reseal(session: Session, flush_context: Any, instances: Any) -> None:
+    """还原过的行被改了内容列：落库前换回密文。只做本地加密，不查库。"""
+    restore: list[tuple[Any, str, Any]] = []
+    session.info[_RESTORE] = restore
+    for row in session.dirty:
+        spec = COLUMNS.get(type(row))
+        if spec is None:
+            continue
+        state = sa_inspect(row)
+        cipher = state.info.get(_CIPHER)
+        bot_id = state.dict.get("bot_id")
+        if cipher is None or bot_id is None:
+            continue
+        table = str(row.__tablename__)
+        for column, kind in spec.items():
+            if column not in state.dict or not state.attrs[column].history.has_changes():
+                continue
+            plain = state.dict[column]
+            if _nothing(kind, plain):
+                continue
+            try:
+                stored = _seal(cipher, aad(table, column, bot_id), kind, plain)
+            except ContentLocked:
+                continue
+            setattr(row, column, stored)
+            restore.append((row, column, plain))
+
+
+@event.listens_for(Session, "after_flush_postexec")
+def _unseal_after_flush(session: Session, flush_context: Any) -> None:
+    for row, column, plain in session.info.pop(_RESTORE, []):
+        set_committed_value(row, column, plain)
