@@ -223,7 +223,10 @@ async def create(
         reply_context={"chat_id": chat_id, "chat_type": chat_type},
     )
     event = await sealed.seal_values(
-        session, InboundEvent, bot.id, {"payload": message.model_dump(mode="json")}
+        session,
+        InboundEvent,
+        bot.id,
+        {"payload": message.model_dump(mode="json"), "reply_context": message.reply_context},
     )
     event_id = await session.scalar(
         insert(InboundEvent)
@@ -237,7 +240,7 @@ async def create(
             sender_platform_user_id=pid,
             sender_open_id=None,
             payload=event["payload"],
-            reply_context=message.reply_context,
+            reply_context=event["reply_context"],
         )
         .returning(InboundEvent.id)
     )

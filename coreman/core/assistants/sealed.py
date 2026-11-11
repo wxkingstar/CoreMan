@@ -70,11 +70,13 @@ class JsonSpec:
         underscore: 下划线开头的键是否留明文（出站的内部记账键）
         mirrors: `(根键, 子键)`：把 `value[根键][子键]` 在封装顶层另存一份供 SQL 过滤，
             还原时以密文里的为准
+        secret: 下划线开头却带内容的键：`underscore` 开着也进密文
     """
 
     plain: frozenset[str] = frozenset()
     underscore: bool = False
     mirrors: tuple[tuple[str, str], ...] = ()
+    secret: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -107,8 +109,27 @@ TASK_PLAIN = frozenset(
         "doc_links",
     }
 )
+# 回复上下文里路由真正要用的键：会话坐标、被回复的消息、收到的时间与网关实例，以及下划线
+# 开头的内部标记。其余的键（卡片回复按钮的文字等助理生成的内容）进密文。
+REPLY_CONTEXT = JsonSpec(
+    plain=frozenset(
+        {
+            "chat_id",
+            "chat_type",
+            "message_id",
+            "parent_id",
+            "root_id",
+            "create_time",
+            "req_id",
+            "gateway_instance",
+            "received_at",
+            "requester_user_id",
+        }
+    ),
+    underscore=True,
+)
 COLUMNS: dict[type, dict[str, Kind]] = {
-    InboundEvent: {"payload": JsonSpec()},
+    InboundEvent: {"payload": JsonSpec(), "reply_context": REPLY_CONTEXT},
     Task: {
         "payload": JsonSpec(plain=TASK_PLAIN),
         "result": Whole(),
@@ -124,7 +145,12 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         # 规则生成的元数据，留明文，读不出来时状态行照常显示。
         "activity": JsonSpec(plain=frozenset({"at", "until", "expect", "stuck", "interrupted"})),
     },
-    OutboxItem: {"payload": JsonSpec(underscore=True, mirrors=(("card", "task_id"),))},
+    # `_reply_used` 带着被点的按钮文字（置灰时写回卡片），不随其它记账键留明文。
+    OutboxItem: {
+        "payload": JsonSpec(
+            underscore=True, mirrors=(("card", "task_id"),), secret=frozenset({"_reply_used"})
+        )
+    },
     ChatLog: {
         "message_content": Text(),
         "quoted_content": Text(),
@@ -200,7 +226,9 @@ def _keep(spec: JsonSpec, value: dict[str, Any]) -> dict[str, Any]:
     return {
         k: v
         for k, v in value.items()
-        if k != SEALED and (k in spec.plain or (spec.underscore and k.startswith("_")))
+        if k != SEALED
+        and k not in spec.secret
+        and (k in spec.plain or (spec.underscore and k.startswith("_")))
     }
 
 
@@ -344,6 +372,19 @@ async def guard_logs(session: AsyncSession, bot_id: uuid.UUID | None) -> bool:
     private = bot_id is not None and await owner_of(session, bot_id) is not None
     mark_private_content(private)
     return private
+
+
+async def routing_context(
+    session: AsyncSession, bot_id: uuid.UUID, reply_context: dict[str, Any]
+) -> dict[str, Any]:
+    """流上的回复上下文：助理的只留路由用的键，普通机器人的原样返回。
+
+    流的回复上下文抄自入站事件，网关只按它找会话与被回复的消息；入站带来的内容键（回复按钮
+    的文字）不必再存一份，也就不必给这一列加封装。
+    """
+    if await owner_of(session, bot_id) is None:
+        return reply_context
+    return _keep(REPLY_CONTEXT, reply_context)
 
 
 async def _cipher(session: AsyncSession, bot_id: uuid.UUID, *, create_key: bool) -> Cipher | None:

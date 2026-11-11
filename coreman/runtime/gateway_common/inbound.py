@@ -49,7 +49,12 @@ async def enqueue_inbound(
     调用方负责提交；提交之后 `tasks_queued` / `outbox_added` 通知才会发出。
     """
     payload = message.model_dump(mode="json")
-    stored = await sealed.seal_values(session, InboundEvent, bot.id, {"payload": payload})
+    stored = await sealed.seal_values(
+        session,
+        InboundEvent,
+        bot.id,
+        {"payload": payload, "reply_context": message.reply_context},
+    )
     stmt = (
         insert(InboundEvent)
         .values(
@@ -62,7 +67,7 @@ async def enqueue_inbound(
             sender_platform_user_id=message.sender.platform_user_id or None,
             sender_open_id=message.sender.open_id,
             payload=stored["payload"],
-            reply_context=message.reply_context,
+            reply_context=stored["reply_context"],
         )
         .on_conflict_do_nothing(index_elements=[InboundEvent.bot_id, InboundEvent.platform_msg_id])
         .returning(InboundEvent.id)

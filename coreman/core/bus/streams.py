@@ -78,7 +78,7 @@ async def create(
         bot_id=bot_id,
         platform=platform,
         stream_id=stream_id,
-        reply_context=reply_context,
+        reply_context=await sealed.routing_context(session, bot_id, reply_context),
         lease_generation=lease_generation,
         running_since=running_since,
         session_url=session_url,
