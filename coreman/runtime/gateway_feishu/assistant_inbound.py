@@ -211,11 +211,15 @@ class AssistantInbound:
         )
 
     async def leave_group(self, chat_id: str, platform_user_id: str, event_id: str) -> None:
-        """被拉进群：把自己移出去，再私信拉群的人说明只支持私聊。两步各自尽力而为。"""
+        """被拉进群：把自己移出去，退成功了再私信拉群的人说明只支持私聊。
+
+        说明里写着「已经退出刚才的群」，所以退群失败时不发，只记一笔（不带内容）。
+        """
         try:
             await self.client.leave_chat(chat_id)
         except FeishuError as exc:
             log.warning("assistant_leave_failed", code=exc.code)
+            return
         if not platform_user_id:
             return
         try:

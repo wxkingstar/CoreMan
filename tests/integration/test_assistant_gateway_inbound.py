@@ -70,11 +70,13 @@ async def _seed(session):
     return app, zhang, li, wang, bots
 
 
-def _inbound(db_engine, app, calls, *, fence=None):
+def _inbound(db_engine, app, calls, *, fence=None, leave_code=0):
     def handler(request):
         if request.url.path.endswith("/tenant_access_token/internal"):
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "t", "expire": 7200})
         calls.append((request.method, request.url.path, json.loads(request.content or b"{}")))
+        if request.method == "DELETE" and leave_code:
+            return httpx.Response(200, json={"code": leave_code, "msg": "synthetic"})
         return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_notice"}})
 
     http = httpx.AsyncClient(
@@ -239,6 +241,29 @@ async def test_added_to_a_group_leaves_and_tells_who_added_it(db_session, db_eng
     assert (method, path, body["receive_id"]) == ("POST", "/open-apis/im/v1/messages", "u_li")
     assert "私聊" in json.loads(body["content"])["text"]
     assert (await db_session.scalars(select(InboundEvent))).all() == []
+
+
+async def test_failing_to_leave_does_not_claim_it_left(db_session, db_engine):
+    app, *_ = await _seed(db_session)
+    calls: list = []
+    inbound, http, _ = _inbound(db_engine, app, calls, leave_code=232033)
+    raw = {
+        "header": {
+            "app_id": APP,
+            "event_type": "im.chat.member.bot.added_v1",
+            "event_id": "ev_added",
+        },
+        "event": {"chat_id": "oc_group", "operator_id": {"user_id": "u_li"}},
+    }
+    try:
+        assert await inbound.accept(raw) is None
+    finally:
+        await inbound.aclose()
+        await http.aclose()
+    # 退群没成功：不私信拉群的人说「已退出」。
+    assert [(method, path) for method, path, _ in calls] == [
+        ("DELETE", "/open-apis/im/v1/chats/oc_group/members")
+    ]
 
 
 async def test_card_clicks_count_only_in_the_owners_own_private_chat(db_session, db_engine):
