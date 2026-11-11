@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, leases, outbox, streams, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.chat import interactions
+from coreman.core.chat import interactions, liveness
 from coreman.core.db.models import (
     Bot,
     BotLease,
@@ -99,6 +99,7 @@ async def test_reap_lost_task_completes_stream_and_logs(
     assert row and row.status == "failed" and row.error_code == "worker_lost"
     s = await streams.get(db_session, t.id)
     assert s and s.is_complete and s.final_text == "做到一半\n\n" + msg("worker_lost")
+    assert s.activity["interrupted"] == liveness.REASON_WORKER_LOST
     log = (await db_session.execute(select(ChatLog))).scalar_one()
     assert log.status == "timeout" and log.error_code == "worker_lost" and log.task_id == t.id
 
@@ -368,9 +369,38 @@ async def test_terminal_task_incomplete_stream_is_recovered_once(db_session):
     await db_session.commit()
     await db_session.refresh(stream)
     assert stream.is_complete and "已保存的结果" in stream.final_text
+    assert "interrupted" not in stream.activity  # 成功收尾的不算中断
     assert await reaper.recover_terminal_streams(db_session, now + timedelta(seconds=120)) == 0
     await db_session.refresh(task)
     assert task.status == "succeeded"
+
+
+async def test_failed_task_recovered_stream_is_marked_interrupted(db_session):
+    bot = await _bot(db_session)
+    now = datetime.now(UTC)
+    task = await tasks.enqueue(db_session, NewTask(bot_id=bot.id, kind="chat", session_key="zs"))
+    await streams.create(
+        db_session,
+        task_id=task.id,
+        bot_id=bot.id,
+        platform="feishu",
+        stream_id="recover-failed",
+        reply_context={"chat_id": "zs"},
+        lease_generation=1,
+        running_since=now,
+    )
+    await streams.update(
+        db_session, task.id, pending_text="半截", activity={"at": now.isoformat(), "stuck": True}
+    )
+    await tasks.finish(db_session, task.id, status="failed", error_code="x")
+    await db_session.commit()
+    assert await reaper.recover_terminal_streams(db_session, now + timedelta(seconds=90)) == 1
+    await db_session.commit()
+    stream = await streams.get(db_session, task.id)
+    assert stream and stream.activity == {
+        "at": now.isoformat(),
+        "interrupted": liveness.REASON_RECOVERED,
+    }
 
 
 async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(

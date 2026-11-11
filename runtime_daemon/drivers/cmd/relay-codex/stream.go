@@ -178,7 +178,7 @@ probe:
 		})
 	}
 
-	toolCallDelta := func(id, name, args string) {
+	toolCallDelta := func(id, name, args, summary string) {
 		emit(openai.ChatCompletionResponse{
 			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []openai.ChatCompletionChoice{{
@@ -189,6 +189,7 @@ probe:
 						ID:       id,
 						Type:     "function",
 						Function: openai.ToolCallFunction{Name: name, Arguments: args},
+						Summary:  summary,
 					}},
 				},
 			}},
@@ -255,7 +256,7 @@ probe:
 		}
 		startedTools[item.ID] = true
 		arguments = capToolArguments(arguments)
-		toolCallDelta(item.ID, name, arguments)
+		toolCallDelta(item.ID, name, arguments, item.toolSummary())
 		// Count each native tool once while preserving its process details.
 		// Progress remains thinking content and never creates another tool start.
 		if item.Type == "command_execution" {

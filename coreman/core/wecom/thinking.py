@@ -24,9 +24,10 @@ class ThinkingCollector:
         self._flush()
         self._lines.append("🤔 " + content)
 
-    def add_tool_call(self, name: str) -> None:
+    def add_tool_call(self, name: str, line: str = "") -> None:
+        """`line` 是写好的整行（不含 🔧，带上「在等什么」）；不给照旧只写工具名。"""
         self._flush()
-        self._lines.append(f"🔧 **{name}**")
+        self._lines.append("🔧 " + (line or f"**{name}**"))
 
     def add_generating(self, text: str) -> None:
         self._tail = (self._tail or "") + text

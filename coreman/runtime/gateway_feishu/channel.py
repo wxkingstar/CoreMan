@@ -62,17 +62,19 @@ ws_client.Client._configure = _configure
 
 # 回复按钮点击的应答：已收下（worker 还可能拒绝，所以不说「已发送」）、这一行点过了、
 # 只有提问人能点。「上一条还在处理」卡片按点的按钮回一句（此时 worker 还没处理，所以只说
-# 正在做什么）。选择题等其他卡片点击照旧只回一个对勾，结果由后续卡片更新。
+# 正在做什么）。运行中卡片的「看看进度」进度随后以一条回复送到。选择题等其他卡片点击照旧
+# 只回一个对勾，结果由后续卡片更新。
 TOASTS: dict[str, dict[str, str]] = {
     "queued": {"type": "success", "content": "已收到"},
     "duplicate": {"type": "info", "content": "已选过"},
     "not_requester": {"type": "warning", "content": "只有提问人可以选择"},
     "busy_wait": {"type": "success", "content": "好的，排在后面"},
     "busy_stop": {"type": "info", "content": "正在停下上一条…"},
-    "busy_progress": {"type": "info", "content": "正在刷新进度…"},
+    "busy_progress": {"type": "info", "content": "正在查看进度…"},
     "busy_cancel": {"type": "info", "content": "正在放弃这条…"},
     "busy_resume": {"type": "success", "content": "好的，继续处理"},
     "busy_drop": {"type": "info", "content": "好的，不处理了"},
+    "live_progress": {"type": "info", "content": "正在查询进度…"},
 }
 DEFAULT_TOAST = {"type": "info", "content": "✓"}
 

@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from coreman.core.bots.permissions import can_switch_relay
 from coreman.core.bus import outbox, streams, tasks
-from coreman.core.chat import chat_logs, interactions, sessions
+from coreman.core.chat import chat_logs, interactions, liveness, sessions
 from coreman.core.chat.rate_limit import (
     is_rate_limited,
     pick_idle_server,
@@ -331,6 +331,10 @@ class FinalizeStage(ChatStageBase):
         if not owned:
             ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)
             return
+        # 节点失联、读超时、硬超时这类中断：卡片标红、群里 @ 提问人（网关按 activity 处理）。
+        pre.writer.interrupted = liveness.interrupt_reason(
+            verdict.error_code, verdict.error_message
+        )
         if collaboration_silent:
             await pre.writer.complete(verdict.final_text)
             if not logged:

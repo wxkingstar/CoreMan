@@ -500,6 +500,7 @@ processLines:
 	var toolCalls []openai.ToolCall
 	for _, idx := range nativeTCOrder {
 		tc := nativeTCs[idx]
+		summary, _ := toolCallDetail(tc.Name, []byte(tc.Args.String()))
 		toolCalls = append(toolCalls, openai.ToolCall{
 			ID:   tc.ID,
 			Type: "function",
@@ -507,6 +508,7 @@ processLines:
 				Name:      tc.Name,
 				Arguments: tc.Args.String(),
 			},
+			Summary: summary,
 		})
 	}
 	if len(toolCalls) > 0 {

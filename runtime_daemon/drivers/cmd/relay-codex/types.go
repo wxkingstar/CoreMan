@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"clawrelay-api/pkg/openai"
@@ -104,6 +105,32 @@ func (item *codexItem) nativeToolCall() (name, arguments string) {
 	}
 	encoded, _ := json.Marshal(input)
 	return name, string(encoded)
+}
+
+// toolSummary is the one line the platform shows for a tool start. Codex has
+// no human description of a command, so the command itself (without the
+// login-shell wrapper) stands in; other items show only their tool name.
+func (item *codexItem) toolSummary() string {
+	if item.Type != "command_execution" {
+		return ""
+	}
+	return openai.ShortSummary(unwrapShell(item.Command))
+}
+
+var shellWrapper = regexp.MustCompile(`^(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+([\s\S]+)$`)
+
+// unwrapShell turns `/bin/bash -lc 'gh run watch 1'` into `gh run watch 1`.
+func unwrapShell(command string) string {
+	command = strings.TrimSpace(command)
+	match := shellWrapper.FindStringSubmatch(command)
+	if match == nil {
+		return command
+	}
+	inner := strings.TrimSpace(match[1])
+	if len(inner) >= 2 && (inner[0] == '\'' || inner[0] == '"') && inner[len(inner)-1] == inner[0] {
+		inner = inner[1 : len(inner)-1]
+	}
+	return inner
 }
 
 // Preserve provider tool fields so non-shell details survive translation too.

@@ -36,6 +36,9 @@ def thinking_panel(
             }
         ],
     }
+    if heading.startswith("❌"):
+        # 中断了：边框标红，一眼看得出不是正常结束。
+        panel["border"]["color"] = "red"
     if session_url and urlparse(session_url).scheme in {"http", "https"}:
         # Use a native URL button; do not interpolate the URL into model Markdown.
         panel["elements"].append(

@@ -1,11 +1,10 @@
-"""「上一条还在处理」卡片的点击：等它做完再做这条、停下上一条先做这条、看看上一条的进度，或者放弃这条。
+"""「上一条还在处理」卡片的点击：等它做完再做这条、停下上一条先做这条、看看上一条的进度（看完这条就放弃），或者放弃这条。
 
 只认发这条消息的本人点；别人点了不回卡（回了就等于替他把卡改掉）。
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -74,28 +73,16 @@ async def handle(
         target.payload = {**target.payload, "busy_wait": True}
         return "wait", card("wait", msg("busy_wait_summary", ctx.locale))
     if choice == busy_choice.PROGRESS:
-        progress, mark = await busy_choice.progress_view(
-            session,
-            bot.id,
-            str(target.session_key),
-            clicker,
-            before_task_id=target.id,
-            locale=ctx.locale,
+        view = await busy_choice.progress_snapshot(
+            session, bot.id, str(target.session_key), clicker, before_task_id=target.id
         )
-        seen = target.payload.get("progress_seen")
-        seen = seen if isinstance(seen, dict) else {}
-        now = datetime.now(UTC)
-        note = busy_choice.viewed_note(seen, mark, now, ctx.locale)
-        target.payload = {
-            **target.payload,
-            "progress_seen": {
-                "count": int(seen.get("count") or 0) + 1,
-                "mark": mark,
-                "at": now.isoformat(),
-            },
-        }
-        return "progress", busy_choice.offer_card(
-            bot.platform, target.id, progress=f"{note}\n{progress}", locale=ctx.locale
+        if view is None:
+            # 上一条刚好做完：没有进度可看，这条照常处理。
+            return "progress", card("prevdone")
+        # 问进度的消息看完就没用了：放弃这条，卡上不再留按钮。
+        await tasks.finish(session, target.id, status="cancelled", error_code="user_dropped")
+        return "progress", busy_choice.progress_card(
+            bot.platform, target.id, view, icon_url=icon, locale=ctx.locale
         )
     if choice != busy_choice.STOP:
         ctx.log.warning("busy_choice_unknown", choice=choice)

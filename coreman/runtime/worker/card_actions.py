@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.chat import busy_choice, interactions
+from coreman.core.chat import busy_choice, interactions, liveness
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
 from coreman.core.feishu_personal import inflow
@@ -37,6 +37,7 @@ from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.credential_cards import handle as handle_credential
 from coreman.runtime.worker.credential_cards import wipe_detached
+from coreman.runtime.worker.live_progress import handle as handle_live_progress
 from coreman.runtime.worker.replies import load_inbound
 
 _DIGITS = re.compile(r"[0-9]+")
@@ -86,6 +87,15 @@ class CardActionHandler:
             inbound = await load_inbound(session, ctx.task)
             icon = str(await ctx.settings_store.get("card_icon_url", default="") or "")
             task_id = str(action.get("task_id") or "")
+            if bot.platform == "feishu" and task_id.startswith(liveness.LIVE_PREFIX):
+                # 流式卡片不经出站箱发出，下面按出站记录核对卡片的那一步不适用；处理器自己核对。
+                result = await handle_live_progress(session, ctx, bot, inbound, action)
+                await tasks.finish(
+                    session, ctx.task.id, status="succeeded", result={"card": result}
+                )
+                await session.commit()
+                ctx.log.info("card_action_done", result=result)
+                return
             if bot.platform == "feishu":
                 sent = await session.scalar(
                     select(OutboxItem.id).where(
