@@ -97,7 +97,7 @@ async def test_busy_card_toasts_name_the_button_that_was_clicked():
     contents = [t.content for t in toasts]
     # 每个按钮一句不同的话，不再是同一个对勾。
     assert "✓" not in contents and len(set(contents)) == len(keys)
-    assert contents[2] == "正在刷新进度…"
+    assert contents[2] == "正在查看进度…"
 
 
 def test_dead_connections_are_found_and_replaced_quickly():
