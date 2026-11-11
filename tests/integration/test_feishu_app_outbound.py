@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from coreman.core.assistants import keys, sealed
 from coreman.core.assistants.records import new_assistant_bot
@@ -276,3 +276,60 @@ async def test_unreadable_streams_are_closed_instead_of_staying_due(db_session, 
         select(TaskStream.finish_pushed_at).where(TaskStream.task_id == plain)
     )
     assert still is None
+
+
+_TRY_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
+
+
+async def test_disabled_assistants_lose_their_transport_and_output_lock(db_session, db_engine):
+    app, zhang, li, _, standard, generation = await _seed(db_session)
+    await _notice(db_session, zhang, "oc_zhang", "notice:zhang")
+    await _notice(db_session, li, "oc_li", "notice:li")
+    await _notice(db_session, standard, "oc_std", "notice:std")
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    autocommit = db_engine.execution_options(isolation_level="AUTOCOMMIT")
+
+    async def no_fence():
+        return None
+
+    async with autocommit.connect() as guard, autocommit.connect() as other:
+        outbound = AppOutbound(
+            factory, FakeAPI(), app=app.id, instance_id="gw-a", generation=generation, guard=guard
+        )
+        # 普通机器人的子进程同样把出站锁常驻在自己的守护连接上（这里借同一条连接）。
+        ordinary = FeishuTransport(
+            factory,
+            FakeAPI(),
+            bot_id=standard.id,
+            instance_id="gw-a",
+            generation=1,
+            guard=guard,
+            lease_fence=no_fence,
+        )
+        await outbound.round()
+        await ordinary.round()
+        assert set(outbound._transports) == {zhang.id, li.id}
+        for bot in (zhang, li, standard):
+            assert not await other.scalar(_TRY_LOCK, {"key": f"feishu-output:{bot.id}"})
+        li.enabled = False
+        await db_session.commit()
+        # 每轮按名下启用的助理记录收拾一次：停用的那条 transport 移除，出站锁放掉。
+        await outbound.retain({str(zhang.id)})
+        assert set(outbound._transports) == {zhang.id}
+        assert await other.scalar(_TRY_LOCK, {"key": f"feishu-output:{li.id}"})
+        # 还在名下的记录、普通机器人的锁都不受影响。
+        assert not await other.scalar(_TRY_LOCK, {"key": f"feishu-output:{zhang.id}"})
+        assert not await other.scalar(_TRY_LOCK, {"key": f"feishu-output:{standard.id}"})
+        # 重新启用后照常重建、重新拿锁（此刻锁在别的连接手里，这一轮先不发）。
+        li.enabled = True
+        await _notice(db_session, li, "oc_li", "notice:li-again")
+        await db_session.commit()
+        await outbound.round()
+        assert (await _statuses(db_session))["notice:li-again"] == "pending"
+        await other.execute(
+            text("SELECT pg_advisory_unlock(hashtextextended(:key,0))"),
+            {"key": f"feishu-output:{li.id}"},
+        )
+        await outbound.round()
+        assert (await _statuses(db_session))["notice:li-again"] == "sent"

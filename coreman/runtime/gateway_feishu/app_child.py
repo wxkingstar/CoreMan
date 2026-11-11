@@ -185,6 +185,7 @@ async def run_app(app_id: uuid.UUID, instance_id: str, generation: int) -> None:
                 current, owned = await app_state(factory, cipher, app_id)
                 if current != initial:
                     break  # 密钥变了、应用停用或删除：退出，由 supervisor 决定重连还是停止
+                await outbound.retain(owned)  # 停用的记录：transport 与出站锁一并放掉
                 more = await outbound.round()  # 应用租约的围栏在这一轮开头查一次
             except LeaseLost:
                 raise

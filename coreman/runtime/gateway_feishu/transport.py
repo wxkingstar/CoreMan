@@ -63,6 +63,7 @@ _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))")
 # 常驻守护连接上用会话级锁：连接是 AUTOCOMMIT，不留未结束的事务，锁随连接关闭释放。
 _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
+_OUTPUT_SESSION_UNLOCK = text("SELECT pg_advisory_unlock(hashtextextended(:key,0))")
 # 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
 OUTBOX_PER_ROUND = 20
 # 同一 bot 两次平台调用之间至少隔这么久：每张卡片不超过飞书的 10 次/秒，整个应用也远低于
@@ -262,6 +263,14 @@ class FeishuTransport:
             if not await guard.scalar(_OUTPUT_LOCK, key):
                 return False
             return await self._deliver()
+
+    async def release(self) -> None:
+        """放掉常驻连接上的出站锁：这个 bot 不再由本进程发送（应用连接进程里记录被停用）。"""
+        if self._guard is not None and self._output_held:
+            await self._guard.execute(
+                _OUTPUT_SESSION_UNLOCK, {"key": f"feishu-output:{self.bot_id}"}
+            )
+        self._output_held = False
 
     async def _deliver(self) -> bool:
         self._round_fenced = True

@@ -118,6 +118,15 @@ class AppOutbound:
             self._transports[bot_id] = transport
         return transport
 
+    async def retain(self, owned: set[str]) -> None:
+        """只留名下启用的助理记录的 transport：其余的移除，并放掉它在守护连接上的出站锁。
+
+        Args:
+            owned: 该应用下启用的助理记录 id（字符串，与唤醒通知的载荷同形）
+        """
+        for bot_id in [bot_id for bot_id in self._transports if str(bot_id) not in owned]:
+            await self._transports.pop(bot_id).release()
+
     async def round(self) -> bool:
         await self.fence()
         more = False
