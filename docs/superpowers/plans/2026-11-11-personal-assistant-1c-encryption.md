@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 开工前合并最新 `main`。写本计划时迁移头是 `0085`，并行的另一份子计划可能占用 `0086`，本计划的迁移写作 `0087`、`down_revision = "0086"`。**开工时按当时迁移头顺延**：头仍是 `0085` 就把文件名与 `revision` 改成 `0086`、`down_revision` 改成 `"0085"`。
+- 开工前合并最新 `main`。写本计划时迁移头是 `0086`，并行的另一份子计划可能占用 `0087`，本计划的迁移写作 `0088`、`down_revision = "0087"`。**开工时按当时迁移头顺延**：头仍是 `0086` 就把文件名与 `revision` 改成 `0087`、`down_revision` 改成 `"0086"`。
 - 公开仓：代码、测试、提交信息只用通用占位（`example.com`、`demo-bot`、`cli_example`、张三/李四），提交前跑仓库约定的敏感词自查。
 - 普通员工（`kind='standard'`）的行为不变：库里仍是明文，现有用例不改即通过。每个接入任务都带一条普通机器人的断言。
 - 接口名沿用总览：`coreman.core.assistants.keys.data_cipher(session, cipher, owner_id) -> Cipher`、`coreman.core.assistants.keys.destroy_key(session, owner_id) -> None`。
@@ -165,7 +165,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `migrations/versions/0087_assistant_keys.py` | 新表 `assistant_keys` |
+| `migrations/versions/0088_assistant_keys.py` | 新表 `assistant_keys` |
 | `coreman/core/db/models/assistants.py` | 模型 `AssistantKey` |
 | `coreman/core/assistants/keys.py` | 数据密钥：生成、取用、销毁、重新包裹、缓存 |
 | `coreman/core/assistants/sealed.py` | 封存形式的编解码；按行封存与还原；`before_flush` 钩子 |
@@ -187,7 +187,7 @@
 ### Task 1: 表 `assistant_keys`
 
 **Files:**
-- Create: `migrations/versions/0087_assistant_keys.py`
+- Create: `migrations/versions/0088_assistant_keys.py`
 - Create: `coreman/core/db/models/assistants.py`
 - Modify: `coreman/core/db/models/__init__.py`（导出 `AssistantKey`）
 - Modify: `tests/conftest.py:24`（`BUSINESS_TABLES`）
@@ -295,7 +295,7 @@ __all__ += ["AssistantKey"]
 
 - [ ] **Step 4: 写迁移**
 
-`migrations/versions/0087_assistant_keys.py`：
+`migrations/versions/0088_assistant_keys.py`：
 
 ```python
 """Personal assistant data keys: one wrapped key per owner."""
@@ -303,8 +303,8 @@ __all__ += ["AssistantKey"]
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0087"
-down_revision = "0086"
+revision = "0088"
+down_revision = "0087"
 branch_labels = None
 depends_on = None
 
@@ -348,7 +348,7 @@ Expected: `No new upgrade operations detected.`。若报外键名不一致，把
 - [ ] **Step 7: 提交**
 
 ```bash
-git add migrations/versions/0087_assistant_keys.py coreman/core/db/models tests/conftest.py tests/integration/test_assistant_keys_schema.py
+git add migrations/versions/0088_assistant_keys.py coreman/core/db/models tests/conftest.py tests/integration/test_assistant_keys_schema.py
 git commit -m "个人助理：新表 assistant_keys"
 ```
 

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 开工前合并最新 `main`：写本计划时迁移头是 `0085`，本计划新迁移是 `0086`；开工时迁移头变了就顺延，并同步改文件名、`revision` 与 `down_revision`。
+- 开工前合并最新 `main`：写本计划时迁移头是 `0086`，本计划新迁移是 `0087`；开工时迁移头变了就顺延，并同步改文件名、`revision` 与 `down_revision`。
 - 公开仓：代码、测试、提交信息只用通用占位（`example.com`、`demo-bot`、`cli_example`、张三 / 李四），提交前跑仓库约定的敏感词自查。
 - 普通员工（`kind='standard'`）的行为不变。每个任务的「普通机器人不受影响」一栏写明由哪条测试保证。
 - 本计划不做：开通卡片（1F）、内容加密（1C）、审批（1D）、沙箱（1E）。没有助理记录的发送人本期只记日志并丢弃。
@@ -47,7 +47,7 @@
 |---|---|
 | `coreman/core/assistants/routing.py`（新） | `assistant_for`：按应用与所有者找启用的助理记录 |
 | `coreman/core/assistants/apps.py` | 新增 `is_assistant_app`、`connection_fingerprint` |
-| `migrations/versions/0086_app_leases.py`（新） | `app_leases` 表 |
+| `migrations/versions/0087_app_leases.py`（新） | `app_leases` 表 |
 | `coreman/core/db/models/bus.py` | `AppLease` 模型；`BotLease.key` |
 | `coreman/core/bus/app_leases.py`（新） | `app_leases` 读写 |
 | `coreman/core/bus/leases.py` | `ensure_rows` / `acquirable` 排除助理记录 |
@@ -288,7 +288,7 @@ git commit -m "个人助理：按应用与所有者找助理记录，应用可�
 ### Task 2: 应用租约表
 
 **Files:**
-- Create: `migrations/versions/0086_app_leases.py`
+- Create: `migrations/versions/0087_app_leases.py`
 - Create: `coreman/core/bus/app_leases.py`
 - Modify: `coreman/core/db/models/bus.py`（`BotLease` 加 `key`；其后加 `AppLease`）
 - Modify: `coreman/core/db/models/__init__.py`（导出 `AppLease`）
@@ -465,7 +465,7 @@ class AppLease(Base):
 
 - [ ] **Step 4: 写迁移**
 
-`migrations/versions/0086_app_leases.py`：
+`migrations/versions/0087_app_leases.py`：
 
 ```python
 """Connection leases for personal assistant apps: one long connection per app."""
@@ -473,8 +473,8 @@ class AppLease(Base):
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0086"
-down_revision = "0085"
+revision = "0087"
+down_revision = "0086"
 branch_labels = None
 depends_on = None
 
@@ -684,7 +684,7 @@ Expected: passed（只建新表，不触发双版本并存门禁）。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add migrations/versions/0086_app_leases.py coreman/core/bus/app_leases.py coreman/core/db/models tests/conftest.py tests/integration/test_bus_app_leases.py
+git add migrations/versions/0087_app_leases.py coreman/core/bus/app_leases.py coreman/core/db/models tests/conftest.py tests/integration/test_bus_app_leases.py
 git commit -m "个人助理：助理应用的连接租约表 app_leases"
 ```
 

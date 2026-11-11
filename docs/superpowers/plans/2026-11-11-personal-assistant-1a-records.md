@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 开工前合并最新 `main`：写本计划时迁移头是 `0084`，本计划新迁移是 `0085`；头变了就顺延并同步改文件名与 `down_revision`。
+- 开工前合并最新 `main`：写本计划时迁移头是 `0085`，本计划新迁移是 `0086`；头变了就顺延并同步改文件名与 `down_revision`。
 - 公开仓：代码、测试、提交信息只用通用占位（`example.com`、`demo-bot`、`cli_example`），提交前跑仓库约定的敏感词自查。
 - 普通员工（`kind='standard'`）的行为不变。
 - 本计划不建网关连接、不接收消息、不提供开通入口（分别属于 1B、1F）。助理记录在本计划里只由测试和 `new_assistant_bot` 创建。
@@ -23,7 +23,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `migrations/versions/0085_assistant_bots.py` | 三列、两个检查约束、两个索引 |
+| `migrations/versions/0086_assistant_bots.py` | 三列、两个检查约束、两个索引 |
 | `coreman/core/db/models/bots.py` | 模型加列与 `BOT_KINDS` |
 | `coreman/core/db/models/platform.py` | `CAPABILITIES` 加 `assistant` |
 | `coreman/core/assistants/__init__.py` | 空包 |
@@ -38,7 +38,7 @@
 ### Task 1: 表结构
 
 **Files:**
-- Create: `migrations/versions/0085_assistant_bots.py`
+- Create: `migrations/versions/0086_assistant_bots.py`
 - Modify: `coreman/core/db/models/bots.py`（`BOT_KEY_RE` 下方加常量；`Bot.__table_args__` 与列）
 - Modify: `coreman/core/db/models/platform.py:27`
 - Modify: `coreman/core/db/models/__init__.py`（导出 `BOT_KINDS`）
@@ -199,8 +199,8 @@ ASSISTANT_SHAPE = (
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0085"
-down_revision = "0084"
+revision = "0086"
+down_revision = "0085"
 branch_labels = None
 depends_on = None
 
@@ -254,7 +254,7 @@ Expected: `No new upgrade operations detected.`。若报外键名不一致，把
 - [ ] **Step 6: 提交**
 
 ```bash
-git add migrations/versions/0085_assistant_bots.py coreman/core/db/models tests/integration/test_assistant_bot_schema.py
+git add migrations/versions/0086_assistant_bots.py coreman/core/db/models tests/integration/test_assistant_bot_schema.py
 git commit -m "个人助理：bots 增加类型、所有者与所属应用"
 ```
 
