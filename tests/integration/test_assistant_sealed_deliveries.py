@@ -9,10 +9,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import keys, sealed
-from coreman.core.bus import instances, leases, streams, tasks
+from coreman.core.bus import app_leases, instances, leases, streams, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.db.models import Bot, BotLease, FeishuDelivery, TaskStream
+from coreman.core.db.models import Bot, FeishuDelivery, TaskStream
 from coreman.core.db.session import make_session_factory
+from coreman.runtime.gateway_feishu.app_outbound import AppOutbound
 from coreman.runtime.gateway_feishu.transport import FeishuTransport
 from tests.integration.assistant_helpers import SECRET, raw, seed_assistant, seed_standard
 
@@ -46,11 +47,16 @@ async def _streaming(session: AsyncSession, bot: Bot) -> tuple[int, int]:
     await instances.register(
         session, instance_id="gw", service="gateway-feishu", version="test", capacity=None
     )
-    # 助理记录的连接按应用认领，没有自己的 bot_leases 行；这里只测内容加密，直接放一行当围栏。
-    session.add(BotLease(bot_id=bot.id, platform="feishu"))
-    await session.flush()
-    lease = await leases.acquire(session, bot_id=bot.id, platform="feishu", instance_id="gw")
-    assert lease is not None
+    if bot.kind == "assistant":
+        # 助理记录的连接按应用认领，没有自己的 bot_leases 行：围栏是应用的租约。
+        assert bot.platform_app_id is not None
+        await app_leases.ensure_rows(session)
+        generation = await app_leases.acquire(session, bot.platform_app_id, "gw")
+    else:
+        await leases.ensure_rows(session, "feishu")
+        lease = await leases.acquire(session, bot_id=bot.id, platform="feishu", instance_id="gw")
+        generation = lease.generation if lease is not None else None
+    assert generation is not None
     task = await tasks.enqueue(session, NewTask(bot_id=bot.id, kind="chat", payload={}))
     assert task is not None
     await streams.create(
@@ -60,7 +66,7 @@ async def _streaming(session: AsyncSession, bot: Bot) -> tuple[int, int]:
         platform="feishu",
         stream_id="s",
         reply_context={"chat_id": "oc_1", "message_id": "om_in"},
-        lease_generation=lease.generation,
+        lease_generation=generation,
         running_since=datetime.now(UTC),
     )
     await streams.update(
@@ -72,7 +78,19 @@ async def _streaming(session: AsyncSession, bot: Bot) -> tuple[int, int]:
         plan=PLAN,
     )
     await session.commit()
-    return task.id, lease.generation
+    return task.id, generation
+
+
+def _assistant_transport(factory: Any, api: FakeAPI, bot: Bot, generation: int) -> FeishuTransport:
+    assert bot.platform_app_id is not None
+    outbound = AppOutbound(
+        factory,
+        api,  # type: ignore[arg-type]
+        app=bot.platform_app_id,
+        instance_id="gw",
+        generation=generation,
+    )
+    return outbound.transport(bot.id)
 
 
 async def test_assistant_layout_is_sealed_and_gateway_keeps_pushing(
@@ -81,9 +99,7 @@ async def test_assistant_layout_is_sealed_and_gateway_keeps_pushing(
     bot, _ = await seed_assistant(db_session)
     task_id, generation = await _streaming(db_session, bot)
     factory, api = make_session_factory(db_engine), FakeAPI()
-    transport = FeishuTransport(
-        factory, api, bot_id=bot.id, instance_id="gw", generation=generation
-    )
+    transport = _assistant_transport(factory, api, bot, generation)
     await transport.round()
     stored = str(await raw(db_session, LAYOUT, id=task_id))
     assert SECRET not in stored and "enc:v2:d1:" in stored
@@ -121,9 +137,7 @@ async def test_destroyed_key_blanks_the_layout_and_stops_pushing(
     bot, owner = await seed_assistant(db_session)
     task_id, generation = await _streaming(db_session, bot)
     factory, api = make_session_factory(db_engine), FakeAPI()
-    transport = FeishuTransport(
-        factory, api, bot_id=bot.id, instance_id="gw", generation=generation
-    )
+    transport = _assistant_transport(factory, api, bot, generation)
     await transport.round()
     await keys.destroy_key(db_session, owner.id)
     await db_session.commit()

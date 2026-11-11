@@ -8,7 +8,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from time import monotonic as heading_clock
 from typing import Any
@@ -118,6 +118,7 @@ class FeishuTransport:
         guard: AsyncConnection | None = None,
         credentials_fingerprint: str | None = None,
         image_transport: httpx.AsyncBaseTransport | None = None,
+        lease_fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
@@ -128,6 +129,8 @@ class FeishuTransport:
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
         self.credentials_fingerprint = credentials_fingerprint
+        # 个人助理记录没有自己的租约：连接按应用认领，围栏由应用连接进程提供（AppOutbound）。
+        self._lease_fence = lease_fence
         self._output_held = False
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
         self._round_fenced = False
@@ -142,6 +145,9 @@ class FeishuTransport:
         self.acks = Acks(self)
 
     async def fence(self) -> None:
+        if self._lease_fence is not None:
+            await self._lease_fence()
+            return
         async with self.factory() as session:
             row = await session.scalar(
                 select(BotLease.bot_id)
