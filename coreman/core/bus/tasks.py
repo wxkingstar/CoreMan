@@ -184,6 +184,8 @@ async def finish(
             bot_id = await session.scalar(select(Task.bot_id).where(Task.id == task_id))
         stored = await sealed.seal_values(session, Task, bot_id, content)
         result, message = stored.get("result"), stored.get("error_message")
+    else:
+        stored = content
     stmt = update(Task).where(Task.id == task_id)
     if only_active:
         stmt = stmt.where(Task.status.in_(ACTIVE))
@@ -198,6 +200,8 @@ async def finish(
             ).returning(Task.id, Task.kind, Task.started_at, Task.finished_at)
         )
     ).first()
+    # 这条语句会把写入的值同步到会话里已加载的任务对象上：助理的换回明文，调用方不用重取。
+    sealed.keep_plain(session, Task, content, stored)
     if row is not None and row[2] is not None:
         kind, elapsed = row[1], max(0, (row[3] - row[2]).total_seconds())
         after_commit(session, lambda: TASK_DURATION.labels(kind, status).observe(elapsed))

@@ -452,6 +452,38 @@ async def seal_values(
     }
 
 
+def keep_plain(
+    session: AsyncSession, model: type, plain: dict[str, Any], stored: dict[str, Any]
+) -> None:
+    """Core 的 UPDATE 写了封存值之后调用：会话里已经加载的同一行换回明文。
+
+    经会话执行的 `update(<模型>)` 会把写入的值同步到已加载的对象上——对助理的行那是密文，
+    调用方不重取就读会读到封装。密文每次加密都不同，所以「对象上这一列等于刚写的密文」就是
+    这条语句同步过去的。密钥已销毁时写下的是墓碑，换成该列的空值。普通机器人的行（没有封存
+    任何列）直接返回。
+
+    Args:
+        plain: 交给 `seal_values` 之前的值
+        stored: `seal_values` 返回的值
+    """
+    spec = COLUMNS[model]
+    sealed_columns = [c for c in spec if c in stored and stored[c] is not plain.get(c)]
+    if not sealed_columns:
+        return
+    for row in list(session.sync_session.identity_map.values()):
+        if type(row) is not model:
+            continue
+        state: Any = sa_inspect(row)
+        for column in sealed_columns:
+            written = stored[column]
+            if written is None or column not in state.dict or state.dict[column] != written:
+                continue
+            dropped = isinstance(written, dict) and written.get(SEALED) == ""
+            kept = _blank(spec[column], plain[column]) if dropped else plain[column]
+            set_committed_value(row, column, kept)
+            state.info.setdefault(_OPENED, {})[column] = kept
+
+
 async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None = None) -> bool:
     """把一行里封存的内容列还原成明文（不标脏）；返回内容是否可读。
 

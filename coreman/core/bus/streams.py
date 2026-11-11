@@ -102,7 +102,8 @@ async def update_state(
     bad = set(fields) - WRITABLE
     if bad:
         raise ValueError(f"不可写字段: {sorted(bad)}")
-    fields = await _sealed_fields(session, task_id, bot_id, fields)
+    plain = fields
+    fields = await _sealed_fields(session, task_id, bot_id, plain)
     row = (
         await session.execute(
             sa_update(TaskStream)
@@ -117,6 +118,8 @@ async def update_state(
             )
         )
     ).first()
+    # 语句把写入的值同步到了会话里已加载的流对象上：助理的换回明文。
+    sealed.keep_plain(session, TaskStream, plain, fields)
     if row is None:
         raise LookupError(f"task_streams {task_id} 不存在")
     await notify(session, "stream_updated", {"task_id": task_id, "bot_id": str(row[1])})
@@ -208,12 +211,8 @@ async def complete(
 ) -> Completion:
     """收尾。`activity` 给了就整份替换（中断原因随终态一起写，网关据此标红）。"""
     extra: dict[str, Any] = {} if activity is None else {"activity": activity}
-    stored = await _sealed_fields(
-        session,
-        task_id,
-        bot_id,
-        {"final_text": final_text, "pending_card": pending_card, **extra},
-    )
+    plain = {"final_text": final_text, "pending_card": pending_card, **extra}
+    stored = await _sealed_fields(session, task_id, bot_id, plain)
     row = (
         await session.execute(
             sa_update(TaskStream)
@@ -234,6 +233,7 @@ async def complete(
             )
         )
     ).first()
+    sealed.keep_plain(session, TaskStream, plain, stored)
     if row is None:
         raise LookupError(f"task_streams {task_id} 不存在")
     await notify(session, "stream_updated", {"task_id": task_id, "bot_id": str(row[1])})
