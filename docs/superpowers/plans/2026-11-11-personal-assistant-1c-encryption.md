@@ -4208,16 +4208,69 @@ git commit -m "个人助理：报错信息、附件信息与已发消息存档�
 
 ## 交付后的状态与遗留
 
-- 助理记录在六张表里的内容列是密文：五张表的正文列，加上 `tasks.error_message`、`chat_logs.error_message`、`chat_logs.file_info`、`feishu_sent_messages.text`、`task_streams.activity` 的说明文字。`destroy_key` 之后永久不可读，各入口的行为见「密钥已销毁时各入口的行为」。
-- 1F 停用流程调用 `keys.destroy_key(session, owner_id)`；重新开通时调用 `keys.ensure_key(session, cipher, owner_id)` 签发下一代密钥（本计划已实现）。旧一代的内容按已锁定处理，新内容正常。
-- 设计文档第二节需要同步改三处：AAD 写法改成「表名.列名:bot_id」；`assistant_keys` 加 `generation` 与重新签发；加密范围表补上上面四列。
-- 仍以明文落库、本期不做的内容：
-  - `cron_jobs.prompt` / `cron_runs.prompt` 及执行结果：助理的定时任务属于第 2 期，届时一并处理。
-  - 各表的 `error_code`、`status`、`chat_logs.user_name` / `user_login`、`outbox.target`、`reply_context`：元数据，供调度、告警与排障使用。`outbox.last_error`、`tasks.cancel_reason` 同样不加密，但助理的行只留开头的代码（见「载荷里被 SQL 直接读取的字段」）。
-  - **`feishu_deliveries.layout`（交付前盘出，未处理）**：飞书网关流式推卡片时把思考预览（最后五行）、各段正文的文本、任务清单存在这一列（`coreman/runtime/gateway_feishu/transport.py` 的流式推送与 `push_plan`，`coreman/core/feishu_cards/stream.py` 的 `StreamUnit.record`），助理的每一次流式回复都会经过，明文保留到流被清理（结束后约一小时）。这张表没有 `bot_id` 列，flush 钩子管不到，需要单独设计（按流的 `bot_id` 封存，或只存摘要不存文本）。同表的 `last_error` 存的是飞书错误说明。
-  - 六张表之外带内容的表，助理用到相应功能时会明文落库：`interaction_states.state`（提问卡片的题目与选项）、`human_collaborations` / `bot_collaborations` 的 `question` / `response`、`api_tasks.prompt`、`work_tasks`、`memories`。本期不涉及，各功能接入助理时逐个决定。
-  - 日志流：`outbox._note_permanent_failure` 把报错原文的前 200 字写进 `outbox_dependents_released` 告警，助理的条目没有改写。
+### 状态
+
+- 助理记录在八张表里的内容列是密文（登记在 `sealed.COLUMNS`）：`inbound_events.payload`、`tasks.payload` / `result` / `error_message`、`task_streams` 的思考、正文、卡片、计划与 `activity` 的说明文字、`outbox.payload`、`chat_logs` 的正文、`file_info` 与 `error_message`、`feishu_sent_messages.text`，以及收尾时补上的 `feishu_deliveries.layout`、`interaction_states.state`。`destroy_key` 之后永久不可读，各入口的行为见「密钥已销毁时各入口的行为」。
+- 1F 停用流程调用 `keys.destroy_key(session, owner_id)`；重新开通时调用 `keys.ensure_key(session, cipher, owner_id)` 签发下一代密钥。旧一代的内容按已锁定处理，新内容正常。
+- 设计文档第二节需要同步改三处：AAD 写法改成「表名.列名:bot_id」；`assistant_keys` 加 `generation` 与重新签发；加密范围表补上 Task 13 的四列与下面收尾的两列。
 - 真机未验证：本计划只有自动化测试；端到端在 1F。
+
+### 收尾补上的六处（Task 13 之后）
+
+| 项 | 做法 |
+|---|---|
+| `feishu_deliveries.layout` | 表加可空列 `bot_id`（迁移 `0088`，按 `task_streams` 回填），网关建投递行时写入；之后与其他表同一套机制：`session.get` 自动还原、经 ORM 改 `layout` 由 flush 钩子封存。`since`、`paused` 是网关自己的记账，留明文键。没有选「经关联的流拿 `bot_id` 后显式封存」：这一列有 1 处写、6 处经 `session.get` 的读、2 处 `session.merge`，显式做法每处都要改且挡不住以后新增的；加列之后台账测试也自动管到它。`last_error` 不处理：只会是 `Feishu <数字码>: <固定英文说明>` 或异常类型名（`FeishuError` 不带平台回的说明文字），不带内容 |
+| `interaction_states.state` | 表本来就有 `bot_id`。`open_state` 等经 ORM 新建的行由 flush 钩子封存；`get_open` / `find_by_prefix` 显式还原，读不出来的当作没有（旧卡片按过期处理）；`patch_state` 对助理的行改成锁行、取出还原、合并、整块封存后写回（库里的 `state \|\| patch` 合并不了密文），调用方传入 `bot_id`。`user_id` 被 SQL 用来数「这个人还有几条待确认」，留明文键 |
+| 会把内容明文写进别的表的功能 | 本期在入口处对助理关闭，见下表 |
+| 日志 | `outbox_dependents_released` 告警里的报错原文、`feishu_rich_card_invalid` 的校验说明，对助理只记代码、长度或条数。处理助理内容期间（worker 的一个任务、飞书网关的一轮）的异常日志只留异常类型与调用栈，不带异常消息（`coreman/core/logging.py` 的 `strip_exception_text`，由 `sealed.guard_logs` 按归属打开） |
+| 切换作业接口 | `GET/POST /api/admin/bots/{id}/switch-jobs/{task_id}[/cancel]` 对助理记录先过 `visible_to`：非所有者（含管理员）得到与「机器人不存在」相同的 404。启停、删除、切换运行时的权限没有改（1F 决定），它们的响应里只有机器人配置与作业编号，没有内容列 |
+| Core 语句写入后同一会话里的对象 | 经会话执行的 `update(<模型>)` 会把写入的值同步到已加载的对象上，助理的行那是密文。`tasks.finish`、`streams.update_state` / `complete` 写完后调用 `sealed.keep_plain` 换回明文；`chat_logs` 的几处更新没有处理（写入方不持有 `ChatLog` 对象，未逐个验证） |
+
+### 助理暂不支持的功能（入口已关闭）
+
+这些功能会把对话内容写进本期没有加密的表。本期只关入口、不做这些表的加密；要对助理开放时逐个设计。
+
+| 功能 | 涉及的表 | 助理原本能否触发 | 关闭的位置 |
+|---|---|---|---|
+| 向同事求助 | `human_collaborations`（`question`、`response`、`cron_config`） | 能：所有者给助理配了求助对象之后，私聊里就会挂上求助入口 | 开流时不挂入口、提示词里不提（`worker/chat/collaboration.configure`）；服务端 `collaboration_tools.task_scope` 拒绝并说明原因（MCP 与旧接口共用）。**助理暂不支持向同事求助，待设计** |
+| 向其他 AI 员工求助（助理作为求助方） | `bot_collaborations` | 私聊不能（三处要求群聊） | 同上，`task_scope` 一并拒绝 |
+| 被其他 AI 员工求助（助理作为被求助方） | `bot_collaborations`（`response`） | `accept_bot_help` 固定为关，但 `PATCH /bot-help` 没有走锁定字段的检查，所有者能打开 | `PATCH /bot-help` 对助理拒绝打开 |
+| API 驱动 | `api_tasks`（`prompt`） | 同上：`api_access` 固定为关，`PATCH /api-access` 能打开 | `PATCH /api-access` 对助理拒绝打开；`api_tasks` 创建时本来就检查 `api_access` |
+| 调度员派活 | `work_tasks`、`work_task_events`（标题、摘要、`agent_detail.reply`） | 私聊不能；助理所在应用若进了有调度员的群，会被当成可派活的员工 | `dispatch.employees` 只选普通员工 |
+| 记忆库 | `memories`（`content`） | 能，且不需要任何操作：节点每小时回收记忆文件 | 回收目录清单不列助理的目录；仍然发上来的条目丢弃（同批其他员工照常）；管理台的记忆接口对助理返回 422。副作用：**换运行时不会带上助理的记忆文件**（记忆经库中转），待设计 |
+| 提醒与定时任务 | `cron_jobs`、`cron_runs`（`prompt`、`reply`），以及草稿所在的 `interaction_states` | 能：私聊里的「N 分钟后提醒我」、定时任务工具、管理台新建三条路都通 | 提醒请求直接回复「暂不支持」；定时任务工具不下发凭据与说明，草稿入口 `open_draft` 拒绝；管理台新建接口返回 422 |
+
+没有关闭、助理照常可用的交互：提问卡（`choice`）、运行时切换提示（`relay_switch`）、会话切换（`session_switch`），状态都在已加密的 `interaction_states.state` 里。
+
+### 全部 Text / JSONB 列在助理路径上的状态
+
+按模型定义逐表过了一遍。没有列出的表与列是配置、目录、组织、凭证密文或与对话无关的运维数据（`bots`、`skills`、`systems`、`relay_servers`、`runtime_nodes`、`users`、`audit_logs` 等），不带对话内容。
+
+| 表.列 | 状态 |
+|---|---|
+| `inbound_events.payload`；`tasks.payload` / `result` / `error_message`；`task_streams.thinking_md` / `pending_text` / `final_text` / `pending_card` / `plan` / `activity`；`outbox.payload`；`chat_logs.message_content` / `quoted_content` / `response_content` / `file_info` / `error_message`；`feishu_sent_messages.text`；`feishu_deliveries.layout`；`interaction_states.state` | 已封存 |
+| `human_collaborations.*`、`bot_collaborations.*`、`bot_collaboration_routes.setup`、`api_tasks.prompt`、`work_tasks.*`、`work_task_events.*`、`memories.*`、`cron_jobs.*`、`cron_runs.*` | 入口已对助理关闭 |
+| `group_observe_decisions.*`、`feishu_group_actions.*`、`feishu_doc_consents.*`、`bot_alert_sources.*` | 只在群聊里产生；助理的群聊旁听固定为关。「助理不收群消息」本身由 1B 网关保证，本计划没有实现 |
+| `wecom_personal_*`、`wecom_bot_provisions.*` | 助理只能是飞书（检查约束） |
+| `inbound_events.reply_context`、`task_streams.reply_context` / `background_state`、`outbox.target`、`chat_sessions.*`、`user_reached.*`、各表的 `status` / `error_code` / `kind` / `chat_id` / `session_key`、`chat_logs.user_name` / `user_login` / `platform_user_id` | 只有元数据（路由、状态、身份标识），供调度、告警与排障使用 |
+| `tasks.cancel_reason`、`outbox.last_error` | 只有元数据：助理的行只留开头的代码 |
+| `feishu_deliveries.last_error` | 只有元数据：固定说明加数字码，或异常类型名 |
+| `business_token_issues.*`、`system_calls.*`、`cloud_calls.*`、`feishu_personal_sends.*`、`feishu_auth_waits.*` | 只有元数据：调用了哪个系统的哪个操作、哈希与结果代码，没有请求与响应正文（`feishu_personal_sends.result` 未逐个字段验证） |
+| `personal_credentials.value_enc`、`feishu_personal_grants.token_enc` / `pending_enc`、`credential_requests.handoff_enc` | 凭证，用平台主密钥加密；不是对话内容 |
+
+仍以明文（或不是所有者密钥）落库的，逐条列为遗留：
+
+| 表.列 | 内容 | 为什么本期没处理 |
+|---|---|---|
+| `credential_requests.purpose`、`fields` | 模型索取个人凭证时写的用途说明与字段名（短文本） | 表单页直接读这两列渲染给本人；个人凭证是助理要用的功能，不能在入口关掉。请求约十几分钟过期。接入时改成封存并在表单接口还原 |
+| `cloud_pending_approvals.reason` | 模型发起云操作审批时写的理由 | 审批人要读，天然要给所有者以外的人看；属于 1D 审批的设计范围 |
+| `escalations.question` / `replies` / `followup_questions` | 外部系统经签名接口发起的升级问答 | 入口是外部系统的接口，不是对话；助理是否可以成为升级目标未确认，1F 开通流程里决定是否对助理关闭 |
+| `runtime_calls.request_enc`、`runtime_chunks.data_enc` | 平台与运行时节点之间的一次调用：完整请求与流式输出 | 是密文，但用的是平台主密钥，不是所有者的数据密钥：销毁数据密钥后在保留期内仍可由平台解开。调用结束即清空或按期限删除。属于 1E（运行时侧）范围 |
+| `runtime_calls.error`、`relay_servers.last_model_failure` / `health_detail`、`bots.workspace_error`、`bot_skills.error_message` | 运行时返回的报错文字 | 来自探测、安装、迁移，不是对话回合；对话回合的报错进 `tasks.error_message`（已封存）。未逐个验证运行时是否会在这些文字里回显输入 |
+| `stored_objects.filename` 与对象存储里的文件本体 | 对话里中转的附件 | 文件不在数据库里，本计划只管内容列；附件加密随 1E 一并设计 |
+| `audit_logs.diff` | 所有者修改助理配置（描述、提示词等）的前后值 | 是配置不是对话；管理员能在审计里看到助理的配置变更，1F 决定是否收紧 |
+
+日志里没有改、看过认为不带对话内容的点：`relay_models_failed`（固定说明）、`feishu_image_localize_failed`（固定原因码）、`skill_install_failed` 的 `detail`（技能安装，不是对话）、`cancelled_before_open` / `observe_turn_finished` 的 `reason`（助理的 `cancel_reason` 只有代码）、各处只写 `type(exc).__name__` 或错误码的日志。没有覆盖的：调度器各循环的 `log.exception`（跨机器人的巡检，没有单个归属；数据库报错里带出的整行对助理是密文）、接口层的 `unhandled_error`（没有机器人上下文）。
 
 ## 自查记录
 
