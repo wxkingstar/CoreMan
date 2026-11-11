@@ -85,6 +85,21 @@ async def test_card_toasts_report_what_happened_to_the_click():
     ]
 
 
+async def test_busy_card_toasts_name_the_button_that_was_clicked():
+    keys = ["busy_wait", "busy_stop", "busy_progress", "busy_cancel", "busy_resume", "busy_drop"]
+    results = iter(keys)
+
+    async def accept(raw):
+        return next(results)
+
+    channel = DurableChannel(accept=accept, app_id="cli_test", app_secret="synthetic")
+    toasts = [(await asyncio.to_thread(channel._on_p2_card_action_trigger, {})).toast for _ in keys]
+    contents = [t.content for t in toasts]
+    # 每个按钮一句不同的话，不再是同一个对勾。
+    assert "✓" not in contents and len(set(contents)) == len(keys)
+    assert contents[2] == "正在刷新进度…"
+
+
 def test_dead_connections_are_found_and_replaced_quickly():
     from lark_oapi.ws import client as ws_client
     from lark_oapi.ws.model import ClientConfig

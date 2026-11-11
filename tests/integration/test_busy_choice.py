@@ -235,10 +235,29 @@ async def test_progress_reports_the_running_message_and_keeps_the_buttons(
         busy_choice.PROGRESS,
         busy_choice.CANCEL,
     ]
-    assert card["sub_title_text"].startswith("上一条已经处理了 6 分 ")
+    assert "\n上一条已经处理了 6 分 " in card["sub_title_text"]
     assert "做了 2 步。" in card["sub_title_text"]
     assert "最近写到：正在汇总上周的退货数据" in card["sub_title_text"]
     assert (await _refresh(db_session, first)).cancel_requested_at is None
+    # 第一次点：卡片上有一行看得出刚刷新过。
+    assert card["sub_title_text"].startswith(msg("busy_progress_first"))
+
+    # 上一条没有新动作时再点：明说没有新进展，而不是一张看着一样的卡。
+    again = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
+    assert again is not None
+    assert again.payload["card"]["sub_title_text"].startswith("🔄 第 2 次查看：和 ")
+    assert "没有新进展" in again.payload["card"]["sub_title_text"]
+
+    await db_session.execute(
+        update(TaskStream)
+        .where(TaskStream.task_id == first.id)
+        .values(thinking_md="🤔 开始\n🔧 **Bash**\n🔧 **Read**\n🔧 **Edit**")
+    )
+    await db_session.commit()
+    moved = await _click(db_engine, db_session, bot, second, busy_choice.PROGRESS)
+    assert moved is not None
+    assert moved.payload["card"]["sub_title_text"].startswith("🔄 第 3 次查看：比 ")
+    assert "做了 3 步。" in moved.payload["card"]["sub_title_text"]
 
 
 def test_progress_of_a_message_still_waiting_in_line() -> None:
