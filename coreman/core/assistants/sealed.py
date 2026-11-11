@@ -41,6 +41,7 @@ from coreman.core.crypto import PREFIX_V2, Cipher, key_id_of
 from coreman.core.db.models import (
     Bot,
     ChatLog,
+    FeishuDelivery,
     FeishuSentMessage,
     InboundEvent,
     OutboxItem,
@@ -132,6 +133,9 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     },
     # 机器人发出的每条飞书消息的正文存档；text 非空，读不出来时给空串。
     FeishuSentMessage: {"text": Text("")},
+    # 流式卡片上当前的单元布局：思考预览、各段正文、任务清单进密文；上次开启流式的时间与
+    # 「已暂停增量」是网关自己的记账，留明文。
+    FeishuDelivery: {"layout": JsonSpec(plain=frozenset({"since", "paused"}))},
 }
 
 

@@ -1,4 +1,4 @@
-"""六张内容表的读写入口台账。
+"""内容表（`sealed.COLUMNS` 里登记的模型）的读写入口台账。
 
 个人助理的内容列在库里是密文。`session.get` / `session.scalar` 取整行会自动还原；
 `session.scalars(select(<模型>))`、`session.execute(select(<模型>))`、只取内容列、裸 SQL 都不会，
@@ -46,7 +46,7 @@ ENTITY_SELECTS = {
     "coreman/core/escalations/service.py": 2,  # session.scalar；只读状态
     "coreman/core/knowledge/installation.py": 1,  # session.scalar
     "coreman/runtime/gateway_common/inbound.py": 1,  # session.scalar
-    "coreman/runtime/gateway_feishu/reply_buttons.py": 1,  # session.scalar
+    "coreman/runtime/gateway_feishu/reply_buttons.py": 2,  # 都是 session.scalar
     "coreman/runtime/gateway_feishu/transport.py": 1,  # 显式还原，跳过不可读的行
     "coreman/runtime/scheduler/notifications.py": 1,  # 不绑机器人的通知
     "coreman/runtime/scheduler/reaper.py": 2,  # 显式还原
@@ -85,7 +85,7 @@ RAW_STATEMENTS = {
     "coreman/runtime/worker/chat/feishu_docs.py": 1,  # `payload || …` 追加明文键 doc_links
     "coreman/runtime/worker/credential_cards.py": 2,  # `#-` 之后对助理的行再经 ORM 删一次
 }
-# 文件 → insert / update / 构造这六个模型的语句条数：内容列都经过 sealed.seal_values，或只写元数据。
+# 文件 → insert / update / 构造这些模型的语句条数：内容列都经过 sealed.seal_values，或只写元数据。
 # 在已登记的文件里新增一条写语句同样会失败。
 WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
@@ -94,7 +94,8 @@ WRITE_STATEMENTS = {
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
     "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存
-    "coreman/runtime/gateway_feishu/transport.py": 1,  # 已发消息的正文存档，封存
+    # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）
+    "coreman/runtime/gateway_feishu/transport.py": 2,
     "coreman/runtime/scheduler/reaper.py": 1,  # 结掉漏网的进行中记录，报错信息封存
 }
 

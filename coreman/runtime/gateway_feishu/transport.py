@@ -373,7 +373,7 @@ class FeishuTransport:
         async with self.factory() as session:
             delivery = await session.get(FeishuDelivery, task_id)
             if delivery is None:
-                delivery = FeishuDelivery(task_id=task_id)
+                delivery = FeishuDelivery(task_id=task_id, bot_id=self.bot_id)
                 session.add(delivery)
             if typing_done:
                 # 这一轮的表情另有人管（网关收到消息时打的），不再打。
