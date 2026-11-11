@@ -874,6 +874,11 @@ class FeishuTransport:
             item = await outbox.claim_next(session, bot_id=self.bot_id)
             if item is None:
                 return False
+            if sealed.is_locked(item):
+                # 个人助理的数据密钥已销毁：内容读不出来，不发。
+                await outbox.mark_skipped(session, item.id, sealed.LOCKED_CODE)
+                await session.commit()
+                return True
             if not await private_target_valid(session, item):
                 await outbox.mark_skipped(session, item.id, "recipient binding changed")
                 await session.commit()

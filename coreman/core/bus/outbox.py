@@ -25,6 +25,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
@@ -110,6 +111,7 @@ async def add(
     }
     if not_before is not None:
         values["not_before"] = not_before
+    values = await sealed.seal_values(session, OutboxItem, bot_id, values)
     stmt = (
         insert(OutboxItem)
         .values(**values)
