@@ -204,6 +204,9 @@ class TaskStream(Base):
     )
     # agent 自己的任务清单：[{"text", "status"}]，status 为 pending / in_progress / completed。
     plan: Mapped[list[dict[str, str]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    # 卡片状态行的数据：最后动作 {at, label}、已知长等待 {until, expect}、疑似卡住 stuck、
+    # 中断原因 interrupted（见 core/chat/liveness.py）。
+    activity: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     running_since: Mapped[datetime] = _ts()
     is_complete: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     completed_at: Mapped[datetime | None] = _ts()

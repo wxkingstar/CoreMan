@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from coreman.core.chat.liveness import live_button
 from coreman.core.feishu_cards.compile import card_shell, streaming_text
 from coreman.core.feishu_cards.thinking import thinking_panel
 from coreman.core.wecom.cards import clip
@@ -89,8 +90,9 @@ def stream_card(
     streaming: bool = True,
     session_url: str | None = None,
     heading: str = "🤔 思考过程",
+    task_id: int | None = None,
 ) -> dict[str, Any]:
-    """流式卡片：思考面板 + 一个 answer markdown。
+    """流式卡片：思考面板 + 一个 answer markdown（给了 task_id 再在最下面放「看看进度」）。
 
     正文里的 card: 块先显示成可读的 Markdown、没写完的块显示占位，终稿时整卡换成富卡片；
     外壳与终稿一致（宽度、留白、配色），替换时不会跳动。
@@ -101,6 +103,7 @@ def stream_card(
         [
             thinking_panel(thinking, session_url=session_url, heading=heading),
             {"tag": "markdown", "element_id": "answer", "content": content},
+            *([live_button(task_id)] if task_id is not None else []),
         ],
         streaming=streaming,
         streaming_config=STREAMING_CONFIG,

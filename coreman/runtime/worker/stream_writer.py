@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from coreman.core.bus import streams
+from coreman.core.chat import liveness
 from coreman.core.relay.sse import paragraph_gap
 from coreman.core.wecom.thinking import ThinkingCollector
 from coreman.runtime.worker.context import TaskContext
@@ -24,6 +26,8 @@ class StreamWriter:
         boundaries: 工具调用处的正文切分点，网关按它分段推送
         extra_lines: 排队 / 预警一类的提示行，恒排在思考区最前面
         plan: agent 自己的任务清单（最后一份），[{"text", "status"}]
+        activity: 卡片状态行的数据（最后动作、已知长等待、疑似卡住），见 core/chat/liveness.py
+        interrupted: 收尾时的中断原因；有值时随终态写进 activity，网关把卡片标红
     """
 
     def __init__(self, ctx: TaskContext, *, min_interval: float = 0.5) -> None:
@@ -33,7 +37,9 @@ class StreamWriter:
         self.boundaries: list[int] = []
         self.extra_lines: list[str] = []
         self.plan: list[dict[str, str]] = []
-        self._last_written: tuple[str, str, tuple[int, ...], str] | None = None
+        self.activity: dict[str, Any] = {}
+        self.interrupted: str | None = None
+        self._last_written: tuple[str, str, tuple[int, ...], str, str] | None = None
         self._last_flush = -1e9
         self.delivery: streams.Completion | None = None
 
@@ -49,13 +55,39 @@ class StreamWriter:
                     len(self.pending_text) if b == end else b for b in self.boundaries
                 ]
         self.pending_text += delta
+        self._touch("写回复")
 
     def add_thinking(self, text: str) -> None:
         self.thinking.add_generating(text)
+        # 节点把工具参数回显成思考（「工具参数 · …」）：那是同一个动作，不能把「在等什么」冲掉。
+        if not text.lstrip("\n").startswith(_TOOL_ECHO):
+            self._touch("思考")
 
-    def add_tool(self, name: str) -> None:
-        self.thinking.add_tool_call(name)
+    def add_tool(self, name: str, summary: str = "", command: str = "") -> None:
+        activity, line = liveness.tool_activity(
+            name, self.ctx.redact(summary) or "", self.ctx.redact(command) or "", _now()
+        )
+        self.activity = activity
+        self.thinking.add_tool_call(name, line)
         self.boundaries.append(len(self.pending_text))
+
+    def _touch(self, label: str) -> None:
+        self.activity = {"at": liveness.iso(_now()), "label": label}
+
+    def check_stuck(self) -> bool:
+        """命令行太久没有任何事件、又不在已知长等待里：标一次「疑似卡住」（只提示，不中断）。
+
+        返回 True 表示这次新标上了，调用方要立即写库让卡片看得到。
+        """
+        now = _now()
+        at = liveness.parse_time(self.activity.get("at"))
+        until = liveness.parse_time(self.activity.get("until"))
+        if self.activity.get("stuck") or at is None or (until is not None and now < until):
+            return False
+        if (now - at).total_seconds() < liveness.STUCK_SECONDS:
+            return False
+        self.activity = {**self.activity, "stuck": True}
+        return True
 
     def set_plan(self, items: tuple[tuple[str, str], ...]) -> None:
         self.plan = [
@@ -88,7 +120,13 @@ class StreamWriter:
     async def flush(self, force: bool = False) -> bool:
         """写一次增量；被节流或内容未变时返回 False（不写库）。"""
         text, boundaries = self.visible()
-        state = (self.thinking_md(), text, tuple(boundaries), repr(self.plan))
+        state = (
+            self.thinking_md(),
+            text,
+            tuple(boundaries),
+            repr(self.plan),
+            repr(self.activity),
+        )
         now = self.ctx.clock()
         if not force and (
             state == self._last_written or now - self._last_flush < self.min_interval
@@ -102,6 +140,7 @@ class StreamWriter:
                 pending_text=state[1],
                 segment_boundaries=list(state[2]),
                 plan=self.plan,
+                activity=self.activity,
             )
             await session.commit()
         self.delivery = delivery
@@ -126,11 +165,23 @@ class StreamWriter:
                 segment_boundaries=boundaries,
                 plan=self.plan,
             )
+            activity = {k: v for k, v in self.activity.items() if k not in ("until", "stuck")}
+            if self.interrupted:
+                activity["interrupted"] = self.interrupted
             done = await streams.complete(
                 session,
                 self.ctx.task.id,
                 final_text=self.ctx.redact(final_text) or "",
                 pending_card=pending_card,
+                activity=activity,
             )
             await session.commit()
         return done
+
+
+# 节点把工具参数、工具开始回显成思考的固定前缀（relay 驱动里写死的）。
+_TOOL_ECHO = ("工具参数 · ", "工具开始 · ")
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)

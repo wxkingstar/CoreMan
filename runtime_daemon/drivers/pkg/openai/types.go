@@ -86,6 +86,28 @@ type ToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`
+	// Summary is a CoreMan extension: one short, human line saying what the
+	// tool is doing (e.g. Bash's description). Older platforms ignore it.
+	Summary string `json:"x_summary,omitempty"`
+}
+
+// ToolSummaryRunes caps a tool summary; it is shown in a one-line status.
+const ToolSummaryRunes = 80
+
+// ShortSummary keeps the first non-empty line of text, capped for a status line.
+func ShortSummary(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) > ToolSummaryRunes {
+			return string(runes[:ToolSummaryRunes-1]) + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 type ToolCallFunction struct {

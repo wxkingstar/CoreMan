@@ -121,6 +121,28 @@ func toolText(part *opencodePart) (args, result string) {
 	return args, part.State.Output
 }
 
+// toolSummary is the one line the platform shows for a tool: opencode's own
+// title for the call (for bash, the description the model wrote), else the
+// input's description, else the command. opencode's JSON output reports a tool
+// only once it has finished, so this tells what was done rather than what is
+// still running.
+func toolSummary(part *opencodePart) string {
+	if part.State == nil {
+		return ""
+	}
+	var input struct {
+		Description string `json:"description"`
+		Command     string `json:"command"`
+	}
+	_ = json.Unmarshal(part.State.Input, &input)
+	for _, text := range []string{input.Description, part.State.Title, input.Command} {
+		if summary := openai.ShortSummary(text); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
 // canRebuildStaleSession reports whether a zero-output resume failed because
 // the bound session is gone. Verified: `opencode run --session <unknown>`
 // exits 1 with empty stdout and "Error: Session not found" on stderr. Any
@@ -335,6 +357,7 @@ probe:
 				startedTools[id] = true
 				delta(&openai.ChatMessage{Role: "assistant", ToolCalls: []openai.ToolCall{{
 					ID: id, Type: "function", Function: openai.ToolCallFunction{Name: part.Tool, Arguments: args},
+					Summary: toolSummary(part),
 				}}})
 				thinkingDelta("\n\n工具参数 · " + part.Tool + "\n" + args + "\n")
 			}

@@ -223,12 +223,16 @@ def progress_text(
     reply_text: str,
     quiet_seconds: float = 0.0,
     locale: str = "zh",
+    subject: str = "busy",
 ) -> str:
-    """上一条的进度：用了多久、做了几步、最近写到哪句。只读实时状态，不调用模型。"""
+    """上一条的进度：用了多久、做了几步、最近写到哪句。只读实时状态，不调用模型。
+
+    `subject="live"` 是运行中卡片自己的「看看进度」：说的是这一条，不是「上一条」。
+    """
     if status == "queued":
-        return msg("busy_progress_queued", locale)
+        return msg(f"{subject}_progress_queued", locale)
     steps = thinking_md.count("🔧")
-    text = msg("busy_progress_elapsed", locale, elapsed=_elapsed(seconds, locale))
+    text = msg(f"{subject}_progress_elapsed", locale, elapsed=_elapsed(seconds, locale))
     if steps:
         text += msg("busy_progress_steps", locale, steps=steps)
     if quiet_seconds >= QUIET_NOTICE_SECONDS:
