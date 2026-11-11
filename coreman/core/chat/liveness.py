@@ -43,12 +43,6 @@ REASON_RELAY_INTERRUPTED = "运行节点连接中断"
 REASON_HARD_TTL = "超过单次最长运行时间"
 REASON_RECOVERED = "处理没有正常结束"
 
-# 运行中卡片上的「看看进度」按钮。
-LIVE_PREFIX = "live@"
-LIVE_PROGRESS = "live_progress"
-LIVE_BUTTON_ID = "live_progress"
-_LIVE_TASK_ID = re.compile(r"live@([1-9][0-9]{0,18})")
-
 # 工具名 → 人话动作；不认识的工具统一叫「调用工具」，状态行不露内部工具名。
 _TOOL_ACTIONS = {
     "bash": "运行命令",
@@ -257,29 +251,3 @@ def interrupted_activity(activity: dict[str, Any] | None, reason: str) -> dict[s
 
 def interrupt_notice(reason: str) -> str:
     return f"刚才这条处理中断了（{reason}）。已经写出的内容留在卡片里，可以再发一次让我接着做。"
-
-
-def live_task_id(task_id: int) -> str:
-    return f"{LIVE_PREFIX}{task_id}"
-
-
-def parse_live_task_id(value: str) -> int | None:
-    match = _LIVE_TASK_ID.fullmatch(value)
-    return int(match.group(1)) if match else None
-
-
-def live_button(task_id: int) -> dict[str, Any]:
-    """运行中卡片最下面的「看看进度」：点了回一条实时进度，不改卡片。"""
-    return {
-        "tag": "button",
-        "element_id": LIVE_BUTTON_ID,
-        "text": {"tag": "plain_text", "content": "看看进度"},
-        "type": "default",
-        "size": "small",
-        "behaviors": [
-            {
-                "type": "callback",
-                "value": {"task_id": live_task_id(task_id), "event_key": LIVE_PROGRESS},
-            }
-        ],
-    }

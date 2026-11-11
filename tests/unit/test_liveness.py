@@ -104,13 +104,6 @@ def test_interrupt_reasons() -> None:
     assert liveness.interrupt_reason("user_stop", None) is None
 
 
-def test_live_task_id_round_trip() -> None:
-    assert liveness.parse_live_task_id(liveness.live_task_id(42)) == 42
-    assert liveness.parse_live_task_id("busy@42") is None
-    button = liveness.live_button(7)
-    assert button["behaviors"][0]["value"] == {"task_id": "live@7", "event_key": "live_progress"}
-
-
 def _chunk(call: dict) -> str:
     delta = {"role": "assistant", "content": "", "tool_calls": [call]}
     return "data: " + json.dumps({"choices": [{"delta": delta, "finish_reason": None}]})

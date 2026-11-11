@@ -519,7 +519,7 @@ async def test_status_line_changes_only_with_activity(db_session, db_engine):
     )
     await transport.round()
     created = [body for _, path, body in api.calls if path == "/open-apis/cardkit/v1/cards"]
-    assert "⏳ 进行中" in created[0]["data"] and "看看进度" in created[0]["data"]
+    assert "⏳ 进行中" in created[0]["data"]
     api.calls.clear()
     await transport.round()
     await transport.round()
@@ -596,7 +596,6 @@ async def test_interrupted_turn_marks_card_and_mentions_requester_once(db_sessio
     cards = [body for _, path, body in api.calls if path == "/open-apis/cardkit/v1/cards/card1"]
     assert "❌ 已中断：处理进程失联" in cards[-1]["card"]["data"]
     assert '"color":"red"' in cards[-1]["card"]["data"]
-    assert "看看进度" not in cards[-1]["card"]["data"]
     posts = [
         body
         for _, path, body in api.calls

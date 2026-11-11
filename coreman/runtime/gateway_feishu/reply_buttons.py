@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.chat import busy_choice, liveness
+from coreman.core.chat import busy_choice
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
 from coreman.core.db.models import FeishuDelivery, OutboxItem, TaskStream
@@ -46,7 +46,6 @@ Outcome = Literal[
     "busy_cancel",
     "busy_resume",
     "busy_drop",
-    "live_progress",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -85,12 +84,6 @@ def is_reply_click(message: InboundMessage) -> bool:
 
 def _busy_click(message: InboundMessage) -> Outcome | None:
     action = message.card_action or {}
-    if (
-        message.kind == "card_action"
-        and liveness.parse_live_task_id(str(action.get("task_id") or "")) is not None
-        and action.get("event_key") == liveness.LIVE_PROGRESS
-    ):
-        return "live_progress"
     if (
         message.kind != "card_action"
         or busy_choice.parse_card_task_id(str(action.get("task_id") or "")) is None
