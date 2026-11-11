@@ -3434,6 +3434,11 @@ git commit -m "个人助理：补齐 bus 层之外的内容读取，加读写入
   - 运维接口 `GET /api/admin/runtime/tasks`、`/outbox` 不变：只返回元数据，不解密。
   - 按关键词搜索（`keyword`）搜不到助理记录的正文。
 
+**实现时的修正（以代码为准）：**
+- `dev.py` 的 `get_task` 不只还原对话记录：任务与流是 `session.get` 取的、已经自动还原，而 `task_out` / `stream_out` 会输出报错信息与思考、正文。所以对任务、流、对话记录三行一起 `open_rows(..., viewer=actor.id)`，不是所有者就把已还原的内容收回去。补一条用例。
+- 接口用例的主密钥按现有助理接口用例的做法显式指定（`sealed.use_master(Cipher(MASTER_KEY))`，与 `api_settings` 配的是同一把），不用 `use_master(None)`。
+- 多一条用例：按关键词搜不到助理记录的正文。
+
 可见性规则不在本任务里改：飞书私聊的记录本来就只有本人可见（`_scope`）。`viewer` 是第二道闸——哪怕某条助理记录因为类型不同（如定时任务）出现在别人的列表里，接口也不会为他解密。
 
 - [ ] **Step 1: 写失败测试**
