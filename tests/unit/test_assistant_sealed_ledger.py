@@ -80,6 +80,7 @@ COLUMN_REFERENCES = {
     "coreman/core/personal_schedules.py": 1,  # 明文键 user_id
     "coreman/core/reminders.py": 1,  # 明文键 user_id
     "coreman/runtime/gateway_common/inbound.py": 7,  # 明文键
+    "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键
     "coreman/runtime/gateway_feishu/reply_buttons.py": 1,  # 下划线开头的明文键
     "coreman/runtime/scheduler/reaper.py": 1,  # 任务报错：取值后 open_value
     "coreman/runtime/worker/busy_choice.py": 1,  # 明文键 platform_user_id

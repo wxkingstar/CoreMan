@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -11,8 +12,10 @@ from sqlalchemy import select
 
 from coreman.core.assistants import keys, sealed
 from coreman.core.assistants.records import new_assistant_bot
+from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
+    Bot,
     InboundEvent,
     PlatformApp,
     Task,
@@ -21,8 +24,12 @@ from coreman.core.db.models import (
     UserReached,
 )
 from coreman.core.db.session import make_session_factory
+from coreman.core.feishu_cards.reply_buttons import reply_value
 from coreman.core.platforms.feishu import FeishuClient
 from coreman.runtime.gateway_feishu.assistant_inbound import AssistantInbound
+from coreman.runtime.gateway_feishu.child import BotInfo
+from coreman.runtime.gateway_feishu.inbound import normalize_event
+from coreman.runtime.gateway_feishu.reply_buttons import admit
 from coreman.runtime.gateway_feishu.transport import LeaseLost
 from tests.integration.assistant_helpers import raw as raw_sql
 
@@ -116,13 +123,13 @@ def message(user_id, mid, *, chat_type="p2p", chat_id=None):
     }
 
 
-def click(user_id, chat_id):
+def click(user_id, chat_id, *, value=None, event_id="ev_click"):
     return {
-        "header": {"app_id": APP, "event_type": "card.action.trigger", "event_id": "ev_click"},
+        "header": {"app_id": APP, "event_type": "card.action.trigger", "event_id": event_id},
         "event": {
             "operator": {"user_id": user_id, "open_id": f"ou_{user_id}"},
             "context": {"open_chat_id": chat_id, "open_message_id": "om_card"},
-            "action": {"value": {"task_id": "personal:1"}, "form_value": {}},
+            "action": {"value": value or {"task_id": "personal:1"}, "form_value": {}},
         },
     }
 
@@ -253,6 +260,92 @@ async def test_card_clicks_count_only_in_the_owners_own_private_chat(db_session,
     assert [(t.bot_id, t.kind, t.lane) for t in tasks] == [
         (bots[zhang.id].id, "card_action", "fast")
     ]
+
+
+async def _sent_card(session, bot, message_id):
+    """这条助理记录发出过的一张卡片（出站已发，记下了平台的消息 id）。"""
+    item = await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"card:{bot.id}:{message_id}",
+        target={"chat_id": "oc_zhang"},
+        payload={"card": {"schema": "2.0"}},
+    )
+    item.status = "sent"
+    item.payload = {**item.payload, "_feishu_message_id": message_id}
+    await session.commit()
+
+
+async def test_owner_who_never_messaged_can_click_a_card_the_assistant_sent(db_session, db_engine):
+    app, zhang, li, _, bots = await _seed(db_session)
+    # 张三没给助理发过私聊（没有 user_reached），助理主动给他发过一张卡片。
+    await _sent_card(db_session, bots[zhang.id], "om_card")
+    inbound, http, _ = _inbound(db_engine, app, [])
+    reply = reply_value("好的", requester="u_zhang", row="row_1", buttons=["btn_1"])
+    try:
+        # 李四的助理没发过这张卡片：不是李四与自己助理私聊里的卡片。
+        assert await inbound.accept(click("u_li", "oc_zhang")) == "not_requester"
+        assert await inbound.accept(click("u_zhang", "oc_zhang")) is None
+        # 回复按钮：直接按私聊入队，不靠私聊记录判断会话类型。
+        assert (
+            await inbound.accept(click("u_zhang", "oc_zhang", value=reply, event_id="ev_reply"))
+            == "queued"
+        )
+    finally:
+        await inbound.aclose()
+        await http.aclose()
+    tasks = (await db_session.scalars(select(Task).order_by(Task.id))).all()
+    assert [(t.bot_id, t.kind) for t in tasks] == [
+        (bots[zhang.id].id, "card_action"),
+        (bots[zhang.id].id, "chat"),
+    ]
+    events = (await db_session.scalars(select(InboundEvent).order_by(InboundEvent.id))).all()
+    assert [e.chat_type for e in events][-1] == "single"
+    assert (await db_session.scalars(select(UserReached))).all() == []
+
+
+async def test_cards_nobody_can_vouch_for_are_still_refused(db_session, db_engine):
+    app, zhang, _, _, bots = await _seed(db_session)
+    inbound, http, _ = _inbound(db_engine, app, [])
+    try:
+        # 没有私聊记录，助理也没发过这张卡片（比如别处转来的副本）。
+        assert await inbound.accept(click("u_zhang", "oc_elsewhere")) == "not_requester"
+    finally:
+        await inbound.aclose()
+        await http.aclose()
+    assert (await db_session.scalars(select(Task))).all() == []
+
+
+async def test_standard_bot_click_still_depends_on_the_private_chat_record(db_session):
+    creator = await _member(db_session, "zhaoliu", "赵六", "u_zhao")
+    bot = Bot(
+        bot_key="demo-bot",
+        platform="feishu",
+        name="demo-bot",
+        created_by=creator.id,
+        model="m",
+        working_dir="/d",
+        credentials_enc="unused",
+    )
+    db_session.add(bot)
+    await db_session.commit()
+    reply = reply_value("好的", requester="u_zhao", row="row_1", buttons=["btn_1"])
+    clicked = normalize_event(
+        click("u_zhao", "oc_zhao", value=reply),
+        bot_id=bot.id,
+        app_id=APP,
+        bot_open_id="",
+        gateway_instance="gw-a",
+        now=datetime.now(UTC),
+    )
+    info = BotInfo(bot.id, bot.bot_key, None)
+    # 普通机器人：没有私聊记录的点击照旧按群处理。
+    assert await admit(db_session, info, clicked, lease_generation=1) == "queued"
+    await db_session.commit()
+    event = await db_session.scalar(select(InboundEvent).where(InboundEvent.bot_id == bot.id))
+    assert event.chat_type == "group" and event.reply_context["chat_type"] == "group"
 
 
 async def test_lost_lease_refuses_the_event(db_session, db_engine):

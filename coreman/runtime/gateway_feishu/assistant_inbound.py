@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants import sealed
@@ -21,6 +21,7 @@ from coreman.core.assistants.routing import assistant_for
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.reachability import private_chat_of
 from coreman.core.crypto import Cipher
+from coreman.core.db.models import FeishuDelivery, OutboxItem
 from coreman.core.i18n.messages import msg
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
@@ -82,6 +83,26 @@ def triage(raw: dict[str, Any], *, app_id: str) -> Triage:
         user_id = str(_obj(event, "operator").get("user_id") or "")
         return Triage("private", platform_user_id=user_id, click=True) if user_id else _IGNORE
     return _IGNORE
+
+
+async def sent_by(session: AsyncSession, bot_id: uuid.UUID, message_id: object) -> bool:
+    """这张卡片是不是这条助理记录自己发出去的（流式回复的主卡，或一条已发的出站消息）。
+
+    助理记录只在所有者的私聊里说话，所以「本人的助理发出的卡片」就在本人与助理的私聊里。
+    所有者没给助理发过私聊时没有私聊记录可查（比如助理主动发来的卡片），靠它认。
+    只按归属与平台消息 id 查，不读内容。
+    """
+    if not isinstance(message_id, str) or not message_id:
+        return False
+    streamed = select(FeishuDelivery.task_id).where(
+        FeishuDelivery.bot_id == bot_id, FeishuDelivery.message_id == message_id
+    )
+    queued = select(OutboxItem.id).where(
+        OutboxItem.bot_id == bot_id,
+        OutboxItem.status == "sent",
+        OutboxItem.payload["_feishu_message_id"].astext == message_id,
+    )
+    return bool(await session.scalar(select(or_(streamed.exists(), queued.exists()))))
 
 
 class AssistantInbound:
@@ -152,14 +173,20 @@ class AssistantInbound:
             )
             if message is None:
                 return None
-            if found.click and not await private_chat_of(
-                session, bot.id, "feishu", found.platform_user_id, message.chat_id
+            if found.click and not (
+                await private_chat_of(
+                    session, bot.id, "feishu", found.platform_user_id, message.chat_id
+                )
+                or await sent_by(session, bot.id, message.reply_context.get("message_id"))
             ):
                 # 卡片不在操作人与自己助理的私聊里：不是所有者在点。
                 return "not_requester"
             info = BotInfo(bot.id, bot.bot_key, bot.welcome_message)
             # 落库走与普通机器人相同的入口：助理的入站事件与任务载荷在那里按所有者封存。
-            outcome = await admit(session, info, message, lease_generation=self.generation)
+            # 到这里的事件都在所有者与助理的私聊里，回复按钮的会话类型不必再查私聊记录。
+            outcome = await admit(
+                session, info, message, lease_generation=self.generation, single=True
+            )
             await session.commit()
             return outcome
 
