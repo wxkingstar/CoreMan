@@ -389,7 +389,10 @@ class IntakeStage(ChatStageBase):
         if since is None or (datetime.now(UTC) - since).total_seconds() > FREE_TEXT_WAIT_SECONDS:
             # 等了半小时还没打字，这条多半是新话题：清掉等待标记放行，状态与卡片仍留着。
             await interactions.patch_state(
-                session, st.id, {"waiting_for_text": False, "waiting_since": None}
+                session,
+                st.id,
+                {"waiting_for_text": False, "waiting_since": None},
+                bot_id=st.bot_id,
             )
             ctx.log.info("choice_wait_expired", state_id=str(st.id))
             return False

@@ -5,6 +5,9 @@
 - relay_switch: {idx, current_relay_id, current_name, target_relay_id, target_name,
   target_pct_7d, chat_id, user_id}
 - session_switch: {sessions: [{relay_session_id, preview}]}
+
+个人助理的 `state` 加密入库（见 assistants/sealed.py）：经 ORM 新建、修改的行由 flush 钩子封存，
+这里的取行函数还原成明文，`patch_state` 对助理的行改成取出、合并、整块封存后写回。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import InteractionState
 
 KIND_CHOICE = "choice"
@@ -38,6 +42,13 @@ def session_scope(bot_id: uuid.UUID, session_key: str) -> str:
 def _rowcount(res: Any) -> int:
     """`AsyncSession.execute` 静态返回 `Result`，只有 DML 拿到的 `CursorResult` 才有 rowcount。"""
     return int(cast("CursorResult[Any]", res).rowcount or 0)
+
+
+async def _readable(session: AsyncSession, row: InteractionState | None) -> InteractionState | None:
+    """个人助理的状态还原成明文；读不出来的（数据密钥已销毁）当作没有，旧卡片按过期处理。"""
+    if row is None or not await sealed.open_row(session, row):
+        return None
+    return row
 
 
 async def open_state(
@@ -85,9 +96,10 @@ async def get_open(
         InteractionState.status == "open",
         or_(InteractionState.expires_at.is_(None), InteractionState.expires_at > now),
     )
-    return (
+    row = (
         await session.execute(stmt, execution_options={"populate_existing": True})
     ).scalar_one_or_none()
+    return await _readable(session, row)
 
 
 async def find_by_prefix(
@@ -97,17 +109,55 @@ async def find_by_prefix(
     stmt = select(InteractionState).where(
         InteractionState.bot_id == bot_id, InteractionState.task_id_prefix == task_id_prefix
     )
-    return (
+    row = (
         await session.execute(stmt, execution_options={"populate_existing": True})
     ).scalar_one_or_none()
+    return await _readable(session, row)
 
 
-async def patch_state(session: AsyncSession, state_id: uuid.UUID, patch: dict[str, Any]) -> None:
+async def patch_state(
+    session: AsyncSession,
+    state_id: uuid.UUID,
+    patch: dict[str, Any],
+    *,
+    bot_id: uuid.UUID | None = None,
+) -> None:
     """JSONB 合并（`state || patch`），只改给出的键。
 
     整块覆写会丢掉并发那一侧刚写进去的键（答题与限流切换可能同时落在一条状态上）；
     `patch` 显式 CAST 成 jsonb，否则 `jsonb || unknown` 会被 Postgres 解成文本拼接。
+
+    个人助理的状态是密文，库里合并不了：锁住这一行，取出还原、合并、封存后写回（并发的
+    另一侧等行锁，同样不丢键）。
+
+    Args:
+        bot_id: 这条状态属于哪个机器人。调用方手里都有，传进来免一次查询；不传按主键查
     """
+    if bot_id is None:
+        bot_id = await session.scalar(
+            select(InteractionState.bot_id).where(InteractionState.id == state_id)
+        )
+    if bot_id is not None and await sealed.owner_of(session, bot_id) is not None:
+        stored = (
+            await session.execute(
+                select(InteractionState.state)
+                .where(InteractionState.id == state_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if stored is None:
+            return
+        current = await sealed.open_value(session, InteractionState, "state", bot_id, stored)
+        values = await sealed.seal_values(
+            session, InteractionState, bot_id, {"state": {**current, **patch}}
+        )
+        await session.execute(
+            update(InteractionState)
+            .where(InteractionState.id == state_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        return
     await session.execute(
         update(InteractionState)
         .where(InteractionState.id == state_id)

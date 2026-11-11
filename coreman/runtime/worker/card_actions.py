@@ -341,6 +341,7 @@ class CardActionHandler:
                 session,
                 st.id,
                 {"waiting_for_text": True, "waiting_since": datetime.now(UTC).isoformat()},
+                bot_id=st.bot_id,
             )
             await self._reply_card(
                 session,

@@ -44,6 +44,7 @@ from coreman.core.db.models import (
     FeishuDelivery,
     FeishuSentMessage,
     InboundEvent,
+    InteractionState,
     OutboxItem,
     Task,
     TaskStream,
@@ -136,6 +137,9 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     # 流式卡片上当前的单元布局：思考预览、各段正文、任务清单进密文；上次开启流式的时间与
     # 「已暂停增量」是网关自己的记账，留明文。
     FeishuDelivery: {"layout": JsonSpec(plain=frozenset({"since", "paused"}))},
+    # 等用户下一步的状态：题面、选项、答案、暂存的参数进密文。`user_id` 被 SQL 用来数
+    # 「这个人还有几条待确认」（reminders、personal_schedules），留明文。
+    InteractionState: {"state": JsonSpec(plain=frozenset({"user_id"}))},
 }
 
 

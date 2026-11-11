@@ -11,8 +11,10 @@ from coreman.core.assistants import sealed
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     ChatLog,
+    FeishuDelivery,
     FeishuSentMessage,
     InboundEvent,
+    InteractionState,
     OutboxItem,
     Task,
     TaskStream,
@@ -35,7 +37,11 @@ def test_every_content_column_is_registered() -> None:
         OutboxItem,
         ChatLog,
         FeishuSentMessage,
+        FeishuDelivery,
+        InteractionState,
     }
+    assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
+    assert set(sealed.COLUMNS[InteractionState]) == {"state"}
     assert set(sealed.COLUMNS[Task]) == {"payload", "result", "error_message"}
     assert set(sealed.COLUMNS[FeishuSentMessage]) == {"text"}
     assert set(sealed.COLUMNS[TaskStream]) == {

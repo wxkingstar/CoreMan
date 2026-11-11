@@ -41,10 +41,12 @@ ENTITY_SELECTS = {
     "coreman/core/chat/busy_choice.py": 1,  # 只读状态与时间
     "coreman/core/chat/collaboration_setup.py": 1,  # 群协作
     "coreman/core/chat/human_collaboration.py": 2,  # session.scalar，自动还原
+    "coreman/core/chat/interactions.py": 2,  # 交互状态：显式还原，读不出来的当作没有
     "coreman/core/chat/session_carry.py": 1,  # 显式还原
     "coreman/core/escalations/media_recovery.py": 1,  # session.scalar
     "coreman/core/escalations/service.py": 2,  # session.scalar；只读状态
     "coreman/core/knowledge/installation.py": 1,  # session.scalar
+    "coreman/core/reminders.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/gateway_common/inbound.py": 1,  # session.scalar
     "coreman/runtime/gateway_feishu/reply_buttons.py": 2,  # 都是 session.scalar
     "coreman/runtime/gateway_feishu/transport.py": 1,  # 显式还原，跳过不可读的行
@@ -53,9 +55,12 @@ ENTITY_SELECTS = {
     "coreman/runtime/worker/chat/api.py": 1,  # session.scalar
     "coreman/runtime/worker/chat/feishu_quote.py": 2,  # session.scalar
     "coreman/runtime/worker/chat/queued_batch.py": 1,  # 显式还原
+    "coreman/runtime/worker/chat/wecom_personal.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/choice_flow.py": 1,  # session.scalar
     "coreman/runtime/worker/cron_handler.py": 1,  # session.scalar
     "coreman/runtime/worker/escalation_media.py": 1,  # session.scalar
+    "coreman/runtime/worker/group_write_cards.py": 1,  # 交互状态，session.scalar
+    "coreman/runtime/worker/personal_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/skill_install.py": 1,  # session.scalar
 }
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
@@ -64,12 +69,16 @@ COLUMN_REFERENCES = {
     "coreman/core/bus/tasks.py": 1,  # 明文键 serialize_session
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
     "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
+    # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并
+    "coreman/core/chat/interactions.py": 2,
     "coreman/core/chat/session_switch.py": 2,  # 取值后 open_value
     "coreman/core/escalations/media_recovery.py": 2,  # 明文键 escalation_id、message_id
     "coreman/core/escalations/service.py": 1,  # 下划线开头的明文键
     "coreman/core/feishu_docs/access.py": 2,  # 明文键 doc_links（取回的封装顶层就有）
     "coreman/core/feishu_docs/consent.py": 1,  # 下划线开头的明文键
     "coreman/core/knowledge/installation.py": 1,  # 明文键 skill_id
+    "coreman/core/personal_schedules.py": 1,  # 明文键 user_id
+    "coreman/core/reminders.py": 1,  # 明文键 user_id
     "coreman/runtime/gateway_common/inbound.py": 7,  # 明文键
     "coreman/runtime/gateway_feishu/reply_buttons.py": 1,  # 下划线开头的明文键
     "coreman/runtime/scheduler/reaper.py": 1,  # 任务报错：取值后 open_value
@@ -92,7 +101,11 @@ WRITE_STATEMENTS = {
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
     "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态
+    # 交互状态：open_state 经 ORM 新建（flush 钩子封存）、patch_state 两条（助理的封存后写回）；
+    # 其余只写状态
+    "coreman/core/chat/interactions.py": 5,
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
+    "coreman/core/feishu_docs/confirm.py": 1,  # 群聊写入确认：经 ORM 新建，flush 钩子封存
     "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存
     # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）
     "coreman/runtime/gateway_feishu/transport.py": 2,
