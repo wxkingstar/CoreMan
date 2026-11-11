@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import event, select
+from sqlalchemy import case, event, exists, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -118,6 +118,9 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         "final_text": Text(),
         "pending_card": Whole(),
         "plan": Whole([]),
+        # 最近动作：说明文字（工具说明、命令首行）进密文；时间、已知等待、卡住与中断标记是
+        # 规则生成的元数据，留明文，读不出来时状态行照常显示。
+        "activity": JsonSpec(plain=frozenset({"at", "until", "expect", "stuck", "interrupted"})),
     },
     OutboxItem: {"payload": JsonSpec(underscore=True, mirrors=(("card", "task_id"),))},
     ChatLog: {
@@ -245,6 +248,39 @@ def open_text(cipher: Cipher, aad_: str, value: Any) -> Any:
     if not is_token(value):
         return value
     return _decrypt(cipher, value, aad_)
+
+
+# ---- 不能封存的说明列 ------------------------------------------------------
+
+# `outbox.last_error`、`tasks.cancel_reason`：运维接口直接输出，控制逻辑按它的值判断，不能加密。
+# 但报错文字可能带出消息片段（平台回的错误说明、异常文字），助理的行只留开头的代码。
+REDACTED = "redacted"
+_LEADING_CODE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?: [0-9]{1,9})?")
+
+
+def code_only(value: str, fallback: str = REDACTED) -> str:
+    """说明文字开头的代码：一个标识符，后面可以跟一个数字（`Feishu 230013`、`not_sent`、
+    `TimeoutError`）。标识符后面还连着别的字符（不是空格、冒号结尾）就不算代码，给 `fallback`。"""
+    match = _LEADING_CODE.match(value)
+    if match is None:
+        return fallback
+    rest = value[match.end() :]
+    return match.group(0) if rest == "" or rest[0] in ": " else fallback
+
+
+def code_for_assistants(bot_id_column: Any, value: str, fallback: str = REDACTED) -> Any:
+    """写说明列用的值：助理的行只留代码，其余的行原样。
+
+    本来就是代码的值原样返回；否则是一个随所在语句判断归属的表达式，不多一次往返。
+
+    Args:
+        bot_id_column: 所在语句里这一行的 `bot_id` 列
+    """
+    code = code_only(value, fallback)
+    if code == value:
+        return value
+    assistant = exists().where(Bot.id == bot_id_column, Bot.kind == "assistant")
+    return case((assistant, code), else_=value)
 
 
 # ---- 按行封存与还原 --------------------------------------------------------

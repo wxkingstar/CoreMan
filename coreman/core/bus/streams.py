@@ -209,7 +209,10 @@ async def complete(
     """收尾。`activity` 给了就整份替换（中断原因随终态一起写，网关据此标红）。"""
     extra: dict[str, Any] = {} if activity is None else {"activity": activity}
     stored = await _sealed_fields(
-        session, task_id, bot_id, {"final_text": final_text, "pending_card": pending_card}
+        session,
+        task_id,
+        bot_id,
+        {"final_text": final_text, "pending_card": pending_card, **extra},
     )
     row = (
         await session.execute(
@@ -218,9 +221,7 @@ async def complete(
             .values(
                 is_complete=True,
                 completed_at=func.now(),
-                final_text=stored["final_text"],
-                pending_card=stored["pending_card"],
-                **extra,
+                **stored,
                 version=TaskStream.version + 1,
                 updated_at=func.now(),
             )

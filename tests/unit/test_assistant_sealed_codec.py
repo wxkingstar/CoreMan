@@ -44,6 +44,7 @@ def test_every_content_column_is_registered() -> None:
         "final_text",
         "pending_card",
         "plan",
+        "activity",
     }
     assert set(sealed.COLUMNS[ChatLog]) == {
         "message_content",

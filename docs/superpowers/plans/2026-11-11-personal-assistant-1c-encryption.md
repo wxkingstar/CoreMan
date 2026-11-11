@@ -41,7 +41,7 @@
 
 | 形态 | 库里的样子 | 用在 |
 |---|---|---|
-| 字典，部分键留明文 | `{"_sealed": "enc:v2:d1:…", <明文键>…}`。密文里是去掉明文键之后的其余部分 | `inbound_events.payload`、`tasks.payload`、`outbox.payload` |
+| 字典，部分键留明文 | `{"_sealed": "enc:v2:d1:…", <明文键>…}`。密文里是去掉明文键之后的其余部分 | `inbound_events.payload`、`tasks.payload`、`outbox.payload`、`task_streams.activity` |
 | 整值封存 | `{"_sealed": "enc:v2:d1:…"}` | `tasks.result`、`task_streams.pending_card`、`task_streams.plan`、`chat_logs.file_info` |
 | 文本 | `enc:v2:d1:…`；空串与 NULL 不加密 | `task_streams.thinking_md` / `pending_text` / `final_text`、`chat_logs.message_content` / `quoted_content` / `response_content` / `error_message`、`tasks.error_message`、`feishu_sent_messages.text` |
 | 墓碑 | `{"_sealed": "", <明文键>…}`：密钥销毁之后写入，内容已丢弃 | 上面两种 JSONB 形态 |
@@ -70,7 +70,11 @@
 | `tasks.error_message`、`chat_logs.error_message`、`chat_logs.file_info` | 无 SQL 过滤、聚合或告警读取（告警与统计只看 `status`、`error_code`） | `coreman/runtime/scheduler/reaper.py:224` 只把任务的报错原样抄到对话记录 | 可以封存（Task 13）；`error_code`、`status` 保持明文 |
 | `feishu_sent_messages.text` | 只按主键取值 | `coreman/runtime/worker/chat/feishu_quote.py:82`；`coreman/core/chat/group_observe.py:229` 只处理群消息 | 可以封存（Task 13）；`work_code`、`chat_id`、`created_at` 保持明文 |
 
-这四列盘点下来没有一列需要留明文。没有任何索引、唯一键、去重键建在这些内容列上（去重用 `dedupe_key`、`platform_msg_id`）。
+| `task_streams.activity` | `label`（工具说明、命令首行，最多 80 字，会带出对话里的东西） | 没有 SQL 过滤、聚合或告警读取；只有网关、巡检、实时进度在已还原的行上读属性 | 封存。`at`、`until`、`expect`、`stuck`、`interrupted` 是规则生成的时间与状态，留明文键：读不出来时状态行照常显示，只是没有说明文字 |
+| `outbox.last_error` | 整列 | 运维接口 `GET /api/admin/runtime/outbox`、管理命令的出站列表、定时任务投递结果直接输出；`human_collaboration.delivery_error` 按里面的飞书错误码判断；求助通知失败原因直接取用 | **不封存**。来源里有平台回的错误说明、异常文字（`Feishu <code>: <reason>`、`not_sent: <exc>`）。助理的行在 `outbox` 的五个写入口只留开头的代码（`sealed.code_for_assistants`）：一个标识符加可选的数字（`Feishu 230013`、`not_sent`、`TimeoutError`），不是这个形状的整个换成 `redacted` |
+| `tasks.cancel_reason` | 整列 | `tasks.heartbeat` 用 `RETURNING` 取回交给 worker，随后被当作 `error_code` 写回；`api_tasks`、`approval_resume` 按值判断；运维接口 `GET /api/admin/runtime/tasks` 与管理命令直接输出 | **不封存**。绝大多数是固定代码（`superseded`、`user_stop`……），协作关闭、管理员手填时是自由文字。助理的行在 `tasks.request_cancel` 里只留代码，自由文字换成 `cancelled` |
+
+前四列盘点下来没有一列需要留明文；后三列是交付前补查的。`code_for_assistants` 在原值本来就是代码时原样写入，否则写成随语句判断归属的 `CASE WHEN EXISTS(助理记录) …`，不多一次往返，普通机器人的行拿到的仍是原文。没有任何索引、唯一键、去重键建在这些内容列上（去重用 `dedupe_key`、`platform_msg_id`）。
 
 ### 加解密所在的层
 

@@ -80,6 +80,11 @@ GROUP BY f.dedupe_key
 )
 
 
+def _error(error: str) -> Any:
+    """`last_error` 的值：不加密（运维接口与投递逻辑直接读），个人助理的行只留开头的代码。"""
+    return sealed.code_for_assistants(OutboxItem.bot_id, error[:2000])
+
+
 def public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     """发给平台之前剥掉下划线开头的内部键（`_attempt_id`、`_feishu_message_id`……）。"""
     return {k: v for k, v in (payload or {}).items() if not str(k).startswith("_")}
@@ -154,7 +159,7 @@ async def _retry_or_fail(
     if only_sending and item.status != "sending":
         return None
     attempts = item.attempts + 1
-    values: dict[str, Any] = {"attempts": attempts, "last_error": error[:2000]}
+    values: dict[str, Any] = {"attempts": attempts, "last_error": _error(error)}
     if attempts < MAX_ATTEMPTS:
         status = "pending"
         delay = BACKOFF_SECONDS[min(attempts - 1, len(BACKOFF_SECONDS) - 1)]
@@ -195,7 +200,7 @@ async def fail(session: AsyncSession, item_id: int, error: str) -> None:
         await session.execute(
             update(OutboxItem)
             .where(OutboxItem.id == item_id, OutboxItem.status.in_(("pending", "sending")))
-            .values(status="failed", attempts=OutboxItem.attempts + 1, last_error=error[:2000])
+            .values(status="failed", attempts=OutboxItem.attempts + 1, last_error=_error(error))
             .returning(OutboxItem.id)
         )
     ).first()
@@ -238,7 +243,7 @@ async def rejected(
     if item is None or item.status != "sent":
         return None
     attempts = item.attempts + 1
-    values: dict[str, Any] = {"attempts": attempts, "last_error": error[:2000], "sent_at": None}
+    values: dict[str, Any] = {"attempts": attempts, "last_error": _error(error), "sent_at": None}
     if retry_after is not None and attempts < MAX_ATTEMPTS:
         values["status"] = "pending"
         values["not_before"] = func.now() + timedelta(seconds=max(retry_after, 0.0))
@@ -274,7 +279,7 @@ async def mark_skipped(session: AsyncSession, item_id: int, reason: str) -> None
     await session.execute(
         update(OutboxItem)
         .where(OutboxItem.id == item_id)
-        .values(status="skipped", last_error=reason[:2000])
+        .values(status="skipped", last_error=_error(reason))
     )
 
 

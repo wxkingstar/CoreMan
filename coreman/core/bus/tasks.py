@@ -209,7 +209,11 @@ async def request_cancel(session: AsyncSession, task_id: int, reason: str) -> bo
         await session.execute(
             update(Task)
             .where(Task.id == task_id, Task.status.in_(OPEN), Task.cancel_requested_at.is_(None))
-            .values(cancel_requested_at=func.now(), cancel_reason=reason)
+            .values(
+                cancel_requested_at=func.now(),
+                # 取消原因不加密（心跳、运维接口、收尾都直接读）：个人助理的行只留代码。
+                cancel_reason=sealed.code_for_assistants(Task.bot_id, reason, "cancelled"),
+            )
             .returning(Task.id)
         )
     ).first()
