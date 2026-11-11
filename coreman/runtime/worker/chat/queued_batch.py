@@ -104,6 +104,7 @@ async def gather(
                 status="cancelled",
                 error_code=MERGED,
                 result={"merged_into": head.id},
+                bot_id=task.bot_id,
             )
     if merged != list(head.payload.get(MERGED) or []) or busy_wait != bool(
         head.payload.get("busy_wait")

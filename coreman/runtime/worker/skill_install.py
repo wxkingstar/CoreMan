@@ -328,6 +328,7 @@ class SkillInstallHandler:
                 status="succeeded",
                 only_active=True,
                 result={"skill_id": str(skill.id)},
+                bot_id=ctx.task.bot_id,
             )
             await session.commit()
 
@@ -344,6 +345,7 @@ class SkillInstallHandler:
                 only_active=True,
                 error_code="skill_install_incomplete",
                 error_message=reason,
+                bot_id=ctx.task.bot_id,
             )
             if row and row.install_task_id == ctx.task.id:
                 row.status, row.install_task_id = "failed", None

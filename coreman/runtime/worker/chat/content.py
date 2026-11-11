@@ -144,6 +144,7 @@ class ContentStage(ChatStageBase):
                 error_code=verdict.error_code,
                 error_message=verdict.error_message,
                 only_active=True,
+                bot_id=ctx.task.bot_id,
             )
             entry = log_entry(
                 ctx,

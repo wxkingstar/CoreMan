@@ -39,7 +39,12 @@ async def _refuse(
 ) -> None:
     """这一轮不做：任务记失败，承接会话里说一句原因（会话里已经有那句「通过 API 发起」）。"""
     await tasks.finish(
-        session, ctx.task.id, status="failed", error_code="api_unavailable", error_message=reason
+        session,
+        ctx.task.id,
+        status="failed",
+        error_code="api_unavailable",
+        error_message=reason,
+        bot_id=ctx.task.bot_id,
     )
     if bot is not None and row is not None:
         await outbox.add(

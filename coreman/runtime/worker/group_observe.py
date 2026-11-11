@@ -412,5 +412,6 @@ class GroupObserveHandler:
             error_code=error_code,
             result=result,
             only_active=True,
+            bot_id=ctx.task.bot_id,
         )
         await session.commit()

@@ -91,7 +91,11 @@ class CardActionHandler:
                 # 流式卡片不经出站箱发出，下面按出站记录核对卡片的那一步不适用；处理器自己核对。
                 result = await handle_live_progress(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -113,14 +117,22 @@ class CardActionHandler:
                 )
                 if sent is None:
                     await tasks.finish(
-                        session, ctx.task.id, status="succeeded", result={"card": "ignored"}
+                        session,
+                        ctx.task.id,
+                        status="succeeded",
+                        result={"card": "ignored"},
+                        bot_id=ctx.task.bot_id,
                     )
                     await session.commit()
                     return
             if bot.platform == "feishu" and task_id.startswith(CARD_PREFIX):
                 result = await handle_credential(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -137,7 +149,11 @@ class CardActionHandler:
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 return
@@ -153,7 +169,11 @@ class CardActionHandler:
                 )
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -163,7 +183,11 @@ class CardActionHandler:
                 if card is not None:
                     await self._reply_card(session, bot, inbound, task_id, card)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -213,7 +237,13 @@ class CardActionHandler:
                         speaker=speaker.platform_user_id,
                         icon=icon,
                     )
-            await tasks.finish(session, ctx.task.id, status="succeeded", result={"card": result})
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"card": result},
+                bot_id=ctx.task.bot_id,
+            )
             await session.commit()
         ctx.log.info("card_action_done", result=result)
 

@@ -260,7 +260,13 @@ class IntakeStage(ChatStageBase):
             return False
         ctx.log.info("announcement_intercepted", announcement_id=str(hit.id))
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=hit.content)
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"announcement": True})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"announcement": True},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _denied(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
@@ -284,7 +290,13 @@ class IntakeStage(ChatStageBase):
             reply_context=intake.inbound.reply_context,
             text=msg("no_permission", ctx.locale),
         )
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"denied": True})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"denied": True},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _command(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
@@ -296,7 +308,11 @@ class IntakeStage(ChatStageBase):
             ctx.log.info("builtin_command", command="api_alias")
             await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=reply)
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"command": "api_alias"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"command": "api_alias"},
+                bot_id=ctx.task.bot_id,
             )
             return True
         command = classify_command(intake.text)
@@ -321,7 +337,13 @@ class IntakeStage(ChatStageBase):
             text = msg("help", ctx.locale)
         ctx.log.info("builtin_command", command=command)
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"command": command})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"command": command},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _pending_answer(
@@ -351,7 +373,11 @@ class IntakeStage(ChatStageBase):
                 text=msg("choice_cancelled", ctx.locale),
             )
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"choice": "cancelled"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"choice": "cancelled"},
+                bot_id=ctx.task.bot_id,
             )
             return True
         state = dict(st.state)
@@ -389,5 +415,11 @@ class IntakeStage(ChatStageBase):
             platform_user_id=intake.speaker.platform_user_id,
             icon_url=await self._icon_url(ctx),
         )
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"choice": "answered"})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"choice": "answered"},
+            bot_id=ctx.task.bot_id,
+        )
         return True

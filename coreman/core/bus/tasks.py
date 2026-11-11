@@ -115,6 +115,7 @@ async def claim(session: AsyncSession, *, lane: str, instance_id: str) -> Task |
             status="failed",
             error_code=sealed.LOCKED_CODE,
             error_message="所有者的数据密钥已销毁，任务内容不可读",
+            bot_id=task.bot_id,
         )
         return None
     return task

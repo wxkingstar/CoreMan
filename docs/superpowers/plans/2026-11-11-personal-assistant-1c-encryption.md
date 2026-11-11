@@ -137,7 +137,16 @@
 
 - 读：先看值是不是封装（`_sealed` 键或 `enc:` 前缀），不是就原样返回，**普通机器人的行零额外开销**。是封装才按行上的 `bot_id` 查所有者。
 - 写：`sealed.owner_of(session, bot_id)` 查 `bots.kind, owner_id`，结果在进程内缓存 60 秒（普通机器人缓存为「不加密」）。六张表都有 `bot_id` 列。
-- `streams.update_state` / `complete`、`tasks.finish` 的参数里没有 `bot_id`：加可选参数 `bot_id`，流式写入的热路径（`stream_writer.py`）传入；没传且确有内容要写时按主键查一次。
+- `streams.update_state` / `complete`、`tasks.finish`、`chat_logs.close_running`、`ChatLogWriter.amend_response` / `submit_amend` 的参数里原本没有 `bot_id`：加可选参数 `bot_id`，调用方把手里已有的传进来；没传且确有内容要写时才按主键查一次（回退）。
+
+### 普通机器人路径上的开销
+
+| 位置 | 开销 |
+|---|---|
+| 读 | 零：值不是封装就原样返回，不查归属 |
+| 写入口（`seal_values`、flush 钩子） | 有内容列要写时查一次归属（`bots.kind, owner_id`，按主键），结果按 `bot_id` 在进程内缓存 60 秒。稳定状态下每个机器人每个进程每分钟最多一条 |
+| `tasks.finish`、`close_running`、`amend_response` | 不多语句。现有调用点（带 `result` 或 `error_message` 的 `tasks.finish` 43 处、`close_running` 3 处、`submit_amend` 1 处）全部传入 `bot_id`，没有拿不到的；回退查询只留作兜底。`tests/integration/test_assistant_standard_overhead.py` 数语句并逐个检查调用点，新增调用点漏传会失败 |
+| `outbox.last_error`、`tasks.cancel_reason` | 值本来就是代码时原样写入；是自由文字时同一条语句里多一个按主键的 `EXISTS` 子查询，不多往返 |
 
 ### 密钥已销毁时各入口的行为
 

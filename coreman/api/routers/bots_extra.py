@@ -305,7 +305,9 @@ async def cancel_switch_job(
         raise forbidden()
     task = await _switch_job(session, bot.id, task_id)
     if task.status == "queued":
-        await tasks.finish(session, task.id, status="cancelled", error_message="已取消")
+        await tasks.finish(
+            session, task.id, status="cancelled", error_message="已取消", bot_id=task.bot_id
+        )
     elif task.status in ACTIVE:
         await tasks.request_cancel(session, task.id, "已取消")
     await session.commit()

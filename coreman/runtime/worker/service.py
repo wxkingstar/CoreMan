@@ -297,6 +297,7 @@ class WorkerService(Service):
                         status="failed",
                         error_code=code,
                         error_message=message,
+                        bot_id=ctx.task.bot_id,
                     )
                     await chat_logs.close_running(
                         session,
@@ -304,6 +305,7 @@ class WorkerService(Service):
                         status="error",
                         error_code=code,
                         error_message=message,
+                        bot_id=ctx.task.bot_id,
                     )
                 stream = await streams.get(session, ctx.task.id)
                 if stream is not None and not stream.is_complete:

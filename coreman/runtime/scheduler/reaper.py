@@ -146,6 +146,7 @@ async def reap_lost_tasks(
             status="failed",
             error_code=LOST_ERROR_CODE,
             error_message=LOST_ERROR_MESSAGE,
+            bot_id=task.bot_id,
         )
         if task.kind == "relay_switch":
             # 切换作业断了：绑定只在最后一个事务里改，员工仍在原运行时上，解除迁移隔离。
@@ -171,6 +172,7 @@ async def reap_lost_tasks(
             status="timeout",
             error_code=LOST_ERROR_CODE,
             error_message=LOST_ERROR_MESSAGE,
+            bot_id=task.bot_id,
         )
         if not closed and writer is not None:
             await writer.write(entry)

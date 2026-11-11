@@ -718,6 +718,7 @@ class CronRunHandler:
                 error_message=detail,
                 result={"cron_run_id": run.id, "status": status},
                 only_active=True,
+                bot_id=task.bot_id,
             )
             bot = await session.get(Bot, task.bot_id)
             actor = await session.get(User, task.user_id) if task.user_id else None

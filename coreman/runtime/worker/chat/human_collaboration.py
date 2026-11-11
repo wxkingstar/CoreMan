@@ -80,6 +80,7 @@ async def consume_reply(
         ctx.task.id,
         status="succeeded",
         result={"human_collaboration_id": str(row.id), "reply": result},
+        bot_id=ctx.task.bot_id,
     )
     ctx.log.info("human_collaboration_reply", collaboration_id=str(row.id), result=result)
     return True

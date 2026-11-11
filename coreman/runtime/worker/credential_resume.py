@@ -206,7 +206,11 @@ class CredentialResumeHandler(ChatTaskHandler):
                 session, bot, row, ANNOUNCED_NOTICE, prefix=f"{hit.content}\n\n"
             )
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"announcement": True}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"announcement": True},
+                bot_id=ctx.task.bot_id,
             )
             return None
         inbound = await load_inbound(session, ctx.task)

@@ -19,5 +19,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
         "](/self-reminders)", "](" + ctx.public_base_url.rstrip("/") + "/self-reminders)"
     )
     await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=reply)
-    await tasks.finish(session, ctx.task.id, status="succeeded", result={"self_reminder": True})
+    await tasks.finish(
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"self_reminder": True},
+        bot_id=ctx.task.bot_id,
+    )
     return True

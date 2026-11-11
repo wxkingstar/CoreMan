@@ -220,6 +220,7 @@ class FinalizeStage(ChatStageBase):
                 error_code=verdict.error_code,
                 error_message=verdict.error_message,
                 only_active=True,
+                bot_id=ctx.task.bot_id,
             )
             collaboration_silent = False
             if owned and intake.bot.platform == "feishu":
@@ -389,7 +390,9 @@ class FinalizeStage(ChatStageBase):
                 replace(entry, response_content=ctx.redact(verdict.final_text))
             )
         elif verdict.final_text != logged_text:
-            ctx.chat_logs.submit_amend(ctx.task.id, ctx.redact(verdict.final_text))
+            ctx.chat_logs.submit_amend(
+                ctx.task.id, ctx.redact(verdict.final_text), bot_id=ctx.task.bot_id
+            )
         ctx.log.info(
             "task_finished",
             status=verdict.log_status,

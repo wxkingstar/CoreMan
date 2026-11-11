@@ -148,6 +148,7 @@ class EscalationMediaHandler:
                 status="succeeded",
                 only_active=True,
                 result={"object_id": str(asset.id)},
+                bot_id=ctx.task.bot_id,
             )
             await session.commit()
 

@@ -117,7 +117,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
     except ValueError as exc:
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=str(exc))
         await tasks.finish(
-            session, ctx.task.id, status="succeeded", result={"personal_connect_denied": True}
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"personal_connect_denied": True},
+            bot_id=ctx.task.bot_id,
         )
         return True
     from coreman.runtime.worker.personal_cards import selection_card
@@ -138,7 +142,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
         },
     )
     await tasks.finish(
-        session, ctx.task.id, status="succeeded", result={"personal_authorization_flow": True}
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"personal_authorization_flow": True},
+        bot_id=ctx.task.bot_id,
     )
     return True
 
