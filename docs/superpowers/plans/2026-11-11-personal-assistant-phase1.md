@@ -12,13 +12,13 @@
 |---|---|---|---|---|
 | 0 | 节点侧前置验证 | 无 | 沙箱方案与出网限制方式定下来 | 本文件「步骤 0」 |
 | 1A | 助理记录与应用凭证 | 无 | 库里能存在助理记录；应用凭证同步；被关闭的能力在服务端拒绝 | `2026-11-11-personal-assistant-1a-records.md` |
-| 1B | 网关：一个应用一条连接 | 1A | 私聊按发送人投递到本人的助理记录；群消息丢弃；进群即退 | 1A 合并后写 |
-| 1C | 加密存储 | 1A | 助理记录的内容列在库里是密文；销毁密钥后不可读 | 1A 合并后写 |
+| 1B | 网关：一个应用一条连接 | 1A | 私聊按发送人投递到本人的助理记录；群消息丢弃；进群即退 | `2026-11-11-personal-assistant-1b-gateway.md` |
+| 1C | 加密存储 | 1A | 助理记录的内容列在库里是密文；销毁密钥后不可读 | `2026-11-11-personal-assistant-1c-encryption.md` |
 | 1D | 审批闸门 | 1A、1C | 写类个人工具不执行，改为 Tower 审批单；批准后原样执行 | 1C 合并后写 |
 | 1E | 节点隔离 | 0、1A、1C | 助理轮次在沙箱里跑；轮次结束后节点上无转录 | 步骤 0 完成且 1C 合并后写 |
 | 1F | 开通与停用 | 1A–1E | 端到端：开通 → 授权 → 办一件事 → 审批 → 执行 → 停用 | 最后写 |
 
-1B、1C 互不依赖，可以并行。后写的子计划在前一份合并后再写，是因为它们要引用前一份落地后的真实接口和行号。
+1B、1C 互不依赖，可以并行；两份计划的迁移分别写作 `0086`、`0087`，开工时按当时的迁移头顺延。1D–1F 在前面的合并后再写，因为它们要引用落地后的真实接口和行号。
 
 ## 子计划之间的接口
 
@@ -34,6 +34,8 @@
 | 1B | `coreman.core.assistants.routing.assistant_for(session, app_id, user_id) -> Bot \| None` | 按发送人找助理记录 |
 | 1C | `coreman.core.assistants.keys.data_cipher(session, cipher, owner_id) -> Cipher` | 取某人的数据密钥对应的加解密器 |
 | 1C | `coreman.core.assistants.keys.destroy_key(session, owner_id) -> None` | 1F 停用时销毁 |
+| 1C | `coreman.core.assistants.keys.ensure_key(session, cipher, owner_id)` | 1F 开通时签发；在已销毁的行上签发下一代 |
+| 1B | `AssistantInbound.on_unprovisioned(session, *, platform_user_id, user_id, raw)` | 没有助理记录的人私聊时的钩子，1F 在这里发开通卡片 |
 | 1D | 表 `assistant_approvals`；`coreman.core.assistants.approvals.submit(...)`、`withdraw_pending(session, bot_id, reason) -> int` | 1F 停用时撤回待批 |
 | 1E | 节点守护进程接口：轮次请求带 `sandbox: true` 与 `transcript` 下发、轮次结束回传 | 1F 端到端依赖 |
 
