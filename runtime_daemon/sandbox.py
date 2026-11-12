@@ -217,6 +217,23 @@ class Launch:
     system: Sequence[str] = field(default_factory=system_mounts)
 
 
+def _ro_roots(launch: Launch) -> list[Path]:
+    roots = [Path(p) for p in launch.ro_paths]
+    system = list(launch.system)
+    roots += [Path(system[i + 1]) for i, arg in enumerate(system[:-1]) if arg == "--ro-bind"]
+    return roots
+
+
+def _check_mounts(launch: Launch) -> None:
+    """只读挂载根等于或包含轮次目录、socket 目录、工作目录时拒绝（会连带暴露别的轮次的凭证副本）。"""
+    layout = launch.layout
+    guarded = [p.resolve() for p in (layout.root.parent, layout.run.parent, Path(launch.workdir))]
+    for root in _ro_roots(launch):
+        real = root.resolve()
+        if any(real == g or real in g.parents for g in guarded):
+            raise ValueError("unsafe_mount")
+
+
 def bwrap_argv(launch: Launch, command: Sequence[str]) -> list[str]:
     """bubblewrap 的完整参数。顺序有讲究：先建目录骨架，再挂可写目录，最后把凭据只读盖上去。
 
@@ -224,6 +241,7 @@ def bwrap_argv(launch: Launch, command: Sequence[str]) -> list[str]:
     bwrap 进程的全部环境启动它，沙箱里的进程原样继承，守护进程自己的环境一个都不带进去。
     """
     layout = launch.layout
+    _check_mounts(launch)
     args = [
         launch.bwrap,
         "--die-with-parent",
@@ -291,24 +309,30 @@ def private_dir(path: Path, uid: int | None = None) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_uid == owner and info.st_mode & 0o077 == 0
 
 
-# 自检在沙箱里跑的检查：看不见的路径、写不进的系统目录、直连外网失败（192.0.2.1 是文档保留
-# 地址，没有路由时立即失败，不会真的发出包）、经转发口能连到守护进程这一侧。
+# 自检在沙箱里跑的检查（参数：转发口端口、JSON {"hidden": [...], "ro": [...]}）：
+# - hidden：这些路径在沙箱里不存在（主机上存在与否由调用方先核对）；
+# - readonly：每个存在的只读挂载点都带只读标志，且至少核对了一个；
+# - offline：网络命名空间里只有 lo，且直连外网立即以 ENETUNREACH 失败（超时、连通、
+#   其他错误都算没隔离）；192.0.2.1 是文档保留地址，空命名空间里没有路由，不会发出包；
+# - bridge：经转发口能连到守护进程这一侧；
+# - umask：沙箱里的进程能把 umask 设成 077。
 _PROBE = r"""
-import json, os, socket, sys
-port, hidden = int(sys.argv[1]), sys.argv[2:]
-out = {"hidden": all(not os.path.exists(p) for p in hidden)}
+import errno, json, os, socket, sys
+port, spec = int(sys.argv[1]), json.loads(sys.argv[2])
+out = {"hidden": all(not os.path.exists(p) for p in spec["hidden"])}
 mask = os.umask(0o077)
 out["umask"] = mask & 0o077 == 0o077
+checked = [p for p in spec["ro"] if os.path.exists(p)]
+out["readonly"] = bool(checked) and all(os.statvfs(p).f_flag & os.ST_RDONLY for p in checked)
 try:
-    open("/usr/.coreman-probe", "w").close()
-    out["readonly"] = False
+    only_lo = all(name == "lo" for _, name in socket.if_nameindex())
+    try:
+        socket.create_connection(("192.0.2.1", 443), timeout=3).close()
+        out["offline"] = False
+    except OSError as exc:
+        out["offline"] = only_lo and exc.errno == errno.ENETUNREACH
 except OSError:
-    out["readonly"] = True
-try:
-    socket.create_connection(("192.0.2.1", 443), timeout=3).close()
     out["offline"] = False
-except OSError:
-    out["offline"] = True
 try:
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
     s.sendall(b"CONNECT probe.invalid:443 HTTP/1.1\r\n\r\n")
@@ -398,13 +422,23 @@ def self_test(
     if not bwrap:
         return SelfTestResult(providers, "bwrap_missing")
     layout = TurnLayout.new(inputs.turns_dir, inputs.socket_dir)
-    layout.create()
-    if not all(private_dir(p) for p in (*inputs.private, inputs.turns_dir, inputs.socket_dir)):
-        layout.remove()
-        return SelfTestResult(providers, "private_dir_check_failed")
-    work = Path(tempfile.mkdtemp(dir=layout.root))
     denier = None
     try:
+        try:
+            layout.create()
+        except OSError:
+            return SelfTestResult(providers, "layout_failed")
+        if not all(private_dir(p) for p in (*inputs.private, inputs.turns_dir, inputs.socket_dir)):
+            return SelfTestResult(providers, "private_dir_check_failed")
+        try:
+            for path in inputs.hidden:
+                os.stat(path)
+        except OSError:
+            return SelfTestResult(providers, "hidden_check_failed")
+        try:
+            work = Path(tempfile.mkdtemp(dir=layout.root))
+        except OSError:
+            return SelfTestResult(providers, "layout_failed")
         bridge = inputs.release / "runtime_daemon" / "sandbox_bridge.py"
         ro = [inputs.release, Path(sys.base_prefix), *inputs.extra_ro]
 
@@ -431,8 +465,11 @@ def self_test(
             if run("claude", ["true"]).returncode != 0:
                 return SelfTestResult(providers, "sandbox_start_failed")
             denier = _DenyAll(layout.egress_socket)
-            hidden = [str(p) for p in inputs.hidden]
-            check = [inputs.python, "-I", "-c", _PROBE, str(BRIDGE_PORT), *hidden]
+            spec = {
+                "hidden": [str(p) for p in inputs.hidden],
+                "ro": [str(p) for p in ro],
+            }
+            check = [inputs.python, "-I", "-c", _PROBE, str(BRIDGE_PORT), json.dumps(spec)]
             probe = run("claude", bridge_command(inputs.python, bridge, check))
             try:
                 checks = json.loads(probe.stdout.strip().splitlines()[-1])
@@ -446,6 +483,9 @@ def self_test(
                 if mounts and link_cli(layout, provider):
                     result = run(provider, [provider, "--version"], mounts)
                     providers[provider] = result.returncode == 0
+        except ValueError as exc:
+            code = "unsafe_mount" if str(exc) == "unsafe_mount" else "probe_failed"
+            return SelfTestResult(dict.fromkeys(PROVIDERS, False), code)
         except (OSError, subprocess.SubprocessError):
             return SelfTestResult(dict.fromkeys(PROVIDERS, False), "sandbox_start_failed")
         return SelfTestResult(providers, "" if any(providers.values()) else "cli_unavailable")

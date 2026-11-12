@@ -170,6 +170,7 @@ def test_bridge_and_driver_commands_point_inside_the_turn():
 
 def inputs(tmp_path: Path) -> sandbox.SelfTestInputs:
     sockets = Path(tempfile.mkdtemp(dir="/tmp"))
+    (tmp_path / "projects").mkdir(exist_ok=True)
     return sandbox.SelfTestInputs(
         turns_dir=tmp_path / "turns",
         socket_dir=sockets,
@@ -220,7 +221,7 @@ def test_self_test_marks_providers_whose_cli_runs(tmp_path, monkeypatch):
     assert result.providers == {"claude": True, "codex": False}
     assert result.code == ""
     probe = next(c for c in calls if "-c" in c)
-    assert str(tmp_path / "projects") in probe
+    assert str(tmp_path / "projects") in probe[-1]
     assert all("--unshare-all" in c for c in calls)
     assert not (tmp_path / "turns").exists() or not any((tmp_path / "turns").iterdir())
 
@@ -292,3 +293,105 @@ def test_self_test_fails_when_a_private_dir_is_open(tmp_path, monkeypatch):
     )
     assert result.code == "private_dir_check_failed" and not any(result.providers.values())
     assert calls == []
+
+
+def test_probe_offline_needs_an_empty_namespace_and_enetunreach():
+    src = sandbox._PROBE
+    assert "if_nameindex" in src and "ENETUNREACH" in src
+
+
+def test_probe_readonly_checks_mount_flags_not_a_write():
+    src = sandbox._PROBE
+    assert "ST_RDONLY" in src and ".coreman-probe" not in src
+
+
+def run_probe(spec: dict, ro_ok_port: int = 1) -> dict:
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", sandbox._PROBE, str(ro_ok_port), json.dumps(spec)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_probe_readonly_fails_without_any_checked_path_and_on_writable_ones(tmp_path):
+    assert run_probe({"hidden": [], "ro": [str(tmp_path / "nope")]})["readonly"] is False
+    assert run_probe({"hidden": [], "ro": [str(tmp_path)]})["readonly"] is False
+
+
+def test_probe_offline_is_not_proven_by_a_host_network_namespace():
+    # 测试进程在主机网络里（有 lo 以外的接口，或连得出去/超时）：不能判为隔离。
+    import socket
+
+    if all(name == "lo" for _, name in socket.if_nameindex()):
+        pytest.skip("本机没有 lo 以外的接口")
+    assert run_probe({"hidden": [], "ro": []})["offline"] is False
+
+
+def test_bwrap_refuses_ro_roots_that_contain_turn_or_work_dirs(tmp_path):
+    built = layout(tmp_path)
+    try:
+        work = tmp_path / "work"
+        work.mkdir()
+        for bad in (built.root.parent, built.run.parent, work, tmp_path):
+            launch = sandbox.Launch(
+                bwrap="/usr/bin/bwrap",
+                layout=built,
+                workdir=work,
+                provider="claude",
+                env={},
+                ro_paths=[bad],
+                system=[],
+            )
+            with pytest.raises(ValueError, match="unsafe_mount"):
+                sandbox.bwrap_argv(launch, ["true"])
+        system = sandbox.Launch(
+            bwrap="/usr/bin/bwrap",
+            layout=built,
+            workdir=work,
+            provider="claude",
+            env={},
+            system=["--ro-bind", str(tmp_path), str(tmp_path)],
+        )
+        with pytest.raises(ValueError, match="unsafe_mount"):
+            sandbox.bwrap_argv(system, ["true"])
+    finally:
+        built.remove()
+
+
+def test_self_test_turns_unsafe_mount_into_a_code(tmp_path, monkeypatch):
+    runner, calls = fake_runner(ALL_GOOD)
+    base = inputs(tmp_path)
+    result = sandbox.self_test(
+        sandbox.SelfTestInputs(**{**base.__dict__, "extra_ro": [tmp_path]}),
+        system_name="Linux",
+        bwrap="/usr/bin/bwrap",
+        runner=runner,
+    )
+    assert result.code == "unsafe_mount" and not any(result.providers.values())
+    assert calls == []
+
+
+def test_self_test_requires_hidden_paths_to_exist_on_the_host(tmp_path):
+    runner, calls = fake_runner(ALL_GOOD)
+    base = inputs(tmp_path)
+    result = sandbox.self_test(
+        sandbox.SelfTestInputs(**{**base.__dict__, "hidden": [tmp_path / "typo"]}),
+        system_name="Linux",
+        bwrap="/usr/bin/bwrap",
+        runner=runner,
+    )
+    assert result.code == "hidden_check_failed" and calls == []
+    assert not (tmp_path / "turns").exists() or not any((tmp_path / "turns").iterdir())
+
+
+def test_self_test_returns_layout_failed_instead_of_raising(tmp_path):
+    runner, calls = fake_runner(ALL_GOOD)
+    base = inputs(tmp_path)
+    missing = sandbox.SelfTestInputs(
+        **{**base.__dict__, "socket_dir": tmp_path / "no" / "such" / "dir"}
+    )
+    result = sandbox.self_test(missing, system_name="Linux", bwrap="/usr/bin/bwrap", runner=runner)
+    assert result.code == "layout_failed" and calls == []
+    assert not (tmp_path / "turns").exists() or not any((tmp_path / "turns").iterdir())
