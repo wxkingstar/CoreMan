@@ -17,18 +17,26 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints, ValidationError
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import is_assistant
-from coreman.core.bus import tasks
+from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.cloud_proxy.resume import clean_reason
+from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import AssistantApproval, Bot, InboundEvent, User, UserIdentity
+from coreman.core.db.models import (
+    AssistantApproval,
+    Bot,
+    InboundEvent,
+    User,
+    UserIdentity,
+    UserReached,
+)
 from coreman.core.db.models.storage import StoredObject
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
@@ -792,3 +800,146 @@ async def listing(
             }
         )
     return {"items": items}
+
+
+REMIND_SETTLE = timedelta(seconds=30)
+REMIND_GAP = timedelta(minutes=5)
+EXPIRE_BATCH = 50
+SWEEP_BATCH = 50
+
+
+async def withdraw_pending(session: AsyncSession, bot_id: uuid.UUID, reason: str) -> int:
+    """撤回这个助理全部待批的单（停用流程用），返回撤了几张。调用方负责提交。
+
+    不往助理会话投结果：它正在被停用。`reason` 只留开头的代码，存进 `error_code`。
+    """
+    cfg = tower.config(get_settings())
+    rows = list(
+        await session.scalars(
+            select(AssistantApproval)
+            .where(AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
+            .with_for_update()
+        )
+    )
+    now = utcnow()
+    for row in rows:
+        row.status, row.decided_at = "withdrawn", now
+        row.error_code = sealed.code_only(reason, "withdrawn")
+        await _withdraw_remote(cfg, row)
+    return len(rows)
+
+
+async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None) -> int:
+    """72 小时没人处理的单按撤回处理，并告诉助理。"""
+    rows = list(
+        await session.scalars(
+            select(AssistantApproval)
+            .where(AssistantApproval.status == "pending", AssistantApproval.expires_at <= now)
+            .order_by(AssistantApproval.expires_at)
+            .limit(EXPIRE_BATCH)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for row in rows:
+        row.status, row.decided_at = "expired", now
+        await _withdraw_remote(cfg, row)
+        bot = await session.get(Bot, row.bot_id)
+        if bot is not None and bot.enabled:
+            await deliver(session, row, bot)
+    return len(rows)
+
+
+async def remind(session: AsyncSession, now: datetime, link: str) -> int:
+    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。"""
+    waiting = (
+        await session.execute(
+            select(AssistantApproval.bot_id, func.min(AssistantApproval.created_at))
+            .where(AssistantApproval.status == "pending", AssistantApproval.notified_at.is_(None))
+            .group_by(AssistantApproval.bot_id)
+        )
+    ).all()
+    sent = 0
+    for bot_id, oldest in waiting:
+        if oldest > now - REMIND_SETTLE:
+            # 同一轮里可能还在接着提交：等这一批落定再合成一条。
+            continue
+        last = await session.scalar(
+            select(func.max(AssistantApproval.notified_at)).where(
+                AssistantApproval.bot_id == bot_id
+            )
+        )
+        if last is not None and last > now - REMIND_GAP:
+            continue
+        bot = await session.get(Bot, bot_id)
+        reached = (
+            await session.get(UserReached, (bot_id, bot.owner_id))
+            if bot is not None and bot.enabled and bot.owner_id is not None
+            else None
+        )
+        if bot is None or reached is None:
+            continue
+        count = await session.scalar(
+            select(func.count())
+            .select_from(AssistantApproval)
+            .where(AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
+        )
+        await outbox.add(
+            session,
+            bot_id=bot_id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"assistant-approvals:{bot_id}:{int(now.timestamp())}",
+            target={"chat_id": reached.platform_chat_id},
+            payload={"markdown": f"有 {count} 张审批单等你处理：{link}"},
+        )
+        await session.execute(
+            update(AssistantApproval)
+            .where(
+                AssistantApproval.bot_id == bot_id,
+                AssistantApproval.status == "pending",
+                AssistantApproval.notified_at.is_(None),
+            )
+            .values(notified_at=now)
+        )
+        sent += 1
+    return sent
+
+
+async def sweep_files(session: AsyncSession, store: attachments.Store | None) -> int:
+    """删掉已有结论的单留在临时桶里的附件，返回清理了几张单。
+
+    不在决定、撤回、执行的路径上删：那些地方握着行锁或赶着应答回调。删不掉的下一轮再试；
+    数据密钥已销毁时读不出对象名，只能交给桶的自动清理。
+    """
+    if store is None:
+        return 0
+    rows = list(
+        await session.scalars(
+            select(AssistantApproval)
+            .where(AssistantApproval.has_files.is_(True), AssistantApproval.status.not_in(LIVE))
+            .order_by(AssistantApproval.created_at)
+            .limit(SWEEP_BATCH)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    await sealed.open_rows(session, rows)
+    done = 0
+    for row in rows:
+        if await attachments.delete(store, _file_keys(row)):
+            row.has_files = False
+            done += 1
+    return done
+
+
+async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
+    """scheduler 每轮调用：过期、提醒、清理附件、收口执行中断的单。没配审批系统时都不会有数据。"""
+    from coreman.core.assistants.approvals import execute  # execute 依赖本模块，延迟导入
+
+    settings = get_settings()
+    cfg = tower.config(settings)
+    return {
+        "assistant_approvals_expired": await expire(session, now, cfg),
+        "assistant_approvals_reminded": await remind(session, now, settings.tower_url or ""),
+        "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
+        "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
+    }

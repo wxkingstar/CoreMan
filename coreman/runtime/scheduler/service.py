@@ -232,6 +232,11 @@ class SchedulerService(Service):
                 async with self._factory() as session:
                     counts["approval_resumes"] = await approval_tick(session, now)
                     await session.commit()
+                from coreman.core.assistants.approvals.service import tick as assistant_tick
+
+                async with self._factory() as session:
+                    counts.update(await assistant_tick(session, now))
+                    await session.commit()
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds
