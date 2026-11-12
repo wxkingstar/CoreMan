@@ -12,6 +12,7 @@ from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantApproval,
     ChatLog,
+    CloudPendingApproval,
     FeishuDelivery,
     FeishuSentMessage,
     InboundEvent,
@@ -41,10 +42,12 @@ def test_every_content_column_is_registered() -> None:
         FeishuDelivery,
         InteractionState,
         AssistantApproval,
+        CloudPendingApproval,
     }
     assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
     assert set(sealed.COLUMNS[InteractionState]) == {"state"}
     assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}
+    assert set(sealed.COLUMNS[CloudPendingApproval]) == {"reason"}
     assert set(sealed.COLUMNS[Task]) == {"payload", "result", "error_message"}
     assert set(sealed.COLUMNS[FeishuSentMessage]) == {"text"}
     assert set(sealed.COLUMNS[TaskStream]) == {

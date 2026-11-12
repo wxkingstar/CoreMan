@@ -38,6 +38,9 @@ ENTITY_SELECTS = {
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
     "coreman/core/chat/bot_collaboration.py": 2,  # 群协作；只读状态与时间
+    "coreman/core/cloud_proxy/decisions.py": 1,  # 云服务审批：session.scalar，自动还原
+    "coreman/core/cloud_proxy/resume.py": 1,  # 定时来源的续跑：助理没有定时任务
+    "coreman/core/cloud_proxy/service.py": 1,  # 只读状态与编号
     "coreman/core/chat/busy_choice.py": 1,  # 只读状态与时间
     "coreman/core/chat/collaboration_setup.py": 1,  # 群协作
     "coreman/core/chat/human_collaboration.py": 2,  # session.scalar，自动还原
@@ -106,6 +109,8 @@ WRITE_STATEMENTS = {
     # 其余只写状态
     "coreman/core/chat/interactions.py": 5,
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
+    # 云服务审批的挂起单：新建时没有理由；另一条只写状态。理由经 ORM 写入，flush 钩子封存
+    "coreman/core/cloud_proxy/service.py": 2,
     "coreman/core/feishu_docs/confirm.py": 1,  # 群聊写入确认：经 ORM 新建，flush 钩子封存
     "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存
     # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）

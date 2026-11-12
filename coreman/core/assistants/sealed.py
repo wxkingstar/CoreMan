@@ -42,6 +42,7 @@ from coreman.core.db.models import (
     AssistantApproval,
     Bot,
     ChatLog,
+    CloudPendingApproval,
     FeishuDelivery,
     FeishuSentMessage,
     InboundEvent,
@@ -169,6 +170,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     InteractionState: {"state": JsonSpec(plain=frozenset({"user_id"}))},
     # 审批闸门：暂存的参数（连同摘要与助理写的说明）、审批人的话、执行结果。
     AssistantApproval: {"args_enc": Whole(), "reason_enc": Text(), "result_enc": Whole()},
+    # 云服务审批的拒绝理由：审批人写给这位所有者的话。
+    CloudPendingApproval: {"reason": Text()},
 }
 
 
