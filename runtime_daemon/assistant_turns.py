@@ -66,7 +66,10 @@ MESSAGES = {
     "credential_expiring": "节点上的登录令牌即将到期，等普通轮次刷新后再试",
     "transcript_unavailable": "取不到这个会话的转录",
     "workdir_missing": "工作目录已不在原处",
+    "workdir_busy": "工作目录正在删除或存储没有响应，稍后再试",
 }
+# 准入在事件循环上取锁：删除线程可能卡在挂死的网络存储上改名、一直占着它，最多等这么久就拒绝这一轮。
+ADMISSION_TIMEOUT = 5.0
 
 
 def ai_proxy() -> str | None:
@@ -511,7 +514,10 @@ class AssistantTurns:
             await self.refuse(frames, refused, plan.transfer)
             return
         layout = sandbox.TurnLayout.new(self.turns_dir, self.daemon.socket_dir)
-        with self.admission:
+        if not self.admission.acquire(timeout=ADMISSION_TIMEOUT):
+            await self.refuse(frames, "workdir_busy", plan.transfer)
+            return
+        try:
             # 检查请求之后目录可能已被删除改名进回收站：在删除用的同一把锁里登记并核对。
             try:
                 present = stat.S_ISDIR(os.lstat(plan.workdir).st_mode)
@@ -519,6 +525,8 @@ class AssistantTurns:
                 present = False
             if present:
                 self.workdirs[layout.turn_id] = plan.workdir
+        finally:
+            self.admission.release()
         if not present:
             await self.refuse(frames, "workdir_missing", plan.transfer)
             return

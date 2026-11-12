@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -302,13 +303,114 @@ def test_remove_leaves_a_directory_that_was_swapped_for_another(agent, tmp_path)
     assert (p / "file").read_text() == "not the registered directory"
 
 
-def test_remove_falls_back_to_the_marker_without_a_record(agent):
+@pytest.mark.parametrize("missing", ["owners", "record"])
+def test_remove_never_trusts_the_marker_without_a_record(agent, missing):
+    """标记在沙箱里写得到：没有登记就认不准，标记写着本助理也不删。"""
     agent.assistant_only = True
     call(agent, "init", content="x")
-    shutil.rmtree(agent.root / workspace.OWNERS_DIR)
-    assert call(agent, "remove") == {"success": True, "removed": True, "existed": True}
+    if missing == "owners":
+        shutil.rmtree(agent.root / workspace.OWNERS_DIR)
+    else:
+        record_of(agent).unlink()
+    assert workspace.marker_data(agent.root / "one")["bot_id"] == "b1"
+    assert call(agent, "remove") == UNVERIFIED
+    assert (agent.root / "one" / workspace.MARKER).exists()
+    assert not os.path.lexists(record_of(agent))
+    assert not os.path.lexists(agent.root / workspace.TRASH_DIR)
+
+
+# ---- 网络存储报错：只有确知不存在才算不存在 ----------------------------------------------
+
+
+def remover(agent) -> workspace.Workspace:
+    return workspace.Workspace(
+        agent, {"type": "workspace-remove", "working_dir": "one", "bot_id": "b1"}
+    )
+
+
+def failing(monkeypatch, name, target, error):
+    real = getattr(os, name)
+
+    def fake(path, *a, **kw):
+        if os.fspath(path) == os.fspath(target):
+            raise error
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(workspace.os, name, fake)
+
+
+STORAGE_ERRORS = [
+    OSError(errno.ESTALE, "stale"),
+    OSError(errno.EIO, "io"),
+    PermissionError(errno.EACCES, "denied"),
+    NotADirectoryError(errno.ENOTDIR, "not a directory"),
+]
+
+
+@pytest.mark.parametrize("error", STORAGE_ERRORS)
+def test_remove_cannot_vouch_when_the_directory_cannot_be_looked_at(agent, monkeypatch, error):
+    """登记读得到、目录 lstat 报错（网络存储 ESTALE / EIO / 没权限）：不算已删除，什么都不动。"""
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    before = record_of(agent).read_bytes()
+    ws = remover(agent)
+    failing(monkeypatch, "lstat", ws.root, error)
+    assert ws.remove() == {"removed": False, "existed": True, "unverified": True}
+    monkeypatch.undo()
+    assert record_of(agent).read_bytes() == before
+    assert (agent.root / "one").is_dir()
+    assert not os.path.lexists(agent.root / workspace.TRASH_DIR)
+
+
+@pytest.mark.parametrize("call_name", ["lstat", "open"])
+@pytest.mark.parametrize("error", STORAGE_ERRORS[:3])
+def test_remove_cannot_vouch_when_the_record_cannot_be_read(agent, monkeypatch, call_name, error):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    before = record_of(agent).read_bytes()
+    ws = remover(agent)
+    failing(monkeypatch, call_name, record_of(agent), error)
+    assert ws.remove() == {"removed": False, "existed": True, "unverified": True}
+    monkeypatch.undo()
+    assert record_of(agent).read_bytes() == before
+    assert (agent.root / "one").is_dir()
+
+
+@pytest.mark.parametrize("error", STORAGE_ERRORS[:3])
+def test_remove_of_a_missing_directory_with_an_unreadable_record_is_not_final(
+    agent, monkeypatch, error
+):
+    """目录确实不在，登记却读不了：不能当「已删除」，也不写墓碑。"""
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    shutil.rmtree(agent.root / "one")
+    before = record_of(agent).read_bytes()
+    ws = remover(agent)
+    failing(monkeypatch, "lstat", record_of(agent), error)
+    assert ws.remove() == {"removed": False, "existed": False, "unverified": True}
+    monkeypatch.undo()
+    assert record_of(agent).read_bytes() == before
+
+
+def test_read_record_tells_no_record_from_an_unreadable_one(tmp_path, monkeypatch):
+    record = tmp_path / "record"
+    assert workspace.read_record(record) is None
+    record.write_text('{"bot_id": "b1", "ino": 1}')
+    assert workspace.read_record(record) == {"bot_id": "b1", "ino": 1}
+    failing(monkeypatch, "lstat", record, OSError(errno.EIO, "io"))
+    with pytest.raises(workspace.RecordUnreadable):
+        workspace.read_record(record)
+
+
+def test_assistant_init_fails_when_the_registry_cannot_be_read(agent, monkeypatch):
+    agent.assistant_only = True
+    workspace.owners_dir(agent.root)
+    failing(monkeypatch, "lstat", record_of(agent), OSError(errno.ESTALE, "stale"))
+    with pytest.raises(OperationError, match="登记"):
+        call(agent, "init", content="x")
+    monkeypatch.undo()
     assert not os.path.lexists(agent.root / "one")
-    assert json.loads(record_of(agent).read_text()) == {"bot_id": "b1", "removed": True}
+    assert not os.path.lexists(record_of(agent))
 
 
 def test_remove_of_a_directory_deleted_by_hand_is_final(agent):
@@ -421,6 +523,24 @@ def test_old_tombstones_are_swept_and_nothing_else(agent, tmp_path):
     assert outside.exists()
 
 
+def test_old_leftover_temporary_files_are_swept_too(agent, tmp_path):
+    """写登记中途崩了留下的 `.tmp-*`：30 天之后清扫一并删掉，链接与目录不碰。"""
+    owners = workspace.owners_dir(agent.root)
+    old = time.time() - workspace.TOMBSTONE_SECONDS - 60
+    (owners / ".tmp-old").write_text('{"bot_id": "b1", "ino": 5}')
+    (owners / ".tmp-new").write_text('{"bot_id": "b1", "ino": 5}')
+    (owners / ".tmp-dir").mkdir()
+    outside = tmp_path / "outside-tmp"
+    outside.write_text("x")
+    (owners / ".tmp-link").symlink_to(outside)
+    for name in (".tmp-old", ".tmp-dir"):
+        os.utime(owners / name, (old, old))
+    os.utime(owners / ".tmp-link", (old, old), follow_symlinks=False)
+    workspace.purge_tombstones(agent.root)
+    assert sorted(p.name for p in owners.iterdir()) == [".tmp-dir", ".tmp-link", ".tmp-new"]
+    assert outside.exists()
+
+
 def test_purging_tombstones_without_a_registry_creates_nothing(agent):
     workspace.purge_tombstones(agent.root)
     assert not os.path.lexists(agent.root / workspace.OWNERS_DIR)
@@ -441,8 +561,8 @@ def test_remove_refuses_an_owners_directory_that_is_a_link(agent, tmp_path):
     elsewhere = tmp_path / "elsewhere"
     owners.rename(elsewhere)
     owners.symlink_to(elsewhere)
-    with pytest.raises(OperationError, match="工作区操作失败"):
-        call(agent, "remove")
+    # 登记目录不对劲不等于「没有登记」：认不准，什么都不动。
+    assert call(agent, "remove") == UNVERIFIED
     assert (agent.root / "one").is_dir()
 
 
@@ -451,8 +571,7 @@ def test_remove_refuses_an_owners_directory_that_is_not_ours(agent, monkeypatch)
     call(agent, "init", content="x")
     uid = os.getuid()
     monkeypatch.setattr(workspace.os, "getuid", lambda: uid + 1)
-    with pytest.raises(OperationError, match="工作区操作失败"):
-        call(agent, "remove")
+    assert call(agent, "remove") == UNVERIFIED
     assert (agent.root / "one").is_dir()
 
 

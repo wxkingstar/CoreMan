@@ -838,11 +838,12 @@ async def test_a_turn_registers_its_workdir_under_the_admission_lock(tmp_path, m
             self.inner = threading.Lock()
             self.held = False
 
-        def __enter__(self):
-            self.inner.acquire()
-            self.held = True
+        def acquire(self, timeout: float = -1) -> bool:
+            got = self.inner.acquire(timeout=timeout)
+            self.held = got
+            return got
 
-        def __exit__(self, *exc):
+        def release(self) -> None:
             self.held = False
             self.inner.release()
 
@@ -870,8 +871,50 @@ async def test_a_turn_registers_its_workdir_under_the_admission_lock(tmp_path, m
     assert ("register", False) not in held
 
 
+async def test_a_turn_is_refused_when_the_admission_lock_stays_taken(tmp_path, monkeypatch):
+    """删除线程在挂死的网络存储上改名、一直占着锁：准入只等一小会儿，然后拒绝这一轮，不卡住事件循环。"""
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    monkeypatch.setattr(assistant_turns, "ADMISSION_TIMEOUT", 0.05)
+    turns.admission.acquire()
+    try:
+        frames = Frames()
+        await asyncio.wait_for(turns.run("call-1", "claude", request(tmp_path), frames), 5)
+    finally:
+        turns.admission.release()
+    assert frames.events[0][2]["status_code"] == 503
+    assert json.loads(frames.events[0][1])["error"]["code"] == "workdir_busy"
+    assert platform.uploads == [("unchanged", b"")]
+    assert turns.workdirs == {} and turns.active == set()
+    # 锁放开之后照常准入，准入用完锁也放回去了。
+    await turns.run("call-2", "claude", request(tmp_path), Frames())
+    assert turns.admission.acquire(blocking=False)
+    turns.admission.release()
+
+
+async def test_admission_releases_the_lock_when_the_check_fails(tmp_path, monkeypatch):
+    turns = make(tmp_path, Platform())
+    fake_sandbox(turns, monkeypatch)
+
+    real_lstat = assistant_turns.os.lstat
+
+    def lstat(path, *a, **kw):
+        # 只在准入的核对里出错（检查请求时 plan_turn 也会 lstat，那在锁外）。
+        if turns.admission.locked():
+            raise RuntimeError("synthetic")
+        return real_lstat(path, *a, **kw)
+
+    monkeypatch.setattr(assistant_turns.os, "lstat", lstat)
+    with pytest.raises(RuntimeError):
+        await turns.run("call-1", "claude", request(tmp_path), Frames())
+    assert turns.admission.acquire(blocking=False)
+    turns.admission.release()
+
+
 def test_the_new_refusal_code_has_a_message():
     assert "workdir_missing" in assistant_turns.MESSAGES
+    assert "workdir_busy" in assistant_turns.MESSAGES
 
 
 async def test_the_sweep_purges_old_tombstones(tmp_path, monkeypatch):

@@ -167,11 +167,46 @@ def record_name(path):
     return hashlib.sha256(os.fsencode(str(path))).hexdigest()
 
 
+class RecordUnreadable(Exception):
+    """归属登记读不了（网络存储报 ESTALE、EIO、没权限等）。
+
+    说不清有没有、记着谁，调用方只能当认不准。
+    """
+
+
 def read_record(record):
-    """归属登记的内容：没有登记返回 None；有但读不了、不像样返回空字典（谁的都不算）。"""
-    if not os.path.lexists(record):
+    """归属登记的内容。
+
+    只有确知不存在（ENOENT）才返回 None（没有登记）；在但不是普通文件、太大、不像样返回空字典
+    （谁的都不算）；别的读取错误抛 RecordUnreadable——不能把读不了当成没有。
+    """
+    try:
+        info = os.lstat(record)
+    except FileNotFoundError:
         return None
-    return parse_object(read_small(record))
+    except OSError as exc:
+        raise RecordUnreadable(type(exc).__name__) from None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MARKER_LIMIT:
+        return {}
+    raw = read_small(record)
+    if raw is None:
+        raise RecordUnreadable("read")
+    return parse_object(raw)
+
+
+def lookup_record(root, name):
+    """工作目录根下名为 `name` 的归属登记，只读不建。
+
+    `.coreman-owners` 确知不存在等同没有登记（None）；它在但打不开、不对劲（链接、不是本用户的），
+    或登记本身读不了，都抛 RecordUnreadable。
+    """
+    try:
+        owners = owners_dir(root, create=False)
+    except OSError as exc:
+        raise RecordUnreadable(type(exc).__name__) from None
+    if owners is None:
+        return None
+    return read_record(owners / name)
 
 
 def write_record(record, data):
@@ -219,9 +254,10 @@ def registered_to(data, bot, info):
 
 
 def purge_tombstones(root, now=None):
-    """删掉归属登记里超过 TOMBSTONE_SECONDS 的墓碑。
+    """删掉归属登记里超过 TOMBSTONE_SECONDS 的墓碑，以及同样旧的 `.tmp-*`（write_record 中途崩了
+    留下的临时文件）。
 
-    别的一概不动，不跟随链接，没有登记目录就不建。
+    别的一概不动，只删普通文件、不跟随链接，没有登记目录就不建。
     """
     owners = owners_dir(root, create=False)
     if owners is None:
@@ -233,6 +269,9 @@ def purge_tombstones(root, now=None):
         try:
             info = entry.stat(follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            if entry.name.startswith(".tmp-"):
+                os.unlink(entry.path)
                 continue
             data = parse_object(read_small(entry.path))
             if data.get("removed") is True and "ino" not in data:
@@ -536,14 +575,18 @@ class Workspace:
             # 全新目录：在目录之外登记归属，删除时认这条登记。登记着别的员工、且就是眼前这个空目录
             # 的，不接管；墓碑不挡（那个目录已经删掉了）。
             record = owners_dir(self.agent.root) / record_name(self.root)
-            data = read_record(record)
-            if (
-                data is not None
-                and data.get("bot_id") != self.bot
-                and os.path.lexists(root)
-                and registered_to(data, data.get("bot_id"), os.lstat(root))
-            ):
-                raise self.error("工作目录属于其他员工或所有权标记无效")
+            try:
+                data = read_record(record)
+            except RecordUnreadable:
+                raise self.error("工作目录的归属登记暂时读不了，请稍后重试") from None
+            if data is not None and data.get("bot_id") != self.bot:
+                # 只有确知不存在才算不在；lstat 报别的错就整个初始化失败。
+                try:
+                    info = os.lstat(root)
+                except FileNotFoundError:
+                    info = None
+                if info is not None and registered_to(data, data.get("bot_id"), info):
+                    raise self.error("工作目录属于其他员工或所有权标记无效")
         root.mkdir(parents=True, exist_ok=True)
         if record is not None:
             # 建好目录马上登记，之后才往里写东西：中途崩了，留下的目录删除时也认得出。
@@ -654,12 +697,13 @@ class Workspace:
 
         - 登记是本员工的墓碑：上次已经删了，答「已删除」，眼前这里有什么都不碰；
         - 登记记着别的员工：答「不是这位助理的」；
-        - 目录不在：登记记着本员工（运维手工删了，或上次改名进回收站后没来得及写墓碑）就写墓碑、
-          答「已删除」；没有登记（例如共享存储没挂上）认不准；
-        - 目录在：登记记着本员工且 inode 对得上，或没有登记（登记出现之前初始化的目录）而目录里的
-          标记写着本员工，才删；登记读不懂、inode 对不上、既无登记又无标记都认不准。
+        - 目录确知不在（lstat 报 ENOENT）：登记记着本员工（运维手工删了，或上次改名进回收站后
+          没来得及写墓碑）就写墓碑、答「已删除」；没有登记（例如共享存储没挂上）认不准；
+        - 目录在：登记记着本员工且 inode 对得上才删；登记读不懂、inode 对不上、没有登记都认不准。
+          目录里的标记沙箱里写得到，从不凭它删。
 
-        判断时只读不建：`.coreman-owners` 与回收站只在真要删时才建。
+        网络存储上 lstat 或读登记报 ENOENT 以外的错（ESTALE、EIO、没权限等）一律认不准：说不清
+        目录在不在、登记记着谁。判断时只读不建：`.coreman-owners` 与回收站只在真要删时才建。
 
         删的时候先把目录原子地改名进工作目录根下的回收站（同一文件系统，一步完成），把登记换成墓碑，
         再在后台线程里删：不跟随任何链接，删不掉的留给助理侧的清扫（启动时与之后每 10 分钟）。还有
@@ -669,29 +713,39 @@ class Workspace:
         """
         if not self.assistant_only:
             raise self.error("不支持的工作区操作")
-        owners = owners_dir(self.agent.root, create=False)
         name = record_name(self.root)
-        data = read_record(owners / name) if owners is not None else None
-        exists = os.path.lexists(self.root)
+        # 只有 ENOENT 才算目录不在；看不了（info 为 None 而 exists 为真）说不清，按「可能在」答。
+        exists, info = True, None
+        try:
+            info = os.lstat(self.root)
+        except FileNotFoundError:
+            exists = False
+        except OSError:
+            pass
         unverified = {"removed": False, "existed": exists, "unverified": True}
+        try:
+            data = lookup_record(self.agent.root, name)
+        except RecordUnreadable:
+            return unverified
         if data is not None and tombstone_of(data, self.bot):
             return {"removed": True, "existed": False}
-        if data is not None and live_record(data) and data["bot_id"] != self.bot:
-            return {"removed": False, "existed": exists}
-        if not exists:
-            if data is not None and live_record(data):
-                with contextlib.suppress(OSError):
-                    write_record(owners / name, {"bot_id": self.bot, "removed": True})
-                return {"removed": True, "existed": False}
-            return unverified
-        info = os.lstat(self.root)
-        if not stat.S_ISDIR(info.st_mode):
+        if exists and info is None:
             return unverified
         if data is None:
-            owned = self.owned()
-        else:
-            owned = registered_to(data, self.bot, info)
-        if not owned:
+            return unverified
+        if live_record(data) and data["bot_id"] != self.bot:
+            return {"removed": False, "existed": exists}
+        if not exists:
+            if live_record(data):
+                with contextlib.suppress(OSError):
+                    write_record(
+                        owners_dir(self.agent.root) / name, {"bot_id": self.bot, "removed": True}
+                    )
+                return {"removed": True, "existed": False}
+            return unverified
+        if info is None or not stat.S_ISDIR(info.st_mode):
+            return unverified
+        if not registered_to(data, self.bot, info):
             return unverified
         from .sandbox import remove_tree
 
