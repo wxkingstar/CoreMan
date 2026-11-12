@@ -70,12 +70,18 @@ class ClassifyStage(ChatStageBase):
                 msg("runtime_busy", locale, relay=pre.relay_label or pre.relay.name),
             )
         if isinstance(out.error, RelayInterruptedError):
+            detail = msg("runtime_control_lost", locale) if out.error.code == "control_lost" else ""
+            error_message = f"RelayInterruptedError: {out.error}"
+            final_text = msg("run_interrupted", locale, relay=pre.relay_label or pre.relay.name)
+            if detail:
+                error_message += f"; {detail}"
+                final_text += f"\n\n{detail}"
             return Verdict(
                 "error",
                 "failed",
                 "run_interrupted",
-                f"RelayInterruptedError: {out.error}",
-                msg("run_interrupted", locale, relay=pre.relay_label or pre.relay.name),
+                error_message,
+                final_text,
             )
         if out.error is not None:
             name = type(out.error).__name__

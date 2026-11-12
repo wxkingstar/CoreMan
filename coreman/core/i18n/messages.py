@@ -152,6 +152,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_switch_detail": "模型：{model}",
         "relay_error": "抱歉，AI 连接出现错误（运行时 {relay}），请稍后再试。",
         "runtime_busy": "抱歉，运行时 {relay} 正忙，排队等待超时仍未开始处理，请稍后再试。",
+        "runtime_control_lost": (
+            "原因：本机运行时已放弃本轮请求（control_lost）。"
+            "请检查节点的控制轮询超时、控制租约失效或运行时停止日志。"
+        ),
         "run_interrupted": (
             "抱歉，这次任务执行到一半中断了（运行时 {relay}），回复没有完成，"
             "已经做的修改可能保留了一部分。可以回复「继续」接着做；"
@@ -469,6 +473,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "runtime_busy": (
             "申し訳ありません。インスタンス {relay} が混み合っており、待機時間内に処理を"
             "開始できませんでした。しばらくしてから再試行してください。"
+        ),
+        "runtime_control_lost": (
+            "原因：実行ノードが今回のリクエストを放棄しました（control_lost）。"
+            "ノードの制御ポーリングのタイムアウト、制御リースの失効、"
+            "または実行ノードの停止ログを確認してください。"
         ),
         "run_interrupted": (
             "申し訳ありません。タスクが途中で中断され、回答は完了していません"

@@ -61,14 +61,16 @@ def test_unconfirmed_terminal_is_not_success(reason):
     assert verdict.task_status == "failed"
 
 
-def _classify(text: str, out: Outcome) -> Verdict:
+def _classify(text: str, out: Outcome, *, locale: str = "zh") -> Verdict:
     pre = NS(
         writer=NS(pending_text=text),
         session_url="http://fake/s",
         relay=NS(name="test"),
         relay_label="test",
     )
-    return ChatTaskHandler()._classify(_ctx(), pre, out)
+    ctx = _ctx()
+    ctx.locale = locale
+    return ChatTaskHandler()._classify(ctx, pre, out)
 
 
 def test_relay_error_wins_over_unconfirmed_terminal() -> None:
@@ -115,21 +117,38 @@ async def test_queue_timeout_surfaces_as_busy_and_declares_total_timeout() -> No
     assert seen == [5400]
 
 
-async def test_node_error_code_survives_as_interrupted_error() -> None:
+@pytest.mark.parametrize(
+    "code", ["control_lost", "connection_lost", "execution_failed", "response_too_large"]
+)
+async def test_node_error_code_survives_as_interrupted_error(code: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadError("execution_failed", request=request)
+        raise httpx.ReadError(code, request=request)
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://fake"
     ) as http:
         client = RelayClient("http://fake", http=http)
-        with pytest.raises(RelayInterruptedError, match="execution_failed"):
+        with pytest.raises(RelayInterruptedError, match=code) as caught:
             [
                 e
                 async for e in client.chat_stream(
                     ChatRequest("m", "s", "u", "/tmp", "s", "claude"), total_timeout=5
                 )
             ]
+        assert caught.value.code == code
+
+
+@pytest.mark.parametrize("locale", ["zh", "ja"])
+def test_control_loss_includes_its_reason_in_the_task_and_reply(locale: str) -> None:
+    verdict = _classify(
+        "",
+        Outcome(error=RelayInterruptedError("运行时中断: control_lost", code="control_lost")),
+        locale=locale,
+    )
+    assert verdict.error_code == "run_interrupted" and verdict.task_status == "failed"
+    assert "control_lost" in (verdict.error_message or "")
+    assert msg("runtime_control_lost", locale) in verdict.final_text
+    assert msg("runtime_control_lost", locale) in (verdict.error_message or "")
 
 
 def test_interrupted_run_tells_the_user_how_to_continue() -> None:
