@@ -20,6 +20,7 @@ from coreman.core.db.models import RelayServer
 from coreman.core.relay.sse import SseEvent, SseParser
 from coreman.core.runtime_nodes.transport import (
     NODE_ERRORS,
+    SANDBOX_EXTENSION,
     TOTAL_TIMEOUT_EXTENSION,
     ReverseTransport,
     RuntimeQueueTimeout,
@@ -78,6 +79,9 @@ class ChatRequest:
     worktree: bool = False
     # 换运行时后原生续聊的首轮：驱动续不上原会话、改开新会话时，把这段放进本轮块。
     resume_fallback: str = ""
+    # 个人助理的一轮：节点在沙箱里跑，`transcript` 是转录的交接（core/assistants/transcripts.py）。
+    sandbox: bool = False
+    transcript: dict[str, Any] | None = None
 
     def user_message(self) -> str | list[dict[str, Any]]:
         """本轮块在前、用户原文在后；含媒体时本轮块作为第一个 text part。"""
@@ -91,7 +95,8 @@ class ChatRequest:
         """拼出 POST /v1/chat/completions 的请求体。
 
         `max_turns` 仅 claude backend 携带；`effort`、`env_vars`、`resume_fallback` 非空才带，
-        `worktree` 为真才带；`session_id` 原样透传（cron 与体检传空字符串）。
+        `worktree`、`sandbox` 为真才带（后者连同 `transcript`）；`session_id` 原样透传（cron 与
+        体检传空字符串）。
         """
         body: dict[str, Any] = {
             "model": self.model,
@@ -114,6 +119,9 @@ class ChatRequest:
             body["env_vars"] = dict(self.env_vars)
         if self.worktree:
             body["worktree"] = True
+        if self.sandbox:
+            body["sandbox"] = True
+            body["transcript"] = dict(self.transcript or {})
         return body
 
 
@@ -254,13 +262,16 @@ class RelayClient:
         )
         deadline = time.monotonic() + total_timeout
         try:
+            extensions: dict[str, Any] = {TOTAL_TIMEOUT_EXTENSION: total_timeout}
+            if request.sandbox:
+                extensions[SANDBOX_EXTENSION] = True
             # 声明总时限：经反向通道时节点满载可以排队，调用期限也按它算（直连 relay 忽略）。
             async with self._http.stream(
                 "POST",
                 "/v1/chat/completions",
                 json=request.to_body(),
                 timeout=timeout,
-                extensions={TOTAL_TIMEOUT_EXTENSION: total_timeout},
+                extensions=extensions,
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread())[:500].decode(errors="replace")
