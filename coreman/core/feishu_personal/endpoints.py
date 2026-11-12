@@ -114,8 +114,20 @@ ENDPOINTS: dict[str, Endpoint] = {
         "im:message.reactions:write_only",
         "im:message",
     ),
+    # 撤销表情：与添加表情用同一组权限，应用清单不变。
+    "im.reaction_delete": _e(
+        "DELETE",
+        "/im/v1/messages/{message_id}/reactions/{reaction_id}",
+        "write",
+        "im:message.reactions:write_only",
+        "im:message",
+    ),
     "im.pin": _e("POST", "/im/v1/pins", "write", "im:message.pins:write_only", "im:message"),
     "im.chats": _e("GET", "/im/v1/chats", "read", "im:chat:read", "im:chat:readonly", "im:chat"),
+    # 单个会话的名称与类型：与列会话用同一组权限，应用清单不变。
+    "im.chat": _e(
+        "GET", "/im/v1/chats/{chat_id}", "read", "im:chat:read", "im:chat:readonly", "im:chat"
+    ),
     "im.chat_search": _e(
         "GET", "/im/v1/chats/search", "read", "im:chat:read", "im:chat:readonly", "im:chat"
     ),
