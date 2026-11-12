@@ -177,6 +177,7 @@ CoreMan 不再只保留最后 200 字；Daemon 的 Claude 流式翻译器传递�
 - **出站。** 同一个子进程发送该应用下所有助理记录的回复与通知。记录停用后，子进程下一轮就不再为它发送，并放掉它的出站锁。
 - **内容加密。** 助理的消息内容按所有者的数据密钥加密存放。回复上下文（`inbound_events.reply_context`）里只有路由用的键留明文（会话、被回复的消息、时间等），卡片回复按钮的文字在密文里；流的回复上下文只保留路由用的键。所有者的数据密钥销毁后，读不出来的出站消息标为 `skipped`（`content_locked`），读不出来的流式回复直接收尾，都不再发送。
 - **告警。** 连接异常按应用告警（键 `gateway:app:<应用 id>`），不按每个人的助理记录告警。
+- **写操作要审批。** 助理调用任何会改动飞书内容的个人工具（发消息、改文档、处理审批、日程、任务、邮件等）都不会直接执行，而是向所有者提交一张 Tower 审批单，批准后由平台执行。唯一的例外是在别人发来的消息上打「处理中」表情。带文件的操作（发文件、存入云空间、邮件附件）同样过审批，需要部署方另配一个临时桶，没配时这类操作不可用。部署要求见 `docs/tower-approval.md`「个人助理的审批闸门」。
 
 应用需要的权限：普通机器人的应用身份权限之外，再开通 `im:chat.members:write_only`（退群用，见 `coreman/core/feishu_apps/manifest.py` 的 `ASSISTANT_SCOPES`）。事件订阅与普通机器人相同：`im.message.receive_v1`、`im.chat.member.bot.added_v1`、`im.chat.access_event.bot_p2p_chat_entered_v1`，回调 `card.action.trigger`，订阅方式选长连接。
 
