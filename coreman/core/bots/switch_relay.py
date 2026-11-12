@@ -192,6 +192,8 @@ async def switch_relay(
     # 会话文件已在目标运行时上的 relay 会话：原样续用。同一实例同一目录（只换模型）全部续用。
     carried = {row.relay_session_id for row in await sessions.list_for_bot(session, bot.id)}
     moved_skills: list[BotSkill] = []
+    # 还是原来那个目录（同一节点同一路径，或共享盘上的同一份）：换完之后旧目录照常在用，不能删。
+    reused = True
     requested_directory = target_directory
     target_directory = bot.working_dir
     if not same_relay or changing_directory:
@@ -235,6 +237,13 @@ async def switch_relay(
         bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
     bot.working_dir = target_directory
     bot.relay_server_id, bot.model = target.id, new_model
+    if is_assistant(bot) and old_relay_id is not None and not reused:
+        from coreman.core.assistants import retired_dirs
+
+        # 助理换走之后旧目录没人再用：登记下来由看护进程删掉（只删带本助理标记的目录）。
+        await retired_dirs.retire(
+            session, bot_id=bot.id, relay_id=old_relay_id, working_dir=old_directory
+        )
     if bot.effort_level:
         # 自动换来的模型不支持 xhigh / max 时降到它支持的最高档，否则下发给 relay 的就是非法档位。
         bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)

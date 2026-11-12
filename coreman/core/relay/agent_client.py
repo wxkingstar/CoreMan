@@ -24,6 +24,8 @@ OPERATIONS = {
     "workspace-git-status",
     "workspace-git-diff",
     "workspace-probe",
+    # 个人助理停用或换走之后删它的工作目录（只有助理专用实例接）。
+    "workspace-remove",
     "ping",
     "status",
     "probe-rate-limits",
