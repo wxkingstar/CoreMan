@@ -30,6 +30,8 @@ ENTITY_SELECTS = {
     "coreman/api/routers/cron_jobs.py": 2,  # 只读状态
     "coreman/api/routers/dev.py": 1,  # 只对所有者还原
     "coreman/api/routers/infra_notify.py": 1,  # 不绑机器人的通知
+    # 转录：上传时取整行（不取转录本身），session.scalar 自动还原
+    "coreman/core/assistants/transcripts.py": 1,
     "coreman/api/routers/infra_push.py": 1,  # 显式还原
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
@@ -71,6 +73,7 @@ ENTITY_SELECTS = {
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
+    "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
     "coreman/core/bus/tasks.py": 1,  # 明文键 serialize_session
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
     "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
@@ -106,6 +109,8 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
+    # 转录：派出前只写交接编号（元数据）；内容经 ORM 写入，flush 钩子封存
+    "coreman/core/assistants/transcripts.py": 1,
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
     "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态

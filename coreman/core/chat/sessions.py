@@ -90,6 +90,27 @@ async def get_or_create(
     return SessionInfo(sid, not fresh, speaker_changed, previous, inherited)
 
 
+async def renew(
+    session: AsyncSession,
+    *,
+    bot_id: uuid.UUID,
+    session_key: str,
+    backend: str,
+    speaker_user_id: uuid.UUID | None,
+) -> SessionInfo:
+    """这个会话键换一个新的 relay 会话（旧会话续不上时用），不带续接。"""
+    sid = uuid.uuid4()
+    await switch_to(
+        session,
+        bot_id=bot_id,
+        session_key=session_key,
+        relay_session_id=sid,
+        backend=backend,
+        speaker_user_id=speaker_user_id,
+    )
+    return SessionInfo(sid, True, False)
+
+
 async def settle_carry(
     session: AsyncSession, *, bot_id: uuid.UUID, session_key: str, relay_session_id: uuid.UUID
 ) -> None:
