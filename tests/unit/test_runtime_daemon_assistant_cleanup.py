@@ -62,6 +62,8 @@ def code_of(frames: list[dict]) -> str:
     return json.loads(base64.b64decode(frames[0]["data"]))["error"]["code"]
 
 
+ENTRY = "0123456789abcdef0123456789abcdef"  # Workspace.remove 写进回收站的名字：32 位小写十六进制
+
 SANDBOXED = {"sandbox": True, "transcript": {"transfer": "0" * 32, "restore": False}}
 
 
@@ -187,14 +189,15 @@ def test_a_failing_cleanup_is_contained(node, monkeypatch):
     assert node.assistant.turns_dir.is_dir()
 
 
-def test_an_assistant_only_daemon_does_not_clear_its_own_turns(node, monkeypatch):
+def test_an_assistant_only_daemon_does_not_clear_its_own_turns(node):
     node.assistant_only = True
-    started: list = []
-    monkeypatch.setattr(node.assistant, "start", lambda: started.append(True))
     (node.assistant.turns_dir / "live").mkdir(parents=True)
-    node.start_assistant()
-    time.sleep(0.2)
-    assert started == [True] and (node.assistant.turns_dir / "live").is_dir()
+    trash = workspace.trash_dir(Path(node.config["workspace_root"]))
+    (trash / ENTRY).mkdir()
+    node.start_leftover_cleanup()
+    time.sleep(0.3)
+    assert (node.assistant.turns_dir / "live").is_dir()
+    assert (trash / ENTRY).is_dir()
 
 
 def test_an_ordinary_daemon_empties_the_trash_without_following_links(node, tmp_path):
@@ -203,21 +206,21 @@ def test_an_ordinary_daemon_empties_the_trash_without_following_links(node, tmp_
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep").write_text("x")
-    (trash / "leftover" / "deep").mkdir(parents=True)
-    (trash / "leftover" / "deep" / "f").write_text("plaintext")
-    (trash / "leftover" / "link").symlink_to(outside)
+    (trash / ENTRY / "deep").mkdir(parents=True)
+    (trash / ENTRY / "deep" / "f").write_text("plaintext")
+    (trash / ENTRY / "link").symlink_to(outside)
     node.clear_assistant_leftovers()
     assert list(trash.iterdir()) == []
     assert (outside / "keep").read_text() == "x"
 
 
-def test_an_ordinary_daemon_only_unlinks_a_linked_trash(node, tmp_path):
+def test_an_ordinary_daemon_leaves_a_linked_trash_alone(node, tmp_path):
     root = Path(node.config["workspace_root"])
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "precious").mkdir(parents=True)
     (root / workspace.TRASH_DIR).symlink_to(elsewhere)
     node.clear_assistant_leftovers()
-    assert not os.path.lexists(root / workspace.TRASH_DIR)
+    assert (root / workspace.TRASH_DIR).is_symlink()
     assert (elsewhere / "precious").is_dir()
 
 
@@ -235,8 +238,8 @@ async def test_leftovers_are_cleared_even_when_enrolment_fails(node, monkeypatch
     (turns / "abc").mkdir(parents=True)
     (turns / "abc" / "transcript.jsonl").write_text("plaintext")
     trash = workspace.trash_dir(Path(node.config["workspace_root"]))
-    (trash / "old").mkdir()
-    (trash / "old" / "notes.md").write_text("plaintext")
+    (trash / ENTRY).mkdir()
+    (trash / ENTRY / "notes.md").write_text("plaintext")
     socket_dir = Path(tempfile.mkdtemp(prefix="cm-", dir="/tmp")) / "run"
     monkeypatch.setattr(module, "choose_socket_dir", lambda data_dir, node_id: socket_dir)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
@@ -262,3 +265,42 @@ async def test_leftovers_are_cleared_even_when_enrolment_fails(node, monkeypatch
         node.log_rotator.stop()
         node.lock_file.close()
         shutil.rmtree(socket_dir.parent, ignore_errors=True)
+
+
+def ordinary_trash(node):
+    """普通实例上 `.coreman-trash` 不是保留名：它可以是员工的工作目录，不是守护进程建的。"""
+    trash = Path(node.config["workspace_root"]) / workspace.TRASH_DIR
+    trash.mkdir()
+    trash.chmod(0o755)
+    return trash
+
+
+def test_an_ordinary_daemon_removes_only_entries_named_like_removed_workspaces(node):
+    trash = ordinary_trash(node)
+    (trash / ENTRY / "deep").mkdir(parents=True)
+    (trash / ENTRY / "deep" / "f").write_text("x")
+    (trash / "project").mkdir()
+    (trash / "project" / "a.py").write_text("x")
+    (trash / "notes.md").write_text("x")
+    (trash / ("g" + ENTRY[1:])).mkdir()
+    (trash / (ENTRY + "0")).mkdir()
+    node.clear_assistant_leftovers()
+    assert sorted(p.name for p in trash.iterdir()) == sorted(
+        ["project", "notes.md", "g" + ENTRY[1:], ENTRY + "0"]
+    )
+    assert (trash / "project" / "a.py").read_text() == "x"
+    assert trash.stat().st_mode & 0o777 == 0o755
+
+
+def test_an_ordinary_daemon_leaves_a_trash_that_is_a_working_directory(node):
+    trash = ordinary_trash(node)
+    (trash / workspace.MARKER).write_text("{}")
+    (trash / ENTRY).mkdir()
+    node.clear_assistant_leftovers()
+    assert (trash / ENTRY).is_dir() and (trash / workspace.MARKER).is_file()
+    assert trash.stat().st_mode & 0o777 == 0o755
+
+
+def test_an_ordinary_daemon_does_not_create_the_trash(node):
+    node.clear_assistant_leftovers()
+    assert not os.path.lexists(Path(node.config["workspace_root"]) / workspace.TRASH_DIR)

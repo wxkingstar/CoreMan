@@ -59,6 +59,9 @@ TRASH_DIR = ".coreman-trash"
 # inode。它在工作目录之外，沙箱里改不到；删目录时据此认归属，不看助理写得到的标记。
 OWNERS_DIR = ".coreman-owners"
 RESERVED_DIRS = (HEALTH_DIR, TRASH_DIR, OWNERS_DIR)
+# Workspace.remove 把目录改名放进回收站时用的名字（secrets.token_hex(16)）：32 位小写十六进制。
+TRASH_ENTRY_BYTES = 16
+TRASH_ENTRY_NAME = re.compile(f"[0-9a-f]{{{2 * TRASH_ENTRY_BYTES}}}")
 
 
 def read_small(path, limit=MARKER_LIMIT):
@@ -634,7 +637,7 @@ class Workspace:
             return {"removed": False, "existed": True, "busy": True}
         from .sandbox import remove_tree
 
-        target = trash_dir(self.agent.root) / secrets.token_hex(16)
+        target = trash_dir(self.agent.root) / secrets.token_hex(TRASH_ENTRY_BYTES)
         os.rename(self.root, target)
         with contextlib.suppress(OSError):
             os.unlink(record)

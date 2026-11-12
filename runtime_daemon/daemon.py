@@ -19,6 +19,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -56,7 +57,7 @@ from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
 from runtime_daemon.sandbox import remove_tree
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
-from runtime_daemon.workspace import TRASH_DIR, reserved
+from runtime_daemon.workspace import MARKER, TRASH_DIR, TRASH_ENTRY_NAME, reserved
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
@@ -1663,15 +1664,38 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 清不掉不能影响普通轮次
             LOG.warning("Assistant leftovers cleanup failed: %s", type(exc).__name__)
         try:
-            root = Path(str(self.config.get("workspace_root") or ""))
-            if root.is_absolute():
-                trash = root / TRASH_DIR
-                if trash.is_symlink():
-                    trash.unlink()
-                else:
-                    self.assistant.purge_trash()
+            self.clear_removed_workspaces()
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Assistant trash cleanup failed: %s", type(exc).__name__)
+
+    def clear_removed_workspaces(self) -> None:
+        """普通实例只删回收站里 Workspace.remove 写进去的条目（名字是 32 位小写十六进制）。
+
+        普通实例上 `.coreman-trash` 不是保留名，可能就是某个员工的工作目录：不改它的权限、不建它、
+        带所有权标记就整个不碰、其中名字对不上的东西不碰。它是链接（或不是目录）时也不碰——
+        那可能是用户自己的链接，不能当守护进程的东西去删。
+        """
+        root = Path(str(self.config.get("workspace_root") or ""))
+        if not root.is_absolute():
+            return
+        trash = root / TRASH_DIR
+        try:
+            if not stat.S_ISDIR(os.lstat(trash).st_mode):
+                return
+        except FileNotFoundError:
+            return
+        if os.path.lexists(trash / MARKER):
+            return
+        with os.scandir(trash) as entries:
+            found = [e for e in entries if TRASH_ENTRY_NAME.fullmatch(e.name)]
+        for entry in found:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    remove_tree(Path(entry.path))
+                else:
+                    os.unlink(entry.path)
+            except OSError as exc:
+                LOG.warning("Assistant trash entry failed: %s", type(exc).__name__)
 
     async def stop_assistant(self) -> None:
         try:
