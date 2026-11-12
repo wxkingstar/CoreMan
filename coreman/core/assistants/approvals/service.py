@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants import sealed
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
-from coreman.core.assistants.records import is_assistant
+from coreman.core.assistants.records import inactive_assistant, is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.cloud_proxy.resume import clean_reason
@@ -579,8 +579,9 @@ async def decide(
         return Decided(known=True)
     row.decided_at = decided_at or utcnow()
     bot = await session.get(Bot, row.bot_id)
-    if bot is None or not bot.enabled or sealed.is_locked(row):
-        # 助理已停用，或数据密钥已销毁、参数读不出来：不执行，也没有会话可以投回。
+    if bot is None or not bot.enabled or inactive_assistant(bot) or sealed.is_locked(row):
+        # 助理已停用、正在停用或还没开通好，或数据密钥已销毁、参数读不出来：不执行，
+        # 也没有会话可以投回。停用开始之前已经批准的单不在这里，照常执行。
         row.status, row.error_code = "withdrawn", "assistant_inactive"
         return Decided(known=True)
     note = clean_reason(reason) if reason else None
@@ -868,7 +869,7 @@ async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None)
         row.status, row.decided_at = "expired", now
         await _withdraw_remote(cfg, row)
         bot = await session.get(Bot, row.bot_id)
-        if bot is not None and bot.enabled:
+        if bot is not None and bot.enabled and not inactive_assistant(bot):
             await deliver(session, row, bot)
     return len(rows)
 
@@ -897,7 +898,10 @@ async def remind(session: AsyncSession, now: datetime, link: str) -> int:
         bot = await session.get(Bot, bot_id)
         reached = (
             await session.get(UserReached, (bot_id, bot.owner_id))
-            if bot is not None and bot.enabled and bot.owner_id is not None
+            if bot is not None
+            and bot.enabled
+            and not inactive_assistant(bot)
+            and bot.owner_id is not None
             else None
         )
         if bot is None or reached is None:

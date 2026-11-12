@@ -14,7 +14,12 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants.records import is_assistant, unsupported
+from coreman.core.assistants.records import (
+    ASSISTANT_NOT_ACTIVE_MESSAGE,
+    inactive_assistant,
+    is_assistant,
+    unsupported,
+)
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
@@ -500,6 +505,16 @@ async def prepare_assistant_directory(
     await session.refresh(bot, with_for_update=True)
     if bot.workspace_operation_id != operation_id:
         raise ApiError(409, 409, "迁移状态已变化，请刷新后重试")
+    if inactive_assistant(bot):
+        # 建目录期间放开了行锁，停用（或别的流程）趁这时开始了：不换过去。刚建的目录没人会用，
+        # 登记待删；原绑定与原目录照旧，由停用流程收拾。
+        if not reused:
+            from coreman.core.assistants import retired_dirs
+
+            await retired_dirs.retire(
+                session, bot_id=bot.id, relay_id=target.id, working_dir=directory
+            )
+        raise ApiError(409, 409, ASSISTANT_NOT_ACTIVE_MESSAGE)
     await reserve_workspace(session, target.id, directory, bot_id=bot.id)
     bot.workspace_phase = "完成切换"
     return "not_transferred", reused, set()

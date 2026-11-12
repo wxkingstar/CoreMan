@@ -41,6 +41,14 @@ def is_assistant(bot: Bot) -> bool:
     return bot.kind == "assistant"
 
 
+ASSISTANT_NOT_ACTIVE_MESSAGE = "个人助理还没开通好或正在停用，不能换运行时"
+
+
+def inactive_assistant(bot: Bot) -> bool:
+    """助理记录不在可用状态：还没开通好、正在停用、已停用，或状态为空的旧记录。普通记录恒为假。"""
+    return is_assistant(bot) and bot.assistant_state != "active"
+
+
 def unsupported(feature: str) -> str:
     """助理暂未开放的功能在入口处拒绝时，给用户或模型看的原因。"""
     return f"个人助理暂不支持{feature}"

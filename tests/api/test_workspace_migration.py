@@ -1330,3 +1330,66 @@ async def test_assistant_rebind_on_the_same_node_leaves_the_directory_alone(
     await db_session.refresh(bot)
     assert bot.relay_server_id == second.id and bot.working_dir == working_dir
     assert (tmp_path / "source" / bot.bot_key / "notes.md").read_text() == "助理写的文件"
+
+
+async def test_assistant_not_active_cannot_switch_or_preview(
+    client, db_session, monkeypatch, tmp_path
+):
+    """开通没完成、正在停用或已停用的助理：换运行时（当场或后台）与换机预览都拒绝，不碰节点。"""
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    for state in ("deprovisioned", "deprovisioning", "provisioning"):
+        bot.assistant_state = state
+        await db_session.commit()
+        await db_session.refresh(bot)
+        for query in ("", "?background=true"):
+            refused = await _switch(client, bot, target, query)
+            assert refused.status_code == 409, refused.text
+            assert "不能换运行时" in refused.text
+        preview = await client.post(
+            f"/api/admin/bots/{bot.id}/workspace/switch-preview",
+            json={"relay_server_id": str(target.id)},
+        )
+        assert preview.status_code == 409 and "不能换运行时" in preview.text, preview.text
+    assert seen == []
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and bot.working_dir == working_dir
+
+
+async def test_assistant_stopped_mid_switch_aborts_and_retires_the_new_directory(
+    client, db_session, monkeypatch, tmp_path
+):
+    """新目录建好之后、绑定之前助理开始停用：换机作罢，新目录登记待删，绑定与目录都不变。"""
+    from sqlalchemy import text
+
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import AssistantRetiredDir
+
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    real = workspace_transfer.call_agent
+
+    async def call(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "workspace-init":
+            async with db_session.bind.begin() as conn:
+                await conn.execute(
+                    text("UPDATE bots SET assistant_state = 'deprovisioning' WHERE id = :id"),
+                    {"id": bot.id},
+                )
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    response = await _switch(client, bot, target)
+    assert response.status_code == 409, response.text
+    assert [op for op, _ in seen] == ["ping", "workspace-info", "workspace-init"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and bot.working_dir == working_dir
+    assert bot.workspace_operation_id is None and bot.workspace_target_relay_id is None
+    retired = list(
+        await db_session.scalars(
+            select(AssistantRetiredDir).where(AssistantRetiredDir.bot_id == bot.id)
+        )
+    )
+    destination = str(tmp_path / "destination" / bot.bot_key)
+    assert [(r.relay_server_id, r.working_dir) for r in retired] == [(target.id, destination)]

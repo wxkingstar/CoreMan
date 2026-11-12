@@ -195,3 +195,22 @@ async def test_tick_closes_approved_tickets_whose_execution_died(
     await db_session.commit()
     row = await reload(db_session, row)
     assert (row.status, row.error_code) == ("failed", "execution_not_started")
+
+
+async def test_no_reminder_or_expiry_turn_once_the_assistant_is_being_stopped(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, fake = install(monkeypatch)
+    bot, _, scope = await assistant_turn(db_session)
+    row = await pending(db_session, scope)
+    bot.assistant_state = "deprovisioning"
+    await db_session.commit()
+    now = utcnow()
+    assert await service.remind(db_session, now + timedelta(seconds=40), LINK) == 0
+    assert await sent(db_session) == []
+    # 过期照常记下，只是不再往正在停用的助理会话里投结果。
+    assert await service.expire(db_session, now + timedelta(hours=73), CFG) == 1
+    await db_session.commit()
+    assert (await reload(db_session, row)).status == "expired"
+    assert fake.withdrawn == [row.external_id]
+    assert await queued(db_session, APPROVAL_RESULT_KIND) == []

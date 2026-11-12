@@ -488,3 +488,35 @@ async def test_stuck_after_execution_started_counts_from_the_start(
     await db_session.commit()
     assert (await reload(db_session, row)).error_code == "execution_interrupted"
     assert fake.reported == []
+
+
+@pytest.mark.parametrize("state", ["deprovisioning", "provisioning", "deprovisioned", None])
+async def test_approval_decided_after_the_assistant_left_active_is_never_queued(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
+    feishu, fake = install(monkeypatch)
+    bot, _, scope = await assistant_turn(db_session)
+    row = await pending(db_session, scope)
+    # 停用已经开始（记录仍是 enabled，直到最后一步）：之后送达的批准不执行。
+    bot.assistant_state = state
+    await db_session.commit()
+    found = await decided(db_session, row)
+    assert found.known and not found.queued
+    row = await reload(db_session, row)
+    assert (row.status, row.error_code) == ("withdrawn", "assistant_inactive")
+    assert await queued(db_session, APPROVAL_EXECUTE_KIND) == []
+    assert await queued(db_session, APPROVAL_RESULT_KIND) == []
+    assert feishu.writes == [] and fake.redeemed == []
+
+
+async def test_approved_while_active_still_executes_during_the_stop(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, feishu, _ = await approved(db_session, monkeypatch)
+    await db_session.execute(
+        text("UPDATE bots SET assistant_state = 'deprovisioning' WHERE id = :id"),
+        {"id": row.bot_id},
+    )
+    await db_session.commit()
+    assert await run(db_engine, row, task) == "executed"
+    assert len(feishu.writes) == 1

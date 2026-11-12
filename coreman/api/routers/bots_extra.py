@@ -29,7 +29,9 @@ from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.assistants.records import (
+    ASSISTANT_NOT_ACTIVE_MESSAGE,
     ASSISTANT_TOGGLE_MESSAGE,
+    inactive_assistant,
     is_assistant,
     unsupported,
     visible_to,
@@ -621,6 +623,9 @@ async def workspace_switch_preview(
     bot = await _visible_bot(session, bot_id, user)
     if not can_switch_relay(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
+    if inactive_assistant(bot):
+        # 与换运行时同一口径：开通没完成、正在停用或已停用的助理不换，也就不去探测节点。
+        raise ApiError(409, 409, ASSISTANT_NOT_ACTIVE_MESSAGE)
     if is_assistant(bot) and body.target_directory is not None:
         # 与换运行时同一口径：助理只落到平台分配的默认目录，不探测自选的路径。
         raise ApiError(422, 422, unsupported("自选工作目录或使用已有目录"))
