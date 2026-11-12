@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
@@ -115,6 +116,21 @@ async def shared_directory(
     return result.get("found") is True
 
 
+async def require_new_assistant_directory(
+    relay: RelayServer, bot: Bot, cipher: Cipher | None
+) -> None:
+    """助理只在开通时初始化：目录已在（里面可能有助理在沙箱里写的链接、Git 配置）就拒绝，
+    因为初始化由守护进程在沙箱外读写这个目录。拒绝时不改工作目录状态，就绪的助理照常干活。"""
+    try:
+        info = await call_agent(
+            relay, cipher, "workspace-info", {"working_dir": bot.working_dir, "bot_id": str(bot.id)}
+        )
+    except (AgentError, TimeoutError) as exc:
+        raise ApiError(502, 502, "工作目录初始化失败，请检查运行时后重试") from exc
+    if info.get("exists") is not False:
+        raise ApiError(422, 422, unsupported("在已有工作目录上重新初始化"))
+
+
 async def initialize_workspace(session: AsyncSession, bot: Bot, cipher: Cipher | None) -> None:
     if not bot.relay_server_id:
         bot.workspace_state, bot.workspace_phase = "pending", "等待分配运行时"
@@ -123,6 +139,8 @@ async def initialize_workspace(session: AsyncSession, bot: Bot, cipher: Cipher |
     if relay is None:
         raise ApiError(422, 422, "运行时不存在")
     await memory_transfer.ensure_idle(session, bot)
+    if is_assistant(bot):
+        await require_new_assistant_directory(relay, bot, cipher)
     bot.workspace_state, bot.workspace_phase = "initializing", "初始化工作说明"
     try:
         await require_workspace(relay, cipher)

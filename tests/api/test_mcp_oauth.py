@@ -289,3 +289,29 @@ async def test_saving_without_the_flag_keeps_it(admin_client, db_session):
         headers={"If-Match": str(stdio.json()["data"]["revision"])},
     )
     assert stdio_oauth.status_code == 422
+
+
+async def test_assistant_mcp_login_is_refused_without_touching_the_node(
+    client, db_session, monkeypatch
+):
+    """MCP 登录在节点上以守护进程用户、助理的工作目录跑 CLI，在沙箱外：助理一律不开放。"""
+    from tests.api.test_bot_skills import as_assistant
+
+    bot, skill, _ = await prepare(client, db_session)
+    bot_id, skill_id = bot.id, skill.id
+    calls = fake_node(monkeypatch)
+    await as_assistant(db_session, bot)
+    path = f"/api/admin/bots/{bot_id}/skills/{skill_id}/mcp-login"
+    for result in (
+        await client.post(path),
+        await client.post(
+            path + "/complete",
+            json={"session_id": "session-1", "callback_url": "http://localhost/cb?code=c"},
+        ),
+        await client.delete(path),
+    ):
+        assert result.status_code == 422, result.text
+        assert "个人助理暂不支持" in result.text
+    assert calls == []
+    row = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert row.mcp_authorized_at is None

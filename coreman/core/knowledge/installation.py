@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.bots.secrets import decrypt_json, merge_secret_dict
 from coreman.core.bus import outbox, tasks
@@ -35,6 +36,7 @@ USER_ENV_AAD = "bot_skills.user_env_vars_enc"
 PRESET_AAD = "env_presets.vars_enc"
 EFFECTIVE_AAD = "bot_skills.effective_env_enc"
 MCP_AAD = "skills.mcp_config_enc"
+ASSISTANT_FEATURE = "安装技能"
 
 
 async def bot_admin(session: AsyncSession, bot: Bot, actor: User) -> bool:
@@ -119,6 +121,9 @@ async def queue(
     approval: SkillApproval | None = None,
     identity: str | None = None,
 ) -> Task:
+    # 节点在员工工作目录里、沙箱外执行安装：助理不排（升级、审批、配套技能、换机重装都经这里）。
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported(ASSISTANT_FEATURE))
     if not bot.relay_server_id:
         raise ApiError(409, 409, "机器人尚未分配实例")
     row = await session.get(BotSkill, (bot.id, skill.id))
