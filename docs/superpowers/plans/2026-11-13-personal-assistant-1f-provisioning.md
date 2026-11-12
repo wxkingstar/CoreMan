@@ -7309,7 +7309,7 @@ git commit -m "个人助理：开通与停用的部署与使用说明、升级�
 
 上面的任务文字是实施前写的；评审之后下面这些行为与它不同，以代码和 `docs/feishu.md`、`runtime_daemon/README.md`、`docs/operations.md` 为准。
 
-- 助理专用实例判断目录归属，看的是守护进程自己保管的登记 `<工作目录根>/.coreman-owners/`（每个目录一条：员工编号与 inode、设备号，初始化全新目录时写入）；目录里的标记只在没有登记的旧目录上作后备。`.coreman-owners` 成了第三个保留目录，与 `.coreman-health`、`.coreman-trash` 一样不能当工作目录。
+- 助理专用实例判断目录归属，看的是守护进程自己保管的登记 `<工作目录根>/.coreman-owners/`（每个目录一条：员工编号与 inode，初始化全新目录时写入）；目录里的标记只在没有登记的旧目录上作后备。`.coreman-owners` 成了第三个保留目录，与 `.coreman-health`、`.coreman-trash` 一样不能当工作目录。
 - 回收站与归属登记目录由守护进程保持为 0700。
 - 改回普通实例时的清理在向平台注册之前做（注册不上也会清）：删 `assistant-turns/`，并只删 `.coreman-trash/` 里名字是 32 位小写十六进制的条目；不动目录本身，带所有权标记时跳过，是链接时不碰。「回收站不清、要手工删」的已知限制因此不再成立，剩下的是 `.coreman-owners/` 的登记和名字不符的条目。
 - `workspace-remove` 在有在跑的轮次用着目录的上级目录时也答复 `busy`。
