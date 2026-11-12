@@ -10,6 +10,7 @@ from sqlalchemy import select
 from coreman.core.assistants import retired_dirs
 from coreman.core.db.models import AssistantRetiredDir, RelayServer, User
 from coreman.core.db.session import make_session_factory
+from runtime_daemon import workspace as node_workspace
 from tests.api.conftest import login_existing
 from tests.api.test_workspace_migration import _assistant_agents, _real_agents, _switch
 
@@ -35,6 +36,13 @@ async def test_switching_away_retires_the_old_directory_and_the_node_removes_it(
 
     monkeypatch.setattr(retired_dirs, "call_agent", call)
     agents[old.id].assistant_only = True  # 助理专用实例才接 workspace-remove
+    # 助理专用实例初始化目录时会登记归属；这个夹具的源目录是直接摆出来的，这里补上那条登记。
+    source = (tmp_path / "source" / bot.bot_key).resolve()
+    owner = node_workspace.marker_data(source)["bot_id"]
+    node_workspace.write_record(
+        node_workspace.owners_dir(agents[old.id].root) / node_workspace.record_name(source),
+        {"bot_id": owner, "ino": source.lstat().st_ino},
+    )
     counts = await retired_dirs.tick(make_session_factory(db_engine), None, datetime.now(UTC))
     assert counts["assistant_dirs_removed"] == 1 and calls == ["workspace-remove"]
     for _ in range(100):
