@@ -47,6 +47,9 @@ Outcome = Literal[
     "busy_resume",
     "busy_drop",
     "live_progress",
+    # 个人助理的开通卡片（没有助理记录时，由 AssistantInbound.on_unprovisioned 处理）。
+    "provision_started",
+    "provision_expired",
 ]
 _BUSY_KEYS = frozenset(
     {

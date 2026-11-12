@@ -11,12 +11,12 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import sealed
+from coreman.core.assistants import provisioning, sealed
 from coreman.core.assistants.routing import assistant_for
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.reachability import private_chat_of
@@ -152,14 +152,14 @@ class AssistantInbound:
                 else await assistant_for(session, self.app, speaker.user_id)
             )
             if bot is None:
-                await self.on_unprovisioned(
+                unprovisioned = await self.on_unprovisioned(
                     session,
                     platform_user_id=found.platform_user_id,
                     user_id=speaker.user_id,
                     raw=raw,
                 )
                 await session.commit()
-                return None
+                return unprovisioned
             # 之后经手的是这个人的私聊内容：这段处理里的日志不带异常文字。
             await sealed.guard_logs(session, bot.id)
             message = normalize_event(
@@ -197,18 +197,34 @@ class AssistantInbound:
         platform_user_id: str,
         user_id: uuid.UUID | None,
         raw: dict[str, Any],
-    ) -> None:
-        """发送人没有启用的助理记录。本期只记日志并丢弃；开通卡片由开通与停用那一期接在这里。
+    ) -> Outcome | None:
+        """发送人没有启用的助理记录：私聊或打开私聊时登记开通（看护进程判断范围、发开通卡片），
+        点开通卡片时核对并开始开通。只写库，返回卡片回调的应答结果。
 
-        `user_id` 为 None 表示通讯录里认不出这个人。调用点在应答窗口内，返回后由调用方提交。
+        `user_id` 为 None 表示通讯录里认不出这个人：不开通。调用点在应答窗口内，返回后由调用方
+        提交；这里的任何失败都只丢掉这一次登记（保存点回滚），不挡应答。
         """
         header = raw.get("header")
-        log.info(
-            "assistant_unprovisioned",
-            app=str(self.app),
-            known_user=user_id is not None,
-            event_type=header.get("event_type") if isinstance(header, dict) else None,
-        )
+        event_type = header.get("event_type") if isinstance(header, dict) else None
+        if user_id is None:
+            log.info("assistant_unprovisioned", app=str(self.app), known_user=False)
+            return None
+        try:
+            async with session.begin_nested():
+                if event_type == "card.action.trigger":
+                    outcome = await provisioning.accept_offer(
+                        session, app_id=self.app, owner_id=user_id, raw=raw
+                    )
+                    return cast("Outcome", outcome)
+                await provisioning.request_offer(
+                    session,
+                    app_id=self.app,
+                    owner_id=user_id,
+                    platform_user_id=platform_user_id,
+                )
+        except Exception as exc:  # noqa: BLE001 开通登记失败不能挡住应答
+            log.warning("assistant_provision_request_failed", error=type(exc).__name__)
+        return None
 
     async def leave_group(self, chat_id: str, platform_user_id: str, event_id: str) -> None:
         """被拉进群：把自己移出去，退成功了再私信拉群的人说明只支持私聊。
