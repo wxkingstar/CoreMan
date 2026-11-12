@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.bus import instances, tasks
-from coreman.core.db.models import ChatLog, CronRun, OutboxItem, Task, User, UserReached
+from coreman.core.db.models import Bot, ChatLog, CronRun, OutboxItem, Task, User, UserReached
 from coreman.core.db.session import make_session_factory
 from coreman.runtime.scheduler.cron import recover_runs, run_tick
 from coreman.runtime.worker.cron_handler import CronRunHandler
@@ -349,3 +349,25 @@ async def test_once_worker_finish_and_repeated_handler_do_not_run_again(
     assert await run_tick(factory, now + timedelta(days=366)) == 0
     assert len(fake.requests) == (0 if skip else 1)
     assert len((await db_session.scalars(select(OutboxItem))).all()) == (0 if skip else 1)
+
+
+@pytest.mark.usefixtures("assistant_master")
+async def test_cron_never_dispatches_for_an_assistant(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from tests.integration.assistant_helpers import into_assistant
+
+    now = datetime.now(UTC)
+    row = await job(db_session, now, target_chats=["test-group"])
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    bot = await db_session.get(Bot, row.bot_id)
+    owner = await db_session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    await into_assistant(db_session, bot, owner)
+    fake = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "failed" and run.error_message == "ApiError"
+    assert fake.requests == []

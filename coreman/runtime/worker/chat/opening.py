@@ -226,8 +226,10 @@ class OpenStage(ChatStageBase):
                     backend=backend,
                     speaker_user_id=intake.speaker.user_id,
                 )
-            except Exception:
-                ctx.log.exception("assistant_transcript_prepare_failed")
+            except Exception as exc:
+                ctx.log.warning(
+                    "assistant_transcript_prepare_failed", error_type=type(exc).__name__
+                )
                 raise AssistantDispatchError from None
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.

@@ -44,7 +44,7 @@ async def paused(ctx: TaskContext, intake: Intake) -> bool:
                 only_active=True,
             )
             await session.commit()
-    except Exception:
-        ctx.log.exception("assistant_pause_gate_failed")
+    except Exception as exc:
+        ctx.log.warning("assistant_pause_gate_failed", error_type=type(exc).__name__)
         raise AssistantDispatchError from None
     return True

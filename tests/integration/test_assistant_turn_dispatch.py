@@ -129,15 +129,33 @@ async def test_assistant_turn_is_not_sent_when_the_gate_or_prepare_raises(
     else:
         monkeypatch.setattr(transcripts, "prepare", boom)
     _, task = await assistant_chat(db_session)
-    done, relay = await run_crashing(db_engine, db_session, task)
+    log = RecordingLog()
+    done, relay = await run_crashing(db_engine, db_session, task, log)
     assert relay.requests == []
     assert done.status == "failed"
     assert done.error_code == "AssistantDispatchError"
     assert "secret-internal-detail" not in (done.error_message or "")
+    logged = str(log.calls)
+    assert "secret-internal-detail" not in logged
+    assert "RuntimeError" in logged  # only the exception type name is logged
+    assert not any(name == "exception" for name, _ in log.calls)
+
+
+class RecordingLog:
+    """记下处理器写过哪些日志（事件名与字段），用来断言日志里没有异常的原文与堆栈。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        def record(*args: object, **kwargs: object) -> None:
+            self.calls.append((name, (args, kwargs)))
+
+        return record
 
 
 async def run_crashing(
-    engine: AsyncEngine, session: AsyncSession, task: Task
+    engine: AsyncEngine, session: AsyncSession, task: Task, log: RecordingLog
 ) -> tuple[Task, FakeRelay]:
     """经 WorkerService 的失败收口跑一轮：处理器抛错时任务怎么落。"""
     from coreman.core.db.session import make_session_factory
@@ -145,6 +163,7 @@ async def run_crashing(
 
     relay = FakeRelay("normal")
     ctx = build_ctx(engine, task, relay_client_factory=lambda _r: relay.client())
+    object.__setattr__(ctx, "log", log)
     service = WorkerService.__new__(WorkerService)
     service._factory = make_session_factory(engine)
     try:
