@@ -34,7 +34,8 @@ ENTITY_SELECTS = {
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
-    "coreman/core/assistants/approvals/service.py": 1,  # 去重：session.scalar，自动还原
+    # 审批单：去重与决定都是 session.scalar，自动还原
+    "coreman/core/assistants/approvals/service.py": 2,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表

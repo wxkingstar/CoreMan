@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints, ValidationError
@@ -22,9 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
+from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import is_assistant
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
+from coreman.core.cloud_proxy.resume import clean_reason
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import AssistantApproval, User
+from coreman.core.db.models import AssistantApproval, Bot, InboundEvent, User, UserIdentity
 from coreman.core.db.models.storage import StoredObject
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
@@ -492,3 +496,93 @@ async def submit(
         await _discard(staged)
         return dict(FILE_STORE_DOWN)
     return {"status": "pending_approval", "approval_id": str(row_id), "hint": PENDING_HINT}
+
+
+@dataclass(frozen=True)
+class Decided:
+    """known=False：不是这里发起的单；queued：排上了执行任务或结果回合。"""
+
+    known: bool
+    queued: bool = False
+
+
+async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bool:
+    """把这张单的结局作为一轮投回助理会话；沿用提交那一轮的入站事件与会话键。"""
+    if row.origin_event_id is None or bot.owner_id is None:
+        return False
+    if await session.get(InboundEvent, row.origin_event_id) is None:
+        return False
+    identity = await session.scalar(
+        select(UserIdentity.platform_user_id)
+        .where(UserIdentity.user_id == bot.owner_id, UserIdentity.platform == "feishu")
+        .limit(1)
+    )
+    task = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=bot.id,
+            kind=APPROVAL_RESULT_KIND,
+            user_id=bot.owner_id,
+            session_key=row.session_key,
+            inbound_event_id=row.origin_event_id,
+            dedupe_key=f"assistant-approval:{row.id}:result:{row.status}",
+            payload={
+                "approval_id": str(row.id),
+                "status": row.status,
+                # 提交的那一轮可能还没结束：同一会话串行，等它收尾再开这一轮。
+                "serialize_session": True,
+                "bot_key": bot.bot_key,
+                "platform_user_id": identity or "",
+            },
+        ),
+    )
+    return task is not None
+
+
+async def decide(
+    session: AsyncSession,
+    *,
+    approval_id: str,
+    external_id: str,
+    status: str,
+    reason: str | None,
+    decided_at: datetime | None,
+) -> Decided:
+    """把 Tower 的决定落到审批单上；回调与对账共用。调用方已校验字段并负责提交。
+
+    只从 pending 往前走，所以重复送达、撤回之后迟到的批准都是无事发生。批准时只排执行任务，
+    不在这里调飞书：回调要尽快应答，执行前还要重新读会话、核销令牌。
+    """
+    row: AssistantApproval | None = await session.scalar(
+        select(AssistantApproval)
+        .where(AssistantApproval.external_id == external_id)
+        .with_for_update()
+    )
+    if row is None or row.approval_id not in (None, approval_id):
+        return Decided(known=False)
+    row.approval_id = approval_id
+    if row.status != "pending":
+        return Decided(known=True)
+    row.decided_at = decided_at or utcnow()
+    bot = await session.get(Bot, row.bot_id)
+    if bot is None or not bot.enabled or sealed.is_locked(row):
+        # 助理已停用，或数据密钥已销毁、参数读不出来：不执行，也没有会话可以投回。
+        row.status, row.error_code = "withdrawn", "assistant_inactive"
+        return Decided(known=True)
+    note = clean_reason(reason) if reason else None
+    row.reason_enc = note or None
+    if status == "approved":
+        row.status = "approved"
+        task = await tasks.enqueue(
+            session,
+            NewTask(
+                bot_id=bot.id,
+                kind=APPROVAL_EXECUTE_KIND,
+                user_id=bot.owner_id,
+                dedupe_key=f"assistant-approval:{row.id}:execute",
+                payload={"approval_id": str(row.id)},
+            ),
+        )
+        return Decided(known=True, queued=task is not None)
+    row.status = status
+    return Decided(known=True, queued=await deliver(session, row, bot))

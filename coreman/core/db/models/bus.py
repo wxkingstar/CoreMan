@@ -40,6 +40,8 @@ TASK_KINDS = (
     "escalation_media",
     "skill_install",
     "group_observe",
+    "assistant_approval_execute",
+    "assistant_approval_result",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")
