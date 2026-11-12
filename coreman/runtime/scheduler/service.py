@@ -240,6 +240,17 @@ class SchedulerService(Service):
                         await session.commit()
                 except Exception as exc:  # noqa: BLE001 审批闸门一直出错，也不能挡住后面的清理
                     self._log.warning("assistant_approval_tick_failed", error=type(exc).__name__)
+                from coreman.core.assistants import transcripts as assistant_transcripts
+
+                try:
+                    async with self._factory() as session:
+                        ttl = int(await self._store.get("session_ttl_hours", default=72))
+                        counts["assistant_transcripts_purged"] = await assistant_transcripts.purge(
+                            session, now - timedelta(hours=ttl + 24)
+                        )
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 转录清理出错不能挡住后面的清理
+                    self._log.warning("assistant_transcript_purge_failed", error=type(exc).__name__)
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds

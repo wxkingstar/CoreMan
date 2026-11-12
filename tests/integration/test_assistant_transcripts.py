@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import keys, sealed, transcripts
@@ -241,3 +242,72 @@ async def test_purge_works_in_bounded_batches(db_session: AsyncSession, monkeypa
     )
     await db_session.commit()
     assert await transcripts.purge(db_session, datetime.now(UTC) - timedelta(days=4)) == 5
+
+
+async def test_purge_stops_after_the_batch_cap_and_the_rest_goes_on_later_calls(
+    db_session: AsyncSession, monkeypatch
+):
+    monkeypatch.setattr(transcripts, "PURGE_BATCH", 2)
+    monkeypatch.setattr(transcripts, "PURGE_MAX_BATCHES", 2)
+    bot = await seed_standard(db_session)
+    stale = datetime.now(UTC) - timedelta(days=9)
+    db_session.add_all(
+        [
+            AssistantTranscript(bot_id=bot.id, session_id=uuid.uuid4(), updated_at=stale)
+            for _ in range(7)
+        ]
+    )
+    await db_session.commit()
+    before = datetime.now(UTC) - timedelta(days=4)
+    assert await transcripts.purge(db_session, before) == 4
+    assert await transcripts.purge(db_session, before) == 3
+    assert await transcripts.purge(db_session, before) == 0
+
+
+async def test_purge_skips_rows_locked_by_an_upload_without_waiting(
+    db_session: AsyncSession, db_engine: AsyncEngine
+):
+    bot = await seed_standard(db_session)
+    stale = datetime.now(UTC) - timedelta(days=9)
+    busy, idle = uuid.uuid4(), uuid.uuid4()
+    db_session.add_all(
+        [
+            AssistantTranscript(bot_id=bot.id, session_id=busy, updated_at=stale),
+            AssistantTranscript(bot_id=bot.id, session_id=idle, updated_at=stale),
+        ]
+    )
+    await db_session.commit()
+    async with make_session_factory(db_engine)() as holder:
+        await holder.execute(
+            select(AssistantTranscript.session_id)
+            .where(AssistantTranscript.session_id == busy)
+            .with_for_update()
+        )
+        before = datetime.now(UTC) - timedelta(days=4)
+        deleted = await asyncio.wait_for(transcripts.purge(db_session, before), 5)
+        await db_session.commit()
+        assert deleted == 1
+        await holder.rollback()
+    assert await db_session.get(AssistantTranscript, (bot.id, busy)) is not None
+    assert await transcripts.purge(db_session, before) == 1
+
+
+async def test_rearming_an_existing_row_refreshes_its_updated_at(db_session: AsyncSession):
+    bot, owner = await seed_assistant(db_session)
+    await keys.ensure_key(db_session, sealed.master(), owner.id)
+    node = await add_node(db_session)
+    info, plan = await start(db_session, bot, node.id)
+    await transcripts.upload(
+        db_session, node_id=node.id, transfer=plan.transfer, status="ok", data=BLOB
+    )
+    await db_session.execute(
+        text("UPDATE assistant_transcripts SET updated_at = now() - interval '9 days'")
+    )
+    await db_session.commit()
+    _, plan2 = await start(db_session, bot, node.id)
+    assert plan2.restore is True
+    row = await db_session.get(
+        AssistantTranscript, (bot.id, info.relay_session_id), populate_existing=True
+    )
+    assert row is not None and datetime.now(UTC) - row.updated_at < timedelta(minutes=5)
+    assert await transcripts.purge(db_session, datetime.now(UTC) - timedelta(days=4)) == 0

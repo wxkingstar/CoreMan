@@ -16,9 +16,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import CursorResult, delete, select, tuple_
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -30,6 +30,8 @@ from coreman.core.db.models import AssistantTranscript, Bot
 MAX_BYTES = 50 * 1024 * 1024
 # purge 一条语句最多删这么多行（转录行可达 50 MiB，不让调度器的一条语句删出一大片）。
 PURGE_BATCH = 200
+# 一次 purge 最多处理这么多批（每个调度周期最多约 2000 行，其余下个周期再删）。
+PURGE_MAX_BATCHES = 10
 # 节点上传时说明这一轮的转录怎么了：ok 带内容；empty 没有转录；too_large 超过上限；
 # unchanged 节点没跑这一轮（拒绝了），上一份照旧可用。
 STATUSES = ("ok", "empty", "too_large", "unchanged")
@@ -101,7 +103,11 @@ async def prepare(
     await session.execute(
         stmt.on_conflict_do_update(
             index_elements=[AssistantTranscript.bot_id, AssistantTranscript.session_id],
-            set_={"pending_transfer": transfer, "pending_node_id": node_id},
+            set_={
+                "pending_transfer": transfer,
+                "pending_node_id": node_id,
+                "updated_at": datetime.now(UTC),
+            },
         )
     )
     return info, Plan(transfer, restore)
@@ -164,26 +170,31 @@ async def upload(
 
 
 async def purge(session: AsyncSession, before: datetime) -> int:
-    """删掉在 `before` 之前就不再更新的转录（会话早已过期，不会再续）。调用方负责提交。"""
+    """删掉在 `before` 之前就不再更新的转录（会话早已过期，不会再续）。调用方负责提交。
+
+    每批只选没被别的事务锁住的行（上传正持有的行跳过、不等），一次最多处理 `PURGE_MAX_BATCHES`
+    批，剩下的留给之后的调用。
+    """
     total = 0
-    while True:
-        batch = (
-            select(AssistantTranscript.bot_id, AssistantTranscript.session_id)
-            .where(AssistantTranscript.updated_at < before)
-            .limit(PURGE_BATCH)
-            .subquery()
-        )
-        result = cast(
-            CursorResult[Any],
+    for _ in range(PURGE_MAX_BATCHES):
+        keys = (
             await session.execute(
-                delete(AssistantTranscript).where(
-                    tuple_(AssistantTranscript.bot_id, AssistantTranscript.session_id).in_(
-                        select(batch.c.bot_id, batch.c.session_id)
-                    )
+                select(AssistantTranscript.bot_id, AssistantTranscript.session_id)
+                .where(AssistantTranscript.updated_at < before)
+                .limit(PURGE_BATCH)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        if not keys:
+            break
+        await session.execute(
+            delete(AssistantTranscript).where(
+                tuple_(AssistantTranscript.bot_id, AssistantTranscript.session_id).in_(
+                    [(row[0], row[1]) for row in keys]
                 )
-            ),
+            )
         )
-        deleted = int(result.rowcount or 0)
-        total += deleted
-        if deleted < PURGE_BATCH:
-            return total
+        total += len(keys)
+        if len(keys) < PURGE_BATCH:
+            break
+    return total
