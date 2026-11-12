@@ -471,6 +471,40 @@ async def copy_session_files(
     await transfer_chunks(steps, read, write)
 
 
+async def prepare_assistant_directory(
+    session: AsyncSession,
+    bot: Bot,
+    target: RelayServer,
+    cipher: Cipher | None,
+    *,
+    directory: str,
+    operation_id: uuid.UUID,
+    reused: bool,
+    exists: bool,
+) -> tuple[str, bool, set[uuid.UUID]]:
+    """助理换运行时：原目录里的东西一样不带（不导出、不克隆、不迁会话与记忆），这些都会由守护进程
+    在沙箱外读写助理写过的目录。还是原来那个目录（同一节点同一路径，或共享盘上的同一份）就原样留着、
+    节点上什么都不做；否则目标目录必须还不存在，建一个全新的空目录。抛出的错误由调用方走迁移失败的
+    收尾：绑定不变、回到 ready、清掉迁移标记。"""
+    if not reused:
+        if exists:
+            raise ApiError(422, 422, unsupported("换到已有内容的工作目录"))
+        bot.workspace_phase = "初始化全新的工作目录"
+        await session.commit()
+        await call_agent(
+            target,
+            cipher,
+            "workspace-init",
+            {"working_dir": directory, "bot_id": str(bot.id), "content": instruction_content(bot)},
+        )
+    await session.refresh(bot, with_for_update=True)
+    if bot.workspace_operation_id != operation_id:
+        raise ApiError(409, 409, "迁移状态已变化，请刷新后重试")
+    await reserve_workspace(session, target.id, directory, bot_id=bot.id)
+    bot.workspace_phase = "完成切换"
+    return "not_transferred", reused, set()
+
+
 async def prepare_switch(
     session: AsyncSession,
     bot: Bot,
@@ -552,6 +586,17 @@ async def prepare_switch(
                         "无法确认目标目录是否与当前目录共享，为避免误覆盖已停止换机；"
                         "请确认两端运行时在线后重试",
                     ) from exc
+            if is_assistant(bot):
+                return await prepare_assistant_directory(
+                    session,
+                    bot,
+                    target,
+                    cipher,
+                    directory=directory,
+                    operation_id=operation_id,
+                    reused=same_directory or shared,
+                    exists=info.get("exists") is not False,
+                )
             bot.workspace_phase = "回收最新记忆"
             await session.commit()
             status = await memory_transfer.recover(

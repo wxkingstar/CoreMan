@@ -157,7 +157,7 @@ async def switch_relay(
     task_id，由 worker 执行（不要求员工空闲，等手上这一轮结束），进度与结论用 switch-jobs 查。
     只换模型、或不带 background 的旧调用方，仍当场完成。
     """
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     member_ids = await member_ids_of(session, bot.id)
     # 权限判定必须先于 If-Match：无权的人漏带版本号时该看到 403，而不是 428/409 那种
     # 「像是自己版本号写错了」的提示。领域服务里的同一道检查保留，worker 走的是那条路。
@@ -213,7 +213,14 @@ async def _start_switch_job(
 ) -> dict[str, Any]:
     try:
         await validate_switch(
-            session, bot=bot, target=target, model=body.model, actor=user, member_ids=member_ids
+            session,
+            bot=bot,
+            target=target,
+            model=body.model,
+            actor=user,
+            member_ids=member_ids,
+            workspace_mode=body.workspace_mode,
+            target_directory=body.target_directory,
         )
     except SwitchError as exc:
         raise ApiError(exc.status, exc.code, exc.message) from exc
@@ -254,6 +261,14 @@ async def _start_switch_job(
     await session.commit()
     response.status_code = 202
     return {"code": 0, "data": {"task_id": task.id}}
+
+
+async def _visible_bot(session: AsyncSession, bot_id: uuid.UUID, user: User) -> Bot:
+    """个人助理只有所有者看得到：其他人（含管理员）得到与「机器人不存在」相同的回答。"""
+    bot = await load_bot(session, bot_id)
+    if not visible_to(bot, user):
+        raise not_found("机器人不存在")
+    return bot
 
 
 async def _job_bot(session: AsyncSession, bot_id: uuid.UUID, user: User) -> Bot:
@@ -330,7 +345,7 @@ async def toggle_bot(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """启停：一次点击就是一次翻转，不需要 If-Match（并发只会多翻一次，不会写坏配置）。"""
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_toggle_bot(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
     await session.refresh(bot, with_for_update=True)
@@ -358,10 +373,10 @@ async def toggle_bot(
 @router.get("/{bot_id}/members")
 async def list_members(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _members_of(session, bot_id)}
 
 
@@ -373,7 +388,7 @@ async def add_member(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_manage_members(user, bot):
         raise forbidden()
     if is_assistant(bot):
@@ -411,7 +426,7 @@ async def remove_member(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_manage_members(user, bot):
         raise forbidden()
     row = await session.get(BotMember, {"bot_id": bot_id, "user_id": user_id})
@@ -435,10 +450,10 @@ async def remove_member(
 @router.get("/{bot_id}/allowed-users")
 async def list_allowed_users(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _allowed_of(session, bot_id)}
 
 
@@ -450,7 +465,7 @@ async def replace_allowed_users(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
     if is_assistant(bot):
@@ -504,10 +519,10 @@ async def replace_allowed_users(
 @router.get("/{bot_id}/approvers")
 async def list_approvers(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _approvers_of(session, bot_id)}
 
 
@@ -519,7 +534,7 @@ async def replace_approvers(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
     wanted = list(dict.fromkeys(body.user_ids))
@@ -593,7 +608,7 @@ async def workspace_switch_preview(
     from coreman.core.knowledge.memory_transfer import active_counts
     from coreman.core.relay.agent_client import AgentError, call_agent
 
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_switch_relay(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
     target = await session.get(RelayServer, body.relay_server_id)

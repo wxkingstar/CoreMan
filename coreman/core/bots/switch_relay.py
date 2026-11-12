@@ -13,7 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import runtime as assistant_runtime
-from coreman.core.assistants.records import is_assistant
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bot
@@ -69,6 +69,8 @@ async def validate_switch(
     model: str | None,
     actor: User,
     member_ids: set[uuid.UUID],
+    workspace_mode: WorkspaceMode = "copy",
+    target_directory: str | None = None,
 ) -> str:
     """只做判定、不改任何东西：权限、目标可用、团队、后端就绪、模型；返回换过去用的模型。
 
@@ -76,6 +78,9 @@ async def validate_switch(
     """
     if not can_switch_relay(actor, bot, member_ids):
         raise SwitchError(403, "没有权限执行该操作")
+    if is_assistant(bot) and (target_directory is not None or workspace_mode != "copy"):
+        # 助理只换到平台分配的默认目录（全新的空目录或原目录本身），不能自选或接管已有目录。
+        raise SwitchError(422, unsupported("自选工作目录或使用已有目录"))
     # 换到当前这台不做可见性/团队校验：同 relay 换模型走的也是这个入口，机器人本来就在上面
     # 跑着，PATCH model 同样不看 relay 可见性——对 visibility='admins' 的实例多这一道就成了
     # 「机器人管理员连自己的模型都改不了」。
@@ -158,7 +163,14 @@ async def switch_relay(
     `drain=True` 用于后台切换作业：不要求员工空闲，隔离后等已在跑的这一轮结束再迁移。
     """
     new_model = await validate_switch(
-        session, bot=bot, target=target, model=model, actor=actor, member_ids=member_ids
+        session,
+        bot=bot,
+        target=target,
+        model=model,
+        actor=actor,
+        member_ids=member_ids,
+        workspace_mode=workspace_mode,
+        target_directory=target_directory,
     )
     if target is None:  # validate_switch 已拒绝，这里只为收窄类型
         raise SwitchError(422, "目标运行时未注册或不可用")
