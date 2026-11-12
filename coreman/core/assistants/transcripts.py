@@ -65,9 +65,9 @@ async def prepare(
 
     续得上的条件：不是新会话、库里有上一轮的转录、那一轮的交接已办完、数据密钥可用。
     续不上又不是新会话时换一个新的 relay 会话：驱动拿着旧会话号续，会在节点上悄悄从空会话开始，
-    换新的至少让这一轮明明白白是新会话。例外是换运行时后的首轮（没有转录行、会话带着
-    `inherited_from`）：这个会话号是换运行时时新起的、从没派出过，节点上没有可续的旧状态，
-    原样用它（不还原），平台的上下文说明才带得进这一轮。
+    换新的至少让这一轮明明白白是新会话。例外是换运行时后的首轮（会话带着 `inherited_from`，
+    且没有转录行，或者只有一行交接已了结、没有内容的——首轮排队超时被 `release` 作废编号后就是
+    这样）：节点上没有可续的旧状态，原样用这个会话号（不还原），平台的上下文说明才带得进这一轮。
     """
     restore = False
     if not info.is_new:
@@ -84,7 +84,9 @@ async def prepare(
             and row[1] > 0
             and await sealed.key_ready(session, bot.id)
         )
-        carried = row is None and info.inherited_from is not None
+        carried = info.inherited_from is not None and (
+            row is None or (row[0] is None and row[1] == 0)
+        )
         if not restore and not carried:
             await session.execute(
                 delete(AssistantTranscript).where(_key(bot.id, info.relay_session_id))
