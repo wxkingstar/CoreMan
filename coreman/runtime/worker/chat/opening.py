@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
@@ -206,6 +207,28 @@ class OpenStage(ChatStageBase):
             writer.set_thinking_line(msg("queued_notice", ctx.locale, seconds=queued))
         backend = backend_of(bot.model, relay.model_provider)
         info = await self._session_info(session, ctx, intake, backend)
+        transcript = None
+        if is_assistant(bot):
+            from coreman.core.assistants import transcripts
+            from coreman.runtime.worker.chat.assistant_runtime import AssistantDispatchError
+
+            if relay.runtime_node_id is None:
+                raise ValueError("bot_or_relay_changed_before_dispatch")
+            # 个人助理的一轮在节点的沙箱里跑：定下续不续上一轮的转录（续不上就换新会话）。
+            # 之后用到会话的地方都用 prepare 返回的这一份；出意外就不派。
+            try:
+                info, transcript = await transcripts.prepare(
+                    session,
+                    bot=bot,
+                    node_id=relay.runtime_node_id,
+                    info=info,
+                    session_key=intake.session_key,
+                    backend=backend,
+                    speaker_user_id=intake.speaker.user_id,
+                )
+            except Exception:
+                ctx.log.exception("assistant_transcript_prepare_failed")
+                raise AssistantDispatchError from None
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
@@ -401,6 +424,8 @@ class OpenStage(ChatStageBase):
             turn_context=turn_context,
             worktree=bot.dev_mode,
             resume_fallback=resume_fallback,
+            sandbox=transcript is not None,
+            transcript=transcript.body() if transcript is not None else None,
         )
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":

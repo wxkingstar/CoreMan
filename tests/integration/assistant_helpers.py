@@ -9,7 +9,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.records import new_assistant_bot
-from coreman.core.db.models import Bot, PlatformApp, User
+from coreman.core.db.models import Bot, PlatformApp, RelayServer, RuntimeNode, User
+from coreman.core.runtime_nodes.transport import now
 
 MASTER_KEY = b"\x07" * 32
 # 断言「库里不含明文」用的片段：不会碰巧出现在 base64 密文里。
@@ -84,6 +85,27 @@ async def into_assistant(session: AsyncSession, bot: Bot, owner: User) -> Bot:
     bot.team_id = None
     for name, value in ASSISTANT_FIXED.items():
         setattr(bot, name, value)
+    await sandbox_ready(session, bot)
     await session.commit()
     sealed.forget()
     return bot
+
+
+async def sandbox_ready(session: AsyncSession, bot: Bot) -> None:
+    """助理绑的实例放进助理池，所在节点在线并声明能隔离运行助理（1E 起助理只在这样的节点上跑）。"""
+    relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
+    if relay is None or relay.runtime_node_id is None:
+        return
+    relay.assistant_pool = True
+    node = await session.get(RuntimeNode, relay.runtime_node_id)
+    assert node is not None
+    capabilities = dict(node.capabilities or {})
+    capabilities[relay.model_provider] = {
+        **capabilities.get(relay.model_provider, {}),
+        "installed": True,
+        "login": "ready",
+        "assistant_sandbox_v1": True,
+    }
+    node.capabilities = capabilities
+    node.heartbeat_at = now()
+    await session.flush()
