@@ -36,6 +36,7 @@ from runtime_daemon.agent import (
     atomic_write,
     operation_message,
 )
+from runtime_daemon.assistant_turns import AssistantTurns
 from runtime_daemon.lifecycle import (
     FatalConfigError,
     choose_socket_dir,
@@ -50,6 +51,7 @@ from runtime_daemon.logs import (
     configure_logging,
     rotate_copytruncate,
 )
+from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
 
@@ -220,6 +222,24 @@ def blocked_env_keys(keys) -> list[str]:
         if name in BLOCKED_ENV_KEYS or name.startswith(BLOCKED_ENV_PREFIXES):
             found.add(str(key))
     return sorted(found)
+
+
+MACHINE_ID_FILES = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def machine_fingerprint(files: tuple[str, ...] = MACHINE_ID_FILES) -> str:
+    """本机的稳定指纹：机器编号的带前缀哈希，原值不出本机。读不到时为空串。
+
+    平台用它认出同一台机器上的几个节点（个人助理要求助理节点与普通员工的节点用不同的系统用户）。
+    """
+    for name in files:
+        try:
+            value = Path(name).read_text().strip()
+        except (OSError, ValueError):
+            continue
+        if value:
+            return hashlib.sha256(b"coreman-machine-v1:" + value.encode()).hexdigest()
+    return ""
 
 
 def environment() -> str:
@@ -731,6 +751,12 @@ class Daemon:
         self.heal_deferrals: dict[str, int] = {}
         # 生效中的出站代理（prepare 时确定，重启才会变），供心跳上报与管理台展示。
         self.proxy: dict[str, str | bool] = {"source": "none", "url": "", "pending": False}
+        # 个人助理的轮次（沙箱、转录、自检）：与上面这些普通轮次的状态完全分开。
+        self.assistant = AssistantTurns(self)
+        try:
+            self.machine = machine_fingerprint()
+        except Exception:  # noqa: BLE001 助理侧的信息读不到不能拦住守护进程启动
+            self.machine = ""
 
     def socket_path(self, provider: str, gen: int | None = None) -> Path:
         # Keep under Unix's 104-byte sockaddr limit, including long macOS home paths.
@@ -1091,6 +1117,11 @@ class Daemon:
             cap = await asyncio.to_thread(cli_status, provider)
             # 守护进程自己的能力，不看驱动：记忆在工作目录的 .coreman-memory/，两种后端共用。
             cap["memory_layout_v1"] = True
+            # 守护进程自检的结果：只有声明了它的节点才会收到个人助理的轮次。
+            try:
+                cap[SANDBOX_CAPABILITY] = self.assistant.capability(provider) is True
+            except Exception:  # noqa: BLE001 自检结果出错按不支持处理，不影响普通轮次
+                cap[SANDBOX_CAPABILITY] = False
             if cap["installed"]:
                 try:
                     await self.heal_driver(provider)
@@ -1220,6 +1251,10 @@ class Daemon:
 
         try:
             data = self.validate_command(command)
+            if command["path"] == "/v1/chat/completions" and "sandbox" in data:
+                # 个人助理的一轮：在沙箱里另起驱动（见 assistant_turns），帧与收尾都在里面发。
+                await self.assistant.run(identity, provider, data, frames)
+                return
             if command["path"] == "/v1/chat/completions":
                 await self.attach_memory(provider, data)
             if command["path"] == "/v1/chat/completions" and data.pop("worktree", False):
@@ -1373,6 +1408,9 @@ class Daemon:
             "proxy": self.proxy_state(),
             "root_edit_supported": True,
             "root_change_result": self.config.get("root_change_result"),
+            # 同一台机器上的节点靠这两项区分系统用户（个人助理的助理池准入用）。
+            "machine": self.machine,
+            "uid": os.getuid(),
         }
 
     def add_backends(self, backends: object) -> None:
@@ -1523,6 +1561,18 @@ class Daemon:
             LOG.warning("Control poll failed: %s", reason)
         self.poll_error = reason
 
+    def start_assistant(self) -> None:
+        try:
+            self.assistant.start()
+        except Exception as exc:  # noqa: BLE001 助理侧起不来，普通轮次照常
+            LOG.warning("Assistant sandbox start failed: %s", type(exc).__name__)
+
+    async def stop_assistant(self) -> None:
+        try:
+            await self.assistant.stop()
+        except Exception as exc:  # noqa: BLE001 不能挡住后面停驱动的收尾
+            LOG.warning("Assistant sandbox stop failed: %s", type(exc).__name__)
+
     async def cancel_all(self) -> None:
         current, self.tasks = self.tasks, {}
         for task in current.values():
@@ -1546,6 +1596,7 @@ class Daemon:
             self.http = client
             await self.enroll()
             await self.discover()
+            self.start_assistant()
             next_discovery = time.monotonic() + 60
             self.control_deadline = time.monotonic() + CONTROL_LEASE_SECONDS
             lease_watch = asyncio.create_task(self.watch_control_lease())
@@ -1585,6 +1636,7 @@ class Daemon:
                 await asyncio.gather(beats, lease_watch, return_exceptions=True)
                 self.write_state(False, force=True)
                 await self.cancel_all()
+                await self.stop_assistant()
                 if hasattr(self, "discovery_task"):
                     self.discovery_task.cancel()
                     await asyncio.gather(self.discovery_task, return_exceptions=True)
