@@ -1,7 +1,10 @@
 import asyncio
 
 from coreman.runtime.worker.approval_resume import ApprovalResumeHandler
-from coreman.runtime.worker.assistant_approvals import AssistantApprovalExecuteHandler
+from coreman.runtime.worker.assistant_approvals import (
+    AssistantApprovalExecuteHandler,
+    AssistantApprovalResultHandler,
+)
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
@@ -27,6 +30,7 @@ asyncio.run(
             "credential_resume": CredentialResumeHandler(),
             "approval_resume": ApprovalResumeHandler(),
             "assistant_approval_execute": AssistantApprovalExecuteHandler(),
+            "assistant_approval_result": AssistantApprovalResultHandler(),
             "relay_switch": RelaySwitchHandler(),
             "group_observe": GroupObserveHandler(),
         }

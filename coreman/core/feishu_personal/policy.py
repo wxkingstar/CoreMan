@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
 from coreman.core.chat.identity import resolve_speaker
@@ -40,7 +41,8 @@ PREFIX = "COREMAN_FEISHU_PERSONAL_"
 # 工具凭证覆盖整轮：机器人的单轮上限（sse_timeout_seconds）再加这点余量。
 CAPABILITY_GRACE = 300
 # 本人私聊的一轮，或凭证提交、审批决定后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
-PRIVATE_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND)
+# 个人助理的审批单有了结局后投回助理会话的一轮同理。
+PRIVATE_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND, APPROVAL_RESULT_KIND)
 # 运行时声明了它，才会把个人工具作为附加 MCP 挂上，而不改变机器人原有能力。
 RUNTIME_CAPABILITY = "feishu_personal_tools_v1"
 # `self_reminder` 不调模型；其余模式在归本人所有、只发给本人时可以用本人授权。
