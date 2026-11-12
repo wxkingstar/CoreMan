@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants import sealed, write_fuse
 from coreman.core.assistants.approvals import attachments, checks, service, tower
+from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AssistantApproval, Bot, FeishuPersonalGrant, Task, UserReached
 from coreman.core.feishu_personal.files import FileRelay
@@ -31,6 +34,9 @@ from coreman.core.logging import get_logger
 from coreman.core.timeutils import utcnow
 
 log = get_logger(__name__)
+
+# 批准（或开始执行）之后超过这么久、又没有在途的执行任务，就当作执行被中断。
+STUCK_AFTER = timedelta(minutes=15)
 
 
 class Retry(Exception):
@@ -252,7 +258,12 @@ async def run(
                         failure = {"error": "execution_error", "type": type(exc).__name__}
                         break
         # 飞书报错之后也提交：令牌刷新、授权失效这些状态变化要留下（与 MCP 入口同一口径）。
-        await session.commit()
+        # 提交本身失败（会话已处于失败事务）也不能让单悬着：回滚后照常记结果。
+        try:
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            log.warning("assistant_approval_commit_failed", type=type(exc).__name__)
 
     async with factory() as session:
         row = await session.get(
@@ -261,6 +272,9 @@ async def run(
         bot = await session.get(Bot, bot_id)
         if row is None or bot is None:
             return "missing"
+        if row.status != "approved":
+            # 别处（例如超时清理）已经给了结论：不再记一次，也不再投回、上报。
+            return row.status
         outcome: str | None = None
         if failure is not None:
             outcome = str(failure.get("error") or "failed")
@@ -292,3 +306,49 @@ async def give_up(
             await session.commit()
             return "failed"
         return await _close(session, row, bot, "failed", code)
+
+
+async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config | None) -> int:
+    """批准之后一直没有结论、也没有在途执行任务的单：记为执行中断并告诉助理与 Tower。
+
+    参考时间取 `execute_started_at`，没有则取 `decided_at`（批准落库的时间）。不提交，由调用方
+    的事务负责。返回关掉的张数。
+    """
+    since = now - STUCK_AFTER
+    alive = exists().where(
+        Task.dedupe_key == func.concat("assistant-approval:", AssistantApproval.id, ":execute"),
+        Task.status.in_(tasks.OPEN),
+    )
+    ids = list(
+        await session.scalars(
+            select(AssistantApproval.id).where(
+                AssistantApproval.status == "approved",
+                func.coalesce(AssistantApproval.execute_started_at, AssistantApproval.decided_at)
+                < since,
+                ~alive,
+            )
+        )
+    )
+    closed = 0
+    for approval_id in ids:
+        row = await session.get(
+            AssistantApproval,
+            approval_id,
+            with_for_update={"skip_locked": True},
+            populate_existing=True,
+        )
+        if row is None or row.status != "approved":
+            continue
+        await sealed.guard_logs(session, row.bot_id)
+        bot = await session.get(Bot, row.bot_id)
+        approval = row.approval_id
+        if bot is None or not bot.enabled or sealed.is_locked(row):
+            code = sealed.LOCKED_CODE if sealed.is_locked(row) else "assistant_inactive"
+            row.status, row.error_code = "failed", code
+        else:
+            code = "execution_interrupted"
+            row.status, row.error_code = "failed", code
+            await service.deliver(session, row, bot)
+        await _report(cfg, approval, "failed", code)
+        closed += 1
+    return closed

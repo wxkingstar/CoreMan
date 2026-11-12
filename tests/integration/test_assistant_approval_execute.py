@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import approvals, keys
@@ -378,3 +380,110 @@ async def test_file_approval_without_a_relay_is_not_executed(
     assert await run_file(db_engine, row, task, None) == "failed"
     assert (await reload(db_session, row)).error_code == "attachments_not_supported"
     assert feishu.uploads == [] and fake.redeemed == []
+
+
+def second_commit(monkeypatch: pytest.MonkeyPatch, before: Any) -> None:
+    """让 run() 里的第二次提交（调飞书之后那一次）先执行 `before`，原提交随后照常进行。"""
+    original = AsyncSession.commit
+    calls = {"n": 0}
+
+    async def commit(self: AsyncSession) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            await before()
+        await original(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+
+
+async def test_failed_commit_after_feishu_still_closes_the_approval(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, feishu, fake = await approved(db_session, monkeypatch)
+
+    async def boom() -> None:
+        raise RuntimeError("commit broke")
+
+    second_commit(monkeypatch, boom)
+    # 飞书已经发出去了；记录令牌状态的那次提交失败也不能让单悬着。
+    assert await run(db_engine, row, task) == "executed"
+    assert len(feishu.writes) == 1
+    row = await reload(db_session, row)
+    assert row.status == "executed"
+    assert fake.reported == [(row.approval_id, "executed", None)]
+    assert [t.payload["status"] for t in await queued(db_session, APPROVAL_RESULT_KIND)] == [
+        "executed"
+    ]
+
+
+async def test_closed_by_someone_else_meanwhile_is_not_closed_twice(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, _, fake = await approved(db_session, monkeypatch)
+
+    async def other() -> None:
+        async with db_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE assistant_approvals SET status='failed', error_code='x' WHERE id=:i"),
+                {"i": row.id},
+            )
+
+    second_commit(monkeypatch, other)
+    assert await run(db_engine, row, task) == "failed"
+    assert fake.reported == [] and await queued(db_session, APPROVAL_RESULT_KIND) == []
+
+
+async def age(session: AsyncSession, row: AssistantApproval, column: str, minutes: int) -> None:
+    setattr(row, column, utcnow() - timedelta(minutes=minutes))
+    await session.commit()
+
+
+async def set_task_status(session: AsyncSession, task: Task, status: str) -> None:
+    await session.execute(
+        text("UPDATE tasks SET status=:s WHERE id=:i"), {"s": status, "i": task.id}
+    )
+    await session.commit()
+
+
+async def test_stuck_approval_without_a_live_task_is_closed_and_reported(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, feishu, fake = await approved(db_session, monkeypatch)
+    await age(db_session, row, "decided_at", 20)
+    await set_task_status(db_session, task, "failed")
+    assert await execute.recover_stuck(db_session, utcnow(), CFG) == 1
+    await db_session.commit()
+    row = await reload(db_session, row)
+    assert (row.status, row.error_code) == ("failed", "execution_interrupted")
+    assert fake.reported == [(row.approval_id, "failed", "execution_interrupted")]
+    assert [t.payload["status"] for t in await queued(db_session, APPROVAL_RESULT_KIND)] == [
+        "failed"
+    ]
+    assert feishu.writes == []
+    assert await execute.recover_stuck(db_session, utcnow(), CFG) == 0
+
+
+async def test_stuck_check_leaves_live_or_recent_approvals_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, _, fake = await approved(db_session, monkeypatch)
+    # 任务还在排队：不动，哪怕批准已经过了很久。
+    await age(db_session, row, "decided_at", 20)
+    assert await execute.recover_stuck(db_session, utcnow(), CFG) == 0
+    # 任务没了，但才批准两分钟：也不动。
+    await age(db_session, row, "decided_at", 2)
+    await set_task_status(db_session, task, "failed")
+    assert await execute.recover_stuck(db_session, utcnow(), CFG) == 0
+    assert (await reload(db_session, row)).status == "approved" and fake.reported == []
+
+
+async def test_stuck_after_execution_started_counts_from_the_start(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, _, fake = await approved(db_session, monkeypatch)
+    await age(db_session, row, "execute_started_at", 20)
+    await set_task_status(db_session, task, "failed")
+    assert await execute.recover_stuck(db_session, utcnow(), None) == 1
+    await db_session.commit()
+    assert (await reload(db_session, row)).error_code == "execution_interrupted"
+    assert fake.reported == []
