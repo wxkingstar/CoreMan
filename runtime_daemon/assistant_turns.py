@@ -34,7 +34,7 @@ from typing import Any
 
 import httpx
 
-from runtime_daemon import egress, sandbox, transcripts, turn_credentials
+from runtime_daemon import egress, sandbox, transcripts, turn_credentials, workspace
 
 LOG = logging.getLogger("coreman-runtime")
 DEFAULT_LIMIT = 8
@@ -219,6 +219,8 @@ class AssistantTurns:
         self.ready: dict[str, bool] = dict.fromkeys(sandbox.PROVIDERS, False)
         self.code = "not_tested"
         self.active: set[str] = set()
+        # 在跑的轮次各自的工作目录（主机上的真实路径）：删目录前核对没有轮次正在用它。
+        self.workdirs: dict[str, Path] = {}
         self.loop_task: asyncio.Task | None = None
         self.background: set[asyncio.Task] = set()
         # background 里的收尾任务（_finish）：关停时从不取消。
@@ -351,6 +353,30 @@ class AssistantTurns:
                 LOG.warning("Assistant sweep entry failed: %s", type(exc).__name__)
             finally:
                 await asyncio.to_thread(sandbox.remove_tree, entry)
+        await asyncio.to_thread(self.purge_trash)
+
+    def purge_trash(self) -> None:
+        """回收站里还没删完的助理工作目录（删除线程随守护进程退出而中断）：不跟随链接地删掉。
+
+        回收站不是本用户的真实目录就不碰；每一项单独兜底。
+        """
+        trash = Path(self.daemon.config["workspace_root"]) / workspace.TRASH_DIR
+        try:
+            info = os.lstat(trash)
+        except OSError:
+            return
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return
+        with os.scandir(trash) as entries:
+            found = list(entries)
+        for entry in found:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    sandbox.remove_tree(Path(entry.path))
+                else:
+                    os.unlink(entry.path)
+            except OSError as exc:
+                LOG.warning("Assistant trash entry failed: %s", type(exc).__name__)
 
     def _leftovers(
         self, active: set[str]
@@ -457,6 +483,10 @@ class AssistantTurns:
         )
         await frames.finish()
 
+    def in_use(self, path: Path) -> bool:
+        """有没有在跑的轮次用着这个目录（或它下面的目录）。可以在线程里调用：先整体复制再看。"""
+        return any(w == path or w.is_relative_to(path) for w in self.workdirs.copy().values())
+
     def _admission(self, provider: str) -> str | None:
         if provider not in sandbox.PROVIDERS or not self.capability(provider):
             return "sandbox_unavailable"
@@ -473,6 +503,7 @@ class AssistantTurns:
             return
         layout = sandbox.TurnLayout.new(self.turns_dir, self.daemon.socket_dir)
         self.active.add(layout.turn_id)
+        self.workdirs[layout.turn_id] = plan.workdir
         self.daemon.task_info[identity] = {
             "request_id": identity,
             "provider": provider,
@@ -634,6 +665,7 @@ class AssistantTurns:
                 await asyncio.to_thread(sandbox.remove_tree, layout.root)
         finally:
             self.active.discard(layout.turn_id)
+            self.workdirs.pop(layout.turn_id, None)
 
     @staticmethod
     def _drop_secrets(layout: sandbox.TurnLayout) -> None:

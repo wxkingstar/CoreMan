@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -48,6 +50,11 @@ EXCLUDED = {
 MAX_DIFF = 256 * 1024
 # 所有权标记由守护进程写、不到 1 KB；读它时最多读这么多（目录里的东西可能被助理换掉）。
 MARKER_LIMIT = 64 * 1024
+# 工作目录根下守护进程自己用的目录：健康探测目录、个人助理工作目录的回收站。助理专用实例拒绝把它们
+# （及其下的任何目录）当作工作目录。
+HEALTH_DIR = ".coreman-health"
+TRASH_DIR = ".coreman-trash"
+RESERVED_DIRS = (HEALTH_DIR, TRASH_DIR)
 
 
 def read_small(path, limit=MARKER_LIMIT):
@@ -90,6 +97,31 @@ def marker_data(root):
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def reserved(root, raw):
+    """`raw`（相对工作目录根或绝对路径）按真实位置算，是不是落在保留目录里（含保留目录本身）。"""
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return False
+    base = Path(root).resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(base / name) for name in RESERVED_DIRS)
+
+
+def trash_dir(root):
+    """工作目录根下的回收站：没有就建（0700）；必须是本用户的真实目录，不是链接。"""
+    path = Path(root) / TRASH_DIR
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError("trash directory is not ours")
+    return path
 
 
 def redact(url):
@@ -340,7 +372,7 @@ class Workspace:
             raise self.error("缺少员工标识")
         marker = self.root / MARKER
         if (
-            data.get("type") != "workspace-info"
+            data.get("type") not in ("workspace-info", "workspace-remove")
             and (marker.exists() or marker.is_symlink())
             and not self.owned()
         ):
@@ -479,6 +511,31 @@ class Workspace:
             path.unlink(missing_ok=True)
             return {"removed": True}
         raise self.error("不支持的探测操作")
+
+    def remove(self):
+        """个人助理停用或换走之后删掉它的工作目录。只在助理专用实例上做，只删带本员工标记的目录。
+
+        先把目录原子地改名进工作目录根下的回收站（同一文件系统，一步完成，不占操作锁多久），再在
+        后台线程里删：不跟随任何链接，删不掉的留给助理侧的清扫（启动时与之后每 10 分钟）。目录
+        已经不在算删完；不是本员工的（或没有标记）不动，如实告诉平台；还有在跑的沙箱轮次用着它
+        时也不动（`busy`），平台稍后再来。
+        """
+        if not self.assistant_only:
+            raise self.error("不支持的工作区操作")
+        if not os.path.lexists(self.root):
+            return {"removed": True, "existed": False}
+        if self.root.is_symlink() or not self.root.is_dir() or not self.owned():
+            return {"removed": False, "existed": True}
+        turns = getattr(getattr(self.agent, "daemon", None), "assistant", None)
+        if turns is not None and turns.in_use(self.root):
+            # 还有沙箱里的轮次挂着这个目录：现在删，它还能往回收站里写。等它结束再来。
+            return {"removed": False, "existed": True, "busy": True}
+        from .sandbox import remove_tree
+
+        target = trash_dir(self.agent.root) / secrets.token_hex(16)
+        os.rename(self.root, target)
+        threading.Thread(target=remove_tree, args=(target,), daemon=True).start()
+        return {"removed": True, "existed": True}
 
     def list(self):
         parent = self.path(self.data.get("path", ""))
@@ -1127,6 +1184,7 @@ class Workspace:
             "git_status",
             "git_diff",
             "probe",
+            "remove",
         }:
             raise self.error("不支持的工作区操作")
         try:

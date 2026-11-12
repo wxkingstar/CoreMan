@@ -55,6 +55,7 @@ from runtime_daemon.logs import (
 from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
+from runtime_daemon.workspace import reserved
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
@@ -112,8 +113,9 @@ HEAL_DEFER_ROUNDS = 30
 RETRYABLE_ENROLL_STATUSES = {408, 429}
 
 # 助理专用实例（config.json 里 assistant_only 为 true）只接这些节点命令：平台对助理所在节点会发的
-# 探活、状态、额度、席位，以及开通与换运行时用到的目录检查与初始化。其余命令（读写或执行工作目录里的
-# 内容、导出内容、遍历所有工作目录）一律以固定代码拒绝。经驱动的读请求只留探活与模型列表。
+# 探活、状态、额度、席位，开通与换运行时用到的目录检查与初始化，以及停用或换走之后删除助理的工作
+# 目录。其余命令（读写或执行工作目录里的内容、导出内容、遍历所有工作目录）一律以固定代码拒绝。
+# 经驱动的读请求只留探活与模型列表。
 ASSISTANT_ONLY_OPERATIONS = frozenset(
     {
         "ping",
@@ -123,6 +125,7 @@ ASSISTANT_ONLY_OPERATIONS = frozenset(
         "workspace-info",
         "workspace-probe",
         "workspace-init",
+        "workspace-remove",
         *SEAT_OPERATIONS,
     }
 )
@@ -424,17 +427,24 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
     return result
 
 
-def assistant_only_refusal(method: str, path: str, data: dict) -> str | None:
+def assistant_only_refusal(
+    method: str, path: str, data: dict, root: Path | None = None
+) -> str | None:
     """助理专用实例对一条请求的裁决：不接就返回固定代码。
 
     聊天请求必须带 `sandbox: true`（只在沙箱里跑）；节点命令只接名单上的；经驱动的读请求只留
-    探活与模型列表。
+    探活与模型列表。给了工作目录根时，工作目录落在保留目录（健康探测目录、回收站）里的一律拒绝：
+    沙箱里的助理能写自己的工作目录，探测在沙箱外跑。
     """
     if path == "/v1/chat/completions":
-        return None if data.get("sandbox") is True else "assistant_only"
-    if path == "/":
-        return None if data.get("type") in ASSISTANT_ONLY_OPERATIONS else "assistant_only"
-    return None if (method, path) in ASSISTANT_ONLY_READS else "assistant_only"
+        refused = None if data.get("sandbox") is True else "assistant_only"
+    elif path == "/":
+        refused = None if data.get("type") in ASSISTANT_ONLY_OPERATIONS else "assistant_only"
+    else:
+        return None if (method, path) in ASSISTANT_ONLY_READS else "assistant_only"
+    if refused is None and root is not None and reserved(root, data.get("working_dir")):
+        return "reserved_directory"
+    return refused
 
 
 class AssistantOnlyRefused(Exception):
@@ -463,6 +473,8 @@ class RuntimeAgent(Agent):
         self.daemon = daemon
         # 助理专用实例不跑遍历所有工作目录的定时任务（回收记忆、刷新 worktree）。
         self.workspace_jobs = not daemon.assistant_only
+        # 工作目录的删除（停用助理）只在助理专用实例上做，见 workspace.Workspace.remove。
+        self.assistant_only = daemon.assistant_only
         # 服务端在心跳里给的检查模型（模型目录的默认模型）。驱动发现的列表只是默认值，
         # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
         self.probe_model = ""
@@ -1242,7 +1254,9 @@ class Daemon:
             raise ValueError("请求过大")
         data = json.loads(raw) if raw else {}
         if self.assistant_only:
-            refused = assistant_only_refusal(method, path, data)
+            refused = assistant_only_refusal(
+                method, path, data, Path(self.config["workspace_root"])
+            )
             if refused is not None:
                 raise AssistantOnlyRefused(refused)
         if path == "/v1/chat/completions":

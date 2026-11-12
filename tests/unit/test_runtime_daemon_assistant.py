@@ -417,6 +417,7 @@ ALLOWED_OPERATIONS = [
     "workspace-info",
     "workspace-probe",
     "workspace-init",
+    "workspace-remove",
     "seat-create",
     "seat-login-start",
     "seat-login-complete",

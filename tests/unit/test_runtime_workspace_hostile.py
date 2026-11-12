@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -113,3 +114,107 @@ def test_ordinary_init_keeps_taking_over_existing_directories(agent):
     (p / "notes.md").write_text("kept")
     assert call(agent, "init", content="x")["initialized"]
     assert (p / "notes.md").read_text() == "kept"
+
+
+def test_remove_is_only_for_assistant_only_daemons(agent):
+    call(agent, "init", content="x")
+    with pytest.raises(OperationError):
+        call(agent, "remove")
+    assert (agent.root / "one").is_dir()
+
+
+def wait_gone(path: Path) -> None:
+    for _ in range(100):
+        if not os.path.lexists(path):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{path} still there")
+
+
+def test_remove_moves_the_directory_into_the_trash_and_deletes_it_without_following_links(
+    agent, tmp_path
+):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not the assistant's")
+    p = agent.root / "one"
+    (p / "escape").symlink_to(outside)
+    (p / "deep" / "er").mkdir(parents=True)
+    (p / "deep" / "er" / "file").write_text("x")
+    (p / "deep" / "locked").mkdir()
+    (p / "deep" / "locked").chmod(0)
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": True}
+    assert not os.path.lexists(p)
+    trash = agent.root / workspace.TRASH_DIR
+    assert trash.is_dir() and (trash.stat().st_mode & 0o777) == 0o700
+    for entry in list(trash.iterdir()):
+        wait_gone(entry)
+    assert (outside / "keep.txt").read_text() == "not the assistant's"
+
+
+def test_remove_reports_missing_and_foreign_directories(agent):
+    agent.assistant_only = True
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": False}
+    p = agent.root / "one"
+    p.mkdir()
+    (p / "file").write_text("unmarked")
+    assert call(agent, "remove") == {"success": True, "removed": False, "existed": True}
+    (p / workspace.MARKER).write_text('{"bot_id": "someone-else"}')
+    assert call(agent, "remove") == {"success": True, "removed": False, "existed": True}
+    assert (p / "file").read_text() == "unmarked"
+
+
+def test_remove_refuses_a_trash_that_is_a_link(agent, tmp_path):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (agent.root / workspace.TRASH_DIR).symlink_to(elsewhere)
+    with pytest.raises(OperationError):
+        call(agent, "remove")
+    assert (agent.root / "one").is_dir() and not any(elsewhere.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (".coreman-health", True),
+        (".coreman-health/x", True),
+        (".coreman-trash/abc", True),
+        ("bot-1", False),
+        (".coreman-healthy", False),
+        ("", False),
+    ],
+)
+def test_reserved_directories(tmp_path, raw, expected):
+    assert workspace.reserved(tmp_path, raw) is expected
+
+
+def test_reserved_follows_links_to_their_real_place(tmp_path):
+    (tmp_path / ".coreman-health").mkdir()
+    (tmp_path / "innocent").symlink_to(tmp_path / ".coreman-health")
+    assert workspace.reserved(tmp_path, "innocent") is True
+    assert workspace.reserved(tmp_path, str(tmp_path / ".coreman-health")) is True
+
+
+def test_remove_waits_while_a_sandboxed_turn_uses_the_directory(agent):
+    from types import SimpleNamespace
+
+    from runtime_daemon.assistant_turns import AssistantTurns
+
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    turns = AssistantTurns(SimpleNamespace())
+    agent.daemon = SimpleNamespace(assistant=turns)
+    turns.workdirs["t1"] = (agent.root / "one").resolve()
+    assert call(agent, "remove") == {
+        "success": True,
+        "removed": False,
+        "existed": True,
+        "busy": True,
+    }
+    assert (agent.root / "one").is_dir()
+    turns.workdirs.clear()
+    assert call(agent, "remove")["removed"] is True
