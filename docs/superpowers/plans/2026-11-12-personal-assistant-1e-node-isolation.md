@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `bots.kind='assistant'` 的每一轮只在声明了沙箱能力的节点上、在 bubblewrap 沙箱里运行：只看得见自己的工作目录、本轮的临时目录与 CLI 配置目录，只读挂 CLI 程序与一份去掉刷新令牌的登录凭证，出网只通平台与模型接口；一轮结束后 CLI 转录经 TLS 上传平台、用所有者的数据密钥加密存入 `assistant_transcripts`，节点上随即删除，续聊前再下发还原。助理绑定在助理池（`relay_servers.assistant_pool`）或所有者本人的私有运行时上，所在节点不可用时暂停并告诉所有者，不回落。普通员工（`kind='standard'`）的请求体、节点上的启动方式、领取顺序都不变。
+**Goal:** `bots.kind='assistant'` 的每一轮只在声明了沙箱能力的节点上、在 bubblewrap 沙箱里运行：只看得见自己的工作目录、本轮的临时目录与 CLI 配置目录，只读挂 CLI 程序与一份去掉刷新令牌的登录凭证，出网只通平台与模型接口；一轮结束后 CLI 转录经 TLS 上传平台、用所有者的数据密钥加密存入 `assistant_transcripts`，节点上随即删除，续聊前再下发还原。助理绑定在助理池（`relay_servers.assistant_pool`）或所有者本人的私有运行时上，所在节点不可用时暂停并告诉所有者，不回落。助理与普通员工共用机器：要跑助理的机器上，以单独的系统用户（示例名 `coreman-assistant`）再装一份守护进程、注册成单独的节点，放进助理池；平台凭节点心跳上报的本机指纹与 uid 强制「助理节点与承载普通员工的节点不是同一个系统用户」，普通员工也绑不到、换不到助理池的节点上。普通员工（`kind='standard'`）的请求体、节点上的启动方式、领取顺序都不变。
 
-**Architecture:** 节点侧全部在 Python 守护进程里：平台的请求体带 `sandbox: true` 与 `transcript: {"transfer", "restore"}` 时，`Daemon.execute` 把这一轮交给 `runtime_daemon/assistant_turns.py`，它为这一轮建目录、收窄凭证（`turn_credentials.py`）、按交接编号取回并还原转录（`transcripts.py`）、起一个只放行名单内「主机:端口」的 CONNECT 代理（`egress.py`），再用 bubblewrap（`sandbox.py`）在断网的命名空间里起「转发口 + 驱动」（`sandbox_bridge.py` 看护现成的 Go 驱动），把请求转进去、把流转出来；流里的 `data: [DONE]` 扣住，等沙箱停下、转录上传完才放出。Go 驱动与普通轮次的常驻驱动一行不改。守护进程启动时与每 30 分钟按前置验证脚本的同一套检查做一次自检，结果按 AI 写进心跳的 `assistant_sandbox_v1`；没声明的节点（旧版本、macOS、容器里没有用户命名空间、没装 bubblewrap）收不到助理的轮次，收到了也拒绝。平台侧：`core/assistants/runtime.py` 判定助理能不能在所绑的实例上跑、开通时从池里挑节点；worker 在开轮前先过这道关（`worker/chat/assistant_runtime.py`），开流时由 `core/assistants/transcripts.py` 定下交接编号与续不续；节点经两个新接口取、交转录；`sealed` 新增二进制内容列，转录与审批单等其他内容列走同一套按人密钥。节点领取调用时普通调用先领，助理调用按设置 `assistant_node_concurrency` 限并发，超出的留在队列里。
+**Architecture:** 节点侧全部在 Python 守护进程里：平台的请求体带 `sandbox: true` 与 `transcript: {"transfer", "restore"}` 时，`Daemon.execute` 把这一轮交给 `runtime_daemon/assistant_turns.py`，它为这一轮建目录、收窄凭证（`turn_credentials.py`）、按交接编号取回并还原转录（`transcripts.py`）、起一个只放行名单内「主机:端口」的 CONNECT 代理（`egress.py`），再用 bubblewrap（`sandbox.py`）在断网的命名空间里起「转发口 + 驱动」（`sandbox_bridge.py` 看护现成的 Go 驱动），把请求转进去、把流转出来；流里的 `data: [DONE]` 扣住，等沙箱停下、转录上传完才放出。Go 驱动与普通轮次的常驻驱动一行不改。守护进程启动时与每 30 分钟按前置验证脚本的同一套检查做一次自检，结果按 AI 写进心跳的 `assistant_sandbox_v1`；没声明的节点（旧版本、macOS、容器里没有用户命名空间、没装 bubblewrap）收不到助理的轮次，收到了也拒绝。平台侧：`core/assistants/runtime.py` 判定助理能不能在所绑的实例上跑、开通时从池里挑节点；worker 在开轮前先过这道关（`worker/chat/assistant_runtime.py`），开流时由 `core/assistants/transcripts.py` 定下交接编号与续不续；节点经两个新接口取、交转录；`sealed` 新增二进制内容列，转录与审批单等其他内容列走同一套按人密钥。节点领取调用时普通调用先领，助理调用按设置 `assistant_node_concurrency` 限并发，超出的留在队列里。每个守护进程在心跳里多报两项：本机指纹（机器编号的哈希）与自己的 uid，存在 `runtime_nodes` 上；助理池准入（Task 12）与普通员工的绑定、换运行时（Task 10）据此执行「一台机器上助理与普通员工分属两个系统用户」。
 
 **Tech Stack:** 守护进程：Python 3.10+ 标准库（asyncio、tarfile、socket）、httpx、bubblewrap；平台：Python 3.12、FastAPI、SQLAlchemy async、Alembic、PostgreSQL、httpx；测试：pytest（真起沙箱的用例在没有 bubblewrap 的机器上自动跳过）。Go 驱动不改。
 
@@ -18,12 +18,16 @@
   - 平台发给节点的请求体逐字不变（`ChatRequest.to_body` 只在 `sandbox` 为真时多两个键，Task 13 有逐键断言）；
   - 节点上普通轮次的路径逐字不变：仍由常驻驱动、同样的参数、环境、工作目录与配置目录处理（Task 7 有用例把请求体转给一个假驱动核对）；`"sandbox"` 键不在请求里时一行新代码都不经过；
   - 节点领取调用时普通调用先领、数量上限不变，助理调用只用剩下的名额（Task 11）；
-  - 助理侧的任何失败（自检、代理、凭证、转录上传下载、清扫、并发满）只结束这一轮或只影响下一次清扫：有各自的 try/except 与超时，不占普通轮次的锁、队列名额、驱动或数据库事务（各任务的「普通机器人不受影响」一栏写明由哪条测试保证）。
+  - 助理侧的任何失败（自检、代理、凭证、转录上传下载、清扫、并发满）只结束这一轮或只影响下一次清扫：有各自的 try/except 与超时，不占普通轮次的锁、队列名额、驱动或数据库事务（各任务的「普通机器人不受影响」一栏写明由哪条测试保证）；
+  - 普通员工那份守护进程的心跳多两个字段（`machine`、`uid`，写坏了按没上报处理、心跳照收），此外它的代码路径不变；普通员工的路径上只多一处查询：绑定（建机器人时选运行时）与换运行时各查一次目标节点是不是助理池节点（Task 10）；
+  - 安装脚本不带新参数时行为与今天相同（Task 16 有用例比对带与不带 `--expect-uid` 的输出）。
 - 失败一律不跑（fail closed）：节点没声明能力、自检没过、bubblewrap 起不来、凭证快到期或读不懂、转录取不下来、并发已满，这一轮都不跑；转录传不上去就不拿旧的那份续；解不开、密钥已销毁、超过 50MB 都从新会话开始。
 - 日志与告警只带代码、编号、大小与异常类型名；不记主机名、路径、命令输出与内容。
+- 部署前提（写进部署文档，平台无法校验）：运行普通员工的系统用户不能有 root 权限或免密 sudo；否则它能读助理用户的一切，本计划的隔离不成立。
 - 守护进程代码要能在 Python 3.10 上跑（不用 `asyncio.timeout`、`TaskGroup`，`asyncio.TimeoutError` 与 `TimeoutError` 一起捕获）；`runtime_daemon/sandbox_bridge.py` 只用标准库（它以 `python -I` 在沙箱里运行）。
 - 仓库里有几个文件本来就不符合 `ruff format`（如 `coreman/core/feishu_docs/write_policy.py`）：**只对本任务改动的文件**跑 `uv run ruff format <文件>`，不要对整个目录格式化。
 - 本计划不做：
+  - 替部署方创建系统用户、配置 `hidepid`：安装文档写步骤，安装脚本只核对 uid。
   - 开通与停用流程（1F）：开通时调 `runtime.pick_pool_relay` 选节点、停用时清工作目录，都在 1F；本计划只提供函数。
   - 每人每日轮次预算：推迟到第 2 期（见「设计选择」第 10 条与「待所有者确认的取舍」）。
   - OpenCode 的助理轮次：守护进程不为它声明能力（「设计选择」第 11 条）。
@@ -53,13 +57,13 @@
 | 按 cgroup 用 nftables 放行 | 没有采用：要 root 或 CAP_NET_ADMIN，守护进程以普通用户运行 |
 | **`--unshare-all` 断网；沙箱里 `127.0.0.1:18080` 的转发口经挂进来的 Unix socket 接到守护进程的 CONNECT 代理；代理只放行本轮名单里的「主机:端口」** | **采用**。名单 = 控制面地址的主机 + 本轮所有 `COREMAN_*_URL` 的主机（都只认 https）+ 这种 AI 的模型接口地址（Claude 是 `api.anthropic.com`，Codex 是 `chatgpt.com`、`api.openai.com`，可在 config.json 的 `assistant_egress_hosts` 按 AI 覆盖）。OAuth 刷新地址不在名单里。上游代理沿用节点配置：平台地址走 `control_proxy`，模型接口走 AI 代理。不解 TLS、不看内容，日志只记次数。代价：CLI 必须遵守 `HTTPS_PROXY`（两种 CLI 都声称支持，列在「仍需真机核实」）；平台必须是 https 地址 |
 
-**5. 模型登录凭证：每轮一份去掉刷新令牌的只读副本。** 节点上的 CLI 登录由所有员工共用。OAuth 的刷新令牌可能是一次性的（轮换式刷新令牌是 OAuth 的常见做法；两种 CLI 的文档都没有承诺可以重复使用，本计划按一次性对待，真机核实见文末）。如果沙箱里的 CLI 拿着只读挂进来的原文件去刷新，新令牌写不回去、旧的又已作废，整台节点的登录就坏了，普通员工一起受影响。
+**5. 模型登录凭证：每轮一份去掉刷新令牌的只读副本。** 助理节点是单独系统用户下的一份守护进程，它有自己的一份 CLI 登录（与普通员工那份分开登录），由这台节点上的所有助理共用。OAuth 的刷新令牌可能是一次性的（轮换式刷新令牌是 OAuth 的常见做法；两种 CLI 的文档都没有承诺可以重复使用，本计划按一次性对待，真机核实见文末）。如果沙箱里的 CLI 拿着只读挂进来的原文件去刷新，新令牌写不回去、旧的又已作废，整个助理节点的登录就坏了，这台节点上的助理全部受影响。
 
 | 做法 | 取舍 |
 |---|---|
 | 只读挂原登录文件（前置验证脚本的做法） | 不可接受：见上 |
 | 守护进程在沙箱外自己刷新 | 没有采用：要实现两家的 OAuth 客户端，还要和同一台节点上 CLI 自己的刷新抢同一个文件 |
-| **每轮从当前席位的登录文件收窄出一份副本：Claude 只留 `claudeAiOauth` 里除 `refreshToken` 以外的字段（其它顶层键如 MCP 的 OAuth 令牌不带）；Codex 去掉 `tokens.refresh_token`、把 `last_refresh` 改成现在（API Key 登录原样带）。副本 0600 写在本轮目录里不挂进沙箱的位置，再只读盖到配置目录的同名文件上；访问令牌剩余不足 30 分钟就不起这一轮（`credential_expiring`）** | **采用**。沙箱里的 CLI 无从刷新（既没有刷新令牌，刷新地址也连不出去）；刷新留给沙箱外的普通轮次与健康检查，它们照常写回节点的登录文件。节点用环境变量登录（`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）时只带那一个变量 |
+| **每轮从当前席位的登录文件收窄出一份副本：Claude 只留 `claudeAiOauth` 里除 `refreshToken` 以外的字段（其它顶层键如 MCP 的 OAuth 令牌不带）；Codex 去掉 `tokens.refresh_token`、把 `last_refresh` 改成现在（API Key 登录原样带）。副本 0600 写在本轮目录里不挂进沙箱的位置，再只读盖到配置目录的同名文件上；访问令牌剩余不足 30 分钟就不起这一轮（`credential_expiring`）** | **采用**。沙箱里的 CLI 无从刷新（既没有刷新令牌，刷新地址也连不出去）；助理节点上没有普通员工，刷新只发生在这份守护进程自己沙箱外的健康检查里（Claude 空闲 15 分钟一次，Codex 白天每小时一次），照常写回它的登录文件。节点用环境变量登录（`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）时只带那一个变量 |
 
 被注入的助理在一轮里读得到这份副本。它拿到的是一枚到期即失效的访问令牌；出网只通平台与模型接口，带不到别处去：能带出去的路只剩把令牌写进发给平台的内容（知识库、审批单——审批单要所有者本人批准才会发出），或拿它在模型接口上消耗额度。这一点写进部署文档。哪些是读代码与文档得来的、哪些要真机验证，见「仍需真机核实」。
 
@@ -96,9 +100,9 @@
 | 新平台 + 新守护进程、自检没过（macOS、容器、没装 bubblewrap、CLI 在沙箱里起不来） | 不声明能力：平台在开轮前就让助理暂停并告诉所有者；即便有请求到了，守护进程也回 503 `sandbox_unavailable` |
 | 新平台 + 旧守护进程 | 旧守护进程不上报 `assistant_sandbox_v1`，平台按没有处理，同上暂停。**这一条是必须的**：旧守护进程不认识 `sandbox` 字段，会把请求原样交给常驻驱动、在沙箱外跑 |
 | 旧平台 + 新守护进程 | 旧平台丢掉心跳里不认识的键；它也不发 `sandbox`，新守护进程走原来的路径。旧平台（1D 及以前）会把助理的轮次当普通轮次派出、在沙箱外跑——与 1E 之前相同 |
-| 平台回滚到 1E 之前 | 同上一行。所以回滚前要先停用助理记录，回滚后再启用（Task 16 的部署文档写了步骤与查询） |
+| 平台回滚到 1E 之前 | 同上一行。所以回滚前要先停用助理记录，回滚后再启用（Task 17 的部署文档写了步骤与查询） |
 
-**9. 分配与并发。** `relay_servers.assistant_pool` 标记助理池；`runtime.pick_pool_relay(session, provider)` 在池里这种 AI、现在能跑助理的实例中选所在节点上助理最少的一个（同数按编号），供 1F 开通时调用。之后每轮都不重新选（设计「不做」）：所在节点离线、排空、失去沙箱能力时这一轮不跑，回一句「你的个人助理暂停了：……」；私有运行时离线同样暂停、不回落到池。所有者改绑只能绑到池里或本人的私有运行时，且那台要现在就能跑（`switch_relay.validate_switch` 里加一道校验）。并发上限在节点领取时执行：`runtime_calls.sandbox` 标出助理的调用，`_collect` 先按原来的条件领普通调用，有剩余名额且节点声明了能力，才按设置 `assistant_node_concurrency`（默认 2）领助理调用。超出的留在队列里，由调用方现成的排队上限（120 秒）等待，等不到时 worker 告诉所有者「运行时繁忙」。守护进程另有一道保险 `assistant_max_concurrent`（config.json，默认 8），超出直接回 503，正常情况下碰不到。
+**9. 分配与并发。** `relay_servers.assistant_pool` 标记助理池；`runtime.pick_pool_relay(session, provider)` 在池里这种 AI、现在能跑助理的实例中选所在节点上助理最少的一个（同数按编号），供 1F 开通时调用。之后每轮都不重新选（设计「不做」）：所在节点离线、排空、失去沙箱能力时这一轮不跑，回一句「你的个人助理暂停了：……」；私有运行时离线同样暂停、不回落到池。助理节点是单独系统用户下的另一份守护进程：它停了而同一台机器上普通员工那份还在跑时，助理同样暂停，普通员工不受影响。所有者改绑只能绑到池里或本人的私有运行时，且那台要现在就能跑（`switch_relay.validate_switch` 里加一道校验）。并发上限在节点领取时执行：`runtime_calls.sandbox` 标出助理的调用，`_collect` 先按原来的条件领普通调用，有剩余名额且节点声明了能力，才按设置 `assistant_node_concurrency`（默认 2）领助理调用。超出的留在队列里，由调用方现成的排队上限（120 秒）等待，等不到时 worker 告诉所有者「运行时繁忙」。守护进程另有一道保险 `assistant_max_concurrent`（config.json，默认 8），超出直接回 503，正常情况下碰不到。
 
 **10. 每人每日轮次预算推迟到第 2 期。** 设计的说法是「用完后非紧急事项攒到次日」：「紧急」由第 2 期的盯消息分级定义（立即交回 / 攒批 / 压着 / 忽略），第 1 期的轮次全是所有者本人发起的私聊与审批结果回合，没有可以攒的东西；现在做只能一刀切地拒绝所有者本人的请求。第 2 期和分级一起做：按人计数放在交回投递处，用完后攒批与压着的条目改到次日投递并私信告知，立即交回的不受限。
 
@@ -106,7 +110,26 @@
 
 **12. 工作目录的安全规则进提示词。** 追加在审批规则之后（同在稳定段，每轮逐字不变）：工作目录只放规则、经验总结和技能，不放人名、聊天、审批内容与任何个人信息，也不写进文件名；下载的文档与附件放 `$TMPDIR`，一轮结束即删除。
 
-**13. 助理池节点只承载助理。** 普通员工不在沙箱里，与助理是同一个系统用户：它们的 CLI 能读守护进程数据目录下这一轮的临时目录、转录与凭证副本。沙箱只能挡住「助理看别人」，挡不住「别人看助理」。所以把实例加入助理池时，要求节点上没有启用的普通员工（Task 12）；私有运行时上放什么由所有者自己决定。这一条与设计「威胁模型」的「同一节点上的其他 AI 员工不能看到」只在这个前提下成立，见文末「对设计文档的意见」。
+**13. 助理与普通员工共用机器，靠单独的系统用户隔开（所有者 2026-11-12 决定）。** 普通员工不在沙箱里、以免审批模式运行；与助理同一个系统用户的话，它们的 CLI 能读守护进程数据目录下助理这一轮的临时目录、转录与凭证副本。沙箱只挡得住「助理看别人」。做法：要跑助理的机器上，以单独的系统用户再装一份守护进程，注册成单独的节点，这个节点进助理池；普通员工照旧在原来那份守护进程、原来的用户下跑，一行不动。助理之间仍靠沙箱隔开。
+
+| 做法 | 取舍 |
+|---|---|
+| 助理与普通员工同一个守护进程、同一个用户 | 不可接受：见上 |
+| 每个助理一个系统用户 | 所有者否决：太重（每人一个用户、编号要跨机器统一、要 root 才能切换身份） |
+| 接受普通员工读得到助理的明文 | 所有者否决 |
+| **每台机器一个助理专用的系统用户，跑第二份守护进程** | **采用**。平台强制而不是靠约定：加入助理池时，节点上不能有普通员工，同一台机器上以同一个 uid 运行的其他节点也必须都是助理池节点、也没有普通员工，uid 不能是 0（Task 12）；普通员工绑定或换到助理池的节点上一律拒绝（Task 10）。用户之间的隔离由文件权限保证：自检要求家目录、数据目录、员工工作目录的上级、本轮目录与 socket 目录都只有本用户能进（0700），沙箱里的进程 umask 077（Task 1、2） |
+
+**14. 节点身份：心跳上报本机指纹与 uid，存在 `runtime_nodes` 的两个新列上。** 指纹是 `/etc/machine-id`（或 `/var/lib/dbus/machine-id`）加固定前缀的 SHA-256，原值不出本机；读不到时为空（macOS 等），这样的节点进不了助理池。放在 `runtime_nodes.machine_fingerprint`、`runtime_nodes.uid`（迁移 0091 一并加）而不是 `capabilities`：能力是按 AI 分的 JSON，这两项是节点级的，而且准入要按它们查同一台机器上的其他节点。所有节点（包括普通员工那一份）都上报，准入才找得到同机同用户的节点；没升级、不上报的节点比对不到，这一点列在「已知限制」。
+
+**15. 别的本机用户还能看到什么。**
+
+| 途径 | 处理 |
+|---|---|
+| `/proc/<pid>/cmdline`（本机所有用户可读） | bwrap 的参数里不放任何环境变量：守护进程以本轮环境作为 bwrap 进程的全部环境启动它（`Popen(env=…)`），能力令牌与模型凭据只在环境里（`/proc/<pid>/environ` 只有本用户与 root 可读）；其余参数只有路径。CLI 自己的参数里有系统提示词（Claude 的 `--append-system-prompt`、Codex 的 `developer_instructions`）：第 1 期这里只有规则，没有聊天内容；第 2 期往提示词里注入个人知识页时必须改走文件。部署文档建议助理机器以 `hidepid=2` 挂 `/proc`（见「已知限制」） |
+| 共享临时目录 | 沙箱里 `/tmp` 是独立的 tmpfs，`TMPDIR` 在本轮目录里；守护进程自己不往 `/tmp` 写助理的内容（转录在内存里打包） |
+| 监听的 socket | 驱动与放行代理的 Unix socket 都在本轮的 socket 目录里（0700，自检核对）；沙箱里的转发口在沙箱自己的网络命名空间里，宿主机上的其他用户连不到 |
+| 工作目录（含共享存储上的） | 属助理用户，员工工作目录的上级目录 0700（自检核对）；共享存储上要求助理用户在每台机器上 uid 相同（安装脚本 `--expect-uid` 核对） |
+| 家目录、数据目录里的登录文件、日志、本轮目录 | 家目录与数据目录 0700（自检核对）；本轮写下的文件 0600 |
 
 ## File Structure
 
@@ -118,16 +141,17 @@
 | `runtime_daemon/turn_credentials.py`（新） | 从当前席位的登录收窄出本轮的凭证副本 |
 | `runtime_daemon/transcripts.py`（新） | 转录打包与安全还原 |
 | `runtime_daemon/assistant_turns.py`（新） | 沙箱里的一轮、交接、[DONE] 扣留、清扫、自检循环 |
-| `runtime_daemon/daemon.py` | 分流 `sandbox` 请求、上报能力、启停后台循环 |
-| `migrations/versions/0091_assistant_transcripts.py`（新） | 表 `assistant_transcripts`；列 `relay_servers.assistant_pool`、`runtime_calls.sandbox` |
+| `runtime_daemon/daemon.py` | 分流 `sandbox` 请求、上报能力、本机指纹与 uid，启停后台循环 |
+| `runtime_daemon/install.sh` | 可选参数 `--expect-uid=<数字>`：核对运行用户 |
+| `migrations/versions/0091_assistant_transcripts.py`（新） | 表 `assistant_transcripts`；列 `relay_servers.assistant_pool`、`runtime_calls.sandbox`、`runtime_nodes.machine_fingerprint`、`runtime_nodes.uid` |
 | `coreman/core/crypto.py` | `Cipher.encrypt_bytes` / `decrypt_bytes` |
 | `coreman/core/assistants/sealed.py` | 二进制内容列 `Blob`、登记 `AssistantTranscript.blob_enc`、`key_ready` |
 | `coreman/core/db/models/assistants.py`、`relay.py`、`runtime_nodes.py`、`__init__.py` | 模型与新列 |
 | `coreman/core/assistants/transcripts.py`（新） | 交接：`prepare` / `download` / `upload` / `purge` |
 | `coreman/core/chat/sessions.py` | `renew`：给会话键换一个新的 relay 会话 |
-| `coreman/core/assistants/runtime.py`（新） | 能不能跑、能不能绑、暂停文案、池里选节点、节点上有没有普通员工 |
-| `coreman/core/bots/switch_relay.py` | 助理改绑的校验 |
-| `coreman/api/routers/runtime_protocol.py` | 心跳能力字段、转录两个接口、领取顺序与助理并发 |
+| `coreman/core/assistants/runtime.py`（新） | 能不能跑、能不能绑、暂停文案、池里选节点、助理池准入、普通员工的绑定校验 |
+| `coreman/core/bots/switch_relay.py`、`coreman/api/routers/bots.py` | 助理改绑的校验；普通员工不能绑定或换到助理池的节点 |
+| `coreman/api/routers/runtime_protocol.py` | 心跳能力字段、本机指纹与 uid、转录两个接口、领取顺序与助理并发 |
 | `coreman/core/runtime_nodes/transport.py` | 请求扩展 `coreman.sandbox` → `runtime_calls.sandbox` |
 | `coreman/core/settings_schema.py` | 设置项 `assistant_node_concurrency` |
 | `coreman/api/routers/relay_servers.py` | 助理池开关接口；列表带 `assistant_pool`、`assistant_sandbox` |
@@ -138,6 +162,7 @@
 | `coreman/runtime/scheduler/service.py` | 每轮清理过期转录 |
 | `tests/integration/assistant_helpers.py` | `into_assistant` 之后让助理所在节点可用 |
 | `tests/conftest.py`、`tests/unit/test_assistant_sealed_codec.py`、`tests/unit/test_assistant_sealed_ledger.py`、`tests/unit/test_settings_schema.py` | 清表顺序、登记全集、台账、设置项全集 |
+| `tests/unit/test_runtime_daemon_install.py` | `--expect-uid` 的用例 |
 | `runtime_daemon/README.md`、`docs/feishu.md`、`docs/superpowers/specs/2026-11-11-personal-assistant.md` | 部署要求、升级与回滚、设计同步 |
 
 ---
@@ -156,11 +181,13 @@
 
 - [ ] **Step 0.1: 选出候选节点**
 
-候选节点 = 准备加入助理池的共享 Runtime 节点，加上已知会被所有者改绑的私有 Runtime。每台记下：操作系统、是否在容器（chroot / nspawn）里运行守护进程、工作目录是否在网络存储上。macOS 节点与没有用户命名空间的容器节点不用测（它们不会声明能力，见「设计选择」第 8 条），直接记为「不能」。
+候选机器 = 准备跑助理的机器（上面通常已经有普通员工的守护进程），加上已知会被所有者改绑的私有 Runtime 所在的机器。每台记下：操作系统、守护进程是否在容器（chroot / nspawn）里运行、工作目录是否在网络存储上、运行普通员工的系统用户有没有 root 权限或免密 sudo（有的话这台机器不能跑助理，见「设计选择」第 13 条）。macOS 与没有用户命名空间的容器不用测（不会声明能力），直接记为「不能」。
+
+在每台候选机器上建好助理专用的系统用户（示例名 `coreman-assistant`；工作目录在网络存储上的，所有机器用同一个 uid），家目录 0700，用这个用户登录一次 Claude / Codex。以下各步都**以这个用户**运行（Step 0.4 的跨用户检查除外）。
 
 - [ ] **Step 0.2: 在每台候选节点上跑探测脚本**
 
-以守护进程所用的系统用户运行，参数是全部员工工作目录的上级目录（节点 `config.json` 的 `workspace_root`）：
+以助理专用的系统用户运行，参数是这个用户将来的工作目录上级目录（例如 `/home/coreman-assistant/projects`；先建好、0700）：
 
 ```bash
 bash probe-runtime-sandbox.sh /path/to/workspace-root > probe-$(hostname -s).txt 2>&1
@@ -170,7 +197,7 @@ bash probe-runtime-sandbox.sh /path/to/workspace-root > probe-$(hostname -s).txt
 
 - [ ] **Step 0.3: 再测一次「去掉刷新令牌的只读凭证」**
 
-探测脚本只读挂的是原登录文件；本计划挂的是去掉刷新令牌的副本（「设计选择」第 5 条）。在同一台节点上、同一个用户下运行（不打印凭证，只打印结果标志与文件摘要）：
+探测脚本只读挂的是原登录文件；本计划挂的是去掉刷新令牌的副本（「设计选择」第 5 条）。在同一台机器上、以助理专用的用户运行（不打印凭证，只打印结果标志与文件摘要）：
 
 ```bash
 /bin/bash -c '
@@ -207,13 +234,29 @@ after=$(sha256sum "$CLAUDE_CRED" "$CODEX_AUTH" 2>/dev/null)
 
 预期：`"is_error":false`、`codex_exit=0`、`node_login_unchanged=yes`。
 
-- [ ] **Step 0.4: 补测 Claude 转录还原后的续聊**
+- [ ] **Step 0.4: 跨用户检查**
+
+以**运行普通员工的那个系统用户**在同一台机器上运行（把路径换成助理用户的实际路径）：
+
+```bash
+/bin/bash -c '
+A=/home/coreman-assistant
+for p in "$A" "$A/.local/share/coreman-runtime" "$A/.claude" "$A/.codex" "$A/projects"; do
+  ls "$p" >/dev/null 2>&1 && echo "readable=$p" || echo "denied=$p"
+done
+sudo -n true 2>/dev/null && echo "standard_user_sudo=YES" || echo "standard_user_sudo=no"
+'
+```
+
+预期：每一行都是 `denied=…`，最后一行 `standard_user_sudo=no`。任何一项不符，这台机器不能跑助理（改权限或去掉免密 sudo 后重测）。
+
+- [ ] **Step 0.5: 补测 Claude 转录还原后的续聊**
 
 按总览「步骤 0」的 0.3 做（在任一装有 Claude 命令行且登录有效的机器上）。
 
-- [ ] **Step 0.5: 写回设计文档并提交**
+- [ ] **Step 0.6: 写回设计文档并提交**
 
-在「前置验证」表里替换「尚未完成」清单中的第 2、3、4 项，各记一行：结论、依据（第几台节点、哪天；节点只写「共享节点甲」「私有节点乙」，不写主机名与地址）。与本计划的预期不符的，按文末「步骤 0 结果与本计划的对应」在同一次提交里注明要改哪些任务。
+在「前置验证」表里替换「尚未完成」清单中的第 2、3、4 项，并加一项「助理用户与普通员工用户的跨用户隔离」，各记一行：结论、依据（第几台节点、哪天；节点只写「共享节点甲」「私有节点乙」，不写主机名与地址）。与本计划的预期不符的，按文末「步骤 0 结果与本计划的对应」在同一次提交里注明要改哪些任务。
 
 ```bash
 git add docs/superpowers/specs/2026-11-11-personal-assistant.md
@@ -238,7 +281,9 @@ git commit -m "个人助理：节点沙箱的前置验证结论"
   - `system_mounts(paths=SYSTEM_PATHS) -> list[str]`、`package_root(executable: Path) -> Path`、`cli_mounts(provider, which=shutil.which) -> list[Path]`、`link_cli(layout, provider, which=shutil.which) -> bool`
   - `sandbox_env(provider: str, base: Mapping[str, str], extra: Mapping[str, str]) -> dict[str, str]`
   - `Launch(bwrap, layout, workdir, provider, env, ro_paths=(), credential=None, system=system_mounts())`、`bwrap_argv(launch, command) -> list[str]`、`bridge_command(python, bridge, command) -> list[str]`、`driver_command(binary) -> list[str]`
-  - `SelfTestInputs(turns_dir, socket_dir, release, hidden, clis, extra_ro=(), python=sys.executable, system=…)`、`SelfTestResult(providers: dict[str, bool], code: str)`、`self_test(inputs, *, bwrap=None, system_name=None, runner=subprocess.run) -> SelfTestResult`
+  - `private_dir(path, uid=None) -> bool`（属本用户、组与其他人没有权限，软链按真实目录）
+  - `SelfTestInputs(turns_dir, socket_dir, release, hidden, clis, private=(), extra_ro=(), python=sys.executable, system=…)`、`SelfTestResult(providers: dict[str, bool], code: str)`、`self_test(inputs, *, bwrap=None, system_name=None, runner=subprocess.run) -> SelfTestResult`；自检依次核对 `private`、本轮目录与 socket 目录都是 `private_dir`（`private_dir_check_failed`），再在沙箱里核对 `hidden`、`readonly`、`offline`、`bridge`、`umask`（`<名字>_check_failed`），最后各 AI 的 `--version`
+  - `bwrap_argv` 不含任何环境变量：调用方用 `Popen(argv, env=dict(launch.env))` 启动 bwrap（参数在 `/proc/<pid>/cmdline` 里本机所有用户可读）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -368,22 +413,22 @@ def test_bwrap_argv_isolates_and_mounts_in_order(tmp_path):
             layout=built,
             workdir=work,
             provider="claude",
-            env={"B": "2", "A": "1"},
+            env={"ANTHROPIC_API_KEY": "sk-secret-value", "HOME": "/turn/home"},
             ro_paths=[Path("/opt/release"), Path("/opt/release")],
             credential=cred,
             system=["--ro-bind", "/usr", "/usr"],
         )
         args = sandbox.bwrap_argv(launch, ["driver", "--x"])
-        assert args[:5] == [
+        assert args[:4] == [
             "/usr/bin/bwrap",
             "--die-with-parent",
             "--new-session",
             "--unshare-all",
-            "--clearenv",
         ]
         assert "--share-net" not in args
-        assert args[5:11] == ["--setenv", "A", "1", "--setenv", "B", "2"]
         joined = " ".join(args)
+        # 环境变量不进参数：/proc/<pid>/cmdline 本机其他用户都读得到。
+        assert "--setenv" not in args and "sk-secret-value" not in joined
         assert "--ro-bind /opt/release /opt/release" in joined
         assert joined.count("/opt/release /opt/release") == 1
         assert f"--bind {work} /work" in joined
@@ -442,8 +487,9 @@ def test_self_test_reports_unsupported_nodes_without_starting_anything(tmp_path,
 def fake_runner(probe: dict[str, bool], *, start_rc: int = 0, version_rc: int = 0):
     calls: list[list[str]] = []
 
-    def runner(argv, **_kwargs):
+    def runner(argv, **kwargs):
         calls.append(argv)
+        assert kwargs["env"]["HOME"] == "/turn/home" and "PATH" in kwargs["env"]
         command = argv[argv.index("--") + 1 :]
         if command == ["true"]:
             return subprocess.CompletedProcess(argv, start_rc, "", "")
@@ -454,7 +500,7 @@ def fake_runner(probe: dict[str, bool], *, start_rc: int = 0, version_rc: int = 
     return runner, calls
 
 
-ALL_GOOD = {"hidden": True, "readonly": True, "offline": True, "bridge": True}
+ALL_GOOD = {"hidden": True, "readonly": True, "offline": True, "bridge": True, "umask": True}
 
 
 def test_self_test_marks_providers_whose_cli_runs(tmp_path, monkeypatch):
@@ -471,7 +517,7 @@ def test_self_test_marks_providers_whose_cli_runs(tmp_path, monkeypatch):
     assert not (tmp_path / "turns").exists() or not any((tmp_path / "turns").iterdir())
 
 
-@pytest.mark.parametrize("failed", ["hidden", "readonly", "offline", "bridge"])
+@pytest.mark.parametrize("failed", ["hidden", "readonly", "offline", "bridge", "umask"])
 def test_self_test_fails_closed_on_any_check(tmp_path, monkeypatch, failed):
     monkeypatch.setattr(sandbox, "link_cli", lambda *_a, **_k: True)
     runner, _ = fake_runner({**ALL_GOOD, failed: False})
@@ -506,6 +552,38 @@ def test_real_sandbox_self_test(tmp_path):
     )
     # 测试机上不一定装了 claude：只要求沙箱本身的四项检查通过。
     assert result.code in {"", "cli_unavailable"}
+
+
+def test_private_dir_means_owned_by_me_and_closed_to_everyone_else(tmp_path):
+    closed = tmp_path / "closed"
+    closed.mkdir(mode=0o700)
+    closed.chmod(0o700)
+    opened = tmp_path / "opened"
+    opened.mkdir()
+    opened.chmod(0o750)
+    link = tmp_path / "link"
+    link.symlink_to(closed)
+    assert sandbox.private_dir(closed) and sandbox.private_dir(link)
+    assert not sandbox.private_dir(opened)
+    assert not sandbox.private_dir(tmp_path / "missing")
+    assert not sandbox.private_dir(closed, uid=closed.stat().st_uid + 1)
+
+
+def test_self_test_fails_when_a_private_dir_is_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "link_cli", lambda *_a, **_k: True)
+    runner, calls = fake_runner(ALL_GOOD)
+    shared = tmp_path / "data"
+    shared.mkdir()
+    shared.chmod(0o755)
+    base = inputs(tmp_path)
+    result = sandbox.self_test(
+        sandbox.SelfTestInputs(**{**base.__dict__, "private": [shared]}),
+        system_name="Linux",
+        bwrap="/usr/bin/bwrap",
+        runner=runner,
+    )
+    assert result.code == "private_dir_check_failed" and not any(result.providers.values())
+    assert calls == []
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -525,7 +603,8 @@ Expected: FAIL，`ImportError: cannot import name 'sandbox' from 'runtime_daemon
 - 只读：系统目录、CLI 程序、本安装的发布目录、Python 解释器，以及本轮收窄过的模型登录凭证；
 - 看不到：节点上其它一切，包括其他员工的工作目录、守护进程的数据目录和本机用户的家目录；
 - 网络：单独的网络命名空间，没有出口；唯一的出路是沙箱里 127.0.0.1 上的转发口，
-  经一个 Unix socket 接到守护进程的放行代理（见 egress.py、sandbox_bridge.py）。
+  经一个 Unix socket 接到守护进程的放行代理（见 egress.py、sandbox_bridge.py）。转发口在沙箱自己
+  的网络命名空间里，本机其他用户连不到；Unix socket 都在只有本用户能进的目录里。
 
 本模块只算参数，不碰网络，在任何平台上都能做单元测试；真正起沙箱只在装了 bubblewrap 的
 Linux 上（`self_test` 证明这一点，证明不了的节点不声明能力，平台就不派助理轮次）。
@@ -539,6 +618,7 @@ import platform
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -736,17 +816,18 @@ class Launch:
 
 
 def bwrap_argv(launch: Launch, command: Sequence[str]) -> list[str]:
-    """bubblewrap 的完整参数。顺序有讲究：先建目录骨架，再挂可写目录，最后把凭据只读盖上去。"""
+    """bubblewrap 的完整参数。顺序有讲究：先建目录骨架，再挂可写目录，最后把凭据只读盖上去。
+
+    环境变量不进参数（`/proc/<pid>/cmdline` 本机其他用户都读得到）：调用方以 `launch.env` 作为
+    bwrap 进程的全部环境启动它，沙箱里的进程原样继承，守护进程自己的环境一个都不带进去。
+    """
     layout = launch.layout
     args = [
         launch.bwrap,
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
-        "--clearenv",
     ]
-    for key in sorted(launch.env):
-        args += ["--setenv", key, launch.env[key]]
     args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/turn"]
     args += list(launch.system)
     for path in dict.fromkeys(str(p) for p in launch.ro_paths):
@@ -793,12 +874,29 @@ def driver_command(binary: Path) -> list[str]:
 
 # ---- 启动自检 ----------------------------------------------------------------
 
+
+def private_dir(path: Path, uid: int | None = None) -> bool:
+    """目录（软链按真实目录）属于本用户，组与其他人没有任何权限。
+
+    个人助理的节点与普通员工的节点在同一台机器上、以不同的系统用户运行：这些目录对别的用户不可进，
+    里面的转录、凭证副本与 socket 才看不到、连不上。
+    """
+    try:
+        info = path.resolve().stat()
+    except OSError:
+        return False
+    owner = os.getuid() if uid is None else uid
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == owner and info.st_mode & 0o077 == 0
+
+
 # 自检在沙箱里跑的检查：看不见的路径、写不进的系统目录、直连外网失败（192.0.2.1 是文档保留
 # 地址，没有路由时立即失败，不会真的发出包）、经转发口能连到守护进程这一侧。
 _PROBE = r"""
 import json, os, socket, sys
 port, hidden = int(sys.argv[1]), sys.argv[2:]
 out = {"hidden": all(not os.path.exists(p) for p in hidden)}
+mask = os.umask(0o077)
+out["umask"] = mask & 0o077 == 0o077
 try:
     open("/usr/.coreman-probe", "w").close()
     out["readonly"] = False
@@ -871,6 +969,9 @@ class SelfTestInputs:
     release: Path
     hidden: Sequence[Path]
     clis: Mapping[str, Sequence[Path]]
+    # 必须只有本用户能进的目录：家目录、数据目录、员工工作目录的上级等（本轮目录与 socket
+    # 目录自动加上）。
+    private: Sequence[Path] = ()
     extra_ro: Sequence[Path] = ()
     python: str = sys.executable
     system: Sequence[str] = field(default_factory=system_mounts)
@@ -896,6 +997,9 @@ def self_test(
         return SelfTestResult(providers, "bwrap_missing")
     layout = TurnLayout.new(inputs.turns_dir, inputs.socket_dir)
     layout.create()
+    if not all(private_dir(p) for p in (*inputs.private, inputs.turns_dir, inputs.socket_dir)):
+        layout.remove()
+        return SelfTestResult(providers, "private_dir_check_failed")
     work = Path(tempfile.mkdtemp(dir=layout.root))
     denier = None
     try:
@@ -914,6 +1018,7 @@ def self_test(
             )
             return runner(
                 bwrap_argv(launch, command),
+                env=dict(launch.env),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -931,7 +1036,7 @@ def self_test(
                 checks = json.loads(probe.stdout.strip().splitlines()[-1])
             except (ValueError, IndexError):
                 return SelfTestResult(providers, "probe_failed")
-            for name in ("hidden", "readonly", "offline", "bridge"):
+            for name in ("hidden", "readonly", "offline", "bridge", "umask"):
                 if checks.get(name) is not True:
                     return SelfTestResult(providers, f"{name}_check_failed")
             for provider in PROVIDERS:
@@ -951,7 +1056,7 @@ def self_test(
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/unit/test_assistant_sandbox.py -q && uv run ruff check runtime_daemon/sandbox.py tests/unit/test_assistant_sandbox.py`
-Expected: 16 条里没有 bubblewrap 的机器上 1 条跳过（`test_real_sandbox_self_test`），其余通过；在装了 bubblewrap 的 Linux 上全部通过。
+Expected: 19 条里没有 bubblewrap 的机器上 1 条跳过（`test_real_sandbox_self_test`），其余通过；在装了 bubblewrap 的 Linux 上全部通过。
 
 普通机器人不受影响：本任务只新增模块，守护进程还没有引用它（`tests/unit/test_runtime_daemon*.py` 照常通过）。
 
@@ -959,7 +1064,7 @@ Expected: 16 条里没有 bubblewrap 的机器上 1 条跳过（`test_real_sandb
 
 ```bash
 git add runtime_daemon/sandbox.py tests/unit/test_assistant_sandbox.py
-git commit -m "个人助理：节点沙箱的目录布局、bubblewrap 参数与启动自检"
+git commit -m "个人助理：节点沙箱的目录布局、bubblewrap 参数与启动自检（含目录权限与 umask）"
 ```
 
 ---
@@ -972,7 +1077,7 @@ git commit -m "个人助理：节点沙箱的目录布局、bubblewrap 参数与
 
 **Interfaces:**
 - Consumes: 无（只用标准库；Task 1 的 `bridge_command` 生成它的命令行）
-- Produces: 命令行 `python -I sandbox_bridge.py --port <端口> --upstream <Unix socket> -- <命令…>`；`main(argv) -> int` 返回被看护命令的退出码
+- Produces: 命令行 `python -I sandbox_bridge.py --port <端口> --upstream <Unix socket> -- <命令…>`；`main(argv) -> int` 返回被看护命令的退出码；启动被看护命令之前把 umask 设为 077
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1001,6 +1106,9 @@ for _ in range(50):
         time.sleep(0.1)
 s.sendall(b"ping")
 print(s.recv(64).decode())
+import os
+mask = os.umask(0)
+print(oct(mask))
 sys.exit(7)
 """
 
@@ -1052,7 +1160,8 @@ def test_bridge_forwards_to_the_upstream_socket_and_returns_the_child_code():
     finally:
         server.close()
     assert result.returncode == 7
-    assert result.stdout.strip() == "pong:ping"
+    # 被看护的进程继承 077 的 umask：这一轮写下的文件只有本用户读得到。
+    assert result.stdout.split() == ["pong:ping", "0o77"]
 
 
 def test_bridge_needs_a_command():
@@ -1093,6 +1202,7 @@ Expected: FAIL，子进程报 `can't open file …/sandbox_bridge.py`，退出�
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import socket
 import subprocess
@@ -1148,6 +1258,8 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("缺少要看护的命令")
+    # 这一轮写下的一切（转录、下载的附件、CLI 的缓存）只有本用户读得到。
+    os.umask(0o077)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", args.port))
@@ -2227,7 +2339,7 @@ git commit -m "个人助理：节点上转录的打包与逐成员把关的还�
 
 ### Task 6: 沙箱里的一轮、转录交接与清扫
 
-这是把 Task 1–5 串起来的模块。用例里沙箱进程用替身（一个进程内的假驱动，像 CLI 一样往本轮目录写转录），平台的两个转录接口用 `httpx.MockTransport`；真起沙箱的部分已由 Task 1 的自检用例覆盖，整条链路的真机验证在 Task 16。
+这是把 Task 1–5 串起来的模块。用例里沙箱进程用替身（一个进程内的假驱动，像 CLI 一样往本轮目录写转录），平台的两个转录接口用 `httpx.MockTransport`；真起沙箱的部分已由 Task 1 的自检用例覆盖，整条链路的真机验证在 Task 17。
 
 **Files:**
 - Create: `runtime_daemon/assistant_turns.py`
@@ -2236,7 +2348,7 @@ git commit -m "个人助理：节点上转录的打包与逐成员把关的还�
 **Interfaces:**
 - Consumes: Task 1–5 的全部接口；守护进程对象上的 `data_dir`、`socket_dir`、`config`（`api_url`、`workspace_root`、`home`、`release`、`control_proxy`，以及新增的可选键 `assistant_max_concurrent`、`assistant_egress_hosts`、`assistant_sandbox_ro_paths`）、`seats`、`task_info`、`http`（带节点令牌的 `httpx.AsyncClient`）
 - Produces:
-  - `AssistantTurns(daemon)`：`ready: dict[str, bool]`、`code: str`、`active: set[str]`、`background: set[asyncio.Task]`；`capability(provider) -> bool`；`start()` / `await stop()`；`await refresh_capability()`；`await sweep()`；`await download(transfer) -> bytes | None`；`await upload(transfer, data, status) -> bool`；`await refuse(frames, code, transfer=None)`；`await run(identity, provider, data, frames)`
+  - `AssistantTurns(daemon)`：`ready: dict[str, bool]`、`code: str`、`active: set[str]`、`background: set[asyncio.Task]`；`capability(provider) -> bool`；`private_paths() -> list[Path]`（家目录、数据目录、`workspace_root`）；`hidden_paths() -> list[Path]`；`start()` / `await stop()`；`await refresh_capability()`；`await sweep()`；`await download(transfer) -> bytes | None`；`await upload(transfer, data, status) -> bool`；`await refuse(frames, code, transfer=None)`；`await run(identity, provider, data, frames)`
   - `plan_turn(provider, data) -> TurnPlan`（`TurnPlan(provider, workdir, body, transfer, restore, session_id)`）、`DoneGate`（`feed(part) -> bytes`、`release() -> bytes`）、`Refused(code)`、`MESSAGES`
   - 拒绝时回给平台：HTTP 503，`{"error": {"code": <代码>, "message": …}}`；代码见 `MESSAGES`
 
@@ -2800,6 +2912,14 @@ class AssistantTurns:
     def capability(self, provider: str) -> bool:
         return self.ready.get(provider, False)
 
+    def private_paths(self) -> list[Path]:
+        """自检时必须只有本用户能进的目录：家目录、本安装的数据目录、员工工作目录的上级。"""
+        return [
+            Path(self.daemon.config.get("home", str(Path.home()))),
+            self.daemon.data_dir,
+            Path(self.daemon.config["workspace_root"]),
+        ]
+
     def hidden_paths(self) -> list[Path]:
         """自检时必须在沙箱里看不到的路径：员工工作目录、本安装的配置、各席位的登录目录。"""
         home = Path(self.daemon.config.get("home", str(Path.home())))
@@ -2855,6 +2975,7 @@ class AssistantTurns:
             release=self.release,
             hidden=self.hidden_paths(),
             clis={p: sandbox.cli_mounts(p) for p in sandbox.PROVIDERS},
+            private=self.private_paths(),
             extra_ro=self.extra_ro(),
         )
         result = await asyncio.to_thread(sandbox.self_test, inputs)
@@ -3000,6 +3121,7 @@ class AssistantTurns:
                 "started_at": time.time(),
             }
             layout.meta.write_text(json.dumps(meta))
+            layout.meta.chmod(0o600)
             seat_env = self.daemon.seats.env(provider, self.daemon.seats.active(provider))
             home = Path(self.daemon.config.get("home", str(Path.home())))
             try:
@@ -3128,6 +3250,7 @@ class AssistantTurns:
         try:
             return subprocess.Popen(
                 sandbox.bwrap_argv(launch, command),
+                env=dict(launch.env),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -3218,7 +3341,7 @@ git commit -m "个人助理：沙箱里的一轮，转录上传完才放出 [DON
 
 **Interfaces:**
 - Consumes: `AssistantTurns`（Task 6）、`sandbox.CAPABILITY`（Task 1）
-- Produces: `Daemon.assistant: AssistantTurns`；心跳里每种 AI 的能力多一个 `assistant_sandbox_v1`（布尔）；`execute` 在 `/v1/chat/completions` 的请求体带 `sandbox` 键时交给 `self.assistant.run`
+- Produces: `Daemon.assistant: AssistantTurns`；`daemon.machine_fingerprint(files=MACHINE_ID_FILES) -> str`（64 位十六进制，读不到为空串）、`Daemon.machine`；心跳多 `machine`、`uid` 两个顶层字段，每种 AI 的能力多一个 `assistant_sandbox_v1`（布尔）；`execute` 在 `/v1/chat/completions` 的请求体带 `sandbox` 键时交给 `self.assistant.run`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -3232,6 +3355,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -3382,6 +3506,23 @@ async def test_background_work_never_raises(node, monkeypatch):
         raise OSError("disk")
 
     await node.assistant._guard("sweep", explode)
+
+
+def test_heartbeat_names_the_machine_by_hash_and_the_system_user(node, tmp_path):
+    machine_id = tmp_path / "machine-id"
+    machine_id.write_text("0123abcd\n")
+    fingerprint = module.machine_fingerprint((str(tmp_path / "missing"), str(machine_id)))
+    assert len(fingerprint) == 64 and "0123abcd" not in fingerprint
+    assert fingerprint == module.machine_fingerprint((str(machine_id),))
+    assert module.machine_fingerprint((str(tmp_path / "missing"),)) == ""
+    body = node.heartbeat_body()
+    assert body["uid"] == os.getuid() and body["machine"] == node.machine
+
+
+def test_self_test_requires_home_data_and_workspace_to_be_private(node):
+    paths = node.assistant.private_paths()
+    assert node.data_dir in paths
+    assert Path(node.config["workspace_root"]) in paths
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -3391,7 +3532,7 @@ Expected: FAIL，`AttributeError: 'Daemon' object has no attribute 'assistant'`�
 
 - [ ] **Step 3: 实现**
 
-`runtime_daemon/daemon.py` 改六处。
+`runtime_daemon/daemon.py` 改七处。
 
 import 区：在 `from runtime_daemon.agent import (…)` 这一组之后加
 
@@ -3410,6 +3551,36 @@ from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
 ```python
         # 个人助理的轮次（沙箱、转录、自检）：与上面这些普通轮次的状态完全分开。
         self.assistant = AssistantTurns(self)
+        self.machine = machine_fingerprint()
+```
+
+`def environment() -> str:` 之前加
+
+```python
+MACHINE_ID_FILES = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def machine_fingerprint(files: tuple[str, ...] = MACHINE_ID_FILES) -> str:
+    """本机的稳定指纹：机器编号的带前缀哈希，原值不出本机。读不到时为空串。
+
+    平台用它认出同一台机器上的几个节点（个人助理要求助理节点与普通员工的节点用不同的系统用户）。
+    """
+    for name in files:
+        try:
+            value = Path(name).read_text().strip()
+        except OSError:
+            continue
+        if value:
+            return hashlib.sha256(b"coreman-machine-v1:" + value.encode()).hexdigest()
+    return ""
+```
+
+`heartbeat_body` 返回的字典末尾（`"root_change_result": …` 之后）加
+
+```python
+            # 同一台机器上的节点靠这两项区分系统用户（个人助理的助理池准入用）。
+            "machine": self.machine,
+            "uid": os.getuid(),
 ```
 
 `discover` 里 `cap["memory_layout_v1"] = True` 之后加
@@ -3428,26 +3599,26 @@ from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
                 return
 ```
 
-`run` 里 `await self.discover()` 之后加 `self.assistant.start()`；`finally` 里 `await self.cancel_all()` 之后加 `await self.assistant.stop()`。
+`run` 里 `await self.discover()` 之后加 `self.assistant.start()`；`finally` 里 `await self.cancel_all()` 之后加 `await self.assistant.stop()`。（以上合起来是七处。）
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/unit/test_runtime_daemon_assistant.py tests/unit/test_runtime_daemon.py tests/unit/test_runtime_daemon_protocol.py tests/unit/test_runtime_daemon_errors.py tests/unit/test_runtime_daemon_health.py tests/unit/test_runtime_daemon_lifecycle.py tests/unit/test_runtime_daemon_install.py tests/unit/test_daemon_boundaries.py tests/unit/test_runtime_seats.py -q && uv run ruff check runtime_daemon tests/unit/test_runtime_daemon_assistant.py`
-Expected: 全部通过（新文件 5 条）。
+Expected: 全部通过（新文件 7 条）。
 
-普通机器人不受影响：`test_standard_turn_reaches_the_resident_driver_unchanged`（普通请求原样交给常驻驱动，助理路径一次都没进）；现有的守护进程用例全部照常通过；`test_assistant_failures_end_only_that_call`、`test_background_work_never_raises`（助理侧的异常只结束那一个调用，后台循环吞掉异常）。
+普通机器人不受影响：`test_standard_turn_reaches_the_resident_driver_unchanged`（普通请求原样交给常驻驱动，助理路径一次都没进）；心跳只多 `machine`、`uid` 两个顶层字段（`test_heartbeat_names_the_machine_by_hash_and_the_system_user`），旧平台会丢掉不认识的字段；现有的守护进程用例全部照常通过；`test_assistant_failures_end_only_that_call`、`test_background_work_never_raises`（助理侧的异常只结束那一个调用，后台循环吞掉异常）。
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add runtime_daemon/daemon.py tests/unit/test_runtime_daemon_assistant.py
-git commit -m "个人助理：守护进程分流沙箱轮次、上报自检得出的能力"
+git commit -m "个人助理：守护进程分流沙箱轮次，上报自检得出的能力、本机指纹与 uid"
 ```
 
 ---
 
 
-### Task 8: 表 `assistant_transcripts`、二进制内容列与两个新列
+### Task 8: 表 `assistant_transcripts`、二进制内容列与四个新列
 
 **Files:**
 - Create: `migrations/versions/0091_assistant_transcripts.py`
@@ -3464,6 +3635,7 @@ git commit -m "个人助理：守护进程分流沙箱轮次、上报自检得�
   - `sealed.Blob`、`sealed.is_blob_token(value) -> bool`、`sealed.seal_blob(cipher, aad, value)`、`sealed.open_blob(cipher, aad, value)`、`sealed.key_ready(session, bot_id) -> bool`
   - 模型 `AssistantTranscript`（`bot_id`、`session_id`、`blob_enc: bytes | None`、`size`、`pending_transfer`、`pending_node_id`、`created_at`、`updated_at`；主键 `(bot_id, session_id)`；`pending_transfer` 唯一）
   - `RelayServer.assistant_pool: bool`、`RuntimeCall.sandbox: bool`（都默认 false）
+  - `RuntimeNode.machine_fingerprint: str | None`、`RuntimeNode.uid: int | None`（节点心跳上报的本机指纹与系统用户，Task 11 写入）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -3651,7 +3823,16 @@ class AssistantTranscript(Base):
     assistant_pool: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 ```
 
-`coreman/core/db/models/runtime_nodes.py`：`RuntimeCall` 的 `error` 一行之后加
+`coreman/core/db/models/runtime_nodes.py`：import 里加 `BigInteger`（`from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text, Uuid, text`）；`RuntimeNode` 的 `capabilities` 一行之后加
+
+```python
+    # 节点心跳上报的本机指纹（机器编号的哈希）与运行守护进程的系统用户 uid：同一台机器上的
+    # 几个节点据此区分，个人助理的助理池准入要求助理节点与普通员工的节点用不同的系统用户。
+    machine_fingerprint: Mapped[str | None] = mapped_column(Text)
+    uid: Mapped[int | None] = mapped_column(BigInteger)
+```
+
+`RuntimeCall` 的 `error` 一行之后加
 
 ```python
     # 个人助理在沙箱里跑的一轮：领取时按节点的助理并发上限另算，排在普通调用之后。
@@ -3712,9 +3893,13 @@ def upgrade() -> None:
         "runtime_calls",
         sa.Column("sandbox", sa.Boolean(), server_default=sa.text("false"), nullable=False),
     )
+    op.add_column("runtime_nodes", sa.Column("machine_fingerprint", sa.Text(), nullable=True))
+    op.add_column("runtime_nodes", sa.Column("uid", sa.BigInteger(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("runtime_nodes", "uid")
+    op.drop_column("runtime_nodes", "machine_fingerprint")
     op.drop_column("runtime_calls", "sandbox")
     op.drop_column("relay_servers", "assistant_pool")
     op.drop_index("assistant_transcripts_updated_idx", table_name="assistant_transcripts")
@@ -3791,13 +3976,13 @@ async def key_ready(session: AsyncSession, bot_id: uuid.UUID) -> bool:
 Run: `uv run pytest tests/integration/test_assistant_transcripts_schema.py tests/unit/test_assistant_sealed_codec.py tests/unit/test_assistant_sealed_ledger.py tests/integration/test_assistant_sealed_*.py -q && uv run alembic check && uv run mypy coreman`
 Expected: 全部通过（新文件 3 条，codec 文件多 2 条）；`alembic check` 报 `No new upgrade operations detected.`。台账这时不用改：登记了模型，但还没有任何代码查询或写入它。
 
-普通机器人不受影响：`test_standard_rows_are_left_alone`（表本身不区分类型，普通机器人的行原样存取、`key_ready` 为假、不会替它生成数据密钥）；`RelayServer.assistant_pool` 与 `RuntimeCall.sandbox` 都有库默认值 false，现有写入不用改；1C 的 `test_assistant_sealed_*` 全部照常通过。
+普通机器人不受影响：`test_standard_rows_are_left_alone`（表本身不区分类型，普通机器人的行原样存取、`key_ready` 为假、不会替它生成数据密钥）；`RelayServer.assistant_pool` 与 `RuntimeCall.sandbox` 都有库默认值 false，`RuntimeNode` 的两列可空，现有写入不用改；1C 的 `test_assistant_sealed_*` 全部照常通过。
 
 - [ ] **Step 7: 提交**
 
 ```bash
 git add migrations/versions/0091_assistant_transcripts.py coreman/core/crypto.py coreman/core/assistants/sealed.py coreman/core/db/models/assistants.py coreman/core/db/models/__init__.py coreman/core/db/models/relay.py coreman/core/db/models/runtime_nodes.py tests/conftest.py tests/unit/test_assistant_sealed_codec.py tests/integration/test_assistant_transcripts_schema.py
-git commit -m "个人助理：转录表 assistant_transcripts 与二进制内容列封存，助理池与沙箱调用两列"
+git commit -m "个人助理：转录表 assistant_transcripts 与二进制内容列封存，助理池、沙箱调用与节点身份四列"
 ```
 
 ---
@@ -4273,16 +4458,19 @@ git commit -m "个人助理：转录的交接编号，传不回来就不续，�
 **Files:**
 - Create: `coreman/core/assistants/runtime.py`
 - Modify: `coreman/core/bots/switch_relay.py`（`validate_switch`）
+- Modify: `coreman/api/routers/bots.py`（`resolve_relay_for_create`）
 - Test: `tests/integration/test_assistant_runtime.py`
 
 **Interfaces:**
-- Consumes: `relay_policy.relay_available`、`transport.online`、Task 8 的 `RelayServer.assistant_pool`
+- Consumes: `relay_policy.relay_available`、`transport.online`、Task 8 的 `RelayServer.assistant_pool`、`RuntimeNode.machine_fingerprint` / `uid`
 - Produces:
   - `runtime.SANDBOX_CAPABILITY = "assistant_sandbox_v1"`、`runtime.ASSISTANT_CONCURRENCY_KEY = "assistant_node_concurrency"`、`runtime.PAUSE_MESSAGES`
   - `node_sandboxed(node, provider=None) -> bool`
   - `unavailable_reason(relay, node) -> str | None`（`runtime_disabled` / `runtime_offline` / `runtime_draining` / `sandbox_unsupported` / `login_required`）
   - `eligible(relay, owner_id) -> bool`、`await turn_blocker(session, bot) -> str | None`（另有 `runtime_missing`、`runtime_not_allowed`）、`pause_message(reason) -> str`
-  - `assignment_error(relay, node, owner_id) -> str | None`、`await pick_pool_relay(session, provider) -> RelayServer | None`（1F 开通时调用）、`await hosts_standard_bots(session, node_id) -> bool`（Task 12 使用）
+  - `assignment_error(relay, node, owner_id) -> str | None`、`await pick_pool_relay(session, provider) -> RelayServer | None`（1F 开通时调用）、`await hosts_standard_bots(session, node_id) -> bool`
+  - `await is_pool_node(session, node_id) -> bool`、`await standard_bind_error(session, relay) -> str | None`（普通员工绑定与换运行时用，`POOL_NODE_MESSAGE`）
+  - `await pool_admission_error(session, relay, node) -> str | None`（Task 12 的接口用）：私有实例、没声明沙箱能力、没上报指纹或 uid、uid 为 0、节点上有普通员工、同一台机器上同一个 uid 的其他节点有普通员工或不是助理池节点（`SHARED_USER_MESSAGE`），都不能加入
 
 - [ ] **Step 1: 写失败测试**
 
@@ -4441,6 +4629,38 @@ async def test_switching_an_assistant_only_to_a_sandboxed_eligible_runtime(
     assert await validate_switch(
         db_session, bot=bot, target=pool, model=None, actor=admin, member_ids=set()
     )
+
+
+async def test_standard_bots_cannot_be_bound_or_switched_to_a_pool_node(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.api.errors import ApiError
+    from coreman.api.routers.bots import resolve_relay_for_create
+
+    pool = await pool_relay(db_session, "pool")
+    pool_node = await db_session.get(RuntimeNode, pool.runtime_node_id)
+    # 同一节点上不在池里的另一种 AI 的实例同样不行：守护进程是同一个。
+    beside = await add_node_relay(db_session, node=pool_node, provider="codex")
+    assert pool_node is not None
+    pool_node.capabilities = {**ready_caps(), **ready_caps("codex")}
+    plain = await pool_relay(db_session, "plain")
+    plain.assistant_pool = False
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = plain.id
+    admin = User(
+        login_name=f"a{uuid.uuid4().hex[:6]}", display_name="管理员", role="platform_admin"
+    )
+    db_session.add(admin)
+    await db_session.commit()
+    for target in (pool, beside):
+        with pytest.raises(SwitchError) as caught:
+            await validate_switch(
+                db_session, bot=standard, target=target, model=None, actor=admin, member_ids=set()
+            )
+        assert caught.value.message == runtime.POOL_NODE_MESSAGE
+        with pytest.raises(ApiError):
+            await resolve_relay_for_create(db_session, admin, target.id, None)
+    assert await resolve_relay_for_create(db_session, admin, plain.id, None) is plain
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -4599,6 +4819,65 @@ async def hosts_standard_bots(session: AsyncSession, node_id: uuid.UUID) -> bool
         )
     )
     return bool(count)
+
+
+POOL_NODE_MESSAGE = "目标运行时是个人助理池的节点，不能承载普通员工"
+SHARED_USER_MESSAGE = (
+    "同一台机器上以同一个系统用户运行的另一个节点承载了普通员工或不在助理池里："
+    "助理节点要用单独的系统用户安装"
+)
+
+
+async def is_pool_node(session: AsyncSession, node_id: uuid.UUID) -> bool:
+    """节点上有没有实例在助理池里。"""
+    found = await session.scalar(
+        select(RelayServer.id)
+        .where(RelayServer.runtime_node_id == node_id, RelayServer.assistant_pool.is_(True))
+        .limit(1)
+    )
+    return found is not None
+
+
+async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str | None:
+    """普通员工绑定或换到这个实例时的校验：助理池节点上不能有普通员工。只在绑定与换运行时调用。"""
+    if relay.runtime_node_id is not None and await is_pool_node(session, relay.runtime_node_id):
+        return POOL_NODE_MESSAGE
+    return None
+
+
+async def pool_admission_error(
+    session: AsyncSession, relay: RelayServer, node: RuntimeNode | None
+) -> str | None:
+    """实例能不能加入助理池；能加入返回 None。
+
+    要求：共享（非私有）实例；节点声明了沙箱能力；节点上报了本机指纹与系统用户且不是 root；节点上
+    没有普通员工；同一台机器上以同一个系统用户运行的其他节点也都是助理池节点、也没有普通员工。
+    后两条保证助理节点与承载普通员工的守护进程是两个不同的系统用户：普通员工不在沙箱里，同一个
+    用户就读得到助理这一轮的临时目录、转录与凭证副本。
+    """
+    if relay.visibility == "private":
+        return "私有运行时不能加入助理池"
+    if node is None or not node_sandboxed(node, relay.model_provider):
+        return "该运行时还不能隔离运行个人助理，请先升级并确认节点自检通过"
+    if not node.machine_fingerprint or node.uid is None:
+        return "该节点没有上报本机指纹与系统用户，请先升级运行时"
+    if node.uid == 0:
+        return "助理节点不能以 root 运行"
+    if await hosts_standard_bots(session, node.id):
+        return "该节点上还有普通员工：助理池节点只承载个人助理"
+    siblings = await session.scalars(
+        select(RuntimeNode).where(
+            RuntimeNode.machine_fingerprint == node.machine_fingerprint,
+            RuntimeNode.uid == node.uid,
+            RuntimeNode.id != node.id,
+        )
+    )
+    for sibling in siblings:
+        if await hosts_standard_bots(session, sibling.id) or not await is_pool_node(
+            session, sibling.id
+        ):
+            return SHARED_USER_MESSAGE
+    return None
 ```
 
 `coreman/core/bots/switch_relay.py`：import 区加
@@ -4621,20 +4900,36 @@ from coreman.core.assistants.records import is_assistant
         problem = assistant_runtime.assignment_error(target, node, bot.owner_id)
         if problem is not None:
             raise SwitchError(422, problem)
+    elif not same_relay:
+        # 普通员工不能换到助理池的节点上：它不在沙箱里，会读到助理的明文。
+        problem = await assistant_runtime.standard_bind_error(session, target)
+        if problem is not None:
+            raise SwitchError(422, problem)
 ```
+
+`coreman/api/routers/bots.py`：import 区加 `from coreman.core.assistants import runtime as assistant_runtime`（按字母序排在 `from coreman.core.assistants.records import …` 之前）；`resolve_relay_for_create` 里 `await validate_backend_ready(session, relay)` 之后、`return relay` 之前加
+
+```python
+    # 普通员工不能建在助理池的节点上：它不在沙箱里，会读到助理的明文。
+    problem = await assistant_runtime.standard_bind_error(session, relay)
+    if problem is not None:
+        raise ApiError(422, 422, problem)
+```
+
+（建机器人只走这里选运行时；改运行时只走 `validate_switch`：`PATCH` 里出现 `relay_server_id` 一律 409。）
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `uv run pytest tests/integration/test_assistant_runtime.py tests/api/test_assistant_switch_jobs.py tests/integration/test_switch_jobs.py tests/integration/test_rate_limit_switch.py tests/api/test_bots_extra.py tests/api/test_workspace_migration.py -q && uv run mypy coreman`
-Expected: 全部通过（新文件 5 条）。
+Run: `uv run pytest tests/integration/test_assistant_runtime.py tests/api/test_assistant_switch_jobs.py tests/integration/test_switch_jobs.py tests/integration/test_rate_limit_switch.py tests/api/test_bots_extra.py tests/api/test_workspace_migration.py tests/api/test_bots.py -q && uv run mypy coreman`
+Expected: 全部通过（新文件 6 条）。
 
-普通机器人不受影响：`validate_switch` 的新分支只在 `is_assistant(bot)` 时进入；`test_pick_pool_relay_takes_the_emptiest_ready_node` 断言节点上的普通员工不计入、也不会被选中。
+普通机器人不受影响：普通员工的路径上只在绑定（`resolve_relay_for_create`）与换到另一台（`validate_switch`，`same_relay` 时不查）各多一条「目标节点有没有助理池实例」的查询，不在池里的照常通过（`test_standard_bots_cannot_be_bound_or_switched_to_a_pool_node` 的最后一条断言）；`test_pick_pool_relay_takes_the_emptiest_ready_node` 断言节点上的普通员工不计入、也不会被选中；`tests/api/test_bots.py`、`test_bots_extra.py`、`test_switch_jobs.py` 照常通过。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add coreman/core/assistants/runtime.py coreman/core/bots/switch_relay.py tests/integration/test_assistant_runtime.py
-git commit -m "个人助理：只派到能隔离运行的节点，池里挑最空的，改绑只能到池里或本人的私有运行时"
+git add coreman/core/assistants/runtime.py coreman/core/bots/switch_relay.py coreman/api/routers/bots.py tests/integration/test_assistant_runtime.py
+git commit -m "个人助理：只派到能隔离运行的节点，池里挑最空的；改绑只能到池里或本人的私有运行时，普通员工进不了池节点"
 ```
 
 ---
@@ -4650,7 +4945,7 @@ git commit -m "个人助理：只派到能隔离运行的节点，池里挑最�
 **Interfaces:**
 - Consumes: Task 9 的 `transcripts.download` / `upload` / `STATUSES` / `MAX_BYTES`；Task 10 的 `node_sandboxed`、`ASSISTANT_CONCURRENCY_KEY`；`sealed.tolerate_undecryptable`
 - Produces:
-  - 心跳 `Capability.assistant_sandbox_v1: StrictBool = False`
+  - 心跳 `Capability.assistant_sandbox_v1: StrictBool = False`；`HeartbeatIn.machine: str | None`（64 位十六进制，否则当没上报）、`HeartbeatIn.uid: int | None`（0 到 2³²−1，否则当没上报），每次心跳写进 `runtime_nodes.machine_fingerprint` / `uid`
   - `GET /api/runtime/assistant-transcripts/{transfer}`：200 返回原始字节（`Cache-Control: no-store`），没有或读不出来 404
   - `PUT /api/runtime/assistant-transcripts/{transfer}`：头 `X-Transcript-Status`（`STATUSES` 之一），请求体是原始字节（只有 `ok` 带内容）；200 `{"result": "stored" | "kept" | "cleared"}`，编号失效 410，超过上限 413，状态或内容不对 422
   - `transport.SANDBOX_EXTENSION = "coreman.sandbox"`：请求扩展为 True 时调用落库为 `sandbox=True`
@@ -4694,7 +4989,7 @@ def _master() -> Iterator[None]:
     sealed.forget()
 
 
-async def beat(client, headers, **claude):
+async def beat(client, headers, *, identity: dict | None = None, **claude):
     return await client.post(
         "/api/runtime/heartbeat",
         headers=headers,
@@ -4703,6 +4998,7 @@ async def beat(client, headers, **claude):
             "codex": CAP,
             "version": "test",
             "service_status": "systemd-user",
+            **(identity or {}),
         },
     )
 
@@ -4880,6 +5176,21 @@ async def test_concurrency_follows_the_setting(client, db_session, app):
     first = await queue(db_session, app, node_id, sandbox=True, minutes_ago=3)
     await queue(db_session, app, node_id, sandbox=True, minutes_ago=2)
     assert await poll(client, headers, 4) == [str(first)]
+
+
+async def test_heartbeat_records_machine_and_uid_and_drops_garbage(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    fingerprint = "ab" * 32
+    ok = await beat(client, headers, identity={"machine": fingerprint, "uid": 1001})
+    assert ok.status_code == 200
+    node = await db_session.get(RuntimeNode, node_id, populate_existing=True)
+    assert node is not None and (node.machine_fingerprint, node.uid) == (fingerprint, 1001)
+    # 写坏的值按没上报处理，心跳照常收下；旧节点不带这两项同样是空。
+    bad = await beat(client, headers, identity={"machine": "/etc/machine-id", "uid": -1})
+    assert bad.status_code == 200
+    node = await db_session.get(RuntimeNode, node_id, populate_existing=True)
+    assert node is not None and node.machine_fingerprint is None and node.uid is None
 ```
 
 `tests/unit/test_settings_schema.py`：`set(SETTING_DEFAULTS) == {…}` 里 `"busy_confirm_minutes",` 之后加 `"assistant_node_concurrency",`。
@@ -4887,7 +5198,7 @@ async def test_concurrency_follows_the_setting(client, db_session, app):
 - [ ] **Step 2: 运行确认失败**
 
 Run: `uv run pytest tests/api/test_assistant_runtime_protocol.py tests/unit/test_settings_schema.py -q`
-Expected: FAIL：心跳用例里能力没有记下（`KeyError: 'assistant_sandbox_v1'`），转录接口 404/405，领取用例拿到的顺序不对，设置项全集对不上。
+Expected: FAIL：心跳用例里能力没有记下（`KeyError: 'assistant_sandbox_v1'`），指纹与 uid 没有存，转录接口 404/405，领取用例拿到的顺序不对，设置项全集对不上。
 
 - [ ] **Step 3: 实现**
 
@@ -4930,7 +5241,41 @@ from coreman.core.assistants.runtime import ASSISTANT_CONCURRENCY_KEY, node_sand
     assistant_sandbox_v1: StrictBool = False
 ```
 
-3. `_collect` 里领取的那一段（`if not node.draining and body.slots:` 到 `for row in rows:` 之前）换成
+3. `HeartbeatIn` 里 `root_change_result` 之后加
+
+```python
+    # 本机指纹（机器编号的哈希，64 位十六进制）与守护进程的 uid；旧节点不上报。只用于判断
+    # 同一台机器上的节点是不是同一个系统用户，写坏了按没上报处理，不让心跳被拒。
+    machine: str | None = None
+    uid: int | None = None
+
+    @field_validator("machine", mode="before")
+    @classmethod
+    def machine_hash(cls, value: object) -> str | None:
+        if (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value)
+        ):
+            return value
+        return None
+
+    @field_validator("uid", mode="before")
+    @classmethod
+    def system_uid(cls, value: object) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**32:
+            return value
+        return None
+```
+
+`heartbeat` 里 `update(RuntimeNode)….values(…)` 的参数末尾（`capabilities=…` 之后）加
+
+```python
+            machine_fingerprint=body.machine,
+            uid=body.uid,
+```
+
+4. `_collect` 里领取的那一段（`if not node.draining and body.slots:` 到 `for row in rows:` 之前）换成
 
 ```python
     if not node.draining and body.slots:
@@ -4957,7 +5302,7 @@ from coreman.core.assistants.runtime import ASSISTANT_CONCURRENCY_KEY, node_sand
 
 （`for row in rows:` 及之后不变。）
 
-4. `@router.post("/calls/{call_id}/frames")` 之前加
+5. `@router.post("/calls/{call_id}/frames")` 之前加
 
 ```python
 async def _claim_sandboxed(
@@ -5042,7 +5387,7 @@ async def transcript_upload(
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/api/test_assistant_runtime_protocol.py tests/unit/test_settings_schema.py tests/api/test_runtime_protocol.py tests/api/test_runtime_nodes.py tests/api/test_runtime_queue.py tests/api/test_runtime.py tests/api/test_runtime_daemon_e2e.py -q && uv run mypy coreman`
-Expected: 全部通过（新文件 11 条）。
+Expected: 全部通过（新文件 12 条）。
 
 普通机器人不受影响：`test_standard_calls_are_claimed_first_and_assistant_calls_are_capped`（比助理调用晚到的普通调用照样先被领走）、`test_assistant_calls_wait_on_nodes_without_the_capability`（没声明能力的节点一个助理调用都不领，普通调用照领）；`tests/api/test_runtime_protocol.py`、`test_runtime_queue.py`、`test_runtime_daemon_e2e.py` 的领取、排队与端到端用例照常通过。领取普通调用的语句只多了 `sandbox IS false` 一个条件，第二条查询只在节点声明了能力时才执行。
 
@@ -5050,7 +5395,7 @@ Expected: 全部通过（新文件 11 条）。
 
 ```bash
 git add coreman/api/routers/runtime_protocol.py coreman/core/runtime_nodes/transport.py coreman/core/settings_schema.py tests/unit/test_settings_schema.py tests/api/test_assistant_runtime_protocol.py
-git commit -m "个人助理：节点上报沙箱能力、取交转录的接口、助理调用排在普通调用之后并限并发"
+git commit -m "个人助理：节点上报沙箱能力、本机指纹与 uid，取交转录的接口，助理调用排在普通调用之后并限并发"
 ```
 
 ---
@@ -5062,7 +5407,7 @@ git commit -m "个人助理：节点上报沙箱能力、取交转录的接口�
 - Test: `tests/api/test_assistant_pool_api.py`
 
 **Interfaces:**
-- Consumes: Task 10 的 `node_sandboxed`、`hosts_standard_bots`；Task 11 的心跳能力字段
+- Consumes: Task 10 的 `node_sandboxed`、`pool_admission_error`；Task 11 的心跳能力字段与本机指纹、uid
 - Produces: `PUT /api/admin/relay-servers/{relay_id}/assistant-pool`（`ai_committee` / `platform_admin`），请求体 `{"enabled": bool}`，审计 `relay.assistant_pool`；实例视图多 `assistant_pool`、`assistant_sandbox` 两个字段
 
 - [ ] **Step 1: 写失败测试**
@@ -5070,33 +5415,70 @@ git commit -m "个人助理：节点上报沙箱能力、取交转录的接口�
 `tests/api/test_assistant_pool_api.py`：
 
 ```python
-"""助理池开关：只有节点声明能隔离运行助理的共享运行时才能加入。"""
+"""助理池开关：只收能隔离运行、节点上没有普通员工、且与普通员工的节点不是同一个系统用户的实例。
+
+普通员工也不能绑定或换到助理池的节点上。
+"""
 
 from __future__ import annotations
 
 import uuid
 
+import pytest
 from sqlalchemy import select
 
 from coreman.core.db.models import RelayServer
 from tests.api.test_assistant_runtime_protocol import beat
 from tests.api.test_runtime_nodes import enrollment
+from tests.fakes.runtime_node import add_node, add_node_relay
 from tests.integration.assistant_helpers import seed_standard
 
+MACHINE = "cd" * 32
+ASSISTANT_UID = 1500
+STANDARD_UID = 1000
 
-async def test_pool_flag_needs_a_sandboxed_shared_runtime(client, db_session):
+
+async def assistant_node(client, db_session, *, uid: int = ASSISTANT_UID, sandbox: bool = True):
+    """装在这台机器上、以 `uid` 运行的一个节点，返回它的 claude 实例与节点凭证头。"""
     _, body, headers = await enrollment(client, db_session)
-    node_id = uuid.UUID(body["node_id"])
+    await beat(
+        client,
+        headers,
+        identity={"machine": MACHINE, "uid": uid},
+        assistant_sandbox_v1=sandbox,
+    )
     relay = await db_session.scalar(
         select(RelayServer).where(
-            RelayServer.runtime_node_id == node_id, RelayServer.model_provider == "claude"
+            RelayServer.runtime_node_id == uuid.UUID(body["node_id"]),
+            RelayServer.model_provider == "claude",
         )
     )
     assert relay is not None
+    return relay, headers
+
+
+async def standard_node(db_session, *, uid: int, machine: str = MACHINE, with_bot: bool = True):
+    """同一台机器上另一个节点（普通员工的那个守护进程）。"""
+    node = await add_node(db_session, name=f"standard-{uid}", machine_fingerprint=machine, uid=uid)
+    relay = await add_node_relay(db_session, node=node)
+    if with_bot:
+        bot = await seed_standard(db_session)
+        bot.relay_server_id = relay.id
+    await db_session.commit()
+    return relay
+
+
+async def enable(client, relay) -> tuple[int, str]:
+    response = await client.put(
+        f"/api/admin/relay-servers/{relay.id}/assistant-pool", json={"enabled": True}
+    )
+    return response.status_code, response.json().get("message", "")
+
+
+async def test_assistant_node_next_to_standard_employees_under_another_user(client, db_session):
+    await standard_node(db_session, uid=STANDARD_UID)
+    relay, _ = await assistant_node(client, db_session)
     url = f"/api/admin/relay-servers/{relay.id}/assistant-pool"
-    refused = await client.put(url, json={"enabled": True})
-    assert refused.status_code == 422
-    await beat(client, headers, assistant_sandbox_v1=True)
     added = await client.put(url, json={"enabled": True})
     assert added.status_code == 200, added.text
     assert added.json()["data"]["assistant_pool"] is True
@@ -5105,23 +5487,60 @@ async def test_pool_flag_needs_a_sandboxed_shared_runtime(client, db_session):
     assert removed.json()["data"]["assistant_pool"] is False
 
 
-async def test_pool_nodes_must_not_host_standard_bots(client, db_session):
-    _, body, headers = await enrollment(client, db_session)
-    node_id = uuid.UUID(body["node_id"])
-    await beat(client, headers, assistant_sandbox_v1=True)
-    relay = await db_session.scalar(
-        select(RelayServer).where(
-            RelayServer.runtime_node_id == node_id, RelayServer.model_provider == "claude"
-        )
+async def test_same_system_user_as_a_standard_node_is_refused(client, db_session):
+    await standard_node(db_session, uid=ASSISTANT_UID)
+    relay, _ = await assistant_node(client, db_session)
+    status, message = await enable(client, relay)
+    assert status == 422 and "单独的系统用户" in message
+
+
+async def test_same_user_sibling_must_itself_be_a_pool_node(client, db_session):
+    idle = await standard_node(db_session, uid=ASSISTANT_UID, with_bot=False)
+    relay, _ = await assistant_node(client, db_session)
+    assert (await enable(client, relay))[0] == 422
+    idle.assistant_pool = True
+    await db_session.commit()
+    assert (await enable(client, relay))[0] == 200
+
+
+async def test_another_machine_with_the_same_uid_does_not_matter(client, db_session):
+    await standard_node(db_session, uid=ASSISTANT_UID, machine="ef" * 32)
+    relay, _ = await assistant_node(client, db_session)
+    assert (await enable(client, relay))[0] == 200
+
+
+@pytest.mark.parametrize(
+    ("setup", "words"),
+    [
+        ("no_sandbox", "隔离运行"),
+        ("no_identity", "本机指纹"),
+        ("root", "root"),
+        ("private", "私有"),
+    ],
+)
+async def test_refusals(client, db_session, setup, words):
+    relay, headers = await assistant_node(
+        client,
+        db_session,
+        uid=0 if setup == "root" else ASSISTANT_UID,
+        sandbox=setup != "no_sandbox",
     )
-    assert relay is not None
+    if setup == "no_identity":
+        await beat(client, headers, assistant_sandbox_v1=True)
+    if setup == "private":
+        relay.visibility = "private"
+        await db_session.commit()
+    status, message = await enable(client, relay)
+    assert status == 422 and words in message
+
+
+async def test_pool_nodes_must_not_host_standard_bots(client, db_session):
+    relay, _ = await assistant_node(client, db_session)
     bot = await seed_standard(db_session)
     bot.relay_server_id = relay.id
     await db_session.commit()
-    response = await client.put(
-        f"/api/admin/relay-servers/{relay.id}/assistant-pool", json={"enabled": True}
-    )
-    assert response.status_code == 422 and "普通员工" in response.json()["message"]
+    status, message = await enable(client, relay)
+    assert status == 422 and "普通员工" in message
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -5156,23 +5575,18 @@ async def set_assistant_pool(
     actor: User = Depends(_MANAGERS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """把实例加入或移出个人助理池。加入时要求节点已声明能隔离运行助理、节点上没有普通员工，
-    私有运行时不能加入。
+    """把实例加入或移出个人助理池；加入的条件见 `assistant_runtime.pool_admission_error`。
 
     移出不影响已经绑在上面的助理（它们照常跑，直到所有者或管理员改绑）；只是开通时不再选它。
     """
     relay = await load_relay(session, relay_id)
     if body.enabled:
-        if relay.visibility == "private":
-            raise ApiError(422, 422, "私有运行时不能加入助理池")
         node = (
             await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
         )
-        if node is None or not assistant_runtime.node_sandboxed(node, relay.model_provider):
-            raise ApiError(422, 422, "该运行时还不能隔离运行个人助理，请先升级并确认节点自检通过")
-        if await assistant_runtime.hosts_standard_bots(session, node.id):
-            # 普通员工在沙箱外、以同一个系统用户运行，读得到助理这一轮的临时目录与凭证副本。
-            raise ApiError(422, 422, "该节点上还有普通员工：助理池节点只承载个人助理")
+        problem = await assistant_runtime.pool_admission_error(session, relay, node)
+        if problem is not None:
+            raise ApiError(422, 422, problem)
     before = relay.assistant_pool
     relay.assistant_pool = body.enabled
     await record_audit(
@@ -5192,7 +5606,7 @@ async def set_assistant_pool(
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/api/test_assistant_pool_api.py tests/api/test_relay_servers.py -q && uv run mypy coreman`
-Expected: 全部通过（新文件 2 条）。
+Expected: 全部通过（新文件 9 条）。
 
 普通机器人不受影响：实例视图只多两个字段，原有字段不变（`tests/api/test_relay_servers.py` 照常通过）；新接口只改 `assistant_pool`。
 
@@ -5200,7 +5614,7 @@ Expected: 全部通过（新文件 2 条）。
 
 ```bash
 git add coreman/api/routers/relay_servers.py tests/api/test_assistant_pool_api.py
-git commit -m "个人助理：助理池开关，只收能隔离运行且没有普通员工的共享节点"
+git commit -m "个人助理：助理池开关，只收能隔离运行、与普通员工分属不同系统用户的节点"
 ```
 
 ---
@@ -5758,8 +6172,126 @@ git commit -m "个人助理：工作目录不放个人信息的规则进提示�
 
 ---
 
+### Task 16: 安装脚本核对运行用户
 
-### Task 16: 部署文档、升级与回滚、设计同步与整体验证
+要跑助理的机器上，部署方以单独的系统用户再装一份守护进程（步骤见 Task 17 的文档）。守护进程本来就按用户隔开：安装目录在该用户的家目录里，systemd 用户服务或 launchd 都挂在该用户自己的会话下，服务名 `coreman-runtime` 不会与另一个用户的冲突；守护进程只出不进，没有监听端口。所以安装脚本只需要一项：可选地核对运行用户的 uid——工作目录在网络存储上时，助理用户在每台机器上必须是同一个 uid，装错用户要在动任何东西之前停下。
+
+**Files:**
+- Modify: `runtime_daemon/install.sh`
+- Test: `tests/unit/test_runtime_daemon_install.py`（文件末尾追加）
+
+**Interfaces:**
+- Consumes: 无
+- Produces: 安装命令可选参数 `--expect-uid=<数字>`（可与 `--replace` 同用）：当前用户 uid 不符时报错退出、什么都不做；不带它时行为与今天相同
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/unit/test_runtime_daemon_install.py` 末尾加：
+
+```python
+def run_install_script(tmp_path, *args):
+    """只跑到参数与用户核对：用不存在的平台地址，后面一步下载必然失败。"""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    payload = {
+        "api_url": "https://127.0.0.1:1",
+        "install_token": "link.token",
+        "workspace_root": str(tmp_path / "projects"),
+    }
+    path = tmp_path / "install.sh"
+    path.write_text(
+        (ROOT / "runtime_daemon/install.sh")
+        .read_text()
+        .replace("__COREMAN_CONFIG__", base64.b64encode(json.dumps(payload).encode()).decode())
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": os.environ["PATH"],
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+    }
+    return subprocess.run(
+        ["sh", str(path), *args], env=env, capture_output=True, text=True, timeout=120
+    )
+
+
+def test_expect_uid_refuses_the_wrong_user_before_touching_anything(tmp_path):
+    result = run_install_script(tmp_path, f"--expect-uid={os.getuid() + 1}")
+    assert result.returncode != 0 and "--expect-uid" in result.stderr
+    assert "没有做任何改动" in result.stderr
+    assert not (tmp_path / "projects").exists()
+    assert not (tmp_path / "home/.local").exists()
+
+
+def test_expect_uid_for_the_right_user_installs_like_the_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    plain = run_install_script(tmp_path / "a")
+    checked = run_install_script(tmp_path / "b", f"--expect-uid={os.getuid()}")
+    # 两次都走到同一步（下载安装包）才失败，输出除了路径之外完全一样。
+    assert plain.returncode == checked.returncode != 0
+    assert plain.stderr.replace(str(tmp_path / "a"), "X") == checked.stderr.replace(
+        str(tmp_path / "b"), "X"
+    )
+    assert "--expect-uid" not in checked.stderr
+
+
+def test_unknown_arguments_are_still_refused(tmp_path):
+    for bad in ("--expect-uid=abc", "--force"):
+        result = run_install_script(tmp_path, bad)
+        assert result.returncode != 0 and "不支持的参数" in result.stderr
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `uv run pytest tests/unit/test_runtime_daemon_install.py -q -k "expect_uid or unknown_arguments"`
+Expected: FAIL：`--expect-uid=…` 被当作不支持的参数拒绝（前两条的断言不成立）。
+
+- [ ] **Step 3: 实现**
+
+`runtime_daemon/install.sh` 里
+
+```python
+# curl … | sh -s -- --replace
+if any(arg != '--replace' for arg in sys.argv[1:]):
+    raise SystemExit('不支持的参数：' + ' '.join(sys.argv[1:]) + '。唯一可用的参数是 --replace（替换本机已安装的 Runtime）')
+replace = '--replace' in sys.argv[1:]
+```
+
+换成
+
+```python
+# curl … | sh -s -- --replace
+# 个人助理的节点（单独的系统用户）再加 --expect-uid=<数字>：用户不对就什么都不做。
+expect_uid = None
+for arg in sys.argv[1:]:
+    if arg.startswith('--expect-uid=') and arg[len('--expect-uid='):].isdigit():
+        expect_uid = int(arg[len('--expect-uid='):])
+    elif arg != '--replace':
+        raise SystemExit('不支持的参数：' + ' '.join(sys.argv[1:]) + '。可用的参数是 --replace（替换本机已安装的 Runtime）与 --expect-uid=<数字>（核对运行用户的 UID）')
+if expect_uid is not None and os.getuid() != expect_uid:
+    raise SystemExit('当前用户的 UID 是 ' + str(os.getuid()) + '，与 --expect-uid=' + str(expect_uid) + ' 不符；请切换到个人助理专用的系统用户后重新运行，没有做任何改动')
+replace = '--replace' in sys.argv[1:]
+```
+
+（安装脚本本来就以 `umask 077` 运行、安装目录建成 0700，新建的项目主目录因此也是 0700，满足 Task 1 自检的目录权限要求；已有的目录由部署方按文档改成 0700。）
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `uv run pytest tests/unit/test_runtime_daemon_install.py -q`
+Expected: 全部通过（原有用例照常通过，新增 3 条）。
+
+普通机器人不受影响：不带新参数时脚本走的分支与今天相同（`test_expect_uid_for_the_right_user_installs_like_the_default` 比对了带与不带参数的输出；原有的整套安装、替换、升级、卸载用例照常通过）。守护进程与服务定义都没有改。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add runtime_daemon/install.sh tests/unit/test_runtime_daemon_install.py
+git commit -m "个人助理：安装脚本可核对运行用户的 uid，给助理专用的第二份守护进程用"
+```
+
+---
+
+### Task 17: 部署文档、升级与回滚、设计同步与整体验证
 
 **Files:**
 - Modify: `runtime_daemon/README.md`（新增一节）
@@ -5779,11 +6311,22 @@ git commit -m "个人助理：工作目录不放个人信息的规则进提示�
 
 个人助理（见 `docs/feishu.md`「个人助理应用」）的每一轮都在 bubblewrap 沙箱里跑：守护进程为这一轮另起一个驱动，只挂进它自己的工作目录（沙箱里是 `/work`）、本轮新建的家目录、临时目录、CLI 配置目录，只读挂系统目录、CLI 程序与本安装的发布目录；网络在单独的命名空间里，唯一的出路是经守护进程的放行代理连平台地址与模型接口。普通员工的轮次不经过沙箱，与以前完全相同。
 
-**节点要求。** Linux；bubblewrap 0.5 或更新（要用 `--clearenv`）；允许非特权用户命名空间（有的发行版要打开 `kernel.unprivileged_userns_clone`，有的发行版用 AppArmor 限制非特权用户命名空间，要给 `bwrap` 放行）。守护进程在容器里运行、容器又不给用户命名空间时，这台节点跑不了助理。macOS 节点跑不了助理。
+**跑在哪里。** 助理与普通员工共用机器，但不共用系统用户：要跑助理的机器上，以一个专用的系统用户（下面用 `coreman-assistant` 举例）再装一份守护进程，注册成单独的节点，放进助理池；普通员工照旧由原来那份守护进程、原来的用户运行，不用改动。平台据心跳上报的本机指纹与 uid 强制两件事：同一台机器上与助理节点同一个 uid 的节点不能承载普通员工；普通员工绑定或换运行时都不能选助理池里的节点。
 
-**自检与能力。** 守护进程启动时、之后每 30 分钟，按前置验证脚本的同一套检查真起几次沙箱：看不见员工工作目录与本安装的配置、系统目录只读、直连外网失败、经转发口连得到守护进程，再在沙箱里跑一遍 `claude --version` / `codex --version`。结果按 AI 上报到心跳的 `assistant_sandbox_v1`，`runtime.log` 里有一行 `Assistant sandbox: claude=ready, codex=no (ok)`（括号里是失败的原因代码）。没通过的节点不会收到助理的轮次，收到了也回 503。
+**部署前提（平台查不到，部署方保证）。** 运行普通员工的系统用户不能有 root 权限或免密 sudo，否则它能读助理用户的一切，这层隔离不成立。建议助理机器以 `hidepid=2` 挂载 `/proc`（`mount -o remount,hidepid=2 /proc`，并写进 `/etc/fstab`）：CLI 的命令行里带着系统提示词，默认本机所有用户都读得到 `/proc/<pid>/cmdline`。
 
-**登录凭证。** 每一轮从当前席位的登录文件收窄出一份副本只读挂进去：去掉刷新令牌（Codex 还把 `last_refresh` 改成现在），Claude 只留 `claudeAiOauth`。节点原来的登录文件不动；令牌刷新只发生在沙箱外的普通轮次与健康检查里。访问令牌剩余不到 30 分钟时这一轮不跑（`credential_expiring`），等下一次健康检查刷新。用环境变量登录（`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）的节点只把那一个变量带进去。沙箱里被注入的助理读得到这一份访问令牌；它只能连平台与模型接口，带不到别处。
+**安装第二份守护进程。**
+
+1. 建用户：`useradd -m -u <uid> coreman-assistant`，`chmod 700 /home/coreman-assistant`。工作目录在网络存储上、多台机器共享时，每台机器用同一个 `<uid>`。
+2. 以该用户登录一次 Claude / Codex（这是一份独立的登录，与普通员工那份分开计额度、分开刷新）。systemd 机器上给它开 linger：`loginctl enable-linger coreman-assistant`。
+3. 在管理台生成一条新的安装链接（项目主目录写这个用户下的目录，例如 `/home/coreman-assistant/projects`），以该用户运行安装命令，末尾加 `--expect-uid=<uid>`：`curl -fsSL '<安装链接>' | sh -s -- --expect-uid=<uid>`。用户不对时安装脚本什么都不做就退出。服务名同样是 `coreman-runtime`，挂在该用户自己的 systemd 用户会话（或 launchd）下，与普通员工那份互不相干；守护进程只出不进，没有端口要分配。
+4. 等 `runtime.log` 里出现 `Assistant sandbox: claude=ready …`，再在管理台把这个节点的实例加入助理池。
+
+**节点要求。** Linux；bubblewrap；允许非特权用户命名空间（有的发行版要打开 `kernel.unprivileged_userns_clone`，有的发行版用 AppArmor 限制非特权用户命名空间，要给 `bwrap` 放行）。守护进程在容器里运行、容器又不给用户命名空间时，这台节点跑不了助理。macOS 节点跑不了助理。
+
+**自检与能力。** 守护进程启动时、之后每 30 分钟：先核对家目录、本安装的数据目录、项目主目录、本轮目录与 socket 目录都属于本用户且组与其他人没有任何权限（0700）；再按前置验证脚本的同一套检查真起几次沙箱：看不见员工工作目录与本安装的配置、系统目录只读、直连外网失败、经转发口连得到守护进程、沙箱里的 umask 是 077，最后在沙箱里跑一遍 `claude --version` / `codex --version`。结果按 AI 上报到心跳的 `assistant_sandbox_v1`，`runtime.log` 里有一行 `Assistant sandbox: claude=ready, codex=no (ok)`（括号里是失败的原因代码）。没通过的节点不会收到助理的轮次，收到了也回 503。
+
+**登录凭证。** 每一轮从当前席位的登录文件收窄出一份副本只读挂进去：去掉刷新令牌（Codex 还把 `last_refresh` 改成现在），Claude 只留 `claudeAiOauth`。节点原来的登录文件不动；助理节点上没有普通员工，令牌刷新只发生在这份守护进程沙箱外的健康检查里。访问令牌剩余不到 30 分钟时这一轮不跑（`credential_expiring`），等下一次健康检查刷新。用环境变量登录（`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）的节点只把那一个变量带进去。沙箱里被注入的助理读得到这一份访问令牌；它只能连平台与模型接口，带不到别处。
 
 **转录。** 一轮结束后守护进程把 CLI 转录打包上传平台（经 TLS，平台用所有者的数据密钥加密保存），然后删掉本轮目录；续聊前再从平台取回。上传失败的本轮目录在 `~/.local/share/coreman-runtime/assistant-turns/` 里留到下一次清扫（启动时一次，之后每 10 分钟）：清扫再传一次，然后删除。沙箱里驱动的输出写在本轮目录里，随本轮删除，不进 `claude.log` / `codex.log`。
 
@@ -5795,7 +6338,6 @@ git commit -m "个人助理：工作目录不放个人信息的规则进提示�
 | `assistant_egress_hosts` | 按 AI 覆盖模型接口地址，如 `{"codex": ["chatgpt.com", "api.openai.com"]}`；只写主机名，端口固定 443 |
 | `assistant_sandbox_ro_paths` | 额外只读挂进沙箱的绝对路径（CLI 装在不常见的位置、自检报 `cli_unavailable` 时用） |
 
-**助理池节点只放助理。** 普通员工不在沙箱里，与助理是同一个系统用户，读得到助理这一轮的临时目录与凭证副本；所以管理台把实例加入助理池时，要求节点上没有启用的普通员工。
 
 **升级与回滚。** 先升平台、再升节点，顺序反过来也安全：新平台只把助理的轮次派给声明了 `assistant_sandbox_v1` 的节点（旧节点不声明，助理在旧节点上暂停）；旧平台不发 `sandbox`，新节点照旧处理普通轮次。**平台回滚到不认识 `sandbox` 的版本之前，先停用所有个人助理**——旧平台会把助理的轮次当普通轮次派出、在沙箱外跑：
 
@@ -5814,7 +6356,7 @@ UPDATE bots SET enabled = false WHERE kind = 'assistant' AND enabled;
 `docs/feishu.md`「个人助理应用」一节的列表末尾（「写操作要审批」之后）加：
 
 ```markdown
-- **在节点的沙箱里运行。** 助理只在声明了沙箱能力的运行时节点上跑（见 `runtime_daemon/README.md`「个人助理的沙箱」），绑在助理池（管理员用 `PUT /api/admin/relay-servers/{id}/assistant-pool` 加入）或所有者本人的私有运行时上。所在节点离线、排空或不能隔离运行时，助理暂停并在私聊里说明，不会换到别的节点。CLI 的转录每轮结束后加密存进平台、节点上删除，续聊前再下发；转录超过 50MB 或没能传回来时，下一轮从新会话开始。每个节点同时跑的助理轮次由设置 `assistant_node_concurrency`（默认 2）限制，超出的排队。
+- **在节点的沙箱里运行。** 助理只在声明了沙箱能力的运行时节点上跑（见 `runtime_daemon/README.md`「个人助理的沙箱」）：要跑助理的机器上以专用的系统用户再装一份守护进程，普通员工那份不动，普通员工也不能绑到助理池的节点上。助理绑在助理池（管理员用 `PUT /api/admin/relay-servers/{id}/assistant-pool` 加入）或所有者本人的私有运行时上。所在节点离线、排空或不能隔离运行时，助理暂停并在私聊里说明，不会换到别的节点。CLI 的转录每轮结束后加密存进平台、节点上删除，续聊前再下发；转录超过 50MB 或没能传回来时，下一轮从新会话开始。每个节点同时跑的助理轮次由设置 `assistant_node_concurrency`（默认 2）限制，超出的排队。
 ```
 
 - [ ] **Step 3: 同步设计文档第三节**
@@ -5823,8 +6365,9 @@ UPDATE bots SET enabled = false WHERE kind = 'assistant' AND enabled;
 
 1. 「沙箱」：可读写一项里「本助理的 CLI 配置目录」后补「（每轮新建、轮次结束删除；续聊需要的会话转录由平台保管）」；补一句「沙箱方案落地为 bubblewrap；节点启动时自检，通过后在心跳里声明 `assistant_sandbox_v1`，平台只把助理的轮次派给声明了的节点」；出网一项补「沙箱断网，经守护进程的放行代理连平台与模型接口；登录令牌的刷新地址不在名单里」；只读一项补「模型登录凭证是去掉刷新令牌的副本」。
 2. 「转录」：补「上传与下发凭派出这一轮时的交接编号；上一轮的转录没传回来时不拿旧的续，开新会话」「清扫在启动时与之后每 10 分钟各一次，再传一次后无论成败都删除」。
-3. 「Runtime 分配」：补「池节点不能有普通员工（普通员工不在沙箱里，与助理同一个系统用户）」「池节点离线同样暂停，不重新选节点」；每日轮次预算一句后加「（推迟到第 2 期，与盯消息的分级一起做）」。
-4. 「威胁模型」里「同一节点上的其他 AI 员工 | 不能」一行的依据改为「沙箱隔离，转录每轮清除；助理池节点不承载普通员工」。
+3. 「Runtime 分配」：补「助理与普通员工共用机器：要跑助理的机器上以专用的系统用户再装一份守护进程、注册成单独的节点，这个节点进助理池；平台凭心跳上报的本机指纹与 uid 强制助理节点与承载普通员工的节点分属不同系统用户，普通员工也不能绑到助理池的节点上；运行普通员工的用户不能有 root 或免密 sudo」「池节点离线同样暂停，不重新选节点」；每日轮次预算一句后加「（推迟到第 2 期，与盯消息的分级一起做）」。
+4. 「威胁模型」里「同一节点上的其他 AI 员工 | 不能」一行的依据改为「与普通员工之间：助理在单独系统用户下的另一份守护进程里运行；助理之间：沙箱隔离，转录每轮清除」。
+5. 「沙箱方案与独立系统用户方案二选一」一句改为「采用 bubblewrap 沙箱（助理之间），再加每台机器一个助理专用的系统用户（助理与普通员工之间）；每个助理一个系统用户的方案不采用」。
 
 - [ ] **Step 4: 全量检查**
 
@@ -5836,19 +6379,19 @@ Expected: 全部 passed（没有 bubblewrap 的机器上 `test_real_sandbox_self
 
 - [ ] **Step 5: 真机联调（需要一台过了 Task 0 的 Linux 节点与一个测试用的助理记录；没有就跳过并在 PR 里写明）**
 
-1. 节点升级后看 `runtime.log`：有 `Assistant sandbox: claude=ready …`；管理台实例视图 `assistant_sandbox` 为真。把实例加入助理池（节点上不能有普通员工），助理记录绑上它。
+1. 在一台已有普通员工的机器上按 Step 1 的步骤装助理节点。看 `runtime.log`：有 `Assistant sandbox: claude=ready …`；管理台实例视图 `assistant_sandbox` 为真。把实例加入助理池，助理记录绑上它。试着把助理节点改用普通员工的那个用户再装一份（或把普通员工的节点也报成同一个 uid）：预期加入助理池被拒绝；试着把一个普通员工换到助理节点上：预期被拒绝。
 2. 私聊助理一句话。预期：有回复；节点上这一轮期间 `assistant-turns/` 下有一个目录，结束后消失；`assistant_transcripts` 多一行，`blob_enc` 以 `enc:v2:d` 开头，`pending_transfer` 为空。
 3. 再问「我刚才说了什么」。预期：续上了上一句（还原成功）。
 4. 让助理执行 `curl -sS https://example.com`。预期：失败（403 / 连接被拒）；`runtime.log` 不出现主机名。让它 `ls` 上级目录与节点的家目录。预期：看不到其他员工的目录。
 5. 一轮进行中 `kill -9` 守护进程，再启动。预期：启动后的清扫把留下的本轮目录传一次并删除；下一句照常回复。
-6. 比对节点登录文件在这些轮次前后的摘要（`sha256sum`）：不变；普通员工在同一时间段内照常对话。
+6. 比对助理用户的登录文件在这些轮次前后的摘要（`sha256sum`）：不变；同一台机器上的普通员工在同一时间段内照常对话。以普通员工的用户 `ls` 助理用户的家目录、`~/.local/share/coreman-runtime/assistant-turns/`、项目主目录：都被拒绝；`ps -ef` 看不到助理用户的进程命令行（配了 `hidepid=2` 时）。
 7. 把节点停掉一分钟，私聊助理。预期：回「你的个人助理暂停了：绑定的运行时现在离线……」，没有在别的节点上跑。
 
 - [ ] **Step 6: 敏感词自查后提交**
 
 ```bash
 git add runtime_daemon/README.md docs/feishu.md docs/superpowers/specs/2026-11-11-personal-assistant.md
-git commit -m "个人助理：节点沙箱的部署要求、升级与回滚，设计文档第三节同步"
+git commit -m "个人助理：助理专用系统用户的安装、节点沙箱的部署要求、升级与回滚，设计文档第三节同步"
 ```
 
 ---
@@ -5859,57 +6402,59 @@ git commit -m "个人助理：节点沙箱的部署要求、升级与回滚，�
 |---|---|
 | 可读写：本人的工作目录、本轮临时目录、本助理的 CLI 配置目录 | Task 1（`bwrap_argv`：`/work`、`/turn/tmp`、`/turn/config` 等）；配置目录每轮新建（「设计选择」第 3 条） |
 | 只读：CLI 程序与模型登录凭证 | Task 1（`cli_mounts`、`system_mounts`）、Task 4（凭证副本）、Task 6（只读盖到配置目录） |
-| 不可见：其他目录，包括其他员工的工作目录与转录 | Task 1（白名单挂载；自检 `hidden` 检查）、Task 12（池节点不承载普通员工） |
+| 不可见：其他目录，包括其他员工的工作目录与转录 | Task 1（白名单挂载；自检 `hidden`、目录权限检查）、Task 2（umask 077）；与普通员工之间靠单独的系统用户（Task 7 上报指纹与 uid、Task 10 与 12 强制、Task 16 安装） |
 | 出网只放行平台地址与模型接口地址 | Task 1（`--unshare-all`；自检 `offline`、`bridge`）、Task 2、Task 3、Task 6（`turn_policy`） |
-| 环境变量里只有本轮能力令牌 | Task 1（`--clearenv` + `sandbox_env`）；能力令牌经请求的 `env_vars` 由驱动叠上，同普通轮次 |
-| 沙箱方案与独立系统用户二选一，由前置验证决定 | Task 0；结果不符时见「步骤 0 结果与本计划的对应」 |
+| 环境变量里只有本轮能力令牌 | Task 1（`sandbox_env` 作为 bwrap 进程的全部环境，不进参数）；能力令牌经请求的 `env_vars` 由驱动叠上，同普通轮次 |
+| 沙箱方案与独立系统用户二选一，由前置验证决定 | 所有者 2026-11-12 决定两者都用：助理之间 bubblewrap，助理与普通员工之间每台机器一个助理专用的系统用户（不是每个助理一个）；Task 0 在这样的布局下验证 |
 | 一轮结束后上传、加密存 `assistant_transcripts`、节点上随即删除 | Task 5、6（打包、上传、删除）、Task 8（表与二进制加密列）、Task 9（`upload`）、Task 11（接口） |
 | 续聊前下发、守护进程还原到沙箱内 | Task 6（`download`、`unpack`）、Task 9（`prepare` 的 `restore`、`download`）、Task 11 |
 | 单个转录上限 50MB，超过时结束该会话，下一轮开新会话 | Task 5（`TooLarge`）、Task 6（`too_large`）、Task 9（`cleared` → 下一轮 `renew`）、Task 11（413） |
 | 守护进程启动时清扫遗留转录：上传后删除 | Task 6（`sweep`，启动时 + 每 10 分钟）、Task 7（`start`） |
 | 本轮临时目录在轮次结束时删除；下载的文档与附件只放这里 | Task 6（`_cleanup`）、Task 15（提示词：附件放 `$TMPDIR`） |
 | 工作目录分配同普通员工；安全提示词写明不放个人信息 | 分配沿用现有方式（1A / 1F）；Task 15 |
-| `relay_servers.assistant_pool`；开通时在池内选助理数最少的在线节点 | Task 8（列）、Task 10（`pick_pool_relay`，1F 调用）、Task 12（开关） |
+| `relay_servers.assistant_pool`；开通时在池内选助理数最少的在线节点 | Task 8（列）、Task 10（`pick_pool_relay`，1F 调用；普通员工绑定与换运行时进不了池节点）、Task 12（开关与准入） |
 | 所有者可改绑到自己的私有 Runtime（沿用 relay_policy 的可选规则） | Task 10（`validate_switch` 里的 `assignment_error`，其余规则沿用） |
 | 私有节点离线时助理暂停并私信所有者，不回落到池 | Task 10（`turn_blocker`）、Task 14（`paused`） |
 | 迁移只需改绑 | 转录在库里、路径固定 `/work`，任何节点都能还原（Task 5、9）；工作目录照现有换运行时流程 |
 | 每个节点对助理轮次设并发上限，超出的排队 | Task 11（领取时限并发、排在普通调用之后）、Task 6（节点侧保险） |
 | 每人每日轮次预算 | 推迟到第 2 期（「设计选择」第 10 条，待所有者确认） |
 | 十一：助理池节点并发上限（设置项） | Task 11（`assistant_node_concurrency`） |
-| 测试：轮次结束后节点上无残留；续聊可还原；异常退出后的清扫 | Task 6（`test_turn_streams_and_releases_done_only_after_the_upload`、`test_restore_puts_the_transcript_back_before_the_driver_runs`、`test_failed_upload_is_retried_once_by_the_sweep_then_deleted`、`test_cancelled_turn_uploads_in_the_background`）；真机见 Task 16 Step 5 |
-| 威胁模型：同一节点上的其他 AI 员工不能看到 | Task 1（沙箱）、Task 12（池节点不承载普通员工）；见「对设计文档的意见」 |
+| 测试：轮次结束后节点上无残留；续聊可还原；异常退出后的清扫 | Task 6（`test_turn_streams_and_releases_done_only_after_the_upload`、`test_restore_puts_the_transcript_back_before_the_driver_runs`、`test_failed_upload_is_retried_once_by_the_sweep_then_deleted`、`test_cancelled_turn_uploads_in_the_background`）；真机见 Task 17 Step 5 |
+| 威胁模型：同一节点上的其他 AI 员工不能看到 | 助理之间：Task 1（沙箱）；与普通员工之间：单独的系统用户（Task 7、10、12、16），自检核对目录权限（Task 1）；部署前提见「已知限制」 |
 | 威胁模型：被注入的助理不能外传（沙箱限制出网） | Task 1–3、6；残留风险见「已知限制」 |
 | 原则 3：明文在节点上只存在于一轮运行期间 | Task 3（配置目录每轮新建）、Task 6（结束即删；上传失败最多留一个清扫周期） |
 
 ## 所有者已确认的取舍
 
-（尚无。本计划的取舍都列在下一节，等所有者答复。）
+1. **助理与普通员工共用机器，靠每台机器一个助理专用的系统用户隔开**（2026-11-12）。要跑助理的机器上以单独的系统用户（示例名 `coreman-assistant`）再装一份守护进程，注册成单独的节点，这个节点进助理池；普通员工照旧在原来的守护进程与用户下运行。助理之间仍靠沙箱。所有者否决了「每个助理一个系统用户」（太重）与「接受普通员工读得到助理的明文」。平台强制而不是靠约定：加入助理池时查节点自身与同机同 uid 的其他节点（Task 12）；普通员工绑定或换运行时不能选助理池的节点（Task 10）；节点心跳上报本机指纹与 uid（Task 7、11）；自检核对目录权限与 umask（Task 1、2）；安装脚本可核对 uid（Task 16）。
 
 ## 待所有者确认的取舍
 
 1. **每人每日轮次预算推迟到第 2 期**，和盯消息的分级一起做（「设计选择」第 10 条）。现在做只能拒绝所有者本人的请求。另一种做法是第 1 期先加一个只计数、不拦截的用量，代价是多一张表、多一个设置项，而且没有地方用它。
 2. **CLI 配置目录每轮新建**，不是每个助理一个长期目录（「设计选择」第 3 条）。更严，但 CLI 在配置目录里记下的其他东西（设置、插件缓存）每轮都从零开始；助理装的技能要放在工作目录里才留得下来。
-3. **助理池节点不能有普通员工**（「设计选择」第 13 条，Task 12 的接口里强制）。否则同一节点上的普通员工读得到助理这一轮的明文与凭证副本。代价：池要单独的节点；把普通员工换到池节点上目前不拦（只在加入池时检查），靠部署约定。另一种做法是给助理分配独立的系统用户（设计里的备选方案），见「步骤 0 结果与本计划的对应」最后一行。
-4. **池节点离线也暂停，不自动换到池里别的节点**。设计只说了私有节点不回落；本计划对池节点同样处理，因为设计「不做」里有「每轮按负载重新选节点」，而且改绑涉及工作目录复制，应走现有的换运行时流程。代价：池节点维护期间，绑在上面的助理都暂停。
-5. **平台回滚前要手工停用助理**（「设计选择」第 8 条与 Task 16 的步骤）。另一种做法是让新守护进程认出助理的 `bot_key`（`assistant-<16 位十六进制>`）、没有 `sandbox` 就拒绝；代价是普通员工的 `bot_key` 恰好是这个形状时会被误拒，而现有的 `bot_key` 校验并不保留这个前缀。
-6. **只支持 Claude 与 Codex**（「设计选择」第 11 条），绑到 OpenCode 的助理暂停。
-7. **访问令牌剩余不足 30 分钟就不跑这一轮**，等沙箱外的健康检查或普通轮次刷新（Claude 空闲 15 分钟一次健康检查）。助理池节点没有普通员工，刷新只能靠健康检查；Codex 的健康检查只在白天每小时一次。若真机核实发现访问令牌寿命短于一两个小时，需要改成守护进程在沙箱外主动触发一次 CLI 调用来刷新。
-8. **拒绝时所有者看到的是通用的「运行时出错」**，具体原因（`credential_expiring`、`sandbox_busy` 等）只在节点日志与任务的错误信息里。要给所有者分原因提示，需要在 worker 的分类里认出 503 的代码，多一处分支。
-9. **取不到转录时拒绝这一轮**（`transcript_unavailable`），不是从空会话开始：网络抖一下宁可让所有者再发一次，也不悄悄丢掉上下文。平台明确说没有（404：读不出来、密钥已销毁）时才从新会话开始。
-10. **清扫除了启动时，还每 10 分钟一次**。设计只写了启动时；不加的话，上传失败留下的明文要等到下次重启才删。
-11. **沙箱里驱动的输出不进 `claude.log` / `codex.log`**，随本轮删除；出问题时节点上没有驱动日志可看，只有 `runtime.log` 里的原因代码。
-12. **CLI 自带的联网搜索与抓取关掉**（Claude 在 `settings.permissions.deny` 里加 `WebSearch`、`WebFetch`；Codex 在 `exec` 下默认不开联网搜索，未额外配置）。查外部资料走平台工具。
-13. **助理池开关只有接口**，没有管理台页面；管理台的实例列表多了 `assistant_pool`、`assistant_sandbox` 两个字段，前端暂不展示。
-14. **会话查看链接对助理无效**：一轮结束后节点上没有这一轮的会话记录。所有者私聊里的会话链接点开是空的。
+3. **池节点离线也暂停，不自动换到池里别的节点**。设计只说了私有节点不回落；本计划对池节点同样处理，因为设计「不做」里有「每轮按负载重新选节点」，而且改绑涉及工作目录复制，应走现有的换运行时流程。代价：池节点维护期间，绑在上面的助理都暂停。
+4. **平台回滚前要手工停用助理**（「设计选择」第 8 条与 Task 17 的步骤）。另一种做法是让新守护进程认出助理的 `bot_key`（`assistant-<16 位十六进制>`）、没有 `sandbox` 就拒绝；代价是普通员工的 `bot_key` 恰好是这个形状时会被误拒，而现有的 `bot_key` 校验并不保留这个前缀。
+5. **只支持 Claude 与 Codex**（「设计选择」第 11 条），绑到 OpenCode 的助理暂停。
+6. **访问令牌剩余不足 30 分钟就不跑这一轮**，等这份守护进程沙箱外的健康检查刷新。助理节点是单独的系统用户、有自己的一份登录，上面没有普通员工，刷新只能靠它自己的健康检查：Claude 空闲 15 分钟一次，Codex 只在白天每小时一次。若真机核实发现访问令牌寿命短于一两个小时（或 Codex 夜里过期），需要让助理节点的守护进程在沙箱外主动触发一次 CLI 调用来刷新。
+7. **拒绝时所有者看到的是通用的「运行时出错」**，具体原因（`credential_expiring`、`sandbox_busy` 等）只在节点日志与任务的错误信息里。要给所有者分原因提示，需要在 worker 的分类里认出 503 的代码，多一处分支。
+8. **取不到转录时拒绝这一轮**（`transcript_unavailable`），不是从空会话开始：网络抖一下宁可让所有者再发一次，也不悄悄丢掉上下文。平台明确说没有（404：读不出来、密钥已销毁）时才从新会话开始。
+9. **清扫除了启动时，还每 10 分钟一次**。设计只写了启动时；不加的话，上传失败留下的明文要等到下次重启才删。
+10. **沙箱里驱动的输出不进 `claude.log` / `codex.log`**，随本轮删除；出问题时节点上没有驱动日志可看，只有 `runtime.log` 里的原因代码。
+11. **CLI 自带的联网搜索与抓取关掉**（Claude 在 `settings.permissions.deny` 里加 `WebSearch`、`WebFetch`；Codex 在 `exec` 下默认不开联网搜索，未额外配置）。查外部资料走平台工具。
+12. **助理池开关只有接口**，没有管理台页面；管理台的实例列表多了 `assistant_pool`、`assistant_sandbox` 两个字段，前端暂不展示。
+13. **会话查看链接对助理无效**：一轮结束后节点上没有这一轮的会话记录。所有者私聊里的会话链接点开是空的。
 
 ## 已知限制
 
-- macOS 节点、守护进程在不给用户命名空间的容器里运行的节点、bubblewrap 低于 0.5 的节点都跑不了助理；自检会如实上报，平台不会派过去。
+- macOS 节点、守护进程在不给用户命名空间的容器里运行的节点、读不到机器编号（`/etc/machine-id`）的节点都跑不了助理或进不了助理池；自检与准入会如实拒绝，平台不会派过去。
 - 平台地址必须是 https：沙箱里只有经放行代理的 CONNECT 一条路，名单只收 https 地址。
 - 一轮结束要等转录上传完 `[DONE]` 才放出：转录大时回复的收尾会晚几秒。
 - 被取消的一轮在后台上传转录；如果所有者在上传完成之前就发来下一句，下一轮会开新会话。
 - 被注入的助理在一轮里读得到访问令牌与本轮的全部内容；能带出去的地方只剩平台（写进知识库或审批单，后者要所有者本人批准才会发出）与模型接口（消耗额度）。
-- 共享节点的 root 在助理运行的那一轮里看得到明文（设计的威胁模型接受）。
+- 共享节点的 root 在助理运行的那一轮里看得到明文（设计的威胁模型接受）。运行普通员工的系统用户若有 root 权限或免密 sudo，同样看得到；这一点平台查不到，只能写进部署前提（Task 17）并在 Task 0 的跨用户检查里核对。
+- 本机其他用户读得到 `/proc/<pid>/cmdline`：bwrap 与驱动的参数里没有内容与密钥，但 CLI 的参数里有系统提示词（第 1 期只有规则，没有聊天内容）。部署文档建议以 `hidepid=2` 挂载 `/proc`；第 2 期往提示词里注入个人知识页之前，必须改成经文件传给 CLI。
+- 准入只比得到上报了本机指纹与 uid 的节点：同一台机器上还没升级的普通员工节点不会被发现。安装脚本本来就一个系统用户只装一份运行时，正常安装不会出现同机同用户的两份；升级到本版本后所有节点都会上报。
+- 普通员工绑定与换运行时会被助理池节点拒绝，但已经绑在某个节点上的普通员工不会被搬走：加入助理池时会因为它而被拒，所以只要先加池、后绑定的顺序不被绕过（直接改库），就不会出现两者同在一个节点上。
 - 并发超出时的排队沿用调用方现成的 120 秒排队上限；等不到时所有者看到「运行时繁忙」，要再发一次。
 - 一轮的转录只取续聊必需的部分（Claude 的 `projects/`、Codex 的 `sessions/` 与线程对应）；CLI 以后把续聊所需的状态放到别处时要改 `runtime_daemon/transcripts.py` 的 `TREES`。
 - 转录上传受 50MB（压缩后）限制，还原时解压后不超过 512MB；超过就开新会话。
@@ -5919,29 +6464,32 @@ git commit -m "个人助理：节点沙箱的部署要求、升级与回滚，�
 
 | Task 0 的结果 | 要改的地方 |
 |---|---|
-| 个别节点 `bwrap=MISSING` 或 `T1 FAIL` | 不改代码：这些节点自检不过、不声明能力；装上 bubblewrap 0.5+ 并放开非特权用户命名空间后重启守护进程即可 |
+| 个别机器 `bwrap=MISSING` 或 `T1 FAIL` | 不改代码：这些机器上的助理节点自检不过、不声明能力；装上 bubblewrap 并放开非特权用户命名空间后重启助理那份守护进程即可 |
 | `*_visible` 不为 0、`write_outside=allowed` | 探测脚本是「整盘只读再遮盖」，本计划是白名单挂载，可能不受影响；先用 Task 1 的自检（`hidden_check_failed`）在该节点上复核，仍不过就查 `SYSTEM_PATHS` 与 `cli_mounts` 是否把员工目录带了进来（例如 CLI 装在员工目录的上级里），改 Task 1 |
 | T3 / T4 用只读原文件认证失败，但 Step 0.3 的收窄副本成功 | 不改：本计划本来就挂收窄副本 |
 | Step 0.3 的收窄副本也失败（CLI 要求有刷新令牌字段，或启动时就要刷新） | 改 Task 4：副本里保留刷新令牌字段但换成无效值（如空串），或改为每轮在沙箱外先跑一次 `<cli> --version` 之类的命令触发刷新再复制；同时把 Task 0 的 Step 0.3 换成对应做法再测 |
-| Step 0.3 的 `node_login_unchanged=NO` | 停：沙箱里的 CLI 动了节点的登录文件（说明文件没有真的只读）。查 bwrap 版本与挂载顺序，Task 1 的 `bwrap_argv` 必须让凭证最后挂、只读 |
+| Step 0.3 的 `node_login_unchanged=NO` | 停：沙箱里的 CLI 动了助理用户的登录文件（说明文件没有真的只读）。查 bwrap 版本与挂载顺序，Task 1 的 `bwrap_argv` 必须让凭证最后挂、只读 |
 | T5 输出 `http=200`（断网命名空间不生效） | 自检的 `offline` 检查会失败、不声明能力；若所有节点都这样，改用设计里的备选「按进程组做防火墙规则」：需要 root，新增一个由节点管理员装的特权辅助程序，改 Task 1 的参数（去掉 `--unshare-all` 里的网络隔离）与 Task 3（放行改在防火墙层），工作量另估 |
 | `cgroup_fs=cgroup2fs` 且 `nft=yes` | 只是备选的前提，不改 |
-| Step 0.4 Claude 还原后不能续聊 | 改 Task 5 的 `TREES`：把 Claude 续聊还需要的文件（例如配置目录里的会话索引）加进转录；Task 6 的用例相应补一份；平台侧不用改 |
-| 所有候选节点都不能用 bubblewrap（例如都在不给用户命名空间的容器里） | 换设计里的备选「每个助理一个独立系统用户，编号由平台统一分配」：Task 8 加列 `bots.assistant_uid`（序列分配，跨节点一致）；Task 1 的 `bwrap_argv` 换成「以该用户身份起驱动」的启动器（需要节点上预建用户与一条只允许启动驱动的 sudo 规则，或一个 setuid 的小启动器）；Task 6 的目录改成属该用户、0700；出网限制改为按用户的防火墙规则（需要 root）；Task 7 的能力改由「用户与规则都已就位」的自检得出。其余任务（转录交接、加密、分配、worker）不变 |
+| Step 0.4 有 `readable=…`，或 `standard_user_sudo=YES` | 这台机器暂不能跑助理：把助理用户的家目录、数据目录、项目主目录改成 0700，去掉普通员工用户的免密 sudo，再测。代码不改（自检本来就核对助理侧目录权限；sudo 平台查不到） |
+| Step 0.5 Claude 还原后不能续聊 | 改 Task 5 的 `TREES`：把 Claude 续聊还需要的文件（例如配置目录里的会话索引）加进转录；Task 6 的用例相应补一份；平台侧不用改 |
+| 所有候选机器都不能用 bubblewrap（例如都在不给用户命名空间的容器里） | 助理之间就没有隔离了，而所有者已否决「每个助理一个系统用户」：这时停下来请所有者重新决定（可选：每台机器只放一位所有者的助理、或换能用 bubblewrap 的机器）。本计划的其余部分（专用系统用户、转录交接、加密、分配、worker）不受影响 |
 
 ## 仍需真机核实
 
-1. **两种 CLI 在没有刷新令牌的凭证下能否正常工作、访问令牌的寿命**：Claude 的 `.credentials.json` 结构（`claudeAiOauth.accessToken / refreshToken / expiresAt`，`expiresAt` 是毫秒）与 Codex 的 `auth.json` 结构（`tokens.access_token / refresh_token`、`last_refresh`、访问令牌是带 `exp` 的 JWT）是读守护进程现有代码（`daemon.login_account`）与社区资料得来的，没有对着真实文件核对；刷新令牌是否一次性、刷新后旧的访问令牌是否立即失效，也没有核实。Task 0 的 Step 0.3 与 Task 16 的 Step 5 第 6 条覆盖。影响 Task 4 与「待所有者确认的取舍」第 7 条。
+1. **两种 CLI 在没有刷新令牌的凭证下能否正常工作、访问令牌的寿命**：Claude 的 `.credentials.json` 结构（`claudeAiOauth.accessToken / refreshToken / expiresAt`，`expiresAt` 是毫秒）与 Codex 的 `auth.json` 结构（`tokens.access_token / refresh_token`、`last_refresh`、访问令牌是带 `exp` 的 JWT）是读守护进程现有代码（`daemon.login_account`）与社区资料得来的，没有对着真实文件核对；刷新令牌是否一次性、刷新后旧的访问令牌是否立即失效，也没有核实。Task 0 的 Step 0.3 与 Task 17 的 Step 5 第 6 条覆盖。影响 Task 4 与「待所有者确认的取舍」第 6 条（助理节点有自己的一份登录，刷新只靠它自己的健康检查）。
 2. **CLI 是否遵守 `HTTPS_PROXY`**：Claude Code 的推理请求与 MCP（HTTP 传输）请求、Codex 的请求是否都走代理。若有哪一条直连，在沙箱里会连不上（失败而不是泄漏）。影响 Task 3、6。
 3. **Codex 在 `exec` 下默认不开联网搜索**：若默认开启，要在本轮配置目录里写一份关掉它的 `config.toml`（键名随版本变化，要对着节点上的版本确认）。影响 Task 6。
 4. **CLI 在全新的配置目录里能否直接跑**：Claude 的 `-p` 模式与 `bypassPermissions`、Codex 的 `exec` 在没有 `.claude.json` / `config.toml` 时是否要求初始化。Task 0 的 Step 0.3 用的就是全新目录，会暴露这个问题。
-5. **常见发行版上 bubblewrap 的版本与用户命名空间设置**：`--clearenv` 需要 0.5+；有的发行版用 AppArmor 限制非特权用户命名空间。Task 0 覆盖。
-6. **Claude 还原转录后的完整续聊**（总览「步骤 0」0.3，Task 0 Step 0.4）。
-7. **网络存储上的工作目录**：bind 挂载网络文件系统、在其中写入，是否受用户命名空间的 uid 映射影响（`--unshare-all` 下 uid 不变，预期没问题）。Task 16 Step 5 在这样的节点上做一遍。
+5. **常见发行版上 bubblewrap 与用户命名空间的设置**：有的发行版用 AppArmor 限制非特权用户命名空间。Task 0 覆盖。
+6. **Claude 还原转录后的完整续聊**（总览「步骤 0」0.3，Task 0 Step 0.5）。
+7. **网络存储上的工作目录**：bind 挂载网络文件系统、在其中写入，是否受用户命名空间的 uid 映射影响（`--unshare-all` 下 uid 不变，预期没问题）；各机器上助理用户 uid 一致时，0700 的项目主目录在每台机器上都只有助理用户能进。Task 17 Step 5 在这样的机器上做一遍。
+8. **跨用户隔离**：普通员工的用户读不到助理用户的家目录、数据目录与项目主目录；`hidepid=2` 之后看不到助理用户进程的命令行（Task 0 Step 0.4、Task 17 Step 5）。
+9. **本机指纹的稳定性**：`/etc/machine-id` 在克隆出来的虚拟机镜像上可能相同。几台机器指纹相同时准入会把它们当成同一台（只会多拒，不会少拒）；部署时给克隆的机器重新生成 machine-id。
 
 ## 对设计文档的意见
 
-1. **「同一节点上的其他 AI 员工不能看到」只在节点上没有普通员工时成立。** 普通员工的 CLI 不在沙箱里、以免审批模式运行，与守护进程是同一个系统用户，能读守护进程数据目录下助理这一轮的临时目录、还原出来的转录与凭证副本。沙箱只挡住「助理看别人」。本计划用「助理池节点不承载普通员工」补上（Task 12），并写进待确认的取舍第 3 条；私有运行时上放什么由所有者自己承担。要在混用的节点上也成立，只能给助理独立的系统用户（设计里的备选方案）。
+1. **「同一节点上的其他 AI 员工不能看到」单靠沙箱不成立。** 普通员工的 CLI 不在沙箱里、以免审批模式运行，与同一个系统用户下的助理之间没有隔离，能读助理这一轮的临时目录、还原出来的转录与凭证副本；沙箱只挡住「助理看别人」。所有者 2026-11-12 决定：每台机器一个助理专用的系统用户、跑第二份守护进程（见「所有者已确认的取舍」）。这一行的依据因此改为「与普通员工之间靠单独的系统用户与另一份守护进程，助理之间靠沙箱」，并加上部署前提：运行普通员工的用户不能有 root 或免密 sudo。设计第三节「沙箱方案与独立系统用户方案二选一」也随之改为两者并用（Task 17 Step 3）。
 2. **「本助理的 CLI 配置目录」若长期保留，与原则 3 冲突**：两种 CLI 都在配置目录里留提示历史。本计划改为每轮新建（待确认第 2 条）。
 3. **「每人每日轮次预算，用完后非紧急事项攒到次日」依赖第 2 期的分级**，第 1 期没有「非紧急事项」可攒（待确认第 1 条）。
 4. **只读挂载原登录凭证不安全**：前置验证脚本与总览「步骤 0」的判定表默认只读挂原文件，沙箱里的 CLI 一旦尝试刷新就可能让整台节点掉登录。本计划改挂去掉刷新令牌的副本（「设计选择」第 5 条），Task 0 加了一步专门验证它。
@@ -5950,7 +6498,7 @@ git commit -m "个人助理：节点沙箱的部署要求、升级与回滚，�
 
 - 设计第三节逐句对应见「与设计文档的对照」；没有对应到任务的只有每日轮次预算（推迟，待确认）。总览接口表里 1E 的一行「轮次请求带 `sandbox: true` 与 `transcript` 下发、轮次结束回传」：请求体字段见 Task 13（`ChatRequest.to_body`），节点处理见 Task 6–7，回传见 Task 6（`upload`）与 Task 11（`PUT /api/runtime/assistant-transcripts/{transfer}`）。1F 要用的只有 `runtime.pick_pool_relay(session, provider)`（开通时选节点）；停用时转录不用单独处理：密钥销毁后已不可读，行随 `bots` 级联删除或由 `transcripts.purge` 回收。
 - 占位扫描：全文没有 TBD、「类似 Task N」之类的写法；每个代码步骤都给了完整代码或逐处的替换内容。
-- 名字与签名前后一致：节点侧 `sandbox.CAPABILITY`、`TurnLayout.new(turns_dir, socket_dir)`、`Launch(...)`、`bwrap_argv(launch, command)`、`bridge_command(python, bridge, command)`、`driver_command(binary)`、`sandbox_env(provider, base, extra)`、`cli_mounts(provider, which)`、`link_cli(layout, provider, which)`、`self_test(inputs, *, bwrap, system_name, runner)`、`egress.turn_policy(*, provider, api_url, env_vars, model_hosts, control_proxy, ai_proxy)`、`egress.Egress(policy).start(path)`、`turn_credentials.for_provider(provider, seat_env, home)`、`turn_credentials.write(directory, credential)`、`transcripts.pack(root, provider, session_id)`、`transcripts.unpack(root, provider, session_id, data)`、`AssistantTurns.run(identity, provider, data, frames)` / `sweep()` / `upload(transfer, data, status)` / `download(transfer)` / `capability(provider)`、`plan_turn(provider, data)`；平台侧 `Cipher.encrypt_bytes(data, aad)` / `decrypt_bytes(token, aad)`、`sealed.Blob`、`sealed.key_ready(session, bot_id)`、`transcripts.prepare(session, *, bot, node_id, info, session_key, backend, speaker_user_id)`、`transcripts.download(session, *, node_id, transfer)`、`transcripts.upload(session, *, node_id, transfer, status, data)`、`transcripts.purge(session, before)`、`transcripts.Plan.body()`、`sessions.renew(session, *, bot_id, session_key, backend, speaker_user_id)`、`runtime.unavailable_reason(relay, node)`、`runtime.turn_blocker(session, bot)`、`runtime.assignment_error(relay, node, owner_id)`、`runtime.pick_pool_relay(session, provider)`、`runtime.hosts_standard_bots(session, node_id)`、`runtime.node_sandboxed(node, provider=None)`、`assistant_runtime.paused(ctx, intake)`、`ChatRequest(sandbox=…, transcript=…)`、`transport.SANDBOX_EXTENSION`、`workspace_prompt.WORKSPACE_RULES`。请求体字段 `sandbox`、`transcript.transfer`（32 位十六进制）、`transcript.restore`；上传头 `X-Transcript-Status`（`ok` / `empty` / `too_large` / `unchanged`）在 Task 6、9、11 里一致。
+- 名字与签名前后一致：节点侧 `sandbox.CAPABILITY`、`TurnLayout.new(turns_dir, socket_dir)`、`Launch(...)`、`bwrap_argv(launch, command)`、`bridge_command(python, bridge, command)`、`driver_command(binary)`、`sandbox_env(provider, base, extra)`、`cli_mounts(provider, which)`、`link_cli(layout, provider, which)`、`private_dir(path, uid=None)`、`SelfTestInputs(…, private=…)`、`self_test(inputs, *, bwrap, system_name, runner)`（runner 收到 `env=`）、`daemon.machine_fingerprint(files)`、`Daemon.machine`、心跳字段 `machine` / `uid`、`egress.turn_policy(*, provider, api_url, env_vars, model_hosts, control_proxy, ai_proxy)`、`egress.Egress(policy).start(path)`、`turn_credentials.for_provider(provider, seat_env, home)`、`turn_credentials.write(directory, credential)`、`transcripts.pack(root, provider, session_id)`、`transcripts.unpack(root, provider, session_id, data)`、`AssistantTurns.run(identity, provider, data, frames)` / `sweep()` / `upload(transfer, data, status)` / `download(transfer)` / `capability(provider)`、`plan_turn(provider, data)`；平台侧 `Cipher.encrypt_bytes(data, aad)` / `decrypt_bytes(token, aad)`、`sealed.Blob`、`sealed.key_ready(session, bot_id)`、`transcripts.prepare(session, *, bot, node_id, info, session_key, backend, speaker_user_id)`、`transcripts.download(session, *, node_id, transfer)`、`transcripts.upload(session, *, node_id, transfer, status, data)`、`transcripts.purge(session, before)`、`transcripts.Plan.body()`、`sessions.renew(session, *, bot_id, session_key, backend, speaker_user_id)`、`runtime.unavailable_reason(relay, node)`、`runtime.turn_blocker(session, bot)`、`runtime.assignment_error(relay, node, owner_id)`、`runtime.pick_pool_relay(session, provider)`、`runtime.hosts_standard_bots(session, node_id)`、`runtime.is_pool_node(session, node_id)`、`runtime.standard_bind_error(session, relay)`、`runtime.pool_admission_error(session, relay, node)`、`runtime.POOL_NODE_MESSAGE` / `SHARED_USER_MESSAGE`、`RuntimeNode.machine_fingerprint` / `uid`、`HeartbeatIn.machine` / `uid`、安装参数 `--expect-uid=<数字>`、`runtime.node_sandboxed(node, provider=None)`、`assistant_runtime.paused(ctx, intake)`、`ChatRequest(sandbox=…, transcript=…)`、`transport.SANDBOX_EXTENSION`、`workspace_prompt.WORKSPACE_RULES`。请求体字段 `sandbox`、`transcript.transfer`（32 位十六进制）、`transcript.restore`；上传头 `X-Transcript-Status`（`ok` / `empty` / `too_large` / `unchanged`）在 Task 6、9、11 里一致。
 - 台账：`coreman/core/assistants/transcripts.py` 取整行 1 处（`upload` 的 `session.scalar(select(AssistantTranscript)…)`）、引用内容列 1 处（`defer(AssistantTranscript.blob_enc)`）、写 1 处（`prepare` 的 `insert`）；`download` 用 `session.get` 自动还原，不计入。
-- 计划里的实现代码与用例在仓库的一份临时副本上按最终状态落过一遍（不是逐个任务提交）。跑过的：`uv run ruff check .` 通过；本计划改动与新增的全部文件 `ruff format --check` 通过；`uv run mypy coreman` 通过（475 个源文件）；在一个新建的空库上 `alembic upgrade head`、`alembic check`（No new upgrade operations detected）、`alembic downgrade 0090` 再 `upgrade head` 通过，用完已删除该库；文中 19 个新用例文件加上改动过的 codec、台账、设置项用例共 128 条：127 条通过、1 条跳过（`test_real_sandbox_self_test`，开发机没有 bubblewrap）；副本上全部单元、集成与接口用例跑了一遍：4419 条通过、3 条跳过（基线 4312 通过、2 跳过，多出的跳过就是上面那条）。现有的助理用例在 Task 14 的 `into_assistant` 补上 `sandbox_ready` 之后全部照常通过。Go 驱动没有改动，`go build ./...` 通过，没有跑 `go test`。
-- 没有验证的：真机上的 bubblewrap 沙箱（开发机是 macOS，没有 bubblewrap，`test_real_sandbox_self_test` 跳过；真起沙箱的参数只在单元测试里逐项核对过）；CLI 在沙箱里的真实行为、凭证收窄后能否推理、`HTTPS_PROXY` 是否被遵守（见「仍需真机核实」）；各任务 Step 2 写的「预期失败信息」没有逐个跑过，各任务提交时的中间状态也没有逐个跑用例；Go 驱动没有改动，没有跑 `go test`。
+- 计划里的实现代码与用例在仓库的一份临时副本上按最终状态落过一遍（不是逐个任务提交）。跑过的：`uv run ruff check .` 通过；本计划改动与新增的全部文件 `ruff format --check` 通过；`uv run mypy coreman` 通过（475 个源文件）；在一个新建的空库上 `alembic upgrade head`、`alembic check`（No new upgrade operations detected）、`alembic downgrade 0090` 再 `upgrade head` 通过，用完已删除该库；文中 19 个新用例文件加上改动过的 codec、台账、设置项与安装脚本用例共 167 条：166 条通过、1 条跳过（`test_real_sandbox_self_test`，开发机没有 bubblewrap）；副本上全部单元、集成与接口用例跑了一遍：4436 条通过、3 条跳过（基线 4312 通过、2 跳过，多出的跳过就是上面那条）。现有的助理用例在 Task 14 的 `into_assistant` 补上 `sandbox_ready` 之后全部照常通过。Go 驱动没有改动，`go build ./...` 通过，没有跑 `go test`。
+- 没有验证的：真机上的 bubblewrap 沙箱与跨用户隔离（两个系统用户、`hidepid`、免密 sudo 都只能在真机上核对；开发机是 macOS，没有 bubblewrap，`test_real_sandbox_self_test` 跳过；真起沙箱的参数只在单元测试里逐项核对过）；CLI 在沙箱里的真实行为、凭证收窄后能否推理、`HTTPS_PROXY` 是否被遵守（见「仍需真机核实」）；各任务 Step 2 写的「预期失败信息」没有逐个跑过，各任务提交时的中间状态也没有逐个跑用例；Go 驱动没有改动，没有跑 `go test`。
