@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from coreman.core.db.models import ModelCatalog
 from coreman.core.prompting.defaults import PROMPT_DEFAULTS_BY_KEY
@@ -37,6 +37,10 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "busy_confirm_minutes": 10,
     # 每个运行时节点同时跑的个人助理轮次上限；超出的排队（节点领取时执行）。
     "assistant_node_concurrency": 2,
+    # 谁能开通个人助理：all 全员；listed 只有名单里的人与部门（含下级部门）。
+    "assistant_eligibility": {"mode": "all", "department_ids": [], "user_ids": []},
+    # 开通个人助理时可选的 AI，按顺序挑第一个助理池里有可用节点的。
+    "assistant_backends": ["claude", "codex"],
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
@@ -52,6 +56,23 @@ PUBLIC_DEFAULT_KEYS = (
     "default_effort_level",
     "wecom_qr_provisioning_enabled",
 )
+
+
+_UUID = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$",
+        to_lower=True,
+    ),
+]
+
+
+class AssistantEligibility(BaseModel):
+    """个人助理的开通范围。编号存成字符串（settings 表是 JSONB）。"""
+
+    mode: Literal["all", "listed"]
+    department_ids: list[_UUID] = Field(default_factory=list, max_length=500)
+    user_ids: list[_UUID] = Field(default_factory=list, max_length=5000)
 
 
 def platform_default_model(catalog: Sequence[ModelCatalog]) -> str | None:
@@ -83,6 +104,10 @@ class SettingsPatch(BaseModel):
     group_observe_bot_streak_limit: int | None = Field(default=None, ge=1, le=100)
     busy_confirm_minutes: int | None = Field(default=None, ge=0, le=1440)
     assistant_node_concurrency: int | None = Field(default=None, ge=1, le=32)
+    assistant_eligibility: AssistantEligibility | None = None
+    assistant_backends: list[Literal["claude", "codex"]] | None = Field(
+        default=None, min_length=1, max_length=2
+    )
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
     # 组织背景出厂就是空的，存成空串即「不加这一段」，所以不设 min_length。
