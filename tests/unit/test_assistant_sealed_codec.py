@@ -11,6 +11,7 @@ from coreman.core.assistants import sealed
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantTranscript,
     ChatLog,
     CloudPendingApproval,
     FeishuDelivery,
@@ -43,11 +44,13 @@ def test_every_content_column_is_registered() -> None:
         InteractionState,
         AssistantApproval,
         CloudPendingApproval,
+        AssistantTranscript,
     }
     assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
     assert set(sealed.COLUMNS[InteractionState]) == {"state"}
     assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}
     assert set(sealed.COLUMNS[CloudPendingApproval]) == {"reason"}
+    assert set(sealed.COLUMNS[AssistantTranscript]) == {"blob_enc"}
     assert set(sealed.COLUMNS[Task]) == {"payload", "result", "error_message"}
     assert set(sealed.COLUMNS[FeishuSentMessage]) == {"text"}
     assert set(sealed.COLUMNS[TaskStream]) == {
@@ -169,3 +172,34 @@ def test_whole_value_and_text() -> None:
     assert sealed.open_text(CIPHER, AAD, token) == SECRET
     assert sealed.open_text(CIPHER, AAD, "明文") == "明文"
     assert sealed.seal_text(CIPHER, AAD, "") == "" and sealed.seal_text(CIPHER, AAD, None) is None
+
+
+def test_blob_round_trip_generations_and_tampering() -> None:
+    data = b"\x1f\x8b" + SECRET.encode() + bytes(range(256))
+    token = sealed.seal_blob(CIPHER, AAD, data)
+    assert token is not None and token.startswith(b"enc:v2:d1:")
+    assert SECRET.encode() not in token
+    assert sealed.is_blob_token(token) and not sealed.is_blob_token(data)
+    assert sealed.open_blob(CIPHER, AAD, token) == data
+    # 不是密文的原样返回；空值不加密。
+    assert sealed.open_blob(CIPHER, AAD, b"plain") == b"plain"
+    assert sealed.seal_blob(CIPHER, AAD, b"") == b"" and sealed.seal_blob(CIPHER, AAD, None) is None
+    with pytest.raises(sealed.ContentLocked):
+        sealed.open_blob(Cipher(b"\x0b" * 32, key_id="d2"), AAD, token)
+    with pytest.raises(DecryptError):
+        sealed.open_blob(CIPHER, "assistant_transcripts.blob_enc:bot-b", token)
+    tampered = token[:-1] + bytes([token[-1] ^ 1])
+    with pytest.raises(DecryptError):
+        sealed.open_blob(CIPHER, AAD, tampered)
+
+
+def test_master_cipher_bytes_use_the_key_id() -> None:
+    master = Cipher(b"\x01" * 32, key_id="k9", previous={"k1": b"\x02" * 32})
+    token = master.encrypt_bytes(b"payload", "t.c:x")
+    assert token.startswith(b"enc:v2:k9:")
+    assert master.decrypt_bytes(token, "t.c:x") == b"payload"
+    old = Cipher(b"\x02" * 32, key_id="k1").encrypt_bytes(b"old", "t.c:x")
+    assert master.decrypt_bytes(old, "t.c:x") == b"old"
+    for bad in (b"enc:v1:abc", b"enc:v2:nokid", b"enc:v2:k9:short"):
+        with pytest.raises(DecryptError):
+            master.decrypt_bytes(bad, "t.c:x")

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, Uuid, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text, Uuid, text
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,6 +35,10 @@ class RuntimeNode(TimestampMixin, Base):
     draining: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
+    # 节点心跳上报的本机指纹（机器编号的哈希）与运行守护进程的系统用户 uid：同一台机器上的
+    # 几个节点据此区分，个人助理的助理池准入要求助理节点与普通员工的节点用不同的系统用户。
+    machine_fingerprint: Mapped[str | None] = mapped_column(Text)
+    uid: Mapped[int | None] = mapped_column(BigInteger)
     service_status: Mapped[str] = mapped_column(Text, server_default="unknown")
     # 节点上报的协议版本；旧节点不上报时为空。
     protocol_version: Mapped[int | None] = mapped_column(Integer)
@@ -84,6 +88,8 @@ class RuntimeCall(Base):
     deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     consumer_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
+    # 个人助理在沙箱里跑的一轮：领取时按节点的助理并发上限另算，排在普通调用之后。
+    sandbox: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
 
 class RuntimeChunk(Base):

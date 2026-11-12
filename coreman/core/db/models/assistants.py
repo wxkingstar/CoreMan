@@ -1,4 +1,4 @@
-"""个人助理的数据密钥、审批流水与「处理中」标记。"""
+"""个人助理的数据密钥、审批流水、「处理中」标记与节点转录。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
@@ -122,3 +123,29 @@ class AssistantMark(Base):
     chat_id: Mapped[str] = mapped_column(Text)
     reaction_id: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class AssistantTranscript(Base):
+    """节点上一个会话的 CLI 转录：每轮结束由节点上传，下一轮续聊前下发，节点上不留。
+
+    `blob_enc` 登记在 `sealed.COLUMNS`（二进制列）：库里是用所有者数据密钥加密的 tar.gz，经会话
+    取出的行上是明文字节。`pending_transfer` 是派给节点的那一轮的交接编号：派出时写上，节点上传
+    时凭它对上号并清空；下一轮派出时它还在，说明上一轮的转录没传回来，这个会话不再续。
+    """
+
+    __tablename__ = "assistant_transcripts"
+    __table_args__ = (
+        PrimaryKeyConstraint("bot_id", "session_id"),
+        UniqueConstraint("pending_transfer", name="uq_assistant_transcripts_pending_transfer"),
+        Index("assistant_transcripts_updated_idx", "updated_at"),
+    )
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    blob_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
+    size: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    pending_transfer: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    pending_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("runtime_nodes.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))

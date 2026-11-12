@@ -27,6 +27,7 @@ from coreman.core.db.models.assistants import (
     AssistantApproval,
     AssistantKey,
     AssistantMark,
+    AssistantTranscript,
 )
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
@@ -287,4 +288,5 @@ __all__ += [
     "AssistantApproval",
     "AssistantKey",
     "AssistantMark",
+    "AssistantTranscript",
 ]

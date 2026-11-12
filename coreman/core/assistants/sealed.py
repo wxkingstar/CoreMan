@@ -8,6 +8,7 @@
   顶层的其它键合并，顶层优先——所以不解密也能对封装增删明文键。
 - 整值列：`{"_sealed": <密文>}`。
 - 文本列：密文串本身。
+- 二进制列：`encrypt_bytes` 的输出（`enc:v2:d<代数>:` 加原始密文字节），不套 base64。
 - `{"_sealed": ""}` 是墓碑：密钥销毁之后写入，内容已丢弃。
 
 内容本身可能长得像封装（任务结果恰好是 `{"_sealed": …}`、正文以 `enc:v2:` 开头）。所以：
@@ -44,6 +45,7 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantTranscript,
     Bot,
     ChatLog,
     CloudPendingApproval,
@@ -100,7 +102,12 @@ class Text:
     blank: str | None = None
 
 
-Kind = JsonSpec | Whole | Text
+@dataclass(frozen=True)
+class Blob:
+    """二进制列（bytea）：整段加密，读不出来时给 None。"""
+
+
+Kind = JsonSpec | Whole | Text | Blob
 
 # tasks.payload 里被 SQL 直接读取的键：认领语句、排队判断、媒体补偿、技能安装、文档链接。
 TASK_PLAIN = frozenset(
@@ -177,6 +184,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     AssistantApproval: {"args_enc": Whole(), "reason_enc": Text(), "result_enc": Whole()},
     # 云服务审批的拒绝理由：审批人写给这位所有者的话。
     CloudPendingApproval: {"reason": Text()},
+    # 节点上 CLI 的转录：一轮结束后上传，续聊前下发。
+    AssistantTranscript: {"blob_enc": Blob()},
 }
 
 
@@ -285,6 +294,28 @@ def open_whole(cipher: Cipher, aad_: str, value: Any) -> Any:
     if not is_sealed(value):
         return value
     return json.loads(_decrypt(cipher, value[SEALED], aad_))
+
+
+_DATA_KID_BYTES = re.compile(rb"^enc:v2:d[0-9]+:")
+
+
+def is_blob_token(value: object) -> bool:
+    """是不是数据密钥写出的二进制密文。"""
+    return isinstance(value, bytes) and _DATA_KID_BYTES.match(value) is not None
+
+
+def seal_blob(cipher: Cipher, aad_: str, value: bytes | None) -> bytes | None:
+    return cipher.encrypt_bytes(value, aad_) if value else value
+
+
+def open_blob(cipher: Cipher, aad_: str, value: Any) -> Any:
+    """同 `_decrypt`：另一代数据密钥加密的按已锁定处理，同一代解不开照抛。"""
+    if not is_blob_token(value):
+        return value
+    kid = value[len(PREFIX_V2) :].split(b":", 1)[0].decode("ascii")
+    if kid != cipher.key_id:
+        raise ContentLocked("内容由已作废的旧一代数据密钥加密")
+    return cipher.decrypt_bytes(value, aad_)
 
 
 def seal_text(cipher: Cipher, aad_: str, value: str | None) -> str | None:
@@ -425,6 +456,17 @@ async def routing_context(
     return _keep(REPLY_CONTEXT, reply_context)
 
 
+async def key_ready(session: AsyncSession, bot_id: uuid.UUID) -> bool:
+    """这条助理记录的内容现在解得开：数据密钥在、没销毁、主密钥解得开包裹。不签发新密钥。
+
+    普通机器人返回 False。只看密钥，不看某一段具体的密文。
+    """
+    try:
+        return await _cipher(session, bot_id, create_key=False) is not None
+    except (ContentLocked, DecryptError):
+        return False
+
+
 async def _cipher(session: AsyncSession, bot_id: uuid.UUID, *, create_key: bool) -> Cipher | None:
     """这条记录的数据密钥；普通机器人返回 None。取不到时抛 ContentLocked。"""
     owner = await owner_of(session, bot_id)
@@ -468,6 +510,8 @@ def _seal(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:
         return seal_dict(cipher, aad_, value, kind)
     if isinstance(kind, Whole):
         return seal_whole(cipher, aad_, value)
+    if isinstance(kind, Blob):
+        return seal_blob(cipher, aad_, value)
     return seal_text(cipher, aad_, value)
 
 
@@ -476,12 +520,16 @@ def _open(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:
         return open_dict(cipher, aad_, value, kind)
     if isinstance(kind, Whole):
         return open_whole(cipher, aad_, value)
+    if isinstance(kind, Blob):
+        return open_blob(cipher, aad_, value)
     return open_text(cipher, aad_, value)
 
 
 def _looks_sealed(kind: Kind, value: Any) -> bool:
     if isinstance(kind, Text):
         return is_token(value)
+    if isinstance(kind, Blob):
+        return is_blob_token(value)
     return is_sealed(value)
 
 
@@ -501,6 +549,8 @@ def _nothing(kind: Kind, value: Any) -> bool:
         return True
     if isinstance(kind, JsonSpec):
         return not isinstance(value, dict)
+    if isinstance(kind, Blob):
+        return isinstance(value, bytes) and not value
     return value in ("", [], {})
 
 
@@ -508,6 +558,8 @@ def _blank(kind: Kind, value: Any) -> Any:
     """读不出来时给调用方的值：字典只剩明文键，其余为该列的空值。"""
     if isinstance(kind, JsonSpec):
         return _keep(kind, value) if isinstance(value, dict) else {}
+    if isinstance(kind, Blob):
+        return None
     return copy.copy(kind.blank)
 
 
@@ -517,6 +569,8 @@ def _dropped(kind: Kind, value: Any) -> Any:
         return {**_keep(kind, value), SEALED: ""}
     if isinstance(kind, Whole):
         return {SEALED: ""}
+    if isinstance(kind, Blob):
+        return None
     return kind.blank
 
 
