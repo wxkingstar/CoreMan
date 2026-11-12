@@ -225,7 +225,7 @@ def _ro_roots(launch: Launch) -> list[Path]:
 
 
 def _check_mounts(launch: Launch) -> None:
-    """只读挂载根等于或包含轮次目录、socket 目录、工作目录时拒绝（会连带暴露别的轮次的凭证副本）。"""
+    """只读挂载根等于或包含轮次目录、socket 目录、工作目录时拒绝（会暴露别轮的凭证副本）。"""
     layout = launch.layout
     guarded = [p.resolve() for p in (layout.root.parent, layout.run.parent, Path(launch.workdir))]
     for root in _ro_roots(launch):
