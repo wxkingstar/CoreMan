@@ -28,7 +28,9 @@ from coreman.core.feishu_personal import service as personal
 from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import seed_standard
 from tests.integration.lifecycle_helpers import (
+    APP_ID,
     CIPHER,
+    TENANT,
     FakeMessenger,
     active_assistant,
     flow_of,
@@ -547,3 +549,95 @@ async def test_concurrent_requests_open_one_flow(
         .where(AssistantLifecycle.owner_id == owner.id, AssistantLifecycle.action == "deprovision")
     )
     assert count == 1
+
+
+async def _until(
+    factory: Any, messenger: FakeMessenger, session: AsyncSession, owner_id: Any, step: str
+) -> None:
+    for _ in range(6):
+        if await _step(session, owner_id) == step:
+            return
+        await tick(factory, messenger, later=1)
+    assert await _step(session, owner_id) == step
+
+
+def _owner_scope(bot: Bot, owner_id: Any, task: Task) -> Any:
+    from coreman.core.feishu_personal.policy import Scope
+
+    return Scope(task, bot, owner_id, TENANT, APP_ID, "ou_owner", "owner_pid", "oc_private")
+
+
+async def test_no_new_authorisation_once_the_grant_was_revoked(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """撤销授权之后、销毁之前：旧的授权卡片、续接查询都发不起、也完不成新的授权。"""
+    _, auth = install(monkeypatch)
+    bot, owner, task = await active_assistant(db_session)
+    await deprovisioning.request(db_session, bot, trigger="owner", actor_id=owner.id)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await _until(factory, messenger, db_session, owner.id, "destroy")
+    bot = await db_session.get(Bot, bot.id, populate_existing=True)
+    assert bot is not None
+    scope = _owner_scope(bot, owner.id, task)
+    for start in (
+        lambda: personal.begin_in_flow(db_session, CIPHER, scope, "all"),
+        lambda: personal.authorization_status(db_session, CIPHER, scope),
+    ):
+        with pytest.raises(personal.PersonalError) as caught:
+            await start()
+        assert caught.value.code == "assistant_inactive"
+    await db_session.rollback()
+    assert auth.issued == 0
+
+
+async def test_a_pending_grant_left_at_destroy_is_cleared(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """撤销之后又冒出一个进行中的授权（比如撤销前已发出的链接）：销毁那一步再撤一次，什么都不留。"""
+    _, auth = install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    await deprovisioning.request(db_session, bot, trigger="owner", actor_id=owner.id)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await _until(factory, messenger, db_session, owner.id, "destroy")
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, owner.id), populate_existing=True)
+    assert grant is not None
+    grant.status, grant.pending_enc = "pending", "enc:pending"
+    grant.pending_expires_at = utcnow() + timedelta(minutes=10)
+    await db_session.commit()
+    await _until(factory, messenger, db_session, owner.id, "done")
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, owner.id), populate_existing=True)
+    assert grant is not None and grant.status == "revoked"
+    assert grant.pending_enc is None and grant.token_enc is None
+    assert grant.pending_expires_at is None
+
+
+async def test_stopping_an_old_record_leaves_the_current_one_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """管理员停用一条早已停用完的旧记录：本人现在那条记录的宽限期不受影响。"""
+    from tests.integration.assistant_helpers import into_assistant
+
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    old = await seed_standard(db_session)
+    old.enabled = False
+    await into_assistant(db_session, old, owner)
+    old.assistant_state, old.bot_key = "deprovisioned", "assistant-old-x1"
+    await db_session.commit()
+    flow = await deprovisioning.request(db_session, bot, trigger="member_left", actor_id=None)
+    await db_session.commit()
+    assert flow is not None and flow.step == "grace"
+    assert (await deprovisioning.request(db_session, old, trigger="admin", actor_id=None)) is None
+    await db_session.commit()
+    current = await flow_of(db_session, owner.id)
+    assert current is not None and current.id == flow.id
+    assert current.step == "grace" and current.trigger == "member_left"
+    # 另一条还没停用完的旧记录（状态为空）也不去动本人正在停用的那条流程。
+    old.assistant_state = None
+    await db_session.commit()
+    assert (await deprovisioning.request(db_session, old, trigger="admin", actor_id=None)) is None
+    await db_session.commit()
+    current = await flow_of(db_session, owner.id)
+    assert current is not None and current.step == "grace" and current.trigger == "member_left"

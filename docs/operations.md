@@ -125,7 +125,7 @@ API 升级先重载 Caddy 的指标隔离规则，再迁移并逐台健康升级
 
   ```sql
   UPDATE bots SET enabled = false
-   WHERE kind = 'assistant' AND assistant_state <> 'active';
+   WHERE kind = 'assistant' AND assistant_state IS DISTINCT FROM 'active';
   SELECT count(*) FROM assistant_lifecycles WHERE finished_at IS NULL;
   SELECT count(*) FROM assistant_retired_dirs;
   ```

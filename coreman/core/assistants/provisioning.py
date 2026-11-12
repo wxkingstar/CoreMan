@@ -22,7 +22,7 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,7 @@ from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.bots.workspace_transfer import instruction_content
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
+    AssistantKey,
     AssistantLifecycle,
     Bot,
     FeishuPersonalGrant,
@@ -59,6 +60,8 @@ QUIET = {"ineligible": timedelta(hours=24), "failed": timedelta(minutes=10)}
 # 授权链接最多发这么多次（每次十来分钟有效）还没完成，就放弃这次开通。
 GRANT_ROUNDS = 3
 GRANT_LEVEL = "all"
+# 数据密钥销毁之后多久才能再开通：各进程的密钥缓存都过期，再留一点余量。
+KEY_COOLING = timedelta(seconds=keys.KEY_TTL_SECONDS + 15)
 GRANT_POLL = timedelta(seconds=5)
 NODE_SECONDS = 120
 TOASTS = ("provision_started", "provision_expired")
@@ -304,11 +307,16 @@ async def _pick(session: AsyncSession) -> tuple[RelayServer, RuntimeNode]:
     raise StepRetry("no_pool_runtime")
 
 
-async def _free_bot_key(session: AsyncSession, key: str) -> None:
-    """以前停用的记录占着同一个 bot_key：给它换一个不会再用到的名字。还在用的记录不动。"""
+async def _free_bot_key(session: AsyncSession, key: str, owner_id: uuid.UUID) -> None:
+    """本人以前停用的助理记录占着同一个 bot_key：给它换一个不会再用到的名字。还在用的记录不动。
+
+    占着这个名字的是别人的记录或普通员工：一律不碰，这次开通失败。
+    """
     old = await session.scalar(select(Bot).where(Bot.bot_key == key).with_for_update())
     if old is None:
         return
+    if old.kind != "assistant" or old.owner_id != owner_id:
+        raise StepFailed("bot_key_taken")
     if old.enabled:
         raise StepFailed("already_provisioned")
     old.bot_key = f"{key}-x{old.id.hex[:8]}"
@@ -338,6 +346,16 @@ async def step_create(
     )
     if taken is not None:
         raise StepFailed("already_provisioned")
+    # 刚销毁过数据密钥：别的进程（网关等）可能还缓存着那一把，会用它封存新记录收到的内容，
+    # 新一代密钥就再也解不开。等所有缓存都过期再建记录。
+    cooling = await session.scalar(
+        select(AssistantKey.user_id).where(
+            AssistantKey.user_id == owner.id,
+            AssistantKey.destroyed_at > func.now() - KEY_COOLING,
+        )
+    )
+    if cooling is not None:
+        raise StepRetry("key_cooling")
     relay, node = await _pick(session)
     model = default_model(relay.model_provider, await load_catalog(session))
     if model is None:
@@ -361,7 +379,7 @@ async def step_create(
         credentials_enc=credentials,
     )
     bot.id = bot_id
-    await _free_bot_key(session, bot.bot_key)
+    await _free_bot_key(session, bot.bot_key, owner.id)
     try:
         await reserve_workspace(session, relay.id, directory, bot_id=bot_id)
     except ApiError:

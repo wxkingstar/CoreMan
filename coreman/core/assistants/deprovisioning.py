@@ -78,15 +78,19 @@ async def request(
         )
         row = await lifecycle.live(session, bot.owner_id)
     await session.refresh(bot, with_for_update=True)
+    if bot.assistant_state == "deprovisioned":
+        # 先看这条记录本身：早已停用完的旧记录不去碰本人别的流程。
+        return None
     if row is not None and row.action == "deprovision":
+        if row.bot_id != bot.id:
+            # 进行中的停用属于本人的另一条记录：那条流程不由这次请求改动。
+            return None
         if row.step == "grace" and trigger != "member_left":
             # 宽限期里本人或管理员明确要停用：不再等账号恢复，现在就往下走。
             row.trigger, row.actor_id, row.deadline = trigger, actor_id, None
             advance(row, "drain")
             await session.flush()
         return row
-    if bot.assistant_state == "deprovisioned":
-        return None
     if row is not None:
         finish(row, "cancelled", "deprovision_requested")
         await session.flush()
@@ -200,9 +204,11 @@ def retired_key(bot: Bot) -> str:
 async def step_destroy(
     session: AsyncSession, cipher: Cipher, row: AssistantLifecycle, messenger: lifecycle.Messenger
 ) -> list[str]:
-    """最后一步，一个事务：再撤一次期间冒出来的待批单，销毁数据密钥，登记删目录，停用记录。"""
+    """最后一步，一个事务：再撤一次期间冒出来的待批单与授权，销毁数据密钥，登记删目录，停用记录。"""
     bot = await _bot(session, row)
     await approvals.withdraw_pending(session, bot.id, REASON)
+    # 撤销之后旧的授权卡片可能又发起了一次授权：在同一个事务里再清一次（幂等）。
+    await personal.revoke_grant(session, bot.id, row.owner_id, cipher)
     await keys.destroy_key(session, row.owner_id)
     if bot.relay_server_id is not None:
         await retired_dirs.retire(

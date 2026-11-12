@@ -432,3 +432,53 @@ async def test_two_clicks_at_once_advance_the_flow_once(
     assert advanced == ["create"]
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.step == "create" and flow.offer_hash is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_a_standard_bot_holding_the_key_is_never_touched(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """普通员工的 bot_key 恰好是助理要用的名字：不改它的名字，开通以单独的原因失败。"""
+    from tests.integration.assistant_helpers import seed_standard
+
+    install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    other = await seed_standard(db_session)
+    key = f"assistant-{owner.id.hex[:16]}"
+    other.bot_key, other.enabled = key, enabled
+    await db_session.commit()
+    await tick(make_session_factory(db_engine), messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "failed" and flow.error_code == "bot_key_taken"
+    other = await db_session.get(Bot, other.id, populate_existing=True)
+    assert other is not None and other.bot_key == key and other.enabled is enabled
+    assert other.kind == "standard"
+    assert await db_session.scalar(select(func.count()).select_from(Bot)) == 1
+
+
+async def test_a_key_destroyed_moments_ago_waits_for_every_cache_to_expire(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """刚停用就重新开通：别的进程可能还缓存着刚销毁的那把密钥，等它们都过期再建记录。"""
+    install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    await keys.ensure_key(db_session, CIPHER, owner.id)
+    await keys.destroy_key(db_session, owner.id)
+    await db_session.commit()
+    owner_id = owner.id
+    factory = make_session_factory(db_engine)
+    await tick(factory, messenger)
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "create"
+    assert flow.error_code == "key_cooling"
+    assert await db_session.scalar(select(func.count()).select_from(Bot)) == 0
+    await db_session.execute(
+        update(AssistantKey)
+        .where(AssistantKey.user_id == owner_id)
+        .values(destroyed_at=func.now() - text("interval '2 minutes'"))
+    )
+    await db_session.commit()
+    await tick(factory, messenger, later=600)
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.step == "init_workspace"
