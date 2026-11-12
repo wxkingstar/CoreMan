@@ -561,3 +561,49 @@ async def test_a_failing_assistant_stop_still_terminates_drivers(node, monkeypat
     node.drivers["claude"] = FakeDriver(events)  # type: ignore[assignment]
     await asyncio.wait_for(node.stop_work(), 2)
     assert events == ["terminate"]
+
+
+# ---- 在跑的轮次登记工作目录：删目录前靠它判断「还在用」 ----------------------------------
+
+
+async def test_a_turn_registers_its_workdir_before_launch_and_clears_it_on_every_exit(
+    tmp_path, monkeypatch
+):
+    from runtime_daemon import turn_credentials
+    from tests.unit.test_assistant_turns import Frames, Platform, fake_sandbox, make, request
+
+    turns = make(tmp_path, Platform())
+    fake_sandbox(turns, monkeypatch)
+    workdir = (tmp_path / "projects" / "assistant-1").resolve()
+    seen: list = []
+    fake_launch = turns._launch
+
+    def launch(*args):
+        seen.append(list(turns.workdirs.values()))
+        return fake_launch(*args)
+
+    monkeypatch.setattr(turns, "_launch", launch)
+    # 正常结束。
+    await turns.run("call-1", "claude", request(tmp_path), Frames())
+    assert seen == [[workdir]] and turns.workdirs == {}
+
+    # 拒绝（凭证拿不到）。
+    def unavailable(*_a):
+        seen.append(list(turns.workdirs.values()))
+        raise turn_credentials.Unavailable("credential_unavailable")
+
+    original = turn_credentials.for_provider
+    monkeypatch.setattr(turn_credentials, "for_provider", unavailable)
+    await turns.run("call-2", "claude", request(tmp_path), Frames())
+    assert seen[-1] == [workdir] and turns.workdirs == {}
+    monkeypatch.setattr(turn_credentials, "for_provider", original)
+
+    # 启动出错。
+    def broken(*_a):
+        seen.append(list(turns.workdirs.values()))
+        raise RuntimeError("launch failed")
+
+    monkeypatch.setattr(turns, "_launch", broken)
+    with pytest.raises(RuntimeError):
+        await turns.run("call-3", "claude", request(tmp_path), Frames())
+    assert seen[-1] == [workdir] and turns.workdirs == {}

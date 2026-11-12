@@ -360,12 +360,10 @@ class AssistantTurns:
 
         回收站不是本用户的真实目录就不碰；每一项单独兜底。
         """
-        trash = Path(self.daemon.config["workspace_root"]) / workspace.TRASH_DIR
+        root = Path(self.daemon.config["workspace_root"])
         try:
-            info = os.lstat(trash)
+            trash = workspace.private_dir(root, workspace.TRASH_DIR, create=False)
         except OSError:
-            return
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
             return
         with os.scandir(trash) as entries:
             found = list(entries)
@@ -484,8 +482,11 @@ class AssistantTurns:
         await frames.finish()
 
     def in_use(self, path: Path) -> bool:
-        """有没有在跑的轮次用着这个目录（或它下面的目录）。可以在线程里调用：先整体复制再看。"""
-        return any(w == path or w.is_relative_to(path) for w in self.workdirs.copy().values())
+        """有没有在跑的轮次用着这个目录、它下面的目录或它的上级目录。可以在线程里调用：先整体复制再看。"""
+        return any(
+            w == path or w.is_relative_to(path) or path.is_relative_to(w)
+            for w in self.workdirs.copy().values()
+        )
 
     def _admission(self, provider: str) -> str | None:
         if provider not in sandbox.PROVIDERS or not self.capability(provider):

@@ -56,7 +56,7 @@ from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
 from runtime_daemon.sandbox import remove_tree
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
-from runtime_daemon.workspace import reserved
+from runtime_daemon.workspace import TRASH_DIR, reserved
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
@@ -899,6 +899,8 @@ class Daemon:
     def prepare(self) -> None:
         self.lock_file = (self.data_dir / "daemon.lock").open("a")
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # 在任何平台调用之前：令牌被吊销、每次启动都在登记处退出的节点也要清掉助理的残留。
+        self.start_leftover_cleanup()
         if self.config.get("release"):
             # Releases switched by an installer that predates the command still get one.
             try:
@@ -1633,10 +1635,15 @@ class Daemon:
             LOG.warning("Control poll failed: %s", reason)
         self.poll_error = reason
 
+    def start_leftover_cleanup(self) -> None:
+        """普通实例每次启动清一次助理的残留（prepare 拿到数据目录锁后立即调用），在后台线程里做。"""
+        if not self.assistant_only:
+            # 从助理专用实例改回普通实例的节点：本轮目录里可能还有没传上去的明文转录，回收站里
+            # 可能还有没删完的助理工作目录。
+            threading.Thread(target=self.clear_assistant_leftovers, daemon=True).start()
+
     def start_assistant(self) -> None:
         if not self.assistant_only:
-            # 从助理专用实例改回普通实例的节点：本轮目录里可能还有没传上去的明文转录，删一次。
-            threading.Thread(target=self.clear_assistant_leftovers, daemon=True).start()
             return
         try:
             self.assistant.start()
@@ -1644,7 +1651,8 @@ class Daemon:
             LOG.warning("Assistant sandbox start failed: %s", type(exc).__name__)
 
     def clear_assistant_leftovers(self) -> None:
-        """普通实例启动时删掉助理的本轮目录（不跟随链接）；在线程里跑，失败只记一笔。"""
+        """普通实例启动时删掉助理的本轮目录、清空回收站（都不跟随链接；回收站位置是链接时只删链接）。
+        在线程里跑，失败只记一笔。"""
         try:
             turns = self.assistant.turns_dir
             if turns.is_symlink():
@@ -1654,6 +1662,16 @@ class Daemon:
                 remove_tree(turns)
         except Exception as exc:  # noqa: BLE001 清不掉不能影响普通轮次
             LOG.warning("Assistant leftovers cleanup failed: %s", type(exc).__name__)
+        try:
+            root = Path(str(self.config.get("workspace_root") or ""))
+            if root.is_absolute():
+                trash = root / TRASH_DIR
+                if trash.is_symlink():
+                    trash.unlink()
+                else:
+                    self.assistant.purge_trash()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Assistant trash cleanup failed: %s", type(exc).__name__)
 
     async def stop_assistant(self) -> None:
         try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -65,7 +66,8 @@ SANDBOXED = {"sandbox": True, "transcript": {"transfer": "0" * 32, "restore": Fa
 
 
 @pytest.mark.parametrize(
-    "directory", [".coreman-health", ".coreman-health/sub", ".coreman-trash/x"]
+    "directory",
+    [".coreman-health", ".coreman-health/sub", ".coreman-trash/x", ".coreman-owners"],
 )
 @pytest.mark.parametrize(
     ("path", "body"),
@@ -158,7 +160,7 @@ def test_an_ordinary_daemon_clears_assistant_turn_leftovers_once(node, tmp_path)
     outside.mkdir()
     (outside / "keep").write_text("x")
     (turns / "abc" / "link").symlink_to(outside)
-    node.start_assistant()
+    node.start_leftover_cleanup()
     wait_until(lambda: not os.path.lexists(turns))
     assert (outside / "keep").read_text() == "x"
 
@@ -170,7 +172,7 @@ def test_an_ordinary_daemon_unlinks_a_linked_turns_directory(node, tmp_path):
     turns = node.assistant.turns_dir
     turns.parent.mkdir(parents=True, exist_ok=True)
     turns.symlink_to(outside)
-    node.start_assistant()
+    node.start_leftover_cleanup()
     wait_until(lambda: not os.path.lexists(turns))
     assert (outside / "keep").read_text() == "x"
 
@@ -193,3 +195,70 @@ def test_an_assistant_only_daemon_does_not_clear_its_own_turns(node, monkeypatch
     node.start_assistant()
     time.sleep(0.2)
     assert started == [True] and (node.assistant.turns_dir / "live").is_dir()
+
+
+def test_an_ordinary_daemon_empties_the_trash_without_following_links(node, tmp_path):
+    root = Path(node.config["workspace_root"])
+    trash = workspace.trash_dir(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    (trash / "leftover" / "deep").mkdir(parents=True)
+    (trash / "leftover" / "deep" / "f").write_text("plaintext")
+    (trash / "leftover" / "link").symlink_to(outside)
+    node.clear_assistant_leftovers()
+    assert list(trash.iterdir()) == []
+    assert (outside / "keep").read_text() == "x"
+
+
+def test_an_ordinary_daemon_only_unlinks_a_linked_trash(node, tmp_path):
+    root = Path(node.config["workspace_root"])
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "precious").mkdir(parents=True)
+    (root / workspace.TRASH_DIR).symlink_to(elsewhere)
+    node.clear_assistant_leftovers()
+    assert not os.path.lexists(root / workspace.TRASH_DIR)
+    assert (elsewhere / "precious").is_dir()
+
+
+def test_an_ordinary_start_assistant_does_not_clean_a_second_time(node, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(node, "clear_assistant_leftovers", lambda: calls.append(True))
+    node.start_assistant()
+    time.sleep(0.1)
+    assert calls == []
+
+
+async def test_leftovers_are_cleared_even_when_enrolment_fails(node, monkeypatch):
+    """令牌被吊销的节点每次启动都在登记处退出：清理在那之前就已开始。"""
+    turns = node.assistant.turns_dir
+    (turns / "abc").mkdir(parents=True)
+    (turns / "abc" / "transcript.jsonl").write_text("plaintext")
+    trash = workspace.trash_dir(Path(node.config["workspace_root"]))
+    (trash / "old").mkdir()
+    (trash / "old" / "notes.md").write_text("plaintext")
+    socket_dir = Path(tempfile.mkdtemp(prefix="cm-", dir="/tmp")) / "run"
+    monkeypatch.setattr(module, "choose_socket_dir", lambda data_dir, node_id: socket_dir)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    calls: list = []
+    original = node.clear_assistant_leftovers
+
+    def counted():
+        calls.append(True)
+        original()
+
+    monkeypatch.setattr(node, "clear_assistant_leftovers", counted)
+
+    async def revoked():
+        raise RuntimeError("token revoked")
+
+    monkeypatch.setattr(node, "enroll", revoked)
+    try:
+        with pytest.raises(RuntimeError):
+            await node.run()
+        wait_until(lambda: not os.path.lexists(turns) and not any(trash.iterdir()))
+        assert calls == [True]
+    finally:
+        node.log_rotator.stop()
+        node.lock_file.close()
+        shutil.rmtree(socket_dir.parent, ignore_errors=True)

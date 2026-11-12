@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import shutil
+import stat
 import threading
 import time
 from pathlib import Path
@@ -183,6 +187,8 @@ def test_remove_refuses_a_trash_that_is_a_link(agent, tmp_path):
         (".coreman-health", True),
         (".coreman-health/x", True),
         (".coreman-trash/abc", True),
+        (".coreman-owners", True),
+        (".coreman-owners/abc", True),
         ("bot-1", False),
         (".coreman-healthy", False),
         ("", False),
@@ -218,3 +224,166 @@ def test_remove_waits_while_a_sandboxed_turn_uses_the_directory(agent):
     assert (agent.root / "one").is_dir()
     turns.workdirs.clear()
     assert call(agent, "remove")["removed"] is True
+
+
+# ---- 守护进程自己保管的归属登记（助理改不到） --------------------------------------------
+
+
+def record_of(agent, name="one") -> Path:
+    path = (agent.root / name).resolve()
+    digest = hashlib.sha256(os.fsencode(str(path))).hexdigest()
+    return agent.root / workspace.OWNERS_DIR / digest
+
+
+def test_assistant_init_registers_the_fresh_directory_outside_it(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    record = record_of(agent)
+    info = os.lstat(agent.root / "one")
+    assert json.loads(record.read_text()) == {
+        "bot_id": "b1",
+        "ino": info.st_ino,
+        "dev": info.st_dev,
+    }
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600
+    assert stat.S_IMODE((agent.root / workspace.OWNERS_DIR).stat().st_mode) == 0o700
+    assert [p.name for p in (agent.root / workspace.OWNERS_DIR).iterdir()] == [record.name]
+
+
+def test_an_ordinary_init_keeps_no_registry(agent):
+    call(agent, "init", content="x")
+    assert not os.path.lexists(agent.root / workspace.OWNERS_DIR)
+
+
+@pytest.mark.parametrize("tamper", ["delete", "rewrite"])
+def test_remove_trusts_the_registry_over_a_tampered_marker(agent, tamper):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    marker = agent.root / "one" / workspace.MARKER
+    if tamper == "delete":
+        marker.unlink()
+    else:
+        marker.write_text('{"bot_id": "someone-else"}')
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": True}
+    assert not os.path.lexists(agent.root / "one")
+    assert not os.path.lexists(record_of(agent))
+
+
+def test_remove_leaves_a_directory_registered_to_another_bot(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    info = os.lstat(agent.root / "one")
+    record_of(agent).write_text(
+        json.dumps({"bot_id": "b2", "ino": info.st_ino, "dev": info.st_dev})
+    )
+    # 标记仍写着 b1：有登记时不看标记。
+    assert call(agent, "remove") == {"success": True, "removed": False, "existed": True}
+    assert (agent.root / "one" / workspace.MARKER).exists()
+    assert record_of(agent).exists()
+
+
+def test_remove_leaves_a_directory_that_was_swapped_for_another(agent, tmp_path):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    p = agent.root / "one"
+    p.rename(tmp_path / "original")
+    p.mkdir()
+    (p / workspace.MARKER).write_text('{"bot_id": "b1"}')
+    (p / "file").write_text("not the registered directory")
+    assert call(agent, "remove") == {"success": True, "removed": False, "existed": True}
+    assert (p / "file").read_text() == "not the registered directory"
+
+
+def test_remove_falls_back_to_the_marker_without_a_record(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    record_of(agent).unlink()
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": True}
+    assert not os.path.lexists(agent.root / "one")
+
+
+def test_remove_of_a_missing_directory_drops_only_its_own_stale_record(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    shutil.rmtree(agent.root / "one")
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": False}
+    assert not os.path.lexists(record_of(agent))
+    record_of(agent).write_text('{"bot_id": "b2", "ino": 1, "dev": 1}')
+    assert call(agent, "remove") == {"success": True, "removed": True, "existed": False}
+    assert record_of(agent).exists()
+
+
+def test_remove_treats_a_deeply_nested_record_as_not_owned(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    record_of(agent).write_text("[" * 50000)
+    assert call(agent, "remove") == {"success": True, "removed": False, "existed": True}
+    assert (agent.root / "one").is_dir()
+
+
+def test_remove_refuses_an_owners_directory_that_is_a_link(agent, tmp_path):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    owners = agent.root / workspace.OWNERS_DIR
+    elsewhere = tmp_path / "elsewhere"
+    owners.rename(elsewhere)
+    owners.symlink_to(elsewhere)
+    with pytest.raises(OperationError, match="工作区操作失败"):
+        call(agent, "remove")
+    assert (agent.root / "one").is_dir()
+
+
+def test_remove_refuses_an_owners_directory_that_is_not_ours(agent, monkeypatch):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    uid = os.getuid()
+    monkeypatch.setattr(workspace.os, "getuid", lambda: uid + 1)
+    with pytest.raises(OperationError, match="工作区操作失败"):
+        call(agent, "remove")
+    assert (agent.root / "one").is_dir()
+
+
+def test_assistant_init_refuses_an_empty_directory_registered_to_another_bot(agent):
+    agent.assistant_only = True
+    p = agent.root / "one"
+    p.mkdir()
+    owners = workspace.owners_dir(agent.root)
+    info = os.lstat(p)
+    (owners / record_of(agent).name).write_text(
+        json.dumps({"bot_id": "b2", "ino": info.st_ino, "dev": info.st_dev})
+    )
+    with pytest.raises(OperationError, match="其他员工"):
+        call(agent, "init", content="x")
+    assert list(p.iterdir()) == []
+
+
+def test_a_deeply_nested_marker_is_simply_not_owned(agent):
+    p = agent.root / "one"
+    p.mkdir()
+    (p / workspace.MARKER).write_text("[" * 50000)
+    assert workspace.marker_data(p) == {}
+    assert call(agent, "info")["owned"] is False
+
+
+def test_the_trash_is_tightened_to_0700(agent):
+    agent.assistant_only = True
+    call(agent, "init", content="x")
+    trash = agent.root / workspace.TRASH_DIR
+    trash.mkdir(mode=0o755)
+    trash.chmod(0o755)
+    assert call(agent, "remove")["removed"] is True
+    assert stat.S_IMODE(trash.stat().st_mode) == 0o700
+
+
+def test_in_use_covers_directories_above_and_below_a_running_turn(tmp_path):
+    from types import SimpleNamespace
+
+    from runtime_daemon.assistant_turns import AssistantTurns
+
+    turns = AssistantTurns(SimpleNamespace())
+    turns.workdirs["t1"] = tmp_path / "a" / "b"
+    assert turns.in_use(tmp_path / "a" / "b")
+    assert turns.in_use(tmp_path / "a")  # 轮次的目录在它下面
+    assert turns.in_use(tmp_path / "a" / "b" / "c")  # 轮次的目录是它的上级
+    assert not turns.in_use(tmp_path / "x")
+    assert not turns.in_use(tmp_path / "a" / "bb")
