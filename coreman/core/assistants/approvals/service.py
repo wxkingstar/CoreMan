@@ -586,3 +586,13 @@ async def decide(
         return Decided(known=True, queued=task is not None)
     row.status = status
     return Decided(known=True, queued=await deliver(session, row, bot))
+
+
+RESULT_LIMIT = 20000
+
+
+def bounded_result(value: Any) -> dict[str, Any]:
+    """执行结果存档：太大时只留一句说明，不把整份文档塞回会话。"""
+    if len(json.dumps(value, ensure_ascii=False, default=str)) > RESULT_LIMIT:
+        return {"truncated": True}
+    return {"results": value}
