@@ -100,7 +100,7 @@ def _files(calls: list[dict[str, Any]], links: dict[str, str]) -> list[str]:
 def abstract(template: Template, facts: list[Facts]) -> str:
     """单行摘要，会出现在锁屏推送里：只有渠道和对象（非消息类是渠道和动作名）。"""
     label = CHANNELS[facts[0].channel]
-    names = [item.target for item in facts if item.target]
+    names = [" ".join(item.target.split()) for item in facts if item.target.strip()]
     if not names:
         text = f"{label} · {template.action}"
     elif len(facts) == 1:
@@ -115,7 +115,7 @@ def abstract(template: Template, facts: list[Facts]) -> str:
 def _head(template: Template, calls: list[dict[str, Any]], facts: list[Facts]) -> list[str]:
     first = calls[0]["arguments"]
     lines = [f"渠道：{CHANNELS[facts[0].channel]}"]
-    names = [item.target for item in facts if item.target]
+    names = [" ".join(item.target.split()) for item in facts if item.target.strip()]
     if names:
         label = "对象" if len(facts) == 1 else f"对象（{len(facts)} 个会话）"
         lines.append(f"{label}：{'、'.join(names)}")
