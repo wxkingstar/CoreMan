@@ -28,7 +28,12 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_bot_changed
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
-from coreman.core.assistants.records import is_assistant, unsupported, visible_to
+from coreman.core.assistants.records import (
+    ASSISTANT_TOGGLE_MESSAGE,
+    is_assistant,
+    unsupported,
+    visible_to,
+)
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
@@ -348,6 +353,9 @@ async def toggle_bot(
     bot = await _visible_bot(session, bot_id, user)
     if not can_toggle_bot(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        # 助理记录的启停跟着开通与停用走：直接翻 enabled 会绕过撤授权、销毁密钥这些步骤。
+        raise ApiError(409, 409, ASSISTANT_TOGGLE_MESSAGE)
     await session.refresh(bot, with_for_update=True)
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录操作正在进行，请完成后再启停")

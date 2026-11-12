@@ -31,7 +31,12 @@ from coreman.api.routers import feishu_apps as feishu_app_routes
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.assistants import runtime as assistant_runtime
-from coreman.core.assistants.records import locked_changes, visible_to
+from coreman.core.assistants.records import (
+    ASSISTANT_DELETE_MESSAGE,
+    is_assistant,
+    locked_changes,
+    visible_to,
+)
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.env_policy import blocked_env_keys
 from coreman.core.bots.events import notify_bot_changed as notify_bot_changed  # 再导出
@@ -775,6 +780,9 @@ async def delete_bot(
     if not can_delete_bot(user, bot):
         raise forbidden()
     await session.refresh(bot, with_for_update=True)
+    if is_assistant(bot) and bot.assistant_state != "deprovisioned":
+        # 直接删会留下有效的飞书授权、没销毁的密钥和节点上的目录：先走停用。
+        raise ApiError(409, 409, ASSISTANT_DELETE_MESSAGE)
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录正在处理中，请完成后再删除员工")
     snapshot = _public(bot)

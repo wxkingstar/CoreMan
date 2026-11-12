@@ -28,6 +28,15 @@ LOCKED_FIELDS = frozenset(
 )
 
 
+ASSISTANT_TOGGLE_MESSAGE = (
+    "个人助理不能直接启停：所有者在私聊里发「停用助理」，或由平台管理员在助理列表里停用"
+)
+ASSISTANT_DELETE_MESSAGE = (
+    "个人助理要先停用（所有者在私聊里发「停用助理」，或由平台管理员在助理列表里停用），"
+    "停用完成后才能删除"
+)
+
+
 def is_assistant(bot: Bot) -> bool:
     return bot.kind == "assistant"
 
