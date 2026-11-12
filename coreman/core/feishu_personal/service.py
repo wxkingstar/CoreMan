@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import write_fuse
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import FeishuPersonalGrant
 from coreman.core.feishu_personal import endpoints, permissions, revocation
@@ -492,6 +493,9 @@ async def _authorize(
     endpoint = endpoints.match(method, path)
     if endpoint is None:
         raise PersonalError("invalid_tool_or_arguments")
+    if write_fuse.blocked(scope.bot, endpoint.kind):
+        # 个人助理的写操作只能由平台在审批通过后执行；任何别的路径到这里为止。
+        raise PersonalError("approval_required")
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")
