@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -23,6 +24,10 @@ from coreman.core.relay.agent_client import AgentError, call_agent
 log = get_logger(__name__)
 BATCH = 10
 NODE_SECONDS = 60
+# 一轮最多花这么久（节点不可达时一条就可能占满 NODE_SECONDS）：用完就不再取新的，剩下的下一轮再说，
+# 免得一台死掉的节点把开通与停用的那条循环拖住十来分钟。
+TICK_SECONDS = 90
+_clock = time.monotonic
 BACKOFF_MAX = timedelta(hours=6)
 
 
@@ -104,8 +109,9 @@ async def _postpone(
 async def tick(
     factory: async_sessionmaker[AsyncSession], cipher: Cipher, now: datetime
 ) -> dict[str, int]:
-    """处理到期的几条；每条一个事务、互不影响。"""
+    """处理到期的几条；每条一个事务、互不影响；一轮的总时长以 `TICK_SECONDS` 为限。"""
     counts = {"assistant_dirs_removed": 0, "assistant_dirs_retry": 0}
+    started = _clock()
     async with factory() as session:
         due = list(
             await session.scalars(
@@ -116,11 +122,17 @@ async def tick(
             )
         )
     for row_id in due:
+        if _clock() - started >= TICK_SECONDS:
+            break
         try:
             async with factory() as session:
+                # 再核对一次到期：换主期间另一个看护进程可能刚处理过它（并把时间往后推了）。
                 row = await session.scalar(
                     select(AssistantRetiredDir)
-                    .where(AssistantRetiredDir.id == row_id)
+                    .where(
+                        AssistantRetiredDir.id == row_id,
+                        AssistantRetiredDir.next_attempt_at <= now,
+                    )
                     .with_for_update(skip_locked=True)
                 )
                 if row is None:

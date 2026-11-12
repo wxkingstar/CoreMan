@@ -129,6 +129,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    # 旧版本没有状态这道闸：开通没走完、正在停用或已停用的助理记录先关掉，免得降级后照常跑轮次。
+    op.execute(
+        "UPDATE bots SET enabled = false"
+        " WHERE kind = 'assistant' AND assistant_state IS DISTINCT FROM 'active'"
+    )
     op.drop_index("assistant_retired_dirs_due_idx", table_name="assistant_retired_dirs")
     op.drop_table("assistant_retired_dirs")
     op.drop_index("assistant_lifecycles_bot_idx", table_name="assistant_lifecycles")

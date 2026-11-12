@@ -159,6 +159,27 @@ async def test_the_messenger_sends_through_the_assistant_app(
         await messenger.text(db_session, app.id, "zhangsan", "你好", key="k3")
     with pytest.raises(lifecycle.StepFailed):
         await messenger.text(db_session, uuid.uuid4(), "zhangsan", "你好", key="k4")
+    # data 不是对象：暂时失败，带固定的代码。
+    for data in (["om_1"], "om_1", 5):
+        reply = {"code": 0, "data": data}
+        with pytest.raises(lifecycle.StepRetry) as failed:
+            await messenger.text(db_session, app.id, "zhangsan", "你好", key="k5")
+        assert failed.value.code == "feishu_bad_response"
+    await messenger.aclose()
+
+
+async def test_an_unreadable_app_secret_is_a_temporary_failure(db_session: AsyncSession) -> None:
+    """应用密钥解不开（例如主密钥轮换没做完）：稍后再试，不放弃开通。"""
+    from coreman.core.assistants.apps import SECRET_AAD
+    from coreman.core.crypto import Cipher
+
+    app = await assistant_app(db_session)
+    app.secret_enc = Cipher(b"\x01" * 32).encrypt("app-secret", SECRET_AAD)
+    await db_session.commit()
+    messenger = lifecycle.Messenger(CIPHER)
+    with pytest.raises(lifecycle.StepRetry) as failed:
+        await messenger.text(db_session, app.id, "zhangsan", "你好", key="k")
+    assert failed.value.code == "app_secret_unreadable"
     await messenger.aclose()
 
 
@@ -166,3 +187,62 @@ def test_the_node_operation_is_on_the_platform_side_list() -> None:
     from coreman.core.relay import agent_client
 
     assert "workspace-remove" in agent_client.OPERATIONS
+
+
+async def test_a_row_another_scheduler_just_handled_is_not_sent_to_the_node_again(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """列出到期的之后、锁住之前，别的看护进程处理了它并往后推：这一轮不再调用节点。"""
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy import update
+
+    node = FakeNode()
+    monkeypatch.setattr(retired_dirs, "call_agent", node)
+    relay = await pool_relay(db_session)
+    await retired(db_session, relay)
+    real = make_session_factory(db_engine)
+    opened = 0
+
+    @asynccontextmanager
+    async def interleaved():  # type: ignore[no-untyped-def]
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            async with real() as other:
+                await other.execute(
+                    update(AssistantRetiredDir).values(
+                        attempts=1, next_attempt_at=utcnow() + timedelta(hours=1)
+                    )
+                )
+                await other.commit()
+        async with real() as session:
+            yield session
+
+    counts = await retired_dirs.tick(interleaved, CIPHER, utcnow())  # type: ignore[arg-type]
+    assert node.calls == []
+    assert counts == {"assistant_dirs_removed": 0, "assistant_dirs_retry": 0}
+    (row,) = await rows(db_session)
+    assert row.attempts == 1
+
+
+async def test_one_round_stops_taking_rows_once_its_time_is_spent(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [0.0]
+
+    class SlowNode(FakeNode):
+        async def __call__(self, *args, **kw):  # type: ignore[no-untyped-def]
+            clock[0] += retired_dirs.NODE_SECONDS  # 每次都等到超时那么久
+            return await super().__call__(*args, **kw)
+
+    node = SlowNode()
+    node.down = True
+    monkeypatch.setattr(retired_dirs, "call_agent", node)
+    monkeypatch.setattr(retired_dirs, "_clock", lambda: clock[0])
+    relay = await pool_relay(db_session)
+    for index in range(4):
+        await retired(db_session, relay, path=f"/srv/pa/old-{index}")
+    counts = await retired_dirs.tick(make_session_factory(db_engine), CIPHER, utcnow())
+    assert counts["assistant_dirs_retry"] == 2
+    assert sorted(row.attempts for row in await rows(db_session)) == [0, 0, 1, 1]

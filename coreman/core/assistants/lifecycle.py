@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.apps import app_credentials
-from coreman.core.crypto import Cipher
+from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import AssistantLifecycle, PlatformApp
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.timeutils import utcnow
@@ -100,6 +100,9 @@ class Messenger:
                 raise StepFailed("app_missing")
             try:
                 creds = app_credentials(self.cipher, app)
+            except DecryptError:
+                # 读不出应用密钥多半是主密钥轮换没做完：等一等再试，不能因此放弃开通。
+                raise StepRetry("app_secret_unreadable") from None
             except ValueError:
                 raise StepFailed("app_unavailable") from None
             client = FeishuClient(creds["app_id"], creds["app_secret"])
@@ -130,7 +133,9 @@ class Messenger:
             )
         except FeishuError as exc:
             raise StepRetry(f"feishu_{exc.code}") from None
-        data = body.get("data") or {}
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, dict):
+            raise StepRetry("feishu_bad_response")
         message_id, chat_id = data.get("message_id"), data.get("chat_id")
         if not isinstance(message_id, str) or not isinstance(chat_id, str):
             raise StepRetry("feishu_bad_response")
