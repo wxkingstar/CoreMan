@@ -184,44 +184,174 @@ async def test_standard_bots_cannot_be_bound_or_switched_to_a_pool_node(
     assert await resolve_relay_for_create(db_session, admin, plain.id, None) is plain
 
 
-async def test_ordinary_bind_and_switch_cost_one_pool_lookup_and_never_fail_without_a_pool(
-    db_session: AsyncSession,
-) -> None:
-    """普通员工的绑定与换运行时：没有任何助理池时照常通过，只多一条查节点池标记的查询。"""
+async def admin_user(session: AsyncSession) -> User:
+    admin = User(
+        login_name=f"a{uuid.uuid4().hex[:6]}", display_name="管理员", role="platform_admin"
+    )
+    session.add(admin)
+    await session.commit()
+    return admin
+
+
+async def record_statements(session: AsyncSession, call) -> list[str]:  # type: ignore[no-untyped-def]
     from sqlalchemy import event
 
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, *args):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    engine = session.bind.sync_engine  # type: ignore[union-attr]
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await call()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return statements
+
+
+async def test_ordinary_bind_and_switch_only_add_a_node_lock_and_one_lookup(
+    db_session: AsyncSession,
+) -> None:
+    """普通员工绑定与换运行时：没有助理池时照常通过；多出来的只有节点锁与一条查询，换到当前这台一条不加。"""
+    from coreman.api.routers.bots import resolve_relay_for_create
+
+    one = await add_node_relay(db_session, name="one")
+    two = await add_node_relay(db_session, name="two")
+    three = await add_node_relay(db_session, name="three")
+    for relay in (two, three):
+        node = await db_session.get(RuntimeNode, relay.runtime_node_id)
+        assert node is not None
+        if relay is three:
+            node.machine_fingerprint, node.uid = "fp-x", 1001
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = one.id
+    admin = await admin_user(db_session)
+
+    async def bind(target: RelayServer) -> None:
+        assert await resolve_relay_for_create(db_session, admin, target.id, None) is target
+
+    async def switch(target: RelayServer) -> None:
+        await validate_switch(
+            db_session, bot=standard, target=target, model=None, actor=admin, member_ids=set()
+        )
+
+    def extra(statements: list[str]) -> tuple[int, int, int]:
+        lock = sum("pg_advisory_xact_lock" in s for s in statements)
+        lookup = sum("assistant_pool" in s for s in statements)
+        rest = [
+            s for s in statements if "pg_advisory_xact_lock" not in s and "assistant_pool" not in s
+        ]
+        # 其余语句只可能是原有路径上switch 原有的读取：节点、创建人、模型目录，不能有别的。
+        assert all(
+            s.startswith(("SELECT runtime_nodes.", "SELECT users.", "SELECT model_catalog."))
+            for s in rest
+        ), [x[:60] for x in rest]
+        return lock, lookup, len(rest)
+
+    # 预热：第一次调用会把目录之类的共用数据读进会话，不属于这次检查。
+    for warm in (two, three):
+        await bind(warm)
+        await switch(warm)
+    results = {}
+    for label, target in (("plain", two), ("fingerprint", three)):
+        results[label, "bind"] = extra(
+            await record_statements(db_session, lambda target=target: bind(target))
+        )
+        results[label, "switch"] = extra(
+            await record_statements(db_session, lambda target=target: switch(target))
+        )
+    results["same"] = extra(await record_statements(db_session, lambda: switch(one)))
+    # 锁一条、池标记（含同机同用户兄弟节点）一条；节点上报了指纹与 uid 也不多查。
+    for key in (
+        ("plain", "bind"),
+        ("plain", "switch"),
+        ("fingerprint", "bind"),
+        ("fingerprint", "switch"),
+    ):
+        assert results[key][:2] == (1, 1), key
+    assert results["same"][:2] == (0, 0)
+
+
+async def test_node_sharing_machine_and_uid_with_a_pool_node_takes_no_ordinary_bots(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.api.errors import ApiError
+    from coreman.api.routers.bots import resolve_relay_for_create
+
+    pool = await pool_relay(db_session, "pool")
+    pool_node = await db_session.get(RuntimeNode, pool.runtime_node_id)
+    assert pool_node is not None
+    pool_node.machine_fingerprint, pool_node.uid = "fp-1", 1001
+    same = await add_node_relay(db_session, name="same")
+    other_uid = await add_node_relay(db_session, name="other-uid")
+    bare = await add_node_relay(db_session, name="bare")
+    for relay, fp, uid in ((same, "fp-1", 1001), (other_uid, "fp-1", 1002), (bare, None, None)):
+        node = await db_session.get(RuntimeNode, relay.runtime_node_id)
+        assert node is not None
+        node.machine_fingerprint, node.uid = fp, uid
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = bare.id
+    admin = await admin_user(db_session)
+    with pytest.raises(SwitchError) as caught:
+        await validate_switch(
+            db_session, bot=standard, target=same, model=None, actor=admin, member_ids=set()
+        )
+    assert caught.value.message == runtime.POOL_NODE_MESSAGE
+    with pytest.raises(ApiError):
+        await resolve_relay_for_create(db_session, admin, same.id, None)
+    assert await resolve_relay_for_create(db_session, admin, other_uid.id, None) is other_uid
+    await validate_switch(
+        db_session, bot=standard, target=other_uid, model=None, actor=admin, member_ids=set()
+    )
+
+
+async def test_a_disabled_ordinary_employee_still_blocks_pool_admission(
+    db_session: AsyncSession,
+) -> None:
+    relay = await add_node_relay(db_session, name="candidate")
+    node = await db_session.get(RuntimeNode, relay.runtime_node_id)
+    assert node is not None
+    node.capabilities, node.machine_fingerprint, node.uid = ready_caps(), "fp-9", 1001
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = relay.id
+    standard.enabled = False
+    await db_session.commit()
+    assert await runtime.hosts_standard_bots(db_session, node.id)
+    assert await runtime.pool_admission_error(db_session, relay, node) is not None
+    standard.relay_server_id = None
+    await db_session.commit()
+    assert await runtime.pool_admission_error(db_session, relay, node) is None
+
+
+async def test_binding_to_a_node_takes_the_node_lock_first(db_session: AsyncSession) -> None:
+    """入池与绑定按节点串行：两条路径都先对目标节点取同一把事务级咨询锁。"""
     from coreman.api.routers.bots import resolve_relay_for_create
 
     one = await add_node_relay(db_session, name="one")
     two = await add_node_relay(db_session, name="two")
     standard = await seed_standard(db_session)
     standard.relay_server_id = one.id
-    admin = User(
-        login_name=f"a{uuid.uuid4().hex[:6]}", display_name="管理员", role="platform_admin"
-    )
-    db_session.add(admin)
-    await db_session.commit()
-    statements: list[str] = []
+    admin = await admin_user(db_session)
+    keys: list[str] = []
 
-    def record(conn, cursor, statement, *args):  # type: ignore[no-untyped-def]
-        statements.append(statement)
+    def spy(statement: str, params: object) -> None:
+        if "pg_advisory_xact_lock" in statement:
+            keys.append(str(params))
+
+    from sqlalchemy import event
+
+    def record(conn, cursor, statement, parameters, *args):  # type: ignore[no-untyped-def]
+        spy(statement, parameters)
 
     engine = db_session.bind.sync_engine  # type: ignore[union-attr]
     event.listen(engine, "before_cursor_execute", record)
     try:
-        assert await resolve_relay_for_create(db_session, admin, two.id, None) is two
-        bind_lookups = [s for s in statements if "assistant_pool" in s]
-        statements.clear()
+        await resolve_relay_for_create(db_session, admin, two.id, None)
         await validate_switch(
             db_session, bot=standard, target=two, model=None, actor=admin, member_ids=set()
         )
-        switch_lookups = [s for s in statements if "assistant_pool" in s]
-        statements.clear()
-        # 换到当前这台（同实例换模型）一条都不多。
-        await validate_switch(
-            db_session, bot=standard, target=one, model=None, actor=admin, member_ids=set()
-        )
-        same_lookups = [s for s in statements if "assistant_pool" in s]
     finally:
         event.remove(engine, "before_cursor_execute", record)
-    assert (len(bind_lookups), len(switch_lookups), len(same_lookups)) == (1, 1, 0)
+    assert len(keys) == 2 and keys[0] == keys[1]
+    assert str(two.runtime_node_id) in keys[0]

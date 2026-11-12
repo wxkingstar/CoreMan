@@ -54,12 +54,18 @@ def upgrade() -> None:
     )
     op.add_column("runtime_nodes", sa.Column("machine_fingerprint", sa.Text(), nullable=True))
     op.add_column("runtime_nodes", sa.Column("uid", sa.BigInteger(), nullable=True))
+    op.create_index(
+        "ix_runtime_nodes_machine_fingerprint_uid",
+        "runtime_nodes",
+        ["machine_fingerprint", "uid"],
+    )
 
 
 def downgrade() -> None:
     # 改的是在用的表，要拿排他锁：排在长事务后面会让之后对这张表的读写全部跟着排队。
     # 5 秒拿不到锁就报错，整次迁移回滚，稍后重跑即可。
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.drop_index("ix_runtime_nodes_machine_fingerprint_uid", table_name="runtime_nodes")
     op.drop_column("runtime_nodes", "uid")
     op.drop_column("runtime_nodes", "machine_fingerprint")
     op.drop_column("runtime_calls", "sandbox")

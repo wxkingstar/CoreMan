@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text, Uuid, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Text, Uuid, text
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,9 @@ from coreman.core.db.base import Base, TimestampMixin
 
 class RuntimeNode(TimestampMixin, Base):
     __tablename__ = "runtime_nodes"
+    __table_args__ = (
+        Index("ix_runtime_nodes_machine_fingerprint_uid", "machine_fingerprint", "uid"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     name: Mapped[str] = mapped_column(Text)
     token_hash: Mapped[str] = mapped_column(Text)

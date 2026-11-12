@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.relay_policy import relay_available
@@ -133,17 +133,30 @@ async def pick_pool_relay(session: AsyncSession, provider: str) -> RelayServer |
 
 
 async def hosts_standard_bots(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    """节点上有没有启用的普通员工。普通员工不在沙箱里、与助理是同一个系统用户，助理池节点不能有。"""
+    """节点上有没有绑定普通员工（不论是否启用：停用的员工之后还能再启用）。
+
+    普通员工不在沙箱里、与助理是同一个系统用户，助理池节点上一个都不能有。
+    """
     count = await session.scalar(
         select(func.count(Bot.id))
         .join(RelayServer, Bot.relay_server_id == RelayServer.id)
-        .where(
-            RelayServer.runtime_node_id == node_id,
-            Bot.kind == "standard",
-            Bot.enabled.is_(True),
-        )
+        .where(RelayServer.runtime_node_id == node_id, Bot.kind == "standard")
     )
     return bool(count)
+
+
+async def lock_node(session: AsyncSession, node_id: uuid.UUID) -> None:
+    """对这个节点的「入池 / 绑定普通员工」判断串行进行，到事务结束。
+
+    用事务级咨询锁而不锁 runtime_nodes 的行：心跳一直在更新那一行。绑定与换运行时（目标有节点时）
+    和入池接口（只锁被加入的那个节点）用同一把锁。只锁目标节点、不锁同机同用户的兄弟节点：
+    兄弟节点上的并发绑定与入池仍可能同时通过各自的检查，但那要求两个管理操作在同一时刻落在
+    同一台机器的两个节点上，且之后每次心跳与入池复核都会暴露，这里接受这个窗口以保持加锁顺序简单。
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"assistant-pool-node:{node_id}"},
+    )
 
 
 POOL_NODE_MESSAGE = "目标运行时是个人助理池的节点，不能承载普通员工"
@@ -164,10 +177,30 @@ async def is_pool_node(session: AsyncSession, node_id: uuid.UUID) -> bool:
 
 
 async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str | None:
-    """普通员工绑定或换到这个实例时的校验：助理池节点上不能有普通员工。只在绑定与换运行时调用。"""
-    if relay.runtime_node_id is not None and await is_pool_node(session, relay.runtime_node_id):
-        return POOL_NODE_MESSAGE
-    return None
+    """普通员工绑定或换到这个实例时的校验：助理池节点、以及与助理池节点同机同用户的节点上不能有普通员工。
+
+    只在绑定与换运行时调用；目标有节点时先取节点锁，再用一条查询同时查本节点与同机同用户节点有没有
+    助理池实例（节点没上报指纹或 uid 时，同机同用户那一半恒为假）。
+    """
+    if relay.runtime_node_id is None:
+        return None
+    node_id = relay.runtime_node_id
+    await lock_node(session, node_id)
+    me = select(RuntimeNode.machine_fingerprint).where(RuntimeNode.id == node_id).scalar_subquery()
+    my_uid = select(RuntimeNode.uid).where(RuntimeNode.id == node_id).scalar_subquery()
+    found = await session.scalar(
+        select(RelayServer.id)
+        .join(RuntimeNode, RelayServer.runtime_node_id == RuntimeNode.id)
+        .where(
+            RelayServer.assistant_pool.is_(True),
+            or_(
+                RuntimeNode.id == node_id,
+                and_(RuntimeNode.machine_fingerprint == me, RuntimeNode.uid == my_uid),
+            ),
+        )
+        .limit(1)
+    )
+    return None if found is None else POOL_NODE_MESSAGE
 
 
 async def pool_admission_error(
@@ -177,7 +210,8 @@ async def pool_admission_error(
 
     要求：共享（非私有）实例；节点声明了沙箱能力；节点上报了本机指纹与系统用户且不是 root；节点上
     没有普通员工；同一台机器上以同一个系统用户运行的其他节点也都是助理池节点、也没有普通员工。
-    后两条保证助理节点与承载普通员工的守护进程是两个不同的系统用户：普通员工不在沙箱里，同一个
+    调用方（入池接口）必须先对被加入的那个节点调 `lock_node`（只锁它），与普通员工的绑定、换运行时
+    互斥。后两条保证助理节点与承载普通员工的守护进程是两个不同的系统用户：普通员工不在沙箱里，同一个
     用户就读得到助理这一轮的临时目录、转录与凭证副本。
     """
     if relay.visibility == "private":
