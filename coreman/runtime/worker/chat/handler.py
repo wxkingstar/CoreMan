@@ -85,12 +85,8 @@ class ChatTaskHandler(
             return None
         intake, relay, parts = resolved
         if is_assistant(intake.bot):
-            from coreman.runtime.worker import assistant_stop
             from coreman.runtime.worker.chat import assistant_runtime
 
-            # 所有者发「停用助理」：发确认卡片，不派这一轮（开通没走完、运行时暂停时也能停用）。
-            if await assistant_stop.intercept(ctx, intake):
-                return None
             # 个人助理只在能隔离运行的节点上跑：所在运行时不行就不派，私聊告诉所有者。
             if await assistant_runtime.paused(ctx, intake):
                 return None

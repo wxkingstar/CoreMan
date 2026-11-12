@@ -169,3 +169,146 @@ async def test_stop_is_not_a_command_for_ordinary_bots(
     await run(db_engine, task, relay)
     assert len(relay.requests) == 1
     assert (await tasks.get(db_session, task.id)).status == "succeeded"  # type: ignore[union-attr]
+
+
+# ---- 评审补充：先于运行时与待答截下、只截私聊、别人发的、重复确认、合并 ------------------------
+
+
+async def _sent_stop_cards(session: AsyncSession, bot: Bot) -> list[OutboxItem]:
+    rows = await session.scalars(
+        select(OutboxItem).where(OutboxItem.bot_id == bot.id, OutboxItem.kind == "send")
+    )
+    return [row for row in rows if "停用个人助理" in str(row.payload)]
+
+
+async def test_the_command_works_while_the_runtime_is_unavailable(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import RelayServer
+
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    relay_row = await db_session.get(RelayServer, bot.relay_server_id)
+    assert relay_row is not None
+    relay_row.is_active = False
+    await db_session.commit()
+    done, relay, sent = await stop_card(db_engine, db_session, bot)
+    assert done.status == "succeeded" and done.result == {"assistant": "stop_offered"}
+    assert relay.requests == [] and "停用个人助理" in str(sent.payload)
+
+
+async def test_the_command_is_not_taken_as_the_answer_to_a_pending_question(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from coreman.core.chat import interactions
+    from tests.integration.test_card_actions import Q1, _state
+
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    st = await _state(db_session, bot, questions=[Q1], user="owner_pid")
+    await interactions.patch_state(
+        db_session,
+        st.id,
+        {"waiting_for_text": True, "waiting_since": datetime.now(UTC).isoformat()},
+        bot_id=bot.id,
+    )
+    await db_session.commit()
+    done, relay, sent = await stop_card(db_engine, db_session, bot)
+    assert done.result == {"assistant": "stop_offered"} and relay.requests == []
+    again = await interactions.get_open(
+        db_session,
+        kind=interactions.KIND_CHOICE,
+        scope_key=interactions.choice_scope(bot.id, "owner_pid"),
+    )
+    assert again is not None and again.state["answers"] == []
+    assert again.state["waiting_for_text"] is True
+
+
+async def test_the_command_in_a_group_is_not_intercepted(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    task = await chat_task(
+        db_session, bot, "停用助理", sender="owner_pid", chat_type="group", chat_id="oc_group"
+    )
+    await run(db_engine, task, FakeRelay("normal"))
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and (done.result or {}).get("assistant") is None
+    assert await _sent_stop_cards(db_session, bot) == []
+
+
+async def test_someone_else_sending_the_command_gets_no_card(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    task = await chat_task(
+        db_session, bot, "停用助理", sender="lisi", chat_type="single", chat_id="oc_lisi"
+    )
+    relay = FakeRelay("normal")
+    await run(db_engine, task, relay)
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and done.status == "succeeded"
+    assert done.result == {"assistant": "stop_not_owner"} and relay.requests == []
+    assert await _sent_stop_cards(db_session, bot) == []
+
+
+async def test_a_non_ascii_token_is_ignored_without_crashing(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    _, _, sent = await stop_card(db_engine, db_session, bot)
+    expires = sent.payload["card"]["body"]["elements"][1]["behaviors"][0]["value"]["level"]
+    task = await click(db_session, bot, sent, level=f"{expires.partition('.')[0]}.停用")
+    await CardActionHandler().run(build_ctx(db_engine, task))
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and done.status == "succeeded"
+    assert done.result == {"card": "ignored"}
+    assert await flow_of(db_session, owner.id) is None
+
+
+async def test_confirming_an_already_stopped_assistant_does_not_say_stopping(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    _, _, sent = await stop_card(db_engine, db_session, bot)
+    bot.assistant_state = "deprovisioned"
+    await db_session.commit()
+    task = await click(db_session, bot, sent)
+    await CardActionHandler().run(build_ctx(db_engine, task))
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and done.result == {"card": "assistant_already_stopped"}
+    update = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.bot_id == bot.id, OutboxItem.kind == "card_update")
+    )
+    assert update is not None and "正在停用" not in str(update.payload)
+
+
+async def test_a_queued_stop_command_is_not_merged_into_the_running_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, _, _ = await active_assistant(db_session)
+    kw: dict[str, Any] = {"sender": "owner_pid", "chat_type": "single", "chat_id": "oc_private"}
+    head = await chat_task(db_session, bot, "帮我看看今天的消息", **kw)
+    head.status = "running"
+    await db_session.commit()
+    follow = await chat_task(db_session, bot, "顺便看下日程", **kw)
+    follow.status = "running"
+    await db_session.commit()
+    stop = await chat_task(db_session, bot, "停用助理", **kw)
+    for row in (follow, stop):
+        row.status, row.claimed_by = "queued", None
+    await db_session.commit()
+    relay = FakeRelay("normal")
+    await run(db_engine, head, relay)
+    merged = await db_session.get(Task, follow.id, populate_existing=True)
+    assert merged is not None and merged.error_code == "merged"
+    waiting = await db_session.get(Task, stop.id, populate_existing=True)
+    assert waiting is not None and waiting.status == "queued" and waiting.error_code is None
+    assert "停用助理" not in str(relay.requests)

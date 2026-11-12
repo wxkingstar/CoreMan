@@ -15,10 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import busy_choice
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.feishu_docs import resume
+from coreman.runtime.worker import assistant_stop
 from coreman.runtime.worker.chat.inbound import joined_text, strip_mention
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
@@ -91,6 +93,8 @@ async def gather(
             text = _mergeable_text(task, intake.bot.name)
             if (
                 text is None
+                # 个人助理的停用命令不能并进给模型的这一轮：留给它自己那一轮去截下。
+                or (is_assistant(intake.bot) and text in assistant_stop.COMMANDS)
                 or not is_plain(task)
                 or task.payload.get("platform_user_id") != sender
                 or task.payload.get("stale_hold")

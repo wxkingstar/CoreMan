@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.chat import alert_sources, interactions
 from coreman.core.chat.announcements import find_announcement
@@ -121,6 +122,13 @@ class IntakeStage(ChatStageBase):
                 resolver=ctx.openuserid,
             )
         text = strip_mention(joined_text(parts), bot.name)
+        if is_assistant(bot) and chat_type == "single" and not observe and not alert:
+            from coreman.runtime.worker import assistant_stop
+
+            # 所有者发「停用助理」：认出人就截下，排在公告、待答与运行时检查之前（开通没走完、
+            # 运行时暂停或不可用时也能停用）。普通员工只多这一次属性判断。
+            if await assistant_stop.intercept(session, ctx, bot, speaker, chat_id, text):
+                return None
         if bot.platform == "feishu" and not observe and not alert:
             from coreman.runtime.worker.feishu_escalations import consume_reply
 

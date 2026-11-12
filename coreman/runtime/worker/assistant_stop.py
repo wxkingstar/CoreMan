@@ -1,6 +1,7 @@
 """所有者在私聊里停用自己的助理：发「停用助理」→ 确认卡片 → 点「确认停用」→ 进入停用流程。
 
-文字命令在这一轮派出之前就截下（不经模型，开通没走完或运行时暂停时也能用）。确认卡片走这条记录的
+文字命令在入站阶段认出发言人后立即截下（不经模型，早于公告、待答与运行时检查：开通没走完、运行时
+暂停或不可用时也能用），只截私聊里的普通聊天消息。确认卡片走这条记录的
 出站箱，卡片回调先过 `CardActionHandler` 的核对（卡片确实由这条记录发到这个会话），这里再核对三样：
 记录是个人助理、点的人就是所有者（按飞书给的操作人认）、卡片上的令牌没过期且是平台签的（主密钥
 派生的 HMAC，绑定记录、发卡片的那一轮与到期时刻）。重复点、转发出去的卡片都不会多做什么。
@@ -21,7 +22,7 @@ from coreman.core.bus import outbox, tasks
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InboundEvent
-from coreman.runtime.worker.chat.models import Intake
+from coreman.core.prompting import Speaker
 from coreman.runtime.worker.context import TaskContext
 
 COMMANDS = frozenset({"停用助理", "/停用助理"})
@@ -70,30 +71,40 @@ def confirm_card(cipher: Cipher, bot_id: uuid.UUID, task_id: int, now: float) ->
     }
 
 
-async def intercept(ctx: TaskContext, intake: Intake) -> bool:
-    """个人助理的私聊里发了停用命令：发确认卡片、结束这一轮，返回真。其余消息返回假。"""
-    if intake.text.strip() not in COMMANDS:
+async def intercept(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    speaker: Speaker,
+    chat_id: str,
+    text: str,
+) -> bool:
+    """个人助理私聊里发了停用命令：所有者收到确认卡片，别人的就此结束；返回真。其余消息返回假。
+
+    在入站阶段、认出发言人之后立即调用（早于公告、待答、运行时可用与否的判断），只用于私聊里的
+    普通聊天消息；写在调用方的事务里，由调用方提交。
+    """
+    if text.strip() not in COMMANDS:
         return False
-    async with ctx.session_factory() as session:
-        if intake.speaker.user_id is not None and intake.speaker.user_id == intake.bot.owner_id:
-            await outbox.add(
-                session,
-                bot_id=intake.bot.id,
-                platform="feishu",
-                kind="send",
-                dedupe_key=f"assistant-stop:{ctx.task.id}",
-                target={"chat_id": intake.chat_id},
-                payload={"card": confirm_card(ctx.cipher, intake.bot.id, ctx.task.id, time.time())},
-            )
-        await tasks.finish(
+    owner = speaker.user_id is not None and speaker.user_id == bot.owner_id
+    if owner:
+        await outbox.add(
             session,
-            ctx.task.id,
-            status="succeeded",
-            result={"assistant": "stop_offered"},
-            only_active=True,
-            bot_id=intake.bot.id,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"assistant-stop:{ctx.task.id}",
+            target={"chat_id": chat_id},
+            payload={"card": confirm_card(ctx.cipher, bot.id, ctx.task.id, time.time())},
         )
-        await session.commit()
+    await tasks.finish(
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"assistant": "stop_offered" if owner else "stop_not_owner"},
+        only_active=True,
+        bot_id=bot.id,
+    )
     return True
 
 
@@ -127,7 +138,8 @@ async def handle(
         expires = int(expires_raw)
     except ValueError:
         return "ignored"
-    if not hmac.compare_digest(mac, _mac(ctx.cipher, bot.id, task_id, expires)):
+    # 按字节比：compare_digest 遇到非 ASCII 的 str 会抛 TypeError。
+    if not hmac.compare_digest(mac.encode(), _mac(ctx.cipher, bot.id, task_id, expires).encode()):
         return "ignored"
     speaker = await resolve_speaker(
         session, platform="feishu", platform_user_id=str(inbound.sender_platform_user_id or "")
@@ -137,6 +149,9 @@ async def handle(
     if expires < time.time():
         await _update(session, bot, inbound, "这张卡片已过期；还要停用的话再发一次「停用助理」。")
         return "assistant_stop_expired"
-    await deprovisioning.request(session, bot, trigger="owner", actor_id=bot.owner_id)
+    flow = await deprovisioning.request(session, bot, trigger="owner", actor_id=bot.owner_id)
+    if flow is None:
+        await _update(session, bot, inbound, "个人助理已经停用了。")
+        return "assistant_already_stopped"
     await _update(session, bot, inbound, "正在停用，做完会在这里告诉你。")
     return "assistant_stopping"
