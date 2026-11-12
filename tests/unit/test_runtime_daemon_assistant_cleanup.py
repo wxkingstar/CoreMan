@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -138,3 +140,56 @@ async def test_the_sweep_leaves_a_trash_that_is_not_a_real_directory(node, tmp_p
     (root / workspace.TRASH_DIR).symlink_to(elsewhere)
     await node.assistant.sweep()
     assert (elsewhere / "precious").is_dir()
+
+
+def wait_until(check) -> None:
+    for _ in range(100):
+        if check():
+            return
+        time.sleep(0.05)
+    raise AssertionError("timed out")
+
+
+def test_an_ordinary_daemon_clears_assistant_turn_leftovers_once(node, tmp_path):
+    turns = node.assistant.turns_dir
+    (turns / "abc" / "config").mkdir(parents=True)
+    (turns / "abc" / "config" / "transcript.jsonl").write_text("plaintext")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    (turns / "abc" / "link").symlink_to(outside)
+    node.start_assistant()
+    wait_until(lambda: not os.path.lexists(turns))
+    assert (outside / "keep").read_text() == "x"
+
+
+def test_an_ordinary_daemon_unlinks_a_linked_turns_directory(node, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    turns = node.assistant.turns_dir
+    turns.parent.mkdir(parents=True, exist_ok=True)
+    turns.symlink_to(outside)
+    node.start_assistant()
+    wait_until(lambda: not os.path.lexists(turns))
+    assert (outside / "keep").read_text() == "x"
+
+
+def test_a_failing_cleanup_is_contained(node, monkeypatch):
+    def boom(_path):
+        raise RuntimeError("disk on fire")
+
+    (node.assistant.turns_dir / "x").mkdir(parents=True)
+    monkeypatch.setattr(module, "remove_tree", boom)
+    node.clear_assistant_leftovers()  # 不抛
+    assert node.assistant.turns_dir.is_dir()
+
+
+def test_an_assistant_only_daemon_does_not_clear_its_own_turns(node, monkeypatch):
+    node.assistant_only = True
+    started: list = []
+    monkeypatch.setattr(node.assistant, "start", lambda: started.append(True))
+    (node.assistant.turns_dir / "live").mkdir(parents=True)
+    node.start_assistant()
+    time.sleep(0.2)
+    assert started == [True] and (node.assistant.turns_dir / "live").is_dir()

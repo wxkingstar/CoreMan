@@ -53,6 +53,7 @@ from runtime_daemon.logs import (
     rotate_copytruncate,
 )
 from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
+from runtime_daemon.sandbox import remove_tree
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
 from runtime_daemon.workspace import reserved
@@ -1634,11 +1635,25 @@ class Daemon:
 
     def start_assistant(self) -> None:
         if not self.assistant_only:
+            # 从助理专用实例改回普通实例的节点：本轮目录里可能还有没传上去的明文转录，删一次。
+            threading.Thread(target=self.clear_assistant_leftovers, daemon=True).start()
             return
         try:
             self.assistant.start()
         except Exception as exc:  # noqa: BLE001 助理侧起不来，普通轮次照常
             LOG.warning("Assistant sandbox start failed: %s", type(exc).__name__)
+
+    def clear_assistant_leftovers(self) -> None:
+        """普通实例启动时删掉助理的本轮目录（不跟随链接）；在线程里跑，失败只记一笔。"""
+        try:
+            turns = self.assistant.turns_dir
+            if turns.is_symlink():
+                turns.unlink()
+            elif turns.is_dir():
+                LOG.warning("Removing assistant turn leftovers")
+                remove_tree(turns)
+        except Exception as exc:  # noqa: BLE001 清不掉不能影响普通轮次
+            LOG.warning("Assistant leftovers cleanup failed: %s", type(exc).__name__)
 
     async def stop_assistant(self) -> None:
         try:
