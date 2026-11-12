@@ -10,6 +10,7 @@ import pytest
 from coreman.core.assistants import sealed
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
+    AssistantApproval,
     ChatLog,
     FeishuDelivery,
     FeishuSentMessage,
@@ -39,9 +40,11 @@ def test_every_content_column_is_registered() -> None:
         FeishuSentMessage,
         FeishuDelivery,
         InteractionState,
+        AssistantApproval,
     }
     assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
     assert set(sealed.COLUMNS[InteractionState]) == {"state"}
+    assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}
     assert set(sealed.COLUMNS[Task]) == {"payload", "result", "error_message"}
     assert set(sealed.COLUMNS[FeishuSentMessage]) == {"text"}
     assert set(sealed.COLUMNS[TaskStream]) == {

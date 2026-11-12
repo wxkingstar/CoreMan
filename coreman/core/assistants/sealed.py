@@ -39,6 +39,7 @@ from coreman.core.assistants import keys
 from coreman.core.config import get_settings
 from coreman.core.crypto import PREFIX_V2, Cipher, key_id_of
 from coreman.core.db.models import (
+    AssistantApproval,
     Bot,
     ChatLog,
     FeishuDelivery,
@@ -166,6 +167,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     # 等用户下一步的状态：题面、选项、答案、暂存的参数进密文。`user_id` 被 SQL 用来数
     # 「这个人还有几条待确认」（reminders、personal_schedules），留明文。
     InteractionState: {"state": JsonSpec(plain=frozenset({"user_id"}))},
+    # 审批闸门：暂存的参数（连同摘要与助理写的说明）、审批人的话、执行结果。
+    AssistantApproval: {"args_enc": Whole(), "reason_enc": Text(), "result_enc": Whole()},
 }
 
 
@@ -408,6 +411,21 @@ async def _cipher(session: AsyncSession, bot_id: uuid.UUID, *, create_key: bool)
         return await keys.data_cipher(session, master(), owner)
     except keys.KeyUnavailable:
         raise ContentLocked("所有者的数据密钥已销毁") from None
+
+
+async def content_mac(session: AsyncSession, bot_id: uuid.UUID, purpose: str, message: str) -> str:
+    """用所有者的数据密钥给一段内容算带密钥的摘要（去重键用）。
+
+    只拿到数据库的人没有密钥，无法拿猜测的内容来比对。密钥重新签发后摘要随之改变。
+
+    Raises:
+        ContentLocked: 数据密钥已销毁
+        ValueError: 不是个人助理的记录
+    """
+    cipher = await _cipher(session, bot_id, create_key=True)
+    if cipher is None:
+        raise ValueError("not an assistant record")
+    return cipher.mac(f"{purpose}:{bot_id}", message)
 
 
 def _seal(cipher: Cipher, aad_: str, kind: Kind, value: Any) -> Any:

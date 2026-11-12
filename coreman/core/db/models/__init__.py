@@ -21,7 +21,13 @@ from coreman.core.db.models.api_tasks import (
     BotConversationAlias,
     PersonalAccessToken,
 )
-from coreman.core.db.models.assistants import AssistantKey
+from coreman.core.db.models.assistants import (
+    APPROVAL_CHANNELS,
+    APPROVAL_STATUSES,
+    AssistantApproval,
+    AssistantKey,
+    AssistantMark,
+)
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
     BOT_KINDS,
@@ -275,4 +281,10 @@ __all__ += ["API_TASK_TARGETS", "ApiTask", "BotConversationAlias", "PersonalAcce
 
 __all__ += ["FeishuAuthWait", "FeishuGroupAction"]
 
-__all__ += ["AssistantKey"]
+__all__ += [
+    "APPROVAL_CHANNELS",
+    "APPROVAL_STATUSES",
+    "AssistantApproval",
+    "AssistantKey",
+    "AssistantMark",
+]
