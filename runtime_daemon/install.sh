@@ -9,8 +9,15 @@ if sys.version_info < (3, 10):
 if importlib.util.find_spec('venv') is None or importlib.util.find_spec('ensurepip') is None:
     raise SystemExit('当前 Python 缺少 venv/ensurepip；Debian/Ubuntu 请先安装 python3-venv 后重新运行此命令。')
 # curl … | sh -s -- --replace
-if any(arg != '--replace' for arg in sys.argv[1:]):
-    raise SystemExit('不支持的参数：' + ' '.join(sys.argv[1:]) + '。唯一可用的参数是 --replace（替换本机已安装的 Runtime）')
+# 个人助理的节点（单独的系统用户）再加 --expect-uid=<数字>：用户不对就什么都不做。
+expect_uid = None
+for arg in sys.argv[1:]:
+    if arg.startswith('--expect-uid=') and arg[len('--expect-uid='):].isdigit():
+        expect_uid = int(arg[len('--expect-uid='):])
+    elif arg != '--replace':
+        raise SystemExit('不支持的参数：' + ' '.join(sys.argv[1:]) + '。可用的参数是 --replace（替换本机已安装的 Runtime）与 --expect-uid=<数字>（核对运行用户的 UID）')
+if expect_uid is not None and os.getuid() != expect_uid:
+    raise SystemExit('当前用户的 UID 是 ' + str(os.getuid()) + '，与 --expect-uid=' + str(expect_uid) + ' 不符；请切换到个人助理专用的系统用户后重新运行，没有做任何改动')
 replace = '--replace' in sys.argv[1:]
 cfg = json.loads(base64.b64decode('__COREMAN_CONFIG__'))
 system = platform.system().lower()

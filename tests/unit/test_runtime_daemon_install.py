@@ -689,3 +689,72 @@ def test_install_script_replace_backs_up_the_existing_runtime(tmp_path):
     assert json.loads((backup / "config.json").read_text()) == old_config
     assert (backup / "sessions").is_dir() and not (install_dir / "runtime.log").exists()
     assert (backup / "install.lock").exists() is False
+
+
+def run_install_script(tmp_path, *args):
+    """只跑到参数与用户核对：用不存在的平台地址，后面一步下载必然失败。"""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    payload = {
+        "api_url": "https://127.0.0.1:1",
+        "install_token": "link.token",
+        "workspace_root": str(tmp_path / "projects"),
+    }
+    path = tmp_path / "install.sh"
+    path.write_text(
+        (ROOT / "runtime_daemon/install.sh")
+        .read_text()
+        .replace("__COREMAN_CONFIG__", base64.b64encode(json.dumps(payload).encode()).decode())
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": os.environ["PATH"],
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+    }
+    return subprocess.run(
+        ["sh", str(path), *args], env=env, capture_output=True, text=True, timeout=120
+    )
+
+
+def test_expect_uid_refuses_the_wrong_user_before_touching_anything(tmp_path):
+    result = run_install_script(tmp_path, f"--expect-uid={os.getuid() + 1}")
+    assert result.returncode != 0 and "--expect-uid" in result.stderr
+    assert "没有做任何改动" in result.stderr
+    assert not (tmp_path / "projects").exists()
+    assert not (tmp_path / "home/.local").exists()
+
+
+def test_expect_uid_for_the_right_user_installs_like_the_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    plain = run_install_script(tmp_path / "a")
+    checked = run_install_script(tmp_path / "b", f"--expect-uid={os.getuid()}")
+    # 两次都走到同一步（下载安装包）才失败，输出除了路径之外完全一样。
+    assert plain.returncode == checked.returncode != 0
+    assert plain.stderr.replace(str(tmp_path / "a"), "X") == checked.stderr.replace(
+        str(tmp_path / "b"), "X"
+    )
+    assert "--expect-uid" not in checked.stderr
+
+
+def test_default_run_output_is_pinned(tmp_path):
+    """不带新参数时输出逐字节固定：上面的对比两边都是新脚本，只有这条能发现默认路径被改动。"""
+    for args in ((), ("--replace",)):
+        result = run_install_script(tmp_path, *args)
+        assert result.returncode == 1
+        assert result.stdout == (
+            f"运行用户 UID: {os.getuid()} HOME: {os.path.realpath(tmp_path / 'home')} \n"
+            f"项目主目录: {tmp_path / 'projects'}\n"
+        )
+        assert result.stderr.startswith(
+            "安装包下载失败（URLError）；请检查平台地址、链接有效期与发布包"
+        )
+        assert result.stderr.endswith("。\n")
+        assert (tmp_path / "home/.local/share/coreman-runtime/install.lock").is_file()
+        shutil.rmtree(tmp_path / "home/.local")
+
+
+def test_unknown_arguments_are_still_refused(tmp_path):
+    for bad in ("--expect-uid=abc", "--force"):
+        result = run_install_script(tmp_path, bad)
+        assert result.returncode != 0 and "不支持的参数" in result.stderr
