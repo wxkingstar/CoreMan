@@ -242,8 +242,10 @@ class AssistantLifecycle(Base):
 class AssistantRetiredDir(Base):
     """要从节点上删掉的助理工作目录：停用时的当前目录、换运行时换走的旧目录。
 
-    看护进程向目录所在实例的节点发 `workspace-remove`，节点只删带这位助理标记的目录；节点离线就
-    隔一段时间再试，直到删掉或节点答复「不是它的」。不引用 bots：记录删了目录也要删。
+    看护进程向目录所在实例的节点发 `workspace-remove`，节点按它自己保管的归属登记认目录（目录里的
+    标记只用于登记出现之前初始化的目录），只删这位助理的；节点离线、目录还在用、或节点认不准
+    （`error_code` 为 `dir_unverified`）就隔一段时间再试，直到节点答复「已删除」或「不是它的」。
+    不引用 bots：记录删了目录也要删。
     """
 
     __tablename__ = "assistant_retired_dirs"

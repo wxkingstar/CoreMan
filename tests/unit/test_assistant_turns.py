@@ -801,3 +801,84 @@ async def test_driver_log_failure_refuses_the_turn(tmp_path, monkeypatch):
     assert json.loads(frames.events[0][1])["error"]["code"] == "sandbox_start_failed"
     assert platform.uploads == [("unchanged", b"")]
     assert not any(turns.turns_dir.iterdir())
+
+
+# ---- 准入与删除目录共用一把锁 --------------------------------------------------------------
+
+
+async def test_a_turn_whose_directory_was_moved_away_is_refused(tmp_path, monkeypatch):
+    """检查请求之后、登记之前目录被删除改名进了回收站：这一轮不跑，不会挂上回收站里的树。"""
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    real_plan = assistant_turns.plan_turn
+    workdir = tmp_path / "projects" / "assistant-1"
+
+    def plan_then_move(*args, **kw):
+        plan = real_plan(*args, **kw)
+        workdir.rename(tmp_path / "trashed")
+        return plan
+
+    monkeypatch.setattr(assistant_turns, "plan_turn", plan_then_move)
+    frames = Frames()
+    await turns.run("call-1", "claude", request(tmp_path), frames)
+    assert frames.events[0][2]["status_code"] == 503
+    assert json.loads(frames.events[0][1])["error"]["code"] == "workdir_missing"
+    assert platform.uploads == [("unchanged", b"")]
+    assert turns.workdirs == {} and turns.active == set()
+
+
+async def test_a_turn_registers_its_workdir_under_the_admission_lock(tmp_path, monkeypatch):
+    turns = make(tmp_path, Platform())
+    fake_sandbox(turns, monkeypatch)
+    held: list[tuple[str, bool]] = []
+
+    class Lock:
+        def __init__(self) -> None:
+            self.inner = threading.Lock()
+            self.held = False
+
+        def __enter__(self):
+            self.inner.acquire()
+            self.held = True
+
+        def __exit__(self, *exc):
+            self.held = False
+            self.inner.release()
+
+    lock = Lock()
+
+    class Workdirs(dict):
+        def __setitem__(self, key, value):
+            held.append(("register", lock.held))
+            super().__setitem__(key, value)
+
+    turns.admission = lock  # type: ignore[assignment]
+    turns.workdirs = Workdirs()
+    real_lstat = assistant_turns.os.lstat
+    target = str((tmp_path / "projects" / "assistant-1").resolve())
+
+    def lstat(path, *a, **kw):
+        if str(path) == target:
+            held.append(("lstat", lock.held))
+        return real_lstat(path, *a, **kw)
+
+    monkeypatch.setattr(assistant_turns.os, "lstat", lstat)
+    await turns.run("call-1", "claude", request(tmp_path), Frames())
+    # 检查请求时（plan_turn）也会 lstat，那在锁外；准入的核对与登记都在锁里。
+    assert ("lstat", True) in held and held.count(("register", True)) == 1
+    assert ("register", False) not in held
+
+
+def test_the_new_refusal_code_has_a_message():
+    assert "workdir_missing" in assistant_turns.MESSAGES
+
+
+async def test_the_sweep_purges_old_tombstones(tmp_path, monkeypatch):
+    turns = make(tmp_path, Platform())
+    called: list = []
+    monkeypatch.setattr(
+        assistant_turns.workspace, "purge_tombstones", lambda root: called.append(root)
+    )
+    await turns.sweep()
+    assert called == [Path(turns.daemon.config["workspace_root"])]

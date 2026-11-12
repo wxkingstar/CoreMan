@@ -27,6 +27,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,7 @@ MESSAGES = {
     "credential_unreadable": "节点上的登录文件读不懂",
     "credential_expiring": "节点上的登录令牌即将到期，等普通轮次刷新后再试",
     "transcript_unavailable": "取不到这个会话的转录",
+    "workdir_missing": "工作目录已不在原处",
 }
 
 
@@ -221,6 +223,9 @@ class AssistantTurns:
         self.active: set[str] = set()
         # 在跑的轮次各自的工作目录（主机上的真实路径）：删目录前核对没有轮次正在用它。
         self.workdirs: dict[str, Path] = {}
+        # 轮次准入（登记工作目录并核对它还在原处）与删工作目录（核对 in_use 并改名进回收站）互斥：
+        # 改名之后不会再有轮次挂上那棵树。只包住几次系统调用，不跨 await。
+        self.admission = threading.Lock()
         self.loop_task: asyncio.Task | None = None
         self.background: set[asyncio.Task] = set()
         # background 里的收尾任务（_finish）：关停时从不取消。
@@ -354,6 +359,9 @@ class AssistantTurns:
             finally:
                 await asyncio.to_thread(sandbox.remove_tree, entry)
         await asyncio.to_thread(self.purge_trash)
+        await asyncio.to_thread(
+            workspace.purge_tombstones, Path(self.daemon.config["workspace_root"])
+        )
 
     def purge_trash(self) -> None:
         """回收站里还没删完的助理工作目录（删除线程随守护进程退出而中断）：不跟随链接地删掉。
@@ -503,8 +511,18 @@ class AssistantTurns:
             await self.refuse(frames, refused, plan.transfer)
             return
         layout = sandbox.TurnLayout.new(self.turns_dir, self.daemon.socket_dir)
+        with self.admission:
+            # 检查请求之后目录可能已被删除改名进回收站：在删除用的同一把锁里登记并核对。
+            try:
+                present = stat.S_ISDIR(os.lstat(plan.workdir).st_mode)
+            except OSError:
+                present = False
+            if present:
+                self.workdirs[layout.turn_id] = plan.workdir
+        if not present:
+            await self.refuse(frames, "workdir_missing", plan.transfer)
+            return
         self.active.add(layout.turn_id)
-        self.workdirs[layout.turn_id] = plan.workdir
         self.daemon.task_info[identity] = {
             "request_id": identity,
             "provider": provider,

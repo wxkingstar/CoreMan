@@ -1,8 +1,9 @@
 """删掉节点上不再用的助理工作目录：停用时的当前目录、换运行时换走的旧目录。
 
 登记（`retire`）与删除分开：登记在停用或换运行时的同一个事务里；删除由看护进程（`tick`）向目录所在
-实例的节点发 `workspace-remove`，节点离线就退避重试，直到删掉或节点答复「不是这位助理的」。节点那边
-只删带本记录所有权标记的目录、不跟随任何链接（见 runtime_daemon/workspace.py `Workspace.remove`）。
+实例的节点发 `workspace-remove`，节点离线、目录还在用、或节点认不准归属（`unverified`）就退避重试，
+直到节点答复「已删除」或「不是这位助理的」。归属由节点按它自己保管的登记认（不看助理写得到的目录内
+标记），删除不跟随任何链接（见 runtime_daemon/workspace.py `Workspace.remove`）。
 """
 
 from __future__ import annotations
@@ -73,17 +74,36 @@ async def _one(session: AsyncSession, cipher: Cipher, row: AssistantRetiredDir) 
         row.error_code = getattr(exc, "code", None) or type(exc).__name__
         row.next_attempt_at = row.next_attempt_at + _backoff(row.attempts)
         return "retry"
-    if result.get("busy") is True:
-        # 节点上还有沙箱里的轮次用着这个目录：等它结束再来。
+    code = _not_final(result)
+    if code is not None:
+        # 节点上还有沙箱里的轮次用着这个目录、节点认不准归属、或回答不像样：留着登记，过一阵再来。
         row.attempts += 1
-        row.error_code = "busy"
+        row.error_code = code
         row.next_attempt_at = row.next_attempt_at + _backoff(row.attempts)
+        if code != "busy":
+            log.warning("assistant_dir_retry", retired=str(row.id), code=code)
         return "retry"
-    if result.get("removed") is not True:
-        # 目录在，但不带这位助理的标记（初始化没做完、或已被别人占用）：不归我们删。
+    if result["removed"] is not True:
+        # 节点按它的登记确认这个目录记着别的助理：不归我们删。
         log.warning("assistant_dir_not_owned", retired=str(row.id))
     await session.delete(row)
     return "removed"
+
+
+def _not_final(result: object) -> str | None:
+    """节点的回答不能当定论时给出原因代码。
+
+    只有布尔的 `removed`/`existed`、不带 `unverified` 才算定论。
+    """
+    if not isinstance(result, dict):
+        return "bad_node_answer"
+    if "unverified" in result:
+        return "dir_unverified" if result["unverified"] is True else "bad_node_answer"
+    if not isinstance(result.get("removed"), bool) or not isinstance(result.get("existed"), bool):
+        return "bad_node_answer"
+    if result.get("busy") is True:
+        return "busy"
+    return None
 
 
 async def _postpone(

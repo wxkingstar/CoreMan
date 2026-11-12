@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import lifecycle, retired_dirs
@@ -48,12 +48,23 @@ async def test_a_directory_is_registered_once_and_removed_by_its_node(
 
 
 @pytest.mark.parametrize(
-    ("answer", "kept"),
+    ("answer", "kept", "code"),
     [
-        ({"down": True}, True),
-        ({"removed": False, "existed": True, "busy": True}, True),
-        ({"removed": False, "existed": True}, False),
-        ({"removed": True, "existed": False}, False),
+        ({"down": True}, True, None),
+        ({"removed": False, "existed": True, "busy": True}, True, "busy"),
+        ({"removed": True, "existed": True}, False, None),
+        ({"removed": False, "existed": True}, False, None),
+        ({"removed": True, "existed": False}, False, None),
+        # 节点认不准是不是这位助理的目录：不管别的字段怎么写，都留着登记再来。
+        ({"removed": False, "existed": True, "unverified": True}, True, "dir_unverified"),
+        ({"removed": False, "existed": False, "unverified": True}, True, "dir_unverified"),
+        ({"removed": True, "existed": False, "unverified": True}, True, "dir_unverified"),
+        # 不像样的回答不算定论。
+        ({}, True, "bad_node_answer"),
+        ({"removed": True}, True, "bad_node_answer"),
+        ({"removed": "true", "existed": False}, True, "bad_node_answer"),
+        ({"removed": True, "existed": 1}, True, "bad_node_answer"),
+        ({"removed": True, "existed": False, "unverified": "yes"}, True, "bad_node_answer"),
     ],
 )
 async def test_what_the_node_says_decides_whether_to_try_again(
@@ -62,6 +73,7 @@ async def test_what_the_node_says_decides_whether_to_try_again(
     monkeypatch: pytest.MonkeyPatch,
     answer: dict,
     kept: bool,
+    code: str | None,
 ) -> None:
     node = FakeNode()
     node.down = bool(answer.pop("down", False))
@@ -75,6 +87,8 @@ async def test_what_the_node_says_decides_whether_to_try_again(
     assert bool(left) is kept
     if kept:
         assert left[0].attempts == 1 and left[0].next_attempt_at > now
+        if code is not None:
+            assert left[0].error_code == code
         # 退避期内不再打扰节点。
         before = len(node.calls)
         await retired_dirs.tick(make_session_factory(db_engine), CIPHER, now)
@@ -246,3 +260,21 @@ async def test_one_round_stops_taking_rows_once_its_time_is_spent(
     counts = await retired_dirs.tick(make_session_factory(db_engine), CIPHER, utcnow())
     assert counts["assistant_dirs_retry"] == 2
     assert sorted(row.attempts for row in await rows(db_session)) == [0, 0, 1, 1]
+
+
+async def test_an_unverified_directory_backs_off_up_to_the_cap(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node = FakeNode()
+    node.removed = {"removed": False, "existed": True, "unverified": True}
+    monkeypatch.setattr(retired_dirs, "call_agent", node)
+    relay = await pool_relay(db_session)
+    await retired(db_session, relay)
+    await db_session.execute(update(AssistantRetiredDir).values(attempts=20))
+    await db_session.commit()
+    now = utcnow()
+    await retired_dirs.tick(make_session_factory(db_engine), CIPHER, now)
+    (row,) = await rows(db_session)
+    assert row.error_code == "dir_unverified" and row.attempts == 21
+    assert row.next_attempt_at - now <= retired_dirs.BACKOFF_MAX + timedelta(seconds=5)
+    assert row.next_attempt_at - now >= retired_dirs.BACKOFF_MAX - timedelta(seconds=5)

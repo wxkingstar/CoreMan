@@ -56,8 +56,11 @@ MARKER_LIMIT = 64 * 1024
 HEALTH_DIR = ".coreman-health"
 TRASH_DIR = ".coreman-trash"
 # 助理专用实例的归属登记：每个助理工作目录一条（文件名是目录真实路径的 sha256），记着员工与目录的
-# inode。它在工作目录之外，沙箱里改不到；删目录时据此认归属，不看助理写得到的标记。
+# inode。它在工作目录之外，沙箱里改不到；删目录时据此认归属，不看助理写得到的标记。删掉之后这条
+# 换成墓碑（{"bot_id": ..., "removed": true}），平台重发时据此答「已删除」；墓碑留
+# TOMBSTONE_SECONDS。
 OWNERS_DIR = ".coreman-owners"
+TOMBSTONE_SECONDS = 30 * 24 * 3600
 RESERVED_DIRS = (HEALTH_DIR, TRASH_DIR, OWNERS_DIR)
 # Workspace.remove 把目录改名放进回收站时用的名字（secrets.token_hex(16)）：32 位小写十六进制。
 TRASH_ENTRY_BYTES = 16
@@ -149,9 +152,14 @@ def trash_dir(root):
     return private_dir(root, TRASH_DIR)
 
 
-def owners_dir(root):
-    """工作目录根下的归属登记目录（见 private_dir）。"""
-    return private_dir(root, OWNERS_DIR)
+def owners_dir(root, create=True):
+    """工作目录根下的归属登记目录（见 private_dir）。`create=False` 时没有就返回 None。"""
+    try:
+        return private_dir(root, OWNERS_DIR, create=create)
+    except FileNotFoundError:
+        if create:
+            raise
+        return None
 
 
 def record_name(path):
@@ -185,13 +193,52 @@ def write_record(record, data):
         raise
 
 
-def registered_to(data, bot, info):
-    """登记是不是记着这个员工、且就是眼前这个目录（inode 与设备都对得上）。"""
+def live_record(data):
+    """像样的归属登记：有员工编号与 inode，不是墓碑。"""
+    bot = data.get("bot_id")
     return (
-        data.get("bot_id") == bot
-        and data.get("ino") == info.st_ino
-        and data.get("dev") == info.st_dev
+        isinstance(bot, str)
+        and bool(bot)
+        and type(data.get("ino")) is int
+        and "removed" not in data
     )
+
+
+def tombstone_of(data, bot):
+    """这个员工的墓碑：本登记删掉过这个员工在这里的目录。"""
+    return data.get("bot_id") == bot and data.get("removed") is True and "ino" not in data
+
+
+def registered_to(data, bot, info):
+    """登记是不是记着这个员工、且就是眼前这个目录。
+
+    只比 inode、不比设备号：工作目录根可以放在几台节点共同挂载的网络存储上，网络挂载的设备号
+    换一台机器、重启或重新挂载都可能变，比设备号会把本助理的目录认成别人的。
+    """
+    return live_record(data) and data.get("bot_id") == bot and data.get("ino") == info.st_ino
+
+
+def purge_tombstones(root, now=None):
+    """删掉归属登记里超过 TOMBSTONE_SECONDS 的墓碑。
+
+    别的一概不动，不跟随链接，没有登记目录就不建。
+    """
+    owners = owners_dir(root, create=False)
+    if owners is None:
+        return
+    cutoff = (time.time() if now is None else now) - TOMBSTONE_SECONDS
+    with os.scandir(owners) as entries:
+        found = list(entries)
+    for entry in found:
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            data = parse_object(read_small(entry.path))
+            if data.get("removed") is True and "ino" not in data:
+                os.unlink(entry.path)
+        except OSError:
+            continue
 
 
 def redact(url):
@@ -487,7 +534,7 @@ class Workspace:
         record = None
         if self.assistant_only and root == self.root:
             # 全新目录：在目录之外登记归属，删除时认这条登记。登记着别的员工、且就是眼前这个空目录
-            # 的，不接管。
+            # 的，不接管；墓碑不挡（那个目录已经删掉了）。
             record = owners_dir(self.agent.root) / record_name(self.root)
             data = read_record(record)
             if (
@@ -498,6 +545,9 @@ class Workspace:
             ):
                 raise self.error("工作目录属于其他员工或所有权标记无效")
         root.mkdir(parents=True, exist_ok=True)
+        if record is not None:
+            # 建好目录马上登记，之后才往里写东西：中途崩了，留下的目录删除时也认得出。
+            write_record(record, {"bot_id": self.bot, "ino": os.lstat(root).st_ino})
         marker = root / MARKER
         if marker.exists() or marker.is_symlink():
             if not self.owned(root):
@@ -507,9 +557,6 @@ class Workspace:
         write_gitignore(root)
         remove_legacy_instruction_excludes(root)
         exclude_private(root)
-        if record is not None:
-            info = os.lstat(root)
-            write_record(record, {"bot_id": self.bot, "ino": info.st_ino, "dev": info.st_dev})
         marker.write_text(
             json.dumps(
                 {
@@ -601,46 +648,62 @@ class Workspace:
     def remove(self):
         """个人助理停用或换走之后删掉它的工作目录。只在助理专用实例上做，只删本员工的目录。
 
-        归属按守护进程自己保管的登记认（见 OWNERS_DIR）：登记记着本员工、且 inode 与设备和眼前的
-        目录一致才算本员工的；记着别人或目录已被换成别的 inode 都不算，原样不动。登记是这次改动
-        之前初始化的目录才没有，这时退回看目录里的标记。
+        归属按守护进程自己保管的登记认（见 OWNERS_DIR），只比 inode（见 registered_to）。平台见到
+        「已删除」或「不是这位助理的」就不再来，所以这两种回答只在能确认时给；确认不了一律答
+        `unverified`（平台留着登记、隔一阵再来），什么都不动。依次是：
 
-        先把目录原子地改名进工作目录根下的回收站（同一文件系统，一步完成，不占操作锁多久），再在
-        后台线程里删：不跟随任何链接，删不掉的留给助理侧的清扫（启动时与之后每 10 分钟）。目录
-        已经不在算删完；不是本员工的不动，如实告诉平台；还有在跑的沙箱轮次用着它时也不动
-        （`busy`），平台稍后再来。
+        - 登记是本员工的墓碑：上次已经删了，答「已删除」，眼前这里有什么都不碰；
+        - 登记记着别的员工：答「不是这位助理的」；
+        - 目录不在：登记记着本员工（运维手工删了，或上次改名进回收站后没来得及写墓碑）就写墓碑、
+          答「已删除」；没有登记（例如共享存储没挂上）认不准；
+        - 目录在：登记记着本员工且 inode 对得上，或没有登记（登记出现之前初始化的目录）而目录里的
+          标记写着本员工，才删；登记读不懂、inode 对不上、既无登记又无标记都认不准。
 
-        `in_use` 核对与改名之间还有一个窗口：这期间开始的轮次照样会挂上这个目录。它逃不出去：
-        沙箱绑定的是目录本身（inode），改名进回收站后它看到的仍是同一棵树，写不到回收站或别处；
-        后台删除按描述符逐层进行、不跟随链接；平台也不会给已不在用的助理记录再派轮次。
+        判断时只读不建：`.coreman-owners` 与回收站只在真要删时才建。
+
+        删的时候先把目录原子地改名进工作目录根下的回收站（同一文件系统，一步完成），把登记换成墓碑，
+        再在后台线程里删：不跟随任何链接，删不掉的留给助理侧的清扫（启动时与之后每 10 分钟）。还有
+        在跑的沙箱轮次用着它时不动（`busy`），平台稍后再来。`in_use` 核对与改名都在轮次准入的锁里
+        （见 AssistantTurns.admission）：准入在同一把锁里登记工作目录并核对它还在原处，所以改名之后
+        不会再有轮次挂上这棵树，后台删除重试时改权限、按路径删也就碰不到沙箱写得到的东西。
         """
         if not self.assistant_only:
             raise self.error("不支持的工作区操作")
-        record = owners_dir(self.agent.root) / record_name(self.root)
-        data = read_record(record)
-        if not os.path.lexists(self.root):
-            if data is not None and data.get("bot_id") == self.bot:
-                with contextlib.suppress(OSError):
-                    os.unlink(record)
+        owners = owners_dir(self.agent.root, create=False)
+        name = record_name(self.root)
+        data = read_record(owners / name) if owners is not None else None
+        exists = os.path.lexists(self.root)
+        unverified = {"removed": False, "existed": exists, "unverified": True}
+        if data is not None and tombstone_of(data, self.bot):
             return {"removed": True, "existed": False}
-        if self.root.is_symlink() or not self.root.is_dir():
-            return {"removed": False, "existed": True}
+        if data is not None and live_record(data) and data["bot_id"] != self.bot:
+            return {"removed": False, "existed": exists}
+        if not exists:
+            if data is not None and live_record(data):
+                with contextlib.suppress(OSError):
+                    write_record(owners / name, {"bot_id": self.bot, "removed": True})
+                return {"removed": True, "existed": False}
+            return unverified
+        info = os.lstat(self.root)
+        if not stat.S_ISDIR(info.st_mode):
+            return unverified
         if data is None:
             owned = self.owned()
         else:
-            owned = registered_to(data, self.bot, os.lstat(self.root))
+            owned = registered_to(data, self.bot, info)
         if not owned:
-            return {"removed": False, "existed": True}
-        turns = getattr(getattr(self.agent, "daemon", None), "assistant", None)
-        if turns is not None and turns.in_use(self.root):
-            # 还有沙箱里的轮次挂着这个目录：现在删，它还能往回收站里写。等它结束再来。
-            return {"removed": False, "existed": True, "busy": True}
+            return unverified
         from .sandbox import remove_tree
 
         target = trash_dir(self.agent.root) / secrets.token_hex(TRASH_ENTRY_BYTES)
-        os.rename(self.root, target)
+        turns = getattr(getattr(self.agent, "daemon", None), "assistant", None)
+        with turns.admission if turns is not None else contextlib.nullcontext():
+            if turns is not None and turns.in_use(self.root):
+                return {"removed": False, "existed": True, "busy": True}
+            os.rename(self.root, target)
+        # 换成墓碑写不进去也已经删了：如实答「已删除」。回执丢了再来时没有墓碑，按上面的规则作答。
         with contextlib.suppress(OSError):
-            os.unlink(record)
+            write_record(owners_dir(self.agent.root) / name, {"bot_id": self.bot, "removed": True})
         threading.Thread(target=remove_tree, args=(target,), daemon=True).start()
         return {"removed": True, "existed": True}
 
