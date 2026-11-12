@@ -36,6 +36,7 @@ type ChatCompletionRequest struct {
 	AddDirs          []string          `json:"add_dirs,omitempty"`
 	Settings         string            `json:"settings,omitempty"`        // JSON string passed verbatim to `claude --settings` (shallow-merged into existing settings.json)
 	ResumeFallback   string            `json:"resume_fallback,omitempty"` // turn-block note used only if --resume finds no session and the turn starts a new one
+	ForkSessionID    string            `json:"fork_session_id,omitempty"` // session to fork from when session_id does not exist yet; falls back to resume_fallback when it is missing too
 }
 
 type StreamOptions struct {

@@ -125,6 +125,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		resumeFallbacks.Store(req.SessionID, req.ResumeFallback)
 		defer resumeFallbacks.Delete(req.SessionID)
 	}
+	if req.SessionID != "" && req.ForkSessionID != "" {
+		forkSources.Store(req.SessionID, req.ForkSessionID)
+		defer forkSources.Delete(req.SessionID)
+	}
 
 	model := resolveModel(req.Model)
 	if model == "" {
@@ -227,6 +231,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"system_mcp_v1": true,
 			// A resume_fallback note is used when --resume finds no session.
 			"resume_fallback_v1": true,
+			"session_fork_v1":    true,
 		},
 	})
 }

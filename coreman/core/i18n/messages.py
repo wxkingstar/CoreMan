@@ -225,6 +225,21 @@ MESSAGES: dict[str, dict[str, str]] = {
         "busy_resumed_desc": "这些消息会合在一起处理。",
         "busy_dropped_title": "好的，不处理了",
         "busy_dropped_desc": "需要的话请重新发送。",
+        "topic_title": "这个话题要接着群里的上下文吗？",
+        "topic_ask": (
+            "这是我在这个话题里的第一条。选「独立开启新会话」，话题从头聊；"
+            "选「继承主群会话」，我带着群里刚才聊的内容接着聊，之后话题和群里各聊各的。"
+        ),
+        "topic_default": "{m} 分钟内不选，或者直接接着发消息，都按独立开启新会话处理。",
+        "topic_opt_new": "独立开启新会话",
+        "topic_opt_fork": "继承主群会话",
+        "topic_new_title": "好的，独立开启新会话",
+        "topic_new_desc": "这个话题从头聊，马上处理。",
+        "topic_fork_title": "好的，继承主群会话",
+        "topic_fork_desc": "带着群里的上下文接着聊，马上处理。",
+        "topic_nomain_desc": "群里的会话已经结束了，这个话题只能从头聊，马上处理。",
+        "topic_late_title": "已经开始处理了",
+        "topic_late_desc": "这个话题已经按独立会话在处理；要换成接着群里聊，请在群里直接问。",
         "busy_progress_quiet": "，最近 {elapsed} 没有新动作",
         "busy_opt_stop": "停下，先做这条",
         "busy_opt_wait": "等它做完，再做这条",
@@ -590,6 +605,31 @@ MESSAGES: dict[str, dict[str, str]] = {
         "busy_resumed_desc": "これらのメッセージはまとめて対応します。",
         "busy_dropped_title": "対応を取りやめました",
         "busy_dropped_desc": "必要な場合はもう一度送ってください。",
+        "topic_title": "このスレッドはグループの文脈を引き継ぎますか？",
+        "topic_ask": (
+            "このスレッドでの最初のメッセージです。"
+            "「新しい会話を始める」ならスレッドは最初から、"
+            "「グループの会話を引き継ぐ」ならグループで話していた内容を踏まえて続けます。"
+            "その後スレッドとグループはそれぞれ別に進みます。"
+        ),
+        "topic_default": (
+            "{m} 分以内に選ばない場合、またはそのまま続けて送った場合は、"
+            "新しい会話として対応します。"
+        ),
+        "topic_opt_new": "新しい会話を始める",
+        "topic_opt_fork": "グループの会話を引き継ぐ",
+        "topic_new_title": "新しい会話を始めます",
+        "topic_new_desc": "このスレッドは最初から始め、すぐに対応します。",
+        "topic_fork_title": "グループの会話を引き継ぎます",
+        "topic_fork_desc": "グループの文脈を踏まえて、すぐに対応します。",
+        "topic_nomain_desc": (
+            "グループの会話はすでに終了しているため、最初から始めてすぐに対応します。"
+        ),
+        "topic_late_title": "すでに対応を始めています",
+        "topic_late_desc": (
+            "このスレッドは新しい会話として対応中です。"
+            "グループの文脈が必要な場合はグループで直接聞いてください。"
+        ),
         "busy_progress_quiet": "、直近 {elapsed} は動きがありません",
         "busy_opt_stop": "止めてこちらを先に",
         "busy_opt_wait": "終わってからこちらを",

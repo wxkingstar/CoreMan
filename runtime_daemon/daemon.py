@@ -68,6 +68,7 @@ DRIVER_CAPABILITIES = {
         "systems_catalog_v1",
         "resume_fallback_v1",
         "system_mcp_v1",
+        "session_fork_v1",
     ),
     "codex": (
         "feishu_personal_tools_v1",
@@ -77,6 +78,7 @@ DRIVER_CAPABILITIES = {
         "systems_catalog_v1",
         "resume_fallback_v1",
         "system_mcp_v1",
+        "session_fork_v1",
     ),
     "opencode": (
         "feishu_personal_tools_v1",
@@ -86,6 +88,7 @@ DRIVER_CAPABILITIES = {
         "systems_catalog_v1",
         "resume_fallback_v1",
         "system_mcp_v1",
+        "session_fork_v1",
     ),
 }
 CONTROL_LEASE_SECONDS = 40.0

@@ -260,6 +260,26 @@ func flattenForFreshSession(messages []openai.ChatMessage, uploadDir string) (pr
 	return strings.Join(parts, "\n\n"), files
 }
 
+// forkedInput is the turn for a session with no binding yet that should start
+// as a fork of another session (a Feishu topic continuing the group's main
+// session): `run --session <src> --fork` continues a copy, and its events carry
+// the new opencode session, which the turn binds to this session. A missing
+// source fails like a missing resume and starts fresh with the platform's
+// continuation (rebuildFresh). ok is false when there is nothing to fork.
+func forkedInput(req *openai.ChatCompletionRequest, model, uploadDir, systemFile string) (opencodeInput, bool) {
+	if req.ForkSessionID == "" || req.ForkSessionID == req.SessionID {
+		return opencodeInput{}, false
+	}
+	src := bindings.Get(req.ForkSessionID)
+	if src == "" {
+		return opencodeInput{}, false
+	}
+	log.Printf("Forking opencode session=%s from session_id=%s into session_id=%s", src, req.ForkSessionID, req.SessionID)
+	input := buildInput(req, model, src, uploadDir, systemFile)
+	input.Args = append(input.Args, "--fork")
+	return input, true
+}
+
 // newRebuildFresh builds the retry used when the bound opencode session no
 // longer exists: the binding is dropped and the turn starts a new session with
 // the full history plus the platform's continuation note.

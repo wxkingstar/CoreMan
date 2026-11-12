@@ -135,6 +135,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Resuming opencode session=%s for session_id=%s", bound, req.SessionID)
 	}
 	input := buildInput(&req, model, bound, uploadDir, systemFile)
+	if bound == "" {
+		if forked, ok := forkedInput(&req, model, uploadDir, systemFile); ok {
+			input = forked
+		}
+	}
 
 	chatID := openai.GenerateChatID()
 	created := time.Now().Unix()
@@ -235,6 +240,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"systems_catalog_v1":      true,
 			"system_mcp_v1":           true,
 			"resume_fallback_v1":      true,
+			"session_fork_v1":         true,
 		},
 	})
 }

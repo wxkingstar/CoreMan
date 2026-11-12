@@ -35,7 +35,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
-from coreman.core.chat import interactions
+from coreman.core.chat import interactions, topics
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.cron.precheck import PrecheckError, validate_script
 from coreman.core.cron.schedule import next_run
@@ -1023,7 +1023,7 @@ async def verified_group_origin(session: AsyncSession, task: Task, actor: str) -
         or event.platform != bot.platform
         or event.chat_type != "group"
         or event.kind != "message"
-        or task.session_key != event.chat_id
+        or topics.chat_of(task.session_key or "") != event.chat_id
         or not event.sender_platform_user_id
     ):
         raise ValueError("group_chat_required")

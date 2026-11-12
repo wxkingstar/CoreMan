@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks import reply_to
 from coreman.core.bus import outbox, tasks
+from coreman.core.chat import topics
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
 from coreman.core.crypto import Cipher
@@ -490,13 +491,21 @@ class HumanAdmission:
 
 
 async def admit_human(
-    session: AsyncSession, bot_id: uuid.UUID, chat_id: str, pid: str, *, command: str | None = None
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    chat_id: str,
+    pid: str,
+    *,
+    command: str | None = None,
+    session_key: str | None = None,
 ) -> HumanAdmission | None:
     """An authorized human turn replaces pending work in the shared group conversation.
 
     Bot lock serializes admission with registration/opening. Ledger locks precede task locks,
     matching completion and reconciliation. No actor change or per-user session partition.
+    Only the conversation the turn belongs to is affected: a Feishu topic is its own session.
     """
+    key = session_key or chat_id
     # 只在这个群有进行中的协作时接管：没有协作的群照普通群聊排队，不打断别人交代的事。
     if not await session.scalar(
         select(BotCollaboration.id)
@@ -504,6 +513,7 @@ async def admit_human(
         .where(
             BotCollaborationRoute.source_bot_id == bot_id,
             BotCollaborationRoute.chat_id == chat_id,
+            topics.same_conversation(BotCollaboration.source_session_key, key),
             BotCollaboration.status.in_(ACTIVE),
         )
         .limit(1)
@@ -526,6 +536,7 @@ async def admit_human(
         .where(
             BotCollaborationRoute.source_bot_id == bot_id,
             BotCollaborationRoute.chat_id == chat_id,
+            topics.same_conversation(BotCollaboration.source_session_key, key),
             BotCollaboration.status.in_(ACTIVE),
         )
         .order_by(BotCollaboration.created_at)
@@ -546,7 +557,7 @@ async def admit_human(
         select(Task)
         .where(
             Task.bot_id == bot_id,
-            Task.session_key == chat_id,
+            Task.session_key == key,
             Task.kind.in_(HUMAN_TURN_KINDS),
             Task.status.in_(tasks.OPEN),
         )

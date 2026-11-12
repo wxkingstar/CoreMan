@@ -313,6 +313,24 @@ class OpenStage(ChatStageBase):
             elif carried:
                 # 会话文件已带到新运行时，原生续聊；驱动续不上时才把它放进本轮块。
                 resume_fallback = carried
+        fork_session_id = ""
+        if info.forked_from is not None:
+            from coreman.core.chat import topics
+            from coreman.core.chat.session_carry import carried_context
+
+            forked = await carried_context(
+                session,
+                bot_id=bot.id,
+                session_key=topics.chat_of(intake.session_key),
+                relay_session_id=info.forked_from,
+                header=topics.FORK_HEADER,
+            )
+            if await topics.fork_supported(session, relay.runtime_node_id, backend):
+                # 运行时原生分叉；群主会话在这台节点上找不到时，驱动用这段开新会话。
+                fork_session_id = str(info.forked_from)
+                resume_fallback = forked or resume_fallback
+            elif forked:
+                ctx.turn_notes.append(forked)
         # 各处在传入文本后面追加自己的规则：从空串起步，攒出的就是本轮附加能力，
         # 交给 build_system_prompt 放在结尾重申之前。
         from coreman.runtime.worker.chat import wecom_personal
@@ -401,6 +419,7 @@ class OpenStage(ChatStageBase):
             turn_context=turn_context,
             worktree=bot.dev_mode,
             resume_fallback=resume_fallback,
+            fork_session_id=fork_session_id,
         )
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":

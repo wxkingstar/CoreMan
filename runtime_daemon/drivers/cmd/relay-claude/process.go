@@ -60,11 +60,14 @@ func hasArg(args []string, flag string) bool {
 	return false
 }
 
-// sessionArg returns the session id passed via --resume or --session-id.
+// sessionArg returns this turn's session id: --session-id when present (a
+// fork resumes the source but writes the new id), otherwise --resume.
 func sessionArg(args []string) string {
-	for i, a := range args {
-		if (a == "--resume" || a == "--session-id") && i+1 < len(args) {
-			return args[i+1]
+	for _, flag := range []string{"--session-id", "--resume"} {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				return args[i+1]
+			}
 		}
 	}
 	return ""
@@ -384,7 +387,7 @@ func (h *procHandle) abort() *exec.Cmd {
 
 // startClaudeStream wraps launchClaude with auto-retry on resume failure.
 // If --resume produced no real content because the session is actually
-// missing (stderr marker), it retries the whole command with --session-id.
+// missing (stderr marker), it retries the whole command (see missingRetry).
 //
 // ready signals when claude produced its first usable output (or definitively
 // failed); the handler sends SSE headers before that and uses the returned
@@ -416,7 +419,9 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			return
 		}
 
-		if hasArg(args, "--resume") {
+		// A resume run is sniffed; a missing session is retried (see missingRetry),
+		// and a retry that resumes again (a fork) is sniffed the same way.
+		for hasArg(args, "--resume") {
 			// Sniff the resume run. Everything is buffered — never discarded:
 			// an early result event carries the error text (API error / rate
 			// limit / auth failure) and the turn's usage, and dropping it used
@@ -524,10 +529,12 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				return
 			}
 
-			log.Printf("Resume session not found, retrying with --session-id")
-			retryArgs := replaceArg(args, "--resume", "--session-id")
+			retryArgs, fallback := missingRetry(args)
 			resetMeter(sessionArg(retryArgs))
-			retryPrompt := withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			retryPrompt := prompt
+			if fallback {
+				retryPrompt = withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			}
 			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, retryPrompt, workingDir, envVars, watchdogTimeout)
 			if err != nil {
 				ready <- err
@@ -540,6 +547,10 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				}
 				ready <- fmt.Errorf("request cancelled during claude resume retry")
 				return
+			}
+			args = retryArgs
+			if hasArg(args, "--resume") {
+				continue
 			}
 			go func() { <-sessErrCh }()
 
@@ -625,10 +636,12 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 	// existing session and hides the original failure.
 	completion := <-sessErrCh
 	if hasArg(args, "--resume") && completion.SessionMissing && lastText == "" && result == "" {
-		log.Printf("Resume session not found, retrying with --session-id")
-		retryArgs := replaceArg(args, "--resume", "--session-id")
+		retryArgs, fallback := missingRetry(args)
 		resetMeter(sessionArg(retryArgs))
-		return runClaude(retryArgs, withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs))), workingDir, envVars)
+		if fallback {
+			prompt = withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+		}
+		return runClaude(retryArgs, prompt, workingDir, envVars)
 	}
 	// Preserve structured API errors/content already returned by the CLI.
 	// Only an otherwise empty response needs the safe process diagnostic.

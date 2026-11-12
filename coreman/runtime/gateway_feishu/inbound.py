@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from coreman.core.chat import busy_choice
+from coreman.core.chat import busy_choice, topics
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
@@ -170,6 +170,7 @@ def _normalize_event(
             and not parse_task_id(task_id)
             and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
             and busy_choice.parse_card_task_id(task_id) is None
+            and topics.parse_card_task_id(task_id) is None
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")
@@ -352,6 +353,8 @@ def _normalize_event(
             "message_id": mid,
             "parent_id": message.get("parent_id"),
             "root_id": message.get("root_id"),
+            # 话题里的消息才有：会话按话题分开（core/chat/topics.py）。
+            "thread_id": message.get("thread_id"),
             "create_time": message.get("create_time"),
         },
         raw=raw,

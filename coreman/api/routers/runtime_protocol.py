@@ -128,6 +128,9 @@ class Capability(BaseModel):
     # 驱动续不上原会话时（Claude --resume 找不到会话、Codex 找不到 rollout），用平台带的续接文本
     # 开新会话。旧节点没有，会从空会话开始。
     resume_fallback_v1: StrictBool = False
+    # 驱动能把新会话从另一个会话分叉出来（飞书话题继承群主会话）。旧节点没有，退回附上群主会话
+    # 最近的对话。
+    session_fork_v1: StrictBool = False
     # 记忆在工作目录的 .coreman-memory/，Claude 与 Codex 共用。旧节点没有，Codex 读不到记忆。
     memory_layout_v1: StrictBool = False
     # 节点能在多个席位之间切换（见 runtime_daemon/seats.py）。旧节点没有，管理台提示升级。

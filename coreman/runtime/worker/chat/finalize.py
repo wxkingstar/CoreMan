@@ -327,6 +327,17 @@ class FinalizeStage(ChatStageBase):
                     session_key=intake.session_key,
                     relay_session_id=pre.info.relay_session_id,
                 )
+            if (
+                owned
+                and pre.info.forked_from is not None
+                and verdict.log_status in ("success", "ask_user")
+            ):
+                await sessions.settle_fork(
+                    session,
+                    bot_id=intake.bot.id,
+                    session_key=intake.session_key,
+                    relay_session_id=pre.info.relay_session_id,
+                )
             await session.commit()
         if not owned:
             ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)

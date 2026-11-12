@@ -327,6 +327,41 @@ func flattenForFreshSession(messages []openai.ChatMessage, sessionDir string) (p
 	return
 }
 
+// forkedInput is the turn for a session with no thread yet that should start as
+// a fork of another session (a Feishu topic continuing the group's main
+// session). The fork's thread.started binds the new thread to this session; a
+// missing source rollout fails like a missing resume and starts fresh with the
+// platform's continuation (rebuildFresh). ok is false when there is nothing to
+// fork, and the turn starts a fresh thread as usual.
+func forkedInput(req *openai.ChatCompletionRequest, model, sessionDir string) (codexInput, bool) {
+	if req.ForkSessionID == "" || req.ForkSessionID == req.SessionID {
+		return codexInput{}, false
+	}
+	src := threads.Get(req.ForkSessionID)
+	if src == "" {
+		return codexInput{}, false
+	}
+	log.Printf("Forking codex thread_id=%s from session_id=%s into session_id=%s", src, req.ForkSessionID, req.SessionID)
+	if meter != nil {
+		meter.Inherit(req.SessionID, req.ForkSessionID)
+	}
+	return forkInput(buildCodexInput(req, model, src, sessionDir)), true
+}
+
+// forkInput turns a resume of the source thread into `codex exec fork`, which
+// takes the same flags and prompt: verified with codex-cli 0.156, the fork
+// prints thread.started with a new thread id and keeps the history, and a
+// missing source exits 1 with empty stdout and "no rollout found" on stderr.
+func forkInput(in codexInput) codexInput {
+	args := make([]string, len(in.Args))
+	copy(args, in.Args)
+	if len(args) > 1 && args[0] == "exec" && args[1] == "resume" {
+		args[1] = "fork"
+	}
+	in.Args = args
+	return in
+}
+
 // newRebuildFresh builds the retry closure used when resuming a codex thread
 // yields zero output. Verified empirically: `codex exec resume <dead-thread>`
 // exits 1 with EMPTY stdout — the "no rollout found for thread id ..." text

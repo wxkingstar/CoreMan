@@ -132,6 +132,27 @@ func (m *usageMeter) Forget(sessionID string) {
 	_ = os.Remove(m.path(sessionID))
 }
 
+// Inherit starts dst from src's baseline. A forked thread's cumulative counter
+// carries the source thread's totals (verified with codex-cli 0.156: the first
+// forked turn reported source total + its own turn), so without this the first
+// turn of the fork would bill the whole source conversation again.
+func (m *usageMeter) Inherit(dst, src string) {
+	if dst == "" || src == "" || dst == src {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.load(src)
+	if !ok {
+		b, ok = m.memory[src]
+	}
+	if !ok {
+		return
+	}
+	m.memory[dst] = b
+	m.store(dst, b)
+}
+
 func (m *usageMeter) load(sessionID string) (meterBaseline, bool) {
 	var b meterBaseline
 	data, err := os.ReadFile(m.path(sessionID))
