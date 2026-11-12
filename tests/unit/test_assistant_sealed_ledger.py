@@ -34,6 +34,7 @@ ENTITY_SELECTS = {
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
+    "coreman/core/assistants/approvals/service.py": 1,  # 去重：session.scalar，自动还原
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
@@ -102,6 +103,7 @@ RAW_STATEMENTS = {
 # 在已登记的文件里新增一条写语句同样会失败。
 WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
+    "coreman/core/assistants/approvals/service.py": 1,  # 审批单：经 ORM 新建，flush 钩子封存
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
     "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态
