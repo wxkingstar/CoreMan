@@ -145,6 +145,8 @@ async def initialize_workspace(session: AsyncSession, bot: Bot, cipher: Cipher |
         raise ApiError(422, 422, "运行时不存在")
     await memory_transfer.ensure_idle(session, bot)
     if is_assistant(bot):
+        if inactive_assistant(bot):
+            raise ApiError(409, 409, "个人助理还没开通好或已停用，不能初始化工作目录")
         await require_new_assistant_directory(relay, bot, cipher)
     bot.workspace_state, bot.workspace_phase = "initializing", "初始化工作说明"
     try:

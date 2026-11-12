@@ -450,6 +450,8 @@ async def test_a_standard_bot_holding_the_key_is_never_touched(
     await tick(make_session_factory(db_engine), messenger)
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.outcome == "failed" and flow.error_code == "bot_key_taken"
+    assert messenger.texts[-1][1] == provisioning.FAILURES["bot_key_taken"]
+    assert messenger.texts[-1][1] != provisioning.GENERIC_FAILURE
     other = await db_session.get(Bot, other.id, populate_existing=True)
     assert other is not None and other.bot_key == key and other.enabled is enabled
     assert other.kind == "standard"

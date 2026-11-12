@@ -290,3 +290,24 @@ async def test_assistant_initialize_only_on_a_missing_directory(client, db_sessi
     assert created.status_code == 200, created.text
     assert calls == ["workspace-info", "ping", "workspace-init"]
     assert created.json()["data"]["state"] == "ready"
+
+
+@pytest.mark.parametrize("state", ["provisioning", "deprovisioning", "deprovisioned", None])
+async def test_assistant_not_active_cannot_initialize(client, db_session, monkeypatch, state):
+    """没开通好或已停用的助理不能初始化工作目录：否则节点上会多出一个没人会删的目录。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, url = await assistant_setup(client, db_session)
+    bot.assistant_state = state
+    await db_session.commit()
+    calls: list[str] = []
+
+    async def node(relay, cipher, operation, payload=None):
+        calls.append(operation)
+        return {"success": True, "exists": False}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", node)
+    refused = await client.post(url + "/initialize")
+    assert refused.status_code == 409, refused.text
+    assert "个人助理还没开通好或已停用" in refused.text
+    assert calls == []

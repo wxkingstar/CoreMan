@@ -71,6 +71,7 @@ FAILURES = {
     "no_model": "个人助理还没有可用的模型，这次开通没有完成，请联系管理员。",
     "app_unavailable": "个人助理应用暂时不可用，这次开通没有完成，请联系管理员。",
     "app_permission_missing": "个人助理应用的飞书权限不足，这次开通没有完成，请联系管理员。",
+    "bot_key_taken": "个人助理这次没能开通，请联系管理员处理。",
     "already_provisioned": "你已经有一个个人助理了。",
     "grant_not_completed": "飞书授权一直没有完成，这次开通已取消；想用的时候再给我发条消息即可。",
 }

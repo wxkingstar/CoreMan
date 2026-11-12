@@ -86,6 +86,20 @@ async def test_destroy_makes_the_key_unavailable_for_good(db_session: AsyncSessi
         await keys.data_cipher(db_session, MASTER, owner)
 
 
+async def test_destroy_stamps_the_statement_time_not_the_transaction_start(
+    db_session: AsyncSession,
+) -> None:
+    owner = await _owner(db_session)
+    await keys.ensure_key(db_session, MASTER, owner)
+    await db_session.commit()
+    await db_session.execute(text("SELECT pg_sleep(0.2)"))
+    inside = await db_session.scalar(text("SELECT clock_timestamp()"))
+    await keys.destroy_key(db_session, owner)
+    stamped = await db_session.scalar(select(AssistantKey.destroyed_at))
+    await db_session.commit()
+    assert stamped is not None and stamped >= inside
+
+
 async def test_reissue_after_destroy_starts_a_new_generation(db_session: AsyncSession) -> None:
     owner = await _owner(db_session)
     await keys.ensure_key(db_session, MASTER, owner)

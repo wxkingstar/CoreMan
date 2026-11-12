@@ -151,12 +151,13 @@ def data_cipher_sync(session: Session, cipher: Cipher, owner_id: uuid.UUID) -> C
 async def destroy_key(session: AsyncSession, owner_id: uuid.UUID) -> None:
     """清空包裹后的密钥并记下时间；之后 `data_cipher` 抛 `KeyDestroyed`。调用方负责提交。
 
-    本进程立即生效；其他进程最迟 `KEY_TTL_SECONDS` 后生效。
+    本进程立即生效；其他进程最迟 `KEY_TTL_SECONDS` 后生效。时间用语句执行时刻（`clock_timestamp`）
+    而不是事务开始时刻：同一事务里前面的网络调用可能已耗时很久，冷却期要从密钥真正销毁起算。
     """
     await session.execute(
         update(AssistantKey)
         .where(AssistantKey.user_id == owner_id, AssistantKey.destroyed_at.is_(None))
-        .values(dek_enc=None, destroyed_at=func.now())
+        .values(dek_enc=None, destroyed_at=func.clock_timestamp())
     )
     forget(owner_id)
 
