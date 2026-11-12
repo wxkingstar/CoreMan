@@ -758,3 +758,63 @@ def test_unknown_arguments_are_still_refused(tmp_path):
     for bad in ("--expect-uid=abc", "--force"):
         result = run_install_script(tmp_path, bad)
         assert result.returncode != 0 and "不支持的参数" in result.stderr
+
+
+def test_assistant_only_flag_writes_the_mode_into_the_config(tmp_path):
+    """--assistant-only 只让写出的 config.json 多一个 assistant_only: true；不带就没有这个键。"""
+    pki = make_pki(tmp_path / "pki")
+    bundle = install_script_bundle()
+    digest = hashlib.sha256(bundle).hexdigest()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "python3").symlink_to(sys.executable)
+
+    def respond(path):
+        if path.endswith("/bundle"):
+            return 200, {"X-SHA256": digest, "Content-Type": "application/gzip"}, bundle
+        return 404, {}, b""
+
+    def install(name, *args):
+        home = tmp_path / name
+        home.mkdir()
+        payload = {
+            "api_url": f"https://127.0.0.1:{port}",
+            "install_token": "link.token",
+            "workspace_root": str(tmp_path / name / "projects"),
+            "ca_pem": pki.ca_pem,
+        }
+        path = tmp_path / f"install-{name}.sh"
+        path.write_text(
+            (ROOT / "runtime_daemon/install.sh")
+            .read_text()
+            .replace("__COREMAN_CONFIG__", base64.b64encode(json.dumps(payload).encode()).decode())
+        )
+        env = {
+            "HOME": str(home),
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            "FAKE_INSTALL_MODE": "ok",
+        }
+        result = subprocess.run(
+            ["sh", str(path), *args], env=env, capture_output=True, text=True, timeout=300
+        )
+        assert result.returncode == 0, result.stderr
+        config = home.resolve() / ".local/share/coreman-runtime/config.json"
+        return json.loads(config.read_text())
+
+    with https_server(pki, respond) as port:
+        assert "assistant_only" not in install("plain")
+        assert install("dedicated", "--assistant-only")["assistant_only"] is True
+        combined = install("both", f"--expect-uid={os.getuid()}", "--assistant-only")
+        assert combined["assistant_only"] is True
+
+
+def test_assistant_only_flag_runs_like_the_default_up_to_the_download(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    plain = run_install_script(tmp_path / "a")
+    dedicated = run_install_script(tmp_path / "b", "--assistant-only")
+    assert plain.returncode == dedicated.returncode != 0
+    assert plain.stderr.replace(str(tmp_path / "a"), "X") == dedicated.stderr.replace(
+        str(tmp_path / "b"), "X"
+    )

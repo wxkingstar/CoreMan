@@ -395,3 +395,119 @@ def test_self_test_returns_layout_failed_instead_of_raising(tmp_path):
     result = sandbox.self_test(missing, system_name="Linux", bwrap="/usr/bin/bwrap", runner=runner)
     assert result.code == "layout_failed" and calls == []
     assert not (tmp_path / "turns").exists() or not any((tmp_path / "turns").iterdir())
+
+
+def test_probe_run_mounts_and_checks_every_cli_root(tmp_path, monkeypatch):
+    """「看不见的路径」要在真实一轮的挂载下证明：探测那一次也挂上所有 CLI 的只读根。"""
+    monkeypatch.setattr(sandbox, "link_cli", lambda *_a, **_k: True)
+    runner, calls = fake_runner(ALL_GOOD)
+    base = inputs(tmp_path)
+    clis = {"claude": [Path("/opt/claude"), Path("/opt/node")], "codex": [Path("/opt/codex")]}
+    sandbox.self_test(
+        sandbox.SelfTestInputs(**{**base.__dict__, "clis": clis}),
+        system_name="Linux",
+        bwrap="/usr/bin/bwrap",
+        runner=runner,
+    )
+    probe = next(c for c in calls if "-c" in c)
+    for root in ("/opt/claude", "/opt/node", "/opt/codex"):
+        index = probe.index(root)
+        assert probe[index - 1] == "--ro-bind" and probe[index + 1] == root
+    assert {"/opt/claude", "/opt/node", "/opt/codex"} <= set(json.loads(probe[-1])["ro"])
+
+
+def test_bwrap_refuses_ro_roots_inside_turns_sockets_or_the_workspace_root(tmp_path):
+    built = layout(tmp_path)
+    workspace = tmp_path / "projects"
+    work = workspace / "bot-1"
+    work.mkdir(parents=True)
+    try:
+        inside = [
+            built.root.parent / "other-turn",
+            built.run.parent / "other-run",
+            workspace / "bot-2",
+            work / "node_modules",
+        ]
+        for bad in inside:
+            launch = sandbox.Launch(
+                bwrap="/usr/bin/bwrap",
+                layout=built,
+                workdir=work,
+                provider="claude",
+                env={},
+                ro_paths=[bad],
+                system=[],
+                workspace_root=workspace,
+            )
+            with pytest.raises(ValueError, match="unsafe_mount"):
+                sandbox.bwrap_argv(launch, ["true"])
+        fine = sandbox.Launch(
+            bwrap="/usr/bin/bwrap",
+            layout=built,
+            workdir=work,
+            provider="claude",
+            env={},
+            ro_paths=[tmp_path / "release"],
+            system=[],
+            workspace_root=workspace,
+        )
+        assert "--ro-bind" in sandbox.bwrap_argv(fine, ["true"])
+    finally:
+        built.remove()
+
+
+def test_self_test_guards_the_workspace_root(tmp_path):
+    runner, calls = fake_runner(ALL_GOOD)
+    base = inputs(tmp_path)
+    result = sandbox.self_test(
+        sandbox.SelfTestInputs(
+            **{
+                **base.__dict__,
+                "workspace_root": tmp_path / "projects",
+                "extra_ro": [tmp_path / "projects" / "bot-1"],
+            }
+        ),
+        system_name="Linux",
+        bwrap="/usr/bin/bwrap",
+        runner=runner,
+    )
+    assert result.code == "unsafe_mount" and calls == []
+
+
+def test_remove_tree_reopens_directories_the_sandbox_closed(tmp_path):
+    top = tmp_path / "turn"
+    locked = top / "config" / "locked"
+    (locked / "deeper").mkdir(parents=True)
+    (locked / "deeper" / "f").write_text("x")
+    (locked / "f").write_text("x")
+    (locked / "deeper").chmod(0o000)
+    locked.chmod(0o000)
+    sandbox.remove_tree(top)
+    assert not top.exists()
+
+
+def test_remove_tree_never_follows_links(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "keep").mkdir(parents=True)
+    outside.chmod(0o500)
+    top = tmp_path / "turn"
+    top.mkdir()
+    (top / "link").symlink_to(outside)
+    closed = top / "closed"
+    closed.mkdir()
+    (closed / "link").symlink_to(outside)
+    closed.chmod(0o000)
+    try:
+        sandbox.remove_tree(top)
+        assert not top.exists()
+        assert (outside / "keep").is_dir() and outside.stat().st_mode & 0o777 == 0o500
+    finally:
+        outside.chmod(0o700)
+
+
+def test_remove_tree_of_a_missing_path_touches_nothing(tmp_path):
+    parent = tmp_path / "turns"
+    parent.mkdir(mode=0o750)
+    parent.chmod(0o750)
+    sandbox.remove_tree(parent / "gone")
+    assert parent.stat().st_mode & 0o777 == 0o750

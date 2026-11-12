@@ -78,6 +78,7 @@ def make(tmp_path: Path, platform: Platform) -> AssistantTurns:
         },
         seats=Seats(),
         task_info={},
+        assistant_only=True,
         http=httpx.AsyncClient(
             transport=httpx.MockTransport(platform.handler),
             base_url="https://coreman.example.com",
@@ -638,3 +639,165 @@ def test_plan_turn_requires_a_working_dir_strictly_inside_the_root(tmp_path):
     ):
         with pytest.raises(ValueError):
             plan_turn("claude", data, workspace_root=root)
+
+
+async def test_read_only_mount_inside_the_workspace_root_refuses_the_turn(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    other = Path(turns.daemon.config["workspace_root"]) / "someone-else"
+    other.mkdir()
+    turns.daemon.config["assistant_sandbox_ro_paths"] = [str(other)]
+    fake_sandbox(turns, monkeypatch)
+    monkeypatch.setattr(turns, "_launch", AssistantTurns._launch.__get__(turns))
+    monkeypatch.setattr(assistant_turns.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(sandbox, "cli_mounts", lambda *_a, **_k: [])
+    frames = Frames()
+    await turns.run("call-1", "claude", request(tmp_path), frames)
+    assert json.loads(frames.events[0][1])["error"]["code"] == "unsafe_mount"
+
+
+async def test_self_test_guards_the_workspace_root(tmp_path, monkeypatch):
+    turns = make(tmp_path, Platform())
+    seen: list = []
+
+    def self_test(inputs):
+        seen.append(inputs)
+        return sandbox.SelfTestResult(dict.fromkeys(sandbox.PROVIDERS, False), "x")
+
+    monkeypatch.setattr(sandbox, "self_test", self_test)
+    monkeypatch.setattr(turns, "hidden_paths", lambda: [])
+    await turns.refresh_capability()
+    assert seen[0].workspace_root == Path(turns.daemon.config["workspace_root"])
+
+
+async def test_cleanup_removes_directories_the_sandbox_locked(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    original = turns._settle
+
+    async def settle(root, *args):
+        locked = root / "home" / "locked"
+        (locked / "inner").mkdir(parents=True)
+        locked.chmod(0o000)
+        return await original(root, *args)
+
+    monkeypatch.setattr(turns, "_settle", settle)
+    await turns.run("call-1", "claude", request(tmp_path), Frames())
+    assert not any(turns.turns_dir.iterdir())
+
+
+async def test_sweep_removes_directories_the_sandbox_locked(tmp_path):
+    turns = make(tmp_path, Platform())
+    root = leftover(turns, "a-locked")
+    locked = root / "home" / "locked"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0o000)
+    await turns.sweep()
+    assert not root.exists()
+
+
+def test_done_gate_caps_what_it_holds_after_the_marker():
+    limit = assistant_turns.HELD_LIMIT
+    assert limit == 64 * 1024
+    gate = DoneGate()
+    assert gate.feed(b"data: a\n\ndata: [DONE]\n\n" + b"x" * limit) == b"data: a\n\n"
+    for _ in range(100):
+        assert gate.feed(b"y" * limit) == b""
+    held = gate.release()
+    assert len(held) == limit
+    assert held.startswith(b"data: [DONE]\n\n")
+
+
+async def test_a_flood_after_done_still_ends_the_turn_normally(tmp_path, monkeypatch):
+    monkeypatch.setattr(assistant_turns, "HELD_LIMIT", 32)
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    frames = Frames()
+    gate_feed = DoneGate.feed
+
+    def flooding(self, part):
+        return gate_feed(self, part + (b"z" * 1000 if b"[DONE]" in part else b""))
+
+    monkeypatch.setattr(DoneGate, "feed", flooding)
+    await turns.run("call-1", "claude", request(tmp_path), frames)
+    tail = frames.body()[frames.body().index(b"data: [DONE]") :]
+    assert len(tail) == 32
+    assert frames.events[-1][0] == "finish" and frames.events[-1][2] == {}
+    assert [s for s, _ in platform.uploads] == ["ok"]
+
+
+# ---- 关停与收尾 -------------------------------------------------------------------
+
+
+async def test_stop_is_bounded_and_never_cancels_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(assistant_turns, "SHUTDOWN_WAIT", 0.1)
+    turns = make(tmp_path, Platform())
+    release = asyncio.Event()
+
+    async def finishing():
+        await release.wait()
+
+    async def uploading():
+        await asyncio.sleep(3600)
+
+    finish = asyncio.ensure_future(finishing())
+    upload = asyncio.ensure_future(uploading())
+    turns.background |= {finish, upload}
+    turns.finishing.add(finish)
+    await asyncio.wait_for(turns.stop(), 2)
+    await asyncio.sleep(0)
+    assert upload.cancelled()
+    assert not finish.done()
+    release.set()
+    await asyncio.wait_for(finish, 2)
+    assert not finish.cancelled()
+
+
+async def test_refused_turn_drops_its_meta_before_anything_can_be_cancelled(tmp_path, monkeypatch):
+    """被拒绝的轮次即使收尾没做完（守护进程退出），清扫也不会把它当成一份转录传上去。"""
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    monkeypatch.setattr(
+        turn_credentials,
+        "for_provider",
+        lambda *_a: (_ for _ in ()).throw(turn_credentials.Unavailable("credential_expiring")),
+    )
+
+    async def unfinished(layout, process, proxy, remove_root):
+        turns.active.discard(layout.turn_id)
+
+    monkeypatch.setattr(turns, "_finish", unfinished)
+    await turns.run("call-1", "claude", request(tmp_path), Frames())
+    assert [p for p in turns.turns_dir.iterdir()]  # 收尾没做，目录还在
+    await turns.sweep()
+    assert platform.uploads == [("unchanged", b"")]
+    assert not any(turns.turns_dir.iterdir())
+
+
+async def test_driver_log_failure_refuses_the_turn(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    monkeypatch.setattr(turns, "_launch", AssistantTurns._launch.__get__(turns))
+    monkeypatch.setattr(assistant_turns.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(sandbox, "cli_mounts", lambda *_a, **_k: [])
+    create = sandbox.TurnLayout.create
+
+    def create_with_a_blocked_log(self):
+        create(self)
+        (self.root / "driver.log").mkdir()
+
+    monkeypatch.setattr(sandbox.TurnLayout, "create", create_with_a_blocked_log)
+
+    def no_popen(*_a, **_k):
+        raise AssertionError("must not start a sandbox")
+
+    monkeypatch.setattr(assistant_turns.subprocess, "Popen", no_popen)
+    frames = Frames()
+    await turns.run("call-1", "claude", request(tmp_path), frames)
+    assert json.loads(frames.events[0][1])["error"]["code"] == "sandbox_start_failed"
+    assert platform.uploads == [("unchanged", b"")]
+    assert not any(turns.turns_dir.iterdir())

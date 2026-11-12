@@ -31,6 +31,7 @@ import httpx
 from runtime_daemon import PROTOCOL_VERSION, __version__, worktree
 from runtime_daemon.agent import (
     COMMAND_CANCEL,
+    SEAT_OPERATIONS,
     Agent,
     OperationError,
     atomic_write,
@@ -109,6 +110,23 @@ DRIVER_CONNECT_RETRY_SECONDS = 0.1
 HEAL_DEFER_ROUNDS = 30
 # Enrollment rejections worth retrying; any other 4xx will not change with the same token.
 RETRYABLE_ENROLL_STATUSES = {408, 429}
+
+# 助理专用实例（config.json 里 assistant_only 为 true）只接这些节点命令：平台对助理所在节点会发的
+# 探活、状态、额度、席位，以及开通与换运行时用到的目录检查与初始化。其余命令（读写或执行工作目录里的
+# 内容、导出内容、遍历所有工作目录）一律以固定代码拒绝。经驱动的读请求只留探活与模型列表。
+ASSISTANT_ONLY_OPERATIONS = frozenset(
+    {
+        "ping",
+        "status",
+        "health-check",
+        "probe-rate-limits",
+        "workspace-info",
+        "workspace-probe",
+        "workspace-init",
+        *SEAT_OPERATIONS,
+    }
+)
+ASSISTANT_ONLY_READS = frozenset({("GET", "/health"), ("GET", "/v1/models")})
 
 # 出站代理变量：大小写两套都写，curl 等程序只认小写的那两个。HTTPS 在前，读取时优先它。
 PROXY_ENV_KEYS: tuple[str, ...] = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
@@ -406,6 +424,27 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
     return result
 
 
+def assistant_only_refusal(method: str, path: str, data: dict) -> str | None:
+    """助理专用实例对一条请求的裁决：不接就返回固定代码。
+
+    聊天请求必须带 `sandbox: true`（只在沙箱里跑）；节点命令只接名单上的；经驱动的读请求只留
+    探活与模型列表。
+    """
+    if path == "/v1/chat/completions":
+        return None if data.get("sandbox") is True else "assistant_only"
+    if path == "/":
+        return None if data.get("type") in ASSISTANT_ONLY_OPERATIONS else "assistant_only"
+    return None if (method, path) in ASSISTANT_ONLY_READS else "assistant_only"
+
+
+class AssistantOnlyRefused(Exception):
+    """助理专用实例不接这条请求；`code` 回给平台。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class RuntimeAgent(Agent):
     def __init__(self, daemon, provider: str, relay_id: str) -> None:
         token = hmac.new(
@@ -422,6 +461,8 @@ class RuntimeAgent(Agent):
             sessions_dir=daemon.data_dir / "sessions" / provider,
         )
         self.daemon = daemon
+        # 助理专用实例不跑遍历所有工作目录的定时任务（回收记忆、刷新 worktree）。
+        self.workspace_jobs = not daemon.assistant_only
         # 服务端在心跳里给的检查模型（模型目录的默认模型）。驱动发现的列表只是默认值，
         # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
         self.probe_model = ""
@@ -753,6 +794,8 @@ class Daemon:
         self.proxy: dict[str, str | bool] = {"source": "none", "url": "", "pending": False}
         # 个人助理的轮次（沙箱、转录、自检）：与上面这些普通轮次的状态完全分开。
         self.assistant = AssistantTurns(self)
+        # 助理专用实例：只声明沙箱能力的就是它，它也只跑沙箱里的轮次与名单上的节点命令。
+        self.assistant_only = self.config.get("assistant_only") is True
         try:
             self.machine = machine_fingerprint()
         except Exception:  # noqa: BLE001 助理侧的信息读不到不能拦住守护进程启动
@@ -1198,6 +1241,10 @@ class Daemon:
         if len(raw) > 64 * 1024 * 1024:
             raise ValueError("请求过大")
         data = json.loads(raw) if raw else {}
+        if self.assistant_only:
+            refused = assistant_only_refusal(method, path, data)
+            if refused is not None:
+                raise AssistantOnlyRefused(refused)
         if path == "/v1/chat/completions":
             directory = self.agents[provider].workspace(data.get("working_dir", ""))
             directory.mkdir(parents=True, exist_ok=True)
@@ -1343,6 +1390,16 @@ class Daemon:
             # Closing the local stream reaches the Go driver's disconnect watcher.
             frames.discard()
             raise
+        except AssistantOnlyRefused as exc:
+            LOG.warning("Request refused on an assistant-only node: %s", command["path"][:40])
+            body = {"error": {"code": exc.code, "message": "本节点只运行沙箱里的个人助理轮次"}}
+            with contextlib.suppress(Exception):
+                await frames.add(
+                    json.dumps(body, ensure_ascii=False).encode(),
+                    status_code=403,
+                    content_type="application/json",
+                )
+                await frames.finish()
         except Exception as exc:
             # Other exception types may carry paths or response text: log the type only.
             reason = type(exc).__name__
@@ -1562,6 +1619,8 @@ class Daemon:
         self.poll_error = reason
 
     def start_assistant(self) -> None:
+        if not self.assistant_only:
+            return
         try:
             self.assistant.start()
         except Exception as exc:  # noqa: BLE001 助理侧起不来，普通轮次照常
@@ -1578,6 +1637,28 @@ class Daemon:
         for task in current.values():
             task.cancel()
         await asyncio.gather(*current.values(), return_exceptions=True)
+
+    async def stop_work(self) -> None:
+        """关停时停下所有工作：取消在跑的请求，然后助理侧的收尾与普通驱动的终止同时进行——
+        助理侧等多久（或失败）都不推迟、不跳过普通驱动的终止。"""
+        await self.cancel_all()
+        assistant = asyncio.ensure_future(self.stop_assistant())
+        try:
+            if hasattr(self, "discovery_task"):
+                self.discovery_task.cancel()
+                await asyncio.gather(self.discovery_task, return_exceptions=True)
+            for agent in self.agents.values():
+                agent.stop.set()
+            for proc in [*self.drivers.values(), *(p for _, _, p in self.retired)]:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.to_thread(proc.wait, timeout=15)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        await asyncio.to_thread(proc.wait)
+        finally:
+            await assistant
 
     async def run(self) -> None:
         self.prepare()
@@ -1635,21 +1716,7 @@ class Daemon:
                     watcher.cancel()
                 await asyncio.gather(beats, lease_watch, return_exceptions=True)
                 self.write_state(False, force=True)
-                await self.cancel_all()
-                await self.stop_assistant()
-                if hasattr(self, "discovery_task"):
-                    self.discovery_task.cancel()
-                    await asyncio.gather(self.discovery_task, return_exceptions=True)
-                for agent in self.agents.values():
-                    agent.stop.set()
-                for proc in [*self.drivers.values(), *(p for _, _, p in self.retired)]:
-                    if proc.poll() is None:
-                        proc.terminate()
-                        try:
-                            await asyncio.to_thread(proc.wait, timeout=15)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            await asyncio.to_thread(proc.wait)
+                await self.stop_work()
                 self.log_rotator.stop()
                 for provider in PROVIDERS:
                     self.socket_path(provider).unlink(missing_ok=True)

@@ -328,3 +328,41 @@ def test_unpack_leaves_nothing_behind_on_failure(tmp_path):
         "config/projects/old.jsonl",
     ]
     assert keep.read_bytes() == b"old"
+
+
+def test_pack_caps_the_member_count_while_walking(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcripts, "MAX_MEMBERS", 5)
+    for i in range(50):
+        touch(tmp_path / f"config/projects/-work/{i:03d}.jsonl", b"")
+    sized: list[str] = []
+    real_size = transcripts._file_size
+    monkeypatch.setattr(
+        transcripts, "_file_size", lambda fd, name: sized.append(name) or real_size(fd, name)
+    )
+
+    def no_archive(*args, **kwargs):
+        raise AssertionError("archive must not be built")
+
+    monkeypatch.setattr(transcripts.tarfile, "open", no_archive)
+    with pytest.raises(transcripts.TooLarge) as err:
+        transcripts.pack(tmp_path, "claude", "s1")
+    assert str(err.value) == "too_large"
+    assert sized == []
+
+
+def test_pack_counts_directories_against_the_member_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcripts, "MAX_MEMBERS", 5)
+    for i in range(6):
+        (tmp_path / f"config/projects/d{i}").mkdir(parents=True)
+    with pytest.raises(transcripts.TooLarge):
+        transcripts.pack(tmp_path, "claude", "s1")
+
+
+def test_pack_at_the_member_cap_still_packs_in_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcripts, "MAX_MEMBERS", 4)
+    for name in ("c", "a", "b"):
+        touch(tmp_path / f"config/projects/-work/{name}.jsonl")
+    data = transcripts.pack(tmp_path, "claude", "s1")
+    assert data is not None
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        assert tar.getnames() == [f"config/projects/-work/{n}.jsonl" for n in ("a", "b", "c")]

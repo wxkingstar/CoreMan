@@ -1,17 +1,17 @@
 """助理沙箱里的模型登录凭证：每轮从节点的登录文件收窄出一份只读副本。
 
 节点上的 CLI 登录由所有员工共用。OAuth 的刷新令牌可能是一次性的：沙箱里的 CLI 若用它刷新，
-新令牌写不回只读文件，节点原来那枚又已作废，整台节点的登录就坏了。所以副本里**没有刷新令牌**：
-- Claude：`.credentials.json` 只留 `claudeAiOauth` 里除 `refreshToken` 以外的字段，其它顶层键
-  （如各 MCP 服务的 OAuth 令牌）一概不带；
-- Codex：`auth.json` 去掉 `tokens.refresh_token`，`last_refresh` 改成现在，免得 CLI 以为该刷新了；
-  用 API Key 登录的原样带上（没有刷新这回事）。
+新令牌写不回只读文件，节点原来那枚又已作废，整台节点的登录就坏了。所以副本只按名单挑字段，
+名单里**没有刷新令牌**：
+- Claude：`.credentials.json` 只取 `claudeAiOauth` 里 `CLAUDE_OAUTH_FIELDS` 列出的字段（访问令牌、
+  到期时间、权限范围、订阅与限额档位），其它顶层键（如各 MCP 服务的 OAuth 令牌）一概不带；
+- Codex：`auth.json` 只取 `CODEX_TOP_FIELDS` 与 `tokens` 里 `CODEX_TOKEN_FIELDS` 列出的字段，
+  `last_refresh` 改成现在，免得 CLI 以为该刷新了；没有 `tokens`、只有 API Key 的文件只带那一个键。
 访问令牌剩余有效期不足 `MARGIN_SECONDS` 时不起这一轮（`credential_expiring`）：刷新留给沙箱外
-的普通轮次与健康检查，由它们照常写回节点的登录文件。节点用环境变量登录（API Key、长效令牌）
-时只把那一个变量带进去。
+的驱动（节点自己的周期模型探测；助理专用实例上没有普通轮次），由它照常写回节点的登录文件。
+节点用环境变量登录（API Key、长效令牌）时只把那一个变量带进去。
 
-副本按白名单构造（`CLAUDE_OAUTH_FIELDS`、`CODEX_TOP_FIELDS`、`CODEX_TOKEN_FIELDS`）：不在名单里
-的字段，包括将来 CLI 新增的，一律不进文件。
+不在名单里的字段，包括将来 CLI 新增的，一律不进文件。
 
 沙箱里被注入的助理读得到这份副本：OAuth 登录拿到的只是一枚到期即失效的访问令牌，而沙箱出网
 只通平台与模型接口，带不出去；刷新地址不在放行名单里。

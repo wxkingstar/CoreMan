@@ -41,11 +41,16 @@ DEFAULT_LIMIT = 8
 SELF_TEST_SECONDS = 1800.0
 SWEEP_SECONDS = 600.0
 STOP_SECONDS = 10.0
+# 守护进程关停时等助理侧收尾的上限（systemd 默认 90 秒、本服务 30 秒后强杀，普通驱动还要留出时间）。
+SHUTDOWN_WAIT = 10.0
 SOCKET_WAIT_SECONDS = 10.0
 TRANSFER_TIMEOUT = 180.0
 # 一次转录上传或下载的总时限（TRANSFER_TIMEOUT 只管 httpx 的每个阶段）：[DONE] 扣住的时间有上限。
 TRANSFER_DEADLINE = 180.0
 DONE = b"data: [DONE]"
+# [DONE] 及其之后扣住的字节上限：再多的直接丢掉（驱动的输出可能受沙箱里的进程控制），
+# 这一轮照常结束。
+HELD_LIMIT = 64 * 1024
 TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 # 守护进程启动时定下的 AI 代理（daemon.apply_proxy 写进了环境）：模型接口经它出去。
 PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
@@ -100,7 +105,7 @@ class DoneGate:
     """转发流里的字节，扣住 `data: [DONE]` 及其之后的部分，等 `release()` 再交出去。
 
     只认行首的标记（流的开头或紧跟换行）：模型在回答里写出这串字时，它在 JSON 字符串里，
-    前面不会是原样的换行。
+    前面不会是原样的换行。扣住的部分最多 `HELD_LIMIT` 字节，超出的丢掉。
     """
 
     def __init__(self) -> None:
@@ -119,12 +124,15 @@ class DoneGate:
 
     def feed(self, part: bytes) -> bytes:
         if self.held:
-            self.pending += part
+            room = HELD_LIMIT - len(self.pending)
+            if room > 0:
+                self.pending += part[:room]
             return b""
         self.pending += part
         index = self._marker()
         if index >= 0:
-            out, self.pending, self.held = self.pending[:index], self.pending[index:], True
+            out, self.held = self.pending[:index], True
+            self.pending = self.pending[index : index + HELD_LIMIT]
             return out
         # 标记可能跨两段到达：末尾留一小截，等下一段再判断。
         keep = len(DONE) - 1
@@ -213,6 +221,8 @@ class AssistantTurns:
         self.active: set[str] = set()
         self.loop_task: asyncio.Task | None = None
         self.background: set[asyncio.Task] = set()
+        # background 里的收尾任务（_finish）：关停时从不取消。
+        self.finishing: set[asyncio.Task] = set()
 
     # ---- 配置 ------------------------------------------------------------------
 
@@ -233,7 +243,8 @@ class AssistantTurns:
         return [Path(p) for p in paths if isinstance(p, str) and Path(p).is_absolute()]
 
     def capability(self, provider: str) -> bool:
-        return self.ready.get(provider, False)
+        """只有助理专用实例（assistant_only）且自检通过才算有能力：普通实例从不跑助理。"""
+        return self.daemon.assistant_only is True and self.ready.get(provider, False)
 
     def private_paths(self) -> list[Path]:
         """自检时必须只有本用户能进的目录：家目录、本安装的数据目录、员工工作目录的上级。"""
@@ -266,16 +277,18 @@ class AssistantTurns:
         self.loop_task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        tasks = [t for t in (self.loop_task, *self.background) if t is not None]
+        """关停：最多等 SHUTDOWN_WAIT 秒让后台工作做完。
+
+        到时还在传转录的任务取消（转录留给下次启动的清扫），收尾任务（_finish）从不取消：
+        它们照常在事件循环上做完，或随进程退出中断，留下的目录由下次启动的清扫处理。
+        """
+        if self.loop_task is not None:
+            self.loop_task.cancel()
+            await asyncio.gather(self.loop_task, return_exceptions=True)
         if self.background:
-            # 被取消的轮次还在传转录：给它们一点时间，传不完就留给下次启动的清扫。
-            await asyncio.wait(self.background, timeout=30)
-        for task in tasks:
+            await asyncio.wait(set(self.background), timeout=SHUTDOWN_WAIT)
+        for task in self.background - self.finishing:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if self.background:
-            # 被取消的轮次在收尾时另起的清理任务：再等一会儿，删不完的留给下次启动的清扫。
-            await asyncio.wait(set(self.background), timeout=STOP_SECONDS)
 
     async def _loop(self) -> None:
         await self._guard("sweep", self.sweep)
@@ -305,6 +318,7 @@ class AssistantTurns:
             clis={p: sandbox.cli_mounts(p) for p in sandbox.PROVIDERS},
             private=self.private_paths(),
             extra_ro=self.extra_ro(),
+            workspace_root=Path(self.daemon.config["workspace_root"]),
         )
         result = await asyncio.to_thread(sandbox.self_test, inputs)
         if result.providers != self.ready or result.code != self.code:
@@ -324,7 +338,7 @@ class AssistantTurns:
         leftovers, runs = await asyncio.to_thread(self._leftovers, set(self.active))
         for entry in runs:
             if entry.name not in {f"a{turn[:10]}" for turn in self.active}:
-                await asyncio.to_thread(shutil.rmtree, entry, True)
+                await asyncio.to_thread(sandbox.remove_tree, entry)
         for entry, meta in leftovers:
             if entry.name in self.active:
                 continue
@@ -336,7 +350,7 @@ class AssistantTurns:
             except Exception as exc:  # noqa: BLE001 一项出错不能让清扫永远卡在这里
                 LOG.warning("Assistant sweep entry failed: %s", type(exc).__name__)
             finally:
-                await asyncio.to_thread(shutil.rmtree, entry, True)
+                await asyncio.to_thread(sandbox.remove_tree, entry)
 
     def _leftovers(
         self, active: set[str]
@@ -532,6 +546,9 @@ class AssistantTurns:
             await frames.finish()
         except Refused as exc:
             settled = True
+            # 先同步删掉 meta.json：之后的收尾即使被打断，清扫也认不出这一轮、不会把它当转录上传。
+            with contextlib.suppress(OSError):
+                layout.meta.unlink()
             await self.refuse(frames, exc.code, plan.transfer)
         except asyncio.CancelledError:
             # 平台取消或守护进程退出：转录放到后台去传，传完再删本轮目录。
@@ -581,12 +598,14 @@ class AssistantTurns:
         settled: bool,
     ) -> None:
         """收尾。凭证副本先删（不经过任何 await）；其余步骤放进受 shield 保护、记在 background
-        里的任务：这里被取消也照样做完（stop() 会等它），取消随后照常抛出。"""
+        与 finishing 里的任务：这里被取消也照样做完（stop() 不取消它），取消随后照常抛出。"""
         self._drop_secrets(layout)
         remove_root = settled or not layout.meta.exists()
         task = asyncio.ensure_future(self._finish(layout, process, proxy, remove_root))
         self.background.add(task)
+        self.finishing.add(task)
         task.add_done_callback(self.background.discard)
+        task.add_done_callback(self.finishing.discard)
         await asyncio.shield(task)
 
     async def _finish(
@@ -610,9 +629,9 @@ class AssistantTurns:
                     await proxy.close()
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("Assistant egress close failed: %s", type(exc).__name__)
-            await asyncio.to_thread(shutil.rmtree, layout.run, True)
+            await asyncio.to_thread(sandbox.remove_tree, layout.run)
             if remove_root:
-                await asyncio.to_thread(shutil.rmtree, layout.root, True)
+                await asyncio.to_thread(sandbox.remove_tree, layout.root)
         finally:
             self.active.discard(layout.turn_id)
 
@@ -646,6 +665,7 @@ class AssistantTurns:
                 *self.extra_ro(),
             ],
             credential=credential_file,
+            workspace_root=Path(self.daemon.config["workspace_root"]),
         )
         command = sandbox.bridge_command(sys.executable, bridge, sandbox.driver_command(binary))
         try:
@@ -654,8 +674,9 @@ class AssistantTurns:
             # 只读挂载会把本轮目录、socket 目录或工作目录带进沙箱：不起这一轮。
             code = "unsafe_mount" if str(exc) == "unsafe_mount" else "sandbox_start_failed"
             raise Refused(code) from None
-        log = (layout.root / "driver.log").open("ab")
+        log = None
         try:
+            log = (layout.root / "driver.log").open("ab")
             return subprocess.Popen(
                 argv,
                 env=dict(launch.env),
@@ -667,7 +688,8 @@ class AssistantTurns:
         except OSError:
             raise Refused("sandbox_start_failed") from None
         finally:
-            log.close()
+            if log is not None:
+                log.close()
 
     async def _wait_ready(self, layout: sandbox.TurnLayout, process: subprocess.Popen) -> None:
         deadline = time.monotonic() + SOCKET_WAIT_SECONDS

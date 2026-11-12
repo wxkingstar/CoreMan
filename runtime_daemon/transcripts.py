@@ -60,28 +60,55 @@ def _open_dir_path(root_fd: int, parts: tuple[str, ...]) -> int:
     return current
 
 
-def _walk(dir_fd: int, prefix: tuple[str, ...], out: list[tuple[tuple[str, ...], int]], depth: int):
+class _Budget:
+    """打包时见过的目录项计数：一过 MAX_MEMBERS 立刻放弃，不把整个目录列出来再排序。"""
+
+    def __init__(self) -> None:
+        self.seen = 0
+
+    def take(self) -> None:
+        self.seen += 1
+        if self.seen > MAX_MEMBERS:
+            raise TooLarge("too_large")
+
+
+def _walk(
+    dir_fd: int,
+    prefix: tuple[str, ...],
+    out: list[tuple[tuple[str, ...], int]],
+    depth: int,
+    budget: _Budget,
+):
     if depth > MAX_DEPTH:
         return
+    kept: list[tuple[str, bool]] = []
     try:
         with os.scandir(dir_fd) as entries:
-            listing = sorted(entries, key=lambda e: e.name)
+            for entry in entries:
+                budget.take()
+                try:
+                    entry.name.encode("utf-8")
+                    if entry.is_dir(follow_symlinks=False):
+                        kept.append((entry.name, True))
+                    elif entry.is_file(follow_symlinks=False):
+                        kept.append((entry.name, False))
+                except (OSError, UnicodeEncodeError):
+                    continue
     except OSError:
         return
-    for entry in listing:
+    for name, is_dir in sorted(kept):
         try:
-            entry.name.encode("utf-8")
-            if entry.is_dir(follow_symlinks=False):
-                child = os.open(entry.name, _DIR_FLAGS, dir_fd=dir_fd)
+            if is_dir:
+                child = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
                 try:
-                    _walk(child, (*prefix, entry.name), out, depth + 1)
+                    _walk(child, (*prefix, name), out, depth + 1, budget)
                 finally:
                     os.close(child)
-            elif entry.is_file(follow_symlinks=False):
-                size = _file_size(dir_fd, entry.name)
+            else:
+                size = _file_size(dir_fd, name)
                 if size is not None:
-                    out.append(((*prefix, entry.name), size))
-        except (OSError, UnicodeEncodeError):
+                    out.append(((*prefix, name), size))
+        except OSError:
             continue
 
 
@@ -100,6 +127,7 @@ def _is_regular(mode: int) -> bool:
 
 def _collect(root_fd: int, provider: str, session_id: str) -> list[tuple[tuple[str, ...], int]]:
     found: list[tuple[tuple[str, ...], int]] = []
+    budget = _Budget()
     for tree in TREES.get(provider, ()):
         parts = tuple(tree.split("/"))
         try:
@@ -107,7 +135,7 @@ def _collect(root_fd: int, provider: str, session_id: str) -> list[tuple[tuple[s
         except OSError:
             continue
         try:
-            _walk(base, parts, found, 0)
+            _walk(base, parts, found, 0, budget)
         finally:
             os.close(base)
     if provider == "codex" and SESSION_ID.fullmatch(session_id):
@@ -143,7 +171,11 @@ class _Capped:
 
 
 class _Bounded:
-    """恰好给出 size 字节：文件之后长大的部分不读，缩短了就补零，保证 tar 头里的大小成立。"""
+    """最多给出 size 字节：文件之后长大的部分不读。
+
+    文件缩短时，读到的字节少于 tar 要的块，tarfile 报读不完整，打包以 TooLarge("io") 放弃；
+    只有恰好在块边界读到文件末尾时才补零凑满 tar 头里的大小。
+    """
 
     def __init__(self, fd: int, size: int) -> None:
         self.fd = fd
@@ -167,7 +199,8 @@ def pack(root: Path, provider: str, session_id: str) -> bytes | None:
     全程不跟随链接：是链接或不是普通文件/目录的一律跳过，打不开的文件也跳过。
 
     Raises:
-        TooLarge: 展开总量超过 MAX_EXPANDED、压缩后超过 MAX_BYTES，或打包中读文件出错（code io）
+        TooLarge: 目录项超过 MAX_MEMBERS、展开总量超过 MAX_EXPANDED、压缩后超过 MAX_BYTES，
+            或打包中读文件出错（code io）
     """
     try:
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)

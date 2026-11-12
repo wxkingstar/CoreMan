@@ -301,3 +301,63 @@ async def test_idle_tunnel_is_closed(socket_path, reach, monkeypatch):
         writer.close()
         await proxy.close()
         server.close()
+
+
+async def silent_upstream():
+    """上游代理替身：收下 CONNECT 后不回话，记下连接什么时候被我们关掉。"""
+    closed = asyncio.Event()
+    connected = asyncio.Event()
+
+    async def handle(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        connected.set()
+        if await reader.read() == b"":
+            closed.set()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1], connected, closed
+
+
+def keep_writers(monkeypatch) -> list:
+    """留住我们这一侧的连接对象：不让垃圾回收替代码把连接关掉。"""
+    kept: list = []
+    original = asyncio.open_connection
+
+    async def open_connection(*args, **kwargs):
+        pair = await original(*args, **kwargs)
+        kept.append(pair)
+        return pair
+
+    monkeypatch.setattr(egress.asyncio, "open_connection", open_connection)
+    return kept
+
+
+async def test_upstream_connection_is_closed_when_the_handshake_times_out(monkeypatch):
+    monkeypatch.setattr(egress, "HEAD_TIMEOUT", 0.2)
+    kept = keep_writers(monkeypatch)
+    server, port, _connected, closed = await silent_upstream()
+    try:
+        with pytest.raises((asyncio.TimeoutError, TimeoutError)):  # noqa: UP041
+            await egress._open("model.example.com", 443, f"http://127.0.0.1:{port}")
+        await asyncio.wait_for(closed.wait(), 2)
+        assert kept
+    finally:
+        server.close()
+
+
+async def test_upstream_connection_is_closed_when_the_handshake_is_cancelled(monkeypatch):
+    kept = keep_writers(monkeypatch)
+    server, port, connected, closed = await silent_upstream()
+    try:
+        task = asyncio.ensure_future(
+            egress._open("model.example.com", 443, f"http://127.0.0.1:{port}")
+        )
+        await asyncio.wait_for(connected.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(closed.wait(), 2)
+        assert kept
+    finally:
+        server.close()

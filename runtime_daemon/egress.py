@@ -160,12 +160,16 @@ async def _open(host: str, port: int, proxy: str | None):
     if parts.username:
         token = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
         lines.append("Proxy-Authorization: Basic " + base64.b64encode(token.encode()).decode())
-    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
-    await writer.drain()
-    status = await _read_head(reader)
-    if not re.match(rb"^HTTP/1\.[01] 200", status):
+    try:
+        writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
+        await writer.drain()
+        status = await _read_head(reader)
+        if not re.match(rb"^HTTP/1\.[01] 200", status):
+            raise OSError("upstream proxy refused")
+    except BaseException:
+        # 握手失败、超时或被取消：到上游代理的连接一并关掉，不留着占文件描述符。
         writer.close()
-        raise OSError("upstream proxy refused")
+        raise
     return reader, writer
 
 

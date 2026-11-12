@@ -115,8 +115,46 @@ class TurnLayout:
                 (self.root / name).mkdir(mode=0o700, exist_ok=True)
 
     def remove(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
-        shutil.rmtree(self.run, ignore_errors=True)
+        remove_tree(self.root)
+        remove_tree(self.run)
+
+
+def _reopen(path: str) -> bool:
+    """把沙箱改掉权限的目录改回 0700；只动真实目录，链接与不存在的路径不碰。"""
+    try:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            return False
+        os.chmod(path, 0o700)
+    except OSError:
+        return False
+    return True
+
+
+def remove_tree(path: Path) -> None:
+    """删一棵沙箱里可写的目录树，不跟随任何链接，删不掉的留下、不抛异常。
+
+    沙箱可以把子目录 chmod 000，`rmtree(ignore_errors=True)` 会默默留下它们（每轮漏一点磁盘）：
+    没有权限而失败时，把出错的目录及其上级（只限这棵树里的）改回 0700，再试一次，每个路径只试一次。
+    """
+    top = os.fspath(path)
+    tried: set[str] = set()
+
+    def retry(func: Any, failed: str, exc_info: Any) -> None:
+        if not isinstance(exc_info[1], PermissionError) or failed in tried:
+            return
+        tried.add(failed)
+        parent = os.path.dirname(failed)
+        if failed != top and (parent == top or parent.startswith(top + os.sep)):
+            _reopen(parent)
+        try:
+            if _reopen(failed):
+                shutil.rmtree(failed, onerror=retry)
+            else:
+                func(failed)
+        except OSError:
+            pass
+
+    shutil.rmtree(top, onerror=retry)
 
 
 def system_mounts(paths: Sequence[str] = SYSTEM_PATHS) -> list[str]:
@@ -215,6 +253,8 @@ class Launch:
     ro_paths: Sequence[Path] = ()
     credential: Path | None = None
     system: Sequence[str] = field(default_factory=system_mounts)
+    # 员工工作目录的根：只读挂载根不能包含它，也不能落在它里面（会把别的员工的目录带进沙箱）。
+    workspace_root: Path | None = None
 
 
 def _ro_roots(launch: Launch) -> list[Path]:
@@ -225,12 +265,19 @@ def _ro_roots(launch: Launch) -> list[Path]:
 
 
 def _check_mounts(launch: Launch) -> None:
-    """只读挂载根等于或包含轮次目录、socket 目录、工作目录时拒绝（会暴露别轮的凭证副本）。"""
+    """只读挂载根等于或包含轮次目录、socket 目录、工作目录、员工工作目录的根时拒绝，落在轮次目录、
+    socket 目录、员工工作目录的根里面时也拒绝（会暴露别轮的凭证副本、转录或别的员工的目录）。"""
     layout = launch.layout
-    guarded = [p.resolve() for p in (layout.root.parent, layout.run.parent, Path(launch.workdir))]
+    inside = [layout.root.parent, layout.run.parent]
+    if launch.workspace_root is not None:
+        inside.append(Path(launch.workspace_root))
+    inside = [p.resolve() for p in inside]
+    guarded = [*inside, Path(launch.workdir).resolve()]
     for root in _ro_roots(launch):
         real = root.resolve()
         if any(real == g or real in g.parents for g in guarded):
+            raise ValueError("unsafe_mount")
+        if any(g in real.parents for g in inside):
             raise ValueError("unsafe_mount")
 
 
@@ -401,6 +448,7 @@ class SelfTestInputs:
     extra_ro: Sequence[Path] = ()
     python: str = sys.executable
     system: Sequence[str] = field(default_factory=system_mounts)
+    workspace_root: Path | None = None
 
 
 def self_test(
@@ -441,6 +489,8 @@ def self_test(
             return SelfTestResult(providers, "layout_failed")
         bridge = inputs.release / "runtime_daemon" / "sandbox_bridge.py"
         ro = [inputs.release, Path(sys.base_prefix), *inputs.extra_ro]
+        # 探测那一次也挂上所有 CLI 的只读根：「看不见的路径」要在真实一轮的挂载下证明。
+        cli_roots = list(dict.fromkeys(p for mounts in inputs.clis.values() for p in mounts))
 
         def run(provider: str, command: Sequence[str], extra: Sequence[Path] = ()) -> Any:
             launch = Launch(
@@ -451,6 +501,7 @@ def self_test(
                 env=sandbox_env(provider, {}, {}),
                 ro_paths=[*ro, *extra],
                 system=inputs.system,
+                workspace_root=inputs.workspace_root,
             )
             return runner(
                 bwrap_argv(launch, command),
@@ -467,10 +518,10 @@ def self_test(
             denier = _DenyAll(layout.egress_socket)
             spec = {
                 "hidden": [str(p) for p in inputs.hidden],
-                "ro": [str(p) for p in ro],
+                "ro": [str(p) for p in dict.fromkeys([*ro, *cli_roots])],
             }
             check = [inputs.python, "-I", "-c", _PROBE, str(BRIDGE_PORT), json.dumps(spec)]
-            probe = run("claude", bridge_command(inputs.python, bridge, check))
+            probe = run("claude", bridge_command(inputs.python, bridge, check), cli_roots)
             try:
                 checks = json.loads(probe.stdout.strip().splitlines()[-1])
             except (ValueError, IndexError):
