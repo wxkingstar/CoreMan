@@ -6,6 +6,8 @@
 - 能绑的实例：助理池里的（`relay_servers.assistant_pool`），或所有者本人的私有运行时。
 - 开通（1F）调 `pick_pool_relay` 选池里助理最少的在线节点；之后每轮都不重新选（设计「不做」）。
   所在节点不可用时这一轮不跑，私聊告诉所有者，不回落到池。
+- 隔离：助理所在的节点（不论池里的还是所有者的私有运行时）上不能有普通员工，与它同机同用户的
+  节点也不能有（`node_isolated`）。每轮开轮前、助理换运行时、普通员工绑定或换运行时都按这一条查。
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import ColumnClause, and_, func, literal_column, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.relay_policy import relay_available
@@ -31,6 +33,9 @@ PAUSE_MESSAGES = {
     "runtime_draining": "绑定的运行时正在维护，稍后再发一次消息即可",
     "sandbox_unsupported": "绑定的运行时还不能隔离运行个人助理（需要升级或不支持），请联系管理员",
     "login_required": "绑定的运行时 AI 未登录，请联系管理员",
+    "runtime_shared": (
+        "绑定的运行时没有与普通员工隔开（要用专为个人助理安装的运行时），请联系管理员"
+    ),
 }
 
 
@@ -67,15 +72,51 @@ def eligible(relay: RelayServer, owner_id: uuid.UUID | None) -> bool:
     return relay.visibility == "private" and owner_id is not None and relay.owner_id == owner_id
 
 
+async def node_isolated(session: AsyncSession, node: RuntimeNode) -> bool:
+    """这台节点能不能承载个人助理：上报了本机指纹与系统用户且不是 root，节点上没有普通员工（不论是否
+    启用，含正在迁移过来的），与它同机同用户的其他节点上也没有。一条查询。
+
+    普通员工不在沙箱里：与助理同一个系统用户时，谁能和它说话谁就能读到助理的工作目录，以及这一轮
+    还原出来的转录与凭证副本。
+    """
+    if not node.machine_fingerprint or node.uid is None or node.uid == 0:
+        return False
+    nodes = select(RuntimeNode.id).where(
+        or_(
+            RuntimeNode.id == node.id,
+            and_(
+                RuntimeNode.machine_fingerprint == node.machine_fingerprint,
+                RuntimeNode.uid == node.uid,
+            ),
+        )
+    )
+    relays = select(RelayServer.id).where(RelayServer.runtime_node_id.in_(nodes))
+    found = await session.scalar(
+        select(Bot.id)
+        .where(
+            Bot.kind == "standard",
+            or_(Bot.relay_server_id.in_(relays), Bot.workspace_target_relay_id.in_(relays)),
+        )
+        .limit(1)
+    )
+    return found is None
+
+
 async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
-    """助理现在为什么不能跑一轮；能跑返回 None。"""
+    """助理现在为什么不能跑一轮；能跑返回 None。
+
+    节点的其它条件都满足时再查一次隔离（`node_isolated`，每轮一条查询）。
+    """
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     if relay is None:
         return "runtime_missing"
     if not eligible(relay, bot.owner_id):
         return "runtime_not_allowed"
     node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
-    return unavailable_reason(relay, node)
+    reason = unavailable_reason(relay, node)
+    if reason is None and node is not None and not await node_isolated(session, node):
+        return "runtime_shared"
+    return reason
 
 
 def pause_message(reason: str) -> str:
@@ -91,6 +132,16 @@ def assignment_error(
         return "个人助理只能使用助理池或你本人的私有运行时"
     reason = unavailable_reason(relay, node)
     return None if reason is None else PAUSE_MESSAGES[reason].removeprefix("绑定的")
+
+
+async def switch_target_error(
+    session: AsyncSession, relay: RelayServer, node: RuntimeNode | None, owner_id: uuid.UUID | None
+) -> str | None:
+    """助理改绑到这个实例的校验：`assignment_error` 之外，目标节点还要与普通员工隔开。"""
+    problem = assignment_error(relay, node, owner_id)
+    if problem is None and node is not None and not await node_isolated(session, node):
+        return PAUSE_MESSAGES["runtime_shared"].removeprefix("绑定的")
+    return problem
 
 
 async def pick_pool_relay(session: AsyncSession, provider: str) -> RelayServer | None:
@@ -170,6 +221,11 @@ POOL_NODE_MESSAGE = "目标运行时是个人助理池的节点，不能承载�
 SHARED_POOL_USER_MESSAGE = (
     "目标运行时所在机器上以同一个系统用户运行的另一个节点属于个人助理池，不能承载普通员工"
 )
+ASSISTANT_NODE_MESSAGE = "目标运行时上有个人助理，不能承载普通员工"
+SHARED_ASSISTANT_USER_MESSAGE = (
+    "目标运行时所在机器上以同一个系统用户运行的另一个节点上有个人助理，不能承载普通员工"
+)
+SANDBOX_NODE_MESSAGE = "目标运行时是个人助理专用的实例，不能承载普通员工"
 SHARED_USER_MESSAGE = (
     "同一台机器上以同一个系统用户运行的另一个节点承载了普通员工或不在助理池里："
     "助理节点要用单独的系统用户安装"
@@ -186,11 +242,18 @@ async def is_pool_node(session: AsyncSession, node_id: uuid.UUID) -> bool:
     return found is not None
 
 
-async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str | None:
-    """普通员工绑定或换到这个实例时的校验：助理池节点、以及与助理池节点同机同用户的节点上不能有普通员工。
+# 节点能力里任一种 AI 声明了沙箱能力（与 node_sandboxed 同义），在 SQL 里判断。
+_SANDBOXED_PATH: ColumnClause[Any] = literal_column(
+    f"'$.*.{SANDBOX_CAPABILITY} ? (@ == true)'::jsonpath"
+)
 
-    只在绑定与换运行时调用；目标有节点时先取节点锁，再用一条查询同时查本节点与同机同用户节点有没有
-    助理池实例（节点没上报指纹或 uid 时，同机同用户那一半恒为假）。
+
+async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str | None:
+    """普通员工绑定或换到这个实例时的校验：助理池节点、绑着或正在迁来个人助理的节点、与它们同机同用户
+    的节点，以及声明了沙箱能力的节点（助理专用实例，本就拒绝普通轮次）上都不能有普通员工。
+
+    只在绑定与换运行时调用；目标有节点时先取节点锁，再用一条查询同时查这几样（节点没上报指纹或 uid
+    时，同机同用户那一半恒为假）。
     """
     if relay.runtime_node_id is None:
         return None
@@ -198,22 +261,39 @@ async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str 
     await lock_node(session, node_id)
     me = select(RuntimeNode.machine_fingerprint).where(RuntimeNode.id == node_id).scalar_subquery()
     my_uid = select(RuntimeNode.uid).where(RuntimeNode.id == node_id).scalar_subquery()
-    found = await session.scalar(
-        select(RuntimeNode.id)
-        .join(RelayServer, RelayServer.runtime_node_id == RuntimeNode.id)
+    assistant_here = (
+        select(Bot.id)
         .where(
-            RelayServer.assistant_pool.is_(True),
+            Bot.kind == "assistant",
             or_(
-                RuntimeNode.id == node_id,
-                and_(RuntimeNode.machine_fingerprint == me, RuntimeNode.uid == my_uid),
+                Bot.relay_server_id == RelayServer.id,
+                Bot.workspace_target_relay_id == RelayServer.id,
             ),
         )
-        .order_by((RuntimeNode.id == node_id).desc())
-        .limit(1)
+        .exists()
     )
+    here = RuntimeNode.id == node_id
+    sandboxed = and_(here, func.jsonb_path_exists(RuntimeNode.capabilities, _SANDBOXED_PATH))
+    found = (
+        await session.execute(
+            select(here, RelayServer.assistant_pool, assistant_here)
+            .join(RelayServer, RelayServer.runtime_node_id == RuntimeNode.id)
+            .where(
+                or_(RelayServer.assistant_pool.is_(True), assistant_here, sandboxed),
+                or_(here, and_(RuntimeNode.machine_fingerprint == me, RuntimeNode.uid == my_uid)),
+            )
+            .order_by(here.desc(), RelayServer.assistant_pool.desc(), assistant_here.desc())
+            .limit(1)
+        )
+    ).first()
     if found is None:
         return None
-    return POOL_NODE_MESSAGE if found == node_id else SHARED_POOL_USER_MESSAGE
+    on_target, pool, assistant = (bool(v) for v in found)
+    if pool:
+        return POOL_NODE_MESSAGE if on_target else SHARED_POOL_USER_MESSAGE
+    if assistant:
+        return ASSISTANT_NODE_MESSAGE if on_target else SHARED_ASSISTANT_USER_MESSAGE
+    return SANDBOX_NODE_MESSAGE
 
 
 async def pool_admission_error(

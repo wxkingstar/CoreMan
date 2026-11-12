@@ -312,7 +312,10 @@ def open_blob(cipher: Cipher, aad_: str, value: Any) -> Any:
     """同 `_decrypt`：另一代数据密钥加密的按已锁定处理，同一代解不开照抛。"""
     if not is_blob_token(value):
         return value
-    kid = value[len(PREFIX_V2) :].split(b":", 1)[0].decode("ascii")
+    # 只切出密钥标识，不把整段密文复制一遍。
+    start = len(PREFIX_V2)
+    end = value.find(b":", start)
+    kid = value[start : end if end >= 0 else len(value)].decode("ascii")
     if kid != cipher.key_id:
         raise ContentLocked("内容由已作废的旧一代数据密钥加密")
     return cipher.decrypt_bytes(value, aad_)

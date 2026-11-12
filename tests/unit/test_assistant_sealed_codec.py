@@ -203,3 +203,50 @@ def test_master_cipher_bytes_use_the_key_id() -> None:
     for bad in (b"enc:v1:abc", b"enc:v2:nokid", b"enc:v2:k9:short"):
         with pytest.raises(DecryptError):
             master.decrypt_bytes(bad, "t.c:x")
+
+
+def _peak(call) -> int:  # type: ignore[no-untyped-def]
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        base = tracemalloc.get_traced_memory()[0]
+        result = call()
+        peak = tracemalloc.get_traced_memory()[1] - base
+    finally:
+        tracemalloc.stop()
+    del result
+    return peak
+
+
+def test_large_blobs_are_sealed_and_opened_without_extra_full_copies() -> None:
+    size = 8 * 1024 * 1024
+    data = bytes(size)
+    token = sealed.seal_blob(CIPHER, AAD, data)
+    assert token is not None
+    # 封存：密文一份、输出一份；打开：只有明文一份（不再先切出整段再切一次）。
+    assert _peak(lambda: CIPHER.encrypt_bytes(data, AAD)) < 2.5 * size
+    assert _peak(lambda: CIPHER.decrypt_bytes(token, AAD)) < 1.5 * size
+    assert _peak(lambda: sealed.open_blob(CIPHER, AAD, token)) < 1.5 * size
+    assert sealed.open_blob(CIPHER, AAD, token) == data
+
+
+def test_malformed_blobs_still_fail_the_same_way() -> None:
+    token = CIPHER.encrypt_bytes(b"payload", AAD)
+    for bad in (
+        b"enc:v2:d1",
+        b"enc:v2:d1:",
+        b"enc:v2:d1:" + b"x" * 27,
+        token[:-1] + bytes([token[-1] ^ 1]),
+        b"enc:v2:\xff\xfe:" + b"x" * 40,
+        b"enc:v2:zz:" + b"x" * 40,
+    ):
+        with pytest.raises(DecryptError):
+            CIPHER.decrypt_bytes(bad, AAD)
+
+
+def test_transcript_transfer_slots() -> None:
+    from coreman.api.routers import runtime_protocol
+
+    assert runtime_protocol.TRANSCRIPT_TRANSFERS == 2

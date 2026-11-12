@@ -73,7 +73,15 @@ DEFAULT_CALL_SECONDS = 2 * 3600
 
 
 class RuntimeQueueTimeout(httpx.PoolTimeout):
-    """节点在线但一直没有空位：调用排队超过 `QUEUE_WAIT_SECONDS` 仍未开始执行。"""
+    """节点在线但一直没有空位：调用排队超过 `QUEUE_WAIT_SECONDS` 仍未开始执行。
+
+    `unclaimed` 为真表示确定节点从没领到它：撤销时它在库里仍是排队中（领取与撤销都按行锁改状态，
+    领取在提交之后才把请求交给节点）。为假时节点可能刚好在最后一刻领走了。
+    """
+
+    def __init__(self, message: str, *, request: httpx.Request, unclaimed: bool = False) -> None:
+        super().__init__(message, request=request)
+        self.unclaimed = unclaimed
 
 
 def call_seconds(total_timeout: object) -> float:
@@ -374,12 +382,16 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                             raise httpx.ConnectError(reason, request=request)
                     await wait_event(stream.wake, poll_seconds())
         except TimeoutError as exc:
-            await stream.aclose()
+            if accepted or not queued:
+                await stream.aclose()
             if accepted:
                 raise httpx.ReadTimeout("运行时已接收，但响应头超时", request=request) from exc
             if queued:
+                unclaimed = await stream.cancel_unclaimed()
                 raise RuntimeQueueTimeout(
-                    f"运行时繁忙：排队 {wait:.0f} 秒仍未开始执行", request=request
+                    f"运行时繁忙：排队 {wait:.0f} 秒仍未开始执行",
+                    request=request,
+                    unclaimed=unclaimed,
                 ) from exc
             raise httpx.ConnectTimeout("运行时未及时接收请求", request=request) from exc
         except BaseException:
@@ -459,6 +471,28 @@ class ReverseStream(httpx.AsyncByteStream):
                 raise httpx.ReadTimeout("运行时响应超时", request=self.request)
             if not chunks:
                 await wait_event(self.wake, min(poll_seconds(), self.read_timeout - idle))
+
+    async def cancel_unclaimed(self) -> bool:
+        """排队等不到空位时关流：调用仍在排队（节点没领到）就撤销并返回真；节点已领走就照 aclose
+        撤销，返回假。"""
+        if self.closed:
+            return False
+        async with self.transport.factory() as session:
+            cancelled = await session.scalar(
+                update(RuntimeCall)
+                .where(RuntimeCall.id == self.call_id, RuntimeCall.status == "queued")
+                .values(status="cancelled", request_enc="")
+                .returning(RuntimeCall.id)
+            )
+            if cancelled is not None:
+                self.closed = True
+                unsubscribe_call(self.call_id, self.wake)
+                await notify_node(session, self.transport.node_id, self.call_id)
+            await session.commit()
+        if cancelled is None:
+            await self.aclose()
+            return False
+        return True
 
     async def aclose(self) -> None:
         if self.closed:

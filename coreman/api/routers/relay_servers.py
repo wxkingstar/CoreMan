@@ -252,6 +252,9 @@ async def set_assistant_pool(
     node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
     if node is not None:
         await assistant_runtime.lock_node(session, node.id)
+        # 等锁期间到的心跳、可见性与池开关修改：取锁之后重读，再判、再记审计的「之前」。
+        await session.refresh(relay)
+        await session.refresh(node)
     if body.enabled:
         problem = await assistant_runtime.pool_admission_error(session, relay, node)
         if problem is not None:

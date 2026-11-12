@@ -64,7 +64,7 @@ from coreman.core.runtime_nodes.transport import (
 router = APIRouter(prefix="/api/runtime", tags=["runtime-daemon"])
 log = get_logger(__name__)
 # 转录传输（上传与下载）同时最多这么多个，等位置最多这么多秒；读请求体的总时限。
-TRANSCRIPT_TRANSFERS = 4
+TRANSCRIPT_TRANSFERS = 2
 TRANSFER_WAIT_SECONDS = 60.0
 BODY_SECONDS = 300.0
 TRANSFER_SLOTS = asyncio.Semaphore(TRANSCRIPT_TRANSFERS)

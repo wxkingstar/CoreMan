@@ -13,7 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import runtime as assistant_runtime
-from coreman.core.assistants.records import is_assistant, unsupported
+from coreman.core.assistants.records import is_assistant, unsupported, visible_to
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bot
@@ -76,7 +76,8 @@ async def validate_switch(
 
     后台切换作业在入队前先用它把能当场拒绝的都拒绝掉，作业执行时 switch_relay 还会再判一次。
     """
-    if not can_switch_relay(actor, bot, member_ids):
+    if not can_switch_relay(actor, bot, member_ids) or not visible_to(bot, actor):
+        # 助理只有所有者能改绑：上线前由管理者排进队列的作业执行时也在这里挡下。
         raise SwitchError(403, "没有权限执行该操作")
     if is_assistant(bot) and (target_directory is not None or workspace_mode != "copy"):
         # 助理只换到平台分配的默认目录（全新的空目录或原目录本身），不能自选或接管已有目录。
@@ -109,7 +110,7 @@ async def validate_switch(
             if target.runtime_node_id
             else None
         )
-        problem = assistant_runtime.assignment_error(target, node, bot.owner_id)
+        problem = await assistant_runtime.switch_target_error(session, target, node, bot.owner_id)
         if problem is not None:
             raise SwitchError(422, problem)
     elif not same_relay:

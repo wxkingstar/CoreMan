@@ -28,7 +28,7 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_bot_changed
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
-from coreman.core.assistants.records import is_assistant, visible_to
+from coreman.core.assistants.records import is_assistant, unsupported, visible_to
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
@@ -537,6 +537,8 @@ async def replace_approvers(
     bot = await _visible_bot(session, bot_id, user)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("设置审批人"))
     wanted = list(dict.fromkeys(body.user_ids))
     if wanted:
         # 与注入时的 approver_logins 同一口径：存下来的人必须真能被注入，
@@ -611,6 +613,9 @@ async def workspace_switch_preview(
     bot = await _visible_bot(session, bot_id, user)
     if not can_switch_relay(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
+    if is_assistant(bot) and body.target_directory is not None:
+        # 与换运行时同一口径：助理只落到平台分配的默认目录，不探测自选的路径。
+        raise ApiError(422, 422, unsupported("自选工作目录或使用已有目录"))
     target = await session.get(RelayServer, body.relay_server_id)
     creator = await session.get(User, bot.created_by)
     if (

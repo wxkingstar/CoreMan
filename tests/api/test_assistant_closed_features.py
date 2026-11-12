@@ -212,3 +212,69 @@ async def test_schedule_tool_is_refused_and_not_offered(
     assert result["error"] == "assistant_unsupported" and REASON in result["message"]
     assert await _count(db_session, InteractionState) == 0
     assert await _count(db_session, CronJob) == 0
+
+
+async def _owned_assistant(client: httpx.AsyncClient, db_session: AsyncSession) -> Bot:
+    owner = await login_as(client, db_session, role="member")
+    bot, _ = await seed_assistant(db_session)
+    bot.owner_id = bot.created_by = owner.id
+    await db_session.commit()
+    return bot
+
+
+async def test_owner_cannot_change_approvers(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot = await _owned_assistant(client, db_session)
+    r = await client.put(f"/api/admin/bots/{bot.id}/approvers", json={"user_ids": []})
+    assert r.status_code == 422 and REASON in r.text, r.text
+
+
+async def test_alert_sources_are_closed_for_assistants(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    admin = await login_as(client, db_session, role="platform_admin")
+    bot, _ = await seed_assistant(db_session)
+    base = f"/api/admin/bots/{bot.id}/alert-sources"
+    listed = await client.get(base)
+    assert listed.status_code == 422 and REASON in listed.text, listed.text
+    created = await client.post(
+        base,
+        json={"chat_id": "oc_x", "sender_union_id": "on_x", "service_user_id": str(admin.id)},
+    )
+    assert created.status_code == 422 and REASON in created.text, created.text
+
+
+async def test_switch_preview_takes_no_target_directory_for_assistants(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from tests.fakes.runtime_node import add_node_relay
+
+    bot = await _owned_assistant(client, db_session)
+    relay = await add_node_relay(db_session, name="preview")
+    await db_session.commit()
+    r = await client.post(
+        f"/api/admin/bots/{bot.id}/workspace/switch-preview",
+        json={"relay_server_id": str(relay.id), "target_directory": "/data/skills/other"},
+    )
+    assert r.status_code == 422 and REASON in r.text, r.text
+
+
+async def test_switch_validation_requires_the_owner(db_session: AsyncSession) -> None:
+    """管理者在上线前排进队列的换运行时作业：执行时也要是本人，别人的助理不改绑。"""
+    from coreman.core.bots.switch_relay import SwitchError, validate_switch
+    from coreman.core.db.models import User
+    from tests.fakes.runtime_node import add_node_relay
+
+    bot, _owner = await seed_assistant(db_session)
+    admin = User(
+        login_name=f"a{uuid.uuid4().hex[:6]}", display_name="管理员", role="platform_admin"
+    )
+    db_session.add(admin)
+    target = await add_node_relay(db_session, name="target")
+    await db_session.commit()
+    with pytest.raises(SwitchError) as caught:
+        await validate_switch(
+            db_session, bot=bot, target=target, model=None, actor=admin, member_ids=set()
+        )
+    assert caught.value.status == 403

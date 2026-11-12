@@ -244,3 +244,57 @@ async def test_turning_the_pool_off_leaves_bound_assistants_paused_not_migrated(
     assert bot.relay_server_id == relay.id and bot.enabled is True
     assert await assistant_runtime.turn_blocker(db_session, bot) == "runtime_not_allowed"
     assert bot.kind == "assistant"
+
+
+async def _change_while_waiting_for_the_lock(monkeypatch, db_engine, change) -> None:  # type: ignore[no-untyped-def]
+    """取节点锁之前，另一个事务改了实例或节点（等锁期间到的心跳、可见性修改）。"""
+    from coreman.core.db.session import make_session_factory
+
+    original = assistant_runtime.lock_node
+
+    async def lock(session, node_id):  # type: ignore[no-untyped-def]
+        async with make_session_factory(db_engine)() as other:
+            await change(other, node_id)
+            await other.commit()
+        await original(session, node_id)
+
+    monkeypatch.setattr(assistant_runtime, "lock_node", lock)
+
+
+async def test_admission_reads_the_node_after_taking_the_lock(
+    client, db_session, db_engine, monkeypatch
+):
+    relay, _ = await assistant_node(client, db_session)
+
+    async def lose_the_sandbox(other, node_id):  # type: ignore[no-untyped-def]
+        node = await other.get(RuntimeNode, node_id)
+        node.capabilities = {"claude": {"installed": True, "login": "ready"}}
+
+    await _change_while_waiting_for_the_lock(monkeypatch, db_engine, lose_the_sandbox)
+    status, message = await enable(client, relay)
+    assert status == 422 and "隔离运行" in message
+
+
+async def test_audit_before_value_is_read_after_taking_the_lock(
+    client, db_session, db_engine, monkeypatch
+):
+    from coreman.core.db.models import AuditLog
+
+    relay, _ = await assistant_node(client, db_session)
+    relay_id = relay.id
+
+    async def added_meanwhile(other, node_id):  # type: ignore[no-untyped-def]
+        row = await other.get(RelayServer, relay_id)
+        row.assistant_pool = True
+
+    await _change_while_waiting_for_the_lock(monkeypatch, db_engine, added_meanwhile)
+    response = await client.put(
+        f"/api/admin/relay-servers/{relay_id}/assistant-pool", json={"enabled": False}
+    )
+    assert response.status_code == 200, response.text
+    audit = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == "relay.assistant_pool", AuditLog.target_id == str(relay_id))
+        .order_by(AuditLog.id.desc())
+    )
+    assert audit is not None and audit.diff == {"assistant_pool": [True, False]}

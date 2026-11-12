@@ -86,7 +86,7 @@ async def test_unfinished_handover_starts_a_new_session_that_reaches_the_node(
     assert body["transcript"]["transfer"] == row.pending_transfer.hex
 
 
-@pytest.mark.parametrize("breakage", ["offline", "no_sandbox", "not_in_pool"])
+@pytest.mark.parametrize("breakage", ["offline", "no_sandbox", "not_in_pool", "shared"])
 async def test_assistant_pauses_instead_of_running_elsewhere(
     db_engine: AsyncEngine, db_session: AsyncSession, breakage: str
 ) -> None:
@@ -99,8 +99,13 @@ async def test_assistant_pauses_instead_of_running_elsewhere(
         node.heartbeat_at = now() - timedelta(minutes=5)
     elif breakage == "no_sandbox":
         node.capabilities = {relay_row.model_provider: {"installed": True, "login": "ready"}}
-    else:
+    elif breakage == "not_in_pool":
         relay_row.assistant_pool = False
+    else:
+        from tests.integration.assistant_helpers import seed_standard
+
+        standard = await seed_standard(db_session)
+        standard.relay_server_id = relay_row.id
     await db_session.commit()
     done, relay = await run(db_engine, db_session, task)
     assert done.status == "failed" and done.error_code == "assistant_paused"
@@ -192,3 +197,152 @@ async def test_standard_turn_never_touches_the_assistant_path(
     assert done.status == "succeeded"
     assert "sandbox" not in relay.requests[0] and "transcript" not in relay.requests[0]
     assert await db_session.scalar(select(AssistantTranscript)) is None
+
+
+async def test_first_turn_after_a_switch_keeps_the_carried_context(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """换运行时后的首轮：新会话号还没派出过，不换掉它，平台的上下文说明照样带进这一轮。"""
+    import uuid
+
+    from coreman.core.chat import sessions
+    from tests.integration.worker_helpers import turn_block
+
+    bot, task = await assistant_chat(db_session)
+    _, first = await run(db_engine, db_session, task)
+    # 上一轮的转录已交回（交接办完）。
+    row = await db_session.scalar(
+        select(AssistantTranscript).where(AssistantTranscript.bot_id == bot.id)
+    )
+    assert row is not None
+    row.pending_transfer, row.pending_node_id = None, None
+    await db_session.commit()
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep=set())
+    await db_session.commit()
+    second_task = await chat_task(
+        db_session, bot, "再查一次", sender="owner_pid", chat_type="single", chat_id="oc_private"
+    )
+    done, second = await run(db_engine, db_session, second_task)
+    assert done.status == "succeeded"
+    body = second.requests[0]
+    assert body["transcript"]["restore"] is False
+    assert body["session_id"] != first.requests[0]["session_id"]
+    assert uuid.UUID(body["session_id"])
+    assert "上下文续接" in turn_block(body)
+
+
+@pytest.mark.parametrize("scenario", ["quota", "normal_observed_model", "relay_error"])
+async def test_side_channel_chunks_of_a_sandboxed_turn_touch_no_relay_records(
+    db_engine: AsyncEngine, db_session: AsyncSession, scenario: str
+) -> None:
+    """沙箱里的进程能伪造额度、运行时与报错帧：助理这一轮不改实例的额度与健康记录。"""
+    bot, task = await assistant_chat(db_session)
+    relay_row = await db_session.get(RelayServer, bot.relay_server_id)
+    assert relay_row is not None
+    relay = FakeRelay(scenario)
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: relay.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    assert relay.requests and relay.requests[0]["sandbox"] is True
+    await db_session.refresh(relay_row)
+    assert relay_row.rate_limit_probed_at is None and relay_row.quota_observation is None
+    assert relay_row.rate_limit_5h_used_pct is None
+    assert relay_row.model_health is None and relay_row.health_checked_at is None
+    assert relay_row.last_model_failure is None
+
+
+async def test_an_unsandboxed_pool_refusal_is_not_a_provider_failure(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """普通员工（绕过了绑定检查）落到助理池实例上：RelayClient 当场拒绝，不记成模型故障。"""
+    from coreman.core.relay.client import RelayClient
+    from tests.integration.worker_helpers import seed_bot
+
+    bot, relay_row, _ = await seed_bot(db_session)
+    relay_row.assistant_pool = True
+    await db_session.commit()
+    task = await chat_task(db_session, bot, "你好")
+    fake = FakeRelay("normal")
+
+    def pool_client(_relay):  # type: ignore[no-untyped-def]
+        import httpx
+
+        return RelayClient(
+            fake.base_url,
+            http=httpx.AsyncClient(base_url=fake.base_url, transport=fake.transport),
+            assistant_pool=True,
+        )
+
+    ctx = build_ctx(db_engine, task, relay_client_factory=pool_client)
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    assert fake.requests == []
+    await db_session.refresh(relay_row)
+    assert relay_row.model_health is None and relay_row.last_model_failure is None
+    assert relay_row.health_checked_at is None
+
+
+class QueueTimeoutRelay(FakeRelay):
+    """排队等满仍没有节点来领：传输层报 RuntimeQueueTimeout，`unclaimed` 说节点是否确定没见过。"""
+
+    def __init__(self, unclaimed: bool) -> None:
+        super().__init__("normal")
+        self.unclaimed = unclaimed
+
+    async def _handle(self, request):  # type: ignore[no-untyped-def]
+        from coreman.core.runtime_nodes.transport import RuntimeQueueTimeout
+
+        if request.url.path == "/v1/chat/completions":
+            self.requests.append({})
+            raise RuntimeQueueTimeout("排队超时", request=request, unclaimed=self.unclaimed)
+        return await super()._handle(request)
+
+
+@pytest.mark.parametrize("unclaimed", [True, False])
+async def test_a_turn_no_node_ever_took_releases_its_handover(
+    db_engine: AsyncEngine, db_session: AsyncSession, unclaimed: bool
+) -> None:
+    """排队超时、确定没到过节点：交接编号作废，上一份转录下一轮照旧可续；有一点不确定就留着。"""
+    bot, task = await assistant_chat(db_session)
+    relay = QueueTimeoutRelay(unclaimed)
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: relay.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    assert relay.requests
+    row = await db_session.scalar(
+        select(AssistantTranscript)
+        .where(AssistantTranscript.bot_id == bot.id)
+        .execution_options(populate_existing=True)
+    )
+    assert row is not None
+    assert (row.pending_transfer is None) is unclaimed
+    assert (row.pending_node_id is None) is unclaimed
+
+
+async def test_release_only_clears_the_handover_it_was_given(db_session: AsyncSession) -> None:
+    import uuid
+
+    from coreman.core.assistants import transcripts
+
+    bot, _task = await assistant_chat(db_session)
+    relay_row = await db_session.get(RelayServer, bot.relay_server_id)
+    assert relay_row is not None
+    session_id, current = uuid.uuid4(), uuid.uuid4()
+    db_session.add(
+        AssistantTranscript(
+            bot_id=bot.id,
+            session_id=session_id,
+            pending_transfer=current,
+            pending_node_id=relay_row.runtime_node_id,
+        )
+    )
+    await db_session.commit()
+    assert not await transcripts.release(
+        db_session, bot_id=bot.id, session_id=session_id, transfer=uuid.uuid4()
+    )
+    assert await transcripts.release(
+        db_session, bot_id=bot.id, session_id=session_id, transfer=current
+    )
+    await db_session.commit()
+    row = await db_session.get(AssistantTranscript, (bot.id, session_id), populate_existing=True)
+    assert row is not None and row.pending_transfer is None and row.pending_node_id is None

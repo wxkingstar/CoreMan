@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -65,7 +65,9 @@ async def prepare(
 
     续得上的条件：不是新会话、库里有上一轮的转录、那一轮的交接已办完、数据密钥可用。
     续不上又不是新会话时换一个新的 relay 会话：驱动拿着旧会话号续，会在节点上悄悄从空会话开始，
-    换新的至少让这一轮明明白白是新会话。
+    换新的至少让这一轮明明白白是新会话。例外是换运行时后的首轮（没有转录行、会话带着
+    `inherited_from`）：这个会话号是换运行时时新起的、从没派出过，节点上没有可续的旧状态，
+    原样用它（不还原），平台的上下文说明才带得进这一轮。
     """
     restore = False
     if not info.is_new:
@@ -82,7 +84,8 @@ async def prepare(
             and row[1] > 0
             and await sealed.key_ready(session, bot.id)
         )
-        if not restore:
+        carried = row is None and info.inherited_from is not None
+        if not restore and not carried:
             await session.execute(
                 delete(AssistantTranscript).where(_key(bot.id, info.relay_session_id))
             )
@@ -111,6 +114,22 @@ async def prepare(
         )
     )
     return info, Plan(transfer, restore)
+
+
+async def release(
+    session: AsyncSession, *, bot_id: uuid.UUID, session_id: uuid.UUID, transfer: uuid.UUID
+) -> bool:
+    """这一轮确定没到过节点（排队时就撤销了）：作废它的交接编号，上一份转录下一轮照旧可续。
+
+    只在编号还是这一轮的时候清（之后的轮次已换上新编号就不动）；返回是否清了。调用方负责提交。
+    有一点不确定节点是否见过请求的，不要调用：留着编号，下一轮开新会话（不会续上可能过期的转录）。
+    """
+    result = await session.execute(
+        update(AssistantTranscript)
+        .where(_key(bot_id, session_id), AssistantTranscript.pending_transfer == transfer)
+        .values(pending_transfer=None, pending_node_id=None)
+    )
+    return bool(getattr(result, "rowcount", 0))
 
 
 async def download(

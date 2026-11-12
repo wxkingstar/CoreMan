@@ -29,6 +29,9 @@ def ready_caps(provider: str = "claude") -> dict:
 async def pool_relay(session: AsyncSession, name: str, **node_values) -> RelayServer:
     node_values.setdefault("capabilities", ready_caps())
     node_values.setdefault("heartbeat_at", now())
+    # 助理专用实例都上报本机指纹与系统用户（不是 root）：每轮都按它们核对隔离。
+    node_values.setdefault("machine_fingerprint", f"fp-{uuid.uuid4().hex}")
+    node_values.setdefault("uid", 1001)
     node = await add_node(session, name=name, **node_values)
     return await add_node_relay(session, node=node, assistant_pool=True)
 
@@ -132,10 +135,6 @@ async def test_switching_an_assistant_only_to_a_sandboxed_eligible_runtime(
     bot, owner_user = await seed_assistant(db_session)
     home = await pool_relay(db_session, "home")
     bot.relay_server_id = home.id
-    admin = User(
-        login_name=f"a{uuid.uuid4().hex[:6]}", display_name="管理员", role="platform_admin"
-    )
-    db_session.add(admin)
     await db_session.commit()
     plain = await add_node_relay(db_session, name="plain")
     plain_node = await db_session.get(RuntimeNode, plain.runtime_node_id)
@@ -143,12 +142,12 @@ async def test_switching_an_assistant_only_to_a_sandboxed_eligible_runtime(
     plain_node.heartbeat_at = now()
     with pytest.raises(SwitchError) as caught:
         await validate_switch(
-            db_session, bot=bot, target=plain, model=None, actor=admin, member_ids=set()
+            db_session, bot=bot, target=plain, model=None, actor=owner_user, member_ids=set()
         )
     assert "助理池" in caught.value.message
     pool = await pool_relay(db_session, "pool")
     assert await validate_switch(
-        db_session, bot=bot, target=pool, model=None, actor=admin, member_ids=set()
+        db_session, bot=bot, target=pool, model=None, actor=owner_user, member_ids=set()
     )
 
 
@@ -164,7 +163,9 @@ async def test_standard_bots_cannot_be_bound_or_switched_to_a_pool_node(
     beside = await add_node_relay(db_session, node=pool_node, provider="codex")
     assert pool_node is not None
     pool_node.capabilities = {**ready_caps(), **ready_caps("codex")}
-    plain = await pool_relay(db_session, "plain")
+    plain = await pool_relay(
+        db_session, "plain", capabilities={"claude": {"installed": True, "login": "ready"}}
+    )
     plain.assistant_pool = False
     standard = await seed_standard(db_session)
     standard.relay_server_id = plain.id
@@ -262,7 +263,8 @@ async def test_ordinary_bind_and_switch_only_add_a_node_lock_and_one_lookup(
             await record_statements(db_session, lambda target=target: switch(target))
         )
     results["same"] = extra(await record_statements(db_session, lambda: switch(one)))
-    # 锁一条、池标记（含同机同用户兄弟节点）一条；节点上报了指纹与 uid 也不多查。
+    # 锁一条、池标记与助理（含同机同用户兄弟节点）合在一条；节点上报了指纹与 uid 也不多查，
+    # 节点能力看已经读进会话的节点，不另查。
     for key in (
         ("plain", "bind"),
         ("plain", "switch"),
@@ -390,4 +392,184 @@ async def test_the_node_lock_is_taken_before_the_pool_lookup(db_session: AsyncSe
         "lock" if "pg_advisory_xact_lock" in s else "lookup" if "assistant_pool" in s else "other"
         for s in statements
     ]
-    assert kinds == ["lock", "lookup"], one
+    assert kinds == ["lock", "lookup"], (one, statements)
+
+
+# ---- 助理所在节点不承载普通员工（池与私有运行时同一条规则） ---------------------------
+
+
+async def private_assistant(session: AsyncSession) -> tuple:
+    """所有者私有运行时上的助理，节点是专门的助理实例：指纹与 uid 都上报、能隔离运行。"""
+    bot, owner_user = await seed_assistant(session)
+    private = await pool_relay(session, "private")
+    private.assistant_pool, private.visibility, private.owner_id = False, "private", owner_user.id
+    bot.relay_server_id = private.id
+    await session.commit()
+    node = await session.get(RuntimeNode, private.runtime_node_id)
+    assert node is not None
+    assert await runtime.turn_blocker(session, bot) is None
+    return bot, owner_user, private, node
+
+
+async def test_an_assistant_on_a_node_hosting_an_ordinary_employee_is_paused(
+    db_session: AsyncSession,
+) -> None:
+    bot, _owner, private, node = await private_assistant(db_session)
+    beside = await add_node_relay(db_session, node=node, provider="codex")
+    standard = await seed_standard(db_session)
+    # 同一节点上的另一个实例、同一个实例、停用的、迁移途中的：都算占用。
+    for place in ("beside", "same", "disabled", "migrating"):
+        standard.relay_server_id = beside.id if place != "same" else private.id
+        standard.enabled = place != "disabled"
+        if place == "migrating":
+            standard.relay_server_id = None
+            standard.workspace_state, standard.workspace_target_relay_id = "migrating", beside.id
+        await db_session.commit()
+        assert await runtime.turn_blocker(db_session, bot) == "runtime_shared", place
+    standard.workspace_state, standard.workspace_target_relay_id = "ready", None
+    standard.relay_server_id, standard.enabled = None, True
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) is None
+    message = runtime.pause_message("runtime_shared")
+    assert message.startswith("你的个人助理暂停了：")
+    assert str(node.id) not in message and (node.name or "") not in message
+
+
+async def test_a_sibling_node_with_the_same_machine_and_user_counts_too(
+    db_session: AsyncSession,
+) -> None:
+    bot, _owner, _private, node = await private_assistant(db_session)
+    sibling = await add_node_relay(db_session, name="sibling")
+    other_user = await add_node_relay(db_session, name="other-user")
+    for relay, uid in ((sibling, node.uid), (other_user, 2002)):
+        row = await db_session.get(RuntimeNode, relay.runtime_node_id)
+        assert row is not None
+        row.machine_fingerprint, row.uid = node.machine_fingerprint, uid
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = other_user.id
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) is None
+    standard.relay_server_id = sibling.id
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) == "runtime_shared"
+
+
+@pytest.mark.parametrize(("fingerprint", "uid"), [(None, 1001), ("fp-z", None), ("fp-z", 0)])
+async def test_a_node_without_fingerprint_and_ordinary_uid_cannot_run_assistants(
+    db_session: AsyncSession, fingerprint: str | None, uid: int | None
+) -> None:
+    bot, _owner, _private, node = await private_assistant(db_session)
+    node.machine_fingerprint, node.uid = fingerprint, uid
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) == "runtime_shared"
+
+
+async def test_the_pool_follows_the_same_rule(db_session: AsyncSession) -> None:
+    bot, _owner = await seed_assistant(db_session)
+    pool = await pool_relay(db_session, "pool")
+    bot.relay_server_id = pool.id
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) is None
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = pool.id
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) == "runtime_shared"
+
+
+async def test_a_visibility_flip_does_not_unpause_the_assistant(db_session: AsyncSession) -> None:
+    """放开成共享、绑上普通员工、再改回私有：助理照样暂停。"""
+    from coreman.api.errors import ApiError
+    from coreman.api.routers.bots import resolve_relay_for_create
+
+    bot, _owner, private, _node = await private_assistant(db_session)
+    private.visibility = "all"
+    await db_session.commit()
+    admin = await admin_user(db_session)
+    with pytest.raises(ApiError):
+        await resolve_relay_for_create(db_session, admin, private.id, None)
+    # 即便绕过了绑定的检查（比如更早的版本绑上的）：
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = private.id
+    private.visibility = "private"
+    await db_session.commit()
+    assert await runtime.turn_blocker(db_session, bot) == "runtime_shared"
+
+
+async def test_switching_an_assistant_to_a_shared_node_is_refused(db_session: AsyncSession) -> None:
+    bot, owner_user = await seed_assistant(db_session)
+    home = await pool_relay(db_session, "home")
+    bot.relay_server_id = home.id
+    target = await pool_relay(db_session, "target")
+    target.assistant_pool, target.visibility, target.owner_id = False, "private", owner_user.id
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = target.id
+    await db_session.commit()
+    with pytest.raises(SwitchError) as caught:
+        await validate_switch(
+            db_session, bot=bot, target=target, model=None, actor=owner_user, member_ids=set()
+        )
+    assert caught.value.message == runtime.PAUSE_MESSAGES["runtime_shared"].removeprefix("绑定的")
+    standard.relay_server_id = None
+    await db_session.commit()
+    await validate_switch(
+        db_session, bot=bot, target=target, model=None, actor=owner_user, member_ids=set()
+    )
+
+
+async def test_ordinary_employees_cannot_join_a_node_that_hosts_an_assistant(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.api.errors import ApiError
+    from coreman.api.routers.bots import resolve_relay_for_create
+
+    admin = await admin_user(db_session)
+    standard = await seed_standard(db_session)
+    home = await add_node_relay(db_session, name="home")
+    standard.relay_server_id = home.id
+    assistant, _owner = await seed_assistant(db_session)
+    # 节点没有声明能力、实例也不在池里，只是有个助理绑在上面（或正在迁过来）。
+    hosting = await add_node_relay(db_session, name="hosting", visibility="all")
+    sibling = await add_node_relay(db_session, name="sibling", visibility="all")
+    for relay in (hosting, sibling):
+        row = await db_session.get(RuntimeNode, relay.runtime_node_id)
+        assert row is not None
+        row.machine_fingerprint, row.uid = "fp-shared", 1001
+    capable = await add_node_relay(db_session, name="capable", visibility="all")
+    capable_node = await db_session.get(RuntimeNode, capable.runtime_node_id)
+    assert capable_node is not None
+    capable_node.capabilities = {
+        **ready_caps("codex"),
+        "claude": {"installed": True, "login": "ready"},
+    }
+    await db_session.commit()
+
+    async def refused(target: RelayServer, message: str) -> None:
+        with pytest.raises(SwitchError) as caught:
+            await validate_switch(
+                db_session, bot=standard, target=target, model=None, actor=admin, member_ids=set()
+            )
+        assert caught.value.message == message
+        with pytest.raises(ApiError):
+            await resolve_relay_for_create(db_session, admin, target.id, None)
+
+    await refused(capable, runtime.SANDBOX_NODE_MESSAGE)
+    assistant.relay_server_id = hosting.id
+    await db_session.commit()
+    await refused(hosting, runtime.ASSISTANT_NODE_MESSAGE)
+    await refused(sibling, runtime.SHARED_ASSISTANT_USER_MESSAGE)
+    assistant.relay_server_id = None
+    assistant.workspace_state, assistant.workspace_target_relay_id = "migrating", hosting.id
+    await db_session.commit()
+    await refused(hosting, runtime.ASSISTANT_NODE_MESSAGE)
+    assistant.workspace_state, assistant.workspace_target_relay_id = "ready", None
+    await db_session.commit()
+    assert await resolve_relay_for_create(db_session, admin, hosting.id, None) is hosting
+    await validate_switch(
+        db_session, bot=standard, target=sibling, model=None, actor=admin, member_ids=set()
+    )
+
+
+async def test_an_assistant_turn_check_costs_one_isolation_query(db_session: AsyncSession) -> None:
+    bot, _owner, _private, _node = await private_assistant(db_session)
+    statements = await record_statements(db_session, lambda: runtime.turn_blocker(db_session, bot))
+    assert len(statements) == 1 and "FROM bots" in statements[0], statements

@@ -108,4 +108,7 @@ async def sandbox_ready(session: AsyncSession, bot: Bot) -> None:
     }
     node.capabilities = capabilities
     node.heartbeat_at = now()
+    # 助理专用实例上报本机指纹与系统用户（不是 root），每轮都按它们核对节点上没有普通员工。
+    node.machine_fingerprint = node.machine_fingerprint or f"fp-{node.id.hex}"
+    node.uid = node.uid or 1001
     await session.flush()

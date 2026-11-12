@@ -1204,6 +1204,9 @@ async def _pool(session, relay):
         "assistant_sandbox_v1": True,
     }
     node.capabilities, node.heartbeat_at = capabilities, now()
+    # 助理专用实例上报本机指纹与系统用户（不是 root）。
+    node.machine_fingerprint = node.machine_fingerprint or f"fp-{node.id.hex}"
+    node.uid = node.uid or 1001
     await session.commit()
 
 
