@@ -75,7 +75,6 @@ class ClassifyStage(ChatStageBase):
             final_text = msg("run_interrupted", locale, relay=pre.relay_label or pre.relay.name)
             if detail:
                 error_message += f"; {detail}"
-                final_text += f"\n\n{detail}"
             return Verdict(
                 "error",
                 "failed",

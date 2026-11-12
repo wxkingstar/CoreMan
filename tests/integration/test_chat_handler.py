@@ -378,9 +378,12 @@ async def test_runtime_interruption_does_not_change_model_health(
     assert node_error in (log.error_message or "")
     if node_error == "control_lost":
         assert "本机运行时已放弃本轮请求" in (log.error_message or "")
-        assert "本机运行时已放弃本轮请求" in (
-            (await stream_of(db_session, task.id)).final_text or ""
-        )
+        reply = (await stream_of(db_session, task.id)).final_text or ""
+        assert "执行到一半中断了" in reply
+        assert "control_lost" not in reply
+        assert "控制轮询" not in reply
+        assert "控制租约" not in reply
+        assert "停止日志" not in reply
     await db_session.refresh(relay_row)
     assert (relay_row.model_health, relay_row.last_model_failure) == before
 
