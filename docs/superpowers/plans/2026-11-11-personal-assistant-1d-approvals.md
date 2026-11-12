@@ -7929,7 +7929,7 @@ __all__ = ["submit", "withdraw_pending"]
 Run: `uv run pytest tests/integration/test_assistant_approval_tick.py tests/unit/test_assistant_sealed_ledger.py tests/integration/test_scheduler_reaper.py -v && uv run mypy coreman`
 Expected: 新用例 5 passed；scheduler 的现有用例不改即通过。
 
-普通机器人不受影响：`test_tick_runs_without_an_approval_service`（没有审批单时每轮两条查询、不发任何东西；没配临时桶时清理直接返回）；`expire` / `remind` / `sweep_files` 只读写 `assistant_approvals`，这张表里只有助理的行。
+普通机器人不受影响：`test_tick_runs_without_an_approval_service`（没有审批单时每轮只做只读查询、不发任何东西；没配临时桶时清理直接返回）；`expire` / `remind` / `sweep_files` 只读写 `assistant_approvals`，这张表里只有助理的行。
 
 - [ ] **Step 6: 提交**
 

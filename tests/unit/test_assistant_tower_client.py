@@ -144,6 +144,25 @@ async def test_resubmitting_the_same_external_id_reports_an_update(
     assert sent.updated is True
 
 
+async def test_an_odd_approval_id_is_refused_before_it_reaches_a_url_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for bad in ("../x", "a/b", "a b", "x" * 129):
+        _serve(monkeypatch, lambda _, bad=bad: httpx.Response(201, json={"approval_id": bad}))
+        with pytest.raises(tower.TowerError) as refused:
+            await tower.submit(
+                CFG,
+                external_id="e",
+                requester="r",
+                caller="c",
+                abstract="a",
+                content="x",
+                body=b"{}",
+                expires_at=DUE,
+            )
+        assert (refused.value.code, refused.value.status) == ("tower_unavailable", 503), bad
+
+
 async def test_refusals_carry_the_code_and_outages_are_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

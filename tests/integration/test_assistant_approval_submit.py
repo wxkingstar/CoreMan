@@ -118,6 +118,22 @@ async def test_same_content_returns_the_existing_approval(
     assert other["status"] == "pending_approval" and "duplicate" not in other
 
 
+async def test_other_refusals_say_retrying_cannot_help(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feishu, _ = install(monkeypatch)
+    _, _, scope = await assistant_turn(db_session)
+
+    async def refuse(cfg: object, **kw: object) -> object:
+        raise tower.TowerError("body_too_large", 400)
+
+    monkeypatch.setattr(tower, "submit", refuse)
+    out = await submit(db_session, scope, "feishu_reply_message", reply())
+    assert out["error"] == "approval_rejected" and out["detail"] == "body_too_large"
+    assert "不会" in out["hint"] and "稍后" not in out["hint"]
+    assert await count(db_session) == 0 and feishu.writes == []
+
+
 async def test_tower_unavailable_means_nothing_is_staged_or_executed(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

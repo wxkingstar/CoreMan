@@ -301,15 +301,22 @@ async def give_up(
         if row is None or row.status != "approved":
             return row.status if row is not None else "missing"
         bot = await session.get(Bot, row.bot_id)
+        approval = row.approval_id
         if bot is None:
             row.status, row.error_code = "failed", code
             await session.commit()
-            return "failed"
-        return await _close(session, row, bot, "failed", code)
+            status = "failed"
+        else:
+            status = await _close(session, row, bot, "failed", code)
+    await _report(cfg, approval, status, code)
+    return status
 
 
 async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config | None) -> int:
-    """批准之后一直没有结论、也没有在途执行任务的单：记为执行中断并告诉助理与 Tower。
+    """批准之后一直没有结论、也没有在途执行任务的单：记为失败并告诉助理与 Tower。
+
+    已记下开始执行的是 `execution_interrupted`（不知道是否生效）；没有记下的是
+    `execution_not_started`（什么都没执行，可以重新提交）。
 
     参考时间取 `execute_started_at`，没有则取 `decided_at`（批准落库的时间）。不提交，由调用方
     的事务负责。返回关掉的张数。
@@ -346,7 +353,12 @@ async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config 
             code = sealed.LOCKED_CODE if sealed.is_locked(row) else "assistant_inactive"
             row.status, row.error_code = "failed", code
         else:
-            code = "execution_interrupted"
+            # 没记下「开始执行」就说明一次飞书调用都没发过：与「调到一半被杀」分开说。
+            code = (
+                "execution_interrupted"
+                if row.execute_started_at is not None
+                else "execution_not_started"
+            )
             row.status, row.error_code = "failed", code
             await service.deliver(session, row, bot)
         await _report(cfg, approval, "failed", code)

@@ -146,6 +146,9 @@ def _rest(
         lines += files
     # 文件参数已经列在附件小节里：对象名不出现在「其他参数」下。
     used = set(template.body) | set(template.target) | attachments.ARGUMENTS
+    if first.get("reply_to_message_id"):
+        # 回复文件发往被回复消息所在的会话，接收方参数不起作用：不展示，免得误导审批人。
+        used |= {"receive_id", "receive_id_type"}
     others = [f"- {key}：{_json(value)}" for key, value in first.items() if key not in used]
     if others:
         lines += ["", "其他参数：", *others]

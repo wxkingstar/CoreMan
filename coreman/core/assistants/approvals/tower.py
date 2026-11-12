@@ -161,6 +161,12 @@ async def submit(
     approval_id = data.get("approval_id")
     if status not in (200, 201) or not isinstance(approval_id, str) or not approval_id:
         raise _refused(status, data)
+    # 编号之后会拼进 URL 路径：只认 Tower 正常签发的字符。decisions 依赖 service，
+    # service 依赖本模块，所以延迟导入。
+    from coreman.core.cloud_proxy import decisions
+
+    if not decisions.APPROVAL_ID.fullmatch(approval_id):
+        raise TowerError("tower_unavailable", 503)
     return Submitted(approval_id, bool(data.get("updated")))
 
 

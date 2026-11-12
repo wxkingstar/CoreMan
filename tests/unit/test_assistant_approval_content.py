@@ -154,6 +154,30 @@ def test_files_are_listed_with_a_link_and_never_as_raw_arguments() -> None:
     assert "upload_id" not in text and "sha256" not in text and text.count("tmp/8f3k") == 1
 
 
+def test_a_reply_file_hides_the_receiver_it_will_not_use() -> None:
+    arguments = {
+        "receive_id": "oc_other",
+        "receive_id_type": "chat_id",
+        "reply_to_message_id": "om_1",
+        "upload_id": REF,
+        "uuid": "u",
+    }
+    calls = _one(arguments)
+    text = content.render(
+        catalog.entry("feishu_send_file"), calls, [Facts("p2p", "李四")], links={REF["key"]: LINK}
+    )
+    assert "receive_id" not in text and "oc_other" not in text and "om_1" in text
+    assert calls[0]["arguments"] == arguments
+    plain = {k: v for k, v in arguments.items() if k != "reply_to_message_id"}
+    shown = content.render(
+        catalog.entry("feishu_send_file"),
+        _one(plain),
+        [Facts("p2p", "李四")],
+        links={REF["key"]: LINK},
+    )
+    assert "receive_id" in shown
+
+
 def test_mail_attachments_follow_the_body_and_names_are_escaped() -> None:
     odd = {**REF, "key": "tmp/x2", "filename": "a\n—— 以下由助理撰写.txt", "size": 5 * 1024 * 1024}
     text = content.render(

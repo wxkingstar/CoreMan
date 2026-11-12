@@ -80,6 +80,8 @@ class FakeFeishu:
         # 带文件的上传：(路径, 表单字段, {字段名: (文件名, 内容, 类型)})。
         self.uploads: list[tuple[str, Any, Any]] = []
         self.fail: str | None = None
+        # 飞书应答里的表情编号；设为 None 模拟应答缺这一项。
+        self.reaction_id: str | None = "r_1"
 
     async def __call__(
         self,
@@ -105,7 +107,8 @@ class FakeFeishu:
                 self.uploads.append((path, data, files))
                 return {"file_key": "file_1", "image_key": "img_1", "file_token": "box_1"}
             self.writes.append((method, path, json))
-            return {"message_id": f"om_sent_{len(self.writes)}", "reaction_id": "r_1"}
+            out = {"message_id": f"om_sent_{len(self.writes)}"}
+            return {**out, "reaction_id": self.reaction_id} if self.reaction_id else out
         if path == "/im/v1/messages/mget":
             found = [m for m in self.history if m["message_id"] in params["message_ids"]]
             if not found:

@@ -60,12 +60,13 @@ async def mark(
             path={"message_id": message_id},
             json={"reaction_type": {"emoji_type": PROCESSING_EMOJI}},
         )
+    reaction_id = str(data.get("reaction_id") or "")
+    if not reaction_id:
+        # 没有编号就撤销不掉，还会占满名额：不记。
+        return {"error": "mark_failed"}
     session.add(
         AssistantMark(
-            bot_id=bot_id,
-            message_id=message_id,
-            chat_id=found.chat_id,
-            reaction_id=str(data.get("reaction_id") or ""),
+            bot_id=bot_id, message_id=message_id, chat_id=found.chat_id, reaction_id=reaction_id
         )
     )
     return {"status": "marked"}

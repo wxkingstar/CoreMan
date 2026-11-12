@@ -194,4 +194,4 @@ async def test_tick_closes_approved_tickets_whose_execution_died(
     assert counts["assistant_approvals_recovered"] == 1
     await db_session.commit()
     row = await reload(db_session, row)
-    assert (row.status, row.error_code) == ("failed", "execution_interrupted")
+    assert (row.status, row.error_code) == ("failed", "execution_not_started")

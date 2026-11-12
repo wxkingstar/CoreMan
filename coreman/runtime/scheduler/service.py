@@ -234,9 +234,12 @@ class SchedulerService(Service):
                     await session.commit()
                 from coreman.core.assistants.approvals.service import tick as assistant_tick
 
-                async with self._factory() as session:
-                    counts.update(await assistant_tick(session, now))
-                    await session.commit()
+                try:
+                    async with self._factory() as session:
+                        counts.update(await assistant_tick(session, now))
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 审批闸门一直出错，也不能挡住后面的清理
+                    self._log.warning("assistant_approval_tick_failed", error=type(exc).__name__)
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds

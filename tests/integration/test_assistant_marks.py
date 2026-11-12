@@ -63,3 +63,14 @@ async def test_marks_are_capped(db_session: AsyncSession, monkeypatch: pytest.Mo
     await db_session.flush()
     out = await marks.mark(db_session, None, scope, "om_2", done=False)  # type: ignore[arg-type]
     assert out["error"] == "too_many_marks" and feishu.writes == []
+
+
+async def test_a_reaction_without_an_id_is_not_stored(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feishu, _ = install(monkeypatch)
+    feishu.reaction_id = None
+    bot, _, scope = await assistant_turn(db_session)
+    out = await marks.mark(db_session, None, scope, "om_2", done=False)  # type: ignore[arg-type]
+    assert out == {"error": "mark_failed"}
+    assert await db_session.get(AssistantMark, (bot.id, "om_2")) is None

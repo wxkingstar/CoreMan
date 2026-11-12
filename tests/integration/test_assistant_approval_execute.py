@@ -189,10 +189,11 @@ async def test_tower_outage_changes_nothing_and_can_be_retried(
 async def test_giving_up_tells_the_assistant(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    row, _, feishu, _ = await approved(db_session, monkeypatch)
+    row, _, feishu, fake = await approved(db_session, monkeypatch)
     assert await execute.give_up(make_session_factory(db_engine), row.id, CFG) == "failed"
     row = await reload(db_session, row)
     assert (row.status, row.error_code) == ("failed", "tower_unavailable")
+    assert fake.reported == [(row.approval_id, "failed", "tower_unavailable")]
     assert feishu.writes == [] and len(await queued(db_session, APPROVAL_RESULT_KIND)) == 1
 
 
@@ -454,8 +455,8 @@ async def test_stuck_approval_without_a_live_task_is_closed_and_reported(
     assert await execute.recover_stuck(db_session, utcnow(), CFG) == 1
     await db_session.commit()
     row = await reload(db_session, row)
-    assert (row.status, row.error_code) == ("failed", "execution_interrupted")
-    assert fake.reported == [(row.approval_id, "failed", "execution_interrupted")]
+    assert (row.status, row.error_code) == ("failed", "execution_not_started")
+    assert fake.reported == [(row.approval_id, "failed", "execution_not_started")]
     assert [t.payload["status"] for t in await queued(db_session, APPROVAL_RESULT_KIND)] == [
         "failed"
     ]
