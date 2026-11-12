@@ -23,10 +23,14 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StrictBool, field_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
+from coreman.core.assistants import keys, sealed, transcripts
+from coreman.core.assistants.runtime import ASSISTANT_CONCURRENCY_KEY, node_sandboxed
 from coreman.core.audit import record_audit
+from coreman.core.crypto import DecryptError
 from coreman.core.db.models import (
     ModelCatalog,
     RelayServer,
@@ -130,9 +134,18 @@ class Capability(BaseModel):
     resume_fallback_v1: StrictBool = False
     # 记忆在工作目录的 .coreman-memory/，Claude 与 Codex 共用。旧节点没有，Codex 读不到记忆。
     memory_layout_v1: StrictBool = False
+    # 守护进程自检通过、能在沙箱里跑个人助理的轮次（见 runtime_daemon/sandbox.py）。旧节点没有，
+    # 也就收不到助理的轮次。写坏的值（非布尔真值）按没有处理，不让心跳被拒。
+    assistant_sandbox_v1: StrictBool = False
     # 节点能在多个席位之间切换（见 runtime_daemon/seats.py）。旧节点没有，管理台提示升级。
     seat_switch_v1: StrictBool = False
     seats: list[SeatState] = Field(default_factory=list, max_length=21)
+
+    @field_validator("assistant_sandbox_v1", mode="before")
+    @classmethod
+    def sandbox_flag(cls, value: object) -> bool:
+        return value is True
+
     installed: bool = False
     version: str = Field(default="", max_length=100)
     # CLI 登录的账号邮箱，只用于展示；旧节点不上报时为空。
@@ -204,6 +217,28 @@ class HeartbeatIn(BaseModel):
     proxy: ProxyState | None = None
     root_edit_supported: bool = False
     root_change_result: RootChangeResult | None = None
+    # 本机指纹（机器编号的哈希，64 位十六进制）与守护进程的 uid；旧节点不上报。只用于判断
+    # 同一台机器上的节点是不是同一个系统用户，写坏了按没上报处理，不让心跳被拒。
+    machine: str | None = None
+    uid: int | None = None
+
+    @field_validator("machine", mode="before")
+    @classmethod
+    def machine_hash(cls, value: object) -> str | None:
+        if (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value)
+        ):
+            return value
+        return None
+
+    @field_validator("uid", mode="before")
+    @classmethod
+    def system_uid(cls, value: object) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**32:
+            return value
+        return None
 
     @field_validator("proxy", mode="before")
     @classmethod
@@ -477,6 +512,8 @@ async def heartbeat(
             git_hosts=body.git_hosts,
             proxy=body.proxy.model_dump() if body.proxy else None,
             capabilities={p: getattr(body, p).model_dump() for p in BACKENDS},
+            machine_fingerprint=body.machine,
+            uid=body.uid,
         )
     )
     from sqlalchemy.dialects.postgresql import insert
@@ -680,20 +717,24 @@ async def _collect(
     commands: list[dict[str, Any]] = []
     if not node.draining and body.slots:
         moment = now()
+        claimable = (
+            RuntimeCall.node_id == node_id,
+            RuntimeCall.status == "queued",
+            RuntimeCall.consumer_at >= moment - timedelta(seconds=LEASE_SECONDS),
+            RuntimeCall.deadline > moment,
+        )
         rows = list(
             await session.scalars(
                 select(RuntimeCall)
-                .where(
-                    RuntimeCall.node_id == node_id,
-                    RuntimeCall.status == "queued",
-                    RuntimeCall.consumer_at >= moment - timedelta(seconds=LEASE_SECONDS),
-                    RuntimeCall.deadline > moment,
-                )
+                .where(*claimable, RuntimeCall.sandbox.is_(False))
                 .order_by(RuntimeCall.created_at)
                 .limit(min(body.slots, 4))
                 .with_for_update(skip_locked=True)
             )
         )
+        room = min(body.slots, 4) - len(rows)
+        if room > 0 and node_sandboxed(node):
+            rows += await _claim_sandboxed(session, request, node_id, claimable, room)
         for row in rows:
             payload = json.loads(
                 request.app.state.cipher.decrypt(row.request_enc, envelope_aad(row.id))
@@ -702,6 +743,99 @@ async def _collect(
             commands.append({"id": str(row.id), "provider": row.provider, **payload})
             await notify_call(session, row.id, node_id)
     return node.draining, cancelled, commands
+
+
+async def _claim_sandboxed(
+    session: AsyncSession,
+    request: Request,
+    node_id: uuid.UUID,
+    claimable: tuple[Any, ...],
+    room: int,
+) -> list[RuntimeCall]:
+    """个人助理的调用：普通调用领完之后才领，且本节点同时在跑的不超过助理并发上限。
+
+    超出的留在队列里，由调用方按排队上限等待；普通调用从不排在它们后面。
+    """
+    stored = await request.app.state.settings_store.get(ASSISTANT_CONCURRENCY_KEY, default=2)
+    limit = stored if isinstance(stored, int) and not isinstance(stored, bool) else 2
+    running = await session.scalar(
+        select(func.count())
+        .select_from(RuntimeCall)
+        .where(
+            RuntimeCall.node_id == node_id,
+            RuntimeCall.sandbox.is_(True),
+            RuntimeCall.status == "running",
+        )
+    )
+    room = min(room, limit - (running or 0))
+    if room <= 0:
+        return []
+    return list(
+        await session.scalars(
+            select(RuntimeCall)
+            .where(*claimable, RuntimeCall.sandbox.is_(True))
+            .order_by(RuntimeCall.created_at)
+            .limit(room)
+            .with_for_update(skip_locked=True)
+        )
+    )
+
+
+@router.get("/assistant-transcripts/{transfer}")
+async def transcript_download(
+    transfer: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
+) -> Response:
+    """节点续聊前取转录：只认派这一轮时给它的交接编号。没有、别人的、读不出来都回同一个 404。"""
+    node = await node_auth(request, session)
+    # 这个请求只读一个助理的一份转录：解不开按没有处理，不报 500。
+    sealed.tolerate_undecryptable(session)
+    try:
+        data = await transcripts.download(session, node_id=node.id, transfer=transfer)
+    except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable):
+        data = None
+    await session.commit()
+    if data is None:
+        raise ApiError(404, 404, "转录不可用")
+    return Response(data, media_type="application/octet-stream", headers=NO_STORE)
+
+
+@router.put("/assistant-transcripts/{transfer}")
+async def transcript_upload(
+    transfer: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """节点交回本轮转录（请求体是 tar.gz 原始字节）。
+
+    编号失效、不是这个节点的、本轮已办完、存不下（密钥销毁、解不开、行已删）都回同一个 410：
+    节点不必再传，也看不出别的节点有没有这个编号。
+    """
+    node_id = (await node_auth(request, session)).id
+    status = request.headers.get("X-Transcript-Status", "")
+    if status not in transcripts.STATUSES:
+        raise ApiError(422, 422, "转录状态无效")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > transcripts.MAX_BYTES:
+        raise ApiError(413, 413, "转录过大")
+    # 读请求体可能很久：先把认证用过的连接还回去，不在读取期间占着事务；行锁在读完之后才拿。
+    await session.rollback()
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > transcripts.MAX_BYTES:
+            raise ApiError(413, 413, "转录过大")
+    if (status == "ok") != bool(data):
+        raise ApiError(422, 422, "转录内容与状态不符")
+    sealed.tolerate_undecryptable(session)
+    try:
+        result = await transcripts.upload(
+            session, node_id=node_id, transfer=transfer, status=status, data=bytes(data)
+        )
+    except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable, StaleDataError):
+        result = "stale"
+    if result == "stale":
+        await session.rollback()
+        raise ApiError(410, 410, "交接编号已失效")
+    await session.commit()
+    return {"code": 0, "data": {"result": result}}
 
 
 @router.post("/calls/{call_id}/frames")

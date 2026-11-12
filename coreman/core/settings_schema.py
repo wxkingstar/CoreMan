@@ -35,6 +35,8 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "group_observe_bot_streak_limit": 3,
     # 排队的消息最早一条等了这么多分钟，开工前先发卡片确认；0 表示不确认。
     "busy_confirm_minutes": 10,
+    # 每个运行时节点同时跑的个人助理轮次上限；超出的排队（节点领取时执行）。
+    "assistant_node_concurrency": 2,
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
@@ -80,6 +82,7 @@ class SettingsPatch(BaseModel):
     group_observe_max_wait_seconds: int | None = Field(default=None, ge=1, le=3600)
     group_observe_bot_streak_limit: int | None = Field(default=None, ge=1, le=100)
     busy_confirm_minutes: int | None = Field(default=None, ge=0, le=1440)
+    assistant_node_concurrency: int | None = Field(default=None, ge=1, le=32)
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
     # 组织背景出厂就是空的，存成空串即「不加这一段」，所以不设 min_length。

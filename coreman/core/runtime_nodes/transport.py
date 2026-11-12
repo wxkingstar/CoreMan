@@ -60,6 +60,8 @@ UNLISTENED_POLL_SECONDS = 0.25
 # 调用方用这个请求扩展声明整次调用的总时限（秒）：声明了的执行类请求（对话）在节点满载时
 # 排队等空位，调用期限也按它算；没声明的探测类请求不排队、期限沿用默认。
 TOTAL_TIMEOUT_EXTENSION = "coreman.total_timeout"
+# 个人助理在沙箱里跑的一轮：节点领取时按助理并发上限另算（见 runtime_protocol._collect）。
+SANDBOX_EXTENSION = "coreman.sandbox"
 # 等节点接单（queued→running）的上限：节点并发满了是排队，不是连接失败。
 QUEUE_WAIT_SECONDS = 120.0
 # 排队期间多久核对一次节点：掉线、停用或开始排空（不会再接单）时不必等满排队上限。
@@ -333,6 +335,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                     deadline=started
                     + timedelta(seconds=call_seconds(extensions.get(TOTAL_TIMEOUT_EXTENSION))),
                     consumer_at=started,
+                    sandbox=extensions.get(SANDBOX_EXTENSION) is True,
                 )
             )
             await notify_node(session, self.node_id, call_id)
