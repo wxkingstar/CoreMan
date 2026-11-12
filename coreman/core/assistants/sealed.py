@@ -16,6 +16,10 @@
   改出来的。
 - 还原只认库里读出的值，且 `_sealed` 必须是本模块写出的格式（墓碑或数据密钥的密文）；已经
   还原在内存里的值靠行上的标记（`_OPENED`）认出来，不再解第二次。
+
+解不开（主密钥配错、密文被改，`DecryptError`）默认照抛，配置错误要响亮。一个会话里处理很多
+机器人的行时（认领、看护），先调 `tolerate_undecryptable`：解不开的那一行按读不出来处理，
+其余的行照常，不让一行坏数据把整批连同普通机器人一起卡住。
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from coreman.core.assistants import keys
 from coreman.core.config import get_settings
-from coreman.core.crypto import PREFIX_V2, Cipher, key_id_of
+from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
     Bot,
@@ -57,6 +61,7 @@ log = get_logger(__name__)
 
 SEALED = "_sealed"
 LOCKED_CODE = "content_locked"
+UNDECRYPTABLE_CODE = "content_undecryptable"
 
 
 class ContentLocked(Exception):
@@ -335,6 +340,10 @@ _LOCKED = "sealed_locked"
 _OPENED = "sealed_opened"
 # flush 期间被换成密文的属性，flush 之后换回明文。
 _RESTORE = "sealed_restore"
+# 会话上的标记：解不开按读不出来处理（见 tolerate_undecryptable）。
+# 行上的标记：读不出来是因为解不开。
+_TOLERATE = "sealed_tolerate_undecryptable"
+_UNDECRYPTABLE = "sealed_undecryptable"
 _master: Cipher | None = None
 # bot_id → (所有者；普通机器人为 None, 过期时刻)。
 _OWNERS: dict[uuid.UUID, tuple[uuid.UUID | None, float]] = {}
@@ -353,6 +362,29 @@ def master() -> Cipher:
 def forget() -> None:
     """清本进程的所有者缓存。"""
     _OWNERS.clear()
+
+
+def tolerate_undecryptable(session: AsyncSession) -> None:
+    """这个会话从此把「解不开」（`DecryptError`）当作这一行读不出来，不再抛错。
+
+    只给一个会话里处理很多机器人的行的地方用（认领、看护），会话要是这批处理专用的。读：内容
+    列置空，`is_locked` 与 `is_undecryptable` 为真；写：内容丢弃（同密钥已销毁）。每次记一条
+    `assistant_content_undecryptable` 错误日志，只带表名、行号与机器人。
+    """
+    session.info[_TOLERATE] = True
+
+
+def _tolerated(session: AsyncSession, table: str, bot_id: uuid.UUID, row_id: Any) -> bool:
+    """解不开时：会话声明了容忍就记一条日志（不带内容与异常文字）返回真，调用方置空；否则照抛。"""
+    if not session.info.get(_TOLERATE):
+        return False
+    log.error(
+        "assistant_content_undecryptable",
+        table=table,
+        row_id=None if row_id is None else str(row_id),
+        bot_id=str(bot_id),
+    )
+    return True
 
 
 async def owner_of(session: AsyncSession, bot_id: uuid.UUID) -> uuid.UUID | None:
@@ -494,7 +526,8 @@ async def seal_values(
     """把 `values` 里的内容列封存后返回新字典；普通机器人、没有内容要写时原样返回。
 
     首次为某个所有者写入时生成其数据密钥。密钥已销毁时不抛错：内容丢弃，其余列照常返回，
-    调用方的状态机照走。
+    调用方的状态机照走。主密钥解不开数据密钥时照抛 `DecryptError`，会话声明了
+    `tolerate_undecryptable` 的同样丢弃内容。
     """
     spec = COLUMNS[model]
     touched = [c for c, kind in spec.items() if c in values and not _nothing(kind, values[c])]
@@ -505,6 +538,10 @@ async def seal_values(
         cipher = await _cipher(session, bot_id, create_key=True)
     except ContentLocked:
         log.warning("assistant_content_dropped", table=table, bot_id=str(bot_id))
+        return {**values, **{c: _dropped(spec[c], values[c]) for c in touched}}
+    except DecryptError:
+        if not _tolerated(session, table, bot_id, None):
+            raise
         return {**values, **{c: _dropped(spec[c], values[c]) for c in touched}}
     if cipher is None:
         return values
@@ -550,7 +587,8 @@ async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None 
     """把一行里封存的内容列还原成明文（不标脏）；返回内容是否可读。
 
     普通机器人的行、已经还原过的行原样返回。读不出来（密钥已销毁、墓碑、`viewer` 不是所有者）
-    时不抛错：内容列置空，`is_locked(row)` 为真。主密钥配错、密文被改仍抛 `DecryptError`。
+    时不抛错：内容列置空，`is_locked(row)` 为真。主密钥配错、密文被改仍抛 `DecryptError`；
+    会话声明了 `tolerate_undecryptable` 的按读不出来处理，`is_undecryptable(row)` 也为真。
 
     Args:
         viewer: 给了就只对所有者本人还原（接口输出正文时用）；不给按运行时对待，一律还原
@@ -565,6 +603,8 @@ async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None 
     if bot_id is None or (not pending and _CIPHER not in state.info):
         return not state.info.get(_LOCKED, False)
     targets = pending
+    table = str(row.__tablename__)
+    undecryptable = False
     try:
         if viewer is not None and await owner_of(session, bot_id) not in (None, viewer):
             # 不是本人：连已经还原在内存里的也收回去。
@@ -574,21 +614,33 @@ async def open_row(session: AsyncSession, row: Any, *, viewer: uuid.UUID | None 
         if cipher is None:
             # 普通机器人的正文恰好长得像密文。
             return True
-        table = str(row.__tablename__)
         opened = {c: _open(cipher, aad(table, c, bot_id), spec[c], values[c]) for c in pending}
     except ContentLocked:
-        for column in targets:
-            set_committed_value(row, column, _blank(spec[column], values[column]))
-        state.info.pop(_CIPHER, None)
-        state.info.pop(_OPENED, None)
-        state.info[_LOCKED] = True
-        return False
-    for column, value in opened.items():
-        set_committed_value(row, column, value)
-        state.info.setdefault(_OPENED, {})[column] = value
-    state.info[_CIPHER] = cipher
-    state.info.pop(_LOCKED, None)
-    return True
+        pass
+    except DecryptError:
+        identity = state.identity
+        row_id = identity[0] if identity and len(identity) == 1 else identity
+        if not _tolerated(session, table, bot_id, row_id):
+            raise
+        undecryptable = True
+    else:
+        for column, value in opened.items():
+            set_committed_value(row, column, value)
+            state.info.setdefault(_OPENED, {})[column] = value
+        state.info[_CIPHER] = cipher
+        state.info.pop(_LOCKED, None)
+        state.info.pop(_UNDECRYPTABLE, None)
+        return True
+    for column in targets:
+        set_committed_value(row, column, _blank(spec[column], values[column]))
+    state.info.pop(_CIPHER, None)
+    state.info.pop(_OPENED, None)
+    state.info[_LOCKED] = True
+    if undecryptable:
+        state.info[_UNDECRYPTABLE] = True
+    else:
+        state.info.pop(_UNDECRYPTABLE, None)
+    return False
 
 
 async def open_rows(
@@ -599,25 +651,46 @@ async def open_rows(
 
 
 async def open_value(
-    session: AsyncSession, model: type, column: str, bot_id: uuid.UUID, value: Any
+    session: AsyncSession,
+    model: type,
+    column: str,
+    bot_id: uuid.UUID,
+    value: Any,
+    *,
+    row_id: Any = None,
 ) -> Any:
-    """只取了一列时还原这个值；读不出来返回该列的空值。"""
+    """只取了一列时还原这个值；读不出来返回该列的空值。
+
+    解不开同 `open_row`：默认照抛，会话声明了 `tolerate_undecryptable` 的返回空值。
+
+    Args:
+        row_id: 这一列所在行的主键，只用于解不开时的日志
+    """
     kind = COLUMNS[model][column]
     if not _looks_sealed(kind, value):
         return value
+    table = str(model.__tablename__)  # type: ignore[attr-defined]
     try:
         cipher = await _cipher(session, bot_id, create_key=False)
         if cipher is None:
             return value
-        table = str(model.__tablename__)  # type: ignore[attr-defined]
         return _open(cipher, aad(table, column, bot_id), kind, value)
     except ContentLocked:
+        return _blank(kind, value)
+    except DecryptError:
+        if not _tolerated(session, table, bot_id, row_id):
+            raise
         return _blank(kind, value)
 
 
 def is_locked(row: Any) -> bool:
-    """这一行的内容读不出来（已置空）。"""
+    """这一行的内容读不出来（已置空）：密钥已销毁，或在声明了容忍的会话里解不开。"""
     return row is not None and bool(sa_inspect(row).info.get(_LOCKED))
+
+
+def is_undecryptable(row: Any) -> bool:
+    """这一行读不出来是因为解不开（主密钥配错、密文被改），不是密钥已销毁。"""
+    return row is not None and bool(sa_inspect(row).info.get(_UNDECRYPTABLE))
 
 
 def is_opened(row: Any) -> bool:

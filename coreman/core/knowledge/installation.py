@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.bots.secrets import decrypt_json, merge_secret_dict
 from coreman.core.bus import outbox, tasks
@@ -372,6 +373,8 @@ async def effective_env(session: AsyncSession, cipher: Cipher, bot: Bot) -> dict
 
 async def recover_installations(session: AsyncSession, now: Any) -> int:
     """任务已终结但安装行未收尾时，仅标记未知失败，不重放外部安装。"""
+    # 跨机器人的一批，且只看任务状态：一条任务的内容解不开不影响判断，也不能卡住整批。
+    sealed.tolerate_undecryptable(session)
     candidates = list(
         await session.scalars(
             select(BotSkill.bot_id)

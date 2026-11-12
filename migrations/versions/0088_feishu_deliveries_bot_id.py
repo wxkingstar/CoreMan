@@ -10,6 +10,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # 改的是在用的表，要拿排他锁：排在长事务后面会让之后对这张表的读写全部跟着排队。
+    # 5 秒拿不到锁就报错，整次迁移回滚，稍后重跑即可。
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column(
         "feishu_deliveries",
         sa.Column(
@@ -26,4 +29,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 改的是在用的表，要拿排他锁：排在长事务后面会让之后对这张表的读写全部跟着排队。
+    # 5 秒拿不到锁就报错，整次迁移回滚，稍后重跑即可。
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.drop_column("feishu_deliveries", "bot_id")

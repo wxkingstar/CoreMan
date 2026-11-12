@@ -150,3 +150,45 @@ async def test_deleted_app_stops_its_child(db_session, runtime_settings, monkeyp
         assert standard.id in service.children
     finally:
         await service.on_shutdown()
+
+
+async def test_standard_lease_heartbeat_survives_a_failing_app_lease_heartbeat(
+    db_session, runtime_settings, monkeypatch
+):
+    """应用租约的心跳出错（如表还没迁移出来）：普通机器人的租约心跳照常提交。"""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from coreman.core.bus import app_leases
+
+    _, app, standard = await _seed(db_session)
+    service = GatewayFeishuService(port=0, interval=0.05)
+
+    async def spawn(key, child):
+        return FakeProcess()
+
+    async def broken(session, instance_id):
+        raise RuntimeError("relation app_leases does not exist")
+
+    monkeypatch.setattr(service, "spawn", spawn)
+    await service.on_start()
+    try:
+        await _started(service, app.id, standard.id)
+        monkeypatch.setattr(app_leases, "heartbeat", broken)
+        # 还没到过期线：扫描不会重新抢它，只有心跳会把时间往前推。
+        old = datetime.now(UTC) - timedelta(seconds=10)
+        async with service.factory() as session:
+            await session.execute(
+                update(BotLease).where(BotLease.bot_id == standard.id).values(heartbeat_at=old)
+            )
+            await session.commit()
+        for _ in range(100):
+            async with service.factory() as session:
+                lease = await session.get(BotLease, standard.id, populate_existing=True)
+            if lease.heartbeat_at > old:
+                break
+            await asyncio.sleep(0.05)
+        assert lease.heartbeat_at > old
+    finally:
+        await service.on_shutdown()

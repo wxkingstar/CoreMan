@@ -113,6 +113,8 @@ async def reap_lost_tasks(
     `claimed` 同样要收：worker 认领之后、`start` 之前被杀（或 `start` 就没写成），这一行
     再也不会有人动它——只看 `running` 的话它会一直挂在在途列表里，用户那边永远转圈。
     """
+    # 一批里是各个机器人的任务：一条解不开的不能让整批回滚、每轮都卡在同一行。
+    sealed.tolerate_undecryptable(session)
     cutoff = now - timedelta(seconds=timeout_seconds)
     # claimed 行可能还没写过 heartbeat_at，用认领时刻兜底。
     beat = func.coalesce(Task.heartbeat_at, Task.claimed_at)
@@ -181,6 +183,7 @@ async def reap_lost_tasks(
 
 async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
     """补偿任务终态提交后、流终态提交前崩溃的窗口；不重跑模型或改变任务结果。"""
+    sealed.tolerate_undecryptable(session)
     rows = list(
         await session.execute(
             select(Task, TaskStream)
@@ -229,10 +232,18 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
     在途任务、升级窗口里旧版本的看护收了尸等。等 `ABANDONED_TURN_GRACE_SECONDS` 再动手，
     cron 看护这类按自己口径收尾的路径先走完。
     """
+    sealed.tolerate_undecryptable(session)
     cutoff = now - timedelta(seconds=ABANDONED_TURN_GRACE_SECONDS)
     rows = (
         await session.execute(
-            select(ChatLog.id, ChatLog.bot_id, Task.status, Task.error_code, Task.error_message)
+            select(
+                ChatLog.id,
+                ChatLog.bot_id,
+                Task.id,
+                Task.status,
+                Task.error_code,
+                Task.error_message,
+            )
             .outerjoin(Task, Task.id == ChatLog.task_id)
             .where(
                 ChatLog.status == CHAT_LOG_RUNNING,
@@ -246,7 +257,7 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
             .with_for_update(of=ChatLog, skip_locked=True)
         )
     ).all()
-    for log_id, bot_id, task_status, error_code, error_message in rows:
+    for log_id, bot_id, task_id, task_status, error_code, error_message in rows:
         code: str | None
         message: str | None
         if task_status is None:
@@ -254,7 +265,9 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
         else:
             status = TASK_TO_LOG_STATUS.get(task_status, "error")
             # 这里只取了任务的一列：先还原成明文，再按对话记录这一列重新封存（两列的 AAD 不同）。
-            plain = await sealed.open_value(session, Task, "error_message", bot_id, error_message)
+            plain = await sealed.open_value(
+                session, Task, "error_message", bot_id, error_message, row_id=task_id
+            )
             code, message = error_code, plain[:5000] if plain else None
         stored = await sealed.seal_values(session, ChatLog, bot_id, {"error_message": message})
         await session.execute(

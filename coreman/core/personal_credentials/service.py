@@ -15,6 +15,7 @@ from typing import Any, Literal
 from sqlalchemy import delete, exists, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.audit import record_audit
 from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
@@ -541,6 +542,8 @@ async def cancel(session: AsyncSession, request_id: uuid.UUID, message: str) -> 
 
 
 async def expire_due(session: AsyncSession, now: datetime) -> int:
+    # 一批里是各个机器人的请求：一张表单卡解不开，不能让整批回滚、每轮都卡在这里。
+    sealed.tolerate_undecryptable(session)
     rows = (
         await session.scalars(
             select(CredentialRequest)

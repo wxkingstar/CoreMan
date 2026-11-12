@@ -16,6 +16,9 @@ SHAPE = (
 
 
 def upgrade() -> None:
+    # 改的是在用的表，要拿排他锁：排在长事务后面会让之后对这张表的读写全部跟着排队。
+    # 5 秒拿不到锁就报错，整次迁移回滚，稍后重跑即可。
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column(
         "bots",
         sa.Column("kind", sa.Text(), server_default=sa.text("'standard'"), nullable=False),
@@ -37,6 +40,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 改的是在用的表，要拿排他锁：排在长事务后面会让之后对这张表的读写全部跟着排队。
+    # 5 秒拿不到锁就报错，整次迁移回滚，稍后重跑即可。
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("DELETE FROM bots WHERE kind = 'assistant'")
     op.drop_index("bots_assistant_owner_uq", table_name="bots")
     op.drop_index("bots_platform_app_idx", table_name="bots")

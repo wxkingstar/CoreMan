@@ -262,3 +262,54 @@ async def test_update_syncs_assistant_bots_and_delete_is_blocked(
     assert (
         await admin_client.delete(f"/api/admin/platform-apps/{created['id']}")
     ).status_code == 409
+
+
+async def _standard_bot_on(db_session: AsyncSession, app_id: str) -> None:
+    from coreman.core.bots.secrets import encrypt_json
+
+    creator = User(login_name="lisi", display_name="李四")
+    db_session.add(creator)
+    await db_session.flush()
+    cipher = Cipher(base64.b64decode(MASTER_KEY))
+    db_session.add(
+        Bot(
+            bot_key="demo-bot",
+            platform="feishu",
+            name="demo-bot",
+            created_by=creator.id,
+            model="m",
+            working_dir="/d",
+            credentials_enc=encrypt_json(
+                cipher, {"app_id": app_id, "app_secret": "x"}, CREDENTIALS_AAD
+            ),
+        )
+    )
+    await db_session.commit()
+
+
+async def test_app_used_by_a_standard_bot_cannot_become_an_assistant_app(
+    admin_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await _standard_bot_on(db_session, "cli_example")
+    r = await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)
+    assert r.status_code == 409, r.text
+    # 没有个人助理能力的应用照常可以登记同一个 app_id。
+    plain = {**ASSISTANT_BODY, "capabilities": ["login"]}
+    created = await admin_client.post("/api/admin/platform-apps", json=plain)
+    assert created.status_code == 201, created.text
+    # 改成个人助理应用同样拒绝。
+    upd = await admin_client.put(
+        f"/api/admin/platform-apps/{created.json()['data']['id']}",
+        json={**plain, "capabilities": ["login", "assistant"]},
+        headers={"If-Match": '"1"'},
+    )
+    assert upd.status_code == 409, upd.text
+    assert (await db_session.scalar(select(PlatformApp.capabilities))) == ["login"]
+
+
+async def test_assistant_app_on_an_unused_app_id_is_accepted(
+    admin_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await _standard_bot_on(db_session, "cli_other")
+    r = await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)
+    assert r.status_code == 201, r.text

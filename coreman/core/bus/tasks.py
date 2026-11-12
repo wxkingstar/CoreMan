@@ -103,10 +103,23 @@ async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
 
 
 async def claim(session: AsyncSession, *, lane: str, instance_id: str) -> Task | None:
+    # 所有机器人共用这条队列：一条解不开的任务抛错会回滚认领，下一轮又领到它，整条车道就停了。
+    sealed.tolerate_undecryptable(session)
     row = (await session.execute(_CLAIM_SQL, {"instance": instance_id, "lane": lane})).first()
     if row is None:
         return None
     task = await get(session, int(row[0]))
+    if task is not None and sealed.is_undecryptable(task):
+        # 解不开（主密钥配错、密文被改）：落终态不再被认领。不写报错文字——写它要用同一把
+        # 密钥封存，主密钥配错时同样写不进去。
+        await finish(
+            session,
+            task.id,
+            status="failed",
+            error_code=sealed.UNDECRYPTABLE_CODE,
+            bot_id=task.bot_id,
+        )
+        return None
     if task is not None and sealed.is_locked(task):
         # 个人助理的数据密钥已销毁：内容读不出来，不交给处理器。
         await finish(

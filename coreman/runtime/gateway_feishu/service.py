@@ -233,11 +233,18 @@ class GatewayFeishuService(Service):
             try:
                 async with self.factory() as session:
                     await leases.heartbeat(session, self.instance_id)
-                    await app_leases.heartbeat(session, self.instance_id)
                     drain = await instances.heartbeat(
                         session, self.instance_id, running=len(self.children)
                     )
                     await session.commit()
+                # 助理应用的租约另起事务：它出错（表还没迁移出来、锁等待）不能把普通机器人的
+                # 租约心跳一起回滚，否则半分钟后普通机器人的租约过期、出站停摆。
+                try:
+                    async with self.factory() as session:
+                        await app_leases.heartbeat(session, self.instance_id)
+                        await session.commit()
+                except Exception as exc:
+                    self._log.error("app_lease_heartbeat_failed", error=type(exc).__name__)
                 if drain and not self.draining:
                     self.draining = True
                     self.request_stop("drained")
