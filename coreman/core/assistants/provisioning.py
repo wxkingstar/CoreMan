@@ -33,7 +33,7 @@ from coreman.core.assistants.records import new_assistant_bot
 from coreman.core.bots.secrets import CREDENTIALS_AAD, encrypt_json
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.bots.workspace_transfer import instruction_content
-from coreman.core.crypto import Cipher
+from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantLifecycle,
     Bot,
@@ -344,6 +344,9 @@ async def step_create(
         raise StepFailed("no_model")
     try:
         credentials = encrypt_json(cipher, app_credentials(cipher, app), CREDENTIALS_AAD)
+    except DecryptError:
+        # 应用密钥暂时解不开（例如主密钥轮换中）：过会儿再试，不当成再也做不成。
+        raise StepRetry("app_secret_unreadable") from None
     except ValueError:
         raise StepFailed("app_unavailable") from None
     bot_id = uuid.uuid4()

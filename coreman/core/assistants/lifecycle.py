@@ -57,7 +57,10 @@ async def live(
         AssistantLifecycle.owner_id == owner_id, AssistantLifecycle.finished_at.is_(None)
     )
     if lock or skip_locked:
-        stmt = stmt.with_for_update(skip_locked=skip_locked)
+        # 加锁读要拿到库里的当前值：同一会话先前不加锁读过这一行的话，不重新装载就会按旧步骤往下走。
+        stmt = stmt.with_for_update(skip_locked=skip_locked).execution_options(
+            populate_existing=True
+        )
     found: AssistantLifecycle | None = await session.scalar(stmt)
     return found
 

@@ -343,6 +343,31 @@ async def test_no_backend_configured_fails_at_once(
     assert messenger.texts[-1][1] == provisioning.FAILURES["no_pool_runtime"]
 
 
+async def test_an_unreadable_app_secret_is_retried_not_abandoned(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """应用密钥暂时解不开（例如主密钥轮换没做完）：建记录这一步稍后再试，不放弃开通。"""
+    from coreman.core.assistants.apps import SECRET_AAD
+    from coreman.core.crypto import Cipher
+    from coreman.core.db.models import PlatformApp
+
+    install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    await db_session.execute(
+        update(PlatformApp).values(
+            secret_enc=Cipher(b"\x01" * 32).encrypt("app-secret", SECRET_AAD)
+        )
+    )
+    await db_session.commit()
+    owner_id = owner.id
+    await tick(make_session_factory(db_engine), messenger)
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "create"
+    assert flow.error_code == "app_secret_unreadable" and flow.attempts == 1
+    assert await db_session.scalar(select(func.count()).select_from(Bot)) == 0
+
+
 async def test_a_switched_off_assistant_still_counts_as_one(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
