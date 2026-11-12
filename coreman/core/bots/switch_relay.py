@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import runtime as assistant_runtime
+from coreman.core.assistants.records import is_assistant
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bot
@@ -28,7 +30,7 @@ from coreman.core.bots.workspace_transfer import (
 )
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotSkill, RelayServer, User
+from coreman.core.db.models import Bot, BotSkill, RelayServer, RuntimeNode, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
 from coreman.core.knowledge.installation import reinstall_after_switch
 from coreman.core.relay.models import (
@@ -95,6 +97,21 @@ async def validate_switch(
             await validate_backend_ready(session, target)
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
+    if not same_relay and is_assistant(bot):
+        # 个人助理只能改绑到助理池或所有者本人的私有运行时，且那台要能隔离运行助理。
+        node = (
+            await session.get(RuntimeNode, target.runtime_node_id)
+            if target.runtime_node_id
+            else None
+        )
+        problem = assistant_runtime.assignment_error(target, node, bot.owner_id)
+        if problem is not None:
+            raise SwitchError(422, problem)
+    elif not same_relay:
+        # 普通员工不能换到助理池的节点上：它不在沙箱里，会读到助理的明文。
+        problem = await assistant_runtime.standard_bind_error(session, target)
+        if problem is not None:
+            raise SwitchError(422, problem)
     if model is not None:
         try:
             await validate_model_for_relay(session, target, model, bot.effort_level)

@@ -30,6 +30,7 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers import feishu_apps as feishu_app_routes
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants import runtime as assistant_runtime
 from coreman.core.assistants.records import locked_changes, visible_to
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.env_policy import blocked_env_keys
@@ -299,6 +300,10 @@ async def resolve_relay_for_create(
     ):
         raise ApiError(422, 422, "目标运行时不属于本团队或公共池")
     await validate_backend_ready(session, relay)
+    # 普通员工不能建在助理池的节点上：它不在沙箱里，会读到助理的明文。
+    problem = await assistant_runtime.standard_bind_error(session, relay)
+    if problem is not None:
+        raise ApiError(422, 422, problem)
     return relay
 
 
