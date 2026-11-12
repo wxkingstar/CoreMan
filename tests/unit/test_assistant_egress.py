@@ -12,6 +12,32 @@ import pytest
 from runtime_daemon import egress
 
 
+def test_platform_url_keys_match_platform_reserved_keys():
+    from coreman.core.prompting.env_vars import RESERVED_KEYS, is_reserved_key
+
+    assert all(is_reserved_key(key) for key in egress.PLATFORM_URL_KEYS)
+    assert {k for k in RESERVED_KEYS if k.endswith("_URL")} <= egress.PLATFORM_URL_KEYS
+    assert all(key.endswith("_URL") for key in egress.PLATFORM_URL_KEYS)
+
+
+def test_only_platform_keys_and_domain_names_enter_the_allowlist():
+    policy = egress.turn_policy(
+        provider="claude",
+        api_url="https://coreman.example.com",
+        env_vars={
+            "COREMAN_USER_NAME": "https://evil.example.com",
+            "COREMAN_FOO_URL": "https://foo.example.com",
+            "COREMAN_FEISHU_DOCS_URL": "https://169.254.169.254/x",
+            "COREMAN_WECOM_PERSONAL_URL": "https://[::1]:8443/x",
+            "COREMAN_SCHEDULE_URL": "https://127.0.0.1:9000/x",
+        },
+        model_hosts=["10.0.0.5", "llm.example.com"],
+    )
+    assert policy.allowed == {("coreman.example.com", 443), ("llm.example.com", 443)}
+    assert egress.endpoint("https://169.254.169.254") is None
+    assert egress.endpoint("https://[::1]:8443/") is None
+
+
 def test_policy_covers_platform_mcp_and_model_hosts_only():
     policy = egress.turn_policy(
         provider="claude",
@@ -63,6 +89,23 @@ def socket_path():
     return Path(tempfile.mkdtemp(dir="/tmp")) / "e.sock"
 
 
+@pytest.fixture
+def reach(monkeypatch):
+    """名单里的名字解析成私网地址，再把拨号重定向到本机的测试服务。"""
+    ports: dict[int, int] = {}
+    addresses = {"value": "10.0.0.1"}
+
+    async def resolve(host, port):
+        return [addresses["value"]]
+
+    async def dial(address, port):
+        return await asyncio.open_connection("127.0.0.1", ports.get(port, port))
+
+    monkeypatch.setattr(egress, "_resolve", resolve)
+    monkeypatch.setattr(egress, "_dial", dial)
+    return ports, addresses
+
+
 async def request(path: Path, head: bytes, payload: bytes = b"") -> bytes:
     reader, writer = await asyncio.open_unix_connection(str(path))
     writer.write(head)
@@ -77,14 +120,13 @@ async def request(path: Path, head: bytes, payload: bytes = b"") -> bytes:
     return status + body
 
 
-async def test_allowed_connect_is_tunnelled(socket_path):
+async def test_allowed_connect_is_tunnelled(socket_path, reach):
     server, port = await echo_server()
-    proxy = egress.Egress(egress.Policy(frozenset({("127.0.0.1", port)})))
+    reach[0][443] = port
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
     await proxy.start(socket_path)
     try:
-        out = await request(
-            socket_path, f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode(), b"hi"
-        )
+        out = await request(socket_path, b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n", b"hi")
         assert out.startswith(b"HTTP/1.1 200") and out.endswith(b"echo:hi")
         assert (proxy.allowed, proxy.denied) == (1, 0)
         assert socket_path.stat().st_mode & 0o077 == 0
@@ -97,6 +139,8 @@ async def test_allowed_connect_is_tunnelled(socket_path):
     ("head", "status"),
     [
         (b"CONNECT blocked.example.com:443 HTTP/1.1\r\n\r\n", b"HTTP/1.1 403"),
+        (b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n", b"HTTP/1.1 403"),
+        (b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n", b"HTTP/1.1 405"),
         (b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", b"HTTP/1.1 405"),
     ],
 )
@@ -151,11 +195,109 @@ async def test_upstream_proxy_is_used_with_its_credentials(socket_path):
         target.close()
 
 
-async def test_unreachable_destination_is_a_bad_gateway(socket_path):
-    proxy = egress.Egress(egress.Policy(frozenset({("127.0.0.1", 1)})))
+async def test_unreachable_destination_is_a_bad_gateway(socket_path, reach):
+    reach[0][443] = 1
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
     await proxy.start(socket_path)
     try:
-        out = await request(socket_path, b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
+        out = await request(socket_path, b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n")
         assert out.startswith(b"HTTP/1.1 502")
     finally:
         await proxy.close()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "169.254.169.254", "::ffff:127.0.0.1"])
+async def test_name_resolving_to_loopback_or_link_local_is_refused(socket_path, reach, address):
+    reach[1]["value"] = address
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
+    await proxy.start(socket_path)
+    try:
+        out = await request(socket_path, b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n")
+        assert out.startswith(b"HTTP/1.1 403")
+        assert (proxy.allowed, proxy.denied) == (0, 1)
+    finally:
+        await proxy.close()
+
+
+async def test_name_resolving_to_private_address_is_allowed(socket_path, reach):
+    server, port = await echo_server()
+    reach[0][443] = port
+    reach[1]["value"] = "192.168.1.10"
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
+    await proxy.start(socket_path)
+    try:
+        out = await request(socket_path, b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n", b"hi")
+        assert out.endswith(b"echo:hi")
+    finally:
+        await proxy.close()
+        server.close()
+
+
+async def test_one_refused_address_among_several_refuses_the_name(socket_path, monkeypatch):
+    async def resolve(host, port):
+        return ["10.0.0.1", "127.0.0.1"]
+
+    monkeypatch.setattr(egress, "_resolve", resolve)
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
+    await proxy.start(socket_path)
+    try:
+        out = await request(socket_path, b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n")
+        assert out.startswith(b"HTTP/1.1 403")
+    finally:
+        await proxy.close()
+
+
+async def test_connections_over_the_cap_are_closed_and_counted(socket_path):
+    proxy = egress.Egress(egress.Policy(frozenset()))
+    await proxy.start(socket_path)
+    held = []
+    try:
+        for _ in range(egress.MAX_CONNECTIONS):
+            held.append(await asyncio.open_unix_connection(str(socket_path)))
+        await asyncio.sleep(0.1)
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        assert await asyncio.wait_for(reader.read(10), 5) == b""
+        writer.close()
+        assert proxy.denied == 1
+        for r, _w in held:
+            assert not r.at_eof()
+    finally:
+        for _r, w in held:
+            w.close()
+        await proxy.close()
+
+
+async def test_close_tears_down_established_tunnels(socket_path, reach):
+    server, port = await echo_server()
+    reach[0][443] = port
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
+    await proxy.start(socket_path)
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    writer.write(b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n")
+    await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+    writer.write(b"a")
+    assert await asyncio.wait_for(reader.read(10), 5) == b"echo:a"
+    await proxy.close()
+    try:
+        assert await asyncio.wait_for(reader.read(10), 5) == b""
+        assert not proxy._tasks and not proxy._writers
+    finally:
+        writer.close()
+        server.close()
+
+
+async def test_idle_tunnel_is_closed(socket_path, reach, monkeypatch):
+    monkeypatch.setattr(egress, "IDLE_TIMEOUT", 0.3)
+    server, port = await echo_server()
+    reach[0][443] = port
+    proxy = egress.Egress(egress.Policy(frozenset({("model.example.com", 443)})))
+    await proxy.start(socket_path)
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        writer.write(b"CONNECT model.example.com:443 HTTP/1.1\r\n\r\n")
+        await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        assert await asyncio.wait_for(reader.read(10), 5) == b""
+    finally:
+        writer.close()
+        await proxy.close()
+        server.close()
