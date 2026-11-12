@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.chat import busy_choice
+from coreman.core.chat import busy_choice, topics
 from coreman.core.db.models import Bot, Task
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.chat.queued_batch import MERGED
@@ -30,7 +30,7 @@ async def handle(
         target is None
         or target.bot_id != bot.id
         or target.kind != "chat"
-        or target.session_key != str(ctx.task.payload.get("chat_id") or "")
+        or topics.chat_of(str(target.session_key)) != str(ctx.task.payload.get("chat_id") or "")
         or not clicker
         or str(target.payload.get("platform_user_id") or "") != clicker
     ):

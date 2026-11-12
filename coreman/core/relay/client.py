@@ -82,6 +82,9 @@ class ChatRequest:
     worktree: bool = False
     # 换运行时后原生续聊的首轮：驱动续不上原会话、改开新会话时，把这段放进本轮块。
     resume_fallback: str = ""
+    # 飞书话题继承群主会话的首轮：本会话还不存在时，驱动从这个会话分叉出来；分叉不了时
+    # 用 resume_fallback 开新会话。
+    fork_session_id: str = ""
 
     def user_message(self) -> str | list[dict[str, Any]]:
         """本轮块在前、用户原文在后；含媒体时本轮块作为第一个 text part。"""
@@ -94,7 +97,8 @@ class ChatRequest:
     def to_body(self) -> dict[str, Any]:
         """拼出 POST /v1/chat/completions 的请求体。
 
-        `max_turns` 仅 claude backend 携带；`effort`、`env_vars`、`resume_fallback` 非空才带，
+        `max_turns` 仅 claude backend 携带；`effort`、`env_vars`、`resume_fallback`、
+        `fork_session_id` 非空才带，
         `worktree` 为真才带；`session_id` 原样透传（cron 与体检传空字符串）。
         """
         body: dict[str, Any] = {
@@ -112,6 +116,8 @@ class ChatRequest:
             body["max_turns"] = self.max_turns
         if self.resume_fallback:
             body["resume_fallback"] = self.resume_fallback
+        if self.fork_session_id:
+            body["fork_session_id"] = self.fork_session_id
         if self.effort:
             body["effort"] = self.effort
         if self.env_vars:

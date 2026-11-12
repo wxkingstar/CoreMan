@@ -65,6 +65,23 @@ func resetMeter(sessionID string) {
 	resumeMeter.store(sessionID, meterSnapshot{Models: map[string]claudeModelUsage{}})
 }
 
+// inheritMeter starts dst from src's baseline: a session forked from src
+// restores src's cumulative totals. Without a baseline for src, dst gets none
+// either, so its first turn bills the bare per-turn usage instead of the
+// whole source conversation.
+func inheritMeter(dst, src string) {
+	if resumeMeter == nil || dst == "" || src == "" || dst == src {
+		return
+	}
+	resumeMeter.mu.Lock()
+	defer resumeMeter.mu.Unlock()
+	if s, ok := resumeMeter.load(src); ok {
+		resumeMeter.store(dst, s)
+		return
+	}
+	_ = os.Remove(resumeMeter.path(dst))
+}
+
 func (m *sessionMeter) perTurn(sessionID string, ev *claudeEvent) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.bus.tasks import NewTask, enqueue
+from coreman.core.chat import topics
 from coreman.core.chat.commands import GATEWAY_COMMANDS, classify_command, is_cancel_word
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.i18n.messages import msg
@@ -155,6 +156,10 @@ async def _enqueue_task(
         "platform_user_id": message.sender.platform_user_id,
     }
     command = classify_command(text_of(message))
+    # 飞书群话题里的消息归话题自己的会话（命令也是：话题里 /new 只清这个话题）。
+    key = topics.key_for(
+        message.platform, message.chat_type, message.chat_id, message.reply_context
+    )
     if (
         message.platform == "feishu"
         and message.chat_type == "group"
@@ -200,17 +205,16 @@ async def _enqueue_task(
             kind="command",
             lane="fast",
             payload={"command": command, **base},
-            session_key=message.chat_id,
+            session_key=key,
             inbound_event_id=event_id,
             dedupe_key=f"inbound:{event_id}",
         )
     else:
-        session_key = message.chat_id
         new = NewTask(
             bot_id=bot.id,
             kind="chat",
             payload={"message": payload, **base},
-            session_key=session_key,
+            session_key=key,
             inbound_event_id=event_id,
             dedupe_key=f"inbound:{event_id}",
         )
@@ -231,10 +235,21 @@ async def _enqueue_task(
             message.chat_id,
             message.sender.platform_user_id,
             command=str(new.payload["command"]) if new.kind == "command" else None,
+            session_key=key,
         )
         if admission is not None:
             new.payload["serialize_session"] = True
             new.payload["interrupted_previous_task"] = admission.interrupted
+    topic_offer = False
+    if new.kind == "chat" and not helper_reply and topics.is_topic(key):
+        if await topics.release_pending(session, bot.id, key):
+            # 卡片没人选，话题里又来了消息：按独立处理，这条排在挂起的那条后面一起做。
+            new.payload["serialize_session"] = True
+        elif await topics.should_offer(session, bot.id, key):
+            # 话题里第一次找它：先挂起，问要不要接着群里的上下文。
+            new.payload["topic_hold"] = True
+            new.run_after = topics.hold_until()
+            topic_offer = True
     if message.chat_type == "group" and new.kind == "chat" and not helper_reply:
         await _queue_behind_others(session, bot, message, new, event_id)
     offer = (
@@ -246,6 +261,17 @@ async def _enqueue_task(
     task = await enqueue(session, new)
     if task is not None and offer:
         await _offer_busy_choice(session, bot, message, task.id, event_id)
+    if task is not None and topic_offer:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform=message.platform,
+            kind="send",
+            dedupe_key=f"inbound:{event_id}:topic",
+            # 引用这条消息发卡：卡片落在话题里。
+            target={"chat_id": message.chat_id, "message_id": message.reply_context["message_id"]},
+            payload={"card": topics.offer_card(task.id), "_reply": True},
+        )
     return task
 
 

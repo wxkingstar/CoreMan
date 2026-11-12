@@ -30,6 +30,8 @@ class SessionInfo:
     previous_speaker_user_id: uuid.UUID | None = None
     # 换运行时后的首轮：要续上的原 relay 会话（本轮块带上它最近的对话）。
     inherited_from: uuid.UUID | None = None
+    # 飞书话题选了继承群主会话后的首轮：从这个 relay 会话分叉。
+    forked_from: uuid.UUID | None = None
 
 
 async def get_or_create(
@@ -65,6 +67,7 @@ async def get_or_create(
     previous = row.last_speaker_user_id if speaker_changed and row is not None else None
     sid = row.relay_session_id if (fresh and row is not None) else uuid.uuid4()
     inherited = row.inherited_from if (fresh and row is not None) else None
+    forked = row.forked_from if (fresh and row is not None) else None
     stmt = insert(ChatSession).values(
         bot_id=bot_id,
         session_key=session_key,
@@ -84,10 +87,12 @@ async def get_or_create(
                 # 续接留到这一轮成功收尾（settle_carry）才清：首轮失败的话下一轮仍要带上。
                 # 换了新会话的（超 TTL、换后端）不再续接。
                 "inherited_from": inherited,
+                # 分叉同理：首轮成功收尾（settle_fork）才清。
+                "forked_from": forked,
             },
         )
     )
-    return SessionInfo(sid, not fresh, speaker_changed, previous, inherited)
+    return SessionInfo(sid, not fresh, speaker_changed, previous, inherited, forked)
 
 
 async def settle_carry(
@@ -102,6 +107,21 @@ async def settle_carry(
             ChatSession.relay_session_id == relay_session_id,
         )
         .values(inherited_from=None)
+    )
+
+
+async def settle_fork(
+    session: AsyncSession, *, bot_id: uuid.UUID, session_key: str, relay_session_id: uuid.UUID
+) -> None:
+    """话题分叉后的首轮成功了：新会话已有群主会话的上下文，之后照常续聊。"""
+    await session.execute(
+        update(ChatSession)
+        .where(
+            ChatSession.bot_id == bot_id,
+            ChatSession.session_key == session_key,
+            ChatSession.relay_session_id == relay_session_id,
+        )
+        .values(forked_from=None)
     )
 
 
@@ -136,6 +156,7 @@ async def switch_to(
                 "last_speaker_user_id": speaker_user_id,
                 "last_active_at": func.now(),
                 "inherited_from": None,
+                "forked_from": None,
             },
         )
     )

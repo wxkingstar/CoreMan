@@ -30,7 +30,12 @@ def clip(text: str, limit: int) -> str:
 
 
 async def carried_context(
-    session: AsyncSession, *, bot_id: uuid.UUID, session_key: str, relay_session_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    bot_id: uuid.UUID,
+    session_key: str,
+    relay_session_id: uuid.UUID,
+    header: str = HEADER,
 ) -> str | None:
     rows = (
         await session.scalars(
@@ -64,4 +69,4 @@ async def carried_context(
     if not turns:
         return None
     body = "\n\n".join(reversed(turns))
-    return f"{HEADER}\n<previous_conversation>\n{body}\n</previous_conversation>"
+    return f"{header}\n<previous_conversation>\n{body}\n</previous_conversation>"

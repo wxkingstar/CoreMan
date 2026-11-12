@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.chat import interactions, sessions
+from coreman.core.chat import interactions, sessions, topics
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
 from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
@@ -59,7 +59,8 @@ async def _clear_states(
                         BotCollaborationRoute.source_bot_id == bot_id,
                         BotCollaborationRoute.target_bot_id == bot_id,
                     ),
-                    BotCollaborationRoute.chat_id == session_key,
+                    BotCollaborationRoute.chat_id == topics.chat_of(session_key),
+                    topics.same_conversation(BotCollaboration.source_session_key, session_key),
                     or_(
                         BotCollaborationRoute.source_bot_id == bot_id,
                         BotCollaboration.origin_platform_user_id == platform_user_id,

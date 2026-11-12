@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,12 +8,9 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
-
-	"clawrelay-api/pkg/proc"
 )
 
 // Long threads are compacted here, through `codex app-server`'s
@@ -164,109 +160,17 @@ func rolloutContextUse(path string) (used, window int) {
 	return 0, 0
 }
 
-type rpcMessage struct {
-	ID     *int            `json:"id,omitempty"`
-	Method string          `json:"method,omitempty"`
-	Params json.RawMessage `json:"params,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  json.RawMessage `json:"error,omitempty"`
-}
-
 // compactViaAppServer compacts one thread over `codex app-server`'s stdio
-// JSON-RPC: initialize, thread/resume, thread/compact/start, then wait for the
+// JSON-RPC: thread/resume, thread/compact/start, then wait for the
 // contextCompaction item to complete. The rollout path is passed along with
 // the id (it needs experimentalApi) so a thread is found wherever it was
 // recorded.
 func compactViaAppServer(ctx context.Context, threadID, path, workingDir, model string) error {
-	cmd := exec.Command("codex", "app-server")
-	proc.SetNewProcessGroup(cmd)
-	cmd.Env = cleanEnv(nil)
-	if workingDir != "" {
-		cmd.Dir = workingDir
-	}
-	stdin, err := cmd.StdinPipe()
+	srv, err := startAppServer(ctx, workingDir)
 	if err != nil {
 		return err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr := &tailBuffer{limit: stderrTailBytes}
-	cmd.Stderr = lineWriter{stderr}
-	if err := proc.Start(cmd); err != nil {
-		return fmt.Errorf("failed to start codex app-server: %v", err)
-	}
-	defer func() {
-		stdin.Close()
-		proc.KillGroup(cmd)
-		_ = proc.Wait(cmd)
-	}()
-
-	messages := make(chan rpcMessage, 64)
-	go func() {
-		defer close(messages)
-		s := bufio.NewScanner(stdout)
-		s.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
-		for s.Scan() {
-			var msg rpcMessage
-			if json.Unmarshal(s.Bytes(), &msg) == nil {
-				messages <- msg
-			}
-		}
-		io.Copy(io.Discard, stdout) //nolint:errcheck // keep the child from blocking on a full pipe
-	}()
-
-	nextID := 0
-	send := func(method string, params any) (int, error) {
-		nextID++
-		id := nextID
-		raw, _ := json.Marshal(params)
-		line, _ := json.Marshal(rpcMessage{ID: &id, Method: method, Params: raw})
-		_, err := stdin.Write(append(line, '\n'))
-		return id, err
-	}
-	// next returns the next message, or an error once codex exits or ctx ends.
-	next := func() (rpcMessage, error) {
-		select {
-		case msg, ok := <-messages:
-			if !ok {
-				return msg, fmt.Errorf("codex app-server exited: %s", lastLine(stderr.String()))
-			}
-			return msg, nil
-		case <-ctx.Done():
-			return rpcMessage{}, ctx.Err()
-		}
-	}
-	call := func(method string, params any) error {
-		id, err := send(method, params)
-		if err != nil {
-			return err
-		}
-		for {
-			msg, err := next()
-			if err != nil {
-				return err
-			}
-			if msg.ID == nil || *msg.ID != id || msg.Method != "" {
-				continue
-			}
-			if len(msg.Error) > 0 {
-				return fmt.Errorf("%s: %s", method, msg.Error)
-			}
-			return nil
-		}
-	}
-
-	if err := call("initialize", map[string]any{
-		"clientInfo":   map[string]string{"name": "coreman-relay-codex", "version": version},
-		"capabilities": map[string]bool{"experimentalApi": true},
-	}); err != nil {
-		return err
-	}
-	if _, err := stdin.Write([]byte(`{"method":"initialized"}` + "\n")); err != nil {
-		return err
-	}
+	defer srv.close()
 	resume := map[string]any{"threadId": threadID, "excludeTurns": true}
 	if path != "" {
 		resume["path"] = path
@@ -277,14 +181,14 @@ func compactViaAppServer(ctx context.Context, threadID, path, workingDir, model 
 	if model != "" {
 		resume["model"] = stripPrefix(model)
 	}
-	if err := call("thread/resume", resume); err != nil {
+	if _, err := srv.call("thread/resume", resume); err != nil {
 		return err
 	}
-	if err := call("thread/compact/start", map[string]string{"threadId": threadID}); err != nil {
+	if _, err := srv.call("thread/compact/start", map[string]string{"threadId": threadID}); err != nil {
 		return err
 	}
 	for {
-		msg, err := next()
+		msg, err := srv.next()
 		if err != nil {
 			return err
 		}

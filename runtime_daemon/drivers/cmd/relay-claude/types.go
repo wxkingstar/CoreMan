@@ -28,6 +28,9 @@ type claudeEvent struct {
 	// RateLimitInfo is set on `rate_limit_event` lines (subscription accounts).
 	RateLimitInfo   json.RawMessage `json:"rate_limit_info,omitempty"`
 	ParentToolUseID string          `json:"parent_tool_use_id,omitempty"`
+	// UUID is the transcript entry of an assistant message; the last one of a
+	// finished turn is where a fork of the session ends (see fork.go).
+	UUID string `json:"uuid,omitempty"`
 }
 
 // Main assistant events identify the model Claude actually used. Child-tool

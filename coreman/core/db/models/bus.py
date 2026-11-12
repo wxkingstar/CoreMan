@@ -271,7 +271,8 @@ class OutboxItem(Base):
 
 
 class ChatSession(Base):
-    """(bot, 会话键) → relay 会话；session_key 单聊是 user_id、群聊是 chat_id。"""
+    """(bot, 会话键) → relay 会话；session_key 单聊是 user_id、群聊是 chat_id，飞书群话题是
+    `<chat_id>#topic:<thread_id>`（见 core/chat/topics.py）。"""
 
     __tablename__ = "chat_sessions"
     bot_id: Mapped[uuid.UUID] = mapped_column(
@@ -284,6 +285,8 @@ class ChatSession(Base):
     last_active_at: Mapped[datetime] = _ts(server_default=text("now()"))
     # 换运行时没能带走原会话时，记下原 relay 会话；新会话首轮带上它最近的对话，随后清空。
     inherited_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 话题选了继承群主会话：首轮从这个 relay 会话分叉，成功后清空。
+    forked_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class UserReached(Base):

@@ -135,6 +135,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := buildCodexInput(&req, model, threadID, sessionDir)
+	if threadID == "" {
+		if forked, ok := forkedInput(&req, model, sessionDir); ok {
+			input = forked
+		}
+	}
 
 	chatID := openai.GenerateChatID()
 	created := time.Now().Unix()
@@ -207,6 +212,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 			"system_mcp_v1": true,
 			// A resume_fallback note is used when a resumed thread has no rollout.
 			"resume_fallback_v1": true,
+			"session_fork_v1":    true,
 		},
 	})
 }

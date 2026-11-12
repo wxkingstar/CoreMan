@@ -215,30 +215,70 @@ func stripANSI(s string) string {
 // event nor exits) fails the turn after apiErrorGrace.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, input opencodeInput, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() opencodeInput) {
 	images := newTurnImages(workingDir)
-	run, err := launchOpencode(input, workingDir, envVars)
-	if err != nil {
-		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
-		return
+	flusher, canFlush := w.(http.Flusher)
+	sseOpen := false
+	openSSE := func() {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		sseOpen = true
+		if canFlush {
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+
+	// A fork waits for its source to finish the turn it is running (fork.go);
+	// the user is told why the answer is slow.
+	gate := takeForkGate(sessionID)
+	if gate != nil {
+		defer gate.done()
+		if gate.release == nil && canFlush {
+			openSSE()
+			notice, _ := json.Marshal(openai.ChatCompletionResponse{ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
+				Choices: []openai.ChatCompletionChoice{{Index: 0, Delta: openai.NewChatMessage("assistant", forkWaitNotice)}}})
+			fmt.Fprintf(w, "data: %s\n\n", notice)
+			flusher.Flush()
+			acquired := make(chan bool, 1)
+			go func() { acquired <- gate.wait(r.Context()) }()
+		wait:
+			for {
+				select {
+				case ok := <-acquired:
+					if !ok {
+						return
+					}
+					break wait
+				case <-heartbeat.C:
+					fmt.Fprintf(w, ": keepalive\n\n")
+					flusher.Flush()
+				}
+			}
+		}
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	run, err := launchOpencode(input, workingDir, envVars)
+	if err != nil {
+		if sseOpen {
+			emitFailure(w, flusher, chatID, created, model, err.Error())
+		} else {
+			openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())
+		}
+		return
+	}
+	if !canFlush {
 		proc.KillGroup(run.cmd)
 		for range run.lines {
 		}
 		return
 	}
-	fmt.Fprintf(w, ": ping\n\n")
-	flusher.Flush()
-
-	heartbeat := time.NewTicker(30 * time.Second)
-	defer heartbeat.Stop()
+	if !sseOpen {
+		openSSE()
+	}
 
 	t := &turn{sessionID: sessionID}
 	var apiErr string
@@ -266,6 +306,10 @@ probe:
 			return
 		case l, ok := <-run.lines:
 			if ok {
+				// The fork has copied its source by its first event.
+				if gate != nil {
+					gate.done()
+				}
 				firstLine, haveFirst = l, true
 				break probe
 			}
@@ -442,6 +486,12 @@ loop:
 // handleNonStreamResponse runs opencode to completion and returns one
 // chat.completion JSON.
 func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input opencodeInput, chatID string, created int64, model string, workingDir string, envVars map[string]string, sessionID string, rebuildFresh func() opencodeInput) {
+	if gate := takeForkGate(sessionID); gate != nil {
+		defer gate.done()
+		if !gate.wait(r.Context()) {
+			return
+		}
+	}
 	run, err := launchOpencode(input, workingDir, envVars)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", err.Error())

@@ -60,11 +60,14 @@ func hasArg(args []string, flag string) bool {
 	return false
 }
 
-// sessionArg returns the session id passed via --resume or --session-id.
+// sessionArg returns this turn's session id: --session-id when present (a
+// fork resumes the source but writes the new id), otherwise --resume.
 func sessionArg(args []string) string {
-	for i, a := range args {
-		if (a == "--resume" || a == "--session-id") && i+1 < len(args) {
-			return args[i+1]
+	for _, flag := range []string{"--session-id", "--resume"} {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				return args[i+1]
+			}
 		}
 	}
 	return ""
@@ -192,8 +195,21 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 // watchdog goroutine never reads the package var concurrently.
 type claudeProcessResult struct {
 	SessionMissing bool
-	Err            error
+	// Fork failures (see nextAttempt): the target id already exists, or the
+	// turn point was rejected (hidden flag unknown, or the entry is gone).
+	SessionInUse bool
+	BadTurnPoint bool
+	Err          error
 }
+
+// retryable reports a failure that nextAttempt knows how to retry.
+func (r claudeProcessResult) retryable() bool {
+	return r.SessionMissing || r.SessionInUse || r.BadTurnPoint
+}
+
+// maxRunAttempts bounds one turn's retries (resume miss → fork → fork without
+// its turn point → fresh), so no combination of failures can loop.
+const maxRunAttempts = 4
 
 // Expose fixed diagnostic codes, never arbitrary stderr (which may contain
 // prompts, credentials, paths or personal data).
@@ -234,7 +250,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 	}
 
 	sessErrCh := make(chan claudeProcessResult, 1)
-	var sessionMissing bool
+	var sessionMissing, sessionInUse, badTurnPoint bool
 	var failureReason string
 	var stderrDone sync.WaitGroup
 	stderrDone.Add(1)
@@ -258,6 +274,13 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 			// line, and keep only the private preview out of the log.
 			if strings.Contains(line, "No conversation found with session ID") {
 				found = true
+			}
+			if strings.Contains(line, "is already in use") {
+				sessionInUse = true
+			}
+			if strings.Contains(line, "No message found with message.uuid of") ||
+				strings.Contains(line, "--resume-session-at") {
+				badTurnPoint = true
 			}
 			logged := openai.RedactCollaborationToken(line, envVars)
 			if private {
@@ -324,7 +347,7 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 				waitErr = fmt.Errorf("%s: %w", failureReason, waitErr)
 			}
 		}
-		sessErrCh <- claudeProcessResult{SessionMissing: sessionMissing, Err: waitErr}
+		sessErrCh <- claudeProcessResult{SessionMissing: sessionMissing, SessionInUse: sessionInUse, BadTurnPoint: badTurnPoint, Err: waitErr}
 	}()
 
 	return cmd, lines, sessErrCh, nil
@@ -384,7 +407,7 @@ func (h *procHandle) abort() *exec.Cmd {
 
 // startClaudeStream wraps launchClaude with auto-retry on resume failure.
 // If --resume produced no real content because the session is actually
-// missing (stderr marker), it retries the whole command with --session-id.
+// missing (stderr marker), it retries the whole command (see missingRetry).
 //
 // ready signals when claude produced its first usable output (or definitively
 // failed); the handler sends SSE headers before that and uses the returned
@@ -416,7 +439,10 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			return
 		}
 
-		if hasArg(args, "--resume") {
+		// A resume run is sniffed; a missing session is retried (see missingRetry),
+		// and a retry that resumes again (a fork) is sniffed the same way.
+		attempts := 0
+		for hasArg(args, "--resume") {
 			// Sniff the resume run. Everything is buffered — never discarded:
 			// an early result event carries the error text (API error / rate
 			// limit / auth failure) and the turn's usage, and dropping it used
@@ -507,7 +533,7 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			// session re-runs the turn at best and produces a second empty
 			// stream at worst.
 			completion := <-sessErrCh
-			if !completion.SessionMissing {
+			if !completion.retryable() {
 				if sawResult {
 					log.Printf("Resume run ended with a result and no content (session exists); forwarding %d buffered event(s) instead of retrying", len(buffered))
 					ready <- nil
@@ -524,10 +550,16 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				return
 			}
 
-			log.Printf("Resume session not found, retrying with --session-id")
-			retryArgs := replaceArg(args, "--resume", "--session-id")
-			resetMeter(sessionArg(retryArgs))
-			retryPrompt := withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			attempts++
+			retryArgs, fallback, ok := nextAttempt(args, completion)
+			if !ok || attempts >= maxRunAttempts {
+				ready <- fmt.Errorf("claude could not resume or fork session %s%s", sessionArg(args), lastOutputNote(buffered))
+				return
+			}
+			retryPrompt := prompt
+			if fallback {
+				retryPrompt = withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			}
 			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, retryPrompt, workingDir, envVars, watchdogTimeout)
 			if err != nil {
 				ready <- err
@@ -540,6 +572,10 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 				}
 				ready <- fmt.Errorf("request cancelled during claude resume retry")
 				return
+			}
+			args = retryArgs
+			if hasArg(args, "--resume") {
+				continue
 			}
 			go func() { <-sessErrCh }()
 
@@ -583,6 +619,10 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 // result text, and usage. Auto-retries with --session-id if --resume yields
 // no content.
 func runClaude(args []string, prompt, workingDir string, envVars map[string]string) (events []claudeEvent, lastText, result string, usage *openai.UsageInfo, rawUsage *claudeUsage, costUSD float64, err error) {
+	return runClaudeAttempt(args, prompt, workingDir, envVars, 0)
+}
+
+func runClaudeAttempt(args []string, prompt, workingDir string, envVars map[string]string, attempt int) (events []claudeEvent, lastText, result string, usage *openai.UsageInfo, rawUsage *claudeUsage, costUSD float64, err error) {
 	_, lines, sessErrCh, err := launchClaude(args, prompt, workingDir, envVars, firstLineTimeout)
 	if err != nil {
 		return
@@ -601,6 +641,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 			continue
 		}
 		rateLimits.observe(event.RateLimitInfo)
+		noteTurnEvent(sessionArg(args), &event)
 		events = append(events, event)
 
 		text := extractTextFromEvent(&event)
@@ -624,11 +665,13 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 	// marker) — a blind retry on any empty output re-runs the turn against an
 	// existing session and hides the original failure.
 	completion := <-sessErrCh
-	if hasArg(args, "--resume") && completion.SessionMissing && lastText == "" && result == "" {
-		log.Printf("Resume session not found, retrying with --session-id")
-		retryArgs := replaceArg(args, "--resume", "--session-id")
-		resetMeter(sessionArg(retryArgs))
-		return runClaude(retryArgs, withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs))), workingDir, envVars)
+	if hasArg(args, "--resume") && lastText == "" && result == "" && attempt+1 < maxRunAttempts {
+		if retryArgs, fallback, ok := nextAttempt(args, completion); ok {
+			if fallback {
+				prompt = withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
+			}
+			return runClaudeAttempt(retryArgs, prompt, workingDir, envVars, attempt+1)
+		}
 	}
 	// Preserve structured API errors/content already returned by the CLI.
 	// Only an otherwise empty response needs the safe process diagnostic.

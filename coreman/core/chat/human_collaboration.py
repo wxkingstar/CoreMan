@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks import reply_to
 from coreman.core.bus import outbox, tasks
+from coreman.core.chat import topics
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
@@ -583,6 +584,17 @@ async def start_resume(
     key = f"human-collaboration:{row.id}:resume"
     if row.origin_kind == "chat":
         reply = await session.get(InboundEvent, row.reply_event_id) if row.reply_event_id else None
+        origin = (
+            await session.get(InboundEvent, row.origin_event_id) if row.origin_event_id else None
+        )
+        # 在飞书群话题里求助的，答复续回那个话题的会话。
+        origin_key = (
+            topics.key_for(
+                origin.platform, origin.chat_type, origin.chat_id, origin.reply_context or {}
+            )
+            if origin is not None
+            else row.origin_chat_id
+        )
         task = await tasks.enqueue(
             session,
             tasks.NewTask(
@@ -590,7 +602,7 @@ async def start_resume(
                 kind="chat",
                 user_id=row.origin_user_id,
                 inbound_event_id=row.reply_event_id,
-                session_key=row.origin_chat_id,
+                session_key=origin_key,
                 dedupe_key=key,
                 payload={
                     "human_collaboration_id": str(row.id),

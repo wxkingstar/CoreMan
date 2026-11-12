@@ -279,6 +279,8 @@ def test_both_drivers_declare_additive_personal_tools():
     assert "system_mcp_v1" in module.DRIVER_CAPABILITIES["claude"]
     assert "system_mcp_v1" in module.DRIVER_CAPABILITIES["codex"]
     assert {"resume_fallback_v1", "system_mcp_v1"} <= set(module.DRIVER_CAPABILITIES["opencode"])
+    for provider in module.PROVIDERS:
+        assert "session_fork_v1" in module.DRIVER_CAPABILITIES[provider]
 
 
 async def test_opencode_waits_for_its_relay_then_starts_an_agent(healing_daemon, monkeypatch):

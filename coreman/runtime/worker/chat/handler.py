@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from coreman.core.bus import tasks
+from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.background import DEFAULT_TIMING, Timing
 from coreman.runtime.worker.chat import queued_batch
@@ -62,8 +63,24 @@ class ChatTaskHandler(
         outcome = await self._converse(ctx, pre)
         await self._finalize(ctx, pre, outcome)
 
+    async def _expire_topic_hold(self, ctx: TaskContext) -> None:
+        from coreman.core.chat import topics
+
+        async with ctx.session_factory() as session:
+            current = await session.get(
+                Task, ctx.task.id, populate_existing=True, with_for_update=True
+            )
+            if current is not None and ctx.task.session_key:
+                await topics.choose(session, ctx.task.bot_id, ctx.task.session_key, fork=False)
+                current.payload = {k: v for k, v in current.payload.items() if k != "topic_hold"}
+            await session.commit()
+        ctx.task.payload = {k: v for k, v in ctx.task.payload.items() if k != "topic_hold"}
+
     async def _prepare(self, ctx: TaskContext) -> Prepared | None:
         started = ctx.clock()
+        if ctx.task.payload.get("topic_hold"):
+            # 话题选择卡片到期没人选：按独立开启新会话处理，照常做这条。
+            await self._expire_topic_hold(ctx)
         if ctx.task.payload.get("stale_hold"):
             # 等确认的消息又被认领，只可能是到期了还没人回：不做了。
             async with ctx.session_factory() as session:

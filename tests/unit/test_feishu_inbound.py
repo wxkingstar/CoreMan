@@ -299,3 +299,25 @@ def test_card_from_a_person_stays_unsupported():
     message = normalize_event(_card_event("user", {"title": "t"}), **KW, observe=True)
     assert message is not None
     assert message.parts[0].type != "text"
+
+
+def test_topic_messages_carry_their_thread():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["message"]["thread_id"] = "omt_topic"
+    message = normalize_event(raw, **KW)
+    assert message is not None and message.reply_context["thread_id"] == "omt_topic"
+    plain = normalize_event(copy.deepcopy(RAW), **KW)
+    assert plain is not None and plain.reply_context["thread_id"] is None
+
+
+def test_topic_choice_clicks_are_admitted():
+    message = normalize_event(
+        _click_event({"task_id": "topic@42", "event_key": "topic_fork"}), **KW
+    )
+    assert message is not None and message.kind == "card_action"
+    assert message.card_action["task_id"] == "topic@42"
+    assert message.card_action["event_key"] == "topic_fork"
+    assert (
+        normalize_event(_click_event({"task_id": "topic@x", "event_key": "topic_fork"}), **KW)
+        is None
+    )
