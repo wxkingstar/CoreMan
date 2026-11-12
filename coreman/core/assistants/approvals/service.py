@@ -635,3 +635,160 @@ def result_text(row: AssistantApproval) -> str:
         "平台不会自动重试。确认问题、改好之后重新调用原工具提交；"
         "error 为 execution_interrupted 时操作可能已经生效，先核对再决定。"
     )
+
+
+REASON_LIMIT = 500
+
+
+async def _own(session: AsyncSession, scope: Scope, approval_id: str) -> AssistantApproval | None:
+    """这位所有者名下的一张单，加行锁；编号不合法或不是他的都当作不存在。"""
+    try:
+        key = uuid.UUID(approval_id)
+    except ValueError:
+        return None
+    row: AssistantApproval | None = await session.get(
+        AssistantApproval, key, with_for_update=True, populate_existing=True
+    )
+    return row if row is not None and row.bot_id == scope.bot.id else None
+
+
+async def _withdraw_remote(cfg: tower.Config | None, row: AssistantApproval) -> bool:
+    """让 Tower 也撤回。失败只记日志：本地已不是 pending，之后即使被批准也不会执行。
+
+    Tower 那边已有结论（`already_final`）也算失败：那个结论迟些送达时本地不会采纳。
+    """
+    if cfg is None or not row.approval_id:
+        return False
+    try:
+        await tower.withdraw(cfg, row.external_id)
+    except tower.TowerError as exc:
+        log.warning("assistant_approval_withdraw_failed", approval=str(row.id), code=exc.code)
+        return False
+    return True
+
+
+def _file_keys(row: AssistantApproval) -> list[str]:
+    """这张单留在临时桶里的对象名；内容读不出来（数据密钥已销毁）时为空。"""
+    stored = row.args_enc if isinstance(row.args_enc, dict) else {}
+    return [ref["key"] for ref in attachments.references(list(stored.get("calls") or []))]
+
+
+async def revise(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    approval_id: str,
+    arguments: dict[str, Any],
+    *,
+    cfg: tower.Config | None,
+    files: FileRelay | None = None,
+) -> dict[str, Any]:
+    """用新参数替换一张待批的单：同一个外部编号重新提交，Tower 原地替换并重新通知。"""
+    requester = await _requester(session, scope, cfg)
+    if isinstance(requester, dict):
+        return requester
+    assert cfg is not None
+    row = await _own(session, scope, approval_id)
+    if row is None:
+        return {"error": "approval_not_found"}
+    if row.status != "pending":
+        return {"error": "not_pending", "status": row.status}
+    staged = await _stage(session, cipher, scope, row.tool, arguments, files)
+    if isinstance(staged, dict):
+        return staged
+    other = await _duplicate(session, row.bot_id, staged.args_hash)
+    if other is not None and other.id != row.id:
+        return {"error": "duplicate", "approval_id": str(other.id)}
+    replaced = _file_keys(row)
+    try:
+        async with session.begin_nested():
+            _apply(row, staged, cfg, scope.bot.bot_key)
+            await session.flush()
+            await _store_uploads(files, staged)
+            await tower.submit(
+                cfg,
+                external_id=row.external_id,
+                requester=requester,
+                caller=scope.bot.bot_key,
+                abstract=staged.abstract,
+                content=staged.content,
+                body=staged.body,
+                expires_at=row.expires_at,
+            )
+    except tower.TowerError as exc:
+        await _discard(staged)
+        log.warning("assistant_approval_revise_failed", approval=approval_id, code=exc.code)
+        return _tower_failure(exc)
+    except attachments.Unavailable:
+        await _discard(staged)
+        return dict(FILE_STORE_DOWN)
+    # 旧稿的附件不会再被执行：现在就删，删不掉由桶的自动清理兜底。
+    store = attachments.store(files.settings) if files is not None else None
+    if replaced and store is not None:
+        await attachments.delete(store, replaced)
+    return {"status": "pending_approval", "approval_id": str(row.id), "revised": True}
+
+
+async def withdraw(
+    session: AsyncSession,
+    scope: Scope,
+    approval_id: str,
+    reason: str,
+    *,
+    cfg: tower.Config | None,
+) -> dict[str, Any]:
+    """撤回一张待批的单。本地先作废，再让 Tower 撤回。"""
+    row = await _own(session, scope, approval_id)
+    if row is None:
+        return {"error": "approval_not_found"}
+    if row.status != "pending":
+        return {"error": "not_pending", "status": row.status}
+    row.status, row.decided_at = "withdrawn", utcnow()
+    row.reason_enc = reason.strip()[:REASON_LIMIT] or None
+    out: dict[str, Any] = {"status": "withdrawn", "approval_id": str(row.id)}
+    if not await _withdraw_remote(cfg, row):
+        out["warning"] = (
+            "审批系统那边没能撤回（连不上，或那边已有结论）；"
+            "平台已作废这张单，即使之后被批准也不会执行。"
+        )
+    return out
+
+
+async def listing(
+    session: AsyncSession,
+    scope: Scope,
+    *,
+    status: str | None = None,
+    topic: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """这位所有者的审批单，新的在前；内容读不出来的只给元数据。"""
+    stmt = select(AssistantApproval).where(AssistantApproval.bot_id == scope.bot.id)
+    if status:
+        stmt = stmt.where(AssistantApproval.status == status)
+    if topic:
+        stmt = stmt.where(AssistantApproval.topic == topic)
+    rows = list(
+        await session.scalars(stmt.order_by(AssistantApproval.created_at.desc()).limit(limit))
+    )
+    await sealed.open_rows(session, rows)
+    items = []
+    for row in rows:
+        stored = row.args_enc if isinstance(row.args_enc, dict) else {}
+        items.append(
+            {
+                "approval_id": str(row.id),
+                "tool": row.tool,
+                "channel": row.channel,
+                "status": row.status,
+                "topic": row.topic,
+                "summary": stored.get("abstract"),
+                "chat_id": row.chat_id,
+                "error": row.error_code,
+                "reason": row.reason_enc,
+                "created_at": row.created_at.isoformat(),
+                "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+                "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+            }
+        )
+    return {"items": items}
