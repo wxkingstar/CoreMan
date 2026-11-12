@@ -138,6 +138,13 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	if bound == "" {
 		if forked, ok := forkedInput(&req, model, uploadDir, systemFile); ok {
 			input = forked
+			// The handler takes the gate; one it never took must not keep the
+			// source held.
+			defer func() {
+				if gate := takeForkGate(req.SessionID); gate != nil {
+					gate.done()
+				}
+			}()
 		}
 	}
 

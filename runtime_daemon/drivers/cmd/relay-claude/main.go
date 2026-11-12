@@ -163,6 +163,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		model, req.Stream, len(req.Messages), len(req.Tools))
 
 	args, stdinData := buildClaudeArgs(&req, model, prompt, systemPrompt)
+	startTurn(req.SessionID)
+	args = forkTurnArgs(args)
 
 	if openai.DebugLogging() {
 		log.Printf("Claude args: %v (stdin length: %d bytes)", openai.RedactArgs(args), len(stdinData))
@@ -301,6 +303,7 @@ func main() {
 	sessionStore = sessions.New(*sessionsDir)
 	sessionStore.StartCleanup(72*time.Hour, 1*time.Hour)
 	resumeMeter = newSessionMeter(sessionStore.AbsDir())
+	turnPoints = newTurnPointTracker(sessionStore.AbsDir())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", chatCompletionsHandler)

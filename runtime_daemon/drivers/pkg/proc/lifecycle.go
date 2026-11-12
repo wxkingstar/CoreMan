@@ -158,3 +158,35 @@ func AcquireSession(ctx context.Context, key string) (func(), error) {
 		return nil, ctx.Err()
 	}
 }
+
+// TryAcquireSession takes a session's gate only when no turn holds it. ok is
+// false while the session is busy; release must be called when ok is true.
+func TryAcquireSession(key string) (release func(), ok bool) {
+	if key == "" {
+		return func() {}, true
+	}
+	gates.Lock()
+	g := gates.entries[key]
+	if g == nil {
+		g = &sessionGate{token: make(chan struct{}, 1)}
+		gates.entries[key] = g
+	}
+	g.users++
+	gates.Unlock()
+	drop := func() {
+		gates.Lock()
+		g.users--
+		if g.users == 0 {
+			delete(gates.entries, key)
+		}
+		gates.Unlock()
+	}
+	select {
+	case g.token <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-g.token; drop() }) }, true
+	default:
+		drop()
+		return nil, false
+	}
+}

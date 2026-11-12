@@ -117,3 +117,28 @@ func TestSessionGateHeldUntilRelease(t *testing.T) {
 		t.Fatal("session locks leaked")
 	}
 }
+
+func TestTryAcquireSessionReportsBusy(t *testing.T) {
+	release, err := AcquireSession(context.Background(), "busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := TryAcquireSession("busy"); ok {
+		t.Fatal("a held session must report busy")
+	}
+	release()
+	again, ok := TryAcquireSession("busy")
+	if !ok {
+		t.Fatal("a released session must be free")
+	}
+	if _, ok := TryAcquireSession("busy"); ok {
+		t.Fatal("the try must hold the session")
+	}
+	again()
+	gates.Lock()
+	left := len(gates.entries)
+	gates.Unlock()
+	if left != 0 {
+		t.Errorf("gate entries leaked: %d", left)
+	}
+}

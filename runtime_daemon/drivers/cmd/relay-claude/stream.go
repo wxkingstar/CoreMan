@@ -288,6 +288,7 @@ processLines:
 		if observed := event.observedModel(); observed != "" {
 			actualModel = observed
 		}
+		noteTurnEvent(sessionID, &event)
 		if rateLimits.observe(event.RateLimitInfo) {
 			sawRateLimit = true
 		}

@@ -156,6 +156,7 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 	if model := event.observedModel(); model != "" {
 		t.actualModel = model
 	}
+	noteTurnEvent(t.sessionID, &event)
 	if rateLimits.observe(event.RateLimitInfo) {
 		t.sawRateLimit = true
 	}
