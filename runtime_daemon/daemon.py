@@ -1652,7 +1652,7 @@ class Daemon:
             LOG.warning("Assistant sandbox start failed: %s", type(exc).__name__)
 
     def clear_assistant_leftovers(self) -> None:
-        """普通实例启动时删掉助理的本轮目录、清空回收站（都不跟随链接；回收站位置是链接时只删链接）。
+        """普通实例启动时删掉助理的本轮目录，再清掉回收站里助理专用实例留下的条目（都不跟随链接）。
         在线程里跑，失败只记一笔。"""
         try:
             turns = self.assistant.turns_dir
