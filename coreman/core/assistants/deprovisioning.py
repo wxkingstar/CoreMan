@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import approvals, keys, lifecycle, retired_dirs
@@ -68,9 +68,22 @@ async def request(
     """
     if not is_assistant(bot) or bot.owner_id is None or bot.platform_app_id is None:
         raise ValueError("not an assistant record")
-    await session.refresh(bot, with_for_update=True)
+    # 加锁顺序与看护进程相同：先流程行、后记录。还没有流程行时，同一个人的并发请求在这把事务锁上
+    # 排队（看护进程不拿它），排到之后再看一次流程行。
     row = await lifecycle.live(session, bot.owner_id)
+    if row is None:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"assistant-lifecycle:{bot.owner_id}"},
+        )
+        row = await lifecycle.live(session, bot.owner_id)
+    await session.refresh(bot, with_for_update=True)
     if row is not None and row.action == "deprovision":
+        if row.step == "grace" and trigger != "member_left":
+            # 宽限期里本人或管理员明确要停用：不再等账号恢复，现在就往下走。
+            row.trigger, row.actor_id, row.deadline = trigger, actor_id, None
+            advance(row, "drain")
+            await session.flush()
         return row
     if bot.assistant_state == "deprovisioned":
         return None
@@ -120,6 +133,8 @@ async def step_grace(
     if row.deadline is not None and row.deadline > now:
         row.next_attempt_at, row.updated_at = min(row.deadline, now + GRACE_CHECK), now
         return []
+    # 宽限期的截止时刻已过，不能留给 drain 当成它自己的等待期限。
+    row.deadline = None
     advance(row, "drain")
     return []
 
@@ -127,7 +142,10 @@ async def step_grace(
 async def step_drain(
     session: AsyncSession, cipher: Cipher, row: AssistantLifecycle, messenger: lifecycle.Messenger
 ) -> list[str]:
-    """叫停这条记录没结束的任务（已批准的写操作照常执行完），等在跑的停下，最多等 `DRAIN_WAIT`。"""
+    """叫停这条记录没结束的任务（已批准的写操作照常执行完），等在跑的停下，最多等 `DRAIN_WAIT`。
+
+    已批准的写操作排着队也算在跑：它不叫停，要等它执行完，否则授权撤销、密钥销毁之后它只会失败。
+    """
     bot = await _bot(session, row)
     now = utcnow()
     if row.deadline is None:
@@ -142,7 +160,11 @@ async def step_drain(
     for task_id, kind, _status in found:
         if kind != APPROVAL_EXECUTE_KIND:
             await tasks.request_cancel(session, task_id, REASON)
-    running = [task_id for task_id, _kind, status in found if status in tasks.ACTIVE]
+    running = [
+        task_id
+        for task_id, kind, status in found
+        if status in tasks.ACTIVE or kind == APPROVAL_EXECUTE_KIND
+    ]
     if running and row.deadline > now:
         row.next_attempt_at, row.updated_at = now + DRAIN_CHECK, now
         return []

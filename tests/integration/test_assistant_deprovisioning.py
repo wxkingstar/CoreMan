@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import deprovisioning, keys, runtime
+from coreman.core.assistants import approvals, deprovisioning, keys, lifecycle_runner, runtime
+from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import (
+    AssistantApproval,
     AssistantKey,
     AssistantLifecycle,
     AssistantRetiredDir,
@@ -20,6 +25,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal import service as personal
+from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import seed_standard
 from tests.integration.lifecycle_helpers import (
     CIPHER,
@@ -27,6 +33,7 @@ from tests.integration.lifecycle_helpers import (
     active_assistant,
     flow_of,
     install,
+    member,
     tick,
 )
 from tests.integration.test_chat_handler import chat_task
@@ -261,3 +268,282 @@ async def test_the_scheduler_runs_lifecycles_in_their_own_loop_and_survives_fail
         svc.request_stop("test")
         await asyncio.wait_for(task, 10)
     assert len(calls) >= 2
+
+
+# ---- 评审补充：宽限期内的停用、等在跑的任务、销毁之前先撤回 ------------------------------------
+
+
+def _approval(bot_id: Any, status: str = "pending") -> AssistantApproval:
+    return AssistantApproval(
+        bot_id=bot_id,
+        tool="feishu_reply_message",
+        args_enc={"calls": [], "abstract": "私聊 → 李四"},
+        args_hash=uuid.uuid4().hex,
+        request_hash="r",
+        channel="p2p",
+        topic="报价",
+        status=status,
+        external_id=f"cm-pa-{uuid.uuid4().hex}",
+        expires_at=utcnow() + timedelta(hours=72),
+    )
+
+
+async def _execution(session: AsyncSession, bot: Bot) -> Task:
+    """一张已批准、排着队等执行的写操作。"""
+    task = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=bot.id,
+            kind=APPROVAL_EXECUTE_KIND,
+            user_id=bot.owner_id,
+            dedupe_key=f"assistant-approval:{uuid.uuid4()}:execute",
+            payload={"approval_id": str(uuid.uuid4())},
+        ),
+    )
+    assert task is not None
+    return task
+
+
+async def _step(session: AsyncSession, owner_id: Any) -> str | None:
+    flow = await flow_of(session, owner_id)
+    assert flow is not None
+    return flow.step if flow.finished_at is None else flow.outcome
+
+
+async def test_an_explicit_stop_during_grace_is_not_undone_when_the_account_returns(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    owner.status = "disabled"
+    await db_session.commit()
+    await tick(factory, messenger)
+    assert await _step(db_session, owner.id) == "grace"
+    admin = await member(db_session, login="lisi", pid="lisi_pid")
+    flow = await deprovisioning.request(db_session, bot, trigger="admin", actor_id=admin.id)
+    await db_session.commit()
+    assert flow is not None and flow.step == "drain" and flow.trigger == "admin"
+    assert flow.actor_id == admin.id and flow.deadline is None
+    owner.status = "active"
+    await db_session.commit()
+    for _ in range(6):
+        await tick(factory, messenger, later=1)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "done"
+    bot = await db_session.get(Bot, bot.id, populate_existing=True)
+    assert bot is not None and bot.assistant_state == "deprovisioned"
+
+
+async def test_after_grace_drain_still_waits_for_running_work(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    monkeypatch.setattr(deprovisioning, "GRACE", timedelta(0))
+    bot, owner, _ = await active_assistant(db_session)
+    running = await chat_task(
+        db_session, bot, "再查一下", sender="owner_pid", chat_type="single", chat_id="oc_private"
+    )
+    running.status = "running"
+    owner.status = "disabled"
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)
+    assert await _step(db_session, owner.id) == "grace"
+    # 宽限期到了：经 step_grace 自己进入 drain。
+    await tick(factory, messenger, later=deprovisioning.GRACE_CHECK.total_seconds() + 1)
+    assert await _step(db_session, owner.id) == "drain"
+    await tick(factory, messenger, later=deprovisioning.GRACE_CHECK.total_seconds() + 2)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "drain" and flow.deadline is not None
+    assert flow.deadline > utcnow() + timedelta(minutes=14)
+    row = await db_session.get(Task, running.id, populate_existing=True)
+    assert row is not None and row.cancel_requested_at is not None
+
+
+async def test_drain_waits_for_a_queued_approved_execution_without_cancelling_it(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    other = await seed_standard(db_session)
+    theirs = await chat_task(db_session, other, "别的员工在忙", sender="lisi")
+    theirs.status = "running"
+    execution = await _execution(db_session, bot)
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)
+    await tick(factory, messenger, later=11)
+    assert await _step(db_session, owner.id) == "drain"
+    row = await db_session.get(Task, execution.id, populate_existing=True)
+    assert row is not None and row.status == "queued" and row.cancel_requested_at is None
+    row = await db_session.get(Task, theirs.id, populate_existing=True)
+    assert row is not None and row.status == "running" and row.cancel_requested_at is None
+    await tasks.finish(db_session, execution.id, status="succeeded")
+    await db_session.commit()
+    await tick(factory, messenger, later=22)
+    assert await _step(db_session, owner.id) == "withdraw"
+
+
+async def test_drain_gives_up_waiting_after_fifteen_minutes(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    stuck = await chat_task(
+        db_session, bot, "再查一下", sender="owner_pid", chat_type="single", chat_id="oc_private"
+    )
+    stuck.status = "running"
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)
+    await tick(factory, messenger, later=11)
+    assert await _step(db_session, owner.id) == "drain"
+    shift = deprovisioning.DRAIN_WAIT + timedelta(minutes=1)
+    real = deprovisioning.utcnow
+    monkeypatch.setattr(deprovisioning, "utcnow", lambda: real() + shift)
+    await tick(factory, messenger, later=shift.total_seconds())
+    assert await _step(db_session, owner.id) == "withdraw"
+
+
+async def test_pending_approvals_are_withdrawn_before_the_key_is_destroyed(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    early = _approval(bot.id)
+    db_session.add(early)
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)  # drain → withdraw
+    await tick(factory, messenger)  # withdraw → revoke
+    assert await _step(db_session, owner.id) == "revoke"
+    # 撤回这一步已经提交，密钥还在。
+    row = await db_session.get(AssistantApproval, early.id, populate_existing=True)
+    assert row is not None and row.status == "withdrawn"
+    key = await db_session.get(AssistantKey, owner.id, populate_existing=True)
+    assert key is not None and key.destroyed_at is None
+    # 撤回之后又冒出来一张：销毁那一步再撤一次。
+    late = _approval(bot.id)
+    db_session.add(late)
+    await db_session.commit()
+    for _ in range(3):
+        await tick(factory, messenger)
+    assert await _step(db_session, owner.id) == "done"
+    row = await db_session.get(AssistantApproval, late.id, populate_existing=True)
+    assert row is not None and row.status == "withdrawn"
+    key = await db_session.get(AssistantKey, owner.id, populate_existing=True)
+    assert key is not None and key.destroyed_at is not None
+
+
+async def test_a_failing_withdraw_keeps_the_key_and_the_record_deprovisioning(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    db_session.add(_approval(bot.id))
+    await deprovisioning.request(db_session, bot, trigger="owner", actor_id=owner.id)
+    await db_session.commit()
+
+    async def broken(*_args: Any, **_kw: Any) -> int:
+        raise RuntimeError("approval system hiccup")
+
+    monkeypatch.setattr(approvals, "withdraw_pending", broken)
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    for hour in range(0, 5):
+        await tick(factory, messenger, later=3600 * hour)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "withdraw" and flow.finished_at is None
+    assert flow.error_code == "RuntimeError"
+    key = await db_session.get(AssistantKey, owner.id, populate_existing=True)
+    assert key is not None and key.destroyed_at is None and key.dek_enc is not None
+    bot = await db_session.get(Bot, bot.id, populate_existing=True)
+    assert bot is not None and bot.assistant_state == "deprovisioning"
+
+
+async def test_a_flow_the_runner_cannot_run_is_pushed_back_and_does_not_block_others(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    # 没有处理函数的步骤（_run_one 在 try 之外就出错）。
+    monkeypatch.delitem(deprovisioning.STEPS, "drain")
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    now = utcnow()
+    await lifecycle_runner.tick(factory, CIPHER, now, messenger=messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "drain" and flow.attempts == 1
+    assert flow.error_code == "KeyError"
+    assert flow.next_attempt_at is not None and flow.next_attempt_at > now
+
+
+async def test_request_takes_the_flow_before_the_record_like_the_runner(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """看护进程先锁流程行再锁记录；请求也必须这个顺序，否则两边相遇就死锁。"""
+    import asyncio
+
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    async with factory() as runner, factory() as caller, factory() as probe:
+        held = await runner.scalar(
+            select(AssistantLifecycle)
+            .where(AssistantLifecycle.owner_id == owner.id)
+            .with_for_update()
+        )
+        assert held is not None
+        held_id = held.id
+        theirs = await caller.get(Bot, bot.id)
+        assert theirs is not None
+        waiting = asyncio.create_task(
+            deprovisioning.request(caller, theirs, trigger="owner", actor_id=owner.id)
+        )
+        try:
+            await asyncio.sleep(0.3)
+            assert not waiting.done()
+            # 请求在等流程行，记录还没被它锁住。
+            await probe.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            locked = await probe.scalar(select(Bot.id).where(Bot.id == bot.id).with_for_update())
+            assert locked == bot.id
+        finally:
+            await probe.rollback()
+            await runner.rollback()
+        flow = await asyncio.wait_for(waiting, 5)
+        flow_id = flow.id if flow is not None else None
+        await caller.commit()
+    assert flow_id == held_id
+
+
+async def test_concurrent_requests_open_one_flow(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    factory = make_session_factory(db_engine)
+
+    async def one(trigger: str) -> Any:
+        async with factory() as session:
+            mine = await session.get(Bot, bot.id)
+            assert mine is not None
+            flow = await deprovisioning.request(session, mine, trigger=trigger, actor_id=None)
+            await session.commit()
+            return flow.id if flow is not None else None
+
+    ids = await asyncio.gather(one("admin"), one("owner"), one("admin"))
+    assert len(set(ids)) == 1 and ids[0] is not None
+    count = await db_session.scalar(
+        select(func.count())
+        .select_from(AssistantLifecycle)
+        .where(AssistantLifecycle.owner_id == owner.id, AssistantLifecycle.action == "deprovision")
+    )
+    assert count == 1

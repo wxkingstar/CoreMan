@@ -123,6 +123,27 @@ async def _settle_failure(
         return texts
 
 
+async def _push_back(
+    factory: async_sessionmaker[AsyncSession], row_id: uuid.UUID, code: str, now: datetime
+) -> None:
+    """`_run_one` 本身出了错（未知步骤、回滚失败、记失败也失败）：最后兜底把这条流程往后推，
+    免得它每一轮都排在最前面、挤掉别的流程。正被别人处理的行不等它。"""
+    try:
+        async with factory() as session:
+            row = await session.scalar(
+                select(AssistantLifecycle)
+                .where(AssistantLifecycle.id == row_id, AssistantLifecycle.finished_at.is_(None))
+                .with_for_update(skip_locked=True)
+            )
+            if row is not None:
+                row.attempts += 1
+                row.error_code, row.updated_at = code, now
+                row.next_attempt_at = now + backoff(row.attempts)
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001 兜底本身出错也不能让循环停下
+        log.warning("assistant_lifecycle_push_back_failed", error=type(exc).__name__)
+
+
 async def _run_one(
     factory: async_sessionmaker[AsyncSession],
     cipher: Cipher,
@@ -210,6 +231,7 @@ async def tick(
                 notices = await _run_one(factory, cipher, messenger, row_id, now)
             except Exception as exc:  # noqa: BLE001 一条流程出错不挡别的
                 log.warning("assistant_lifecycle_failed", error=type(exc).__name__)
+                await _push_back(factory, row_id, type(exc).__name__, now)
                 continue
             counts["assistant_lifecycle_steps"] += 1
             await _notify(factory, messenger, notices)
