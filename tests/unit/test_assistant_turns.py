@@ -11,6 +11,7 @@ import io
 import json
 import tarfile
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,8 +102,18 @@ def request(tmp_path: Path, restore: bool = False, **extra) -> dict:
     }
 
 
-def fake_sandbox(turns: AssistantTurns, monkeypatch, *, seen: list | None = None, hang=False):
-    """进程内的假驱动：收到请求后写一份转录，回一段 SSE。"""
+def fake_sandbox(
+    turns: AssistantTurns,
+    monkeypatch,
+    *,
+    seen: list | None = None,
+    hang=False,
+    stop_gate: tuple[int, asyncio.Event, asyncio.Event] | None = None,
+):
+    """进程内的假驱动：收到请求后写一份转录，回一段 SSE。
+
+    `stop_gate=(n, entered, release)`：第 n 次 `_stop` 先置 entered，再等 release。
+    """
     monkeypatch.setattr(
         turn_credentials,
         "for_provider",
@@ -141,7 +152,13 @@ def fake_sandbox(turns: AssistantTurns, monkeypatch, *, seen: list | None = None
 
         servers.append(await asyncio.start_unix_server(handle, path=str(layout.driver_socket)))
 
+    stops = [0]
+
     async def stop(process):
+        stops[0] += 1
+        if stop_gate is not None and stops[0] == stop_gate[0]:
+            stop_gate[1].set()
+            await stop_gate[2].wait()
         for server in servers:
             server.close()
 
@@ -437,3 +454,187 @@ def test_hidden_paths_list_only_login_dirs_that_exist(tmp_path):
     assert home / ".claude" in hidden and home / ".codex" not in hidden
     assert Path(turns.daemon.config["workspace_root"]) in hidden
     assert turns.daemon.data_dir / "config.json" in hidden
+
+
+# ---- 第一轮审查的修复 ---------------------------------------------------------
+
+
+async def test_cleanup_deletes_sandbox_trees_off_the_event_loop(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+    loop_thread = threading.current_thread()
+    calls: list[tuple[Path, bool]] = []
+    original = assistant_turns.shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        calls.append((Path(path), threading.current_thread() is loop_thread))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(assistant_turns.shutil, "rmtree", rmtree)
+    await turns.run("call-1", "claude", request(tmp_path), Frames())
+    big = [(p, on_loop) for p, on_loop in calls if p.name != "secrets"]
+    assert any(p.parent == turns.turns_dir for p, _ in big)
+    assert any(p.parent == turns.daemon.socket_dir for p, _ in big)
+    assert not any(on_loop for _, on_loop in big)
+
+
+async def test_cancel_during_cleanup_still_finishes_every_step(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    entered, release = asyncio.Event(), asyncio.Event()
+    # 第 1 次 _stop 在流结束后，第 2 次在清理里。
+    fake_sandbox(turns, monkeypatch, stop_gate=(2, entered, release))
+    closed: list[bool] = []
+    original_close = assistant_turns.egress.Egress.close
+
+    async def close(self):
+        closed.append(True)
+        await original_close(self)
+
+    monkeypatch.setattr(assistant_turns.egress.Egress, "close", close)
+    task = asyncio.create_task(turns.run("call-1", "claude", request(tmp_path), Frames()))
+    await asyncio.wait_for(entered.wait(), 5)
+    roots = list(turns.turns_dir.iterdir())
+    assert len(roots) == 1 and not (roots[0] / "secrets").exists()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.wait(turns.background, timeout=5)
+    assert closed == [True]
+    assert not any(turns.turns_dir.iterdir())
+    assert not list(turns.daemon.socket_dir.glob("a*"))
+    assert turns.active == set()
+
+
+async def test_refused_turn_cancelled_during_cleanup_leaves_nothing_for_the_sweep(
+    tmp_path, monkeypatch
+):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    entered, release = asyncio.Event(), asyncio.Event()
+    fake_sandbox(turns, monkeypatch, stop_gate=(1, entered, release))
+    monkeypatch.setattr(
+        turn_credentials,
+        "for_provider",
+        lambda *_a: (_ for _ in ()).throw(turn_credentials.Unavailable("credential_expiring")),
+    )
+    task = asyncio.create_task(turns.run("call-1", "claude", request(tmp_path), Frames()))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    if turns.background:
+        await asyncio.wait(turns.background, timeout=5)
+    await turns.sweep()
+    assert platform.uploads == [("unchanged", b"")]
+    assert not any(turns.turns_dir.iterdir())
+    assert turns.active == set()
+
+
+def leftover(turns: AssistantTurns, name: str) -> Path:
+    root = turns.turns_dir / name
+    (root / "config/projects/-work").mkdir(parents=True)
+    (root / "config/projects/-work/s1.jsonl").write_bytes(b"{}\n")
+    meta = {"provider": "claude", "transfer": TRANSFER, "session_id": "s1"}
+    (root / "meta.json").write_text(json.dumps(meta))
+    return root
+
+
+async def test_sweep_survives_a_leftover_whose_pack_fails(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    bad, good = leftover(turns, "a-bad"), leftover(turns, "b-good")
+    original = transcripts.pack
+
+    def pack(root, provider, session_id):
+        if Path(root).name == "a-bad":
+            raise RuntimeError("boom")
+        return original(root, provider, session_id)
+
+    monkeypatch.setattr(transcripts, "pack", pack)
+    await turns.sweep()
+    assert not bad.exists() and not good.exists()
+    assert [s for s, _ in platform.uploads] == ["ok"]
+
+
+async def test_run_whose_pack_fails_removes_the_turn_and_uploads_nothing(tmp_path, monkeypatch):
+    platform = Platform()
+    turns = make(tmp_path, platform)
+    fake_sandbox(turns, monkeypatch)
+
+    def pack(*_a):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(transcripts, "pack", pack)
+    frames = Frames()
+    await turns.run("call-1", "claude", request(tmp_path), frames)
+    assert frames.body().endswith(b"data: [DONE]\n\n")
+    assert platform.uploads == []
+    assert not any(turns.turns_dir.iterdir())
+
+
+async def test_sweep_spares_a_turn_that_registers_after_the_listing(tmp_path, monkeypatch):
+    turns = make(tmp_path, Platform())
+    root = turns.turns_dir / "late"
+    root.mkdir(parents=True)
+    run_dir = turns.daemon.socket_dir / "alate"
+    run_dir.mkdir()
+    original = turns._leftovers
+
+    def listing(active):
+        found = original(active)
+        turns.active.add("late")
+        return found
+
+    monkeypatch.setattr(turns, "_leftovers", listing)
+    await turns.sweep()
+    assert root.exists() and run_dir.exists()
+
+
+def test_done_gate_ignores_the_marker_inside_a_content_string():
+    gate = DoneGate()
+    chunk = b'data: {"content":"data: [DONE]"}\n\n'
+    assert gate.feed(chunk) + gate.feed(b"data: [DONE]\n\n") == chunk
+    assert gate.release() == b"data: [DONE]\n\n"
+    first = DoneGate()
+    assert first.feed(b"data: [DONE]\n\n") == b""
+    assert first.release() == b"data: [DONE]\n\n"
+
+
+async def test_transcript_transfers_have_an_overall_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(assistant_turns, "TRANSFER_DEADLINE", 0.2)
+    turns = make(tmp_path, Platform())
+
+    async def hang(request):
+        await asyncio.sleep(3600)
+
+    turns.daemon.http = httpx.AsyncClient(
+        transport=httpx.MockTransport(hang), base_url="https://coreman.example.com"
+    )
+    assert await asyncio.wait_for(turns.upload(TRANSFER, b"x", "ok"), 5) is False
+    with pytest.raises(assistant_turns.Refused) as refused:
+        await asyncio.wait_for(turns.download(TRANSFER), 5)
+    assert refused.value.code == "transcript_unavailable"
+
+
+def test_plan_turn_requires_a_working_dir_strictly_inside_the_root(tmp_path):
+    root = tmp_path / "projects"
+    (root / "assistant-1").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "escape").symlink_to(outside)
+    base = request(tmp_path)
+    assert plan_turn("claude", base, workspace_root=root).workdir == (root / "assistant-1")
+    missing = {k: v for k, v in base.items() if k != "working_dir"}
+    for data in (
+        missing,
+        {**base, "working_dir": str(root)},
+        {**base, "working_dir": str(outside)},
+        {**base, "working_dir": str(root / "escape")},
+        {**base, "working_dir": str(root / "nope")},
+    ):
+        with pytest.raises(ValueError):
+            plan_turn("claude", data, workspace_root=root)

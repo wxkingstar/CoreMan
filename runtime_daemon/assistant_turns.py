@@ -43,6 +43,8 @@ SWEEP_SECONDS = 600.0
 STOP_SECONDS = 10.0
 SOCKET_WAIT_SECONDS = 10.0
 TRANSFER_TIMEOUT = 180.0
+# 一次转录上传或下载的总时限（TRANSFER_TIMEOUT 只管 httpx 的每个阶段）：[DONE] 扣住的时间有上限。
+TRANSFER_DEADLINE = 180.0
 DONE = b"data: [DONE]"
 TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 # 守护进程启动时定下的 AI 代理（daemon.apply_proxy 写进了环境）：模型接口经它出去。
@@ -95,24 +97,40 @@ class TurnPlan:
 
 
 class DoneGate:
-    """转发流里的字节，扣住 `data: [DONE]` 及其之后的部分，等 `release()` 再交出去。"""
+    """转发流里的字节，扣住 `data: [DONE]` 及其之后的部分，等 `release()` 再交出去。
+
+    只认行首的标记（流的开头或紧跟换行）：模型在回答里写出这串字时，它在 JSON 字符串里，
+    前面不会是原样的换行。
+    """
 
     def __init__(self) -> None:
         self.pending = b""
         self.held = False
+        # pending 的第一个字节是否在行首（流开头，或已交出的最后一个字节是换行）。
+        self.line_start = True
+
+    def _marker(self) -> int:
+        index = self.pending.find(DONE)
+        while index >= 0:
+            if (index == 0 and self.line_start) or self.pending[index - 1 : index] == b"\n":
+                return index
+            index = self.pending.find(DONE, index + 1)
+        return -1
 
     def feed(self, part: bytes) -> bytes:
         if self.held:
             self.pending += part
             return b""
         self.pending += part
-        index = self.pending.find(DONE)
+        index = self._marker()
         if index >= 0:
             out, self.pending, self.held = self.pending[:index], self.pending[index:], True
             return out
         # 标记可能跨两段到达：末尾留一小截，等下一段再判断。
         keep = len(DONE) - 1
         out, self.pending = self.pending[:-keep], self.pending[-keep:]
+        if out:
+            self.line_start = out.endswith(b"\n")
         return out
 
     def release(self) -> bytes:
@@ -120,8 +138,27 @@ class DoneGate:
         return out
 
 
-def plan_turn(provider: str, data: dict[str, Any]) -> TurnPlan:
+def _workdir(data: dict[str, Any], workspace_root: Path | None) -> Path:
+    """本轮的工作目录：必须给出、真实存在，且（给了根目录时）严格在根目录之内，软链按真实位置算。"""
+    raw = data.get("working_dir")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("working_dir 必须给出")
+    workdir = Path(raw).resolve()
+    if not workdir.is_dir():
+        raise ValueError("working_dir 必须是已有的目录")
+    if workspace_root is not None:
+        root = Path(workspace_root).resolve()
+        if workdir == root or not workdir.is_relative_to(root):
+            raise ValueError("working_dir 必须在员工工作目录的根目录之内")
+    return workdir
+
+
+def plan_turn(
+    provider: str, data: dict[str, Any], *, workspace_root: Path | None = None
+) -> TurnPlan:
     """检查请求并改写成沙箱里的样子：工作目录换成 /work，去掉只给守护进程看的字段。
+
+    `workspace_root`（守护进程的员工工作目录根）给出时，工作目录必须严格在它之内。
 
     Raises:
         ValueError: 请求不合规（按普通的请求失败处理）
@@ -137,7 +174,7 @@ def plan_turn(provider: str, data: dict[str, Any]) -> TurnPlan:
         raise ValueError("transcript 无效")
     if data.get("worktree") or data.get("add_dirs"):
         raise ValueError("个人助理的轮次不支持 worktree 与 add_dirs")
-    workdir = Path(data["working_dir"])
+    workdir = _workdir(data, workspace_root)
     body = {k: v for k, v in data.items() if k not in ("sandbox", "transcript", "worktree")}
     body["working_dir"] = sandbox.INSIDE_WORK
     if body.get("system_prompt_file"):
@@ -236,6 +273,9 @@ class AssistantTurns:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.background:
+            # 被取消的轮次在收尾时另起的清理任务：再等一会儿，删不完的留给下次启动的清扫。
+            await asyncio.wait(set(self.background), timeout=STOP_SECONDS)
 
     async def _loop(self) -> None:
         await self._guard("sweep", self.sweep)
@@ -276,18 +316,37 @@ class AssistantTurns:
         self.ready, self.code = result.providers, result.code
 
     async def sweep(self) -> None:
-        """上一轮异常退出、或传不上去留下的本轮目录：再传一次转录，然后无论如何都删除。"""
-        for entry, meta in await asyncio.to_thread(self._leftovers):
-            if meta is not None:
-                await self._settle(entry, meta["provider"], meta["transfer"], meta["session_id"])
-            await asyncio.to_thread(shutil.rmtree, entry, True)
+        """上一轮异常退出、或传不上去留下的本轮目录：再传一次转录，然后无论如何都删除。
 
-    def _leftovers(self) -> list[tuple[Path, dict[str, str] | None]]:
-        """不在跑的本轮目录及其 meta（读不懂的为 None）；顺手删掉无主的 socket 目录。"""
+        `active` 在事件循环上取快照交给线程去列目录；删除或上传前在循环上再核对一次，
+        列目录之后才登记的轮次不会被误删。每一项单独兜底：一项出错不挡后面的，也不挡它自己被删。
+        """
+        leftovers, runs = await asyncio.to_thread(self._leftovers, set(self.active))
+        for entry in runs:
+            if entry.name not in {f"a{turn[:10]}" for turn in self.active}:
+                await asyncio.to_thread(shutil.rmtree, entry, True)
+        for entry, meta in leftovers:
+            if entry.name in self.active:
+                continue
+            try:
+                if meta is not None:
+                    await self._settle(
+                        entry, meta["provider"], meta["transfer"], meta["session_id"]
+                    )
+            except Exception as exc:  # noqa: BLE001 一项出错不能让清扫永远卡在这里
+                LOG.warning("Assistant sweep entry failed: %s", type(exc).__name__)
+            finally:
+                await asyncio.to_thread(shutil.rmtree, entry, True)
+
+    def _leftovers(
+        self, active: set[str]
+    ) -> tuple[list[tuple[Path, dict[str, str] | None]], list[Path]]:
+        """不在跑的本轮目录及其 meta（读不懂的为 None），以及无主的 socket 目录。只读不删。"""
         found: list[tuple[Path, dict[str, str] | None]] = []
+        runs: list[Path] = []
         if self.turns_dir.is_dir():
             for entry in sorted(self.turns_dir.iterdir()):
-                if entry.name in self.active:
+                if entry.name in active:
                     continue
                 try:
                     raw = json.loads((entry / "meta.json").read_text())
@@ -301,22 +360,25 @@ class AssistantTurns:
                     meta = None
                 found.append((entry, meta))
         socket_dir = getattr(self.daemon, "socket_dir", None)
-        active_runs = {f"a{turn[:10]}" for turn in self.active}
+        active_runs = {f"a{turn[:10]}" for turn in active}
         if socket_dir is not None and socket_dir.is_dir():
             for entry in socket_dir.glob("a*"):
                 if entry.name not in active_runs and entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry, ignore_errors=True)
-        return found
+                    runs.append(entry)
+        return found, runs
 
     # ---- 与平台交换转录 --------------------------------------------------------
 
     async def download(self, transfer: str) -> bytes | None:
         """取续聊要用的转录；平台说没有（404）返回 None，其它失败拒绝这一轮。"""
         try:
-            response = await self.daemon.http.get(
-                f"/api/runtime/assistant-transcripts/{transfer}", timeout=TRANSFER_TIMEOUT
+            response = await asyncio.wait_for(
+                self.daemon.http.get(
+                    f"/api/runtime/assistant-transcripts/{transfer}", timeout=TRANSFER_TIMEOUT
+                ),
+                TRANSFER_DEADLINE,
             )
-        except httpx.HTTPError:
+        except (httpx.HTTPError, asyncio.TimeoutError, TimeoutError):  # noqa: UP041 3.10
             raise Refused("transcript_unavailable") from None
         if response.status_code == 404:
             return None
@@ -327,16 +389,19 @@ class AssistantTurns:
     async def upload(self, transfer: str, data: bytes | None, status: str) -> bool:
         """上传本轮转录；平台收下（200）或已不需要（410）都算办完。"""
         try:
-            response = await self.daemon.http.put(
-                f"/api/runtime/assistant-transcripts/{transfer}",
-                content=data or b"",
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "X-Transcript-Status": status,
-                },
-                timeout=TRANSFER_TIMEOUT,
+            response = await asyncio.wait_for(
+                self.daemon.http.put(
+                    f"/api/runtime/assistant-transcripts/{transfer}",
+                    content=data or b"",
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Transcript-Status": status,
+                    },
+                    timeout=TRANSFER_TIMEOUT,
+                ),
+                TRANSFER_DEADLINE,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041 3.10
             LOG.warning("Assistant transcript upload failed: %s", type(exc).__name__)
             return False
         if response.status_code in (200, 410):
@@ -345,7 +410,11 @@ class AssistantTurns:
         return False
 
     async def _settle(self, root: Path, provider: str, transfer: str, session_id: str) -> bool:
-        """打包并上传一轮的转录，返回平台是否已办完。"""
+        """打包并上传一轮的转录，返回这个目录是否可以删了。
+
+        平台已办完返回真；打包时的 OSError 或上传失败返回假（留给清扫再试一次）；打包出了别的
+        异常（再试也一样）不上传、返回真：平台没收到转录，下一轮开新会话。
+        """
         try:
             data = await asyncio.to_thread(transcripts.pack, root, provider, session_id)
             status = "ok" if data else "empty"
@@ -354,6 +423,9 @@ class AssistantTurns:
         except OSError as exc:
             LOG.warning("Assistant transcript pack failed: %s", type(exc).__name__)
             return False
+        except Exception as exc:  # noqa: BLE001 打包的意外不能让本轮目录留着
+            LOG.warning("Assistant transcript pack failed: %s", type(exc).__name__)
+            return True
         return await self.upload(transfer, data, status)
 
     # ---- 一轮 ------------------------------------------------------------------
@@ -380,7 +452,7 @@ class AssistantTurns:
 
     async def run(self, identity: str, provider: str, data: dict[str, Any], frames: Any) -> None:
         """跑一轮；回给平台的帧（含收尾帧）都在这里发。"""
-        plan = plan_turn(provider, data)
+        plan = plan_turn(provider, data, workspace_root=Path(self.daemon.config["workspace_root"]))
         refused = self._admission(provider)
         if refused is not None:
             await self.refuse(frames, refused, plan.transfer)
@@ -452,6 +524,7 @@ class AssistantTurns:
             gate = DoneGate()
             await self._stream(layout, plan, frames, gate)
             await self._stop(process)
+            self._drop_secrets(layout)
             settled = await self._settle(layout.root, provider, plan.transfer, plan.session_id)
             tail = gate.release()
             if tail:
@@ -463,12 +536,14 @@ class AssistantTurns:
         except asyncio.CancelledError:
             # 平台取消或守护进程退出：转录放到后台去传，传完再删本轮目录。
             handed_off = True
+            self._drop_secrets(layout)
             task = asyncio.create_task(self._settle_later(layout, plan, process, proxy))
             self.background.add(task)
             task.add_done_callback(self.background.discard)
             raise
         except Exception:
             # 驱动或流出错：照样把已有的转录传上去，下一轮还能续上。
+            self._drop_secrets(layout)
             await self._stop(process)
             if layout.meta.exists():
                 with contextlib.suppress(Exception):
@@ -505,16 +580,46 @@ class AssistantTurns:
         proxy: egress.Egress | None,
         settled: bool,
     ) -> None:
+        """收尾。凭证副本先删（不经过任何 await）；其余步骤放进受 shield 保护、记在 background
+        里的任务：这里被取消也照样做完（stop() 会等它），取消随后照常抛出。"""
+        self._drop_secrets(layout)
+        remove_root = settled or not layout.meta.exists()
+        task = asyncio.ensure_future(self._finish(layout, process, proxy, remove_root))
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        await asyncio.shield(task)
+
+    async def _finish(
+        self,
+        layout: sandbox.TurnLayout,
+        process: subprocess.Popen | None,
+        proxy: egress.Egress | None,
+        remove_root: bool,
+    ) -> None:
+        """停沙箱、关放行代理、删 socket 目录与（要删时）本轮目录；每一步都不挡后面的。
+
+        这两棵目录树沙箱里可写（可能极大、极深），在线程里删，不占事件循环。
+        """
         try:
-            await self._stop(process)
+            try:
+                await self._stop(process)
+            except Exception as exc:  # noqa: BLE001 停不下来也要接着收尾
+                LOG.warning("Assistant sandbox stop failed: %s", type(exc).__name__)
             if proxy is not None:
-                await proxy.close()
-            shutil.rmtree(layout.secrets, ignore_errors=True)
-            shutil.rmtree(layout.run, ignore_errors=True)
-            if settled or not layout.meta.exists():
-                shutil.rmtree(layout.root, ignore_errors=True)
+                try:
+                    await proxy.close()
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("Assistant egress close failed: %s", type(exc).__name__)
+            await asyncio.to_thread(shutil.rmtree, layout.run, True)
+            if remove_root:
+                await asyncio.to_thread(shutil.rmtree, layout.root, True)
         finally:
             self.active.discard(layout.turn_id)
+
+    @staticmethod
+    def _drop_secrets(layout: sandbox.TurnLayout) -> None:
+        """删本轮的凭证副本。secrets 不挂进沙箱、只有一个小文件，直接在循环上删。"""
+        shutil.rmtree(layout.secrets, ignore_errors=True)
 
     def _launch(
         self,
