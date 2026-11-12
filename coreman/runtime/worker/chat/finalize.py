@@ -26,7 +26,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
-from coreman.core.relay.client import RelayBusyError, RelayError
+from coreman.core.relay.client import RelayBusyError, RelayError, RelayInterruptedError
 from coreman.core.relay.labels import load_nodes, relay_label, signed_in
 from coreman.core.relay.observations import HealthObservation, provider_failure, save_health
 from coreman.core.relay.quota import parse_quota, save_quota
@@ -294,11 +294,11 @@ class FinalizeStage(ChatStageBase):
             elif (
                 owned
                 and not out.cancelled
+                and not isinstance(out.error, (RelayBusyError, RelayInterruptedError))
                 and (
                     out.relay_error
                     or (out.finish_reason == "error" and verdict.log_status == "error")
                     or isinstance(out.error, RelayError)
-                    and not isinstance(out.error, RelayBusyError)
                 )
             ):
                 status, code, detail = provider_failure(

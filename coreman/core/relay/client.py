@@ -39,6 +39,10 @@ class IncompleteResultError(RelayError):
 class RelayInterruptedError(RelayError):
     """节点上报调用已失败：任务执行到一半中断，消息里带节点的错误码。"""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class RelayBusyError(RelayError):
     """运行时节点满载：对话排队超过上限仍未开始执行（没有任何副作用）。"""
@@ -280,7 +284,7 @@ class RelayClient:
             raise RelayBusyError(str(exc)) from exc
         except httpx.HTTPError as exc:
             if str(exc) in NODE_ERRORS:
-                raise RelayInterruptedError(f"运行时中断: {exc}") from exc
+                raise RelayInterruptedError(f"运行时中断: {exc}", code=str(exc)) from exc
             raise RelayError(f"连接失败: {type(exc).__name__}") from exc
         for event in parser.flush():
             yield event

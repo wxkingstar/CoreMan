@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from coreman.core.relay.client import RelayClient
+from coreman.core.runtime_nodes.transport import NODE_ERRORS
 
 
 def _chunk(
@@ -233,6 +234,8 @@ class _Stream(httpx.AsyncByteStream):
                 yield frame.encode()
                 if self._relay.chunk_delay:
                     await asyncio.sleep(self._relay.chunk_delay)
+            if self._relay.scenario in NODE_ERRORS:
+                raise httpx.ReadError(self._relay.scenario)
         except (asyncio.CancelledError, GeneratorExit):
             self._abort()
             raise
@@ -329,6 +332,8 @@ class FakeRelay:
             frames = _leaked_credential_frames(body)
         elif self.scenario == "leaks_personal":
             frames = _leaked_personal_frames(body)
+        elif self.scenario in NODE_ERRORS:
+            frames = [_text("半截")]
         else:
             frames = SCENARIOS[self.scenario]()
         return httpx.Response(

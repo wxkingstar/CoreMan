@@ -1,7 +1,9 @@
 import asyncio
 import re
 import uuid
+from typing import Literal
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -22,6 +24,8 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.observations import HealthObservation, save_health
+from coreman.core.runtime_nodes.transport import NODE_ERRORS
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.worker_helpers import build_ctx, seed_bot, turn_block, user_input
@@ -337,6 +341,48 @@ async def test_error_finish_records_model_failure(
     assert relay_row.model_health["error_code"] == "model_request_failed"
     assert relay_row.model_health["reply_verified"] is False
     assert relay_row.last_model_failure == relay_row.model_health
+
+
+@pytest.mark.parametrize("node_error", sorted(NODE_ERRORS))
+@pytest.mark.parametrize("previous_status", [None, "healthy", "down"])
+async def test_runtime_interruption_does_not_change_model_health(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    node_error: str,
+    previous_status: Literal["healthy", "down"] | None,
+) -> None:
+    bot, relay_row, _ = await seed_bot(db_session)
+    if previous_status is not None:
+        await save_health(
+            db_session,
+            relay_row.id,
+            HealthObservation(
+                status=previous_status,
+                check_kind="model",
+                reply_verified=previous_status == "healthy",
+            ),
+        )
+        await db_session.commit()
+        await db_session.refresh(relay_row)
+    before = (relay_row.model_health, relay_row.last_model_failure)
+
+    task = await chat_task(db_session, bot, "a")
+    await run(db_engine, task, FakeRelay(node_error))
+
+    result = await tasks.get(db_session, task.id)
+    assert result is not None and result.status == "failed"
+    assert result.error_code == "run_interrupted"
+    assert node_error in (result.error_message or "")
+    log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == task.id))).scalar_one()
+    assert log.status == "error" and log.error_code == "run_interrupted"
+    assert node_error in (log.error_message or "")
+    if node_error == "control_lost":
+        assert "本机运行时已放弃本轮请求" in (log.error_message or "")
+        assert "本机运行时已放弃本轮请求" in (
+            (await stream_of(db_session, task.id)).final_text or ""
+        )
+    await db_session.refresh(relay_row)
+    assert (relay_row.model_health, relay_row.last_model_failure) == before
 
 
 async def test_whitelist_unsupported_help_and_disabled(

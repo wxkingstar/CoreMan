@@ -20,6 +20,8 @@ Drivers attach `x_actual_model` when the CLI identifies the model for the reply.
 
 Actual completed conversations write model observations and returned quota through the same storage functions as fallback probes. Cancelled, queued and business/tool-failed tasks do not by themselves prove provider failure. The executing node attaches its seat ID to streamed provider results when supported. **Explicitly mismatched retired-seat reports are rejected. Reports omitting seat_id remain accepted even if the node advertises seats**, preserving API-first rollout compatibility with existing runtimes and worker SSE. These legacy reports cannot attest which seat generated them; accepted telemetry is not credential-generation attestation.
 
+Node-reported interruptions (`control_lost`, `connection_lost`, `execution_failed`, and `response_too_large`) remain failed tasks with `run_interrupted` and the node error code in the task and chat log. They do not update `model_health`, `last_model_failure`, or legacy relay health: a transport/execution failure proves neither model failure nor recovery. A `control_lost` reply explains that the local runtime abandoned the request and points to its control-poll, lease and shutdown logs. The code can also be reported during shutdown, so it does not by itself prove a lease timeout or identify a failing network hop. No timeout or cancellation policy changes are implied, and existing observations keep their original timestamps and freshness limits.
+
 ## Existing cadence, with activity suppression
 
 | Observation | Strategy |
