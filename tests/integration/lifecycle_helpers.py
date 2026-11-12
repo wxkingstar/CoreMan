@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import lifecycle
+from coreman.core.assistants import keys, lifecycle, lifecycle_runner, retired_dirs, sealed
 from coreman.core.assistants.apps import SECRET_AAD
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     AssistantLifecycle,
+    Bot,
+    FeishuPersonalGrant,
     PlatformApp,
     RelayServer,
     RuntimeNode,
+    Task,
     User,
     UserIdentity,
 )
+from coreman.core.feishu_personal import revocation
+from coreman.core.feishu_personal import service as personal
 from coreman.core.relay.agent_client import AgentError
 from coreman.core.timeutils import utcnow
 from tests.fakes.runtime_node import add_node_relay
@@ -192,3 +199,106 @@ async def flow_of(session: AsyncSession, owner_id: uuid.UUID) -> AssistantLifecy
         .execution_options(populate_existing=True)
     )
     return found
+
+
+class FakeFeishuAuth:
+    """飞书设备授权与撤销的替身：`approve()` 之后，下一次查询拿到本人的令牌。"""
+
+    def __init__(self) -> None:
+        self.approved = False
+        self.issued = 0
+        self.revoked: list[dict[str, Any]] = []
+        self.identity = {"user_id": OWNER_PID, "open_id": OWNER_OPEN_ID, "tenant_key": TENANT}
+
+    def approve(self) -> None:
+        self.approved = True
+
+    async def http(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if url.endswith("/oauth/v1/device_authorization"):
+            self.issued += 1
+            return {
+                "device_code": f"dc-{self.issued}",
+                "verification_uri_complete": f"https://accounts.feishu.cn/verify?c={self.issued}",
+                "expires_in": 600,
+                "interval": 5,
+            }
+        if url == personal.TOKEN_URL:
+            if not self.approved:
+                return {"error": "authorization_pending"}
+            return {
+                "access_token": "u-access",
+                "refresh_token": "u-refresh",
+                "expires_in": 7200,
+                "scope": "offline_access im:message",
+            }
+        if url.endswith("/authen/v1/user_info"):
+            return {"code": 0, "data": self.identity}
+        raise AssertionError(url)
+
+    async def revoke(self, app_id: str, secret: str, tokens: dict[str, Any]) -> bool:
+        self.revoked.append(tokens)
+        return True
+
+
+def install(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeNode, FakeFeishuAuth]:
+    node, auth = FakeNode(), FakeFeishuAuth()
+    monkeypatch.setattr(retired_dirs, "call_agent", node)
+    monkeypatch.setattr(personal, "_http", auth.http)
+    monkeypatch.setattr(revocation, "revoke_tokens", auth.revoke)
+
+    async def no_scopes(*_args: Any, **_kw: Any) -> list[str]:
+        # 应用开通了发消息与读消息的全部用户权限（「全部」档位要它们）。
+        return ["offline_access", "im:message", "im:message.send_as_user", "im:chat:read"]
+
+    from coreman.core.feishu_personal import permissions
+
+    monkeypatch.setattr(permissions, "app_user_scopes", no_scopes)
+    return node, auth
+
+
+async def tick(
+    factory: async_sessionmaker[AsyncSession], messenger: FakeMessenger, *, later: float = 0
+) -> dict[str, int]:
+    """推进一轮；`later` 秒之后的时刻（跳过退避与轮询间隔）。"""
+    return await lifecycle_runner.tick(
+        factory, CIPHER, utcnow() + timedelta(seconds=later), messenger=messenger
+    )
+
+
+async def active_assistant(session: AsyncSession) -> tuple[Bot, User, Task]:
+    """一位已经开通好的助理（与所有者聊过一轮，那一轮已结束），带着有效的飞书授权。
+
+    记录绑在助理池里一个能跑助理的实例上（`into_assistant` → `sandbox_ready`）。
+    """
+    from tests.integration.assistant_helpers import into_assistant
+    from tests.integration.credential_helpers import owner
+
+    bot, user, task, _ = await owner(session)
+    await into_assistant(session, bot, user)
+    await keys.ensure_key(session, sealed.master(), user.id)
+    from coreman.core.bots.secrets import CREDENTIALS_AAD, encrypt_json
+
+    # 助理记录上是助理应用凭证的副本（见 assistants.apps）。
+    bot.credentials_enc = encrypt_json(
+        CIPHER, {"app_id": APP_ID, "app_secret": "app-secret"}, CREDENTIALS_AAD
+    )
+    grant = FeishuPersonalGrant(
+        bot_id=bot.id,
+        user_id=user.id,
+        app_id=APP_ID,
+        platform_user_id="owner_pid",
+        open_id="ou_owner",
+        tenant_key=TENANT,
+        status="connected",
+        authorization_level="all",
+        scopes=["offline_access"],
+        requested_scopes=["offline_access"],
+    )
+    grant.token_enc = CIPHER.encrypt(
+        json.dumps({"access_token": "u-access", "refresh_token": "u-refresh"}),
+        personal._aad(grant, "token_enc"),
+    )
+    session.add(grant)
+    task.status = "succeeded"
+    await session.commit()
+    return bot, user, task
