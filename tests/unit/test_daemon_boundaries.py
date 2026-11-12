@@ -139,7 +139,7 @@ async def test_node_error_code_survives_as_interrupted_error(code: str) -> None:
 
 
 @pytest.mark.parametrize("locale", ["zh", "ja"])
-def test_control_loss_includes_its_reason_in_the_task_and_reply(locale: str) -> None:
+def test_control_loss_keeps_diagnostics_in_the_record_only(locale: str) -> None:
     verdict = _classify(
         "",
         Outcome(error=RelayInterruptedError("运行时中断: control_lost", code="control_lost")),
@@ -147,7 +147,9 @@ def test_control_loss_includes_its_reason_in_the_task_and_reply(locale: str) -> 
     )
     assert verdict.error_code == "run_interrupted" and verdict.task_status == "failed"
     assert "control_lost" in (verdict.error_message or "")
-    assert msg("runtime_control_lost", locale) in verdict.final_text
+    assert verdict.final_text == msg("run_interrupted", locale, relay="test")
+    assert msg("runtime_control_lost", locale) not in verdict.final_text
+    assert "control_lost" not in verdict.final_text
     assert msg("runtime_control_lost", locale) in (verdict.error_message or "")
 
 
