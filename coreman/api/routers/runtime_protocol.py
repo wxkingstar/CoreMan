@@ -14,6 +14,8 @@ import json
 import logging
 import secrets
 import uuid
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -39,6 +41,7 @@ from coreman.core.db.models import (
     RuntimeInstallLink,
     RuntimeNode,
 )
+from coreman.core.logging import get_logger
 from coreman.core.relay.models import BACKENDS, default_model, known_effort_flags
 from coreman.core.runtime_nodes.bundle import stale_bundle_reason
 from coreman.core.runtime_nodes.common import PROTOCOL_VERSION, absolute_root, token_digest
@@ -59,6 +62,12 @@ from coreman.core.runtime_nodes.transport import (
 )
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime-daemon"])
+log = get_logger(__name__)
+# 转录传输（上传与下载）同时最多这么多个，等位置最多这么多秒；读请求体的总时限。
+TRANSCRIPT_TRANSFERS = 4
+TRANSFER_WAIT_SECONDS = 60.0
+BODY_SECONDS = 300.0
+TRANSFER_SLOTS = asyncio.Semaphore(TRANSCRIPT_TRANSFERS)
 ROOT = Path(__file__).resolve().parents[3]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 # 长轮询最多挂起的秒数（只有节点带 wait 才挂起）；一批响应帧与待消费分片的上限。
@@ -716,6 +725,10 @@ async def _collect(
     cancelled = [str(i) for i in body.running if i not in active]
     commands: list[dict[str, Any]] = []
     if not node.draining and body.slots:
+        # 只看每种 AI 自己的沙箱能力：能隔离 claude、不能隔离 codex 的节点领不到 codex 的助理调用。
+        capable = [p for p in BACKENDS if node_sandboxed(node, p)]
+        # 并发上限在锁普通调用之前读好：读设置可能再开一个连接，不能让它压在已锁的行上。
+        limit = await _assistant_limit(request) if capable else 0
         moment = now()
         claimable = (
             RuntimeCall.node_id == node_id,
@@ -733,8 +746,15 @@ async def _collect(
             )
         )
         room = min(body.slots, 4) - len(rows)
-        if room > 0 and node_sandboxed(node):
-            rows += await _claim_sandboxed(session, request, node_id, claimable, room)
+        if room > 0 and capable:
+            # 助理的查询放在保存点里：它出任何错，只丢掉这一部分，同一轮已领的普通调用照常返回。
+            try:
+                async with session.begin_nested():
+                    rows += await _claim_sandboxed(
+                        session, node_id, claimable, room, capable, limit
+                    )
+            except Exception as exc:
+                log.warning("assistant_claim_failed", error_type=type(exc).__name__)
         for row in rows:
             payload = json.loads(
                 request.app.state.cipher.decrypt(row.request_enc, envelope_aad(row.id))
@@ -745,19 +765,30 @@ async def _collect(
     return node.draining, cancelled, commands
 
 
+async def _assistant_limit(request: Request) -> int:
+    """每个节点同时跑的助理轮次上限：读不到、写坏了按 2，其余夹在 1 到 32。"""
+    try:
+        stored = await request.app.state.settings_store.get(ASSISTANT_CONCURRENCY_KEY, default=2)
+    except Exception:
+        return 2
+    if not isinstance(stored, int) or isinstance(stored, bool):
+        return 2
+    return max(1, min(32, stored))
+
+
 async def _claim_sandboxed(
     session: AsyncSession,
-    request: Request,
     node_id: uuid.UUID,
     claimable: tuple[Any, ...],
     room: int,
+    providers: Sequence[str],
+    limit: int,
 ) -> list[RuntimeCall]:
-    """个人助理的调用：普通调用领完之后才领，且本节点同时在跑的不超过助理并发上限。
+    """个人助理的调用：普通调用领完之后才领，只领节点能隔离的 provider，且不超过助理并发上限。
 
+    上限按节点算（不分 provider）：它管的是这台机器同时跑多少个沙箱，不是每种 AI 各多少。
     超出的留在队列里，由调用方按排队上限等待；普通调用从不排在它们后面。
     """
-    stored = await request.app.state.settings_store.get(ASSISTANT_CONCURRENCY_KEY, default=2)
-    limit = stored if isinstance(stored, int) and not isinstance(stored, bool) else 2
     running = await session.scalar(
         select(func.count())
         .select_from(RuntimeCall)
@@ -773,12 +804,25 @@ async def _claim_sandboxed(
     return list(
         await session.scalars(
             select(RuntimeCall)
-            .where(*claimable, RuntimeCall.sandbox.is_(True))
+            .where(*claimable, RuntimeCall.sandbox.is_(True), RuntimeCall.provider.in_(providers))
             .order_by(RuntimeCall.created_at)
             .limit(room)
             .with_for_update(skip_locked=True)
         )
     )
+
+
+@asynccontextmanager
+async def _transfer_slot() -> AsyncIterator[None]:
+    """转录传输同时只放 TRANSCRIPT_TRANSFERS 个：一个 50 MB 的转录在本进程里要占好几份内存。"""
+    try:
+        await asyncio.wait_for(TRANSFER_SLOTS.acquire(), TRANSFER_WAIT_SECONDS)
+    except TimeoutError:
+        raise ApiError(503, 503, "转录传输繁忙") from None
+    try:
+        yield
+    finally:
+        TRANSFER_SLOTS.release()
 
 
 @router.get("/assistant-transcripts/{transfer}")
@@ -789,11 +833,12 @@ async def transcript_download(
     node = await node_auth(request, session)
     # 这个请求只读一个助理的一份转录：解不开按没有处理，不报 500。
     sealed.tolerate_undecryptable(session)
-    try:
-        data = await transcripts.download(session, node_id=node.id, transfer=transfer)
-    except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable):
-        data = None
-    await session.commit()
+    async with _transfer_slot():
+        try:
+            data = await transcripts.download(session, node_id=node.id, transfer=transfer)
+        except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable):
+            data = None
+        await session.commit()
     if data is None:
         raise ApiError(404, 404, "转录不可用")
     return Response(data, media_type="application/octet-stream", headers=NO_STORE)
@@ -817,25 +862,44 @@ async def transcript_upload(
         raise ApiError(413, 413, "转录过大")
     # 读请求体可能很久：先把认证用过的连接还回去，不在读取期间占着事务；行锁在读完之后才拿。
     await session.rollback()
-    data = bytearray()
-    async for chunk in request.stream():
-        data += chunk
-        if len(data) > transcripts.MAX_BYTES:
-            raise ApiError(413, 413, "转录过大")
-    if (status == "ok") != bool(data):
-        raise ApiError(422, 422, "转录内容与状态不符")
-    sealed.tolerate_undecryptable(session)
-    try:
-        result = await transcripts.upload(
-            session, node_id=node_id, transfer=transfer, status=status, data=bytes(data)
-        )
-    except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable, StaleDataError):
-        result = "stale"
-    if result == "stale":
-        await session.rollback()
-        raise ApiError(410, 410, "交接编号已失效")
-    await session.commit()
+    async with _transfer_slot():
+        data = await _read_body(request)
+        if (status == "ok") != bool(data):
+            raise ApiError(422, 422, "转录内容与状态不符")
+        sealed.tolerate_undecryptable(session)
+        try:
+            result = await transcripts.upload(
+                session, node_id=node_id, transfer=transfer, status=status, data=data
+            )
+        except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable, StaleDataError):
+            result = "stale"
+        if result == "stale":
+            await session.rollback()
+            raise ApiError(410, 410, "交接编号已失效")
+        await session.commit()
     return {"code": 0, "data": {"result": result}}
+
+
+async def _read_body(request: Request) -> bytes:
+    """读请求体：总大小与总时长都有上限，读的过程中不占数据库连接。"""
+    chunks: list[bytes] = []
+    size = 0
+
+    async def read() -> None:
+        nonlocal size
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > transcripts.MAX_BYTES:
+                raise ApiError(413, 413, "转录过大")
+            chunks.append(chunk)
+
+    try:
+        await asyncio.wait_for(read(), BODY_SECONDS)
+    except TimeoutError:
+        raise ApiError(408, 408, "转录上传超时") from None
+    data = b"".join(chunks)
+    chunks.clear()
+    return data
 
 
 @router.post("/calls/{call_id}/frames")

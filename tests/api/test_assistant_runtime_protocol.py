@@ -154,7 +154,13 @@ async def test_endpoints_need_the_node_credentials(client, db_session):
 
 
 async def queue(
-    db_session, app, node_id: uuid.UUID, *, sandbox: bool, minutes_ago: int
+    db_session,
+    app,
+    node_id: uuid.UUID,
+    *,
+    sandbox: bool,
+    minutes_ago: int,
+    provider: str = "claude",
 ) -> uuid.UUID:
     call_id = uuid.uuid4()
     payload = json.dumps({"method": "POST", "path": "/v1/chat/completions", "body": ""})
@@ -162,7 +168,7 @@ async def queue(
         RuntimeCall(
             id=call_id,
             node_id=node_id,
-            provider="claude",
+            provider=provider,
             request_enc=app.state.cipher.encrypt(payload, envelope_aad(call_id)),
             deadline=now() + timedelta(hours=1),
             consumer_at=now(),
@@ -321,7 +327,7 @@ async def test_garbage_concurrency_setting_does_not_break_the_poll(client, db_se
 async def test_unknown_foreign_and_settled_transfers_all_look_the_same(client, db_session):
     _, body, headers = await enrollment(client, db_session)
     node_id = uuid.UUID(body["node_id"])
-    _, other, other_headers = await enrollment(client, db_session)
+    _, _other, other_headers = await enrollment(client, db_session)
     _, plan = await handover(db_session, node_id)
     put = {"X-Transcript-Status": "empty"}
     unknown = await client.put(
@@ -330,10 +336,8 @@ async def test_unknown_foreign_and_settled_transfers_all_look_the_same(client, d
     foreign = await client.put(
         f"/api/runtime/assistant-transcripts/{plan.transfer}", headers={**other_headers, **put}
     )
-    assert (unknown.status_code, unknown.json()) == (foreign.status_code, foreign.json()) or (
-        unknown.status_code == foreign.status_code == 410
-    )
-    assert unknown.status_code == 410
+    assert unknown.status_code == foreign.status_code == 410
+    assert unknown.json() == foreign.json()
     # 真正的节点这时还能用，说明对方的请求没有消耗编号。
     mine = await client.put(
         f"/api/runtime/assistant-transcripts/{plan.transfer}", headers={**headers, **put}
@@ -351,7 +355,7 @@ async def test_unknown_foreign_and_settled_transfers_all_look_the_same(client, d
     ):
         got = await client.get(f"/api/runtime/assistant-transcripts/{ident}", headers=who)
         assert got.status_code == 404
-    assert other["node_id"] != body["node_id"]
+        assert got.json() == {"code": 404, "message": "转录不可用"}
 
 
 async def test_download_undecryptable_or_destroyed_key_is_a_plain_404(client, db_session):
@@ -426,3 +430,118 @@ async def test_chunked_oversized_upload_is_cut_off_while_reading(client, db_sess
         content=body_chunks(),
     )
     assert response.status_code == 413
+
+
+async def test_assistant_claim_follows_the_calls_own_provider(client, db_session, app):
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    await beat(client, headers, assistant_sandbox_v1=True)  # 只有 claude 能隔离
+    codex = await queue(db_session, app, node_id, sandbox=True, minutes_ago=9, provider="codex")
+    claude = await queue(db_session, app, node_id, sandbox=True, minutes_ago=1)
+    assert await poll(client, headers, 4) == [str(claude)]
+    row = await db_session.get(RuntimeCall, codex, populate_existing=True)
+    assert row is not None and row.status == "queued"
+
+
+async def test_failing_assistant_query_does_not_take_the_ordinary_claim_with_it(
+    client, db_session, app, monkeypatch
+):
+    from sqlalchemy import text
+
+    from coreman.api.routers import runtime_protocol
+
+    async def broken(session, *args, **kwargs):
+        await session.execute(text("select 1/0"))  # 数据库里真的报错
+
+    monkeypatch.setattr(runtime_protocol, "_claim_sandboxed", broken)
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    await beat(client, headers, assistant_sandbox_v1=True)
+    standard = await queue(db_session, app, node_id, sandbox=False, minutes_ago=1)
+    waiting = await queue(db_session, app, node_id, sandbox=True, minutes_ago=5)
+    assert await poll(client, headers, 4) == [str(standard)]
+    row = await db_session.get(RuntimeCall, waiting, populate_existing=True)
+    assert row is not None and row.status == "queued"
+    done = await db_session.get(RuntimeCall, standard, populate_existing=True)
+    assert done is not None and done.status == "running"
+
+
+async def test_settings_read_failing_falls_back_to_two(client, db_session, app, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("pool timeout")
+
+    monkeypatch.setattr(app.state.settings_store, "get", boom)
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    await beat(client, headers, assistant_sandbox_v1=True)
+    standard = await queue(db_session, app, node_id, sandbox=False, minutes_ago=1)
+    for i in range(3):
+        await queue(db_session, app, node_id, sandbox=True, minutes_ago=9 - i)
+    assert len(await poll(client, headers, 4)) == 3 and standard
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"), [(0, 1), (10**9, 32), (-5, 1), ("x", 2), (True, 2)]
+)
+async def test_stored_concurrency_is_clamped(app, monkeypatch, stored, expected):
+    from coreman.api.routers import runtime_protocol
+
+    async def get(*args, **kwargs):
+        return stored
+
+    monkeypatch.setattr(app.state.settings_store, "get", get)
+
+    class Req:
+        pass
+
+    req = Req()
+    req.app = app
+    assert await runtime_protocol._assistant_limit(req) == expected
+
+
+async def test_transfer_slots_are_bounded_and_waiting_times_out(client, db_session, monkeypatch):
+    import asyncio
+
+    from coreman.api.routers import runtime_protocol
+
+    slots = asyncio.Semaphore(1)
+    monkeypatch.setattr(runtime_protocol, "TRANSFER_SLOTS", slots)
+    monkeypatch.setattr(runtime_protocol, "TRANSFER_WAIT_SECONDS", 0.2)
+    _, body, headers = await enrollment(client, db_session)
+    _, plan = await handover(db_session, uuid.UUID(body["node_id"]))
+    url = f"/api/runtime/assistant-transcripts/{plan.transfer}"
+    await slots.acquire()
+    put = await client.put(url, headers={**headers, "X-Transcript-Status": "empty"})
+    got = await client.get(url, headers=headers)
+    assert (put.status_code, got.status_code) == (503, 503)
+    assert put.json() == {"code": 503, "message": "转录传输繁忙"}
+    slots.release()
+    ok = await client.put(url, headers={**headers, "X-Transcript-Status": "empty"})
+    assert ok.status_code == 200
+    assert slots._value == 1  # 用完即还
+
+
+async def test_slow_sender_is_cut_off_and_frees_its_slot(client, db_session, monkeypatch):
+    import asyncio
+
+    from coreman.api.routers import runtime_protocol
+
+    slots = asyncio.Semaphore(1)
+    monkeypatch.setattr(runtime_protocol, "TRANSFER_SLOTS", slots)
+    monkeypatch.setattr(runtime_protocol, "BODY_SECONDS", 0.2)
+    _, body, headers = await enrollment(client, db_session)
+    _, plan = await handover(db_session, uuid.UUID(body["node_id"]))
+
+    async def slow():
+        yield b"abc"
+        await asyncio.sleep(2)
+        yield b"def"
+
+    response = await client.put(
+        f"/api/runtime/assistant-transcripts/{plan.transfer}",
+        headers={**headers, "X-Transcript-Status": "ok"},
+        content=slow(),
+    )
+    assert response.status_code == 408
+    assert response.json() == {"code": 408, "message": "转录上传超时"}
+    assert slots._value == 1
