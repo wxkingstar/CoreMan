@@ -70,9 +70,46 @@ async def test_an_admin_deprovision_returns_nothing_but_the_state(
         select(AuditLog).where(AuditLog.action == "assistant.deprovision")
     )
     assert audit is not None and audit.target_id == str(bot.id)
-    # 重复点不重复开流程。
+    # 重复点不重复开流程，也不重复记审计。
     assert (await client.post(url, json={"confirm": True})).status_code == 200
     assert len((await db_session.scalars(select(AssistantLifecycle))).all()) == 1
+    audits = await db_session.scalars(
+        select(AuditLog).where(AuditLog.action == "assistant.deprovision")
+    )
+    assert len(audits.all()) == 1
+
+
+async def test_confirm_must_be_the_json_true(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member")
+    bot = await _assistant(db_session, owner)
+    await login_as(client, db_session, role="platform_admin")
+    url = f"/api/admin/assistants/{bot.id}/deprovision"
+    for value in ("true", 1, "yes", "1", None):
+        assert (await client.post(url, json={"confirm": value})).status_code == 422, value
+    assert (await client.post(url, json={})).status_code == 422
+    assert await db_session.scalar(select(AssistantLifecycle)) is None
+    await db_session.refresh(bot)
+    assert bot.assistant_state == "active"
+
+
+async def test_an_already_deprovisioned_assistant_writes_no_audit(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member")
+    bot = await _assistant(db_session, owner, state="deprovisioned")
+    bot.enabled = False
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.post(
+        f"/api/admin/assistants/{bot.id}/deprovision", json={"confirm": True}
+    )
+    assert response.status_code == 200 and response.json()["data"]["state"] == "deprovisioned"
+    assert (
+        await db_session.scalar(select(AuditLog).where(AuditLog.action == "assistant.deprovision"))
+        is None
+    )
 
 
 async def test_an_admin_cannot_deprovision_an_ordinary_bot(
@@ -131,3 +168,27 @@ async def test_toggle_of_ordinary_bots_is_unchanged(
     await login_existing(client, db_session, creator)
     response = await client.post(f"/api/admin/bots/{standard.id}/toggle")
     assert response.status_code == 200 and response.json()["data"]["enabled"] is False
+
+
+async def test_delete_is_refused_while_deprovisioning(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member")
+    bot = await _assistant(db_session, owner, state="deprovisioning")
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.delete(f"/api/admin/bots/{bot.id}")
+    assert response.status_code == 409 and "停用" in response.json()["message"]
+    assert await db_session.get(Bot, bot.id, populate_existing=True) is not None
+
+
+async def test_toggle_by_a_platform_admin_who_is_not_the_owner_is_not_found_404(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """别人的助理对平台管理员也不可见：启停接口按不存在回 404，记录不变。"""
+    owner = await login_as(client, db_session, role="member")
+    bot = await _assistant(db_session, owner)
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.post(f"/api/admin/bots/{bot.id}/toggle")
+    assert response.status_code == 404
+    await db_session.refresh(bot)
+    assert bot.enabled and bot.assistant_state == "active"
