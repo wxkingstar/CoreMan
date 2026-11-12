@@ -46,6 +46,50 @@ EXCLUDED = {
 
 
 MAX_DIFF = 256 * 1024
+# 所有权标记由守护进程写、不到 1 KB；读它时最多读这么多（目录里的东西可能被助理换掉）。
+MARKER_LIMIT = 64 * 1024
+
+
+def read_small(path, limit=MARKER_LIMIT):
+    """读一个别人可能换掉的小文件，读不了或不像样一律返回 None。
+
+    不跟随链接（O_NOFOLLOW），不在 FIFO、设备上等待（O_NONBLOCK 打开、fstat 只认普通文件），
+    超过 `limit` 字节不读。打开之后核对的是同一个文件描述符，没有先查后用的窗口。
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, min(65536, limit + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def marker_data(root):
+    """工作目录里所有权标记的内容；没有、读不了、不是 JSON 对象都返回空字典。"""
+    raw = read_small(Path(root) / MARKER)
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def redact(url):
@@ -323,16 +367,21 @@ class Workspace:
         return target
 
     def owned(self, root=None):
-        marker = (root or self.root) / MARKER
-        if marker.is_symlink():
-            return False
-        try:
-            return json.loads(marker.read_text()).get("bot_id") == self.bot
-        except (OSError, ValueError):
-            return False
+        return marker_data(root or self.root).get("bot_id") == self.bot
+
+    @property
+    def assistant_only(self):
+        return getattr(self.agent, "assistant_only", False) is True
 
     def init(self, root=None):
         root = root or self.root
+        if self.assistant_only and root == self.root and root.exists():
+            # 助理专用实例只在全新的目录上初始化，绝不读写助理在沙箱里写过的文件：标记是本员工的说明
+            # 上一次初始化已经做完（标记最后写），原样返回；没有标记的非空目录一律拒绝。
+            if self.owned(root):
+                return {"initialized": True, "owned": True, "workspace_protocol": 1}
+            if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+                raise self.error("工作目录已存在，个人助理只能使用全新的目录")
         root.mkdir(parents=True, exist_ok=True)
         marker = root / MARKER
         if marker.exists() or marker.is_symlink():
@@ -843,7 +892,7 @@ class Workspace:
 
     def finish(self):
         if self.owned():
-            marker = json.loads((self.root / MARKER).read_text())
+            marker = marker_data(self.root)
             if marker.get("transfer_id") and marker["transfer_id"] == self.data.get("transfer_id"):
                 return {"installed": True}
         stage = self.stage()
