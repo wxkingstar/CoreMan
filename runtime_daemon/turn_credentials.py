@@ -10,14 +10,22 @@
 的普通轮次与健康检查，由它们照常写回节点的登录文件。节点用环境变量登录（API Key、长效令牌）
 时只把那一个变量带进去。
 
-沙箱里被注入的助理读得到这份副本：拿到的只是一枚到期即失效的访问令牌，而沙箱出网只通平台与
-模型接口，带不出去；刷新地址不在放行名单里。
+副本按白名单构造（`CLAUDE_OAUTH_FIELDS`、`CODEX_TOP_FIELDS`、`CODEX_TOKEN_FIELDS`）：不在名单里
+的字段，包括将来 CLI 新增的，一律不进文件。
+
+沙箱里被注入的助理读得到这份副本：OAuth 登录拿到的只是一枚到期即失效的访问令牌，而沙箱出网
+只通平台与模型接口，带不出去；刷新地址不在放行名单里。
+
+例外要说清楚：节点用环境变量登录（API Key、长效令牌）或 Codex 用 API Key 文件登录时，带进
+沙箱的是一枚**长期有效、没有到期门槛**的凭证，被注入的助理能读到它；这一路的保护只靠出网
+放行名单。
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import time
 from collections.abc import Mapping
@@ -28,6 +36,10 @@ from pathlib import Path
 # 访问令牌至少还要有这么久才起一轮（秒）。长于一轮的常见时长，短于令牌的常见寿命。
 MARGIN_SECONDS = 30 * 60
 # 节点用环境变量登录时，带进沙箱的那一个变量（按顺序取第一个有值的）。
+# 副本里允许出现的字段；名单之外的一律丢弃。
+CLAUDE_OAUTH_FIELDS = ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier")
+CODEX_TOP_FIELDS = ("auth_mode", "last_refresh")
+CODEX_TOKEN_FIELDS = ("id_token", "access_token", "account_id")
 ENV_LOGINS = {
     "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
     "codex": ("OPENAI_API_KEY",),
@@ -46,8 +58,9 @@ class Unavailable(Exception):
 class Credential:
     """收窄后的凭证：一个要只读挂进配置目录的文件内容，或几个环境变量。"""
 
-    content: bytes | None = None
-    env: Mapping[str, str] = field(default_factory=dict)
+    # repr=False：content 是整份令牌 JSON、env 是 API Key，不能随 repr / 日志 / 回溯外露。
+    content: bytes | None = field(default=None, repr=False)
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
 
 def _load(path: Path) -> dict:
@@ -55,11 +68,22 @@ def _load(path: Path) -> dict:
         data = json.loads(path.read_text())
     except FileNotFoundError:
         raise Unavailable("credential_missing") from None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, OverflowError):
         raise Unavailable("credential_unreadable") from None
     if not isinstance(data, dict):
         raise Unavailable("credential_unreadable")
     return data
+
+
+def _finite(value: object) -> float | None:
+    """有限的数；NaN、无穷、超大整数、非数字都得 None。"""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _from_env(provider: str, env: Mapping[str, str]) -> Credential | None:
@@ -78,12 +102,12 @@ def claude(config_dir: Path, env: Mapping[str, str], now: float | None = None) -
     oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str):
         raise Unavailable("credential_unreadable")
-    expires = oauth.get("expiresAt")
-    if not isinstance(expires, int | float):
+    expires = _finite(oauth.get("expiresAt"))
+    if expires is None:
         raise Unavailable("credential_unreadable")
     if expires / 1000 - (time.time() if now is None else now) < MARGIN_SECONDS:
         raise Unavailable("credential_expiring")
-    narrowed = {k: v for k, v in oauth.items() if k != "refreshToken"}
+    narrowed = {k: oauth[k] for k in CLAUDE_OAUTH_FIELDS if k in oauth}
     return Credential(content=json.dumps({"claudeAiOauth": narrowed}).encode())
 
 
@@ -91,10 +115,9 @@ def _jwt_expiry(token: str) -> float | None:
     try:
         payload = token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    except (IndexError, ValueError):
+    except (IndexError, ValueError, RecursionError):
         return None
-    exp = claims.get("exp") if isinstance(claims, dict) else None
-    return float(exp) if isinstance(exp, int | float) else None
+    return _finite(claims.get("exp")) if isinstance(claims, dict) else None
 
 
 def codex(codex_home: Path, env: Mapping[str, str], now: float | None = None) -> Credential:
@@ -116,8 +139,8 @@ def codex(codex_home: Path, env: Mapping[str, str], now: float | None = None) ->
     moment = time.time() if now is None else now
     if expiry - moment < MARGIN_SECONDS:
         raise Unavailable("credential_expiring")
-    narrowed = dict(data)
-    narrowed["tokens"] = {k: v for k, v in tokens.items() if k != "refresh_token"}
+    narrowed: dict = {k: data[k] for k in CODEX_TOP_FIELDS if k in data}
+    narrowed["tokens"] = {k: tokens[k] for k in CODEX_TOKEN_FIELDS if k in tokens}
     narrowed["last_refresh"] = (
         datetime.fromtimestamp(moment, tz=timezone.utc).isoformat().replace("+00:00", "Z")  # noqa: UP017 3.10
     )
