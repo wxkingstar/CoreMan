@@ -15,9 +15,16 @@ ASSISTANT_FIXED: dict[str, object] = {
     "api_access": False,
     "dev_mode": False,
 }
-# 所有者也不能改的字段：固定取值的列，加上由平台分配的归属、目录与凭证。
+# 所有者也不能改的字段：固定取值的列，加上由平台分配的归属、目录、凭证与开通状态。
 LOCKED_FIELDS = frozenset(
-    {*ASSISTANT_FIXED, "group_observe_scope", "team_id", "working_dir", "credentials"}
+    {
+        *ASSISTANT_FIXED,
+        "group_observe_scope",
+        "team_id",
+        "working_dir",
+        "credentials",
+        "assistant_state",
+    }
 )
 
 
@@ -64,5 +71,7 @@ def new_assistant_bot(
         model=model,
         working_dir=working_dir,
         credentials_enc=credentials_enc,
+        # 开通流程走完（授权完成）才改成 active；在那之前跑不了任何一轮。
+        assistant_state="provisioning",
         **ASSISTANT_FIXED,
     )

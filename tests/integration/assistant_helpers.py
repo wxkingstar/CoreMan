@@ -31,6 +31,8 @@ async def seed_assistant(session: AsyncSession) -> tuple[Bot, User]:
     bot = new_assistant_bot(
         owner, app, relay_server_id=None, model="m", working_dir="/w", credentials_enc=""
     )
+    # 各功能的用例要的是一位已经开通好的助理（开通流程本身见 test_assistant_provisioning）。
+    bot.assistant_state = "active"
     session.add(bot)
     await session.commit()
     return bot, owner
@@ -83,6 +85,7 @@ async def into_assistant(session: AsyncSession, bot: Bot, owner: User) -> Bot:
         app.id,
     )
     bot.team_id = None
+    bot.assistant_state = "active"
     for name, value in ASSISTANT_FIXED.items():
         setattr(bot, name, value)
     await sandbox_ready(session, bot)

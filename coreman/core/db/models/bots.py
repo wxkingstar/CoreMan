@@ -34,6 +34,11 @@ ASSISTANT_SHAPE = (
     "AND platform = 'feishu')"
 )
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+# 助理记录走到哪了：只有 active 能跑轮次（`runtime.turn_blocker`）。普通记录恒为空。
+ASSISTANT_STATE_CHECK = (
+    "assistant_state IS NULL OR (kind = 'assistant' AND assistant_state IN "
+    "('provisioning', 'active', 'deprovisioning', 'deprovisioned'))"
+)
 
 
 class Bot(TimestampMixin, Base):
@@ -56,6 +61,7 @@ class Bot(TimestampMixin, Base):
         Index("bots_created_by_idx", "created_by"),
         CheckConstraint("kind IN ('standard','assistant')", name="kind"),
         CheckConstraint(ASSISTANT_SHAPE, name="assistant_shape"),
+        CheckConstraint(ASSISTANT_STATE_CHECK, name="assistant_state"),
         Index("bots_platform_app_idx", "platform_app_id"),
         # 一人同时只有一条启用的助理记录。
         Index(
@@ -81,6 +87,8 @@ class Bot(TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
     # 助理记录共用的飞书应用；应用凭证以 platform_apps 为准，credentials_enc 是它的副本。
     platform_app_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("platform_apps.id"))
+    # 助理记录的开通状态，只有 active 能跑轮次；见 coreman/core/assistants/lifecycle.py。
+    assistant_state: Mapped[str | None] = mapped_column(Text)
     relay_server_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("relay_servers.id"))
     model: Mapped[str] = mapped_column(Text)
     working_dir: Mapped[str] = mapped_column(Text)

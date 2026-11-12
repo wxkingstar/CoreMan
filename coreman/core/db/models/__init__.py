@@ -24,9 +24,12 @@ from coreman.core.db.models.api_tasks import (
 from coreman.core.db.models.assistants import (
     APPROVAL_CHANNELS,
     APPROVAL_STATUSES,
+    ASSISTANT_STATES,
     AssistantApproval,
     AssistantKey,
+    AssistantLifecycle,
     AssistantMark,
+    AssistantRetiredDir,
     AssistantTranscript,
 )
 from coreman.core.db.models.bots import (
@@ -289,4 +292,7 @@ __all__ += [
     "AssistantKey",
     "AssistantMark",
     "AssistantTranscript",
+    "ASSISTANT_STATES",
+    "AssistantLifecycle",
+    "AssistantRetiredDir",
 ]

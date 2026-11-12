@@ -22,6 +22,8 @@ from coreman.core.db.session import make_engine, make_session_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESS_TABLES = [
+    "assistant_lifecycles",
+    "assistant_retired_dirs",
     "assistant_transcripts",
     "assistant_approvals",
     "assistant_marks",

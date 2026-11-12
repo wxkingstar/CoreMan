@@ -37,6 +37,11 @@ PAUSE_MESSAGES = {
         "绑定的运行时没有与普通员工隔开（要用专为个人助理安装的运行时），请联系管理员"
     ),
 }
+# 记录本身还不能（或已不能）跑轮次：开通没走完、正在停用。这两句不说「暂停」。
+LIFECYCLE_MESSAGES = {
+    "provisioning": "你的个人助理还没开通完：请先点私聊里的授权卡片完成飞书授权，完成后会告诉你。",
+    "deprovisioning": "你的个人助理正在停用（或已停用），不再处理消息；停用完成后可以重新开通。",
+}
 
 
 def node_sandboxed(node: RuntimeNode, provider: str | None = None) -> bool:
@@ -105,8 +110,15 @@ async def node_isolated(session: AsyncSession, node: RuntimeNode) -> bool:
 async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
     """助理现在为什么不能跑一轮；能跑返回 None。
 
-    节点的其它条件都满足时再查一次隔离（`node_isolated`，每轮一条查询）。
+    记录不是 active（开通没走完、正在或已经停用）先挡下，不查库。节点的其它条件都满足时再查一次
+    隔离（`node_isolated`，每轮一条查询）。
     """
+    if bot.assistant_state != "active":
+        return (
+            "deprovisioning"
+            if bot.assistant_state in ("deprovisioning", "deprovisioned")
+            else ("provisioning")
+        )
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     if relay is None:
         return "runtime_missing"
@@ -120,6 +132,8 @@ async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
 
 
 def pause_message(reason: str) -> str:
+    if reason in LIFECYCLE_MESSAGES:
+        return LIFECYCLE_MESSAGES[reason]
     detail = PAUSE_MESSAGES.get(reason, PAUSE_MESSAGES["runtime_missing"])
     return f"你的个人助理暂停了：{detail}。"
 
