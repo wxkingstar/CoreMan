@@ -545,3 +545,27 @@ async def test_slow_sender_is_cut_off_and_frees_its_slot(client, db_session, mon
     assert response.status_code == 408
     assert response.json() == {"code": 408, "message": "转录上传超时"}
     assert slots._value == 1
+
+
+async def test_download_waiting_for_a_slot_holds_no_database_connection(
+    client, db_session, app, monkeypatch
+):
+    import asyncio
+
+    from coreman.api.routers import runtime_protocol
+
+    slots = asyncio.Semaphore(1)
+    monkeypatch.setattr(runtime_protocol, "TRANSFER_SLOTS", slots)
+    _, body, headers = await enrollment(client, db_session)
+    _, plan = await handover(db_session, uuid.UUID(body["node_id"]))
+    pool = app.state.session_factory.kw["bind"].sync_engine.pool
+    before = pool.checkedout()
+    await slots.acquire()
+    waiter = asyncio.create_task(
+        client.get(f"/api/runtime/assistant-transcripts/{plan.transfer}", headers=headers)
+    )
+    await asyncio.sleep(0.5)
+    assert not waiter.done()
+    assert pool.checkedout() == before
+    slots.release()
+    assert (await waiter).status_code == 404

@@ -830,12 +830,14 @@ async def transcript_download(
     transfer: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
 ) -> Response:
     """节点续聊前取转录：只认派这一轮时给它的交接编号。没有、别人的、读不出来都回同一个 404。"""
-    node = await node_auth(request, session)
+    node_id = (await node_auth(request, session)).id
+    # 等名额可能要很久：先把认证用过的连接还回去，拿到名额之后 download 再开事务。
+    await session.rollback()
     # 这个请求只读一个助理的一份转录：解不开按没有处理，不报 500。
     sealed.tolerate_undecryptable(session)
     async with _transfer_slot():
         try:
-            data = await transcripts.download(session, node_id=node.id, transfer=transfer)
+            data = await transcripts.download(session, node_id=node_id, transfer=transfer)
         except (DecryptError, sealed.ContentLocked, keys.KeyUnavailable):
             data = None
         await session.commit()
