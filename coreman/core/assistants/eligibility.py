@@ -12,11 +12,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import Department, Setting, User, UserDepartment
-from coreman.core.settings_schema import SETTING_DEFAULTS
+from coreman.core.settings_schema import SETTING_DEFAULTS, AssistantEligibility
 
 ELIGIBILITY_KEY = "assistant_eligibility"
 BACKENDS_KEY = "assistant_backends"
@@ -30,9 +31,12 @@ REASONS = {
 
 
 async def setting(session: AsyncSession, key: str) -> Any:
-    """直接读 settings 表（不经进程内缓存）：管理员刚改的范围要立即生效。"""
-    value = await session.scalar(select(Setting.value).where(Setting.key == key))
-    return SETTING_DEFAULTS[key] if value is None else value
+    """直接读 settings 表（不经进程内缓存）：管理员刚改的范围要立即生效。
+
+    没有这一行才用默认值；有这一行而值是 null 属于写坏了，原样返回 None（调用方一律按坏值处理）。
+    """
+    found = (await session.execute(select(Setting.value).where(Setting.key == key))).first()
+    return SETTING_DEFAULTS[key] if found is None else found[0]
 
 
 async def backends(session: AsyncSession) -> list[str]:
@@ -61,15 +65,17 @@ async def refusal(session: AsyncSession, user: User) -> str | None:
         return "inactive"
     if not user.login_name:
         return "no_login_name"
-    rule = await setting(session, ELIGIBILITY_KEY)
-    if isinstance(rule, dict) and rule.get("mode") == "all":
-        return None
-    if not isinstance(rule, dict) or rule.get("mode") != "listed":
+    try:
+        # 与管理接口同一套校验：编号格式、名单长度都要对。
+        rule = AssistantEligibility.model_validate(await setting(session, ELIGIBILITY_KEY))
+    except ValidationError:
         # 设置被写坏（管理接口有校验，坏值只可能来自直接改库）：谁都不放行。
         return "not_listed"
-    if str(user.id) in {str(v) for v in rule.get("user_ids") or []}:
+    if rule.mode == "all":
         return None
-    wanted = {str(v) for v in rule.get("department_ids") or []}
+    if str(user.id) in set(rule.user_ids):
+        return None
+    wanted = set(rule.department_ids)
     if wanted and wanted & await _departments_with_ancestors(session, user.id):
         return None
     return "not_listed"

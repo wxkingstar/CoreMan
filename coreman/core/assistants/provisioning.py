@@ -22,7 +22,7 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,7 +148,14 @@ async def request_offer(
 ) -> None:
     """没有助理的人发来私聊：登记一条开通流程，由看护进程判断范围并发卡片。只写库，调用方提交。"""
     now = utcnow()
-    row = await lifecycle.live(session, owner_id)
+    # 网关的应答窗口只有 1.5 秒：看护进程正锁着这条流程（一步最长 150 秒）就是正在处理，不等它。
+    row = await lifecycle.live(session, owner_id, skip_locked=True)
+    if row is None and await session.scalar(
+        select(AssistantLifecycle.id).where(
+            AssistantLifecycle.owner_id == owner_id, AssistantLifecycle.finished_at.is_(None)
+        )
+    ):
+        return
     if row is not None:
         sent_at = row.deadline - OFFER_TTL if row.deadline else None
         if (
@@ -210,6 +217,7 @@ async def accept_offer(
     token = value.get("token")
     open_id = operator.get("open_id")
     tenant_key = header.get("tenant_key") or operator.get("tenant_key")
+    # 令牌只能用一次，这里要真的锁住；等锁算在网关事务的 statement_timeout（1.5 秒）里。
     row = await lifecycle.live(session, owner_id)
     if row is None or row.action != "provision" or row.platform_app_id != app_id:
         return "provision_expired"
@@ -279,8 +287,14 @@ async def step_offered(
 
 
 async def _pick(session: AsyncSession) -> tuple[RelayServer, RuntimeNode]:
-    """按设置的 AI 顺序，在助理池里挑一个现在能跑、且与普通员工隔开的节点。"""
-    for provider in await eligibility.backends(session):
+    """按设置的 AI 顺序，在助理池里挑一个现在能跑、且与普通员工隔开的节点。
+
+    一种 AI 都没配：再等也不会有，当场放弃并告诉本人。配了而眼下没有可用节点：稍后再试。
+    """
+    providers = await eligibility.backends(session)
+    if not providers:
+        raise StepFailed("no_pool_runtime")
+    for provider in providers:
         relay = await runtime.pick_pool_relay(session, provider)
         if relay is None or relay.runtime_node_id is None:
             continue
@@ -312,10 +326,15 @@ async def step_create(
     app = await session.get(PlatformApp, row.platform_app_id)
     if app is None or not is_assistant_app(app):
         raise StepFailed("app_unavailable")
+    # 看记录的状态而不是启停开关：停用完之前（含被关掉的、状态为空的旧记录）都算已经有一个。
     taken = await session.scalar(
-        select(Bot.id).where(
-            Bot.kind == "assistant", Bot.owner_id == owner.id, Bot.enabled.is_(True)
+        select(Bot.id)
+        .where(
+            Bot.kind == "assistant",
+            Bot.owner_id == owner.id,
+            or_(Bot.assistant_state.is_(None), Bot.assistant_state != "deprovisioned"),
         )
+        .limit(1)
     )
     if taken is not None:
         raise StepFailed("already_provisioned")

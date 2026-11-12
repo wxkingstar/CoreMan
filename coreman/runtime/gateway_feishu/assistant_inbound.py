@@ -224,6 +224,9 @@ class AssistantInbound:
                 )
         except Exception as exc:  # noqa: BLE001 开通登记失败不能挡住应答
             log.warning("assistant_provision_request_failed", error=type(exc).__name__)
+            if event_type == "card.action.trigger":
+                # 不能让默认的「✓」让人以为开通了：提示他再发条消息拿一张新卡片。
+                return "provision_expired"
         return None
 
     async def leave_group(self, chat_id: str, platform_user_id: str, event_id: str) -> None:

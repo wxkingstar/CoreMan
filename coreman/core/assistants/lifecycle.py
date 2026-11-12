@@ -47,15 +47,18 @@ class StepFailed(Exception):
 
 
 async def live(
-    session: AsyncSession, owner_id: uuid.UUID, *, lock: bool = True
+    session: AsyncSession, owner_id: uuid.UUID, *, lock: bool = True, skip_locked: bool = False
 ) -> AssistantLifecycle | None:
-    """这个人进行中的那一条流程（最多一条，见 `assistant_lifecycles_live_uq`）。"""
+    """这个人进行中的那一条流程（最多一条，见 `assistant_lifecycles_live_uq`）。
+
+    `skip_locked`：别人正锁着就当没找到（不等锁）；调用方要自己分清「没有」与「被锁住」。
+    """
     stmt = select(AssistantLifecycle).where(
         AssistantLifecycle.owner_id == owner_id, AssistantLifecycle.finished_at.is_(None)
     )
-    found: AssistantLifecycle | None = await session.scalar(
-        stmt.with_for_update() if lock else stmt
-    )
+    if lock or skip_locked:
+        stmt = stmt.with_for_update(skip_locked=skip_locked)
+    found: AssistantLifecycle | None = await session.scalar(stmt)
     return found
 
 

@@ -6,7 +6,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import provisioning
@@ -137,5 +137,66 @@ async def test_a_failing_registration_never_blocks_the_gateway(
     monkeypatch.setattr(provisioning, "accept_offer", broken)
     inbound = gateway(db_engine, app.id)
     assert await inbound.accept(message_event()) is None
-    assert await inbound.accept(click_event("t", "om_1")) is None
+    # 点卡片时出错：不能回默认的「✓」，要让人知道再发条消息拿新卡片。
+    assert await inbound.accept(click_event("t", "om_1")) == "provision_expired"
     assert await count(db_session) == 0
+
+
+async def test_a_failing_statement_inside_the_registration_is_rolled_back_alone(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """登记里一条真的出错的语句（违反约束）只回滚到保存点：这次应答照常，下一个事件照常登记。"""
+    app = await assistant_app(db_session)
+    owner = await member(db_session)
+    other = await member(db_session, login="lisi", pid="lisi")
+    await db_session.commit()
+    real = provisioning.request_offer
+
+    async def broken(session: AsyncSession, **kw: object) -> None:
+        await session.execute(
+            text(
+                "INSERT INTO assistant_lifecycles (id, owner_id, platform_app_id, action, step)"
+                " VALUES (gen_random_uuid(), :owner, :app, 'provision', 'no_such_step')"
+            ),
+            {"owner": kw["owner_id"], "app": kw["app_id"]},
+        )
+
+    monkeypatch.setattr(provisioning, "request_offer", broken)
+    inbound = gateway(db_engine, app.id)
+    assert await inbound.accept(message_event()) is None
+    assert await flow_of(db_session, owner.id) is None
+    monkeypatch.setattr(provisioning, "request_offer", real)
+    assert await inbound.accept(entered("lisi")) is None
+    flow = await flow_of(db_session, other.id)
+    assert flow is not None and flow.step == "offered"
+
+
+async def test_a_flow_the_runner_is_holding_is_not_waited_for(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """看护进程正锁着这个人的流程：私聊登记不等锁（网关应答窗口只有 1.5 秒），什么也不做。"""
+    import time
+
+    app = await assistant_app(db_session)
+    owner = await member(db_session)
+    await db_session.commit()
+    inbound = gateway(db_engine, app.id)
+    await inbound.accept(message_event())
+    factory = make_session_factory(db_engine)
+    async with factory() as runner:
+        held = await runner.scalar(
+            select(AssistantLifecycle)
+            .where(AssistantLifecycle.owner_id == owner.id)
+            .with_for_update()
+        )
+        assert held is not None
+        started = time.monotonic()
+        async with factory() as session:
+            await session.execute(text("SET LOCAL statement_timeout = 1500"))
+            await provisioning.request_offer(
+                session, app_id=app.id, owner_id=owner.id, platform_user_id="zhangsan"
+            )
+            await session.commit()
+        assert time.monotonic() - started < 1.0
+        await runner.rollback()
+    assert await count(db_session) == 1

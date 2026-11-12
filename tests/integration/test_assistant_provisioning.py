@@ -317,3 +317,93 @@ async def test_a_grant_that_is_never_completed_is_abandoned_after_three_links(
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.action == "deprovision" and flow.trigger == "abandoned"
     assert provisioning.FAILURES["grant_not_completed"] in [text for _, text in messenger.texts]
+
+
+async def _clicked(db_engine: AsyncEngine, db_session: AsyncSession) -> tuple[Any, FakeMessenger]:
+    app, owner, inbound, messenger = await offered(db_engine, db_session)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.offer_message_id is not None
+    assert await inbound.accept(click_event(messenger.token(), flow.offer_message_id)) == (
+        "provision_started"
+    )
+    return owner, messenger
+
+
+async def test_no_backend_configured_fails_at_once(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    db_session.add(Setting(key="assistant_backends", value=[]))
+    await db_session.commit()
+    await tick(make_session_factory(db_engine), messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "failed" and flow.error_code == "no_pool_runtime"
+    assert flow.attempts == 1
+    assert messenger.texts[-1][1] == provisioning.FAILURES["no_pool_runtime"]
+
+
+async def test_a_switched_off_assistant_still_counts_as_one(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.integration.assistant_helpers import into_assistant, seed_standard
+
+    install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    existing = await seed_standard(db_session)
+    await into_assistant(db_session, existing, owner)
+    existing.enabled, existing.assistant_state = False, "active"
+    await db_session.commit()
+    await tick(make_session_factory(db_engine), messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "failed"
+    assert flow.error_code == "already_provisioned"
+    assert await db_session.scalar(select(func.count()).select_from(Bot)) == 1
+
+
+async def test_a_grant_completed_by_someone_else_never_activates_the_record(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, auth = install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    factory = make_session_factory(db_engine)
+    for _ in range(3):  # 建记录 → 建目录 → 发起授权
+        await tick(factory, messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "await_grant" and flow.bot_id is not None
+    # 打开授权链接、点同意的是另一个飞书身份。
+    auth.identity = {"user_id": "lisi", "open_id": "ou_li", "tenant_key": "tenant-example"}
+    auth.approve()
+    for second in range(1, 4):
+        await poll_now(db_session)
+        await tick(factory, messenger, later=6 * second)
+    bot = await db_session.get(Bot, flow.bot_id, populate_existing=True)
+    assert bot is not None and bot.assistant_state == "provisioning"
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, owner.id), populate_existing=True)
+    assert grant is None or grant.status != "connected"
+    assert provisioning.welcome_text() not in [text for _, text in messenger.texts]
+
+
+async def test_two_clicks_at_once_advance_the_flow_once(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    install(monkeypatch)
+    app, owner, inbound, messenger = await offered(db_engine, db_session)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.offer_message_id is not None
+    advanced: list[str] = []
+    real = provisioning.advance
+
+    def counting(row: AssistantLifecycle, step: str, **kw: Any) -> None:
+        advanced.append(step)
+        real(row, step, **kw)
+
+    monkeypatch.setattr(provisioning, "advance", counting)
+    click = click_event(messenger.token(), flow.offer_message_id)
+    results = await asyncio.gather(inbound.accept(click), inbound.accept(click))
+    assert results == ["provision_started", "provision_started"]
+    assert advanced == ["create"]
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "create" and flow.offer_hash is None
