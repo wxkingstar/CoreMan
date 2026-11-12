@@ -297,7 +297,7 @@ async def test_node_sharing_machine_and_uid_with_a_pool_node_takes_no_ordinary_b
         await validate_switch(
             db_session, bot=standard, target=same, model=None, actor=admin, member_ids=set()
         )
-    assert caught.value.message == runtime.POOL_NODE_MESSAGE
+    assert caught.value.message == runtime.SHARED_POOL_USER_MESSAGE
     with pytest.raises(ApiError):
         await resolve_relay_for_create(db_session, admin, same.id, None)
     assert await resolve_relay_for_create(db_session, admin, other_uid.id, None) is other_uid
@@ -355,3 +355,39 @@ async def test_binding_to_a_node_takes_the_node_lock_first(db_session: AsyncSess
         event.remove(engine, "before_cursor_execute", record)
     assert len(keys) == 2 and keys[0] == keys[1]
     assert str(two.runtime_node_id) in keys[0]
+
+
+async def test_an_ordinary_employee_migrating_to_a_node_keeps_it_out_of_the_pool(
+    db_session: AsyncSession,
+) -> None:
+    """切换隔离里写下的目标也算占用：迁移途中的员工还没绑定，入池不能放过。"""
+    old = await add_node_relay(db_session, name="old")
+    relay = await add_node_relay(db_session, name="candidate")
+    node = await db_session.get(RuntimeNode, relay.runtime_node_id)
+    assert node is not None
+    node.capabilities, node.machine_fingerprint, node.uid = ready_caps(), "fp-7", 1001
+    standard = await seed_standard(db_session)
+    standard.relay_server_id = old.id
+    await db_session.commit()
+    assert await runtime.pool_admission_error(db_session, relay, node) is None
+    standard.workspace_state, standard.workspace_target_relay_id = "migrating", relay.id
+    await db_session.commit()
+    assert await runtime.hosts_standard_bots(db_session, node.id)
+    assert await runtime.pool_admission_error(db_session, relay, node) is not None
+    standard.workspace_state, standard.workspace_target_relay_id = "ready", None
+    await db_session.commit()
+    assert await runtime.pool_admission_error(db_session, relay, node) is None
+
+
+async def test_the_node_lock_is_taken_before_the_pool_lookup(db_session: AsyncSession) -> None:
+    one = await add_node_relay(db_session, name="one")
+    two = await add_node_relay(db_session, name="two")
+    await db_session.commit()
+    statements = await record_statements(
+        db_session, lambda: runtime.standard_bind_error(db_session, two)
+    )
+    kinds = [
+        "lock" if "pg_advisory_xact_lock" in s else "lookup" if "assistant_pool" in s else "other"
+        for s in statements
+    ]
+    assert kinds == ["lock", "lookup"], one

@@ -133,14 +133,21 @@ async def pick_pool_relay(session: AsyncSession, provider: str) -> RelayServer |
 
 
 async def hosts_standard_bots(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    """节点上有没有绑定普通员工（不论是否启用：停用的员工之后还能再启用）。
+    """节点上有没有绑定普通员工（不论是否启用：停用的员工之后还能再启用），含正在迁移过来的。
 
-    普通员工不在沙箱里、与助理是同一个系统用户，助理池节点上一个都不能有。
+    普通员工不在沙箱里、与助理是同一个系统用户，助理池节点上一个都不能有。切换运行时先在提交
+    迁移隔离的同一个事务里写下目标（workspace_target_relay_id），之后才放开节点锁，所以入池在拿到
+    节点锁后一定看得到迁移途中的员工；最终绑定落下时这个标记还在，直到同一事务里清掉。
     """
+    on_node = select(RelayServer.id).where(RelayServer.runtime_node_id == node_id)
     count = await session.scalar(
-        select(func.count(Bot.id))
-        .join(RelayServer, Bot.relay_server_id == RelayServer.id)
-        .where(RelayServer.runtime_node_id == node_id, Bot.kind == "standard")
+        select(func.count(Bot.id)).where(
+            Bot.kind == "standard",
+            or_(
+                Bot.relay_server_id.in_(on_node),
+                Bot.workspace_target_relay_id.in_(on_node),
+            ),
+        )
     )
     return bool(count)
 
@@ -160,6 +167,9 @@ async def lock_node(session: AsyncSession, node_id: uuid.UUID) -> None:
 
 
 POOL_NODE_MESSAGE = "目标运行时是个人助理池的节点，不能承载普通员工"
+SHARED_POOL_USER_MESSAGE = (
+    "目标运行时所在机器上以同一个系统用户运行的另一个节点属于个人助理池，不能承载普通员工"
+)
 SHARED_USER_MESSAGE = (
     "同一台机器上以同一个系统用户运行的另一个节点承载了普通员工或不在助理池里："
     "助理节点要用单独的系统用户安装"
@@ -189,8 +199,8 @@ async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str 
     me = select(RuntimeNode.machine_fingerprint).where(RuntimeNode.id == node_id).scalar_subquery()
     my_uid = select(RuntimeNode.uid).where(RuntimeNode.id == node_id).scalar_subquery()
     found = await session.scalar(
-        select(RelayServer.id)
-        .join(RuntimeNode, RelayServer.runtime_node_id == RuntimeNode.id)
+        select(RuntimeNode.id)
+        .join(RelayServer, RelayServer.runtime_node_id == RuntimeNode.id)
         .where(
             RelayServer.assistant_pool.is_(True),
             or_(
@@ -198,9 +208,12 @@ async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str 
                 and_(RuntimeNode.machine_fingerprint == me, RuntimeNode.uid == my_uid),
             ),
         )
+        .order_by((RuntimeNode.id == node_id).desc())
         .limit(1)
     )
-    return None if found is None else POOL_NODE_MESSAGE
+    if found is None:
+        return None
+    return POOL_NODE_MESSAGE if found == node_id else SHARED_POOL_USER_MESSAGE
 
 
 async def pool_admission_error(
