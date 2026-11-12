@@ -121,6 +121,16 @@ API 升级先重载 Caddy 的指标隔离规则，再迁移并逐台健康升级
   UPDATE bots SET enabled = false WHERE kind = 'assistant' AND enabled;
   ```
 
+- 开通与停用的版本（迁移 `0092`）：先迁移、再启动新进程，先升平台、再升助理节点。新平台对还没升级的助理专用实例发 `workspace-remove` 会被拒绝，登记待删的目录留着、每隔一阵重试，节点升级后自动删掉；还有目录等着删的运行时实例不能删除（409），删之前先看管理台助理列表里每位助理还剩几个目录。回滚平台之前，先停用所有还没开通完的助理记录（旧平台不认识开通状态，会让它们跑轮次），并等进行中的开通与停用做完：
+
+  ```sql
+  UPDATE bots SET enabled = false
+   WHERE kind = 'assistant' AND assistant_state <> 'active';
+  SELECT count(*) FROM assistant_lifecycles WHERE finished_at IS NULL;
+  SELECT count(*) FROM assistant_retired_dirs;
+  ```
+
+  降级这一个迁移会先把状态不是 `active`（含状态为空）的助理记录停用，再删掉开通状态、进行中的流程与待删目录的登记。需要手工做的有：之后没删的旧目录要到节点上手工删；停用做到一半的助理，飞书授权可能还没撤销、数据密钥可能还没销毁，降级前先让流程做完；降级后要用这些记录的，自己判断再启用。
 - 只回退节点隔离那一个迁移的数据库降级，会删掉 `assistant_transcripts`（所有助理的下一轮都从新会话开始，已有对话内容在别的表里，不受影响），以及助理池标记、调用的沙箱标记、节点的本机指纹与 uid 两列。节点回滚到旧版本不需要数据库配合。
 
 升级只支持已有 a/b worker 与本机 Compose 网关对；跨主机调度、共享存储和外部负载均衡需按实际部署配置。部署工具持有数据库运行权限，应仅允许受信任运维使用。

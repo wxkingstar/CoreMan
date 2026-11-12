@@ -84,11 +84,17 @@ launchd 没有按退出码阻止重启的机制，因此 launchd 下同类错误
 **只有助理专用实例跑助理。** 守护进程的 `config.json` 里 `assistant_only` 为 `true`（安装时加 `--assistant-only` 写入）才是助理专用实例。只有它在自检通过后声明沙箱能力（心跳里的 `assistant_sandbox_v1`），平台也只把助理的轮次派给声明了的节点；不是助理专用实例的守护进程不跑自检、从不声明能力，收到带沙箱标记的请求一律拒绝（503，`sandbox_unavailable`），它处理普通轮次的路径与以前相同。助理专用实例反过来只做这些：
 
 - 对话请求必须带 `sandbox: true`，在沙箱里跑；不带的（包括 `sandbox` 不是 `true` 的）在动任何东西之前拒绝，连工作目录都不建；
-- 节点命令只接平台对助理所在节点会发的几种：`ping`、`status`、`health-check`、`probe-rate-limits`、席位的五个操作（`seat-create`、`seat-login-start`、`seat-login-complete`、`seat-activate`、`seat-remove`），以及开通和换运行时用到的 `workspace-info`、`workspace-probe`、`workspace-init`；其余命令（装技能、MCP 登录、工作目录的文件读写与 git 查看、导出导入与克隆、会话迁移、记忆的读取与下发、`pull` / `pr` / `init` 等）一律拒绝；
+- 节点命令只接平台对助理所在节点会发的几种：`ping`、`status`、`health-check`、`probe-rate-limits`、席位的五个操作（`seat-create`、`seat-login-start`、`seat-login-complete`、`seat-activate`、`seat-remove`），开通和换运行时用到的 `workspace-info`、`workspace-probe`、`workspace-init`，以及停用或换走之后删目录的 `workspace-remove`；其余命令（装技能、MCP 登录、工作目录的文件读写与 git 查看、导出导入与克隆、会话迁移、记忆的读取与下发、`pull` / `pr` / `init` 等）一律拒绝；
 - 经驱动的读请求只留 `GET /health` 与 `GET /v1/models`，会话列表、会话事件、用量统计都拒绝；
 - 不跑遍历所有工作目录的定时任务（回收记忆、刷新开发模式的 worktree）；节点自己的周期模型探测照常跑，它负责刷新这份登录（见下面「登录凭证」）。
 
 拒绝的请求回 `403`，错误代码 `assistant_only`，`runtime.log` 里记一行 `Request refused on an assistant-only node`。
+
+**工作目录。** 助理在沙箱里能写自己的工作目录，守护进程在沙箱外碰它时都按「里面的东西可能被换掉」处理：读所有权标记（`.coreman-workspace.json`）不跟随链接、不在 FIFO 或设备上等待、只读普通文件且最多 64 KB；`workspace-init` 只在全新的目录上做，目录已带本助理的标记就原样返回（不读里面的任何文件），没有标记的非空目录一律拒绝。工作目录根下有三个守护进程自己用的目录，不能当作助理的工作目录，落在它们里面的请求以 `reserved_directory` 拒绝：`.coreman-health`（节点自己的健康探测目录）、`.coreman-trash`（回收站）、`.coreman-owners`（归属登记）。回收站与归属登记目录由守护进程保持为 0700。
+
+归属登记：初始化一个全新的目录时，守护进程在 `.coreman-owners/` 下为它写一条记录（员工编号与目录的 inode、设备号），助理在沙箱里改不到它。`workspace-remove` 据此认归属：登记着本助理、且目录的 inode 与设备号对得上才删；没有登记的目录（升级之前初始化的）才退回看目录里的标记。`workspace-remove` 先原子地把目录改名进回收站，再在后台线程里不跟随任何链接地删掉；还有沙箱里的轮次用着这个目录、它下面的目录或它的上级目录时不删（`busy`），平台稍后再来；删除线程没做完就退出的，由助理侧的清扫（启动时与之后每 10 分钟）接着删。
+
+**改回普通实例。** 把助理专用实例改回普通实例（去掉 `assistant_only`）后，守护进程在启动时、向平台注册之前（所以即使这台节点之后再也注册不上，也会清）在后台线程里做一次清理：删掉数据目录下的 `assistant-turns/`（可能有没传上去的明文转录），并删掉工作目录根下 `.coreman-trash/` 里名字是 32 位小写十六进制的条目。不动 `.coreman-trash` 这个目录本身；它带所有权标记（说明它是某人的工作目录）时整个跳过，它是链接时也不碰。留下的只有 `.coreman-owners/`（里面只有员工编号与 inode 号，没有内容）和回收站里名字不是 32 位十六进制的东西，需要时手工删。
 
 **跑在哪里。** 规则只有一条，助理池与所有者的私有运行时一样：**跑助理的节点上没有普通员工，与它同一台机器、同一个 uid 的其他节点上也没有**。助理与普通员工可以共用机器，但不共用系统用户：要跑助理的机器上，以一个专用的系统用户（下面用 `coreman-assistant` 举例）再装一份助理专用实例，注册成单独的节点；普通员工照旧由原来那份守护进程、原来的用户运行，不用改动。所有者想用自己的机器跑自己的助理，同样要在那台机器上装一份助理专用实例，把它作为自己的私有运行时绑给助理。平台据心跳上报的本机指纹与 uid 在三处检查：
 
