@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import kinds
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.kinds import ORIGIN_KINDS
 from coreman.core.assistants.records import is_assistant
@@ -41,6 +42,15 @@ JOB_SEPARATOR = "#job:"
 def is_platform(task: Task) -> bool:
     """这个任务是不是平台自己发起的一轮：没有入站事件，类型在名单里。"""
     return task.inbound_event_id is None and task.kind in ORIGIN_KINDS
+
+
+def unattended(task: Task) -> bool:
+    """这一轮是不是无人在场（`kinds.unattended`）：能力收紧按它判断。
+
+    比 `is_platform` 宽：带着提交那一轮入站事件的审批结果回合也算。`is_platform` 只回答
+    「身份从哪里核验」（没有入站事件 → 开通时记下的设置），不回答所有者在不在场。
+    """
+    return kinds.unattended(task.kind)
 
 
 def owns_session(row: AssistantSettings, session_key: str | None) -> bool:

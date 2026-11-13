@@ -9,8 +9,9 @@ import httpx
 import pytest
 
 from coreman.core.assistants import platform_turns, tools
-from coreman.core.assistants.kinds import HANDOVER_KIND, SUBTASK_KIND
+from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, HANDOVER_KIND, SUBTASK_KIND
 from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import FeishuPersonalGrant
 from coreman.core.feishu_personal import policy
 from tests.api.test_assistant_approval_gate import listed, owner_turn
@@ -150,6 +151,41 @@ async def test_a_platform_turn_can_only_query_the_authorization(
     bot, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
     listing = await listed(client, app, turn, user)
     assert "feishu_authorization_status" in listing
+    assert not {"feishu_authorize", "feishu_revoke_authorization"} & set(listing)
+    auth = await headers(app, turn, user)
+    for name in ("feishu_authorize", "feishu_revoke_authorization"):
+        out = await call(client, auth, name, {})
+        assert out["error"] == "owner_turn_required" and "private chat" in out["hint"]
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, user.id), populate_existing=True)
+    assert grant.status == "connected" and grant.token_enc
+    status = await call(client, auth, "feishu_authorization_status", {})
+    assert status["status"] == "connected"
+
+
+async def test_a_result_turn_with_an_inbound_event_can_only_query_the_authorization(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    """审批结果回合带着提交那一轮的入站事件，所有者照样不在场：授权工具只留查询。"""
+    bot, user, task = await owner_turn(db_session, app, assistant=True)
+    await tasks.finish(db_session, task.id, status="succeeded")
+    queued = await tasks.enqueue(
+        db_session,
+        NewTask(
+            bot_id=bot.id,
+            kind=APPROVAL_RESULT_KIND,
+            user_id=user.id,
+            session_key=task.session_key,
+            inbound_event_id=task.inbound_event_id,
+            dedupe_key="assistant-approval:demo:result:rejected",
+            payload={"serialize_session": True},
+        ),
+    )
+    await db_session.commit()
+    assert queued is not None
+    turn = await claim(db_session)
+    assert turn.id == queued.id and turn.inbound_event_id is not None
+    listing = await listed(client, app, turn, user)
+    assert "feishu_authorization_status" in listing and "feishu_chat_history" in listing
     assert not {"feishu_authorize", "feishu_revoke_authorization"} & set(listing)
     auth = await headers(app, turn, user)
     for name in ("feishu_authorize", "feishu_revoke_authorization"):

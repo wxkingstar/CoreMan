@@ -92,8 +92,8 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             level, granted = live.authorization_level, set(live.requested_scopes or [])
         definitions = tools.definitions(
             auth=current and not scope.scheduled,
-            # 平台自己发起的一轮没有人在场：授权工具只列查询。
-            owner_present=not scope.platform,
+            # 无人在场的一轮（平台来源的轮次、审批结果回合）：授权工具只列查询。
+            owner_present=not scope.unattended,
             level=level,
             scopes=granted,
         )

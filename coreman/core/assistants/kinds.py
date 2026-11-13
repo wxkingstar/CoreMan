@@ -22,3 +22,13 @@ PLATFORM_TURN_KINDS = (HANDOVER_KIND, JOB_RESULT_KIND, COMPILE_KIND, SUBTASK_KIN
 # 没有入站事件也能跑的任务类型：平台来源的四种，加上在这样的轮次里提交的审批单的结果回合。
 # 不带入站事件的这些类型只有 `platform_turns.enqueue` 能入队（`bus.tasks.enqueue` 把关）。
 ORIGIN_KINDS = (*PLATFORM_TURN_KINDS, APPROVAL_RESULT_KIND)
+
+
+def unattended(kind: str) -> bool:
+    """这类任务的一轮是不是无人在场：平台触发，所有者此刻不在对话里，输入可能来自别人。
+
+    只看任务类型，不看有没有入站事件：审批结果回合沿用提交那一轮的入站事件，照样无人在场。
+    无人在场的轮次能力要收紧（开轮让路、不挂以所有者身份签发的凭据、授权工具只留查询、
+    不得改动置顶页），各处一律按这一个判断，不要各自再写条件。
+    """
+    return kind in ORIGIN_KINDS

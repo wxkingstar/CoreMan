@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import kinds
 from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, PLATFORM_TURN_KINDS
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
@@ -78,6 +79,11 @@ class Scope:
     @property
     def scheduled(self) -> bool:
         return self.event is None and not self.platform
+
+    @property
+    def unattended(self) -> bool:
+        """所有者不在场的一轮（`kinds.unattended`）：平台来源的轮次，以及带入站事件的审批结果回合。"""
+        return self.platform or kinds.unattended(self.task.kind)
 
 
 @dataclass(frozen=True)

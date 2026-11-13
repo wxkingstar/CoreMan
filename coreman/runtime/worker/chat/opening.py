@@ -235,9 +235,10 @@ class OpenStage(ChatStageBase):
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
-        # 个人助理里平台自己发起的一轮无人在场，输入可能来自别人发给所有者的消息：不挂云签名
-        # 代理、业务系统目录与所有者的个人凭证，需要时由所有者在私聊里亲自让助理做。
-        unattended = platform_turns.is_platform(ctx.task)
+        # 个人助理里平台触发的一轮（含带入站事件的审批结果回合）无人在场，输入可能来自别人发给
+        # 所有者的消息：不挂云签名代理、业务系统目录与所有者的个人凭证，需要时由所有者在私聊里
+        # 亲自让助理做。
+        unattended = platform_turns.unattended(ctx.task)
         access = await build_system_access(
             session,
             ctx.cipher,

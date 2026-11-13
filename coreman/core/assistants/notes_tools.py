@@ -153,13 +153,13 @@ async def _write(session: AsyncSession, scope: Scope, args: Write) -> dict[str, 
         version=args.version,
         updated_by="assistant",
         # 平台自己发起的轮次与子任务没有人在场：不能置顶，也动不了置顶页。
-        owner_present=not scope.platform,
+        owner_present=not scope.unattended,
     )
     return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}
 
 
 async def _delete(session: AsyncSession, scope: Scope, args: Delete) -> dict[str, Any]:
-    if await notes.delete(session, scope.bot.id, args.path, owner_present=not scope.platform):
+    if await notes.delete(session, scope.bot.id, args.path, owner_present=not scope.unattended):
         return {"status": "deleted"}
     return {"error": "page_not_found"}
 

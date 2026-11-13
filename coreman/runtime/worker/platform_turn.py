@@ -151,13 +151,13 @@ class PlatformTurnHandler(ChatTaskHandler):
         return stand_in(bot, row, ctx.task)
 
     async def _take_session(self, ctx: TaskContext, intake: Intake) -> bool:
-        """没有入站事件的一轮不取消同会话的任务：没人在等它，所有者的消息优先。
+        """无人在场的一轮不取消同会话的任务：没人在等它，所有者的消息优先。
 
         同会话有别的任务在跑、或所有者的消息在排队时，自己放回队列稍后再认领。反过来所有者
         一发消息，这一轮照旧被那条消息取消（`ChatTaskHandler._take_session`）。带入站事件的
-        回合（所有者私聊那一轮里提交的审批单的结果）沿用原来的做法。
+        审批结果回合同样如此：那条入站事件是提交那一轮留下的，所有者此刻不在场。
         """
-        if not platform_turns.is_platform(ctx.task):
+        if not platform_turns.unattended(ctx.task):
             return await super()._take_session(ctx, intake)
         async with ctx.session_factory() as session:
             if not await tasks.in_the_way(

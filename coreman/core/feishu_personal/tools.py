@@ -73,8 +73,8 @@ def definitions(
 ) -> list[dict[str, Any]]:
     """`auth`: the authorization tools (private chat only).
 
-    `owner_present`: False for a turn the platform started itself; only the status query of
-    the authorization tools is listed.
+    `owner_present`: False for a turn nobody attends (`Scope.unattended`); only the status
+    query of the authorization tools is listed.
 
     `level`/`scopes`: the owner's saved tier and permissions; tools they do not reach are not
     listed. None lists no data tools (not connected and not completing authorization).
@@ -105,7 +105,7 @@ async def dispatch(
         # 授权要本人在私聊里点卡片完成，定时任务里没有人能确认。
         if scope.scheduled:
             return {"error": "invalid_tool_or_arguments"}
-        if scope.platform and name != STATUS_TOOL:
+        if scope.unattended and name != STATUS_TOOL:
             return dict(OWNER_TURN_REQUIRED)
         try:
             if name == "feishu_authorize":
