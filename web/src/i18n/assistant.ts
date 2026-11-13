@@ -99,6 +99,17 @@ export const assistantZh = {
     dangerHint: '停用后：飞书授权撤销，待批的审批单撤回，加密保存的个人内容（对话、知识库、待跟进）永久不可恢复。一旦开始不可撤销。',
     deprovision: '停用我的助理', deprovisionPrompt: '输入助理的名字「{name}」确认停用',
     deprovisionMismatch: '名字不对', deprovisionStarted: '已开始停用',
+    accessLog: '访问记录',
+    accessLogHint: '助理自己干活之外，谁在什么时候读取过你加密保存的个人内容。这里只记动作，不记内容；保留 180 天。',
+    accessEmpty: '还没有访问记录。', accessMore: '更早的记录',
+    accessWho: { owner: '你本人', admin: '{name}（不是你本人）', system: '服务器上的管理命令' },
+    accessActions: {
+      approvals_read: '查看审批单', followups_read: '查看待跟进', jobs_read: '查看子任务',
+      notes_index: '查看知识库目录', notes_read: '打开一页知识页', settings_read: '查看设置',
+      chatlogs_read: '查看对话记录', tasks_read: '查看任务详情',
+      import_preview: '预览导入', import_notes: '导入知识页与待跟进', export: '导出知识页与待跟进',
+      cli_rewrap: '主密钥轮换（没有读取内容）', cli_chatlogs: '有人用管理命令尝试查看对话记录（内容没有读出）', cli_tasks: '有人用管理命令尝试查看任务详情（内容没有读出）',
+    },
   },
   admin: {
     intro: '谁开通了个人助理、运行在哪、是否正常。这里只有元数据，看不到任何人的对话、知识库或待跟进内容。',
@@ -109,6 +120,7 @@ export const assistantZh = {
     deprovision: '停用',
     deprovisionPrompt: '停用后这位成员加密保存的个人内容永久不可恢复，且不可撤销。输入所有者的登录名「{name}」确认',
     deprovisionMismatch: '登录名不对', deprovisionStarted: '已开始停用',
+    lastAccess: '最近一次非本人访问',
   },
   platform: {
     title: '个人助理', hint: '谁能开通个人助理、用哪种 AI、每个节点同时跑几轮、每人每天最多几轮。',
@@ -222,6 +234,17 @@ export const assistantEn: typeof assistantZh = {
     dangerHint: 'After shutdown the Feishu authorization is revoked, pending approvals are withdrawn, and your encrypted personal content (conversations, knowledge base, follow-ups) can never be recovered. It cannot be undone once started.',
     deprovision: 'Shut down my assistant', deprovisionPrompt: 'Type the assistant\'s name "{name}" to confirm the shutdown',
     deprovisionMismatch: 'The name does not match', deprovisionStarted: 'Shutdown started',
+    accessLog: 'Access log',
+    accessLogHint: 'Who read your encrypted personal content, and when, outside the assistant doing its own work. Only the action is recorded, never the content. Entries are kept for 180 days.',
+    accessEmpty: 'No access has been recorded yet.', accessMore: 'Earlier entries',
+    accessWho: { owner: 'You', admin: '{name} (not you)', system: 'An admin command on the server' },
+    accessActions: {
+      approvals_read: 'Viewed approvals', followups_read: 'Viewed follow-ups', jobs_read: 'Viewed sub-tasks',
+      notes_index: 'Viewed the knowledge base index', notes_read: 'Opened a knowledge page', settings_read: 'Viewed settings',
+      chatlogs_read: 'Viewed conversation logs', tasks_read: 'Viewed task details',
+      import_preview: 'Previewed an import', import_notes: 'Imported pages and follow-ups', export: 'Exported pages and follow-ups',
+      cli_rewrap: 'Master key rotation (no content was read)', cli_chatlogs: 'Someone tried to view conversation logs with an admin command (no content was read)', cli_tasks: 'Someone tried to view task details with an admin command (no content was read)',
+    },
   },
   admin: {
     intro: 'Who has a personal assistant, where it runs and whether it is healthy. Only metadata is shown here: nobody\'s conversations, knowledge base or follow-ups are visible.',
@@ -232,6 +255,7 @@ export const assistantEn: typeof assistantZh = {
     deprovision: 'Shut down',
     deprovisionPrompt: 'After shutdown this member\'s encrypted personal content can never be recovered, and it cannot be undone. Type the owner\'s login name "{name}" to confirm',
     deprovisionMismatch: 'The login name does not match', deprovisionStarted: 'Shutdown started',
+    lastAccess: 'Last access by someone else',
   },
   platform: {
     title: 'Personal assistants', hint: 'Who may set up a personal assistant, which AI it uses, how many turns each node runs at once and how many turns each person gets per day.',
@@ -345,6 +369,17 @@ export const assistantJa: typeof assistantZh = {
     dangerHint: '停止すると、飛書の認可は取り消され、承認待ちの申請は取り下げられ、暗号化された個人データ（会話、ナレッジベース、フォローアップ）は永久に復元できません。開始後は取り消せません。',
     deprovision: '自分のアシスタントを停止', deprovisionPrompt: '確認のためアシスタント名「{name}」を入力してください',
     deprovisionMismatch: '名前が一致しません', deprovisionStarted: '停止を開始しました',
+    accessLog: 'アクセス記録',
+    accessLogHint: 'アシスタント自身の作業以外で、暗号化して保存されたあなたの個人データを誰がいつ読み取ったかを表示します。記録するのは操作のみで、内容は含みません。180 日間保存されます。',
+    accessEmpty: 'アクセス記録はまだありません。', accessMore: '以前の記録',
+    accessWho: { owner: 'あなた本人', admin: '{name}（本人以外）', system: 'サーバー上の管理コマンド' },
+    accessActions: {
+      approvals_read: '承認申請を表示', followups_read: 'フォローアップを表示', jobs_read: 'サブタスクを表示',
+      notes_index: 'ナレッジベースの一覧を表示', notes_read: 'ナレッジページを開いた', settings_read: '設定を表示',
+      chatlogs_read: '会話ログを表示', tasks_read: 'タスクの詳細を表示',
+      import_preview: 'インポートをプレビュー', import_notes: 'ページとフォローアップをインポート', export: 'ページとフォローアップをエクスポート',
+      cli_rewrap: 'マスターキーのローテーション（内容は読み取っていません）', cli_chatlogs: '管理コマンドで会話ログの表示が試みられました（内容は読み取られていません）', cli_tasks: '管理コマンドでタスクの詳細の表示が試みられました（内容は読み取られていません）',
+    },
   },
   admin: {
     intro: '誰が個人アシスタントを開設したか、どこで動いているか、正常かどうかを表示します。ここにあるのはメタデータのみで、誰の会話・ナレッジベース・フォローアップも見えません。',
@@ -355,6 +390,7 @@ export const assistantJa: typeof assistantZh = {
     deprovision: '停止',
     deprovisionPrompt: '停止すると、このメンバーの暗号化された個人データは永久に復元できず、取り消しもできません。確認のため所有者のログイン名「{name}」を入力してください',
     deprovisionMismatch: 'ログイン名が一致しません', deprovisionStarted: '停止を開始しました',
+    lastAccess: '本人以外による最終アクセス',
   },
   platform: {
     title: '個人アシスタント', hint: '誰が開設できるか、どの AI を使うか、ノードごとの同時実行数、1 人あたり 1 日のターン上限を設定します。',

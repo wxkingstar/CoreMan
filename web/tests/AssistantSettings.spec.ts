@@ -76,10 +76,19 @@ describe('settings form rules', () => {
   })
 })
 
-const render = () => mount(AssistantSettings, { props: { name: '个人助理', runtime: 'pool-1' }, global: { plugins: [ElementPlus, i18n] } })
+const render = () => mount(AssistantSettings, {
+  props: { name: '个人助理', runtime: 'pool-1' },
+  global: { plugins: [ElementPlus, i18n], stubs: { AssistantAccessLog: true } },
+})
 const form = (wrapper: ReturnType<typeof render>) => (wrapper.vm as unknown as { form: PrefsForm }).form
 
 describe('settings section', () => {
+  it('shows the access log under the form', async () => {
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.find('assistant-access-log-stub').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     vi.restoreAllMocks()
     vi.mocked(myAssistant.settings).mockReset().mockResolvedValue(prefs)

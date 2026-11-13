@@ -138,6 +138,19 @@ export interface AssistantPrefs {
 export type AssistantPrefsPatch = Partial<Pick<AssistantPrefs,
   'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'daily_turn_budget'>>
 
+/** 访问记录的一行：谁、什么时候、做了什么；没有任何内容。 */
+export interface AccessEntry {
+  id: number
+  at: string
+  actor_kind: 'owner' | 'admin' | 'system'
+  /** 操作人的显示名；管理命令或账号已删除时为 null。 */
+  actor_name: string | null
+  action: string
+  target: string
+}
+/** `next_before` 不为 null 时还有更早的，带着它再取下一页。 */
+export interface AccessPage { items: AccessEntry[]; next_before: number | null }
+
 const root = '/api/me/assistant'
 /** 等待审批的调度靠这个工具名认出来（它没有子任务行）。 */
 export const DISPATCH_TOOL = 'assistant_ask_bot'
@@ -168,4 +181,5 @@ export const myAssistant = {
   regenerateVoice: () => call<{ queued: boolean; left_today: number }>(http.post(`${root}/voice/regenerate`, undefined, SLOW)),
   /** 停用不可撤销：调用前必须已经让所有者二次确认。 */
   deprovision: () => call<{ state: string }>(http.post(`${root}/deprovision`, { confirm: true })),
+  accessLog: (before?: number) => call<AccessPage>(http.get(`${root}/access-log`, { params: before ? { before } : {} })),
 }

@@ -25,6 +25,8 @@ export interface AssistantRow {
   turns: { today: number; budget: number } | null
   inbox_pending: number
   jobs_active: number
+  /** 最近一次非所有者访问这位助理个人内容的时间（管理命令等）；从来没有是 null。只有时间。 */
+  last_non_owner_access_at: string | null
 }
 
 const root = '/api/admin/assistants'

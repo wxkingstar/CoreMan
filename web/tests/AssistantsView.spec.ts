@@ -7,6 +7,7 @@ vi.mock('@/api/assistantsAdmin', () => ({ assistantsAdmin: { list: vi.fn(), depr
 import { assistantsAdmin, type AssistantRow } from '@/api/assistantsAdmin'
 import { i18n } from '@/i18n'
 import { MENU } from '@/layouts/AdminLayout.vue'
+import { formatDateTime } from '@/utils/format'
 import { router } from '@/router'
 import AssistantsView from '@/views/AssistantsView.vue'
 
@@ -19,7 +20,7 @@ const row = (over: Partial<AssistantRow>): AssistantRow => ({
   cold_start: { state: 'in_progress', step: 'focus', outcome: null, started_at: '2026-11-13T01:00:00Z', done_at: null },
   directories_pending_removal: 0,
   watch: { state: 'backoff', last_ok_at: '2026-11-13T02:00:00Z', last_error: 'rate_limited' },
-  turns: { today: 12, budget: 200 }, inbox_pending: 4, jobs_active: 2, ...over,
+  turns: { today: 12, budget: 200 }, inbox_pending: 4, jobs_active: 2, last_non_owner_access_at: null, ...over,
 })
 const render = () => mount(AssistantsView, { global: { plugins: [ElementPlus, i18n] } })
 
@@ -36,6 +37,17 @@ beforeEach(() => {
 })
 
 describe('personal assistants (admin)', () => {
+  it('shows only the time of the last access by someone other than the owner', async () => {
+    vi.mocked(assistantsAdmin.list).mockResolvedValue({
+      items: [row({ last_non_owner_access_at: '2026-11-12T08:00:00Z' }), row({ bot_id: 'b2' })],
+    })
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.text()).toContain(t('assistant.admin.lastAccess'))
+    expect(wrapper.get('[data-test="last-access-b1"]').text()).toBe(formatDateTime('2026-11-12T08:00:00Z'))
+    expect(wrapper.get('[data-test="last-access-b2"]').text()).toBe(t('assistant.admin.none'))
+    wrapper.unmount()
+  })
+
   it('is open to platform administrators only', () => {
     expect(MENU.find((item) => item.key === 'assistants')).toMatchObject({ path: '/assistants', roles: ['platform_admin'] })
     const route = router.resolve({ name: 'assistants' })

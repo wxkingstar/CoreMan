@@ -151,6 +151,14 @@ onMounted(load)
         </template>
       </el-table-column>
       <el-table-column
+        :label="t('assistant.admin.lastAccess')"
+        width="170"
+      >
+        <template #default="{ row }: { row: AssistantRow }">
+          <span :data-test="'last-access-' + row.bot_id">{{ row.last_non_owner_access_at ? formatDateTime(row.last_non_owner_access_at) : t('assistant.admin.none') }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column
         :label="t('assistant.admin.dirs')"
         prop="directories_pending_removal"
         width="100"

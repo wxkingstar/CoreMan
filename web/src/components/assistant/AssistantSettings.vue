@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantPrefs } from '@/api/myAssistant'
+import AssistantAccessLog from '@/components/assistant/AssistantAccessLog.vue'
 import LoadState from '@/components/LoadState.vue'
 import { toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
 import { errorMessage } from '@/utils/errors'
@@ -258,6 +259,7 @@ defineExpose({ form, save, load })
         </el-button>
       </el-form-item>
     </el-form>
+    <AssistantAccessLog />
     <el-alert
       type="error"
       :closable="false"
