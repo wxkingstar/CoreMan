@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import eligibility, keys, lifecycle, runtime, sealed
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.apps import app_credentials, is_assistant_app
 from coreman.core.assistants.lifecycle import StepFailed, StepRetry, advance, finish, token_hash
 from coreman.core.assistants.records import new_assistant_bot
@@ -548,6 +549,16 @@ async def step_await_grant(
             # 授权被拒或身份对不上：授权行已清空，下面按「链接已失效」再发一次。
         grant = await session.get(FeishuPersonalGrant, key, populate_existing=True)
     if _connected(grant):
+        # 和置为 active 同一个事务：平台自己发起的轮次（交回、子任务结果）凭这份身份拿个人工具。
+        # 取自点开通时飞书给的操作人与开通卡片所在的私聊，不来自任何请求内容。
+        await assistant_settings.record_identity(
+            session,
+            bot.id,
+            open_id=row.open_id or "",
+            tenant_key=row.tenant_key or "",
+            platform_user_id=row.platform_user_id,
+            chat_id=row.offer_chat_id or "",
+        )
         if row.offer_message_id:
             await messenger.update_card(
                 session, row.platform_app_id, row.offer_message_id, granted_card()

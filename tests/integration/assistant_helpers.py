@@ -9,7 +9,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.records import new_assistant_bot
-from coreman.core.db.models import Bot, PlatformApp, RelayServer, RuntimeNode, User
+from coreman.core.db.models import (
+    AssistantSettings,
+    Bot,
+    PlatformApp,
+    RelayServer,
+    RuntimeNode,
+    User,
+)
 from coreman.core.runtime_nodes.transport import now
 
 MASTER_KEY = b"\x07" * 32
@@ -115,3 +122,30 @@ async def sandbox_ready(session: AsyncSession, bot: Bot) -> None:
     node.machine_fingerprint = node.machine_fingerprint or f"fp-{node.id.hex}"
     node.uid = node.uid or 1001
     await session.flush()
+
+
+async def identified(
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    open_id: str = "ou_owner",
+    tenant_key: str = "tenant-example",
+    platform_user_id: str = "owner_pid",
+    chat_id: str = "oc_private",
+) -> AssistantSettings:
+    """开通时记下的所有者身份（平台来源的轮次凭它拿个人工具）。
+
+    默认值与 `lifecycle_helpers.active_assistant` 造出的通讯录身份、授权与私聊一致。
+    """
+    from coreman.core.assistants import settings
+
+    row = await settings.record_identity(
+        session,
+        bot.id,
+        open_id=open_id,
+        tenant_key=tenant_key,
+        platform_user_id=platform_user_id,
+        chat_id=chat_id,
+    )
+    await session.commit()
+    return row

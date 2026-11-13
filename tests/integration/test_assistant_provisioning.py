@@ -14,6 +14,7 @@ from coreman.core.db.models import (
     AssistantKey,
     AssistantLifecycle,
     AssistantRetiredDir,
+    AssistantSettings,
     Bot,
     FeishuPersonalGrant,
     Setting,
@@ -25,6 +26,8 @@ from tests.integration.lifecycle_helpers import (
     CHAT,
     CIPHER,
     OWNER_OPEN_ID,
+    OWNER_PID,
+    TENANT,
     FakeFeishuAuth,
     FakeMessenger,
     FakeNode,
@@ -139,6 +142,8 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     await tick(factory, messenger, later=6)  # 还没点同意
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.step == "await_grant" and flow.finished_at is None
+    # 授权完成之前不记身份：平台来源的轮次还用不了。
+    assert await db_session.get(AssistantSettings, bot.id) is None
     auth.approve()
     await poll_now(db_session)
     await tick(factory, messenger, later=12)
@@ -153,6 +158,15 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     # 授权完成后，授权卡片换成没有按钮的。
     assert [card for _, card in messenger.updates] == [provisioning.granted_card()]
     assert "button" not in str(provisioning.granted_card())
+    # 开通好的同时记下所有者的身份：点开通时飞书给的操作人、开通卡片所在的私聊。
+    identity = await db_session.get(AssistantSettings, bot.id, populate_existing=True)
+    assert identity is not None
+    assert (
+        identity.open_id,
+        identity.tenant_key,
+        identity.platform_user_id,
+        identity.chat_id,
+    ) == (OWNER_OPEN_ID, TENANT, OWNER_PID, CHAT)
 
 
 async def test_a_card_can_be_used_once_by_its_owner_in_its_own_chat(

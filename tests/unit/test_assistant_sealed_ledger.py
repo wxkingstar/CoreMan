@@ -111,6 +111,7 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
+    "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列
     # 转录：派出前写交接编号、没到过节点的轮次清掉交接编号（都是元数据）；内容经 ORM 写入，
     # flush 钩子封存
     "coreman/core/assistants/transcripts.py": 2,
