@@ -18,7 +18,7 @@ from datetime import timedelta
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import approvals, keys, lifecycle, retired_dirs, watch
+from coreman.core.assistants import approvals, cold_start, keys, lifecycle, retired_dirs, watch
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.assistants.lifecycle import StepFailed, advance, finish
 from coreman.core.assistants.records import is_assistant
@@ -153,6 +153,8 @@ async def step_drain(
     bot = await _bot(session, row)
     # 先停止盯消息、作废没交回的条目，再叫停任务：之后不会再有新的条目进来。
     await watch.stop(session, bot.id)
+    # 没做完的冷启动不再推进，「上班」「下班」的临时切换清掉（幂等，这一步会重复执行）。
+    await cold_start.stop(session, bot.id)
     now = utcnow()
     if row.deadline is None:
         row.deadline = now + DRAIN_WAIT

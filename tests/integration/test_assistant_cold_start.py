@@ -201,6 +201,33 @@ async def test_an_empty_or_overlong_answer(db_session: AsyncSession) -> None:
     assert page is not None and len(page.body) == cold_start.MAX_ANSWER
 
 
+async def test_form_values_of_an_unexpected_shape_do_not_block(db_session: AsyncSession) -> None:
+    """表单回调的形状没在真实租户里核对过：单个字符串照认，别的形状当没填，都照样前进。"""
+    bot, row = await started(db_session)
+    now = utcnow()
+    said = await cold_start.answer(db_session, bot, row, "people", {"answer": "上级是李四"}, now)
+    assert said == cold_start.SAVED.format(path="profile/people.md")
+    for odd in (
+        None,
+        "上级是李四",
+        ["上级是李四"],
+        {"answer": {"value": "x"}},
+        {"answer": [1, None]},
+    ):
+        row.cold_start_step = "duties"
+        assert await cold_start.answer(db_session, bot, row, "duties", odd, now) == (
+            cold_start.NOT_SAVED
+        )
+        assert row.cold_start_step == "focus"
+    assert await notes.read(db_session, bot.id, "profile/duties.md") is None
+    row.cold_start_step = "hours"
+    said = await cold_start.answer(
+        db_session, bot, row, "hours", {"hours": "10:00-19:00", "timezone": 8}, now
+    )
+    assert said == "工作时段 10:00–19:00，时区 Asia/Shanghai。"
+    assert row.cold_start_outcome == "completed"
+
+
 async def test_skip_moves_on_without_writing(db_session: AsyncSession) -> None:
     bot, row = await started(db_session)
     now = utcnow()

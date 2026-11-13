@@ -158,6 +158,11 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     # 授权完成后，授权卡片换成没有按钮的。
     assert [card for _, card in messenger.updates] == [provisioning.granted_card()]
     assert "button" not in str(provisioning.granted_card())
+    # 授权完成的同一个事务里登记冷启动；开通不等它，记录已经是 active。
+    prefs = await db_session.get(AssistantSettings, bot.id, populate_existing=True)
+    assert prefs is not None and prefs.cold_start_step == "voice"
+    assert prefs.cold_start_started_at is not None and prefs.cold_start_next_at is not None
+    assert prefs.cold_start_done_at is None
     # 开通好的同时记下所有者的身份：点开通时飞书给的操作人、开通卡片所在的私聊。
     identity = await db_session.get(AssistantSettings, bot.id, populate_existing=True)
     assert identity is not None

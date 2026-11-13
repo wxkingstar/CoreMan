@@ -21,6 +21,9 @@ def test_without_configuration_the_texts_say_approval_system(monkeypatch: pytest
     configure(monkeypatch, None, None)
     assert "在审批系统里批准后才执行" in card_text(provisioning.offer_card("t"))
     assert "在审批系统里批准后才执行" in provisioning.welcome_text()
+    # 欢迎语预告冷启动：几个问题，都可以跳过，问完才开始看消息。
+    assert "都可以跳过" in provisioning.welcome_text()
+    assert "才开始看你的飞书消息" in provisioning.welcome_text()
 
 
 def test_configured_name_and_link_replace_the_generic_wording(monkeypatch: pytest.MonkeyPatch):

@@ -51,6 +51,8 @@ ASSISTANT_LIFECYCLE_SECONDS = 5.0
 ASSISTANT_WATCH_SECONDS = 5.0
 # 个人助理投递：多久对一次账、排一次交回（立即交回的条目从入箱到入队最多这么久）。
 ASSISTANT_DELIVERY_SECONDS = 5.0
+# 个人助理的冷启动与下班编译：5 秒看一次，所有者点完一道题到下一张卡片发出最多这么久。
+ASSISTANT_SHIFT_SECONDS = 5.0
 
 
 class SchedulerService(Service):
@@ -135,6 +137,7 @@ class SchedulerService(Service):
                 ("scheduler-assistant-lifecycle", self._assistant_lifecycle_loop()),
                 ("scheduler-assistant-watch", self._assistant_watch_loop()),
                 ("scheduler-assistant-delivery", self._assistant_delivery_loop()),
+                ("scheduler-assistant-shift", self._assistant_shift_loop()),
             )
         ]
         self.ready = True
@@ -466,6 +469,34 @@ class SchedulerService(Service):
             except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
                 self._log.warning("assistant_delivery_failed", error=type(exc).__name__)
             await self._sleep(ASSISTANT_DELIVERY_SECONDS)
+
+    async def _assistant_shift_loop(self) -> None:
+        """个人助理的冷启动与下班编译：单独一条循环，里面对飞书的调用慢了、出错了只影响它自己。
+
+        先冷启动后编译：冷启动刚做完的助理，同一轮里就能被编译那一半看到。
+        """
+        from coreman.core.assistants import cold_start, compiling
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    now = datetime.now(UTC)
+                    hits = {
+                        key: value
+                        for key, value in (
+                            await cold_start.tick(self._factory, self._cipher, now)
+                        ).items()
+                        if value
+                    }
+                    compiled = await compiling.tick(self._factory, now)
+                    hits.update(
+                        {f"compile_{key}": value for key, value in compiled.items() if value}
+                    )
+                    if hits:
+                        self._log.info("assistant_shift", **hits)
+            except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
+                self._log.warning("assistant_shift_failed", error=type(exc).__name__)
+            await self._sleep(ASSISTANT_SHIFT_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""

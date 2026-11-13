@@ -18,14 +18,22 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import notes
+from coreman.core.assistants import notes, sealed, voice, watch
 from coreman.core.assistants import settings as assistant_settings
+from coreman.core.assistants import watch_feed as feed
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import COLD_START_STEPS, AssistantSettings, Bot
+from coreman.core.feishu_personal.service import PersonalError
+from coreman.core.feishu_personal.toolbase import Call
+from coreman.core.logging import get_logger
 from coreman.core.timeutils import aware_utc
+
+log = get_logger(__name__)
 
 STEPS = COLD_START_STEPS
 # 第一步（voice）是平台自己拉样本，其余四步各是一道题。
@@ -33,6 +41,11 @@ QUESTIONS = STEPS[1:]
 # 卡片回调的分流键。不与任务类型 `assistant_cold_start` 同名：那个字面量只许出现在登记处。
 EVENT_KEY = "assistant_cold_start_card"
 DEADLINE = timedelta(hours=24)
+# 口吻样本拉不到：隔这么久重试；从开始算起满这么久还拉不到就放弃这一步，往下问。
+VOICE_RETRY = timedelta(minutes=10)
+VOICE_WINDOW = timedelta(hours=1)
+# 一次循环最多推进这么多位助理。
+BATCH = 50
 MAX_ANSWER = 500
 MAX_GROUPS = 20
 MAX_NAME = 30
@@ -263,8 +276,11 @@ async def send(
 
 
 def _values(selected: Any, key: str) -> list[str]:
+    """回调里这一项的值。形状没在真实租户里核对过：单个字符串、字符串列表都认，别的当没填。"""
     found = selected.get(key) if isinstance(selected, dict) else None
-    return [str(value) for value in found] if isinstance(found, list) else []
+    if isinstance(found, str):
+        return [found]
+    return [value for value in found if isinstance(value, str)] if isinstance(found, list) else []
 
 
 async def _page(session: AsyncSession, bot_id: uuid.UUID, step: str, body: str) -> bool:
@@ -399,3 +415,196 @@ async def stop(session: AsyncSession, bot_id: uuid.UUID) -> None:
         return
     row.cold_start_step, row.cold_start_next_at = None, None
     assistant_settings.clear_override(row)
+
+
+async def _reader(
+    session: AsyncSession, cipher: Cipher, bot: Bot, row: AssistantSettings
+) -> feed.Reader | None:
+    """以所有者身份读飞书的调用器；身份核对不过（授权没了、账号停用、身份对不上）返回 None。"""
+    scope, _code = await watch.owner_scope(session, bot, row)
+    return Call(session, cipher, scope) if scope is not None else None
+
+
+async def _groups(call: feed.Reader, row: AssistantSettings) -> list[Group]:
+    """所有者最近活跃的群（给「重点群」那一题当选项）：有名字、不是单聊、不是与助理的私聊。"""
+    listed = await feed.list_chats(call)
+    found = [
+        (chat_id, listed.names.get(chat_id, ""))
+        for chat_id in listed.order
+        if chat_id != row.chat_id and listed.kinds.get(chat_id) != "p2p"
+    ]
+    return [(chat_id, name) for chat_id, name in found if name][:MAX_GROUPS]
+
+
+async def _voice_step(
+    session: AsyncSession, cipher: Cipher, bot: Bot, row: AssistantSettings, now: datetime
+) -> str:
+    """拉所有者自己发出的消息、排一轮口吻样本；不等那一轮，直接进入第一题。"""
+    assert row.cold_start_started_at is not None
+    call = await _reader(session, cipher, bot, row)
+    samples: list[str] = []
+    if call is not None:
+        try:
+            samples = await voice.collect(call, row, now)
+        except PersonalError:
+            if aware_utc(now) - aware_utc(row.cold_start_started_at) < VOICE_WINDOW:
+                row.cold_start_next_at, row.updated_at = now + VOICE_RETRY, now
+                return "voice_retry"
+    queued = len(samples) >= voice.MIN_MESSAGES
+    if queued:
+        await voice.enqueue(session, bot, row, samples, nonce(row))
+    await skip(session, bot, row, "voice", now)
+    return "voice_queued" if queued else "voice_skipped"
+
+
+async def _question_step(
+    session: AsyncSession,
+    cipher: Cipher,
+    bot: Bot,
+    row: AssistantSettings,
+    step: str,
+    now: datetime,
+) -> str:
+    groups: list[Group] = []
+    if step == "focus":
+        call = await _reader(session, cipher, bot, row)
+        if call is not None:
+            try:
+                groups = await _groups(call, row)
+            except Exception as exc:  # noqa: BLE001 列不出来（含字段形状不符）就当没有群；只记类型
+                # 不往外抛：这一次里可能刚刷新过令牌，事务要照常提交。
+                log.warning("assistant_cold_start_groups_failed", error=type(exc).__name__)
+                groups = []
+        if not groups:
+            # 列不出群就没有可选的：这一题自动跳过，所有者之后在私聊里说。
+            await skip(session, bot, row, step, now)
+            return "focus_skipped"
+    await send(session, cipher, bot, row, step, now, groups=groups)
+    return "asked"
+
+
+async def advance(
+    session: AsyncSession, cipher: Cipher, bot: Bot, row: AssistantSettings, now: datetime
+) -> str | None:
+    """一位助理的一次推进：满 24 小时兜底完成；到点了就拉样本或发下一题。调用方提交。
+
+    调过飞书之后调用方不要回滚：刷新令牌一次性使用，换到的新令牌必须落库（`_visit`）。
+    """
+    if not pending(row):
+        return None
+    assert row.cold_start_started_at is not None
+    if aware_utc(now) - aware_utc(row.cold_start_started_at) >= DEADLINE:
+        await complete(session, bot, row, "timeout", now)
+        return "timeout"
+    due = row.cold_start_next_at
+    if due is None or aware_utc(due) > aware_utc(now) or row.cold_start_step is None:
+        return None
+    if row.cold_start_step == "voice":
+        return await _voice_step(session, cipher, bot, row, now)
+    return await _question_step(session, cipher, bot, row, row.cold_start_step, now)
+
+
+def _recover(row: AssistantSettings, now: datetime) -> None:
+    """这一位出了意外的错：往后推，不让循环每 5 秒撞一次；口吻那一步拖满一小时就放弃它。
+
+    24 小时兜底不受影响：`advance` 先看超时，再做别的。
+    """
+    if not pending(row) or row.cold_start_step is None or row.cold_start_started_at is None:
+        return
+    stuck = aware_utc(now) - aware_utc(row.cold_start_started_at) >= VOICE_WINDOW
+    if row.cold_start_step == STEPS[0] and stuck:
+        row.cold_start_step, row.cold_start_next_at = STEPS[1], now
+    else:
+        row.cold_start_next_at = now + VOICE_RETRY
+    row.updated_at = now
+
+
+async def _visit(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, bot_id: uuid.UUID, now: datetime
+) -> str | None:
+    """一位助理一个短事务：加锁、推进、提交。"""
+    async with factory() as session:
+        await sealed.guard_logs(session, bot_id)
+        bot = await session.get(Bot, bot_id)
+        # 所有者正点着卡片（回调握着行锁）：这一次跳过，5 秒后再来。
+        row = await session.get(
+            AssistantSettings,
+            bot_id,
+            with_for_update={"skip_locked": True},
+            populate_existing=True,
+        )
+        code: str | None = None
+        if (
+            bot is not None
+            and row is not None
+            and bot.enabled
+            and is_assistant(bot)
+            and bot.assistant_state == "active"
+        ):
+            try:
+                code = await advance(session, cipher, bot, row, now)
+            except Exception as exc:  # noqa: BLE001 只记类型
+                # 意外出错也先试着提交：这一次里可能已经刷新过令牌（旧的刷新令牌已经用掉），
+                # 回滚会让授权就此作废。会话本身坏了时提交会再抛，由 `tick` 另开事务往后推。
+                log.warning(
+                    "assistant_cold_start_failed", bot_id=str(bot_id), error=type(exc).__name__
+                )
+                _recover(row, now)
+                code = "failed"
+        await session.commit()
+        return code
+
+
+async def _push_back(
+    factory: async_sessionmaker[AsyncSession], bot_id: uuid.UUID, now: datetime
+) -> None:
+    """`_visit` 连提交都没成（事务已回滚）：另开事务把这一位往后推。"""
+    try:
+        async with factory() as session:
+            row = await session.get(
+                AssistantSettings, bot_id, with_for_update={"skip_locked": True}
+            )
+            if row is not None:
+                _recover(row, now)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 兜底本身出错也不能让循环停下
+        log.warning("assistant_cold_start_push_back_failed", error=type(exc).__name__)
+
+
+async def tick(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, now: datetime
+) -> dict[str, int]:
+    """循环入口：冷启动开始了、没做完、且到点或超时的助理逐个推进，每位一个事务。"""
+    async with factory() as session:
+        ids = list(
+            await session.scalars(
+                select(AssistantSettings.bot_id)
+                .join(Bot, Bot.id == AssistantSettings.bot_id)
+                .where(
+                    Bot.kind == "assistant",
+                    Bot.enabled.is_(True),
+                    Bot.assistant_state == "active",
+                    AssistantSettings.cold_start_done_at.is_(None),
+                    AssistantSettings.cold_start_started_at.is_not(None),
+                    or_(
+                        AssistantSettings.cold_start_next_at <= now,
+                        AssistantSettings.cold_start_started_at <= now - DEADLINE,
+                    ),
+                )
+                .order_by(AssistantSettings.cold_start_started_at)
+                .limit(BATCH)
+            )
+        )
+    counts: dict[str, int] = {}
+    for bot_id in ids:
+        code: str | None
+        try:
+            # 被叫停时等这一位提交完再退：这一次里可能刚刷新过令牌（见 `watch.finish_round`）。
+            code = await watch.finish_round(_visit(factory, cipher, bot_id, now))
+        except Exception as exc:  # noqa: BLE001 一位助理出错不挡别人；只记类型
+            log.warning("assistant_cold_start_failed", bot_id=str(bot_id), error=type(exc).__name__)
+            await _push_back(factory, bot_id, now)
+            code = "failed"
+        if code is not None:
+            counts[code] = counts.get(code, 0) + 1
+    return counts

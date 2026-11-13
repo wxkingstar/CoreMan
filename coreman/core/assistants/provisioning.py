@@ -26,7 +26,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import eligibility, keys, lifecycle, runtime, sealed
+from coreman.core.assistants import cold_start, eligibility, keys, lifecycle, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.apps import app_credentials, is_assistant_app
 from coreman.core.assistants.lifecycle import StepFailed, StepRetry, advance, finish, token_hash
@@ -182,6 +182,7 @@ def welcome_text() -> str:
         "个人助理开通好了，直接在这里说要做的事就行。\n"
         f"对外有影响的操作会先提交审批，在{approval_system()}里批准后才执行。"
         f"要是提示你在{name}里还没有账号，先登录一次{name}再让我重试。\n"
+        "接下来我会问你几个小问题（都可以跳过），问完才开始看你的飞书消息。\n"
         "发「停用助理」可以随时停用。"
     )
 
@@ -563,6 +564,9 @@ async def step_await_grant(
             platform_user_id=row.platform_user_id,
             chat_id=row.offer_chat_id or "",
         )
+        # 冷启动不挡开通：这里只登记（同一个事务），之后由看护进程的另一条循环推进；记录现在
+        # 就是 active，所有者可以照常在私聊里让它办事。盯消息要等冷启动做完。
+        await cold_start.begin(session, bot.id, now)
         if row.offer_message_id:
             await messenger.update_card(
                 session, row.platform_app_id, row.offer_message_id, granted_card()
