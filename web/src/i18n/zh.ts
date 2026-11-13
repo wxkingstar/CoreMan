@@ -613,6 +613,8 @@ export default {
   layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
   menu: {
     selfReminders: "我的定时任务",
+    myAssistant: "我的助理",
+    assistants: "个人助理",
     myFeishu: "我的飞书",
     myWecom: "我的企业微信",
     myCredentials: "我的凭证",
@@ -892,9 +894,9 @@ export default {
     noDiff: '无变更内容',
   },
   chatLogs: {
+    contentWithheld: '内容仅发起人可见',
     title: '对话记录',
     bot: 'AI 员工',
-    contentWithheld: '内容仅发起人可见',
     user: '用户',
     status: '状态',
     chatType: '会话类型',
