@@ -1298,6 +1298,8 @@ class Agent:
                 # 换机可在目标节点重新克隆仓库、按 2MB 分块，Claude 会话文件可随之迁移。
                 "workspace_git": 1,
                 "workspace_chunk": WORKSPACE_CHUNK,
+                # 换机可整包传：源节点 workspace-pack 打包，目标节点 workspace-unpack 解开。
+                "workspace_pack": 1,
                 "session_transfer": 1 if self.provider == "claude" else 0,
                 # Codex 会话（thread 的 rollout 与绑定）也能随换机迁移，目标机原生续聊。
                 "session_transfer_codex": 1 if self.provider == "codex" else 0,

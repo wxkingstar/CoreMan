@@ -176,9 +176,152 @@ def test_legacy_platform_export_is_unchanged(agent, remote):
     assert any(e["path"] == "src/app/big/asset.bin" for e in export["manifest"])
 
 
+def pack_to(agent, source, target, chunk=64 * 1024):
+    """整包换机：源节点打包、按块读出，目标节点按块接收、解开，再照旧 finish。"""
+    export = call(agent, "export", source)
+    transfer = str(uuid.uuid4())
+    manifest = export["manifest"]
+    call(agent, "import", target, transfer_id=transfer, manifest=manifest)
+    packed = call(agent, "pack", source, transfer_id=transfer, action="create", manifest=manifest)
+    for offset in range(0, packed["size"], chunk):
+        part = call(
+            agent, "pack", source, transfer_id=transfer, action="read", offset=offset, length=chunk
+        )
+        call(
+            agent,
+            "unpack",
+            target,
+            transfer_id=transfer,
+            action="write",
+            offset=offset,
+            data=part["data"],
+        )
+    call(
+        agent,
+        "unpack",
+        target,
+        transfer_id=transfer,
+        action="extract",
+        size=packed["size"],
+        hash=packed["hash"],
+    )
+    call(agent, "pack", source, transfer_id=transfer, action="remove")
+    call(agent, "finish", target, transfer_id=transfer, replace=True, repos=[])
+    return packed
+
+
+def test_pack_moves_files_links_modes_and_cleans_up(agent):
+    call(agent, "init", "one")
+    src = agent.root / "one"
+    (src / "deep/er").mkdir(parents=True)
+    (src / "deep/er/data.bin").write_bytes(os.urandom(300 * 1024))
+    (src / "notes.md").write_text("研发" * 1000)
+    (src / "empty.txt").write_text("")
+    (src / "run.sh").write_text("#!/bin/sh\n")
+    (src / "run.sh").chmod(0o755)
+    (src / "latest").symlink_to("notes.md")
+    packed = pack_to(agent, "one", "two")
+    dst = agent.root / "two"
+    assert packed["files"] >= 4
+    assert (dst / "deep/er/data.bin").read_bytes() == (src / "deep/er/data.bin").read_bytes()
+    assert (dst / "notes.md").read_text() == "研发" * 1000
+    assert (dst / "empty.txt").read_bytes() == b""
+    assert (dst / "run.sh").stat().st_mode & 0o777 == 0o755
+    assert os.readlink(dst / "latest") == "notes.md"
+    assert not list(agent.root.glob(".coreman-transfer-*"))
+
+
+def test_pack_stops_when_a_source_file_changed_after_export(agent):
+    call(agent, "init", "one")
+    (agent.root / "one/notes.md").write_text("v1")
+    manifest = call(agent, "export", "one")["manifest"]
+    (agent.root / "one/notes.md").write_text("v2")
+    with pytest.raises(OperationError, match="发生变化"):
+        call(
+            agent, "pack", "one", transfer_id=str(uuid.uuid4()), action="create", manifest=manifest
+        )
+
+
+def test_unpack_refuses_a_pack_that_does_not_match_the_manifest(agent):
+    import io
+    import tarfile
+
+    call(agent, "init", "one")
+    (agent.root / "one/notes.md").write_text("hello")
+    manifest = call(agent, "export", "one")["manifest"]
+
+    def ship(members):
+        transfer = str(uuid.uuid4())
+        call(agent, "import", "two", transfer_id=transfer, manifest=manifest)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for info, body in members:
+                tar.addfile(info, io.BytesIO(body) if body is not None else None)
+        raw = buf.getvalue()
+        call(
+            agent,
+            "unpack",
+            "two",
+            transfer_id=transfer,
+            action="write",
+            offset=0,
+            data=base64.b64encode(raw).decode(),
+        )
+        return call(
+            agent,
+            "unpack",
+            "two",
+            transfer_id=transfer,
+            action="extract",
+            size=len(raw),
+            hash=hashlib.sha256(raw).hexdigest(),
+        )
+
+    def regular(name, body):
+        info = tarfile.TarInfo(name)
+        info.size = len(body)
+        return info, body
+
+    link = tarfile.TarInfo("notes.md")
+    link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    for members in (
+        [regular("notes.md", b"hello"), regular("../escape.txt", b"x")],
+        [regular("notes.md", b"hello"), regular("extra.txt", b"x")],
+        [(link, None)],
+        [regular("notes.md", b"hello!")],
+        [],
+    ):
+        with pytest.raises(OperationError, match="不符"):
+            ship(members)
+    assert not (agent.root / "escape.txt").exists()
+    assert not (agent.root / "two").exists()
+
+
+def test_unpack_refuses_a_pack_with_the_wrong_hash(agent):
+    call(agent, "init", "one")
+    (agent.root / "one/notes.md").write_text("hello")
+    manifest = call(agent, "export", "one")["manifest"]
+    transfer = str(uuid.uuid4())
+    call(agent, "import", "two", transfer_id=transfer, manifest=manifest)
+    packed = call(agent, "pack", "one", transfer_id=transfer, action="create", manifest=manifest)
+    part = call(agent, "pack", "one", transfer_id=transfer, action="read", offset=0)
+    call(agent, "unpack", "two", transfer_id=transfer, action="write", offset=0, data=part["data"])
+    with pytest.raises(OperationError, match="校验失败"):
+        call(
+            agent,
+            "unpack",
+            "two",
+            transfer_id=transfer,
+            action="extract",
+            size=packed["size"],
+            hash="0" * 64,
+        )
+
+
 def test_ping_reports_transfer_capabilities(agent):
     ping = agent.dispatch({"type": "ping"})
     assert ping["workspace_git"] == 1
+    assert ping["workspace_pack"] == 1
     assert ping["workspace_chunk"] == 2 * 1024 * 1024
     assert ping["session_transfer"] == 1
 

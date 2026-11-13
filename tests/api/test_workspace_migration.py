@@ -1,5 +1,6 @@
 """Workspace migration fences execution and retains recovered memory on failure."""
 
+import os
 import uuid
 from datetime import timedelta
 
@@ -1156,12 +1157,65 @@ async def test_shared_directory_needs_both_runtimes_and_cleans_up_on_the_source(
     assert all(op == "ping" for op, _, _ in calls)
 
 
+async def test_cross_node_copy_ships_one_pack_when_both_runtimes_support_it(
+    client, db_session, monkeypatch, tmp_path
+):
+    """两端都报 workspace_pack：文件打成一个压缩包传，不再逐个文件读写，源节点的包用完即删。"""
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    folder = tmp_path / "source" / bot.bot_key
+    (folder / "report.txt").write_text("数据")
+    (folder / "deep" / "empty").mkdir(parents=True)
+    (folder / "deep" / "empty" / "blank.txt").write_text("")
+    (folder / "run.sh").write_text("#!/bin/sh\n")
+    (folder / "run.sh").chmod(0o755)
+    (folder / "latest").symlink_to("report.txt")
+    seen.clear()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    steps = [(op, p.get("action")) for op, p in seen if op.startswith("workspace-")]
+    assert steps == [
+        ("workspace-info", None),
+        ("workspace-export", None),
+        ("workspace-import", None),
+        ("workspace-pack", "create"),
+        ("workspace-pack", "read"),
+        ("workspace-unpack", "write"),
+        ("workspace-unpack", "extract"),
+        ("workspace-pack", "remove"),
+        ("workspace-finish", None),
+    ]
+    moved = tmp_path / "destination" / bot.bot_key
+    assert (moved / "report.txt").read_text() == "数据"
+    assert (moved / "deep" / "empty" / "blank.txt").read_text() == ""
+    assert (moved / "run.sh").stat().st_mode & 0o777 == 0o755
+    assert os.readlink(moved / "latest") == "report.txt"
+    assert not list((tmp_path / "source").glob(".coreman-transfer-*"))
+    assert not list((tmp_path / "destination").glob(".coreman-transfer-*"))
+
+
 async def test_ordinary_cross_node_switch_keeps_its_node_command_sequence(
     client, db_session, monkeypatch, tmp_path
 ):
-    """助理那边的改动不碰普通员工：跨节点复制换机向节点发的命令与顺序原样不变。"""
+    """目标运行时没升级（不报 workspace_pack）：跨节点复制照旧逐个文件读写，命令与顺序不变。"""
+    from coreman.core.bots import workspace_transfer
+
     bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
     (tmp_path / "source" / bot.bot_key / "report.txt").write_text("数据")
+    real = workspace_transfer.call_agent
+
+    async def call(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "ping" and relay.id == target.id:
+            result = {k: v for k, v in result.items() if k != "workspace_pack"}
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
     seen.clear()
     await login_existing(client, db_session, await db_session.get(User, bot.created_by))
     response = await client.post(
