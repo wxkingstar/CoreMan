@@ -15,6 +15,7 @@ from coreman.core.assistants.watch_grade import Item, Level
 from coreman.core.db.models import AssistantWatch, Bot, FeishuPersonalGrant
 from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal import service as personal
+from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import seed_assistant
 from tests.integration.lifecycle_helpers import CIPHER, FakeMessenger
@@ -24,6 +25,7 @@ from tests.integration.watch_helpers import (
     inbox_rows,
     install,
     primed,
+    scope_of,
     tick,
     tokens,
     watch_row,
@@ -94,6 +96,40 @@ async def test_a_new_row_counts_from_its_creation(
     await db_session.commit()
     await tick(factory, base + timedelta(seconds=1))
     assert api.refreshes == 1
+
+
+async def test_keeping_the_token_alive_needs_no_particular_permission(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """保活只刷新令牌、不调业务接口：授权里没有读会话的权限（所有者没勾，或刷新后权限少了）
+    也不该让它失败——否则这份授权会因为七天没刷新而整个作废。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session, shift="off")
+    base = base_time()
+    await primed(db_session, who, base)
+    await db_session.execute(
+        text(
+            "UPDATE feishu_personal_grants SET scopes = ARRAY['offline_access',"
+            " 'docx:document:readonly'] WHERE bot_id = :id"
+        ),
+        {"id": who.bot.id},
+    )
+    await last_alive(db_session, who, base - timedelta(hours=25))
+    # 业务接口照旧要权限：这份授权读不了会话。
+    with pytest.raises(PersonalError) as caught:
+        await personal._authorize(db_session, CIPHER, scope_of(who), "GET", "/im/v1/chats")
+    assert caught.value.code == "selected_permission_missing"
+    await db_session.commit()
+    now = (await watch_row(db_session, who)).next_poll_at
+    counts = await tick(make_session_factory(db_engine), now)
+    assert counts["assistant_watch_keepalives"] == 1 and counts["assistant_watch_backoff"] == 0
+    assert api.refreshes == 1 and api.hits == []
+    row = await watch_row(db_session, who)
+    assert (row.state, row.last_error, row.keepalive_at) == ("idle", None, now)
+    grant = await db_session.get(
+        FeishuPersonalGrant, (who.bot.id, who.owner.id), populate_existing=True
+    )
+    assert grant is not None and grant.status == "connected"
 
 
 async def test_a_failed_keepalive_backs_off_and_keeps_the_grant(

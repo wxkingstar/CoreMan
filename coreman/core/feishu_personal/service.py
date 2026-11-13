@@ -513,23 +513,38 @@ async def _authorize(
     scope: Scope,
     method: str,
     path: str,
-    *,
-    refresh: bool = False,
 ) -> tuple[endpoints.Endpoint, FeishuPersonalGrant, str, dict[str, Any]]:
-    """The registered endpoint, the owner's grant and a fresh token, or a PersonalError.
-
-    `refresh` 为真时不看到期时间，直接刷新一次（保活用）。
-    """
+    """The registered endpoint, the owner's grant and a fresh token, or a PersonalError."""
     endpoint = endpoints.match(method, path)
     if endpoint is None:
         raise PersonalError("invalid_tool_or_arguments")
     if write_fuse.blocked(scope.bot, endpoint.kind):
         # 个人助理的写操作只能由平台在审批通过后执行；任何别的路径到这里为止。
         raise PersonalError("approval_required")
+    row, secret, tokens = await _tokens(session, cipher, scope, endpoint)
+    return endpoint, row, secret, tokens
+
+
+async def _tokens(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    endpoint: endpoints.Endpoint | None,
+    *,
+    refresh: bool = False,
+) -> tuple[FeishuPersonalGrant, str, dict[str, Any]]:
+    """所有者的授权行与一份没过期的令牌（需要时刷新并落在这一行上）。
+
+    Args:
+        endpoint: 接下来要调的接口：刷新前后各核对一次这份授权够不够得着它。None 表示不调
+            任何业务接口（保活），不做权限核对
+        refresh: 为真时不看到期时间，直接刷新一次（保活用）
+    """
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")
-    _check(row, endpoint)
+    if endpoint is not None:
+        _check(row, endpoint)
     tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
     if refresh or not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
         if not tokens.get("refresh_token"):
@@ -552,8 +567,9 @@ async def _authorize(
         save_tokens(cipher, row, data, secret)
         tokens = data
     # A refresh may return fewer permissions than before.
-    _check(row, endpoint)
-    return endpoint, row, secret, tokens
+    if endpoint is not None:
+        _check(row, endpoint)
+    return row, secret, tokens
 
 
 def _failure(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint, code: Any) -> PersonalError:
@@ -767,11 +783,10 @@ async def keep_alive(session: AsyncSession, cipher: Cipher, scope: Scope) -> Non
     """只把所有者的令牌续上，不调任何业务接口。
 
     刷新令牌约 7 天不用就失效：盯消息在不轮询的时候（下班、暂停）每 24 小时调一次。与读写
-    走同一把锁、同一次落库；调用方必须提交。
+    走同一把锁、同一次落库；调用方必须提交。不核对任何接口的权限：授权里没有读会话的权限
+    （所有者没勾，或刷新后权限变少）时令牌照样要续，否则整份授权七天后作废。
 
     Raises:
         PersonalError: 没有有效的授权、刷新被拒（授权随之标为过期）、上游不可用或限频
     """
-    await _authorize(
-        session, cipher, scope, "GET", endpoints.ENDPOINTS["im.chats"].path, refresh=True
-    )
+    await _tokens(session, cipher, scope, None, refresh=True)
