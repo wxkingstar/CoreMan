@@ -332,3 +332,10 @@ def test_memory_section_only_for_codex_with_a_memory_directory() -> None:
     assert "# Persistent Memory" not in build("codex", "")
     # Claude Code 自带记忆说明，守护进程已把目录指到同一处。
     assert "# Persistent Memory" not in build("claude", path)
+
+
+def test_time_rule_leaves_progress_timestamps_to_the_platform() -> None:
+    from coreman.core.prompting.defaults import TIME_RULE
+
+    assert "Do not start progress updates with a clock time" in TIME_RULE
+    assert "even if a memory or an earlier message asks you" in TIME_RULE

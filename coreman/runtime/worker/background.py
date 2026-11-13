@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from coreman.core.bus import outbox, streams
+from coreman.core.chat import liveness
 from coreman.core.db.models import TaskStream
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.stream_render import truncate_utf8
@@ -92,6 +93,7 @@ class BackgroundPusher:
         timing: Timing = DEFAULT_TIMING,
         locale: str = "zh",
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.task_id = task_id
         self.bot_id = bot_id
@@ -102,6 +104,7 @@ class BackgroundPusher:
         self.timing = timing
         self.locale = locale
         self.clock = clock
+        self.wall_clock = wall_clock
         self.offset = 0
         self.pushed_count = 0
         self.degraded = False
@@ -160,7 +163,15 @@ class BackgroundPusher:
         # 推过一段就等于「用户刚收到动静」：静默从这一刻重新计，阈值也全部重新可用。
         self._last_activity, self._fired = now, set()
         # 上一段推完才补上的段间空行会落在这一段开头，前缀自带空行，去掉免得空两遍。
-        return [self.cap(msg("bg_progress_prefix", self.locale) + delta.lstrip("\n"))]
+        return [self.cap(self.progress_prefix() + delta.lstrip("\n"))]
+
+    def progress_prefix(self) -> str:
+        """进展消息的开头。飞书带上推送时刻，用 `<local_datetime>` 按看的人设备时区显示；
+        模型自己在正文里写的钟点不准（它不会每段都去取时间），提示词里也要求它不写。"""
+        if self.platform != "feishu":
+            return msg("bg_progress_prefix", self.locale)
+        now = self.wall_clock()
+        return msg("bg_progress_prefix_at", self.locale, at=liveness.clock(now, now))
 
     def heartbeat(self, now: float) -> str | None:
         """提交轮静默心跳：静默跨过每个阈值各推一次；任何推送都让静默计时从头再来。
