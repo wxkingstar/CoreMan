@@ -110,7 +110,7 @@ async def test_first_turn_gets_pinned_pages_then_only_changes(
     assert third["session_id"] == first["session_id"]
     block = turn_block(third)
     assert "置顶页有更新" in block and "说话简短，先给结论，再给理由。" in block
-    assert "【置顶页 rules/tone.md（版本 2）】" in block and "索引（共" not in block
+    assert "【置顶页（版本 2）】\n> 路径：rules/tone.md" in block and "索引（共" not in block
 
     # 第四轮：变更已经给过，不再重复。
     await hand_back(db_session, bot)
