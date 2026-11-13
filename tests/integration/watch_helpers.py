@@ -13,13 +13,22 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import keys, sealed, settings
+from coreman.core.assistants import keys, sealed, settings, watch
 from coreman.core.assistants.apps import SECRET_AAD
 from coreman.core.assistants.records import new_assistant_bot
 from coreman.core.bots.secrets import CREDENTIALS_AAD, encrypt_json
-from coreman.core.db.models import Bot, FeishuPersonalGrant, PlatformApp, Task, User, UserIdentity
+from coreman.core.db.models import (
+    AssistantInbox,
+    AssistantWatch,
+    Bot,
+    FeishuPersonalGrant,
+    PlatformApp,
+    Task,
+    User,
+    UserIdentity,
+)
 from coreman.core.feishu_personal import ratelimit
 from coreman.core.feishu_personal import service as personal
 from coreman.core.feishu_personal.policy import Scope
@@ -153,6 +162,14 @@ def msg(
     }
 
 
+def _since(message: dict[str, Any], floor: int) -> bool:
+    """这条消息不早于 `floor`；时间读不出来的（用例故意造的坏数据）照样给出去。"""
+    try:
+        return int(message["create_time"]) >= floor
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
 @dataclass
 class Hit:
     path: str
@@ -216,7 +233,7 @@ class FakeFeishuApi:
         self._wait(path)
         everything = [item for items in self.history.values() for item in items]
         if path == "/im/v1/chats":
-            return {"code": 0, "data": {"items": [dict(chat) for chat in self.chats]}}
+            return {"code": 0, "data": {"items": list(self.chats)}}
         if path == "/im/v1/messages/mget":
             wanted = params["message_ids"]
             return {
@@ -236,9 +253,15 @@ class FakeFeishuApi:
                 found = [
                     m
                     for m in self.history.get(container, [])
-                    if int(m["create_time"]) >= floor and not m.get("_thread_only")
+                    if _since(m, floor) and not m.get("_thread_only")
                 ]
-            return {"code": 0, "data": {"items": found, "has_more": False}}
+            # 按页给：`page_token` 是下一页的起点。
+            start, size = int(params.get("page_token") or 0), int(params.get("page_size") or 50)
+            more = start + size < len(found)
+            data: dict[str, Any] = {"items": found[start : start + size], "has_more": more}
+            if more:
+                data["page_token"] = str(start + size)
+            return {"code": 0, "data": data}
         if path.startswith("/im/v1/chats/"):
             chat_id = path.rsplit("/", 1)[1]
             return {"code": 0, "data": {"chat_mode": self.modes.get(chat_id, "group"), "name": ""}}
@@ -249,3 +272,45 @@ def install(monkeypatch: pytest.MonkeyPatch) -> FakeFeishuApi:
     api = FakeFeishuApi()
     monkeypatch.setattr(personal, "_http", api.http)
     return api
+
+
+def ms(at: datetime) -> int:
+    return int(at.timestamp() * 1000)
+
+
+async def primed(
+    session: AsyncSession, who: Watched, since: datetime, *, head: list[str] | None = None
+) -> None:
+    """一行已经过了第一轮（只记基线）的盯消息状态，立刻到期；`head` 是上一轮的会话顺序。"""
+    session.add(
+        AssistantWatch(
+            bot_id=who.bot.id,
+            cursor={"since": ms(since), "chats": {}, "todo": []},
+            head_enc=list(head or []),
+            next_poll_at=since,
+        )
+    )
+    await session.commit()
+
+
+async def tick(factory: async_sessionmaker[AsyncSession], at: datetime) -> dict[str, int]:
+    return await watch.tick(factory, CIPHER, at)
+
+
+async def watch_row(session: AsyncSession, who: Watched) -> AssistantWatch:
+    row = await session.get(AssistantWatch, who.bot.id, populate_existing=True)
+    assert row is not None
+    return row
+
+
+async def inbox_rows(session: AsyncSession, who: Watched) -> list[AssistantInbox]:
+    rows = list(
+        await session.scalars(
+            select(AssistantInbox)
+            .where(AssistantInbox.bot_id == who.bot.id)
+            .order_by(AssistantInbox.id)
+            .execution_options(populate_existing=True)
+        )
+    )
+    await sealed.open_rows(session, rows)
+    return rows

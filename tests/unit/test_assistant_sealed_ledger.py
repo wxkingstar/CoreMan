@@ -42,6 +42,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/followups.py": 2,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
+    # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序）
+    "coreman/core/assistants/watch.py": 1,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
@@ -124,6 +126,8 @@ WRITE_STATEMENTS = {
     # 转录：派出前写交接编号、没到过节点的轮次清掉交接编号（都是元数据）；内容经 ORM 写入，
     # flush 钩子封存
     "coreman/core/assistants/transcripts.py": 2,
+    # 盯消息：登记缺行的助理、意外失败后往后推，都只写调度用的列
+    "coreman/core/assistants/watch.py": 2,
     # 收件箱：入箱经 seal_values 封存摘要；压着与两种作废只改级别、状态与时间
     "coreman/core/assistants/watch_inbox.py": 4,
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
