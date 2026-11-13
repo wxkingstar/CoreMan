@@ -64,4 +64,11 @@ describe('AdminLayout menu', () => {
       expect(labels[feishu - 1]).toBe(i18n.global.t('menu.myAssistant'))
     }
   })
+
+  it('shows Personal assistants to platform administrators only', () => {
+    const label = i18n.global.t('menu.assistants')
+    const labels = (role: string) => mountAs(role).findAll('.el-menu-item').map((el) => el.text())
+    expect(labels('platform_admin')).toContain(label)
+    for (const role of ['member', 'team_lead', 'ai_committee']) expect(labels(role)).not.toContain(label)
+  })
 })

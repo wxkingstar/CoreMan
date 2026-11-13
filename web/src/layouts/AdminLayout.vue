@@ -27,6 +27,7 @@ export const MENU: readonly MenuItem[] = [
   { key: 'workTasks', path: '/work-tasks' },
   { key: 'announcements', path: '/announcements', roles: ['ai_committee', 'platform_admin'] },
   { key: 'runtime', path: '/runtime', roles: ['team_lead', 'ai_committee', 'platform_admin'] },
+  { key: 'assistants', path: '/assistants', roles: ['platform_admin'] },
   { key: 'users', path: '/users' },
   { key: 'apps', path: '/apps', roles: ['platform_admin'] },
   { key: 'audit', path: '/audit', roles: ['ai_committee', 'platform_admin'] },
@@ -40,7 +41,7 @@ export const MENU: readonly MenuItem[] = [
 <script setup lang="ts">
 import BrandLogo from '@/components/BrandLogo.vue'
 import { computed, ref, watch } from 'vue'
-import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, Lock, OfficeBuilding, SwitchButton, Moon, Tickets, Service } from '@element-plus/icons-vue'
+import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, Lock, OfficeBuilding, SwitchButton, Moon, Tickets, Service, Avatar } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
@@ -50,11 +51,11 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { myAssistant: Service, bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, myApiTokens: Key, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { myAssistant: Service, assistants: Avatar, bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, myApiTokens: Key, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
   { key: 'collaboration', keys: ['bots', 'workTasks', 'skills', 'cron', 'chatLogs', 'myAssistant', 'myFeishu', 'myWecom', 'myCredentials', 'myApiTokens', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
-  { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
+  { key: 'platform', keys: ['relays', 'runtime', 'assistants', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]
 const organizationKeys = ['users', 'apps', 'systems', 'credentials']
 function visible(item: MenuItem): boolean { return !item.roles || !!auth.user && item.roles.includes(auth.user.role as Role) }

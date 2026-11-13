@@ -56,6 +56,12 @@ export const router = createRouter({
           meta: { roles: ['team_lead', 'ai_committee', 'platform_admin'] },
         },
         {
+          path: 'assistants',
+          name: 'assistants',
+          component: () => import('@/views/AssistantsView.vue'),
+          meta: { roles: ['platform_admin'] },
+        },
+        {
           path: 'apps',
           name: 'apps',
           component: () => import('@/views/PlatformAppsView.vue'),
