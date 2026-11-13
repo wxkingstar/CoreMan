@@ -109,7 +109,7 @@ async def test_the_list_shows_watch_health_without_any_content(
             state="backoff",
             last_error="rate_limited",
             last_ok_at=seen,
-            cursor={"since": 1, "chats": {"oc_private_chat": {"t": 2}}, "todo": []},
+            cursor_enc={"since": 1, "chats": {"oc_private_chat": {"t": 2}}, "todo": []},
         )
     )
     await db_session.commit()
