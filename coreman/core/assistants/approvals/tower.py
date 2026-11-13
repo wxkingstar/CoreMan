@@ -2,9 +2,10 @@
 
 接口形状已对照 Tower 服务端实现核实（见计划文末）：错误应答是 `{"error": 代码, "message": …}`。
 
-平台既是发送端又是目标系统 `feishu-personal`：提交时用发送端的 Key，批准后先用发送端的 Key
-取一次性令牌，再用目标系统的 Key 核销。令牌与「方法 + 路径 + 请求体 + 调用方」的哈希绑定，
-请求体是暂存参数的规范化形式，所以核销通过就说明要执行的正是被批准的那份参数。
+平台既是发送端又是目标系统：个人工具的写操作登记为 `feishu-personal`，调度公共员工登记为
+`assistant-dispatch`，各有各的 Key，由 `Config.target` 带着。提交时用发送端的 Key，批准后先用
+发送端的 Key 取一次性令牌，再用目标系统的 Key 核销。令牌与「方法 + 路径 + 请求体 + 调用方」的
+哈希绑定，请求体是暂存参数的规范化形式，所以核销通过就说明要执行的正是被批准的那份参数。
 
 请求不跟随重定向、不读环境里的代理变量：头里带着 API Key。报错只带代码，不带地址与正文。
 """
@@ -26,6 +27,8 @@ from coreman.core.cloud_proxy import tower_gate
 from coreman.core.config import Settings
 
 TARGET = "feishu-personal"
+# 调度公共员工（`assistant_ask_bot` 且允许对方改动）的审批单走自己的目标系统。
+DISPATCH_TARGET = "assistant-dispatch"
 TIMEOUT_SECONDS = 15.0
 # 测试换成 httpx.MockTransport。
 transport: httpx.AsyncBaseTransport | None = None
@@ -50,6 +53,8 @@ class Config:
     sender_key: str
     target_key: str
     public_base_url: str
+    # 这份配置对应的目标系统：提交、哈希与核销都按它。
+    target: str = TARGET
 
 
 @dataclass(frozen=True)
@@ -58,19 +63,24 @@ class Submitted:
     updated: bool
 
 
-def config(settings: Settings) -> Config | None:
-    """审批闸门要用的部署配置；缺任何一项返回 None（提交失败、写操作不执行）。"""
-    target = settings.tower_target_keys.get(TARGET)
+def config(settings: Settings, target: str = TARGET) -> Config | None:
+    """审批闸门要用的部署配置；缺任何一项返回 None（提交失败、写操作不执行）。
+
+    Args:
+        target: 目标系统；它在 `TOWER_TARGET_KEYS` 里要有自己的 Key
+    """
+    key = settings.tower_target_keys.get(target)
     sender = settings.tower_sender_key
-    if not (settings.tower_url and sender and target and settings.tower_callback_secret):
+    if not (settings.tower_url and sender and key and settings.tower_callback_secret):
         return None
-    if not (sender.get_secret_value() and target.get_secret_value()):
+    if not (sender.get_secret_value() and key.get_secret_value()):
         return None
     return Config(
         settings.tower_url.rstrip("/"),
         sender.get_secret_value(),
-        target.get_secret_value(),
+        key.get_secret_value(),
         settings.public_base_url.rstrip("/"),
+        target,
     )
 
 
@@ -96,7 +106,7 @@ def request_url(cfg: Config, external_id: str) -> str:
 
 def request_hash(cfg: Config, external_id: str, body: bytes, caller: str) -> str:
     path = urllib.parse.urlsplit(request_url(cfg, external_id)).path
-    return str(tower_gate.request_hash_parts("POST", TARGET, path, "", body, caller))
+    return str(tower_gate.request_hash_parts("POST", cfg.target, path, "", body, caller))
 
 
 async def _post(cfg: Config, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -148,7 +158,7 @@ async def submit(
             "content": content,
             "expires_at": expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "request": {
-                "target": TARGET,
+                "target": cfg.target,
                 "caller": caller,
                 "requester": requester,
                 "method": "POST",

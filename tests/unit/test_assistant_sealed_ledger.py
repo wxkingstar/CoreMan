@@ -36,6 +36,8 @@ ENTITY_SELECTS = {
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
+    # 调度单：同一份内容有没有在途的单，session.scalar（自动还原）
+    "coreman/core/assistants/approvals/dispatching.py": 1,
     # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表与清理附件显式还原；
     # 撤回与过期只改状态
     "coreman/core/assistants/approvals/service.py": 7,
@@ -124,6 +126,8 @@ RAW_STATEMENTS = {
 # 在已登记的文件里新增一条写语句同样会失败。
 WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
+    # 调度单：经 ORM 新建（flush 钩子封存目标员工与问题）
+    "coreman/core/assistants/approvals/dispatching.py": 1,
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
     # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据

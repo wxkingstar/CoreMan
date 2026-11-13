@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import sealed
-from coreman.core.assistants.approvals import execute, service, tower
+from coreman.core.assistants import dispatch, sealed
+from coreman.core.assistants.approvals import dispatching, execute, service, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.bus import tasks
 from coreman.core.config import get_settings
@@ -33,15 +34,26 @@ class AssistantApprovalExecuteHandler:
             # 载荷读不出来（数据密钥已销毁时认领就会失败，到不了这里）：没有可执行的东西。
             await self._finish(ctx, "failed", "approval_missing")
             return
-        try:
-            status = await execute.run(
-                ctx.session_factory,
-                ctx.cipher,
-                approval_id,
-                ctx.task,
-                cfg,
-                FileRelay(settings, ctx.cipher),
+        async with ctx.session_factory() as session:
+            # 只取工具名（不是内容列）：调度公共员工的单走自己的目标系统与执行路径。
+            tool = await session.scalar(
+                select(AssistantApproval.tool).where(AssistantApproval.id == approval_id)
             )
+        dispatched = tool == dispatch.TOOL
+        if dispatched:
+            cfg = tower.config(settings, tower.DISPATCH_TARGET)
+        try:
+            if dispatched:
+                status = await dispatching.run(ctx.session_factory, approval_id, cfg)
+            else:
+                status = await execute.run(
+                    ctx.session_factory,
+                    ctx.cipher,
+                    approval_id,
+                    ctx.task,
+                    cfg,
+                    FileRelay(settings, ctx.cipher),
+                )
         except execute.Retry as exc:
             if ctx.task.attempts < MAX_ATTEMPTS:
                 async with ctx.session_factory() as session:
