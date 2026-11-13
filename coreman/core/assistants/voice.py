@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +67,12 @@ def _own(item: Item, open_id: str, since_ms: int) -> bool:
 
 
 async def collect(
-    call: feed.Reader, prefs: AssistantSettings, now: datetime, *, ours: Ours | None = None
+    call: feed.Reader,
+    prefs: AssistantSettings,
+    now: datetime,
+    *,
+    ours: Ours | None = None,
+    between: Callable[[], Awaitable[None]] | None = None,
 ) -> list[str]:
     """以所有者身份读最近活跃的几个会话，只留他自己发出的文本消息（新的在前）。
 
@@ -79,21 +85,28 @@ async def collect(
     Args:
         ours: 给一批消息编号，返回其中由平台经审批替所有者发出的（`sent.among`）：那些话是
             助理起草的，不是他的口吻
+        between: 每调完一次飞书（列会话、读一个会话）之后调用。页面上的重新生成用它提交
+            事务：所有者的授权锁随提交释放，这位助理的轮询与工具调用不用等整个读取结束
 
     Raises:
         PersonalError: 飞书读不了（含限频）
     """
     since_ms = int((aware_utc(now) - WINDOW).timestamp() * 1000)
+    own_chat, open_id = prefs.chat_id, prefs.open_id
     listed = await feed.list_chats(call)
+    if between is not None:
+        await between()
     samples: list[str] = []
-    for chat_id in [chat for chat in listed.order if chat != prefs.chat_id][:MAX_CHATS]:
+    for chat_id in [chat for chat in listed.order if chat != own_chat][:MAX_CHATS]:
         raws, _ = await feed.read_main(call, chat_id, since_ms)
+        if between is not None:
+            await between()
         own: list[Item] = []
         for raw in reversed(raws):
             item = feed.to_item(
                 raw, chat_id=chat_id, chat_kind=listed.kinds.get(chat_id, "group"), chat_name=""
             )
-            if item is not None and _own(item, prefs.open_id, since_ms):
+            if item is not None and _own(item, open_id, since_ms):
                 own.append(item)
         drafted = await ours([item.message_id for item in own]) if ours and own else ()
         for item in own:

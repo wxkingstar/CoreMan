@@ -369,6 +369,10 @@ class AssistantSettings(Base):
     worked_on: Mapped[date | None] = mapped_column(Date)
     compiled_on: Mapped[date | None] = mapped_column(Date)
     compiled_at: Mapped[datetime | None] = _ts()
+    # 所有者在页面上要求重新生成口吻页：最近一天里每次尝试的时刻（秒，限频用，只有时间），
+    # 以及正在进行的那一次从什么时候开始读飞书（读完清掉）。
+    voice_attempts: Mapped[list[int]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    voice_regenerating_at: Mapped[datetime | None] = _ts()
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 

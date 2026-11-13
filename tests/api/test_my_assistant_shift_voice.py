@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import cold_start, keys, notes, settings, voice
 from coreman.core.assistants.kinds import COLD_START_KIND
-from coreman.core.db.models import Bot, User
+from coreman.core.db.models import Bot, FeishuPersonalGrant, User
+from coreman.core.feishu_personal import ratelimit
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
@@ -46,6 +49,9 @@ class Feishu:
         self.authorized = True
         self.error: Exception | None = None
         self.calls = 0
+        # 读到一半停住：`entered` 置位表示已经在读，`release` 置位才读完。
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.hold = False
 
 
 @pytest.fixture
@@ -55,9 +61,16 @@ def feishu(monkeypatch: pytest.MonkeyPatch) -> Feishu:
     async def reader(session: Any, cipher: Any, bot: Any, row: Any) -> Any:
         return READER if fake.authorized else None
 
-    async def collect(call: Any, prefs: Any, now: datetime, *, ours: Any) -> list[str]:
+    async def collect(
+        call: Any, prefs: Any, now: datetime, *, ours: Any, between: Any = None
+    ) -> list[str]:
         assert call is READER and await ours(["om_x"]) == frozenset()
         fake.calls += 1
+        if between is not None:
+            await between()
+        if fake.hold:
+            fake.entered.set()
+            await fake.release.wait()
         if fake.error is not None:
             raise fake.error
         return list(fake.samples)
@@ -232,3 +245,140 @@ async def test_an_admin_with_their_own_assistant_only_touches_their_own(
     assert (await settings.get(db_session, theirs.id)).shift_override == "off"
     assert await tasks_of(db_session, bot, COLD_START_KIND) == []
     assert len(await tasks_of(db_session, theirs, COLD_START_KIND)) == 1
+
+
+async def _attempts(db_session: AsyncSession, bot: Bot) -> list[int]:
+    found = await db_session.scalar(
+        text("SELECT voice_attempts FROM assistant_settings WHERE bot_id = :id"), {"id": bot.id}
+    )
+    await db_session.commit()
+    return list(found or [])
+
+
+async def test_attempts_that_queue_nothing_are_limited_too(
+    client: httpx.AsyncClient, db_session: AsyncSession, feishu: Feishu
+) -> None:
+    bot, _owner_row = await _owner(client, db_session)
+    # 样本太少：每次都读了飞书、却一轮都没排上。
+    feishu.samples = SAMPLES[: voice.MIN_MESSAGES - 1]
+    for _ in range(cold_start.REGENERATE_HOURLY):
+        assert code(await client.post(VOICE)) == "too_few_samples"
+    refused = await client.post(VOICE)
+    assert refused.status_code == 429 and code(refused) == "voice_attempt_limit"
+    assert feishu.calls == cold_start.REGENERATE_HOURLY
+    # 一小时之后又能试，直到一天的次数用完。
+    stamps = await _attempts(db_session, bot)
+    assert len(stamps) == cold_start.REGENERATE_HOURLY
+    await db_session.execute(
+        text("UPDATE assistant_settings SET voice_attempts = :v ::jsonb WHERE bot_id = :id"),
+        {"v": str([stamp - 2 * 3600 for stamp in stamps]), "id": bot.id},
+    )
+    await db_session.commit()
+    for _ in range(cold_start.REGENERATE_ATTEMPTS_DAILY - cold_start.REGENERATE_HOURLY):
+        assert code(await client.post(VOICE)) == "too_few_samples"
+    await db_session.execute(
+        text(
+            "UPDATE assistant_settings SET voice_attempts ="
+            " (SELECT jsonb_agg(v::bigint - 7200) FROM jsonb_array_elements_text(voice_attempts) v)"
+            " WHERE bot_id = :id"
+        ),
+        {"id": bot.id},
+    )
+    await db_session.commit()
+    refused = await client.post(VOICE)
+    assert refused.status_code == 429 and code(refused) == "voice_attempt_limit"
+    assert feishu.calls == cold_start.REGENERATE_ATTEMPTS_DAILY
+    # 超过一天的尝试不再算。
+    await db_session.execute(
+        text("UPDATE assistant_settings SET voice_attempts = :v ::jsonb WHERE bot_id = :id"),
+        {"v": str([int(utcnow().timestamp()) - 25 * 3600] * 6), "id": bot.id},
+    )
+    await db_session.commit()
+    assert code(await client.post(VOICE)) == "too_few_samples"
+    assert len(await _attempts(db_session, bot)) == 1
+
+
+async def test_a_second_request_while_one_is_reading_is_told_so(
+    client: httpx.AsyncClient, db_session: AsyncSession, feishu: Feishu
+) -> None:
+    bot, _owner_row = await _owner(client, db_session)
+    feishu.hold = True
+    first = asyncio.create_task(client.post(VOICE))
+    await asyncio.wait_for(feishu.entered.wait(), 10)
+    # 读飞书之前已经提交：这次尝试别的连接看得到，设置行也没被这个请求锁着。
+    locked = await db_session.scalar(
+        text(
+            "SELECT jsonb_array_length(voice_attempts) FROM assistant_settings"
+            " WHERE bot_id = :id FOR UPDATE NOWAIT"
+        ),
+        {"id": bot.id},
+    )
+    await db_session.commit()
+    assert locked == 1
+    second = await client.post(VOICE)
+    assert second.status_code == 409 and code(second) == "regenerate_in_progress"
+    assert feishu.calls == 1
+    feishu.release.set()
+    done = await first
+    assert done.status_code == 200 and done.json()["data"] == {"queued": True, "left_today": 2}
+    # 读完之后标记清掉了：可以再来。
+    feishu.hold = False
+    assert (await client.post(VOICE)).status_code == 200
+    assert len(await tasks_of(db_session, bot, COLD_START_KIND)) == 2
+
+
+async def test_a_reading_mark_left_by_a_crash_does_not_block_for_long(
+    client: httpx.AsyncClient, db_session: AsyncSession, feishu: Feishu
+) -> None:
+    bot, _owner_row = await _owner(client, db_session)
+    prefs = await settings.get(db_session, bot.id)
+    prefs.voice_regenerating_at = utcnow() - timedelta(seconds=30)
+    await db_session.commit()
+    assert code(await client.post(VOICE)) == "regenerate_in_progress"
+    prefs.voice_regenerating_at = utcnow() - cold_start.REGENERATE_STALE - timedelta(seconds=1)
+    await db_session.commit()
+    assert (await client.post(VOICE)).status_code == 200
+
+
+async def test_a_failed_read_clears_the_mark_and_keeps_the_attempt(
+    client: httpx.AsyncClient, db_session: AsyncSession, feishu: Feishu
+) -> None:
+    bot, _owner_row = await _owner(client, db_session)
+    feishu.error = RuntimeError("boom")
+    refused = await client.post(VOICE)
+    # 读飞书时意外出错不冒成 500（这一次里可能刚换过令牌，事务要照常提交）。
+    assert refused.status_code == 502 and code(refused) == "feishu_unavailable"
+    await fresh(db_session, bot)
+    prefs = await settings.get(db_session, bot.id)
+    assert prefs.voice_regenerating_at is None and len(prefs.voice_attempts) == 1
+
+
+async def test_a_tight_feishu_budget_turns_the_request_away_before_reading(
+    client: httpx.AsyncClient, db_session: AsyncSession, feishu: Feishu
+) -> None:
+    bot, owner = await _owner(client, db_session)
+    db_session.add(
+        FeishuPersonalGrant(
+            bot_id=bot.id,
+            user_id=owner.id,
+            app_id="cli_example",
+            app_fingerprint="f",
+            platform_user_id="owner_pid",
+            open_id="ou_owner",
+            tenant_key="tenant-example",
+            status="connected",
+        )
+    )
+    await ratelimit.Budget("cli_example").record(
+        db_session,
+        ratelimit.HISTORY,
+        units=int(ratelimit.LIMITS[ratelimit.HISTORY] * ratelimit.TIGHT),
+    )
+    await db_session.commit()
+    refused = await client.post(VOICE)
+    assert refused.status_code == 429 and code(refused) == "feishu_busy"
+    # 没读飞书，也不占尝试次数。
+    assert feishu.calls == 0 and await _attempts(db_session, bot) == []
+    await db_session.execute(text("DELETE FROM feishu_rate_usage"))
+    await db_session.commit()
+    assert (await client.post(VOICE)).status_code == 200

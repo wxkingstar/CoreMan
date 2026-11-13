@@ -27,7 +27,14 @@ from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import COLD_START_STEPS, AssistantSettings, Bot, Task
+from coreman.core.db.models import (
+    COLD_START_STEPS,
+    AssistantSettings,
+    Bot,
+    FeishuPersonalGrant,
+    Task,
+)
+from coreman.core.feishu_personal import ratelimit
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.logging import get_logger
@@ -464,6 +471,12 @@ async def _voice_step(
 
 # 所有者在「我的助理」页上要求重新生成口吻页：每天（他的时区）至多排这么多轮。
 REGENERATE_DAILY = 3
+# 另按尝试次数限频，不管排没排上：每次尝试都要以他的身份列会话、读几个会话的历史。
+REGENERATE_HOURLY = 3
+REGENERATE_ATTEMPTS_DAILY = 6
+_HOUR, _DAY = 3600, 86400
+# 「正在读飞书」的标记最多认这么久：读的那个进程中途没了，之后的请求不会一直被挡。
+REGENERATE_STALE = timedelta(minutes=3)
 
 
 class VoiceError(Exception):
@@ -482,55 +495,196 @@ def _regenerate_nonce(row: AssistantSettings, now: datetime, slot: int) -> int:
     return int(assistant_settings.local_today(row, now).strftime("%Y%m%d")) * 10 + slot
 
 
-async def regenerate_voice(
-    session: AsyncSession, cipher: Cipher, bot: Bot, now: datetime
-) -> tuple[Task, int]:
-    """所有者要求重新生成口吻页：再读一次他最近自己发出的消息，排一轮口吻样本。调用方提交。
+async def _free_slots(
+    session: AsyncSession, bot_id: uuid.UUID, row: AssistantSettings, now: datetime
+) -> list[int]:
+    """今天还没用掉的幂等编号（按排上的轮数算：查任务的幂等键）。"""
+    nonces = [_regenerate_nonce(row, now, slot) for slot in range(1, REGENERATE_DAILY + 1)]
+    keys = [voice.dedupe_key(bot_id, nonce) for nonce in nonces]
+    used = set(await session.scalars(select(Task.dedupe_key).where(Task.dedupe_key.in_(keys))))
+    return [nonce for nonce, key in zip(nonces, keys, strict=True) if key not in used]
 
-    与冷启动第一步是同一条路（`voice.collect` + `voice.enqueue`，同样不出声、同样只读得到他
-    自己的话）。那一轮保存时仍守 `voice.save` 的规矩：口吻页最后不是助理写的就不覆盖，所以这里
-    提前拒绝，不白跑一轮。次数按排上的轮数算（查任务的幂等键），没排上的不占。
 
-    Returns:
-        （排上的任务, 今天还能再排几次）
+async def _locked_settings(
+    session: AsyncSession, bot_id: uuid.UUID
+) -> tuple[Bot, AssistantSettings]:
+    """这位助理与它的设置行（加行锁）；助理不在可用状态时拒绝。"""
+    await sealed.guard_logs(session, bot_id)
+    bot = await session.get(Bot, bot_id, populate_existing=True)
+    if bot is None or not bot.enabled or not is_assistant(bot) or bot.assistant_state != "active":
+        raise VoiceError("assistant_unavailable")
+    await assistant_settings.get(session, bot_id)
+    await session.flush()
+    row = await session.get(AssistantSettings, bot_id, with_for_update=True, populate_existing=True)
+    assert row is not None
+    return bot, row
 
-    Raises:
-        VoiceError: `cold_start_unfinished`（冷启动还没做完，口吻页归它管）、`content_locked`、
-            `voice_page_edited`、`voice_daily_limit`、`authorization_required`（以所有者身份读
-            飞书的核对没过）、`feishu_unavailable`、`too_few_samples`、`assistant_unavailable`
-    """
-    row = await assistant_settings.get(session, bot.id)
+
+async def _grant_app(session: AsyncSession, bot: Bot) -> str | None:
+    """所有者的授权挂在哪个应用下（限频按应用计）；没有授权行返回 None。"""
+    app_id: str | None = await session.scalar(
+        select(FeishuPersonalGrant.app_id).where(
+            FeishuPersonalGrant.bot_id == bot.id, FeishuPersonalGrant.user_id == bot.owner_id
+        )
+    )
+    return app_id
+
+
+async def _admit_regenerate(
+    session: AsyncSession, cipher: Cipher, bot_id: uuid.UUID, now: datetime
+) -> None:
+    """第一段事务：过门槛、记一次尝试、立「正在读」的标记。调用方提交。不调飞书。"""
+    bot, row = await _locked_settings(session, bot_id)
     if row.cold_start_done_at is None or not assistant_settings.identified(row):
         raise VoiceError("cold_start_unfinished")
     if not await sealed.key_ready(session, bot.id):
         raise VoiceError("content_locked")
     if await notes.author(session, bot.id, voice.PATH) not in (None, "assistant"):
         raise VoiceError("voice_page_edited")
-    nonces = [_regenerate_nonce(row, now, slot) for slot in range(1, REGENERATE_DAILY + 1)]
-    keys = [voice.dedupe_key(bot.id, nonce) for nonce in nonces]
-    used = set(await session.scalars(select(Task.dedupe_key).where(Task.dedupe_key.in_(keys))))
-    free = [nonce for nonce, key in zip(nonces, keys, strict=True) if key not in used]
-    if not free:
+    running = row.voice_regenerating_at
+    if running is not None and aware_utc(now) - aware_utc(running) < REGENERATE_STALE:
+        # 同一刻的另一个请求正在读飞书：明说，不让它等到最后撞幂等键。
+        raise VoiceError("regenerate_in_progress")
+    if not await _free_slots(session, bot.id, row, now):
         raise VoiceError("voice_daily_limit")
-    call = await _reader(session, cipher, bot, row)
-    if call is None:
+    at = int(aware_utc(now).timestamp())
+    attempts = [int(one) for one in row.voice_attempts or [] if at - int(one) < _DAY]
+    recent = [one for one in attempts if at - one < _HOUR]
+    if len(recent) >= REGENERATE_HOURLY or len(attempts) >= REGENERATE_ATTEMPTS_DAILY:
+        raise VoiceError("voice_attempt_limit")
+    if await _reader(session, cipher, bot, row) is None:
         raise VoiceError("authorization_required")
+    # 飞书按应用限频、全员共用：盯消息已经在拉长间隔时，页面上的这次读取让路。
+    app_id = await _grant_app(session, bot)
+    if app_id and await ratelimit.Budget(app_id).load(session, now) >= ratelimit.TIGHT:
+        raise VoiceError("feishu_busy")
+    row.voice_attempts = [*attempts, at]
+    row.voice_regenerating_at, row.updated_at = now, now
 
-    async def ours(message_ids: list[str]) -> frozenset[str]:
-        # 平台经审批代所有者发出的消息是助理起草的：不进口吻样本。
-        return await sent.among(session, bot.id, message_ids)
 
+async def _read_samples(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, bot_id: uuid.UUID, now: datetime
+) -> tuple[list[str], str | None]:
+    """第二段：以所有者身份读飞书。返回（样本, 没读成的原因代码）。
+
+    每调完一次飞书就提交（`voice.collect` 的 `between`）：所有者的授权锁与刷新到的新令牌都
+    不跨调用留着。调过飞书之后不让异常冒出事务——刷新令牌一次性使用，回滚会把新令牌丢掉——
+    所以意外的异常也只记类型、照常提交，按读不了飞书报。读到的消息只在内存里。
+    """
+    async with factory() as session:
+        await sealed.guard_logs(session, bot_id)
+        bot = await session.get(Bot, bot_id)
+        row = await session.get(AssistantSettings, bot_id)
+        call = (
+            await _reader(session, cipher, bot, row)
+            if bot is not None and row is not None
+            else None
+        )
+        if call is None or bot is None or row is None:
+            await session.commit()
+            return [], "authorization_required"
+
+        async def ours(message_ids: list[str]) -> frozenset[str]:
+            # 平台经审批代所有者发出的消息是助理起草的：不进口吻样本。
+            return await sent.among(session, bot_id, message_ids)
+
+        samples: list[str] = []
+        code: str | None = None
+        try:
+            samples = await voice.collect(call, row, now, ours=ours, between=session.commit)
+        except ratelimit.RateLimited as exc:
+            code = "feishu_busy"
+            app_id = await _grant_app(session, bot)
+            if exc.category is not None and app_id:
+                # 与盯消息同一个做法：记一笔占满额度的用量，同一应用的人这段时间都不调。
+                await ratelimit.Budget(app_id).exhaust(session, exc.category, now, exc.retry_after)
+        except PersonalError:
+            code = "feishu_unavailable"
+        except Exception as exc:  # noqa: BLE001 只记类型
+            log.warning(
+                "assistant_voice_regenerate_failed", bot_id=str(bot_id), error=type(exc).__name__
+            )
+            code = "feishu_unavailable"
+        await session.commit()
+        return ([] if code else samples), code
+
+
+async def _release_regenerate(
+    factory: async_sessionmaker[AsyncSession], bot_id: uuid.UUID, started: datetime
+) -> None:
+    """清掉这一次立的「正在读」标记（别的请求在它过期后另立的不动）。"""
+    async with factory() as session:
+        row = await session.get(AssistantSettings, bot_id, with_for_update=True)
+        if row is not None and row.voice_regenerating_at is not None:
+            if aware_utc(row.voice_regenerating_at) == aware_utc(started):
+                row.voice_regenerating_at = None
+        await session.commit()
+
+
+async def regenerate_voice(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, bot_id: uuid.UUID, now: datetime
+) -> tuple[Task, int]:
+    """所有者要求重新生成口吻页：再读一次他最近自己发出的消息，排一轮口吻样本。自己提交。
+
+    与冷启动第一步是同一条路（`voice.collect` + `voice.enqueue`，同样不出声、同样只读得到他
+    自己的话）。那一轮保存时仍守 `voice.save` 的规矩：口吻页最后不是助理写的就不覆盖，所以这里
+    提前拒绝，不白跑一轮。
+
+    分三段短事务，读飞书时不占着调用方的事务：先过门槛、记一次尝试并立「正在读」的标记，
+    提交；再读飞书（每次调用之后提交）；最后另开事务排任务并清掉标记。限频有两层：排上的
+    轮数每天至多 `REGENERATE_DAILY`（查任务的幂等键）；尝试次数每小时至多
+    `REGENERATE_HOURLY`、每 24 小时至多 `REGENERATE_ATTEMPTS_DAILY`，读了飞书就算，不管排没
+    排上。调用方不能带着自己没提交的事务进来（会与这里的行锁互等）。
+
+    Returns:
+        （排上的任务, 今天还能再排几次）
+
+    Raises:
+        VoiceError: `cold_start_unfinished`（冷启动还没做完，口吻页归它管）、`content_locked`、
+            `voice_page_edited`、`voice_daily_limit`、`voice_attempt_limit`、
+            `regenerate_in_progress`（另一个请求正在读）、`authorization_required`（以所有者
+            身份读飞书的核对没过）、`feishu_busy`（应用的分钟用量紧，或被飞书限频）、
+            `feishu_unavailable`、`too_few_samples`、`assistant_unavailable`
+    """
+    async with factory() as session:
+        try:
+            await _admit_regenerate(session, cipher, bot_id, now)
+        except VoiceError:
+            await session.rollback()
+            raise
+        await session.commit()
+    released = False
     try:
-        samples = await voice.collect(call, row, now, ours=ours)
-    except PersonalError:
-        raise VoiceError("feishu_unavailable") from None
-    if len(samples) < voice.MIN_MESSAGES:
-        raise VoiceError("too_few_samples")
-    task = await voice.enqueue(session, bot, row, samples, free[0])
-    if task is None:
-        # 同一刻另一个请求占了这个编号，或这位助理现在跑不了平台来源的轮次。
-        raise VoiceError("assistant_unavailable")
-    return task, len(free) - 1
+        samples, code = await _read_samples(factory, cipher, bot_id, now)
+        async with factory() as session:
+            bot, row = await _locked_settings(session, bot_id)
+            if row.voice_regenerating_at is not None and aware_utc(
+                row.voice_regenerating_at
+            ) == aware_utc(now):
+                row.voice_regenerating_at = None
+            # 标记随这一段一起提交；下面不论排没排上都不用再清。
+            await session.commit()
+            released = True
+            if code is not None:
+                raise VoiceError(code)
+            if len(samples) < voice.MIN_MESSAGES:
+                raise VoiceError("too_few_samples")
+            free = await _free_slots(session, bot.id, row, now)
+            if not free:
+                raise VoiceError("voice_daily_limit")
+            task = await voice.enqueue(session, bot, row, samples, free[0])
+            if task is None:
+                # 这位助理现在跑不了平台来源的轮次。
+                await session.rollback()
+                raise VoiceError("assistant_unavailable")
+            await session.commit()
+            return task, len(free) - 1
+    finally:
+        if not released:
+            try:
+                await _release_regenerate(factory, bot_id, now)
+            except Exception as exc:  # noqa: BLE001 清不掉就等它过期；只记类型
+                log.warning("assistant_voice_release_failed", error=type(exc).__name__)
 
 
 async def _question_step(

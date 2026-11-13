@@ -20,6 +20,7 @@
 | 3B 调度公共员工 | `assistant_ask_bot`、`assistant_bot_list`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | — |
 | 3C 页面 | `/api/me/assistant`、「我的助理」页、管理台的助理列表与设置项表单 | 2C 2E 3A | — |
 | 3D 导入与访问日志 | `assistant_access_log`、导入与导出接口 | 2B 2C 3C | `0102_assistant_access_log` |
+| 第二轮审查修补 | 第 2、3 期独立审查发现的问题（周末消息被年龄上限丢掉、无人在场调度到别人的私有运行时、重新生成口吻页的限频与事务等，见裁定 24–26） | 2D–3D | `0103_assistant_voice_attempts` |
 
 ## 裁定（与 spec 不同或 spec 没写明的地方）
 
@@ -103,6 +104,8 @@
     - 调度公共员工那一轮（裁定 17，明文存在目标员工名下）不是解密，不进访问日志；管理命令以所有者身份建的会话目前仍能在对话记录里看到它的内容（`withheld` 只看发起人与机器人令牌），没有在本层处理。
 
 24. **无人在场时不能调度跑在别人私有运行时上的员工**（独立审查之后，对裁定 17 的补充）：裁定 17 定了无人在场的只读调度不经审批、不收紧目标侧的令牌与凭证，这一条不改它，只在平台侧多拦一种目标。现状：交回轮次的输入来自他人；`accept_bot_help` 默认开、没设可用人名单的员工谁都能调度；私有运行时（`relay_servers.visibility = 'private'`）的所有者在自己的节点上读得到那一轮的问题。三者合起来，同事发一条诱导消息就能让助理把内容问给他自己建的员工。裁定：发起的轮次无人在场（`scope.unattended`）时，目标员工绑的运行时实例是私有的且 `owner_id` 不是这位助理的所有者（含没记所有者的），`dispatch.authorize` / `resolve` 拒绝并返回 `owner_turn_required`，`dispatch.candidates` 不列它；所有者在场的轮次、公开运行时、所有者自己的私有运行时不受限。`allow_write=true` 的调度由无人在场的轮次提交时在提交前就拒（`dispatch_tools` 先 `resolve` 后提交），批准后执行时按审批单里记的 `unattended` 再查一次（提交之后运行时才改成私有的情况）。目标那一轮开轮前的复查不带这道拦截（求助的行里没记发起时在不在场，派出时已经查过）。代价：所有者不在场时助理问不了同事私有运行时上的员工，只能记待跟进等他当面发起；公开运行时上的员工仍可能被诱导调度，那部分仍按裁定 17 靠提示词、长度上限与审计。接口：`dispatch.authorize(..., attended=True)`、`resolve(..., attended=True)`、`candidates(..., attended=True)`、`on_foreign_runtime(session, target, owner_id)`。
+
+25. **重新生成口吻页的限频与事务**（独立审查之后，改裁定 22 里的相应一条，迁移 `0103`）：原先每天 3 次只数排上的轮数，样本太少、飞书读不了都不占次数却每次都读飞书，可以无限重放；读飞书时请求的事务一直开着，所有者的授权锁挡住这位助理的轮询与工具调用。裁定：`cold_start.regenerate_voice(factory, cipher, bot_id, now)` 自己分三段短事务（过门槛并记一次尝试、读飞书、排任务），路由先结束请求的事务再调它；读飞书时每调完一次就提交（`voice.collect` 的 `between`），读的过程中任何异常都不冒出事务（刷新过的令牌照常落库），按 `feishu_unavailable` 报。限频两层：排上的轮数每天至多 3（不变）；尝试次数每小时至多 3、每 24 小时至多 6（滚动窗口，读了飞书就算），存在 `assistant_settings.voice_attempts`（秒级时间戳的列表）。读之前看应用的分钟用量（`ratelimit.Budget.load`），到 `ratelimit.TIGHT` 就返回 `feishu_busy`（429），不读、不占次数。同时只有一个请求在读：`assistant_settings.voice_regenerating_at` 作标记，第二个请求返回 `regenerate_in_progress`；标记读完即清，进程中途没了的 3 分钟后失效。代价：多两列；滚动窗口与「每天 3 轮」按所有者时区的自然日口径不同，页面只显示后者的剩余次数。
 
 ## 层间接口
 

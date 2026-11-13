@@ -99,6 +99,13 @@ VOICE_ERRORS: dict[str, tuple[int, str]] = {
         429,
         f"今天已经重新生成过 {cold_start.REGENERATE_DAILY} 次了，明天再试",
     ),
+    "voice_attempt_limit": (
+        429,
+        f"试得太频繁了（每小时至多 {cold_start.REGENERATE_HOURLY} 次、"
+        f"每天至多 {cold_start.REGENERATE_ATTEMPTS_DAILY} 次），过一阵再试",
+    ),
+    "regenerate_in_progress": (409, "上一次重新生成还在读取飞书，等它结束再试"),
+    "feishu_busy": (429, "飞书接口现在用量紧张，稍后再试"),
     "authorization_required": (409, "需要先在私聊里重新完成飞书授权"),
     "feishu_unavailable": (502, "暂时读不了飞书，稍后再试"),
     "too_few_samples": (409, "最近 7 天里你自己发出的消息太少，归纳不出口吻"),
@@ -294,19 +301,19 @@ async def voice_regenerate(
 ) -> dict[str, Any]:
     """重新生成口吻页：再读一次所有者最近自己发出的消息，排一轮不出声的归纳。
 
-    冷启动没做完时拒绝；每天至多 `cold_start.REGENERATE_DAILY` 次。这个请求里要以所有者身份
-    读飞书（几个会话的近期消息），可能要十几秒；读到的消息不出现在响应里。
+    冷启动没做完时拒绝；每天至多排 `cold_start.REGENERATE_DAILY` 轮，另按尝试次数限频（读了
+    飞书就算，不管排没排上）。这个请求里要以所有者身份读飞书（几个会话的近期消息），可能要
+    十几秒；读到的消息不出现在响应里。读飞书不在这个请求的事务里做：先把它结束掉，核心函数
+    自己分段开短事务（见 `cold_start.regenerate_voice`）。
     """
+    bot_id = own.bot.id
+    await session.rollback()
     try:
         _task, left = await cold_start.regenerate_voice(
-            session, request.app.state.cipher, own.bot, utcnow()
+            request.app.state.session_factory, request.app.state.cipher, bot_id, utcnow()
         )
     except cold_start.VoiceError as exc:
-        # 提交而不是回滚：读飞书时可能刚换过所有者的令牌（刷新令牌是一次性的），回滚会把新令牌
-        # 丢掉。到这里为止这个事务里没有别的改动。
-        await session.commit()
         raise refuse(exc.code, VOICE_ERRORS) from None
-    await session.commit()
     return {"code": 0, "data": {"queued": True, "left_today": left}}
 
 
