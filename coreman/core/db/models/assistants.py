@@ -404,6 +404,9 @@ class AssistantPage(Base):
 FOLLOWUP_CATEGORIES = ("decide", "promised", "waiting", "remind")
 FOLLOWUP_STATUSES = ("open", "snoozed", "done", "dropped")
 FOLLOWUP_CLOSE_CODES = ("origin_recalled",)
+JOB_KINDS = ("subtask", "bot_help")
+JOB_ORIGINS = ("assistant", "system")
+JOB_STATUSES = ("queued", "running", "done", "failed", "cancelled", "blocked")
 
 
 class AssistantFollowup(Base):
@@ -412,7 +415,7 @@ class AssistantFollowup(Base):
     `title_enc` / `notes_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出的行上是明文。
     分类、状态、两个日期、编号是明文，按日期查询不解密。`seq` 在一位助理内递增，显示为 F012。
     `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 只在平台自动关闭时有值。
-    `job_id` 是第 3 期子任务的编号，这里只是普通列。
+    `job_id` 指向引出这一条的子任务（`assistant_jobs`），子任务行删掉时置空。
     """
 
     __tablename__ = "assistant_followups"
@@ -434,7 +437,9 @@ class AssistantFollowup(Base):
     review_on: Mapped[date | None] = mapped_column(Date)
     due_on: Mapped[date | None] = mapped_column(Date)
     origin_message_id: Mapped[str | None] = mapped_column(Text)
-    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_jobs.id", ondelete="SET NULL")
+    )
     title_enc: Mapped[str] = mapped_column(Text)
     notes_enc: Mapped[str | None] = mapped_column(Text)
     close_code: Mapped[str | None] = mapped_column(Text)
@@ -555,3 +560,64 @@ class AssistantDelivery(Base):
     next_sweep_at: Mapped[datetime] = _ts(server_default=text("now()"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class AssistantJob(Base):
+    """助理派出去的一件事：自己的会话里跑一轮或几轮，结论回到主会话。
+
+    `title_enc` / `brief_enc` / `message_enc` / `result_enc` / `blocked_enc` 登记在
+    `sealed.COLUMNS`：库里是密文，经会话取出的行上是明文。其余列是调度与排障用的元数据。
+    `last_task_id` 是在途或最近那一轮的任务号，`result_task_id` 是把结论投回主会话的那一轮；
+    两列都不设外键，任务行会被过期清理。`kind = 'bot_help'` 与 `target_bot_id` 留给调度公共员工。
+    """
+
+    __tablename__ = "assistant_jobs"
+    __table_args__ = (
+        CheckConstraint(enum_check("kind", JOB_KINDS), name="kind"),
+        CheckConstraint(enum_check("origin", JOB_ORIGINS), name="origin"),
+        CheckConstraint(enum_check("status", JOB_STATUSES), name="status"),
+        Index("assistant_jobs_bot_status_idx", "bot_id", "status"),
+        Index(
+            "assistant_jobs_live_idx",
+            "deadline_at",
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index(
+            "assistant_jobs_unreported_idx",
+            "bot_id",
+            postgresql_where=text(
+                "report AND reported_at IS NULL"
+                " AND status IN ('done', 'failed', 'cancelled', 'blocked')"
+            ),
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'subtask'"))
+    origin: Mapped[str] = mapped_column(Text, server_default=text("'assistant'"))
+    target_bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(Text, server_default=text("'queued'"))
+    title_enc: Mapped[str] = mapped_column(Text)
+    brief_enc: Mapped[str] = mapped_column(Text)
+    message_enc: Mapped[str | None] = mapped_column(Text)
+    result_enc: Mapped[str | None] = mapped_column(Text)
+    blocked_enc: Mapped[str | None] = mapped_column(Text)
+    session_key: Mapped[str] = mapped_column(Text)
+    origin_session_key: Mapped[str] = mapped_column(Text)
+    rounds: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_task_id: Mapped[int | None] = mapped_column(BigInteger)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    report: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    result_task_id: Mapped[int | None] = mapped_column(BigInteger)
+    report_seq: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    report_after: Mapped[datetime | None] = _ts()
+    report_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    reported_at: Mapped[datetime | None] = _ts()
+    report_code: Mapped[str | None] = mapped_column(Text)
+    deadline_at: Mapped[datetime] = _ts()
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    started_at: Mapped[datetime | None] = _ts()
+    finished_at: Mapped[datetime | None] = _ts()

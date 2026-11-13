@@ -13,6 +13,7 @@ from coreman.core.db.models import (
     AssistantApproval,
     AssistantFollowup,
     AssistantInbox,
+    AssistantJob,
     AssistantPage,
     AssistantSettings,
     AssistantTranscript,
@@ -53,6 +54,7 @@ def test_every_content_column_is_registered() -> None:
         AssistantSettings,
         AssistantPage,
         AssistantFollowup,
+        AssistantJob,
         AssistantInbox,
         AssistantWatch,
     }
@@ -64,6 +66,13 @@ def test_every_content_column_is_registered() -> None:
     assert set(sealed.COLUMNS[AssistantWatch]) == {"head_enc"}
     assert set(sealed.COLUMNS[AssistantInbox]) == {"summary_enc"}
     assert set(sealed.COLUMNS[AssistantFollowup]) == {"title_enc", "notes_enc"}
+    assert set(sealed.COLUMNS[AssistantJob]) == {
+        "title_enc",
+        "brief_enc",
+        "message_enc",
+        "result_enc",
+        "blocked_enc",
+    }
     assert set(sealed.COLUMNS[AssistantSettings]) == {"focus_chats_enc", "ignored_chats_enc"}
     assert set(sealed.COLUMNS[AssistantPage]) == {
         "path_enc",

@@ -47,6 +47,7 @@ from coreman.core.db.models import (
     AssistantApproval,
     AssistantFollowup,
     AssistantInbox,
+    AssistantJob,
     AssistantPage,
     AssistantSettings,
     AssistantTranscript,
@@ -200,6 +201,14 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     },
     # 待跟进：标题与备注。标题非空，读不出来时给空串。
     AssistantFollowup: {"title_enc": Text(""), "notes_enc": Text()},
+    # 子任务：标题、首轮的交代、最近一次追问、结论、卡住的原因。标题与交代非空，读不出来时给空串。
+    AssistantJob: {
+        "title_enc": Text(""),
+        "brief_enc": Text(""),
+        "message_enc": Text(),
+        "result_enc": Text(),
+        "blocked_enc": Text(),
+    },
     # 所有者标记的重点群与忽略的会话：会话 id 的列表整值封存，读不出来按空列表。
     AssistantSettings: {"focus_chats_enc": Whole([]), "ignored_chats_enc": Whole([])},
     # 盯消息：上一轮的会话顺序（会话 id 的列表）与交回条目的摘要。

@@ -33,6 +33,9 @@ from coreman.core.db.models.assistants import (
     INBOX_KINDS,
     INBOX_LEVELS,
     INBOX_STATUSES,
+    JOB_KINDS,
+    JOB_ORIGINS,
+    JOB_STATUSES,
     PAGE_AUTHORS,
     SHIFT_OVERRIDES,
     WATCH_STATES,
@@ -40,6 +43,7 @@ from coreman.core.db.models.assistants import (
     AssistantDelivery,
     AssistantFollowup,
     AssistantInbox,
+    AssistantJob,
     AssistantKey,
     AssistantLifecycle,
     AssistantMark,
@@ -330,6 +334,10 @@ __all__ += [
     "FOLLOWUP_CLOSE_CODES",
     "FOLLOWUP_STATUSES",
     "AssistantFollowup",
+    "JOB_KINDS",
+    "JOB_ORIGINS",
+    "JOB_STATUSES",
+    "AssistantJob",
 ]
 
 __all__ += [
