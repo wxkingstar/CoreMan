@@ -47,6 +47,11 @@ async def reload(session: AsyncSession, row: AssistantApproval) -> AssistantAppr
 def test_own_tools_are_listed_for_assistants() -> None:
     listed = assistant_tools.definitions([], groups=assistant_tools.GROUPS)
     assert [item["name"] for item in listed] == [
+        "notes_index",
+        "notes_read",
+        "notes_search",
+        "notes_write",
+        "notes_delete",
         "approval_revise",
         "approval_withdraw",
         "approval_list",

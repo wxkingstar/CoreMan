@@ -25,6 +25,7 @@ APPROVAL_TOOLS = [
     "approval_list",
     "assistant_mark_processing",
 ]
+NOTES_TOOLS = ["notes_index", "notes_read", "notes_search", "notes_write", "notes_delete"]
 INVALID = {"error": "invalid_tool_or_arguments"}
 CTX = tools.Context(None, None, None)  # type: ignore[arg-type]
 
@@ -93,7 +94,12 @@ def test_a_full_turn_lists_staged_writes_and_every_group(demo: Recorder) -> None
     out = tools.definitions(source, groups=tools.GROUPS)
     names = [item["name"] for item in out]
     assert names[: len(source)] == [item["name"] for item in source]
-    assert names[len(source) :] == ["notes_demo", *APPROVAL_TOOLS, "assistant_spawn_demo"]
+    assert names[len(source) :] == [
+        *NOTES_TOOLS,
+        "notes_demo",
+        *APPROVAL_TOOLS,
+        "assistant_spawn_demo",
+    ]
     writes = [item for item in out if catalog.is_write(item["name"])]
     assert writes and "feishu_reply_message" in {item["name"] for item in writes}
     for item in writes:
@@ -108,7 +114,7 @@ def test_a_turn_without_the_approval_group_is_read_only(demo: Recorder) -> None:
     source = base()
     names = [item["name"] for item in tools.definitions(source, groups=("knowledge",))]
     reads = [item["name"] for item in source if not catalog.is_write(item["name"])]
-    assert names == [*reads, "notes_demo"]
+    assert names == [*reads, *NOTES_TOOLS, "notes_demo"]
     assert "feishu_chat_history" in names and "feishu_reply_message" not in names
 
 

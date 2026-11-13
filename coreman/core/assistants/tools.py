@@ -20,6 +20,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import notes_tools
 from coreman.core.assistants.approvals import catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
 from coreman.core.assistants.kinds import SUBTASK_KIND
@@ -139,4 +140,9 @@ async def _approval(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[
     return out if out is not None else {"error": _INVALID}
 
 
+async def _notes(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await notes_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
+register("knowledge", lambda: list(notes_tools.DEFINITIONS), _notes)
 register("approval", approval_tools.own_definitions, _approval)
