@@ -38,6 +38,8 @@ ENTITY_SELECTS = {
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 审批单：去重与决定是 session.scalar（自动还原）；列表与清理附件显式还原；撤回与过期只改状态
     "coreman/core/assistants/approvals/service.py": 6,
+    # 知识库：按路径摘要取一页，显式还原，读不出来的报 content_locked
+    "coreman/core/assistants/notes.py": 1,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
@@ -111,6 +113,8 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
+    # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
+    "coreman/core/assistants/notes.py": 1,
     "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列
     # 转录：派出前写交接编号、没到过节点的轮次清掉交接编号（都是元数据）；内容经 ORM 写入，
     # flush 钩子封存
