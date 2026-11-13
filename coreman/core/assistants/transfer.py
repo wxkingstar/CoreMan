@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -21,7 +22,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import followups, notes, sealed
+from coreman.core.assistants import archive, followups, notes, sealed
 from coreman.core.assistants.archive import FollowupItem, PageFile, Parsed
 from coreman.core.assistants.followups import FollowupError
 from coreman.core.assistants.notes import NotesError
@@ -252,3 +253,41 @@ def counts(planned: Plan) -> str:
         f"new={len(planned.create)},over={len(planned.overwrite)},"
         f"skip={len(planned.skip)},fu={len(planned.followups)}"
     )
+
+
+async def export(session: AsyncSession, bot_id: uuid.UUID, *, today: date) -> tuple[bytes, str]:
+    """全部知识页与未结的待跟进（含推后的），打成与导入相同格式的 zip。
+
+    Returns:
+        （压缩包, 访问记录里的对象——只有两个数）
+
+    Raises:
+        TransferError: `content_locked`
+    """
+    if not await sealed.key_ready(session, bot_id):
+        raise TransferError("content_locked")
+    pages = await notes.dump(session, bot_id)
+    live = await followups.list_(session, bot_id, "open", today=today, limit=followups.MAX_OPEN)
+    items = [
+        {
+            "category": row.category,
+            "title": row.title_enc,
+            "notes": row.notes_enc,
+            "review_on": row.review_on.isoformat() if row.review_on else None,
+            "due_on": row.due_on.isoformat() if row.due_on else None,
+            "status": row.status,
+        }
+        for row in live
+    ]
+    files = [
+        (
+            page.path,
+            archive.page_text(
+                title=page.title, summary=page.summary, pinned=page.pinned, body=page.body
+            ),
+        )
+        for page in pages
+    ]
+    # 压缩是纯计算，装满的知识库有二十多 MB：放到线程里，不占事件循环。
+    data = await asyncio.to_thread(archive.build, files, archive.followups_text(items))
+    return data, f"pages={len(pages)},followups={len(items)}"

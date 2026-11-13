@@ -39,6 +39,8 @@ READS: dict[str, list[tuple[str, str]]] = {
     "/settings": [("settings.read", "")],
     # 访问记录本身只有编号、动作与时间：看它不解密任何东西。
     "/access-log": [],
+    # 导出把全部知识页与未结的待跟进解了出来：对象只有两个数。
+    "/export": [("export", "pages=1,followups=1")],
 }
 # 不是 GET 却把解密后的内容带回来的：知识页的路径只放请求体；改设置、即时上下班的响应里
 # 带着解密后的重点群与忽略名单。键是（方法, 路径）。

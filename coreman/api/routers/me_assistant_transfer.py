@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Iterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Form, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api import mcp_rpc
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.api.routers.me_assistant_common import (
     DEPENDENCIES,
     PREFIX,
     Mine,
+    mine,
     refuse,
     writable,
 )
@@ -55,6 +59,16 @@ TRANSFER_ERRORS: dict[str, tuple[int, str]] = {
     "too_many_followups": (409, f"导入之后未结的待跟进会超过 {followups.MAX_OPEN} 条的上限"),
     "plan_changed": (409, "预览之后内容有变化，请核对新的清单后再确认"),
 }
+
+
+# 下载时一次发出去的块。
+CHUNK = 64 * 1024
+
+
+def _chunks(data: bytes) -> Iterator[bytes]:
+    view = memoryview(data)
+    for start in range(0, len(view), CHUNK):
+        yield bytes(view[start : start + CHUNK])
 
 
 # 读上传时一次取的块。
@@ -142,3 +156,34 @@ async def import_archive(
         # 没带摘要，或摘要对不上：不预览就写不进去。
         raise refuse("plan_changed", TRANSFER_ERRORS)
     return {"code": 0, "data": {**summary, "dry_run": True}}
+
+
+@router.get("/export")
+async def export_archive(
+    own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
+) -> StreamingResponse:
+    """把全部知识页与未结的待跟进打成与导入相同格式的 zip 下载。
+
+    不要求助理处于可用状态：停用开始之后、密钥销毁之前仍然可以导出。
+    """
+    bot_id, actor_id = own.bot.id, own.actor.id
+    prefs = await assistant_settings.get(session, bot_id)
+    today = assistant_settings.local_today(prefs, utcnow())
+    try:
+        data, counted = await transfer.export(session, bot_id, today=today)
+    except TransferError as exc:
+        await session.rollback()
+        raise refuse(exc.code, TRANSFER_ERRORS) from None
+    await access_log.record(session, bot_id, actor_id, "export", counted)
+    # 发出第一个字节之前先把记录提交：提交不了，内容也不交出去。
+    await session.commit()
+    return StreamingResponse(
+        _chunks(data),
+        media_type="application/zip",
+        # 直接返回响应对象时路由级的 no_store 依赖不生效，这里自己带上。
+        headers={
+            **mcp_rpc.NO_STORE,
+            "Content-Disposition": f'attachment; filename="assistant-export-{today:%Y%m%d}.zip"',
+            "Content-Length": str(len(data)),
+        },
+    )

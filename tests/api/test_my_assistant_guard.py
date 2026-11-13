@@ -64,6 +64,7 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("PATCH", "/settings"): {"json": {"timezone": "UTC"}},
     ("GET", "/access-log"): {},
     ("POST", "/import"): {"files": {"archive": ("notes.zip", ARCHIVE, "application/zip")}},
+    ("GET", "/export"): {},
     ("POST", "/shift"): {"json": {"state": "on"}},
     ("POST", "/voice/regenerate"): {},
     # 停用放最后：有的用例按这个顺序把每条路由都调一遍。

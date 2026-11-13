@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -552,3 +552,9 @@ async def changes_since(session: AsyncSession, bot_id: uuid.UUID, since: datetim
         full = await _rows(session, bot_id, bodies=True, pinned=True, since=since)
         parts += [_page_text(row) for row in _by_path(full)]
     return "\n".join(parts)
+
+
+async def dump(session: AsyncSession, bot_id: uuid.UUID) -> list[Page]:
+    """全部页面连正文，按路径排序：导出用。读不出来的行（密钥已销毁）不返回。"""
+    rows = _by_path(await _rows(session, bot_id, bodies=True))
+    return [Page(**asdict(_entry(row)), body=row.body_enc) for row in rows]
