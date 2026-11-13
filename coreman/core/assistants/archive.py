@@ -10,9 +10,10 @@
   是一个 YAML 映射。只采用三个键：`title`、`summary`（标量，按字符串用）与 `pinned`（布尔），
   其余键忽略。收尾的 `---` 之后的全部内容是正文；没有 front matter 的文件整篇是正文。
 - 包根目录下可选的 `followups.json`：待跟进清单，语法见 `_followups`。
-- 系统自带的压缩功能顺手带上的文件（`.DS_Store`、`__MACOSX/` 下的一切、`Thumbs.db`、名字以
-  `._` 开头的文件）跳过不读，只计数（`Parsed.ignored`）；除此之外的任何别的文件都让整个包被
-  拒绝。
+- 系统自带的压缩功能顺手带上的文件（`.DS_Store`、包根下 `__MACOSX/` 里的一切、`Thumbs.db`、
+  名字以 `._` 开头且同一个目录里有它的本体的资源分叉文件）跳过不读，只计数
+  （`Parsed.ignored`）；除此之外的任何别的文件都让整个包被拒绝。知识页的路径里可以有以 `._`
+  开头的一段或叫 `__MACOSX` 的一段（不在包根下）：导出的包原样导得回来。
 
 任何一条安全检查不过，整个包都拒绝（`ArchiveError`），见 `parse`。
 """
@@ -25,7 +26,7 @@ import re
 import stat
 import unicodedata
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -121,17 +122,23 @@ def _unsafe(name: str) -> bool:
     )
 
 
-def _clutter(name: str) -> bool:
-    """系统自带的压缩功能带上的文件或目录：`.DS_Store`、`Thumbs.db`、`._*`、`__MACOSX/` 下的。"""
+def _clutter(name: str, names: Collection[str]) -> bool:
+    """系统自带的压缩功能带上的文件或目录；`names` 是包里全部条目的名字。
+
+    `.DS_Store`、`Thumbs.db`；包根下的 `__MACOSX/` 与它里面的一切（别处同名的目录是普通目录）；
+    名字以 `._` 开头、且同一个目录里有去掉这个前缀的那个文件的（资源分叉总是跟着本体）。
+    只按前缀与目录名认的话，路径里带这两样的知识页导出之后就导不回来了。
+    """
     parts = name.rstrip("/").split("/")
-    return (
-        IGNORED_FOLDER in parts
-        or parts[-1].lower() in IGNORED_NAMES
-        or parts[-1].startswith(IGNORED_PREFIX)
-    )
+    last = parts[-1]
+    if parts[0] == IGNORED_FOLDER or last.lower() in IGNORED_NAMES:
+        return True
+    if not last.startswith(IGNORED_PREFIX) or name.endswith("/"):
+        return False
+    return "/".join([*parts[:-1], last[len(IGNORED_PREFIX) :]]) in names
 
 
-def _check(info: zipfile.ZipInfo) -> bool:
+def _check(info: zipfile.ZipInfo, names: Collection[str]) -> bool:
     """只看中央目录里的一条，不读内容。返回这一条要不要读：目录与要忽略的系统文件为假。"""
     name = info.filename
     # zipfile 在第一个 NUL 处截断文件名：原始文件名里有 NUL 的一律拒绝。
@@ -140,7 +147,7 @@ def _check(info: zipfile.ZipInfo) -> bool:
     kind = stat.S_IFMT(info.external_attr >> 16)
     if kind == stat.S_IFLNK:
         raise ArchiveError("symlink_not_allowed", name=_shown(name))
-    if _clutter(name):
+    if _clutter(name, names):
         # 名字安全、不是符号链接的系统文件：不读，也就不必再看它的类型与内容。
         return False
     if info.flag_bits & 0x1:
@@ -306,7 +313,7 @@ def parse(data: bytes) -> Parsed:
     2. 条目总数不超过 4096，其中页面文件不超过 2000 个（`too_many_entries`）。
     3. 每个条目的名字：不是绝对路径，没有反斜杠、`.` / `..` 段、空段、控制字符或 NUL
        （`unsafe_path`）；不是符号链接（`symlink_not_allowed`）；过了这两条的系统文件
-       （`.DS_Store` 之类）跳过不读、只计数，其余的继续查：没有加密
+       （`.DS_Store` 之类，见 `_clutter`）跳过不读、只计数，其余的继续查：没有加密
        （`encrypted_entry`）；后缀不是压缩包（`nested_archive`）；是 `.md` 文件或根目录的
        `followups.json`，且是普通文件（`unsupported_file`）。
     4. 中央目录里写的大小合计不超过上限；实际读出来的字节数再核一次（`unpacked_too_large`）。
@@ -326,8 +333,9 @@ def parse(data: bytes) -> Parsed:
         infos = zf.infolist()
         if len(infos) > MAX_RAW_ENTRIES:
             raise ArchiveError("too_many_entries", limit=MAX_PAGE_FILES)
-        files = [info for info in infos if _check(info)]
-        ignored = sum(1 for info in infos if not info.is_dir() and _clutter(info.filename))
+        names = {info.filename for info in infos}
+        files = [info for info in infos if _check(info, names)]
+        ignored = sum(1 for info in infos if not info.is_dir() and _clutter(info.filename, names))
         if sum(1 for info in files if info.filename != FOLLOWUPS_FILE) > MAX_PAGE_FILES:
             raise ArchiveError("too_many_entries", limit=MAX_PAGE_FILES)
         if sum(info.file_size for info in files) > MAX_UNPACKED_BYTES:

@@ -123,11 +123,12 @@ def test_system_clutter_is_ignored_and_counted() -> None:
                 "__MACOSX/子目录/照片.png": b"\x89PNG",
                 "Thumbs.db": b"\xd0\xcf\x11\xe0",
                 "子目录/thumbs.db": b"\xd0\xcf",
+                "子目录/笔记.md": "正文",
                 "子目录/._笔记.md": b"\x00\x05",
             }
         )
     )
-    assert [page.path for page in parsed.pages] == ["好"]
+    assert [page.path for page in parsed.pages] == ["好", "子目录/笔记"]
     assert parsed.ignored == 7
     assert archive.parse(pack({"好.md": "正文"})).ignored == 0
     # 忽略的只是这几种已知的系统文件：别的非 Markdown 文件照样让整个包被拒绝。
@@ -301,3 +302,38 @@ def test_nothing_is_ever_extracted_to_disk() -> None:
     with open(source, encoding="utf-8") as handle:
         text = handle.read()
     assert ".extract(" not in text and ".extractall(" not in text
+
+
+def test_pages_that_only_look_like_system_clutter_survive_a_round_trip() -> None:
+    """路径里有一段以 `._` 开头、或有一段叫 `__MACOSX` 的知识页：导出再导入一页不少。"""
+    paths = ["笔记/._草稿", "._根下的一页", "项目/__MACOSX/说明", "项目/__MACOSX/._隐藏", "普通"]
+    files = [
+        (path, archive.page_text(title=path, summary="", pinned=False, body=f"正文 {path}\n"))
+        for path in paths
+    ]
+    parsed = archive.parse(archive.build(files, None))
+    assert parsed.ignored == 0
+    assert sorted(page.path for page in parsed.pages) == sorted(paths)
+    assert all(page.problem is None and page.body == f"正文 {page.path}\n" for page in parsed.pages)
+
+
+def test_only_the_root_macosx_folder_and_forks_beside_their_file_are_clutter() -> None:
+    parsed = archive.parse(
+        pack(
+            {
+                "a.md": "正文",
+                # 资源分叉：同一个目录里有它的本体。
+                "._a.md": b"\x00\x05\x16\x07",
+                "__MACOSX/._a.md": b"\x00\x05\x16\x07",
+                "__MACOSX/深/._b.md": b"\x00\x05\x16\x07",
+                # 不在根下的同名目录是普通目录。
+                "深/__MACOSX/c.md": "正文",
+            }
+        )
+    )
+    assert [page.path for page in parsed.pages] == ["a", "深/__MACOSX/c"]
+    assert parsed.ignored == 3
+    # 没有本体的 `._` 文件按普通文件处理：是页面就读，不是就照样拒绝整个包。
+    assert code_of(pack({"a.md": "x", "子目录/._照片.png": b"x"})) == "unsupported_file"
+    assert code_of(pack({"a.md": "x", "深/__MACOSX/照片.png": b"x"})) == "unsupported_file"
+    assert code_of(pack({"a.md": "x", "._b.md": b"\x00\x05\x16\x07"})) == "not_utf8"
