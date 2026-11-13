@@ -6,6 +6,7 @@ from coreman.core.assistants import (
     followup_prompt,
     handover_prompt,
     notes_prompt,
+    settings_prompt,
     workspace_prompt,
 )
 from coreman.core.assistants.approvals import prompt as approval_prompt
@@ -39,6 +40,7 @@ async def test_the_assistant_prompt_gets_the_workspace_rules(db_session, app, db
         + notes_prompt.RULES
         + followup_prompt.FOLLOWUP_RULES
         + handover_prompt.RULES
+        + settings_prompt.SETTINGS_RULES
     )
 
 
@@ -57,3 +59,4 @@ async def test_the_standard_employee_prompt_is_unchanged(db_session, app, db_eng
     assert notes_prompt.RULES not in prompt
     assert followup_prompt.FOLLOWUP_RULES not in prompt
     assert handover_prompt.RULES not in prompt
+    assert settings_prompt.SETTINGS_RULES not in prompt

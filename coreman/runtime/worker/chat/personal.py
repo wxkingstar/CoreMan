@@ -16,6 +16,7 @@ from coreman.core.assistants import (
     followup_prompt,
     handover_prompt,
     notes_prompt,
+    settings_prompt,
     workspace_prompt,
 )
 from coreman.core.assistants.approvals import prompt as approval_prompt
@@ -240,9 +241,10 @@ async def configure(
     rules, note = feishu_guidance(row, base_url, scheduled=False)
     if is_assistant(scope.bot):
         # 个人助理：写类工具改为提交审批，工作目录不放个人信息，个人内容进知识库，跨天的事记待跟进，
-        # 交回事项怎么处理；规则都写进稳定段。
+        # 交回事项怎么处理，工作时段与关注的会话怎么改；规则都写进稳定段。
         rules += approval_prompt.RULES + workspace_prompt.WORKSPACE_RULES + notes_prompt.RULES
         rules += followup_prompt.FOLLOWUP_RULES + handover_prompt.RULES
+        rules += settings_prompt.SETTINGS_RULES
     ctx.turn_notes.append(note)
     if ctx.task.payload.get(resume.PAYLOAD_KEY):
         ctx.turn_notes.append("- 本人飞书：用户刚完成授权，这一轮是自动续接，请直接继续原来的事。")

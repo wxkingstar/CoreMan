@@ -1,8 +1,8 @@
 """个人助理自有工具的总注册表：个人工具 MCP 对助理记录在这里取清单、在这里分派。
 
 三组：
-- `knowledge`：知识库与待跟进。数据在平台自己的库里、不调飞书，所以飞书授权换代之后照常可用
-  （MCP 入口把它排在授权代数判断之前），子任务也可用。
+- `knowledge`：知识库、待跟进与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权换代之后
+  照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
 - `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）。
 - `jobs`：派子任务、调度公共员工。子任务自己不可用。
 
@@ -21,7 +21,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core import personal_schedules as schedules
-from coreman.core.assistants import followup_tools, notes_tools
+from coreman.core.assistants import followup_tools, notes_tools, settings_tools
 from coreman.core.assistants.approvals import catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
 from coreman.core.assistants.kinds import SUBTASK_KIND
@@ -154,6 +154,11 @@ async def _followups(ctx: Context, name: str, arguments: dict[str, Any]) -> dict
     return await followup_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _settings(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await settings_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 register("knowledge", lambda: list(notes_tools.DEFINITIONS), _notes)
 register("knowledge", followup_tools.definitions, _followups)
+register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
