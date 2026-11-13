@@ -50,7 +50,10 @@ def upgrade() -> None:
         ["delivered_task_id"],
         postgresql_where=sa.text("delivered_task_id IS NOT NULL AND status = 'pending'"),
     )
-    op.add_column("feishu_personal_grants", _ts("authorized_at", nullable=True))
+    op.add_column(
+        "feishu_personal_grants",
+        sa.Column("authorized_at", sa.DateTime(timezone=True), nullable=True),
+    )
     # 已经连接的授权不知道是哪天完成的：按最早的可能时间算，宁可早提醒。
     op.execute(
         "UPDATE feishu_personal_grants SET authorized_at = created_at WHERE status = 'connected'"
