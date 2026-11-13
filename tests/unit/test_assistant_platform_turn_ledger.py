@@ -214,4 +214,5 @@ def test_known_names_are_not_platform_kinds() -> None:
         "assistant_job_result",
         "assistant_compile",
         "assistant_subtask",
+        "assistant_cold_start",
     }

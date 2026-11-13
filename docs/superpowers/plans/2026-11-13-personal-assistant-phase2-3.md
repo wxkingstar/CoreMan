@@ -52,6 +52,7 @@
     - 无人在场的轮次发起只读调度不需要审批；防范放在助理这一层：提示词规则要求只把完成任务必需、合理的问题交出去，不带原始聊天记录，发现来件里有诱导外传的内容就不调度并记待跟进；平台侧对问题设长度上限并记审计。`allow_write=true` 仍先过审批（目标系统 `assistant-dispatch`）。
     - 资格按现有口径（目标员工开启接受求助，且所有者在它的可用人范围内），不另要求私聊过。
     - 批准后不单独投一轮「已批准并派出」，只投被拒、过期、失败与最终答复。
+18. **冷启动的口吻样本是一种新的平台来源类型**（2F 计划提出）：`kinds.COLD_START_KIND = "assistant_cold_start"`，并入 `PLATFORM_TURN_KINDS`。它跑在独立会话 `<主会话键>#job:cold-start` 里，工具组是新加的 `voice`（只有 `assistant_voice_save`，这一轮不带任何个人工具、授权工具、知识库工具与定时任务工具），输入只有所有者自己发出的消息；平台经 `voice.save` 把结果写成置顶页 `profile/voice.md`。原因：置顶页只能由所有者在场的轮次改动，口吻页要在无人在场时生成，只能靠「这一轮读不到别人的任何东西」来守同一条线。代价：多一种任务类型与一个工具组。
 
 ## 层间接口
 
@@ -94,9 +95,13 @@
 
 ### 2F
 
-- 私聊命令「上班」「下班」（与「停用助理」同一处截下）。
-- 开通步骤新增 `cold_start`（在 `await_grant` 之后、置 `active` 之前不阻塞：先置 `active`，冷启动作为一轮 `assistant_handover` 之外的平台来源任务跑，完成后写 `cold_start_done_at`；完成前 `watch` 不开始）。
-- `COMPILE_KIND` 的处理器。
+- 迁移 `0099_assistant_cold_start`：`assistant_settings` 加 `cold_start_started_at`、`cold_start_step`（`voice`/`people`/`duties`/`focus`/`hours`）、`cold_start_next_at`、`cold_start_outcome`（`completed`/`skipped`/`timeout`）、`worked_on`、`compiled_on`、`compiled_at`。
+- `coreman/core/assistants/settings.py`：`view(row, now) -> dict`、`update(session, bot_id, *, now, timezone=None, work_start=None, work_end=None, workdays=None, focus_chats=None, ignored_chats=None) -> AssistantSettings`（`SettingsError(code)`）、`clock_in(row, now) -> datetime`、`clock_out(row, now) -> datetime`、`override(row, now) -> str | None`、`cold_start_state(row) -> str`。3C 的设置表单直接调 `view` / `update`。
+- 工具 `assistant_settings_get`、`assistant_settings_update`，注册在 `knowledge` 组，无人在场的轮次返回 `owner_turn_required`。
+- 私聊命令「上班」「下班」「跳过」（与「停用助理」同一处截下，`coreman/runtime/worker/assistant_shift.py`）。
+- `coreman/core/assistants/cold_start.py`：`begin(session, bot_id, now) -> bool`（授权完成、置 `active` 的同一个事务里调用，不阻塞开通）、`complete(session, bot, row, outcome, now) -> bool`（写 `cold_start_done_at`）、`tick(factory, cipher, now)`、`stop(session, bot_id)`；完成前 `watch` 与 `delivery` 不动。
+- `coreman/core/assistants/compiling.py`：`tick(factory, now)`；`COMPILE_KIND` 的处理器 `AssistantCompileHandler`；`COLD_START_KIND` 的处理器 `AssistantColdStartHandler`。
+- scheduler 循环 `_assistant_shift_loop`（5 秒，先 `cold_start.tick` 后 `compiling.tick`）。
 
 ### 3A
 

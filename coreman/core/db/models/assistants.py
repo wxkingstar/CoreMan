@@ -281,6 +281,8 @@ class AssistantRetiredDir(Base):
 
 
 SHIFT_OVERRIDES = ("on", "off")
+COLD_START_STEPS = ("voice", "people", "duties", "focus", "hours")
+COLD_START_OUTCOMES = ("completed", "skipped", "timeout")
 _HHMM = "'^([01][0-9]|2[0-3]):[0-5][0-9]$'"
 
 
@@ -297,6 +299,12 @@ class AssistantSettings(Base):
     工作时段是所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays`
     是 ISO 星期（1 周一 … 7 周日）。`shift_override` 是「上班」「下班」命令的临时切换，过了
     `shift_override_until` 失效。
+
+    冷启动：`cold_start_started_at` 是开始时刻（24 小时兜底从它算起），`cold_start_step` 是
+    走到哪一步，`cold_start_next_at` 非空表示该平台出手（拉样本、发卡片）、空表示在等所有者，
+    `cold_start_outcome` 是怎么结束的；做完、跳过、超时都写 `cold_start_done_at`。
+    编译：`worked_on` 是最近一次被看到在班的那天，`compiled_on` 是已经处理过编译的那天，
+    `compiled_at` 是上一次编译成功时的入队时刻（下一次的活动窗口从它算起）。日期都按所有者时区。
     """
 
     __tablename__ = "assistant_settings"
@@ -313,6 +321,23 @@ class AssistantSettings(Base):
         CheckConstraint(
             "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 2000",
             name="daily_turn_budget",
+        ),
+        CheckConstraint(
+            f"cold_start_step IS NULL OR {enum_check('cold_start_step', COLD_START_STEPS)}",
+            name="cold_start_step",
+        ),
+        CheckConstraint(
+            "cold_start_outcome IS NULL OR "
+            f"{enum_check('cold_start_outcome', COLD_START_OUTCOMES)}",
+            name="cold_start_outcome",
+        ),
+        # 冷启动循环只看「开始了、没做完」的行：平时一行都没有。
+        Index(
+            "assistant_settings_cold_start_idx",
+            "cold_start_started_at",
+            postgresql_where=text(
+                "cold_start_done_at IS NULL AND cold_start_started_at IS NOT NULL"
+            ),
         ),
     )
     bot_id: Mapped[uuid.UUID] = mapped_column(
@@ -335,6 +360,13 @@ class AssistantSettings(Base):
     shift_override: Mapped[str | None] = mapped_column(Text)
     shift_override_until: Mapped[datetime | None] = _ts()
     cold_start_done_at: Mapped[datetime | None] = _ts()
+    cold_start_started_at: Mapped[datetime | None] = _ts()
+    cold_start_step: Mapped[str | None] = mapped_column(Text)
+    cold_start_next_at: Mapped[datetime | None] = _ts()
+    cold_start_outcome: Mapped[str | None] = mapped_column(Text)
+    worked_on: Mapped[date | None] = mapped_column(Date)
+    compiled_on: Mapped[date | None] = mapped_column(Date)
+    compiled_at: Mapped[datetime | None] = _ts()
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 

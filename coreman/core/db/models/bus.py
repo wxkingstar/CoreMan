@@ -48,6 +48,7 @@ TASK_KINDS = (
     "assistant_compile",
     "assistant_subtask",
     "assistant_bot_help",
+    "assistant_cold_start",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")
