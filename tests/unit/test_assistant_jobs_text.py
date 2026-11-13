@@ -76,3 +76,10 @@ def test_a_known_failure_code_comes_with_a_line_from_the_platform() -> None:
     limited = jobs.result_text(_row(status="failed", error_code="rate_limited"))
     assert "状态：失败（rate_limited）" in limited
     assert f"说明：{jobs.FAILURE_NOTES['rate_limited']}" in limited.split("\n")
+
+
+def test_a_job_the_platform_started_is_told_nothing_goes_back() -> None:
+    text = jobs.round_text(_row(origin="system"))
+    assert text.startswith("这是平台派给你的子任务")
+    assert f"编号 {JOB}" in text and "翻一下上周的聊天记录，找出报价。" in text
+    assert "不会交回主会话" in text and "「你现在是子任务」" in text

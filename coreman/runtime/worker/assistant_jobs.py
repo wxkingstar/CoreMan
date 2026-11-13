@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import jobs
+from coreman.core.assistants import compiling, jobs
 from coreman.core.assistants.kinds import JOB_RESULT_KIND, SUBTASK_KIND
 from coreman.core.bus import streams, tasks
 from coreman.core.chat import sessions
@@ -126,6 +126,9 @@ class AssistantSubtaskHandler(PlatformTurnHandler):
                 result=ctx.redact(body) if ok else None,
                 error_code=verdict.error_code,
             )
+            if row is not None:
+                # 平台派的下班编译做完了：推进它的活动窗口。
+                await compiling.settle(session, row)
             await session.commit()
         ctx.log.info(
             "assistant_subtask_finished",

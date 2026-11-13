@@ -12,7 +12,9 @@ APPROVAL_RESULT_KIND = "assistant_approval_result"
 HANDOVER_KIND = "assistant_handover"
 # 子任务或公共员工的结论投回主会话。
 JOB_RESULT_KIND = "assistant_job_result"
-# 下班时把当天的进展整理进知识库。
+# 下班时把当天的进展整理进知识库。3A 起下班编译改为平台派出的子任务，这个类型不再入队，也没有
+# 处理器；名字留着是因为任务类型的取值约束与历史对话记录里还有它，升级时队列里的旧任务由
+# worker 按未知类型结掉（那一天的活动留给下一次编译）。
 COMPILE_KIND = "assistant_compile"
 # 子任务自己的一轮（会话键 `<主会话键>#job:<编号>`）。
 SUBTASK_KIND = "assistant_subtask"

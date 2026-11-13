@@ -54,6 +54,14 @@ ROUND_ONE = (
     "要查的事：\n{brief}\n\n"
     "按「你现在是子任务」的规则做。"
 )
+# 平台派的子任务（下班编译）：做完不投回主会话，要留下的东西自己写进库里。
+ROUND_SYSTEM = (
+    "这是平台派给你的子任务（编号 {id}）。所有者不在场；你的回答不会发给任何人，也不会交回主会话："
+    "要留下的东西都写进知识库或待跟进。\n"
+    "标题：{title}\n\n"
+    "要做的事：\n{brief}\n\n"
+    "按「你现在是子任务」的规则做。"
+)
 FOLLOW_UP = (
     "主会话就子任务 {id} 追问（第 {round} 轮，最多 {limit} 轮）：\n{text}\n\n"
     "按「你现在是子任务」的规则做，最后一条回答是这次追问的结论。"
@@ -394,7 +402,8 @@ async def for_round(session: AsyncSession, bot_id: uuid.UUID, task: Task) -> Ass
 def round_text(row: AssistantJob) -> str:
     """这一轮交给模型的文本：首轮是交代，之后是最近一次追问。"""
     if row.rounds <= 1:
-        return ROUND_ONE.format(
+        template = ROUND_SYSTEM if row.origin == "system" else ROUND_ONE
+        return template.format(
             id=row.id, title=" ".join(row.title_enc.split()), brief=row.brief_enc
         )
     return FOLLOW_UP.format(
