@@ -56,6 +56,11 @@ def status(
 
 # 发言者身份未知、或账号不可用（停用、引导管理员）时的本轮状态：规则照挂，稳定段不随人变。
 UNAVAILABLE = "- 个人凭证：本轮发言者身份未验证或账号不可用，不能索取或使用个人凭证。"
+# 个人助理里平台自己发起的一轮：所有者不在场，凭证不注入、也不发索取用的令牌。
+OWNER_ABSENT = (
+    "- 个人凭证：本轮由平台发起、所有者不在场，不能索取或使用个人凭证；"
+    "需要时把要做的事告诉所有者，由他在私聊里让你做。"
+)
 
 
 def guidance(origin_kind: str) -> str:
@@ -160,6 +165,12 @@ async def _apply(
         )
     )
     return extra, env, found.secret_values | once.secret_values
+
+
+def withhold(ctx: TaskContext, extra: str, env: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """所有者不在场的一轮：规则照挂（同一会话的稳定段不随轮次变），凭证与令牌都不给。"""
+    ctx.turn_notes.append(OWNER_ABSENT)
+    return extra + guidance("chat"), _strip(env)
 
 
 async def configure(

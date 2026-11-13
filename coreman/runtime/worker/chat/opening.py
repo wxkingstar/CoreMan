@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import platform_turns
 from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
@@ -234,6 +235,9 @@ class OpenStage(ChatStageBase):
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
+        # 个人助理里平台自己发起的一轮无人在场，输入可能来自别人发给所有者的消息：不挂云签名
+        # 代理、业务系统目录与所有者的个人凭证，需要时由所有者在私聊里亲自让助理做。
+        unattended = platform_turns.is_platform(ctx.task)
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -243,7 +247,7 @@ class OpenStage(ChatStageBase):
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
             catalog=None
-            if alert_turn
+            if alert_turn or unattended
             else await catalog_policy.mount_for(
                 session,
                 relay=relay,
@@ -395,16 +399,19 @@ class OpenStage(ChatStageBase):
             )
             from coreman.runtime.worker.chat import credentials
 
-            extra, env, personal_secrets = await credentials.configure(
-                session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
-            )
+            if unattended:
+                extra, env = credentials.withhold(ctx, extra, env)
+            else:
+                extra, env, personal_secrets = await credentials.configure(
+                    session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
+                )
         from coreman.runtime.worker.chat import cloud_proxy
 
         env = await cloud_proxy.configure(
             session,
             ctx,
             bot=bot,
-            user_id=None if alert_turn else intake.speaker.user_id,
+            user_id=None if alert_turn or unattended else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,
