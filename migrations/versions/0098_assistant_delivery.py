@@ -1,4 +1,5 @@
-"""Personal assistant delivery: per-assistant state, daily sessions, inbox retries, grant date."""
+"""Personal assistant delivery: per-assistant state, daily sessions, inbox retries, grant date,
+and the ids of messages the platform sent as the owner."""
 
 import sqlalchemy as sa
 from alembic import op
@@ -28,6 +29,16 @@ def upgrade() -> None:
         _ts("updated_at"),
     )
     op.create_index("assistant_delivery_sweep_idx", "assistant_delivery", ["next_sweep_at"])
+    # 平台经审批以所有者身份发出的消息的编号：盯消息读到它们时不当作所有者亲自发言。
+    op.create_table(
+        "assistant_sent",
+        sa.Column(
+            "bot_id", sa.Uuid(), sa.ForeignKey("bots.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column("message_id", sa.Text(), nullable=False),
+        _ts("created_at"),
+        sa.PrimaryKeyConstraint("bot_id", "message_id"),
+    )
     op.add_column("chat_sessions", sa.Column("local_day", sa.Date(), nullable=True))
     op.add_column(
         "assistant_inbox",
@@ -51,5 +62,6 @@ def downgrade() -> None:
     op.drop_index("assistant_inbox_in_flight_idx", table_name="assistant_inbox")
     op.drop_column("assistant_inbox", "failures")
     op.drop_column("chat_sessions", "local_day")
+    op.drop_table("assistant_sent")
     op.drop_index("assistant_delivery_sweep_idx", table_name="assistant_delivery")
     op.drop_table("assistant_delivery")

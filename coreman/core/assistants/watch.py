@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import followups, runtime, sealed
+from coreman.core.assistants import followups, runtime, sealed, sent
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants import watch_inbox as inbox
@@ -246,12 +246,16 @@ class _Round:
             )
 
     async def take(self, item: Item, entry: dict[str, Any]) -> None:
-        """处理游标之后的一条消息：撤回的作废，所有者自己发的压住这个会话，其余分级入箱。"""
+        """处理游标之后的一条消息：撤回的作废，所有者亲自发的压住这个会话，其余分级入箱。"""
         owner = self.prefs.open_id
         if item.deleted:
             await self.recall(item.message_id)
             return
         if item.sender_type == "user" and item.sender_id == owner:
+            if await sent.ours(self.session, self.bot_id, item.message_id):
+                # 审批通过后平台代他发的：发送人是所有者，但不是他亲自发言——不压这个会话，
+                # 也不更新「所有者上次发言」。
+                return
             entry["o"] = max(int(entry.get("o") or 0), item.at_ms)
             await inbox.hold_chat(
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW

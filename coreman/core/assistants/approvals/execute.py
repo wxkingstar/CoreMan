@@ -20,8 +20,8 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import sealed, write_fuse
-from coreman.core.assistants.approvals import attachments, checks, service, tower
+from coreman.core.assistants import sealed, sent, write_fuse
+from coreman.core.assistants.approvals import attachments, catalog, checks, service, tower
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AssistantApproval, Bot, FeishuPersonalGrant, Task, UserReached
@@ -100,6 +100,25 @@ async def owner_scope(session: AsyncSession, bot: Bot, task: Task) -> Scope | No
         grant.platform_user_id,
         reached.platform_chat_id if reached is not None else "",
     )
+
+
+async def _remember_sent(
+    factory: async_sessionmaker[AsyncSession], bot_id: uuid.UUID, result: dict[str, Any]
+) -> None:
+    """记下刚以所有者身份发出的消息的编号：盯消息读到它时不当作所有者亲自发言（见 `sent.py`）。
+
+    另开一个短事务、立刻提交：盯消息随时可能读到这条消息，等不到执行的事务结束（合并发送时
+    后面还有别的会话要发）。记不上只记日志——消息已经发出去了，不能因此把这张单记成失败。
+    """
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if not isinstance(message_id, str) or not message_id:
+        return
+    try:
+        async with factory() as side:
+            await sent.record(side, bot_id, [message_id])
+            await side.commit()
+    except Exception as exc:  # noqa: BLE001 只记类型
+        log.warning("assistant_sent_record_failed", type=type(exc).__name__)
 
 
 async def _close(
@@ -248,6 +267,8 @@ async def run(
                         )
                         args = item.args.model_validate(arguments)
                         results.append(await item.run(args, Call(session, cipher, scope, files)))
+                        if tool in catalog.SENDS:
+                            await _remember_sent(factory, bot_id, results[-1])
                     except PersonalError as exc:
                         failure = exc.payload()
                         break

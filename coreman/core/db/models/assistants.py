@@ -128,6 +128,16 @@ class AssistantMark(Base):
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 
+class AssistantSent(Base):
+    """平台经审批以所有者身份发出的消息：盯消息读到它们时不当作所有者亲自发言。只有编号。"""
+
+    __tablename__ = "assistant_sent"
+    __table_args__ = (PrimaryKeyConstraint("bot_id", "message_id"),)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
 class AssistantTranscript(Base):
     """节点上一个会话的 CLI 转录：每轮结束由节点上传，下一轮续聊前下发，节点上不留。
 
