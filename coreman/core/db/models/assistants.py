@@ -324,3 +324,34 @@ class AssistantSettings(Base):
     shift_override_until: Mapped[datetime | None] = _ts()
     cold_start_done_at: Mapped[datetime | None] = _ts()
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+PAGE_AUTHORS = ("owner", "assistant", "import")
+
+
+class AssistantPage(Base):
+    """个人知识库的一页。
+
+    `path_enc` / `title_enc` / `summary_enc` / `body_enc` 登记在 `sealed.COLUMNS`：库里是密文，
+    经会话取出并还原的行上是明文。`path_hmac` 是规范化后的路径用所有者数据密钥算的带密钥
+    摘要，同一位助理内唯一；`size` 是正文的 UTF-8 字节数，合计上限按它求和；`version` 每次
+    写入加 1，写入时带上读到的版本做乐观锁。
+    """
+
+    __tablename__ = "assistant_pages"
+    __table_args__ = (
+        CheckConstraint(enum_check("updated_by", PAGE_AUTHORS), name="updated_by"),
+        UniqueConstraint("bot_id", "path_hmac", name="uq_assistant_pages_path"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    path_hmac: Mapped[str] = mapped_column(Text)
+    path_enc: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    title_enc: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    summary_enc: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    body_enc: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    size: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pinned: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    updated_by: Mapped[str] = mapped_column(Text, server_default=text("'assistant'"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
