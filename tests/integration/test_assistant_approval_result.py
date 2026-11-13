@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -18,7 +19,8 @@ from coreman.core.feishu_personal import policy
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.assistant_approvals import AssistantApprovalResultHandler
 from tests.fakes.fake_relay import FakeRelay
-from tests.integration.assistant_helpers import into_assistant
+from tests.integration.approval_helpers import assistant_turn, install, pending, queued
+from tests.integration.assistant_helpers import identified, into_assistant
 from tests.integration.credential_helpers import owner
 from tests.integration.test_cron_handler import claim
 from tests.integration.worker_helpers import build_ctx, user_input
@@ -167,3 +169,58 @@ async def test_outdated_result_turn_is_cancelled_without_calling_the_model(
     done, relay = await run_turn(db_engine, db_session)
     assert done.status == "cancelled" and done.error_code == "approval_result_inactive"
     assert relay.requests == []
+
+
+async def test_an_approval_submitted_in_a_platform_turn_records_no_inbound_event(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    _, _, scope = await assistant_turn(db_session)
+    row = await pending(db_session, replace(scope, event=None, platform=True))
+    assert row.origin_event_id is None and row.session_key == "oc_assistant"
+
+
+async def test_a_result_without_an_inbound_event_comes_back_as_a_platform_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, user, origin, _ = await owner(db_session)
+    await into_assistant(db_session, bot, user)
+    await keys.ensure_key(db_session, sealed.master(), user.id)
+    await identified(db_session, bot)
+    await tasks.finish(db_session, origin.id, status="succeeded")
+    row = _row(bot.id, "rejected", reason_enc="先别发", session_key="oc_private")
+    db_session.add(row)
+    await db_session.flush()
+    assert await service.deliver(db_session, row, bot) is True
+    # 同一结局只投一次。
+    assert await service.deliver(db_session, row, bot) is False
+    await db_session.commit()
+    (task,) = await queued(db_session, APPROVAL_RESULT_KIND)
+    assert task.inbound_event_id is None and task.user_id == user.id
+    assert task.session_key == "oc_private"
+    assert task.payload == {
+        "approval_id": str(row.id),
+        "status": "rejected",
+        "serialize_session": True,
+        "bot_key": bot.bot_key,
+        "platform_user_id": "owner_pid",
+    }
+    done, relay = await run_turn(db_engine, db_session)
+    assert done.status == "succeeded"
+    text = user_input(relay.requests[0])
+    assert "被拒绝，没有执行" in text and "<approver_reason>\n先别发\n</approver_reason>" in text
+
+
+async def test_without_a_recorded_identity_such_a_result_is_not_delivered(
+    db_session: AsyncSession,
+) -> None:
+    """本功能上线前建的助理没有记下身份：没有入站事件的结果无处可投，和原来一样不投。"""
+    bot, user, _, _ = await owner(db_session)
+    await into_assistant(db_session, bot, user)
+    await keys.ensure_key(db_session, sealed.master(), user.id)
+    row = _row(bot.id, "rejected")
+    db_session.add(row)
+    await db_session.flush()
+    assert await service.deliver(db_session, row, bot) is False
+    await db_session.commit()
+    assert await queued(db_session, APPROVAL_RESULT_KIND) == []

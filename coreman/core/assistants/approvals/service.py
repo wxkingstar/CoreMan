@@ -20,7 +20,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import sealed
+from coreman.core.assistants import platform_turns, sealed
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
@@ -521,9 +521,25 @@ class Decided:
 
 
 async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bool:
-    """把这张单的结局作为一轮投回助理会话；沿用提交那一轮的入站事件与会话键。"""
-    if row.origin_event_id is None or bot.owner_id is None:
+    """把这张单的结局作为一轮投回助理会话。
+
+    所有者私聊那一轮里提交的单沿用那一轮的入站事件与会话键。平台自己发起的轮次里提交的单没有
+    入站事件：经 `platform_turns.enqueue` 入队，身份取自开通时记下的设置，回到提交时的会话。
+    """
+    if bot.owner_id is None:
         return False
+    dedupe = f"assistant-approval:{row.id}:result:{row.status}"
+    result = {"approval_id": str(row.id), "status": row.status}
+    if row.origin_event_id is None:
+        queued = await platform_turns.enqueue(
+            session,
+            bot,
+            APPROVAL_RESULT_KIND,
+            result,
+            session_key=row.session_key or None,
+            dedupe_key=dedupe,
+        )
+        return queued is not None
     if await session.get(InboundEvent, row.origin_event_id) is None:
         return False
     identity = await session.scalar(
@@ -539,10 +555,9 @@ async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bo
             user_id=bot.owner_id,
             session_key=row.session_key,
             inbound_event_id=row.origin_event_id,
-            dedupe_key=f"assistant-approval:{row.id}:result:{row.status}",
+            dedupe_key=dedupe,
             payload={
-                "approval_id": str(row.id),
-                "status": row.status,
+                **result,
                 # 提交的那一轮可能还没结束：同一会话串行，等它收尾再开这一轮。
                 "serialize_session": True,
                 "bot_key": bot.bot_key,
