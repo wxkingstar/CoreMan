@@ -536,6 +536,13 @@ async def test_status_line_changes_only_with_activity(db_session, db_engine):
     await transport.round()
     quiet = _headings(api)
     assert len(quiet) == 1 and quiet[0].startswith("⚠️ ") and "后没有新动作" in quiet[0]
+    # 标题是 markdown，时间交给飞书按看的人设备时区显示。
+    patched = [
+        json.loads(body["partial_element"])["header"]["title"]
+        for _, path, body in api.calls
+        if path.endswith("/elements/thinking_panel")
+    ]
+    assert patched[0]["tag"] == "markdown" and "<local_datetime " in quiet[0]
 
     api.calls.clear()
     await streams.update(

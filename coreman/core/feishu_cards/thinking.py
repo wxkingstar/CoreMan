@@ -23,7 +23,8 @@ def thinking_panel(
         "tag": "collapsible_panel",
         "element_id": "thinking_panel",
         "expanded": False,
-        "header": {"title": {"tag": "plain_text", "content": heading}},
+        # markdown：运行中的状态行用 <local_datetime> 按看的人设备时区显示时间。
+        "header": {"title": {"tag": "markdown", "content": heading}},
         "background_color": "grey",
         "border": {"color": "grey", "corner_radius": "8px"},
         "padding": "8px",

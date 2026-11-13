@@ -11,7 +11,8 @@
      "stuck": true,                                   # worker 判定命令行长时间没有任何输出
      "interrupted": "运行节点 2 分钟没有响应"}          # 终态：卡片标红并在群里 @ 提问人
 
-时间按办公时区（北京时间）显示，和提示词里「用户说的时间按北京时间理解」同一约定。
+状态行是飞书卡片的 markdown：时间写成 `<local_datetime>`，由飞书客户端按看的人设备时区显示
+（同一张卡，北京的人看到北京时间，美国的人看到美国当地时间）；动作说明转义后再放进去。
 """
 
 from __future__ import annotations
@@ -21,9 +22,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
-DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 # 这么久没有新动作，状态行改成 ⚠️（已知长等待在预计结束前不算）。
 QUIET_SECONDS = 5 * 60
 # 命令行这么久一个事件都没有、又不在已知长等待里：状态行标「疑似卡住」，只提示不中断。
@@ -32,6 +31,8 @@ STUCK_SECONDS = 15 * 60
 LABEL_CHARS = 36
 SUMMARY_CHARS = 80
 COMMAND_CHARS = 400
+# 离现在这么久就带上日期。服务端不知道看的人在哪个时区，判断不了是不是「同一天」，按时间差算。
+DATE_AFTER = timedelta(hours=12)
 
 DONE_HEADING = "🤔 思考过程"
 INTERRUPTED_PREFIX = "❌ 已中断："
@@ -160,11 +161,28 @@ def parse_time(value: Any) -> datetime | None:
 
 
 def clock(at: datetime, now: datetime) -> str:
-    """绝对时间：同一天只写 时:分，跨天带上月-日。"""
-    local, today = at.astimezone(DISPLAY_TZ), now.astimezone(DISPLAY_TZ)
-    if local.date() == today.date():
-        return local.strftime("%H:%M")
-    return local.strftime("%m-%d %H:%M")
+    """绝对时间，按看的人设备时区显示：离现在不到 12 小时只写 时:分，再久带上日期。"""
+    # 截到整分钟：同一分钟里的事件算出同一个状态行，不多改卡片。
+    millisecond = int(at.timestamp()) // 60 * 60_000
+    shown = _local_datetime(millisecond, "time")
+    if abs(now - at) < DATE_AFTER:
+        return shown
+    return f"{_local_datetime(millisecond, 'date_short')} {shown}"
+
+
+def _local_datetime(millisecond: int, format_type: str) -> str:
+    return (
+        f"<local_datetime millisecond='{millisecond}' format_type='{format_type}'></local_datetime>"
+    )
+
+
+def escape_markdown(text: str) -> str:
+    """ASCII 标点一律写成 HTML 实体：命令、文件名里的 * _ < [ 等不被当成 markdown 或标签。"""
+    return "".join(_entity(c) if c.isascii() and not c.isalnum() and c != " " else c for c in text)
+
+
+def _entity(char: str) -> str:
+    return f"&#{ord(char)};"
 
 
 def tool_activity(
@@ -193,9 +211,9 @@ def tool_activity(
 
 
 def heading(running_since: datetime | None, activity: dict[str, Any], now: datetime) -> str:
-    """运行中的状态行。"""
+    """运行中的状态行（markdown）。"""
     at = parse_time(activity.get("at"))
-    label = clip(str(activity.get("label") or ""), LABEL_CHARS)
+    label = escape_markdown(clip(str(activity.get("label") or ""), LABEL_CHARS))
     suffix = f"（{label}）" if label else ""
     if at is not None and activity.get("stuck"):
         return f"⚠️ 疑似卡住：{clock(at, now)} 后没有任何输出{suffix}"
