@@ -524,13 +524,14 @@ async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bo
     """把这张单的结局作为一轮投回助理会话。
 
     所有者私聊那一轮里提交的单沿用那一轮的入站事件与会话键。平台自己发起的轮次里提交的单没有
-    入站事件：经 `platform_turns.enqueue` 入队，身份取自开通时记下的设置，回到提交时的会话。
+    入站事件，或者那条入站事件已被清理（审批等了几天）：经 `platform_turns.enqueue` 入队，身份
+    取自开通时记下的设置，回到提交时的会话。
     """
     if bot.owner_id is None:
         return False
     dedupe = f"assistant-approval:{row.id}:result:{row.status}"
     result = {"approval_id": str(row.id), "status": row.status}
-    if row.origin_event_id is None:
+    if row.origin_event_id is None or await session.get(InboundEvent, row.origin_event_id) is None:
         queued = await platform_turns.enqueue(
             session,
             bot,
@@ -540,8 +541,6 @@ async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bo
             dedupe_key=dedupe,
         )
         return queued is not None
-    if await session.get(InboundEvent, row.origin_event_id) is None:
-        return False
     identity = await session.scalar(
         select(UserIdentity.platform_user_id)
         .where(UserIdentity.user_id == bot.owner_id, UserIdentity.platform == "feishu")

@@ -211,6 +211,36 @@ async def test_a_result_without_an_inbound_event_comes_back_as_a_platform_turn(
     assert "被拒绝，没有执行" in text and "<approver_reason>\n先别发\n</approver_reason>" in text
 
 
+async def test_a_result_whose_inbound_event_was_purged_comes_back_as_a_platform_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """审批等了几天，提交那一轮的入站事件已被清理：结果不丢，改走平台来源投回原会话。"""
+    bot, user, origin, _ = await owner(db_session)
+    await into_assistant(db_session, bot, user)
+    await keys.ensure_key(db_session, sealed.master(), user.id)
+    await identified(db_session, bot)
+    await tasks.finish(db_session, origin.id, status="succeeded")
+    row = _row(
+        bot.id,
+        "rejected",
+        reason_enc="先别发",
+        # 一个已经不存在的事件编号。
+        origin_event_id=10**12,
+        session_key=origin.session_key,
+    )
+    db_session.add(row)
+    await db_session.flush()
+    assert await service.deliver(db_session, row, bot) is True
+    assert await service.deliver(db_session, row, bot) is False
+    await db_session.commit()
+    (task,) = await queued(db_session, APPROVAL_RESULT_KIND)
+    assert task.inbound_event_id is None and task.user_id == user.id
+    assert task.session_key == origin.session_key == "oc_private"
+    done, relay = await run_turn(db_engine, db_session)
+    assert done.status == "succeeded"
+    assert "被拒绝，没有执行" in user_input(relay.requests[0])
+
+
 async def test_without_a_recorded_identity_such_a_result_is_not_delivered(
     db_session: AsyncSession,
 ) -> None:
