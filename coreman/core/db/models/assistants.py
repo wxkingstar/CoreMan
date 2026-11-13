@@ -631,3 +631,38 @@ class AssistantJob(Base):
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
     started_at: Mapped[datetime | None] = _ts()
     finished_at: Mapped[datetime | None] = _ts()
+
+
+ACCESS_ACTOR_KINDS = ("owner", "admin", "system")
+
+
+class AssistantAccessLog(Base):
+    """运行时路径之外对个人内容的每一次解密：谁、什么时候、做了什么。没有内容列。
+
+    `target` 只放计数或明文的范围名（`open`、`rows=3`）；知识页的路径、标题都属于内容，不放。
+    `actor_id` 为空：这次操作来自服务器上的管理命令（`system`），或操作人的账号已删除。
+    `action` 的取值由 `coreman/core/assistants/access_log.py` 的 `ACTIONS` 把关，库里不设检查
+    约束（加一个动作不必写迁移）。保留 180 天，由 scheduler 清理。
+    """
+
+    __tablename__ = "assistant_access_log"
+    __table_args__ = (
+        CheckConstraint(enum_check("actor_kind", ACCESS_ACTOR_KINDS), name="actor_kind"),
+        Index("assistant_access_log_bot_at_idx", "bot_id", "at"),
+        Index("assistant_access_log_at_idx", "at"),
+        Index(
+            "assistant_access_log_foreign_idx",
+            "bot_id",
+            "at",
+            postgresql_where=text("actor_kind <> 'owner'"),
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL")
+    )
+    actor_kind: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    target: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    at: Mapped[datetime] = _ts(server_default=text("now()"))

@@ -22,6 +22,7 @@ from coreman.core.db.models.api_tasks import (
     PersonalAccessToken,
 )
 from coreman.core.db.models.assistants import (
+    ACCESS_ACTOR_KINDS,
     APPROVAL_CHANNELS,
     APPROVAL_STATUSES,
     ASSISTANT_STATES,
@@ -39,6 +40,7 @@ from coreman.core.db.models.assistants import (
     PAGE_AUTHORS,
     SHIFT_OVERRIDES,
     WATCH_STATES,
+    AssistantAccessLog,
     AssistantApproval,
     AssistantDelivery,
     AssistantFollowup,
@@ -155,6 +157,8 @@ from .feishu import FeishuDelivery, FeishuSentMessage
 from .pricing import ModelPrice
 
 __all__ = [
+    "ACCESS_ACTOR_KINDS",
+    "AssistantAccessLog",
     "FeishuAppRegistration",
     "WECOM_PROVISION_STATUSES",
     "WecomBotProvision",
