@@ -40,6 +40,8 @@ JOB_TOOLS = [
     "assistant_job_message",
     "assistant_job_list",
     "assistant_job_cancel",
+    "assistant_bot_list",
+    "assistant_ask_bot",
 ]
 INVALID = {"error": "invalid_tool_or_arguments"}
 CTX = tools.Context(None, None, None)  # type: ignore[arg-type]
@@ -192,3 +194,10 @@ async def test_dispatch_follows_the_groups(demo: Recorder) -> None:
         INVALID
     )
     assert len(demo.calls) == 2
+
+
+def test_dispatch_tools_live_in_the_jobs_group() -> None:
+    """调度公共员工的两个工具与派子任务同组：子任务轮次没有这一组，也就不能再调度。"""
+    assert tools.group_of("assistant_ask_bot") == "jobs"
+    assert tools.group_of("assistant_bot_list") == "jobs"
+    assert "jobs" not in tools.groups_for(SUBTASK_KIND)

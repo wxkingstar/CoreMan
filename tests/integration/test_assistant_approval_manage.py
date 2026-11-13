@@ -67,6 +67,8 @@ def test_own_tools_are_listed_for_assistants() -> None:
         "assistant_job_message",
         "assistant_job_list",
         "assistant_job_cancel",
+        "assistant_bot_list",
+        "assistant_ask_bot",
     ]
     for item in listed:
         assert item["inputSchema"]["type"] == "object" and item["description"]

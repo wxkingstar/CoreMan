@@ -3,6 +3,7 @@
 import uuid
 
 from coreman.core.assistants import (
+    dispatch_prompt,
     followup_prompt,
     handover_prompt,
     jobs_prompt,
@@ -43,6 +44,7 @@ async def test_the_assistant_prompt_gets_the_workspace_rules(db_session, app, db
         + handover_prompt.RULES
         + settings_prompt.SETTINGS_RULES
         + jobs_prompt.RULES
+        + dispatch_prompt.RULES
     )
 
 
@@ -64,3 +66,4 @@ async def test_the_standard_employee_prompt_is_unchanged(db_session, app, db_eng
     assert settings_prompt.SETTINGS_RULES not in prompt
     assert jobs_prompt.RULES not in prompt
     assert jobs_prompt.SUBTASK_RULES not in prompt
+    assert dispatch_prompt.RULES not in prompt

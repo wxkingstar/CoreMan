@@ -4,7 +4,8 @@
 - `knowledge`：知识库、待跟进与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权换代之后
   照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
 - `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）。
-- `jobs`：派子任务、追问、查看、取消（之后还有调度公共员工）。子任务自己不可用。
+- `jobs`：派子任务、追问、查看、取消，以及调度公共员工（看可以问谁、把问题交给其中一位）。
+  子任务自己不可用。
 - `subtask`：子任务报告自己卡住了。只有子任务轮次可用。
 
 一轮能用哪几组由任务类型决定（`groups_for`）。没有 `approval` 组的轮次拿到的个人工具只有读类：
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core import personal_schedules as schedules
 from coreman.core.assistants import (
+    dispatch_tools,
     followup_tools,
     jobs_tools,
     notes_tools,
@@ -199,6 +201,10 @@ async def _jobs(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str,
     return await jobs_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _ask_bots(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await dispatch_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 async def _voice(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return await voice_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
@@ -209,4 +215,5 @@ register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
 register(VOICE_GROUP, lambda: list(voice_tools.DEFINITIONS), _voice)
 register("jobs", jobs_tools.definitions, _jobs)
+register("jobs", dispatch_tools.definitions, _ask_bots)
 register(SUBTASK_GROUP, jobs_tools.subtask_definitions, _jobs)
