@@ -88,7 +88,7 @@
     - 知识页的路径不进网址：读与删是 `POST /api/me/assistant/notes/read`、`POST /api/me/assistant/notes/delete`，路径在请求体里；写仍是 `PUT /notes/page`。索引不收目录参数（目录名也是路径的一部分）。原因：网址会进反向代理与应用的访问日志，而别处都在避免个人内容进日志。3D 的导入、导出同此口径。
     - 给所有者的链接只用审批系统的网页入口（`tower.web_url(settings)`，即 `TOWER_WEB_URL`）：私聊里「有 N 张待批」的提醒与页面「等你出手」都是它，没配就不带链接，不回落到接口地址 `TOWER_URL`。
     - 「最近落地」列审批单的全部终态（`owner_view.SETTLED`：`executed`、`rejected`、`withdrawn`、`failed`、`expired`、`stale`）；`approved` 是途中状态，两个分区都不列。
-    - 页面上可以即时上班、下班、回到按工作时段（`POST /shift`，`owner_view.switch_shift`，与私聊命令同一个效果，同样写 `worked_on`），可以重新生成口吻页（`POST /voice/regenerate`，`cold_start.regenerate_voice`）：冷启动没做完时拒绝；每天（所有者时区）至多 `cold_start.REGENERATE_DAILY`（3）次，按排上的轮数算，靠任务的幂等键 `voice.dedupe_key(bot_id, <日期×10+第几次>)` 数，不加列；口吻页最后不是助理写的时不排（`voice.save` 本来也不会覆盖）。读飞书在这个请求里做，出错时提交而不回滚（刷新过的令牌不能丢）。
+    - 页面上可以即时上班、下班、回到按工作时段（`POST /shift`，`owner_view.switch_shift`，与私聊命令同一个效果，同样写 `worked_on`），可以重新生成口吻页（`POST /voice/regenerate`，`cold_start.regenerate_voice`）：冷启动没做完时拒绝；每天（所有者时区）至多 `cold_start.REGENERATE_DAILY`（3）次，按排上的轮数算，靠任务的幂等键 `voice.dedupe_key(bot_id, <日期×10+第几次>)` 数，不加列；口吻页最后不是助理写的时不排（`voice.save` 本来也不会覆盖）。读飞书在这个请求里做，出错时提交而不回滚（刷新过的令牌不能丢）。（限频与事务的做法后来改了，见裁定 25。）
     - 每日轮次预算以个人值与平台默认里较小的为准（`delivery.effective_budget`，`budget_left`、`usage`、预算用完的告知、所有者概览都用它）；页面不让个人值高于平台默认（`owner_view.set_budget`）。管理员调低平台默认会同步收紧，个人值留着。
     - 两处「在班」同一口径：所有者概览的 `on_shift` 也要求记录启用且开通好。
     - 开通卡片多一句调度的告知（裁定 17 的存储方式）。
