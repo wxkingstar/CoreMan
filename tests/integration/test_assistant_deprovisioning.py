@@ -10,12 +10,20 @@ import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import approvals, deprovisioning, keys, lifecycle_runner, runtime
-from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
+from coreman.core.assistants import (
+    approvals,
+    deprovisioning,
+    jobs,
+    keys,
+    lifecycle_runner,
+    runtime,
+)
+from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, JOB_RESULT_KIND
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantJob,
     AssistantKey,
     AssistantLifecycle,
     AssistantRetiredDir,
@@ -26,7 +34,7 @@ from coreman.core.db.models import (
 from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal import service as personal
 from coreman.core.timeutils import utcnow
-from tests.integration.assistant_helpers import seed_standard
+from tests.integration.assistant_helpers import identified, seed_standard
 from tests.integration.lifecycle_helpers import (
     APP_ID,
     CIPHER,
@@ -149,6 +157,44 @@ async def test_running_turns_are_stopped_before_anything_is_withdrawn(
     await tasks.finish(db_session, queued.id, status="cancelled")
     await db_session.commit()
     await tick(factory, messenger, later=11)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "withdraw"
+
+
+async def test_running_subtasks_are_cancelled_when_deprovisioning_starts(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    await identified(db_session, bot)
+    live = [
+        await jobs.spawn(db_session, bot, title="查报价", brief="翻聊天记录"),
+        await jobs.spawn(db_session, bot, title="查合同", brief="读合同"),
+    ]
+    finished = await jobs.spawn(db_session, bot, title="查过的", brief="已经查完")
+    finished.status, finished.result_enc = "done", "报价 3 万"
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)
+    for row in live:
+        cancelled = await db_session.get(AssistantJob, row.id, populate_existing=True)
+        assert cancelled is not None
+        assert (cancelled.status, cancelled.error_code) == ("cancelled", deprovisioning.REASON)
+        # 没有会话可回：不投回。
+        assert cancelled.reported_at is not None and cancelled.report_code == "not_needed"
+        turn = await db_session.get(Task, row.last_task_id, populate_existing=True)
+        assert turn is not None and turn.cancel_requested_at is not None
+    kept = await db_session.get(AssistantJob, finished.id, populate_existing=True)
+    assert kept is not None and kept.status == "done"
+    # 之后对账也不会给一位正在停用的助理排结果轮次。
+    await jobs.reconcile(db_session, utcnow() + timedelta(hours=3))
+    await db_session.commit()
+    results = await db_session.scalar(
+        select(func.count()).select_from(Task).where(Task.kind == JOB_RESULT_KIND)
+    )
+    assert results == 0
+    # 排着队的轮次不用等：这一步已经往下走了。
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.step == "withdraw"
 

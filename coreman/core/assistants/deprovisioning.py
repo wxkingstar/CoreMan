@@ -18,7 +18,15 @@ from datetime import timedelta
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import approvals, cold_start, keys, lifecycle, retired_dirs, watch
+from coreman.core.assistants import (
+    approvals,
+    cold_start,
+    jobs,
+    keys,
+    lifecycle,
+    retired_dirs,
+    watch,
+)
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.assistants.lifecycle import StepFailed, advance, finish
 from coreman.core.assistants.records import is_assistant
@@ -149,6 +157,7 @@ async def step_drain(
     """叫停这条记录没结束的任务（已批准的写操作照常执行完），等在跑的停下，最多等 `DRAIN_WAIT`。
 
     已批准的写操作排着队也算在跑：它不叫停，要等它执行完，否则授权撤销、密钥销毁之后它只会失败。
+    进行中的子任务先记为已取消：它们的结论再也没有会话可回。
     """
     bot = await _bot(session, row)
     # 先停止盯消息、作废没交回的条目，再叫停任务：之后不会再有新的条目进来。
@@ -158,6 +167,8 @@ async def step_drain(
     now = utcnow()
     if row.deadline is None:
         row.deadline = now + DRAIN_WAIT
+    # 子任务的轮次也是这条记录的任务，下面会一并叫停；先把子任务本身收口，免得对账再去投回。
+    await jobs.cancel_all(session, bot.id, REASON)
     found = (
         await session.execute(
             select(Task.id, Task.kind, Task.status).where(

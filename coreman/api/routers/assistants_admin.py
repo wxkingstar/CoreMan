@@ -1,7 +1,7 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
 只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态、今天的轮次与预算、待交回的
-条目数、冷启动走到哪一步、按设置此刻是否在班），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
+条目数、冷启动走到哪一步、按设置此刻是否在班、进行中的子任务数），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
 可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。
 """
 
@@ -19,7 +19,7 @@ from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import delivery, deprovisioning, lifecycle
+from coreman.core.assistants import delivery, deprovisioning, jobs, lifecycle
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
@@ -144,6 +144,7 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                 "done_at": done.isoformat() if done else None,
             },
         )
+    running_jobs = await jobs.active_counts(session)
     items = []
     for bot_id, state, enabled, created, owner_id, login, name, relay_id, relay, node in rows:
         flow = live.get(bot_id)
@@ -174,6 +175,7 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                 "on_shift": bool(enabled and state == "active" and working),
                 "cold_start": cold,
                 "directories_pending_removal": int(pending_dirs.get(bot_id, 0)),
+                "jobs_active": running_jobs.get(bot_id, 0),
                 "watch": health.get(bot_id),
                 "turns": (
                     {"today": spent[bot_id].used, "budget": spent[bot_id].budget}

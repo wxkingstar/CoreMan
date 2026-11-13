@@ -774,3 +774,13 @@ async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> dict
         counts = await reconcile(session, now)
         await session.commit()
     return counts
+
+
+async def active_counts(session: AsyncSession) -> dict[uuid.UUID, int]:
+    """每位助理进行中的子任务数（管理台的助理列表用）；只数状态，不读内容。"""
+    rows = await session.execute(
+        select(AssistantJob.bot_id, func.count())
+        .where(AssistantJob.status.in_(LIVE))
+        .group_by(AssistantJob.bot_id)
+    )
+    return {bot_id: int(count) for bot_id, count in rows.all()}

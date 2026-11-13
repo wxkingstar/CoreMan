@@ -319,3 +319,24 @@ async def test_the_list_shows_cold_start_progress_and_shift(
     bot.assistant_state = "deprovisioning"
     await db_session.commit()
     assert (await item())["on_shift"] is False
+
+
+async def test_the_list_counts_running_subtasks_without_their_content(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    job = text(
+        "INSERT INTO assistant_jobs (id, bot_id, status, title_enc, brief_enc, session_key,"
+        " origin_session_key, deadline_at) VALUES (gen_random_uuid(), :bot, :status, :title,"
+        " 'x', 'oc_private#job:demo', 'oc_private', now() + interval '2 hours')"
+    )
+    for status in ("queued", "running", "done", "blocked", "cancelled"):
+        await db_session.execute(job, {"bot": bot.id, "status": status, "title": SECRET})
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.get("/api/admin/assistants")
+    assert response.status_code == 200
+    [item] = response.json()["data"]["items"]
+    assert item["jobs_active"] == 2
+    assert SECRET not in response.text and "oc_private" not in response.text
