@@ -91,7 +91,11 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             # List what was asked for, so the tools are there once the owner confirms.
             level, granted = live.authorization_level, set(live.requested_scopes or [])
         definitions = tools.definitions(
-            auth=current and not scope.scheduled, level=level, scopes=granted
+            auth=current and not scope.scheduled,
+            # 平台自己发起的一轮没有人在场：授权工具只列查询。
+            owner_present=not scope.platform,
+            level=level,
+            scopes=granted,
         )
         if assistant:
             # 个人助理：写类工具改为提交审批（没有 approval 组的轮次不列出），另加助理自有的工具。

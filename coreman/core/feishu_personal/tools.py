@@ -44,6 +44,14 @@ _AUTH: dict[str, tuple[str, str]] = {
         "Revoke this user's authorization for this bot.",
     ),
 }
+# 没有人在场的轮次（个人助理里平台自己发起的）只能查询授权状态：发起授权要所有者点卡片，
+# 撤销授权不该由别人发来的消息引出。
+STATUS_TOOL = "feishu_authorization_status"
+OWNER_TURN_REQUIRED = {
+    "error": "owner_turn_required",
+    "hint": "Nobody is present in this turn. Tell the owner what is needed; authorization is"
+    " requested or revoked only when the owner asks for it in the private chat.",
+}
 
 
 def _auth_definition(name: str) -> dict[str, Any]:
@@ -56,14 +64,22 @@ def _auth_definition(name: str) -> dict[str, Any]:
 
 
 def definitions(
-    *, auth: bool = True, level: str | None = None, scopes: Iterable[str] = ()
+    *,
+    auth: bool = True,
+    owner_present: bool = True,
+    level: str | None = None,
+    scopes: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     """`auth`: the authorization tools (private chat only).
+
+    `owner_present`: False for a turn the platform started itself; only the status query of
+    the authorization tools is listed.
 
     `level`/`scopes`: the owner's saved tier and permissions; tools they do not reach are not
     listed. None lists no data tools (not connected and not completing authorization).
     """
-    out = [_auth_definition(name) for name in _AUTH] if auth else []
+    names = _AUTH if owner_present else (STATUS_TOOL,)
+    out = [_auth_definition(name) for name in names] if auth else []
     if level is None:
         return out
     granted = frozenset(scopes)
@@ -88,6 +104,8 @@ async def dispatch(
         # 授权要本人在私聊里点卡片完成，定时任务里没有人能确认。
         if scope.scheduled:
             return {"error": "invalid_tool_or_arguments"}
+        if scope.platform and name != STATUS_TOOL:
+            return dict(OWNER_TURN_REQUIRED)
         try:
             if name == "feishu_authorize":
                 asked = Authorize.model_validate(arguments)

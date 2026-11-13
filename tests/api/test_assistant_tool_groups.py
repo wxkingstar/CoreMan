@@ -12,6 +12,7 @@ from coreman.core.assistants import platform_turns, tools
 from coreman.core.assistants.kinds import HANDOVER_KIND, SUBTASK_KIND
 from coreman.core.bus import tasks
 from coreman.core.db.models import FeishuPersonalGrant
+from coreman.core.feishu_personal import policy
 from tests.api.test_assistant_approval_gate import listed, owner_turn
 from tests.api.test_feishu_personal import URL, headers, rpc, value
 from tests.integration.assistant_helpers import identified, isolate_tool_registry
@@ -113,10 +114,8 @@ async def test_a_platform_turn_gets_the_owners_tools(
     _, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
     assert turn.inbound_event_id is None
     listing = await listed(client, app, turn, user)
-    # 和私聊一轮一样：读写个人工具（写类过审批）、授权工具、审批组与 knowledge 组。
-    assert {"notes_demo", "approval_list", "feishu_chat_history", "feishu_authorize"} <= set(
-        listing
-    )
+    # 和私聊一轮一样：读写个人工具（写类过审批）、审批组与 knowledge 组。
+    assert {"notes_demo", "approval_list", "feishu_chat_history"} <= set(listing)
     assert "approval" in listing["feishu_reply_message"]["inputSchema"]["properties"]
     auth = await headers(app, turn, user)
     assert await call(client, auth, "notes_demo", {}) == {"ok": True}
@@ -142,3 +141,72 @@ async def test_a_subtask_is_read_only_plus_knowledge(
     assert await call(client, auth, "notes_demo", {}) == {"ok": True}
     assert (await call(client, auth, "approval_list", {}))["error"] == INVALID
     assert (await call(client, auth, "feishu_reply_message", {}))["error"] == INVALID
+
+
+async def test_a_platform_turn_can_only_query_the_authorization(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    """没有人在场的一轮不能发起授权、也不能撤销授权：只列查询，另两个调用被拒。"""
+    bot, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
+    listing = await listed(client, app, turn, user)
+    assert "feishu_authorization_status" in listing
+    assert not {"feishu_authorize", "feishu_revoke_authorization"} & set(listing)
+    auth = await headers(app, turn, user)
+    for name in ("feishu_authorize", "feishu_revoke_authorization"):
+        out = await call(client, auth, name, {})
+        assert out["error"] == "owner_turn_required" and "private chat" in out["hint"]
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, user.id), populate_existing=True)
+    assert grant.status == "connected" and grant.token_enc
+    status = await call(client, auth, "feishu_authorization_status", {})
+    assert status["status"] == "connected"
+
+
+async def test_an_owner_turn_keeps_all_three_authorization_tools(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    _, user, task = await owner_turn(db_session, app, assistant=True)
+    listing = await listed(client, app, task, user)
+    assert {
+        "feishu_authorize",
+        "feishu_authorization_status",
+        "feishu_revoke_authorization",
+    } <= set(listing)
+
+
+async def test_a_platform_turn_is_fenced_by_its_session(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    """能力令牌里的会话编号与助理会话现在的不一致（会话换新了）：整个入口 403。"""
+    bot, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
+    good = await headers(app, turn, user)
+    assert (await client.post(URL, headers=good, json=rpc("notes_index"))).status_code == 200
+    grant = await db_session.get(FeishuPersonalGrant, (bot.id, user.id), populate_existing=True)
+    stale = {
+        **good,
+        "Authorization": "Bearer "
+        + policy.issue_capability(
+            app.state.cipher,
+            task_id=turn.id,
+            user_id=str(user.id),
+            context_epoch=grant.context_epoch,
+            base_session_id=uuid.uuid4(),
+            ttl_seconds=1800,
+        ),
+    }
+    for body in (rpc("notes_index"), rpc("feishu_authorization_status")):
+        response = await client.post(URL, headers=stale, json=body)
+        assert response.status_code == 403 and "conversation changed" in response.text
+    # 不带会话编号的令牌是定时任务的样子，平台轮次不认。
+    bare = {
+        **good,
+        "Authorization": "Bearer "
+        + policy.issue_capability(
+            app.state.cipher,
+            task_id=turn.id,
+            user_id=str(user.id),
+            context_epoch=grant.context_epoch,
+            base_session_id=None,
+            ttl_seconds=1800,
+        ),
+    }
+    assert (await client.post(URL, headers=bare, json=rpc("notes_index"))).status_code == 403
