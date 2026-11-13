@@ -100,7 +100,10 @@ async def index(
     # 密钥不可用时核心函数把读不出来的行都略过了：告诉页面这是「读不出来」而不是「没有」。
     locked = not await sealed.key_ready(session, own.bot.id)
     await access_log.record(session, own.bot.id, own.actor.id, "notes.index", "")
-    return {"code": 0, "data": {"items": [_entry(entry) for entry in entries], "locked": locked}}
+    data = {"items": [_entry(entry) for entry in entries], "locked": locked}
+    # 访问记录与这次读取同一个事务：提交不了，内容也不交出去。
+    await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.post("/read")
@@ -115,7 +118,10 @@ async def read(
         raise refuse("page_not_found", ERRORS)
     # 路径本身是个人内容，不进访问记录。
     await access_log.record(session, own.bot.id, own.actor.id, "notes.read", "page")
-    return {"code": 0, "data": _entry(page)}
+    data = _entry(page)
+    # 访问记录与这次读取同一个事务：提交不了，内容也不交出去。
+    await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.put("/page")

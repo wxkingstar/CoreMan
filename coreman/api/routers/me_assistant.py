@@ -155,13 +155,13 @@ async def job_list(
     await sealed.open_rows(session, [*active, *recent], viewer=own.actor.id)
     names = await owner_view.target_names(session, [*active, *recent])
     await access_log.record(session, own.bot.id, own.actor.id, "jobs.read", "list")
-    return {
-        "code": 0,
-        "data": {
-            "active": [owner_view.job(row, names) for row in active],
-            "recent": [owner_view.job(row, names) for row in recent],
-        },
+    data = {
+        "active": [owner_view.job(row, names) for row in active],
+        "recent": [owner_view.job(row, names) for row in recent],
     }
+    # 访问记录与这次读取同一个事务：提交不了，内容也不交出去。
+    await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -217,7 +217,10 @@ async def recent_approvals(
     """最近落地：全部终态的审批单（已执行、被拒、撤回、失败、过期、作废），给本人解密后的摘要与理由。"""
     rows = await owner_view.approvals(session, own.bot, own.actor.id, owner_view.SETTLED)
     await access_log.record(session, own.bot.id, own.actor.id, "approvals.read", "recent")
-    return {"code": 0, "data": {"items": [owner_view.settled_view(row) for row in rows]}}
+    data = {"items": [owner_view.settled_view(row) for row in rows]}
+    # 访问记录与这次读取同一个事务：提交不了，内容也不交出去。
+    await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.get("/settings")
@@ -276,6 +279,8 @@ async def shift(
     assert row is not None
     owner_view.switch_shift(row, body.state, now)
     await sealed.open_row(session, row, viewer=own.actor.id)
+    # 响应里带着解密后的设置（重点群、忽略的会话）：与读设置一样记一次。
+    await access_log.record(session, own.bot.id, own.actor.id, "settings.read", "shift")
     data = await owner_view.preferences(session, row, now)
     await session.commit()
     return {"code": 0, "data": data}
