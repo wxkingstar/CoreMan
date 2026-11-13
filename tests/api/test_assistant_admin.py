@@ -340,3 +340,32 @@ async def test_the_list_counts_running_subtasks_without_their_content(
     [item] = response.json()["data"]["items"]
     assert item["jobs_active"] == 2
     assert SECRET not in response.text and "oc_private" not in response.text
+
+
+async def test_the_running_count_includes_dispatches(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    job = text(
+        "INSERT INTO assistant_jobs (id, bot_id, kind, status, title_enc, brief_enc, session_key,"
+        " origin_session_key, deadline_at) VALUES (gen_random_uuid(), :bot, :kind, :status,"
+        " :title, 'x', :key, 'oc_private', now() + interval '2 hours')"
+    )
+    rows = (
+        ("subtask", "running", "oc_private#job:demo"),
+        ("bot_help", "queued", "assistant-help:demo-1"),
+        ("bot_help", "running", "assistant-help:demo-2"),
+        ("bot_help", "blocked", "assistant-help:demo-3"),
+    )
+    for kind, status, key in rows:
+        await db_session.execute(
+            job, {"bot": bot.id, "kind": kind, "status": status, "title": SECRET, "key": key}
+        )
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    response = await client.get("/api/admin/assistants")
+    assert response.status_code == 200
+    [item] = response.json()["data"]["items"]
+    assert item["jobs_active"] == 3
+    assert SECRET not in response.text and "assistant-help:" not in response.text

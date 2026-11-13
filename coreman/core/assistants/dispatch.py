@@ -521,3 +521,22 @@ async def result_text(session: AsyncSession, row: AssistantJob) -> str:
         lines.append("没有答复。")
     lines.append(RESULT_FOOTER)
     return "\n".join(lines)
+
+
+async def live_rounds(session: AsyncSession, bot_id: uuid.UUID) -> list[int]:
+    """这位助理调度出去、目标员工那边已认领或在跑的轮次的任务号（停用时要等它们停下）。
+
+    不看求助自己的状态：停用先把求助记为已取消，对方那一轮要过一个心跳才真的停。只取编号。
+    """
+    return list(
+        await session.scalars(
+            select(Task.id)
+            .join(AssistantJob, AssistantJob.last_task_id == Task.id)
+            .where(
+                AssistantJob.bot_id == bot_id,
+                AssistantJob.kind == "bot_help",
+                Task.kind == BOT_HELP_KIND,
+                Task.status.in_(tasks.ACTIVE),
+            )
+        )
+    )

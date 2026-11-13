@@ -35,6 +35,7 @@ from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal import service as personal
 from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import identified, seed_standard
+from tests.integration.dispatch_helpers import asked, help_task, target_bot
 from tests.integration.lifecycle_helpers import (
     APP_ID,
     CIPHER,
@@ -195,6 +196,38 @@ async def test_running_subtasks_are_cancelled_when_deprovisioning_starts(
     )
     assert results == 0
     # 排着队的轮次不用等：这一步已经往下走了。
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "withdraw"
+
+
+async def test_deprovisioning_cancels_a_dispatch_and_waits_for_the_other_side(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner, _ = await active_assistant(db_session)
+    await identified(db_session, bot)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target)
+    # 目标员工那边已经认领了这一轮。
+    running = await help_task(db_session, row)
+    await deprovisioning.request(db_session, bot, trigger="admin", actor_id=None)
+    await db_session.commit()
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    await tick(factory, messenger)
+    cancelled = await db_session.get(AssistantJob, row.id, populate_existing=True)
+    assert cancelled is not None
+    assert (cancelled.status, cancelled.error_code) == ("cancelled", deprovisioning.REASON)
+    # 没有会话可回：不投回。
+    assert cancelled.reported_at is not None and cancelled.report_code == "not_needed"
+    turn = await db_session.get(Task, running.id, populate_existing=True)
+    assert turn is not None and turn.bot_id == target.id
+    assert turn.cancel_requested_at is not None
+    # 对方那一轮还没停：这一步不往下走。
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "drain"
+    await tasks.finish(db_session, running.id, status="cancelled")
+    await db_session.commit()
+    await tick(factory, messenger, later=11)
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.step == "withdraw"
 

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants import (
     approvals,
     cold_start,
+    dispatch,
     jobs,
     keys,
     lifecycle,
@@ -157,7 +158,8 @@ async def step_drain(
     """叫停这条记录没结束的任务（已批准的写操作照常执行完），等在跑的停下，最多等 `DRAIN_WAIT`。
 
     已批准的写操作排着队也算在跑：它不叫停，要等它执行完，否则授权撤销、密钥销毁之后它只会失败。
-    进行中的子任务先记为已取消：它们的结论再也没有会话可回。
+    进行中的子任务先记为已取消：它们的结论再也没有会话可回。调度到别的员工那边的轮次同样要等：
+    它们带着所有者的业务令牌。
     """
     bot = await _bot(session, row)
     # 先停止盯消息、作废没交回的条目，再叫停任务：之后不会再有新的条目进来。
@@ -184,6 +186,9 @@ async def step_drain(
         for task_id, kind, status in found
         if status in tasks.ACTIVE or kind == APPROVAL_EXECUTE_KIND
     ]
+    # 调度出去的求助跑在目标员工名下，上面按这条记录查不到：求助已由 `jobs.cancel_all` 记为取消
+    # 并请求取消了对方那一轮，这里等它真的停下，再去撤销授权、销毁密钥。
+    running += await dispatch.live_rounds(session, bot.id)
     if running and row.deadline > now:
         row.next_attempt_at, row.updated_at = now + DRAIN_CHECK, now
         return []
