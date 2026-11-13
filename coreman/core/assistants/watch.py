@@ -99,6 +99,10 @@ LOOKBACK = timedelta(minutes=30)
 # 消息对所有者已经没有「刚发生」的意义。只针对轮询照常、单个会话没读的情况：上一次成功轮询
 # 之后才发来的消息平台没见过，隔了多久都入箱（周末、请假之后的第一轮），见 `_oldest`。
 MAX_AGE = timedelta(hours=24)
+# 回看的硬上限：轮询停了很久（助理被暂停、授权失效了两三周）之后恢复，回看起点与年龄截止点
+# 都不早于这么久以前。周末、几天的假期照常补回；更早的对所有者已经是旧事，整批倒进收件箱
+# 只会淹没恢复后真正要看的。
+MAX_LOOKBACK = timedelta(days=7)
 # 刷新令牌约 7 天不用就失效：不轮询的助理每这么久强制刷新一次。
 KEEPALIVE = timedelta(hours=24)
 # 用量流水（`feishu_rate_usage`）多久清一次旧行；上次清理的时刻（进程内，单调时钟）。
@@ -312,8 +316,10 @@ class _Round:
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW
             )
             return
-        if item.at_ms < min(self.oldest, int(entry.get("a") or self.oldest)):
-            # 太老了：不入箱，游标照常越过它。排过队的会话按排队那一轮的截止点算（`put_off`）。
+        oldest = min(self.oldest, int(entry.get("a") or self.oldest))
+        if item.at_ms < max(oldest, _week_ago(self.now)):
+            # 太老了：不入箱，游标照常越过它。排过队的会话按排队那一轮的截止点算（`put_off`），
+            # 同样不早于 `MAX_LOOKBACK` 之前。
             return
         spoke = int(entry.get("o") or 0)
         context = Context(
@@ -438,20 +444,26 @@ class _Round:
             log.warning("assistant_watch_chat_parked", bot_id=str(self.bot_id))
 
 
+def _week_ago(now: datetime) -> int:
+    """回看的硬上限（毫秒）：见 `MAX_LOOKBACK`。"""
+    return int((aware_utc(now) - MAX_LOOKBACK).timestamp() * 1000)
+
+
 def _floor(since: int, last_ok_at: datetime | None, now: datetime) -> int:
     """游标里没有的会话从哪一刻读起（毫秒）：回看 `LOOKBACK`；轮询停了更久就回看到上一次成功
-    轮询，但不早于开始盯的时刻。"""
+    轮询，但不早于开始盯的时刻，也不早于 `MAX_LOOKBACK` 之前。"""
     back = aware_utc(now) - LOOKBACK
     if last_ok_at is not None:
         back = min(back, aware_utc(last_ok_at))
-    return max(since, int(back.timestamp() * 1000))
+    return max(since, int(back.timestamp() * 1000), _week_ago(now))
 
 
 def _oldest(last_ok_at: datetime | None, now: datetime, owed: int = 0) -> int:
     """早于哪一刻的消息不入箱（毫秒）：`MAX_AGE` 之前，与上一次成功轮询两者里更早的那个。
 
     下班后不轮询：周五下班到周一上班之间发来的消息都晚于上一次成功轮询，不能按「超过一天」
-    丢掉。丢的只是上一次成功轮询时就已经超过 `MAX_AGE` 的。
+    丢掉。丢的只是上一次成功轮询时就已经超过 `MAX_AGE` 的。无论如何不早于 `MAX_LOOKBACK` 之前：
+    停了两三周后恢复，只交回最近 7 天的。
 
     Args:
         owed: 之前有一轮没探完时那一轮的截止点（毫秒，没有传 0）：那一轮算成功，「上一次
@@ -461,7 +473,9 @@ def _oldest(last_ok_at: datetime | None, now: datetime, owed: int = 0) -> int:
     if last_ok_at is not None:
         back = min(back, aware_utc(last_ok_at))
     at = int(back.timestamp() * 1000)
-    return min(at, owed) if owed else at
+    if owed:
+        at = min(at, owed)
+    return max(at, _week_ago(now))
 
 
 def _owed(left: list[str], state: _Round, skip: set[str]) -> list[str]:

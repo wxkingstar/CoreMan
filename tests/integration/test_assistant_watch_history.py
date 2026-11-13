@@ -50,6 +50,7 @@ async def polled(session: AsyncSession, who: Watched, at: datetime) -> None:
 def test_the_windows_are_the_agreed_ones() -> None:
     assert watch.LOOKBACK == timedelta(minutes=30)
     assert watch.MAX_AGE == timedelta(hours=24)
+    assert watch.MAX_LOOKBACK == timedelta(days=7)
 
 
 async def test_a_group_the_owner_was_just_added_to_does_not_dump_its_history(
@@ -408,3 +409,47 @@ async def test_an_unreached_chat_read_by_another_route_does_not_end_the_stretch(
     await tick(factory, later)
     assert await boxed(db_session, who) == ["om_li_saturday", "om_li_monday", "om_team_saturday"]
     assert "p" not in (await watch_row(db_session, who)).cursor_enc
+
+
+@pytest.mark.parametrize(
+    ("days", "kept"),
+    [
+        (3, ["om_li_old", "om_li_recent", "om_team_old", "om_team_recent"]),
+        (20, ["om_li_recent", "om_team_edge", "om_team_recent"]),
+    ],
+)
+async def test_coming_back_after_a_long_stop_looks_back_a_week_at_most(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    days: int,
+    kept: list[str],
+) -> None:
+    """停了几天（周末、假期）全补回；停了两三周，只交回最近 7 天的。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    stopped = ago(base, days=days)
+    await primed(db_session, who, ago(base, days=40), head=["oc_li"])
+    # 一个读过的会话（游标停在停止之前），一个停止期间才有人找来的会话（游标里没有）。
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {"oc_li": {"t": ms(stopped) - 1000, "m": [], "k": "p2p", "th": {}}},
+    }
+    await db_session.commit()
+    await polled(db_session, who, stopped)
+    api.chats = [TEAM, LI]
+    mention = [{"id": who.open_id, "id_type": "open_id"}]
+    # 「旧」的那条在停止后一天发出：停 3 天时是两天前，停 20 天时是 19 天前。
+    api.say("oc_li", "om_li_old", stopped + timedelta(days=1))
+    api.say("oc_li", "om_li_week", ago(base, days=7, hours=1))
+    api.say("oc_li", "om_li_recent", ago(base, hours=30))
+    api.say("oc_team", "om_team_old", stopped + timedelta(days=1), mentions=mention)
+    api.say("oc_team", "om_team_edge", ago(base, days=6, hours=23), mentions=mention)
+    api.say("oc_team", "om_team_recent", ago(base, hours=30), mentions=mention)
+    await tick(make_session_factory(db_engine), base)
+    assert sorted(await boxed(db_session, who)) == kept
+    # 没见过的会话从哪一刻读起：停得久时不早于 7 天前。
+    start = int(api.read("oc_team")[0].params["start_time"])
+    assert start == ms(max(stopped, base - watch.MAX_LOOKBACK)) // 1000
