@@ -30,7 +30,8 @@ from coreman.core.timeutils import aware_utc
 STEPS = COLD_START_STEPS
 # 第一步（voice）是平台自己拉样本，其余四步各是一道题。
 QUESTIONS = STEPS[1:]
-EVENT_KEY = "assistant_cold_start"
+# 卡片回调的分流键。不与任务类型 `assistant_cold_start` 同名：那个字面量只许出现在登记处。
+EVENT_KEY = "assistant_cold_start_card"
 DEADLINE = timedelta(hours=24)
 MAX_ANSWER = 500
 MAX_GROUPS = 20

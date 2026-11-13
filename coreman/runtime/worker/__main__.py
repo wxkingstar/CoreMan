@@ -5,6 +5,7 @@ from coreman.runtime.worker.assistant_approvals import (
     AssistantApprovalExecuteHandler,
     AssistantApprovalResultHandler,
 )
+from coreman.runtime.worker.assistant_cold_start import AssistantColdStartHandler
 from coreman.runtime.worker.assistant_compile import AssistantCompileHandler
 from coreman.runtime.worker.assistant_handover import AssistantHandoverHandler
 from coreman.runtime.worker.card_actions import CardActionHandler
@@ -35,6 +36,7 @@ asyncio.run(
             "assistant_approval_result": AssistantApprovalResultHandler(),
             "assistant_handover": AssistantHandoverHandler(),
             "assistant_compile": AssistantCompileHandler(),
+            "assistant_cold_start": AssistantColdStartHandler(),
             "relay_switch": RelaySwitchHandler(),
             "group_observe": GroupObserveHandler(),
         }

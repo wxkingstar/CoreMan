@@ -9,6 +9,10 @@
 一轮能用哪几组由任务类型决定（`groups_for`）。没有 `approval` 组的轮次拿到的个人工具只有读类：
 写类工具不列出，调用也不受理——子任务要对外做事，只能把建议写进结论，由主会话提交。
 
+另有一组 `voice`（冷启动的口吻样本）：只有 `assistant_cold_start` 的轮次有它，而且那一轮只有
+它——不列、不受理任何个人工具（读类也没有）与别的组。那一轮要生成一页置顶页，输入只能是
+所有者自己发出的消息，所以不给它任何能读到别人内容的工具。
+
 各组的工具在本文件末尾登记，清单不取决于别的模块有没有被导入。
 """
 
@@ -21,16 +25,19 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core import personal_schedules as schedules
-from coreman.core.assistants import followup_tools, notes_tools, settings_tools
+from coreman.core.assistants import followup_tools, notes_tools, settings_tools, voice_tools
 from coreman.core.assistants.approvals import catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
-from coreman.core.assistants.kinds import SUBTASK_KIND
+from coreman.core.assistants.kinds import COLD_START_KIND, SUBTASK_KIND
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_personal import tools as personal_tools
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
 
 GROUPS = ("knowledge", "approval", "jobs")
+# 只有冷启动的口吻样本那一轮有；有它的轮次没有别的任何工具（`bare`）。
+VOICE_GROUP = "voice"
+ALL_GROUPS = (*GROUPS, VOICE_GROUP)
 _INVALID = "invalid_tool_or_arguments"
 
 
@@ -48,7 +55,7 @@ class Context:
 Definitions = Callable[[], list[dict[str, Any]]]
 Dispatch = Callable[[Context, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
-_DEFINITIONS: dict[str, list[Definitions]] = {group: [] for group in GROUPS}
+_DEFINITIONS: dict[str, list[Definitions]] = {group: [] for group in ALL_GROUPS}
 _TOOLS: dict[str, tuple[str, Dispatch]] = {}
 
 
@@ -92,8 +99,15 @@ def group_of(name: str) -> str | None:
 
 
 def groups_for(kind: str) -> tuple[str, ...]:
-    """这类任务的一轮能用哪几组：子任务只有 knowledge，其余的轮次全部。"""
+    """这类任务的一轮能用哪几组：口吻样本只有 voice，子任务只有 knowledge，其余的轮次三组全有。"""
+    if kind == COLD_START_KIND:
+        return (VOICE_GROUP,)
     return ("knowledge",) if kind == SUBTASK_KIND else GROUPS
+
+
+def bare(groups: Iterable[str]) -> bool:
+    """这一轮只带登记在它那几组里的工具：没有个人工具、授权工具与本人定时任务工具。"""
+    return VOICE_GROUP in frozenset(groups)
 
 
 def definitions(base: list[dict[str, Any]], *, groups: Iterable[str]) -> list[dict[str, Any]]:
@@ -105,12 +119,13 @@ def definitions(base: list[dict[str, Any]], *, groups: Iterable[str]) -> list[di
     """
     allowed = frozenset(groups)
     out: list[dict[str, Any]] = []
-    for item in base:
+    # 只带本组工具的轮次：个人工具一个都不列。
+    for item in [] if bare(allowed) else base:
         if not catalog.is_write(str(item["name"])):
             out.append(item)
         elif "approval" in allowed:
             out.append(approval_tools.staged(item))
-    for group in GROUPS:
+    for group in ALL_GROUPS:
         if group in allowed:
             for listing in _DEFINITIONS[group]:
                 out.extend(listing())
@@ -128,6 +143,8 @@ async def dispatch(
     if found is not None:
         group, run = found
         return await run(ctx, name, arguments) if group in allowed else {"error": _INVALID}
+    if bare(allowed):
+        return {"error": _INVALID}
     if catalog.is_write(name):
         if "approval" not in allowed:
             return {"error": _INVALID}
@@ -158,7 +175,12 @@ async def _settings(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[
     return await settings_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _voice(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await voice_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 register("knowledge", lambda: list(notes_tools.DEFINITIONS), _notes)
 register("knowledge", followup_tools.definitions, _followups)
 register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
+register(VOICE_GROUP, lambda: list(voice_tools.DEFINITIONS), _voice)

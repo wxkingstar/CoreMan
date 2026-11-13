@@ -71,6 +71,8 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     assistant = is_assistant(scope.bot)
     # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge）。
     groups = assistant_tools.groups_for(scope.task.kind) if assistant else ()
+    # 只带本组工具的轮次（冷启动的口吻样本）：定时任务工具也不列、不受理。
+    bare = assistant and assistant_tools.bare(groups)
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -100,7 +102,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         if assistant:
             # 个人助理：写类工具改为提交审批（没有 approval 组的轮次不列出），另加助理自有的工具。
             definitions = assistant_tools.definitions(definitions, groups=groups)
-        if not scope.scheduled:
+        if not scope.scheduled and not bare:
             definitions += schedules.definitions()
         result = {} if method == "ping" else {"tools": definitions}
     elif method == "tools/call":
@@ -112,11 +114,12 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             return mcp_rpc.error(rid, -32602, "Invalid params")
         name, arguments = params["name"], params.get("arguments", {})
         try:
-            if name in schedules.TOOLS:
+            if name in schedules.TOOLS and not bare:
                 value = await schedules.dispatch(session, scope, name, arguments)
-            elif assistant and assistant_tools.group_of(name) == "knowledge":
-                # 知识库与待跟进在平台自己的库里、不调飞书：授权换代之后同一轮里照常可用，
-                # 所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按 groups 把关。
+            elif assistant and assistant_tools.group_of(name) in ("knowledge", "voice"):
+                # 知识库、待跟进、设置与口吻页都在平台自己的库里、不调飞书：授权换代之后同一轮里
+                # 照常可用，所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按 groups
+                # 把关。
                 value = await assistant_tools.dispatch(
                     assistant_tools.Context(session, cipher, scope), name, arguments, groups=groups
                 )
