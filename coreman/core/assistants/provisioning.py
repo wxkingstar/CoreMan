@@ -110,6 +110,25 @@ def offer_card(token: str) -> dict[str, Any]:
     }
 
 
+def accepted_card() -> dict[str, Any]:
+    """点了「开通」之后换上的卡片：没有按钮，免得再点。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "template": "turquoise",
+            "title": {"tag": "plain_text", "content": "开通个人助理"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "正在开通，好了会在这里告诉你；接下来还要授权一次飞书。",
+                }
+            ]
+        },
+    }
+
+
 def grant_card(url: str) -> dict[str, Any]:
     return {
         "schema": "2.0",
