@@ -46,6 +46,7 @@
     - 任务入队处加运行时闸：没有入站事件的平台来源类型，只有 `platform_turns.enqueue` 能入队。
     - 入站事件已被清理的审批结果，回落到平台来源投回。
     这些在 2A 的修补提交里落地，2E 之后的各层按此假定。
+    - 后续补入两点：「无人在场」按任务类型判断（`kinds.unattended(kind)`，即类型属于 `kinds.ORIGIN_KINDS`；`platform_turns.unattended(task)` 与 `Scope.unattended` 都落到它），带入站事件的审批结果回合同样让路、同样收紧、同样动不了置顶页，`Scope.platform`（无入站事件 → 身份取自设置、会话围栏）含义不变；无人在场的轮次不下发以所有者身份签发的业务系统令牌（`BOT_TOKEN_*`）、业务系统账号与令牌配置，也不挂业务系统 MCP，机器人自己配的静态环境变量不动。新增的收紧一律用 `unattended` 判断，不要再用 `is_platform` 或 `scope.platform`。
 
 ## 层间接口
 
