@@ -203,6 +203,15 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 收件箱只进不出（条目一直是 `pending`）说明投递层没在取，不是盯消息的问题。
 
+### 个人助理：冷启动与上下班的排查
+
+- 管理台的助理列表（`GET /api/admin/assistants`）每条记录有 `cold_start`（`state`：`pending` 没开始、`in_progress`、`done`；`step`；`outcome`：`completed` / `skipped` / `timeout`）与 `on_shift`（按设置此刻是否在班）。助理不盯消息时先看这两项：`cold_start.state` 不是 `done` 就还没开始盯；`on_shift` 为 `false` 是下班中。
+- `cold_start.state` 长时间停在 `pending`：这位助理是本功能上线前开通的，所有者还没再来私聊；或者它没有记下身份（`cold_start` 为 `null`），需要重新开通。
+- `step` 长时间停在 `voice`：平台以所有者身份读飞书失败，每 10 分钟重试，满 1 小时放弃这一步；看 scheduler 日志里的 `assistant_shift`、`assistant_cold_start_failed` 与盯消息的限频日志。
+- scheduler 日志 `assistant_shift` 的字段：`voice_queued` / `voice_skipped` / `voice_retry` / `asked` / `focus_skipped` / `timeout`（冷启动），`compile_worked` / `compile_queued` / `compile_idle` / `compile_budget` / `compile_paused`（下班编译）。日志不带任何内容。
+- 口吻页没生成：`assistant_cold_start` 那一轮失败不重试（运行时暂停、节点不可用、样本不足）。所有者可以在私聊里让助理按他的要求新建或改写这一页。
+- `step` 停在某一题：在等所有者点卡片；满 24 小时自动按默认设置完成。意外出错（接口字段与预期不符等）时日志里是 `failed`，这一位被推后 10 分钟再试，不影响别人，也不影响 24 小时兜底。
+
 ### 个人助理投递排障
 
 `GET /api/admin/assistants` 的每条记录有 `turns`（今天的轮次与预算）与 `inbox_pending`（收件箱里还没交回的条目数）。scheduler 的日志 `assistant_delivery` 带各项计数（`assistant_handovers`、`assistant_inbox_settled`、`assistant_followups_due`、`assistant_marks_stale`、`assistant_approvals_auto_withdrawn`、`assistant_recalls_noticed`、`assistant_reauth_reminded`）。
