@@ -36,6 +36,9 @@ WorkspaceMode = Literal["copy", "existing"]
 # 旧运行时只认 256KB 分块；新运行时在 ping 里报 workspace_chunk。
 CHUNK_SIZE = 256 * 1024
 MAX_CHUNK = 2 * 1024 * 1024
+# 不报 workspace_read_raw 的源运行时读文本块时还会附原文，JSON 转义最坏一个字节变六个：
+# 512KB 的块 base64 加原文仍在 call_agent 的 4MB 响应上限内，2MB 的块会超出、换机失败。
+LEGACY_READ_CHUNK = 512 * 1024
 MAX_FILES = 50000
 SESSION_COPY_TIMEOUT = 5 * 60
 # 各会话的文件互不相干，并行搬；每个会话内部仍按块串行。
@@ -252,6 +255,8 @@ async def copy_files(
         int(capability.get("workspace_chunk") or CHUNK_SIZE),
         MAX_CHUNK,
     )
+    if not source_capability.get("workspace_read_raw"):
+        chunk_size = min(chunk_size, LEGACY_READ_CHUNK)
     export = await call_agent(source, cipher, "workspace-export", {**src, "git": git_aware})
     cloned: list[dict[str, Any]] = []
     failed: list[str] = []
@@ -278,6 +283,91 @@ async def copy_files(
     ):
         raise ApiError(409, 409, "目标运行时版本较旧，不能覆盖已有目录或复制 .git，请先升级运行时")
     await call_agent(target, cipher, "workspace-import", {**dst, "manifest": manifest})
+    if source_capability.get("workspace_pack") and capability.get("workspace_pack"):
+        await transfer_pack(source, target, cipher, src, dst, manifest, chunk_size)
+    else:
+        await transfer_each_file(source, target, cipher, src, dst, manifest, chunk_size)
+    await call_agent(
+        target,
+        cipher,
+        "workspace-finish",
+        {
+            **dst,
+            "manifest": manifest,
+            "content": instruction_content(bot),
+            "replace": True,
+            "repos": cloned,
+        },
+    )
+
+
+async def transfer_pack(
+    source: RelayServer,
+    target: RelayServer,
+    cipher: Cipher | None,
+    src: dict[str, Any],
+    dst: dict[str, Any],
+    manifest: list[dict[str, Any]],
+    chunk_size: int,
+) -> None:
+    """两端都支持时整包传：源节点把清单里的文件打成一个压缩包，按块读走、写到目标，目标核对
+    大小与哈希后只按清单解开。调用次数从「每个文件至少一读一写」降到「每块一读一写」。"""
+    if not any("link" not in entry for entry in manifest):
+        return
+    job = {**src, "transfer_id": dst["transfer_id"]}
+    try:
+        packed = await call_agent(
+            source, cipher, "workspace-pack", {**job, "action": "create", "manifest": manifest}
+        )
+        size, pack_hash = packed.get("size"), packed.get("hash")
+        if not isinstance(size, int) or size <= 0 or not isinstance(pack_hash, str):
+            raise ApiError(502, 502, "源文件压缩包无效")
+
+        async def read(_: dict[str, Any], offset: int) -> dict[str, Any]:
+            return await call_agent(
+                source,
+                cipher,
+                "workspace-pack",
+                {**job, "action": "read", "offset": offset, "length": chunk_size},
+            )
+
+        async def write(_: dict[str, Any], offset: int, chunk: dict[str, Any]) -> None:
+            raw = base64.b64decode(chunk["data"], validate=True)
+            if len(raw) != min(chunk_size, size - offset):
+                raise ApiError(502, 502, "文件传输校验失败")
+            await call_agent(
+                target,
+                cipher,
+                "workspace-unpack",
+                {**dst, "action": "write", "offset": offset, "data": chunk["data"]},
+            )
+
+        steps: list[tuple[dict[str, Any], int]] = [
+            ({}, offset) for offset in range(0, size, chunk_size)
+        ]
+        await transfer_chunks(steps, read, write)
+        await call_agent(
+            target,
+            cipher,
+            "workspace-unpack",
+            {**dst, "action": "extract", "size": size, "hash": pack_hash},
+        )
+    finally:
+        # 源节点的暂存压缩包用完就删；删不掉也会被过期清理扫掉，不影响结果。
+        with contextlib.suppress(AgentError, TimeoutError):
+            await call_agent(source, cipher, "workspace-pack", {**job, "action": "remove"})
+
+
+async def transfer_each_file(
+    source: RelayServer,
+    target: RelayServer,
+    cipher: Cipher | None,
+    src: dict[str, Any],
+    dst: dict[str, Any],
+    manifest: list[dict[str, Any]],
+    chunk_size: int,
+) -> None:
+    """旧运行时：逐个文件按块读、写。"""
     steps: list[tuple[dict[str, Any], int]] = []
     for entry in manifest:
         if "link" in entry:
@@ -296,7 +386,7 @@ async def copy_files(
             "workspace-read",
             {
                 **src,
-                "transfer_id": str(operation_id),
+                "transfer_id": dst["transfer_id"],
                 "path": entry["path"],
                 "offset": offset,
                 "length": chunk_size,
@@ -320,18 +410,6 @@ async def copy_files(
             raise ApiError(502, 502, "文件传输校验失败")
 
     await transfer_chunks(steps, read, write)
-    await call_agent(
-        target,
-        cipher,
-        "workspace-finish",
-        {
-            **dst,
-            "manifest": manifest,
-            "content": instruction_content(bot),
-            "replace": True,
-            "repos": cloned,
-        },
-    )
 
 
 async def copy_sessions(

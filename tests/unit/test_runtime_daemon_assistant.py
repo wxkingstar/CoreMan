@@ -378,6 +378,8 @@ REFUSED_OPERATIONS = [
     "workspace-import",
     "workspace-finish",
     "workspace-clone",
+    "workspace-pack",
+    "workspace-unpack",
     "session-export",
     "session-read",
     "session-import",
