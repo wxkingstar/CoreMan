@@ -236,8 +236,9 @@ class OpenStage(ChatStageBase):
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
         # 个人助理里平台触发的一轮（含带入站事件的审批结果回合）无人在场，输入可能来自别人发给
-        # 所有者的消息：不挂云签名代理、业务系统目录与所有者的个人凭证，需要时由所有者在私聊里
-        # 亲自让助理做。
+        # 所有者的消息：不挂云签名代理、业务系统目录与所有者的个人凭证，也不下发以所有者身份
+        # 签发的业务系统令牌与业务系统 MCP，需要时由所有者在私聊里亲自让助理做。机器人自己配的
+        # 静态环境变量不受影响。
         unattended = platform_turns.unattended(ctx.task)
         access = await build_system_access(
             session,
@@ -258,6 +259,7 @@ class OpenStage(ChatStageBase):
                 ttl_seconds=bot.sse_timeout_seconds,
             ),
             mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
+            unattended=unattended,
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(
