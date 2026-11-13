@@ -806,9 +806,8 @@ class Workspace:
         return {"entries": entries[:1000], "truncated": len(entries) > 1000}
 
     def read(self):
-        path = self.path(
-            self.data["path"], allow_link=True, transfer=bool(self.data.get("transfer_id"))
-        )
+        transfer = bool(self.data.get("transfer_id"))
+        path = self.path(self.data["path"], allow_link=True, transfer=transfer)
         if not path.is_file() or path.stat().st_size > MAX_TOTAL:
             raise self.error("文件类型或大小不支持")
         offset = int(self.data.get("offset", 0))
@@ -819,8 +818,9 @@ class Workspace:
         with path.open("rb") as f:
             f.seek(offset)
             raw = f.read(length)
+        # 换机复制只用 data：再带一份原文，2MB 的文本块经 JSON 转义后会超出平台 4MB 的响应上限。
         try:
-            content = raw.decode("utf-8")
+            content = None if transfer else raw.decode("utf-8")
         except UnicodeDecodeError:
             content = None
         return {
