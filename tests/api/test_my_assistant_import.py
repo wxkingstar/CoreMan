@@ -375,3 +375,28 @@ async def test_an_oversized_upload_is_cut_off_while_reading(
     assert refused.value.code == "archive_too_large"
     # 一过上限就停：没有把整个上传读进内存再判断。
     assert upload.taken <= 1000 + 300
+
+
+async def test_a_header_value_that_cannot_be_turned_into_text_is_skipped_not_a_crash(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """十六进制写的超大整数：读得出来、转不成字符串。只跳过这一个文件，不是 500。"""
+    await owned(client, db_session)
+    huge = "0x" + "f" * 4000
+    odd = pack(
+        {
+            "好.md": "正文",
+            "大标题.md": f"---\ntitle: {huge}\n---\nx",
+            "大摘要.md": f"---\nsummary: {huge}\n---\nx",
+            "大置顶.md": f"---\npinned: {huge}\n---\nx",
+        }
+    )
+    response = await _post(client, odd)
+    assert response.status_code == 200, response.text
+    plan = response.json()["data"]
+    assert plan["create"] == [{"path": "好", "pinned": False}]
+    assert plan["skip"] == [
+        {"path": "大标题", "reason": "invalid_front_matter"},
+        {"path": "大摘要", "reason": "invalid_front_matter"},
+        {"path": "大置顶", "reason": "invalid_front_matter"},
+    ]

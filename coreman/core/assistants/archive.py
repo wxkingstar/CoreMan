@@ -230,13 +230,13 @@ def _page(name: str, text: str) -> PageFile:
     title, summary, pinned = meta.get("title"), meta.get("summary"), meta.get("pinned")
     if not (_scalar(title) and _scalar(summary) and (pinned is None or isinstance(pinned, bool))):
         return PageFile(path, None, None, None, "", "invalid_front_matter")
-    return PageFile(
-        path,
-        None if title is None else str(title),
-        None if summary is None else str(summary),
-        pinned,
-        body,
-    )
+    try:
+        # 取值转成字符串也可能失败：十六进制写的超大整数 YAML 读得出来，`str()` 却因为位数
+        # 上限抛 ValueError。
+        shown = [None if value is None else str(value) for value in (title, summary)]
+    except (ValueError, OverflowError, RecursionError):
+        return PageFile(path, None, None, None, "", "invalid_front_matter")
+    return PageFile(path, shown[0], shown[1], pinned, body)
 
 
 def _day(value: object) -> date | None:

@@ -52,12 +52,34 @@ def test_markdown_files_become_pages_and_the_header_is_optional() -> None:
 
 @pytest.mark.parametrize(
     "header",
-    ["title: [1, 2]", "pinned: yes please", "title: true", "summary: {a: b}", 'title: "没收尾'],
+    [
+        "title: [1, 2]",
+        "pinned: yes please",
+        "title: true",
+        "summary: {a: b}",
+        'title: "没收尾',
+        # 十六进制写的超大整数：YAML 读得出来，转成字符串时超过位数上限。
+        pytest.param("title: 0x" + "f" * 4000, id="huge-title"),
+        pytest.param("summary: 0x" + "f" * 4000, id="huge-summary"),
+        pytest.param("pinned: 0x" + "f" * 4000, id="huge-pinned"),
+        "pinned: 2026-11-14",
+        "summary: [[[[1]]]]",
+        "title: &a [*a]",
+    ],
 )
 def test_a_bad_header_marks_only_that_file(header: str) -> None:
     parsed = archive.parse(pack({"坏.md": f"---\n{header}\n---\n正文", "好.md": "正文"}))
     assert parsed.pages[0] == PageFile("坏", None, None, None, "", "invalid_front_matter")
     assert parsed.pages[1] == PageFile("好", None, None, None, "正文")
+
+
+def test_odd_scalars_in_the_header_are_used_as_text() -> None:
+    header = "title: 2026-11-14\nsummary: 2026-11-14 10:00:00\npinned: false"
+    parsed = archive.parse(pack({"日.md": f"---\n{header}\n---\n正文"}))
+    assert parsed.pages == [PageFile("日", "2026-11-14", "2026-11-14 10:00:00", False, "正文")]
+    for value in (".inf", ".nan", "1e400", "0x" + "f" * 100):
+        (page,) = archive.parse(pack({"数.md": f"---\ntitle: {value}\n---\n正文"})).pages
+        assert page.problem is None and page.title
 
 
 @pytest.mark.parametrize(
