@@ -296,25 +296,34 @@ async def send(
 ) -> AssistantJob:
     """记下一次求助并给目标员工排一轮。不查资格：调用方先 `resolve` 或 `authorize`。
 
-    名额与每天的个数和子任务共用（`jobs._admit` 在同一把锁里数，不分种类）。问题只进这一行的
+    名额与每天的个数和子任务共用（`jobs._admit` 在同一把锁里数，不分种类）；所有者刚批准的
+    派出（`approved`）不被这两个上限拦下，但照样计入。问题只进这一行的
     密文列，目标员工那边的任务载荷只有编号；它开轮时才把问题解出来交给模型。
 
     Args:
         allow_write: 所有者是否批准了让对方改东西；只读求助为假
         attended: 发起它的那一轮所有者在不在场；不在场的要看每日轮次预算
-        approved: 这是所有者刚在审批系统里批准的一次派出，不看预算
+        approved: 这是所有者刚在审批系统里批准的一次派出，不看预算、并发上限与每日个数
         job_id: 指定行的编号（审批执行用审批单的编号，重跑时不会派第二次）
 
     Raises:
         DispatchError: invalid_question / question_too_long / assistant_unavailable /
             already_dispatched
         jobs.JobError: content_locked / too_many_jobs / daily_job_limit /
-            daily_budget_exhausted
+            daily_budget_exhausted（后三个在 `approved` 时不会出现）
     """
     now = aware_utc(now or utcnow())
     body = clean_question(question)
     prefs, owner = await owner_of(session, bot)
-    await jobs._admit(session, bot, prefs, new=True, budget=not (attended or approved), now=now)
+    await jobs._admit(
+        session,
+        bot,
+        prefs,
+        new=True,
+        budget=not (attended or approved),
+        now=now,
+        capped=not approved,
+    )
     row_id = job_id or uuid.uuid4()
     key = session_key_for(row_id)
     task = await tasks.enqueue(

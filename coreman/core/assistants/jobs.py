@@ -163,12 +163,15 @@ async def _admit(
     new: bool,
     budget: bool,
     now: datetime,
+    capped: bool = True,
 ) -> None:
     """再占一个「进行中」的名额之前的检查；之后本事务独占这位助理的名额计数。
 
     Args:
         new: 新派一个（数当天个数）；追问不算新的
         budget: 要不要看每日轮次预算（无人在场的轮次与平台派的要看）
+        capped: 受不受并发上限与每日个数的限制。所有者刚亲自批准的派出不受限（否则名额
+            恰好满了，他得重新批一次）；它照样占名额、计入当天的个数
 
     Raises:
         JobError: content_locked / too_many_jobs / daily_job_limit / daily_budget_exhausted
@@ -185,10 +188,10 @@ async def _admit(
         .select_from(AssistantJob)
         .where(AssistantJob.bot_id == bot.id, AssistantJob.status.in_(LIVE))
     )
-    if (live or 0) >= MAX_ACTIVE:
+    if capped and (live or 0) >= MAX_ACTIVE:
         raise JobError("too_many_jobs")
     today = assistant_settings.local_today(prefs, now)
-    if new:
+    if new and capped:
         start, end = delivery.day_bounds(delivery.zone_named(prefs.timezone), today)
         made = await session.scalar(
             select(func.count())

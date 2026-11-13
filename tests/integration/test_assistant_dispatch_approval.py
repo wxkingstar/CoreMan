@@ -300,3 +300,27 @@ async def test_an_unattended_request_is_refused_when_the_runtime_turned_private(
     await db_session.refresh(row)
     assert row.error_code == "owner_turn_required"
     assert await _dispatched(db_session, target) == 0
+
+
+async def test_an_approved_dispatch_is_not_turned_away_by_the_job_limits(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import jobs
+    from tests.integration.job_helpers import spawned
+
+    install_tower(monkeypatch)
+    bot, _, scope = await owner_scope(db_session)
+    target = await target_bot(db_session)
+    row = await submitted(db_session, scope, target)
+    # 等待批准的这段时间里名额用满了、当天的个数也到了上限。
+    monkeypatch.setattr(jobs, "MAX_ACTIVE", 1)
+    monkeypatch.setattr(jobs, "MAX_DAILY", 1)
+    await spawned(db_session, bot)
+    # 所有者已经亲自批准：照样派出，不用他再批一次。
+    assert await approved(db_engine, db_session, row) == "executed"
+    assert await _dispatched(db_session, target) == 1
+    # 它仍然占名额、计入当天的个数：别的派出照常被拦。
+    assert await jobs.active_counts(db_session) == {bot.id: 2}
+    with pytest.raises(jobs.JobError) as full:
+        await dispatch.send(db_session, bot, target, QUESTION, allow_write=False, attended=True)
+    assert full.value.code == "too_many_jobs"
