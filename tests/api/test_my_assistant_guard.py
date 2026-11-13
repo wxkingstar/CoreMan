@@ -31,12 +31,15 @@ from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_as, login_existing
 from tests.api.my_assistant_helpers import URL, as_bot_token, as_cli, code
 from tests.api.test_csrf import _api_routes
+from tests.fakes.archives import pack
 from tests.integration.assistant_helpers import SECRET
 from tests.integration.job_helpers import owner_with_key, reloaded, spawned, tasks_of
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
 PAGE = "规则/口吻"
 SAFE = frozenset({"GET"})
+# 导入接口的一次合法调用：默认只预览，不改任何东西。
+ARCHIVE = pack({"新页.md": "正文"})
 # （方法，路由模板）→ 一次合法调用的参数；`{job}` 在用例里换成所有者那个子任务的编号。
 CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("GET", ""): {},
@@ -60,6 +63,7 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("GET", "/settings"): {},
     ("PATCH", "/settings"): {"json": {"timezone": "UTC"}},
     ("GET", "/access-log"): {},
+    ("POST", "/import"): {"files": {"archive": ("notes.zip", ARCHIVE, "application/zip")}},
     ("POST", "/shift"): {"json": {"state": "on"}},
     ("POST", "/voice/regenerate"): {},
     # 停用放最后：有的用例按这个顺序把每条路由都调一遍。
@@ -138,7 +142,11 @@ async def _call(
     spec = CASES[(method, template)]
     path = spec.get("path", template).replace("{job}", str(seeded.job.id))
     return await client.request(
-        method, f"{URL}{path}", params=spec.get("params"), json=spec.get("json")
+        method,
+        f"{URL}{path}",
+        params=spec.get("params"),
+        json=spec.get("json"),
+        files=spec.get("files"),
     )
 
 
