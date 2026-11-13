@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import platform_turns
@@ -23,12 +23,14 @@ from coreman.core.db.models import (
 )
 from coreman.core.feishu_personal import policy
 from coreman.runtime.worker.assistant_approvals import AssistantApprovalResultHandler
+from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.platform_turn import PlatformTurnHandler, stand_in
 from tests.fakes.fake_relay import FakeRelay
 from tests.integration.assistant_helpers import identified, raw
 from tests.integration.lifecycle_helpers import active_assistant
 from tests.integration.test_assistant_approval_result import _row
+from tests.integration.test_chat_handler import chat_task
 from tests.integration.test_cron_handler import claim
 from tests.integration.worker_helpers import build_ctx, user_input
 
@@ -194,3 +196,34 @@ def test_the_stand_in_carries_only_coordinates() -> None:
     )
     assert event.platform_msg_id == "platform-turn:7"
     assert event.reply_context == {"chat_id": "oc_private", "chat_type": "single"}
+
+
+async def test_a_stand_in_turn_is_not_the_owner_reaching_out(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """替身不是所有者发来的私聊消息：不写 user_reached，也不去处理「被点过的回复按钮」。"""
+    from coreman.core.chat import card_replies
+
+    used: list[Any] = []
+
+    async def record(*args: Any) -> None:
+        used.append(args)
+
+    monkeypatch.setattr(card_replies, "enqueue_used", record)
+    bot, _ = await assistant(db_session)
+    await db_session.execute(text("DELETE FROM user_reached"))
+    task = await queued(db_session, bot, HANDOVER_KIND, {"note": "李四问报价"})
+    done, _ = await run(db_engine, db_session, task, Handover())
+    assert done.status == "succeeded"
+    assert await raw(db_session, "SELECT count(*) FROM user_reached") == 0
+    assert used == []
+    # 所有者真的发来一条时照旧记下。
+    message = await chat_task(
+        db_session, bot, "在吗", sender="owner_pid", chat_type="single", chat_id="oc_private"
+    )
+    relay = FakeRelay("normal")
+    ctx = build_ctx(db_engine, message, relay_client_factory=lambda _r: relay.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    assert await raw(db_session, "SELECT count(*) FROM user_reached") == 1
+    assert len(used) == 1

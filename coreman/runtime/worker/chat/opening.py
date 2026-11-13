@@ -482,7 +482,11 @@ class OpenStage(ChatStageBase):
             session,
             log_entry(ctx, intake, status=CHAT_LOG_RUNNING, relay_session_id=info.relay_session_id),
         )
-        if bot.platform == "feishu" and ctx.task.inbound_event_id == intake.inbound.id:
+        if (
+            bot.platform == "feishu"
+            and ctx.task.inbound_event_id is not None
+            and ctx.task.inbound_event_id == intake.inbound.id
+        ):
             from coreman.core.chat.card_replies import enqueue_used
 
             # 点回复按钮带来的这一轮过了入站的各道关、真正开始了，才把那一行按钮置灰；
