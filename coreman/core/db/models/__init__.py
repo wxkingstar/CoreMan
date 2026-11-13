@@ -25,11 +25,13 @@ from coreman.core.db.models.assistants import (
     APPROVAL_CHANNELS,
     APPROVAL_STATUSES,
     ASSISTANT_STATES,
+    SHIFT_OVERRIDES,
     AssistantApproval,
     AssistantKey,
     AssistantLifecycle,
     AssistantMark,
     AssistantRetiredDir,
+    AssistantSettings,
     AssistantTranscript,
 )
 from coreman.core.db.models.bots import (
@@ -295,4 +297,6 @@ __all__ += [
     "ASSISTANT_STATES",
     "AssistantLifecycle",
     "AssistantRetiredDir",
+    "AssistantSettings",
+    "SHIFT_OVERRIDES",
 ]

@@ -16,12 +16,13 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     PrimaryKeyConstraint,
+    SmallInteger,
     Text,
     UniqueConstraint,
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, enum_check
@@ -265,3 +266,61 @@ class AssistantRetiredDir(Base):
     next_attempt_at: Mapped[datetime] = _ts(server_default=text("now()"))
     error_code: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+SHIFT_OVERRIDES = ("on", "off")
+_HHMM = "'^([01][0-9]|2[0-3]):[0-5][0-9]$'"
+
+
+class AssistantSettings(Base):
+    """一位助理的设置：开通时记下的所有者身份，工作时段，重点群与忽略的会话。
+
+    身份四列（`open_id`、`tenant_key`、`platform_user_id`、`chat_id`）在授权完成时由平台写入，
+    取自点开通时飞书给的操作人与开通卡片所在的私聊，不来自任何请求内容；平台自己发起的轮次
+    （没有入站事件）凭它们拿个人工具，见 `coreman/core/assistants/platform_turns.py`。空串表示
+    没记下，这样的助理跑不了平台来源的轮次。
+
+    `focus_chats_enc` / `ignored_chats_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出
+    的行上是会话 id 的列表；没设置过是 None，密钥销毁后读出来是空列表。
+    工作时段是所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays`
+    是 ISO 星期（1 周一 … 7 周日）。`shift_override` 是「上班」「下班」命令的临时切换，过了
+    `shift_override_until` 失效。
+    """
+
+    __tablename__ = "assistant_settings"
+    __table_args__ = (
+        CheckConstraint(
+            f"work_start ~ {_HHMM} AND work_end ~ {_HHMM} AND work_start < work_end",
+            name="work_hours",
+        ),
+        CheckConstraint("workdays <@ ARRAY[1,2,3,4,5,6,7]::smallint[]", name="workdays"),
+        CheckConstraint(
+            f"shift_override IS NULL OR {enum_check('shift_override', SHIFT_OVERRIDES)}",
+            name="shift_override",
+        ),
+        CheckConstraint(
+            "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 2000",
+            name="daily_turn_budget",
+        ),
+    )
+    bot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
+    )
+    open_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    tenant_key: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    platform_user_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    chat_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    timezone: Mapped[str] = mapped_column(Text, server_default=text("'Asia/Shanghai'"))
+    work_start: Mapped[str] = mapped_column(Text, server_default=text("'09:30'"))
+    work_end: Mapped[str] = mapped_column(Text, server_default=text("'19:00'"))
+    workdays: Mapped[list[int]] = mapped_column(
+        ARRAY(SmallInteger()), server_default=text("'{1,2,3,4,5}'::smallint[]")
+    )
+    focus_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    ignored_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    # 空则用平台默认（设置项 assistant_daily_turn_budget，2E）。
+    daily_turn_budget: Mapped[int | None] = mapped_column(Integer)
+    shift_override: Mapped[str | None] = mapped_column(Text)
+    shift_override_until: Mapped[datetime | None] = _ts()
+    cold_start_done_at: Mapped[datetime | None] = _ts()
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))

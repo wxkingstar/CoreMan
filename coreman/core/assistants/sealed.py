@@ -45,6 +45,7 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantSettings,
     AssistantTranscript,
     Bot,
     ChatLog,
@@ -186,6 +187,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     CloudPendingApproval: {"reason": Text()},
     # 节点上 CLI 的转录：一轮结束后上传，续聊前下发。
     AssistantTranscript: {"blob_enc": Blob()},
+    # 所有者标记的重点群与忽略的会话：会话 id 的列表整值封存，读不出来按空列表。
+    AssistantSettings: {"focus_chats_enc": Whole([]), "ignored_chats_enc": Whole([])},
 }
 
 
