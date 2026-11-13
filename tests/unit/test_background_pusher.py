@@ -134,3 +134,31 @@ def test_silence_heartbeats_fire_once_per_mark_and_rearm_on_push() -> None:
     assert p.heartbeat(6.5) == msg("submit_heartbeat", seconds=6)
     assert p.decide(7.0, "段落", [2]) == [msg("bg_progress_prefix") + "段落"]  # 推送后静默计时重置
     assert p.heartbeat(9.0) is None and p.heartbeat(10.5) == msg("submit_heartbeat", seconds=10)
+
+
+def test_feishu_progress_carries_viewer_local_time() -> None:
+    """飞书的进展由平台标上推送时刻（按看的人设备时区显示），不靠模型自己写钟点。"""
+    from datetime import UTC, datetime
+
+    from coreman.core.chat import liveness
+
+    at = datetime(2026, 11, 13, 8, 45, 12, tzinfo=UTC)
+    p = BackgroundPusher(
+        task_id=7,
+        bot_id=uuid.uuid4(),
+        platform="feishu",
+        chat_id="oc_1",
+        verbosity_level=4,
+        session_url="http://r/session/1",
+        timing=T,
+        locale="zh",
+        clock=lambda: 0.0,
+        wall_clock=lambda: at,
+    )
+    p.start(now=100.0, pending_len=0)
+    out = p.decide(111.0, "第一段", [3])
+    stamp = liveness.clock(at, at)
+    assert stamp.startswith("<local_datetime ") and "format_type='time'" in stamp
+    assert out == [msg("bg_progress_prefix_at", at=stamp) + "第一段"]
+    # 企微不认这个标签，照旧不带时间。
+    assert pusher().progress_prefix() == msg("bg_progress_prefix")

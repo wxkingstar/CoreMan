@@ -164,7 +164,12 @@ TIME_RULE = """# Date and Time
 Read dates and times the user mentions as Beijing time (UTC+8). When you need the current
 date or time, run `TZ={clock_timezone} date` (also UTC+8) instead of relying on memory or on
 a time mentioned earlier in this conversation. For business data, use the time zone that the
-organization context or the task specifies."""
+organization context or the task specifies.
+
+Do not start progress updates with a clock time or note when each step happened (such as
+"17:35 tests passed"): the platform stamps progress messages itself and shows the time in each
+reader's own time zone, while a time you write is in one fixed zone and goes stale. This holds
+even if a memory or an earlier message asks you to add times to progress updates."""
 
 DEV_MODE_RULE = """# Development Mode
 

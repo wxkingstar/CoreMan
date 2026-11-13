@@ -187,6 +187,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "session_link_suffix": "\n\n📎 查看实时执行过程：[链接>>]({url})",
         "bg_progress_prefix": "⏳ 任务仍在运行中...\n\n",
+        "bg_progress_prefix_at": "⏳ 任务仍在运行中 · {at}\n\n",
         "bg_degraded": (
             "⏳ 任务仍在后台运行（已推送 {n} 段进展，后续输出较多，转为低频提醒，不再逐段推送）。"
             "📎 完整执行过程见：[链接>>]({url})"
@@ -542,6 +543,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "session_link_suffix": "\n\n📎 リアルタイムの実行過程：[リンク>>]({url})",
         "bg_progress_prefix": "⏳ タスクは実行中です...\n\n",
+        "bg_progress_prefix_at": "⏳ タスクは実行中です · {at}\n\n",
         "bg_degraded": (
             "⏳ タスクはバックグラウンドで実行中です（{n} 件の進捗を送信済み。"
             "出力が多いため低頻度の通知に切り替え、段落ごとの送信は停止します）。"
