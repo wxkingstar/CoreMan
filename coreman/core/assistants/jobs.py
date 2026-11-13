@@ -16,8 +16,8 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants import delivery, handover, platform_turns, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
@@ -79,6 +79,11 @@ STATUS_WORDS = {
 FAILURE_NOTES = {
     "rate_limited": "运行时的额度用完了，这一轮没有跑成；过一阵再派，或自己在这一轮里查。",
 }
+RECONCILE_BATCH = 200
+# 在途那一轮结束后留给收尾挂钩的时间；过了还没收尾，就是挂钩没跑到。
+LOST_GRACE = timedelta(seconds=60)
+TIMEOUT = "job_timeout"
+LOST = "turn_lost"
 
 
 class JobError(Exception):
@@ -672,3 +677,100 @@ async def settle_report(
     row.updated_at = when
     await session.flush()
     return True
+
+
+async def _locked(session: AsyncSession, job_id: uuid.UUID) -> AssistantJob | None:
+    row: AssistantJob | None = await session.get(
+        AssistantJob, job_id, with_for_update=True, populate_existing=True
+    )
+    return row
+
+
+async def reconcile(session: AsyncSession, now: datetime) -> dict[str, int]:
+    """收口没走到收尾的子任务与投回。调用方提交。
+
+    1. 到点还没结束的：记失败 `job_timeout`，叫停在途的那一轮。
+    2. 在途那一轮已经结束、却没有收尾的（开流前被取消、暂停、被收尸，或收尾挂钩没跑到），以及
+       任务行已经被清理的：记失败，代码取任务的错误代码。
+    3. 该投回而没投到的：绑着的结果任务已经结束就记账（正常结束算投到，否则放回），没有在途
+       的就重投。只管启用中的 `active` 助理。
+
+    先用只取编号与状态的查询挑行，再按主键逐行加锁取出（自动还原）；与收尾挂钩并发时以行锁
+    为准，两边都幂等。
+    """
+    now = aware_utc(now)
+    counts = {"assistant_jobs_timed_out": 0, "assistant_jobs_lost": 0, "assistant_job_results": 0}
+    due = list(
+        await session.scalars(
+            select(AssistantJob.id)
+            .where(AssistantJob.status.in_(LIVE), AssistantJob.deadline_at <= now)
+            .order_by(AssistantJob.deadline_at)
+            .limit(RECONCILE_BATCH)
+        )
+    )
+    for job_id in due:
+        row = await _locked(session, job_id)
+        if row is None or row.status not in LIVE:
+            continue
+        await _end(session, row, "failed", TIMEOUT, report=True, now=now)
+        counts["assistant_jobs_timed_out"] += 1
+
+    ended_turn = and_(Task.status.not_in(tasks.OPEN), Task.finished_at < now - LOST_GRACE)
+    lost = (
+        await session.execute(
+            select(AssistantJob.id, Task.status, Task.error_code)
+            .outerjoin(Task, Task.id == AssistantJob.last_task_id)
+            .where(AssistantJob.status.in_(LIVE), or_(Task.id.is_(None), ended_turn))
+            .order_by(AssistantJob.created_at)
+            .limit(RECONCILE_BATCH)
+        )
+    ).all()
+    for job_id, status, code in lost:
+        row = await _locked(session, job_id)
+        if row is None or row.status not in LIVE:
+            continue
+        # 任务成功了却没收尾、任务行不在了：没有可用的代码。其余取任务的错误代码。
+        reason = LOST if status in (None, "succeeded") else sealed.code_only(code or "", LOST)
+        await _end(session, row, "failed", reason, report=True, now=now)
+        counts["assistant_jobs_lost"] += 1
+
+    pending = (
+        await session.execute(
+            select(AssistantJob.id, AssistantJob.result_task_id, Task.status, Task.error_code)
+            .join(Bot, Bot.id == AssistantJob.bot_id)
+            .outerjoin(Task, Task.id == AssistantJob.result_task_id)
+            .where(
+                AssistantJob.report.is_(True),
+                AssistantJob.reported_at.is_(None),
+                AssistantJob.status.in_(ENDED),
+                Bot.enabled.is_(True),
+                Bot.kind == "assistant",
+                Bot.assistant_state == "active",
+                or_(
+                    AssistantJob.result_task_id.is_(None),
+                    Task.id.is_(None),
+                    Task.status.not_in(tasks.OPEN),
+                ),
+            )
+            .order_by(AssistantJob.finished_at)
+            .limit(RECONCILE_BATCH)
+        )
+    ).all()
+    for job_id, task_id, status, code in pending:
+        if task_id is not None:
+            await settle_report(session, task_id, status or "missing", code, now=now)
+        row = await _locked(session, job_id)
+        bot = await session.get(Bot, row.bot_id) if row is not None else None
+        if row is None or bot is None:
+            continue
+        if await report(session, bot, row, now) is not None:
+            counts["assistant_job_results"] += 1
+    return counts
+
+
+async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> dict[str, int]:
+    """scheduler 的投递循环每 5 秒调一次：一个事务里对一次账。"""
+    async with factory() as session:
+        counts = await reconcile(session, now)
+        await session.commit()
+    return counts
