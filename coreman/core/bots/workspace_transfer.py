@@ -36,6 +36,9 @@ WorkspaceMode = Literal["copy", "existing"]
 # 旧运行时只认 256KB 分块；新运行时在 ping 里报 workspace_chunk。
 CHUNK_SIZE = 256 * 1024
 MAX_CHUNK = 2 * 1024 * 1024
+# 不报 workspace_read_raw 的源运行时读文本块时还会附原文，JSON 转义最坏一个字节变六个：
+# 512KB 的块 base64 加原文仍在 call_agent 的 4MB 响应上限内，2MB 的块会超出、换机失败。
+LEGACY_READ_CHUNK = 512 * 1024
 MAX_FILES = 50000
 SESSION_COPY_TIMEOUT = 5 * 60
 # 各会话的文件互不相干，并行搬；每个会话内部仍按块串行。
@@ -252,6 +255,8 @@ async def copy_files(
         int(capability.get("workspace_chunk") or CHUNK_SIZE),
         MAX_CHUNK,
     )
+    if not source_capability.get("workspace_read_raw"):
+        chunk_size = min(chunk_size, LEGACY_READ_CHUNK)
     export = await call_agent(source, cipher, "workspace-export", {**src, "git": git_aware})
     cloned: list[dict[str, Any]] = []
     failed: list[str] = []
