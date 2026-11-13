@@ -1,7 +1,8 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
 只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态、今天的轮次与预算、待交回的
-条目数、冷启动走到哪一步、按设置此刻是否在班、进行中的子任务数），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
+条目数、冷启动走到哪一步、按设置此刻是否在班、进行中的子任务数、最近一次非所有者访问个人
+内容的时间），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
 可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。
 """
 
@@ -20,7 +21,7 @@ from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import delivery, jobs
+from coreman.core.assistants import access_log, delivery, jobs
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import (
     AssistantInbox,
@@ -127,6 +128,8 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
             AssistantSettings.cold_start_done_at,
         )
     )
+    # 最近一次非所有者访问个人内容的时间（管理命令等）：只取时间，动作与对象不出现在这里。
+    foreign = await access_log.last_foreign(session)
     now = utcnow()
     shifts: dict[uuid.UUID, tuple[bool, dict[str, Any]]] = {}
     for found in prefs.all():
@@ -183,6 +186,9 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                     else None
                 ),
                 "inbox_pending": waiting.get(bot_id, 0),
+                "last_non_owner_access_at": (
+                    foreign[bot_id].isoformat() if bot_id in foreign else None
+                ),
             }
         )
     return {"code": 0, "data": {"items": items}}

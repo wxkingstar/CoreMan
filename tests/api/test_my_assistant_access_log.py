@@ -14,9 +14,10 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import followups, notes
+from coreman.core.assistants import access_log, followups, notes
 from coreman.core.db.models import Bot
-from tests.api.my_assistant_helpers import URL, owned
+from tests.api.conftest import login_as
+from tests.api.my_assistant_helpers import URL, code, owned
 from tests.api.test_csrf import _api_routes
 from tests.integration.assistant_helpers import SECRET
 
@@ -36,6 +37,8 @@ READS: dict[str, list[tuple[str, str]]] = {
     "/approvals/recent": [("approvals.read", "recent")],
     "/notes": [("notes.index", "")],
     "/settings": [("settings.read", "")],
+    # 访问记录本身只有编号、动作与时间：看它不解密任何东西。
+    "/access-log": [],
 }
 # 用 POST 读的：知识页的路径只放请求体；即时上下班的响应里带着解密后的设置。
 POSTED: dict[str, tuple[dict[str, str], list[tuple[str, str]]]] = {
@@ -112,3 +115,56 @@ async def test_the_log_holds_no_content(
     # 正文、摘要、标题里的机密片段，路径的两段，待跟进的标题：一样都不在。
     for piece in (SECRET, "规则", "口吻", "续约"):
         assert piece not in logged
+
+
+LOG = f"{URL}/access-log"
+
+
+async def test_the_owner_pages_through_their_own_records(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _owner = await owned(client, db_session)
+    await _seed(db_session, bot)
+    for _ in range(3):
+        await client.get(f"{URL}/notes")
+    await access_log.record(db_session, bot.id, None, "cli.rewrap")
+    await db_session.commit()
+    first = await client.get(LOG, params={"limit": 2})
+    assert first.status_code == 200 and first.headers["cache-control"] == "no-store"
+    data = first.json()["data"]
+    assert [(item["action"], item["actor_kind"], item["actor_name"]) for item in data["items"]] == [
+        ("cli.rewrap", "system", None),
+        ("notes.index", "owner", "张三"),
+    ]
+    assert set(data["items"][0]) == {"id", "at", "actor_kind", "actor_name", "action", "target"}
+    assert data["next_before"] == data["items"][-1]["id"]
+    rest = (await client.get(LOG, params={"before": data["next_before"]})).json()["data"]
+    assert [item["action"] for item in rest["items"]] == ["notes.index", "notes.index"]
+    assert rest["next_before"] is None
+    # 看访问记录本身不算一次解密：还是那四行。
+    assert len(await _stored(db_session)) == 4
+
+
+async def test_nobody_reads_someone_elses_records(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _owner = await owned(client, db_session)
+    await _seed(db_session, bot)
+    await client.get(f"{URL}/notes")
+    # 另一位有自己助理的平台管理员：只看得到他自己的（空的）。
+    await owned(client, db_session, role="platform_admin")
+    mine_only = await client.get(LOG)
+    assert mine_only.json()["data"] == {"items": [], "next_before": None}
+    assert str(bot.id) not in mine_only.text
+    # 没有助理的平台管理员：没有助理，也就没有记录可看。
+    await login_as(client, db_session, role="platform_admin")
+    refused = await client.get(LOG)
+    assert refused.status_code == 404 and code(refused) == "no_assistant"
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 201}, {"before": 0}, {"before": "x"}])
+async def test_bad_paging_is_refused(
+    client: httpx.AsyncClient, db_session: AsyncSession, params: dict[str, object]
+) -> None:
+    await owned(client, db_session)
+    assert (await client.get(LOG, params=params)).status_code == 422

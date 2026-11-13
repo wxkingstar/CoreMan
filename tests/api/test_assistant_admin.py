@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import access_log
 from coreman.core.assistants.records import new_assistant_bot
 from coreman.core.db.models import (
     AssistantLifecycle,
@@ -369,3 +370,27 @@ async def test_the_running_count_includes_dispatches(
     [item] = response.json()["data"]["items"]
     assert item["jobs_active"] == 3
     assert SECRET not in response.text and "assistant-help:" not in response.text
+
+
+async def test_the_list_shows_when_someone_other_than_the_owner_last_accessed(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    await access_log.record(db_session, bot.id, owner.id, "notes.read", "page", kind="owner")
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    [item] = (await client.get("/api/admin/assistants")).json()["data"]["items"]
+    # 所有者自己看自己的不算。
+    assert item["last_non_owner_access_at"] is None
+
+    await access_log.record(db_session, bot.id, None, "cli.rewrap")
+    await db_session.commit()
+    seen = await db_session.scalar(
+        text("SELECT max(\"at\") FROM assistant_access_log WHERE actor_kind = 'system'")
+    )
+    response = await client.get("/api/admin/assistants")
+    [item] = response.json()["data"]["items"]
+    assert item["last_non_owner_access_at"] == seen.isoformat()
+    # 管理员只看到时间：做了什么、对着什么，都不在这里。
+    assert "cli.rewrap" not in response.text and "notes.read" not in response.text

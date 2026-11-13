@@ -471,6 +471,7 @@ async def test_retention_deletes_old_rows_in_batches_and_keeps_referenced_ones(
         "old_observe_decisions": 0,
         "old_credential_requests": 0,
         "old_doc_consents": 0,
+        "old_assistant_access_log": 0,
     }
     async with make_session_factory(db_engine)() as s:
         assert set((await s.execute(select(Task.id))).scalars()) == {queued_id, recent_id}
@@ -522,6 +523,27 @@ async def test_retention_drops_month_old_observe_decisions(
     await db_session.commit()
     counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
     assert counts["old_observe_decisions"] == 1
+
+
+async def test_retention_drops_access_log_rows_after_180_days(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import AssistantAccessLog
+
+    bot = await _bot(db_session)
+    now = datetime.now(UTC)
+    for age in (181, 179):
+        db_session.add(
+            AssistantAccessLog(
+                bot_id=bot.id,
+                actor_kind="system",
+                action="cli.rewrap",
+                at=now - timedelta(days=age),
+            )
+        )
+    await db_session.commit()
+    counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
+    assert counts["old_assistant_access_log"] == 1
 
 
 async def test_failing_assistant_approval_tick_does_not_skip_the_cleanup(

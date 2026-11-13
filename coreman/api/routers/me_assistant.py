@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -306,6 +306,38 @@ async def voice_regenerate(
         raise refuse(exc.code, VOICE_ERRORS) from None
     await session.commit()
     return {"code": 0, "data": {"queued": True, "left_today": left}}
+
+
+@router.get("/access-log")
+async def access_entries(
+    limit: int = Query(50, ge=1, le=access_log.MAX_LIST),
+    before: int | None = Query(None, ge=1),
+    own: Mine = Depends(mine),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """所有者看自己的访问记录：谁、什么时候、做了什么，新的在前。
+
+    记录里只有编号、动作代码与时间，没有任何内容：看它不算一次解密，所以这个接口自己不记。
+    """
+    rows = await access_log.list_(session, own.bot.id, limit=limit, before=before)
+    return {
+        "code": 0,
+        "data": {
+            "items": [
+                {
+                    "id": row.id,
+                    "at": row.at.isoformat(),
+                    "actor_kind": row.actor_kind,
+                    "actor_name": row.actor_name,
+                    "action": row.action,
+                    "target": row.target,
+                }
+                for row in rows
+            ],
+            # 这一页装满了才可能还有更早的。
+            "next_before": rows[-1].id if len(rows) == limit else None,
+        },
+    }
 
 
 @router.post("/deprovision")

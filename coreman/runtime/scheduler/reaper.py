@@ -22,7 +22,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
-from coreman.core.assistants import platform_turns, sealed
+from coreman.core.assistants import access_log, platform_turns, sealed
 from coreman.core.assistants.kinds import BOT_HELP_KIND, SILENT_KINDS
 from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
@@ -617,6 +617,8 @@ async def run_retention(
         "old_observe_decisions": cleanup_observe_decisions,
         "old_credential_requests": credential_requests.cleanup,
         "old_doc_consents": doc_consents.cleanup,
+        # 个人助理的访问记录留 180 天。
+        "old_assistant_access_log": access_log.cleanup,
     }
     counts: dict[str, int] = {}
     for key, job in jobs.items():
