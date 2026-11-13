@@ -25,6 +25,7 @@ PLATFORM_VALUES = frozenset(kinds.PLATFORM_TURN_KINDS)
 ENTRY = "coreman/core/assistants/platform_turns.py"
 BUS = "coreman/core/bus/tasks.py"
 DELIVERY = "coreman/core/assistants/approvals/service.py"
+DISPATCH = "coreman/core/assistants/dispatch.py"
 # 可以出现类型字面量的文件：常量定义、任务类型元组、worker 入口按类型登记处理器。
 LITERAL_FILES = frozenset(
     {
@@ -216,3 +217,13 @@ def test_known_names_are_not_platform_kinds() -> None:
         "assistant_subtask",
         "assistant_cold_start",
     }
+
+
+def test_bot_help_tasks_are_created_only_by_the_dispatch_module() -> None:
+    """调度公共员工的那一轮跑在目标员工名下、以所有者的身份执行：只有一处能创建它。"""
+    found = [
+        relative
+        for relative, node, inside in _new_tasks()
+        if _value(_module(relative), _keyword(node, "kind"), inside) == kinds.BOT_HELP_KIND
+    ]
+    assert found == [DISPATCH]

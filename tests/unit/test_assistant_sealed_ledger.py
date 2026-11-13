@@ -130,6 +130,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/delivery.py": 5,
     # 顺带检查：入提醒条目（摘要封存）；交回后被撤回的条目作废（只写状态）
     "coreman/core/assistants/delivery_checks.py": 2,
+    # 调度公共员工：经 ORM 新建一行求助（flush 钩子封存问题与标题）
+    "coreman/core/assistants/dispatch.py": 1,
     # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
     "coreman/core/assistants/followups.py": 2,
     # 子任务：经 ORM 新建（flush 钩子封存）；之后的改动同样经 ORM
