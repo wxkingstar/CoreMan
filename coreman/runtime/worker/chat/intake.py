@@ -123,11 +123,14 @@ class IntakeStage(ChatStageBase):
             )
         text = strip_mention(joined_text(parts), bot.name)
         if is_assistant(bot) and chat_type == "single" and not observe and not alert:
-            from coreman.runtime.worker import assistant_stop
+            from coreman.runtime.worker import assistant_shift, assistant_stop
 
             # 所有者发「停用助理」：认出人就截下，排在公告、待答与运行时检查之前（开通没走完、
             # 运行时暂停或不可用时也能停用）。普通员工只多这一次属性判断。
             if await assistant_stop.intercept(session, ctx, bot, speaker, chat_id, text):
+                return None
+            # 「上班」「下班」同样在这里截下，不经模型。
+            if await assistant_shift.intercept(session, ctx, bot, speaker, chat_id, text):
                 return None
         if bot.platform == "feishu" and not observe and not alert:
             from coreman.runtime.worker.feishu_escalations import consume_reply
