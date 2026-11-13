@@ -20,7 +20,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import platform_turns, sealed
+from coreman.core.assistants import platform_turns, sealed, sent
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
@@ -323,9 +323,16 @@ async def _stage(
         return {"error": "duplicate_recipient", "hint": "合并的会话里有重复的 chat_id。"}
     reader = Call(session, cipher, scope)
     facts: list[content.Facts] = []
+
+    async def ours(message_ids: list[str]) -> frozenset[str]:
+        # 平台经审批代发的消息不算所有者亲自回复，也不算对方的新消息。
+        return await sent.among(session, scope.bot.id, message_ids)
+
     try:
         for one in calls:
-            found = await checks.check_call(reader, tool, one, owner_open_id=scope.open_id)
+            found = await checks.check_call(
+                reader, tool, one, owner_open_id=scope.open_id, ours=ours
+            )
             one["anchor_message_id"] = found.anchor_message_id
             facts.append(found)
     except checks.Rejected as exc:

@@ -34,6 +34,7 @@ from tests.integration.approval_helpers import (
     message,
     pending,
     queued,
+    reply,
 )
 from tests.integration.assistant_helpers import raw
 from tests.integration.test_cron_handler import claim
@@ -125,6 +126,54 @@ async def test_chat_moved_on_after_approval_is_stale_and_not_executed(
     assert [t.payload["status"] for t in await queued(db_session, APPROVAL_RESULT_KIND)] == [
         "stale"
     ]
+
+
+async def two_drafts(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AssistantApproval, AssistantApproval, FakeFeishu]:
+    """同一个会话里两张待批的回复（都回复李四的 om_2），第一张已批准并发出。"""
+    feishu, _ = install(monkeypatch)
+    _, _, scope = await assistant_turn(session)
+    first = await pending(session, scope)
+    second = await pending(
+        session, scope, {**reply(), "text": "报价单我周四一并发你。", "uuid": "u2"}
+    )
+    await decided(session, first)
+    return first, second, feishu
+
+
+async def test_a_second_draft_in_the_same_chat_survives_the_first_being_sent(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """平台代发的那条在飞书里发送人是所有者，但不是他亲自回复：不让同会话的另一张单过时。"""
+    first, second, feishu = await two_drafts(db_session, monkeypatch)
+    task = (await queued(db_session, APPROVAL_EXECUTE_KIND))[0]
+    assert await run(db_engine, first, task) == "executed"
+    # 飞书里这个会话多了一条所有者名下的消息：就是刚才代发的那条。
+    feishu.history.insert(0, message("om_sent_1", OWNER, TEXT))
+    await decided(db_session, second)
+    task = (await queued(db_session, APPROVAL_EXECUTE_KIND))[1]
+    assert await run(db_engine, second, task) == "executed"
+    second = await reload(db_session, second)
+    assert (second.status, second.error_code) == ("executed", None)
+    assert len(feishu.writes) == 2
+
+
+async def test_the_owner_really_replying_still_makes_the_second_draft_stale(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second, feishu = await two_drafts(db_session, monkeypatch)
+    task = (await queued(db_session, APPROVAL_EXECUTE_KIND))[0]
+    assert await run(db_engine, first, task) == "executed"
+    feishu.history.insert(0, message("om_sent_1", OWNER, TEXT))
+    # 所有者自己又回了一句：这一条没登记在平台代发的名单里。
+    feishu.history.insert(0, message("om_own", OWNER, "我再补一句"))
+    await decided(db_session, second)
+    task = (await queued(db_session, APPROVAL_EXECUTE_KIND))[1]
+    assert await run(db_engine, second, task) == "stale"
+    second = await reload(db_session, second)
+    assert (second.status, second.error_code) == ("stale", "owner_replied_after_anchor")
+    assert len(feishu.writes) == 1
 
 
 async def test_feishu_failure_is_recorded_and_not_retried(

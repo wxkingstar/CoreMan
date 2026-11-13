@@ -16,7 +16,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import delivery, followups, sealed, watch
+from coreman.core.assistants import delivery, followups, sealed, sent, watch
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants.approvals import catalog, tower
@@ -255,7 +255,13 @@ async def stale_approvals(
             where = (row.chat_id, row.thread_id)
             if where not in views:
                 views[where] = await anchors.chat_view(call, row.chat_id, row.thread_id)
-            verdict = anchors.anchor_verdict(views[where], row.anchor_message_id, prefs.open_id)
+            # 平台代发的消息（同会话另一张单批准后发出的）不算所有者亲自回复。
+            mine = await sent.among(
+                session, bot.id, [item.message_id for item in views[where].messages]
+            )
+            verdict = anchors.anchor_verdict(
+                views[where], row.anchor_message_id, prefs.open_id, mine
+            )
             code = _VERDICTS.get(verdict) if verdict else None
         if code is None:
             continue

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +28,8 @@ HINTS = {
 }
 # 会话读取：`toolbase.Call`，或测试里签名相同的替身。
 Reader = Callable[..., Awaitable[dict[str, Any]]]
+# 给一批消息编号，返回其中由平台经审批替所有者发出的（`sent.among`）。
+Ours = Callable[[list[str]], Awaitable[Collection[str]]]
 
 
 class Rejected(Exception):
@@ -154,10 +156,17 @@ async def _quote(call: Reader, found: Message | None) -> str:
     return f"{await _name(call, found.sender_id) or '（未知发送人）'}：{found.text}"
 
 
-def anchor_verdict(view: ChatView, anchor_message_id: str, owner_open_id: str) -> str | None:
+def anchor_verdict(
+    view: ChatView,
+    anchor_message_id: str,
+    owner_open_id: str,
+    ours: Collection[str] = frozenset(),
+) -> str | None:
     """锚点之后会话有没有动过；None 表示可以提交（或执行）。
 
-    只数真人发的、没被撤回的消息：机器人的通知不算「对方又发了消息」。
+    只数真人发的、没被撤回的消息：机器人的通知不算「对方又发了消息」。`ours` 是平台经审批
+    替所有者发出的消息的编号：它们在飞书里发送人是所有者，但不是他亲自回复，也不是对方的新
+    消息——同一个会话有两张待批单时，第一张发出去不该让第二张过时。
     """
     newer: list[Message] = []
     for item in view.messages:
@@ -166,13 +175,19 @@ def anchor_verdict(view: ChatView, anchor_message_id: str, owner_open_id: str) -
         newer.append(item)
     else:
         return "anchor_not_found"
-    people = [item for item in newer if item.sender_type == "user" and not item.deleted]
+    people = [
+        item
+        for item in newer
+        if item.sender_type == "user" and not item.deleted and item.message_id not in ours
+    ]
     if any(item.sender_id == owner_open_id for item in people):
         return "owner_replied_after_anchor"
     return "newer_messages_after_anchor" if people else None
 
 
-async def _send(call: Reader, tool: str, one: dict[str, Any], owner_open_id: str) -> Facts:
+async def _send(
+    call: Reader, tool: str, one: dict[str, Any], owner_open_id: str, ours: Ours | None
+) -> Facts:
     args, chat_id = one["arguments"], one.get("chat_id")
     if not chat_id:
         raise Rejected("chat_id_required")
@@ -195,7 +210,8 @@ async def _send(call: Reader, tool: str, one: dict[str, Any], owner_open_id: str
         if view.messages:
             raise Rejected("anchor_required")
     else:
-        verdict = anchor_verdict(view, anchor, owner_open_id)
+        mine = await ours([item.message_id for item in view.messages]) if ours else frozenset()
+        verdict = anchor_verdict(view, anchor, owner_open_id, mine)
         if verdict is not None:
             raise Rejected(verdict)
     quoted = source if source is not None else by_id.get(anchor or "")
@@ -222,18 +238,26 @@ async def _on_message(call: Reader, tool: str, one: dict[str, Any], owner_open_i
     )
 
 
-async def check_call(call: Reader, tool: str, one: dict[str, Any], *, owner_open_id: str) -> Facts:
+async def check_call(
+    call: Reader,
+    tool: str,
+    one: dict[str, Any],
+    *,
+    owner_open_id: str,
+    ours: Ours | None = None,
+) -> Facts:
     """检查一次调用并取回审批单要展示的事实；提交前与执行前用的是同一套。
 
     Args:
         one: `{"arguments": 工具参数, "chat_id": …, "anchor_message_id": …, "thread_id": …}`
+        ours: 查哪些消息是平台替所有者发的；给了，这些消息就不算锚点之后的新动静
 
     Raises:
         Rejected: 不能提交。执行前复查时抛出就记为 `stale`
         PersonalError: 所有者的授权失效等，原样交给调用方
     """
     if tool in catalog.SENDS:
-        return await _send(call, tool, one, owner_open_id)
+        return await _send(call, tool, one, owner_open_id, ours)
     if tool in catalog.ON_MESSAGE:
         return await _on_message(call, tool, one, owner_open_id)
     channel = catalog.entry(tool).channel

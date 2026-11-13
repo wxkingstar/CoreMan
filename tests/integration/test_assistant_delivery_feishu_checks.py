@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import delivery, followups, settings
+from coreman.core.assistants import delivery, followups, sent, settings
 from coreman.core.assistants import delivery_checks as checks
 from coreman.core.assistants.approvals import service
 from coreman.core.db.models import AssistantApproval, AssistantWatch, Bot
@@ -203,6 +203,27 @@ async def test_new_activity_after_the_draft_is_checked_against_the_chat(
     assert await check(db_session, bot, feishu, now) == (1 if code else 0)
     assert feishu.calls == ["im.mget", "im.chat", "im.history"]
     assert await status_of(db_session, row) == (("withdrawn", code) if code else ("pending", None))
+
+
+async def test_a_message_the_platform_sent_for_the_owner_withdraws_nothing(
+    db_session: AsyncSession,
+) -> None:
+    """同会话的另一张单批准后由平台代发：发送人是所有者，但不算他亲自回复，这张单留着。"""
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    created = now - timedelta(minutes=10)
+    row = await pending(db_session, bot, created)
+    await seen(db_session, bot, latest=ms(created) + 60_000)
+    await sent.record(db_session, bot.id, ["om_sent"])
+    await db_session.commit()
+    feishu = Feishu(history=[said("om_sent", OWNER), said("om_anchor")])
+    assert await check(db_session, bot, feishu, now) == 0
+    assert feishu.calls == ["im.mget", "im.chat", "im.history"]
+    assert await status_of(db_session, row) == ("pending", None)
+    # 所有者真的亲自回复了（没登记过的消息）：照旧撤回。
+    feishu = Feishu(history=[said("om_own", OWNER), said("om_sent", OWNER), said("om_anchor")])
+    assert await check(db_session, bot, feishu, now) == 1
+    assert await status_of(db_session, row) == ("withdrawn", "owner_replied")
 
 
 async def test_two_drafts_in_one_chat_read_it_once(db_session: AsyncSession) -> None:

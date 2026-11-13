@@ -196,9 +196,15 @@ async def run(
             return status
         calls = list((row.args_enc or {}).get("calls") or [])
         reader = Call(session, cipher, scope)
+        assistant_id = row.bot_id
+
+        async def ours(message_ids: list[str]) -> frozenset[str]:
+            # 同会话的另一张单刚由平台代发出去：那条消息不算所有者亲自回复，这张单不因此过时。
+            return await sent.among(session, assistant_id, message_ids)
+
         try:
             for one in calls:
-                await checks.check_call(reader, tool, one, owner_open_id=scope.open_id)
+                await checks.check_call(reader, tool, one, owner_open_id=scope.open_id, ours=ours)
         except checks.Rejected as exc:
             status = await _close(session, row, bot, "stale", exc.code)
             await _report(cfg, approval, status, "stale")

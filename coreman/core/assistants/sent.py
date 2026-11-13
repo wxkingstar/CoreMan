@@ -46,3 +46,18 @@ async def ours(session: AsyncSession, bot_id: uuid.UUID, message_id: str) -> boo
         )
     )
     return found is not None
+
+
+async def among(
+    session: AsyncSession, bot_id: uuid.UUID, message_ids: Iterable[str]
+) -> frozenset[str]:
+    """这些消息里哪几条是平台替这位所有者发的（一次查完；判断会话动没动过时用）。"""
+    wanted = sorted({message_id for message_id in message_ids if message_id})
+    if not wanted:
+        return frozenset()
+    found = await session.scalars(
+        select(AssistantSent.message_id).where(
+            AssistantSent.bot_id == bot_id, AssistantSent.message_id.in_(wanted)
+        )
+    )
+    return frozenset(found)
