@@ -47,6 +47,38 @@ async def test_save_writes_one_pinned_page_as_the_assistant(db_session: AsyncSes
     assert caught.value.code == "page_too_large"
 
 
+@pytest.mark.parametrize("author", ["owner", "import"])
+async def test_a_voice_page_the_owner_wrote_is_never_overwritten(
+    db_session: AsyncSession, author: str
+) -> None:
+    """所有者自己改过（或导入的）口吻页是他的话；再跑一次冷启动不能拿归纳出来的盖掉它。"""
+    bot, _, scope = await assistant_turn(db_session)
+    mine = "我说话就这样：短句，不用敬语。"
+    await notes.write(
+        db_session,
+        bot.id,
+        voice.PATH,
+        body=mine,
+        summary="我自己写的",
+        pinned=True,
+        updated_by=author,
+    )
+    await db_session.commit()
+    assert await voice.save(db_session, bot.id, "说话简短，常用「收到」开头。") is None
+    out = await voice_tools.dispatch(
+        db_session,
+        None,  # type: ignore[arg-type]
+        cold_start_scope(scope),
+        "assistant_voice_save",
+        {"body": "归纳出来的另一版"},
+    )
+    await db_session.commit()
+    assert out["status"] == "kept" and out["path"] == voice.PATH and "error" not in out
+    page = await notes.read(db_session, bot.id, voice.PATH)
+    assert page is not None and (page.body, page.version, page.summary) == (mine, 1, "我自己写的")
+    assert await raw(db_session, AUTHOR, bot=bot.id) == author
+
+
 async def test_the_tool_only_works_in_a_cold_start_turn(db_session: AsyncSession) -> None:
     bot, _, owner = await assistant_turn(db_session)
     body = {"body": "说话简短，常用「收到」开头。"}

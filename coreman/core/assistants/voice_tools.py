@@ -61,4 +61,10 @@ async def dispatch(
         entry = await voice.save(session, scope.bot.id, args.body)
     except notes.NotesError as exc:
         return exc.payload()
+    if entry is None:
+        return {
+            "status": "kept",
+            "path": voice.PATH,
+            "hint": "所有者自己写过这一页，保留他的版本，不用再保存。",
+        }
     return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}

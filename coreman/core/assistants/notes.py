@@ -189,6 +189,17 @@ async def read(session: AsyncSession, bot_id: uuid.UUID, path: str) -> Page | No
     )
 
 
+async def author(session: AsyncSession, bot_id: uuid.UUID, path: str) -> str | None:
+    """这一页最后是谁写的（`PAGE_AUTHORS` 之一）；没有这一页返回 None。
+
+    Raises:
+        NotesError: `invalid_path`、`content_locked`、`assistant_only`
+    """
+    _, key = normalize(path)
+    row = await _load(session, bot_id, await _path_key(session, bot_id, key))
+    return row.updated_by if row is not None else None
+
+
 async def write(
     session: AsyncSession,
     bot_id: uuid.UUID,

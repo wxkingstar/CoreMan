@@ -133,11 +133,14 @@ async def enqueue(
     )
 
 
-async def save(session: AsyncSession, bot_id: uuid.UUID, body: str) -> notes.Entry:
+async def save(session: AsyncSession, bot_id: uuid.UUID, body: str) -> notes.Entry | None:
     """平台内部入口：把口吻样本写成置顶页。只由冷启动那一轮的工具调用。调用方提交。
 
     传 `owner_present=True` 是有意绕开「无人在场的轮次不能置顶」：那条规则防的是别人的内容
     变成规则，而这一轮读不到别人的任何内容（见模块说明）。别处不要照这个写法调 `notes.write`。
+
+    这一页已经在、而且最后不是助理写的（所有者自己改过，或是导入的）时不动它，返回 None：
+    那是他本人的话，不能被再一次冷启动归纳出来的东西盖掉。
 
     Raises:
         NotesError: `page_too_large`、`invalid_page`、`content_locked`、`notes_full` 等
@@ -146,6 +149,8 @@ async def save(session: AsyncSession, bot_id: uuid.UUID, body: str) -> notes.Ent
     if size > MAX_BODY_BYTES:
         raise notes.NotesError("page_too_large", limit_bytes=MAX_BODY_BYTES, size_bytes=size)
     existing = await notes.read(session, bot_id, PATH)
+    if existing is not None and await notes.author(session, bot_id, PATH) != "assistant":
+        return None
     return await notes.write(
         session,
         bot_id,
