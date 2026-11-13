@@ -847,6 +847,32 @@ EXPIRE_BATCH = 50
 SWEEP_BATCH = 50
 
 
+async def auto_withdraw(
+    session: AsyncSession, approval_id: uuid.UUID, code: str, *, cfg: tower.Config | None
+) -> AssistantApproval | None:
+    """平台撤回一张待批的单：所有者已亲自回复、对方撤回了被回复的消息、会话又有了新消息。
+
+    本地先作废（之后即使被批准也不会执行），再让审批系统撤回。不在这里通知助理：调用方
+    （`delivery_checks`）入一条提醒，与别的交回事项合成一轮。调用方提交。
+
+    Args:
+        code: 原因代码，存进 `error_code`
+
+    Returns:
+        被撤回的单（内容已还原）；不存在或已经不是 pending 时返回 None
+    """
+    row: AssistantApproval | None = await session.get(
+        AssistantApproval, approval_id, with_for_update=True, populate_existing=True
+    )
+    if row is None or row.status != "pending":
+        return None
+    row.status, row.decided_at = "withdrawn", utcnow()
+    row.error_code = sealed.code_only(code, "withdrawn")
+    await _withdraw_remote(cfg, row)
+    log.info("assistant_approval_auto_withdrawn", approval=str(row.id), code=row.error_code)
+    return row
+
+
 async def withdraw_pending(session: AsyncSession, bot_id: uuid.UUID, reason: str) -> int:
     """撤回这个助理全部待批的单（停用流程用），返回撤了几张。调用方负责提交。
 
