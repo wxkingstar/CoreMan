@@ -256,6 +256,8 @@ export interface ChatLogByBot {
 export interface ChatLogStats {
   total: number
   /** 只含出现过的状态。 */
+  /** 个人助理调度这位员工的那一轮：不是发起的所有者本人，正文、引用、附件、报错与工具清单都不下发。 */
+  content_withheld?: boolean
   by_status: Record<string, number>
   avg_latency_ms: number | null
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }

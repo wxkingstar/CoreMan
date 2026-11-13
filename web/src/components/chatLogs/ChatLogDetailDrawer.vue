@@ -122,14 +122,26 @@ defineExpose({ open })
           </el-table>
         </template>
 
-        <h4>{{ t('chatLogs.message') }}</h4>
-        <MarkdownContent :content="detail.data.message_content ?? detail.data.message_preview ?? '—'" />
-        <template v-if="detail.data.quoted_content">
-          <h4>{{ t('chatLogs.quoted') }}</h4>
-          <MarkdownContent :content="detail.data.quoted_content" />
+        <!-- 个人助理调度这位员工的那一轮：内容只对发起的所有者开放，别人只看得到发生过这一次。 -->
+        <el-alert
+          v-if="detail.data.content_withheld"
+          type="info"
+          :closable="false"
+          show-icon
+          class="withheld"
+          data-test="content-withheld"
+          :title="t('chatLogs.contentWithheld')"
+        />
+        <template v-else>
+          <h4>{{ t('chatLogs.message') }}</h4>
+          <MarkdownContent :content="detail.data.message_content ?? detail.data.message_preview ?? '—'" />
+          <template v-if="detail.data.quoted_content">
+            <h4>{{ t('chatLogs.quoted') }}</h4>
+            <MarkdownContent :content="detail.data.quoted_content" />
+          </template>
+          <h4>{{ t('chatLogs.response') }}</h4>
+          <MarkdownContent :content="detail.data.response_content ?? detail.data.response_preview ?? '—'" />
         </template>
-        <h4>{{ t('chatLogs.response') }}</h4>
-        <MarkdownContent :content="detail.data.response_content ?? detail.data.response_preview ?? '—'" />
         <template v-if="detail.data.error_message || detail.data.error_code">
           <h4>{{ t('chatLogs.error') }}</h4>
           <pre class="body error">{{ detail.data.error_code }} {{ detail.data.error_message }}</pre>
@@ -141,6 +153,7 @@ defineExpose({ open })
 
 <style scoped>
 .chip { margin-right: 6px; }
+.withheld { margin-top: 16px; }
 .mono { font-family: var(--el-font-family-mono, monospace); word-break: break-all; }
 .body {
   margin: 0 0 12px;

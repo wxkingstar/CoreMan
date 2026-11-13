@@ -894,6 +894,7 @@ export default {
   chatLogs: {
     title: '对话记录',
     bot: 'AI 员工',
+    contentWithheld: '内容仅发起人可见',
     user: '用户',
     status: '状态',
     chatType: '会话类型',

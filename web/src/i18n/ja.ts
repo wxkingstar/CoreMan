@@ -895,6 +895,7 @@ export default {
   chatLogs: {
     title: '会話ログ',
     bot: 'AI スタッフ',
+    contentWithheld: '内容は依頼した本人のみ閲覧できます',
     user: 'ユーザー',
     status: 'ステータス',
     chatType: '会話タイプ',
