@@ -337,7 +337,9 @@ async def transfer_pack(
                 {**dst, "action": "write", "offset": offset, "data": chunk["data"]},
             )
 
-        steps = [({}, offset) for offset in range(0, size, chunk_size)]
+        steps: list[tuple[dict[str, Any], int]] = [
+            ({}, offset) for offset in range(0, size, chunk_size)
+        ]
         await transfer_chunks(steps, read, write)
         await call_agent(
             target,
