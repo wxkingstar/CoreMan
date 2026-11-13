@@ -196,6 +196,7 @@ def anchor_verdict(
     替所有者发出的消息的编号：它们在飞书里发送人是所有者，但不是他亲自回复，也不是对方的新
     消息——同一个会话有两张待批单时，第一张发出去不该让第二张过时。
 
+    锚点本身已被撤回时返回 `message_gone`。
     所有者亲自发言在哪种会话里都算。别人的新消息，私聊里每一条都算（都是对所有者说的）；
     群里只算与这个话头有关的：@ 了所有者、回复了锚点那条（或在以它为根的话题里、与它同在
     一个话题里）、或锚点的发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿
@@ -211,6 +212,9 @@ def anchor_verdict(
         newer.append(item)
     if anchor is None:
         return "anchor_not_found"
+    if anchor.deleted:
+        # 锚点那条已被撤回（撤回的消息仍在历史里）：这个话头没了，后面有没有新消息都不能发。
+        return "message_gone"
     people = [
         item
         for item in newer

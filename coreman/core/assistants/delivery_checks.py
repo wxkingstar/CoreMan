@@ -76,6 +76,8 @@ _VERDICTS = {
     "owner_replied_after_anchor": "owner_replied",
     "newer_messages_after_anchor": "anchor_moved",
     "anchor_not_found": "anchor_moved",
+    # 读会话时看到锚点已撤回（批量取消息那一步没认出来）：与对方撤回同一个原因。
+    "message_gone": "anchor_recalled",
 }
 
 

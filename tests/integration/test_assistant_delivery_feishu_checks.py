@@ -216,6 +216,8 @@ async def test_a_recalled_anchor_withdraws_the_draft(db_session: AsyncSession) -
         ([said("om_new")], "anchor_moved"),
         # 只有机器人的通知：不算会话动过。
         ([said("om_bot", kind="app"), said("om_anchor")], None),
+        # 读会话时才看到锚点已被撤回（批量取消息那一步没认出来）：按对方撤回算。
+        ([said("om_new"), said("om_anchor", deleted=True)], "anchor_recalled"),
     ],
 )
 async def test_new_activity_after_the_draft_is_checked_against_the_chat(
@@ -233,7 +235,13 @@ async def test_new_activity_after_the_draft_is_checked_against_the_chat(
     # 所有者亲自回了的要立刻告诉助理；只是会话又有新消息的不急，跟下一批一起交回。
     levels = [item.level for item in await inbox_rows(db_session, bot)]
     assert levels == (
-        {"owner_replied": ["immediate"], "anchor_moved": ["batch"]}[code] if code else []
+        {
+            "owner_replied": ["immediate"],
+            "anchor_moved": ["batch"],
+            "anchor_recalled": ["immediate"],
+        }[code]
+        if code
+        else []
     )
 
 

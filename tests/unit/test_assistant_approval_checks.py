@@ -332,3 +332,14 @@ async def test_everything_in_a_topic_view_counts_like_a_private_chat() -> None:
         await check(group(history), "feishu_reply_message", reply("om_3", thread_id="omt_1"))
     assert caught.value.code == "newer_messages_after_anchor"
     assert (await check(group(history), "feishu_reply_message", reply("om_3"))).channel == "group"
+
+
+@pytest.mark.parametrize("mode", ["p2p", "group"])
+async def test_a_send_anchored_on_a_recalled_message_is_gone(mode: str) -> None:
+    """不是回复、只带锚点的发送：锚点那条被撤回了，后面没有新消息也不能发。"""
+    history = [msg("om_2", PEER, "周五能给报价吗？", deleted=True), msg("om_1", PEER)]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(
+            Reader(history, mode=mode), "feishu_send_message", send(anchor_message_id="om_2")
+        )
+    assert caught.value.code == "message_gone"
