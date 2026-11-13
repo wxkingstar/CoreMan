@@ -49,6 +49,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
+from coreman.core.feishu_personal import ratelimit
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
@@ -416,11 +417,35 @@ async def _step(
     resting = await _resting(session, bot, prefs, now)
     if resting is not None:
         return _rest(row, now, *resting)
-    items = await _round(session, Call(session, cipher, scope), row, prefs, now)
+    # 飞书按应用限频，全员共用：先看这个应用最近一分钟用了多少。
+    budget = ratelimit.Budget(scope.app_id)
+    load = await budget.load(session, now)
+    factor = ratelimit.stretch(load)
+    if factor is None:
+        # 额度已满（或有人刚被限频）：这一轮一次都不调，过一个间隔再看。不算这位助理的失败。
+        row.state, row.last_error = "backoff", "budget_exhausted"
+        _schedule(row, now, BASE_INTERVAL)
+        return Outcome("backoff", app_id=scope.app_id, load=load)
+    try:
+        items = await _round(session, Call(session, cipher, scope), row, prefs, now)
+    except ratelimit.RateLimited as exc:
+        if exc.category is not None:
+            # 记一笔占满额度、等待结束才滑出窗口的用量：同一应用的人这段时间都不调。
+            await budget.exhaust(session, exc.category, now, exc.retry_after)
+        log.warning(
+            "assistant_watch_rate_limited",
+            bot_id=str(row.bot_id),
+            category=exc.category,
+            retry_after=exc.retry_after,
+        )
+        outcome = _failed(row, now, exc.code, wait=exc.retry_after)
+        outcome.app_id, outcome.load = scope.app_id, 1.0
+        return outcome
     row.state, row.last_error, row.failures = "polling", None, 0
     row.last_ok_at = row.keepalive_at = now
-    _schedule(row, now, BASE_INTERVAL)
-    return Outcome("polling", items=items, app_id=scope.app_id)
+    # 接近上限时拉长间隔：每个人都按同一个用量算，所以是所有人一起变慢。
+    _schedule(row, now, BASE_INTERVAL * factor)
+    return Outcome("polling", items=items, app_id=scope.app_id, load=load)
 
 
 async def _visit(
@@ -445,8 +470,10 @@ async def _visit(
         try:
             outcome = await _step(session, cipher, row, now)
         except PersonalError as exc:
-            # 不回滚：这一轮里刷新过的令牌、已入箱的条目照常提交。
-            outcome = _failed(row, now, exc.code)
+            # 不回滚：这一轮里刷新过的令牌、已入箱的条目照常提交。刷新令牌时被限频的
+            # （不属于哪一类接口）也到这里，按它给的秒数等。
+            wait = exc.retry_after if isinstance(exc, ratelimit.RateLimited) else None
+            outcome = _failed(row, now, exc.code, wait=wait)
         except Exception as exc:  # noqa: BLE001 只记类型
             # 意外出错也先试着提交：这一轮里可能已经刷新过令牌（旧的刷新令牌已经用掉），回滚
             # 会让授权就此作废。会话本身坏了（数据库错误）时提交会再抛，由 `tick` 另开事务
@@ -554,4 +581,16 @@ async def tick(
             counts[f"assistant_watch_{outcome.state}"] += 1
         counts["assistant_watch_items"] += outcome.items
         counts["assistant_watch_keepalives"] += int(outcome.kept_alive)
+    tight: dict[str, float] = {}
+    for outcome in outcomes:
+        if outcome.app_id and outcome.load >= ratelimit.TIGHT:
+            tight[outcome.app_id] = max(tight.get(outcome.app_id, 0.0), outcome.load)
+    for app_id, load in tight.items():
+        # 每次 tick 每个应用一条：人数多到一个应用撑不住时，这条日志会持续出现。
+        log.warning(
+            "assistant_watch_budget_tight",
+            app_id=app_id,
+            load=round(load, 2),
+            stretch=ratelimit.stretch(load) or 0,
+        )
     return counts
