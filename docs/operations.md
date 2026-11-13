@@ -177,6 +177,32 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 数据库整体故障时 CoreMan 无法写通知队列，须由独立监控负责外部送达。Prometheus 的 7 条规则可直接查看；未自动配置外部 Alertmanager 或外部通知凭证。
 
+### 个人助理盯消息排障
+
+`GET /api/admin/assistants` 每条记录的 `watch` 是这位助理的轮询状态，scheduler 日志里对应的事件名以 `assistant_watch` 开头。日志与这个接口都只有代码、编号与计数，没有消息内容。
+
+| `state` | `last_error` | 含义与处理 |
+|---|---|---|
+| `polling` | 空 | 正常，`last_ok_at` 是上一次轮询成功的时刻 |
+| `idle` | 空 | 所有者下班，或记录不是启用中的开通好状态；不用处理 |
+| `idle` | `cold_start_pending` | 冷启动还没做完，做完后自动开始 |
+| `idle` | `identity_missing` | 没记下所有者的身份（迁移 `0093` 之前建的助理）：让所有者停用后重新开通 |
+| `paused` | `runtime_offline` 等 | 运行时暂停，原因与私聊里说的一致；恢复后自动接着读 |
+| `backoff` | `rate_limited` | 被飞书限频，按飞书给的秒数等；持续出现说明一个应用撑不住这么多人 |
+| `backoff` | `budget_exhausted` | 这个应用最近一分钟的额度已满，下一分钟再试 |
+| `backoff` | `authorization_required` | 所有者的飞书授权失效：需要他重新授权 |
+| `backoff` | `personal_grant_required` / `personal_permission_revoked` | 所有者的通讯录身份或授权与开通时记下的不一致，或账号不可用：核对账号，必要时重新开通 |
+| `backoff` | `feishu_read_failed` 等 | 飞书读取失败，按 2、4、8、15 分钟退避后重试；同一个会话连续 3 轮读不了会被放下 1 小时（日志 `assistant_watch_chat_parked`），之后恢复正常。一直是它且没有这条日志时，多半是列会话的参数被飞书拒绝 |
+| `backoff` | 异常类型名（如 `TimeoutError`） | 平台侧意外出错，15 分钟后重试；看 scheduler 日志里的 `assistant_watch_failed` |
+| `stopped` | 空 | 助理已停用 |
+| `null`（没有 `watch`） | | 还没被登记：记录不是启用中的开通好状态，或 scheduler 没在跑 |
+
+日志 `assistant_watch_budget_tight`（`app_id`、`load`、`stretch`）表示这个应用最近一分钟的用量到了上限的六成以上，所有人的轮询间隔已被拉长到 `stretch` 倍；偶尔出现不用处理，持续出现需要减少重点群或再接一个助理应用。用量流水在表 `feishu_rate_usage` 里，只留 15 分钟。
+
+日志 `assistant_watch_messages_skipped`（`count`）表示飞书返回的消息里有缺编号或读不出时间的，被跳过；持续出现说明飞书的返回格式与假定的不同。
+
+收件箱只进不出（条目一直是 `pending`）说明投递层没在取，不是盯消息的问题。
+
 ## 隔离演练
 
 ```bash
