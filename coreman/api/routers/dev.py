@@ -23,6 +23,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.chat_logs import chat_log_out
 from coreman.api.security import verify_csrf
 from coreman.core.assistants import sealed
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.db.models import Bot, ChatLog, InboundEvent, Task, TaskStream, User
 from coreman.core.wecom.messages import InboundMessage, Part, Sender, TextPart
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
@@ -159,6 +160,9 @@ async def get_task(
         and inbound.chat_type == "single"
         and (via_bot_token(request) or task.user_id != actor.id)
     ):
+        raise not_found("任务不存在")
+    if task.kind == BOT_HELP_KIND and (via_bot_token(request) or task.user_id != actor.id):
+        # 个人助理调度来的一轮没有入站事件，开流前也没有对话记录：按任务自己判断，只归发起它的人。
         raise not_found("任务不存在")
     stream = await session.get(TaskStream, task_id, populate_existing=True)
     log = (
