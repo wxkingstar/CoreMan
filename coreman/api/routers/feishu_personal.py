@@ -68,6 +68,9 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     except (ValueError, service.PersonalError):
         raise ApiError(403, 403, "Private authorization changed") from None
     current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
+    assistant = is_assistant(scope.bot)
+    # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge）。
+    groups = assistant_tools.groups_for(scope.task.kind) if assistant else ()
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -90,9 +93,9 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         definitions = tools.definitions(
             auth=current and not scope.scheduled, level=level, scopes=granted
         )
-        if is_assistant(scope.bot):
-            # 个人助理：写类工具改为提交审批，另加助理自有的工具。
-            definitions = assistant_tools.definitions(definitions, groups=assistant_tools.GROUPS)
+        if assistant:
+            # 个人助理：写类工具改为提交审批（没有 approval 组的轮次不列出），另加助理自有的工具。
+            definitions = assistant_tools.definitions(definitions, groups=groups)
         if not scope.scheduled:
             definitions += schedules.definitions()
         result = {} if method == "ping" else {"tools": definitions}
@@ -107,18 +110,24 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         try:
             if name in schedules.TOOLS:
                 value = await schedules.dispatch(session, scope, name, arguments)
+            elif assistant and assistant_tools.group_of(name) == "knowledge":
+                # 知识库与待跟进在平台自己的库里、不调飞书：授权换代之后同一轮里照常可用，
+                # 所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按 groups 把关。
+                value = await assistant_tools.dispatch(
+                    assistant_tools.Context(session, cipher, scope), name, arguments, groups=groups
+                )
             elif not current:
                 value = {"error": "authorization_changed"}
             else:
                 relay = files.FileRelay(request.app.state.settings, cipher)
-                if is_assistant(scope.bot):
+                if assistant:
                     value = await assistant_tools.dispatch(
                         assistant_tools.Context(
                             session, cipher, scope, relay, tower.config(request.app.state.settings)
                         ),
                         name,
                         arguments,
-                        groups=assistant_tools.GROUPS,
+                        groups=groups,
                     )
                 else:
                     value = await tools.dispatch(session, cipher, scope, name, arguments, relay)
