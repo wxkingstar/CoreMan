@@ -251,6 +251,24 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 调整某个人的预算目前只能改库里 `assistant_settings.daily_turn_budget`（10–2000）；页面入口随「我的助理」页提供。scheduler 停止时日志里出现 `assistant_round_abandoned_on_stop`，表示有一位助理的一轮等了 20 秒仍没做完被放弃：若它恰好刚刷新过令牌，所有者需要重新授权。
 
+### 个人助理访问记录
+
+表 `assistant_access_log` 记运行时路径之外对个人助理内容的每一次解密，没有任何内容列：`bot_id`、`actor_id`（操作人，账号删除后为空）、`actor_kind`（`owner` / `admin` / `system`）、`action`、`target`（范围名或计数）、`at`。它和审计日志（`audit_logs`）是两回事：审计记谁改了平台上的什么，给管理员看；访问记录记谁读了某位所有者的个人内容，给所有者本人看（「我的助理」页的「设置」分区），管理员只在 `GET /api/admin/assistants` 的 `last_non_owner_access_at` 里看到最近一次非本人访问的时间。
+
+| 动作 | 什么时候记 |
+|---|---|
+| `notes.index`、`notes.read`、`followups.read`、`jobs.read`、`approvals.read`、`settings.read` | 所有者在「我的助理」页上读取；改设置（对象 `update`）与即时上下班（对象 `shift`）的响应带着解密后的设置，也记 `settings.read` |
+| `import.preview`、`import.notes`、`export` | 导入的预览（含没写成的确认）、导入写入成功、导出；对象是计数 |
+| `chatlogs.read`、`tasks.read` | 所有者在管理台读自己助理的对话记录、任务详情 |
+| `cli.chatlogs`、`cli.tasks` | 有人用管理命令以所有者的身份（`--as`）读对话记录、任务详情；内容没有还原，记成 `system`，不留操作人 |
+| `cli.rewrap` | `assistant-keys rewrap --apply` 重新包裹了这位所有者的数据密钥；没有读内容 |
+
+- **保留。** 180 天；scheduler 的保留期那一档分批清理，计数在日志里是 `old_assistant_access_log`。助理记录被删除时它的访问记录一并删除。
+- **写不进去不挡读取。** 记录与读取在同一个事务里提交：提交不了，请求以 500 结束，内容不交出去。单独这一行写失败时（应用日志 `assistant_access_log_failed`，带助理编号、动作与错误类型）读取照常返回；每次解密另有一条应用日志 `assistant_content_access`（助理、操作人、类别、动作、对象），可以拿来补查。持续出现 `assistant_access_log_failed` 说明表不可用，要当故障处理。
+- **管理命令看不到助理的内容，这是有意的。** `coreman … --as 登录名` 以那位成员的身份建一个管理台会话（`admin_sessions.auth_method = 'cli'`），权限与他一致，但敲命令的人在服务器上，不是他本人。所以：`/api/me/assistant` 下的接口不受理这种会话（403 `cli_session_refused`），所有者的知识库、待跟进、导入导出只能由他本人在管理台里操作；经它读对话记录（`/api/admin/chat-logs`）与任务详情时，助理加密保存的内容不还原，输出与「不是所有者」时一样（`content_locked`），并给所有者留一条 `cli.chatlogs` / `cli.tasks`。普通员工的记录不受影响。排障需要看助理的内容时，请所有者本人在管理台里看。不看内容的命令（`assistant-keys rewrap`）照常可用，执行时记 `cli.rewrap`。
+- **上传的大小。** 导入的压缩包上限 20MB：应用读上传时按块读，一过上限就停并回 413。但框架在此之前已经把请求体收到了临时文件里，所以要挡住「传上来」本身，请在反向代理上给 `/api/me/assistant/import` 设 25MB 左右的请求体上限。装满的知识库导入、导出要十几秒，代理的超时不要低于 180 秒（管理台对这两个请求的超时就是 180 秒）。
+- **排查。** 所有者问「谁看过我的内容」：让他看「设置」分区的访问记录；管理员一侧只能确认时间。直接连库、拿主密钥解密不经过平台，不会留下记录（见设计文档的威胁模型）。
+
 ## 隔离演练
 
 ```bash

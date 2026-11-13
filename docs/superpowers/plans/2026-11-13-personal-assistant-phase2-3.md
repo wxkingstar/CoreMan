@@ -19,7 +19,7 @@
 | 审查修补 | 第 2 期与 3A 的独立审查发现的问题（盯消息倒灌历史、索引行引用、自动撤回循环、被打断的交回、游标封存等） | 2B–3A | `0101_assistant_hardening` |
 | 3B 调度公共员工 | `assistant_ask_bot`、`assistant_bot_list`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | — |
 | 3C 页面 | `/api/me/assistant`、「我的助理」页、管理台的助理列表与设置项表单 | 2C 2E 3A | — |
-| 3D 导入与访问日志 | `assistant_access_log`、导入接口 | 2B 2C 3C | `0102_assistant_access_log` |
+| 3D 导入与访问日志 | `assistant_access_log`、导入与导出接口 | 2B 2C 3C | `0102_assistant_access_log` |
 
 ## 裁定（与 spec 不同或 spec 没写明的地方）
 
@@ -34,7 +34,7 @@
 7. **话题回复是否让群靠前（spec「前置验证」第 1 项）还没测。** 裁定：2D 两条路都做——按会话列表顺序发现新动静，另对所有者标记的重点群每轮直接读历史；实测留到上线后，在真实租户里做，结论写回 spec。代价：重点群每轮多一次读历史调用，计入分钟预算。
 8. **限频。** 现状完全没处理。裁定：2D 新增按应用的两类接口分钟预算（列会话、读历史），识别限频错误码与响应头里的等待秒数；预算与退避只作用于轮询循环，助理工具的调用不受它限制但计入用量。「单个应用承载不下时分到下一个应用」不做，接近上限时只拉长间隔并打告警日志。代价：人数多到一个应用撑不住时需要再做分流。
 9. **调度公共员工的加密。** spec 要求目标员工那一轮的内容用所有者的密钥加密，现有的按人加密按行所属员工找所有者，公共员工的行一律明文。裁定留给 3B 的计划在读完那条链路后给出两个方案的工作量，再定；在此之前 3B 不动工。
-10. **导入。** spec 说管理命令、由所有者本人执行，但管理命令是运维在服务器上跑的。裁定：做成 `/api/me/assistant/import` 上传接口（Markdown 压缩包），所有者本人登录后操作，并写访问日志。
+10. **导入。** spec 说管理命令、由所有者本人执行，但管理命令是运维在服务器上跑的。裁定：做成 `/api/me/assistant/import` 上传接口（Markdown 压缩包），所有者本人登录后操作，并写访问日志。 落地时的补充（3D）：导出与导入用同一种格式；预览与确认之间用清单的摘要做乐观锁；解包后的硬上限取 32MB（正文合计仍按知识库的 20MB 算），否则装满的知识库导出后导不回去。
 11. **助理池开关在仍有助理绑定时能否关闭**（spec 标「待定」）：维持现状（能关，绑定的助理暂停），不在这两期处理。
 
 12. **`PLATFORM_TURN_KINDS` 的取法**（2A 计划提出）：`(HANDOVER_KIND, JOB_RESULT_KIND, COMPILE_KIND, SUBTASK_KIND)`；`BOT_HELP_KIND` 跑在目标员工那边，不属于它，留给 3B。没有入站事件的审批结果回合也经 `platform_turns.enqueue` 入队（`platform_turns.ORIGIN_KINDS`）。2F 另加 `COLD_START_KIND`（见裁定 18）。
@@ -93,6 +93,14 @@
     - 开通卡片多一句调度的告知（裁定 17 的存储方式）。
     - 所有者视图里的子任务比 `jobs.view` 多两项：`origin`（`system` 是平台派的下班整理）与 `target`（调度的目标员工，按 `target_bot_id` 另查名字）；`jobs.view` 本身不变，助理工具的输出不变。
     - 管理台对话记录认 `content_withheld`：列表与详情都显示「内容仅发起人可见」，不摆出空的消息与回复两栏。
+
+23. **访问日志与导入层的补充**（3D 落地时定，所有者 2026-11-14 的取舍）：
+    - 访问记录与读取在同一个事务里：`access_log.record` 在调用方的事务里用保存点写一行，读接口在返回前提交（`/jobs`、`/approvals/recent`、`/notes`、`/notes/read` 补了提交）。没有选「独立短事务」：那样记录写进去了、读取却可能失败（多记无妨），但更要紧的是反过来——独立事务提交失败时没法阻止内容已经算好并返回；同一个事务里「提交不了就不交出内容」是自然的。代价：保存点里的那一行单独写失败而外层提交成功时，这一次读取只在应用日志 `assistant_content_access` 里有记。
+    - 改设置（`PATCH /settings`）与即时上下班（`POST /shift`）的响应带着解密后的重点群与忽略名单，也记 `settings.read`，对象分别是 `update`、`shift`（3C 的独立审查提出）。台账把 `owner_view.preferences` 算作解密。
+    - 管理命令的会话读不到助理的加密内容（比计划更严）：`coreman … --as 登录名` 建的会话 `auth_method = 'cli'`（`deps.via_cli`）。`/api/me/assistant` 整个前缀拒绝它（403 `cli_session_refused`）；带 `viewer=` 的还原（对话记录列表与详情、开发页任务详情）对它用 `access_log.NOBODY` 当查看者，输出与不是所有者时相同；会话的身份正是所有者时记一条 `actor_kind = 'system'`、操作人为空的 `cli.chatlogs` / `cli.tasks`（`access_log.record_refused`）。不看内容的 `assistant-keys rewrap --apply` 照常并记 `cli.rewrap`。
+    - 压缩包里的系统杂项文件忽略而不是拒绝：`.DS_Store`、`__MACOSX/` 下的一切、`Thumbs.db`、名字以 `._` 开头的文件（先过文件名安全与符号链接两项检查），不读内容、不占页面文件名额，预览里的 `ignored` 给出个数；其它非 `.md` 文件仍然拒绝整包。
+    - 上传按块读，超过 20MB 立刻中止并回 413；框架已先把请求体落到临时文件，挡「传上来」本身靠反向代理（`docs/operations.md`）。导入、导出两个请求的前端超时 180 秒。
+    - 调度公共员工那一轮（裁定 17，明文存在目标员工名下）不是解密，不进访问日志；管理命令以所有者身份建的会话目前仍能在对话记录里看到它的内容（`withheld` 只看发起人与机器人令牌），没有在本层处理。
 
 ## 层间接口
 
@@ -187,6 +195,16 @@
 - 导入写知识页用 `notes.write(..., updated_by="import", owner_present=True)`，页面会显示「导入」；待跟进没有 `updated_by` 列。
 - 所有者的每日轮次预算由 `owner_view.set_budget(session, bot_id, value)` 写（不得高于平台默认值）；其余设置项仍是 2F 的 `settings.update`。
 - 前端：页面壳 `web/src/views/MyAssistantView.vue`（标签页 `attention` / `jobs` / `followups` / `recent` / `notes` / `settings`，`el-tab-pane lazy`），分区组件在 `web/src/components/assistant/`（`AssistantAttention.vue`、`AssistantJobs.vue`、`AssistantFollowups.vue`、`AssistantRecent.vue`、`AssistantNotes.vue`、`AssistantSettings.vue`，都没有属性或只有 `name` / `runtime`，挂载时自己取数，`defineExpose({ load })`），接口封装 `web/src/api/myAssistant.ts`（对象 `myAssistant`），文案 `web/src/i18n/assistant.ts`（`assistantZh` / `assistantEn` / `assistantJa`，键在 `assistant.<分区>.<键>` 下；`web/tests/assistantI18n.spec.ts` 与 `tests/i18n.spec.ts` 会查三种语言的键齐全与插值参数名）。管理台列表 `web/src/views/AssistantsView.vue` + `web/src/api/assistantsAdmin.ts`；平台设置表单 `web/src/components/AssistantPlatformSettings.vue`。
+
+3D 落地的接口：
+
+- 迁移 `0102_assistant_access_log`：表 `assistant_access_log`（`id`、`bot_id`、`actor_id`、`actor_kind`、`action`、`target`、`at`）。
+- `coreman/core/assistants/access_log.py`：`record(session, bot_id, actor_id, action, target="", *, kind=None)`（调用方提交）、`record_opened(session, rows, actor_id, action) -> int`、`record_refused(session, rows, owner_id, action) -> int`、`NOBODY`、`bots_of(session, owner_ids)`、`list_(session, bot_id, *, limit=50, before=None)`、`last_foreign(session)`、`cleanup(session, now, *, limit=500)`；动作代码在 `ACTIONS`（十四个）。
+- `coreman/core/assistants/archive.py`（压缩包的格式与安全检查，纯函数；`Parsed.ignored`）与 `transfer.py`（`plan` / `apply` / `preview` / `counts` / `export`）；`notes.dump(session, bot_id)`。
+- `GET /api/me/assistant/access-log?limit=&before=`、`POST /api/me/assistant/import`（`multipart/form-data`：`archive`、`dry_run`、`overwrite`、`expect`）、`GET /api/me/assistant/export`；`GET /api/admin/assistants` 多 `last_non_owner_access_at`。
+- `deps.via_cli(request)`：管理命令建的会话。之后新增只对本人开放的接口时用它区分；新增带 `viewer=` 的还原时照对话记录的写法（`NOBODY` + `record_refused`）。
+- 之后的层新增运行时路径之外的解密时：在同一个函数里调 `access_log.record`，否则 `tests/unit/test_assistant_access_ledger.py` 失败。
+- 前端：`web/src/components/assistant/AssistantAccessLog.vue`（嵌在设置分区）、`AssistantTransfer.vue`（嵌在知识库分区）、`web/src/utils/download.ts`。
 
 ## 每层都要守的约束
 
