@@ -23,10 +23,12 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, current_user, get_session, via_bot_token
+from coreman.api.deps import client_ip, current_user, get_session, via_bot_token, via_cli
 from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.security import verify_csrf
 from coreman.core import session_links
+from coreman.core.assistants import access_log
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     AssistantRetiredDir,
@@ -537,6 +539,9 @@ async def _authorize_session_content(
     非管理员还要节点已升级到记录不含环境变量的驱动。以本人身份运行过的定时任务与私聊同样只归执行者本人。
     其余按角色：管理员可看群聊与企微私聊；飞书私聊、挂了本人企业微信工具的企微私聊和这类
     定时任务可能含个人资料，任何角色都不能代看。
+    管理命令以成员身份建的会话（`via_cli`）同样不走本人这条路：操作的人在服务器上，不是本人。
+    它读的是所有者的助理调度公共员工的那一轮时，在助理名下记一条 `cli.session`。
+    个人助理自己的会话对谁都不开：它跑在沙箱里，转录每轮清出节点，不从这里看。
     """
     try:
         identity = uuid.UUID(session_id)
@@ -550,15 +555,30 @@ async def _authorize_session_content(
                 ChatLog.user_id,
                 ChatLog.private.is_(True)
                 | ChatLog.task_id.in_(select(CronRun.task_id).where(CronRun.private.is_(True))),
+                ChatLog.bot_id,
+                ChatLog.private.is_(True) & (ChatLog.message_type == BOT_HELP_KIND),
             ).where(ChatLog.relay_session_id == identity)
         )
     ).all()
-    mine = not via_bot_token(request) and all(
-        (chat_type == "single" or private) and user_id == actor.id
-        for _, chat_type, user_id, private in rows
-    )
     token = request.query_params.get("t", "")
     claims = session_links.read(request.app.state.cipher, token) if token else None
+    bots = {bot_id for *_, bot_id, _ in rows if bot_id is not None}
+    if claims is not None and claims.session_id == identity:
+        bots.add(claims.bot_id)
+    if bots and await session.scalar(
+        select(Bot.id).where(Bot.id.in_(bots), Bot.kind == "assistant").limit(1)
+    ):
+        raise not_found("会话不存在")
+    own = not via_bot_token(request) and all(
+        (chat_type == "single" or private) and user_id == actor.id
+        for _, chat_type, user_id, private, _, _ in rows
+    )
+    mine = own and not via_cli(request)
+    if own and not mine and rows:
+        # 行都是这个人自己的（own）：数出其中调度公共员工留下的那几轮。
+        dispatched = sum(1 for *_, dispatch in rows if dispatch)
+        if await access_log.record_dispatch_count(session, actor.id, "cli.session", dispatched):
+            await session.commit()
     linked = (
         mine
         and claims is not None
@@ -580,7 +600,7 @@ async def _authorize_session_content(
         raise forbidden()
     if not rows or any(
         (platform == "feishu" and chat_type == "single") or private
-        for platform, chat_type, _, private in rows
+        for platform, chat_type, _, private, _, _ in rows
     ):
         raise not_found("会话不存在")
     return "role"
@@ -699,9 +719,20 @@ async def session_events(
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
         raise not_found("会话不存在")
-    await _authorize_session_content(session, request, actor, node_id, provider, session_id)
+    via = await _authorize_session_content(session, request, actor, node_id, provider, session_id)
     if not await session.get(RuntimeNode, node_id):
         raise not_found("运行时不存在")
+    # 事件流才是内容本身：不经查看页直接取（管理命令就是这样）也要留下审计。
+    await record_audit(
+        session,
+        action="runtime.session_events",
+        actor_id=actor.id,
+        actor_login=actor.login_name or f"user:{actor.id}",
+        target_type="runtime_session",
+        target_id=session_id,
+        diff={"node_id": [None, str(node_id)], "provider": [None, provider], "via": [None, via]},
+        ip=client_ip(request),
+    )
     # Release the reader transaction before holding a long-lived stream.
     await session.commit()
 

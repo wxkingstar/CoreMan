@@ -17,12 +17,13 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import get_session, via_bot_token
+from coreman.api.deps import get_session, via_bot_token, via_cli
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.chat_logs import chat_log_out
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import sealed
+from coreman.core.assistants import access_log, sealed
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.db.models import Bot, ChatLog, InboundEvent, Task, TaskStream, User
 from coreman.core.wecom.messages import InboundMessage, Part, Sender, TextPart
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
@@ -160,6 +161,9 @@ async def get_task(
         and (via_bot_token(request) or task.user_id != actor.id)
     ):
         raise not_found("任务不存在")
+    if task.kind == BOT_HELP_KIND and (via_bot_token(request) or task.user_id != actor.id):
+        # 个人助理调度来的一轮没有入站事件，开流前也没有对话记录：按任务自己判断，只归发起它的人。
+        raise not_found("任务不存在")
     stream = await session.get(TaskStream, task_id, populate_existing=True)
     log = (
         await session.execute(
@@ -174,13 +178,31 @@ async def get_task(
     ):
         raise not_found("任务不存在")
     # 个人助理的内容只对所有者本人解密：按主键取到的任务与流已自动还原，不是本人就收回去。
-    await sealed.open_rows(session, [task, stream, log], viewer=actor.id)
+    # 管理命令以所有者身份建的会话不是本人在场：同样收回去。
+    cli = via_cli(request)
+    rows = [task, stream, log]
+    await sealed.open_rows(session, rows, viewer=access_log.NOBODY if cli else actor.id)
     now = datetime.now(UTC)
-    return {
-        "code": 0,
-        "data": {
-            "task": task_out(task),
-            "stream": stream_out(stream, now) if stream else None,
-            "chat_log": chat_log_out(log) if log else None,
-        },
+    # 个人助理调度来的一轮明文存在目标员工名下，上面的还原管不到它：管理命令以所有者身份建的
+    # 会话不是本人在场，只给元数据（流里是答复，任务的报错文字也可能带着内容）。
+    hidden = cli and (
+        task.kind == BOT_HELP_KIND
+        or (log is not None and log.message_type == BOT_HELP_KIND and bool(log.private))
+    )
+    data: dict[str, Any] = {
+        "task": task_out(task),
+        "stream": stream_out(stream, now) if stream and not hidden else None,
+        "chat_log": chat_log_out(log, withheld=hidden) if log else None,
     }
+    if hidden:
+        data["task"]["error_message"] = None
+        data["content_withheld"] = True
+    recorded = (
+        await access_log.record_refused(session, rows, actor.id, "cli.tasks")
+        + await access_log.record_dispatch_refused(session, [task], actor.id, "cli.tasks")
+        if cli
+        else await access_log.record_opened(session, rows, actor.id, "tasks.read")
+    )
+    if recorded:
+        await session.commit()
+    return {"code": 0, "data": data}

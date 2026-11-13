@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,12 +22,17 @@ HINTS = {
     "anchor_required": "这个会话里已有消息：approval.anchor_message_id 填你读到的最后一条。",
     "anchor_not_found": "锚点不在会话最近的消息里（太早或已撤回）：重新读会话后再起草。",
     "owner_replied_after_anchor": "锚点之后本人已经在这个会话里发过言：读完最新消息后重写或放弃。",
-    "newer_messages_after_anchor": "锚点之后对方又发了消息：读完最新消息后重写。",
+    "newer_messages_after_anchor": (
+        "锚点之后对方又发了消息（群里指 @ 本人、回复锚点那条、同一话题里的、"
+        "或锚点发送人自己又发的）：读完最新消息后重写。"
+    ),
     "message_gone": "目标消息不在这个会话里，或已被撤回。",
     "not_own_message": "只能编辑或撤回本人发出的消息。",
 }
 # 会话读取：`toolbase.Call`，或测试里签名相同的替身。
 Reader = Callable[..., Awaitable[dict[str, Any]]]
+# 给一批消息编号，返回其中由平台经审批替所有者发出的（`sent.among`）。
+Ours = Callable[[list[str]], Awaitable[Collection[str]]]
 
 
 class Rejected(Exception):
@@ -47,6 +52,12 @@ class Message:
     sender_type: str
     text: str
     deleted: bool
+    # 被 @ 的人、它回复的那条消息、回复链（或话题）的根消息、所在的话题：判断群里的新消息与
+    # 锚点有没有关系时用。`root_id` 在普通的引用回复链里也有，只有 `thread_id` 说明它在话题里。
+    mentions: frozenset[str] = frozenset()
+    parent_id: str = ""
+    root_id: str = ""
+    thread_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,6 +67,8 @@ class ChatView:
     kind: str
     title: str
     messages: list[Message]
+    # 读的是一个话题（按话题容器读的）：里面每一条都属于这个话头。
+    thread: bool = False
 
 
 def _text(item: dict[str, Any]) -> str:
@@ -80,6 +93,22 @@ def _text(item: dict[str, Any]) -> str:
     return f"[{kind or '未知类型'}消息]"
 
 
+def mentioned(item: dict[str, Any]) -> frozenset[str]:
+    """消息里被 @ 的人。`id` 按字符串读；万一是按类型分开的对象，取其中的 open_id。
+
+    @所有人不产生指向某个人的条目，不算 @ 了谁。
+    """
+    found: set[str] = set()
+    raw = item.get("mentions")
+    for one in raw if isinstance(raw, list) else []:
+        who = one.get("id") if isinstance(one, dict) else None
+        if isinstance(who, dict):
+            who = who.get("open_id")
+        if isinstance(who, str) and who:
+            found.add(who)
+    return frozenset(found)
+
+
 def parse(item: dict[str, Any]) -> Message:
     sender = item.get("sender")
     sender = sender if isinstance(sender, dict) else {}
@@ -90,6 +119,10 @@ def parse(item: dict[str, Any]) -> Message:
         sender_type=str(sender.get("sender_type") or ""),
         text=_text(item),
         deleted=bool(item.get("deleted")),
+        mentions=mentioned(item),
+        parent_id=str(item.get("parent_id") or ""),
+        root_id=str(item.get("root_id") or ""),
+        thread_id=str(item.get("thread_id") or ""),
     )
 
 
@@ -106,7 +139,7 @@ async def chat_view(call: Reader, chat_id: str, thread_id: str | None = None) ->
     )
     items = [parse(item) for item in data.get("items") or [] if isinstance(item, dict)]
     kind = "p2p" if info.get("chat_mode") == "p2p" else "group"
-    return ChatView(kind, str(info.get("name") or ""), items)
+    return ChatView(kind, str(info.get("name") or ""), items, thread=bool(thread_id))
 
 
 async def message(call: Reader, message_id: str) -> Message | None:
@@ -154,25 +187,68 @@ async def _quote(call: Reader, found: Message | None) -> str:
     return f"{await _name(call, found.sender_id) or '（未知发送人）'}：{found.text}"
 
 
-def anchor_verdict(view: ChatView, anchor_message_id: str, owner_open_id: str) -> str | None:
+def anchor_verdict(
+    view: ChatView,
+    anchor_message_id: str,
+    owner_open_id: str,
+    ours: Collection[str] = frozenset(),
+) -> str | None:
     """锚点之后会话有没有动过；None 表示可以提交（或执行）。
 
-    只数真人发的、没被撤回的消息：机器人的通知不算「对方又发了消息」。
+    只数真人发的、没被撤回的消息：机器人的通知不算「对方又发了消息」。`ours` 是平台经审批
+    替所有者发出的消息的编号：它们在飞书里发送人是所有者，但不是他亲自回复，也不是对方的新
+    消息——同一个会话有两张待批单时，第一张发出去不该让第二张过时。
+
+    锚点本身已被撤回时返回 `message_gone`。
+    所有者亲自发言在哪种会话里都算。别人的新消息，私聊里每一条都算（都是对所有者说的）；
+    群里只算与这个话头有关的：@ 了所有者、直接回复了锚点那条、与它同在一个话题里（或在以它
+    为根的话题里）、或锚点的发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿
+    永远赶不上最新一条。「同一个话题」只认话题编号（`thread_id`）：普通群里一条公告下大家用
+    「回复」接龙，根消息都是那条公告，却不是在说同一件事。读的是话题视图时按私聊的口径全算：话题里的每一条都在说这件事，
+    问题可能已经被第三个人答掉了。
     """
     newer: list[Message] = []
+    anchor: Message | None = None
     for item in view.messages:
         if item.message_id == anchor_message_id:
+            anchor = item
             break
         newer.append(item)
-    else:
+    if anchor is None:
         return "anchor_not_found"
-    people = [item for item in newer if item.sender_type == "user" and not item.deleted]
+    if anchor.deleted:
+        # 锚点那条已被撤回（撤回的消息仍在历史里）：这个话头没了，后面有没有新消息都不能发。
+        return "message_gone"
+    people = [
+        item
+        for item in newer
+        if item.sender_type == "user" and not item.deleted and item.message_id not in ours
+    ]
     if any(item.sender_id == owner_open_id for item in people):
         return "owner_replied_after_anchor"
+    if view.kind == "group" and not view.thread:
+        people = [item for item in people if _about(item, anchor, owner_open_id)]
     return "newer_messages_after_anchor" if people else None
 
 
-async def _send(call: Reader, tool: str, one: dict[str, Any], owner_open_id: str) -> Facts:
+def _about(item: Message, anchor: Message, owner_open_id: str) -> bool:
+    """群里的一条新消息与锚点这个话头有没有关系。"""
+    return (
+        owner_open_id in item.mentions
+        or item.parent_id == anchor.message_id
+        # 话题里的回复：与锚点同一个话题，或话题的根就是锚点。只看根消息不够——普通的引用
+        # 回复链里根消息也相同。
+        or (
+            bool(item.thread_id)
+            and (item.thread_id == anchor.thread_id or item.root_id == anchor.message_id)
+        )
+        or (bool(anchor.sender_id) and item.sender_id == anchor.sender_id)
+    )
+
+
+async def _send(
+    call: Reader, tool: str, one: dict[str, Any], owner_open_id: str, ours: Ours | None
+) -> Facts:
     args, chat_id = one["arguments"], one.get("chat_id")
     if not chat_id:
         raise Rejected("chat_id_required")
@@ -195,7 +271,8 @@ async def _send(call: Reader, tool: str, one: dict[str, Any], owner_open_id: str
         if view.messages:
             raise Rejected("anchor_required")
     else:
-        verdict = anchor_verdict(view, anchor, owner_open_id)
+        mine = await ours([item.message_id for item in view.messages]) if ours else frozenset()
+        verdict = anchor_verdict(view, anchor, owner_open_id, mine)
         if verdict is not None:
             raise Rejected(verdict)
     quoted = source if source is not None else by_id.get(anchor or "")
@@ -222,18 +299,26 @@ async def _on_message(call: Reader, tool: str, one: dict[str, Any], owner_open_i
     )
 
 
-async def check_call(call: Reader, tool: str, one: dict[str, Any], *, owner_open_id: str) -> Facts:
+async def check_call(
+    call: Reader,
+    tool: str,
+    one: dict[str, Any],
+    *,
+    owner_open_id: str,
+    ours: Ours | None = None,
+) -> Facts:
     """检查一次调用并取回审批单要展示的事实；提交前与执行前用的是同一套。
 
     Args:
         one: `{"arguments": 工具参数, "chat_id": …, "anchor_message_id": …, "thread_id": …}`
+        ours: 查哪些消息是平台替所有者发的；给了，这些消息就不算锚点之后的新动静
 
     Raises:
         Rejected: 不能提交。执行前复查时抛出就记为 `stale`
         PersonalError: 所有者的授权失效等，原样交给调用方
     """
     if tool in catalog.SENDS:
-        return await _send(call, tool, one, owner_open_id)
+        return await _send(call, tool, one, owner_open_id, ours)
     if tool in catalog.ON_MESSAGE:
         return await _on_message(call, tool, one, owner_open_id)
     channel = catalog.entry(tool).channel

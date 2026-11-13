@@ -177,6 +177,100 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 数据库整体故障时 CoreMan 无法写通知队列，须由独立监控负责外部送达。Prometheus 的 7 条规则可直接查看；未自动配置外部 Alertmanager 或外部通知凭证。
 
+### 个人助理列表
+
+管理台「平台管理 → 个人助理」（仅平台管理员）列出每一位助理，数据来自 `GET /api/admin/assistants`。这一页与这个接口只有元数据：看不到任何人的对话、知识库、待跟进、审批单内容、重点群。
+
+| 列 | 接口里的键 | 含义 |
+|---|---|---|
+| 所有者 | `owner` | 显示名与登录名 |
+| 状态 | `state`、`lifecycle` | `provisioning` 开通中、`active` 可用、`deprovisioning` 停用中、`deprovisioned` 已停用；流程进行中时另显示动作、步骤与错误代码 |
+| 运行时 | `node`、`relay` | 所在节点的名字与是否在线 |
+| 在班 | `on_shift` | 记录启用、开通好，且此刻在所有者的工作时段内（含「上班」「下班」的临时切换） |
+| 冷启动 | `cold_start` | `pending` 没开始、`in_progress` 进行中（后面是走到哪一步）、`done` 已结束（后面是怎么结束的：`completed` / `skipped` / `timeout`）；没完成时不盯消息、不交回事项 |
+| 今日轮次 | `turns` | 今天（所有者时区）跑了几轮 / 预算；预算是个人值与平台默认里较小的那个，用完后只交回紧急的 |
+| 待交回 | `inbox_pending` | 收件箱里还没交回的条目数；一直不降见下一节 |
+| 进行中（含调度） | `jobs_active` | 排队或在跑的子任务与调度公共员工的求助合计，两者共用名额，每位助理至多 3 个 |
+| 轮询健康 | `watch` | 盯消息的状态、上次成功的时刻与错误代码，对照下一节的表 |
+| 待删目录 | `directories_pending_removal` | 换运行时或停用后等原节点删除的旧工作目录数 |
+
+「停用」要输入所有者的登录名确认。停用不可撤销：飞书授权撤销、待批的审批单撤回、数据密钥销毁，这位成员加密保存的个人内容从此不可恢复；接口只回状态。已经停用完的记录没有这个按钮。
+
+可开通范围、允许的 AI 及其先后、每个节点的并发上限、每日轮次预算的默认值在「设置 → 个人助理」里改（设置项 `assistant_eligibility`、`assistant_backends`、`assistant_node_concurrency`、`assistant_daily_turn_budget`）。成员可以在「我的助理 → 设置」里把自己的每日预算调低，不能调到平台默认值以上；之后把平台默认调到某人的个人值以下时，那个人也按较小的生效（个人值留着，调回来之后重新起作用）。
+
+待批提醒（私聊里的「有 N 张审批单等你处理」）与「我的助理」页上的跳转都只用审批系统的网页入口 `TOWER_WEB_URL`；没配就不带链接，不会回落到接口地址 `TOWER_URL`。
+
+### 个人助理盯消息排障
+
+`GET /api/admin/assistants` 每条记录的 `watch` 是这位助理的轮询状态，scheduler 日志里对应的事件名以 `assistant_watch` 开头。日志与这个接口都只有代码、编号与计数，没有消息内容。
+
+| `state` | `last_error` | 含义与处理 |
+|---|---|---|
+| `polling` | 空 | 正常，`last_ok_at` 是上一次轮询成功的时刻 |
+| `idle` | 空 | 所有者下班，或记录不是启用中的开通好状态；不用处理 |
+| `idle` | `cold_start_pending` | 冷启动还没做完，做完后自动开始 |
+| `idle` | `identity_missing` | 没记下所有者的身份（迁移 `0093` 之前建的助理）：让所有者停用后重新开通 |
+| `paused` | `runtime_offline` 等 | 运行时暂停，原因与私聊里说的一致；恢复后自动接着读 |
+| `backoff` | `rate_limited` | 被飞书限频，按飞书给的秒数等；持续出现说明一个应用撑不住这么多人 |
+| `backoff` | `budget_exhausted` | 这个应用最近一分钟的额度已满，下一分钟再试 |
+| `backoff` | `authorization_required` | 所有者的飞书授权失效：需要他重新授权 |
+| `backoff` | `personal_grant_required` / `personal_permission_revoked` | 所有者的通讯录身份或授权与开通时记下的不一致，或账号不可用：核对账号，必要时重新开通 |
+| `backoff` | `feishu_read_failed` 等 | 飞书读取失败，按 2、4、8、15 分钟退避后重试；同一个会话连续 3 轮读不了会被放下 1 小时（日志 `assistant_watch_chat_parked`），之后恢复正常。一直是它且没有这条日志时，多半是列会话的参数被飞书拒绝 |
+| `backoff` | 异常类型名（如 `TimeoutError`） | 平台侧意外出错，15 分钟后重试；看 scheduler 日志里的 `assistant_watch_failed` |
+| `stopped` | 空 | 助理已停用 |
+| `null`（没有 `watch`） | | 还没被登记：记录不是启用中的开通好状态，或 scheduler 没在跑 |
+
+日志 `assistant_watch_budget_tight`（`app_id`、`load`、`stretch`）表示这个应用最近一分钟的用量到了上限的六成以上，所有人的轮询间隔已被拉长到 `stretch` 倍；偶尔出现不用处理，持续出现需要减少重点群或再接一个助理应用。用量流水在表 `feishu_rate_usage` 里，只留 15 分钟。
+
+日志 `assistant_watch_messages_skipped`（`count`）表示飞书返回的消息里有缺编号或读不出时间的，被跳过；持续出现说明飞书的返回格式与假定的不同。
+
+长时间停止后恢复（暂停、授权失效、`backoff` 了很久）：回看有 7 天的硬上限，停了几天的全部补回，停了两三周的只交回最近 7 天的消息，更早的不补，所有者问「为什么上上周的没提醒」时就是这个原因。
+
+收件箱只进不出（条目一直是 `pending`）说明投递层没在取，不是盯消息的问题。
+
+### 个人助理：冷启动与上下班的排查
+
+- 管理台的助理列表（`GET /api/admin/assistants`）每条记录有 `cold_start`（`state`：`pending` 没开始、`in_progress`、`done`；`step`；`outcome`：`completed` / `skipped` / `timeout`）与 `on_shift`（按设置此刻是否在班）。助理不盯消息时先看这两项：`cold_start.state` 不是 `done` 就还没开始盯；`on_shift` 为 `false` 是下班中。
+- `cold_start.state` 长时间停在 `pending`：这位助理是本功能上线前开通的，所有者还没再来私聊；或者它没有记下身份（`cold_start` 为 `null`），需要重新开通。
+- `step` 长时间停在 `voice`：平台以所有者身份读飞书失败，每 10 分钟重试，满 1 小时放弃这一步；看 scheduler 日志里的 `assistant_shift`、`assistant_cold_start_failed` 与盯消息的限频日志。
+- scheduler 日志 `assistant_shift` 的字段：`voice_queued` / `voice_skipped` / `voice_retry` / `asked` / `focus_skipped` / `timeout`（冷启动），`compile_worked` / `compile_queued` / `compile_idle` / `compile_budget` / `compile_paused`（下班编译）。日志不带任何内容。
+- 口吻页没生成：`assistant_cold_start` 那一轮失败不重试（运行时暂停、节点不可用、样本不足）。所有者可以在私聊里让助理按他的要求新建或改写这一页。
+- `step` 停在某一题：在等所有者点卡片；满 24 小时自动按默认设置完成。意外出错（接口字段与预期不符等）时日志里是 `failed`，这一位被推后 10 分钟再试，不影响别人，也不影响 24 小时兜底。
+
+### 个人助理投递排障
+
+`GET /api/admin/assistants` 的每条记录有 `turns`（今天的轮次与预算）与 `inbox_pending`（收件箱里还没交回的条目数）。scheduler 的日志 `assistant_delivery` 带各项计数（`assistant_handovers`、`assistant_inbox_settled`、`assistant_followups_due`、`assistant_marks_stale`、`assistant_approvals_auto_withdrawn`、`assistant_recalls_noticed`、`assistant_reauth_reminded`）。
+
+| 现象 | 看哪里 | 说明 |
+|---|---|---|
+| `inbox_pending` 一直不降 | `watch.state`、所有者的工作时段、`turns` | 运行时暂停（`paused`）、下班、冷启动没做完、所有者的账号停用或飞书身份解绑时不交回，恢复后自动交回；`turns.today` 达到 `budget` 时只交回紧急的，其余次日交回 |
+| 条目反复交回不成 | `assistant_inbox.failures`、`void_code` | 带着它的轮次真失败满 3 次后条目作废（`undeliverable`）；先看那几轮任务的 `error_code` |
+| `inbox_pending` 不降、又没有在途的交回任务 | `assistant_delivery.handover_misses`、`handover_retry_at` | 上一轮交回没走完（被所有者的消息取消、让路放弃、暂停、失败）之后的等待：60 秒起，连续没走完逐次加倍，最多 15 分钟；到 `handover_retry_at` 之前不排新的一轮，走完一轮清零 |
+| 条目绑着任务号不动 | `assistant_inbox.delivered_task_id` 对应的 `tasks` 行 | 那一轮还在排队或在跑（所有者正在和助理聊时会一直让路）；任务结束后 5 秒内由对账记账 |
+| 审批单自己变成了已撤回 | `assistant_approvals.error_code` | `owner_replied`、`anchor_recalled`、`anchor_moved` 是平台的自动撤回，助理会在下一轮交回里得知（`anchor_moved` 的跟下一批一起，同一个会话 30 分钟内至多撤一次） |
+| 所有者说没收到授权到期提醒 | `feishu_personal_grants.authorized_at`、`assistant_delivery.reauth_reminded_on` | 只在工作时段提醒，每天一次；升级前就连接的授权按建行时间算 |
+| 平台代发的回复之后那个会话被压着 | `assistant_sent`、worker 日志 `assistant_sent_record_failed` | 代发消息的编号没记上时，盯消息会把它当成所有者亲自发言，压 10 分钟后恢复 |
+
+调整某个人的预算目前只能改库里 `assistant_settings.daily_turn_budget`（10–2000）；页面入口随「我的助理」页提供。scheduler 停止时日志里出现 `assistant_round_abandoned_on_stop`，表示有一位助理的一轮等了 20 秒仍没做完被放弃：若它恰好刚刷新过令牌，所有者需要重新授权。
+
+### 个人助理访问记录
+
+表 `assistant_access_log` 记运行时路径之外对个人助理内容的每一次解密，没有任何内容列：`bot_id`、`actor_id`（操作人，账号删除后为空）、`actor_kind`（`owner` / `admin` / `system`）、`action`、`target`（范围名或计数）、`at`。它和审计日志（`audit_logs`）是两回事：审计记谁改了平台上的什么，给管理员看；访问记录记谁读了某位所有者的个人内容，给所有者本人看（「我的助理」页的「设置」分区），管理员只在 `GET /api/admin/assistants` 的 `last_non_owner_access_at` 里看到最近一次非本人访问的时间。
+
+| 动作 | 什么时候记 |
+|---|---|
+| `notes.index`、`notes.read`、`followups.read`、`jobs.read`、`approvals.read`、`settings.read` | 所有者在「我的助理」页上读取；改设置（对象 `update`）与即时上下班（对象 `shift`）的响应带着解密后的设置，也记 `settings.read` |
+| `import.preview`、`import.notes`、`export` | 导入的预览（含没写成的确认）、导入写入成功、导出；对象是计数 |
+| `chatlogs.read`、`tasks.read` | 所有者在管理台读自己助理的对话记录、任务详情 |
+| `cli.chatlogs`、`cli.tasks`、`cli.session` | 有人用管理命令以所有者的身份（`--as`）读对话记录、任务详情、运行时节点上的会话过程（`runtimes session`）；内容没有还原，记成 `system`，不留操作人 |
+| `cli.rewrap` | `assistant-keys rewrap --apply` 重新包裹了这位所有者的数据密钥；没有读内容 |
+
+- **保留。** 180 天；scheduler 的保留期那一档分批清理，计数在日志里是 `old_assistant_access_log`。助理记录被删除时它的访问记录一并删除。
+- **写不进去不挡读取。** 记录与读取在同一个事务里提交：提交不了，请求以 500 结束，内容不交出去。单独这一行写失败时（应用日志 `assistant_access_log_failed`，带助理编号、动作与错误类型）读取照常返回；每次解密另有一条应用日志 `assistant_content_access`（助理、操作人、类别、动作、对象），可以拿来补查。持续出现 `assistant_access_log_failed` 说明表不可用，要当故障处理。
+- **管理命令看不到助理的内容，这是有意的。** `coreman … --as 登录名` 以那位成员的身份建一个管理台会话（`admin_sessions.auth_method = 'cli'`），权限与他一致，但敲命令的人在服务器上，不是他本人。所以：`/api/me/assistant` 下的接口不受理这种会话（403 `cli_session_refused`），所有者的知识库、待跟进、导入导出只能由他本人在管理台里操作；经它读对话记录（`/api/admin/chat-logs`）与任务详情时，助理加密保存的内容不还原，输出与「不是所有者」时一样（`content_locked`），并给所有者留一条 `cli.chatlogs` / `cli.tasks`。助理调度公共员工留在目标员工名下的那一轮虽然是明文，对这种会话同样只给元数据（`content_withheld`，按正文搜索与统计不含它，开发页的任务详情不给流与报错文字），同样在所有者的助理名下留一条记录（对象 `dispatch=N`）。运行时节点上的会话过程（`coreman runtimes session`、会话查看页与它的事件流）也一样：这种会话不按「本人」放行，只剩角色那条路（群聊、企微私聊），以所有者的身份去取调度那一轮会被拒绝并记 `cli.session`。个人助理自己的会话在这个入口对谁都不开（所有者本人、管理员、带凭据的旧链接都是 404），助理的回复里也不带会话入口。事件流每次放行都记审计 `runtime.session_events`（与会话页的 `runtime.session_view` 同样的字段）。普通员工的其它记录不受影响。排障需要看助理的内容时，请所有者本人在管理台里看。不看内容的命令（`assistant-keys rewrap`）照常可用，执行时记 `cli.rewrap`。
+- **上传的大小。** 导入的压缩包上限 20MB：应用读上传时按块读，一过上限就停并回 413。但框架在此之前已经把请求体收到了临时文件里，所以要挡住「传上来」本身，请在反向代理上给 `/api/me/assistant/import` 设 25MB 左右的请求体上限。装满的知识库导入、导出要十几秒，代理的超时不要低于 180 秒（管理台对这两个请求的超时就是 180 秒）。
+- **排查。** 所有者问「谁看过我的内容」：让他看「设置」分区的访问记录；管理员一侧只能确认时间。直接连库、拿主密钥解密不经过平台，不会留下记录（见设计文档的威胁模型）。
+
 ## 隔离演练
 
 ```bash

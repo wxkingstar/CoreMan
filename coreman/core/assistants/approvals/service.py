@@ -20,7 +20,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import sealed
+from coreman.core.assistants import platform_turns, sealed, sent
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
@@ -323,9 +323,16 @@ async def _stage(
         return {"error": "duplicate_recipient", "hint": "合并的会话里有重复的 chat_id。"}
     reader = Call(session, cipher, scope)
     facts: list[content.Facts] = []
+
+    async def ours(message_ids: list[str]) -> frozenset[str]:
+        # 平台经审批代发的消息不算所有者亲自回复，也不算对方的新消息。
+        return await sent.among(session, scope.bot.id, message_ids)
+
     try:
         for one in calls:
-            found = await checks.check_call(reader, tool, one, owner_open_id=scope.open_id)
+            found = await checks.check_call(
+                reader, tool, one, owner_open_id=scope.open_id, ours=ours
+            )
             one["anchor_message_id"] = found.anchor_message_id
             facts.append(found)
     except checks.Rejected as exc:
@@ -521,11 +528,26 @@ class Decided:
 
 
 async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bool:
-    """把这张单的结局作为一轮投回助理会话；沿用提交那一轮的入站事件与会话键。"""
-    if row.origin_event_id is None or bot.owner_id is None:
+    """把这张单的结局作为一轮投回助理会话。
+
+    所有者私聊那一轮里提交的单沿用那一轮的入站事件与会话键。平台自己发起的轮次里提交的单没有
+    入站事件，或者那条入站事件已被清理（审批等了几天）：经 `platform_turns.enqueue` 入队，身份
+    取自开通时记下的设置，回到提交时的会话。
+    """
+    if bot.owner_id is None:
         return False
-    if await session.get(InboundEvent, row.origin_event_id) is None:
-        return False
+    dedupe = f"assistant-approval:{row.id}:result:{row.status}"
+    result = {"approval_id": str(row.id), "status": row.status}
+    if row.origin_event_id is None or await session.get(InboundEvent, row.origin_event_id) is None:
+        queued = await platform_turns.enqueue(
+            session,
+            bot,
+            APPROVAL_RESULT_KIND,
+            result,
+            session_key=row.session_key or None,
+            dedupe_key=dedupe,
+        )
+        return queued is not None
     identity = await session.scalar(
         select(UserIdentity.platform_user_id)
         .where(UserIdentity.user_id == bot.owner_id, UserIdentity.platform == "feishu")
@@ -539,10 +561,9 @@ async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bo
             user_id=bot.owner_id,
             session_key=row.session_key,
             inbound_event_id=row.origin_event_id,
-            dedupe_key=f"assistant-approval:{row.id}:result:{row.status}",
+            dedupe_key=dedupe,
             payload={
-                "approval_id": str(row.id),
-                "status": row.status,
+                **result,
                 # 提交的那一轮可能还没结束：同一会话串行，等它收尾再开这一轮。
                 "serialize_session": True,
                 "bot_key": bot.bot_key,
@@ -736,6 +757,8 @@ async def revise(
     try:
         async with session.begin_nested():
             _apply(row, staged, cfg, scope.bot.bot_key)
+            # `_stage` 刚重新读过会话、核对过锚点：平台之后判断这张单过没过时从这一刻算起。
+            row.revised_at = utcnow()
             await session.flush()
             await _store_uploads(files, staged)
             await tower.submit(
@@ -833,6 +856,45 @@ EXPIRE_BATCH = 50
 SWEEP_BATCH = 50
 
 
+async def auto_withdraw(
+    session: AsyncSession,
+    approval_id: uuid.UUID,
+    code: str,
+    *,
+    cfg: tower.Config | None,
+    now: datetime | None = None,
+) -> AssistantApproval | None:
+    """平台撤回一张待批的单：所有者已亲自回复、对方撤回了被回复的消息、会话又有了新消息。
+
+    本地先作废（之后即使被批准也不会执行），再让审批系统撤回。不在这里通知助理：调用方
+    （`delivery_checks`）入一条提醒，与别的交回事项合成一轮。调用方提交。
+
+    审批单的行锁不等（`SKIP LOCKED`）：执行、决定、改稿、助理自己撤回都是先锁审批单、再去取
+    所有者的令牌（授权行的锁）；顺带检查在调到这里之前已经以所有者身份读过飞书，加锁顺序
+    正相反。别人正锁着这张单就先不撤，下一次检查再看。
+
+    Args:
+        code: 原因代码，存进 `error_code`
+        now: 撤回的时刻，存进 `decided_at`（调用方按它算同一会话的撤回冷却）；不给用当前时间
+
+    Returns:
+        被撤回的单（内容已还原）；不存在、已经不是 pending、或正被别处锁着时返回 None
+    """
+    row: AssistantApproval | None = await session.scalar(
+        select(AssistantApproval)
+        .where(AssistantApproval.id == approval_id, AssistantApproval.status == "pending")
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        return None
+    row.status, row.decided_at = "withdrawn", now or utcnow()
+    row.error_code = sealed.code_only(code, "withdrawn")
+    await _withdraw_remote(cfg, row)
+    log.info("assistant_approval_auto_withdrawn", approval=str(row.id), code=row.error_code)
+    return row
+
+
 async def withdraw_pending(session: AsyncSession, bot_id: uuid.UUID, reason: str) -> int:
     """撤回这个助理全部待批的单（停用流程用），返回撤了几张。调用方负责提交。
 
@@ -874,8 +936,12 @@ async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None)
     return len(rows)
 
 
-async def remind(session: AsyncSession, now: datetime, link: str) -> int:
-    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。"""
+async def remind(session: AsyncSession, now: datetime, link: str | None) -> int:
+    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。
+
+    Args:
+        link: 审批系统的网页入口（`tower.web_url`）；没有就只说张数，不带链接
+    """
     waiting = (
         await session.execute(
             select(AssistantApproval.bot_id, func.min(AssistantApproval.created_at))
@@ -918,7 +984,13 @@ async def remind(session: AsyncSession, now: datetime, link: str) -> int:
             kind="send",
             dedupe_key=f"assistant-approvals:{bot_id}:{int(now.timestamp())}",
             target={"chat_id": reached.platform_chat_id},
-            payload={"markdown": f"有 {count} 张审批单等你处理：{link}"},
+            payload={
+                "markdown": (
+                    f"有 {count} 张审批单等你处理：{link}"
+                    if link
+                    else f"有 {count} 张审批单等你处理。"
+                )
+            },
         )
         await session.execute(
             update(AssistantApproval)
@@ -967,7 +1039,7 @@ async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
     cfg = tower.config(settings)
     return {
         "assistant_approvals_expired": await expire(session, now, cfg),
-        "assistant_approvals_reminded": await remind(session, now, settings.tower_url or ""),
+        "assistant_approvals_reminded": await remind(session, now, tower.web_url(settings)),
         "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
         "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
     }

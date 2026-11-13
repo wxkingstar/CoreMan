@@ -24,11 +24,13 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 
 from sqlalchemy import select
 
 from coreman import admin_cli
 from coreman.api.errors import ApiError
+from coreman.core.assistants import access_log
 from coreman.core.assistants import keys as assistant_keys
 from coreman.core.config import get_settings
 from coreman.core.contacts import runner
@@ -254,8 +256,15 @@ async def _assistant_keys_rewrap(apply: bool) -> int:
     engine = make_engine(settings.database_url, command_timeout=None)
     try:
         async with make_session_factory(engine)() as session:
-            current, changed = await assistant_keys.rewrap(session, settings.build_cipher())
+            touched: list[uuid.UUID] = []
+            current, changed = await assistant_keys.rewrap(
+                session, settings.build_cipher(), touched=touched
+            )
             if apply:
+                # 这条命令解开并重新包裹了数据密钥，没有读任何内容：照样让所有者看得到。
+                # 与重新包裹在同一个事务里提交。
+                for bot_id in await access_log.bots_of(session, touched):
+                    await access_log.record(session, bot_id, None, "cli.rewrap")
                 await session.commit()
             else:
                 await session.rollback()

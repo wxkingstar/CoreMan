@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -14,17 +15,21 @@ from coreman.core.db.models import (
     AssistantKey,
     AssistantLifecycle,
     AssistantRetiredDir,
+    AssistantSettings,
     Bot,
     FeishuPersonalGrant,
     Setting,
     UserIdentity,
 )
 from coreman.core.db.session import make_session_factory
+from coreman.core.feishu_personal import service as personal
 from tests.integration import lifecycle_helpers
 from tests.integration.lifecycle_helpers import (
     CHAT,
     CIPHER,
     OWNER_OPEN_ID,
+    OWNER_PID,
+    TENANT,
     FakeFeishuAuth,
     FakeMessenger,
     FakeNode,
@@ -139,6 +144,8 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     await tick(factory, messenger, later=6)  # 还没点同意
     flow = await flow_of(db_session, owner.id)
     assert flow is not None and flow.step == "await_grant" and flow.finished_at is None
+    # 授权完成之前不记身份：平台来源的轮次还用不了。
+    assert await db_session.get(AssistantSettings, bot.id) is None
     auth.approve()
     await poll_now(db_session)
     await tick(factory, messenger, later=12)
@@ -153,6 +160,20 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     # 授权完成后，授权卡片换成没有按钮的。
     assert [card for _, card in messenger.updates] == [provisioning.granted_card()]
     assert "button" not in str(provisioning.granted_card())
+    # 授权完成的同一个事务里登记冷启动；开通不等它，记录已经是 active。
+    prefs = await db_session.get(AssistantSettings, bot.id, populate_existing=True)
+    assert prefs is not None and prefs.cold_start_step == "voice"
+    assert prefs.cold_start_started_at is not None and prefs.cold_start_next_at is not None
+    assert prefs.cold_start_done_at is None
+    # 开通好的同时记下所有者的身份：点开通时飞书给的操作人、开通卡片所在的私聊。
+    identity = await db_session.get(AssistantSettings, bot.id, populate_existing=True)
+    assert identity is not None
+    assert (
+        identity.open_id,
+        identity.tenant_key,
+        identity.platform_user_id,
+        identity.chat_id,
+    ) == (OWNER_OPEN_ID, TENANT, OWNER_PID, CHAT)
 
 
 async def test_a_card_can_be_used_once_by_its_owner_in_its_own_chat(
@@ -371,6 +392,47 @@ async def test_an_unreadable_app_secret_is_retried_not_abandoned(
     assert await db_session.scalar(select(func.count()).select_from(Bot)) == 0
 
 
+async def test_a_rate_limited_grant_step_is_retried_not_abandoned(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """飞书限频时发起授权与查询授权都稍后再试：不当成应用缺权限，也不多发一张授权卡片。"""
+    from coreman.core.feishu_personal import ratelimit
+    from coreman.core.feishu_personal import service as personal
+
+    _, auth = install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    factory = make_session_factory(db_engine)
+    owner_id = owner.id
+    await tick(factory, messenger)  # 建记录与密钥
+    await tick(factory, messenger)  # 节点上建目录
+    limited = True
+
+    async def http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if limited:
+            raise ratelimit.RateLimited(5)
+        return await auth.http(method, url, **kwargs)
+
+    monkeypatch.setattr(personal, "_http", http)
+    await tick(factory, messenger)  # 发起授权：被限频
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "start_grant"
+    assert (flow.error_code, flow.issued) == ("rate_limited", 0)
+    limited = False
+    await tick(factory, messenger, later=3600)
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.step == "await_grant" and flow.issued == 1
+    cards = len(messenger.cards)
+    limited = True
+    await poll_now(db_session)
+    await tick(factory, messenger, later=3600 + 6)  # 查询授权：被限频
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "await_grant"
+    assert flow.issued == 1 and len(messenger.cards) == cards
+
+
 async def test_a_switched_off_assistant_still_counts_as_one(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,3 +549,54 @@ async def test_a_key_destroyed_moments_ago_waits_for_every_cache_to_expire(
     await tick(factory, messenger, later=600)
     flow = await flow_of(db_session, owner_id)
     assert flow is not None and flow.step == "init_workspace"
+
+
+async def test_a_step_cancelled_midway_finishes_and_keeps_the_new_tokens(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scheduler 停止时会取消循环：查授权的这一步刚用设备码换到令牌，要等它提交完再退。"""
+    _, auth = install(monkeypatch)
+    app, owner, inbound, messenger = await offered(db_engine, db_session)
+    factory = make_session_factory(db_engine)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None
+    await inbound.accept(click_event(messenger.token(), flow.offer_message_id))
+    for _ in range(3):  # 建记录与密钥、节点上建目录、发起授权
+        await tick(factory, messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "await_grant" and flow.bot_id is not None
+    auth.approve()
+    await poll_now(db_session)
+    reached, release = asyncio.Event(), asyncio.Event()
+    exchanged = 0
+
+    async def http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        nonlocal exchanged
+        out = await auth.http(method, url, **kwargs)
+        if url == personal.TOKEN_URL and "access_token" in out:
+            exchanged += 1
+        elif exchanged:
+            # 令牌已经换到（设备码用掉了），这一步还在往下调飞书：这时循环被取消。
+            reached.set()
+            await release.wait()
+        return out
+
+    monkeypatch.setattr(personal, "_http", http)
+    job = asyncio.create_task(tick(factory, messenger, later=12))
+    await asyncio.wait_for(reached.wait(), 5)
+    assert exchanged == 1
+    job.cancel()
+    await asyncio.sleep(0.05)
+    assert not job.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(job, 5)
+    # 这一步的事务照常提交了：令牌落库，记录开通好。
+    grant = await db_session.get(
+        FeishuPersonalGrant, (flow.bot_id, owner.id), populate_existing=True
+    )
+    assert grant is not None and grant.status == "connected" and grant.token_enc
+    bot = await db_session.get(Bot, flow.bot_id, populate_existing=True)
+    assert bot is not None and bot.assistant_state == "active"
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "done"

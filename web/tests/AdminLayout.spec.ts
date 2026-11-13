@@ -56,4 +56,19 @@ describe('AdminLayout menu', () => {
     expect(entry?.path).toBe('/my-wecom')
     expect(entry?.roles).toBeUndefined()
   })
+  it('lists My assistant right before My Feishu for every signed-in user', () => {
+    for (const role of ['member', 'team_lead', 'platform_admin']) {
+      const labels = mountAs(role).findAll('.el-menu-item').map((el) => el.text())
+      const feishu = labels.indexOf(i18n.global.t('menu.myFeishu'))
+      expect(feishu).toBeGreaterThan(0)
+      expect(labels[feishu - 1]).toBe(i18n.global.t('menu.myAssistant'))
+    }
+  })
+
+  it('shows Personal assistants to platform administrators only', () => {
+    const label = i18n.global.t('menu.assistants')
+    const labels = (role: string) => mountAs(role).findAll('.el-menu-item').map((el) => el.text())
+    expect(labels('platform_admin')).toContain(label)
+    for (const role of ['member', 'team_lead', 'ai_committee']) expect(labels(role)).not.toContain(label)
+  })
 })

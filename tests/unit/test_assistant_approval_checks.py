@@ -230,3 +230,153 @@ async def test_sending_a_file_follows_the_send_and_reply_rules() -> None:
     with pytest.raises(checks.Rejected) as moved:
         await check(Reader([msg("om_3", text="算了"), msg("om_2")]), "feishu_send_file", replying)
     assert moved.value.code == "newer_messages_after_anchor"
+
+
+def group(history: list[dict[str, Any]]) -> Reader:
+    return Reader(history, mode="group")
+
+
+def at_owner() -> dict[str, Any]:
+    return {"mentions": [{"key": "@_user_1", "id": OWNER, "id_type": "open_id", "name": "张三"}]}
+
+
+async def test_group_chatter_after_the_anchor_does_not_make_a_draft_stale() -> None:
+    """群里别人接着聊别的：不算这个话头动过。私聊不变（对方每句话都是对所有者说的）。"""
+    chatter = [
+        msg("om_5", "ou_wang", "中午吃什么"),
+        msg("om_4", "ou_zhao", "+1"),
+        msg("om_3", "ou_wang", "@所有人 周五团建", mentions=[{"key": "@_all", "id": "all"}]),
+        msg("om_2", PEER, "周五能给报价吗？"),
+    ]
+    facts = await check(group(chatter), "feishu_reply_message", reply())
+    assert (facts.channel, facts.anchor_message_id) == ("group", "om_2")
+    with pytest.raises(checks.Rejected) as caught:
+        await check(Reader(chatter), "feishu_reply_message", reply())
+    assert caught.value.code == "newer_messages_after_anchor"
+
+
+@pytest.mark.parametrize(
+    ("newer", "code"),
+    [
+        # 有人 @ 了所有者。
+        (msg("om_3", "ou_wang", "@张三 这个你看下", **at_owner()), "newer_messages_after_anchor"),
+        # 有人回复（引用）了锚点那条消息。
+        (msg("om_3", "ou_wang", "同问", parent_id="om_2"), "newer_messages_after_anchor"),
+        # 话题里的回复：根是锚点。
+        (
+            msg("om_3", "ou_wang", "同问", parent_id="om_x", root_id="om_2", thread_id="omt_1"),
+            "newer_messages_after_anchor",
+        ),
+        # 锚点的发送人自己又说了一句。
+        (msg("om_3", PEER, "算了不用了"), "newer_messages_after_anchor"),
+        # 所有者亲自回了：不管 @ 没 @、引没引用。
+        (msg("om_3", OWNER, "我来回"), "owner_replied_after_anchor"),
+    ],
+)
+async def test_group_messages_about_the_anchor_still_make_a_draft_stale(
+    newer: dict[str, Any], code: str
+) -> None:
+    history = [msg("om_4", "ou_zhao", "中午吃什么"), newer, msg("om_2", PEER, "周五能给报价吗？")]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(group(history), "feishu_reply_message", reply())
+    assert caught.value.code == code
+
+
+async def test_a_recalled_anchor_in_a_group_is_still_gone() -> None:
+    history = [msg("om_3", "ou_wang", "中午吃什么"), msg("om_2", PEER, deleted=True)]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(group(history), "feishu_reply_message", reply())
+    assert caught.value.code == "message_gone"
+
+
+def test_group_replies_from_bots_and_recalled_or_platform_sent_ones_do_not_count() -> None:
+    view = checks.ChatView(
+        "group",
+        "项目群",
+        [
+            checks.parse(msg("om_6", "cli_example", "通知", kind="app", parent_id="om_2")),
+            checks.parse(msg("om_5", PEER, "撤回的", deleted=True)),
+            checks.parse(msg("om_4", OWNER, "平台代发的")),
+            checks.parse(msg("om_2", PEER)),
+        ],
+    )
+    assert checks.anchor_verdict(view, "om_2", OWNER, {"om_4"}) is None
+    assert checks.anchor_verdict(view, "om_2", OWNER) == "owner_replied_after_anchor"
+    assert checks.anchor_verdict(view, "om_1", OWNER) == "anchor_not_found"
+
+
+@pytest.mark.parametrize("thread_id", ["omt_1", None])
+async def test_a_third_persons_reply_in_the_same_topic_makes_a_draft_stale(
+    thread_id: str | None,
+) -> None:
+    """锚点是话题里的一条非根消息：同话题里别人的回复（没 @、不是回复锚点）也算这个话头动过。"""
+    topic = {"parent_id": "om_1", "root_id": "om_1", "thread_id": "omt_1"}
+    history = [
+        msg("om_4", "ou_wang", "周五可以，报价在共享盘", **topic),
+        msg("om_3", PEER, "周五能给报价吗？", **topic),
+        msg("om_1", "ou_zhao", "报价的事在这里说"),
+    ]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(group(history), "feishu_reply_message", reply("om_3", thread_id=thread_id))
+    assert caught.value.code == "newer_messages_after_anchor"
+    # 没有新回复时照常通过。
+    facts = await check(
+        group(history[1:]), "feishu_reply_message", reply("om_3", thread_id="omt_1")
+    )
+    assert facts.anchor_message_id == "om_3"
+
+
+async def test_everything_in_a_topic_view_counts_like_a_private_chat() -> None:
+    # 话题视图里读到的都是这个话题里的：飞书没给 root_id 也一样算。
+    history = [msg("om_4", "ou_wang", "我来答"), msg("om_3", PEER, "周五能给报价吗？")]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(group(history), "feishu_reply_message", reply("om_3", thread_id="omt_1"))
+    assert caught.value.code == "newer_messages_after_anchor"
+    assert (await check(group(history), "feishu_reply_message", reply("om_3"))).channel == "group"
+
+
+@pytest.mark.parametrize("mode", ["p2p", "group"])
+async def test_a_send_anchored_on_a_recalled_message_is_gone(mode: str) -> None:
+    """不是回复、只带锚点的发送：锚点那条被撤回了，后面没有新消息也不能发。"""
+    history = [msg("om_2", PEER, "周五能给报价吗？", deleted=True), msg("om_1", PEER)]
+    with pytest.raises(checks.Rejected) as caught:
+        await check(
+            Reader(history, mode=mode), "feishu_send_message", send(anchor_message_id="om_2")
+        )
+    assert caught.value.code == "message_gone"
+
+
+async def test_a_reply_chain_under_an_announcement_is_not_a_topic() -> None:
+    """普通群里一条公告下大家用「回复」接龙：根都是那条公告，但不是话题，别人回一句不算。"""
+    chain = {"parent_id": "om_1", "root_id": "om_1"}
+    history = [
+        msg("om_5", "ou_wang", "收到", **chain),
+        msg("om_4", "ou_zhao", "收到", parent_id="om_2", root_id="om_1"),
+        msg("om_3", PEER, "收到，另外周五能给报价吗？", **chain),
+        msg("om_2", "ou_zhao", "收到", **chain),
+        msg("om_1", "ou_boss", "本周五盘点，收到请回复"),
+    ]
+    facts = await check(group(history), "feishu_reply_message", reply("om_3"))
+    assert facts.anchor_message_id == "om_3"
+    # 锚点是公告本身：直接回复它的照常算；回复别人那条回复的（根是公告）不算。
+    for newer, stale in ((history[1], False), (history[3], True)):
+        view = [newer, history[4]]
+        if stale:
+            with pytest.raises(checks.Rejected) as caught:
+                await check(group(view), "feishu_reply_message", reply("om_1"))
+            assert caught.value.code == "newer_messages_after_anchor"
+        else:
+            assert await check(group(view), "feishu_reply_message", reply("om_1"))
+    # 同一条链上：有人直接回复锚点、锚点的发送人自己又发、@ 了所有者，仍然算。
+    for newer in (
+        msg("om_6", "ou_wang", "周五不行", parent_id="om_3", root_id="om_1"),
+        msg("om_6", PEER, "算了", **chain),
+        msg("om_6", "ou_wang", "@张三 你来定", **chain, **at_owner()),
+    ):
+        with pytest.raises(checks.Rejected):
+            await check(group([newer, *history]), "feishu_reply_message", reply("om_3"))
+
+
+def test_the_topic_of_a_message_is_read_from_thread_id() -> None:
+    assert checks.parse(msg("om_1", thread_id="omt_1")).thread_id == "omt_1"
+    assert checks.parse(msg("om_1")).thread_id == ""

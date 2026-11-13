@@ -45,7 +45,13 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantFollowup,
+    AssistantInbox,
+    AssistantJob,
+    AssistantPage,
+    AssistantSettings,
     AssistantTranscript,
+    AssistantWatch,
     Bot,
     ChatLog,
     CloudPendingApproval,
@@ -186,6 +192,29 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     CloudPendingApproval: {"reason": Text()},
     # 节点上 CLI 的转录：一轮结束后上传，续聊前下发。
     AssistantTranscript: {"blob_enc": Blob()},
+    # 个人知识库：路径、标题、摘要、正文。四列非空，读不出来时给空串。
+    AssistantPage: {
+        "path_enc": Text(""),
+        "title_enc": Text(""),
+        "summary_enc": Text(""),
+        "body_enc": Text(""),
+    },
+    # 待跟进：标题与备注。标题非空，读不出来时给空串。
+    AssistantFollowup: {"title_enc": Text(""), "notes_enc": Text()},
+    # 子任务：标题、首轮的交代、最近一次追问、结论、卡住的原因。标题与交代非空，读不出来时给空串。
+    AssistantJob: {
+        "title_enc": Text(""),
+        "brief_enc": Text(""),
+        "message_enc": Text(),
+        "result_enc": Text(),
+        "blocked_enc": Text(),
+    },
+    # 所有者标记的重点群与忽略的会话：会话 id 的列表整值封存，读不出来按空列表。
+    AssistantSettings: {"focus_chats_enc": Whole([]), "ignored_chats_enc": Whole([])},
+    # 盯消息：上一轮的会话顺序（会话 id 的列表）、各会话读到的位置（游标，整值封存，读不出来
+    # 按空字典——等于重新记基线），以及交回条目的摘要。
+    AssistantWatch: {"head_enc": Whole([]), "cursor_enc": Whole({})},
+    AssistantInbox: {"summary_enc": Whole()},
 }
 
 

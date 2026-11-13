@@ -1,5 +1,5 @@
-"""停用个人助理：停下在跑的轮次 → 撤回待批的审批单 → 撤销飞书授权 → 销毁数据密钥并停用记录，
-工作目录交给 `retired_dirs` 删掉。
+"""停用个人助理：停止盯消息 → 停下在跑的轮次 → 撤回待批的审批单 → 撤销飞书授权 → 销毁数据密钥并
+停用记录，工作目录交给 `retired_dirs` 删掉。
 
 三个入口，都只调 `request`：本人在私聊里确认停用（worker 的卡片回调）、成员离开（看护进程发现账号
 停用，先宽限 24 小时，期间恢复就作罢）、管理员在助理列表里停用（只回状态，不回任何内容）。另外，
@@ -18,7 +18,16 @@ from datetime import timedelta
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import approvals, keys, lifecycle, retired_dirs
+from coreman.core.assistants import (
+    approvals,
+    cold_start,
+    dispatch,
+    jobs,
+    keys,
+    lifecycle,
+    retired_dirs,
+    watch,
+)
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.assistants.lifecycle import StepFailed, advance, finish
 from coreman.core.assistants.records import is_assistant
@@ -149,11 +158,19 @@ async def step_drain(
     """叫停这条记录没结束的任务（已批准的写操作照常执行完），等在跑的停下，最多等 `DRAIN_WAIT`。
 
     已批准的写操作排着队也算在跑：它不叫停，要等它执行完，否则授权撤销、密钥销毁之后它只会失败。
+    进行中的子任务先记为已取消：它们的结论再也没有会话可回。调度到别的员工那边的轮次同样要等：
+    它们带着所有者的业务令牌。
     """
     bot = await _bot(session, row)
+    # 先停止盯消息、作废没交回的条目，再叫停任务：之后不会再有新的条目进来。
+    await watch.stop(session, bot.id)
+    # 没做完的冷启动不再推进，「上班」「下班」的临时切换清掉（幂等，这一步会重复执行）。
+    await cold_start.stop(session, bot.id)
     now = utcnow()
     if row.deadline is None:
         row.deadline = now + DRAIN_WAIT
+    # 子任务的轮次也是这条记录的任务，下面会一并叫停；先把子任务本身收口，免得对账再去投回。
+    await jobs.cancel_all(session, bot.id, REASON)
     found = (
         await session.execute(
             select(Task.id, Task.kind, Task.status).where(
@@ -169,6 +186,9 @@ async def step_drain(
         for task_id, kind, status in found
         if status in tasks.ACTIVE or kind == APPROVAL_EXECUTE_KIND
     ]
+    # 调度出去的求助跑在目标员工名下，上面按这条记录查不到：求助已由 `jobs.cancel_all` 记为取消
+    # 并请求取消了对方那一轮，这里等它真的停下，再去撤销授权、销毁密钥。
+    running += await dispatch.live_rounds(session, bot.id)
     if running and row.deadline > now:
         row.next_attempt_at, row.updated_at = now + DRAIN_CHECK, now
         return []

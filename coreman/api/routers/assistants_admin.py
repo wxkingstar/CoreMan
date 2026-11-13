@@ -1,35 +1,41 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
-只出元数据（人、实例、节点、状态、时间、错误代码），不碰任何内容列，也不解密任何东西。停用只回
-「已开始停用」，不回记录本身。开通范围与可选 AI 在平台设置里改（`assistant_eligibility`、
-`assistant_backends`）。
+只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态、今天的轮次与预算、待交回的
+条目数、冷启动走到哪一步、按设置此刻是否在班、进行中的子任务数、最近一次非所有者访问个人
+内容的时间），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
+可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, StrictBool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, get_session
+from coreman.api import assistant_deprovision
+from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import deprovisioning, lifecycle
-from coreman.core.audit import record_audit
+from coreman.core.assistants import access_log, delivery, jobs
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import (
+    AssistantInbox,
     AssistantLifecycle,
     AssistantRetiredDir,
+    AssistantSettings,
+    AssistantWatch,
     Bot,
     RelayServer,
     RuntimeNode,
     User,
 )
 from coreman.core.runtime_nodes.transport import online
+from coreman.core.timeutils import utcnow
 
 _require_platform_admin = require_roles("platform_admin")
 router = APIRouter(
@@ -81,9 +87,71 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
         select(AssistantRetiredDir.bot_id, func.count()).group_by(AssistantRetiredDir.bot_id)
     )
     pending_dirs: dict[uuid.UUID, int] = {bot: count for bot, count in counted.all()}
+    # 盯消息的健康状态：只取状态、时间与错误代码三列，游标与会话顺序不取。
+    watched = await session.execute(
+        select(
+            AssistantWatch.bot_id,
+            AssistantWatch.state,
+            AssistantWatch.last_ok_at,
+            AssistantWatch.last_error,
+        )
+    )
+    health: dict[uuid.UUID, dict[str, Any]] = {
+        bot: {
+            "state": state,
+            "last_ok_at": seen.isoformat() if seen else None,
+            "last_error": error,
+        }
+        for bot, state, seen, error in watched.all()
+    }
+    # 今天的轮次与预算（各自所有者的时区）；收件箱里还没交回的条目数。只数行，不取内容。
+    spent = await delivery.usage(session, utcnow())
+    boxed = await session.execute(
+        select(AssistantInbox.bot_id, func.count(AssistantInbox.id))
+        .where(AssistantInbox.status == "pending")
+        .group_by(AssistantInbox.bot_id)
+    )
+    waiting: dict[uuid.UUID, int] = {bot: int(count) for bot, count in boxed.all()}
+    # 冷启动进度与是否在班：只取明文的设置列，重点群与忽略的会话（加密列）不取。
+    prefs = await session.execute(
+        select(
+            AssistantSettings.bot_id,
+            AssistantSettings.timezone,
+            AssistantSettings.work_start,
+            AssistantSettings.work_end,
+            AssistantSettings.workdays,
+            AssistantSettings.shift_override,
+            AssistantSettings.shift_override_until,
+            AssistantSettings.cold_start_started_at,
+            AssistantSettings.cold_start_step,
+            AssistantSettings.cold_start_outcome,
+            AssistantSettings.cold_start_done_at,
+        )
+    )
+    # 最近一次非所有者访问个人内容的时间（管理命令等）：只取时间，动作与对象不出现在这里。
+    foreign = await access_log.last_foreign(session)
+    now = utcnow()
+    shifts: dict[uuid.UUID, tuple[bool, dict[str, Any]]] = {}
+    for found in prefs.all():
+        # 查出来的这一行带着 settings 的时间判断要读的全部明文列：直接当设置行用，不另建模型
+        # 对象（没取加密列，也不该在这里出现一个能落库的设置行）。
+        probe = cast(AssistantSettings, found)
+        started, done = found.cold_start_started_at, found.cold_start_done_at
+        shifts[found.bot_id] = (
+            assistant_settings.on_shift(probe, now),
+            {
+                "state": assistant_settings.cold_start_state(probe),
+                "step": found.cold_start_step,
+                "outcome": found.cold_start_outcome,
+                "started_at": started.isoformat() if started else None,
+                "done_at": done.isoformat() if done else None,
+            },
+        )
+    running_jobs = await jobs.active_counts(session)
     items = []
     for bot_id, state, enabled, created, owner_id, login, name, relay_id, relay, node in rows:
         flow = live.get(bot_id)
+        working, cold = shifts.get(bot_id, (False, None))
         items.append(
             {
                 "bot_id": str(bot_id),
@@ -107,7 +175,20 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                     if flow is not None
                     else None
                 ),
+                "on_shift": bool(enabled and state == "active" and working),
+                "cold_start": cold,
                 "directories_pending_removal": int(pending_dirs.get(bot_id, 0)),
+                "jobs_active": running_jobs.get(bot_id, 0),
+                "watch": health.get(bot_id),
+                "turns": (
+                    {"today": spent[bot_id].used, "budget": spent[bot_id].budget}
+                    if bot_id in spent
+                    else None
+                ),
+                "inbox_pending": waiting.get(bot_id, 0),
+                "last_non_owner_access_at": (
+                    foreign[bot_id].isoformat() if bot_id in foreign else None
+                ),
             }
         )
     return {"code": 0, "data": {"items": items}}
@@ -126,30 +207,6 @@ async def deprovision(
     bot = await session.get(Bot, bot_id)
     if bot is None or bot.kind != "assistant":
         raise not_found("个人助理不存在")
-    prior = await lifecycle.live(session, bot.owner_id, lock=False) if bot.owner_id else None
-    before = (prior.id, prior.action, prior.step) if prior is not None else None
-    flow = await deprovisioning.request(session, bot, trigger="admin", actor_id=user.id)
-    # 只在这一次真的开始了停用时记审计（新开的停用流程，或把宽限期里的停用推进到现在）；
-    # 重复点、已经停用完的都不记。
-    started = flow is not None and (
-        before is None
-        or before[0] != flow.id
-        or before[1] != "deprovision"
-        or (before[2] == "grace" and flow.step != "grace")
-    )
-    if started:
-        await record_audit(
-            session,
-            action="assistant.deprovision",
-            actor_id=user.id,
-            actor_login=user.login_name,
-            target_type="bot",
-            target_id=str(bot_id),
-            diff={},
-            ip=client_ip(request),
-        )
+    state = await assistant_deprovision.begin(session, request, bot, trigger="admin", actor=user)
     await session.commit()
-    return {
-        "code": 0,
-        "data": {"bot_id": str(bot_id), "state": "deprovisioning" if flow else "deprovisioned"},
-    }
+    return {"code": 0, "data": {"bot_id": str(bot_id), "state": state}}

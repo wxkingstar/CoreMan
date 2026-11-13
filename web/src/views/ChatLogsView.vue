@@ -318,7 +318,7 @@ defineExpose({ paged, openDetail })
             min-width="220"
           >
             <template #default="{ row }: { row: ChatLogOut }">
-              <span class="preview">{{ row.message_preview ?? '—' }}</span>
+              <span class="preview">{{ row.content_withheld ? t('chatLogs.contentWithheld') : (row.message_preview ?? '—') }}</span>
             </template>
           </el-table-column>
           <el-table-column

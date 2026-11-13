@@ -19,6 +19,7 @@ class AssistantDispatchError(Exception):
 
 async def paused(ctx: TaskContext, intake: Intake) -> bool:
     """所在运行时不可用（离线、没有沙箱能力、不在池里也不是本人的）：回一句、结掉任务，返回真。
+    平台自己发起的一轮不回这一句。
 
     不回落到别的节点：私有运行时离线时把助理换到池里，等于把个人内容挪到所有者没选的机器上。
     检查本身出了意外也不派（宁可不跑，不能当普通请求发出去）。
@@ -30,12 +31,14 @@ async def paused(ctx: TaskContext, intake: Intake) -> bool:
             if reason is None:
                 return False
             ctx.log.warning("assistant_paused", reason=reason)
-            await reply_once(
-                session,
-                ctx,
-                reply_context=intake.inbound.reply_context,
-                text=runtime.pause_message(reason),
-            )
+            if intake.inbound.id is not None:
+                # 没有入站事件的一轮（平台自己发起的）没有人在等：不私信，只结掉任务。
+                await reply_once(
+                    session,
+                    ctx,
+                    reply_context=intake.inbound.reply_context,
+                    text=runtime.pause_message(reason),
+                )
             await tasks.finish(
                 session,
                 ctx.task.id,

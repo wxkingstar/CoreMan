@@ -155,3 +155,10 @@ async def test_large_message_output_is_explicit_error_not_silent_truncation(upst
     assert out["error"] == "response_too_large"
     assert "smaller" in out["hint"]
     assert len(str(out)) < 200000
+
+
+def test_without_the_owner_only_the_status_query_is_listed() -> None:
+    names = [item["name"] for item in tools.definitions(owner_present=False)]
+    assert names == ["feishu_authorization_status"]
+    assert tools.definitions(auth=False, owner_present=False) == []
+    assert len(tools.definitions()) == 3

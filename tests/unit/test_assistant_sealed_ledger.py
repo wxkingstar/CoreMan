@@ -36,8 +36,25 @@ ENTITY_SELECTS = {
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
-    # 审批单：去重与决定是 session.scalar（自动还原）；列表与清理附件显式还原；撤回与过期只改状态
-    "coreman/core/assistants/approvals/service.py": 6,
+    # 调度单：同一份内容有没有在途的单，session.scalar（自动还原）
+    "coreman/core/assistants/approvals/dispatching.py": 1,
+    # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表与清理附件显式还原；
+    # 撤回与过期只改状态
+    "coreman/core/assistants/approvals/service.py": 7,
+    # 下班编译：被拒与已执行的审批单，显式还原后把摘要写进子任务的交代（密文列）
+    "coreman/core/assistants/compiling.py": 1,
+    # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
+    "coreman/core/assistants/delivery.py": 2,
+    # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
+    "coreman/core/assistants/followups.py": 2,
+    # 子任务：取一条、按结果任务号取一条都是 session.scalar（自动还原）；列表显式还原
+    "coreman/core/assistants/jobs.py": 3,
+    # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
+    "coreman/core/assistants/notes.py": 2,
+    # 「我的助理」页的审批单：显式还原，且只对所有者本人（viewer）还原
+    "coreman/core/assistants/owner_view.py": 1,
+    # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序与游标）
+    "coreman/core/assistants/watch.py": 1,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
@@ -74,8 +91,10 @@ ENTITY_SELECTS = {
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
+    "coreman/core/assistants/delivery_checks.py": 1,  # 盯消息的游标：取值后 open_value
+    "coreman/core/assistants/notes.py": 1,  # 列索引时 defer 掉正文，不读它
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
-    "coreman/core/bus/tasks.py": 1,  # 明文键 serialize_session
+    "coreman/core/bus/tasks.py": 3,  # 明文键 serialize_session、stale_hold
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
     "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
     # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并
@@ -109,11 +128,30 @@ RAW_STATEMENTS = {
 # 在已登记的文件里新增一条写语句同样会失败。
 WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
+    # 调度单：经 ORM 新建（flush 钩子封存目标员工与问题）
+    "coreman/core/assistants/approvals/dispatching.py": 1,
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
+    # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据
+    "coreman/core/assistants/delivery.py": 5,
+    # 顺带检查：入提醒条目（摘要封存）；交回后被撤回的条目作废（只写状态）
+    "coreman/core/assistants/delivery_checks.py": 2,
+    # 调度公共员工：经 ORM 新建一行求助（flush 钩子封存问题与标题）
+    "coreman/core/assistants/dispatch.py": 1,
+    # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
+    "coreman/core/assistants/followups.py": 2,
+    # 子任务：经 ORM 新建（flush 钩子封存）；之后的改动同样经 ORM
+    "coreman/core/assistants/jobs.py": 1,
+    # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
+    "coreman/core/assistants/notes.py": 1,
+    "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列
     # 转录：派出前写交接编号、没到过节点的轮次清掉交接编号（都是元数据）；内容经 ORM 写入，
     # flush 钩子封存
     "coreman/core/assistants/transcripts.py": 2,
+    # 盯消息：登记缺行的助理、意外失败后往后推，都只写调度用的列
+    "coreman/core/assistants/watch.py": 2,
+    # 收件箱：入箱经 seal_values 封存摘要；压着与两种作废只改级别、状态与时间
+    "coreman/core/assistants/watch_inbox.py": 4,
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
     "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态
@@ -128,6 +166,8 @@ WRITE_STATEMENTS = {
     # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）
     "coreman/runtime/gateway_feishu/transport.py": 2,
     "coreman/runtime/scheduler/reaper.py": 1,  # 结掉漏网的进行中记录，报错信息封存
+    "coreman/runtime/worker/assistant_bot_help.py": 1,  # 入站事件的替身：不加入会话、不落库
+    "coreman/runtime/worker/platform_turn.py": 1,  # 入站事件的替身：不加入会话、不落库
 }
 
 

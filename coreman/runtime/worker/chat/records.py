@@ -56,7 +56,8 @@ def log_entry(
         stream_id=ctx.stream_id,
         task_id=ctx.task.id,
         private=ctx.private_turn,
-        reach=not is_click(intake.inbound.payload or {}),
+        # 没落库的替身（个人助理里平台自己发起的一轮）不是这个人发来的私聊消息，不算触达。
+        reach=intake.inbound.id is not None and not is_click(intake.inbound.payload or {}),
         # chat_logs 的可见范围比一次对话大（管理台、统计、体检都读它），所以正文三列也要
         # 过一遍出站闸门：模型复述的凭据不能留在库里。
         message_content=ctx.redact(content.text if content else intake.text),

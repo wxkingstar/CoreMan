@@ -614,6 +614,8 @@ export default {
   layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
   menu: {
     selfReminders: "自分の定期タスク",
+    myAssistant: "マイアシスタント",
+    assistants: "個人アシスタント",
     myFeishu: "マイ飛書",
     myWecom: "マイ WeCom",
     myCredentials: "マイ認証情報",
@@ -893,6 +895,7 @@ export default {
     noDiff: '変更内容なし',
   },
   chatLogs: {
+    contentWithheld: '内容は依頼した本人のみ閲覧できます',
     title: '会話ログ',
     bot: 'AI スタッフ',
     user: 'ユーザー',

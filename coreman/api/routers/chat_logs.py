@@ -16,12 +16,13 @@ from sqlalchemy import ColumnElement, and_, case, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
-from coreman.api.deps import current_user, get_session, via_bot_token
+from coreman.api.deps import current_user, get_session, via_bot_token, via_cli
 from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import sealed
+from coreman.core.assistants import access_log, sealed
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.db.models import Bot, BotMember, BusinessTokenIssue, ChatLog, CronRun, User
 from coreman.core.richtext.degrade import readable
 from coreman.core.timeutils import aware_utc
@@ -33,6 +34,16 @@ PREVIEW_CHARS = 200
 TOP_BOTS = 50
 # 「出错了」这一列把三种失败态算在一起：只数 status='error' 会让全是超时的 bot 看着很健康。
 FAILURE_STATUSES = ("error", "timeout", "failed")
+# 内容对查看者收起时置空的键（列表的摘要与详情的全文）。
+WITHHELD_KEYS = (
+    "message_preview",
+    "response_preview",
+    "message_content",
+    "quoted_content",
+    "file_info",
+    "response_content",
+    "error_message",
+)
 
 
 async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID] | None:
@@ -50,6 +61,34 @@ async def accessible_bot_ids(session: AsyncSession, user: User) -> set[uuid.UUID
     return ids
 
 
+def _dispatched() -> ColumnElement[bool]:
+    """个人助理调度来的一轮：记在目标员工名下、标为私有（worker 的 `AssistantBotHelpHandler`）。"""
+    return and_(ChatLog.message_type == BOT_HELP_KIND, ChatLog.private.is_(True))
+
+
+def withheld(row: ChatLog, viewer: User, *, bot_token: bool, cli: bool = False) -> bool:
+    """这条记录的内容要不要对查看者收起。
+
+    调度来的一轮只有发起它的所有者本人看得到内容；这位员工的管理者与平台管理员看得到发生过
+    这一轮（时间、发起人、状态、用量）。管理命令以所有者身份建的会话（`cli`）不是本人在场，
+    与不是所有者一样对待。
+    """
+    return (
+        row.message_type == BOT_HELP_KIND
+        and bool(row.private)
+        and (bot_token or cli or row.user_id != viewer.id)
+    )
+
+
+def _searchable(keyword: str | None, user: User, *, cli: bool = False) -> list[ColumnElement[bool]]:
+    """按正文搜索时，看不到内容的调度记录不参与：否则能用「搜得到 / 搜不到」探出内容。"""
+    if not keyword:
+        return []
+    if cli:
+        return [not_(_dispatched())]
+    return [or_(not_(_dispatched()), ChatLog.user_id == user.id)]
+
+
 def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[ColumnElement[bool]]:
     """可见性条件：我管得着的 bot，或者我自己参与过的对话。"""
     # 飞书私聊、挂了本人企业微信工具的轮次，以及以本人身份运行的定时任务：只有本人能看。
@@ -62,7 +101,13 @@ def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[C
         ),
     )
     # A bot token can originate in a group, even when its human identity is the owner.
-    privacy = not_(private) if bot_token else or_(not_(private), ChatLog.user_id == user.id)
+    # 个人助理调度来的一轮例外：管得着这位员工的人看得到这一行，内容在输出时收起（`withheld`）；
+    # 机器人令牌照旧整行看不到。「管得着」由下面的 bot 集合条件决定。
+    privacy = (
+        not_(private)
+        if bot_token
+        else or_(not_(private), ChatLog.user_id == user.id, _dispatched())
+    )
     if ids is None:
         return [privacy]
     return [privacy, or_(ChatLog.bot_id.in_(ids), ChatLog.user_id == user.id)]
@@ -134,9 +179,9 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def chat_log_out(
-    row: ChatLog, *, full: bool = False, bot_name: str | None = None
+    row: ChatLog, *, full: bool = False, bot_name: str | None = None, withheld: bool = False
 ) -> dict[str, Any]:
-    """列表项只有摘要；`full=True` 才带正文、报错详情与成本。"""
+    """列表项只有摘要；`full=True` 才带正文、报错详情与成本；`withheld` 时只留元数据。"""
     data: dict[str, Any] = {
         "id": row.id,
         "bot_id": str(row.bot_id),
@@ -178,6 +223,13 @@ def chat_log_out(
             # Numeric 列读出来是 Decimal，直接进 JSON 会 500。
             "cost_usd": float(row.cost_usd) if row.cost_usd is not None else None,
         }
+    if withheld:
+        # 不是发起这一轮的所有者：正文、引用、附件、报错文字与工具清单都不给。
+        for key in WITHHELD_KEYS:
+            if key in data:
+                data[key] = None
+        data["tools_used"] = []
+        data["content_withheld"] = True
     if sealed.is_locked(row):
         # 个人助理的内容读不出来：不是所有者本人，或数据密钥已销毁。
         data["content_locked"] = True
@@ -200,19 +252,42 @@ async def list_chat_logs(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
-    conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
+    token = via_bot_token(request)
+    cli = via_cli(request)
+    conds = _scope(ids, actor, bot_token=token) + _window(bot_id, since, until)
     conds += _filters(user, status, chat_type, keyword, token_id)
+    conds += _searchable(keyword, actor, cli=cli)
     # request_at 会并列（同一秒的批量写），加 id 兜底保证翻页稳定。
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
     rows: list[ChatLog] = page["items"]
-    # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。
-    await sealed.open_rows(session, rows, viewer=actor.id)
+    # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。管理命令以所有者身份建的会话
+    # 不是本人在场：同样不解密；调度公共员工留下的明文那一轮对它也收起内容。
+    await sealed.open_rows(session, rows, viewer=access_log.NOBODY if cli else actor.id)
     names = await bot_names(session, (r.bot_id for r in rows))
-    return {
-        "code": 0,
-        "data": {**page, "items": [chat_log_out(r, bot_name=names.get(r.bot_id)) for r in rows]},
+    data = {
+        **page,
+        "items": [
+            chat_log_out(
+                r,
+                bot_name=names.get(r.bot_id),
+                withheld=withheld(r, actor, bot_token=token, cli=cli),
+            )
+            for r in rows
+        ],
     }
+    # 真的为所有者还原了助理的内容才记；管理命令以所有者身份来的没有还原，记一条 system
+    # （调度留下的那一轮另记：它不在助理名下）。
+    recorded = (
+        await access_log.record_refused(session, rows, actor.id, "cli.chatlogs")
+        + await access_log.record_dispatch_refused(session, rows, actor.id, "cli.chatlogs")
+        if cli
+        else await access_log.record_opened(session, rows, actor.id, "chatlogs.read")
+    )
+    if recorded:
+        # 与这次读取同一个事务：提交不了，内容也不交出去。
+        await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.get("/stats")
@@ -232,7 +307,9 @@ async def chat_log_stats(
     """概览：总量、按状态、平均时延、token 合计、按 bot 前 50（同样受可见性过滤）。"""
     ids = await accessible_bot_ids(session, actor)
     conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
+    # 与列表同一口径：按正文筛选的统计不含看不到内容的调度记录。
     conds += _filters(user, status, chat_type, keyword, token_id)
+    conds += _searchable(keyword, actor, cli=via_cli(request))
 
     def _tokens(col: Any) -> Any:
         return func.coalesce(func.sum(col), 0)
@@ -321,10 +398,24 @@ async def get_chat_log(
     if row is None:
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。
         raise not_found("对话记录不存在")
-    await sealed.open_row(session, row, viewer=actor.id)
+    cli = via_cli(request)
+    await sealed.open_row(session, row, viewer=access_log.NOBODY if cli else actor.id)
     names = await bot_names(session, [row.bot_id])
-    data = chat_log_out(row, full=True, bot_name=names.get(row.bot_id))
+    data = chat_log_out(
+        row,
+        full=True,
+        bot_name=names.get(row.bot_id),
+        withheld=withheld(row, actor, bot_token=via_bot_token(request), cli=cli),
+    )
     data["business_tokens"] = await business_tokens(session, row.task_id)
+    recorded = (
+        await access_log.record_refused(session, [row], actor.id, "cli.chatlogs")
+        + await access_log.record_dispatch_refused(session, [row], actor.id, "cli.chatlogs")
+        if cli
+        else await access_log.record_opened(session, [row], actor.id, "chatlogs.read")
+    )
+    if recorded:
+        await session.commit()
     return {"code": 0, "data": data}
 
 

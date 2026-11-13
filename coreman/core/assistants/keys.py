@@ -169,11 +169,17 @@ def _settle_fresh(session: Session) -> None:
     session.info.pop(_FRESH, None)
 
 
-async def rewrap(session: AsyncSession, cipher: Cipher) -> tuple[int, int]:
+async def rewrap(
+    session: AsyncSession, cipher: Cipher, *, touched: list[uuid.UUID] | None = None
+) -> tuple[int, int]:
     """主密钥轮换之后：把不是当前主密钥包裹的数据密钥重新包裹一遍。
 
     内容密文只认数据密钥，不用动。返回（已是当前主密钥的行数，本次重新包裹的行数）；
     调用方提交才生效。全部跑完后，旧主密钥才能从 `MASTER_KEYS_PREVIOUS` 里移除。
+
+    Args:
+        touched: 给了就把本次重新包裹的数据密钥属于谁（用户编号）追加进去：管理命令据此给
+            这些人的助理各记一条访问记录
     """
     rows = (
         (
@@ -193,6 +199,8 @@ async def rewrap(session: AsyncSession, cipher: Cipher) -> tuple[int, int]:
         aad = wrap_aad(row.user_id)
         row.dek_enc = cipher.encrypt(cipher.decrypt(row.dek_enc, aad), aad)
         changed += 1
+        if touched is not None:
+            touched.append(row.user_id)
     await session.flush()
     forget()
     return current, changed

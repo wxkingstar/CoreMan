@@ -63,6 +63,8 @@ class _SessionChanged(ValueError):
 
 class CredentialResumeHandler(ChatTaskHandler):
     kind = RESUME_KIND
+    # 续接只进提问的那个 relay 会话：不做每天换新，留给之后的普通轮次。
+    DAILY_SESSIONS = False
 
     async def run(self, ctx: TaskContext) -> None:
         try:

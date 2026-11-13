@@ -107,4 +107,24 @@ describe('ChatLogsView', () => {
     expect(text).not.toContain(i18n.global.t('chatLogs.file'))
     wrapper.unmount()
   })
+
+  // 个人助理调度公共员工的那一轮：管得着这位员工的人看得到这一行，内容只对发起的所有者开放。
+  it('says the content is visible only to the initiator when it is withheld', async () => {
+    useAuthStore().user = { id: 'u2', login_name: 'lisi', display_name: '李四', role: 'platform_admin', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: null }
+    const withheld = { ...log, id: 10, message_type: 'assistant_bot_help', message_preview: null, response_preview: null, tools_used: [], content_withheld: true } as unknown as ChatLogOut
+    vi.mocked(chatLogs.list).mockResolvedValueOnce({ items: [withheld], total: 1, page: 1, per_page: 50 })
+    vi.mocked(chatLogs.get).mockResolvedValueOnce({ ...withheld, message_content: null, response_content: null, error_message: null })
+    const wrapper = mount(ChatLogsView, { global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    const notice = i18n.global.t('chatLogs.contentWithheld')
+    expect(notice).toBe('内容仅发起人可见')
+    expect(wrapper.text()).toContain(notice)
+    await (wrapper.vm as unknown as { openDetail: (id: number) => Promise<void> }).openDetail(10)
+    await flushPromises()
+    const text = drawerText()
+    expect(text).toContain(notice)
+    // 没有内容可看：不摆出「消息」「回复」两个空栏。
+    expect(text).not.toContain(i18n.global.t('chatLogs.response'))
+    wrapper.unmount()
+  })
 })

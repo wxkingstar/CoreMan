@@ -15,7 +15,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND
+from coreman.core.assistants import kinds
+from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, PLATFORM_TURN_KINDS
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
 from coreman.core.chat.identity import resolve_speaker
@@ -41,8 +42,15 @@ PREFIX = "COREMAN_FEISHU_PERSONAL_"
 # 工具凭证覆盖整轮：机器人的单轮上限（sse_timeout_seconds）再加这点余量。
 CAPABILITY_GRACE = 300
 # 本人私聊的一轮，或凭证提交、审批决定后在原私聊里续接它的一轮（来源事件相同，同样由本人驱动）。
-# 个人助理的审批单有了结局后投回助理会话的一轮同理。
-PRIVATE_TURN_KINDS = ("chat", RESUME_KIND, APPROVAL_RESUME_KIND, APPROVAL_RESULT_KIND)
+# 个人助理的审批单有了结局后投回助理会话的一轮同理。个人助理里平台自己发起的轮次（交回事项、
+# 子任务及其结果、下班编译）没有入站事件，另由 `platform_turns.scope_for` 核验。
+PRIVATE_TURN_KINDS = (
+    "chat",
+    RESUME_KIND,
+    APPROVAL_RESUME_KIND,
+    APPROVAL_RESULT_KIND,
+    *PLATFORM_TURN_KINDS,
+)
 # 运行时声明了它，才会把个人工具作为附加 MCP 挂上，而不改变机器人原有能力。
 RUNTIME_CAPABILITY = "feishu_personal_tools_v1"
 # `self_reminder` 不调模型；其余模式在归本人所有、只发给本人时可以用本人授权。
@@ -65,10 +73,17 @@ class Scope:
     # The owner's private chat with this bot: the chat itself, or where a job delivers.
     chat_id: str
     event: InboundEvent | None = None
+    # 个人助理里平台自己发起的一轮：没有入站事件，但和私聊一轮一样跑在助理会话里。
+    platform: bool = False
 
     @property
     def scheduled(self) -> bool:
-        return self.event is None
+        return self.event is None and not self.platform
+
+    @property
+    def unattended(self) -> bool:
+        """所有者不在场的一轮（`kinds.unattended`）：平台来源的轮次，以及带入站事件的审批结果回合。"""
+        return self.platform or kinds.unattended(self.task.kind)
 
 
 @dataclass(frozen=True)
@@ -136,7 +151,23 @@ async def task_scope(session: AsyncSession, task_id: int, actor: str) -> Scope:
         or task.payload.get("collaboration_phase")
     ):
         raise ValueError("private_human_task_required")
+    if task.inbound_event_id is None:
+        return await _platform_scope(session, task, actor)
     return await verified_origin_scope(session, task, actor)
+
+
+async def _platform_scope(session: AsyncSession, task: Task, actor: str) -> Scope:
+    """没有入站事件的一轮：只有个人助理里平台自己发起的任务才有 scope，且只给所有者本人。"""
+    # 函数内导入：platform_turns 要用本模块的 Scope。
+    from coreman.core.assistants import platform_turns
+
+    bot = await session.get(Bot, task.bot_id, populate_existing=True)
+    if bot is None:
+        raise ValueError("platform_turn_required")
+    scope = await platform_turns.scope_for(session, bot, task)
+    if str(scope.user_id) != actor:
+        raise ValueError("personal_actor_mismatch")
+    return scope
 
 
 def _verified_message(header: dict[str, Any], source: dict[str, Any], event: InboundEvent) -> None:
@@ -183,6 +214,9 @@ def _verified_click(header: dict[str, Any], source: dict[str, Any], event: Inbou
 
 async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -> Scope:
     """Validate a durable private origin. Callers must separately validate task lifecycle."""
+    if task.inbound_event_id is None:
+        # 平台来源的任务没有入站事件：卡片回调等直接调到这里的路径一律不放行。
+        raise ValueError("feishu_private_chat_required")
     event = await session.get(InboundEvent, task.inbound_event_id)
     if (
         event is None

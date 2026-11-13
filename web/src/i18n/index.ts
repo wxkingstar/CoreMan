@@ -8,6 +8,7 @@ import en from './en'
 import skillEditorEn from './skillEditorEn'
 import zh from './zh'
 import { skillEditorZh, skillEditorJa } from './skillEditor'
+import { assistantZh, assistantEn, assistantJa } from './assistant'
 
 export type Locale = 'zh' | 'ja' | 'en'
 const STORAGE_KEY = 'coreman.locale'
@@ -21,7 +22,7 @@ function saved(): Locale {
   }
 }
 
-export const i18n = createI18n({ legacy: false, locale: saved(), fallbackLocale: 'zh', messages: { zh: { ...zh, workspaceFiles: workspaceFilesZh, collaboration: collaborationZh, apiAccess: apiAccessZh, apiTasksGuide: apiTasksGuideZh, skillEditor: skillEditorZh }, ja: { ...ja, workspaceFiles: workspaceFilesEn, collaboration: collaborationJa, apiAccess: apiAccessJa, apiTasksGuide: apiTasksGuideJa, skillEditor: skillEditorJa }, en: { ...en, workspaceFiles: workspaceFilesEn, collaboration: collaborationEn, apiAccess: apiAccessEn, apiTasksGuide: apiTasksGuideEn, skillEditor: skillEditorEn } } })
+export const i18n = createI18n({ legacy: false, locale: saved(), fallbackLocale: 'zh', messages: { zh: { ...zh, workspaceFiles: workspaceFilesZh, collaboration: collaborationZh, apiAccess: apiAccessZh, apiTasksGuide: apiTasksGuideZh, skillEditor: skillEditorZh, assistant: assistantZh }, ja: { ...ja, workspaceFiles: workspaceFilesEn, collaboration: collaborationJa, apiAccess: apiAccessJa, apiTasksGuide: apiTasksGuideJa, skillEditor: skillEditorJa, assistant: assistantJa }, en: { ...en, workspaceFiles: workspaceFilesEn, collaboration: collaborationEn, apiAccess: apiAccessEn, apiTasksGuide: apiTasksGuideEn, skillEditor: skillEditorEn, assistant: assistantEn } } })
 
 export function getLocale(): Locale {
   return i18n.global.locale.value as Locale

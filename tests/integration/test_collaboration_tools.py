@@ -212,7 +212,15 @@ async def test_parallel_calls_cannot_reset_or_overspend_budget(db_session, db_en
             except ValueError:
                 return {}
 
-    results = await asyncio.gather(*(run(n) for n in range(15)))
+    # call() 每次进出同一组 patch；并发时进出交错，最后一个退出的会把别人的替身当成「原函数」
+    # 留在模块上，污染同一进程里之后的测试。外面先包一层，交错只发生在这一层之内。
+    with (
+        patch("coreman.core.chat.collaboration_setup.in_chat", new=AsyncMock(return_value=True)),
+        patch("coreman.core.chat.collaboration_setup.check_current_group", new_callable=AsyncMock),
+        patch("coreman.core.chat.collaboration_setup.available", new=AsyncMock(return_value=True)),
+        patch("coreman.core.chat.collaboration_setup.begin_runtime", new_callable=AsyncMock),
+    ):
+        results = await asyncio.gather(*(run(n) for n in range(15)))
     assert sum("items" in result for result in results) == 12
     await db_session.refresh(task)
     assert task.cancel_requested_at is not None

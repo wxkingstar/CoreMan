@@ -268,6 +268,9 @@ class TimeoutSupervisor:
         self.platform = platform
         self.started_at = ctx.clock() if started_at is None else started_at
         self.switched = False
+        # 不出声的轮次（个人助理的子任务）：结论由平台另行带回主会话，进度、完成与超时通知
+        # 都不往会话里发。
+        self.silent = False
         # 预警时刻已经是负的（agent_timeout 比提前量还短）就没有预警阶段，直接切。
         self._pre_warned = (
             self.agent_timeout is None or self.agent_timeout - timing.pre_warning <= 0
@@ -403,6 +406,8 @@ class TimeoutSupervisor:
 
     async def push(self, markdown: str, dedupe_key: str | None = None) -> None:
         """一条推送一个短事务；dedupe_key 冲突说明已经排过队，静默忽略。"""
+        if self.silent:
+            return
         async with self.ctx.session_factory() as session:
             await outbox.add(
                 session,

@@ -26,7 +26,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import eligibility, keys, lifecycle, runtime, sealed
+from coreman.core.assistants import cold_start, eligibility, keys, lifecycle, runtime, sealed
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.apps import app_credentials, is_assistant_app
 from coreman.core.assistants.lifecycle import StepFailed, StepRetry, advance, finish, token_hash
 from coreman.core.assistants.records import new_assistant_bot
@@ -97,6 +98,8 @@ def offer_card(token: str) -> dict[str, Any]:
         "- 只在这个私聊里工作，对话与个人数据加密保存，只有你本人看得到。\n"
         "- 对外有影响的操作（发消息、改文档、处理审批……）都先提交审批，"
         f"由你本人在{approval_system(markdown=True)}里批准后才执行；审批单正文保存在{name}里。\n"
+        "- 助理可能把完成任务必需的问题交给其他 AI 员工；"
+        "那部分内容按与该员工私聊同样的方式保存，不在上面说的加密保存之列。\n"
         f"- 开通前请先登录一次{name}，否则第一次提交审批时会提示没有账号。\n"
         "- 开通后还要授权一次飞书；随时发「停用助理」可以停用，停用后个人数据不可恢复。"
     )
@@ -181,6 +184,7 @@ def welcome_text() -> str:
         "个人助理开通好了，直接在这里说要做的事就行。\n"
         f"对外有影响的操作会先提交审批，在{approval_system()}里批准后才执行。"
         f"要是提示你在{name}里还没有账号，先登录一次{name}再让我重试。\n"
+        "接下来我会问你几个小问题（都可以跳过），问完才开始看你的飞书消息。\n"
         "发「停用助理」可以随时停用。"
     )
 
@@ -462,6 +466,10 @@ async def step_init_workspace(
     return []
 
 
+# 飞书暂时不可用或限频：这一步稍后再试，不算授权被拒。
+_TRANSIENT = ("upstream_unavailable", "rate_limited")
+
+
 def _grant_scope(bot: Bot, row: AssistantLifecycle, app_id: str) -> Scope:
     """发起与查询授权用的身份：飞书给的操作人（点开通时记下的），不来自任何请求内容。
 
@@ -496,7 +504,7 @@ async def step_start_grant(
     try:
         begun = await personal.begin_in_flow(session, cipher, scope, GRANT_LEVEL)
     except personal.PersonalError as exc:
-        if exc.code == "upstream_unavailable":
+        if exc.code in _TRANSIENT:
             raise StepRetry(exc.code) from None
         raise StepFailed("app_permission_missing") from None
     row.issued += 1
@@ -543,11 +551,24 @@ async def step_await_grant(
         try:
             await personal.authorization_status(session, cipher, scope)
         except personal.PersonalError as exc:
-            if exc.code == "upstream_unavailable":
+            if exc.code in _TRANSIENT:
                 raise StepRetry(exc.code) from None
             # 授权被拒或身份对不上：授权行已清空，下面按「链接已失效」再发一次。
         grant = await session.get(FeishuPersonalGrant, key, populate_existing=True)
     if _connected(grant):
+        # 和置为 active 同一个事务：平台自己发起的轮次（交回、子任务结果）凭这份身份拿个人工具。
+        # 取自点开通时飞书给的操作人与开通卡片所在的私聊，不来自任何请求内容。
+        await assistant_settings.record_identity(
+            session,
+            bot.id,
+            open_id=row.open_id or "",
+            tenant_key=row.tenant_key or "",
+            platform_user_id=row.platform_user_id,
+            chat_id=row.offer_chat_id or "",
+        )
+        # 冷启动不挡开通：这里只登记（同一个事务），之后由看护进程的另一条循环推进；记录现在
+        # 就是 active，所有者可以照常在私聊里让它办事。盯消息要等冷启动做完。
+        await cold_start.begin(session, bot.id, now)
         if row.offer_message_id:
             await messenger.update_card(
                 session, row.platform_app_id, row.offer_message_id, granted_card()

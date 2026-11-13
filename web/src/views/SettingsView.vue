@@ -7,6 +7,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settings } from '@/api/admin'
 import AlertSettings from '@/components/AlertSettings.vue'
+import AssistantPlatformSettings from '@/components/AssistantPlatformSettings.vue'
 import NotificationSettings from '@/components/NotificationSettings.vue'
 import { PROMPT_SEGMENTS, type EffortLevel, type SettingsOut, type SettingsPatch } from '@/api/types'
 import { EFFORT_LEVELS } from '@/utils/effort'
@@ -159,7 +160,7 @@ defineExpose({ form })
       class="cm-section-nav"
       :aria-label="t('workspace.sections')"
     >
-      <a href="#settings-runtime">{{ t('workspace.configuration') }}</a><a href="#settings-prompts">{{ t('workspace.prompts') }}</a><a href="#settings-notifications">{{ t('workspace.notifications') }}</a>
+      <a href="#settings-runtime">{{ t('workspace.configuration') }}</a><a href="#settings-prompts">{{ t('workspace.prompts') }}</a><a href="#settings-assistant">{{ t('assistant.platform.title') }}</a><a href="#settings-notifications">{{ t('workspace.notifications') }}</a>
     </nav>
     <h3
       id="settings-runtime"
@@ -451,6 +452,13 @@ defineExpose({ form })
         </el-button>
       </el-form-item>
     </el-form>
+    <h3
+      id="settings-assistant"
+      class="cm-section-title"
+    >
+      {{ t('assistant.platform.title') }}
+    </h3>
+    <AssistantPlatformSettings />
     <h3
       id="settings-notifications"
       class="cm-section-title"

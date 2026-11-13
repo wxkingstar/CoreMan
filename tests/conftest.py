@@ -22,6 +22,16 @@ from coreman.core.db.session import make_engine, make_session_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESS_TABLES = [
+    "assistant_access_log",
+    "assistant_jobs",
+    "assistant_delivery",
+    "assistant_sent",
+    "assistant_inbox",
+    "assistant_watch",
+    "feishu_rate_usage",
+    "assistant_followups",
+    "assistant_pages",
+    "assistant_settings",
     "assistant_lifecycles",
     "assistant_retired_dirs",
     "assistant_transcripts",

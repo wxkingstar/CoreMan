@@ -22,15 +22,39 @@ from coreman.core.db.models.api_tasks import (
     PersonalAccessToken,
 )
 from coreman.core.db.models.assistants import (
+    ACCESS_ACTOR_KINDS,
     APPROVAL_CHANNELS,
     APPROVAL_STATUSES,
     ASSISTANT_STATES,
+    COLD_START_OUTCOMES,
+    COLD_START_STEPS,
+    FOLLOWUP_CATEGORIES,
+    FOLLOWUP_CLOSE_CODES,
+    FOLLOWUP_STATUSES,
+    INBOX_KINDS,
+    INBOX_LEVELS,
+    INBOX_STATUSES,
+    JOB_KINDS,
+    JOB_ORIGINS,
+    JOB_STATUSES,
+    PAGE_AUTHORS,
+    SHIFT_OVERRIDES,
+    WATCH_STATES,
+    AssistantAccessLog,
     AssistantApproval,
+    AssistantDelivery,
+    AssistantFollowup,
+    AssistantInbox,
+    AssistantJob,
     AssistantKey,
     AssistantLifecycle,
     AssistantMark,
+    AssistantPage,
     AssistantRetiredDir,
+    AssistantSent,
+    AssistantSettings,
     AssistantTranscript,
+    AssistantWatch,
 )
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
@@ -70,7 +94,12 @@ from coreman.core.db.models.cloud_proxy import (
 from coreman.core.db.models.feishu_apps import FeishuAppRegistration
 from coreman.core.db.models.feishu_docs import DOC_CONSENT_STATUSES, FeishuDocConsent
 from coreman.core.db.models.feishu_inflow import FeishuAuthWait, FeishuGroupAction
-from coreman.core.db.models.feishu_personal import FeishuPersonalGrant, FeishuPersonalSend
+from coreman.core.db.models.feishu_personal import (
+    RATE_CATEGORIES,
+    FeishuPersonalGrant,
+    FeishuPersonalSend,
+    FeishuRateUsage,
+)
 from coreman.core.db.models.infrastructure import (
     CATALOG_STATUSES,
     TOKEN_DELIVERIES,
@@ -128,6 +157,8 @@ from .feishu import FeishuDelivery, FeishuSentMessage
 from .pricing import ModelPrice
 
 __all__ = [
+    "ACCESS_ACTOR_KINDS",
+    "AssistantAccessLog",
     "FeishuAppRegistration",
     "WECOM_PROVISION_STATUSES",
     "WecomBotProvision",
@@ -289,10 +320,37 @@ __all__ += [
     "APPROVAL_CHANNELS",
     "APPROVAL_STATUSES",
     "AssistantApproval",
+    "AssistantDelivery",
     "AssistantKey",
     "AssistantMark",
     "AssistantTranscript",
     "ASSISTANT_STATES",
     "AssistantLifecycle",
     "AssistantRetiredDir",
+    "AssistantSent",
+    "AssistantSettings",
+    "COLD_START_OUTCOMES",
+    "COLD_START_STEPS",
+    "SHIFT_OVERRIDES",
+    "PAGE_AUTHORS",
+    "AssistantPage",
+    "FOLLOWUP_CATEGORIES",
+    "FOLLOWUP_CLOSE_CODES",
+    "FOLLOWUP_STATUSES",
+    "AssistantFollowup",
+    "JOB_KINDS",
+    "JOB_ORIGINS",
+    "JOB_STATUSES",
+    "AssistantJob",
+]
+
+__all__ += [
+    "INBOX_KINDS",
+    "INBOX_LEVELS",
+    "INBOX_STATUSES",
+    "RATE_CATEGORIES",
+    "WATCH_STATES",
+    "AssistantInbox",
+    "AssistantWatch",
+    "FeishuRateUsage",
 ]

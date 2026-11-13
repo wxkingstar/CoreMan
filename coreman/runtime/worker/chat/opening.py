@@ -13,6 +13,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import platform_turns
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
@@ -73,9 +75,11 @@ async def session_link(
 
     查看页按对话记录判断归属：开流时这一轮已经写进 chat_logs（见 `_open`），第一轮也不例外，
     链接不需要另带凭据。群聊沿用管理员查看，私聊归本人。飞书私聊只有本人能看：发言人没绑定
-    员工身份时谁也打不开，就不给。
+    员工身份时谁也打不开，就不给。个人助理的会话查看页对谁都不开，也不给。
     """
     url = session_viewer_url(ctx, relay, relay_session_id)
+    if intake.bot.kind == "assistant":
+        return ""
     if (
         intake.chat_type == "single"
         and intake.bot.platform == "feishu"
@@ -127,6 +131,41 @@ class OpenStage(ChatStageBase):
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(ctx.cancel_event.wait(), delay)
             delay = min(delay * 2, self.SUPERSEDE_POLL_MAX_SECONDS)
+
+    async def _wait_transcript(self, ctx: TaskContext, intake: Intake) -> bool:
+        """个人助理：上一轮被取消、它的转录还在从节点传回来的路上时，等它到了再开轮。
+
+        不等的话，`transcripts.prepare` 看到交接没办完就换新会话，所有者每打断一次助理，当天
+        的上下文就丢一次。每次查询各用一个短事务，等待期间不占连接、不持锁；最多等到
+        `transcripts.UPLOAD_WAIT`，到点还没来就照旧换新会话。返回 False 表示等待期间本任务
+        自己被取消。查询出了意外不拦这一轮：不等，按原来的办。
+        """
+        from coreman.core.assistants import transcripts
+
+        delay = self.TRANSCRIPT_POLL_SECONDS
+        waited = False
+        while True:
+            try:
+                async with ctx.session_factory() as session:
+                    until = await transcripts.awaiting_upload(
+                        session,
+                        bot_id=intake.bot.id,
+                        session_key=intake.session_key,
+                        task_id=ctx.task.id,
+                    )
+            except Exception as exc:  # noqa: BLE001 等不等只影响续不续得上，不该让这一轮开不了
+                ctx.log.warning("assistant_transcript_wait_failed", error_type=type(exc).__name__)
+                return True
+            if until is None:
+                if waited:
+                    ctx.log.info("assistant_transcript_wait_ended")
+                return True
+            if ctx.cancel_event.is_set():
+                return False
+            waited = True
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ctx.cancel_event.wait(), delay)
+            delay = min(delay * 2, self.TRANSCRIPT_POLL_MAX_SECONDS)
 
     async def _open(
         self,
@@ -234,6 +273,11 @@ class OpenStage(ChatStageBase):
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
+        # 个人助理里平台触发的一轮（含带入站事件的审批结果回合）无人在场，输入可能来自别人发给
+        # 所有者的消息：不挂云签名代理、业务系统目录与所有者的个人凭证，也不下发以所有者身份
+        # 签发的业务系统令牌与业务系统 MCP，需要时由所有者在私聊里亲自让助理做。机器人自己配的
+        # 静态环境变量不受影响。
+        unattended = platform_turns.unattended(ctx.task)
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -243,7 +287,7 @@ class OpenStage(ChatStageBase):
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
             catalog=None
-            if alert_turn
+            if alert_turn or unattended
             else await catalog_policy.mount_for(
                 session,
                 relay=relay,
@@ -253,6 +297,7 @@ class OpenStage(ChatStageBase):
                 ttl_seconds=bot.sse_timeout_seconds,
             ),
             mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
+            unattended=unattended,
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(
@@ -323,6 +368,13 @@ class OpenStage(ChatStageBase):
             api_note = await api.note(session, ctx)
             if api_note:
                 ctx.turn_notes.append(api_note)
+        if is_assistant(bot):
+            # 个人知识库：会话首轮给置顶页与索引，之后只在置顶页有更新时补一条说明。
+            from coreman.runtime.worker.chat import assistant_notes
+
+            knowledge = await assistant_notes.turn_note(session, ctx, intake, info)
+            if knowledge:
+                ctx.turn_notes.append(knowledge)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
@@ -362,7 +414,21 @@ class OpenStage(ChatStageBase):
 
         extra = ""
         personal_secrets: frozenset[str] = frozenset()
-        if ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
+        # 个人助理调度来的一轮：所有者不在场，凡是要他当场点卡片、或以他的飞书 / 企微身份行事的
+        # 能力都不挂（个人工具、本人定时任务、群文档、向员工或同事求助、凭证索取）；只注入他在
+        # 这位员工名下已保存的凭证，并在本轮块里写明这一轮怎么作答。
+        bot_help = ctx.task.kind == BOT_HELP_KIND
+        if bot_help:
+            from coreman.core.assistants import dispatch_prompt
+            from coreman.runtime.worker.chat import credentials
+
+            ctx.turn_notes.append(
+                dispatch_prompt.target_note(allow_write=ctx.task.payload.get("allow_write") is True)
+            )
+            extra, env, personal_secrets = await credentials.stored_only(
+                session, ctx, intake, extra, env
+            )
+        elif ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。
             from coreman.runtime.worker.chat.collaboration import configure
@@ -388,16 +454,20 @@ class OpenStage(ChatStageBase):
             )
             from coreman.runtime.worker.chat import credentials
 
-            extra, env, personal_secrets = await credentials.configure(
-                session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
-            )
+            if unattended:
+                extra, env = credentials.withhold(ctx, extra, env)
+            else:
+                extra, env, personal_secrets = await credentials.configure(
+                    session, ctx, intake, extra, env, relay_session_id=info.relay_session_id
+                )
         from coreman.runtime.worker.chat import cloud_proxy
 
         env = await cloud_proxy.configure(
             session,
             ctx,
             bot=bot,
-            user_id=None if alert_turn else intake.speaker.user_id,
+            # 个人助理调度来的一轮也不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
+            user_id=None if alert_turn or unattended or bot_help else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,
@@ -406,8 +476,8 @@ class OpenStage(ChatStageBase):
         )
         from coreman.core.prompting.rich_cards import with_reply_images
 
-        # helper 的回答是交给平台解析的 JSON，不会发到聊天里，图片说明用不上。
-        if ctx.task.payload.get("collaboration_phase") != "helper":
+        # 交给平台解析的回答（helper、个人助理调度来的一轮）不会发到聊天里，图片说明用不上。
+        if not self._structured_reply(ctx):
             extra = with_reply_images(extra, intake.bot.platform, backend)
         tag = identity_tag(ctx.cipher, info.relay_session_id)
         system_prompt = await self._system_prompt(
@@ -425,7 +495,8 @@ class OpenStage(ChatStageBase):
             previous=await previous_speaker(session, info),
             notes=ctx.turn_notes,
         )
-        ctx.private_turn = wecom_personal.mounted(env)
+        # 个人助理调度来的一轮：记在这位员工名下，但只有所有者本人看得到内容。
+        ctx.private_turn = wecom_personal.mounted(env) or ctx.task.kind == BOT_HELP_KIND
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
         # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
         ctx.secrets = collect_secrets(env) | personal_secrets
@@ -468,7 +539,11 @@ class OpenStage(ChatStageBase):
             session,
             log_entry(ctx, intake, status=CHAT_LOG_RUNNING, relay_session_id=info.relay_session_id),
         )
-        if bot.platform == "feishu" and ctx.task.inbound_event_id == intake.inbound.id:
+        if (
+            bot.platform == "feishu"
+            and ctx.task.inbound_event_id is not None
+            and ctx.task.inbound_event_id == intake.inbound.id
+        ):
             from coreman.core.chat.card_replies import enqueue_used
 
             # 点回复按钮带来的这一轮过了入站的各道关、真正开始了，才把那一行按钮置灰；
@@ -550,7 +625,7 @@ class OpenStage(ChatStageBase):
             current.last_speaker_user_id = intake.speaker.user_id
             return sessions.SessionInfo(row.source_relay_session_id, False, False)
         ttl = int(await ctx.settings_store.get("session_ttl_hours", default=72))
-        return await sessions.get_or_create(
+        info = await sessions.get_or_create(
             session,
             bot_id=intake.bot.id,
             session_key=intake.session_key,
@@ -558,6 +633,19 @@ class OpenStage(ChatStageBase):
             ttl_hours=ttl,
             speaker_user_id=intake.speaker.user_id,
         )
+        if self.DAILY_SESSIONS and is_assistant(intake.bot):
+            from coreman.runtime.worker.chat import assistant_day
+
+            info = await assistant_day.roll(
+                session,
+                intake.bot,
+                info,
+                session_key=intake.session_key,
+                chat_id=intake.chat_id,
+                backend=backend,
+                speaker_user_id=intake.speaker.user_id,
+            )
+        return info
 
     async def _system_prompt(
         self,
@@ -581,7 +669,7 @@ class OpenStage(ChatStageBase):
             systems_prompt=systems_prompt,
             extra=extra,
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
-            structured_reply=ctx.task.payload.get("collaboration_phase") == "helper",
+            structured_reply=self._structured_reply(ctx),
             dev_mode=intake.bot.dev_mode,
             memory_dir=memory_dir,
         )
@@ -602,6 +690,10 @@ class OpenStage(ChatStageBase):
         return dispatch.note(
             staff, unverified, recent, names, solo=bool(ctx.task.payload.get("solo"))
         )
+
+    def _structured_reply(self, ctx: TaskContext) -> bool:
+        """这一轮的回答是不是交给平台按固定格式解析、不给人看。默认只有协作的 helper 阶段。"""
+        return ctx.task.payload.get("collaboration_phase") == "helper"
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""

@@ -21,7 +21,10 @@ from coreman.core.assistants import write_fuse
 from coreman.core.assistants.records import is_assistant
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, FeishuPersonalGrant
-from coreman.core.feishu_personal import endpoints, permissions, revocation
+from coreman.core.feishu_personal import endpoints, permissions, ratelimit, revocation
+
+# 定义挪到了 errors（ratelimit 要继承它，放在这里会成环）；各处照旧从这里引用同一个类。
+from coreman.core.feishu_personal.errors import PersonalError as PersonalError
 from coreman.core.feishu_personal.policy import Scope, app_credentials
 from coreman.core.logging import get_logger
 
@@ -35,19 +38,6 @@ SCOPES = (
     "minutes:minutes.search:read minutes:minutes.basic:read minutes:minutes.artifacts:read "
     "docx:document:readonly"
 )
-
-
-class PersonalError(Exception):
-    def __init__(self, code: str, *, upstream_code: int | None = None):
-        self.code = code
-        self.upstream_code = upstream_code
-        super().__init__(code)
-
-    def payload(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"error": self.code}
-        if self.upstream_code is not None:
-            out["upstream_code"] = self.upstream_code
-        return out
 
 
 # The app has not enabled the permission, or the owner did not grant it.
@@ -73,7 +63,12 @@ def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
 
 
 def save_tokens(
-    cipher: Cipher, row: FeishuPersonalGrant, data: dict[str, Any], secret: str
+    cipher: Cipher,
+    row: FeishuPersonalGrant,
+    data: dict[str, Any],
+    secret: str,
+    *,
+    authorized: bool = False,
 ) -> None:
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise PersonalError("authorization_failed")
@@ -93,6 +88,9 @@ def save_tokens(
     row.remote_revoked = False
     row.pending_enc = None
     row.pending_expires_at = row.next_poll_at = None
+    if authorized:
+        # 完成了一次授权（不是刷新）：飞书要求授权满 365 天重新授权，从这一刻算起。
+        row.authorized_at = datetime.now(UTC)
 
 
 async def _http(method: str, url: str, *, seconds: float = 20, **kwargs: Any) -> dict[str, Any]:
@@ -107,7 +105,15 @@ async def _http(method: str, url: str, *, seconds: float = 20, **kwargs: Any) ->
                     chunks.extend(chunk)
                     if len(chunks) > 8_000_000:
                         raise PersonalError("response_too_large")
-                data = jsonlib.loads(chunks)
+                try:
+                    data = jsonlib.loads(chunks)
+                except ValueError:
+                    data = None
+                # 限频：状态码 429 或错误码 99991400。应答头里的等待秒数交给调用方退避；
+                # 正文里的文字不外传。
+                limited = ratelimit.detect(response.status_code, data, response.headers)
+                if limited is not None:
+                    raise limited
                 if not isinstance(data, dict):
                     raise PersonalError("upstream_unavailable")
                 if response.status_code >= 400 and not data.get("error"):
@@ -448,7 +454,7 @@ async def authorization_status(
     ):
         _clear(row)
         raise PersonalError("identity_mismatch")
-    save_tokens(cipher, row, data, secret)
+    save_tokens(cipher, row, data, secret, authorized=True)
     return _state(row, cipher)
 
 
@@ -502,7 +508,11 @@ def _check(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint) -> None:
 
 
 async def _authorize(
-    session: AsyncSession, cipher: Cipher, scope: Scope, method: str, path: str
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    method: str,
+    path: str,
 ) -> tuple[endpoints.Endpoint, FeishuPersonalGrant, str, dict[str, Any]]:
     """The registered endpoint, the owner's grant and a fresh token, or a PersonalError."""
     endpoint = endpoints.match(method, path)
@@ -511,12 +521,32 @@ async def _authorize(
     if write_fuse.blocked(scope.bot, endpoint.kind):
         # 个人助理的写操作只能由平台在审批通过后执行；任何别的路径到这里为止。
         raise PersonalError("approval_required")
+    row, secret, tokens = await _tokens(session, cipher, scope, endpoint)
+    return endpoint, row, secret, tokens
+
+
+async def _tokens(
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: Scope,
+    endpoint: endpoints.Endpoint | None,
+    *,
+    refresh: bool = False,
+) -> tuple[FeishuPersonalGrant, str, dict[str, Any]]:
+    """所有者的授权行与一份没过期的令牌（需要时刷新并落在这一行上）。
+
+    Args:
+        endpoint: 接下来要调的接口：刷新前后各核对一次这份授权够不够得着它。None 表示不调
+            任何业务接口（保活），不做权限核对
+        refresh: 为真时不看到期时间，直接刷新一次（保活用）
+    """
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")
-    _check(row, endpoint)
+    if endpoint is not None:
+        _check(row, endpoint)
     tokens = jsonlib.loads(cipher.decrypt(row.token_enc, _aad(row, "token_enc")))
-    if not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
+    if refresh or not row.expires_at or row.expires_at <= datetime.now(UTC) + timedelta(seconds=60):
         if not tokens.get("refresh_token"):
             _clear(row, "expired")
             raise PersonalError("authorization_required")
@@ -537,8 +567,9 @@ async def _authorize(
         save_tokens(cipher, row, data, secret)
         tokens = data
     # A refresh may return fewer permissions than before.
-    _check(row, endpoint)
-    return endpoint, row, secret, tokens
+    if endpoint is not None:
+        _check(row, endpoint)
+    return row, secret, tokens
 
 
 def _failure(row: FeishuPersonalGrant, endpoint: endpoints.Endpoint, code: Any) -> PersonalError:
@@ -567,15 +598,24 @@ async def api_request(
 ) -> dict[str, Any]:
     """Call a registered endpoint as the owner. `data`/`files` send a multipart upload."""
     endpoint, row, secret, tokens = await _authorize(session, cipher, scope, method, path)
+    # 助理共用一个应用，飞书按应用限频：列会话与读历史各记一笔用量，盯消息的循环据此拉长
+    # 间隔。这里只记不拦；普通员工不记。
+    category = ratelimit.category(endpoint) if is_assistant(scope.bot) else None
+    if category is not None:
+        await ratelimit.Budget(row.app_id).record(session, category)
     body: dict[str, Any] = {"data": data, "files": files} if files is not None else {"json": json}
-    response = await _http(
-        method,
-        BASE + path,
-        headers={"Authorization": "Bearer " + tokens["access_token"]},
-        params=params,
-        seconds=120 if files is not None else 20,
-        **body,
-    )
+    try:
+        response = await _http(
+            method,
+            BASE + path,
+            headers={"Authorization": "Bearer " + tokens["access_token"]},
+            params=params,
+            seconds=120 if files is not None else 20,
+            **body,
+        )
+    except ratelimit.RateLimited as exc:
+        exc.category = category
+        raise
     code = response.get("code")
     if code != 0:
         raise _failure(row, endpoint, code)
@@ -737,3 +777,16 @@ async def signed_download(url: str) -> Download:
     if isinstance(opened, dict):
         raise PersonalError("feishu_read_failed")
     return opened
+
+
+async def keep_alive(session: AsyncSession, cipher: Cipher, scope: Scope) -> None:
+    """只把所有者的令牌续上，不调任何业务接口。
+
+    刷新令牌约 7 天不用就失效：盯消息在不轮询的时候（下班、暂停）每 24 小时调一次。与读写
+    走同一把锁、同一次落库；调用方必须提交。不核对任何接口的权限：授权里没有读会话的权限
+    （所有者没勾，或刷新后权限变少）时令牌照样要续，否则整份授权七天后作废。
+
+    Raises:
+        PersonalError: 没有有效的授权、刷新被拒（授权随之标为过期）、上游不可用或限频
+    """
+    await _tokens(session, cipher, scope, None, refresh=True)

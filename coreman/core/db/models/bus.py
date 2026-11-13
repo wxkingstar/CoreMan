@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Identity,
@@ -42,6 +43,12 @@ TASK_KINDS = (
     "group_observe",
     "assistant_approval_execute",
     "assistant_approval_result",
+    "assistant_handover",
+    "assistant_job_result",
+    "assistant_compile",
+    "assistant_subtask",
+    "assistant_bot_help",
+    "assistant_cold_start",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -320,6 +327,8 @@ class ChatSession(Base):
     inherited_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 话题选了继承群主会话：首轮从这个 relay 会话分叉，成功后清空。
     forked_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 个人助理的主会话每天换新：这个 relay 会话是所有者时区里哪一天开始的。别的会话不写。
+    local_day: Mapped[date | None] = mapped_column(Date)
 
 
 class UserReached(Base):

@@ -2,7 +2,15 @@
 
 import uuid
 
-from coreman.core.assistants import workspace_prompt
+from coreman.core.assistants import (
+    dispatch_prompt,
+    followup_prompt,
+    handover_prompt,
+    jobs_prompt,
+    notes_prompt,
+    settings_prompt,
+    workspace_prompt,
+)
 from coreman.core.assistants.approvals import prompt as approval_prompt
 from coreman.core.db.models import PlatformApp
 from coreman.runtime.worker.chat.personal import configure, feishu_guidance
@@ -28,7 +36,16 @@ async def test_the_assistant_prompt_gets_the_workspace_rules(db_session, app, db
     prompt, _ = await configure(
         db_session, build_ctx(db_engine, task), intake, uuid.uuid4(), "你是助理", {}
     )
-    assert prompt.endswith(approval_prompt.RULES + workspace_prompt.WORKSPACE_RULES)
+    assert prompt.endswith(
+        approval_prompt.RULES
+        + workspace_prompt.WORKSPACE_RULES
+        + notes_prompt.RULES
+        + followup_prompt.FOLLOWUP_RULES
+        + handover_prompt.RULES
+        + settings_prompt.SETTINGS_RULES
+        + jobs_prompt.RULES
+        + dispatch_prompt.RULES
+    )
 
 
 async def test_the_standard_employee_prompt_is_unchanged(db_session, app, db_engine):
@@ -43,3 +60,10 @@ async def test_the_standard_employee_prompt_is_unchanged(db_session, app, db_eng
     )
     assert workspace_prompt.WORKSPACE_RULES not in prompt
     assert approval_prompt.RULES not in prompt
+    assert notes_prompt.RULES not in prompt
+    assert followup_prompt.FOLLOWUP_RULES not in prompt
+    assert handover_prompt.RULES not in prompt
+    assert settings_prompt.SETTINGS_RULES not in prompt
+    assert jobs_prompt.RULES not in prompt
+    assert jobs_prompt.SUBTASK_RULES not in prompt
+    assert dispatch_prompt.RULES not in prompt

@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.assistants import tools as assistant_tools
 from coreman.core.assistants.approvals import execute
-from coreman.core.assistants.approvals import tools as assistant_tools
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AssistantApproval
@@ -32,7 +32,8 @@ REVISED = {**reply(), "text": "周四给你，辛苦再等一下", "uuid": "u9"}
 
 
 async def call(session: AsyncSession, scope: Scope, name: str, arguments: dict[str, Any]) -> Any:
-    out = await assistant_tools.dispatch(session, None, scope, name, arguments, None, CFG)  # type: ignore[arg-type]
+    ctx = assistant_tools.Context(session, None, scope, None, CFG)  # type: ignore[arg-type]
+    out = await assistant_tools.dispatch(ctx, name, arguments, groups=assistant_tools.GROUPS)
     await session.commit()
     return out
 
@@ -44,14 +45,32 @@ async def reload(session: AsyncSession, row: AssistantApproval) -> AssistantAppr
 
 
 def test_own_tools_are_listed_for_assistants() -> None:
-    names = [item["name"] for item in assistant_tools.definitions([])]
-    assert names == [
+    listed = assistant_tools.definitions([], groups=assistant_tools.GROUPS)
+    assert [item["name"] for item in listed] == [
+        "notes_index",
+        "notes_read",
+        "notes_search",
+        "notes_write",
+        "notes_delete",
+        "followup_add",
+        "followup_update",
+        "followup_snooze",
+        "followup_close",
+        "followup_list",
+        "assistant_settings_get",
+        "assistant_settings_update",
         "approval_revise",
         "approval_withdraw",
         "approval_list",
         "assistant_mark_processing",
+        "assistant_spawn",
+        "assistant_job_message",
+        "assistant_job_list",
+        "assistant_job_cancel",
+        "assistant_bot_list",
+        "assistant_ask_bot",
     ]
-    for item in assistant_tools.definitions([]):
+    for item in listed:
         assert item["inputSchema"]["type"] == "object" and item["description"]
 
 
@@ -63,12 +82,15 @@ async def test_revise_replaces_the_pending_approval_in_place(
     row = await pending(db_session, scope)
     before = (row.args_hash, row.request_hash, row.external_id, row.approval_id)
     row.notified_at = row.created_at
+    assert row.revised_at is None
     await db_session.commit()
     out = await call(
         db_session, scope, "approval_revise", {"approval_id": str(row.id), "arguments": REVISED}
     )
     assert out == {"status": "pending_approval", "approval_id": str(row.id), "revised": True}
     row = await reload(db_session, row)
+    # 记下改稿的时刻：平台判断「会话在这张单之后动没动过」从这一刻算起。
+    assert row.revised_at is not None and row.revised_at >= row.created_at
     # 同一张单、同一个外部编号；内容、去重键、请求哈希都换成新的；提醒重新来过。
     assert row.status == "pending" and row.external_id == before[2]
     assert row.args_enc is not None
@@ -203,7 +225,8 @@ async def test_revise_swaps_the_files_in_the_bucket(
     _, _, scope = await assistant_turn(db_session)
 
     async def tool(name: str, arguments: dict[str, Any]) -> Any:
-        out = await assistant_tools.dispatch(db_session, None, scope, name, arguments, relay, CFG)  # type: ignore[arg-type]
+        ctx = assistant_tools.Context(db_session, None, scope, relay, CFG)  # type: ignore[arg-type]
+        out = await assistant_tools.dispatch(ctx, name, arguments, groups=assistant_tools.GROUPS)
         await db_session.commit()
         return out
 
