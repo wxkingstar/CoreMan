@@ -16,7 +16,8 @@ import uuid
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import ColumnElement, func, or_, select, text
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
@@ -28,6 +29,9 @@ MAX_OPEN = 500
 MAX_TITLE = 200
 MAX_NOTES = 4000
 LIVE = ("open", "snoozed")
+SCOPES = ("today", "open", "all", *FOLLOWUP_CATEGORIES)
+# 平台自动关闭的原因：起因消息被撤回。
+RECALLED = "origin_recalled"
 _LABEL = re.compile(r"^[Ff]?(\d{1,9})$")
 
 
@@ -275,3 +279,97 @@ async def close(
     row.closed_at = row.updated_at = utcnow()
     await session.flush()
     return row
+
+
+async def _wake(session: AsyncSession, bot_id: uuid.UUID, today: date) -> None:
+    """推后的条目到了回看日：改回未结。只写状态与时间，不碰内容列。"""
+    await session.execute(
+        sql_update(AssistantFollowup)
+        .where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.status == "snoozed",
+            AssistantFollowup.review_on <= today,
+        )
+        .values(status="open", updated_at=utcnow())
+    )
+
+
+async def _rows(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    *where: ColumnElement[bool],
+    limit: int | None = None,
+    newest: bool = False,
+) -> list[AssistantFollowup]:
+    # 重新从库里取：会话里可能留着这些行更早的样子（别的事务改过状态）。
+    stmt = (
+        select(AssistantFollowup)
+        .where(AssistantFollowup.bot_id == bot_id, *where)
+        .execution_options(populate_existing=True)
+    )
+    stmt = stmt.order_by(AssistantFollowup.seq.desc() if newest else AssistantFollowup.seq)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = list(await session.scalars(stmt))
+    # session.scalars 不自动还原。
+    await sealed.open_rows(session, rows)
+    return rows
+
+
+def _due(today: date) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    return (
+        AssistantFollowup.status == "open",
+        or_(AssistantFollowup.review_on <= today, AssistantFollowup.due_on <= today),
+    )
+
+
+async def due(session: AsyncSession, bot_id: uuid.UUID, today: date) -> list[AssistantFollowup]:
+    """今天该看的：未结且回看日或期限已到。幂等，同一天反复调用结果相同。
+
+    Args:
+        today: 所有者时区的今天
+    """
+    await _wake(session, bot_id, today)
+    return await _rows(session, bot_id, *_due(today))
+
+
+async def list_(
+    session: AsyncSession, bot_id: uuid.UUID, scope: str, *, today: date, limit: int = 50
+) -> list[AssistantFollowup]:
+    """按范围列出：today（同 `due`）、open（全部未结，含推后的）、all（含已关闭，新的在前）、
+    或一个分类名（该分类的未结）。
+
+    Raises:
+        FollowupError: invalid_scope
+    """
+    if scope not in SCOPES:
+        raise FollowupError("invalid_scope")
+    await _wake(session, bot_id, today)
+    if scope == "today":
+        return await _rows(session, bot_id, *_due(today), limit=limit)
+    if scope == "all":
+        return await _rows(session, bot_id, limit=limit, newest=True)
+    where: list[ColumnElement[bool]] = [AssistantFollowup.status.in_(LIVE)]
+    if scope != "open":
+        where.append(AssistantFollowup.category == scope)
+    return await _rows(session, bot_id, *where, limit=limit)
+
+
+async def close_for_message(
+    session: AsyncSession, bot_id: uuid.UUID, message_id: str
+) -> list[AssistantFollowup]:
+    """起因消息被撤回：这位助理由它引起、还未结的条目自动关闭。返回被关闭的行。"""
+    if not message_id:
+        return []
+    rows = await _rows(
+        session,
+        bot_id,
+        AssistantFollowup.status.in_(LIVE),
+        AssistantFollowup.origin_message_id == message_id,
+    )
+    now = utcnow()
+    for row in rows:
+        row.status, row.close_code = "dropped", RECALLED
+        row.closed_at = row.updated_at = now
+    await session.flush()
+    return rows
