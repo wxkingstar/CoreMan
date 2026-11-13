@@ -204,8 +204,13 @@ def load(raw: dict[str, Any]) -> dict[str, Any]:
     chats = raw.get("chats")
     todo = raw.get("todo")
     since = raw.get("since")
+    probe = raw.get("p")
+    oldest = raw.get("a")
     return {
         "since": since if isinstance(since, int) else 0,
+        # 没探完的那一段会话与那一轮的年龄截止点（毫秒）：见 `watch._round`。
+        "p": [chat for chat in (probe if isinstance(probe, list) else []) if isinstance(chat, str)],
+        "a": oldest if isinstance(oldest, int) else 0,
         "chats": {
             str(chat): dict(entry)
             for chat, entry in (chats if isinstance(chats, dict) else {}).items()
@@ -218,14 +223,19 @@ def load(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def dump(cursor: dict[str, Any], todo: list[str]) -> dict[str, Any]:
-    """写回库的游标：只留最近读过的 `CURSOR_CHATS` 个会话；还在排队的会话先留（它们记着起点）。"""
+    """写回库的游标：只留最近读过的 `CURSOR_CHATS` 个会话；还在排队的、还没探到的会话先留
+    （它们记着起点）。"""
     chats: dict[str, dict[str, Any]] = cursor["chats"]
-    waiting = set(todo[:TOP])
+    waiting = {*todo[:TOP], *(cursor.get("p") or [])[:TOP]}
     kept = sorted(
         chats, key=lambda chat: (chat in waiting, int(chats[chat].get("t") or 0)), reverse=True
     )
-    return {
+    stored = {
         "since": cursor["since"],
         "chats": {chat: chats[chat] for chat in kept[:CURSOR_CHATS]},
         "todo": todo[:TOP],
     }
+    if cursor.get("p"):
+        # 还有一段会话没探到：连同那一轮的年龄截止点一起留着，探完才去掉。
+        stored["p"], stored["a"] = cursor["p"][:TOP], int(cursor.get("a") or 0)
+    return stored

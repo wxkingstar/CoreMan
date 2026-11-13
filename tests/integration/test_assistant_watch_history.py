@@ -330,3 +330,81 @@ async def test_chats_left_for_the_next_round_keep_the_weekend_too(
     # 第二轮时「上次成功轮询」是一分钟前：排队的会话仍按排队那一轮的年龄截止点算。
     await tick(factory, base + timedelta(seconds=60))
     assert sorted(await boxed(db_session, who)) == [f"om_friday_{index:02d}" for index in range(20)]
+
+
+async def test_chats_the_round_never_reached_keep_the_weekend_too(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """排在前面的会话把一轮用完：后面顺序没变、还没探到的会话下一轮照样读，周末的消息不丢。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    friday = ago(base, hours=62)
+    await primed(db_session, who, ago(base, days=9), head=["oc_li", "oc_team"])
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {
+            "oc_li": {"t": ms(ago(base, hours=63)), "m": [], "k": "p2p", "th": {}},
+            "oc_team": {"t": ms(ago(base, hours=63)), "m": [], "k": "group", "th": {}},
+        },
+    }
+    await db_session.commit()
+    await polled(db_session, who, friday)
+    # 周末有 12 位没说过话的同事发来私聊，排到了最前面；原有的两个会话名次没变，其中一个
+    # 周六来过消息。
+    api.chats = [*night_chats(watch.MAX_READS), LI, TEAM]
+    for index in range(watch.MAX_READS):
+        api.say(f"oc_p{index:02d}", f"om_new_{index:02d}", ago(base, hours=20))
+    api.say("oc_li", "om_saturday", ago(base, hours=40))
+    factory = make_session_factory(db_engine)
+    await tick(factory, base)
+    assert "om_saturday" not in await boxed(db_session, who)
+    assert api.read("oc_li") == []
+    row = await watch_row(db_session, who)
+    # 没探到的那一段与这一轮的年龄截止点（上一次成功轮询：周五）记在游标顶层。
+    assert row.cursor_enc["p"] == ["oc_li", "oc_team"]
+    assert row.cursor_enc["a"] == ms(friday)
+    row.next_poll_at = base
+    await db_session.commit()
+    # 第二轮时「上次成功轮询」是一分钟前，年龄截止点只剩一天：周六那条仍按第一轮的算。
+    await tick(factory, base + timedelta(seconds=60))
+    assert "om_saturday" in await boxed(db_session, who)
+    # 这一段探到了没有新消息的会话：探完了，顶层的记号去掉。
+    assert len(api.read("oc_li")) == 1 and len(api.read("oc_team")) == 1
+    assert len(api.read("oc_p00")) == 1
+    row = await watch_row(db_session, who)
+    assert "p" not in row.cursor_enc and "a" not in row.cursor_enc
+
+
+async def test_an_unreached_chat_read_by_another_route_does_not_end_the_stretch(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没探到的那一段里，有会话下一轮因为来了新消息排到前面被读掉：它后面的仍要探到。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    friday = ago(base, hours=62)
+    await primed(db_session, who, ago(base, days=9), head=["oc_li", "oc_team"])
+    await polled(db_session, who, friday)
+    api.chats = [*night_chats(watch.MAX_READS), LI, TEAM]
+    api.say("oc_li", "om_li_saturday", ago(base, hours=40))
+    api.say(
+        "oc_team",
+        "om_team_saturday",
+        ago(base, hours=39),
+        mentions=[{"id": who.open_id, "id_type": "open_id"}],
+    )
+    factory = make_session_factory(db_engine)
+    await tick(factory, base)
+    assert await boxed(db_session, who) == []
+    # 一分钟里那位同事又发了一条，他的会话排到了最前面。
+    later = base + timedelta(seconds=60)
+    api.chats = [LI, *night_chats(watch.MAX_READS), TEAM]
+    api.say("oc_li", "om_li_monday", ago(later, seconds=5))
+    row = await watch_row(db_session, who)
+    row.next_poll_at = base
+    await db_session.commit()
+    await tick(factory, later)
+    assert await boxed(db_session, who) == ["om_li_saturday", "om_li_monday", "om_team_saturday"]
+    assert "p" not in (await watch_row(db_session, who)).cursor_enc

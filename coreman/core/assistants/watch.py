@@ -278,6 +278,8 @@ class _Round:
     reading: str = ""
     # 这一轮读到了页数上限、后面还有消息的会话：下一轮接着读。
     more: list[str] = field(default_factory=list)
+    # 这一轮读完了的会话。
+    done: set[str] = field(default_factory=set)
 
     def spent(self) -> bool:
         return self.reads >= MAX_READS or time.monotonic() >= self.deadline
@@ -405,6 +407,7 @@ class _Round:
         if chat_id not in self.more:
             entry.pop("a", None)
         self.reading = ""
+        self.done.add(chat_id)
         return new
 
     def put_off(self, chat_id: str) -> None:
@@ -444,16 +447,29 @@ def _floor(since: int, last_ok_at: datetime | None, now: datetime) -> int:
     return max(since, int(back.timestamp() * 1000))
 
 
-def _oldest(last_ok_at: datetime | None, now: datetime) -> int:
+def _oldest(last_ok_at: datetime | None, now: datetime, owed: int = 0) -> int:
     """早于哪一刻的消息不入箱（毫秒）：`MAX_AGE` 之前，与上一次成功轮询两者里更早的那个。
 
     下班后不轮询：周五下班到周一上班之间发来的消息都晚于上一次成功轮询，不能按「超过一天」
     丢掉。丢的只是上一次成功轮询时就已经超过 `MAX_AGE` 的。
+
+    Args:
+        owed: 之前有一轮没探完时那一轮的截止点（毫秒，没有传 0）：那一轮算成功，「上一次
+            成功轮询」已经变成它，没探到的会话仍要按它的截止点算，取更早的
     """
     back = aware_utc(now) - MAX_AGE
     if last_ok_at is not None:
         back = min(back, aware_utc(last_ok_at))
-    return int(back.timestamp() * 1000)
+    at = int(back.timestamp() * 1000)
+    return min(at, owed) if owed else at
+
+
+def _owed(left: list[str], state: _Round, skip: set[str]) -> list[str]:
+    """没探到的那一段里还欠着的会话：这一轮经别的路读过的、不读的去掉。
+
+    读过的必须去掉：它之后再被探到时没有新消息，会被当成「这一段到头了」，后面的就丢了。
+    """
+    return [chat for chat in left if chat not in state.done and chat not in skip]
 
 
 async def _round(
@@ -491,7 +507,7 @@ async def _round(
         cursor,
         time.monotonic() + ROUND_SECONDS,
         floor=_floor(cursor["since"], row.last_ok_at, now),
-        oldest=_oldest(row.last_ok_at, now),
+        oldest=_oldest(row.last_ok_at, now, cursor["a"] if cursor["p"] else 0),
     )
     # 排队时记下的年龄截止点只对还在排队的会话有效：被放下、被忽略而离队的不留着它。
     for chat_id, entry in cursor["chats"].items():
@@ -506,15 +522,28 @@ async def _round(
             else:
                 await state.chat(chat_id)
         # 顺序没变的会话里，藏着新消息的只可能是开头连续的一段：从头探，探到没有新消息的为止。
+        # 之前有一轮没探完（时间或次数用完）时接着那一段探，不从头来：排在它前面的会话那一轮
+        # 已经读过，从头探会停在它们身上，后面的就再也探不到了。
+        owed = set(cursor["p"])
+        chain = [chat for chat in rest if chat in owed] if owed else rest
+        left: list[str] = []
         probes = 0
-        for chat_id in rest:
+        for index, chat_id in enumerate(chain):
             if chat_id in skip or chat_id in queue:
                 continue
             if state.spent() or probes >= CHAIN_MAX:
+                left = chain[index:]
                 break
             probes += 1
             if not await state.chat(chat_id):
                 break
+        cursor["p"] = _owed(left, state, skip)
+        cursor["a"] = state.oldest
+        for chat_id in cursor["p"]:
+            # 与排队的会话一样当场记下回看起点：到下一轮再算就只剩 `LOOKBACK` 了。
+            entry = cursor["chats"].setdefault(chat_id, {})
+            if not entry.get("t"):
+                entry["t"] = state.floor
         if time.monotonic() < state.deadline:
             waiting = await inbox.pending_messages(session, row.bot_id)
             for message_id in await feed.recalled(call, waiting):
@@ -522,6 +551,7 @@ async def _round(
     except PersonalError as exc:
         # 读到一半失败：已读完的会话的进度留下，顺序不存，下一轮重新比。
         state.strike(exc.code)
+        cursor["p"] = _owed(cursor["p"], state, skip)
         row.cursor_enc = feed.dump(cursor, cursor["todo"])
         raise
     finally:
