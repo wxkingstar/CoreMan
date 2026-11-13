@@ -129,6 +129,9 @@ class ChatTaskHandler(
         if not ready:
             await self._cancelled_before_open(ctx)
             return None
+        if is_assistant(intake.bot) and not await self._wait_transcript(ctx, intake):
+            await self._cancelled_before_open(ctx)
+            return None
         async with ctx.session_factory() as session:
             pre = await self._open(session, ctx, intake, relay, started)
             await session.commit()

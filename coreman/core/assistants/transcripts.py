@@ -6,6 +6,8 @@
 2. 节点要续聊就凭编号来取（`download`），一轮结束凭同一编号上传（`upload`），平台清掉编号；
 3. 下一轮派出时编号还在，说明上一轮的转录没传回来（节点挂了、网断了）：不拿旧的那份续，
    换一个新的 relay 会话。
+4. 例外是上一轮被取消：节点收到取消后先停沙箱、再在后台上传，下一轮往往先到。开轮之前
+   （`awaiting_upload`，不占事务）最多等 `UPLOAD_WAIT`，等到了照常续，等不到再按第 3 条办。
 
 内容是节点打好的 tar.gz，经 ORM 写入时由 `sealed` 用所有者的数据密钥加密（`blob_enc` 是二进制
 内容列）。日志只记代码、编号与大小。
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, select, tuple_, update
@@ -25,7 +27,7 @@ from sqlalchemy.orm import defer
 
 from coreman.core.assistants import sealed
 from coreman.core.chat import sessions
-from coreman.core.db.models import AssistantTranscript, Bot
+from coreman.core.db.models import AssistantTranscript, Bot, ChatLog, ChatSession, Task
 
 MAX_BYTES = 50 * 1024 * 1024
 # purge 一条语句最多删这么多行（转录行可达 50 MiB，不让调度器的一条语句删出一大片）。
@@ -35,6 +37,9 @@ PURGE_MAX_BATCHES = 10
 # 节点上传时说明这一轮的转录怎么了：ok 带内容；empty 没有转录；too_large 超过上限；
 # unchanged 节点没跑这一轮（拒绝了），上一份照旧可用。
 STATUSES = ("ok", "empty", "too_large", "unchanged")
+# 被取消的一轮：节点停沙箱（至多 10 秒）之后才在后台上传转录。下一轮开轮前最多等它这么久，从那
+# 一轮结束的时刻起算；过了还没到就不等了。
+UPLOAD_WAIT = timedelta(seconds=20)
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,57 @@ async def prepare(
         )
     )
     return info, Plan(transfer, restore)
+
+
+async def awaiting_upload(
+    session: AsyncSession,
+    *,
+    bot_id: uuid.UUID,
+    session_key: str,
+    task_id: int,
+    now: datetime | None = None,
+) -> datetime | None:
+    """这个会话上一轮的转录是不是还在路上：返回最晚等到什么时候，不用等返回 None。纯读。
+
+    要等的只有一种情况：会话当前的交接编号还没了结，而留下它的那一轮是被取消的（所有者的新
+    消息打断了它，或他喊了停）。那一轮到过节点——确定没到过的在收尾时已由 `release` 清掉
+    编号——节点正在后台停沙箱、上传。正常结束的轮次在收尾之前就传完了，编号还在说明确实没传
+    上来；worker 失联的轮次传不传、什么时候传都说不准。这两种不等，照旧换新会话。
+
+    留下编号的那一轮按对话记录认：开流时这一轮的记录与交接编号在同一事务里写下，带着会话号
+    与任务号。`task_id` 是正要开的这一轮，不算在内。
+    """
+    moment = now or datetime.now(UTC)
+    relay_session_id = await session.scalar(
+        select(ChatSession.relay_session_id).where(
+            ChatSession.bot_id == bot_id, ChatSession.session_key == session_key
+        )
+    )
+    if relay_session_id is None:
+        return None
+    pending = await session.scalar(
+        select(AssistantTranscript.pending_transfer).where(_key(bot_id, relay_session_id))
+    )
+    if pending is None:
+        return None
+    last = (
+        await session.execute(
+            select(Task.status, Task.finished_at)
+            .join(ChatLog, ChatLog.task_id == Task.id)
+            .where(
+                ChatLog.bot_id == bot_id,
+                ChatLog.session_key == session_key,
+                ChatLog.relay_session_id == relay_session_id,
+                Task.id != task_id,
+            )
+            .order_by(ChatLog.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if last is None or last[0] != "cancelled" or last[1] is None:
+        return None
+    until: datetime = last[1] + UPLOAD_WAIT
+    return until if until > moment else None
 
 
 async def release(

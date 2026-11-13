@@ -129,6 +129,41 @@ class OpenStage(ChatStageBase):
                 await asyncio.wait_for(ctx.cancel_event.wait(), delay)
             delay = min(delay * 2, self.SUPERSEDE_POLL_MAX_SECONDS)
 
+    async def _wait_transcript(self, ctx: TaskContext, intake: Intake) -> bool:
+        """个人助理：上一轮被取消、它的转录还在从节点传回来的路上时，等它到了再开轮。
+
+        不等的话，`transcripts.prepare` 看到交接没办完就换新会话，所有者每打断一次助理，当天
+        的上下文就丢一次。每次查询各用一个短事务，等待期间不占连接、不持锁；最多等到
+        `transcripts.UPLOAD_WAIT`，到点还没来就照旧换新会话。返回 False 表示等待期间本任务
+        自己被取消。查询出了意外不拦这一轮：不等，按原来的办。
+        """
+        from coreman.core.assistants import transcripts
+
+        delay = self.TRANSCRIPT_POLL_SECONDS
+        waited = False
+        while True:
+            try:
+                async with ctx.session_factory() as session:
+                    until = await transcripts.awaiting_upload(
+                        session,
+                        bot_id=intake.bot.id,
+                        session_key=intake.session_key,
+                        task_id=ctx.task.id,
+                    )
+            except Exception as exc:  # noqa: BLE001 等不等只影响续不续得上，不该让这一轮开不了
+                ctx.log.warning("assistant_transcript_wait_failed", error_type=type(exc).__name__)
+                return True
+            if until is None:
+                if waited:
+                    ctx.log.info("assistant_transcript_wait_ended")
+                return True
+            if ctx.cancel_event.is_set():
+                return False
+            waited = True
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ctx.cancel_event.wait(), delay)
+            delay = min(delay * 2, self.TRANSCRIPT_POLL_MAX_SECONDS)
+
     async def _open(
         self,
         session: AsyncSession,

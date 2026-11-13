@@ -33,6 +33,10 @@ class ChatStageBase:
     SUPERSEDE_WAIT_SECONDS = 90.0
     SUPERSEDE_RETRY_SECONDS = 30.0
     SUPERSEDE_MAX_ATTEMPTS = 3
+    # 个人助理：上一轮被取消后，等它的转录从节点传回来时的查询间隔（等多久见
+    # `transcripts.UPLOAD_WAIT`）。
+    TRANSCRIPT_POLL_SECONDS = 0.2
+    TRANSCRIPT_POLL_MAX_SECONDS = 1.0
     # 个人助理的主会话按所有者时区每天换新（chat/assistant_day.py）。要求「必须还是原来那个
     # relay 会话」的续接轮次关掉它：跨天换新会让续接作废。
     DAILY_SESSIONS = True
