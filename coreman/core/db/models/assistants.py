@@ -457,12 +457,13 @@ INBOX_STATUSES = ("pending", "delivered", "void")
 class AssistantWatch(Base):
     """一位助理的盯消息状态：读到哪了、上一轮的会话顺序、下次什么时候轮询、健康状况。
 
-    `cursor` 是明文的定位信息，只有会话 id、话题 id、消息 id 与毫秒时间：
+    `cursor_enc` 是定位信息，只有会话 id、话题 id、消息 id 与毫秒时间；与 `head_enc` 一样登记在
+    `sealed.COLUMNS`（和谁有会话、什么时候说过话本身就是所有者的私事），库里是密文：
     `{"since": <开始被盯的时刻>, "chats": {<会话>: {"t": <读到的最新一条>, "m": [<时间等于 t 的
     消息>], "k": "p2p" | "group", "o": <所有者上次在这里发言>, "th": {<话题>: <读到的最新一条>},
     "f": <连续读失败的轮数>, "x": <放下它到什么时候>}}, "todo": [<上一轮没读完的会话>]}`。
-    `head_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出的行上是上一轮列会话得到的会话 id
-    列表（按最近活跃倒序）。
+    `head_enc` 同样是密文，经会话取出的行上是上一轮列会话得到的会话 id 列表（按最近活跃倒序）。
+    两列都不能在 SQL 里按内容过滤：要看里面的字段就取出来在内存里判断。
     `state`：`polling` 在轮询；`idle` 没在轮询但没有问题（下班、冷启动没做完）；`paused` 运行时
     暂停；`backoff` 出错或限频后在退避；`stopped` 已停用。`last_error` 只存代码。
     `keepalive_at` 是上次确认令牌还活着的时刻（轮询成功或保活刷新），不轮询时每 24 小时刷新一次。
@@ -477,7 +478,7 @@ class AssistantWatch(Base):
     bot_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
     )
-    cursor: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    cursor_enc: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     head_enc: Mapped[list[str] | None] = mapped_column(JSONB)
     interval: Mapped[int] = mapped_column(Integer, server_default=text("60"))
     next_poll_at: Mapped[datetime] = _ts(server_default=text("now()"))

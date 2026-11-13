@@ -93,7 +93,7 @@ async def test_a_message_the_platform_sent_as_the_owner_does_not_hold_the_chat(
     # 不入箱，先到的那条不被压着，「所有者上次发言」也不动；游标照常越过它。
     [first] = await inbox_rows(db_session, who)
     assert (first.message_id, first.level, first.hold_until) == ("om_1", "immediate", None)
-    entry = (await watch_row(db_session, who)).cursor["chats"]["oc_li"]
+    entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
     assert "o" not in entry and entry["t"] == ms(after(base, 20))
     # 之后对方再发：照常分级，不按「压着」。
     api.say("oc_li", "om_3", after(base, 70))
@@ -105,5 +105,5 @@ async def test_a_message_the_platform_sent_as_the_owner_does_not_hold_the_chat(
     await tick(factory, after(base, 151))
     held = {row.message_id: row.level for row in await inbox_rows(db_session, who)}
     assert held == {"om_1": "hold", "om_3": "hold"}
-    entry = (await watch_row(db_session, who)).cursor["chats"]["oc_li"]
+    entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
     assert entry["o"] == ms(after(base, 100))

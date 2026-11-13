@@ -221,7 +221,7 @@ Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有�
 
 ### 轮询
 
-平台侧进程，不经模型。新表 `assistant_watch`（`bot_id`、`cursor`、`head_enc`、`interval`、`next_poll_at`、`state`、`last_error`、`last_ok_at`、`failures`、`keepalive_at`、时间戳）。在所有者的工作时段内每 60 秒轮询一次，多个助理的轮询时刻错开。
+平台侧进程，不经模型。新表 `assistant_watch`（`bot_id`、`cursor_enc`、`head_enc`、`interval`、`next_poll_at`、`state`、`last_error`、`last_ok_at`、`failures`、`keepalive_at`、时间戳）。游标（各会话读到的位置，`cursor_enc`）与上一轮的会话顺序（`head_enc`）都用所有者的数据密钥加密：和谁有会话、什么时候说过话本身就是他的私事；要按游标里的字段判断时取出来在内存里看。在所有者的工作时段内每 60 秒轮询一次，多个助理的轮询时刻错开。
 
 飞书的限频按「应用 × 企业 × 接口」计，全员共用：列会话与读会话历史各为每分钟 1000 次，搜索消息只有每分钟 100 次。所以不逐个会话轮询，也不用搜索接口：
 

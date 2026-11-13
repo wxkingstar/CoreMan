@@ -77,7 +77,7 @@ async def test_new_assistants_are_enrolled_and_the_first_round_only_sets_a_basel
     counts = await tick(factory, base)
     assert counts["assistant_watch_enrolled"] == 1 and api.hits == []
     row = await watch_row(db_session, who)
-    assert row.state == "idle" and row.cursor == {} and row.head_enc is None
+    assert row.state == "idle" and row.cursor_enc == {} and row.head_enc is None
     assert base < row.next_poll_at <= after(base, 60)
     first = row.next_poll_at
     counts = await tick(factory, first)
@@ -86,7 +86,7 @@ async def test_new_assistants_are_enrolled_and_the_first_round_only_sets_a_basel
     assert api.paths() == ["/im/v1/chats"]
     row = await watch_row(db_session, who)
     assert row.state == "polling" and row.last_ok_at == first and row.last_error is None
-    assert row.cursor == {"since": ms(first), "chats": {}, "todo": []}
+    assert row.cursor_enc == {"since": ms(first), "chats": {}, "todo": []}
     assert row.head_enc == ["oc_li", "oc_team"]
     assert first < row.next_poll_at <= after(first, 60)
     assert await inbox_rows(db_session, who) == []
@@ -133,17 +133,20 @@ async def test_new_messages_are_graded_into_a_sealed_inbox(
     head = str(await raw(db_session, "SELECT head_enc::text FROM assistant_watch"))
     assert SECRET not in stored and "报价" not in stored
     assert "oc_team" not in head and "enc:v2:d1:" in head
+    # 游标（和谁有会话、读到哪条消息）同样是密文。
+    cursor = str(await raw(db_session, "SELECT cursor_enc::text FROM assistant_watch"))
+    assert "oc_li" not in cursor and "om_1" not in cursor and "enc:v2:d1:" in cursor
     assert SECRET not in json.dumps(logs, ensure_ascii=False, default=str)
     row = await watch_row(db_session, who)
-    assert row.head_enc == ["oc_li", "oc_team", who.chat_id] and row.cursor["todo"] == []
-    assert row.cursor["chats"]["oc_li"] == {
+    assert row.head_enc == ["oc_li", "oc_team", who.chat_id] and row.cursor_enc["todo"] == []
+    assert row.cursor_enc["chats"]["oc_li"] == {
         "k": "p2p",
         "t": ms(after(base, 10)),
         "m": ["om_1"],
         "th": {},
     }
-    assert row.cursor["chats"]["oc_team"]["t"] == ms(after(base, 12))
-    assert who.chat_id not in row.cursor["chats"]
+    assert row.cursor_enc["chats"]["oc_team"]["t"] == ms(after(base, 12))
+    assert who.chat_id not in row.cursor_enc["chats"]
     assert (row.state, row.failures, row.last_ok_at) == ("polling", 0, now)
 
 
@@ -181,7 +184,9 @@ async def test_the_owners_own_message_is_not_boxed_and_holds_the_chat(
     [held] = await inbox_rows(db_session, who)
     # 所有者自己发的不入箱；先到的那条被压到他这次发言之后 10 分钟。
     assert (held.message_id, held.level, held.hold_until) == ("om_1", "hold", release)
-    assert (await watch_row(db_session, who)).cursor["chats"]["oc_li"]["o"] == ms(after(base, 20))
+    assert (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]["o"] == ms(
+        after(base, 20)
+    )
     # 10 分钟内这个会话的新消息直接按「压着」入箱。
     api.say("oc_li", "om_3", after(base, 70))
     await tick(factory, after(base, 91))
@@ -212,7 +217,7 @@ async def test_the_same_message_is_boxed_once_across_reruns_and_overlap(
     # 重跑：游标与顺序退回到这一轮之前（比如上一任 scheduler 的这一轮没来得及提交就没了）。
     await db_session.execute(
         text(
-            "UPDATE assistant_watch SET cursor = CAST(:cursor AS jsonb), head_enc = NULL,"
+            "UPDATE assistant_watch SET cursor_enc = CAST(:cursor AS jsonb), head_enc = NULL,"
             " next_poll_at = :due"
         ),
         {"cursor": json.dumps({"since": ms(base), "chats": {}, "todo": []}), "due": base},
@@ -288,7 +293,7 @@ async def test_focus_chats_are_read_every_round_with_their_threads_and_ignored_o
     assert len(api.read("oc_focus")) == 1 and len(api.read("omt_1")) == 1
     reply = (await inbox_rows(db_session, who))[-1]
     assert (reply.message_id, reply.level, reply.thread_id) == ("om_reply", "immediate", "omt_1")
-    assert (await watch_row(db_session, who)).cursor["chats"]["oc_focus"]["th"] == {
+    assert (await watch_row(db_session, who)).cursor_enc["chats"]["oc_focus"]["th"] == {
         "omt_1": ms(after(base, 60))
     }
 

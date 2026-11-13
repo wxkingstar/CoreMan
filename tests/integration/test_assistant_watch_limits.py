@@ -151,7 +151,8 @@ async def test_a_failed_read_backs_off_and_keeps_what_was_already_read(
     # 读完的会话的条目与游标留下了；顺序没存，下一轮重新比。
     assert [item.message_id for item in await inbox_rows(db_session, who)] == ["om_1"]
     assert (
-        row.cursor["chats"]["oc_li"]["m"] == ["om_1"] and "t" not in row.cursor["chats"]["oc_team"]
+        row.cursor_enc["chats"]["oc_li"]["m"] == ["om_1"]
+        and "t" not in row.cursor_enc["chats"]["oc_team"]
     )
     assert row.head_enc == []
     api.failing = set()

@@ -9,8 +9,8 @@ scheduler 的 `_assistant_watch_loop` 每 5 秒调一次 `tick`。每位助理�
 （`PersonalError`）时，已入箱的条目与已读完的会话的游标照常提交，下一轮接着来；重读由游标
 与收件箱的唯一索引去重。只有意外的异常才回滚，再另开事务把这一行往后推。
 
-消息内容只在这里的内存里：出去的只有加密的摘要（`watch_inbox`）、加密的会话顺序与游标里的
-编号和时间。日志只带代码与计数。
+消息内容只在这里的内存里：出去的只有加密的摘要（`watch_inbox`）、加密的会话顺序与加密的游标
+（各会话读到的编号和时间）。日志只带代码与计数。
 """
 
 from __future__ import annotations
@@ -397,11 +397,11 @@ async def _round(
     now: datetime,
 ) -> int:
     """轮询一轮，返回新入箱的条数。做法见 spec 第五节与实现计划「设计选择」1–11。"""
-    stored = dict(row.cursor or {})
+    stored = dict(row.cursor_enc or {})
     listed = await feed.list_chats(call)
     if not isinstance(stored.get("since"), int):
         # 第一轮只记基线：从现在起盯，不把之前的历史倒进收件箱。
-        row.cursor = {"since": int(now.timestamp() * 1000), "chats": {}, "todo": []}
+        row.cursor_enc = {"since": int(now.timestamp() * 1000), "chats": {}, "todo": []}
         row.head_enc = listed.order
         return 0
     cursor = feed.load(stored)
@@ -441,14 +441,14 @@ async def _round(
     except PersonalError as exc:
         # 读到一半失败：已读完的会话的进度留下，顺序不存，下一轮重新比。
         state.strike(exc.code)
-        row.cursor = feed.dump(cursor, cursor["todo"])
+        row.cursor_enc = feed.dump(cursor, cursor["todo"])
         raise
     finally:
         if state.skipped:
             log.info(
                 "assistant_watch_messages_skipped", bot_id=str(row.bot_id), count=state.skipped
             )
-    row.cursor = feed.dump(cursor, list(dict.fromkeys([*todo, *state.more])))
+    row.cursor_enc = feed.dump(cursor, list(dict.fromkeys([*todo, *state.more])))
     row.head_enc = listed.order
     return state.items
 
@@ -510,7 +510,8 @@ async def _visit(
     """一位助理一个事务。被别人认领着、或已经不到期的跳过。"""
     async with factory() as session:
         await sealed.guard_logs(session, bot_id)
-        # 这个会话只处理这一位助理：上一轮的顺序解不开时按没有处理，不让它卡住这一行。
+        # 这个会话只处理这一位助理：上一轮的顺序与游标解不开时按没有处理（重新记基线），
+        # 不让它卡住这一行。
         sealed.tolerate_undecryptable(session)
         row = await session.scalar(
             select(AssistantWatch)
@@ -666,6 +667,6 @@ async def stop(session: AsyncSession, bot_id: uuid.UUID) -> None:
     row = await session.get(AssistantWatch, bot_id, with_for_update=True)
     if row is not None and row.state != "stopped":
         row.state, row.last_error, row.failures = "stopped", None, 0
-        row.cursor, row.head_enc = {}, None
+        row.cursor_enc, row.head_enc = {}, None
         row.updated_at = utcnow()
     await inbox.void_all(session, bot_id, "stopped")

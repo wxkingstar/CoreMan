@@ -66,7 +66,7 @@ async def test_a_chat_that_cannot_be_read_is_set_aside_after_three_rounds(
                 strikes,
             )
             now = row.next_poll_at
-    parked = row.cursor["chats"]["oc_team"]
+    parked = row.cursor_enc["chats"]["oc_team"]
     assert parked["f"] == watch.CHAT_STRIKES - 1 and parked["x"] > int(now.timestamp() * 1000)
     assert [entry["event"] for entry in logs].count("assistant_watch_chat_parked") == 1
     # 第四轮起不再读它：别的会话照常盯。
@@ -85,7 +85,7 @@ async def test_a_chat_that_cannot_be_read_is_set_aside_after_three_rounds(
     api.chats = [TEAM, LI]
     counts = await tick(factory, later)
     assert counts["assistant_watch_polled"] == 1 and counts["assistant_watch_items"] == 2
-    entry = (await watch_row(db_session, who)).cursor["chats"]["oc_team"]
+    entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_team"]
     assert "f" not in entry and "x" not in entry
     assert [item.message_id for item in await inbox_rows(db_session, who)][2:] == ["om_2", "om_4"]
 
@@ -106,7 +106,9 @@ async def test_failures_that_are_not_about_one_chat_do_not_set_it_aside(
         row = await watch_row(db_session, who)
         assert row.last_error == "rate_limited"
         now = row.next_poll_at + timedelta(seconds=120)
-    assert "f" not in row.cursor["chats"]["oc_li"] and "x" not in row.cursor["chats"]["oc_li"]
+    assert (
+        "f" not in row.cursor_enc["chats"]["oc_li"] and "x" not in row.cursor_enc["chats"]["oc_li"]
+    )
 
 
 async def test_a_backlog_longer_than_one_round_is_finished_in_the_next(
@@ -124,11 +126,11 @@ async def test_a_backlog_longer_than_one_round_is_finished_in_the_next(
     # 一个会话一轮最多读两页；后面还有，记下来下一轮接着读。
     assert counts["assistant_watch_items"] == 100 and len(api.read("oc_team")) == 2
     row = await watch_row(db_session, who)
-    assert row.cursor["todo"] == ["oc_team"]
+    assert row.cursor_enc["todo"] == ["oc_team"]
     counts = await tick(factory, row.next_poll_at)
     assert counts["assistant_watch_items"] == 20
     row = await watch_row(db_session, who)
-    assert row.cursor["todo"] == [] and row.cursor["chats"]["oc_team"]["m"] == ["om_120"]
+    assert row.cursor_enc["todo"] == [] and row.cursor_enc["chats"]["oc_team"]["m"] == ["om_120"]
     assert len(await inbox_rows(db_session, who)) == 120
 
 

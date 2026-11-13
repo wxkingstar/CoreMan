@@ -45,7 +45,7 @@ async def test_defaults_and_removal_with_the_record(db_session: AsyncSession) ->
     await db_session.commit()
     watch = await db_session.get(AssistantWatch, bot.id, populate_existing=True)
     assert watch is not None
-    assert watch.cursor == {} and watch.head_enc is None
+    assert watch.cursor_enc == {} and watch.head_enc is None
     assert (watch.interval, watch.state, watch.failures) == (60, "idle", 0)
     assert watch.next_poll_at is not None and watch.created_at is not None
     assert watch.last_error is None and watch.last_ok_at is None and watch.keepalive_at is None

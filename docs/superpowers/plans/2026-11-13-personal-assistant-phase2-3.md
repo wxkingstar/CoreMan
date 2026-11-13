@@ -91,7 +91,7 @@
 ### 2D
 
 - `coreman/core/feishu_personal/ratelimit.py`：`Budget`（按应用、按接口类别的分钟计数，存库以便多进程共享）、`RateLimited(retry_after)`；`service._http` 保留响应头并在限频时抛它。
-- 表 `assistant_watch`（主键 `bot_id`）：`cursor`（JSON：每个会话读到的位置）、`head_enc`、`interval`、`next_poll_at`、`state`（`idle`/`polling`/`backoff`/`paused`/`stopped`）、`last_error`、`last_ok_at`。
+- 表 `assistant_watch`（主键 `bot_id`）：`cursor_enc`（JSON：每个会话读到的位置；迁移 `0101` 起与 `head_enc` 一样封存，不能在 SQL 里按内容过滤）、`head_enc`、`interval`、`next_poll_at`、`state`（`idle`/`polling`/`backoff`/`paused`/`stopped`）、`last_error`、`last_ok_at`。
 - 表 `assistant_inbox`：见 spec 第五节，另加 `kind`（`message`/`approval_todo`/`reminder`）、`hold_until`、`delivered_task_id`。
 - `coreman/core/assistants/watch.py`：`tick(factory, cipher, now)`（scheduler 新循环 `_assistant_watch_loop` 每 5 秒调一次，认领到期的行）、`grade(item, settings, context) -> Level`、`stop(session, bot_id)`（停用时调用）。
 

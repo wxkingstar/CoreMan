@@ -45,6 +45,8 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("0009", ADD_NOT_NULL): _ONE_OFF.format(table="escalations"),
     # skill_approvals.request_inputs_enc
     ("0012", ADD_NOT_NULL): _ONE_OFF.format(table="skill_approvals"),
+    # assistant_watch.cursor → cursor_enc：这张表由 0097 新建，上一个发布版本里没有它，不读写这一列
+    ("0101", DROP_COLUMN): "assistant_watch 是同一批未发布迁移（0097）新建的表，上一版本不读写它",
 }
 
 

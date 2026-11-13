@@ -63,7 +63,7 @@ def test_every_content_column_is_registered() -> None:
     assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}
     assert set(sealed.COLUMNS[CloudPendingApproval]) == {"reason"}
     assert set(sealed.COLUMNS[AssistantTranscript]) == {"blob_enc"}
-    assert set(sealed.COLUMNS[AssistantWatch]) == {"head_enc"}
+    assert set(sealed.COLUMNS[AssistantWatch]) == {"head_enc", "cursor_enc"}
     assert set(sealed.COLUMNS[AssistantInbox]) == {"summary_enc"}
     assert set(sealed.COLUMNS[AssistantFollowup]) == {"title_enc", "notes_enc"}
     assert set(sealed.COLUMNS[AssistantJob]) == {

@@ -91,9 +91,9 @@ async def seen(session: AsyncSession, bot: Bot, *, owner: int = 0, latest: int =
     row = await session.get(AssistantWatch, bot.id)
     cursor = {"since": 0, "chats": {"oc_li": {"o": owner, "t": latest}}, "todo": []}
     if row is None:
-        session.add(AssistantWatch(bot_id=bot.id, cursor=cursor))
+        session.add(AssistantWatch(bot_id=bot.id, cursor_enc=cursor))
     else:
-        row.cursor = cursor
+        row.cursor_enc = cursor
     await session.commit()
 
 

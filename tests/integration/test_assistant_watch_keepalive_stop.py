@@ -159,7 +159,7 @@ async def test_stop_ends_polling_and_voids_what_was_not_handed_over(
     await watch.stop(db_session, who.bot.id)  # 幂等
     await db_session.commit()
     row = await watch_row(db_session, who)
-    assert (row.state, row.last_error, row.cursor, row.head_enc) == ("stopped", None, {}, None)
+    assert (row.state, row.last_error, row.cursor_enc, row.head_enc) == ("stopped", None, {}, None)
     found = [(item.status, item.void_code) for item in await inbox_rows(db_session, who)]
     assert found == [("void", "stopped"), ("delivered", None)]
     # 停了之后不再轮询，也不会被重新登记。

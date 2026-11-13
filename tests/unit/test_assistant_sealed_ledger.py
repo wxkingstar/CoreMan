@@ -48,7 +48,7 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/jobs.py": 3,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
-    # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序）
+    # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序与游标）
     "coreman/core/assistants/watch.py": 1,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
@@ -86,6 +86,7 @@ ENTITY_SELECTS = {
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
+    "coreman/core/assistants/delivery_checks.py": 1,  # 盯消息的游标：取值后 open_value
     "coreman/core/assistants/notes.py": 1,  # 列索引时 defer 掉正文，不读它
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
     "coreman/core/bus/tasks.py": 3,  # 明文键 serialize_session、stale_hold

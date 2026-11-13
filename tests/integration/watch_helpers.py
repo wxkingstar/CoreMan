@@ -285,7 +285,7 @@ async def primed(
     session.add(
         AssistantWatch(
             bot_id=who.bot.id,
-            cursor={"since": ms(since), "chats": {}, "todo": []},
+            cursor_enc={"since": ms(since), "chats": {}, "todo": []},
             head_enc=list(head or []),
             next_poll_at=since,
         )

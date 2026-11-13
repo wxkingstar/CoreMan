@@ -190,9 +190,15 @@ def _number(value: Any) -> int:
 
 
 async def _chat_marks(session: AsyncSession, bot_id: uuid.UUID) -> dict[str, tuple[int, int]]:
-    """盯消息的游标里每个会话的两个时刻（毫秒）：所有者上次发言、读到的最新一条消息。"""
-    cursor = await session.scalar(
-        select(AssistantWatch.cursor).where(AssistantWatch.bot_id == bot_id)
+    """盯消息的游标里每个会话的两个时刻（毫秒）：所有者上次发言、读到的最新一条消息。
+
+    游标在库里是密文：只取这一列，还原之后在内存里看，不在 SQL 里按它的字段过滤。
+    """
+    stored = await session.scalar(
+        select(AssistantWatch.cursor_enc).where(AssistantWatch.bot_id == bot_id)
+    )
+    cursor = await sealed.open_value(
+        session, AssistantWatch, "cursor_enc", bot_id, stored, row_id=bot_id
     )
     chats = cursor.get("chats") if isinstance(cursor, dict) else None
     return {
