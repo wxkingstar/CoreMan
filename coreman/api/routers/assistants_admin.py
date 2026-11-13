@@ -1,14 +1,14 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
 只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态、今天的轮次与预算、待交回的
-条目数），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
+条目数、冷启动走到哪一步、按设置此刻是否在班），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
 可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, StrictBool
@@ -20,11 +20,13 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.core.assistants import delivery, deprovisioning, lifecycle
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     AssistantInbox,
     AssistantLifecycle,
     AssistantRetiredDir,
+    AssistantSettings,
     AssistantWatch,
     Bot,
     RelayServer,
@@ -109,9 +111,43 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
         .group_by(AssistantInbox.bot_id)
     )
     waiting: dict[uuid.UUID, int] = {bot: int(count) for bot, count in boxed.all()}
+    # 冷启动进度与是否在班：只取明文的设置列，重点群与忽略的会话（加密列）不取。
+    prefs = await session.execute(
+        select(
+            AssistantSettings.bot_id,
+            AssistantSettings.timezone,
+            AssistantSettings.work_start,
+            AssistantSettings.work_end,
+            AssistantSettings.workdays,
+            AssistantSettings.shift_override,
+            AssistantSettings.shift_override_until,
+            AssistantSettings.cold_start_started_at,
+            AssistantSettings.cold_start_step,
+            AssistantSettings.cold_start_outcome,
+            AssistantSettings.cold_start_done_at,
+        )
+    )
+    now = utcnow()
+    shifts: dict[uuid.UUID, tuple[bool, dict[str, Any]]] = {}
+    for found in prefs.all():
+        # 查出来的这一行带着 settings 的时间判断要读的全部明文列：直接当设置行用，不另建模型
+        # 对象（没取加密列，也不该在这里出现一个能落库的设置行）。
+        probe = cast(AssistantSettings, found)
+        started, done = found.cold_start_started_at, found.cold_start_done_at
+        shifts[found.bot_id] = (
+            assistant_settings.on_shift(probe, now),
+            {
+                "state": assistant_settings.cold_start_state(probe),
+                "step": found.cold_start_step,
+                "outcome": found.cold_start_outcome,
+                "started_at": started.isoformat() if started else None,
+                "done_at": done.isoformat() if done else None,
+            },
+        )
     items = []
     for bot_id, state, enabled, created, owner_id, login, name, relay_id, relay, node in rows:
         flow = live.get(bot_id)
+        working, cold = shifts.get(bot_id, (False, None))
         items.append(
             {
                 "bot_id": str(bot_id),
@@ -135,6 +171,8 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                     if flow is not None
                     else None
                 ),
+                "on_shift": bool(enabled and state == "active" and working),
+                "cold_start": cold,
                 "directories_pending_removal": int(pending_dirs.get(bot_id, 0)),
                 "watch": health.get(bot_id),
                 "turns": (

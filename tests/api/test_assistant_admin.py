@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants.records import new_assistant_bot
 from coreman.core.db.models import (
     AssistantLifecycle,
+    AssistantSettings,
     AssistantWatch,
     AuditLog,
     Bot,
     PlatformApp,
     User,
 )
+from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_as, login_existing
 from tests.fakes.runtime_node import add_node_relay
 
@@ -262,3 +264,58 @@ async def test_toggle_by_a_platform_admin_who_is_not_the_owner_is_not_found_404(
     assert response.status_code == 404
     await db_session.refresh(bot)
     assert bot.enabled and bot.assistant_state == "active"
+
+
+async def test_the_list_shows_cold_start_progress_and_shift(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    await login_as(client, db_session, role="platform_admin")
+
+    async def item() -> dict[str, object]:
+        response = await client.get("/api/admin/assistants")
+        assert response.status_code == 200
+        [found] = response.json()["data"]["items"]
+        assert "oc_" not in response.text  # 重点群与忽略的会话不出现在管理接口里
+        return found  # type: ignore[no-any-return]
+
+    # 没有设置行（没记下身份的旧助理）。
+    first = await item()
+    assert first["cold_start"] is None and first["on_shift"] is False
+    started = utcnow()
+    prefs = AssistantSettings(
+        bot_id=bot.id,
+        chat_id="oc_private",
+        shift_override="on",
+        cold_start_started_at=started,
+        cold_start_step="focus",
+    )
+    db_session.add(prefs)
+    await db_session.commit()
+    second = await item()
+    assert second["on_shift"] is True
+    assert second["cold_start"] == {
+        "state": "in_progress",
+        "step": "focus",
+        "outcome": None,
+        "started_at": started.isoformat(),
+        "done_at": None,
+    }
+    prefs.cold_start_done_at, prefs.cold_start_outcome = started, "timeout"
+    prefs.cold_start_step, prefs.shift_override = None, "off"
+    await db_session.commit()
+    third = await item()
+    assert third["on_shift"] is False
+    assert third["cold_start"] == {
+        "state": "done",
+        "step": None,
+        "outcome": "timeout",
+        "started_at": started.isoformat(),
+        "done_at": started.isoformat(),
+    }
+    # 停用中的记录不算在班。
+    prefs.shift_override = "on"
+    bot.assistant_state = "deprovisioning"
+    await db_session.commit()
+    assert (await item())["on_shift"] is False
