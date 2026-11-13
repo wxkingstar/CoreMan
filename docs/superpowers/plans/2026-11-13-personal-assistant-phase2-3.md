@@ -16,9 +16,10 @@
 | 2E 投递 | `assistant_handover` 轮次、排队合并、每日换新会话、每日轮次预算、盯消息顺带的检查（撤回审批、表情挂起、到期待跟进、授权到期提醒） | 2B 2C 2D | `0098_assistant_delivery` |
 | 2F 上下班与冷启动 | 工作时段启停、「上班」「下班」、下班编译、开通后的冷启动 | 2E | `0099_assistant_cold_start` |
 | 3A 子任务 | `assistant_jobs`、`assistant_spawn`、`assistant_job_message`、只读工具范围、结果投回 | 2E | `0100_assistant_jobs` |
-| 3B 调度公共员工 | `assistant_ask_bot`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | `0101_assistant_dispatch` |
+| 审查修补 | 第 2 期与 3A 的独立审查发现的问题（盯消息倒灌历史、索引行引用、自动撤回循环、被打断的交回、游标封存等） | 2B–3A | `0101_assistant_hardening` |
+| 3B 调度公共员工 | `assistant_ask_bot`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | `0102_assistant_dispatch` |
 | 3C 页面 | `/api/me/assistant`、「我的助理」页、管理台的助理列表与设置项表单 | 2C 2E 3A | — |
-| 3D 导入与访问日志 | `assistant_access_log`、导入接口 | 2B 2C 3C | `0102_assistant_access_log` |
+| 3D 导入与访问日志 | `assistant_access_log`、导入接口 | 2B 2C 3C | `0103_assistant_access_log` |
 
 ## 裁定（与 spec 不同或 spec 没写明的地方）
 
@@ -62,6 +63,15 @@
     - 下班编译改为平台派出的子任务（裁定 6 的后半）：`compiling.step` 调 `jobs.spawn(origin="system", report=False, attended=False)`，每天一次仍靠 `compiled_on`；子任务没有 `approval` 组，被拒与已执行的审批单的摘要与拒绝原因由平台写进交代（引用行，交代至多 8000 字，放不下丢最早的并注明张数）；正常做完时由子任务的收尾挂钩调 `compiling.settle` 把活动窗口推进到派出时刻。`AssistantCompileHandler` 与它的注册已删除，`COMPILE_KIND` 的名字保留（任务类型的取值约束、历史记录），不再入队：升级时队列里的旧任务由 worker 按未知类型结掉，那一天的活动留给下一次编译。不保留处理器一版的理由：它的文本生成与主会话里跑的做法都已改掉，留着就是两套编译并存，而丢一次编译的代价只是晚一天整理。
     - 本人定时任务工具对一切无人在场的轮次都不列、调用返回 `owner_turn_required`（2F 之后的修补已做），子任务轮次不另作处理。
     - 冷启动的口吻样本那一轮同样不出声（审查后补）：`COLD_START_KIND` 进了 `kinds.SILENT_KINDS`。处理器层的那几处覆盖提到了基类 `worker.platform_turn.SilentTurnHandler`，`AssistantSubtaskHandler` 与 `AssistantColdStartHandler` 都继承它；3B 的不出声轮次直接继承这个基类，并把任务类型加进 `SILENT_KINDS`。
+
+20. **审查修补改动的接口**（独立审查之后，迁移 `0101_assistant_hardening`；3B、3D 的迁移号顺延为 `0102`、`0103`）：
+    - `assistant_watch.cursor` 改名 `cursor_enc` 并封存；要看游标里的字段先 `sealed.open_value` 或取整行，不能在 SQL 里过滤。
+    - 新列：`assistant_approvals.revised_at`、`assistant_inbox.handovers`（带着它开过几轮）、`assistant_delivery.handover_misses` / `handover_retry_at`（没走完的交回之后的等待）。
+    - 引用统一走 `assistants/quoting.py` 的 `quoted`；知识库注入里页面的路径、标题、摘要都在引用行里，平台写的行不带页面文字（3D 的导入页、3C 展示索引时同此口径）。
+    - `approvals.checks.Message` 多了 `mentions`、`parent_id`、`root_id`；`anchor_verdict` 在群里只算与锚点有关的新消息。`approvals.service.auto_withdraw` 不等行锁、可传 `now`。
+    - `watch.restart_chats(session, bot_id, chat_ids, now)`：会话从忽略名单移出时由 `settings.update` 调用；3C 的设置表单经 `settings.update` 走到它，会等正在进行的一轮轮询提交（至多几十秒）。
+    - `voice.save` 在口吻页最后不是助理写的时候返回 None（不覆盖）；`notes.author(session, bot_id, path)` 取一页最后的作者。
+    - 不出声的轮次继承 `worker.platform_turn.SilentTurnHandler`，`COLD_START_KIND` 已在 `SILENT_KINDS` 里。
 
 ## 层间接口
 
