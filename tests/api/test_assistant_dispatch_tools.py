@@ -194,3 +194,42 @@ async def test_an_ordinary_employee_has_no_dispatch_tools(
     auth = await headers(app, task, user)
     out = await call(client, auth, "assistant_ask_bot", {"bot": "demo-bot", "question": "x"})
     assert "error" in out and await rounds(db_session) == 0
+
+
+async def test_an_unattended_turn_cannot_reach_someone_elses_private_runtime(
+    client: httpx.AsyncClient, app: Any, db_session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tower_on(monkeypatch)
+    _, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
+    # 同事自己建的员工，跑在他的私有运行时上：他在自己的节点上读得到问题。
+    await target_bot(db_session, key="their-bot", name="同事的员工", private_to="creator")
+    await target_bot(db_session, key="open-bot", name="公开的员工")
+    await target_bot(db_session, key="my-bot", name="我的员工", private_to=user.id)
+    auth = await headers(app, turn, user)
+    listed_bots = (await call(client, auth, "assistant_bot_list", {}))["bots"]
+    assert sorted(row["bot"] for row in listed_bots) == ["my-bot", "open-bot"]
+    for extra in ({}, {"allow_write": True}):
+        out = await call(
+            client, auth, "assistant_ask_bot", {"bot": "their-bot", "question": QUESTION, **extra}
+        )
+        assert out["error"] == "owner_turn_required" and out["hint"]
+    # 提交时就拒：没有派出，也没有审批单。
+    assert await rounds(db_session) == 0 and await count(db_session, AssistantApproval) == 0
+    assert fake.submitted == []
+    # 公开运行时、所有者自己的私有运行时照常。
+    for key in ("open-bot", "my-bot"):
+        out = await call(client, auth, "assistant_ask_bot", {"bot": key, "question": QUESTION})
+        assert out["job"]["status"] == "queued"
+    assert await rounds(db_session) == 2
+
+
+async def test_the_owner_in_person_may_ask_an_employee_on_a_private_runtime(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    _, user, task = await owner_session(db_session, app)
+    await target_bot(db_session, key="their-bot", name="同事的员工", private_to="creator")
+    auth = await headers(app, task, user)
+    listed_bots = (await call(client, auth, "assistant_bot_list", {}))["bots"]
+    assert [row["bot"] for row in listed_bots] == ["their-bot"]
+    out = await call(client, auth, "assistant_ask_bot", {"bot": "their-bot", "question": QUESTION})
+    assert out["job"]["status"] == "queued" and await rounds(db_session) == 1

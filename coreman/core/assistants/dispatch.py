@@ -8,6 +8,10 @@
 资格与员工之间求助同一个口径（`bot_collaboration.authorized_peer`）：目标员工启用、是飞书的
 普通员工、开启了接受求助，所有者在它的可用人范围内。派出时、目标那一轮开轮前、审批执行时
 各查一次。全部函数只 flush，调用方提交。
+
+另有一道只对无人在场的轮次生效的拦截（分层总览裁定 24）：目标员工跑在别人的私有运行时上
+时拒绝（`owner_turn_required`）。那一轮的输入来自他人，而私有运行时的所有者在自己的节点上
+读得到问题：同事发一条诱导消息，就能让助理把内容问给他自己建的员工。所有者当面发起的不限。
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from coreman.core.db.models import (
     AssistantSettings,
     Bot,
     BotAllowedUser,
+    RelayServer,
     Task,
     User,
 )
@@ -132,14 +137,38 @@ async def owner_of(session: AsyncSession, bot: Bot) -> tuple[AssistantSettings, 
     return prefs, owner
 
 
-async def authorize(session: AsyncSession, bot: Bot, target_id: uuid.UUID) -> tuple[Bot, Speaker]:
+def _foreign_runtime(owner_id: uuid.UUID) -> ColumnElement[bool]:
+    """`Bot` 绑的运行时是私有的，而所有者不是 `owner_id`（没记所有者的私有运行时同样算）。"""
+    return exists().where(
+        RelayServer.id == Bot.relay_server_id,
+        RelayServer.visibility == "private",
+        RelayServer.owner_id.is_distinct_from(owner_id),
+    )
+
+
+async def on_foreign_runtime(session: AsyncSession, target: Bot, owner_id: uuid.UUID) -> bool:
+    """目标员工是不是跑在别人的私有运行时上：那位所有者在自己的节点上读得到交过去的问题。"""
+    found = await session.scalar(
+        select(Bot.id).where(Bot.id == target.id, _foreign_runtime(owner_id))
+    )
+    return found is not None
+
+
+async def authorize(
+    session: AsyncSession, bot: Bot, target_id: uuid.UUID, *, attended: bool = True
+) -> tuple[Bot, Speaker]:
     """所有者现在能不能经这位助理调度 `target_id`；返回目标员工与所有者的发言者身份。
 
     找不到与调不动分开报：前者是没有这位员工（或它是助理、已停用、不是飞书员工），后者是它
     没开接受求助、所有者不在它的可用人范围内，或所有者的飞书身份对不上了。
 
+    Args:
+        attended: 发起这次调度的那一轮所有者在不在场；不在场时不能调度跑在别人私有运行时上
+            的员工
+
     Raises:
-        DispatchError: assistant_unavailable / bot_not_found / bot_not_available
+        DispatchError: assistant_unavailable / bot_not_found / bot_not_available /
+            owner_turn_required
     """
     prefs, owner = await owner_of(session, bot)
     target = await session.get(Bot, target_id, populate_existing=True)
@@ -157,6 +186,8 @@ async def authorize(session: AsyncSession, bot: Bot, target_id: uuid.UUID) -> tu
         )
     except ValueError:
         raise DispatchError("bot_not_available") from None
+    if not attended and await on_foreign_runtime(session, target, owner.id):
+        raise DispatchError("owner_turn_required")
     return target, speaker
 
 
@@ -169,20 +200,23 @@ def _dispatchable(bot: Bot) -> tuple[ColumnElement[bool], ...]:
     )
 
 
-async def candidates(session: AsyncSession, bot: Bot) -> list[Bot]:
-    """所有者经这位助理可以调度的员工，按名称排序，至多 `LIST_LIMIT` 位。"""
+async def candidates(session: AsyncSession, bot: Bot, *, attended: bool = True) -> list[Bot]:
+    """所有者经这位助理可以调度的员工，按名称排序，至多 `LIST_LIMIT` 位。
+
+    所有者不在场的轮次（`attended` 为假）不列跑在别人私有运行时上的员工。
+    """
     try:
         _, owner = await owner_of(session, bot)
     except DispatchError:
         return []
     limited = exists().where(BotAllowedUser.bot_id == Bot.id)
     named = exists().where(BotAllowedUser.bot_id == Bot.id, BotAllowedUser.user_id == owner.id)
+    where = [*_dispatchable(bot), Bot.accept_bot_help.is_(True), or_(~limited, named)]
+    if not attended:
+        where.append(~_foreign_runtime(owner.id))
     return list(
         await session.scalars(
-            select(Bot)
-            .where(*_dispatchable(bot), Bot.accept_bot_help.is_(True), or_(~limited, named))
-            .order_by(Bot.name, Bot.bot_key)
-            .limit(LIST_LIMIT)
+            select(Bot).where(*where).order_by(Bot.name, Bot.bot_key).limit(LIST_LIMIT)
         )
     )
 
@@ -199,12 +233,12 @@ def listing(rows: list[Bot]) -> list[dict[str, str]]:
     ]
 
 
-async def resolve(session: AsyncSession, bot: Bot, ref: str) -> Bot:
-    """按标识（`bot_key`）或名称找到目标员工并核对资格。
+async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool = True) -> Bot:
+    """按标识（`bot_key`）或名称找到目标员工并核对资格（`attended` 见 `authorize`）。
 
     Raises:
         DispatchError: invalid_bot / bot_not_found / bot_ambiguous / bot_not_available /
-            assistant_unavailable
+            assistant_unavailable / owner_turn_required
     """
     ref = " ".join(ref.split())
     if not ref or len(ref) > MAX_REF:
@@ -225,7 +259,7 @@ async def resolve(session: AsyncSession, bot: Bot, ref: str) -> Bot:
         raise DispatchError("bot_not_found")
     if len(found) > 1:
         raise DispatchError("bot_ambiguous")
-    target, _ = await authorize(session, bot, found[0].id)
+    target, _ = await authorize(session, bot, found[0].id, attended=attended)
     return target
 
 

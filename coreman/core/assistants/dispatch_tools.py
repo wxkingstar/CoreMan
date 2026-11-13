@@ -82,6 +82,10 @@ HINTS = {
         "这位员工没有开启接受求助，或所有者不在它的可用人范围内："
         "如实告诉所有者，由他找这位员工的管理者。"
     ),
+    "owner_turn_required": (
+        "这位员工跑在别人的私有运行时上，所有者不在场时不能调度它："
+        "记待跟进，等所有者在私聊里当面让你问。"
+    ),
     "assistant_unavailable": "助理现在不能调度公共员工；如实告诉所有者。",
     "already_dispatched": "这次求助已经派出过了，等它的答复。",
     "too_many_jobs": "进行中的调度与子任务合计已到上限，等一个结束或取消一个再派。",
@@ -102,7 +106,9 @@ async def _run(session: AsyncSession, scope: Scope, name: str, args: Any) -> dic
     bot = scope.bot
     if name == "assistant_bot_list":
         return {
-            "bots": core.listing(await core.candidates(session, bot)),
+            "bots": core.listing(
+                await core.candidates(session, bot, attended=not scope.unattended)
+            ),
             "limits": {
                 "question_chars": core.MAX_QUESTION,
                 "active": jobs.MAX_ACTIVE,
@@ -110,7 +116,8 @@ async def _run(session: AsyncSession, scope: Scope, name: str, args: Any) -> dic
             },
         }
     question = core.clean_question(args.question)
-    target = await core.resolve(session, bot, args.bot)
+    # 无人在场的轮次不能调度跑在别人私有运行时上的员工：要过审批的也在提交前就拒。
+    target = await core.resolve(session, bot, args.bot, attended=not scope.unattended)
     if args.allow_write:
         # 要对方改东西是对外操作：不论所有者在不在场，都先由他在审批系统里批准。
         out = await dispatching.submit(

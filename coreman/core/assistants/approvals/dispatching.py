@@ -238,8 +238,13 @@ async def run(
             call = calls[0] if calls else {}
             arguments = call.get("arguments") or {}
             try:
+                # 无人在场的轮次提交的单，批准后仍不能派到别人的私有运行时上（提交时已拒过
+                # 一次；这里防的是提交之后运行时才改成私有）。
                 target, _ = await dispatch.authorize(
-                    session, bot, uuid.UUID(str(arguments.get("bot_id")))
+                    session,
+                    bot,
+                    uuid.UUID(str(arguments.get("bot_id"))),
+                    attended=not call.get("unattended"),
                 )
                 await dispatch.send(
                     session,

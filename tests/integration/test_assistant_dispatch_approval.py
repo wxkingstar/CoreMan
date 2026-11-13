@@ -280,3 +280,23 @@ async def test_the_worker_routes_dispatch_approvals_to_their_own_target(
     assert await _dispatched(db_session, target) == 1
     # 核销用的是调度目标系统算出的哈希。
     assert fake.redeemed[-1][1] == row.request_hash
+
+
+async def test_an_unattended_request_is_refused_when_the_runtime_turned_private(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import RelayServer
+
+    install_tower(monkeypatch)
+    _, _, scope = await owner_scope(db_session, unattended=True)
+    target = await target_bot(db_session)
+    row = await submitted(db_session, scope, target)
+    # 提交之后目标员工的运行时改成了别人的私有运行时：批准了也不派出。
+    relay = await db_session.get(RelayServer, target.relay_server_id)
+    assert relay is not None
+    relay.visibility, relay.owner_id = "private", target.created_by
+    await db_session.commit()
+    assert await approved(db_engine, db_session, row) == "failed"
+    await db_session.refresh(row)
+    assert row.error_code == "owner_turn_required"
+    assert await _dispatched(db_session, target) == 0

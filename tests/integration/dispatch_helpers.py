@@ -39,8 +39,12 @@ async def target_bot(
     enabled: bool = True,
     platform: str = "feishu",
     allowed: list[uuid.UUID] | None = None,
+    private_to: uuid.UUID | str | None = None,
 ) -> Bot:
-    """一位普通员工，绑在自己的节点与实例上（不与助理共用：助理所在的节点不承载普通员工）。"""
+    """一位普通员工，绑在自己的节点与实例上（不与助理共用：助理所在的节点不承载普通员工）。
+
+    `private_to` 让它所在的运行时是私有的：给用户编号就归那个人，给 `"creator"` 归建它的人。
+    """
     cipher, tag = Cipher(MASTER), uuid.uuid4().hex[:8]
     creator = User(
         login_name=f"c{tag}", display_name="李四", email=f"c{tag}@example.test", source="sync"
@@ -69,6 +73,10 @@ async def target_bot(
         clawrelay_port=80,
         model_provider="claude",
     )
+    if private_to is not None:
+        holder = creator.id if private_to == "creator" else private_to
+        node.visibility, node.owner_id = "private", holder
+        relay.visibility, relay.owner_id = "private", holder
     session.add(relay)
     await session.flush()
     bot = Bot(
