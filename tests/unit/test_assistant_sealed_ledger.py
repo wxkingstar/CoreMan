@@ -129,6 +129,7 @@ WRITE_STATEMENTS = {
     # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）
     "coreman/runtime/gateway_feishu/transport.py": 2,
     "coreman/runtime/scheduler/reaper.py": 1,  # 结掉漏网的进行中记录，报错信息封存
+    "coreman/runtime/worker/platform_turn.py": 1,  # 入站事件的替身：不加入会话、不落库
 }
 
 
