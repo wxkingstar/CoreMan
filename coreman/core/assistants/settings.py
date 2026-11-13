@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.dialects.postgresql import insert
@@ -82,3 +82,74 @@ def on_shift(settings: AssistantSettings, now: datetime) -> bool:
     return local.isoweekday() in settings.workdays and (
         settings.work_start <= clock < settings.work_end
     )
+
+
+# 「下班」找下一个上班时刻时往后看几天：一周七天加当天。
+_LOOKAHEAD_DAYS = 8
+# 没有工作日可找时「下班」持续多久。
+_NO_WORKDAY_REST = timedelta(days=1)
+
+
+def _at(row: AssistantSettings, day: date, clock: str) -> datetime:
+    """所有者时区里某天某个 `HH:MM` 对应的时刻（UTC）。"""
+    hour, minute = clock.split(":")
+    return datetime.combine(day, time(int(hour), int(minute)), tzinfo=zone(row)).astimezone(UTC)
+
+
+def end_today(row: AssistantSettings, now: datetime) -> datetime | None:
+    """今天是工作日且还没到下班时间：今天的下班时刻；否则 None。"""
+    day = local_today(row, now)
+    if day.isoweekday() not in row.workdays:
+        return None
+    end = _at(row, day, row.work_end)
+    return end if end > aware_utc(now) else None
+
+
+def next_start(row: AssistantSettings, now: datetime) -> datetime | None:
+    """晚于 `now` 的下一个上班时刻；没有工作日时为 None。"""
+    today = local_today(row, now)
+    for offset in range(_LOOKAHEAD_DAYS):
+        day = today + timedelta(days=offset)
+        if day.isoweekday() not in row.workdays:
+            continue
+        start = _at(row, day, row.work_start)
+        if start > aware_utc(now):
+            return start
+    return None
+
+
+def next_midnight(row: AssistantSettings, now: datetime) -> datetime:
+    """所有者时区的次日零点。"""
+    return _at(row, local_today(row, now) + timedelta(days=1), "00:00")
+
+
+def override(row: AssistantSettings, now: datetime) -> str | None:
+    """还没过期的临时切换（`on` / `off`）；没有或已过期返回 None。"""
+    until = row.shift_override_until
+    if row.shift_override is None or (until is not None and until <= aware_utc(now)):
+        return None
+    return row.shift_override
+
+
+def clear_override(row: AssistantSettings) -> None:
+    row.shift_override, row.shift_override_until = None, None
+    row.updated_at = utcnow()
+
+
+def clock_in(row: AssistantSettings, now: datetime) -> datetime:
+    """所有者说「上班」：到今天的下班时间为止；今天不是工作日或已过下班时间，到次日零点。
+
+    返回到期时刻。到点不用清理：`on_shift` 只认没过期的临时切换。
+    """
+    until = end_today(row, now) or next_midnight(row, now)
+    row.shift_override, row.shift_override_until = "on", until
+    row.updated_at = utcnow()
+    return until
+
+
+def clock_out(row: AssistantSettings, now: datetime) -> datetime:
+    """所有者说「下班」：到下一个工作时段开始为止。返回到期时刻。"""
+    until = next_start(row, now) or aware_utc(now) + _NO_WORKDAY_REST
+    row.shift_override, row.shift_override_until = "off", until
+    row.updated_at = utcnow()
+    return until
