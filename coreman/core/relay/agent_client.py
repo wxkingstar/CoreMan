@@ -19,6 +19,8 @@ OPERATIONS = {
     "workspace-write",
     "workspace-export",
     "workspace-import",
+    "workspace-pack",
+    "workspace-unpack",
     "workspace-finish",
     "workspace-clone",
     "workspace-git-status",
@@ -48,6 +50,17 @@ OPERATIONS = {
     "seat-login-complete",
     "seat-activate",
     "seat-remove",
+}
+
+# 可能跑上好几分钟的操作：Git 拉取克隆、装技能、整包换机的打包与解包（最多 4G）。
+SLOW_OPERATIONS = {
+    "pull",
+    "pr",
+    "init",
+    "install-skill",
+    "workspace-clone",
+    "workspace-pack",
+    "workspace-unpack",
 }
 
 
@@ -93,9 +106,7 @@ async def call_agent(
     del cipher
     if operation not in OPERATIONS or not relay.is_active or relay.runtime_node_id is None:
         raise AgentError("实例未启用、未绑定运行时节点或操作不支持")
-    timeout = (
-        950 if operation in {"pull", "pr", "init", "install-skill", "workspace-clone"} else 130
-    )
+    timeout = 950 if operation in SLOW_OPERATIONS else 130
     # 换机清单最多 5 万条，其他操作的响应都很小。
     limit = 32 * 1024 * 1024 if operation == "workspace-export" else 4 * 1024 * 1024
     try:

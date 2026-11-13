@@ -13,6 +13,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -26,6 +27,12 @@ MAX_TOTAL = 4 * 1024**3
 MAX_FILES = 50000
 # 未推送提交随描述内联传过去；超过这个大小就整仓复制。
 BUNDLE_LIMIT = 8 * 1024 * 1024
+# 整包换机：源节点把清单里的文件打成一个 gzip 压缩的 tar 按块传，目标节点收齐后校验再解开。
+# 压缩级别取 1：瓶颈是逐块经平台中转，压得更小不如打得更快。
+PACK_NAME = "pack.tar.gz"
+PACK_LEVEL = 1
+# 压缩包可能比原文件略大（不可压缩的内容加每个文件 512 字节的 tar 头）。
+PACK_LIMIT = MAX_TOTAL + MAX_FILES * 1024 + CHUNK
 # 换机暂存目录超过这个时长还在，一定是中断的迁移留下的（单次迁移最长 30 分钟）。
 STALE_STAGE = 6 * 3600
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -334,6 +341,18 @@ def cached_digest(cache, path):
             cache.clear()
         cache[key] = digest(path)
     return cache[key]
+
+
+class HashingReader:
+    """打包时边读边算哈希：打进包里的字节必须正是导出清单记下的那份。"""
+
+    def __init__(self, f):
+        self.f, self.hash = f, hashlib.sha256()
+
+    def read(self, size=-1):
+        data = self.f.read(size)
+        self.hash.update(data)
+        return data
 
 
 def sweep_stages(parent):
@@ -1157,6 +1176,118 @@ class Workspace:
             f.write(raw)
         return {"received": received + len(raw)}
 
+    def pack(self):
+        """源节点整包换机：按清单把普通文件打成一个压缩包，平台按块读走后删掉暂存目录。
+
+        链接不进包，目标节点照旧按清单重建。打包时逐个核对哈希，源文件在导出之后改过就停下。
+        """
+        stage = self.stage()
+        pack = stage / PACK_NAME
+        action = self.data.get("action")
+        if action == "remove":
+            shutil.rmtree(stage, ignore_errors=True)
+            return {"removed": True}
+        if action == "read":
+            offset = int(self.data.get("offset", 0))
+            length = int(self.data.get("length", CHUNK))
+            if not pack.is_file() or offset < 0 or not 0 < length <= CHUNK:
+                raise self.error("迁移压缩包不存在或读取范围无效")
+            with pack.open("rb") as f:
+                f.seek(offset)
+                raw = f.read(length)
+            return {
+                "data": base64.b64encode(raw).decode(),
+                "eof": offset + len(raw) >= pack.stat().st_size,
+            }
+        if action != "create":
+            raise self.error("迁移参数无效")
+        manifest = self.data.get("manifest")
+        self.validate_manifest(manifest, self.root)
+        sweep_stages(self.root.parent)
+        stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+        count = 0
+        with tarfile.open(pack, "w:gz", compresslevel=PACK_LEVEL, format=tarfile.PAX_FORMAT) as tar:
+            for entry in manifest:
+                if "link" in entry:
+                    continue
+                info = tarfile.TarInfo(entry["path"])
+                info.size, info.mode = entry["size"], 0o600
+                with self.path(entry["path"], transfer=True).open("rb") as f:
+                    reader = HashingReader(f)
+                    try:
+                        tar.addfile(info, reader)
+                    except OSError as exc:  # 文件变短了：tarfile 读不够 size 个字节
+                        raise self.error("源文件在复制时发生变化，请重试") from exc
+                if reader.hash.hexdigest() != entry["hash"]:
+                    raise self.error("源文件在复制时发生变化，请重试")
+                count += 1
+        return {"size": pack.stat().st_size, "hash": digest(pack), "files": count}
+
+    def unpack(self):
+        """目标节点整包换机：按顺序接收压缩包，收齐后核对大小与哈希，只按清单解出普通文件。
+
+        不用 extractall：包里每一项都必须是清单里的普通文件、大小一致且只出现一次，逐个经
+        path() 写进暂存目录，链接、目录项、越界路径一律拒绝。解完由 finish 照旧逐个核对哈希。
+        """
+        stage = self.stage()
+        meta = stage / "transfer.json"
+        if not meta.is_file():
+            raise self.error("迁移清单尚未建立")
+        record = json.loads(meta.read_text())
+        if record["bot_id"] != self.bot or record["target"] != str(self.root):
+            raise self.error("迁移清单或归属发生变化")
+        pack = stage / PACK_NAME
+        action = self.data.get("action")
+        if action == "write":
+            data = self.data.get("data")
+            if not isinstance(data, str) or len(data) > ((CHUNK + 2) // 3) * 4:
+                raise self.error("迁移分块超过大小限制")
+            raw = base64.b64decode(data, validate=True)
+            received = pack.stat().st_size if pack.exists() else 0
+            if (
+                len(raw) > CHUNK
+                or int(self.data.get("offset", 0)) != received
+                or received + len(raw) > PACK_LIMIT
+            ):
+                raise self.error("迁移分块大小或顺序不正确")
+            with pack.open("ab") as f:
+                f.write(raw)
+            return {"received": received + len(raw)}
+        if action != "extract":
+            raise self.error("迁移参数无效")
+        if (
+            not pack.is_file()
+            or pack.stat().st_size != self.data.get("size")
+            or digest(pack) != self.data.get("hash")
+        ):
+            raise self.error("迁移压缩包不完整或校验失败")
+        files = stage / "files"
+        wanted = {e["path"]: e for e in record["manifest"] if "link" not in e}
+        done = set()
+        mismatch = self.error("迁移压缩包内容与清单不符")
+        with tarfile.open(pack, "r:gz") as tar:
+            for member in tar:
+                entry = wanted.get(member.name)
+                if (
+                    entry is None
+                    or not member.isreg()
+                    or member.name in done
+                    or member.size != entry["size"]
+                ):
+                    raise mismatch
+                target = self.path(member.name, files, transfer=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tar.extractfile(member)
+                if src is None:
+                    raise mismatch
+                with src, target.open("wb") as out:
+                    shutil.copyfileobj(src, out, CHUNK)
+                done.add(member.name)
+        if len(done) != len(wanted):
+            raise mismatch
+        pack.unlink()
+        return {"extracted": len(done)}
+
     def install(self, files, replace=False):
         if self.root.exists() and not replace:
             names = [p.name for p in self.root.iterdir()]
@@ -1403,6 +1534,8 @@ class Workspace:
             "write",
             "export",
             "import_",
+            "pack",
+            "unpack",
             "finish",
             "clone",
             "git_status",
