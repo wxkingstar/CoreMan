@@ -8,7 +8,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from time import monotonic as heading_clock
 from typing import Any
@@ -18,6 +18,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox, streams
 from coreman.core.chat import liveness
 from coreman.core.chat.group_observe import NO_REPLY
@@ -62,6 +63,7 @@ _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _OUTPUT_LOCK = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))")
 # 常驻守护连接上用会话级锁：连接是 AUTOCOMMIT，不留未结束的事务，锁随连接关闭释放。
 _OUTPUT_SESSION_LOCK = text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))")
+_OUTPUT_SESSION_UNLOCK = text("SELECT pg_advisory_unlock(hashtextextended(:key,0))")
 # 一轮最多发这么多条出站；没发完就告诉调用方接着来，别等兜底轮询。
 OUTBOX_PER_ROUND = 20
 # 同一 bot 两次平台调用之间至少隔这么久：每张卡片不超过飞书的 10 次/秒，整个应用也远低于
@@ -117,6 +119,7 @@ class FeishuTransport:
         guard: AsyncConnection | None = None,
         credentials_fingerprint: str | None = None,
         image_transport: httpx.AsyncBaseTransport | None = None,
+        lease_fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.factory, self.client = factory, client
         self.bot_id, self.instance_id, self.generation = bot_id, instance_id, generation
@@ -127,18 +130,25 @@ class FeishuTransport:
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
         self.credentials_fingerprint = credentials_fingerprint
+        # 个人助理记录没有自己的租约：连接按应用认领，围栏由应用连接进程提供（AppOutbound）。
+        self._lease_fence = lease_fence
         self._output_held = False
         # 这一轮开头已经查过租约围栏：轮内的平台调用不再逐次回表。
         self._round_fenced = False
         self.images = RemoteImages(self.upload_image, transport=image_transport)
         # 机器人的富卡片开关；子进程每轮从库里刷新。
         self.rich_cards = True
+        # 这个机器人是个人助理：日志里不写卡片内容的片段。每轮开头刷新。
+        self._private = False
         # 调度员在单人群里收到消息就打的「处理中」表情（见 acks.py）。
         from coreman.runtime.gateway_feishu.acks import Acks
 
         self.acks = Acks(self)
 
     async def fence(self) -> None:
+        if self._lease_fence is not None:
+            await self._lease_fence()
+            return
         async with self.factory() as session:
             row = await session.scalar(
                 select(BotLease.bot_id)
@@ -222,12 +232,14 @@ class FeishuTransport:
             values["work_code"] = work_code
         try:
             async with self.factory() as session:
+                # 个人助理发出的正文加密存档；chat_id、work_code 不是内容列，原样写入。
+                stored = await sealed.seal_values(session, FeishuSentMessage, self.bot_id, values)
                 await session.execute(
                     insert(FeishuSentMessage)
-                    .values(bot_id=self.bot_id, message_id=message_id, **values)
+                    .values(bot_id=self.bot_id, message_id=message_id, **stored)
                     .on_conflict_do_update(
                         index_elements=[FeishuSentMessage.bot_id, FeishuSentMessage.message_id],
-                        set_=values,
+                        set_=stored,
                     )
                 )
                 await session.commit()
@@ -252,11 +264,20 @@ class FeishuTransport:
                 return False
             return await self._deliver()
 
+    async def release(self) -> None:
+        """放掉常驻连接上的出站锁：这个 bot 不再由本进程发送（应用连接进程里记录被停用）。"""
+        if self._guard is not None and self._output_held:
+            await self._guard.execute(
+                _OUTPUT_SESSION_UNLOCK, {"key": f"feishu-output:{self.bot_id}"}
+            )
+        self._output_held = False
+
     async def _deliver(self) -> bool:
         self._round_fenced = True
         await self.acks.expire()
         try:
             async with self.factory() as session:
+                self._private = await sealed.guard_logs(session, self.bot_id)
                 rows = list(
                     await session.scalars(
                         select(TaskStream)
@@ -269,6 +290,19 @@ class FeishuTransport:
                         .limit(50)
                     )
                 )
+                # 个人助理的内容还原成明文；读不出来的（数据密钥已销毁）不推，直接收尾：
+                # 这条回复再也读不出来，留着不收尾每一轮都会被当成还有活。
+                await sealed.open_rows(session, rows)
+                locked = [row.task_id for row in rows if sealed.is_locked(row)]
+                for task_id in locked:
+                    await streams.mark_finish_pushed(session, task_id)
+                if locked:
+                    await session.commit()
+                    log.warning("feishu_stream_locked", count=len(locked), code=sealed.LOCKED_CODE)
+                rows = [row for row in rows if not sealed.is_locked(row)]
+            for task_id in locked:
+                # 入站消息上的「处理中」表情跟着撤掉（没打过就什么也不做）。
+                await typing(self, task_id, done=True)
             active_ids = {row.task_id for row in rows}
             self._headings = {
                 key: value for key, value in self._headings.items() if key in active_ids
@@ -367,7 +401,7 @@ class FeishuTransport:
         async with self.factory() as session:
             delivery = await session.get(FeishuDelivery, task_id)
             if delivery is None:
-                delivery = FeishuDelivery(task_id=task_id)
+                delivery = FeishuDelivery(task_id=task_id, bot_id=self.bot_id)
                 session.add(delivery)
             if typing_done:
                 # 这一轮的表情另有人管（网关收到消息时打的），不再打。
@@ -744,10 +778,17 @@ class FeishuTransport:
             )
             if not compiled.problems:
                 return compiled
-            log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+            self._warn_invalid_card(compiled.problems)
         return await self.plain_cards(
             thinking, answer, session_url, heading, localized=True, plan=plan
         )
+
+    def _warn_invalid_card(self, problems: list[str]) -> None:
+        if self._private:
+            # 校验说明里带着卡片里的键与取值（模型写的内容）：个人助理的只记条数。
+            log.warning("feishu_rich_card_invalid", problem_count=len(problems))
+        else:
+            log.warning("feishu_rich_card_invalid", problems=problems[:5])
 
     async def plain_cards(
         self,
@@ -866,6 +907,11 @@ class FeishuTransport:
             item = await outbox.claim_next(session, bot_id=self.bot_id)
             if item is None:
                 return False
+            if sealed.is_locked(item):
+                # 个人助理的数据密钥已销毁：内容读不出来，不发。
+                await outbox.mark_skipped(session, item.id, sealed.LOCKED_CODE)
+                await session.commit()
+                return True
             if not await private_target_valid(session, item):
                 await outbox.mark_skipped(session, item.id, "recipient binding changed")
                 await session.commit()
@@ -1112,7 +1158,7 @@ class FeishuTransport:
             people = await self.people_ids(names)
             compiled = await asyncio.to_thread(compile_reply, body, images=images, people=people)
             if compiled.problems:
-                log.warning("feishu_rich_card_invalid", problems=compiled.problems[:5])
+                self._warn_invalid_card(compiled.problems)
                 compiled = None
         if compiled is None:
             cards = await asyncio.to_thread(simple_cards, body)

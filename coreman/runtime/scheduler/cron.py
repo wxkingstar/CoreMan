@@ -253,6 +253,7 @@ async def recover_runs(
                     status="error",
                     error_code="worker_lost",
                     error_message=lost,
+                    bot_id=run.bot_id,
                 )
                 if not closed:
                     # 只补不改：close_running 写失败时那一行进行中的记录还在，不能拿这份

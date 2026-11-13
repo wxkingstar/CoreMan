@@ -9,6 +9,7 @@ import gc
 import sqlalchemy.dialects.postgresql.asyncpg  # noqa: F401  建引擎时才会导入的方言
 from lark_oapi.ws import client as ws_client
 
+import coreman.runtime.gateway_feishu.app_child  # noqa: F401
 import coreman.runtime.gateway_feishu.child  # noqa: F401
 import coreman.runtime.gateway_feishu.service  # noqa: F401  子进程入口所在模块
 

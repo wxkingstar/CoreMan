@@ -34,6 +34,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import interactions, topics
 from coreman.core.chat.identity import resolve_speaker
@@ -612,6 +613,9 @@ async def open_draft(
     """校验草稿、存起来并发确认卡片。返回给模型的只有结果摘要，不会替用户确认。"""
     now = utcnow()
     bot = origin.bot
+    if is_assistant(bot):
+        # 任务指令会明文存进草稿与定时任务，个人助理暂不开放。
+        return {"error": "assistant_unsupported", "message": unsupported("提醒与定时任务")}
     group = isinstance(origin, GroupOrigin)
     if group:
         args = group_defaults(args, origin.chat_id)

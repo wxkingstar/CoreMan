@@ -522,3 +522,30 @@ async def test_retention_drops_month_old_observe_decisions(
     await db_session.commit()
     counts = await reaper.run_retention(make_session_factory(db_engine), now, batch=1)
     assert counts["old_observe_decisions"] == 1
+
+
+async def test_failing_assistant_approval_tick_does_not_skip_the_cleanup(
+    db_engine: AsyncEngine,
+    runtime_settings,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    from coreman.core.assistants.approvals import service as approvals
+
+    async def broken(*args: object, **kwargs: object) -> dict[str, int]:
+        raise RuntimeError("boom")
+
+    ran = asyncio.Event()
+
+    async def cleanup(*args: object, **kwargs: object) -> dict[str, int]:
+        ran.set()
+        return {}
+
+    monkeypatch.setattr(approvals, "tick", broken)
+    monkeypatch.setattr(reaper, "run_cleanup", cleanup)
+    svc = SchedulerService(port=0, tick_seconds=0.2, cleanup_seconds=0.5, leader_retry_seconds=0.2)
+    task = asyncio.create_task(svc.run())
+    try:
+        await asyncio.wait_for(ran.wait(), 10)
+    finally:
+        svc.request_stop("test")
+        await asyncio.wait_for(task, 10)

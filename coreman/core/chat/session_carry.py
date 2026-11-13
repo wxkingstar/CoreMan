@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import ChatLog
 
 MAX_TURNS = 20
@@ -50,6 +51,8 @@ async def carried_context(
             .limit(MAX_TURNS)
         )
     ).all()
+    # 个人助理的正文还原成明文；读不出来的轮次内容为空，下面自然跳过。
+    await sealed.open_rows(session, rows)
     turns: list[str] = []
     total = 0
     for row in rows:

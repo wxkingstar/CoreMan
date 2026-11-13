@@ -11,9 +11,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed as content_seal
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.crypto import DecryptError
-from coreman.core.db.models import Bot, InboundEvent
+from coreman.core.db.models import Bot, InboundEvent, Task
 from coreman.core.personal_credentials import policy, service
 from coreman.core.personal_credentials.policy import CredentialError
 from coreman.runtime.worker.context import TaskContext
@@ -35,6 +36,18 @@ async def wipe(session: AsyncSession, task_id: int, event_id: int | None) -> Non
             ),
             {"id": event_id},
         )
+    # 个人助理的载荷整体加密，上面两条语句碰不到里面的副本：还原后删掉，落库时重新封存。
+    rows: list[Task | InboundEvent | None] = [await session.get(Task, task_id)]
+    if event_id is not None:
+        rows.append(await session.get(InboundEvent, event_id))
+    for row in rows:
+        if row is None or not content_seal.is_opened(row):
+            continue
+        action = row.payload.get("card_action")
+        if isinstance(action, dict) and "sealed" in action:
+            kept = {k: v for k, v in action.items() if k != "sealed"}
+            row.payload = {**row.payload, "card_action": kept}
+    await session.flush()
 
 
 async def wipe_detached(ctx: TaskContext) -> None:

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox
 from coreman.core.db.models import ApiClient, Bot, OutboxItem
 
@@ -64,6 +65,8 @@ async def push(
         item = (
             await session.execute(select(OutboxItem).where(OutboxItem.dedupe_key == key))
         ).scalar_one()
+        # 比对的是明文载荷：个人助理的行要先还原。
+        await sealed.open_row(session, item)
         if item.bot_id != bot.id or item.target != target or item.payload != payload:
             raise ApiError(409, 409, "request_id 已用于不同的推送内容")
     await session.commit()

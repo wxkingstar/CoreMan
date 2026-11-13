@@ -21,6 +21,7 @@ from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
+from coreman.core.assistants import sealed
 from coreman.core.db.models import Bot, BotMember, BusinessTokenIssue, ChatLog, CronRun, User
 from coreman.core.richtext.degrade import readable
 from coreman.core.timeutils import aware_utc
@@ -177,6 +178,9 @@ def chat_log_out(
             # Numeric 列读出来是 Decimal，直接进 JSON 会 500。
             "cost_usd": float(row.cost_usd) if row.cost_usd is not None else None,
         }
+    if sealed.is_locked(row):
+        # 个人助理的内容读不出来：不是所有者本人，或数据密钥已销毁。
+        data["content_locked"] = True
     return data
 
 
@@ -202,6 +206,8 @@ async def list_chat_logs(
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
     rows: list[ChatLog] = page["items"]
+    # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。
+    await sealed.open_rows(session, rows, viewer=actor.id)
     names = await bot_names(session, (r.bot_id for r in rows))
     return {
         "code": 0,
@@ -315,6 +321,7 @@ async def get_chat_log(
     if row is None:
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。
         raise not_found("对话记录不存在")
+    await sealed.open_row(session, row, viewer=actor.id)
     names = await bot_names(session, [row.bot_id])
     data = chat_log_out(row, full=True, bot_name=names.get(row.bot_id))
     data["business_tokens"] = await business_tokens(session, row.task_id)

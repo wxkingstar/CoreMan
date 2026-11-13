@@ -74,6 +74,22 @@ class Settings(BaseSettings):
     s3_access_key: SecretStr | None = Field(default=None, alias="S3_ACCESS_KEY")
     s3_secret_key: SecretStr | None = Field(default=None, alias="S3_SECRET_KEY")
     s3_session_token: SecretStr | None = Field(default=None, alias="S3_SESSION_TOKEN")
+    # 个人助理等待审批期间的附件：独立的临时桶（S3 兼容）。桶必须私有，并配不超过 7 天的自动清理。
+    assistant_tmp_s3_endpoint: str | None = Field(default=None, alias="ASSISTANT_TMP_S3_ENDPOINT")
+    assistant_tmp_s3_region: str = Field(default="us-east-1", alias="ASSISTANT_TMP_S3_REGION")
+    assistant_tmp_s3_bucket: str | None = Field(default=None, alias="ASSISTANT_TMP_S3_BUCKET")
+    assistant_tmp_s3_prefix: str = Field(
+        default="assistant-approvals", alias="ASSISTANT_TMP_S3_PREFIX"
+    )
+    assistant_tmp_s3_access_key: SecretStr | None = Field(
+        default=None, alias="ASSISTANT_TMP_S3_ACCESS_KEY"
+    )
+    assistant_tmp_s3_secret_key: SecretStr | None = Field(
+        default=None, alias="ASSISTANT_TMP_S3_SECRET_KEY"
+    )
+    assistant_tmp_s3_addressing: Literal["virtual", "path"] = Field(
+        default="virtual", alias="ASSISTANT_TMP_S3_ADDRESSING"
+    )
     runtime_bundle_dir: str = Field(default="runtime_daemon/dist", alias="RUNTIME_BUNDLE_DIR")
     web_dist_dir: str = Field(default="/app/web/dist", alias="WEB_DIST_DIR")
     coreman_env: Literal["dev", "prod"] = Field(default="prod", alias="COREMAN_ENV")
@@ -184,6 +200,21 @@ class Settings(BaseSettings):
             self.s3_bucket and self.s3_access_key and self.s3_secret_key
         ):
             raise ValueError("S3 storage requires S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY")
+        return self
+
+    @model_validator(mode="after")
+    def _check_assistant_tmp_storage(self) -> Settings:
+        # 只配了一半（例如有桶名没有凭据）时在启动阶段就失败，而不是到助理提交带文件的操作时才发现。
+        parts = (
+            self.assistant_tmp_s3_bucket,
+            self.assistant_tmp_s3_access_key,
+            self.assistant_tmp_s3_secret_key,
+        )
+        if any(parts) and not all(parts):
+            raise ValueError(
+                "ASSISTANT_TMP_S3_BUCKET, ASSISTANT_TMP_S3_ACCESS_KEY and"
+                " ASSISTANT_TMP_S3_SECRET_KEY must be set together"
+            )
         return self
 
     @model_validator(mode="after")

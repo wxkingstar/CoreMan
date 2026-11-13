@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.chat.commands import command_text, normalize
 from coreman.core.db.models import ChatLog
 from coreman.core.i18n.messages import msg
@@ -134,6 +135,10 @@ async def recent_sessions(
     preview: dict[uuid.UUID, str] = {}
     for rs, content in firsts:
         if rs is None or content is None:
+            continue
+        content = await sealed.open_value(session, ChatLog, "message_content", bot_id, content)
+        if content is None:
+            # 个人助理的数据密钥已销毁，读不出来：看下一条，都读不出就回落到「非文本消息」。
             continue
         preview.setdefault(rs, content[:PREVIEW_LEN])
     return [

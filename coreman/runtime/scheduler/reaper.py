@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
+from coreman.core.assistants import sealed
 from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
@@ -112,6 +113,8 @@ async def reap_lost_tasks(
     `claimed` 同样要收：worker 认领之后、`start` 之前被杀（或 `start` 就没写成），这一行
     再也不会有人动它——只看 `running` 的话它会一直挂在在途列表里，用户那边永远转圈。
     """
+    # 一批里是各个机器人的任务：一条解不开的不能让整批回滚、每轮都卡在同一行。
+    sealed.tolerate_undecryptable(session)
     cutoff = now - timedelta(seconds=timeout_seconds)
     # claimed 行可能还没写过 heartbeat_at，用认领时刻兜底。
     beat = func.coalesce(Task.heartbeat_at, Task.claimed_at)
@@ -125,6 +128,8 @@ async def reap_lost_tasks(
     lost = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    # 个人助理的载荷是密文：后面要从里面取会话与消息信息写记录、通知用户。
+    await sealed.open_rows(session, lost)
     writer = None if chat_logs_factory is None else ChatLogWriter(chat_logs_factory)
     for task in lost:
         bot = await session.get(Bot, task.bot_id)
@@ -143,6 +148,7 @@ async def reap_lost_tasks(
             status="failed",
             error_code=LOST_ERROR_CODE,
             error_message=LOST_ERROR_MESSAGE,
+            bot_id=task.bot_id,
         )
         if task.kind == "relay_switch":
             # 切换作业断了：绑定只在最后一个事务里改，员工仍在原运行时上，解除迁移隔离。
@@ -168,6 +174,7 @@ async def reap_lost_tasks(
             status="timeout",
             error_code=LOST_ERROR_CODE,
             error_message=LOST_ERROR_MESSAGE,
+            bot_id=task.bot_id,
         )
         if not closed and writer is not None:
             await writer.write(entry)
@@ -176,6 +183,7 @@ async def reap_lost_tasks(
 
 async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
     """补偿任务终态提交后、流终态提交前崩溃的窗口；不重跑模型或改变任务结果。"""
+    sealed.tolerate_undecryptable(session)
     rows = list(
         await session.execute(
             select(Task, TaskStream)
@@ -191,12 +199,16 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
         )
     )
     for task, stream in rows:
+        # 个人助理的载荷与半截正文是密文：还原后再拼终稿（读不出来就走兜底文案）。
+        await sealed.open_rows(session, [task, stream])
         final = stream.final_text or stream.pending_text or msg("stream_recovered")
         activity = None
         if task.status != "succeeded":
             final += "\n\n" + msg("stream_interrupted")
             activity = liveness.interrupted_activity(stream.activity, liveness.REASON_RECOVERED)
-        await streams.complete(session, task.id, final_text=final, activity=activity)
+        await streams.complete(
+            session, task.id, final_text=final, activity=activity, bot_id=task.bot_id
+        )
         if stream.delivery_mode != "stream" or stream.finish_pushed_at is not None:
             bot = await session.get(Bot, task.bot_id)
             chat_id = stream.reply_context.get("chat_id") or _chat_id(task)
@@ -220,10 +232,18 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
     在途任务、升级窗口里旧版本的看护收了尸等。等 `ABANDONED_TURN_GRACE_SECONDS` 再动手，
     cron 看护这类按自己口径收尾的路径先走完。
     """
+    sealed.tolerate_undecryptable(session)
     cutoff = now - timedelta(seconds=ABANDONED_TURN_GRACE_SECONDS)
     rows = (
         await session.execute(
-            select(ChatLog.id, Task.status, Task.error_code, Task.error_message)
+            select(
+                ChatLog.id,
+                ChatLog.bot_id,
+                Task.id,
+                Task.status,
+                Task.error_code,
+                Task.error_message,
+            )
             .outerjoin(Task, Task.id == ChatLog.task_id)
             .where(
                 ChatLog.status == CHAT_LOG_RUNNING,
@@ -237,21 +257,26 @@ async def close_abandoned_turns(session: AsyncSession, now: datetime) -> int:
             .with_for_update(of=ChatLog, skip_locked=True)
         )
     ).all()
-    for log_id, task_status, error_code, error_message in rows:
+    for log_id, bot_id, task_id, task_status, error_code, error_message in rows:
         code: str | None
         message: str | None
         if task_status is None:
             status, code, message = "error", "task_missing", "任务记录已不存在（如机器人已删除）"
         else:
             status = TASK_TO_LOG_STATUS.get(task_status, "error")
-            code, message = error_code, error_message[:5000] if error_message else None
+            # 这里只取了任务的一列：先还原成明文，再按对话记录这一列重新封存（两列的 AAD 不同）。
+            plain = await sealed.open_value(
+                session, Task, "error_message", bot_id, error_message, row_id=task_id
+            )
+            code, message = error_code, plain[:5000] if plain else None
+        stored = await sealed.seal_values(session, ChatLog, bot_id, {"error_message": message})
         await session.execute(
             update(ChatLog)
             .where(ChatLog.id == log_id)
             .values(
                 status=status,
                 error_code=code,
-                error_message=message,
+                error_message=stored["error_message"],
                 latency_ms=chat_logs.elapsed_ms(),
             )
         )
@@ -281,6 +306,7 @@ async def _tell_user(
             task.id,
             final_text=prefix + lost,
             activity=liveness.interrupted_activity(stream.activity, liveness.REASON_WORKER_LOST),
+            bot_id=task.bot_id,
         )
     if pushable:
         return

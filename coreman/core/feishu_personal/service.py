@@ -17,8 +17,10 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import write_fuse
+from coreman.core.assistants.records import is_assistant
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import FeishuPersonalGrant
+from coreman.core.db.models import Bot, FeishuPersonalGrant
 from coreman.core.feishu_personal import endpoints, permissions, revocation
 from coreman.core.feishu_personal.policy import Scope, app_credentials
 from coreman.core.logging import get_logger
@@ -190,6 +192,18 @@ async def _row(
     return row, secret
 
 
+async def _require_live(session: AsyncSession, scope: Scope) -> None:
+    """发起或完成授权之前：助理记录必须在开通中或已开通，正在停用、已停用的不再拿到授权。
+
+    在 `_row` 拿到授权锁之后读库里的当前状态（停用的撤销一步拿同一把锁）；普通员工不查。
+    """
+    if not is_assistant(scope.bot):
+        return
+    state = await session.scalar(select(Bot.assistant_state).where(Bot.id == scope.bot.id))
+    if state not in ("provisioning", "active"):
+        raise PersonalError("assistant_inactive")
+
+
 async def existing_row(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> FeishuPersonalGrant | None:
@@ -244,6 +258,7 @@ async def _revoke_remote(cipher: Cipher, row: FeishuPersonalGrant, secret: str) 
 
 async def begin_selection(session: AsyncSession, cipher: Cipher, scope: Scope) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
+    await _require_live(session, scope)
     remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
     row.remote_revoked = remote_revoked
     _clear(row, "selecting")
@@ -280,6 +295,7 @@ async def begin_in_flow(
 ) -> dict[str, Any]:
     """用到时发起授权：不选档位。已有未过期的授权流程就复用，旧令牌在这里才作废。"""
     row, secret = await _row(session, cipher, scope)
+    await _require_live(session, scope)
     if (
         row.status == "pending"
         and row.pending_enc
@@ -307,6 +323,7 @@ async def choose_authorization(
     selection_task_id: int | None = None,
 ) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
+    await _require_live(session, scope)
     if (
         row.status != "selecting"
         or row.selection_chat_id != scope.chat_id
@@ -383,6 +400,7 @@ async def authorization_status(
     session: AsyncSession, cipher: Cipher, scope: Scope
 ) -> dict[str, Any]:
     row, secret = await _row(session, cipher, scope)
+    await _require_live(session, scope)
     if row.status != "pending" or not row.pending_enc:
         return _state(row, cipher)
     now = datetime.now(UTC)
@@ -452,8 +470,6 @@ async def revoke_grant(
         if row.token_enc:
             remote_revoked = False
             if cipher is not None:
-                from coreman.core.db.models import Bot
-
                 bot = await session.get(Bot, bot_id)
                 try:
                     if bot is None:
@@ -492,6 +508,9 @@ async def _authorize(
     endpoint = endpoints.match(method, path)
     if endpoint is None:
         raise PersonalError("invalid_tool_or_arguments")
+    if write_fuse.blocked(scope.bot, endpoint.kind):
+        # 个人助理的写操作只能由平台在审批通过后执行；任何别的路径到这里为止。
+        raise PersonalError("approval_required")
     row, secret = await _row(session, cipher, scope)
     if row.status != "connected" or not row.token_enc:
         raise PersonalError("authorization_required")

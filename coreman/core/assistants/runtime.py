@@ -1,0 +1,346 @@
+"""个人助理用哪台运行时：只派到能在沙箱里跑的节点；池里挑助理最少的节点；节点不可用就暂停。
+
+- 能派的节点：在线、启用、没在排空，且这种 AI 的能力里声明了 `assistant_sandbox_v1`（守护进程
+  启动自检通过，见 runtime_daemon/sandbox.py）。macOS、容器里没有用户命名空间、没装 bubblewrap、
+  还没升级的节点都不会声明它。
+- 能绑的实例：助理池里的（`relay_servers.assistant_pool`），或所有者本人的私有运行时。
+- 开通（1F）调 `pick_pool_relay` 选池里助理最少的在线节点；之后每轮都不重新选（设计「不做」）。
+  所在节点不可用时这一轮不跑，私聊告诉所有者，不回落到池。
+- 隔离：助理所在的节点（不论池里的还是所有者的私有运行时）上不能有普通员工，与它同机同用户的
+  节点也不能有（`node_isolated`）。每轮开轮前、助理换运行时、普通员工绑定或换运行时都按这一条查。
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from sqlalchemy import ColumnClause, and_, func, literal_column, or_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from coreman.core.bots.relay_policy import relay_available
+from coreman.core.db.models import Bot, RelayServer, RuntimeNode
+from coreman.core.runtime_nodes.transport import online
+
+SANDBOX_CAPABILITY = "assistant_sandbox_v1"
+# 管理台设置项：每个节点同时跑的个人助理轮次上限（节点领取时执行）。
+ASSISTANT_CONCURRENCY_KEY = "assistant_node_concurrency"
+PAUSE_MESSAGES = {
+    "runtime_missing": "还没有分配可用的运行时，请联系管理员",
+    "runtime_not_allowed": "绑定的运行时既不在助理池里、也不是你本人的私有运行时，请联系管理员",
+    "runtime_disabled": "绑定的运行时已停用，请联系管理员",
+    "runtime_offline": "绑定的运行时现在离线，恢复在线后再发一次消息即可",
+    "runtime_draining": "绑定的运行时正在维护，稍后再发一次消息即可",
+    "sandbox_unsupported": "绑定的运行时还不能隔离运行个人助理（需要升级或不支持），请联系管理员",
+    "login_required": "绑定的运行时 AI 未登录，请联系管理员",
+    "runtime_shared": (
+        "绑定的运行时没有与普通员工隔开（要用专为个人助理安装的运行时），请联系管理员"
+    ),
+}
+# 记录本身还不能（或已不能）跑轮次：开通没走完、正在停用。这两句不说「暂停」。
+LIFECYCLE_MESSAGES = {
+    "provisioning": "你的个人助理还没开通完：请先点私聊里的授权卡片完成飞书授权，完成后会告诉你。",
+    "deprovisioning": "你的个人助理正在停用（或已停用），不再处理消息；停用完成后可以重新开通。",
+}
+
+
+def node_sandboxed(node: RuntimeNode, provider: str | None = None) -> bool:
+    """节点（某种 AI，或任一种）声明了能在沙箱里跑助理。"""
+    capabilities: dict[str, Any] = node.capabilities or {}
+    providers = [provider] if provider else list(capabilities)
+    return any(
+        isinstance(capabilities.get(p), dict) and capabilities[p].get(SANDBOX_CAPABILITY) is True
+        for p in providers
+    )
+
+
+def unavailable_reason(relay: RelayServer, node: RuntimeNode | None) -> str | None:
+    """这个实例现在能不能跑助理的一轮；能跑返回 None。"""
+    if not relay_available(relay) or node is None or not node.is_active:
+        return "runtime_disabled"
+    if not online(node):
+        return "runtime_offline"
+    if node.draining:
+        return "runtime_draining"
+    if not node_sandboxed(node, relay.model_provider):
+        return "sandbox_unsupported"
+    cap = (node.capabilities or {}).get(relay.model_provider) or {}
+    if cap.get("login") != "ready":
+        return "login_required"
+    return None
+
+
+def eligible(relay: RelayServer, owner_id: uuid.UUID | None) -> bool:
+    """助理能不能绑这个实例：助理池里的，或所有者本人的私有运行时。"""
+    if relay.assistant_pool:
+        return True
+    return relay.visibility == "private" and owner_id is not None and relay.owner_id == owner_id
+
+
+async def node_isolated(session: AsyncSession, node: RuntimeNode) -> bool:
+    """这台节点能不能承载个人助理：上报了本机指纹与系统用户且不是 root，节点上没有普通员工（不论是否
+    启用，含正在迁移过来的），与它同机同用户的其他节点上也没有。一条查询。
+
+    普通员工不在沙箱里：与助理同一个系统用户时，谁能和它说话谁就能读到助理的工作目录，以及这一轮
+    还原出来的转录与凭证副本。
+    """
+    if not node.machine_fingerprint or node.uid is None or node.uid == 0:
+        return False
+    nodes = select(RuntimeNode.id).where(
+        or_(
+            RuntimeNode.id == node.id,
+            and_(
+                RuntimeNode.machine_fingerprint == node.machine_fingerprint,
+                RuntimeNode.uid == node.uid,
+            ),
+        )
+    )
+    relays = select(RelayServer.id).where(RelayServer.runtime_node_id.in_(nodes))
+    found = await session.scalar(
+        select(Bot.id)
+        .where(
+            Bot.kind == "standard",
+            or_(Bot.relay_server_id.in_(relays), Bot.workspace_target_relay_id.in_(relays)),
+        )
+        .limit(1)
+    )
+    return found is None
+
+
+async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
+    """助理现在为什么不能跑一轮；能跑返回 None。
+
+    记录不是 active（开通没走完、正在或已经停用）先挡下，不查库。节点的其它条件都满足时再查一次
+    隔离（`node_isolated`，每轮一条查询）。
+    """
+    if bot.assistant_state != "active":
+        return (
+            "deprovisioning"
+            if bot.assistant_state in ("deprovisioning", "deprovisioned")
+            else ("provisioning")
+        )
+    relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
+    if relay is None:
+        return "runtime_missing"
+    if not eligible(relay, bot.owner_id):
+        return "runtime_not_allowed"
+    node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
+    reason = unavailable_reason(relay, node)
+    if reason is None and node is not None and not await node_isolated(session, node):
+        return "runtime_shared"
+    return reason
+
+
+def pause_message(reason: str) -> str:
+    if reason in LIFECYCLE_MESSAGES:
+        return LIFECYCLE_MESSAGES[reason]
+    detail = PAUSE_MESSAGES.get(reason, PAUSE_MESSAGES["runtime_missing"])
+    return f"你的个人助理暂停了：{detail}。"
+
+
+def assignment_error(
+    relay: RelayServer, node: RuntimeNode | None, owner_id: uuid.UUID | None
+) -> str | None:
+    """改绑时的校验：只能绑助理池或本人的私有运行时，且那台现在就能跑助理。"""
+    if not eligible(relay, owner_id):
+        return "个人助理只能使用助理池或你本人的私有运行时"
+    reason = unavailable_reason(relay, node)
+    return None if reason is None else PAUSE_MESSAGES[reason].removeprefix("绑定的")
+
+
+async def switch_target_error(
+    session: AsyncSession, relay: RelayServer, node: RuntimeNode | None, owner_id: uuid.UUID | None
+) -> str | None:
+    """助理改绑到这个实例的校验：`assignment_error` 之外，目标节点还要与普通员工隔开。"""
+    problem = assignment_error(relay, node, owner_id)
+    if problem is None and node is not None and not await node_isolated(session, node):
+        return PAUSE_MESSAGES["runtime_shared"].removeprefix("绑定的")
+    return problem
+
+
+async def pick_pool_relay(session: AsyncSession, provider: str) -> RelayServer | None:
+    """开通时用：池里这种 AI、现在能跑助理的实例中，所在节点上助理最少的一个（同数按编号）。"""
+    relays = list(
+        await session.scalars(
+            select(RelayServer)
+            .where(
+                RelayServer.assistant_pool.is_(True),
+                RelayServer.is_active.is_(True),
+                RelayServer.model_provider == provider,
+                RelayServer.runtime_node_id.is_not(None),
+            )
+            .order_by(RelayServer.id)
+        )
+    )
+    if not relays:
+        return None
+    node_ids = {r.runtime_node_id for r in relays}
+    found = await session.scalars(select(RuntimeNode).where(RuntimeNode.id.in_(node_ids)))
+    nodes = {n.id: n for n in found}
+    rows = await session.execute(
+        select(RelayServer.runtime_node_id, func.count(Bot.id))
+        .join(Bot, Bot.relay_server_id == RelayServer.id)
+        .where(
+            RelayServer.runtime_node_id.in_(node_ids),
+            Bot.kind == "assistant",
+            Bot.enabled.is_(True),
+        )
+        .group_by(RelayServer.runtime_node_id)
+    )
+    load: dict[uuid.UUID | None, int] = {node_id: count for node_id, count in rows.all()}
+    ready = [
+        r
+        for r in relays
+        if r.runtime_node_id is not None
+        and unavailable_reason(r, nodes.get(r.runtime_node_id)) is None
+    ]
+    return min(ready, key=lambda r: (load.get(r.runtime_node_id, 0), str(r.id)), default=None)
+
+
+async def hosts_standard_bots(session: AsyncSession, node_id: uuid.UUID) -> bool:
+    """节点上有没有绑定普通员工（不论是否启用：停用的员工之后还能再启用），含正在迁移过来的。
+
+    普通员工不在沙箱里、与助理是同一个系统用户，助理池节点上一个都不能有。切换运行时先在提交
+    迁移隔离的同一个事务里写下目标（workspace_target_relay_id），之后才放开节点锁，所以入池在拿到
+    节点锁后一定看得到迁移途中的员工；最终绑定落下时这个标记还在，直到同一事务里清掉。
+    """
+    on_node = select(RelayServer.id).where(RelayServer.runtime_node_id == node_id)
+    count = await session.scalar(
+        select(func.count(Bot.id)).where(
+            Bot.kind == "standard",
+            or_(
+                Bot.relay_server_id.in_(on_node),
+                Bot.workspace_target_relay_id.in_(on_node),
+            ),
+        )
+    )
+    return bool(count)
+
+
+async def lock_node(session: AsyncSession, node_id: uuid.UUID) -> None:
+    """对这个节点的「入池 / 绑定普通员工」判断串行进行，到事务结束。
+
+    用事务级咨询锁而不锁 runtime_nodes 的行：心跳一直在更新那一行。绑定与换运行时（目标有节点时）
+    和入池接口（只锁被加入的那个节点）用同一把锁。只锁目标节点、不锁同机同用户的兄弟节点：
+    兄弟节点上的并发绑定与入池仍可能同时通过各自的检查，但那要求两个管理操作在同一时刻落在
+    同一台机器的两个节点上，且之后每次心跳与入池复核都会暴露，这里接受这个窗口以保持加锁顺序简单。
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"assistant-pool-node:{node_id}"},
+    )
+
+
+POOL_NODE_MESSAGE = "目标运行时是个人助理池的节点，不能承载普通员工"
+SHARED_POOL_USER_MESSAGE = (
+    "目标运行时所在机器上以同一个系统用户运行的另一个节点属于个人助理池，不能承载普通员工"
+)
+ASSISTANT_NODE_MESSAGE = "目标运行时上有个人助理，不能承载普通员工"
+SHARED_ASSISTANT_USER_MESSAGE = (
+    "目标运行时所在机器上以同一个系统用户运行的另一个节点上有个人助理，不能承载普通员工"
+)
+SANDBOX_NODE_MESSAGE = "目标运行时是个人助理专用的实例，不能承载普通员工"
+SHARED_USER_MESSAGE = (
+    "同一台机器上以同一个系统用户运行的另一个节点承载了普通员工或不在助理池里："
+    "助理节点要用单独的系统用户安装"
+)
+
+
+async def is_pool_node(session: AsyncSession, node_id: uuid.UUID) -> bool:
+    """节点上有没有实例在助理池里。"""
+    found = await session.scalar(
+        select(RelayServer.id)
+        .where(RelayServer.runtime_node_id == node_id, RelayServer.assistant_pool.is_(True))
+        .limit(1)
+    )
+    return found is not None
+
+
+# 节点能力里任一种 AI 声明了沙箱能力（与 node_sandboxed 同义），在 SQL 里判断。
+_SANDBOXED_PATH: ColumnClause[Any] = literal_column(
+    f"'$.*.{SANDBOX_CAPABILITY} ? (@ == true)'::jsonpath"
+)
+
+
+async def standard_bind_error(session: AsyncSession, relay: RelayServer) -> str | None:
+    """普通员工绑定或换到这个实例时的校验：助理池节点、绑着或正在迁来个人助理的节点、与它们同机同用户
+    的节点，以及声明了沙箱能力的节点（助理专用实例，本就拒绝普通轮次）上都不能有普通员工。
+
+    只在绑定与换运行时调用；目标有节点时先取节点锁，再用一条查询同时查这几样（节点没上报指纹或 uid
+    时，同机同用户那一半恒为假）。
+    """
+    if relay.runtime_node_id is None:
+        return None
+    node_id = relay.runtime_node_id
+    await lock_node(session, node_id)
+    me = select(RuntimeNode.machine_fingerprint).where(RuntimeNode.id == node_id).scalar_subquery()
+    my_uid = select(RuntimeNode.uid).where(RuntimeNode.id == node_id).scalar_subquery()
+    assistant_here = (
+        select(Bot.id)
+        .where(
+            Bot.kind == "assistant",
+            or_(
+                Bot.relay_server_id == RelayServer.id,
+                Bot.workspace_target_relay_id == RelayServer.id,
+            ),
+        )
+        .exists()
+    )
+    here = RuntimeNode.id == node_id
+    sandboxed = and_(here, func.jsonb_path_exists(RuntimeNode.capabilities, _SANDBOXED_PATH))
+    found = (
+        await session.execute(
+            select(here, RelayServer.assistant_pool, assistant_here)
+            .join(RelayServer, RelayServer.runtime_node_id == RuntimeNode.id)
+            .where(
+                or_(RelayServer.assistant_pool.is_(True), assistant_here, sandboxed),
+                or_(here, and_(RuntimeNode.machine_fingerprint == me, RuntimeNode.uid == my_uid)),
+            )
+            .order_by(here.desc(), RelayServer.assistant_pool.desc(), assistant_here.desc())
+            .limit(1)
+        )
+    ).first()
+    if found is None:
+        return None
+    on_target, pool, assistant = (bool(v) for v in found)
+    if pool:
+        return POOL_NODE_MESSAGE if on_target else SHARED_POOL_USER_MESSAGE
+    if assistant:
+        return ASSISTANT_NODE_MESSAGE if on_target else SHARED_ASSISTANT_USER_MESSAGE
+    return SANDBOX_NODE_MESSAGE
+
+
+async def pool_admission_error(
+    session: AsyncSession, relay: RelayServer, node: RuntimeNode | None
+) -> str | None:
+    """实例能不能加入助理池；能加入返回 None。
+
+    要求：共享（非私有）实例；节点声明了沙箱能力；节点上报了本机指纹与系统用户且不是 root；节点上
+    没有普通员工；同一台机器上以同一个系统用户运行的其他节点也都是助理池节点、也没有普通员工。
+    调用方（入池接口）必须先对被加入的那个节点调 `lock_node`（只锁它），与普通员工的绑定、换运行时
+    互斥。后两条保证助理节点与承载普通员工的守护进程是两个不同的系统用户：普通员工不在沙箱里，同一个
+    用户就读得到助理这一轮的临时目录、转录与凭证副本。
+    """
+    if relay.visibility == "private":
+        return "私有运行时不能加入助理池"
+    if node is None or not node_sandboxed(node, relay.model_provider):
+        return "该运行时还不能隔离运行个人助理，请先升级并确认节点自检通过"
+    if not node.machine_fingerprint or node.uid is None:
+        return "该节点没有上报本机指纹与系统用户，请先升级运行时"
+    if node.uid == 0:
+        return "助理节点不能以 root 运行"
+    if await hosts_standard_bots(session, node.id):
+        return "该节点上还有普通员工：助理池节点只承载个人助理"
+    siblings = await session.scalars(
+        select(RuntimeNode).where(
+            RuntimeNode.machine_fingerprint == node.machine_fingerprint,
+            RuntimeNode.uid == node.uid,
+            RuntimeNode.id != node.id,
+        )
+    )
+    for sibling in siblings:
+        if await hosts_standard_bots(session, sibling.id) or not await is_pool_node(
+            session, sibling.id
+        ):
+            return SHARED_USER_MESSAGE
+    return None

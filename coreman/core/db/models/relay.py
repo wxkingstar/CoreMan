@@ -62,6 +62,8 @@ class RelayServer(TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
     description: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # 个人助理池：开通时在池里挑助理最少的在线节点（见 core/assistants/runtime.py）。
+    assistant_pool: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # 节点按 AI 类型派生的上报令牌（密文），用于 /api/infra/relay/* 与记忆上报的 Bearer 校验。
     agent_token_enc: Mapped[str | None] = mapped_column(Text, comment="enc")
     rate_limit_5h_used_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))

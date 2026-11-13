@@ -100,6 +100,7 @@ async def advance_choice(
             "waiting_for_text": False,
             "waiting_since": None,
         },
+        bot_id=st.bot_id,
     )
     if nxt < total:
         question = questions[nxt]

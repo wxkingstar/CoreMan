@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.crypto import Cipher
@@ -96,6 +97,9 @@ async def invoke(
     operation: str,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # 守护进程在沙箱外读写助理的工作目录，会照办助理放进去的链接与 Git 配置：一律不开放。
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("查看或修改工作文件"))
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     if relay is None or not relay.is_active or relay.runtime_node_id is None:
         raise ApiError(409, 409, "运行时未分配或不可用")

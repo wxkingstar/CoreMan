@@ -17,10 +17,12 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.apps import sync_bot_credentials
 from coreman.core.audit import diff_dict, record_audit
+from coreman.core.bots.platform_account import lock_feishu_app, standard_bot_uses
 from coreman.core.contacts import runner
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import CAPABILITIES, ContactSyncRun, PlatformApp, User
+from coreman.core.db.models import CAPABILITIES, Bot, ContactSyncRun, PlatformApp, User
 from coreman.core.masking import is_masked, mask_secret
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.platforms.wecom import WeComClient, WeComError
@@ -62,6 +64,8 @@ class PlatformAppIn(BaseModel):
             raise ValueError("企微应用必须填写 corp_id")
         if self.platform == "feishu" and not self.app_id:
             raise ValueError("飞书应用必须填写 app_id")
+        if "assistant" in self.capabilities and self.platform != "feishu":
+            raise ValueError("个人助理应用只支持飞书")
         return self
 
 
@@ -163,6 +167,15 @@ def _cipher(request: Request) -> Cipher:
     return request.app.state.cipher  # type: ignore[no-any-return]
 
 
+async def _refuse_taken_app(session: AsyncSession, cipher: Cipher, body: PlatformAppIn) -> None:
+    """个人助理应用不能用普通机器人已经在用的 app_id：两边会抢同一条连接，普通机器人可能掉线。"""
+    if "assistant" not in body.capabilities or not body.app_id:
+        return
+    await lock_feishu_app(session, body.app_id)
+    if await standard_bot_uses(session, cipher, body.app_id):
+        raise ApiError(409, 409, "该飞书应用已分配给普通机器人，不能作为个人助理应用")
+
+
 @router.get("")
 async def list_apps(
     request: Request,
@@ -198,6 +211,7 @@ async def create_app(
         # 否则 secret 会被写成占位串、callback_token/aes_key 会被静默置空。
         raise ApiError(422, 422, "密钥不能是脱敏值")
     cipher = _cipher(request)
+    await _refuse_taken_app(session, cipher, body)
     app = PlatformApp(secret_enc="")
     _apply(cipher, app, body, None)
     session.add(app)
@@ -243,8 +257,12 @@ async def update_app(
     cipher = _cipher(request)
     app = await load_app(session, app_id)
     require_if_match(request, app.version)
+    await _refuse_taken_app(session, cipher, body)
     before = _plain(cipher, app)
     _apply(cipher, app, body, before)
+    if "assistant" in app.capabilities and app.enabled:
+        await session.flush()
+        await sync_bot_credentials(session, cipher, app)
     await record_audit(
         session,
         action="platform_app.update",
@@ -269,6 +287,8 @@ async def delete_app(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     app = await load_app(session, app_id)
+    if await session.scalar(select(Bot.id).where(Bot.platform_app_id == app.id).limit(1)):
+        raise ApiError(409, 409, "还有个人助理在使用这个应用，请先停用它们")
     snapshot = _public(app)  # 密钥字段一个都不进审计
     await session.delete(app)
     await record_audit(

@@ -123,3 +123,74 @@ async def test_health_token_uses_health_task_timeout_and_external_provider(
     assert fields == {"username": ["creator"], "audience": ["erp"], "expires_in": ["300"]}
     assert requests[0].env_vars["BOT_TOKEN_ERP"] == "health-issued-token"
     assert "health-service-secret" not in repr(requests[0])
+
+
+async def test_health_refuses_an_assistant_and_sends_nothing(client, db_session, monkeypatch):
+    from tests.integration.assistant_helpers import into_assistant
+
+    bot = await prepare(client, db_session)
+    owner = await db_session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    db_session.add(
+        UserIdentity(user_id=owner.id, platform="feishu", platform_user_id="owner-feishu")
+    )
+    await into_assistant(db_session, bot, owner)
+    sent = []
+
+    class Fake:
+        async def chat_stream(self, request, **kwargs):
+            sent.append(request)
+            yield FinishEvent("stop")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_report, "make_client", lambda _: Fake())
+    response = await client.post(f"/api/admin/bots/{bot.id}/health-report")
+    assert response.status_code == 422 and "个人助理暂不支持" in response.text
+    assert sent == []
+
+
+async def test_health_rechecks_the_reloaded_bot_before_sending(client, db_session, monkeypatch):
+    bot = await prepare(client, db_session)
+    sent = []
+
+    class Fake:
+        async def chat_stream(self, request, **kwargs):
+            sent.append(request)
+            yield FinishEvent("stop")
+
+        async def aclose(self):
+            pass
+
+    calls = []
+
+    def flips(candidate):
+        calls.append(candidate)
+        return len(calls) > 1  # the entry check sees a standard bot, the reloaded one is not
+
+    monkeypatch.setattr(health_report, "make_client", lambda _: Fake())
+    monkeypatch.setattr(health_report, "is_assistant", flips)
+    response = await client.post(f"/api/admin/bots/{bot.id}/health-report")
+    assert "event: error" in response.text and "event: done" not in response.text
+    assert sent == [] and len(calls) == 2
+
+
+async def test_health_request_body_for_an_ordinary_bot_has_no_sandbox_fields(
+    client, db_session, monkeypatch
+):
+    bot = await prepare(client, db_session)
+    sent = []
+
+    class Fake:
+        async def chat_stream(self, request, **kwargs):
+            sent.append(request.to_body())
+            yield TextDelta("ok")
+            yield FinishEvent("stop")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_report, "make_client", lambda _: Fake())
+    await client.post(f"/api/admin/bots/{bot.id}/health-report")
+    assert "sandbox" not in sent[0] and "transcript" not in sent[0]

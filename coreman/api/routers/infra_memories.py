@@ -88,7 +88,8 @@ async def workspaces(
             select(Bot.working_dir)
             .where(Bot.relay_server_id == relay.id)
             .group_by(Bot.working_dir)
-            .having(func.count() == 1)
+            # 个人助理的记忆不回收：目录不列出来，节点就不会把内容发上来。
+            .having(func.count() == 1, func.bool_and(Bot.kind == "standard"))
             .order_by(Bot.working_dir)
             .offset((page - 1) * 500)
             .limit(501)

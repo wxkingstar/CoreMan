@@ -12,6 +12,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import workspace_prompt
+from coreman.core.assistants.approvals import prompt as approval_prompt
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.commands import command_text, normalize
 from coreman.core.db.models import FeishuPersonalGrant, RuntimeNode
@@ -117,7 +120,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
     except ValueError as exc:
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=str(exc))
         await tasks.finish(
-            session, ctx.task.id, status="succeeded", result={"personal_connect_denied": True}
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"personal_connect_denied": True},
+            bot_id=ctx.task.bot_id,
         )
         return True
     from coreman.runtime.worker.personal_cards import selection_card
@@ -138,7 +145,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
         },
     )
     await tasks.finish(
-        session, ctx.task.id, status="succeeded", result={"personal_authorization_flow": True}
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"personal_authorization_flow": True},
+        bot_id=ctx.task.bot_id,
     )
     return True
 
@@ -222,6 +233,9 @@ async def configure(
     )
     # 本人定时任务的说明由 chat.schedules 统一追加（飞书与企业微信共用）。
     rules, note = feishu_guidance(row, base_url, scheduled=False)
+    if is_assistant(scope.bot):
+        # 个人助理：写类工具改为提交审批，工作目录不放个人信息，规则写进稳定段。
+        rules += approval_prompt.RULES + workspace_prompt.WORKSPACE_RULES
     ctx.turn_notes.append(note)
     if ctx.task.payload.get(resume.PAYLOAD_KEY):
         ctx.turn_notes.append("- 本人飞书：用户刚完成授权，这一轮是自动续接，请直接继续原来的事。")

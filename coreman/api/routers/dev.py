@@ -22,6 +22,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.chat_logs import chat_log_out
 from coreman.api.security import verify_csrf
+from coreman.core.assistants import sealed
 from coreman.core.db.models import Bot, ChatLog, InboundEvent, Task, TaskStream, User
 from coreman.core.wecom.messages import InboundMessage, Part, Sender, TextPart
 from coreman.core.wecom.stream_render import StreamView, render_wecom_stream
@@ -172,6 +173,8 @@ async def get_task(
         and (via_bot_token(request) or log.user_id != actor.id)
     ):
         raise not_found("任务不存在")
+    # 个人助理的内容只对所有者本人解密：按主键取到的任务与流已自动还原，不是本人就收回去。
+    await sealed.open_rows(session, [task, stream, log], viewer=actor.id)
     now = datetime.now(UTC)
     return {
         "code": 0,

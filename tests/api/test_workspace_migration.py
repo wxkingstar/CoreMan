@@ -1154,3 +1154,242 @@ async def test_shared_directory_needs_both_runtimes_and_cleans_up_on_the_source(
         await workspace_transfer.shared_directory(bot, old, target, bot.working_dir, None)
     assert caught.value.status_code == 409 and "升级" in caught.value.message
     assert all(op == "ping" for op, _, _ in calls)
+
+
+async def test_ordinary_cross_node_switch_keeps_its_node_command_sequence(
+    client, db_session, monkeypatch, tmp_path
+):
+    """助理那边的改动不碰普通员工：跨节点复制换机向节点发的命令与顺序原样不变。"""
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    (tmp_path / "source" / bot.bot_key / "report.txt").write_text("数据")
+    seen.clear()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    assert [op for op, _ in seen] == [
+        "ping",
+        "workspace-info",
+        "ping",
+        "read-memory",
+        "ping",
+        "workspace-export",
+        "workspace-import",
+        "workspace-read",
+        "workspace-import",
+        "workspace-read",
+        "workspace-import",
+        "workspace-read",
+        "workspace-import",
+        "workspace-finish",
+        "ping",
+    ]
+
+
+async def _pool(session, relay):
+    """把实例放进助理池，所在节点在线并声明能隔离运行助理。"""
+    from coreman.core.db.models import RuntimeNode
+    from coreman.core.runtime_nodes.transport import now
+
+    relay.assistant_pool = True
+    node = await session.get(RuntimeNode, relay.runtime_node_id)
+    capabilities = dict(node.capabilities or {})
+    capabilities[relay.model_provider] = {
+        **capabilities.get(relay.model_provider, {}),
+        "installed": True,
+        "login": "ready",
+        "assistant_sandbox_v1": True,
+    }
+    node.capabilities, node.heartbeat_at = capabilities, now()
+    # 助理专用实例上报本机指纹与系统用户（不是 root）。
+    node.machine_fingerprint = node.machine_fingerprint or f"fp-{node.id.hex}"
+    node.uid = node.uid or 1001
+    await session.commit()
+
+
+async def _assistant_agents(client, db_session, tmp_path, monkeypatch):
+    """真实节点上的个人助理：源目录里有它写的文件，目标是另一台助理池节点。"""
+    from tests.integration.assistant_helpers import into_assistant
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    (tmp_path / "source" / bot.bot_key / "notes.md").write_text("助理写的文件")
+    owner = await db_session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    await into_assistant(db_session, bot, owner)
+    await _pool(db_session, target)
+    await db_session.refresh(bot)
+    seen.clear()
+    await login_existing(client, db_session, owner)
+    return bot, old, target, agents, seen
+
+
+async def _switch(client, bot, target, query="", **body):
+    return await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay{query}",
+        json={"relay_server_id": str(target.id), **body},
+        headers={"If-Match": str(bot.version)},
+    )
+
+
+async def test_assistant_switch_takes_no_directory_and_no_existing_mode(
+    client, db_session, monkeypatch, tmp_path
+):
+    """助理换运行时只落到平台分配的默认目录：自选目录、「使用已有目录」在同实例和跨实例都拒绝。"""
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    elsewhere = str(tmp_path / "destination" / ".coreman-health")
+    for relay in (old, target):
+        for query in ("", "?background=true"):
+            refused = await _switch(client, bot, relay, query, target_directory=elsewhere)
+            assert refused.status_code == 422, refused.text
+            assert "个人助理暂不支持" in refused.text
+    refused = await _switch(client, bot, target, workspace_mode="existing")
+    assert refused.status_code == 422 and "个人助理暂不支持" in refused.text, refused.text
+    assert seen == []
+    # 同一实例、只换模型（不带目录）照常。
+    kept = await _switch(client, bot, old)
+    assert kept.status_code == 200, kept.text
+
+
+async def test_assistant_cross_node_switch_only_initialises_a_fresh_directory(
+    client, db_session, monkeypatch, tmp_path
+):
+    """跨节点换机：不导出、不复制、不克隆、不迁会话与记忆，只在目标上初始化一个全新的空目录。"""
+    from coreman.core.chat import sessions
+
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    info = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="u1",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=None,
+    )
+    sid = info.relay_session_id
+    await db_session.commit()
+    response = await _switch(client, bot, target)
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["memory_status"] == "not_transferred"
+    assert [op for op, _ in seen] == ["ping", "workspace-info", "workspace-init"]
+    await db_session.refresh(bot)
+    destination = tmp_path / "destination" / bot.bot_key
+    assert bot.relay_server_id == target.id and bot.working_dir == str(destination)
+    assert bot.workspace_state == "ready" and bot.workspace_target_relay_id is None
+    assert (destination / "AGENTS.md").exists() and not (destination / "notes.md").exists()
+    # 现有换机逻辑：会话文件没搬过去，relay 会话换新，首轮按原会话补上下文（平台上的转录不续用）。
+    (row,) = await sessions.list_for_bot(db_session, bot.id)
+    await db_session.refresh(row)
+    assert row.relay_session_id != sid and row.inherited_from == sid
+
+
+async def test_assistant_switch_into_an_existing_directory_is_refused_cleanly(
+    client, db_session, monkeypatch, tmp_path
+):
+    """目标目录已在（比如节点上没有标记的公共目录）：拒绝，助理留在原运行时、原状态，迁移标记清掉。"""
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    planted = tmp_path / "destination" / bot.bot_key
+    planted.mkdir()
+    (planted / "settings.json").write_text("{}")
+    response = await _switch(client, bot, target)
+    assert response.status_code == 422, response.text
+    assert "个人助理暂不支持" in response.text
+    operations = {op for op, _ in seen}
+    assert operations <= {"ping", "workspace-info", "workspace-probe"}, operations
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and bot.working_dir == working_dir
+    assert bot.workspace_state == "ready"
+    assert bot.workspace_target_relay_id is None and bot.workspace_target_dir is None
+    assert bot.workspace_operation_id is None
+    assert (planted / "settings.json").read_text() == "{}"
+
+
+async def test_assistant_rebind_on_the_same_node_leaves_the_directory_alone(
+    client, db_session, monkeypatch, tmp_path
+):
+    """同一节点上换到另一个助理池实例：还是原来那个目录，节点上对它什么都不做。"""
+    from coreman.core.db.models import RelayServer
+
+    bot, old, _, agents, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    second = RelayServer(
+        runtime_node_id=old.runtime_node_id,
+        name="pool-two",
+        model_provider="claude",
+        assistant_pool=True,
+    )
+    db_session.add(second)
+    await db_session.commit()
+    agents[second.id] = agents[old.id]
+    response = await _switch(client, bot, second)
+    assert response.status_code == 200, response.text
+    assert [op for op, _ in seen] == ["ping", "workspace-info"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == second.id and bot.working_dir == working_dir
+    assert (tmp_path / "source" / bot.bot_key / "notes.md").read_text() == "助理写的文件"
+
+
+async def test_assistant_not_active_cannot_switch_or_preview(
+    client, db_session, monkeypatch, tmp_path
+):
+    """开通没完成、正在停用或已停用的助理：换运行时（当场或后台）与换机预览都拒绝，不碰节点。"""
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    for state in ("deprovisioned", "deprovisioning", "provisioning"):
+        bot.assistant_state = state
+        await db_session.commit()
+        await db_session.refresh(bot)
+        for query in ("", "?background=true"):
+            refused = await _switch(client, bot, target, query)
+            assert refused.status_code == 409, refused.text
+            assert "不能换运行时" in refused.text
+        preview = await client.post(
+            f"/api/admin/bots/{bot.id}/workspace/switch-preview",
+            json={"relay_server_id": str(target.id)},
+        )
+        assert preview.status_code == 409 and "不能换运行时" in preview.text, preview.text
+    assert seen == []
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and bot.working_dir == working_dir
+
+
+async def test_assistant_stopped_mid_switch_aborts_and_retires_the_new_directory(
+    client, db_session, monkeypatch, tmp_path
+):
+    """新目录建好之后、绑定之前助理开始停用：换机作罢，新目录登记待删，绑定与目录都不变。"""
+    from sqlalchemy import text
+
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.db.models import AssistantRetiredDir
+
+    bot, old, target, _, seen = await _assistant_agents(client, db_session, tmp_path, monkeypatch)
+    working_dir = bot.working_dir
+    real = workspace_transfer.call_agent
+
+    async def call(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "workspace-init":
+            async with db_session.bind.begin() as conn:
+                await conn.execute(
+                    text("UPDATE bots SET assistant_state = 'deprovisioning' WHERE id = :id"),
+                    {"id": bot.id},
+                )
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    response = await _switch(client, bot, target)
+    assert response.status_code == 409, response.text
+    assert [op for op, _ in seen] == ["ping", "workspace-info", "workspace-init"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == old.id and bot.working_dir == working_dir
+    assert bot.workspace_operation_id is None and bot.workspace_target_relay_id is None
+    retired = list(
+        await db_session.scalars(
+            select(AssistantRetiredDir).where(AssistantRetiredDir.bot_id == bot.id)
+        )
+    )
+    destination = str(tmp_path / "destination" / bot.bot_key)
+    assert [(r.relay_server_id, r.working_dir) for r in retired] == [(target.id, destination)]

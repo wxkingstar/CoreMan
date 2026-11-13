@@ -32,9 +32,13 @@ RETURNING bot_id
 
 
 async def ensure_rows(session: AsyncSession, platform: str) -> None:
-    """为该平台的每个 bot 补一行租约（含停用的 bot：停用只由 acquirable 过滤，行本身保留）。"""
+    """为该平台的每个 bot 补一行租约（含停用的 bot：停用只由 acquirable 过滤，行本身保留）。
+
+    个人助理记录除外：它们的连接按应用认领（见 `app_leases`），不各自占一行。
+    """
     missing = select(Bot.id, literal(platform)).where(
         Bot.platform == platform,
+        Bot.kind == "standard",
         ~exists(select(BotLease.bot_id).where(BotLease.bot_id == Bot.id)),
     )
     stmt = insert(BotLease).from_select(["bot_id", "platform"], missing)
@@ -48,6 +52,7 @@ async def acquirable(session: AsyncSession, platform: str) -> list[uuid.UUID]:
         .join(Bot, Bot.id == BotLease.bot_id)
         .where(
             Bot.enabled.is_(True),
+            Bot.kind == "standard",
             BotLease.platform == platform,
             # 与 _ACQUIRE_SQL 同源：排空标记不参与筛选，只看有没有活着的持有者。
             (BotLease.holder_instance.is_(None)) | (BotLease.heartbeat_at < stale),

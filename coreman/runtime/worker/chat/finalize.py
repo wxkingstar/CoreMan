@@ -26,10 +26,16 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.i18n.messages import msg
-from coreman.core.relay.client import RelayBusyError, RelayError, RelayInterruptedError
+from coreman.core.relay.client import (
+    RelayBusyError,
+    RelayError,
+    RelayInterruptedError,
+    UnsandboxedPoolRequest,
+)
 from coreman.core.relay.labels import load_nodes, relay_label, signed_in
 from coreman.core.relay.observations import HealthObservation, provider_failure, save_health
 from coreman.core.relay.quota import parse_quota, save_quota
+from coreman.core.runtime_nodes.transport import RuntimeQueueTimeout
 from coreman.core.wecom.cards import (
     choice_card,
     make_choice_prefix,
@@ -41,6 +47,12 @@ from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
 from coreman.runtime.worker.chat.records import log_entry
 from coreman.runtime.worker.context import TaskContext
+
+
+def never_reached_node(error: BaseException | None) -> bool:
+    """这一轮的请求确定没有到过节点：排队超时，且撤销时调用仍在排队（节点从没领到）。"""
+    cause = error.__cause__ if isinstance(error, RelayBusyError) else None
+    return isinstance(cause, RuntimeQueueTimeout) and cause.unclaimed
 
 
 class FinalizeStage(ChatStageBase):
@@ -220,6 +232,7 @@ class FinalizeStage(ChatStageBase):
                 error_code=verdict.error_code,
                 error_message=verdict.error_message,
                 only_active=True,
+                bot_id=ctx.task.bot_id,
             )
             collaboration_silent = False
             if owned and intake.bot.platform == "feishu":
@@ -257,9 +270,13 @@ class FinalizeStage(ChatStageBase):
                     content=pre.content,
                 )
             )
+            # 个人助理在沙箱里的一轮：流里的额度、运行时、报错帧都可能是沙箱里的进程伪造的，不拿来改
+            # 实例的额度与健康记录（这一轮自己的用量照常记进它的对话记录）。
+            sandboxed = pre.request.sandbox
+            rate_limits = None if sandboxed else out.rate_limits
             # 额度来自本轮实际请求，比 Agent 定时上报新；写在这里，下面的额度预警读到的就是它。
-            quota = parse_quota(out.rate_limits) if out.rate_limits else None
-            if out.rate_limits and quota is None:
+            quota = parse_quota(rate_limits) if rate_limits else None
+            if rate_limits and quota is None:
                 from coreman.core.relay.quota import Quota
 
                 quota = Quota(
@@ -274,7 +291,9 @@ class FinalizeStage(ChatStageBase):
             # Actual provider output proves inference; cancellations, queue
             # waits and business/tool failures do not prove a model failure.
             observation = None
-            if (
+            if sandboxed:
+                pass
+            elif (
                 owned
                 and not out.cancelled
                 and not out.relay_error
@@ -294,7 +313,9 @@ class FinalizeStage(ChatStageBase):
             elif (
                 owned
                 and not out.cancelled
-                and not isinstance(out.error, (RelayBusyError, RelayInterruptedError))
+                and not isinstance(
+                    out.error, (RelayBusyError, RelayInterruptedError, UnsandboxedPoolRequest)
+                )
                 and (
                     out.relay_error
                     or (out.finish_reason == "error" and verdict.log_status == "error")
@@ -314,6 +335,16 @@ class FinalizeStage(ChatStageBase):
                 )
             if observation is not None:
                 await save_health(session, pre.relay.id, observation)
+            if pre.request.transcript is not None and never_reached_node(out.error):
+                # 排队超时、确定没有节点领到：交接编号作废，下一轮还能续上一份转录。
+                from coreman.core.assistants import transcripts
+
+                await transcripts.release(
+                    session,
+                    bot_id=intake.bot.id,
+                    session_id=pre.info.relay_session_id,
+                    transfer=uuid.UUID(pre.request.transcript["transfer"]),
+                )
             # 记录与任务同一事务结束：不会出现任务结束了、记录还停在进行中。
             logged = owned and await chat_logs.finish_turn(session, entry)
             if (
@@ -400,7 +431,9 @@ class FinalizeStage(ChatStageBase):
                 replace(entry, response_content=ctx.redact(verdict.final_text))
             )
         elif verdict.final_text != logged_text:
-            ctx.chat_logs.submit_amend(ctx.task.id, ctx.redact(verdict.final_text))
+            ctx.chat_logs.submit_amend(
+                ctx.task.id, ctx.redact(verdict.final_text), bot_id=ctx.task.bot_id
+            )
         ctx.log.info(
             "task_finished",
             status=verdict.log_status,

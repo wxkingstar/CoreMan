@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core import personal_schedules as schedules
+from coreman.core.assistants.records import is_assistant
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
 
@@ -61,6 +62,8 @@ async def configure(
         or intake.chat_type not in ("single", "group")
         or not intake.speaker.known
         or intake.speaker.user_id is None
+        # 个人助理暂不支持定时任务：不下发凭据，也不在提示词里提。
+        or is_assistant(intake.bot)
     ):
         return system_prompt, env
     try:

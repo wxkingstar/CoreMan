@@ -19,6 +19,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -31,11 +32,13 @@ import httpx
 from runtime_daemon import PROTOCOL_VERSION, __version__, worktree
 from runtime_daemon.agent import (
     COMMAND_CANCEL,
+    SEAT_OPERATIONS,
     Agent,
     OperationError,
     atomic_write,
     operation_message,
 )
+from runtime_daemon.assistant_turns import AssistantTurns
 from runtime_daemon.lifecycle import (
     FatalConfigError,
     choose_socket_dir,
@@ -50,8 +53,11 @@ from runtime_daemon.logs import (
     configure_logging,
     rotate_copytruncate,
 )
+from runtime_daemon.sandbox import CAPABILITY as SANDBOX_CAPABILITY
+from runtime_daemon.sandbox import remove_tree
 from runtime_daemon.seats import SeatLogins, Seats, opencode_auth_file
 from runtime_daemon.tls import build_trust_bundle, client_context
+from runtime_daemon.workspace import MARKER, TRASH_DIR, TRASH_ENTRY_NAME, reserved
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
@@ -110,6 +116,25 @@ DRIVER_CONNECT_RETRY_SECONDS = 0.1
 HEAL_DEFER_ROUNDS = 30
 # Enrollment rejections worth retrying; any other 4xx will not change with the same token.
 RETRYABLE_ENROLL_STATUSES = {408, 429}
+
+# 助理专用实例（config.json 里 assistant_only 为 true）只接这些节点命令：平台对助理所在节点会发的
+# 探活、状态、额度、席位，开通与换运行时用到的目录检查与初始化，以及停用或换走之后删除助理的工作
+# 目录。其余命令（读写或执行工作目录里的内容、导出内容、遍历所有工作目录）一律以固定代码拒绝。
+# 经驱动的读请求只留探活与模型列表。
+ASSISTANT_ONLY_OPERATIONS = frozenset(
+    {
+        "ping",
+        "status",
+        "health-check",
+        "probe-rate-limits",
+        "workspace-info",
+        "workspace-probe",
+        "workspace-init",
+        "workspace-remove",
+        *SEAT_OPERATIONS,
+    }
+)
+ASSISTANT_ONLY_READS = frozenset({("GET", "/health"), ("GET", "/v1/models")})
 
 # 出站代理变量：大小写两套都写，curl 等程序只认小写的那两个。HTTPS 在前，读取时优先它。
 PROXY_ENV_KEYS: tuple[str, ...] = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
@@ -223,6 +248,24 @@ def blocked_env_keys(keys) -> list[str]:
         if name in BLOCKED_ENV_KEYS or name.startswith(BLOCKED_ENV_PREFIXES):
             found.add(str(key))
     return sorted(found)
+
+
+MACHINE_ID_FILES = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def machine_fingerprint(files: tuple[str, ...] = MACHINE_ID_FILES) -> str:
+    """本机的稳定指纹：机器编号的带前缀哈希，原值不出本机。读不到时为空串。
+
+    平台用它认出同一台机器上的几个节点（个人助理要求助理节点与普通员工的节点用不同的系统用户）。
+    """
+    for name in files:
+        try:
+            value = Path(name).read_text().strip()
+        except (OSError, ValueError):
+            continue
+        if value:
+            return hashlib.sha256(b"coreman-machine-v1:" + value.encode()).hexdigest()
+    return ""
 
 
 def environment() -> str:
@@ -389,6 +432,34 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
     return result
 
 
+def assistant_only_refusal(
+    method: str, path: str, data: dict, root: Path | None = None
+) -> str | None:
+    """助理专用实例对一条请求的裁决：不接就返回固定代码。
+
+    聊天请求必须带 `sandbox: true`（只在沙箱里跑）；节点命令只接名单上的；经驱动的读请求只留
+    探活与模型列表。给了工作目录根时，工作目录落在保留目录（健康探测目录、回收站）里的一律拒绝：
+    沙箱里的助理能写自己的工作目录，探测在沙箱外跑。
+    """
+    if path == "/v1/chat/completions":
+        refused = None if data.get("sandbox") is True else "assistant_only"
+    elif path == "/":
+        refused = None if data.get("type") in ASSISTANT_ONLY_OPERATIONS else "assistant_only"
+    else:
+        return None if (method, path) in ASSISTANT_ONLY_READS else "assistant_only"
+    if refused is None and root is not None and reserved(root, data.get("working_dir")):
+        return "reserved_directory"
+    return refused
+
+
+class AssistantOnlyRefused(Exception):
+    """助理专用实例不接这条请求；`code` 回给平台。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class RuntimeAgent(Agent):
     def __init__(self, daemon, provider: str, relay_id: str) -> None:
         token = hmac.new(
@@ -405,6 +476,10 @@ class RuntimeAgent(Agent):
             sessions_dir=daemon.data_dir / "sessions" / provider,
         )
         self.daemon = daemon
+        # 助理专用实例不跑遍历所有工作目录的定时任务（回收记忆、刷新 worktree）。
+        self.workspace_jobs = not daemon.assistant_only
+        # 工作目录的删除（停用助理）只在助理专用实例上做，见 workspace.Workspace.remove。
+        self.assistant_only = daemon.assistant_only
         # 服务端在心跳里给的检查模型（模型目录的默认模型）。驱动发现的列表只是默认值，
         # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
         self.probe_model = ""
@@ -734,6 +809,14 @@ class Daemon:
         self.heal_deferrals: dict[str, int] = {}
         # 生效中的出站代理（prepare 时确定，重启才会变），供心跳上报与管理台展示。
         self.proxy: dict[str, str | bool] = {"source": "none", "url": "", "pending": False}
+        # 个人助理的轮次（沙箱、转录、自检）：与上面这些普通轮次的状态完全分开。
+        self.assistant = AssistantTurns(self)
+        # 助理专用实例：只声明沙箱能力的就是它，它也只跑沙箱里的轮次与名单上的节点命令。
+        self.assistant_only = self.config.get("assistant_only") is True
+        try:
+            self.machine = machine_fingerprint()
+        except Exception:  # noqa: BLE001 助理侧的信息读不到不能拦住守护进程启动
+            self.machine = ""
 
     def socket_path(self, provider: str, gen: int | None = None) -> Path:
         # Keep under Unix's 104-byte sockaddr limit, including long macOS home paths.
@@ -820,6 +903,8 @@ class Daemon:
     def prepare(self) -> None:
         self.lock_file = (self.data_dir / "daemon.lock").open("a")
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # 在任何平台调用之前：令牌被吊销、每次启动都在登记处退出的节点也要清掉助理的残留。
+        self.start_leftover_cleanup()
         if self.config.get("release"):
             # Releases switched by an installer that predates the command still get one.
             try:
@@ -1094,6 +1179,11 @@ class Daemon:
             cap = await asyncio.to_thread(cli_status, provider)
             # 守护进程自己的能力，不看驱动：记忆在工作目录的 .coreman-memory/，两种后端共用。
             cap["memory_layout_v1"] = True
+            # 守护进程自检的结果：只有声明了它的节点才会收到个人助理的轮次。
+            try:
+                cap[SANDBOX_CAPABILITY] = self.assistant.capability(provider) is True
+            except Exception:  # noqa: BLE001 自检结果出错按不支持处理，不影响普通轮次
+                cap[SANDBOX_CAPABILITY] = False
             if cap["installed"]:
                 try:
                     await self.heal_driver(provider)
@@ -1170,6 +1260,12 @@ class Daemon:
         if len(raw) > 64 * 1024 * 1024:
             raise ValueError("请求过大")
         data = json.loads(raw) if raw else {}
+        if self.assistant_only:
+            refused = assistant_only_refusal(
+                method, path, data, Path(self.config["workspace_root"])
+            )
+            if refused is not None:
+                raise AssistantOnlyRefused(refused)
         if path == "/v1/chat/completions":
             directory = self.agents[provider].workspace(data.get("working_dir", ""))
             directory.mkdir(parents=True, exist_ok=True)
@@ -1223,6 +1319,10 @@ class Daemon:
 
         try:
             data = self.validate_command(command)
+            if command["path"] == "/v1/chat/completions" and "sandbox" in data:
+                # 个人助理的一轮：在沙箱里另起驱动（见 assistant_turns），帧与收尾都在里面发。
+                await self.assistant.run(identity, provider, data, frames)
+                return
             if command["path"] == "/v1/chat/completions":
                 await self.attach_memory(provider, data)
             if command["path"] == "/v1/chat/completions" and data.pop("worktree", False):
@@ -1311,6 +1411,16 @@ class Daemon:
             # Closing the local stream reaches the Go driver's disconnect watcher.
             frames.discard()
             raise
+        except AssistantOnlyRefused as exc:
+            LOG.warning("Request refused on an assistant-only node: %s", command["path"][:40])
+            body = {"error": {"code": exc.code, "message": "本节点只运行沙箱里的个人助理轮次"}}
+            with contextlib.suppress(Exception):
+                await frames.add(
+                    json.dumps(body, ensure_ascii=False).encode(),
+                    status_code=403,
+                    content_type="application/json",
+                )
+                await frames.finish()
         except Exception as exc:
             # Other exception types may carry paths or response text: log the type only.
             reason = type(exc).__name__
@@ -1376,6 +1486,9 @@ class Daemon:
             "proxy": self.proxy_state(),
             "root_edit_supported": True,
             "root_change_result": self.config.get("root_change_result"),
+            # 同一台机器上的节点靠这两项区分系统用户（个人助理的助理池准入用）。
+            "machine": self.machine,
+            "uid": os.getuid(),
         }
 
     def add_backends(self, backends: object) -> None:
@@ -1526,11 +1639,100 @@ class Daemon:
             LOG.warning("Control poll failed: %s", reason)
         self.poll_error = reason
 
+    def start_leftover_cleanup(self) -> None:
+        """普通实例每次启动清一次助理的残留（prepare 拿到数据目录锁后立即调用），在后台线程里做。"""
+        if not self.assistant_only:
+            # 从助理专用实例改回普通实例的节点：本轮目录里可能还有没传上去的明文转录，回收站里
+            # 可能还有没删完的助理工作目录。
+            threading.Thread(target=self.clear_assistant_leftovers, daemon=True).start()
+
+    def start_assistant(self) -> None:
+        if not self.assistant_only:
+            return
+        try:
+            self.assistant.start()
+        except Exception as exc:  # noqa: BLE001 助理侧起不来，普通轮次照常
+            LOG.warning("Assistant sandbox start failed: %s", type(exc).__name__)
+
+    def clear_assistant_leftovers(self) -> None:
+        """普通实例启动时删掉助理的本轮目录，再清掉回收站里助理专用实例留下的条目（都不跟随链接）。
+        在线程里跑，失败只记一笔。"""
+        try:
+            turns = self.assistant.turns_dir
+            if turns.is_symlink():
+                turns.unlink()
+            elif turns.is_dir():
+                LOG.warning("Removing assistant turn leftovers")
+                remove_tree(turns)
+        except Exception as exc:  # noqa: BLE001 清不掉不能影响普通轮次
+            LOG.warning("Assistant leftovers cleanup failed: %s", type(exc).__name__)
+        try:
+            self.clear_removed_workspaces()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Assistant trash cleanup failed: %s", type(exc).__name__)
+
+    def clear_removed_workspaces(self) -> None:
+        """普通实例只删回收站里 Workspace.remove 写进去的条目（名字是 32 位小写十六进制）。
+
+        普通实例上 `.coreman-trash` 不是保留名，可能就是某个员工的工作目录：不改它的权限、不建它、
+        带所有权标记就整个不碰、其中名字对不上的东西不碰。它是链接（或不是目录）时也不碰——
+        那可能是用户自己的链接，不能当守护进程的东西去删。
+        """
+        root = Path(str(self.config.get("workspace_root") or ""))
+        if not root.is_absolute():
+            return
+        trash = root / TRASH_DIR
+        try:
+            if not stat.S_ISDIR(os.lstat(trash).st_mode):
+                return
+        except FileNotFoundError:
+            return
+        if os.path.lexists(trash / MARKER):
+            return
+        with os.scandir(trash) as entries:
+            found = [e for e in entries if TRASH_ENTRY_NAME.fullmatch(e.name)]
+        for entry in found:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    remove_tree(Path(entry.path))
+                else:
+                    os.unlink(entry.path)
+            except OSError as exc:
+                LOG.warning("Assistant trash entry failed: %s", type(exc).__name__)
+
+    async def stop_assistant(self) -> None:
+        try:
+            await self.assistant.stop()
+        except Exception as exc:  # noqa: BLE001 不能挡住后面停驱动的收尾
+            LOG.warning("Assistant sandbox stop failed: %s", type(exc).__name__)
+
     async def cancel_all(self) -> None:
         current, self.tasks = self.tasks, {}
         for task in current.values():
             task.cancel()
         await asyncio.gather(*current.values(), return_exceptions=True)
+
+    async def stop_work(self) -> None:
+        """关停时停下所有工作：取消在跑的请求，然后助理侧的收尾与普通驱动的终止同时进行——
+        助理侧等多久（或失败）都不推迟、不跳过普通驱动的终止。"""
+        await self.cancel_all()
+        assistant = asyncio.ensure_future(self.stop_assistant())
+        try:
+            if hasattr(self, "discovery_task"):
+                self.discovery_task.cancel()
+                await asyncio.gather(self.discovery_task, return_exceptions=True)
+            for agent in self.agents.values():
+                agent.stop.set()
+            for proc in [*self.drivers.values(), *(p for _, _, p in self.retired)]:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.to_thread(proc.wait, timeout=15)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        await asyncio.to_thread(proc.wait)
+        finally:
+            await assistant
 
     async def run(self) -> None:
         self.prepare()
@@ -1549,6 +1751,7 @@ class Daemon:
             self.http = client
             await self.enroll()
             await self.discover()
+            self.start_assistant()
             next_discovery = time.monotonic() + 60
             self.control_deadline = time.monotonic() + CONTROL_LEASE_SECONDS
             lease_watch = asyncio.create_task(self.watch_control_lease())
@@ -1587,20 +1790,7 @@ class Daemon:
                     watcher.cancel()
                 await asyncio.gather(beats, lease_watch, return_exceptions=True)
                 self.write_state(False, force=True)
-                await self.cancel_all()
-                if hasattr(self, "discovery_task"):
-                    self.discovery_task.cancel()
-                    await asyncio.gather(self.discovery_task, return_exceptions=True)
-                for agent in self.agents.values():
-                    agent.stop.set()
-                for proc in [*self.drivers.values(), *(p for _, _, p in self.retired)]:
-                    if proc.poll() is None:
-                        proc.terminate()
-                        try:
-                            await asyncio.to_thread(proc.wait, timeout=15)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            await asyncio.to_thread(proc.wait)
+                await self.stop_work()
                 self.log_rotator.stop()
                 for provider in PROVIDERS:
                     self.socket_path(provider).unlink(missing_ok=True)

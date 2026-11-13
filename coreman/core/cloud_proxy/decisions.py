@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.approvals import service as assistant_approvals
 from coreman.core.cloud_proxy import resume
 from coreman.core.db.models.cloud_proxy import CloudPendingApproval
 from coreman.core.timeutils import utcnow
@@ -35,6 +36,17 @@ async def apply(
     decided_at: datetime | None,
 ) -> Applied:
     """调用方须先校验 status 属于 RESUME_STATUSES、approval_id 合乎 APPROVAL_ID，并负责提交。"""
+    if external_id.startswith(assistant_approvals.EXTERNAL_PREFIX):
+        # 个人助理的审批单：另一张表、另一套状态，回调与对账的入口共用。
+        found = await assistant_approvals.decide(
+            session,
+            approval_id=approval_id,
+            external_id=external_id,
+            status=status,
+            reason=reason,
+            decided_at=decided_at,
+        )
+        return Applied(known=found.known, resumed=found.queued)
     row = await session.scalar(
         select(CloudPendingApproval)
         .where(CloudPendingApproval.external_id == external_id)

@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.permissions import require_roles
 from coreman.api.routers.model_catalog import load_catalog
 from coreman.api.security import verify_csrf
+from coreman.core.assistants import runtime as assistant_runtime
 from coreman.core.audit import record_audit
 from coreman.core.bots.relay_policy import (
     backend_unavailable_reason,
@@ -83,6 +85,11 @@ async def relay_out(
         "visibility": relay.visibility,
         "description": relay.description,
         "is_active": relay.is_active,
+        # 个人助理：是否在助理池里，节点是否声明能隔离运行助理。
+        "assistant_pool": relay.assistant_pool,
+        "assistant_sandbox": bool(
+            node and assistant_runtime.node_sandboxed(node, relay.model_provider)
+        ),
         "rate_limit_5h_used_pct": _pct(relay.rate_limit_5h_used_pct),
         "rate_limit_5h_resets_at": relay.rate_limit_5h_resets_at,
         "rate_limit_7d_used_pct": _pct(relay.rate_limit_7d_used_pct),
@@ -221,6 +228,51 @@ async def probe_endpoint(
             "relay": await _one_out(session, relay),
         },
     }
+
+
+class AssistantPoolIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/{relay_id}/assistant-pool")
+async def set_assistant_pool(
+    relay_id: uuid.UUID,
+    body: AssistantPoolIn,
+    request: Request,
+    actor: User = Depends(_MANAGERS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """把实例加入或移出个人助理池；加入的条件见 `assistant_runtime.pool_admission_error`。
+
+    先对这个实例的节点取节点锁（只锁它），与普通员工的绑定、换运行时互斥，再检查、再写。
+    移出不改绑：已经绑在上面的助理仍留在这个实例，但它不再在池里，所有者之外的助理下一轮会按
+    「不在助理池里」暂停并私聊通知所有者，直到管理员改绑；开通时也不再选它。
+    """
+    relay = await load_relay(session, relay_id)
+    node = await session.get(RuntimeNode, relay.runtime_node_id) if relay.runtime_node_id else None
+    if node is not None:
+        await assistant_runtime.lock_node(session, node.id)
+        # 等锁期间到的心跳、可见性与池开关修改：取锁之后重读，再判、再记审计的「之前」。
+        await session.refresh(relay)
+        await session.refresh(node)
+    if body.enabled:
+        problem = await assistant_runtime.pool_admission_error(session, relay, node)
+        if problem is not None:
+            raise ApiError(422, 422, problem)
+    before = relay.assistant_pool
+    relay.assistant_pool = body.enabled
+    await record_audit(
+        session,
+        action="relay.assistant_pool",
+        actor_id=actor.id,
+        actor_login=actor.login_name,
+        target_type="relay_server",
+        target_id=str(relay.id),
+        diff={"assistant_pool": [before, body.enabled]},
+        ip=client_ip(request),
+    )
+    await session.commit()
+    return {"code": 0, "data": await _one_out(session, relay)}
 
 
 @router.get("/{relay_id}/models")

@@ -140,3 +140,48 @@ async def test_queued_chat_gives_up_early_when_the_node_cannot_take_it(
             await asyncio.wait_for(pending, 5)
     (row,) = await _calls(db_engine, node_id)
     assert row.status == "cancelled"
+
+
+async def test_queue_timeout_says_the_node_never_took_the_call(
+    client, db_session, app, db_engine, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(transport, "QUEUE_WAIT_SECONDS", 0.5)
+    _, body, _ = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    async with _caller(app, db_engine, node_id) as caller:
+        with pytest.raises(RuntimeQueueTimeout) as caught:
+            await caller.post("/v1/chat/completions", json={}, extensions=CHAT)
+    assert caught.value.unclaimed is True
+    (row,) = await _calls(db_engine, node_id)
+    assert row.status == "cancelled"
+
+
+async def test_a_call_claimed_as_the_queue_wait_ends_is_not_reported_unclaimed(
+    client, db_session, app, db_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """排队等满的那一刻节点刚好领走：不能说「节点没见过」，调用照常撤销。"""
+    monkeypatch.setattr(transport, "QUEUE_WAIT_SECONDS", 0.5)
+    _, body, _ = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    original = transport.ReverseStream.read_batch
+
+    async def stale_view(self, *, include_chunks: bool = True):  # type: ignore[no-untyped-def]
+        row, data = await original(self, include_chunks=include_chunks)
+        # 库里已被节点领走，这一侧最后一次读到的仍是排队中。
+        async with make_session_factory(db_engine)() as session:
+            await session.execute(
+                update(RuntimeCall)
+                .where(RuntimeCall.id == self.call_id, RuntimeCall.status == "queued")
+                .values(status="running")
+            )
+            await session.commit()
+        row.status = "queued"
+        return row, data
+
+    monkeypatch.setattr(transport.ReverseStream, "read_batch", stale_view)
+    async with _caller(app, db_engine, node_id) as caller:
+        with pytest.raises(RuntimeQueueTimeout) as caught:
+            await caller.post("/v1/chat/completions", json={}, extensions=CHAT)
+    assert caught.value.unclaimed is False
+    (row,) = await _calls(db_engine, node_id)
+    assert row.status == "cancelled"

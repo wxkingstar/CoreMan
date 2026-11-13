@@ -15,6 +15,7 @@ from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.bots.relay_policy import relay_available
@@ -44,6 +45,8 @@ async def require_admin(
     )
     if actor.status != "active" or not is_bot_admin(actor, bot, members):
         raise ApiError(403, 403, "仅机器人管理员可管理记忆")
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("记忆库"))
     if lock and bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录正在处理中，请完成后再修改记忆")
     return bot

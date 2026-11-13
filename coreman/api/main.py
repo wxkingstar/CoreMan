@@ -147,6 +147,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_feishu.router)
     app.include_router(platform_apps.router)
     app.include_router(platform_apps.runs_router)
+    from coreman.api.routers import assistants_admin
+
+    app.include_router(assistants_admin.router)
     app.include_router(users.router)
     app.include_router(teams.router)
     app.include_router(departments.router)
