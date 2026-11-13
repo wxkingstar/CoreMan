@@ -40,3 +40,11 @@ def test_a_link_that_is_not_http_is_left_out(monkeypatch: pytest.MonkeyPatch):
     configure(monkeypatch, "Example Tower", "javascript:alert(1)")
     assert "javascript" not in card_text(provisioning.offer_card("t"))
     assert "javascript" not in provisioning.welcome_text()
+
+
+def test_the_offer_says_questions_may_go_to_other_ai_employees(monkeypatch: pytest.MonkeyPatch):
+    """开通前就告知调度：交给其他 AI 员工的那部分内容不在加密保存之列，按与该员工私聊的方式保存。"""
+    configure(monkeypatch, None, None)
+    card = card_text(provisioning.offer_card("t"))
+    assert "助理可能把完成任务必需的问题交给其他 AI 员工" in card
+    assert "按与该员工私聊同样的方式保存" in card
