@@ -23,8 +23,8 @@ HINTS = {
     "anchor_not_found": "锚点不在会话最近的消息里（太早或已撤回）：重新读会话后再起草。",
     "owner_replied_after_anchor": "锚点之后本人已经在这个会话里发过言：读完最新消息后重写或放弃。",
     "newer_messages_after_anchor": (
-        "锚点之后对方又发了消息（群里指 @ 本人、回复锚点那条、或锚点发送人自己又发的）："
-        "读完最新消息后重写。"
+        "锚点之后对方又发了消息（群里指 @ 本人、回复锚点那条、同一话题里的、"
+        "或锚点发送人自己又发的）：读完最新消息后重写。"
     ),
     "message_gone": "目标消息不在这个会话里，或已被撤回。",
     "not_own_message": "只能编辑或撤回本人发出的消息。",
@@ -52,10 +52,12 @@ class Message:
     sender_type: str
     text: str
     deleted: bool
-    # 被 @ 的人、它回复的那条消息、所在话题的根消息：判断群里的新消息与锚点有没有关系时用。
+    # 被 @ 的人、它回复的那条消息、回复链（或话题）的根消息、所在的话题：判断群里的新消息与
+    # 锚点有没有关系时用。`root_id` 在普通的引用回复链里也有，只有 `thread_id` 说明它在话题里。
     mentions: frozenset[str] = frozenset()
     parent_id: str = ""
     root_id: str = ""
+    thread_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ def parse(item: dict[str, Any]) -> Message:
         mentions=mentioned(item),
         parent_id=str(item.get("parent_id") or ""),
         root_id=str(item.get("root_id") or ""),
+        thread_id=str(item.get("thread_id") or ""),
     )
 
 
@@ -198,9 +201,10 @@ def anchor_verdict(
 
     锚点本身已被撤回时返回 `message_gone`。
     所有者亲自发言在哪种会话里都算。别人的新消息，私聊里每一条都算（都是对所有者说的）；
-    群里只算与这个话头有关的：@ 了所有者、回复了锚点那条（或在以它为根的话题里、与它同在
-    一个话题里）、或锚点的发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿
-    永远赶不上最新一条。读的是话题视图时按私聊的口径全算：话题里的每一条都在说这件事，
+    群里只算与这个话头有关的：@ 了所有者、直接回复了锚点那条、与它同在一个话题里（或在以它
+    为根的话题里）、或锚点的发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿
+    永远赶不上最新一条。「同一个话题」只认话题编号（`thread_id`）：普通群里一条公告下大家用
+    「回复」接龙，根消息都是那条公告，却不是在说同一件事。读的是话题视图时按私聊的口径全算：话题里的每一条都在说这件事，
     问题可能已经被第三个人答掉了。
     """
     newer: list[Message] = []
@@ -231,9 +235,13 @@ def _about(item: Message, anchor: Message, owner_open_id: str) -> bool:
     """群里的一条新消息与锚点这个话头有没有关系。"""
     return (
         owner_open_id in item.mentions
-        or anchor.message_id in (item.parent_id, item.root_id)
-        # 锚点是话题里的一条非根消息：同一个话题里别人的回复也在说这件事。
-        or (bool(anchor.root_id) and item.root_id == anchor.root_id)
+        or item.parent_id == anchor.message_id
+        # 话题里的回复：与锚点同一个话题，或话题的根就是锚点。只看根消息不够——普通的引用
+        # 回复链里根消息也相同。
+        or (
+            bool(item.thread_id)
+            and (item.thread_id == anchor.thread_id or item.root_id == anchor.message_id)
+        )
         or (bool(anchor.sender_id) and item.sender_id == anchor.sender_id)
     )
 
