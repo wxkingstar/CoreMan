@@ -385,6 +385,47 @@ async def test_an_unreadable_app_secret_is_retried_not_abandoned(
     assert await db_session.scalar(select(func.count()).select_from(Bot)) == 0
 
 
+async def test_a_rate_limited_grant_step_is_retried_not_abandoned(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """飞书限频时发起授权与查询授权都稍后再试：不当成应用缺权限，也不多发一张授权卡片。"""
+    from coreman.core.feishu_personal import ratelimit
+    from coreman.core.feishu_personal import service as personal
+
+    _, auth = install(monkeypatch)
+    owner, messenger = await _clicked(db_engine, db_session)
+    factory = make_session_factory(db_engine)
+    owner_id = owner.id
+    await tick(factory, messenger)  # 建记录与密钥
+    await tick(factory, messenger)  # 节点上建目录
+    limited = True
+
+    async def http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if limited:
+            raise ratelimit.RateLimited(5)
+        return await auth.http(method, url, **kwargs)
+
+    monkeypatch.setattr(personal, "_http", http)
+    await tick(factory, messenger)  # 发起授权：被限频
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "start_grant"
+    assert (flow.error_code, flow.issued) == ("rate_limited", 0)
+    limited = False
+    await tick(factory, messenger, later=3600)
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.step == "await_grant" and flow.issued == 1
+    cards = len(messenger.cards)
+    limited = True
+    await poll_now(db_session)
+    await tick(factory, messenger, later=3600 + 6)  # 查询授权：被限频
+    db_session.expire_all()
+    flow = await flow_of(db_session, owner_id)
+    assert flow is not None and flow.outcome is None and flow.step == "await_grant"
+    assert flow.issued == 1 and len(messenger.cards) == cards
+
+
 async def test_a_switched_off_assistant_still_counts_as_one(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

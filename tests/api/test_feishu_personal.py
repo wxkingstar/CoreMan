@@ -550,6 +550,74 @@ async def test_refresh_rejection_clears_credentials(client, app, db_session):
     assert row.status == "expired" and row.token_enc is None
 
 
+@pytest.mark.parametrize(
+    "limited",
+    [
+        httpx.Response(429, headers={"x-ogw-ratelimit-reset": "7"}, text="too many requests"),
+        httpx.Response(200, headers={"retry-after": "7"}, json={"code": 99991400, "msg": "x"}),
+    ],
+)
+async def test_a_rate_limited_refresh_keeps_an_ordinary_employees_grant(
+    client, app, db_session, limited
+):
+    """限频不是授权失效：刷新令牌被限频时授权行原样留着，等一会儿再调就能用。"""
+    from sqlalchemy import func
+
+    from coreman.core.db.models import FeishuRateUsage
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(
+        db_session, app, bot, user, expires_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    before = row.token_enc
+    with respx.mock as mock:
+        mock.post("https://open.feishu.cn/open-apis/authen/v2/oauth/token").mock(
+            return_value=limited
+        )
+        out = value(
+            await client.post(
+                URL,
+                headers=await headers(app, task, user),
+                json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
+            )
+        )
+    assert out == {"error": "rate_limited", "upstream_code": 99991400, "retry_after": 7}
+    await db_session.refresh(row)
+    assert row.status == "connected" and row.token_enc == before
+    # 普通员工的调用不记用量。
+    assert await db_session.scalar(select(func.count()).select_from(FeishuRateUsage)) == 0
+
+
+async def test_a_rate_limited_read_reports_the_wait_for_an_ordinary_employee(
+    client, app, db_session
+):
+    from sqlalchemy import func
+
+    from coreman.core.db.models import FeishuRateUsage
+
+    bot, user, task = await setup(db_session, app)
+    row = await grant(db_session, app, bot, user)
+    with respx.mock as mock:
+        mock.get("https://open.feishu.cn/open-apis/minutes/v1/minutes/minute-one").mock(
+            return_value=httpx.Response(
+                400,
+                headers={"x-ogw-ratelimit-reset": "12"},
+                json={"code": 99991400, "msg": "request trigger frequency limit"},
+            )
+        )
+        out = value(
+            await client.post(
+                URL,
+                headers=await headers(app, task, user),
+                json=rpc("feishu_read_minutes", {"minute_token": "minute-one"}),
+            )
+        )
+    assert out == {"error": "rate_limited", "upstream_code": 99991400, "retry_after": 12}
+    await db_session.refresh(row)
+    assert row.status == "connected" and row.token_enc
+    assert await db_session.scalar(select(func.count()).select_from(FeishuRateUsage)) == 0
+
+
 async def test_claude_mcp_metadata_does_not_become_tool_arguments(client, app, db_session):
     _, user, task = await setup(db_session, app)
     body = rpc("feishu_authorization_status")

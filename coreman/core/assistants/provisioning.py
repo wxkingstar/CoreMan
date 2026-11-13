@@ -463,6 +463,10 @@ async def step_init_workspace(
     return []
 
 
+# 飞书暂时不可用或限频：这一步稍后再试，不算授权被拒。
+_TRANSIENT = ("upstream_unavailable", "rate_limited")
+
+
 def _grant_scope(bot: Bot, row: AssistantLifecycle, app_id: str) -> Scope:
     """发起与查询授权用的身份：飞书给的操作人（点开通时记下的），不来自任何请求内容。
 
@@ -497,7 +501,7 @@ async def step_start_grant(
     try:
         begun = await personal.begin_in_flow(session, cipher, scope, GRANT_LEVEL)
     except personal.PersonalError as exc:
-        if exc.code == "upstream_unavailable":
+        if exc.code in _TRANSIENT:
             raise StepRetry(exc.code) from None
         raise StepFailed("app_permission_missing") from None
     row.issued += 1
@@ -544,7 +548,7 @@ async def step_await_grant(
         try:
             await personal.authorization_status(session, cipher, scope)
         except personal.PersonalError as exc:
-            if exc.code == "upstream_unavailable":
+            if exc.code in _TRANSIENT:
                 raise StepRetry(exc.code) from None
             # 授权被拒或身份对不上：授权行已清空，下面按「链接已失效」再发一次。
         grant = await session.get(FeishuPersonalGrant, key, populate_existing=True)
