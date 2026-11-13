@@ -45,6 +45,7 @@ from coreman.core.config import get_settings
 from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantFollowup,
     AssistantPage,
     AssistantSettings,
     AssistantTranscript,
@@ -195,6 +196,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         "summary_enc": Text(""),
         "body_enc": Text(""),
     },
+    # 待跟进：标题与备注。标题非空，读不出来时给空串。
+    AssistantFollowup: {"title_enc": Text(""), "notes_enc": Text()},
     # 所有者标记的重点群与忽略的会话：会话 id 的列表整值封存，读不出来按空列表。
     AssistantSettings: {"focus_chats_enc": Whole([]), "ignored_chats_enc": Whole([])},
 }

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -355,3 +356,45 @@ class AssistantPage(Base):
     version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     updated_by: Mapped[str] = mapped_column(Text, server_default=text("'assistant'"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+FOLLOWUP_CATEGORIES = ("decide", "promised", "waiting", "remind")
+FOLLOWUP_STATUSES = ("open", "snoozed", "done", "dropped")
+FOLLOWUP_CLOSE_CODES = ("origin_recalled",)
+
+
+class AssistantFollowup(Base):
+    """助理替所有者记着的一件跨天的事：等他决定、他答应了别人、在等别人、到日子提醒他。
+
+    `title_enc` / `notes_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出的行上是明文。
+    分类、状态、两个日期、编号是明文，按日期查询不解密。`seq` 在一位助理内递增，显示为 F012。
+    `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 只在平台自动关闭时有值。
+    `job_id` 是第 3 期子任务的编号，这里只是普通列。
+    """
+
+    __tablename__ = "assistant_followups"
+    __table_args__ = (
+        CheckConstraint(enum_check("category", FOLLOWUP_CATEGORIES), name="category"),
+        CheckConstraint(enum_check("status", FOLLOWUP_STATUSES), name="status"),
+        CheckConstraint(
+            f"close_code IS NULL OR {enum_check('close_code', FOLLOWUP_CLOSE_CODES)}",
+            name="close_code",
+        ),
+        UniqueConstraint("bot_id", "seq", name="uq_assistant_followups_bot_seq"),
+        Index("assistant_followups_bot_status_idx", "bot_id", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    seq: Mapped[int] = mapped_column(Integer)
+    category: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    review_on: Mapped[date | None] = mapped_column(Date)
+    due_on: Mapped[date | None] = mapped_column(Date)
+    origin_message_id: Mapped[str | None] = mapped_column(Text)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    title_enc: Mapped[str] = mapped_column(Text)
+    notes_enc: Mapped[str | None] = mapped_column(Text)
+    close_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    closed_at: Mapped[datetime | None] = _ts()
