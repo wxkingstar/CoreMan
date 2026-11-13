@@ -95,8 +95,9 @@ PARK = timedelta(hours=1)
 # 这个会话的整段历史倒进收件箱。轮询停了更久（下班一夜、退避）时回看到上一次成功轮询为止，
 # 那之后才发来的消息平台确实没见过。
 LOOKBACK = timedelta(minutes=30)
-# 比这更早的消息不入箱，只前移游标：一个会话停读了几天（被放下、助理停用后恢复），积下的旧
-# 消息对所有者已经没有「刚发生」的意义。
+# 比这更早的消息不入箱，只前移游标：一个会话停读了几天（被放下、挤出游标后又出现），积下的旧
+# 消息对所有者已经没有「刚发生」的意义。只针对轮询照常、单个会话没读的情况：上一次成功轮询
+# 之后才发来的消息平台没见过，隔了多久都入箱（周末、请假之后的第一轮），见 `_oldest`。
 MAX_AGE = timedelta(hours=24)
 # 刷新令牌约 7 天不用就失效：不轮询的助理每这么久强制刷新一次。
 KEEPALIVE = timedelta(hours=24)
@@ -267,6 +268,8 @@ class _Round:
     deadline: float
     # 游标里没有的会话从这一刻读起（毫秒）：见 `LOOKBACK`。
     floor: int = 0
+    # 早于这一刻的消息不入箱（毫秒）：见 `MAX_AGE`。
+    oldest: int = 0
     reads: int = 0
     items: int = 0
     # 缺编号或读不出时间、没法处理的消息数：只记个数。
@@ -307,7 +310,7 @@ class _Round:
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW
             )
             return
-        if self.now - item.created_at > MAX_AGE:
+        if item.at_ms < self.oldest:
             # 太老了：不入箱，游标照常越过它。
             return
         spoke = int(entry.get("o") or 0)
@@ -425,6 +428,18 @@ def _floor(since: int, last_ok_at: datetime | None, now: datetime) -> int:
     return max(since, int(back.timestamp() * 1000))
 
 
+def _oldest(last_ok_at: datetime | None, now: datetime) -> int:
+    """早于哪一刻的消息不入箱（毫秒）：`MAX_AGE` 之前，与上一次成功轮询两者里更早的那个。
+
+    下班后不轮询：周五下班到周一上班之间发来的消息都晚于上一次成功轮询，不能按「超过一天」
+    丢掉。丢的只是上一次成功轮询时就已经超过 `MAX_AGE` 的。
+    """
+    back = aware_utc(now) - MAX_AGE
+    if last_ok_at is not None:
+        back = min(back, aware_utc(last_ok_at))
+    return int(back.timestamp() * 1000)
+
+
 async def _round(
     session: AsyncSession,
     call: feed.Reader,
@@ -460,6 +475,7 @@ async def _round(
         cursor,
         time.monotonic() + ROUND_SECONDS,
         floor=_floor(cursor["since"], row.last_ok_at, now),
+        oldest=_oldest(row.last_ok_at, now),
     )
     todo: list[str] = []
     try:

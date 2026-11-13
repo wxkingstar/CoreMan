@@ -177,7 +177,8 @@ async def test_messages_older_than_a_day_only_move_the_cursor(
         "chats": {"oc_li": {"t": ms(ago(base, days=3)), "m": [], "k": "p2p", "th": {}}},
     }
     await db_session.commit()
-    await polled(db_session, who, ago(base, days=3))
+    # 轮询本身一直没停（一分钟前还成功过）：这些旧消息在上次轮询之前就超过一天了。
+    await polled(db_session, who, ago(base, seconds=60))
     api.chats = [LI]
     api.say("oc_li", "om_stale", ago(base, days=2))
     api.say("oc_li", "om_edge", ago(base, hours=24, seconds=1))
@@ -204,3 +205,62 @@ async def test_after_a_long_pause_an_unseen_chat_is_read_from_the_last_poll(
     await tick(make_session_factory(db_engine), base)
     # 回看到上一次轮询为止（窗口是下限，不是上限）：夜里那条不能丢，更早的不要。
     assert await boxed(db_session, who) == ["om_night"]
+
+
+async def test_messages_from_the_weekend_arrive_on_monday_morning(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    # 周五 19:00 下班（最后一次成功轮询），周一 09:00 上班：中间 62 小时没有轮询。
+    friday = ago(base, hours=62)
+    await primed(db_session, who, ago(base, days=9), head=["oc_li", "oc_team"])
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {
+            "oc_li": {"t": ms(ago(base, hours=63)), "m": [], "k": "p2p", "th": {}},
+            "oc_team": {"t": ms(ago(base, hours=63)), "m": [], "k": "group", "th": {}},
+        },
+    }
+    await db_session.commit()
+    await polled(db_session, who, friday)
+    api.chats = [LI, TEAM]
+    api.say("oc_li", "om_friday_night", ago(base, hours=60))
+    api.say("oc_li", "om_saturday", ago(base, hours=40))
+    api.say("oc_li", "om_sunday", ago(base, hours=10))
+    api.say(
+        "oc_team",
+        "om_at_saturday",
+        ago(base, hours=45),
+        mentions=[{"id": who.open_id, "id_type": "open_id"}],
+    )
+    await tick(make_session_factory(db_engine), base)
+    # 平台没轮询的这段时间里发来的，都没见过：不因为超过一天而丢掉。
+    assert await boxed(db_session, who) == [
+        "om_friday_night",
+        "om_saturday",
+        "om_sunday",
+        "om_at_saturday",
+    ]
+
+
+async def test_a_group_joined_over_the_weekend_still_keeps_its_old_history_out(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    friday = ago(base, hours=62)
+    await primed(db_session, who, ago(base, days=30), head=["oc_li"])
+    await polled(db_session, who, friday)
+    api.chats = [TEAM, LI]
+    # 这个群有几周的历史，所有者周末才被拉进来。
+    api.say("oc_team", "om_weeks", ago(base, days=20))
+    api.say("oc_team", "om_last_week", ago(base, days=4))
+    api.say("oc_team", "om_weekend", ago(base, hours=30))
+    await tick(make_session_factory(db_engine), base)
+    assert await boxed(db_session, who) == ["om_weekend"]
+    start = int(api.read("oc_team")[0].params["start_time"])
+    assert start == ms(friday) // 1000
