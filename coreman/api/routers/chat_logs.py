@@ -66,22 +66,27 @@ def _dispatched() -> ColumnElement[bool]:
     return and_(ChatLog.message_type == BOT_HELP_KIND, ChatLog.private.is_(True))
 
 
-def withheld(row: ChatLog, viewer: User, *, bot_token: bool) -> bool:
+def withheld(row: ChatLog, viewer: User, *, bot_token: bool, cli: bool = False) -> bool:
     """这条记录的内容要不要对查看者收起。
 
     调度来的一轮只有发起它的所有者本人看得到内容；这位员工的管理者与平台管理员看得到发生过
-    这一轮（时间、发起人、状态、用量）。
+    这一轮（时间、发起人、状态、用量）。管理命令以所有者身份建的会话（`cli`）不是本人在场，
+    与不是所有者一样对待。
     """
     return (
         row.message_type == BOT_HELP_KIND
         and bool(row.private)
-        and (bot_token or row.user_id != viewer.id)
+        and (bot_token or cli or row.user_id != viewer.id)
     )
 
 
-def _searchable(keyword: str | None, user: User) -> list[ColumnElement[bool]]:
+def _searchable(keyword: str | None, user: User, *, cli: bool = False) -> list[ColumnElement[bool]]:
     """按正文搜索时，看不到内容的调度记录不参与：否则能用「搜得到 / 搜不到」探出内容。"""
-    return [or_(not_(_dispatched()), ChatLog.user_id == user.id)] if keyword else []
+    if not keyword:
+        return []
+    if cli:
+        return [not_(_dispatched())]
+    return [or_(not_(_dispatched()), ChatLog.user_id == user.id)]
 
 
 def _scope(ids: set[uuid.UUID] | None, user: User, *, bot_token: bool) -> list[ColumnElement[bool]]:
@@ -248,29 +253,34 @@ async def list_chat_logs(
 ) -> dict[str, Any]:
     ids = await accessible_bot_ids(session, actor)
     token = via_bot_token(request)
+    cli = via_cli(request)
     conds = _scope(ids, actor, bot_token=token) + _window(bot_id, since, until)
-    conds += _filters(user, status, chat_type, keyword, token_id) + _searchable(keyword, actor)
+    conds += _filters(user, status, chat_type, keyword, token_id)
+    conds += _searchable(keyword, actor, cli=cli)
     # request_at 会并列（同一秒的批量写），加 id 兜底保证翻页稳定。
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
     rows: list[ChatLog] = page["items"]
     # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。管理命令以所有者身份建的会话
-    # 不是本人在场：同样不解密。
-    cli = via_cli(request)
+    # 不是本人在场：同样不解密；调度公共员工留下的明文那一轮对它也收起内容。
     await sealed.open_rows(session, rows, viewer=access_log.NOBODY if cli else actor.id)
     names = await bot_names(session, (r.bot_id for r in rows))
     data = {
         **page,
         "items": [
             chat_log_out(
-                r, bot_name=names.get(r.bot_id), withheld=withheld(r, actor, bot_token=token)
+                r,
+                bot_name=names.get(r.bot_id),
+                withheld=withheld(r, actor, bot_token=token, cli=cli),
             )
             for r in rows
         ],
     }
-    # 真的为所有者还原了助理的内容才记；管理命令以所有者身份来的没有还原，记一条 system。
+    # 真的为所有者还原了助理的内容才记；管理命令以所有者身份来的没有还原，记一条 system
+    # （调度留下的那一轮另记：它不在助理名下）。
     recorded = (
         await access_log.record_refused(session, rows, actor.id, "cli.chatlogs")
+        + await access_log.record_dispatch_refused(session, rows, actor.id, "cli.chatlogs")
         if cli
         else await access_log.record_opened(session, rows, actor.id, "chatlogs.read")
     )
@@ -298,7 +308,8 @@ async def chat_log_stats(
     ids = await accessible_bot_ids(session, actor)
     conds = _scope(ids, actor, bot_token=via_bot_token(request)) + _window(bot_id, since, until)
     # 与列表同一口径：按正文筛选的统计不含看不到内容的调度记录。
-    conds += _filters(user, status, chat_type, keyword, token_id) + _searchable(keyword, actor)
+    conds += _filters(user, status, chat_type, keyword, token_id)
+    conds += _searchable(keyword, actor, cli=via_cli(request))
 
     def _tokens(col: Any) -> Any:
         return func.coalesce(func.sum(col), 0)
@@ -394,11 +405,12 @@ async def get_chat_log(
         row,
         full=True,
         bot_name=names.get(row.bot_id),
-        withheld=withheld(row, actor, bot_token=via_bot_token(request)),
+        withheld=withheld(row, actor, bot_token=via_bot_token(request), cli=cli),
     )
     data["business_tokens"] = await business_tokens(session, row.task_id)
     recorded = (
         await access_log.record_refused(session, [row], actor.id, "cli.chatlogs")
+        + await access_log.record_dispatch_refused(session, [row], actor.id, "cli.chatlogs")
         if cli
         else await access_log.record_opened(session, [row], actor.id, "chatlogs.read")
     )

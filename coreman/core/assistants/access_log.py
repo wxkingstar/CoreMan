@@ -27,7 +27,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
-from coreman.core.db.models import ACCESS_ACTOR_KINDS, AssistantAccessLog, Bot, User
+from coreman.core.assistants.kinds import BOT_HELP_KIND
+from coreman.core.db.models import (
+    ACCESS_ACTOR_KINDS,
+    AssistantAccessLog,
+    Bot,
+    ChatLog,
+    Task,
+    User,
+)
 from coreman.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -164,6 +172,31 @@ async def record_refused(
     for bot_id, count in counts.items():
         await record(session, bot_id, None, action, f"rows={count}", kind="system")
     return len(counts)
+
+
+def _dispatched_by(row: Any, owner_id: uuid.UUID) -> bool:
+    """这一行是不是 `owner_id` 的助理调度公共员工留在目标员工名下的那一轮（对话记录或任务）。"""
+    if isinstance(row, ChatLog):
+        return row.message_type == BOT_HELP_KIND and bool(row.private) and row.user_id == owner_id
+    return isinstance(row, Task) and row.kind == BOT_HELP_KIND and row.user_id == owner_id
+
+
+async def record_dispatch_refused(
+    session: AsyncSession, rows: Iterable[Any], owner_id: uuid.UUID, action: str
+) -> int:
+    """管理命令以所有者的身份来读他的助理调度公共员工的那一轮：内容已收起，记下「有人试过」。
+
+    那一轮明文存在目标员工名下（不是助理的行，`record_refused` 数不到它），换成本人在场的
+    会话本来看得到全文。记在所有者启用着的助理名下，`system`、不留操作人；他已经没有助理时
+    没有可记的地方，只返回 0。返回记了几位助理（为 0 时调用方不必提交）。
+    """
+    count = sum(1 for row in rows if row is not None and _dispatched_by(row, owner_id))
+    if not count:
+        return 0
+    bots = await bots_of(session, [owner_id])
+    for bot_id in bots:
+        await record(session, bot_id, None, action, f"dispatch={count}", kind="system")
+    return len(bots)
 
 
 async def bots_of(session: AsyncSession, owner_ids: Iterable[uuid.UUID]) -> list[uuid.UUID]:

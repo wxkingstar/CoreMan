@@ -183,13 +183,23 @@ async def get_task(
     rows = [task, stream, log]
     await sealed.open_rows(session, rows, viewer=access_log.NOBODY if cli else actor.id)
     now = datetime.now(UTC)
-    data = {
+    # 个人助理调度来的一轮明文存在目标员工名下，上面的还原管不到它：管理命令以所有者身份建的
+    # 会话不是本人在场，只给元数据（流里是答复，任务的报错文字也可能带着内容）。
+    hidden = cli and (
+        task.kind == BOT_HELP_KIND
+        or (log is not None and log.message_type == BOT_HELP_KIND and bool(log.private))
+    )
+    data: dict[str, Any] = {
         "task": task_out(task),
-        "stream": stream_out(stream, now) if stream else None,
-        "chat_log": chat_log_out(log) if log else None,
+        "stream": stream_out(stream, now) if stream and not hidden else None,
+        "chat_log": chat_log_out(log, withheld=hidden) if log else None,
     }
+    if hidden:
+        data["task"]["error_message"] = None
+        data["content_withheld"] = True
     recorded = (
         await access_log.record_refused(session, rows, actor.id, "cli.tasks")
+        + await access_log.record_dispatch_refused(session, [task], actor.id, "cli.tasks")
         if cli
         else await access_log.record_opened(session, rows, actor.id, "tasks.read")
     )

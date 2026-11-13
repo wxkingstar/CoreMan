@@ -241,3 +241,62 @@ async def test_the_dev_task_view_hides_a_round_that_has_no_record_yet(
     await db_session.commit()
     await login_existing(client, db_session, owner)
     assert (await client.get(f"/api/dev/tasks/{queued.id}")).status_code == 200
+
+
+async def test_a_cli_session_acting_as_the_owner_does_not_read_the_round(
+    dev_env: None, client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """管理命令以所有者身份建的会话不是本人在场：这一轮明文存在目标员工名下，同样不给内容。"""
+    from tests.api.my_assistant_helpers import as_cli
+    from tests.api.test_assistant_chat_logs import _access
+    from tests.integration.assistant_helpers import into_assistant
+
+    bot = await seed_standard(db_session)
+    owner = await login_as(client, db_session, role="platform_admin", display_name="张三")
+    queued = await tasks.enqueue(
+        db_session,
+        NewTask(bot_id=bot.id, kind=BOT_HELP_KIND, user_id=owner.id, session_key=KEY),
+    )
+    assert queued is not None
+    assert await chat_logs.insert_turn(db_session, _entry(bot, owner, task_id=queued.id))
+    await db_session.commit()
+    assistant = await into_assistant(db_session, await seed_standard(db_session), owner)
+    assistant_id = assistant.id
+    # 本人登录时照常看得到（对照）。
+    (item,) = await _items(client)
+    assert item["message_preview"] == f"问：{SECRET}"
+    assert await _access(db_session) == []
+
+    await as_cli(client, db_session, owner)
+    listing = await client.get("/api/admin/chat-logs")
+    assert listing.status_code == 200 and SECRET not in listing.text
+    (item,) = listing.json()["data"]["items"]
+    assert item["content_withheld"] is True and item["tools_used"] == []
+    assert all(item[key] is None for key in HIDDEN)
+    detail = await client.get(f"/api/admin/chat-logs/{item['id']}")
+    assert detail.status_code == 200 and SECRET not in detail.text
+    assert all(detail.json()["data"][key] is None for key in HIDDEN_FULL)
+    # 按正文搜索与统计同样不含它：搜得到搜不到也是内容。
+    assert await _items(client, "?keyword=机密") == []
+    searched = await client.get("/api/admin/chat-logs/stats?keyword=机密")
+    assert searched.json()["data"]["total"] == 0
+    # 开发页的任务详情：只剩元数据。
+    seen = await client.get(f"/api/dev/tasks/{queued.id}")
+    assert seen.status_code == 200 and SECRET not in seen.text
+    data = seen.json()["data"]
+    assert data["content_withheld"] is True and data["stream"] is None
+    assert data["task"]["id"] == queued.id and data["task"]["error_message"] is None
+    assert data["chat_log"]["content_withheld"] is True
+    assert data["chat_log"]["message_preview"] is None
+    # 每次都在所有者的助理名下记一条 system，不留操作人。
+    recorded = await _access(db_session)
+    assert [(action, kind, who) for action, _, kind, who in recorded] == [
+        ("cli.chatlogs", "system", None),
+        ("cli.chatlogs", "system", None),
+        ("cli.tasks", "system", None),
+    ]
+    assert {target for _, target, _, _ in recorded} == {"dispatch=1"}
+    from sqlalchemy import text as sql
+
+    bots = await db_session.scalars(sql("SELECT DISTINCT bot_id FROM assistant_access_log"))
+    assert list(bots) == [assistant_id]
