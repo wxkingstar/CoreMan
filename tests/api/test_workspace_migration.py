@@ -1,8 +1,11 @@
 """Workspace migration fences execution and retains recovered memory on failure."""
 
+import base64
+import json
 import uuid
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import select
 
 from coreman.core.bus import tasks
@@ -758,6 +761,47 @@ async def test_switch_falls_back_to_full_copy_when_clone_fails(
     assert _git(moved, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
     exports = [p for op, p in seen if op == "workspace-export"]
     assert exports[-1]["expand"] == ["app"]
+
+
+@pytest.mark.parametrize("raw_reads", [True, False])
+async def test_large_text_file_reads_stay_under_response_limit(
+    client, db_session, monkeypatch, tmp_path, raw_reads
+):
+    """2MB 左右的中文文本：新运行时整块读、不附原文；旧运行时附原文，平台改按 512KB 读。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    text = "研发" * (1900 * 1024 // 6)
+    (tmp_path / "source" / bot.bot_key / "notes.md").write_text(text)
+    real = workspace_transfer.call_agent
+    sizes: list[int] = []
+
+    async def call(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if relay.id == old.id and operation == "ping" and not raw_reads:
+            result = {k: v for k, v in result.items() if k != "workspace_read_raw"}
+        if relay.id == old.id and operation == "workspace-read":
+            if not raw_reads:  # 旧运行时：能按 UTF-8 解码的块附原文
+                raw = base64.b64decode(result["data"])
+                try:
+                    result = {**result, "content": raw.decode("utf-8")}
+                except UnicodeDecodeError:
+                    pass
+            sizes.append(len(json.dumps(result).encode()))
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    response = await client.post(
+        f"/api/admin/bots/{bot.id}/switch-relay",
+        json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+        headers={"If-Match": str(bot.version)},
+    )
+    assert response.status_code == 200, response.text
+    assert (tmp_path / "destination" / bot.bot_key / "notes.md").read_text() == text
+    assert sizes and max(sizes) < 4 * 1024 * 1024
+    lengths = [p["length"] for op, p in seen if op == "workspace-read"]
+    assert max(lengths) == (2 * 1024 * 1024 if raw_reads else 512 * 1024)
 
 
 async def test_switch_failure_reports_runtime_reason(client, db_session, monkeypatch, tmp_path):

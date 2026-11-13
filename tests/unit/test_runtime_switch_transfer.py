@@ -180,7 +180,21 @@ def test_ping_reports_transfer_capabilities(agent):
     ping = agent.dispatch({"type": "ping"})
     assert ping["workspace_git"] == 1
     assert ping["workspace_chunk"] == 2 * 1024 * 1024
+    assert ping["workspace_read_raw"] == 1
     assert ping["session_transfer"] == 1
+
+
+def test_transfer_read_returns_no_text_copy(agent):
+    """换机读取只回 base64：2MB 的中文文本块再附原文，JSON 后超出平台 4MB 响应上限。"""
+    call(agent, "init", "one")
+    text = "研发" * (1024 * 1024 // 3)
+    (agent.root / "one/notes.md").write_text(text)
+    moved = call(agent, "read", "one", path="notes.md", transfer_id=str(uuid.uuid4()))
+    assert moved["content"] is None and not moved["editable"]
+    assert base64.b64decode(moved["data"]) == text.encode()
+    assert len(json.dumps(moved)) < 4 * 1024 * 1024
+    viewed = call(agent, "read", "one", path="notes.md", length=3 * 80000)
+    assert viewed["content"] == text[:80000]
 
 
 def test_legacy_memory_dir_matches_claude_project_naming(agent):
