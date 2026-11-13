@@ -42,6 +42,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/delivery.py": 2,
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
+    # 子任务：取一条是 session.scalar（自动还原）；列表显式还原
+    "coreman/core/assistants/jobs.py": 2,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
     # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序）
@@ -126,6 +128,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/delivery_checks.py": 2,
     # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
     "coreman/core/assistants/followups.py": 2,
+    # 子任务：经 ORM 新建（flush 钩子封存）；之后的改动同样经 ORM
+    "coreman/core/assistants/jobs.py": 1,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
     "coreman/core/assistants/notes.py": 1,
     "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列
