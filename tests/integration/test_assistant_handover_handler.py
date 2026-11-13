@@ -173,3 +173,42 @@ async def test_a_turn_with_nothing_left_to_hand_over_is_dropped(
     done, relay = await run(db_engine, db_session, turn, AssistantHandoverHandler())
     assert done.status == "cancelled" and done.error_code == "handover_inactive"
     assert relay.requests == [] and await streams_of(db_session, turn) == []
+
+
+async def test_items_from_a_turn_that_started_and_did_not_finish_are_marked_next_time(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """开了流的一轮没走完（被打断、中途失败）：模型可能已经处理了一部分，而下一轮不一定还记得
+    （被打断那一轮的转录不保证续得上）。重交回时在这些条目上写明，让它先核对。"""
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    await boxed(db_session, bot, "om_1")
+    turn = await handed(db_session, bot, now)
+    relay = FakeRelay("error_finish")
+    ctx = build_ctx(db_engine, turn, relay_client_factory=lambda _r: relay.client())
+    await AssistantHandoverHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    assert "交回过" not in user_input(relay.requests[0])
+    (row,) = await inbox_rows(db_session, bot)
+    assert (row.status, row.delivered_task_id, row.handovers) == ("pending", None, 1)
+    await boxed(db_session, bot, "om_2", text="第二件事")
+    again = await handed(db_session, bot, now + timedelta(hours=1))
+    done, relay = await run(db_engine, db_session, again, AssistantHandoverHandler())
+    assert done.status == "succeeded"
+    first, second = user_input(relay.requests[0]).split("【2】")
+    assert "message_id=om_1" in first and "这件事之前交回过 1 次" in first
+    assert "message_id=om_2" in second and "交回过" not in second
+    assert [row.handovers for row in await inbox_rows(db_session, bot)] == [2, 1]
+
+
+async def test_a_turn_that_never_started_leaves_no_mark(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await ready(db_session)
+    await boxed(db_session, bot, "om_1")
+    turn = await handed(db_session, bot)
+    # 让路：渲染过文本，但没开流。
+    await owner_message(db_session, bot)
+    done, relay = await run(db_engine, db_session, turn, AssistantHandoverHandler())
+    assert done.status == "queued" and relay.requests == []
+    assert [row.handovers for row in await inbox_rows(db_session, bot)] == [0]

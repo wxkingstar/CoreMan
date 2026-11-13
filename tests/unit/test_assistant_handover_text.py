@@ -186,3 +186,15 @@ def test_reminders_have_their_own_wording() -> None:
     assert "待跟进 F012（promised）今天到期，截止 2026-11-13。" in text
     assert "> 给李四回报价" in text and "> 定位：chat_id=oc_boss" in text
     assert "oc_boss" not in "\n".join(platform_lines(text))
+
+
+def test_an_item_handed_over_before_says_so_and_asks_to_check_first() -> None:
+    again = message("om_1", handovers=2)
+    fresh = message("om_2", handovers=0)
+    text = handover.render([again, fresh], ZONE)
+    first, second = text.split("【2】")
+    assert handover.AGAIN.format(count=2) in platform_lines(first)
+    assert "交回过" not in second
+    # 说明是平台写的行，说清楚先核对什么。
+    assert "approval_list" in handover.AGAIN and "followup_list" in handover.AGAIN
+    assert "不要重做" in handover.AGAIN

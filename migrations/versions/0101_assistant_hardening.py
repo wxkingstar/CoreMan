@@ -1,4 +1,4 @@
-"""Personal assistant hardening: sealed watch cursor, revision time on approvals."""
+"""Personal assistant hardening: sealed watch cursor, approval revision time, handover pacing."""
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,8 +27,24 @@ def upgrade() -> None:
         "assistant_approvals", sa.Column("revised_at", sa.DateTime(timezone=True), nullable=True)
     )
 
+    op.add_column(
+        "assistant_inbox",
+        sa.Column("handovers", sa.Integer(), server_default=sa.text("0"), nullable=False),
+    )
+    op.add_column(
+        "assistant_delivery",
+        sa.Column("handover_misses", sa.Integer(), server_default=sa.text("0"), nullable=False),
+    )
+    op.add_column(
+        "assistant_delivery",
+        sa.Column("handover_retry_at", sa.DateTime(timezone=True), nullable=True),
+    )
+
 
 def downgrade() -> None:
+    op.drop_column("assistant_delivery", "handover_retry_at")
+    op.drop_column("assistant_delivery", "handover_misses")
+    op.drop_column("assistant_inbox", "handovers")
     op.drop_column("assistant_approvals", "revised_at")
     op.add_column(
         "assistant_watch",

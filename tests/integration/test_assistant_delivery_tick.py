@@ -39,30 +39,31 @@ async def test_the_loop_settles_finished_turns_then_queues_the_next(
     await boxed(db_session, bot, "om_2")
     assert (await delivery.tick(factory, now))["assistant_handovers"] == 0
     (task_id,) = await handovers(db_session, bot)
-    # 那一轮被所有者的消息取消了：同一次 tick 里先对账放回，再把新来的那条排上；
-    # 放回的那条至少等一分钟。
+    # 那一轮被所有者的消息取消了：这次 tick 对账放回。所有者正在场，放回的那条与期间新来的
+    # 那条都至少等一分钟，不马上再开一轮。
     await tasks.finish(db_session, task_id, status="cancelled", error_code="superseded")
     await db_session.commit()
     assert await delivery.tick(factory, now) == {
         "assistant_inbox_settled": 1,
+        "assistant_handovers": 0,
+    }
+    assert [row.delivered_task_id for row in await inbox_rows(db_session, bot)] == [None, None]
+    # 等够了：下一轮把两条一起带上。
+    assert await delivery.tick(factory, now + timedelta(minutes=2)) == {
+        "assistant_inbox_settled": 0,
         "assistant_handovers": 1,
     }
     second = (await handovers(db_session, bot))[-1]
-    rows = await inbox_rows(db_session, bot)
-    assert [row.delivered_task_id for row in rows] == [None, second]
-    # 第二轮正常结束之后，放回的那条在下一轮带上。
+    assert [row.delivered_task_id for row in await inbox_rows(db_session, bot)] == [second] * 2
+    # 这一轮正常结束：两条都记为已交回。
     await tasks.finish(db_session, second, status="succeeded")
     await db_session.commit()
     assert await delivery.tick(factory, now + timedelta(minutes=2)) == {
-        "assistant_inbox_settled": 1,
-        "assistant_handovers": 1,
+        "assistant_inbox_settled": 2,
+        "assistant_handovers": 0,
     }
-    third = (await handovers(db_session, bot))[-1]
     rows = await inbox_rows(db_session, bot)
-    assert [(row.status, row.delivered_task_id) for row in rows] == [
-        ("pending", third),
-        ("delivered", second),
-    ]
+    assert [(row.status, row.delivered_task_id) for row in rows] == [("delivered", second)] * 2
 
 
 async def test_a_paused_runtime_keeps_items_until_it_is_back(

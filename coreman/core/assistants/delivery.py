@@ -48,8 +48,12 @@ OVERDRAFT = 20
 MAX_ITEMS = 30
 # 带着某个条目的交回轮次真失败满这么多次，这个条目作废。
 MAX_FAILURES = 3
-# 没跑成的轮次把条目放回之后，至少过这么久才再排（所有者正在聊、有公告时不空转）。
+# 一轮交回没走完（被所有者的消息取消、让路放弃、暂停、失败），条目放回之后过多久才再排：
+# 第一次这么久，连续没走完时逐次加倍，到上限为止；走完一轮从头算。所有者持续在聊时每一轮都会
+# 被他的下一条消息取消——他本人在场，这些事本来就该等，不必每分钟开一轮又被打断。等待期间新
+# 到的条目也不另开一轮。
 RETRY_AFTER_RELEASE = timedelta(seconds=60)
+RETRY_MAX = timedelta(minutes=15)
 RETRY_AFTER_FAILURE = timedelta(minutes=5)
 # 任务记了失败、但只是「没轮到」：不算条目的失败次数。
 QUIET_CODES = frozenset(
@@ -155,6 +159,12 @@ async def state(
     return found
 
 
+def retry_delay(misses: int) -> timedelta:
+    """连续 `misses` 轮没走完之后，下一轮至少等多久：60 秒起逐次加倍，封顶 15 分钟。"""
+    seconds = RETRY_AFTER_RELEASE.total_seconds() * 2 ** min(max(misses, 1) - 1, 10)
+    return min(timedelta(seconds=seconds), RETRY_MAX)
+
+
 def _waiting(bot_id: uuid.UUID, now: datetime) -> tuple[Any, ...]:
     """到点、还没装进任何一轮的条目。"""
     return (
@@ -253,13 +263,16 @@ async def dispatch(session: AsyncSession, bot: Bot, now: datetime) -> Task | Non
 
     装进这一轮的条目写上 `delivered_task_id`（状态仍是 `pending`）：从这一刻起盯消息不再改
     它们，直到这一轮结束时由 `settle` / `reconcile` 记账。运行时暂停、有公告、下班、冷启动没
-    做完时不入队，条目留在箱里，这里不为此发任何私信。
+    做完时不入队，条目留在箱里，这里不为此发任何私信。上一轮没走完之后的等待期内
+    （`handover_retry_at`）同样不入队，新到的条目也等着。
     """
     prefs = await session.get(AssistantSettings, bot.id)
     if prefs is None or not gate(bot, prefs, now):
         return None
     row = await state(session, bot.id, lock=True)
     if row is None or await _in_flight(session, bot.id):
+        return None
+    if row.handover_retry_at is not None and aware_utc(row.handover_retry_at) > aware_utc(now):
         return None
     if await find_announcement(session, bot_id=bot.id, relay_server_id=bot.relay_server_id):
         return None
@@ -318,19 +331,62 @@ async def bound(session: AsyncSession, task: Task) -> list[AssistantInbox]:
     return [row for row in rows if not sealed.is_locked(row) and not sealed.is_undecryptable(row)]
 
 
+async def opened(session: AsyncSession, task: Task) -> int:
+    """这一轮开了流：它带的条目各记一次「交回过」。与开流同一个事务，调用方提交。
+
+    记的是模型看到过这一条。这一轮要是没走完（被所有者的消息打断、中途失败），条目回到待
+    交回，下一轮的整理稿凭这个数在条目上写明「之前交回过」——被打断那一轮的转录不保证续得上
+    （节点在后台上传，下一轮先开就换新会话），助理不能指望自己还记得做过什么。
+    """
+    done = await session.execute(
+        update(AssistantInbox)
+        .where(
+            AssistantInbox.bot_id == task.bot_id,
+            AssistantInbox.delivered_task_id == task.id,
+            AssistantInbox.status == "pending",
+        )
+        .values(handovers=AssistantInbox.handovers + 1, updated_at=func.now())
+    )
+    return _count(done)
+
+
 async def _settle(session: AsyncSession, task_id: int, ok: bool) -> int:
-    mine = (AssistantInbox.delivered_task_id == task_id, AssistantInbox.status == "pending")
+    unsettled = (AssistantInbox.delivered_task_id == task_id, AssistantInbox.status == "pending")
+    # 先锁住这一轮还没记账的条目：重复调用（收尾与对账各来一次）时后到的那次拿不到行，
+    # 不会把这一轮算两次。
+    held = (
+        await session.execute(
+            select(AssistantInbox.id, AssistantInbox.bot_id).where(*unsettled).with_for_update()
+        )
+    ).all()
+    if not held:
+        return 0
+    ids = [int(found[0]) for found in held]
+    bot_id = held[0][1]
+    mine = (AssistantInbox.id.in_(ids), *unsettled)
+    pace = update(AssistantDelivery).where(AssistantDelivery.bot_id == bot_id)
     if ok:
-        done = await session.execute(
+        await session.execute(
             update(AssistantInbox).where(*mine).values(status="delivered", updated_at=func.now())
         )
-        return _count(done)
+        await session.execute(
+            pace.values(handover_misses=0, handover_retry_at=None, updated_at=func.now())
+        )
+        return len(ids)
     ended = (
         await session.execute(select(Task.status, Task.error_code).where(Task.id == task_id))
     ).first()
     # 真失败：任务记了失败，原因又不是「没轮到」。取消、任务行已不在的都不算。
     failed = ended is not None and ended[0] == "failed" and ended[1] not in QUIET_CODES
-    retry = func.now() + (RETRY_AFTER_FAILURE if failed else RETRY_AFTER_RELEASE)
+    # 这位助理连续第几轮没走完：决定下一轮等多久。状态行不在（助理刚被删）时按第一次算。
+    misses = await session.scalar(
+        pace.values(
+            handover_misses=AssistantDelivery.handover_misses + 1, updated_at=func.now()
+        ).returning(AssistantDelivery.handover_misses)
+    )
+    wait = retry_delay(int(misses or 1))
+    await session.execute(pace.values(handover_retry_at=func.now() + wait))
+    retry = func.now() + (max(wait, RETRY_AFTER_FAILURE) if failed else wait)
     values: dict[str, Any] = {
         "delivered_task_id": None,
         "hold_until": func.greatest(func.coalesce(AssistantInbox.hold_until, retry), retry),
@@ -338,11 +394,8 @@ async def _settle(session: AsyncSession, task_id: int, ok: bool) -> int:
     }
     if failed:
         values["failures"] = AssistantInbox.failures + 1
-    released = await session.execute(
-        update(AssistantInbox).where(*mine).values(**values).returning(AssistantInbox.id)
-    )
-    ids = [int(found[0]) for found in released]
-    if failed and ids:
+    await session.execute(update(AssistantInbox).where(*mine).values(**values))
+    if failed:
         await session.execute(
             update(AssistantInbox)
             .where(AssistantInbox.id.in_(ids), AssistantInbox.failures >= MAX_FAILURES)
@@ -357,7 +410,8 @@ async def settle(session: AsyncSession, task: Task, ok: bool) -> int:
     Args:
         ok: 这一轮正常结束（任务 `succeeded`）。为真时条目记为已交回；否则条目回到待交回
             （裁定 3）——被所有者的消息取消（`superseded`）、让路放弃（`platform_turn_yielded`）、
-            暂停（`assistant_paused`）、失败都一样，下一轮再带上；真失败另计次数。
+            暂停（`assistant_paused`）、失败都一样，下一轮再带上；真失败另计次数。没走完的
+            轮次连续出现时，下一轮的等待逐次加倍（`retry_delay`），走完一轮清零。
     """
     return await _settle(session, task.id, ok)
 

@@ -126,8 +126,8 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
-    # 投递：绑定任务号、记已交回、放回、作废，四条都只写元数据
-    "coreman/core/assistants/delivery.py": 4,
+    # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据
+    "coreman/core/assistants/delivery.py": 5,
     # 顺带检查：入提醒条目（摘要封存）；交回后被撤回的条目作废（只写状态）
     "coreman/core/assistants/delivery_checks.py": 2,
     # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结

@@ -220,8 +220,9 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 |---|---|---|
 | `inbox_pending` 一直不降 | `watch.state`、所有者的工作时段、`turns` | 运行时暂停（`paused`）、下班、冷启动没做完时不交回，恢复后自动交回；`turns.today` 达到 `budget` 时只交回紧急的，其余次日交回 |
 | 条目反复交回不成 | `assistant_inbox.failures`、`void_code` | 带着它的轮次真失败满 3 次后条目作废（`undeliverable`）；先看那几轮任务的 `error_code` |
+| `inbox_pending` 不降、又没有在途的交回任务 | `assistant_delivery.handover_misses`、`handover_retry_at` | 上一轮交回没走完（被所有者的消息取消、让路放弃、暂停、失败）之后的等待：60 秒起，连续没走完逐次加倍，最多 15 分钟；到 `handover_retry_at` 之前不排新的一轮，走完一轮清零 |
 | 条目绑着任务号不动 | `assistant_inbox.delivered_task_id` 对应的 `tasks` 行 | 那一轮还在排队或在跑（所有者正在和助理聊时会一直让路）；任务结束后 5 秒内由对账记账 |
-| 审批单自己变成了已撤回 | `assistant_approvals.error_code` | `owner_replied`、`anchor_recalled`、`anchor_moved` 是平台的自动撤回，助理会在下一轮交回里得知 |
+| 审批单自己变成了已撤回 | `assistant_approvals.error_code` | `owner_replied`、`anchor_recalled`、`anchor_moved` 是平台的自动撤回，助理会在下一轮交回里得知（`anchor_moved` 的跟下一批一起，同一个会话 30 分钟内至多撤一次） |
 | 所有者说没收到授权到期提醒 | `feishu_personal_grants.authorized_at`、`assistant_delivery.reauth_reminded_on` | 只在工作时段提醒，每天一次；升级前就连接的授权按建行时间算 |
 | 平台代发的回复之后那个会话被压着 | `assistant_sent`、worker 日志 `assistant_sent_record_failed` | 代发消息的编号没记上时，盯消息会把它当成所有者亲自发言，压 10 分钟后恢复 |
 

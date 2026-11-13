@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from coreman.core.assistants import delivery, settings
 from coreman.core.assistants.kinds import HANDOVER_KIND
 from coreman.core.bus import tasks
-from coreman.core.db.models import AssistantInbox, Bot, RelayServer, Task
+from coreman.core.db.models import AssistantDelivery, AssistantInbox, Bot, RelayServer, Task
 from coreman.core.db.session import make_session_factory
 from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import SECRET, raw
@@ -175,6 +175,64 @@ async def test_a_turn_that_did_not_happen_puts_its_items_back_for_the_next_one(
         "om_1",
         "om_2",
     ]
+
+
+async def pace(session: AsyncSession, bot: Bot) -> tuple[int, float | None]:
+    """（连续没走完的轮数, 离下一次能排还有多少秒）。"""
+    row = await session.get(AssistantDelivery, bot.id, populate_existing=True)
+    assert row is not None
+    after = row.handover_retry_at
+    return row.handover_misses, (after - utcnow()).total_seconds() if after else None
+
+
+async def test_interrupted_turns_wait_twice_as_long_each_time_up_to_fifteen_minutes(
+    db_session: AsyncSession,
+) -> None:
+    """所有者一直在聊：每一轮交回都被他的消息取消。间隔逐次加倍，新到的急事也不另开一轮。"""
+    bot, _ = await ready(db_session)
+    await boxed(db_session, bot, "om_1")
+    at = utcnow()
+    waits = []
+    for attempt in range(1, 7):
+        task = await send(db_session, bot, at)
+        assert task is not None, attempt
+        await end(db_session, task, "cancelled", "superseded")
+        assert await delivery.settle(db_session, task, False) >= 1
+        await db_session.commit()
+        misses, wait = await pace(db_session, bot)
+        assert misses == attempt and wait is not None
+        waits.append(round(wait / 60))
+        # 这段时间里新到的立即交回的条目也等着：他本人在场。
+        await boxed(db_session, bot, f"om_new_{attempt}")
+        assert await send(db_session, bot, utcnow() + timedelta(seconds=wait - 20)) is None
+        at = utcnow() + timedelta(seconds=wait + 5)
+    assert waits == [1, 2, 4, 8, 15, 15]
+    # 取消不算条目的失败：多少次都不作废。
+    assert {row.failures for row in await inbox_rows(db_session, bot)} == {0}
+    # 走完一轮之后从头算。
+    task = await send(db_session, bot, at)
+    assert task is not None
+    await end(db_session, task, "succeeded")
+    await delivery.settle(db_session, task, True)
+    await db_session.commit()
+    assert await pace(db_session, bot) == (0, None)
+    await boxed(db_session, bot, "om_after")
+    assert await send(db_session, bot) is not None
+
+
+async def test_settling_twice_or_by_reconcile_counts_the_turn_once(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    await boxed(db_session, bot, "om_1")
+    task = await send(db_session, bot)
+    assert task is not None
+    await end(db_session, task, "cancelled", "superseded")
+    assert await delivery.settle(db_session, task, False) == 1
+    assert await delivery.settle(db_session, task, False) == 0
+    assert await delivery.reconcile(db_session) == 0
+    await db_session.commit()
+    assert (await pace(db_session, bot))[0] == 1
 
 
 async def test_real_failures_back_off_and_give_up_after_three(db_session: AsyncSession) -> None:

@@ -540,6 +540,9 @@ class AssistantInbox(Base):
     delivered_task_id: Mapped[int | None] = mapped_column(BigInteger)
     # 带着它的交回轮次真失败过几次；满 delivery.MAX_FAILURES 次作废（void_code=undeliverable）。
     failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    # 带着它开过几轮（开了流、模型看到过它）。大于 0 而还在待交回，说明之前那一轮没走完：
+    # 重交回时整理稿在这一条上写明，让助理先核对是否已经处理。
+    handovers: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
@@ -550,6 +553,8 @@ class AssistantDelivery(Base):
     `handover_seq` 只增不减，拼进交回任务的幂等键；取这一行的行锁（`FOR UPDATE SKIP LOCKED`）
     同时是「同一时刻只有一处在为这位助理入队」的互斥。两个日期都是所有者时区里的日期：当天
     已经私信过「预算用完」、已经提醒过「授权快到期」。`next_sweep_at` 是下一次顺带检查的时刻。
+    `handover_misses` 是连续没走完的交回轮数（被所有者的消息取消、让路放弃、暂停、失败），走完
+    一轮清零；`handover_retry_at` 之前不再排新的一轮（间隔随 `handover_misses` 逐次加倍）。
     """
 
     __tablename__ = "assistant_delivery"
@@ -558,6 +563,8 @@ class AssistantDelivery(Base):
         Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
     )
     handover_seq: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    handover_misses: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    handover_retry_at: Mapped[datetime | None] = _ts()
     budget_notified_on: Mapped[date | None] = mapped_column(Date)
     reauth_reminded_on: Mapped[date | None] = mapped_column(Date)
     next_sweep_at: Mapped[datetime] = _ts(server_default=text("now()"))
