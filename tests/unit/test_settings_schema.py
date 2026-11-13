@@ -30,6 +30,7 @@ def test_patch_partial_and_bounds() -> None:
         "group_observe_bot_streak_limit",
         "busy_confirm_minutes",
         "assistant_node_concurrency",
+        "assistant_daily_turn_budget",
         "assistant_eligibility",
         "assistant_backends",
         "prompt_org_context",
