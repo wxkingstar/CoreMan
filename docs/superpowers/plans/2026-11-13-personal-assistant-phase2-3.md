@@ -17,9 +17,9 @@
 | 2F 上下班与冷启动 | 工作时段启停、「上班」「下班」、下班编译、开通后的冷启动 | 2E | `0099_assistant_cold_start` |
 | 3A 子任务 | `assistant_jobs`、`assistant_spawn`、`assistant_job_message`、只读工具范围、结果投回 | 2E | `0100_assistant_jobs` |
 | 审查修补 | 第 2 期与 3A 的独立审查发现的问题（盯消息倒灌历史、索引行引用、自动撤回循环、被打断的交回、游标封存等） | 2B–3A | `0101_assistant_hardening` |
-| 3B 调度公共员工 | `assistant_ask_bot`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | `0102_assistant_dispatch` |
+| 3B 调度公共员工 | `assistant_ask_bot`、`assistant_bot_list`、目标员工那边的私有轮次、`assistant-dispatch` 审批 | 3A | — |
 | 3C 页面 | `/api/me/assistant`、「我的助理」页、管理台的助理列表与设置项表单 | 2C 2E 3A | — |
-| 3D 导入与访问日志 | `assistant_access_log`、导入接口 | 2B 2C 3C | `0103_assistant_access_log` |
+| 3D 导入与访问日志 | `assistant_access_log`、导入接口 | 2B 2C 3C | `0102_assistant_access_log` |
 
 ## 裁定（与 spec 不同或 spec 没写明的地方）
 
@@ -64,7 +64,7 @@
     - 本人定时任务工具对一切无人在场的轮次都不列、调用返回 `owner_turn_required`（2F 之后的修补已做），子任务轮次不另作处理。
     - 冷启动的口吻样本那一轮同样不出声（审查后补）：`COLD_START_KIND` 进了 `kinds.SILENT_KINDS`。处理器层的那几处覆盖提到了基类 `worker.platform_turn.SilentTurnHandler`，`AssistantSubtaskHandler` 与 `AssistantColdStartHandler` 都继承它；3B 的不出声轮次直接继承这个基类，并把任务类型加进 `SILENT_KINDS`。
 
-20. **审查修补改动的接口**（独立审查之后，迁移 `0101_assistant_hardening`；3B、3D 的迁移号顺延为 `0102`、`0103`）：
+20. **审查修补改动的接口**（独立审查之后，迁移 `0101_assistant_hardening`；3B 落地后确认不需要迁移，3D 用 `0102`，见裁定 21）：
     - `assistant_watch.cursor` 改名 `cursor_enc` 并封存；要看游标里的字段先 `sealed.open_value` 或取整行，不能在 SQL 里过滤。
     - 新列：`assistant_approvals.revised_at`、`assistant_inbox.handovers`（带着它开过几轮）、`assistant_delivery.handover_misses` / `handover_retry_at`（没走完的交回之后的等待）。
     - 引用统一走 `assistants/quoting.py` 的 `quoted`；知识库注入里页面的路径、标题、摘要都在引用行里，平台写的行不带页面文字（3D 的导入页、3C 展示索引时同此口径）。
@@ -72,6 +72,16 @@
     - `watch.restart_chats(session, bot_id, chat_ids, now)`：会话从忽略名单移出时由 `settings.update` 调用；3C 的设置表单经 `settings.update` 走到它，会等正在进行的一轮轮询提交（至多几十秒）。
     - `voice.save` 在口吻页最后不是助理写的时候返回 None（不覆盖）；`notes.author(session, bot_id, path)` 取一页最后的作者。
     - 不出声的轮次继承 `worker.platform_turn.SilentTurnHandler`，`COLD_START_KIND` 已在 `SILENT_KINDS` 里。
+
+21. **调度公共员工层的补充**（3B 落地时定）：
+    - 本层没有迁移（总览原先留的 `0102_assistant_dispatch` 不用，3D 改回 `0102`）：等待审批的调度不占 `assistant_jobs` 的行，批准后才建行，行的编号沿用审批单的编号（执行任务重跑不会派第二次）；审批单的 `channel` 用 `other`，靠 `tool = 'assistant_ask_bot'` 区分。
+    - 一次求助只有一轮：`jobs.message` / `assistant_job_message` 对 `bot_help` 返回 `job_no_follow_up`（在占名额之前判断）。`jobs.list_` / `view` / `cancel` / `cancel_all` / `reconcile` / `active_counts` 不分种类，对它照常可用。
+    - 目标员工那一轮的处理器 `AssistantBotHelpHandler` 继承 `SilentTurnHandler`，整个换掉入站解析（基类只认助理自己的轮次）；`BOT_HELP_KIND` 进了 `kinds.SILENT_KINDS`，但不进 `ORIGIN_KINDS` / `PLATFORM_TURN_KINDS`：它不是助理自己的轮次，`unattended` 对它为假，能力收紧在 `opening._open` 里按任务类型单开一支（不挂个人工具、本人定时任务、群文档、求助、凭证索取、云签名代理；只注入已保存的个人凭证）。
+    - 目标员工用提问工具时改判为正常结束、答复是平台代写的 `blocked`；终稿是额度告示时按 `rate_limited` 失败（基类的行为）。收尸补记录时这类任务标私有、类型用任务类型、不写私聊可达。
+    - `allow_write=false` 在平台侧能强制的只有业务系统目录的代理调用不放写（`catalog_policy.writable_for`）；业务令牌没有只读范围。云签名代理不论 `allow_write` 都不挂。
+    - 可见性按 `chat_logs.message_type = 'assistant_bot_help' AND private` 判断：管得着这位员工的人看得到这一行、看不到内容（输出带 `content_withheld`），带关键词的列表与统计不含它；机器人令牌与无关成员整行不可见；开发接口（按任务类型与发起人把关，开流前也一样）与节点会话查看页对非所有者仍是「不存在」。
+    - 停用的 `drain` 一步把目标员工那边在途的轮次算进「还在跑」（`dispatch.live_rounds`）。停用期间已批准的调度单执行时因助理不在 `active` 而记失败，不会派出。
+    - 顺带修了转录交接的一处竞态（不属于调度）：被取消的一轮的转录还在从节点传回来时，下一轮开轮前最多等 `transcripts.UPLOAD_WAIT`（20 秒，从被取消那一轮结束起算；`transcripts.awaiting_upload`，在 `OpenStage._wait_transcript` 里用短事务轮询），等到了照常续，等不到才换新会话。
 
 ## 层间接口
 
@@ -131,7 +141,16 @@
 - `coreman/core/assistants/jobs.py` 对外：`spawn`、`message`、`list_`（`scope`：`active` / `blocked` / `recent`）、`get`、`cancel`、`cancel_all`、`complete`、`block`、`for_round`、`mark_running`、`round_text`、`result_text`、`report`、`bound_report`、`settle_report`、`reconcile`、`tick`、`active_counts`、`view(row, full=False)`、`JobError`。
 - 不出声：回复上下文标记 `_silent`、`TimeoutSupervisor.silent`、`kinds.SILENT_KINDS`（见裁定 19）；处理器层的覆盖在基类 `SilentTurnHandler`（`coreman/runtime/worker/platform_turn.py`）。处理器 `AssistantSubtaskHandler` 在 `coreman/runtime/worker/assistant_jobs.py`。
 
-### 3B、3C、3D
+### 3B
+
+- 一次求助是一行 `assistant_jobs`：`kind = 'bot_help'`、`origin = 'assistant'`、`target_bot_id`、`session_key = "assistant-help:<id>"`、`origin_session_key` 是主会话键、`rounds = 1`；`title_enc` 是「请「员工名」协助」，`brief_enc` 是问题原文，`result_enc` 是答复，`blocked_enc` 是对方需要的东西（多条用「；」连接）。状态与子任务相同：`queued` / `running` / `done` / `blocked` / `failed` / `cancelled`；失败代码有 `bot_help_not_allowed`、`bot_help_announced`、`relay_unavailable`、`session_busy`、`empty_answer`、`rate_limited`、`job_timeout`、`turn_lost` 以及任务自己的错误代码。
+- `coreman/core/assistants/dispatch.py` 对外：`resolve(session, bot, ref)`、`authorize(session, bot, target_id)`、`candidates(session, bot)`、`listing(rows)`、`clean_question(value)`、`owner_of(session, bot)`、`send(session, bot, target, question, *, allow_write, attended, approved=False, job_id=None, now=None)`、`for_round(session, task)`、`round_text(row, owner_name)`、`mark_running(session, task)`、`finish(session, task, *, ok, answer=None, error_code=None)`、`fail(session, task, code)`、`read_answer`、`blocked_text`、`result_text(session, row)`、`live_rounds(session, bot_id)`、`session_key_for(job_id)`、`DispatchError`、`Answer`、`Round`、`MAX_QUESTION`、`TOOL`、`AUDIT_ACTION`、`STATUS_WORDS`、`FAILURE_NOTES`。
+- 工具 `assistant_bot_list`（返回 `bots: [{bot, name, description}]` 与 `limits`）、`assistant_ask_bot`（只读返回 `{job: jobs.view(row), bot, name, hint}`；`allow_write=true` 返回审批提交的结果加 `bot`），注册在 `jobs` 组；目标侧处理器 `AssistantBotHelpHandler`，任务类型 `BOT_HELP_KIND`，载荷 `{job_id, round, allow_write, bot_key, platform_user_id}`。
+- 审计：`audit_logs.action = 'assistant.dispatch'`，`actor_id` / `actor_login` 是所有者，`target_type = 'bot'`，`target_id` 是目标员工，`diff = {assistant_bot_id, job_id, unattended, allow_write, approved, question_chars}`；每次派出一条（等待审批时不写）。
+- 审批：`approvals/dispatching.py` 的 `submit(session, scope, *, target, question, cfg)` / `run(factory, approval_id, cfg)`；`tower.DISPATCH_TARGET = "assistant-dispatch"`，`tower.config(settings, target)`，`tower.Config.target`。审批单 `tool = 'assistant_ask_bot'`、`channel = 'other'`，`args_enc.calls[0].arguments = {bot_id, bot, name, question}`，`args_enc.abstract` 是「调度员工 → 员工名」。
+- 3C 的「正在跑」里调度与子任务同表同接口，用 `view(row)["kind"]` 区分；等待审批的调度在「等你出手」的待批审批单里（`tool = 'assistant_ask_bot'`），还没有 `assistant_jobs` 行。目标员工的名字由 3C 按 `target_bot_id` 另查（`view` 里的 `title` 带着派出当时的名字）。所有者在页面上取消一次调度用 `jobs.cancel(session, bot_id, job_id, code="cancelled_by_owner", report=True)`，与子任务相同。管理台对话记录列表要认 `content_withheld`。
+
+### 3C、3D
 
 接口在各自的计划里定；3C 的接口前缀 `/api/me/assistant`，鉴权照 `feishu_personal.interactive_user`。
 
