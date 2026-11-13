@@ -14,6 +14,8 @@ from coreman.core.assistants.kinds import (
     PLATFORM_TURN_KINDS,
     SUBTASK_KIND,
 )
+from coreman.core.bus import tasks
+from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import TASK_KINDS, AssistantSettings, Task
 from tests.integration.assistant_helpers import (
     SECRET,
@@ -128,3 +130,30 @@ async def test_enqueue_refuses_standard_bots_and_other_kinds(db_session: AsyncSe
     for kind in ("chat", "cron_run", APPROVAL_EXECUTE_KIND, BOT_HELP_KIND):
         with pytest.raises(ValueError, match="platform turn kind"):
             await platform_turns.enqueue(db_session, bot, kind, {}, dedupe_key=f"x:{kind}")
+
+
+@pytest.mark.parametrize("kind", platform_turns.ORIGIN_KINDS)
+async def test_the_bus_refuses_these_kinds_from_anywhere_else(
+    db_session: AsyncSession, kind: str
+) -> None:
+    """运行时的闸：没有入站事件的平台来源类型，绕过入口直接入队会抛错，一行也不写。"""
+    bot, owner = await seed_assistant(db_session)
+    await identified(db_session, bot)
+    forged = NewTask(bot_id=bot.id, kind=kind, user_id=owner.id, session_key="oc_private")
+    with pytest.raises(RuntimeError, match="platform_turns.enqueue"):
+        await tasks.enqueue(db_session, forged)
+    assert await raw(db_session, "SELECT count(*) FROM tasks WHERE kind = :kind", kind=kind) == 0
+
+
+async def test_the_entry_admits_only_its_own_task(db_session: AsyncSession) -> None:
+    """入口放行的是它自己建的那一个任务：入队之后再直接入队同类任务照样被拒。"""
+    bot, owner = await seed_assistant(db_session)
+    await identified(db_session, bot)
+    assert await platform_turns.enqueue(
+        db_session, bot, HANDOVER_KIND, {"note": "x"}, dedupe_key="handover:gate"
+    )
+    with pytest.raises(RuntimeError):
+        await tasks.enqueue(
+            db_session,
+            NewTask(bot_id=bot.id, kind=HANDOVER_KIND, user_id=owner.id, session_key="oc_private"),
+        )

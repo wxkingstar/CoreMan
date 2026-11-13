@@ -19,3 +19,6 @@ SUBTASK_KIND = "assistant_subtask"
 # 调度公共员工：跑在目标员工那边，不是助理自己的轮次，来源校验另定。
 BOT_HELP_KIND = "assistant_bot_help"
 PLATFORM_TURN_KINDS = (HANDOVER_KIND, JOB_RESULT_KIND, COMPILE_KIND, SUBTASK_KIND)
+# 没有入站事件也能跑的任务类型：平台来源的四种，加上在这样的轮次里提交的审批单的结果回合。
+# 不带入站事件的这些类型只有 `platform_turns.enqueue` 能入队（`bus.tasks.enqueue` 把关）。
+ORIGIN_KINDS = (*PLATFORM_TURN_KINDS, APPROVAL_RESULT_KIND)

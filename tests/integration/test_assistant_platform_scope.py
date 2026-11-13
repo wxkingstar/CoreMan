@@ -155,17 +155,16 @@ async def test_a_forged_platform_task_on_a_standard_bot_is_refused(
     db_session: AsyncSession,
 ) -> None:
     standard = await seed_standard(db_session)
+    # 总线不收这样的任务（见 test_assistant_platform_turns）：当成库里已经有了这么一行。
     forged = await tasks.enqueue(
         db_session,
         NewTask(
-            bot_id=standard.id,
-            kind=HANDOVER_KIND,
-            user_id=standard.created_by,
-            session_key="oc_private",
+            bot_id=standard.id, kind="chat", user_id=standard.created_by, session_key="oc_private"
         ),
     )
-    await db_session.commit()
     assert forged is not None
+    await db_session.execute(update(Task).where(Task.id == forged.id).values(kind=HANDOVER_KIND))
+    await db_session.commit()
     claimed = await claim(db_session)
     with pytest.raises(ValueError, match="platform_turn_required"):
         await policy.task_scope(db_session, claimed.id, str(standard.created_by))

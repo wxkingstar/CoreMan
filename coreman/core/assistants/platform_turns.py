@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import settings as assistant_settings
-from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, PLATFORM_TURN_KINDS
+from coreman.core.assistants.kinds import ORIGIN_KINDS
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
@@ -34,8 +34,6 @@ from coreman.core.logging import get_logger
 
 log = get_logger(__name__)
 
-# 没有入站事件也能跑的任务类型：平台来源的四种，加上在这样的轮次里提交的审批单的结果回合。
-ORIGIN_KINDS = (*PLATFORM_TURN_KINDS, APPROVAL_RESULT_KIND)
 # 子任务的会话键：`<主会话键>#job:<编号>`。
 JOB_SEPARATOR = "#job:"
 
@@ -95,23 +93,26 @@ async def enqueue(
     if row is None or not assistant_settings.identified(row) or not owns_session(row, key):
         log.warning("assistant_platform_turn_refused", bot_id=str(bot.id), kind=kind)
         return None
-    return await tasks.enqueue(
-        session,
-        NewTask(
-            bot_id=bot.id,
-            kind=kind,
-            user_id=bot.owner_id,
-            session_key=key,
-            dedupe_key=dedupe_key,
-            payload={
-                **payload,
-                # 同一会话串行：所有者正在聊的那一轮没结束时排在它后面。
-                "serialize_session": True,
-                "bot_key": bot.bot_key,
-                "platform_user_id": row.platform_user_id,
-            },
-        ),
+    new = NewTask(
+        bot_id=bot.id,
+        kind=kind,
+        user_id=bot.owner_id,
+        session_key=key,
+        dedupe_key=dedupe_key,
+        payload={
+            **payload,
+            # 同一会话串行：所有者正在聊的那一轮没结束时排在它后面。
+            "serialize_session": True,
+            "bot_key": bot.bot_key,
+            "platform_user_id": row.platform_user_id,
+        },
     )
+    # 总线不收别处来的、没有入站事件的这些类型：只放行这里建的这一个任务。
+    admitted = tasks._ADMITTED.set(new)
+    try:
+        return await tasks.enqueue(session, new)
+    finally:
+        tasks._ADMITTED.reset(admitted)
 
 
 async def scope_for(session: AsyncSession, bot: Bot, task: Task) -> Scope:

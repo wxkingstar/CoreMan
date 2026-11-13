@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -13,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
+from coreman.core.assistants.kinds import ORIGIN_KINDS
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
@@ -76,8 +78,21 @@ class NewTask:
     dedupe_key: str | None = None
 
 
+# 个人助理里平台自己发起的轮次不带入站事件也能拿到所有者的个人工具，凭的是「只有
+# `platform_turns.enqueue` 能创建」。那个入口把它建的任务放在这里，`enqueue` 只认这一个对象；
+# 模块私有，别处不得使用（tests/unit/test_assistant_platform_turn_ledger.py 守着）。
+_ADMITTED: ContextVar[NewTask | None] = ContextVar("admitted_platform_turn", default=None)
+
+
 async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
-    """入队；带 dedupe_key 且已存在同键任务时返回 None（幂等），不发通知。"""
+    """入队；带 dedupe_key 且已存在同键任务时返回 None（幂等），不发通知。
+
+    Raises:
+        RuntimeError: 没有入站事件的平台来源类型（`kinds.ORIGIN_KINDS`）不是经
+            `platform_turns.enqueue` 进来的
+    """
+    if new.kind in ORIGIN_KINDS and new.inbound_event_id is None and _ADMITTED.get() is not new:
+        raise RuntimeError(f"{new.kind} without an inbound event: use platform_turns.enqueue")
     values: dict[str, Any] = {
         "bot_id": new.bot_id,
         "kind": new.kind,
