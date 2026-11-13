@@ -91,6 +91,8 @@ class Entry:
     version: int
     size: int
     updated_at: datetime
+    # 最后一次写这一页的是谁：`owner`（所有者在页面上）、`assistant`、`import`。
+    updated_by: str
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,7 @@ def _entry(row: AssistantPage) -> Entry:
         version=row.version,
         size=row.size,
         updated_at=row.updated_at,
+        updated_by=row.updated_by,
     )
 
 
@@ -185,6 +188,7 @@ async def read(session: AsyncSession, bot_id: uuid.UUID, path: str) -> Page | No
         version=entry.version,
         size=entry.size,
         updated_at=entry.updated_at,
+        updated_by=entry.updated_by,
         body=row.body_enc,
     )
 

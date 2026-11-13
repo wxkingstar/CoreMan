@@ -151,10 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(assistants_admin.router)
 
-    from coreman.api.routers import me_assistant, me_assistant_followups
+    from coreman.api.routers import me_assistant, me_assistant_followups, me_assistant_notes
 
     app.include_router(me_assistant.router)
     app.include_router(me_assistant_followups.router)
+    app.include_router(me_assistant_notes.router)
     app.include_router(users.router)
     app.include_router(teams.router)
     app.include_router(departments.router)
