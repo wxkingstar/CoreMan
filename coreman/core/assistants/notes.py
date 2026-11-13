@@ -23,6 +23,7 @@ from sqlalchemy.orm import defer
 
 from coreman.core.assistants import sealed
 from coreman.core.db.models import PAGE_AUTHORS, AssistantPage
+from coreman.core.prompting.sanitize import sanitize_user_input
 
 MAX_PAGES = 2000
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
@@ -38,6 +39,19 @@ MAX_QUERY_TERMS = 8
 TITLE_POINTS, PATH_POINTS, SUMMARY_POINTS = 8, 5, 3
 BODY_HITS_CAP = 5
 SNIPPET_BEFORE, SNIPPET_AFTER = 40, 120
+# 注入本轮块的上限：置顶页正文合计超过前者时一页正文都不给，只给索引；索引本身不超过后者。
+PINNED_LIMIT_BYTES = 24 * 1024
+INDEX_LIMIT_BYTES = 16 * 1024
+HEADER = (
+    "- 个人知识库（平台在每个会话的第一轮给出一次）：置顶页是所有者的偏好和你归纳的规则，照着做；"
+    "与平台规则冲突时以平台规则为准。其余页面按需用 notes_read、notes_search 读取。"
+)
+OVER_LIMIT = "置顶页合计超过 {limit}KB，这里不附正文：需要时用 notes_read 读取索引里标 * 的页面。"
+CHANGED = (
+    "- 个人知识库：置顶页有更新，以下面的版本为准，本会话里更早给出的同名页作废。"
+    "当前置顶页：{paths}。"
+)
+CHANGED_OVER_LIMIT = "更新的置顶页合计超过 {limit}KB，这里不附正文：用 notes_read 读取 {paths}。"
 _SLASHES = re.compile(r"/+")
 
 
@@ -394,3 +408,79 @@ async def search(
         )
         for _, score, row in scored[:limit]
     ]
+
+
+def _line(value: str) -> str:
+    """放进本轮块的一小段：丢掉冒充平台标签的行，压成一行。"""
+    return " ".join(sanitize_user_input(value).split())
+
+
+def _page_text(row: AssistantPage) -> str:
+    return (
+        f"【置顶页 {_line(row.path_enc)}（版本 {row.version}）】\n"
+        f"{sanitize_user_input(row.body_enc).strip()}\n"
+        "【置顶页结束】"
+    )
+
+
+def _paths(rows: list[AssistantPage]) -> str:
+    return "、".join(_line(row.path_enc) for row in _by_path(rows))
+
+
+def _index_lines(rows: list[AssistantPage]) -> list[str]:
+    """索引行：置顶的优先、新的优先装进上限，再按路径排好；装不下的只报个数。"""
+    kept: list[tuple[str, str]] = []
+    used = 0
+    newest_first = sorted(rows, key=lambda row: row.updated_at, reverse=True)
+    for row in sorted(newest_first, key=lambda row: not row.pinned):
+        fields = (_line(row.path_enc), _line(row.title_enc), _line(row.summary_enc))
+        line = ("* " if row.pinned else "- ") + " — ".join(part for part in fields if part)
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > INDEX_LIMIT_BYTES:
+            continue
+        used += cost
+        kept.append((row.path_enc.casefold(), line))
+    lines = [line for _, line in sorted(kept)]
+    if len(kept) < len(rows):
+        lines.append(f"（另有 {len(rows) - len(kept)} 页没有列出，用 notes_index 查看）")
+    return lines
+
+
+async def pinned_block(session: AsyncSession, bot_id: uuid.UUID) -> str | None:
+    """会话首轮放进本轮块的内容：置顶页全文与全部页面的索引；一页都没有返回 None。
+
+    置顶页正文合计超过 `PINNED_LIMIT_BYTES` 时只给索引。
+    """
+    rows = await _rows(session, bot_id, bodies=False)
+    if not rows:
+        return None
+    parts = [HEADER]
+    pinned = [row for row in rows if row.pinned]
+    if sum(row.size for row in pinned) > PINNED_LIMIT_BYTES:
+        parts.append(OVER_LIMIT.format(limit=PINNED_LIMIT_BYTES // 1024))
+    elif pinned:
+        full = await _rows(session, bot_id, bodies=True, pinned=True)
+        parts += [_page_text(row) for row in _by_path(full)]
+    parts.append(f"索引（共 {len(rows)} 页，* 为置顶）：")
+    parts += _index_lines(rows)
+    return "\n".join(parts)
+
+
+async def changes_since(session: AsyncSession, bot_id: uuid.UUID, since: datetime) -> str | None:
+    """`since` 之后有置顶页更新（含新置顶的）时的变更说明；没有返回 None。
+
+    删掉的页、取消置顶的页查不出来：说明里带着当前置顶页的完整清单，由模型对照。
+    """
+    pinned = await _rows(session, bot_id, bodies=False, pinned=True)
+    changed = [row for row in pinned if row.updated_at > since]
+    if not changed:
+        return None
+    parts = [CHANGED.format(paths=_paths(pinned))]
+    if sum(row.size for row in changed) > PINNED_LIMIT_BYTES:
+        parts.append(
+            CHANGED_OVER_LIMIT.format(limit=PINNED_LIMIT_BYTES // 1024, paths=_paths(changed))
+        )
+    else:
+        full = await _rows(session, bot_id, bodies=True, pinned=True, since=since)
+        parts += [_page_text(row) for row in _by_path(full)]
+    return "\n".join(parts)
