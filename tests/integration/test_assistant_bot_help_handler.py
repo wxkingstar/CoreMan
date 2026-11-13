@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from coreman.core.assistants.kinds import BOT_HELP_KIND, JOB_RESULT_KIND
 from coreman.core.bus import streams, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.db.models import ChatSession, Task
+from coreman.core.db.models import Announcement, ChatSession, RelayServer, Task
 from coreman.core.db.session import make_session_factory
 from coreman.runtime.scheduler import reaper
 from coreman.runtime.worker.assistant_bot_help import AssistantBotHelpHandler
@@ -29,7 +29,7 @@ from tests.integration.dispatch_helpers import (
 )
 from tests.integration.job_helpers import reloaded, take, tasks_of
 from tests.integration.test_assistant_platform_turn_handler import assistant, streams_of
-from tests.integration.worker_helpers import user_input
+from tests.integration.worker_helpers import build_ctx, user_input
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
 # 这一轮不该留下新行的表：出站、入站事件、待答状态、私聊可达、公共任务、凭证表单、已发消息存档。
@@ -262,3 +262,55 @@ async def test_a_round_lost_after_opening_is_closed_quietly(
     assert await reaper.recover_terminal_streams(db_session, datetime.now(UTC)) == 2
     await db_session.commit()
     assert await rows_in(db_session, "outbox") == 0
+
+
+@pytest.mark.parametrize("obstacle", ["announcement", "relay"])
+async def test_a_round_that_cannot_open_is_reported_without_a_reply(
+    db_engine: AsyncEngine, db_session: AsyncSession, obstacle: str
+) -> None:
+    """运行时有公告、实例停用：普通私聊这时会回一句说明；这里只结掉任务并投回助理。"""
+    bot, _ = await assistant(db_session)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target)
+    if obstacle == "announcement":
+        db_session.add(Announcement(scope="bot", bot_id=target.id, content="今晚维护"))
+        expected = ("cancelled", "bot_help_announced")
+    else:
+        relay_row = await db_session.get(RelayServer, target.relay_server_id)
+        assert relay_row is not None
+        relay_row.is_active = False
+        expected = ("failed", "relay_unavailable")
+    await db_session.commit()
+    task = await help_task(db_session, row)
+    before = await _counts(db_session)
+    done, relay = await run_help(db_engine, db_session, task)
+    assert (done.status, done.error_code) == expected
+    assert relay.requests == [] and await streams_of(db_session, task) == []
+    assert await _counts(db_session) == before
+    failed = await reloaded(db_session, row)
+    assert (failed.status, failed.error_code) == ("failed", expected[1])
+    assert len(await tasks_of(db_session, bot, JOB_RESULT_KIND)) == 1
+
+
+async def test_a_busy_session_fails_the_round_without_a_notice(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """上一轮停不下来时普通私聊会回「会话忙」：这里不回，记失败并投回。"""
+    bot, _ = await assistant(db_session)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target)
+    task = await help_task(db_session, row)
+    ctx = build_ctx(db_engine, task)
+    handler = AssistantBotHelpHandler()
+    async with ctx.session_factory() as session:
+        resolved = await handler._resolve(session, ctx)
+        await session.commit()
+    assert resolved is not None
+    before = await _counts(db_session)
+    await handler._session_busy(ctx, resolved[0])
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and (done.status, done.error_code) == ("failed", "session_busy")
+    assert await _counts(db_session) == before
+    failed = await reloaded(db_session, row)
+    assert (failed.status, failed.error_code) == ("failed", "session_busy")
+    assert len(await tasks_of(db_session, bot, JOB_RESULT_KIND)) == 1
