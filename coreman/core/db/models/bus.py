@@ -42,6 +42,11 @@ TASK_KINDS = (
     "group_observe",
     "assistant_approval_execute",
     "assistant_approval_result",
+    "assistant_handover",
+    "assistant_job_result",
+    "assistant_compile",
+    "assistant_subtask",
+    "assistant_bot_help",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")
