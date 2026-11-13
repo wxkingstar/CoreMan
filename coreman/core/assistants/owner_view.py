@@ -88,6 +88,7 @@ async def overview(session: AsyncSession, bot: Bot, now: datetime) -> dict[str, 
     ).first()
     flow = await lifecycle.live(session, bot.owner_id, lock=False) if bot.owner_id else None
     name = (get_settings().tower_display_name or "").strip() or None
+    switched = assistant_settings.override(prefs, now)
     return {
         "exists": True,
         "bot_id": str(bot.id),
@@ -110,6 +111,13 @@ async def overview(session: AsyncSession, bot: Bot, now: datetime) -> dict[str, 
             bot.enabled
             and bot.assistant_state == "active"
             and assistant_settings.on_shift(prefs, now)
+        ),
+        # 还没过期的「上班」「下班」临时切换与它的到期时刻；按工作时段时两项都是 None。
+        "shift_override": switched,
+        "shift_override_until": (
+            prefs.shift_override_until.isoformat()
+            if switched is not None and prefs.shift_override_until is not None
+            else None
         ),
         "cold_start": {
             "state": assistant_settings.cold_start_state(prefs),

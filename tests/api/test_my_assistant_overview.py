@@ -94,6 +94,7 @@ async def test_the_owner_sees_state_runtime_shift_turns_and_watch(
     assert data["name"] == "个人助理" and data["state"] == "active"
     assert data["runtime"]["name"] == "pool-1" and isinstance(data["runtime"]["online"], bool)
     assert data["on_shift"] is True
+    assert data["shift_override"] == "on" and data["shift_override_until"] is None
     assert data["cold_start"] == {"state": "pending", "step": None, "outcome": None}
     assert data["turns"] == {"today": 3, "budget": 50}
     assert data["watch"] == {

@@ -80,7 +80,9 @@ async def test_the_owner_clocks_in_out_and_back_to_the_schedule(
     prefs = await settings.get(db_session, bot.id)
     # 与私聊里说「上班」同一个效果：记下今天上过班（下班整理凭它触发）。
     assert prefs.shift_override == "on" and prefs.worked_on == settings.local_today(prefs, utcnow())
-    assert (await client.get(URL)).json()["data"]["on_shift"] is True
+    seen = (await client.get(URL)).json()["data"]
+    assert seen["on_shift"] is True and seen["shift_override"] == "on"
+    assert seen["shift_override_until"] == data["shift_override_until"]
 
     off = (await client.post(SHIFT, json={"state": "off"})).json()["data"]
     assert off["shift_override"] == "off" and off["on_shift"] is False
@@ -88,6 +90,7 @@ async def test_the_owner_clocks_in_out_and_back_to_the_schedule(
 
     auto = (await client.post(SHIFT, json={"state": "auto"})).json()["data"]
     assert auto["shift_override"] is None and auto["shift_override_until"] is None
+    assert (await client.get(URL)).json()["data"]["shift_override"] is None
     await fresh(db_session, bot)
     assert (await settings.get(db_session, bot.id)).shift_override is None
 
