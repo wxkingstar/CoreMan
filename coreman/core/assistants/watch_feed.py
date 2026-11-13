@@ -51,18 +51,6 @@ def _rows(data: Any, key: str = "items") -> list[dict[str, Any]]:
     return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
 
 
-def _mentioned(raw: dict[str, Any]) -> frozenset[str]:
-    """消息里被 @ 的人。`id` 按字符串读；万一是按类型分开的对象，取其中的 open_id。"""
-    found: set[str] = set()
-    for one in _rows(raw, "mentions"):
-        who = one.get("id")
-        if isinstance(who, dict):
-            who = who.get("open_id")
-        if isinstance(who, str) and who:
-            found.add(who)
-    return frozenset(found)
-
-
 def _kind(mode: Any) -> str | None:
     if mode == "p2p":
         return "p2p"
@@ -136,7 +124,7 @@ def to_item(
         thread_id=thread_id or (own_thread if isinstance(own_thread, str) and own_thread else None),
         msg_type=str(raw.get("msg_type") or ""),
         text=parsed.text,
-        mentions=_mentioned(raw),
+        mentions=parsed.mentions,
         deleted=parsed.deleted,
         chat_name=chat_name,
     )

@@ -64,6 +64,13 @@ REAUTH_OVERDUE = (
     "你的飞书授权已经满一年，需要重新授权，否则助理读不了你的消息、也办不了事。"
     "在这里跟助理说一声「重新授权飞书」就可以。"
 )
+# 同一位助理同一个会话，平台因「会话动过」（`anchor_moved`）自动撤回审批单之后这么久内不再因
+# 同样的原因撤：活跃的群里，助理重新起草的回复会马上又被新消息顶掉，撤回、提醒、重写就成了
+# 循环。冷却期内的单留着待批，过没过时交给执行前复查。
+WITHDRAW_COOLDOWN = timedelta(minutes=30)
+# 撤回之后入箱的提醒的级别：所有者亲自回了、对方撤回了，助理手上的草稿已经没用，立刻告诉它；
+# 会话只是又有了新消息的不急，跟下一批一起交回。
+_REMINDER_LEVELS = {"anchor_moved": "batch"}
 # 复核会话得到的结论 → 撤回原因代码。锚点找不到（太早了，或被撤回而 mget 没认出来）按会话动过算。
 _VERDICTS = {
     "owner_replied_after_anchor": "owner_replied",
@@ -208,6 +215,22 @@ async def _chat_marks(session: AsyncSession, bot_id: uuid.UUID) -> dict[str, tup
     }
 
 
+async def _cooling_chats(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -> set[str]:
+    """这位助理最近 `WITHDRAW_COOLDOWN` 内已经因「会话动过」被平台撤过单的会话。"""
+    found = await session.scalars(
+        select(AssistantApproval.chat_id)
+        .where(
+            AssistantApproval.bot_id == bot_id,
+            AssistantApproval.status == "withdrawn",
+            AssistantApproval.error_code == "anchor_moved",
+            AssistantApproval.decided_at > now - WITHDRAW_COOLDOWN,
+            AssistantApproval.chat_id.is_not(None),
+        )
+        .distinct()
+    )
+    return {chat_id for chat_id in found if chat_id}
+
+
 async def stale_approvals(
     session: AsyncSession,
     bot: Bot,
@@ -221,6 +244,10 @@ async def stale_approvals(
     尽量不读飞书：锚点合成一次 `im.mget`；「所有者已亲自回复」看盯消息记下的发言时间；只有
     游标显示这张单提交（改过稿的按最近一次改稿）之后会话里有新消息，才读一次会话复核
     （同一个会话只读一次）。
+
+    「会话又有了新消息」按 `anchors.anchor_verdict` 的口径（群里只算与锚点有关的），提醒按
+    攒批的级别入箱，且同一个会话在 `WITHDRAW_COOLDOWN` 内至多因此撤一次（同一次检查里的几张
+    算一次），冷却期内不再为它读会话；所有者亲自回复、对方撤回不受冷却限制。
     """
     rows = (
         await session.execute(
@@ -248,6 +275,7 @@ async def stale_approvals(
     if not rows:
         return 0
     marks = await _chat_marks(session, bot.id)
+    cooling = await _cooling_chats(session, bot.id, now)
     gone = set(await feed.recalled(call, [row.anchor_message_id for row in rows][:CHECK_BATCH]))
     views: dict[tuple[str, str | None], anchors.ChatView] = {}
     withdrawn = 0
@@ -261,7 +289,7 @@ async def stale_approvals(
             code = "anchor_recalled"
         elif spoke > created:
             code = "owner_replied"
-        elif latest > created:
+        elif latest > created and row.chat_id not in cooling:
             where = (row.chat_id, row.thread_id)
             if where not in views:
                 views[where] = await anchors.chat_view(call, row.chat_id, row.thread_id)
@@ -275,7 +303,7 @@ async def stale_approvals(
             code = _VERDICTS.get(verdict) if verdict else None
         if code is None:
             continue
-        done = await approvals.auto_withdraw(session, row.id, code, cfg=cfg)
+        done = await approvals.auto_withdraw(session, row.id, code, cfg=cfg, now=now)
         if done is None:
             continue
         stored = done.args_enc if isinstance(done.args_enc, dict) else {}
@@ -283,7 +311,7 @@ async def stale_approvals(
             session,
             bot.id,
             f"approval:{done.id}:withdrawn",
-            level="immediate",
+            level=_REMINDER_LEVELS.get(code, "immediate"),
             chat_id=done.chat_id,
             now=now,
             summary={

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.usefixtures("assistant_master", "runtime_settings")
 OWNER = "ou_owner"
 
 
-def said(mid: str, sender: str = "ou_li", kind: str = "user") -> dict[str, Any]:
+def said(mid: str, sender: str = "ou_li", kind: str = "user", **extra: Any) -> dict[str, Any]:
     return {
         "message_id": mid,
         "chat_id": "oc_li",
@@ -32,6 +32,7 @@ def said(mid: str, sender: str = "ou_li", kind: str = "user") -> dict[str, Any]:
         "msg_type": "text",
         "body": {"content": json.dumps({"text": "……"})},
         "deleted": False,
+        **extra,
     }
 
 
@@ -44,8 +45,10 @@ class Feishu:
         deleted: tuple[str, ...] = (),
         history: list[dict[str, Any]] | None = None,
         failing: str = "",
+        mode: str = "p2p",
     ) -> None:
         self.deleted, self.history, self.failing = set(deleted), history or [], failing
+        self.mode = mode
         self.calls: list[str] = []
 
     async def __call__(
@@ -62,7 +65,7 @@ class Feishu:
                 ]
             }
         if key == "im.chat":
-            return {"chat_mode": "p2p", "name": ""}
+            return {"chat_mode": self.mode, "name": ""}
         if key == "im.history":
             return {"items": self.history}
         raise AssertionError(key)
@@ -227,6 +230,69 @@ async def test_new_activity_after_the_draft_is_checked_against_the_chat(
     assert await check(db_session, bot, feishu, now) == (1 if code else 0)
     assert feishu.calls == ["im.mget", "im.chat", "im.history"]
     assert await status_of(db_session, row) == (("withdrawn", code) if code else ("pending", None))
+    # 所有者亲自回了的要立刻告诉助理；只是会话又有新消息的不急，跟下一批一起交回。
+    levels = [item.level for item in await inbox_rows(db_session, bot)]
+    assert levels == (
+        {"owner_replied": ["immediate"], "anchor_moved": ["batch"]}[code] if code else []
+    )
+
+
+async def test_group_chatter_withdraws_nothing_but_a_reply_to_the_anchor_does(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    created = now - timedelta(minutes=10)
+    row = await pending(db_session, bot, created)
+    await seen(db_session, bot, latest=ms(created) + 60_000)
+    chatter = [said("om_c2", "ou_wang"), said("om_c1", "ou_zhao"), said("om_anchor")]
+    feishu = Feishu(history=chatter, mode="group")
+    assert await check(db_session, bot, feishu, now) == 0
+    assert feishu.calls == ["im.mget", "im.chat", "im.history"]
+    assert await status_of(db_session, row) == ("pending", None)
+    assert await inbox_rows(db_session, bot) == []
+    # 有人回复了锚点那条：这个话头动过了。
+    about = [said("om_c3", "ou_wang", parent_id="om_anchor"), *chatter]
+    assert await check(db_session, bot, Feishu(history=about, mode="group"), now) == 1
+    assert await status_of(db_session, row) == ("withdrawn", "anchor_moved")
+
+
+async def test_a_busy_group_does_not_put_drafts_into_a_withdraw_and_redraft_loop(
+    db_session: AsyncSession,
+) -> None:
+    """活跃的群里：助理起草 → 有人接话 → 平台撤回并提醒 → 助理重新起草 → 又有人接话……
+
+    三道闸：群里的闲聊不算话头动过；同一个会话 30 分钟内平台至多因「会话动过」撤一次，
+    之后的留着待批，交给执行前复查；这类提醒不急，跟下一批一起交回。
+    """
+    bot, _ = await ready(db_session)
+    start = utcnow() - timedelta(hours=2)
+    history = [said("om_anchor")]
+    drafts: list[AssistantApproval] = []
+    outcomes: list[tuple[str, str | None]] = []
+    # 每 5 分钟一次检查，一共一小时；每次检查之前群里有人闲聊一句，另有人回复助理锚定的那条。
+    for step in range(12):
+        now = start + timedelta(minutes=5 * (step + 1))
+        if not drafts or (await status_of(db_session, drafts[-1]))[0] != "pending":
+            # 助理（重新）起草：锚点是它读到的最后一条。
+            anchor = history[0]["message_id"]
+            drafts.append(await pending(db_session, bot, now - timedelta(minutes=4), anchor))
+        anchor = drafts[-1].anchor_message_id
+        history.insert(0, said(f"om_chat_{step}", "ou_wang"))
+        history.insert(0, said(f"om_about_{step}", "ou_zhao", parent_id=anchor))
+        await seen(db_session, bot, latest=ms(now) - 1000)
+        await check(db_session, bot, Feishu(history=list(history), mode="group"), now)
+        outcomes.append(await status_of(db_session, drafts[-1]))
+    # 一小时里有人接了 12 次话，平台只撤了 2 次（间隔 30 分钟），而不是每次都撤。
+    withdrawn = [index for index, (status, _) in enumerate(outcomes) if status == "withdrawn"]
+    assert withdrawn == [0, 6]
+    assert len(drafts) == 3 and outcomes[-1] == ("pending", None)
+    reminders = await inbox_rows(db_session, bot)
+    assert [(item.kind, item.level) for item in reminders] == [("reminder", "batch")] * 2
+    # 冷却只管「会话动过」：所有者亲自回了、对方撤回了被回复的消息，随时都撤。
+    await seen(db_session, bot, owner=ms(now) + 1000, latest=ms(now) + 1000)
+    assert await check(db_session, bot, Feishu(), now + timedelta(minutes=1)) == 1
+    assert await status_of(db_session, drafts[-1]) == ("withdrawn", "owner_replied")
 
 
 async def test_a_message_the_platform_sent_for_the_owner_withdraws_nothing(

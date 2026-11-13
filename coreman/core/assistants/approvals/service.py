@@ -857,7 +857,12 @@ SWEEP_BATCH = 50
 
 
 async def auto_withdraw(
-    session: AsyncSession, approval_id: uuid.UUID, code: str, *, cfg: tower.Config | None
+    session: AsyncSession,
+    approval_id: uuid.UUID,
+    code: str,
+    *,
+    cfg: tower.Config | None,
+    now: datetime | None = None,
 ) -> AssistantApproval | None:
     """平台撤回一张待批的单：所有者已亲自回复、对方撤回了被回复的消息、会话又有了新消息。
 
@@ -870,6 +875,7 @@ async def auto_withdraw(
 
     Args:
         code: 原因代码，存进 `error_code`
+        now: 撤回的时刻，存进 `decided_at`（调用方按它算同一会话的撤回冷却）；不给用当前时间
 
     Returns:
         被撤回的单（内容已还原）；不存在、已经不是 pending、或正被别处锁着时返回 None
@@ -882,7 +888,7 @@ async def auto_withdraw(
     )
     if row is None:
         return None
-    row.status, row.decided_at = "withdrawn", utcnow()
+    row.status, row.decided_at = "withdrawn", now or utcnow()
     row.error_code = sealed.code_only(code, "withdrawn")
     await _withdraw_remote(cfg, row)
     log.info("assistant_approval_auto_withdrawn", approval=str(row.id), code=row.error_code)

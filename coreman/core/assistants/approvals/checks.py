@@ -22,7 +22,10 @@ HINTS = {
     "anchor_required": "这个会话里已有消息：approval.anchor_message_id 填你读到的最后一条。",
     "anchor_not_found": "锚点不在会话最近的消息里（太早或已撤回）：重新读会话后再起草。",
     "owner_replied_after_anchor": "锚点之后本人已经在这个会话里发过言：读完最新消息后重写或放弃。",
-    "newer_messages_after_anchor": "锚点之后对方又发了消息：读完最新消息后重写。",
+    "newer_messages_after_anchor": (
+        "锚点之后对方又发了消息（群里指 @ 本人、回复锚点那条、或锚点发送人自己又发的）："
+        "读完最新消息后重写。"
+    ),
     "message_gone": "目标消息不在这个会话里，或已被撤回。",
     "not_own_message": "只能编辑或撤回本人发出的消息。",
 }
@@ -49,6 +52,10 @@ class Message:
     sender_type: str
     text: str
     deleted: bool
+    # 被 @ 的人、它回复的那条消息、所在话题的根消息：判断群里的新消息与锚点有没有关系时用。
+    mentions: frozenset[str] = frozenset()
+    parent_id: str = ""
+    root_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,22 @@ def _text(item: dict[str, Any]) -> str:
     return f"[{kind or '未知类型'}消息]"
 
 
+def mentioned(item: dict[str, Any]) -> frozenset[str]:
+    """消息里被 @ 的人。`id` 按字符串读；万一是按类型分开的对象，取其中的 open_id。
+
+    @所有人不产生指向某个人的条目，不算 @ 了谁。
+    """
+    found: set[str] = set()
+    raw = item.get("mentions")
+    for one in raw if isinstance(raw, list) else []:
+        who = one.get("id") if isinstance(one, dict) else None
+        if isinstance(who, dict):
+            who = who.get("open_id")
+        if isinstance(who, str) and who:
+            found.add(who)
+    return frozenset(found)
+
+
 def parse(item: dict[str, Any]) -> Message:
     sender = item.get("sender")
     sender = sender if isinstance(sender, dict) else {}
@@ -92,6 +115,9 @@ def parse(item: dict[str, Any]) -> Message:
         sender_type=str(sender.get("sender_type") or ""),
         text=_text(item),
         deleted=bool(item.get("deleted")),
+        mentions=mentioned(item),
+        parent_id=str(item.get("parent_id") or ""),
+        root_id=str(item.get("root_id") or ""),
     )
 
 
@@ -167,13 +193,19 @@ def anchor_verdict(
     只数真人发的、没被撤回的消息：机器人的通知不算「对方又发了消息」。`ours` 是平台经审批
     替所有者发出的消息的编号：它们在飞书里发送人是所有者，但不是他亲自回复，也不是对方的新
     消息——同一个会话有两张待批单时，第一张发出去不该让第二张过时。
+
+    所有者亲自发言在哪种会话里都算。别人的新消息，私聊里每一条都算（都是对所有者说的）；
+    群里只算与这个话头有关的：@ 了所有者、回复了锚点那条（或在以它为根的话题里）、或锚点的
+    发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿永远赶不上最新一条。
     """
     newer: list[Message] = []
+    anchor: Message | None = None
     for item in view.messages:
         if item.message_id == anchor_message_id:
+            anchor = item
             break
         newer.append(item)
-    else:
+    if anchor is None:
         return "anchor_not_found"
     people = [
         item
@@ -182,7 +214,18 @@ def anchor_verdict(
     ]
     if any(item.sender_id == owner_open_id for item in people):
         return "owner_replied_after_anchor"
+    if view.kind == "group":
+        people = [item for item in people if _about(item, anchor, owner_open_id)]
     return "newer_messages_after_anchor" if people else None
+
+
+def _about(item: Message, anchor: Message, owner_open_id: str) -> bool:
+    """群里的一条新消息与锚点这个话头有没有关系。"""
+    return (
+        owner_open_id in item.mentions
+        or anchor.message_id in (item.parent_id, item.root_id)
+        or (bool(anchor.sender_id) and item.sender_id == anchor.sender_id)
+    )
 
 
 async def _send(
