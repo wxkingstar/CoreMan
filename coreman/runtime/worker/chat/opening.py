@@ -323,6 +323,13 @@ class OpenStage(ChatStageBase):
             api_note = await api.note(session, ctx)
             if api_note:
                 ctx.turn_notes.append(api_note)
+        if is_assistant(bot):
+            # 个人知识库：会话首轮给置顶页与索引，之后只在置顶页有更新时补一条说明。
+            from coreman.runtime.worker.chat import assistant_notes
+
+            knowledge = await assistant_notes.turn_note(session, ctx, intake, info)
+            if knowledge:
+                ctx.turn_notes.append(knowledge)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
