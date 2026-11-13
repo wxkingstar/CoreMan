@@ -1,5 +1,5 @@
-"""停用个人助理：停下在跑的轮次 → 撤回待批的审批单 → 撤销飞书授权 → 销毁数据密钥并停用记录，
-工作目录交给 `retired_dirs` 删掉。
+"""停用个人助理：停止盯消息 → 停下在跑的轮次 → 撤回待批的审批单 → 撤销飞书授权 → 销毁数据密钥并
+停用记录，工作目录交给 `retired_dirs` 删掉。
 
 三个入口，都只调 `request`：本人在私聊里确认停用（worker 的卡片回调）、成员离开（看护进程发现账号
 停用，先宽限 24 小时，期间恢复就作罢）、管理员在助理列表里停用（只回状态，不回任何内容）。另外，
@@ -18,7 +18,7 @@ from datetime import timedelta
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import approvals, keys, lifecycle, retired_dirs
+from coreman.core.assistants import approvals, keys, lifecycle, retired_dirs, watch
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.assistants.lifecycle import StepFailed, advance, finish
 from coreman.core.assistants.records import is_assistant
@@ -151,6 +151,8 @@ async def step_drain(
     已批准的写操作排着队也算在跑：它不叫停，要等它执行完，否则授权撤销、密钥销毁之后它只会失败。
     """
     bot = await _bot(session, row)
+    # 先停止盯消息、作废没交回的条目，再叫停任务：之后不会再有新的条目进来。
+    await watch.stop(session, bot.id)
     now = utcnow()
     if row.deadline is None:
         row.deadline = now + DRAIN_WAIT

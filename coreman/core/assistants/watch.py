@@ -50,13 +50,14 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.feishu_personal import ratelimit
+from coreman.core.feishu_personal import service as personal
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.logging import get_logger
-from coreman.core.timeutils import aware_utc
+from coreman.core.timeutils import aware_utc, utcnow
 
-__all__ = ["Context", "Item", "Level", "grade", "owner_scope", "tick"]
+__all__ = ["Context", "Item", "Level", "grade", "owner_scope", "stop", "tick"]
 
 log = get_logger(__name__)
 # 轮询间隔（秒）；用量接近上限时成倍拉长，不超过 MAX_INTERVAL。
@@ -78,6 +79,8 @@ ERROR_BACKOFF_MAX = 900
 # 一个读不了的会话不该让这位助理的整个轮询一直退避。
 CHAT_STRIKES = 3
 PARK = timedelta(hours=1)
+# 刷新令牌约 7 天不用就失效：不轮询的助理每这么久强制刷新一次。
+KEEPALIVE = timedelta(hours=24)
 
 
 @dataclass
@@ -185,6 +188,22 @@ async def _resting(
         return "idle", None
     blocker = await runtime.turn_blocker(session, bot)
     return ("paused", blocker) if blocker is not None else None
+
+
+async def _keep_alive(
+    session: AsyncSession, cipher: Cipher, scope: Scope, row: AssistantWatch, now: datetime
+) -> bool:
+    """不轮询的这段时间里把令牌续上；距上次确认它还活着不满 `KEEPALIVE` 就什么都不做。
+
+    轮询成功也算确认过（轮询期间访问令牌每两小时过期，自然会刷新）。从没确认过的从这一行
+    建出来的时刻算起。
+    """
+    last = row.keepalive_at or row.created_at
+    if aware_utc(last) + KEEPALIVE > now:
+        return False
+    await personal.keep_alive(session, cipher, scope)
+    row.keepalive_at = now
+    return True
 
 
 @dataclass
@@ -416,7 +435,11 @@ async def _step(
         return _failed(row, now, code)
     resting = await _resting(session, bot, prefs, now)
     if resting is not None:
-        return _rest(row, now, *resting)
+        # 下班、冷启动没做完、运行时暂停：不轮询，但授权不能因此过期。
+        kept = await _keep_alive(session, cipher, scope, row, now)
+        outcome = _rest(row, now, *resting)
+        outcome.kept_alive = kept
+        return outcome
     # 飞书按应用限频，全员共用：先看这个应用最近一分钟用了多少。
     budget = ratelimit.Budget(scope.app_id)
     load = await budget.load(session, now)
@@ -594,3 +617,17 @@ async def tick(
             stretch=ratelimit.stretch(load) or 0,
         )
     return counts
+
+
+async def stop(session: AsyncSession, bot_id: uuid.UUID) -> None:
+    """这位助理不再被盯：停用流程在叫停任务之前调用。幂等；调用方提交。
+
+    状态改成 `stopped`（`tick` 不认领、也不会重新登记），游标与保存的会话顺序清掉，还没交回
+    的条目作废。正在进行的一轮持有这一行的锁：这里等它提交，它入箱的条目随后一并作废。
+    """
+    row = await session.get(AssistantWatch, bot_id, with_for_update=True)
+    if row is not None and row.state != "stopped":
+        row.state, row.last_error, row.failures = "stopped", None, 0
+        row.cursor, row.head_enc = {}, None
+        row.updated_at = utcnow()
+    await inbox.void_all(session, bot_id, "stopped")
