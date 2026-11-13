@@ -210,6 +210,17 @@ def _dispatchable(bot: Bot) -> tuple[ColumnElement[bool], ...]:
     )
 
 
+def _eligible(bot: Bot, owner_id: uuid.UUID, *, attended: bool) -> list[ColumnElement[bool]]:
+    """名单用的资格条件：可调度、开了接受求助、所有者在可用人范围内；无人在场时另排除别人
+    私有运行时上的。"""
+    limited = exists().where(BotAllowedUser.bot_id == Bot.id)
+    named = exists().where(BotAllowedUser.bot_id == Bot.id, BotAllowedUser.user_id == owner_id)
+    where = [*_dispatchable(bot), Bot.accept_bot_help.is_(True), or_(~limited, named)]
+    if not attended:
+        where.append(~_foreign_runtime(owner_id))
+    return where
+
+
 async def candidates(session: AsyncSession, bot: Bot, *, attended: bool = True) -> list[Bot]:
     """所有者经这位助理可以调度的员工，按名称排序，至多 `LIST_LIMIT` 位。
 
@@ -219,11 +230,7 @@ async def candidates(session: AsyncSession, bot: Bot, *, attended: bool = True) 
         _, owner = await owner_of(session, bot)
     except DispatchError:
         return []
-    limited = exists().where(BotAllowedUser.bot_id == Bot.id)
-    named = exists().where(BotAllowedUser.bot_id == Bot.id, BotAllowedUser.user_id == owner.id)
-    where = [*_dispatchable(bot), Bot.accept_bot_help.is_(True), or_(~limited, named)]
-    if not attended:
-        where.append(~_foreign_runtime(owner.id))
+    where = _eligible(bot, owner.id, attended=attended)
     return list(
         await session.scalars(
             select(Bot).where(*where).order_by(Bot.name, Bot.bot_key).limit(LIST_LIMIT)
@@ -249,6 +256,9 @@ async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool =
     标识命中时还要看有没有另一位员工的显示名正是这个串：标识是建员工的人自己取的，取成别人
     的名字就能把按名字找那一位的求助截走。撞上了报 `bot_ambiguous` 并带上候选（同名的几位
     也一样），助理改用候选里的编号再调——编号谁也取不了，标识与名字相撞的那一位只能靠它。
+    候选先过与 `candidates` 相同的资格条件：所有者调不动的员工（含无人在场时别人私有运行时
+    上的），名称、标识、编号都不交给模型。筛完只剩一位也仍按歧义报，不悄悄落到它头上；一位
+    都不剩时按单个目标调不动时的代码报（`owner_turn_required` / `bot_not_available`）。
 
     Raises:
         DispatchError: invalid_bot / bot_not_found / bot_ambiguous / bot_not_available /
@@ -257,7 +267,7 @@ async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool =
     ref = " ".join(ref.split())
     if not ref or len(ref) > MAX_REF:
         raise DispatchError("invalid_bot")
-    await owner_of(session, bot)
+    _, owner = await owner_of(session, bot)
     base = _dispatchable(bot)
     try:
         by_id: uuid.UUID | None = uuid.UUID(ref)
@@ -280,7 +290,17 @@ async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool =
     if not found:
         raise DispatchError("bot_not_found")
     if len(found) > 1:
-        raise DispatchError("bot_ambiguous", found[:AMBIGUOUS_LIMIT])
+        ids = [row.id for row in found[:AMBIGUOUS_LIMIT]]
+        usable: dict[bool, set[uuid.UUID]] = {}
+        for present in {attended, True}:
+            where = _eligible(bot, owner.id, attended=present)
+            usable[present] = set(
+                await session.scalars(select(Bot.id).where(Bot.id.in_(ids), *where))
+            )
+        shown = [row for row in found[:AMBIGUOUS_LIMIT] if row.id in usable[attended]]
+        if shown:
+            raise DispatchError("bot_ambiguous", shown)
+        raise DispatchError("owner_turn_required" if usable[True] else "bot_not_available")
     target, _ = await authorize(session, bot, found[0].id, attended=attended)
     return target
 

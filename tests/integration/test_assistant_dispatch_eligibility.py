@@ -156,3 +156,40 @@ async def test_a_key_that_is_someone_elses_name_does_not_win_silently(
     with pytest.raises(dispatch.DispatchError) as missing:
         await dispatch.resolve(db_session, bot, str(uuid.uuid4()))
     assert missing.value.code == "bot_not_found"
+
+
+async def test_ambiguous_candidates_are_only_those_the_owner_can_dispatch(
+    db_session: AsyncSession,
+) -> None:
+    """歧义时交给模型的候选先过资格：调不动的员工，名称、标识、编号都不给。"""
+    bot, owner = await assistant(db_session)
+    open_ = await target_bot(db_session, key="demo-bot-a", name="数据助手")
+    await target_bot(db_session, key="demo-bot-b", name="数据助手", accept=False)
+    # 设了可用人名单、名单里没有所有者。
+    await target_bot(db_session, key="demo-bot-c", name="数据助手", allowed=[open_.created_by])
+    private = await target_bot(db_session, key="demo-bot-d", name="数据助手", private_to="creator")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        await dispatch.resolve(db_session, bot, "数据助手")
+    assert refused.value.code == "bot_ambiguous"
+    assert [row.bot_key for row in refused.value.bots] == ["demo-bot-a", "demo-bot-d"]
+    # 无人在场的轮次：别人私有运行时上的那一位也不在候选里；只剩一位时不再算歧义，
+    # 但被拦下的那一位不能因此被悄悄换成另一位。
+    with pytest.raises(dispatch.DispatchError) as unattended:
+        await dispatch.resolve(db_session, bot, "数据助手", attended=False)
+    assert unattended.value.code == "bot_ambiguous"
+    assert [row.bot_key for row in unattended.value.bots] == ["demo-bot-a"]
+    assert (await dispatch.resolve(db_session, bot, "demo-bot-a", attended=False)).id == open_.id
+    # 一位都调不动：不带候选。
+    for row in (open_, private):
+        row.accept_bot_help = False
+    await db_session.commit()
+    with pytest.raises(dispatch.DispatchError) as none:
+        await dispatch.resolve(db_session, bot, "数据助手")
+    assert (none.value.code, none.value.bots) == ("bot_not_available", [])
+    # 只是因为所有者不在场才调不动的：照单个目标时的说法，等他当面发起。
+    private.accept_bot_help = True
+    await db_session.commit()
+    with pytest.raises(dispatch.DispatchError) as later:
+        await dispatch.resolve(db_session, bot, "数据助手", attended=False)
+    assert (later.value.code, later.value.bots) == ("owner_turn_required", [])
+    assert owner is not None
