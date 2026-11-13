@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,3 +150,13 @@ async def identified(
     )
     await session.commit()
     return row
+
+
+def isolate_tool_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让用例里临时登记的助理工具只活到用例结束（注册表是进程级的）。"""
+    from coreman.core.assistants import tools
+
+    monkeypatch.setattr(tools, "_TOOLS", dict(tools._TOOLS))
+    monkeypatch.setattr(
+        tools, "_DEFINITIONS", {group: list(items) for group, items in tools._DEFINITIONS.items()}
+    )

@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from coreman.core.assistants import tools as assistant_tools
 from coreman.core.assistants.approvals import execute
-from coreman.core.assistants.approvals import tools as assistant_tools
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import AssistantApproval
@@ -32,7 +32,8 @@ REVISED = {**reply(), "text": "周四给你，辛苦再等一下", "uuid": "u9"}
 
 
 async def call(session: AsyncSession, scope: Scope, name: str, arguments: dict[str, Any]) -> Any:
-    out = await assistant_tools.dispatch(session, None, scope, name, arguments, None, CFG)  # type: ignore[arg-type]
+    ctx = assistant_tools.Context(session, None, scope, None, CFG)  # type: ignore[arg-type]
+    out = await assistant_tools.dispatch(ctx, name, arguments, groups=assistant_tools.GROUPS)
     await session.commit()
     return out
 
@@ -44,14 +45,14 @@ async def reload(session: AsyncSession, row: AssistantApproval) -> AssistantAppr
 
 
 def test_own_tools_are_listed_for_assistants() -> None:
-    names = [item["name"] for item in assistant_tools.definitions([])]
-    assert names == [
+    listed = assistant_tools.definitions([], groups=assistant_tools.GROUPS)
+    assert [item["name"] for item in listed] == [
         "approval_revise",
         "approval_withdraw",
         "approval_list",
         "assistant_mark_processing",
     ]
-    for item in assistant_tools.definitions([]):
+    for item in listed:
         assert item["inputSchema"]["type"] == "object" and item["description"]
 
 
@@ -203,7 +204,8 @@ async def test_revise_swaps_the_files_in_the_bucket(
     _, _, scope = await assistant_turn(db_session)
 
     async def tool(name: str, arguments: dict[str, Any]) -> Any:
-        out = await assistant_tools.dispatch(db_session, None, scope, name, arguments, relay, CFG)  # type: ignore[arg-type]
+        ctx = assistant_tools.Context(db_session, None, scope, relay, CFG)  # type: ignore[arg-type]
+        out = await assistant_tools.dispatch(ctx, name, arguments, groups=assistant_tools.GROUPS)
         await db_session.commit()
         return out
 

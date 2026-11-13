@@ -1,7 +1,7 @@
-"""个人助理在个人工具 MCP 上的那一层：写类工具改为提交审批，另加审批单管理与「处理中」表情。
+"""审批组的工具：审批单管理与「处理中」表情，以及写类个人工具在助理清单里的样子。
 
-MCP 入口对助理记录调这里的 `definitions` / `dispatch`，对普通机器人仍调
-`feishu_personal.tools`。读类工具与授权工具原样转交。
+清单的拼装与分派在 `coreman/core/assistants/tools.py`（助理自有工具的总注册表），这里的工具
+登记在它的 `approval` 组里。
 """
 
 from __future__ import annotations
@@ -12,9 +12,8 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants.approvals import catalog, marks, service, tower
+from coreman.core.assistants.approvals import marks, service, tower
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_personal import tools as personal_tools
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, Identifier, Short, input_schema
@@ -25,20 +24,12 @@ STAGED_NOTE = (
 )
 
 
-def definitions(base: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把普通清单改成助理的：写类工具的入参多一个 `approval`，其余原样。"""
-    meta = input_schema(service.Meta)
-    out: list[dict[str, Any]] = []
-    for item in base:
-        name = str(item["name"])
-        if not catalog.is_write(name):
-            out.append(item)
-            continue
-        staged = copy.deepcopy(item)
-        staged["description"] = str(item["description"]) + STAGED_NOTE
-        staged["inputSchema"].setdefault("properties", {})[service.META] = meta
-        out.append(staged)
-    return out + own_definitions()
+def staged(item: dict[str, Any]) -> dict[str, Any]:
+    """写类工具在助理清单里的样子：说明里注明不会当场执行，入参多一个 `approval`。原项不动。"""
+    out = copy.deepcopy(item)
+    out["description"] = str(item["description"]) + STAGED_NOTE
+    out["inputSchema"].setdefault("properties", {})[service.META] = input_schema(service.Meta)
+    return out
 
 
 Status = Literal[
@@ -122,22 +113,3 @@ async def own_dispatch(
             session, scope, status=args.status, topic=args.topic or None, limit=args.limit
         )
     return await marks.mark(session, cipher, scope, args.message_id, done=args.done)
-
-
-async def dispatch(
-    session: AsyncSession,
-    cipher: Cipher,
-    scope: Scope,
-    name: str,
-    arguments: Any,
-    files: FileRelay | None,
-    cfg: tower.Config | None,
-) -> dict[str, Any]:
-    if not isinstance(arguments, dict):
-        return {"error": "invalid_tool_or_arguments"}
-    own = await own_dispatch(session, cipher, scope, name, arguments, cfg, files)
-    if own is not None:
-        return own
-    if catalog.is_write(name):
-        return await service.submit(session, cipher, scope, name, arguments, cfg=cfg, files=files)
-    return await personal_tools.dispatch(session, cipher, scope, name, arguments, files)
