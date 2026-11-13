@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.records import new_assistant_bot
-from coreman.core.db.models import AssistantLifecycle, AuditLog, Bot, PlatformApp, User
+from coreman.core.db.models import (
+    AssistantLifecycle,
+    AssistantWatch,
+    AuditLog,
+    Bot,
+    PlatformApp,
+    User,
+)
 from tests.api.conftest import login_as, login_existing
 from tests.fakes.runtime_node import add_node_relay
 
@@ -50,6 +58,37 @@ async def test_the_list_shows_who_where_and_what_state_only(
     assert item["owner"]["display_name"] == "张三" and item["node"]["name"] == "pool-1"
     assert item["lifecycle"] is None and item["directories_pending_removal"] == 0
     assert SECRET not in response.text and "/w/a" not in response.text
+
+
+async def test_the_list_shows_watch_health_without_any_content(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    await login_as(client, db_session, role="platform_admin")
+    # 还没被盯过。
+    [item] = (await client.get("/api/admin/assistants")).json()["data"]["items"]
+    assert item["watch"] is None
+    seen = datetime(2026, 11, 16, 2, 0, tzinfo=UTC)
+    db_session.add(
+        AssistantWatch(
+            bot_id=bot.id,
+            state="backoff",
+            last_error="rate_limited",
+            last_ok_at=seen,
+            cursor={"since": 1, "chats": {"oc_private_chat": {"t": 2}}, "todo": []},
+        )
+    )
+    await db_session.commit()
+    response = await client.get("/api/admin/assistants")
+    [item] = response.json()["data"]["items"]
+    assert item["watch"] == {
+        "state": "backoff",
+        "last_ok_at": seen.isoformat(),
+        "last_error": "rate_limited",
+    }
+    # 只有状态、时间与代码：读到哪了、和谁有会话都不出现。
+    assert "oc_private_chat" not in response.text and "cursor" not in response.text
 
 
 async def test_an_admin_deprovision_returns_nothing_but_the_state(

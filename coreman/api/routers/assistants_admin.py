@@ -1,8 +1,8 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
-只出元数据（人、实例、节点、状态、时间、错误代码），不碰任何内容列，也不解密任何东西。停用只回
-「已开始停用」，不回记录本身。开通范围与可选 AI 在平台设置里改（`assistant_eligibility`、
-`assistant_backends`）。
+只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态），不碰任何内容列，也不解密
+任何东西。停用只回「已开始停用」，不回记录本身。开通范围与可选 AI 在平台设置里改
+（`assistant_eligibility`、`assistant_backends`）。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     AssistantLifecycle,
     AssistantRetiredDir,
+    AssistantWatch,
     Bot,
     RelayServer,
     RuntimeNode,
@@ -81,6 +82,23 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
         select(AssistantRetiredDir.bot_id, func.count()).group_by(AssistantRetiredDir.bot_id)
     )
     pending_dirs: dict[uuid.UUID, int] = {bot: count for bot, count in counted.all()}
+    # 盯消息的健康状态：只取状态、时间与错误代码三列，游标与会话顺序不取。
+    watched = await session.execute(
+        select(
+            AssistantWatch.bot_id,
+            AssistantWatch.state,
+            AssistantWatch.last_ok_at,
+            AssistantWatch.last_error,
+        )
+    )
+    health: dict[uuid.UUID, dict[str, Any]] = {
+        bot: {
+            "state": state,
+            "last_ok_at": seen.isoformat() if seen else None,
+            "last_error": error,
+        }
+        for bot, state, seen, error in watched.all()
+    }
     items = []
     for bot_id, state, enabled, created, owner_id, login, name, relay_id, relay, node in rows:
         flow = live.get(bot_id)
@@ -108,6 +126,7 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                     else None
                 ),
                 "directories_pending_removal": int(pending_dirs.get(bot_id, 0)),
+                "watch": health.get(bot_id),
             }
         )
     return {"code": 0, "data": {"items": items}}
