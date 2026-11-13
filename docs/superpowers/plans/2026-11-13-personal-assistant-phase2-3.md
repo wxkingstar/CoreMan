@@ -53,6 +53,14 @@
     - 资格按现有口径（目标员工开启接受求助，且所有者在它的可用人范围内），不另要求私聊过。
     - 批准后不单独投一轮「已批准并派出」，只投被拒、过期、失败与最终答复。
 18. **冷启动的口吻样本是一种新的平台来源类型**（2F 计划提出）：`kinds.COLD_START_KIND = "assistant_cold_start"`，并入 `PLATFORM_TURN_KINDS`。它跑在独立会话 `<主会话键>#job:cold-start` 里，工具组是新加的 `voice`（只有 `assistant_voice_save`，这一轮不带任何个人工具、授权工具、知识库工具与定时任务工具），输入只有所有者自己发出的消息；平台经 `voice.save` 把结果写成置顶页 `profile/voice.md`。原因：置顶页只能由所有者在场的轮次改动，口吻页要在无人在场时生成，只能靠「这一轮读不到别人的任何东西」来守同一条线。代价：多一种任务类型与一个工具组。
+19. **子任务层的补充**（3A 落地时定）：
+    - 工具分组多一个 `subtask`（只有子任务轮次有，里面是 `assistant_job_blocked`）；`GROUPS` 仍是普通轮次的三组。`knowledge`、`jobs`、`subtask`、`voice` 四组的数据都在平台自己的库里，排在授权代数判断之前（`tools.LOCAL_GROUPS`）。
+    - 子任务轮次不出声。回复上下文带 `_silent`：飞书网关不推这条流，流恢复不补发。看护器 `TimeoutSupervisor.silent`：进度、完成、超时通知都不发。处理器覆盖掉长任务提醒、主动模式的终稿、选择卡（题面留在结论里）、额度切换卡（终稿是额度告示时按失败 `rate_limited` 收尾，不写 `interaction_states`）、「会话忙」提示。收尸按任务类型（`kinds.SILENT_KINDS`）不往会话里发「进程没了」。3B 的不出声轮次复用这三样：`_silent`、`supervisor.silent`、`SILENT_KINDS`。
+    - 顺带收紧了一切平台来源的轮次（不只子任务）：认领之后才遇到运行时暂停的，没有入站事件就不私信（裁定 13 原来只管开轮前那一次检查）；收尸补写对话记录时，没有入站事件的平台来源轮次不记所有者触达（`user_reached`）。
+    - 轮数超限在追问处拒绝（`job_round_limit`），不把已有结论的子任务改成失败；时长按每次派出或追问起 2 小时。
+    - 主会话自己取消的、停用时取消的、`report = false` 的子任务不投回。
+    - 下班编译改为平台派出的子任务（裁定 6 的后半）：`compiling.step` 调 `jobs.spawn(origin="system", report=False, attended=False)`，每天一次仍靠 `compiled_on`；子任务没有 `approval` 组，被拒与已执行的审批单的摘要与拒绝原因由平台写进交代（引用行，交代至多 8000 字，放不下丢最早的并注明张数）；正常做完时由子任务的收尾挂钩调 `compiling.settle` 把活动窗口推进到派出时刻。`AssistantCompileHandler` 与它的注册已删除，`COMPILE_KIND` 的名字保留（任务类型的取值约束、历史记录），不再入队：升级时队列里的旧任务由 worker 按未知类型结掉，那一天的活动留给下一次编译。不保留处理器一版的理由：它的文本生成与主会话里跑的做法都已改掉，留着就是两套编译并存，而丢一次编译的代价只是晚一天整理。
+    - 本人定时任务工具对一切无人在场的轮次都不列、调用返回 `owner_turn_required`（2F 之后的修补已做），子任务轮次不另作处理。
 
 ## 层间接口
 
@@ -105,10 +113,12 @@
 
 ### 3A
 
-- 表 `assistant_jobs`：见 spec 第七节。
-- 子任务会话键 `"<chat_id>#job:<id>"`；工具范围 = 个人工具的读类 + `knowledge` 组。
-- 工具 `assistant_spawn`、`assistant_job_message`、`assistant_job_list`，注册在 `jobs` 组。
-- 结果以 `JOB_RESULT_KIND` 投回主会话（经 `platform_turns.enqueue`）。
+- 表 `assistant_jobs`：见 spec 第七节。3B 用 `kind = 'bot_help'` 与 `target_bot_id`；结果投回共用 `report` / `result_task_id` / `report_seq` / `report_after` / `report_failures` / `reported_at` / `report_code` 这一组列与 `jobs.report` / `settle_report` / `reconcile`。`origin = 'system'` 目前只有下班编译（`compiling.settle` 按它判断）。
+- 子任务会话键 `"<chat_id>#job:<id>"`（`jobs.session_key_for` / `job_id_of`；`job_id_of` 对冷启动的 `#job:cold-start` 返回 None）；工具范围 = 个人工具的读类 + `knowledge` 组 + `subtask` 组。
+- 工具 `assistant_spawn`、`assistant_job_message`、`assistant_job_list`、`assistant_job_cancel`，注册在 `jobs` 组；`assistant_job_blocked` 注册在 `subtask` 组。
+- 结果以 `JOB_RESULT_KIND` 投回主会话（经 `platform_turns.enqueue`，载荷只有 `job_id`）；处理器 `AssistantJobResultHandler` 的文本是 `jobs.result_text(row)`。
+- `coreman/core/assistants/jobs.py` 对外：`spawn`、`message`、`list_`（`scope`：`active` / `blocked` / `recent`）、`get`、`cancel`、`cancel_all`、`complete`、`block`、`for_round`、`mark_running`、`round_text`、`result_text`、`report`、`bound_report`、`settle_report`、`reconcile`、`tick`、`active_counts`、`view(row, full=False)`、`JobError`。
+- 不出声：回复上下文标记 `_silent`、`TimeoutSupervisor.silent`、`kinds.SILENT_KINDS`（见裁定 19）。处理器 `AssistantSubtaskHandler` 在 `coreman/runtime/worker/assistant_jobs.py`。
 
 ### 3B、3C、3D
 

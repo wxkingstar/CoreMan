@@ -258,7 +258,7 @@ Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有�
 
 默认按所有者设置的工作时段自动开始和停止（时区、每天的起止时间、工作日；不支持跨午夜）。私聊里发「上班」「下班」临时切换，平台直接处理、不经模型：「上班」到当天的下班时间（当天不是工作日或已过下班时间则到当地次日零点），「下班」到下一个工作时段开始，到点自动失效。所有者在私聊里说要改时段、时区、重点群或忽略的会话时，助理用 `assistant_settings_get` / `assistant_settings_update` 改；这两个工具只在所有者发起的轮次里可用。
 
-下班时做当天的编译：把当天的进展、被拒与执行的审批、有变化的待跟进整理进知识库。每位助理每个自然日至多一次，当天没有活动不做。第 2 期做成主会话里的一轮平台来源任务（`assistant_compile`，无人在场，改不了置顶页），第 3 期子任务落地后改为子任务。
+下班时做当天的编译：把当天的进展、被拒与执行的审批、有变化的待跟进整理进知识库。每位助理每个自然日至多一次，当天没有活动不做。编译是平台派出的一个子任务（`origin = system`）：不占主会话，不占助理每天的名额，做完不投回主会话；无人在场，改不了置顶页。子任务没有审批工具，被拒与已执行的审批单的摘要由平台写进交代。（第 2 期曾做成主会话里的一轮 `assistant_compile`，这个任务类型不再入队。）
 
 ## 六、个人知识与待跟进
 
@@ -292,10 +292,10 @@ Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有�
 
 用于需要时间的调查，主会话不被占住。
 
-- 工具 `assistant_spawn(title, brief)`。新表 `assistant_jobs`：`id`、`bot_id`、`kind`（subtask / bot_help）、`target_bot_id`、`status`、`title_enc`、`brief_enc`、`result_enc`、`session_key`、时间戳。
-- 子任务以同一条助理记录、同一个沙箱运行，会话独立。同一助理同时最多 3 个。
-- 工具范围：个人工具中的读类、知识库读写、待跟进读写。没有写类个人工具，不能提交审批，不能再派子任务。需要对外操作时在结论里写明建议，由主会话提交。
-- 完成后结论作为 `assistant_job_result` 投回主会话。主会话可用 `assistant_job_message(id, text)` 追问同一个子任务。
+- 工具 `assistant_spawn(title, brief)`。新表 `assistant_jobs`：`id`、`bot_id`、`kind`（subtask / bot_help）、`origin`（assistant / system）、`target_bot_id`、`status`（queued / running / done / failed / cancelled / blocked）、`title_enc`、`brief_enc`、`message_enc`（最近一次追问）、`result_enc`、`blocked_enc`、`session_key`、`origin_session_key`、`rounds`、`last_task_id`、`error_code`、`deadline_at`，投回的记账列 `report`、`result_task_id`、`report_seq`、`report_after`、`report_failures`、`reported_at`、`report_code`，以及时间戳。`assistant_followups.job_id` 外键到它。
+- 子任务以同一条助理记录、同一个沙箱运行，会话独立。同一助理同时最多 3 个。助理自己每天至多派 20 个，一个子任务至多 6 轮，每次派出或追问起 2 小时没结束记失败。子任务的轮次计入每日轮次预算；所有者不在场的轮次在预算用完后不能再派。
+- 工具范围：个人工具中的读类、知识库读写（置顶页除外）、待跟进读写，另有 `assistant_job_blocked(reason)` 报告自己卡住了。没有写类个人工具，不能提交审批，不能再派子任务，不能发起或撤销授权，没有定时任务工具。子任务不往飞书发任何东西（回复、进度、提问卡、额度切换卡、中断通知都不发）；需要对外操作时在结论里写明建议，由主会话提交。
+- 完成后结论作为 `assistant_job_result` 投回主会话，结论逐行引用；失败、超时同样投回一句说明。投回的一轮被所有者的消息打断时由平台重投，投到一次为止。主会话可用 `assistant_job_message(id, text)` 追问同一个子任务，`assistant_job_list` 查看，`assistant_job_cancel(id)` 取消。
 - 不出现在公共任务页；转录按第三节处理。
 
 几分钟内能查完的事，助理可以直接用 CLI 自带的子代理。
