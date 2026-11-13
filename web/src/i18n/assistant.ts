@@ -123,7 +123,7 @@ export const assistantZh = {
       notes_index: '查看知识库目录', notes_read: '打开一页知识页', settings_read: '查看设置',
       chatlogs_read: '查看对话记录', tasks_read: '查看任务详情',
       import_preview: '预览导入', import_notes: '导入知识页与待跟进', export: '导出知识页与待跟进',
-      cli_rewrap: '主密钥轮换（没有读取内容）', cli_chatlogs: '有人用管理命令尝试查看对话记录（内容没有读出）', cli_tasks: '有人用管理命令尝试查看任务详情（内容没有读出）',
+      cli_rewrap: '主密钥轮换（没有读取内容）', cli_chatlogs: '有人用管理命令尝试查看对话记录（内容没有读出）', cli_tasks: '有人用管理命令尝试查看任务详情（内容没有读出）', cli_session: '有人用管理命令尝试查看运行时上的会话过程（内容没有读出）',
     },
   },
   admin: {
@@ -273,7 +273,7 @@ export const assistantEn: typeof assistantZh = {
       notes_index: 'Viewed the knowledge base index', notes_read: 'Opened a knowledge page', settings_read: 'Viewed settings',
       chatlogs_read: 'Viewed conversation logs', tasks_read: 'Viewed task details',
       import_preview: 'Previewed an import', import_notes: 'Imported pages and follow-ups', export: 'Exported pages and follow-ups',
-      cli_rewrap: 'Master key rotation (no content was read)', cli_chatlogs: 'Someone tried to view conversation logs with an admin command (no content was read)', cli_tasks: 'Someone tried to view task details with an admin command (no content was read)',
+      cli_rewrap: 'Master key rotation (no content was read)', cli_chatlogs: 'Someone tried to view conversation logs with an admin command (no content was read)', cli_tasks: 'Someone tried to view task details with an admin command (no content was read)', cli_session: 'Someone tried to view a session transcript on the runtime with an admin command (no content was read)',
     },
   },
   admin: {
@@ -423,7 +423,7 @@ export const assistantJa: typeof assistantZh = {
       notes_index: 'ナレッジベースの一覧を表示', notes_read: 'ナレッジページを開いた', settings_read: '設定を表示',
       chatlogs_read: '会話ログを表示', tasks_read: 'タスクの詳細を表示',
       import_preview: 'インポートをプレビュー', import_notes: 'ページとフォローアップをインポート', export: 'ページとフォローアップをエクスポート',
-      cli_rewrap: 'マスターキーのローテーション（内容は読み取っていません）', cli_chatlogs: '管理コマンドで会話ログの表示が試みられました（内容は読み取られていません）', cli_tasks: '管理コマンドでタスクの詳細の表示が試みられました（内容は読み取られていません）',
+      cli_rewrap: 'マスターキーのローテーション（内容は読み取っていません）', cli_chatlogs: '管理コマンドで会話ログの表示が試みられました（内容は読み取られていません）', cli_tasks: '管理コマンドでタスクの詳細の表示が試みられました（内容は読み取られていません）', cli_session: '管理コマンドでランタイム上のセッション記録の表示が試みられました（内容は読み取られていません）',
     },
   },
   admin: {

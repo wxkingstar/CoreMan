@@ -213,7 +213,7 @@
 3D 落地的接口：
 
 - 迁移 `0102_assistant_access_log`：表 `assistant_access_log`（`id`、`bot_id`、`actor_id`、`actor_kind`、`action`、`target`、`at`）。
-- `coreman/core/assistants/access_log.py`：`record(session, bot_id, actor_id, action, target="", *, kind=None)`（调用方提交）、`record_opened(session, rows, actor_id, action) -> int`、`record_refused(session, rows, owner_id, action) -> int`、`NOBODY`、`bots_of(session, owner_ids)`、`list_(session, bot_id, *, limit=50, before=None)`、`last_foreign(session)`、`cleanup(session, now, *, limit=500)`；动作代码在 `ACTIONS`（十四个）。
+- `coreman/core/assistants/access_log.py`：`record(session, bot_id, actor_id, action, target="", *, kind=None)`（调用方提交）、`record_opened(session, rows, actor_id, action) -> int`、`record_refused(session, rows, owner_id, action) -> int`、`NOBODY`、`bots_of(session, owner_ids)`、`list_(session, bot_id, *, limit=50, before=None)`、`last_foreign(session)`、`cleanup(session, now, *, limit=500)`；动作代码在 `ACTIONS`（十五个，含裁定 27 加的 `cli.session`）。
 - `coreman/core/assistants/archive.py`（压缩包的格式与安全检查，纯函数；`Parsed.ignored`）与 `transfer.py`（`plan` / `apply` / `preview` / `counts` / `export`）；`notes.dump(session, bot_id)`。
 - `GET /api/me/assistant/access-log?limit=&before=`、`POST /api/me/assistant/import`（`multipart/form-data`：`archive`、`dry_run`、`overwrite`、`expect`）、`GET /api/me/assistant/export`；`GET /api/admin/assistants` 多 `last_non_owner_access_at`。
 - `deps.via_cli(request)`：管理命令建的会话。之后新增只对本人开放的接口时用它区分；新增带 `viewer=` 的还原时照对话记录的写法（`NOBODY` + `record_refused`）。

@@ -260,12 +260,12 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 | `notes.index`、`notes.read`、`followups.read`、`jobs.read`、`approvals.read`、`settings.read` | 所有者在「我的助理」页上读取；改设置（对象 `update`）与即时上下班（对象 `shift`）的响应带着解密后的设置，也记 `settings.read` |
 | `import.preview`、`import.notes`、`export` | 导入的预览（含没写成的确认）、导入写入成功、导出；对象是计数 |
 | `chatlogs.read`、`tasks.read` | 所有者在管理台读自己助理的对话记录、任务详情 |
-| `cli.chatlogs`、`cli.tasks` | 有人用管理命令以所有者的身份（`--as`）读对话记录、任务详情；内容没有还原，记成 `system`，不留操作人 |
+| `cli.chatlogs`、`cli.tasks`、`cli.session` | 有人用管理命令以所有者的身份（`--as`）读对话记录、任务详情、运行时节点上的会话过程（`runtimes session`）；内容没有还原，记成 `system`，不留操作人 |
 | `cli.rewrap` | `assistant-keys rewrap --apply` 重新包裹了这位所有者的数据密钥；没有读内容 |
 
 - **保留。** 180 天；scheduler 的保留期那一档分批清理，计数在日志里是 `old_assistant_access_log`。助理记录被删除时它的访问记录一并删除。
 - **写不进去不挡读取。** 记录与读取在同一个事务里提交：提交不了，请求以 500 结束，内容不交出去。单独这一行写失败时（应用日志 `assistant_access_log_failed`，带助理编号、动作与错误类型）读取照常返回；每次解密另有一条应用日志 `assistant_content_access`（助理、操作人、类别、动作、对象），可以拿来补查。持续出现 `assistant_access_log_failed` 说明表不可用，要当故障处理。
-- **管理命令看不到助理的内容，这是有意的。** `coreman … --as 登录名` 以那位成员的身份建一个管理台会话（`admin_sessions.auth_method = 'cli'`），权限与他一致，但敲命令的人在服务器上，不是他本人。所以：`/api/me/assistant` 下的接口不受理这种会话（403 `cli_session_refused`），所有者的知识库、待跟进、导入导出只能由他本人在管理台里操作；经它读对话记录（`/api/admin/chat-logs`）与任务详情时，助理加密保存的内容不还原，输出与「不是所有者」时一样（`content_locked`），并给所有者留一条 `cli.chatlogs` / `cli.tasks`。助理调度公共员工留在目标员工名下的那一轮虽然是明文，对这种会话同样只给元数据（`content_withheld`，按正文搜索与统计不含它，开发页的任务详情不给流与报错文字），同样在所有者的助理名下留一条记录（对象 `dispatch=N`）。普通员工的其它记录不受影响。排障需要看助理的内容时，请所有者本人在管理台里看。不看内容的命令（`assistant-keys rewrap`）照常可用，执行时记 `cli.rewrap`。
+- **管理命令看不到助理的内容，这是有意的。** `coreman … --as 登录名` 以那位成员的身份建一个管理台会话（`admin_sessions.auth_method = 'cli'`），权限与他一致，但敲命令的人在服务器上，不是他本人。所以：`/api/me/assistant` 下的接口不受理这种会话（403 `cli_session_refused`），所有者的知识库、待跟进、导入导出只能由他本人在管理台里操作；经它读对话记录（`/api/admin/chat-logs`）与任务详情时，助理加密保存的内容不还原，输出与「不是所有者」时一样（`content_locked`），并给所有者留一条 `cli.chatlogs` / `cli.tasks`。助理调度公共员工留在目标员工名下的那一轮虽然是明文，对这种会话同样只给元数据（`content_withheld`，按正文搜索与统计不含它，开发页的任务详情不给流与报错文字），同样在所有者的助理名下留一条记录（对象 `dispatch=N`）。运行时节点上的会话过程（`coreman runtimes session`、会话查看页与它的事件流）也一样：这种会话不按「本人」放行，只剩角色那条路（群聊、企微私聊），以所有者的身份去取调度那一轮会被拒绝并记 `cli.session`。个人助理自己的会话在这个入口对谁都不开（所有者本人、管理员、带凭据的旧链接都是 404），助理的回复里也不带会话入口。事件流每次放行都记审计 `runtime.session_events`（与会话页的 `runtime.session_view` 同样的字段）。普通员工的其它记录不受影响。排障需要看助理的内容时，请所有者本人在管理台里看。不看内容的命令（`assistant-keys rewrap`）照常可用，执行时记 `cli.rewrap`。
 - **上传的大小。** 导入的压缩包上限 20MB：应用读上传时按块读，一过上限就停并回 413。但框架在此之前已经把请求体收到了临时文件里，所以要挡住「传上来」本身，请在反向代理上给 `/api/me/assistant/import` 设 25MB 左右的请求体上限。装满的知识库导入、导出要十几秒，代理的超时不要低于 180 秒（管理台对这两个请求的超时就是 180 秒）。
 - **排查。** 所有者问「谁看过我的内容」：让他看「设置」分区的访问记录；管理员一侧只能确认时间。直接连库、拿主密钥解密不经过平台，不会留下记录（见设计文档的威胁模型）。
 

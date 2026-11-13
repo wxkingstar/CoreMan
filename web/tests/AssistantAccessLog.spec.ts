@@ -20,7 +20,7 @@ const render = () => mount(AssistantAccessLog, { global: { plugins: [ElementPlus
 const ACTIONS = [
   'approvals.read', 'followups.read', 'jobs.read', 'notes.index', 'notes.read', 'settings.read',
   'chatlogs.read', 'tasks.read', 'import.preview', 'import.notes', 'export',
-  'cli.rewrap', 'cli.chatlogs', 'cli.tasks',
+  'cli.rewrap', 'cli.chatlogs', 'cli.tasks', 'cli.session',
 ]
 
 beforeEach(() => {

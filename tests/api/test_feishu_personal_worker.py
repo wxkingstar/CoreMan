@@ -530,3 +530,7 @@ async def test_session_link_rules_by_chat_type_and_identity(db_session, app, db_
     assert await session_link(db_session, ctx, anonymous, intake.relay, sid) == ""
     bot.platform = "wecom"
     assert (await session_link(db_session, ctx, anonymous, intake.relay, sid)).endswith(plain)
+    # 个人助理的会话查看页对谁都不开：回复里不带入口。
+    bot.kind = "assistant"
+    for turn in (intake, group):
+        assert await session_link(db_session, ctx, turn, intake.relay, sid) == ""

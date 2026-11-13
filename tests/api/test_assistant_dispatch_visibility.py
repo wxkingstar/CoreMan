@@ -300,3 +300,98 @@ async def test_a_cli_session_acting_as_the_owner_does_not_read_the_round(
 
     bots = await db_session.scalars(sql("SELECT DISTINCT bot_id FROM assistant_access_log"))
     assert list(bots) == [assistant_id]
+
+
+@pytest.mark.parametrize("role", ["member", "platform_admin"])
+async def test_a_cli_session_does_not_read_the_round_from_the_node(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+) -> None:
+    """节点会话查看同样不认管理命令的会话：事件流里是那一轮的完整过程。"""
+    from tests.api.my_assistant_helpers import as_cli
+    from tests.api.test_assistant_chat_logs import _access
+    from tests.api.test_runtime_nodes import _mock_events
+    from tests.integration.assistant_helpers import into_assistant
+
+    _, _, owner, row, url = await _private_session(client, db_session)
+    row.message_type, row.private = BOT_HELP_KIND, True
+    row.chat_id = row.session_key = KEY
+    owner.role = role
+    await db_session.commit()
+    assistant = await into_assistant(db_session, await seed_standard(db_session), owner)
+    assistant_id = assistant.id
+    _mock_events(monkeypatch)
+    # 本人的浏览器会话照常（对照），不进访问记录。
+    await login_existing(client, db_session, owner)
+    for suffix in ("", "/events"):
+        assert (await client.get(url + suffix)).status_code == 200
+    assert await _access(db_session) == []
+
+    await as_cli(client, db_session, owner)
+    refused = 404 if role == "platform_admin" else 403
+    for suffix in ("", "/events"):
+        assert (await client.get(url + suffix)).status_code == refused
+    recorded = await _access(db_session)
+    assert recorded == [("cli.session", "dispatch=1", "system", None)] * 2
+    from sqlalchemy import text as sql
+
+    bots = await db_session.scalars(sql("SELECT DISTINCT bot_id FROM assistant_access_log"))
+    assert list(bots) == [assistant_id]
+
+
+async def test_the_event_stream_is_audited_like_the_page(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import select
+
+    from coreman.core.db.models import AuditLog
+    from tests.api.test_runtime_nodes import _mock_events
+
+    node_id, _, owner, row, url = await _private_session(client, db_session)
+    _mock_events(monkeypatch)
+    await login_existing(client, db_session, owner)
+    assert (await client.get(url + "/events")).status_code == 200
+    (audit,) = (
+        await db_session.scalars(select(AuditLog).where(AuditLog.action.like("runtime.session%")))
+    ).all()
+    assert audit.action == "runtime.session_events"
+    assert (audit.actor_id, audit.target_id) == (owner.id, str(row.relay_session_id))
+    assert audit.diff == {
+        "node_id": [None, node_id],
+        "provider": [None, "claude"],
+        "via": [None, "owner"],
+    }
+
+
+async def test_an_assistants_own_session_opens_for_nobody(
+    app: Any, client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """助理的会话在沙箱里、转录每轮清出节点：本人、管理员、带凭据的链接都不从这里看。"""
+    from tests.api.test_runtime_nodes import _link, _mock_events
+    from tests.integration.assistant_helpers import into_assistant
+
+    node_id, mine, owner, row, url = await _private_session(client, db_session)
+    session_id = row.relay_session_id
+    mine.platform = "feishu"
+    await db_session.commit()
+    assistant = await into_assistant(db_session, mine, owner)
+    assistant_id = assistant.id
+    _mock_events(monkeypatch)
+    # 夹具登录着的是另一位管理员。
+    for suffix in ("", "/events"):
+        assert (await client.get(url + suffix)).status_code == 404
+    owner.role = "platform_admin"
+    await db_session.commit()
+    await login_existing(client, db_session, owner)
+    link = _link(app, node_id, session_id, owner.id, assistant_id)
+    for query in ("", f"?t={link}"):
+        for suffix in ("", "/events"):
+            assert (await client.get(url + suffix + query)).status_code == 404
+    # 还没有对话记录的会话，凭据里写的是助理：同样不开。
+    fresh = uuid.uuid4()
+    blank = f"/api/admin/runtime-nodes/{node_id}/claude/session/{fresh}"
+    link = _link(app, node_id, fresh, owner.id, assistant_id)
+    for suffix in ("", "/events"):
+        assert (await client.get(f"{blank}{suffix}?t={link}")).status_code == 404

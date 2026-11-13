@@ -75,9 +75,11 @@ async def session_link(
 
     查看页按对话记录判断归属：开流时这一轮已经写进 chat_logs（见 `_open`），第一轮也不例外，
     链接不需要另带凭据。群聊沿用管理员查看，私聊归本人。飞书私聊只有本人能看：发言人没绑定
-    员工身份时谁也打不开，就不给。
+    员工身份时谁也打不开，就不给。个人助理的会话查看页对谁都不开，也不给。
     """
     url = session_viewer_url(ctx, relay, relay_session_id)
+    if intake.bot.kind == "assistant":
+        return ""
     if (
         intake.chat_type == "single"
         and intake.bot.platform == "feishu"

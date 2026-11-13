@@ -55,11 +55,12 @@ ACTIONS = (
     "import.preview",
     "import.notes",
     "export",
-    # 服务器上的管理命令：重新包裹数据密钥（不读内容）；以所有者的身份读对话记录、任务详情
-    # （内容不还原，记的是有人试过）
+    # 服务器上的管理命令：重新包裹数据密钥（不读内容）；以所有者的身份读对话记录、任务详情、
+    # 节点上的会话过程（内容不还原，记的是有人试过）
     "cli.rewrap",
     "cli.chatlogs",
     "cli.tasks",
+    "cli.session",
 )
 MAX_TARGET = 64
 # 不等于任何用户的查看者：管理命令以某位成员的身份建的会话拿它去「只对本人还原」，
@@ -191,6 +192,13 @@ async def record_dispatch_refused(
     没有可记的地方，只返回 0。返回记了几位助理（为 0 时调用方不必提交）。
     """
     count = sum(1 for row in rows if row is not None and _dispatched_by(row, owner_id))
+    return await record_dispatch_count(session, owner_id, action, count)
+
+
+async def record_dispatch_count(
+    session: AsyncSession, owner_id: uuid.UUID, action: str, count: int
+) -> int:
+    """`record_dispatch_refused` 的记账部分：调用方手里只有列、没有整行时自己数好了传进来。"""
     if not count:
         return 0
     bots = await bots_of(session, [owner_id])
