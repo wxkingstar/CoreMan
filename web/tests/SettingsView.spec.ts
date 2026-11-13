@@ -22,6 +22,7 @@ vi.mock('@/api/admin', () => ({
 vi.mock('@/components/AlertSettings.vue', () => ({ default: { template: '<div />' } }))
 
 vi.mock('@/components/NotificationSettings.vue', () => ({ default: { template: '<div />' } }))
+vi.mock('@/components/AssistantPlatformSettings.vue', () => ({ default: { template: '<div />' } }))
 
 import { settings } from '@/api/admin'
 import { i18n } from '@/i18n'

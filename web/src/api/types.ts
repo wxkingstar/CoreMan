@@ -189,7 +189,20 @@ export const PROMPT_SEGMENTS = [
 export type PromptSegment = (typeof PROMPT_SEGMENTS)[number]
 export type PromptSettings = { [K in PromptSegment as `prompt_${K}`]: string }
 
-export interface SettingsOut extends PromptSettings {
+/** 个人助理的开通范围：`listed` 时只有名单里的人与部门（含下级部门）能开通。 */
+export interface AssistantEligibility { mode: 'all' | 'listed'; department_ids: string[]; user_ids: string[] }
+export type AssistantBackend = 'claude' | 'codex'
+/** 平台设置里个人助理的四项（`coreman/core/settings_schema.py`）。 */
+export interface AssistantPlatformSettings {
+  assistant_eligibility: AssistantEligibility
+  /** 开通时按顺序挑第一个助理池里有可用节点的。 */
+  assistant_backends: AssistantBackend[]
+  /** 每个运行时节点同时跑的助理轮次上限，1–32。 */
+  assistant_node_concurrency: number
+  /** 每位助理每天的轮次预算默认值，10–2000。 */
+  assistant_daily_turn_budget: number
+}
+export interface SettingsOut extends PromptSettings, Partial<AssistantPlatformSettings> {
   bootstrap_admin_enabled: boolean
   /** 由模型目录里标记为默认的模型派生，只读；目录为空或全部退役时为 null。 */
   default_model: string | null
@@ -243,6 +256,8 @@ export interface ChatLogOut {
   cost_usd?: number | null
   /** 这一轮签发过的业务系统令牌（只有标识，不含令牌），用来和业务系统日志的 token_id 对账。 */
   business_tokens?: BusinessTokenIssue[]
+  /** 个人助理调度这位员工的那一轮：不是发起的所有者本人，正文、引用、附件、报错与工具清单都不下发。 */
+  content_withheld?: boolean
 }
 export interface BusinessTokenIssue {
   system_key: string; provider: string; audience: string; subject: string
@@ -256,8 +271,6 @@ export interface ChatLogByBot {
 export interface ChatLogStats {
   total: number
   /** 只含出现过的状态。 */
-  /** 个人助理调度这位员工的那一轮：不是发起的所有者本人，正文、引用、附件、报错与工具清单都不下发。 */
-  content_withheld?: boolean
   by_status: Record<string, number>
   avg_latency_ms: number | null
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
