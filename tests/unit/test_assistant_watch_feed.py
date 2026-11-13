@@ -246,10 +246,22 @@ def test_cursor_round_trip_copies_and_prunes() -> None:
         "todo": ["oc_b", 3],
     }
     cursor = feed.load(stored)
-    assert cursor == {"since": 5, "chats": {"oc_a": {"t": 9, "m": ["om_1"]}}, "todo": ["oc_b"]}
+    assert cursor == {
+        "since": 5,
+        "chats": {"oc_a": {"t": 9, "m": ["om_1"]}},
+        "todo": ["oc_b"],
+        "p": [],
+        "a": 0,
+    }
     cursor["chats"]["oc_a"]["t"] = 10
     assert stored["chats"]["oc_a"]["t"] == 9  # 改的是副本
-    assert feed.load({}) == {"since": 0, "chats": {}, "todo": []}
+    assert feed.load({}) == {"since": 0, "chats": {}, "todo": [], "p": [], "a": 0}
+    # 没探完的那一段与它的年龄截止点：有才写回，没有就不留这两个键。
+    assert "p" not in feed.dump(cursor, []) and "a" not in feed.dump(cursor, [])
+    owed = feed.load({**stored, "p": ["oc_c", 7], "a": 4})
+    assert (owed["p"], owed["a"]) == (["oc_c"], 4)
+    kept = feed.dump(owed, [])
+    assert (kept["p"], kept["a"]) == (["oc_c"], 4)
     many = {"since": 1, "chats": {f"oc_{n}": {"t": n} for n in range(250)}, "todo": []}
     kept = feed.dump(many, ["oc_z"] * 80)
     assert len(kept["chats"]) == 200 and "oc_249" in kept["chats"] and "oc_49" not in kept["chats"]
