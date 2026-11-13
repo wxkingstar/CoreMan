@@ -51,6 +51,7 @@ async def test_the_row_is_sealed_and_the_target_task_carries_ids_only(
         "job_id": str(row.id),
         "round": 1,
         "allow_write": False,
+        "unattended": False,
         "bot_key": "demo-bot",
         "platform_user_id": "owner_pid",
     }

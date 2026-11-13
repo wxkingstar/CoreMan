@@ -314,3 +314,29 @@ async def test_a_busy_session_fails_the_round_without_a_notice(
     failed = await reloaded(db_session, row)
     assert (failed.status, failed.error_code) == ("failed", "session_busy")
     assert len(await tasks_of(db_session, bot, JOB_RESULT_KIND)) == 1
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_a_target_moved_onto_someone_elses_private_runtime_after_dispatch(
+    db_engine: AsyncEngine, db_session: AsyncSession, attended: bool
+) -> None:
+    """派出之后目标员工被换绑到别人的私有运行时：无人在场发起的那一轮开轮前被拦下。"""
+    bot, _ = await assistant(db_session)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target, attended=attended)
+    task = await help_task(db_session, row)
+    assert task.payload["unattended"] is (not attended)
+    elsewhere = await target_bot(db_session, key="demo-bot-b", private_to="creator")
+    target.relay_server_id = elsewhere.relay_server_id
+    await db_session.commit()
+    done, relay = await run_help(db_engine, db_session, task)
+    if attended:
+        # 所有者当面发起的不限（裁定 24）。
+        assert done.status == "succeeded" and len(relay.requests) == 1
+        return
+    assert (done.status, done.error_code) == ("cancelled", "owner_turn_required")
+    assert relay.requests == [] and await streams_of(db_session, task) == []
+    failed = await reloaded(db_session, row)
+    assert (failed.status, failed.error_code) == ("failed", "owner_turn_required")
+    (result,) = await tasks_of(db_session, bot, JOB_RESULT_KIND)
+    assert failed.result_task_id == result.id

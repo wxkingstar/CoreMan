@@ -84,6 +84,9 @@ FAILURE_NOTES = {
     ),
     "bot_help_announced": "那位员工所在的运行时有维护公告，这一轮没有开。",
     "job_timeout": "对方到点还没答完，平台已叫停这一轮。",
+    "owner_turn_required": (
+        "派出之后那位员工换到了别人的私有运行时上；所有者不在场时不能问它，等他当面发起。"
+    ),
 }
 
 
@@ -338,6 +341,8 @@ async def send(
                 "job_id": str(row_id),
                 "round": 1,
                 "allow_write": allow_write,
+                # 发起它的那一轮所有者在不在场：目标那一轮开轮前复查资格时要用（裁定 24）。
+                "unattended": not attended,
                 "bot_key": target.bot_key,
                 "platform_user_id": prefs.platform_user_id,
             },

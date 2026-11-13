@@ -2,7 +2,7 @@
 
 流水线（会话、提示词、业务系统令牌、收尾）与所有者私聊这位员工的一轮相同，不同的只有：
 - 入站解析：没有入站事件，用一个不落库的替身；问题从助理的 `assistant_jobs` 密文行里取；
-  开轮前重新核对资格（`dispatch.authorize`）。
+  开轮前重新核对资格（`dispatch.authorize`，带着载荷里记的发起时所有者在不在场）。
 - 不出声：继承 `SilentTurnHandler`——流的回复上下文带 `_silent`（网关不推、流恢复不补发）、
   看护器不推进度与超时通知、不发长任务完成提醒、不自己推终稿、不发额度切换卡；任务类型登记
   在 `kinds.SILENT_KINDS`，收尸不往会话里发「进程没了」。会话忙时不回提示，记失败并投回。
@@ -61,6 +61,7 @@ class AssistantBotHelpHandler(SilentTurnHandler):
     INACTIVE = "bot_help_inactive"
     NOT_ALLOWED = "bot_help_not_allowed"
     ANNOUNCED = "bot_help_announced"
+    OWNER_TURN = "owner_turn_required"
 
     async def _refuse(
         self, session: AsyncSession, ctx: TaskContext, status: str, code: str
@@ -77,10 +78,17 @@ class AssistantBotHelpHandler(SilentTurnHandler):
             await tasks.finish(session, ctx.task.id, status="cancelled", error_code=self.INACTIVE)
             return None
         try:
-            # 派出之后员工被停用、关了接受求助、可用人名单变了，或所有者的账号、身份变了。
-            target, speaker = await dispatch.authorize(session, found.assistant, ctx.task.bot_id)
-        except dispatch.DispatchError:
-            await self._refuse(session, ctx, "cancelled", self.NOT_ALLOWED)
+            # 派出之后员工被停用、关了接受求助、可用人名单变了，或所有者的账号、身份变了；
+            # 无人在场发起的，还要看它有没有被换绑到别人的私有运行时上。
+            target, speaker = await dispatch.authorize(
+                session,
+                found.assistant,
+                ctx.task.bot_id,
+                attended=ctx.task.payload.get("unattended") is not True,
+            )
+        except dispatch.DispatchError as exc:
+            code = self.OWNER_TURN if exc.code == self.OWNER_TURN else self.NOT_ALLOWED
+            await self._refuse(session, ctx, "cancelled", code)
             return None
         relay = (
             await session.get(RelayServer, target.relay_server_id)
