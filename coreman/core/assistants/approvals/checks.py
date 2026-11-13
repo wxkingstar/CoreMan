@@ -65,6 +65,8 @@ class ChatView:
     kind: str
     title: str
     messages: list[Message]
+    # 读的是一个话题（按话题容器读的）：里面每一条都属于这个话头。
+    thread: bool = False
 
 
 def _text(item: dict[str, Any]) -> str:
@@ -134,7 +136,7 @@ async def chat_view(call: Reader, chat_id: str, thread_id: str | None = None) ->
     )
     items = [parse(item) for item in data.get("items") or [] if isinstance(item, dict)]
     kind = "p2p" if info.get("chat_mode") == "p2p" else "group"
-    return ChatView(kind, str(info.get("name") or ""), items)
+    return ChatView(kind, str(info.get("name") or ""), items, thread=bool(thread_id))
 
 
 async def message(call: Reader, message_id: str) -> Message | None:
@@ -195,8 +197,10 @@ def anchor_verdict(
     消息——同一个会话有两张待批单时，第一张发出去不该让第二张过时。
 
     所有者亲自发言在哪种会话里都算。别人的新消息，私聊里每一条都算（都是对所有者说的）；
-    群里只算与这个话头有关的：@ 了所有者、回复了锚点那条（或在以它为根的话题里）、或锚点的
-    发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿永远赶不上最新一条。
+    群里只算与这个话头有关的：@ 了所有者、回复了锚点那条（或在以它为根的话题里、与它同在
+    一个话题里）、或锚点的发送人自己又发的。群里别人接着聊别的不算——否则活跃的群里，草稿
+    永远赶不上最新一条。读的是话题视图时按私聊的口径全算：话题里的每一条都在说这件事，
+    问题可能已经被第三个人答掉了。
     """
     newer: list[Message] = []
     anchor: Message | None = None
@@ -214,7 +218,7 @@ def anchor_verdict(
     ]
     if any(item.sender_id == owner_open_id for item in people):
         return "owner_replied_after_anchor"
-    if view.kind == "group":
+    if view.kind == "group" and not view.thread:
         people = [item for item in people if _about(item, anchor, owner_open_id)]
     return "newer_messages_after_anchor" if people else None
 
@@ -224,6 +228,8 @@ def _about(item: Message, anchor: Message, owner_open_id: str) -> bool:
     return (
         owner_open_id in item.mentions
         or anchor.message_id in (item.parent_id, item.root_id)
+        # 锚点是话题里的一条非根消息：同一个话题里别人的回复也在说这件事。
+        or (bool(anchor.root_id) and item.root_id == anchor.root_id)
         or (bool(anchor.sender_id) and item.sender_id == anchor.sender_id)
     )
 
