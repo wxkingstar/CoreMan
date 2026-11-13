@@ -218,9 +218,12 @@ def load(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def dump(cursor: dict[str, Any], todo: list[str]) -> dict[str, Any]:
-    """写回库的游标：只留最近读过的 `CURSOR_CHATS` 个会话。"""
+    """写回库的游标：只留最近读过的 `CURSOR_CHATS` 个会话；还在排队的会话先留（它们记着起点）。"""
     chats: dict[str, dict[str, Any]] = cursor["chats"]
-    kept = sorted(chats, key=lambda chat: int(chats[chat].get("t") or 0), reverse=True)
+    waiting = set(todo[:TOP])
+    kept = sorted(
+        chats, key=lambda chat: (chat in waiting, int(chats[chat].get("t") or 0)), reverse=True
+    )
     return {
         "since": cursor["since"],
         "chats": {chat: chats[chat] for chat in kept[:CURSOR_CHATS]},

@@ -264,3 +264,69 @@ async def test_a_group_joined_over_the_weekend_still_keeps_its_old_history_out(
     assert await boxed(db_session, who) == ["om_weekend"]
     start = int(api.read("oc_team")[0].params["start_time"])
     assert start == ms(friday) // 1000
+
+
+def night_chats(count: int = 20) -> list[dict[str, Any]]:
+    return [{"chat_id": f"oc_p{index:02d}", "chat_mode": "p2p"} for index in range(count)]
+
+
+async def test_chats_left_for_the_next_round_keep_last_nights_starting_point(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    # 昨晚下班后没轮询过；夜里 20 位从没说过话的同事各发来一条私聊，游标里都没有条目。
+    await primed(db_session, who, ago(base, days=3))
+    await polled(db_session, who, ago(base, hours=14))
+    api.chats = night_chats()
+    for index in range(20):
+        api.say(f"oc_p{index:02d}", f"om_night_{index:02d}", ago(base, hours=9))
+    factory = make_session_factory(db_engine)
+    await tick(factory, base)
+    # 一轮最多读 `MAX_READS` 次：其余的排到下一轮。
+    assert len(await boxed(db_session, who)) == watch.MAX_READS
+    row = await watch_row(db_session, who)
+    waiting = row.cursor_enc["todo"]
+    assert len(waiting) == 20 - watch.MAX_READS
+    # 排队的会话当场记下这一轮的回看起点：下一轮「上次成功轮询」已经变成刚才。
+    for chat in waiting:
+        assert row.cursor_enc["chats"][chat]["t"] == ms(ago(base, hours=14))
+    row.next_poll_at = base
+    await db_session.commit()
+    await tick(factory, base + timedelta(seconds=60))
+    assert sorted(await boxed(db_session, who)) == [f"om_night_{index:02d}" for index in range(20)]
+    row = await watch_row(db_session, who)
+    assert row.cursor_enc["todo"] == []
+    assert all("a" not in entry for entry in row.cursor_enc["chats"].values())
+
+
+async def test_chats_left_for_the_next_round_keep_the_weekend_too(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    friday = ago(base, hours=62)
+    await primed(db_session, who, ago(base, days=9))
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {
+            f"oc_p{index:02d}": {"t": ms(ago(base, hours=63)), "m": [], "k": "p2p", "th": {}}
+            for index in range(20)
+        },
+    }
+    await db_session.commit()
+    await polled(db_session, who, friday)
+    api.chats = night_chats()
+    for index in range(20):
+        api.say(f"oc_p{index:02d}", f"om_friday_{index:02d}", ago(base, hours=60))
+    factory = make_session_factory(db_engine)
+    await tick(factory, base)
+    row = await watch_row(db_session, who)
+    row.next_poll_at = base
+    await db_session.commit()
+    # 第二轮时「上次成功轮询」是一分钟前：排队的会话仍按排队那一轮的年龄截止点算。
+    await tick(factory, base + timedelta(seconds=60))
+    assert sorted(await boxed(db_session, who)) == [f"om_friday_{index:02d}" for index in range(20)]

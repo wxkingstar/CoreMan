@@ -310,8 +310,8 @@ class _Round:
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW
             )
             return
-        if item.at_ms < self.oldest:
-            # 太老了：不入箱，游标照常越过它。
+        if item.at_ms < min(self.oldest, int(entry.get("a") or self.oldest)):
+            # 太老了：不入箱，游标照常越过它。排过队的会话按排队那一轮的截止点算（`put_off`）。
             return
         spoke = int(entry.get("o") or 0)
         context = Context(
@@ -360,6 +360,8 @@ class _Round:
         self.reads += calls
         if len(raws) >= feed.PAGE * feed.MAX_PAGES:
             self.more.append(chat_id)
+            # 剩下的下一轮接着读，仍按这一轮的年龄截止点算。
+            entry.setdefault("a", self.oldest)
         threads = {str(key): int(value) for key, value in (entry.get("th") or {}).items()}
         new = False
         for raw in raws:
@@ -400,8 +402,22 @@ class _Round:
         # 读成了：之前记的读失败次数作废。
         entry.pop("f", None)
         entry.pop("x", None)
+        if chat_id not in self.more:
+            entry.pop("a", None)
         self.reading = ""
         return new
+
+    def put_off(self, chat_id: str) -> None:
+        """这一轮读不到这个会话了，留给下一轮：当场把这一轮的起点记进游标。
+
+        这一轮成功之后「上一次成功轮询」就是现在：到下一轮才算起点，回看只剩 `LOOKBACK`，
+        年龄截止点也只剩 `MAX_AGE`，夜里、周末发来的消息就被跳过了。所以游标里还没有它时
+        把 `floor` 写成读到的位置，并记下这一轮的年龄截止点（`a`，读完后去掉）。
+        """
+        entry = self.cursor["chats"].setdefault(chat_id, {})
+        if not entry.get("t"):
+            entry["t"] = self.floor
+        entry.setdefault("a", self.oldest)
 
     def strike(self, code: str) -> None:
         """正在读的会话被飞书拒绝了：记一次；连续 `CHAT_STRIKES` 次就放下它一段时间。
@@ -477,11 +493,16 @@ async def _round(
         floor=_floor(cursor["since"], row.last_ok_at, now),
         oldest=_oldest(row.last_ok_at, now),
     )
+    # 排队时记下的年龄截止点只对还在排队的会话有效：被放下、被忽略而离队的不留着它。
+    for chat_id, entry in cursor["chats"].items():
+        if chat_id not in queue or chat_id not in cursor["todo"]:
+            entry.pop("a", None)
     todo: list[str] = []
     try:
         for chat_id in queue:
             if state.spent():
                 todo.append(chat_id)
+                state.put_off(chat_id)
             else:
                 await state.chat(chat_id)
         # 顺序没变的会话里，藏着新消息的只可能是开头连续的一段：从头探，探到没有新消息的为止。
