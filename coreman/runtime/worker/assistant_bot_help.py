@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +25,9 @@ from coreman.core.bus import tasks
 from coreman.core.chat import sessions
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.db.models import InboundEvent, RelayServer, Task
+from coreman.core.i18n.messages import msg
 from coreman.core.timeutils import utcnow
-from coreman.runtime.worker.chat.models import Intake
+from coreman.runtime.worker.chat.models import Intake, Outcome, Prepared, Verdict
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.platform_turn import SilentTurnHandler
 
@@ -126,6 +128,43 @@ class AssistantBotHelpHandler(SilentTurnHandler):
         # 与开流同一事务：这一轮真的开了，求助才算在跑。
         await dispatch.mark_running(session, ctx.task)
         return info
+
+    def _classify(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
+        # 先按普通轮次的口径看是不是用提问工具向用户发问（不出声的基类会把它直接改成正常结束）。
+        plain = super(SilentTurnHandler, self)._classify(ctx, pre, out)
+        if plain.log_status != "ask_user":
+            return super()._classify(ctx, pre, out)
+        # 没有人能答题：不开选择卡（它会挂在所有者与这位员工的私聊上、把他的下一条消息当成
+        # 答案），题面作为所需事项、按 blocked 交回助理。
+        asked = [
+            str(item.get("question") or "") for item in out.questions if isinstance(item, dict)
+        ]
+        final = dispatch.blocked_text(pre.writer.pending_text, asked)
+        return replace(plain, log_status="success", final_text=ctx.redact(final) or "")
+
+    async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
+        await super()._after_finalize(ctx, pre, verdict)
+        ok = verdict.task_status == "succeeded"
+        answer: dispatch.Answer | None = None
+        if ok:
+            said, marks = pre.writer.pending_text, pre.writer.boundaries
+            final = verdict.final_text.removesuffix(msg("done_suffix", ctx.locale))
+            # 约定的 JSON 在终稿里，或在最后一次工具调用之后；都不是就把说过的话原样交回。
+            found = dispatch.read_answer(final, said[marks[-1] :] if marks else said, plain=said)
+            if found is not None:
+                answer = replace(
+                    found,
+                    answer=ctx.redact(found.answer) or "",
+                    needs=tuple(ctx.redact(item) or "" for item in found.needs),
+                )
+        async with ctx.session_factory() as session:
+            row = await dispatch.finish(
+                session, ctx.task, ok=ok, answer=answer, error_code=verdict.error_code
+            )
+            await session.commit()
+        ctx.log.info(
+            "assistant_bot_help_finished", status=row.status if row is not None else "stale"
+        )
 
     async def _session_busy(self, ctx: TaskContext, intake: Intake) -> None:
         """求助的会话只有它自己的一轮，正常走不到这里：不回提示，记失败并投回。"""

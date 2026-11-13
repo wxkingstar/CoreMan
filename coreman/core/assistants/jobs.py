@@ -350,18 +350,19 @@ async def message(
     上一轮的结论留着，直到新的一轮写下新的；还没投到主会话的那一次投回作废。
 
     Raises:
-        JobError: invalid_text / job_not_found / job_busy / job_closed / job_round_limit /
-            content_locked / too_many_jobs / daily_budget_exhausted / assistant_unavailable
+        JobError: invalid_text / job_not_found / job_no_follow_up / job_busy / job_closed /
+            job_round_limit / content_locked / too_many_jobs / daily_budget_exhausted /
+            assistant_unavailable
     """
     now = aware_utc(now or utcnow())
     body = _clean(text_, MAX_MESSAGE, "invalid_text")
     prefs = await assistant_settings.get(session, bot.id)
     # 先确认是自己的子任务，再占名额：别人的编号不该先撞上「名额满了」。
-    await get(session, bot.id, job_id)
+    if (await get(session, bot.id, job_id)).kind != "subtask":
+        # 调度公共员工的求助只有一轮：对方的会话不在助理的沙箱里，追问要重新派出。
+        raise JobError("job_no_follow_up")
     await _admit(session, bot, prefs, new=False, budget=not attended, now=now)
     row = await get(session, bot.id, job_id, lock=True)
-    if row.kind != "subtask":
-        raise JobError("job_not_found")
     if row.status in LIVE:
         raise JobError("job_busy")
     if row.status not in ("done", "blocked"):

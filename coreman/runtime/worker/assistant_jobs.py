@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import compiling, jobs
+from coreman.core.assistants import compiling, dispatch, jobs
 from coreman.core.assistants.kinds import JOB_RESULT_KIND, SUBTASK_KIND
 from coreman.core.chat import sessions
 from coreman.core.db.models import Bot
@@ -95,6 +95,9 @@ class AssistantJobResultHandler(PlatformTurnHandler):
         if row is None:
             return None
         ctx.log.info("assistant_job_result_opened", job_id=str(row.id), status=row.status)
+        if row.kind == "bot_help":
+            # 调度公共员工的答复：另一位员工写的，带着它的名字与问题原文。
+            return await dispatch.result_text(session, row)
         return jobs.result_text(row)
 
     async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
