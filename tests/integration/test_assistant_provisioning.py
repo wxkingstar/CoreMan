@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -21,6 +22,7 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.db.session import make_session_factory
+from coreman.core.feishu_personal import service as personal
 from tests.integration import lifecycle_helpers
 from tests.integration.lifecycle_helpers import (
     CHAT,
@@ -547,3 +549,54 @@ async def test_a_key_destroyed_moments_ago_waits_for_every_cache_to_expire(
     await tick(factory, messenger, later=600)
     flow = await flow_of(db_session, owner_id)
     assert flow is not None and flow.step == "init_workspace"
+
+
+async def test_a_step_cancelled_midway_finishes_and_keeps_the_new_tokens(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scheduler 停止时会取消循环：查授权的这一步刚用设备码换到令牌，要等它提交完再退。"""
+    _, auth = install(monkeypatch)
+    app, owner, inbound, messenger = await offered(db_engine, db_session)
+    factory = make_session_factory(db_engine)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None
+    await inbound.accept(click_event(messenger.token(), flow.offer_message_id))
+    for _ in range(3):  # 建记录与密钥、节点上建目录、发起授权
+        await tick(factory, messenger)
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.step == "await_grant" and flow.bot_id is not None
+    auth.approve()
+    await poll_now(db_session)
+    reached, release = asyncio.Event(), asyncio.Event()
+    exchanged = 0
+
+    async def http(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        nonlocal exchanged
+        out = await auth.http(method, url, **kwargs)
+        if url == personal.TOKEN_URL and "access_token" in out:
+            exchanged += 1
+        elif exchanged:
+            # 令牌已经换到（设备码用掉了），这一步还在往下调飞书：这时循环被取消。
+            reached.set()
+            await release.wait()
+        return out
+
+    monkeypatch.setattr(personal, "_http", http)
+    job = asyncio.create_task(tick(factory, messenger, later=12))
+    await asyncio.wait_for(reached.wait(), 5)
+    assert exchanged == 1
+    job.cancel()
+    await asyncio.sleep(0.05)
+    assert not job.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(job, 5)
+    # 这一步的事务照常提交了：令牌落库，记录开通好。
+    grant = await db_session.get(
+        FeishuPersonalGrant, (flow.bot_id, owner.id), populate_existing=True
+    )
+    assert grant is not None and grant.status == "connected" and grant.token_enc
+    bot = await db_session.get(Bot, flow.bot_id, populate_existing=True)
+    assert bot is not None and bot.assistant_state == "active"
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "done"

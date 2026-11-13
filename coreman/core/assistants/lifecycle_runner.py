@@ -17,7 +17,7 @@ from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import deprovisioning, keys, provisioning, retired_dirs
+from coreman.core.assistants import deprovisioning, keys, provisioning, retired_dirs, watch
 from coreman.core.assistants.lifecycle import (
     PROVISION_MAX_ATTEMPTS,
     Messenger,
@@ -228,7 +228,12 @@ async def tick(
             )
         for row_id in due:
             try:
-                notices = await _run_one(factory, cipher, messenger, row_id, now)
+                # 被叫停（scheduler 退出）时等这一步提交完再退：查授权那一步可能刚换到令牌，
+                # 设备码与刷新令牌都只能用一次，就地打断等于回滚、授权作废
+                # （见 `watch.finish_round`）。
+                notices = await watch.finish_round(
+                    _run_one(factory, cipher, messenger, row_id, now)
+                )
             except Exception as exc:  # noqa: BLE001 一条流程出错不挡别的
                 log.warning("assistant_lifecycle_failed", error=type(exc).__name__)
                 await _push_back(factory, row_id, type(exc).__name__, now)
