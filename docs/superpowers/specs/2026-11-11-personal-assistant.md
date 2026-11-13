@@ -280,9 +280,9 @@ Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有�
 
 ### 待跟进
 
-新表 `assistant_followups`：`id`、`bot_id`、`seq`（每个助理内递增，显示为 F012）、`category`（等我决定 / 我答应 / 等别人 / 提醒我）、`status`、`review_on`、`due_on`、`origin_message_id`、`job_id`、`title_enc`、`notes_enc`、时间戳。
+新表 `assistant_followups`：`id`、`bot_id`、`seq`（每个助理内递增，显示为 F012）、`category`（等我决定 / 我答应 / 等别人 / 提醒我）、`status`、`review_on`、`due_on`、`origin_message_id`、`job_id`、`title_enc`、`notes_enc`、时间戳，另有 `closed_at` 与 `close_code`（平台自动关闭的原因，目前只有 `origin_recalled`）。分类在库里是 `decide` / `promised` / `waiting` / `remind`，状态是 `open` / `snoozed` / `done` / `dropped`；每位助理未结的条目上限 500。
 
-工具：`followup_add`、`followup_update`、`followup_snooze`、`followup_close`、`followup_list(scope)`。分类、状态、日期是明文，按日期查询不需要解密。起因消息被撤回时自动关闭。
+工具：`followup_add`、`followup_update`、`followup_snooze`、`followup_close`、`followup_list(scope)`（`scope` 也可以是一个编号，返回这一条连同备注）。日期按所有者时区，推后的条目到回看日那天改回未结。分类、状态、日期是明文，按日期查询不需要解密。起因消息被撤回时自动关闭。
 
 ## 七、子任务
 
