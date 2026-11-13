@@ -122,6 +122,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/approvals/service.py": 2,
     # 投递：绑定任务号、记已交回、放回、作废，四条都只写元数据
     "coreman/core/assistants/delivery.py": 4,
+    # 顺带检查：入提醒条目，摘要封存
+    "coreman/core/assistants/delivery_checks.py": 1,
     # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
     "coreman/core/assistants/followups.py": 2,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
