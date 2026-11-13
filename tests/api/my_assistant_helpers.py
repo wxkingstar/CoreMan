@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import secrets
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api.security import CSRF_COOKIE, SESSION_COOKIE, sign_session_id
 from coreman.core.assistants import keys, sealed
-from coreman.core.db.models import Bot, User
+from coreman.core.db.models import AdminSession, Bot, User
 from tests.api.conftest import login_existing
 from tests.integration.assistant_helpers import seed_assistant
 
@@ -54,3 +58,24 @@ async def fresh(db_session: AsyncSession, *rows: Bot) -> None:
     db_session.expire_all()
     for row in rows:
         await db_session.refresh(row)
+
+
+async def as_cli(client: httpx.AsyncClient, db_session: AsyncSession, user: User) -> None:
+    """让之后的请求带着管理命令建的那种会话（`coreman … --as 登录名`）：`auth_method = "cli"`。"""
+    now = datetime.now(UTC)
+    row = AdminSession(
+        user_id=user.id,
+        auth_method="cli",
+        user_agent="coreman-cli",
+        expires_at=now + timedelta(hours=1),
+        last_seen_at=now,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    csrf = secrets.token_urlsafe(16)
+    # 与 tests/api/conftest.py 的 _attach_session 用同一把测试密钥。
+    client.cookies.set(
+        SESSION_COOKIE, sign_session_id("unit-test-session-secret-0123456789", row.id)
+    )
+    client.cookies.set(CSRF_COOKIE, csrf)
+    client.headers["X-CSRF-Token"] = csrf

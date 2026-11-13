@@ -16,12 +16,12 @@ from sqlalchemy import ColumnElement, and_, case, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.bot_names import bot_names
-from coreman.api.deps import current_user, get_session, via_bot_token
+from coreman.api.deps import current_user, get_session, via_bot_token, via_cli
 from coreman.api.errors import not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.routers.audit_logs import escape_like
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import sealed
+from coreman.core.assistants import access_log, sealed
 from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.db.models import Bot, BotMember, BusinessTokenIssue, ChatLog, CronRun, User
 from coreman.core.richtext.degrade import readable
@@ -254,21 +254,30 @@ async def list_chat_logs(
     stmt = select(ChatLog).where(*conds).order_by(ChatLog.request_at.desc(), ChatLog.id.desc())
     page = await paginate(session, stmt, params)
     rows: list[ChatLog] = page["items"]
-    # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。
-    await sealed.open_rows(session, rows, viewer=actor.id)
+    # 个人助理的正文只对所有者本人解密，其他人拿到的是空值。管理命令以所有者身份建的会话
+    # 不是本人在场：同样不解密。
+    cli = via_cli(request)
+    await sealed.open_rows(session, rows, viewer=access_log.NOBODY if cli else actor.id)
     names = await bot_names(session, (r.bot_id for r in rows))
-    return {
-        "code": 0,
-        "data": {
-            **page,
-            "items": [
-                chat_log_out(
-                    r, bot_name=names.get(r.bot_id), withheld=withheld(r, actor, bot_token=token)
-                )
-                for r in rows
-            ],
-        },
+    data = {
+        **page,
+        "items": [
+            chat_log_out(
+                r, bot_name=names.get(r.bot_id), withheld=withheld(r, actor, bot_token=token)
+            )
+            for r in rows
+        ],
     }
+    # 真的为所有者还原了助理的内容才记；管理命令以所有者身份来的没有还原，记一条 system。
+    recorded = (
+        await access_log.record_refused(session, rows, actor.id, "cli.chatlogs")
+        if cli
+        else await access_log.record_opened(session, rows, actor.id, "chatlogs.read")
+    )
+    if recorded:
+        # 与这次读取同一个事务：提交不了，内容也不交出去。
+        await session.commit()
+    return {"code": 0, "data": data}
 
 
 @router.get("/stats")
@@ -378,7 +387,8 @@ async def get_chat_log(
     if row is None:
         # 看不见的记录一律说「不存在」，不泄漏「有这条但你没权限」。
         raise not_found("对话记录不存在")
-    await sealed.open_row(session, row, viewer=actor.id)
+    cli = via_cli(request)
+    await sealed.open_row(session, row, viewer=access_log.NOBODY if cli else actor.id)
     names = await bot_names(session, [row.bot_id])
     data = chat_log_out(
         row,
@@ -387,6 +397,13 @@ async def get_chat_log(
         withheld=withheld(row, actor, bot_token=via_bot_token(request)),
     )
     data["business_tokens"] = await business_tokens(session, row.task_id)
+    recorded = (
+        await access_log.record_refused(session, [row], actor.id, "cli.chatlogs")
+        if cli
+        else await access_log.record_opened(session, [row], actor.id, "chatlogs.read")
+    )
+    if recorded:
+        await session.commit()
     return {"code": 0, "data": data}
 
 

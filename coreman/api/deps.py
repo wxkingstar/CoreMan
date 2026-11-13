@@ -64,6 +64,17 @@ def via_bot_token(request: Request) -> bool:
     return bool(getattr(request.state, "bot_token_authenticated", False))
 
 
+def via_cli(request: Request) -> bool:
+    """本次请求的管理台会话是不是管理命令建的（`coreman … --as 登录名`）。
+
+    管理命令以指定成员的身份建一个真的会话（见 `coreman/admin_cli/client.py`），权限与那位成员
+    一致；但操作的人在服务器上，不是成员本人。只对本人开放的个人内容据此区分：个人助理加密保存
+    的内容对这种会话一律不还原。
+    """
+    login = getattr(request.state, "admin_session", None)
+    return login is not None and login.auth_method == "cli"
+
+
 async def current_user(
     request: Request, response: Response, session: AsyncSession = Depends(get_session)
 ) -> User:

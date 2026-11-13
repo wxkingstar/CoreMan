@@ -47,12 +47,16 @@ ACTIONS = (
     "import.preview",
     "import.notes",
     "export",
-    # 服务器上的管理命令
+    # 服务器上的管理命令：重新包裹数据密钥（不读内容）；以所有者的身份读对话记录、任务详情
+    # （内容不还原，记的是有人试过）
     "cli.rewrap",
     "cli.chatlogs",
     "cli.tasks",
 )
 MAX_TARGET = 64
+# 不等于任何用户的查看者：管理命令以某位成员的身份建的会话拿它去「只对本人还原」，
+# 助理的内容于是一律读不出来（`sealed.open_row(..., viewer=NOBODY)`）。
+NOBODY = uuid.UUID(int=0)
 RETENTION = timedelta(days=180)
 MAX_LIST = 200
 
@@ -140,6 +144,25 @@ async def record_opened(
     )
     for bot_id, count in counts.items():
         await record(session, bot_id, actor_id, action, f"rows={count}")
+    return len(counts)
+
+
+async def record_refused(
+    session: AsyncSession, rows: Iterable[Any], owner_id: uuid.UUID, action: str
+) -> int:
+    """管理命令以所有者的身份来读，内容没有还原（`viewer=NOBODY`）：记下「有人试过」。
+
+    只数所有者是 `owner_id` 的助理行——换成本人在场的会话，这些行本来会被还原。每位助理记一条
+    `system`，不留操作人：敲命令的人在服务器上，不是这位成员本人。别人的助理行对这个身份本来
+    就读不出来，与管理台里的非所有者一样不记。返回记了几位助理（为 0 时调用方不必提交）。
+    """
+    counts: Counter[uuid.UUID] = Counter()
+    for row in rows:
+        bot_id = getattr(row, "bot_id", None) if type(row) in sealed.COLUMNS else None
+        if bot_id is not None and await sealed.owner_of(session, bot_id) == owner_id:
+            counts[bot_id] += 1
+    for bot_id, count in counts.items():
+        await record(session, bot_id, None, action, f"rows={count}", kind="system")
     return len(counts)
 
 

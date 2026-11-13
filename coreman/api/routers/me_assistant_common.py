@@ -8,11 +8,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from fastapi import Depends, Response
+from fastapi import Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
-from coreman.api.deps import get_session
+from coreman.api.deps import current_user, get_session, via_cli
 from coreman.api.errors import ApiError
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.security import verify_csrf
@@ -28,8 +28,20 @@ async def no_store(response: Response) -> None:
     response.headers.update(mcp_rpc.NO_STORE)
 
 
-# 路由级依赖：写操作先过 CSRF；成功的响应都带 no-store。
-DEPENDENCIES = [Depends(verify_csrf), Depends(no_store)]
+async def in_person(request: Request, _actor: User = Depends(current_user)) -> None:
+    """管理命令以某位成员的身份建的会话不是本人在场：整个前缀都不受理。
+
+    否则服务器上的人能以所有者的身份读他的知识库，还能导入置顶页——等于替他给助理写规则。
+    依赖 `current_user`：会话是它认出来并放进 `request.state` 的。
+    """
+    if via_cli(request):
+        raise ApiError(
+            403, 403, "这些接口只对本人在管理台里的登录开放", [{"type": "cli_session_refused"}]
+        )
+
+
+# 路由级依赖：写操作先过 CSRF；成功的响应都带 no-store；管理命令的会话一律拒绝。
+DEPENDENCIES = [Depends(verify_csrf), Depends(no_store), Depends(in_person)]
 
 
 @dataclass(frozen=True)

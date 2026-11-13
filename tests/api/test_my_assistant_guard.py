@@ -29,7 +29,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_as, login_existing
-from tests.api.my_assistant_helpers import URL, as_bot_token, code
+from tests.api.my_assistant_helpers import URL, as_bot_token, as_cli, code
 from tests.api.test_csrf import _api_routes
 from tests.integration.assistant_helpers import SECRET
 from tests.integration.job_helpers import owner_with_key, reloaded, spawned, tasks_of
@@ -265,3 +265,16 @@ async def test_the_owner_stops_their_assistant_once(
     assert (await client.get(URL)).json()["data"]["state"] == "deprovisioning"
     refused = await client.post(f"{URL}/followups/F001/close", json={})
     assert refused.status_code == 409 and code(refused) == "assistant_not_active"
+
+
+async def test_a_cli_session_gets_nothing_even_as_the_owner(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    # 管理命令能以任意成员的身份建会话：那不是本人在场，整个前缀都不受理。
+    seeded = await _seeded(db_session)
+    await as_cli(client, db_session, seeded.owner)
+    for method, template in CASES:
+        response = await _call(client, seeded, method, template)
+        assert response.status_code == 403, (method, template)
+        assert code(response) == "cli_session_refused" and SECRET not in response.text
+    await seeded.intact(db_session)

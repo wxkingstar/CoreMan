@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman import cli
@@ -15,6 +17,7 @@ from coreman.core.assistants import keys
 from coreman.core.config import reset_settings_cache
 from coreman.core.crypto import Cipher, key_id_of
 from coreman.core.db.models import AssistantKey, User
+from tests.integration.assistant_helpers import seed_assistant
 
 OLD = b"\x05" * 32
 NEW = b"\x06" * 32
@@ -38,7 +41,10 @@ async def test_rewrap_moves_keys_to_the_current_master(db_session: AsyncSession)
     await db_session.commit()
     token = (await keys.data_cipher(db_session, old, owners[0].id)).encrypt("机密", "t.c:x")
     rotated = Cipher(NEW, key_id="k2", previous={"k1": OLD})
-    assert await keys.rewrap(db_session, rotated) == (0, 2)
+    touched: list[uuid.UUID] = []
+    assert await keys.rewrap(db_session, rotated, touched=touched) == (0, 2)
+    # 只报真的重新包裹了的那两把；已销毁的不算。
+    assert set(touched) == {owners[0].id, owners[1].id}
     await db_session.commit()
     rows = (await db_session.execute(select(AssistantKey))).scalars().all()
     assert {key_id_of(r.dek_enc) for r in rows if r.dek_enc} == {"k2"}
@@ -59,10 +65,20 @@ async def test_command_only_counts_unless_applied(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    owner = User(login_name="u0", display_name="张三")
-    db_session.add(owner)
-    await db_session.flush()
+    bot, owner = await seed_assistant(db_session)
+    # 下面的 stored_kid 会让会话里的对象过期：之后还要用的编号先取出来。
+    bot_id = bot.id
     await keys.ensure_key(db_session, Cipher(OLD, key_id="k0"), owner.id)
+
+    async def logged() -> list[tuple[Any, ...]]:
+        rows = await db_session.execute(
+            text(
+                "SELECT bot_id, actor_id, actor_kind, action, target"
+                " FROM assistant_access_log ORDER BY id"
+            )
+        )
+        return [tuple(row) for row in rows.all()]
+
     await db_session.commit()
     monkeypatch.setenv("MASTER_KEYS_PREVIOUS", "k0:" + base64.b64encode(OLD).decode())
     reset_settings_cache()
@@ -75,6 +91,10 @@ async def test_command_only_counts_unless_applied(
     assert await cli._assistant_keys_rewrap(False) == 0
     assert json.loads(capsys.readouterr().out) == {"current": 0, "stale": 1}
     assert await stored_kid() == "k0"
+    # 只统计的那一次不落库，也就不留访问记录。
+    assert await logged() == []
     assert await cli._assistant_keys_rewrap(True) == 0
     assert json.loads(capsys.readouterr().out) == {"current": 0, "rewrapped": 1}
     assert await stored_kid() == "k1"
+    # 不看内容的密钥操作，也让所有者在访问记录里看得到。
+    assert await logged() == [(bot_id, None, "system", "cli.rewrap", "")]
