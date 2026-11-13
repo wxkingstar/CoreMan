@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.db.models import Bot, OutboxItem, Task
+from coreman.core.assistants import sealed, settings
+from coreman.core.db.models import AssistantSettings, Bot, OutboxItem, Task, User
+from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from tests.fakes.fake_relay import FakeRelay
+from tests.integration.test_assistant_platform_turn_handler import assistant
 from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import build_ctx
 
@@ -45,3 +50,33 @@ async def last_sent(session: AsyncSession, bot: Bot) -> OutboxItem | None:
         .execution_options(populate_existing=True)
     )
     return found
+
+
+async def working(
+    session: AsyncSession, *, shift: str | None = "on"
+) -> tuple[Bot, User, AssistantSettings]:
+    """冷启动已做完、记下了身份、所在节点可用的助理。
+
+    `shift` 写进 `shift_override`、不带到期时刻：用例不依赖跑的时候是星期几、几点。
+    """
+    bot, owner = await assistant(session)
+    prefs = await settings.get(session, bot.id)
+    prefs.cold_start_started_at = utcnow() - timedelta(days=1)
+    prefs.cold_start_done_at = prefs.cold_start_started_at
+    prefs.cold_start_outcome = "completed"
+    prefs.shift_override = shift
+    await session.commit()
+    return bot, owner, prefs
+
+
+async def tasks_of(session: AsyncSession, bot: Bot, kind: str) -> list[Task]:
+    rows = list(
+        await session.scalars(
+            select(Task)
+            .where(Task.bot_id == bot.id, Task.kind == kind)
+            .order_by(Task.id)
+            .execution_options(populate_existing=True)
+        )
+    )
+    await sealed.open_rows(session, rows)
+    return rows
