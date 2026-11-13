@@ -862,16 +862,23 @@ async def auto_withdraw(
     本地先作废（之后即使被批准也不会执行），再让审批系统撤回。不在这里通知助理：调用方
     （`delivery_checks`）入一条提醒，与别的交回事项合成一轮。调用方提交。
 
+    审批单的行锁不等（`SKIP LOCKED`）：执行、决定、改稿、助理自己撤回都是先锁审批单、再去取
+    所有者的令牌（授权行的锁）；顺带检查在调到这里之前已经以所有者身份读过飞书，加锁顺序
+    正相反。别人正锁着这张单就先不撤，下一次检查再看。
+
     Args:
         code: 原因代码，存进 `error_code`
 
     Returns:
-        被撤回的单（内容已还原）；不存在或已经不是 pending 时返回 None
+        被撤回的单（内容已还原）；不存在、已经不是 pending、或正被别处锁着时返回 None
     """
-    row: AssistantApproval | None = await session.get(
-        AssistantApproval, approval_id, with_for_update=True, populate_existing=True
+    row: AssistantApproval | None = await session.scalar(
+        select(AssistantApproval)
+        .where(AssistantApproval.id == approval_id, AssistantApproval.status == "pending")
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     )
-    if row is None or row.status != "pending":
+    if row is None:
         return None
     row.status, row.decided_at = "withdrawn", utcnow()
     row.error_code = sealed.code_only(code, "withdrawn")

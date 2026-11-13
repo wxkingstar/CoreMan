@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import delivery, followups, sent, settings
 from coreman.core.assistants import delivery_checks as checks
 from coreman.core.assistants.approvals import service
 from coreman.core.db.models import AssistantApproval, AssistantWatch, Bot
+from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.timeutils import utcnow
 from tests.integration.delivery_helpers import boxed, inbox_rows, ready
@@ -332,3 +334,25 @@ async def test_auto_withdraw_only_touches_pending_drafts(db_session: AsyncSessio
     await db_session.commit()
     assert await service.auto_withdraw(db_session, row.id, "owner_replied", cfg=None) is None
     assert await status_of(db_session, row) == ("approved", None)
+
+
+async def test_a_draft_someone_else_is_working_on_is_left_for_the_next_sweep(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """执行、决定、改稿都是先锁审批单、再去取所有者的令牌；顺带检查反过来（先用过令牌、再来
+    锁审批单）。所以这里不等锁：单被别人锁着就先不撤，下一次再看。"""
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    created = now - timedelta(minutes=10)
+    row = await pending(db_session, bot, created)
+    await seen(db_session, bot, owner=ms(created) + 60_000, latest=ms(created) + 60_000)
+    async with make_session_factory(db_engine)() as other:
+        await other.get(AssistantApproval, row.id, with_for_update=True)
+        done = await asyncio.wait_for(check(db_session, bot, Feishu(), now), timeout=5)
+        assert done == 0
+        assert await inbox_rows(db_session, bot) == []
+        await other.rollback()
+    assert await status_of(db_session, row) == ("pending", None)
+    # 锁放开之后的下一次检查照常撤回。
+    assert await check(db_session, bot, Feishu(), now) == 1
+    assert await status_of(db_session, row) == ("withdrawn", "owner_replied")

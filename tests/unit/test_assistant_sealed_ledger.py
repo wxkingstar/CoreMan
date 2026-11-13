@@ -36,8 +36,9 @@ ENTITY_SELECTS = {
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
-    # 审批单：去重与决定是 session.scalar（自动还原）；列表与清理附件显式还原；撤回与过期只改状态
-    "coreman/core/assistants/approvals/service.py": 6,
+    # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表与清理附件显式还原；
+    # 撤回与过期只改状态
+    "coreman/core/assistants/approvals/service.py": 7,
     # 下班编译：被拒与已执行的审批单，显式还原后把摘要写进子任务的交代（密文列）
     "coreman/core/assistants/compiling.py": 1,
     # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
