@@ -36,6 +36,10 @@
 10. **导入。** spec 说管理命令、由所有者本人执行，但管理命令是运维在服务器上跑的。裁定：做成 `/api/me/assistant/import` 上传接口（Markdown 压缩包），所有者本人登录后操作，并写访问日志。
 11. **助理池开关在仍有助理绑定时能否关闭**（spec 标「待定」）：维持现状（能关，绑定的助理暂停），不在这两期处理。
 
+12. **`PLATFORM_TURN_KINDS` 的取法**（2A 计划提出）：`(HANDOVER_KIND, JOB_RESULT_KIND, COMPILE_KIND, SUBTASK_KIND)`；`BOT_HELP_KIND` 跑在目标员工那边，不属于它，留给 3B。没有入站事件的审批结果回合也经 `platform_turns.enqueue` 入队（`platform_turns.ORIGIN_KINDS`）。
+13. **暂停时平台来源的轮次静默失败**（2A 计划提出）：没有入站事件的轮次遇到运行时暂停，不私信，任务记失败（`assistant_paused`）；带入站事件的回合行为不变。
+14. **比 spec 多出的列与上限**（2B、2C 计划提出）：`assistant_pages.size`（正文字节数，算合计上限用）；索引注入上限 16KB；`assistant_followups.closed_at`、`close_code`。spec 的同步随各层最后一个任务做。
+
 ## 层间接口
 
 各层计划必须原样使用这些名字；需要改名时先改本文。
