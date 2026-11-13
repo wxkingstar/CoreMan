@@ -38,6 +38,8 @@ ENTITY_SELECTS = {
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 审批单：去重与决定是 session.scalar（自动还原）；列表与清理附件显式还原；撤回与过期只改状态
     "coreman/core/assistants/approvals/service.py": 6,
+    # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
+    "coreman/core/assistants/delivery.py": 2,
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
@@ -118,6 +120,8 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
+    # 投递：绑定任务号、记已交回、放回、作废，四条都只写元数据
+    "coreman/core/assistants/delivery.py": 4,
     # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
     "coreman/core/assistants/followups.py": 2,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
