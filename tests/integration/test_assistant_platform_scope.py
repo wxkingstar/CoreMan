@@ -10,7 +10,12 @@ from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns
-from coreman.core.assistants.kinds import HANDOVER_KIND, PLATFORM_TURN_KINDS, SUBTASK_KIND
+from coreman.core.assistants.kinds import (
+    APPROVAL_RESULT_KIND,
+    HANDOVER_KIND,
+    PLATFORM_TURN_KINDS,
+    SUBTASK_KIND,
+)
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import Bot, FeishuPersonalGrant, PlatformApp, Task, User, UserIdentity
@@ -121,6 +126,73 @@ async def test_any_broken_condition_refuses(db_session: AsyncSession, change: st
     await db_session.commit()
     with pytest.raises(ValueError):
         await policy.task_scope(db_session, task.id, str(owner.id))
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ("disabled", "platform_turn_required"),
+        ("deprovisioning", "platform_turn_required"),
+        ("other_user", "platform_turn_required"),
+        ("foreign_session", "platform_turn_required"),
+        ("topic_session", "platform_turn_required"),
+        ("no_identity", "platform_turn_required"),
+        ("bootstrap_owner", "personal_permission_revoked"),
+        ("owner_disabled", "personal_permission_revoked"),
+        ("rebound", "personal_grant_required"),
+    ],
+)
+@pytest.mark.parametrize("kind", [HANDOVER_KIND, APPROVAL_RESULT_KIND])
+async def test_each_refusal_names_its_reason(
+    db_session: AsyncSession, change: str, code: str, kind: str
+) -> None:
+    """逐条钉住拒绝的原因；没有入站事件的审批结果回合走的是同一套核对。"""
+    bot, owner, _ = await active_assistant(db_session)
+    await identified(db_session, bot)
+    task = await running(db_session, bot, kind)
+    edit = update(Task).where(Task.id == task.id)
+    if change == "disabled":
+        bot.enabled = False
+    elif change == "deprovisioning":
+        bot.assistant_state = "deprovisioning"
+    elif change == "other_user":
+        # 任务不归所有者：另一位真实存在的成员也不行。
+        other = User(login_name="someone", display_name="别人", source="sync")
+        db_session.add(other)
+        await db_session.flush()
+        await db_session.execute(edit.values(user_id=other.id))
+    elif change == "foreign_session":
+        await db_session.execute(edit.values(session_key="oc_other"))
+    elif change == "topic_session":
+        await db_session.execute(edit.values(session_key="oc_private#topic:1"))
+    elif change == "no_identity":
+        await db_session.execute(text("UPDATE assistant_settings SET chat_id = ''"))
+    elif change == "bootstrap_owner":
+        owner.source = "bootstrap"
+    elif change == "owner_disabled":
+        owner.status = "disabled"
+    else:
+        await db_session.execute(
+            update(UserIdentity)
+            .where(UserIdentity.user_id == owner.id)
+            .values(platform_user_id="someone_else")
+        )
+    await db_session.commit()
+    with pytest.raises(ValueError, match=f"^{code}$"):
+        await policy.task_scope(db_session, task.id, str(owner.id))
+    # MCP 入口走的那一条给出同样的结论。
+    with pytest.raises(ValueError, match=f"^{code}$"):
+        await policy.capability_scope(db_session, task.id, str(owner.id))
+
+
+async def test_a_record_on_another_platform_is_refused(db_session: AsyncSession) -> None:
+    """库里的约束不让助理记录落在别的平台上，这一条是多一层的防护：直接对着函数验，不落库。"""
+    bot, _, task = await ready(db_session)
+    with db_session.no_autoflush:
+        bot.platform = "wecom"
+        with pytest.raises(ValueError, match="^platform_turn_required$"):
+            await platform_turns.scope_for(db_session, bot, task)
+    await db_session.rollback()
 
 
 async def test_a_grant_for_another_identity_is_refused_and_left_alone(
