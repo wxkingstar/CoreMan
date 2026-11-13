@@ -1,4 +1,4 @@
-"""长任务卡片状态行：绝对时间、静默、已知长等待、疑似卡住、中断。"""
+"""长任务卡片状态行：按看的人时区显示的时间、静默、已知长等待、疑似卡住、中断。"""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -12,30 +12,61 @@ from coreman.core.wecom.thinking import ThinkingCollector
 from coreman.runtime.worker import stream_writer
 from coreman.runtime.worker.stream_writer import StreamWriter
 
-# 北京时间 2026-11-11 17:20 = UTC 09:20
+# UTC 2026-11-11 09:20
 START = datetime(2026, 11, 11, 9, 20, tzinfo=UTC)
 
 
-def test_running_line_uses_absolute_beijing_times() -> None:
+def at(moment: datetime, format_type: str = "time") -> str:
+    """飞书按看的人设备时区渲染的时间标签。"""
+    ms = int(moment.timestamp()) * 1000
+    return f"<local_datetime millisecond='{ms}' format_type='{format_type}'></local_datetime>"
+
+
+T0 = at(START)
+
+
+def test_running_line_uses_viewer_local_times() -> None:
     activity = {"at": liveness.iso(START + timedelta(minutes=11)), "label": "运行命令：跑测试"}
     line = liveness.heading(START, activity, START + timedelta(minutes=12))
-    assert line == "⏳ 进行中 · 17:20 开始 · 最后动作 17:31（运行命令：跑测试）"
+    last = at(START + timedelta(minutes=11))
+    assert line == f"⏳ 进行中 · {T0} 开始 · 最后动作 {last}（运行命令：跑测试）"
+    # 不再写死任何时区的钟点。
+    assert "17:20" not in line and "09:20" not in line
 
 
 def test_no_action_yet_only_shows_start() -> None:
-    assert liveness.heading(START, {}, START) == "⏳ 进行中 · 17:20 开始"
+    assert liveness.heading(START, {}, START) == f"⏳ 进行中 · {T0} 开始"
 
 
 def test_quiet_after_threshold() -> None:
     activity = {"at": liveness.iso(START), "label": "思考"}
     now = START + timedelta(seconds=liveness.QUIET_SECONDS)
-    assert liveness.heading(START, activity, now) == "⚠️ 17:20 后没有新动作（思考）"
+    assert liveness.heading(START, activity, now) == f"⚠️ {T0} 后没有新动作（思考）"
     assert liveness.heading(START, activity, now - timedelta(seconds=1)).startswith("⏳")
 
 
-def test_other_day_shows_date() -> None:
+def test_long_ago_shows_date() -> None:
     activity = {"at": liveness.iso(START), "label": "思考"}
-    assert liveness.heading(START, activity, START + timedelta(days=1)).startswith("⚠️ 11-11 17:20")
+    near = liveness.heading(START, activity, START + liveness.DATE_AFTER - timedelta(seconds=1))
+    assert near.startswith(f"⚠️ {T0} 后")
+    far = liveness.heading(START, activity, START + timedelta(days=1))
+    assert far.startswith(f"⚠️ {at(START, 'date_short')} {T0} 后")
+
+
+def test_times_within_a_minute_give_the_same_line() -> None:
+    """截到整分钟：同一分钟里的新事件不让状态行变，不多改卡片。"""
+    now = START + timedelta(minutes=2)
+    first = {"at": liveness.iso(START + timedelta(seconds=5)), "label": "思考"}
+    later = {"at": liveness.iso(START + timedelta(seconds=55)), "label": "思考"}
+    assert liveness.heading(START, first, now) == liveness.heading(START, later, now)
+    assert T0 in liveness.heading(START, first, now)
+
+
+def test_label_is_escaped_for_markdown() -> None:
+    activity = {"at": liveness.iso(START), "label": "运行命令：rm *.log <at id=all></at>"}
+    line = liveness.heading(START, activity, START)
+    assert "<at" not in line and "*" not in line
+    assert "rm &#42;&#46;log &#60;at id&#61;all&#62;&#60;&#47;at&#62;" in line
 
 
 def test_known_long_wait_holds_quiet_until_expected_end() -> None:
@@ -43,11 +74,11 @@ def test_known_long_wait_holds_quiet_until_expected_end() -> None:
     assert line == "**运行命令**：等 GitHub Actions 跑完（通常 5–10 分钟）"
     during = liveness.heading(START, activity, START + timedelta(minutes=9))
     assert during == (
-        "⏳ 进行中 · 17:20 开始 · 最后动作 17:20（运行命令：等 GitHub Actions 跑完）"
-        " · 通常 5–10 分钟 · 预计 17:30 前"
+        f"⏳ 进行中 · {T0} 开始 · 最后动作 {T0}（运行命令：等 GitHub Actions 跑完）"
+        f" · 通常 5–10 分钟 · 预计 {at(START + timedelta(minutes=10))} 前"
     )
     after = liveness.heading(START, activity, START + timedelta(minutes=10))
-    assert after.startswith("⚠️ 17:20 后没有新动作")
+    assert after.startswith(f"⚠️ {T0} 后没有新动作")
 
 
 @pytest.mark.parametrize(
@@ -86,7 +117,7 @@ def test_human_summary_wins_but_command_echo_does_not() -> None:
 def test_stuck_and_interrupted_headings() -> None:
     activity = {"at": liveness.iso(START), "label": "运行命令", "stuck": True}
     assert liveness.heading(START, activity, START + timedelta(minutes=20)) == (
-        "⚠️ 疑似卡住：17:20 后没有任何输出（运行命令）"
+        f"⚠️ 疑似卡住：{T0} 后没有任何输出（运行命令）"
     )
     done = liveness.interrupted_activity(activity, liveness.REASON_RELAY_SILENT)
     assert "stuck" not in done

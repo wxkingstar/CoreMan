@@ -377,7 +377,7 @@ class FeishuTransport:
                 json={
                     "sequence": await self.sequence(row.task_id),
                     "partial_element": json.dumps(
-                        {"header": {"title": {"tag": "plain_text", "content": title}}},
+                        {"header": {"title": {"tag": "markdown", "content": title}}},
                         ensure_ascii=False,
                     ),
                 },
