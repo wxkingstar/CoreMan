@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
@@ -100,6 +101,12 @@ class ChatTaskHandler(
         if resolved is None:
             return None
         intake, relay, parts = resolved
+        if is_assistant(intake.bot):
+            from coreman.runtime.worker.chat import assistant_runtime
+
+            # 个人助理只在能隔离运行的节点上跑：所在运行时不行就不派，私聊告诉所有者。
+            if await assistant_runtime.paused(ctx, intake):
+                return None
         if ctx.task.attempts > 1 and await self._outdated(ctx, intake):
             return None
         if ctx.task.payload.get("origin") == "observe" and await self._observe_yields(ctx, intake):

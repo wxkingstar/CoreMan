@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bus import tasks
 from coreman.core.chat import bot_collaboration as service
 from coreman.core.chat import collaboration_setup as setup
@@ -137,6 +138,12 @@ def tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _refuse_assistant(bot: Bot | None) -> None:
+    """个人助理的内容只属于所有者：求助会把问题发给同事或别的 AI 员工，本期在入口关闭。"""
+    if bot is not None and is_assistant(bot):
+        raise ValueError(unsupported("向同事或其他 AI 员工求助"))
+
+
 async def task_scope(
     session: AsyncSession, task_id: int, actor: str
 ) -> tuple[Task, InboundEvent | None]:
@@ -159,6 +166,7 @@ async def task_scope(
         )
         if user is None or str(user.id) != actor:
             raise ValueError("capability actor mismatch")
+        _refuse_assistant(bot)
         if bot is None or not bot.enabled or bot.platform != "feishu" or user.status != "active":
             raise ValueError("source permission revoked")
         return task, None
@@ -176,6 +184,7 @@ async def task_scope(
     if not speaker.known or speaker.user_id is None or str(speaker.user_id) != actor:
         raise ValueError("capability actor mismatch")
     bot = await session.get(Bot, task.bot_id, populate_existing=True)
+    _refuse_assistant(bot)
     allowed = list(
         await session.scalars(
             select(BotAllowedUser.user_id).where(BotAllowedUser.bot_id == task.bot_id)

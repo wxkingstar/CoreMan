@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from coreman.core.bots import rules_backup
@@ -274,3 +275,40 @@ async def test_run_due_waits_a_day_and_retries_failures_hourly(
 async def test_rejects_malformed_repo(db_engine: AsyncEngine) -> None:
     with pytest.raises(rules_backup.BackupError):
         await rules_backup.run(make_session_factory(db_engine), "not a repo", "t", NOW)
+
+
+async def test_assistants_are_never_read_or_published(db_engine: AsyncEngine, agent) -> None:
+    """共用备份仓库人人可读：个人助理的规则不读、不提交，名字也不进 INDEX.md。"""
+    from tests.integration.assistant_helpers import into_assistant
+
+    await seed(db_engine)
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        owner = await session.scalar(select(User).where(User.login_name == "owner"))
+        relay = await add_node_relay(session, name="assistant-pool")
+        bot = Bot(
+            bot_key="private",
+            name="张三的助理",
+            platform="feishu",
+            created_by=owner.id,
+            relay_server_id=relay.id,
+            model="claude-sonnet-4-6",
+            working_dir="/w/alpha",
+            credentials_enc="unused",
+        )
+        session.add(bot)
+        await session.commit()
+        await into_assistant(session, bot, owner)
+        assistant_id = str(bot.id)
+    github = FakeGitHub({})
+    async with github.client() as http:
+        report = await rules_backup.run(factory, "acme/rules", "secret-token", NOW, http=http)
+    assert "private" not in report["bots"]
+    assert report["inactive"] == 2
+    (tree,) = github.trees
+    paths = {entry["path"] for entry in tree["tree"]}
+    assert not any(path.startswith("bots/private/") for path in paths)
+    index = next(e["content"] for e in tree["tree"] if e["path"] == "INDEX.md")
+    assert "private" not in index and "张三的助理" not in index
+    # 助理的工作目录一次也没被读过。
+    assert all(payload.get("bot_id") != assistant_id for _, payload in agent)

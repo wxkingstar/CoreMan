@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
 from coreman.core.bus import tasks
@@ -201,6 +202,9 @@ class CronRunHandler:
                     or (not resuming and job.expires_at is not None and job.expires_at <= utcnow())
                 ):
                     raise ApiError(403, 403, "job_or_actor_unavailable")
+                if is_assistant(bot):
+                    # 助理不能有定时任务（创建处都拒绝）；万一有，也不派。
+                    raise ApiError(403, 403, "assistant_unsupported")
                 if job.execution_mode == "personal_ai":
                     speaker = await require_personal(session, job, bot, actor)
                 else:
@@ -718,6 +722,7 @@ class CronRunHandler:
                 error_message=detail,
                 result={"cron_run_id": run.id, "status": status},
                 only_active=True,
+                bot_id=task.bot_id,
             )
             bot = await session.get(Bot, task.bot_id)
             actor = await session.get(User, task.user_id) if task.user_id else None

@@ -1086,3 +1086,32 @@ async def test_private_scheduled_run_session_is_owner_only(app, client, db_sessi
     assert (await client.get(url)).status_code == 404
     await login_existing(client, db_session, owner)
     assert (await client.get(url)).status_code == 200
+
+
+async def test_delete_runtime_refuses_while_assistant_directories_wait_for_removal(
+    client, db_session
+):
+    """删实例会连带删掉待删目录的登记：节点上的目录就再也没人删了，所以先拒绝。"""
+    from coreman.core.db.models import AssistantRetiredDir
+
+    _, body, _ = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    relay_id = await db_session.scalar(
+        select(RelayServer.id).where(RelayServer.runtime_node_id == node_id).limit(1)
+    )
+    pending = AssistantRetiredDir(
+        bot_id=uuid.uuid4(), relay_server_id=relay_id, working_dir="/srv/pa/assistant-x"
+    )
+    db_session.add(pending)
+    await db_session.commit()
+    pending_id = pending.id
+    url = f"/api/admin/runtime-nodes/{node_id}"
+    blocked = await client.delete(url)
+    assert blocked.status_code == 409
+    assert blocked.json()["message"] == "还有助理的工作目录等待删除"
+    db_session.expire_all()
+    assert await db_session.get(AssistantRetiredDir, pending_id) is not None
+    assert await db_session.get(RuntimeNode, node_id) is not None
+    await db_session.delete(await db_session.get(AssistantRetiredDir, pending_id))
+    await db_session.commit()
+    assert (await client.delete(url)).status_code == 200

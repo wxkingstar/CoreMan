@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks import SYNTHETIC_PREFIX, aliases
 from coreman.core.api_tasks.tokens import TokenError
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.chat_logs import LIMITS
 from coreman.core.crypto import Cipher
@@ -221,6 +222,12 @@ async def create(
         parts=[TextPart(text=prompt)],
         reply_context={"chat_id": chat_id, "chat_type": chat_type},
     )
+    event = await sealed.seal_values(
+        session,
+        InboundEvent,
+        bot.id,
+        {"payload": message.model_dump(mode="json"), "reply_context": message.reply_context},
+    )
     event_id = await session.scalar(
         insert(InboundEvent)
         .values(
@@ -232,8 +239,8 @@ async def create(
             chat_id=chat_id,
             sender_platform_user_id=pid,
             sender_open_id=None,
-            payload=message.model_dump(mode="json"),
-            reply_context=message.reply_context,
+            payload=event["payload"],
+            reply_context=event["reply_context"],
         )
         .returning(InboundEvent.id)
     )

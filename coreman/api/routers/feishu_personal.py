@@ -18,6 +18,9 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.routers.objects import serve
 from coreman.api.security import verify_csrf
 from coreman.core import personal_schedules as schedules
+from coreman.core.assistants.approvals import tools as assistant_tools
+from coreman.core.assistants.approvals import tower
+from coreman.core.assistants.records import is_assistant
 from coreman.core.db.models import Bot, ChatSession, FeishuPersonalGrant, StoredObject, User
 from coreman.core.feishu_personal import files, policy, service, tools
 
@@ -87,6 +90,9 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         definitions = tools.definitions(
             auth=current and not scope.scheduled, level=level, scopes=granted
         )
+        if is_assistant(scope.bot):
+            # 个人助理：写类工具改为提交审批，另加审批单管理工具。
+            definitions = assistant_tools.definitions(definitions)
         if not scope.scheduled:
             definitions += schedules.definitions()
         result = {} if method == "ping" else {"tools": definitions}
@@ -105,7 +111,18 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
                 value = {"error": "authorization_changed"}
             else:
                 relay = files.FileRelay(request.app.state.settings, cipher)
-                value = await tools.dispatch(session, cipher, scope, name, arguments, relay)
+                if is_assistant(scope.bot):
+                    value = await assistant_tools.dispatch(
+                        session,
+                        cipher,
+                        scope,
+                        name,
+                        arguments,
+                        relay,
+                        tower.config(request.app.state.settings),
+                    )
+                else:
+                    value = await tools.dispatch(session, cipher, scope, name, arguments, relay)
         except service.PersonalError as exc:
             value = exc.payload()
         except Exception:

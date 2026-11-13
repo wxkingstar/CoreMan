@@ -46,6 +46,9 @@ Outcome = Literal[
     "busy_cancel",
     "busy_resume",
     "busy_drop",
+    # 个人助理的开通卡片（没有助理记录时，由 AssistantInbound.on_unprovisioned 处理）。
+    "provision_started",
+    "provision_expired",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -59,19 +62,29 @@ _BUSY_KEYS = frozenset(
 )
 
 
-async def settle(session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage) -> bool:
+async def settle(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    message: InboundMessage,
+    *,
+    single: bool | None = None,
+) -> bool:
     """应答前的判定：不是回复按钮点击或允许入队返回 True；提问人以外的人点击返回 False。
 
     会话类型在这里定下来：按钮 value 里没有它，也不信任回调里的任何说法。
+
+    Args:
+        single: 调用方已经确认过这是不是私聊（个人助理只有私聊）；不给就按私聊记录判断
     """
     meta = clicked(message.reply_context)
     if meta is None or message.kind != "message":
         return True
     if meta.get("requester") != message.sender.platform_user_id:
         return False
-    single = await private_chat_of(
-        session, bot_id, "feishu", message.sender.platform_user_id, message.chat_id
-    )
+    if single is None:
+        single = await private_chat_of(
+            session, bot_id, "feishu", message.sender.platform_user_id, message.chat_id
+        )
     chat_type: Literal["single", "group"] = "single" if single else "group"
     message.chat_type = chat_type
     message.reply_context = {**message.reply_context, "chat_type": chat_type}
@@ -94,11 +107,16 @@ def _busy_click(message: InboundMessage) -> Outcome | None:
 
 
 async def admit(
-    session: AsyncSession, bot: InboundBot, message: InboundMessage, *, lease_generation: int
+    session: AsyncSession,
+    bot: InboundBot,
+    message: InboundMessage,
+    *,
+    lease_generation: int,
+    single: bool | None = None,
 ) -> Outcome | None:
     """应答窗口里的入站落库：回复按钮先判定提问人与会话类型。返回回复按钮点击的结果，
     「上一条还在处理」卡片的点击返回点的是哪个按钮，其余事件返回 None。调用方负责提交。"""
-    if not await settle(session, bot.id, message):
+    if not await settle(session, bot.id, message, single=single):
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):

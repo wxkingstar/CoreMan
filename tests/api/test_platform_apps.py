@@ -1,10 +1,15 @@
+import base64
+import uuid
+
 import httpx
 from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import new_assistant_bot
+from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.crypto import Cipher, is_encrypted
-from coreman.core.db.models import AuditLog, ContactSyncRun, PlatformApp
+from coreman.core.db.models import AuditLog, Bot, ContactSyncRun, PlatformApp, User
 from coreman.core.platforms import wecom
 from tests.api.conftest import MASTER_KEY
 
@@ -204,3 +209,107 @@ async def test_sync_audit_and_run_are_atomic(
         r = await c.post(f"/api/admin/platform-apps/{created['id']}/sync")
     assert r.status_code == 500
     assert (await db_session.execute(select(ContactSyncRun))).scalars().all() == []
+
+
+ASSISTANT_BODY = {
+    "platform": "feishu",
+    "name": "个人助理",
+    "capabilities": ["assistant"],
+    "app_id": "cli_example",
+    "secret": "s3cret-value",
+}
+
+
+async def test_assistant_capability_is_feishu_only(admin_client: httpx.AsyncClient) -> None:
+    bad = {**ASSISTANT_BODY, "platform": "wecom", "corp_id": "ww_example", "app_id": None}
+    assert (await admin_client.post("/api/admin/platform-apps", json=bad)).status_code == 422
+    ok = await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)
+    assert ok.status_code == 201, ok.text
+
+
+async def test_update_syncs_assistant_bots_and_delete_is_blocked(
+    admin_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    created = (await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)).json()[
+        "data"
+    ]
+    app = await db_session.get(PlatformApp, uuid.UUID(created["id"]))
+    assert app is not None
+    owner = User(login_name="zhangsan", display_name="张三")
+    db_session.add(owner)
+    await db_session.flush()
+    bot = new_assistant_bot(
+        owner, app, relay_server_id=None, model="m", working_dir="/w", credentials_enc=""
+    )
+    db_session.add(bot)
+    await db_session.flush()
+    bot_id = bot.id
+    await db_session.commit()
+    r = await admin_client.put(
+        f"/api/admin/platform-apps/{created['id']}",
+        json={**ASSISTANT_BODY, "secret": "rotated-value"},
+        headers={"If-Match": '"1"'},
+    )
+    assert r.status_code == 200, r.text
+    db_session.expire_all()
+    fresh = await db_session.get(Bot, bot_id)
+    assert fresh is not None
+    cipher = Cipher(base64.b64decode(MASTER_KEY))
+    assert decrypt_json(cipher, fresh.credentials_enc, CREDENTIALS_AAD) == {
+        "app_id": "cli_example",
+        "app_secret": "rotated-value",
+    }
+    assert (
+        await admin_client.delete(f"/api/admin/platform-apps/{created['id']}")
+    ).status_code == 409
+
+
+async def _standard_bot_on(db_session: AsyncSession, app_id: str) -> None:
+    from coreman.core.bots.secrets import encrypt_json
+
+    creator = User(login_name="lisi", display_name="李四")
+    db_session.add(creator)
+    await db_session.flush()
+    cipher = Cipher(base64.b64decode(MASTER_KEY))
+    db_session.add(
+        Bot(
+            bot_key="demo-bot",
+            platform="feishu",
+            name="demo-bot",
+            created_by=creator.id,
+            model="m",
+            working_dir="/d",
+            credentials_enc=encrypt_json(
+                cipher, {"app_id": app_id, "app_secret": "x"}, CREDENTIALS_AAD
+            ),
+        )
+    )
+    await db_session.commit()
+
+
+async def test_app_used_by_a_standard_bot_cannot_become_an_assistant_app(
+    admin_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await _standard_bot_on(db_session, "cli_example")
+    r = await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)
+    assert r.status_code == 409, r.text
+    # 没有个人助理能力的应用照常可以登记同一个 app_id。
+    plain = {**ASSISTANT_BODY, "capabilities": ["login"]}
+    created = await admin_client.post("/api/admin/platform-apps", json=plain)
+    assert created.status_code == 201, created.text
+    # 改成个人助理应用同样拒绝。
+    upd = await admin_client.put(
+        f"/api/admin/platform-apps/{created.json()['data']['id']}",
+        json={**plain, "capabilities": ["login", "assistant"]},
+        headers={"If-Match": '"1"'},
+    )
+    assert upd.status_code == 409, upd.text
+    assert (await db_session.scalar(select(PlatformApp.capabilities))) == ["login"]
+
+
+async def test_assistant_app_on_an_unused_app_id_is_accepted(
+    admin_client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    await _standard_bot_on(db_session, "cli_other")
+    r = await admin_client.post("/api/admin/platform-apps", json=ASSISTANT_BODY)
+    assert r.status_code == 201, r.text

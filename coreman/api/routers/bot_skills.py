@@ -17,6 +17,7 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, mask_dict
@@ -185,6 +186,8 @@ async def install(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bot = await admin_bot(session, bot_id, actor)
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported(installs.ASSISTANT_FEATURE))
     # 共享锁与目录删除的行锁互斥：删除与新申请并发时只有一个成功。
     skill = await session.get(Skill, skill_id, with_for_update={"read": True})
     if skill is None or skill.deleted_at is not None:
@@ -402,6 +405,9 @@ async def mcp_target(
 ) -> tuple[Bot, Skill, RelayServer, dict[str, str]]:
     """授权的对象：已安装、需要 OAuth 的 MCP 技能，以及员工当前的运行时实例。"""
     bot = await admin_bot(session, bot_id, actor, lock=False)
+    # CLI 以守护进程用户在员工工作目录里登录，在沙箱外：助理不开放。
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("MCP 技能授权"))
     row = await session.get(BotSkill, (bot_id, skill_id))
     skill = await session.get(Skill, skill_id)
     if row is None or skill is None:

@@ -8,6 +8,8 @@
 维护），以及停用、未分配运行时、工作目录不在就绪状态的员工。读取失败（节点离线等）的员工保留仓库里上一次的内容，下一轮再试；
 已删除员工的目录也原样保留。提交前把常见格式的令牌、私钥与 `password: ...` 一类赋值
 替换成 [REDACTED]。
+
+个人助理一概不读、不提交：规则只属于本人，备份仓库是共用的。
 """
 
 from __future__ import annotations
@@ -270,6 +272,8 @@ async def run(
             await session.execute(
                 select(Bot, RelayServer)
                 .outerjoin(RelayServer, RelayServer.id == Bot.relay_server_id)
+                # 备份仓库是共用的：个人助理的规则一概不读、不提交，名字也不进索引。
+                .where(Bot.kind == "standard")
                 .order_by(Bot.bot_key)
             )
         ).all()

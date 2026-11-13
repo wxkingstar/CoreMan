@@ -25,6 +25,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import OutboxItem
 from coreman.core.logging import get_logger
@@ -70,13 +71,18 @@ RETURNING id
 )
 _RELEASED_SQL = text(
     f"""
-SELECT f.dedupe_key, count(q.id) FROM outbox f
+SELECT f.dedupe_key, count(q.id), f.bot_id FROM outbox f
 LEFT JOIN outbox q ON q.bot_id=f.bot_id AND q.status IN ('pending','sending')
   AND q.id>f.id AND {_group_sql("q")} = {_group_sql("f")}
 WHERE f.id=:id AND {_group_sql("f")} IS NOT NULL
-GROUP BY f.dedupe_key
+GROUP BY f.dedupe_key, f.bot_id
 """
 )
+
+
+def _error(error: str) -> Any:
+    """`last_error` 的值：不加密（运维接口与投递逻辑直接读），个人助理的行只留开头的代码。"""
+    return sealed.code_for_assistants(OutboxItem.bot_id, error[:2000])
 
 
 def public_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -110,6 +116,7 @@ async def add(
     }
     if not_before is not None:
         values["not_before"] = not_before
+    values = await sealed.seal_values(session, OutboxItem, bot_id, values)
     stmt = (
         insert(OutboxItem)
         .values(**values)
@@ -152,7 +159,7 @@ async def _retry_or_fail(
     if only_sending and item.status != "sending":
         return None
     attempts = item.attempts + 1
-    values: dict[str, Any] = {"attempts": attempts, "last_error": error[:2000]}
+    values: dict[str, Any] = {"attempts": attempts, "last_error": _error(error)}
     if attempts < MAX_ATTEMPTS:
         status = "pending"
         delay = BACKOFF_SECONDS[min(attempts - 1, len(BACKOFF_SECONDS) - 1)]
@@ -193,7 +200,7 @@ async def fail(session: AsyncSession, item_id: int, error: str) -> None:
         await session.execute(
             update(OutboxItem)
             .where(OutboxItem.id == item_id, OutboxItem.status.in_(("pending", "sending")))
-            .values(status="failed", attempts=OutboxItem.attempts + 1, last_error=error[:2000])
+            .values(status="failed", attempts=OutboxItem.attempts + 1, last_error=_error(error))
             .returning(OutboxItem.id)
         )
     ).first()
@@ -208,6 +215,10 @@ async def _note_permanent_failure(session: AsyncSession, item_id: int, error: st
     if row is None or not row[1]:
         return
     dedupe_key, released = str(row[0]), int(row[1])
+    detail: dict[str, Any] = {"error": error[:200]}
+    if row[2] is not None and await sealed.owner_of(session, row[2]) is not None:
+        # 报错原文可能带出消息片段：个人助理的只记开头的代码与长度（同 last_error）。
+        detail = {"error": sealed.code_only(error), "error_length": len(error)}
     after_commit(
         session,
         lambda: log.warning(
@@ -215,7 +226,7 @@ async def _note_permanent_failure(session: AsyncSession, item_id: int, error: st
             outbox_id=item_id,
             dedupe_key=dedupe_key,
             released=released,
-            error=error[:200],
+            **detail,
         ),
     )
 
@@ -236,7 +247,7 @@ async def rejected(
     if item is None or item.status != "sent":
         return None
     attempts = item.attempts + 1
-    values: dict[str, Any] = {"attempts": attempts, "last_error": error[:2000], "sent_at": None}
+    values: dict[str, Any] = {"attempts": attempts, "last_error": _error(error), "sent_at": None}
     if retry_after is not None and attempts < MAX_ATTEMPTS:
         values["status"] = "pending"
         values["not_before"] = func.now() + timedelta(seconds=max(retry_after, 0.0))
@@ -272,7 +283,7 @@ async def mark_skipped(session: AsyncSession, item_id: int, reason: str) -> None
     await session.execute(
         update(OutboxItem)
         .where(OutboxItem.id == item_id)
-        .values(status="skipped", last_error=reason[:2000])
+        .values(status="skipped", last_error=_error(reason))
     )
 
 

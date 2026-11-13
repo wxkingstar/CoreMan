@@ -181,6 +181,9 @@ def atomic_write(path: Path, content: str, *, durable: bool = False) -> None:
 
 
 class Agent:
+    # 是否跑遍历所有工作目录的定时任务；助理专用实例关掉（见 daemon.RuntimeAgent）。
+    workspace_jobs = True
+
     def __init__(
         self,
         *,
@@ -1242,12 +1245,16 @@ class Agent:
                 if self.provider == "codex" and now - last_quota >= 3600:
                     self.start_background("probe-rate-limits", self.probe_rate_limits)
                     last_quota = now
-                if os.environ.get("COREMAN_MEMORY_SYNC", "1") == "1" and now - last_memory >= 3600:
+                if (
+                    self.workspace_jobs
+                    and os.environ.get("COREMAN_MEMORY_SYNC", "1") == "1"
+                    and now - last_memory >= 3600
+                ):
                     self.start_background(
                         "collect-memory", lambda: self.dispatch({"type": "collect-memory"})
                     )
                     last_memory = now
-                if now - last_worktrees >= 1800:
+                if self.workspace_jobs and now - last_worktrees >= 1800:
                     self.start_background("refresh-worktrees", self.refresh_worktrees)
                     last_worktrees = now
                 recent_model = getattr(self, "last_model_check", 0)

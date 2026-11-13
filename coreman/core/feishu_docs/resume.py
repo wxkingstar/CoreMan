@@ -10,6 +10,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, FeishuAuthWait, FeishuPersonalGrant, Task
@@ -60,6 +61,8 @@ async def _poll(
 
 async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
     """替等待中的提问人查授权结果；已连接且档位够的续接原来那一轮。返回续接的条数。"""
+    # 一批里是各个机器人的等待：一条来源任务解不开，不能让整批回滚、每轮都卡在这里。
+    sealed.tolerate_undecryptable(session)
     expired = await session.scalars(
         select(FeishuAuthWait)
         .where(FeishuAuthWait.status.in_(("offered", "waiting")), FeishuAuthWait.expires_at <= now)
@@ -83,6 +86,8 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
         if (
             origin is None
             or origin.inbound_event_id is None
+            # 来源那一轮的内容读不出来，续接不了。
+            or sealed.is_locked(origin)
             # 用户已经叫停的那一轮，授权完成也不再接着做。
             or origin.cancel_requested_at
             or origin.status == "cancelled"

@@ -60,6 +60,10 @@ OBSERVE_SCOPES: tuple[str, ...] = ("im:message.group_msg.include_bot:read",)
 # 读改企业内其他应用的可用范围，所以只在管理员要在 CoreMan 管可用范围时按需申请，不进默认清单。
 VISIBILITY_SCOPES: tuple[str, ...] = ("admin:app.info:readonly", "admin:app.visibility")
 
+# 个人助理应用：只接私聊，被拉进群时把自己移出去。只有带 assistant 能力的应用需要，
+# 不进默认清单，普通机器人不申请。
+ASSISTANT_SCOPES: tuple[str, ...] = ("im:chat.members:write_only",)
+
 # 机器人之间求助：收到其他机器人 @ 自己的消息、确认双方都在当前群（已含在 TENANT_SCOPES）。
 COLLABORATION_SCOPES: tuple[str, ...] = (
     "im:message.group_at_msg.include_bot:readonly",

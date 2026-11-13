@@ -2,6 +2,9 @@
 
 租约规则（认领、排空、孤儿回收）在 `gateway_common.lease_loop.LeaseCoordinator`；这里只管
 子进程：认领到租约就拉起，凭证或代次变了就重启，崩溃了按 5→60 秒退避重启，释放租约前先停掉。
+
+个人助理应用另走一个租约扫描器（`app_leases`）：一个应用一个子进程，键是 platform_apps.id；
+助理记录自己没有租约，也不各自起子进程。
 """
 
 from __future__ import annotations
@@ -15,14 +18,16 @@ import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman import __version__
-from coreman.core.bus import instances, leases
+from coreman.core.assistants.apps import connection_fingerprint, is_assistant_app
+from coreman.core.bus import app_leases, instances, leases
 from coreman.core.config import get_settings
-from coreman.core.db.models import Bot, BotLease
+from coreman.core.db.models import Bot, BotLease, PlatformApp
 from coreman.core.db.session import make_engine, make_session_factory
 from coreman.runtime.base import HEALTH_PORTS, Service
 from coreman.runtime.gateway_common import drain as drain_pacing
@@ -44,6 +49,13 @@ def run_child_process(bot_id: uuid.UUID, instance_id: str, generation: int) -> N
     from coreman.runtime.gateway_feishu.child import run_process
 
     run_process(bot_id, instance_id, generation)
+
+
+def run_app_process(app_id: uuid.UUID, instance_id: str, generation: int) -> None:
+    """个人助理应用连接的子进程入口；同样只在子进程里导入 SDK。"""
+    from coreman.runtime.gateway_feishu.app_child import run_process
+
+    run_process(app_id, instance_id, generation)
 
 
 class ForkedProcess:
@@ -94,10 +106,65 @@ class Child:
     next_start: float = 0
     delay: float = 5
     started_at: float = 0
+    # bot：一个机器人一条连接；app：一个个人助理应用一条连接（键是 platform_apps.id）。
+    kind: str = "bot"
 
 
 def _fingerprint(bot: Bot) -> str:
     return hashlib.sha256(bot.credentials_enc.encode()).hexdigest()
+
+
+class _AppLeaseHooks:
+    """个人助理应用的租约钩子：参数里的 `app_id` 是 platform_apps.id。
+
+    子进程的拉起、退避重启、停止都复用 supervisor 的那一套，只是进程入口与租约表不同。
+    """
+
+    def __init__(self, service: GatewayFeishuService) -> None:
+        self.service = service
+
+    def lease_connected(self) -> Collection[uuid.UUID]:
+        return [key for key, child in self.service.children.items() if child.kind == "app"]
+
+    async def lease_connect(self, app_id: uuid.UUID, generation: int) -> bool:
+        service = self.service
+        async with service.factory() as session:
+            app = await session.get(PlatformApp, app_id)
+        if app is None or not is_assistant_app(app):
+            return False
+        if app_id in service.children:
+            await service.stop_child(app_id, release=False)
+        child = Child(generation, connection_fingerprint(service.cipher, app), kind="app")
+        service.children[app_id] = child
+        await service._supervise(app_id, child)
+        return True
+
+    async def lease_orphaned(self, app_id: uuid.UUID) -> None:
+        await self.service.stop_child(app_id, release=False)
+
+    async def lease_drain(self, app_id: uuid.UUID) -> None:
+        await self.service.stop_child(app_id)
+
+    async def lease_maintain(self, held: list[Any]) -> None:
+        service = self.service
+        async with service.factory() as session:
+            apps = {
+                app.id: app
+                for app in await session.scalars(
+                    select(PlatformApp).where(PlatformApp.id.in_([lease.key for lease in held]))
+                )
+            }
+        for lease in held:
+            app = apps.get(lease.key)
+            child = service.children.get(lease.key)
+            if app is None or child is None:
+                continue
+            fingerprint = connection_fingerprint(service.cipher, app)
+            if child.fingerprint != fingerprint or child.generation != lease.generation:
+                await service.stop_child(app.id, release=False)
+                child = Child(int(lease.generation), fingerprint, kind="app")
+                service.children[app.id] = child
+            await service._supervise(app.id, child)
 
 
 class GatewayFeishuService(Service):
@@ -115,6 +182,17 @@ class GatewayFeishuService(Service):
             hooks=self,
             heartbeat=False,
         )
+        # 只用来算助理应用的连接指纹（比较解密后的密钥）。
+        self.cipher = get_settings().build_cipher()
+        # 个人助理应用：一个应用一条连接，租约在 app_leases。
+        self.app_lease_loop = LeaseCoordinator(
+            platform="feishu",
+            instance_id=lambda: self.instance_id,
+            factory=self.factory,
+            hooks=_AppLeaseHooks(self),
+            heartbeat=False,
+            store=app_leases,
+        )
         self.ready = False
         self._jobs: list[asyncio.Task[None]] = []
 
@@ -125,6 +203,7 @@ class GatewayFeishuService(Service):
     @draining.setter
     def draining(self, value: bool) -> None:
         self.lease_loop.draining = value
+        self.app_lease_loop.draining = value
 
     async def on_start(self) -> None:
         try:
@@ -158,6 +237,14 @@ class GatewayFeishuService(Service):
                         session, self.instance_id, running=len(self.children)
                     )
                     await session.commit()
+                # 助理应用的租约另起事务：它出错（表还没迁移出来、锁等待）不能把普通机器人的
+                # 租约心跳一起回滚，否则半分钟后普通机器人的租约过期、出站停摆。
+                try:
+                    async with self.factory() as session:
+                        await app_leases.heartbeat(session, self.instance_id)
+                        await session.commit()
+                except Exception as exc:
+                    self._log.error("app_lease_heartbeat_failed", error=type(exc).__name__)
                 if drain and not self.draining:
                     self.draining = True
                     self.request_stop("drained")
@@ -175,7 +262,7 @@ class GatewayFeishuService(Service):
 
     async def spawn(self, bot_id: uuid.UUID, child: Child) -> ForkedProcess:
         process = FORKSERVER.Process(
-            target=run_child_process,
+            target=run_app_process if child.kind == "app" else run_child_process,
             args=(bot_id, self.instance_id, child.generation),
             daemon=True,
         )
@@ -193,17 +280,20 @@ class GatewayFeishuService(Service):
         return ForkedProcess(process)
 
     async def reconcile(self) -> None:
-        await self.lease_loop.round()
+        try:
+            await self.lease_loop.round()
+        finally:
+            await self.app_lease_loop.round()
 
     # ---- 租约钩子 ---------------------------------------------------------
 
     def lease_connected(self) -> Collection[uuid.UUID]:
-        return self.children.keys()
+        return [key for key, child in self.children.items() if child.kind == "bot"]
 
     async def lease_connect(self, bot_id: uuid.UUID, generation: int) -> bool:
         async with self.factory() as session:
             bot = await session.get(Bot, bot_id)
-        if bot is None or not bot.enabled:
+        if bot is None or not bot.enabled or bot.kind != "standard":
             return False
         if bot_id in self.children:
             # 上一代的子进程还在（释放与再认领落在同一轮）：先停掉，新旧两代不能同时连着。
@@ -250,9 +340,8 @@ class GatewayFeishuService(Service):
             child.delay = min(60, child.delay * 2)
             self._log.warning("feishu_child_exited", bot_id=str(bot_id), retry_seconds=child.delay)
             async with self.factory() as session:
-                await leases.set_state(
-                    session, bot_id, "disconnected", instance_id=self.instance_id
-                )
+                store = app_leases if child.kind == "app" else leases
+                await store.set_state(session, bot_id, "disconnected", instance_id=self.instance_id)
                 await session.commit()
         if child.process is None and now >= child.next_start:
             try:
@@ -279,7 +368,8 @@ class GatewayFeishuService(Service):
                 await child.process.wait()
         self.children.pop(bot_id, None)
         if release:
-            await self.lease_loop.release(bot_id, child.generation)
+            loop = self.app_lease_loop if child.kind == "app" else self.lease_loop
+            await loop.release(bot_id, child.generation)
 
     async def on_shutdown(self) -> None:
         self.ready, self.draining = False, True

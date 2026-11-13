@@ -132,7 +132,9 @@ class RelaySwitchHandler:
             if p.get("state_id"):
                 # 这轮卡片到此为止：状态留着只会让用户再点一次旧卡又排一个切换任务。
                 await interactions.remove(session, uuid.UUID(str(p["state_id"])))
-            await tasks.finish(session, ctx.task.id, status="succeeded", result=outcome)
+            await tasks.finish(
+                session, ctx.task.id, status="succeeded", result=outcome, bot_id=ctx.task.bot_id
+            )
             await session.commit()
 
     async def _actor(

@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import is_manager
 from coreman.core.bots.secrets import decrypt_json, encrypt_json
@@ -43,6 +44,7 @@ CANCELLED = "安装已取消；远端操作可能已执行，请检查实例状�
 # 安装前后校验失败的错误码 → 用户可见原因。
 REASONS = {
     "installation_no_longer_active": "安装任务已取消或已结束",
+    "installation_assistant_unsupported": unsupported(installs.ASSISTANT_FEATURE),
     "installation_configuration_changed": "技能已停用或修改，或安装记录已变化",
     "installation_target_changed": "技能来源、机器人所属实例或工作目录在提交后发生了变化",
     "installation_permission_revoked": "提交人已不是该机器人的管理员，或执行人账号已停用",
@@ -109,6 +111,9 @@ async def checked(
     task = await session.scalar(select(Task).where(Task.id == ctx.task.id).with_for_update())
     if bot is None or task is None or task.status not in tasks.ACTIVE or task.cancel_requested_at:
         raise ValueError("installation_no_longer_active")
+    # 入口和排队都拒绝助理；别的路径插进来的任务在这里拦下，不向节点下发。
+    if is_assistant(bot):
+        raise ValueError("installation_assistant_unsupported")
     skill = await session.get(Skill, uuid.UUID(task.payload["skill_id"]))
     row = await session.get(BotSkill, (bot.id, skill.id)) if skill else None
     inputs = json.loads(ctx.cipher.decrypt(task.payload["inputs_enc"], installs.INPUTS_AAD))
@@ -328,6 +333,7 @@ class SkillInstallHandler:
                 status="succeeded",
                 only_active=True,
                 result={"skill_id": str(skill.id)},
+                bot_id=ctx.task.bot_id,
             )
             await session.commit()
 
@@ -344,6 +350,7 @@ class SkillInstallHandler:
                 only_active=True,
                 error_code="skill_install_incomplete",
                 error_message=reason,
+                bot_id=ctx.task.bot_id,
             )
             if row and row.install_task_id == ctx.task.id:
                 row.status, row.install_task_id = "failed", None

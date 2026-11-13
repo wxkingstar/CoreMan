@@ -21,8 +21,20 @@ from coreman.core.db.models.api_tasks import (
     BotConversationAlias,
     PersonalAccessToken,
 )
+from coreman.core.db.models.assistants import (
+    APPROVAL_CHANNELS,
+    APPROVAL_STATUSES,
+    ASSISTANT_STATES,
+    AssistantApproval,
+    AssistantKey,
+    AssistantLifecycle,
+    AssistantMark,
+    AssistantRetiredDir,
+    AssistantTranscript,
+)
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
+    BOT_KINDS,
     EFFORT_LEVELS,
     Bot,
     BotAllowedUser,
@@ -37,6 +49,7 @@ from coreman.core.db.models.bus import (
     TASK_KINDS,
     TASK_LANES,
     TASK_STATUSES,
+    AppLease,
     BotLease,
     ChatSession,
     InboundEvent,
@@ -164,6 +177,7 @@ __all__ = [
     "JwtKey",
     "ANNOUNCEMENT_SCOPES",
     "BOT_KEY_RE",
+    "BOT_KINDS",
     "CAPABILITIES",
     "CHAT_LOG_RUNNING",
     "CHAT_LOG_STATUSES",
@@ -186,6 +200,7 @@ __all__ = [
     "BotAlertSource",
     "BotAlertState",
     "Announcement",
+    "AppLease",
     "AuditLog",
     "AuthNonce",
     "Bot",
@@ -269,3 +284,15 @@ __all__ += [
 __all__ += ["API_TASK_TARGETS", "ApiTask", "BotConversationAlias", "PersonalAccessToken"]
 
 __all__ += ["FeishuAuthWait", "FeishuGroupAction"]
+
+__all__ += [
+    "APPROVAL_CHANNELS",
+    "APPROVAL_STATUSES",
+    "AssistantApproval",
+    "AssistantKey",
+    "AssistantMark",
+    "AssistantTranscript",
+    "ASSISTANT_STATES",
+    "AssistantLifecycle",
+    "AssistantRetiredDir",
+]

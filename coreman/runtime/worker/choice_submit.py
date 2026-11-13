@@ -88,7 +88,11 @@ class ChoiceSubmitHandler(ChatTaskHandler):
                 )
             ctx.log.info("submit_duplicate", state_id=str(st.id), status=st.status)
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"submit": "duplicate"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"submit": "duplicate"},
+                bot_id=ctx.task.bot_id,
             )
             return None
         context = dict(st.state.get("context") or {})
@@ -109,7 +113,11 @@ class ChoiceSubmitHandler(ChatTaskHandler):
                 msg("choice_config_changed", ctx.locale),
             )
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"submit": "config_changed"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"submit": "config_changed"},
+                bot_id=ctx.task.bot_id,
             )
             return None
         self._snapshots[ctx.task.id] = _Snapshot(st.id, context)

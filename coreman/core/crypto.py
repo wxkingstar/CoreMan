@@ -104,6 +104,35 @@ class Cipher:
         """解 `seal` 的输出。没有密钥标识，所以只用主密钥。"""
         return self._open(self._aead, raw, aad)
 
+    def encrypt_bytes(self, data: bytes, aad: str) -> bytes:
+        """二进制内容的密文：`enc:v2:<kid>:` 加上 nonce|ciphertext|tag，不再套一层 base64。"""
+        nonce = os.urandom(_NONCE_LEN)
+        ciphertext = self._aead.encrypt(nonce, data, aad.encode("utf-8"))
+        # 一次拼出整段输出：大块内容（转录可到几十 MB）不再多复制一遍。
+        return b"".join((f"{PREFIX_V2}{self._key_id}:".encode("ascii"), nonce, ciphertext))
+
+    def decrypt_bytes(self, token: bytes, aad: str) -> bytes:
+        """解 `encrypt_bytes` 的输出；按密文里的密钥标识选密钥。"""
+        prefix = PREFIX_V2.encode("ascii")
+        if not token.startswith(prefix):
+            raise DecryptError("不是 enc:v2 二进制密文")
+        # 只切出短的密钥标识；正文用 memoryview 引用，不整段复制。
+        colon = token.find(b":", len(prefix))
+        kid = token[len(prefix) : colon if colon >= 0 else len(token)]
+        name = kid.decode("ascii", errors="replace")
+        if colon < 0 or not KID_RE.match(name):
+            raise DecryptError("enc:v2 密文缺少密钥标识")
+        aead = self._keys.get(name)
+        if aead is None:
+            raise DecryptError(f"未配置密钥标识 {name} 对应的密钥")
+        raw = memoryview(token)[colon + 1 :]
+        if len(raw) < _NONCE_LEN + _TAG_LEN:
+            raise DecryptError("密文过短")
+        try:
+            return aead.decrypt(bytes(raw[:_NONCE_LEN]), raw[_NONCE_LEN:], aad.encode("utf-8"))
+        except InvalidTag as exc:
+            raise DecryptError("密钥或 AAD 不匹配") from exc
+
     def encrypt(self, plaintext: str, aad: str) -> str:
         return f"{PREFIX_V2}{self._key_id}:" + base64.b64encode(self.seal(plaintext, aad)).decode(
             "ascii"

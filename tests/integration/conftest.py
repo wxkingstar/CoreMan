@@ -12,7 +12,9 @@ from collections.abc import Iterator
 
 import pytest
 
+from coreman.core.assistants import keys, sealed
 from coreman.core.config import reset_settings_cache
+from coreman.core.crypto import Cipher
 from tests.integration.worker_helpers import MASTER
 
 
@@ -25,3 +27,15 @@ def runtime_settings(migrated_database: str, monkeypatch: pytest.MonkeyPatch) ->
     reset_settings_cache()
     yield
     reset_settings_cache()
+
+
+@pytest.fixture
+def assistant_master() -> Iterator[None]:
+    """加密存储用例的平台主密钥，并清掉进程内的密钥与所有者缓存。"""
+    sealed.use_master(Cipher(MASTER))
+    keys.forget()
+    sealed.forget()
+    yield
+    sealed.use_master(None)
+    keys.forget()
+    sealed.forget()

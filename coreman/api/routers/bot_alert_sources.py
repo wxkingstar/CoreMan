@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.bots.permissions import is_manager
 from coreman.core.db.models import Bot, BotAlertSource, User
@@ -56,6 +57,8 @@ async def _require(session: AsyncSession, bot_id: uuid.UUID, actor: User) -> Bot
     bot = await session.get(Bot, bot_id)
     if bot is None:
         raise not_found("机器人不存在")
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("告警来源"))
     if bot.platform != "feishu":
         raise ApiError(422, 422, "告警来源只支持飞书机器人")
     return bot

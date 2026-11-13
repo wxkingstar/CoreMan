@@ -73,6 +73,8 @@ TOASTS: dict[str, dict[str, str]] = {
     "busy_cancel": {"type": "info", "content": "正在放弃这条…"},
     "busy_resume": {"type": "success", "content": "好的，继续处理"},
     "busy_drop": {"type": "info", "content": "好的，不处理了"},
+    "provision_started": {"type": "success", "content": "正在开通，好了会在这里告诉你"},
+    "provision_expired": {"type": "warning", "content": "这张卡片已失效，给我发条消息会收到新的"},
 }
 DEFAULT_TOAST = {"type": "info", "content": "✓"}
 

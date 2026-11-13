@@ -20,6 +20,7 @@ from coreman.core.db.models import RelayServer
 from coreman.core.relay.sse import SseEvent, SseParser
 from coreman.core.runtime_nodes.transport import (
     NODE_ERRORS,
+    SANDBOX_EXTENSION,
     TOTAL_TIMEOUT_EXTENSION,
     ReverseTransport,
     RuntimeQueueTimeout,
@@ -30,6 +31,13 @@ _AUTH_MARKERS = ("not logged in", "/login", "401")
 
 class RelayError(Exception):
     """访问 relay 接口失败。"""
+
+
+class UnsandboxedPoolRequest(RelayError):
+    """发往个人助理池运行时的对话请求没有带沙箱标记：池里不承载普通员工，这一定是调用方的错。"""
+
+    def __init__(self) -> None:
+        super().__init__("unsandboxed_pool_request")
 
 
 class IncompleteResultError(RelayError):
@@ -85,6 +93,14 @@ class ChatRequest:
     # 飞书话题继承群主会话的首轮：本会话还不存在时，驱动从这个会话分叉出来；分叉不了时
     # 用 resume_fallback 开新会话。
     fork_session_id: str = ""
+    # 个人助理的一轮：节点在沙箱里跑，`transcript` 是转录的交接（core/assistants/transcripts.py）。
+    sandbox: bool = False
+    transcript: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # 沙箱与转录交接成对出现：只有一个，说明调用方拼错了。
+        if self.sandbox != (self.transcript is not None):
+            raise ValueError("sandbox and transcript must be set together")
 
     def user_message(self) -> str | list[dict[str, Any]]:
         """本轮块在前、用户原文在后；含媒体时本轮块作为第一个 text part。"""
@@ -99,7 +115,8 @@ class ChatRequest:
 
         `max_turns` 仅 claude backend 携带；`effort`、`env_vars`、`resume_fallback`、
         `fork_session_id` 非空才带，
-        `worktree` 为真才带；`session_id` 原样透传（cron 与体检传空字符串）。
+        `worktree`、`sandbox` 为真才带（后者连同 `transcript`）；`session_id` 原样透传（cron 与
+        体检传空字符串）。
         """
         body: dict[str, Any] = {
             "model": self.model,
@@ -124,6 +141,9 @@ class ChatRequest:
             body["env_vars"] = dict(self.env_vars)
         if self.worktree:
             body["worktree"] = True
+        if self.sandbox:
+            body["sandbox"] = True
+            body["transcript"] = dict(self.transcript or {})
         return body
 
 
@@ -140,6 +160,7 @@ class RelayClient:
         http: httpx.AsyncClient | None = None,
         timeout: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        assistant_pool: bool = False,
     ) -> None:
         """初始化客户端。
 
@@ -148,6 +169,7 @@ class RelayClient:
             http: 自定义 httpx.AsyncClient（外部注入的不由本类关闭）
             timeout: 默认客户端各阶段超时秒数
             transport: 自建客户端使用的传输层；运行时实例请用 `RelayClient.for_relay`
+            assistant_pool: 目标是助理池实例：不带沙箱标记的对话请求一律拒绝
 
         Raises:
             ValueError: http 与 transport 都没给——不再按地址猜测传输方式
@@ -158,6 +180,7 @@ class RelayClient:
             base_url=base_url, timeout=httpx.Timeout(timeout), transport=transport, trust_env=False
         )
         self._owns = http is None
+        self._assistant_pool = assistant_pool
 
     @classmethod
     def for_relay(cls, relay: RelayServer, *, timeout: float = 5.0) -> RelayClient:
@@ -169,7 +192,12 @@ class RelayClient:
         if relay.runtime_node_id is None:
             raise RelayError("运行时实例未绑定节点")
         transport = ReverseTransport(relay.runtime_node_id, relay.model_provider)
-        return cls(RUNTIME_BASE_URL, timeout=timeout, transport=transport)
+        return cls(
+            RUNTIME_BASE_URL,
+            timeout=timeout,
+            transport=transport,
+            assistant_pool=relay.assistant_pool,
+        )
 
     async def aclose(self) -> None:
         """关闭自建的连接；外部注入的 http 不关。"""
@@ -258,19 +286,25 @@ class RelayClient:
             RelayError: HTTP 非 200、连接失败、读超时或总时长超限
             IncompleteResultError: 流结束时没有 finish_reason，也没有 relay 回传的错误
         """
+        if self._assistant_pool and not request.sandbox:
+            # 助理池里没有普通员工：不带沙箱的请求在这里就停，body 都不拼。
+            raise UnsandboxedPoolRequest
         parser = SseParser(request.backend)
         timeout = httpx.Timeout(
             connect=connect_timeout, read=read_timeout, write=30.0, pool=connect_timeout
         )
         deadline = time.monotonic() + total_timeout
         try:
+            extensions: dict[str, Any] = {TOTAL_TIMEOUT_EXTENSION: total_timeout}
+            if request.sandbox:
+                extensions[SANDBOX_EXTENSION] = True
             # 声明总时限：经反向通道时节点满载可以排队，调用期限也按它算（直连 relay 忽略）。
             async with self._http.stream(
                 "POST",
                 "/v1/chat/completions",
                 json=request.to_body(),
                 timeout=timeout,
-                extensions={TOTAL_TIMEOUT_EXTENSION: total_timeout},
+                extensions=extensions,
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread())[:500].decode(errors="replace")

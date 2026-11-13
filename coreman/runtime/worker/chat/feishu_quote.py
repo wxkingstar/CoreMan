@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
@@ -85,6 +86,7 @@ async def persisted_text(
             FeishuSentMessage.chat_id == chat_id,
         )
     )
+    archived = await sealed.open_value(session, FeishuSentMessage, "text", bot.id, archived)
     if isinstance(archived, str) and archived.strip():
         return archived
     # 存档上线前发出的消息：流（回复结束后留一小时）和出站队列（留七天）里可能还有原文。
@@ -101,10 +103,12 @@ async def persisted_text(
         .order_by(TaskStream.task_id.desc())
         .limit(1)
     )
+    final_text = await sealed.open_value(session, TaskStream, "final_text", bot.id, final_text)
     if isinstance(final_text, str) and final_text.strip():
         return final_text
-    markdown = await session.scalar(
-        select(OutboxItem.payload["markdown"].astext)
+    # 取整行再读正文：个人助理的载荷整体加密，SQL 取不到里面的 markdown。
+    sent = await session.scalar(
+        select(OutboxItem)
         .where(
             OutboxItem.bot_id == bot.id,
             OutboxItem.platform == "feishu",
@@ -115,6 +119,7 @@ async def persisted_text(
         .order_by(OutboxItem.id.desc())
         .limit(1)
     )
+    markdown = sent.payload.get("markdown") if sent is not None else None
     return markdown if isinstance(markdown, str) and markdown.strip() else None
 
 
@@ -248,14 +253,18 @@ def _quote_part(rendered: Rendered, message_id: str) -> tuple[dict[str, Any], st
 async def _from_inbound(
     session: AsyncSession, *, bot: Bot, chat_id: str, parent_id: str
 ) -> Rendered | None:
-    message = await session.scalar(
-        select(InboundEvent.payload["raw"]["event"]["message"]).where(
+    # 取整行再读原文：个人助理的载荷整体加密，SQL 取不到里面的消息。
+    event = await session.scalar(
+        select(InboundEvent).where(
             InboundEvent.bot_id == bot.id,
             InboundEvent.platform == "feishu",
             InboundEvent.platform_msg_id == parent_id,
             InboundEvent.chat_id == chat_id,
         )
     )
+    raw = event.payload.get("raw") if event is not None else None
+    inner = raw.get("event") if isinstance(raw, dict) else None
+    message = inner.get("message") if isinstance(inner, dict) else None
     if not isinstance(message, dict):
         return None
     return render(

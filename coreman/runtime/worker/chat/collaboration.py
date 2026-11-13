@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.chat import bot_collaboration as service
 from coreman.core.chat import sessions
@@ -180,6 +181,9 @@ async def configure(
         )
         return system_prompt, env
     if intake.bot.platform != "feishu" or intake.chat_type not in ("group", "single"):
+        return system_prompt, env
+    if is_assistant(intake.bot):
+        # 个人助理暂不支持求助：不挂入口，也不在提示词里提（服务端 task_scope 同样拒绝）。
         return system_prompt, env
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
     # 不用配置伙伴：还有别的飞书 AI 员工可能被求助就挂上入口；在不在这个群、

@@ -18,6 +18,10 @@ class FeishuDelivery(Base):
     task_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("task_streams.task_id", ondelete="CASCADE"), primary_key=True
     )
+    # 这条流属于哪个机器人：个人助理的 layout 按它找所有者的数据密钥（见 assistants/sealed.py）。
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE")
+    )
     card_id: Mapped[str | None] = mapped_column(Text)
     message_id: Mapped[str | None] = mapped_column(Text)
     reaction_id: Mapped[str | None] = mapped_column(Text)

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import base64
 import configparser
+import contextlib
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -46,6 +49,235 @@ EXCLUDED = {
 
 
 MAX_DIFF = 256 * 1024
+# 所有权标记由守护进程写、不到 1 KB；读它时最多读这么多（目录里的东西可能被助理换掉）。
+MARKER_LIMIT = 64 * 1024
+# 工作目录根下守护进程自己用的目录：健康探测目录、个人助理工作目录的回收站。助理专用实例拒绝把它们
+# （及其下的任何目录）当作工作目录。
+HEALTH_DIR = ".coreman-health"
+TRASH_DIR = ".coreman-trash"
+# 助理专用实例的归属登记：每个助理工作目录一条（文件名是目录真实路径的 sha256），记着员工与目录的
+# inode。它在工作目录之外，沙箱里改不到；删目录时据此认归属，不看助理写得到的标记。删掉之后这条
+# 换成墓碑（{"bot_id": ..., "removed": true}），平台重发时据此答「已删除」；墓碑留
+# TOMBSTONE_SECONDS。
+OWNERS_DIR = ".coreman-owners"
+TOMBSTONE_SECONDS = 30 * 24 * 3600
+RESERVED_DIRS = (HEALTH_DIR, TRASH_DIR, OWNERS_DIR)
+# Workspace.remove 把目录改名放进回收站时用的名字（secrets.token_hex(16)）：32 位小写十六进制。
+TRASH_ENTRY_BYTES = 16
+TRASH_ENTRY_NAME = re.compile(f"[0-9a-f]{{{2 * TRASH_ENTRY_BYTES}}}")
+
+
+def read_small(path, limit=MARKER_LIMIT):
+    """读一个别人可能换掉的小文件，读不了或不像样一律返回 None。
+
+    不跟随链接（O_NOFOLLOW），不在 FIFO、设备上等待（O_NONBLOCK 打开、fstat 只认普通文件），
+    超过 `limit` 字节不读。打开之后核对的是同一个文件描述符，没有先查后用的窗口。
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, min(65536, limit + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def marker_data(root):
+    """工作目录里所有权标记的内容；没有、读不了、不是 JSON 对象都返回空字典。"""
+    return parse_object(read_small(Path(root) / MARKER))
+
+
+def parse_object(raw):
+    """JSON 对象；读不了、不是 JSON 对象（含嵌套过深）都返回空字典。"""
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def reserved(root, raw):
+    """`raw`（相对工作目录根或绝对路径）按真实位置算，是不是落在保留目录里（含保留目录本身）。"""
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return False
+    base = Path(root).resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(base / name) for name in RESERVED_DIRS)
+
+
+def private_dir(root, name, create=True):
+    """工作目录根下守护进程自己的目录：没有就建（0700）；必须是本用户的真实目录，不是链接，
+    权限不是 0700 就收紧。核对与收紧都在同一个不跟随链接打开的描述符上做。"""
+    path = Path(root) / name
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError("private directory is not ours")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+    return path
+
+
+def trash_dir(root):
+    """工作目录根下的回收站（见 private_dir）。"""
+    return private_dir(root, TRASH_DIR)
+
+
+def owners_dir(root, create=True):
+    """工作目录根下的归属登记目录（见 private_dir）。`create=False` 时没有就返回 None。"""
+    try:
+        return private_dir(root, OWNERS_DIR, create=create)
+    except FileNotFoundError:
+        if create:
+            raise
+        return None
+
+
+def record_name(path):
+    """归属登记的文件名：目录真实路径的 sha256，不取目录里的任何东西。"""
+    return hashlib.sha256(os.fsencode(str(path))).hexdigest()
+
+
+class RecordUnreadable(Exception):
+    """归属登记读不了（网络存储报 ESTALE、EIO、没权限等）。
+
+    说不清有没有、记着谁，调用方只能当认不准。
+    """
+
+
+def read_record(record):
+    """归属登记的内容。
+
+    只有确知不存在（ENOENT）才返回 None（没有登记）；在但不是普通文件、太大、不像样返回空字典
+    （谁的都不算）；别的读取错误抛 RecordUnreadable——不能把读不了当成没有。
+    """
+    try:
+        info = os.lstat(record)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RecordUnreadable(type(exc).__name__) from None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MARKER_LIMIT:
+        return {}
+    raw = read_small(record)
+    if raw is None:
+        raise RecordUnreadable("read")
+    return parse_object(raw)
+
+
+def lookup_record(root, name):
+    """工作目录根下名为 `name` 的归属登记，只读不建。
+
+    `.coreman-owners` 确知不存在等同没有登记（None）；它在但打不开、不对劲（链接、不是本用户的），
+    或登记本身读不了，都抛 RecordUnreadable。
+    """
+    try:
+        owners = owners_dir(root, create=False)
+    except OSError as exc:
+        raise RecordUnreadable(type(exc).__name__) from None
+    if owners is None:
+        return None
+    return read_record(owners / name)
+
+
+def write_record(record, data):
+    """原子写一条归属登记（0600，同目录临时文件再改名）。"""
+    temporary = record.parent / f".tmp-{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps(data).encode())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, record)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def live_record(data):
+    """像样的归属登记：有员工编号与 inode，不是墓碑。"""
+    bot = data.get("bot_id")
+    return (
+        isinstance(bot, str)
+        and bool(bot)
+        and type(data.get("ino")) is int
+        and "removed" not in data
+    )
+
+
+def tombstone_of(data, bot):
+    """这个员工的墓碑：本登记删掉过这个员工在这里的目录。"""
+    return data.get("bot_id") == bot and data.get("removed") is True and "ino" not in data
+
+
+def registered_to(data, bot, info):
+    """登记是不是记着这个员工、且就是眼前这个目录。
+
+    只比 inode、不比设备号：工作目录根可以放在几台节点共同挂载的网络存储上，网络挂载的设备号
+    换一台机器、重启或重新挂载都可能变，比设备号会把本助理的目录认成别人的。
+    """
+    return live_record(data) and data.get("bot_id") == bot and data.get("ino") == info.st_ino
+
+
+def purge_tombstones(root, now=None):
+    """删掉归属登记里超过 TOMBSTONE_SECONDS 的墓碑，以及同样旧的 `.tmp-*`（write_record 中途崩了
+    留下的临时文件）。
+
+    别的一概不动，只删普通文件、不跟随链接，没有登记目录就不建。
+    """
+    owners = owners_dir(root, create=False)
+    if owners is None:
+        return
+    cutoff = (time.time() if now is None else now) - TOMBSTONE_SECONDS
+    with os.scandir(owners) as entries:
+        found = list(entries)
+    for entry in found:
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            if entry.name.startswith(".tmp-"):
+                os.unlink(entry.path)
+                continue
+            data = parse_object(read_small(entry.path))
+            if data.get("removed") is True and "ino" not in data:
+                os.unlink(entry.path)
+        except OSError:
+            continue
 
 
 def redact(url):
@@ -296,7 +528,7 @@ class Workspace:
             raise self.error("缺少员工标识")
         marker = self.root / MARKER
         if (
-            data.get("type") != "workspace-info"
+            data.get("type") not in ("workspace-info", "workspace-remove")
             and (marker.exists() or marker.is_symlink())
             and not self.owned()
         ):
@@ -323,17 +555,42 @@ class Workspace:
         return target
 
     def owned(self, root=None):
-        marker = (root or self.root) / MARKER
-        if marker.is_symlink():
-            return False
-        try:
-            return json.loads(marker.read_text()).get("bot_id") == self.bot
-        except (OSError, ValueError):
-            return False
+        return marker_data(root or self.root).get("bot_id") == self.bot
+
+    @property
+    def assistant_only(self):
+        return getattr(self.agent, "assistant_only", False) is True
 
     def init(self, root=None):
         root = root or self.root
+        if self.assistant_only and root == self.root and root.exists():
+            # 助理专用实例只在全新的目录上初始化，绝不读写助理在沙箱里写过的文件：标记是本员工的说明
+            # 上一次初始化已经做完（标记最后写），原样返回；没有标记的非空目录一律拒绝。
+            if self.owned(root):
+                return {"initialized": True, "owned": True, "workspace_protocol": 1}
+            if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+                raise self.error("工作目录已存在，个人助理只能使用全新的目录")
+        record = None
+        if self.assistant_only and root == self.root:
+            # 全新目录：在目录之外登记归属，删除时认这条登记。登记着别的员工、且就是眼前这个空目录
+            # 的，不接管；墓碑不挡（那个目录已经删掉了）。
+            record = owners_dir(self.agent.root) / record_name(self.root)
+            try:
+                data = read_record(record)
+            except RecordUnreadable:
+                raise self.error("工作目录的归属登记暂时读不了，请稍后重试") from None
+            if data is not None and data.get("bot_id") != self.bot:
+                # 只有确知不存在才算不在；lstat 报别的错就整个初始化失败。
+                try:
+                    info = os.lstat(root)
+                except FileNotFoundError:
+                    info = None
+                if info is not None and registered_to(data, data.get("bot_id"), info):
+                    raise self.error("工作目录属于其他员工或所有权标记无效")
         root.mkdir(parents=True, exist_ok=True)
+        if record is not None:
+            # 建好目录马上登记，之后才往里写东西：中途崩了，留下的目录删除时也认得出。
+            write_record(record, {"bot_id": self.bot, "ino": os.lstat(root).st_ino})
         marker = root / MARKER
         if marker.exists() or marker.is_symlink():
             if not self.owned(root):
@@ -430,6 +687,79 @@ class Workspace:
             path.unlink(missing_ok=True)
             return {"removed": True}
         raise self.error("不支持的探测操作")
+
+    def remove(self):
+        """个人助理停用或换走之后删掉它的工作目录。只在助理专用实例上做，只删本员工的目录。
+
+        归属按守护进程自己保管的登记认（见 OWNERS_DIR），只比 inode（见 registered_to）。平台见到
+        「已删除」或「不是这位助理的」就不再来，所以这两种回答只在能确认时给；确认不了一律答
+        `unverified`（平台留着登记、隔一阵再来），什么都不动。依次是：
+
+        - 登记是本员工的墓碑：上次已经删了，答「已删除」，眼前这里有什么都不碰；
+        - 登记记着别的员工：答「不是这位助理的」；
+        - 目录确知不在（lstat 报 ENOENT）：登记记着本员工（运维手工删了，或上次改名进回收站后
+          没来得及写墓碑）就写墓碑、答「已删除」；没有登记（例如共享存储没挂上）认不准；
+        - 目录在：登记记着本员工且 inode 对得上才删；登记读不懂、inode 对不上、没有登记都认不准。
+          目录里的标记沙箱里写得到，从不凭它删。
+
+        网络存储上 lstat 或读登记报 ENOENT 以外的错（ESTALE、EIO、没权限等）一律认不准：说不清
+        目录在不在、登记记着谁。判断时只读不建：`.coreman-owners` 与回收站只在真要删时才建。
+
+        删的时候先把目录原子地改名进工作目录根下的回收站（同一文件系统，一步完成），把登记换成墓碑，
+        再在后台线程里删：不跟随任何链接，删不掉的留给助理侧的清扫（启动时与之后每 10 分钟）。还有
+        在跑的沙箱轮次用着它时不动（`busy`），平台稍后再来。`in_use` 核对与改名都在轮次准入的锁里
+        （见 AssistantTurns.admission）：准入在同一把锁里登记工作目录并核对它还在原处，所以改名之后
+        不会再有轮次挂上这棵树，后台删除重试时改权限、按路径删也就碰不到沙箱写得到的东西。
+        """
+        if not self.assistant_only:
+            raise self.error("不支持的工作区操作")
+        name = record_name(self.root)
+        # 只有 ENOENT 才算目录不在；看不了（info 为 None 而 exists 为真）说不清，按「可能在」答。
+        exists, info = True, None
+        try:
+            info = os.lstat(self.root)
+        except FileNotFoundError:
+            exists = False
+        except OSError:
+            pass
+        unverified = {"removed": False, "existed": exists, "unverified": True}
+        try:
+            data = lookup_record(self.agent.root, name)
+        except RecordUnreadable:
+            return unverified
+        if data is not None and tombstone_of(data, self.bot):
+            return {"removed": True, "existed": False}
+        if exists and info is None:
+            return unverified
+        if data is None:
+            return unverified
+        if live_record(data) and data["bot_id"] != self.bot:
+            return {"removed": False, "existed": exists}
+        if not exists:
+            if live_record(data):
+                with contextlib.suppress(OSError):
+                    write_record(
+                        owners_dir(self.agent.root) / name, {"bot_id": self.bot, "removed": True}
+                    )
+                return {"removed": True, "existed": False}
+            return unverified
+        if info is None or not stat.S_ISDIR(info.st_mode):
+            return unverified
+        if not registered_to(data, self.bot, info):
+            return unverified
+        from .sandbox import remove_tree
+
+        target = trash_dir(self.agent.root) / secrets.token_hex(TRASH_ENTRY_BYTES)
+        turns = getattr(getattr(self.agent, "daemon", None), "assistant", None)
+        with turns.admission if turns is not None else contextlib.nullcontext():
+            if turns is not None and turns.in_use(self.root):
+                return {"removed": False, "existed": True, "busy": True}
+            os.rename(self.root, target)
+        # 换成墓碑写不进去也已经删了：如实答「已删除」。回执丢了再来时没有墓碑，按上面的规则作答。
+        with contextlib.suppress(OSError):
+            write_record(owners_dir(self.agent.root) / name, {"bot_id": self.bot, "removed": True})
+        threading.Thread(target=remove_tree, args=(target,), daemon=True).start()
+        return {"removed": True, "existed": True}
 
     def list(self):
         parent = self.path(self.data.get("path", ""))
@@ -843,7 +1173,7 @@ class Workspace:
 
     def finish(self):
         if self.owned():
-            marker = json.loads((self.root / MARKER).read_text())
+            marker = marker_data(self.root)
             if marker.get("transfer_id") and marker["transfer_id"] == self.data.get("transfer_id"):
                 return {"installed": True}
         stage = self.stage()
@@ -1078,6 +1408,7 @@ class Workspace:
             "git_status",
             "git_diff",
             "probe",
+            "remove",
         }:
             raise self.error("不支持的工作区操作")
         try:

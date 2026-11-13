@@ -29,6 +29,7 @@ from coreman.api.security import verify_csrf
 from coreman.core import session_links
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
+    AssistantRetiredDir,
     Bot,
     ChatLog,
     CronRun,
@@ -467,6 +468,14 @@ async def delete_node(
     if bots:
         shown = "、".join(bots[:5]) + (f" 等 {len(bots)} 个" if len(bots) > 5 else "")
         raise ApiError(409, 409, f"仍有 AI 员工使用该运行时：{shown}。请先为它们切换运行时")
+    # 删实例会连带删掉待删目录的登记，节点上的助理目录就再也没人删了。
+    pending_dirs = await session.scalar(
+        select(AssistantRetiredDir.id)
+        .where(AssistantRetiredDir.relay_server_id.in_(relay_ids))
+        .limit(1)
+    )
+    if pending_dirs is not None:
+        raise ApiError(409, 409, "还有助理的工作目录等待删除")
     cancelled = await session.scalars(
         update(RuntimeCall)
         .where(RuntimeCall.node_id == node_id, RuntimeCall.status.not_in(TERMINAL))

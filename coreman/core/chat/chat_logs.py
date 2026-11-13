@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import CHAT_LOG_RUNNING, ChatLog, UserReached
 from coreman.core.logging import get_logger
 from coreman.core.pricing import estimate
@@ -154,7 +155,10 @@ async def _insert_once(session: AsyncSession, entry: ChatLogEntry, values: dict[
         )
         if existing is not None:
             return
-    session.add(ChatLog(**values))
+    # 用语句插入而不是 session.add：个人助理的内容列在这里封存（首次写入时签发数据密钥），
+    # 不再经过 flush 钩子——钩子只取用密钥、不签发，也不该把已封存的值再封一次。
+    stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
+    await session.execute(insert(ChatLog).values(**stored))
     await _reach(session, entry)
 
 
@@ -163,10 +167,11 @@ async def _finish(session: AsyncSession, entry: ChatLogEntry) -> None:
     values = row_values(entry)
     await _with_cost(session, entry, values)
     if entry.task_id is not None:
+        stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
         updated = await session.scalar(
             update(ChatLog)
             .where(ChatLog.task_id == entry.task_id, ChatLog.status == CHAT_LOG_RUNNING)
-            .values(**values)
+            .values(**stored)
             .returning(ChatLog.id)
         )
         if updated is not None:
@@ -184,9 +189,11 @@ async def open_turn(session: AsyncSession, entry: ChatLogEntry) -> bool:
     await session.flush()
     try:
         async with session.begin_nested():
+            # 封存放在保存点里：出错只回滚保存点，不弄挂对话。
+            stored = await sealed.seal_values(session, ChatLog, entry.bot_id, values)
             await session.execute(
                 insert(ChatLog)
-                .values(**values)
+                .values(**stored)
                 .on_conflict_do_nothing(
                     # 谓词必须是字面量：写成绑定参数时，同一预备语句执行几次后 PostgreSQL
                     # 换用通用计划，就认不出这个部分唯一索引，插入直接报错。
@@ -242,23 +249,39 @@ async def close_running(
     status: str,
     error_code: str | None,
     error_message: str | None,
+    bot_id: uuid.UUID | None = None,
 ) -> bool:
     """只知道结局、不知道这一轮内容时的收尾：保留开流时写下的内容，只改终态与耗时。
 
     返回是否真有一行进行中的记录被结掉；没有（或写失败）时由调用方决定要不要补一行，
     写失败留下的进行中记录由看护的巡检结掉。
+
+    Args:
+        bot_id: 这一轮所属的机器人，封存报错信息时用；没传且有报错信息要写时按任务查一次
     """
     limit = LIMITS["error_message"]
     await session.flush()
     try:
         async with session.begin_nested():
+            message = error_message[:limit] if error_message else None
+            if message:
+                if bot_id is None:
+                    # 调用方没给：先查到这一行属于谁，再决定要不要封存。
+                    bot_id = await session.scalar(
+                        select(ChatLog.bot_id)
+                        .where(ChatLog.task_id == task_id, ChatLog.status == CHAT_LOG_RUNNING)
+                        .limit(1)
+                    )
+                message = (
+                    await sealed.seal_values(session, ChatLog, bot_id, {"error_message": message})
+                )["error_message"]
             closed = await session.scalar(
                 update(ChatLog)
                 .where(ChatLog.task_id == task_id, ChatLog.status == CHAT_LOG_RUNNING)
                 .values(
                     status=status,
                     error_code=error_code,
-                    error_message=error_message[:limit] if error_message else None,
+                    error_message=message,
                     latency_ms=elapsed_ms(),
                 )
                 .returning(ChatLog.id)
@@ -304,16 +327,31 @@ class ChatLogWriter:
         """事后补写收尾：同事务没写成时用，改进行中的那一行或补一行。"""
         return await self._attempt(lambda session: _finish(session, entry))
 
-    async def amend_response(self, task_id: int, response_content: str | None) -> bool:
-        """收尾之后才定稿的回复（接了额度表的终稿）：只改已经结束的那一行的回复正文。"""
+    async def amend_response(
+        self, task_id: int, response_content: str | None, *, bot_id: uuid.UUID | None = None
+    ) -> bool:
+        """收尾之后才定稿的回复（接了额度表的终稿）：只改已经结束的那一行的回复正文。
+
+        Args:
+            bot_id: 这一轮所属的机器人，封存回复正文时用；没传就按任务查一次
+        """
         limit = LIMITS["response_content"]
         text = response_content[:limit] if response_content else response_content
 
         async def run(session: AsyncSession) -> None:
+            owner_bot = bot_id
+            if owner_bot is None and text:
+                # 调用方没给：先按任务查到这一行属于谁。
+                owner_bot = await session.scalar(
+                    select(ChatLog.bot_id).where(ChatLog.task_id == task_id).limit(1)
+                )
+            stored = await sealed.seal_values(
+                session, ChatLog, owner_bot, {"response_content": text}
+            )
             await session.execute(
                 update(ChatLog)
                 .where(ChatLog.task_id == task_id, ChatLog.status != CHAT_LOG_RUNNING)
-                .values(response_content=text)
+                .values(response_content=stored["response_content"])
             )
 
         return await self._attempt(run)
@@ -345,8 +383,10 @@ class ChatLogWriter:
     def submit_finish(self, entry: ChatLogEntry) -> None:
         self._spawn(self.finish(entry))
 
-    def submit_amend(self, task_id: int, response_content: str | None) -> None:
-        self._spawn(self.amend_response(task_id, response_content))
+    def submit_amend(
+        self, task_id: int, response_content: str | None, *, bot_id: uuid.UUID | None = None
+    ) -> None:
+        self._spawn(self.amend_response(task_id, response_content, bot_id=bot_id))
 
     def _spawn(self, work: Coroutine[Any, Any, bool]) -> None:
         if len(self._tasks) >= self._max_pending:

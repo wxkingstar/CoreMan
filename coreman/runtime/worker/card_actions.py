@@ -104,20 +104,29 @@ class CardActionHandler:
                 )
                 if sent is None:
                     await tasks.finish(
-                        session, ctx.task.id, status="succeeded", result={"card": "ignored"}
+                        session,
+                        ctx.task.id,
+                        status="succeeded",
+                        result={"card": "ignored"},
+                        bot_id=ctx.task.bot_id,
                     )
                     await session.commit()
                     return
             if bot.platform == "feishu" and task_id.startswith(CARD_PREFIX):
                 result = await handle_credential(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
                 return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.core.feishu_docs import confirm
+                from coreman.runtime.worker import assistant_stop
                 from coreman.runtime.worker.group_write_cards import handle as handle_group_write
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
 
@@ -125,10 +134,15 @@ class CardActionHandler:
                     "personal_schedule": handle_schedule,
                     inflow.UPGRADE_EVENT: inflow.handle_upgrade,
                     confirm.CARD_EVENT: handle_group_write,
+                    assistant_stop.EVENT_KEY: assistant_stop.handle,
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 return
@@ -144,7 +158,11 @@ class CardActionHandler:
                 )
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -157,7 +175,11 @@ class CardActionHandler:
                 if card is not None:
                     await self._reply_card(session, bot, inbound, task_id, card)
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"card": result}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"card": result},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 ctx.log.info("card_action_done", result=result)
@@ -207,7 +229,13 @@ class CardActionHandler:
                         speaker=speaker.platform_user_id,
                         icon=icon,
                     )
-            await tasks.finish(session, ctx.task.id, status="succeeded", result={"card": result})
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"card": result},
+                bot_id=ctx.task.bot_id,
+            )
             await session.commit()
         ctx.log.info("card_action_done", result=result)
 
@@ -305,6 +333,7 @@ class CardActionHandler:
                 session,
                 st.id,
                 {"waiting_for_text": True, "waiting_since": datetime.now(UTC).isoformat()},
+                bot_id=st.bot_id,
             )
             await self._reply_card(
                 session,

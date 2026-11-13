@@ -167,6 +167,20 @@ CoreMan 可以替 Agent 给阿里云 OpenAPI 请求签名：Agent 机器上不�
 - **Tower 不可用**：读与低风险写不受影响；高风险写在核销时 fail closed（`503 tower_unavailable`），恢复后重新执行。
 - **停用 CoreMan 发送端**：在 Tower 里停用该发送端；Agent 提交审批会被拒，代理照常拦截高风险写。
 
+## 个人助理的审批闸门
+
+个人助理（见 `docs/feishu.md`「个人助理应用」）以所有者的飞书身份工作，它的每一次写操作都先经所有者本人在 Tower 批准。这里平台自己既是发送端又是目标系统：
+
+- **目标系统**：在 Tower 登记一个目标系统，key 固定为 `feishu-personal`，登记时**打开免比对**（正文与请求体是私人消息，不送任何模型；这是按目标系统的开关，没有按次的字段）。打开后审批卡片上会显示「未经比对」，这是预期的。没打开时提交可能被 Tower 以 `description_mismatch` 拒绝。把它的 API Key 加进 `TOWER_TARGET_KEYS`：`{"feishu-personal": "…", …}`。云签名代理的四个产品 Key 不受影响；只用个人助理、不用云签名代理的部署可以只配这一个键。
+- **发送端**：沿用 `TOWER_SENDER_KEY`、`TOWER_CALLBACK_SECRET` 与同一个回调地址。`TOWER_URL`、这两项和上面的目标 Key 任一缺失时，助理的写类工具返回 `approval_service_unavailable`，写操作不会执行。
+- **发起人与审批人**：发起人是所有者的登录名（`login_name`，要与 Tower 的用户名一致），审批人不填，由发起人本人确认。所有者没有登录名时返回 `no_login_name`；在 Tower 没有登记或已停用时返回 `tower_account_missing`（Tower 没有供发送端预先查询账号的接口，只能在提交时发现）。Tower 因内容本身拒绝这张单（正文过长、到期时间不合法等其他 4xx）时返回 `approval_rejected`，`detail` 带 Tower 的原代码，提示助理原样重提也不会成功；连不上或 5xx 才是 `approval_service_unavailable`，可以稍后重试。
+- **流程**：提交 → 所有者在 Tower 批准或拒绝 → 回调（丢失时由对账补上）→ 批准后平台重新读会话、取令牌并以 `feishu-personal` 的身份核销、按暂存参数原样执行、把结果上报 Tower，并在助理会话里告诉它；拒绝、过期、执行失败同样告诉它。令牌与暂存参数的哈希绑定，库里的参数被改动后核销不过，不会执行。
+- **审批单里有什么**：摘要只有渠道和对象（如「私聊 → 某人」）；正文是纯文本，含被回复的原话、将要执行的内容、全部其他参数，以及标明「由助理撰写」的背景与调研。对象里的会话名、对方名字会压成单行，名字里夹带换行也伪造不出审批单的抬头行（摘要与「对象」行都是如此）。带文件时列出文件名、类型、大小和一个供批准前查看的下载链接（与审批单同时失效）。正文与请求体保存在 Tower 里；请求体里文件只以文件名、大小与 SHA-256 出现。
+- **数量与期限**：每位所有者同时待批最多 10 张；72 小时无人处理按撤回处理（提交时把同一个到期时刻交给 Tower）。批准后要在 24 小时内执行完（Tower 的取令牌窗口），平台在回调后立即执行。有新的待批单时，平台在助理私聊里发一条「有 N 张审批单等你处理」加 Tower 地址，不带内容，5 分钟内不重复。
+- **执行中断**：执行进程在调飞书期间被杀时，同一任务重跑会把单收口为失败，不会再执行一次。除此之外 scheduler 每轮还会调用 `recover_stuck`：已批准超过 15 分钟、又没有在途执行任务的单最迟约 15 分钟后记为失败，通过结果回合告诉助理并把结果上报 Tower，绝不会第二次执行；已记下「开始执行」的是 `execution_interrupted`（平台不知道操作是否生效，助理应去核对），没有记下的是 `execution_not_started`（什么都没执行，可以重新提交）。scheduler 这一轮的返回里因此多一项 `assistant_approvals_recovered`。飞书调用做完之后即使提交数据库失败，这张单仍会在同一次执行里被收口，不会悬在已批准。
+- **数据**：审批流水在 `assistant_approvals`，参数、审批人的话、执行结果用所有者的数据密钥加密。日志关键字：`assistant_approval_submit_failed`、`assistant_approval_executed`、`assistant_approval_report_failed`、`assistant_approval_withdraw_failed`。
+- **带文件的写操作（可选）**：发文件、存入云空间、带附件的邮件要等所有者批准，文件在此期间放在一个单独的临时桶里（`ASSISTANT_TMP_S3_*`，见 `docs/object-storage.md`「个人助理的临时桶」）。没配临时桶时这类操作返回 `attachments_not_supported`，其余写操作不受影响。日志关键字：`assistant_tmp_storage_misconfigured`、`assistant_attachment_put_failed`、`assistant_attachment_get_failed`、`assistant_attachment_delete_failed`。
+
 ## 已知限制
 
 - 任务已结束时代理返回 `403 task_not_active`；未知产品返回 `403 product_not_allowed`，未知动作返回 `403 action_not_allowed`。

@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.chat import alert_sources, interactions
 from coreman.core.chat.announcements import find_announcement
@@ -121,6 +122,13 @@ class IntakeStage(ChatStageBase):
                 resolver=ctx.openuserid,
             )
         text = strip_mention(joined_text(parts), bot.name)
+        if is_assistant(bot) and chat_type == "single" and not observe and not alert:
+            from coreman.runtime.worker import assistant_stop
+
+            # 所有者发「停用助理」：认出人就截下，排在公告、待答与运行时检查之前（开通没走完、
+            # 运行时暂停或不可用时也能停用）。普通员工只多这一次属性判断。
+            if await assistant_stop.intercept(session, ctx, bot, speaker, chat_id, text):
+                return None
         if bot.platform == "feishu" and not observe and not alert:
             from coreman.runtime.worker.feishu_escalations import consume_reply
 
@@ -260,7 +268,13 @@ class IntakeStage(ChatStageBase):
             return False
         ctx.log.info("announcement_intercepted", announcement_id=str(hit.id))
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=hit.content)
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"announcement": True})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"announcement": True},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _denied(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
@@ -284,7 +298,13 @@ class IntakeStage(ChatStageBase):
             reply_context=intake.inbound.reply_context,
             text=msg("no_permission", ctx.locale),
         )
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"denied": True})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"denied": True},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _command(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> bool:
@@ -296,7 +316,11 @@ class IntakeStage(ChatStageBase):
             ctx.log.info("builtin_command", command="api_alias")
             await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=reply)
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"command": "api_alias"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"command": "api_alias"},
+                bot_id=ctx.task.bot_id,
             )
             return True
         command = classify_command(intake.text)
@@ -321,7 +345,13 @@ class IntakeStage(ChatStageBase):
             text = msg("help", ctx.locale)
         ctx.log.info("builtin_command", command=command)
         await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"command": command})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"command": command},
+            bot_id=ctx.task.bot_id,
+        )
         return True
 
     async def _pending_answer(
@@ -351,7 +381,11 @@ class IntakeStage(ChatStageBase):
                 text=msg("choice_cancelled", ctx.locale),
             )
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"choice": "cancelled"}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"choice": "cancelled"},
+                bot_id=ctx.task.bot_id,
             )
             return True
         state = dict(st.state)
@@ -363,7 +397,10 @@ class IntakeStage(ChatStageBase):
         if since is None or (datetime.now(UTC) - since).total_seconds() > FREE_TEXT_WAIT_SECONDS:
             # 等了半小时还没打字，这条多半是新话题：清掉等待标记放行，状态与卡片仍留着。
             await interactions.patch_state(
-                session, st.id, {"waiting_for_text": False, "waiting_since": None}
+                session,
+                st.id,
+                {"waiting_for_text": False, "waiting_since": None},
+                bot_id=st.bot_id,
             )
             ctx.log.info("choice_wait_expired", state_id=str(st.id))
             return False
@@ -389,5 +426,11 @@ class IntakeStage(ChatStageBase):
             platform_user_id=intake.speaker.platform_user_id,
             icon_url=await self._icon_url(ctx),
         )
-        await tasks.finish(session, ctx.task.id, status="succeeded", result={"choice": "answered"})
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"choice": "answered"},
+            bot_id=ctx.task.bot_id,
+        )
         return True

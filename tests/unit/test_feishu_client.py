@@ -103,3 +103,30 @@ def test_feishu_directory_requires_stable_user_id_and_preserves_identity():
         parse_feishu_directory([], [{"open_id": "ou"}])
     with pytest.raises(FeishuError, match="inconsistent"):
         parse_feishu_directory([], [row, {**row, "email": "b@example.com"}])
+
+
+async def test_leave_chat_removes_the_app_itself_from_the_group():
+    calls = []
+
+    def response(request):
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200}
+            )
+        calls.append(request)
+        return httpx.Response(200, json={"code": 0, "data": {"invalid_id_list": []}})
+
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn", transport=httpx.MockTransport(response)
+    ) as http:
+        client = FeishuClient("cli_example", "synthetic-secret", http=http)
+        await client.leave_chat("oc_group1")
+        with pytest.raises(FeishuError):
+            await client.leave_chat("oc/../x")
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.method == "DELETE"
+    assert request.url.path == "/open-apis/im/v1/chats/oc_group1/members"
+    assert request.url.params["member_id_type"] == "app_id"
+    assert json.loads(request.content) == {"id_list": ["cli_example"]}
+    assert request.headers["Authorization"] == "Bearer tenant-token"

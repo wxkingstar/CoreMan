@@ -28,6 +28,14 @@ from coreman.api.errors import ApiError, forbidden, not_found
 from coreman.api.routers.bots import build_out, load_bot, member_ids_of, notify_bot_changed
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.records import (
+    ASSISTANT_NOT_ACTIVE_MESSAGE,
+    ASSISTANT_TOGGLE_MESSAGE,
+    inactive_assistant,
+    is_assistant,
+    unsupported,
+    visible_to,
+)
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.switch_relay import SwitchError, is_moving, validate_switch
 from coreman.core.bots.switch_relay import switch_relay as domain_switch_relay
@@ -156,7 +164,7 @@ async def switch_relay(
     task_id，由 worker 执行（不要求员工空闲，等手上这一轮结束），进度与结论用 switch-jobs 查。
     只换模型、或不带 background 的旧调用方，仍当场完成。
     """
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     member_ids = await member_ids_of(session, bot.id)
     # 权限判定必须先于 If-Match：无权的人漏带版本号时该看到 403，而不是 428/409 那种
     # 「像是自己版本号写错了」的提示。领域服务里的同一道检查保留，worker 走的是那条路。
@@ -212,7 +220,14 @@ async def _start_switch_job(
 ) -> dict[str, Any]:
     try:
         await validate_switch(
-            session, bot=bot, target=target, model=body.model, actor=user, member_ids=member_ids
+            session,
+            bot=bot,
+            target=target,
+            model=body.model,
+            actor=user,
+            member_ids=member_ids,
+            workspace_mode=body.workspace_mode,
+            target_directory=body.target_directory,
         )
     except SwitchError as exc:
         raise ApiError(exc.status, exc.code, exc.message) from exc
@@ -255,6 +270,25 @@ async def _start_switch_job(
     return {"code": 0, "data": {"task_id": task.id}}
 
 
+async def _visible_bot(session: AsyncSession, bot_id: uuid.UUID, user: User) -> Bot:
+    """个人助理只有所有者看得到：其他人（含管理员）得到与「机器人不存在」相同的回答。"""
+    bot = await load_bot(session, bot_id)
+    if not visible_to(bot, user):
+        raise not_found("机器人不存在")
+    return bot
+
+
+async def _job_bot(session: AsyncSession, bot_id: uuid.UUID, user: User) -> Bot:
+    """切换作业接口的机器人：作业的结果与报错是任务内容，个人助理的只有所有者能看——
+    其他人（含管理员）得到与「机器人不存在」相同的回答。"""
+    bot = await load_bot(session, bot_id)
+    if not visible_to(bot, user):
+        raise not_found("机器人不存在")
+    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
+        raise forbidden()
+    return bot
+
+
 async def _switch_job(session: AsyncSession, bot_id: uuid.UUID, task_id: int) -> Task:
     task = await session.get(Task, task_id, populate_existing=True)
     if task is None or task.bot_id != bot_id or task.kind != "relay_switch":
@@ -272,9 +306,7 @@ async def switch_job(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """切换作业的进度与结论：进行中看工作目录的阶段；结束后 result.ok 区分成功与被规则挡下。"""
-    bot = await load_bot(session, bot_id)
-    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
-        raise forbidden()
+    bot = await _job_bot(session, bot_id, user)
     task = await _switch_job(session, bot.id, task_id)
     data: dict[str, Any] = {
         "task_id": task.id,
@@ -299,12 +331,12 @@ async def cancel_switch_job(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """取消切换：还在排队的直接作废；已经在跑的只在等待员工手上这一轮时生效，开始迁移后跑完为止。"""
-    bot = await load_bot(session, bot_id)
-    if not can_switch_relay(user, bot, await member_ids_of(session, bot.id)):
-        raise forbidden()
+    bot = await _job_bot(session, bot_id, user)
     task = await _switch_job(session, bot.id, task_id)
     if task.status == "queued":
-        await tasks.finish(session, task.id, status="cancelled", error_message="已取消")
+        await tasks.finish(
+            session, task.id, status="cancelled", error_message="已取消", bot_id=task.bot_id
+        )
     elif task.status in ACTIVE:
         await tasks.request_cancel(session, task.id, "已取消")
     await session.commit()
@@ -320,9 +352,12 @@ async def toggle_bot(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """启停：一次点击就是一次翻转，不需要 If-Match（并发只会多翻一次，不会写坏配置）。"""
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_toggle_bot(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        # 助理记录的启停跟着开通与停用走：直接翻 enabled 会绕过撤授权、销毁密钥这些步骤。
+        raise ApiError(409, 409, ASSISTANT_TOGGLE_MESSAGE)
     await session.refresh(bot, with_for_update=True)
     if bot.workspace_state in {"migrating", "initializing", "busy"}:
         raise ApiError(409, 409, "工作目录操作正在进行，请完成后再启停")
@@ -348,10 +383,10 @@ async def toggle_bot(
 @router.get("/{bot_id}/members")
 async def list_members(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _members_of(session, bot_id)}
 
 
@@ -363,9 +398,11 @@ async def add_member(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_manage_members(user, bot):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, "个人助理只属于本人，不能添加成员或可用人")
     target = await session.get(User, body.user_id)
     if target is None or target.status != "active":
         raise ApiError(422, 422, "用户不存在或已停用")
@@ -399,7 +436,7 @@ async def remove_member(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_manage_members(user, bot):
         raise forbidden()
     row = await session.get(BotMember, {"bot_id": bot_id, "user_id": user_id})
@@ -423,10 +460,10 @@ async def remove_member(
 @router.get("/{bot_id}/allowed-users")
 async def list_allowed_users(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _allowed_of(session, bot_id)}
 
 
@@ -438,9 +475,11 @@ async def replace_allowed_users(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, "个人助理只属于本人，不能添加成员或可用人")
     wanted = list(dict.fromkeys(body.user_ids))  # 前端重复勾选不该变成主键冲突
     if wanted:
         # 与协作者同口径：停用的账号不能进白名单（否则停用只挡登录，机器人照用）。
@@ -490,10 +529,10 @@ async def replace_allowed_users(
 @router.get("/{bot_id}/approvers")
 async def list_approvers(
     bot_id: uuid.UUID,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await load_bot(session, bot_id)
+    await _visible_bot(session, bot_id, user)
     return {"code": 0, "data": await _approvers_of(session, bot_id)}
 
 
@@ -505,9 +544,11 @@ async def replace_approvers(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot.id)):
         raise forbidden()
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("设置审批人"))
     wanted = list(dict.fromkeys(body.user_ids))
     if wanted:
         # 与注入时的 approver_logins 同一口径：存下来的人必须真能被注入，
@@ -579,9 +620,15 @@ async def workspace_switch_preview(
     from coreman.core.knowledge.memory_transfer import active_counts
     from coreman.core.relay.agent_client import AgentError, call_agent
 
-    bot = await load_bot(session, bot_id)
+    bot = await _visible_bot(session, bot_id, user)
     if not can_switch_relay(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
+    if inactive_assistant(bot):
+        # 与换运行时同一口径：开通没完成、正在停用或已停用的助理不换，也就不去探测节点。
+        raise ApiError(409, 409, ASSISTANT_NOT_ACTIVE_MESSAGE)
+    if is_assistant(bot) and body.target_directory is not None:
+        # 与换运行时同一口径：助理只落到平台分配的默认目录，不探测自选的路径。
+        raise ApiError(422, 422, unsupported("自选工作目录或使用已有目录"))
     target = await session.get(RelayServer, body.relay_server_id)
     creator = await session.get(User, bot.created_by)
     if (

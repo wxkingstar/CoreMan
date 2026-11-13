@@ -67,7 +67,11 @@ class SessionSwitchStage(ChatStageBase):
             ctx.log.info("sessions_listed", count=len(items))
             await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
             await tasks.finish(
-                session, ctx.task.id, status="succeeded", result={"sessions": len(items)}
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"sessions": len(items)},
+                bot_id=ctx.task.bot_id,
             )
             return True
         st = await interactions.get_open(
@@ -103,7 +107,11 @@ class SessionSwitchStage(ChatStageBase):
             ),
         )
         await tasks.finish(
-            session, ctx.task.id, status="succeeded", result={"session_switch": index}
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"session_switch": index},
+            bot_id=ctx.task.bot_id,
         )
         ctx.log.info("session_switched", index=index)
         return True

@@ -147,7 +147,11 @@ class CommandHandler:
                     session, ctx, reply_context=inbound.reply_context, text=hit.content
                 )
                 await tasks.finish(
-                    session, ctx.task.id, status="succeeded", result={"announcement": True}
+                    session,
+                    ctx.task.id,
+                    status="succeeded",
+                    result={"announcement": True},
+                    bot_id=ctx.task.bot_id,
                 )
                 await session.commit()
                 return
@@ -186,7 +190,11 @@ class CommandHandler:
                         text=msg("no_permission", ctx.locale),
                     )
                     await tasks.finish(
-                        session, ctx.task.id, status="succeeded", result={"denied": True}
+                        session,
+                        ctx.task.id,
+                        status="succeeded",
+                        result={"denied": True},
+                        bot_id=ctx.task.bot_id,
                     )
                     await session.commit()
                     return

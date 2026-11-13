@@ -17,6 +17,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.cron.access import job_config, require_operator
 from coreman.core.cron.delivery import delivery_summary, enqueue_result, private_destination
@@ -399,7 +400,8 @@ async def create_job(
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    await _bot(session, body.bot_id, actor)
+    if is_assistant(await _bot(session, body.bot_id, actor)):
+        raise ApiError(422, 422, unsupported("提醒与定时任务"))
     upcoming = await _validate(session, body, datetime.now(UTC), creator_id=actor.id)
     values = _values(body, request)
     row = CronJob(**values, created_by=actor.id, next_run_at=upcoming)

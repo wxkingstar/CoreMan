@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.exceptions import WebSocketException
 
+from coreman.core.assistants import sealed
 from coreman.core.bus import outbox
 from coreman.core.chat.reachability import private_target_valid
 from coreman.core.db.models import OutboxItem
@@ -105,6 +106,10 @@ class OutboxConsumer:
 
     async def _handle(self, session: AsyncSession, item: OutboxItem) -> bool:
         """处理一条；返回 False 表示连接不可用，这一轮别再领了。"""
+        if sealed.is_locked(item):
+            # 个人助理的内容读不出来（与飞书网关同样处理）：不发，免得把空内容当消息送出去。
+            await outbox.mark_skipped(session, item.id, sealed.LOCKED_CODE)
+            return True
         if item.lease_generation is not None and item.lease_generation != self.runner.generation:
             # 上一任租约排的队：它的会话上下文（req_id、卡片实体）对这条连接已经没意义了。
             await outbox.mark_skipped(session, item.id, "stale generation")

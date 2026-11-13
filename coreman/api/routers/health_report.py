@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api.deps import client_ip, current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
@@ -104,6 +105,8 @@ async def health_report(
     if bot is None:
         raise not_found("机器人不存在")
     await require_operator(session, bot, actor)
+    if is_assistant(bot):
+        raise ApiError(422, 422, unsupported("运行环境检查"))
     if not bot.relay_server_id:
         raise ApiError(409, 409, "机器人尚未分配实例")
     report_id = uuid.uuid4()
@@ -152,6 +155,8 @@ async def health_report(
                         current_actor = await fresh.get(User, actor_id)
                         if current_bot is None or current_actor is None:
                             raise ValueError("owner_missing")
+                        if is_assistant(current_bot):
+                            raise ValueError("assistant_unsupported")
                         speaker = await require_operator(fresh, current_bot, current_actor)
                         relay = (
                             await fresh.get(RelayServer, current_bot.relay_server_id)
@@ -160,6 +165,9 @@ async def health_report(
                         )
                         if relay is None or not relay.is_active:
                             raise ValueError("relay_unavailable")
+                        if relay.assistant_pool:
+                            # 助理池运行时只跑沙箱里的助理，由节点自己的沙箱自检保证健康。
+                            raise ValueError("assistant_pool_unsupported")
                         store = request.app.state.settings_store
                         access = await build_system_access(
                             fresh,

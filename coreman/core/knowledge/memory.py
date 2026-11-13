@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant
 from coreman.core.db.models import Bot, Memory, RelayServer, RuntimeNode
 from coreman.core.errors import ApiError
 from coreman.core.timeutils import aware_utc
@@ -108,6 +109,9 @@ async def collect(
     result = {"created": 0, "updated": 0, "unchanged": 0, "stale": 0, "deleted": 0}
     for entry in entries:
         bot = by_directory[entry.working_dir][0]
+        if is_assistant(bot):
+            # 个人助理的记忆不进库（记忆库暂不支持，内容不能明文落库）；同批其他员工照常处理。
+            continue
         digest = content_hash(entry.content)
         if entry.content_hash is not None and entry.content_hash != digest:
             raise ApiError(422, 422, "记忆内容与校验值不一致")

@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from coreman.api.routers import bot_workspace
-from coreman.core.db.models import Bot, Task
+from coreman.core.db.models import Bot, Task, User
 from coreman.core.relay.agent_client import AgentError
 from tests.api.conftest import login_as
 from tests.fakes.runtime_node import add_node_relay
@@ -229,3 +229,85 @@ async def test_git_view_is_read_only(client, db_session, agent):
         await client.put(url + "/git", json={"git_url": "https://example.com/r.git"})
     ).status_code in (404, 405)
     assert (await client.post(url + "/git/backup", json={"files": []})).status_code in (404, 405)
+
+
+async def assistant_setup(client, session):
+    from tests.integration.assistant_helpers import into_assistant
+
+    bot, url = await setup(client, session)
+    owner = await session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    await into_assistant(session, bot, owner)
+    return bot, url
+
+
+async def test_assistant_workspace_files_and_git_are_refused(client, db_session, agent):
+    """文件读写与 Git 查看由守护进程在沙箱外执行，会照办助理目录里的链接、Git 配置：一律拒绝。"""
+    bot, url = await assistant_setup(client, db_session)
+    # 只读数据库的状态查询不碰节点，照常可用。
+    assert (await client.get(url)).status_code == 200
+    for result in (
+        await client.get(url + "/files"),
+        await client.get(url + "/file", params={"path": "AGENTS.md"}),
+        await client.put(
+            url + "/file",
+            json={"path": "AGENTS.md", "content": "x", "expected_hash": None},
+        ),
+        await client.get(url + "/git/status"),
+        await client.get(url + "/git/diff", params={"path": "AGENTS.md"}),
+    ):
+        assert result.status_code == 422, result.text
+        assert "个人助理暂不支持" in result.text
+    agent.assert_not_called()
+
+
+async def test_assistant_initialize_only_on_a_missing_directory(client, db_session, monkeypatch):
+    """开通时目录还不存在，初始化照常；目录已在（里面可能有助理写的东西）就不在沙箱外重跑初始化。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, url = await assistant_setup(client, db_session)
+    info = {"success": True, "exists": True, "empty": False, "owned": True, "marked": True}
+
+    async def node(relay, cipher, operation, payload=None):
+        calls.append(operation)
+        if operation == "ping":
+            return {"success": True, "workspace_protocol": 1}
+        if operation == "workspace-info":
+            return info
+        return {"success": True, "initialized": True}
+
+    calls: list[str] = []
+    monkeypatch.setattr(workspace_transfer, "call_agent", node)
+    refused = await client.post(url + "/initialize")
+    assert refused.status_code == 422 and "个人助理暂不支持" in refused.text, refused.text
+    assert "workspace-init" not in calls
+    # 拒绝不改工作目录状态：就绪的助理照常干活。
+    assert (await client.get(url)).json()["data"]["state"] == "ready"
+
+    calls.clear()
+    info.update(exists=False, empty=True, owned=False, marked=False)
+    created = await client.post(url + "/initialize")
+    assert created.status_code == 200, created.text
+    assert calls == ["workspace-info", "ping", "workspace-init"]
+    assert created.json()["data"]["state"] == "ready"
+
+
+@pytest.mark.parametrize("state", ["provisioning", "deprovisioning", "deprovisioned", None])
+async def test_assistant_not_active_cannot_initialize(client, db_session, monkeypatch, state):
+    """没开通好或已停用的助理不能初始化工作目录：否则节点上会多出一个没人会删的目录。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, url = await assistant_setup(client, db_session)
+    bot.assistant_state = state
+    await db_session.commit()
+    calls: list[str] = []
+
+    async def node(relay, cipher, operation, payload=None):
+        calls.append(operation)
+        return {"success": True, "exists": False}
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", node)
+    refused = await client.post(url + "/initialize")
+    assert refused.status_code == 409, refused.text
+    assert "个人助理还没开通好或已停用" in refused.text
+    assert calls == []

@@ -11,6 +11,9 @@
 `rules-backup [--apply]`：立即备份一轮员工规则文档（scheduler 每天自动跑），
 见 core.bots.rules_backup。
 
+`assistant-keys rewrap [--apply]`：轮换 MASTER_KEY 之后，把个人助理的数据密钥改由新主密钥包裹，
+见 core.assistants.keys。
+
 `bots`、`skills`、`approvals`、`systems`、`teams`、`users`、`api`：管理后台常用操作的命令行版本，
 以 --as 指定的成员身份经同一套管理 API 执行，见 coreman.admin_cli。
 """
@@ -26,6 +29,7 @@ from sqlalchemy import select
 
 from coreman import admin_cli
 from coreman.api.errors import ApiError
+from coreman.core.assistants import keys as assistant_keys
 from coreman.core.config import get_settings
 from coreman.core.contacts import runner
 from coreman.core.db.models import PlatformApp
@@ -241,6 +245,26 @@ async def _rules_backup(apply: bool) -> int:
     return 0
 
 
+async def _assistant_keys_rewrap(apply: bool) -> int:
+    """把个人助理的数据密钥改由当前主密钥包裹；不加 --apply 只统计、不落库。"""
+    settings = get_settings()
+    configure_logging(
+        service="cli", instance="assistant-keys", level=settings.log_level, stream=sys.stderr
+    )
+    engine = make_engine(settings.database_url, command_timeout=None)
+    try:
+        async with make_session_factory(engine)() as session:
+            current, changed = await assistant_keys.rewrap(session, settings.build_cipher())
+            if apply:
+                await session.commit()
+            else:
+                await session.rollback()
+    finally:
+        await engine.dispose()
+    print(json.dumps({"current": current, "rewrapped" if apply else "stale": changed}))
+    return 0
+
+
 def _preview_texts(args: argparse.Namespace) -> dict[str, str] | None:
     """预览内容：--file 文件、--sample 某个样例，都不给就是全部样例。"""
     from coreman.core.feishu_cards.samples import SAMPLES
@@ -302,6 +326,10 @@ def main(argv: list[str] | None = None) -> int:
     tower_ops.add_parser("reconcile", help="翻 Tower 状态接口，补上丢失回调的审批决定")
     backup = sub.add_parser("rules-backup", help="立即备份员工规则文档到共用 GitHub 仓库")
     backup.add_argument("--apply", action="store_true", help="真正提交；不加只读取并列出改动")
+    akeys = sub.add_parser("assistant-keys", help="个人助理数据密钥")
+    akeys_ops = akeys.add_subparsers(dest="operation", required=True)
+    rewrap = akeys_ops.add_parser("rewrap", help="主密钥轮换后重新包裹数据密钥")
+    rewrap.add_argument("--apply", action="store_true", help="真正写入；不加只统计")
     cards = sub.add_parser("feishu-cards", help="飞书富卡片")
     cards_ops = cards.add_subparsers(dest="operation", required=True)
     pv = cards_ops.add_parser("preview", help="编译样例或文件并发给指定成员，做真机视觉回归")
@@ -325,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_tower_reconcile())
     if args.command == "contact-sync":
         return asyncio.run(_contact_sync(args.app))
+    if args.command == "assistant-keys" and args.operation == "rewrap":
+        return asyncio.run(_assistant_keys_rewrap(args.apply))
     if args.command == "rules-backup":
         return asyncio.run(_rules_backup(args.apply))
     return 2

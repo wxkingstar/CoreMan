@@ -102,6 +102,7 @@ async def run_fixed(ctx: TaskContext) -> bool:
             error_code=error,
             result={"cron_run_id": run.id, "self_reminder": True},
             only_active=True,
+            bot_id=task.bot_id,
         )
         await session.commit()
         return True

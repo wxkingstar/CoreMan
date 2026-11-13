@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.bus.notify import notify
 from coreman.core.db.models import Task
 from coreman.core.observability.metrics import TASK_DURATION, after_commit
@@ -90,6 +91,7 @@ async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
     }
     if new.run_after is not None:
         values["run_after"] = new.run_after
+    values = await sealed.seal_values(session, Task, new.bot_id, values)
     stmt = insert(Task).values(**values)
     if new.dedupe_key is not None:
         stmt = stmt.on_conflict_do_nothing(index_elements=[Task.dedupe_key])
@@ -101,8 +103,35 @@ async def enqueue(session: AsyncSession, new: NewTask) -> Task | None:
 
 
 async def claim(session: AsyncSession, *, lane: str, instance_id: str) -> Task | None:
+    # 所有机器人共用这条队列：一条解不开的任务抛错会回滚认领，下一轮又领到它，整条车道就停了。
+    sealed.tolerate_undecryptable(session)
     row = (await session.execute(_CLAIM_SQL, {"instance": instance_id, "lane": lane})).first()
-    return None if row is None else await get(session, int(row[0]))
+    if row is None:
+        return None
+    task = await get(session, int(row[0]))
+    if task is not None and sealed.is_undecryptable(task):
+        # 解不开（主密钥配错、密文被改）：落终态不再被认领。不写报错文字——写它要用同一把
+        # 密钥封存，主密钥配错时同样写不进去。
+        await finish(
+            session,
+            task.id,
+            status="failed",
+            error_code=sealed.UNDECRYPTABLE_CODE,
+            bot_id=task.bot_id,
+        )
+        return None
+    if task is not None and sealed.is_locked(task):
+        # 个人助理的数据密钥已销毁：内容读不出来，不交给处理器。
+        await finish(
+            session,
+            task.id,
+            status="failed",
+            error_code=sealed.LOCKED_CODE,
+            error_message="所有者的数据密钥已销毁，任务内容不可读",
+            bot_id=task.bot_id,
+        )
+        return None
+    return task
 
 
 async def get(session: AsyncSession, task_id: int) -> Task | None:
@@ -145,12 +174,31 @@ async def finish(
     error_code: str | None = None,
     error_message: str | None = None,
     only_active: bool = False,
+    bot_id: uuid.UUID | None = None,
 ) -> bool:
     """写终态；返回是否真的写进去了。
 
     `only_active=True` 时加 `status IN ACTIVE` 守卫：被 reaper 收割过的行不得再被原持有者
     改回 succeeded（守卫与 UPDATE 同一条语句，不存在读后写的窗口）。
+
+    Args:
+        bot_id: 任务所属的机器人，封存 `result` 与 `error_message` 时用；没传且有这两样要写时
+            按主键查一次
     """
+    # 截断按明文长度做，在加密之前。
+    message = error_message[:5000] if error_message else None
+    content: dict[str, Any] = {}
+    if result is not None:
+        content["result"] = result
+    if message is not None:
+        content["error_message"] = message
+    if content:
+        if bot_id is None:
+            bot_id = await session.scalar(select(Task.bot_id).where(Task.id == task_id))
+        stored = await sealed.seal_values(session, Task, bot_id, content)
+        result, message = stored.get("result"), stored.get("error_message")
+    else:
+        stored = content
     stmt = update(Task).where(Task.id == task_id)
     if only_active:
         stmt = stmt.where(Task.status.in_(ACTIVE))
@@ -161,10 +209,12 @@ async def finish(
                 finished_at=func.now(),
                 result=result,
                 error_code=error_code,
-                error_message=error_message[:5000] if error_message else None,
+                error_message=message,
             ).returning(Task.id, Task.kind, Task.started_at, Task.finished_at)
         )
     ).first()
+    # 这条语句会把写入的值同步到会话里已加载的任务对象上：助理的换回明文，调用方不用重取。
+    sealed.keep_plain(session, Task, content, stored)
     if row is not None and row[2] is not None:
         kind, elapsed = row[1], max(0, (row[3] - row[2]).total_seconds())
         after_commit(session, lambda: TASK_DURATION.labels(kind, status).observe(elapsed))
@@ -177,7 +227,11 @@ async def request_cancel(session: AsyncSession, task_id: int, reason: str) -> bo
         await session.execute(
             update(Task)
             .where(Task.id == task_id, Task.status.in_(OPEN), Task.cancel_requested_at.is_(None))
-            .values(cancel_requested_at=func.now(), cancel_reason=reason)
+            .values(
+                cancel_requested_at=func.now(),
+                # 取消原因不加密（心跳、运维接口、收尾都直接读）：个人助理的行只留代码。
+                cancel_reason=sealed.code_for_assistants(Task.bot_id, reason, "cancelled"),
+            )
             .returning(Task.id)
         )
     ).first()
@@ -195,9 +249,11 @@ async def active_for_session(
         .where(Task.bot_id == bot_id, Task.session_key == session_key, Task.status.in_(ACTIVE))
         .order_by(Task.id)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    await sealed.open_rows(session, rows)
+    return rows
 
 
 async def open_for_session(
@@ -214,9 +270,11 @@ async def open_for_session(
         )
         .order_by(Task.id)
     )
-    return list(
+    rows = list(
         (await session.execute(stmt, execution_options={"populate_existing": True})).scalars()
     )
+    await sealed.open_rows(session, rows)
+    return rows
 
 
 async def release_hold(session: AsyncSession, task: Task) -> None:

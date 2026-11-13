@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.records import is_assistant, unsupported
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
 from coreman.core.chat import interactions
@@ -308,6 +309,9 @@ async def handle_request(
         bot, actor, event = await verified_origin(session, task, cipher, text)
     except (ValueError, TypeError, AttributeError, ApiError):
         return "无法验证本人直接私聊请求，未设置提醒。" if reminder_request else None
+    if is_assistant(bot):
+        # 提醒正文会明文存进定时任务，个人助理暂不开放；不是提醒请求的照常交给对话。
+        return unsupported("提醒与定时任务") + "。" if reminder_request else None
     # Strip only outer whitespace after the exact normalized parts have been proved.
     text = text.strip()
     scope = f"{bot.id}:{actor.id}:{event.chat_id}"

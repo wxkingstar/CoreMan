@@ -99,6 +99,10 @@ async def consume_reply(
             ),
         )
     await tasks.finish(
-        session, ctx.task.id, status="succeeded", result={"escalation_id": row.escalation_id}
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"escalation_id": row.escalation_id},
+        bot_id=ctx.task.bot_id,
     )
     return True

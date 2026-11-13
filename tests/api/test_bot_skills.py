@@ -15,6 +15,7 @@ from coreman.core.db.models import (
     Task,
     User,
 )
+from coreman.core.errors import ApiError
 from coreman.core.knowledge import installation as installs
 from coreman.core.relay.agent_client import AgentError
 from coreman.core.timeutils import utcnow
@@ -527,3 +528,98 @@ async def test_switch_reinstalls_with_current_approval(client, db_session, db_en
         )
         is None
     )
+
+
+ASSISTANT_REFUSED = "个人助理暂不支持安装技能"
+
+
+async def as_assistant(session, bot):
+    """把夹具里的员工改成创建者本人的个人助理（助理只能是飞书）。"""
+    from tests.integration.assistant_helpers import into_assistant
+
+    owner = await session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    await into_assistant(session, bot, owner)
+    return owner
+
+
+@pytest.mark.parametrize("internal", [False, True])
+async def test_assistant_install_is_refused_before_anything_is_queued(client, db_session, internal):
+    """技能安装在助理工作目录里、沙箱外跑 npx：入口直接拒绝，不排任务也不提交审批。"""
+    bot, skill, _ = await prepare(client, db_session, internal=internal)
+    bot_id, skill_id = bot.id, skill.id
+    await as_assistant(db_session, bot)
+    result = await client.post(
+        f"/api/admin/bots/{bot_id}/skills/{skill_id}/install",
+        json={
+            "selected_env_groups": ["erp"] if internal else [],
+            "user_env_vars": {"API_KEY": "secret"},
+        },
+    )
+    assert result.status_code == 422 and ASSISTANT_REFUSED in result.text, result.text
+    assert await db_session.scalar(select(Task.id)) is None
+    assert await db_session.scalar(select(SkillApproval.id)) is None
+    assert await db_session.get(BotSkill, (bot_id, skill_id)) is None
+
+
+async def test_assistant_install_task_never_reaches_the_node(
+    client, db_session, db_engine, monkeypatch
+):
+    """排队之后才成了助理（或别的路径插进来的任务）：执行时拒绝，不向节点下发安装。"""
+    bot, skill, _ = await prepare(client, db_session)
+    bot_id, skill_id = bot.id, skill.id
+    calls = []
+
+    async def agent(*args):
+        calls.append(args[2])
+        return {"success": True}
+
+    monkeypatch.setattr(skill_install, "call_agent", agent)
+    result = await client.post(
+        f"/api/admin/bots/{bot_id}/skills/{skill_id}/install",
+        json={"user_env_vars": {"API_KEY": "secret"}},
+    )
+    assert result.status_code == 200, result.text
+    await as_assistant(db_session, bot)
+    with capture_logs() as logs:
+        task = await execute(db_session, db_engine, result.json()["data"]["task_id"])
+    assert calls == []
+    assert task.status == "failed"
+    assert task.error_message == f"安装未执行：{ASSISTANT_REFUSED}，请处理后重新提交。"
+    (failure,) = [entry for entry in logs if entry["event"] == "skill_install_failed"]
+    assert failure["error_code"] == "installation_assistant_unsupported"
+    assert failure["remote"] is False
+    db_session.expire_all()
+    row = await db_session.get(BotSkill, (bot_id, skill_id))
+    assert row.status == "failed" and row.install_task_id is None
+
+
+async def test_every_queue_path_refuses_an_assistant(client, db_session):
+    """一键升级、审批通过、系统授权的配套技能、换机重装都经 `installation.queue`，助理一律不排。"""
+    bot, skill, cipher = await prepare(client, db_session)
+    bot_id, skill_id = bot.id, skill.id
+    owner = await as_assistant(db_session, bot)
+    with pytest.raises(ApiError) as caught:
+        await installs.queue(db_session, cipher, bot=bot, skill=skill, actor=owner, inputs={})
+    assert caught.value.status_code == 422 and ASSISTANT_REFUSED in caught.value.message
+    # 授权业务系统时随系统自动装的配套技能：不需要输入的技能本来会直接排队。
+    skill.user_env_vars = {}
+    with pytest.raises(ApiError) as caught:
+        await installs.install_companion(
+            db_session, cipher, bot=bot, skill=skill, actor=owner, system_key="crm"
+        )
+    assert ASSISTANT_REFUSED in caught.value.message
+    await db_session.rollback()
+    # 目录页一键升级：助理被跳过并写明原因，没有排出任务。
+    skill = await db_session.get(Skill, skill_id)
+    skill.user_env_vars = {}
+    db_session.add(
+        BotSkill(bot_id=bot_id, skill_id=skill_id, status="installed", installed_at=utcnow())
+    )
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    result = await client.post(f"/api/admin/skills/{skill_id}/upgrade")
+    assert result.status_code == 200, result.text
+    data = result.json()["data"]
+    assert data["queued"] == [] and ASSISTANT_REFUSED in data["skipped"][0]["reason"]
+    assert await db_session.scalar(select(Task.id)) is None

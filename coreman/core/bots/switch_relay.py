@@ -12,6 +12,14 @@ from dataclasses import dataclass
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import runtime as assistant_runtime
+from coreman.core.assistants.records import (
+    ASSISTANT_NOT_ACTIVE_MESSAGE,
+    inactive_assistant,
+    is_assistant,
+    unsupported,
+    visible_to,
+)
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import can_switch_relay, relay_allowed_for_bot
@@ -28,7 +36,7 @@ from coreman.core.bots.workspace_transfer import (
 )
 from coreman.core.chat import sessions
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotSkill, RelayServer, User
+from coreman.core.db.models import Bot, BotSkill, RelayServer, RuntimeNode, User
 from coreman.core.errors import VERSION_CONFLICT, ApiError
 from coreman.core.knowledge.installation import reinstall_after_switch
 from coreman.core.relay.models import (
@@ -67,13 +75,22 @@ async def validate_switch(
     model: str | None,
     actor: User,
     member_ids: set[uuid.UUID],
+    workspace_mode: WorkspaceMode = "copy",
+    target_directory: str | None = None,
 ) -> str:
     """只做判定、不改任何东西：权限、目标可用、团队、后端就绪、模型；返回换过去用的模型。
 
     后台切换作业在入队前先用它把能当场拒绝的都拒绝掉，作业执行时 switch_relay 还会再判一次。
     """
-    if not can_switch_relay(actor, bot, member_ids):
+    if not can_switch_relay(actor, bot, member_ids) or not visible_to(bot, actor):
+        # 助理只有所有者能改绑：上线前由管理者排进队列的作业执行时也在这里挡下。
         raise SwitchError(403, "没有权限执行该操作")
+    if inactive_assistant(bot):
+        # 开通没完成、正在停用或已停用：换过去会在目标节点上建一个没人收拾的新目录。
+        raise SwitchError(409, ASSISTANT_NOT_ACTIVE_MESSAGE)
+    if is_assistant(bot) and (target_directory is not None or workspace_mode != "copy"):
+        # 助理只换到平台分配的默认目录（全新的空目录或原目录本身），不能自选或接管已有目录。
+        raise SwitchError(422, unsupported("自选工作目录或使用已有目录"))
     # 换到当前这台不做可见性/团队校验：同 relay 换模型走的也是这个入口，机器人本来就在上面
     # 跑着，PATCH model 同样不看 relay 可见性——对 visibility='admins' 的实例多这一道就成了
     # 「机器人管理员连自己的模型都改不了」。
@@ -95,6 +112,21 @@ async def validate_switch(
             await validate_backend_ready(session, target)
         except ApiError as exc:
             raise SwitchError(exc.status_code, exc.message) from exc
+    if not same_relay and is_assistant(bot):
+        # 个人助理只能改绑到助理池或所有者本人的私有运行时，且那台要能隔离运行助理。
+        node = (
+            await session.get(RuntimeNode, target.runtime_node_id)
+            if target.runtime_node_id
+            else None
+        )
+        problem = await assistant_runtime.switch_target_error(session, target, node, bot.owner_id)
+        if problem is not None:
+            raise SwitchError(422, problem)
+    elif not same_relay:
+        # 普通员工不能换到助理池的节点上：它不在沙箱里，会读到助理的明文。
+        problem = await assistant_runtime.standard_bind_error(session, target)
+        if problem is not None:
+            raise SwitchError(422, problem)
     if model is not None:
         try:
             await validate_model_for_relay(session, target, model, bot.effort_level)
@@ -141,7 +173,14 @@ async def switch_relay(
     `drain=True` 用于后台切换作业：不要求员工空闲，隔离后等已在跑的这一轮结束再迁移。
     """
     new_model = await validate_switch(
-        session, bot=bot, target=target, model=model, actor=actor, member_ids=member_ids
+        session,
+        bot=bot,
+        target=target,
+        model=model,
+        actor=actor,
+        member_ids=member_ids,
+        workspace_mode=workspace_mode,
+        target_directory=target_directory,
     )
     if target is None:  # validate_switch 已拒绝，这里只为收窄类型
         raise SwitchError(422, "目标运行时未注册或不可用")
@@ -162,6 +201,8 @@ async def switch_relay(
     # 会话文件已在目标运行时上的 relay 会话：原样续用。同一实例同一目录（只换模型）全部续用。
     carried = {row.relay_session_id for row in await sessions.list_for_bot(session, bot.id)}
     moved_skills: list[BotSkill] = []
+    # 还是原来那个目录（同一节点同一路径，或共享盘上的同一份）：换完之后旧目录照常在用，不能删。
+    reused = True
     requested_directory = target_directory
     target_directory = bot.working_dir
     if not same_relay or changing_directory:
@@ -205,6 +246,13 @@ async def switch_relay(
         bot.workspace_target_relay_id, bot.workspace_target_dir = None, None
     bot.working_dir = target_directory
     bot.relay_server_id, bot.model = target.id, new_model
+    if is_assistant(bot) and old_relay_id is not None and not reused:
+        from coreman.core.assistants import retired_dirs
+
+        # 助理换走之后旧目录没人再用：登记下来由看护进程删掉（只删带本助理标记的目录）。
+        await retired_dirs.retire(
+            session, bot_id=bot.id, relay_id=old_relay_id, working_dir=old_directory
+        )
     if bot.effort_level:
         # 自动换来的模型不支持 xhigh / max 时降到它支持的最高档，否则下发给 relay 的就是非法档位。
         bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)

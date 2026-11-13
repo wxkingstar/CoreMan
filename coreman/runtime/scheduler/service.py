@@ -43,6 +43,8 @@ MAX_HEARTBEAT_SECONDS = 10.0
 RECONCILE_SECONDS = 300.0
 CONTACT_SYNC_CHECK_SECONDS = 300.0
 RULES_BACKUP_CHECK_SECONDS = 600.0
+# 个人助理的开通与停用：多久推进一次（授权完成后最多这么久就开通好）。
+ASSISTANT_LIFECYCLE_SECONDS = 5.0
 
 
 class SchedulerService(Service):
@@ -124,6 +126,7 @@ class SchedulerService(Service):
                 ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
                 ("scheduler-contact-sync", self._contact_sync_loop()),
                 ("scheduler-rules-backup", self._rules_backup_loop()),
+                ("scheduler-assistant-lifecycle", self._assistant_lifecycle_loop()),
             )
         ]
         self.ready = True
@@ -232,6 +235,25 @@ class SchedulerService(Service):
                 async with self._factory() as session:
                     counts["approval_resumes"] = await approval_tick(session, now)
                     await session.commit()
+                from coreman.core.assistants.approvals.service import tick as assistant_tick
+
+                try:
+                    async with self._factory() as session:
+                        counts.update(await assistant_tick(session, now))
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 审批闸门一直出错，也不能挡住后面的清理
+                    self._log.warning("assistant_approval_tick_failed", error=type(exc).__name__)
+                from coreman.core.assistants import transcripts as assistant_transcripts
+
+                try:
+                    async with self._factory() as session:
+                        ttl = int(await self._store.get("session_ttl_hours", default=72))
+                        counts["assistant_transcripts_purged"] = await assistant_transcripts.purge(
+                            session, now - timedelta(hours=ttl + 24)
+                        )
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 转录清理出错不能挡住后面的清理
+                    self._log.warning("assistant_transcript_purge_failed", error=type(exc).__name__)
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
                     next_cleanup = time.monotonic() + self._cleanup_seconds
@@ -387,6 +409,23 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("rules_backup_failed")
             await self._sleep(RULES_BACKUP_CHECK_SECONDS)
+
+    async def _assistant_lifecycle_loop(self) -> None:
+        """个人助理的开通与停用：单独一条循环，里面对节点与飞书的调用慢了、出错了都只影响它自己。"""
+        from coreman.core.assistants import lifecycle_runner
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    counts = await lifecycle_runner.tick(
+                        self._factory, self._cipher, datetime.now(UTC)
+                    )
+                    hits = {key: value for key, value in counts.items() if value}
+                    if hits:
+                        self._log.info("assistant_lifecycle", **hits)
+            except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
+                self._log.warning("assistant_lifecycle_failed", error=type(exc).__name__)
+            await self._sleep(ASSISTANT_LIFECYCLE_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""

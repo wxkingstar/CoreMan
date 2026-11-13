@@ -423,3 +423,40 @@ async def test_group_observe_switch_rules(
     assert r.status_code == 200 and r.json()["data"]["group_role"] == "dispatcher"
     r = await patch({"group_observe": "on"})
     assert r.status_code == 200 and r.json()["data"]["group_observe"] == "on"
+
+
+async def test_routes_hide_someone_elses_assistant_from_managers(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """切换、预览、启停、成员与名单：个人助理只有所有者看得到，管理员得到「机器人不存在」。"""
+    from tests.integration.assistant_helpers import into_assistant
+    from tests.integration.worker_helpers import seed_bot
+
+    bot, relay, _ = await seed_bot(db_session)
+    owner = await db_session.get(User, bot.created_by)
+    bot.platform = "feishu"
+    await into_assistant(db_session, bot, owner)
+    await db_session.refresh(bot)
+    base = f"/api/admin/bots/{bot.id}"
+    for role in ("platform_admin", "ai_committee"):
+        await login_as(client, db_session, role=role)
+        headers = {"If-Match": str(bot.version)}
+        for response in (
+            await client.post(
+                base + "/switch-relay", json={"relay_server_id": str(relay.id)}, headers=headers
+            ),
+            await client.post(
+                base + "/workspace/switch-preview", json={"relay_server_id": str(relay.id)}
+            ),
+            await client.post(base + "/toggle"),
+            await client.get(base + "/members"),
+            await client.post(base + "/members", json={"user_id": str(owner.id)}),
+            await client.delete(base + f"/members/{owner.id}"),
+            await client.get(base + "/allowed-users"),
+            await client.get(base + "/approvers"),
+        ):
+            assert response.status_code == 404, response.text
+    await db_session.refresh(bot)
+    assert bot.enabled is True
+    await login_existing(client, db_session, owner)
+    assert (await client.get(base + "/members")).status_code == 200

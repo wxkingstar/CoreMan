@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 
-from coreman.runtime.gateway_feishu.child import wait_for_work
+from coreman.runtime.gateway_feishu.child import wait_for_notice, wait_for_work
 
 
 class FakeListener:
@@ -48,3 +48,25 @@ async def test_sleeps_until_the_poll_interval_and_returns_at_once_when_stopping(
     started = loop.time()
     await wait_for_work(listener, uuid.uuid4(), stop, 5.0)  # type: ignore[arg-type]
     assert loop.time() - started < 0.5
+
+
+async def test_app_connection_wakes_up_for_any_of_its_assistants() -> None:
+    mine = {str(uuid.uuid4()), str(uuid.uuid4())}
+    listener, stop = FakeListener(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    listener.queues["stream_updated"].put_nowait({"bot_id": str(uuid.uuid4())})
+
+    async def notify_later() -> None:
+        await asyncio.sleep(0.2)
+        listener.queues["outbox_added"].put_nowait({"bot_id": sorted(mine)[1]})
+
+    started = loop.time()
+    notifier = asyncio.create_task(notify_later())
+    await wait_for_notice(listener, mine.__contains__, stop, 5.0)  # type: ignore[arg-type]
+    await notifier
+    assert 0.15 <= loop.time() - started < 2.0
+    # 通知项（bot_id 为 None）与空集合都不算。
+    listener.queues["outbox_added"].put_nowait({"bot_id": "None"})
+    started = loop.time()
+    await wait_for_notice(listener, set().__contains__, stop, 0.3)  # type: ignore[arg-type]
+    assert 0.25 <= loop.time() - started < 1.5

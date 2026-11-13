@@ -136,6 +136,7 @@ class StreamWriter:
             delivery = await streams.update_state(
                 session,
                 self.ctx.task.id,
+                bot_id=self.ctx.task.bot_id,
                 thinking_md=state[0],
                 pending_text=state[1],
                 segment_boundaries=list(state[2]),
@@ -160,6 +161,7 @@ class StreamWriter:
             await streams.update(
                 session,
                 self.ctx.task.id,
+                bot_id=self.ctx.task.bot_id,
                 thinking_md=self.thinking_md(),
                 pending_text=text,
                 segment_boundaries=boundaries,
@@ -174,6 +176,7 @@ class StreamWriter:
                 final_text=self.ctx.redact(final_text) or "",
                 pending_card=pending_card,
                 activity=activity,
+                bot_id=self.ctx.task.bot_id,
             )
             await session.commit()
         return done

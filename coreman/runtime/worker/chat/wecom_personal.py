@@ -189,7 +189,9 @@ async def _finish(
     session: AsyncSession, ctx: TaskContext, intake: Intake, text: str, result: dict[str, Any]
 ) -> bool:
     await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
-    await tasks.finish(session, ctx.task.id, status="succeeded", result=result)
+    await tasks.finish(
+        session, ctx.task.id, status="succeeded", result=result, bot_id=ctx.task.bot_id
+    )
     return True
 
 
@@ -249,7 +251,11 @@ async def intercept(session: AsyncSession, ctx: TaskContext, intake: Intake) -> 
         payload={"card": selection_card(card_task_id(ctx.task.id), row.authorization_level, icon)},
     )
     await tasks.finish(
-        session, ctx.task.id, status="succeeded", result={"wecom_personal_flow": True}
+        session,
+        ctx.task.id,
+        status="succeeded",
+        result={"wecom_personal_flow": True},
+        bot_id=ctx.task.bot_id,
     )
     return True
 

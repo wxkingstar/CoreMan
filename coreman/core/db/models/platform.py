@@ -24,7 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin
 from coreman.core.db.models.account import PLATFORM_CHECK
 
-CAPABILITIES = ("contact_sync", "login", "notify", "callback")
+CAPABILITIES = ("contact_sync", "login", "notify", "callback", "assistant")
 
 
 class PlatformApp(TimestampMixin, Base):
