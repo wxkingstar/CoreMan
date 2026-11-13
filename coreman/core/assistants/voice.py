@@ -119,6 +119,11 @@ def session_key(row: AssistantSettings) -> str:
     return f"{row.chat_id}{platform_turns.JOB_SEPARATOR}{SESSION_SUFFIX}"
 
 
+def dedupe_key(bot_id: uuid.UUID, nonce: int) -> str:
+    """口吻样本那一轮的幂等键；重新生成按它数当天排过几轮。"""
+    return f"assistant-cold-start:{bot_id}:{nonce}:voice"
+
+
 async def enqueue(
     session: AsyncSession, bot: Bot, row: AssistantSettings, samples: list[str], nonce: int
 ) -> Task | None:
@@ -129,7 +134,7 @@ async def enqueue(
         COLD_START_KIND,
         {"samples": samples},
         session_key=session_key(row),
-        dedupe_key=f"assistant-cold-start:{bot.id}:{nonce}:voice",
+        dedupe_key=dedupe_key(bot.id, nonce),
     )
 
 

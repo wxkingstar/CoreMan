@@ -44,3 +44,13 @@ def code(response: httpx.Response) -> str | None:
     errors = response.json().get("errors") or [{}]
     found = errors[0].get("type")
     return found if isinstance(found, str) else None
+
+
+async def fresh(db_session: AsyncSession, *rows: Bot) -> None:
+    """丢掉会话里缓存的行，再把这几条助理记录读回来。
+
+    接口在另一个会话里改了库；`expire_all` 之后直接取 `bot.id` 会在同步上下文里触发加载。
+    """
+    db_session.expire_all()
+    for row in rows:
+        await db_session.refresh(row)

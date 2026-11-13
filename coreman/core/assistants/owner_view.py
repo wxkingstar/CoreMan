@@ -21,6 +21,7 @@ from coreman.core.db.models import (
     AssistantApproval,
     AssistantJob,
     AssistantLifecycle,
+    AssistantSettings,
     AssistantWatch,
     Bot,
     PlatformApp,
@@ -29,6 +30,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.runtime_nodes.transport import online
+from coreman.core.timeutils import utcnow
 
 # 开通的三步，页面按这些代号显示文案：私聊助理应用 → 点卡片上的「开通」→ 完成飞书授权。
 HOW_TO = ("open_private_chat", "accept_offer", "authorize")
@@ -252,3 +254,74 @@ def settled_view(row: AssistantApproval) -> dict[str, Any]:
         "executed_at": row.executed_at.isoformat() if row.executed_at else None,
         "locked": sealed.is_locked(row),
     }
+
+
+async def preferences(
+    session: AsyncSession, row: AssistantSettings, now: datetime
+) -> dict[str, Any]:
+    """页面上的设置表单要的全部：`settings.view` 加上每日预算、平台默认值与各项上限。
+
+    `row` 的内容列要已还原（`settings.get` 取出来的就是）。
+    """
+    default = await delivery.default_budget(session)
+    return {
+        **assistant_settings.view(row, now),
+        # 个人值；None 表示跟随平台默认。
+        "daily_turn_budget": row.daily_turn_budget,
+        "platform_daily_turn_budget": default,
+        # 实际生效的：两者里较小的。管理员把平台默认调到个人值以下时，个人值留着但不再生效。
+        "effective_daily_turn_budget": delivery.effective_budget(row.daily_turn_budget, default),
+        "limits": {
+            "focus_chats": assistant_settings.MAX_FOCUS,
+            "ignored_chats": assistant_settings.MAX_IGNORED,
+            "budget_min": delivery.BUDGET_MIN,
+        },
+        "locked": sealed.is_locked(row),
+    }
+
+
+async def set_budget(
+    session: AsyncSession, bot_id: uuid.UUID, value: int | None
+) -> AssistantSettings:
+    """所有者改自己的每日轮次预算；`None` 是清掉个人值、跟随平台默认。只 flush，调用方提交。
+
+    个人只能调低：调到平台默认值之上，管理员的设置就形同虚设（实际生效的本来也是两者里
+    较小的那个，见 `delivery.effective_budget`；这里拒绝是为了不让页面存下一个不生效的数）。
+    范围下限与上限由入参模型挡。
+
+    Raises:
+        SettingsError: budget_over_platform
+    """
+    limit = await delivery.default_budget(session)
+    if value is not None and value > limit:
+        raise assistant_settings.SettingsError("budget_over_platform", limit=limit)
+    row = await assistant_settings.get(session, bot_id)
+    row.daily_turn_budget = value
+    row.updated_at = utcnow()
+    await session.flush()
+    return row
+
+
+SHIFT_STATES = ("on", "off", "auto")
+
+
+def switch_shift(row: AssistantSettings, state: str, now: datetime) -> None:
+    """页面上的「上班」「下班」「按工作时段」：与私聊里说「上班」「下班」同一个效果。
+
+    `on` / `off` 的到期时刻照 `settings.clock_in` / `clock_out`；`auto` 清掉临时切换。上班、或
+    下班时本来在班，都记下今天上过班（下班整理凭它触发）。调用方加锁、提交。
+
+    Raises:
+        ValueError: 不认识的状态
+    """
+    if state not in SHIFT_STATES:
+        raise ValueError(f"unknown shift state: {state}")
+    if state == "auto":
+        assistant_settings.clear_override(row)
+        return
+    if state == "on" or assistant_settings.on_shift(row, now):
+        row.worked_on = assistant_settings.local_today(row, now)
+    if state == "on":
+        assistant_settings.clock_in(row, now)
+    else:
+        assistant_settings.clock_out(row, now)

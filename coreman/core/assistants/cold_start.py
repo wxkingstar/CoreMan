@@ -27,7 +27,7 @@ from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import COLD_START_STEPS, AssistantSettings, Bot
+from coreman.core.db.models import COLD_START_STEPS, AssistantSettings, Bot, Task
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.logging import get_logger
@@ -460,6 +460,77 @@ async def _voice_step(
         await voice.enqueue(session, bot, row, samples, nonce(row))
     await skip(session, bot, row, "voice", now)
     return "voice_queued" if queued else "voice_skipped"
+
+
+# 所有者在「我的助理」页上要求重新生成口吻页：每天（他的时区）至多排这么多轮。
+REGENERATE_DAILY = 3
+
+
+class VoiceError(Exception):
+    """这次重新生成口吻页没有排上；`code` 给页面的接口映射成提示。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _regenerate_nonce(row: AssistantSettings, now: datetime, slot: int) -> int:
+    """重新生成的幂等编号：所有者时区的日期加当天第几次。
+
+    与冷启动自己的编号（开始时刻的毫秒数，十三位）不会撞：这个数只有九位。
+    """
+    return int(assistant_settings.local_today(row, now).strftime("%Y%m%d")) * 10 + slot
+
+
+async def regenerate_voice(
+    session: AsyncSession, cipher: Cipher, bot: Bot, now: datetime
+) -> tuple[Task, int]:
+    """所有者要求重新生成口吻页：再读一次他最近自己发出的消息，排一轮口吻样本。调用方提交。
+
+    与冷启动第一步是同一条路（`voice.collect` + `voice.enqueue`，同样不出声、同样只读得到他
+    自己的话）。那一轮保存时仍守 `voice.save` 的规矩：口吻页最后不是助理写的就不覆盖，所以这里
+    提前拒绝，不白跑一轮。次数按排上的轮数算（查任务的幂等键），没排上的不占。
+
+    Returns:
+        （排上的任务, 今天还能再排几次）
+
+    Raises:
+        VoiceError: `cold_start_unfinished`（冷启动还没做完，口吻页归它管）、`content_locked`、
+            `voice_page_edited`、`voice_daily_limit`、`authorization_required`（以所有者身份读
+            飞书的核对没过）、`feishu_unavailable`、`too_few_samples`、`assistant_unavailable`
+    """
+    row = await assistant_settings.get(session, bot.id)
+    if row.cold_start_done_at is None or not assistant_settings.identified(row):
+        raise VoiceError("cold_start_unfinished")
+    if not await sealed.key_ready(session, bot.id):
+        raise VoiceError("content_locked")
+    if await notes.author(session, bot.id, voice.PATH) not in (None, "assistant"):
+        raise VoiceError("voice_page_edited")
+    nonces = [_regenerate_nonce(row, now, slot) for slot in range(1, REGENERATE_DAILY + 1)]
+    keys = [voice.dedupe_key(bot.id, nonce) for nonce in nonces]
+    used = set(await session.scalars(select(Task.dedupe_key).where(Task.dedupe_key.in_(keys))))
+    free = [nonce for nonce, key in zip(nonces, keys, strict=True) if key not in used]
+    if not free:
+        raise VoiceError("voice_daily_limit")
+    call = await _reader(session, cipher, bot, row)
+    if call is None:
+        raise VoiceError("authorization_required")
+
+    async def ours(message_ids: list[str]) -> frozenset[str]:
+        # 平台经审批代所有者发出的消息是助理起草的：不进口吻样本。
+        return await sent.among(session, bot.id, message_ids)
+
+    try:
+        samples = await voice.collect(call, row, now, ours=ours)
+    except PersonalError:
+        raise VoiceError("feishu_unavailable") from None
+    if len(samples) < voice.MIN_MESSAGES:
+        raise VoiceError("too_few_samples")
+    task = await voice.enqueue(session, bot, row, samples, free[0])
+    if task is None:
+        # 同一刻另一个请求占了这个编号，或这位助理现在跑不了平台来源的轮次。
+        raise VoiceError("assistant_unavailable")
+    return task, len(free) - 1
 
 
 async def _question_step(
