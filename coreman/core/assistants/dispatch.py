@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -48,6 +49,8 @@ TOOL = "assistant_ask_bot"
 # 问题的字数上限：够讲清一件事，贴不下整段聊天记录。
 MAX_QUESTION = 4000
 MAX_REF = 100
+# 一个串对得上几位员工时，随 `bot_ambiguous` 给出的候选至多这么多位。
+AMBIGUOUS_LIMIT = 5
 LIST_LIMIT = 100
 DESCRIPTION_LIMIT = 200
 SESSION_PREFIX = "assistant-help:"
@@ -85,11 +88,15 @@ FAILURE_NOTES = {
 
 
 class DispatchError(Exception):
-    """调用方能照着改的拒绝；`code` 原样作为工具的 error 返回，不带任何内容。"""
+    """调用方能照着改的拒绝；`code` 原样作为工具的 error 返回，不带任何内容。
 
-    def __init__(self, code: str) -> None:
+    `bots` 只在 `bot_ambiguous` 时有：这个串对得上的几位员工，给助理改用编号再调一次。
+    """
+
+    def __init__(self, code: str, bots: Sequence[Bot] = ()) -> None:
         super().__init__(code)
         self.code = code
+        self.bots = list(bots)
 
 
 def session_key_for(job_id: uuid.UUID) -> str:
@@ -234,7 +241,11 @@ def listing(rows: list[Bot]) -> list[dict[str, str]]:
 
 
 async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool = True) -> Bot:
-    """按标识（`bot_key`）或名称找到目标员工并核对资格（`attended` 见 `authorize`）。
+    """按编号、标识（`bot_key`）或名称找到目标员工并核对资格（`attended` 见 `authorize`）。
+
+    标识命中时还要看有没有另一位员工的显示名正是这个串：标识是建员工的人自己取的，取成别人
+    的名字就能把按名字找那一位的求助截走。撞上了报 `bot_ambiguous` 并带上候选（同名的几位
+    也一样），助理改用候选里的编号再调——编号谁也取不了，标识与名字相撞的那一位只能靠它。
 
     Raises:
         DispatchError: invalid_bot / bot_not_found / bot_ambiguous / bot_not_available /
@@ -245,20 +256,28 @@ async def resolve(session: AsyncSession, bot: Bot, ref: str, *, attended: bool =
         raise DispatchError("invalid_bot")
     await owner_of(session, bot)
     base = _dispatchable(bot)
-    found = list(await session.scalars(select(Bot).where(*base, Bot.bot_key == ref).limit(1)))
+    try:
+        by_id: uuid.UUID | None = uuid.UUID(ref)
+    except ValueError:
+        by_id = None
+    found: list[Bot] = []
+    if by_id is not None:
+        found = list(await session.scalars(select(Bot).where(*base, Bot.id == by_id).limit(1)))
     if not found:
-        found = list(
+        named = list(
             await session.scalars(
                 select(Bot)
                 .where(*base, func.lower(Bot.name) == ref.lower())
                 .order_by(Bot.bot_key)
-                .limit(2)
+                .limit(AMBIGUOUS_LIMIT)
             )
         )
+        keyed = list(await session.scalars(select(Bot).where(*base, Bot.bot_key == ref).limit(1)))
+        found = [*keyed, *(row for row in named if not keyed or row.id != keyed[0].id)]
     if not found:
         raise DispatchError("bot_not_found")
     if len(found) > 1:
-        raise DispatchError("bot_ambiguous")
+        raise DispatchError("bot_ambiguous", found[:AMBIGUOUS_LIMIT])
     target, _ = await authorize(session, bot, found[0].id, attended=attended)
     return target
 

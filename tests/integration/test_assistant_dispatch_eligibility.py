@@ -129,3 +129,30 @@ def test_questions_are_bounded() -> None:
     assert long.value.code == "question_too_long"
     job_id = uuid.uuid4()
     assert dispatch.session_key_for(job_id) == f"assistant-help:{job_id}"
+
+
+async def test_a_key_that_is_someone_elses_name_does_not_win_silently(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await assistant(db_session)
+    # 一位员工的标识恰好是另一位的显示名：按这个串找人，不能悄悄落到标识那一位头上。
+    keyed = await target_bot(db_session, key="stock", name="别的员工")
+    named = await target_bot(db_session, key="demo-bot-b", name="Stock")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        await dispatch.resolve(db_session, bot, "stock")
+    assert refused.value.code == "bot_ambiguous"
+    assert [row.bot_key for row in refused.value.bots] == ["stock", "demo-bot-b"]
+    # 候选带着编号：标识与名字相撞的那一位只能靠编号指明。
+    assert (await dispatch.resolve(db_session, bot, str(keyed.id))).id == keyed.id
+    assert (await dispatch.resolve(db_session, bot, "demo-bot-b")).id == named.id
+    assert (await dispatch.resolve(db_session, bot, "别的员工")).id == keyed.id
+    # 同名的两位也带候选。
+    await target_bot(db_session, key="demo-bot-c", name="别的员工")
+    with pytest.raises(dispatch.DispatchError) as same:
+        await dispatch.resolve(db_session, bot, "别的员工")
+    assert same.value.code == "bot_ambiguous"
+    assert [row.bot_key for row in same.value.bots] == ["demo-bot-c", "stock"]
+    # 编号指到的员工照样要过资格。
+    with pytest.raises(dispatch.DispatchError) as missing:
+        await dispatch.resolve(db_session, bot, str(uuid.uuid4()))
+    assert missing.value.code == "bot_not_found"

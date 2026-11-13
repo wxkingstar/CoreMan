@@ -36,7 +36,12 @@ class AskBot(Arguments):
     bot: Annotated[
         str,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=core.MAX_REF),
-        Field(description="The `bot` value (or exact name) from assistant_bot_list"),
+        Field(
+            description=(
+                "The `bot` value (or exact name) from assistant_bot_list; after a bot_ambiguous"
+                " error, the `id` of the candidate you mean"
+            )
+        ),
     ]
     # 长度不写进 schema：超长要返回 question_too_long 与上限，而不是一句笼统的参数无效。
     question: str = Field(
@@ -77,7 +82,9 @@ HINTS = {
     "question_too_long": "问题超过字数上限：只写完成这件事必需的信息，不要贴聊天记录或整份文档。",
     "invalid_bot": "bot 填 assistant_bot_list 返回的标识或名称。",
     "bot_not_found": "没有这位员工，或它不能被调度；用 assistant_bot_list 看可以问谁。",
-    "bot_ambiguous": "不止一位员工叫这个名字：改用 assistant_bot_list 返回的 bot 标识。",
+    "bot_ambiguous": (
+        "这个名字或标识对得上不止一位员工：看 candidates，把要找的那一位的 id 填进 bot 再调一次。"
+    ),
     "bot_not_available": (
         "这位员工没有开启接受求助，或所有者不在它的可用人范围内："
         "如实告诉所有者，由他找这位员工的管理者。"
@@ -159,6 +166,11 @@ async def dispatch(
         out: dict[str, Any] = {"error": exc.code}
         if exc.code in HINTS:
             out["hint"] = HINTS[exc.code]
+        if isinstance(exc, core.DispatchError) and exc.bots:
+            out["candidates"] = [
+                {"bot": row.bot_key, "name": " ".join(row.name.split()), "id": str(row.id)}
+                for row in exc.bots
+            ]
         if exc.code == "question_too_long":
             out["limit"] = core.MAX_QUESTION
         if exc.code == "too_many_jobs":

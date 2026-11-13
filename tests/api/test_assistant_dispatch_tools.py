@@ -233,3 +233,23 @@ async def test_the_owner_in_person_may_ask_an_employee_on_a_private_runtime(
     assert [row["bot"] for row in listed_bots] == ["their-bot"]
     out = await call(client, auth, "assistant_ask_bot", {"bot": "their-bot", "question": QUESTION})
     assert out["job"]["status"] == "queued" and await rounds(db_session) == 1
+
+
+async def test_an_ambiguous_reference_comes_back_with_the_candidates(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    _, user, task = await owner_session(db_session, app)
+    keyed = await target_bot(db_session, key="stock", name="别的员工")
+    named = await target_bot(db_session, key="demo-bot-b", name="Stock")
+    auth = await headers(app, task, user)
+    out = await call(client, auth, "assistant_ask_bot", {"bot": "stock", "question": QUESTION})
+    assert out["error"] == "bot_ambiguous" and out["hint"]
+    assert out["candidates"] == [
+        {"bot": "stock", "name": "别的员工", "id": str(keyed.id)},
+        {"bot": "demo-bot-b", "name": "Stock", "id": str(named.id)},
+    ]
+    assert await rounds(db_session) == 0
+    again = await call(
+        client, auth, "assistant_ask_bot", {"bot": str(keyed.id), "question": QUESTION}
+    )
+    assert again["bot"] == "stock" and await rounds(db_session) == 1
