@@ -1,4 +1,4 @@
-"""每日轮次预算：数的是所有者时区里今天的对话记录；个人设置盖过平台默认；可以为负。"""
+"""每日轮次预算：数的是所有者时区里今天的对话记录；个人值与平台默认取较小者；可以为负。"""
 
 from __future__ import annotations
 
@@ -77,3 +77,20 @@ async def test_the_budget_can_go_negative(db_session: AsyncSession) -> None:
     await db_session.commit()
     await spend(db_session, bot, 13, NOON)
     assert await delivery.budget_left(db_session, bot, TODAY) == -3
+
+
+async def test_a_lowered_platform_default_tightens_personal_budgets_too(
+    db_session: AsyncSession,
+) -> None:
+    """个人值只能把预算调低：管理员把平台默认调到某人自己的值以下时，以较小的为准。"""
+    bot, _ = await ready(db_session)
+    (await settings.get(db_session, bot.id)).daily_turn_budget = 150
+    await db_session.commit()
+    assert await delivery.budget_left(db_session, bot, TODAY) == 150
+    db_session.add(Setting(key=delivery.BUDGET_KEY, value=80))
+    await db_session.commit()
+    assert await delivery.budget_left(db_session, bot, TODAY) == 80
+    assert (await delivery.usage(db_session, NOON))[bot.id].budget == 80
+    assert delivery.effective_budget(None, 80) == 80
+    assert delivery.effective_budget(30, 80) == 30
+    assert delivery.effective_budget(150, 80) == 80

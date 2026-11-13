@@ -93,6 +93,14 @@ async def default_budget(session: AsyncSession) -> int:
     return DEFAULT_BUDGET
 
 
+def effective_budget(own: int | None, default: int) -> int:
+    """实际生效的每日轮次预算：个人值与平台默认里较小的那个；没设个人值就是平台默认。
+
+    个人值只能把预算调低。管理员之后把平台默认调到某人的个人值以下时，那个人也跟着收紧。
+    """
+    return default if own is None else min(own, default)
+
+
 async def turns_used(session: AsyncSession, bot_id: uuid.UUID, zone: ZoneInfo, today: date) -> int:
     """这位助理今天跑了几轮：数对话记录。
 
@@ -115,7 +123,7 @@ async def budget_left(session: AsyncSession, bot: Bot, today: date) -> int:
     """
     prefs = await session.get(AssistantSettings, bot.id)
     own = prefs.daily_turn_budget if prefs is not None else None
-    total = own if own is not None else await default_budget(session)
+    total = effective_budget(own, await default_budget(session))
     zone = zone_named(prefs.timezone if prefs is not None else None)
     return total - await turns_used(session, bot.id, zone, today)
 
@@ -262,8 +270,7 @@ async def _tell_budget_spent(
     """预算用完后第一次有条目没交回：私信所有者一次（每天至多一次），不带任何内容。"""
     if row.budget_notified_on == today:
         return
-    own = prefs.daily_turn_budget
-    total = own if own is not None else await default_budget(session)
+    total = effective_budget(prefs.daily_turn_budget, await default_budget(session))
     await outbox.add(
         session,
         bot_id=bot.id,
@@ -542,6 +549,6 @@ async def usage(session: AsyncSession, now: datetime) -> dict[uuid.UUID, Usage]:
         )
         used.update({bot_id: int(count) for bot_id, count in counted.all()})
     return {
-        bot_id: Usage(used.get(bot_id, 0), own if own is not None else fallback)
+        bot_id: Usage(used.get(bot_id, 0), effective_budget(own, fallback))
         for bot_id, _name, own in rows
     }

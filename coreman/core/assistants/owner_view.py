@@ -116,7 +116,8 @@ async def overview(session: AsyncSession, bot: Bot, now: datetime) -> dict[str, 
         },
         "turns": {
             "today": used,
-            "budget": own if own is not None else await delivery.default_budget(session),
+            # 个人值与平台默认里较小的那个（`delivery.effective_budget`）。
+            "budget": delivery.effective_budget(own, await delivery.default_budget(session)),
         },
         "watch": (
             {
