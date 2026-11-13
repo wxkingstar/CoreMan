@@ -46,6 +46,7 @@ ENTITY_SELECTS = {
     "coreman/core/cloud_proxy/resume.py": 1,  # 定时来源的续跑：助理没有定时任务
     "coreman/core/cloud_proxy/service.py": 1,  # 只读状态与编号
     "coreman/core/chat/busy_choice.py": 1,  # 只读状态与时间
+    "coreman/core/chat/topics.py": 1,  # 话题只在群里，助理不收群消息；session.scalar
     "coreman/core/chat/collaboration_setup.py": 1,  # 群协作
     "coreman/core/chat/human_collaboration.py": 2,  # session.scalar，自动还原
     "coreman/core/chat/interactions.py": 2,  # 交互状态：显式还原，读不出来的当作没有
@@ -80,6 +81,7 @@ COLUMN_REFERENCES = {
     # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并
     "coreman/core/chat/interactions.py": 2,
     "coreman/core/chat/session_switch.py": 2,  # 取值后 open_value
+    "coreman/core/chat/topics.py": 1,  # 话题挂起标记：话题只在群里，助理不收群消息
     "coreman/core/escalations/media_recovery.py": 2,  # 明文键 escalation_id、message_id
     "coreman/core/escalations/service.py": 1,  # 下划线开头的明文键
     "coreman/core/feishu_docs/access.py": 2,  # 明文键 doc_links（取回的封装顶层就有）
