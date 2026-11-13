@@ -78,7 +78,7 @@ COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
     "coreman/core/assistants/notes.py": 1,  # 列索引时 defer 掉正文，不读它
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
-    "coreman/core/bus/tasks.py": 1,  # 明文键 serialize_session
+    "coreman/core/bus/tasks.py": 3,  # 明文键 serialize_session、stale_hold
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
     "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
     # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并

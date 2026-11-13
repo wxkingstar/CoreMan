@@ -60,6 +60,11 @@ class PlatformTurnHandler(ChatTaskHandler):
     INACTIVE = "platform_turn_inactive"
     OWNER_CHANGED = "platform_owner_changed"
     ANNOUNCED = "platform_turn_announced"
+    # 让路：同会话有别的任务时放回队列，等待逐次加倍；认领这么多次还轮不到就记失败，不私信。
+    YIELDED = "platform_turn_yielded"
+    YIELD_RETRY_SECONDS = 15.0
+    YIELD_RETRY_MAX_SECONDS = 300.0
+    YIELD_MAX_ATTEMPTS = 10
 
     async def _text(self, session: AsyncSession, ctx: TaskContext, bot: Bot) -> str | None:
         """这一轮交给模型的文本；返回 None 表示这一轮已经没有意义，任务按 `INACTIVE` 取消。"""
@@ -144,6 +149,44 @@ class PlatformTurnHandler(ChatTaskHandler):
             await tasks.finish(session, ctx.task.id, status="failed", error_code="assistant_paused")
             return None
         return stand_in(bot, row, ctx.task)
+
+    async def _take_session(self, ctx: TaskContext, intake: Intake) -> bool:
+        """没有入站事件的一轮不取消同会话的任务：没人在等它，所有者的消息优先。
+
+        同会话有别的任务在跑、或所有者的消息在排队时，自己放回队列稍后再认领。反过来所有者
+        一发消息，这一轮照旧被那条消息取消（`ChatTaskHandler._take_session`）。带入站事件的
+        回合（所有者私聊那一轮里提交的审批单的结果）沿用原来的做法。
+        """
+        if not platform_turns.is_platform(ctx.task):
+            return await super()._take_session(ctx, intake)
+        async with ctx.session_factory() as session:
+            if not await tasks.in_the_way(
+                session, intake.bot.id, intake.session_key, task_id=ctx.task.id
+            ):
+                return True
+            if ctx.task.attempts >= self.YIELD_MAX_ATTEMPTS:
+                await tasks.finish(
+                    session,
+                    ctx.task.id,
+                    status="failed",
+                    error_code=self.YIELDED,
+                    only_active=True,
+                )
+                await session.commit()
+                ctx.log.warning("platform_turn_yield_gave_up", attempts=ctx.task.attempts)
+                return False
+            seconds = min(
+                self.YIELD_RETRY_SECONDS * 2 ** max(ctx.task.attempts - 1, 0),
+                self.YIELD_RETRY_MAX_SECONDS,
+            )
+            deferred = await tasks.defer(session, ctx.task.id, seconds=seconds)
+            await session.commit()
+        if deferred:
+            ctx.log.info("platform_turn_yielded", attempts=ctx.task.attempts, seconds=seconds)
+        else:
+            # 没放回去：刚被所有者的消息取消，按取消收尾。
+            await self._cancelled_before_open(ctx)
+        return False
 
     def _needs_content(self) -> bool:
         """消息是平台写好的成品文本，没有媒体要下载。"""

@@ -119,12 +119,8 @@ class ChatTaskHandler(
             if held:
                 return None
             intake, parts = queued_batch.apply(intake, parts, entries)
-        # supersede 必须先提交再等：被替代的任务跑在另一条连接上，看不见未提交的取消标记。
-        async with ctx.session_factory() as session:
-            await tasks.supersede(
-                session, intake.bot.id, intake.session_key, except_task_id=ctx.task.id
-            )
-            await session.commit()
+        if not await self._take_session(ctx, intake):
+            return None
         try:
             ready = await self._wait_superseded(ctx, intake.bot.id, intake.session_key)
         except TimeoutError:
@@ -152,6 +148,17 @@ class ChatTaskHandler(
             )
         ctx.log.info("task_started", bot_key=intake.bot.bot_key, chat_type=intake.chat_type)
         return pre
+
+    async def _take_session(self, ctx: TaskContext, intake: Intake) -> bool:
+        """开轮前占住会话：把同会话其它活动任务标成被替代。返回 False 表示这一轮不开了，
+        任务已由这里处置。"""
+        # supersede 必须先提交再等：被替代的任务跑在另一条连接上，看不见未提交的取消标记。
+        async with ctx.session_factory() as session:
+            await tasks.supersede(
+                session, intake.bot.id, intake.session_key, except_task_id=ctx.task.id
+            )
+            await session.commit()
+        return True
 
     async def _observe_yields(self, ctx: TaskContext, intake: Intake) -> bool:
         """插话回合从不替代别的回合：同一个群里已有别的回复在排队或在跑（多半是有人 @ 了它），

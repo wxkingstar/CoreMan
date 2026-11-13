@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -341,6 +341,37 @@ async def has_newer(
         .limit(1)
     )
     stmt = stmt.where(Task.payload["serialize_session"].astext.is_distinct_from("true"))
+    return (await session.scalar(stmt)) is not None
+
+
+async def in_the_way(
+    session: AsyncSession, bot_id: uuid.UUID, session_key: str, *, task_id: int
+) -> bool:
+    """同会话里有没有该让的任务：别的任务在跑，或有不等 `task_id` 就会开跑的 chat 消息在排队。
+
+    排在 `task_id` 后面等它做完的消息（载荷 `serialize_session`、编号更大）不算：认领语句
+    不会放它先跑，让给它就成了两边互等。等确认的消息（`stale_hold`）同样不算。
+    """
+    waiting = and_(
+        Task.status == "queued",
+        Task.kind == "chat",
+        Task.cancel_requested_at.is_(None),
+        Task.payload["stale_hold"].astext.is_distinct_from("true"),
+        or_(
+            Task.payload["serialize_session"].astext.is_distinct_from("true"),
+            Task.id < task_id,
+        ),
+    )
+    stmt = (
+        select(Task.id)
+        .where(
+            Task.bot_id == bot_id,
+            Task.session_key == session_key,
+            Task.id != task_id,
+            or_(Task.status.in_(ACTIVE), waiting),
+        )
+        .limit(1)
+    )
     return (await session.scalar(stmt)) is not None
 
 
