@@ -61,6 +61,11 @@ OWNER_ABSENT = (
     "- 个人凭证：本轮由平台发起、所有者不在场，不能索取或使用个人凭证；"
     "需要时把要做的事告诉所有者，由他在私聊里让你做。"
 )
+# 个人助理调度来的一轮：提问人不在场，已保存的照常可用，但发不了表单、索取不了新的。
+STORED_ONLY = (
+    "- 个人凭证：本轮由提问人的个人助理代为发起，提问人不在场，不能向他索取凭证。"
+    "{have}缺凭证时按本轮说明返回 blocked，并写出需要的环境变量名。"
+)
 
 
 def guidance(origin_kind: str) -> str:
@@ -241,3 +246,31 @@ async def configure_cron(
         cron_job_id=job_id,
     )
     return await _apply(session, ctx, bot=bot, user_id=actor_id, cap=cap, extra=extra, env=env)
+
+
+def stored_status(names: tuple[str, ...]) -> str:
+    """个人助理调度来的一轮的本轮状态：已保存了哪些（只给名字）。"""
+    have = (
+        "他已在本 AI 员工保存（环境变量，只给名字）" + _names(names) + "，可以直接使用。"
+        if names
+        else "他在本 AI 员工还没有保存个人凭证。"
+    )
+    return STORED_ONLY.format(have=have)
+
+
+async def stored_only(
+    session: AsyncSession,
+    ctx: TaskContext,
+    intake: Intake,
+    extra: str,
+    env: dict[str, str],
+) -> tuple[str, dict[str, str], frozenset[str]]:
+    """只注入发言者在这位员工名下已保存的凭证；不下发索取用的地址与令牌，规则也不进提示词。"""
+    env = _strip(env)
+    user_id = intake.speaker.user_id
+    if intake.bot.platform not in service.PLATFORMS or user_id is None:
+        return extra, env, _NONE
+    found = await store.injected(session, ctx.cipher, bot_id=intake.bot.id, user_id=user_id)
+    env.update(found.env)
+    ctx.turn_notes.append(stored_status(found.names))
+    return extra, env, found.secret_values

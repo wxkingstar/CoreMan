@@ -412,7 +412,21 @@ class OpenStage(ChatStageBase):
 
         extra = ""
         personal_secrets: frozenset[str] = frozenset()
-        if ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
+        # 个人助理调度来的一轮：所有者不在场，凡是要他当场点卡片、或以他的飞书 / 企微身份行事的
+        # 能力都不挂（个人工具、本人定时任务、群文档、向员工或同事求助、凭证索取）；只注入他在
+        # 这位员工名下已保存的凭证，并在本轮块里写明这一轮怎么作答。
+        bot_help = ctx.task.kind == BOT_HELP_KIND
+        if bot_help:
+            from coreman.core.assistants import dispatch_prompt
+            from coreman.runtime.worker.chat import credentials
+
+            ctx.turn_notes.append(
+                dispatch_prompt.target_note(allow_write=ctx.task.payload.get("allow_write") is True)
+            )
+            extra, env, personal_secrets = await credentials.stored_only(
+                session, ctx, intake, extra, env
+            )
+        elif ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。
             from coreman.runtime.worker.chat.collaboration import configure
@@ -450,7 +464,8 @@ class OpenStage(ChatStageBase):
             session,
             ctx,
             bot=bot,
-            user_id=None if alert_turn or unattended else intake.speaker.user_id,
+            # 个人助理调度来的一轮也不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
+            user_id=None if alert_turn or unattended or bot_help else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,

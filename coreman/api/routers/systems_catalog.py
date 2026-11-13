@@ -161,7 +161,7 @@ async def call_tool(
             user=scope.user, subject=subject, task_id=task.id, bot_id=scope.bot.id
         ),
         systems=await granted_systems(session, scope.bot.id),
-        writable=frozenset(writable),
+        writable=policy.writable_for(task, writable),
         token_ttl=scope.bot.sse_timeout_seconds,
         perms=dict(state.get("perms") or {}),
         tokens=dict(state.get("tokens") or {}),
