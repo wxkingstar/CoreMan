@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type NoteEntry, type NoteIndex, type NotePage } from '@/api/myAssistant'
+import AssistantTransfer from '@/components/assistant/AssistantTransfer.vue'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage, isVersionConflict } from '@/utils/errors'
 import { formatBytes, formatDateTime } from '@/utils/format'
@@ -113,6 +114,11 @@ defineExpose({ editor, save, load })
       >
         {{ t('assistant.notes.regenerate') }}
       </el-button>
+      <!-- 密钥不可用时内容读不出来也写不进去：不给导入导出。导入完成后重新取索引。 -->
+      <AssistantTransfer
+        v-if="!index.locked"
+        @imported="load"
+      />
       <p
         v-if="!index.locked && !index.items.length"
         class="muted"

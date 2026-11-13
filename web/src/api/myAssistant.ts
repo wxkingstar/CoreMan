@@ -1,4 +1,4 @@
-import { call, http } from '@/api/client'
+import { ApiError, call, http } from '@/api/client'
 
 /** 「我的助理」页的接口：只对所有者本人，助理由登录人推出，路径里没有助理编号。 */
 
@@ -151,6 +151,23 @@ export interface AccessEntry {
 /** `next_before` 不为 null 时还有更早的，带着它再取下一页。 */
 export interface AccessPage { items: AccessEntry[]; next_before: number | null }
 
+/** 导入清单里的一行：只有路径、是否置顶或跳过的原因代码，没有正文。 */
+export interface ImportLine { path: string; pinned?: boolean; reason?: string }
+/** 导入的清单。确认时把 `digest` 原样带回去：期间库里有变化，服务端会拒绝并要求重新预览。 */
+export interface ImportPlan {
+  dry_run: boolean
+  digest: string
+  /** 包里跳过没读的系统文件个数（.DS_Store 之类）。 */
+  ignored: number
+  create: ImportLine[]
+  overwrite: ImportLine[]
+  skip: ImportLine[]
+  followups: { create: number; skip: { index: number; reason: string }[] }
+}
+
+/** 导入与导出要解压、逐页写入或打包，比普通接口慢得多。 */
+const TRANSFER_TIMEOUT = 180_000
+
 const root = '/api/me/assistant'
 /** 等待审批的调度靠这个工具名认出来（它没有子任务行）。 */
 export const DISPATCH_TOOL = 'assistant_ask_bot'
@@ -182,4 +199,23 @@ export const myAssistant = {
   /** 停用不可撤销：调用前必须已经让所有者二次确认。 */
   deprovision: () => call<{ state: string }>(http.post(`${root}/deprovision`, { confirm: true })),
   accessLog: (before?: number) => call<AccessPage>(http.get(`${root}/access-log`, { params: before ? { before } : {} })),
+  /** `dryRun` 为真只出清单；为假时必须带上预览给的 `expect`。 */
+  importArchive: (file: File, options: { dryRun: boolean; overwrite: boolean; expect?: string }) => {
+    const form = new FormData()
+    form.append('archive', file)
+    form.append('dry_run', String(options.dryRun))
+    form.append('overwrite', String(options.overwrite))
+    if (options.expect) form.append('expect', options.expect)
+    return call<ImportPlan>(http.post(`${root}/import`, form, { timeout: TRANSFER_TIMEOUT }))
+  },
+  /** 下载的是二进制：失败时响应体不是 JSON 信封，只带状态码。 */
+  exportArchive: async (): Promise<Blob> => {
+    try {
+      return (await http.get<Blob>(`${root}/export`, { responseType: 'blob', timeout: TRANSFER_TIMEOUT })).data
+    } catch (e) {
+      const err = e as { response?: { status?: number }; message?: string }
+      const status = err.response?.status ?? 0
+      throw new ApiError(status, status, err.message ?? '')
+    }
+  },
 }

@@ -21,7 +21,7 @@ const page = (over: Partial<NotePage>): NotePage => ({ ...entry({}), body: 'å›žå
 interface Exposed {
   editor: { open: boolean; isNew: boolean; path: string; title: string; summary: string; body: string; pinned: boolean; version: number }
 }
-const render = () => mount(AssistantNotes, { global: { plugins: [ElementPlus, i18n] } })
+const render = () => mount(AssistantNotes, { global: { plugins: [ElementPlus, i18n], stubs: { AssistantTransfer: true } } })
 const editor = (wrapper: ReturnType<typeof render>) => (wrapper.vm as unknown as Exposed).editor
 
 beforeEach(() => {
@@ -38,6 +38,18 @@ beforeEach(() => {
 })
 
 describe('knowledge base', () => {
+  it('offers import and export, reloads after an import, and hides both when locked', async () => {
+    const wrapper = render(); await flushPromises()
+    const transfer = wrapper.getComponent({ name: 'AssistantTransfer' })
+    transfer.vm.$emit('imported'); await flushPromises()
+    expect(myAssistant.notes).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+    vi.mocked(myAssistant.notes).mockResolvedValue({ items: [], locked: true })
+    const locked = render(); await flushPromises()
+    expect(locked.findComponent({ name: 'AssistantTransfer' }).exists()).toBe(false)
+    locked.unmount()
+  })
+
   it('lists pages, marks pinned ones clearly and says who changed each last', async () => {
     const wrapper = render(); await flushPromises()
     expect(wrapper.text()).toContain(t('assistant.notes.intro'))

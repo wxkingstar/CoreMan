@@ -160,6 +160,8 @@ describe('settings section', () => {
     const wrapper = render(); await flushPromises()
     await wrapper.get('[data-test="deprovision"]').trigger('click'); await flushPromises()
     expect(prompt.mock.calls[0][0]).toBe(t('assistant.settings.deprovisionPrompt', { name: '个人助理' }))
+    // 停用前提示可以先导出。
+    expect(prompt.mock.calls[0][0]).toContain('导出')
     const options = prompt.mock.calls[0][2] as { inputValidator: (value: string) => boolean | string }
     expect(options.inputValidator('个人助理')).toBe(true)
     expect(options.inputValidator('个人')).toBe(t('assistant.settings.deprovisionMismatch'))
