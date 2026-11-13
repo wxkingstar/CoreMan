@@ -182,7 +182,10 @@ async def test_poll_sanitizes_upstream_failures(response):
 def test_assistant_scopes_are_not_requested_for_ordinary_bots():
     from coreman.core.i18n.messages import MESSAGES, msg
 
-    assert manifest.ASSISTANT_SCOPES == ("im:chat.members:write_only",)
+    assert manifest.ASSISTANT_SCOPES == (
+        "im:chat.members:bot_access",
+        "im:chat.members:write_only",
+    )
     assert not set(manifest.ASSISTANT_SCOPES) & set(manifest.addons()["scopes"]["tenant"])
     assert not set(manifest.ASSISTANT_SCOPES) & set(manifest.missing_scopes([], kind="tenant"))
     assert "私聊" in msg("assistant_private_only")
