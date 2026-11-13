@@ -11,10 +11,12 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api import assistant_deprovision
 from coreman.api.deps import get_session
+from coreman.api.errors import ApiError
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.routers.me_assistant_common import (
     DEPENDENCIES,
@@ -102,6 +104,13 @@ VOICE_ERRORS: dict[str, tuple[int, str]] = {
     "too_few_samples": (409, "最近 7 天里你自己发出的消息太少，归纳不出口吻"),
     "assistant_unavailable": (409, "个人助理现在跑不了这一轮，稍后再试"),
 }
+
+
+class DeprovisionIn(BaseModel):
+    """停用不可撤销：必须明确带上 `confirm: true`（JSON 的 true；"true"、1 都不算）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    confirm: StrictBool
 
 
 class ShiftIn(BaseModel):
@@ -292,3 +301,23 @@ async def voice_regenerate(
         raise refuse(exc.code, VOICE_ERRORS) from None
     await session.commit()
     return {"code": 0, "data": {"queued": True, "left_today": left}}
+
+
+@router.post("/deprovision")
+async def deprovision(
+    body: DeprovisionIn,
+    request: Request,
+    own: Mine = Depends(mine),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """所有者停用自己的助理：与私聊里发「停用助理」并确认是同一件事，一旦开始不可撤销。
+
+    不要求助理处于可用状态：开通到一半、已经在停用中都可以点（后者不重复做）。
+    """
+    if body.confirm is not True:
+        raise ApiError(422, 422, "停用不可撤销，请带上 confirm: true")
+    state = await assistant_deprovision.begin(
+        session, request, own.bot, trigger="owner", actor=own.actor
+    )
+    await session.commit()
+    return {"code": 0, "data": {"state": state}}

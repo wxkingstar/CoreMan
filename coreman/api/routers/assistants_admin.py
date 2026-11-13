@@ -15,13 +15,13 @@ from pydantic import BaseModel, StrictBool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.api.deps import client_ip, get_session
+from coreman.api import assistant_deprovision
+from coreman.api.deps import get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import delivery, deprovisioning, jobs, lifecycle
+from coreman.core.assistants import delivery, jobs
 from coreman.core.assistants import settings as assistant_settings
-from coreman.core.audit import record_audit
 from coreman.core.db.models import (
     AssistantInbox,
     AssistantLifecycle,
@@ -201,30 +201,6 @@ async def deprovision(
     bot = await session.get(Bot, bot_id)
     if bot is None or bot.kind != "assistant":
         raise not_found("个人助理不存在")
-    prior = await lifecycle.live(session, bot.owner_id, lock=False) if bot.owner_id else None
-    before = (prior.id, prior.action, prior.step) if prior is not None else None
-    flow = await deprovisioning.request(session, bot, trigger="admin", actor_id=user.id)
-    # 只在这一次真的开始了停用时记审计（新开的停用流程，或把宽限期里的停用推进到现在）；
-    # 重复点、已经停用完的都不记。
-    started = flow is not None and (
-        before is None
-        or before[0] != flow.id
-        or before[1] != "deprovision"
-        or (before[2] == "grace" and flow.step != "grace")
-    )
-    if started:
-        await record_audit(
-            session,
-            action="assistant.deprovision",
-            actor_id=user.id,
-            actor_login=user.login_name,
-            target_type="bot",
-            target_id=str(bot_id),
-            diff={},
-            ip=client_ip(request),
-        )
+    state = await assistant_deprovision.begin(session, request, bot, trigger="admin", actor=user)
     await session.commit()
-    return {
-        "code": 0,
-        "data": {"bot_id": str(bot_id), "state": "deprovisioning" if flow else "deprovisioned"},
-    }
+    return {"code": 0, "data": {"bot_id": str(bot_id), "state": state}}
