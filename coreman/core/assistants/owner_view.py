@@ -7,16 +7,18 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import delivery, eligibility, lifecycle, runtime, sealed
+from coreman.core.assistants import delivery, eligibility, jobs, lifecycle, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.config import get_settings
 from coreman.core.db.models import (
+    AssistantJob,
     AssistantLifecycle,
     AssistantWatch,
     Bot,
@@ -151,3 +153,28 @@ async def absent(session: AsyncSession, user: User) -> dict[str, Any]:
         "how_to": {"app_name": app_name, "steps": list(HOW_TO)},
         "lifecycle": _flow(flow),
     }
+
+
+async def target_names(session: AsyncSession, rows: Iterable[AssistantJob]) -> dict[uuid.UUID, str]:
+    """调度的目标员工现在叫什么（只取编号与名字两列）；员工已删除的不在结果里。"""
+    wanted = {row.target_bot_id for row in rows if row.target_bot_id is not None}
+    if not wanted:
+        return {}
+    found = await session.execute(select(Bot.id, Bot.name).where(Bot.id.in_(wanted)))
+    return {bot_id: name for bot_id, name in found.all()}
+
+
+def job(row: AssistantJob, names: Mapping[uuid.UUID, str]) -> dict[str, Any]:
+    """所有者在页面上看到的一个子任务或一次调度；`row` 的内容列要已还原。
+
+    比给助理的视图多两项：`origin`（`system` 是平台派的下班整理）与 `target`（调度的目标员工；
+    子任务是 None，员工已删除时名字为 None，标题里仍带着派出当时的名字）。
+    """
+    out = jobs.view(row, full=True)
+    out["origin"] = row.origin
+    out["target"] = (
+        {"id": str(row.target_bot_id), "name": names.get(row.target_bot_id)}
+        if row.target_bot_id is not None
+        else None
+    )
+    return out
