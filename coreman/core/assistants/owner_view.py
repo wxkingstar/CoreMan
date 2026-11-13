@@ -11,13 +11,14 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import delivery, eligibility, jobs, lifecycle, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.config import get_settings
 from coreman.core.db.models import (
+    AssistantApproval,
     AssistantJob,
     AssistantLifecycle,
     AssistantWatch,
@@ -31,6 +32,11 @@ from coreman.core.runtime_nodes.transport import online
 
 # 开通的三步，页面按这些代号显示文案：私聊助理应用 → 点卡片上的「开通」→ 完成飞书授权。
 HOW_TO = ("open_private_chat", "accept_offer", "authorize")
+# 「等你出手」与「最近落地」各看哪些状态的审批单。最近落地列全部终态：已执行、被拒、撤回、
+# 失败、过期、内容已过时作废；已批准还没执行完的（`approved`）是途中状态，两边都不列。
+PENDING = ("pending",)
+SETTLED = ("executed", "rejected", "withdrawn", "failed", "expired", "stale")
+APPROVAL_LIMIT = 30
 
 
 async def current(session: AsyncSession, user_id: uuid.UUID) -> Bot | None:
@@ -178,3 +184,70 @@ def job(row: AssistantJob, names: Mapping[uuid.UUID, str]) -> dict[str, Any]:
         else None
     )
     return out
+
+
+async def approvals(
+    session: AsyncSession,
+    bot: Bot,
+    viewer: uuid.UUID,
+    statuses: tuple[str, ...],
+    *,
+    limit: int = APPROVAL_LIMIT,
+) -> list[AssistantApproval]:
+    """这位助理处于这些状态的审批单，新近有动静的在前。
+
+    内容列只对所有者本人还原：`viewer` 不是所有者时摘要、理由、结果都是空的，
+    `sealed.is_locked(row)` 为真。
+    """
+    latest = func.coalesce(
+        AssistantApproval.executed_at, AssistantApproval.decided_at, AssistantApproval.created_at
+    )
+    rows = list(
+        await session.scalars(
+            select(AssistantApproval)
+            .where(AssistantApproval.bot_id == bot.id, AssistantApproval.status.in_(statuses))
+            .order_by(latest.desc(), AssistantApproval.id)
+            .limit(limit)
+            .execution_options(populate_existing=True)
+        )
+    )
+    await sealed.open_rows(session, rows, viewer=viewer)
+    return rows
+
+
+def _summary(row: AssistantApproval) -> str | None:
+    """提交时平台生成的单行摘要（渠道与对象）；读不出来是 None。"""
+    stored = row.args_enc if isinstance(row.args_enc, dict) else {}
+    found = stored.get("abstract")
+    return found if isinstance(found, str) and found else None
+
+
+def pending_view(row: AssistantApproval, link: str | None) -> dict[str, Any]:
+    """等所有者批的一张单：只有编号、工具名、摘要、提交时间与审批系统的入口。
+
+    要发出的正文不在这里给：它在审批系统里，由所有者在那边看着批。
+    """
+    return {
+        "id": str(row.id),
+        "tool": row.tool,
+        "summary": _summary(row),
+        "created_at": row.created_at.isoformat(),
+        "link": link,
+    }
+
+
+def settled_view(row: AssistantApproval) -> dict[str, Any]:
+    """已经落地的一张单：结果、摘要、审批人写的理由与各个时刻。"""
+    return {
+        "id": str(row.id),
+        "tool": row.tool,
+        "channel": row.channel,
+        "status": row.status,
+        "summary": _summary(row),
+        "reason": row.reason_enc or None,
+        "error": row.error_code,
+        "created_at": row.created_at.isoformat(),
+        "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+        "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+        "locked": sealed.is_locked(row),
+    }

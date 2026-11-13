@@ -23,7 +23,8 @@ from coreman.api.routers.me_assistant_common import (
     refuse,
     writable,
 )
-from coreman.core.assistants import access_log, jobs, owner_view, sealed
+from coreman.core.assistants import access_log, followups, jobs, owner_view, sealed
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import User
 from coreman.core.timeutils import utcnow
 
@@ -96,3 +97,42 @@ async def job_cancel(
     data = {"id": str(row.id), "status": row.status}
     await session.commit()
     return {"code": 0, "data": data}
+
+
+@router.get("/attention")
+async def attention(
+    own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """等你出手：待批的审批单、被卡住的子任务、今天到期的待跟进。"""
+    bot, actor = own.bot, own.actor
+    prefs = await assistant_settings.get(session, bot.id)
+    today = assistant_settings.local_today(prefs, utcnow())
+    link = owner_view.approval_link()
+    pending = await owner_view.approvals(session, bot, actor.id, owner_view.PENDING)
+    blocked = await jobs.list_(session, bot.id, scope="blocked", limit=JOB_LIMIT)
+    due = await followups.due(session, bot.id, today)
+    # 核心函数已经还原过；这里按查看者再核一次。
+    await sealed.open_rows(session, [*blocked, *due], viewer=actor.id)
+    names = await owner_view.target_names(session, blocked)
+    await access_log.record(session, bot.id, actor.id, "approvals.read", "pending")
+    await access_log.record(session, bot.id, actor.id, "jobs.read", "blocked")
+    await access_log.record(session, bot.id, actor.id, "followups.read", "today")
+    data = {
+        "today": today.isoformat(),
+        "approvals": [owner_view.pending_view(row, link) for row in pending],
+        "jobs": [owner_view.job(row, names) for row in blocked],
+        "followups": [followups.view(row) for row in due],
+    }
+    # 取今天到期的条目会把到了回看日的推后条目改回未结。
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
+@router.get("/approvals/recent")
+async def recent_approvals(
+    own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """最近落地：全部终态的审批单（已执行、被拒、撤回、失败、过期、作废），给本人解密后的摘要与理由。"""
+    rows = await owner_view.approvals(session, own.bot, own.actor.id, owner_view.SETTLED)
+    await access_log.record(session, own.bot.id, own.actor.id, "approvals.read", "recent")
+    return {"code": 0, "data": {"items": [owner_view.settled_view(row) for row in rows]}}

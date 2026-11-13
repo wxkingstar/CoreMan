@@ -51,6 +51,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/jobs.py": 3,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
+    # 「我的助理」页的审批单：显式还原，且只对所有者本人（viewer）还原
+    "coreman/core/assistants/owner_view.py": 1,
     # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序与游标）
     "coreman/core/assistants/watch.py": 1,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
