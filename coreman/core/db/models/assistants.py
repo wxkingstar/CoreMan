@@ -467,6 +467,12 @@ class AssistantInbox(Base):
             postgresql_where=text("message_id IS NOT NULL"),
         ),
         Index("assistant_inbox_due_idx", "bot_id", "status", "hold_until"),
+        # 对账用：还绑着任务号、没记账的条目（见 assistants/delivery.py 的 reconcile）。
+        Index(
+            "assistant_inbox_in_flight_idx",
+            "delivered_task_id",
+            postgresql_where=text("delivered_task_id IS NOT NULL AND status = 'pending'"),
+        ),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
@@ -482,5 +488,28 @@ class AssistantInbox(Base):
     hold_until: Mapped[datetime | None] = _ts()
     # 不设外键：任务行按保留期清理，条目比它留得久。
     delivered_task_id: Mapped[int | None] = mapped_column(BigInteger)
+    # 带着它的交回轮次真失败过几次；满 delivery.MAX_FAILURES 次作废（void_code=undeliverable）。
+    failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class AssistantDelivery(Base):
+    """投递层给每位助理记的账；没有内容列。
+
+    `handover_seq` 只增不减，拼进交回任务的幂等键；取这一行的行锁（`FOR UPDATE SKIP LOCKED`）
+    同时是「同一时刻只有一处在为这位助理入队」的互斥。两个日期都是所有者时区里的日期：当天
+    已经私信过「预算用完」、已经提醒过「授权快到期」。`next_sweep_at` 是下一次顺带检查的时刻。
+    """
+
+    __tablename__ = "assistant_delivery"
+    __table_args__ = (Index("assistant_delivery_sweep_idx", "next_sweep_at"),)
+    bot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
+    )
+    handover_seq: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    budget_notified_on: Mapped[date | None] = mapped_column(Date)
+    reauth_reminded_on: Mapped[date | None] = mapped_column(Date)
+    next_sweep_at: Mapped[datetime] = _ts(server_default=text("now()"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))

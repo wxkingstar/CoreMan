@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Identity,
@@ -325,6 +326,8 @@ class ChatSession(Base):
     inherited_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 话题选了继承群主会话：首轮从这个 relay 会话分叉，成功后清空。
     forked_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 个人助理的主会话每天换新：这个 relay 会话是所有者时区里哪一天开始的。别的会话不写。
+    local_day: Mapped[date | None] = mapped_column(Date)
 
 
 class UserReached(Base):

@@ -58,6 +58,8 @@ class FeishuPersonalGrant(TimestampMixin, Base):
     remote_revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     selection_chat_id: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 最近一次完成授权的时刻。飞书要求授权满 365 天重新授权，个人助理据此提前提醒。
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     poll_interval: Mapped[int] = mapped_column(Integer, default=5)
