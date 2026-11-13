@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import secrets as _secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -147,3 +147,18 @@ async def admin_client(client: httpx.AsyncClient) -> httpx.AsyncClient:
     assert r.status_code == 200, r.text
     client.headers["X-CSRF-Token"] = client.cookies["coreman_csrf"]
     return client
+
+
+@pytest.fixture
+def assistant_master() -> Iterator[None]:
+    """个人助理加密存储的平台主密钥：与接口进程从配置里取到的是同一把；清掉进程内的缓存。"""
+    from coreman.core.assistants import keys, sealed
+    from coreman.core.crypto import Cipher
+
+    sealed.use_master(Cipher(base64.b64decode(MASTER_KEY)))
+    keys.forget()
+    sealed.forget()
+    yield
+    sealed.use_master(None)
+    keys.forget()
+    sealed.forget()

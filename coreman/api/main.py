@@ -150,6 +150,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from coreman.api.routers import assistants_admin
 
     app.include_router(assistants_admin.router)
+
+    from coreman.api.routers import me_assistant
+
+    app.include_router(me_assistant.router)
     app.include_router(users.router)
     app.include_router(teams.router)
     app.include_router(departments.router)
