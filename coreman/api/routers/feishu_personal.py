@@ -75,7 +75,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         raise ApiError(403, 403, "Private authorization changed") from None
     current = (grant.context_epoch if grant else policy.NO_GRANT_EPOCH) == capability.epoch
     assistant = is_assistant(scope.bot)
-    # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge）。
+    # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge 与 subtask）。
     groups = assistant_tools.groups_for(scope.task.kind) if assistant else ()
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
@@ -126,10 +126,10 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
                     if scope.unattended
                     else await schedules.dispatch(session, scope, name, arguments)
                 )
-            elif assistant and assistant_tools.group_of(name) in ("knowledge", "voice"):
-                # 知识库、待跟进、设置与口吻页都在平台自己的库里、不调飞书：授权换代之后同一轮里
-                # 照常可用，所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按 groups
-                # 把关。
+            elif assistant and assistant_tools.group_of(name) in assistant_tools.LOCAL_GROUPS:
+                # 知识库、待跟进、设置、子任务与口吻页都在平台自己的库里、不调飞书：授权换代之后
+                # 同一轮里照常可用，所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按
+                # groups 把关。
                 value = await assistant_tools.dispatch(
                     assistant_tools.Context(session, cipher, scope), name, arguments, groups=groups
                 )

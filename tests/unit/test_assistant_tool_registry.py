@@ -1,4 +1,4 @@
-"""助理自有工具的注册表：三组、按组列出、按组分派；没有 approval 组的轮次只有读类个人工具。"""
+"""助理自有工具的注册表：普通轮次三组、子任务轮次两组，按组列出、按组分派。"""
 
 from __future__ import annotations
 
@@ -34,6 +34,12 @@ FOLLOWUP_TOOLS = [
     "followup_snooze",
     "followup_close",
     "followup_list",
+]
+JOB_TOOLS = [
+    "assistant_spawn",
+    "assistant_job_message",
+    "assistant_job_list",
+    "assistant_job_cancel",
 ]
 INVALID = {"error": "invalid_tool_or_arguments"}
 CTX = tools.Context(None, None, None)  # type: ignore[arg-type]
@@ -78,10 +84,15 @@ def test_groups_and_the_built_in_approval_group() -> None:
         assert tools.group_of(name) == "approval"
     assert tools.group_of("feishu_chat_history") is None
     assert tools.group_of("notes_demo") is None
+    assert tools.SUBTASK_GROUP == "subtask"
+    assert tools.LOCAL_GROUPS == {"knowledge", "jobs", "subtask", "voice"}
+    for name in JOB_TOOLS:
+        assert tools.group_of(name) == "jobs"
+    assert tools.group_of("assistant_job_blocked") == "subtask"
 
 
 def test_only_subtasks_are_narrowed() -> None:
-    assert tools.groups_for(SUBTASK_KIND) == ("knowledge",)
+    assert tools.groups_for(SUBTASK_KIND) == ("knowledge", "subtask")
     for kind in ("chat", HANDOVER_KIND, JOB_RESULT_KIND, APPROVAL_RESULT_KIND):
         assert tools.groups_for(kind) == tools.GROUPS, kind
 
@@ -125,8 +136,10 @@ def test_a_full_turn_lists_staged_writes_and_every_group(demo: Recorder) -> None
         *SETTINGS_TOOLS,
         "notes_demo",
         *APPROVAL_TOOLS,
+        *JOB_TOOLS,
         "assistant_spawn_demo",
     ]
+    assert "assistant_job_blocked" not in names
     writes = [item for item in out if catalog.is_write(item["name"])]
     assert writes and "feishu_reply_message" in {item["name"] for item in writes}
     for item in writes:
@@ -143,6 +156,23 @@ def test_a_turn_without_the_approval_group_is_read_only(demo: Recorder) -> None:
     reads = [item["name"] for item in source if not catalog.is_write(item["name"])]
     assert names == [*reads, *NOTES_TOOLS, *FOLLOWUP_TOOLS, *SETTINGS_TOOLS, "notes_demo"]
     assert "feishu_chat_history" in names and "feishu_reply_message" not in names
+
+
+def test_a_subtask_turn_adds_only_the_blocked_tool(demo: Recorder) -> None:
+    source = base()
+    names = [
+        item["name"] for item in tools.definitions(source, groups=tools.groups_for(SUBTASK_KIND))
+    ]
+    reads = [item["name"] for item in source if not catalog.is_write(item["name"])]
+    assert names == [
+        *reads,
+        *NOTES_TOOLS,
+        *FOLLOWUP_TOOLS,
+        *SETTINGS_TOOLS,
+        "notes_demo",
+        "assistant_job_blocked",
+    ]
+    assert not set(names) & set(JOB_TOOLS)
 
 
 async def test_dispatch_follows_the_groups(demo: Recorder) -> None:

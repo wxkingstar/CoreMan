@@ -1,13 +1,16 @@
 """个人助理自有工具的总注册表：个人工具 MCP 对助理记录在这里取清单、在这里分派。
 
-三组：
+普通轮次三组，子任务轮次另有一组：
 - `knowledge`：知识库、待跟进与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权换代之后
   照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
 - `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）。
-- `jobs`：派子任务、调度公共员工。子任务自己不可用。
+- `jobs`：派子任务、追问、查看、取消（之后还有调度公共员工）。子任务自己不可用。
+- `subtask`：子任务报告自己卡住了。只有子任务轮次可用。
 
 一轮能用哪几组由任务类型决定（`groups_for`）。没有 `approval` 组的轮次拿到的个人工具只有读类：
 写类工具不列出，调用也不受理——子任务要对外做事，只能把建议写进结论，由主会话提交。
+`knowledge`、`jobs`、`subtask` 与下面的 `voice` 的数据都在平台自己的库里（`LOCAL_GROUPS`），MCP
+入口把它们排在授权代数判断之前。
 
 另有一组 `voice`（冷启动的口吻样本）：只有 `assistant_cold_start` 的轮次有它，而且那一轮只有
 它——不列、不受理任何个人工具（读类也没有）与别的组。那一轮要生成一页置顶页，输入只能是
@@ -25,7 +28,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core import personal_schedules as schedules
-from coreman.core.assistants import followup_tools, notes_tools, settings_tools, voice_tools
+from coreman.core.assistants import (
+    followup_tools,
+    jobs_tools,
+    notes_tools,
+    settings_tools,
+    voice_tools,
+)
 from coreman.core.assistants.approvals import catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
 from coreman.core.assistants.kinds import COLD_START_KIND, SUBTASK_KIND
@@ -34,10 +43,15 @@ from coreman.core.feishu_personal import tools as personal_tools
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.policy import Scope
 
+# 普通轮次（所有者的私聊、交回、结果回合）能用的三组。
 GROUPS = ("knowledge", "approval", "jobs")
+# 只有子任务轮次能用的一组。
+SUBTASK_GROUP = "subtask"
 # 只有冷启动的口吻样本那一轮有；有它的轮次没有别的任何工具（`bare`）。
 VOICE_GROUP = "voice"
-ALL_GROUPS = (*GROUPS, VOICE_GROUP)
+ALL_GROUPS = (*GROUPS, SUBTASK_GROUP, VOICE_GROUP)
+# 数据在平台自己的库里、不调飞书的组：飞书授权换代之后同一轮里照常可用。
+LOCAL_GROUPS = frozenset({"knowledge", "jobs", SUBTASK_GROUP, VOICE_GROUP})
 _INVALID = "invalid_tool_or_arguments"
 
 
@@ -99,10 +113,13 @@ def group_of(name: str) -> str | None:
 
 
 def groups_for(kind: str) -> tuple[str, ...]:
-    """这类任务的一轮能用哪几组：口吻样本只有 voice，子任务只有 knowledge，其余的轮次三组全有。"""
+    """这类任务的一轮能用哪几组。
+
+    口吻样本只有 voice，子任务只有 knowledge 与 subtask，其余的轮次是普通的三组。
+    """
     if kind == COLD_START_KIND:
         return (VOICE_GROUP,)
-    return ("knowledge",) if kind == SUBTASK_KIND else GROUPS
+    return ("knowledge", SUBTASK_GROUP) if kind == SUBTASK_KIND else GROUPS
 
 
 def bare(groups: Iterable[str]) -> bool:
@@ -178,6 +195,10 @@ async def _settings(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[
     return await settings_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _jobs(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await jobs_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 async def _voice(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return await voice_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
@@ -187,3 +208,5 @@ register("knowledge", followup_tools.definitions, _followups)
 register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
 register(VOICE_GROUP, lambda: list(voice_tools.DEFINITIONS), _voice)
+register("jobs", jobs_tools.definitions, _jobs)
+register(SUBTASK_GROUP, jobs_tools.subtask_definitions, _jobs)
