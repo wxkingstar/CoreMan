@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from coreman.core.assistants import sealed
 from coreman.core.db.models import PAGE_AUTHORS, AssistantPage
@@ -32,6 +33,11 @@ MAX_TITLE_CHARS = 120
 MAX_SUMMARY_CHARS = 300
 # `sealed.content_mac` 的用途标签：路径摘要与别的带密钥摘要（审批单去重）互不相通。
 PATH_PURPOSE = "assistant_pages.path"
+MAX_QUERY_TERMS = 8
+# 检索打分：标题、路径、摘要里含这个词各得这么多分；正文每出现一次 1 分，单词封顶。
+TITLE_POINTS, PATH_POINTS, SUMMARY_POINTS = 8, 5, 3
+BODY_HITS_CAP = 5
+SNIPPET_BEFORE, SNIPPET_AFTER = 40, 120
 _SLASHES = re.compile(r"/+")
 
 
@@ -258,3 +264,133 @@ async def delete(session: AsyncSession, bot_id: uuid.UUID, path: str) -> bool:
         .returning(AssistantPage.id)
     )
     return gone.first() is not None
+
+
+async def _rows(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    *,
+    bodies: bool,
+    pinned: bool = False,
+    since: datetime | None = None,
+) -> list[AssistantPage]:
+    """这位助理的页面，已还原；读不出来的行（密钥已销毁）不返回。
+
+    Args:
+        bodies: 取不取正文；不取时行上的 `body_enc` 没有加载，不要去读
+        pinned: 只取置顶页
+        since: 只取这个时刻之后更新过的
+    """
+    stmt = (
+        select(AssistantPage)
+        .where(AssistantPage.bot_id == bot_id)
+        .execution_options(populate_existing=True)
+    )
+    if pinned:
+        stmt = stmt.where(AssistantPage.pinned.is_(True))
+    if since is not None:
+        stmt = stmt.where(AssistantPage.updated_at > since)
+    if not bodies:
+        stmt = stmt.options(defer(AssistantPage.body_enc))
+    rows = list(await session.scalars(stmt))
+    await sealed.open_rows(session, rows)
+    return [row for row in rows if not sealed.is_locked(row)]
+
+
+def _by_path(rows: list[AssistantPage]) -> list[AssistantPage]:
+    return sorted(rows, key=lambda row: row.path_enc.casefold())
+
+
+async def index(session: AsyncSession, bot_id: uuid.UUID, *, folder: str = "") -> list[Entry]:
+    """全部页面的条目（不取正文），按路径排序。
+
+    Args:
+        folder: 只要这个目录下的页（按规范化后的路径比，不分大小写）；空串是全部
+
+    Raises:
+        NotesError: `invalid_path`（`folder` 不像路径）
+    """
+    under = normalize(folder)[1] + "/" if folder.strip(" /\\") else ""
+    rows = _by_path(await _rows(session, bot_id, bodies=False))
+    return [_entry(row) for row in rows if row.path_enc.casefold().startswith(under)]
+
+
+@dataclass(frozen=True)
+class Hit:
+    path: str
+    title: str
+    summary: str
+    pinned: bool
+    version: int
+    score: int
+    snippet: str
+
+
+def _terms(query: str) -> list[str]:
+    words = unicodedata.normalize("NFKC", query).casefold().split()
+    return list(dict.fromkeys(words))[:MAX_QUERY_TERMS]
+
+
+def _score(terms: list[str], row: AssistantPage) -> tuple[int, int]:
+    """（命中了几个不同的词, 总分）。"""
+    title, path, summary, body = (
+        value.casefold() for value in (row.title_enc, row.path_enc, row.summary_enc, row.body_enc)
+    )
+    matched = score = 0
+    for term in terms:
+        points = (
+            TITLE_POINTS * (term in title)
+            + PATH_POINTS * (term in path)
+            + SUMMARY_POINTS * (term in summary)
+            + min(body.count(term), BODY_HITS_CAP)
+        )
+        matched += points > 0
+        score += points
+    return matched, score
+
+
+def _snippet(terms: list[str], row: AssistantPage) -> str:
+    """正文里第一个命中词前后的一段，压成一行；正文没命中时用摘要。
+
+    在原文上不分大小写地找，位置才对得上：折叠大小写可能改变字符串长度。
+    """
+    body = row.body_enc
+    for term in terms:
+        found = re.search(re.escape(term), body, re.IGNORECASE)
+        if found is None:
+            continue
+        start = max(0, found.start() - SNIPPET_BEFORE)
+        end = min(len(body), found.end() + SNIPPET_AFTER)
+        piece = " ".join(body[start:end].split())
+        return ("…" if start else "") + piece + ("…" if end < len(body) else "")
+    return row.summary_enc
+
+
+async def search(
+    session: AsyncSession, bot_id: uuid.UUID, query: str, *, limit: int = 10
+) -> list[Hit]:
+    """把这位助理的全部页面解密到内存，按词匹配、打分、排序。
+
+    上限 2000 页、合计 20MB，内存里扫一遍足够；不做密文索引。
+    """
+    terms = _terms(query)
+    if not terms:
+        return []
+    scored: list[tuple[int, int, AssistantPage]] = []
+    for row in await _rows(session, bot_id, bodies=True):
+        matched, score = _score(terms, row)
+        if score:
+            scored.append((matched, score, row))
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2].path_enc.casefold()))
+    return [
+        Hit(
+            path=row.path_enc,
+            title=row.title_enc,
+            summary=row.summary_enc,
+            pinned=row.pinned,
+            version=row.version,
+            score=score,
+            snippet=_snippet(terms, row),
+        )
+        for _, score, row in scored[:limit]
+    ]

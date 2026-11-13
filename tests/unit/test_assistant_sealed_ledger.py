@@ -38,8 +38,8 @@ ENTITY_SELECTS = {
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 审批单：去重与决定是 session.scalar（自动还原）；列表与清理附件显式还原；撤回与过期只改状态
     "coreman/core/assistants/approvals/service.py": 6,
-    # 知识库：按路径摘要取一页，显式还原，读不出来的报 content_locked
-    "coreman/core/assistants/notes.py": 1,
+    # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
+    "coreman/core/assistants/notes.py": 2,
     "coreman/core/bus/outbox.py": 1,  # 运维列表
     "coreman/core/bus/streams.py": 2,  # 显式还原，跳过不可读的行
     "coreman/core/bus/tasks.py": 3,  # 两处显式还原 + 运维列表
@@ -76,6 +76,7 @@ ENTITY_SELECTS = {
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
+    "coreman/core/assistants/notes.py": 1,  # 列索引时 defer 掉正文，不读它
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
     "coreman/core/bus/tasks.py": 1,  # 明文键 serialize_session
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
