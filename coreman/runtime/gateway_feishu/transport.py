@@ -409,7 +409,8 @@ class FeishuTransport:
             await session.commit()
 
     async def push(self, row: TaskStream) -> None:
-        if row.reply_context.get("_collaboration_helper"):
+        # `_silent`：个人助理子任务的一轮，结论由平台另行带回主会话，这条流不发到飞书。
+        if row.reply_context.get("_collaboration_helper") or row.reply_context.get("_silent"):
             if row.is_complete:
                 async with self.factory() as session:
                     await streams.mark_finish_pushed(session, row.task_id)

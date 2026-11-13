@@ -22,7 +22,8 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
-from coreman.core.assistants import sealed
+from coreman.core.assistants import platform_turns, sealed
+from coreman.core.assistants.kinds import SILENT_KINDS
 from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
@@ -209,6 +210,9 @@ async def recover_terminal_streams(session: AsyncSession, now: datetime) -> int:
         await streams.complete(
             session, task.id, final_text=final, activity=activity, bot_id=task.bot_id
         )
+        # 不出声的流（`_silent`，个人助理的子任务）不往会话里补发：结局由对账带回主会话。
+        if stream.reply_context.get("_silent"):
+            continue
         if stream.delivery_mode != "stream" or stream.finish_pushed_at is not None:
             bot = await session.get(Bot, task.bot_id)
             chat_id = stream.reply_context.get("chat_id") or _chat_id(task)
@@ -308,7 +312,8 @@ async def _tell_user(
             activity=liveness.interrupted_activity(stream.activity, liveness.REASON_WORKER_LOST),
             bot_id=task.bot_id,
         )
-    if pushable:
+    # 不出声的任务类型没有人在等这一轮，它的会话键也不一定是一个能发消息的会话。
+    if pushable or task.kind in SILENT_KINDS:
         return
     chat_id = _chat_id(task)
     if not chat_id:
@@ -360,7 +365,9 @@ def _lost_entry(
         error_code=LOST_ERROR_CODE,
         error_message=LOST_ERROR_MESSAGE,
         latency_ms=int((now - request_at).total_seconds() * 1000),
-        reach=not is_click(message),
+        # 平台自己发起的一轮（没有入站事件）不是这个人发来的私聊消息，不算触达；子任务的
+        # 会话键更不是一个能推送的会话。与 worker 写记录时的口径一致（`records.log_entry`）。
+        reach=not is_click(message) and not platform_turns.is_platform(task),
     )
 
 

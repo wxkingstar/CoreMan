@@ -15,11 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants import (
     followup_prompt,
     handover_prompt,
+    jobs_prompt,
     notes_prompt,
     settings_prompt,
     workspace_prompt,
 )
 from coreman.core.assistants.approvals import prompt as approval_prompt
+from coreman.core.assistants.kinds import SUBTASK_KIND
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat.commands import command_text, normalize
@@ -239,12 +241,16 @@ async def configure(
     )
     # 本人定时任务的说明由 chat.schedules 统一追加（飞书与企业微信共用）。
     rules, note = feishu_guidance(row, base_url, scheduled=False)
-    if is_assistant(scope.bot):
+    if is_assistant(scope.bot) and ctx.task.kind == SUBTASK_KIND:
+        # 子任务轮次：没有审批、交回、设置与派子任务的规则，换成「你现在是子任务」。
+        rules += workspace_prompt.WORKSPACE_RULES + notes_prompt.RULES
+        rules += followup_prompt.FOLLOWUP_RULES + jobs_prompt.SUBTASK_RULES
+    elif is_assistant(scope.bot):
         # 个人助理：写类工具改为提交审批，工作目录不放个人信息，个人内容进知识库，跨天的事记待跟进，
-        # 交回事项怎么处理，工作时段与关注的会话怎么改；规则都写进稳定段。
+        # 交回事项怎么处理，工作时段与关注的会话怎么改，怎么用子任务；规则都写进稳定段。
         rules += approval_prompt.RULES + workspace_prompt.WORKSPACE_RULES + notes_prompt.RULES
         rules += followup_prompt.FOLLOWUP_RULES + handover_prompt.RULES
-        rules += settings_prompt.SETTINGS_RULES
+        rules += settings_prompt.SETTINGS_RULES + jobs_prompt.RULES
     ctx.turn_notes.append(note)
     if ctx.task.payload.get(resume.PAYLOAD_KEY):
         ctx.turn_notes.append("- 本人飞书：用户刚完成授权，这一轮是自动续接，请直接继续原来的事。")

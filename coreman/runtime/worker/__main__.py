@@ -8,6 +8,7 @@ from coreman.runtime.worker.assistant_approvals import (
 from coreman.runtime.worker.assistant_cold_start import AssistantColdStartHandler
 from coreman.runtime.worker.assistant_compile import AssistantCompileHandler
 from coreman.runtime.worker.assistant_handover import AssistantHandoverHandler
+from coreman.runtime.worker.assistant_jobs import AssistantSubtaskHandler
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
@@ -35,6 +36,7 @@ asyncio.run(
             "assistant_approval_execute": AssistantApprovalExecuteHandler(),
             "assistant_approval_result": AssistantApprovalResultHandler(),
             "assistant_handover": AssistantHandoverHandler(),
+            "assistant_subtask": AssistantSubtaskHandler(),
             "assistant_compile": AssistantCompileHandler(),
             "assistant_cold_start": AssistantColdStartHandler(),
             "relay_switch": RelaySwitchHandler(),

@@ -262,7 +262,12 @@ async def get(
     Raises:
         JobError: job_not_found（包括编号是别的助理的）
     """
-    stmt = select(AssistantJob).where(AssistantJob.bot_id == bot_id, AssistantJob.id == job_id)
+    # 总是读库里现在的值：同一个会话里先前加载过这一行时，加锁后的判断不能凭旧值。
+    stmt = (
+        select(AssistantJob)
+        .where(AssistantJob.bot_id == bot_id, AssistantJob.id == job_id)
+        .execution_options(populate_existing=True)
+    )
     if lock:
         stmt = stmt.with_for_update()
     # session.scalar 取单个实体：SealedSession 自动还原内容列。

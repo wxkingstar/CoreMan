@@ -30,6 +30,9 @@ PLATFORM_TURN_KINDS = (
 # 没有入站事件也能跑的任务类型：平台来源的几种，加上在这样的轮次里提交的审批单的结果回合。
 # 不带入站事件的这些类型只有 `platform_turns.enqueue` 能入队（`bus.tasks.enqueue` 把关）。
 ORIGIN_KINDS = (*PLATFORM_TURN_KINDS, APPROVAL_RESULT_KIND)
+# 不出声的任务类型：这一轮的回复、进度、失败与中断都不往任何会话里发，结局由平台另行带回
+# 主会话。收尸与流恢复按它判断；以后有别的不出声的轮次（如调度公共员工那一轮）加在这里。
+SILENT_KINDS: tuple[str, ...] = (SUBTASK_KIND,)
 
 
 def unattended(kind: str) -> bool:
