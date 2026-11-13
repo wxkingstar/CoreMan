@@ -11,13 +11,14 @@ scheduler 的 `_assistant_delivery_loop` 每 5 秒调一次 `tick`：先对账�
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants import eligibility, platform_turns, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
@@ -34,6 +35,7 @@ from coreman.core.db.models import (
     Task,
 )
 from coreman.core.logging import get_logger
+from coreman.core.timeutils import aware_utc
 
 log = get_logger(__name__)
 
@@ -54,6 +56,8 @@ QUIET_CODES = frozenset(
     {"assistant_paused", "platform_turn_yielded", "relay_unavailable", "session_busy"}
 )
 RECONCILE_BATCH = 200
+# 一次 tick 最多看多少位有到点条目的助理（下班、暂停的也在里面，逐位判断很便宜）。
+TICK_BATCH = 200
 BUDGET_NOTICE = (
     "今天的轮次预算（{total} 轮）已经用完：不紧急的事项留到明天再交回，紧急的照常处理。"
     "需要调整额度请联系管理员。"
@@ -382,3 +386,84 @@ async def reconcile(session: AsyncSession) -> int:
     for task_id, status in found:
         total += await _settle(session, int(task_id), status == "succeeded")
     return total
+
+
+async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> dict[str, int]:
+    """scheduler 每 5 秒调一次：先给已经结束的交回轮次记账，再给有到点条目的助理各排一轮。
+
+    每位助理一个自己的事务；一位出错只记类型，不挡别的。
+    """
+    counts = {"assistant_inbox_settled": 0, "assistant_handovers": 0}
+    async with factory() as session:
+        counts["assistant_inbox_settled"] = await reconcile(session)
+        await session.commit()
+        waiting = list(
+            await session.scalars(
+                select(AssistantInbox.bot_id)
+                .join(Bot, Bot.id == AssistantInbox.bot_id)
+                .where(
+                    Bot.kind == "assistant",
+                    Bot.enabled.is_(True),
+                    Bot.assistant_state == "active",
+                    AssistantInbox.status == "pending",
+                    AssistantInbox.delivered_task_id.is_(None),
+                    or_(AssistantInbox.hold_until.is_(None), AssistantInbox.hold_until <= now),
+                )
+                .distinct()
+                .limit(TICK_BATCH)
+            )
+        )
+    for bot_id in waiting:
+        try:
+            async with factory() as session:
+                await sealed.guard_logs(session, bot_id)
+                bot = await session.get(Bot, bot_id)
+                task = await dispatch(session, bot, now) if bot is not None else None
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 一位助理出错不挡别的
+            log.warning("assistant_delivery_failed", bot_id=str(bot_id), error=type(exc).__name__)
+            continue
+        counts["assistant_handovers"] += int(task is not None)
+    return counts
+
+
+@dataclass(frozen=True)
+class Usage:
+    """一位助理今天的轮次：已用与预算。"""
+
+    used: int
+    budget: int
+
+
+async def usage(session: AsyncSession, now: datetime) -> dict[uuid.UUID, Usage]:
+    """每位助理今天（各自所有者的时区）跑了几轮、预算多少；管理员的助理列表用。
+
+    按时区分组数对话记录：查询条数等于用到的时区数，不随助理人数增长。只读元数据。
+    """
+    fallback = await default_budget(session)
+    rows = (
+        await session.execute(
+            select(Bot.id, AssistantSettings.timezone, AssistantSettings.daily_turn_budget)
+            .outerjoin(AssistantSettings, AssistantSettings.bot_id == Bot.id)
+            .where(Bot.kind == "assistant")
+        )
+    ).all()
+    zones: dict[str, list[uuid.UUID]] = {}
+    for bot_id, name, _own in rows:
+        zones.setdefault(zone_named(name).key, []).append(bot_id)
+    used: dict[uuid.UUID, int] = {}
+    for key, bot_ids in zones.items():
+        zone = ZoneInfo(key)
+        start, end = day_bounds(zone, aware_utc(now).astimezone(zone).date())
+        counted = await session.execute(
+            select(ChatLog.bot_id, func.count(ChatLog.id))
+            .where(
+                ChatLog.bot_id.in_(bot_ids), ChatLog.request_at >= start, ChatLog.request_at < end
+            )
+            .group_by(ChatLog.bot_id)
+        )
+        used.update({bot_id: int(count) for bot_id, count in counted.all()})
+    return {
+        bot_id: Usage(used.get(bot_id, 0), own if own is not None else fallback)
+        for bot_id, _name, own in rows
+    }

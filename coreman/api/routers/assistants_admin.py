@@ -1,8 +1,8 @@
 """平台管理员看个人助理：谁开通了、在哪个运行时、开通与停用走到哪一步；可以停用某人的助理。
 
-只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态），不碰任何内容列，也不解密
-任何东西。停用只回「已开始停用」，不回记录本身。开通范围与可选 AI 在平台设置里改
-（`assistant_eligibility`、`assistant_backends`）。
+只出元数据（人、实例、节点、状态、时间、错误代码、盯消息的健康状态、今天的轮次与预算、待交回的
+条目数），不碰任何内容列，也不解密任何东西。停用只回「已开始停用」，不回记录本身。开通范围与
+可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。
 """
 
 from __future__ import annotations
@@ -19,9 +19,10 @@ from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.security import verify_csrf
-from coreman.core.assistants import deprovisioning, lifecycle
+from coreman.core.assistants import delivery, deprovisioning, lifecycle
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
+    AssistantInbox,
     AssistantLifecycle,
     AssistantRetiredDir,
     AssistantWatch,
@@ -31,6 +32,7 @@ from coreman.core.db.models import (
     User,
 )
 from coreman.core.runtime_nodes.transport import online
+from coreman.core.timeutils import utcnow
 
 _require_platform_admin = require_roles("platform_admin")
 router = APIRouter(
@@ -99,6 +101,14 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
         }
         for bot, state, seen, error in watched.all()
     }
+    # 今天的轮次与预算（各自所有者的时区）；收件箱里还没交回的条目数。只数行，不取内容。
+    spent = await delivery.usage(session, utcnow())
+    boxed = await session.execute(
+        select(AssistantInbox.bot_id, func.count(AssistantInbox.id))
+        .where(AssistantInbox.status == "pending")
+        .group_by(AssistantInbox.bot_id)
+    )
+    waiting: dict[uuid.UUID, int] = {bot: int(count) for bot, count in boxed.all()}
     items = []
     for bot_id, state, enabled, created, owner_id, login, name, relay_id, relay, node in rows:
         flow = live.get(bot_id)
@@ -127,6 +137,12 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
                 ),
                 "directories_pending_removal": int(pending_dirs.get(bot_id, 0)),
                 "watch": health.get(bot_id),
+                "turns": (
+                    {"today": spent[bot_id].used, "budget": spent[bot_id].budget}
+                    if bot_id in spent
+                    else None
+                ),
+                "inbox_pending": waiting.get(bot_id, 0),
             }
         )
     return {"code": 0, "data": {"items": items}}

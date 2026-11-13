@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.records import new_assistant_bot
@@ -58,6 +58,37 @@ async def test_the_list_shows_who_where_and_what_state_only(
     assert item["owner"]["display_name"] == "张三" and item["node"]["name"] == "pool-1"
     assert item["lifecycle"] is None and item["directories_pending_removal"] == 0
     assert SECRET not in response.text and "/w/a" not in response.text
+
+
+async def test_the_list_shows_todays_turns_the_budget_and_waiting_items(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    owner = await login_as(client, db_session, role="member", display_name="张三")
+    bot = await _assistant(db_session, owner)
+    turn = text(
+        "INSERT INTO chat_logs (bot_id, bot_key, platform, chat_type, message_type, status,"
+        " request_at) VALUES (:bot, 'k', 'feishu', 'single', 'text', 'success',"
+        " now() - make_interval(days => :days))"
+    )
+    for days in (0, 0, 0, 2):
+        await db_session.execute(turn, {"bot": bot.id, "days": days})
+    item = text(
+        "INSERT INTO assistant_inbox (bot_id, level, message_id, status)"
+        " VALUES (:bot, 'immediate', :mid, :status)"
+    )
+    for mid, status in (("om_1", "pending"), ("om_2", "pending"), ("om_3", "delivered")):
+        await db_session.execute(item, {"bot": bot.id, "mid": mid, "status": status})
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    [listed] = (await client.get("/api/admin/assistants")).json()["data"]["items"]
+    assert listed["turns"] == {"today": 3, "budget": 200}
+    assert listed["inbox_pending"] == 2
+    changed = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 50})
+    assert changed.status_code == 200
+    [listed] = (await client.get("/api/admin/assistants")).json()["data"]["items"]
+    assert listed["turns"] == {"today": 3, "budget": 50}
+    refused = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 5})
+    assert refused.status_code == 422
 
 
 async def test_the_list_shows_watch_health_without_any_content(

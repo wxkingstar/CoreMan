@@ -15,8 +15,9 @@
 
 cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次；通讯录每
 `CONTACT_SYNC_INTERVAL_HOURS` 全量同步一次（每 5 分钟看一眼是否到期）；配了 `RULES_BACKUP_REPO`
-与令牌时，员工规则文档每天备份一次（每 10 分钟看一眼是否到期）。个人助理的开通与停用、盯消息
-各有一条独立的循环，每 5 秒一次：里面有对节点与飞书的网络调用，慢了、出错了只影响它们自己。
+与令牌时，员工规则文档每天备份一次（每 10 分钟看一眼是否到期）。个人助理的开通与停用、盯消息、
+投递（交回事项与顺带检查）各有一条独立的循环，每 5 秒一次：里面有对节点与飞书的网络调用，慢了、
+出错了只影响它们自己。
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ RULES_BACKUP_CHECK_SECONDS = 600.0
 ASSISTANT_LIFECYCLE_SECONDS = 5.0
 # 个人助理盯消息：多久认领一次到期的助理（每位助理自己的轮询间隔是 60 秒起）。
 ASSISTANT_WATCH_SECONDS = 5.0
+# 个人助理投递：多久对一次账、排一次交回（立即交回的条目从入箱到入队最多这么久）。
+ASSISTANT_DELIVERY_SECONDS = 5.0
 
 
 class SchedulerService(Service):
@@ -131,6 +134,7 @@ class SchedulerService(Service):
                 ("scheduler-rules-backup", self._rules_backup_loop()),
                 ("scheduler-assistant-lifecycle", self._assistant_lifecycle_loop()),
                 ("scheduler-assistant-watch", self._assistant_watch_loop()),
+                ("scheduler-assistant-delivery", self._assistant_delivery_loop()),
             )
         ]
         self.ready = True
@@ -445,6 +449,23 @@ class SchedulerService(Service):
             except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
                 self._log.warning("assistant_watch_failed", error=type(exc).__name__)
             await self._sleep(ASSISTANT_WATCH_SECONDS)
+
+    async def _assistant_delivery_loop(self) -> None:
+        """个人助理的投递：把到点的条目排成交回轮次，再做盯消息顺带的检查。单独一条循环。"""
+        from coreman.core.assistants import delivery, delivery_checks
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    now = datetime.now(UTC)
+                    counts = await delivery.tick(self._factory, now)
+                    counts.update(await delivery_checks.tick(self._factory, self._cipher, now))
+                    hits = {key: value for key, value in counts.items() if value}
+                    if hits:
+                        self._log.info("assistant_delivery", **hits)
+            except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
+                self._log.warning("assistant_delivery_failed", error=type(exc).__name__)
+            await self._sleep(ASSISTANT_DELIVERY_SECONDS)
 
     async def _wecom_provisions_loop(self) -> None:
         """替已经离开页面的发起人取回扫码结果：二维码等于密钥，拿到结果越早，泄露窗口越小。"""
