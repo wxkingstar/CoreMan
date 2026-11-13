@@ -203,6 +203,21 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 收件箱只进不出（条目一直是 `pending`）说明投递层没在取，不是盯消息的问题。
 
+### 个人助理投递排障
+
+`GET /api/admin/assistants` 的每条记录有 `turns`（今天的轮次与预算）与 `inbox_pending`（收件箱里还没交回的条目数）。scheduler 的日志 `assistant_delivery` 带各项计数（`assistant_handovers`、`assistant_inbox_settled`、`assistant_followups_due`、`assistant_marks_stale`、`assistant_approvals_auto_withdrawn`、`assistant_recalls_noticed`、`assistant_reauth_reminded`）。
+
+| 现象 | 看哪里 | 说明 |
+|---|---|---|
+| `inbox_pending` 一直不降 | `watch.state`、所有者的工作时段、`turns` | 运行时暂停（`paused`）、下班、冷启动没做完时不交回，恢复后自动交回；`turns.today` 达到 `budget` 时只交回紧急的，其余次日交回 |
+| 条目反复交回不成 | `assistant_inbox.failures`、`void_code` | 带着它的轮次真失败满 3 次后条目作废（`undeliverable`）；先看那几轮任务的 `error_code` |
+| 条目绑着任务号不动 | `assistant_inbox.delivered_task_id` 对应的 `tasks` 行 | 那一轮还在排队或在跑（所有者正在和助理聊时会一直让路）；任务结束后 5 秒内由对账记账 |
+| 审批单自己变成了已撤回 | `assistant_approvals.error_code` | `owner_replied`、`anchor_recalled`、`anchor_moved` 是平台的自动撤回，助理会在下一轮交回里得知 |
+| 所有者说没收到授权到期提醒 | `feishu_personal_grants.authorized_at`、`assistant_delivery.reauth_reminded_on` | 只在工作时段提醒，每天一次；升级前就连接的授权按建行时间算 |
+| 平台代发的回复之后那个会话被压着 | `assistant_sent`、worker 日志 `assistant_sent_record_failed` | 代发消息的编号没记上时，盯消息会把它当成所有者亲自发言，压 10 分钟后恢复 |
+
+调整某个人的预算目前只能改库里 `assistant_settings.daily_turn_budget`（10–2000）；页面入口随「我的助理」页提供。scheduler 停止时日志里出现 `assistant_round_abandoned_on_stop`，表示有一位助理的一轮等了 20 秒仍没做完被放弃：若它恰好刚刷新过令牌，所有者需要重新授权。
+
 ## 隔离演练
 
 ```bash
