@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from coreman.core import personal_schedules as schedules
 from coreman.core.assistants import tools
 from coreman.core.assistants.approvals import catalog
 from coreman.core.assistants.approvals.tools import STAGED_NOTE
@@ -87,6 +88,22 @@ def test_register_refuses_unknown_groups_and_name_clashes(demo: Recorder) -> Non
         tools.register("knowledge", listing("twice_demo", "twice_demo"), demo)
     # 被拒绝的那一批一个都没登记进去。
     assert tools.group_of("fresh_demo") is None and tools.group_of("twice_demo") is None
+
+
+@pytest.mark.parametrize(
+    "taken",
+    [
+        "feishu_authorize",
+        "feishu_authorization_status",
+        "feishu_revoke_authorization",
+        *sorted(schedules.TOOLS),
+    ],
+)
+def test_register_refuses_names_the_entry_handles_itself(demo: Recorder, taken: str) -> None:
+    """授权工具与本人定时任务工具由 MCP 入口另行分派：重名的助理工具永远轮不到。"""
+    with pytest.raises(ValueError, match="taken"):
+        tools.register("knowledge", listing("fresh_demo", taken), demo)
+    assert tools.group_of("fresh_demo") is None
 
 
 def test_a_full_turn_lists_staged_writes_and_every_group(demo: Recorder) -> None:

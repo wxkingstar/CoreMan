@@ -44,6 +44,7 @@ _AUTH: dict[str, tuple[str, str]] = {
         "Revoke this user's authorization for this bot.",
     ),
 }
+AUTH_TOOLS = frozenset(_AUTH)
 # 没有人在场的轮次（个人助理里平台自己发起的）只能查询授权状态：发起授权要所有者点卡片，
 # 撤销授权不该由别人发来的消息引出。
 STATUS_TOOL = "feishu_authorization_status"

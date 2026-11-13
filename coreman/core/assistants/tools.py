@@ -20,6 +20,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core import personal_schedules as schedules
 from coreman.core.assistants import notes_tools
 from coreman.core.assistants.approvals import catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
@@ -60,7 +61,8 @@ def register(group: str, definitions: Definitions, dispatch: Dispatch) -> None:
         dispatch: `(ctx, 工具名, 入参字典) -> 结果字典`；只会收到这批里的工具名
 
     Raises:
-        ValueError: 组名不认识，或工具名与已登记的工具、个人工具重名
+        ValueError: 组名不认识，或工具名与已登记的工具、个人工具、授权工具、本人定时任务工具
+            重名（后两样由 MCP 入口另行分派，重名的工具永远轮不到）
     """
     if group not in _DEFINITIONS:
         raise ValueError(f"unknown tool group: {group}")
@@ -69,7 +71,11 @@ def register(group: str, definitions: Definitions, dispatch: Dispatch) -> None:
         {
             name
             for name in names
-            if name in _TOOLS or name in personal_tools.TOOLS or names.count(name) > 1
+            if name in _TOOLS
+            or name in personal_tools.TOOLS
+            or name in personal_tools.AUTH_TOOLS
+            or name in schedules.TOOLS
+            or names.count(name) > 1
         }
     )
     if taken:
