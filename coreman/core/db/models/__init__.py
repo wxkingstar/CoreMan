@@ -28,10 +28,15 @@ from coreman.core.db.models.assistants import (
     FOLLOWUP_CATEGORIES,
     FOLLOWUP_CLOSE_CODES,
     FOLLOWUP_STATUSES,
+    INBOX_KINDS,
+    INBOX_LEVELS,
+    INBOX_STATUSES,
     PAGE_AUTHORS,
     SHIFT_OVERRIDES,
+    WATCH_STATES,
     AssistantApproval,
     AssistantFollowup,
+    AssistantInbox,
     AssistantKey,
     AssistantLifecycle,
     AssistantMark,
@@ -39,6 +44,7 @@ from coreman.core.db.models.assistants import (
     AssistantRetiredDir,
     AssistantSettings,
     AssistantTranscript,
+    AssistantWatch,
 )
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
@@ -78,7 +84,12 @@ from coreman.core.db.models.cloud_proxy import (
 from coreman.core.db.models.feishu_apps import FeishuAppRegistration
 from coreman.core.db.models.feishu_docs import DOC_CONSENT_STATUSES, FeishuDocConsent
 from coreman.core.db.models.feishu_inflow import FeishuAuthWait, FeishuGroupAction
-from coreman.core.db.models.feishu_personal import FeishuPersonalGrant, FeishuPersonalSend
+from coreman.core.db.models.feishu_personal import (
+    RATE_CATEGORIES,
+    FeishuPersonalGrant,
+    FeishuPersonalSend,
+    FeishuRateUsage,
+)
 from coreman.core.db.models.infrastructure import (
     CATALOG_STATUSES,
     TOKEN_DELIVERIES,
@@ -311,4 +322,15 @@ __all__ += [
     "FOLLOWUP_CLOSE_CODES",
     "FOLLOWUP_STATUSES",
     "AssistantFollowup",
+]
+
+__all__ += [
+    "INBOX_KINDS",
+    "INBOX_LEVELS",
+    "INBOX_STATUSES",
+    "RATE_CATEGORIES",
+    "WATCH_STATES",
+    "AssistantInbox",
+    "AssistantWatch",
+    "FeishuRateUsage",
 ]

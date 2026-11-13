@@ -7,10 +7,12 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Text,
@@ -81,3 +83,26 @@ class FeishuPersonalSend(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text)
     draft_id: Mapped[str | None] = mapped_column(Text)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
+RATE_CATEGORIES = ("chats", "history")
+
+
+class FeishuRateUsage(Base):
+    """以所有者身份调飞书的用量流水：一行一次调用，或一笔限频后占满额度的退避。
+
+    飞书按「应用 × 企业 × 接口」限频，全员共用，所以按应用、按接口类别统计最近 60 秒的
+    `sum(units)`。只插入不更新：计数器的行锁会被调用方的事务一直占着。旧行由盯消息循环清理。
+    """
+
+    __tablename__ = "feishu_rate_usage"
+    __table_args__ = (
+        CheckConstraint(enum_check("category", RATE_CATEGORIES), name="category"),
+        CheckConstraint("units > 0", name="units"),
+        Index("feishu_rate_usage_window_idx", "app_id", "category", "at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    app_id: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(Text)
+    units: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

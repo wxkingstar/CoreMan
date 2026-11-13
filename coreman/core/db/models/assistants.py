@@ -13,6 +13,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -398,3 +399,88 @@ class AssistantFollowup(Base):
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
     closed_at: Mapped[datetime | None] = _ts()
+
+
+WATCH_STATES = ("idle", "polling", "backoff", "paused", "stopped")
+INBOX_KINDS = ("message", "approval_todo", "reminder")
+INBOX_LEVELS = ("immediate", "batch", "hold")
+INBOX_STATUSES = ("pending", "delivered", "void")
+
+
+class AssistantWatch(Base):
+    """一位助理的盯消息状态：读到哪了、上一轮的会话顺序、下次什么时候轮询、健康状况。
+
+    `cursor` 是明文的定位信息，只有会话 id、话题 id、消息 id 与毫秒时间：
+    `{"since": <开始被盯的时刻>, "chats": {<会话>: {"t": <读到的最新一条>, "m": [<时间等于 t 的
+    消息>], "k": "p2p" | "group", "o": <所有者上次在这里发言>, "th": {<话题>: <读到的最新一条>}}},
+    "todo": [<上一轮没读完的会话>]}`。
+    `head_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出的行上是上一轮列会话得到的会话 id
+    列表（按最近活跃倒序）。
+    `state`：`polling` 在轮询；`idle` 没在轮询但没有问题（下班、冷启动没做完）；`paused` 运行时
+    暂停；`backoff` 出错或限频后在退避；`stopped` 已停用。`last_error` 只存代码。
+    `keepalive_at` 是上次确认令牌还活着的时刻（轮询成功或保活刷新），不轮询时每 24 小时刷新一次。
+    """
+
+    __tablename__ = "assistant_watch"
+    __table_args__ = (
+        CheckConstraint(enum_check("state", WATCH_STATES), name="state"),
+        CheckConstraint('"interval" BETWEEN 60 AND 3600', name="interval"),
+        Index("assistant_watch_due_idx", "next_poll_at"),
+    )
+    bot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
+    )
+    cursor: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    head_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    interval: Mapped[int] = mapped_column(Integer, server_default=text("60"))
+    next_poll_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    state: Mapped[str] = mapped_column(Text, server_default=text("'idle'"))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_ok_at: Mapped[datetime | None] = _ts()
+    failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    keepalive_at: Mapped[datetime | None] = _ts()
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class AssistantInbox(Base):
+    """要交回给助理的一件事。消息内容不落库：这里只有定位信息与加密的摘要。
+
+    `summary_enc` 登记在 `sealed.COLUMNS`。`level` 是入箱时的分级；`hold_until` 为空表示可以
+    立刻交回，否则攒批或压着到那个时刻。`status`：`pending` 待交回，`delivered` 已交回，`void`
+    作废（`void_code`：`recalled` 对方撤回、`stopped` 助理停用）。`delivered_task_id` 由投递层
+    （2E）写入：交回它的那一轮；`pending` 且非空表示正在交回，盯消息不再改这一行。
+    """
+
+    __tablename__ = "assistant_inbox"
+    __table_args__ = (
+        CheckConstraint(enum_check("kind", INBOX_KINDS), name="kind"),
+        CheckConstraint(enum_check("level", INBOX_LEVELS), name="level"),
+        CheckConstraint(enum_check("status", INBOX_STATUSES), name="status"),
+        # 同一条消息只入箱一次：轮询重跑、两个 scheduler 交接时重叠都靠它兜住。
+        Index(
+            "assistant_inbox_message_uq",
+            "bot_id",
+            "kind",
+            "message_id",
+            unique=True,
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
+        Index("assistant_inbox_due_idx", "bot_id", "status", "hold_until"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'message'"))
+    level: Mapped[str] = mapped_column(Text)
+    chat_id: Mapped[str | None] = mapped_column(Text)
+    message_id: Mapped[str | None] = mapped_column(Text)
+    thread_id: Mapped[str | None] = mapped_column(Text)
+    message_at: Mapped[datetime | None] = _ts()
+    summary_enc: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    void_code: Mapped[str | None] = mapped_column(Text)
+    hold_until: Mapped[datetime | None] = _ts()
+    # 不设外键：任务行按保留期清理，条目比它留得久。
+    delivered_task_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
