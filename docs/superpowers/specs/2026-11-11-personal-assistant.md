@@ -202,7 +202,7 @@
 
 ### 改稿与撤回
 
-工具 `approval_revise(id, 新参数)`、`approval_withdraw(id, reason)`、`approval_list(status, topic)`。只有 `pending` 的单可以改稿或撤回。改稿是用同一个外部编号重新提交，Tower 原地替换并重新通知；撤回调用 Tower 的撤回接口。平台在下列情况自动撤回往会话里发新内容的待批单并通知助理（每 5 分钟检查一次，原因记在 `error_code`）：所有者已在该会话亲自回复（`owner_replied`）、对方撤回了被回复的消息（`anchor_recalled`）、锚点之后会话又有了新消息（`anchor_moved`）。审批通过后由平台代所有者发出的消息记下编号（表 `assistant_sent`），盯消息读到它时不当作所有者亲自发言。
+工具 `approval_revise(id, 新参数)`、`approval_withdraw(id, reason)`、`approval_list(status, topic)`。只有 `pending` 的单可以改稿或撤回。改稿是用同一个外部编号重新提交，Tower 原地替换并重新通知；撤回调用 Tower 的撤回接口。平台在下列情况自动撤回往会话里发新内容的待批单并通知助理（每 5 分钟检查一次，原因记在 `error_code`）：所有者已在该会话亲自回复（`owner_replied`）、对方撤回了被回复的消息（`anchor_recalled`）、锚点之后会话又有了新消息（`anchor_moved`）。「之后」从这张单提交的时刻算起，改过稿的从最近一次改稿算起（`assistant_approvals.revised_at`）：改稿时平台重新读过会话。审批单正被执行、决定或改稿锁着时这一次不撤，留到下一次检查。审批通过后由平台代所有者发出的消息记下编号（表 `assistant_sent`），盯消息读到它时不当作所有者亲自发言。
 
 Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有对应账号时提交失败（`tower_account_missing`）；开通时查不到账号，只提醒先登录一次（见第十节）。
 

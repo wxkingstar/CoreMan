@@ -219,7 +219,8 @@ async def stale_approvals(
     """待批的发消息类审批单：被回复的消息已撤回、所有者已亲自回复、会话又有了新消息的，撤回并入箱告知。
 
     尽量不读飞书：锚点合成一次 `im.mget`；「所有者已亲自回复」看盯消息记下的发言时间；只有
-    游标显示这张单创建之后会话里有新消息，才读一次会话复核（同一个会话只读一次）。
+    游标显示这张单提交（改过稿的按最近一次改稿）之后会话里有新消息，才读一次会话复核
+    （同一个会话只读一次）。
     """
     rows = (
         await session.execute(
@@ -229,6 +230,7 @@ async def stale_approvals(
                 AssistantApproval.anchor_message_id,
                 AssistantApproval.thread_id,
                 AssistantApproval.created_at,
+                AssistantApproval.revised_at,
             )
             .where(
                 AssistantApproval.bot_id == bot.id,
@@ -250,7 +252,9 @@ async def stale_approvals(
     views: dict[tuple[str, str | None], anchors.ChatView] = {}
     withdrawn = 0
     for row in rows:
-        created = _ms(row.created_at)
+        # 提交与改稿时平台都重新读过会话、核对过锚点：从较晚的那一次算起。只按创建时间算的话，
+        # 所有者说了一句、助理据此改了稿，这张新稿仍会被当成「所有者已亲自回复」撤掉。
+        created = _ms(max(row.created_at, row.revised_at or row.created_at))
         spoke, latest = marks.get(row.chat_id, (0, 0))
         code: str | None = None
         if row.anchor_message_id in gone:

@@ -757,6 +757,8 @@ async def revise(
     try:
         async with session.begin_nested():
             _apply(row, staged, cfg, scope.bot.bot_key)
+            # `_stage` 刚重新读过会话、核对过锚点：平台之后判断这张单过没过时从这一刻算起。
+            row.revised_at = utcnow()
             await session.flush()
             await _store_uploads(files, staged)
             await tower.submit(

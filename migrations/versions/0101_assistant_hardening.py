@@ -1,4 +1,4 @@
-"""Personal assistant hardening: the watch cursor becomes a sealed column."""
+"""Personal assistant hardening: sealed watch cursor, revision time on approvals."""
 
 import sqlalchemy as sa
 from alembic import op
@@ -23,9 +23,13 @@ def upgrade() -> None:
         ),
     )
     op.drop_column("assistant_watch", "cursor")
+    op.add_column(
+        "assistant_approvals", sa.Column("revised_at", sa.DateTime(timezone=True), nullable=True)
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("assistant_approvals", "revised_at")
     op.add_column(
         "assistant_watch",
         sa.Column(

@@ -109,6 +109,8 @@ class AssistantApproval(Base):
     # 临时桶里还留着这张单的附件；到终态后由 scheduler 删除并清掉这个标记。
     has_files: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    # 最近一次改稿的时刻（没改过为空）：改稿时平台重新读过会话，「之后会话动没动过」从它算起。
+    revised_at: Mapped[datetime | None] = _ts()
     expires_at: Mapped[datetime] = _ts()
     notified_at: Mapped[datetime | None] = _ts()
     decided_at: Mapped[datetime | None] = _ts()

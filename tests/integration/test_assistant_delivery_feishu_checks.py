@@ -156,6 +156,28 @@ async def test_the_owner_replying_himself_withdraws_the_draft_without_reading_th
     assert len(await inbox_rows(db_session, bot)) == 1
 
 
+async def test_a_revised_draft_is_judged_from_the_revision_not_from_its_creation(
+    db_session: AsyncSession,
+) -> None:
+    """改稿时平台重新读过会话、核对过锚点：那之前所有者说的话、会话里的新消息都已经算在新稿里。"""
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    created = now - timedelta(minutes=10)
+    row = await pending(db_session, bot, created)
+    # 提交一分钟后所有者亲自说了一句、对方也回了；五分钟后助理据此改了稿。
+    await seen(db_session, bot, owner=ms(created) + 60_000, latest=ms(created) + 90_000)
+    row.revised_at = created + timedelta(minutes=5)
+    await db_session.commit()
+    feishu = Feishu(history=[said("om_reply"), said("om_mine", OWNER), said("om_anchor")])
+    assert await check(db_session, bot, feishu, now) == 0
+    assert feishu.calls == ["im.mget"]
+    assert await status_of(db_session, row) == ("pending", None)
+    # 改稿之后所有者又亲自回了：照旧撤回。
+    await seen(db_session, bot, owner=ms(created) + 6 * 60_000, latest=ms(created) + 6 * 60_000)
+    assert await check(db_session, bot, Feishu(), now) == 1
+    assert await status_of(db_session, row) == ("withdrawn", "owner_replied")
+
+
 async def test_only_drafts_that_send_into_a_chat_are_checked(db_session: AsyncSession) -> None:
     """改、撤、置顶自己发过的消息的单，锚点就是那条消息本身：所有者之后又发言不让它过时。"""
     bot, _ = await ready(db_session)

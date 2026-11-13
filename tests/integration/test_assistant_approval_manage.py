@@ -80,12 +80,15 @@ async def test_revise_replaces_the_pending_approval_in_place(
     row = await pending(db_session, scope)
     before = (row.args_hash, row.request_hash, row.external_id, row.approval_id)
     row.notified_at = row.created_at
+    assert row.revised_at is None
     await db_session.commit()
     out = await call(
         db_session, scope, "approval_revise", {"approval_id": str(row.id), "arguments": REVISED}
     )
     assert out == {"status": "pending_approval", "approval_id": str(row.id), "revised": True}
     row = await reload(db_session, row)
+    # 记下改稿的时刻：平台判断「会话在这张单之后动没动过」从这一刻算起。
+    assert row.revised_at is not None and row.revised_at >= row.created_at
     # 同一张单、同一个外部编号；内容、去重键、请求哈希都换成新的；提醒重新来过。
     assert row.status == "pending" and row.external_id == before[2]
     assert row.args_enc is not None
