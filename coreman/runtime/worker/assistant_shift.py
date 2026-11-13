@@ -3,6 +3,9 @@
 与「停用助理」同一处截下（入站阶段认出发言人之后，早于公告、待答与运行时检查），只截私聊里
 整条消息就是命令的情况；别人发的不回应、不生效。到期时刻的算法在 `settings.clock_in` /
 `clock_out`；到点不用清理，`settings.on_shift` 只认没过期的临时切换。
+
+同一处还管冷启动的两件事：冷启动进行中所有者发「跳过」，整个跳过；2F 上线前开通的助理没有
+冷启动记录，所有者下一次来私聊时开始（那条消息照常交给模型）。
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import cold_start
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.bus import outbox, tasks
 from coreman.core.db.models import AssistantSettings, Bot
@@ -21,8 +25,10 @@ from coreman.runtime.worker.context import TaskContext
 ON = frozenset({"上班", "/上班"})
 OFF = frozenset({"下班", "/下班"})
 COMMANDS = ON | OFF
+# 只在冷启动进行中才截下；其余时候是一句普通的话。
+SKIP = frozenset({"跳过", "/跳过"})
 # 不并进正在跑的一轮的词：留给它们自己那一轮去截下（`chat/queued_batch.py`）。
-RESERVED = COMMANDS
+RESERVED = COMMANDS | SKIP
 _WEEKDAYS = "一二三四五六日"
 NOT_WATCHING = "冷启动还没做完，我还没开始看消息；做完或发「跳过」之后才开始。"
 
@@ -51,22 +57,10 @@ def _reply(prefs: AssistantSettings, on: bool, until: datetime, now: datetime) -
     return text
 
 
-async def intercept(
-    session: AsyncSession,
-    ctx: TaskContext,
-    bot: Bot,
-    speaker: Speaker,
-    chat_id: str,
-    text: str,
-) -> bool:
-    """个人助理私聊里发了「上班」「下班」：所有者的就地生效并回一句，别人的就此结束；返回真。
-
-    其余消息返回假。写在调用方的事务里，由调用方提交。
-    """
-    word = text.strip()
-    if word not in COMMANDS:
-        return False
-    owner = speaker.user_id is not None and speaker.user_id == bot.owner_id
+async def _switch(
+    session: AsyncSession, ctx: TaskContext, bot: Bot, owner: bool, chat_id: str, word: str
+) -> None:
+    """「上班」「下班」：所有者的就地生效并回一句，别人的就此结束。"""
     result = "shift_not_owner"
     if owner and bot.assistant_state != "active":
         # 开通没走完或正在停用：没有可切换的东西，也不回话（停用流程自己会告知）。
@@ -102,4 +96,43 @@ async def intercept(
         only_active=True,
         bot_id=bot.id,
     )
-    return True
+
+
+async def intercept(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    speaker: Speaker,
+    chat_id: str,
+    text: str,
+) -> bool:
+    """个人助理私聊里的一条消息：是平台直接处理的命令就处理掉并返回真，其余返回假。
+
+    写在调用方的事务里，由调用方提交。普通消息多一次按主键读设置行（只有个人助理走到这里）。
+    """
+    word = text.strip()
+    owner = speaker.user_id is not None and speaker.user_id == bot.owner_id
+    if word in COMMANDS:
+        await _switch(session, ctx, bot, owner, chat_id, word)
+        return True
+    if not owner or bot.assistant_state != "active":
+        return False
+    prefs = await session.get(AssistantSettings, bot.id)
+    if prefs is None:
+        # 还没有设置行（没记下身份的旧助理的第一轮）：跑不了平台来源的轮次，冷启动不开始。
+        return False
+    now = utcnow()
+    if word in SKIP and cold_start.pending(prefs):
+        await cold_start.complete(session, bot, prefs, "skipped", now)
+        await tasks.finish(
+            session,
+            ctx.task.id,
+            status="succeeded",
+            result={"assistant": "cold_start_skipped"},
+            only_active=True,
+            bot_id=bot.id,
+        )
+        return True
+    # 2F 上线前开通的助理：所有者下一次来私聊时开始冷启动（已开始过的什么都不做）。
+    await cold_start.begin(session, bot.id, now)
+    return False
