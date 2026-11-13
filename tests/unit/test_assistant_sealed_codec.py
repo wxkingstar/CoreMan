@@ -11,6 +11,7 @@ from coreman.core.assistants import sealed
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantSettings,
     AssistantTranscript,
     ChatLog,
     CloudPendingApproval,
@@ -45,12 +46,14 @@ def test_every_content_column_is_registered() -> None:
         AssistantApproval,
         CloudPendingApproval,
         AssistantTranscript,
+        AssistantSettings,
     }
     assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
     assert set(sealed.COLUMNS[InteractionState]) == {"state"}
     assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}
     assert set(sealed.COLUMNS[CloudPendingApproval]) == {"reason"}
     assert set(sealed.COLUMNS[AssistantTranscript]) == {"blob_enc"}
+    assert set(sealed.COLUMNS[AssistantSettings]) == {"focus_chats_enc", "ignored_chats_enc"}
     assert set(sealed.COLUMNS[Task]) == {"payload", "result", "error_message"}
     assert set(sealed.COLUMNS[FeishuSentMessage]) == {"text"}
     assert set(sealed.COLUMNS[TaskStream]) == {
