@@ -571,7 +571,7 @@ class OpenStage(ChatStageBase):
             current.last_speaker_user_id = intake.speaker.user_id
             return sessions.SessionInfo(row.source_relay_session_id, False, False)
         ttl = int(await ctx.settings_store.get("session_ttl_hours", default=72))
-        return await sessions.get_or_create(
+        info = await sessions.get_or_create(
             session,
             bot_id=intake.bot.id,
             session_key=intake.session_key,
@@ -579,6 +579,19 @@ class OpenStage(ChatStageBase):
             ttl_hours=ttl,
             speaker_user_id=intake.speaker.user_id,
         )
+        if self.DAILY_SESSIONS and is_assistant(intake.bot):
+            from coreman.runtime.worker.chat import assistant_day
+
+            info = await assistant_day.roll(
+                session,
+                intake.bot,
+                info,
+                session_key=intake.session_key,
+                chat_id=intake.chat_id,
+                backend=backend,
+                speaker_user_id=intake.speaker.user_id,
+            )
+        return info
 
     async def _system_prompt(
         self,

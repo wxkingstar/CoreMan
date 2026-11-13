@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, Delete, delete, func, select, update
@@ -228,4 +228,25 @@ async def carry_over(
 async def list_for_bot(session: AsyncSession, bot_id: uuid.UUID) -> list[ChatSession]:
     return list(
         (await session.execute(select(ChatSession).where(ChatSession.bot_id == bot_id))).scalars()
+    )
+
+
+async def day_of(session: AsyncSession, *, bot_id: uuid.UUID, session_key: str) -> date | None:
+    """这个会话键当前的 relay 会话是哪一天开始的（所有者时区）；没记过返回 None。"""
+    found: date | None = await session.scalar(
+        select(ChatSession.local_day).where(
+            ChatSession.bot_id == bot_id, ChatSession.session_key == session_key
+        )
+    )
+    return found
+
+
+async def stamp_day(
+    session: AsyncSession, *, bot_id: uuid.UUID, session_key: str, day: date
+) -> None:
+    """记下这个会话键当前的 relay 会话从 `day` 开始（个人助理的主会话每天换新用）。"""
+    await session.execute(
+        update(ChatSession)
+        .where(ChatSession.bot_id == bot_id, ChatSession.session_key == session_key)
+        .values(local_day=day)
     )

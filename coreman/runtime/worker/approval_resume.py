@@ -45,6 +45,8 @@ async def _reset_by_user(session: AsyncSession, ctx: TaskContext) -> bool:
 
 class ApprovalResumeHandler(ChatTaskHandler):
     kind = resume.RESUME_KIND
+    # 续接只进提交审批的那个 relay 会话：不做每天换新，留给之后的普通轮次。
+    DAILY_SESSIONS = False
 
     async def run(self, ctx: TaskContext) -> None:
         try:
