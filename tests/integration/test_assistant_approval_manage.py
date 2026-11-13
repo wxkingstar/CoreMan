@@ -57,6 +57,8 @@ def test_own_tools_are_listed_for_assistants() -> None:
         "followup_snooze",
         "followup_close",
         "followup_list",
+        "assistant_settings_get",
+        "assistant_settings_update",
         "approval_revise",
         "approval_withdraw",
         "approval_list",
