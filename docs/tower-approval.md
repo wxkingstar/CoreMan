@@ -172,6 +172,7 @@ CoreMan 可以替 Agent 给阿里云 OpenAPI 请求签名：Agent 机器上不�
 个人助理（见 `docs/feishu.md`「个人助理应用」）以所有者的飞书身份工作，它的每一次写操作都先经所有者本人在 Tower 批准。这里平台自己既是发送端又是目标系统：
 
 - **目标系统**：在 Tower 登记一个目标系统，key 固定为 `feishu-personal`，登记时**打开免比对**（正文与请求体是私人消息，不送任何模型；这是按目标系统的开关，没有按次的字段）。打开后审批卡片上会显示「未经比对」，这是预期的。没打开时提交可能被 Tower 以 `description_mismatch` 拒绝。把它的 API Key 加进 `TOWER_TARGET_KEYS`：`{"feishu-personal": "…", …}`。云签名代理的四个产品 Key 不受影响；只用个人助理、不用云签名代理的部署可以只配这一个键。
+- **给人看的名称与入口（可选）**：`TOWER_DISPLAY_NAME`（如 `Example Tower`）与 `TOWER_WEB_URL`（如 `https://tower.example.com`，只认 http/https）。配了之后，开通卡片与欢迎语里用这个名称并带上链接，代替笼统的「审批系统」；不配则照旧。
 - **发送端**：沿用 `TOWER_SENDER_KEY`、`TOWER_CALLBACK_SECRET` 与同一个回调地址。`TOWER_URL`、这两项和上面的目标 Key 任一缺失时，助理的写类工具返回 `approval_service_unavailable`，写操作不会执行。
 - **发起人与审批人**：发起人是所有者的登录名（`login_name`，要与 Tower 的用户名一致），审批人不填，由发起人本人确认。所有者没有登录名时返回 `no_login_name`；在 Tower 没有登记或已停用时返回 `tower_account_missing`（Tower 没有供发送端预先查询账号的接口，只能在提交时发现）。Tower 因内容本身拒绝这张单（正文过长、到期时间不合法等其他 4xx）时返回 `approval_rejected`，`detail` 带 Tower 的原代码，提示助理原样重提也不会成功；连不上或 5xx 才是 `approval_service_unavailable`，可以稍后重试。
 - **流程**：提交 → 所有者在 Tower 批准或拒绝 → 回调（丢失时由对账补上）→ 批准后平台重新读会话、取令牌并以 `feishu-personal` 的身份核销、按暂存参数原样执行、把结果上报 Tower，并在助理会话里告诉它；拒绝、过期、执行失败同样告诉它。令牌与暂存参数的哈希绑定，库里的参数被改动后核销不过，不会执行。

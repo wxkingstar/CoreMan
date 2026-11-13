@@ -46,6 +46,12 @@ class FakeMessenger(lifecycle.Messenger):
         self.texts: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict[str, Any]]] = []
         self.fail = False
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+
+    async def update_card(
+        self, session: AsyncSession, app_id: uuid.UUID, message_id: str, card: dict[str, Any]
+    ) -> None:
+        self.updates.append((message_id, card))
 
     async def _send(
         self,

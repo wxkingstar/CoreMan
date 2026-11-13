@@ -22,8 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants.apps import app_credentials
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import AssistantLifecycle, PlatformApp
+from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.timeutils import utcnow
+
+log = get_logger(__name__)
 
 # 本步骤连续失败到这么多次：开通放弃（走一遍停用把已建的东西收掉）；停用永不放弃。
 PROVISION_MAX_ATTEMPTS = 10
@@ -158,6 +161,20 @@ class Messenger:
         key: str,
     ) -> tuple[str, str]:
         return await self._send(session, app_id, user_id, "interactive", card, key)
+
+    async def update_card(
+        self, session: AsyncSession, app_id: uuid.UUID, message_id: str, card: dict[str, Any]
+    ) -> None:
+        """把已发出的卡片换成新内容；换不成只记一笔，不挡这一步。"""
+        try:
+            client = await self._client(session, app_id)
+            await client.call(
+                "PATCH",
+                f"/open-apis/im/v1/messages/{message_id}",
+                json={"content": json.dumps(card, ensure_ascii=False)},
+            )
+        except (FeishuError, StepRetry, StepFailed) as exc:
+            log.warning("assistant_card_update_failed", code=getattr(exc, "code", None))
 
     async def aclose(self) -> None:
         for client in self._clients.values():

@@ -219,6 +219,7 @@ class AssistantLifecycle(Base):
         Uuid, ForeignKey("users.id", ondelete="SET NULL", name="fk_assistant_lifecycles_actor")
     )
     # 开通卡片：发给谁（飞书 user_id）、卡片令牌的摘要（点过即清）、卡片所在的消息与私聊。
+    # 点过开通之后 offer_message_id 改记最近一张授权卡片的消息。
     platform_user_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
     offer_hash: Mapped[str | None] = mapped_column(Text)
     offer_message_id: Mapped[str | None] = mapped_column(Text)

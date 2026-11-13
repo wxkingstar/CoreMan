@@ -150,6 +150,9 @@ async def test_the_whole_way_from_a_message_to_a_usable_assistant(
     assert grant is not None and grant.status == "connected" and grant.authorization_level == "all"
     assert grant.open_id == OWNER_OPEN_ID
     assert messenger.texts[-1][1] == provisioning.welcome_text()
+    # 授权完成后，授权卡片换成没有按钮的。
+    assert [card for _, card in messenger.updates] == [provisioning.granted_card()]
+    assert "button" not in str(provisioning.granted_card())
 
 
 async def test_a_card_can_be_used_once_by_its_owner_in_its_own_chat(

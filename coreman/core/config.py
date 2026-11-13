@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     tower_target_keys: dict[str, SecretStr] = Field(
         default_factory=dict, alias="TOWER_TARGET_KEYS", repr=False
     )
+    # 给人看的审批系统名称与网页入口（如「Example Tower」「https://tower.example.com」）：
+    # 个人助理的开通卡片与欢迎语里用它们代替笼统的「审批系统」。都可不配。
+    tower_display_name: str | None = Field(default=None, alias="TOWER_DISPLAY_NAME")
+    tower_web_url: str | None = Field(default=None, alias="TOWER_WEB_URL")
     aliyun_proxy_access_key_id: SecretStr | None = Field(
         default=None, alias="ALIYUN_PROXY_ACCESS_KEY_ID"
     )
