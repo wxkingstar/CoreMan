@@ -38,7 +38,15 @@ def test_session_keys_carry_the_job_id() -> None:
     key = jobs.session_key_for("oc_private", row_id)
     assert key == "oc_private#job:0b0f6f0c-9f43-4c50-8f0e-3b2b3a8f7a11"
     assert jobs.job_id_of(key) == row_id
-    for other in ("oc_private", "oc_private#job:", "oc_private#job:not-a-uuid", "", None):
+    for other in (
+        "oc_private",
+        "oc_private#job:",
+        "oc_private#job:not-a-uuid",
+        # 冷启动的口吻样本用的会话键，不是子任务。
+        "oc_private#job:cold-start",
+        "",
+        None,
+    ):
         assert jobs.job_id_of(other) is None
 
 

@@ -23,7 +23,7 @@ from coreman.core.assistants import delivery, platform_turns, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.kinds import SUBTASK_KIND
 from coreman.core.bus import tasks
-from coreman.core.db.models import AssistantJob, AssistantSettings, Bot
+from coreman.core.db.models import AssistantJob, AssistantSettings, Bot, Task
 from coreman.core.timeutils import aware_utc, utcnow
 
 # 同一位助理同时进行中的子任务、助理自己每天能派的个数、一个子任务最多几轮（首轮加追问）。
@@ -45,6 +45,19 @@ SCOPES: dict[str, tuple[str, ...] | None] = {
     "blocked": ("blocked",),
     "recent": None,
 }
+# 子任务一句话都没说就正常结束时记下的结论。
+EMPTY_RESULT = "（子任务没有给出结论。）"
+ROUND_ONE = (
+    "这是主会话派给你的子任务（编号 {id}）。所有者不在场；你的回答不会发给任何人，"
+    "最后一条回答会作为结论交回主会话。\n"
+    "标题：{title}\n\n"
+    "要查的事：\n{brief}\n\n"
+    "按「你现在是子任务」的规则做。"
+)
+FOLLOW_UP = (
+    "主会话就子任务 {id} 追问（第 {round} 轮，最多 {limit} 轮）：\n{text}\n\n"
+    "按「你现在是子任务」的规则做，最后一条回答是这次追问的结论。"
+)
 
 
 class JobError(Exception):
@@ -326,5 +339,180 @@ async def message(
     row.report_failures, row.report_code = 0, None
     row.deadline_at, row.updated_at = now + LIFETIME, now
     await _enqueue_round(session, bot, row)
+    await session.flush()
+    return row
+
+
+async def for_round(session: AsyncSession, bot_id: uuid.UUID, task: Task) -> AssistantJob | None:
+    """这个子任务轮次对应的行：任务就是它在途的那一轮、子任务还在进行中、内容读得出。纯读。
+
+    处理器在占会话之前调它，让路放回队列后每次重新认领都会再调一次。
+    """
+    job_id = job_id_of(task.session_key)
+    if job_id is None or str(task.payload.get("job_id")) != str(job_id):
+        return None
+    try:
+        row = await get(session, bot_id, job_id)
+    except JobError:
+        return None
+    if row.status not in LIVE or row.last_task_id != task.id or sealed.is_locked(row):
+        return None
+    return row
+
+
+def round_text(row: AssistantJob) -> str:
+    """这一轮交给模型的文本：首轮是交代，之后是最近一次追问。"""
+    if row.rounds <= 1:
+        return ROUND_ONE.format(
+            id=row.id, title=" ".join(row.title_enc.split()), brief=row.brief_enc
+        )
+    return FOLLOW_UP.format(
+        id=row.id, round=row.rounds, limit=MAX_ROUNDS, text=row.message_enc or ""
+    )
+
+
+async def _in_flight(session: AsyncSession, bot_id: uuid.UUID, task: Task) -> AssistantJob | None:
+    """`task` 是哪个进行中的子任务在途的那一轮（加锁）；不是就返回 None。"""
+    job_id = job_id_of(task.session_key)
+    if job_id is None:
+        return None
+    try:
+        row = await get(session, bot_id, job_id, lock=True)
+    except JobError:
+        return None
+    return row if row.status in LIVE and row.last_task_id == task.id else None
+
+
+async def mark_running(session: AsyncSession, bot_id: uuid.UUID, task: Task) -> bool:
+    """这一轮开流了：`queued` → `running`。与开流同一事务，调用方提交。"""
+    row = await _in_flight(session, bot_id, task)
+    if row is None or row.status != "queued":
+        return False
+    now = utcnow()
+    row.status, row.updated_at = "running", now
+    row.started_at = row.started_at or now
+    await session.flush()
+    return True
+
+
+async def block(session: AsyncSession, bot_id: uuid.UUID, task: Task, reason: str) -> AssistantJob:
+    """子任务说它卡住了：记下原因，这一轮正常结束时状态是 `blocked`。
+
+    Raises:
+        JobError: invalid_reason / job_not_found / content_locked
+    """
+    reason = _clean(reason, MAX_REASON, "invalid_reason")
+    row = await _in_flight(session, bot_id, task)
+    if row is None:
+        raise JobError("job_not_found")
+    if not await sealed.key_ready(session, bot_id):
+        raise JobError("content_locked")
+    row.blocked_enc, row.updated_at = reason, utcnow()
+    await session.flush()
+    return row
+
+
+async def _end(
+    session: AsyncSession,
+    row: AssistantJob,
+    status: str,
+    code: str | None,
+    *,
+    report: bool,
+    now: datetime,
+) -> None:
+    """把一个进行中的子任务结掉，并叫停它在途的那一轮（已经结束的任务不受影响）。"""
+    row.status, row.error_code = status, code
+    row.finished_at, row.updated_at = now, now
+    if not report:
+        row.reported_at, row.report_code = now, "not_needed"
+    if row.last_task_id is not None:
+        await tasks.request_cancel(session, row.last_task_id, code or status)
+    await session.flush()
+
+
+async def cancel(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    job_id: uuid.UUID,
+    *,
+    code: str = "cancelled",
+    report: bool = False,
+    now: datetime | None = None,
+) -> AssistantJob:
+    """取消一个进行中的子任务。
+
+    Args:
+        report: 要不要把「已取消」投回主会话；主会话自己取消的不用
+
+    Raises:
+        JobError: job_not_found / job_closed
+    """
+    row = await get(session, bot_id, job_id, lock=True)
+    if row.status not in LIVE:
+        raise JobError("job_closed")
+    await _end(session, row, "cancelled", code, report=report, now=aware_utc(now or utcnow()))
+    return row
+
+
+async def cancel_all(
+    session: AsyncSession, bot_id: uuid.UUID, code: str, *, now: datetime | None = None
+) -> int:
+    """取消这位助理所有进行中的子任务（停用时用），不投回；返回个数。"""
+    when = aware_utc(now or utcnow())
+    ids = list(
+        await session.scalars(
+            select(AssistantJob.id)
+            .where(AssistantJob.bot_id == bot_id, AssistantJob.status.in_(LIVE))
+            .order_by(AssistantJob.created_at)
+        )
+    )
+    count = 0
+    for job_id in ids:
+        row = await session.get(AssistantJob, job_id, with_for_update=True, populate_existing=True)
+        if row is None or row.status not in LIVE:
+            continue
+        await _end(session, row, "cancelled", code, report=False, now=when)
+        count += 1
+    return count
+
+
+async def complete(
+    session: AsyncSession,
+    bot: Bot,
+    job_id: uuid.UUID,
+    *,
+    task_id: int,
+    ok: bool,
+    result: str | None = None,
+    error_code: str | None = None,
+    now: datetime | None = None,
+) -> AssistantJob | None:
+    """子任务的一轮结束了：写下结论与状态。
+
+    只认在途的那一轮：子任务已被取消、已超时，或同一轮重复收尾时返回 None，什么都不改。
+
+    Args:
+        ok: 这一轮是不是正常结束
+        result: 正常结束时的终稿
+        error_code: 没正常结束时任务的错误代码；只留开头的代码，说明文字不进库
+    """
+    try:
+        row = await get(session, bot.id, job_id, lock=True)
+    except JobError:
+        return None
+    if row.status not in LIVE or row.last_task_id != task_id:
+        return None
+    when = aware_utc(now or utcnow())
+    if ok and await sealed.key_ready(session, bot.id):
+        row.result_enc = (result or "").strip()[:MAX_RESULT] or EMPTY_RESULT
+        row.status, row.error_code = ("blocked" if row.blocked_enc else "done"), None
+    elif ok:
+        # 结论写不进去（所有者的数据密钥不可用）：不留一条没有结论的「已完成」。
+        row.status, row.error_code = "failed", "content_locked"
+    else:
+        row.status = "failed"
+        row.error_code = sealed.code_only(error_code or "", "turn_failed")
+    row.finished_at, row.updated_at = when, when
     await session.flush()
     return row
