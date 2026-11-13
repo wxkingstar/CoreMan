@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 
@@ -196,3 +197,59 @@ async def test_an_unexpected_error_keeps_the_token_refreshed_in_that_round(
     assert (row.state, row.last_error, row.failures) == ("backoff", "RuntimeError", 1)
     assert row.next_poll_at == now + timedelta(seconds=watch.ERROR_BACKOFF_MAX)
     assert SECRET not in json.dumps(logs, ensure_ascii=False, default=str)
+
+
+async def test_a_round_cancelled_midway_finishes_and_keeps_the_refreshed_token(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scheduler 停止时会取消循环：正在进行的一轮刚换过令牌，要等它提交完，不能就地回滚。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session, expired=True)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [LI]
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def before(hit: Hit) -> None:
+        reached.set()
+        await release.wait()
+
+    api.before = before
+    now = after(base, 30)
+    job = asyncio.create_task(tick(make_session_factory(db_engine), now))
+    await asyncio.wait_for(reached.wait(), 5)
+    # 列会话之前已经换到了新令牌（旧的刷新令牌已经用掉），这时循环被取消。
+    assert api.refreshes == 1
+    job.cancel()
+    await asyncio.sleep(0.05)
+    assert not job.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(job, 5)
+    assert (await tokens(db_session, who))["refresh_token"] == "u-refresh-r1"
+    row = await watch_row(db_session, who)
+    assert (row.state, row.last_ok_at) == ("polling", now)
+
+
+async def test_a_cancelled_round_is_not_waited_for_forever(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [LI]
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def before(hit: Hit) -> None:
+        reached.set()
+        await release.wait()
+
+    api.before = before
+    monkeypatch.setattr(watch, "STOP_GRACE", 0.1)
+    job = asyncio.create_task(tick(make_session_factory(db_engine), after(base, 30)))
+    await asyncio.wait_for(reached.wait(), 5)
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(job, 5)
+    release.set()

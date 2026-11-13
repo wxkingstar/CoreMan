@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -57,7 +58,7 @@ from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.logging import get_logger
 from coreman.core.timeutils import aware_utc, utcnow
 
-__all__ = ["Context", "Item", "Level", "grade", "owner_scope", "stop", "tick"]
+__all__ = ["Context", "Item", "Level", "finish_round", "grade", "owner_scope", "stop", "tick"]
 
 log = get_logger(__name__)
 # 轮询间隔（秒）；用量接近上限时成倍拉长，不超过 MAX_INTERVAL。
@@ -84,6 +85,31 @@ KEEPALIVE = timedelta(hours=24)
 # 用量流水（`feishu_rate_usage`）多久清一次旧行；上次清理的时刻（进程内，单调时钟）。
 PURGE_SECONDS = 60.0
 _purged = 0.0
+# 循环被叫停（scheduler 退出）时，正在进行的那一位助理最多再等这么久把事务提交完。
+STOP_GRACE = 20.0
+
+
+async def finish_round[T](work: Coroutine[Any, Any, T]) -> T:
+    """跑完一位助理的一轮；自己被取消时不就地打断它，等它做完（最多 `STOP_GRACE` 秒）再往上传。
+
+    一轮里可能刚刷新过令牌：刷新令牌一次性使用，换到的新令牌与这一轮在同一个事务里提交。
+    scheduler 停止时会取消各条循环，这时就地打断等于回滚——旧的刷新令牌已经用掉、新的没存下，
+    授权就此作废。所以把这一轮放进它自己的任务里护住，取消到来时等它提交完。到了上限还没
+    做完（飞书一直不应答）才放弃，那时令牌可能丢，但进程不能一直不退。
+    """
+    job = asyncio.ensure_future(work)
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        if not job.done():
+            await asyncio.wait({job}, timeout=STOP_GRACE)
+        if not job.done():
+            job.cancel()
+            log.warning("assistant_round_abandoned_on_stop")
+        elif not job.cancelled() and job.exception() is not None:
+            # 取走异常，免得解释器抱怨没人看；这一轮的结局已经由它自己记在库里。
+            log.warning("assistant_round_failed_on_stop", error=type(job.exception()).__name__)
+        raise
 
 
 @dataclass
@@ -594,7 +620,7 @@ async def tick(
     async def one(bot_id: uuid.UUID) -> Outcome:
         async with gate:
             try:
-                return await _visit(factory, cipher, bot_id, now)
+                return await finish_round(_visit(factory, cipher, bot_id, now))
             except Exception as exc:  # noqa: BLE001 一位出错不挡别人；只记类型
                 log.warning("assistant_watch_failed", bot_id=str(bot_id), error=type(exc).__name__)
                 await _push_back(factory, bot_id, type(exc).__name__, now)

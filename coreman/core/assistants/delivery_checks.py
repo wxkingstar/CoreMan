@@ -491,7 +491,8 @@ async def tick(
     total: dict[str, int] = {}
     for bot_id in due:
         try:
-            counts = await _visit(factory, cipher, bot_id, now)
+            # 被叫停时等这一位提交完再退：这一次里可能刚刷新过令牌（见 `watch.finish_round`）。
+            counts = await watch.finish_round(_visit(factory, cipher, bot_id, now))
         except Exception as exc:  # noqa: BLE001 一位助理出错不挡别的
             log.warning(
                 "assistant_delivery_sweep_failed", bot_id=str(bot_id), error=type(exc).__name__

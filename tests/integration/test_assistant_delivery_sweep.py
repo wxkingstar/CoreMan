@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -273,3 +274,35 @@ async def test_an_unexpected_error_after_calling_feishu_keeps_the_refreshed_toke
     assert (await tokens(db_session, who))["refresh_token"] == "u-refresh-r1"
     assert counts["assistant_recalls_noticed"] == 0
     assert SECRET not in str(logs) and "RuntimeError" in str(logs)
+
+
+async def test_a_check_cancelled_midway_finishes_and_keeps_the_refreshed_token(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scheduler 停止时会取消循环：正在检查的这一位刚换过令牌，要等它提交完。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session, expired=True)
+    db_session.add(
+        AssistantInbox(bot_id=who.bot.id, level="immediate", message_id="om_1", status="delivered")
+    )
+    await db_session.commit()
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def before(hit: Hit) -> None:
+        reached.set()
+        await release.wait()
+
+    api.before = before
+    now = utcnow() + timedelta(minutes=1)
+    job = asyncio.create_task(checks.tick(make_session_factory(db_engine), CIPHER, now))
+    await asyncio.wait_for(reached.wait(), 5)
+    assert api.refreshes == 1
+    job.cancel()
+    await asyncio.sleep(0.05)
+    assert not job.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(job, 5)
+    assert (await tokens(db_session, who))["refresh_token"] == "u-refresh-r1"
+    row = await db_session.get(AssistantDelivery, who.bot.id, populate_existing=True)
+    assert row is not None and row.next_sweep_at == now + checks.SWEEP_EVERY
