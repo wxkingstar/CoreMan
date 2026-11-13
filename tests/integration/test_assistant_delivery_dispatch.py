@@ -6,13 +6,20 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import delivery, settings
 from coreman.core.assistants.kinds import HANDOVER_KIND
 from coreman.core.bus import tasks
-from coreman.core.db.models import AssistantDelivery, AssistantInbox, Bot, RelayServer, Task
+from coreman.core.db.models import (
+    AssistantDelivery,
+    AssistantInbox,
+    Bot,
+    RelayServer,
+    Task,
+    UserIdentity,
+)
 from coreman.core.db.session import make_session_factory
 from coreman.core.timeutils import utcnow
 from tests.integration.assistant_helpers import SECRET, raw
@@ -233,6 +240,60 @@ async def test_settling_twice_or_by_reconcile_counts_the_turn_once(
     assert await delivery.reconcile(db_session) == 0
     await db_session.commit()
     assert (await pace(db_session, bot))[0] == 1
+
+
+@pytest.mark.parametrize("change", ["disabled", "unbound"])
+async def test_no_turn_is_queued_for_an_owner_who_cannot_take_it(
+    db_session: AsyncSession, change: str
+) -> None:
+    """所有者的账号停用了、或飞书身份解绑了：那一轮开轮时只会被取消，条目放回、一分钟后再来，
+    没完没了。入队前先看一眼，不排。"""
+    bot, owner = await ready(db_session)
+    await boxed(db_session, bot, "om_1")
+    if change == "disabled":
+        owner.status = "disabled"
+    else:
+        await db_session.execute(delete(UserIdentity).where(UserIdentity.user_id == owner.id))
+    await db_session.commit()
+    for _ in range(3):
+        assert await send(db_session, bot) is None
+    assert await handovers(db_session, bot) == []
+    (row,) = await inbox_rows(db_session, bot)
+    assert (row.status, row.delivered_task_id, row.hold_until) == ("pending", None, None)
+    assert await pace(db_session, bot) == (0, None)
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        ("failed", "platform_turn_yielded"),
+        ("failed", "assistant_paused"),
+        ("failed", "relay_unavailable"),
+        ("failed", "session_busy"),
+        ("cancelled", "handover_announced"),
+    ],
+)
+async def test_turns_that_keep_not_starting_back_off_instead_of_spinning(
+    db_session: AsyncSession, status: str, code: str
+) -> None:
+    """没开成的轮次不算条目的失败（不会作废），但连着没开成就越等越久，不每分钟空转一次。"""
+    bot, _ = await ready(db_session)
+    await boxed(db_session, bot, "om_1")
+    at = utcnow()
+    waits = []
+    for _ in range(4):
+        task = await send(db_session, bot, at)
+        assert task is not None
+        await end(db_session, task, status, code)
+        assert await delivery.reconcile(db_session) == 1
+        await db_session.commit()
+        _, wait = await pace(db_session, bot)
+        assert wait is not None
+        waits.append(round(wait / 60))
+        at = utcnow() + timedelta(seconds=wait + 5)
+    assert waits == [1, 2, 4, 8]
+    (row,) = await inbox_rows(db_session, bot)
+    assert (row.status, row.failures, row.handovers) == ("pending", 0, 0)
 
 
 async def test_real_failures_back_off_and_give_up_after_three(db_session: AsyncSession) -> None:

@@ -218,7 +218,7 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 | 现象 | 看哪里 | 说明 |
 |---|---|---|
-| `inbox_pending` 一直不降 | `watch.state`、所有者的工作时段、`turns` | 运行时暂停（`paused`）、下班、冷启动没做完时不交回，恢复后自动交回；`turns.today` 达到 `budget` 时只交回紧急的，其余次日交回 |
+| `inbox_pending` 一直不降 | `watch.state`、所有者的工作时段、`turns` | 运行时暂停（`paused`）、下班、冷启动没做完、所有者的账号停用或飞书身份解绑时不交回，恢复后自动交回；`turns.today` 达到 `budget` 时只交回紧急的，其余次日交回 |
 | 条目反复交回不成 | `assistant_inbox.failures`、`void_code` | 带着它的轮次真失败满 3 次后条目作废（`undeliverable`）；先看那几轮任务的 `error_code` |
 | `inbox_pending` 不降、又没有在途的交回任务 | `assistant_delivery.handover_misses`、`handover_retry_at` | 上一轮交回没走完（被所有者的消息取消、让路放弃、暂停、失败）之后的等待：60 秒起，连续没走完逐次加倍，最多 15 分钟；到 `handover_retry_at` 之前不排新的一轮，走完一轮清零 |
 | 条目绑着任务号不动 | `assistant_inbox.delivered_task_id` 对应的 `tasks` 行 | 那一轮还在排队或在跑（所有者正在和助理聊时会一直让路）；任务结束后 5 秒内由对账记账 |

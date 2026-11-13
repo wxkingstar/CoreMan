@@ -33,6 +33,8 @@ from coreman.core.db.models import (
     Bot,
     ChatLog,
     Task,
+    User,
+    UserIdentity,
 )
 from coreman.core.logging import get_logger
 from coreman.core.timeutils import aware_utc
@@ -196,6 +198,23 @@ async def due_items(
     return rows
 
 
+async def _owner_ready(session: AsyncSession, bot: Bot) -> bool:
+    """所有者现在接不接得住一轮：账号在用、飞书身份还绑着。
+
+    与 worker 开轮时的核对同一口径（`PlatformTurnHandler._resolve`）：不成立时那一轮只会被取消
+    （`platform_owner_changed`），条目放回、过一会儿又排，白白空转。入队前先看，不排。
+    """
+    owner = await session.get(User, bot.owner_id, populate_existing=True) if bot.owner_id else None
+    if owner is None or owner.status != "active" or owner.source == "bootstrap":
+        return False
+    bound = await session.scalar(
+        select(UserIdentity.user_id)
+        .where(UserIdentity.user_id == owner.id, UserIdentity.platform == "feishu")
+        .limit(1)
+    )
+    return bound is not None
+
+
 async def _in_flight(session: AsyncSession, bot_id: uuid.UUID) -> bool:
     """这位助理有没有还没了结的交回：绑着任务号没记账的条目，或没结束的交回任务。"""
     held = await session.scalar(
@@ -263,7 +282,8 @@ async def dispatch(session: AsyncSession, bot: Bot, now: datetime) -> Task | Non
 
     装进这一轮的条目写上 `delivered_task_id`（状态仍是 `pending`）：从这一刻起盯消息不再改
     它们，直到这一轮结束时由 `settle` / `reconcile` 记账。运行时暂停、有公告、下班、冷启动没
-    做完时不入队，条目留在箱里，这里不为此发任何私信。上一轮没走完之后的等待期内
+    做完、所有者的账号停用或飞书身份解绑时不入队，条目留在箱里，这里不为此发任何私信。
+    上一轮没走完之后的等待期内
     （`handover_retry_at`）同样不入队，新到的条目也等着。
     """
     prefs = await session.get(AssistantSettings, bot.id)
@@ -276,7 +296,11 @@ async def dispatch(session: AsyncSession, bot: Bot, now: datetime) -> Task | Non
         return None
     if await find_announcement(session, bot_id=bot.id, relay_server_id=bot.relay_server_id):
         return None
+    # 运行时（实例停用、节点离线、没登录……）与所有者的状态都在入队前看：开轮时才发现的话，
+    # 那一轮记一次安静的失败或取消，条目放回再排，周而复始。
     if await runtime.turn_blocker(session, bot) is not None:
+        return None
+    if not await _owner_ready(session, bot):
         return None
     ids, deferred = await _pick(session, bot, prefs, now)
     if deferred:
