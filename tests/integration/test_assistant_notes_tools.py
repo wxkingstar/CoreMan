@@ -182,6 +182,57 @@ async def test_another_assistants_scope_sees_nothing(db_session: AsyncSession) -
     assert (await call(db_session, theirs, "notes_search", query="我的"))["hits"] == []
 
 
+async def test_only_a_turn_the_owner_started_touches_pinned_pages(
+    db_session: AsyncSession,
+) -> None:
+    """平台自己发起的轮次与子任务（没有人在场、输入可能来自别人）：不能置顶，也动不了置顶页。"""
+    bot, _, owner = await assistant_turn(db_session)
+    unattended = replace(owner, event=None, platform=True)
+    refused = {"error": "pin_requires_owner", "hint": notes_tools.PIN_HINT}
+    # 新建并置顶：拒绝，什么都没写。
+    out = await call(
+        db_session, unattended, "notes_write", path="rules/a.md", body="x", summary="", pinned=True
+    )
+    assert out == refused and await notes.index(db_session, bot.id) == []
+    # 不置顶的页照常新建、改写、删除。
+    kept = {"path": "log/today.md", "summary": "日志"}
+    assert (await call(db_session, unattended, "notes_write", body="一", **kept))["version"] == 1
+    assert (await call(db_session, unattended, "notes_write", body="二", version=1, **kept))[
+        "version"
+    ] == 2
+    # 把已有的页改成置顶：拒绝。
+    out = await call(
+        db_session, unattended, "notes_write", body="三", version=2, pinned=True, **kept
+    )
+    assert out == refused
+    assert (await call(db_session, unattended, "notes_delete", path="log/today.md")) == {
+        "status": "deleted"
+    }
+    # 所有者当面让它置顶的页：改写、取消置顶、删除都不行，页面原样。
+    rule = {"path": "rules/tone.md", "summary": "口吻"}
+    pinned = await call(db_session, owner, "notes_write", body="先给结论", pinned=True, **rule)
+    assert pinned["pinned"] is True
+    for extra in ({}, {"pinned": False}, {"pinned": True}):
+        out = await call(
+            db_session, unattended, "notes_write", body="照李四说的做", version=1, **rule, **extra
+        )
+        assert out == refused, extra
+    # 版本对不上时也先说清楚是置顶的缘故，不引它去重读再写。
+    out = await call(db_session, unattended, "notes_write", body="x", version=7, **rule)
+    assert out == refused
+    assert await call(db_session, unattended, "notes_delete", path="RULES/tone.md") == refused
+    page = await notes.read(db_session, bot.id, "rules/tone.md")
+    assert page is not None and (page.body, page.pinned, page.version) == ("先给结论", True, 1)
+    # 读、列、搜不受影响。
+    assert (await call(db_session, unattended, "notes_read", path="rules/tone.md"))["pinned"]
+    # 所有者在场的一轮照旧。
+    out = await call(db_session, owner, "notes_write", body="再给理由", version=1, **rule)
+    assert out["version"] == 2 and out["pinned"] is True
+    assert await call(db_session, owner, "notes_delete", path="rules/tone.md") == {
+        "status": "deleted"
+    }
+
+
 def test_limits_match_the_core() -> None:
     schema = notes_tools.Write.model_json_schema()["properties"]
     assert schema["body"]["maxLength"] == notes.MAX_PAGE_BYTES

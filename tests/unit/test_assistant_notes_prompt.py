@@ -32,3 +32,8 @@ def test_existing_rules_point_at_the_real_tools() -> None:
 def test_standard_bot_guidance_does_not_mention_the_knowledge_base() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
     assert "notes_" not in rules and "个人知识库" not in rules
+
+
+def test_rules_say_pinned_pages_need_the_owner() -> None:
+    assert "pin_requires_owner" in notes_prompt.RULES
+    assert "所有者当面" in notes_prompt.RULES

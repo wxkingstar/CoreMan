@@ -60,6 +60,8 @@ CHANGED = (
 )
 CHANGED_OVER_LIMIT = "更新的置顶页合计超过 {limit}KB，这里不附正文：用 notes_read 读取 {paths}。"
 _SLASHES = re.compile(r"/+")
+# 置顶与改动置顶页只在所有者发起的轮次里做。
+PIN_REQUIRES_OWNER = "pin_requires_owner"
 
 
 class NotesError(Exception):
@@ -119,6 +121,14 @@ async def _path_key(session: AsyncSession, bot_id: uuid.UUID, key: str) -> str:
         raise NotesError("content_locked") from None
     except ValueError:
         raise NotesError("assistant_only") from None
+
+
+async def _serialize(session: AsyncSession, bot_id: uuid.UUID) -> None:
+    """同一位助理的写入串行，到事务结束。"""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"assistant_pages:{bot_id}"},
+    )
 
 
 async def _load(session: AsyncSession, bot_id: uuid.UUID, mac: str) -> AssistantPage | None:
@@ -186,6 +196,7 @@ async def write(
     pinned: bool | None = None,
     version: int = 0,
     updated_by: str = "assistant",
+    owner_present: bool = True,
 ) -> Entry:
     """新建一页，或把已有的一页整页替换。
 
@@ -194,11 +205,13 @@ async def write(
         pinned: 省略时，新页不置顶，已有的页保持原样
         version: 调用方读到的版本；0 表示「我认为这页还不存在」
         updated_by: `PAGE_AUTHORS` 之一
+        owner_present: False 表示这一轮不是所有者发起的（平台来源的轮次、子任务）：置顶页每个
+            会话都当规则给出，这样的轮次不能置顶，也不能改写已置顶的页
 
     Raises:
         NotesError: `invalid_path`、`invalid_page`、`page_too_large`、`page_exists`、
             `page_not_found`、`version_conflict`、`too_many_pages`、`notes_full`、
-            `content_locked`、`assistant_only`
+            `content_locked`、`assistant_only`、`pin_requires_owner`
     """
     shown, key = normalize(path)
     size = len(body.encode("utf-8"))
@@ -214,12 +227,11 @@ async def write(
     ):
         raise NotesError("invalid_page")
     mac = await _path_key(session, bot_id, key)
-    # 同一位助理的写入串行：版本检查与三个上限都是在这把锁里读了再写。
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"assistant_pages:{bot_id}"},
-    )
+    # 同一位助理的写入串行：版本检查、置顶检查与三个上限都是在这把锁里读了再写。
+    await _serialize(session, bot_id)
     row = await _load(session, bot_id, mac)
+    if not owner_present and (pinned or (row is not None and row.pinned)):
+        raise NotesError(PIN_REQUIRES_OWNER)
     count, total = (
         await session.execute(
             select(func.count(), func.coalesce(func.sum(AssistantPage.size), 0))
@@ -271,14 +283,29 @@ async def write(
     return _entry(row)
 
 
-async def delete(session: AsyncSession, bot_id: uuid.UUID, path: str) -> bool:
+async def delete(
+    session: AsyncSession, bot_id: uuid.UUID, path: str, *, owner_present: bool = True
+) -> bool:
     """删除一页；返回原来有没有这一页。
 
+    Args:
+        owner_present: False 时（见 `write`）不能删已置顶的页
+
     Raises:
-        NotesError: `invalid_path`、`content_locked`、`assistant_only`
+        NotesError: `invalid_path`、`content_locked`、`assistant_only`、`pin_requires_owner`
     """
     _, key = normalize(path)
     mac = await _path_key(session, bot_id, key)
+    if not owner_present:
+        # 和写入用同一把锁：查完到删掉之间，这一页不会被另一轮置顶。
+        await _serialize(session, bot_id)
+        pinned = await session.scalar(
+            select(AssistantPage.pinned).where(
+                AssistantPage.bot_id == bot_id, AssistantPage.path_hmac == mac
+            )
+        )
+        if pinned:
+            raise NotesError(PIN_REQUIRES_OWNER)
     gone = await session.execute(
         sql_delete(AssistantPage)
         .where(AssistantPage.bot_id == bot_id, AssistantPage.path_hmac == mac)

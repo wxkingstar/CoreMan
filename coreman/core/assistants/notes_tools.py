@@ -8,7 +8,6 @@ knowledge 组不受飞书授权代数影响，子任务也能用；分派时只�
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Annotated, Any
@@ -60,7 +59,9 @@ class Write(Arguments):
         default="", description="Omit to keep the current title (new page: last path segment)"
     )
     pinned: bool | None = Field(
-        default=None, description="Pinned pages are given to you at the start of every session"
+        default=None,
+        description="Pinned pages are given to you at the start of every session. Pin, unpin or"
+        " change a pinned page only in a turn the owner started, when the owner asks for it",
     )
     version: int = Field(
         default=0, ge=0, description="0 for a new page; otherwise the version you last read"
@@ -94,6 +95,11 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     ),
     "notes_delete": (Delete, "Delete one page by path."),
 }
+PIN_HINT = (
+    "Pinned pages are rules for every session; they change only in a turn the owner started."
+    " Nobody is present in this turn: leave the page as it is, write what you learned to a page"
+    " that is not pinned, and tell the owner what you would change."
+)
 DEFINITIONS: list[dict[str, Any]] = [
     {"name": name, "description": text, "inputSchema": input_schema(args)}
     for name, (args, text) in OWN.items()
@@ -111,8 +117,8 @@ def _listed(entry: notes.Entry) -> dict[str, Any]:
     }
 
 
-async def _index(session: AsyncSession, bot_id: uuid.UUID, args: Index) -> dict[str, Any]:
-    entries = await notes.index(session, bot_id, folder=args.folder)
+async def _index(session: AsyncSession, scope: Scope, args: Index) -> dict[str, Any]:
+    entries = await notes.index(session, scope.bot.id, folder=args.folder)
     page = entries[args.offset : args.offset + args.limit]
     end = args.offset + len(page)
     return {
@@ -122,23 +128,23 @@ async def _index(session: AsyncSession, bot_id: uuid.UUID, args: Index) -> dict[
     }
 
 
-async def _read(session: AsyncSession, bot_id: uuid.UUID, args: Read) -> dict[str, Any]:
-    page = await notes.read(session, bot_id, args.path)
+async def _read(session: AsyncSession, scope: Scope, args: Read) -> dict[str, Any]:
+    page = await notes.read(session, scope.bot.id, args.path)
     if page is None:
         return {"error": "page_not_found"}
     body, meta = text_page(page.body, args)
     return {**_listed(page), "body": body, **meta}
 
 
-async def _search(session: AsyncSession, bot_id: uuid.UUID, args: Search) -> dict[str, Any]:
-    hits = await notes.search(session, bot_id, args.query, limit=args.limit)
+async def _search(session: AsyncSession, scope: Scope, args: Search) -> dict[str, Any]:
+    hits = await notes.search(session, scope.bot.id, args.query, limit=args.limit)
     return {"hits": [asdict(hit) for hit in hits]}
 
 
-async def _write(session: AsyncSession, bot_id: uuid.UUID, args: Write) -> dict[str, Any]:
+async def _write(session: AsyncSession, scope: Scope, args: Write) -> dict[str, Any]:
     entry = await notes.write(
         session,
-        bot_id,
+        scope.bot.id,
         args.path,
         body=args.body,
         summary=args.summary,
@@ -146,17 +152,19 @@ async def _write(session: AsyncSession, bot_id: uuid.UUID, args: Write) -> dict[
         pinned=args.pinned,
         version=args.version,
         updated_by="assistant",
+        # 平台自己发起的轮次与子任务没有人在场：不能置顶，也动不了置顶页。
+        owner_present=not scope.platform,
     )
     return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}
 
 
-async def _delete(session: AsyncSession, bot_id: uuid.UUID, args: Delete) -> dict[str, Any]:
-    if await notes.delete(session, bot_id, args.path):
+async def _delete(session: AsyncSession, scope: Scope, args: Delete) -> dict[str, Any]:
+    if await notes.delete(session, scope.bot.id, args.path, owner_present=not scope.platform):
         return {"status": "deleted"}
     return {"error": "page_not_found"}
 
 
-_RUN: dict[str, Callable[[AsyncSession, uuid.UUID, Any], Awaitable[dict[str, Any]]]] = {
+_RUN: dict[str, Callable[[AsyncSession, Scope, Any], Awaitable[dict[str, Any]]]] = {
     "notes_index": _index,
     "notes_read": _read,
     "notes_search": _search,
@@ -184,6 +192,8 @@ async def dispatch(
             "invalid": approvals_service._problems(exc),
         }
     try:
-        return await _RUN[name](session, scope.bot.id, args)
+        return await _RUN[name](session, scope, args)
     except notes.NotesError as exc:
+        if exc.code == notes.PIN_REQUIRES_OWNER:
+            return {**exc.payload(), "hint": PIN_HINT}
         return exc.payload()
