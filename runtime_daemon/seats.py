@@ -305,9 +305,10 @@ class SeatLogins:
             pass
 
     def reap(self) -> None:
+        # 已退出的进程不在这里清：Codex 的设备码登录在浏览器授权后自己退出，要留给 complete 读结果。
         now = time.monotonic()
         for key, session in list(self.sessions.items()):
-            if session.proc.poll() is not None or now - session.created > SESSION_TTL:
+            if now - session.created > SESSION_TTL:
                 self.close(key)
 
     def expire(self, key: str, session: LoginSession) -> None:

@@ -187,6 +187,18 @@ def test_codex_device_login_waits_for_the_browser(tmp_path, cli):
     assert (seats.directory("codex", seat) / "auth.json").exists()
 
 
+def test_codex_device_login_completes_after_the_cli_has_already_exited(tmp_path, cli):
+    seats, _ = make_seats(tmp_path)
+    seat = seats.create("codex", "B")
+    logins = SeatLogins()
+    started = logins.start("codex", seat, seats.env("codex", seat), tmp_path)
+    (seats.directory("codex", seat) / "browser-done").write_text("")
+    logins.sessions[started["session_id"]].proc.wait(timeout=10)
+    assert logins.complete(started["session_id"], "codex", seat, None)["success"] is True
+    with pytest.raises(OperationError, match="过期"):
+        logins.complete(started["session_id"], "codex", seat, None)
+
+
 def test_opencode_seat_logs_in_with_an_api_key_kept_on_the_node(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     seats, _ = make_seats(tmp_path)
