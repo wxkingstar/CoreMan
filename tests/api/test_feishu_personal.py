@@ -353,6 +353,70 @@ async def test_authorization_cannot_be_completed_by_different_identity(
     assert not row.token_enc and not row.pending_enc
 
 
+async def test_completing_authorization_records_when_and_refreshing_keeps_it(
+    client, app, db_session
+):
+    """普通员工：授权完成的应答不变，只多记下完成的时刻；之后刷新令牌不动它。"""
+    from coreman.core.db.models import FeishuPersonalGrant
+
+    bot, user, task = await setup(db_session, app)
+    token_url = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
+    with respx.mock as mock:
+        mock.post("https://accounts.feishu.cn/oauth/v1/device_authorization").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "device_code": "device",
+                    "verification_uri_complete": "https://accounts.feishu.cn/verify",
+                    "expires_in": 600,
+                    "interval": 1,
+                },
+            )
+        )
+        await start_selected(db_session, app, task, user)
+        row = (await db_session.scalars(select(FeishuPersonalGrant))).one()
+        assert row.authorized_at is None
+        issued = {
+            "access_token": "first",
+            "refresh_token": "refresh",
+            "expires_in": 7200,
+            "scope": "search:message",
+        }
+        mock.post(token_url).mock(return_value=httpx.Response(200, json=issued))
+        ident = {"user_id": "human", "open_id": "ou_human", "tenant_key": "tenant-test"}
+        mock.get("https://open.feishu.cn/open-apis/authen/v1/user_info").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": ident})
+        )
+        before = datetime.now(UTC)
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task, user), json=rpc("feishu_authorization_status")
+            )
+        )
+        assert out["status"] == "connected" and "authorized_at" not in out
+        await db_session.refresh(row)
+        completed = row.authorized_at
+        assert completed is not None and before <= completed <= datetime.now(UTC)
+        # 访问令牌过期后的下一次调用会刷新：换了令牌，授权完成的时刻不变。
+        row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        await db_session.commit()
+        mock.post(token_url).mock(
+            return_value=httpx.Response(200, json={**issued, "access_token": "second"})
+        )
+        searched = mock.post("https://open.feishu.cn/open-apis/im/v1/messages/search").mock(
+            return_value=httpx.Response(200, json={"code": 0, "data": {"items": []}})
+        )
+        await client.post(
+            URL,
+            headers=await headers(app, task, user),
+            json=rpc("feishu_search_messages", {"query": "x"}),
+        )
+        assert searched.calls[0].request.headers["authorization"] == "Bearer second"
+    await db_session.refresh(row)
+    assert row.expires_at > datetime.now(UTC)
+    assert row.authorized_at == completed
+
+
 async def test_search_returns_real_content_without_exposing_token(client, app, db_session):
     bot, user, task = await setup(db_session, app)
     await grant(db_session, app, bot, user)

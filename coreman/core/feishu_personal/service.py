@@ -63,7 +63,12 @@ def _clear(row: FeishuPersonalGrant, status: str = "revoked") -> None:
 
 
 def save_tokens(
-    cipher: Cipher, row: FeishuPersonalGrant, data: dict[str, Any], secret: str
+    cipher: Cipher,
+    row: FeishuPersonalGrant,
+    data: dict[str, Any],
+    secret: str,
+    *,
+    authorized: bool = False,
 ) -> None:
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise PersonalError("authorization_failed")
@@ -83,6 +88,9 @@ def save_tokens(
     row.remote_revoked = False
     row.pending_enc = None
     row.pending_expires_at = row.next_poll_at = None
+    if authorized:
+        # 完成了一次授权（不是刷新）：飞书要求授权满 365 天重新授权，从这一刻算起。
+        row.authorized_at = datetime.now(UTC)
 
 
 async def _http(method: str, url: str, *, seconds: float = 20, **kwargs: Any) -> dict[str, Any]:
@@ -446,7 +454,7 @@ async def authorization_status(
     ):
         _clear(row)
         raise PersonalError("identity_mismatch")
-    save_tokens(cipher, row, data, secret)
+    save_tokens(cipher, row, data, secret, authorized=True)
     return _state(row, cipher)
 
 

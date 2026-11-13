@@ -14,22 +14,26 @@ from typing import Any
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import followups, sealed, watch
+from coreman.core.assistants import delivery, followups, sealed, watch
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants.approvals import catalog, tower
 from coreman.core.assistants.approvals import checks as anchors
 from coreman.core.assistants.approvals import service as approvals
+from coreman.core.bus import outbox
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantDelivery,
     AssistantInbox,
     AssistantMark,
     AssistantSettings,
     AssistantWatch,
     Bot,
+    FeishuPersonalGrant,
 )
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
@@ -46,6 +50,20 @@ FOLLOWUP_BATCH = 20
 CHECK_BATCH = 20
 # 交回之后这么久以内的消息还查「有没有被对方撤回」。
 RECALL_WINDOW = timedelta(hours=24)
+# 每位助理多久做一次顺带检查；一次 tick 最多认领多少位。
+SWEEP_EVERY = timedelta(minutes=5)
+BATCH = 40
+# 飞书要求授权满这么久重新授权；到期前这么多天起每天在私聊里提醒一次。
+REAUTH_AFTER = timedelta(days=365)
+REAUTH_NOTICE_DAYS = 14
+REAUTH_SOON = (
+    "你的飞书授权还有 {days} 天满一年，到时需要重新授权，否则助理读不了你的消息、也办不了事。"
+    "在这里跟助理说一声「重新授权飞书」就可以。"
+)
+REAUTH_OVERDUE = (
+    "你的飞书授权已经满一年，需要重新授权，否则助理读不了你的消息、也办不了事。"
+    "在这里跟助理说一声「重新授权飞书」就可以。"
+)
 # 复核会话得到的结论 → 撤回原因代码。锚点找不到（太早了，或被撤回而 mget 没认出来）按会话动过算。
 _VERDICTS = {
     "owner_replied_after_anchor": "owner_replied",
@@ -320,7 +338,11 @@ async def recalled_after_delivery(
 async def feishu_checks(
     session: AsyncSession, bot: Bot, prefs: AssistantSettings, call: feed.Reader, now: datetime
 ) -> dict[str, int]:
-    """要以所有者身份读飞书的两类检查。读失败只记代码；已经做完的照常由调用方提交。"""
+    """要以所有者身份读飞书的两类检查。读失败只记代码；已经做完的照常由调用方提交。
+
+    意外的异常也在这里收住、只记类型：这一次里可能已经刷新过令牌（旧的刷新令牌已经用掉），
+    让它往上抛就会回滚，授权就此作废。会话本身坏了（数据库错误）时调用方的提交会再抛。
+    """
     counts = {"assistant_approvals_auto_withdrawn": 0, "assistant_recalls_noticed": 0}
     cfg = tower.config(get_settings())
     try:
@@ -334,4 +356,148 @@ async def feishu_checks(
         log.warning(
             "assistant_delivery_checks_failed", bot_id=str(bot.id), code=sealed.code_only(exc.code)
         )
+    except Exception as exc:  # noqa: BLE001 只记类型
+        log.warning("assistant_delivery_checks_failed", bot_id=str(bot.id), code=type(exc).__name__)
     return counts
+
+
+async def remind_reauth(
+    session: AsyncSession,
+    bot: Bot,
+    prefs: AssistantSettings,
+    row: AssistantDelivery,
+    now: datetime,
+) -> int:
+    """授权快满一年（或已经满了）：私信所有者一次，每天至多一次。不经模型，不带任何内容。"""
+    today = assistant_settings.local_today(prefs, now)
+    if row.reauth_reminded_on == today or bot.owner_id is None:
+        return 0
+    since = await session.scalar(
+        select(FeishuPersonalGrant.authorized_at).where(
+            FeishuPersonalGrant.bot_id == bot.id,
+            FeishuPersonalGrant.user_id == bot.owner_id,
+            FeishuPersonalGrant.status == "connected",
+        )
+    )
+    if since is None:
+        return 0
+    expires = aware_utc(since) + REAUTH_AFTER
+    if now < expires - timedelta(days=REAUTH_NOTICE_DAYS):
+        return 0
+    words = REAUTH_SOON.format(days=(expires - now).days) if now < expires else REAUTH_OVERDUE
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"assistant-reauth:{bot.id}:{today.isoformat()}",
+        target={"chat_id": prefs.chat_id},
+        payload={"markdown": words},
+    )
+    row.reauth_reminded_on = today
+    return 1
+
+
+async def sweep(
+    session: AsyncSession,
+    cipher: Cipher,
+    bot: Bot,
+    prefs: AssistantSettings,
+    row: AssistantDelivery,
+    now: datetime,
+) -> dict[str, int]:
+    """一位助理的一次顺带检查。不提交；调过飞书之后调用方不回滚（刷新的令牌要落库）。"""
+    today = assistant_settings.local_today(prefs, now)
+    counts = {
+        "assistant_followups_due": await followups_due(session, bot.id, today, now),
+        "assistant_marks_stale": await stale_marks(session, bot.id, today, now),
+        "assistant_reauth_reminded": await remind_reauth(session, bot, prefs, row, now),
+        "assistant_approvals_auto_withdrawn": 0,
+        "assistant_recalls_noticed": 0,
+    }
+    call = await reader(session, cipher, bot, prefs)
+    if call is not None:
+        counts.update(await feishu_checks(session, bot, prefs, call, now))
+    return counts
+
+
+async def _enroll(session: AsyncSession) -> None:
+    """给启用中的助理补上投递状态行（新开通的、升级前就有的）。"""
+    await session.execute(
+        insert(AssistantDelivery)
+        .from_select(
+            ["bot_id"],
+            select(Bot.id).where(
+                Bot.kind == "assistant", Bot.enabled.is_(True), Bot.assistant_state == "active"
+            ),
+        )
+        .on_conflict_do_nothing(index_elements=[AssistantDelivery.bot_id])
+    )
+
+
+async def _visit(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, bot_id: uuid.UUID, now: datetime
+) -> dict[str, int]:
+    """一位助理一个短事务：认领、往后排、过门槛、检查、提交。"""
+    async with factory() as session:
+        await sealed.guard_logs(session, bot_id)
+        row = await delivery.state(session, bot_id, lock=True)
+        if row is None:
+            return {}
+        row.next_sweep_at = now + SWEEP_EVERY
+        bot = await session.get(Bot, bot_id)
+        prefs = await session.get(AssistantSettings, bot_id)
+        counts: dict[str, int] = {}
+        # 下班、冷启动没做完、正在停用的助理不检查，但照样往后排。
+        if bot is not None and prefs is not None and delivery.gate(bot, prefs, now):
+            counts = await sweep(session, cipher, bot, prefs, row, now)
+        await session.commit()
+        return counts
+
+
+async def _push_back(
+    factory: async_sessionmaker[AsyncSession], bot_id: uuid.UUID, now: datetime
+) -> None:
+    async with factory() as session:
+        await session.execute(
+            update(AssistantDelivery)
+            .where(AssistantDelivery.bot_id == bot_id)
+            .values(next_sweep_at=now + SWEEP_EVERY)
+        )
+        await session.commit()
+
+
+async def tick(
+    factory: async_sessionmaker[AsyncSession], cipher: Cipher, now: datetime
+) -> dict[str, int]:
+    """scheduler 每 5 秒调一次：认领到点的助理，逐位做顺带检查。一位出错只影响它自己。"""
+    async with factory() as session:
+        await _enroll(session)
+        due = list(
+            await session.scalars(
+                select(AssistantDelivery.bot_id)
+                .join(Bot, Bot.id == AssistantDelivery.bot_id)
+                .where(
+                    Bot.kind == "assistant",
+                    Bot.enabled.is_(True),
+                    Bot.assistant_state == "active",
+                    AssistantDelivery.next_sweep_at <= now,
+                )
+                .order_by(AssistantDelivery.next_sweep_at)
+                .limit(BATCH)
+            )
+        )
+        await session.commit()
+    total: dict[str, int] = {}
+    for bot_id in due:
+        try:
+            counts = await _visit(factory, cipher, bot_id, now)
+        except Exception as exc:  # noqa: BLE001 一位助理出错不挡别的
+            log.warning(
+                "assistant_delivery_sweep_failed", bot_id=str(bot_id), error=type(exc).__name__
+            )
+            await _push_back(factory, bot_id, now)
+            continue
+        for key, value in counts.items():
+            total[key] = total.get(key, 0) + value
+    return total
