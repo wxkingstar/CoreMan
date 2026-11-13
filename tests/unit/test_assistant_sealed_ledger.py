@@ -42,8 +42,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/delivery.py": 2,
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
-    # 子任务：取一条是 session.scalar（自动还原）；列表显式还原
-    "coreman/core/assistants/jobs.py": 2,
+    # 子任务：取一条、按结果任务号取一条都是 session.scalar（自动还原）；列表显式还原
+    "coreman/core/assistants/jobs.py": 3,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
     # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序）

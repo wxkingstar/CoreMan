@@ -1,4 +1,5 @@
-"""个人助理子任务的一轮：在子任务自己的会话里跑，不往飞书发任何东西，收尾时把终稿记为结论。"""
+"""个人助理子任务的两种轮次：子任务自己的一轮（不往飞书发任何东西，终稿记为结论），
+以及把结论投回主会话的一轮。"""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import jobs
-from coreman.core.assistants.kinds import SUBTASK_KIND
+from coreman.core.assistants.kinds import JOB_RESULT_KIND, SUBTASK_KIND
 from coreman.core.bus import streams, tasks
 from coreman.core.chat import sessions
 from coreman.core.chat.rate_limit import is_rate_limited
@@ -131,3 +132,32 @@ class AssistantSubtaskHandler(PlatformTurnHandler):
             job_id=str(job_id),
             status=row.status if row is not None else "stale",
         )
+
+
+class AssistantJobResultHandler(PlatformTurnHandler):
+    """把子任务的结论作为一轮投回主会话：文本由平台按行生成，结论在引用行里。
+
+    `_text` 只读。主会话里的一轮会给所有者的消息让路、会被它取消：走到收尾的在这里记账，
+    没走到的由 scheduler 的 `jobs.reconcile` 放回重投。
+    """
+
+    kind = JOB_RESULT_KIND
+    INACTIVE = "job_result_inactive"
+    OWNER_CHANGED = "job_result_owner_changed"
+    ANNOUNCED = "job_result_announced"
+
+    async def _text(self, session: AsyncSession, ctx: TaskContext, bot: Bot) -> str | None:
+        row = await jobs.bound_report(session, ctx.task)
+        if row is None:
+            return None
+        ctx.log.info("assistant_job_result_opened", job_id=str(row.id), status=row.status)
+        return jobs.result_text(row)
+
+    async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
+        await super()._after_finalize(ctx, pre, verdict)
+        async with ctx.session_factory() as session:
+            settled = await jobs.settle_report(
+                session, ctx.task.id, verdict.task_status, verdict.error_code
+            )
+            await session.commit()
+        ctx.log.info("assistant_job_result_settled", status=verdict.task_status, settled=settled)
