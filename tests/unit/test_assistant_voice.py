@@ -151,3 +151,35 @@ def test_render_quotes_every_sample() -> None:
 
 def test_session_key_is_a_separate_session_of_the_same_assistant() -> None:
     assert voice.session_key(PREFS) == "oc_private#job:cold-start"
+
+
+async def test_messages_the_platform_sent_for_the_owner_are_not_his_voice(install: Any) -> None:
+    """审批通过后平台代发的消息，发送人是所有者，文字却是助理起草的：不算他的口吻。"""
+    install(
+        {
+            "oc_li": [
+                raw("om_1", OWNER, "收到，我看一下"),
+                raw("om_sent", OWNER, "您好，报价单已随信附上，请查收。"),
+                raw("om_2", OWNER, "行，周四给你"),
+            ],
+            "oc_team": [raw("om_sent_2", OWNER, "各位好，以下是本周进展。")],
+        }
+    )
+    asked: list[list[str]] = []
+
+    async def ours(message_ids: list[str]) -> set[str]:
+        asked.append(message_ids)
+        return {"om_sent", "om_sent_2"} & set(message_ids)
+
+    samples = await voice.collect(object(), PREFS, NOW, ours=ours)  # type: ignore[arg-type]
+    assert samples == ["行，周四给你", "收到，我看一下"]
+    # 每个会话问一次，只问所有者自己发的那些。
+    assert asked == [["om_2", "om_sent", "om_1"], ["om_sent_2"]]
+
+
+def test_the_task_asks_for_traits_not_for_quotes() -> None:
+    """样本里可能有他转述、转发的别人的话：不让模型把原话抄进置顶页，只概括特征。"""
+    text = voice.render(["收到，我看一下"])
+    assert "原话示例" not in text and "不要照抄" in text
+    for word in ("句子长短", "称呼", "语气"):
+        assert word in text

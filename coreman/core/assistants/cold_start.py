@@ -21,7 +21,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import notes, sealed, voice, watch
+from coreman.core.assistants import notes, sealed, sent, voice, watch
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants.records import is_assistant
@@ -443,9 +443,14 @@ async def _voice_step(
     assert row.cold_start_started_at is not None
     call = await _reader(session, cipher, bot, row)
     samples: list[str] = []
+
+    async def ours(message_ids: list[str]) -> frozenset[str]:
+        # 平台经审批代所有者发出的消息是助理起草的：不进口吻样本。
+        return await sent.among(session, bot.id, message_ids)
+
     if call is not None:
         try:
-            samples = await voice.collect(call, row, now)
+            samples = await voice.collect(call, row, now, ours=ours)
         except PersonalError:
             if aware_utc(now) - aware_utc(row.cold_start_started_at) < VOICE_WINDOW:
                 row.cold_start_next_at, row.updated_at = now + VOICE_RETRY, now

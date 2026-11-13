@@ -51,8 +51,9 @@ def feishu(monkeypatch: pytest.MonkeyPatch) -> Feishu:
     async def reader(session: Any, cipher: Any, bot: Any, row: Any) -> Any:
         return READER if fake.authorized else None
 
-    async def collect(call: Any, prefs: Any, now: datetime) -> list[str]:
-        assert call is READER
+    async def collect(call: Any, prefs: Any, now: datetime, *, ours: Any) -> list[str]:
+        # 冷启动总是带上「哪些消息是平台代发的」这个查询。
+        assert call is READER and await ours(["om_x"]) == frozenset()
         fake.calls.append("collect")
         if fake.hold is not None:
             fake.reached.set()
