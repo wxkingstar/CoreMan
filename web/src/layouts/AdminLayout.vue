@@ -14,6 +14,7 @@ export const MENU: readonly MenuItem[] = [
   { key: 'statistics', path: '/statistics' },
   { key: 'bots', path: '/bots' },
   { key: 'selfReminders', path: '/self-reminders' },
+  { key: 'myAssistant', path: '/my-assistant' },
   { key: 'myFeishu', path: '/my-feishu' },
   { key: 'myWecom', path: '/my-wecom' },
   { key: 'myCredentials', path: '/my-credentials' },
@@ -39,7 +40,7 @@ export const MENU: readonly MenuItem[] = [
 <script setup lang="ts">
 import BrandLogo from '@/components/BrandLogo.vue'
 import { computed, ref, watch } from 'vue'
-import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, Lock, OfficeBuilding, SwitchButton, Moon, Tickets } from '@element-plus/icons-vue'
+import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, ChatDotRound, ChatLineRound, DataLine, DocumentChecked, Bell, Monitor, Setting, Connection, Document, Key, Lock, OfficeBuilding, SwitchButton, Moon, Tickets, Service } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
@@ -49,9 +50,9 @@ const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
 const dark = ref(document.documentElement.classList.contains('dark'))
 const mobileOpen = ref(false)
-const icons: Record<string, typeof Grid> = { bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, myApiTokens: Key, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
+const icons: Record<string, typeof Grid> = { myAssistant: Service, bots: User, skills: Collection, cron: Timer, selfReminders: AlarmClock, myWecom: ChatLineRound, myCredentials: Lock, myApiTokens: Key, chatLogs: ChatDotRound, workTasks: Tickets, statistics: DataLine, skillApprovals: DocumentChecked, announcements: Bell, relays: Connection, runtime: Monitor, users: User, apps: Connection, audit: Document, systems: OfficeBuilding, credentials: Key, settings: Setting }
 const groups = [
-  { key: 'collaboration', keys: ['bots', 'workTasks', 'skills', 'cron', 'chatLogs', 'myFeishu', 'myWecom', 'myCredentials', 'myApiTokens', 'selfReminders'] },
+  { key: 'collaboration', keys: ['bots', 'workTasks', 'skills', 'cron', 'chatLogs', 'myAssistant', 'myFeishu', 'myWecom', 'myCredentials', 'myApiTokens', 'selfReminders'] },
   { key: 'governance', keys: ['statistics', 'skillApprovals', 'announcements', 'audit'] },
   { key: 'platform', keys: ['relays', 'runtime', 'users', 'apps', 'systems', 'credentials', 'settings'] },
 ]

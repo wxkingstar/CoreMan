@@ -22,6 +22,7 @@ export const router = createRouter({
         { path: ':pathMatch(.*)*', name: 'not-found', component: () => import('@/views/NotFoundView.vue') },
         { path: '', name: 'home', component: () => import('@/views/HomeView.vue') },
         { path: 'self-reminders', name: 'self-reminders', component: () => import('@/views/SelfRemindersView.vue') },
+        { path: 'my-assistant', name: 'my-assistant', component: () => import('@/views/MyAssistantView.vue') },
         { path: 'my-feishu', name: 'my-feishu', component: () => import('@/views/MyFeishuView.vue') },
         { path: 'my-wecom', name: 'my-wecom', component: () => import('@/views/MyWecomView.vue') },
         { path: 'my-credentials', name: 'my-credentials', component: () => import('@/views/MyCredentialsView.vue') },

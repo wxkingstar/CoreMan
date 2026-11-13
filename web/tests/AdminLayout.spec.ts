@@ -56,4 +56,12 @@ describe('AdminLayout menu', () => {
     expect(entry?.path).toBe('/my-wecom')
     expect(entry?.roles).toBeUndefined()
   })
+  it('lists My assistant right before My Feishu for every signed-in user', () => {
+    for (const role of ['member', 'team_lead', 'platform_admin']) {
+      const labels = mountAs(role).findAll('.el-menu-item').map((el) => el.text())
+      const feishu = labels.indexOf(i18n.global.t('menu.myFeishu'))
+      expect(feishu).toBeGreaterThan(0)
+      expect(labels[feishu - 1]).toBe(i18n.global.t('menu.myAssistant'))
+    }
+  })
 })
