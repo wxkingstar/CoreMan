@@ -6,13 +6,17 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from functools import lru_cache
+from typing import Any
+from zoneinfo import ZoneInfo, available_timezones
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import AssistantSettings
 from coreman.core.timeutils import aware_utc, utcnow
 
@@ -153,3 +157,144 @@ def clock_out(row: AssistantSettings, now: datetime) -> datetime:
     row.shift_override, row.shift_override_until = "off", until
     row.updated_at = utcnow()
     return until
+
+
+# 重点群每轮直接读历史，计入分钟预算：与 `watch.FOCUS_MAX` 一致。
+MAX_FOCUS = 5
+MAX_IGNORED = 50
+_HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+_CHAT = re.compile(r"^oc_[A-Za-z0-9_-]{1,80}$")
+
+
+class SettingsError(Exception):
+    """这次修改被拒绝；`code` 给调用方（助理工具、「我的助理」页），`detail` 是改正时用得上的数。"""
+
+    def __init__(self, code: str, **detail: Any) -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+    def payload(self) -> dict[str, Any]:
+        return {"error": self.code, **self.detail}
+
+
+@lru_cache(maxsize=1)
+def _zones() -> frozenset[str]:
+    return frozenset(available_timezones())
+
+
+def _timezone(name: str) -> str:
+    name = name.strip()
+    if name not in _zones():
+        raise SettingsError("invalid_timezone")
+    return name
+
+
+def _clock(value: str) -> str:
+    if not _HHMM.match(value):
+        raise SettingsError("invalid_work_hours")
+    return value
+
+
+def _days(values: list[int]) -> list[int]:
+    if (
+        not values
+        or len(set(values)) != len(values)
+        or any(type(day) is not int or not 1 <= day <= 7 for day in values)
+    ):
+        raise SettingsError("invalid_workdays")
+    return sorted(values)
+
+
+def _chats(values: list[str], limit: int) -> list[str]:
+    found = list(dict.fromkeys(value.strip() for value in values))
+    if any(not _CHAT.match(value) for value in found):
+        raise SettingsError("invalid_chats")
+    if len(found) > limit:
+        raise SettingsError("too_many_chats", limit=limit)
+    return found
+
+
+def cold_start_state(row: AssistantSettings) -> str:
+    """冷启动走到哪了：`pending`（没开始）、`in_progress`、`done`（做完、跳过或超时）。"""
+    if row.cold_start_done_at is not None:
+        return "done"
+    return "in_progress" if row.cold_start_started_at is not None else "pending"
+
+
+def view(row: AssistantSettings, now: datetime) -> dict[str, Any]:
+    """给所有者看的设置（助理工具与「我的助理」页共用）。`row` 的内容列要已还原。"""
+    switched = override(row, now)
+    until = row.shift_override_until if switched is not None else None
+    return {
+        "timezone": zone(row).key,
+        "work_start": row.work_start,
+        "work_end": row.work_end,
+        "workdays": sorted(row.workdays),
+        "focus_chats": list(row.focus_chats_enc or []),
+        "ignored_chats": list(row.ignored_chats_enc or []),
+        "on_shift": on_shift(row, now),
+        "shift_override": switched,
+        "shift_override_until": until.isoformat() if until is not None else None,
+        "cold_start": cold_start_state(row),
+        "today": local_today(row, now).isoformat(),
+    }
+
+
+async def update(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    *,
+    now: datetime,
+    timezone: str | None = None,
+    work_start: str | None = None,
+    work_end: str | None = None,
+    workdays: list[int] | None = None,
+    focus_chats: list[str] | None = None,
+    ignored_chats: list[str] | None = None,
+) -> AssistantSettings:
+    """改这位助理的设置：只改给出的项，名单整份替换。调用方提交。
+
+    改了时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
+
+    Raises:
+        SettingsError: `nothing_to_update`、`invalid_timezone`、`invalid_work_hours`（格式不对，
+            或上班时间不早于下班时间）、`invalid_workdays`、`invalid_chats`、`too_many_chats`、
+            `chat_in_both_lists`、`content_locked`（取不到数据密钥时不能写名单）
+    """
+    given = (timezone, work_start, work_end, workdays, focus_chats, ignored_chats)
+    if all(value is None for value in given):
+        raise SettingsError("nothing_to_update")
+    await get(session, bot_id)
+    # 先把调用方在这一行上没落库的改动刷下去，再加锁重读。
+    await session.flush()
+    row = await session.get(AssistantSettings, bot_id, with_for_update=True, populate_existing=True)
+    assert row is not None
+    zone_name = _timezone(timezone) if timezone is not None else row.timezone
+    start = _clock(work_start) if work_start is not None else row.work_start
+    end = _clock(work_end) if work_end is not None else row.work_end
+    if start >= end:
+        raise SettingsError("invalid_work_hours")
+    days = _days(workdays) if workdays is not None else sorted(row.workdays)
+    focus = _chats(focus_chats, MAX_FOCUS) if focus_chats is not None else None
+    ignored = _chats(ignored_chats, MAX_IGNORED) if ignored_chats is not None else None
+    lists = focus is not None or ignored is not None
+    if lists:
+        now_focus = focus if focus is not None else list(row.focus_chats_enc or [])
+        now_ignored = ignored if ignored is not None else list(row.ignored_chats_enc or [])
+        if set(now_focus) & set(now_ignored):
+            raise SettingsError("chat_in_both_lists")
+        # 名单是加密列：密钥不可用时写下去会丢内容，宁可拒绝。
+        if not await sealed.key_ready(session, bot_id):
+            raise SettingsError("content_locked")
+    schedule = (zone_name, start, end, days)
+    if schedule != (row.timezone, row.work_start, row.work_end, sorted(row.workdays)):
+        row.timezone, row.work_start, row.work_end, row.workdays = schedule
+        clear_override(row)
+    if focus is not None:
+        row.focus_chats_enc = focus
+    if ignored is not None:
+        row.ignored_chats_enc = ignored
+    row.updated_at = utcnow()
+    await session.flush()
+    return row
