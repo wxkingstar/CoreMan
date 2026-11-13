@@ -39,6 +39,13 @@
 12. **`PLATFORM_TURN_KINDS` 的取法**（2A 计划提出）：`(HANDOVER_KIND, JOB_RESULT_KIND, COMPILE_KIND, SUBTASK_KIND)`；`BOT_HELP_KIND` 跑在目标员工那边，不属于它，留给 3B。没有入站事件的审批结果回合也经 `platform_turns.enqueue` 入队（`platform_turns.ORIGIN_KINDS`）。
 13. **暂停时平台来源的轮次静默失败**（2A 计划提出）：没有入站事件的轮次遇到运行时暂停，不私信，任务记失败（`assistant_paused`）；带入站事件的回合行为不变。
 14. **比 spec 多出的列与上限**（2B、2C 计划提出）：`assistant_pages.size`（正文字节数，算合计上限用）；索引注入上限 16KB；`assistant_followups.closed_at`、`close_code`。spec 的同步随各层最后一个任务做。
+15. **平台来源的轮次无人在场、输入来自他人，能力要收紧**（2A 审查提出）：
+    - 不挂云签名代理、业务系统目录与所有者的个人凭证；需要时由所有者在私聊里亲自让助理做。
+    - 授权工具只保留查询状态，不提供发起授权与撤销授权。
+    - 开轮时不取消同会话的其它任务，而是让路：同会话有所有者的消息在排队或在跑时，自己放回队列。
+    - 任务入队处加运行时闸：没有入站事件的平台来源类型，只有 `platform_turns.enqueue` 能入队。
+    - 入站事件已被清理的审批结果，回落到平台来源投回。
+    这些在 2A 的修补提交里落地，2E 之后的各层按此假定。
 
 ## 层间接口
 
