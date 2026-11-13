@@ -58,7 +58,17 @@ from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.logging import get_logger
 from coreman.core.timeutils import aware_utc, utcnow
 
-__all__ = ["Context", "Item", "Level", "finish_round", "grade", "owner_scope", "stop", "tick"]
+__all__ = [
+    "Context",
+    "Item",
+    "Level",
+    "finish_round",
+    "grade",
+    "owner_scope",
+    "restart_chats",
+    "stop",
+    "tick",
+]
 
 log = get_logger(__name__)
 # 轮询间隔（秒）；用量接近上限时成倍拉长，不超过 MAX_INTERVAL。
@@ -80,6 +90,14 @@ ERROR_BACKOFF_MAX = 900
 # 一个读不了的会话不该让这位助理的整个轮询一直退避。
 CHAT_STRIKES = 3
 PARK = timedelta(hours=1)
+# 游标里没有的会话（所有者刚被拉进一个有历史的群、会话从忽略名单移出、游标只留最近的
+# `feed.CURSOR_CHATS` 个而被挤掉的会话又活跃了）从多久以前读起。不能从开始盯的那一刻读：那会把
+# 这个会话的整段历史倒进收件箱。轮询停了更久（下班一夜、退避）时回看到上一次成功轮询为止，
+# 那之后才发来的消息平台确实没见过。
+LOOKBACK = timedelta(minutes=30)
+# 比这更早的消息不入箱，只前移游标：一个会话停读了几天（被放下、助理停用后恢复），积下的旧
+# 消息对所有者已经没有「刚发生」的意义。
+MAX_AGE = timedelta(hours=24)
 # 刷新令牌约 7 天不用就失效：不轮询的助理每这么久强制刷新一次。
 KEEPALIVE = timedelta(hours=24)
 # 用量流水（`feishu_rate_usage`）多久清一次旧行；上次清理的时刻（进程内，单调时钟）。
@@ -247,6 +265,8 @@ class _Round:
     listed: feed.Listed
     cursor: dict[str, Any]
     deadline: float
+    # 游标里没有的会话从这一刻读起（毫秒）：见 `LOOKBACK`。
+    floor: int = 0
     reads: int = 0
     items: int = 0
     # 缺编号或读不出时间、没法处理的消息数：只记个数。
@@ -287,6 +307,9 @@ class _Round:
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW
             )
             return
+        if self.now - item.created_at > MAX_AGE:
+            # 太老了：不入箱，游标照常越过它。
+            return
         spoke = int(entry.get("o") or 0)
         context = Context(
             now=self.now,
@@ -314,11 +337,15 @@ class _Round:
         """读一个会话游标之后的消息（主线，再加跟着的话题）；返回有没有新消息。
 
         游标（`t`、`m`、`th`）在整个会话读完之后才写回 `entry`：读到一半失败，这个会话下一轮
-        从原来的位置重读。
+        从原来的位置重读。游标里还没有这个会话时从 `floor` 读起（不从开始盯的那一刻读），并
+        当场把这个起点记进游标：这一次没读成，之后重试仍从同一刻读，不会越试越晚。
         """
-        entry: dict[str, Any] = self.cursor["chats"].setdefault(chat_id, {})
+        chats: dict[str, dict[str, Any]] = self.cursor["chats"]
+        entry = chats.get(chat_id)
+        if entry is None:
+            entry = chats[chat_id] = {"t": self.floor}
         self.reading = chat_id
-        last = int(entry.get("t") or self.cursor["since"])
+        last = int(entry.get("t") or self.floor)
         same = [str(one) for one in entry.get("m") or []]
         kind = entry.get("k") or self.listed.kinds.get(chat_id)
         name = self.listed.names.get(chat_id, "")
@@ -389,6 +416,15 @@ class _Round:
             log.warning("assistant_watch_chat_parked", bot_id=str(self.bot_id))
 
 
+def _floor(since: int, last_ok_at: datetime | None, now: datetime) -> int:
+    """游标里没有的会话从哪一刻读起（毫秒）：回看 `LOOKBACK`；轮询停了更久就回看到上一次成功
+    轮询，但不早于开始盯的时刻。"""
+    back = aware_utc(now) - LOOKBACK
+    if last_ok_at is not None:
+        back = min(back, aware_utc(last_ok_at))
+    return max(since, int(back.timestamp() * 1000))
+
+
 async def _round(
     session: AsyncSession,
     call: feed.Reader,
@@ -415,7 +451,15 @@ async def _round(
     # 上一轮没读完的、这一轮排到前面的、重点群：都读。
     queue = [chat for chat in dict.fromkeys([*cursor["todo"], *moved, *focus]) if chat not in skip]
     state = _Round(
-        session, call, row.bot_id, prefs, now, listed, cursor, time.monotonic() + ROUND_SECONDS
+        session,
+        call,
+        row.bot_id,
+        prefs,
+        now,
+        listed,
+        cursor,
+        time.monotonic() + ROUND_SECONDS,
+        floor=_floor(cursor["since"], row.last_ok_at, now),
     )
     todo: list[str] = []
     try:
@@ -656,6 +700,30 @@ async def tick(
             stretch=ratelimit.stretch(load) or 0,
         )
     return counts
+
+
+async def restart_chats(
+    session: AsyncSession, bot_id: uuid.UUID, chat_ids: list[str], now: datetime
+) -> None:
+    """这些会话从现在起重新盯：游标置为 `now`，之前的消息不再读。调用方提交。
+
+    所有者把会话从忽略名单移出时调用（`settings.update`）：忽略期间的消息是他明说不要的，
+    不能在移出之后补进收件箱。取这一行的行锁：正在进行的一轮提交之后才改，免得被它覆盖。
+    还没记过基线的（没开始盯、已停用、游标读不出来）不用改。
+    """
+    row = await session.get(AssistantWatch, bot_id, with_for_update=True, populate_existing=True)
+    stored = row.cursor_enc if row is not None else None
+    if row is None or not chat_ids or not isinstance(stored, dict):
+        return
+    if not isinstance(stored.get("since"), int):
+        return
+    cursor = feed.load(stored)
+    at = int(aware_utc(now).timestamp() * 1000)
+    for chat_id in chat_ids:
+        entry = cursor["chats"].setdefault(chat_id, {})
+        entry["t"], entry["m"], entry["th"] = at, [], {}
+    row.cursor_enc = feed.dump(cursor, cursor["todo"])
+    row.updated_at = utcnow()
 
 
 async def stop(session: AsyncSession, bot_id: uuid.UUID) -> None:

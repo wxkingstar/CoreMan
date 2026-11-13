@@ -256,6 +256,7 @@ async def update(
     """改这位助理的设置：只改给出的项，名单整份替换。调用方提交。
 
     改了时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
+    从忽略名单里移出的会话，盯消息的游标置为 `now`（会等正在进行的一轮轮询提交）。
 
     Raises:
         SettingsError: `nothing_to_update`、`invalid_timezone`、`invalid_work_hours`（格式不对，
@@ -294,7 +295,14 @@ async def update(
     if focus is not None:
         row.focus_chats_enc = focus
     if ignored is not None:
+        released = [chat for chat in row.ignored_chats_enc or [] if chat not in ignored]
         row.ignored_chats_enc = ignored
+        if released:
+            # 移出忽略名单的会话从这一刻起盯：忽略期间的消息不补进收件箱。
+            # 函数内引入：watch 在模块层引用本模块。
+            from coreman.core.assistants import watch
+
+            await watch.restart_chats(session, bot_id, released, now)
     row.updated_at = utcnow()
     await session.flush()
     return row

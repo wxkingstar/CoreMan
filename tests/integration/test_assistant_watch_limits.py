@@ -20,6 +20,7 @@ from tests.integration.watch_helpers import (
     assistant,
     inbox_rows,
     install,
+    ms,
     primed,
     tick,
     tokens,
@@ -148,12 +149,11 @@ async def test_a_failed_read_backs_off_and_keeps_what_was_already_read(
     # 只留代码：飞书应答里的文字不进库。
     assert (row.state, row.last_error, row.failures) == ("backoff", "feishu_read_failed", 1)
     assert row.next_poll_at == now + timedelta(seconds=120)
-    # 读完的会话的条目与游标留下了；顺序没存，下一轮重新比。
+    # 读完的会话的条目与游标留下了；顺序没存，下一轮重新比。没读成的会话只记下从哪一刻读起
+    # （这里是开始盯的时刻），之后重试仍从那里读。
     assert [item.message_id for item in await inbox_rows(db_session, who)] == ["om_1"]
-    assert (
-        row.cursor_enc["chats"]["oc_li"]["m"] == ["om_1"]
-        and "t" not in row.cursor_enc["chats"]["oc_team"]
-    )
+    assert row.cursor_enc["chats"]["oc_li"]["m"] == ["om_1"]
+    assert row.cursor_enc["chats"]["oc_team"] == {"t": ms(base), "k": "group", "f": 1}
     assert row.head_enc == []
     api.failing = set()
     counts = await tick(factory, row.next_poll_at)
