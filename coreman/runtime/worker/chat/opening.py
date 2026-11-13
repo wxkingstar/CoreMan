@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns
+from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
@@ -458,8 +459,8 @@ class OpenStage(ChatStageBase):
         )
         from coreman.core.prompting.rich_cards import with_reply_images
 
-        # helper 的回答是交给平台解析的 JSON，不会发到聊天里，图片说明用不上。
-        if ctx.task.payload.get("collaboration_phase") != "helper":
+        # 交给平台解析的回答（helper、个人助理调度来的一轮）不会发到聊天里，图片说明用不上。
+        if not self._structured_reply(ctx):
             extra = with_reply_images(extra, intake.bot.platform, backend)
         tag = identity_tag(ctx.cipher, info.relay_session_id)
         system_prompt = await self._system_prompt(
@@ -477,7 +478,8 @@ class OpenStage(ChatStageBase):
             previous=await previous_speaker(session, info),
             notes=ctx.turn_notes,
         )
-        ctx.private_turn = wecom_personal.mounted(env)
+        # 个人助理调度来的一轮：记在这位员工名下，但只有所有者本人看得到内容。
+        ctx.private_turn = wecom_personal.mounted(env) or ctx.task.kind == BOT_HELP_KIND
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
         # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
         ctx.secrets = collect_secrets(env) | personal_secrets
@@ -650,7 +652,7 @@ class OpenStage(ChatStageBase):
             systems_prompt=systems_prompt,
             extra=extra,
             output_format=rich_cards_prompt(intake.bot.platform, intake.bot.rich_cards),
-            structured_reply=ctx.task.payload.get("collaboration_phase") == "helper",
+            structured_reply=self._structured_reply(ctx),
             dev_mode=intake.bot.dev_mode,
             memory_dir=memory_dir,
         )
@@ -671,6 +673,10 @@ class OpenStage(ChatStageBase):
         return dispatch.note(
             staff, unverified, recent, names, solo=bool(ctx.task.payload.get("solo"))
         )
+
+    def _structured_reply(self, ctx: TaskContext) -> bool:
+        """这一轮的回答是不是交给平台按固定格式解析、不给人看。默认只有协作的 helper 阶段。"""
+        return ctx.task.payload.get("collaboration_phase") == "helper"
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""

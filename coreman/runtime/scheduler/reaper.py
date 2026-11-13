@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
 from coreman.core.assistants import platform_turns, sealed
-from coreman.core.assistants.kinds import SILENT_KINDS
+from coreman.core.assistants.kinds import BOT_HELP_KIND, SILENT_KINDS
 from coreman.core.bots.workspace_transfer import release_fence
 from coreman.core.bus import leases, outbox, streams, tasks
 from coreman.core.bus.notify import notify
@@ -347,12 +347,15 @@ def _lost_entry(
     message = _message(task)
     chat_type = str(message.get("chat_type") or "single")
     request_at = task.claimed_at or task.run_after
+    # 个人助理调度来的一轮：不是所有者发来的私聊，不能据此记「他私聊过这位员工」；记录与正常
+    # 收尾的一样标为私有、类型用任务类型，管理者只看得到发生过这一轮。
+    dispatched = task.kind == BOT_HELP_KIND
     return ChatLogEntry(
         bot_id=task.bot_id,
         bot_key=str(bot.bot_key if bot is not None else payload.get("bot_key") or ""),
         platform=str(bot.platform if bot is not None else message.get("platform") or ""),
         chat_type=chat_type if chat_type in CHAT_TYPES else "single",
-        message_type="text",
+        message_type=BOT_HELP_KIND if dispatched else "text",
         status="timeout",
         request_at=request_at,
         user_id=task.user_id,
@@ -367,7 +370,8 @@ def _lost_entry(
         latency_ms=int((now - request_at).total_seconds() * 1000),
         # 平台自己发起的一轮（没有入站事件）不是这个人发来的私聊消息，不算触达；子任务的
         # 会话键更不是一个能推送的会话。与 worker 写记录时的口径一致（`records.log_entry`）。
-        reach=not is_click(message) and not platform_turns.is_platform(task),
+        private=dispatched,
+        reach=not is_click(message) and not platform_turns.is_platform(task) and not dispatched,
     )
 
 

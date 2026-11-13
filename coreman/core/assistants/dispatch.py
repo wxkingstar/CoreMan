@@ -13,12 +13,13 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import jobs
+from coreman.core.assistants import jobs, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.assistants.records import is_assistant
@@ -26,7 +27,14 @@ from coreman.core.audit import record_audit
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.chat import bot_collaboration
-from coreman.core.db.models import AssistantJob, AssistantSettings, Bot, BotAllowedUser, User
+from coreman.core.db.models import (
+    AssistantJob,
+    AssistantSettings,
+    Bot,
+    BotAllowedUser,
+    Task,
+    User,
+)
 from coreman.core.prompting import Speaker
 from coreman.core.timeutils import aware_utc, utcnow
 
@@ -40,6 +48,11 @@ SESSION_PREFIX = "assistant-help:"
 AUDIT_ACTION = "assistant.dispatch"
 # 行的标题：给所有者在「我的助理」页与列表里认的，不含问题内容。
 TITLE = "请「{name}」协助"
+ROUND_TEXT = (
+    "{who}代他来问一件事。平台已核验身份：这一轮以他本人的身份执行，他此刻不在场，"
+    "你的回答不会发给任何人，由平台交回他的助理。按本轮块里「个人助理代问」的说明作答。\n\n"
+    "要办的事：\n{question}"
+)
 
 
 class DispatchError(Exception):
@@ -286,3 +299,77 @@ async def send(
         },
     )
     return row
+
+
+@dataclass(frozen=True)
+class Round:
+    """目标员工那边在途的一轮对应的求助与发起它的助理。"""
+
+    job: AssistantJob
+    assistant: Bot
+
+
+def _job_id(task: Task) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(task.payload.get("job_id")))
+    except ValueError:
+        return None
+
+
+def _matches(row: AssistantJob, task: Task) -> bool:
+    """这一行是不是一次进行中的求助，而 `task` 正是它在目标员工那边在途的那一轮。"""
+    return (
+        row.kind == "bot_help"
+        and row.target_bot_id == task.bot_id
+        and row.session_key == task.session_key
+        and row.last_task_id == task.id
+        and row.status in jobs.LIVE
+    )
+
+
+async def _load(session: AsyncSession, task: Task, *, lock: bool) -> Round | None:
+    job_id = _job_id(task)
+    if job_id is None:
+        return None
+    # 按主键取：会话自动用所有者的数据密钥还原问题。
+    row = await session.get(AssistantJob, job_id, with_for_update=lock, populate_existing=True)
+    if row is None or not _matches(row, task) or sealed.is_locked(row):
+        return None
+    assistant = await session.get(Bot, row.bot_id, populate_existing=True)
+    if assistant is None or assistant.owner_id != task.user_id:
+        return None
+    return Round(row, assistant)
+
+
+async def for_round(session: AsyncSession, task: Task) -> Round | None:
+    """`task` 对应的求助与助理；不是在途的那一轮、已结束、问题读不出来时返回 None。纯读。"""
+    return await _load(session, task, lock=False)
+
+
+def round_text(row: AssistantJob, owner_name: str) -> str:
+    """这一轮交给目标员工的文本：平台写的一句交代，加上问题原文。"""
+    name = " ".join(owner_name.split())
+    who = f"这是 {name} 的个人助理，" if name else "这是一位同事的个人助理，"
+    return ROUND_TEXT.format(who=who, question=row.brief_enc)
+
+
+async def mark_running(session: AsyncSession, task: Task) -> bool:
+    """这一轮开流了：`queued` → `running`。与开流同一事务，调用方提交。"""
+    found = await _load(session, task, lock=True)
+    if found is None or found.job.status != "queued":
+        return False
+    now = utcnow()
+    found.job.status, found.job.updated_at = "running", now
+    found.job.started_at = found.job.started_at or now
+    await session.flush()
+    return True
+
+
+async def fail(session: AsyncSession, task: Task, code: str) -> AssistantJob | None:
+    """这一轮开不了或没跑成：把求助记失败并投回助理主会话。不是在途的那一轮时什么都不做。"""
+    found = await _load(session, task, lock=True)
+    if found is None:
+        return None
+    return await jobs.complete(
+        session, found.assistant, found.job.id, task_id=task.id, ok=False, error_code=code
+    )

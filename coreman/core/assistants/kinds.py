@@ -34,9 +34,10 @@ PLATFORM_TURN_KINDS = (
 ORIGIN_KINDS = (*PLATFORM_TURN_KINDS, APPROVAL_RESULT_KIND)
 # 不出声的任务类型：这一轮的回复、进度、失败与中断都不往任何会话里发，结局由平台另行带回
 # （子任务的结论投回主会话；冷启动的口吻样本做完与否不影响冷启动，做完时平台发一句确认）。
-# 收尸与流恢复按它判断；以后有别的不出声的轮次（如调度公共员工那一轮）加在这里，处理器
-# 继承 `worker.platform_turn.SilentTurnHandler`。
-SILENT_KINDS: tuple[str, ...] = (SUBTASK_KIND, COLD_START_KIND)
+# 调度公共员工时目标员工那边的一轮同样不出声：答复由平台交回助理的主会话。
+# 收尸与流恢复按它判断；以后有别的不出声的轮次加在这里，处理器继承
+# `worker.platform_turn.SilentTurnHandler`。
+SILENT_KINDS: tuple[str, ...] = (SUBTASK_KIND, COLD_START_KIND, BOT_HELP_KIND)
 
 
 def unattended(kind: str) -> bool:

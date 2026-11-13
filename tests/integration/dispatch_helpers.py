@@ -138,7 +138,11 @@ def scripted(monkeypatch: pytest.MonkeyPatch, text_: str, *, name: str = "help_a
 
 
 async def run_help(
-    engine: AsyncEngine, session: AsyncSession, task: Task, scenario: str = "normal"
+    engine: AsyncEngine,
+    session: AsyncSession,
+    task: Task,
+    scenario: str = "normal",
+    handler: Any = None,
 ) -> tuple[Task, FakeRelay]:
     """在目标员工那边跑这一轮，返回结束后的任务与假 relay。"""
     from coreman.runtime.worker.assistant_bot_help import AssistantBotHelpHandler
@@ -146,7 +150,7 @@ async def run_help(
     relay = FakeRelay(scenario)
     ctx = build_ctx(engine, task, relay_client_factory=lambda _r: relay.client())
     ctx.cloud_proxy_ready = True
-    await AssistantBotHelpHandler().run(ctx)
+    await (handler or AssistantBotHelpHandler()).run(ctx)
     await ctx.chat_logs.drain(5)
     done = await session.get(Task, task.id, populate_existing=True)
     assert done is not None
