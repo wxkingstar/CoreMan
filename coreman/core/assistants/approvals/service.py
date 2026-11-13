@@ -936,8 +936,12 @@ async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None)
     return len(rows)
 
 
-async def remind(session: AsyncSession, now: datetime, link: str) -> int:
-    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。"""
+async def remind(session: AsyncSession, now: datetime, link: str | None) -> int:
+    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。
+
+    Args:
+        link: 审批系统的网页入口（`tower.web_url`）；没有就只说张数，不带链接
+    """
     waiting = (
         await session.execute(
             select(AssistantApproval.bot_id, func.min(AssistantApproval.created_at))
@@ -980,7 +984,13 @@ async def remind(session: AsyncSession, now: datetime, link: str) -> int:
             kind="send",
             dedupe_key=f"assistant-approvals:{bot_id}:{int(now.timestamp())}",
             target={"chat_id": reached.platform_chat_id},
-            payload={"markdown": f"有 {count} 张审批单等你处理：{link}"},
+            payload={
+                "markdown": (
+                    f"有 {count} 张审批单等你处理：{link}"
+                    if link
+                    else f"有 {count} 张审批单等你处理。"
+                )
+            },
         )
         await session.execute(
             update(AssistantApproval)
@@ -1029,7 +1039,7 @@ async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
     cfg = tower.config(settings)
     return {
         "assistant_approvals_expired": await expire(session, now, cfg),
-        "assistant_approvals_reminded": await remind(session, now, settings.tower_url or ""),
+        "assistant_approvals_reminded": await remind(session, now, tower.web_url(settings)),
         "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
         "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
     }

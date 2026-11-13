@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import delivery, eligibility, jobs, lifecycle, runtime, sealed
 from coreman.core.assistants import settings as assistant_settings
+from coreman.core.assistants.approvals import tower
 from coreman.core.config import get_settings
 from coreman.core.db.models import (
     AssistantApproval,
@@ -57,8 +58,7 @@ async def current(session: AsyncSession, user_id: uuid.UUID) -> Bot | None:
 
 def approval_link() -> str | None:
     """审批系统的网页入口；没配、或配的不是 http(s) 地址时不给。"""
-    url = (get_settings().tower_web_url or "").strip()
-    return url if url.startswith(("https://", "http://")) else None
+    return tower.web_url(get_settings())
 
 
 def _flow(row: AssistantLifecycle | None) -> dict[str, Any] | None:

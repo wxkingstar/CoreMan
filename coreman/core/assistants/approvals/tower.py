@@ -63,6 +63,16 @@ class Submitted:
     updated: bool
 
 
+def web_url(settings: Settings) -> str | None:
+    """审批系统给人看的网页入口（`TOWER_WEB_URL`）；没配、或配的不是 http(s) 地址时不给。
+
+    给所有者的提醒与页面上的跳转只用它：`TOWER_URL` 是平台调审批系统接口的地址，不是给人
+    打开的，不能拿来当链接。
+    """
+    url = (settings.tower_web_url or "").strip()
+    return url if url.startswith(("https://", "http://")) else None
+
+
 def config(settings: Settings, target: str = TARGET) -> Config | None:
     """审批闸门要用的部署配置；缺任何一项返回 None（提交失败、写操作不执行）。
 

@@ -214,3 +214,40 @@ async def test_no_reminder_or_expiry_turn_once_the_assistant_is_being_stopped(
     assert (await reload(db_session, row)).status == "expired"
     assert fake.withdrawn == [row.external_id]
     assert await queued(db_session, APPROVAL_RESULT_KIND) == []
+
+
+@pytest.mark.parametrize(
+    ("web_url", "expected"),
+    [
+        ("https://tower.example.com/", "有 1 张审批单等你处理：https://tower.example.com/"),
+        # 没配网页入口：不带链接，更不回落到审批系统的接口地址。
+        (None, "有 1 张审批单等你处理。"),
+        ("javascript:alert(1)", "有 1 张审批单等你处理。"),
+    ],
+)
+@pytest.mark.usefixtures("runtime_settings")
+async def test_the_reminder_links_to_the_web_entry_never_the_api_address(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    web_url: str | None,
+    expected: str,
+) -> None:
+    from coreman.core.config import reset_settings_cache
+
+    install(monkeypatch)
+    monkeypatch.setenv("TOWER_URL", "https://tower-api.example.com")
+    if web_url is None:
+        monkeypatch.delenv("TOWER_WEB_URL", raising=False)
+    else:
+        monkeypatch.setenv("TOWER_WEB_URL", web_url)
+    reset_settings_cache()
+    _bot, _, scope = await assistant_turn(db_session)
+    row = await pending(db_session, scope)
+    row.created_at = utcnow() - timedelta(minutes=1)
+    await db_session.commit()
+    counts = await service.tick(db_session, utcnow())
+    await db_session.commit()
+    assert counts["assistant_approvals_reminded"] == 1
+    [item] = await sent(db_session)
+    assert item.payload == {"markdown": expected}
+    assert "tower-api" not in str(item.payload)
