@@ -83,6 +83,17 @@
     - 停用的 `drain` 一步把目标员工那边在途的轮次算进「还在跑」（`dispatch.live_rounds`）。停用期间已批准的调度单执行时因助理不在 `active` 而记失败，不会派出。
     - 顺带修了转录交接的一处竞态（不属于调度）：被取消的一轮的转录还在从节点传回来时，下一轮开轮前最多等 `transcripts.UPLOAD_WAIT`（20 秒，从被取消那一轮结束起算；`transcripts.awaiting_upload`，在 `OpenStage._wait_transcript` 里用短事务轮询），等到了照常续，等不到才换新会话。
 
+22. **页面层的补充**（3C 落地时定，所有者 2026-11-14 的取舍）：
+    - 知识页的路径不进网址：读与删是 `POST /api/me/assistant/notes/read`、`POST /api/me/assistant/notes/delete`，路径在请求体里；写仍是 `PUT /notes/page`。索引不收目录参数（目录名也是路径的一部分）。原因：网址会进反向代理与应用的访问日志，而别处都在避免个人内容进日志。3D 的导入、导出同此口径。
+    - 给所有者的链接只用审批系统的网页入口（`tower.web_url(settings)`，即 `TOWER_WEB_URL`）：私聊里「有 N 张待批」的提醒与页面「等你出手」都是它，没配就不带链接，不回落到接口地址 `TOWER_URL`。
+    - 「最近落地」列审批单的全部终态（`owner_view.SETTLED`：`executed`、`rejected`、`withdrawn`、`failed`、`expired`、`stale`）；`approved` 是途中状态，两个分区都不列。
+    - 页面上可以即时上班、下班、回到按工作时段（`POST /shift`，`owner_view.switch_shift`，与私聊命令同一个效果，同样写 `worked_on`），可以重新生成口吻页（`POST /voice/regenerate`，`cold_start.regenerate_voice`）：冷启动没做完时拒绝；每天（所有者时区）至多 `cold_start.REGENERATE_DAILY`（3）次，按排上的轮数算，靠任务的幂等键 `voice.dedupe_key(bot_id, <日期×10+第几次>)` 数，不加列；口吻页最后不是助理写的时不排（`voice.save` 本来也不会覆盖）。读飞书在这个请求里做，出错时提交而不回滚（刷新过的令牌不能丢）。
+    - 每日轮次预算以个人值与平台默认里较小的为准（`delivery.effective_budget`，`budget_left`、`usage`、预算用完的告知、所有者概览都用它）；页面不让个人值高于平台默认（`owner_view.set_budget`）。管理员调低平台默认会同步收紧，个人值留着。
+    - 两处「在班」同一口径：所有者概览的 `on_shift` 也要求记录启用且开通好。
+    - 开通卡片多一句调度的告知（裁定 17 的存储方式）。
+    - 所有者视图里的子任务比 `jobs.view` 多两项：`origin`（`system` 是平台派的下班整理）与 `target`（调度的目标员工，按 `target_bot_id` 另查名字）；`jobs.view` 本身不变，助理工具的输出不变。
+    - 管理台对话记录认 `content_withheld`：列表与详情都显示「内容仅发起人可见」，不摆出空的消息与回复两栏。
+
 ## 层间接口
 
 各层计划必须原样使用这些名字；需要改名时先改本文。
@@ -152,7 +163,30 @@
 
 ### 3C、3D
 
-接口在各自的计划里定；3C 的接口前缀 `/api/me/assistant`，鉴权照 `feishu_personal.interactive_user`。
+3C 的接口前缀 `/api/me/assistant`，鉴权照 `feishu_personal.interactive_user`，落地的接口如下（计划 `2026-11-13-personal-assistant-3c-pages.md` 的「接口一览」是落地前写的，以这里为准）：
+
+| 方法 | 路径 | 访问记录（动作, 对象） |
+|---|---|---|
+| GET | `` | — |
+| GET | `/attention` | `approvals.read` `pending`、`jobs.read` `blocked`、`followups.read` `today` |
+| GET | `/jobs` | `jobs.read` `list` |
+| POST | `/jobs/{job_id}/cancel` | — |
+| GET | `/followups` | `followups.read` `open` |
+| POST | `/followups`、PATCH `/followups/{label}`、POST `/followups/{label}/close`、POST `/followups/{label}/snooze` | — |
+| GET | `/approvals/recent` | `approvals.read` `recent` |
+| GET | `/notes` | `notes.index` 空串 |
+| POST | `/notes/read` | `notes.read` `page`（路径不进记录） |
+| PUT | `/notes/page`、POST `/notes/delete` | — |
+| GET | `/settings` | `settings.read` 空串 |
+| PATCH | `/settings`、POST `/shift`、POST `/voice/regenerate`、POST `/deprovision` | — |
+
+给 3D 的交接：
+
+- `coreman/core/assistants/access_log.py` 的 `async def record(session: AsyncSession, bot_id: uuid.UUID, actor_id: uuid.UUID, action: str, target: str = "") -> None` 是页面读取密文的唯一记账点，现在只写日志 `assistant_content_access`（`del session`，不落库）；`ACTIONS = ("approvals.read", "followups.read", "jobs.read", "notes.index", "notes.read", "settings.read")`，`MAX_TARGET = 64`，不认识的动作抛 `ValueError`。3D 把函数体换成写 `assistant_access_log`（调用方都在记完之后才返回；只读接口有的不提交，落库时要么在 `record` 里用独立的短事务，要么给这些接口补上提交——`/jobs`、`/approvals/recent`、`/notes`、`/notes/read` 现在没有 `session.commit()`），调用点不动，新增动作（导出、导入）加进 `ACTIONS`。`target` 只放明文的编号或范围名，知识页的路径不进 `target`。
+- 所有者查看自己的访问记录、导入、导出：接口加在 `coreman/api/routers/me_assistant*.py`，用 `me_assistant_common` 的 `mine` / `writable` 与路由级依赖 `DEPENDENCIES`，并登记进 `tests/api/test_my_assistant_guard.py` 的 `CASES`（不登记，台账用例失败；`/deprovision` 要留在最后一项）。路径、文件名这类个人内容不进网址。
+- 导入写知识页用 `notes.write(..., updated_by="import", owner_present=True)`，页面会显示「导入」；待跟进没有 `updated_by` 列。
+- 所有者的每日轮次预算由 `owner_view.set_budget(session, bot_id, value)` 写（不得高于平台默认值）；其余设置项仍是 2F 的 `settings.update`。
+- 前端：页面壳 `web/src/views/MyAssistantView.vue`（标签页 `attention` / `jobs` / `followups` / `recent` / `notes` / `settings`，`el-tab-pane lazy`），分区组件在 `web/src/components/assistant/`（`AssistantAttention.vue`、`AssistantJobs.vue`、`AssistantFollowups.vue`、`AssistantRecent.vue`、`AssistantNotes.vue`、`AssistantSettings.vue`，都没有属性或只有 `name` / `runtime`，挂载时自己取数，`defineExpose({ load })`），接口封装 `web/src/api/myAssistant.ts`（对象 `myAssistant`），文案 `web/src/i18n/assistant.ts`（`assistantZh` / `assistantEn` / `assistantJa`，键在 `assistant.<分区>.<键>` 下；`web/tests/assistantI18n.spec.ts` 与 `tests/i18n.spec.ts` 会查三种语言的键齐全与插值参数名）。管理台列表 `web/src/views/AssistantsView.vue` + `web/src/api/assistantsAdmin.ts`；平台设置表单 `web/src/components/AssistantPlatformSettings.vue`。
 
 ## 每层都要守的约束
 
