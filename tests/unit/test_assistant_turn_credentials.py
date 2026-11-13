@@ -114,7 +114,8 @@ def test_codex_copy_keeps_access_drops_refresh_and_resets_last_refresh(tmp_path)
     )
     got = creds.codex(tmp_path, {}, now=NOW)
     data = json.loads(got.content or b"")
-    assert "refresh_token" not in data["tokens"]
+    # 字段留着、值是空串：实测 Codex 读不到这个字段就当作没登录（401），空串则正常工作。
+    assert data["tokens"]["refresh_token"] == ""
     assert data["tokens"]["account_id"] == "acct"
     assert data["last_refresh"].startswith("2027-01-15T")
     assert source.read_bytes() == raw
@@ -207,7 +208,8 @@ def test_codex_copy_is_built_from_an_allowlist(tmp_path):
     got = creds.codex(tmp_path, {}, now=NOW)
     data = json.loads(got.content or b"")
     assert set(data) == {"auth_mode", "last_refresh", "tokens"}
-    assert set(data["tokens"]) == {"id_token", "access_token", "account_id"}
+    assert set(data["tokens"]) == {"id_token", "access_token", "account_id", "refresh_token"}
+    assert data["tokens"]["refresh_token"] == ""
     for leaked in (b"sk-next-to-tokens", b"top-secret", b"nested-secret", b"refresh-2"):
         assert leaked not in (got.content or b"")
 

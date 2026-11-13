@@ -149,7 +149,7 @@ launchd 没有按退出码阻止重启的机制，因此 launchd 下同类错误
 
 某一种 AI 单独失败（比如只装了 Claude）时没有整体原因代码，那一种的能力为 `no`，另一种照常声明。
 
-**登录凭证。** 每一轮从当前席位的登录文件收窄出一份副本只读挂进去，副本按字段白名单构造，白名单外的字段（包括 CLI 以后新增的）一律不带：Claude 只留 `claudeAiOauth` 里的 `accessToken`、`expiresAt`、`scopes`、`subscriptionType`、`rateLimitTier`；Codex 只留 `auth_mode`、`last_refresh`，以及 `tokens` 里的 `id_token`、`access_token`、`account_id`，`last_refresh` 改成现在。没有刷新令牌，节点原来的登录文件不动；助理专用实例上没有普通轮次，令牌刷新只发生在这份守护进程沙箱外、节点自己的周期模型探测里（Claude 空闲时每 15 分钟一次，其他 AI 白天每小时一次；它和管理台的「运行环境检查」不是一回事，后者对助理关闭）。访问令牌剩余不到 30 分钟（或到期时间读不懂、不是有限的数）时这一轮不跑（`credential_expiring` / `credential_unreadable`），等下一次探测刷新。
+**登录凭证。** 每一轮从当前席位的登录文件收窄出一份副本只读挂进去，副本按字段白名单构造，白名单外的字段（包括 CLI 以后新增的）一律不带：Claude 只留 `claudeAiOauth` 里的 `accessToken`、`expiresAt`、`scopes`、`subscriptionType`、`rateLimitTier`；Codex 只留 `auth_mode`、`last_refresh`，以及 `tokens` 里的 `id_token`、`access_token`、`account_id`，`refresh_token` 留一个空串（真机实测：Codex 读不到这个字段就不认这份登录，请求一律 401；空串则正常），`last_refresh` 改成现在。副本里没有刷新令牌的值，节点原来的登录文件不动；助理专用实例上没有普通轮次，令牌刷新只发生在这份守护进程沙箱外、节点自己的周期模型探测里（Claude 空闲时每 15 分钟一次，其他 AI 白天每小时一次；它和管理台的「运行环境检查」不是一回事，后者对助理关闭）。访问令牌剩余不到 30 分钟（或到期时间读不懂、不是有限的数）时这一轮不跑（`credential_expiring` / `credential_unreadable`），等下一次探测刷新。
 
 > **长效凭证没有到期门槛。** 用环境变量登录（`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）的节点，以及 Codex 用 API Key 文件登录的节点，带进沙箱的是一枚**长期有效**的凭证，不做到期检查，被提示词注入的助理读得到它；这一路的保护只有出网放行名单（见下）。要避免，让助理节点用 OAuth 订阅登录，不要用长效令牌或 API Key。OAuth 登录时被注入的助理读到的只是一枚到期即失效的访问令牌。
 

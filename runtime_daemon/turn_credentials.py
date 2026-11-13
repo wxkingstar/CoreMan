@@ -2,11 +2,12 @@
 
 节点上的 CLI 登录由所有员工共用。OAuth 的刷新令牌可能是一次性的：沙箱里的 CLI 若用它刷新，
 新令牌写不回只读文件，节点原来那枚又已作废，整台节点的登录就坏了。所以副本只按名单挑字段，
-名单里**没有刷新令牌**：
+副本里**没有刷新令牌的值**：
 - Claude：`.credentials.json` 只取 `claudeAiOauth` 里 `CLAUDE_OAUTH_FIELDS` 列出的字段（访问令牌、
   到期时间、权限范围、订阅与限额档位），其它顶层键（如各 MCP 服务的 OAuth 令牌）一概不带；
 - Codex：`auth.json` 只取 `CODEX_TOP_FIELDS` 与 `tokens` 里 `CODEX_TOKEN_FIELDS` 列出的字段，
-  `last_refresh` 改成现在，免得 CLI 以为该刷新了；没有 `tokens`、只有 API Key 的文件只带那一个键。
+  `refresh_token` 留一个空串（CLI 要求这个字段在），`last_refresh` 改成现在，免得 CLI 以为该
+  刷新了；没有 `tokens`、只有 API Key 的文件只带那一个键。
 访问令牌剩余有效期不足 `MARGIN_SECONDS` 时不起这一轮（`credential_expiring`）：刷新留给沙箱外
 的驱动（节点自己的周期模型探测；助理专用实例上没有普通轮次），由它照常写回节点的登录文件。
 节点用环境变量登录（API Key、长效令牌）时只把那一个变量带进去。
@@ -141,6 +142,9 @@ def codex(codex_home: Path, env: Mapping[str, str], now: float | None = None) ->
         raise Unavailable("credential_expiring")
     narrowed: dict = {k: data[k] for k in CODEX_TOP_FIELDS if k in data}
     narrowed["tokens"] = {k: tokens[k] for k in CODEX_TOKEN_FIELDS if k in tokens}
+    # 字段要在、值为空：真机实测 Codex 读不到 refresh_token 字段就不认这份登录（请求 401），
+    # 空串则照常用访问令牌工作，也刷新不了任何东西。
+    narrowed["tokens"]["refresh_token"] = ""
     narrowed["last_refresh"] = (
         datetime.fromtimestamp(moment, tz=timezone.utc).isoformat().replace("+00:00", "Z")  # noqa: UP017 3.10
     )
