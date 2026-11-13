@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -12,13 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import kinds, notes, settings, voice, voice_tools
 from coreman.core.assistants import tools as registry
+from coreman.core.bus import tasks
 from coreman.core.db.models import Task
+from coreman.core.db.session import make_session_factory
+from coreman.core.timeutils import utcnow
+from coreman.runtime.scheduler import reaper
 from coreman.runtime.worker.assistant_cold_start import AssistantColdStartHandler
+from tests.fakes.fake_relay import FakeRelay
 from tests.integration.approval_helpers import assistant_turn
 from tests.integration.assistant_helpers import SECRET, raw
-from tests.integration.test_assistant_platform_turn_handler import assistant, run
+from tests.integration.test_assistant_platform_turn_handler import assistant, run, streams_of
 from tests.integration.test_cron_handler import claim
-from tests.integration.worker_helpers import turn_block, user_input
+from tests.integration.worker_helpers import build_ctx, turn_block, user_input
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
 SAMPLES = ["收到，我看一下", "可以，周四下班前给你", "这个先放一放", "辛苦了", "明天上午对一下"]
@@ -145,6 +151,59 @@ async def test_the_turn_runs_in_its_own_session_with_only_the_samples(
     # 独立会话：没有知识库的首轮注入，别人的内容到不了这一轮。
     assert "个人知识库" not in turn_block(request)
     assert SECRET not in json.dumps(request, ensure_ascii=False)
+
+
+async def test_the_voice_turn_says_nothing_in_the_owners_chat(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """口吻样本那一轮没有人在等：回复、进度、完成提醒都不往私聊发（做完由冷启动的确认告知）。"""
+    assert kinds.COLD_START_KIND in kinds.SILENT_KINDS
+    bot, _ = await assistant(db_session)
+    row = await settings.get(db_session, bot.id)
+    await voice.enqueue(db_session, bot, row, SAMPLES, 7)
+    await db_session.commit()
+    task = await claim(db_session)
+    handler = AssistantColdStartHandler()
+    relay = FakeRelay("normal")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _r: relay.client())
+    seen: list[bool] = []
+    wrapped = handler._after_supervisor
+
+    def spy(pre: Any) -> None:
+        wrapped(pre)
+        seen.append(pre.supervisor.silent)
+
+    handler._after_supervisor = spy  # type: ignore[method-assign]
+    await handler.run(ctx)
+    await ctx.chat_logs.drain(5)
+    done = await db_session.get(Task, task.id, populate_existing=True)
+    assert done is not None and done.status == "succeeded"
+    # 流带着不出声的标记：网关不推它，流恢复不补发；看护器不发进度与超时通知。
+    (stream,) = await streams_of(db_session, task)
+    assert stream.reply_context.get("_silent") is True and seen == [True]
+    assert await raw(db_session, "SELECT count(*) FROM outbox WHERE bot_id = :id", id=bot.id) == 0
+    # 提示里不再让它「告诉所有者」：这一轮的话没有人看得到。
+    assert "告诉所有者" not in user_input(relay.requests[0])
+
+
+async def test_a_lost_voice_turn_is_not_announced_to_a_chat_that_does_not_exist(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """worker 没了：这一轮的会话键是 `<私聊>#job:cold-start`，不是一个能发消息的会话。"""
+    bot, _ = await assistant(db_session)
+    row = await settings.get(db_session, bot.id)
+    task = await voice.enqueue(db_session, bot, row, SAMPLES, 8)
+    assert task is not None
+    await tasks.start(db_session, task.id)
+    now = utcnow()
+    task.heartbeat_at = now - timedelta(seconds=61)
+    await db_session.commit()
+    lost = await reaper.reap_lost_tasks(
+        db_session, now, chat_logs_factory=make_session_factory(db_engine)
+    )
+    await db_session.commit()
+    assert lost == 1
+    assert await raw(db_session, "SELECT count(*) FROM outbox WHERE bot_id = :id", id=bot.id) == 0
 
 
 async def test_too_few_samples_cancel_the_turn(

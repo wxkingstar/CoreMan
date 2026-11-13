@@ -61,6 +61,7 @@
     - 主会话自己取消的、停用时取消的、`report = false` 的子任务不投回。
     - 下班编译改为平台派出的子任务（裁定 6 的后半）：`compiling.step` 调 `jobs.spawn(origin="system", report=False, attended=False)`，每天一次仍靠 `compiled_on`；子任务没有 `approval` 组，被拒与已执行的审批单的摘要与拒绝原因由平台写进交代（引用行，交代至多 8000 字，放不下丢最早的并注明张数）；正常做完时由子任务的收尾挂钩调 `compiling.settle` 把活动窗口推进到派出时刻。`AssistantCompileHandler` 与它的注册已删除，`COMPILE_KIND` 的名字保留（任务类型的取值约束、历史记录），不再入队：升级时队列里的旧任务由 worker 按未知类型结掉，那一天的活动留给下一次编译。不保留处理器一版的理由：它的文本生成与主会话里跑的做法都已改掉，留着就是两套编译并存，而丢一次编译的代价只是晚一天整理。
     - 本人定时任务工具对一切无人在场的轮次都不列、调用返回 `owner_turn_required`（2F 之后的修补已做），子任务轮次不另作处理。
+    - 冷启动的口吻样本那一轮同样不出声（审查后补）：`COLD_START_KIND` 进了 `kinds.SILENT_KINDS`。处理器层的那几处覆盖提到了基类 `worker.platform_turn.SilentTurnHandler`，`AssistantSubtaskHandler` 与 `AssistantColdStartHandler` 都继承它；3B 的不出声轮次直接继承这个基类，并把任务类型加进 `SILENT_KINDS`。
 
 ## 层间接口
 
@@ -118,7 +119,7 @@
 - 工具 `assistant_spawn`、`assistant_job_message`、`assistant_job_list`、`assistant_job_cancel`，注册在 `jobs` 组；`assistant_job_blocked` 注册在 `subtask` 组。
 - 结果以 `JOB_RESULT_KIND` 投回主会话（经 `platform_turns.enqueue`，载荷只有 `job_id`）；处理器 `AssistantJobResultHandler` 的文本是 `jobs.result_text(row)`。
 - `coreman/core/assistants/jobs.py` 对外：`spawn`、`message`、`list_`（`scope`：`active` / `blocked` / `recent`）、`get`、`cancel`、`cancel_all`、`complete`、`block`、`for_round`、`mark_running`、`round_text`、`result_text`、`report`、`bound_report`、`settle_report`、`reconcile`、`tick`、`active_counts`、`view(row, full=False)`、`JobError`。
-- 不出声：回复上下文标记 `_silent`、`TimeoutSupervisor.silent`、`kinds.SILENT_KINDS`（见裁定 19）。处理器 `AssistantSubtaskHandler` 在 `coreman/runtime/worker/assistant_jobs.py`。
+- 不出声：回复上下文标记 `_silent`、`TimeoutSupervisor.silent`、`kinds.SILENT_KINDS`（见裁定 19）；处理器层的覆盖在基类 `SilentTurnHandler`（`coreman/runtime/worker/platform_turn.py`）。处理器 `AssistantSubtaskHandler` 在 `coreman/runtime/worker/assistant_jobs.py`。
 
 ### 3B、3C、3D
 

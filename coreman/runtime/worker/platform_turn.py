@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy import select
@@ -14,9 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns, runtime
 from coreman.core.assistants.records import is_assistant
-from coreman.core.bus import tasks
+from coreman.core.bus import streams, tasks
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_speaker
+from coreman.core.chat.rate_limit import is_rate_limited
 from coreman.core.db.models import (
     AssistantSettings,
     Bot,
@@ -27,6 +29,7 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.timeutils import utcnow
+from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
 from coreman.runtime.worker.chat_handler import ChatTaskHandler, Intake
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound
@@ -191,3 +194,69 @@ class PlatformTurnHandler(ChatTaskHandler):
     def _needs_content(self) -> bool:
         """消息是平台写好的成品文本，没有媒体要下载。"""
         return False
+
+
+class SilentTurnHandler(PlatformTurnHandler):
+    """不出声的一轮：回复、进度、提问、额度告示、完成提醒都不往任何会话里发。
+
+    子任务、冷启动的口吻样本这样的轮次没有人在等，它们的会话键（`<私聊>#job:…`）也不是一个能
+    发消息的会话；结局由平台另行带回（子任务的结论投回主会话，冷启动做完时平台发一句确认）。
+    任务类型同时要登记在 `kinds.SILENT_KINDS`：收尸按它判断，不往会话里发「进程没了」。
+
+    不出声的几处都在这里：流的回复上下文带 `_silent`（网关不推、流恢复不补发）、看护器不推
+    进度与超时通知、不发长任务完成提醒、不自己推终稿、不开选择卡、触限时不发切换卡、会话忙时
+    不回提示。
+    """
+
+    def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
+        return {"reply_context": {**intake.inbound.reply_context, "_silent": True}}
+
+    def _after_supervisor(self, pre: Prepared) -> None:
+        pre.supervisor.silent = True
+
+    def _classify(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
+        verdict = super()._classify(ctx, pre, out)
+        if verdict.log_status == "ask_user":
+            # 没有人能答题：不开选择卡（它会挂在所有者的私聊上），题面留在终稿里。
+            return replace(verdict, log_status="success")
+        if verdict.log_status in ("success", "error") and is_rate_limited(verdict.final_text):
+            # 终稿是「额度用完」的告示，不是这一轮该有的结果：按失败收尾。
+            return Verdict("error", "failed", "rate_limited", "运行时额度用完", verdict.final_text)
+        return verdict
+
+    async def _postprocess_rate_limit(
+        self, ctx: TaskContext, pre: Prepared, verdict: Verdict
+    ) -> tuple[Verdict, dict[str, Any] | None]:
+        """不附额度表、不发切换卡：那张卡会发到所有者的私聊，并覆盖他在那里的待答状态。"""
+        return verdict, None
+
+    async def _notify_long_task(
+        self,
+        ctx: TaskContext,
+        pre: Prepared,
+        verdict: Verdict,
+        done: streams.Completion,
+        elapsed: int,
+    ) -> None:
+        """跑多久都不往私聊里发完成提醒：结局由平台另行带回。"""
+
+    async def _push_if_proactive(
+        self,
+        ctx: TaskContext,
+        pre: Prepared,
+        verdict: Verdict,
+        done: streams.Completion,
+        card: dict[str, Any] | None = None,
+        *,
+        plain: bool = False,
+    ) -> None:
+        """流被网关改成主动模式时也不自己推终稿。"""
+
+    async def _session_busy(self, ctx: TaskContext, intake: Intake) -> None:
+        """这个会话里上一轮停不下来：不回提示，只把这一轮记失败（子任务由对账收口）。"""
+        async with ctx.session_factory() as session:
+            await tasks.finish(
+                session, ctx.task.id, status="failed", error_code="session_busy", only_active=True
+            )
+            await session.commit()
+        ctx.log.warning("silent_turn_session_busy", kind=self.kind, attempts=ctx.task.attempts)

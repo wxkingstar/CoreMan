@@ -8,10 +8,12 @@ from coreman.core.assistants import voice
 from coreman.core.assistants.kinds import COLD_START_KIND
 from coreman.core.db.models import Bot
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.platform_turn import PlatformTurnHandler
+from coreman.runtime.worker.platform_turn import SilentTurnHandler
 
 
-class AssistantColdStartHandler(PlatformTurnHandler):
+class AssistantColdStartHandler(SilentTurnHandler):
+    """不出声：归纳口吻的这一轮没有人在等，它的话不发到私聊；冷启动做完时平台另发一句确认。"""
+
     kind = COLD_START_KIND
     # 不是主会话，本来就不参与每日换新；写明免得以后改了判断条件把它算进去。
     DAILY_SESSIONS = False
