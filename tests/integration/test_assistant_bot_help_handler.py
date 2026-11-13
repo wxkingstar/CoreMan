@@ -7,10 +7,11 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants.kinds import BOT_HELP_KIND, JOB_RESULT_KIND
-from coreman.core.bus import tasks
+from coreman.core.bus import streams, tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.db.models import ChatSession, Task
 from coreman.core.db.session import make_session_factory
@@ -186,3 +187,78 @@ async def test_the_reaper_stays_quiet_and_keeps_the_record_private(
     assert await raw(db_session, LOGGED, id=task.id) == (
         f"feishu|single|{BOT_HELP_KIND}|true|{owner.id}|assistant-help:{task.payload['job_id']}"
     )
+
+
+async def test_a_quota_notice_fails_the_round_without_a_switch_card(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await assistant(db_session)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target)
+    task = await help_task(db_session, row)
+    before = await _counts(db_session)
+    # 普通私聊这时会接上额度表、发「切过去吗」的卡片并写一条待答状态。
+    done, _ = await run_help(db_engine, db_session, task, "rate_limit")
+    assert (done.status, done.error_code) == ("failed", "rate_limited")
+    assert await _counts(db_session) == before
+    failed = await reloaded(db_session, row)
+    assert (failed.status, failed.error_code, failed.result_enc) == ("failed", "rate_limited", None)
+    assert len(await tasks_of(db_session, bot, JOB_RESULT_KIND)) == 1
+
+
+async def test_a_round_lost_after_opening_is_closed_quietly(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """开了流、写了半截之后 worker 失联：流补上终态，但不往任何会话里补发，记录仍是私有的。"""
+    bot, owner = await assistant(db_session)
+    target = await target_bot(db_session)
+    row = await asked(db_session, bot, target)
+    task = await help_task(db_session, row)
+    await tasks.start(db_session, task.id)
+    for mode in ("stream", "proactive"):
+        if mode == "proactive":
+            # 第二种：流已不在推（主动模式），普通轮次这时改走出站箱。
+            other = await asked(db_session, bot, target, question="再查一件")
+            task = await help_task(db_session, other)
+            await tasks.start(db_session, task.id)
+        await streams.create(
+            db_session,
+            task_id=task.id,
+            bot_id=target.id,
+            platform="feishu",
+            stream_id=f"s-help-{mode}",
+            reply_context={"chat_id": task.session_key, "chat_type": "single", "_silent": True},
+            lease_generation=1,
+            running_since=datetime.now(UTC),
+            delivery_mode=mode,
+        )
+        await streams.update(db_session, task.id, pending_text="查到一半", bot_id=target.id)
+        lost = await db_session.get(Task, task.id, populate_existing=True)
+        assert lost is not None
+        lost.heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+        await db_session.commit()
+        reached = await rows_in(db_session, "user_reached")
+        now = datetime.now(UTC)
+        assert (
+            await reaper.reap_lost_tasks(
+                db_session, now, chat_logs_factory=make_session_factory(db_engine)
+            )
+            == 1
+        )
+        await db_session.commit()
+        (stream,) = await streams_of(db_session, task)
+        assert stream.is_complete
+        assert await rows_in(db_session, "outbox") == 0
+        assert await rows_in(db_session, "user_reached") == reached
+        assert await raw(db_session, LOGGED, id=task.id) == (
+            f"feishu|single|{BOT_HELP_KIND}|true|{owner.id}|{task.session_key}"
+        )
+    # 流恢复也不补发：任务早已结束、流没收尾的那种。
+    await db_session.execute(
+        text("UPDATE task_streams SET is_complete = false, finish_pushed_at = now()")
+    )
+    await db_session.execute(text("UPDATE tasks SET finished_at = now() - interval '5 minutes'"))
+    await db_session.commit()
+    assert await reaper.recover_terminal_streams(db_session, datetime.now(UTC)) == 2
+    await db_session.commit()
+    assert await rows_in(db_session, "outbox") == 0
