@@ -116,6 +116,18 @@
     - `jobs.report` 入不了队时设 `report_after`：60 秒起每次加倍、封顶 15 分钟；上一次的等待由 `report_after − updated_at` 推出，不加列。
     - 管理命令的会话（`deps.via_cli`）读调度公共员工那一轮时按非所有者处理：对话记录列表与详情带 `content_withheld`、按正文的搜索与统计不含它；开发页任务详情只给元数据（不给流，任务的 `error_message` 置空，带 `content_withheld`）。在所有者启用着的助理名下记一条 `actor_kind = 'system'` 的 `cli.chatlogs` / `cli.tasks`，对象 `dispatch=N`（`access_log.record_dispatch_refused`；所有者已经没有助理时没有可记的行）。节点会话查看页没有动。
 
+27. **第三轮审查修补**（独立审查之后；每条一个提交，不需要迁移）：
+    - 节点会话查看（`runtime_nodes._authorize_session_content`，会话页与事件流共用）不把管理命令的会话当本人：`mine` 加上 `not via_cli`，只剩角色那条路。它以所有者身份取调度公共员工那一轮时被拒，并在所有者启用着的助理名下记 `actor_kind = 'system'` 的 `cli.session`，对象 `dispatch=N`（`access_log.record_dispatch_count`，`ACTIONS` 增至十五个）。裁定 26 末尾「节点会话查看页没有动」到此为止。
+    - 个人助理自己的会话在这个入口对谁都不开（对话记录的 `bot_id` 或旧链接凭据里的 `bot_id` 是助理就回 404）：它跑在沙箱里、转录每轮清出节点。相应地 `worker.chat.opening.session_link` 对助理返回空串，回复里不带入口。
+    - 事件流每次放行记审计 `runtime.session_events`（字段与 `runtime.session_view` 相同）：原先只有会话页那条路由有审计，管理命令 `runtimes session` 直接取事件流不留痕。
+    - 盯消息：顺序没变的那一段因为时间或次数用完（含逐个探到 `CHAIN_MAX`）没探完时，游标顶层记下没探到的会话（`p`）与这一轮的年龄截止点（`a`），没有游标条目的当场记下回看起点；之后各轮接着这一段探、截止点取较早者，探到没有新消息的会话或探完才清；这一段里经别的路读过的会话从 `p` 里去掉。只记顶层截止点不够：下一轮顺序不变，从头探会停在上一轮读过的会话上，没探到的那一段根本读不到。代价：这一段没探完期间，排在它前面、名次没变的会话里新来的消息要晚几轮才读到。
+    - 盯消息：回看起点（`_floor`）与年龄截止点（`_oldest`、排队会话的 `a`）都不早于「现在 − `MAX_LOOKBACK`」（7 天）。停几天全补，停两三周只交回最近 7 天。
+    - `approvals.checks.Message` 多了 `thread_id`。主线视图里「同一个话题」只认它：与锚点 `thread_id` 相同，或自己在话题里且根是锚点。只有 `root_id` 相同的普通引用回复链不算（改裁定 26 的「与锚点同一个话题根」）；直接回复锚点、@ 所有者、锚点发送人自己又发的三条不变。依据的是对飞书字段的理解，记在 2D 计划「需真机确认」第 10 项。
+    - 导入：front matter 的取值转不成字符串（十六进制写的超大整数）归为这一个文件的 `invalid_front_matter`，与其它坏头一样只跳过这个文件（预览 200、原因在 `skip` 里），不再是 500。
+    - 目标员工那一轮的任务载荷多了 `unattended`，开轮前的 `dispatch.authorize` 带 `attended`；被拒时任务按 `owner_turn_required` 取消、求助记失败并投回（改裁定 24 的「开轮前的复查不带这道拦截」）。升级时已在队列里的旧任务没有这个键，按所有者在场处理。
+    - `bot_ambiguous` 的候选先过 `dispatch._eligible`（与 `candidates` 同一组条件，含 `attended`）；筛完只剩一位仍报歧义，一位不剩时报 `owner_turn_required`（只因不在场才调不动）或 `bot_not_available`，不带候选。
+    - 压缩包里的系统杂项收窄（改裁定 23 的相应一条）：`__MACOSX` 只认包根下的目录；`._` 前缀的文件只在同目录里有去掉前缀的本体时才忽略，否则按普通文件处理。仍会丢的两种：路径第一段正好是 `__MACOSX` 的知识页；与同目录的 `a` 页并存的 `._a` 页。
+
 ## 层间接口
 
 各层计划必须原样使用这些名字；需要改名时先改本文。
@@ -178,7 +190,7 @@
 
 - 一次求助是一行 `assistant_jobs`：`kind = 'bot_help'`、`origin = 'assistant'`、`target_bot_id`、`session_key = "assistant-help:<id>"`、`origin_session_key` 是主会话键、`rounds = 1`；`title_enc` 是「请「员工名」协助」，`brief_enc` 是问题原文，`result_enc` 是答复，`blocked_enc` 是对方需要的东西（多条用「；」连接）。状态与子任务相同：`queued` / `running` / `done` / `blocked` / `failed` / `cancelled`；失败代码有 `bot_help_not_allowed`、`bot_help_announced`、`relay_unavailable`、`session_busy`、`empty_answer`、`rate_limited`、`job_timeout`、`turn_lost` 以及任务自己的错误代码。
 - `coreman/core/assistants/dispatch.py` 对外：`resolve(session, bot, ref)`、`authorize(session, bot, target_id)`、`candidates(session, bot)`、`listing(rows)`、`clean_question(value)`、`owner_of(session, bot)`、`send(session, bot, target, question, *, allow_write, attended, approved=False, job_id=None, now=None)`、`for_round(session, task)`、`round_text(row, owner_name)`、`mark_running(session, task)`、`finish(session, task, *, ok, answer=None, error_code=None)`、`fail(session, task, code)`、`read_answer`、`blocked_text`、`result_text(session, row)`、`live_rounds(session, bot_id)`、`session_key_for(job_id)`、`DispatchError`、`Answer`、`Round`、`MAX_QUESTION`、`TOOL`、`AUDIT_ACTION`、`STATUS_WORDS`、`FAILURE_NOTES`。
-- 工具 `assistant_bot_list`（返回 `bots: [{bot, name, description}]` 与 `limits`）、`assistant_ask_bot`（只读返回 `{job: jobs.view(row), bot, name, hint}`；`allow_write=true` 返回审批提交的结果加 `bot`），注册在 `jobs` 组；目标侧处理器 `AssistantBotHelpHandler`，任务类型 `BOT_HELP_KIND`，载荷 `{job_id, round, allow_write, bot_key, platform_user_id}`。
+- 工具 `assistant_bot_list`（返回 `bots: [{bot, name, description}]` 与 `limits`）、`assistant_ask_bot`（只读返回 `{job: jobs.view(row), bot, name, hint}`；`allow_write=true` 返回审批提交的结果加 `bot`），注册在 `jobs` 组；目标侧处理器 `AssistantBotHelpHandler`，任务类型 `BOT_HELP_KIND`，载荷 `{job_id, round, allow_write, unattended, bot_key, platform_user_id}`。
 - 审计：`audit_logs.action = 'assistant.dispatch'`，`actor_id` / `actor_login` 是所有者，`target_type = 'bot'`，`target_id` 是目标员工，`diff = {assistant_bot_id, job_id, unattended, allow_write, approved, question_chars}`；每次派出一条（等待审批时不写）。
 - 审批：`approvals/dispatching.py` 的 `submit(session, scope, *, target, question, cfg)` / `run(factory, approval_id, cfg)`；`tower.DISPATCH_TARGET = "assistant-dispatch"`，`tower.config(settings, target)`，`tower.Config.target`。审批单 `tool = 'assistant_ask_bot'`、`channel = 'other'`，`args_enc.calls[0].arguments = {bot_id, bot, name, question}`，`args_enc.abstract` 是「调度员工 → 员工名」。
 - 3C 的「正在跑」里调度与子任务同表同接口，用 `view(row)["kind"]` 区分；等待审批的调度在「等你出手」的待批审批单里（`tool = 'assistant_ask_bot'`），还没有 `assistant_jobs` 行。目标员工的名字由 3C 按 `target_bot_id` 另查（`view` 里的 `title` 带着派出当时的名字）。所有者在页面上取消一次调度用 `jobs.cancel(session, bot_id, job_id, code="cancelled_by_owner", report=True)`，与子任务相同。管理台对话记录列表要认 `content_withheld`。
