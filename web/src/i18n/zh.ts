@@ -679,7 +679,7 @@ export default {
       contact_sync: '通讯录同步',
       login: '登录',
       notify: '通知',
-      callback: '回调',
+      callback: '回调', assistant: '个人助理',
     },
     corpId: '企业 ID',
     appId: '应用 ID',

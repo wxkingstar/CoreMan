@@ -680,7 +680,7 @@ export default {
       contact_sync: 'アドレス帳同期',
       login: 'ログイン',
       notify: '通知',
-      callback: 'コールバック',
+      callback: 'コールバック', assistant: 'パーソナルアシスタント',
     },
     corpId: '企業 ID',
     appId: 'アプリ ID',

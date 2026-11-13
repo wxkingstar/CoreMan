@@ -12,7 +12,7 @@ import { toPlatformAppBody } from '@/utils/platformApps'
 const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
 
-const CAPABILITIES = ['contact_sync', 'login', 'notify', 'callback'] as const
+const CAPABILITIES = ['contact_sync', 'login', 'notify', 'callback', 'assistant'] as const
 
 function emptyForm(): PlatformAppIn {
   return {
