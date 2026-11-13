@@ -5,13 +5,14 @@
   （tests/unit/test_assistant_platform_turn_ledger.py 扫全库守着这一条）；
 - 身份来自开通时记下的 `assistant_settings`，是飞书给的操作人，不来自任何请求内容；
 - 每次用到都重新核对：记录还是启用中的助理、任务归所有者、会话是这位助理的、所有者的账号、
-  通讯录身份与授权行都没变（Task 4 的 `scope_for`）。
+  通讯录身份与授权行都没变（`scope_for`）。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import settings as assistant_settings
@@ -19,7 +20,16 @@ from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, PLATFORM_TURN_KI
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.db.models import AssistantSettings, Bot, Task
+from coreman.core.db.models import (
+    AssistantSettings,
+    Bot,
+    FeishuPersonalGrant,
+    PlatformApp,
+    Task,
+    User,
+    UserIdentity,
+)
+from coreman.core.feishu_personal.policy import Scope
 from coreman.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -101,4 +111,74 @@ async def enqueue(
                 "platform_user_id": row.platform_user_id,
             },
         ),
+    )
+
+
+async def scope_for(session: AsyncSession, bot: Bot, task: Task) -> Scope:
+    """平台来源的一轮以所有者身份用个人工具的核验结果；不来自任何调用方给的身份。
+
+    调用方（`policy.task_scope`）已核对任务仍在运行、没被取消，并在拿到结果后核对能力令牌里的
+    人就是所有者。这里核对其余的：任务是平台来源的、归这位助理的所有者、会话是这位助理的；
+    记录是启用中的助理；所有者账号可用，通讯录里的飞书身份还是开通时记下的那个；授权行（有的
+    话）也是这个身份。授权行与记下的身份对不上时在这里拒绝，不交给 `service._locked`：它遇到
+    不一致会清空令牌，一条写错的设置不该把所有者的授权清掉。
+
+    Raises:
+        ValueError: 任何一项对不上
+    """
+    if (
+        not is_platform(task)
+        or task.bot_id != bot.id
+        or bot.platform != "feishu"
+        or not _runnable(bot)
+        or task.user_id != bot.owner_id
+    ):
+        raise ValueError("platform_turn_required")
+    assert bot.owner_id is not None
+    row = await session.get(AssistantSettings, bot.id, populate_existing=True)
+    if (
+        row is None
+        or not assistant_settings.identified(row)
+        or not owns_session(row, task.session_key)
+    ):
+        raise ValueError("platform_turn_required")
+    owner = await session.get(User, bot.owner_id, populate_existing=True)
+    if owner is None or owner.status != "active" or owner.source == "bootstrap":
+        raise ValueError("personal_permission_revoked")
+    bound = await session.scalar(
+        select(UserIdentity.user_id)
+        .where(
+            UserIdentity.user_id == owner.id,
+            UserIdentity.platform == "feishu",
+            UserIdentity.platform_user_id == row.platform_user_id,
+        )
+        .limit(1)
+    )
+    if bound is None:
+        raise ValueError("personal_grant_required")
+    grant = await session.get(FeishuPersonalGrant, (bot.id, owner.id), populate_existing=True)
+    if grant is not None and (grant.platform_user_id, grant.open_id, grant.tenant_key) != (
+        row.platform_user_id,
+        row.open_id,
+        row.tenant_key,
+    ):
+        raise ValueError("personal_grant_required")
+    if grant is not None:
+        app_id = grant.app_id
+    else:
+        app = await session.get(PlatformApp, bot.platform_app_id) if bot.platform_app_id else None
+        if app is None or not app.app_id:
+            raise ValueError("personal_grant_required")
+        app_id = app.app_id
+    return Scope(
+        task,
+        bot,
+        owner.id,
+        row.tenant_key,
+        app_id,
+        row.open_id,
+        row.platform_user_id,
+        row.chat_id,
+        None,
+        True,
     )
