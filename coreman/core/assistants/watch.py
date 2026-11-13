@@ -81,6 +81,9 @@ CHAT_STRIKES = 3
 PARK = timedelta(hours=1)
 # 刷新令牌约 7 天不用就失效：不轮询的助理每这么久强制刷新一次。
 KEEPALIVE = timedelta(hours=24)
+# 用量流水（`feishu_rate_usage`）多久清一次旧行；上次清理的时刻（进程内，单调时钟）。
+PURGE_SECONDS = 60.0
+_purged = 0.0
 
 
 @dataclass
@@ -565,9 +568,14 @@ async def tick(
     factory: async_sessionmaker[AsyncSession], cipher: Cipher, now: datetime
 ) -> dict[str, int]:
     """登记缺行的助理，认领到期的各轮询一次；返回这一次的计数。"""
+    global _purged
     now = aware_utc(now)
     async with factory() as session:
         enrolled = await _enroll(session, now)
+        if time.monotonic() - _purged >= PURGE_SECONDS:
+            # 用量只看最近一分钟：更早的流水没用了，顺手清掉。
+            _purged = time.monotonic()
+            await ratelimit.purge(session, now)
         due = list(
             await session.scalars(
                 select(AssistantWatch.bot_id)

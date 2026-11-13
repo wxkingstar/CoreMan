@@ -159,3 +159,26 @@ async def test_a_failed_read_backs_off_and_keeps_what_was_already_read(
     assert counts["assistant_watch_polled"] == 1 and counts["assistant_watch_items"] == 1
     assert [item.message_id for item in await inbox_rows(db_session, who)] == ["om_1", "om_2"]
     assert (await watch_row(db_session, who)).failures == 0
+
+
+async def test_the_loop_clears_old_usage_rows_about_once_a_minute(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import func, select
+
+    from coreman.core.db.models import FeishuRateUsage
+
+    monkeypatch.setattr(watch, "_purged", 0.0)
+    now = base_time()
+    budget = ratelimit.Budget(APP_ID)
+    await budget.record(db_session, "chats", at=now - timedelta(minutes=16))
+    await budget.record(db_session, "chats", at=now - timedelta(minutes=1))
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    await tick(factory, now)
+    assert await db_session.scalar(select(func.count()).select_from(FeishuRateUsage)) == 1
+    # 刚清过：一分钟内不再清。
+    await budget.record(db_session, "chats", at=now - timedelta(minutes=20))
+    await db_session.commit()
+    await tick(factory, now)
+    assert await db_session.scalar(select(func.count()).select_from(FeishuRateUsage)) == 2
