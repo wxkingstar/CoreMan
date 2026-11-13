@@ -208,3 +208,48 @@ async def test_tick_commits_and_the_scheduler_calls_it(
         svc.request_stop("test")
         await asyncio.wait_for(job, 10)
     assert len(calls) >= 2 and all(at.tzinfo is not None for at in calls)
+
+
+async def test_a_result_that_cannot_be_queued_is_retried_with_a_growing_wait(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import platform_turns
+
+    bot, _ = await assistant(db_session)
+    row = await spawned(db_session, bot)
+    assert row.last_task_id is not None
+    await tasks.finish(db_session, row.last_task_id, status="succeeded")
+
+    async def refused(*_args: object, **_kw: object) -> None:
+        return None
+
+    # 入不了队（这位助理现在跑不了平台来源的轮次）：不能每 5 秒重试一次、把序号一直加上去。
+    monkeypatch.setattr(platform_turns, "enqueue", refused)
+    now = utcnow()
+    done = await jobs.complete(
+        db_session, bot, row.id, task_id=row.last_task_id, ok=True, result="报价 3 万", now=now
+    )
+    await db_session.commit()
+    assert done is not None and done.result_task_id is None
+    assert (done.report_seq, done.report_after) == (1, now + timedelta(seconds=60))
+    # 没到时刻的对账什么都不做。
+    for seconds in (5, 30, 59):
+        await jobs.reconcile(db_session, now + timedelta(seconds=seconds))
+        await db_session.commit()
+    assert (await reloaded(db_session, row)).report_seq == 1
+    # 之后每次等待加倍，封顶 15 分钟。
+    at, waits = now, []
+    for _ in range(6):
+        at = (await reloaded(db_session, row)).report_after + timedelta(seconds=1)
+        await jobs.reconcile(db_session, at)
+        await db_session.commit()
+        waits.append(round(((await reloaded(db_session, row)).report_after - at).total_seconds()))
+    assert waits == [120, 240, 480, 900, 900, 900]
+    assert (await reloaded(db_session, row)).report_seq == 7
+    # 能入队了就照常投回。
+    monkeypatch.undo()
+    at = (await reloaded(db_session, row)).report_after + timedelta(seconds=1)
+    counts = await jobs.reconcile(db_session, at)
+    await db_session.commit()
+    assert counts["assistant_job_results"] == 1
+    assert (await reloaded(db_session, row)).result_task_id is not None

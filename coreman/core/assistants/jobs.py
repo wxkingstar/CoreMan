@@ -70,6 +70,9 @@ FOLLOW_UP = (
 RETRY_AFTER_RELEASE = timedelta(seconds=60)
 RETRY_AFTER_FAILURE = timedelta(minutes=5)
 MAX_REPORT_FAILURES = 3
+# 结果任务入不了队（这位助理现在跑不了平台来源的轮次）时的重试间隔：从这么久起加倍，封顶。
+RETRY_ENQUEUE_MIN = timedelta(seconds=60)
+RETRY_ENQUEUE_MAX = timedelta(minutes=15)
 # 结果轮次以这些代码失败不算真失败：只是没轮到。
 QUIET_CODES = frozenset(
     {"assistant_paused", "platform_turn_yielded", "relay_unavailable", "session_busy"}
@@ -591,6 +594,7 @@ async def report(session: AsyncSession, bot: Bot, row: AssistantJob, now: dateti
 
     不该投（`report` 为假）、已投到、还有一轮在途、没到重投的时刻、内容读不出、助理现在跑不了
     轮次时什么都不做。每次投回换一个幂等键（`report_seq`）：上一轮被取消后同一个键入不了队。
+    入不了队时记下重投的时刻（`report_after`，60 秒起每次加倍、封顶 15 分钟）。
     调用方持有这一行的锁并提交。
     """
     if (
@@ -606,6 +610,8 @@ async def report(session: AsyncSession, bot: Bot, row: AssistantJob, now: dateti
     if await runtime.turn_blocker(session, bot) is not None:
         # 暂停期间不入队：入了也只会失败。恢复后的下一次对账再投。
         return None
+    # 上一次定下的等待（入不了队时用来加倍）：重投的时刻减去定下它的时刻。
+    waited = row.report_after - row.updated_at if row.report_after is not None else None
     row.report_seq += 1
     task = await platform_turns.enqueue(
         session,
@@ -617,6 +623,12 @@ async def report(session: AsyncSession, bot: Bot, row: AssistantJob, now: dateti
     )
     if task is not None:
         row.result_task_id = task.id
+    else:
+        # 入不了队：不设重试时刻的话对账每 5 秒来一次，白白把序号一直加上去。
+        wait = RETRY_ENQUEUE_MIN
+        if waited is not None and waited >= RETRY_ENQUEUE_MIN:
+            wait = min(RETRY_ENQUEUE_MAX, waited * 2)
+        row.report_after = now + wait
     row.updated_at = now
     await session.flush()
     return task
