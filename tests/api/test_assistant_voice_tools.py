@@ -31,11 +31,14 @@ async def test_a_cold_start_turn_lists_one_tool_and_runs_nothing_else(
         ("followup_list", {"scope": "open"}),
         ("approval_list", {}),
         ("assistant_settings_get", {}),
-        (next(iter(schedules.TOOLS)), {}),
     ]
     for name, arguments in refused:
         out = await call(client, auth, name, arguments)
         assert out["error"] == INVALID, name
+    # 本人定时任务工具在一切无人在场的轮次里都拒绝，这一轮也不例外。
+    for name in schedules.TOOLS:
+        out = await call(client, auth, name, {})
+        assert out["error"] == "owner_turn_required", name
     saved = await call(
         client, auth, "assistant_voice_save", {"body": "说话简短，常用「收到」开头。"}
     )

@@ -106,7 +106,10 @@ def groups_for(kind: str) -> tuple[str, ...]:
 
 
 def bare(groups: Iterable[str]) -> bool:
-    """这一轮只带登记在它那几组里的工具：没有个人工具、授权工具与本人定时任务工具。"""
+    """这一轮只带登记在它那几组里的工具：没有个人工具与授权工具。
+
+    本人定时任务工具不归这里管：MCP 入口对一切无人在场的轮次都不列、不受理。
+    """
     return VOICE_GROUP in frozenset(groups)
 
 

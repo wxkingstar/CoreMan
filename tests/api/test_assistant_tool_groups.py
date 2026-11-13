@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from coreman.core import personal_schedules as schedules
 from coreman.core.assistants import platform_turns, tools
 from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, HANDOVER_KIND, SUBTASK_KIND
 from coreman.core.bus import tasks
@@ -207,6 +208,57 @@ async def test_an_owner_turn_keeps_all_three_authorization_tools(
         "feishu_authorization_status",
         "feishu_revoke_authorization",
     } <= set(listing)
+
+
+async def result_turn(session: Any, app: Any) -> tuple[Any, Any, Any]:
+    """审批结果回合：带着提交那一轮的入站事件，但所有者此刻不在场。"""
+    bot, user, task = await owner_turn(session, app, assistant=True)
+    await tasks.finish(session, task.id, status="succeeded")
+    queued = await tasks.enqueue(
+        session,
+        NewTask(
+            bot_id=bot.id,
+            kind=APPROVAL_RESULT_KIND,
+            user_id=user.id,
+            session_key=task.session_key,
+            inbound_event_id=task.inbound_event_id,
+            dedupe_key="assistant-approval:demo:result:executed",
+            payload={"serialize_session": True},
+        ),
+    )
+    await session.commit()
+    assert queued is not None
+    turn = await claim(session)
+    assert turn.id == queued.id and turn.inbound_event_id is not None
+    return bot, user, turn
+
+
+@pytest.mark.parametrize("origin", ["platform", "result"])
+async def test_an_unattended_turn_has_no_schedule_tools(
+    client: httpx.AsyncClient, app: Any, db_session: Any, origin: str
+) -> None:
+    """无人在场的轮次输入可能来自别人：不能替所有者建、改、删本人定时任务，也不列出来。"""
+    if origin == "platform":
+        _, user, turn = await platform_turn(db_session, app, HANDOVER_KIND)
+    else:
+        _, user, turn = await result_turn(db_session, app)
+    listing = await listed(client, app, turn, user)
+    assert not set(schedules.TOOLS) & set(listing)
+    assert "feishu_chat_history" in listing
+    auth = await headers(app, turn, user)
+    for name in schedules.TOOLS:
+        out = await call(client, auth, name, {})
+        assert out["error"] == "owner_turn_required" and "private chat" in out["hint"], name
+
+
+async def test_an_owner_turn_keeps_the_schedule_tools(
+    client: httpx.AsyncClient, app: Any, db_session: Any
+) -> None:
+    _, user, task = await owner_turn(db_session, app, assistant=True)
+    assert set(schedules.TOOLS) <= set(await listed(client, app, task, user))
+    auth = await headers(app, task, user)
+    out = await call(client, auth, "schedule_list", {})
+    assert out.get("error") != "owner_turn_required"
 
 
 async def test_a_platform_turn_is_fenced_by_its_session(

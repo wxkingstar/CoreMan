@@ -27,6 +27,12 @@ from coreman.core.feishu_personal import files, policy, service, tools
 router = APIRouter(tags=["feishu-personal"])
 # Mail bodies, sheet rows and document paragraphs arrive as tool arguments.
 MAX_BODY = 262_144
+# 无人在场的轮次调本人定时任务工具时的答复（代码与授权工具、设置工具在这类轮次里的相同）。
+SCHEDULE_OWNER_TURN = {
+    "error": "owner_turn_required",
+    "hint": "Nobody is present in this turn. Scheduled tasks are created, changed or listed only"
+    " when the owner asks for it in the private chat; tell the owner what you would schedule.",
+}
 
 
 @router.post("/api/runtime/feishu-personal/mcp")
@@ -71,8 +77,6 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     assistant = is_assistant(scope.bot)
     # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge）。
     groups = assistant_tools.groups_for(scope.task.kind) if assistant else ()
-    # 只带本组工具的轮次（冷启动的口吻样本）：定时任务工具也不列、不受理。
-    bare = assistant and assistant_tools.bare(groups)
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -102,7 +106,9 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         if assistant:
             # 个人助理：写类工具改为提交审批（没有 approval 组的轮次不列出），另加助理自有的工具。
             definitions = assistant_tools.definitions(definitions, groups=groups)
-        if not scope.scheduled and not bare:
+        # 本人定时任务只在所有者亲自发起的轮次里有：无人在场的轮次（交回、审批结果、下班整理、
+        # 冷启动的口吻样本）输入可能来自别人，不能替所有者建定时任务，所以不列出。
+        if not scope.scheduled and not scope.unattended:
             definitions += schedules.definitions()
         result = {} if method == "ping" else {"tools": definitions}
     elif method == "tools/call":
@@ -114,8 +120,12 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             return mcp_rpc.error(rid, -32602, "Invalid params")
         name, arguments = params["name"], params.get("arguments", {})
         try:
-            if name in schedules.TOOLS and not bare:
-                value = await schedules.dispatch(session, scope, name, arguments)
+            if name in schedules.TOOLS:
+                value = (
+                    dict(SCHEDULE_OWNER_TURN)
+                    if scope.unattended
+                    else await schedules.dispatch(session, scope, name, arguments)
+                )
             elif assistant and assistant_tools.group_of(name) in ("knowledge", "voice"):
                 # 知识库、待跟进、设置与口吻页都在平台自己的库里、不调飞书：授权换代之后同一轮里
                 # 照常可用，所以排在授权代数判断之前。这一轮有没有这个组仍由 dispatch 按 groups
