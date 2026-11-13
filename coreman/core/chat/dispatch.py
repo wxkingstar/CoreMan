@@ -448,6 +448,7 @@ async def hand_off(
     event_id: int | None,
     requester_pid: str,
     note: str = "",
+    dedupe_key: str | None = None,
 ) -> None:
     """把任务交给执行员工：排一轮它的对话，回复挂在 `event_id` 那条群消息上。
 
@@ -468,7 +469,7 @@ async def hand_off(
             user_id=row.requester_user_id,
             inbound_event_id=event_id,
             session_key=work_session_key(row.code),
-            dedupe_key=f"work:{row.id}:{event_id}",
+            dedupe_key=dedupe_key or f"work:{row.id}:{event_id}",
             payload={
                 "work_task_id": row.id,
                 "work_note": note,
