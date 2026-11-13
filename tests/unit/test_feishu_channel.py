@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -49,8 +50,6 @@ async def test_ack_timeout_cancels_uncommitted_work():
 
 
 async def test_actual_sdk_dispatcher_preserves_header_and_waits_for_handler():
-    import json
-
     from tests.unit.test_feishu_inbound import RAW
 
     accepted = []
@@ -83,6 +82,24 @@ async def test_card_toasts_report_what_happened_to_the_click():
         ("info", "✓"),
         ("info", "✓"),
     ]
+
+
+async def test_accepted_offer_card_is_replaced_by_one_without_a_button():
+    results = iter(["provision_started", "provision_expired", "queued"])
+
+    async def accept(raw):
+        return next(results)
+
+    channel = DurableChannel(accept=accept, app_id="cli_test", app_secret="synthetic")
+    started, expired, queued = [
+        await asyncio.to_thread(channel._on_p2_card_action_trigger, {}) for _ in range(3)
+    ]
+    assert started.toast.content == "正在开通，好了会在这里告诉你"
+    assert started.card.type == "raw"
+    assert started.card.data["header"]["title"]["content"] == "开通个人助理"
+    assert "button" not in json.dumps(started.card.data)
+    # 失效与其他卡片的点击不换卡片。
+    assert expired.card is None and queued.card is None
 
 
 async def test_busy_card_toasts_name_the_button_that_was_clicked():

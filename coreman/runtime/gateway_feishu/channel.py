@@ -22,6 +22,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTr
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 from lark_oapi.ws import client as ws_client
 
+from coreman.core.assistants import provisioning
 from coreman.core.logging import get_logger
 
 # 长连接断了飞书不会重投卡片回调，断连到重连之间的点击直接报「目标回调服务当前未在线」，
@@ -83,6 +84,14 @@ def card_toast(accepted: object) -> dict[str, str]:
     """回调应答里的 toast：按 accept 报告的点击结果选文案。"""
     toast = TOASTS.get(accepted) if isinstance(accepted, str) else None
     return dict(toast or DEFAULT_TOAST)
+
+
+def card_response(accepted: object) -> dict[str, Any]:
+    """回调应答：toast 之外，开通卡片点过后当场换成没有按钮的卡片（已在开通中的再点也一样）。"""
+    response: dict[str, Any] = {"toast": card_toast(accepted)}
+    if accepted == "provision_started":
+        response["card"] = {"type": "raw", "data": provisioning.accepted_card()}
+    return response
 
 
 class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.typed marker
@@ -169,7 +178,7 @@ class DurableChannel(FeishuChannel):  # type: ignore[misc]  # SDK has no py.type
     def _on_p2_card_action_trigger(self, data: Any) -> P2CardActionTriggerResponse:
         # 3 秒应答窗口：这里只落库，改卡片（置灰已点的按钮）交给出站循环。
         accepted = self._persist_before_ack(data)
-        return P2CardActionTriggerResponse({"toast": card_toast(accepted)})
+        return P2CardActionTriggerResponse(card_response(accepted))
 
     def _on_p2_bot_added(self, data: Any) -> None:
         self._persist_before_ack(data)

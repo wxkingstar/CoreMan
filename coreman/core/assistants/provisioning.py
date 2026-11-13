@@ -33,6 +33,7 @@ from coreman.core.assistants.records import new_assistant_bot
 from coreman.core.bots.secrets import CREDENTIALS_AAD, encrypt_json
 from coreman.core.bots.workspace import reserve_workspace
 from coreman.core.bots.workspace_transfer import instruction_content
+from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantKey,
@@ -78,14 +79,25 @@ FAILURES = {
 GENERIC_FAILURE = "个人助理这次没能开通，已经收拾干净；稍后再给我发条消息可以重新开通。"
 
 
+def approval_system(*, markdown: bool = False, link: bool = True) -> str:
+    """审批系统在文案里的叫法：部署配了名称就用名称，配了网页入口就带上链接。"""
+    settings = get_settings()
+    name = (settings.tower_display_name or "").strip() or "审批系统"
+    url = (settings.tower_web_url or "").strip()
+    if not link or not url.startswith(("https://", "http://")):
+        return name
+    return f"[{name}]({url})" if markdown else f"{name}（{url}）"
+
+
 def offer_card(token: str) -> dict[str, Any]:
     """开通卡片：说清楚它是什么、数据放在哪、要先做什么；按钮的值只有一个随机令牌。"""
+    name = approval_system(link=False)
     text = (
         "这是你的个人助理：以你的飞书身份帮你看消息、起草回复、处理文档与审批。\n"
         "- 只在这个私聊里工作，对话与个人数据加密保存，只有你本人看得到。\n"
         "- 对外有影响的操作（发消息、改文档、处理审批……）都先提交审批，"
-        "由你本人在审批系统里批准后才执行；审批单正文保存在审批系统里。\n"
-        "- 开通前请先登录一次审批系统，否则第一次提交审批时会提示没有账号。\n"
+        f"由你本人在{approval_system(markdown=True)}里批准后才执行；审批单正文保存在{name}里。\n"
+        f"- 开通前请先登录一次{name}，否则第一次提交审批时会提示没有账号。\n"
         "- 开通后还要授权一次飞书；随时发「停用助理」可以停用，停用后个人数据不可恢复。"
     )
     return {
@@ -105,6 +117,25 @@ def offer_card(token: str) -> dict[str, Any]:
                         {"type": "callback", "value": {"assistant": "provision", "token": token}}
                     ],
                 },
+            ]
+        },
+    }
+
+
+def accepted_card() -> dict[str, Any]:
+    """点了「开通」之后换上的卡片：没有按钮，免得再点。"""
+    return {
+        "schema": "2.0",
+        "header": {
+            "template": "turquoise",
+            "title": {"tag": "plain_text", "content": "开通个人助理"},
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "正在开通，好了会在这里告诉你；接下来还要授权一次飞书。",
+                }
             ]
         },
     }
@@ -135,11 +166,21 @@ def grant_card(url: str) -> dict[str, Any]:
     }
 
 
+def granted_card() -> dict[str, Any]:
+    """授权完成后换上的卡片：没有按钮。"""
+    return {
+        "schema": "2.0",
+        "header": {"template": "turquoise", "title": {"tag": "plain_text", "content": "飞书授权"}},
+        "body": {"elements": [{"tag": "markdown", "content": "已完成授权。"}]},
+    }
+
+
 def welcome_text() -> str:
+    name = approval_system(link=False)
     return (
         "个人助理开通好了，直接在这里说要做的事就行。\n"
-        "对外有影响的操作会先提交审批，在审批系统里批准后才执行。"
-        "要是提示你在审批系统里还没有账号，先登录一次审批系统再让我重试。\n"
+        f"对外有影响的操作会先提交审批，在{approval_system()}里批准后才执行。"
+        f"要是提示你在{name}里还没有账号，先登录一次{name}再让我重试。\n"
         "发「停用助理」可以随时停用。"
     )
 
@@ -459,7 +500,8 @@ async def step_start_grant(
             raise StepRetry(exc.code) from None
         raise StepFailed("app_permission_missing") from None
     row.issued += 1
-    await messenger.card(
+    # 开通卡片点过之后这一栏空出来，改记授权卡片，授权完成时好把按钮去掉。
+    row.offer_message_id, _ = await messenger.card(
         session,
         row.platform_app_id,
         row.platform_user_id,
@@ -506,6 +548,10 @@ async def step_await_grant(
             # 授权被拒或身份对不上：授权行已清空，下面按「链接已失效」再发一次。
         grant = await session.get(FeishuPersonalGrant, key, populate_existing=True)
     if _connected(grant):
+        if row.offer_message_id:
+            await messenger.update_card(
+                session, row.platform_app_id, row.offer_message_id, granted_card()
+            )
         bot.assistant_state = "active"
         finish(row, "done")
         return [welcome_text()]
