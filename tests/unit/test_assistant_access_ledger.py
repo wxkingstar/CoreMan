@@ -35,6 +35,8 @@ DECRYPTING = frozenset(
         ("followups", "get"),
         ("jobs", "list_"),
         ("owner_view", "approvals"),
+        # 设置表单的输出带着解密后的重点群与忽略名单：读、改、即时上下班都经它
+        ("owner_view", "preferences"),
         ("transfer", "plan"),
         ("transfer", "export"),
         ("sealed", "open_row"),

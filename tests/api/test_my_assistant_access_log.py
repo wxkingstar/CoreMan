@@ -40,21 +40,25 @@ READS: dict[str, list[tuple[str, str]]] = {
     # 访问记录本身只有编号、动作与时间：看它不解密任何东西。
     "/access-log": [],
 }
-# 用 POST 读的：知识页的路径只放请求体；即时上下班的响应里带着解密后的设置。
-POSTED: dict[str, tuple[dict[str, str], list[tuple[str, str]]]] = {
-    "/notes/read": ({"path": PAGE}, [("notes.read", "page")]),
-    "/shift": ({"state": "on"}, [("settings.read", "shift")]),
+# 不是 GET 却把解密后的内容带回来的：知识页的路径只放请求体；改设置、即时上下班的响应里
+# 带着解密后的重点群与忽略名单。键是（方法, 路径）。
+ECHOES: dict[tuple[str, str], tuple[dict[str, str], list[tuple[str, str]]]] = {
+    ("POST", "/notes/read"): ({"path": PAGE}, [("notes.read", "page")]),
+    ("PATCH", "/settings"): ({"timezone": "UTC"}, [("settings.read", "update")]),
+    ("POST", "/shift"): ({"state": "on"}, [("settings.read", "shift")]),
 }
+Call = tuple[str, str]
 
 
-async def _read(client: httpx.AsyncClient, path: str) -> httpx.Response:
-    if path in POSTED:
-        return await client.post(f"{URL}{path}", json=POSTED[path][0])
-    return await client.get(f"{URL}{path}")
+async def _read(client: httpx.AsyncClient, call: Call) -> httpx.Response:
+    method, path = call
+    body = ECHOES[call][0] if call in ECHOES else None
+    return await client.request(method, f"{URL}{path}", json=body)
 
 
-def _expected() -> dict[str, list[tuple[str, str]]]:
-    return {**READS, **{path: rows for path, (_, rows) in POSTED.items()}}
+def _expected() -> dict[Call, list[tuple[str, str]]]:
+    reads: dict[Call, list[tuple[str, str]]] = {("GET", path): rows for path, rows in READS.items()}
+    return {**reads, **{call: rows for call, (_, rows) in ECHOES.items()}}
 
 
 async def _stored(db_session: AsyncSession) -> list[tuple[str, str, str, uuid.UUID | None]]:
@@ -94,9 +98,10 @@ async def test_each_read_leaves_exactly_its_records(
 ) -> None:
     bot, owner = await owned(client, db_session)
     await _seed(db_session, bot)
-    for path, expected in _expected().items():
+    for call, expected in _expected().items():
+        path = " ".join(call)
         before = len(await _stored(db_session))
-        response = await _read(client, path)
+        response = await _read(client, call)
         assert response.status_code == 200, (path, response.text)
         added = (await _stored(db_session))[before:]
         assert [(action, target) for action, target, _, _ in added] == expected, path
@@ -108,8 +113,8 @@ async def test_the_log_holds_no_content(
 ) -> None:
     bot, _owner = await owned(client, db_session)
     await _seed(db_session, bot)
-    for path in _expected():
-        assert (await _read(client, path)).status_code == 200, path
+    for call in _expected():
+        assert (await _read(client, call)).status_code == 200, call
     logged = " ".join(f"{action} {target}" for action, target, _, _ in await _stored(db_session))
     assert logged
     # 正文、摘要、标题里的机密片段，路径的两段，待跟进的标题：一样都不在。

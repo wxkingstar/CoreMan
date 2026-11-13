@@ -260,6 +260,8 @@ async def settings_patch(
         await session.rollback()
         raise refuse(exc.code, SETTINGS_ERRORS) from None
     row = await assistant_settings.get(session, own.bot.id)
+    # 响应里带着解密后的设置（重点群、忽略的会话，不只是这次改的那几项）：与读设置一样记一次。
+    await access_log.record(session, own.bot.id, own.actor.id, "settings.read", "update")
     data = await owner_view.preferences(session, row, now)
     await session.commit()
     return {"code": 0, "data": data}
