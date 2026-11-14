@@ -15,6 +15,7 @@ CoreMan 可以替 Agent 给阿里云 OpenAPI 请求签名：Agent 机器上不�
 4. 写动作先做服务端风险判定（`coreman/core/cloud_proxy/risk.py`），判定需要的现状由代理用同一把 AccessKey 自己读：
    - 低风险：直接签名转发。
    - 高风险：返回 `428 approval_required`，带 `target`、`caller`、`requester`、`external_id`、`url`、`risk_reasons`。Agent 用 Tower 审批 Skill 提交审批；批准后带 `X-Tower-Approval: <令牌>` 原样重发同一份请求体，代理在 Tower 核销成功后才签名转发。
+   - 个人助理无人在场的一轮（平台发起的交回、子任务、结果回合等，见 [飞书](feishu.md)「平台自己发起的轮次」）：写动作不论风险高低一律返回 `403 owner_turn_required`，在风险判定之前就拒，不读阿里云、不建挂起单、不走 Tower；读动作照常。按每次调用重新加载的任务类型判断，审计记为 `write_high` / `denied`。
 5. Tower 的决定通过回调（`POST /api/integrations/tower/callback`）送回 CoreMan，CoreMan 唤醒发起审批的那轮对话，让 Agent 继续执行或转述拒绝理由。回调丢失时由定时对账补上。
 6. 每次调用写一行 `cloud_calls` 审计；高风险挂起单在 `cloud_pending_approvals`。
 
