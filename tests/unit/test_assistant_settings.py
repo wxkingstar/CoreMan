@@ -18,6 +18,8 @@ def row(**over: Any) -> AssistantSettings:
         "platform_user_id": "owner_pid",
         "chat_id": "oc_private",
         "timezone": "Asia/Shanghai",
+        # 库里默认全天候；这里的用例看的是按工作时段的计算，全天候的单独写。
+        "always_on": False,
         "work_start": "09:30",
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
@@ -64,6 +66,21 @@ def test_workday_is_judged_in_the_owners_timezone() -> None:
     assert settings.on_shift(s, at(13, 15, 0))  # 纽约周五 10:00
     assert not settings.on_shift(s, at(14, 1, 0))  # 纽约周五 20:00（UTC 已是周六）
     assert not settings.on_shift(s, at(14, 15, 0))  # 纽约周六 10:00
+
+
+def test_always_on_is_on_shift_at_any_hour() -> None:
+    s = row(always_on=True)
+    assert settings.on_shift(s, at(13, 1, 29))  # 周五 09:29
+    assert settings.on_shift(s, at(13, 16, 0))  # 周六 00:00
+    assert settings.on_shift(row(always_on=True, workdays=[6]), at(16, 3, 0))  # 周一
+
+
+def test_a_switch_still_wins_over_always_on() -> None:
+    work = at(13, 3, 0)
+    off = row(always_on=True, shift_override="off", shift_override_until=work + timedelta(hours=1))
+    assert not settings.on_shift(off, work)
+    # 过期后恢复全天候，不看钟点。
+    assert settings.on_shift(off, at(14, 3, 0))
 
 
 def test_override_wins_until_it_expires() -> None:

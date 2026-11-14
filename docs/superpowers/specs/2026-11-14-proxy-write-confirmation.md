@@ -174,7 +174,7 @@
 | `worker/chat/finalize.py` | 本轮正常结束就发卡，否则把批次标记为 `cancelled` |
 | `worker/chat/opening.py`、`queued_batch.py` | 续接回合把 `systems_write_result` 放进本轮块；这类回合不与排队消息合并 |
 | `auth/system_access.py`、`systems_catalog/tools.py` | `PROXY_RULES`、调用方式说明、目录标记改写；本轮块提醒 |
-| 迁移 `0104` | `interaction_states.kind` 增加 `systems_write` |
+| 迁移 `0105` | `interaction_states.kind` 增加 `systems_write` |
 | 文档 | `docs/business-system-catalog.md` 补充确认流程 |
 
 不新增表。`system_calls.outcome` 不是枚举约束，新增取值不需要迁移。

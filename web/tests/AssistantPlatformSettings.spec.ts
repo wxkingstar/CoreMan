@@ -103,8 +103,8 @@ describe('assistant platform settings', () => {
     vi.mocked(settings.get).mockResolvedValue({} as never)
     vi.mocked(settings.update).mockRejectedValueOnce(new Error('设置项不能置空'))
     const wrapper = render(); await flushPromises()
-    expect(form(wrapper)).toEqual({ mode: 'all', user_ids: [], department_ids: [], primary: 'claude', also_other: true, concurrency: 2, budget: 200 })
-    form(wrapper).budget = 300
+    expect(form(wrapper)).toEqual({ mode: 'all', user_ids: [], department_ids: [], primary: 'claude', also_other: true, concurrency: 2, budget: 2000 })
+    form(wrapper).budget = 3000
     await save(wrapper)
     expect(error).toHaveBeenCalledWith('设置项不能置空')
     wrapper.unmount()

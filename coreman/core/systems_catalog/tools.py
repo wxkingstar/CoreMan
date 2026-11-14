@@ -175,7 +175,11 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
     return None
 
 
-CALL_NOTES = {"risk_not_allowed": "不代理", "write_not_allowed": "未开启写入"}
+CALL_NOTES = {
+    "risk_not_allowed": "不代理",
+    "write_not_allowed": "未开启写入",
+    "owner_turn_required": "所有者不在场",
+}
 # The anonymous catalog keeps its own marker: callers there confirm these with the user themselves.
 ANONYMOUS_CONFIRM = ("destructive", "financial")
 

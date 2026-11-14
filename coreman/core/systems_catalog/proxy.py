@@ -313,6 +313,8 @@ def policy_error(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> st
     """Why this operation may not be proxied for this AI employee, or None."""
     if op["risk"] in NEVER_PROXIED:
         return "risk_not_allowed"
+    if op["risk"] in CONFIRMED_RISKS and ctx.owner_absent:
+        return "owner_turn_required"
     if op["risk"] in CONFIRMED_RISKS and system.key not in ctx.writable:
         return "write_not_allowed"
     return None
@@ -323,6 +325,8 @@ DENIALS = {
     "请告诉用户需要本人在业务系统里操作。",
     "write_not_allowed": "这个 AI 员工没有该系统的写入权限。需要管理员在 AI 员工的「系统权限」里"
     "为这个系统开启「允许写入」；在此之前不要尝试其他写入方式。",
+    "owner_turn_required": "这一轮是个人助理在所有者不在场时跑的，业务系统只能查询，不能做写操作；"
+    "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做。",
 }
 
 

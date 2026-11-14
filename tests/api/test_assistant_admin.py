@@ -84,7 +84,7 @@ async def test_the_list_shows_todays_turns_the_budget_and_waiting_items(
     await db_session.commit()
     await login_as(client, db_session, role="platform_admin")
     [listed] = (await client.get("/api/admin/assistants")).json()["data"]["items"]
-    assert listed["turns"] == {"today": 3, "budget": 200}
+    assert listed["turns"] == {"today": 3, "budget": 2000}
     assert listed["inbox_pending"] == 2
     changed = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 50})
     assert changed.status_code == 200
@@ -92,6 +92,10 @@ async def test_the_list_shows_todays_turns_the_budget_and_waiting_items(
     assert listed["turns"] == {"today": 3, "budget": 50}
     refused = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 5})
     assert refused.status_code == 422
+    raised = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 20000})
+    assert raised.status_code == 200
+    too_high = await client.put("/api/admin/settings", json={"assistant_daily_turn_budget": 20001})
+    assert too_high.status_code == 422
 
 
 async def test_the_list_shows_watch_health_without_any_content(
@@ -315,8 +319,16 @@ async def test_the_list_shows_cold_start_progress_and_shift(
         "started_at": started.isoformat(),
         "done_at": started.isoformat(),
     }
+    # 没有临时切换：全天候（默认）随时在班；按工作时段、又没有工作日时不在班。
+    # 与「我的助理」页同一口径。
+    prefs.shift_override = None
+    await db_session.commit()
+    assert (await item())["on_shift"] is True
+    prefs.always_on, prefs.workdays = False, []
+    await db_session.commit()
+    assert (await item())["on_shift"] is False
     # 停用中的记录不算在班。
-    prefs.shift_override = "on"
+    prefs.always_on, prefs.shift_override = True, "on"
     bot.assistant_state = "deprovisioning"
     await db_session.commit()
     assert (await item())["on_shift"] is False

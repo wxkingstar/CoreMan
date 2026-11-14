@@ -14,6 +14,8 @@ def row(**over: Any) -> AssistantSettings:
     values: dict[str, Any] = {
         "bot_id": uuid.uuid4(),
         "timezone": "Asia/Shanghai",
+        # 库里默认全天候；这里的用例看的是按工作时段的计算，全天候的单独写。
+        "always_on": False,
         "work_start": "09:30",
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
@@ -103,6 +105,16 @@ def test_clock_out_without_working_days_lasts_a_day() -> None:
     owner = row(workdays=[])
     now = at(13, 7)
     assert settings.clock_out(owner, now) == now + timedelta(days=1)
+
+
+def test_around_the_clock_clocking_in_only_clears_clocking_out() -> None:
+    owner = row(always_on=True)
+    until = settings.clock_out(owner, at(13, 7))  # 周五 15:00
+    # 「下班」照样到下一个上班时刻（按存着的工作时段）。
+    assert until == at(16, 1, 30) and owner.shift_override == "off"
+    assert settings.clock_in(owner, at(13, 8)) is None
+    assert owner.shift_override is None and owner.shift_override_until is None
+    assert settings.on_shift(owner, at(14, 3))  # 周六也在班
 
 
 def test_clear_override() -> None:

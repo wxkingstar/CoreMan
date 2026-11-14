@@ -14,7 +14,7 @@ const { t } = useI18n()
 
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 const prefs = ref<AssistantPrefs | null>(null)
-const form = reactive<PrefsForm>({ timezone: '', work_start: '', work_end: '', workdays: [], focus_chats: '', ignored_chats: '', follow_platform: true, daily_turn_budget: 0 })
+const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', ignored_chats: '', follow_platform: true, daily_turn_budget: 0 })
 const errors = ref<Partial<Record<PrefsField, string>>>({})
 const error = ref(''), loading = ref(false), saving = ref(false)
 
@@ -92,6 +92,16 @@ defineExpose({ form, save, load })
           {{ fieldError('timezone') }}
         </div>
       </el-form-item>
+      <el-form-item :label="t('assistant.settings.alwaysOn')">
+        <el-switch
+          v-model="form.always_on"
+          data-test="always-on"
+        />
+        <div class="hint">
+          {{ t('assistant.settings.alwaysOnHint') }}
+        </div>
+      </el-form-item>
+      <!-- 全天候时工作时段与工作日置灰但保留：改回按工作时段时直接生效，「下班」也按它找下一个上班时刻。 -->
       <el-form-item
         :label="t('assistant.settings.workStart')"
         :error="fieldError('work_start')"
@@ -101,6 +111,7 @@ defineExpose({ form, save, load })
           v-model="form.work_start"
           placeholder="09:30"
           style="width: 120px"
+          :disabled="form.always_on"
         />
         <!-- 错误原因自己渲染：el-form-item 的提示走过渡动画，这里要它立刻、稳定地出现。 -->
         <div
@@ -121,6 +132,7 @@ defineExpose({ form, save, load })
           v-model="form.work_end"
           placeholder="19:00"
           style="width: 120px"
+          :disabled="form.always_on"
         />
         <!-- 错误原因自己渲染：el-form-item 的提示走过渡动画，这里要它立刻、稳定地出现。 -->
         <div
@@ -137,7 +149,10 @@ defineExpose({ form, save, load })
         :error="fieldError('workdays')"
         :show-message="false"
       >
-        <el-checkbox-group v-model="form.workdays">
+        <el-checkbox-group
+          v-model="form.workdays"
+          :disabled="form.always_on"
+        >
           <el-checkbox
             v-for="day in WEEKDAYS"
             :key="day"

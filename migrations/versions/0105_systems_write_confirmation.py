@@ -4,8 +4,8 @@ large or file responses are kept in short-term object storage (system_calls.obje
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0104"
-down_revision = "0103"
+revision = "0105"
+down_revision = "0104"
 branch_labels = None
 depends_on = None
 

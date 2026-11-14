@@ -46,12 +46,17 @@ def when(prefs: AssistantSettings, at: datetime, now: datetime) -> str:
     return f"{local.month} 月 {local.day} 日（周{_WEEKDAYS[local.isoweekday() - 1]}）{clock}"
 
 
-def _reply(prefs: AssistantSettings, on: bool, until: datetime, now: datetime) -> str:
-    moment = when(prefs, until, now)
-    if on:
-        text = f"已上班，到{moment}为止，之后按你的工作时段。"
+def _reply(prefs: AssistantSettings, on: bool, until: datetime | None, now: datetime) -> str:
+    """`until` 为 None 是全天候时说「上班」：没有到期时刻，只是取消了「下班」。"""
+    if until is None:
+        text = "已上班，全天候看你的飞书消息。"
+    elif on:
+        text = f"已上班，到{when(prefs, until, now)}为止，之后按你的工作时段。"
     else:
-        text = f"已下班，{moment}恢复。这期间我不看你的飞书消息，你在这里说话我照常回应。"
+        text = (
+            f"已下班，{when(prefs, until, now)}恢复。这期间我不看你的飞书消息，"
+            "你在这里说话我照常回应。"
+        )
     if prefs.cold_start_done_at is None:
         text += "\n" + NOT_WATCHING
     return text
@@ -71,8 +76,8 @@ async def _switch(
         await session.refresh(prefs, with_for_update=True)
         on = word in ON
         if on or assistant_settings.on_shift(prefs, now):
-            # 今天上过班：下班编译凭它触发，不等 5 秒一次的循环来记。
-            prefs.worked_on = assistant_settings.local_today(prefs, now)
+            # 今天上过班：下班编译凭它触发，不等 5 秒一次的循环来记；前一天还欠着整理时不覆盖。
+            assistant_settings.mark_worked(prefs, now)
         until = (
             assistant_settings.clock_in(prefs, now)
             if on

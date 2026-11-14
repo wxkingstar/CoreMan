@@ -1,4 +1,4 @@
-"""盯消息不倒灌历史：没有游标的会话只回看一小段，移出忽略名单的从移出那一刻读起，太老的消息不入箱。"""
+"""盯消息不倒灌历史：没有游标的会话回看 7 天，移出忽略名单的从移出那一刻读起，太老的消息不入箱。"""
 
 from __future__ import annotations
 
@@ -48,33 +48,93 @@ async def polled(session: AsyncSession, who: Watched, at: datetime) -> None:
 
 
 def test_the_windows_are_the_agreed_ones() -> None:
-    assert watch.LOOKBACK == timedelta(minutes=30)
-    assert watch.MAX_AGE == timedelta(hours=24)
+    assert watch.LOOKBACK == timedelta(days=7)
+    assert watch.MAX_AGE == timedelta(days=7)
     assert watch.MAX_LOOKBACK == timedelta(days=7)
 
 
-async def test_a_group_the_owner_was_just_added_to_does_not_dump_its_history(
+async def test_a_group_the_owner_was_just_added_to_is_read_back_a_week(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
-    # 三天前就开始盯了；这个群有历史，所有者刚被拉进来，游标里没有它。
-    await primed(db_session, who, ago(base, days=3), head=["oc_li"])
+    # 十天前就开始盯了；这个群有历史，所有者刚被拉进来，游标里没有它。
+    await primed(db_session, who, ago(base, days=10), head=["oc_li"])
     await polled(db_session, who, ago(base, seconds=60))
     api.chats = [TEAM, LI]
-    api.say("oc_team", "om_week", ago(base, days=2))
+    api.say("oc_team", "om_older", ago(base, days=8))
+    api.say("oc_team", "om_days", ago(base, days=2))
     api.say("oc_team", "om_morning", ago(base, hours=5))
-    api.say("oc_team", "om_recent", ago(base, minutes=10))
     api.say("oc_team", "om_now", ago(base, seconds=20))
     await tick(make_session_factory(db_engine), base)
-    # 只回看 30 分钟：更早的历史不入箱，也不会在之后的轮次里补进来。
-    assert await boxed(db_session, who) == ["om_recent", "om_now"]
+    # 回看 7 天：这一周里的都入箱，更早的历史不读。
+    assert await boxed(db_session, who) == ["om_days", "om_morning", "om_now"]
     start = int(api.read("oc_team")[0].params["start_time"])
     assert start == ms(base - watch.LOOKBACK) // 1000
     row = await watch_row(db_session, who)
     assert row.cursor_enc["chats"]["oc_team"]["t"] == ms(ago(base, seconds=20))
-    assert row.cursor_enc["since"] == ms(ago(base, days=3))
+    assert row.cursor_enc["since"] == ms(ago(base, days=10))
+
+
+async def test_the_lookback_does_not_reach_before_the_watch_began(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    # 三天前才开始盯：刚被拉进的群只从开始盯的那一刻读起。
+    await primed(db_session, who, ago(base, days=3), head=["oc_li"])
+    await polled(db_session, who, ago(base, seconds=60))
+    api.chats = [TEAM, LI]
+    api.say("oc_team", "om_before", ago(base, days=4))
+    api.say("oc_team", "om_after", ago(base, days=2))
+    await tick(make_session_factory(db_engine), base)
+    assert await boxed(db_session, who) == ["om_after"]
+    start = int(api.read("oc_team")[0].params["start_time"])
+    assert start == ms(ago(base, days=3)) // 1000
+
+
+async def test_a_week_of_backlog_is_read_over_several_rounds_without_holding_others_up(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """刚被拉进一个很热闹的群：7 天的积压一轮读不完，分几轮接着读，一条不丢；别的会话照常读。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, ago(base, days=10), head=["oc_li"])
+    await polled(db_session, who, ago(base, seconds=60))
+    api.chats = [TEAM, LI]
+    count = feed.PAGE * feed.MAX_PAGES * 2 + 30
+    for n in range(count):
+        api.say("oc_team", f"om_team_{n:03d}", ago(base, days=6) + timedelta(minutes=n))
+    api.say("oc_li", "om_li_1", ago(base, seconds=30))
+    factory = make_session_factory(db_engine)
+    now = base
+    rounds = 0
+    while True:
+        rounds += 1
+        await tick(factory, now)
+        row = await watch_row(db_session, who)
+        if rounds == 1:
+            # 第一轮：群里读了两页、记下接着读；排在后面的私聊照样读到了。
+            assert len(api.read("oc_team")) == feed.MAX_PAGES
+            assert row.cursor_enc["todo"] == ["oc_team"]
+            assert "om_li_1" in await boxed(db_session, who)
+            # 下一轮之前私聊又来一条：它排到前面，也照常读到。
+            api.chats = [LI, TEAM]
+            api.say("oc_li", "om_li_2", now + timedelta(seconds=30))
+        if not row.cursor_enc["todo"]:
+            break
+        assert rounds < 10
+        now = row.next_poll_at
+    assert rounds == 3
+    found = await boxed(db_session, who)
+    assert sorted(item for item in found if item.startswith("om_team_")) == [
+        f"om_team_{n:03d}" for n in range(count)
+    ]
+    assert {"om_li_1", "om_li_2"} <= set(found)
+    assert "a" not in row.cursor_enc["chats"]["oc_team"]
 
 
 async def test_a_chat_pushed_out_of_the_cursor_restarts_from_the_window(
@@ -83,25 +143,25 @@ async def test_a_chat_pushed_out_of_the_cursor_restarts_from_the_window(
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
-    await primed(db_session, who, ago(base, days=3), head=["oc_team"])
+    await primed(db_session, who, ago(base, days=12), head=["oc_team"])
     # 游标只留最近读过的 CURSOR_CHATS 个会话：这个群很久没动静，被挤掉了。
     row = await watch_row(db_session, who)
     chats = {
         f"oc_{index}": {"t": ms(ago(base, hours=1)), "m": [], "k": "group", "th": {}}
         for index in range(feed.CURSOR_CHATS)
     }
-    chats["oc_team"] = {"t": ms(ago(base, days=2)), "m": ["om_read"], "k": "group", "th": {}}
-    row.cursor_enc = feed.dump({"since": ms(ago(base, days=3)), "chats": chats}, [])
+    chats["oc_team"] = {"t": ms(ago(base, days=9)), "m": ["om_read"], "k": "group", "th": {}}
+    row.cursor_enc = feed.dump({"since": ms(ago(base, days=12)), "chats": chats}, [])
     await db_session.commit()
     assert "oc_team" not in (await watch_row(db_session, who)).cursor_enc["chats"]
     await polled(db_session, who, ago(base, seconds=60))
     api.chats = [TEAM]
-    # 被挤掉之前读过的、当时分级为忽略没入箱的旧消息，不该在它再活跃时整批回来。
-    api.say("oc_team", "om_read", ago(base, days=2))
+    # 被挤掉之前读过的旧消息，不该在它再活跃时整批回来：只回看 7 天。
+    api.say("oc_team", "om_read", ago(base, days=9))
     api.say("oc_team", "om_quiet", ago(base, hours=20))
     api.say("oc_team", "om_new", ago(base, seconds=20))
     await tick(make_session_factory(db_engine), base)
-    assert await boxed(db_session, who) == ["om_new"]
+    assert await boxed(db_session, who) == ["om_quiet", "om_new"]
 
 
 async def test_a_chat_taken_off_the_ignore_list_is_read_from_that_moment(
@@ -164,36 +224,62 @@ async def test_removing_a_chat_the_watch_never_read_starts_it_now(
     assert api.hits == []
 
 
-async def test_messages_older_than_a_day_only_move_the_cursor(
+async def test_messages_older_than_a_week_only_move_the_cursor(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
+    await primed(db_session, who, ago(base, days=20), head=["oc_li"])
+    # 这个会话的游标停在九天前（比如它被放下、或助理停了很久）。
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {"oc_li": {"t": ms(ago(base, days=9)), "m": [], "k": "p2p", "th": {}}},
+    }
+    await db_session.commit()
+    # 轮询本身一直没停（一分钟前还成功过）：这些旧消息在上次轮询之前就超过一周了。
+    await polled(db_session, who, ago(base, seconds=60))
+    api.chats = [LI]
+    api.say("oc_li", "om_stale", ago(base, days=8))
+    api.say("oc_li", "om_edge", ago(base, days=7, seconds=1))
+    api.say("oc_li", "om_fresh", ago(base, days=6, hours=23))
+    counts = await tick(make_session_factory(db_engine), base)
+    assert counts["assistant_watch_items"] == 1
+    assert await boxed(db_session, who) == ["om_fresh"]
+    entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
+    assert (entry["t"], entry["m"]) == (ms(ago(base, days=6, hours=23)), ["om_fresh"])
+
+
+async def test_with_a_shorter_age_limit_only_what_the_last_poll_saw_is_dropped(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """年龄截止点取 `MAX_AGE` 之前与上一次成功轮询里更早的那个：截止点短于 7 天时同样成立。"""
+    monkeypatch.setattr(watch, "MAX_AGE", timedelta(hours=24))
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
     await primed(db_session, who, ago(base, days=9), head=["oc_li"])
-    # 这个会话的游标停在三天前（比如它被放下、或助理停了几天）。
     row = await watch_row(db_session, who)
     row.cursor_enc = {
         **row.cursor_enc,
         "chats": {"oc_li": {"t": ms(ago(base, days=3)), "m": [], "k": "p2p", "th": {}}},
     }
     await db_session.commit()
-    # 轮询本身一直没停（一分钟前还成功过）：这些旧消息在上次轮询之前就超过一天了。
     await polled(db_session, who, ago(base, seconds=60))
     api.chats = [LI]
     api.say("oc_li", "om_stale", ago(base, days=2))
     api.say("oc_li", "om_edge", ago(base, hours=24, seconds=1))
     api.say("oc_li", "om_fresh", ago(base, hours=23))
-    counts = await tick(make_session_factory(db_engine), base)
-    assert counts["assistant_watch_items"] == 1
+    await tick(make_session_factory(db_engine), base)
     assert await boxed(db_session, who) == ["om_fresh"]
-    entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
-    assert (entry["t"], entry["m"]) == (ms(ago(base, hours=23)), ["om_fresh"])
 
 
 async def test_after_a_long_pause_an_unseen_chat_is_read_from_the_last_poll(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """回看窗口比停下的时长短时（这里把它缩到 30 分钟）回看到上一次成功轮询为止。"""
+    monkeypatch.setattr(watch, "LOOKBACK", timedelta(minutes=30))
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
@@ -247,7 +333,7 @@ async def test_messages_from_the_weekend_arrive_on_monday_morning(
     ]
 
 
-async def test_a_group_joined_over_the_weekend_still_keeps_its_old_history_out(
+async def test_a_group_joined_over_the_weekend_still_keeps_history_older_than_a_week_out(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api = install(monkeypatch)
@@ -262,9 +348,9 @@ async def test_a_group_joined_over_the_weekend_still_keeps_its_old_history_out(
     api.say("oc_team", "om_last_week", ago(base, days=4))
     api.say("oc_team", "om_weekend", ago(base, hours=30))
     await tick(make_session_factory(db_engine), base)
-    assert await boxed(db_session, who) == ["om_weekend"]
+    assert await boxed(db_session, who) == ["om_last_week", "om_weekend"]
     start = int(api.read("oc_team")[0].params["start_time"])
-    assert start == ms(friday) // 1000
+    assert start == ms(base - watch.LOOKBACK) // 1000
 
 
 def night_chats(count: int = 20) -> list[dict[str, Any]]:
@@ -274,6 +360,8 @@ def night_chats(count: int = 20) -> list[dict[str, Any]]:
 async def test_chats_left_for_the_next_round_keep_last_nights_starting_point(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """回看窗口比停下的时长短时（这里把它缩到 30 分钟），排队的会话仍从昨晚读起。"""
+    monkeypatch.setattr(watch, "LOOKBACK", timedelta(minutes=30))
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
@@ -336,7 +424,11 @@ async def test_chats_left_for_the_next_round_keep_the_weekend_too(
 async def test_chats_the_round_never_reached_keep_the_weekend_too(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """排在前面的会话把一轮用完：后面顺序没变、还没探到的会话下一轮照样读，周末的消息不丢。"""
+    """排在前面的会话把一轮用完：后面顺序没变、还没探到的会话下一轮照样读，周末的消息不丢。
+
+    年龄截止点缩到一天，才看得出第二轮仍按第一轮的截止点算（默认 7 天时两轮都是 7 天前）。
+    """
+    monkeypatch.setattr(watch, "MAX_AGE", timedelta(hours=24))
     api = install(monkeypatch)
     who = await assistant(db_session)
     base = base_time()
@@ -414,7 +506,7 @@ async def test_an_unreached_chat_read_by_another_route_does_not_end_the_stretch(
 @pytest.mark.parametrize(
     ("days", "kept"),
     [
-        (3, ["om_li_old", "om_li_recent", "om_team_old", "om_team_recent"]),
+        (3, ["om_li_old", "om_li_recent", "om_team_edge", "om_team_old", "om_team_recent"]),
         (20, ["om_li_recent", "om_team_edge", "om_team_recent"]),
     ],
 )
@@ -448,8 +540,11 @@ async def test_coming_back_after_a_long_stop_looks_back_a_week_at_most(
     api.say("oc_team", "om_team_old", stopped + timedelta(days=1), mentions=mention)
     api.say("oc_team", "om_team_edge", ago(base, days=6, hours=23), mentions=mention)
     api.say("oc_team", "om_team_recent", ago(base, hours=30), mentions=mention)
+    # 替身按写入的先后给，飞书按时间正序给：停 3 天时「旧」的那条比 edge 晚。
+    for items in api.history.values():
+        items.sort(key=lambda item: int(item["create_time"]))
     await tick(make_session_factory(db_engine), base)
     assert sorted(await boxed(db_session, who)) == kept
-    # 没见过的会话从哪一刻读起：停得久时不早于 7 天前。
+    # 没见过的会话回看 7 天：停得更久时也不早于 7 天前。
     start = int(api.read("oc_team")[0].params["start_time"])
-    assert start == ms(max(stopped, base - watch.MAX_LOOKBACK)) // 1000
+    assert start == ms(base - watch.MAX_LOOKBACK) // 1000

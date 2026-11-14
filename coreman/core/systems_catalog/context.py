@@ -42,6 +42,8 @@ class Context:
     writable: frozenset[str] = frozenset()
     # The owner approved writes for this turn in the approval system: they run without a card.
     writes_preapproved: bool = False
+    # A personal assistant's turn with the owner absent (`kinds.unattended`): reads only.
+    owner_absent: bool = False
     # Proxy tokens live as long as the AI employee's task timeout.
     token_ttl: int = 3600
     # Sections of task.payload[BUDGET_KEY]; the caller persists them when changed.

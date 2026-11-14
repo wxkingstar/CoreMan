@@ -42,8 +42,8 @@ from coreman.core.timeutils import aware_utc
 log = get_logger(__name__)
 
 BUDGET_KEY = "assistant_daily_turn_budget"
-DEFAULT_BUDGET = 200
-BUDGET_MIN, BUDGET_MAX = 10, 2000
+DEFAULT_BUDGET = 2000
+BUDGET_MIN, BUDGET_MAX = 10, 20000
 # 预算用完后，立即交回级别的条目至多再透支这么多轮。
 OVERDRAFT = 20
 # 一轮最多带这么多条目；多出来的留给下一轮。
@@ -86,7 +86,7 @@ def day_bounds(zone: ZoneInfo, today: date) -> tuple[datetime, datetime]:
 
 
 async def default_budget(session: AsyncSession) -> int:
-    """平台默认的每日轮次预算；设置被写坏（管理接口有校验，坏值只可能来自直接改库）时用 200。"""
+    """平台默认的每日轮次预算；设置被写坏（管理接口有校验，坏值只可能来自直接改库）时用默认值。"""
     raw = await eligibility.setting(session, BUDGET_KEY)
     if isinstance(raw, int) and not isinstance(raw, bool) and BUDGET_MIN <= raw <= BUDGET_MAX:
         return raw

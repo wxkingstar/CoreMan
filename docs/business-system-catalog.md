@@ -200,14 +200,14 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 新增 `systems_call(system, operation_id, path_params?, query?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。
 
 - 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径与查询参数、JSON 请求体，必填的请求头或 Cookie 参数无法通过代理调用，名为 `Idempotency-Key`、`X-Operation-Request-Id` 的请求头除外，由平台生成。
-- 风险策略：`read` 直接执行；`write`、`destructive` 需要机器人对该系统的授权开启"允许写入"，并且只进入待确认列表，由提问人在确认卡上确认后执行（见下文「写操作确认卡」）；`financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
+- 风险策略：`read` 直接执行；`write`、`destructive` 需要机器人对该系统的授权开启"允许写入"（个人助理无人在场的一轮开了也不能写），并且只进入待确认列表，由提问人在确认卡上确认后执行（见下文「写操作确认卡」）；`financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
 - 令牌：服务端在首次调用（或首次查权限）时签发，有效期与任务超时一致，签发记录用途为 `proxy`；以任务和系统为 AAD 加密后存在任务里，任务内复用，不进入运行环境、工具结果或日志。
 - 请求：只发往目录里的服务器前缀（与系统地址同源），连接固定到登记的主机，不跟随重定向，不读取环境代理，超时 30 秒，响应最多读 5 MiB。
 - 响应：成功的文本结果不超过 2 万字符时原样给模型；更大的结果和文件转存到短期附件存储（见下文「大结果与文件转存」）。错误响应最多 4000 字符；响应正文里出现的令牌值替换为 `[REDACTED]`。结果标注 `content_trust: system_returned_data`。
 
 ### 大结果与文件转存
 
-迁移 `0104` 给 `system_calls` 加了 `object_id`。转存用的是平台的短期附件存储（`OBJECT_STORAGE`、`S3_*`，见 [短期附件存储](object-storage.md)），不另配存储。
+迁移 `0105` 给 `system_calls` 加了 `object_id`。转存用的是平台的短期附件存储（`OBJECT_STORAGE`、`S3_*`，见 [短期附件存储](object-storage.md)），不另配存储。
 
 - 触发：2xx 响应是文件（`Content-Disposition: attachment` 或非文本类型），或文本超过 2 万字符、超过 5 MiB。读取上限随之提高到 100 MiB，先写进临时文件再上传；超过 100 MiB 不保存，提示缩小范围。
 - 数据结果（JSON、文本）：模型拿到开头部分的预览（JSON 按列表截短，约 4000 字符）、大小和下载方式。下载地址 `GET /api/runtime/systems/objects/<id>`，用本轮目录 MCP 的凭据（`$COREMAN_SYSTEMS_MCP_TOKEN`）鉴权，只能取本任务、本人的调用存下的对象，任务结束即不能再取；对象保留时间为任务超时时长（最多 24 小时）。存进去之前同样把令牌值替换为 `[REDACTED]`。这类链接不给人用。
@@ -218,7 +218,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 ### 写操作确认卡
 
-迁移 `0104`，设计见 `docs/superpowers/specs/2026-11-14-proxy-write-confirmation.md`。
+迁移 `0105`，设计见 `docs/superpowers/specs/2026-11-14-proxy-write-confirmation.md`。
 
 - `systems_call` 调用 `write`、`destructive` 操作时，所有检查照常执行，但不调用业务系统，只把请求加密暂存进本轮的批次（`interaction_states`，`kind = systems_write`），返回 `pending_confirmation`。同一批里参数相同的只留一个，每批最多 20 项，超出返回 `confirmation_batch_full`。可选参数 `note` 写对象、修改前后的值、影响和恢复方法，卡片上标为「AI 说明（未经平台核实）」。
 - 只有飞书里提问人本人打字发来的消息所在的回合能提交；定时任务、插话、调度、告警、API 驱动、AI 员工之间的协作、卡片触发的回合返回 `confirmation_unavailable`。例外：个人助理调度来的一轮，所有者已在审批系统里批准让对方改东西（载荷 `allow_write` 为真），写操作照员工的授权直接执行、不发确认卡；预算限制照旧。

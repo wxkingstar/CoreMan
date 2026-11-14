@@ -12,6 +12,7 @@ import pytest
 from coreman.core.assistants import voice
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.db.models import AssistantSettings
+from coreman.core.feishu_personal import ratelimit
 
 NOW = datetime(2026, 11, 13, 7, 0, tzinfo=UTC)
 OWNER = "ou_owner"
@@ -91,7 +92,7 @@ async def test_only_the_owners_own_text_messages_are_kept(install: Any) -> None:
                 raw("om_3", OWNER, "[图片]", msg_type="image"),
                 raw("om_4", OWNER, "撤回了的一句话", deleted=True),
                 raw("om_5", OWNER, "机器人冒用了我的编号", kind="app"),
-                raw("om_6", OWNER, "八天前说的", ago=timedelta(days=8)),
+                raw("om_6", OWNER, "三十一天前说的", ago=timedelta(days=31)),
                 raw("om_7", OWNER, "好"),
                 raw("om_8", OWNER, "收到，我看一下"),
             ],
@@ -103,6 +104,7 @@ async def test_only_the_owners_own_text_messages_are_kept(install: Any) -> None:
     # 新的在前；空白压成一个空格；一个字的不要。
     assert samples == ["收到，我看一下", "可以， 周四 下班前给你"]
     assert [chat for chat, _ in fake.read] == ["oc_li"]
+    assert voice.WINDOW == timedelta(days=30)
     assert fake.read[0][1] == ms(NOW - voice.WINDOW) and fake.listed == 1
     assert "李四说的" not in "".join(samples)
 
@@ -121,20 +123,31 @@ async def test_limits_on_chats_messages_and_length(install: Any) -> None:
             raw(f"om_{index}_{n}", OWNER, f"第 {index} 个会话的第 {n} 句" + "长" * 400)
             for n in range(40)
         ]
-        for index in range(12)
+        for index in range(30)
     }
     fake = install(chats)
     samples = await voice.collect(object(), PREFS, NOW)  # type: ignore[arg-type]
-    assert len(samples) == voice.MAX_MESSAGES == 200
+    assert len(samples) == voice.MAX_MESSAGES == 500
     assert all(len(text) == voice.MAX_CHARS for text in samples)
-    # 最近活跃的会话优先，凑够就停：40 条一个会话，读 5 个就够了。
-    assert [chat for chat, _ in fake.read] == [f"oc_{index}" for index in range(5)]
+    # 最近活跃的会话优先，凑够就停：40 条一个会话，读 13 个就够了。
+    assert [chat for chat, _ in fake.read] == [f"oc_{index}" for index in range(13)]
 
 
-async def test_at_most_eight_chats_are_read(install: Any) -> None:
-    fake = install({f"oc_{index}": [raw(f"om_{index}", OWNER, "收到了")] for index in range(12)})
+async def test_at_most_twenty_chats_are_read(install: Any) -> None:
+    fake = install({f"oc_{index}": [raw(f"om_{index}", OWNER, "收到了")] for index in range(30)})
     samples = await voice.collect(object(), PREFS, NOW)  # type: ignore[arg-type]
-    assert len(fake.read) == voice.MAX_CHATS == 8 and len(samples) == 8
+    assert len(fake.read) == voice.MAX_CHATS == 20 and len(samples) == 20
+
+
+def test_reads_stay_far_below_the_apps_history_budget() -> None:
+    """一次冷启动最多 1 次列会话、`MAX_CHATS × MAX_PAGES` 次读历史：远在应用每分钟额度之内。"""
+    reads = voice.MAX_CHATS * feed.MAX_PAGES
+    assert reads == 40
+    assert reads * 20 <= ratelimit.LIMITS[ratelimit.HISTORY]
+
+
+def test_the_task_names_the_window() -> None:
+    assert "最近 30 天" in voice.render(["收到，我看一下"])
 
 
 def test_render_quotes_every_sample() -> None:

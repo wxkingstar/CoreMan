@@ -1,4 +1,4 @@
-"""助理设置的两个工具：所有者在私聊里说要改工作时段、时区、重点群、忽略的会话时用。
+"""助理设置的两个工具：所有者在私聊里说要改全天候、工作时段、时区、重点群、忽略的会话时用。
 
 登记在助理工具注册表的 `knowledge` 组（不调飞书，授权换代后照常可用），但只在所有者发起的
 轮次里受理：改设置等于改「看哪些群、什么时候看」，交回轮次、审批结果回合与子任务的输入可能
@@ -35,6 +35,11 @@ class Get(Arguments):
 
 class Update(Arguments):
     timezone: Short | None = Field(default=None, description="IANA name such as Asia/Shanghai")
+    always_on: bool | None = Field(
+        default=None,
+        description="true = watch around the clock (the default); false = only during the"
+        " working hours and days below",
+    )
     work_start: Short | None = Field(
         default=None, description="HH:MM in the owner's time zone, e.g. 09:30"
     )
@@ -59,8 +64,9 @@ class Update(Arguments):
 OWN: dict[str, tuple[type[Arguments], str]] = {
     "assistant_settings_get": (
         Get,
-        "Read the owner's assistant settings: time zone, working hours and days, focus chats,"
-        " ignored chats, whether the assistant is on shift now and any temporary switch.",
+        "Read the owner's assistant settings: time zone, whether it works around the clock,"
+        " working hours and days, focus chats, ignored chats, whether the assistant is on shift"
+        " now and any temporary switch.",
     ),
     "assistant_settings_update": (
         Update,

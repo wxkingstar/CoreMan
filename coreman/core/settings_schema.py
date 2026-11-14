@@ -39,7 +39,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "assistant_node_concurrency": 2,
     # 每位个人助理每天（所有者时区的自然日）的轮次预算；所有者的设置里另有数时以那个为准。
     # 用完后不紧急的事项留到次日交回。
-    "assistant_daily_turn_budget": 200,
+    "assistant_daily_turn_budget": 2000,
     # 谁能开通个人助理：all 全员；listed 只有名单里的人与部门（含下级部门）。
     "assistant_eligibility": {"mode": "all", "department_ids": [], "user_ids": []},
     # 开通个人助理时可选的 AI，按顺序挑第一个助理池里有可用节点的。
@@ -107,7 +107,7 @@ class SettingsPatch(BaseModel):
     group_observe_bot_streak_limit: int | None = Field(default=None, ge=1, le=100)
     busy_confirm_minutes: int | None = Field(default=None, ge=0, le=1440)
     assistant_node_concurrency: int | None = Field(default=None, ge=1, le=32)
-    assistant_daily_turn_budget: int | None = Field(default=None, ge=10, le=2000)
+    assistant_daily_turn_budget: int | None = Field(default=None, ge=10, le=20000)
     assistant_eligibility: AssistantEligibility | None = None
     assistant_backends: list[Literal["claude", "codex"]] | None = Field(
         default=None, min_length=1, max_length=2

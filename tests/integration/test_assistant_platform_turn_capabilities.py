@@ -1,4 +1,5 @@
-"""平台来源的一轮无人在场：不挂云签名代理、业务系统目录与所有者的个人凭证；私聊一轮照旧。"""
+"""平台来源的一轮无人在场：云签名代理与业务系统目录照常挂上（只读由服务端把关），所有者的个人
+凭证不挂；私聊一轮照旧。"""
 
 from __future__ import annotations
 
@@ -90,14 +91,14 @@ async def test_the_owners_turn_has_all_three(
     assert mounted(request["env_vars"]) == {"cloud", "catalog", "credentials"}
 
 
-async def test_a_platform_turn_has_none_of_them(
+async def test_a_platform_turn_has_the_proxies_but_not_the_credentials(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bot = await equipped(db_session, monkeypatch)
     task = await queued(db_session, bot, HANDOVER_KIND, {"note": "李四问报价"})
     request = await sent(db_engine, task, Handover())
     env = request["env_vars"]
-    assert mounted(env) == set()
+    assert mounted(env) == {"cloud", "catalog"}
     assert not set(VALUES.values()) & set(env.values())
     # 找谁审批的名单与个人工具照常下发。
     assert cloud_policy.APPROVERS_ENV in env and "COREMAN_FEISHU_PERSONAL_TOKEN" in env

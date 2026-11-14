@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import kinds
 from coreman.core.cloud_proxy import aliyun, risk, tower_gate
 from coreman.core.cloud_proxy.policy import Capability
 from coreman.core.config import Settings
@@ -371,6 +372,22 @@ async def handle(
     req_hash: str | None = None
     approval_id: str | None = None
     redeemed_id: int | None = None
+    if kind == "write" and kinds.unattended(scope.task.kind):
+        # 个人助理无人在场的一轮只能查询：所有者不在场，输入可能来自别人发给他的消息。低风险写
+        # 也不放，也不走 Tower（平台发起的轮次没有入站事件，批准结果续接不回来）。在风险判定之前
+        # 拒，不为它读阿里云；没判定过的写按高风险记账。任务是 task_scope 每次重新加载的，
+        # 不看能力令牌里的声明。
+        return await done(
+            error(
+                403,
+                "owner_turn_required",
+                "这一轮是个人助理在所有者不在场时跑的，云服务只能查询，不能做写操作；"
+                "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做",
+            ),
+            action=action,
+            risk_level="write_high",
+            outcome="denied",
+        )
     if kind == "write":
         # 高风险写要以发言者的登录名作 Tower 的 requester，没有就永远批不下来；在读阿里云判定风险、
         # 建挂起单之前就拒，给一个说得清的原因，而不是让 Agent 拿着空 requester 去 Tower 碰壁

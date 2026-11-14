@@ -28,10 +28,10 @@ from coreman.core.timeutils import aware_utc, utcnow
 
 # 同一位助理同时进行中的子任务、助理自己每天能派的个数、一个子任务最多几轮（首轮加追问）。
 MAX_ACTIVE = 3
-MAX_DAILY = 20
-MAX_ROUNDS = 6
+MAX_DAILY = 100
+MAX_ROUNDS = 12
 # 每次派出或追问起这么久还没结束，记失败。
-LIFETIME = timedelta(hours=2)
+LIFETIME = timedelta(hours=6)
 MAX_TITLE = 200
 MAX_BRIEF = 8000
 MAX_MESSAGE = 4000
