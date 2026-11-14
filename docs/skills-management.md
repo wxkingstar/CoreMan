@@ -4,7 +4,7 @@
 
 目录同步读取 marketplace.json 的 plugins[].source 与插件 plugin.json 的名称、描述、版本，不执行清单内的指令。新条目默认停用；同步描述与版本不自动改安全等级、预设、审批策略或启用状态。插件常见结构为 `./plugins/{name}/.claude-plugin/plugin.json`。声明了 MCP 服务的插件登记为 MCP 技能，见下文「仓库中的 MCP 技能」。
 
-Git 技能安装后以工作目录中的 `.agents/skills/<技能名>` 为唯一副本，Runtime 自动建立 `.claude/skills/<技能名>` 的相对软链接，供 Claude Code 读取。重复安装复用正确链接；同名真实目录、错误链接或工作区外的目标会报错并保留原文件。只有确认 `SKILL.md` 存在并完成链接后才报告安装成功。已有节点须升级 Runtime，已有技能重新执行安装后补齐链接。MCP 安装写入工作目录的 `.mcp.json`，Claude Code 直接读取，Codex 由驱动每轮转换后挂载。
+Git 技能安装后以工作目录中的 `.agents/skills/<技能名>` 为唯一副本，Runtime 自动建立 `.claude/skills/<技能名>` 的相对软链接，供 Claude Code 读取。重复安装复用正确链接；同名真实目录、错误链接或工作区外的目标会报错并保留原文件。只有确认 `SKILL.md` 存在并完成链接后才报告安装成功。已有节点须升级 Runtime，已有技能重新执行安装后补齐链接。`.claude/skills` 整目录链接到 `../.agents/skills` 而目标目录不存在时（换机清单与 Git 都不记空目录，还没装过技能的员工换机或重新克隆后会只剩这条断链），Runtime 在初始化工作目录和安装技能前补建空的 `.agents/skills`；指向别处的断链仍报「技能目录链接已失效」。MCP 安装写入工作目录的 `.mcp.json`，Claude Code 直接读取，Codex 由驱动每轮转换后挂载。
 
 public 技能由机器人管理员安装；internal 技能须先获委员会审批。审批绑定具体目录 revision（包版本另存 version），批准数据库范围须是申请子集。目录发生变化的待批申请需重新提交。安装通过持久任务经反向通道调用机器人所属的运行时节点，失败显示原因，不把入队视作安装成功。
 

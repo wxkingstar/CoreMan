@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 import requests
 
 from .workspace import CHUNK as WORKSPACE_CHUNK
-from .workspace import cached_digest, digest
+from .workspace import cached_digest, digest, repair_skills_link
 
 MAX_BODY = 4 * 1024 * 1024
 MAX_MEMORY = 256 * 1024
@@ -736,6 +736,8 @@ class Agent:
     def link_claude_skills(
         self, path: Path, skill: str | None, *, validate_only: bool = False
     ) -> None:
+        # 换机后只剩断链的工作目录先补上目标目录，免得一直报「技能目录链接已失效」。
+        repair_skills_link(path)
         canonical = path / ".agents/skills"
         aliases = path / ".claude/skills"
         for directory in (path / ".agents", canonical, path / ".claude", aliases):
