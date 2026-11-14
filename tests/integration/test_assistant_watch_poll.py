@@ -590,6 +590,22 @@ async def test_what_the_owner_says_to_a_bot_is_not_boxed_as_owner_said(
     assert {row.message_id for row in await owner_said(db_session, who)} == {"om_l2", "om_t2"}
 
 
+async def test_a_system_message_does_not_mark_a_human_chat_as_a_bot_chat(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [{"chat_id": "oc_li", "chat_mode": "p2p"}]
+    api.say(
+        "oc_li", "om_s1", after(base, 10), sender="", kind="", msg_type="system", text="系统消息"
+    )
+    api.say("oc_li", "om_l2", after(base, 20), sender=who.open_id, text="周四前我把报价发你")
+    await tick(make_session_factory(db_engine), after(base, 30))
+    assert {row.message_id for row in await owner_said(db_session, who)} == {"om_l2"}
+
+
 async def test_owner_said_items_share_one_batch(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

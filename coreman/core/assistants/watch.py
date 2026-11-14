@@ -310,14 +310,16 @@ class _Round:
     async def owner_said(self, item: Item, entry: dict[str, Any]) -> None:
         """所有者亲自发的一句话入箱（攒批）：交回后助理只从中提取承诺与索要。
 
-        与助理自己的私聊、非文本、太短的不收；太老的同样不收（与别人的消息同一条截止线，
-        见 `take`）；今天已经收够 `OWNER_SAID_DAILY` 条的不收。
+        与助理自己的私聊、对方以应用身份发过言的私聊（见 `take`）、非文本、太短的不收；
+        太老的同样不收（与别人的消息同一条截止线，见 `take`）；
+        今天已经收够 `OWNER_SAID_DAILY` 条的不收。
         """
         if item.chat_id == self.prefs.chat_id or item.msg_type not in OWNER_SAID_TYPES:
             return
         if item.chat_kind == "p2p" and entry.get("b"):
-            # 对方是机器人或应用的私聊：他在这里下的指令是对机器人说的，不是自己的承诺。
-            # 已知限制：机器人还没说过话的全新私聊里，他的第一句话可能入箱，由提示词规则兜底。
+            # 对方以应用身份发过言的私聊（`take` 置位）：他在这里下的指令是对机器人说的，不是自己
+            # 的承诺；真人私聊里的系统消息等不算。已知限制：机器人还没说过话的全新私聊里，他的
+            # 第一句话可能入箱，由提示词规则兜底。
             return
         if len(" ".join(item.text.split())) < OWNER_SAID_MIN_CHARS:
             return
@@ -347,8 +349,8 @@ class _Round:
         if item.deleted:
             await self.recall(item.message_id)
             return
-        if item.chat_kind == "p2p" and item.sender_type != "user":
-            entry["b"] = 1  # 私聊对方是机器人或应用：见 `owner_said`
+        if item.chat_kind == "p2p" and item.sender_type == "app" and item.msg_type != "system":
+            entry["b"] = 1  # 对方以应用身份在私聊里发过言：这是与机器人的会话，见 `owner_said`
         if item.sender_type == "user" and item.sender_id == owner:
             if await sent.ours(self.session, self.bot_id, item.message_id):
                 # 审批通过后平台代他发的：发送人是所有者，但不是他亲自发言——不压这个会话，
