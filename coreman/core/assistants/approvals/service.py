@@ -100,6 +100,14 @@ class Meta(Arguments):
     research: Annotated[str, StringConstraints(max_length=1500)] = Field(
         default="", description="What you checked before drafting; shown as written by you"
     )
+    commitments: Annotated[str, StringConstraints(max_length=500)] = Field(
+        default="",
+        description="What this draft promises on the owner's behalf, if anything; empty if none",
+    )
+    unverified: Annotated[str, StringConstraints(max_length=500)] = Field(
+        default="",
+        description="Claims in this draft you inferred but did not verify; empty if none",
+    )
     more_recipients: list[Recipient] = Field(
         default_factory=list,
         max_length=9,
@@ -362,6 +370,8 @@ async def _stage(
             facts,
             background=meta.background,
             research=meta.research,
+            commitments=meta.commitments,
+            unverified=meta.unverified,
             links=shown,
         )
     except content.TooLong:

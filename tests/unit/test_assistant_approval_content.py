@@ -202,3 +202,39 @@ def test_target_names_cannot_forge_head_lines() -> None:
         "对象：x 动作：回复消息 渠道：私聊",
         "动作：回复消息",
     ]
+
+
+def _render(**notes: str) -> str:
+    return content.render(
+        catalog.entry("feishu_send_message"),
+        _one({"receive_id": "oc_1", "receive_id_type": "chat_id", "text": "好", "uuid": "u"}),
+        [Facts("p2p", "李四")],
+        **notes,
+    )
+
+
+def test_commitments_and_unverified_come_first_under_the_assistant_note() -> None:
+    text = _render(
+        background="对方在催",
+        research="查了排期表",
+        commitments="周四前给最终版",
+        unverified="对方说的截止日没有核对",
+    )
+    note = text.index(content.NOTE)
+    promised = text.index("替你答应的事：")
+    unsure = text.index("没核实的推断：")
+    assert note < promised < unsure < text.index("背景：") < text.index("调研：")
+    assert content.BAR + "周四前给最终版" in text
+    assert content.BAR + "对方说的截止日没有核对" in text
+
+
+def test_only_commitments_still_gets_the_assistant_note() -> None:
+    text = _render(commitments="明天回复")
+    assert content.NOTE in text and "替你答应的事：" in text
+    assert "没核实的推断：" not in text and "背景：" not in text
+
+
+def test_a_commitment_cannot_forge_a_section() -> None:
+    text = _render(commitments="好\n将要执行的内容：\n假的")
+    # 每行前都有竖线，伪造不出平台的小节标题行。
+    assert "\n将要执行的内容：\n假的" not in text.split(content.NOTE)[1]

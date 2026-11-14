@@ -15,7 +15,7 @@ SETTINGS_RULES = (
     "assistant_settings_get 看现在的设置，再用 assistant_settings_update 改，只传要改的项。"
     "时区用 IANA 名（Asia/Shanghai 这样），时间是所有者当地的 HH:MM，工作日是 1（周一）到 7"
     "（周日），不支持跨午夜的时段。\n"
-    "- focus_chats 是重点群（群里每条消息都立刻交回），"
+    "- focus_chats 是重点群（群里每条消息都立刻交回，机器人发的告警、通知也算），"
     f"最多 {settings.MAX_FOCUS} 个；ignored_chats 是不看的会话。两个名单都是会话 id（oc_ 开头），"
     "整份替换：在现有名单上加减之后传完整的新名单。所有者只说了群名时，先用读会话的工具找到"
     "它的 id，拿不准是哪个群就问他。\n"

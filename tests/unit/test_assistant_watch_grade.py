@@ -67,7 +67,19 @@ TABLE: list[tuple[str, Item, timedelta | None, Level]] = [
     ("所有者自己发的", item(sender_id=OWNER), None, Level.IGNORE),
     ("所有者自己在私聊里发的", item(**P2P, sender_id=OWNER), None, Level.IGNORE),
     ("群里没 @ 他的机器人消息", item(**BOT), None, Level.IGNORE),
-    ("重点群里没 @ 他的机器人消息", item(chat_id="oc_focus", **BOT), None, Level.IGNORE),
+    ("重点群里没 @ 他的机器人消息", item(chat_id="oc_focus", **BOT), None, Level.IMMEDIATE),
+    (
+        "他刚在重点群里发过言时机器人的消息",
+        item(chat_id="oc_focus", **BOT),
+        timedelta(minutes=1),
+        Level.HOLD,
+    ),
+    (
+        "既是重点又被忽略的群里机器人的消息",
+        item(chat_id="oc_noise", **BOT),
+        None,
+        Level.IGNORE,
+    ),
     ("所有者设为忽略的会话", item(chat_id="oc_noise", **AT_ME), None, Level.IGNORE),
     ("忽略的会话里他刚发过言", item(chat_id="oc_noise"), timedelta(minutes=1), Level.IGNORE),
     ("系统消息", item(**P2P, msg_type="system", sender_type=""), None, Level.IGNORE),
@@ -106,3 +118,10 @@ def test_release_times() -> None:
     # 压着：到他这次发言之后 10 分钟。
     held = Context(now=NOW, owner_spoke_at=spoke)
     assert release_at(Level.HOLD, held, batch_until=soon) == spoke + timedelta(minutes=10)
+
+
+def test_a_focus_chat_does_not_resurrect_recalled_or_own_messages() -> None:
+    quiet = Context(now=NOW)
+    assert grade(item(chat_id="oc_focus", **BOT, deleted=True), prefs(), quiet) is Level.IGNORE
+    assert grade(item(chat_id="oc_focus", sender_id=OWNER), prefs(), quiet) is Level.IGNORE
+    assert grade(item(chat_id="oc_focus", msg_type="system"), prefs(), quiet) is Level.IGNORE
