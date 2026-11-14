@@ -49,6 +49,12 @@ defineExpose({ tab, load })
       <h1>{{ t('menu.myAssistant') }}</h1>
       <p class="cm-page-intro">
         {{ t('assistant.page.intro') }}
+        <a
+          href="/assistant-intro/index.html"
+          target="_blank"
+          rel="noopener"
+          data-test="assistant-story"
+        >{{ t('assistant.page.story') }}</a>
       </p>
       <el-button
         :loading="loading"

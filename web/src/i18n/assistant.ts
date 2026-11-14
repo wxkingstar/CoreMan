@@ -4,6 +4,7 @@ export const assistantZh = {
   page: {
     intro: '以你的飞书身份工作的个人助理。这里的内容只有你本人看得到，管理员也看不到。',
     refresh: '刷新',
+    story: '用一个故事看懂它',
     tabs: { attention: '等你出手', jobs: '正在跑', followups: '待跟进', recent: '最近落地', notes: '知识库', settings: '设置' },
     locked: '加密保存的个人内容已不可读取（数据密钥已销毁），下面只显示编号、状态与时间。',
     lockedText: '（内容已不可读取）',
@@ -157,6 +158,7 @@ export const assistantEn: typeof assistantZh = {
   page: {
     intro: 'A personal assistant that works as you in Feishu. Only you can see what is on this page; administrators cannot.',
     refresh: 'Refresh',
+    story: 'See how it works in one story (Chinese)',
     tabs: { attention: 'Needs you', jobs: 'Running', followups: 'Follow-ups', recent: 'Recently settled', notes: 'Knowledge base', settings: 'Settings' },
     locked: 'Your encrypted personal content can no longer be read (the data key was destroyed). Only numbers, states and times are shown below.',
     lockedText: '(content can no longer be read)',
@@ -310,6 +312,7 @@ export const assistantJa: typeof assistantZh = {
   page: {
     intro: 'あなたの飛書アカウントとして働く個人アシスタントです。このページの内容は本人だけが閲覧でき、管理者にも見えません。',
     refresh: '更新',
+    story: 'ストーリーで仕組みを見る（中国語）',
     tabs: { attention: '対応待ち', jobs: '実行中', followups: 'フォローアップ', recent: '最近の結果', notes: 'ナレッジベース', settings: '設定' },
     locked: '暗号化された個人データは読み取れなくなりました（データ鍵は破棄済み）。以下は番号・状態・時刻のみ表示します。',
     lockedText: '（内容は読み取れません）',
