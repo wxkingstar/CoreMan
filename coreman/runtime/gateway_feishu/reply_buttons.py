@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.chat import busy_choice
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
-from coreman.core.db.models import FeishuDelivery, OutboxItem, TaskStream
+from coreman.core.db.models import FeishuDelivery, InboundEvent, OutboxItem, Task, TaskStream
 from coreman.core.feishu_cards.reply_buttons import UsedRow, batch_actions, mark_card
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuError
@@ -66,6 +66,8 @@ Outcome = Literal[
     "choice_other",
     "switch_runtime",
     "switch_wait",
+    # 确认卡（写操作、定时任务）由发起人以外的人点了。
+    "not_initiator",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -174,6 +176,28 @@ def _card_click(message: InboundMessage) -> Outcome | None:
     return None
 
 
+# 只有发起人能点的确认卡：按钮 value 的 task_id 是 `personal:<发起那条消息的任务>`。
+_INITIATOR_ONLY = frozenset(
+    {"write_confirm", "write_cancel", "write_resend", "schedule_confirm", "schedule_cancel"}
+)
+
+
+async def _initiator_clicked(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> bool | None:
+    """点的人是不是发起那条消息的人。只为选 toast：真正的校验在 worker，这里认不出返回 None。"""
+    kind, _, raw_id = str((message.card_action or {}).get("task_id") or "").partition(":")
+    if kind != "personal" or not raw_id.isdigit():
+        return None
+    origin = await session.get(Task, int(raw_id))
+    if origin is None or origin.bot_id != bot_id or origin.inbound_event_id is None:
+        return None
+    event = await session.get(InboundEvent, origin.inbound_event_id)
+    if event is None or not event.sender_platform_user_id:
+        return None
+    return event.sender_platform_user_id == message.sender.platform_user_id
+
+
 async def admit(
     session: AsyncSession,
     bot: InboundBot,
@@ -188,7 +212,14 @@ async def admit(
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        return _busy_click(message) or _card_click(message)
+        outcome = _busy_click(message) or _card_click(message)
+        if outcome in _INITIATOR_ONLY:
+            initiator = await _initiator_clicked(session, bot.id, message)
+            if initiator is None:
+                return None  # 认不出发起人：不说「已确认」，只回兜底的「已收到」
+            if not initiator:
+                return "not_initiator"
+        return outcome
     return "queued" if task is not None else "duplicate"
 
 

@@ -92,6 +92,7 @@ TOASTS: dict[str, dict[str, str]] = {
     "choice_other": {"type": "info", "content": "好的，直接发消息告诉我"},
     "switch_runtime": {"type": "info", "content": "正在切换运行时…"},
     "switch_wait": {"type": "info", "content": "好的，继续等额度恢复"},
+    "not_initiator": {"type": "warning", "content": "只有发起人可以确认"},
 }
 # 认不出的点击（新加的卡片漏配也一样）：至少说一句收到了，不只是一个对勾。
 DEFAULT_TOAST = {"type": "info", "content": "已收到"}
