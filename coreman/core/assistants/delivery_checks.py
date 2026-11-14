@@ -9,7 +9,7 @@ message_id)`：提醒条目的 `message_id` 存的是去重键，真实的消息
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, text, update
@@ -147,6 +147,56 @@ async def followups_due(
                 "review_on": row.review_on.isoformat() if row.review_on else None,
                 "title": row.title_enc,
             },
+        )
+    return added
+
+
+# 每日例行在当天第一个摘要时点之前这么久起生成，第一轮摘要带得上；每周例行在最后一个时点之前。
+MORNING_LEAD = timedelta(minutes=30)
+WEEKLY_LEAD = timedelta(minutes=60)
+
+
+def _at(day: date, slot: str, prefs: AssistantSettings) -> datetime:
+    """所有者当地 `day` 的 `slot`（HH:MM）对应的 UTC 时刻。"""
+    hour, minute = (int(part) for part in slot.split(":"))
+    zone = assistant_settings.zone(prefs)
+    return datetime.combine(day, time(hour, minute), tzinfo=zone).astimezone(UTC)
+
+
+async def routines(
+    session: AsyncSession, bot_id: uuid.UUID, prefs: AssistantSettings, now: datetime
+) -> int:
+    """每日与每周例行的提醒条目，各自到点生成一次。不调飞书：日程与任务由助理在那一轮里自己查。"""
+    if prefs.cold_start_done_at is None:
+        return 0
+    slots = assistant_settings.digest_slots(prefs)
+    if not slots:
+        return 0
+    today = assistant_settings.local_today(prefs, now)
+    added = 0
+    if now >= _at(today, slots[0], prefs) - MORNING_LEAD:
+        added += await add_reminder(
+            session,
+            bot_id,
+            f"morning_brief:{today.isoformat()}",
+            level="batch",
+            summary={"reminder": "morning_brief"},
+            now=now,
+        )
+    workdays = sorted(prefs.workdays or [])
+    if (
+        workdays
+        and today.isoweekday() == workdays[-1]
+        and now >= _at(today, slots[-1], prefs) - WEEKLY_LEAD
+    ):
+        year, week, _ = today.isocalendar()
+        added += await add_reminder(
+            session,
+            bot_id,
+            f"weekly_review:{year}-W{week:02d}",
+            level="batch",
+            summary={"reminder": "weekly_review"},
+            now=now,
         )
     return added
 
@@ -466,6 +516,7 @@ async def sweep(
     counts = {
         "assistant_followups_due": await followups_due(session, bot.id, today, now),
         "assistant_marks_stale": await stale_marks(session, bot.id, today, now),
+        "assistant_routines": await routines(session, bot.id, prefs, now),
         "assistant_reauth_reminded": await remind_reauth(session, bot, prefs, row, now),
         "assistant_approvals_auto_withdrawn": 0,
         "assistant_recalls_noticed": 0,

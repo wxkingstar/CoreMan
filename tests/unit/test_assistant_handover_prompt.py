@@ -73,3 +73,11 @@ def test_rules_say_what_to_do_with_the_owners_own_messages() -> None:
     assert handover.OWNER_SAID_TITLE in text
     for phrase in ("promised", "waiting", "不起草回复", "先用 followup_list 看有没有同一件事"):
         assert phrase in text
+
+
+def test_rules_say_what_the_two_routines_are() -> None:
+    text = handover_prompt.RULES
+    assert handover.REMINDERS["morning_brief"] in text
+    assert handover.REMINDERS["weekly_review"] in text
+    for phrase in ("今明两天的日程", "到期的任务", "没有就什么都不记", "四类各记一条"):
+        assert phrase in text

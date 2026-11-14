@@ -179,6 +179,7 @@ async def test_each_assistant_is_checked_every_five_minutes(
         counts = await checks.tick(factory, CIPHER, NOON)
     assert counts["assistant_marks_stale"] == 1 and counts["assistant_reauth_reminded"] == 1
     assert counts["assistant_followups_due"] == 0 and counts["assistant_recalls_noticed"] == 0
+    assert counts["assistant_routines"] == 1
     assert feishu.calls == ["im.mget"]
     assert await next_sweep(db_session, bot) == NOON + checks.SWEEP_EVERY
     assert SECRET not in str(logs)
@@ -189,7 +190,8 @@ async def test_each_assistant_is_checked_every_five_minutes(
     later = await checks.tick(factory, CIPHER, NOON + timedelta(minutes=5))
     assert not any(later.values()) and feishu.calls == ["im.mget", "im.mget"]
     reminders = [row for row in await inbox_rows(db_session, bot) if row.kind == "reminder"]
-    assert [row.message_id for row in reminders] == [f"mark:om_old:{DAY}"]
+    # 中午已过第一个摘要时点前 30 分钟：当天的每日例行也在这一轮入了箱，只入一次。
+    assert [row.message_id for row in reminders] == [f"mark:om_old:{DAY}", f"morning_brief:{DAY}"]
     assert await raw(db_session, REMINDERS, bot=bot.id) == 1
 
 
