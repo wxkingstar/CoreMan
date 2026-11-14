@@ -318,9 +318,10 @@ async def test_around_the_clock_the_day_is_compiled_after_midnight(
     await noted(db_session, bot)
     day = prefs.worked_on
     assert day is not None
-    # 同一天里一直在班：不整理。
-    assert await compiling.step(db_session, bot, prefs, now + timedelta(hours=1)) is None
-    tomorrow = settings.next_midnight(prefs, now) + timedelta(minutes=5)
+    # 同一天里一直在班：不整理。取到零点前的一半，免得临近所有者零点时跑测试跨到第二天。
+    midnight = settings.next_midnight(prefs, now)
+    assert await compiling.step(db_session, bot, prefs, now + (midnight - now) / 2) is None
+    tomorrow = midnight + timedelta(minutes=5)
     assert settings.on_shift(prefs, tomorrow)
     assert await compiling.step(db_session, bot, prefs, tomorrow) == "queued"
     assert prefs.compiled_on == day
