@@ -17,6 +17,7 @@ def test_rules_name_the_tools_commands_and_limits() -> None:
     for word in ("默认全天候", "always_on", "digest_times", "quiet_start", "22:00–08:00"):
         assert word in text
     assert f"最多 {settings.MAX_FOCUS} 个" in text
+    assert "机器人发的告警、通知也算" in text
 
 
 def test_rules_are_stable_text() -> None:

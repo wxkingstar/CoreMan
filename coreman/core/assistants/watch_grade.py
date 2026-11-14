@@ -77,15 +77,16 @@ def grade(item: Item, settings: AssistantSettings, context: Context) -> Level:
         return Level.IGNORE
     mentioned = owner in item.mentions
     private = item.chat_kind == "p2p"
-    if not private and not human and not mentioned:
-        # 群里没 @ 他的机器人消息。
+    focus = item.chat_id in (settings.focus_chats_enc or [])
+    if not private and not human and not mentioned and not focus:
+        # 群里没 @ 他的机器人消息。重点群除外：他要这个群的每一条，告警群里说话的多半是机器人。
         return Level.IGNORE
     if _holding(context):
         return Level.HOLD
     if private:
         # 私聊里机器人发来的（审批待办等通知）不急，攒批。
         return Level.IMMEDIATE if human else Level.BATCH
-    if mentioned or item.chat_id in (settings.focus_chats_enc or []):
+    if mentioned or focus:
         return Level.IMMEDIATE
     return Level.BATCH
 
