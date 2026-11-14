@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import kinds
+from coreman.core.assistants import kinds, records
 from coreman.core.cloud_proxy import aliyun, risk, tower_gate
 from coreman.core.cloud_proxy.policy import Capability
 from coreman.core.config import Settings
@@ -465,6 +465,28 @@ async def handle(
             policy=settings.cloud_proxy_policy,
         )
         level = "write_high" if assessment.high else "write_low"
+        if not assessment.high and records.is_assistant(scope.bot):
+            # 个人助理所有者在场的一轮：低风险写同样要人工确认。不转发，暂存进本轮的待确认
+            # 批次，本轮结束时给所有者发确认卡，点确认后由平台原样执行（`confirm`）。高风险写
+            # 照下面的 428 走 Tower；普通员工的低风险写照旧直接转发。
+            from coreman.core.cloud_proxy import confirm  # 依赖目录代理的确认卡，延迟导入
+
+            proposal = await confirm.propose(
+                session,
+                task=scope.task,
+                bot=scope.bot,
+                user=scope.user,
+                product=product_key,
+                params=params,
+                reasons=assessment.reasons,
+            )
+            return await done(
+                JSONResponse(proposal.body, status_code=proposal.status),
+                action=action,
+                risk_level=level,
+                outcome="proposed" if proposal.status == 202 else "denied",
+                request_hash=proposal.digest,
+            )
         if assessment.high:
             target = f"aliyun-{product_key}"
             caller = scope.bot.bot_key
@@ -558,6 +580,128 @@ async def handle(
     )
 
 
+# 所有者在确认卡上确认后执行的低风险写：审计结局带这个前缀，与无人在场批准后执行的（无前缀、
+# 记 Tower 审批编号）分开。
+CONFIRMED_PREFIX = "confirmed_"
+
+
+class _StagedCall:
+    """平台代为执行一次暂存的写：所有者在 Tower 批准的（无人在场），或在确认卡上确认的（在场）。
+
+    与在场调用同一套判定：代理配置、产品与 endpoint、类别（仍须是写）、风险（重新评估，变成
+    高风险就不执行）；审计行在出站前落盘，出站后补上结局，与核销过令牌的高风险写同一做法。
+    参数是暂存的那一份，不经模型。
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        settings: Settings,
+        task: Task,
+        bot: Bot,
+        user: User,
+        product_key: str,
+        params: dict[str, str],
+        approval_id: str | None,
+        request_hash: str | None,
+        prefix: str,
+        http: ClientFactory,
+    ) -> None:
+        self._session = session
+        self._settings = settings
+        self._product_key = product_key
+        self._params = params
+        self._prefix = prefix
+        self._http = http
+        self._started = time.monotonic()
+        self._audit: dict[str, Any] = {
+            "task_id": task.id,
+            "bot_id": bot.id,
+            "user_id": user.id,
+            "product": product_key,
+            "approval_id": approval_id,
+            "request_hash": request_hash,
+        }
+        action = str(params.get("Action") or "")
+        self._action = action
+        self._logged = action[:64] if _ACTION_NAME.fullmatch(action) else "<invalid>"
+
+    def _elapsed(self) -> int:
+        return int((time.monotonic() - self._started) * 1000)
+
+    async def _record(self, risk_level: str, outcome: str) -> CloudCall:
+        row = CloudCall(
+            **self._audit,
+            action=self._logged,
+            risk=risk_level,
+            outcome=self._prefix + outcome,
+            status_code=None,
+            duration_ms=self._elapsed(),
+        )
+        self._session.add(row)
+        await self._session.commit()
+        return row
+
+    async def check(self) -> tuple[dict[str, Any] | None, _Signer | None]:
+        """能不能执行：不能时返回原因（判不出写、变成高风险的记一行 denied 审计）。只做读调用。"""
+        settings = self._settings
+        if not settings.cloud_proxy_ready:
+            return {"error": "cloud_proxy_disabled"}, None
+        product = aliyun.PRODUCTS.get(self._product_key)
+        if product is None or aliyun.endpoint_for(product, settings.cloud_proxy_policy) is None:
+            return {"error": "product_not_configured"}, None
+        if aliyun.classify(product, self._action) != "write":
+            await self._record("write_high", "denied")
+            return {"error": "action_not_allowed"}, None
+        signer = _Signer(settings, self._http)
+        assessment = await risk.assess(
+            self._product_key,
+            self._action,
+            self._params,
+            _Reader(signer),
+            now=datetime.now(UTC),
+            policy=settings.cloud_proxy_policy,
+        )
+        if assessment.high:
+            # 批准（确认）之后云上的状态或部署策略变了：现在执行算高风险，所有者同意的不是这样
+            # 一次操作。
+            await self._record("write_high", "denied")
+            return {"error": "risk_changed", "risk_reasons": list(assessment.reasons)}, None
+        return None, signer
+
+    async def run(self) -> dict[str, Any]:
+        refused, signer = await self.check()
+        if refused is not None or signer is None:
+            return refused or {"error": "cloud_proxy_disabled"}
+        product = aliyun.PRODUCTS[self._product_key]
+        row = await self._record("write_low", "unreachable")
+        try:
+            up = await signer.send(product, self._params)
+        except (httpx.HTTPError, TimeoutError, ValueError):
+            return {
+                "error": "aliyun_unreachable",
+                "hint": "请求可能已经到达阿里云：先查询核对再决定。",
+            }
+        await self._session.execute(
+            update(CloudCall)
+            .where(CloudCall.id == row.id)
+            .values(
+                outcome=self._prefix + ("ok" if 200 <= up.status < 300 else "http_error"),
+                status_code=up.status,
+                duration_ms=self._elapsed(),
+            )
+        )
+        await self._session.commit()
+        text = redact(up.text, signer.access_key_id)
+        return {
+            "status": up.status,
+            "ok": 200 <= up.status < 300,
+            "body": text[:APPROVED_RESULT_CHARS],
+            **({"truncated": True} if len(text) > APPROVED_RESULT_CHARS else {}),
+        }
+
+
 async def execute_approved(
     session: AsyncSession,
     *,
@@ -572,78 +716,88 @@ async def execute_approved(
 ) -> dict[str, Any]:
     """个人助理无人在场时暂存、所有者已批准的一次低风险写：由平台以所有者身份原样执行。
 
-    调用方已核销审批令牌，并核对过助理与所有者。这里走与在场调用相同的判定：产品与 endpoint、
-    类别（仍须是写）、风险（重新评估，变成高风险就不执行）；审计行在出站前落盘，出站后补上结局，
-    与核销过令牌的高风险写同一做法。参数是暂存的那一份，不经模型。
+    调用方已核销审批令牌，并核对过助理与所有者。判定与审计见 `_StagedCall`；审计行记 Tower 的
+    审批编号，结局不带前缀。
 
     Returns:
         `{"status": 上游状态码, "ok": 是否 2xx, "body": 脱敏并截断的响应正文}`；没有发出请求时是
         `{"error": 代码, …}`
     """
-    started = time.monotonic()
-    audit: dict[str, Any] = {
-        "task_id": task.id,
-        "bot_id": bot.id,
-        "user_id": user.id,
-        "product": product_key,
-        "approval_id": approval_id,
-    }
-    action = str(params.get("Action") or "")
-    logged = action[:64] if _ACTION_NAME.fullmatch(action) else "<invalid>"
+    return await _StagedCall(
+        session,
+        settings=settings,
+        task=task,
+        bot=bot,
+        user=user,
+        product_key=product_key,
+        params=params,
+        approval_id=approval_id,
+        request_hash=None,
+        prefix="",
+        http=http,
+    ).run()
 
-    async def record(risk_level: str, outcome: str, status_code: int | None) -> CloudCall:
-        row = CloudCall(
-            **audit,
-            action=logged,
-            risk=risk_level,
-            outcome=outcome,
-            status_code=status_code,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
-        session.add(row)
-        await session.commit()
-        return row
 
-    if not settings.cloud_proxy_ready:
-        return {"error": "cloud_proxy_disabled"}
-    product = aliyun.PRODUCTS.get(product_key)
-    if product is None or aliyun.endpoint_for(product, settings.cloud_proxy_policy) is None:
-        return {"error": "product_not_configured"}
-    if aliyun.classify(product, action) != "write":
-        await record("write_high", "denied", None)
-        return {"error": "action_not_allowed"}
-    signer = _Signer(settings, http)
-    assessment = await risk.assess(
-        product_key,
-        action,
-        params,
-        _Reader(signer),
-        now=datetime.now(UTC),
-        policy=settings.cloud_proxy_policy,
-    )
-    if assessment.high:
-        # 批准之后云上的状态或部署策略变了：现在执行算高风险，所有者批的不是这样一次操作。
-        await record("write_high", "denied", None)
-        return {"error": "risk_changed", "risk_reasons": list(assessment.reasons)}
-    row = await record("write_low", "unreachable", None)
-    try:
-        up = await signer.send(product, params)
-    except (httpx.HTTPError, TimeoutError, ValueError):
-        return {"error": "aliyun_unreachable", "hint": "请求可能已经到达阿里云：先查询核对再决定。"}
-    await session.execute(
-        update(CloudCall)
-        .where(CloudCall.id == row.id)
-        .values(
-            outcome="ok" if 200 <= up.status < 300 else "http_error",
-            status_code=up.status,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
-    )
-    await session.commit()
-    text = redact(up.text, signer.access_key_id)
-    return {
-        "status": up.status,
-        "ok": 200 <= up.status < 300,
-        "body": text[:APPROVED_RESULT_CHARS],
-        **({"truncated": True} if len(text) > APPROVED_RESULT_CHARS else {}),
-    }
+async def check_confirmed(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    task: Task,
+    bot: Bot,
+    user: User,
+    product_key: str,
+    params: dict[str, str],
+    request_hash: str,
+    http: ClientFactory = aliyun_client,
+) -> dict[str, Any] | None:
+    """确认卡上的一项现在还能不能执行（整批执行前逐项复查，任一项不行整批都不执行）。
+
+    与 `execute_confirmed` 同一套判定，不发写请求；不能执行时返回原因，审计记 `confirmed_denied`。
+    """
+    refused, _ = await _StagedCall(
+        session,
+        settings=settings,
+        task=task,
+        bot=bot,
+        user=user,
+        product_key=product_key,
+        params=params,
+        approval_id=None,
+        request_hash=request_hash,
+        prefix=CONFIRMED_PREFIX,
+        http=http,
+    ).check()
+    return refused
+
+
+async def execute_confirmed(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    task: Task,
+    bot: Bot,
+    user: User,
+    product_key: str,
+    params: dict[str, str],
+    request_hash: str,
+    http: ClientFactory = aliyun_client,
+) -> dict[str, Any]:
+    """个人助理所有者在场时暂存、所有者在确认卡上确认的一次低风险写：以所有者身份原样执行。
+
+    调用方已核对点击人是所有者、助理仍启用，并把这张卡记为已提交（只执行一次）。发出前再判一次
+    类别与风险；审计行的 `request_hash` 是暂存时的摘要（与暂存那一行 `proposed` 对得上），结局带
+    `confirmed_` 前缀。返回值同 `execute_approved`。
+    """
+    return await _StagedCall(
+        session,
+        settings=settings,
+        task=task,
+        bot=bot,
+        user=user,
+        product_key=product_key,
+        params=params,
+        approval_id=None,
+        request_hash=request_hash,
+        prefix=CONFIRMED_PREFIX,
+        http=http,
+    ).run()
