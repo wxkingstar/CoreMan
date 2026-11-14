@@ -21,9 +21,9 @@ from coreman.core.systems_catalog import context, proxy, service, uploads
 from coreman.core.systems_catalog.context import TRUST, Context
 from coreman.core.systems_catalog.search import normalize
 
-MAX_CALLS = 40
+MAX_CALLS = 2000
 # Proxied calls have their own, smaller allowance: each one reaches the business system.
-MAX_PROXY_CALLS = 100
+MAX_PROXY_CALLS = 3000
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
 MODULE_PAGE = 25
@@ -165,7 +165,8 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
             "message": f"本轮{'代理调用' if counter == 'proxy_calls' else '目录调用'}"
             f"已超过 {limit} 次。停止调用这些工具，用已经拿到的信息完成回复。",
         }
-    if seen[fingerprint] > MAX_REPEATS:
+    # Proxied calls may repeat: polling an async job reads the same operation many times.
+    if name != "systems_call" and seen[fingerprint] > MAX_REPEATS:
         return {
             "error": "repeated_call",
             "stop": True,

@@ -184,6 +184,10 @@ async def test_read_write_and_risk_policy(
     # Only the encrypted value is kept with the task.
     assert set(stored) == {"enc", "expires_at", "auth_mode", "token_id"}
     assert next(iter(used)) not in str(task.payload)
+    # Polling a job repeats the same read; proxied calls have no repeat limit.
+    poll = {"system": "stock", "operation_id": "listDocuments", "query": {"status": "confirmed"}}
+    for _ in range(3):
+        assert (await call(client, auth, "systems_call", poll))["status"] == 200
 
 
 @pytest.mark.parametrize("kind", ORIGIN_KINDS)
