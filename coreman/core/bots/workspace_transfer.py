@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -40,6 +41,13 @@ MAX_CHUNK = 2 * 1024 * 1024
 # 512KB 的块 base64 加原文仍在 call_agent 的 4MB 响应上限内，2MB 的块会超出、换机失败。
 LEGACY_READ_CHUNK = 512 * 1024
 MAX_FILES = 50000
+# 经平台中转时的总大小上限，与节点一致；直连失败后只有在这个范围内才退回中转。
+MAX_TOTAL = 4 * 1024**3
+# 局域网直连（两台节点在同一网络区）时放宽到 20 万个文件、32G，与节点一致。
+DIRECT_MAX_FILES = 200000
+# 直连拉取的进度轮询间隔；连续这么久没有新字节就判定卡住。
+DIRECT_POLL_SECONDS = 1.0
+DIRECT_STALL_SECONDS = 120
 SESSION_COPY_TIMEOUT = 5 * 60
 # 各会话的文件互不相干，并行搬；每个会话内部仍按块串行。
 SESSION_COPY_CONCURRENCY = 4
@@ -201,6 +209,22 @@ async def target_path(
     return str(path)
 
 
+def direct_route(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any] | None:
+    """两台节点都在 config.json 配了同一个网络区（如同一间办公室的局域网）且都支持整包传：
+    返回源节点的直连信息，压缩包由目标节点直接拉取；否则 None，照旧经平台中转。"""
+    here, there = source.get("workspace_direct"), target.get("workspace_direct")
+    if not (isinstance(here, dict) and isinstance(there, dict)):
+        return None
+    if not (source.get("workspace_pack") and target.get("workspace_pack")):
+        return None
+    zone = here.get("zone")
+    if not zone or zone != there.get("zone") or not here.get("address"):
+        return None
+    if not isinstance(here.get("fingerprint"), str):
+        return None
+    return here
+
+
 def revision(repo: dict[str, Any] | None) -> dict[str, Any] | None:
     """仓库描述里决定克隆结果的部分；bundle 的字节每次打包可能不同，不参与比较。"""
     return {k: v for k, v in repo.items() if k != "bundle"} if repo else None
@@ -257,6 +281,17 @@ async def copy_files(
     )
     if not source_capability.get("workspace_read_raw"):
         chunk_size = min(chunk_size, LEGACY_READ_CHUNK)
+    route = direct_route(source_capability, capability)
+    if route is not None:
+        # 直连时两端按放宽后的上限导出、校验清单与压缩包。
+        src = {**src, "limits": "direct"}
+        dst = {**dst, "limits": "direct"}
+    log.info(
+        "workspace_transfer_route",
+        bot_id=str(bot.id),
+        route="direct" if route else "relay",
+        zone=route.get("zone") if route else None,
+    )
     export = await call_agent(source, cipher, "workspace-export", {**src, "git": git_aware})
     cloned: list[dict[str, Any]] = []
     failed: list[str] = []
@@ -276,7 +311,7 @@ async def copy_files(
         if any(revision(again.get(repo["path"])) != revision(repo) for repo in cloned):
             raise ApiError(409, 409, "源文件在复制时发生变化，请重试")
     manifest = export.get("manifest")
-    if not isinstance(manifest, list) or len(manifest) > MAX_FILES:
+    if not isinstance(manifest, list) or len(manifest) > (DIRECT_MAX_FILES if route else MAX_FILES):
         raise ApiError(502, 502, "源文件清单无效")
     if not capability.get("workspace_replace") and (
         occupied or any(".git" in PurePosixPath(entry["path"]).parts for entry in manifest)
@@ -284,7 +319,7 @@ async def copy_files(
         raise ApiError(409, 409, "目标运行时版本较旧，不能覆盖已有目录或复制 .git，请先升级运行时")
     await call_agent(target, cipher, "workspace-import", {**dst, "manifest": manifest})
     if source_capability.get("workspace_pack") and capability.get("workspace_pack"):
-        await transfer_pack(source, target, cipher, src, dst, manifest, chunk_size)
+        await transfer_pack(source, target, cipher, src, dst, manifest, chunk_size, route=route)
     else:
         await transfer_each_file(source, target, cipher, src, dst, manifest, chunk_size)
     await call_agent(
@@ -309,19 +344,35 @@ async def transfer_pack(
     dst: dict[str, Any],
     manifest: list[dict[str, Any]],
     chunk_size: int,
+    *,
+    route: dict[str, Any] | None = None,
 ) -> None:
     """两端都支持时整包传：源节点把清单里的文件打成一个压缩包，按块读走、写到目标，目标核对
-    大小与哈希后只按清单解开。调用次数从「每个文件至少一读一写」降到「每块一读一写」。"""
+    大小与哈希后只按清单解开。调用次数从「每个文件至少一读一写」降到「每块一读一写」。
+
+    `route` 是同一网络区里源节点的直连信息：压缩包由目标节点直接从源节点拉取，平台只下发令牌
+    与核对结果。拉不通且目录在中转上限之内时退回按块中转，超出上限就停下（绑定不变）。"""
     if not any("link" not in entry for entry in manifest):
         return
     job = {**src, "transfer_id": dst["transfer_id"]}
+    token = secrets.token_hex(32) if route else None
     try:
-        packed = await call_agent(
-            source, cipher, "workspace-pack", {**job, "action": "create", "manifest": manifest}
-        )
+        create: dict[str, Any] = {**job, "action": "create", "manifest": manifest}
+        if token:
+            create["serve_token"] = token
+        packed = await call_agent(source, cipher, "workspace-pack", create)
         size, pack_hash = packed.get("size"), packed.get("hash")
         if not isinstance(size, int) or size <= 0 or not isinstance(pack_hash, str):
             raise ApiError(502, 502, "源文件压缩包无效")
+        if route is not None and token is not None:
+            if await direct_fetch(source, target, cipher, dst, route, token, packed, manifest):
+                await call_agent(
+                    target,
+                    cipher,
+                    "workspace-unpack",
+                    {**dst, "action": "extract", "size": size, "hash": pack_hash},
+                )
+                return
 
         async def read(_: dict[str, Any], offset: int) -> dict[str, Any]:
             return await call_agent(
@@ -356,6 +407,93 @@ async def transfer_pack(
         # 源节点的暂存压缩包用完就删；删不掉也会被过期清理扫掉，不影响结果。
         with contextlib.suppress(AgentError, TimeoutError):
             await call_agent(source, cipher, "workspace-pack", {**job, "action": "remove"})
+
+
+def within_relay_limits(manifest: list[dict[str, Any]]) -> bool:
+    total = sum(int(entry.get("size") or 0) for entry in manifest if "link" not in entry)
+    return len(manifest) <= MAX_FILES and total <= MAX_TOTAL
+
+
+async def direct_fetch(
+    source: RelayServer,
+    target: RelayServer,
+    cipher: Cipher | None,
+    dst: dict[str, Any],
+    route: dict[str, Any],
+    token: str,
+    packed: dict[str, Any],
+    manifest: list[dict[str, Any]],
+) -> bool:
+    """让目标节点直接从源节点拉压缩包；拉齐返回 True。拉不通时目标节点已删掉不完整的文件，
+    目录在中转上限之内返回 False（调用方接着按块中转），否则抛出。"""
+    problem: str | None = "源节点没能开启局域网下载口"
+    if packed.get("served"):
+        problem = await run_direct_fetch(target, cipher, dst, route, token, int(packed["size"]))
+        if problem is None:
+            return True
+    log.warning(
+        "workspace_direct_failed",
+        source=str(source.id),
+        target=str(target.id),
+        zone=route.get("zone"),
+        detail=problem,
+    )
+    if within_relay_limits(manifest):
+        return False
+    raise ApiError(
+        502,
+        502,
+        f"局域网直连传输失败（{problem}），工作目录又超过经平台中转的上限（5 万个文件或 4G），"
+        "原绑定已保留；请确认两台节点在同一网络、源节点的直连端口已放行后重试",
+    )
+
+
+async def run_direct_fetch(
+    target: RelayServer,
+    cipher: Cipher | None,
+    dst: dict[str, Any],
+    route: dict[str, Any],
+    token: str,
+    size: int,
+) -> str | None:
+    """启动目标节点的后台拉取并等它结束；成功返回 None，失败返回原因。卡住不动时直接抛出：
+    后台还在写同一个文件，不能接着按块中转。"""
+    try:
+        await call_agent(
+            target,
+            cipher,
+            "workspace-unpack",
+            {
+                **dst,
+                "action": "fetch",
+                "address": route["address"],
+                "fingerprint": route["fingerprint"],
+                "token": token,
+                "size": size,
+            },
+        )
+    except AgentError as exc:
+        return exc.detail or "目标节点没能开始拉取"
+    received: object = -1
+    moved_at = asyncio.get_running_loop().time()
+    while True:
+        await asyncio.sleep(DIRECT_POLL_SECONDS)
+        state = await call_agent(
+            target, cipher, "workspace-unpack", {**dst, "action": "fetch-status"}
+        )
+        if state.get("done"):
+            return None
+        if state.get("error"):
+            return str(state["error"])[:200]
+        now = asyncio.get_running_loop().time()
+        if state.get("received") != received:
+            received, moved_at = state.get("received"), now
+        elif now - moved_at > DIRECT_STALL_SECONDS:
+            raise ApiError(
+                502,
+                502,
+                "局域网直连传输卡住超过 2 分钟，原绑定已保留；请确认两台节点之间的网络后重试",
+            )
 
 
 async def transfer_each_file(

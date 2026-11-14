@@ -39,6 +39,7 @@ from runtime_daemon.agent import (
     operation_message,
 )
 from runtime_daemon.assistant_turns import AssistantTurns
+from runtime_daemon.direct_transfer import DirectTransfer
 from runtime_daemon.lifecycle import (
     FatalConfigError,
     choose_socket_dir,
@@ -484,6 +485,7 @@ class RuntimeAgent(Agent):
         # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
         self.probe_model = ""
         self.lock = daemon.operations_lock
+        self.direct = daemon.direct
         self.http.trust_env = False
         if daemon.trust_file:
             # Same chain as the control-plane client; proxy variables stay ignored.
@@ -788,6 +790,8 @@ class Daemon:
         self.task_info: dict[str, dict] = {}
         self.capabilities = {p: {"installed": False} for p in PROVIDERS}
         self.operations_lock = threading.Lock()
+        # 局域网直连换机：配了 network_zone 与 direct_address 才有，各实例共用一个下载口。
+        self.direct = DirectTransfer.from_config(self.config, self.data_dir)
         self.stopping = asyncio.Event()
         self.http = None
         self.lock_file = None

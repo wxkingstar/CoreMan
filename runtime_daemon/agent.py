@@ -207,6 +207,8 @@ class Agent:
         # 驱动按会话存的附件与用量基线（<sessions_dir>/<会话>/）；不在守护进程里跑时为空。
         self.sessions_dir = sessions_dir
         self.digests: dict = {}
+        # 局域网直连换机（runtime_daemon/direct_transfer.py）；守护进程按 config.json 配置。
+        self.direct = None
         self.git_hosts = set(git_hosts)
         self.lock = threading.Lock()
         # 记忆目录迁移另用一把锁：聊天前也要确保布局，不能等工作目录操作的长锁。
@@ -1314,6 +1316,12 @@ class Agent:
                 "mcp_oauth": 1,
                 # 记忆放在工作目录的 .coreman-memory/，Claude 与 Codex 共用。
                 "memory_layout": 2,
+                # 同一网络区的节点之间，换机压缩包可由目标节点直接拉取，不经平台中转。
+                **(
+                    {"workspace_direct": direct}
+                    if self.direct is not None and (direct := self.direct.capability())
+                    else {}
+                ),
             }
         if kind == "status":
             tasks = self.active_tasks()
