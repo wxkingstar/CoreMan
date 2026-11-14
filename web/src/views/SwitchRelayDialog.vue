@@ -9,7 +9,7 @@ import { bots, relays } from '@/api/admin'
 import type { BotOut, RelayOut, SwitchJobOut, SwitchRelayOut } from '@/api/types'
 import QuotaBar from '@/components/QuotaBar.vue'
 import { pctNum } from '@/utils/format'
-import { backendOf, selectableRelays } from '@/utils/models'
+import { backendOf, providerIcon, providerLabel, selectableRelays } from '@/utils/models'
 
 const props = defineProps<{ bot: BotOut; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; switched: [SwitchRelayOut] }>()
@@ -76,6 +76,13 @@ const unchanged = computed(() => targetId.value === props.bot.relay_server_id &&
 const backendChanged = computed(() => !!target.value && !!model.value && backendOf(model.value) !== props.bot.backend)
 // 未安装或未登录的后端采不到额度，库里留着的是旧值，不展示。
 const hasQuota = (row: RelayOut) => !['not_installed', 'login_required'].includes(row.unavailable_reason ?? '')
+/** 快捷筛选：只看 5 小时与 7 天用量都低于 70% 的（没采到的窗口不算超）。当前和已选中的那台始终列出。 */
+const onlyAmple = ref(false)
+const AMPLE_PCT = 70
+const ample = (row: RelayOut) => [row.rate_limit_5h_used_pct, row.rate_limit_7d_used_pct].every(p => (pctNum(p) ?? 0) < AMPLE_PCT)
+const shownRelays = computed(() => onlyAmple.value
+  ? relayList.value.filter(r => r.id === props.bot.relay_server_id || r.id === targetId.value || (r.unavailable_reason === null && ample(r)))
+  : relayList.value)
 /** 状态列与运行时页同源（节点心跳里的在线与 CLI 登录状态），不用推理检查的结果。 */
 function runtimeState(row: RelayOut): { type: 'success' | 'danger' | 'warning'; label: string } {
   if (!row.runtime_online) return { type: 'danger', label: t('runtimeNodes.offline') }
@@ -216,9 +223,20 @@ defineExpose({ pick, confirm, checkTarget })
     :show-close="!saving"
     @update:model-value="emit('update:visible', $event)"
   >
+    <div class="switch-filter">
+      <el-checkbox
+        v-model="onlyAmple"
+        data-test="only-ample"
+      >
+        {{ t('bots.switch.onlyAmple') }}
+      </el-checkbox>
+      <span class="muted">{{ t('bots.switch.onlyAmpleHint') }}</span>
+    </div>
     <el-table
       v-loading="loading"
-      :data="relayList"
+      :data="shownRelays"
+      row-key="id"
+      :empty-text="onlyAmple ? t('bots.switch.noAmple') : undefined"
       max-height="360"
     >
       <el-table-column width="56">
@@ -234,49 +252,42 @@ defineExpose({ pick, confirm, checkTarget })
           </el-radio>
         </template>
       </el-table-column>
+      <!-- 名称就是「节点 / 提供方」，与提供方列重复：合成一列，图标表明是 Claude 还是 Codex。 -->
       <el-table-column
-        min-width="200"
-        :label="t('relays.name')"
+        min-width="240"
+        :label="t('bots.switch.runtime')"
       >
         <template #default="{ row }: { row: RelayOut }">
-          <div>{{ row.name }}</div>
-          <p
-            v-if="row.unavailable_reason !== null"
-            class="muted"
-          >
-            {{ t('runtimeNodes.unavailable.' + (row.unavailable_reason ?? 'unknown')) }}
-          </p>
-          <el-tag
-            v-if="row.id === bot.relay_server_id"
-            size="small"
-            type="info"
-          >
-            {{ t('bots.switch.current') }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column
-        :label="t('relays.provider')"
-        width="150"
-      >
-        <template #default="{ row }: { row: RelayOut }">
-          <div>{{ row.model_provider }}</div>
-          <!-- 后端标签按默认模型推断（后端也是按模型名定 backend 的）；没有默认模型就不猜。 -->
-          <el-tag
-            v-if="row.default_model"
-            size="small"
-            type="info"
-          >
-            {{ t(`bots.backend.${backendOf(row.default_model)}`) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column
-        :label="t('runtimeNodes.nodes')"
-        width="160"
-      >
-        <template #default="{ row }: { row: RelayOut }">
-          {{ row.runtime_name ?? '—' }}
+          <div class="relay-cell">
+            <img
+              :src="providerIcon(row.model_provider)"
+              :alt="providerLabel(row.model_provider)"
+              :title="providerLabel(row.model_provider)"
+              width="28"
+              height="28"
+            >
+            <div>
+              <div class="relay-title">
+                <span>{{ row.runtime_name ?? row.name }}</span>
+                <el-tag
+                  v-if="row.id === bot.relay_server_id"
+                  size="small"
+                  type="primary"
+                >
+                  {{ t('bots.switch.current') }}
+                </el-tag>
+              </div>
+              <div class="muted">
+                {{ providerLabel(row.model_provider) }}
+              </div>
+              <div
+                v-if="row.unavailable_reason !== null"
+                class="muted"
+              >
+                {{ t('runtimeNodes.unavailable.' + (row.unavailable_reason ?? 'unknown')) }}
+              </div>
+            </div>
+          </div>
         </template>
       </el-table-column>
       <el-table-column
@@ -513,6 +524,10 @@ defineExpose({ pick, confirm, checkTarget })
 
 <style scoped>
 .switch-form { margin-top: 12px; }
+.switch-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.relay-cell { display: flex; align-items: center; gap: 10px; }
+.relay-cell img { flex-shrink: 0; }
+.relay-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .backend-change { margin-top: 8px; }
 .switch-steps { margin: 8px 0; }
 .switch-steps ol { list-style: none; padding: 0; margin: 4px 0 0; }
