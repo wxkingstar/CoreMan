@@ -199,7 +199,7 @@ export interface AssistantPlatformSettings {
   assistant_backends: AssistantBackend[]
   /** 每个运行时节点同时跑的助理轮次上限，1–32。 */
   assistant_node_concurrency: number
-  /** 每位助理每天的轮次预算默认值，10–2000。 */
+  /** 每位助理每天的轮次预算默认值，10–20000。 */
   assistant_daily_turn_budget: number
 }
 export interface SettingsOut extends PromptSettings, Partial<AssistantPlatformSettings> {

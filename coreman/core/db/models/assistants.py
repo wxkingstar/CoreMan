@@ -323,7 +323,7 @@ class AssistantSettings(Base):
             name="shift_override",
         ),
         CheckConstraint(
-            "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 2000",
+            "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 20000",
             name="daily_turn_budget",
         ),
         CheckConstraint(

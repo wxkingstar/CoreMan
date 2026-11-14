@@ -22,8 +22,8 @@ async def test_the_platform_default_applies_until_the_owner_has_his_own(
     db_session: AsyncSession,
 ) -> None:
     bot, _ = await ready(db_session)
-    assert await delivery.default_budget(db_session) == 200
-    assert await delivery.budget_left(db_session, bot, TODAY) == 200
+    assert await delivery.default_budget(db_session) == delivery.DEFAULT_BUDGET == 2000
+    assert await delivery.budget_left(db_session, bot, TODAY) == 2000
     db_session.add(Setting(key=delivery.BUDGET_KEY, value=50))
     await db_session.commit()
     assert await delivery.budget_left(db_session, bot, TODAY) == 50
@@ -32,7 +32,7 @@ async def test_the_platform_default_applies_until_the_owner_has_his_own(
     assert await delivery.budget_left(db_session, bot, TODAY) == 12
 
 
-@pytest.mark.parametrize("bad", [None, "lots", 5, 5000, True])
+@pytest.mark.parametrize("bad", [None, "lots", 5, 50000, True])
 async def test_a_broken_setting_falls_back_to_the_default(
     db_session: AsyncSession, bad: object
 ) -> None:
@@ -54,8 +54,8 @@ async def test_only_todays_turns_of_this_assistant_count(db_session: AsyncSessio
         ]
     )
     await db_session.commit()
-    assert await delivery.budget_left(db_session, bot, TODAY) == 197
-    assert await delivery.budget_left(db_session, bot, TODAY + timedelta(days=1)) == 199
+    assert await delivery.budget_left(db_session, bot, TODAY) == 1997
+    assert await delivery.budget_left(db_session, bot, TODAY + timedelta(days=1)) == 1999
 
 
 async def test_the_owners_zone_decides_which_day_a_turn_belongs_to(
@@ -64,11 +64,11 @@ async def test_the_owners_zone_decides_which_day_a_turn_belongs_to(
     bot, _ = await ready(db_session)
     # UTC 13 日 03:00：上海是 13 日上午，纽约还是 12 日晚上。
     await spend(db_session, bot, 1, datetime(2026, 11, 13, 3, tzinfo=UTC))
-    assert await delivery.budget_left(db_session, bot, TODAY) == 199
+    assert await delivery.budget_left(db_session, bot, TODAY) == 1999
     (await settings.get(db_session, bot.id)).timezone = "America/New_York"
     await db_session.commit()
-    assert await delivery.budget_left(db_session, bot, TODAY) == 200
-    assert await delivery.budget_left(db_session, bot, date(2026, 11, 12)) == 199
+    assert await delivery.budget_left(db_session, bot, TODAY) == 2000
+    assert await delivery.budget_left(db_session, bot, date(2026, 11, 12)) == 1999
 
 
 async def test_the_budget_can_go_negative(db_session: AsyncSession) -> None:

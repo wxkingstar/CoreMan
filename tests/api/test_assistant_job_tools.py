@@ -88,7 +88,7 @@ async def test_spawn_list_message_and_cancel_from_the_main_session(
     listing = await call(client, auth, "assistant_job_list", {})
     assert [item["id"] for item in listing["jobs"]] == [job["id"]]
     assert "brief" not in listing["jobs"][0]
-    assert listing["limits"] == {"active": 3, "per_day": 20, "rounds": 6}
+    assert listing["limits"] == {"active": 3, "per_day": 100, "rounds": 12}
     one = await call(client, auth, "assistant_job_list", {"id": job["id"]})
     assert one["job"]["brief"].endswith(SECRET) and one["job"]["result"] is None
     # 还在跑的不能追问。

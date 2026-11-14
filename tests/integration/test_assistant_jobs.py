@@ -1,4 +1,4 @@
-"""子任务的派出、追问与读取：内容是密文；别的助理够不着；同时 3 个、每天 20 个、预算。"""
+"""子任务的派出、追问与读取：内容是密文；别的助理够不着；同时 3 个、每天 100 个、预算。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import jobs, platform_turns
+from coreman.core.assistants import delivery, jobs, platform_turns
 from coreman.core.assistants.kinds import JOB_RESULT_KIND, SUBTASK_KIND
 from coreman.core.db.models import Bot, Task
 from coreman.core.db.session import make_session_factory
@@ -132,7 +132,7 @@ async def test_two_concurrent_spawns_cannot_both_take_the_last_slot(
     assert sorted(await asyncio.gather(one(), one())) == ["ok", "too_many_jobs"]
 
 
-async def test_twenty_a_day_in_the_owners_time_zone(db_session: AsyncSession) -> None:
+async def test_a_hundred_a_day_in_the_owners_time_zone(db_session: AsyncSession) -> None:
     bot, _ = await owner_with_key(db_session)
     morning = datetime(2026, 11, 13, 2, 0, tzinfo=UTC)  # 上海 10:00
     for _ in range(jobs.MAX_DAILY):
@@ -142,7 +142,7 @@ async def test_twenty_a_day_in_the_owners_time_zone(db_session: AsyncSession) ->
     later = morning + timedelta(hours=1)
     made = jobs.spawn(db_session, bot, title=TITLE, brief=BRIEF, now=later)
     assert await code_of(made) == "daily_job_limit"
-    # 平台派的（下班编译）不占这 20 个。
+    # 平台派的（下班编译）不占这 100 个。
     system = await spawned(db_session, bot, origin="system", report=False, now=later)
     system.status = "done"
     await db_session.commit()
@@ -153,7 +153,7 @@ async def test_twenty_a_day_in_the_owners_time_zone(db_session: AsyncSession) ->
 async def test_unattended_and_system_spawns_need_budget(db_session: AsyncSession) -> None:
     bot, _ = await owner_with_key(db_session)
     now = utcnow()
-    await spend(db_session, bot, 200, now)
+    await spend(db_session, bot, delivery.DEFAULT_BUDGET, now)
     for kw in ({"attended": False}, {"origin": "system", "report": False}):
         made = jobs.spawn(db_session, bot, title=TITLE, brief=BRIEF, now=now, **kw)  # type: ignore[arg-type]
         assert await code_of(made) == "daily_budget_exhausted"
