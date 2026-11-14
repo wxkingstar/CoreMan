@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -34,6 +36,11 @@ MAX_ITEMS = 20
 MAX_VALUE = 500
 # Items after this many characters are listed by operation and path only.
 CARD_TEXT_MAX = 12_000
+# The summary at the top of the card: short values, the first few changes of each item.
+SHOW_MAX = 80
+SHOW_CHANGES = 3
+_HIDDEN = ("Cc", "Cf", "Zl", "Zp")
+DETAIL_TITLE = "查看详情（实际发出的请求）"
 AAD = "systems_write.v1"
 
 PENDING_HINT = (
@@ -203,31 +210,75 @@ def _value(value: Any) -> str:
     return text[:MAX_VALUE] + ("…" if len(text) > MAX_VALUE else "")
 
 
-def _note_lines(note: dict[str, Any] | None) -> list[str]:
-    if not note:
-        return []
-    parts = []
+def _plain(value: Any, limit: int = SHOW_MAX) -> str:
+    """A value for the summary: one line without control or format characters, so it can neither
+    forge another line nor flip the text direction; strings are shown without quotes."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in _HIDDEN)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    # Cut in the middle: the end of a link or a name often matters as much as its start.
+    tail = limit // 3
+    return text[: limit - tail - 1] + "…" + text[-tail:]
+
+
+def title(item: dict[str, Any]) -> str:
+    """The catalog's name for the operation, without the technical remark in brackets."""
+    name = str(item.get("summary") or item["operation_id"])
+    short = re.split(r"[（(]", name, maxsplit=1)[0].strip()
+    return _plain(short or name, 40)
+
+
+def headline(index: int, item: dict[str, Any], *, numbered: bool = True) -> str:
+    mark = "（删除后无法恢复）" if item["risk"] == "destructive" else ""
+    return (f"{index}. " if numbered else "") + title(item) + mark
+
+
+def _change(change: dict[str, Any]) -> str | None:
+    field = _plain(change.get("field"), 30)
+    before, after = change.get("before"), change.get("after")
+    if before is None and after is None:
+        return None
+    if before is None:
+        return f"{field}：{_plain(after)}"
+    if after is None:
+        return f"{field}：原为 {_plain(before)}"
+    return f"{field}：{_plain(before)} → {_plain(after)}"
+
+
+def _summary_lines(index: int, item: dict[str, Any], *, numbered: bool) -> list[str]:
+    """What the member decides on: the operation, the object and the values that change."""
+    # A single item's name is the card title already; only its warning is repeated.
+    if numbered:
+        lines = [headline(index, item)]
+    else:
+        lines = ["⚠️ 删除后无法恢复"] if item["risk"] == "destructive" else []
+    indent = "   " if numbered else ""
+    note = item.get("note") or {}
     if note.get("target"):
-        parts.append(f"对象：{_value(note['target'])}")
-    for change in note.get("changes") or []:
-        parts.append(
-            f"{change.get('field')}：{_value(change.get('before'))} → {_value(change.get('after'))}"
-        )
-    if note.get("impact"):
-        parts.append(f"影响：{_value(note['impact'])}")
-    if note.get("rollback"):
-        parts.append(f"恢复：{_value(note['rollback'])}")
-    return ["   AI 说明（未经平台核实）：" + "；".join(parts)] if parts else []
+        lines.append(f"{indent}对象：{_plain(note['target'])}")
+    changes = [line for change in note.get("changes") or [] if (line := _change(change))]
+    lines += [indent + line for line in changes[:SHOW_CHANGES]]
+    if len(changes) > SHOW_CHANGES:
+        lines.append(f"{indent}…另有 {len(changes) - SHOW_CHANGES} 项改动，见详情")
+    if not note:
+        params = item.get("path_params") or {}
+        lines += [f"{indent}{_plain(k, 30)}：{_plain(v)}" for k, v in params.items()]
+    return lines
 
 
-def headline(index: int, item: dict[str, Any]) -> str:
-    name = item.get("summary") or item["operation_id"]
-    mark = "  ⚠️ 不可恢复" if item["risk"] == "destructive" else ""
-    return f"{index}. [{item['system_name']}] {name}  {item['method']} {item['path']}{mark}"
+def summary_text(items: list[dict[str, Any]]) -> str:
+    numbered = len(items) > 1
+    return "\n".join(
+        line
+        for index, item in enumerate(items, 1)
+        for line in _summary_lines(index, item, numbered=numbered)
+    )
 
 
-def _item_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
-    lines = [headline(index, item)]
+def _detail_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
+    lines = [f"{index}. {item['system_name']} · {item['method']} {item['path']}"]
     for key, value in (item.get("path_params") or {}).items():
         lines.append(f"   {key} = {_value(value)}")
     if not full:
@@ -236,20 +287,23 @@ def _item_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
         lines.append(f"   ?{key} = {_value(value)}")
     if item.get("body") is not None:
         lines.append(f"   请求体 = {_value(item['body'])}")
-    return lines + _note_lines(item.get("note"))
+    note = item.get("note") or {}
+    if note.get("impact"):
+        lines.append(f"   影响（AI 说明）：{_value(note['impact'])}")
+    if note.get("rollback"):
+        lines.append(f"   恢复方法（AI 说明）：{_value(note['rollback'])}")
+    return lines
 
 
 def card_text(items: list[dict[str, Any]]) -> str:
-    """Rendered from the staged requests, never from model-written text alone. JSON keeps each
-    value on one line, so a value cannot forge another item."""
+    """The exact requests, rendered from what was staged, never from model-written text alone.
+    JSON keeps each value on one line, so a value cannot forge another item."""
     rows: list[str] = []
     size = 0
     for index, item in enumerate(items, 1):
-        lines = _item_lines(index, item, full=True)
-        text = "\n".join(lines)
+        text = "\n".join(_detail_lines(index, item, full=True))
         if size + len(text) > CARD_TEXT_MAX:
-            lines = _item_lines(index, item, full=False)
-            text = "\n".join(lines)
+            text = "\n".join(_detail_lines(index, item, full=False))
         rows.append(text)
         size += len(text)
     return "\n".join(rows)
@@ -274,28 +328,62 @@ def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) 
         }
 
     destructive = any(item["risk"] == "destructive" for item in items)
+    heading = f"请确认：{title(items[0])}" if len(items) == 1 else f"请确认 {len(items)} 项操作"
+    systems = "、".join(dict.fromkeys(str(item["system_name"]) for item in items))
     return {
         "schema": "2.0",
         "task_id": f"personal:{origin_task_id}",
         "header": {
             "template": "red" if destructive else "orange",
-            "title": {
-                "tag": "plain_text",
-                "content": f"确认：执行 {len(items)} 个业务系统写操作",
-            },
+            "title": {"tag": "plain_text", "content": heading},
+            "subtitle": {"tag": "plain_text", "content": _plain(systems)},
         },
         "body": {
             "elements": [
                 # Values come from the conversation: plain text, so no @mention or link fires.
-                {"tag": "div", "text": {"tag": "plain_text", "content": card_text(items)}},
-                button("确认执行", "confirm", "danger" if destructive else "primary"),
-                button("取消", "cancel", "default"),
+                {"tag": "div", "text": {"tag": "plain_text", "content": summary_text(items)}},
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {"title": {"tag": "markdown", "content": DETAIL_TITLE}},
+                    "background_color": "grey",
+                    "border": {"color": "grey", "corner_radius": "8px"},
+                    "padding": "8px",
+                    "elements": [
+                        {
+                            "tag": "div",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": card_text(items),
+                                "text_size": "notation",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "tag": "column_set",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                button("确认", "confirm", "danger" if destructive else "primary")
+                            ],
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [button("取消", "cancel", "default")],
+                        },
+                    ],
+                },
                 {
                     "tag": "markdown",
                     "content": (
-                        "<font color='grey'>只有提问人能操作，将以提问人身份按顺序执行，"
-                        "遇到失败即停止，10 分钟内有效。</font>"
+                        "<font color='grey'>改动说明由 AI 整理，以详情里的请求为准。"
+                        "只有发起人能确认，10 分钟内有效。</font>"
                     ),
+                    "text_size": "notation",
                 },
             ]
         },

@@ -59,7 +59,11 @@ Scalar = str | int | float | bool
 
 class Change(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
-    field: str = Field(min_length=1, max_length=100)
+    field: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Business name the member knows (e.g. 价格), not the API field name",
+    )
     before: Scalar | None = Field(default=None, description="Current value, read it first")
     after: Scalar | None = None
 
@@ -68,7 +72,11 @@ class Note(BaseModel):
     """What the model says a write does; shown on the confirmation card as unverified text."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
-    target: str | None = Field(default=None, max_length=200, description="What is changed")
+    target: str | None = Field(
+        default=None,
+        max_length=200,
+        description="What is changed, in words a non-technical member recognises",
+    )
     changes: list[Change] | None = Field(default=None, max_length=10)
     impact: str | None = Field(default=None, max_length=300)
     rollback: str | None = Field(default=None, max_length=300, description="How to undo it")
