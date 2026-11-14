@@ -32,7 +32,7 @@ def test_tables_are_registered_for_truncation() -> None:
         assert BUSINESS_TABLES.index(name) < BUSINESS_TABLES.index("bots")
     assert "feishu_rate_usage" in BUSINESS_TABLES
     assert WATCH_STATES == ("idle", "polling", "backoff", "paused", "stopped")
-    assert INBOX_KINDS == ("message", "approval_todo", "reminder")
+    assert INBOX_KINDS == ("message", "approval_todo", "reminder", "owner_said")
     assert INBOX_LEVELS == ("immediate", "batch", "hold")
     assert INBOX_STATUSES == ("pending", "delivered", "void")
     assert RATE_CATEGORIES == ("chats", "history")

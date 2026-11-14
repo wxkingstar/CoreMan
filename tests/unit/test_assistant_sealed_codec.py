@@ -76,7 +76,11 @@ def test_every_content_column_is_registered() -> None:
         "result_enc",
         "blocked_enc",
     }
-    assert set(sealed.COLUMNS[AssistantSettings]) == {"focus_chats_enc", "ignored_chats_enc"}
+    assert set(sealed.COLUMNS[AssistantSettings]) == {
+        "focus_chats_enc",
+        "ignored_chats_enc",
+        "focus_people_enc",
+    }
     assert set(sealed.COLUMNS[AssistantPage]) == {
         "path_enc",
         "title_enc",

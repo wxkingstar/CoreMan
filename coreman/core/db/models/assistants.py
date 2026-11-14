@@ -313,8 +313,9 @@ class AssistantSettings(Base):
     （没有入站事件）凭它们拿个人工具，见 `coreman/core/assistants/platform_turns.py`。空串表示
     没记下，这样的助理跑不了平台来源的轮次。
 
-    `focus_chats_enc` / `ignored_chats_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出
-    的行上是会话 id 的列表；没设置过是 None，密钥销毁后读出来是空列表。
+    `focus_chats_enc` / `ignored_chats_enc` / `focus_people_enc` 登记在 `sealed.COLUMNS`：库里是
+    密文，经会话取出的行上是 id 的列表（会话 id 或 open_id）；没设置过是 None，
+    密钥销毁后读出来是空列表。
     `always_on` 为真（默认）时全天候在班，不看工作时段；为假时只在工作时段里在班。工作时段是
     所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays` 是 ISO 星期
     （1 周一 … 7 周日），全天候时也留着（「下班」按它找下一个上班时刻，改回按工作时段时直接
@@ -382,6 +383,8 @@ class AssistantSettings(Base):
     )
     focus_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
     ignored_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    # 重点人：这些 open_id 发的消息总是立即交回。
+    focus_people_enc: Mapped[list[str] | None] = mapped_column(JSONB)
     # 空则用平台默认（设置项 assistant_daily_turn_budget，2E）。
     daily_turn_budget: Mapped[int | None] = mapped_column(Integer)
     shift_override: Mapped[str | None] = mapped_column(Text)
@@ -493,7 +496,7 @@ class AssistantFollowup(Base):
 
 
 WATCH_STATES = ("idle", "polling", "backoff", "paused", "stopped")
-INBOX_KINDS = ("message", "approval_todo", "reminder")
+INBOX_KINDS = ("message", "approval_todo", "reminder", "owner_said")
 INBOX_LEVELS = ("immediate", "batch", "hold")
 INBOX_STATUSES = ("pending", "delivered", "void")
 
