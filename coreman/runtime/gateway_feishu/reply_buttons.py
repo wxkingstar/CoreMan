@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.chat import busy_choice
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
-from coreman.core.db.models import FeishuDelivery, OutboxItem, TaskStream
+from coreman.core.db.models import FeishuDelivery, InboundEvent, OutboxItem, Task, TaskStream
 from coreman.core.feishu_cards.reply_buttons import UsedRow, batch_actions, mark_card
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuError
@@ -49,6 +49,25 @@ Outcome = Literal[
     # 个人助理的开通卡片（没有助理记录时，由 AssistantInbound.on_unprovisioned 处理）。
     "provision_started",
     "provision_expired",
+    # 其余卡片按钮：只按回调 value 认出点了什么，结果由 worker 处理后更新卡片告知。
+    "write_confirm",
+    "write_cancel",
+    "write_resend",
+    "schedule_confirm",
+    "schedule_cancel",
+    "topic_new",
+    "topic_fork",
+    "cold_start_answer",
+    "cold_start_skip",
+    "assistant_stop",
+    "credential_submit",
+    "authorize_link",
+    "choice_submit",
+    "choice_other",
+    "switch_runtime",
+    "switch_wait",
+    # 确认卡（写操作、定时任务）由发起人以外的人点了。
+    "not_initiator",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -106,6 +125,79 @@ def _busy_click(message: InboundMessage) -> Outcome | None:
     return cast("Outcome", key) if key in _BUSY_KEYS else None
 
 
+# 卡片回调 value 里的 event_key。网关不引入这些卡片所在的模块（有的在 worker 里），
+# 写成字面值；测试核对它们与各模块的常量一致。
+WRITE_CARD_EVENTS = frozenset(
+    {"feishu_group_write", "assistant_write", "cloud_write", "systems_write"}
+)
+SCHEDULE_EVENT = "personal_schedule"
+TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
+COLD_START_EVENT = "assistant_cold_start_card"
+STOP_EVENT = "assistant_stop"
+AUTHORIZE_EVENTS = frozenset({"personal_authorize", "personal_upgrade"})
+CHOICE_SUBMIT = "submit_choice"
+CHOICE_OTHER = "opt_other"
+SWITCH_SUBMIT = "ratelimit_switch_submit"
+SWITCH_OPTIONS: dict[str, Outcome] = {"opt_switch": "switch_runtime", "opt_wait": "switch_wait"}
+_WRITE_VERBS: dict[str, Outcome] = {"confirm": "write_confirm", "cancel": "write_cancel"}
+_SCHEDULE_VERBS: dict[str, Outcome] = {"confirm": "schedule_confirm", "cancel": "schedule_cancel"}
+
+
+def _card_click(message: InboundMessage) -> Outcome | None:
+    """其余卡片按钮点的是什么，只看回调 value，不查库（3 秒应答窗口）。认不出返回 None。"""
+    action = message.card_action or {}
+    if message.kind != "card_action":
+        return None
+    if action.get("card_type") == "credential":
+        return "credential_submit"
+    key = str(action.get("event_key") or "")
+    verb = str(action.get("level") or "").partition(":")[0]
+    picked = {v for values in (action.get("selected") or {}).values() for v in values}
+    if verb == "resend":
+        return "write_resend"
+    if key in WRITE_CARD_EVENTS:
+        return _WRITE_VERBS.get(verb)
+    if key == SCHEDULE_EVENT:
+        return _SCHEDULE_VERBS.get(verb)
+    if key in TOPIC_EVENTS:
+        return TOPIC_EVENTS[key]
+    if key == COLD_START_EVENT:
+        # 令牌是「题.answer|skip.签名」。
+        parts = str(action.get("level") or "").split(".")
+        return "cold_start_skip" if parts[1:2] == ["skip"] else "cold_start_answer"
+    if key == STOP_EVENT:
+        return "assistant_stop"
+    if key in AUTHORIZE_EVENTS:
+        return "authorize_link"
+    if key == CHOICE_SUBMIT:
+        return "choice_other" if CHOICE_OTHER in picked else "choice_submit"
+    if key == SWITCH_SUBMIT:
+        return next((SWITCH_OPTIONS[p] for p in picked if p in SWITCH_OPTIONS), None)
+    return None
+
+
+# 只有发起人能点的确认卡：按钮 value 的 task_id 是 `personal:<发起那条消息的任务>`。
+_INITIATOR_ONLY = frozenset(
+    {"write_confirm", "write_cancel", "write_resend", "schedule_confirm", "schedule_cancel"}
+)
+
+
+async def _initiator_clicked(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> bool | None:
+    """点的人是不是发起那条消息的人。只为选 toast：真正的校验在 worker，这里认不出返回 None。"""
+    kind, _, raw_id = str((message.card_action or {}).get("task_id") or "").partition(":")
+    if kind != "personal" or not raw_id.isdigit():
+        return None
+    origin = await session.get(Task, int(raw_id))
+    if origin is None or origin.bot_id != bot_id or origin.inbound_event_id is None:
+        return None
+    event = await session.get(InboundEvent, origin.inbound_event_id)
+    if event is None or not event.sender_platform_user_id:
+        return None
+    return event.sender_platform_user_id == message.sender.platform_user_id
+
+
 async def admit(
     session: AsyncSession,
     bot: InboundBot,
@@ -115,12 +207,19 @@ async def admit(
     single: bool | None = None,
 ) -> Outcome | None:
     """应答窗口里的入站落库：回复按钮先判定提问人与会话类型。返回回复按钮点击的结果，
-    「上一条还在处理」卡片的点击返回点的是哪个按钮，其余事件返回 None。调用方负责提交。"""
+    其他卡片按钮的点击返回点的是哪类按钮（认不出为 None），其余事件返回 None。调用方负责提交。"""
     if not await settle(session, bot.id, message, single=single):
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        return _busy_click(message)
+        outcome = _busy_click(message) or _card_click(message)
+        if outcome in _INITIATOR_ONLY:
+            initiator = await _initiator_clicked(session, bot.id, message)
+            if initiator is None:
+                return None  # 认不出发起人：不说「已确认」，只回兜底的「已收到」
+            if not initiator:
+                return "not_initiator"
+        return outcome
     return "queued" if task is not None else "duplicate"
 
 
