@@ -92,9 +92,53 @@ async def test_a_reason_cannot_forge_an_entry_line(db_session: AsyncSession) -> 
     assert len(feedback.split(page.body)[1]) == 1
 
 
-async def test_an_empty_reason_or_an_ordinary_bot_records_nothing(
+async def test_an_empty_reason_or_an_unknown_bot_records_nothing(
     db_session: AsyncSession,
 ) -> None:
     bot = await assistant(db_session)
     assert not await feedback.record(db_session, bot.id, what="私聊 → 李四", draft="稿", reason=" ")
     assert not await feedback.record(db_session, uuid.uuid4(), what="x", draft="稿", reason="意见")
+
+
+async def test_an_oversized_head_leaves_the_entries_half_the_budget(
+    db_session: AsyncSession,
+) -> None:
+    bot = await assistant(db_session)
+    await feedback.record(db_session, bot.id, what="私聊 → 李四", draft="稿", reason="先建页")
+    page = await notes.read(db_session, bot.id, feedback.PATH)
+    assert page is not None
+    await notes.write(
+        db_session,
+        bot.id,
+        feedback.PATH,
+        body="说" * 2000 + "\n\n",
+        summary=page.summary,
+        version=page.version,
+        updated_by="owner",
+    )
+    for number in range(30):
+        await feedback.record(
+            db_session, bot.id, what="私聊 → 李四", draft="稿" * 100, reason=f"意见{number:02d}"
+        )
+    await db_session.commit()
+    page = await notes.read(db_session, bot.id, feedback.PATH)
+    assert page is not None
+    head, entries = feedback.split(page.body)
+    assert len(head.encode()) == 6000 + 2
+    assert len("".join(entries).encode()) <= feedback.BUDGET_BYTES // 2
+    assert "意见29" in page.body
+
+
+async def test_a_failed_write_is_reported_not_raised(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot = await assistant(db_session)
+
+    async def full(*_args: object, **_kwargs: object) -> None:
+        raise notes.NotesError("notes_full")
+
+    monkeypatch.setattr(notes, "write", full)
+    assert not await feedback.record(
+        db_session, bot.id, what="私聊 → 李四", draft="稿", reason="意见"
+    )
+    assert await notes.read(db_session, bot.id, feedback.PATH) is None

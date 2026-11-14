@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import notes, sealed
@@ -135,35 +136,42 @@ async def record(
         False：打回本身不受影响，只记一条不含内容的日志。
     """
     reason = _one(reason)[:REASON_MAX]
-    if not reason or not await sealed.key_ready(session, bot_id):
+    if not reason:
         return False
     try:
+        if not await sealed.key_ready(session, bot_id):
+            return False
         new = _entry(await _today(session, bot_id), what, draft, reason)
         for _ in range(RETRIES):
-            page = await notes.read(session, bot_id, PATH)
-            head, old = split(page.body) if page is not None else (HEAD, [])
-            kept, overflow = _fit([new, *old], BUDGET_BYTES - len(head.encode()))
             try:
-                await notes.write(
-                    session,
-                    bot_id,
-                    PATH,
-                    body=head + "".join(kept),
-                    summary=page.summary if page is not None else SUMMARY,
-                    title=TITLE if page is None else None,
-                    # 所有者取消过置顶的保持原样。
-                    pinned=True if page is None else None,
-                    version=page.version if page is not None else 0,
-                    updated_by="owner",
-                )
+                # 意见页与归档页同一个保存点：任一步失败都整体回滚，不丢条目。
+                async with session.begin_nested():
+                    page = await notes.read(session, bot_id, PATH)
+                    head, old = split(page.body) if page is not None else (HEAD, [])
+                    # 页首是所有者的字，不截断：页首超过预算一半时条目只占一半预算，
+                    # 这时页面超过 8KB 只可能因为他自己写的页首。
+                    room = max(BUDGET_BYTES - len(head.encode()), BUDGET_BYTES // 2)
+                    kept, overflow = _fit([new, *old], room)
+                    await notes.write(
+                        session,
+                        bot_id,
+                        PATH,
+                        body=head + "".join(kept),
+                        summary=page.summary if page is not None else SUMMARY,
+                        title=TITLE if page is None else None,
+                        # 所有者取消过置顶的保持原样。
+                        pinned=True if page is None else None,
+                        version=page.version if page is not None else 0,
+                        updated_by="owner",
+                    )
+                    if overflow:
+                        await _archive(session, bot_id, overflow)
+                return True
             except notes.NotesError as exc:
                 if exc.code in ("version_conflict", "page_exists", "page_not_found"):
                     continue
                 raise
-            if overflow:
-                await _archive(session, bot_id, overflow)
-            return True
-    except (notes.NotesError, DecryptError) as exc:
+    except (notes.NotesError, DecryptError, SQLAlchemyError) as exc:
         # 只记原因代码：异常文字里可能带内容。
         code = getattr(exc, "code", type(exc).__name__)
         log.warning("assistant_feedback_not_recorded", bot_id=str(bot_id), code=code)
