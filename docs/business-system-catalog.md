@@ -200,7 +200,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 新增 `systems_call(system, operation_id, path_params?, query?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。
 
 - 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径与查询参数、JSON 请求体，必填的请求头或 Cookie 参数无法通过代理调用。
-- 风险策略：`read` 直接执行；`write` 需要机器人对该系统的授权开启"允许写入"（个人助理无人在场的一轮开了也不能写）；`destructive` 与 `financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
+- 风险策略：`read` 直接执行；`write` 需要机器人对该系统的授权开启"允许写入"（个人助理无人在场的一轮不当场写：能提交审批的轮次里自动提交给所有者审批、批准后由平台原样执行，见 `docs/tower-approval.md`「无人在场时的代理写操作」；不能提审批的轮次返回 `owner_turn_required`）；`destructive` 与 `financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
 - 令牌：服务端在首次调用（或首次查权限）时签发，有效期与任务超时一致，签发记录用途为 `proxy`；以任务和系统为 AAD 加密后存在任务里，任务内复用，不进入运行环境、工具结果或日志。
 - 请求：只发往目录里的服务器前缀（与系统地址同源），连接固定到登记的主机，不跟随重定向，不读取环境代理，超时 30 秒，响应最多读 5 MiB。
 - 响应：JSON 精简后不超过 100k 字符（错误响应 4000 字符），超出时从长列表开始截断并提示用分页、筛选参数缩小范围；文件类响应只返回类型和大小；响应正文里出现的令牌值替换为 `[REDACTED]`。结果标注 `content_trust: system_returned_data`。
