@@ -1,4 +1,4 @@
-"""带入站事件的审批结果回合也是无人在场的一轮：让路、不挂云签名代理 / 业务系统目录 / 个人凭证、
+"""带入站事件的审批结果回合也是无人在场的一轮：让路、云签名代理与业务系统目录只读、不挂个人凭证、
 不得改动置顶页。入站事件是提交那一轮留下的，所有者此刻并不在场。"""
 
 from __future__ import annotations
@@ -83,14 +83,16 @@ async def test_it_yields_to_the_owners_message_instead_of_cancelling_it(
     assert kept.cancel_requested_at is None and kept.status == "claimed"
 
 
-async def test_it_gets_no_cloud_proxy_catalog_or_credentials(
+async def test_it_gets_the_proxies_but_no_credentials(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bot = await equipped(db_session, monkeypatch)
     turn = await result_turn(db_session, bot)
     request = await sent(db_engine, turn, AssistantApprovalResultHandler())
     env = request["env_vars"]
-    assert mounted(env) == set()
+    # 云签名代理与目录挂上，写由服务端按任务类型拒绝（tests/api/test_cloud_proxy.py、
+    # tests/api/test_systems_proxy.py）。
+    assert mounted(env) == {"cloud", "catalog"}
     assert not set(VALUES.values()) & set(env.values())
     # 找谁审批的名单照常下发（个人工具照常可用见 tests/api/test_assistant_tool_groups.py）。
     assert cloud_policy.APPROVERS_ENV in env

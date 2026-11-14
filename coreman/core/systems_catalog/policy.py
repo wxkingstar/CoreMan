@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import kinds
 from coreman.core.assistants.kinds import BOT_HELP_KIND
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
@@ -107,8 +108,11 @@ def writable_for(task: Task, granted: Iterable[str]) -> frozenset[str]:
     """这一轮经目录代理能写哪些系统。
 
     个人助理调度来的一轮，所有者没有在审批系统里批准写（载荷里的 `allow_write` 不是真）时一个
-    都不能写：这是平台自己把得住的写通道。其余轮次照员工的授权。
+    都不能写：这是平台自己把得住的写通道。个人助理无人在场的一轮（`kinds.unattended`）同样一个
+    都不能写：所有者不在场，只能查询。其余轮次照员工的授权。
     """
+    if kinds.unattended(task.kind):
+        return frozenset()
     if task.kind == BOT_HELP_KIND and task.payload.get("allow_write") is not True:
         return frozenset()
     return frozenset(granted)
