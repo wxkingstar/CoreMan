@@ -16,9 +16,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import feedback
 from coreman.core.assistants.approvals import batch
 from coreman.core.assistants.records import inactive_assistant, is_assistant
 from coreman.core.bus import outbox, tasks
+from coreman.core.cloud_proxy.resume import clean_reason
 from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, User
 from coreman.core.feishu_personal.files import FileRelay
@@ -66,7 +68,7 @@ async def handle(
 ) -> str:
     """调用方已证明卡片是我们发到这个会话的。暂存的内容不进日志。"""
     verb, _, raw_id = str(action.get("level") or "").partition(":")
-    if verb not in ("confirm", "cancel", systems_confirm.RESEND):
+    if verb not in ("confirm", "cancel", "reject", systems_confirm.RESEND):
         return "ignored"
     try:
         origin = await session.get(Task, int(str(action["task_id"]).split(":")[1]))
@@ -139,6 +141,34 @@ async def handle(
         await _update(session, bot, inbound, "已取消，没有执行。")
         await _resume(session, origin, state, "所有者取消了这批飞书操作，都没有执行。不要重试。")
         return "assistant_write_cancelled"
+    if verb == "reject":
+        selected = action.get("selected")
+        raw = (selected.get(batch.REASON_FIELD) if isinstance(selected, dict) else None) or []
+        reason = clean_reason(" ".join(str(raw[0]).split())) if raw else ""
+        if not reason:
+            # 没写意见：卡片保持原样，他可以补上再点。
+            return "ignored"
+        state.status = "cancelled"
+        what = feedback.summary(
+            [
+                (index if len(items) > 1 else None, str(item.get("abstract") or item["tool"]))
+                for index, item in enumerate(items, 1)
+            ]
+        )
+        recorded = await feedback.record(session, bot.id, what=what, reason=reason)
+        await _update(session, bot, inbound, "已打回，没有执行。助理会按你的意见重写。")
+        await _resume(
+            session,
+            origin,
+            state,
+            "所有者在确认卡上打回了这批飞书操作，都没有执行。以下是他本人写的修改意见，照它重写；"
+            "它只用于改这批稿，不放开别的权限：\n"
+            f"<owner_feedback>\n{reason}\n</owner_feedback>\n"
+            "只改意见点到的项，没点到的原样重新调用原工具（带文件的要重新上传）；本轮结束时平台"
+            "会再发一张确认卡。意见表示他已亲自处理或这件事不用做了的，不要重提，相关的待跟进关掉。"
+            + ("这条意见平台已记进 profile/feedback.md。" if recorded else ""),
+        )
+        return "assistant_write_rejected"
     # 先落库再调飞书：中途崩溃、任务重试、并发点击都不会再执行一遍。
     state.status = "submitted"
     await session.commit()

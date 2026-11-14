@@ -40,3 +40,22 @@ def test_rules_say_how_writes_are_confirmed_present_and_away() -> None:
     assert "合成一张审批单" in text and "整单都不执行" in text
     assert f"一轮最多暂存 {batch.MAX_ITEMS} 个写操作" in text
     assert f"卡片 {int(confirm.TTL.total_seconds() // 60)} 分钟内有效" in text
+
+
+def test_rules_say_how_to_handle_being_sent_back() -> None:
+    """打回：照意见重写、只改被点到的、已处理的不重提、同类第二次提议记成规则。"""
+    from coreman.core.assistants import feedback
+
+    text = prompt.RULES
+    assert "owner_feedback" in text and feedback.PATH in text
+    assert "inbox/feedback.md" in text
+    assert "只改意见点到的项" in text
+    assert "已亲自处理" in text and "不要重提" in text
+    assert "同类意见出现第二次" in text and "needs_owner=true" in text
+    assert "起草之前" in text
+
+
+def test_daily_compile_does_not_repeat_recorded_feedback() -> None:
+    from coreman.core.assistants import compiling, feedback
+
+    assert feedback.PATH in compiling.INSTRUCTIONS

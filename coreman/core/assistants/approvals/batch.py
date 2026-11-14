@@ -48,6 +48,9 @@ MAX_ITEMS = service.MAX_ITEMS
 CARD_TEXT_MAX = systems_confirm.CARD_TEXT_MAX
 CARD_BYTES_MAX = 24_000
 TOO_LARGE = "too_large_to_review"
+# 确认卡上「打回重写」表单里意见输入框的名字。
+REASON_FIELD = "reason"
+REASON_MAX = service.REASON_LIMIT
 
 CARD_HINT = (
     "已暂存，没有执行。本轮结束时平台给所有者发一张确认卡，按顺序列出本轮暂存的全部飞书操作；"
@@ -163,10 +166,35 @@ def card(
         button("确认执行", "confirm", "primary"),
         button("取消", "cancel", "default"),
         {
+            "tag": "form",
+            "name": "assistant_write_reject",
+            "elements": [
+                {
+                    "tag": "input",
+                    "name": REASON_FIELD,
+                    "required": True,
+                    "max_length": REASON_MAX,
+                    "label": {"tag": "plain_text", "content": "不满意？写下哪里要改"},
+                    "label_position": "top",
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "例如：第 2 条太硬，改客气点",
+                    },
+                },
+                {
+                    **button("打回重写", "reject", "default"),
+                    "name": "reject",
+                    "form_action_type": "submit",
+                },
+            ],
+        },
+        {
             "tag": "markdown",
             "content": (
                 "<font color='grey'>只有你本人能操作。平台以你的身份按上面的内容原样、按顺序执行，"
-                "执行前会重新核对会话与授权，遇到失败即停止。60 分钟内有效，过期后可以重新发起。"
+                "执行前会重新核对会话与授权，遇到失败即停止。打回不执行任何一项，助理按你写的意见"
+                "重写后再发一张卡，意见会尽量记下来供以后起草参考。"
+                "60 分钟内有效，过期后可以重新发起。"
                 "</font>"
             ),
         },

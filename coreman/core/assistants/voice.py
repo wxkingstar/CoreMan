@@ -159,6 +159,8 @@ async def save(session: AsyncSession, bot_id: uuid.UUID, body: str) -> notes.Ent
 
     传 `owner_present=True` 是有意绕开「无人在场的轮次不能置顶」：那条规则防的是别人的内容
     变成规则，而这一轮读不到别人的任何内容（见模块说明）。别处不要照这个写法调 `notes.write`。
+    `feedback.record` 是第二个在无人在场时写置顶页的地方，它只写平台生成的摘要与所有者本人在
+    审批系统或确认卡上写的意见，不写助理或别人的文字。
 
     这一页已经在、而且最后不是助理写的（所有者自己改过，或是导入的）时不动它，返回 None：
     那是他本人的话，不能被再一次冷启动归纳出来的东西盖掉。

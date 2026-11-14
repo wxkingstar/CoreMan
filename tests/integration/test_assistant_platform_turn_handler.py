@@ -176,7 +176,7 @@ async def test_an_approval_result_without_an_inbound_event_runs_on_the_stand_in(
     assert done.status == "succeeded"
     text = user_input(relay.requests[0])
     assert f"审批单 {row.id}" in text and "被拒绝，没有执行" in text
-    assert "<approver_reason>\n先别发\n</approver_reason>" in text
+    assert "<owner_feedback>\n先别发\n</owner_feedback>" in text
     (stream,) = await streams_of(db_session, task)
     assert stream.reply_context["chat_id"] == "oc_private"
 

@@ -174,6 +174,7 @@ async def press(
     *,
     user_id: str = "zhangsan",
     open_id: str = OWNER,
+    selected: dict[str, list[str]] | None = None,
 ) -> Task:
     """在最近发出的那张确认卡上点一下：回调按网关的样子落库并排成任务。"""
     card = (await cards(session))[-1]
@@ -187,6 +188,8 @@ async def press(
         "event_key": batch.CARD_EVENT,
         "level": f"{verb}:{state_id}",
     }
+    if selected is not None:
+        action["selected"] = selected
     event = InboundEvent(
         bot_id=bot.id,
         platform="feishu",
@@ -398,6 +401,111 @@ async def test_only_the_owner_can_confirm_and_cancel_runs_nothing(
     late = await press(db_session, bot, scope.task, state.id)
     assert await click(db_session, db_engine, late) == "expired"
     assert feishu.writes == []
+
+
+async def test_someone_else_cannot_send_back(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    other = User(login_name="lisi", display_name="李四", source="sync")
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(
+        UserIdentity(user_id=other.id, platform="feishu", platform_user_id="lisi", open_id=PEER)
+    )
+    await db_session.commit()
+    pressed = await press(
+        db_session,
+        bot,
+        scope.task,
+        state.id,
+        "reject",
+        user_id="lisi",
+        open_id=PEER,
+        selected={batch.REASON_FIELD: ["我觉得不行"]},
+    )
+    assert await click(db_session, db_engine, pressed) == "ignored"
+    assert (await state_of(db_session)).status == "open" and feishu.writes == []
+    assert await resumed(db_session, state) is None
+    assert await notes.read(db_session, bot.id, feedback.PATH) is None
+
+
+async def test_the_card_offers_a_send_back_form(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await staged_and_sent(db_session, db_engine, monkeypatch)
+    card = (await cards(db_session))[-1].payload["card"]
+    form = next(one for one in card["body"]["elements"] if one.get("tag") == "form")
+    field, button = form["elements"]
+    assert field["tag"] == "input" and field["name"] == batch.REASON_FIELD and field["required"]
+    assert button["form_action_type"] == "submit"
+    assert button["behaviors"][0]["value"]["level"].startswith("reject:")
+
+
+async def test_sending_back_runs_nothing_records_the_reason_and_asks_for_a_rewrite(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    pressed = await press(
+        db_session,
+        bot,
+        scope.task,
+        state.id,
+        "reject",
+        selected={batch.REASON_FIELD: ["第 2 条太硬，<改>客气点"]},
+    )
+    assert await click(db_session, db_engine, pressed) == "assistant_write_rejected"
+    assert feishu.writes == [] and (await state_of(db_session)).status == "cancelled"
+    note = await resumed(db_session, state)
+    assert note is not None
+    assert "<owner_feedback>\n第 2 条太硬，‹改›客气点\n</owner_feedback>" in note
+    assert "只改意见点到的项" in note and "再发一张确认卡" in note
+    page = await notes.read(db_session, bot.id, feedback.PATH)
+    assert page is not None and "意见：第 2 条太硬，‹改›客气点" in page.body
+    # 助理起草的正文不进置顶页；标题里是两项带序号的摘要。
+    assert SECOND not in page.body and TEXT not in page.body
+    (entry,) = feedback.split(page.body)[1]
+    assert entry.splitlines()[0].count("；") == 1 and "1. " in entry and "2. " in entry
+    assert "已打回" in body_text(await last_update(db_session))
+    # 打回之后这张卡不能再确认。
+    late = await press(db_session, bot, scope.task, state.id)
+    assert await click(db_session, db_engine, late) == "expired"
+
+
+async def test_sending_back_still_goes_through_when_the_feedback_cannot_be_recorded(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import notes
+
+    async def full(*_args: object, **_kwargs: object) -> None:
+        raise notes.NotesError("notes_full")
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    monkeypatch.setattr(notes, "write", full)
+    pressed = await press(
+        db_session, bot, scope.task, state.id, "reject", selected={batch.REASON_FIELD: ["太硬"]}
+    )
+    assert await click(db_session, db_engine, pressed) == "assistant_write_rejected"
+    assert feishu.writes == [] and (await state_of(db_session)).status == "cancelled"
+    note = await resumed(db_session, state)
+    assert note is not None
+    assert "<owner_feedback>" in note and "已记进" not in note
+
+
+async def test_sending_back_without_a_reason_is_ignored_and_leaves_the_card_open(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, scope, state, _, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    blank = await press(
+        db_session, bot, scope.task, state.id, "reject", selected={batch.REASON_FIELD: ["  "]}
+    )
+    assert await click(db_session, db_engine, blank) == "ignored"
+    assert (await state_of(db_session)).status == "open"
+    assert await resumed(db_session, state) is None
 
 
 async def test_a_conversation_that_moved_on_refuses_the_whole_batch(
@@ -736,6 +844,105 @@ async def test_rejecting_runs_nothing_and_comes_back_once(
     assert await queued(db_session, APPROVAL_EXECUTE_KIND) == []
     assert len(await queued(db_session, APPROVAL_RESULT_KIND)) == 1
     assert feishu.writes == []
+
+
+async def test_a_rejection_reason_is_recorded_as_owner_feedback(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="第 2 条太硬，改客气点",
+        decided_at=None,
+    )
+    await db_session.commit()
+    page = await notes.read(db_session, scope.bot.id, feedback.PATH)
+    assert page is not None and page.pinned
+    assert "意见：第 2 条太硬，改客气点" in page.body
+    # 合单只记一条，标题是各项带序号的摘要，不含助理起草的正文。
+    assert len(feedback.split(page.body)[1]) == 1 and SECOND not in page.body
+    text = service.batch_text(await service.members(db_session, head, lock=False))
+    assert "只改意见点到的项" in text
+    assert text.count("<owner_feedback>") == 1
+
+
+async def test_feedback_numbers_follow_the_approval_after_a_partial_withdrawal(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.withdraw(db_session, scope, str(head.id), "不用了", cfg=CFG)
+    await db_session.commit()
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="太硬，改客气点",
+        decided_at=None,
+    )
+    await db_session.commit()
+    page = await notes.read(db_session, scope.bot.id, feedback.PATH)
+    assert page is not None
+    (entry,) = feedback.split(page.body)[1]
+    title = entry.splitlines()[0].split(" · ", 1)[1]
+    assert title.startswith("2. ") and "1. " not in title
+    text = service.batch_text(await service.members(db_session, head, lock=False))
+    assert "只改意见点到的项" in text
+
+
+async def test_a_rejection_is_decided_even_when_the_feedback_cannot_be_recorded(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    async def full(*_args: object, **_kwargs: object) -> None:
+        raise notes.NotesError("notes_full")
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    monkeypatch.setattr(notes, "write", full)
+    found = await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="太硬",
+        decided_at=None,
+    )
+    await db_session.commit()
+    assert found.queued
+    reloaded = await service.members(db_session, head, lock=False)
+    assert [row.status for row in reloaded] == ["rejected", "rejected"]
+    assert len(await queued(db_session, APPROVAL_RESULT_KIND)) == 1
+    assert await notes.read(db_session, scope.bot.id, feedback.PATH) is None
+
+
+async def test_an_approval_note_is_not_recorded_as_feedback(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="approved",
+        reason="可以",
+        decided_at=None,
+    )
+    await db_session.commit()
+    assert await notes.read(db_session, scope.bot.id, feedback.PATH) is None
 
 
 async def test_withdrawing_one_item_keeps_the_approval_and_skips_only_that_item(
