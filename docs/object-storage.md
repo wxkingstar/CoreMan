@@ -1,6 +1,8 @@
 # 短期附件存储
 
-默认 `OBJECT_STORAGE=local` 使用共享卷 `/data/storage/objects`。可配置 `OBJECT_STORAGE=s3`，并设置 S3_BUCKET、S3_ACCESS_KEY、S3_SECRET_KEY；S3_REGION 默认 us-east-1，S3_ENDPOINT 可指定 HTTPS 兼容服务，S3_PREFIX 默认 coreman-objects。临时凭据另设 S3_SESSION_TOKEN。配置示例见 `.env.example`。
+默认 `OBJECT_STORAGE=local` 使用共享卷 `/data/storage/objects`。可配置 `OBJECT_STORAGE=s3`，并设置 S3_BUCKET、S3_ACCESS_KEY、S3_SECRET_KEY；S3_REGION 默认 us-east-1，S3_ENDPOINT 可指定 HTTPS 兼容服务，S3_PREFIX 默认 coreman-objects。临时凭据另设 S3_SESSION_TOKEN。S3_ADDRESSING 默认 `path`（桶名在路径里）；阿里云 OSS 等只接受桶名在域名里的服务设为 `virtual`。配置示例见 `.env.example`。
+
+平台代理调用业务系统时，大结果和文件也存在这里（见 [业务系统操作目录](business-system-catalog.md) 的「大结果与文件转存」）：文件链接 1 小时有效，数据结果只给本轮的运行环境下载。
 
 SDK 使用显式凭据、独立 Session、HTTPS 证书验证，忽略环境代理与外部覆盖的 endpoint；不使用机器元数据凭据链。自定义 endpoint 不允许内嵌凭据、查询串、路径和已知元数据地址。账号应限定独立 bucket/prefix 的 Put/Get/Delete/List；不得将该前缀与其它应用混用。SDK 参考：[PutObject](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/put_object.html)、[GetObject](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/get_object.html)。
 

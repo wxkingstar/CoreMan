@@ -116,3 +116,9 @@ def writable_for(task: Task, granted: Iterable[str]) -> frozenset[str]:
     if task.kind == BOT_HELP_KIND and task.payload.get("allow_write") is not True:
         return frozenset()
     return frozenset(granted)
+
+
+def writes_preapproved(task: Task) -> bool:
+    """所有者已在审批系统里批准这一轮改东西（个人助理调度来的一轮）：写操作不再发确认卡，
+    这一轮也没有人在飞书里点卡。"""
+    return task.kind == BOT_HELP_KIND and task.payload.get("allow_write") is True
