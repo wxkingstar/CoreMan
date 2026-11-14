@@ -106,16 +106,16 @@ async def _run(
     lines: list[str] = []
     notes: list[str] = []
     stopped = False
+    numbered = len(items) > 1
     for index, (item, p) in enumerate(zip(items, prepared, strict=True), 1):
-        head = confirm.headline(index, item)
+        head = confirm.headline(index, item, numbered=numbered)
         if stopped:
-            lines.append(f"⏸ {head}（未执行）")
+            lines.append(f"⏸ {head}：没有执行")
             notes.append(f"{index}. {item['system']}.{item['operation_id']}：未执行")
             continue
         result = await proxy.send(pctx, p, key=item["key"], prefix="confirmed_")
         ok = bool(result.get("ok"))
-        status = result.get("status")
-        lines.append(f"{'✅' if ok else '❌'} {head}" + (f"（{status}）" if status else ""))
+        lines.append(f"✅ {head}：已完成" if ok else f"❌ {head}：没有成功")
         notes.append(
             f"{index}. {item['system']}.{item['operation_id']}："
             + ("成功" if ok else "失败")
@@ -203,7 +203,15 @@ async def handle(
         )
         return "systems_write_refused"
     lines, notes, all_ok = await _run(pctx, items, checked)
-    await _update(session, bot, inbound, "\n".join(["已确认并执行：", *lines]))
+    tail = "" if all_ok else "\n遇到失败已停下，AI 员工会接着说明原因。"
+    await _update(
+        session,
+        bot,
+        inbound,
+        "\n".join(lines) + tail,
+        title="已完成" if all_ok else "没有全部完成",
+        template="green" if all_ok else "red",
+    )
     await _resume(
         session,
         origin,
@@ -240,7 +248,15 @@ async def _resume(session: AsyncSession, origin: Task, state: InteractionState, 
     )
 
 
-async def _update(session: AsyncSession, bot: Bot, inbound: InboundEvent, text: str) -> None:
+async def _update(
+    session: AsyncSession,
+    bot: Bot,
+    inbound: InboundEvent,
+    text: str,
+    *,
+    title: str = "没有执行",
+    template: str = "grey",
+) -> None:
     await outbox.add(
         session,
         bot_id=bot.id,
@@ -251,7 +267,10 @@ async def _update(session: AsyncSession, bot: Bot, inbound: InboundEvent, text: 
         payload={
             "card": {
                 "schema": "2.0",
-                "header": {"title": {"tag": "plain_text", "content": "业务系统写操作"}},
+                "header": {
+                    "template": template,
+                    "title": {"tag": "plain_text", "content": title},
+                },
                 # 结果里可能有业务数据：纯文本，不让其中的标记生效。
                 "body": {
                     "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]
