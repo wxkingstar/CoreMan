@@ -250,7 +250,12 @@ async def _pick(
     """这一轮带哪些条目：(条目编号, 有没有条目因为预算留在了箱里)。只读元数据。"""
     today = assistant_settings.local_today(prefs, now)
     left = await budget_left(session, bot, today)
-    ids = select(AssistantInbox.id).where(*_waiting(bot.id, now)).order_by(AssistantInbox.id)
+    # 别人发来的事排在所有者自己说的话之前：名额不够时先给前者。
+    ids = (
+        select(AssistantInbox.id)
+        .where(*_waiting(bot.id, now))
+        .order_by((AssistantInbox.kind == "owner_said").asc(), AssistantInbox.id)
+    )
     if left > 0:
         return list(await session.scalars(ids.limit(MAX_ITEMS))), False
     # 预算用完：只有立即交回的还走，且至多再透支 OVERDRAFT 轮。

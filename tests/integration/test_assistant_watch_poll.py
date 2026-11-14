@@ -634,3 +634,29 @@ async def test_a_recalled_owner_message_voids_its_owner_said_item(
     await tick(factory, after(base, 91))
     [row] = await owner_said(db_session, who)
     assert (row.status, row.void_code) == ("void", "recalled")
+
+
+async def test_at_most_a_daily_quota_of_owner_said_items_per_local_day(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(watch, "OWNER_SAID_DAILY", 2)
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    for index in (1, 2, 3):
+        api.say(
+            "oc_team",
+            f"om_{index}",
+            after(base, 10 + index),
+            sender=who.open_id,
+            text="周四前我把报价发你",
+        )
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert [r.message_id for r in await owner_said(db_session, who)] == ["om_1", "om_2"]
+    # 次日（所有者时区的下一个自然日）又能入箱。
+    api.say("oc_team", "om_4", after(base, 86400 + 100), sender=who.open_id, text="发我一下合同")
+    await tick(factory, after(base, 86400 + 120))
+    assert [r.message_id for r in await owner_said(db_session, who)] == ["om_1", "om_2", "om_4"]

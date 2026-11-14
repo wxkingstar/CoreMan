@@ -62,6 +62,18 @@ async def batch_until(
     return found
 
 
+async def count_since(session: AsyncSession, bot_id: uuid.UUID, kind: str, since: datetime) -> int:
+    """这位助理从 `since` 起入箱的这一类条目数（不论状态）。只查元数据列。"""
+    found = await session.scalar(
+        select(func.count(AssistantInbox.id)).where(
+            AssistantInbox.bot_id == bot_id,
+            AssistantInbox.kind == kind,
+            AssistantInbox.created_at >= since,
+        )
+    )
+    return int(found or 0)
+
+
 async def add(
     session: AsyncSession,
     bot_id: uuid.UUID,

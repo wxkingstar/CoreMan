@@ -90,6 +90,8 @@ OWNER_SAID_WINDOW = timedelta(minutes=30)
 # 压成单行后不足这么多字的不收（「好」「收到」里没有承诺也没有索要）。
 OWNER_SAID_MIN_CHARS = 4
 OWNER_SAID_TYPES = frozenset({"text", "post"})
+# 一位助理一个当地自然日至多入箱这么多条所有者自己的话，极健谈的人超出的不再提取。
+OWNER_SAID_DAILY = 100
 ERROR_BACKOFF_MAX = 900
 # 同一个会话连续这么多轮读不了（飞书拒绝：没有权限、会话不让读）就先放下它，隔 PARK 再试：
 # 一个读不了的会话不该让这位助理的整个轮询一直退避。
@@ -305,16 +307,25 @@ class _Round:
                 followups=len(closed),
             )
 
-    async def owner_said(self, item: Item) -> None:
+    async def owner_said(self, item: Item, entry: dict[str, Any]) -> None:
         """所有者亲自发的一句话入箱（攒批）：交回后助理只从中提取承诺与索要。
 
-        与助理自己的私聊、非文本、太短的不收；太老的同样不收（与别人的消息同一条截止线）。
+        与助理自己的私聊、非文本、太短的不收；太老的同样不收（与别人的消息同一条截止线，
+        见 `take`）；今天已经收够 `OWNER_SAID_DAILY` 条的不收。
         """
         if item.chat_id == self.prefs.chat_id or item.msg_type not in OWNER_SAID_TYPES:
             return
         if len(" ".join(item.text.split())) < OWNER_SAID_MIN_CHARS:
             return
-        if item.at_ms < _week_ago(self.now):
+        oldest = min(self.oldest, int(entry.get("a") or self.oldest))
+        if item.at_ms < max(oldest, _week_ago(self.now)):
+            return
+        zone = assistant_settings.zone(self.prefs)
+        day = assistant_settings.local_today(self.prefs, self.now)
+        midnight = datetime.combine(day, datetime.min.time(), tzinfo=zone).astimezone(UTC)
+        if await inbox.count_since(self.session, self.bot_id, "owner_said", midnight) >= (
+            OWNER_SAID_DAILY
+        ):
             return
         until = await inbox.batch_until(self.session, self.bot_id, self.now, kind="owner_said")
         await inbox.add(
@@ -342,7 +353,7 @@ class _Round:
             await inbox.hold_chat(
                 self.session, self.bot_id, item.chat_id, item.created_at + HOLD_WINDOW
             )
-            await self.owner_said(item)
+            await self.owner_said(item, entry)
             return
         oldest = min(self.oldest, int(entry.get("a") or self.oldest))
         if item.at_ms < max(oldest, _week_ago(self.now)):

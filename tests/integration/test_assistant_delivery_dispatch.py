@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import delivery, settings
+from coreman.core.assistants import delivery, digest, settings
 from coreman.core.assistants.kinds import HANDOVER_KIND
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
@@ -466,3 +466,53 @@ async def test_settling_another_task_does_not_touch_this_turns_items(
     assert await delivery.settle(db_session, other, True) == 0
     (row,) = await inbox_rows(db_session, bot)
     assert (row.status, row.delivered_task_id) == ("pending", task.id)
+
+
+async def test_the_slots_of_a_turn_go_to_other_peoples_messages_first(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    past = now - timedelta(minutes=1)
+    for index in range(delivery.MAX_ITEMS + 1):
+        await boxed(
+            db_session, bot, f"om_mine_{index}", level="batch", hold_until=past, kind="owner_said"
+        )
+    await boxed(db_session, bot, "om_a", level="batch", hold_until=past)
+    await boxed(db_session, bot, "om_b", level="batch", hold_until=past)
+    task = await send(db_session, bot, now)
+    assert task is not None
+    picked = [row.message_id for row in await delivery.bound(db_session, task)]
+    assert len(picked) == delivery.MAX_ITEMS and {"om_a", "om_b"} <= set(picked)
+
+
+async def test_only_owner_said_items_still_open_a_turn_that_is_not_urgent(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    now = utcnow()
+    past = now - timedelta(minutes=1)
+    await boxed(db_session, bot, "om_mine", level="batch", hold_until=past, kind="owner_said")
+    task = await send(db_session, bot, now)
+    assert task is not None
+    assert [row.message_id for row in await delivery.bound(db_session, task)] == ["om_mine"]
+    assert await digest._urgent_turn(db_session, task) is False
+
+
+async def test_owner_said_items_wait_for_the_next_day_when_the_budget_is_spent(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    prefs = await settings.get(db_session, bot.id)
+    prefs.daily_turn_budget, prefs.quiet_enabled = 10, False
+    await db_session.commit()
+    now = utcnow()
+    await spend(db_session, bot, 10, now)
+    past = now - timedelta(minutes=1)
+    await boxed(db_session, bot, "om_mine", level="batch", hold_until=past, kind="owner_said")
+    assert await send(db_session, bot, now) is None
+    [row] = await inbox_rows(db_session, bot)
+    assert (row.status, row.delivered_task_id) == ("pending", None)
+    # 次日预算重新有了：交回。
+    task = await send(db_session, bot, now + timedelta(days=1))
+    assert task is not None
