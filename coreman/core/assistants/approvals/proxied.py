@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import kinds, quoting, sealed
+from coreman.core.assistants import handover, kinds, quoting, sealed
 from coreman.core.assistants.approvals import catalog, content, execute, service, tower
 from coreman.core.assistants.records import inactive_assistant, is_assistant
 from coreman.core.config import Settings
@@ -162,6 +162,8 @@ async def _origin(session: AsyncSession, task: Task) -> list[str]:
             title = _ITEM_TITLES.get(str(data.get("chat_kind")), "消息")
             if row.kind == "approval_todo":
                 title = "飞书审批待办"
+            elif row.kind == "owner_said":
+                title = handover.OWNER_SAID_TITLE
             lines.append(f"{index}. {title}")
             if data.get("chat_name"):
                 lines.append(BAR + "会话：" + _one_line(data["chat_name"], NAME_LIMIT))

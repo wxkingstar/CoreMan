@@ -198,3 +198,16 @@ def test_an_item_handed_over_before_says_so_and_asks_to_check_first() -> None:
     # 说明是平台写的行，说清楚先核对什么。
     assert "approval_list" in handover.AGAIN and "followup_list" in handover.AGAIN
     assert "不要重做" in handover.AGAIN
+
+
+def test_an_owner_said_item_is_titled_as_his_own_words_and_quoted() -> None:
+    row = message(
+        "om_9",
+        kind="owner_said",
+        level="batch",
+        summary={"sender_id": "ou_owner", "text": "周四前我把报价发你"},
+    )
+    text = handover.render([row], ZONE)
+    assert handover.OWNER_SAID_TITLE in text
+    assert "> 周四前我把报价发你" in text
+    assert "私聊消息" not in text and "群聊消息" not in text

@@ -66,3 +66,10 @@ def test_rules_say_a_handover_turns_writes_go_out_as_one_approval() -> None:
     """交回这一轮的飞书写先暂存、本轮结束时合成一张审批单；被打断那一轮暂存的没有提交。"""
     text = handover_prompt.RULES
     assert "合成一张审批单" in text and "整批作废" in text and "重新起草" in text
+
+
+def test_rules_say_what_to_do_with_the_owners_own_messages() -> None:
+    text = handover_prompt.RULES
+    assert handover.OWNER_SAID_TITLE in text
+    for phrase in ("promised", "waiting", "不起草回复", "先用 followup_list 看有没有同一件事"):
+        assert phrase in text

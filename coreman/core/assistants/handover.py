@@ -118,11 +118,16 @@ def _reminder(data: dict[str, Any]) -> list[str]:
     return ["一条平台提醒，内容读不出来，可以忽略。"]
 
 
+OWNER_SAID_TITLE = "你自己发的消息"
+
+
 def _title(row: AssistantInbox, data: dict[str, Any]) -> str:
     if row.kind == "reminder":
         return REMINDERS.get(str(data.get("reminder")), "提醒")
     if row.kind == "approval_todo":
         return "飞书审批待办"
+    if row.kind == "owner_said":
+        return OWNER_SAID_TITLE
     return {"p2p": "私聊消息", "group": "群聊消息"}.get(str(data.get("chat_kind")), "消息")
 
 

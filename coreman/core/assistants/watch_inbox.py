@@ -44,11 +44,17 @@ def _open(bot_id: uuid.UUID) -> tuple[Any, ...]:
     )
 
 
-async def batch_until(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -> datetime | None:
-    """这位助理正在攒的那一批什么时候到点；没有在攒的返回 None。"""
+async def batch_until(
+    session: AsyncSession, bot_id: uuid.UUID, now: datetime, *, kind: str = "message"
+) -> datetime | None:
+    """这位助理正在攒的某一类条目的那一批什么时候到点；没有在攒的返回 None。
+
+    按 `kind` 分开算：所有者自己说的话（`owner_said`）攒 30 分钟，不能把别人消息的 5 分钟窗口拉长。
+    """
     found: datetime | None = await session.scalar(
         select(func.min(AssistantInbox.hold_until)).where(
             *_open(bot_id),
+            AssistantInbox.kind == kind,
             AssistantInbox.level == Level.BATCH.value,
             AssistantInbox.hold_until > now,
         )
@@ -64,6 +70,7 @@ async def add(
     *,
     owner_open_id: str,
     hold_until: datetime | None,
+    kind: str = "message",
 ) -> bool:
     """入箱；这条消息已经在箱里（不论什么状态）就什么都不做，返回 False。
 
@@ -76,7 +83,7 @@ async def add(
         bot_id,
         {
             "bot_id": bot_id,
-            "kind": "message",
+            "kind": kind,
             "level": level.value,
             "chat_id": item.chat_id,
             "message_id": item.message_id,
@@ -117,12 +124,12 @@ async def hold_chat(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, unti
 
 
 async def void_message(session: AsyncSession, bot_id: uuid.UUID, message_id: str, code: str) -> int:
-    """这条消息对应的、还没交回的条目作废（对方撤回）。"""
+    """这条消息对应的、还没交回的条目作废（撤回）：别人发来的消息条目，与所有者自己说的话条目。"""
     result = await session.execute(
         update(AssistantInbox)
         .where(
             *_open(bot_id),
-            AssistantInbox.kind == "message",
+            AssistantInbox.kind.in_(("message", "owner_said")),
             AssistantInbox.message_id == message_id,
         )
         .values(status="void", void_code=code, updated_at=func.now())
@@ -141,11 +148,13 @@ async def void_all(session: AsyncSession, bot_id: uuid.UUID, code: str) -> int:
 
 
 async def pending_messages(session: AsyncSession, bot_id: uuid.UUID, limit: int = 20) -> list[str]:
-    """还没交回的消息条目的消息 id，新的在前：每轮拿它们去查有没有被撤回。"""
+    """还没交回的消息条目（含所有者自己说的话）的消息 id，新的在前：每轮拿它们去查有没有被撤回。"""
     found = await session.scalars(
         select(AssistantInbox.message_id)
         .where(
-            *_open(bot_id), AssistantInbox.kind == "message", AssistantInbox.message_id.is_not(None)
+            *_open(bot_id),
+            AssistantInbox.kind.in_(("message", "owner_said")),
+            AssistantInbox.message_id.is_not(None),
         )
         .order_by(AssistantInbox.id.desc())
         .limit(limit)
