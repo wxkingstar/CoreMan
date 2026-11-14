@@ -813,11 +813,10 @@ async def _remember(
     """拒绝理由是所有者本人的修改意见：记进意见页（一张单一条）。记不下不影响决定。"""
     stored = [item.args_enc if isinstance(item.args_enc, dict) else {} for item in items]
     what = "；".join(str(one.get("abstract") or "") for one in stored if one.get("abstract"))
-    drafts = [feedback.draft_of(list(one.get("calls") or [])) for one in stored]
     numbered = [
-        f"{index}. {draft}" if len(stored) > 1 else draft
-        for index, draft in enumerate(drafts, 1)
-        if draft
+        f"{one['item']}. {draft}" if one.get("item") else draft
+        for one in stored
+        if (draft := feedback.draft_of(list(one.get("calls") or [])))
     ]
     await feedback.record(
         session, bot.id, what=what or items[0].tool, draft=" ".join(numbered), reason=reason
@@ -1017,7 +1016,6 @@ def result_text(row: AssistantApproval) -> str:
         return (
             f"{what}{topic}被拒绝，没有执行。{opinion}\n"
             "改好后重新调用原工具提交，或者放弃；不要原样再提交一次。"
-            + ("这条意见平台已记进 profile/feedback.md。" if row.reason_enc else "")
         )
     if row.status == "stale":
         return (
@@ -1070,7 +1068,7 @@ def batch_text(rows: list[AssistantApproval]) -> str:
         "前面已执行的项不会因为后面的失败撤回。"
     )
     parts = [lead, *(f"第 {index} 项：" + result_text(row) for index, row in enumerate(rows, 1))]
-    if all(row.status == "rejected" for row in rows) and rows[0].reason_enc:
+    if any(row.status == "rejected" and row.reason_enc for row in rows):
         parts.append(REJECTED_BATCH)
     return "\n\n".join(parts)
 

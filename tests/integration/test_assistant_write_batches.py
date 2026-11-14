@@ -763,6 +763,33 @@ async def test_a_rejection_reason_is_recorded_as_owner_feedback(
     assert "只改意见点到的项" in text
 
 
+async def test_feedback_numbers_follow_the_approval_after_a_partial_withdrawal(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.withdraw(db_session, scope, str(head.id), "不用了", cfg=CFG)
+    await db_session.commit()
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="太硬，改客气点",
+        decided_at=None,
+    )
+    await db_session.commit()
+    page = await notes.read(db_session, scope.bot.id, feedback.PATH)
+    assert page is not None
+    (entry,) = feedback.split(page.body)[1]
+    draft_line = next(line for line in entry.splitlines() if line.startswith("稿子："))
+    assert draft_line.removeprefix("稿子：").startswith("2. ")
+    text = service.batch_text(await service.members(db_session, head, lock=False))
+    assert "只改意见点到的项" in text
+
+
 async def test_an_approval_note_is_not_recorded_as_feedback(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
