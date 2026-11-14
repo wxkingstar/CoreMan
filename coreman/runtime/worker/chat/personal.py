@@ -18,6 +18,7 @@ from coreman.core.assistants import (
     handover_prompt,
     jobs_prompt,
     notes_prompt,
+    reply_prompt,
     settings_prompt,
     workspace_prompt,
 )
@@ -251,7 +252,7 @@ async def configure(
         # 交回事项怎么处理，工作时段与关注的会话怎么改，怎么用子任务、怎么调度公共员工；规则都写进
         # 稳定段。
         rules += approval_prompt.RULES + workspace_prompt.WORKSPACE_RULES + notes_prompt.RULES
-        rules += followup_prompt.FOLLOWUP_RULES + handover_prompt.RULES
+        rules += followup_prompt.FOLLOWUP_RULES + handover_prompt.RULES + reply_prompt.RULES
         rules += settings_prompt.SETTINGS_RULES + jobs_prompt.RULES + dispatch_prompt.RULES
     ctx.turn_notes.append(note)
     if ctx.task.payload.get(resume.PAYLOAD_KEY):
