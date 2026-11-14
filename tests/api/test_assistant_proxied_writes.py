@@ -50,6 +50,7 @@ from coreman.core.db.models.cloud_proxy import CloudCall
 from coreman.core.db.session import make_session_factory
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.systems_catalog.service import Issuance
+from coreman.core.timeutils import utcnow
 from coreman.runtime.worker import assistant_approvals as worker_approvals
 from tests.api.test_systems_catalog import bearer, call
 from tests.fakes.business_system import BASE_URL, SPEC_URL, FakeBusinessSystem, install
@@ -293,24 +294,84 @@ async def test_a_repeated_call_reuses_the_live_approval(
     assert len(await approvals(db_session)) == 2 and posts(fake) == []
 
 
-async def test_the_pending_cap_stops_new_approvals(
+def owner_approval(bot: Bot, n: int) -> AssistantApproval:
+    """所有者在场时自己提交的一张待批飞书写审批（只要状态与工具名）。"""
+    row_id = uuid.uuid4()
+    return AssistantApproval(
+        id=row_id,
+        bot_id=bot.id,
+        tool="feishu_send_message",
+        external_id=service.EXTERNAL_PREFIX + row_id.hex,
+        args_enc={"calls": [], "abstract": f"私聊 → 某人 {n}"},
+        args_hash=f"owner-{n}",
+        request_hash="h",
+        channel="p2p",
+        expires_at=utcnow() + service.TTL,
+    )
+
+
+async def test_proxied_writes_have_their_own_smaller_pending_cap(
     client: httpx.AsyncClient,
     app: Any,
     db_session: AsyncSession,
     fake: FakeBusinessSystem,
     fake_tower: FakeTower,
 ) -> None:
-    _, owner, task = await owner_turn(db_session, STAGEABLE[0])
+    """无人在场的代理写最多同时待批 5 张，刷不满各类共用的 10 张。"""
+    bot, owner, task = await owner_turn(db_session, STAGEABLE[0])
     auth = bearer(app, task, owner)
-    for n in range(service.MAX_PENDING):
+    for n in range(proxied.MAX_PENDING):
         out = await call(
             client, auth, "systems_call", {**WRITE, "body": {"sku": f"S{n}", "quantity": 1}}
         )
         assert out["status"] == "pending_approval"
     full = await call(client, auth, "systems_call", WRITE)
-    assert full["error"] == "too_many_pending" and full["limit"] == service.MAX_PENDING
+    assert full["error"] == "too_many_pending" and full["limit"] == proxied.MAX_PENDING
+    assert "所有者不在场" in full["hint"]
+    assert len(await approvals(db_session)) == proxied.MAX_PENDING
+    assert len(fake_tower.submitted) == proxied.MAX_PENDING and posts(fake) == []
+    assert proxied.MAX_PENDING < service.MAX_PENDING
+    # 所有者自己的审批还有位置：各类共用的上限照旧是 10 张。
+    db_session.add_all(
+        [owner_approval(bot, n) for n in range(service.MAX_PENDING - proxied.MAX_PENDING)]
+    )
+    await db_session.commit()
     assert len(await approvals(db_session)) == service.MAX_PENDING
-    assert len(fake_tower.submitted) == service.MAX_PENDING and posts(fake) == []
+
+
+async def test_the_shared_pending_cap_still_applies(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    fake_tower: FakeTower,
+) -> None:
+    bot, owner, task = await owner_turn(db_session, STAGEABLE[0])
+    db_session.add_all([owner_approval(bot, n) for n in range(service.MAX_PENDING)])
+    await db_session.commit()
+    full = await call(client, bearer(app, task, owner), "systems_call", WRITE)
+    assert full["error"] == "too_many_pending" and full["limit"] == service.MAX_PENDING
+    assert fake_tower.submitted == [] and posts(fake) == []
+
+
+async def test_a_request_too_large_to_review_is_not_staged(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    fake_tower: FakeTower,
+) -> None:
+    """所有者在审批单上看不全的请求不提交：不建单、不发请求，返回 too_large_to_review。"""
+    _, owner, task = await owner_turn(db_session, STAGEABLE[0])
+    out = await call(
+        client,
+        bearer(app, task, owner),
+        "systems_call",
+        {**WRITE, "body": {"sku": "S" * 12000, "quantity": 1}},
+    )
+    assert out["error"] == proxied.TOO_LARGE and "看不全" in out["hint"]
+    assert await approvals(db_session) == [] and fake_tower.submitted == [] and posts(fake) == []
+    assert await system_calls(db_session) == [("createDraft", "denied")]
 
 
 async def test_tower_down_leaves_no_row_and_sends_nothing(
@@ -916,3 +977,22 @@ async def test_the_worker_routes_proxied_approvals_to_their_proxy(
     [done] = await approvals(db_session)
     assert done.status == "executed" and posts(fake) == [{"sku": "SKU-9", "quantity": 3}]
     assert fake_tower.redeemed[-1][1] == row.request_hash
+
+
+async def test_a_cloud_write_too_large_to_review_is_not_staged(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake_tower: FakeTower,
+    aliyun_mock: respx.MockRouter,
+) -> None:
+    """一个参数值太长（低风险写里只有 ACL 条目的备注能变长）：整张不提交，不调阿里云。"""
+    bot, owner, task = await owner_turn(db_session, STAGEABLE[0])
+    entries = json.dumps([{"entry": "8.8.8.8", "comment": "c" * 12000}])
+    params = {"Action": "AddAccessControlListEntry", "AclId": ACL, "AclEntrys": entries}
+    body = urllib.parse.urlencode(sorted(params.items())).encode()
+    r = await client.post(SLB, content=body, headers=cloud_bearer(app, bot, owner, task))
+    assert r.status_code == 403 and r.json()["error"] == proxied.TOO_LARGE
+    assert not aliyun_mock.calls and await approvals(db_session) == []
+    assert fake_tower.submitted == []
+    assert [(c.risk, c.outcome) for c in await cloud_calls(db_session)] == [("write_low", "denied")]

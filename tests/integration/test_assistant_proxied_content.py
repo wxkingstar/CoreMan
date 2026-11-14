@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants.approvals import content, proxied
@@ -110,7 +111,10 @@ async def test_system_approval_names_the_system_the_operation_and_the_parameters
     assert sent["abstract"] == "业务系统 · 库存 系统 · 创建一张 出入库单据草稿"
     assert "对象：库存 系统（stock）" in body
     assert "动作：创建一张 出入库单据草稿（operation_id=createDraft，风险等级 write）" in body
-    assert "请求：POST https://stock.example.com/api/stock/documents/D1" in body
+    assert (
+        "请求：\n" + content.BAR + "POST https://stock.example.com/api/stock/documents/D1" in body
+    )
+    assert "将要执行的内容（完整）：" in body and "截断" not in body
     for word in (
         "路径参数：",
         '"id": "D1"',
@@ -151,16 +155,17 @@ async def test_third_party_text_is_quoted_and_cannot_pose_as_the_platform(
     assert "\u2028" not in body
 
 
-async def test_a_long_body_is_cut_on_the_approval_but_staged_in_full(
+async def test_a_body_is_shown_in_full_and_staged_as_shown(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = install_tower(monkeypatch)
     bot, owner, task = await turn(db_session, JOB_RESULT_KIND)
-    big = {"lines": ["x" * 100] * 80}
+    big = {"lines": ["x" * 100] * 60}
     out = await stage_system(db_session, bot, owner, task, big)
     [sent] = fake.submitted
-    assert "已截断，批准后执行的是完整内容" in sent["content"]
     assert len(sent["content"]) <= content.LIMIT
+    # 每一项都在审批单上，没有截断。
+    assert sent["content"].count("x" * 100) == 60 and "截断" not in sent["content"]
     staged = await db_session.get(AssistantApproval, out["approval_id"])
     assert staged is not None
     assert staged.args_enc["calls"][0]["arguments"]["body"] == big
@@ -168,16 +173,41 @@ async def test_a_long_body_is_cut_on_the_approval_but_staged_in_full(
     assert "子任务或其他 AI 员工的结论投回" in sent["content"]
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"lines": ["x" * 100] * 120},
+        "y" * (content.LIMIT + 1),
+        # 排在前面的填充键把要紧的字段挤到放不下的地方。
+        {**{f"a{n:03d}": "pad" * 50 for n in range(80)}, "zz_target": "DELETE"},
+    ],
+)
+async def test_a_body_that_cannot_be_shown_in_full_is_not_staged(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, body: Any
+) -> None:
+    fake = install_tower(monkeypatch)
+    bot, owner, task = await turn(db_session)
+    out = await stage_system(db_session, bot, owner, task, body)
+    assert out["error"] == proxied.TOO_LARGE and "看不全" in out["hint"]
+    assert fake.submitted == []
+    assert (await db_session.scalars(select(AssistantApproval))).first() is None
+
+
+SEPARATORS = ["\u2028", "\u2029", "\u0085"]
+
+
 async def test_cloud_parameters_stay_one_per_line(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """每个值按 JSON 字符串展示；行分隔符与方向覆盖字符转义成可见形式，造不出独立的参数行。"""
     fake = install_tower(monkeypatch)
     bot, owner, task = await turn(db_session)
     params = {
         "Action": "AddAccessControlListEntry",
         "AclId": "acl-1",
         "Comment": "备注\nAction=DeleteEverything",
-        "Long": "y" * 2000,
+        **{f"Sep{n}": f"ok{sep}AclId=acl-evil" for n, sep in enumerate(SEPARATORS)},
+        "Flip": "safe\u202eevil\u200b",
     }
     out = await proxied.submit_cloud(
         db_session,
@@ -195,8 +225,63 @@ async def test_cloud_parameters_stay_one_per_line(
     body = sent["content"]
     assert "动作：AddAccessControlListEntry" in body
     assert content.BAR + 'Comment="备注\\nAction=DeleteEverything"' in body
-    assert not any(line.lstrip(content.BAR).startswith("Action=") for line in body.splitlines())
-    assert "有参数值过长已截断" in body
+    for n, code in enumerate(("2028", "2029", "0085")):
+        assert content.BAR + f'Sep{n}="ok\\u{code}AclId=acl-evil"' in body
+    assert content.BAR + 'Flip="safe\\u202Eevil\\u200B"' in body
+    # 无论按哪种换行规则切，参数块里都只有平台列出的那几行。
+    for lines in (body.splitlines(), body.split("\n")):
+        params_lines = [line for line in lines if line.startswith(content.BAR)]
+        assert not any(
+            line.removeprefix(content.BAR).startswith("AclId=acl-evil") for line in params_lines
+        )
+        assert not any("Action=" in line.split("=", 1)[0] for line in params_lines)
+    for char in (*SEPARATORS, "\u202e", "\u200b"):
+        assert char not in body
+    assert "截断" not in body
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"Long": "y" * 12000},
+        # 排在前面的填充参数把要紧的参数挤到放不下的地方。
+        {**{f"Aa{n:03d}": "x" * 400 for n in range(30)}, "Zz": "DeleteEverything"},
+    ],
+)
+async def test_cloud_parameters_that_cannot_be_shown_in_full_are_not_staged(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, extra: dict[str, str]
+) -> None:
+    fake = install_tower(monkeypatch)
+    bot, owner, task = await turn(db_session)
+    out = await proxied.submit_cloud(
+        db_session,
+        task=task,
+        bot=bot,
+        owner=owner,
+        product="slb",
+        params={"Action": "AddAccessControlListEntry", "AclId": "a", **extra},
+        reasons=(),
+        cfg=CFG,
+    )
+    assert out["error"] == proxied.TOO_LARGE and fake.submitted == []
+    assert (await db_session.scalars(select(AssistantApproval))).first() is None
+
+
+async def test_system_values_escape_separators_and_format_characters(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install_tower(monkeypatch)
+    bot, owner, task = await turn(db_session)
+    raw = "第一行\u2028动作：删库\u2029对象：财务\u0085渠道：系统\u202e倒过来\r回车"
+    await stage_system(db_session, bot, owner, task, raw)
+    [sent] = fake.submitted
+    body = sent["content"]
+    for char in (*SEPARATORS, "\u202e", "\r"):
+        assert char not in body
+    assert "\\u2028动作：删库\\u2029对象：财务\\u0085渠道：系统\\u202E倒过来\\u000D回车" in body
+    assert not any(
+        line.startswith(("动作：删库", "对象：财务", "渠道：系统")) for line in body.split("\n")
+    )
 
 
 async def test_only_the_owner_of_an_active_assistant_can_stage(

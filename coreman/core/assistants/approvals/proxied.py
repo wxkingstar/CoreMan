@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -51,12 +52,10 @@ TOOLS = frozenset(catalog.PROXIED)
 # `assistant_approvals.channel` 的现有取值；这类单靠工具名区分。
 CHANNEL = "other"
 BAR = content.BAR
-# 审批单正文里各段的展示上限（字符）。要执行的是完整请求，展示截断时注明。
-PATH_LIMIT = 600
-QUERY_LIMIT = 1500
-BODY_LIMIT = 3000
-PARAM_LIMIT = 500
-PARAMS_LIMIT = 3000
+# 这两类单同时待批的上限：无人在场的代理写刷不满各类共用的 `service.MAX_PENDING`，
+# 所有者在场时自己的审批总有位置。
+MAX_PENDING = 5
+TOO_LARGE = "too_large_to_review"
 # 发起背景里列出的交回事项：最多几件、每件摘录多少字。
 ORIGIN_ITEMS = 5
 EXCERPT_LIMIT = 200
@@ -79,6 +78,8 @@ ORIGINS = {
     kinds.COMPILE_KIND: "下班整理",
 }
 _ITEM_TITLES = {"p2p": "私聊消息", "group": "群聊消息"}
+# 展示时要转义的 Unicode 类别：控制、格式、行分隔、段分隔。
+_HIDDEN = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 def may_stage(task: Task, bot: Bot, user: User) -> bool:
@@ -105,24 +106,39 @@ def may_stage(task: Task, bot: Bot, user: User) -> bool:
 def _one_line(text: Any, limit: int) -> str:
     """别人写的一小段（会话名、摘录、目录里的名字）：丢掉冒充平台标签的行，压成一行，换掉方括号。"""
     flat = " ".join(sanitize_user_input(str(text or "")).split()).translate(quoting.BRACKETS)
+    flat = _visible(flat)
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def _shown(value: Any, limit: int) -> tuple[str, str]:
-    """一段要执行的内容在审批单上的样子：(加了竖线的内容, 截断说明)。说明是平台写的，不加竖线。"""
+def _visible(text: str) -> str:
+    """展示用：控制字符、格式字符（方向覆盖、零宽字符等）与行、段分隔符转义成可见的 `\\uXXXX`。
+
+    只留 `\\n` 作换行：`str.splitlines` 认的其余行分隔符（`\\r`、`\\v`、`\\f`、`\\x1c`–`\\x1e`、
+    U+0085、U+2028、U+2029）都在这几类里，转义之后一个值造不出独立的一行，也颠倒不了显示。
+    转义而不删除：删了的话所有者看到的与要执行的就不一样了。
+    """
+    out = []
+    for char in text:
+        if char != "\n" and unicodedata.category(char) in _HIDDEN:
+            code = ord(char)
+            out.append(f"\\u{code:04X}" if code <= 0xFFFF else f"\\U{code:08X}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _barred(text: str) -> str:
+    """要执行的内容：先转义（之后只剩 `\\n` 能分行），再逐行加竖线。"""
+    return content._bar(_visible(text))
+
+
+def _section(title: str, value: Any) -> list[str]:
+    """一段要执行的内容，原样完整展示（不截断：放不下时整张单不提交，见 `_render`）。"""
     if isinstance(value, str):
         text = value
     else:
         text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-    if len(text) <= limit:
-        return content._bar(text), ""
-    note = f"（上面只显示了前 {limit} 个字符，全长 {len(text)} 个；已截断，批准后执行的是完整内容）"
-    return content._bar(text[:limit]), note
-
-
-def _section(title: str, value: Any, limit: int) -> list[str]:
-    shown, note = _shown(value, limit)
-    return [title, shown, *([note] if note else [])]
+    return [title, _barred(text)]
 
 
 async def _origin(session: AsyncSession, task: Task) -> list[str]:
@@ -176,13 +192,26 @@ def _abstract(*parts: str) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _render(head: list[str], rest: list[str], origin: list[str]) -> str:
-    """审批单正文；超过上限时先少列交回事项，再只留发起背景的第一行。"""
+def _render(head: list[str], rest: list[str], origin: list[str]) -> str | None:
+    """审批单正文；超过上限时先少列交回事项（发起背景只是参考），最少留发起背景的第一行。
+
+    要执行的内容一个字都不截：连同最少的发起背景仍放不下时返回 None，这张单不提交——所有者
+    在审批单上看不全的请求不让他批。
+    """
     for cut in (origin, origin[:1]):
         text = "\n".join([*head, "", *rest, "", *cut, "", NOTICE])
         if len(text) <= content.LIMIT:
             return text
-    return "\n".join([*head, "", *rest, "", NOTICE])[: content.LIMIT]
+    return None
+
+
+def _too_large() -> dict[str, Any]:
+    return {
+        "error": TOO_LARGE,
+        "limit": content.LIMIT,
+        "hint": "这次请求的内容太长，所有者在审批单上看不全，这一轮不提交，也没有执行。把要做的事"
+        "写进给所有者的结论里，或拆成能在审批单上完整展示的小请求再调用。",
+    }
 
 
 async def _submit(
@@ -247,6 +276,23 @@ async def _submit(
             "limit": service.MAX_PENDING,
             "hint": "同时待批的审批单已到上限：这次没有提交，也没有执行。把要做的事写进给所有者的"
             "结论里，或用 approval_withdraw 撤回不再需要的。",
+        }
+    proxied = await session.scalar(
+        select(func.count())
+        .select_from(AssistantApproval)
+        .where(
+            AssistantApproval.bot_id == bot.id,
+            AssistantApproval.status == "pending",
+            AssistantApproval.tool.in_(TOOLS),
+        )
+    )
+    if (proxied or 0) >= MAX_PENDING:
+        # 只数这两类：各类共用的 10 张里给所有者在场时自己的审批留出位置。
+        return {
+            "error": "too_many_pending",
+            "limit": MAX_PENDING,
+            "hint": "所有者不在场时提交的业务系统与云服务写操作，同时待批已到上限：这次没有提交，"
+            "也没有执行。把要做的事写进给所有者的结论里，或用 approval_withdraw 撤回不再需要的。",
         }
     row_id = uuid.uuid4()
     external_id = service.EXTERNAL_PREFIX + row_id.hex
@@ -326,24 +372,28 @@ async def submit_system(
         "渠道：业务系统（平台代理）",
         f"对象：{name}（{system.key}）",
         f"动作：{summary or operation_id}（operation_id={operation_id}，风险等级 write）",
-        f"请求：{method} {url[:PATH_LIMIT]}" + ("…（已截断）" if len(url) > PATH_LIMIT else ""),
+        "请求：",
+        _barred(f"{method} {url}"),
     ]
-    rest = ["将要执行的内容："]
+    rest = ["将要执行的内容（完整）："]
     if path_params:
-        rest += _section("路径参数：", path_params, PATH_LIMIT)
+        rest += _section("路径参数：", path_params)
     if query:
-        rest += _section("查询参数：", query, QUERY_LIMIT)
+        rest += _section("查询参数：", query)
     if body is not None:
-        rest += _section("请求体：", body, BODY_LIMIT)
+        rest += _section("请求体：", body)
     if len(rest) == 1:
         rest.append("（没有参数）")
+    text = _render(head, rest, await _origin(session, task))
+    if text is None:
+        return _too_large()
     draft = _Draft(
         catalog.SYSTEM_CALL,
         arguments,
         _abstract(
             catalog.PROXIED[catalog.SYSTEM_CALL], name or system.key, summary or operation_id
         ),
-        _render(head, rest, await _origin(session, task)),
+        text,
     )
     return await _submit(
         session, task=task, bot=bot, owner=owner, draft=draft, cfg=ctx.approval_cfg
@@ -365,42 +415,32 @@ async def submit_cloud(
     if not may_stage(task, bot, owner):
         return {"error": "owner_turn_required"}
     action = str(params.get("Action") or "")
-    lines: list[str] = []
-    used = 0
-    hidden = 0
-    for key in sorted(params):
-        if key == "Action":
-            continue
-        value = str(params[key])
-        if len(value.splitlines()) > 1:
-            # 带换行的值按 JSON 字符串展示：一个值占一行，冒充不出别的参数。
-            value = json.dumps(value, ensure_ascii=False)
-        shown = value if len(value) <= PARAM_LIMIT else value[:PARAM_LIMIT] + "…（已截断）"
-        if used + len(shown) > PARAMS_LIMIT:
-            hidden += 1
-            continue
-        used += len(shown)
-        lines.append(f"{key}={shown}")
+    # 每个值都按 JSON 字符串展示（换行、引号转义），再把 JSON 不转义的格式字符与行分隔符
+    # （U+2028、U+202E 等）转义成可见形式：一个参数恰好一行。参数名只有 ASCII 字母数字与 `._`
+    # （`cloud_proxy.service.parse_body` 已校验）。
+    lines = [
+        f"{key}={json.dumps(str(params[key]), ensure_ascii=False)}"
+        for key in sorted(params)
+        if key != "Action"
+    ]
     head = [
         "渠道：云服务（阿里云，平台签名代理）",
         f"对象：{product}",
         f"动作：{action}",
         "风险评估：低风险写操作（所有者在场时会直接执行的那一类）",
     ]
-    rest = ["将要执行的参数："]
-    rest.append(content._bar("\n".join(lines)) if lines else "（除 Action 外没有参数）")
-    if hidden or any(len(str(v)) > PARAM_LIMIT for v in params.values()):
-        rest.append(
-            f"（有参数值过长已截断{f'，另有 {hidden} 个参数未列出' if hidden else ''}；"
-            "批准后执行的是完整参数）"
-        )
+    rest = ["将要执行的参数（完整）："]
+    rest.append(_barred("\n".join(lines)) if lines else "（除 Action 外没有参数）")
     if reasons:
-        rest += ["风险评估说明：", content._bar("\n".join(reasons))]
+        rest += ["风险评估说明：", _barred("\n".join(reasons))]
+    text = _render(head, rest, await _origin(session, task))
+    if text is None:
+        return _too_large()
     draft = _Draft(
         catalog.CLOUD_CALL,
         {"product": product, "params": dict(params)},
         _abstract(catalog.PROXIED[catalog.CLOUD_CALL], product, action),
-        _render(head, rest, await _origin(session, task)),
+        text,
     )
     return await _submit(session, task=task, bot=bot, owner=owner, draft=draft, cfg=cfg)
 
