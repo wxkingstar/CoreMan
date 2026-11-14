@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from coreman.core.auth.system_access import auth_label, auth_mode, token_env_var
 from coreman.core.db.models import BusinessSystem
-from coreman.core.systems_catalog import context, proxy, service
+from coreman.core.systems_catalog import context, proxy, service, uploads
 from coreman.core.systems_catalog.context import TRUST, Context
 from coreman.core.systems_catalog.search import normalize
 
@@ -595,7 +595,7 @@ def call_template(
 ) -> dict[str, Any]:
     if system.token_delivery == "proxy" and not ctx.anonymous:
         denied = proxy.policy_error(ctx, system, op)
-        return {
+        template = {
             "mode": "proxy",
             "tool": "systems_call",
             "allowed": denied in (None, proxy.OWNER_APPROVAL),
@@ -603,6 +603,10 @@ def call_template(
             "（path_params、query、body）。运行环境里没有这个系统的令牌，不要用 curl 直接调用。"
             + ("" if denied is None else proxy.DENIALS[denied]),
         }
+        form = (op.get("validate") or {}).get("body") or {}
+        if form.get("multipart") and form.get("files") and ctx.settings is not None:
+            template["upload"] = uploads.instructions(ctx.settings.public_base_url, form["files"])
+        return template
     if ctx.anonymous:
         env_var, mode = ctx.token_env, "bearer"
     else:

@@ -20,7 +20,7 @@ import json
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 from urllib.parse import quote
@@ -29,11 +29,12 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from coreman.core.auth.token_providers import TokenProviderError
-from coreman.core.db.models import BusinessSystem, SystemCall
+from coreman.core.config import get_settings
+from coreman.core.db.models import BusinessSystem, StoredObject, SystemCall
 from coreman.core.logging import get_logger
 from coreman.core.object_store import MAX_SIZE as STORE_MAX
 from coreman.core.object_store import disk_io
-from coreman.core.systems_catalog import context, fetch, spill
+from coreman.core.systems_catalog import context, fetch, spill, uploads
 from coreman.core.systems_catalog.compiler import same_origin
 from coreman.core.systems_catalog.context import Context
 from coreman.core.systems_catalog.validate import Validator, coerce
@@ -84,7 +85,11 @@ class Call(BaseModel):
     query: dict[str, Scalar | list[Scalar]] | None = Field(
         default=None, description="Query parameters"
     )
-    body: Any = Field(default=None, description="JSON request body")
+    body: Any = Field(
+        default=None,
+        description="Request body. For an upload or import operation, each file field takes "
+        '{"upload_id": ...} from uploading the file first (see systems_describe)',
+    )
     note: Note | None = Field(
         default=None,
         description="Writes only: the object, before/after values, impact and how to undo it, "
@@ -97,7 +102,8 @@ DESCRIPTION = (
     "with systems_describe first. Reads run directly. Writes (write, destructive) need the AI "
     "employee's write permission and only join this turn's confirmation list: when the turn "
     "ends the member gets one card for all of them, and the platform runs them once confirmed. "
-    "Financial operations are never proxied."
+    "Financial operations are never proxied. Operations that take files: upload each file first "
+    "as systems_describe shows and pass its upload_id."
 )
 
 
@@ -112,6 +118,8 @@ class Prepared:
     body: Any
     # Idempotency header names the operation declares; `send` fills them.
     keys: list[str]
+    # Multipart operations: (field, upload) for every file, in the order given.
+    files: list[tuple[str, StoredObject]] = field(default_factory=list)
 
 
 def _text(value: Scalar) -> str:
@@ -163,6 +171,8 @@ def build_request(
     if body_spec is None:
         if args.body is not None:
             problems.append("body: this operation takes no request body")
+    elif body_spec.get("multipart"):
+        problems += _form_problems(args.body, body_spec, validator)
     elif not body_spec["json"]:
         problems.append("body: only JSON request bodies are supported by systems_call")
     elif args.body is None:
@@ -173,6 +183,66 @@ def build_request(
     if "{" in path:
         problems.append("path: undeclared path parameter in the catalog")
     return path, pairs, args.body, problems
+
+
+def _form_problems(body: Any, spec: dict[str, Any], validator: Validator) -> list[str]:
+    """A multipart form: file fields hold upload references, the rest is checked like JSON."""
+    if body is None:
+        return ["body: required"] if spec["required"] else []
+    if not isinstance(body, dict):
+        return ["body: must be an object of form fields"]
+    problems: list[str] = []
+    for name, file in spec["files"].items():
+        value = body.get(name)
+        if value is None:
+            if file["required"]:
+                problems.append(f'body.{name}: required, pass {{"upload_id": ...}}')
+            continue
+        refs = value if file["many"] and isinstance(value, list) else [value]
+        if not refs or not all(uploads.is_ref(ref) for ref in refs):
+            shape = '[{"upload_id": ...}]' if file["many"] else '{"upload_id": ...}'
+            problems.append(f"body.{name}: a file field takes {shape}")
+    fields = {k: v for k, v in body.items() if k not in spec["files"]}
+    return problems + validator.errors(fields, spec["schema"], "body")
+
+
+def form_files(op: dict[str, Any], body: Any) -> list[tuple[str, str]]:
+    """(field, upload_id) for every file a checked multipart body references."""
+    spec = op["validate"].get("body") or {}
+    if not spec.get("multipart") or not isinstance(body, dict):
+        return []
+    out = []
+    for name in spec["files"]:
+        value = body.get(name)
+        refs = value if isinstance(value, list) else [] if value is None else [value]
+        out += [(name, str(ref["upload_id"])) for ref in refs]
+    return out
+
+
+def _form_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dict | list):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+async def _form(ctx: Context, p: Prepared) -> list[tuple[str, tuple[str | None, Any, str | None]]]:
+    """Multipart parts: text fields first, then the stored files."""
+    # 确认卡与审批执行的上下文不带部署配置（不转存结果），读上传的文件照样要用。
+    settings = ctx.settings or get_settings()
+    names = set(p.op["validate"]["body"]["files"])
+    parts: list[tuple[str, tuple[str | None, Any, str | None]]] = [
+        (name, (None, _form_text(value), None))
+        for name, value in (p.body or {}).items()
+        if name not in names and value is not None
+    ]
+    for name, row in p.files:
+        data = await uploads.read(settings, row)
+        parts.append((name, (row.filename, data, row.content_type)))
+    return parts
 
 
 def idempotency_headers(op: dict[str, Any]) -> list[str]:
@@ -395,7 +465,18 @@ async def prepare(ctx: Context, args: Call) -> Prepared | dict[str, Any]:
     url = httpx.URL(target)
     if pairs:
         url = url.copy_with(params=pairs)
-    return Prepared(system, args.operation_id, op, url, body, idempotency_headers(op))
+    files: list[tuple[str, StoredObject]] = []
+    for name, upload_id in form_files(op, body):
+        row = await uploads.resolve(ctx, upload_id)
+        if row is None:
+            return {
+                "error": "upload_not_found",
+                "field": name,
+                "message": "文件不存在、已过期（1 小时）或不是本轮上传的。"
+                "按 systems_describe 的说明重新上传后再调用。",
+            }
+        files.append((name, row))
+    return Prepared(system, args.operation_id, op, url, body, idempotency_headers(op), files)
 
 
 async def send(
@@ -424,12 +505,11 @@ async def send(
     with tempfile.SpooledTemporaryFile(max_size=MAX_RESPONSE_BYTES) as spool:
         try:
             async with fetch.client_for(p.url, timeout=CALL_TIMEOUT) as client:
-                async with client.stream(
-                    op["method"],
-                    p.url,
-                    headers=headers,
-                    **({"json": p.body} if p.body is not None else {}),
-                ) as response:
+                if (op["validate"].get("body") or {}).get("multipart"):
+                    sent: dict[str, Any] = {"files": await _form(ctx, p)}
+                else:
+                    sent = {"json": p.body} if p.body is not None else {}
+                async with client.stream(op["method"], p.url, headers=headers, **sent) as response:
                     size = 0
                     cut_off = False
                     async for part in response.aiter_bytes():
@@ -525,6 +605,15 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
     if isinstance(prepared, dict):
         return prepared
     if policy_error(ctx, prepared.system, prepared.op) == OWNER_APPROVAL:
+        if prepared.files:
+            # 审批可能隔几小时才批，上传 1 小时就过期：带文件的写只在所有者在场时做。
+            await record(ctx, prepared.system, prepared.operation_id, prepared.op, "denied")
+            return {
+                "error": "owner_turn_required",
+                "system": prepared.system.key,
+                "operation_id": prepared.operation_id,
+                "message": DENIALS["owner_turn_required"],
+            }
         return await _stage(ctx, prepared, args)
     if prepared.op["risk"] in CONFIRMED_RISKS and not ctx.writes_preapproved:
         from coreman.core.systems_catalog import confirm

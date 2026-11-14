@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -37,7 +38,7 @@ from coreman.core.db.models import (
     Task,
     User,
 )
-from coreman.core.systems_catalog import context, policy, service, spill, tools
+from coreman.core.systems_catalog import context, policy, service, spill, tools, uploads
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["systems-catalog"])
@@ -280,6 +281,47 @@ async def stored_result(
     if owned is None or row is None or row.expires_at <= utcnow():
         raise not_found("结果不存在或已过期")
     return await serve(request.app.state.settings, row)
+
+
+@router.put(uploads.UPLOAD_PATH)
+async def upload_file(request: Request, session: AsyncSession = Depends(get_session)) -> Any:
+    """A file for an upload or import operation of a proxied system, from this turn's runtime:
+    the same capability as the catalog MCP. The returned upload ID goes into `systems_call`."""
+    capability, scope = await _capability_scope(request, session)
+    filename = (request.query_params.get("filename") or "").strip()
+    if not filename or len(filename) > 200:
+        raise ApiError(400, 400, "请用 ?filename= 给出文件名（不超过 200 个字符）")
+    limit = uploads.UPLOAD_LIMIT
+    too_large = f"文件超过 {limit // (1024 * 1024)} MB"
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise ApiError(413, 413, too_large)
+
+    async def body() -> AsyncIterator[bytes]:
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > limit:
+                raise ApiError(413, 413, too_large)
+            yield chunk
+
+    row = await uploads.save(
+        session,
+        request.app.state.settings,
+        body(),
+        filename=filename,
+        mime=uploads.content_type(filename, request.headers.get("content-type")),
+        task_id=capability.task_id,
+        user_id=scope.user.id,
+    )
+    if row.size == 0:
+        raise ApiError(400, 400, "文件为空")
+    await session.commit()
+    return {
+        "upload_id": str(row.id),
+        **uploads.describe(row),
+        "expires_in": int(uploads.TTL.total_seconds()),
+    }
 
 
 @router.get(policy.API_PATH)
