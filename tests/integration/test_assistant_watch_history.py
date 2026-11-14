@@ -548,3 +548,27 @@ async def test_coming_back_after_a_long_stop_looks_back_a_week_at_most(
     # 没见过的会话回看 7 天：停得更久时也不早于 7 天前。
     start = int(api.read("oc_team")[0].params["start_time"])
     assert start == ms(base - watch.MAX_LOOKBACK) // 1000
+
+
+async def test_the_owners_old_words_are_not_boxed_when_polling_resumes(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """与别人的旧消息同一条年龄线：上一次成功轮询之前、又早于截止点的话不整批入箱。"""
+    monkeypatch.setattr(watch, "MAX_AGE", timedelta(hours=24))
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, ago(base, days=9), head=["oc_li"])
+    row = await watch_row(db_session, who)
+    row.cursor_enc = {
+        **row.cursor_enc,
+        "chats": {"oc_li": {"t": ms(ago(base, days=3)), "m": [], "k": "p2p", "th": {}}},
+    }
+    await db_session.commit()
+    await polled(db_session, who, ago(base, seconds=60))
+    api.chats = [LI]
+    api.say("oc_li", "om_stale", ago(base, days=2), sender=who.open_id, text="周四前我把报价发你")
+    api.say("oc_li", "om_fresh", ago(base, hours=23), sender=who.open_id, text="发我一下合同")
+    await tick(make_session_factory(db_engine), base)
+    said = [r.message_id for r in await inbox_rows(db_session, who) if r.kind == "owner_said"]
+    assert said == ["om_fresh"]

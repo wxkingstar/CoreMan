@@ -20,6 +20,11 @@ def test_rules_name_the_tools_commands_and_limits() -> None:
     assert "机器人发的告警、通知也算" in text
 
 
+def test_rules_explain_focus_people() -> None:
+    assert "focus_people" in settings_prompt.SETTINGS_RULES
+    assert "通讯录" in settings_prompt.SETTINGS_RULES
+
+
 def test_rules_are_stable_text() -> None:
     assert "2026" not in settings_prompt.SETTINGS_RULES
 

@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from structlog.testing import capture_logs
 
-from coreman.core.assistants import followups, settings, watch
+from coreman.core.assistants import followups, sent, settings, watch
 from coreman.core.assistants.watch_grade import Context, Item, Level
 from coreman.core.db.models import AssistantFollowup, Bot, FeishuPersonalGrant, RelayServer
 from coreman.core.db.session import make_session_factory
@@ -48,6 +48,15 @@ def base_time() -> datetime:
 
 def after(base: datetime, seconds: int) -> datetime:
     return base + timedelta(seconds=seconds)
+
+
+async def messages(session: AsyncSession, who: Watched) -> list[Any]:
+    """别人发来的消息条目（不含所有者自己说的话）。"""
+    return [row for row in await inbox_rows(session, who) if row.kind == "message"]
+
+
+async def owner_said(session: AsyncSession, who: Watched) -> list[Any]:
+    return [row for row in await inbox_rows(session, who) if row.kind == "owner_said"]
 
 
 def test_grade_is_exported_and_polls_are_staggered() -> None:
@@ -181,8 +190,8 @@ async def test_the_owners_own_message_is_not_boxed_and_holds_the_chat(
     factory = make_session_factory(db_engine)
     await tick(factory, after(base, 30))
     release = after(base, 20) + timedelta(minutes=10)
-    [held] = await inbox_rows(db_session, who)
-    # 所有者自己发的不入箱；先到的那条被压到他这次发言之后 10 分钟。
+    [held] = await messages(db_session, who)
+    # 所有者自己发的不入 message 条目；先到的那条被压到他这次发言之后 10 分钟。
     assert (held.message_id, held.level, held.hold_until) == ("om_1", "hold", release)
     assert (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]["o"] == ms(
         after(base, 20)
@@ -191,7 +200,7 @@ async def test_the_owners_own_message_is_not_boxed_and_holds_the_chat(
     api.say("oc_li", "om_3", after(base, 70))
     await tick(factory, after(base, 91))
     assert [
-        (row.message_id, row.level, row.hold_until) for row in await inbox_rows(db_session, who)
+        (row.message_id, row.level, row.hold_until) for row in await messages(db_session, who)
     ] == [
         ("om_1", "hold", release),
         ("om_3", "hold", release),
@@ -199,7 +208,7 @@ async def test_the_owners_own_message_is_not_boxed_and_holds_the_chat(
     # 他停下满 10 分钟之后来的，照常分级。
     api.say("oc_li", "om_4", after(base, 700))
     await tick(factory, after(base, 760))
-    last = (await inbox_rows(db_session, who))[-1]
+    last = (await messages(db_session, who))[-1]
     assert (last.message_id, last.level, last.hold_until) == ("om_4", "immediate", None)
 
 
@@ -477,3 +486,222 @@ async def test_an_unexpected_error_pushes_one_assistant_back_and_spares_the_rest
     assert broken.next_poll_at == now + timedelta(seconds=watch.ERROR_BACKOFF_MAX)
     assert (await watch_row(db_session, second)).state == "polling"
     assert SECRET not in json.dumps(logs, ensure_ascii=False, default=str)
+
+
+async def test_the_owners_own_message_is_boxed_as_owner_said(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    api.say("oc_team", "om_1", after(base, 10))
+    api.say(
+        "oc_team", "om_2", after(base, 20), sender=who.open_id, text=f"周四前我把报价发你{SECRET}"
+    )
+    factory = make_session_factory(db_engine)
+    now = after(base, 30)
+    await tick(factory, now)
+    [said] = await owner_said(db_session, who)
+    assert (said.message_id, said.level, said.chat_id) == ("om_2", "batch", "oc_team")
+    assert said.hold_until == now + watch.OWNER_SAID_WINDOW
+    assert said.summary_enc["text"] == f"周四前我把报价发你{SECRET}"  # type: ignore[index]
+    stored = str(
+        await raw(db_session, "SELECT string_agg(summary_enc::text, '') FROM assistant_inbox")
+    )
+    assert SECRET not in stored
+    # 这个会话照旧被压着：别人先到的那条被压到他发言之后 10 分钟。
+    [held] = await messages(db_session, who)
+    assert (held.message_id, held.level) == ("om_1", "hold")
+
+
+async def test_short_or_non_text_owner_messages_are_not_boxed(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    api.say("oc_team", "om_1", after(base, 10), sender=who.open_id, text="好的")
+    api.say("oc_team", "om_2", after(base, 11), sender=who.open_id, msg_type="image")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert await owner_said(db_session, who) == []
+
+
+async def test_messages_the_platform_sent_for_the_owner_are_not_boxed(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    await sent.record(db_session, who.bot.id, ["om_1"])
+    await db_session.commit()
+    api.say("oc_team", "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert await owner_said(db_session, who) == []
+
+
+async def test_the_owners_chat_with_the_assistant_is_not_boxed(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [{"chat_id": who.chat_id, "chat_mode": "p2p"}]
+    api.say(who.chat_id, "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert await owner_said(db_session, who) == []
+
+
+async def test_what_the_owner_says_to_a_bot_is_not_boxed_as_owner_said(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """私聊里读到过机器人（应用）发的消息，所有者在这个私聊里的话不入箱；标志随游标落库，
+    下一轮读到的话同样不入箱。真人私聊与群聊不受影响。"""
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [
+        {"chat_id": "oc_bot", "chat_mode": "p2p"},
+        {"chat_id": "oc_li", "chat_mode": "p2p"},
+        TEAM,
+    ]
+    api.say("oc_bot", "om_b1", after(base, 10), sender="cli_bot", kind="app", text="你好")
+    api.say("oc_bot", "om_b2", after(base, 20), sender=who.open_id, text="帮我建个本周的周报文档吧")
+    api.say("oc_li", "om_l1", after(base, 21), sender="ou_li", text="在吗")
+    api.say("oc_li", "om_l2", after(base, 22), sender=who.open_id, text="周四前我把报价发你")
+    api.say("oc_team", "om_t1", after(base, 23), sender="cli_bot", kind="app", text="收到")
+    api.say("oc_team", "om_t2", after(base, 24), sender=who.open_id, text="周四前我把方案发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert {row.message_id for row in await owner_said(db_session, who)} == {"om_l2", "om_t2"}
+    # 下一轮：机器人这次没再说话，标志来自上一轮落库的游标。
+    api.say("oc_bot", "om_b3", after(base, 40), sender=who.open_id, text="再帮我约一个会议室吧")
+    await tick(factory, after(base, 60))
+    assert {row.message_id for row in await owner_said(db_session, who)} == {"om_l2", "om_t2"}
+
+
+async def test_a_system_message_does_not_mark_a_human_chat_as_a_bot_chat(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [{"chat_id": "oc_li", "chat_mode": "p2p"}]
+    api.say(
+        "oc_li", "om_s1", after(base, 10), sender="", kind="", msg_type="system", text="系统消息"
+    )
+    api.say("oc_li", "om_l2", after(base, 20), sender=who.open_id, text="周四前我把报价发你")
+    await tick(make_session_factory(db_engine), after(base, 30))
+    assert {row.message_id for row in await owner_said(db_session, who)} == {"om_l2"}
+
+
+async def test_owner_said_items_share_one_batch(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM, LI]
+    api.say("oc_team", "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    api.chats = [LI, TEAM]
+    api.say("oc_li", "om_2", after(base, 400), sender=who.open_id, text="发我一下合同")
+    await tick(factory, after(base, 600))
+    first, second = await owner_said(db_session, who)
+    assert first.hold_until == second.hold_until == after(base, 30) + watch.OWNER_SAID_WINDOW
+
+
+async def test_owner_said_rows_do_not_stretch_other_peoples_batch(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM, {"chat_id": "oc_other", "name": "另一个群", "chat_mode": "group"}]
+    api.say("oc_team", "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    # 另一个所有者没发过言的群里别人的话：照常攒 5 分钟，不跟着那条 30 分钟的批走。
+    api.chats = [api.chats[1], api.chats[0]]
+    api.say("oc_other", "om_2", after(base, 40), sender="ou_li")
+    now = after(base, 91)
+    await tick(factory, now)
+    [other] = [row for row in await messages(db_session, who) if row.message_id == "om_2"]
+    assert other.hold_until == now + timedelta(minutes=5)
+
+
+async def test_hold_chat_does_not_push_owner_said_rows_back(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    api.say("oc_team", "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你")
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    # 所有者随后又在同一个会话里发言：压着的是别人的消息，他自己说过的话照旧 30 分钟那一批。
+    api.say("oc_team", "om_2", after(base, 100), sender=who.open_id, text="我再确认一下")
+    await tick(factory, after(base, 150))
+    for row in await owner_said(db_session, who):
+        assert (row.level, row.hold_until) == ("batch", after(base, 30) + watch.OWNER_SAID_WINDOW)
+
+
+async def test_a_recalled_owner_message_voids_its_owner_said_item(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    said = api.say(
+        "oc_team", "om_1", after(base, 10), sender=who.open_id, text="周四前我把报价发你"
+    )
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    said["deleted"] = True
+    await tick(factory, after(base, 91))
+    [row] = await owner_said(db_session, who)
+    assert (row.status, row.void_code) == ("void", "recalled")
+
+
+async def test_at_most_a_daily_quota_of_owner_said_items_per_local_day(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(watch, "OWNER_SAID_DAILY", 2)
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    for index in (1, 2, 3):
+        api.say(
+            "oc_team",
+            f"om_{index}",
+            after(base, 10 + index),
+            sender=who.open_id,
+            text="周四前我把报价发你",
+        )
+    factory = make_session_factory(db_engine)
+    await tick(factory, after(base, 30))
+    assert [r.message_id for r in await owner_said(db_session, who)] == ["om_1", "om_2"]
+    # 次日（所有者时区的下一个自然日）又能入箱。
+    api.say("oc_team", "om_4", after(base, 86400 + 100), sender=who.open_id, text="发我一下合同")
+    await tick(factory, after(base, 86400 + 120))
+    assert [r.message_id for r in await owner_said(db_session, who)] == ["om_1", "om_2", "om_4"]

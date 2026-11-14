@@ -39,6 +39,7 @@ def test_both_tools_are_registered_in_the_knowledge_group() -> None:
         "work_end",
         "workdays",
         "focus_chats",
+        "focus_people",
         "ignored_chats",
         "digest_times",
         "quiet_enabled",
@@ -61,8 +62,10 @@ async def test_the_owner_reads_and_changes_settings(db_session: AsyncSession) ->
         work_end="20:00",
         workdays=[1, 2, 3, 4, 5, 6],
         focus_chats=["oc_team"],
+        focus_people=["ou_boss"],
     )
     assert saved["status"] == "saved"
+    assert saved["settings"]["focus_people"] == ["ou_boss"]
     assert saved["settings"]["workdays"] == [1, 2, 3, 4, 5, 6]
     assert saved["settings"]["focus_chats"] == ["oc_team"]
     # 默认全天候；所有者要只在工作时段里看时改成 false。
@@ -73,6 +76,7 @@ async def test_the_owner_reads_and_changes_settings(db_session: AsyncSession) ->
     row = await settings.get(db_session, bot_id)
     assert (row.work_start, row.work_end) == ("10:00", "20:00") and row.always_on is False
     assert settings.view(row, utcnow())["focus_chats"] == ["oc_team"]
+    assert settings.view(row, utcnow())["focus_people"] == ["ou_boss"]
 
 
 async def test_validation_errors_reach_the_model_as_codes(db_session: AsyncSession) -> None:

@@ -28,6 +28,7 @@ def prefs() -> AssistantSettings:
         bot_id=uuid.uuid4(),
         open_id=OWNER,
         focus_chats_enc=["oc_focus"],
+        focus_people_enc=["ou_boss"],
         ignored_chats_enc=["oc_noise"],
     )
 
@@ -57,6 +58,21 @@ TABLE: list[tuple[str, Item, timedelta | None, Level]] = [
     ("审批被拒或执行失败", item(kind="approval_outcome", **NO_CHAT), None, Level.IMMEDIATE),
     ("重点群里的消息", item(chat_id="oc_focus"), None, Level.IMMEDIATE),
     ("其他群里真人的消息", item(), None, Level.BATCH),
+    ("重点人在群里没 @ 他", item(sender_id="ou_boss"), None, Level.IMMEDIATE),
+    ("重点人私聊", item(**P2P, sender_id="ou_boss"), None, Level.IMMEDIATE),
+    ("重点人在忽略的会话里", item(chat_id="oc_noise", sender_id="ou_boss"), None, Level.IGNORE),
+    (
+        "他刚在这个会话发过言时重点人的消息",
+        item(sender_id="ou_boss"),
+        timedelta(minutes=1),
+        Level.HOLD,
+    ),
+    (
+        "机器人的编号碰巧在重点人名单里",
+        item(**{**BOT, "sender_id": "ou_boss"}),
+        None,
+        Level.IGNORE,
+    ),
     ("群里 @ 了别人", item(mentions=frozenset({"ou_wang"})), None, Level.BATCH),
     ("新出现的飞书审批待办", item(kind="approval_todo", **NO_CHAT), None, Level.BATCH),
     ("私聊里机器人发来的通知", item(**P2P, **BOT), None, Level.BATCH),

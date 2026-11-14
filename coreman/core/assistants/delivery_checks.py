@@ -151,6 +151,49 @@ async def followups_due(
     return added
 
 
+# 每日例行在当天第一个摘要时点之前这么久起生成，第一轮摘要带得上；每周例行在最后一个时点之前。
+MORNING_LEAD = timedelta(minutes=30)
+WEEKLY_LEAD = timedelta(minutes=60)
+
+
+async def routines(
+    session: AsyncSession, bot_id: uuid.UUID, prefs: AssistantSettings, now: datetime
+) -> int:
+    """每日与每周例行的提醒条目，各自到点生成一次。不调飞书：日程与任务由助理在那一轮里自己查。"""
+    if prefs.cold_start_done_at is None:
+        return 0
+    slots = assistant_settings.digest_slots(prefs)
+    if not slots:
+        return 0
+    today = assistant_settings.local_today(prefs, now)
+    added = 0
+    if now >= assistant_settings.local_at(prefs, today, slots[0]) - MORNING_LEAD:
+        added += await add_reminder(
+            session,
+            bot_id,
+            f"morning_brief:{today.isoformat()}",
+            level="batch",
+            summary={"reminder": "morning_brief"},
+            now=now,
+        )
+    workdays = sorted(prefs.workdays or [])
+    if (
+        workdays
+        and today.isoweekday() == workdays[-1]
+        and now >= assistant_settings.local_at(prefs, today, slots[-1]) - WEEKLY_LEAD
+    ):
+        year, week, _ = today.isocalendar()
+        added += await add_reminder(
+            session,
+            bot_id,
+            f"weekly_review:{year}-W{week:02d}",
+            level="batch",
+            summary={"reminder": "weekly_review"},
+            now=now,
+        )
+    return added
+
+
 async def stale_marks(session: AsyncSession, bot_id: uuid.UUID, today: date, now: datetime) -> int:
     """挂了 4 小时以上的「处理中」表情各入一条提醒，每条每天至多一次；返回新入了几条。"""
     rows = (
@@ -461,7 +504,10 @@ async def sweep(
     row: AssistantDelivery,
     now: datetime,
 ) -> dict[str, int]:
-    """一位助理的一次顺带检查。不提交；调过飞书之后调用方不回滚（刷新的令牌要落库）。"""
+    """一位助理的一次顺带检查（在班时）。不提交；调过飞书之后调用方不回滚（刷新的令牌要落库）。
+
+    每日与每周例行的生成不在这里：它不受在班限制，见 `_visit`。
+    """
     today = assistant_settings.local_today(prefs, now)
     counts = {
         "assistant_followups_due": await followups_due(session, bot.id, today, now),
@@ -504,9 +550,13 @@ async def _visit(
         bot = await session.get(Bot, bot_id)
         prefs = await session.get(AssistantSettings, bot_id)
         counts: dict[str, int] = {}
-        # 下班、冷启动没做完、正在停用的助理不检查，但照样往后排。
-        if bot is not None and prefs is not None and delivery.gate(bot, prefs, now):
-            counts = await sweep(session, cipher, bot, prefs, row, now)
+        # 冷启动没做完、正在停用的助理什么都不查，但照样往后排。
+        if bot is not None and prefs is not None and delivery.set_up(bot, prefs):
+            # 例行提醒不调飞书，生成不受在班限制（交回仍由投递的 `gate` 卡在上班时段）；
+            # 其余检查只在上班时做。
+            counts["assistant_routines"] = await routines(session, bot.id, prefs, now)
+            if delivery.gate(bot, prefs, now):
+                counts.update(await sweep(session, cipher, bot, prefs, row, now))
         await session.commit()
         return counts
 

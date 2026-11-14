@@ -18,7 +18,7 @@ NOW = datetime(2026, 11, 13, 7, 0, tzinfo=UTC)  # 北京周五 15:00
 SECRET_ID = "s3cr3tchat7f3a"
 STORED = (
     "SELECT coalesce(focus_chats_enc::text, '') || coalesce(ignored_chats_enc::text, '')"
-    " FROM assistant_settings WHERE bot_id = :id"
+    " || coalesce(focus_people_enc::text, '') FROM assistant_settings WHERE bot_id = :id"
 )
 
 
@@ -40,6 +40,7 @@ async def test_view_of_a_fresh_assistant(db_session: AsyncSession) -> None:
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
         "focus_chats": [],
+        "focus_people": [],
         "ignored_chats": [],
         "on_shift": True,
         "shift_override": None,
@@ -86,6 +87,7 @@ async def test_chat_lists_are_replaced_whole_and_stored_encrypted(
         now=NOW,
         focus_chats=[f"oc_{SECRET_ID}", " oc_team ", f"oc_{SECRET_ID}"],
         ignored_chats=["oc_noise"],
+        focus_people=[f"ou_{SECRET_ID}", " ou_boss ", f"ou_{SECRET_ID}"],
     )
     await db_session.commit()
     assert SECRET_ID not in str(await raw(db_session, STORED, id=bot_id))
@@ -94,11 +96,13 @@ async def test_chat_lists_are_replaced_whole_and_stored_encrypted(
     # 去掉首尾空白与重复，保留顺序。
     assert shown["focus_chats"] == [f"oc_{SECRET_ID}", "oc_team"]
     assert shown["ignored_chats"] == ["oc_noise"]
-    await settings.update(db_session, bot_id, now=NOW, focus_chats=[])
+    assert shown["focus_people"] == [f"ou_{SECRET_ID}", "ou_boss"]
+    await settings.update(db_session, bot_id, now=NOW, focus_chats=[], focus_people=[])
     await db_session.commit()
     db_session.expire_all()
     shown = settings.view(await settings.get(db_session, bot_id), NOW)
     assert shown["focus_chats"] == [] and shown["ignored_chats"] == ["oc_noise"]
+    assert shown["focus_people"] == []
 
 
 @pytest.mark.parametrize(
@@ -124,6 +128,8 @@ async def test_chat_lists_are_replaced_whole_and_stored_encrypted(
         ({"focus_chats": [f"oc_{n}" for n in range(6)]}, "too_many_chats"),
         ({"ignored_chats": [f"oc_{n}" for n in range(51)]}, "too_many_chats"),
         ({"focus_chats": ["oc_a"], "ignored_chats": ["oc_a"]}, "chat_in_both_lists"),
+        ({"focus_people": ["oc_a"]}, "invalid_people"),
+        ({"focus_people": [f"ou_{n}" for n in range(11)]}, "too_many_people"),
     ],
 )
 async def test_each_validation(
@@ -203,6 +209,20 @@ async def test_lists_cannot_be_written_without_the_data_key(db_session: AsyncSes
     # 不碰名单的修改照常可用。
     row = await settings.update(db_session, bot_id, now=NOW, work_start="10:00")
     assert row.work_start == "10:00"
+
+
+async def test_focus_people_cannot_be_written_without_the_data_key(
+    db_session: AsyncSession,
+) -> None:
+    bot, owner = await keyed(db_session)
+    bot_id = bot.id  # 回滚、expire_all 之后行上的属性已过期，先取出来
+    await keys.destroy_key(db_session, owner.id)
+    await db_session.commit()
+    keys.forget()
+    sealed.forget()
+    with pytest.raises(settings.SettingsError) as caught:
+        await settings.update(db_session, bot_id, now=NOW, focus_people=["ou_a"])
+    assert caught.value.code == "content_locked"
 
 
 async def test_cold_start_state(db_session: AsyncSession) -> None:

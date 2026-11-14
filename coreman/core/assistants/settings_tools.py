@@ -55,6 +55,12 @@ class Update(Arguments):
         description="The whole list of focus group chat ids (oc_…); replaces the current list."
         f" At most {assistant_settings.MAX_FOCUS}",
     )
+    focus_people: Annotated[list[Short], Field(max_length=50)] | None = Field(
+        default=None,
+        description="The whole list of open_ids (ou_…) whose messages are always handed over at"
+        " once, in any chat; replaces the current list."
+        f" At most {assistant_settings.MAX_FOCUS_PEOPLE}",
+    )
     ignored_chats: ChatList | None = Field(
         default=None,
         description="The whole list of chat ids (oc_…) the owner does not want watched;"
@@ -82,13 +88,14 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     "assistant_settings_get": (
         Get,
         "Read the owner's assistant settings: time zone, whether it works around the clock,"
-        " working hours and days, digest times, quiet hours, focus chats, ignored chats,"
+        " working hours and days, digest times, quiet hours, focus chats, focus people,"
+        " ignored chats,"
         " whether the assistant is on shift now and any temporary switch.",
     ),
     "assistant_settings_update": (
         Update,
-        "Change the owner's assistant settings; only what you pass changes. Chat lists are"
-        " replaced whole: read the current list first, then pass the complete new list."
+        "Change the owner's assistant settings; only what you pass changes. Chat and people"
+        " lists are replaced whole: read the current list first, then pass the complete new list."
         " Only when the owner asks for it in this private chat.",
     ),
 }

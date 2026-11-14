@@ -186,3 +186,47 @@ async def test_voiding_leaves_delivered_and_in_flight_items_alone(
     assert not await inbox.add(
         db_session, bot_id, item("om_1"), Level.IMMEDIATE, owner_open_id=OWNER, hold_until=None
     )
+
+
+async def test_pending_messages_put_other_peoples_messages_before_the_owners_own(
+    db_session: AsyncSession,
+) -> None:
+    bot_id = await owned(db_session)
+    await inbox.add(
+        db_session, bot_id, item("om_1"), Level.IMMEDIATE, owner_open_id=OWNER, hold_until=None
+    )
+    for number in (2, 3, 4):
+        await inbox.add(
+            db_session,
+            bot_id,
+            item(f"om_{number}"),
+            Level.BATCH,
+            owner_open_id=OWNER,
+            hold_until=None,
+            kind="owner_said",
+        )
+    await db_session.commit()
+    # owner_said 比 message 新、又多于 limit：那条 message 仍在返回里。
+    assert await inbox.pending_messages(db_session, bot_id, limit=2) == ["om_1", "om_4"]
+
+
+async def test_batch_until_looks_at_one_kind_only(db_session: AsyncSession) -> None:
+    bot_id = await owned(db_session)
+    now = utcnow()
+    await inbox.add(
+        db_session,
+        bot_id,
+        item("om_1"),
+        Level.BATCH,
+        owner_open_id=OWNER,
+        hold_until=now + timedelta(minutes=30),
+        kind="owner_said",
+    )
+    assert await inbox.batch_until(db_session, bot_id, now) is None
+    assert await inbox.batch_until(db_session, bot_id, now, kind="owner_said") == (
+        now + timedelta(minutes=30)
+    )
+    # 同一条消息可以既是 message 条目也是 owner_said 条目：去重按 (kind, message_id)。
+    assert await inbox.add(
+        db_session, bot_id, item("om_1"), Level.BATCH, owner_open_id=OWNER, hold_until=None
+    )

@@ -35,6 +35,8 @@ REMINDERS = {
     "message_recalled": "消息被对方撤回",
     "mark_stale": "「处理中」表情挂了很久",
     "followup_due": "待跟进到期",
+    "morning_brief": "每日例行：今天要留意的事",
+    "weekly_review": "每周例行：把待跟进过一遍",
 }
 WITHDRAW_REASONS = {
     "owner_replied": "所有者已经在这个会话里亲自回复",
@@ -115,7 +117,12 @@ def _reminder(data: dict[str, Any]) -> list[str]:
             f"待跟进 {ident(data.get('label'))}（{ident(data.get('category'))}）今天到期{dates}。",
             quoted(data.get("title")),
         ]
+    if kind in ("morning_brief", "weekly_review"):
+        return ["按「交回事项」里对这类条目的说明做。"]
     return ["一条平台提醒，内容读不出来，可以忽略。"]
+
+
+OWNER_SAID_TITLE = "你自己发的消息"
 
 
 def _title(row: AssistantInbox, data: dict[str, Any]) -> str:
@@ -123,6 +130,8 @@ def _title(row: AssistantInbox, data: dict[str, Any]) -> str:
         return REMINDERS.get(str(data.get("reminder")), "提醒")
     if row.kind == "approval_todo":
         return "飞书审批待办"
+    if row.kind == "owner_said":
+        return OWNER_SAID_TITLE
     return {"p2p": "私聊消息", "group": "群聊消息"}.get(str(data.get("chat_kind")), "消息")
 
 

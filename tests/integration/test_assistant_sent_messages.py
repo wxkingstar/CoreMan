@@ -92,6 +92,7 @@ async def test_a_message_the_platform_sent_as_the_owner_does_not_hold_the_chat(
     await tick(factory, after(base, 30))
     # 不入箱，先到的那条不被压着，「所有者上次发言」也不动；游标照常越过它。
     [first] = await inbox_rows(db_session, who)
+    assert first.kind == "message"
     assert (first.message_id, first.level, first.hold_until) == ("om_1", "immediate", None)
     entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
     assert "o" not in entry and entry["t"] == ms(after(base, 20))
@@ -103,7 +104,10 @@ async def test_a_message_the_platform_sent_as_the_owner_does_not_hold_the_chat(
     # 所有者真的亲自发了一句：照旧压着。
     api.say("oc_li", "om_mine", after(base, 100), sender=who.open_id)
     await tick(factory, after(base, 151))
-    held = {row.message_id: row.level for row in await inbox_rows(db_session, who)}
+    rows = await inbox_rows(db_session, who)
+    held = {row.message_id: row.level for row in rows if row.kind == "message"}
     assert held == {"om_1": "hold", "om_3": "hold"}
+    # 他亲自发的那句进了 owner_said；平台代发的那条始终没有。
+    assert [row.message_id for row in rows if row.kind == "owner_said"] == ["om_mine"]
     entry = (await watch_row(db_session, who)).cursor_enc["chats"]["oc_li"]
     assert entry["o"] == ms(after(base, 100))

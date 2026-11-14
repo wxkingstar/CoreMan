@@ -128,8 +128,8 @@ async def budget_left(session: AsyncSession, bot: Bot, today: date) -> int:
     return total - await turns_used(session, bot.id, zone, today)
 
 
-def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
-    """这位助理现在该不该有平台发起的动作（交回、顺带检查）：启用中、开通好、冷启动做完、在上班。
+def set_up(bot: Bot, prefs: AssistantSettings | None) -> bool:
+    """启用中、开通好、记下了身份、冷启动做完：与上不上班无关的那几项。
 
     运行时暂停不在这里判断：暂停只是不入队，调用方另看 `runtime.turn_blocker`。
     """
@@ -141,7 +141,13 @@ def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
         and prefs is not None
         and assistant_settings.identified(prefs)
         and prefs.cold_start_done_at is not None
-        and assistant_settings.on_shift(prefs, now)
+    )
+
+
+def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
+    """这位助理现在该不该有平台发起的动作（交回、顺带检查）：`set_up` 且在上班。"""
+    return bool(
+        prefs is not None and set_up(bot, prefs) and assistant_settings.on_shift(prefs, now)
     )
 
 
@@ -250,7 +256,12 @@ async def _pick(
     """这一轮带哪些条目：(条目编号, 有没有条目因为预算留在了箱里)。只读元数据。"""
     today = assistant_settings.local_today(prefs, now)
     left = await budget_left(session, bot, today)
-    ids = select(AssistantInbox.id).where(*_waiting(bot.id, now)).order_by(AssistantInbox.id)
+    # 别人发来的事排在所有者自己说的话之前：名额不够时先给前者。
+    ids = (
+        select(AssistantInbox.id)
+        .where(*_waiting(bot.id, now))
+        .order_by((AssistantInbox.kind == "owner_said").asc(), AssistantInbox.id)
+    )
     if left > 0:
         return list(await session.scalars(ids.limit(MAX_ITEMS))), False
     # 预算用完：只有立即交回的还走，且至多再透支 OVERDRAFT 轮。
