@@ -403,6 +403,35 @@ async def test_only_the_owner_can_confirm_and_cancel_runs_nothing(
     assert feishu.writes == []
 
 
+async def test_someone_else_cannot_send_back(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    other = User(login_name="lisi", display_name="李四", source="sync")
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(
+        UserIdentity(user_id=other.id, platform="feishu", platform_user_id="lisi", open_id=PEER)
+    )
+    await db_session.commit()
+    pressed = await press(
+        db_session,
+        bot,
+        scope.task,
+        state.id,
+        "reject",
+        user_id="lisi",
+        open_id=PEER,
+        selected={batch.REASON_FIELD: ["我觉得不行"]},
+    )
+    assert await click(db_session, db_engine, pressed) == "ignored"
+    assert (await state_of(db_session)).status == "open" and feishu.writes == []
+    assert await resumed(db_session, state) is None
+    assert await notes.read(db_session, bot.id, feedback.PATH) is None
+
+
 async def test_the_card_offers_a_send_back_form(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
