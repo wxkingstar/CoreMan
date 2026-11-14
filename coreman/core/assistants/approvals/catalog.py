@@ -201,6 +201,11 @@ FILE_TOOLS = frozenset(
 UNGATED = frozenset({"feishu_prepare_upload"})
 # 只用于去重的参数：同一件事换一个重试编号仍是同一件事。
 RETRY_KEYS = frozenset({"uuid", "idempotency_key", "client_token"})
+# 不是个人工具、经平台代理执行的写操作：个人助理无人在场时由代理自动提交审批（见 proxied.py）。
+# 审批单的工具名 → 结果回合与页面上说的来源。
+SYSTEM_CALL = "systems_call"
+CLOUD_CALL = "cloud_call"
+PROXIED = {SYSTEM_CALL: "业务系统", CLOUD_CALL: "云服务"}
 
 
 def is_write(name: str) -> bool:

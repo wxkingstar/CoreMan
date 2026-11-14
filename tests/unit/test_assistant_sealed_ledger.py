@@ -130,6 +130,8 @@ WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
     # 调度单：经 ORM 新建（flush 钩子封存目标员工与问题）
     "coreman/core/assistants/approvals/dispatching.py": 1,
+    # 代理写操作的审批单：经 ORM 新建（flush 钩子封存完整请求）
+    "coreman/core/assistants/approvals/proxied.py": 1,
     # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
     "coreman/core/assistants/approvals/service.py": 2,
     # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据

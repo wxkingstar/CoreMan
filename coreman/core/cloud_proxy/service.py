@@ -41,6 +41,13 @@ _RESERVED_FOLDED = frozenset(p.casefold() for p in aliyun.RESERVED_PARAMS)
 _PARAM_NAME = re.compile(r"[A-Za-z][A-Za-z0-9._]*")
 _ACTION_NAME = re.compile(r"[A-Za-z]+")
 
+OWNER_TURN_MESSAGE = (
+    "这一轮是个人助理在所有者不在场时跑的，云服务只能查询，不能做写操作；"
+    "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做"
+)
+# 批准后执行时带回结果回合的响应正文上限（字符）。
+APPROVED_RESULT_CHARS = 8000
+
 # 测试换成假的阿里云；生产固定只连登记的 endpoint。
 transport_factory: Callable[[httpx.URL], httpx.AsyncBaseTransport] = registered_transport
 
@@ -373,19 +380,65 @@ async def handle(
     approval_id: str | None = None
     redeemed_id: int | None = None
     if kind == "write" and kinds.unattended(scope.task.kind):
-        # 个人助理无人在场的一轮只能查询：所有者不在场，输入可能来自别人发给他的消息。低风险写
-        # 也不放，也不走 Tower（平台发起的轮次没有入站事件，批准结果续接不回来）。在风险判定之前
-        # 拒，不为它读阿里云；没判定过的写按高风险记账。任务是 task_scope 每次重新加载的，
-        # 不看能力令牌里的声明。
+        # 个人助理无人在场的一轮：所有者不在场，输入可能来自别人发给他的消息，写操作不当场执行。
+        # 能提交审批的轮次（交回、结论投回、审批结果回合）里，低风险写（所有者在场时会直接放行
+        # 的那类）暂存并提交给所有者审批，批准后由平台原样执行；高风险写与不能提审批的轮次
+        # （子任务、冷启动）照旧拒绝。不能提审批时在风险判定之前拒，不为它读阿里云；没判定过的
+        # 写按高风险记账。任务是 task_scope 每次重新加载的，不看能力令牌里的声明。
+        from coreman.core.assistants.approvals import proxied, service, tower  # 依赖面广，延迟导入
+
+        if not proxied.may_stage(scope.task, scope.bot, scope.user):
+            return await done(
+                error(403, "owner_turn_required", OWNER_TURN_MESSAGE),
+                action=action,
+                risk_level="write_high",
+                outcome="denied",
+            )
+        # 风险判定只做读调用（`_Reader` 只放行读动作）。
+        assessment = await risk.assess(
+            product_key,
+            action,
+            params,
+            _Reader(signer),
+            now=datetime.now(UTC),
+            policy=settings.cloud_proxy_policy,
+        )
+        if assessment.high:
+            return await done(
+                error(
+                    403,
+                    "owner_turn_required",
+                    "这一轮是个人助理在所有者不在场时跑的，这个云服务写操作评估为高风险，不能提交"
+                    "审批；把它写进给所有者的结论里（产品、Action、参数与原因），由所有者在私聊里"
+                    "亲自让助理去做",
+                    risk_reasons=list(assessment.reasons),
+                ),
+                action=action,
+                risk_level="write_high",
+                outcome="denied",
+            )
+        staged = await proxied.submit_cloud(
+            session,
+            task=scope.task,
+            bot=scope.bot,
+            owner=scope.user,
+            product=product_key,
+            params=params,
+            reasons=assessment.reasons,
+            cfg=tower.config(settings),
+        )
+        if staged.get("status") == "pending_approval":
+            return await done(
+                JSONResponse(staged, status_code=202),
+                action=action,
+                risk_level="write_low",
+                outcome="approval_required",
+            )
+        code = 503 if staged.get("error") == service.UNAVAILABLE else 403
         return await done(
-            error(
-                403,
-                "owner_turn_required",
-                "这一轮是个人助理在所有者不在场时跑的，云服务只能查询，不能做写操作；"
-                "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做",
-            ),
+            JSONResponse(staged, status_code=code),
             action=action,
-            risk_level="write_high",
+            risk_level="write_low",
             outcome="denied",
         )
     if kind == "write":
@@ -503,3 +556,94 @@ async def handle(
         outcome="ok" if 200 <= up.status < 300 else "http_error",
         status_code=up.status,
     )
+
+
+async def execute_approved(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    task: Task,
+    bot: Bot,
+    user: User,
+    product_key: str,
+    params: dict[str, str],
+    approval_id: str,
+    http: ClientFactory = aliyun_client,
+) -> dict[str, Any]:
+    """个人助理无人在场时暂存、所有者已批准的一次低风险写：由平台以所有者身份原样执行。
+
+    调用方已核销审批令牌，并核对过助理与所有者。这里走与在场调用相同的判定：产品与 endpoint、
+    类别（仍须是写）、风险（重新评估，变成高风险就不执行）；审计行在出站前落盘，出站后补上结局，
+    与核销过令牌的高风险写同一做法。参数是暂存的那一份，不经模型。
+
+    Returns:
+        `{"status": 上游状态码, "ok": 是否 2xx, "body": 脱敏并截断的响应正文}`；没有发出请求时是
+        `{"error": 代码, …}`
+    """
+    started = time.monotonic()
+    audit: dict[str, Any] = {
+        "task_id": task.id,
+        "bot_id": bot.id,
+        "user_id": user.id,
+        "product": product_key,
+        "approval_id": approval_id,
+    }
+    action = str(params.get("Action") or "")
+    logged = action[:64] if _ACTION_NAME.fullmatch(action) else "<invalid>"
+
+    async def record(risk_level: str, outcome: str, status_code: int | None) -> CloudCall:
+        row = CloudCall(
+            **audit,
+            action=logged,
+            risk=risk_level,
+            outcome=outcome,
+            status_code=status_code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        session.add(row)
+        await session.commit()
+        return row
+
+    if not settings.cloud_proxy_ready:
+        return {"error": "cloud_proxy_disabled"}
+    product = aliyun.PRODUCTS.get(product_key)
+    if product is None or aliyun.endpoint_for(product, settings.cloud_proxy_policy) is None:
+        return {"error": "product_not_configured"}
+    if aliyun.classify(product, action) != "write":
+        await record("write_high", "denied", None)
+        return {"error": "action_not_allowed"}
+    signer = _Signer(settings, http)
+    assessment = await risk.assess(
+        product_key,
+        action,
+        params,
+        _Reader(signer),
+        now=datetime.now(UTC),
+        policy=settings.cloud_proxy_policy,
+    )
+    if assessment.high:
+        # 批准之后云上的状态或部署策略变了：现在执行算高风险，所有者批的不是这样一次操作。
+        await record("write_high", "denied", None)
+        return {"error": "risk_changed", "risk_reasons": list(assessment.reasons)}
+    row = await record("write_low", "unreachable", None)
+    try:
+        up = await signer.send(product, params)
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        return {"error": "aliyun_unreachable", "hint": "请求可能已经到达阿里云：先查询核对再决定。"}
+    await session.execute(
+        update(CloudCall)
+        .where(CloudCall.id == row.id)
+        .values(
+            outcome="ok" if 200 <= up.status < 300 else "http_error",
+            status_code=up.status,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+    )
+    await session.commit()
+    text = redact(up.text, signer.access_key_id)
+    return {
+        "status": up.status,
+        "ok": 200 <= up.status < 300,
+        "body": text[:APPROVED_RESULT_CHARS],
+        **({"truncated": True} if len(text) > APPROVED_RESULT_CHARS else {}),
+    }

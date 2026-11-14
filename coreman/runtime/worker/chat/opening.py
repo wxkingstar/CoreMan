@@ -275,9 +275,9 @@ class OpenStage(ChatStageBase):
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
         # 个人助理里平台触发的一轮（含带入站事件的审批结果回合）无人在场，输入可能来自别人发给
         # 所有者的消息：业务系统令牌、业务系统 MCP、操作目录与云签名代理照常以所有者身份挂上，
-        # 但只能查询——云签名代理与目录代理由服务端拒绝写，持令牌直连的系统（含 MCP）只靠本轮块
-        # 的只读说明；所有者的个人凭证不挂。要写的事由所有者在私聊里亲自让助理做。冷启动归纳口吻
-        # 的那一轮用不到这些，一样都不挂。机器人自己配的静态环境变量不受影响。
+        # 但不能当场写——经云签名代理与目录代理的写由服务端暂存并提交所有者审批（不能提审批的
+        # 轮次拒绝），持令牌直连的系统（含 MCP）只靠本轮块的只读说明；所有者的个人凭证不挂。
+        # 冷启动归纳口吻的那一轮用不到这些，一样都不挂。机器人自己配的静态环境变量不受影响。
         unattended = platform_turns.unattended(ctx.task)
         cold_start = ctx.task.kind == COLD_START_KIND
         access = await build_system_access(

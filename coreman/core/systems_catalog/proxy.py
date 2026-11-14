@@ -5,6 +5,10 @@ Only operations in the catalog that the member can see are callable, arguments a
 against the operation's schemas, `write` needs the AI employee's grant to allow writes, and
 `destructive`/`financial` are never proxied. The response is bounded and every call that reaches
 a policy decision is recorded without arguments, bodies or the token.
+
+In a personal assistant's unattended turn a write the grant allows is not sent: it is staged for
+the owner's approval (`assistants.approvals.proxied`) and, once approved, executed by the platform
+through `call` again with the approved request.
 """
 
 from __future__ import annotations
@@ -235,12 +239,21 @@ async def _record(
     )
 
 
+# Not a refusal: the owner is absent and the write is staged for the owner's approval.
+OWNER_APPROVAL = "owner_approval_required"
+
+
 def policy_error(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str | None:
-    """Why this operation may not be proxied for this AI employee, or None."""
+    """Why this operation may not be proxied for this AI employee, or None.
+
+    `OWNER_APPROVAL` means it is not sent now but staged for the owner's approval: only in a
+    personal assistant's unattended turn that may submit approvals, and only for systems whose
+    grant allows writes (what the owner's own turn would have sent).
+    """
     if op["risk"] in NEVER_PROXIED:
         return "risk_not_allowed"
     if op["risk"] == "write" and ctx.owner_absent:
-        return "owner_turn_required"
+        return OWNER_APPROVAL if system.key in ctx.stageable else "owner_turn_required"
     if op["risk"] == "write" and system.key not in ctx.writable:
         return "write_not_allowed"
     return None
@@ -253,10 +266,20 @@ DENIALS = {
     "为这个系统开启「允许写入」；在此之前不要尝试其他写入方式。",
     "owner_turn_required": "这一轮是个人助理在所有者不在场时跑的，业务系统只能查询，不能做写操作；"
     "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做。",
+    OWNER_APPROVAL: "这一轮是个人助理在所有者不在场时跑的：写操作调用后不会当场执行，平台自动"
+    "提交给所有者审批，批准后按原样执行并把结果交回本会话。不要重试，也不要换别的方式做同一件事。",
 }
 
 
-async def call(ctx: Context, args: Call) -> dict[str, Any]:
+async def call(
+    ctx: Context, args: Call, *, approved: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """One proxied call.
+
+    `approved` is the request an owner approved (method, url, body), executed by the platform after
+    approval through this same path: every check runs again and the call is refused, without
+    reaching the system, when the request built now differs from it.
+    """
     system = ctx.system(args.system)
     if system is None:
         return context.no_system(args.system)
@@ -277,7 +300,7 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
     if "validate" not in op:
         return context.unavailable(system)
     denied = policy_error(ctx, system, op)
-    if denied is not None:
+    if denied is not None and denied != OWNER_APPROVAL:
         await _record(ctx, system, args.operation_id, op, "denied")
         return {
             "error": denied,
@@ -297,6 +320,38 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
     # The catalog may predate a change of the system URL: never call the old origin.
     if not same_origin(target, system.base_url or ""):
         return context.unavailable(system)
+    url = httpx.URL(target)
+    if pairs:
+        url = url.copy_with(params=pairs)
+    if denied == OWNER_APPROVAL:
+        # 函数内导入：审批闸门依赖面广，目录代理平时用不到它。
+        from coreman.core.assistants.approvals import proxied
+
+        staged = await proxied.submit_system(
+            ctx,
+            system,
+            op,
+            operation_id=args.operation_id,
+            path_params=args.path_params,
+            query=args.query,
+            body=body,
+            url=str(url),
+        )
+        done = staged.get("status") == "pending_approval"
+        await _record(ctx, system, args.operation_id, op, "staged" if done else "denied")
+        if staged.get("error") == "owner_turn_required":
+            staged = {**staged, "message": DENIALS["owner_turn_required"]}
+        return {"system": system.key, "operation_id": args.operation_id, **staged}
+    if approved is not None and approved != {"method": op["method"], "url": str(url), "body": body}:
+        # 目录或系统地址在批准之后变了：批准的不是现在要发的这一份。
+        await _record(ctx, system, args.operation_id, op, "denied")
+        return {
+            "error": "request_changed",
+            "system": system.key,
+            "operation_id": args.operation_id,
+            "message": "批准之后操作目录或系统地址有了变化，现在要发的请求与批准的不一致，"
+            "没有执行。",
+        }
     try:
         token = await context.proxy_token(ctx, system)
     except TokenProviderError as exc:
@@ -305,9 +360,6 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
             "reason": exc.code,
             "message": "平台没能为当前用户签发这个系统的令牌，请联系管理员检查签发方和用户授权。",
         }
-    url = httpx.URL(target)
-    if pairs:
-        url = url.copy_with(params=pairs)
     headers = {"Accept": "application/json", **fetch.auth_headers(token)}
     started = time.monotonic()
     try:

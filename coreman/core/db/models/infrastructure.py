@@ -187,7 +187,7 @@ class SystemCall(Base):
     operation_id: Mapped[str] = mapped_column(Text)
     method: Mapped[str] = mapped_column(Text)
     risk: Mapped[str] = mapped_column(Text)
-    # ok / http_error / denied / invalid / unreachable
+    # ok / http_error / denied / invalid / unreachable；staged：个人助理无人在场时提交给所有者审批
     outcome: Mapped[str] = mapped_column(Text)
     status_code: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)

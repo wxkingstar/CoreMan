@@ -179,6 +179,7 @@ CALL_NOTES = {
     "risk_not_allowed": "不代理",
     "write_not_allowed": "未开启写入",
     "owner_turn_required": "所有者不在场",
+    proxy.OWNER_APPROVAL: "需所有者审批",
 }
 
 
@@ -204,7 +205,10 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
             "本人的权限判定。destructive、financial 先向用户说明并等对方明确确认。"
         )
     if system.token_delivery == "proxy":
-        writes = "已开启" if system.key in ctx.writable else "未开启，需管理员开启「允许写入」"
+        if system.key in ctx.stageable:
+            writes = "调用后自动提交所有者审批（所有者不在场），批准后由平台执行"
+        else:
+            writes = "已开启" if system.key in ctx.writable else "未开启，需管理员开启「允许写入」"
         return (
             f"平台代理：用 systems_call 调用。读操作直接执行；写操作{writes}；"
             "destructive、financial 不代理，需用户本人在业务系统里操作。"
@@ -579,7 +583,7 @@ def call_template(
         return {
             "mode": "proxy",
             "tool": "systems_call",
-            "allowed": denied is None,
+            "allowed": denied in (None, proxy.OWNER_APPROVAL),
             "message": "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数"
             "（path_params、query、body）。运行环境里没有这个系统的令牌，不要用 curl 直接调用。"
             + ("" if denied is None else proxy.DENIALS[denied]),

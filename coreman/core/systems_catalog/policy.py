@@ -109,7 +109,8 @@ def writable_for(task: Task, granted: Iterable[str]) -> frozenset[str]:
 
     个人助理调度来的一轮，所有者没有在审批系统里批准写（载荷里的 `allow_write` 不是真）时一个
     都不能写：这是平台自己把得住的写通道。个人助理无人在场的一轮（`kinds.unattended`）同样一个
-    都不能写：所有者不在场，只能查询。其余轮次照员工的授权。
+    都不能直接写：所有者不在场，授权允许写的系统改为提交所有者审批（`proxy.OWNER_APPROVAL`，
+    由路由按 `approvals.proxied.may_stage` 判断），批准后由平台另起执行。其余轮次照员工的授权。
     """
     if kinds.unattended(task.kind):
         return frozenset()
