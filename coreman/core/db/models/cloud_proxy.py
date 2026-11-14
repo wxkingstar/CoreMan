@@ -23,7 +23,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
 CLOUD_RISKS = ("read", "write_low", "write_high")
-CLOUD_OUTCOMES = ("ok", "http_error", "denied", "approval_required", "unreachable")
+CLOUD_OUTCOMES = (
+    "ok",
+    "http_error",
+    "denied",
+    "approval_required",
+    "unreachable",
+    # 个人助理所有者在场时的低风险写：暂存等确认卡（proposed），确认后执行的结局带 confirmed_ 前缀。
+    "proposed",
+    "confirmed_ok",
+    "confirmed_http_error",
+    "confirmed_denied",
+    "confirmed_unreachable",
+)
 CLOUD_APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired", "executed", "withdrawn")
 
 

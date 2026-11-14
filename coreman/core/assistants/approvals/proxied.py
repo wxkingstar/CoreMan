@@ -400,6 +400,20 @@ async def submit_system(
     )
 
 
+def cloud_param_lines(params: dict[str, str]) -> list[str]:
+    """云参数的展示（Action 之外），审批单与所有者在场时的确认卡共用。
+
+    每个值都按 JSON 字符串展示（换行、引号转义），再把 JSON 不转义的格式字符与行分隔符
+    （U+2028、U+202E 等）转义成可见形式（`_visible`，审批单经 `_barred`）：一个参数恰好一行。
+    参数名只有 ASCII 字母数字与 `._`（`cloud_proxy.service.parse_body` 已校验）。
+    """
+    return [
+        f"{key}={json.dumps(str(params[key]), ensure_ascii=False)}"
+        for key in sorted(params)
+        if key != "Action"
+    ]
+
+
 async def submit_cloud(
     session: AsyncSession,
     *,
@@ -415,14 +429,7 @@ async def submit_cloud(
     if not may_stage(task, bot, owner):
         return {"error": "owner_turn_required"}
     action = str(params.get("Action") or "")
-    # 每个值都按 JSON 字符串展示（换行、引号转义），再把 JSON 不转义的格式字符与行分隔符
-    # （U+2028、U+202E 等）转义成可见形式：一个参数恰好一行。参数名只有 ASCII 字母数字与 `._`
-    # （`cloud_proxy.service.parse_body` 已校验）。
-    lines = [
-        f"{key}={json.dumps(str(params[key]), ensure_ascii=False)}"
-        for key in sorted(params)
-        if key != "Action"
-    ]
+    lines = cloud_param_lines(params)
     head = [
         "渠道：云服务（阿里云，平台签名代理）",
         f"对象：{product}",

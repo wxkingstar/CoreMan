@@ -607,20 +607,28 @@ class FinalizeStage(ChatStageBase):
         """收尾之后的挂钩（清理本轮独有的状态）。只在这一轮真的抢到终态时才会走到。"""
 
     async def _release_writes(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
-        """本轮暂存的业务系统写操作：正常结束就在终稿之后发一张确认卡，否则作废。"""
+        """本轮暂存的业务系统写操作（以及个人助理的云服务写操作）：正常结束就在终稿之后发一张
+        确认卡，否则作废。"""
+        from coreman.core.cloud_proxy import confirm as cloud_confirm
         from coreman.core.systems_catalog import confirm as systems_confirm
 
+        send = verdict.log_status in ("success", "ask_user")
         async with ctx.session_factory() as session:
             sent = await systems_confirm.release(
                 session,
                 ctx.cipher,
                 bot_id=pre.intake.bot.id,
                 task_id=ctx.task.id,
-                send=verdict.log_status in ("success", "ask_user"),
+                send=send,
+            )
+            cloud_sent = await cloud_confirm.release(
+                session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
             )
             await session.commit()
         if sent:
             ctx.log.info("systems_write_card_queued")
+        if cloud_sent:
+            ctx.log.info("cloud_write_card_queued")
 
     @staticmethod
     async def _icon_url(ctx: TaskContext) -> str:

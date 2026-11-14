@@ -89,6 +89,7 @@ ENTITY_SELECTS = {
     "coreman/runtime/worker/personal_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/skill_install.py": 1,  # session.scalar
     "coreman/runtime/worker/systems_write_cards.py": 1,  # 交互状态，session.scalar
+    "coreman/runtime/worker/cloud_write_cards.py": 1,  # 交互状态，session.scalar
 }
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
@@ -165,6 +166,8 @@ WRITE_STATEMENTS = {
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
     # 云服务审批的挂起单：新建时没有理由；另一条只写状态。理由经 ORM 写入，flush 钩子封存
     "coreman/core/cloud_proxy/service.py": 2,
+    # 个人助理云服务写操作确认：经 ORM 新建与修改，flush 钩子用所有者的数据密钥封存暂存的请求
+    "coreman/core/cloud_proxy/confirm.py": 1,
     "coreman/core/feishu_docs/confirm.py": 1,  # 群聊写入确认：经 ORM 新建，flush 钩子封存
     # 业务系统写操作确认：经 ORM 新建与修改，flush 钩子封存（暂存的请求另以任务为 AAD 加密）
     "coreman/core/systems_catalog/confirm.py": 1,

@@ -112,11 +112,14 @@ async def confirmable_origin(
     return None
 
 
-async def _batch(session: AsyncSession, bot_id: Any, task_id: int) -> InteractionState | None:
+async def _batch(
+    session: AsyncSession, bot_id: Any, task_id: int, *, kind: str = KIND
+) -> InteractionState | None:
+    """This turn's batch, locked; `kind` lets the cloud proxy's card reuse it."""
     state: InteractionState | None = await session.scalar(
         select(InteractionState)
         .where(
-            InteractionState.kind == KIND,
+            InteractionState.kind == kind,
             InteractionState.bot_id == bot_id,
             InteractionState.scope_key == str(task_id),
         )
