@@ -76,11 +76,11 @@ async def test_card_toasts_report_what_happened_to_the_click():
     ]
     # 已收下不等于已发送：worker 还可能拒绝（停用、白名单），所以说「已收到」。
     assert [(t.type, t.content) for t in toasts] == [
-        ("success", "已收到"),
+        ("success", "已收到，马上处理"),
         ("info", "已选过"),
         ("warning", "只有提问人可以选择"),
-        ("info", "✓"),
-        ("info", "✓"),
+        ("info", "已收到"),
+        ("info", "已收到"),
     ]
 
 
@@ -157,3 +157,15 @@ async def test_reconnects_are_logged_with_how_long_the_bot_was_offline():
         ("feishu_ws_reconnected", "warning", pytest.approx(7.5, abs=0.5)),
     ]
     assert all(e["app_id"] == "cli_test" for e in logs)
+
+
+def test_every_click_outcome_has_its_own_toast():
+    from typing import get_args
+
+    from coreman.runtime.gateway_feishu.channel import DEFAULT_TOAST, TOASTS
+    from coreman.runtime.gateway_feishu.reply_buttons import Outcome
+
+    # 每种点击结果都配了一句话，不会掉到兜底；兜底也不再是一个对勾。
+    assert set(get_args(Outcome)) == set(TOASTS)
+    assert DEFAULT_TOAST["content"] != "✓"
+    assert all(t["type"] in {"info", "success", "warning", "error"} for t in TOASTS.values())

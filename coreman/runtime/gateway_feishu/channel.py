@@ -62,10 +62,10 @@ ws_client._ws_connect_kwargs = _connect_kwargs
 ws_client.Client._configure = _configure
 
 # 回复按钮点击的应答：已收下（worker 还可能拒绝，所以不说「已发送」）、这一行点过了、
-# 只有提问人能点。「上一条还在处理」卡片按点的按钮回一句（此时 worker 还没处理，所以只说
-# 正在做什么）。选择题等其他卡片点击照旧只回一个对勾，结果由后续卡片更新。
+# 只有提问人能点。其余卡片按点的按钮回一句：应答时 worker 还没处理（可能过期、执行失败），
+# 所以只说收到了、接下来会怎样，不说「已完成」；结果由后续卡片更新。
 TOASTS: dict[str, dict[str, str]] = {
-    "queued": {"type": "success", "content": "已收到"},
+    "queued": {"type": "success", "content": "已收到，马上处理"},
     "duplicate": {"type": "info", "content": "已选过"},
     "not_requester": {"type": "warning", "content": "只有提问人可以选择"},
     "busy_wait": {"type": "success", "content": "好的，排在后面"},
@@ -76,8 +76,25 @@ TOASTS: dict[str, dict[str, str]] = {
     "busy_drop": {"type": "info", "content": "好的，不处理了"},
     "provision_started": {"type": "success", "content": "正在开通，好了会在这里告诉你"},
     "provision_expired": {"type": "warning", "content": "这张卡片已失效，给我发条消息会收到新的"},
+    "write_confirm": {"type": "success", "content": "已确认，正在执行…"},
+    "write_cancel": {"type": "info", "content": "已取消，不会执行"},
+    "write_resend": {"type": "info", "content": "正在重新发起确认…"},
+    "schedule_confirm": {"type": "success", "content": "已确认，正在保存定时任务…"},
+    "schedule_cancel": {"type": "info", "content": "已取消，定时任务没有改动"},
+    "topic_new": {"type": "success", "content": "好的，开新会话"},
+    "topic_fork": {"type": "success", "content": "好的，接着主群的会话"},
+    "cold_start_answer": {"type": "success", "content": "已提交，正在记下…"},
+    "cold_start_skip": {"type": "info", "content": "已跳过这一题"},
+    "assistant_stop": {"type": "warning", "content": "正在停用，完成后会通知你"},
+    "credential_submit": {"type": "success", "content": "已加密提交"},
+    "authorize_link": {"type": "info", "content": "正在生成授权链接…"},
+    "choice_submit": {"type": "success", "content": "已提交你的选择"},
+    "choice_other": {"type": "info", "content": "好的，直接发消息告诉我"},
+    "switch_runtime": {"type": "info", "content": "正在切换运行时…"},
+    "switch_wait": {"type": "info", "content": "好的，继续等额度恢复"},
 }
-DEFAULT_TOAST = {"type": "info", "content": "✓"}
+# 认不出的点击（新加的卡片漏配也一样）：至少说一句收到了，不只是一个对勾。
+DEFAULT_TOAST = {"type": "info", "content": "已收到"}
 
 
 def card_toast(accepted: object) -> dict[str, str]:

@@ -49,6 +49,23 @@ Outcome = Literal[
     # 个人助理的开通卡片（没有助理记录时，由 AssistantInbound.on_unprovisioned 处理）。
     "provision_started",
     "provision_expired",
+    # 其余卡片按钮：只按回调 value 认出点了什么，结果由 worker 处理后更新卡片告知。
+    "write_confirm",
+    "write_cancel",
+    "write_resend",
+    "schedule_confirm",
+    "schedule_cancel",
+    "topic_new",
+    "topic_fork",
+    "cold_start_answer",
+    "cold_start_skip",
+    "assistant_stop",
+    "credential_submit",
+    "authorize_link",
+    "choice_submit",
+    "choice_other",
+    "switch_runtime",
+    "switch_wait",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -106,6 +123,57 @@ def _busy_click(message: InboundMessage) -> Outcome | None:
     return cast("Outcome", key) if key in _BUSY_KEYS else None
 
 
+# 卡片回调 value 里的 event_key。网关不引入这些卡片所在的模块（有的在 worker 里），
+# 写成字面值；测试核对它们与各模块的常量一致。
+WRITE_CARD_EVENTS = frozenset(
+    {"feishu_group_write", "assistant_write", "cloud_write", "systems_write"}
+)
+SCHEDULE_EVENT = "personal_schedule"
+TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
+COLD_START_EVENT = "assistant_cold_start_card"
+STOP_EVENT = "assistant_stop"
+AUTHORIZE_EVENTS = frozenset({"personal_authorize", "personal_upgrade"})
+CHOICE_SUBMIT = "submit_choice"
+CHOICE_OTHER = "opt_other"
+SWITCH_SUBMIT = "ratelimit_switch_submit"
+SWITCH_OPTIONS: dict[str, Outcome] = {"opt_switch": "switch_runtime", "opt_wait": "switch_wait"}
+_WRITE_VERBS: dict[str, Outcome] = {"confirm": "write_confirm", "cancel": "write_cancel"}
+_SCHEDULE_VERBS: dict[str, Outcome] = {"confirm": "schedule_confirm", "cancel": "schedule_cancel"}
+
+
+def _card_click(message: InboundMessage) -> Outcome | None:
+    """其余卡片按钮点的是什么，只看回调 value，不查库（3 秒应答窗口）。认不出返回 None。"""
+    action = message.card_action or {}
+    if message.kind != "card_action":
+        return None
+    if action.get("card_type") == "credential":
+        return "credential_submit"
+    key = str(action.get("event_key") or "")
+    verb = str(action.get("level") or "").partition(":")[0]
+    picked = {v for values in (action.get("selected") or {}).values() for v in values}
+    if verb == "resend":
+        return "write_resend"
+    if key in WRITE_CARD_EVENTS:
+        return _WRITE_VERBS.get(verb)
+    if key == SCHEDULE_EVENT:
+        return _SCHEDULE_VERBS.get(verb)
+    if key in TOPIC_EVENTS:
+        return TOPIC_EVENTS[key]
+    if key == COLD_START_EVENT:
+        # 令牌是「题.answer|skip.签名」。
+        parts = str(action.get("level") or "").split(".")
+        return "cold_start_skip" if parts[1:2] == ["skip"] else "cold_start_answer"
+    if key == STOP_EVENT:
+        return "assistant_stop"
+    if key in AUTHORIZE_EVENTS:
+        return "authorize_link"
+    if key == CHOICE_SUBMIT:
+        return "choice_other" if CHOICE_OTHER in picked else "choice_submit"
+    if key == SWITCH_SUBMIT:
+        return next((SWITCH_OPTIONS[p] for p in picked if p in SWITCH_OPTIONS), None)
+    return None
+
+
 async def admit(
     session: AsyncSession,
     bot: InboundBot,
@@ -115,12 +183,12 @@ async def admit(
     single: bool | None = None,
 ) -> Outcome | None:
     """应答窗口里的入站落库：回复按钮先判定提问人与会话类型。返回回复按钮点击的结果，
-    「上一条还在处理」卡片的点击返回点的是哪个按钮，其余事件返回 None。调用方负责提交。"""
+    其他卡片按钮的点击返回点的是哪类按钮（认不出为 None），其余事件返回 None。调用方负责提交。"""
     if not await settle(session, bot.id, message, single=single):
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        return _busy_click(message)
+        return _busy_click(message) or _card_click(message)
     return "queued" if task is not None else "duplicate"
 
 
