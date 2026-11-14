@@ -547,14 +547,21 @@ async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> dict
         urgent = list(
             await session.scalars(
                 select(AssistantReport.bot_id)
+                .join(Bot, Bot.id == AssistantReport.bot_id)
                 .outerjoin(Task, Task.id == AssistantReport.task_id)
                 .where(
+                    # 停用或不在 active 的助理留着的条目不占名额。
+                    Bot.kind == "assistant",
+                    Bot.enabled.is_(True),
+                    Bot.assistant_state == "active",
                     AssistantReport.sent_at.is_(None),
                     AssistantReport.urgent.is_(True),
                     # 记下它的那一轮结束了才发：同一轮里的几条并成一条。
                     or_(Task.id.is_(None), Task.status.not_in(tasks.OPEN)),
                 )
-                .distinct()
+                .group_by(AssistantReport.bot_id)
+                # 新近有紧急条目的先轮到：免打扰里久留的条目挤不掉刚记下的。
+                .order_by(func.max(AssistantReport.created_at).desc())
                 .limit(TICK_BATCH)
             )
         )

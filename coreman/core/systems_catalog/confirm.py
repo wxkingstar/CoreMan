@@ -674,5 +674,8 @@ async def purge(session: AsyncSession, state: InteractionState) -> None:
     if state.kind == "assistant_write":
         from coreman.core.assistants.approvals import batch  # 审批闸门依赖面广，延迟导入
 
+        if state.status in ("open", "expired"):
+            # 本轮收尾没把它交出去（收尾出错、进程没了）：清掉之前说一声，不悄悄丢掉。
+            await batch.tell_dropped(session, state)
         await batch.discard_files(state.state)
     await session.delete(state)

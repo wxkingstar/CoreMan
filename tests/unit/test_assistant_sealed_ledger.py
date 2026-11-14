@@ -146,8 +146,9 @@ WRITE_STATEMENTS = {
     # 审批单：经 ORM 新建（flush 钩子封存）；本轮结束时合并提交的各项（含没提交成、另建的失败行）
     # 同样经 ORM 新建
     "coreman/core/assistants/approvals/service.py": 3,
-    # 一轮里暂存的飞书写：经 ORM 新建与修改，flush 钩子用所有者的数据密钥封存暂存的内容
-    "coreman/core/assistants/approvals/batch.py": 1,
+    # 一轮里暂存的飞书写：经 ORM 新建与修改，flush 钩子用所有者的数据密钥封存暂存的内容；
+    # 作废没交出去的批次时记一条待汇报，同样经 ORM 新建
+    "coreman/core/assistants/approvals/batch.py": 2,
     # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据
     "coreman/core/assistants/delivery.py": 5,
     # 摘要：待汇报经 ORM 新建（flush 钩子封存正文）；另一条只写发出时间

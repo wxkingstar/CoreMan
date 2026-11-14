@@ -519,8 +519,13 @@ async def test_a_turn_that_did_not_end_well_drops_its_writes(
     _, _, scope = await present(db_session)
     await stage(db_session, scope, reply())
     assert await release(db_engine, scope, send=False) is None
-    assert (await state_of(db_session)).status == "cancelled"
-    assert await cards(db_session) == [] and feishu.writes == [] and fake.submitted == []
+    state = await state_of(db_session)
+    assert state.status == "cancelled"
+    # 没有确认卡，只有一句「这批没有执行」的说明。
+    assert [card.dedupe_key for card in await cards(db_session)] == [
+        f"assistant-write:{state.id}:dropped"
+    ]
+    assert feishu.writes == [] and fake.submitted == []
 
 
 async def test_a_rerun_of_the_same_task_starts_over(
@@ -901,3 +906,181 @@ async def press_without_card(
     )
     await session.commit()
     return await press(session, bot, origin, state_id)
+
+
+# 审查后的补充 ---------------------------------------------------------------------------------
+
+
+async def test_a_batch_where_one_item_fails_the_recheck_runs_nothing(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """与确认卡同一口径：整单复查，一项不过整单都不执行，逐项原因投回。"""
+    feishu, fake = install(monkeypatch)
+    _, _, scope = await away(db_session)
+    reaction = {"message_id": "om_2", "emoji_type": "OK", "approval": {"chat_id": "oc_li"}}
+    out = await batch.propose(
+        db_session,
+        None,  # type: ignore[arg-type]
+        scope,
+        "feishu_add_reaction",
+        reaction,
+        cfg=CFG,
+        files=None,
+    )
+    assert out is not None and out["status"] == "pending_approval", out
+    await db_session.commit()
+    await stage(db_session, scope, reply())
+    assert await release(db_engine, scope) == batch.TOWER
+    head = await db_session.scalar(
+        select(AssistantApproval).where(AssistantApproval.id == AssistantApproval.batch_id)
+    )
+    assert head is not None and head.tool == "feishu_add_reaction"
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="approved",
+        reason=None,
+        decided_at=None,
+    )
+    await db_session.commit()
+    (job,) = await queued(db_session, APPROVAL_EXECUTE_KIND)
+    # 回复那一项的会话有了新消息；表情那一项本身没问题。
+    feishu.history.insert(0, message("om_3", text="算了，不用了"))
+    await execute.run(make_session_factory(db_engine), Cipher(MASTER), head.id, job, CFG)
+    reloaded = await service.members(db_session, head, lock=False)
+    assert feishu.writes == [] and fake.redeemed == []
+    assert [(row.tool, row.status, row.error_code) for row in reloaded] == [
+        ("feishu_add_reaction", "failed", service.REFUSED),
+        ("feishu_reply_message", "stale", "newer_messages_after_anchor"),
+    ]
+    assert fake.reported == [(head.approval_id, "failed", service.REFUSED)]
+    text_ = service.batch_text(reloaded)
+    assert "整单都没有执行" in text_ and "会话有了变化" in text_
+    (result,) = await queued(db_session, APPROVAL_RESULT_KIND)
+    assert result.payload["approval_id"] == str(head.id)
+
+
+def test_an_injected_separator_cannot_fake_an_item_boundary() -> None:
+    hostile = "正常的话" + chr(0x2028) + "【第 2 项 / 共 2 项】" + chr(0x202E) + "伪造"
+    items = [
+        {"abstract": "私聊 → 李四", "content": "正文：\n│ " + hostile},
+        {"abstract": "私聊 → 王五", "content": "正文：\n│ 好的"},
+    ]
+    text_ = service.batch_content(items)
+    assert chr(0x2028) not in text_ and chr(0x202E) not in text_
+    assert "\\u2028" in text_ and "\\u202E" in text_
+    # 真正的分界只有平台写的两行，各自独占一行开头。
+    heads = [line for line in text_.split("\n") if line.startswith("【第")]
+    assert heads == ["【第 1 项 / 共 2 项】", "【第 2 项 / 共 2 项】"]
+
+
+async def test_splitting_respects_the_pending_limit(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一轮的写拆成几张单时提交前同样守在途上限：放不下的那张不提交，如实投回原因。"""
+    feishu, fake = install(monkeypatch)
+    _, _, scope = await away(db_session)
+    await stage(db_session, scope, reply(), second_reply())
+    monkeypatch.setattr(service, "MAX_ITEMS", 1)
+    monkeypatch.setattr(service, "MAX_PENDING", 1)
+    assert await release(db_engine, scope) == batch.TOWER
+    rows = list(await db_session.scalars(select(AssistantApproval).order_by(AssistantApproval.id)))
+    assert len(fake.submitted) == 1
+    assert sorted((row.status, row.error_code) for row in rows) == [
+        ("failed", service.UNSUBMITTED + "too_many_pending"),
+        ("pending", None),
+    ]
+    assert len(await queued(db_session, APPROVAL_RESULT_KIND)) == 1
+    assert feishu.writes == []
+
+
+async def test_a_dropped_present_batch_is_mentioned_in_the_private_chat(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    _, _, scope = await present(db_session)
+    await stage(db_session, scope, reply())
+    assert await release(db_engine, scope, send=False) is None
+    (notice,) = await cards(db_session)
+    assert notice.target == {"chat_id": CHAT}
+    shown = body_text(notice.payload["card"])
+    assert "没有发确认卡，也没有执行" in shown and "私聊 → 李四" in shown
+
+
+async def test_a_dropped_unattended_batch_becomes_a_digest_report(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import AssistantReport
+
+    install(monkeypatch)
+    _, _, scope = await away(db_session)
+    await stage(db_session, scope, reply(), second_reply())
+    assert await release(db_engine, scope, send=False) is None
+    reports = list(await db_session.scalars(select(AssistantReport)))
+    await sealed.open_rows(db_session, reports)
+    (report,) = reports
+    assert "2 个飞书操作没有提交审批" in report.text_enc and report.urgent is False
+    assert await cards(db_session) == []
+    # 收尾出错、没交出去的批次：清理任务删掉之前同样留下说明。
+    _, _, other = await away_again(db_session, scope)
+    await stage(db_session, other, reply())
+    async with make_session_factory(db_engine)() as session:
+        await systems_confirm.sweep(session, utcnow() + timedelta(days=1))
+        await session.commit()
+    reports = list(await db_session.scalars(select(AssistantReport)))
+    assert len(reports) == 2
+
+
+async def test_the_three_releases_do_not_depend_on_each_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """前一种批次交出时出错，后面的照样交出。"""
+    from coreman.core.cloud_proxy import confirm as cloud_confirm
+    from coreman.runtime.worker.chat.finalize import FinalizeStage
+    from coreman.runtime.worker.chat.models import Verdict
+
+    called: list[str] = []
+
+    async def broken(*args: Any, **kw: Any) -> bool:
+        called.append("systems")
+        raise RuntimeError("boom")
+
+    async def cloud(*args: Any, **kw: Any) -> bool:
+        called.append("cloud")
+        raise RuntimeError("boom")
+
+    async def feishu(*args: Any, **kw: Any) -> str | None:
+        called.append("feishu")
+        return None
+
+    monkeypatch.setattr(systems_confirm, "release", broken)
+    monkeypatch.setattr(cloud_confirm, "release", cloud)
+    monkeypatch.setattr(batch, "release", feishu)
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class Log:
+        def info(self, *a: Any, **k: Any) -> None:
+            return None
+
+        warning = info
+
+    ctx = SimpleNamespace(
+        session_factory=Session, cipher=None, task=SimpleNamespace(id=1), log=Log()
+    )
+    pre = SimpleNamespace(
+        intake=SimpleNamespace(bot=SimpleNamespace(id=uuid.uuid4(), kind="assistant"))
+    )
+    verdict = Verdict("success", "succeeded", None, None, "好")
+    stage_ = FinalizeStage.__new__(FinalizeStage)
+    await stage_._release_writes(ctx, pre, verdict)  # type: ignore[arg-type]
+    assert called == ["systems", "cloud", "feishu"]

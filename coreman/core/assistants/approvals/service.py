@@ -15,6 +15,7 @@ pending →（拒绝）rejected、（助理或停用流程撤回）withdrawn、�
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -37,6 +38,7 @@ from coreman.core.db.models import (
     AssistantApproval,
     Bot,
     InboundEvent,
+    Task,
     User,
     UserIdentity,
 )
@@ -49,7 +51,7 @@ from coreman.core.feishu_personal.tools import TOOLS as PERSONAL_TOOLS
 from coreman.core.feishu_personal.toolsets import files as file_tools
 from coreman.core.feishu_personal.toolsets import mail as mail_tools
 from coreman.core.logging import get_logger
-from coreman.core.timeutils import utcnow
+from coreman.core.timeutils import aware_utc, utcnow
 
 log = get_logger(__name__)
 # 与云签名代理的 `cm-<任务号>-…` 同在 `cm-` 之下（对账只认这个前缀），又不会与它相撞。
@@ -540,18 +542,26 @@ async def submit(
 # 一张合单最多几项（一轮里暂存的飞书写的上限相同）。
 MAX_ITEMS = 20
 BATCH_LEAD = (
-    "本单共 {count} 项，是助理在你不在场时同一轮里要做的飞书操作。批准后平台按顺序逐项原样执行；"
-    "某一项执行失败时停下，后面的项不再执行，已经执行的不会撤回；拒绝则整单都不执行。"
+    "本单共 {count} 项，是助理在你不在场时同一轮里要做的飞书操作。批准后平台先逐项复查（会话"
+    "是否有了变化、附件是否还在且没被改动），任何一项不通过整单都不执行；全部通过后按顺序原样"
+    "执行，某一项执行失败就停下，后面的项不再执行，已经执行的不会撤回；拒绝则整单都不执行。"
 )
 ITEM_HEAD = "【第 {index} 项 / 共 {count} 项】"
 
 
 def batch_content(items: list[dict[str, Any]]) -> str:
-    """合单的正文：一句说明，然后按顺序完整列出每一项（每项就是它单独成单时的正文）。"""
+    """合单的正文：一句说明，然后按顺序完整列出每一项（每项就是它单独成单时的正文）。
+
+    各项正文与确认卡一样做可见化转义（`proxied._visible`）：控制、格式字符与 `\\n` 以外的行、
+    段分隔符转成 `\\uXXXX`，值里夹带的分隔符造不出新的「第 N 项」分界，也颠倒不了显示。
+    """
+    from coreman.core.assistants.approvals import proxied  # proxied 依赖本模块，延迟导入
+
     count = len(items)
     parts = [BATCH_LEAD.format(count=count)]
     for index, item in enumerate(items, 1):
-        parts.append(ITEM_HEAD.format(index=index, count=count) + "\n" + str(item["content"]))
+        body = proxied._visible(str(item["content"]))
+        parts.append(ITEM_HEAD.format(index=index, count=count) + "\n" + body)
     return "\n\n".join(parts)
 
 
@@ -653,6 +663,9 @@ async def submit_batch(
             code = UNAVAILABLE
         elif requester is None:
             code = "no_login_name"
+        elif await pending_count(session, bot.id) >= MAX_PENDING:
+            # 拆成几张时也守住在途上限：放不下的这一张不提交，如实投回原因。
+            code = str(TOO_MANY["error"])
         else:
             try:
                 async with session.begin_nested():
@@ -734,7 +747,12 @@ class Decided:
 
 
 async def deliver(
-    session: AsyncSession, row: AssistantApproval, bot: Bot, *, status: str | None = None
+    session: AsyncSession,
+    row: AssistantApproval,
+    bot: Bot,
+    *,
+    status: str | None = None,
+    attempt: int = 0,
 ) -> bool:
     """把这张单的结局作为一轮投回助理会话。合单只投一轮，`row` 是第一项，各项的结局都在里面。
 
@@ -744,11 +762,14 @@ async def deliver(
 
     Args:
         status: 这次投回的结局（合单的第一项自己可能已被单独撤回）；不给用 `row.status`
+        attempt: 第几次重投（`redeliver`）；0 是第一次
     """
     if bot.owner_id is None:
         return False
     outcome = status or row.status
     dedupe = f"assistant-approval:{row.id}:result:{outcome}"
+    if attempt:
+        dedupe += f"{RETRY_MARK}{attempt}"
     result = {"approval_id": str(row.id), "status": outcome}
     if row.origin_event_id is None or await session.get(InboundEvent, row.origin_event_id) is None:
         queued = await platform_turns.enqueue(
@@ -851,9 +872,78 @@ async def decide(
     return Decided(known=True, queued=await deliver(session, row, bot, status=status))
 
 
+# 结果回合没跑成、只是「没轮到」（会话忙、让路给所有者、暂停、运行时不可用、被替代）：重投。
+REDELIVER_CODES = frozenset(
+    {
+        "session_busy",
+        "platform_turn_yielded",
+        "assistant_paused",
+        "relay_unavailable",
+        "superseded",
+    }
+)
+REDELIVER_MAX = 8
+REDELIVER_AFTER = timedelta(minutes=1)
+REDELIVER_WINDOW = timedelta(days=3)
+REDELIVER_BATCH = 50
+RETRY_MARK = ":retry:"
+_RESULT_KEY = re.compile(
+    r"^assistant-approval:([0-9a-f-]{36}):result:([a-z_]+)(?::retry:([0-9]+))?$"
+)
+
+
+async def redeliver(session: AsyncSession, now: datetime) -> int:
+    """结局已定、结果回合却没跑成的单：再投一轮，保证助理最终知道结局。调用方提交。
+
+    结果回合不出声，会话忙时直接记失败（`session_busy`），所有者发来消息时让路取消；去重键已
+    用掉，不重投就永远送不到。这里按任务表找：同一个结局最近一次的结果任务以「没轮到」的代码
+    结束、此后没有在途或成功的同一结局任务的，退避（1 分钟起逐次加倍）后用新的去重键重投，
+    至多 `REDELIVER_MAX` 次；助理已停用或不在 active 的不投。返回重投了几轮。
+    """
+    rows = (
+        await session.execute(
+            select(Task.dedupe_key, Task.status, Task.error_code, Task.finished_at)
+            .where(
+                Task.kind == APPROVAL_RESULT_KIND,
+                Task.dedupe_key.like("assistant-approval:%"),
+                or_(Task.finished_at.is_(None), Task.finished_at > now - REDELIVER_WINDOW),
+            )
+            .order_by(Task.id)
+        )
+    ).all()
+    latest: dict[tuple[str, str], tuple[int, str, str | None, datetime | None]] = {}
+    for key, status, code, finished in rows:
+        found = _RESULT_KEY.match(key or "")
+        if found is None:
+            continue
+        attempt = int(found.group(3) or 0)
+        group = (found.group(1), found.group(2))
+        if group not in latest or attempt >= latest[group][0]:
+            latest[group] = (attempt, status, code, finished)
+    count = 0
+    for (approval_id, outcome), (attempt, status, code, finished) in latest.items():
+        if status in tasks.OPEN or status == "succeeded" or code not in REDELIVER_CODES:
+            continue
+        if attempt >= REDELIVER_MAX or finished is None:
+            continue
+        if aware_utc(finished) > now - REDELIVER_AFTER * (2**attempt):
+            continue
+        row = await session.get(AssistantApproval, uuid.UUID(approval_id))
+        bot = await session.get(Bot, row.bot_id) if row is not None else None
+        if row is None or bot is None or not bot.enabled or inactive_assistant(bot):
+            continue
+        if await deliver(session, row, bot, status=outcome, attempt=attempt + 1):
+            count += 1
+        if count >= REDELIVER_BATCH:
+            break
+    return count
+
+
 RESULT_LIMIT = 20000
 # 合单里前面一项执行失败、平台停下没有执行的项。
 SKIPPED = "skipped_after_failure"
+# 合单里另有一项执行前复查没通过、整单都没执行时，其余各项的原因代码。
+REFUSED = "refused_with_batch"
 # 本轮结束时没能提交审批的项：原因代码前加这个前缀（什么都没提交，也没有执行）。
 UNSUBMITTED = "unsubmitted_"
 
@@ -916,6 +1006,11 @@ def result_text(row: AssistantApproval) -> str:
         return (
             f"{what}{topic}没能提交审批（{(row.error_code or '')[len(UNSUBMITTED) :]}），没有执行。"
             "确认原因之后，需要时重新调用原工具提交。"
+        )
+    if row.error_code == REFUSED:
+        return (
+            f"{what}{topic}已批准，但同一张单里另有一项在执行前的复查没有通过，整单都没有执行；"
+            "这一项本身没有问题，需要时重新提交。"
         )
     if row.error_code == SKIPPED:
         return f"{what}{topic}已批准，但同一张单里前面的一项执行失败，平台已停下，这一项没有执行。"
@@ -1376,4 +1471,5 @@ async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
         "assistant_approvals_expired": await expire(session, now, cfg),
         "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
         "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
+        "assistant_approval_results_redelivered": await redeliver(session, now),
     }

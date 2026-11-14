@@ -649,18 +649,28 @@ class FinalizeStage(ChatStageBase):
         from coreman.core.systems_catalog import confirm as systems_confirm
 
         send = verdict.log_status in ("success", "ask_user")
-        async with ctx.session_factory() as session:
-            sent = await systems_confirm.release(
-                session,
-                ctx.cipher,
-                bot_id=pre.intake.bot.id,
-                task_id=ctx.task.id,
-                send=send,
-            )
-            cloud_sent = await cloud_confirm.release(
-                session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
-            )
-            await session.commit()
+        # 三种批次各自一个事务、各自兜住异常：前一个出错不能让后面的不交出去。
+        sent = cloud_sent = False
+        try:
+            async with ctx.session_factory() as session:
+                sent = await systems_confirm.release(
+                    session,
+                    ctx.cipher,
+                    bot_id=pre.intake.bot.id,
+                    task_id=ctx.task.id,
+                    send=send,
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("systems_write_release_failed", error=type(exc).__name__)
+        try:
+            async with ctx.session_factory() as session:
+                cloud_sent = await cloud_confirm.release(
+                    session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("cloud_write_release_failed", error=type(exc).__name__)
         if sent:
             ctx.log.info("systems_write_card_queued")
         if cloud_sent:

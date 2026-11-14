@@ -128,6 +128,8 @@ async def test_a_failed_job_is_reported_too_and_a_silent_one_never(
         ("cancelled", "superseded", False, 0, 60),
         ("failed", "platform_turn_yielded", False, 0, 60),
         ("failed", "assistant_paused", False, 0, 60),
+        # 不出声的结论投回遇到会话忙直接记失败：只是没轮到，放回重投，不算失败次数。
+        ("failed", "session_busy", False, 0, 60),
         ("failed", "RelayError", False, 1, 300),
     ],
 )

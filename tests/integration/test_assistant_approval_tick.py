@@ -91,6 +91,7 @@ async def test_tick_runs_without_an_approval_service(db_session: AsyncSession) -
         "assistant_approvals_expired": 0,
         "assistant_approval_files_swept": 0,
         "assistant_approvals_recovered": 0,
+        "assistant_approval_results_redelivered": 0,
     }
 
 

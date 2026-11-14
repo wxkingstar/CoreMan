@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from structlog.testing import capture_logs
 
@@ -83,6 +83,14 @@ def buttons(card: dict[str, Any]) -> list[dict[str, Any]]:
 
     walk(card)
     return found
+
+
+async def raw_payload(session: AsyncSession, item: OutboxItem) -> str:
+    """出站表里这一行载荷的原样（不经还原）。"""
+    found = await session.scalar(
+        text("SELECT payload::text FROM outbox WHERE id = :id"), {"id": item.id}
+    )
+    return str(found)
 
 
 async def due_now(session: AsyncSession, bot: Bot, at: datetime) -> None:
@@ -165,6 +173,11 @@ async def test_urgent_reports_go_out_when_the_turn_ends_and_wait_out_quiet_hours
     (item,) = await sent(db_session, bot)
     assert item.target == {"chat_id": "oc_private"}
     assert "要你拍板" in texts(item.payload["card"])
+    # 出站表里没有明文：卡片与纯文本兜底都在所有者数据密钥的密文里，还原后才看得到。
+    assert SECRET in item.payload["_fallback_markdown"]
+    assert SECRET not in await raw_payload(db_session, item) and "要你拍板" not in (
+        await raw_payload(db_session, item)
+    )
     # 发过的不再发。
     assert (await digest.tick(factory, AFTERNOON))["assistant_urgent_sent"] == 0
 
@@ -210,6 +223,10 @@ async def test_the_digest_lists_approvals_owner_items_and_reports(
     assert click is not None and click.text == "现在处理 F001"
     assert click.requester == "owner_pid" and click.row == "fu1"
     assert item.payload["_digest_rows"] == [owner_item.seq]
+    stored = await raw_payload(db_session, item)
+    assert SECRET in item.payload["_fallback_markdown"]
+    assert SECRET not in stored and "已回复王五" not in stored and "供应商" not in stored
+    assert "_digest_rows" in stored  # 平台写的编号仍是明文，置灰靠它
     rows = list(await db_session.scalars(select(AssistantReport.sent_at)))
     assert all(at is not None for at in rows)
     # 下一个时点没有新东西：不重复发。
@@ -361,3 +378,29 @@ async def test_a_stopped_assistant_gets_no_digest(
         "assistant_urgent_sent": 0,
     }
     assert await sent(db_session, bot) == []
+
+
+async def test_urgent_reports_of_stopped_assistants_do_not_take_a_slot(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """紧急汇报的取数只看启用且 active 的助理：停用的留着的条目不占每次的名额。"""
+    bot, owner = await ready(db_session)
+    factory = make_session_factory(db_engine)
+    scope = await handover_scope(db_session, bot, owner)
+    await digest.record(db_session, scope, "合同今天截止", urgent=True)
+    await db_session.commit()
+    await finish(db_session, scope)
+    picked: list[Any] = []
+
+    async def spy(factory: Any, bot_id: Any, now: datetime) -> bool:
+        picked.append(bot_id)
+        return False
+
+    monkeypatch.setattr(digest, "_urgent_one", spy)
+    await digest.tick(factory, AFTERNOON)
+    assert picked == [bot.id]
+    picked.clear()
+    await db_session.execute(update(Bot).where(Bot.id == bot.id).values(enabled=False))
+    await db_session.commit()
+    await digest.tick(factory, AFTERNOON)
+    assert picked == []

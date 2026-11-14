@@ -311,9 +311,10 @@ async def run(
 ) -> str:
     """执行一张已批准的单，返回它最后的状态（合单返回 `settled`，各项的结局记在各项上）。
 
-    合单按单上的顺序执行批准时仍在待批的各项：执行前逐项复查，会话变了的那一项记 stale、
-    不执行，其余照常；执行中某一项失败就停下，后面的项记 `skipped_after_failure`，前面已执行
-    的不撤回。
+    合单执行批准时仍在待批（没撤回）的各项，与确认卡同一口径：先整单复查（会话、锚点、目标、
+    附件），任何一项不通过整单都不执行，没通过的记各自的原因、其余记 `refused_with_batch`；
+    全部通过才按单上的顺序执行，某一项失败就停下，后面的项记 `skipped_after_failure`，前面
+    已执行的不撤回。
 
     Args:
         approval_id: 单独成单的那一行，或合单的第一项
@@ -378,7 +379,10 @@ async def run(
                 # 被清理掉了，或桶里的内容不是提交时的那一份：这一项不执行。
                 _set([item], "failed", exc.code)
         runnable = [item for item in todo if item.status == "approved"]
-        if not runnable:
+        if len(runnable) < len(todo):
+            # 合单与确认卡同一口径：整单复查，任何一项不通过（会话变了、附件取不回或被改动）
+            # 整单都不执行；没通过的那几项记各自的原因，其余记 `refused_with_batch`。
+            _set(runnable, "failed", service.REFUSED)
             status = await _settle(session, row, rows, bot)
             await _report(cfg, approval, *_verdict(todo))
             return status

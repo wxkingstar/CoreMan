@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants.approvals import attachments, checks, execute, service, tower
 from coreman.core.assistants.records import inactive_assistant, is_assistant
+from coreman.core.bus import outbox
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InteractionState, Task
@@ -201,6 +202,65 @@ async def discard_files(value: dict[str, Any]) -> None:
         await attachments.delete(store, keys)
 
 
+DROPPED_CARD = (
+    "这一轮没有正常结束，暂存的 {count} 个飞书操作没有发确认卡，也没有执行：{what}。需要的话"
+    "请再说一次。"
+)
+DROPPED_REPORT = (
+    "无人在场的一轮没有正常结束，那一轮暂存的 {count} 个飞书操作没有提交审批，也没有执行：{what}。"
+    "交回的事项平台会再交回，需要时我会重新起草。"
+)
+
+
+async def tell_dropped(session: AsyncSession, state: InteractionState) -> bool:
+    """作废了一批还没交出去的飞书写：不悄悄清掉，让人知道这些没有提交、也没有执行。
+
+    在场的批次在所有者的私聊里发一句（他刚做的动作的回应，不受免打扰影响）；无人在场的记一条
+    待汇报，进下一次摘要。只说条数与平台生成的摘要，不带正文。返回是否留下了说明。
+    """
+    from coreman.core.assistants import digest, sealed  # digest 依赖面广，延迟导入
+    from coreman.core.db.models import AssistantReport
+
+    value = state.state
+    items = list(value.get("items") or [])
+    if not items or value.get("sent"):
+        return False
+    what = "；".join(
+        " ".join(str(item.get("abstract") or item.get("tool")).split()) for item in items
+    )
+    if value.get("mode") == CARD:
+        chat_id = str(value.get("chat_id") or "")
+        if not chat_id:
+            return False
+        text = DROPPED_CARD.format(count=len(items), what=what)
+        await outbox.add(
+            session,
+            bot_id=state.bot_id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"assistant-write:{state.id}:dropped",
+            target={"chat_id": chat_id},
+            # 摘要里有会话名：纯文本，@ 与链接都不生效。
+            payload={"card": systems_confirm.notice_card("飞书操作没有执行", text)},
+        )
+        return True
+    if not await sealed.key_ready(session, state.bot_id):
+        return False
+    text = DROPPED_REPORT.format(count=len(items), what=what)
+    if len(text) > digest.MAX_REPORT:
+        text = DROPPED_REPORT.format(count=len(items), what="…")[: digest.MAX_REPORT]
+    session.add(
+        AssistantReport(
+            bot_id=state.bot_id,
+            task_id=int(value.get("origin_task_id") or state.scope_key),
+            text_enc=text,
+            urgent=False,
+        )
+    )
+    await session.flush()
+    return True
+
+
 async def propose(
     session: AsyncSession,
     cipher: Cipher,
@@ -339,7 +399,10 @@ async def release(
     bot = await session.get(Bot, bot_id)
     usable = bot is not None and bot.enabled and not inactive_assistant(bot)
     if not send or not items or not usable:
-        # 没正常结束、内容读不出来（所有者的数据密钥已销毁），或助理已停用：什么都不执行。
+        # 没正常结束、内容读不出来（所有者的数据密钥已销毁），或助理已停用：什么都不执行。没正常
+        # 结束的（失败、超时、被打断、额度用完）告诉人这批没有提交（`tell_dropped`）。
+        if usable:
+            await tell_dropped(session, state)
         state.status = "cancelled"
         await discard_files(value)
         return None
