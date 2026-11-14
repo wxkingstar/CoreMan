@@ -345,7 +345,9 @@ async def test_when_the_budget_is_spent_only_urgent_items_go_and_the_owner_is_to
     db_session: AsyncSession,
 ) -> None:
     bot, _ = await ready(db_session)
-    (await settings.get(db_session, bot.id)).daily_turn_budget = 10
+    prefs = await settings.get(db_session, bot.id)
+    # 用的是真实时钟：关掉免打扰，告知才不看跑测试的钟点。
+    prefs.daily_turn_budget, prefs.quiet_enabled = 10, False
     await db_session.commit()
     now = utcnow()
     await spend(db_session, bot, 10, now)
@@ -380,7 +382,9 @@ async def test_urgent_items_stop_too_once_the_overdraft_is_used_up(
     db_session: AsyncSession,
 ) -> None:
     bot, _ = await ready(db_session)
-    (await settings.get(db_session, bot.id)).daily_turn_budget = 10
+    prefs = await settings.get(db_session, bot.id)
+    # 用的是真实时钟：关掉免打扰，告知才不看跑测试的钟点。
+    prefs.daily_turn_budget, prefs.quiet_enabled = 10, False
     await db_session.commit()
     now = utcnow()
     await spend(db_session, bot, 10 + delivery.OVERDRAFT, now)
@@ -393,7 +397,9 @@ async def test_urgent_items_stop_too_once_the_overdraft_is_used_up(
 
 async def test_the_next_day_everything_goes_again(db_session: AsyncSession) -> None:
     bot, _ = await ready(db_session)
-    (await settings.get(db_session, bot.id)).daily_turn_budget = 10
+    prefs = await settings.get(db_session, bot.id)
+    # 用的是真实时钟：关掉免打扰，告知才不看跑测试的钟点。
+    prefs.daily_turn_budget, prefs.quiet_enabled = 10, False
     await db_session.commit()
     now = utcnow()
     await spend(db_session, bot, 10, now)
