@@ -33,6 +33,11 @@ PACK_NAME = "pack.tar.gz"
 PACK_LEVEL = 1
 # 压缩包可能比原文件略大（不可压缩的内容加每个文件 512 字节的 tar 头）。
 PACK_LIMIT = MAX_TOTAL + MAX_FILES * 1024 + CHUNK
+# 局域网直连（同一网络区的两台节点，压缩包不经平台中转）放宽的上限：清单仍经平台下发，
+# 20 万条约 40MB，在控制通道单次请求的上限之内。
+DIRECT_MAX_FILES = 200000
+DIRECT_MAX_TOTAL = 32 * 1024**3
+DIRECT_PACK_LIMIT = DIRECT_MAX_TOTAL + DIRECT_MAX_FILES * 1024 + CHUNK
 # 换机暂存目录超过这个时长还在，一定是中断的迁移留下的（单次迁移最长 30 分钟）。
 STALE_STAGE = 6 * 3600
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -914,6 +919,7 @@ class Workspace:
             raise self.error("迁移参数无效")
         manifest, excluded, total = [], [], 0
         repos, descriptors = {}, []
+        max_files, max_total = self.limits()
         for parent, dirs, files in os.walk(self.root, followlinks=False):
             here = Path(parent)
             rel_dir = here.relative_to(self.root).as_posix()
@@ -964,7 +970,11 @@ class Workspace:
                     )
                 elif name in files:
                     excluded.append(rel)
-                if len(manifest) > MAX_FILES or total > MAX_TOTAL:
+                if (len(manifest) > max_files or total > max_total) and self.direct_limits():
+                    raise self.error(
+                        "工作目录超过迁移上限（20 万个文件或 32G，可从远端重新克隆的仓库不计）"
+                    )
+                if len(manifest) > max_files or total > max_total:
                     raise self.error(
                         "工作目录超过迁移上限（5 万个文件或 4G，可从远端重新克隆的仓库不计）"
                     )
@@ -1215,8 +1225,17 @@ class Workspace:
         git("reset", "--quiet", "--hard", "HEAD")
         return {"cloned": True}
 
-    def validate_manifest(self, manifest, root):
-        if not isinstance(manifest, list) or len(manifest) > MAX_FILES:
+    def direct_limits(self):
+        """平台走局域网直连时带 limits=direct，上限放宽到 20 万个文件、32G。"""
+        return self.data.get("limits") == "direct"
+
+    def limits(self, direct=None):
+        direct = self.direct_limits() if direct is None else direct
+        return (DIRECT_MAX_FILES, DIRECT_MAX_TOTAL) if direct else (MAX_FILES, MAX_TOTAL)
+
+    def validate_manifest(self, manifest, root, direct=None):
+        max_files, max_total = self.limits(direct)
+        if not isinstance(manifest, list) or len(manifest) > max_files:
             raise self.error("迁移清单无效")
         seen, total = set(), 0
         for entry in manifest:
@@ -1246,7 +1265,7 @@ class Workspace:
         for name in seen:
             if any(str(p) in seen for p in PurePosixPath(name).parents if str(p) != "."):
                 raise self.error("迁移清单目录冲突")
-        if total > MAX_TOTAL:
+        if total > max_total:
             raise self.error("迁移超过大小限制")
 
     def import_(self):
@@ -1261,7 +1280,14 @@ class Workspace:
             stage.mkdir(mode=0o700, parents=True, exist_ok=True)
             files.mkdir(exist_ok=True)
             meta.write_text(
-                json.dumps({"bot_id": self.bot, "target": str(self.root), "manifest": manifest})
+                json.dumps(
+                    {
+                        "bot_id": self.bot,
+                        "target": str(self.root),
+                        "manifest": manifest,
+                        "direct": self.direct_limits(),
+                    }
+                )
             )
             for entry in manifest:
                 if "link" not in entry and entry["size"] == 0:
@@ -1308,6 +1334,8 @@ class Workspace:
         pack = stage / PACK_NAME
         action = self.data.get("action")
         if action == "remove":
+            if self.agent.direct is not None:
+                self.agent.direct.withdraw(pack)
             shutil.rmtree(stage, ignore_errors=True)
             return {"removed": True}
         if action == "read":
@@ -1344,7 +1372,15 @@ class Workspace:
                 if reader.hash.hexdigest() != entry["hash"]:
                     raise self.error("源文件在复制时发生变化，请重试")
                 count += 1
-        return {"size": pack.stat().st_size, "hash": digest(pack), "files": count}
+        result = {"size": pack.stat().st_size, "hash": digest(pack), "files": count}
+        token = self.data.get("serve_token")
+        if token is not None:
+            # 平台要走局域网直连：登记到下载口，目标节点凭这个一次性令牌来拉。
+            if not isinstance(token, str) or not re.fullmatch("[0-9a-f]{64}", token):
+                raise self.error("迁移参数无效")
+            direct = self.agent.direct
+            result["served"] = direct is not None and direct.serve(token, pack)
+        return result
 
     def unpack(self):
         """目标节点整包换机：按顺序接收压缩包，收齐后核对大小与哈希，只按清单解出普通文件。
@@ -1361,6 +1397,28 @@ class Workspace:
             raise self.error("迁移清单或归属发生变化")
         pack = stage / PACK_NAME
         action = self.data.get("action")
+        if action == "fetch":
+            from . import direct_transfer
+
+            size, token = self.data.get("size"), self.data.get("token")
+            limit = DIRECT_PACK_LIMIT if record.get("direct") is True else PACK_LIMIT
+            if (
+                not isinstance(size, int)
+                or not 0 < size <= limit
+                or not isinstance(token, str)
+                or not re.fullmatch("[0-9a-f]{64}", token)
+                or not re.fullmatch("[0-9a-f]{64}", str(self.data.get("fingerprint") or ""))
+                or direct_transfer.parse_address(self.data.get("address")) is None
+            ):
+                raise self.error("迁移参数无效")
+            direct_transfer.start_fetch(
+                str(self.data["address"]), token, str(self.data["fingerprint"]), size, pack
+            )
+            return {"started": True}
+        if action == "fetch-status":
+            from . import direct_transfer
+
+            return direct_transfer.status(pack)
         if action == "write":
             data = self.data.get("data")
             if not isinstance(data, str) or len(data) > ((CHUNK + 2) // 3) * 4:
@@ -1370,7 +1428,7 @@ class Workspace:
             if (
                 len(raw) > CHUNK
                 or int(self.data.get("offset", 0)) != received
-                or received + len(raw) > PACK_LIMIT
+                or received + len(raw) > (DIRECT_PACK_LIMIT if record.get("direct") else PACK_LIMIT)
             ):
                 raise self.error("迁移分块大小或顺序不正确")
             with pack.open("ab") as f:
@@ -1439,7 +1497,7 @@ class Workspace:
             or ("manifest" in self.data and self.data["manifest"] != record["manifest"])
         ):
             raise self.error("迁移归属或清单无效")
-        self.validate_manifest(record["manifest"], files)
+        self.validate_manifest(record["manifest"], files, direct=record.get("direct") is True)
         for entry in record["manifest"]:
             if "link" in entry:
                 continue

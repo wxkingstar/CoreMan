@@ -591,3 +591,35 @@ def test_transfer_carries_tracked_secret_named_files_and_repairs_worktrees(agent
         text=True,
     ).stdout
     assert status == ""
+
+
+def test_direct_limits_only_when_platform_asks(agent, monkeypatch):
+    """局域网直连时平台带 limits=direct，上限放宽；不带就是原来的 5 万个文件或 4G。"""
+    from runtime_daemon import workspace
+
+    call(agent, "init")
+    for i in range(3):
+        (agent.root / "one" / f"f{i}.txt").write_text(str(i))
+    monkeypatch.setattr(workspace, "MAX_FILES", 2)
+    monkeypatch.setattr(workspace, "DIRECT_MAX_FILES", 10)
+    with pytest.raises(OperationError, match="5 万个文件"):
+        call(agent, "export")
+    manifest = call(agent, "export", limits="direct")["manifest"]
+    assert len(manifest) > 2
+    tid = uuid.uuid4().hex
+    with pytest.raises(OperationError):
+        call(agent, "import", working_dir="two", transfer_id=tid, manifest=manifest)
+    call(agent, "import", working_dir="two", transfer_id=tid, manifest=manifest, limits="direct")
+
+
+def test_serve_token_requires_direct_config(agent):
+    call(agent, "init")
+    (agent.root / "one" / "a.txt").write_text("a")
+    manifest = call(agent, "export")["manifest"]
+    tid = uuid.uuid4().hex
+    packed = call(
+        agent, "pack", action="create", transfer_id=tid, manifest=manifest, serve_token="c" * 64
+    )
+    assert packed["served"] is False
+    with pytest.raises(OperationError):
+        call(agent, "pack", action="create", transfer_id=tid, manifest=manifest, serve_token="x")

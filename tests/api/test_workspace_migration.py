@@ -1493,3 +1493,173 @@ async def test_assistant_stopped_mid_switch_aborts_and_retires_the_new_directory
     )
     destination = str(tmp_path / "destination" / bot.bot_key)
     assert [(r.relay_server_id, r.working_dir) for r in retired] == [(target.id, destination)]
+
+
+def _direct(monkeypatch, tmp_path, agents, zones):
+    """给两台真实节点配上局域网直连（各自的网络区、本机回环上的下载口）。"""
+    import shutil
+    import socket
+
+    from coreman.core.bots import workspace_transfer
+    from runtime_daemon.direct_transfer import DirectTransfer
+
+    if shutil.which("openssl") is None:
+        pytest.skip("需要 openssl 生成证书")
+    monkeypatch.setattr(workspace_transfer, "DIRECT_POLL_SECONDS", 0.05)
+    nodes = []
+    for (relay_id, agent), zone in zip(agents.items(), zones, strict=True):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        agent.direct = DirectTransfer(zone, f"127.0.0.1:{port}", tmp_path / f"direct-{relay_id}")
+        nodes.append(agent.direct)
+    return nodes
+
+
+async def test_same_zone_copy_pulls_the_pack_directly_from_the_source(
+    client, db_session, monkeypatch, tmp_path
+):
+    """两台节点在同一网络区：目标节点直接从源节点拉压缩包，平台不再按块读写。"""
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    nodes = _direct(monkeypatch, tmp_path, agents, ["office", "office"])
+    folder = tmp_path / "source" / bot.bot_key
+    (folder / "report.txt").write_text("数据")
+    (folder / "big.bin").write_bytes(os.urandom(3 * 1024 * 1024))
+    (folder / "latest").symlink_to("report.txt")
+    seen.clear()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    try:
+        response = await client.post(
+            f"/api/admin/bots/{bot.id}/switch-relay",
+            json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+            headers={"If-Match": str(bot.version)},
+        )
+    finally:
+        for node in nodes:
+            node.close()
+    assert response.status_code == 200, response.text
+    steps = [(op, p.get("action")) for op, p in seen if op.startswith("workspace-")]
+    assert ("workspace-pack", "read") not in steps
+    assert ("workspace-unpack", "write") not in steps
+    assert steps[:4] == [
+        ("workspace-info", None),
+        ("workspace-export", None),
+        ("workspace-import", None),
+        ("workspace-pack", "create"),
+    ]
+    assert steps[4] == ("workspace-unpack", "fetch")
+    assert steps[-3:] == [
+        ("workspace-unpack", "extract"),
+        ("workspace-pack", "remove"),
+        ("workspace-finish", None),
+    ]
+    export = next(p for op, p in seen if op == "workspace-export")
+    assert export["limits"] == "direct"
+    moved = tmp_path / "destination" / bot.bot_key
+    assert (moved / "report.txt").read_text() == "数据"
+    assert (moved / "big.bin").read_bytes() == (folder / "big.bin").read_bytes()
+    assert os.readlink(moved / "latest") == "report.txt"
+    assert not list((tmp_path / "source").glob(".coreman-transfer-*"))
+
+
+async def test_direct_failure_falls_back_to_relay_within_limits(
+    client, db_session, monkeypatch, tmp_path
+):
+    """源节点登记的证书对不上（或网络不通）：目标拉取失败，目录不大就退回经平台按块中转。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    nodes = _direct(monkeypatch, tmp_path, agents, ["office", "office"])
+    (tmp_path / "source" / bot.bot_key / "report.txt").write_text("数据")
+    real = workspace_transfer.call_agent
+
+    async def call(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "ping" and relay.id == old.id and "workspace_direct" in result:
+            result = {**result, "workspace_direct": {**result["workspace_direct"]}}
+            result["workspace_direct"]["fingerprint"] = "0" * 64
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    seen.clear()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    try:
+        response = await client.post(
+            f"/api/admin/bots/{bot.id}/switch-relay",
+            json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+            headers={"If-Match": str(bot.version)},
+        )
+    finally:
+        for node in nodes:
+            node.close()
+    assert response.status_code == 200, response.text
+    steps = [(op, p.get("action")) for op, p in seen if op.startswith("workspace-")]
+    fetch = steps.index(("workspace-unpack", "fetch"))
+    assert ("workspace-pack", "read") in steps[fetch:]
+    assert ("workspace-unpack", "write") in steps[fetch:]
+    moved = tmp_path / "destination" / bot.bot_key
+    assert (moved / "report.txt").read_text() == "数据"
+
+
+async def test_direct_failure_beyond_relay_limits_keeps_binding(
+    client, db_session, monkeypatch, tmp_path
+):
+    """直连拉不通、目录又超过中转上限：不退回中转，换机失败，绑定不变。"""
+    from coreman.core.bots import workspace_transfer
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    nodes = _direct(monkeypatch, tmp_path, agents, ["office", "office"])
+    for i in range(3):
+        (tmp_path / "source" / bot.bot_key / f"f{i}.txt").write_text(str(i))
+    monkeypatch.setattr(workspace_transfer, "MAX_FILES", 2)
+    real = workspace_transfer.call_agent
+
+    async def call(relay, cipher, operation, payload=None):
+        if operation == "workspace-unpack" and (payload or {}).get("action") == "fetch":
+            payload = {**payload, "fingerprint": "0" * 64}
+        return await real(relay, cipher, operation, payload)
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", call)
+    monkeypatch.setattr(memory_transfer, "call_agent", call)
+    original = old.id
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    try:
+        response = await client.post(
+            f"/api/admin/bots/{bot.id}/switch-relay",
+            json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+            headers={"If-Match": str(bot.version)},
+        )
+    finally:
+        for node in nodes:
+            node.close()
+    assert response.status_code == 502, response.text
+    assert "局域网直连" in response.json()["message"]
+    await db_session.refresh(bot)
+    assert bot.relay_server_id == original and bot.workspace_state == "ready"
+
+
+async def test_different_zones_keep_relaying_with_normal_limits(
+    client, db_session, monkeypatch, tmp_path
+):
+    """网络区不同（云上与办公室）：照旧经平台中转，按原来的上限导出。"""
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    nodes = _direct(monkeypatch, tmp_path, agents, ["cloud", "office"])
+    (tmp_path / "source" / bot.bot_key / "report.txt").write_text("数据")
+    seen.clear()
+    await login_existing(client, db_session, await db_session.get(User, bot.created_by))
+    try:
+        response = await client.post(
+            f"/api/admin/bots/{bot.id}/switch-relay",
+            json={"relay_server_id": str(target.id), "workspace_mode": "copy"},
+            headers={"If-Match": str(bot.version)},
+        )
+    finally:
+        for node in nodes:
+            node.close()
+    assert response.status_code == 200, response.text
+    steps = [(op, p.get("action")) for op, p in seen if op.startswith("workspace-")]
+    assert ("workspace-unpack", "fetch") not in steps
+    assert ("workspace-pack", "read") in steps
+    export = next(p for op, p in seen if op == "workspace-export")
+    assert "limits" not in export
