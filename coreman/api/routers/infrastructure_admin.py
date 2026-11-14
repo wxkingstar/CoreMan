@@ -619,6 +619,10 @@ async def sync_companions(
         for row in rows:
             if row.skill_id in still_needed:
                 continue
+            # 同时是全局技能的，只去掉系统来源，留给全局技能管。
+            if row.installed_globally:
+                row.installed_by_system = None
+                continue
             await installs.uninstall(session, bot, row, user)
             uninstalled.append(str(row.skill_id))
     return installed, uninstalled

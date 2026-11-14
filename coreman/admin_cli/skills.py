@@ -51,6 +51,12 @@ def register(ops: Any) -> None:
     p.add_argument("--repo", help="技能自己的 Git 仓库地址（覆盖来源仓库）")
     p.add_argument("--security-prompt-file", metavar="文件", help="内部技能的安全约束模板")
     leaf(ops, "upgrade", "为已安装该技能的所有 AI 员工重装技能", upgrade).add_argument("skill")
+    p = leaf(ops, "global", "设为或取消全局技能（所有普通 AI 员工自动安装）", set_global)
+    p.add_argument("skill")
+    p.add_argument("state", type=on_off, metavar="on|off")
+    p.add_argument(
+        "--keep", action="store_true", help="取消全局时保留随全局装上的副本（改按手动安装）"
+    )
     p = leaf(ops, "delete", "从目录删除技能", delete)
     p.add_argument("skill")
     add_yes(p)
@@ -85,6 +91,7 @@ async def list_skills(c: AdminClient, args: argparse.Namespace) -> int:
         [
             ("名称", "name"),
             ("状态", output.enabled),
+            ("全局", lambda r: "是" if r.get("is_global") else ""),
             ("安全级别", "security_level"),
             ("安装方式", "install_type"),
             ("分类", "category"),
@@ -107,6 +114,7 @@ async def show(c: AdminClient, args: argparse.Namespace) -> int:
             ("名称", "name"),
             ("id", "id"),
             ("状态", output.enabled),
+            ("全局技能", lambda s: "是" if s.get("is_global") else "否"),
             ("来源", lambda s: keys.get(str(s["source_id"]))),
             ("安全级别", "security_level"),
             ("安装方式", "install_type"),
@@ -185,6 +193,34 @@ async def upgrade(c: AdminClient, args: argparse.Namespace) -> int:
     if data["skipped"]:
         print("\n跳过：")
         output.table(data["skipped"], [("AI 员工", "bot_name"), ("原因", "reason")])
+    return 0
+
+
+async def set_global(c: AdminClient, args: argparse.Namespace) -> int:
+    skill = await c.skill(args.skill)
+    if args.keep and args.state:
+        raise CliError("--keep 只用于取消全局（off）")
+    body = {"is_global": args.state, "keep_installed": args.keep}
+    data = await c.request("PUT", f"{SKILLS}/{skill['id']}/global", body=body)
+    if args.json:
+        output.dump(data)
+        return 0
+    if args.state:
+        queued, skipped = data["queued"], data["skipped"]
+        print(
+            f"{skill['name']} 已设为全局技能：已排队 {len(queued)} 个，跳过 {len(skipped)} 个；"
+            "之后新建或刚分到运行时的 AI 员工会自动补装"
+        )
+        output.table(queued, [("AI 员工", "bot_name")], empty="")
+        if skipped:
+            print("\n跳过：")
+            output.table(skipped, [("AI 员工", "bot_name"), ("原因", "reason")])
+    elif args.keep:
+        print(f"{skill['name']} 已取消全局，各 AI 员工上的副本改按手动安装保留")
+    else:
+        removed = data["uninstalled"]
+        print(f"{skill['name']} 已取消全局，卸载了 {len(removed)} 个 AI 员工上自动装的副本")
+        output.table(removed, [("AI 员工", "bot_name")], empty="")
     return 0
 
 

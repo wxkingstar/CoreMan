@@ -104,3 +104,14 @@ it("marks skills installed together with a business system", async () => {
   expect(wrapper.get("[data-test=\"installed-by-system\"]").text()).toBe(i18n.global.t("infra.installedBySystem", { key: "lookup" }))
   wrapper.unmount()
 })
+
+it('marks global skills and does not offer to uninstall them', async () => {
+  vi.mocked(allSkills).mockResolvedValue([])
+  vi.mocked(skills.installed).mockResolvedValue({ items: [{ skill_id: 's4', name: 'file-share', status: 'installed', revision: 1, version: '1.0', selected_env_groups: [], user_env_vars: {}, security_prompt: null, error_message: null, mcp_oauth: false, mcp_authorized: false, mcp_authorized_at: null, mcp_authorized_by: null, is_global: true, installed_globally: true }], pending_approvals: [] })
+  const wrapper = mount(BotSkills, { props: { botId: 'b1' }, global: { plugins: [createPinia(), ElementPlus, i18n], stubs: { teleport: true } } })
+  await flushPromises()
+  expect(wrapper.get('[data-test="global-skill"]').text()).toBe('全局技能')
+  const remove = wrapper.findAll('button').find(node => node.attributes('title') === i18n.global.t('skillEditor.globalHint'))
+  expect(remove?.attributes('disabled')).toBeDefined()
+  wrapper.unmount()
+})

@@ -19,8 +19,18 @@ from coreman.api.pagination import PageParams, paginate
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
+from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.secrets import decrypt_json, encrypt_json, mask_dict, merge_secret_dict
-from coreman.core.db.models import BotSkill, EnvPreset, Skill, SkillApproval, SkillSource, User
+from coreman.core.db.models import (
+    BotSkill,
+    EnvPreset,
+    GlobalSkill,
+    Skill,
+    SkillApproval,
+    SkillSource,
+    User,
+)
+from coreman.core.knowledge import global_skills
 from coreman.core.knowledge import skill_policy as policy
 from coreman.core.knowledge.catalog_sync import CatalogAccessError, fetch_catalog, sync_catalog
 from coreman.core.knowledge.git_auth import SOURCE_TOKEN_AAD, git_username, https_repository
@@ -142,6 +152,13 @@ class SkillStatusIn(BaseModel):
     enabled: bool
 
 
+class GlobalIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    is_global: bool
+    # 取消全局时：false 卸载随全局装上的（默认），true 改按手动安装保留在各员工处。
+    keep_installed: bool = False
+
+
 class PresetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     group_key: str = Field(min_length=1, max_length=100)
@@ -195,12 +212,13 @@ def apply_source(row: SkillSource, body: SourceIn, request: Request) -> None:
         row.access_token_enc = request.app.state.cipher.encrypt(body.access_token, SOURCE_TOKEN_AAD)
 
 
-def skill_out(row: Skill) -> dict[str, Any]:
+def skill_out(row: Skill, *, is_global: bool = False) -> dict[str, Any]:
     names = tuple(SkillIn.model_fields.keys())
     return {
         "id": row.id,
         "revision": row.revision,
         "has_mcp_config": bool(row.mcp_config_enc),
+        "is_global": is_global,
         **{key: getattr(row, key) for key in names if key != "mcp_config"},
     }
 
@@ -347,7 +365,9 @@ async def list_skills(
     if not manager(actor):
         query = query.where(Skill.enabled)
     page = await paginate(session, query.order_by(Skill.name), params)
-    return {"code": 0, "data": {**page, "items": [skill_out(row) for row in page["items"]]}}
+    ids = await global_skills.global_ids(session)
+    items = [skill_out(row, is_global=row.id in ids) for row in page["items"]]
+    return {"code": 0, "data": {**page, "items": items}}
 
 
 async def apply_skill(session: AsyncSession, row: Skill, body: SkillIn, request: Request) -> None:
@@ -423,8 +443,12 @@ async def update_skill(
     row = await live_skill(session, identity)
     require_if_match(request, row.revision)
     await apply_skill(session, row, body, request)
+    is_global = await global_skills.is_global(session, row.id)
+    # 停用照常允许（紧急止损）；其余会让员工没法自动装上的改动，须先取消全局。
+    if is_global and row.enabled and (reason := global_skills.problem(row)):
+        raise ApiError(409, 409, f"这是全局技能，{reason}；请先取消全局再修改")
     await audited(session, request, actor, "skill.update", str(row.id))
-    return {"code": 0, "data": skill_out(row)}
+    return {"code": 0, "data": skill_out(row, is_global=is_global)}
 
 
 @router.patch("/skills/{identity}")
@@ -447,7 +471,10 @@ async def set_skill_status(
         row.enabled, row.updated_at = body.enabled, utcnow()
         action = "skill.enable" if body.enabled else "skill.disable"
         await audited(session, request, actor, action, str(row.id), diff)
-    return {"code": 0, "data": skill_out(row)}
+    return {
+        "code": 0,
+        "data": skill_out(row, is_global=await global_skills.is_global(session, row.id)),
+    }
 
 
 @router.delete("/skills/{identity}")
@@ -465,6 +492,8 @@ async def delete_skill(
     require_manager(actor)
     row = await live_skill(session, identity, lock=True)
     require_if_match(request, row.revision)
+    if await global_skills.is_global(session, row.id):
+        raise ApiError(409, 409, "这是全局技能，请先取消全局再删除")
     in_use = set(
         await session.scalars(
             select(BotSkill.bot_id).where(
@@ -558,3 +587,65 @@ async def put_preset(
             "version": row.version,
         },
     }
+
+
+@router.put("/skills/{identity}/global")
+async def set_global(
+    identity: uuid.UUID,
+    body: GlobalIn,
+    request: Request,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """设为或取消全局技能。
+
+    设为全局（含重复勾选）时立即给所有已就绪的普通员工排安装，并重试之前失败的；
+    之后新建、新分到运行时的员工由调度器定期补装。手动装过的员工不动。
+    取消全局只处理随全局装上的行：默认卸载，keep_installed 时改按手动安装保留。
+    """
+    require_manager(actor)
+    # 共享锁与目录删除、整份保存互斥。
+    row = await session.get(Skill, identity, with_for_update={"read": True})
+    if row is None or row.deleted_at is not None:
+        raise not_found("技能不存在")
+    entry = await session.get(GlobalSkill, identity, with_for_update=True)
+    cipher = request.app.state.cipher
+    data: dict[str, Any]
+    if body.is_global:
+        if reason := global_skills.problem(row):
+            raise ApiError(422, 422, reason)
+        if entry is None:
+            session.add(GlobalSkill(skill_id=identity, set_by=actor.id))
+        else:
+            # 重新勾选的人接替自动补装的署名：设置人离开后靠这个续上。
+            entry.set_by, entry.set_at = actor.id, utcnow()
+        await session.flush()
+        queued, skipped = await global_skills.apply(session, cipher, row, actor, retry_failed=True)
+        names = await bot_names(session, [*queued, *(bot for bot, _ in skipped)])
+        data = {
+            "is_global": True,
+            "queued": [{"bot_id": bot, "bot_name": names.get(bot)} for bot in queued],
+            "skipped": [
+                {"bot_id": bot, "bot_name": names.get(bot), "reason": reason}
+                for bot, reason in skipped
+            ],
+        }
+        diff = {"is_global": [entry is not None, True], "queued": [None, len(queued)]}
+        action = "skill.global"
+    else:
+        if entry is not None:
+            await session.delete(entry)
+        removed = await global_skills.release(
+            session, identity, actor, keep_installed=body.keep_installed
+        )
+        for bot_id in removed:
+            await notify_bot_changed(session, bot_id)
+        names = await bot_names(session, removed)
+        data = {
+            "is_global": False,
+            "uninstalled": [{"bot_id": bot, "bot_name": names.get(bot)} for bot in removed],
+        }
+        diff = {"is_global": [entry is not None, False], "uninstalled": [None, len(removed)]}
+        action = "skill.unglobal"
+    await audited(session, request, actor, action, str(identity), diff)
+    return {"code": 0, "data": data}

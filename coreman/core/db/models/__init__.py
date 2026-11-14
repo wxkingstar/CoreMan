@@ -122,6 +122,7 @@ from coreman.core.db.models.interactions import (
 from coreman.core.db.models.knowledge import (
     BotSkill,
     EnvPreset,
+    GlobalSkill,
     Memory,
     Skill,
     SkillApproval,
@@ -184,6 +185,7 @@ __all__ = [
     "Skill",
     "EnvPreset",
     "BotSkill",
+    "GlobalSkill",
     "SkillApproval",
     "Memory",
     "StoredObject",

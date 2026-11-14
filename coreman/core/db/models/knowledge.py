@@ -114,8 +114,26 @@ class BotSkill(TimestampMixin, Base):
     mcp_authorized_relay_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 因授权业务系统而自动安装时记下系统 key；撤销授权只卸载这样装上的。手动安装为空。
     installed_by_system: Mapped[str | None] = mapped_column(Text)
+    # 因全局技能自动安装；取消全局时只卸载这类行，手动装过的留给员工。
+    installed_globally: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     revision: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     __mapper_args__ = {"version_id_col": revision}
+
+
+class GlobalSkill(Base):
+    """全局技能：所有普通 AI 员工（含之后新建的）都自动安装。
+
+    单独成表而不是 skills 上的一列：skills.revision 是乐观锁版本，
+    改它会让排队中的安装和待审申请作废。
+    """
+
+    __tablename__ = "global_skills"
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("skills.id", ondelete="CASCADE"), primary_key=True
+    )
+    # 自动安装以设置人的名义排队；设置人停用或失去委员会身份后需有人重新勾选。
+    set_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"))
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
 class SkillApproval(Base):

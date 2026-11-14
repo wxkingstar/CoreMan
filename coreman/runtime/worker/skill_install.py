@@ -19,6 +19,7 @@ from coreman.core.db.models import (
     Bot,
     BotSkill,
     EnvPreset,
+    GlobalSkill,
     RelayServer,
     Skill,
     SkillApproval,
@@ -151,9 +152,22 @@ async def checked(
         and requester.status == "active"
         and is_manager(requester)
     )
+    # 全局技能的自动安装以设置人的名义排队：要求技能此刻仍是全局的、设置人仍是委员会成员。
+    global_installer = (
+        inputs.get("global_skill")
+        and requester is not None
+        and requester.status == "active"
+        and requester.role in ("ai_committee", "platform_admin")
+        and await session.get(GlobalSkill, skill.id) is not None
+    )
     if (
         requester is None
-        or not (upgrader or migrator or await installs.bot_admin(session, bot, requester))
+        or not (
+            upgrader
+            or migrator
+            or global_installer
+            or await installs.bot_admin(session, bot, requester)
+        )
         or actor is None
         or actor.status != "active"
     ):

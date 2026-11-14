@@ -7,9 +7,9 @@ export interface SkillInput {
   default_data_source: string | null; doris_enabled_groups: string[]; user_env_vars: Record<string, { label: string; placeholder: string; required: boolean }>
   install_type: 'git' | 'mcp'; external_repo_url: string | null; mcp_config?: Record<string, unknown> | null; mcp_oauth: boolean; security_prompt_template: string | null; enabled: boolean
 }
-export interface Skill extends SkillInput { id: string; revision: number; has_mcp_config: boolean }
+export interface Skill extends SkillInput { id: string; revision: number; has_mcp_config: boolean; is_global?: boolean }
 export interface Preset { group_key: string; label: string; vars: Record<string, string>; tags: string[]; version: number }
-export interface Installed { skill_id: string; name: string; status: string; revision: number; version: string | null; selected_env_groups: string[]; user_env_vars: Record<string, string>; security_prompt: string | null; error_message: string | null; mcp_oauth: boolean; mcp_authorized: boolean; mcp_authorized_at: string | null; mcp_authorized_by: string | null; installed_by_system?: string | null }
+export interface Installed { skill_id: string; name: string; status: string; revision: number; version: string | null; selected_env_groups: string[]; user_env_vars: Record<string, string>; security_prompt: string | null; error_message: string | null; mcp_oauth: boolean; mcp_authorized: boolean; mcp_authorized_at: string | null; mcp_authorized_by: string | null; installed_by_system?: string | null; is_global?: boolean; installed_globally?: boolean }
 export interface McpLogin { session_id: string; authorization_url: string; expires_in: number }
 export interface Approval { bot_name?: string | null; skill_name?: string | null; skill_revision?: number; id: string; bot_id: string; skill_id: string; requested_databases: string[]; requested_security_prompt: string; approved_databases: string[] | null; status: string; version: number; requested_at: string; requested_by: string; reviewed_by: string | null; review_comment: string | null }
 export interface InstallInput { selected_env_groups: string[]; data_source: string | null; user_env_vars: Record<string, string>; requested_security_prompt: string | null; reinstall_code: boolean }
@@ -26,6 +26,7 @@ export const skills = {
   setEnabled: (row: Skill, enabled: boolean) => call<Skill>(http.patch(`${root}/skills/${row.id}`, { enabled }, match(row.revision))),
   upgrade: (row: Skill) => call<{ queued: UpgradeItem[]; skipped: (UpgradeItem & { reason: string })[] }>(http.post(`${root}/skills/${row.id}/upgrade`)),
   remove: (row: Skill) => call(http.delete(`${root}/skills/${row.id}`, match(row.revision))),
+  setGlobal: (row: Skill, body: { is_global: boolean; keep_installed?: boolean }) => call<{ is_global: boolean; queued?: UpgradeItem[]; skipped?: (UpgradeItem & { reason: string })[]; uninstalled?: UpgradeItem[] }>(http.put(`${root}/skills/${row.id}/global`, body)),
   localInstall: (row: Skill) => call<{ command: string; expires_at: string }>(http.post(`${root}/skills/${row.id}/local-install`)),
   envExports: (row: Skill, body: { selected_env_groups: string[]; data_source: string | null }) => call<{ text: string }>(http.post(`${root}/skills/${row.id}/env-exports`, body)),
   presets: () => call<Preset[]>(http.get(`${root}/env-presets`)),

@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { expect, it, vi } from 'vitest'
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ user: { role: 'ai_committee' } }) }))
-vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), remove: vi.fn(), upgrade: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
+vi.mock('@/api/skills', () => ({ allSkills: vi.fn(), skills: { sources: vi.fn(), presets: vi.fn(), save: vi.fn(), setEnabled: vi.fn(), remove: vi.fn(), upgrade: vi.fn(), setGlobal: vi.fn(), presetSave: vi.fn(), sourceSync: vi.fn(), sourceSave: vi.fn() } }))
 import { allSkills, skills, type Skill, type SkillInput } from '@/api/skills'
 import SkillsView from '@/views/SkillsView.vue'
 import SkillEnvEditor from '@/components/SkillEnvEditor.vue'
@@ -163,5 +163,32 @@ it('keeps stored project tokens out of the form and clears newly entered tokens 
   await dialog.saveSource()
   expect(skills.sourceSave).toHaveBeenLastCalledWith(source, expect.objectContaining({ access_token: 'test-token' }))
   expect(dialog.sourceForm.access_token).toBe('')
+  wrapper.unmount()
+})
+
+it('sets a skill global after confirmation and keeps auto-installed copies when the user picks keep', async () => {
+  const row = { id: 's1', revision: 5, name: 'file-share', source_id: 'source', description: '', category: null, security_level: 'public', version: '1.0', env_groups: ['share_files'], selectable_env_groups: {}, data_sources: null, default_data_source: null, doris_enabled_groups: [], user_env_vars: {}, install_type: 'git', external_repo_url: null, security_prompt_template: null, enabled: true, has_mcp_config: false, mcp_oauth: false, is_global: false } as Skill
+  vi.mocked(allSkills).mockResolvedValue([row])
+  vi.mocked(skills.sources).mockResolvedValue([{ id: 'source', key: 'tools', label: 'Tools' }] as never)
+  vi.mocked(skills.presets).mockResolvedValue([])
+  vi.mocked(skills.setGlobal).mockResolvedValueOnce({ is_global: true, queued: [{ bot_id: 'b1', bot_name: 'demo-bot' }], skipped: [] })
+  const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce('confirm' as never)
+  const wrapper = mount(SkillsView, { global: { plugins: [ElementPlus, i18n] } })
+  await flushPromises()
+  await wrapper.get('[data-test="global-file-share"]').trigger('click')
+  await flushPromises()
+  expect(skills.setGlobal).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }), { is_global: true, keep_installed: false })
+  // 取消全局时选「保留」：对话框以 cancel 结束，副本改按手动安装保留。
+  vi.mocked(skills.setGlobal).mockResolvedValueOnce({ is_global: false, uninstalled: [] })
+  confirm.mockRejectedValueOnce('cancel')
+  await wrapper.get('[data-test="global-file-share"]').trigger('click')
+  await flushPromises()
+  expect(skills.setGlobal).toHaveBeenLastCalledWith(expect.objectContaining({ id: 's1' }), { is_global: false, keep_installed: true })
+  // 直接关闭对话框不做任何改动。
+  confirm.mockRejectedValueOnce('close')
+  await wrapper.get('[data-test="global-file-share"]').trigger('click')
+  await flushPromises()
+  expect(skills.setGlobal).toHaveBeenCalledTimes(2)
+  confirm.mockRestore()
   wrapper.unmount()
 })
