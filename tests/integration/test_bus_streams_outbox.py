@@ -394,3 +394,33 @@ async def test_poll_probes_find_only_the_bots_that_have_work(db_session: AsyncSe
     await db_session.commit()
     assert await outbox.bots_with_due(db_session, ids) == {bot.id}
     assert await streams.bots_with_pending(db_session, ids) == {bot.id}
+
+
+async def test_stream_writes_replace_nul(db_session: AsyncSession) -> None:
+    """模型转述的二进制输出带 NUL 时，PostgreSQL 会拒收整条 UPDATE，整轮结果跟着丢。"""
+    bot = await _bot(db_session)
+    t = await tasks.enqueue(db_session, NewTask(bot_id=bot.id, kind="chat", session_key="u1"))
+    assert t
+    await streams.create(
+        db_session,
+        task_id=t.id,
+        bot_id=bot.id,
+        platform="wecom",
+        stream_id="s1",
+        reply_context={"req_id": "r1"},
+        lease_generation=1,
+        running_since=datetime.now(UTC),
+    )
+    await streams.update(
+        db_session,
+        t.id,
+        thinking_md="a\x00b",
+        pending_text="c\x00d",
+        plan=[{"step": "e\x00f"}],
+    )
+    await streams.complete(db_session, t.id, final_text="g\x00h", pending_card={"text": "i\x00j"})
+    await db_session.commit()
+    row = await streams.get(db_session, t.id)
+    assert row is not None
+    assert (row.thinking_md, row.pending_text, row.final_text) == ("a�b", "c�d", "g�h")
+    assert row.plan == [{"step": "e�f"}] and row.pending_card == {"text": "i�j"}
