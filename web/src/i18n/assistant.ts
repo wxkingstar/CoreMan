@@ -40,6 +40,7 @@ export const assistantZh = {
   attention: {
     approvals: '待批的审批单', approvalsEmpty: '没有等你批的审批单。',
     open: '去审批系统处理', noLink: '请到审批系统里处理', submittedAt: '提交于 {time}', dispatch: '调度员工',
+    systemsCall: '业务系统写操作', cloudCall: '云服务写操作',
     jobs: '卡住的子任务', jobsEmpty: '没有卡住的子任务。', blockedReason: '卡住的原因',
     followups: '今天到期的待跟进', followupsEmpty: '今天没有到期的待跟进。',
   },
@@ -64,6 +65,7 @@ export const assistantZh = {
     empty: '最近没有落地的审批单。', reason: '审批人的话',
     statuses: { executed: '已执行', rejected: '被拒', withdrawn: '已撤回', failed: '执行失败', expired: '已过期', stale: '已作废（内容已过时）' },
     error: '原因代码 {detail}', dispatch: '调度员工',
+    systemsCall: '业务系统写操作', cloudCall: '云服务写操作',
     decidedAt: '决定于 {time}', executedAt: '执行于 {time}',
   },
   notes: {
@@ -191,6 +193,7 @@ export const assistantEn: typeof assistantZh = {
   attention: {
     approvals: 'Approvals waiting for you', approvalsEmpty: 'No approvals are waiting for you.',
     open: 'Open the approval system', noLink: 'Handle it in the approval system', submittedAt: 'Submitted {time}', dispatch: 'Ask an AI employee',
+    systemsCall: 'Business system write', cloudCall: 'Cloud write',
     jobs: 'Blocked sub-tasks', jobsEmpty: 'No sub-tasks are blocked.', blockedReason: 'Why it is blocked',
     followups: 'Follow-ups due today', followupsEmpty: 'No follow-ups are due today.',
   },
@@ -215,6 +218,7 @@ export const assistantEn: typeof assistantZh = {
     empty: 'No approvals have been settled recently.', reason: 'Note from the approver',
     statuses: { executed: 'Executed', rejected: 'Rejected', withdrawn: 'Withdrawn', failed: 'Failed to execute', expired: 'Expired', stale: 'Voided (content went out of date)' },
     error: 'Reason code {detail}', dispatch: 'Ask an AI employee',
+    systemsCall: 'Business system write', cloudCall: 'Cloud write',
     decidedAt: 'Decided {time}', executedAt: 'Executed {time}',
   },
   notes: {
@@ -342,6 +346,7 @@ export const assistantJa: typeof assistantZh = {
   attention: {
     approvals: '承認待ちの申請', approvalsEmpty: '承認待ちの申請はありません。',
     open: '承認システムで処理する', noLink: '承認システムで処理してください', submittedAt: '提出 {time}', dispatch: 'AI 社員への依頼',
+    systemsCall: '業務システムへの書き込み', cloudCall: 'クラウドへの書き込み',
     jobs: '止まっているサブタスク', jobsEmpty: '止まっているサブタスクはありません。', blockedReason: '止まっている理由',
     followups: '本日期限のフォローアップ', followupsEmpty: '本日期限のフォローアップはありません。',
   },
@@ -366,6 +371,7 @@ export const assistantJa: typeof assistantZh = {
     empty: '最近決着した申請はありません。', reason: '承認者のコメント',
     statuses: { executed: '実行済み', rejected: '却下', withdrawn: '取り下げ', failed: '実行失敗', expired: '期限切れ', stale: '無効（内容が古くなった）' },
     error: '理由コード {detail}', dispatch: 'AI 社員への依頼',
+    systemsCall: '業務システムへの書き込み', cloudCall: 'クラウドへの書き込み',
     decidedAt: '決定 {time}', executedAt: '実行 {time}',
   },
   notes: {

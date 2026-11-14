@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { DISPATCH_TOOL, myAssistant, type Attention } from '@/api/myAssistant'
+import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type Attention } from '@/api/myAssistant'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
@@ -46,6 +46,13 @@ defineExpose({ load })
             type="warning"
           >
             {{ t('assistant.attention.dispatch') }}
+          </el-tag>
+          <el-tag
+            v-if="PROXIED_TOOLS[item.tool]"
+            size="small"
+            type="warning"
+          >
+            {{ t('assistant.attention.' + PROXIED_TOOLS[item.tool]) }}
           </el-tag>
           <span class="muted">{{ item.tool }} · {{ t('assistant.attention.submittedAt', { time: formatDateTime(item.created_at) }) }}</span>
           <!-- 链接只可能是部署配置的审批系统入口（后端只放行 http/https）；新窗口打开，不带来源页。 -->
