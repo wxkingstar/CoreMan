@@ -65,6 +65,8 @@ def test_rules_say_when_to_fill_commitments_and_unverified() -> None:
     text = prompt.RULES
     assert "approval.commitments" in text and "approval.unverified" in text
     assert "没有就留空" in text
+    assert "有该写而没写的" not in text
+    assert "能不替他答应就不答应" in text
 
 
 def test_meta_accepts_the_two_notes_and_bounds_them() -> None:
