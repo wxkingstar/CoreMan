@@ -33,7 +33,7 @@ h1, h2, .say { font-family: var(--display); font-weight: 900; text-wrap: balance
 .day { background: var(--day); color: var(--ink); }
 .night { background: var(--night); color: var(--moon); }
 .dusk { background: linear-gradient(var(--day), var(--night)); height: 140px; }
-.dawn { background: linear-gradient(var(--night), var(--dawn) 55%, var(--day)); color: var(--moon); }
+.page.dawn { background: linear-gradient(var(--night), var(--dawn) calc(100% - 150px), var(--day)); color: var(--moon); padding-bottom: 200px; }
 .dawn .say, .dawn .clock { text-shadow: 0 1px 12px var(--night); }
 
 .pic { border-radius: 10px; overflow: hidden; aspect-ratio: 3 / 2; max-width: 100%; }
@@ -42,6 +42,7 @@ h1, h2, .say { font-family: var(--display); font-weight: 900; text-wrap: balance
 .say { font-size: clamp(26px, 4.6vw, 44px); line-height: 1.35; }
 .say em { font-style: normal; color: var(--jade); }
 .say b { color: var(--seal); }
+.aside { font-size: 17px; opacity: .72; max-width: 30em; }
 
 /* 封面 */
 .cover { padding-block: 28px 40px; }
@@ -69,7 +70,7 @@ button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
 .end { background: var(--ink); color: var(--day); padding-block: 88px; }
 .end h2 { font-size: clamp(38px, 7.6vw, 80px); line-height: 1.18; }
 .end h2 b { color: var(--seal); } .end h2 em { font-style: normal; color: var(--jade); }
-.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 20px; }
+.three { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 48px; margin-top: 20px; }
 .three div { display: flex; flex-direction: column; gap: 6px; }
 .three strong { font-family: var(--display); font-weight: 900; font-size: 22px; }
 .three span { font-size: 16px; opacity: .75; }
@@ -106,6 +107,7 @@ button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
     <span class="clock">22:41</span>
     <figure class="pic"><img src="story/p2.jpg" alt="办公室里台灯亮着，绿色的分身在翻文件夹，周围飘着一张张纸，椅子空着"></figure>
     <p class="say"><em>你的分身没睡。</em><br>它知道去哪儿查，也进得去，因为它就是你。</p>
+    <p class="aside">小林那边看得到一个「处理中」的表情：有人在查了。查完，表情就撤掉。</p>
   </div>
 </section>
 
@@ -113,15 +115,16 @@ button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
   <div class="wrap">
     <span class="clock">22:44</span>
     <figure class="pic"><img src="story/p3.jpg" alt="天快亮了，分身把一张带红角的纸放在桌上，旁边是印章，它没有碰印章，退后一步等着"></figure>
-    <p class="say">数查到了，回复也写好了。<br>但它<b>没有发</b>。它把纸放在你桌上，等你。</p>
+    <p class="say">数查到了，回复也写好了。<br>但它<b>没有发</b>，也没有吵醒你。它把纸放在你桌上，等你。</p>
+    <p class="aside">夜里是免打扰时段。除非真出了事、等不到天亮，它才会叫你。</p>
   </div>
 </section>
 
 <section class="page day">
   <div class="wrap">
-    <span class="clock">08:05</span>
+    <span class="clock">08:00</span>
     <figure class="pic"><img src="story/p4.jpg" alt="早上，人端着咖啡，把印章盖在那张纸上，分身安静地站在后面"></figure>
-    <p class="say">早上你看了一眼。没问题，<b>盖章。</b></p>
+    <p class="say">早上你收到一条摘要：昨晚的事它都理好了，只等你点头。没问题，<b>盖章。</b></p>
     <div class="sheet">
       <span class="to">回复小林 · 项目群</span>
       <p class="txt">上周 A 类目退货率 3.8%，比前一周低 0.7 个点，主要是尺码问题的退货少了。明细在文档里。</p>
@@ -137,7 +140,7 @@ button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
 
 <section class="page day">
   <div class="wrap">
-    <span class="clock">08:06</span>
+    <span class="clock">08:01</span>
     <figure class="pic"><img src="story/p5.jpg" alt="盖过章的纸变成纸飞机飞出窗外，远处的同事挥手，人在喝咖啡，分身已经拿起下一个文件夹"></figure>
     <p class="say">回复发出去了，署的是你的名字。<br><em>分身已经在忙下一件事。</em></p>
   </div>
@@ -150,6 +153,7 @@ button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
       <div><strong>它就是你</strong><span>用你的身份，看你能看的，不用再给它单独开权限。</span></div>
       <div><strong>它不替你做主</strong><span>发消息、改东西，都要你点头。你不点，什么都不会发生。</span></div>
       <div><strong>它一直在</strong><span>你开会、出差、睡觉的时候，找你的事不用干等。</span></div>
+      <div><strong>它不吵你</strong><span>没事不说话，平时攒成一天几条摘要，夜里不打扰。真出了事才叫你。</span></div>
     </div>
     <p class="fine">个人助理目前是试验阶段，先在小范围试用。</p>
   </div>

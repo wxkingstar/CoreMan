@@ -4,6 +4,7 @@
   知道的事由助理调 `assistant_report` 记下（`record`），存在 `assistant_reports`，正文按所有者的
   数据密钥封存。没调就是没事要说：这一轮静默结束。
 - 紧急的（助理标 `urgent`，或这一轮交回的事项里有立即级别的）在那一轮结束后由 `tick` 立刻发；
+  其中助理标了 `wake` 的在免打扰时段里也发；
   其余的等摘要时点（`settings.digest_slots`，默认 09:00、13:30、18:00）。
 - 免打扰时段（默认 22:00–08:00）里什么都不发，紧急的也留着；免打扰结束的那一刻本身是一个摘要
   时点，攒下的并成一条。
@@ -74,6 +75,7 @@ RECORDED_HINT = (
     "这一轮的回复不会发给任何人。"
 )
 URGENT_HINT = "已记下，这一轮结束后平台立刻发给所有者（免打扰时段里留到结束时）。"
+WAKE_HINT = "已记下，这一轮结束后平台立刻发给所有者，他在免打扰时段里也发。"
 OWNER_PRESENT_HINT = "所有者就在这一轮里：直接在回复里告诉他，不用记待汇报。"
 
 
@@ -110,8 +112,12 @@ async def _urgent_turn(session: AsyncSession, task: Task) -> bool:
     return found is not None
 
 
-async def record(session: AsyncSession, scope: Scope, text: str, *, urgent: bool) -> dict[str, Any]:
+async def record(
+    session: AsyncSession, scope: Scope, text: str, *, urgent: bool, wake: bool = False
+) -> dict[str, Any]:
     """无人在场的一轮记一条要告诉所有者的话。只 flush，调用方提交。
+
+    `wake` 只认助理自己标的：立即级别事项引起的那一轮自动按紧急发，但不因此穿透免打扰。
 
     所有者在场的轮次返回 `owner_present`：那时直接回复他。
     """
@@ -130,14 +136,15 @@ async def record(session: AsyncSession, scope: Scope, text: str, *, urgent: bool
     )
     if int(waiting or 0) >= MAX_UNSENT:
         return {"error": "too_many_reports", "limit": MAX_UNSENT}
-    urgent = urgent or await _urgent_turn(session, scope.task)
-    session.add(AssistantReport(bot_id=bot_id, task_id=scope.task.id, text_enc=body, urgent=urgent))
+    urgent = urgent or wake or await _urgent_turn(session, scope.task)
+    session.add(
+        AssistantReport(
+            bot_id=bot_id, task_id=scope.task.id, text_enc=body, urgent=urgent, wake=wake
+        )
+    )
     await session.flush()
-    return {
-        "status": "recorded",
-        "urgent": urgent,
-        "hint": URGENT_HINT if urgent else RECORDED_HINT,
-    }
+    hint = WAKE_HINT if wake else URGENT_HINT if urgent else RECORDED_HINT
+    return {"status": "recorded", "urgent": urgent, "wake": wake, "hint": hint}
 
 
 def _ready(bot: Bot | None, prefs: AssistantSettings | None) -> bool:
@@ -154,7 +161,7 @@ def _ready(bot: Bot | None, prefs: AssistantSettings | None) -> bool:
 
 
 async def _reports(
-    session: AsyncSession, bot_id: uuid.UUID, *, urgent_only: bool
+    session: AsyncSession, bot_id: uuid.UUID, *, urgent_only: bool, wake_only: bool = False
 ) -> list[AssistantReport]:
     """还没发出的汇报，早的在前，内容已还原；读不出来的跳过（照样记为已发，免得每次都卡在它）。"""
     stmt = select(AssistantReport).where(
@@ -162,6 +169,8 @@ async def _reports(
     )
     if urgent_only:
         stmt = stmt.where(AssistantReport.urgent.is_(True))
+    if wake_only:
+        stmt = stmt.where(AssistantReport.wake.is_(True))
     rows = list(
         await session.scalars(stmt.order_by(AssistantReport.id).with_for_update(skip_locked=True))
     )
@@ -461,10 +470,11 @@ async def send_digest(
 async def send_urgent(
     session: AsyncSession, bot: Bot, prefs: AssistantSettings, now: datetime
 ) -> bool:
-    """紧急的汇报：那一轮结束了就合成一条立刻发（免打扰时段里不发，留给它结束时的摘要）。"""
-    if assistant_settings.quiet(prefs, now):
-        return False
-    rows = await _reports(session, bot.id, urgent_only=True)
+    """紧急的汇报：那一轮结束了就合成一条立刻发。免打扰时段里只发助理标了 `wake` 的，其余留给
+    它结束时的摘要。"""
+    rows = await _reports(
+        session, bot.id, urgent_only=True, wake_only=assistant_settings.quiet(prefs, now)
+    )
     lines = _lines(rows)
     if lines:
         stamp = max(row.id for row in rows)

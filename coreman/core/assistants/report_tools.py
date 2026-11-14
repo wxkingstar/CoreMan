@@ -30,6 +30,12 @@ class Report(Arguments):
         description="true only when it cannot wait for the next digest: it has a deadline"
         " before then, or the owner himself must decide right now",
     )
+    wake: bool = Field(
+        default=False,
+        description="true only when it cannot wait until his quiet hours end and is worth"
+        " waking him for: an incident or real loss happening now, or a deadline that passes"
+        " before quiet hours end. Implies urgent",
+    )
 
 
 NAME = "assistant_report"
@@ -40,8 +46,8 @@ DEFINITIONS: list[dict[str, Any]] = [
             "In a turn the owner is not present in (handover, job result, approval result):"
             " record something the owner needs to know. Nothing is sent now: the platform"
             " merges these into a digest at the owner's digest times; urgent ones go out when"
-            " this turn ends (never during his quiet hours). Not calling it means there is"
-            " nothing to tell him. Your reply text in such a turn reaches nobody."
+            " this turn ends (during his quiet hours only those marked wake). Not calling it"
+            " means there is nothing to tell him. Your reply text in such a turn reaches nobody."
         ),
         "inputSchema": input_schema(Report),
     }
@@ -58,4 +64,4 @@ async def dispatch(
         args = Report.model_validate(arguments)
     except ValidationError as exc:
         return {"error": "invalid_tool_or_arguments", "invalid": approvals_service._problems(exc)}
-    return await digest.record(session, scope, args.text, urgent=args.urgent)
+    return await digest.record(session, scope, args.text, urgent=args.urgent, wake=args.wake)
