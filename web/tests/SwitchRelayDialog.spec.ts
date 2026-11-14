@@ -68,6 +68,22 @@ describe('SwitchRelayDialog', () => {
     expect(bars[0].textContent).toContain('45 分钟后重置')
     wrapper.unmount()
   })
+  it('ample-capacity filter keeps runtimes under 70% in both windows plus the current one', async () => {
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      { ...relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'), rate_limit_7d_used_pct: 90 },
+      { ...relayRow('r2', 'codex', 'codex/gpt-5.5'), rate_limit_7d_used_pct: 97 },
+      { ...relayRow('r3', 'claude', 'vllm/claude-sonnet-4-6'), rate_limit_5h_used_pct: 70 },
+      { ...relayRow('r4', 'codex', 'codex/gpt-5.5'), rate_limit_5h_used_pct: null, rate_limit_7d_used_pct: 40 },
+    ] } as never)
+    const wrapper = mount(SwitchRelayDialog, { props: { bot: { id: 'b1', version: 1, relay_server_id: 'r1', model: 'vllm/claude-sonnet-4-6' } as never, visible: true }, global: { plugins: [ElementPlus, i18n] }, attachTo: document.body })
+    await flushPromises()
+    expect(document.querySelectorAll('img[src="/providers/openai.svg"]').length).toBe(2)
+    ;(document.querySelector('[data-test="only-ample"] input') as HTMLInputElement).click()
+    await flushPromises()
+    const shown = ['r1', 'r2', 'r3', 'r4'].filter(id => document.querySelector(`[data-test="pick-${id}"]`))
+    expect(shown).toEqual(['r1', 'r4'])
+    wrapper.unmount()
+  })
   it('hides a logged-out backend but keeps the current one listed', async () => {
     vi.mocked(relays.list).mockResolvedValueOnce({ items: [
       { ...relayRow('r1', 'claude', 'vllm/claude-sonnet-4-6'), unavailable_reason: 'login_required' },
