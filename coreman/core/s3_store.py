@@ -27,6 +27,12 @@ from coreman.core.object_store import LINK_TTL, MAX_SIZE, LocalObjectStore, disk
 from coreman.core.relay.safe_transport import validate_host
 
 
+def _content_md5(request: Any, **kwargs: Any) -> None:
+    # 阿里云 OSS 的批量删除只认 Content-MD5；新版 boto 只带 CRC32 校验头，OSS 会拒绝。
+    body = request.body if isinstance(request.body, bytes) else str(request.body or "").encode()
+    request.headers["Content-MD5"] = base64.b64encode(hashlib.md5(body).digest()).decode()
+
+
 class S3ObjectStore(LocalObjectStore):
     def __init__(self, cfg: Settings):
         super().__init__(cfg.object_storage_root, cfg.master_key_bytes, cfg.public_base_url)
@@ -64,7 +70,7 @@ class S3ObjectStore(LocalObjectStore):
     def client(self) -> Any:
         # 使用独立 SDK session，显式凭据，不尝试机器元数据凭据链；不继承代理。
         assert self.cfg.s3_access_key and self.cfg.s3_secret_key
-        return boto3.session.Session().client(
+        client = boto3.session.Session().client(
             "s3",
             endpoint_url=self.cfg.s3_endpoint,
             region_name=self.cfg.s3_region,
@@ -82,9 +88,11 @@ class S3ObjectStore(LocalObjectStore):
                 read_timeout=30,
                 retries={"total_max_attempts": 2, "mode": "standard"},
                 proxies={},
-                s3={"addressing_style": "path"},
+                s3={"addressing_style": self.cfg.s3_addressing},
             ),
         )
+        client.meta.events.register("before-sign.s3.DeleteObjects", _content_md5)
+        return client
 
     def object_key(self, row: StoredObject) -> str:
         if row.backend != "s3" or row.storage_metadata.get("store_id") != self.store_id:

@@ -135,18 +135,26 @@ async def test_read_write_and_risk_policy(
     assert grant is not None
     grant.allow_write = True
     await db_session.commit()
-    created = await call(client, auth, "systems_call", write)
-    assert created["ok"] is True and created["data"]["data"]["sku"] == "SKU-9"
-
-    for op_id, risk in (("cancelDocument", "destructive"), ("refundSupplier", "financial")):
-        result = await call(
-            client,
-            auth,
-            "systems_call",
-            {"system": "stock", "operation_id": op_id, "path_params": {"id": "D1"}},
-        )
-        assert result["error"] == "risk_not_allowed" and result["risk"] == risk
-    assert all(r.url.path != "/api/stock/documents/D1/cancel" for r in fake.requests)
+    # Writes only run from a confirmation card; this turn has no asker who could click one.
+    for args in (
+        write,
+        {
+            "system": "stock",
+            "operation_id": "cancelDocument",
+            "path_params": {"id": "D1"},
+            "body": {"reason": "录入错误"},
+        },
+    ):
+        staged = await call(client, auth, "systems_call", args)
+        assert staged["error"] == "confirmation_unavailable"
+    refused = await call(
+        client,
+        auth,
+        "systems_call",
+        {"system": "stock", "operation_id": "refundSupplier", "path_params": {"id": "D1"}},
+    )
+    assert refused["error"] == "risk_not_allowed" and refused["risk"] == "financial"
+    assert not [r for r in fake.requests if r.method == "POST" and "documents" in r.url.path]
     assert fake.documents["D1"]["status"] == "confirmed"
 
     # One token for the whole task, issued on first use and used for permissions and calls.
@@ -167,8 +175,6 @@ async def test_read_write_and_risk_policy(
     assert [(c.operation_id, c.outcome, c.status_code) for c in calls] == [
         ("listDocuments", "ok", 200),
         ("createDraft", "denied", None),
-        ("createDraft", "ok", 200),
-        ("cancelDocument", "denied", None),
         ("refundSupplier", "denied", None),
     ]
     assert calls[0].token_id == proxy_issues[0].token_id and calls[0].duration_ms is not None

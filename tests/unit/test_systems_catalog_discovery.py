@@ -358,7 +358,8 @@ async def test_refunds_show_queries_and_what_needs_a_person(described: Catalogs)
     module = await run(proxied, "systems_browse", {"system": "ops", "module": "Refunds"})
     lines = dict(line.split("  ", 1) for line in module["operations"])
     assert lines["retryRefund"].endswith("[financial; 不代理]")
-    assert lines["judgeRefundLiability"].endswith("[destructive; 不代理]")
+    # Destructive operations are writes too: proposed only with write access, then confirmed.
+    assert lines["judgeRefundLiability"].endswith("[destructive; 未开启写入]")
     overview = await run(proxied, "systems_browse", {"system": "ops"})
     assert "未开启" in overview["call_rules"]
 
@@ -367,6 +368,11 @@ async def test_refunds_show_queries_and_what_needs_a_person(described: Catalogs)
     writable = described.ctx(delivery="proxy", writable=frozenset({"ops"}))
     carriers = await run(writable, "systems_browse", {"system": "ops", "module": "Ops Carriers"})
     assert not any("未开启写入" in line for line in carriers["operations"])
+    assert any(line.endswith("[write; 需确认]") for line in carriers["operations"])
+    refunds = await run(writable, "systems_browse", {"system": "ops", "module": "Refunds"})
+    lines = dict(line.split("  ", 1) for line in refunds["operations"])
+    assert lines["judgeRefundLiability"].endswith("[destructive; 需确认]")
+    assert lines["retryRefund"].endswith("[financial; 不代理]")
 
     detail = await run(env, "systems_describe", {"system": "ops", "operation_id": "retryRefund"})
     assert detail["risk"] == "financial" and detail["module_limits"].startswith("退款重试")

@@ -1,13 +1,15 @@
+import base64
 import hashlib
 import io
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
 from coreman.core.db.models import StoredObject
-from coreman.core.s3_store import S3ObjectStore
+from coreman.core.s3_store import S3ObjectStore, _content_md5
 from coreman.core.timeutils import utcnow
 
 
@@ -119,3 +121,12 @@ def test_s3_requires_explicit_credentials_and_https(api_settings):
     ]:
         with pytest.raises(ValueError):
             S3ObjectStore(config(api_settings).model_copy(update={"s3_endpoint": endpoint}))
+
+
+def test_batch_delete_carries_content_md5_for_oss() -> None:
+    request = SimpleNamespace(body=b"<Delete/>", headers={})
+    _content_md5(request)
+    assert (
+        request.headers["Content-MD5"]
+        == base64.b64encode(hashlib.md5(b"<Delete/>").digest()).decode()
+    )

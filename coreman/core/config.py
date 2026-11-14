@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     s3_access_key: SecretStr | None = Field(default=None, alias="S3_ACCESS_KEY")
     s3_secret_key: SecretStr | None = Field(default=None, alias="S3_SECRET_KEY")
     s3_session_token: SecretStr | None = Field(default=None, alias="S3_SESSION_TOKEN")
+    # path：桶名在路径里（默认，兼容已有部署）；virtual：桶名在域名里，阿里云 OSS 等只认这种。
+    s3_addressing: Literal["virtual", "path"] = Field(default="path", alias="S3_ADDRESSING")
     # 个人助理等待审批期间的附件：独立的临时桶（S3 兼容）。桶必须私有，并配不超过 7 天的自动清理。
     assistant_tmp_s3_endpoint: str | None = Field(default=None, alias="ASSISTANT_TMP_S3_ENDPOINT")
     assistant_tmp_s3_region: str = Field(default="us-east-1", alias="ASSISTANT_TMP_S3_REGION")

@@ -46,6 +46,7 @@ from coreman.core.prompting import (
 from coreman.core.relay.client import ChatRequest
 from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import backend_of
+from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.runtime.worker.background import TimeoutSupervisor
 from coreman.runtime.worker.chat.base import ChatStageBase
@@ -362,6 +363,10 @@ class OpenStage(ChatStageBase):
             from coreman.core.prompting.defaults import STOPPED_PREVIOUS_NOTE
 
             ctx.turn_notes.append(STOPPED_PREVIOUS_NOTE)
+        written = ctx.task.payload.get(systems_confirm.RESULT_KEY)
+        if isinstance(written, str):
+            # 确认卡点完后的续接：平台按确认内容执行的结果。
+            ctx.turn_notes.append("- 业务系统写操作：" + written)
         if ctx.task.payload.get("api_task_id"):
             from coreman.runtime.worker.chat import api
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -16,6 +17,7 @@ from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
+from coreman.api.routers.objects import serve
 from coreman.api.security import verify_csrf
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import (
@@ -24,8 +26,17 @@ from coreman.core.auth.system_access import (
     granted_systems,
     token_subject,
 )
-from coreman.core.db.models import BotSystemGrant, BusinessSystem, SystemCatalog, Task, User
-from coreman.core.systems_catalog import context, policy, service, tools
+from coreman.core.db.models import (
+    BotSystemGrant,
+    BusinessSystem,
+    StoredObject,
+    SystemCall,
+    SystemCatalog,
+    Task,
+    User,
+)
+from coreman.core.systems_catalog import context, policy, service, spill, tools
+from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["systems-catalog"])
 admin_router = APIRouter(
@@ -162,9 +173,11 @@ async def call_tool(
         ),
         systems=await granted_systems(session, scope.bot.id),
         writable=policy.writable_for(task, writable),
+        writes_preapproved=policy.writes_preapproved(task),
         token_ttl=scope.bot.sse_timeout_seconds,
         perms=dict(state.get("perms") or {}),
         tokens=dict(state.get("tokens") or {}),
+        settings=request.app.state.settings,
     )
     value = await tools.dispatch(ctx, name, arguments)
     if ctx.perms_changed or ctx.tokens_changed:
@@ -185,19 +198,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     The capability is checked on every request and the task, AI employee and member are reloaded,
     so a stopped task, a disabled employee or a revoked grant takes effect on the next call.
     """
-    if "origin" in request.headers:
-        raise ApiError(403, 403, "Browser origins are not supported")
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer ") or len(auth) > 4096:
-        raise ApiError(401, 401, "Invalid catalog capability")
-    try:
-        capability = policy.read_capability(request.app.state.cipher, auth[7:])
-    except (ValueError, KeyError, TypeError, OverflowError):
-        raise ApiError(401, 401, "Invalid catalog capability") from None
-    try:
-        scope = await policy.task_scope(session, capability)
-    except ValueError:
-        raise ApiError(403, 403, "Active task required") from None
+    capability, scope = await _capability_scope(request, session)
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -231,6 +232,45 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     else:
         return mcp_rpc.error(rid, -32601, "Method not found")
     return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
+
+
+async def _capability_scope(
+    request: Request, session: AsyncSession
+) -> tuple[policy.Capability, policy.Scope]:
+    if "origin" in request.headers:
+        raise ApiError(403, 403, "Browser origins are not supported")
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or len(auth) > 4096:
+        raise ApiError(401, 401, "Invalid catalog capability")
+    try:
+        capability = policy.read_capability(request.app.state.cipher, auth[7:])
+    except (ValueError, KeyError, TypeError, OverflowError):
+        raise ApiError(401, 401, "Invalid catalog capability") from None
+    try:
+        scope = await policy.task_scope(session, capability)
+    except ValueError:
+        raise ApiError(403, 403, "Active task required") from None
+    return capability, scope
+
+
+@router.get(spill.OBJECT_PATH + "{identity}")
+async def stored_result(
+    identity: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
+) -> Response:
+    """A large proxied result of this turn, for its runtime only: the same capability as the
+    catalog MCP, and only objects a call of this task by this member stored."""
+    capability, _ = await _capability_scope(request, session)
+    owned = await session.scalar(
+        select(SystemCall.id).where(
+            SystemCall.object_id == identity,
+            SystemCall.task_id == capability.task_id,
+            SystemCall.user_id == capability.actor,
+        )
+    )
+    row = await session.get(StoredObject, identity)
+    if owned is None or row is None or row.expires_at <= utcnow():
+        raise not_found("结果不存在或已过期")
+    return await serve(request.app.state.settings, row)
 
 
 @router.get(policy.API_PATH)

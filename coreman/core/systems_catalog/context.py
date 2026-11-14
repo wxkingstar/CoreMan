@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.auth.token_providers import IssuedToken, TokenProviderError
+from coreman.core.config import Settings
 from coreman.core.db.models import BusinessSystem
 from coreman.core.systems_catalog import service
 
@@ -39,6 +40,8 @@ class Context:
     systems: list[BusinessSystem]
     # Systems whose grant allows write-level proxied calls for this AI employee.
     writable: frozenset[str] = frozenset()
+    # The owner approved writes for this turn in the approval system: they run without a card.
+    writes_preapproved: bool = False
     # Proxy tokens live as long as the AI employee's task timeout.
     token_ttl: int = 3600
     # Sections of task.payload[BUDGET_KEY]; the caller persists them when changed.
@@ -49,6 +52,8 @@ class Context:
     anonymous: bool = False
     # Anonymous only: the caller's own environment variable named in its call templates.
     token_env: str = DIRECT_TOKEN_ENV
+    # Large and file responses are kept in short-term object storage when set (see `spill`).
+    settings: Settings | None = None
 
     def system(self, key: str) -> BusinessSystem | None:
         return next((s for s in self.systems if s.key == key), None)
