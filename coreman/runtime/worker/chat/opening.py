@@ -22,6 +22,7 @@ from coreman.core.bus import tasks
 from coreman.core.chat import alert_sources, chat_logs, sessions
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.redaction import collect_secrets
+from coreman.core.cloud_proxy import confirm as cloud_confirm
 from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
     Bot,
@@ -370,6 +371,10 @@ class OpenStage(ChatStageBase):
         if isinstance(written, str):
             # 确认卡点完后的续接：平台按确认内容执行的结果。
             ctx.turn_notes.append("- 业务系统写操作：" + written)
+        cloud_written = ctx.task.payload.get(cloud_confirm.RESULT_KEY)
+        if isinstance(cloud_written, str):
+            # 个人助理的云服务写操作确认卡点完后的续接：平台按暂存内容执行的结果。
+            ctx.turn_notes.append("- 云服务写操作：" + cloud_written)
         if ctx.task.payload.get("api_task_id"):
             from coreman.runtime.worker.chat import api
 

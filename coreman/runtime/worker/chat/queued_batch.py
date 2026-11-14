@@ -18,6 +18,7 @@ from coreman.core.assistants import sealed
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import busy_choice
+from coreman.core.cloud_proxy import confirm as cloud_confirm
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.feishu_docs import resume
 from coreman.core.systems_catalog import confirm as systems_confirm
@@ -38,6 +39,7 @@ _NOT_PLAIN = (
     resume.PAYLOAD_KEY,
     resume.CONFIRM_RESULT_KEY,
     systems_confirm.RESULT_KEY,
+    cloud_confirm.RESULT_KEY,
 )
 _NOTE = (
     "（以上几条是你处理上一轮时，同一个人陆续发来的，按发送时间排列。"

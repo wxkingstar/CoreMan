@@ -955,18 +955,22 @@ async def test_an_unknown_action_is_refused_without_an_approval(
     assert not aliyun_mock.calls and await approvals(db_session) == []
 
 
-async def test_an_owner_present_cloud_write_goes_straight_through(
+async def test_an_owner_present_cloud_write_is_never_sent_straight_through(
     client: httpx.AsyncClient,
     app: Any,
     db_session: AsyncSession,
     fake_tower: FakeTower,
     aliyun_mock: respx.MockRouter,
 ) -> None:
+    """所有者在场的低风险写走确认卡（见 test_assistant_cloud_write_confirm）；这一轮没有可以点卡的
+    来源消息，所以不执行、不暂存，也不提审批。"""
     aliyun_mock.post(SLB_HOST).mock(return_value=httpx.Response(200, json={"RequestId": "r1"}))
     bot, owner, task = await owner_turn(db_session, "chat")
     r = await client.post(SLB, content=LOW, headers=cloud_bearer(app, bot, owner, task))
-    assert r.status_code == 200 and len(writes(aliyun_mock)) == 1
+    assert r.status_code == 403 and r.json()["error"] == "confirmation_unavailable"
+    assert writes(aliyun_mock) == []
     assert await approvals(db_session) == [] and fake_tower.submitted == []
+    assert [(c.risk, c.outcome) for c in await cloud_calls(db_session)] == [("write_low", "denied")]
 
 
 async def _cloud_staged(
