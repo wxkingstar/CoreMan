@@ -59,3 +59,20 @@ def test_daily_compile_does_not_repeat_recorded_feedback() -> None:
     from coreman.core.assistants import compiling, feedback
 
     assert feedback.PATH in compiling.INSTRUCTIONS
+
+
+def test_rules_say_when_to_fill_commitments_and_unverified() -> None:
+    text = prompt.RULES
+    assert "approval.commitments" in text and "approval.unverified" in text
+    assert "没有就留空" in text
+
+
+def test_meta_accepts_the_two_notes_and_bounds_them() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    meta = service.Meta.model_validate({"commitments": "周四前给", "unverified": "截止日没核对"})
+    assert (meta.commitments, meta.unverified) == ("周四前给", "截止日没核对")
+    assert service.Meta.model_validate({}).commitments == ""
+    with pytest.raises(ValidationError):
+        service.Meta.model_validate({"commitments": "长" * 501})

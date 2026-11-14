@@ -132,6 +132,8 @@ def _rest(
     background: str,
     research: str,
     links: dict[str, str],
+    commitments: str = "",
+    unverified: str = "",
 ) -> list[str]:
     first = calls[0]["arguments"]
     lines: list[str] = []
@@ -158,12 +160,17 @@ def _rest(
         for call in calls[1:]:
             differing = {k: v for k, v in call["arguments"].items() if first.get(k) != v}
             lines.append(f"- {_json(differing)}")
-    if background or research:
+    notes = [
+        ("替你答应的事：", commitments),
+        ("没核实的推断：", unverified),
+        ("背景：", background),
+        ("调研：", research),
+    ]
+    if any(text for _, text in notes):
         lines += ["", NOTE]
-        if background:
-            lines += ["背景：", _bar(background)]
-        if research:
-            lines += ["调研：", _bar(research)]
+        for label, text in notes:
+            if text:
+                lines += [label, _bar(text)]
     return lines
 
 
@@ -174,6 +181,8 @@ def render(
     *,
     background: str = "",
     research: str = "",
+    commitments: str = "",
+    unverified: str = "",
     links: dict[str, str] | None = None,
 ) -> str:
     """审批单正文。超过上限时只截断原话；不算原话仍超出则抛 `TooLong`。
@@ -182,7 +191,9 @@ def render(
         links: 临时桶对象名 → 预签名下载链接；参数里的文件引用按它附上查看链接
     """
     head = "\n".join(_head(template, calls, facts))
-    rest = "\n".join(_rest(template, calls, background, research, links or {}))
+    rest = "\n".join(
+        _rest(template, calls, background, research, links or {}, commitments, unverified)
+    )
     quotes = [item for item in facts if item.quoted]
     title = "被回复的原话：" if len(facts) == 1 else "各会话里最近的一条消息："
     fixed = len(head) + len(rest) + 4
