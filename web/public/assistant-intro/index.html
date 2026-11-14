@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/coreman-mark.svg">
+<title>CoreMan 个人助理</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@700;900&family=Noto+Sans+SC:wght@400;500&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* 布局：一本竖着翻的图画书。一页一张图、一句话；页面底色跟着故事从夜里走到早上。只有这一种样子，不分深浅色。 */
+:root {
+  --night: #0C1A1D;
+  --dawn: #3B5F63;
+  --day: #F3F6F5;
+  --ink: #10262B;
+  --moon: #E6EEEC;
+  --jade: #2FB58F;
+  --seal: #E0503A;
+  --display: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+html { -webkit-text-size-adjust: 100%; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--day); color: var(--ink); font-family: var(--body); font-size: 18px; line-height: 1.8; }
+.wrap { max-width: 900px; margin: 0 auto; padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px)); }
+p, h1, h2, figure { margin: 0; }
+h1, h2, .say { font-family: var(--display); font-weight: 900; text-wrap: balance; }
+
+.page { padding-block: 64px; overflow-x: clip; }
+.page .wrap { display: flex; flex-direction: column; gap: 28px; }
+.day { background: var(--day); color: var(--ink); }
+.night { background: var(--night); color: var(--moon); }
+.dusk { background: linear-gradient(var(--day), var(--night)); height: 140px; }
+.dawn { background: linear-gradient(var(--night), var(--dawn) 55%, var(--day)); color: var(--moon); }
+.dawn .say, .dawn .clock { text-shadow: 0 1px 12px var(--night); }
+
+.pic { border-radius: 10px; overflow: hidden; aspect-ratio: 3 / 2; max-width: 100%; }
+.pic img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.clock { font-family: var(--mono); font-size: 14px; letter-spacing: .1em; opacity: .7; }
+.say { font-size: clamp(26px, 4.6vw, 44px); line-height: 1.35; }
+.say em { font-style: normal; color: var(--jade); }
+.say b { color: var(--seal); }
+
+/* 封面 */
+.cover { padding-block: 28px 40px; }
+.brand { font-family: var(--mono); font-size: 13px; letter-spacing: .1em; opacity: .65; }
+h1 { font-size: clamp(44px, 9vw, 96px); line-height: 1.12; }
+h1 em { font-style: normal; color: var(--jade); }
+.lede { font-size: clamp(18px, 2.3vw, 22px); max-width: 26em; opacity: .8; }
+
+/* 盖章 */
+.sheet { background: #fff; color: var(--ink); border-radius: 6px; padding: 22px 24px; position: relative; box-shadow: 0 10px 30px rgba(16, 38, 43, .12); display: flex; flex-direction: column; gap: 10px; }
+.sheet .to { font-size: 14px; opacity: .6; }
+.sheet .txt { padding-right: 96px; }
+.mark { position: absolute; right: 20px; bottom: 16px; width: 84px; height: 84px; border-radius: 50%; border: 4px solid var(--seal); color: var(--seal); font-family: var(--display); font-weight: 900; font-size: 22px; display: flex; align-items: center; justify-content: center; transform: rotate(-12deg); }
+.do { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+button { font: inherit; font-family: var(--display); font-weight: 900; font-size: 20px; background: var(--seal); color: #fff; border: 0; border-radius: 99px; padding: 10px 30px; cursor: pointer; }
+button.quiet { background: transparent; color: var(--ink); font-family: var(--body); font-weight: 500; font-size: 15px; padding: 6px 0; text-decoration: underline; }
+button:focus-visible { outline: 3px solid var(--jade); outline-offset: 3px; }
+.note { font-size: 16px; opacity: .75; }
+@media (prefers-reduced-motion: no-preference) {
+  .mark:not([hidden]) { animation: thud .32s cubic-bezier(.2, 1.7, .4, 1); }
+  @keyframes thud { from { transform: scale(2.2) rotate(-28deg); opacity: 0; } }
+}
+
+/* 收尾 */
+.end { background: var(--ink); color: var(--day); padding-block: 88px; }
+.end h2 { font-size: clamp(38px, 7.6vw, 80px); line-height: 1.18; }
+.end h2 b { color: var(--seal); } .end h2 em { font-style: normal; color: var(--jade); }
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 20px; }
+.three div { display: flex; flex-direction: column; gap: 6px; }
+.three strong { font-family: var(--display); font-weight: 900; font-size: 22px; }
+.three span { font-size: 16px; opacity: .75; }
+.fine { font-size: 14px; opacity: .55; margin-top: 28px; }
+@media (max-width: 700px) {
+  .page { padding-block: 44px; }
+  .three { grid-template-columns: minmax(0, 1fr); }
+  .sheet .txt { padding-right: 0; padding-bottom: 84px; }
+}
+</style>
+</head>
+<body>
+<section class="page day cover">
+  <div class="wrap">
+    <span class="brand">COREMAN 个人助理</span>
+    <h1>如果你有<br>一个<em>分身</em></h1>
+    <p class="lede">它看得到你能看到的一切，会替你把事情做到只差你点头。下面是它的一个晚上。</p>
+    <figure class="pic"><img src="story/cover.jpg" alt="一个人拿着印章站着，旁边站着一个一模一样的绿色分身，抱着一摞纸"></figure>
+  </div>
+</section>
+
+<div class="dusk" aria-hidden="true"></div>
+
+<section class="page night">
+  <div class="wrap">
+    <span class="clock">22:40</span>
+    <figure class="pic"><img src="story/p1.jpg" alt="夜里，人在床上睡着了，床头的手机亮起一个红点"></figure>
+    <p class="say">有人找你要一个数，明早开会用。<br>你已经睡了。</p>
+  </div>
+</section>
+
+<section class="page night">
+  <div class="wrap">
+    <span class="clock">22:41</span>
+    <figure class="pic"><img src="story/p2.jpg" alt="办公室里台灯亮着，绿色的分身在翻文件夹，周围飘着一张张纸，椅子空着"></figure>
+    <p class="say"><em>你的分身没睡。</em><br>它知道去哪儿查，也进得去，因为它就是你。</p>
+  </div>
+</section>
+
+<section class="page dawn">
+  <div class="wrap">
+    <span class="clock">22:44</span>
+    <figure class="pic"><img src="story/p3.jpg" alt="天快亮了，分身把一张带红角的纸放在桌上，旁边是印章，它没有碰印章，退后一步等着"></figure>
+    <p class="say">数查到了，回复也写好了。<br>但它<b>没有发</b>。它把纸放在你桌上，等你。</p>
+  </div>
+</section>
+
+<section class="page day">
+  <div class="wrap">
+    <span class="clock">08:05</span>
+    <figure class="pic"><img src="story/p4.jpg" alt="早上，人端着咖啡，把印章盖在那张纸上，分身安静地站在后面"></figure>
+    <p class="say">早上你看了一眼。没问题，<b>盖章。</b></p>
+    <div class="sheet">
+      <span class="to">回复小林 · 项目群</span>
+      <p class="txt">上周 A 类目退货率 3.8%，比前一周低 0.7 个点，主要是尺码问题的退货少了。明细在文档里。</p>
+      <span class="mark" id="mark" hidden>已阅<br>可发</span>
+    </div>
+    <div class="do">
+      <button id="stamp" type="button">你来盖这个章</button>
+      <button id="undo" class="quiet" type="button" hidden>再盖一次</button>
+      <span class="note" id="note">你不盖，这张纸就一直躺在这儿，哪儿也不去。</span>
+    </div>
+  </div>
+</section>
+
+<section class="page day">
+  <div class="wrap">
+    <span class="clock">08:06</span>
+    <figure class="pic"><img src="story/p5.jpg" alt="盖过章的纸变成纸飞机飞出窗外，远处的同事挥手，人在喝咖啡，分身已经拿起下一个文件夹"></figure>
+    <p class="say">回复发出去了，署的是你的名字。<br><em>分身已经在忙下一件事。</em></p>
+  </div>
+</section>
+
+<section class="end">
+  <div class="wrap">
+    <h2><em>事它去办，</em><br><b>章你来盖。</b></h2>
+    <div class="three">
+      <div><strong>它就是你</strong><span>用你的身份，看你能看的，不用再给它单独开权限。</span></div>
+      <div><strong>它不替你做主</strong><span>发消息、改东西，都要你点头。你不点，什么都不会发生。</span></div>
+      <div><strong>它一直在</strong><span>你开会、出差、睡觉的时候，找你的事不用干等。</span></div>
+    </div>
+    <p class="fine">个人助理目前是试验阶段，先在小范围试用。</p>
+  </div>
+</section>
+
+<script>
+(function () {
+  var mark = document.getElementById('mark'), stamp = document.getElementById('stamp'),
+      undo = document.getElementById('undo'), note = document.getElementById('note');
+  stamp.addEventListener('click', function () {
+    mark.hidden = false; stamp.hidden = true; undo.hidden = false;
+    note.textContent = '就这一下。剩下的它去办。';
+  });
+  undo.addEventListener('click', function () {
+    mark.hidden = true; stamp.hidden = false; undo.hidden = true;
+    note.textContent = '你不盖，这张纸就一直躺在这儿，哪儿也不去。';
+  });
+})();
+</script>
+</body>
+</html>
