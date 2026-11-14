@@ -33,7 +33,7 @@ CARD_EVENT = "cloud_write"
 # 卡片答完后续接的那一轮，任务载荷里放结果的键。
 RESULT_KEY = "cloud_write_result"
 TTL = systems_confirm.TTL
-MAX_ITEMS = systems_confirm.MAX_ITEMS
+MAX_ITEMS = 20
 # 卡片正文（字符）与整张卡序列化后（字节）的上限。飞书卡片消息的请求体上限约 30 KB；正文
 # 一个字都不截，放不下就不暂存，所以取比目录代理确认卡（正文 12000 字、超出只列抬头）更保守的值。
 CARD_TEXT_MAX = systems_confirm.CARD_TEXT_MAX
