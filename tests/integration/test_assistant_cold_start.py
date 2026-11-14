@@ -122,7 +122,14 @@ async def test_each_question_has_its_own_card_and_tokens(db_session: AsyncSessio
     assert focus["options"][1]["text"] == {"tag": "plain_text", "content": "x" * 30}
     hours = form(cold_start.card(CIPHER, bot.id, row, "hours"))["elements"]
     assert hours[0]["tag"] == hours[1]["tag"] == "select_static"
+    # 「全天候」排第一、默认选中；其余是几个常见的工作时段。
+    assert hours[0]["options"][0] == {
+        "text": {"tag": "plain_text", "content": "全天候"},
+        "value": cold_start.ALWAYS,
+    }
+    assert hours[0]["initial_option"] == cold_start.ALWAYS
     assert "09:30-19:00" in [option["value"] for option in hours[0]["options"]]
+    assert "initial_option" not in hours[1]
     assert "Asia/Shanghai" in [option["value"] for option in hours[1]["options"]]
 
 
@@ -225,7 +232,7 @@ async def test_form_values_of_an_unexpected_shape_do_not_block(db_session: Async
         db_session, bot, row, "hours", {"hours": "10:00-19:00", "timezone": 8}, now
     )
     assert said == "工作时段 10:00–19:00，时区 Asia/Shanghai。"
-    assert row.cold_start_outcome == "completed"
+    assert row.always_on is False and row.cold_start_outcome == "completed"
 
 
 async def test_skip_moves_on_without_writing(db_session: AsyncSession) -> None:
@@ -270,6 +277,8 @@ async def test_hours_and_timezone_finish_the_cold_start(db_session: AsyncSession
     )
     await db_session.commit()
     assert said == "工作时段 10:00–20:00，时区 Asia/Tokyo。"
+    # 选了某个时段：只在那个时段里看。
+    assert row.always_on is False
     assert (row.work_start, row.work_end, row.timezone) == ("10:00", "20:00", "Asia/Tokyo")
     # 最后一题答完：冷启动完成。
     assert row.cold_start_done_at == now and row.cold_start_outcome == "completed"
@@ -294,7 +303,31 @@ async def test_values_not_on_the_card_are_ignored(db_session: AsyncSession) -> N
     )
     assert said == cold_start.NOT_SAVED
     assert (row.work_start, row.work_end, row.timezone) == ("09:30", "19:00", "Asia/Shanghai")
-    assert row.cold_start_outcome == "completed"
+    assert row.always_on is True and row.cold_start_outcome == "completed"
+
+
+async def test_always_on_is_the_first_choice_and_is_said_back(db_session: AsyncSession) -> None:
+    bot, row = await started(db_session, "hours")
+    row.always_on = False
+    now = utcnow()
+    said = await cold_start.answer(
+        db_session,
+        bot,
+        row,
+        "hours",
+        {"hours": [cold_start.ALWAYS], "timezone": ["Asia/Tokyo"]},
+        now,
+    )
+    await db_session.commit()
+    assert said == "全天候，时区 Asia/Tokyo。"
+    assert row.always_on is True and row.timezone == "Asia/Tokyo"
+    # 工作时段保留：之后改回按工作时段时直接用。
+    assert (row.work_start, row.work_end) == ("09:30", "19:00")
+    sent = await last_sent(db_session, bot)
+    assert sent is not None
+    text = sent.payload["markdown"]
+    assert "从现在起我全天看你的飞书消息" in text and "09:30" not in text
+    assert "只在工作时段里看" in text
 
 
 async def test_complete_is_idempotent_and_says_how_it_ended(db_session: AsyncSession) -> None:
@@ -307,6 +340,9 @@ async def test_complete_is_idempotent_and_says_how_it_ended(db_session: AsyncSes
     assert await sent_count(db_session, bot) == 1
     sent = await last_sent(db_session, bot)
     assert sent is not None and "24 小时" in sent.payload["markdown"]
+    # 默认全天候；改成按工作时段时说出时段。
+    assert "从现在起我全天看你的飞书消息" in cold_start.done_text(row, "skipped")
+    row.always_on = False
     assert "09:30–19:00" in cold_start.done_text(row, "skipped")
     assert cold_start.done_text(row, "skipped").startswith("好的，先跳过。")
     assert cold_start.done_text(row, "completed").startswith("认识完了。")
@@ -316,7 +352,8 @@ async def test_stop_clears_an_unfinished_cold_start_and_the_switch(
     db_session: AsyncSession,
 ) -> None:
     bot, row = await started(db_session, "focus")
-    settings.clock_in(row, utcnow())
+    settings.clock_out(row, utcnow())
+    assert row.shift_override == "off"
     row.cold_start_next_at = utcnow()
     await cold_start.stop(db_session, bot.id)
     assert row.cold_start_step is None and row.cold_start_next_at is None

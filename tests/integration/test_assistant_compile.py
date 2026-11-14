@@ -1,4 +1,5 @@
-"""下班编译：下班后才触发、每个自然日至多一次、没有活动不派；是平台派出的子任务，不占主会话、不投回。"""
+"""下班编译：下班后（全天候时过了零点）才触发、每个自然日至多一次、没有活动不派；是平台派出的子任务，
+不占主会话、不投回。"""
 
 from __future__ import annotations
 
@@ -193,6 +194,7 @@ async def test_nothing_happens_before_the_cold_start_is_done(db_session: AsyncSe
 
 async def test_a_manual_clock_out_triggers_it(db_session: AsyncSession) -> None:
     bot, _, prefs = await working(db_session, shift=None)
+    prefs.always_on = False
     now = utcnow()
     settings.clock_in(prefs, now)
     assert await compiling.step(db_session, bot, prefs, now) == "worked"
@@ -303,3 +305,83 @@ async def test_a_compile_that_did_not_finish_leaves_the_window_for_the_next_day(
     assert mine.last_task_id is not None
     done = await jobs.complete(db_session, bot, mine.id, task_id=mine.last_task_id, ok=True)
     assert done is not None and await compiling.settle(db_session, done) is False
+
+
+async def test_around_the_clock_the_day_is_compiled_after_midnight(
+    db_session: AsyncSession,
+) -> None:
+    """全天候一直在班：所有者时区过了零点，先为前一天派整理，再把今天记下；那一天只整理一次。"""
+    bot, _, prefs = await working(db_session, shift=None)
+    assert prefs.always_on is True
+    now = utcnow()
+    assert await compiling.step(db_session, bot, prefs, now) == "worked"
+    await noted(db_session, bot)
+    day = prefs.worked_on
+    assert day is not None
+    # 同一天里一直在班：不整理。
+    assert await compiling.step(db_session, bot, prefs, now + timedelta(hours=1)) is None
+    tomorrow = settings.next_midnight(prefs, now) + timedelta(minutes=5)
+    assert settings.on_shift(prefs, tomorrow)
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "queued"
+    assert prefs.compiled_on == day
+    assert prefs.worked_on == settings.local_today(prefs, tomorrow) != day
+    await db_session.commit()
+    (row,) = await compile_jobs(db_session, bot)
+    assert row.origin == "system" and day.isoformat() in row.brief_enc
+    # 当天之后的判断：今天已记下，前一天已整理，什么都不做。
+    assert await compiling.step(db_session, bot, prefs, tomorrow + timedelta(hours=1)) is None
+    await db_session.commit()
+    assert len(await compile_jobs(db_session, bot)) == 1
+
+
+async def test_around_the_clock_a_quiet_day_still_moves_on(db_session: AsyncSession) -> None:
+    bot, _, prefs = await working(db_session, shift=None)
+    now = utcnow()
+    assert await compiling.step(db_session, bot, prefs, now) == "worked"
+    day = prefs.worked_on
+    tomorrow = settings.next_midnight(prefs, now) + timedelta(minutes=5)
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "idle"
+    assert prefs.compiled_on == day
+    assert prefs.worked_on == settings.local_today(prefs, tomorrow)
+    await db_session.commit()
+    assert await nothing_spawned(db_session, bot)
+
+
+async def test_around_the_clock_a_paused_runtime_keeps_the_day_owed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, _, prefs = await working(db_session, shift=None)
+    now = utcnow()
+    assert await compiling.step(db_session, bot, prefs, now) == "worked"
+    await noted(db_session, bot)
+    day = prefs.worked_on
+    tomorrow = settings.next_midnight(prefs, now) + timedelta(minutes=5)
+
+    async def blocked(*_args: object) -> str:
+        return "node_offline"
+
+    monkeypatch.setattr(compiling.runtime, "turn_blocker", blocked)
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "paused"
+    # 暂停：前一天没处理，今天也先不记，恢复后先补那一天。
+    assert prefs.compiled_on is None and prefs.worked_on == day
+    monkeypatch.undo()
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "queued"
+    assert prefs.compiled_on == day
+    assert prefs.worked_on == settings.local_today(prefs, tomorrow)
+
+
+async def test_working_hours_still_compile_after_the_shift_not_at_midnight(
+    db_session: AsyncSession,
+) -> None:
+    """按工作时段的助理照旧：下班后整理当天；第二天上班时那一天已经整理过，只记下新的一天。"""
+    bot, _, prefs = await working(db_session)
+    prefs.always_on = False
+    later = await after_work(db_session, bot, prefs)
+    assert await compiling.step(db_session, bot, prefs, later) == "queued"
+    day = prefs.worked_on
+    prefs.shift_override = "on"
+    tomorrow = settings.next_midnight(prefs, later) + timedelta(hours=10)
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "worked"
+    assert prefs.compiled_on == day and prefs.worked_on != day
+    await db_session.commit()
+    assert len(await compile_jobs(db_session, bot)) == 1

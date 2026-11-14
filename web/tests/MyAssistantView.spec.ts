@@ -31,7 +31,7 @@ const absent: AssistantAbsent = {
 }
 const overview: AssistantOverview = {
   exists: true, bot_id: 'b1', name: '个人助理', state: 'active', runtime: { name: 'pool-1', online: true }, paused_reason: null,
-  on_shift: true, shift_override: null, shift_override_until: null, cold_start: { state: 'in_progress', step: 'focus', outcome: null }, turns: { today: 3, budget: 50 },
+  on_shift: true, always_on: false, shift_override: null, shift_override_until: null, cold_start: { state: 'in_progress', step: 'focus', outcome: null }, turns: { today: 3, budget: 50 },
   watch: { state: 'polling', last_ok_at: '2026-11-13T02:00:00Z', last_error: null },
   lifecycle: null, content_locked: false, approval_system: { name: null, url: null },
 }
@@ -142,6 +142,24 @@ describe('My assistant page', () => {
     expect(myAssistant.shift).toHaveBeenLastCalledWith('auto')
     await wrapper.get('[data-test="shift-on"]').trigger('click'); await flushPromises()
     expect(myAssistant.shift).toHaveBeenLastCalledWith('on')
+    wrapper.unmount()
+  })
+
+  it('shows around the clock and offers only clocking out or going back to it', async () => {
+    vi.mocked(myAssistant.shift).mockReset().mockResolvedValue({} as AssistantPrefs)
+    vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+    vi.mocked(myAssistant.overview).mockResolvedValue({ ...overview, always_on: true })
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.get('[data-test="shift-state"]').text()).toBe(t('assistant.overview.alwaysOn'))
+    // 全天候时本来就在班：没有「上班」。
+    expect(wrapper.find('[data-test="shift-on"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="shift-auto"]').exists()).toBe(false)
+    vi.mocked(myAssistant.overview).mockResolvedValue({ ...overview, always_on: true, on_shift: false, shift_override: 'off', shift_override_until: '2026-11-16T01:30:00Z' })
+    await wrapper.get('[data-test="shift-off"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('[data-test="shift-state"]').text()).toBe(t('assistant.overview.offShift'))
+    expect(wrapper.get('[data-test="shift-auto"]').text()).toBe(t('assistant.overview.shiftAlwaysOn'))
+    await wrapper.get('[data-test="shift-auto"]').trigger('click'); await flushPromises()
+    expect(myAssistant.shift).toHaveBeenLastCalledWith('auto')
     wrapper.unmount()
   })
 

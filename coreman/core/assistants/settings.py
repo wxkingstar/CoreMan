@@ -1,7 +1,8 @@
 """个人助理的设置：开通时记下的所有者身份，以及按所有者时区做的时间判断。
 
 读写的是 `assistant_settings`（一位助理一行）。身份四列只由开通流程写（`record_identity`），
-平台来源的轮次凭它们拿个人工具；工作时段、时区、重点群等由所有者在「我的助理」页与冷启动里改。
+平台来源的轮次凭它们拿个人工具；全天候还是按工作时段、工作时段、时区、重点群等由所有者在
+「我的助理」页与冷启动里改。
 """
 
 from __future__ import annotations
@@ -76,11 +77,14 @@ def local_today(settings: AssistantSettings, now: datetime) -> date:
 
 
 def on_shift(settings: AssistantSettings, now: datetime) -> bool:
-    """现在是不是所有者的工作时段。「上班」「下班」的临时切换没过期时以它为准。"""
+    """现在在不在班：「上班」「下班」的临时切换没过期时以它为准；否则全天候就在班，不是全天候
+    按工作时段。"""
     now = aware_utc(now)
     until = settings.shift_override_until
     if settings.shift_override is not None and (until is None or until > now):
         return settings.shift_override == "on"
+    if settings.always_on:
+        return True
     local = now.astimezone(zone(settings))
     clock = local.strftime("%H:%M")
     return local.isoweekday() in settings.workdays and (
@@ -140,11 +144,15 @@ def clear_override(row: AssistantSettings) -> None:
     row.updated_at = utcnow()
 
 
-def clock_in(row: AssistantSettings, now: datetime) -> datetime:
+def clock_in(row: AssistantSettings, now: datetime) -> datetime | None:
     """所有者说「上班」：到今天的下班时间为止；今天不是工作日或已过下班时间，到次日零点。
 
-    返回到期时刻。到点不用清理：`on_shift` 只认没过期的临时切换。
+    返回到期时刻。到点不用清理：`on_shift` 只认没过期的临时切换。全天候时本来就在班：只清掉
+    「下班」的临时切换，返回 None。
     """
+    if row.always_on:
+        clear_override(row)
+        return None
     until = end_today(row, now) or next_midnight(row, now)
     row.shift_override, row.shift_override_until = "on", until
     row.updated_at = utcnow()
@@ -152,7 +160,10 @@ def clock_in(row: AssistantSettings, now: datetime) -> datetime:
 
 
 def clock_out(row: AssistantSettings, now: datetime) -> datetime:
-    """所有者说「下班」：到下一个工作时段开始为止。返回到期时刻。"""
+    """所有者说「下班」：到下一个工作时段开始为止。返回到期时刻。
+
+    全天候时同样按存着的工作时段找下一个上班时刻：到点之后恢复全天候。
+    """
     until = next_start(row, now) or aware_utc(now) + _NO_WORKDAY_REST
     row.shift_override, row.shift_override_until = "off", until
     row.updated_at = utcnow()
@@ -228,6 +239,7 @@ def view(row: AssistantSettings, now: datetime) -> dict[str, Any]:
     until = row.shift_override_until if switched is not None else None
     return {
         "timezone": zone(row).key,
+        "always_on": row.always_on,
         "work_start": row.work_start,
         "work_end": row.work_end,
         "workdays": sorted(row.workdays),
@@ -247,6 +259,7 @@ async def update(
     *,
     now: datetime,
     timezone: str | None = None,
+    always_on: bool | None = None,
     work_start: str | None = None,
     work_end: str | None = None,
     workdays: list[int] | None = None,
@@ -255,7 +268,7 @@ async def update(
 ) -> AssistantSettings:
     """改这位助理的设置：只改给出的项，名单整份替换。调用方提交。
 
-    改了时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
+    改了全天候、时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
     从忽略名单里移出的会话，盯消息的游标置为 `now`（会等正在进行的一轮轮询提交）。
 
     Raises:
@@ -263,7 +276,7 @@ async def update(
             或上班时间不早于下班时间）、`invalid_workdays`、`invalid_chats`、`too_many_chats`、
             `chat_in_both_lists`、`content_locked`（取不到数据密钥时不能写名单）
     """
-    given = (timezone, work_start, work_end, workdays, focus_chats, ignored_chats)
+    given = (timezone, always_on, work_start, work_end, workdays, focus_chats, ignored_chats)
     if all(value is None for value in given):
         raise SettingsError("nothing_to_update")
     await get(session, bot_id)
@@ -288,9 +301,11 @@ async def update(
         # 名单是加密列：密钥不可用时写下去会丢内容，宁可拒绝。
         if not await sealed.key_ready(session, bot_id):
             raise SettingsError("content_locked")
-    schedule = (zone_name, start, end, days)
-    if schedule != (row.timezone, row.work_start, row.work_end, sorted(row.workdays)):
-        row.timezone, row.work_start, row.work_end, row.workdays = schedule
+    every = always_on if always_on is not None else row.always_on
+    schedule = (every, zone_name, start, end, days)
+    current = (row.always_on, row.timezone, row.work_start, row.work_end, sorted(row.workdays))
+    if schedule != current:
+        row.always_on, row.timezone, row.work_start, row.work_end, row.workdays = schedule
         clear_override(row)
     if focus is not None:
         row.focus_chats_enc = focus

@@ -34,6 +34,7 @@ def test_both_tools_are_registered_in_the_knowledge_group() -> None:
     ]
     assert set(update["inputSchema"]["properties"]) == {
         "timezone",
+        "always_on",
         "work_start",
         "work_end",
         "workdays",
@@ -60,9 +61,13 @@ async def test_the_owner_reads_and_changes_settings(db_session: AsyncSession) ->
     assert saved["status"] == "saved"
     assert saved["settings"]["workdays"] == [1, 2, 3, 4, 5, 6]
     assert saved["settings"]["focus_chats"] == ["oc_team"]
+    # 默认全天候；所有者要只在工作时段里看时改成 false。
+    assert shown["settings"]["always_on"] is True
+    hours = await call(db_session, scope, "assistant_settings_update", always_on=False)
+    assert hours["status"] == "saved" and hours["settings"]["always_on"] is False
     db_session.expire_all()
     row = await settings.get(db_session, bot_id)
-    assert (row.work_start, row.work_end) == ("10:00", "20:00")
+    assert (row.work_start, row.work_end) == ("10:00", "20:00") and row.always_on is False
     assert settings.view(row, utcnow())["focus_chats"] == ["oc_team"]
 
 

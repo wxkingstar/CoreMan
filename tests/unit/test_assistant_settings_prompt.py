@@ -13,6 +13,9 @@ def test_rules_name_the_tools_commands_and_limits() -> None:
         assert name in text
     for word in ("上班", "下班", "focus_chats", "ignored_chats", "IANA", "owner_turn_required"):
         assert word in text
+    # 默认全天候，所有者可以改成只在工作时段里看。
+    for word in ("默认全天候", "always_on"):
+        assert word in text
     assert f"最多 {settings.MAX_FOCUS} 个" in text
 
 

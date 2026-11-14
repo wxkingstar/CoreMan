@@ -112,7 +112,9 @@ async def overview(session: AsyncSession, bot: Bot, now: datetime) -> dict[str, 
             and bot.assistant_state == "active"
             and assistant_settings.on_shift(prefs, now)
         ),
-        # 还没过期的「上班」「下班」临时切换与它的到期时刻；按工作时段时两项都是 None。
+        # 全天候（默认）还是按工作时段。
+        "always_on": prefs.always_on,
+        # 还没过期的「上班」「下班」临时切换与它的到期时刻；没有临时切换时两项都是 None。
         "shift_override": switched,
         "shift_override_until": (
             prefs.shift_override_until.isoformat()
@@ -314,10 +316,12 @@ SHIFT_STATES = ("on", "off", "auto")
 
 
 def switch_shift(row: AssistantSettings, state: str, now: datetime) -> None:
-    """页面上的「上班」「下班」「按工作时段」：与私聊里说「上班」「下班」同一个效果。
+    """页面上的「上班」「下班」「按工作时段」（全天候时是「恢复全天候」）：与私聊里说「上班」
+    「下班」同一个效果。
 
-    `on` / `off` 的到期时刻照 `settings.clock_in` / `clock_out`；`auto` 清掉临时切换。上班、或
-    下班时本来在班，都记下今天上过班（下班整理凭它触发）。调用方加锁、提交。
+    `on` / `off` 的到期时刻照 `settings.clock_in` / `clock_out`（全天候时 `on` 只清掉「下班」）；
+    `auto` 清掉临时切换。上班、或下班时本来在班，都记下今天上过班（每日整理凭它触发）。
+    调用方加锁、提交。
 
     Raises:
         ValueError: 不认识的状态

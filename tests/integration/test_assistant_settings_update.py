@@ -35,6 +35,7 @@ async def test_view_of_a_fresh_assistant(db_session: AsyncSession) -> None:
     shown = settings.view(await settings.get(db_session, bot_id), NOW)
     assert shown == {
         "timezone": "Asia/Shanghai",
+        "always_on": True,
         "work_start": "09:30",
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
@@ -58,8 +59,13 @@ async def test_update_changes_only_what_is_given(db_session: AsyncSession) -> No
     shown = settings.view(row, NOW)
     assert shown["timezone"] == "America/New_York" and shown["workdays"] == [1, 3, 5]
     assert (shown["work_start"], shown["work_end"]) == ("09:30", "19:00")
-    # 纽约此刻是周五凌晨 02:00：不在班。
-    assert shown["on_shift"] is False and shown["today"] == "2026-11-13"
+    # 全天候没动：纽约此刻是周五凌晨 02:00，照样在班。
+    assert shown["always_on"] is True and shown["on_shift"] is True
+    row = await settings.update(db_session, bot_id, now=NOW, always_on=False)
+    shown = settings.view(row, NOW)
+    # 改成按工作时段：凌晨 02:00 不在班；时区、工作日不动。
+    assert shown["always_on"] is False and shown["on_shift"] is False
+    assert shown["timezone"] == "America/New_York" and shown["today"] == "2026-11-13"
     row = await settings.update(db_session, bot_id, now=NOW, work_start="08:00")
     assert (row.work_start, row.work_end) == ("08:00", "19:00")
 
@@ -170,6 +176,12 @@ async def test_changing_the_schedule_clears_the_temporary_switch(
     row = await settings.update(db_session, bot_id, now=NOW, work_end="20:00")
     assert row.shift_override is None and row.shift_override_until is None
     assert settings.view(row, NOW)["on_shift"] is True
+    # 改全天候也清：它属于工作时段的设置。
+    settings.clock_out(row, NOW)
+    row = await settings.update(db_session, bot_id, now=NOW, always_on=True)
+    assert settings.override(row, NOW) == "off"
+    row = await settings.update(db_session, bot_id, now=NOW, always_on=False)
+    assert row.shift_override is None and row.always_on is False
 
 
 async def test_lists_cannot_be_written_without_the_data_key(db_session: AsyncSession) -> None:

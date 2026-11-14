@@ -62,6 +62,8 @@ PAGES: dict[str, tuple[str, str, str]] = {
     "duties": ("profile/duties.md", "负责的事", "所有者负责哪些事"),
 }
 HOURS = (("09:00", "18:00"), ("09:30", "19:00"), ("10:00", "19:00"), ("10:00", "20:00"))
+# 工作时段那一题排第一、默认选中的选项：全天候（选了某个时段就是只在那个时段里看）。
+ALWAYS = "always"
 ZONES = (
     "Asia/Shanghai",
     "Asia/Tokyo",
@@ -76,8 +78,8 @@ PROMPTS = {
     "people": "你的上级是谁？平时主要和哪些人一起做事？写名字和各自管什么就行。",
     "duties": "你主要负责哪些事？有人来问这些事时，我会优先交回给你。",
     "focus": "哪些群要重点盯？重点群里的每条消息我都会立刻交回给你（最多选 5 个）。",
-    "hours": "你的工作时段和时区？我只在工作时段里看消息。工作日默认周一到周五，"
-    "别的时段或时区之后直接告诉我。",
+    "hours": "要我全天候看消息，还是只在工作时段里看？再选一下你的时区。只在工作时段里看时，"
+    "工作日默认周一到周五；别的时段或时区之后直接告诉我。",
 }
 FOOTER = "每一题都可以跳过；发「跳过」可以全部跳过。之后随时在这里告诉我怎么改。"
 SAVED = "已记下，存在知识库的 {path}。"
@@ -164,14 +166,21 @@ def _input(label: str, placeholder: str) -> dict[str, Any]:
 
 
 def _select(
-    tag: str, name: str, placeholder: str, options: list[tuple[str, str]]
+    tag: str,
+    name: str,
+    placeholder: str,
+    options: list[tuple[str, str]],
+    initial: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    found: dict[str, Any] = {
         "tag": tag,
         "name": name,
         "placeholder": _plain(placeholder),
         "options": [{"text": _plain(text), "value": value} for value, text in options],
     }
+    if initial is not None:
+        found["initial_option"] = initial
+    return found
 
 
 def _fields(step: str, groups: Sequence[Group]) -> list[dict[str, Any]]:
@@ -183,8 +192,9 @@ def _fields(step: str, groups: Sequence[Group]) -> list[dict[str, Any]]:
         # 群名是别人起的：只截短，只放进纯文本。
         options = [(chat_id, name[:MAX_NAME] or chat_id) for chat_id, name in groups[:MAX_GROUPS]]
         return [_select("multi_select_static", "focus", "选择重点群", options)]
+    hours = [(ALWAYS, "全天候"), *((f"{a}-{b}", f"{a}–{b}") for a, b in HOURS)]
     return [
-        _select("select_static", "hours", "工作时段", [(f"{a}-{b}", f"{a}–{b}") for a, b in HOURS]),
+        _select("select_static", "hours", "工作时段", hours, initial=ALWAYS),
         _select("select_static", "timezone", "时区", [(name, name) for name in ZONES]),
     ]
 
@@ -329,10 +339,16 @@ async def _focus(session: AsyncSession, bot_id: uuid.UUID, chosen: list[str], no
 async def _hours(
     session: AsyncSession, bot_id: uuid.UUID, row: AssistantSettings, selected: Any, now: datetime
 ) -> str:
-    """只认卡片上给出的选项：回调里的值不在选项里就当没选。"""
+    """只认卡片上给出的选项：回调里的值不在选项里就当没选。
+
+    选「全天候」是 `always_on` 为真；选某个时段是只在那个时段里看（`always_on` 为假）。
+    """
     changes: dict[str, Any] = {}
     picked = (_values(selected, "hours") or [""])[0]
-    if picked in {f"{a}-{b}" for a, b in HOURS}:
+    if picked == ALWAYS:
+        changes["always_on"] = True
+    elif picked in {f"{a}-{b}" for a, b in HOURS}:
+        changes["always_on"] = False
         changes["work_start"], changes["work_end"] = picked.split("-")
     zone_name = (_values(selected, "timezone") or [""])[0]
     if zone_name in ZONES:
@@ -343,7 +359,10 @@ async def _hours(
         await assistant_settings.update(session, bot_id, now=now, **changes)
     except assistant_settings.SettingsError:
         return NOT_SAVED
-    return f"工作时段 {row.work_start}–{row.work_end}，时区 {assistant_settings.zone(row).key}。"
+    zone_name = assistant_settings.zone(row).key
+    if row.always_on:
+        return f"全天候，时区 {zone_name}。"
+    return f"工作时段 {row.work_start}–{row.work_end}，时区 {zone_name}。"
 
 
 async def _next(
@@ -385,13 +404,17 @@ async def skip(
 
 
 def done_text(row: AssistantSettings, outcome: str) -> str:
-    days = "、".join(f"周{_WEEKDAYS[day - 1]}" for day in sorted(row.workdays))
-    hours = f"{days} {row.work_start}–{row.work_end}，{assistant_settings.zone(row).key}"
+    if row.always_on:
+        watching = "从现在起我全天看你的飞书消息"
+        change = "要改成只在工作时段里看、改时区、重点群或不想看的会话"
+    else:
+        days = "、".join(f"周{_WEEKDAYS[day - 1]}" for day in sorted(row.workdays))
+        hours = f"{days} {row.work_start}–{row.work_end}，{assistant_settings.zone(row).key}"
+        watching = f"从现在起我在你的工作时段（{hours}）里看你的飞书消息"
+        change = "要改工作时段、时区、重点群或不想看的会话"
     return (
-        f"{HEADS[outcome]}从现在起我在你的工作时段（{hours}）里看你的飞书消息，"
-        "有要你处理的会在这里告诉你；对外的操作仍然先提交审批。\n"
-        "随时发「上班」「下班」临时切换；要改工作时段、时区、重点群或不想看的会话，"
-        "直接在这里告诉我。"
+        f"{HEADS[outcome]}{watching}，有要你处理的会在这里告诉你；对外的操作仍然先提交审批。\n"
+        f"随时发「上班」「下班」临时切换；{change}，直接在这里告诉我。"
     )
 
 

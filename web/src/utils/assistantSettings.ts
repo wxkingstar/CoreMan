@@ -3,6 +3,8 @@ import type { AssistantPrefs, AssistantPrefsPatch } from '@/api/myAssistant'
 /** 「我的助理」设置表单的值：两个会话列表在表单里是多行文本，一行一个 chat_id。 */
 export interface PrefsForm {
   timezone: string
+  /** 全天候：开着时工作时段与工作日不生效，表单里保留原值。 */
+  always_on: boolean
   work_start: string
   work_end: string
   workdays: number[]
@@ -25,6 +27,7 @@ export function lines(text: string): string[] {
 export function toForm(prefs: AssistantPrefs): PrefsForm {
   return {
     timezone: prefs.timezone,
+    always_on: prefs.always_on,
     work_start: prefs.work_start,
     work_end: prefs.work_end,
     workdays: [...prefs.workdays],
@@ -53,11 +56,14 @@ export function validTimezone(name: string): boolean {
 export function validate(form: PrefsForm, prefs: AssistantPrefs): Partial<Record<PrefsField, string>> {
   const errors: Partial<Record<PrefsField, string>> = {}
   if (!validTimezone(form.timezone)) errors.timezone = 'timezone'
-  if (!CLOCK.test(form.work_start)) errors.work_start = 'time'
-  if (!CLOCK.test(form.work_end)) errors.work_end = 'time'
-  // HH:MM 定宽，按字典序比就是按时间比。
-  if (!errors.work_start && !errors.work_end && form.work_start >= form.work_end) errors.work_end = 'hours'
-  if (!form.workdays.length) errors.workdays = 'workdays'
+  // 全天候时工作时段与工作日置灰、改不了，不校验：存着的值本来就合法。
+  if (!form.always_on) {
+    if (!CLOCK.test(form.work_start)) errors.work_start = 'time'
+    if (!CLOCK.test(form.work_end)) errors.work_end = 'time'
+    // HH:MM 定宽，按字典序比就是按时间比。
+    if (!errors.work_start && !errors.work_end && form.work_start >= form.work_end) errors.work_end = 'hours'
+    if (!form.workdays.length) errors.workdays = 'workdays'
+  }
   const focus = lines(form.focus_chats), ignored = lines(form.ignored_chats)
   if (focus.some((id) => !CHAT.test(id))) errors.focus_chats = 'chatId'
   else if (focus.length > prefs.limits.focus_chats) errors.focus_chats = 'focusTooMany'
@@ -80,6 +86,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export function toPatch(form: PrefsForm, prefs: AssistantPrefs): AssistantPrefsPatch {
   const next = {
     timezone: form.timezone.trim(),
+    always_on: form.always_on,
     work_start: form.work_start,
     work_end: form.work_end,
     workdays: [...form.workdays].sort((a, b) => a - b),

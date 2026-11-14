@@ -14,7 +14,7 @@ import { lines, toForm, toPatch, validate, validTimezone, type PrefsField, type 
 
 const t = i18n.global.t
 const prefs: AssistantPrefs = {
-  timezone: 'Asia/Shanghai', work_start: '09:30', work_end: '19:00', workdays: [1, 2, 3, 4, 5],
+  timezone: 'Asia/Shanghai', always_on: false, work_start: '09:30', work_end: '19:00', workdays: [1, 2, 3, 4, 5],
   focus_chats: ['oc_a'], ignored_chats: [], daily_turn_budget: null, platform_daily_turn_budget: 200, effective_daily_turn_budget: 200,
   limits: { focus_chats: 5, ignored_chats: 50, budget_min: 10 }, locked: false,
   on_shift: true, shift_override: null, shift_override_until: null, cold_start: 'done', today: '2026-11-13',
@@ -29,6 +29,8 @@ const CASES: [Partial<PrefsForm>, Partial<Record<PrefsField, string>>][] = [
   [{ work_start: '20:00' }, { work_end: 'hours' }],
   [{ work_start: '19:00' }, { work_end: 'hours' }],
   [{ workdays: [] }, { workdays: 'workdays' }],
+  // 全天候时工作时段与工作日置灰，不校验。
+  [{ always_on: true, work_start: '20:00', workdays: [] }, {}],
   [{ focus_chats: 'oc_a\nnot-a-chat' }, { focus_chats: 'chatId' }],
   [{ focus_chats: 'oc_1\noc_2\noc_3\noc_4\noc_5\noc_6' }, { focus_chats: 'focusTooMany' }],
   [{ ignored_chats: 'ou_person' }, { ignored_chats: 'chatId' }],
@@ -73,6 +75,8 @@ describe('settings form rules', () => {
     expect(toPatch({ ...toForm(prefs), follow_platform: false, daily_turn_budget: 120 }, prefs)).toEqual({ daily_turn_budget: 120 })
     const own = { ...prefs, daily_turn_budget: 120 }
     expect(toPatch({ ...toForm(own), follow_platform: true }, own)).toEqual({ daily_turn_budget: null })
+    expect(toPatch({ ...toForm(prefs), always_on: true }, prefs)).toEqual({ always_on: true })
+    expect(toForm({ ...prefs, always_on: true })).toMatchObject({ always_on: true, work_start: '09:30', workdays: [1, 2, 3, 4, 5] })
   })
 })
 
@@ -134,6 +138,22 @@ describe('settings section', () => {
     const lowered = render(); await flushPromises()
     expect(lowered.get('[data-test="budget-effective"]').text()).toBe(t('assistant.settings.budgetEffective', { value: 80 }))
     lowered.unmount()
+  })
+
+  it('greys out the working hours around the clock and keeps their values', async () => {
+    vi.mocked(myAssistant.settings).mockResolvedValue({ ...prefs, always_on: true })
+    const wrapper = render(); await flushPromises()
+    expect(form(wrapper)).toMatchObject({ always_on: true, work_start: '09:30', work_end: '19:00' })
+    expect(wrapper.text()).toContain(t('assistant.settings.alwaysOn'))
+    const inputs = wrapper.findAll('input[placeholder="09:30"], input[placeholder="19:00"]')
+    expect(inputs).toHaveLength(2)
+    for (const input of inputs) expect(input.attributes('disabled')).toBeDefined()
+    form(wrapper).always_on = false
+    await flushPromises()
+    for (const input of wrapper.findAll('input[placeholder="09:30"], input[placeholder="19:00"]')) expect(input.attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-test="save-settings"]').trigger('click'); await flushPromises()
+    expect(myAssistant.saveSettings).toHaveBeenCalledWith({ always_on: false })
+    wrapper.unmount()
   })
 
   it('does not call the API when nothing changed', async () => {

@@ -63,6 +63,9 @@ async def test_the_owner_clocks_in_after_clocking_out(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     bot, _, _ = await active_assistant(db_session)
+    # 按工作时段：「上班」到今天的下班时间为止。
+    (await settings.get(db_session, bot.id)).always_on = False
+    await db_session.commit()
     await say(db_engine, db_session, bot, "/下班")
     done, relay = await say(db_engine, db_session, bot, " 上班 ")
     assert done.result == {"assistant": "shift_on"} and relay.requests == []
@@ -75,6 +78,30 @@ async def test_the_owner_clocks_in_after_clocking_out(
     assert "今天 19:00" in sent.payload["markdown"]
     # 冷启动还没做完：回复里说明。
     assert "还没开始看消息" in sent.payload["markdown"]
+
+
+async def test_around_the_clock_clocking_in_only_cancels_clocking_out(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """全天候（默认）：「下班」照样到下一个上班时刻；「上班」只是取消「下班」，不说到几点。"""
+    bot, _, _ = await active_assistant(db_session)
+    await say(db_engine, db_session, bot, "下班")
+    prefs = await prefs_of(db_session, bot)
+    assert prefs.always_on is True
+    assert prefs.shift_override == "off" and prefs.shift_override_until == MONDAY_OPEN
+    assert not settings.on_shift(prefs, FRIDAY_3PM)
+    # 到点之后恢复全天候：周一 09:30 之前的周末也不在班，之后一直在班。
+    assert settings.on_shift(prefs, MONDAY_OPEN)
+    done, relay = await say(db_engine, db_session, bot, "上班")
+    assert done.result == {"assistant": "shift_on"} and relay.requests == []
+    prefs = await prefs_of(db_session, bot)
+    assert prefs.shift_override is None and prefs.shift_override_until is None
+    assert settings.on_shift(prefs, FRIDAY_CLOSE + timedelta(hours=5))
+    sent = await last_sent(db_session, bot)
+    assert sent is not None
+    text = sent.payload["markdown"]
+    assert text.startswith("已上班，全天候看你的飞书消息。")
+    assert "为止" not in text and "19:00" not in text
 
 
 async def test_someone_else_cannot_switch_it(

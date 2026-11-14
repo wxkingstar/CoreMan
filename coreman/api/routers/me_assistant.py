@@ -73,11 +73,12 @@ _ChatId = Annotated[str, StringConstraints(max_length=100)]
 class SettingsIn(BaseModel):
     """所有者改的设置。这里只挡类型与离谱的长度：取值规则由 `settings.update` 判断并给出原因代码。
 
-    前六项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、跟随平台默认。
+    前七项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、跟随平台默认。
     """
 
     model_config = ConfigDict(extra="forbid")
     timezone: str | None = Field(default=None, max_length=64)
+    always_on: StrictBool | None = None
     work_start: str | None = Field(default=None, max_length=5)
     work_end: str | None = Field(default=None, max_length=5)
     workdays: list[StrictInt] | None = Field(default=None, max_length=7)

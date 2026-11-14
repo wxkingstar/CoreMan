@@ -117,6 +117,7 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
         select(
             AssistantSettings.bot_id,
             AssistantSettings.timezone,
+            AssistantSettings.always_on,
             AssistantSettings.work_start,
             AssistantSettings.work_end,
             AssistantSettings.workdays,

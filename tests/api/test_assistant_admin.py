@@ -315,8 +315,16 @@ async def test_the_list_shows_cold_start_progress_and_shift(
         "started_at": started.isoformat(),
         "done_at": started.isoformat(),
     }
+    # 没有临时切换：全天候（默认）随时在班；按工作时段、又没有工作日时不在班。
+    # 与「我的助理」页同一口径。
+    prefs.shift_override = None
+    await db_session.commit()
+    assert (await item())["on_shift"] is True
+    prefs.always_on, prefs.workdays = False, []
+    await db_session.commit()
+    assert (await item())["on_shift"] is False
     # 停用中的记录不算在班。
-    prefs.shift_override = "on"
+    prefs.always_on, prefs.shift_override = True, "on"
     bot.assistant_state = "deprovisioning"
     await db_session.commit()
     assert (await item())["on_shift"] is False

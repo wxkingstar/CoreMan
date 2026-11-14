@@ -34,6 +34,7 @@ async def test_the_owner_reads_the_defaults(
     assert isinstance(data.pop("on_shift"), bool) and len(data.pop("today")) == 10
     assert data == {
         "timezone": "Asia/Shanghai",
+        "always_on": True,
         "work_start": "09:30",
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
@@ -96,8 +97,9 @@ async def test_the_owner_changes_everything_and_chat_lists_are_stored_encrypted(
     ("body", "reason"),
     [
         ({}, "nothing_to_update"),
-        # 前六项给 null 等同于没给。
+        # 前七项给 null 等同于没给。
         ({"timezone": None}, "nothing_to_update"),
+        ({"always_on": None}, "nothing_to_update"),
         ({"timezone": "Asia/Nowhere"}, "invalid_timezone"),
         ({"timezone": ""}, "invalid_timezone"),
         ({"work_start": "9:30"}, "invalid_work_hours"),
@@ -122,6 +124,8 @@ async def test_the_owner_changes_everything_and_chat_lists_are_stored_encrypted(
         ({"focus_chats": "oc_a"}, "list_type"),
         ({"daily_turn_budget": 5}, "greater_than_equal"),
         ({"daily_turn_budget": 2001}, "less_than_equal"),
+        ({"always_on": "false"}, "bool_type"),
+        ({"always_on": 0}, "bool_type"),
         ({"daily_turn_budget": "200"}, "int_type"),
         ({"chat_id": "oc_other"}, "extra_forbidden"),
         ({"cold_start_done_at": "2026-11-13T00:00:00Z"}, "extra_forbidden"),
@@ -226,3 +230,28 @@ async def test_a_lowered_platform_default_shows_as_the_effective_budget(
     assert data["daily_turn_budget"] == 150 and data["platform_daily_turn_budget"] == 80
     assert data["effective_daily_turn_budget"] == 80
     assert (await client.get(URL)).json()["data"]["turns"]["budget"] == 80
+
+
+async def test_the_owner_switches_between_always_on_and_working_hours(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """默认全天候；关掉后按工作时段，工作时段与工作日一直留着。改它也清掉临时切换。"""
+    bot, _owner = await owned(client, db_session)
+    assert (await client.get(PREFS)).json()["data"]["always_on"] is True
+    row = await settings.get(db_session, bot.id)
+    row.shift_override, row.shift_override_until = "off", None
+    await db_session.commit()
+    response = await client.patch(PREFS, json={"always_on": False})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["always_on"] is False and data["shift_override"] is None
+    assert (data["work_start"], data["work_end"], data["workdays"]) == (
+        "09:30",
+        "19:00",
+        [1, 2, 3, 4, 5],
+    )
+    await fresh(db_session, bot)
+    row = await settings.get(db_session, bot.id)
+    assert row.always_on is False and row.shift_override is None
+    back = await client.patch(PREFS, json={"always_on": True})
+    assert back.json()["data"]["always_on"] is True and back.json()["data"]["on_shift"] is True
