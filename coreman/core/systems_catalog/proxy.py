@@ -7,6 +7,11 @@ employee's grant to allow writes and are only staged: the member confirms them o
 platform then runs exactly what was staged (see `confirm`). `financial` is never proxied. The
 response is bounded and every call that reaches a policy decision is recorded without arguments,
 bodies or the token.
+
+In a personal assistant's unattended turn nobody can click a card: a `write` the grant allows is
+staged for the owner's approval in the approval system instead (`assistants.approvals.proxied`)
+and, once approved, run by the platform through `prepare` and `send` with the approved request;
+`destructive` stays refused there.
 """
 
 from __future__ import annotations
@@ -309,11 +314,24 @@ def _spills(response: httpx.Response, head: bytes, whole: bool) -> bool:
     )
 
 
+# Not a refusal: the owner is absent and the write is staged for the owner's approval.
+OWNER_APPROVAL = "owner_approval_required"
+# Recorded outcomes of a write run after the owner approved it, like `confirmed_` for cards.
+APPROVED_PREFIX = "approved_"
+
+
 def policy_error(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str | None:
-    """Why this operation may not be proxied for this AI employee, or None."""
+    """Why this operation may not be proxied for this AI employee, or None.
+
+    `OWNER_APPROVAL` means it is not sent now but staged for the owner's approval: only a `write`,
+    only in a personal assistant's unattended turn that may submit approvals, and only for systems
+    whose grant allows writes. `destructive` stays refused while the owner is away.
+    """
     if op["risk"] in NEVER_PROXIED:
         return "risk_not_allowed"
     if op["risk"] in CONFIRMED_RISKS and ctx.owner_absent:
+        if op["risk"] == "write" and system.key in ctx.stageable:
+            return OWNER_APPROVAL
         return "owner_turn_required"
     if op["risk"] in CONFIRMED_RISKS and system.key not in ctx.writable:
         return "write_not_allowed"
@@ -327,6 +345,8 @@ DENIALS = {
     "为这个系统开启「允许写入」；在此之前不要尝试其他写入方式。",
     "owner_turn_required": "这一轮是个人助理在所有者不在场时跑的，业务系统只能查询，不能做写操作；"
     "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做。",
+    OWNER_APPROVAL: "这一轮是个人助理在所有者不在场时跑的：写操作调用后不会当场执行，平台自动"
+    "提交给所有者审批，批准后按原样执行并把结果交回本会话。不要重试，也不要换别的方式做同一件事。",
 }
 
 
@@ -352,7 +372,7 @@ async def prepare(ctx: Context, args: Call) -> Prepared | dict[str, Any]:
     if "validate" not in op:
         return context.unavailable(system)
     denied = policy_error(ctx, system, op)
-    if denied is not None:
+    if denied is not None and denied != OWNER_APPROVAL:
         await record(ctx, system, args.operation_id, op, "denied")
         return {
             "error": denied,
@@ -478,10 +498,34 @@ async def send(
     return {"system": system.key, "operation_id": p.operation_id, **result, **DATA_TRUST}
 
 
+async def _stage(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
+    """Unattended write: staged for the owner's approval, never sent now."""
+    # 函数内导入：审批闸门依赖面广，目录代理平时用不到它。
+    from coreman.core.assistants.approvals import proxied
+
+    staged = await proxied.submit_system(
+        ctx,
+        p.system,
+        p.op,
+        operation_id=p.operation_id,
+        path_params=args.path_params,
+        query=args.query,
+        body=p.body,
+        url=str(p.url),
+    )
+    done = staged.get("status") == "pending_approval"
+    await record(ctx, p.system, p.operation_id, p.op, "staged" if done else "denied")
+    if staged.get("error") == "owner_turn_required":
+        staged = {**staged, "message": DENIALS["owner_turn_required"]}
+    return {"system": p.system.key, "operation_id": p.operation_id, **staged}
+
+
 async def call(ctx: Context, args: Call) -> dict[str, Any]:
     prepared = await prepare(ctx, args)
     if isinstance(prepared, dict):
         return prepared
+    if policy_error(ctx, prepared.system, prepared.op) == OWNER_APPROVAL:
+        return await _stage(ctx, prepared, args)
     if prepared.op["risk"] in CONFIRMED_RISKS and not ctx.writes_preapproved:
         from coreman.core.systems_catalog import confirm
 

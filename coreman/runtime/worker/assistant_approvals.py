@@ -8,12 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import dispatch, sealed
-from coreman.core.assistants.approvals import dispatching, execute, service, tower
+from coreman.core.assistants.approvals import dispatching, execute, proxied, service, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.bus import tasks
 from coreman.core.config import get_settings
 from coreman.core.db.models import AssistantApproval, Bot
 from coreman.core.feishu_personal.files import FileRelay
+from coreman.core.systems_catalog.service import Issuance
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.platform_turn import PlatformTurnHandler
 
@@ -35,7 +36,7 @@ class AssistantApprovalExecuteHandler:
             await self._finish(ctx, "failed", "approval_missing")
             return
         async with ctx.session_factory() as session:
-            # 只取工具名（不是内容列）：调度公共员工的单走自己的目标系统与执行路径。
+            # 只取工具名（不是内容列）：调度公共员工、代理写操作的单各走自己的执行路径。
             tool = await session.scalar(
                 select(AssistantApproval.tool).where(AssistantApproval.id == approval_id)
             )
@@ -45,6 +46,21 @@ class AssistantApprovalExecuteHandler:
         try:
             if dispatched:
                 status = await dispatching.run(ctx.session_factory, approval_id, cfg)
+            elif tool in proxied.TOOLS:
+                # 无人在场时经平台代理暂存的业务系统、云服务写操作：交回各自的代理执行。
+                status = await proxied.run(
+                    ctx.session_factory,
+                    approval_id,
+                    ctx.task,
+                    cfg,
+                    settings=settings,
+                    issuance=Issuance(
+                        cipher=ctx.cipher,
+                        issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
+                        external_key=ctx.external_jwt_key,
+                        providers=ctx.business_token_providers,
+                    ),
+                )
             else:
                 status = await execute.run(
                     ctx.session_factory,

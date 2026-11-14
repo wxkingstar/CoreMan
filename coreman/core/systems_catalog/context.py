@@ -44,6 +44,11 @@ class Context:
     writes_preapproved: bool = False
     # A personal assistant's turn with the owner absent (`kinds.unattended`): reads only.
     owner_absent: bool = False
+    # Owner absent, but the turn may submit approvals (`approvals.proxied.may_stage`): writes to
+    # these systems (the grant allows writes) are staged for the owner's approval instead.
+    stageable: frozenset[str] = frozenset()
+    # Tower settings for those approvals (`approvals.tower.config`); None when not deployed.
+    approval_cfg: Any = None
     # Proxy tokens live as long as the AI employee's task timeout.
     token_ttl: int = 3600
     # Sections of task.payload[BUDGET_KEY]; the caller persists them when changed.

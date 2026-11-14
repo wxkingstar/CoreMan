@@ -74,6 +74,25 @@ describe('needs you', () => {
     wrapper.unmount()
   })
 
+  it('labels writes staged while the owner was away with the system and operation', async () => {
+    vi.mocked(myAssistant.attention).mockResolvedValue({
+      ...attention,
+      approvals: [
+        { id: 'a4', tool: 'systems_call', summary: '业务系统 · 库存 · 创建草稿', created_at: '2026-11-13T03:00:00Z', link: null },
+        { id: 'a5', tool: 'cloud_call', summary: '云服务 · slb · AddAccessControlListEntry', created_at: '2026-11-13T03:00:00Z', link: null },
+      ],
+    })
+    const wrapper = render(AssistantAttention); await flushPromises()
+    const system = wrapper.get('[data-test="approval-a4"]')
+    expect(system.text()).toContain(t('assistant.attention.systemsCall'))
+    expect(system.text()).toContain('业务系统 · 库存 · 创建草稿')
+    const cloud = wrapper.get('[data-test="approval-a5"]')
+    expect(cloud.text()).toContain(t('assistant.attention.cloudCall'))
+    expect(cloud.text()).toContain('AddAccessControlListEntry')
+    expect(cloud.text()).not.toContain(t('assistant.attention.dispatch'))
+    wrapper.unmount()
+  })
+
   it('says so when nothing is waiting', async () => {
     vi.mocked(myAssistant.attention).mockResolvedValue({ today: '2026-11-13', approvals: [], jobs: [], followups: [] })
     const wrapper = render(AssistantAttention); await flushPromises()
@@ -176,6 +195,18 @@ describe('recently settled', () => {
     expect(new Set(words).size).toBe(statuses.length)
     for (const status of statuses) expect(wrapper.get(`[data-test="settled-s-${status}"]`).text()).toContain(t(`assistant.recent.statuses.${status}`))
     expect(wrapper.get('[data-test="settled-s-failed"]').text()).toContain(t('assistant.recent.error', { detail: 'feishu_error' }))
+    wrapper.unmount()
+  })
+
+  it('labels settled writes staged while the owner was away', async () => {
+    vi.mocked(myAssistant.recentApprovals).mockResolvedValue({
+      items: [settled({ id: 's4', tool: 'systems_call', summary: '业务系统 · 库存 · 创建草稿' }), settled({ id: 's5', tool: 'cloud_call', status: 'failed', error: 'risk_changed' })],
+    })
+    const wrapper = render(AssistantRecent); await flushPromises()
+    expect(wrapper.get('[data-test="settled-s4"]').text()).toContain(t('assistant.recent.systemsCall'))
+    expect(wrapper.get('[data-test="settled-s4"]').text()).toContain('业务系统 · 库存 · 创建草稿')
+    expect(wrapper.get('[data-test="settled-s5"]').text()).toContain(t('assistant.recent.cloudCall'))
+    expect(wrapper.get('[data-test="settled-s5"]').text()).toContain(t('assistant.recent.error', { detail: 'risk_changed' }))
     wrapper.unmount()
   })
 

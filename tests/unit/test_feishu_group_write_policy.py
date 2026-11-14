@@ -31,8 +31,12 @@ def test_inviting_others_needs_confirmation():
 
 def test_locate_results_keep_only_locating_fields():
     out = wp.trim_locate(
-        {"items": [{"event_id": "e", "summary": "周会", "description": "机密", "attendees": ["a"]}],
-         "has_more": False}
+        {
+            "items": [
+                {"event_id": "e", "summary": "周会", "description": "机密", "attendees": ["a"]}
+            ],
+            "has_more": False,
+        }
     )
     assert out == {"items": [{"event_id": "e", "summary": "周会"}], "has_more": False}
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { DISPATCH_TOOL, myAssistant, type SettledApproval } from '@/api/myAssistant'
+import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type SettledApproval } from '@/api/myAssistant'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
@@ -54,6 +54,13 @@ defineExpose({ load })
           type="warning"
         >
           {{ t('assistant.recent.dispatch') }}
+        </el-tag>
+        <el-tag
+          v-if="PROXIED_TOOLS[item.tool]"
+          size="small"
+          type="warning"
+        >
+          {{ t('assistant.recent.' + PROXIED_TOOLS[item.tool]) }}
         </el-tag>
         <span class="muted">{{ item.tool }}</span>
         <span

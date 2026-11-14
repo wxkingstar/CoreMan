@@ -20,6 +20,7 @@ from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
 from coreman.api.routers.objects import serve
 from coreman.api.security import verify_csrf
 from coreman.core.assistants import kinds
+from coreman.core.assistants.approvals import proxied, tower
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import (
     SubjectUnavailable,
@@ -161,11 +162,15 @@ async def call_tool(
         subject = await token_subject(session, scope.user)
     except SubjectUnavailable as exc:
         return {"error": "subject_unavailable", "reason": exc.reason}
-    writable = await session.scalars(
-        select(BotSystemGrant.system_key).where(
-            BotSystemGrant.bot_id == scope.bot.id, BotSystemGrant.allow_write
+    writable = frozenset(
+        await session.scalars(
+            select(BotSystemGrant.system_key).where(
+                BotSystemGrant.bot_id == scope.bot.id, BotSystemGrant.allow_write
+            )
         )
     )
+    # 个人助理无人在场、又能提交审批的一轮：授权允许写的系统，写操作改为提交所有者审批。
+    stage = proxied.may_stage(task, scope.bot, scope.user)
     ctx = context.Context(
         session=session,
         issuance=await issuance(request),
@@ -176,6 +181,8 @@ async def call_tool(
         writable=policy.writable_for(task, writable),
         writes_preapproved=policy.writes_preapproved(task),
         owner_absent=kinds.unattended(task.kind),
+        stageable=writable if stage else frozenset(),
+        approval_cfg=tower.config(request.app.state.settings) if stage else None,
         token_ttl=scope.bot.sse_timeout_seconds,
         perms=dict(state.get("perms") or {}),
         tokens=dict(state.get("tokens") or {}),

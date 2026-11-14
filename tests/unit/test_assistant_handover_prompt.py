@@ -27,8 +27,9 @@ def test_rules_say_what_is_unavailable_without_the_owner() -> None:
     text = handover_prompt.RULES
     for word in ("个人凭证", "授权", "置顶页"):
         assert word in text
-    # 业务系统与云服务照常挂上，但这一轮只能查询。
-    assert "业务系统与云服务只能查询" in text
+    # 业务系统与云服务照常挂上：直连只能查询，经平台代理的写操作自动提交所有者审批。
+    assert "MCP 服务只能查询" in text
+    assert "自动提交给所有者审批" in text and "pending_approval" in text
     assert "记一条待跟进" in text and "当面" in text
 
 

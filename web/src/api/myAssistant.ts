@@ -175,6 +175,11 @@ const TRANSFER_TIMEOUT = 180_000
 const root = '/api/me/assistant'
 /** 等待审批的调度靠这个工具名认出来（它没有子任务行）。 */
 export const DISPATCH_TOOL = 'assistant_ask_bot'
+/** 所有者不在场时经平台代理暂存的写操作：工具名 → 页面上的标签键（`assistant.attention.*` / `assistant.recent.*`）。 */
+export const PROXIED_TOOLS: Record<string, 'systemsCall' | 'cloudCall'> = {
+  systems_call: 'systemsCall',
+  cloud_call: 'cloudCall',
+}
 // 这几个请求可能要等后台：改设置时把会话移出忽略名单要等正在进行的一轮轮询提交（上限 30 秒），
 // 重新生成口吻页要以所有者身份读几个会话的近期消息。
 const SLOW = { timeout: 60_000 }
