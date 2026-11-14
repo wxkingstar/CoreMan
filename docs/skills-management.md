@@ -98,7 +98,7 @@ Agent 执行安装器与探针时移除全部 COREMAN_ 环境变量，避免子�
 - **员工侧**：技能列表标「全局技能」，不能单独卸载（409），要在目录取消全局。`coreman bots skills` 的「来源」列显示全局 / 随系统 / 手动。
 - **取消全局**：默认卸载随全局装上的副本（取消在途安装，后续请求不再注入其环境层）；`keep_installed`（命令行 `--keep`，管理台选「保留」）则改按手动安装留在各员工处。
 - **设置人**：调度器补装用最近一次勾选的人的名义。此人停用或不再是委员会成员 / 平台管理员时补装暂停，有人重新勾选即可续上。
-- 审计：`skill.global`、`skill.unglobal`（目标为技能）。数据：`global_skills` 表（迁移 0106），`bot_skills.installed_globally` 标记自动装上的行。单独成表而不放在 `skills` 上，是因为改 `skills` 会递增 revision，让排队中的安装和待审申请作废。
+- 审计：`skill.global`、`skill.unglobal`（目标为技能）。数据：`global_skills` 表（迁移 0107），`bot_skills.installed_globally` 标记自动装上的行。单独成表而不放在 `skills` 上，是因为改 `skills` 会递增 revision，让排队中的安装和待审申请作废。
 
 ## 从目录删除技能
 
