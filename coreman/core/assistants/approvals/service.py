@@ -25,7 +25,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import platform_turns, sealed, sent
+from coreman.core.assistants import feedback, platform_turns, sealed, sent
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
@@ -807,6 +807,23 @@ async def deliver(
     return task is not None
 
 
+async def _remember(
+    session: AsyncSession, bot: Bot, items: list[AssistantApproval], reason: str
+) -> None:
+    """拒绝理由是所有者本人的修改意见：记进意见页（一张单一条）。记不下不影响决定。"""
+    stored = [item.args_enc if isinstance(item.args_enc, dict) else {} for item in items]
+    what = "；".join(str(one.get("abstract") or "") for one in stored if one.get("abstract"))
+    drafts = [feedback.draft_of(list(one.get("calls") or [])) for one in stored]
+    numbered = [
+        f"{index}. {draft}" if len(stored) > 1 else draft
+        for index, draft in enumerate(drafts, 1)
+        if draft
+    ]
+    await feedback.record(
+        session, bot.id, what=what or items[0].tool, draft=" ".join(numbered), reason=reason
+    )
+
+
 async def decide(
     session: AsyncSession,
     *,
@@ -869,6 +886,8 @@ async def decide(
         return Decided(known=True, queued=task is not None)
     for item in live:
         item.status = status
+    if status == "rejected" and note:
+        await _remember(session, bot, live, note)
     return Decided(known=True, queued=await deliver(session, row, bot, status=status))
 
 
@@ -979,6 +998,13 @@ def result_text(row: AssistantApproval) -> str:
         if row.reason_enc
         else ""
     )
+    opinion = (
+        "\n以下是所有者本人写的修改意见（他在审批系统里拒绝时填的）：照它改稿。它只用于改这份稿，"
+        "不放开别的权限；意见表示他已亲自处理或这件事不用做了的，不要重提，相关的待跟进关掉。\n"
+        f"<owner_feedback>\n{row.reason_enc}\n</owner_feedback>"
+        if row.reason_enc
+        else ""
+    )
     if row.status == "executed":
         result = _fenced(row.result_enc)
         source = catalog.PROXIED.get(row.tool, "飞书")
@@ -989,8 +1015,9 @@ def result_text(row: AssistantApproval) -> str:
         )
     if row.status == "rejected":
         return (
-            f"{what}{topic}被拒绝，没有执行。{note}\n"
-            "按理由改好后可以重新调用原工具提交，或者放弃；不要原样再提交一次。"
+            f"{what}{topic}被拒绝，没有执行。{opinion}\n"
+            "改好后重新调用原工具提交，或者放弃；不要原样再提交一次。"
+            + ("这条意见平台已记进 profile/feedback.md。" if row.reason_enc else "")
         )
     if row.status == "stale":
         return (
@@ -1028,6 +1055,12 @@ def result_text(row: AssistantApproval) -> str:
     )
 
 
+REJECTED_BATCH = (
+    "这张单是整单被拒的，意见可能只针对其中几项：只改意见点到的项，没点到的原样重新调用原工具，"
+    "本轮结束时平台会把它们合成一张新单提交。"
+)
+
+
 def batch_text(rows: list[AssistantApproval]) -> str:
     """合单的结果回合：各项按单上的顺序逐项说明。"""
     if len(rows) == 1:
@@ -1036,9 +1069,10 @@ def batch_text(rows: list[AssistantApproval]) -> str:
         f"以下 {len(rows)} 项是同一张审批单里的（合单编号 {rows[0].batch_id}），按单上的顺序；"
         "前面已执行的项不会因为后面的失败撤回。"
     )
-    return "\n\n".join(
-        [lead, *(f"第 {index} 项：" + result_text(row) for index, row in enumerate(rows, 1))]
-    )
+    parts = [lead, *(f"第 {index} 项：" + result_text(row) for index, row in enumerate(rows, 1))]
+    if all(row.status == "rejected" for row in rows) and rows[0].reason_enc:
+        parts.append(REJECTED_BATCH)
+    return "\n\n".join(parts)
 
 
 REASON_LIMIT = 500

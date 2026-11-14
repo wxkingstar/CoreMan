@@ -738,6 +738,50 @@ async def test_rejecting_runs_nothing_and_comes_back_once(
     assert feishu.writes == []
 
 
+async def test_a_rejection_reason_is_recorded_as_owner_feedback(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="第 2 条太硬，改客气点",
+        decided_at=None,
+    )
+    await db_session.commit()
+    page = await notes.read(db_session, scope.bot.id, feedback.PATH)
+    assert page is not None and page.pinned
+    assert "意见：第 2 条太硬，改客气点" in page.body
+    # 合单只记一条，稿子摘录是各项的正文。
+    assert len(feedback.split(page.body)[1]) == 1 and SECOND in page.body
+    text = service.batch_text(await service.members(db_session, head, lock=False))
+    assert "只改意见点到的项" in text
+
+
+async def test_an_approval_note_is_not_recorded_as_feedback(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="approved",
+        reason="可以",
+        decided_at=None,
+    )
+    await db_session.commit()
+    assert await notes.read(db_session, scope.bot.id, feedback.PATH) is None
+
+
 async def test_withdrawing_one_item_keeps_the_approval_and_skips_only_that_item(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

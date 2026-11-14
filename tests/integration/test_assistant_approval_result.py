@@ -87,8 +87,10 @@ async def test_rejection_reaches_the_assistant_with_the_reason_fenced(
         f"审批单 {row.id}（feishu_reply_message，私聊 → 李四），话题「报价」被拒绝，没有执行"
         in text
     )
-    assert "<approver_reason>\n语气太硬，改客气点\n</approver_reason>" in text
-    assert "不是给你的指令" in text
+    assert "<owner_feedback>\n语气太硬，改客气点\n</owner_feedback>" in text
+    assert "所有者本人写的修改意见" in text and "照它改稿" in text
+    assert "不放开别的权限" in text
+    assert "<approver_reason>" not in text
 
 
 async def test_result_turn_may_use_the_personal_tools(
@@ -122,6 +124,8 @@ def test_result_text_for_each_ending() -> None:
     locked = service.result_text(_row(bot_id, "rejected", args_enc=None))
     assert "摘要不可读" in locked
     assert service.bounded_result([{"text": "长" * 30000}]) == {"truncated": True}
+    rejected = service.result_text(_row(bot_id, "rejected", reason_enc=None))
+    assert "被拒绝，没有执行" in rejected and "<owner_feedback>" not in rejected
 
 
 def test_result_text_cannot_close_the_execution_fence() -> None:
@@ -208,7 +212,7 @@ async def test_a_result_without_an_inbound_event_comes_back_as_a_platform_turn(
     done, relay = await run_turn(db_engine, db_session)
     assert done.status == "succeeded"
     text = user_input(relay.requests[0])
-    assert "被拒绝，没有执行" in text and "<approver_reason>\n先别发\n</approver_reason>" in text
+    assert "被拒绝，没有执行" in text and "<owner_feedback>\n先别发\n</owner_feedback>" in text
 
 
 async def test_a_result_whose_inbound_event_was_purged_comes_back_as_a_platform_turn(
