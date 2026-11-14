@@ -49,6 +49,7 @@ from coreman.core.db.models import (
     AssistantInbox,
     AssistantJob,
     AssistantPage,
+    AssistantReport,
     AssistantSettings,
     AssistantTranscript,
     AssistantWatch,
@@ -215,6 +216,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     # 按空字典——等于重新记基线），以及交回条目的摘要。
     AssistantWatch: {"head_enc": Whole([]), "cursor_enc": Whole({})},
     AssistantInbox: {"summary_enc": Whole()},
+    # 待汇报：无人在场的一轮想告诉所有者的话，攒到摘要时点发出。非空，读不出来时给空串。
+    AssistantReport: {"text_enc": Text("")},
 }
 
 

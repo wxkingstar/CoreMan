@@ -32,6 +32,7 @@ async def test_the_owner_reads_the_defaults(
     data = response.json()["data"]
     # 这两项随钟点变。
     assert isinstance(data.pop("on_shift"), bool) and len(data.pop("today")) == 10
+    assert isinstance(data.pop("quiet_now"), bool)
     assert data == {
         "timezone": "Asia/Shanghai",
         "always_on": True,
@@ -43,6 +44,10 @@ async def test_the_owner_reads_the_defaults(
         "shift_override": None,
         "shift_override_until": None,
         "cold_start": "pending",
+        "digest_times": ["09:00", "13:30", "18:00"],
+        "quiet_enabled": True,
+        "quiet_start": "22:00",
+        "quiet_end": "08:00",
         "daily_turn_budget": None,
         "platform_daily_turn_budget": 2000,
         "effective_daily_turn_budget": 2000,
@@ -153,6 +158,35 @@ async def test_a_chat_cannot_end_up_in_both_lists_across_two_requests(
     assert (await client.patch(PREFS, json={"ignored_chats": ["oc_a"]})).status_code == 200
     refused = await client.patch(PREFS, json={"focus_chats": ["oc_a"]})
     assert refused.status_code == 422 and code(refused) == "chat_in_both_lists"
+
+
+async def test_the_owner_sets_digest_times_and_quiet_hours(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _owner = await owned(client, db_session)
+    response = await client.patch(
+        PREFS,
+        json={
+            "digest_times": ["17:00", "08:30"],
+            "quiet_enabled": False,
+            "quiet_start": "23:30",
+            "quiet_end": "06:30",
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["digest_times"] == ["08:30", "17:00"] and data["quiet_enabled"] is False
+    assert (data["quiet_start"], data["quiet_end"]) == ("23:30", "06:30")
+    for body, reason in (
+        ({"digest_times": []}, "invalid_digest_times"),
+        ({"digest_times": ["8:00"]}, "invalid_digest_times"),
+        ({"quiet_start": "06:30"}, "invalid_quiet_hours"),
+    ):
+        refused = await client.patch(PREFS, json=body)
+        assert refused.status_code == 422 and code(refused) == reason
+    await fresh(db_session, bot)
+    row = await settings.get(db_session, bot.id)
+    assert row.digest_times == ["08:30", "17:00"] and row.quiet_start == "23:30"
 
 
 async def test_the_budget_cannot_exceed_the_platform_default(

@@ -1,4 +1,5 @@
-"""助理设置的两个工具：所有者在私聊里说要改全天候、工作时段、时区、重点群、忽略的会话时用。
+"""助理设置的两个工具：所有者在私聊里说要改全天候、工作时段、时区、摘要时点、免打扰时段、
+重点群、忽略的会话时用。
 
 登记在助理工具注册表的 `knowledge` 组（不调飞书，授权换代后照常可用），但只在所有者发起的
 轮次里受理：改设置等于改「看哪些群、什么时候看」，交回轮次、审批结果回合与子任务的输入可能
@@ -59,14 +60,30 @@ class Update(Arguments):
         description="The whole list of chat ids (oc_…) the owner does not want watched;"
         f" replaces the current list. At most {assistant_settings.MAX_IGNORED}",
     )
+    digest_times: list[Short] | None = Field(
+        default=None,
+        max_length=assistant_settings.MAX_DIGEST_TIMES,
+        description="The whole list of local HH:MM times when non-urgent news is sent as one"
+        f" digest; 1 to {assistant_settings.MAX_DIGEST_TIMES}, no duplicates",
+    )
+    quiet_enabled: bool | None = Field(
+        default=None,
+        description="true = nothing is sent to the owner during the quiet hours below",
+    )
+    quiet_start: Short | None = Field(
+        default=None, description="HH:MM; quiet hours may cross midnight, e.g. 22:00"
+    )
+    quiet_end: Short | None = Field(
+        default=None, description="HH:MM, different from quiet_start, e.g. 08:00"
+    )
 
 
 OWN: dict[str, tuple[type[Arguments], str]] = {
     "assistant_settings_get": (
         Get,
         "Read the owner's assistant settings: time zone, whether it works around the clock,"
-        " working hours and days, focus chats, ignored chats, whether the assistant is on shift"
-        " now and any temporary switch.",
+        " working hours and days, digest times, quiet hours, focus chats, ignored chats,"
+        " whether the assistant is on shift now and any temporary switch.",
     ),
     "assistant_settings_update": (
         Update,

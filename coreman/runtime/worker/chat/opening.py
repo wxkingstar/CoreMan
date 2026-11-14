@@ -388,6 +388,13 @@ class OpenStage(ChatStageBase):
             knowledge = await assistant_notes.turn_note(session, ctx, intake, info)
             if knowledge:
                 ctx.turn_notes.append(knowledge)
+            if ctx.task.kind == "chat":
+                # 所有者发来「现在处理 F012」（摘要上的按钮）：附上这条待跟进。
+                from coreman.core.assistants import digest
+
+                handle = await digest.now_note(session, bot.id, intake.text)
+                if handle:
+                    ctx.turn_notes.append(handle)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context

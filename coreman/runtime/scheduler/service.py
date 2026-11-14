@@ -464,11 +464,12 @@ class SchedulerService(Service):
             await self._sleep(ASSISTANT_WATCH_SECONDS)
 
     async def _assistant_delivery_loop(self) -> None:
-        """个人助理的投递：把到点的条目排成交回轮次，给子任务对账，再做盯消息顺带的检查。
+        """个人助理的投递：把到点的条目排成交回轮次，给子任务对账，再做盯消息顺带的检查，
+        最后把到了时点的摘要与紧急汇报发给所有者。
 
         单独一条循环。
         """
-        from coreman.core.assistants import delivery, delivery_checks, jobs
+        from coreman.core.assistants import delivery, delivery_checks, digest, jobs
 
         while not self._stop.is_set():
             try:
@@ -478,6 +479,7 @@ class SchedulerService(Service):
                     # 子任务：超时、没走到收尾的轮次、要重投的结论。
                     counts.update(await jobs.tick(self._factory, now))
                     counts.update(await delivery_checks.tick(self._factory, self._cipher, now))
+                    counts.update(await digest.tick(self._factory, now))
                     hits = {key: value for key, value in counts.items() if value}
                     if hits:
                         self._log.info("assistant_delivery", **hits)

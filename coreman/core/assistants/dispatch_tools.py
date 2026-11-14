@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import dispatch as core
 from coreman.core.assistants import jobs
-from coreman.core.assistants.approvals import dispatching, tower
+from coreman.core.assistants.approvals import dispatching, marks, tower
 from coreman.core.assistants.approvals import service as approvals_service
 from coreman.core.assistants.kinds import SUBTASK_KIND
 from coreman.core.assistants.records import is_assistant
@@ -138,6 +138,8 @@ async def _run(session: AsyncSession, scope: Scope, name: str, args: Any) -> dic
     row = await core.send(
         session, bot, target, question, allow_write=False, attended=not scope.unattended
     )
+    # 这一轮打的「处理中」表情跟着这件事走：对方的答复交回之后再撤。
+    await marks.bind_job(session, bot.id, scope.task.id, row.id)
     return {
         "job": jobs.view(row),
         "bot": target.bot_key,

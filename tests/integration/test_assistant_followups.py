@@ -72,6 +72,7 @@ async def test_add_numbers_items_and_stores_ciphertext(db_session: AsyncSession)
         "review_on": None,
         "due_on": "2026-11-19",
         "origin_message_id": "om_1",
+        "needs_owner": False,
         "created_at": first.created_at.isoformat(),
         "notes": f"他周一问的。{SECRET}",
     }

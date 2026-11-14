@@ -73,7 +73,9 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     "assistant_mark_processing": (
         Mark,
         "Put (or with done=true remove) the 'on it' reaction on a message someone sent the"
-        " owner. The only write that needs no approval; the emoji is fixed.",
+        " owner. Only while you investigate it (look up data, spawn a job, ask another"
+        " employee); remove it as soon as the investigation ends, without waiting for"
+        " approvals. The only write that needs no approval; the emoji is fixed.",
     ),
 }
 

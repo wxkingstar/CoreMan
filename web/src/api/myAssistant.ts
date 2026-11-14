@@ -125,6 +125,12 @@ export interface AssistantPrefs {
   workdays: number[]
   focus_chats: string[]
   ignored_chats: string[]
+  /** 摘要时点（所有者时区的 HH:MM，升序，1–6 个）：不急的事攒到这些时点合并成一条。 */
+  digest_times: string[]
+  /** 免打扰时段：开着时这段时间里平台不主动发任何消息；可以跨午夜。 */
+  quiet_enabled: boolean
+  quiet_start: string
+  quiet_end: string
   /** null = 跟随平台默认。 */
   daily_turn_budget: number | null
   platform_daily_turn_budget: number
@@ -138,9 +144,12 @@ export interface AssistantPrefs {
   shift_override_until: string | null
   cold_start: 'pending' | 'in_progress' | 'done'
   today: string
+  /** 此刻是不是在免打扰时段里。 */
+  quiet_now: boolean
 }
 export type AssistantPrefsPatch = Partial<Pick<AssistantPrefs,
-  'timezone' | 'always_on' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'daily_turn_budget'>>
+  'timezone' | 'always_on' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats'
+  | 'digest_times' | 'quiet_enabled' | 'quiet_start' | 'quiet_end' | 'daily_turn_budget'>>
 
 /** 访问记录的一行：谁、什么时候、做了什么；没有任何内容。 */
 export interface AccessEntry {

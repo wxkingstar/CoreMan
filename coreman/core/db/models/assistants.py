@@ -119,7 +119,12 @@ class AssistantApproval(Base):
 
 
 class AssistantMark(Base):
-    """助理在别人发来的消息上打的「处理中」表情；撤销时删行。第 2 期按时间提醒久未回复的。"""
+    """助理在别人发来的消息上打的「处理中」表情；撤销时删行。第 2 期按时间提醒久未回复的。
+
+    `task_id` 是打上它的那一轮（不设外键，任务行按保留期清理）；那一轮结束时平台撤掉还挂着的。
+    `job_id` 非空表示调查由那一轮派出的子任务或调度延续：等它的结论交回的那一轮结束再撤。
+    `task_id` 为空的是升级前打的，平台不自动撤，只按时间提醒。
+    """
 
     __tablename__ = "assistant_marks"
     __table_args__ = (PrimaryKeyConstraint("bot_id", "message_id"),)
@@ -127,6 +132,10 @@ class AssistantMark(Base):
     message_id: Mapped[str] = mapped_column(Text)
     chat_id: Mapped[str] = mapped_column(Text)
     reaction_id: Mapped[str] = mapped_column(Text)
+    task_id: Mapped[int | None] = mapped_column(BigInteger)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_jobs.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 
@@ -330,6 +339,11 @@ class AssistantSettings(Base):
             f"cold_start_step IS NULL OR {enum_check('cold_start_step', COLD_START_STEPS)}",
             name="cold_start_step",
         ),
+        CheckConstraint("cardinality(digest_times) BETWEEN 1 AND 6", name="digest_times"),
+        CheckConstraint(
+            f"quiet_start ~ {_HHMM} AND quiet_end ~ {_HHMM} AND quiet_start <> quiet_end",
+            name="quiet_hours",
+        ),
         CheckConstraint(
             "cold_start_outcome IS NULL OR "
             f"{enum_check('cold_start_outcome', COLD_START_OUTCOMES)}",
@@ -376,6 +390,16 @@ class AssistantSettings(Base):
     # 以及正在进行的那一次从什么时候开始读飞书（读完清掉）。
     voice_attempts: Mapped[list[int]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     voice_regenerating_at: Mapped[datetime | None] = _ts()
+    # 摘要时点（所有者时区的 HH:MM，1–6 个，升序）与免打扰时段（可跨午夜，起止不同）。
+    digest_times: Mapped[list[str]] = mapped_column(
+        ARRAY(Text()), server_default=text("'{09:00,13:30,18:00}'::text[]")
+    )
+    quiet_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    quiet_start: Mapped[str] = mapped_column(Text, server_default=text("'22:00'"))
+    quiet_end: Mapped[str] = mapped_column(Text, server_default=text("'08:00'"))
+    # 下一个摘要时点（空表示还没算：下一次只算出来、不发）；上一次真的发出摘要的时刻。
+    digest_next_at: Mapped[datetime | None] = _ts()
+    digest_sent_at: Mapped[datetime | None] = _ts()
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 
@@ -449,6 +473,9 @@ class AssistantFollowup(Base):
     job_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("assistant_jobs.id", ondelete="SET NULL")
     )
+    # 要所有者在场才办得了（个人凭证、授权、置顶页、无人在场时被拒的写操作……）：摘要里
+    # 逐条列出，带「现在处理」按钮。
+    needs_owner: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     title_enc: Mapped[str] = mapped_column(Text)
     notes_enc: Mapped[str | None] = mapped_column(Text)
     close_code: Mapped[str | None] = mapped_column(Text)
@@ -552,6 +579,30 @@ class AssistantInbox(Base):
     handovers: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class AssistantReport(Base):
+    """无人在场的一轮想告诉所有者的一句话（`assistant_report`）：攒到摘要时点合并发出。
+
+    `text_enc` 登记在 `sealed.COLUMNS`。`urgent` 的不等摘要，那一轮结束就发（免打扰时段除外）；
+    `task_id` 是记下它的那一轮（不设外键）。`sent_at` 非空表示已经发给所有者。
+    """
+
+    __tablename__ = "assistant_reports"
+    __table_args__ = (
+        Index(
+            "assistant_reports_unsent_idx",
+            "bot_id",
+            postgresql_where=text("sent_at IS NULL"),
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    task_id: Mapped[int | None] = mapped_column(BigInteger)
+    text_enc: Mapped[str] = mapped_column(Text)
+    urgent: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    sent_at: Mapped[datetime | None] = _ts()
 
 
 class AssistantDelivery(Base):

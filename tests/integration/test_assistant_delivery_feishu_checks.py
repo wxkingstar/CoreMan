@@ -419,7 +419,11 @@ async def test_a_failed_read_keeps_what_was_done_and_only_logs_a_code(
 
     counts = await checks.feishu_checks(db_session, bot, prefs, Flaky(), now)
     await db_session.commit()
-    assert counts == {"assistant_approvals_auto_withdrawn": 1, "assistant_recalls_noticed": 0}
+    assert counts == {
+        "assistant_approvals_auto_withdrawn": 1,
+        "assistant_recalls_noticed": 0,
+        "assistant_marks_released": 0,
+    }
     assert await status_of(db_session, row) == ("withdrawn", "owner_replied")
 
 

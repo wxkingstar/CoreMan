@@ -10,11 +10,14 @@ from coreman.core.chat import sessions
 from coreman.core.db.models import AssistantSettings, Bot
 from coreman.runtime.worker.chat.models import Intake, Prepared, Verdict
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.platform_turn import PlatformTurnHandler
+from coreman.runtime.worker.platform_turn import SilentTurnHandler
 
 
-class AssistantHandoverHandler(PlatformTurnHandler):
+class AssistantHandoverHandler(SilentTurnHandler):
     """文本取自绑在这一轮上的收件箱条目；收尾时按这一轮的结局给条目记账。
+
+    不出声：所有者不在场，这一轮的回复不发给任何人；要他知道的事由助理记成待汇报
+    （`assistant_report`），平台合并进摘要（`digest.py`）。
 
     `_text` 只读：基类在占会话之前调它，让路放回队列后每次重新认领都会再调一次。条目的
     绑定在入队时就定了（`delivery.dispatch`），这里不绑新的、不改状态；真的开了流才给条目记一次

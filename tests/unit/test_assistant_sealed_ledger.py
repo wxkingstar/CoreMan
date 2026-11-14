@@ -45,6 +45,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/compiling.py": 1,
     # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
     "coreman/core/assistants/delivery.py": 2,
+    # 摘要：没发出的汇报、在途的审批单；都显式还原，汇报读不出来的跳过
+    "coreman/core/assistants/digest.py": 2,
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
     # 子任务：取一条、按结果任务号取一条都是 session.scalar（自动还原）；列表显式还原
@@ -95,6 +97,8 @@ ENTITY_SELECTS = {
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
     "coreman/core/assistants/delivery_checks.py": 1,  # 盯消息的游标：取值后 open_value
+    # 摘要卡片置灰：只按下划线开头的明文键（消息编号、平台写的待跟进编号）过滤与取值
+    "coreman/core/assistants/digest.py": 2,
     "coreman/core/assistants/notes.py": 1,  # 列索引时 defer 掉正文，不读它
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
     "coreman/core/bus/tasks.py": 3,  # 明文键 serialize_session、stale_hold
@@ -135,10 +139,12 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/approvals/dispatching.py": 1,
     # 代理写操作的审批单：经 ORM 新建（flush 钩子封存完整请求）
     "coreman/core/assistants/approvals/proxied.py": 1,
-    # 审批单：经 ORM 新建（flush 钩子封存）；另一条只写提醒时间
-    "coreman/core/assistants/approvals/service.py": 2,
+    # 审批单：经 ORM 新建（flush 钩子封存）
+    "coreman/core/assistants/approvals/service.py": 1,
     # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据
     "coreman/core/assistants/delivery.py": 5,
+    # 摘要：待汇报经 ORM 新建（flush 钩子封存正文）；另一条只写发出时间
+    "coreman/core/assistants/digest.py": 2,
     # 顺带检查：入提醒条目（摘要封存）；交回后被撤回的条目作废（只写状态）
     "coreman/core/assistants/delivery_checks.py": 2,
     # 调度公共员工：经 ORM 新建一行求助（flush 钩子封存问题与标题）

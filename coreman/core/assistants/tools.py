@@ -3,7 +3,8 @@
 普通轮次三组，子任务轮次另有一组：
 - `knowledge`：知识库、待跟进与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权换代之后
   照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
-- `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）。
+- `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）；无人在场时记
+  要告诉所有者的话（`assistant_report`，合并进摘要）。
 - `jobs`：派子任务、追问、查看、取消，以及调度公共员工（看可以问谁、把问题交给其中一位）。
   子任务自己不可用。
 - `subtask`：子任务报告自己卡住了。只有子任务轮次可用。
@@ -34,6 +35,7 @@ from coreman.core.assistants import (
     followup_tools,
     jobs_tools,
     notes_tools,
+    report_tools,
     settings_tools,
     voice_tools,
 )
@@ -205,6 +207,10 @@ async def _ask_bots(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[
     return await dispatch_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _report(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await report_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 async def _voice(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return await voice_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
@@ -213,6 +219,7 @@ register("knowledge", lambda: list(notes_tools.DEFINITIONS), _notes)
 register("knowledge", followup_tools.definitions, _followups)
 register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
+register("approval", lambda: list(report_tools.DEFINITIONS), _report)
 register(VOICE_GROUP, lambda: list(voice_tools.DEFINITIONS), _voice)
 register("jobs", jobs_tools.definitions, _jobs)
 register("jobs", dispatch_tools.definitions, _ask_bots)

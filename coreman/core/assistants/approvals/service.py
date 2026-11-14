@@ -17,14 +17,14 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints, ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns, sealed, sent
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
-from coreman.core.bus import outbox, tasks
+from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.cloud_proxy.resume import clean_reason
 from coreman.core.config import get_settings
@@ -35,7 +35,6 @@ from coreman.core.db.models import (
     InboundEvent,
     User,
     UserIdentity,
-    UserReached,
 )
 from coreman.core.db.models.storage import StoredObject
 from coreman.core.feishu_personal.files import FileRelay
@@ -851,8 +850,6 @@ async def listing(
     return {"items": items}
 
 
-REMIND_SETTLE = timedelta(seconds=30)
-REMIND_GAP = timedelta(minutes=5)
 EXPIRE_BATCH = 50
 SWEEP_BATCH = 50
 
@@ -937,75 +934,6 @@ async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None)
     return len(rows)
 
 
-async def remind(session: AsyncSession, now: datetime, link: str | None) -> int:
-    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。
-
-    Args:
-        link: 审批系统的网页入口（`tower.web_url`）；没有就只说张数，不带链接
-    """
-    waiting = (
-        await session.execute(
-            select(AssistantApproval.bot_id, func.min(AssistantApproval.created_at))
-            .where(AssistantApproval.status == "pending", AssistantApproval.notified_at.is_(None))
-            .group_by(AssistantApproval.bot_id)
-        )
-    ).all()
-    sent = 0
-    for bot_id, oldest in waiting:
-        if oldest > now - REMIND_SETTLE:
-            # 同一轮里可能还在接着提交：等这一批落定再合成一条。
-            continue
-        last = await session.scalar(
-            select(func.max(AssistantApproval.notified_at)).where(
-                AssistantApproval.bot_id == bot_id
-            )
-        )
-        if last is not None and last > now - REMIND_GAP:
-            continue
-        bot = await session.get(Bot, bot_id)
-        reached = (
-            await session.get(UserReached, (bot_id, bot.owner_id))
-            if bot is not None
-            and bot.enabled
-            and not inactive_assistant(bot)
-            and bot.owner_id is not None
-            else None
-        )
-        if bot is None or reached is None:
-            continue
-        count = await session.scalar(
-            select(func.count())
-            .select_from(AssistantApproval)
-            .where(AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
-        )
-        await outbox.add(
-            session,
-            bot_id=bot_id,
-            platform="feishu",
-            kind="send",
-            dedupe_key=f"assistant-approvals:{bot_id}:{int(now.timestamp())}",
-            target={"chat_id": reached.platform_chat_id},
-            payload={
-                "markdown": (
-                    f"有 {count} 张审批单等你处理：{link}"
-                    if link
-                    else f"有 {count} 张审批单等你处理。"
-                )
-            },
-        )
-        await session.execute(
-            update(AssistantApproval)
-            .where(
-                AssistantApproval.bot_id == bot_id,
-                AssistantApproval.status == "pending",
-                AssistantApproval.notified_at.is_(None),
-            )
-            .values(notified_at=now)
-        )
-        sent += 1
-    return sent
-
-
 async def sweep_files(session: AsyncSession, store: attachments.Store | None) -> int:
     """删掉已有结论的单留在临时桶里的附件，返回清理了几张单。
 
@@ -1033,14 +961,15 @@ async def sweep_files(session: AsyncSession, store: attachments.Store | None) ->
 
 
 async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
-    """scheduler 每轮调用：过期、提醒、清理附件、收口执行中断的单。没配审批系统时都不会有数据。"""
+    """scheduler 每轮调用：过期、清理附件、收口执行中断的单。没配审批系统时都不会有数据。
+
+    「有 N 张待批」不再单独私信所有者：在途的单列在助理摘要的「等你批的」里（`digest.py`）。"""
     from coreman.core.assistants.approvals import execute  # execute 依赖本模块，延迟导入
 
     settings = get_settings()
     cfg = tower.config(settings)
     return {
         "assistant_approvals_expired": await expire(session, now, cfg),
-        "assistant_approvals_reminded": await remind(session, now, tower.web_url(settings)),
         "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
         "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
     }

@@ -8,13 +8,13 @@ from coreman.runtime.worker.chat import personal
 
 def test_rules_name_the_tools_commands_and_limits() -> None:
     text = settings_prompt.SETTINGS_RULES
-    assert text.startswith("\n\n## 工作时段与关注的会话\n")
+    assert text.startswith("\n\n## 工作时段、摘要与关注的会话\n")
     for name in settings_tools.OWN:
         assert name in text
     for word in ("上班", "下班", "focus_chats", "ignored_chats", "IANA", "owner_turn_required"):
         assert word in text
     # 默认全天候，所有者可以改成只在工作时段里看。
-    for word in ("默认全天候", "always_on"):
+    for word in ("默认全天候", "always_on", "digest_times", "quiet_start", "22:00–08:00"):
         assert word in text
     assert f"最多 {settings.MAX_FOCUS} 个" in text
 
@@ -25,4 +25,4 @@ def test_rules_are_stable_text() -> None:
 
 def test_standard_bot_guidance_does_not_mention_settings() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
-    assert "assistant_settings_" not in rules and "工作时段与关注的会话" not in rules
+    assert "assistant_settings_" not in rules and "工作时段、摘要与关注的会话" not in rules

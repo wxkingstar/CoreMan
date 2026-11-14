@@ -15,6 +15,7 @@ from coreman.core.db.models import (
     AssistantInbox,
     AssistantJob,
     AssistantPage,
+    AssistantReport,
     AssistantSettings,
     AssistantTranscript,
     AssistantWatch,
@@ -57,7 +58,9 @@ def test_every_content_column_is_registered() -> None:
         AssistantJob,
         AssistantInbox,
         AssistantWatch,
+        AssistantReport,
     }
+    assert set(sealed.COLUMNS[AssistantReport]) == {"text_enc"}
     assert set(sealed.COLUMNS[FeishuDelivery]) == {"layout"}
     assert set(sealed.COLUMNS[InteractionState]) == {"state"}
     assert set(sealed.COLUMNS[AssistantApproval]) == {"args_enc", "reason_enc", "result_enc"}

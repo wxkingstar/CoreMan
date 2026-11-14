@@ -10,13 +10,20 @@ export interface PrefsForm {
   workdays: number[]
   focus_chats: string
   ignored_chats: string
+  /** 摘要时点：表单里是一行文本，逗号或空格隔开。 */
+  digest_times: string
+  quiet_enabled: boolean
+  quiet_start: string
+  quiet_end: string
   /** 跟随平台默认：提交时每日预算传 null。 */
   follow_platform: boolean
   daily_turn_budget: number
 }
-export type PrefsField = 'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'daily_turn_budget'
+export type PrefsField = 'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'digest_times' | 'quiet_hours' | 'daily_turn_budget'
 
 const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
+/** 与后端 `settings.MAX_DIGEST_TIMES` 一致。 */
+export const MAX_DIGEST_TIMES = 6
 const CHAT = /^oc_[A-Za-z0-9_-]{1,80}$/
 
 /** 多行文本 → 去掉空行与重复之后的各行。 */
@@ -33,9 +40,18 @@ export function toForm(prefs: AssistantPrefs): PrefsForm {
     workdays: [...prefs.workdays],
     focus_chats: prefs.focus_chats.join('\n'),
     ignored_chats: prefs.ignored_chats.join('\n'),
+    digest_times: prefs.digest_times.join(', '),
+    quiet_enabled: prefs.quiet_enabled,
+    quiet_start: prefs.quiet_start,
+    quiet_end: prefs.quiet_end,
     follow_platform: prefs.daily_turn_budget === null,
     daily_turn_budget: prefs.daily_turn_budget ?? prefs.platform_daily_turn_budget,
   }
+}
+
+/** 摘要时点的一行文本 → 各个时点（按逗号、顿号或空白分开），去空、升序。重复的留着，交给校验报错。 */
+export function clocks(text: string): string[] {
+  return text.split(/[\s,，、]+/).map((item) => item.trim()).filter(Boolean).sort()
 }
 
 /** 浏览器认不认识这个 IANA 时区名。 */
@@ -70,6 +86,11 @@ export function validate(form: PrefsForm, prefs: AssistantPrefs): Partial<Record
   if (ignored.some((id) => !CHAT.test(id))) errors.ignored_chats = 'chatId'
   else if (ignored.length > prefs.limits.ignored_chats) errors.ignored_chats = 'ignoredTooMany'
   else if (!errors.focus_chats && ignored.some((id) => focus.includes(id))) errors.ignored_chats = 'chatInBoth'
+  const times = clocks(form.digest_times)
+  if (!times.length || times.length > MAX_DIGEST_TIMES || new Set(times).size !== times.length || times.some((time) => !CLOCK.test(time))) {
+    errors.digest_times = 'digestTimes'
+  }
+  if (!CLOCK.test(form.quiet_start) || !CLOCK.test(form.quiet_end) || form.quiet_start === form.quiet_end) errors.quiet_hours = 'quietHours'
   const budget = form.daily_turn_budget
   // 没动过的个人值不校验：管理员把平台默认调到它以下之后，它高于上限但只是不再生效（生效的是两者里
   // 较小的），不该挡住所有者改别的项。
@@ -92,6 +113,10 @@ export function toPatch(form: PrefsForm, prefs: AssistantPrefs): AssistantPrefsP
     workdays: [...form.workdays].sort((a, b) => a - b),
     focus_chats: lines(form.focus_chats),
     ignored_chats: lines(form.ignored_chats),
+    digest_times: clocks(form.digest_times),
+    quiet_enabled: form.quiet_enabled,
+    quiet_start: form.quiet_start,
+    quiet_end: form.quiet_end,
     daily_turn_budget: form.follow_platform ? null : form.daily_turn_budget,
   }
   const patch: Record<string, unknown> = {}

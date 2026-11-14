@@ -12,7 +12,7 @@ from coreman.core.db.models import Bot
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.chat.models import Intake, Prepared, Verdict
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.platform_turn import PlatformTurnHandler, SilentTurnHandler
+from coreman.runtime.worker.platform_turn import SilentTurnHandler
 
 
 class AssistantSubtaskHandler(SilentTurnHandler):
@@ -78,8 +78,10 @@ class AssistantSubtaskHandler(SilentTurnHandler):
         )
 
 
-class AssistantJobResultHandler(PlatformTurnHandler):
+class AssistantJobResultHandler(SilentTurnHandler):
     """把子任务的结论作为一轮投回主会话：文本由平台按行生成，结论在引用行里。
+
+    不出声：所有者不在场，要他知道的事由助理记成待汇报，平台合并进摘要（`digest.py`）。
 
     `_text` 只读。主会话里的一轮会给所有者的消息让路、会被它取消：走到收尾的在这里记账，
     没走到的由 scheduler 的 `jobs.reconcile` 放回重投。
