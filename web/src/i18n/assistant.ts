@@ -91,7 +91,7 @@ export const assistantZh = {
       invalid_date: '日期要写成 YYYY-MM-DD', invalid_status: '状态只能是 open 或 snoozed', invalid_item: '这一条不是一个对象',
     },
     regenerate: '重新生成口吻页',
-    regenerateConfirm: '让助理按你最近 7 天自己发出的消息重新归纳口吻页？每天至多 3 次；你自己改过的口吻页不会被覆盖。',
+    regenerateConfirm: '让助理按你最近 30 天自己发出的消息重新归纳口吻页？每天至多 3 次；你自己改过的口吻页不会被覆盖。',
     regenerated: '已排上，过一会儿口吻页会更新。今天还可以再生成 {count} 次。',
   },
   settings: {
@@ -242,7 +242,7 @@ export const assistantEn: typeof assistantZh = {
       invalid_date: 'Dates must be written as YYYY-MM-DD', invalid_status: 'The status must be open or snoozed', invalid_item: 'This entry is not an object',
     },
     regenerate: 'Regenerate the voice page',
-    regenerateConfirm: 'Have the assistant rebuild the voice page from the messages you sent in the last 7 days? At most 3 times a day; a voice page you edited yourself is never overwritten.',
+    regenerateConfirm: 'Have the assistant rebuild the voice page from the messages you sent in the last 30 days? At most 3 times a day; a voice page you edited yourself is never overwritten.',
     regenerated: 'Queued. The voice page will update shortly. You can regenerate {count} more times today.',
   },
   settings: {
@@ -393,7 +393,7 @@ export const assistantJa: typeof assistantZh = {
       invalid_date: '日付は YYYY-MM-DD で書いてください', invalid_status: '状態は open か snoozed のみです', invalid_item: 'この項目はオブジェクトではありません',
     },
     regenerate: '口調ページを再生成',
-    regenerateConfirm: '直近 7 日間に自分が送ったメッセージから、アシスタントに口調ページを作り直させますか？1 日 3 回まで。自分で編集した口調ページは上書きされません。',
+    regenerateConfirm: '直近 30 日間に自分が送ったメッセージから、アシスタントに口調ページを作り直させますか？1 日 3 回まで。自分で編集した口調ページは上書きされません。',
     regenerated: 'キューに入れました。しばらくすると口調ページが更新されます。今日はあと {count} 回再生成できます。',
   },
   settings: {

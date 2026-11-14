@@ -34,6 +34,7 @@ from coreman.core.assistants import (
     jobs,
     owner_view,
     sealed,
+    voice,
 )
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import AssistantSettings, User
@@ -109,7 +110,10 @@ VOICE_ERRORS: dict[str, tuple[int, str]] = {
     "feishu_busy": (429, "飞书接口现在用量紧张，稍后再试"),
     "authorization_required": (409, "需要先在私聊里重新完成飞书授权"),
     "feishu_unavailable": (502, "暂时读不了飞书，稍后再试"),
-    "too_few_samples": (409, "最近 7 天里你自己发出的消息太少，归纳不出口吻"),
+    "too_few_samples": (
+        409,
+        f"最近 {voice.WINDOW.days} 天里你自己发出的消息太少，归纳不出口吻",
+    ),
     "assistant_unavailable": (409, "个人助理现在跑不了这一轮，稍后再试"),
 }
 
