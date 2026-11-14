@@ -107,8 +107,8 @@ async def call_agent(
     if operation not in OPERATIONS or not relay.is_active or relay.runtime_node_id is None:
         raise AgentError("实例未启用、未绑定运行时节点或操作不支持")
     timeout = 950 if operation in SLOW_OPERATIONS else 130
-    # 换机清单最多 5 万条，其他操作的响应都很小。
-    limit = 32 * 1024 * 1024 if operation == "workspace-export" else 4 * 1024 * 1024
+    # 换机清单最多 20 万条（局域网直连），其他操作的响应都很小；控制通道单次响应上限 128MB。
+    limit = 120 * 1024 * 1024 if operation == "workspace-export" else 4 * 1024 * 1024
     try:
         async with make_http(relay) as client:
             async with client.stream(
