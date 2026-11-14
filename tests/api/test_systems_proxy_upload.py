@@ -229,7 +229,10 @@ async def test_file_write_is_confirmed_on_the_card_then_sent(
 
     assert await release(app, task)
     card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
-    text = card.payload["card"]["body"]["elements"][0]["text"]["content"]
+    elements = card.payload["card"]["body"]["elements"]
+    summary = elements[0]["text"]["content"]
+    assert "文件：banner.png（2.0 KB）" in summary and "文件：logo.png（100 B）" in summary
+    text = elements[1]["elements"][0]["text"]["content"]
     assert '文件 files = "banner.png"（2.0 KB，sha256 ' in text
     assert '文件 files = "logo.png"（100 B' in text
     assert first["upload_id"] not in text and "请求体" not in text

@@ -224,8 +224,10 @@ async def test_writes_wait_for_one_card_and_run_once_confirmed(
 
     assert await release(app, task)
     card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
-    text = card.payload["card"]["body"]["elements"][0]["text"]["content"]
-    assert "执行 2 个" in card.payload["card"]["header"]["title"]["content"]
+    elements = card.payload["card"]["body"]["elements"]
+    text = elements[1]["elements"][0]["text"]["content"]
+    assert card.payload["card"]["header"]["title"]["content"] == "请确认 2 项操作"
+    assert elements[0]["text"]["content"].startswith("1. ")
     assert '"SKU-1"' in text and '"SKU-2"' in text and "POST /api/stock/documents" in text
     assert card.target == {"chat_id": "oc_private"}
 
@@ -283,12 +285,14 @@ async def test_destructive_runs_after_confirmation_with_a_red_card(
     await release(app, task)
     card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
     assert card.payload["card"]["header"]["template"] == "red"
-    text = card.payload["card"]["body"]["elements"][0]["text"]["content"]
-    assert (
-        "不可恢复" in text
-        and "AI 说明（未经平台核实）" in text
-        and card.target["chat_id"] == "oc_group"
-    )
+    elements = card.payload["card"]["body"]["elements"]
+    summary = elements[0]["text"]["content"]
+    detail = elements[1]["elements"][0]["text"]["content"]
+    assert "无法恢复" in summary and "对象：单据 D1" in summary
+    assert "status：原为 confirmed" in summary
+    assert elements[1]["tag"] == "collapsible_panel" and elements[1]["expanded"] is False
+    assert "/documents/" in detail and "录入错误" in detail and "/documents/" not in summary
+    assert card.target["chat_id"] == "oc_group"
     state = await batch(db_session)
     pressed = await press(db_session, bot, task, state.id, chat_type="group")
     assert await run_click(db_session, db_engine, pressed) == "systems_write_done"
@@ -367,7 +371,7 @@ async def test_first_failure_stops_the_rest(client, app, db_session, db_engine, 
     assert result == "systems_write_failed"
     assert posts(fake) == ["/api/stock/documents"]
     update = await last_update(db_session)
-    assert "❌" in update and "未执行" in update
+    assert "❌" in update and "没有成功" in update and "没有执行" in update
     (follow,) = await resumed(db_session)
     assert "未执行" in follow.payload[confirm.RESULT_KEY]
 
