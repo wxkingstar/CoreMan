@@ -500,6 +500,27 @@ def exclude_private(directory):
         replace_file(current, (text + "".join(line + "\n" for line in missing)).encode())
 
 
+def repair_skills_link(directory):
+    """`.claude/skills` 整目录链接到 `../.agents/skills`、目标却不在时，补建空的 `.agents/skills`。
+
+    换机清单只记文件和链接、不记空目录：还没装过技能的员工换机后只剩一条断链，之后装什么技能
+    都会被拒。Git 也不记空目录，克隆回来的仓库同样会这样，补一个空目录不影响仓库。
+    只认平台自己建的这一种链接，`.agents` 被文件或链接占用时不动。
+    """
+    canonical, alias = directory / ".agents/skills", directory / ".claude/skills"
+    if (
+        not alias.is_symlink()
+        or os.readlink(alias) != "../.agents/skills"
+        or canonical.exists()
+        or canonical.is_symlink()
+    ):
+        return
+    agents = directory / ".agents"
+    if agents.is_symlink() or (agents.exists() and not agents.is_dir()):
+        return
+    canonical.mkdir(parents=True)
+
+
 def link_skills(directory):
     """让 .claude/skills 整个链接到 .agents/skills，Claude 与 Codex 读同一份技能。
 
@@ -507,6 +528,7 @@ def link_skills(directory):
     放着别的内容就原样保留，安装技能时仍逐个补链接。Git 仓库的布局归仓库管，不动。
     """
     canonical, alias = directory / ".agents/skills", directory / ".claude/skills"
+    repair_skills_link(directory)
     if (directory / ".git").exists() or alias.is_symlink():
         return
     for path in (directory / ".agents", canonical, directory / ".claude"):

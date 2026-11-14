@@ -597,3 +597,48 @@ def test_mcp_install_does_not_require_skill_directories(agent):
     assert json.loads((bot / ".mcp.json").read_text())["mcpServers"]["query"] == {
         "command": "example"
     }
+
+
+def test_skill_install_repairs_skills_link_left_broken_by_transfer(agent, monkeypatch):
+    """换机清单不带空目录：只剩 .claude/skills -> ../.agents/skills 断链的工作目录照样能装。"""
+    bot = agent.root / "moved-bot"
+    (bot / ".claude").mkdir(parents=True)
+    (bot / ".claude/skills").symlink_to("../.agents/skills", target_is_directory=True)
+
+    def install(command, *args, **kwargs):
+        if command[0] == "npx":
+            source = bot / ".agents/skills/query"
+            source.mkdir(parents=True, exist_ok=True)
+            (source / "SKILL.md").write_text("query instructions")
+
+    monkeypatch.setattr(agent_module, "run_command", install)
+    data = {"project_dir": str(bot), "git_url": "https://github.com/example/tools.git"}
+    assert agent.install_skill({**data, "skill_name": "query"})["success"]
+    assert (bot / ".claude/skills/query/SKILL.md").read_text() == "query instructions"
+
+
+def test_skill_link_still_rejects_other_broken_links(agent):
+    bot = agent.root / "other-link"
+    (bot / ".claude").mkdir(parents=True)
+    (bot / ".claude/skills").symlink_to("../elsewhere/skills", target_is_directory=True)
+    with pytest.raises(agent_module.OperationError, match="链接已失效"):
+        agent.link_claude_skills(bot, "query", validate_only=True)
+    assert not (bot / ".agents").exists() and not (bot / "elsewhere").exists()
+
+
+def test_workspace_init_repairs_broken_skills_link(tmp_path):
+    from runtime_daemon.workspace import link_skills
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/skills").symlink_to("../.agents/skills", target_is_directory=True)
+    (tmp_path / ".git").mkdir()  # 仓库里克隆回来的也一样：Git 不记空目录
+    link_skills(tmp_path)
+    assert (tmp_path / ".agents/skills").is_dir()
+    assert (tmp_path / ".claude/skills").resolve() == (tmp_path / ".agents/skills").resolve()
+    # .agents 被文件占着时不动
+    other = tmp_path / "other"
+    (other / ".claude").mkdir(parents=True)
+    (other / ".claude/skills").symlink_to("../.agents/skills", target_is_directory=True)
+    (other / ".agents").write_text("x")
+    link_skills(other)
+    assert (other / ".agents").is_file()
