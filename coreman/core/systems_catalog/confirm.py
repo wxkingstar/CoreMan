@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task
+from coreman.core.systems_catalog import uploads
 from coreman.core.systems_catalog.context import Context
 from coreman.core.systems_catalog.proxy import Call, Prepared, record
 from coreman.core.timeutils import utcnow
@@ -167,6 +168,8 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
             "query": args.query,
             "body": args.body,
             "note": args.note.model_dump(exclude_none=True) if args.note else None,
+            # What the card shows for each file; the request itself keeps the upload IDs.
+            "files": [{"field": name, **uploads.describe(row)} for name, row in p.files],
             # Fixed now, so running the item twice reaches the system with the same key.
             "key": str(uuid.uuid4()),
             "digest": digest,
@@ -234,9 +237,27 @@ def _item_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
         return lines
     for key, value in (item.get("query") or {}).items():
         lines.append(f"   ?{key} = {_value(value)}")
-    if item.get("body") is not None:
-        lines.append(f"   请求体 = {_value(item['body'])}")
+    files = item.get("files") or []
+    body = item.get("body")
+    if files and isinstance(body, dict):
+        named = {file["field"] for file in files}
+        body = {key: value for key, value in body.items() if key not in named} or None
+    if body is not None:
+        lines.append(f"   请求体 = {_value(body)}")
+    for file in files:
+        lines.append(
+            f"   文件 {file['field']} = {_value(file['filename'])}（{_size(file['bytes'])}，"
+            f"sha256 {file['sha256'][:12]}）"
+        )
     return lines + _note_lines(item.get("note"))
+
+
+def _size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
 
 
 def card_text(items: list[dict[str, Any]]) -> str:
