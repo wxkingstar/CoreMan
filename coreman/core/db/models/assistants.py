@@ -84,6 +84,11 @@ class AssistantApproval(Base):
             unique=True,
             postgresql_where=text("status IN ('pending', 'approved')"),
         ),
+        Index(
+            "assistant_approvals_batch_idx",
+            "batch_id",
+            postgresql_where=text("batch_id IS NOT NULL"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
@@ -108,6 +113,9 @@ class AssistantApproval(Base):
     session_key: Mapped[str] = mapped_column(Text, server_default=text("''"))
     # 临时桶里还留着这张单的附件；到终态后由 scheduler 删除并清掉这个标记。
     has_files: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # 无人在场的一轮里提交的多个飞书写合成的一张单：各项共用它，取值是第一项的编号（第一项
+    # 带着向 Tower 提交的外部编号与令牌）。单独成单的为空。
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     # 最近一次改稿的时刻（没改过为空）：改稿时平台重新读过会话，「之后会话动没动过」从它算起。
     revised_at: Mapped[datetime | None] = _ts()

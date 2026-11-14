@@ -330,6 +330,38 @@ async def test_expired_card_runs_nothing(client, app, db_session, db_engine, fak
     assert posts(fake) == []
 
 
+async def test_an_expired_card_is_resent_with_the_same_content_and_confirmed_again(
+    client, app, db_session, db_engine, fake
+) -> None:
+    """过期的卡改成「已过期」并带「重新发起」：同一份暂存内容发一张新卡（新的 60 分钟），
+    确认时照样整批复查；已确认的不能再重发。"""
+    assert confirm.TTL == timedelta(minutes=60)
+    bot, user, task = await turn(db_session, app)
+    await stage(client, app, task, user, draft("SKU-1"))
+    await release(app, task)
+    state = await batch(db_session)
+    state.expires_at = utcnow() - timedelta(seconds=1)
+    await db_session.commit()
+    late = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, late) == "expired"
+    assert "重新发起" in await last_update(db_session) and posts(fake) == []
+    resend = await press(db_session, bot, task, state.id, confirm.RESEND)
+    assert await run_click(db_session, db_engine, resend) == "systems_write_resent"
+    first, again = list(
+        await db_session.scalars(
+            select(OutboxItem).where(OutboxItem.kind == "send").order_by(OutboxItem.id)
+        )
+    )
+    assert again.dedupe_key == f"systems-write:{state.id}:resend:1"
+    assert again.payload["card"]["body"] == first.payload["card"]["body"]
+    assert (await batch(db_session)).expires_at > utcnow() + timedelta(minutes=59)
+    pressed = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, pressed) == "systems_write_done"
+    assert posts(fake) == ["/api/stock/documents"]
+    no_more = await press(db_session, bot, task, state.id, confirm.RESEND)
+    assert await run_click(db_session, db_engine, no_more) == "ignored"
+
+
 async def test_revoked_write_permission_voids_the_whole_batch(
     client, app, db_session, db_engine, fake
 ) -> None:

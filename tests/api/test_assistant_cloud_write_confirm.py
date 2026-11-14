@@ -34,6 +34,7 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.db.models.cloud_proxy import CloudCall, CloudPendingApproval
+from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker import cloud_write_cards
 from coreman.runtime.worker.card_actions import CardActionHandler
@@ -518,6 +519,30 @@ async def test_an_expired_card_runs_nothing(
     )
     assert writes(aliyun_mock) == [] and "过期" in await last_update(db_session)
     assert await resumed(db_session, state) is None
+
+
+@pytest.mark.usefixtures("settings")
+async def test_an_expired_card_is_resent_by_the_owner_and_runs_once_confirmed(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    aliyun_mock: respx.MockRouter,
+) -> None:
+    bot, _, task, state = await staged_and_sent(client, app, db_session)
+    state.expires_at = utcnow() - timedelta(seconds=1)
+    await db_session.commit()
+    late = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, late) == "expired"
+    assert "重新发起" in await last_update(db_session) and writes(aliyun_mock) == []
+    resend = await press(db_session, bot, task, state.id, systems_confirm.RESEND)
+    assert await run_click(db_session, db_engine, resend) == "cloud_write_resent"
+    card = await sent_card(db_session)
+    assert card.dedupe_key == f"cloud-write:{state.id}:resend:1"
+    assert "AddAccessControlListEntry" in card_text(card)
+    pressed = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, pressed) == "cloud_write_done"
+    assert len(writes(aliyun_mock)) == 1
 
 
 @pytest.mark.usefixtures("settings")

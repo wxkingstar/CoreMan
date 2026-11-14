@@ -109,6 +109,12 @@ class AssistantApprovalResultHandler(SilentTurnHandler):
         except ValueError:
             return None
         row = await session.get(AssistantApproval, key, populate_existing=True)
+        if row is not None and row.bot_id == bot.id and row.batch_id is not None:
+            # 合单：各项都有了结论才投回，一轮里逐项说明。
+            rows = await service.members(session, row, lock=False)
+            if any(item.status in service.LIVE or sealed.is_locked(item) for item in rows):
+                return None
+            return service.batch_text(rows)
         if (
             row is None
             or row.bot_id != bot.id

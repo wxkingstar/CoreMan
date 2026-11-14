@@ -19,7 +19,9 @@ from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, Identifier, Short, input_schema
 
 STAGED_NOTE = (
-    " Not executed now: staged for the owner's approval and returns pending_approval."
+    " Not executed now: staged for the owner's confirmation. When the owner messaged you"
+    " himself this turn, returns pending_confirmation and he confirms a card when the turn"
+    " ends; otherwise returns pending_approval and this turn's writes go out as one approval."
     " Put chat_id, anchor_message_id, background and research in `approval`."
 )
 

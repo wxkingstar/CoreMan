@@ -38,9 +38,9 @@ ENTITY_SELECTS = {
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 调度单：同一份内容有没有在途的单，session.scalar（自动还原）
     "coreman/core/assistants/approvals/dispatching.py": 1,
-    # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表与清理附件显式还原；
-    # 撤回与过期只改状态
-    "coreman/core/assistants/approvals/service.py": 7,
+    # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表、清理附件与取合单的
+    # 各项显式还原；撤回与过期只改状态
+    "coreman/core/assistants/approvals/service.py": 8,
     # 下班编译：被拒与已执行的审批单，显式还原后把摘要写进子任务的交代（密文列）
     "coreman/core/assistants/compiling.py": 1,
     # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
@@ -74,7 +74,8 @@ ENTITY_SELECTS = {
     "coreman/core/escalations/service.py": 2,  # session.scalar；只读状态
     "coreman/core/knowledge/installation.py": 1,  # session.scalar
     "coreman/core/reminders.py": 1,  # 交互状态，session.scalar
-    "coreman/core/systems_catalog/confirm.py": 1,  # 写操作确认批次，session.scalar
+    # 写操作确认批次，session.scalar；过期与保留期满的清理取整行后显式还原
+    "coreman/core/systems_catalog/confirm.py": 2,
     "coreman/runtime/gateway_common/inbound.py": 1,  # session.scalar
     "coreman/runtime/gateway_feishu/reply_buttons.py": 2,  # 都是 session.scalar
     "coreman/runtime/gateway_feishu/transport.py": 1,  # 显式还原，跳过不可读的行
@@ -92,6 +93,7 @@ ENTITY_SELECTS = {
     "coreman/runtime/worker/skill_install.py": 1,  # session.scalar
     "coreman/runtime/worker/systems_write_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/cloud_write_cards.py": 1,  # 交互状态，session.scalar
+    "coreman/runtime/worker/assistant_write_cards.py": 1,  # 交互状态，session.scalar
 }
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
@@ -115,6 +117,8 @@ COLUMN_REFERENCES = {
     "coreman/core/knowledge/installation.py": 1,  # 明文键 skill_id
     "coreman/core/personal_schedules.py": 1,  # 明文键 user_id
     "coreman/core/reminders.py": 1,  # 明文键 user_id
+    # 确认卡过期时找到发出去的那张卡：只按下划线开头的明文键（消息编号）取值
+    "coreman/core/systems_catalog/confirm.py": 1,
     "coreman/runtime/gateway_common/inbound.py": 7,  # 明文键
     "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键
     "coreman/runtime/gateway_feishu/reply_buttons.py": 1,  # 下划线开头的明文键
@@ -139,8 +143,11 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/approvals/dispatching.py": 1,
     # 代理写操作的审批单：经 ORM 新建（flush 钩子封存完整请求）
     "coreman/core/assistants/approvals/proxied.py": 1,
-    # 审批单：经 ORM 新建（flush 钩子封存）
-    "coreman/core/assistants/approvals/service.py": 1,
+    # 审批单：经 ORM 新建（flush 钩子封存）；本轮结束时合并提交的各项（含没提交成、另建的失败行）
+    # 同样经 ORM 新建
+    "coreman/core/assistants/approvals/service.py": 3,
+    # 一轮里暂存的飞书写：经 ORM 新建与修改，flush 钩子用所有者的数据密钥封存暂存的内容
+    "coreman/core/assistants/approvals/batch.py": 1,
     # 投递：绑定任务号、记「交回过」、记已交回、放回、作废，五条都只写元数据
     "coreman/core/assistants/delivery.py": 5,
     # 摘要：待汇报经 ORM 新建（flush 钩子封存正文）；另一条只写发出时间

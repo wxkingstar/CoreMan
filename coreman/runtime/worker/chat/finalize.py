@@ -665,6 +665,25 @@ class FinalizeStage(ChatStageBase):
             ctx.log.info("systems_write_card_queued")
         if cloud_sent:
             ctx.log.info("cloud_write_card_queued")
+        if pre.intake.bot.kind == "assistant":
+            await self._release_assistant_writes(ctx, pre, send)
+
+    async def _release_assistant_writes(self, ctx: TaskContext, pre: Prepared, send: bool) -> None:
+        """个人助理本轮暂存的飞书写：在场的发确认卡，无人在场的合成一张审批单提交；没正常结束的
+        整批作废。出了意外只记日志：没交出去的批次由确认卡的清理任务删掉，不影响这一轮。"""
+        from coreman.core.assistants.approvals import batch
+
+        try:
+            async with ctx.session_factory() as session:
+                released = await batch.release(
+                    session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("assistant_writes_release_failed", error=type(exc).__name__)
+            return
+        if released:
+            ctx.log.info("assistant_writes_released", mode=released)
 
     @staticmethod
     async def _icon_url(ctx: TaskContext) -> str:

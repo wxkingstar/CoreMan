@@ -135,7 +135,7 @@ async def handle(
 ) -> str:
     """The caller proved the card was sent by us to this chat. Staged values stay out of logs."""
     verb, _, raw_id = str(action.get("level") or "").partition(":")
-    if verb not in ("confirm", "cancel"):
+    if verb not in ("confirm", "cancel", confirm.RESEND):
         return "ignored"
     try:
         origin = await session.get(Task, int(str(action["task_id"]).split(":")[1]))
@@ -168,11 +168,25 @@ async def handle(
     who = await _clicker(session, origin, inbound, str(staged.get("chat_type")))
     if who is None or str(who[0]) != staged.get("user_id") or who[1] != staged.get("chat_id"):
         return "ignored"
+    now = utcnow()
+    where: dict[str, Any] = {
+        "dedupe_key": f"{inbound.id}:card_update",
+        "chat_id": inbound.chat_id,
+        "message_id": inbound.reply_context.get("message_id"),
+    }
+    if verb == confirm.RESEND:
+        # 过期卡片上的「重新发起」：同一份暂存内容发一张新卡，确认时照样整批复查。
+        if not confirm.lapsed(state, now):
+            return "ignored"
+        body = confirm.card(origin.id, state.id, confirm.unseal(ctx.cipher, origin.id, staged))
+        if await confirm.resend(session, state, body, now, **where):
+            return "systems_write_resent"
+        await confirm.expire(session, state, now, **where)
+        return "expired"
     if state.status != "open":
         return "expired"
-    if state.expires_at is not None and state.expires_at <= utcnow():
-        state.status = "expired"
-        await _update(session, bot, inbound, "这张确认卡片已过期，没有执行。")
+    if state.expires_at is not None and state.expires_at <= now:
+        await confirm.expire(session, state, now, **where)
         return "expired"
     items = confirm.unseal(ctx.cipher, origin.id, staged)
     if verb == "cancel":

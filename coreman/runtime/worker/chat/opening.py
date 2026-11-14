@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns
+from coreman.core.assistants.approvals import batch as assistant_writes
 from coreman.core.assistants.kinds import BOT_HELP_KIND, COLD_START_KIND
 from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
@@ -375,6 +376,10 @@ class OpenStage(ChatStageBase):
         if isinstance(cloud_written, str):
             # 个人助理的云服务写操作确认卡点完后的续接：平台按暂存内容执行的结果。
             ctx.turn_notes.append("- 云服务写操作：" + cloud_written)
+        feishu_written = ctx.task.payload.get(assistant_writes.RESULT_KEY)
+        if isinstance(feishu_written, str):
+            # 个人助理的飞书写操作确认卡点完后的续接：平台按暂存内容执行的各项结果。
+            ctx.turn_notes.append("- 飞书写操作：" + feishu_written)
         if ctx.task.payload.get("api_task_id"):
             from coreman.runtime.worker.chat import api
 

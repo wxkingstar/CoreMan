@@ -39,7 +39,7 @@ from coreman.core.assistants import (
     settings_tools,
     voice_tools,
 )
-from coreman.core.assistants.approvals import catalog, service, tower
+from coreman.core.assistants.approvals import batch, catalog, service, tower
 from coreman.core.assistants.approvals import tools as approval_tools
 from coreman.core.assistants.kinds import COLD_START_KIND, SUBTASK_KIND
 from coreman.core.crypto import Cipher
@@ -172,6 +172,13 @@ async def dispatch(
     if catalog.is_write(name):
         if "approval" not in allowed:
             return {"error": _INVALID}
+        # 在场的一轮出确认卡、无人在场的一轮合成一张审批单，都在本轮结束时交出去（`batch`）；
+        # 别的轮次照旧当场提交审批单。
+        staged = await batch.propose(
+            ctx.session, ctx.cipher, ctx.scope, name, arguments, cfg=ctx.cfg, files=ctx.files
+        )
+        if staged is not None:
+            return staged
         return await service.submit(
             ctx.session, ctx.cipher, ctx.scope, name, arguments, cfg=ctx.cfg, files=ctx.files
         )

@@ -214,16 +214,19 @@ def urgent_card(lines: list[str]) -> dict[str, Any]:
     return _card("需要你马上知道", "orange", [_plain("\n".join(f"· {line}" for line in lines))])
 
 
-def _approval_summary(row: AssistantApproval) -> str:
+def _approval_summary(row: AssistantApproval, items: int = 1) -> str:
+    """一张单一行：平台生成的摘要；一轮里合成的单另注明共几项。"""
     stored = row.args_enc if isinstance(row.args_enc, dict) else {}
     found = stored.get("abstract")
-    return _clean(found) if isinstance(found, str) and found else row.tool
+    text = _clean(found) if isinstance(found, str) and found else row.tool
+    return f"{text} 等，共 {items} 项（一张单）" if items > 1 else text
 
 
 def digest_card(
     *,
     approvals: list[AssistantApproval],
     approvals_total: int,
+    approval_items: dict[uuid.UUID, int] | None = None,
     owner_items: list[AssistantFollowup],
     owner_total: int,
     reports: list[str],
@@ -235,7 +238,12 @@ def digest_card(
     elements: list[dict[str, Any]] = []
     if approvals:
         elements.append(_heading(f"等你批的（{approvals_total}）"))
-        elements.append(_plain("\n".join(f"· {_approval_summary(row)}" for row in approvals)))
+        sizes = approval_items or {}
+        elements.append(
+            _plain(
+                "\n".join(f"· {_approval_summary(row, sizes.get(row.id, 1))}" for row in approvals)
+            )
+        )
         if approvals_total > len(approvals):
             elements.append(_plain(f"另有 {approvals_total - len(approvals)} 张", "notation"))
         name = system or "审批系统"
@@ -348,26 +356,43 @@ async def _send(
 
 async def _pending_approvals(
     session: AsyncSession, bot_id: uuid.UUID
-) -> tuple[list[AssistantApproval], int, datetime | None]:
-    """在途的审批单（早的在前，至多 `LIST_MAX` 张，内容已还原）、总张数、最晚一张的提交时刻。"""
+) -> tuple[list[AssistantApproval], int, datetime | None, dict[uuid.UUID, int]]:
+    """在途的审批单：每张单一行（早的在前，至多 `LIST_MAX` 张，内容已还原）、总张数、最晚一张
+    的提交时刻，以及合单的项数（按代表那张单的行的编号）。一轮里合成一张的几项只算一张。"""
+    pending = (AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
+    key = func.coalesce(AssistantApproval.batch_id, AssistantApproval.id)
     total, newest = (
         await session.execute(
-            select(func.count(AssistantApproval.id), func.max(AssistantApproval.created_at)).where(
-                AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending"
+            select(func.count(func.distinct(key)), func.max(AssistantApproval.created_at)).where(
+                *pending
             )
         )
     ).one()
+    grouped = (
+        await session.execute(
+            select(key, func.count())
+            .where(*pending)
+            .group_by(key)
+            .order_by(func.min(AssistantApproval.created_at), key)
+            .limit(LIST_MAX)
+        )
+    ).all()
+    counts = {group: int(count) for group, count in grouped}
     rows = list(
         await session.scalars(
             select(AssistantApproval)
-            .where(AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
-            .order_by(AssistantApproval.created_at)
-            .limit(LIST_MAX)
+            .where(*pending, key.in_(list(counts)))
+            .order_by(AssistantApproval.created_at, AssistantApproval.id)
             .execution_options(populate_existing=True)
         )
     )
     await sealed.open_rows(session, rows)
-    return rows, int(total or 0), newest
+    first: dict[uuid.UUID, AssistantApproval] = {}
+    for row in rows:
+        first.setdefault(row.batch_id or row.id, row)
+    shown = [first[group] for group in counts if group in first]
+    sizes = {first[group].id: counts[group] for group in counts if group in first}
+    return shown, int(total or 0), newest, sizes
 
 
 def _newer(value: datetime | None, since: datetime | None) -> bool:
@@ -384,7 +409,7 @@ async def send_digest(
     都列全。
     """
     reports = await _reports(session, bot.id, urgent_only=False)
-    approvals, approvals_total, newest = await _pending_approvals(session, bot.id)
+    approvals, approvals_total, newest, sizes = await _pending_approvals(session, bot.id)
     today = assistant_settings.local_today(prefs, now)
     owner_items = await followups.needs_owner(session, bot.id, today, limit=LIST_MAX + 1)
     owner_total = await followups.needs_owner_count(session, bot.id)
@@ -404,6 +429,7 @@ async def send_digest(
     card = digest_card(
         approvals=approvals,
         approvals_total=approvals_total,
+        approval_items=sizes,
         owner_items=shown,
         owner_total=owner_total,
         reports=lines,

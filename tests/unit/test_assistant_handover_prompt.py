@@ -60,3 +60,9 @@ def test_rules_describe_an_interrupted_turn_the_way_the_platform_handles_it() ->
 def test_standard_bot_guidance_does_not_mention_handovers() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
     assert "交回事项" not in rules
+
+
+def test_rules_say_a_handover_turns_writes_go_out_as_one_approval() -> None:
+    """交回这一轮的飞书写先暂存、本轮结束时合成一张审批单；被打断那一轮暂存的没有提交。"""
+    text = handover_prompt.RULES
+    assert "合成一张审批单" in text and "整批作废" in text and "重新起草" in text

@@ -8,9 +8,10 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
+from sqlalchemy import select
 
-from coreman.core.assistants.approvals import attachments, execute, service, tower
-from coreman.core.db.models import AssistantApproval
+from coreman.core.assistants.approvals import attachments, batch
+from coreman.core.db.models import Bot, InteractionState, OutboxItem, Task
 from coreman.core.feishu_personal.files import FileRelay
 from tests.api.test_assistant_approval_gate import (  # noqa: F401
     FEISHU,
@@ -54,7 +55,7 @@ async def upload(client: httpx.AsyncClient, auth: dict[str, str]) -> str:
 
 
 @pytest.mark.usefixtures("tower_ready")
-async def test_file_reaches_feishu_only_after_approval_and_unchanged(
+async def test_file_reaches_feishu_only_after_the_owner_confirms_and_unchanged(
     client: httpx.AsyncClient,
     app: Any,
     db_session: Any,
@@ -73,38 +74,68 @@ async def test_file_reaches_feishu_only_after_approval_and_unchanged(
         out = value(
             await client.post(URL, headers=auth, json=rpc("feishu_save_to_drive", arguments))
         )
-    assert out["status"] == "pending_approval" and not saved.called
+    assert out["status"] == "pending_confirmation" and not saved.called
     (key,) = bucket.objects
-    assert bucket.objects[key] == CONTENT
-    assert f"https://tmp.example.com/{key}" in fake.submitted[0]["content"]
-    assert '- "方案.pdf"（application/pdf，13 B）' in fake.submitted[0]["content"]
-    row = await db_session.get(AssistantApproval, out["approval_id"])
-    await service.decide(
-        db_session,
-        approval_id=row.approval_id,
-        external_id=row.external_id,
-        status="approved",
-        reason=None,
-        decided_at=None,
-    )
-    await db_session.commit()
-    # 批准之后：从临时桶取回、重新落进中转区，交给原来的工具函数以所有者身份上传。
+    assert bucket.objects[key] == CONTENT and fake.submitted == []
+    # 本轮结束：确认卡列出文件名、类型与大小，附件另有平台写的查看链接。
+    monkeypatch.setattr(batch, "_store", lambda: attachments.store(app.state.settings))
+    async with app.state.session_factory() as session:
+        assert await batch.release(session, bot_id=task.bot_id, task_id=task.id, send=True)
+        await session.commit()
+    card = await db_session.scalar(select(OutboxItem).where(OutboxItem.kind == "send"))
+    elements = card.payload["card"]["body"]["elements"]
+    assert '"方案.pdf"（application/pdf，13 B）' in elements[0]["text"]["content"]
+    assert f"(https://tmp.example.com/{key}?expires=3600)" in elements[1]["content"]
+    # 所有者确认之后：从临时桶取回、核对、重新落进中转区，交给原来的工具函数以所有者身份上传。
+    state = await batch_state(db_session)
     relay = FileRelay(app.state.settings, app.state.cipher)
-    with respx.mock as mock:
-        saved = mock.post(UPLOAD).mock(return_value=ok({"file_token": "box_1"}))
-        status = await execute.run(
-            app.state.session_factory,
-            app.state.cipher,
-            row.id,
-            task,
-            tower.config(app.state.settings),
-            relay,
-        )
-    assert status == "executed" and saved.call_count == 1
+    async with app.state.session_factory() as session:
+        bot = await session.get(Bot, task.bot_id)
+        origin = await session.get(Task, task.id)
+        with respx.mock as mock:
+            saved = mock.post(UPLOAD).mock(return_value=ok({"file_token": "box_1"}))
+            ran = await batch.run_confirmed(
+                app.state.session_factory,
+                session,
+                app.state.cipher,
+                bot,
+                origin,
+                state.state["items"],
+                relay,
+            )
+        await session.commit()
+    assert isinstance(ran, list) and ran[0] is not None and ran[0][1] is None
+    assert saved.call_count == 1
     request = saved.calls[0].request
     assert request.headers["authorization"] == "Bearer user-secret"
     assert CONTENT in request.content and b'name="parent_node"\r\n\r\nfld_1' in request.content
-    assert len(fake.redeemed) == 1
+    # 桶里的内容被换掉：核对不过，整批不执行。
+    bucket.objects[key] = b"tampered"
+    async with app.state.session_factory() as session:
+        bot = await session.get(Bot, task.bot_id)
+        origin = await session.get(Task, task.id)
+        with respx.mock as mock:
+            again = mock.post(UPLOAD).mock(return_value=ok({"file_token": "box_1"}))
+            refused = await batch.run_confirmed(
+                app.state.session_factory,
+                session,
+                app.state.cipher,
+                bot,
+                origin,
+                state.state["items"],
+                relay,
+            )
+    assert refused == (1, "attachment_changed") and not again.called
+
+
+async def batch_state(session: Any) -> Any:
+    found = await session.scalar(
+        select(InteractionState)
+        .where(InteractionState.kind == batch.KIND)
+        .execution_options(populate_existing=True)
+    )
+    assert found is not None
+    return found
 
 
 @pytest.mark.usefixtures("tower_ready")

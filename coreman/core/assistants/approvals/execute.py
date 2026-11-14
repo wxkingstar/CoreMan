@@ -121,141 +121,77 @@ async def _remember_sent(
         log.warning("assistant_sent_record_failed", type=type(exc).__name__)
 
 
-async def _close(
-    session: AsyncSession,
-    row: AssistantApproval,
-    bot: Bot,
-    status: str,
-    code: str | None = None,
-    result: Any = None,
-) -> str:
-    row.status, row.error_code = status, code
-    if result is not None:
-        row.result_enc = service.bounded_result(result)
-    if status == "executed":
-        row.executed_at = utcnow()
-    await service.deliver(session, row, bot)
-    await session.commit()
-    return status
+class Unrunnable(Exception):
+    """一项的附件取不回来或对不上：这一项不能执行。`code` 是原因代码。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
-async def _report(
-    cfg: tower.Config | None, approval: str | None, status: str, code: str | None
+def calls_of(row: AssistantApproval) -> list[dict[str, Any]]:
+    return list((row.args_enc or {}).get("calls") or [])
+
+
+async def check_calls(
+    session: AsyncSession, cipher: Cipher, scope: Scope, tool: str, calls: list[dict[str, Any]]
 ) -> None:
-    """告诉 Tower 这张单最后有没有执行；报不上只记日志，不影响本地结果。"""
-    if cfg is None or not approval:
-        return
-    try:
-        await tower.report(cfg, approval, "executed" if status == "executed" else "failed", code)
-    except tower.TowerError as exc:
-        log.warning("assistant_approval_report_failed", code=exc.code)
-
-
-async def run(
-    factory: async_sessionmaker[AsyncSession],
-    cipher: Cipher,
-    approval_id: uuid.UUID,
-    task: Task,
-    cfg: tower.Config | None,
-    files: FileRelay | None = None,
-) -> str:
-    """执行一张已批准的单，返回它最后的状态。
-
-    Args:
-        files: 文件中转；带文件的单要用它把附件交给原工具，没有时这类单记为失败
+    """执行前复查一项：重新读会话、核对锚点与目标（与提交时同一套检查）。
 
     Raises:
-        Retry: 取附件、取令牌或核销时对方不可用；审批单保持 approved，没有任何副作用
+        checks.Rejected: 会话或目标变了，这一项不该再执行
+        PersonalError: 所有者的授权失效
     """
-    async with factory() as session:
-        row = await session.get(
-            AssistantApproval, approval_id, with_for_update=True, populate_existing=True
-        )
-        if row is None or row.status != "approved":
-            return row.status if row is not None else "missing"
-        await sealed.guard_logs(session, row.bot_id)
-        bot = await session.get(Bot, row.bot_id)
-        approval, tool = row.approval_id, row.tool
-        if bot is None or not bot.enabled or sealed.is_locked(row):
-            # 助理已停用或数据密钥已销毁：参数读不出来，无法执行，也没有会话可以投回。
-            code = sealed.LOCKED_CODE if sealed.is_locked(row) else "assistant_inactive"
-            row.status, row.error_code = "failed", code
-            await session.commit()
-            await _report(cfg, approval, "failed", code)
-            return "failed"
-        if row.execute_started_at is not None:
-            # 上一次已经开始调飞书、没等到结果：不知道是否生效，绝不再执行一次。
-            status = await _close(session, row, bot, "failed", "execution_interrupted")
-            await _report(cfg, approval, status, "execution_interrupted")
-            return status
-        scope = await owner_scope(session, bot, task)
-        if scope is None or cfg is None or not approval:
-            code = "authorization_required" if scope is None else service.UNAVAILABLE
-            status = await _close(session, row, bot, "failed", code)
-            await _report(cfg, approval, status, code)
-            return status
-        calls = list((row.args_enc or {}).get("calls") or [])
-        reader = Call(session, cipher, scope)
-        assistant_id = row.bot_id
+    reader = Call(session, cipher, scope)
+    assistant_id = scope.bot.id
 
-        async def ours(message_ids: list[str]) -> frozenset[str]:
-            # 同会话的另一张单刚由平台代发出去：那条消息不算所有者亲自回复，这张单不因此过时。
-            return await sent.among(session, assistant_id, message_ids)
+    async def ours(message_ids: list[str]) -> frozenset[str]:
+        # 同会话的另一张单刚由平台代发出去：那条消息不算所有者亲自回复，这张单不因此过时。
+        return await sent.among(session, assistant_id, message_ids)
 
-        try:
-            for one in calls:
-                await checks.check_call(reader, tool, one, owner_open_id=scope.open_id, ours=ours)
-        except checks.Rejected as exc:
-            status = await _close(session, row, bot, "stale", exc.code)
-            await _report(cfg, approval, status, "stale")
-            return status
-        except PersonalError as exc:
-            status = await _close(session, row, bot, "failed", exc.code)
-            await _report(cfg, approval, status, exc.code)
-            return status
-        # 先取回附件再核销：附件有问题时不白白用掉这次批准的令牌。
-        blobs: dict[str, bytes] = {}
-        refs = attachments.references(calls)
-        store = attachments.store(files.settings) if files is not None else None
-        if refs and store is None:
-            status = await _close(session, row, bot, "failed", "attachments_not_supported")
-            await _report(cfg, approval, status, "attachments_not_supported")
-            return status
-        try:
-            for ref in refs:
-                assert store is not None
-                blobs[ref["key"]] = await attachments.get(store, ref)
-        except attachments.Unavailable:
-            raise Retry("attachment_store_unavailable") from None
-        except (attachments.Missing, attachments.Changed) as exc:
-            # 被清理掉了，或桶里的内容不是提交时的那一份：不执行。
-            missing = isinstance(exc, attachments.Missing)
-            code = "attachment_missing" if missing else "attachment_changed"
-            status = await _close(session, row, bot, "failed", code)
-            await _report(cfg, approval, status, code)
-            return status
-        req_hash = tower.request_hash(
-            cfg, row.external_id, tower.request_body(tool, calls), bot.bot_key
-        )
-        try:
-            redeemed = await tower.redeem(
-                cfg, await tower.token(cfg, approval), req_hash, bot.bot_key
-            )
-        except tower.TowerError as exc:
-            if exc.unavailable:
-                raise Retry from None
-            # 令牌已用、已过期、请求对不上：这次批准作废，不执行。
-            status = await _close(session, row, bot, "failed", exc.code)
-            await _report(cfg, approval, status, exc.code)
-            return status
-        if redeemed != approval:
-            status = await _close(session, row, bot, "failed", "approval_mismatch")
-            await _report(cfg, approval, status, "approval_mismatch")
-            return status
-        row.execute_started_at = utcnow()
-        bot_id = bot.id
-        await session.commit()
+    for one in calls:
+        await checks.check_call(reader, tool, one, owner_open_id=scope.open_id, ours=ours)
 
+
+async def fetch(
+    files: FileRelay | None, calls: list[dict[str, Any]], blobs: dict[str, bytes]
+) -> None:
+    """取回一项的附件并核对大小与 SHA-256，放进 `blobs`。
+
+    Raises:
+        Retry: 临时桶暂时连不上（什么都没变，稍后重来）
+        Unrunnable: 部署没配临时桶、附件已被清理或内容不是提交时的那一份
+    """
+    refs = attachments.references(calls)
+    if not refs:
+        return
+    store = attachments.store(files.settings) if files is not None else None
+    if store is None:
+        raise Unrunnable("attachments_not_supported")
+    try:
+        for ref in refs:
+            blobs[ref["key"]] = await attachments.get(store, ref)
+    except attachments.Unavailable:
+        raise Retry("attachment_store_unavailable") from None
+    except (attachments.Missing, attachments.Changed) as exc:
+        missing = isinstance(exc, attachments.Missing)
+        raise Unrunnable("attachment_missing" if missing else "attachment_changed") from None
+
+
+async def perform(
+    factory: async_sessionmaker[AsyncSession],
+    cipher: Cipher,
+    bot_id: uuid.UUID,
+    task: Task,
+    tool: str,
+    calls: list[dict[str, Any]],
+    blobs: dict[str, bytes],
+    files: FileRelay | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """以所有者身份按暂存的参数原样执行一项，自己一个短事务。返回 (各次结果, 失败)。
+
+    调用方已复查、已记下「开始执行」并提交：这里不再看审批单，也不持有它的行锁。
+    """
     results: list[dict[str, Any]] = []
     failure: dict[str, Any] | None = None
     async with factory() as session:
@@ -291,6 +227,197 @@ async def run(
         except Exception as exc:  # noqa: BLE001
             await session.rollback()
             log.warning("assistant_approval_commit_failed", type=type(exc).__name__)
+    return results, failure
+
+
+def _outcome(rows: list[AssistantApproval]) -> str:
+    """投回与返回用的结局：单独成单的是它的状态，合单统一记 `settled`（各项的结局在各项上）。"""
+    return rows[0].status if len(rows) == 1 else "settled"
+
+
+def _set(
+    rows: list[AssistantApproval], status: str, code: str | None = None, result: Any = None
+) -> None:
+    for row in rows:
+        row.status, row.error_code = status, code
+        if result is not None:
+            row.result_enc = service.bounded_result(result)
+        if status == "executed":
+            row.executed_at = utcnow()
+
+
+async def _close(
+    session: AsyncSession,
+    row: AssistantApproval,
+    bot: Bot,
+    status: str,
+    code: str | None = None,
+    result: Any = None,
+) -> str:
+    """单独成单的一行有了结论：记下、投回并提交（调度与代理写操作的执行也用它）。"""
+    _set([row], status, code, result)
+    await service.deliver(session, row, bot)
+    await session.commit()
+    return status
+
+
+async def _settle(
+    session: AsyncSession,
+    head: AssistantApproval,
+    rows: list[AssistantApproval],
+    bot: Bot,
+) -> str:
+    """各项已有结论：投回一轮（合单只投一轮）并提交。"""
+    outcome = _outcome(rows)
+    await service.deliver(session, head, bot, status=outcome)
+    await session.commit()
+    return outcome
+
+
+async def _report(
+    cfg: tower.Config | None, approval: str | None, status: str, code: str | None
+) -> None:
+    """告诉 Tower 这张单最后有没有执行；报不上只记日志，不影响本地结果。"""
+    if cfg is None or not approval:
+        return
+    try:
+        await tower.report(cfg, approval, "executed" if status == "executed" else "failed", code)
+    except tower.TowerError as exc:
+        log.warning("assistant_approval_report_failed", code=exc.code)
+
+
+def _verdict(todo: list[AssistantApproval]) -> tuple[str, str | None]:
+    """上报给 Tower 的结局：批准的各项全部执行了才算 executed，否则是第一项没执行的原因。"""
+    for row in todo:
+        if row.status != "executed":
+            return "failed", "stale" if row.status == "stale" else row.error_code
+    return "executed", None
+
+
+def request_body(rows: list[AssistantApproval]) -> bytes:
+    """审批系统批准的那一份请求体：单独成单是这一项，合单是全部各项（含已撤回的），按单上的顺序。"""
+    if len(rows) == 1 and rows[0].batch_id is None:
+        return tower.request_body(rows[0].tool, calls_of(rows[0]))
+    return tower.batch_body([(row.tool, calls_of(row)) for row in rows])
+
+
+async def run(
+    factory: async_sessionmaker[AsyncSession],
+    cipher: Cipher,
+    approval_id: uuid.UUID,
+    task: Task,
+    cfg: tower.Config | None,
+    files: FileRelay | None = None,
+) -> str:
+    """执行一张已批准的单，返回它最后的状态（合单返回 `settled`，各项的结局记在各项上）。
+
+    合单按单上的顺序执行批准时仍在待批的各项：执行前逐项复查，会话变了的那一项记 stale、
+    不执行，其余照常；执行中某一项失败就停下，后面的项记 `skipped_after_failure`，前面已执行
+    的不撤回。
+
+    Args:
+        approval_id: 单独成单的那一行，或合单的第一项
+        files: 文件中转；带文件的单要用它把附件交给原工具，没有时这类单记为失败
+
+    Raises:
+        Retry: 取附件、取令牌或核销时对方不可用；审批单保持 approved，没有任何副作用
+    """
+    async with factory() as session:
+        row = await session.get(
+            AssistantApproval, approval_id, with_for_update=True, populate_existing=True
+        )
+        if row is None:
+            return "missing"
+        rows = await service.members(session, row)
+        todo = [item for item in rows if item.status == "approved"]
+        if not todo:
+            return row.status if row.batch_id is None else _outcome(rows)
+        await sealed.guard_logs(session, row.bot_id)
+        bot = await session.get(Bot, row.bot_id)
+        approval = row.approval_id
+        locked = any(sealed.is_locked(item) for item in rows)
+        if bot is None or not bot.enabled or locked:
+            # 助理已停用或数据密钥已销毁：参数读不出来，无法执行，也没有会话可以投回。
+            code = sealed.LOCKED_CODE if locked else "assistant_inactive"
+            _set(todo, "failed", code)
+            await session.commit()
+            await _report(cfg, approval, "failed", code)
+            return "failed" if len(rows) == 1 else _outcome(rows)
+        if any(item.execute_started_at is not None for item in todo):
+            # 上一次已经开始调飞书、没等到结果：不知道是否生效，绝不再执行一次。
+            _set(todo, "failed", "execution_interrupted")
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, "failed", "execution_interrupted")
+            return status
+        scope = await owner_scope(session, bot, task)
+        if scope is None or cfg is None or not approval:
+            code = "authorization_required" if scope is None else service.UNAVAILABLE
+            _set(todo, "failed", code)
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, "failed", code)
+            return status
+        try:
+            for item in todo:
+                try:
+                    await check_calls(session, cipher, scope, item.tool, calls_of(item))
+                except checks.Rejected as exc:
+                    _set([item], "stale", exc.code)
+        except PersonalError as exc:
+            _set(todo, "failed", exc.code)
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, "failed", exc.code)
+            return status
+        # 先取回附件再核销：附件有问题时不白白用掉这次批准的令牌。
+        blobs: dict[str, bytes] = {}
+        for item in todo:
+            if item.status != "approved":
+                continue
+            try:
+                await fetch(files, calls_of(item), blobs)
+            except Unrunnable as exc:
+                # 被清理掉了，或桶里的内容不是提交时的那一份：这一项不执行。
+                _set([item], "failed", exc.code)
+        runnable = [item for item in todo if item.status == "approved"]
+        if not runnable:
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, *_verdict(todo))
+            return status
+        head = await service.head_of(session, row)
+        req_hash = tower.request_hash(cfg, head.external_id, request_body(rows), bot.bot_key)
+        try:
+            redeemed = await tower.redeem(
+                cfg, await tower.token(cfg, approval), req_hash, bot.bot_key
+            )
+        except tower.TowerError as exc:
+            if exc.unavailable:
+                raise Retry from None
+            # 令牌已用、已过期、请求对不上：这次批准作废，不执行。
+            _set(runnable, "failed", exc.code)
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, "failed", exc.code)
+            return status
+        if redeemed != approval:
+            _set(runnable, "failed", "approval_mismatch")
+            status = await _settle(session, row, rows, bot)
+            await _report(cfg, approval, "failed", "approval_mismatch")
+            return status
+        started = utcnow()
+        approved = {item.id for item in todo}
+        plan = [(item.id, item.tool, calls_of(item)) for item in runnable]
+        for item in runnable:
+            item.execute_started_at = started
+        bot_id = bot.id
+        await session.commit()
+
+    outcomes: dict[uuid.UUID, tuple[list[dict[str, Any]], dict[str, Any] | None] | None] = {}
+    stopped = False
+    for item_id, tool, calls in plan:
+        if stopped:
+            outcomes[item_id] = None
+            continue
+        results, failure = await perform(factory, cipher, bot_id, task, tool, calls, blobs, files)
+        outcomes[item_id] = (results, failure)
+        stopped = failure is not None
 
     async with factory() as session:
         row = await session.get(
@@ -299,18 +426,22 @@ async def run(
         bot = await session.get(Bot, bot_id)
         if row is None or bot is None:
             return "missing"
-        if row.status != "approved":
+        rows = await service.members(session, row)
+        mine = [item for item in rows if item.id in outcomes and item.status == "approved"]
+        if not mine:
             # 别处（例如超时清理）已经给了结论：不再记一次，也不再投回、上报。
-            return row.status
-        outcome: str | None = None
-        if failure is not None:
-            outcome = str(failure.get("error") or "failed")
-            status = await _close(
-                session, row, bot, "failed", outcome, {"done": results, "failure": failure}
-            )
-        else:
-            status = await _close(session, row, bot, "executed", None, results)
-    await _report(cfg, approval, status, outcome)
+            return row.status if row.batch_id is None else _outcome(rows)
+        for item in mine:
+            done = outcomes[item.id]
+            if done is None:
+                _set([item], "failed", service.SKIPPED)
+            elif done[1] is not None:
+                code = str(done[1].get("error") or "failed")
+                _set([item], "failed", code, {"done": done[0], "failure": done[1]})
+            else:
+                _set([item], "executed", None, done[0])
+        status = await _settle(session, row, rows, bot)
+    await _report(cfg, approval, *_verdict([item for item in rows if item.id in approved]))
     return status
 
 
@@ -325,17 +456,21 @@ async def give_up(
         row = await session.get(
             AssistantApproval, approval_id, with_for_update=True, populate_existing=True
         )
-        if row is None or row.status != "approved":
-            return row.status if row is not None else "missing"
+        if row is None:
+            return "missing"
+        rows = await service.members(session, row)
+        todo = [item for item in rows if item.status == "approved"]
+        if not todo:
+            return row.status if row.batch_id is None else _outcome(rows)
         bot = await session.get(Bot, row.bot_id)
         approval = row.approval_id
+        _set(todo, "failed", code)
         if bot is None:
-            row.status, row.error_code = "failed", code
             await session.commit()
-            status = "failed"
+            status = "failed" if len(rows) == 1 else _outcome(rows)
         else:
-            status = await _close(session, row, bot, "failed", code)
-    await _report(cfg, approval, status, code)
+            status = await _settle(session, row, rows, bot)
+    await _report(cfg, approval, "failed", code)
     return status
 
 
@@ -343,14 +478,16 @@ async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config 
     """批准之后一直没有结论、也没有在途执行任务的单：记为失败并告诉助理与 Tower。
 
     已记下开始执行的是 `execution_interrupted`（不知道是否生效）；没有记下的是
-    `execution_not_started`（什么都没执行，可以重新提交）。
+    `execution_not_started`（什么都没执行，可以重新提交）。合单的执行任务挂在第一项上，
+    各项一起收口，只投回一轮。
 
     参考时间取 `execute_started_at`，没有则取 `decided_at`（批准落库的时间）。不提交，由调用方
-    的事务负责。返回关掉的张数。
+    的事务负责。返回关掉的项数。
     """
     since = now - STUCK_AFTER
+    key = func.coalesce(AssistantApproval.batch_id, AssistantApproval.id)
     alive = exists().where(
-        Task.dedupe_key == func.concat("assistant-approval:", AssistantApproval.id, ":execute"),
+        Task.dedupe_key == func.concat("assistant-approval:", key, ":execute"),
         Task.status.in_(tasks.OPEN),
     )
     ids = list(
@@ -364,6 +501,7 @@ async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config 
         )
     )
     closed = 0
+    settled: set[uuid.UUID] = set()
     for approval_id in ids:
         row = await session.get(
             AssistantApproval,
@@ -371,23 +509,36 @@ async def recover_stuck(session: AsyncSession, now: datetime, cfg: tower.Config 
             with_for_update={"skip_locked": True},
             populate_existing=True,
         )
-        if row is None or row.status != "approved":
+        if row is None or row.status != "approved" or (row.batch_id or row.id) in settled:
             continue
         await sealed.guard_logs(session, row.bot_id)
+        rows = await service.members(session, row)
+        todo = [item for item in rows if item.status == "approved"]
+        settled.add(row.batch_id or row.id)
         bot = await session.get(Bot, row.bot_id)
         approval = row.approval_id
-        if bot is None or not bot.enabled or sealed.is_locked(row):
-            code = sealed.LOCKED_CODE if sealed.is_locked(row) else "assistant_inactive"
-            row.status, row.error_code = "failed", code
+        locked = any(sealed.is_locked(item) for item in rows)
+        if bot is None or not bot.enabled or locked:
+            code = sealed.LOCKED_CODE if locked else "assistant_inactive"
+            _set(todo, "failed", code)
         else:
             # 没记下「开始执行」就说明一次飞书调用都没发过：与「调到一半被杀」分开说。
             code = (
                 "execution_interrupted"
-                if row.execute_started_at is not None
+                if any(item.execute_started_at is not None for item in todo)
                 else "execution_not_started"
             )
-            row.status, row.error_code = "failed", code
-            await service.deliver(session, row, bot)
+            for item in todo:
+                _set(
+                    [item],
+                    "failed",
+                    "execution_interrupted"
+                    if item.execute_started_at is not None
+                    else "execution_not_started",
+                )
+            await service.deliver(
+                session, await service.head_of(session, row), bot, status=_outcome(rows)
+            )
         await _report(cfg, approval, "failed", code)
-        closed += 1
+        closed += len(todo)
     return closed

@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from coreman.core.assistants import keys, sealed
 from coreman.core.assistants.approvals import catalog, tower
-from coreman.core.db.models import AssistantApproval
+from coreman.core.db.models import AssistantApproval, InteractionState
 from coreman.core.feishu_personal import endpoints
 from tests.api.test_feishu_personal import URL, grant, headers, rpc, setup, value
 from tests.integration.approval_helpers import install_tower, message, reply
@@ -97,10 +97,16 @@ async def test_assistant_write_is_staged_and_never_reaches_feishu(
                 json=rpc("feishu_reply_message", reply()),
             )
         )
-    assert out["status"] == "pending_approval" and out["approval_id"]
+    # 所有者本人私聊发来的一轮：暂存进本轮的确认卡，不提交审批系统，也不调飞书的写接口。
+    assert out["status"] == "pending_confirmation" and out["pending"] == 1
+    assert "确认卡" in out["hint"] and "不要重试" in out["hint"]
     assert not sent.called
-    assert len(fake.submitted) == 1 and fake.submitted[0]["requester"] == "personal-reader"
-    assert await approvals(db_session) == 1
+    assert fake.submitted == [] and await approvals(db_session) == 0
+    state = await db_session.scalar(
+        select(InteractionState).where(InteractionState.kind == "assistant_write")
+    )
+    assert state is not None and state.state["mode"] == "card"
+    assert [item["tool"] for item in state.state["items"]] == ["feishu_reply_message"]
 
 
 @pytest.mark.usefixtures("tower_ready")
@@ -122,9 +128,11 @@ async def test_assistant_reads_run_as_before(
     assert fake.submitted == [] and await approvals(db_session) == 0
 
 
-async def test_without_an_approval_service_the_write_fails_closed(
+async def test_without_an_approval_service_the_owner_still_confirms_on_a_card(
     client: httpx.AsyncClient, app: Any, db_session: Any
 ) -> None:
+    """在场的确认卡不经审批系统：没配审批系统照样暂存，等所有者点卡，绝不当场执行。
+    （无人在场的一轮没配审批系统时照旧失败关闭，见 test_assistant_write_batches。）"""
     _, user, task = await owner_turn(db_session, app, assistant=True)
     with respx.mock as mock:
         sent = chat(mock)
@@ -135,7 +143,7 @@ async def test_without_an_approval_service_the_write_fails_closed(
                 json=rpc("feishu_reply_message", reply()),
             )
         )
-    assert out["error"] == "approval_service_unavailable"
+    assert out["status"] == "pending_confirmation"
     assert not sent.called and await approvals(db_session) == 0
 
 

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
+from coreman.core.assistants.approvals import batch as assistant_writes
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox, tasks
 from coreman.core.chat import busy_choice
@@ -40,6 +41,7 @@ _NOT_PLAIN = (
     resume.CONFIRM_RESULT_KEY,
     systems_confirm.RESULT_KEY,
     cloud_confirm.RESULT_KEY,
+    assistant_writes.RESULT_KEY,
 )
 _NOTE = (
     "（以上几条是你处理上一轮时，同一个人陆续发来的，按发送时间排列。"

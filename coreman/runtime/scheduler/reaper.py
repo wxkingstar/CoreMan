@@ -54,6 +54,7 @@ from coreman.core.logging import get_logger
 from coreman.core.personal_credentials import service as credential_requests
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
+from coreman.core.systems_catalog import confirm as systems_confirm
 
 # worker 每 10 秒写一次任务心跳，60 秒一次都没写上来就当这个 worker 没了。
 TASK_TIMEOUT_SECONDS = 60
@@ -570,6 +571,8 @@ async def run_cleanup(
         "purged_instances": await _run(factory, purge_instances, now),
         # 待答状态到点置 expired。读路径（get_open）本来就按 expires_at 过滤，不靠这一步才正确；
         # 但卡片回调是按 task_id 前缀反查的，那条路没有时间条件，得靠 status 认出「这轮已经过期」。
+        # 确认卡：过期的改成可以重新发起，过了保留期（第一次发卡后 24 小时）的连同暂存内容清掉。
+        "confirm_cards_swept": await _run(factory, systems_confirm.sweep, now),
         "interactions_expired": await _run(factory, interactions.expire_due, now),
         "credential_requests_expired": await _run(factory, credential_requests.expire_due, now),
         "doc_consents_expired": await _run(factory, doc_consents.expire_due, now),
