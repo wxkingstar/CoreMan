@@ -117,7 +117,7 @@ _LOOKAHEAD_DAYS = 8
 _NO_WORKDAY_REST = timedelta(days=1)
 
 
-def _at(row: AssistantSettings, day: date, clock: str) -> datetime:
+def local_at(row: AssistantSettings, day: date, clock: str) -> datetime:
     """所有者时区里某天某个 `HH:MM` 对应的时刻（UTC）。"""
     hour, minute = clock.split(":")
     return datetime.combine(day, time(int(hour), int(minute)), tzinfo=zone(row)).astimezone(UTC)
@@ -128,7 +128,7 @@ def end_today(row: AssistantSettings, now: datetime) -> datetime | None:
     day = local_today(row, now)
     if day.isoweekday() not in row.workdays:
         return None
-    end = _at(row, day, row.work_end)
+    end = local_at(row, day, row.work_end)
     return end if end > aware_utc(now) else None
 
 
@@ -139,7 +139,7 @@ def next_start(row: AssistantSettings, now: datetime) -> datetime | None:
         day = today + timedelta(days=offset)
         if day.isoweekday() not in row.workdays:
             continue
-        start = _at(row, day, row.work_start)
+        start = local_at(row, day, row.work_start)
         if start > aware_utc(now):
             return start
     return None
@@ -147,7 +147,7 @@ def next_start(row: AssistantSettings, now: datetime) -> datetime | None:
 
 def next_midnight(row: AssistantSettings, now: datetime) -> datetime:
     """所有者时区的次日零点。"""
-    return _at(row, local_today(row, now) + timedelta(days=1), "00:00")
+    return local_at(row, local_today(row, now) + timedelta(days=1), "00:00")
 
 
 def override(row: AssistantSettings, now: datetime) -> str | None:
@@ -221,7 +221,7 @@ def next_digest(row: AssistantSettings, now: datetime) -> datetime:
     today = local_today(row, now)
     for offset in range(3):
         for slot in slots:
-            at = _at(row, today + timedelta(days=offset), slot)
+            at = local_at(row, today + timedelta(days=offset), slot)
             if at > aware_utc(now):
                 return at
     # 时点至少一个，三天里一定找得到；走到这里只可能是数据被写坏，往后推一天再算。

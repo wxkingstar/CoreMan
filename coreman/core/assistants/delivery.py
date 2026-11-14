@@ -128,8 +128,8 @@ async def budget_left(session: AsyncSession, bot: Bot, today: date) -> int:
     return total - await turns_used(session, bot.id, zone, today)
 
 
-def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
-    """这位助理现在该不该有平台发起的动作（交回、顺带检查）：启用中、开通好、冷启动做完、在上班。
+def set_up(bot: Bot, prefs: AssistantSettings | None) -> bool:
+    """启用中、开通好、记下了身份、冷启动做完：与上不上班无关的那几项。
 
     运行时暂停不在这里判断：暂停只是不入队，调用方另看 `runtime.turn_blocker`。
     """
@@ -141,7 +141,13 @@ def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
         and prefs is not None
         and assistant_settings.identified(prefs)
         and prefs.cold_start_done_at is not None
-        and assistant_settings.on_shift(prefs, now)
+    )
+
+
+def gate(bot: Bot, prefs: AssistantSettings | None, now: datetime) -> bool:
+    """这位助理现在该不该有平台发起的动作（交回、顺带检查）：`set_up` 且在上班。"""
+    return bool(
+        prefs is not None and set_up(bot, prefs) and assistant_settings.on_shift(prefs, now)
     )
 
 

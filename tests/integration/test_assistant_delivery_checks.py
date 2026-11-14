@@ -207,14 +207,16 @@ async def test_routines_wait_until_cold_start_is_done(db_session: AsyncSession) 
 
 
 @pytest.mark.usefixtures("runtime_settings")
-async def test_sweep_counts_routines(db_session: AsyncSession) -> None:
+async def test_sweep_no_longer_generates_routines(db_session: AsyncSession) -> None:
+    """例行提醒的生成不在 sweep 里（不受在班限制，由 `_visit` 单独调）。"""
     bot, _ = await ready(db_session)
     prefs = await settings.get(db_session, bot.id)
-    prefs.quiet_enabled = False  # 开着免打扰时，它结束的那一刻也算一个摘要时点
+    prefs.quiet_enabled = False
     row = await delivery.state(db_session, bot.id)
     assert row is not None
     counts = await checks.sweep(db_session, CIPHER, bot, prefs, row, local(13, 17))
-    assert counts["assistant_routines"] == 2
+    assert "assistant_routines" not in counts
+    assert await routine_kinds(db_session, bot) == []
 
 
 def test_each_routine_renders_a_title_and_one_platform_line() -> None:

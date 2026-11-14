@@ -315,14 +315,17 @@ class _Round:
         """
         if item.chat_id == self.prefs.chat_id or item.msg_type not in OWNER_SAID_TYPES:
             return
+        if item.chat_kind == "p2p" and entry.get("b"):
+            # 对方是机器人或应用的私聊：他在这里下的指令是对机器人说的，不是自己的承诺。
+            # 已知限制：机器人还没说过话的全新私聊里，他的第一句话可能入箱，由提示词规则兜底。
+            return
         if len(" ".join(item.text.split())) < OWNER_SAID_MIN_CHARS:
             return
         oldest = min(self.oldest, int(entry.get("a") or self.oldest))
         if item.at_ms < max(oldest, _week_ago(self.now)):
             return
-        zone = assistant_settings.zone(self.prefs)
         day = assistant_settings.local_today(self.prefs, self.now)
-        midnight = datetime.combine(day, datetime.min.time(), tzinfo=zone).astimezone(UTC)
+        midnight = assistant_settings.local_at(self.prefs, day, "00:00")
         if await inbox.count_since(self.session, self.bot_id, "owner_said", midnight) >= (
             OWNER_SAID_DAILY
         ):
@@ -344,6 +347,8 @@ class _Round:
         if item.deleted:
             await self.recall(item.message_id)
             return
+        if item.chat_kind == "p2p" and item.sender_type != "user":
+            entry["b"] = 1  # 私聊对方是机器人或应用：见 `owner_said`
         if item.sender_type == "user" and item.sender_id == owner:
             if await sent.ours(self.session, self.bot_id, item.message_id):
                 # 审批通过后平台代他发的：发送人是所有者，但不是他亲自发言——不压这个会话，

@@ -9,7 +9,7 @@ message_id)`：提醒条目的 `message_id` 存的是去重键，真实的消息
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, text, update
@@ -156,13 +156,6 @@ MORNING_LEAD = timedelta(minutes=30)
 WEEKLY_LEAD = timedelta(minutes=60)
 
 
-def _at(day: date, slot: str, prefs: AssistantSettings) -> datetime:
-    """所有者当地 `day` 的 `slot`（HH:MM）对应的 UTC 时刻。"""
-    hour, minute = (int(part) for part in slot.split(":"))
-    zone = assistant_settings.zone(prefs)
-    return datetime.combine(day, time(hour, minute), tzinfo=zone).astimezone(UTC)
-
-
 async def routines(
     session: AsyncSession, bot_id: uuid.UUID, prefs: AssistantSettings, now: datetime
 ) -> int:
@@ -174,7 +167,7 @@ async def routines(
         return 0
     today = assistant_settings.local_today(prefs, now)
     added = 0
-    if now >= _at(today, slots[0], prefs) - MORNING_LEAD:
+    if now >= assistant_settings.local_at(prefs, today, slots[0]) - MORNING_LEAD:
         added += await add_reminder(
             session,
             bot_id,
@@ -187,7 +180,7 @@ async def routines(
     if (
         workdays
         and today.isoweekday() == workdays[-1]
-        and now >= _at(today, slots[-1], prefs) - WEEKLY_LEAD
+        and now >= assistant_settings.local_at(prefs, today, slots[-1]) - WEEKLY_LEAD
     ):
         year, week, _ = today.isocalendar()
         added += await add_reminder(
@@ -511,12 +504,14 @@ async def sweep(
     row: AssistantDelivery,
     now: datetime,
 ) -> dict[str, int]:
-    """一位助理的一次顺带检查。不提交；调过飞书之后调用方不回滚（刷新的令牌要落库）。"""
+    """一位助理的一次顺带检查（在班时）。不提交；调过飞书之后调用方不回滚（刷新的令牌要落库）。
+
+    每日与每周例行的生成不在这里：它不受在班限制，见 `_visit`。
+    """
     today = assistant_settings.local_today(prefs, now)
     counts = {
         "assistant_followups_due": await followups_due(session, bot.id, today, now),
         "assistant_marks_stale": await stale_marks(session, bot.id, today, now),
-        "assistant_routines": await routines(session, bot.id, prefs, now),
         "assistant_reauth_reminded": await remind_reauth(session, bot, prefs, row, now),
         "assistant_approvals_auto_withdrawn": 0,
         "assistant_recalls_noticed": 0,
@@ -555,9 +550,13 @@ async def _visit(
         bot = await session.get(Bot, bot_id)
         prefs = await session.get(AssistantSettings, bot_id)
         counts: dict[str, int] = {}
-        # 下班、冷启动没做完、正在停用的助理不检查，但照样往后排。
-        if bot is not None and prefs is not None and delivery.gate(bot, prefs, now):
-            counts = await sweep(session, cipher, bot, prefs, row, now)
+        # 冷启动没做完、正在停用的助理什么都不查，但照样往后排。
+        if bot is not None and prefs is not None and delivery.set_up(bot, prefs):
+            # 例行提醒不调飞书，生成不受在班限制（交回仍由投递的 `gate` 卡在上班时段）；
+            # 其余检查只在上班时做。
+            counts["assistant_routines"] = await routines(session, bot.id, prefs, now)
+            if delivery.gate(bot, prefs, now):
+                counts.update(await sweep(session, cipher, bot, prefs, row, now))
         await session.commit()
         return counts
 

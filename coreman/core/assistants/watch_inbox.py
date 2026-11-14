@@ -168,7 +168,8 @@ async def pending_messages(session: AsyncSession, bot_id: uuid.UUID, limit: int 
             AssistantInbox.kind.in_(("message", "owner_said")),
             AssistantInbox.message_id.is_not(None),
         )
-        .order_by(AssistantInbox.id.desc())
+        # 别人的消息优先：所有者自己的话多了也不挤掉它们的撤回补查。
+        .order_by((AssistantInbox.kind == "owner_said").asc(), AssistantInbox.id.desc())
         .limit(limit)
     )
     return [message_id for message_id in found if message_id]

@@ -12,7 +12,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from structlog.testing import capture_logs
 
-from coreman.core.assistants import delivery, settings
+from coreman.core.assistants import delivery, followups, settings
 from coreman.core.assistants import delivery_checks as checks
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
@@ -191,8 +191,39 @@ async def test_each_assistant_is_checked_every_five_minutes(
     assert not any(later.values()) and feishu.calls == ["im.mget", "im.mget"]
     reminders = [row for row in await inbox_rows(db_session, bot) if row.kind == "reminder"]
     # 中午已过第一个摘要时点前 30 分钟：当天的每日例行也在这一轮入了箱，只入一次。
-    assert [row.message_id for row in reminders] == [f"mark:om_old:{DAY}", f"morning_brief:{DAY}"]
+    assert [row.message_id for row in reminders] == [f"morning_brief:{DAY}", f"mark:om_old:{DAY}"]
     assert await raw(db_session, REMINDERS, bot=bot.id) == 1
+
+
+async def test_weekly_review_is_generated_after_work_hours_but_nothing_else_runs(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """例行提醒的生成不看在班：下班早于最后一个摘要时点前 60 分钟的人，周五 17:30 也有周报条目。"""
+    bot, _ = await ready(db_session)
+    prefs = await settings.get(db_session, bot.id)
+    prefs.shift_override = None
+    prefs.always_on = False
+    prefs.work_start, prefs.work_end = "09:00", "17:00"
+    prefs.digest_times = ["09:00", "18:00"]
+    prefs.quiet_enabled = False
+    prefs.workdays = [1, 2, 3, 4, 5]
+    friday = NOON.date() + timedelta(days=1)
+    while friday.isoweekday() != 5:
+        friday += timedelta(days=1)
+    now = datetime.combine(friday, time(9, 30), tzinfo=UTC)  # 当地 17:30
+    assert not settings.on_shift(prefs, now)
+    await followups.add(db_session, bot.id, category="promised", title="到期的事", due_on=friday)
+    await db_session.commit()
+    counts = await checks.tick(make_session_factory(db_engine), CIPHER, now)
+    year, week, _ = friday.isocalendar()
+    assert counts["assistant_routines"] == 2
+    assert counts.get("assistant_followups_due", 0) == 0
+    keys = {row.message_id for row in await inbox_rows(db_session, bot) if row.kind == "reminder"}
+    assert f"weekly_review:{year}-W{week:02d}" in keys
+    assert not any(key.startswith("followup:") for key in keys)
+    # 同一天后面的检查不会再生成。
+    again = await checks.tick(make_session_factory(db_engine), CIPHER, now + checks.SWEEP_EVERY)
+    assert again.get("assistant_routines", 0) == 0
 
 
 @pytest.mark.parametrize("change", ["off_shift", "cold_start"])
@@ -215,8 +246,13 @@ async def test_an_assistant_that_is_resting_is_not_checked(
 
     monkeypatch.setattr(checks, "reader", stub)
     counts = await checks.tick(make_session_factory(db_engine), CIPHER, NOON)
-    assert not any(counts.values()) and feishu.calls == []
-    assert await inbox_rows(db_session, bot) == []
+    assert feishu.calls == []
+    # 下班只停顺带检查；每日例行的生成不看在班（冷启动没做完的什么都不生成）。
+    only_routines = change == "off_shift"
+    assert counts == ({"assistant_routines": 1} if only_routines else {})
+    assert [row.message_id for row in await inbox_rows(db_session, bot)] == (
+        [f"morning_brief:{DAY}"] if only_routines else []
+    )
     assert await raw(db_session, REMINDERS, bot=bot.id) == 0
     # 仍然往后排，不会每 5 秒看一次。
     assert await next_sweep(db_session, bot) == NOON + checks.SWEEP_EVERY

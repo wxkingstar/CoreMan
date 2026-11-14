@@ -211,6 +211,20 @@ async def test_lists_cannot_be_written_without_the_data_key(db_session: AsyncSes
     assert row.work_start == "10:00"
 
 
+async def test_focus_people_cannot_be_written_without_the_data_key(
+    db_session: AsyncSession,
+) -> None:
+    bot, owner = await keyed(db_session)
+    bot_id = bot.id  # 回滚、expire_all 之后行上的属性已过期，先取出来
+    await keys.destroy_key(db_session, owner.id)
+    await db_session.commit()
+    keys.forget()
+    sealed.forget()
+    with pytest.raises(settings.SettingsError) as caught:
+        await settings.update(db_session, bot_id, now=NOW, focus_people=["ou_a"])
+    assert caught.value.code == "content_locked"
+
+
 async def test_cold_start_state(db_session: AsyncSession) -> None:
     bot, _ = await keyed(db_session)
     bot_id = bot.id  # 回滚、expire_all 之后行上的属性已过期，先取出来

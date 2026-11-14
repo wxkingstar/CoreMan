@@ -81,3 +81,10 @@ def test_rules_say_what_the_two_routines_are() -> None:
     assert handover.REMINDERS["weekly_review"] in text
     for phrase in ("今明两天的日程", "到期的任务", "没有就什么都不记", "四类各记一条"):
         assert phrase in text
+
+
+def test_owner_own_messages_are_not_orders_for_the_assistant() -> None:
+    text = handover_prompt.RULES
+    assert "不是给你的，不要去办" in text
+    assert "机器人或 AI 员工" in text
+    assert "转发" in text
