@@ -40,6 +40,7 @@ async def test_the_owner_reads_the_defaults(
         "work_end": "19:00",
         "workdays": [1, 2, 3, 4, 5],
         "focus_chats": [],
+        "focus_people": [],
         "ignored_chats": [],
         "shift_override": None,
         "shift_override_until": None,

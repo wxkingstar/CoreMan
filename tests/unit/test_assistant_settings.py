@@ -6,6 +6,8 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from coreman.core.assistants import settings
 from coreman.core.db.models import AssistantSettings
 
@@ -94,3 +96,21 @@ def test_override_wins_until_it_expires() -> None:
     # 没有到期时刻的切换一直有效。
     assert settings.on_shift(row(shift_override="on"), weekend)
     assert not settings.on_shift(row(shift_override="off"), work)
+
+
+def test_people_are_open_ids_deduplicated_in_order() -> None:
+    assert settings._people([" ou_a ", "ou_b", "ou_a"], 10) == ["ou_a", "ou_b"]
+    assert settings._people([], 10) == []
+
+
+def test_people_must_be_open_ids() -> None:
+    with pytest.raises(settings.SettingsError) as caught:
+        settings._people(["oc_chat"], 10)
+    assert caught.value.code == "invalid_people"
+
+
+def test_too_many_people() -> None:
+    with pytest.raises(settings.SettingsError) as caught:
+        settings._people([f"ou_{n}" for n in range(settings.MAX_FOCUS_PEOPLE + 1)], 10)
+    assert caught.value.code == "too_many_people"
+    assert caught.value.detail == {"limit": 10}

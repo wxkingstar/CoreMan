@@ -231,9 +231,11 @@ def next_digest(row: AssistantSettings, now: datetime) -> datetime:
 # 重点群每轮直接读历史，计入分钟预算：与 `watch.FOCUS_MAX` 一致。
 MAX_FOCUS = 5
 MAX_IGNORED = 50
+MAX_FOCUS_PEOPLE = 10
 MAX_DIGEST_TIMES = 6
 _HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _CHAT = re.compile(r"^oc_[A-Za-z0-9_-]{1,80}$")
+_PERSON = re.compile(r"^ou_[A-Za-z0-9_-]{1,80}$")
 
 
 class SettingsError(Exception):
@@ -303,6 +305,15 @@ def _chats(values: list[str], limit: int) -> list[str]:
     return found
 
 
+def _people(values: list[str], limit: int) -> list[str]:
+    found = list(dict.fromkeys(value.strip() for value in values))
+    if any(not _PERSON.match(value) for value in found):
+        raise SettingsError("invalid_people")
+    if len(found) > limit:
+        raise SettingsError("too_many_people", limit=limit)
+    return found
+
+
 def cold_start_state(row: AssistantSettings) -> str:
     """冷启动走到哪了：`pending`（没开始）、`in_progress`、`done`（做完、跳过或超时）。"""
     if row.cold_start_done_at is not None:
@@ -321,6 +332,7 @@ def view(row: AssistantSettings, now: datetime) -> dict[str, Any]:
         "work_end": row.work_end,
         "workdays": sorted(row.workdays),
         "focus_chats": list(row.focus_chats_enc or []),
+        "focus_people": list(row.focus_people_enc or []),
         "ignored_chats": list(row.ignored_chats_enc or []),
         "on_shift": on_shift(row, now),
         "shift_override": switched,
@@ -346,6 +358,7 @@ async def update(
     work_end: str | None = None,
     workdays: list[int] | None = None,
     focus_chats: list[str] | None = None,
+    focus_people: list[str] | None = None,
     ignored_chats: list[str] | None = None,
     digest_times: list[str] | None = None,
     quiet_enabled: bool | None = None,
@@ -361,6 +374,7 @@ async def update(
     Raises:
         SettingsError: `nothing_to_update`、`invalid_timezone`、`invalid_work_hours`（格式不对，
             或上班时间不早于下班时间）、`invalid_workdays`、`invalid_chats`、`too_many_chats`、
+            `invalid_people`、`too_many_people`、
             `chat_in_both_lists`、`invalid_digest_times`（1–6 个不重复的 `HH:MM`）、
             `invalid_quiet_hours`（格式不对，或起止相同）、`content_locked`（取不到数据密钥时
             不能写名单）
@@ -372,6 +386,7 @@ async def update(
         work_end,
         workdays,
         focus_chats,
+        focus_people,
         ignored_chats,
         digest_times,
         quiet_enabled,
@@ -399,11 +414,11 @@ async def update(
     hush = quiet_enabled if quiet_enabled is not None else row.quiet_enabled
     focus = _chats(focus_chats, MAX_FOCUS) if focus_chats is not None else None
     ignored = _chats(ignored_chats, MAX_IGNORED) if ignored_chats is not None else None
-    lists = focus is not None or ignored is not None
-    if lists:
+    people = _people(focus_people, MAX_FOCUS_PEOPLE) if focus_people is not None else None
+    if focus is not None or ignored is not None or people is not None:
         now_focus = focus if focus is not None else list(row.focus_chats_enc or [])
         now_ignored = ignored if ignored is not None else list(row.ignored_chats_enc or [])
-        if set(now_focus) & set(now_ignored):
+        if (focus is not None or ignored is not None) and set(now_focus) & set(now_ignored):
             raise SettingsError("chat_in_both_lists")
         # 名单是加密列：密钥不可用时写下去会丢内容，宁可拒绝。
         if not await sealed.key_ready(session, bot_id):
@@ -428,6 +443,8 @@ async def update(
         clear_override(row)
     if focus is not None:
         row.focus_chats_enc = focus
+    if people is not None:
+        row.focus_people_enc = people
     if ignored is not None:
         released = [chat for chat in row.ignored_chats_enc or [] if chat not in ignored]
         row.ignored_chats_enc = ignored
