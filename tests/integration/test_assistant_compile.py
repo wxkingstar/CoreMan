@@ -313,7 +313,8 @@ async def test_around_the_clock_the_day_is_compiled_after_midnight(
     """全天候一直在班：所有者时区过了零点，先为前一天派整理，再把今天记下；那一天只整理一次。"""
     bot, _, prefs = await working(db_session, shift=None)
     assert prefs.always_on is True
-    now = utcnow()
+    # 离所有者零点不到两小时就往前挪：下面「同一天再过一小时」不能跨过零点。
+    now = min(utcnow(), settings.next_midnight(prefs, utcnow()) - timedelta(hours=2))
     assert await compiling.step(db_session, bot, prefs, now) == "worked"
     await noted(db_session, bot)
     day = prefs.worked_on
