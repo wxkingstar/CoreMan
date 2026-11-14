@@ -186,7 +186,7 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 | 所有者 | `owner` | 显示名与登录名 |
 | 状态 | `state`、`lifecycle` | `provisioning` 开通中、`active` 可用、`deprovisioning` 停用中、`deprovisioned` 已停用；流程进行中时另显示动作、步骤与错误代码 |
 | 运行时 | `node`、`relay` | 所在节点的名字与是否在线 |
-| 在班 | `on_shift` | 记录启用、开通好，且此刻在所有者的工作时段内（含「上班」「下班」的临时切换） |
+| 在班 | `on_shift` | 记录启用、开通好，且此刻在班：全天候（默认）随时在班，否则在所有者的工作时段内；「上班」「下班」的临时切换优先 |
 | 冷启动 | `cold_start` | `pending` 没开始、`in_progress` 进行中（后面是走到哪一步）、`done` 已结束（后面是怎么结束的：`completed` / `skipped` / `timeout`）；没完成时不盯消息、不交回事项 |
 | 今日轮次 | `turns` | 今天（所有者时区）跑了几轮 / 预算；预算是个人值与平台默认里较小的那个，用完后只交回紧急的 |
 | 待交回 | `inbox_pending` | 收件箱里还没交回的条目数；一直不降见下一节 |
@@ -230,7 +230,7 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 
 ### 个人助理：冷启动与上下班的排查
 
-- 管理台的助理列表（`GET /api/admin/assistants`）每条记录有 `cold_start`（`state`：`pending` 没开始、`in_progress`、`done`；`step`；`outcome`：`completed` / `skipped` / `timeout`）与 `on_shift`（按设置此刻是否在班）。助理不盯消息时先看这两项：`cold_start.state` 不是 `done` 就还没开始盯；`on_shift` 为 `false` 是下班中。
+- 管理台的助理列表（`GET /api/admin/assistants`）每条记录有 `cold_start`（`state`：`pending` 没开始、`in_progress`、`done`；`step`；`outcome`：`completed` / `skipped` / `timeout`）与 `on_shift`（按设置此刻是否在班）。助理不盯消息时先看这两项：`cold_start.state` 不是 `done` 就还没开始盯；`on_shift` 为 `false` 是下班中（全天候的助理只在发了「下班」之后）。
 - `cold_start.state` 长时间停在 `pending`：这位助理是本功能上线前开通的，所有者还没再来私聊；或者它没有记下身份（`cold_start` 为 `null`），需要重新开通。
 - `step` 长时间停在 `voice`：平台以所有者身份读飞书失败，每 10 分钟重试，满 1 小时放弃这一步；看 scheduler 日志里的 `assistant_shift`、`assistant_cold_start_failed` 与盯消息的限频日志。
 - scheduler 日志 `assistant_shift` 的字段：`voice_queued` / `voice_skipped` / `voice_retry` / `asked` / `focus_skipped` / `timeout`（冷启动），`compile_worked` / `compile_queued` / `compile_idle` / `compile_budget` / `compile_paused`（下班编译）。日志不带任何内容。
@@ -251,7 +251,7 @@ relay 超过两小时没有新健康上报时，调度器每分钟最多补探�
 | 所有者说没收到授权到期提醒 | `feishu_personal_grants.authorized_at`、`assistant_delivery.reauth_reminded_on` | 只在工作时段提醒，每天一次；升级前就连接的授权按建行时间算 |
 | 平台代发的回复之后那个会话被压着 | `assistant_sent`、worker 日志 `assistant_sent_record_failed` | 代发消息的编号没记上时，盯消息会把它当成所有者亲自发言，压 10 分钟后恢复 |
 
-调整某个人的预算目前只能改库里 `assistant_settings.daily_turn_budget`（10–2000）；页面入口随「我的助理」页提供。scheduler 停止时日志里出现 `assistant_round_abandoned_on_stop`，表示有一位助理的一轮等了 20 秒仍没做完被放弃：若它恰好刚刷新过令牌，所有者需要重新授权。
+调整某个人的预算目前只能改库里 `assistant_settings.daily_turn_budget`（10–20000）；页面入口随「我的助理」页提供。scheduler 停止时日志里出现 `assistant_round_abandoned_on_stop`，表示有一位助理的一轮等了 20 秒仍没做完被放弃：若它恰好刚刷新过令牌，所有者需要重新授权。
 
 ### 个人助理访问记录
 
