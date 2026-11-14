@@ -593,6 +593,7 @@ class AssistantReport(Base):
     """无人在场的一轮想告诉所有者的一句话（`assistant_report`）：攒到摘要时点合并发出。
 
     `text_enc` 登记在 `sealed.COLUMNS`。`urgent` 的不等摘要，那一轮结束就发（免打扰时段除外）；
+    `wake` 的连免打扰时段里也发（只有助理自己标得出来）。
     `task_id` 是记下它的那一轮（不设外键）。`sent_at` 非空表示已经发给所有者。
     """
 
@@ -609,6 +610,7 @@ class AssistantReport(Base):
     task_id: Mapped[int | None] = mapped_column(BigInteger)
     text_enc: Mapped[str] = mapped_column(Text)
     urgent: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    wake: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     sent_at: Mapped[datetime | None] = _ts()
 

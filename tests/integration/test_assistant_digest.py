@@ -182,6 +182,50 @@ async def test_urgent_reports_go_out_when_the_turn_ends_and_wait_out_quiet_hours
     assert (await digest.tick(factory, AFTERNOON))["assistant_urgent_sent"] == 0
 
 
+async def test_only_reports_the_assistant_marked_wake_go_out_during_quiet_hours(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, owner = await ready(db_session)
+    factory = make_session_factory(db_engine)
+    scope = await handover_scope(db_session, bot, owner)
+    out = await digest.record(db_session, scope, "线上支付全部失败", urgent=False, wake=True)
+    assert out["urgent"] is True and out["wake"] is True
+    await digest.record(db_session, scope, "夜里有人催报价", urgent=True)
+    await digest.record(db_session, scope, "已把会议改到周三", urgent=False)
+    await db_session.commit()
+    await finish(db_session, scope)
+    assert (await digest.tick(factory, NIGHT))["assistant_urgent_sent"] == 1
+    (item,) = await sent(db_session, bot)
+    body = texts(item.payload["card"])
+    assert "支付全部失败" in body and "催报价" not in body and "周三" not in body
+    # 免打扰里发过的不再发；没标 wake 的紧急条目仍留着，免打扰一过照常发。
+    assert (await digest.tick(factory, NIGHT))["assistant_urgent_sent"] == 0
+    assert (await digest.tick(factory, AFTERNOON))["assistant_urgent_sent"] == 1
+    later = texts((await sent(db_session, bot))[-1].payload["card"])
+    assert "催报价" in later and "支付全部失败" not in later
+
+
+async def test_an_immediate_handover_alone_does_not_break_quiet_hours(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, owner = await ready(db_session)
+    factory = make_session_factory(db_engine)
+    scope = await handover_scope(db_session, bot, owner)
+    item = await boxed(db_session, bot, "om_1", level="immediate")
+    await db_session.execute(
+        update(AssistantInbox)
+        .where(AssistantInbox.id == item.id)
+        .values(delivered_task_id=scope.task.id)
+    )
+    await db_session.commit()
+    out = await digest.record(db_session, scope, "李四要今天下班前的报价", urgent=False)
+    assert out["urgent"] is True and out["wake"] is False
+    await db_session.commit()
+    await finish(db_session, scope)
+    assert (await digest.tick(factory, NIGHT))["assistant_urgent_sent"] == 0
+    assert await sent(db_session, bot) == []
+
+
 async def test_the_digest_lists_approvals_owner_items_and_reports(
     db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
