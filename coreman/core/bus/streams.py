@@ -35,6 +35,17 @@ WRITABLE = frozenset(
 )
 
 
+def _no_nul(value: Any) -> Any:
+    """PostgreSQL 的 text / jsonb 存不下 NUL：模型转述二进制输出时会带出来，换成 U+FFFD。"""
+    if isinstance(value, str):
+        return value.replace("\x00", "�")
+    if isinstance(value, dict):
+        return {_no_nul(k): _no_nul(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_no_nul(v) for v in value]
+    return value
+
+
 async def _sealed_fields(
     session: AsyncSession, task_id: int, bot_id: uuid.UUID | None, fields: dict[str, Any]
 ) -> dict[str, Any]:
@@ -102,7 +113,7 @@ async def update_state(
     bad = set(fields) - WRITABLE
     if bad:
         raise ValueError(f"不可写字段: {sorted(bad)}")
-    plain = fields
+    plain = {k: _no_nul(v) for k, v in fields.items()}
     fields = await _sealed_fields(session, task_id, bot_id, plain)
     row = (
         await session.execute(
@@ -211,7 +222,7 @@ async def complete(
 ) -> Completion:
     """收尾。`activity` 给了就整份替换（中断原因随终态一起写，网关据此标红）。"""
     extra: dict[str, Any] = {} if activity is None else {"activity": activity}
-    plain = {"final_text": final_text, "pending_card": pending_card, **extra}
+    plain = _no_nul({"final_text": final_text, "pending_card": pending_card, **extra})
     stored = await _sealed_fields(session, task_id, bot_id, plain)
     row = (
         await session.execute(
