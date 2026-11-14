@@ -174,6 +174,7 @@ async def press(
     *,
     user_id: str = "zhangsan",
     open_id: str = OWNER,
+    selected: dict[str, list[str]] | None = None,
 ) -> Task:
     """在最近发出的那张确认卡上点一下：回调按网关的样子落库并排成任务。"""
     card = (await cards(session))[-1]
@@ -187,6 +188,8 @@ async def press(
         "event_key": batch.CARD_EVENT,
         "level": f"{verb}:{state_id}",
     }
+    if selected is not None:
+        action["selected"] = selected
     event = InboundEvent(
         bot_id=bot.id,
         platform="feishu",
@@ -398,6 +401,59 @@ async def test_only_the_owner_can_confirm_and_cancel_runs_nothing(
     late = await press(db_session, bot, scope.task, state.id)
     assert await click(db_session, db_engine, late) == "expired"
     assert feishu.writes == []
+
+
+async def test_the_card_offers_a_send_back_form(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await staged_and_sent(db_session, db_engine, monkeypatch)
+    card = (await cards(db_session))[-1].payload["card"]
+    form = next(one for one in card["body"]["elements"] if one.get("tag") == "form")
+    field, button = form["elements"]
+    assert field["tag"] == "input" and field["name"] == batch.REASON_FIELD and field["required"]
+    assert button["form_action_type"] == "submit"
+    assert button["behaviors"][0]["value"]["level"].startswith("reject:")
+
+
+async def test_sending_back_runs_nothing_records_the_reason_and_asks_for_a_rewrite(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    pressed = await press(
+        db_session,
+        bot,
+        scope.task,
+        state.id,
+        "reject",
+        selected={batch.REASON_FIELD: ["第 2 条太硬，<改>客气点"]},
+    )
+    assert await click(db_session, db_engine, pressed) == "assistant_write_rejected"
+    assert feishu.writes == [] and (await state_of(db_session)).status == "cancelled"
+    note = await resumed(db_session, state)
+    assert note is not None
+    assert "<owner_feedback>\n第 2 条太硬，‹改›客气点\n</owner_feedback>" in note
+    assert "只改意见点到的项" in note and "再发一张确认卡" in note
+    page = await notes.read(db_session, bot.id, feedback.PATH)
+    assert page is not None and "意见：第 2 条太硬，‹改›客气点" in page.body
+    assert SECOND in page.body
+    assert "已打回" in body_text(await last_update(db_session))
+    # 打回之后这张卡不能再确认。
+    late = await press(db_session, bot, scope.task, state.id)
+    assert await click(db_session, db_engine, late) == "expired"
+
+
+async def test_sending_back_without_a_reason_is_ignored_and_leaves_the_card_open(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, scope, state, _, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    blank = await press(
+        db_session, bot, scope.task, state.id, "reject", selected={batch.REASON_FIELD: ["  "]}
+    )
+    assert await click(db_session, db_engine, blank) == "ignored"
+    assert (await state_of(db_session)).status == "open"
+    assert await resumed(db_session, state) is None
 
 
 async def test_a_conversation_that_moved_on_refuses_the_whole_batch(
