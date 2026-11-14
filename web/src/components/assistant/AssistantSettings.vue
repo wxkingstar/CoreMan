@@ -5,7 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantPrefs } from '@/api/myAssistant'
 import AssistantAccessLog from '@/components/assistant/AssistantAccessLog.vue'
 import LoadState from '@/components/LoadState.vue'
-import { toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
+import { MAX_DIGEST_TIMES, toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
 import { errorMessage } from '@/utils/errors'
 
 const props = defineProps<{ name: string; runtime: string | null }>()
@@ -14,7 +14,7 @@ const { t } = useI18n()
 
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 const prefs = ref<AssistantPrefs | null>(null)
-const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', ignored_chats: '', follow_platform: true, daily_turn_budget: 0 })
+const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', ignored_chats: '', digest_times: '', quiet_enabled: true, quiet_start: '', quiet_end: '', follow_platform: true, daily_turn_budget: 0 })
 const errors = ref<Partial<Record<PrefsField, string>>>({})
 const error = ref(''), loading = ref(false), saving = ref(false)
 
@@ -172,6 +172,69 @@ defineExpose({ form, save, load })
         </div>
       </el-form-item>
       <el-form-item
+        :label="t('assistant.settings.digestTimes')"
+        :error="fieldError('digest_times')"
+        :show-message="false"
+      >
+        <el-input
+          v-model="form.digest_times"
+          placeholder="09:00, 13:30, 18:00"
+          style="width: 260px"
+          data-test="digest-times"
+        />
+        <div class="hint">
+          {{ t('assistant.settings.digestTimesHint', { count: MAX_DIGEST_TIMES }) }}
+        </div>
+        <!-- 错误原因自己渲染：el-form-item 的提示走过渡动画，这里要它立刻、稳定地出现。 -->
+        <div
+          v-if="fieldError('digest_times')"
+          class="field-error"
+          role="alert"
+          data-test="error-digest_times"
+        >
+          {{ fieldError('digest_times') }}
+        </div>
+      </el-form-item>
+      <el-form-item
+        :label="t('assistant.settings.quiet')"
+        :error="fieldError('quiet_hours')"
+        :show-message="false"
+      >
+        <el-switch
+          v-model="form.quiet_enabled"
+          data-test="quiet-enabled"
+        />
+        <!-- 关掉时时段置灰但保留：再打开直接生效。 -->
+        <el-input
+          v-model="form.quiet_start"
+          placeholder="22:00"
+          style="width: 100px"
+          class="quiet-input"
+          :disabled="!form.quiet_enabled"
+          data-test="quiet-start"
+        />
+        <span class="quiet-dash">–</span>
+        <el-input
+          v-model="form.quiet_end"
+          placeholder="08:00"
+          style="width: 100px"
+          :disabled="!form.quiet_enabled"
+          data-test="quiet-end"
+        />
+        <div class="hint">
+          {{ t('assistant.settings.quietHint') }}
+        </div>
+        <!-- 错误原因自己渲染：el-form-item 的提示走过渡动画，这里要它立刻、稳定地出现。 -->
+        <div
+          v-if="fieldError('quiet_hours')"
+          class="field-error"
+          role="alert"
+          data-test="error-quiet_hours"
+        >
+          {{ fieldError('quiet_hours') }}
+        </div>
+      </el-form-item>
+      <el-form-item
         :label="t('assistant.settings.focusChats')"
         :error="fieldError('focus_chats')"
         :show-message="false"
@@ -299,5 +362,7 @@ defineExpose({ form, save, load })
 .hint { flex-basis: 100%; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .field-error { flex-basis: 100%; color: var(--el-color-danger); font-size: 12px; line-height: 1.6; }
 .budget-input { margin-left: 16px; }
+.quiet-input { margin-left: 16px; }
+.quiet-dash { margin: 0 8px; color: var(--el-text-color-secondary); }
 .danger-zone { margin-top: 24px; max-width: 760px; }
 </style>

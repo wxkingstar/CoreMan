@@ -40,6 +40,10 @@ def test_both_tools_are_registered_in_the_knowledge_group() -> None:
         "workdays",
         "focus_chats",
         "ignored_chats",
+        "digest_times",
+        "quiet_enabled",
+        "quiet_start",
+        "quiet_end",
     }
     assert "required" not in update["inputSchema"] or update["inputSchema"]["required"] == []
 

@@ -109,6 +109,22 @@ def request_body(tool: str, calls: list[dict[str, Any]]) -> bytes:
     ).encode()
 
 
+def batch_body(items: list[tuple[str, list[dict[str, Any]]]]) -> bytes:
+    """合单的规范化请求体：各项（工具与参数）按单上的顺序。被批准的是整张单的这一份。"""
+    return json.dumps(
+        {
+            "items": [
+                {"tool": tool, "calls": [attachments.public(call["arguments"]) for call in calls]}
+                for tool, calls in items
+            ]
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+
+
 def request_url(cfg: Config, external_id: str) -> str:
     """这张单在平台上的名义地址。平台不经 HTTP 调自己，它只用来算哈希、给 Tower 展示。"""
     return f"{cfg.public_base_url}/api/assistant/approvals/{external_id}/execute"

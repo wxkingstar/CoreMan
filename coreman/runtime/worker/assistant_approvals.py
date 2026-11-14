@@ -16,7 +16,7 @@ from coreman.core.db.models import AssistantApproval, Bot
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.systems_catalog.service import Issuance
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.platform_turn import PlatformTurnHandler
+from coreman.runtime.worker.platform_turn import SilentTurnHandler
 
 # 审批系统或临时桶连不上时隔多久再试、最多试几次；之后记为失败并告诉助理。
 RETRY_SECONDS = 60.0
@@ -88,8 +88,10 @@ class AssistantApprovalExecuteHandler:
             await session.commit()
 
 
-class AssistantApprovalResultHandler(PlatformTurnHandler):
+class AssistantApprovalResultHandler(SilentTurnHandler):
     """仿 approval_resume：发言者固定为所有者，消息是系统写好的文本。
+
+    不出声：所有者不在场，要他知道的事由助理记成待汇报，平台合并进摘要（`digest.py`）。
 
     入站事件沿用提交那一轮的；审批单是在平台来源的轮次里提交的（没有入站事件）时用替身，回复
     发到所有者的私聊。不要求还是提交时的那个 relay 会话：助理会话会换新，结果文本自带是哪张单、
@@ -107,6 +109,12 @@ class AssistantApprovalResultHandler(PlatformTurnHandler):
         except ValueError:
             return None
         row = await session.get(AssistantApproval, key, populate_existing=True)
+        if row is not None and row.bot_id == bot.id and row.batch_id is not None:
+            # 合单：各项都有了结论才投回，一轮里逐项说明。
+            rows = await service.members(session, row, lock=False)
+            if any(item.status in service.LIVE or sealed.is_locked(item) for item in rows):
+                return None
+            return service.batch_text(rows)
         if (
             row is None
             or row.bot_id != bot.id

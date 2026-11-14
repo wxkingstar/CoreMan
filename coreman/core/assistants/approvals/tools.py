@@ -19,7 +19,9 @@ from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, Identifier, Short, input_schema
 
 STAGED_NOTE = (
-    " Not executed now: staged for the owner's approval and returns pending_approval."
+    " Not executed now: staged for the owner's confirmation. When the owner messaged you"
+    " himself this turn, returns pending_confirmation and he confirms a card when the turn"
+    " ends; otherwise returns pending_approval and this turn's writes go out as one approval."
     " Put chat_id, anchor_message_id, background and research in `approval`."
 )
 
@@ -73,7 +75,9 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     "assistant_mark_processing": (
         Mark,
         "Put (or with done=true remove) the 'on it' reaction on a message someone sent the"
-        " owner. The only write that needs no approval; the emoji is fixed.",
+        " owner. Only while you investigate it (look up data, spawn a job, ask another"
+        " employee); remove it as soon as the investigation ends, without waiting for"
+        " approvals. The only write that needs no approval; the emoji is fixed.",
     ),
 }
 

@@ -189,9 +189,49 @@ def clock_out(row: AssistantSettings, now: datetime) -> datetime:
     return until
 
 
+def _clock_of(row: AssistantSettings, now: datetime) -> str:
+    return aware_utc(now).astimezone(zone(row)).strftime("%H:%M")
+
+
+def _within(clock: str, start: str, end: str) -> bool:
+    """`clock` 在不在 [start, end) 里；`start` 晚于 `end` 时跨午夜。都是定宽的 `HH:MM`。"""
+    if start < end:
+        return start <= clock < end
+    return clock >= start or clock < end
+
+
+def quiet(row: AssistantSettings, now: datetime) -> bool:
+    """现在是不是所有者的免打扰时段：平台不主动给他发任何消息（他自己发来的照常回复）。"""
+    return row.quiet_enabled and _within(_clock_of(row, now), row.quiet_start, row.quiet_end)
+
+
+def digest_slots(row: AssistantSettings) -> list[str]:
+    """一天里发摘要的时点：设置的时点去掉落在免打扰里的，开着免打扰时再加上它结束的那一刻
+    （免打扰期间攒下的事在那时并成一条）。"""
+    slots = set(row.digest_times)
+    if row.quiet_enabled:
+        slots = {slot for slot in slots if not _within(slot, row.quiet_start, row.quiet_end)}
+        slots.add(row.quiet_end)
+    return sorted(slots)
+
+
+def next_digest(row: AssistantSettings, now: datetime) -> datetime:
+    """晚于 `now` 的下一个摘要时点（UTC）。"""
+    slots = digest_slots(row)
+    today = local_today(row, now)
+    for offset in range(3):
+        for slot in slots:
+            at = _at(row, today + timedelta(days=offset), slot)
+            if at > aware_utc(now):
+                return at
+    # 时点至少一个，三天里一定找得到；走到这里只可能是数据被写坏，往后推一天再算。
+    return aware_utc(now) + timedelta(days=1)
+
+
 # 重点群每轮直接读历史，计入分钟预算：与 `watch.FOCUS_MAX` 一致。
 MAX_FOCUS = 5
 MAX_IGNORED = 50
+MAX_DIGEST_TIMES = 6
 _HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _CHAT = re.compile(r"^oc_[A-Za-z0-9_-]{1,80}$")
 
@@ -223,6 +263,24 @@ def _timezone(name: str) -> str:
 def _clock(value: str) -> str:
     if not _HHMM.match(value):
         raise SettingsError("invalid_work_hours")
+    return value
+
+
+def _digest_times(values: list[str]) -> list[str]:
+    found = sorted(set(values))
+    if (
+        not found
+        or len(found) != len(values)
+        or len(found) > MAX_DIGEST_TIMES
+        or any(not _HHMM.match(value) for value in found)
+    ):
+        raise SettingsError("invalid_digest_times", limit=MAX_DIGEST_TIMES)
+    return found
+
+
+def _quiet_clock(value: str) -> str:
+    if not _HHMM.match(value):
+        raise SettingsError("invalid_quiet_hours")
     return value
 
 
@@ -269,6 +327,11 @@ def view(row: AssistantSettings, now: datetime) -> dict[str, Any]:
         "shift_override_until": until.isoformat() if until is not None else None,
         "cold_start": cold_start_state(row),
         "today": local_today(row, now).isoformat(),
+        "digest_times": list(row.digest_times),
+        "quiet_enabled": row.quiet_enabled,
+        "quiet_start": row.quiet_start,
+        "quiet_end": row.quiet_end,
+        "quiet_now": quiet(row, now),
     }
 
 
@@ -284,18 +347,37 @@ async def update(
     workdays: list[int] | None = None,
     focus_chats: list[str] | None = None,
     ignored_chats: list[str] | None = None,
+    digest_times: list[str] | None = None,
+    quiet_enabled: bool | None = None,
+    quiet_start: str | None = None,
+    quiet_end: str | None = None,
 ) -> AssistantSettings:
     """改这位助理的设置：只改给出的项，名单整份替换。调用方提交。
 
     改了全天候、时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
+    改了时区、摘要时点或免打扰时段时，下一个摘要时点重新算（从这一刻往后找）。
     从忽略名单里移出的会话，盯消息的游标置为 `now`（会等正在进行的一轮轮询提交）。
 
     Raises:
         SettingsError: `nothing_to_update`、`invalid_timezone`、`invalid_work_hours`（格式不对，
             或上班时间不早于下班时间）、`invalid_workdays`、`invalid_chats`、`too_many_chats`、
-            `chat_in_both_lists`、`content_locked`（取不到数据密钥时不能写名单）
+            `chat_in_both_lists`、`invalid_digest_times`（1–6 个不重复的 `HH:MM`）、
+            `invalid_quiet_hours`（格式不对，或起止相同）、`content_locked`（取不到数据密钥时
+            不能写名单）
     """
-    given = (timezone, always_on, work_start, work_end, workdays, focus_chats, ignored_chats)
+    given = (
+        timezone,
+        always_on,
+        work_start,
+        work_end,
+        workdays,
+        focus_chats,
+        ignored_chats,
+        digest_times,
+        quiet_enabled,
+        quiet_start,
+        quiet_end,
+    )
     if all(value is None for value in given):
         raise SettingsError("nothing_to_update")
     await get(session, bot_id)
@@ -309,6 +391,12 @@ async def update(
     if start >= end:
         raise SettingsError("invalid_work_hours")
     days = _days(workdays) if workdays is not None else sorted(row.workdays)
+    times = _digest_times(digest_times) if digest_times is not None else list(row.digest_times)
+    hush_start = _quiet_clock(quiet_start) if quiet_start is not None else row.quiet_start
+    hush_end = _quiet_clock(quiet_end) if quiet_end is not None else row.quiet_end
+    if hush_start == hush_end:
+        raise SettingsError("invalid_quiet_hours")
+    hush = quiet_enabled if quiet_enabled is not None else row.quiet_enabled
     focus = _chats(focus_chats, MAX_FOCUS) if focus_chats is not None else None
     ignored = _chats(ignored_chats, MAX_IGNORED) if ignored_chats is not None else None
     lists = focus is not None or ignored is not None
@@ -323,6 +411,18 @@ async def update(
     every = always_on if always_on is not None else row.always_on
     schedule = (every, zone_name, start, end, days)
     current = (row.always_on, row.timezone, row.work_start, row.work_end, sorted(row.workdays))
+    digest = (zone_name, times, hush, hush_start, hush_end)
+    if digest != (
+        row.timezone,
+        list(row.digest_times),
+        row.quiet_enabled,
+        row.quiet_start,
+        row.quiet_end,
+    ):
+        row.digest_times, row.quiet_enabled = times, hush
+        row.quiet_start, row.quiet_end = hush_start, hush_end
+        # 下一个时点由摘要循环按新设置从这一刻往后算。
+        row.digest_next_at = None
     if schedule != current:
         row.always_on, row.timezone, row.work_start, row.work_end, row.workdays = schedule
         clear_override(row)

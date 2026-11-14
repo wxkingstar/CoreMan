@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
 from coreman.core.assistants.records import inactive_assistant
-from coreman.core.bus import outbox
 from coreman.core.db.models import Bot, InteractionState, Task, User
 from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.core.timeutils import utcnow
@@ -150,7 +149,7 @@ def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) 
                     "tag": "markdown",
                     "content": (
                         "<font color='grey'>只有所有者本人能操作，平台以你的身份按上面的参数原样、"
-                        "按顺序执行，遇到失败即停止，10 分钟内有效。</font>"
+                        "按顺序执行，遇到失败即停止，60 分钟内有效。</font>"
                     ),
                 },
             ]
@@ -257,15 +256,5 @@ async def release(session: AsyncSession, *, bot_id: uuid.UUID, task_id: int, sen
         # 没正常结束，或内容读不出来（所有者的数据密钥已销毁）：不发卡，什么都不执行。
         state.status = "cancelled"
         return False
-    state.state = {**state.state, "sent": True}
-    state.expires_at = utcnow() + TTL
-    await outbox.add(
-        session,
-        bot_id=bot_id,
-        platform="feishu",
-        kind="send",
-        dedupe_key=f"cloud-write:{state.id}",
-        target={"chat_id": state.state["chat_id"]},
-        payload={"card": card(task_id, state.id, items)},
-    )
+    await systems_confirm.send_card(session, state, card(task_id, state.id, items), now=utcnow())
     return True

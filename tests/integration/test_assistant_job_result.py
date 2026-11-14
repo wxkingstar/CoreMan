@@ -75,7 +75,7 @@ async def test_the_result_turn_quotes_the_conclusion_in_the_main_session(
     assert text.startswith(jobs.RESULT_HEADER) and f"编号：{row.id}" in text
     assert f"> {RESULT}" in text
     assert "\n## 子任务\n" in relay.requests[0]["messages"][0]["content"]
-    # 主会话里的一轮：回复照常发到所有者的私聊。
+    # 主会话里的一轮，但所有者不在场：不出声，要他知道的由助理记成待汇报。
     logged = await raw(
         db_session,
         "SELECT session_key || '|' || message_type FROM chat_logs WHERE task_id = :id",
@@ -83,7 +83,7 @@ async def test_the_result_turn_quotes_the_conclusion_in_the_main_session(
     )
     assert logged == f"oc_private|{JOB_RESULT_KIND}"
     (stream,) = await streams_of(db_session, turn)
-    assert stream.reply_context["chat_id"] == "oc_private" and "_silent" not in stream.reply_context
+    assert stream.reply_context["chat_id"] == "oc_private" and stream.reply_context["_silent"]
     delivered = await reloaded(db_session, row)
     assert delivered.reported_at is not None and delivered.result_task_id == turn.id
     # 投到了就不再投。
@@ -128,6 +128,8 @@ async def test_a_failed_job_is_reported_too_and_a_silent_one_never(
         ("cancelled", "superseded", False, 0, 60),
         ("failed", "platform_turn_yielded", False, 0, 60),
         ("failed", "assistant_paused", False, 0, 60),
+        # 不出声的结论投回遇到会话忙直接记失败：只是没轮到，放回重投，不算失败次数。
+        ("failed", "session_busy", False, 0, 60),
         ("failed", "RelayError", False, 1, 300),
     ],
 )

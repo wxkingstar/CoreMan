@@ -46,6 +46,11 @@ async def test_view_of_a_fresh_assistant(db_session: AsyncSession) -> None:
         "shift_override_until": None,
         "cold_start": "pending",
         "today": "2026-11-13",
+        "digest_times": ["09:00", "13:30", "18:00"],
+        "quiet_enabled": True,
+        "quiet_start": "22:00",
+        "quiet_end": "08:00",
+        "quiet_now": False,
     }
 
 

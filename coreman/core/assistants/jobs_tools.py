@@ -15,6 +15,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import jobs
+from coreman.core.assistants.approvals import marks
 from coreman.core.assistants.approvals import service as approvals_service
 from coreman.core.assistants.kinds import SUBTASK_KIND
 from coreman.core.assistants.records import is_assistant
@@ -136,6 +137,8 @@ async def _run(session: AsyncSession, scope: Scope, name: str, args: Any) -> dic
         row = await jobs.spawn(
             session, bot, title=args.title, brief=args.brief, attended=not scope.unattended
         )
+        # 这一轮打的「处理中」表情跟着这件事走：结论交回之后再撤。
+        await marks.bind_job(session, bot.id, scope.task.id, row.id)
         return {"job": jobs.view(row)}
     if name == "assistant_job_list":
         if args.id is not None:
@@ -153,6 +156,7 @@ async def _run(session: AsyncSession, scope: Scope, name: str, args: Any) -> dic
     job_id = jobs.parse_id(args.id)
     if name == "assistant_job_message":
         row = await jobs.message(session, bot, job_id, args.text, attended=not scope.unattended)
+        await marks.bind_job(session, bot.id, scope.task.id, row.id)
     else:
         # 主会话自己取消的：不必再投回一轮告诉它。
         row = await jobs.cancel(session, bot.id, job_id, code="cancelled_by_assistant")

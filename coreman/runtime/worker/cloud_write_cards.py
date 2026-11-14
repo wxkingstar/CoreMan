@@ -21,6 +21,7 @@ from coreman.core.cloud_proxy import confirm
 from coreman.core.cloud_proxy import service as cloud
 from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, User
+from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.personal_cards import card_owner_scope
@@ -75,7 +76,7 @@ async def handle(
 ) -> str:
     """调用方已证明卡片是我们发到这个会话的。暂存的参数不进日志。"""
     verb, _, raw_id = str(action.get("level") or "").partition(":")
-    if verb not in ("confirm", "cancel"):
+    if verb not in ("confirm", "cancel", systems_confirm.RESEND):
         return "ignored"
     try:
         origin = await session.get(Task, int(str(action["task_id"]).split(":")[1]))
@@ -117,13 +118,27 @@ async def handle(
         or bot.owner_id != scope.user_id
     ):
         return "ignored"
+    now = utcnow()
+    where: dict[str, Any] = {
+        "dedupe_key": f"{inbound.id}:card_update",
+        "chat_id": inbound.chat_id,
+        "message_id": inbound.reply_context.get("message_id"),
+    }
+    items: list[dict[str, Any]] = list(staged.get("items") or [])
+    if verb == systems_confirm.RESEND:
+        # 过期卡片上的「重新发起」：同一份暂存内容发一张新卡，确认时照样逐项复查。
+        if not systems_confirm.lapsed(state, now) or not items:
+            return "ignored"
+        body = confirm.card(origin.id, state.id, items)
+        if await systems_confirm.resend(session, state, body, now, **where):
+            return "cloud_write_resent"
+        await systems_confirm.expire(session, state, now, **where)
+        return "expired"
     if state.status != "open":
         return "expired"
-    if state.expires_at is not None and state.expires_at <= utcnow():
-        state.status = "expired"
-        await _update(session, bot, inbound, "这张确认卡片已过期，没有执行。")
+    if state.expires_at is not None and state.expires_at <= now:
+        await systems_confirm.expire(session, state, now, **where)
         return "expired"
-    items: list[dict[str, Any]] = list(staged.get("items") or [])
     if verb == "cancel":
         state.status = "cancelled"
         await _update(session, bot, inbound, "已取消，没有执行。")

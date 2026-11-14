@@ -32,6 +32,7 @@ def test_definitions_describe_ids_dates_and_scopes() -> None:
         "review_on",
         "due_on",
         "origin_message_id",
+        "needs_owner",
     }
     snooze = by_name["followup_snooze"]["inputSchema"]
     assert snooze["properties"]["until"]["description"] == "YYYY-MM-DD"

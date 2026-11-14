@@ -43,6 +43,11 @@ Title = Annotated[
     Field(description="One sentence that makes sense on its own"),
 ]
 Notes = Annotated[str, StringConstraints(max_length=followups.MAX_NOTES)]
+NEEDS_OWNER = (
+    "true when only the owner in person can get it done (his decision on the spot, personal"
+    " credentials, authorization, pinned pages, a write refused with owner_turn_required): the"
+    " digest lists it with a button that lets him start it with you right away"
+)
 
 
 class Add(Arguments):
@@ -54,6 +59,7 @@ class Add(Arguments):
     origin_message_id: Identifier | None = Field(
         default=None, description="The Feishu message that caused it, if any"
     )
+    needs_owner: bool = Field(default=False, description=NEEDS_OWNER)
 
     _days = valid_days("review_on", "due_on")
 
@@ -65,6 +71,7 @@ class Update(Arguments):
     notes: Notes | None = None
     review_on: Day | None = None
     due_on: Day | None = None
+    needs_owner: bool | None = Field(default=None, description=NEEDS_OWNER)
     clear: list[Literal["notes", "review_on", "due_on"]] = Field(
         default_factory=list, max_length=3, description="Fields to empty"
     )
@@ -178,6 +185,7 @@ async def _run(
             review_on=_day(args.review_on),
             due_on=_day(args.due_on),
             origin_message_id=args.origin_message_id,
+            needs_owner=args.needs_owner,
         )
         return {"followup": followups.view(row)}
     seq = followups.parse_label(args.id)
@@ -191,7 +199,7 @@ async def _run(
         )
     else:
         changes: dict[str, Any] = {}
-        for field in ("category", "title", "notes"):
+        for field in ("category", "title", "notes", "needs_owner"):
             if getattr(args, field) is not None:
                 changes[field] = getattr(args, field)
         for field in ("review_on", "due_on"):

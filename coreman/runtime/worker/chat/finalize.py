@@ -443,6 +443,7 @@ class FinalizeStage(ChatStageBase):
         )
         await self._release_writes(ctx, pre, verdict)
         await self._after_finalize(ctx, pre, verdict)
+        await self._release_marks(ctx, pre)
 
     async def _finish_observe(
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict, out: Outcome
@@ -606,6 +607,41 @@ class FinalizeStage(ChatStageBase):
     async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
         """收尾之后的挂钩（清理本轮独有的状态）。只在这一轮真的抢到终态时才会走到。"""
 
+    async def _release_marks(self, ctx: TaskContext, pre: Prepared) -> None:
+        """个人助理：这一轮打的「处理中」表情还挂着的撤掉；交给子任务或调度接着查的，等那件事的
+        结论交回的这一轮结束再撤（`marks.release_due`）。
+
+        以所有者身份调飞书，自己一个短事务；撤不掉的留给盯消息顺带的检查再试，不影响这一轮。
+        调过飞书之后照常提交：刷新过的令牌不能丢。
+        """
+        if pre.intake.bot.kind != "assistant":
+            return
+        from coreman.core.assistants import watch
+        from coreman.core.assistants.approvals import marks
+        from coreman.core.db.models import AssistantSettings, Bot
+        from coreman.core.feishu_personal.toolbase import Call
+
+        released = 0
+        try:
+            async with ctx.session_factory() as session:
+                bot = await session.get(Bot, pre.intake.bot.id)
+                prefs = await session.get(AssistantSettings, pre.intake.bot.id)
+                if bot is None or prefs is None or not await marks.due(session, bot.id):
+                    return
+                scope, _code = await watch.owner_scope(session, bot, prefs)
+                if scope is not None:
+                    try:
+                        released = await marks.release_due(
+                            session, Call(session, ctx.cipher, scope), bot.id
+                        )
+                    except Exception as exc:  # noqa: BLE001 只记类型，留给顺带检查再试
+                        ctx.log.warning("assistant_marks_release_failed", error=type(exc).__name__)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 收尾之后的兜底，不影响这一轮
+            ctx.log.warning("assistant_marks_release_failed", error=type(exc).__name__)
+        if released:
+            ctx.log.info("assistant_marks_released", count=released)
+
     async def _release_writes(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
         """本轮暂存的业务系统写操作（以及个人助理的云服务写操作）：正常结束就在终稿之后发一张
         确认卡，否则作废。"""
@@ -613,22 +649,51 @@ class FinalizeStage(ChatStageBase):
         from coreman.core.systems_catalog import confirm as systems_confirm
 
         send = verdict.log_status in ("success", "ask_user")
-        async with ctx.session_factory() as session:
-            sent = await systems_confirm.release(
-                session,
-                ctx.cipher,
-                bot_id=pre.intake.bot.id,
-                task_id=ctx.task.id,
-                send=send,
-            )
-            cloud_sent = await cloud_confirm.release(
-                session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
-            )
-            await session.commit()
+        # 三种批次各自一个事务、各自兜住异常：前一个出错不能让后面的不交出去。
+        sent = cloud_sent = False
+        try:
+            async with ctx.session_factory() as session:
+                sent = await systems_confirm.release(
+                    session,
+                    ctx.cipher,
+                    bot_id=pre.intake.bot.id,
+                    task_id=ctx.task.id,
+                    send=send,
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("systems_write_release_failed", error=type(exc).__name__)
+        try:
+            async with ctx.session_factory() as session:
+                cloud_sent = await cloud_confirm.release(
+                    session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("cloud_write_release_failed", error=type(exc).__name__)
         if sent:
             ctx.log.info("systems_write_card_queued")
         if cloud_sent:
             ctx.log.info("cloud_write_card_queued")
+        if pre.intake.bot.kind == "assistant":
+            await self._release_assistant_writes(ctx, pre, send)
+
+    async def _release_assistant_writes(self, ctx: TaskContext, pre: Prepared, send: bool) -> None:
+        """个人助理本轮暂存的飞书写：在场的发确认卡，无人在场的合成一张审批单提交；没正常结束的
+        整批作废。出了意外只记日志：没交出去的批次由确认卡的清理任务删掉，不影响这一轮。"""
+        from coreman.core.assistants.approvals import batch
+
+        try:
+            async with ctx.session_factory() as session:
+                released = await batch.release(
+                    session, bot_id=pre.intake.bot.id, task_id=ctx.task.id, send=send
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("assistant_writes_release_failed", error=type(exc).__name__)
+            return
+        if released:
+            ctx.log.info("assistant_writes_released", mode=released)
 
     @staticmethod
     async def _icon_url(ctx: TaskContext) -> str:

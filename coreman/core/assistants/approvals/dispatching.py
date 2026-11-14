@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.assistants import dispatch, jobs, sealed
@@ -114,12 +114,7 @@ async def submit(
     )
     if existing is not None:
         return {"status": "pending_approval", "approval_id": str(existing.id), "duplicate": True}
-    pending = await session.scalar(
-        select(func.count())
-        .select_from(AssistantApproval)
-        .where(AssistantApproval.bot_id == bot.id, AssistantApproval.status == "pending")
-    )
-    if (pending or 0) >= service.MAX_PENDING:
+    if await service.pending_count(session, bot.id) >= service.MAX_PENDING:
         return {
             "error": "too_many_pending",
             "limit": service.MAX_PENDING,

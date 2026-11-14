@@ -19,6 +19,10 @@ FOLLOWUP_RULES = (
     "- 今天不用管的事用 followup_snooze 推到之后的某一天，到那天它会重新出现。办完了用 "
     "followup_close；不再需要的用 outcome=dropped。关闭后不能再改。\n"
     "- 由某条消息引起的事，记的时候带上 origin_message_id；那条消息被撤回时平台会自动关掉它。\n"
+    "- 要所有者在场才办得了的（等他当面拍板、要他的个人凭证或授权、改置顶页、无人在场时被拒的"
+    "写操作），记的时候带 needs_owner=true：平台把它列进给他的摘要，带一个「现在处理」按钮。"
+    "他点了，私聊里就会收到他发来的「现在处理 F012」，本轮块里附着这一条：他在场，当面办，"
+    "办完用 followup_close 关掉。\n"
     "- 标题写成一句能独立看懂的话，来龙去脉写进 notes。清单里不带 notes，要看时把编号作为 "
     f"followup_list 的 scope。同时未结的最多 {followups.MAX_OPEN} 条。"
 )

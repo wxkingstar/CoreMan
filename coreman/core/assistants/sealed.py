@@ -49,6 +49,7 @@ from coreman.core.db.models import (
     AssistantInbox,
     AssistantJob,
     AssistantPage,
+    AssistantReport,
     AssistantSettings,
     AssistantTranscript,
     AssistantWatch,
@@ -165,10 +166,13 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         # 规则生成的元数据，留明文，读不出来时状态行照常显示。
         "activity": JsonSpec(plain=frozenset({"at", "until", "expect", "stuck", "interrupted"})),
     },
-    # `_reply_used` 带着被点的按钮文字（置灰时写回卡片），不随其它记账键留明文。
+    # `_reply_used` 带着被点的按钮文字（置灰时写回卡片）、`_fallback_markdown` 是卡片全文的纯文本
+    # 兜底（摘要、紧急汇报、续卡），都不随其它记账键留明文。
     OutboxItem: {
         "payload": JsonSpec(
-            underscore=True, mirrors=(("card", "task_id"),), secret=frozenset({"_reply_used"})
+            underscore=True,
+            mirrors=(("card", "task_id"),),
+            secret=frozenset({"_reply_used", "_fallback_markdown"}),
         )
     },
     ChatLog: {
@@ -215,6 +219,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     # 按空字典——等于重新记基线），以及交回条目的摘要。
     AssistantWatch: {"head_enc": Whole([]), "cursor_enc": Whole({})},
     AssistantInbox: {"summary_enc": Whole()},
+    # 待汇报：无人在场的一轮想告诉所有者的话，攒到摘要时点发出。非空，读不出来时给空串。
+    AssistantReport: {"text_enc": Text("")},
 }
 
 

@@ -6,25 +6,30 @@ pending →（拒绝）rejected、（助理或停用流程撤回）withdrawn、�
 
 带文件的写操作：提交时把中转文件复制到临时桶（`attachments.py`），参数里的中转编号换成引用；
 单子有了结论之后由 scheduler 删掉桶里的对象。
+
+合单：无人在场的一轮里暂存的飞书写在本轮结束时合成一张单（`submit_batch`，暂存见 `batch.py`）。
+各项各一行、共用 `batch_id`（第一项的编号），第一项带着提交给 Tower 的外部编号与令牌；决定落到
+还在待批的各项上，撤回按项、单上没有待批的项了才在 Tower 撤回，过期与结果回合按单只投一轮。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints, ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns, sealed, sent
 from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
-from coreman.core.bus import outbox, tasks
+from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.cloud_proxy.resume import clean_reason
 from coreman.core.config import get_settings
@@ -33,9 +38,9 @@ from coreman.core.db.models import (
     AssistantApproval,
     Bot,
     InboundEvent,
+    Task,
     User,
     UserIdentity,
-    UserReached,
 )
 from coreman.core.db.models.storage import StoredObject
 from coreman.core.feishu_personal.files import FileRelay
@@ -46,7 +51,7 @@ from coreman.core.feishu_personal.tools import TOOLS as PERSONAL_TOOLS
 from coreman.core.feishu_personal.toolsets import files as file_tools
 from coreman.core.feishu_personal.toolsets import mail as mail_tools
 from coreman.core.logging import get_logger
-from coreman.core.timeutils import utcnow
+from coreman.core.timeutils import aware_utc, utcnow
 
 log = get_logger(__name__)
 # 与云签名代理的 `cm-<任务号>-…` 同在 `cm-` 之下（对账只认这个前缀），又不会与它相撞。
@@ -278,8 +283,14 @@ async def _stage(
     tool: str,
     arguments: dict[str, Any],
     files: FileRelay | None = None,
+    *,
+    links: bool = True,
 ) -> Staged | dict[str, Any]:
-    """校验参数、重新读会话、生成审批单内容。返回字典表示不能提交（原样交给助理）。"""
+    """校验参数、重新读会话、生成审批单内容。返回字典表示不能提交（原样交给助理）。
+
+    Args:
+        links: 正文里附上附件的查看链接（审批单用）；确认卡另行附链接，正文里不带
+    """
     item = PERSONAL_TOOLS.get(tool)
     if item is None or not catalog.is_write(tool):
         return {"error": "invalid_tool_or_arguments"}
@@ -339,10 +350,10 @@ async def _stage(
         return {"error": exc.code, "hint": exc.hint}
     template = catalog.entry(tool)
     # 审批人在批准前要能看到文件：链接与审批单同一时刻失效。
-    links = {
+    shown = {
         item.ref["key"]: attachments.link(store, item.ref, int(TTL.total_seconds()))
         for item in uploads
-        if store is not None
+        if store is not None and links
     }
     try:
         text = content.render(
@@ -351,7 +362,7 @@ async def _stage(
             facts,
             background=meta.background,
             research=meta.research,
-            links=links,
+            links=shown,
         )
     except content.TooLong:
         return {
@@ -377,6 +388,24 @@ async def _stage(
         uploads=uploads,
         store=store,
     )
+
+
+TOO_MANY = {
+    "error": "too_many_pending",
+    "limit": MAX_PENDING,
+    "hint": "同时待批的审批单已到上限：等本人处理，或用 approval_withdraw 撤回不再需要的。",
+}
+
+
+async def pending_count(session: AsyncSession, bot_id: uuid.UUID) -> int:
+    """待批的单数：一轮里合成一张的几项只算一张。"""
+    key = func.coalesce(AssistantApproval.batch_id, AssistantApproval.id)
+    found = await session.scalar(
+        select(func.count(func.distinct(key))).where(
+            AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending"
+        )
+    )
+    return int(found or 0)
 
 
 async def _duplicate(
@@ -471,17 +500,8 @@ async def submit(
     if existing is not None:
         status = "pending_approval" if existing.status in LIVE else "already_executed"
         return {"status": status, "approval_id": str(existing.id), "duplicate": True}
-    pending = await session.scalar(
-        select(func.count())
-        .select_from(AssistantApproval)
-        .where(AssistantApproval.bot_id == bot.id, AssistantApproval.status == "pending")
-    )
-    if (pending or 0) >= MAX_PENDING:
-        return {
-            "error": "too_many_pending",
-            "limit": MAX_PENDING,
-            "hint": "同时待批的审批单已到上限：等本人处理，或用 approval_withdraw 撤回不再需要的。",
-        }
+    if await pending_count(session, bot.id) >= MAX_PENDING:
+        return dict(TOO_MANY)
     row_id = uuid.uuid4()
     try:
         # Tower 没收下就连同暂存的行一起回滚：不留一张谁也批不了的单。
@@ -519,6 +539,205 @@ async def submit(
     return {"status": "pending_approval", "approval_id": str(row_id), "hint": PENDING_HINT}
 
 
+# 一张合单最多几项（一轮里暂存的飞书写的上限相同）。
+MAX_ITEMS = 20
+BATCH_LEAD = (
+    "本单共 {count} 项，是助理在你不在场时同一轮里要做的飞书操作。批准后平台先逐项复查（会话"
+    "是否有了变化、附件是否还在且没被改动），任何一项不通过整单都不执行；全部通过后按顺序原样"
+    "执行，某一项执行失败就停下，后面的项不再执行，已经执行的不会撤回；拒绝则整单都不执行。"
+)
+ITEM_HEAD = "【第 {index} 项 / 共 {count} 项】"
+
+
+def batch_content(items: list[dict[str, Any]]) -> str:
+    """合单的正文：一句说明，然后按顺序完整列出每一项（每项就是它单独成单时的正文）。
+
+    各项正文与确认卡一样做可见化转义（`proxied._visible`）：控制、格式字符与 `\\n` 以外的行、
+    段分隔符转成 `\\uXXXX`，值里夹带的分隔符造不出新的「第 N 项」分界，也颠倒不了显示。
+    """
+    from coreman.core.assistants.approvals import proxied  # proxied 依赖本模块，延迟导入
+
+    count = len(items)
+    parts = [BATCH_LEAD.format(count=count)]
+    for index, item in enumerate(items, 1):
+        body = proxied._visible(str(item["content"]))
+        parts.append(ITEM_HEAD.format(index=index, count=count) + "\n" + body)
+    return "\n\n".join(parts)
+
+
+def batch_abstract(items: list[dict[str, Any]]) -> str:
+    text = f"{len(items)} 项 · " + "；".join(str(item["abstract"]) for item in items)
+    text = " ".join(text.split())
+    limit = content.ABSTRACT_LIMIT
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def groups(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """按顺序把一轮暂存的项分成几张单：正文放得下就合在一张里，放不下才另起一张。"""
+    out: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for item in items:
+        trial = [*current, item]
+        if current and (len(trial) > MAX_ITEMS or len(batch_content(trial)) > content.LIMIT):
+            out.append(current)
+            trial = [item]
+        current = trial
+    if current:
+        out.append(current)
+    return out
+
+
+def _stored_item(item: dict[str, Any], index: int, count: int) -> dict[str, Any]:
+    stored: dict[str, Any] = {
+        "calls": item["calls"],
+        "abstract": item["abstract"],
+        "background": item.get("background") or "",
+        "research": item.get("research") or "",
+    }
+    if count > 1:
+        # 合单的项：第几项、共几项，以及它在单上的正文（改稿时重新拼整张单要用）。
+        stored |= {"item": index, "items": count, "content": item["content"]}
+    return stored
+
+
+def _body(group: list[dict[str, Any]]) -> bytes:
+    if len(group) == 1:
+        return tower.request_body(group[0]["tool"], group[0]["calls"])
+    return tower.batch_body([(item["tool"], item["calls"]) for item in group])
+
+
+async def submit_batch(
+    session: AsyncSession, bot: Bot, staged: dict[str, Any], *, cfg: tower.Config | None
+) -> int:
+    """无人在场的一轮结束时：把这一轮暂存的飞书写提交审批，返回提交了几张单。调用方提交事务。
+
+    能合的合成一张（`groups`），只有一项时与当场提交的单完全相同。提交前再查一次重复：同一份
+    内容这期间已有在途或刚执行过的单，这一项不再提交。审批系统没收下时照样留下审批行（失败、
+    原因代码），并作为一轮投回，助理据此知道这些写操作没有提交；附件随后由清理任务删除。
+    """
+    items: list[dict[str, Any]] = []
+    for item in list(staged.get("items") or []):
+        if await _duplicate(session, bot.id, str(item["args_hash"])) is None:
+            items.append(item)
+    if not items:
+        return 0
+    owner = await session.get(User, bot.owner_id) if bot.owner_id is not None else None
+    requester = str(owner.login_name) if owner is not None and owner.login_name else None
+    event_id = staged.get("event_id")
+    count = 0
+    for group in groups(items):
+        ids = [uuid.uuid4() for _ in group]
+        head = ids[0]
+        batch_id = head if len(group) > 1 else None
+        body = _body(group)
+        rows = []
+        for index, (row_id, item) in enumerate(zip(ids, group, strict=True), 1):
+            first = item["calls"][0]
+            rows.append(
+                AssistantApproval(
+                    id=row_id,
+                    bot_id=bot.id,
+                    tool=item["tool"],
+                    external_id=EXTERNAL_PREFIX + row_id.hex,
+                    origin_event_id=int(event_id) if event_id else None,
+                    session_key=str(staged.get("session_key") or ""),
+                    args_enc=_stored_item(item, index, len(group)),
+                    args_hash=item["args_hash"],
+                    request_hash=(
+                        tower.request_hash(cfg, EXTERNAL_PREFIX + head.hex, body, bot.bot_key)
+                        if cfg is not None
+                        else ""
+                    ),
+                    channel=item["channel"],
+                    chat_id=first["chat_id"],
+                    anchor_message_id=first["anchor_message_id"],
+                    thread_id=first["thread_id"],
+                    topic=item.get("topic") or None,
+                    expires_at=utcnow() + TTL,
+                    has_files=bool(item.get("has_files")),
+                    batch_id=batch_id,
+                )
+            )
+        code: str | None = None
+        if cfg is None:
+            code = UNAVAILABLE
+        elif requester is None:
+            code = "no_login_name"
+        elif await pending_count(session, bot.id) >= MAX_PENDING:
+            # 拆成几张时也守住在途上限：放不下的这一张不提交，如实投回原因。
+            code = str(TOO_MANY["error"])
+        else:
+            try:
+                async with session.begin_nested():
+                    session.add_all(rows)
+                    await session.flush()
+                    sent = await tower.submit(
+                        cfg,
+                        external_id=rows[0].external_id,
+                        requester=requester,
+                        caller=bot.bot_key,
+                        abstract=(
+                            batch_abstract(group) if len(group) > 1 else group[0]["abstract"]
+                        ),
+                        content=batch_content(group) if len(group) > 1 else group[0]["content"],
+                        body=body,
+                        expires_at=rows[0].expires_at,
+                    )
+                    for row in rows:
+                        row.approval_id = sent.approval_id
+            except tower.TowerError as exc:
+                log.warning("assistant_approval_batch_submit_failed", code=exc.code)
+                code = str(_tower_failure(exc)["error"])
+        if code is not None:
+            # 没提交成：留下失败的行（没有审批编号）告诉助理，这些写操作都没有执行。
+            rows = [_copy(row) for row in rows]
+            for row in rows:
+                row.status, row.error_code, row.decided_at = "failed", UNSUBMITTED + code, utcnow()
+            session.add_all(rows)
+            await session.flush()
+            await deliver(session, rows[0], bot)
+            continue
+        count += 1
+    return count
+
+
+def _copy(row: AssistantApproval) -> AssistantApproval:
+    """嵌套事务回滚之后的行不能再加回会话：按同样的值另建一行。"""
+    columns = AssistantApproval.__table__.columns.keys()
+    values = {name: getattr(row, name) for name in columns if name in row.__dict__}
+    return AssistantApproval(**values)
+
+
+async def members(
+    session: AsyncSession, row: AssistantApproval, *, lock: bool = True
+) -> list[AssistantApproval]:
+    """这张单的各项，按单上的顺序（内容已还原）；单独成单的就是它自己。"""
+    if row.batch_id is None:
+        return [row]
+    stmt = (
+        select(AssistantApproval)
+        .where(AssistantApproval.batch_id == row.batch_id)
+        .order_by(AssistantApproval.id)
+        .execution_options(populate_existing=True)
+    )
+    rows = list(await session.scalars(stmt.with_for_update() if lock else stmt))
+    await sealed.open_rows(session, rows)
+
+    def position(item: AssistantApproval) -> int:
+        stored = item.args_enc if isinstance(item.args_enc, dict) else {}
+        return int(stored.get("item") or 0)
+
+    return sorted(rows, key=position)
+
+
+async def head_of(session: AsyncSession, row: AssistantApproval) -> AssistantApproval:
+    """这张单向审批系统提交时用的那一行（合单的第一项）；单独成单的就是它自己。"""
+    if row.batch_id is None or row.batch_id == row.id:
+        return row
+    found = await session.get(AssistantApproval, row.batch_id)
+    return found if found is not None else row
+
+
 @dataclass(frozen=True)
 class Decided:
     """known=False：不是这里发起的单；queued：排上了执行任务或结果回合。"""
@@ -527,17 +746,31 @@ class Decided:
     queued: bool = False
 
 
-async def deliver(session: AsyncSession, row: AssistantApproval, bot: Bot) -> bool:
-    """把这张单的结局作为一轮投回助理会话。
+async def deliver(
+    session: AsyncSession,
+    row: AssistantApproval,
+    bot: Bot,
+    *,
+    status: str | None = None,
+    attempt: int = 0,
+) -> bool:
+    """把这张单的结局作为一轮投回助理会话。合单只投一轮，`row` 是第一项，各项的结局都在里面。
 
     所有者私聊那一轮里提交的单沿用那一轮的入站事件与会话键。平台自己发起的轮次里提交的单没有
     入站事件，或者那条入站事件已被清理（审批等了几天）：经 `platform_turns.enqueue` 入队，身份
     取自开通时记下的设置，回到提交时的会话。
+
+    Args:
+        status: 这次投回的结局（合单的第一项自己可能已被单独撤回）；不给用 `row.status`
+        attempt: 第几次重投（`redeliver`）；0 是第一次
     """
     if bot.owner_id is None:
         return False
-    dedupe = f"assistant-approval:{row.id}:result:{row.status}"
-    result = {"approval_id": str(row.id), "status": row.status}
+    outcome = status or row.status
+    dedupe = f"assistant-approval:{row.id}:result:{outcome}"
+    if attempt:
+        dedupe += f"{RETRY_MARK}{attempt}"
+    result = {"approval_id": str(row.id), "status": outcome}
     if row.origin_event_id is None or await session.get(InboundEvent, row.origin_event_id) is None:
         queued = await platform_turns.enqueue(
             session,
@@ -595,20 +828,34 @@ async def decide(
     )
     if row is None or row.approval_id not in (None, approval_id):
         return Decided(known=False)
-    row.approval_id = approval_id
-    if row.status != "pending":
+    # 合单：决定落到还在待批的各项上（单独撤回的项不动）；第一项自己被撤回了也照样。
+    items = await members(session, row)
+    for item in items:
+        item.approval_id = approval_id
+    live = [item for item in items if item.status == "pending"]
+    if not live:
         return Decided(known=True)
-    row.decided_at = decided_at or utcnow()
+    when = decided_at or utcnow()
+    for item in live:
+        item.decided_at = when
     bot = await session.get(Bot, row.bot_id)
-    if bot is None or not bot.enabled or inactive_assistant(bot) or sealed.is_locked(row):
+    if (
+        bot is None
+        or not bot.enabled
+        or inactive_assistant(bot)
+        or any(sealed.is_locked(item) for item in live)
+    ):
         # 助理已停用、正在停用或还没开通好，或数据密钥已销毁、参数读不出来：不执行，
         # 也没有会话可以投回。停用开始之前已经批准的单不在这里，照常执行。
-        row.status, row.error_code = "withdrawn", "assistant_inactive"
+        for item in live:
+            item.status, item.error_code = "withdrawn", "assistant_inactive"
         return Decided(known=True)
     note = clean_reason(reason) if reason else None
-    row.reason_enc = note or None
+    for item in live:
+        item.reason_enc = note or None
     if status == "approved":
-        row.status = "approved"
+        for item in live:
+            item.status = "approved"
         task = await tasks.enqueue(
             session,
             NewTask(
@@ -620,11 +867,85 @@ async def decide(
             ),
         )
         return Decided(known=True, queued=task is not None)
-    row.status = status
-    return Decided(known=True, queued=await deliver(session, row, bot))
+    for item in live:
+        item.status = status
+    return Decided(known=True, queued=await deliver(session, row, bot, status=status))
+
+
+# 结果回合没跑成、只是「没轮到」（会话忙、让路给所有者、暂停、运行时不可用、被替代）：重投。
+REDELIVER_CODES = frozenset(
+    {
+        "session_busy",
+        "platform_turn_yielded",
+        "assistant_paused",
+        "relay_unavailable",
+        "superseded",
+    }
+)
+REDELIVER_MAX = 8
+REDELIVER_AFTER = timedelta(minutes=1)
+REDELIVER_WINDOW = timedelta(days=3)
+REDELIVER_BATCH = 50
+RETRY_MARK = ":retry:"
+_RESULT_KEY = re.compile(
+    r"^assistant-approval:([0-9a-f-]{36}):result:([a-z_]+)(?::retry:([0-9]+))?$"
+)
+
+
+async def redeliver(session: AsyncSession, now: datetime) -> int:
+    """结局已定、结果回合却没跑成的单：再投一轮，保证助理最终知道结局。调用方提交。
+
+    结果回合不出声，会话忙时直接记失败（`session_busy`），所有者发来消息时让路取消；去重键已
+    用掉，不重投就永远送不到。这里按任务表找：同一个结局最近一次的结果任务以「没轮到」的代码
+    结束、此后没有在途或成功的同一结局任务的，退避（1 分钟起逐次加倍）后用新的去重键重投，
+    至多 `REDELIVER_MAX` 次；助理已停用或不在 active 的不投。返回重投了几轮。
+    """
+    rows = (
+        await session.execute(
+            select(Task.dedupe_key, Task.status, Task.error_code, Task.finished_at)
+            .where(
+                Task.kind == APPROVAL_RESULT_KIND,
+                Task.dedupe_key.like("assistant-approval:%"),
+                or_(Task.finished_at.is_(None), Task.finished_at > now - REDELIVER_WINDOW),
+            )
+            .order_by(Task.id)
+        )
+    ).all()
+    latest: dict[tuple[str, str], tuple[int, str, str | None, datetime | None]] = {}
+    for key, status, code, finished in rows:
+        found = _RESULT_KEY.match(key or "")
+        if found is None:
+            continue
+        attempt = int(found.group(3) or 0)
+        group = (found.group(1), found.group(2))
+        if group not in latest or attempt >= latest[group][0]:
+            latest[group] = (attempt, status, code, finished)
+    count = 0
+    for (approval_id, outcome), (attempt, status, code, finished) in latest.items():
+        if status in tasks.OPEN or status == "succeeded" or code not in REDELIVER_CODES:
+            continue
+        if attempt >= REDELIVER_MAX or finished is None:
+            continue
+        if aware_utc(finished) > now - REDELIVER_AFTER * (2**attempt):
+            continue
+        row = await session.get(AssistantApproval, uuid.UUID(approval_id))
+        bot = await session.get(Bot, row.bot_id) if row is not None else None
+        if row is None or bot is None or not bot.enabled or inactive_assistant(bot):
+            continue
+        if await deliver(session, row, bot, status=outcome, attempt=attempt + 1):
+            count += 1
+        if count >= REDELIVER_BATCH:
+            break
+    return count
 
 
 RESULT_LIMIT = 20000
+# 合单里前面一项执行失败、平台停下没有执行的项。
+SKIPPED = "skipped_after_failure"
+# 合单里另有一项执行前复查没通过、整单都没执行时，其余各项的原因代码。
+REFUSED = "refused_with_batch"
+# 本轮结束时没能提交审批的项：原因代码前加这个前缀（什么都没提交，也没有执行）。
+UNSUBMITTED = "unsubmitted_"
 
 
 def bounded_result(value: Any) -> dict[str, Any]:
@@ -678,6 +999,21 @@ def result_text(row: AssistantApproval) -> str:
         )
     if row.status == "expired":
         return f"{what}{topic}超过 72 小时没有处理，已按撤回处理，没有执行。仍然需要时重新提交。"
+    if row.status == "withdrawn":
+        return f"{what}{topic}在决定之前已撤回（{row.error_code or 'withdrawn'}），没有执行。"
+    if row.status == "failed" and (row.error_code or "").startswith(UNSUBMITTED):
+        # 本轮结束时合并提交，审批系统没有收下：什么都没有提交，也没有执行。
+        return (
+            f"{what}{topic}没能提交审批（{(row.error_code or '')[len(UNSUBMITTED) :]}），没有执行。"
+            "确认原因之后，需要时重新调用原工具提交。"
+        )
+    if row.error_code == REFUSED:
+        return (
+            f"{what}{topic}已批准，但同一张单里另有一项在执行前的复查没有通过，整单都没有执行；"
+            "这一项本身没有问题，需要时重新提交。"
+        )
+    if row.error_code == SKIPPED:
+        return f"{what}{topic}已批准，但同一张单里前面的一项执行失败，平台已停下，这一项没有执行。"
     if row.error_code == "execution_not_started":
         return (
             f"{what}{topic}已批准，但平台没能开始执行（execution_not_started），没有执行任何操作。{note}\n"
@@ -689,6 +1025,19 @@ def result_text(row: AssistantApproval) -> str:
         f"<execution_result>\n{result}\n</execution_result>\n"
         "平台不会自动重试。确认问题、改好之后重新调用原工具提交；"
         "error 为 execution_interrupted 时操作可能已经生效，先核对再决定。"
+    )
+
+
+def batch_text(rows: list[AssistantApproval]) -> str:
+    """合单的结果回合：各项按单上的顺序逐项说明。"""
+    if len(rows) == 1:
+        return result_text(rows[0])
+    lead = (
+        f"以下 {len(rows)} 项是同一张审批单里的（合单编号 {rows[0].batch_id}），按单上的顺序；"
+        "前面已执行的项不会因为后面的失败撤回。"
+    )
+    return "\n\n".join(
+        [lead, *(f"第 {index} 项：" + result_text(row) for index, row in enumerate(rows, 1))]
     )
 
 
@@ -714,12 +1063,41 @@ async def _withdraw_remote(cfg: tower.Config | None, row: AssistantApproval) -> 
     """
     if cfg is None or not row.approval_id:
         return False
+    # 合单在审批系统里是第一项的外部编号（第一项的编号就是合单编号）。
+    external = row.external_id if row.batch_id is None else EXTERNAL_PREFIX + row.batch_id.hex
     try:
-        await tower.withdraw(cfg, row.external_id)
+        await tower.withdraw(cfg, external)
     except tower.TowerError as exc:
         log.warning("assistant_approval_withdraw_failed", approval=str(row.id), code=exc.code)
         return False
     return True
+
+
+async def _others_pending(session: AsyncSession, row: AssistantApproval) -> bool:
+    """同一张合单里除这一项之外还有待批的项。"""
+    if row.batch_id is None:
+        return False
+    found = await session.scalar(
+        select(func.count()).where(
+            AssistantApproval.batch_id == row.batch_id,
+            AssistantApproval.id != row.id,
+            AssistantApproval.status == "pending",
+        )
+    )
+    return bool(found)
+
+
+async def _withdraw_item(
+    session: AsyncSession, cfg: tower.Config | None, row: AssistantApproval
+) -> bool:
+    """一项撤回之后：单上已经没有待批的项时让审批系统也撤回整张单。
+
+    还有待批的项时审批系统那张单留着，批准后只执行还在待批的项（撤回的这一项本地已不是待批，
+    不会执行）。返回审批系统那边是否撤回成功；不需要撤回时为 True。
+    """
+    if await _others_pending(session, row):
+        return True
+    return await _withdraw_remote(cfg, row)
 
 
 def _file_keys(row: AssistantApproval) -> list[str]:
@@ -755,6 +1133,13 @@ async def revise(
     if other is not None and other.id != row.id:
         return {"error": "duplicate", "approval_id": str(other.id)}
     replaced = _file_keys(row)
+    if row.batch_id is not None:
+        out = await _revise_item(session, scope, row, staged, cfg, requester, files)
+        if out.get("revised") and replaced and files is not None:
+            store = attachments.store(files.settings)
+            if store is not None:
+                await attachments.delete(store, replaced)
+        return out
     try:
         async with session.begin_nested():
             _apply(row, staged, cfg, scope.bot.bot_key)
@@ -786,6 +1171,92 @@ async def revise(
     return {"status": "pending_approval", "approval_id": str(row.id), "revised": True}
 
 
+def _as_item(row: AssistantApproval) -> dict[str, Any]:
+    stored = row.args_enc if isinstance(row.args_enc, dict) else {}
+    return {
+        "tool": row.tool,
+        "calls": list(stored.get("calls") or []),
+        "abstract": stored.get("abstract") or row.tool,
+        "content": stored.get("content") or "",
+        "background": stored.get("background") or "",
+        "research": stored.get("research") or "",
+    }
+
+
+async def _revise_item(
+    session: AsyncSession,
+    scope: Scope,
+    row: AssistantApproval,
+    staged: Staged,
+    cfg: tower.Config,
+    requester: str,
+    files: FileRelay | None,
+) -> dict[str, Any]:
+    """改合单里的一项：整张单以第一项的外部编号重新提交，审批系统原地替换内容并重新通知。"""
+    rows = await members(session, row)
+    if any(sealed.is_locked(item) for item in rows):
+        return {"error": sealed.LOCKED_CODE}
+    head = await head_of(session, row)
+    fresh = {
+        "tool": row.tool,
+        "calls": staged.calls,
+        "abstract": staged.abstract,
+        "content": staged.content,
+        "background": staged.meta.background,
+        "research": staged.meta.research,
+    }
+    group = [fresh if item.id == row.id else _as_item(item) for item in rows]
+    text = batch_content(group)
+    if len(text) > content.LIMIT:
+        return {
+            "error": "content_too_long",
+            "limit": content.LIMIT,
+            "hint": "改过的这一项放回原来那张单之后正文超过上限：缩短内容，或撤回这一项另行提交。",
+        }
+    index = next(position for position, item in enumerate(rows, 1) if item.id == row.id)
+    body = _body(group)
+    first = staged.calls[0]
+    try:
+        async with session.begin_nested():
+            row.args_enc = _stored_item(fresh, index, len(rows))
+            row.args_hash = staged.args_hash
+            row.channel = staged.facts[0].channel
+            row.chat_id = first["chat_id"]
+            row.anchor_message_id = first["anchor_message_id"]
+            row.thread_id = first["thread_id"]
+            row.topic = staged.meta.topic or None
+            row.has_files = bool(staged.uploads)
+            row.revised_at = utcnow()
+            digest = tower.request_hash(cfg, head.external_id, body, scope.bot.bot_key)
+            for item in rows:
+                item.request_hash = digest
+            await session.flush()
+            await _store_uploads(files, staged)
+            await tower.submit(
+                cfg,
+                external_id=head.external_id,
+                requester=requester,
+                caller=scope.bot.bot_key,
+                abstract=batch_abstract(group),
+                content=text,
+                body=body,
+                expires_at=head.expires_at,
+            )
+    except tower.TowerError as exc:
+        await _discard(staged)
+        log.warning("assistant_approval_revise_failed", approval=str(row.id), code=exc.code)
+        return _tower_failure(exc)
+    except attachments.Unavailable:
+        await _discard(staged)
+        return dict(FILE_STORE_DOWN)
+    return {
+        "status": "pending_approval",
+        "approval_id": str(row.id),
+        "batch_id": str(row.batch_id),
+        "revised": True,
+    }
+
+
 async def withdraw(
     session: AsyncSession,
     scope: Scope,
@@ -803,6 +1274,11 @@ async def withdraw(
     row.status, row.decided_at = "withdrawn", utcnow()
     row.reason_enc = reason.strip()[:REASON_LIMIT] or None
     out: dict[str, Any] = {"status": "withdrawn", "approval_id": str(row.id)}
+    if await _others_pending(session, row):
+        # 合单里的一项：审批系统里那张单还在，批准后只执行其余仍待批的项。
+        out["batch_id"] = str(row.batch_id)
+        out["note"] = "同一张审批单里其余的项仍在待批；批准后只执行它们，这一项不会执行。"
+        return out
     if not await _withdraw_remote(cfg, row):
         out["warning"] = (
             "审批系统那边没能撤回（连不上，或那边已有结论）；"
@@ -846,13 +1322,21 @@ async def listing(
                 "created_at": row.created_at.isoformat(),
                 "decided_at": row.decided_at.isoformat() if row.decided_at else None,
                 "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+                # 合单的一项：所在的单（第一项的编号）与它在单上的位置。
+                **(
+                    {
+                        "batch_id": str(row.batch_id),
+                        "item": stored.get("item"),
+                        "items": stored.get("items"),
+                    }
+                    if row.batch_id is not None
+                    else {}
+                ),
             }
         )
     return {"items": items}
 
 
-REMIND_SETTLE = timedelta(seconds=30)
-REMIND_GAP = timedelta(minutes=5)
 EXPIRE_BATCH = 50
 SWEEP_BATCH = 50
 
@@ -891,7 +1375,7 @@ async def auto_withdraw(
         return None
     row.status, row.decided_at = "withdrawn", now or utcnow()
     row.error_code = sealed.code_only(code, "withdrawn")
-    await _withdraw_remote(cfg, row)
+    await _withdraw_item(session, cfg, row)
     log.info("assistant_approval_auto_withdrawn", approval=str(row.id), code=row.error_code)
     return row
 
@@ -913,7 +1397,12 @@ async def withdraw_pending(session: AsyncSession, bot_id: uuid.UUID, reason: str
     for row in rows:
         row.status, row.decided_at = "withdrawn", now
         row.error_code = sealed.code_only(reason, "withdrawn")
-        await _withdraw_remote(cfg, row)
+    done: set[uuid.UUID] = set()
+    for row in rows:
+        # 合单在审批系统里只有一张：撤一次。
+        if (row.batch_id or row.id) not in done:
+            done.add(row.batch_id or row.id)
+            await _withdraw_remote(cfg, row)
     return len(rows)
 
 
@@ -930,80 +1419,18 @@ async def expire(session: AsyncSession, now: datetime, cfg: tower.Config | None)
     )
     for row in rows:
         row.status, row.decided_at = "expired", now
+    done: set[uuid.UUID] = set()
+    for row in rows:
+        key = row.batch_id or row.id
+        # 合单只撤一次、只投一轮，等它的各项都过期了再投（各项的到期时刻相同）。
+        if key in done or await _others_pending(session, row):
+            continue
+        done.add(key)
         await _withdraw_remote(cfg, row)
         bot = await session.get(Bot, row.bot_id)
         if bot is not None and bot.enabled and not inactive_assistant(bot):
-            await deliver(session, row, bot)
+            await deliver(session, await head_of(session, row), bot, status="expired")
     return len(rows)
-
-
-async def remind(session: AsyncSession, now: datetime, link: str | None) -> int:
-    """在助理私聊里提醒所有者「有 N 张待批」：不带内容，同一批合并，5 分钟内不重复。
-
-    Args:
-        link: 审批系统的网页入口（`tower.web_url`）；没有就只说张数，不带链接
-    """
-    waiting = (
-        await session.execute(
-            select(AssistantApproval.bot_id, func.min(AssistantApproval.created_at))
-            .where(AssistantApproval.status == "pending", AssistantApproval.notified_at.is_(None))
-            .group_by(AssistantApproval.bot_id)
-        )
-    ).all()
-    sent = 0
-    for bot_id, oldest in waiting:
-        if oldest > now - REMIND_SETTLE:
-            # 同一轮里可能还在接着提交：等这一批落定再合成一条。
-            continue
-        last = await session.scalar(
-            select(func.max(AssistantApproval.notified_at)).where(
-                AssistantApproval.bot_id == bot_id
-            )
-        )
-        if last is not None and last > now - REMIND_GAP:
-            continue
-        bot = await session.get(Bot, bot_id)
-        reached = (
-            await session.get(UserReached, (bot_id, bot.owner_id))
-            if bot is not None
-            and bot.enabled
-            and not inactive_assistant(bot)
-            and bot.owner_id is not None
-            else None
-        )
-        if bot is None or reached is None:
-            continue
-        count = await session.scalar(
-            select(func.count())
-            .select_from(AssistantApproval)
-            .where(AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
-        )
-        await outbox.add(
-            session,
-            bot_id=bot_id,
-            platform="feishu",
-            kind="send",
-            dedupe_key=f"assistant-approvals:{bot_id}:{int(now.timestamp())}",
-            target={"chat_id": reached.platform_chat_id},
-            payload={
-                "markdown": (
-                    f"有 {count} 张审批单等你处理：{link}"
-                    if link
-                    else f"有 {count} 张审批单等你处理。"
-                )
-            },
-        )
-        await session.execute(
-            update(AssistantApproval)
-            .where(
-                AssistantApproval.bot_id == bot_id,
-                AssistantApproval.status == "pending",
-                AssistantApproval.notified_at.is_(None),
-            )
-            .values(notified_at=now)
-        )
-        sent += 1
-    return sent
 
 
 async def sweep_files(session: AsyncSession, store: attachments.Store | None) -> int:
@@ -1033,14 +1460,16 @@ async def sweep_files(session: AsyncSession, store: attachments.Store | None) ->
 
 
 async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
-    """scheduler 每轮调用：过期、提醒、清理附件、收口执行中断的单。没配审批系统时都不会有数据。"""
+    """scheduler 每轮调用：过期、清理附件、收口执行中断的单。没配审批系统时都不会有数据。
+
+    「有 N 张待批」不再单独私信所有者：在途的单列在助理摘要的「等你批的」里（`digest.py`）。"""
     from coreman.core.assistants.approvals import execute  # execute 依赖本模块，延迟导入
 
     settings = get_settings()
     cfg = tower.config(settings)
     return {
         "assistant_approvals_expired": await expire(session, now, cfg),
-        "assistant_approvals_reminded": await remind(session, now, tower.web_url(settings)),
         "assistant_approval_files_swept": await sweep_files(session, attachments.store(settings)),
         "assistant_approvals_recovered": await execute.recover_stuck(session, now, cfg),
+        "assistant_approval_results_redelivered": await redeliver(session, now),
     }

@@ -72,6 +72,7 @@ def view(row: AssistantFollowup, *, notes: bool = True) -> dict[str, Any]:
         "review_on": row.review_on.isoformat() if row.review_on else None,
         "due_on": row.due_on.isoformat() if row.due_on else None,
         "origin_message_id": row.origin_message_id,
+        "needs_owner": row.needs_owner,
         "created_at": row.created_at.isoformat(),
     }
     if notes:
@@ -133,8 +134,12 @@ async def add(
     due_on: date | None = None,
     origin_message_id: str | None = None,
     job_id: uuid.UUID | None = None,
+    needs_owner: bool = False,
 ) -> AssistantFollowup:
     """记一条，编号取这位助理的下一个。
+
+    Args:
+        needs_owner: 要所有者在场才办得了：摘要里逐条列出，带「现在处理」按钮
 
     Raises:
         FollowupError: invalid_category / invalid_title / invalid_notes / too_many_followups /
@@ -164,6 +169,7 @@ async def add(
         due_on=due_on,
         origin_message_id=origin_message_id,
         job_id=job_id,
+        needs_owner=needs_owner,
     )
     session.add(row)
     await session.flush()
@@ -207,6 +213,7 @@ async def update(
     notes: str | None | Keep = KEEP,
     review_on: date | None | Keep = KEEP,
     due_on: date | None | Keep = KEEP,
+    needs_owner: bool | None = None,
 ) -> AssistantFollowup:
     """改一条未结的；没给的项不动，`notes` / `review_on` / `due_on` 给 None 是清空。
 
@@ -224,6 +231,8 @@ async def update(
         row.notes_enc = _notes(notes)
     if not isinstance(due_on, Keep):
         row.due_on = due_on
+    if needs_owner is not None:
+        row.needs_owner = needs_owner
     if not isinstance(review_on, Keep):
         row.review_on = review_on
         if review_on is None and row.status == "snoozed":
@@ -278,7 +287,17 @@ async def close(
     row.status = "dropped" if dropped else "done"
     row.closed_at = row.updated_at = utcnow()
     await session.flush()
+    if row.needs_owner:
+        await _retire(session, bot_id, [row.seq])
     return row
+
+
+async def _retire(session: AsyncSession, bot_id: uuid.UUID, seqs: list[int]) -> None:
+    """关掉的要当面处理的条目：摘要卡片上它的「现在处理」按钮置灰。"""
+    # 函数内引入：digest 在模块层引用本模块。
+    from coreman.core.assistants import digest
+
+    await digest.retire(session, bot_id, seqs)
 
 
 async def _wake(session: AsyncSession, bot_id: uuid.UUID, today: date) -> None:
@@ -372,4 +391,28 @@ async def close_for_message(
         row.status, row.close_code = "dropped", RECALLED
         row.closed_at = row.updated_at = now
     await session.flush()
+    await _retire(session, bot_id, [row.seq for row in rows if row.needs_owner])
     return rows
+
+
+def _owner_waiting(bot_id: uuid.UUID) -> tuple[ColumnElement[bool], ...]:
+    return (
+        AssistantFollowup.bot_id == bot_id,
+        AssistantFollowup.status == "open",
+        AssistantFollowup.needs_owner.is_(True),
+    )
+
+
+async def needs_owner(
+    session: AsyncSession, bot_id: uuid.UUID, today: date, *, limit: int
+) -> list[AssistantFollowup]:
+    """要所有者当面处理、还未结的条目（推后的到了回看日先改回未结），编号小的在前，内容已还原。"""
+    await _wake(session, bot_id, today)
+    return await _rows(session, bot_id, *_owner_waiting(bot_id)[1:], limit=limit)
+
+
+async def needs_owner_count(session: AsyncSession, bot_id: uuid.UUID) -> int:
+    found = await session.scalar(
+        select(func.count()).select_from(AssistantFollowup).where(*_owner_waiting(bot_id))
+    )
+    return int(found or 0)

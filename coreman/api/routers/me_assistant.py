@@ -65,6 +65,11 @@ SETTINGS_ERRORS: dict[str, tuple[int, str]] = {
         f"忽略的会话最多 {assistant_settings.MAX_IGNORED} 个",
     ),
     "chat_in_both_lists": (422, "同一个会话不能既是重点群又被忽略"),
+    "invalid_digest_times": (
+        422,
+        f"摘要时点要写成 HH:MM，1 到 {assistant_settings.MAX_DIGEST_TIMES} 个，不能重复",
+    ),
+    "invalid_quiet_hours": (422, "免打扰时段要写成 HH:MM，开始与结束不能相同"),
     "budget_over_platform": (422, "每日轮次预算不能超过平台默认值"),
     "content_locked": (409, "加密保存的个人内容已不可读取，不能再写入重点群与忽略的会话"),
 }
@@ -74,7 +79,8 @@ _ChatId = Annotated[str, StringConstraints(max_length=100)]
 class SettingsIn(BaseModel):
     """所有者改的设置。这里只挡类型与离谱的长度：取值规则由 `settings.update` 判断并给出原因代码。
 
-    前七项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、跟随平台默认。
+    除 `daily_turn_budget` 外各项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、
+    跟随平台默认。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -85,6 +91,12 @@ class SettingsIn(BaseModel):
     workdays: list[StrictInt] | None = Field(default=None, max_length=7)
     focus_chats: list[_ChatId] | None = Field(default=None, max_length=200)
     ignored_chats: list[_ChatId] | None = Field(default=None, max_length=200)
+    digest_times: list[Annotated[str, StringConstraints(max_length=5)]] | None = Field(
+        default=None, max_length=24
+    )
+    quiet_enabled: StrictBool | None = None
+    quiet_start: str | None = Field(default=None, max_length=5)
+    quiet_end: str | None = Field(default=None, max_length=5)
     daily_turn_budget: StrictInt | None = Field(
         default=None, ge=delivery.BUDGET_MIN, le=delivery.BUDGET_MAX
     )

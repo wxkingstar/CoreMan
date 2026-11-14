@@ -15,9 +15,12 @@ import { lines, toForm, toPatch, validate, validTimezone, type PrefsField, type 
 const t = i18n.global.t
 const prefs: AssistantPrefs = {
   timezone: 'Asia/Shanghai', always_on: false, work_start: '09:30', work_end: '19:00', workdays: [1, 2, 3, 4, 5],
-  focus_chats: ['oc_a'], ignored_chats: [], daily_turn_budget: null, platform_daily_turn_budget: 200, effective_daily_turn_budget: 200,
+  focus_chats: ['oc_a'], ignored_chats: [],
+  digest_times: ['09:00', '13:30', '18:00'], quiet_enabled: true, quiet_start: '22:00', quiet_end: '08:00',
+  daily_turn_budget: null, platform_daily_turn_budget: 200, effective_daily_turn_budget: 200,
   limits: { focus_chats: 5, ignored_chats: 50, budget_min: 10 }, locked: false,
   on_shift: true, shift_override: null, shift_override_until: null, cold_start: 'done', today: '2026-11-13',
+  quiet_now: false,
 }
 const CASES: [Partial<PrefsForm>, Partial<Record<PrefsField, string>>][] = [
   [{}, {}],
@@ -35,6 +38,13 @@ const CASES: [Partial<PrefsForm>, Partial<Record<PrefsField, string>>][] = [
   [{ focus_chats: 'oc_1\noc_2\noc_3\noc_4\noc_5\noc_6' }, { focus_chats: 'focusTooMany' }],
   [{ ignored_chats: 'ou_person' }, { ignored_chats: 'chatId' }],
   [{ ignored_chats: 'oc_b\noc_a' }, { ignored_chats: 'chatInBoth' }],
+  [{ digest_times: '18:00,09:00' }, {}],
+  [{ digest_times: '' }, { digest_times: 'digestTimes' }],
+  [{ digest_times: '9:00' }, { digest_times: 'digestTimes' }],
+  [{ digest_times: '09:00, 09:00' }, { digest_times: 'digestTimes' }],
+  [{ digest_times: '01:00 02:00 03:00 04:00 05:00 06:00 07:00' }, { digest_times: 'digestTimes' }],
+  [{ quiet_start: '08:00' }, { quiet_hours: 'quietHours' }],
+  [{ quiet_end: '8:00' }, { quiet_hours: 'quietHours' }],
   [{ follow_platform: false, daily_turn_budget: 9 }, { daily_turn_budget: 'budget' }],
   [{ follow_platform: false, daily_turn_budget: 201 }, { daily_turn_budget: 'budget' }],
   [{ follow_platform: false, daily_turn_budget: 20.5 }, { daily_turn_budget: 'budget' }],
@@ -76,6 +86,10 @@ describe('settings form rules', () => {
     const own = { ...prefs, daily_turn_budget: 120 }
     expect(toPatch({ ...toForm(own), follow_platform: true }, own)).toEqual({ daily_turn_budget: null })
     expect(toPatch({ ...toForm(prefs), always_on: true }, prefs)).toEqual({ always_on: true })
+    expect(toForm(prefs)).toMatchObject({ digest_times: '09:00, 13:30, 18:00', quiet_enabled: true })
+    expect(toPatch({ ...toForm(prefs), digest_times: '18:00、 08:30', quiet_enabled: false, quiet_start: '23:00' }, prefs)).toEqual({
+      digest_times: ['08:30', '18:00'], quiet_enabled: false, quiet_start: '23:00',
+    })
     expect(toForm({ ...prefs, always_on: true })).toMatchObject({ always_on: true, work_start: '09:30', workdays: [1, 2, 3, 4, 5] })
   })
 })

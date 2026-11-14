@@ -14,7 +14,7 @@ import json
 import re
 import unicodedata
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -22,17 +22,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task
+from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem, Task
 from coreman.core.systems_catalog import uploads
 from coreman.core.systems_catalog.context import Context
 from coreman.core.systems_catalog.proxy import Call, Prepared, record
-from coreman.core.timeutils import utcnow
+from coreman.core.timeutils import aware_utc, utcnow
 
 KIND = "systems_write"
 CARD_EVENT = "systems_write"
 # Task payload key of the turn that continues after the card was answered.
 RESULT_KEY = "systems_write_result"
-TTL = timedelta(minutes=10)
+TTL = timedelta(minutes=60)
+# A sent batch is kept this long after its first card: an expired card can be sent again with the
+# same staged content until then; afterwards the content is purged (`sweep`).
+KEEP = timedelta(hours=24)
+# The confirmation cards that share expiry, resending and purging. Each kind is also its card's
+# `event_key`; its outbox dedupe keys start with the kind spelled with dashes.
+CARD_KINDS = (KIND, "cloud_write", "assistant_write")
+RESEND = "resend"
+SWEEP_BATCH = 50
 MAX_ITEMS = 50
 MAX_VALUE = 500
 # Items after this many characters are listed by operation and path only.
@@ -404,7 +412,7 @@ def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) 
                     "tag": "markdown",
                     "content": (
                         "<font color='grey'>改动说明由 AI 整理，以详情里的请求为准。"
-                        "只有发起人能确认，10 分钟内有效。</font>"
+                        "只有发起人能确认，60 分钟内有效。</font>"
                     ),
                     "text_size": "notation",
                 },
@@ -425,15 +433,249 @@ async def release(
         state.status = "cancelled"
         return False
     items = unseal(cipher, task_id, state.state)
-    state.state = {**state.state, "sent": True}
-    state.expires_at = utcnow() + TTL
+    await send_card(session, state, card(task_id, state.id, items), now=utcnow())
+    return True
+
+
+def card_key(kind: str, state_id: uuid.UUID, number: int) -> str:
+    """Outbox dedupe key of a batch's card: the first one, then each resend."""
+    prefix = f"{kind.replace('_', '-')}:{state_id}"
+    return prefix if number == 0 else f"{prefix}:resend:{number}"
+
+
+async def send_card(
+    session: AsyncSession, state: InteractionState, body: dict[str, Any], *, now: datetime
+) -> None:
+    """Send (or send again) the card of a batch; it can be answered for `TTL` from now.
+
+    The first send is remembered: the staged content is kept `KEEP` after it, then purged."""
+    staged = state.state
+    number = int(staged.get("resent", -1)) + 1
+    key = card_key(state.kind, state.id, number)
+    state.state = {
+        **staged,
+        "sent": True,
+        "first_sent_at": staged.get("first_sent_at") or now.isoformat(),
+        "resent": number,
+        "card_key": key,
+    }
+    state.status = "open"
+    state.expires_at = now + TTL
     await outbox.add(
         session,
-        bot_id=bot_id,
+        bot_id=state.bot_id,
         platform="feishu",
         kind="send",
-        dedupe_key=f"systems-write:{state.id}",
-        target={"chat_id": state.state["chat_id"]},
-        payload={"card": card(task_id, state.id, items)},
+        dedupe_key=key,
+        target={"chat_id": staged["chat_id"]},
+        payload={"card": body},
+    )
+
+
+def keep_until(state: InteractionState) -> datetime | None:
+    """Until when the staged content of a sent batch may be sent again; None if never sent."""
+    first = state.state.get("first_sent_at") if state.state.get("sent") else None
+    if not isinstance(first, str):
+        return None
+    try:
+        return aware_utc(datetime.fromisoformat(first)) + KEEP
+    except ValueError:
+        return None
+
+
+def lapsed(state: InteractionState, now: datetime) -> bool:
+    """The card was sent and its time is up, while nobody confirmed or cancelled it."""
+    if not state.state.get("sent") or state.status not in ("open", "expired"):
+        return False
+    return state.status == "expired" or (
+        state.expires_at is not None and aware_utc(state.expires_at) <= now
+    )
+
+
+def resendable(state: InteractionState, now: datetime) -> bool:
+    """An expired card can be sent again with the same staged content (within `KEEP`)."""
+    until = keep_until(state)
+    return lapsed(state, now) and until is not None and now < until
+
+
+def expired_card(origin_task_id: int, state: InteractionState, *, again: bool) -> dict[str, Any]:
+    """What an expired card turns into: with a resend button while the content is kept."""
+    text = (
+        "这张确认卡已过期（发出后 60 分钟内有效），没有执行。暂存的内容保留到第一次发卡后"
+        " 24 小时，点「重新发起」用同一份内容发一张新卡，确认时平台照样先复查再执行。"
+        "只有发起人本人能点。"
+        if again
+        else "这张确认卡已过期，没有执行。暂存的内容已经清理，不能再重新发起。"
+    )
+    elements: list[dict[str, Any]] = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": text}}
+    ]
+    if again:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "重新发起"},
+                "type": "primary",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "task_id": f"personal:{origin_task_id}",
+                            "event_key": state.kind,
+                            "level": f"{RESEND}:{state.id}",
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "schema": "2.0",
+        "task_id": f"personal:{origin_task_id}",
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text", "content": "确认卡已过期"},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def notice_card(title: str, text: str) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "header": {"template": "grey", "title": {"tag": "plain_text", "content": title}},
+        "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]},
+    }
+
+
+async def update_card(
+    session: AsyncSession,
+    state: InteractionState,
+    body: dict[str, Any],
+    *,
+    dedupe_key: str,
+    chat_id: str | None = None,
+    message_id: str | None = None,
+) -> bool:
+    """Rewrite the batch's latest card in place (no new message). Without a clicked message the
+    card is found by the outbox item that sent it; False when it was never delivered."""
+    if message_id is None:
+        sent = await session.scalar(
+            select(OutboxItem.payload["_feishu_message_id"].astext).where(
+                OutboxItem.bot_id == state.bot_id,
+                OutboxItem.dedupe_key == str(state.state.get("card_key") or ""),
+                OutboxItem.status == "sent",
+            )
+        )
+        if not sent:
+            return False
+        message_id, chat_id = str(sent), str(state.state.get("chat_id") or "")
+    await outbox.add(
+        session,
+        bot_id=state.bot_id,
+        platform="feishu",
+        kind="card_update",
+        dedupe_key=dedupe_key,
+        target={"chat_id": chat_id, "message_id": message_id},
+        payload={"card": body},
     )
     return True
+
+
+async def expire(
+    session: AsyncSession,
+    state: InteractionState,
+    now: datetime,
+    *,
+    dedupe_key: str,
+    chat_id: str | None = None,
+    message_id: str | None = None,
+) -> None:
+    """A sent card ran out of time: show it as expired (with a resend button while the content is
+    kept) and keep the batch until `KEEP` after its first card."""
+    again = resendable(state, now)
+    origin = int(state.state.get("origin_task_id") or state.scope_key)
+    await update_card(
+        session,
+        state,
+        expired_card(origin, state, again=again),
+        dedupe_key=dedupe_key,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    until = keep_until(state)
+    state.status = "expired"
+    state.expires_at = until if again and until is not None else now
+
+
+async def resend(
+    session: AsyncSession,
+    state: InteractionState,
+    body: dict[str, Any],
+    now: datetime,
+    *,
+    dedupe_key: str,
+    chat_id: str,
+    message_id: str | None,
+) -> bool:
+    """「重新发起」: the same staged content on a new card, valid `TTL` from now; the old card
+    points to it. Callers checked who clicked. False once the content is no longer kept."""
+    if not resendable(state, now):
+        return False
+    await update_card(
+        session,
+        state,
+        notice_card("已重新发起", "已用同一份内容发了一张新的确认卡，请在新卡片上确认。"),
+        dedupe_key=dedupe_key,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    await send_card(session, state, body, now=now)
+    return True
+
+
+async def sweep(session: AsyncSession, now: datetime) -> int:
+    """Expired cards get a resend button; batches past `KEEP`, never sent or unreadable are
+    deleted together with their staged content. Returns how many batches were handled."""
+    from coreman.core.assistants import sealed  # 助理的批次整块封存：取整行后显式还原
+
+    rows = list(
+        await session.scalars(
+            select(InteractionState)
+            .where(
+                InteractionState.kind.in_(CARD_KINDS),
+                InteractionState.expires_at.is_not(None),
+                InteractionState.expires_at <= now,
+            )
+            .order_by(InteractionState.expires_at)
+            .limit(SWEEP_BATCH)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    await sealed.open_rows(session, rows)
+    for state in rows:
+        until = keep_until(state)
+        key = str(state.state.get("card_key") or state.id)
+        if sealed.is_locked(state) or until is None or now >= until:
+            # 没发出过（那一轮没正常结束）、过了保留期、内容读不出来：清掉。卡片还停在能操作的
+            # 样子时先改成不能重发。
+            if until is not None and state.status in ("open", "expired"):
+                await expire(session, state, now, dedupe_key=f"{key}:purged")
+            await purge(session, state)
+        elif state.status in ("cancelled", "submitted"):
+            # 已确认或已取消：不能再重发，保留期满再清。
+            state.expires_at = until
+        else:
+            await expire(session, state, now, dedupe_key=f"{key}:expired")
+    return len(rows)
+
+
+async def purge(session: AsyncSession, state: InteractionState) -> None:
+    """Delete a batch, and what it keeps outside the row (files of personal assistant writes)."""
+    if state.kind == "assistant_write":
+        from coreman.core.assistants.approvals import batch  # 审批闸门依赖面广，延迟导入
+
+        if state.status in ("open", "expired"):
+            # 本轮收尾没把它交出去（收尾出错、进程没了）：清掉之前说一声，不悄悄丢掉。
+            await batch.tell_dropped(session, state)
+        await batch.discard_files(state.state)
+    await session.delete(state)

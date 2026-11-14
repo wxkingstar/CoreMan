@@ -126,11 +126,13 @@ class CardActionHandler:
                 return
             if bot.platform == "feishu" and task_id.startswith("personal:"):
                 from coreman.core.assistants import cold_start
+                from coreman.core.assistants.approvals import batch as assistant_writes
                 from coreman.core.cloud_proxy import confirm as cloud_confirm
                 from coreman.core.feishu_docs import confirm
                 from coreman.core.systems_catalog import confirm as systems_confirm
                 from coreman.runtime.worker import (
                     assistant_stop,
+                    assistant_write_cards,
                     cloud_write_cards,
                     cold_start_cards,
                     systems_write_cards,
@@ -144,6 +146,7 @@ class CardActionHandler:
                     confirm.CARD_EVENT: handle_group_write,
                     systems_confirm.CARD_EVENT: systems_write_cards.handle,
                     cloud_confirm.CARD_EVENT: cloud_write_cards.handle,
+                    assistant_writes.CARD_EVENT: assistant_write_cards.handle,
                     assistant_stop.EVENT_KEY: assistant_stop.handle,
                     cold_start.EVENT_KEY: cold_start_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)

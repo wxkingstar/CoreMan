@@ -30,7 +30,18 @@ def test_rules_say_what_is_unavailable_without_the_owner() -> None:
     # 业务系统与云服务照常挂上：直连只能查询，经平台代理的写操作自动提交所有者审批。
     assert "MCP 服务只能查询" in text
     assert "自动提交给所有者审批" in text and "pending_approval" in text
-    assert "记一条待跟进" in text and "当面" in text
+    assert "needs_owner=true 的待跟进" in text and "当面" in text
+
+
+def test_rules_keep_unattended_turns_quiet() -> None:
+    """无人在场的一轮不出声：要所有者知道的记待汇报，没有就静默；紧急的标准写明。"""
+    text = handover_prompt.RULES
+    assert "只说一句" not in text
+    assert "assistant_report" in text and "静默结束" in text
+    assert "urgent=true" in text and "马上拍板" in text
+    # 「处理中」只在调查时打，调查一结束就撤，不等审批结果；平台兜底撤。
+    assert "要先去调查" in text and "不等审批结果" in text
+    assert "这一轮结束时撤掉" in text
 
 
 def test_rules_describe_an_interrupted_turn_the_way_the_platform_handles_it() -> None:
@@ -49,3 +60,9 @@ def test_rules_describe_an_interrupted_turn_the_way_the_platform_handles_it() ->
 def test_standard_bot_guidance_does_not_mention_handovers() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
     assert "交回事项" not in rules
+
+
+def test_rules_say_a_handover_turns_writes_go_out_as_one_approval() -> None:
+    """交回这一轮的飞书写先暂存、本轮结束时合成一张审批单；被打断那一轮暂存的没有提交。"""
+    text = handover_prompt.RULES
+    assert "合成一张审批单" in text and "整批作废" in text and "重新起草" in text

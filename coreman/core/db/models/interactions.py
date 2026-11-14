@@ -36,6 +36,7 @@ INTERACTION_KINDS = (
     "feishu_group_write",
     "systems_write",
     "cloud_write",
+    "assistant_write",
 )
 INTERACTION_STATUSES = ("open", "submitted", "cancelled", "expired")
 ANNOUNCEMENT_SCOPES = ("global", "relay", "bot")

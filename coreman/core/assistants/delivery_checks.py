@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coreman.core.assistants import delivery, followups, sealed, sent, watch
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
-from coreman.core.assistants.approvals import catalog, tower
+from coreman.core.assistants.approvals import catalog, marks, tower
 from coreman.core.assistants.approvals import checks as anchors
 from coreman.core.assistants.approvals import service as approvals
 from coreman.core.bus import outbox
@@ -384,14 +384,20 @@ async def recalled_after_delivery(
 async def feishu_checks(
     session: AsyncSession, bot: Bot, prefs: AssistantSettings, call: feed.Reader, now: datetime
 ) -> dict[str, int]:
-    """要以所有者身份读飞书的两类检查。读失败只记代码；已经做完的照常由调用方提交。
+    """要以所有者身份调飞书的检查：两类读，加上撤掉该撤的「处理中」表情（轮次结束时没撤成的
+    兜底）。读失败只记代码；已经做完的照常由调用方提交。
 
     意外的异常也在这里收住、只记类型：这一次里可能已经刷新过令牌（旧的刷新令牌已经用掉），
     让它往上抛就会回滚，授权就此作废。会话本身坏了（数据库错误）时调用方的提交会再抛。
     """
-    counts = {"assistant_approvals_auto_withdrawn": 0, "assistant_recalls_noticed": 0}
+    counts = {
+        "assistant_approvals_auto_withdrawn": 0,
+        "assistant_recalls_noticed": 0,
+        "assistant_marks_released": 0,
+    }
     cfg = tower.config(get_settings())
     try:
+        counts["assistant_marks_released"] = await marks.release_due(session, call, bot.id)
         counts["assistant_approvals_auto_withdrawn"] = await stale_approvals(
             session, bot, prefs, call, now, cfg
         )
@@ -417,6 +423,9 @@ async def remind_reauth(
     """授权快满一年（或已经满了）：私信所有者一次，每天至多一次。不经模型，不带任何内容。"""
     today = assistant_settings.local_today(prefs, now)
     if row.reauth_reminded_on == today or bot.owner_id is None:
+        return 0
+    if assistant_settings.quiet(prefs, now):
+        # 免打扰时段里不发；今天还没记提醒过，结束之后的下一次检查再发。
         return 0
     since = await session.scalar(
         select(FeishuPersonalGrant.authorized_at).where(
@@ -460,6 +469,7 @@ async def sweep(
         "assistant_reauth_reminded": await remind_reauth(session, bot, prefs, row, now),
         "assistant_approvals_auto_withdrawn": 0,
         "assistant_recalls_noticed": 0,
+        "assistant_marks_released": 0,
     }
     call = await reader(session, cipher, bot, prefs)
     if call is not None:

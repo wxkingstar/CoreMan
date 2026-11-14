@@ -265,12 +265,7 @@ async def _submit(
             "duplicate": True,
             "hint": HINT,
         }
-    waiting = await session.scalar(
-        select(func.count())
-        .select_from(AssistantApproval)
-        .where(AssistantApproval.bot_id == bot.id, AssistantApproval.status == "pending")
-    )
-    if (waiting or 0) >= service.MAX_PENDING:
+    if await service.pending_count(session, bot.id) >= service.MAX_PENDING:
         return {
             "error": "too_many_pending",
             "limit": service.MAX_PENDING,

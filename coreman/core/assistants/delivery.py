@@ -265,10 +265,18 @@ async def _pick(
 
 
 async def _tell_budget_spent(
-    session: AsyncSession, bot: Bot, prefs: AssistantSettings, row: AssistantDelivery, today: date
+    session: AsyncSession,
+    bot: Bot,
+    prefs: AssistantSettings,
+    row: AssistantDelivery,
+    now: datetime,
 ) -> None:
-    """预算用完后第一次有条目没交回：私信所有者一次（每天至多一次），不带任何内容。"""
-    if row.budget_notified_on == today:
+    """预算用完后第一次有条目没交回：私信所有者一次（每天至多一次），不带任何内容。
+
+    免打扰时段里不发：今天还没记告知过，结束之后再有条目留在箱里时照常告知。
+    """
+    today = assistant_settings.local_today(prefs, now)
+    if row.budget_notified_on == today or assistant_settings.quiet(prefs, now):
         return
     total = effective_budget(prefs.daily_turn_budget, await default_budget(session))
     await outbox.add(
@@ -311,9 +319,7 @@ async def dispatch(session: AsyncSession, bot: Bot, now: datetime) -> Task | Non
         return None
     ids, deferred = await _pick(session, bot, prefs, now)
     if deferred:
-        await _tell_budget_spent(
-            session, bot, prefs, row, assistant_settings.local_today(prefs, now)
-        )
+        await _tell_budget_spent(session, bot, prefs, row, now)
     if not ids:
         return None
     row.handover_seq += 1

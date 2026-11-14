@@ -67,6 +67,9 @@ async def test_the_turn_gets_the_digest_and_settles_when_it_ends_well(
         db_session, "SELECT message_type FROM chat_logs WHERE task_id = :id", id=task.id
     )
     assert kind == HANDOVER_KIND
+    # 所有者不在场：这一轮不出声，回复不发到私聊（要他知道的记成待汇报）。
+    (stream,) = await streams_of(db_session, task)
+    assert stream.reply_context["chat_id"] == "oc_private" and stream.reply_context["_silent"]
     # 正常开了一轮：预算少一轮。
     assert await left_today(db_session, bot) == before - 1
 
