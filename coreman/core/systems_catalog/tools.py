@@ -181,14 +181,18 @@ CALL_NOTES = {
     "owner_turn_required": "所有者不在场",
     proxy.OWNER_APPROVAL: "需所有者审批",
 }
+# The anonymous catalog keeps its own marker: callers there confirm these with the user themselves.
+ANONYMOUS_CONFIRM = ("destructive", "financial")
 
 
 def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
     """Whether this turn may call the operation, from the catalog's risk and the call mode."""
     if ctx.anonymous:
-        return "需确认" if op["risk"] in proxy.NEVER_PROXIED else ""
+        return "需确认" if op["risk"] in ANONYMOUS_CONFIRM else ""
     if system.token_delivery == "proxy":
         denied = proxy.policy_error(ctx, system, op)
+        if denied is None and op["risk"] in proxy.CONFIRMED_RISKS and not ctx.writes_preapproved:
+            return "需确认"
         return CALL_NOTES.get(denied or "", "")
     return "需确认" if op["risk"] != "read" else ""
 
@@ -206,12 +210,23 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
         )
     if system.token_delivery == "proxy":
         if system.key in ctx.stageable:
-            writes = "调用后自动提交所有者审批（所有者不在场），批准后由平台执行"
+            # 个人助理无人在场、能提交审批的一轮：没人点确认卡，write 改为提交所有者审批。
+            return (
+                "平台代理：用 systems_call 调用。读操作直接执行；所有者不在场，write 调用后自动"
+                "提交给所有者审批，批准后由平台按原样执行并把结果交回本会话；destructive 不能做"
+                "（等所有者在场时由他在确认卡上确认）；financial 不代理，"
+                "需用户本人在业务系统里操作。"
+            )
+        if ctx.owner_absent:
+            writes = "所有者不在场，不能做"
+        elif system.key in ctx.writable:
+            writes = "已开启，提交后由提问人在确认卡上确认才执行，一次最多 20 个"
         else:
-            writes = "已开启" if system.key in ctx.writable else "未开启，需管理员开启「允许写入」"
+            writes = "未开启，需管理员开启「允许写入」"
         return (
-            f"平台代理：用 systems_call 调用。读操作直接执行；写操作{writes}；"
-            "destructive、financial 不代理，需用户本人在业务系统里操作。"
+            "平台代理：用 systems_call 调用。读操作直接执行；"
+            f"写操作（write、destructive）{writes}；"
+            "financial 不代理，需用户本人在业务系统里操作。"
         )
     return (
         "持令牌直接调用（按 systems_describe 的 curl 模板）。risk=read 直接执行；其余操作先向"

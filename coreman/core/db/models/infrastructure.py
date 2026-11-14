@@ -192,6 +192,8 @@ class SystemCall(Base):
     status_code: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     token_id: Mapped[str | None] = mapped_column(Text)
+    # 响应太大或是文件时转存到短期附件存储（stored_objects.id）；不加外键，附件过期删除后仍留记录。
+    object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class ApiClient(TimestampMixin, Base):

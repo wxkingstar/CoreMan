@@ -495,8 +495,16 @@ async def _execute_system(
     task: Task,
     arguments: dict[str, Any],
     issuance: Issuance,
+    key: str,
 ) -> dict[str, Any]:
-    """以所有者身份走目录代理的同一条路径（授权、目录、策略、参数校验、令牌、审计）。"""
+    """以所有者身份走目录代理的同一条路径：`prepare` 重跑全部检查（授权、目录、可见性、策略、
+    参数校验、同源），拼出的请求与批准的一致才 `send`。
+
+    不经 `proxy.call`：执行任务既不是在场的一轮（不该再发确认卡），也不是无人在场的一轮（不该
+    再提一次审批）——上下文按在场、未预批准构造，只用 `prepare` 的检查，发出由这里决定。幂等头
+    用 `key`（审批单号）：同一张单无论重跑几次，业务系统收到的都是同一个键。不设 `settings`：
+    与确认卡执行的写操作一样，大结果截断、不转存。
+    """
     from coreman.core.auth.system_access import (
         SubjectUnavailable,
         granted_systems,
@@ -531,6 +539,7 @@ async def _execute_system(
             systems=await granted_systems(session, bot.id),
             # 执行任务不是无人在场的类型：照员工当前的授权判断能不能写。
             writable=policy.writable_for(task, granted),
+            owner_absent=False,
             token_ttl=bot.sse_timeout_seconds,
         )
         try:
@@ -543,12 +552,27 @@ async def _execute_system(
             )
         except (KeyError, ValueError):
             return {"error": "invalid_tool_or_arguments"}
+        prepared = await proxy.prepare(ctx, call)
+        if isinstance(prepared, dict):
+            await session.commit()
+            return prepared
+        now = {"method": prepared.op["method"], "url": str(prepared.url), "body": prepared.body}
         approved = {
             "method": arguments.get("method"),
             "url": arguments.get("url"),
             "body": arguments.get("body"),
         }
-        result = await proxy.call(ctx, call, approved=approved)
+        if now != approved or prepared.op["risk"] != "write":
+            # 目录、系统地址或操作的风险等级在批准之后变了：批准的不是现在要发的这一份。
+            await proxy.record(ctx, prepared.system, prepared.operation_id, prepared.op, "denied")
+            return {
+                "error": "request_changed",
+                "system": prepared.system.key,
+                "operation_id": prepared.operation_id,
+                "message": "批准之后操作目录或系统地址有了变化，现在要发的请求与批准的不一致，"
+                "没有执行。",
+            }
+        result = await proxy.send(ctx, prepared, key=key, prefix=proxy.APPROVED_PREFIX)
         await session.commit()
         return result
 
@@ -653,7 +677,9 @@ async def run(
     arguments = dict(calls[0]["arguments"])
     try:
         if tool == catalog.SYSTEM_CALL:
-            result = await _execute_system(factory, bot_id, task, arguments, issuance)
+            result = await _execute_system(
+                factory, bot_id, task, arguments, issuance, str(approval_id)
+            )
         else:
             result = await _execute_cloud(factory, bot_id, task, arguments, settings, approval)
     except Exception as exc:  # noqa: BLE001 结果必须落到审批单上，不能悬着

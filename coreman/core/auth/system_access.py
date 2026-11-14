@@ -182,9 +182,18 @@ CATALOG_RULES = (
 # 有平台代理的系统时再追加：这些系统的令牌不进运行环境。
 PROXY_RULES = (
     "标注「平台代理」的系统没有令牌变量，用 systems_call 调用：平台按目录校验参数，"
-    "以当前发言者的身份代为请求。读操作直接执行；写操作需要管理员为本 AI 员工开启该系统的"
-    "「允许写入」；不可撤销（destructive）和涉及资金（financial）的操作不代理，"
-    "请用户本人到业务系统里操作。"
+    "以当前发言者的身份代为请求。读操作直接执行。写操作（write、destructive）需要管理员为本 "
+    "AI 员工开启该系统的「允许写入」，调用后只进入本轮的待确认列表，不会执行：本轮结束时平台给"
+    "提问人发一张确认卡，点确认后才按原样执行。提交前先用读操作查到要改的对象和当前值，在 note "
+    "里写清对象、修改前后的值、影响和恢复方法；提交后告诉用户需要在卡片上确认，不要说已经完成。"
+    "一次最多确认 20 个写操作，更多的修改请用户在业务系统里批量处理，不要逐条提交。"
+    "用户取消或卡片过期后不要重新提交，除非用户再次明确要求。"
+    "涉及资金（financial）的操作不代理，请用户本人到业务系统里操作。"
+)
+# 写进本轮块：Codex 续聊不重读 system prompt，旧会话靠这一句拿到要求。
+PROXY_WRITE_REMINDER = (
+    "- 业务系统写操作：平台代理的系统，写操作提交后只进入待确认列表，提问人在本轮结束后的卡片上"
+    "确认才执行；不要说已经完成，一次最多 20 个。"
 )
 # 有令牌下发到运行环境的系统时追加：平台拦不住这些调用，只能靠提示词约束高风险操作。
 ENV_RISK_RULES = (
@@ -518,5 +527,11 @@ async def _issue(
     notes = [ISSUE_FAILURE_NOTE, *failures] if failures else []
     if not unattended and any(config["token_delivery"] == "env" for config in configs):
         notes.append(ENV_WRITE_REMINDER)
+    if (
+        catalog is not None
+        and not unattended
+        and any(config["token_delivery"] == "proxy" for config in configs)
+    ):
+        notes.append(PROXY_WRITE_REMINDER)
     note = "\n".join(notes)
     return SystemAccess(env, prompt, subject=subject, issued=issued, note=note)

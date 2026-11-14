@@ -411,7 +411,7 @@ async def test_approval_executes_the_staged_request_exactly_once(
     )
     assert [i.purpose for i in issues] == ["proxy"] and issues[0].user_id == owner.id
     executed = await db_session.scalar(
-        select(SystemCall).where(SystemCall.task_id == job.id, SystemCall.outcome == "ok")
+        select(SystemCall).where(SystemCall.task_id == job.id, SystemCall.outcome == "approved_ok")
     )
     assert executed is not None and executed.token_id == issues[0].token_id
     [done] = await approvals(db_session)
@@ -665,9 +665,18 @@ async def test_a_changed_request_is_refused_by_the_proxy_itself(
         job,
         {**arguments, "url": BASE_URL + "/api/stock/elsewhere"},
         issuance(app),
+        str(row.id),
     )
     assert out["error"] == "request_changed" and posts(fake) == []
     assert task.id != job.id
+    outcomes = list(
+        await db_session.scalars(
+            select(SystemCall.outcome)
+            .where(SystemCall.task_id == job.id)
+            .execution_options(populate_existing=True)
+        )
+    )
+    assert outcomes == ["denied"]
 
 
 async def test_no_write_permission_no_approval(
@@ -685,7 +694,12 @@ async def test_no_write_permission_no_approval(
 
 
 @pytest.mark.parametrize(
-    ("op_id", "risk"), [("cancelDocument", "destructive"), ("refundSupplier", "financial")]
+    ("op_id", "risk", "code"),
+    [
+        # 所有者在场时 destructive 走确认卡；无人在场没人点卡，也不提审批，照旧拒绝。
+        ("cancelDocument", "destructive", "owner_turn_required"),
+        ("refundSupplier", "financial", "risk_not_allowed"),
+    ],
 )
 async def test_destructive_and_financial_are_never_staged(
     client: httpx.AsyncClient,
@@ -695,6 +709,7 @@ async def test_destructive_and_financial_are_never_staged(
     fake_tower: FakeTower,
     op_id: str,
     risk: str,
+    code: str,
 ) -> None:
     _, owner, task = await owner_turn(db_session, STAGEABLE[0])
     out = await call(
@@ -703,8 +718,9 @@ async def test_destructive_and_financial_are_never_staged(
         "systems_call",
         {"system": "stock", "operation_id": op_id, "path_params": {"id": "D1"}},
     )
-    assert out["error"] == "risk_not_allowed" and out["risk"] == risk
+    assert out["error"] == code and out["risk"] == risk
     assert await approvals(db_session) == [] and fake_tower.submitted == []
+    assert not [r for r in fake.requests if r.method == "POST"]
 
 
 async def test_invalid_arguments_are_refused_before_staging(
@@ -731,14 +747,104 @@ async def test_turns_that_are_not_unattended_behave_as_before(
     fake_tower: FakeTower,
     kind: str,
 ) -> None:
-    """所有者在场直接执行；调度公共员工没批准写就不能写。都不建审批单。"""
+    """所有者在场走确认卡（这里的一轮没有可点卡的飞书来源，按 main 返回 confirmation_unavailable）；
+    调度公共员工没批准写就不能写。都不执行、不建审批单。"""
     _, owner, task = await owner_turn(db_session, kind)
     out = await call(client, bearer(app, task, owner), "systems_call", WRITE)
     if kind == "chat":
-        assert out["ok"] is True and posts(fake) == [{"sku": "SKU-9", "quantity": 3}]
+        assert out["error"] == "confirmation_unavailable" and posts(fake) == []
     else:
         assert out["error"] == "write_not_allowed" and posts(fake) == []
     assert await approvals(db_session) == [] and fake_tower.submitted == []
+
+
+def with_idempotent_op(fake: FakeBusinessSystem) -> list[str | None]:
+    """给假系统加一个声明了 Idempotency-Key 的写操作，返回它收到的键。"""
+    seen: list[str | None] = []
+
+    def adjust(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("idempotency-key"))
+        return httpx.Response(200, json={"code": 0, "data": {"adjusted": True}})
+
+    fake.spec["paths"]["/api/stock/adjust"] = {  # type: ignore[index]
+        "post": {
+            "operationId": "adjustStock",
+            "tags": ["documents"],
+            "summary": "调整库存",
+            "x-permission": "stock:doc:write",
+            "parameters": [
+                {"name": "Idempotency-Key", "in": "header", "required": True, "schema": {}}
+            ],
+            "responses": {"200": {"description": "OK"}},
+        }
+    }
+    fake.routes[("POST", "/api/stock/adjust")] = adjust
+    return seen
+
+
+async def test_an_approved_write_uses_a_stable_idempotency_key(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    fake_tower: FakeTower,
+) -> None:
+    """幂等请求头的值取审批单号：同一张单的执行重来一次，业务系统收到的仍是同一个键。"""
+    seen = with_idempotent_op(fake)
+    bot, owner, task = await owner_turn(db_session, STAGEABLE[0])
+    out = await call(
+        client,
+        bearer(app, task, owner),
+        "systems_call",
+        {"system": "stock", "operation_id": "adjustStock"},
+    )
+    assert out["status"] == "pending_approval" and seen == []
+    [row] = await approvals(db_session)
+    status, job = await approve_and_run(app, db_engine, db_session, row)
+    assert status == "executed" and seen == [str(row.id)]
+    # 模拟执行进程在发出之后、记结果之前没了，同一张单的请求再发一次：键不变。
+    again = await proxied._execute_system(
+        make_session_factory(db_engine),
+        bot.id,
+        job,
+        dict(row.args_enc["calls"][0]["arguments"]),
+        issuance(app),
+        str(row.id),
+    )
+    assert again["ok"] is True and seen == [str(row.id), str(row.id)]
+    outcomes = list(
+        await db_session.scalars(
+            select(SystemCall.outcome)
+            .where(SystemCall.task_id == job.id)
+            .execution_options(populate_existing=True)
+        )
+    )
+    assert outcomes == ["approved_ok", "approved_ok"]
+
+
+async def test_an_attended_write_still_goes_to_the_confirmation_card(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    fake_tower: FakeTower,
+) -> None:
+    """提问人在飞书里亲自发来的一轮：照 main 进确认卡的待确认列表，不建审批单、不发请求。"""
+    from tests.api.test_systems_write_confirm import turn as attended_turn
+
+    _, user, task = await attended_turn(db_session, app)
+    for op in ("createDraft", "cancelDocument"):
+        args: dict[str, Any] = {"system": "stock", "operation_id": op}
+        if op == "createDraft":
+            args["body"] = {"sku": "SKU-9", "quantity": 1}
+        else:
+            args["path_params"] = {"id": "D1"}
+            args["body"] = {"reason": "录入错误"}
+        out = await call(client, bearer(app, task, user), "systems_call", args)
+        assert out.get("status") == "pending_confirmation", out
+    assert posts(fake) == [] and await approvals(db_session) == []
+    assert fake_tower.submitted == []
 
 
 # 云签名代理 -------------------------------------------------------------------------------------

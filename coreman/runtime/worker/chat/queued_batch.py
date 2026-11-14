@@ -20,6 +20,7 @@ from coreman.core.bus import outbox, tasks
 from coreman.core.chat import busy_choice
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.feishu_docs import resume
+from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.runtime.worker import assistant_shift, assistant_stop
 from coreman.runtime.worker.chat.inbound import joined_text, strip_mention
 from coreman.runtime.worker.chat.models import Intake
@@ -36,6 +37,7 @@ _NOT_PLAIN = (
     # 授权、确认后的续接：标记要留到这一轮，不并入别的任务，也不收别的消息。
     resume.PAYLOAD_KEY,
     resume.CONFIRM_RESULT_KEY,
+    systems_confirm.RESULT_KEY,
 )
 _NOTE = (
     "（以上几条是你处理上一轮时，同一个人陆续发来的，按发送时间排列。"

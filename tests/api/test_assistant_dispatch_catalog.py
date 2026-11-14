@@ -53,7 +53,22 @@ async def test_a_read_only_dispatch_cannot_write_through_the_proxy(
         )
         assert detail["call"]["allowed"] is False
     assert len([r for r in fake.requests if r.method == "POST"]) == posted
-    # 所有者在审批系统里批准过的那一轮，以及他自己的私聊，照员工的授权。
+    # 所有者在审批系统里批准过的那一轮照员工的授权直接写，不再发确认卡。
     approved = bearer(app, await _round(db_session, bot, allow_write=True), member)
     assert (await call(client, approved, "systems_call", WRITE))["ok"] is True
-    assert (await call(client, bearer(app, chat, member), "systems_call", WRITE))["ok"] is True
+    assert len([r for r in fake.requests if r.method == "POST"]) == posted + 1
+    # 他自己的私聊照员工的授权，但写操作要等确认卡（这里不是飞书消息触发的，发不了卡）。
+    own = await call(client, bearer(app, chat, member), "systems_call", WRITE)
+    assert own["error"] == "confirmation_unavailable"
+
+
+def test_only_an_approved_dispatch_skips_the_card() -> None:
+    from coreman.core.systems_catalog import policy
+
+    assert policy.writes_preapproved(Task(kind=BOT_HELP_KIND, payload={"allow_write": True}))
+    for kind, payload in (
+        (BOT_HELP_KIND, {}),
+        (BOT_HELP_KIND, {"allow_write": "true"}),
+        ("chat", {"allow_write": True}),
+    ):
+        assert not policy.writes_preapproved(Task(kind=kind, payload=payload))
