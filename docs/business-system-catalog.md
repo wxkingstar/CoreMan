@@ -199,7 +199,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 新增 `systems_call(system, operation_id, path_params?, query?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。
 
-- 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径与查询参数、JSON 请求体，必填的请求头或 Cookie 参数无法通过代理调用，名为 `Idempotency-Key`、`X-Operation-Request-Id` 的请求头除外，由平台生成。
+- 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径与查询参数、JSON 请求体和带文件的 `multipart/form-data` 表单（见下文「上传文件」），必填的请求头或 Cookie 参数无法通过代理调用，名为 `Idempotency-Key`、`X-Operation-Request-Id` 的请求头除外，由平台生成。
 - 风险策略：`read` 直接执行；`write`、`destructive` 需要机器人对该系统的授权开启"允许写入"（个人助理无人在场的一轮另行处理，见下文「写操作确认卡」末条），并且只进入待确认列表，由提问人在确认卡上确认后执行（见下文「写操作确认卡」）；`financial` 一律不开放。`systems_describe` 的调用方式里写明当前是否允许。
 - 令牌：服务端在首次调用（或首次查权限）时签发，有效期与任务超时一致，签发记录用途为 `proxy`；以任务和系统为 AAD 加密后存在任务里，任务内复用，不进入运行环境、工具结果或日志。
 - 请求：只发往目录里的服务器前缀（与系统地址同源），连接固定到登记的主机，不跟随重定向，不读取环境代理，超时 30 秒，响应最多读 5 MiB。
@@ -215,6 +215,15 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 存储不可用或上传失败时退回原来的截断结果，查询本身不失败。确认卡执行的写操作仍按原来的方式截断，不转存。
 - 预算：每个任务最多 30 次代理调用，与 40 次目录调用分开计；相同参数最多重复 2 次。
 - 审计：`system_calls` 记录系统、操作、风险、结果、状态码、耗时、令牌 `jti`；同时写一条 `system_call` 日志。
+
+### 上传文件
+
+请求体是 `multipart/form-data` 的操作（上传图片、导入 CSV/xlsx 等）同样可以代理调用。编译器第 4 版把表单里 `type: string` 且 `format: binary`/`base64` 或带 `contentMediaType` 的字段（以及这类字段的数组）记为文件字段，其余字段按 JSON 对象校验，旧目录在下次复查时重新编译。
+
+- 上传：运行环境用本轮目录 MCP 的凭据把文件 `PUT` 到 `/api/runtime/systems/uploads?filename=<文件名>`，拿到 `upload_id`。单个文件不超过 30 MB，保存 1 小时，只有同一轮、同一位发言者能用；类型取请求的 `Content-Type`，没有声明、或是 `curl --data-binary` 默认的表单编码与 `application/octet-stream` 时按文件名判断。`systems_describe` 对这类操作附上传用的 curl 模板和请求体写法。
+- 调用：`systems_call` 的 `body` 里文件字段写 `{"upload_id": "..."}`（数组字段写数组），其他字段照常写。平台先确认每个文件都是本轮本人上传、未过期的，再以发言者身份按 `multipart/form-data` 发出：文本字段在前，对象和数组字段转成 JSON 文本，文件带原文件名和类型。
+- 写操作照常进确认卡。卡片上不显示 `upload_id`，按字段列出文件名、大小和 sha256 前 12 位；点确认后发出的就是卡片上这几个文件。
+- 个人助理无人在场的一轮，带文件的写操作不提交所有者审批，按「所有者不在场」拒绝：审批可能几小时后才批，文件那时已经过期。
 
 ### 写操作确认卡
 

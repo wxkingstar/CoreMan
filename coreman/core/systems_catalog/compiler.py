@@ -18,8 +18,8 @@ from coreman.core.systems_catalog.refs import MAX_DEPTH, Refs, local
 
 # Bump when the compiled format changes: stored catalogs of an older version are fetched again
 # in full (no If-None-Match) and recompiled on the next check. 2: validation schemas for calls.
-# 3: module groups, display names, aliases and module limits.
-COMPILER_VERSION = 3
+# 3: module groups, display names, aliases and module limits. 4: multipart forms with file fields.
+COMPILER_VERSION = 4
 RISKS = ("read", "write", "destructive", "financial")
 DEFAULT_MODULE = "default"
 GUIDE_MAX = 2000
@@ -434,7 +434,52 @@ def _validation(item: dict[str, Any], op: dict[str, Any], refs: Refs) -> dict[st
             "json": media is not None,
             "schema": validation_schema(media[1].get("schema") or {}) if media else None,
         }
+        form = None if media else _form_media(request["content"])
+        if form is not None:
+            body.update(_form_validation(form, refs))
     return {"params": params, "body": body}
+
+
+def _form_media(content: dict[str, Any]) -> dict[str, Any] | None:
+    for media_type, media in content.items():
+        if media_type.split(";", 1)[0].strip().lower() == "multipart/form-data":
+            return media if isinstance(media, dict) else {}
+    return None
+
+
+def _is_file(schema: Any) -> bool:
+    return (
+        isinstance(schema, dict)
+        and schema.get("type") == "string"
+        and (schema.get("format") in ("binary", "base64") or "contentMediaType" in schema)
+    )
+
+
+def _form_validation(media: dict[str, Any], refs: Refs) -> dict[str, Any]:
+    """A multipart form: file fields are sent from uploads, the other fields are validated like
+    a JSON object and sent as text parts."""
+    schema = refs.deref(media.get("schema")) or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return {"multipart": True, "files": {}, "schema": {"type": "object"}}
+    required = set(schema.get("required") or [])
+    files: dict[str, dict[str, bool]] = {}
+    fields: dict[str, Any] = {}
+    for name, raw in props.items():
+        prop = refs.deref(raw)
+        items = refs.deref(prop.get("items")) if isinstance(prop, dict) else None
+        if _is_file(prop) or (
+            isinstance(prop, dict) and prop.get("type") == "array" and _is_file(items)
+        ):
+            files[name] = {"many": not _is_file(prop), "required": name in required}
+        else:
+            fields[name] = raw
+    rest = {
+        "type": "object",
+        "properties": fields,
+        "required": sorted(required - set(files)),
+    }
+    return {"multipart": True, "files": files, "schema": validation_schema(rest)}
 
 
 def _definitions(operations: dict[str, dict[str, Any]], refs: Refs) -> dict[str, Any]:

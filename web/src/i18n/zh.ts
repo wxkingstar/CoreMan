@@ -864,6 +864,10 @@ export default {
     switch: {
       title: '切换运行时',
       current: '当前',
+      runtime: '运行时',
+      onlyAmple: '只看容量充足',
+      onlyAmpleHint: '5 小时与 7 天用量都低于 70%',
+      noAmple: '没有容量充足的运行时，取消勾选可查看全部',
       target: '目标运行时',
       model: '模型',
       warnings: '切换后会话接着上次的对话继续，记忆一并迁移；共享存储上不复制文件、技能照常可用，不共享时会复制工作目录并在目标运行时重新安装技能。',
