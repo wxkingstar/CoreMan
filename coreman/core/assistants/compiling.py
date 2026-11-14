@@ -1,9 +1,11 @@
-"""下班编译：下班后平台给助理派一个子任务，让它把当天的进展整理进知识库。
+"""每日整理（下班编译）：一天结束后平台给助理派一个子任务，让它把那天的进展整理进知识库。
 
 每位助理每个自然日（所有者时区）至多一次。不找「上班 → 下班」的边沿（scheduler 重启会错过），
-记两个日期：`worked_on`（最近一次被看到在班的那天）与 `compiled_on`（已经处理过编译的那天）；
-现在不在班、`worked_on` 晚于 `compiled_on`，就该为 `worked_on` 那天编译。活动窗口从上一次编译
-成功时的入队时刻（`compiled_at`）算起，窗口里什么都没发生就不入队。
+记两个日期：`worked_on`（最近一次被看到在班的那天）与 `compiled_on`（已经处理过编译的那天）。
+`worked_on` 晚于 `compiled_on` 时，有两种时刻为 `worked_on` 那天编译：现在不在班（按工作时段
+的助理下班之后）；或者现在仍在班、但 `worked_on` 已是今天之前（全天候的助理一直在班，所有者
+时区过了零点就整理前一天，再把 `worked_on` 记成今天）。活动窗口从上一次编译成功时的入队时刻
+（`compiled_at`）算起，窗口里什么都没发生就不入队。
 
 编译是平台派出的子任务（`jobs.spawn(origin="system", report=False)`）：跑在子任务自己的会话里，
 不占主会话、不往私聊发东西，做完不投回——产物在知识库里。它不占助理自己每天的子任务名额，但要
@@ -213,7 +215,8 @@ def render(day: date, found: Activity) -> str:
     放不下时丢掉最早的审批单，末尾注明还有几张没列出。
     """
     lines = [
-        f"【下班整理 {day.isoformat()}】这一轮由平台在下班时发起，所有者不在场。",
+        f"【下班整理 {day.isoformat()}】这一轮由平台在下班后（全天候时是过了零点）发起，"
+        "所有者不在场。",
         INSTRUCTIONS.format(day=day.isoformat()),
         "今天的活动（只有编号与状态，内容用工具读）：",
         f"- 对话轮次：{found.turns}",
@@ -247,9 +250,12 @@ def render(day: date, found: Activity) -> str:
 async def step(
     session: AsyncSession, bot: Bot, prefs: AssistantSettings, now: datetime
 ) -> str | None:
-    """一位助理的一次判断：在班就记下今天上过班；下班后该编译就派一个子任务。调用方提交。
+    """一位助理的一次判断：在班就记下今天上过班；下班后、或在班时过了零点，该编译就派一个
+    子任务。调用方提交。
 
-    每天至多一次靠 `compiled_on`（调用方锁着这一行）：无论派没派成，这一天都不再看。
+    每天至多一次靠 `compiled_on`（调用方锁着这一行）：无论派没派成，这一天都不再看。在班时
+    为之前的某天编译（全天候）：处理过之后在同一次判断里把 `worked_on` 记成今天；运行时暂停
+    （`paused`）时不记，恢复后先补那一天。
 
     Returns:
         `worked`（记下了今天）、`queued`（派出了）、`idle`（没有活动）、`budget`（预算用完）、
@@ -259,14 +265,27 @@ async def step(
     if prefs.cold_start_done_at is None:
         return None
     today = assistant_settings.local_today(prefs, now)
-    if assistant_settings.on_shift(prefs, now):
-        if prefs.worked_on == today:
-            return None
-        prefs.worked_on = today
-        return "worked"
     day = prefs.worked_on
-    if day is None or (prefs.compiled_on is not None and prefs.compiled_on >= day):
+    if assistant_settings.on_shift(prefs, now):
+        if day == today:
+            return None
+        # 没记过、那天不欠整理、或那天不在今天之前（所有者把时区往西改，本地日期回退）：只记今天。
+        if assistant_settings.mark_worked(prefs, now) or day is None:
+            return "worked"
+        # 在班时过了零点（全天候）：先为那一天整理，再记下今天。
+        code = await _compile(session, bot, prefs, day, today, now)
+        if code != "paused":
+            prefs.worked_on = today
+        return code
+    if day is None or not assistant_settings.owed(prefs, day):
         return None
+    return await _compile(session, bot, prefs, day, today, now)
+
+
+async def _compile(
+    session: AsyncSession, bot: Bot, prefs: AssistantSettings, day: date, today: date, now: datetime
+) -> str:
+    """为 `day` 那天派编译子任务（见 `step`）；预算按所有者时区的今天（`today`）看。"""
     if await runtime.turn_blocker(session, bot) is not None:
         # 暂停时这一轮只会静默失败：不记成处理过，恢复后再入队。
         return "paused"

@@ -25,8 +25,10 @@ def test_rules_tell_the_assistant_what_a_handover_is_and_what_to_do() -> None:
 
 def test_rules_say_what_is_unavailable_without_the_owner() -> None:
     text = handover_prompt.RULES
-    for word in ("云签名代理", "业务系统目录", "个人凭证", "授权", "置顶页"):
+    for word in ("个人凭证", "授权", "置顶页"):
         assert word in text
+    # 业务系统与云服务照常挂上，但这一轮只能查询。
+    assert "业务系统与云服务只能查询" in text
     assert "记一条待跟进" in text and "当面" in text
 
 

@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.kinds import HANDOVER_KIND, ORIGIN_KINDS
 from coreman.core.cloud_proxy import aliyun, policy, service, tower_gate
 from coreman.core.cloud_proxy.risk_policy import CloudProxyPolicy
 from coreman.core.config import CLOUD_PROXY_PRODUCTS
@@ -449,6 +450,65 @@ async def test_write_without_login_name_is_rejected_before_risk_reads(
     assert (await db_session.scalars(select(CloudPendingApproval))).first() is None
     [row] = await calls(db_session)
     assert (row.outcome, row.status_code) == ("denied", 403)
+
+
+# 个人助理无人在场的一轮只能查询 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ORIGIN_KINDS)
+async def test_an_unattended_assistant_turn_can_only_read(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    ctx: Any,
+    aliyun_mock: respx.MockRouter,
+    tower: tuple[FakeTower, str],
+    kind: str,
+) -> None:
+    _, _, task, auth = ctx
+    task.kind = kind
+    await db_session.commit()
+    slb = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {"RequestId": "r1"})
+    # 低风险写、高风险写都拒：不读阿里云做风险判定，不建审批单，也不去 Tower。
+    for body in (LOW, HIGH):
+        r = await client.post(SLB, content=body, headers=auth)
+        assert r.status_code == 403, r.text
+        assert r.json()["error"] == "owner_turn_required" and "所有者" in r.json()["message"]
+    assert not slb.calls and not aliyun_mock.calls and not tower[0].requests
+    db_session.expire_all()
+    assert (await db_session.scalars(select(CloudPendingApproval))).first() is None
+    # 读照常签名转发。
+    dns = ok_route(aliyun_mock, "alidns.aliyuncs.com", {"TotalCount": 1})
+    body = form({"Action": "DescribeDomainRecords", "DomainName": "example.com"})
+    r = await client.post("/api/runtime/cloud/aliyun/alidns", content=body, headers=auth)
+    assert r.status_code == 200, r.text
+    assert dns.call_count == 1
+    assert [(c.action, c.risk, c.outcome, c.status_code) for c in await calls(db_session)] == [
+        ("AddAccessControlListEntry", "write_high", "denied", 403),
+        ("AddAccessControlListEntry", "write_high", "denied", 403),
+        ("DescribeDomainRecords", "read", "ok", 200),
+    ]
+
+
+async def test_the_read_only_rule_follows_the_task_not_the_capability(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    ctx: Any,
+    aliyun_mock: respx.MockRouter,
+) -> None:
+    """同一枚能力令牌：任务是所有者在场的一轮时低风险写照常放行，判断每次按重新加载的任务。"""
+    _, _, task, auth = ctx
+    route = ok_route(aliyun_mock, "slb.us-east-1.aliyuncs.com", {"RequestId": "r1"})
+    task.kind = HANDOVER_KIND
+    await db_session.commit()
+    r = await client.post(SLB, content=LOW, headers=auth)
+    assert r.status_code == 403 and r.json()["error"] == "owner_turn_required"
+    task.kind = "chat"
+    await db_session.commit()
+    r = await client.post(SLB, content=LOW, headers=auth)
+    assert r.status_code == 200, r.text
+    assert route.call_count == 1
+    r = await client.post(SLB, content=HIGH, headers=auth)
+    assert r.status_code == 428 and r.json()["error"] == "approval_required"
 
 
 async def test_unreadable_state_is_high_risk(

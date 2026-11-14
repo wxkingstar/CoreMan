@@ -22,13 +22,13 @@ const DEFAULTS: AssistantPlatformSettings = {
   assistant_eligibility: { mode: 'all', department_ids: [], user_ids: [] },
   assistant_backends: ['claude', 'codex'],
   assistant_node_concurrency: 2,
-  assistant_daily_turn_budget: 200,
+  assistant_daily_turn_budget: 2000,
 }
 // 已选的人只查这么多个名字：名单再长，剩下的在选择框里显示编号。
 const NAME_LOOKUPS = 50
 
 const { t } = useI18n()
-const form = reactive<Form>({ mode: 'all', user_ids: [], department_ids: [], primary: 'claude', also_other: true, concurrency: 2, budget: 200 })
+const form = reactive<Form>({ mode: 'all', user_ids: [], department_ids: [], primary: 'claude', also_other: true, concurrency: 2, budget: 2000 })
 /** 上一次从后端拿到的值（按表单的形状重排过键序）：save() 靠它算出改了哪几项。 */
 let original: AssistantPlatformSettings = DEFAULTS
 const loaded = ref(false), saving = ref(false)
@@ -177,7 +177,7 @@ defineExpose({ form, save })
         <el-input-number
           :model-value="form.budget"
           :min="10"
-          :max="2000"
+          :max="20000"
           @update:model-value="setNumber('budget', $event)"
         />
         <div class="hint">

@@ -22,6 +22,8 @@ export interface AssistantOverview {
   /** 可用状态下现在跑不了轮次的原因代码；能跑是 null。 */
   paused_reason: string | null
   on_shift: boolean
+  /** 全天候（默认）；false 是只在工作时段里在班。 */
+  always_on: boolean
   /** 还没过期的「上班」「下班」临时切换；按工作时段时是 null。 */
   shift_override: 'on' | 'off' | null
   shift_override_until: string | null
@@ -116,6 +118,8 @@ export interface NoteIn { path: string; body: string; summary: string; title?: s
 
 export interface AssistantPrefs {
   timezone: string
+  /** 全天候；开着时工作时段与工作日保留但不生效。 */
+  always_on: boolean
   work_start: string
   work_end: string
   workdays: number[]
@@ -136,7 +140,7 @@ export interface AssistantPrefs {
   today: string
 }
 export type AssistantPrefsPatch = Partial<Pick<AssistantPrefs,
-  'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'daily_turn_budget'>>
+  'timezone' | 'always_on' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'daily_turn_budget'>>
 
 /** 访问记录的一行：谁、什么时候、做了什么；没有任何内容。 */
 export interface AccessEntry {

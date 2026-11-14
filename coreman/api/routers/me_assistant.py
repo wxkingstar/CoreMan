@@ -34,6 +34,7 @@ from coreman.core.assistants import (
     jobs,
     owner_view,
     sealed,
+    voice,
 )
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import AssistantSettings, User
@@ -73,11 +74,12 @@ _ChatId = Annotated[str, StringConstraints(max_length=100)]
 class SettingsIn(BaseModel):
     """所有者改的设置。这里只挡类型与离谱的长度：取值规则由 `settings.update` 判断并给出原因代码。
 
-    前六项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、跟随平台默认。
+    前七项给 null 等同于没给；`daily_turn_budget` 给 null 是清掉个人值、跟随平台默认。
     """
 
     model_config = ConfigDict(extra="forbid")
     timezone: str | None = Field(default=None, max_length=64)
+    always_on: StrictBool | None = None
     work_start: str | None = Field(default=None, max_length=5)
     work_end: str | None = Field(default=None, max_length=5)
     workdays: list[StrictInt] | None = Field(default=None, max_length=7)
@@ -108,7 +110,10 @@ VOICE_ERRORS: dict[str, tuple[int, str]] = {
     "feishu_busy": (429, "飞书接口现在用量紧张，稍后再试"),
     "authorization_required": (409, "需要先在私聊里重新完成飞书授权"),
     "feishu_unavailable": (502, "暂时读不了飞书，稍后再试"),
-    "too_few_samples": (409, "最近 7 天里你自己发出的消息太少，归纳不出口吻"),
+    "too_few_samples": (
+        409,
+        f"最近 {voice.WINDOW.days} 天里你自己发出的消息太少，归纳不出口吻",
+    ),
     "assistant_unavailable": (409, "个人助理现在跑不了这一轮，稍后再试"),
 }
 

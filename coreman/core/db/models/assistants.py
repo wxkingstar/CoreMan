@@ -298,9 +298,11 @@ class AssistantSettings(Base):
 
     `focus_chats_enc` / `ignored_chats_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出
     的行上是会话 id 的列表；没设置过是 None，密钥销毁后读出来是空列表。
-    工作时段是所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays`
-    是 ISO 星期（1 周一 … 7 周日）。`shift_override` 是「上班」「下班」命令的临时切换，过了
-    `shift_override_until` 失效。
+    `always_on` 为真（默认）时全天候在班，不看工作时段；为假时只在工作时段里在班。工作时段是
+    所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays` 是 ISO 星期
+    （1 周一 … 7 周日），全天候时也留着（「下班」按它找下一个上班时刻，改回按工作时段时直接
+    生效）。`shift_override` 是「上班」「下班」命令的临时切换，过了 `shift_override_until`
+    失效，没过期时比 `always_on` 优先。
 
     冷启动：`cold_start_started_at` 是开始时刻（24 小时兜底从它算起），`cold_start_step` 是
     走到哪一步，`cold_start_next_at` 非空表示该平台出手（拉样本、发卡片）、空表示在等所有者，
@@ -321,7 +323,7 @@ class AssistantSettings(Base):
             name="shift_override",
         ),
         CheckConstraint(
-            "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 2000",
+            "daily_turn_budget IS NULL OR daily_turn_budget BETWEEN 10 AND 20000",
             name="daily_turn_budget",
         ),
         CheckConstraint(
@@ -350,6 +352,7 @@ class AssistantSettings(Base):
     platform_user_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
     chat_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
     timezone: Mapped[str] = mapped_column(Text, server_default=text("'Asia/Shanghai'"))
+    always_on: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     work_start: Mapped[str] = mapped_column(Text, server_default=text("'09:30'"))
     work_end: Mapped[str] = mapped_column(Text, server_default=text("'19:00'"))
     workdays: Mapped[list[int]] = mapped_column(

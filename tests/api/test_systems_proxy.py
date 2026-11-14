@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants.kinds import ORIGIN_KINDS
 from coreman.core.auth.system_access import ENV_RISK_RULES, PROXY_RULES, build_system_access
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
@@ -177,6 +178,47 @@ async def test_read_write_and_risk_policy(
     # Only the encrypted value is kept with the task.
     assert set(stored) == {"enc", "expires_at", "auth_mode", "token_id"}
     assert next(iter(used)) not in str(task.payload)
+
+
+@pytest.mark.parametrize("kind", ORIGIN_KINDS)
+async def test_an_unattended_assistant_turn_reads_but_cannot_write(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    kind: str,
+) -> None:
+    """个人助理无人在场的一轮只能查询：员工开了「允许写入」也拒，请求到不了业务系统。"""
+    _, member, task = await proxied_turn(db_session, write=True)
+    task.kind = kind
+    await db_session.commit()
+    auth = bearer(app, task, member)
+    read = await call(
+        client,
+        auth,
+        "systems_call",
+        {"system": "stock", "operation_id": "listDocuments", "query": {"status": "confirmed"}},
+    )
+    assert read["status"] == 200
+    write = {
+        "system": "stock",
+        "operation_id": "createDraft",
+        "body": {"sku": "SKU-9", "quantity": 3},
+    }
+    denied = await call(client, auth, "systems_call", write)
+    # 说明是「所有者不在场只能查询」，不是让所有者去找管理员开写入。
+    assert denied["error"] == "owner_turn_required"
+    assert "所有者不在场" in denied["message"] and "管理员" not in denied["message"]
+    detail = await call(
+        client, auth, "systems_describe", {"system": "stock", "operation_id": "createDraft"}
+    )
+    assert detail["call"]["allowed"] is False and "所有者不在场" in detail["call"]["message"]
+    assert not any(r.method == "POST" for r in fake.requests)
+    calls = (await db_session.execute(select(SystemCall).order_by(SystemCall.id))).scalars().all()
+    assert [(c.operation_id, c.outcome) for c in calls] == [
+        ("listDocuments", "ok"),
+        ("createDraft", "denied"),
+    ]
 
 
 async def test_arguments_are_validated_and_responses_bounded(

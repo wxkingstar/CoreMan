@@ -55,7 +55,7 @@ async def test_defaults_and_removal_with_the_record(db_session: AsyncSession) ->
         {"workdays": [1, 8]},
         {"shift_override": "maybe"},
         {"daily_turn_budget": 5},
-        {"daily_turn_budget": 2001},
+        {"daily_turn_budget": 20001},
     ],
 )
 async def test_values_are_constrained(db_session: AsyncSession, bad: dict[str, object]) -> None:

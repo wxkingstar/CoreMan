@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import platform_turns
-from coreman.core.assistants.kinds import BOT_HELP_KIND
+from coreman.core.assistants.kinds import BOT_HELP_KIND, COLD_START_KIND
 from coreman.core.assistants.records import is_assistant
 from coreman.core.auth.system_access import build_system_access, mcp_runtime_supported
 from coreman.core.auth.token_issues import record_issues
@@ -274,10 +274,12 @@ class OpenStage(ChatStageBase):
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
         # 个人助理里平台触发的一轮（含带入站事件的审批结果回合）无人在场，输入可能来自别人发给
-        # 所有者的消息：不挂云签名代理、业务系统目录与所有者的个人凭证，也不下发以所有者身份
-        # 签发的业务系统令牌与业务系统 MCP，需要时由所有者在私聊里亲自让助理做。机器人自己配的
-        # 静态环境变量不受影响。
+        # 所有者的消息：业务系统令牌、业务系统 MCP、操作目录与云签名代理照常以所有者身份挂上，
+        # 但只能查询——云签名代理与目录代理由服务端拒绝写，持令牌直连的系统（含 MCP）只靠本轮块
+        # 的只读说明；所有者的个人凭证不挂。要写的事由所有者在私聊里亲自让助理做。冷启动归纳口吻
+        # 的那一轮用不到这些，一样都不挂。机器人自己配的静态环境变量不受影响。
         unattended = platform_turns.unattended(ctx.task)
+        cold_start = ctx.task.kind == COLD_START_KIND
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -287,7 +289,7 @@ class OpenStage(ChatStageBase):
             external_key=ctx.external_jwt_key,
             providers=ctx.business_token_providers,
             catalog=None
-            if alert_turn or unattended
+            if alert_turn or cold_start
             else await catalog_policy.mount_for(
                 session,
                 relay=relay,
@@ -298,6 +300,7 @@ class OpenStage(ChatStageBase):
             ),
             mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
             unattended=unattended,
+            withhold=cold_start,
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(
@@ -466,8 +469,9 @@ class OpenStage(ChatStageBase):
             session,
             ctx,
             bot=bot,
-            # 个人助理调度来的一轮也不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
-            user_id=None if alert_turn or unattended or bot_help else intake.speaker.user_id,
+            # 个人助理调度来的一轮不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
+            # 助理无人在场的一轮挂上，写由代理按任务类型拒绝；冷启动那一轮不挂。
+            user_id=None if alert_turn or cold_start or bot_help else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,

@@ -84,6 +84,7 @@ async def test_the_owner_clocks_in_out_and_back_to_the_schedule(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
     bot, _owner_row = await _owner(client, db_session)
+    assert (await client.patch(f"{URL}/settings", json={"always_on": False})).status_code == 200
     on = await client.post(SHIFT, json={"state": "on"})
     assert on.status_code == 200 and on.headers["cache-control"] == "no-store"
     data = on.json()["data"]
@@ -106,6 +107,25 @@ async def test_the_owner_clocks_in_out_and_back_to_the_schedule(
     assert (await client.get(URL)).json()["data"]["shift_override"] is None
     await fresh(db_session, bot)
     assert (await settings.get(db_session, bot.id)).shift_override is None
+
+
+async def test_around_the_clock_clocking_in_only_cancels_clocking_out(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """全天候（默认）时「下班」照样到下一个上班时刻；「上班」只是取消「下班」，没有到期时刻。"""
+    bot, _owner_row = await _owner(client, db_session)
+    seen = (await client.get(URL)).json()["data"]
+    assert seen["always_on"] is True and seen["shift_override"] is None
+    off = (await client.post(SHIFT, json={"state": "off"})).json()["data"]
+    assert off["shift_override"] == "off" and off["on_shift"] is False
+    assert off["shift_override_until"] is not None
+    on = (await client.post(SHIFT, json={"state": "on"})).json()["data"]
+    assert on["shift_override"] is None and on["shift_override_until"] is None
+    assert on["on_shift"] is True
+    await fresh(db_session, bot)
+    prefs = await settings.get(db_session, bot.id)
+    assert prefs.shift_override is None
+    assert prefs.worked_on == settings.local_today(prefs, utcnow())
 
 
 @pytest.mark.parametrize(

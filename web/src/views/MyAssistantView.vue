@@ -121,7 +121,7 @@ defineExpose({ tab, load })
               :type="mine.on_shift ? 'success' : 'info'"
               data-test="shift-state"
             >
-              {{ mine.on_shift ? t('assistant.overview.onShift') : t('assistant.overview.offShift') }}
+              {{ mine.on_shift ? (mine.always_on && !mine.shift_override ? t('assistant.overview.alwaysOn') : t('assistant.overview.onShift')) : t('assistant.overview.offShift') }}
             </el-tag>
             <span
               v-if="mine.shift_override && mine.shift_override_until"
@@ -130,7 +130,9 @@ defineExpose({ tab, load })
             >{{ t('assistant.overview.shiftUntil', { time: formatDateTime(mine.shift_override_until) }) }}</span>
             <!-- 只在助理可用时能切：开通中、停用中没有可切换的东西。 -->
             <el-button-group v-if="mine.state === 'active'">
+              <!-- 全天候时本来就在班：「上班」与「恢复全天候」是同一个效果，只留后者。 -->
               <el-button
+                v-if="!mine.always_on"
                 size="small"
                 :disabled="switching"
                 data-test="shift-on"
@@ -153,7 +155,7 @@ defineExpose({ tab, load })
                 data-test="shift-auto"
                 @click="shift('auto')"
               >
-                {{ t('assistant.overview.shiftAuto') }}
+                {{ mine.always_on ? t('assistant.overview.shiftAlwaysOn') : t('assistant.overview.shiftAuto') }}
               </el-button>
             </el-button-group>
           </dd>
