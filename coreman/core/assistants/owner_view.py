@@ -320,7 +320,8 @@ def switch_shift(row: AssistantSettings, state: str, now: datetime) -> None:
     「下班」同一个效果。
 
     `on` / `off` 的到期时刻照 `settings.clock_in` / `clock_out`（全天候时 `on` 只清掉「下班」）；
-    `auto` 清掉临时切换。上班、或下班时本来在班，都记下今天上过班（每日整理凭它触发）。
+    `auto` 清掉临时切换。上班、或下班时本来在班，都记下今天上过班（每日整理凭它触发；
+    前一天还欠着整理时不覆盖，见 `settings.mark_worked`）。
     调用方加锁、提交。
 
     Raises:
@@ -332,7 +333,7 @@ def switch_shift(row: AssistantSettings, state: str, now: datetime) -> None:
         assistant_settings.clear_override(row)
         return
     if state == "on" or assistant_settings.on_shift(row, now):
-        row.worked_on = assistant_settings.local_today(row, now)
+        assistant_settings.mark_worked(row, now)
     if state == "on":
         assistant_settings.clock_in(row, now)
     else:

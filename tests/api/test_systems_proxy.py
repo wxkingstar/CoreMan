@@ -206,7 +206,13 @@ async def test_an_unattended_assistant_turn_reads_but_cannot_write(
         "body": {"sku": "SKU-9", "quantity": 3},
     }
     denied = await call(client, auth, "systems_call", write)
-    assert denied["error"] == "write_not_allowed"
+    # 说明是「所有者不在场只能查询」，不是让所有者去找管理员开写入。
+    assert denied["error"] == "owner_turn_required"
+    assert "所有者不在场" in denied["message"] and "管理员" not in denied["message"]
+    detail = await call(
+        client, auth, "systems_describe", {"system": "stock", "operation_id": "createDraft"}
+    )
+    assert detail["call"]["allowed"] is False and "所有者不在场" in detail["call"]["message"]
     assert not any(r.method == "POST" for r in fake.requests)
     calls = (await db_session.execute(select(SystemCall).order_by(SystemCall.id))).scalars().all()
     assert [(c.operation_id, c.outcome) for c in calls] == [

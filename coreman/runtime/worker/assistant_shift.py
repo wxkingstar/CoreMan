@@ -76,8 +76,8 @@ async def _switch(
         await session.refresh(prefs, with_for_update=True)
         on = word in ON
         if on or assistant_settings.on_shift(prefs, now):
-            # 今天上过班：下班编译凭它触发，不等 5 秒一次的循环来记。
-            prefs.worked_on = assistant_settings.local_today(prefs, now)
+            # 今天上过班：下班编译凭它触发，不等 5 秒一次的循环来记；前一天还欠着整理时不覆盖。
+            assistant_settings.mark_worked(prefs, now)
         until = (
             assistant_settings.clock_in(prefs, now)
             if on

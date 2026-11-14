@@ -17,6 +17,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.permissions import require_roles
 from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
 from coreman.api.security import verify_csrf
+from coreman.core.assistants import kinds
 from coreman.core.audit import record_audit
 from coreman.core.auth.system_access import (
     SubjectUnavailable,
@@ -162,6 +163,7 @@ async def call_tool(
         ),
         systems=await granted_systems(session, scope.bot.id),
         writable=policy.writable_for(task, writable),
+        owner_absent=kinds.unattended(task.kind),
         token_ttl=scope.bot.sse_timeout_seconds,
         perms=dict(state.get("perms") or {}),
         tokens=dict(state.get("tokens") or {}),

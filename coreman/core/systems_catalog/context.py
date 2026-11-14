@@ -39,6 +39,8 @@ class Context:
     systems: list[BusinessSystem]
     # Systems whose grant allows write-level proxied calls for this AI employee.
     writable: frozenset[str] = frozenset()
+    # A personal assistant's turn with the owner absent (`kinds.unattended`): reads only.
+    owner_absent: bool = False
     # Proxy tokens live as long as the AI employee's task timeout.
     token_ttl: int = 3600
     # Sections of task.payload[BUDGET_KEY]; the caller persists them when changed.

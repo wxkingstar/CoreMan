@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import compiling, followups, jobs, settings
+from coreman.core.assistants import compiling, followups, jobs, owner_view, settings
 from coreman.core.assistants.kinds import COMPILE_KIND, JOB_RESULT_KIND, SUBTASK_KIND
 from coreman.core.db.models import AssistantJob, AssistantSettings, Bot, OutboxItem
 from coreman.core.db.session import make_session_factory
@@ -383,5 +383,55 @@ async def test_working_hours_still_compile_after_the_shift_not_at_midnight(
     tomorrow = settings.next_midnight(prefs, later) + timedelta(hours=10)
     assert await compiling.step(db_session, bot, prefs, tomorrow) == "worked"
     assert prefs.compiled_on == day and prefs.worked_on != day
+    await db_session.commit()
+    assert len(await compile_jobs(db_session, bot)) == 1
+
+
+async def test_moving_the_timezone_west_never_compiles_a_day_still_to_come(
+    db_session: AsyncSession,
+) -> None:
+    """所有者把时区往西改、本地日期回退一天：在班时只把今天记成新时区的今天，不为「明天」整理。"""
+    bot, _, prefs = await working(db_session, shift=None)
+    prefs.timezone = "Asia/Shanghai"
+    now = datetime(2026, 11, 13, 2, 0, tzinfo=UTC)  # 北京 13 日 10:00，洛杉矶 12 日 18:00
+    assert await compiling.step(db_session, bot, prefs, now) == "worked"
+    await noted(db_session, bot)
+    day = prefs.worked_on
+    assert day is not None
+    prefs.timezone = "America/Los_Angeles"
+    later = now + timedelta(minutes=1)
+    assert settings.local_today(prefs, later) < day
+    assert await compiling.step(db_session, bot, prefs, later) == "worked"
+    assert prefs.worked_on == settings.local_today(prefs, later) and prefs.compiled_on is None
+    await db_session.commit()
+    assert await nothing_spawned(db_session, bot)
+
+
+async def test_clocking_in_while_paused_keeps_the_owed_day(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全天候、过了零点运行时暂停：所有者这时在页面上切换上下班，不覆盖欠着整理的前一天。"""
+    bot, _, prefs = await working(db_session, shift=None)
+    now = utcnow()
+    assert await compiling.step(db_session, bot, prefs, now) == "worked"
+    await noted(db_session, bot)
+    day = prefs.worked_on
+    tomorrow = settings.next_midnight(prefs, now) + timedelta(minutes=5)
+
+    async def blocked(*_args: object) -> str:
+        return "node_offline"
+
+    monkeypatch.setattr(compiling.runtime, "turn_blocker", blocked)
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "paused"
+    owner_view.switch_shift(prefs, "on", tomorrow)
+    owner_view.switch_shift(prefs, "off", tomorrow)
+    assert prefs.worked_on == day and prefs.compiled_on is None
+    monkeypatch.undo()
+    # 恢复之后先补那一天，再记下今天。
+    prefs.shift_override = None
+    prefs.shift_override_until = None
+    assert await compiling.step(db_session, bot, prefs, tomorrow) == "queued"
+    assert prefs.compiled_on == day
+    assert prefs.worked_on == settings.local_today(prefs, tomorrow)
     await db_session.commit()
     assert len(await compile_jobs(db_session, bot)) == 1

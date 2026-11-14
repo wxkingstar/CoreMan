@@ -104,6 +104,25 @@ async def test_around_the_clock_clocking_in_only_cancels_clocking_out(
     assert "为止" not in text and "19:00" not in text
 
 
+async def test_clocking_out_keeps_a_day_still_owed_its_compile(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """全天候、前一天还欠着整理（运行时暂停没补上）：说「下班」不把它覆盖成今天；整理过了才记今天。"""
+    bot, _, _ = await active_assistant(db_session)
+    prefs = await settings.get(db_session, bot.id)
+    owed = settings.local_today(prefs, FRIDAY_3PM) - timedelta(days=1)
+    prefs.worked_on = owed
+    await db_session.commit()
+    await say(db_engine, db_session, bot, "下班")
+    prefs = await prefs_of(db_session, bot)
+    assert prefs.shift_override == "off" and prefs.worked_on == owed
+    prefs.compiled_on = owed
+    await db_session.commit()
+    await say(db_engine, db_session, bot, "上班")
+    prefs = await prefs_of(db_session, bot)
+    assert prefs.worked_on == settings.local_today(prefs, FRIDAY_3PM)
+
+
 async def test_someone_else_cannot_switch_it(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

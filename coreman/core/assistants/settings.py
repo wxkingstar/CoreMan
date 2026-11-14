@@ -76,6 +76,25 @@ def local_today(settings: AssistantSettings, now: datetime) -> date:
     return aware_utc(now).astimezone(zone(settings)).date()
 
 
+def owed(settings: AssistantSettings, day: date) -> bool:
+    """`day` 那天还没处理过下班编译。"""
+    return settings.compiled_on is None or settings.compiled_on < day
+
+
+def mark_worked(settings: AssistantSettings, now: datetime) -> bool:
+    """记下今天上过班（下班编译凭它触发），返回记了没有。
+
+    `worked_on` 是今天之前、且那天还欠着整理时不覆盖：留给下班编译先为那一天整理（全天候、过了
+    零点运行时暂停时就是这样）。`worked_on` 晚于今天（所有者把时区往西改）时直接记成今天。
+    """
+    today = local_today(settings, now)
+    day = settings.worked_on
+    if day is not None and day < today and owed(settings, day):
+        return False
+    settings.worked_on = today
+    return True
+
+
 def on_shift(settings: AssistantSettings, now: datetime) -> bool:
     """现在在不在班：「上班」「下班」的临时切换没过期时以它为准；否则全天候就在班，不是全天候
     按工作时段。"""

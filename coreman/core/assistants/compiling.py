@@ -269,22 +269,17 @@ async def step(
     if assistant_settings.on_shift(prefs, now):
         if day == today:
             return None
-        if day is None or not _owed(prefs, day):
-            prefs.worked_on = today
+        # 没记过、那天不欠整理、或那天不在今天之前（所有者把时区往西改，本地日期回退）：只记今天。
+        if assistant_settings.mark_worked(prefs, now) or day is None:
             return "worked"
         # 在班时过了零点（全天候）：先为那一天整理，再记下今天。
         code = await _compile(session, bot, prefs, day, today, now)
         if code != "paused":
             prefs.worked_on = today
         return code
-    if day is None or not _owed(prefs, day):
+    if day is None or not assistant_settings.owed(prefs, day):
         return None
     return await _compile(session, bot, prefs, day, today, now)
-
-
-def _owed(prefs: AssistantSettings, day: date) -> bool:
-    """`day` 那天还没处理过编译。"""
-    return prefs.compiled_on is None or prefs.compiled_on < day
 
 
 async def _compile(
