@@ -21,9 +21,9 @@ from coreman.core.systems_catalog import context, proxy, service, uploads
 from coreman.core.systems_catalog.context import TRUST, Context
 from coreman.core.systems_catalog.search import normalize
 
-MAX_CALLS = 100
+MAX_CALLS = 2000
 # Proxied calls have their own, smaller allowance: each one reaches the business system.
-MAX_PROXY_CALLS = 300
+MAX_PROXY_CALLS = 3000
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
 MODULE_PAGE = 25
