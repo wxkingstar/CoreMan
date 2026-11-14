@@ -120,6 +120,15 @@ async function remove(row: Installed) {
             {{ mcpState(row) }}
           </el-tag>
           <el-tag
+            v-if="row.is_global"
+            class="mcp-state"
+            size="small"
+            type="success"
+            data-test="global-skill"
+          >
+            {{ t('skillEditor.globalTag') }}
+          </el-tag>
+          <el-tag
             v-if="row.installed_by_system && row.status !== 'uninstalled'"
             class="mcp-state"
             size="small"
@@ -165,7 +174,8 @@ async function remove(row: Installed) {
             v-if="row.status !== 'uninstalled'"
             link
             type="danger"
-            :disabled="busy"
+            :title="row.is_global ? t('skillEditor.globalHint') : undefined"
+            :disabled="busy || row.is_global"
             @click="remove(row)"
           >
             {{ t('skill.remove') }}

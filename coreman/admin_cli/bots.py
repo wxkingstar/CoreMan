@@ -480,6 +480,15 @@ async def visibility_all(c: AdminClient, args: argparse.Namespace) -> int:
     return await _update_visibility(c, bot, {"visible_to_all": True}, args.json)
 
 
+def skill_origin(row: dict[str, Any]) -> str:
+    """技能怎么来的：全局技能（自动装或已手动装过）、随业务系统授权，或手动安装。"""
+    if row.get("is_global"):
+        return "全局" if row.get("installed_globally") else "全局（手动装过）"
+    if row.get("installed_by_system"):
+        return f"随系统 {row['installed_by_system']}"
+    return "手动"
+
+
 async def skills(c: AdminClient, args: argparse.Namespace) -> int:
     data = await bot_skills(c, await c.bot(args.bot))
     if args.json:
@@ -490,6 +499,7 @@ async def skills(c: AdminClient, args: argparse.Namespace) -> int:
         [
             ("技能", "name"),
             ("状态", "status"),
+            ("来源", skill_origin),
             ("版本", "version"),
             ("数据库", lambda r: r["approved_databases"] or r["selected_env_groups"]),
             ("安装时间", "installed_at"),

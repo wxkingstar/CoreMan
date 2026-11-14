@@ -83,7 +83,7 @@ coreman bots visibility-all sales_bot --yes
 技能与业务系统授权：
 
 ```bash
-coreman bots skills sales_bot
+coreman bots skills sales_bot          # 「来源」列：全局 / 随系统 / 手动
 coreman bots skill-install sales_bot query --env-group erp --var API_KEY=… [--keep-code]
 coreman bots skill-uninstall sales_bot query
 coreman bots systems sales_bot
@@ -231,6 +231,8 @@ coreman skills show query
 coreman skills enable|disable query
 coreman skills set query --category 数据 --security-level internal --security-prompt-file policy.md
 coreman skills upgrade query          # 为已安装该技能的所有 AI 员工重装
+coreman skills global file-share on   # 设为全局技能：所有普通 AI 员工自动安装
+coreman skills global file-share off [--keep]  # 取消全局；--keep 保留各员工上的副本
 coreman skills delete query --yes
 coreman skills sources
 coreman skills source-sync tools      # 从来源仓库同步技能目录

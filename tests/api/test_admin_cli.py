@@ -362,3 +362,27 @@ async def test_feishu_visibility_commands(cli, db_session, monkeypatch):
     assert json.loads(patch[0].content) == {"del_visible_list": {"user_ids": ["fs_alice"]}}
     assert (await cli("bots", "visibility-all", "fs_bot", "--as", "ops"))[0] == 1
     assert (await cli("bots", "visibility-all", "fs_bot", "--yes", "--as", "ops"))[0] == 0
+
+
+async def test_skill_global_toggle_and_bot_skill_origin(cli, db_session):
+    bot, _, _ = await seed_bot(db_session)
+    source = SkillSource(key="tools", label="Tools", git_url="https://github.com/example/s.git")
+    db_session.add(source)
+    await db_session.flush()
+    db_session.add(Skill(name="share", source_id=source.id, enabled=True))
+    await db_session.commit()
+    await add_user(db_session, "ops", "ai_committee")
+
+    code, out, err = await cli("skills", "global", "share", "on", "--as", "ops")
+    assert code == 0 and "已设为全局技能：已排队 1 个" in out, err
+    code, out, _ = await cli("skills", "list", "--as", "ops")
+    assert "share" in out and "是" in out
+    code, out, err = await cli("bots", "skills", "sales_bot", "--as", "creator")
+    assert code == 0 and "全局" in out, err
+    code, _, err = await cli("skills", "global", "share", "on", "--keep", "--as", "ops")
+    assert code == 1 and "--keep" in err
+    code, out, err = await cli("skills", "global", "share", "off", "--as", "ops")
+    assert code == 0 and "卸载了 1 个" in out, err
+    row = await db_session.scalar(select(BotSkill).where(BotSkill.bot_id == bot.id))
+    await db_session.refresh(row)
+    assert row.status == "uninstalled"

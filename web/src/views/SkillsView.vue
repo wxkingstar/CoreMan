@@ -52,6 +52,35 @@ async function setEnabled(row: Skill, value: boolean | string | number) {
     ElMessage.success(t('common.saved'))
   } catch (e) { fail(e); await load() } finally { toggling.value = '' }
 }
+/** 全局技能：勾选后所有普通员工自动安装；取消时选卸载还是保留随全局装上的副本。 */
+const globalizing = ref('')
+async function setGlobal(row: Skill, value: boolean | string | number) {
+  const on = Boolean(value)
+  let keep = false
+  try {
+    if (on) await ElMessageBox.confirm(t('skillEditor.globalOnConfirm', { name: row.name }), t('skillEditor.globalSkill'), { type: 'warning' })
+    else {
+      await ElMessageBox.confirm(t('skillEditor.globalOffConfirm', { name: row.name }), t('skillEditor.globalSkill'), {
+        type: 'warning', distinguishCancelAndClose: true,
+        confirmButtonText: t('skillEditor.globalOffUninstall'), cancelButtonText: t('skillEditor.globalOffKeep'),
+      }).catch((action: string) => { if (action === 'cancel') keep = true; else throw action })
+    }
+  } catch { return }
+  globalizing.value = row.id
+  try {
+    const data = await skills.setGlobal(row, { is_global: on, keep_installed: keep })
+    row.is_global = data.is_global
+    if (on) {
+      const queued = data.queued ?? [], skipped = data.skipped ?? []
+      if (queued.length) ElMessage.success(t('skillEditor.globalQueued', { count: queued.length }))
+      else if (!skipped.length) ElMessage.success(t('skillEditor.globalNone'))
+      if (skipped.length) {
+        const detail = skipped.map(item => `${item.bot_name ?? item.bot_id}（${item.reason}）`).join('；')
+        ElMessage({ type: 'warning', message: t('skillEditor.upgradeSkipped', { count: skipped.length, detail }), duration: 0, showClose: true })
+      }
+    } else ElMessage.success(keep ? t('skillEditor.globalKept') : t('skillEditor.globalUninstalled', { count: data.uninstalled?.length ?? 0 }))
+  } catch (e) { fail(e); await load() } finally { globalizing.value = '' }
+}
 /** 删除只留墓碑，来源同步不会再导入；仍有 AI 员工在用或待审时后端拒绝并列出员工。 */
 const deleting = ref('')
 async function remove(row: Skill) {
@@ -211,6 +240,29 @@ onMounted(load)
                 effect="plain"
               >
                 {{ t(row.enabled ? 'common.enabled' : 'common.disabled') }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column
+            :label="t('skillEditor.globalSkill')"
+            min-width="90"
+          >
+            <template #default="{ row }">
+              <el-switch
+                v-if="manager"
+                :data-test="'global-' + row.name"
+                :model-value="!!row.is_global"
+                :loading="globalizing === row.id"
+                :disabled="!row.is_global && (!row.enabled || row.security_level === 'internal')"
+                :aria-label="`${row.name} ${t('skillEditor.globalSkill')}`"
+                @change="setGlobal(row, $event)"
+              />
+              <el-tag
+                v-else-if="row.is_global"
+                type="success"
+                effect="plain"
+              >
+                {{ t('skillEditor.globalTag') }}
               </el-tag>
             </template>
           </el-table-column>

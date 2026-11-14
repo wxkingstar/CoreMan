@@ -267,6 +267,16 @@ class SchedulerService(Service):
                     self._log.warning("assistant_transcript_purge_failed", error=type(exc).__name__)
                 if time.monotonic() >= next_cleanup:
                     counts.update(await reaper.run_cleanup(self._factory, self._store, now))
+                    from coreman.core.knowledge import global_skills
+
+                    try:
+                        async with self._factory() as session:
+                            counts["global_skill_installs"] = await global_skills.sweep(
+                                session, self._cipher
+                            )
+                            await session.commit()
+                    except Exception as exc:  # noqa: BLE001 补装出错不能挡住后面的清理
+                        self._log.warning("global_skill_sweep_failed", error=type(exc).__name__)
                     next_cleanup = time.monotonic() + self._cleanup_seconds
                 if time.monotonic() >= next_retention:
                     counts.update(await reaper.run_retention(self._factory, now))

@@ -206,6 +206,9 @@ async def install_companion(
     """授权业务系统时装上它的配套技能。已装、正在装或待审的不动，返回是否排了安装。"""
     row = await session.get(BotSkill, (bot.id, skill.id))
     if row is not None and row.status in ("installed", "installing", "pending_approval"):
+        # 随全局技能装上的，记上系统来源：之后取消全局时，系统仍授权着就不卸。
+        if row.installed_globally and row.installed_by_system is None:
+            row.installed_by_system = system_key
         return False
     problem = companion_problem(skill)
     if problem:

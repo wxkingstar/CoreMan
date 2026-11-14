@@ -31,6 +31,7 @@ from coreman.core.db.models import (
     Task,
     User,
 )
+from coreman.core.knowledge import global_skills
 from coreman.core.knowledge import installation as installs
 from coreman.core.knowledge import skill_policy as policy
 from coreman.core.relay.agent_client import AgentError, call_agent
@@ -122,6 +123,7 @@ async def bot_skills(
         )
     )
     authorizers = {row.mcp_authorized_by for row, _ in rows if row.mcp_authorized_by}
+    global_ids = await global_skills.global_ids(session)
     names: dict[uuid.UUID, str] = {}
     if authorizers:
         for user_id, display_name in await session.execute(
@@ -159,6 +161,10 @@ async def bot_skills(
                     "mcp_authorized_by": names.get(row.mcp_authorized_by),
                     # 随授权业务系统自动安装时的系统 key；撤销授权会一并卸载。
                     "installed_by_system": row.installed_by_system,
+                    # is_global：目录里设为全局，所有员工都装、不能单独卸载；
+                    # installed_globally：因全局技能自动装上，取消全局时会一并卸载。
+                    "is_global": row.skill_id in global_ids,
+                    "installed_globally": row.installed_globally,
                 }
                 for row, skill in rows
             ],
@@ -203,8 +209,9 @@ async def install(
     cipher = request.app.state.cipher
     existing = await session.get(BotSkill, (bot_id, skill_id))
     if existing is not None:
-        # 手动安装过的技能归员工自己管，撤销业务系统授权时不再连带卸载。
+        # 手动安装过的技能归员工自己管，撤销业务系统授权、取消全局时都不再连带卸载。
         existing.installed_by_system = None
+        existing.installed_globally = False
     inputs = await installs.input_snapshot(
         session,
         cipher,
@@ -387,6 +394,8 @@ async def uninstall(
     if row is None:
         raise not_found("机器人技能不存在")
     require_if_match(request, row.revision)
+    if row.status != "uninstalled" and await global_skills.is_global(session, skill_id):
+        raise ApiError(409, 409, "全局技能对所有 AI 员工生效，不能单独卸载；请在技能目录取消全局")
     await installs.uninstall(session, bot, row, actor)
     await notify_bot_changed(session, bot.id)
     await audit(session, request, actor, bot, "uninstalled", skill_id)
