@@ -23,7 +23,7 @@ from coreman.core.systems_catalog.search import normalize
 
 MAX_CALLS = 40
 # Proxied calls have their own, smaller allowance: each one reaches the business system.
-MAX_PROXY_CALLS = 30
+MAX_PROXY_CALLS = 100
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
 MODULE_PAGE = 25
@@ -220,7 +220,7 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
         if ctx.owner_absent:
             writes = "所有者不在场，不能做"
         elif system.key in ctx.writable:
-            writes = "已开启，提交后由提问人在确认卡上确认才执行，一次最多 20 个"
+            writes = "已开启，提交后由提问人在确认卡上确认才执行，一次最多 50 个"
         else:
             writes = "未开启，需管理员开启「允许写入」"
         return (

@@ -31,7 +31,7 @@ CARD_EVENT = "systems_write"
 # Task payload key of the turn that continues after the card was answered.
 RESULT_KEY = "systems_write_result"
 TTL = timedelta(minutes=10)
-MAX_ITEMS = 20
+MAX_ITEMS = 50
 MAX_VALUE = 500
 # Items after this many characters are listed by operation and path only.
 CARD_TEXT_MAX = 12_000
