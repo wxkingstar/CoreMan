@@ -311,17 +311,41 @@ def untracked_diff(name, path):
     return header + "".join(f"+{line}\n" for line in lines)
 
 
-def forbidden(name, transfer=False):
-    """transfer=True 用于换机复制：.git 随工作目录一起迁移，文件管理里仍然看不到它。"""
+SECRET_NAMES = {
+    "credentials.json",
+    "auth.json",
+    "id_rsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+}
+
+
+def secret_name(name):
+    """按文件名看像凭据（.env*、密钥、auth.json 等）。"""
     return any(
-        (p in EXCLUDED and not (transfer and p == ".git"))
-        or p.startswith(".env")
-        or p.startswith(".coreman-")
+        p.startswith(".env")
         or p.lower().endswith((".pem", ".key", ".p12", ".pfx"))
-        or p.lower()
-        in {"credentials.json", "auth.json", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pypirc"}
+        or p.lower() in SECRET_NAMES
         for p in PurePosixPath(name).parts
     )
+
+
+def forbidden(name, transfer=False):
+    """transfer=True 用于换机复制：.git 随工作目录一起迁移，文件管理里仍然看不到它。
+
+    换机复制不在这里按凭据名拦：源节点上由 Workspace.shareable 判断，被 Git 跟踪的照常带走
+    （内容本来就在随迁的 .git 里，如多语言包 messages/en/auth.json、.env.example）。
+    .git 里的锁文件是正在运行或崩掉的 Git 进程留下的，带过去会让目标上的 Git 一直报锁占用。
+    """
+    parts = PurePosixPath(name).parts
+    if transfer and ".git" in parts[:-1] and parts[-1].endswith(".lock"):
+        return True
+    return any(
+        (p in EXCLUDED and not (transfer and p == ".git")) or p.startswith(".coreman-")
+        for p in parts
+    ) or (not transfer and secret_name(name))
 
 
 def digest(path):
@@ -564,8 +588,12 @@ class Workspace:
         resolved = target.resolve()
         if not resolved.is_relative_to(root.resolve()):
             raise self.error("文件超出工作目录")
-        if forbidden(resolved.relative_to(root.resolve()).as_posix(), transfer):
+        rel = resolved.relative_to(root.resolve()).as_posix()
+        if forbidden(rel, transfer):
             raise self.error("链接目标不允许访问")
+        # 源节点读工作目录本身时，凭据名文件只放行被 Git 跟踪的；目标节点写的是暂存目录。
+        if transfer and root == self.root and not self.shareable(rel):
+            raise self.error("该文件路径不允许访问")
         current = root
         for part in p.parts:
             current = current / part
@@ -877,7 +905,7 @@ class Workspace:
             for name in list(dirs) + files:
                 path = here / name
                 rel = path.relative_to(self.root).as_posix()
-                if forbidden(rel, transfer=True):
+                if forbidden(rel, transfer=True) or not self.shareable(rel):
                     excluded.append(rel)
                     if name in dirs:
                         dirs.remove(name)
@@ -896,6 +924,7 @@ class Workspace:
                         or forbidden(
                             path.resolve().relative_to(self.root).as_posix(), transfer=True
                         )
+                        or not self.shareable(path.resolve().relative_to(self.root).as_posix())
                     ):
                         excluded.append(rel)
                         continue
@@ -923,6 +952,78 @@ class Workspace:
             "total_size": total,
             "repos": descriptors,
         }
+
+    def shareable(self, rel):
+        """换机复制能否带走：不像凭据，或虽然像凭据但被所在仓库跟踪。"""
+        return not secret_name(rel) or self.tracked(rel)
+
+    def tracked(self, rel):
+        """rel 是否被它所在的 Git 仓库（含 git worktree 建的工作树）跟踪。"""
+        parts = PurePosixPath(rel).parts
+        for i in range(len(parts) - 1, -1, -1):
+            repo = self.root.joinpath(*parts[:i])
+            dotgit = repo / ".git"
+            sub = "/".join(parts[i:])
+            try:
+                if dotgit.is_dir() and not dotgit.is_symlink():
+                    return sub in self.git_paths(["ls-files", "-z", "--", sub], repo)
+                if dotgit.is_file() and not dotgit.is_symlink():
+                    main, gitdir = self.linked_worktree(repo)
+                    if main is None:
+                        return False
+                    args = ["--git-dir", str(gitdir), "--work-tree", str(repo)]
+                    return sub in self.git_paths([*args, "ls-files", "-z", "--", sub], main)
+            except (self.error, OSError):
+                return False
+        return False
+
+    def linked_worktree(self, repo):
+        """repo 是 git worktree 建的工作树、主仓库也在工作目录里时，返回 (主仓库, 它的元数据目录)。
+
+        元数据目录必须形如 <主仓库>/.git/worktrees/<名字>；否则返回 (None, None)。
+        """
+        root = self.root.resolve()
+        text = (repo / ".git").read_text(errors="replace")[:4096].strip()
+        if not text.startswith("gitdir:"):
+            return None, None
+        gitdir = Path(text[len("gitdir:") :].strip())
+        if not gitdir.is_absolute():
+            gitdir = repo / gitdir
+        gitdir = gitdir.resolve()
+        if (
+            not gitdir.is_relative_to(root)
+            or gitdir.parent.name != "worktrees"
+            or gitdir.parent.parent.name != ".git"
+            or not gitdir.is_dir()
+        ):
+            return None, None
+        return gitdir.parent.parent.parent, gitdir
+
+    def repair_worktrees(self, manifest):
+        """换机后 git worktree 两头记的都是源节点的绝对路径：按清单找出工作目录里的工作树，
+        让主仓库 git worktree repair 改成新路径。尽力而为，修不了不影响迁移结果。"""
+        linked = [
+            str(PurePosixPath(e["path"]).parent)
+            for e in manifest
+            if "link" not in e and PurePosixPath(e["path"]).name == ".git"
+        ]
+        if not linked:
+            return
+        for entry in manifest:
+            path = PurePosixPath(entry["path"])
+            # <主仓库>/.git/worktrees/<名字>/gitdir 记着工作树 .git 的原路径。
+            if "link" in entry or path.name != "gitdir" or len(path.parts) < 4:
+                continue
+            if path.parts[-3] != "worktrees" or path.parts[-4] != ".git":
+                continue
+            main = self.root.joinpath(*path.parts[:-4])
+            try:
+                old = (self.root / path).read_text(errors="replace").strip()
+            except OSError:
+                continue
+            for rel in linked:
+                if rel != "." and old.endswith("/" + rel + "/.git"):
+                    self.optional(["worktree", "repair", str(self.root / rel)], main)
 
     def git_paths(self, args, repo):
         from .agent import MAX_BODY
@@ -1335,6 +1436,7 @@ class Workspace:
                     p.symlink_to(entry["link"])
         self.restore_repos(stage, files)
         self.install(files, replace=self.data.get("replace") is True)
+        self.repair_worktrees(record["manifest"])
         # 被替换的旧目录里可能有删不掉的只读目录；文件已经就位，清理失败不影响结果。
         shutil.rmtree(stage, ignore_errors=True)
         return {"installed": True}
