@@ -539,3 +539,55 @@ def test_probe_rejects_bad_token_missing_directory_and_other_employee(agent):
     call(agent, "init", working_dir="two", bot_id=2)
     with pytest.raises(OperationError, match="其他员工"):
         call(agent, "probe", working_dir="two", token=token, action="create")
+
+
+def test_transfer_carries_tracked_secret_named_files_and_repairs_worktrees(agent, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("PATH", "/opt/homebrew/bin:" + os.environ["PATH"])
+    call(agent, "init")
+    source = agent.root / "one"
+    repo = source / "web"
+    (repo / "messages").mkdir(parents=True)
+    (repo / "messages/auth.json").write_text('{"login": "Log in"}')
+    (repo / ".env.example").write_text("API_KEY=\n")
+
+    def git(*args, cwd=repo):
+        subprocess.run(
+            ["git", "-c", "user.email=a@example.com", "-c", "user.name=a", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    git("add", ".")
+    git("commit", "-qm", "init")
+    git("worktree", "add", "-q", "-b", "feature", str(source / "work/wt"))
+    (repo / ".env").write_text("API_KEY=real")
+    (repo / ".git/index.lock").write_text("")
+    with pytest.raises(OperationError):
+        call(agent, "read", path="web/.env", transfer_id=str(uuid.uuid4()))
+
+    manifest = [entry["path"] for entry in copy_to(agent, "two", replace=True)]
+    target = agent.root / "two"
+    assert "web/messages/auth.json" in manifest and "work/wt/messages/auth.json" in manifest
+    assert (target / "web/.env.example").exists() and not (target / "web/.env").exists()
+    assert not (target / "web/.git/index.lock").exists()
+    # 工作树两头都改成了新路径，Git 在目标上能照常用。
+    listing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=target / "web",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert f"worktree {(target / 'work/wt').resolve()}" in listing
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=target / "work/wt",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
