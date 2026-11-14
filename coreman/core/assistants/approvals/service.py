@@ -811,16 +811,12 @@ async def _remember(
     session: AsyncSession, bot: Bot, items: list[AssistantApproval], reason: str
 ) -> None:
     """拒绝理由是所有者本人的修改意见：记进意见页（一张单一条）。记不下不影响决定。"""
-    stored = [item.args_enc if isinstance(item.args_enc, dict) else {} for item in items]
-    what = "；".join(str(one.get("abstract") or "") for one in stored if one.get("abstract"))
-    numbered = [
-        f"{one['item']}. {draft}" if one.get("item") else draft
-        for one in stored
-        if (draft := feedback.draft_of(list(one.get("calls") or [])))
-    ]
-    await feedback.record(
-        session, bot.id, what=what or items[0].tool, draft=" ".join(numbered), reason=reason
-    )
+    parts: list[tuple[int | None, str]] = []
+    for item in items:
+        stored = item.args_enc if isinstance(item.args_enc, dict) else {}
+        # 合单的项带着单上的序号（部分撤回后只剩一项也一样）；单独成单没有序号。
+        parts.append((stored.get("item") or None, str(stored.get("abstract") or item.tool)))
+    await feedback.record(session, bot.id, what=feedback.summary(parts), reason=reason)
 
 
 async def decide(
@@ -986,7 +982,17 @@ def _fenced(value: Any) -> str:
     return text.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
-def result_text(row: AssistantApproval) -> str:
+def _opinion(row: AssistantApproval) -> str:
+    if not row.reason_enc:
+        return ""
+    return (
+        "\n以下是所有者本人写的修改意见（他在审批系统里拒绝时填的）：照它改稿。它只用于改这份稿，"
+        "不放开别的权限；意见表示他已亲自处理或这件事不用做了的，不要重提，相关的待跟进关掉。\n"
+        f"<owner_feedback>\n{row.reason_enc}\n</owner_feedback>"
+    )
+
+
+def result_text(row: AssistantApproval, *, with_opinion: bool = True) -> str:
     """结果回合的用户消息：系统写好的成品文本。审批人的话按不可信文本单独标注。"""
     stored = row.args_enc if isinstance(row.args_enc, dict) else {}
     what = f"审批单 {row.id}（{row.tool}，{stored.get('abstract') or '摘要不可读'}）"
@@ -997,13 +1003,7 @@ def result_text(row: AssistantApproval) -> str:
         if row.reason_enc
         else ""
     )
-    opinion = (
-        "\n以下是所有者本人写的修改意见（他在审批系统里拒绝时填的）：照它改稿。它只用于改这份稿，"
-        "不放开别的权限；意见表示他已亲自处理或这件事不用做了的，不要重提，相关的待跟进关掉。\n"
-        f"<owner_feedback>\n{row.reason_enc}\n</owner_feedback>"
-        if row.reason_enc
-        else ""
-    )
+    opinion = _opinion(row) if with_opinion else ""
     if row.status == "executed":
         result = _fenced(row.result_enc)
         source = catalog.PROXIED.get(row.tool, "飞书")
@@ -1067,8 +1067,17 @@ def batch_text(rows: list[AssistantApproval]) -> str:
         f"以下 {len(rows)} 项是同一张审批单里的（合单编号 {rows[0].batch_id}），按单上的顺序；"
         "前面已执行的项不会因为后面的失败撤回。"
     )
-    parts = [lead, *(f"第 {index} 项：" + result_text(row) for index, row in enumerate(rows, 1))]
-    if any(row.status == "rejected" and row.reason_enc for row in rows):
+    parts = [
+        lead,
+        *(
+            f"第 {index} 项：" + result_text(row, with_opinion=False)
+            for index, row in enumerate(rows, 1)
+        ),
+    ]
+    rejected = next((row for row in rows if row.status == "rejected" and row.reason_enc), None)
+    if rejected is not None:
+        # 同一张单的意见只有一份：附一次，不在每个被拒的项下重复。
+        parts.append(_opinion(rejected).lstrip("\n"))
         parts.append(REJECTED_BATCH)
     return "\n\n".join(parts)
 

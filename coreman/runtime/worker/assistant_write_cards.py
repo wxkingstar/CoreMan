@@ -149,18 +149,13 @@ async def handle(
             # 没写意见：卡片保持原样，他可以补上再点。
             return "ignored"
         state.status = "cancelled"
-        drafts = [feedback.draft_of(list(item.get("calls") or [])) for item in items]
-        numbered = [
-            f"{index}. {draft}" if len(items) > 1 else draft
-            for index, draft in enumerate(drafts, 1)
-            if draft
-        ]
-        what = "；".join(
-            " ".join(str(item.get("abstract") or item["tool"]).split()) for item in items
+        what = feedback.summary(
+            [
+                (index if len(items) > 1 else None, str(item.get("abstract") or item["tool"]))
+                for index, item in enumerate(items, 1)
+            ]
         )
-        recorded = await feedback.record(
-            session, bot.id, what=what, draft=" ".join(numbered), reason=reason
-        )
+        recorded = await feedback.record(session, bot.id, what=what, reason=reason)
         await _update(session, bot, inbound, "已打回，没有执行。助理会按你的意见重写。")
         await _resume(
             session,

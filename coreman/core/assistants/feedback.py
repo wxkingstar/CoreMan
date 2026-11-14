@@ -3,12 +3,14 @@
 写入方是平台，不是模型：确认卡上的「打回重写」和审批系统的拒绝都落到 `record`。页面置顶，所以
 每个会话的第一轮都带上，刚被打回的那一轮也会因为「置顶页有更新」当场带上。所有者可以在
 「我的助理」页直接改这一页；页首（第一条 `## ` 之前）由他说了算，平台只动条目。
+
+条目只有平台生成的摘要（渠道与对象）和所有者本人写的意见；助理起草的正文不进这一页，
+因为置顶页每个会话都当作所有者的偏好给出。
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -37,12 +39,9 @@ MARK = "## "
 # 置顶页合计 24KB：这一页只占 8KB，其余留给口吻与规则页。
 BUDGET_BYTES = 8 * 1024
 ARCHIVE_BYTES = 150 * 1024
-DRAFT_MAX = 200
 REASON_MAX = 500
-WHAT_MAX = 80
+WHAT_MAX = 300
 RETRIES = 3
-# 第一处调用里按这个顺序找正文。
-_DRAFT_KEYS = ("text", "body", "content", "description", "comment", "summary", "title", "subject")
 
 
 def _one(text: str) -> str:
@@ -50,22 +49,15 @@ def _one(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def draft_of(calls: list[dict[str, Any]]) -> str:
-    """暂存的调用里要发出去的那段文字，单行、截短；没有正文字段时为空串。"""
-    arguments = (calls[0].get("arguments") if calls else None) or {}
-    for key in _DRAFT_KEYS:
-        value = arguments.get(key)
-        if isinstance(value, str) and value.strip():
-            return _one(value)[:DRAFT_MAX]
-    return ""
+def summary(parts: list[tuple[int | None, str]]) -> str:
+    """条目标题里的摘要：入参是（序号或 None，摘要或工具名）；只有一项且无序号时不带序号。"""
+    if len(parts) == 1 and parts[0][0] is None:
+        return _one(parts[0][1])
+    return "；".join(f"{number}. {_one(text)}" for number, text in parts)
 
 
-def _entry(day: str, what: str, draft: str, reason: str) -> str:
-    lines = [f"{MARK}{day} · {_one(what)[:WHAT_MAX]}"]
-    if draft:
-        lines.append(f"稿子：{_one(draft)[:DRAFT_MAX]}")
-    lines.append(f"意见：{reason}")
-    return "\n".join(lines) + "\n\n"
+def _entry(day: str, what: str, reason: str) -> str:
+    return f"{MARK}{day} · {_one(what)[:WHAT_MAX]}\n意见：{reason}\n\n"
 
 
 def split(body: str) -> tuple[str, list[str]]:
@@ -121,14 +113,11 @@ async def _archive(session: AsyncSession, bot_id: uuid.UUID, overflow: list[str]
     )
 
 
-async def record(
-    session: AsyncSession, bot_id: uuid.UUID, *, what: str, draft: str, reason: str
-) -> bool:
+async def record(session: AsyncSession, bot_id: uuid.UUID, *, what: str, reason: str) -> bool:
     """把一条打回意见记到意见页最前面。调用方提交事务。
 
     Args:
-        what: 平台生成的摘要（渠道与对象，如「私聊 → 李四」）
-        draft: 被打回的稿子的摘录（`draft_of`）
+        what: 平台生成的摘要（渠道与对象，如「私聊 → 李四」，见 `summary`）
         reason: 所有者写的意见原文
 
     Returns:
@@ -138,43 +127,47 @@ async def record(
     reason = _one(reason)[:REASON_MAX]
     if not reason:
         return False
-    try:
-        if not await sealed.key_ready(session, bot_id):
+    for _ in range(RETRIES):
+        try:
+            # 每次重试一个保存点：任一步失败（含数据库错误）都只回滚这一段，外层事务不受影响；
+            # 意见页与归档页同一个保存点，不丢条目。
+            async with session.begin_nested():
+                if not await sealed.key_ready(session, bot_id):
+                    return False
+                new = _entry(await _today(session, bot_id), what, reason)
+                page = await notes.read(session, bot_id, PATH)
+                head, old = split(page.body) if page is not None else (HEAD, [])
+                # 页首是所有者的字，不截断：页首超过预算一半时条目只占一半预算，
+                # 这时页面超过 8KB 只可能因为他自己写的页首。
+                room = max(BUDGET_BYTES - len(head.encode()), BUDGET_BYTES // 2)
+                kept, overflow = _fit([new, *old], room)
+                await notes.write(
+                    session,
+                    bot_id,
+                    PATH,
+                    body=head + "".join(kept),
+                    summary=page.summary if page is not None else SUMMARY,
+                    title=TITLE if page is None else None,
+                    # 所有者取消过置顶的保持原样。
+                    pinned=True if page is None else None,
+                    version=page.version if page is not None else 0,
+                    updated_by="owner",
+                )
+                if overflow:
+                    await _archive(session, bot_id, overflow)
+            return True
+        except notes.NotesError as exc:
+            if exc.code in ("version_conflict", "page_exists", "page_not_found"):
+                continue
+            _not_recorded(bot_id, exc.code)
             return False
-        new = _entry(await _today(session, bot_id), what, draft, reason)
-        for _ in range(RETRIES):
-            try:
-                # 意见页与归档页同一个保存点：任一步失败都整体回滚，不丢条目。
-                async with session.begin_nested():
-                    page = await notes.read(session, bot_id, PATH)
-                    head, old = split(page.body) if page is not None else (HEAD, [])
-                    # 页首是所有者的字，不截断：页首超过预算一半时条目只占一半预算，
-                    # 这时页面超过 8KB 只可能因为他自己写的页首。
-                    room = max(BUDGET_BYTES - len(head.encode()), BUDGET_BYTES // 2)
-                    kept, overflow = _fit([new, *old], room)
-                    await notes.write(
-                        session,
-                        bot_id,
-                        PATH,
-                        body=head + "".join(kept),
-                        summary=page.summary if page is not None else SUMMARY,
-                        title=TITLE if page is None else None,
-                        # 所有者取消过置顶的保持原样。
-                        pinned=True if page is None else None,
-                        version=page.version if page is not None else 0,
-                        updated_by="owner",
-                    )
-                    if overflow:
-                        await _archive(session, bot_id, overflow)
-                return True
-            except notes.NotesError as exc:
-                if exc.code in ("version_conflict", "page_exists", "page_not_found"):
-                    continue
-                raise
-    except (notes.NotesError, DecryptError, SQLAlchemyError) as exc:
-        # 只记原因代码：异常文字里可能带内容。
-        code = getattr(exc, "code", type(exc).__name__)
-        log.warning("assistant_feedback_not_recorded", bot_id=str(bot_id), code=code)
-        return False
-    log.warning("assistant_feedback_not_recorded", bot_id=str(bot_id), code="conflict")
+        except (DecryptError, SQLAlchemyError) as exc:
+            _not_recorded(bot_id, type(exc).__name__)
+            return False
+    _not_recorded(bot_id, "conflict")
     return False
+
+
+def _not_recorded(bot_id: uuid.UUID, code: str) -> None:
+    # 只记原因代码：异常文字里可能带内容。
+    log.warning("assistant_feedback_not_recorded", bot_id=str(bot_id), code=code)

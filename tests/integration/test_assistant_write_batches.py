@@ -466,11 +466,34 @@ async def test_sending_back_runs_nothing_records_the_reason_and_asks_for_a_rewri
     assert "只改意见点到的项" in note and "再发一张确认卡" in note
     page = await notes.read(db_session, bot.id, feedback.PATH)
     assert page is not None and "意见：第 2 条太硬，‹改›客气点" in page.body
-    assert SECOND in page.body
+    # 助理起草的正文不进置顶页；标题里是两项带序号的摘要。
+    assert SECOND not in page.body and TEXT not in page.body
+    (entry,) = feedback.split(page.body)[1]
+    assert entry.splitlines()[0].count("；") == 1 and "1. " in entry and "2. " in entry
     assert "已打回" in body_text(await last_update(db_session))
     # 打回之后这张卡不能再确认。
     late = await press(db_session, bot, scope.task, state.id)
     assert await click(db_session, db_engine, late) == "expired"
+
+
+async def test_sending_back_still_goes_through_when_the_feedback_cannot_be_recorded(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import notes
+
+    async def full(*_args: object, **_kwargs: object) -> None:
+        raise notes.NotesError("notes_full")
+
+    bot, scope, state, feishu, _ = await staged_and_sent(db_session, db_engine, monkeypatch)
+    monkeypatch.setattr(notes, "write", full)
+    pressed = await press(
+        db_session, bot, scope.task, state.id, "reject", selected={batch.REASON_FIELD: ["太硬"]}
+    )
+    assert await click(db_session, db_engine, pressed) == "assistant_write_rejected"
+    assert feishu.writes == [] and (await state_of(db_session)).status == "cancelled"
+    note = await resumed(db_session, state)
+    assert note is not None
+    assert "<owner_feedback>" in note and "已记进" not in note
 
 
 async def test_sending_back_without_a_reason_is_ignored_and_leaves_the_card_open(
@@ -842,10 +865,11 @@ async def test_a_rejection_reason_is_recorded_as_owner_feedback(
     page = await notes.read(db_session, scope.bot.id, feedback.PATH)
     assert page is not None and page.pinned
     assert "意见：第 2 条太硬，改客气点" in page.body
-    # 合单只记一条，稿子摘录是各项的正文。
-    assert len(feedback.split(page.body)[1]) == 1 and SECOND in page.body
+    # 合单只记一条，标题是各项带序号的摘要，不含助理起草的正文。
+    assert len(feedback.split(page.body)[1]) == 1 and SECOND not in page.body
     text = service.batch_text(await service.members(db_session, head, lock=False))
     assert "只改意见点到的项" in text
+    assert text.count("<owner_feedback>") == 1
 
 
 async def test_feedback_numbers_follow_the_approval_after_a_partial_withdrawal(
@@ -869,10 +893,37 @@ async def test_feedback_numbers_follow_the_approval_after_a_partial_withdrawal(
     page = await notes.read(db_session, scope.bot.id, feedback.PATH)
     assert page is not None
     (entry,) = feedback.split(page.body)[1]
-    draft_line = next(line for line in entry.splitlines() if line.startswith("稿子："))
-    assert draft_line.removeprefix("稿子：").startswith("2. ")
+    title = entry.splitlines()[0].split(" · ", 1)[1]
+    assert title.startswith("2. ") and "1. " not in title
     text = service.batch_text(await service.members(db_session, head, lock=False))
     assert "只改意见点到的项" in text
+
+
+async def test_a_rejection_is_decided_even_when_the_feedback_cannot_be_recorded(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import feedback, notes
+
+    async def full(*_args: object, **_kwargs: object) -> None:
+        raise notes.NotesError("notes_full")
+
+    rows, _, _, scope = await submitted(db_session, db_engine, monkeypatch)
+    head = rows[0]
+    monkeypatch.setattr(notes, "write", full)
+    found = await service.decide(
+        db_session,
+        approval_id=str(head.approval_id),
+        external_id=head.external_id,
+        status="rejected",
+        reason="太硬",
+        decided_at=None,
+    )
+    await db_session.commit()
+    assert found.queued
+    reloaded = await service.members(db_session, head, lock=False)
+    assert [row.status for row in reloaded] == ["rejected", "rejected"]
+    assert len(await queued(db_session, APPROVAL_RESULT_KIND)) == 1
+    assert await notes.read(db_session, scope.bot.id, feedback.PATH) is None
 
 
 async def test_an_approval_note_is_not_recorded_as_feedback(

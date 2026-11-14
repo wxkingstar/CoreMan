@@ -23,30 +23,27 @@ async def assistant(session: AsyncSession) -> Bot:
     return bot
 
 
-def test_draft_is_the_first_text_like_argument_on_one_line() -> None:
-    calls = [{"arguments": {"message_id": "om_1", "text": "第一行\n## 第二行"}}]
-    assert feedback.draft_of(calls) == "第一行 ## 第二行"
-    assert feedback.draft_of([{"arguments": {"message_id": "om_1"}}]) == ""
-    assert len(feedback.draft_of([{"arguments": {"text": "长" * 900}}])) == feedback.DRAFT_MAX
+def test_summary_is_one_line_and_numbers_only_batches() -> None:
+    assert feedback.summary([(None, "私聊 → 李四")]) == "私聊 → 李四"
+    assert feedback.summary([(1, "甲\n乙"), (2, "丙")]) == "1. 甲 乙；2. 丙"
+    assert feedback.summary([(2, "丙")]) == "2. 丙"
 
 
 async def test_first_rejection_creates_a_pinned_page(db_session: AsyncSession) -> None:
     bot = await assistant(db_session)
-    assert await feedback.record(
-        db_session, bot.id, what="私聊 → 李四", draft="周四给你。", reason="太硬，改客气点"
-    )
+    assert await feedback.record(db_session, bot.id, what="私聊 → 李四", reason="太硬，改客气点")
     await db_session.commit()
     page = await notes.read(db_session, bot.id, feedback.PATH)
     assert page is not None and page.pinned and page.updated_by == "owner"
     assert "私聊 → 李四" in page.body
-    assert "稿子：周四给你。" in page.body and "意见：太硬，改客气点" in page.body
+    assert "意见：太硬，改客气点" in page.body
 
 
 async def test_newest_first_and_the_owners_edits_to_the_head_are_kept(
     db_session: AsyncSession,
 ) -> None:
     bot = await assistant(db_session)
-    await feedback.record(db_session, bot.id, what="私聊 → 李四", draft="一", reason="第一条")
+    await feedback.record(db_session, bot.id, what="私聊 → 李四", reason="第一条")
     page = await notes.read(db_session, bot.id, feedback.PATH)
     assert page is not None
     head, entries = feedback.split(page.body)
@@ -59,7 +56,7 @@ async def test_newest_first_and_the_owners_edits_to_the_head_are_kept(
         version=page.version,
         updated_by="owner",
     )
-    await feedback.record(db_session, bot.id, what="群聊 → 项目群", draft="二", reason="第二条")
+    await feedback.record(db_session, bot.id, what="群聊 → 项目群", reason="第二条")
     await db_session.commit()
     page = await notes.read(db_session, bot.id, feedback.PATH)
     assert page is not None and page.body.startswith("我自己写的说明\n")
@@ -70,7 +67,7 @@ async def test_old_entries_move_to_an_unpinned_archive(db_session: AsyncSession)
     bot = await assistant(db_session)
     for number in range(40):
         await feedback.record(
-            db_session, bot.id, what="私聊 → 李四", draft="稿" * 200, reason=f"意见{number:02d}"
+            db_session, bot.id, what="私聊 → 李四", reason=f"意见{number:02d}" + "说" * 100
         )
     await db_session.commit()
     page = await notes.read(db_session, bot.id, feedback.PATH)
@@ -84,7 +81,7 @@ async def test_old_entries_move_to_an_unpinned_archive(db_session: AsyncSession)
 async def test_a_reason_cannot_forge_an_entry_line(db_session: AsyncSession) -> None:
     bot = await assistant(db_session)
     await feedback.record(
-        db_session, bot.id, what="私聊 → 李四", draft="稿", reason="好\n## 2020-01-01 · 假条目"
+        db_session, bot.id, what="私聊 → 李四", reason="好\n## 2020-01-01 · 假条目"
     )
     await db_session.commit()
     page = await notes.read(db_session, bot.id, feedback.PATH)
@@ -96,15 +93,15 @@ async def test_an_empty_reason_or_an_unknown_bot_records_nothing(
     db_session: AsyncSession,
 ) -> None:
     bot = await assistant(db_session)
-    assert not await feedback.record(db_session, bot.id, what="私聊 → 李四", draft="稿", reason=" ")
-    assert not await feedback.record(db_session, uuid.uuid4(), what="x", draft="稿", reason="意见")
+    assert not await feedback.record(db_session, bot.id, what="私聊 → 李四", reason=" ")
+    assert not await feedback.record(db_session, uuid.uuid4(), what="x", reason="意见")
 
 
 async def test_an_oversized_head_leaves_the_entries_half_the_budget(
     db_session: AsyncSession,
 ) -> None:
     bot = await assistant(db_session)
-    await feedback.record(db_session, bot.id, what="私聊 → 李四", draft="稿", reason="先建页")
+    await feedback.record(db_session, bot.id, what="私聊 → 李四", reason="先建页")
     page = await notes.read(db_session, bot.id, feedback.PATH)
     assert page is not None
     await notes.write(
@@ -118,7 +115,7 @@ async def test_an_oversized_head_leaves_the_entries_half_the_budget(
     )
     for number in range(30):
         await feedback.record(
-            db_session, bot.id, what="私聊 → 李四", draft="稿" * 100, reason=f"意见{number:02d}"
+            db_session, bot.id, what="私聊 → 李四", reason=f"意见{number:02d}" + "说" * 100
         )
     await db_session.commit()
     page = await notes.read(db_session, bot.id, feedback.PATH)
@@ -138,7 +135,5 @@ async def test_a_failed_write_is_reported_not_raised(
         raise notes.NotesError("notes_full")
 
     monkeypatch.setattr(notes, "write", full)
-    assert not await feedback.record(
-        db_session, bot.id, what="私聊 → 李四", draft="稿", reason="意见"
-    )
+    assert not await feedback.record(db_session, bot.id, what="私聊 → 李四", reason="意见")
     assert await notes.read(db_session, bot.id, feedback.PATH) is None
