@@ -374,3 +374,57 @@ func TestNonStreamUnknownExitDoesNotReturnStderr(t *testing.T) {
 		t.Fatalf("unexpected diagnostic: %v", err)
 	}
 }
+
+// A resumed session with a background-task notification queued from the
+// previous turn opens with a content-less result, then runs the real turn in
+// the same process, which then idles up to 10 minutes waiting for background
+// subagents. The real turn must stream as it happens, not after exit.
+func TestResumeStreamsContentAfterLeadingResult(t *testing.T) {
+	writeFakeClaude(t, `echo '{"type":"system","subtype":"init"}'
+echo '{"type":"result","subtype":"success","result":""}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"live"}}}'
+echo '{"type":"result","subtype":"success","result":"live"}'
+sleep 3
+`)
+	start := time.Now()
+	lines, ready, _ := startClaudeStream([]string{"--resume", "sess-x"}, "hi", "", nil)
+	if err := waitReadyErr(t, ready); err != nil {
+		t.Fatalf("ready returned error: %v", err)
+	}
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatal("stream closed before the content line")
+			}
+			if strings.Contains(l, `"text":"live"`) {
+				if elapsed := time.Since(start); elapsed > 2*time.Second {
+					t.Fatalf("content arrived after %s, want it before the process exits", elapsed)
+				}
+				collectAllLines(t, lines)
+				return
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("content never arrived")
+		}
+	}
+}
+
+// After a leading result the quiet tail (background wait) is not a hang: the
+// sniff watchdog must not kill it, and everything is still forwarded at exit.
+func TestResumeLeadingResultQuietTailNotKilled(t *testing.T) {
+	writeFakeClaude(t, `echo '{"type":"system","subtype":"init"}'
+echo '{"type":"result","subtype":"success","result":"done"}'
+sleep 1.5
+`)
+	old := firstLineTimeout
+	firstLineTimeout = 500 * time.Millisecond
+	defer func() { firstLineTimeout = old }()
+	lines, ready, _ := startClaudeStream([]string{"--resume", "sess-x"}, "hi", "", nil)
+	if err := waitReadyErr(t, ready); err != nil {
+		t.Fatalf("quiet tail after result was treated as failure: %v", err)
+	}
+	if got := strings.Join(collectAllLines(t, lines), "\n"); !strings.Contains(got, `"result":"done"`) {
+		t.Fatalf("result not forwarded: %s", got)
+	}
+}

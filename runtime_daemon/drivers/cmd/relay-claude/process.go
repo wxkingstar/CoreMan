@@ -492,7 +492,7 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 							sniffTimer.Stop()
 							sniffDeadline = nil
 							compacting = true
-						} else if compacting && (evt.Subtype == "compact_boundary" ||
+						} else if compacting && !sawResult && (evt.Subtype == "compact_boundary" ||
 							(evt.Subtype == "status" && string(evt.Status) == "null")) {
 							sniffTimer.Reset(watchdogTimeout)
 							sniffDeadline = sniffTimer.C
@@ -502,13 +502,19 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 					continue
 				}
 				if evt.Type == "result" {
-					// Result before any content: the run is over. Buffer the
-					// remainder to EOF so nothing is lost.
+					// Result before any content. Usually the run is over, but
+					// not always: a background-task notification queued from
+					// the previous turn ends in a content-less result and the
+					// real turn follows in the same process. Keep sniffing so
+					// the first content after it streams live instead of being
+					// buffered until exit (which waits up to 10 minutes for
+					// background subagents). No deadline from here on: the
+					// process already answered, and a quiet tail is that
+					// background wait, not a hang.
 					sawResult = true
-					for line := range innerLines {
-						buffered = append(buffered, line)
-					}
-					break sniff
+					sniffTimer.Stop()
+					sniffDeadline = nil
+					continue
 				}
 				gotContent = true
 				break sniff
