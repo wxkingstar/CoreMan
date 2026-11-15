@@ -92,6 +92,11 @@ ENDPOINTS: dict[str, Endpoint] = {
     "im.search": _e("POST", "/im/v1/messages/search", "read", "search:message"),
     "im.mget": _e("GET", "/im/v1/messages/mget", "read", "im:message:readonly"),
     "im.history": _e("GET", "/im/v1/messages", "read", "im:message:readonly"),
+    # 取单条消息：合并转发的子消息只有它会返回（mget 与历史只给最外层）。权限与 im.history 同族、
+    # 读消息的排第一：应用清单与授权请求都不多一项。
+    "im.get": _e(
+        "GET", "/im/v1/messages/{message_id}", "read", "im:message:readonly", "im:message"
+    ),
     # 与 im.history 同一个读消息权限排第一：应用清单与授权请求都不多一项，已授权的人不用重授权。
     "im.reactions": _e(
         "POST",

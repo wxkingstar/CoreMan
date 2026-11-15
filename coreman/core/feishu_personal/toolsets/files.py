@@ -57,7 +57,10 @@ class MailAttachment(Arguments):
 
 
 class MessageFile(Arguments):
-    message_id: Identifier
+    message_id: Identifier = Field(
+        description="The message holding the file; for a merge-forwarded record, the merge-forward"
+        " message's own id"
+    )
     file_key: Identifier = Field(description="file_key or image_key from the message content")
     type: Literal["file", "image"] = "file"
 
@@ -148,7 +151,9 @@ async def download_mail_attachment(args: MailAttachment, call: Call) -> dict[str
     "feishu_download_message_file",
     MessageFile,
     "im.resource",
-    "Fetch a file or image from a chat message and get a short-lived link to download it.",
+    "Fetch a file or image from a chat message and get a short-lived link to download it."
+    " For an image or file inside a merge-forwarded record, message_id is the merge-forward"
+    " message's own id, not the sub-message's.",
 )
 async def download_message_file(args: MessageFile, call: Call) -> dict[str, Any]:
     download = await call.download(

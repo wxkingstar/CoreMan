@@ -54,6 +54,10 @@ class ReadMessages(Arguments):
     message_ids: list[Identifier] = Field(min_length=1, max_length=20)
 
 
+class MergeForward(Arguments):
+    message_id: Identifier = Field(description="ID of the merge-forwarded message itself")
+
+
 class ChatHistory(TimedPage):
     chat_id: Identifier
 
@@ -162,6 +166,33 @@ def _readable_items(data: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+# 合并转发里最多返回的子消息条数。
+MERGE_FORWARD_LIMIT = 100
+MERGE_FORWARD_NOTE = (
+    "To download an image or file from any message below, call feishu_download_message_file with "
+    "message_id set to download_message_id (the merge-forward message itself), not the "
+    "sub-message's id; images inside cards cannot be downloaded."
+)
+
+
+def _sub_message(item: dict[str, Any]) -> dict[str, Any]:
+    shaped = _readable(item)
+    sender = item.get("sender")
+    sender = sender if isinstance(sender, dict) else {}
+    out = {
+        "message_id": item.get("message_id"),
+        "msg_type": item.get("msg_type"),
+        "sender_id": sender.get("id"),
+        "sender_type": sender.get("sender_type"),
+        "create_time": item.get("create_time"),
+        "body": shaped.get("body"),
+    }
+    for key in ("card_image_keys", "card_images_note"):
+        if key in shaped:
+            out[key] = shaped[key]
+    return out
+
+
 def _message(text: str, kind: str) -> dict[str, str]:
     if kind == "markdown":
         post = {"zh_cn": {"content": [[{"tag": "md", "text": text}]]}}
@@ -221,6 +252,30 @@ async def read_messages(args: ReadMessages, call: Call) -> dict[str, Any]:
     if isinstance(data.get("items"), list):
         data = {**data, "items": data["items"][: len(args.message_ids)]}
     return data
+
+
+@tool(
+    "feishu_read_merge_forward",
+    MergeForward,
+    "im.get",
+    "Expand a merge-forwarded chat record into its messages, including image_key and file_key.",
+)
+async def read_merge_forward(args: MergeForward, call: Call) -> dict[str, Any]:
+    data = await call("im.get", path={"message_id": args.message_id}, params=CARD_CONTENT)
+    items = _dicts(data.get("items"))
+    if not items or items[0].get("msg_type") != "merge_forward":
+        return {"error": "not_a_merge_forward"}
+    subs = items[1:]
+    out: dict[str, Any] = {
+        "message_id": args.message_id,
+        "count": min(len(subs), MERGE_FORWARD_LIMIT),
+        "messages": [_sub_message(item) for item in subs[:MERGE_FORWARD_LIMIT]],
+        "download_message_id": args.message_id,
+        "note": MERGE_FORWARD_NOTE,
+    }
+    if len(subs) > MERGE_FORWARD_LIMIT:
+        out["truncated"] = True
+    return out
 
 
 @tool(
@@ -458,6 +513,7 @@ async def edit_message(args: EditMessage, call: Call) -> dict[str, Any]:
 TOOLS = [
     search_messages,
     read_messages,
+    read_merge_forward,
     chat_history,
     send_message,
     reply_message,
