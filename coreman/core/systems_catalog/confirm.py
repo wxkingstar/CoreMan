@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
@@ -732,25 +732,35 @@ def _undelivered_reason(error: str) -> str:
 async def undelivered(session: AsyncSession, now: datetime) -> int:
     """A batch whose latest card the platform refused for good: tell the asker in that chat and
     void the batch, so it can never run and is not mistaken for a later batch of the same writes.
-    Returns how many batches were handled."""
-    rows = (
+    Returns how many batches were handled.
+
+    Found from the failed card in the outbox (its key names the batch); the batch row is read with
+    `session.get`, which also opens a personal assistant's sealed content."""
+    prefixes = [kind.replace("_", "-") + ":" for kind in UNDELIVERED_KINDS]
+    failed = (
         await session.execute(
-            select(InteractionState, OutboxItem.last_error)
-            .join(
-                OutboxItem,
-                (OutboxItem.bot_id == InteractionState.bot_id)
-                & (OutboxItem.dedupe_key == InteractionState.state["card_key"].astext),
-            )
-            .where(
-                InteractionState.kind.in_(UNDELIVERED_KINDS),
-                InteractionState.status.in_(("open", "expired")),
+            select(OutboxItem.dedupe_key, OutboxItem.last_error).where(
                 OutboxItem.status == "failed",
+                OutboxItem.kind == "send",
+                OutboxItem.created_at > now - KEEP,
+                or_(*(OutboxItem.dedupe_key.startswith(prefix) for prefix in prefixes)),
             )
-            .limit(SWEEP_BATCH)
-            .with_for_update(of=InteractionState, skip_locked=True)
         )
     ).all()
-    for state, error in rows:
+    handled = 0
+    for key, error in failed:
+        try:
+            state_id = uuid.UUID(str(key).split(":")[1])
+        except (IndexError, ValueError):
+            continue
+        state = await session.get(InteractionState, state_id, with_for_update=True)
+        if (
+            state is None
+            or state.kind not in UNDELIVERED_KINDS
+            or state.status not in ("open", "expired")
+            or state.state.get("card_key") != key
+        ):
+            continue
         staged = state.state
         count = staged.get("count") or len(staged.get("items") or [])
         chat_id = str(staged.get("chat_id") or "")
@@ -768,7 +778,8 @@ async def undelivered(session: AsyncSession, now: datetime) -> int:
         state.state = {**staged, "undelivered": True}
         state.status = "cancelled"
         state.expires_at = keep_until(state) or now
-    return len(rows)
+        handled += 1
+    return handled
 
 
 async def purge(session: AsyncSession, state: InteractionState) -> None:
