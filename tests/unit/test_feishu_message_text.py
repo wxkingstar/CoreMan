@@ -250,3 +250,31 @@ def test_hostile_nesting_and_oversize_never_raise(kind: str) -> None:
     out = mt.item_text(item(kind, huge))
     assert isinstance(out, str) and len(out) <= mt.LIMIT
     assert "字字字" not in out
+
+
+MALFORMED = [
+    ("interactive", {"elements": [{"tag": "img_combination", "img_list": 5}]}),
+    ("interactive", {"elements": [{"tag": ["x"]}]}),
+    (
+        "interactive",
+        {"elements": [{"tag": "table", "columns": [{"name": "a"}], "rows": {"x": 1}}]},
+    ),
+    ("interactive", {"elements": [{"tag": "select_static", "options": {"x": 1}}]}),
+    ("post", {"content": 5}),
+]
+
+
+@pytest.mark.parametrize(("kind", "content"), MALFORMED)
+def test_malformed_structures_never_raise(kind: str, content: Any) -> None:
+    assert isinstance(mt.item_text(item(kind, content)), str)
+    assert isinstance(mt.card_image_keys(item(kind, content)), list)
+
+
+def test_a_failing_card_renderer_falls_back_to_the_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_: Any, **__: Any) -> str:
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(mt, "card_text", boom)
+    assert mt.item_text(item("interactive", CARD_1)) == mt.CARD_EMPTY

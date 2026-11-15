@@ -62,14 +62,16 @@ def _images(data: Any) -> tuple[int, list[str]]:
         if isinstance(node, list):
             stack.extend((child, depth + 1) for child in reversed(node))
         elif isinstance(node, dict):
-            if node.get("tag") in _IMAGE_TAGS:
+            tag = node.get("tag")
+            if isinstance(tag, str) and tag in _IMAGE_TAGS:
                 count += 1
                 key = node.get("image_key") or node.get("img_key")
                 if isinstance(key, str) and key:
                     keys.append(key)
                 continue
-            if node.get("tag") == "img_combination":
-                for one in node.get("img_list") or []:
+            if tag == "img_combination":
+                images = node.get("img_list")
+                for one in images if isinstance(images, list) else []:
                     count += 1
                     key = one.get("img_key") if isinstance(one, dict) else None
                     if isinstance(key, str) and key:
@@ -83,7 +85,10 @@ def card_image_keys(item: dict[str, Any]) -> list[str]:
     """卡片里的图片键（去重、保序）；不是卡片或读不出时为空。"""
     if item.get("msg_type") != "interactive":
         return []
-    return list(dict.fromkeys(_images(_content(item))[1]))
+    try:
+        return list(dict.fromkeys(_images(_content(item))[1]))
+    except Exception:  # noqa: BLE001 见 `item_text`
+        return []
 
 
 def without_marker(text: str) -> str:
@@ -92,9 +97,10 @@ def without_marker(text: str) -> str:
 
 
 def _post(data: dict[str, Any]) -> str:
+    lines = data.get("content")
     runs = [
         run
-        for line in data.get("content") or []
+        for line in (lines if isinstance(lines, list) else [])
         if isinstance(line, list)
         for run in line
         if isinstance(run, dict)
@@ -124,6 +130,16 @@ def _card(data: Any) -> str:
 
 def item_text(item: dict[str, Any]) -> str:
     """一条飞书消息的可读文字；任何内容都不抛错，最长 `LIMIT` 个字符。"""
+    try:
+        return _item_text(item)
+    except Exception:  # noqa: BLE001
+        # 内容是第三方发来的任意 JSON，轮询的每条消息都会走到这里：抛错会让一位助理的盯消息
+        # 卡在同一条上；平台层 `card_text` 对畸形结构本身就会抛 KeyError / TypeError。
+        kind = str(item.get("msg_type") or "") if isinstance(item, dict) else ""
+        return CARD_EMPTY if kind == "interactive" else f"[{kind or '未知类型'}消息]"
+
+
+def _item_text(item: dict[str, Any]) -> str:
     kind = str(item.get("msg_type") or "")
     data = _content(item)
     if kind == "text" and isinstance(data, dict):
