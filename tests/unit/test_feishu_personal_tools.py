@@ -95,7 +95,10 @@ async def test_search_enriches_only_valid_bounded_message_ids(upstream):
         {"items": [{"body": {"content": "hello"}, "access_token": "secret"}]},
     ]
     result = await invoke("feishu_search_messages", {"limit": 2})
-    assert upstream.call_args.kwargs["params"] == {"message_ids": ["om_1"]}
+    assert upstream.call_args.kwargs["params"] == {
+        "message_ids": ["om_1"],
+        "card_msg_content_type": "user_card_content",
+    }
     assert result["messages"] == [{"body": {"content": "hello"}}]
     assert result["has_more"] is True and result["page_token"] == "next"
     assert result["content_trust"] == "external_untrusted_data"

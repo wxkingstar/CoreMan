@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Any
 
 from coreman.core.assistants.approvals import catalog
 from coreman.core.assistants.approvals.content import Facts
+from coreman.core.feishu_personal.endpoints import CARD_CONTENT
+from coreman.core.feishu_personal.message_text import item_text
 from coreman.core.feishu_personal.service import PersonalError
 
 # 重新读会话时取最近多少条；锚点比这更早就算过期。
@@ -72,25 +73,7 @@ class ChatView:
 
 
 def _text(item: dict[str, Any]) -> str:
-    kind = str(item.get("msg_type") or "")
-    body = item.get("body")
-    raw = body.get("content") if isinstance(body, dict) else None
-    try:
-        data = json.loads(raw) if isinstance(raw, str) else None
-    except ValueError:
-        data = None
-    if kind == "text" and isinstance(data, dict):
-        return str(data.get("text") or "")
-    if kind == "post" and isinstance(data, dict):
-        runs = [
-            str(run.get("text") or "")
-            for line in data.get("content") or []
-            if isinstance(line, list)
-            for run in line
-            if isinstance(run, dict)
-        ]
-        return " ".join(part for part in [str(data.get("title") or ""), *runs] if part)
-    return f"[{kind or '未知类型'}消息]"
+    return item_text(item)
 
 
 def mentioned(item: dict[str, Any]) -> frozenset[str]:
@@ -135,6 +118,7 @@ async def chat_view(call: Reader, chat_id: str, thread_id: str | None = None) ->
             "container_id": thread_id or chat_id,
             "sort_type": "ByCreateTimeDesc",
             "page_size": RECENT,
+            **CARD_CONTENT,
         },
     )
     items = [parse(item) for item in data.get("items") or [] if isinstance(item, dict)]
@@ -145,7 +129,7 @@ async def chat_view(call: Reader, chat_id: str, thread_id: str | None = None) ->
 async def message(call: Reader, message_id: str) -> Message | None:
     """按编号取一条消息；读不到（不存在、不可见）返回 None。"""
     try:
-        data = await call("im.mget", params={"message_ids": [message_id]})
+        data = await call("im.mget", params={"message_ids": [message_id], **CARD_CONTENT})
     except PersonalError as exc:
         if exc.code != "feishu_read_failed":
             raise

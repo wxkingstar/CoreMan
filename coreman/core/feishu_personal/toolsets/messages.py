@@ -7,6 +7,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, ValidationError, model_validator
 
+from coreman.core.feishu_personal.endpoints import CARD_CONTENT
+from coreman.core.feishu_personal.message_text import (
+    CARD_IMAGES_NOTE,
+    card_image_keys,
+    item_text,
+)
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
     Call,
@@ -133,6 +139,26 @@ def _dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _readable(item: Any) -> Any:
+    """卡片消息的原始 JSON 动辄几十 KB：给可读文字与图片键，其余类型原样返回。"""
+    if not isinstance(item, dict) or item.get("msg_type") != "interactive":
+        return item
+    body = item.get("body")
+    return {
+        **item,
+        "body": {**(body if isinstance(body, dict) else {}), "content": item_text(item)},
+        "card_image_keys": card_image_keys(item),
+        "card_images_note": CARD_IMAGES_NOTE,
+    }
+
+
+def _readable_items(data: dict[str, Any]) -> dict[str, Any]:
+    items = data.get("items")
+    return (
+        {**data, "items": [_readable(item) for item in items]} if isinstance(items, list) else data
+    )
+
+
 def _message(text: str, kind: str) -> dict[str, str]:
     if kind == "markdown":
         post = {"zh_cn": {"content": [[{"tag": "md", "text": text}]]}}
@@ -172,7 +198,11 @@ async def search_messages(args: SearchMessages, call: Call) -> dict[str, Any]:
             ids.extend(ReadMessages(message_ids=[candidate]).message_ids)
         except ValidationError:
             continue
-    messages = await call("im.mget", params={"message_ids": ids}) if ids else {}
+    messages = (
+        _readable_items(await call("im.mget", params={"message_ids": ids, **CARD_CONTENT}))
+        if ids
+        else {}
+    )
     return {
         "messages": messages.get("items", [])[: args.limit],
         "has_more": bool(found.get("has_more")),
@@ -182,7 +212,9 @@ async def search_messages(args: SearchMessages, call: Call) -> dict[str, Any]:
 
 @tool("feishu_read_messages", ReadMessages, "im.mget", "Read up to 20 accessible messages by ID.")
 async def read_messages(args: ReadMessages, call: Call) -> dict[str, Any]:
-    data = await call("im.mget", params={"message_ids": args.message_ids})
+    data = _readable_items(
+        await call("im.mget", params={"message_ids": args.message_ids, **CARD_CONTENT})
+    )
     if isinstance(data.get("items"), list):
         data = {**data, "items": data["items"][: len(args.message_ids)]}
     return data
@@ -196,14 +228,17 @@ async def read_messages(args: ReadMessages, call: Call) -> dict[str, Any]:
 )
 async def chat_history(args: ChatHistory, call: Call) -> dict[str, Any]:
     times = {"start_time": args.start_time, "end_time": args.end_time}
-    return await call(
-        "im.history",
-        params={
-            **page(args),
-            **{key: str(value) for key, value in times.items() if value is not None},
-            "container_id_type": "chat",
-            "container_id": args.chat_id,
-        },
+    return _readable_items(
+        await call(
+            "im.history",
+            params={
+                **page(args),
+                **{key: str(value) for key, value in times.items() if value is not None},
+                "container_id_type": "chat",
+                "container_id": args.chat_id,
+                **CARD_CONTENT,
+            },
+        )
     )
 
 

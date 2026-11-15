@@ -2,6 +2,7 @@
 
 import base64
 import email
+import json
 from email import policy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1174,3 +1175,72 @@ async def test_list_reactions_sends_one_batch_query_and_keeps_only_the_essential
 async def test_list_reactions_rejects_bad_message_ids(upstream, ids):
     out = await invoke("feishu_list_reactions", {"message_ids": ids})
     assert "error" in out and not upstream.call_args_list
+
+
+CARD = {
+    "schema": "2.0",
+    "header": {"title": {"tag": "plain_text", "content": "周报"}},
+    "body": {
+        "elements": [
+            {"tag": "markdown", "content": "张三本周完成了三件事"},
+            {"tag": "img", "img_key": "img_v3_a"},
+        ]
+    },
+}
+
+
+def _with_card(upstream):
+    card = {
+        "message_id": "om_card",
+        "msg_type": "interactive",
+        "body": {"content": json.dumps(CARD, ensure_ascii=False)},
+    }
+    text = {"message_id": "om_text", "msg_type": "text", "body": {"content": '{"text": "hi"}'}}
+
+    async def call(session, cipher, scope, method, path, **kwargs):
+        if path in ("/im/v1/messages", "/im/v1/messages/mget"):
+            return {"items": [card, text]}
+        if path == "/im/v1/messages/search":
+            return {"items": [{"message_id": "om_card"}]}
+        return {"items": []}
+
+    upstream.side_effect = call
+
+
+def _assert_readable(items):
+    card, text = items
+    assert card["body"]["content"].startswith("[卡片] 周报 张三本周完成了三件事")
+    assert card["card_image_keys"] == ["img_v3_a"]
+    assert "无法下载" in card["card_images_note"]
+    assert "schema" not in str(card)
+    assert text == {
+        "message_id": "om_text",
+        "msg_type": "text",
+        "body": {"content": '{"text": "hi"}'},
+    }
+
+
+async def test_reading_messages_asks_for_card_content_and_returns_readable_text(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_read_messages", {"message_ids": ["om_card", "om_text"]})
+    ((_, path, kw),) = calls(upstream)
+    assert path == "/im/v1/messages/mget"
+    assert kw["params"]["card_msg_content_type"] == "user_card_content"
+    _assert_readable(out["items"])
+
+
+async def test_chat_history_asks_for_card_content_and_returns_readable_text(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_chat_history", {"chat_id": "oc_1"})
+    ((_, path, kw),) = calls(upstream)
+    assert path == "/im/v1/messages"
+    assert kw["params"]["card_msg_content_type"] == "user_card_content"
+    _assert_readable(out["items"])
+
+
+async def test_searching_messages_fetches_content_with_card_content(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_search_messages", {"query": "周报"})
+    paths = {path: kw for _, path, kw in calls(upstream)}
+    assert paths["/im/v1/messages/mget"]["params"]["card_msg_content_type"] == "user_card_content"
+    assert out["messages"][0]["card_image_keys"] == ["img_v3_a"]
