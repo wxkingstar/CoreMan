@@ -45,6 +45,8 @@ MAX_ITEMS = 50
 MAX_VALUE = 500
 # Items after this many characters are listed by operation and path only.
 CARD_TEXT_MAX = 12_000
+# Feishu refuses a card over 30 KB of JSON; a longer card is shortened step by step.
+CARD_BYTES_MAX = 28_000
 # The summary at the top of the card: short values, the first few changes of each item.
 SHOW_MAX = 80
 SHOW_CHANGES = 3
@@ -63,6 +65,10 @@ UNAVAILABLE = (
 BATCH_FULL = (
     f"一次最多确认 {MAX_ITEMS} 个写操作，这一个没有加入。更多的修改请让用户在业务系统里用批量"
     "导入或批量编辑完成，不要拆成多轮逐条提交。"
+)
+BATCH_TOO_LONG = (
+    "这批写操作的内容已经放不进一张确认卡，这一个没有加入。先结束本轮让用户确认已暂存的部分，"
+    "剩下的请用户另发一条消息再做。"
 )
 
 
@@ -169,6 +175,7 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
     if len(items) >= MAX_ITEMS:
         await session.commit()
         return {"error": "confirmation_batch_full", "message": BATCH_FULL}
+    staged = len(items)
     items.append(
         {
             "system": p.system.key,
@@ -190,6 +197,9 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
             "digest": digest,
         }
     )
+    if staged and not fits(items):
+        await session.commit()
+        return {"error": "confirmation_batch_full", "message": BATCH_TOO_LONG}
     sealed = {
         "origin_task_id": member.task_id,
         "user_id": str(member.user.id),
@@ -258,8 +268,11 @@ def _change(change: dict[str, Any]) -> str | None:
     return f"{field}：{_plain(before)} → {_plain(after)}"
 
 
-def _summary_lines(index: int, item: dict[str, Any], *, numbered: bool) -> list[str]:
-    """What the member decides on: the operation, the object and the values that change."""
+def _summary_lines(
+    index: int, item: dict[str, Any], *, numbered: bool, brief: bool = False
+) -> list[str]:
+    """What the member decides on: the operation, the object and the values that change.
+    `brief` keeps the operation and its object only, for batches too long for one card."""
     # A single item's name is the card title already; only its warning is repeated.
     if numbered:
         lines = [headline(index, item)]
@@ -269,6 +282,8 @@ def _summary_lines(index: int, item: dict[str, Any], *, numbered: bool) -> list[
     note = item.get("note") or {}
     if note.get("target"):
         lines.append(f"{indent}对象：{_plain(note['target'])}")
+    if brief:
+        return lines
     changes = [line for change in note.get("changes") or [] if (line := _change(change))]
     lines += [indent + line for line in changes[:SHOW_CHANGES]]
     if len(changes) > SHOW_CHANGES:
@@ -281,12 +296,12 @@ def _summary_lines(index: int, item: dict[str, Any], *, numbered: bool) -> list[
     return lines
 
 
-def summary_text(items: list[dict[str, Any]]) -> str:
+def summary_text(items: list[dict[str, Any]], *, brief: bool = False) -> str:
     numbered = len(items) > 1
     return "\n".join(
         line
         for index, item in enumerate(items, 1)
-        for line in _summary_lines(index, item, numbered=numbered)
+        for line in _summary_lines(index, item, numbered=numbered, brief=brief)
     )
 
 
@@ -326,21 +341,49 @@ def _size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MB"
 
 
-def card_text(items: list[dict[str, Any]]) -> str:
+def card_text(items: list[dict[str, Any]], *, full: bool = True) -> str:
     """The exact requests, rendered from what was staged, never from model-written text alone.
-    JSON keeps each value on one line, so a value cannot forge another item."""
+    JSON keeps each value on one line, so a value cannot forge another item. Without `full`
+    every item shows only its endpoint and path parameters."""
     rows: list[str] = []
     size = 0
     for index, item in enumerate(items, 1):
-        text = "\n".join(_detail_lines(index, item, full=True))
-        if size + len(text) > CARD_TEXT_MAX:
+        text = "\n".join(_detail_lines(index, item, full=full))
+        if full and size + len(text) > CARD_TEXT_MAX:
             text = "\n".join(_detail_lines(index, item, full=False))
         rows.append(text)
         size += len(text)
     return "\n".join(rows)
 
 
+def _bytes(body: dict[str, Any]) -> int:
+    return len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
+
+
 def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """The confirmation card, shortened until it fits: first the request details lose their
+    bodies, then the summary keeps only each operation and its object."""
+    body: dict[str, Any] = {}
+    for full, brief in ((True, False), (False, False), (False, True)):
+        body = _card(origin_task_id, state_id, items, full=full, brief=brief)
+        if _bytes(body) <= CARD_BYTES_MAX:
+            break
+    return body
+
+
+def fits(items: list[dict[str, Any]]) -> bool:
+    """The batch still fits one card once shortened as far as `card` goes."""
+    return _bytes(card(0, uuid.UUID(int=0), items)) <= CARD_BYTES_MAX
+
+
+def _card(
+    origin_task_id: int,
+    state_id: uuid.UUID,
+    items: list[dict[str, Any]],
+    *,
+    full: bool,
+    brief: bool,
+) -> dict[str, Any]:
     def button(label: str, verb: str, kind: str) -> dict[str, Any]:
         return {
             "tag": "button",
@@ -372,7 +415,10 @@ def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) 
         "body": {
             "elements": [
                 # Values come from the conversation: plain text, so no @mention or link fires.
-                {"tag": "div", "text": {"tag": "plain_text", "content": summary_text(items)}},
+                {
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": summary_text(items, brief=brief)},
+                },
                 {
                     "tag": "collapsible_panel",
                     "expanded": False,
@@ -385,7 +431,7 @@ def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) 
                             "tag": "div",
                             "text": {
                                 "tag": "plain_text",
-                                "content": card_text(items),
+                                "content": card_text(items, full=full),
                                 "text_size": "notation",
                             },
                         }
