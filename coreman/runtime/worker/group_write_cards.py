@@ -19,6 +19,7 @@ from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.feishu_personal.tools import TOOLS
+from coreman.core.systems_catalog.context import carried
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.personal_cards import group_card_scope
@@ -152,7 +153,7 @@ async def _resume(session: AsyncSession, origin: Task, state: InteractionState, 
             inbound_event_id=origin.inbound_event_id,
             dedupe_key=f"feishu-group-write:{state.id}:resume",
             payload={
-                **{k: v for k, v in origin.payload.items() if k != resume.PAYLOAD_KEY},
+                **carried(origin.payload, resume.PAYLOAD_KEY),
                 confirm.RESULT_KEY: note,
                 "serialize_session": True,
                 # 用户刚点完确认卡，不再问「还要不要做」。

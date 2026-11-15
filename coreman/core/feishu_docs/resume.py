@@ -16,6 +16,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, FeishuAuthWait, FeishuPersonalGrant, Task
 from coreman.core.feishu_personal import inflow, policy, service
 from coreman.core.feishu_personal.service import PersonalError
+from coreman.core.systems_catalog.context import carried
 
 AWAIT_TTL = inflow.WAIT_TTL
 BATCH = 20
@@ -108,7 +109,7 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
                 inbound_event_id=origin.inbound_event_id,
                 dedupe_key=f"feishu-auth:{row.id}:resume",
                 payload={
-                    **{k: v for k, v in origin.payload.items() if k != CONFIRM_RESULT_KEY},
+                    **carried(origin.payload, CONFIRM_RESULT_KEY),
                     PAYLOAD_KEY: str(row.id),
                     # 来源那一轮可能还没结束：同一会话串行，等它收尾再续接。
                     "serialize_session": True,
