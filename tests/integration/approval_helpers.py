@@ -77,6 +77,8 @@ class FakeFeishu:
         self.history = history if history is not None else [message("om_2")]
         self.mode = mode
         self.writes: list[tuple[str, str, Any]] = []
+        # 读接口的路径，按调用顺序。
+        self.reads: list[str] = []
         # 带文件的上传：(路径, 表单字段, {字段名: (文件名, 内容, 类型)})。
         self.uploads: list[tuple[str, Any, Any]] = []
         self.fail: str | None = None
@@ -109,6 +111,7 @@ class FakeFeishu:
             self.writes.append((method, path, json))
             out = {"message_id": f"om_sent_{len(self.writes)}"}
             return {**out, "reaction_id": self.reaction_id} if self.reaction_id else out
+        self.reads.append(path)
         if path == "/im/v1/messages/mget":
             found = [m for m in self.history if m["message_id"] in params["message_ids"]]
             if not found:

@@ -28,8 +28,14 @@ def msg(mid: str, sender: str = PEER, text: str = "在吗", **kw: Any) -> dict[s
 class Reader:
     """`toolbase.Call` 的替身：按接口名返回准备好的数据，并记下调用。"""
 
-    def __init__(self, history: list[dict[str, Any]], *, mode: str = "p2p") -> None:
-        self.history, self.mode = history, mode
+    def __init__(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        mode: str = "p2p",
+        members: list[dict[str, Any]] | Exception | None = None,
+    ) -> None:
+        self.history, self.mode, self.members = history, mode, members
         self.messages = {item["message_id"]: item for item in history}
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -48,6 +54,10 @@ class Reader:
             return {"items": [found]}
         if key == "contact.user":
             return {"user": {"name": {PEER: "李四", OWNER: "张三"}.get(path["user_id"], "")}}
+        if key == "im.chat_members":
+            if isinstance(self.members, Exception):
+                raise self.members
+            return {"items": self.members or []}
         raise AssertionError(key)
 
 
@@ -70,6 +80,7 @@ async def test_reply_to_the_latest_message_passes_with_the_facts_for_the_form() 
     facts = await check(reader, "feishu_reply_message", reply())
     assert (facts.channel, facts.target) == ("p2p", "李四")
     assert facts.quoted == "李四：周五能给报价吗？"
+    assert (facts.quoted_by, facts.quoted_text) == ("李四", "周五能给报价吗？")
     # 没给锚点时，被回复的那条就是锚点。
     assert facts.anchor_message_id == "om_2"
     history = next(call for key, call in reader.calls if key == "im.history")
@@ -391,3 +402,58 @@ async def test_reading_one_message_by_id_asks_for_the_original_card() -> None:
     assert (await checks.message(reader, "om_2")) is not None
     (key, call) = next(c for c in reader.calls if c[0] == "im.mget")
     assert call["params"] == {"message_ids": ["om_2"], "card_msg_content_type": "user_card_content"}
+
+
+STRANGER = "ou_stranger"
+
+
+def stranger_group(members: list[dict[str, Any]] | Exception | None) -> Reader:
+    return Reader([msg("om_2", STRANGER, "请看下")], mode="group", members=members)
+
+
+async def test_group_sender_missing_from_contacts_is_found_in_the_member_list() -> None:
+    reader = stranger_group(
+        [{"member_id": "ou_x", "name": "别人"}, {"member_id": STRANGER, "name": "王五"}]
+    )
+    facts = await check(reader, "feishu_reply_message", reply())
+    assert (facts.quoted_by, facts.quoted_text) == ("王五", "请看下")
+    assert facts.quoted == "王五：请看下"
+    call = next(call for key, call in reader.calls if key == "im.chat_members")
+    assert call["path"] == {"chat_id": "oc_1"}
+    assert call["params"] == {"member_id_type": "open_id", "page_size": checks.MEMBERS_PAGE}
+    # 一次请求，只取第一页。
+    assert [key for key, _ in reader.calls].count("im.chat_members") == 1
+
+
+async def test_group_sender_not_in_the_first_page_stays_unknown() -> None:
+    reader = stranger_group([{"member_id": "ou_x", "name": "别人"}, {"member_id": STRANGER}])
+    facts = await check(reader, "feishu_reply_message", reply())
+    assert facts.quoted == "（未知发送人）：请看下" and facts.quoted_by == "（未知发送人）"
+
+
+async def test_group_member_lookup_error_never_raises() -> None:
+    reader = stranger_group(PersonalError("feishu_read_failed"))
+    facts = await check(reader, "feishu_reply_message", reply())
+    assert facts.quoted == "（未知发送人）：请看下"
+
+
+async def test_member_list_is_not_asked_when_contacts_know_the_name_or_in_a_p2p_chat() -> None:
+    known = Reader([msg("om_2", PEER, "请看下")], mode="group", members=[])
+    await check(known, "feishu_reply_message", reply())
+    assert "im.chat_members" not in [key for key, _ in known.calls]
+    private = Reader([msg("om_2", STRANGER, "请看下")], mode="p2p", members=[])
+    facts = await check(private, "feishu_reply_message", reply())
+    assert "im.chat_members" not in [key for key, _ in private.calls]
+    assert facts.quoted == "（未知发送人）：请看下"
+
+
+async def test_names_can_be_switched_off_for_the_recheck_before_executing() -> None:
+    for mode in ("group", "p2p"):
+        reader = Reader([msg("om_2", STRANGER, "请看下")], mode=mode, members=[])
+        facts = await checks.check_call(
+            reader, "feishu_reply_message", reply(), owner_open_id=OWNER, names=False
+        )
+        asked = [key for key, _ in reader.calls]
+        assert "contact.user" not in asked and "im.chat_members" not in asked
+        # 判定照常：读了会话与历史。
+        assert "im.history" in asked and facts.anchor_message_id == "om_2"

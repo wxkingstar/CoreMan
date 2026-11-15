@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import approvals, keys
-from coreman.core.assistants.approvals import attachments, service, tower
+from coreman.core.assistants.approvals import attachments, richtext, service, tower
 from coreman.core.db.models import AssistantApproval
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolsets import files as file_tools
@@ -84,8 +84,12 @@ async def test_write_is_staged_sealed_and_submitted_not_executed(
     assert sent["requester"] == owner.login_name and sent["caller"] == bot.bot_key
     assert sent["external_id"] == row.external_id == "cm-pa-" + row.id.hex
     assert sent["abstract"] == "私聊 → 李四" and SECRET not in sent["abstract"]
-    assert "│ 李四：周五能给报价吗？" in sent["content"] and f"│ {TEXT}" in sent["content"]
-    assert "背景：\n│ 他上周问过" in sent["content"]
+    # 正文是富文本版式（以前缀开头）：原话灰字、要发出的话放大、助理的说明在内容框里，且逐字符转义。
+    assert sent["content"].startswith(richtext.PREFIX)
+    assert '<font color="grey">回复 李四：周五能给报价吗？</font>' in sent["content"]
+    assert f"\n### {richtext.inert(TEXT)}\n" in sent["content"]
+    assert "#### 背景\n> [!PANEL]\n> 他上周问过" in sent["content"]
+    assert "#### 做过的调研\n> [!PANEL]\n> 查了报价表" in sent["content"]
     # 请求体是暂存参数的规范化形式，哈希按它算。
     assert sent["body"] == tower.request_body("feishu_reply_message", row.args_enc["calls"])
     assert row.request_hash == tower.request_hash(CFG, row.external_id, sent["body"], bot.bot_key)
@@ -239,7 +243,10 @@ async def test_same_text_to_several_chats_is_one_approval(
     assert row is not None and row.args_enc is not None
     assert [c["chat_id"] for c in row.args_enc["calls"]] == ["oc_li", "oc_wang"]
     assert row.args_enc["calls"][1]["arguments"]["uuid"] == "b"
-    assert len(fake.submitted) == 1 and "对象（2 个会话）" in fake.submitted[0]["content"]
+    assert len(fake.submitted) == 1
+    merged = fake.submitted[0]["content"]
+    assert merged.startswith(richtext.PREFIX) and "### 明早九点开会" in merged
+    assert merged.count("｜最近一条 ") == 2 and "其他参数" not in merged
     # 最多合并 10 个会话；别的工具不能合并；同一个会话不能出现两次。
     many = [{"receive_id": f"oc_{i}", "uuid": f"u{i}"} for i in range(10)]
     too_many = {**arguments, "approval": {"chat_id": "oc_li", "more_recipients": many}}
@@ -342,8 +349,8 @@ async def test_file_write_copies_the_upload_into_the_temporary_bucket(
     stored = str(await raw(db_session, STORED, id=row.id))
     assert key not in stored and "报价单" not in stored and digest not in stored
     sent = fake.submitted[0]
-    assert f'- "报价单.pdf"（application/pdf，{len(content)} B）' in sent["content"]
-    assert f"https://tmp.example.com/{key}?expires=259200" in sent["content"]
+    link = f"[查看附件 1](https://tmp.example.com/{key}?expires=259200)"
+    assert f"报价单\\.pdf（application\\/pdf，{len(content)} B） {link}" in sent["content"]
     # 被批准的是这份内容：请求体里是文件名、大小与哈希，没有对象名。
     assert json.loads(sent["body"]) == {
         "tool": "feishu_save_to_drive",
@@ -399,7 +406,8 @@ async def test_mail_attachments_and_chat_files_are_staged_too(
         relay,
     )
     assert sent["status"] == "pending_approval" and len(bucket.objects) == 3
-    assert "渠道：私聊\n对象：李四" in fake.submitted[1]["content"]
+    assert "动作：发送文件" in fake.submitted[1]["content"]
+    assert fake.submitted[1]["content"].startswith(richtext.PREFIX)
 
 
 async def test_file_writes_fail_closed(
