@@ -556,6 +556,8 @@ async def run_tick(
         "stale_leases": await _run(factory, release_stale_leases, now),
         "dead_instances": await _run(factory, mark_dead_instances, now),
         "outbox_attempts_recovered": await _run(factory, recover_outbox_attempts, now),
+        # 写操作确认卡被飞书拒收：告诉提问人没有执行，并作废那一批。
+        "confirm_cards_undelivered": await _run(factory, systems_confirm.undelivered, now),
     }
 
 

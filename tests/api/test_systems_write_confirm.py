@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.bus import tasks
+from coreman.core.bus import outbox, tasks
 from coreman.core.db.models import (
     BotSystemGrant,
     BusinessSystem,
@@ -438,3 +438,27 @@ async def test_write_needs_the_grant_before_staging(client, app, db_session, fak
     (out,) = await stage(client, app, task, user, draft("SKU-1"))
     assert out["error"] == "write_not_allowed"
     assert not await db_session.scalar(select(InteractionState.id))
+
+
+async def test_a_refused_card_tells_the_asker_and_voids_the_batch(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    await stage(client, app, task, user, draft("SKU-1"), draft("SKU-2"))
+    assert await release(app, task)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
+    await outbox.fail(db_session, card.id, "Feishu -2: message too large")
+    assert await confirm.undelivered(db_session, utcnow()) == 1
+    await db_session.commit()
+    state = await batch(db_session)
+    assert state.status == "cancelled" and state.state["undelivered"] is True
+    notice = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"{card.dedupe_key}:undelivered")
+    )
+    assert notice is not None and notice.target == {"chat_id": "oc_private"}
+    text = notice.payload["card"]["body"]["elements"][0]["text"]["content"]
+    assert "2 个写操作没有执行" in text and "大小上限" in text
+    # Handled once; the voided batch cannot run.
+    assert await confirm.undelivered(db_session, utcnow()) == 0
+    result = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
+    assert result in ("expired", "ignored") and posts(fake) == []
