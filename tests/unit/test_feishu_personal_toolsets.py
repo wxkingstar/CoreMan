@@ -18,6 +18,7 @@ SAMPLES = {
     "feishu_search_messages": {},
     "feishu_read_messages": {"message_ids": ["om_1"]},
     "feishu_chat_history": {"chat_id": "oc_1"},
+    "feishu_read_merge_forward": {"message_id": "om_mf"},
     "feishu_send_message": {
         "receive_id": "ou_1",
         "receive_id_type": "open_id",
@@ -205,6 +206,26 @@ def _body(text):
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
 
 
+def _merge_forward():
+    return {
+        "message_id": "om_mf",
+        "msg_type": "merge_forward",
+        "body": {"content": "Merged and Forwarded Message"},
+    }
+
+
+def _sub(message_id, msg_type, content, sender="ou_zhang", sender_type="user"):
+    return {
+        "message_id": message_id,
+        "msg_type": msg_type,
+        "body": {"content": content if isinstance(content, str) else json.dumps(content)},
+        "sender": {"id": sender, "sender_type": sender_type},
+        "create_time": "1700000000000",
+        "upper_message_id": "om_mf",
+        "chat_id": "oc_1",
+    }
+
+
 def _upstream(method, path, params=None):
     if path.endswith("/attachments/download_url"):
         ids = (params or {}).get("attachment_ids") or []
@@ -236,6 +257,8 @@ def _upstream(method, path, params=None):
         return {
             "message": {"subject": "Hi", "body_html": "<b>x</b>", "body_plain_text": _body("hello")}
         }
+    if path == "/im/v1/messages/om_mf":
+        return {"items": [_merge_forward(), _sub("om_s1", "text", {"text": "你好"})]}
     if path == "/im/v1/messages/reactions/batch_query":
         return {
             "success_msg_reaction_details": [
@@ -387,6 +410,7 @@ def test_listing_follows_the_saved_tier_and_granted_permissions():
         "feishu_search_messages",
         "feishu_read_messages",
         "feishu_chat_history",
+        "feishu_read_merge_forward",
         "feishu_list_reactions",
         "feishu_list_chats",
         "feishu_message_read_users",
@@ -1261,3 +1285,72 @@ async def test_a_card_without_images_carries_no_image_note(upstream):
     out = await invoke("feishu_read_messages", {"message_ids": ["om_c"]})
     [item] = out["items"]
     assert item["card_image_keys"] == [] and "card_images_note" not in item
+
+
+async def _expand(upstream, items, args=None):
+    async def call(session, cipher, scope, method, path, **kwargs):
+        return {"items": items}
+
+    upstream.side_effect = call
+    return await invoke("feishu_read_merge_forward", args or {"message_id": "om_mf"})
+
+
+async def test_read_merge_forward_expands_sub_messages_with_the_top_level_id_for_downloads(
+    upstream,
+):
+    post = {"title": "", "content": [[{"tag": "img", "image_key": "img_post"}]]}
+    items = [
+        _merge_forward(),
+        _sub("om_a", "text", {"text": "李四说的话"}),
+        _sub("om_b", "post", post, sender="cli_bot", sender_type="app"),
+        _sub("om_c", "image", {"image_key": "img_key_1"}),
+        _sub("om_d", "file", {"file_key": "file_key_1", "file_name": "报告.pdf"}),
+        _sub("om_e", "interactive", CARD),
+    ]
+    out = await _expand(upstream, items)
+    ((method, path, kw),) = calls(upstream)
+    assert (method, path) == ("GET", "/im/v1/messages/om_mf")
+    assert kw["params"]["card_msg_content_type"] == "user_card_content"
+    assert out["message_id"] == "om_mf" and out["download_message_id"] == "om_mf"
+    assert out["count"] == 5 and "truncated" not in out
+    assert "feishu_download_message_file" in out["note"] and "download_message_id" in out["note"]
+    text, bundle, image, file, card = out["messages"]
+    assert (text["message_id"], text["msg_type"], text["sender_id"]) == ("om_a", "text", "ou_zhang")
+    assert text["sender_type"] == "user" and text["create_time"] == "1700000000000"
+    assert bundle["sender_type"] == "app" and "img_post" in bundle["body"]["content"]
+    assert json.loads(image["body"]["content"]) == {"image_key": "img_key_1"}
+    assert "file_key_1" in file["body"]["content"]
+    assert card["body"]["content"].startswith("[卡片·含 1 张图] 周报 张三本周完成了三件事")
+    assert card["card_image_keys"] == ["img_v3_a"] and "无法下载" in card["card_images_note"]
+    assert "schema" not in str(card)
+
+
+async def test_read_merge_forward_caps_the_sub_messages_at_one_hundred(upstream):
+    subs = [_sub(f"om_{i}", "text", {"text": str(i)}) for i in range(101)]
+    out = await _expand(upstream, [_merge_forward(), *subs])
+    assert out["count"] == 100 and len(out["messages"]) == 100 and out["truncated"] is True
+    exact = await _expand(upstream, [_merge_forward(), *subs[:100]])
+    assert exact["count"] == 100 and "truncated" not in exact
+
+
+async def test_read_merge_forward_does_not_recurse_into_a_nested_one(upstream):
+    nested = _sub("om_in", "merge_forward", "Merged and Forwarded Message")
+    out = await _expand(upstream, [_merge_forward(), nested])
+    [only] = out["messages"]
+    assert only["msg_type"] == "merge_forward"
+    assert only["body"]["content"] == "Merged and Forwarded Message"
+    assert len(calls(upstream)) == 1
+
+
+@pytest.mark.parametrize(
+    "items", [[], [{"message_id": "om_t", "msg_type": "text", "body": {"content": "{}"}}], ["x"]]
+)
+async def test_read_merge_forward_refuses_anything_that_is_not_a_merge_forward(upstream, items):
+    out = await _expand(upstream, items)
+    assert out["error"] == "not_a_merge_forward" and "messages" not in out
+
+
+@pytest.mark.parametrize("message_id", ["", "om 1", "../x"])
+async def test_read_merge_forward_rejects_bad_message_ids(upstream, message_id):
+    out = await invoke("feishu_read_merge_forward", {"message_id": message_id})
+    assert "error" in out and not upstream.call_args_list

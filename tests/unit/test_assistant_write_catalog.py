@@ -138,3 +138,37 @@ def test_listing_reactions_is_a_read_that_asks_for_no_new_permission() -> None:
     assert not catalog.is_write("feishu_list_reactions")
     assistant = SimpleNamespace(kind="assistant", id=1)
     assert not write_fuse.blocked(assistant, item.kind)  # type: ignore[arg-type]
+
+
+def test_expanding_a_merge_forward_is_a_read_that_asks_for_no_new_permission(monkeypatch) -> None:
+    """单条取消息（展开合并转发）复用读消息的权限：清单不变，已授权的人不用重新授权。"""
+    item = endpoints.ENDPOINTS["im.get"]
+    assert item.method == "GET" and item.kind == "read"
+    assert item.scopes == ("im:message:readonly", "im:message")
+    assert endpoints.manifest_scopes() == frozenset(
+        {
+            s
+            for key, e in endpoints.ENDPOINTS.items()
+            if key != "im.get"
+            for s in (e.scopes[0], *e.also)
+        }
+        | endpoints.EXTRA_SCOPES
+    )
+    with_it = {
+        level: endpoints.request_scopes(level, {"im:message:readonly"})
+        for level in ("messages_readonly", "all_except_send", "all")
+    }
+    for level in with_it:
+        assert endpoints.denied(item, level, permissions.MESSAGE_SCOPES) is None
+    # 没有这个接口时授权请求的权限一样：它没有多要任何一项。
+    with monkeypatch.context() as patch:
+        patch.delitem(endpoints.ENDPOINTS, "im.get")
+        for level, scopes in with_it.items():
+            assert endpoints.request_scopes(level, {"im:message:readonly"}) == scopes
+    assert endpoints.denied(item, "no_messages", permissions.MESSAGE_SCOPES) is not None
+    assert endpoints.match("GET", "/im/v1/messages/om_1") is item
+    assert endpoints.match("GET", "/im/v1/messages/mget") is endpoints.ENDPOINTS["im.mget"]
+    # 助理不拦它，写保险丝也放行。
+    assert not catalog.is_write("feishu_read_merge_forward")
+    assistant = SimpleNamespace(kind="assistant", id=1)
+    assert not write_fuse.blocked(assistant, item.kind)  # type: ignore[arg-type]
