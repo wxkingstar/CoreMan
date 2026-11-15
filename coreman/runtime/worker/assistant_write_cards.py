@@ -25,6 +25,7 @@ from coreman.core.config import get_settings
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, User
 from coreman.core.feishu_personal.files import FileRelay
 from coreman.core.systems_catalog import confirm as systems_confirm
+from coreman.core.systems_catalog.context import carried
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.personal_cards import card_owner_scope
@@ -251,7 +252,7 @@ async def _resume(session: AsyncSession, origin: Task, state: InteractionState, 
             inbound_event_id=origin.inbound_event_id,
             dedupe_key=f"assistant-write:{state.id}:resume",
             payload={
-                **{k: v for k, v in origin.payload.items() if k != batch.RESULT_KEY},
+                **carried(origin.payload, batch.RESULT_KEY),
                 batch.RESULT_KEY: note,
                 "serialize_session": True,
                 # 所有者刚点完确认卡，不再问「还要不要做」。

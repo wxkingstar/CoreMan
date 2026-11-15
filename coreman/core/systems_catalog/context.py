@@ -25,6 +25,15 @@ DIRECT_TOKEN_ENV = "SYSTEMS_TOKEN"
 TOKEN_MARGIN_SECONDS = 30
 
 
+def carried(payload: dict[str, Any], *drop: str) -> dict[str, Any]:
+    """A follow-up turn's copy of its origin's payload, without `drop` and this turn's state.
+
+    The budget and cached proxy tokens belong to the origin task: its tokens are sealed to that
+    task id and cannot be opened by another task, and its call counts are not the new turn's.
+    """
+    return {k: v for k, v in payload.items() if k != BUDGET_KEY and k not in drop}
+
+
 @dataclass
 class Context:
     """One verified call: the member, their systems this turn and the task's catalog state.
