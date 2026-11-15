@@ -715,6 +715,62 @@ async def sweep(session: AsyncSession, now: datetime) -> int:
     return len(rows)
 
 
+UNDELIVERED = (
+    "刚才那张写操作确认卡没能发出去（{reason}），这 {count} 个写操作没有执行，以后也不会执行。"
+    "需要的话请再发一条消息，让 AI 员工重新整理后再提交确认。"
+)
+# Batches whose card text is readable here; a personal assistant's sealed batch has its own path.
+UNDELIVERED_KINDS = (KIND, "cloud_write")
+
+
+def _undelivered_reason(error: str) -> str:
+    if "too large" in error.lower():
+        return "内容超过了飞书卡片的大小上限"
+    return "飞书没有接收这条消息"
+
+
+async def undelivered(session: AsyncSession, now: datetime) -> int:
+    """A batch whose latest card the platform refused for good: tell the asker in that chat and
+    void the batch, so it can never run and is not mistaken for a later batch of the same writes.
+    Returns how many batches were handled."""
+    rows = (
+        await session.execute(
+            select(InteractionState, OutboxItem.last_error)
+            .join(
+                OutboxItem,
+                (OutboxItem.bot_id == InteractionState.bot_id)
+                & (OutboxItem.dedupe_key == InteractionState.state["card_key"].astext),
+            )
+            .where(
+                InteractionState.kind.in_(UNDELIVERED_KINDS),
+                InteractionState.status.in_(("open", "expired")),
+                OutboxItem.status == "failed",
+            )
+            .limit(SWEEP_BATCH)
+            .with_for_update(of=InteractionState, skip_locked=True)
+        )
+    ).all()
+    for state, error in rows:
+        staged = state.state
+        count = staged.get("count") or len(staged.get("items") or [])
+        chat_id = str(staged.get("chat_id") or "")
+        if chat_id:
+            text = UNDELIVERED.format(reason=_undelivered_reason(error or ""), count=count)
+            await outbox.add(
+                session,
+                bot_id=state.bot_id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"{staged['card_key']}:undelivered",
+                target={"chat_id": chat_id},
+                payload={"card": notice_card("写操作没有执行", text)},
+            )
+        state.state = {**staged, "undelivered": True}
+        state.status = "cancelled"
+        state.expires_at = keep_until(state) or now
+    return len(rows)
+
+
 async def purge(session: AsyncSession, state: InteractionState) -> None:
     """Delete a batch, and what it keeps outside the row (files of personal assistant writes)."""
     if state.kind == "assistant_write":
