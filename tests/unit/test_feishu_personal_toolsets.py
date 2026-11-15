@@ -1164,6 +1164,7 @@ async def test_list_reactions_sends_one_batch_query_and_keeps_only_the_essential
                     "action_time": "1626086391570",
                 }
             ],
+            "counts": {"OK": "1"},
             "has_more": True,
         }
     ]
@@ -1209,7 +1210,7 @@ def _with_card(upstream):
 
 def _assert_readable(items):
     card, text = items
-    assert card["body"]["content"].startswith("[卡片] 周报 张三本周完成了三件事")
+    assert card["body"]["content"].startswith("[卡片·含 1 张图] 周报 张三本周完成了三件事")
     assert card["card_image_keys"] == ["img_v3_a"]
     assert "无法下载" in card["card_images_note"]
     assert "schema" not in str(card)
@@ -1244,3 +1245,19 @@ async def test_searching_messages_fetches_content_with_card_content(upstream):
     paths = {path: kw for _, path, kw in calls(upstream)}
     assert paths["/im/v1/messages/mget"]["params"]["card_msg_content_type"] == "user_card_content"
     assert out["messages"][0]["card_image_keys"] == ["img_v3_a"]
+
+
+async def test_a_card_without_images_carries_no_image_note(upstream):
+    card = {
+        "message_id": "om_c",
+        "msg_type": "interactive",
+        "body": {"content": json.dumps({"elements": [{"tag": "markdown", "content": "通知"}]})},
+    }
+
+    async def call(session, cipher, scope, method, path, **kwargs):
+        return {"items": [card]}
+
+    upstream.side_effect = call
+    out = await invoke("feishu_read_messages", {"message_ids": ["om_c"]})
+    [item] = out["items"]
+    assert item["card_image_keys"] == [] and "card_images_note" not in item

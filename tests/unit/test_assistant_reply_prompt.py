@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from coreman.core.assistants import reply_prompt
+from coreman.core.assistants.approvals import marks
 from coreman.runtime.worker.chat import personal
 
 
@@ -23,8 +24,14 @@ def test_rules_cover_the_judgements_that_get_drafts_sent_back() -> None:
         "assistant_report",
         "feishu_list_reactions",
         "算他已经处理",
+        "不算他处理过",
+        "assistant_mark_processing",
     ):
         assert phrase in text
+
+
+def test_processing_emoji_in_the_prompt_is_the_one_marks_uses() -> None:
+    assert f"（{marks.PROCESSING_EMOJI}）" in reply_prompt.RULES
 
 
 def test_rules_carry_no_personal_content() -> None:

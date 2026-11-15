@@ -144,12 +144,15 @@ def _readable(item: Any) -> Any:
     if not isinstance(item, dict) or item.get("msg_type") != "interactive":
         return item
     body = item.get("body")
-    return {
+    keys = card_image_keys(item)
+    out = {
         **item,
         "body": {**(body if isinstance(body, dict) else {}), "content": item_text(item)},
-        "card_image_keys": card_image_keys(item),
-        "card_images_note": CARD_IMAGES_NOTE,
+        "card_image_keys": keys,
     }
+    if keys:
+        out["card_images_note"] = CARD_IMAGES_NOTE
+    return out
 
 
 def _readable_items(data: dict[str, Any]) -> dict[str, Any]:
@@ -323,6 +326,12 @@ async def list_reactions(args: ListReactions, call: Call) -> dict[str, Any]:
             "page_size_per_message": 10,
         },
     )
+    counts: dict[Any, dict[str, str]] = {}
+    for entry in _dicts(data.get("success_msg_reaction_counts")):
+        counts[entry.get("message_id")] = {
+            str(one.get("reaction_type")): str(one.get("count"))
+            for one in _dicts(entry.get("reaction_count"))
+        }
     messages: list[dict[str, Any]] = []
     for entry in _dicts(data.get("success_msg_reaction_details")):
         reactions = []
@@ -341,6 +350,7 @@ async def list_reactions(args: ListReactions, call: Call) -> dict[str, Any]:
             {
                 "message_id": entry.get("message_id"),
                 "reactions": reactions,
+                "counts": counts.get(entry.get("message_id"), {}),
                 "has_more": bool(entry.get("has_more")),
             }
         )

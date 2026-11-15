@@ -188,8 +188,7 @@ async def test_a_card_from_someone_is_boxed_as_readable_text_and_read_with_card_
     assert counts["assistant_watch_items"] == 1
     (row,) = await messages(db_session, who)
     text_ = row.summary_enc["text"]  # type: ignore[index]
-    assert text_.startswith("[卡片] ") and "张三的差旅报销待处理" in text_
-    assert "含 1 张图" in text_
+    assert text_.startswith("[卡片·含 1 张图] ") and "张三的差旅报销待处理" in text_
     (hit,) = api.read("oc_li")
     assert hit.params["card_msg_content_type"] == "user_card_content"
 
@@ -740,3 +739,27 @@ async def test_at_most_a_daily_quota_of_owner_said_items_per_local_day(
     api.say("oc_team", "om_4", after(base, 86400 + 100), sender=who.open_id, text="发我一下合同")
     await tick(factory, after(base, 86400 + 120))
     assert [r.message_id for r in await owner_said(db_session, who)] == ["om_1", "om_2", "om_4"]
+
+
+async def test_an_image_only_post_from_the_owner_is_not_boxed_but_one_with_a_sentence_is(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [TEAM]
+    image = {"content": [[{"tag": "img", "image_key": "k1"}]]}
+    both = {"content": [[{"tag": "img", "image_key": "k2"}, {"tag": "text", "text": "周四给你"}]]}
+    for mid, post, sec in (("om_img", image, 10), ("om_both", both, 11)):
+        api.say(
+            "oc_team",
+            mid,
+            after(base, sec),
+            sender=who.open_id,
+            msg_type="post",
+            body={"content": json.dumps(post, ensure_ascii=False)},
+        )
+    await tick(make_session_factory(db_engine), after(base, 30))
+    [said] = await owner_said(db_session, who)
+    assert said.message_id == "om_both"
