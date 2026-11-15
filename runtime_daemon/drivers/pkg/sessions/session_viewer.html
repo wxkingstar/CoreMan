@@ -214,6 +214,9 @@ const statusLabel = document.getElementById('statusLabel');
 const autoLoadHint = document.getElementById('autoLoadHint');
 let streamingEl = null;
 let streamingContent = '';
+let wsHistoryDone = false;
+let historyBuffer = [];
+let replaying = false;
 
 function renderMarkdown(text) {
   try { return marked.parse(text); } catch(e) { return escHtml(text); }
@@ -225,6 +228,7 @@ function connect() {
     return; // Already connected or connecting
   }
   wsHistoryDone = false;
+  historyBuffer = [];
   const ws = new WebSocket(wsUrl);
   currentWs = ws;
   ws.onopen = () => {
@@ -239,17 +243,59 @@ function connect() {
   };
   ws.onmessage = (e) => {
     const ev = JSON.parse(e.data);
-    if (ev.type === 'history_end') {
-      wsHistoryDone = true;
-      return;
-    }
-    // During WS history replay, skip events already rendered from inline data
-    // but render any newer events (arrived between HTTP snapshot and WS subscribe)
+    // The history replay is a full snapshot (a superset of inline data and of
+    // whatever an earlier connection rendered): buffer it and render it once.
     if (!wsHistoryDone) {
-      if (lastInlineTs && ev.timestamp && ev.timestamp <= lastInlineTs) return;
+      if (ev.type === 'history_end') {
+        wsHistoryDone = true;
+        renderHistory(historyBuffer);
+        historyBuffer = [];
+      } else {
+        historyBuffer.push(ev);
+      }
+      return;
     }
     renderEvent(ev);
   };
+}
+
+function deltaText(ev) {
+  const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+  return (data && data.text) || '';
+}
+
+// Merge consecutive deltas so a long answer renders once instead of once per token.
+function coalesce(events) {
+  const out = [];
+  for (const ev of events) {
+    if (ev.type !== 'response_delta' && ev.type !== 'thinking_delta') {
+      out.push(ev);
+      continue;
+    }
+    const prev = out[out.length - 1];
+    if (prev && prev.merged && prev.type === ev.type) {
+      prev.data.text += deltaText(ev);
+    } else {
+      out.push({ type: ev.type, timestamp: ev.timestamp, merged: true, data: { text: deltaText(ev) } });
+    }
+  }
+  return out;
+}
+
+function renderHistory(events) {
+  const stick = userAtBottom;
+  const y = window.scrollY;
+  while (eventsEl.firstChild !== autoLoadHint) eventsEl.firstChild.remove();
+  streamingEl = null;
+  streamingContent = '';
+  replaying = true;
+  try {
+    coalesce(events).forEach(renderEvent);
+  } finally {
+    replaying = false;
+  }
+  if (stick) scrollToBottom();
+  else window.scrollTo(0, y);
 }
 
 function renderEvent(ev) {
@@ -381,19 +427,33 @@ function isAtBottom() {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 150;
 }
 
+function scrollToBottom() {
+  window.scrollTo(0, document.body.scrollHeight);
+  userAtBottom = true;
+  scrollBtn.classList.remove('show');
+}
+
+// Only an upward scroll by the reader stops following; content growing below
+// (or a scroll still catching up) must not.
+let lastScrollY = window.scrollY;
 window.addEventListener('scroll', () => {
-  userAtBottom = isAtBottom();
+  const y = window.scrollY;
+  if (isAtBottom()) userAtBottom = true;
+  else if (y < lastScrollY) userAtBottom = false;
+  lastScrollY = y;
   if (userAtBottom) scrollBtn.classList.remove('show');
 });
 
 scrollBtn.onclick = () => {
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  userAtBottom = true;
   scrollBtn.classList.remove('show');
 };
 
 function autoScroll() {
+  if (replaying) return;
   if (userAtBottom) {
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    scrollToBottom();
   } else {
     scrollBtn.classList.add('show');
   }
@@ -408,25 +468,10 @@ function autoScroll() {
   autoLoadHint.textContent = text;
 })();
 
-// Render initial events from inline data (no WebSocket dependency)
+// Render initial events from inline data (no WebSocket dependency); the
+// connection's history replay later re-renders the same snapshot plus newer events.
 const initialEvents = {{.EventsJSON}};
-initialEvents.forEach(ev => renderEvent(ev));
-
-// After all inline events rendered, force scroll to bottom so userAtBottom stays true
-if (initialEvents.length > 0) {
-  requestAnimationFrame(() => {
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' });
-    userAtBottom = true;
-  });
-}
-
-// Track last inline event timestamp for deduplication with WS history
-const lastInlineTs = initialEvents.length > 0
-  ? initialEvents[initialEvents.length - 1].timestamp || ''
-  : '';
-
-// Track whether WebSocket history replay is done
-let wsHistoryDone = false;
+renderHistory(initialEvents);
 
 connect();
 
