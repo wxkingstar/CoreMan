@@ -445,3 +445,15 @@ async def test_member_list_is_not_asked_when_contacts_know_the_name_or_in_a_p2p_
     facts = await check(private, "feishu_reply_message", reply())
     assert "im.chat_members" not in [key for key, _ in private.calls]
     assert facts.quoted == "（未知发送人）：请看下"
+
+
+async def test_names_can_be_switched_off_for_the_recheck_before_executing() -> None:
+    for mode in ("group", "p2p"):
+        reader = Reader([msg("om_2", STRANGER, "请看下")], mode=mode, members=[])
+        facts = await checks.check_call(
+            reader, "feishu_reply_message", reply(), owner_open_id=OWNER, names=False
+        )
+        asked = [key for key, _ in reader.calls]
+        assert "contact.user" not in asked and "im.chat_members" not in asked
+        # 判定照常：读了会话与历史。
+        assert "im.history" in asked and facts.anchor_message_id == "om_2"

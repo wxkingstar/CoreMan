@@ -150,7 +150,9 @@ async def check_calls(
         return await sent.among(session, assistant_id, message_ids)
 
     for one in calls:
-        await checks.check_call(reader, tool, one, owner_open_id=scope.open_id, ours=ours)
+        await checks.check_call(
+            reader, tool, one, owner_open_id=scope.open_id, ours=ours, names=False
+        )
 
 
 async def fetch(

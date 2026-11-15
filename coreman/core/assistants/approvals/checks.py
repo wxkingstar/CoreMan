@@ -175,7 +175,7 @@ async def _name(call: Reader, open_id: str, group_chat_id: str = "") -> str:
     return await _member_name(call, group_chat_id, open_id)
 
 
-async def _title(call: Reader, view: ChatView, owner_open_id: str) -> str:
+async def _title(call: Reader, view: ChatView, owner_open_id: str, names: bool = True) -> str:
     if view.kind == "group":
         return view.title or "未命名群聊"
     peer = next(
@@ -186,19 +186,22 @@ async def _title(call: Reader, view: ChatView, owner_open_id: str) -> str:
         ),
         "",
     )
-    return await _name(call, peer) or "对方未发言的私聊"
+    return (await _name(call, peer) if names else "") or "对方未发言的私聊"
 
 
-async def _quote(call: Reader, found: Message | None, group_chat_id: str = "") -> Facts:
+async def _quote(
+    call: Reader, found: Message | None, group_chat_id: str = "", names: bool = True
+) -> Facts:
     """被引用那条消息的事实（只填原话相关的字段，调用方补上其余）。"""
     if found is None:
         return Facts("")
-    name = await _name(call, found.sender_id, group_chat_id) or "（未知发送人）"
+    looked = await _name(call, found.sender_id, group_chat_id) if names else ""
+    name = looked or "（未知发送人）"
     return Facts("", quoted=f"{name}：{found.text}", quoted_by=name, quoted_text=found.text)
 
 
 def _group(view: ChatView, found: Message | None) -> str:
-    """要在哪个群的成员里找发送人：只有这条消息就在这个群里时才有。"""
+    """要在哪个群的成员里找发送人：只有读的是群、且这条消息就在这个群里时才有。"""
     if view.kind == "group" and found is not None and found.chat_id:
         return found.chat_id
     return ""
@@ -264,7 +267,12 @@ def _about(item: Message, anchor: Message, owner_open_id: str) -> bool:
 
 
 async def _send(
-    call: Reader, tool: str, one: dict[str, Any], owner_open_id: str, ours: Ours | None
+    call: Reader,
+    tool: str,
+    one: dict[str, Any],
+    owner_open_id: str,
+    ours: Ours | None,
+    names: bool,
 ) -> Facts:
     args, chat_id = one["arguments"], one.get("chat_id")
     if not chat_id:
@@ -293,16 +301,18 @@ async def _send(
         if verdict is not None:
             raise Rejected(verdict)
     quoted = source if source is not None else by_id.get(anchor or "")
-    said = await _quote(call, quoted, _group(view, quoted))
+    said = await _quote(call, quoted, _group(view, quoted), names)
     return replace(
         said,
         channel=view.kind,
-        target=await _title(call, view, owner_open_id),
+        target=await _title(call, view, owner_open_id, names),
         anchor_message_id=anchor,
     )
 
 
-async def _on_message(call: Reader, tool: str, one: dict[str, Any], owner_open_id: str) -> Facts:
+async def _on_message(
+    call: Reader, tool: str, one: dict[str, Any], owner_open_id: str, names: bool
+) -> Facts:
     args, chat_id = one["arguments"], one.get("chat_id")
     if not chat_id:
         raise Rejected("chat_id_required")
@@ -312,11 +322,11 @@ async def _on_message(call: Reader, tool: str, one: dict[str, Any], owner_open_i
     if tool in catalog.OWN_MESSAGE and found.sender_id != owner_open_id:
         raise Rejected("not_own_message")
     view = await chat_view(call, chat_id, one.get("thread_id"))
-    said = await _quote(call, found, _group(view, found))
+    said = await _quote(call, found, _group(view, found), names)
     return replace(
         said,
         channel=view.kind,
-        target=await _title(call, view, owner_open_id),
+        target=await _title(call, view, owner_open_id, names),
         anchor_message_id=found.message_id,
     )
 
@@ -328,20 +338,22 @@ async def check_call(
     *,
     owner_open_id: str,
     ours: Ours | None = None,
+    names: bool = True,
 ) -> Facts:
     """检查一次调用并取回审批单要展示的事实；提交前与执行前用的是同一套。
 
     Args:
         one: `{"arguments": 工具参数, "chat_id": …, "anchor_message_id": …, "thread_id": …}`
         ours: 查哪些消息是平台替所有者发的；给了，这些消息就不算锚点之后的新动静
+        names: 查姓名（通讯录、群成员）；只为审批单展示用。执行前复查用不到，传 False 就不调
 
     Raises:
         Rejected: 不能提交。执行前复查时抛出就记为 `stale`
         PersonalError: 所有者的授权失效等，原样交给调用方
     """
     if tool in catalog.SENDS:
-        return await _send(call, tool, one, owner_open_id, ours)
+        return await _send(call, tool, one, owner_open_id, ours, names)
     if tool in catalog.ON_MESSAGE:
-        return await _on_message(call, tool, one, owner_open_id)
+        return await _on_message(call, tool, one, owner_open_id, names)
     channel = catalog.entry(tool).channel
     return Facts("other" if channel == "message" else channel)

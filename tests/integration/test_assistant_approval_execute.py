@@ -569,3 +569,17 @@ async def test_approved_while_active_still_executes_during_the_stop(
     await db_session.commit()
     assert await run(db_engine, row, task) == "executed"
     assert len(feishu.writes) == 1
+
+
+async def test_the_recheck_before_executing_does_not_look_up_names(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row, task, feishu, _ = await approved(db_session, monkeypatch)
+    # 提交时为了在审批单上写出发送人与对象，查过通讯录。
+    assert any(path.startswith("/contact/") for path in feishu.reads)
+    feishu.reads.clear()
+    assert await run(db_engine, row, task) == "executed"
+    # 执行前复查照样读会话，但姓名只为展示用，不查通讯录也不查群成员。
+    assert feishu.reads and not any(
+        path.startswith("/contact/") or path.endswith("/members") for path in feishu.reads
+    )

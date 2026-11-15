@@ -32,7 +32,12 @@ RULE = "---"
 _VISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 # CommonMark 里能用反斜杠转义的 ASCII 标点，去掉 `&` `<` `>`（它们写成实体）。
 _PUNCT = frozenset("!\"#$%'()*+,-./:;=?@[\\]^_`{|}~")
-_ENTITY = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
+# `&` 后面紧跟一个 WORD JOINER：审批系统在解析之后把 `&amp;` 还原成 `&`，要是后面接着 `lt;`，
+# 还原出来的字符串又会像实体；隔开之后不会。这个字符只会出现在 `&amp;` 之后。
+JOINER = "\u2060"
+_ENTITY = {"&": "&amp;" + JOINER, "<": "&lt;", ">": "&gt;"}
+DROPPED = "（原话过长，未附）"
+CUT = "…（已截断）"
 _LINE_BREAKS = re.compile("\r\n|[\n\r  \x0b\x0c]")
 _SPACES = re.compile(" +")
 # 已经转义好的一行：只有 `inert` 能造出来，版式函数只接受它，传不进原文。
@@ -82,6 +87,11 @@ def cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(limit - 1, 0)] + "…"
 
 
+def cut_plain(text: str, limit: int | None) -> str:
+    """不加省略号的截断（省略号由调用方以平台文字补上）。"""
+    return text if limit is None or len(text) <= limit else text[:limit]
+
+
 def grey(line: Inert) -> str:
     """次要的一行小字。"""
     return f'<font color="grey">{line}</font>'
@@ -90,7 +100,7 @@ def grey(line: Inert) -> str:
 def quote_line(label: str, who: str, text: str, limit: int = 200) -> str:
     """被回复（或最近一条、被操作）那条消息的原话，灰字一行：`回复 张三：原话`。"""
     sender = inert(who)
-    body = inert(cut(text, limit))
+    body = inert(cut(text, limit)) if limit > 0 else (DROPPED if text.strip() else "")
     head = f"{inert(label)} {sender}" if sender else inert(label)
     return grey(const(f"{head}：{body}" if body else head))
 
@@ -98,9 +108,12 @@ def quote_line(label: str, who: str, text: str, limit: int = 200) -> str:
 def chat_line(chat: str, label: str, who: str, text: str, limit: int = 200) -> str:
     """合并发送时每个会话一行：`会话名｜最近一条 张三：原话`；没有可引用的消息时只写会话名。"""
     sender = inert(who)
-    body = inert(cut(text, limit))
-    if not body:
+    if not inert(text):
         return grey(const(f"{inert(chat)}｜暂无可引用的消息"))
+    if limit <= 0:
+        # 会话名是固定的，原话放不下才让位。
+        return grey(const(f"{inert(chat)}｜{DROPPED}"))
+    body = inert(cut(text, limit))
     head = f"{inert(label)} {sender}" if sender else inert(label)
     return grey(const(f"{inert(chat)}｜{head}：{body}"))
 
@@ -115,9 +128,14 @@ def field(label: str, text: str) -> list[str]:
     return [f"**{inert(label)}**", *lines(text)]
 
 
-def panel(title: str, text: str) -> list[str]:
-    """内容框：四级标题加 `[!PANEL]`；一行就是一句话，多行变成列表。"""
-    body = lines(text)
+def panel(title: str, text: str, limit: int | None = None) -> list[str]:
+    """内容框：四级标题加 `[!PANEL]`；一行就是一句话，多行变成列表。
+
+    `limit` 给了且文字更长时，在转义之前截到这么多字，末尾加平台写的「…（已截断）」。
+    """
+    body = lines(cut_plain(text, limit))
+    if limit is not None and len(text) > limit and body:
+        body[-1] = const(body[-1] + CUT)
     rows = [f"> {line}" for line in body] if len(body) == 1 else [f"> - {line}" for line in body]
     return [f"#### {inert(title)}", "> [!PANEL]", *rows]
 

@@ -243,6 +243,9 @@ QUOTE_CAP = 400
 # 缩到这个长度以下就没有意义，改为不附原话。
 QUOTE_MIN = 20
 RICH_NOTE = "以下由助理撰写，供参考，不是将要执行的内容"
+NOTES_DROPPED = "助理的说明过长，未附"
+# 放不下时助理每段说明至少保留的字数。
+NOTE_MIN = 80
 _REPLY = ENTRIES["feishu_reply_message"].action
 _PLAIN = {ENTRIES["feishu_send_message"].action, _REPLY}
 _FORWARD = ENTRIES["feishu_forward_message"].action
@@ -319,27 +322,27 @@ def _rich(
     facts: list[Facts],
     quote_limit: int,
     notes: list[tuple[str, str]],
+    note_limit: int | None,
     links: dict[str, str],
 ) -> str:
+    """`quote_limit` 为 0 表示原话放不下（会话名、发送人仍列出）；`note_limit` 是助理每段说明
+    最多保留的字数，None 不截，0 整段不附。"""
     first = calls[0]["arguments"]
     head: list[str] = []
     quote_shown = False
     quoted = [_quoted(item) for item in facts]
     if len(calls) > 1:
-        # 合并发送：每个会话一行，先说会话名。
-        if quote_limit:
-            for item, (who, text) in zip(facts, quoted, strict=True):
-                head.append(
-                    richtext.chat_line(item.target or "会话", "最近一条", who, text, quote_limit)
-                )
-    elif any(quoted[0]) and quote_limit:
-        label = _quote_label(template, first)
-        head.append(richtext.quote_line(label, *quoted[0], limit=quote_limit))
-        quote_shown = True
+        # 合并发送：每个会话一行，会话名是固定开销，任何情况下都列出。
+        for item, (who, text) in zip(facts, quoted, strict=True):
+            head.append(
+                richtext.chat_line(item.target or "会话", "最近一条", who, text, quote_limit)
+            )
     elif any(quoted[0]):
-        # 额度不够放原话：如实说明。目标消息仍由这条说明代表，编号不再重列。
-        head.append(richtext.grey(richtext.const("原话过长，未附")))
-        quote_shown = True
+        # 原话放不下时仍写明回复的是谁，并照常列出目标消息的编号（quote_shown 为假）。
+        head.append(
+            richtext.quote_line(_quote_label(template, first), *quoted[0], limit=quote_limit)
+        )
+        quote_shown = quote_limit > 0
     if template.action not in _PLAIN:
         head.append(richtext.grey(richtext.inert(f"动作：{template.action}")))
     body: list[list[str]] = []
@@ -353,7 +356,7 @@ def _rich(
     used = set(template.body) | set(template.target) | attachments.ARGUMENTS
     hidden = _hidden(template, calls[0], quote_shown) | used
     params = [
-        richtext.grey(richtext.const(f"{richtext.inert(key)}：{richtext.inert(_json(value))}"))
+        f"{richtext.inert(key)}：{richtext.inert(_json(value))}"
         for key, value in first.items()
         if key not in hidden and not _is_default(key, value)
     ]
@@ -362,18 +365,22 @@ def _rich(
         skip = _hidden(template, call, quote_shown) | used
         name = richtext.inert(item.target or "会话")
         params += [
-            richtext.grey(
-                richtext.const(f"{name}｜{richtext.inert(key)}：{richtext.inert(_json(value))}")
-            )
+            f"{name}｜{richtext.inert(key)}：{richtext.inert(_json(value))}"
             for key, value in call["arguments"].items()
             if key not in skip and first.get(key) != value and not _is_default(key, value)
         ]
+    # 这些参数是真的会执行的（非默认值），用正常字色，不是灰字。
     if params:
-        params.insert(0, richtext.grey(richtext.const("其他参数")))
+        params.insert(0, "#### 其他参数")
     tail: list[list[str]] = []
-    if any(richtext.lines(text) for _, text in notes):
-        tail = [[richtext.RULE], [richtext.grey(richtext.const(RICH_NOTE))]]
-        tail += [richtext.panel(title, text) for title, text in notes if richtext.lines(text)]
+    written = [(title, text) for title, text in notes if richtext.lines(text)]
+    if written:
+        tail = [[richtext.RULE]]
+        if note_limit == 0:
+            tail.append([richtext.grey(richtext.const(NOTES_DROPPED))])
+        else:
+            tail.append([richtext.grey(richtext.const(RICH_NOTE))])
+            tail += [richtext.panel(title, text, note_limit) for title, text in written]
     return richtext.blocks(head, *body, params, *tail)
 
 
@@ -391,8 +398,10 @@ def render_rich(
     """审批系统用的富文本正文（以 `richtext.PREFIX` 开头）；版式见 `richtext` 与设计文档。
 
     不可信的文字（原话、会话名、要发出的内容、助理的说明、参数值、文件名）一律经
-    `richtext.inert` 进入版式，不会冒出平台没写的小节、链接或组件。超过上限时与 `render` 一样
-    只缩短原话（在转义之前缩短原文）；不算原话仍超出则抛 `TooLong`：要执行的内容不截断。
+    `richtext.inert` 进入版式，不会冒出平台没写的小节、链接或组件。转义让文字变长，超过上限时
+    按这个顺序缩：先缩助理的说明（每段至少保留 `NOTE_MIN` 字，再不够整段不附），再缩原话（在
+    转义之前缩短原文；缩到不能再缩就不附，但会话名与发送人仍列出），仍超出则抛 `TooLong`。
+    要执行的内容不截断。
 
     Args:
         links: 临时桶对象名 → 预签名下载链接；是版式里唯一可点击的链接
@@ -403,23 +412,31 @@ def render_rich(
         ("背景", background),
         ("做过的调研", research),
     ]
+    longest = max(len(text) for _, text in notes)
 
-    def build(limit: int) -> str:
-        return richtext.PREFIX + _rich(template, calls, facts, limit, notes, links or {})
+    def build(quote: int, note: int | None) -> str:
+        return richtext.PREFIX + _rich(template, calls, facts, quote, notes, note, links or {})
 
-    full = build(QUOTE_CAP)
-    if len(full) <= LIMIT:
-        return full
-    if len(build(QUOTE_MIN)) > LIMIT:
-        dropped = build(0)
-        if len(dropped) > LIMIT:
-            raise TooLong
-        return dropped
+    def fits(quote: int, note: int | None) -> bool:
+        return len(build(quote, note)) <= LIMIT
+
+    if fits(QUOTE_CAP, None):
+        return build(QUOTE_CAP, None)
+    if longest > NOTE_MIN:
+        if fits(QUOTE_CAP, NOTE_MIN):
+            low, high = NOTE_MIN, longest  # low 放得下，high（不截）放不下
+            while high - low > 1:
+                mid = (low + high) // 2
+                low, high = (mid, high) if fits(QUOTE_CAP, mid) else (low, mid)
+            return build(QUOTE_CAP, low)
+    if fits(QUOTE_CAP, 0):
+        return build(QUOTE_CAP, 0)
+    if not fits(QUOTE_MIN, 0):
+        if fits(0, 0):
+            return build(0, 0)
+        raise TooLong
     low, high = QUOTE_MIN, QUOTE_CAP  # low 放得下，high 放不下
     while high - low > 1:
         mid = (low + high) // 2
-        if len(build(mid)) <= LIMIT:
-            low = mid
-        else:
-            high = mid
-    return build(low)
+        low, high = (mid, high) if fits(mid, 0) else (low, mid)
+    return build(low, 0)

@@ -404,7 +404,10 @@ async def _stage(
         return {
             "error": "content_too_long",
             "limit": content.LIMIT,
-            "hint": "审批单正文超过上限，要执行的内容不会被截断：缩短内容或拆成几次操作。",
+            "hint": (
+                "审批单正文超过上限，要执行的内容不会被截断：缩短内容或拆成几次操作。长度按审批"
+                "单上转义后的字符数计算，标点和特殊字符占得更多。"
+            ),
         }
     try:
         digest = await sealed.content_mac(
@@ -579,7 +582,10 @@ async def submit(
 
 # 一张合单最多几项（一轮里暂存的飞书写的上限相同）。
 MAX_ITEMS = 20
-BATCH_LEAD = "这一轮的 {count} 个操作，批准后按顺序执行，任何一项复查不通过整单都不执行"
+BATCH_LEAD = (
+    "这一轮的 {count} 个操作：批准后先逐项复查，任何一项复查不通过整单都不执行；"
+    "通过后按顺序执行，某一项失败就停下，后面的不再执行，已执行的不撤回"
+)
 
 
 def _rich_of(item: dict[str, Any]) -> str:
@@ -1315,7 +1321,10 @@ async def _revise_item(
         return {
             "error": "content_too_long",
             "limit": content.LIMIT,
-            "hint": "改过的这一项放回原来那张单之后正文超过上限：缩短内容，或撤回这一项另行提交。",
+            "hint": (
+                "改过的这一项放回原来那张单之后正文超过上限：缩短内容，或撤回这一项另行提交。"
+                "长度按审批单上转义后的字符数计算，标点和特殊字符占得更多。"
+            ),
         }
     index = next(position for position, item in enumerate(rows, 1) if item.id == row.id)
     body = _body(group)

@@ -404,7 +404,7 @@ def test_rich_hides_only_the_technical_parameters() -> None:
     bare = content.render_rich(
         reply, _one({**args, "format": "post", "reply_in_thread": True}), [Facts("group", "项目群")]
     )
-    assert '<font color="grey">其他参数</font>' in bare
+    assert "#### 其他参数\n" in bare and "<font" not in bare.split("#### 其他参数")[1]
     assert 'message\\_id：\\"om\\_1\\"' in bare and 'format：\\"post\\"' in bare
     assert "reply\\_in\\_thread：true" in bare and "uuid" not in bare
     # 未登记的参数不隐藏。
@@ -506,8 +506,8 @@ def test_rich_merged_send_lists_every_chat_and_only_real_differences() -> None:
         "\n"
         "### 明早九点开会\n"
         "\n"
-        '<font color="grey">其他参数</font>\n'
-        '<font color="grey">运营群&lt;\\/font&gt;｜format：\\"post\\"</font>'
+        "#### 其他参数\n"
+        '运营群&lt;\\/font&gt;｜format：\\"post\\"'
     )
 
 
@@ -520,13 +520,6 @@ def test_rich_only_the_quote_is_shortened_and_the_body_never() -> None:
     text = content.render_rich(reply, _one({**REPLY, "text": body}), [wanted])
     assert len(text) <= content.LIMIT and text.count("正") == 9000
     assert 0 < text.count("原") < content.QUOTE_CAP and "…" in text
-    # 额度只够放几个字时干脆不附原话，并如实说明。
-    short = Facts("p2p", "李四", "李四：原", "om_1", "李四", "原")
-    base = len(content.render_rich(reply, _one({**REPLY, "text": "正"}), [short])) - 1
-    tight = "正" * (content.LIMIT - base - 5)
-    dropped = content.render_rich(reply, _one({**REPLY, "text": tight}), [wanted])
-    assert len(dropped) <= content.LIMIT and "原原" not in dropped
-    assert "原话过长，未附" in dropped
     with pytest.raises(content.TooLong):
         content.render_rich(reply, _one({**REPLY, "text": "正" * 10000}), [wanted])
 
@@ -538,3 +531,83 @@ def test_rich_quote_without_split_fields_falls_back_to_the_joined_text() -> None
         [Facts("p2p", "李四", "李四：周五能给报价吗？")],
     )
     assert text.splitlines()[1] == '<font color="grey">回复：李四：周五能给报价吗？</font>'
+
+
+def _drop_quote(template_name: str, calls: list[dict[str, object]], facts: list[Facts]) -> str:
+    return content._rich(catalog.entry(template_name), calls, facts, 0, [], None, {})
+
+
+def test_rich_a_dropped_quote_still_says_who_and_keeps_the_target_message_id() -> None:
+    text = _drop_quote("feishu_reply_message", _one(REPLY), [SAID])
+    assert text.splitlines()[0] == '<font color="grey">回复 张三：（原话过长，未附）</font>'
+    assert "#### 其他参数" in text and 'message\\_id：\\"om\\_1\\"' in text
+    edit = _drop_quote("feishu_edit_message", _one({"message_id": "om_1", "text": "改后"}), [SAID])
+    assert "针对 张三：（原话过长，未附）" in edit and "om\\_1" in edit
+    file = _drop_quote(
+        "feishu_send_file",
+        _one({"reply_to_message_id": "om_1", "upload_id": REF, "uuid": "u"}),
+        [SAID],
+    )
+    assert "回复 张三：（原话过长，未附）" in file and "om\\_1" in file
+    # 原话在时 message_id 不重复列出。
+    full = content.render_rich(catalog.entry("feishu_reply_message"), _one(REPLY), [SAID])
+    assert "om\\_1" not in full
+
+
+def test_rich_merged_send_always_lists_every_chat_even_when_nothing_else_fits() -> None:
+    first = {
+        "receive_id": "oc_1",
+        "receive_id_type": "chat_id",
+        "text": "好." * 3275,  # 转义后约 6550 + 3275 个字
+        "uuid": "a",
+    }
+    calls = [
+        {"arguments": {**first, "receive_id": f"oc_{n}", "uuid": f"u{n}"}, "chat_id": f"oc_{n}"}
+        for n in (1, 2, 3)
+    ]
+    facts = [Facts("group", f"群{n}", "x", "m", "张三", "长" * 3000) for n in ("甲", "乙", "丙")]
+    text = content.render_rich(catalog.entry("feishu_send_message"), calls, facts)
+    assert len(text) <= content.LIMIT
+    for name in ("群甲", "群乙", "群丙"):
+        assert f"{name}｜" in text
+    assert text.count("（原话过长，未附）") == 3 and "长长" not in text
+    assert text.count("好\\.") == 3275
+    # 会话名本身放不下时才拒绝。
+    huge = [Facts("group", "名" * 4000, "", None) for _ in range(3)]
+    with pytest.raises(content.TooLong):
+        content.render_rich(catalog.entry("feishu_send_message"), calls, huge)
+
+
+def test_rich_notes_shrink_before_the_quote_and_the_body_never() -> None:
+    send = {"receive_id": "oc_1", "receive_id_type": "chat_id", "uuid": "u"}
+    wanted = Facts("p2p", "李四", "李四：好", "m", "李四", "好" * 300)
+    # 5000 个汉字的正文配满额的四段说明：能提交，说明被截断，原话保持原样。
+    text = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({**send, "text": "字" * 5000}),
+        [wanted],
+        commitments="答" * 3000,
+        unverified="推" * 3000,
+        background="背" * 3000,
+        research="研" * 3000,
+    )
+    assert len(text) <= content.LIMIT and text.count("字") == 5000
+    assert "…（已截断）" in text and "好" * 300 in text
+    assert content.NOTE_MIN <= text.count("答") < 3000
+    assert "助理的说明过长，未附" not in text
+    # 正文本身就占满：说明整段不附，并留一行说明，原话照样在。
+    tight = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({**send, "text": "字" * 9900}),
+        [Facts("p2p", "李四")],
+        background="背" * 3000,
+    )
+    assert len(tight) <= content.LIMIT and "背" not in tight
+    assert '<font color="grey">助理的说明过长，未附</font>' in tight
+    # 要执行的内容转义后超限：仍然拒绝，不截断。
+    with pytest.raises(content.TooLong):
+        content.render_rich(
+            catalog.entry("feishu_send_message"),
+            _one({**send, "text": "好." * 4000}),
+            [Facts("p2p", "李四")],
+        )

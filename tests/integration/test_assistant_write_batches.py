@@ -737,8 +737,9 @@ async def test_unattended_writes_go_out_as_one_approval_listing_every_item(
     assert sent_one["external_id"] == rows[0].external_id
     body = sent_one["content"]
     assert body.startswith(richtext.PREFIX)
-    assert '<font color="grey">这一轮的 2 个操作，批准后按顺序执行' in body
-    assert "整单都不执行</font>" in body
+    assert '<font color="grey">这一轮的 2 个操作：批准后先逐项复查' in body
+    assert "某一项失败就停下，后面的不再执行，已执行的不撤回" in body
+    assert "已执行的不撤回</font>" in body
     # 每项一个分界：分隔线加平台写的小标题（渠道与对象），再是这一项的富文本正文。
     heads = [line for line in body.split("\n") if line.startswith("#### ") and "/" in line]
     assert heads == ["#### 1/2 私聊 → 李四", "#### 2/2 私聊 → 李四"]

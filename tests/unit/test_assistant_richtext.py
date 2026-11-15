@@ -88,6 +88,8 @@ def test_inert_output_has_no_markup_control_or_leading_space(raw: str) -> None:
     assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in out)
     assert not any(c in out for c in "  ‮‬")
     assert out == out.strip() and "  " not in out
+    # U+2060 只出现在 `&amp;` 之后（输入里原有的 U+2060 已写成可见的转义）。
+    assert out.count("\u2060") == out.count("&amp;\u2060") == raw.count("&")
     assert not out.startswith(" ")
     for pattern in (FONT_OPEN, FONT_CLOSE, BREAK):
         assert not pattern.search(out)
@@ -101,9 +103,10 @@ def test_inert_specific_outputs() -> None:
     assert inert("a@example.com") == r"a\@example\.com"
     assert inert("1. 列表") == r"1\. 列表"
     assert inert("---") == r"\-\-\-"
-    assert inert("a & b < c > d") == "a &amp; b &lt; c &gt; d"
+    assert inert("a & b < c > d") == "a &amp;\u2060 b &lt; c &gt; d"
     assert inert('<font color="red">假</font>') == (r"&lt;font color\=\"red\"&gt;假&lt;\/font&gt;")
-    assert inert("&lt;br&gt;") == "&amp;lt\\;br&amp;gt\\;"
+    assert inert("&lt;br&gt;") == "&amp;\u2060lt\\;br&amp;\u2060gt\\;"
+    assert inert("a\u2060b") == "a\\\\u2060b"
     assert inert("    缩进\t\t和  空格  ") == "缩进 和 空格"
     assert inert("a\nb\r\nc") == "a b c"
     assert inert("x\u0001y\u0004z") == "xyz"
@@ -143,7 +146,8 @@ def test_a_real_parser_renders_exactly_the_original_text() -> None:
         children = tokens[1].children or []
         # 没有链接、强调、行内代码、行内 HTML、图片、软硬换行。
         assert {child.type for child in children} <= {"text", "text_special"}, (raw, children)
-        shown = "".join(child.content for child in children)
+        # 渲染器把 `&amp;` 还原成 `&`：我们插入的 U+2060 去掉再比。
+        shown = "".join(child.content for child in children).replace("\u2060", "")
         assert shown == want, (raw, shown, want)
 
 
