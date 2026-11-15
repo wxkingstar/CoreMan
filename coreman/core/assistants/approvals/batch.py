@@ -315,7 +315,7 @@ async def propose(
         if isinstance(requester, dict):
             return requester
     staged = await service._stage(
-        session, cipher, scope, tool, arguments, files, links=mode == TOWER
+        session, cipher, scope, tool, arguments, files, links=mode == TOWER, rich=mode == TOWER
     )
     if isinstance(staged, dict):
         return staged
@@ -357,6 +357,9 @@ async def propose(
         "calls": staged.calls,
         "abstract": staged.abstract,
         "content": staged.content,
+        # 审批系统用的富文本正文（不带前缀）与合单里这一项的小标题；确认卡只用上面的纯文本。
+        "rich": staged.rich,
+        "heading": staged.heading,
         "background": staged.meta.background,
         "research": staged.meta.research,
         "topic": staged.meta.topic,

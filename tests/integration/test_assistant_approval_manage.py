@@ -99,6 +99,8 @@ async def test_revise_replaces_the_pending_approval_in_place(
     assert (row.args_hash, row.request_hash) != before[:2] and row.notified_at is None
     assert [item["external_id"] for item in fake.submitted] == [before[2], before[2]]
     assert "周四给你，辛苦再等一下" in fake.submitted[1]["content"]
+    # 改稿重新提交的也是富文本版式。
+    assert fake.submitted[1]["content"].startswith("<md>\n")
     # 批准之后执行的是改过的那一份。
     await decided(db_session, row)
     task = (await queued(db_session, APPROVAL_EXECUTE_KIND))[0]

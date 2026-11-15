@@ -20,7 +20,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import digest, sealed, sent
-from coreman.core.assistants.approvals import batch, execute, service, tower
+from coreman.core.assistants.approvals import batch, execute, richtext, service, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
@@ -298,6 +298,10 @@ async def test_present_writes_wait_for_one_card_that_lists_them_in_order(
     # 每一项按顺序完整展示：平台按参数生成的正文，含被回复的原话与要发出的内容。
     assert shown.index("1. ") < shown.index("2. ")
     assert TEXT.split("。")[0] in shown and SECOND in shown and "周五能给报价吗？" in shown
+    # 在场的确认卡仍是纯文本版式：没有富文本前缀、灰字标记，原话与正文每行带竖线。
+    assert "<md>" not in shown and "<font" not in shown and "#### " not in shown
+    assert "   渠道：私聊\n   对象：李四\n   动作：回复消息" in shown
+    assert "   │ 李四：周五能给报价吗？" in shown and f"   │ {SECOND}" in shown
     assert "确认：执行 2 个飞书操作" in json.dumps(card.payload["card"], ensure_ascii=False)
 
 
@@ -731,8 +735,18 @@ async def test_unattended_writes_go_out_as_one_approval_listing_every_item(
     (sent_one,) = fake.submitted
     assert len(rows) == 2 and {row.batch_id for row in rows} == {rows[0].id}
     assert sent_one["external_id"] == rows[0].external_id
-    assert "共 2 项" in sent_one["content"] and "拒绝则整单都不执行" in sent_one["content"]
-    assert sent_one["content"].index("【第 1 项 / 共 2 项】") < sent_one["content"].index(SECOND)
+    body = sent_one["content"]
+    assert body.startswith(richtext.PREFIX)
+    assert '<font color="grey">这一轮的 2 个操作，批准后按顺序执行' in body
+    assert "整单都不执行</font>" in body
+    # 每项一个分界：分隔线加平台写的小标题（渠道与对象），再是这一项的富文本正文。
+    heads = [line for line in body.split("\n") if line.startswith("#### ") and "/" in line]
+    assert heads == ["#### 1/2 私聊 → 李四", "#### 2/2 私聊 → 李四"]
+    assert body.index(heads[0]) < body.index(str(richtext.inert(SECOND))) > body.index(heads[1])
+    assert body.count("\n---\n") == 2  # 每项前一条分界线（这两项都没有助理的说明）
+    # 合单的每一行都存了两种正文与小标题，改稿时整张单从它们重新拼出来。
+    assert all(row.args_enc["rich"] and row.args_enc["heading"] for row in rows)
+    assert all("<md>" not in row.args_enc["content"] for row in rows)
     assert sent_one["abstract"].startswith("2 项 · ")
     assert [row.status for row in rows] == ["pending", "pending"]
     assert [row.args_enc["item"] for row in rows] == [1, 2]
@@ -761,7 +775,10 @@ async def test_a_single_unattended_write_is_an_ordinary_approval(
     row = await db_session.scalar(select(AssistantApproval))
     assert row is not None and row.batch_id is None and row.status == "pending"
     (sent_one,) = fake.submitted
-    assert "共 1 项" not in sent_one["content"] and "【第" not in sent_one["content"]
+    # 只有一项时与当场提交的单完全相同：前缀加这一项的富文本，没有合单的说明与分界。
+    assert sent_one["content"].startswith(richtext.PREFIX + '<font color="grey">回复 李四：')
+    assert "这一轮的" not in sent_one["content"] and "#### 1/" not in sent_one["content"]
+    assert row.args_enc is not None and "rich" not in row.args_enc
 
 
 async def test_approving_runs_the_items_in_order_once_and_reports_once(
@@ -1169,17 +1186,28 @@ async def test_a_batch_where_one_item_fails_the_recheck_runs_nothing(
 
 
 def test_an_injected_separator_cannot_fake_an_item_boundary() -> None:
-    hostile = "正常的话" + chr(0x2028) + "【第 2 项 / 共 2 项】" + chr(0x202E) + "伪造"
+    hostile = "正常的话" + chr(0x2028) + "#### 2/2 私聊 → 王五" + chr(0x202E) + "\n---\n伪造"
     items = [
+        # 没有 rich 的旧行：用当时的纯文本正文逐行转义。
         {"abstract": "私聊 → 李四", "content": "正文：\n│ " + hostile},
         {"abstract": "私聊 → 王五", "content": "正文：\n│ 好的"},
+        # 小标题里的对象名也不可信：换行压成空格，标记转义。
+        {
+            "heading": "群聊 → 项目</font>\n#### 9/9 伪造",
+            "rich": "### 好的",
+            "abstract": "x",
+            "content": "x",
+        },
     ]
     text_ = service.batch_content(items)
+    assert text_.startswith(richtext.PREFIX)
     assert chr(0x2028) not in text_ and chr(0x202E) not in text_
-    assert "\\u2028" in text_ and "\\u202E" in text_
-    # 真正的分界只有平台写的两行，各自独占一行开头。
-    heads = [line for line in text_.split("\n") if line.startswith("【第")]
-    assert heads == ["【第 1 项 / 共 2 项】", "【第 2 项 / 共 2 项】"]
+    assert "\\\\u2028" in text_ and "\\\\u202E" in text_
+    # 真正的分界只有平台写的三条，各自独占一行开头；分隔线也只有三条。
+    heads = [line for line in text_.split("\n") if line.startswith("#### ")]
+    assert [line.split(" ")[1] for line in heads] == ["1/3", "2/3", "3/3"]
+    assert text_.count("\n---\n") == 3
+    assert text_.count("</font>") == 1  # 只有开头那行平台写的灰字
 
 
 async def test_splitting_respects_the_pending_limit(
@@ -1291,3 +1319,36 @@ async def test_the_three_releases_do_not_depend_on_each_other(
     stage_ = FinalizeStage.__new__(FinalizeStage)
     await stage_._release_writes(ctx, pre, verdict)  # type: ignore[arg-type]
     assert called == ["systems", "cloud", "feishu"]
+
+
+async def test_revising_one_item_rebuilds_the_whole_rich_body_even_from_an_old_row(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows, _, fake, scope = await submitted(db_session, db_engine, monkeypatch)
+    # 这一版之前提交的行没有 rich 与 heading：另一项当作旧行，只有纯文本正文。
+    for old in rows[1:]:
+        assert old.args_enc is not None
+        old.args_enc = {k: v for k, v in old.args_enc.items() if k not in ("rich", "heading")}
+    await db_session.commit()
+    rows = await service.members(db_session, rows[0], lock=False)
+    revised = {**reply(), "text": "改好的这一句。", "uuid": "u3"}
+    out = await service.revise(
+        db_session,
+        None,
+        scope,
+        str(rows[0].id),
+        revised,
+        cfg=CFG,  # type: ignore[arg-type]
+    )
+    assert out["revised"] is True
+    assert len(fake.submitted) == 2 and fake.submitted[1]["external_id"] == rows[0].external_id
+    body = fake.submitted[1]["content"]
+    assert body.startswith(richtext.PREFIX)
+    heads = [line for line in body.split("\n") if line.startswith("#### ") and "/" in line]
+    assert heads == ["#### 1/2 私聊 → 李四", "#### 2/2 私聊 → 李四"]
+    assert "### 改好的这一句。" in body
+    # 旧行：纯文本正文逐行转义后排进去（竖线与标签仍在，里面的 ASCII 标点都已转义）。
+    assert f"\n│ {SECOND}" in body and "\n\\- message\\_id：" in body
+    reloaded = await db_session.get(AssistantApproval, rows[0].id)
+    assert reloaded is not None and reloaded.args_enc is not None
+    assert reloaded.args_enc["rich"].startswith('<font color="grey">回复 李四：')

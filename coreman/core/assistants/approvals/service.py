@@ -26,7 +26,14 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import feedback, platform_turns, sealed, sent
-from coreman.core.assistants.approvals import attachments, catalog, checks, content, tower
+from coreman.core.assistants.approvals import (
+    attachments,
+    catalog,
+    checks,
+    content,
+    richtext,
+    tower,
+)
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.assistants.records import inactive_assistant, is_assistant
 from coreman.core.bus import tasks
@@ -140,6 +147,8 @@ class Staged:
     args_hash: str
     abstract: str
     content: str
+    rich: str
+    heading: str
     body: bytes
     uploads: list[Upload]
     store: attachments.Store | None
@@ -293,11 +302,14 @@ async def _stage(
     files: FileRelay | None = None,
     *,
     links: bool = True,
+    rich: bool = True,
 ) -> Staged | dict[str, Any]:
     """校验参数、重新读会话、生成审批单内容。返回字典表示不能提交（原样交给助理）。
 
     Args:
         links: 正文里附上附件的查看链接（审批单用）；确认卡另行附链接，正文里不带
+        rich: 同时生成审批系统用的富文本正文（`Staged.rich`，不带 `richtext.PREFIX`）；
+            只走飞书确认卡的暂存用不到，不生成，也就不会因为它放不下而被拒
     """
     item = PERSONAL_TOOLS.get(tool)
     if item is None or not catalog.is_write(tool):
@@ -374,6 +386,20 @@ async def _stage(
             unverified=meta.unverified,
             links=shown,
         )
+        rich_text = (
+            content.render_rich(
+                template,
+                calls,
+                facts,
+                background=meta.background,
+                research=meta.research,
+                commitments=meta.commitments,
+                unverified=meta.unverified,
+                links=shown,
+            )[len(richtext.PREFIX) :]
+            if rich
+            else ""
+        )
     except content.TooLong:
         return {
             "error": "content_too_long",
@@ -394,6 +420,8 @@ async def _stage(
         args_hash=digest,
         abstract=content.abstract(template, facts),
         content=text,
+        rich=rich_text,
+        heading=content.heading(template, facts),
         body=tower.request_body(tool, calls),
         uploads=uploads,
         store=store,
@@ -534,7 +562,7 @@ async def submit(
                 requester=requester,
                 caller=bot.bot_key,
                 abstract=staged.abstract,
-                content=staged.content,
+                content=richtext.PREFIX + staged.rich,
                 body=staged.body,
                 expires_at=row.expires_at,
             )
@@ -551,28 +579,39 @@ async def submit(
 
 # 一张合单最多几项（一轮里暂存的飞书写的上限相同）。
 MAX_ITEMS = 20
-BATCH_LEAD = (
-    "本单共 {count} 项，是助理在你不在场时同一轮里要做的飞书操作。批准后平台先逐项复查（会话"
-    "是否有了变化、附件是否还在且没被改动），任何一项不通过整单都不执行；全部通过后按顺序原样"
-    "执行，某一项执行失败就停下，后面的项不再执行，已经执行的不会撤回；拒绝则整单都不执行。"
-)
-ITEM_HEAD = "【第 {index} 项 / 共 {count} 项】"
+BATCH_LEAD = "这一轮的 {count} 个操作，批准后按顺序执行，任何一项复查不通过整单都不执行"
+
+
+def _rich_of(item: dict[str, Any]) -> str:
+    """一项在合单里的富文本正文（不带前缀）。
+
+    这一版之前暂存的行没有 `rich`：把它当时的纯文本正文逐行转义后原样排进去，这样还没批的旧单
+    照样能改稿、重新提交。
+    """
+    rich = item.get("rich")
+    if isinstance(rich, str) and rich:
+        return rich
+    return "\n".join(
+        str(richtext.inert(line)) for line in str(item.get("content") or "").split("\n")
+    )
+
+
+def _heading_of(item: dict[str, Any]) -> str:
+    return str(item.get("heading") or item.get("abstract") or item.get("tool") or "")
 
 
 def batch_content(items: list[dict[str, Any]]) -> str:
-    """合单的正文：一句说明，然后按顺序完整列出每一项（每项就是它单独成单时的正文）。
+    """合单的富文本正文（带前缀）：一行灰字说明，然后按顺序完整排出每一项。
 
-    各项正文与确认卡一样做可见化转义（`proxied._visible`）：控制、格式字符与 `\\n` 以外的行、
-    段分隔符转成 `\\uXXXX`，值里夹带的分隔符造不出新的「第 N 项」分界，也颠倒不了显示。
+    每项一个分界：`---`、`#### 第几项/共几项 渠道 → 对象`（平台写的标题，对象名经 `inert`），再是它
+    单独成单时的富文本正文。项里的文字都已经转义过，伪造不出分界，也冒充不了平台的标题。
     """
-    from coreman.core.assistants.approvals import proxied  # proxied 依赖本模块，延迟导入
-
     count = len(items)
-    parts = [BATCH_LEAD.format(count=count)]
+    parts = [richtext.grey(richtext.const(BATCH_LEAD.format(count=count)))]
     for index, item in enumerate(items, 1):
-        body = proxied._visible(str(item["content"]))
-        parts.append(ITEM_HEAD.format(index=index, count=count) + "\n" + body)
-    return "\n\n".join(parts)
+        head = f"#### {index}/{count} {richtext.inert(_heading_of(item))}"
+        parts.append("\n".join([richtext.RULE, "", head, "", _rich_of(item)]))
+    return richtext.PREFIX + "\n\n".join(parts)
 
 
 def batch_abstract(items: list[dict[str, Any]]) -> str:
@@ -605,8 +644,14 @@ def _stored_item(item: dict[str, Any], index: int, count: int) -> dict[str, Any]
         "research": item.get("research") or "",
     }
     if count > 1:
-        # 合单的项：第几项、共几项，以及它在单上的正文（改稿时重新拼整张单要用）。
-        stored |= {"item": index, "items": count, "content": item["content"]}
+        # 合单的项：第几项、共几项，以及它在单上的两种正文与小标题（改稿时重新拼整张单要用）。
+        stored |= {
+            "item": index,
+            "items": count,
+            "content": item["content"],
+            "rich": _rich_of(item),
+            "heading": _heading_of(item),
+        }
     return stored
 
 
@@ -689,7 +734,11 @@ async def submit_batch(
                         abstract=(
                             batch_abstract(group) if len(group) > 1 else group[0]["abstract"]
                         ),
-                        content=batch_content(group) if len(group) > 1 else group[0]["content"],
+                        content=(
+                            batch_content(group)
+                            if len(group) > 1
+                            else richtext.PREFIX + _rich_of(group[0])
+                        ),
                         body=body,
                         expires_at=rows[0].expires_at,
                     )
@@ -1204,7 +1253,7 @@ async def revise(
                 requester=requester,
                 caller=scope.bot.bot_key,
                 abstract=staged.abstract,
-                content=staged.content,
+                content=richtext.PREFIX + staged.rich,
                 body=staged.body,
                 expires_at=row.expires_at,
             )
@@ -1229,6 +1278,8 @@ def _as_item(row: AssistantApproval) -> dict[str, Any]:
         "calls": list(stored.get("calls") or []),
         "abstract": stored.get("abstract") or row.tool,
         "content": stored.get("content") or "",
+        "rich": stored.get("rich") or "",
+        "heading": stored.get("heading") or "",
         "background": stored.get("background") or "",
         "research": stored.get("research") or "",
     }
@@ -1253,6 +1304,8 @@ async def _revise_item(
         "calls": staged.calls,
         "abstract": staged.abstract,
         "content": staged.content,
+        "rich": staged.rich,
+        "heading": staged.heading,
         "background": staged.meta.background,
         "research": staged.meta.research,
     }

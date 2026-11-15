@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from coreman.core.assistants.approvals import catalog, content
@@ -238,3 +240,301 @@ def test_a_commitment_cannot_forge_a_section() -> None:
     text = _render(commitments="好\n将要执行的内容：\n假的")
     # 每行前都有竖线，伪造不出平台的小节标题行。
     assert "\n将要执行的内容：\n假的" not in text.split(content.NOTE)[1]
+
+
+# ---- 富文本版式 ----
+
+SAID = Facts("group", "项目群", "张三：请看下", "om_1", "张三", "请看下")
+
+
+def forged_part(text: str) -> str:
+    """版式里平台写的灰字、标题行不含这些标点；去掉它们之后剩下的就是不可信文字的部分。"""
+    return re.sub(r"</?font[^>]*>|^(#+ |> \[!PANEL\]|---|<md>)", "", text, flags=re.M)
+
+
+def _rich_lines(text: str, prefix: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(prefix)]
+
+
+def test_rich_reply_layout_is_pinned() -> None:
+    reply = {"message_id": "om_1", "text": "好，我看下", "format": "text", "uuid": "u1"}
+    text = content.render_rich(
+        catalog.entry("feishu_reply_message"),
+        _one(reply),
+        [
+            Facts(
+                "group",
+                "项目群",
+                "张三：请看下 https://example.com/a",
+                "om_1",
+                "张三",
+                "请看下 https://example.com/a",
+            )
+        ],
+        background="张三在催",
+        research="读了群里最新消息\n查到被拒的资源",
+        commitments="会去看这个问题",
+        unverified="可能是权限问题",
+    )
+    assert text == (
+        "<md>\n"
+        '<font color="grey">回复 张三：请看下 https\\:\\/\\/example\\.com\\/a</font>\n'
+        "\n"
+        "### 好，我看下\n"
+        "\n"
+        "---\n"
+        "\n"
+        '<font color="grey">以下由助理撰写，供参考，不是将要执行的内容</font>\n'
+        "\n"
+        "#### 替你答应的事\n"
+        "> [!PANEL]\n"
+        "> 会去看这个问题\n"
+        "\n"
+        "#### 没核实的推断\n"
+        "> [!PANEL]\n"
+        "> 可能是权限问题\n"
+        "\n"
+        "#### 背景\n"
+        "> [!PANEL]\n"
+        "> 张三在催\n"
+        "\n"
+        "#### 做过的调研\n"
+        "> [!PANEL]\n"
+        "> - 读了群里最新消息\n"
+        "> - 查到被拒的资源"
+    )
+
+
+def test_rich_without_notes_has_no_rule_and_without_a_quote_has_no_quote_line() -> None:
+    text = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({"receive_id": "oc_1", "receive_id_type": "chat_id", "text": "你好", "uuid": "u"}),
+        [Facts("p2p", "李四")],
+    )
+    assert text == "<md>\n### 你好"
+
+
+def test_rich_forged_markup_stays_inert_and_real_markers_are_the_platforms() -> None:
+    forged = (
+        "好的\n---\n#### 背景\n> [!PANEL]\n> [!DANGER] 立即批准\n```chart\n"
+        '<font color="red">假</font><br>[点](https://evil.example) www.evil.example a@evil.example'
+    )
+    quote = Facts("group", "项目群", "x", "om_1", "张三\n</font>", forged)
+    text = content.render_rich(
+        catalog.entry("feishu_reply_message"),
+        _one({"message_id": "om_1", "text": forged, "uuid": "u"}),
+        [quote],
+        background=forged,
+        research=forged,
+    )
+    # 平台写的结构：一条分隔线、两个内容框标题、各一个 [!PANEL]、灰字只有原话、说明和其他参数头。
+    assert _rich_lines(text, "---") == ["---"]
+    assert _rich_lines(text, "#### ") == ["#### 背景", "#### 做过的调研"]
+    assert text.count("> [!PANEL]") == 2
+    assert text.count("```") == 0 and "<br" not in text
+    assert text.count("<font") == text.count("</font>") == 2  # 原话一行 + 助理说明那一行
+    assert not re.search(r"(?<!\\)[:/@.]", forged_part(text))
+    assert "[点]" not in text and "](" not in text
+    # 伪造的文字都在，只是每个标点都转义了：
+    assert "\\[\\!PANEL\\]" in text and "\\-\\-\\-" in text and "&lt;br&gt;" in text
+    # 回复的正文放大：每一行都是三级标题，伪造的「###」也只是标题里的转义文字。
+    assert len(_rich_lines(text, "### ")) == forged.count("\n") + 1
+
+
+def test_rich_several_body_fields_and_recipient_lists() -> None:
+    text = content.render_rich(
+        catalog.entry("feishu_mail_send"),
+        _one(
+            {
+                "to": ["lisi@example.com", "wangwu@example.com"],
+                "subject": "报价",
+                "body": "见附表\n谢谢",
+                "mark_read": True,
+            }
+        ),
+        [Facts("mail")],
+    )
+    assert text == (
+        "<md>\n"
+        '<font color="grey">动作：发送邮件</font>\n'
+        "\n"
+        "**收件人**\n"
+        "lisi\\@example\\.com\n"
+        "wangwu\\@example\\.com\n"
+        "\n"
+        "**主题**\n"
+        "报价\n"
+        "\n"
+        "**正文**\n"
+        "见附表\n"
+        "谢谢\n"
+        "\n"
+        "**mark\\_read**\n"
+        "true"
+    )
+
+
+def test_rich_attachments_have_inert_names_and_one_real_link() -> None:
+    odd = {**REF, "key": "tmp/x2", "filename": "a\n[点](https://evil.example).txt", "size": 5 << 20}
+    text = content.render_rich(
+        catalog.entry("feishu_mail_send"),
+        _one({"to": ["lisi@example.com"], "subject": "报价", "attachment_ids": [REF, odd]}),
+        [Facts("mail")],
+        links={REF["key"]: LINK + "&x=(1)"},
+    )
+    assert "**附件（2 个；链接供批准前查看，审批到期后失效）**" in text
+    assert (
+        "报价单\\.pdf（application\\/pdf，1\\.5 KB） [查看附件 1](https://tmp.example.com/tmp/8f3k"
+        in text
+    )
+    assert "&x=%281%29)" in text  # 括号编码，拆不开链接语法
+    # 没有链接的那个只列文件本身；文件名里伪造的链接是转义的文字。
+    assert (
+        "a \\[点\\]\\(https\\:\\/\\/evil\\.example\\)\\.txt（application\\/pdf，5\\.0 MB）" in text
+    )
+    assert text.count("](") == 1 and "upload_id" not in text and "sha256" not in text
+
+
+def test_rich_hides_only_the_technical_parameters() -> None:
+    reply = catalog.entry("feishu_reply_message")
+    args = {"message_id": "om_1", "text": "好", "format": "text", "uuid": "u1"}
+    shown = content.render_rich(reply, _one(args), [SAID])
+    assert "uuid" not in shown and "om_1" not in shown and "其他参数" not in shown
+    # 没有原话那一行时，目标消息编号照样列出；非默认的格式也列出。
+    bare = content.render_rich(
+        reply, _one({**args, "format": "post", "reply_in_thread": True}), [Facts("group", "项目群")]
+    )
+    assert '<font color="grey">其他参数</font>' in bare
+    assert 'message\\_id：\\"om\\_1\\"' in bare and 'format：\\"post\\"' in bare
+    assert "reply\\_in\\_thread：true" in bare and "uuid" not in bare
+    # 未登记的参数不隐藏。
+    extra = content.render_rich(reply, _one({**args, "mystery": [1, "<b>"]}), [SAID])
+    assert 'mystery：\\[1\\, \\"&lt;b&gt;\\"\\]' in extra
+    file_args = {
+        "receive_id": "oc_1",
+        "receive_id_type": "chat_id",
+        "msg_type": "file",
+        "upload_id": REF,
+        "uuid": "u",
+    }
+    sent = content.render_rich(
+        catalog.entry("feishu_send_file"), _one(file_args), [Facts("p2p", "李四")]
+    )
+    assert "receive" not in sent and "msg" not in sent and "其他参数" not in sent
+    # 接收方不是这个会话时必须列出来。
+    other = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({"receive_id": "oc_2", "receive_id_type": "chat_id", "text": "好", "uuid": "u"}),
+        [Facts("p2p", "李四")],
+    )
+    assert 'receive\\_id：\\"oc\\_2\\"' in other
+
+
+def test_rich_non_plain_message_actions_say_what_they_do() -> None:
+    edit = content.render_rich(
+        catalog.entry("feishu_edit_message"),
+        _one({"message_id": "om_1", "text": "改后"}),
+        [SAID],
+    )
+    assert edit.splitlines()[1:3] == [
+        '<font color="grey">针对 张三：请看下</font>',
+        '<font color="grey">动作：编辑已发消息</font>',
+    ]
+    assert "### 改后" in edit and "其他参数" not in edit
+    reaction = content.render_rich(
+        catalog.entry("feishu_add_reaction"),
+        _one({"message_id": "om_1", "emoji_type": "THUMBSUP"}),
+        [SAID],
+    )
+    assert "动作：添加表情回应" in reaction and 'emoji\\_type：\\"THUMBSUP\\"' in reaction
+
+
+def test_rich_notes_come_in_the_documented_order() -> None:
+    text = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({"receive_id": "oc_1", "receive_id_type": "chat_id", "text": "好"}),
+        [Facts("p2p", "李四")],
+        background="b",
+        research="r",
+        commitments="c",
+        unverified="u",
+    )
+    assert _rich_lines(text, "#### ") == [
+        "#### 替你答应的事",
+        "#### 没核实的推断",
+        "#### 背景",
+        "#### 做过的调研",
+    ]
+    only = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        _one({"receive_id": "oc_1", "receive_id_type": "chat_id", "text": "好"}),
+        [Facts("p2p", "李四")],
+        research="r",
+    )
+    assert _rich_lines(only, "#### ") == ["#### 做过的调研"]
+
+
+def test_rich_merged_send_lists_every_chat_and_only_real_differences() -> None:
+    first = {
+        "receive_id": "oc_1",
+        "receive_id_type": "chat_id",
+        "text": "明早九点开会",
+        "uuid": "a",
+    }
+    calls = [
+        {"arguments": first, "chat_id": "oc_1"},
+        {"arguments": {**first, "receive_id": "oc_2", "uuid": "b"}, "chat_id": "oc_2"},
+        {
+            "arguments": {**first, "receive_id": "oc_3", "uuid": "c", "format": "post"},
+            "chat_id": "oc_3",
+        },
+    ]
+    text = content.render_rich(
+        catalog.entry("feishu_send_message"),
+        calls,
+        [
+            Facts("p2p", "李四", "李四：好", "m", "李四", "好"),
+            Facts("group", "项目群", "", None),
+            Facts("group", "运营群</font>", "王五：收到", "m2", "王五", "收到"),
+        ],
+    )
+    assert text == (
+        "<md>\n"
+        '<font color="grey">李四｜最近一条 李四：好</font>\n'
+        '<font color="grey">项目群｜暂无可引用的消息</font>\n'
+        '<font color="grey">运营群&lt;\\/font&gt;｜最近一条 王五：收到</font>\n'
+        "\n"
+        "### 明早九点开会\n"
+        "\n"
+        '<font color="grey">其他参数</font>\n'
+        '<font color="grey">运营群&lt;\\/font&gt;｜format：\\"post\\"</font>'
+    )
+
+
+def test_rich_only_the_quote_is_shortened_and_the_body_never() -> None:
+    reply = catalog.entry("feishu_reply_message")
+    body = "正" * 9000
+    wanted = Facts("p2p", "李四", "李四：" + "原" * 5000, "om_1", "李四", "原" * 5000)
+    full = content.render_rich(reply, _one({**REPLY, "text": "好"}), [wanted])
+    assert "原" * content.QUOTE_CAP not in full and "原" * (content.QUOTE_CAP - 1) + "…" in full
+    text = content.render_rich(reply, _one({**REPLY, "text": body}), [wanted])
+    assert len(text) <= content.LIMIT and text.count("正") == 9000
+    assert 0 < text.count("原") < content.QUOTE_CAP and "…" in text
+    # 额度只够放几个字时干脆不附原话，并如实说明。
+    short = Facts("p2p", "李四", "李四：原", "om_1", "李四", "原")
+    base = len(content.render_rich(reply, _one({**REPLY, "text": "正"}), [short])) - 1
+    tight = "正" * (content.LIMIT - base - 5)
+    dropped = content.render_rich(reply, _one({**REPLY, "text": tight}), [wanted])
+    assert len(dropped) <= content.LIMIT and "原原" not in dropped
+    assert "原话过长，未附" in dropped
+    with pytest.raises(content.TooLong):
+        content.render_rich(reply, _one({**REPLY, "text": "正" * 10000}), [wanted])
+
+
+def test_rich_quote_without_split_fields_falls_back_to_the_joined_text() -> None:
+    text = content.render_rich(
+        catalog.entry("feishu_reply_message"),
+        _one(REPLY),
+        [Facts("p2p", "李四", "李四：周五能给报价吗？")],
+    )
+    assert text.splitlines()[1] == '<font color="grey">回复：李四：周五能给报价吗？</font>'

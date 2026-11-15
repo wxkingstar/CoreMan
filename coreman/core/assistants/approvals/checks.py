@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from coreman.core.assistants.approvals import catalog
@@ -138,7 +138,28 @@ async def message(call: Reader, message_id: str) -> Message | None:
     return parse(items[0]) if items else None
 
 
-async def _name(call: Reader, open_id: str) -> str:
+# 群成员列表一页最多取多少个（飞书接口的上限）。
+MEMBERS_PAGE = 100
+
+
+async def _member_name(call: Reader, chat_id: str, open_id: str) -> str:
+    """在群成员里找这个人的名字：只取第一页，读不到或不在这一页都返回空，不抛错。"""
+    try:
+        data = await call(
+            "im.chat_members",
+            path={"chat_id": chat_id},
+            params={"member_id_type": "open_id", "page_size": MEMBERS_PAGE},
+        )
+    except PersonalError:
+        return ""
+    for item in data.get("items") or []:
+        if isinstance(item, dict) and item.get("member_id") == open_id:
+            return str(item.get("name") or "")
+    return ""
+
+
+async def _name(call: Reader, open_id: str, group_chat_id: str = "") -> str:
+    """通讯录里查姓名；查不到且在群里时，再从这个群的成员列表里找。"""
     if not open_id:
         return ""
     try:
@@ -146,9 +167,12 @@ async def _name(call: Reader, open_id: str) -> str:
             "contact.user", path={"user_id": open_id}, params={"user_id_type": "open_id"}
         )
     except PersonalError:
-        return ""
+        data = {}
     user = data.get("user")
-    return str(user.get("name") or "") if isinstance(user, dict) else ""
+    name = str(user.get("name") or "") if isinstance(user, dict) else ""
+    if name or not group_chat_id:
+        return name
+    return await _member_name(call, group_chat_id, open_id)
 
 
 async def _title(call: Reader, view: ChatView, owner_open_id: str) -> str:
@@ -165,10 +189,19 @@ async def _title(call: Reader, view: ChatView, owner_open_id: str) -> str:
     return await _name(call, peer) or "对方未发言的私聊"
 
 
-async def _quote(call: Reader, found: Message | None) -> str:
+async def _quote(call: Reader, found: Message | None, group_chat_id: str = "") -> Facts:
+    """被引用那条消息的事实（只填原话相关的字段，调用方补上其余）。"""
     if found is None:
-        return ""
-    return f"{await _name(call, found.sender_id) or '（未知发送人）'}：{found.text}"
+        return Facts("")
+    name = await _name(call, found.sender_id, group_chat_id) or "（未知发送人）"
+    return Facts("", quoted=f"{name}：{found.text}", quoted_by=name, quoted_text=found.text)
+
+
+def _group(view: ChatView, found: Message | None) -> str:
+    """要在哪个群的成员里找发送人：只有这条消息就在这个群里时才有。"""
+    if view.kind == "group" and found is not None and found.chat_id:
+        return found.chat_id
+    return ""
 
 
 def anchor_verdict(
@@ -260,8 +293,12 @@ async def _send(
         if verdict is not None:
             raise Rejected(verdict)
     quoted = source if source is not None else by_id.get(anchor or "")
-    return Facts(
-        view.kind, await _title(call, view, owner_open_id), await _quote(call, quoted), anchor
+    said = await _quote(call, quoted, _group(view, quoted))
+    return replace(
+        said,
+        channel=view.kind,
+        target=await _title(call, view, owner_open_id),
+        anchor_message_id=anchor,
     )
 
 
@@ -275,11 +312,12 @@ async def _on_message(call: Reader, tool: str, one: dict[str, Any], owner_open_i
     if tool in catalog.OWN_MESSAGE and found.sender_id != owner_open_id:
         raise Rejected("not_own_message")
     view = await chat_view(call, chat_id, one.get("thread_id"))
-    return Facts(
-        view.kind,
-        await _title(call, view, owner_open_id),
-        await _quote(call, found),
-        found.message_id,
+    said = await _quote(call, found, _group(view, found))
+    return replace(
+        said,
+        channel=view.kind,
+        target=await _title(call, view, owner_open_id),
+        anchor_message_id=found.message_id,
     )
 
 
