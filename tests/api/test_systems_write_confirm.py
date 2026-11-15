@@ -22,6 +22,7 @@ from coreman.core.db.models import (
     Task,
 )
 from coreman.core.systems_catalog import confirm
+from coreman.core.systems_catalog.context import BUDGET_KEY
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.card_actions import CardActionHandler
 from tests.api.test_feishu_personal import setup
@@ -246,6 +247,10 @@ async def test_writes_wait_for_one_card_and_run_once_confirmed(
     (follow,) = await resumed(db_session)
     assert follow.inbound_event_id == task.inbound_event_id
     assert "成功" in follow.payload[confirm.RESULT_KEY]
+    # 续接是新的一轮：上一轮的调用计数和按任务封存的代理令牌不能带过去。
+    origin = await db_session.get(Task, task.id, populate_existing=True)
+    assert origin is not None and BUDGET_KEY in origin.payload
+    assert BUDGET_KEY not in follow.payload
 
     # The same card cannot run twice.
     again_click = await press(db_session, bot, task, state.id)
