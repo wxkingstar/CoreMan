@@ -21,6 +21,8 @@ def test_rules_cover_the_judgements_that_get_drafts_sent_back() -> None:
         "拿不准",
         "followup_add",
         "assistant_report",
+        "feishu_list_reactions",
+        "算他已经处理",
     ):
         assert phrase in text
 

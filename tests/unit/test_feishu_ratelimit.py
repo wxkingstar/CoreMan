@@ -54,7 +54,7 @@ def test_only_listing_chats_and_reading_history_are_budgeted() -> None:
     assert ratelimit.category(known["im.chats"]) == "chats"
     assert ratelimit.category(known["im.history"]) == "history"
     # 同一个路径的 POST 是发消息；按编号取消息、单个会话、搜索会话各有自己的限额。
-    for key in ("im.send", "im.mget", "im.chat", "im.chat_search", "im.search"):
+    for key in ("im.send", "im.reactions", "im.mget", "im.chat", "im.chat_search", "im.search"):
         assert ratelimit.category(known[key]) is None, key
 
 

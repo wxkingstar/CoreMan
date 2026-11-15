@@ -32,6 +32,7 @@ SAMPLES = {
     },
     "feishu_recall_message": {"message_id": "om_1"},
     "feishu_add_reaction": {"message_id": "om_1", "emoji_type": "THUMBSUP"},
+    "feishu_list_reactions": {"message_ids": ["om_1"]},
     "feishu_pin_message": {"message_id": "om_1"},
     "feishu_list_chats": {"query": "weekly"},
     "feishu_chat_members": {"chat_id": "oc_1"},
@@ -234,6 +235,28 @@ def _upstream(method, path, params=None):
         return {
             "message": {"subject": "Hi", "body_html": "<b>x</b>", "body_plain_text": _body("hello")}
         }
+    if path == "/im/v1/messages/reactions/batch_query":
+        return {
+            "success_msg_reaction_details": [
+                {
+                    "message_id": "om_1",
+                    "has_more": True,
+                    "page_token": "tok",
+                    "message_reaction_items": [
+                        {
+                            "reaction_id": "r1",
+                            "operator": {"operator_id": "ou_zhang", "operator_type": "user"},
+                            "action_time": "1626086391570",
+                            "emoji_type": "OK",
+                        }
+                    ],
+                }
+            ],
+            "success_msg_reaction_counts": [
+                {"message_id": "om_1", "reaction_count": [{"reaction_type": "OK", "count": "1"}]}
+            ],
+            "fail_msg_reaction_details": [{"message_id": "om_2", "fail_reason": "invalid"}],
+        }
     return {"items": []}
 
 
@@ -363,6 +386,7 @@ def test_listing_follows_the_saved_tier_and_granted_permissions():
         "feishu_search_messages",
         "feishu_read_messages",
         "feishu_chat_history",
+        "feishu_list_reactions",
         "feishu_list_chats",
         "feishu_message_read_users",
         "feishu_download_message_file",
@@ -1117,3 +1141,36 @@ def test_download_names_come_from_content_disposition():
     assert name("attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf") == "报告.pdf"
     assert name('attachment; filename="a b.docx"') == "a b.docx"
     assert name("inline") is None
+
+
+async def test_list_reactions_sends_one_batch_query_and_keeps_only_the_essentials(upstream):
+    out = await invoke("feishu_list_reactions", {"message_ids": ["om_1", "om_2"]})
+    ((method, path, kw),) = calls(upstream)
+    assert (method, path) == ("POST", "/im/v1/messages/reactions/batch_query")
+    assert kw["params"] == {"user_id_type": "open_id"}
+    assert kw["json"] == {
+        "queries": [{"message_id": "om_1"}, {"message_id": "om_2"}],
+        "page_size_per_message": 10,
+    }
+    assert out["messages"] == [
+        {
+            "message_id": "om_1",
+            "reactions": [
+                {
+                    "emoji_type": "OK",
+                    "operator_id": "ou_zhang",
+                    "operator_type": "user",
+                    "action_time": "1626086391570",
+                }
+            ],
+            "has_more": True,
+        }
+    ]
+    assert out["failed"] == [{"message_id": "om_2", "fail_reason": "invalid"}]
+    assert "reaction_id" not in str(out) and "page_token" not in str(out)
+
+
+@pytest.mark.parametrize("ids", [[], [f"om_{i}" for i in range(21)], ["om 1"], ["../x"], "om_1"])
+async def test_list_reactions_rejects_bad_message_ids(upstream, ids):
+    out = await invoke("feishu_list_reactions", {"message_ids": ids})
+    assert "error" in out and not upstream.call_args_list

@@ -89,6 +89,14 @@ ENDPOINTS: dict[str, Endpoint] = {
     "im.search": _e("POST", "/im/v1/messages/search", "read", "search:message"),
     "im.mget": _e("GET", "/im/v1/messages/mget", "read", "im:message:readonly"),
     "im.history": _e("GET", "/im/v1/messages", "read", "im:message:readonly"),
+    # 与 im.history 同一个读消息权限排第一：应用清单与授权请求都不多一项，已授权的人不用重授权。
+    "im.reactions": _e(
+        "POST",
+        "/im/v1/messages/reactions/batch_query",
+        "read",
+        "im:message:readonly",
+        "im:message.reactions:read",
+    ),
     "im.send": _e("POST", "/im/v1/messages", "send", "im:message.send_as_user", also=_SEND_AS_USER),
     "im.reply": _e(
         "POST",

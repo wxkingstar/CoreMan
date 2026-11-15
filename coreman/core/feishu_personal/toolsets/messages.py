@@ -91,6 +91,10 @@ class Reaction(MessageRef):
     )
 
 
+class ListReactions(Arguments):
+    message_ids: list[Identifier] = Field(min_length=1, max_length=20)
+
+
 class ReadUsers(Page):
     message_id: Identifier
 
@@ -123,6 +127,10 @@ class CreateChat(Arguments):
 class AddChatMembers(Arguments):
     chat_id: Identifier
     member_open_ids: OpenIds
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _message(text: str, kind: str) -> dict[str, str]:
@@ -265,6 +273,49 @@ async def add_reaction(args: Reaction, call: Call) -> dict[str, Any]:
     )
 
 
+@tool(
+    "feishu_list_reactions",
+    ListReactions,
+    "im.reactions",
+    "List emoji reactions (type, who, when) on up to 20 messages.",
+)
+async def list_reactions(args: ListReactions, call: Call) -> dict[str, Any]:
+    data = await call(
+        "im.reactions",
+        params={"user_id_type": "open_id"},
+        json={
+            "queries": [{"message_id": message_id} for message_id in args.message_ids],
+            "page_size_per_message": 10,
+        },
+    )
+    messages: list[dict[str, Any]] = []
+    for entry in _dicts(data.get("success_msg_reaction_details")):
+        reactions = []
+        for item in _dicts(entry.get("message_reaction_items")):
+            operator = item.get("operator")
+            operator = operator if isinstance(operator, dict) else {}
+            reactions.append(
+                {
+                    "emoji_type": item.get("emoji_type"),
+                    "operator_id": operator.get("operator_id"),
+                    "operator_type": operator.get("operator_type"),
+                    "action_time": item.get("action_time"),
+                }
+            )
+        messages.append(
+            {
+                "message_id": entry.get("message_id"),
+                "reactions": reactions,
+                "has_more": bool(entry.get("has_more")),
+            }
+        )
+    failed = [
+        {"message_id": item.get("message_id"), "fail_reason": item.get("fail_reason")}
+        for item in _dicts(data.get("fail_msg_reaction_details"))
+    ]
+    return {"messages": messages, "failed": failed}
+
+
 @tool("feishu_pin_message", MessageRef, "im.pin", "Pin a message in its chat.")
 async def pin_message(args: MessageRef, call: Call) -> dict[str, Any]:
     return await call("im.pin", json={"message_id": args.message_id})
@@ -371,6 +422,7 @@ TOOLS = [
     read_users,
     announcement,
     add_reaction,
+    list_reactions,
     pin_message,
     list_chats,
     chat_members,

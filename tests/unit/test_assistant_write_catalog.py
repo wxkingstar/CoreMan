@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
+from coreman.core.assistants import write_fuse
 from coreman.core.assistants.approvals import catalog
-from coreman.core.feishu_personal import endpoints
+from coreman.core.feishu_personal import endpoints, permissions
 from coreman.core.feishu_personal.tools import TOOLS
 
 # 会改动飞书里东西的接口（kind 为 write 或 send）。
@@ -36,8 +38,8 @@ WRITES = {
 READ_BY_POST = {
     "approval.templates", "attendance.results", "bitable.search", "calendar.freebusy",
     "calendar.primary", "calendar.search", "contact.departments", "contact.search",
-    "docs.fetch", "docs.search", "drive.metas", "im.search", "mail.batch_get", "mail.search",
-    "minutes.search", "task.search", "vc.rooms", "vc.search",
+    "docs.fetch", "docs.search", "drive.metas", "im.reactions", "im.search", "mail.batch_get",
+    "mail.search", "minutes.search", "task.search", "vc.rooms", "vc.search",
 }  # fmt: skip
 
 
@@ -110,3 +112,29 @@ def test_new_endpoints_request_no_new_permission() -> None:
     assert table["im.reaction_delete"].scopes == table["im.reaction"].scopes
     assert table["im.chat"].scopes == table["im.chats"].scopes
     assert table["im.chat"].kind == "read" and table["im.reaction_delete"].kind == "write"
+
+
+def test_listing_reactions_is_a_read_that_asks_for_no_new_permission() -> None:
+    """读表情复用读消息的权限：应用清单不多一项，已授权的人不用重新授权。"""
+    item = endpoints.ENDPOINTS["im.reactions"]
+    assert item.kind == "read" and item.scopes[0] == "im:message:readonly"
+    assert "im:message.reactions:read" not in endpoints.manifest_scopes()
+    assert endpoints.manifest_scopes() == frozenset(
+        {
+            s
+            for key, e in endpoints.ENDPOINTS.items()
+            if key != "im.reactions"
+            for s in (e.scopes[0], *e.also)
+        }
+        | endpoints.EXTRA_SCOPES
+    )
+    for level in ("messages_readonly", "all_except_send", "all"):
+        assert endpoints.denied(item, level, permissions.MESSAGE_SCOPES) is None
+        assert "im:message.reactions:read" not in endpoints.request_scopes(
+            level, {"im:message:readonly"}
+        )
+    assert "im:message:readonly" in endpoints.request_scopes("all", {"im:message:readonly"})
+    # 助理不拦它，写保险丝也放行。
+    assert not catalog.is_write("feishu_list_reactions")
+    assistant = SimpleNamespace(kind="assistant", id=1)
+    assert not write_fuse.blocked(assistant, item.kind)  # type: ignore[arg-type]
