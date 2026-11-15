@@ -14,6 +14,7 @@ from typing import Any
 
 from coreman.core.assistants.approvals import checks
 from coreman.core.assistants.watch_grade import Item
+from coreman.core.feishu_personal.endpoints import CARD_CONTENT
 from coreman.core.feishu_personal.service import PersonalError
 
 Reader = checks.Reader
@@ -146,6 +147,7 @@ async def read_main(call: Reader, chat_id: str, since_ms: int) -> tuple[list[dic
         "start_time": str(since_ms // 1000),
         "sort_type": "ByCreateTimeAsc",
         "page_size": PAGE,
+        **CARD_CONTENT,
     }
     items: list[dict[str, Any]] = []
     calls = 0
@@ -169,6 +171,7 @@ async def read_thread(call: Reader, thread_id: str) -> list[dict[str, Any]]:
             "container_id": thread_id,
             "sort_type": "ByCreateTimeDesc",
             "page_size": THREAD_PAGE,
+            **CARD_CONTENT,
         },
     )
     items = _rows(data)

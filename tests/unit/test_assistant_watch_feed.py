@@ -191,6 +191,7 @@ async def test_read_main_starts_at_the_cursor_second_and_follows_one_more_page()
         "start_time": "1700000000",
         "sort_type": "ByCreateTimeAsc",
         "page_size": 50,
+        "card_msg_content_type": "user_card_content",
     }
     assert reader.calls == [
         ("im.history", None, first),
@@ -213,6 +214,7 @@ async def test_read_thread_takes_the_latest_page_without_a_time_range() -> None:
                 "container_id": "omt_1",
                 "sort_type": "ByCreateTimeDesc",
                 "page_size": 20,
+                "card_msg_content_type": "user_card_content",
             },
         )
     ]

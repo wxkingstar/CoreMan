@@ -75,6 +75,7 @@ async def test_reply_to_the_latest_message_passes_with_the_facts_for_the_form() 
     history = next(call for key, call in reader.calls if key == "im.history")
     assert history["params"]["container_id"] == "oc_1"
     assert history["params"]["sort_type"] == "ByCreateTimeDesc"
+    assert history["params"]["card_msg_content_type"] == "user_card_content"
 
 
 @pytest.mark.parametrize(
@@ -152,6 +153,7 @@ async def test_reading_a_thread_reads_that_thread() -> None:
     history = next(call for key, call in reader.calls if key == "im.history")
     assert history["params"]["container_id_type"] == "thread"
     assert history["params"]["container_id"] == "omt_1"
+    assert history["params"]["card_msg_content_type"] == "user_card_content"
 
 
 async def test_forward_reads_the_source_wherever_it_is() -> None:
@@ -209,7 +211,9 @@ def test_rich_text_and_other_message_types_are_flattened() -> None:
     item["msg_type"], item["body"] = "post", {"content": json.dumps(post, ensure_ascii=False)}
     assert checks.parse(item).text == "周报 本周 链接"
     item["msg_type"], item["body"] = "image", {"content": "{}"}
-    assert checks.parse(item).text == "[image消息]"
+    assert checks.parse(item).text == "[图片]"
+    item["msg_type"], item["body"] = "interactive", {"content": '{"title": "通知", "elements": []}'}
+    assert checks.parse(item).text == "[卡片] 通知"
 
 
 async def test_sending_a_file_follows_the_send_and_reply_rules() -> None:
@@ -380,3 +384,10 @@ async def test_a_reply_chain_under_an_announcement_is_not_a_topic() -> None:
 def test_the_topic_of_a_message_is_read_from_thread_id() -> None:
     assert checks.parse(msg("om_1", thread_id="omt_1")).thread_id == "omt_1"
     assert checks.parse(msg("om_1")).thread_id == ""
+
+
+async def test_reading_one_message_by_id_asks_for_the_original_card() -> None:
+    reader = Reader([msg("om_2")])
+    assert (await checks.message(reader, "om_2")) is not None
+    (key, call) = next(c for c in reader.calls if c[0] == "im.mget")
+    assert call["params"] == {"message_ids": ["om_2"], "card_msg_content_type": "user_card_content"}

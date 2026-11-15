@@ -2,6 +2,7 @@
 
 import base64
 import email
+import json
 from email import policy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -32,6 +33,7 @@ SAMPLES = {
     },
     "feishu_recall_message": {"message_id": "om_1"},
     "feishu_add_reaction": {"message_id": "om_1", "emoji_type": "THUMBSUP"},
+    "feishu_list_reactions": {"message_ids": ["om_1"]},
     "feishu_pin_message": {"message_id": "om_1"},
     "feishu_list_chats": {"query": "weekly"},
     "feishu_chat_members": {"chat_id": "oc_1"},
@@ -234,6 +236,28 @@ def _upstream(method, path, params=None):
         return {
             "message": {"subject": "Hi", "body_html": "<b>x</b>", "body_plain_text": _body("hello")}
         }
+    if path == "/im/v1/messages/reactions/batch_query":
+        return {
+            "success_msg_reaction_details": [
+                {
+                    "message_id": "om_1",
+                    "has_more": True,
+                    "page_token": "tok",
+                    "message_reaction_items": [
+                        {
+                            "reaction_id": "r1",
+                            "operator": {"operator_id": "ou_zhang", "operator_type": "user"},
+                            "action_time": "1626086391570",
+                            "emoji_type": "OK",
+                        }
+                    ],
+                }
+            ],
+            "success_msg_reaction_counts": [
+                {"message_id": "om_1", "reaction_count": [{"reaction_type": "OK", "count": "1"}]}
+            ],
+            "fail_msg_reaction_details": [{"message_id": "om_2", "fail_reason": "invalid"}],
+        }
     return {"items": []}
 
 
@@ -363,6 +387,7 @@ def test_listing_follows_the_saved_tier_and_granted_permissions():
         "feishu_search_messages",
         "feishu_read_messages",
         "feishu_chat_history",
+        "feishu_list_reactions",
         "feishu_list_chats",
         "feishu_message_read_users",
         "feishu_download_message_file",
@@ -1117,3 +1142,122 @@ def test_download_names_come_from_content_disposition():
     assert name("attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf") == "报告.pdf"
     assert name('attachment; filename="a b.docx"') == "a b.docx"
     assert name("inline") is None
+
+
+async def test_list_reactions_sends_one_batch_query_and_keeps_only_the_essentials(upstream):
+    out = await invoke("feishu_list_reactions", {"message_ids": ["om_1", "om_2"]})
+    ((method, path, kw),) = calls(upstream)
+    assert (method, path) == ("POST", "/im/v1/messages/reactions/batch_query")
+    assert kw["params"] == {"user_id_type": "open_id"}
+    assert kw["json"] == {
+        "queries": [{"message_id": "om_1"}, {"message_id": "om_2"}],
+        "page_size_per_message": 10,
+    }
+    assert out["messages"] == [
+        {
+            "message_id": "om_1",
+            "reactions": [
+                {
+                    "emoji_type": "OK",
+                    "operator_id": "ou_zhang",
+                    "operator_type": "user",
+                    "action_time": "1626086391570",
+                }
+            ],
+            "counts": {"OK": "1"},
+            "has_more": True,
+        }
+    ]
+    assert out["failed"] == [{"message_id": "om_2", "fail_reason": "invalid"}]
+    assert "reaction_id" not in str(out) and "page_token" not in str(out)
+
+
+@pytest.mark.parametrize("ids", [[], [f"om_{i}" for i in range(21)], ["om 1"], ["../x"], "om_1"])
+async def test_list_reactions_rejects_bad_message_ids(upstream, ids):
+    out = await invoke("feishu_list_reactions", {"message_ids": ids})
+    assert "error" in out and not upstream.call_args_list
+
+
+CARD = {
+    "schema": "2.0",
+    "header": {"title": {"tag": "plain_text", "content": "周报"}},
+    "body": {
+        "elements": [
+            {"tag": "markdown", "content": "张三本周完成了三件事"},
+            {"tag": "img", "img_key": "img_v3_a"},
+        ]
+    },
+}
+
+
+def _with_card(upstream):
+    card = {
+        "message_id": "om_card",
+        "msg_type": "interactive",
+        "body": {"content": json.dumps(CARD, ensure_ascii=False)},
+    }
+    text = {"message_id": "om_text", "msg_type": "text", "body": {"content": '{"text": "hi"}'}}
+
+    async def call(session, cipher, scope, method, path, **kwargs):
+        if path in ("/im/v1/messages", "/im/v1/messages/mget"):
+            return {"items": [card, text]}
+        if path == "/im/v1/messages/search":
+            return {"items": [{"message_id": "om_card"}]}
+        return {"items": []}
+
+    upstream.side_effect = call
+
+
+def _assert_readable(items):
+    card, text = items
+    assert card["body"]["content"].startswith("[卡片·含 1 张图] 周报 张三本周完成了三件事")
+    assert card["card_image_keys"] == ["img_v3_a"]
+    assert "无法下载" in card["card_images_note"]
+    assert "schema" not in str(card)
+    assert text == {
+        "message_id": "om_text",
+        "msg_type": "text",
+        "body": {"content": '{"text": "hi"}'},
+    }
+
+
+async def test_reading_messages_asks_for_card_content_and_returns_readable_text(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_read_messages", {"message_ids": ["om_card", "om_text"]})
+    ((_, path, kw),) = calls(upstream)
+    assert path == "/im/v1/messages/mget"
+    assert kw["params"]["card_msg_content_type"] == "user_card_content"
+    _assert_readable(out["items"])
+
+
+async def test_chat_history_asks_for_card_content_and_returns_readable_text(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_chat_history", {"chat_id": "oc_1"})
+    ((_, path, kw),) = calls(upstream)
+    assert path == "/im/v1/messages"
+    assert kw["params"]["card_msg_content_type"] == "user_card_content"
+    _assert_readable(out["items"])
+
+
+async def test_searching_messages_fetches_content_with_card_content(upstream):
+    _with_card(upstream)
+    out = await invoke("feishu_search_messages", {"query": "周报"})
+    paths = {path: kw for _, path, kw in calls(upstream)}
+    assert paths["/im/v1/messages/mget"]["params"]["card_msg_content_type"] == "user_card_content"
+    assert out["messages"][0]["card_image_keys"] == ["img_v3_a"]
+
+
+async def test_a_card_without_images_carries_no_image_note(upstream):
+    card = {
+        "message_id": "om_c",
+        "msg_type": "interactive",
+        "body": {"content": json.dumps({"elements": [{"tag": "markdown", "content": "通知"}]})},
+    }
+
+    async def call(session, cipher, scope, method, path, **kwargs):
+        return {"items": [card]}
+
+    upstream.side_effect = call
+    out = await invoke("feishu_read_messages", {"message_ids": ["om_c"]})
+    [item] = out["items"]
+    assert item["card_image_keys"] == [] and "card_images_note" not in item

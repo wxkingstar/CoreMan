@@ -52,6 +52,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.feishu_personal import ratelimit
 from coreman.core.feishu_personal import service as personal
+from coreman.core.feishu_personal.message_text import without_marker
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call
@@ -321,7 +322,7 @@ class _Round:
             # 的承诺；真人私聊里的系统消息等不算。已知限制：机器人还没说过话的全新私聊里，他的
             # 第一句话可能入箱，由提示词规则兜底。
             return
-        if len(" ".join(item.text.split())) < OWNER_SAID_MIN_CHARS:
+        if len(" ".join(without_marker(item.text).split())) < OWNER_SAID_MIN_CHARS:
             return
         oldest = min(self.oldest, int(entry.get("a") or self.oldest))
         if item.at_ms < max(oldest, _week_ago(self.now)):

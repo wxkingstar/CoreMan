@@ -255,3 +255,27 @@ async def test_a_cancelled_round_is_not_waited_for_forever(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(job, 5)
     release.set()
+
+
+async def test_a_card_with_malformed_content_does_not_stall_the_cursor(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = install(monkeypatch)
+    who = await assistant(db_session)
+    base = base_time()
+    await primed(db_session, who, base)
+    api.chats = [LI]
+    bad = {"elements": [{"tag": "table", "columns": [{"name": "a"}], "rows": {"x": 1}}]}
+    api.say(
+        "oc_li",
+        "om_bad",
+        after(base, 5),
+        msg_type="interactive",
+        body={"content": json.dumps(bad)},
+    )
+    api.say("oc_li", "om_ok", after(base, 6), text="正常的一条")
+    counts = await tick(make_session_factory(db_engine), after(base, 30))
+    assert counts["assistant_watch_polled"] == 1
+    ids = {row.message_id for row in await inbox_rows(db_session, who)}
+    assert "om_ok" in ids
+    assert (await watch_row(db_session, who)).state == "polling"

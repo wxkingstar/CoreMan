@@ -7,6 +7,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, ValidationError, model_validator
 
+from coreman.core.feishu_personal.endpoints import CARD_CONTENT
+from coreman.core.feishu_personal.message_text import (
+    CARD_IMAGES_NOTE,
+    card_image_keys,
+    item_text,
+)
 from coreman.core.feishu_personal.toolbase import (
     Arguments,
     Call,
@@ -91,6 +97,10 @@ class Reaction(MessageRef):
     )
 
 
+class ListReactions(Arguments):
+    message_ids: list[Identifier] = Field(min_length=1, max_length=20)
+
+
 class ReadUsers(Page):
     message_id: Identifier
 
@@ -123,6 +133,33 @@ class CreateChat(Arguments):
 class AddChatMembers(Arguments):
     chat_id: Identifier
     member_open_ids: OpenIds
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _readable(item: Any) -> Any:
+    """卡片消息的原始 JSON 动辄几十 KB：给可读文字与图片键，其余类型原样返回。"""
+    if not isinstance(item, dict) or item.get("msg_type") != "interactive":
+        return item
+    body = item.get("body")
+    keys = card_image_keys(item)
+    out = {
+        **item,
+        "body": {**(body if isinstance(body, dict) else {}), "content": item_text(item)},
+        "card_image_keys": keys,
+    }
+    if keys:
+        out["card_images_note"] = CARD_IMAGES_NOTE
+    return out
+
+
+def _readable_items(data: dict[str, Any]) -> dict[str, Any]:
+    items = data.get("items")
+    return (
+        {**data, "items": [_readable(item) for item in items]} if isinstance(items, list) else data
+    )
 
 
 def _message(text: str, kind: str) -> dict[str, str]:
@@ -164,7 +201,11 @@ async def search_messages(args: SearchMessages, call: Call) -> dict[str, Any]:
             ids.extend(ReadMessages(message_ids=[candidate]).message_ids)
         except ValidationError:
             continue
-    messages = await call("im.mget", params={"message_ids": ids}) if ids else {}
+    messages = (
+        _readable_items(await call("im.mget", params={"message_ids": ids, **CARD_CONTENT}))
+        if ids
+        else {}
+    )
     return {
         "messages": messages.get("items", [])[: args.limit],
         "has_more": bool(found.get("has_more")),
@@ -174,7 +215,9 @@ async def search_messages(args: SearchMessages, call: Call) -> dict[str, Any]:
 
 @tool("feishu_read_messages", ReadMessages, "im.mget", "Read up to 20 accessible messages by ID.")
 async def read_messages(args: ReadMessages, call: Call) -> dict[str, Any]:
-    data = await call("im.mget", params={"message_ids": args.message_ids})
+    data = _readable_items(
+        await call("im.mget", params={"message_ids": args.message_ids, **CARD_CONTENT})
+    )
     if isinstance(data.get("items"), list):
         data = {**data, "items": data["items"][: len(args.message_ids)]}
     return data
@@ -188,14 +231,17 @@ async def read_messages(args: ReadMessages, call: Call) -> dict[str, Any]:
 )
 async def chat_history(args: ChatHistory, call: Call) -> dict[str, Any]:
     times = {"start_time": args.start_time, "end_time": args.end_time}
-    return await call(
-        "im.history",
-        params={
-            **page(args),
-            **{key: str(value) for key, value in times.items() if value is not None},
-            "container_id_type": "chat",
-            "container_id": args.chat_id,
-        },
+    return _readable_items(
+        await call(
+            "im.history",
+            params={
+                **page(args),
+                **{key: str(value) for key, value in times.items() if value is not None},
+                "container_id_type": "chat",
+                "container_id": args.chat_id,
+                **CARD_CONTENT,
+            },
+        )
     )
 
 
@@ -263,6 +309,56 @@ async def add_reaction(args: Reaction, call: Call) -> dict[str, Any]:
         path={"message_id": args.message_id},
         json={"reaction_type": {"emoji_type": args.emoji_type}},
     )
+
+
+@tool(
+    "feishu_list_reactions",
+    ListReactions,
+    "im.reactions",
+    "List emoji reactions (type, who, when) on up to 20 messages.",
+)
+async def list_reactions(args: ListReactions, call: Call) -> dict[str, Any]:
+    data = await call(
+        "im.reactions",
+        params={"user_id_type": "open_id"},
+        json={
+            "queries": [{"message_id": message_id} for message_id in args.message_ids],
+            "page_size_per_message": 10,
+        },
+    )
+    counts: dict[Any, dict[str, str]] = {}
+    for entry in _dicts(data.get("success_msg_reaction_counts")):
+        counts[entry.get("message_id")] = {
+            str(one.get("reaction_type")): str(one.get("count"))
+            for one in _dicts(entry.get("reaction_count"))
+        }
+    messages: list[dict[str, Any]] = []
+    for entry in _dicts(data.get("success_msg_reaction_details")):
+        reactions = []
+        for item in _dicts(entry.get("message_reaction_items")):
+            operator = item.get("operator")
+            operator = operator if isinstance(operator, dict) else {}
+            reactions.append(
+                {
+                    "emoji_type": item.get("emoji_type"),
+                    "operator_id": operator.get("operator_id"),
+                    "operator_type": operator.get("operator_type"),
+                    "action_time": item.get("action_time"),
+                }
+            )
+        messages.append(
+            {
+                "message_id": entry.get("message_id"),
+                "reactions": reactions,
+                "counts": counts.get(entry.get("message_id"), {}),
+                "has_more": bool(entry.get("has_more")),
+            }
+        )
+    failed = [
+        {"message_id": item.get("message_id"), "fail_reason": item.get("fail_reason")}
+        for item in _dicts(data.get("fail_msg_reaction_details"))
+    ]
+    return {"messages": messages, "failed": failed}
 
 
 @tool("feishu_pin_message", MessageRef, "im.pin", "Pin a message in its chat.")
@@ -371,6 +467,7 @@ TOOLS = [
     read_users,
     announcement,
     add_reaction,
+    list_reactions,
     pin_message,
     list_chats,
     chat_members,
