@@ -20,6 +20,8 @@ class FakeS3:
         self.closed = 0
 
     def put_object(self, **args):
+        # 阿里云 OSS 丢弃带下划线的请求头，元数据键带下划线会让签名校验失败。
+        assert all("_" not in key for key in args.get("Metadata", {}))
         self.files[args["Key"]] = {"body": args["Body"].read(), "modified": utcnow()}
         return {"VersionId": "v1"}
 
