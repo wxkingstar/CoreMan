@@ -20,7 +20,7 @@ from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, Us
 from coreman.core.systems_catalog import batch, confirm
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.systems_write_cards import _clicker, _context, _resume, _update
+from coreman.runtime.worker.systems_write_cards import _clicker, _context, _update
 
 
 async def handle(
@@ -87,6 +87,9 @@ async def handle(
         if not confirm.lapsed(state, now):
             return "ignored"
         body = await batch.card(session, ctx.cipher, state)
+        if body is None:
+            # 明细文件没能生成：不发只有抽样的卡，旧卡保持原样，稍后可以再点。
+            return "systems_batch_unavailable"
         if await confirm.resend(session, state, body, now, **where):
             return "systems_batch_resent"
         await confirm.expire(session, state, now, **where)
@@ -99,7 +102,7 @@ async def handle(
     if verb == "cancel":
         state.status = "cancelled"
         await _update(session, bot, inbound, "已取消，没有执行。")
-        await _resume(session, origin, state, "用户取消了这批写操作，都没有执行。不要重试。")
+        await batch.resume(session, origin, state, "用户取消了这批写操作，都没有执行。不要重试。")
         return "systems_batch_cancelled"
     # 先落库再复查：复查会提交事务、放掉行锁，状态必须先离开「待确认」，之后的取消、过期、
     # 再点确认才都不会生效。进程在这之后没了的话，这一批不会执行，保留期满由清理任务删掉。
@@ -122,7 +125,7 @@ async def handle(
         return "expired"
     if reason:
         await _update(session, bot, inbound, f"已不能执行（{reason}），整批都没有执行。")
-        await _resume(
+        await batch.resume(
             session,
             origin,
             locked,
@@ -164,25 +167,47 @@ class SystemsBatchRunHandler:
             bot = await session.get(Bot, state.bot_id)
             user = await session.get(User, uuid.UUID(str(meta["user_id"])))
             halted: str | None = None
+            crashed: batch.ItemCrashed | None = None
             pctx = None
-            if origin is not None and bot is not None and user is not None:
-                pctx = await _context(session, ctx, bot, origin, user)
             try:
+                # 一批可能跑很久：每段都看提问人和 AI 员工是否仍然有效。
+                if bot is None or not bot.enabled:
+                    raise batch.Halt("AI 员工已停用")
+                if user is None or user.status != "active":
+                    raise batch.Halt("提问人的账号已停用")
+                if origin is not None:
+                    pctx = await _context(session, ctx, bot, origin, user)
                 if pctx is None:
                     raise batch.Halt("无法以提问人的身份调用业务系统")
                 outcome = await batch.run_chunk(
-                    pctx, ctx.cipher, state, chunk=chunk, clock=ctx.clock
+                    pctx,
+                    ctx.cipher,
+                    state,
+                    chunk=chunk,
+                    clock=ctx.clock,
+                    cancelled=ctx.cancel_event.is_set,
                 )
             except batch.Halt as exc:
                 await session.rollback()
                 halted = exc.reason
                 outcome = batch.DONE
+            except batch.ItemCrashed as exc:
+                await session.rollback()
+                crashed = exc
+                outcome = batch.MORE
+            if halted is not None or crashed is not None:
                 # 回滚让已加载的行都过期：重新取，后面要用。
                 state = await session.get(InteractionState, batch_id, populate_existing=True)
                 origin = await session.get(
                     Task, int(meta["origin_task_id"]), populate_existing=True
                 )
                 assert state is not None
+            if crashed is not None:
+                await batch.mark_unknown(session, ctx.cipher, batch_id, crashed.seq, crashed.kind)
+            if outcome == batch.CANCELLED and ctx.cancel_reason != "reaper":
+                # 管理台停掉了执行任务：这一批到此为止，剩下的记为未执行并告诉提问人。
+                halted = "执行被管理员停止"
+                outcome = batch.DONE
             if outcome == batch.WAIT:
                 # 上一段有一项可能还在途：过了宽限再来，那时仍没有结果才记为结果未知。
                 await tasks.defer(session, ctx.task.id, seconds=batch.SEND_GRACE + 5)
@@ -192,9 +217,10 @@ class SystemsBatchRunHandler:
             if outcome == batch.DONE:
                 note = await batch.finish(session, ctx.cipher, state, halted, chunk=chunk)
                 if note is not None and origin is not None:
-                    await _resume(session, origin, state, note)
+                    await batch.resume(session, origin, state, note)
             elif outcome == batch.MORE:
                 await batch.next_chunk(session, state, chunk=chunk)
+            # 被判失联（CANCELLED 且原因是 reaper）或已被接手：什么都不收尾，巡检会另排一段。
             await tasks.finish(session, ctx.task.id, status="succeeded", only_active=True)
             await session.commit()
         ctx.log.info("systems_batch_chunk", outcome=outcome, halted=bool(halted))

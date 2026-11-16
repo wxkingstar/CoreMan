@@ -26,15 +26,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.bus import tasks
+from coreman.core.bus import outbox, tasks
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InteractionState, SystemBatchItem, Task
 from coreman.core.logging import get_logger
 from coreman.core.object_store import object_store
 from coreman.core.systems_catalog import confirm, policy, proxy, uploads
-from coreman.core.systems_catalog.context import Context
-from coreman.core.timeutils import utcnow
+from coreman.core.systems_catalog.context import Context, carried
+from coreman.core.timeutils import aware_utc, utcnow
 
 log = get_logger(__name__)
 
@@ -44,6 +44,11 @@ RUN_KIND = "systems_batch_run"
 AAD = "systems_batch.v1"
 MAX_ITEMS = {"write": 1000, "destructive": 50}
 PREVIEW_MAX = 50
+# The batch file: checked, sealed and turned into CSV in memory, so it stays small.
+MAX_FILE_BYTES = 5 * 1024 * 1024
+# Fields the card counts values for; the rest are only in the detail file.
+STATS_FIELDS_MAX = 20
+STATS_VALUE_MAX = 40
 ERRORS_SHOWN = 20
 TOP_VALUES = 3
 REPEATS_SHOWN = 5
@@ -58,9 +63,11 @@ CHUNK_SECONDS = 60.0
 # but is alive): the next stretch waits this long before calling it unknown. A call may wait up to
 # `proxy.CALL_TIMEOUT` for each read of the response.
 SEND_GRACE = 120.0
-DONE, MORE, WAIT, SUPERSEDED = "done", "more", "wait", "superseded"
-# A batch whose run task keeps failing is not queued again forever.
+DONE, MORE, WAIT, SUPERSEDED, CANCELLED = "done", "more", "wait", "superseded", "cancelled"
+# A batch whose run task keeps getting lost without any item done in between is queued again this
+# many times, at least `REVIVE_GAP` seconds apart, then finished with the rest not run.
 MAX_REVIVES = 3
+REVIVE_GAP = 60.0
 STOP = "stop"
 LABELS = {
     "ok": "成功",
@@ -82,7 +89,8 @@ Scalar = proxy.Scalar
 class Row(BaseModel):
     """One line of the batch file."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    # 与 proxy.Call 一样去掉首尾空白：暂存、判重、展示用的就是发出去的值。
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
     path_params: dict[str, Scalar] | None = None
     query: dict[str, Scalar | list[Scalar]] | None = None
     body: Any = None
@@ -110,13 +118,19 @@ def _error(code: str, message: str, **extra: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------- submit
 
 
+def _no_constant(name: str) -> Any:
+    """NaN and Infinity are not JSON and cannot be sent as a request body."""
+    raise ValueError(name)
+
+
 def parse(data: bytes, cap: int) -> tuple[list[tuple[int, Row]], list[str], int]:
     """(line number, row) of every non-blank line, the problems found and the item count."""
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         return [], ["文件不是 UTF-8 编码的 JSON Lines"], 0
-    lines = [(n, line) for n, line in enumerate(text.splitlines(), 1) if line.strip()]
+    # 只按换行切：U+2028 之类在 JSON 字符串里是合法字符，不能当成行尾。
+    lines = [(n, line) for n, line in enumerate(text.split("\n"), 1) if line.strip()]
     if not lines:
         return [], ["文件里没有任何一行数据"], 0
     if len(lines) > cap:
@@ -125,9 +139,9 @@ def parse(data: bytes, cap: int) -> tuple[list[tuple[int, Row]], list[str], int]
     problems: list[str] = []
     for number, line in lines:
         try:
-            raw = json.loads(line)
+            raw = json.loads(line, parse_constant=_no_constant)
         except ValueError:
-            problems.append(f"第 {number} 行：不是合法的 JSON")
+            problems.append(f"第 {number} 行：不是合法的 JSON（NaN、Infinity 也不行）")
             continue
         if not isinstance(raw, dict):
             problems.append(f"第 {number} 行：每行应是一个 JSON 对象")
@@ -277,6 +291,13 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
             "批量文件不存在、已过期（1 小时）或不是本轮上传的。"
             "按 systems_describe 的说明重新上传。",
         )
+    if upload.size > MAX_FILE_BYTES:
+        await session.commit()
+        return _error(
+            "batch_too_large",
+            f"批量文件不能超过 {MAX_FILE_BYTES // (1024 * 1024)} MB。每行只写这一项要改的参数，"
+            "或分成几批、让用户分几条消息提交。",
+        )
     data = await uploads.read(ctx.settings or get_settings(), upload)
     cap = MAX_ITEMS[op["risk"]]
     rows, problems, total = parse(data, cap)
@@ -297,7 +318,8 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
                 return built
             problems.append(f"第 {number} 行：" + "；".join(built["invalid"][:3]))
             continue
-        key = _canon([row.path_params, row.query, row.body])
+        # 按实际发出的请求判重，不按文件里的写法。
+        key = _canon([str(built.url), built.body])
         if key in seen:
             problems.append(f"第 {number} 行：与第 {seen[key]} 行完全相同")
             continue
@@ -314,6 +336,38 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
         )
     chat_id, chat_type = origin
     now = utcnow()
+    note = (
+        args.note.model_dump(exclude_none=True, include={"impact", "rollback"}) if args.note else {}
+    )
+    sealed = {
+        "note": note,
+        "summary": summarize(items),
+        "preview": [[index + 1, items[index]] for index in pick(items, member.task_id)],
+    }
+    meta = {
+        "origin_task_id": member.task_id,
+        "user_id": str(member.user.id),
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "system": system.key,
+        "system_name": system.name,
+        "operation_id": args.operation_id,
+        "summary": op.get("summary") or "",
+        "method": op["method"],
+        "path": op["path"],
+        "server": _server(system, loaded),
+        "risk": op["risk"],
+        "op_digest": confirm.op_digest(op),
+        "count": len(items),
+    }
+    # 卡片放不下就当场说，不等飞书拒收之后才让用户知道。
+    if not fits(meta, sealed):
+        await session.commit()
+        return _error(
+            "batch_card_too_large",
+            "这一批的内容放不进一张确认卡（字段太多或取值太长）。每行只写这一项要改的字段，"
+            "或者请用户在业务系统里用批量导入完成。",
+        )
     state = InteractionState(
         bot_id=member.bot_id,
         kind=KIND,
@@ -335,32 +389,14 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
                 idempotency_key=str(uuid.uuid4()),
             )
         )
-    note = (
-        args.note.model_dump(exclude_none=True, include={"impact", "rollback"}) if args.note else {}
-    )
-    sealed = {
-        "note": note,
-        "summary": summarize(items),
-        "preview": [[index + 1, items[index]] for index in pick(items, member.task_id)],
-    }
-    state.state = {
-        "origin_task_id": member.task_id,
-        "user_id": str(member.user.id),
-        "chat_id": chat_id,
-        "chat_type": chat_type,
-        "system": system.key,
-        "system_name": system.name,
-        "operation_id": args.operation_id,
-        "summary": op.get("summary") or "",
-        "method": op["method"],
-        "path": op["path"],
-        "risk": op["risk"],
-        "op_digest": confirm.op_digest(op),
-        "count": len(items),
-        "enc": cipher.encrypt(_dump(sealed), _aad(state.id)),
-    }
+    state.state = {**meta, "enc": cipher.encrypt(_dump(sealed), _aad(state.id))}
     await proxy.record(ctx, system, args.operation_id, op, "batch_proposed")
     return {"status": "pending_confirmation", "count": len(items), "hint": HINT}
+
+
+def _server(system: Any, loaded: Any) -> str:
+    """Where the operation's path is appended: part of what the asker confirms."""
+    return str(loaded.compiled.get("server") or system.base_url or "")
 
 
 def instructions(public_base_url: str, risk: str) -> dict[str, Any]:
@@ -371,7 +407,7 @@ def instructions(public_base_url: str, risk: str) -> dict[str, Any]:
         "file": "JSON Lines，UTF-8，每行一项："
         '{"path_params": {...}, "query": {...}, "body": {...}, "target": "对象的业务名称", '
         '"before": {"字段": "修改前的值"}}；path_params、query、body 与单次调用相同，'
-        "target、before 选填，只用于确认卡展示。",
+        "target、before 选填，只用于确认卡展示。文件不超过 5 MB，不能有 NaN、Infinity。",
         "upload": f'curl -sS -X PUT -H "Authorization: Bearer ${policy.TOKEN_ENV}" '
         f"--data-binary @<本地文件路径> '{url}'",
         "call": 'systems_call(system, operation_id, batch={"upload_id": "..."}, '
@@ -401,6 +437,24 @@ def _object(item: dict[str, Any]) -> str:
     return "，".join(f"{_value(k)}={_value(v)}" for k, v in params.items())
 
 
+def _params(item: dict[str, Any]) -> str:
+    """The real request parameters of an item: path parameters, and the query when the counted
+    fields are the body's."""
+    pairs = dict(item.get("path_params") or {})
+    if isinstance(item.get("body"), dict):
+        pairs.update(item.get("query") or {})
+    return "，".join(f"{confirm._plain(k, 30)}={_value(v)}" for k, v in pairs.items())
+
+
+def _preview_object(item: dict[str, Any]) -> str:
+    """What a preview line names: the AI's name for the object is never shown without the real
+    parameters beside it, so a name matched to the wrong row can be seen on the card."""
+    params = _params(item)
+    if item.get("target"):
+        return _value(item["target"]) + (f"［{params}］" if params else "")
+    return params
+
+
 def _named(item: dict[str, Any]) -> str:
     name = _object(item)
     return f"（{name}）" if name else ""
@@ -421,13 +475,18 @@ def _changes(item: dict[str, Any]) -> str:
 
 def stats_lines(summary: dict[str, Any]) -> list[str]:
     lines = []
-    for field in summary["fields"]:
-        values = [f"{_value(value)}（{n} 项）" for value, n in field["top"]]
+    for field in summary["fields"][:STATS_FIELDS_MAX]:
+        values = [
+            f"{confirm._plain(value, STATS_VALUE_MAX)}（{n} 项）" for value, n in field["top"]
+        ]
         if field["other_values"]:
             values.append(f"其他 {field['other_values']} 种取值（{field['other_items']} 项）")
         if field["missing"]:
             values.append(f"未填（{field['missing']} 项）")
         lines.append(f"{confirm._plain(field['field'], 30)}：" + "、".join(values))
+    hidden = len(summary["fields"]) - STATS_FIELDS_MAX
+    if hidden > 0:
+        lines.append(f"…另有 {hidden} 个字段没有列出，见明细")
     if summary["repeats"]:
         shown = "、".join(
             f"{_object({'path_params': obj})}（{n} 次）" for obj, n in summary["repeats"]
@@ -470,9 +529,12 @@ def _title(meta: dict[str, Any]) -> str:
 
 
 def _card_body(
-    state: InteractionState, sealed: dict[str, Any], preview: list[Any], url: str | None
+    meta: dict[str, Any],
+    state_id: uuid.UUID,
+    sealed: dict[str, Any],
+    preview: list[Any],
+    url: str | None,
 ) -> dict[str, Any]:
-    meta = state.state
     origin = int(meta["origin_task_id"])
     count = int(meta["count"])
     destructive = meta["risk"] == "destructive"
@@ -490,7 +552,8 @@ def _card_body(
     lines += ["", f"【预览 {len(preview)} / {count}】"]
     for seq, item in preview:
         changes = _changes(item)
-        lines.append(f"{seq}. " + "  ".join(part for part in (_object(item), changes) if part))
+        named = _preview_object(item)
+        lines.append(f"{seq}. " + "  ".join(part for part in (named, changes) if part))
     detail = [f"{meta['system_name']} · {meta['method']} {meta['path']}"]
     note = sealed.get("note") or {}
     if note.get("impact"):
@@ -539,7 +602,7 @@ def _card_body(
                             "elements": [
                                 _button(
                                     origin,
-                                    state.id,
+                                    state_id,
                                     f"确认执行 {count} 项",
                                     "confirm",
                                     "danger" if destructive else "primary",
@@ -549,7 +612,7 @@ def _card_body(
                         {
                             "tag": "column",
                             "width": "auto",
-                            "elements": [_button(origin, state.id, "取消", "cancel", "default")],
+                            "elements": [_button(origin, state_id, "取消", "cancel", "default")],
                         },
                     ],
                 },
@@ -567,20 +630,28 @@ def _card_body(
     }
 
 
-def render(state: InteractionState, sealed: dict[str, Any], url: str | None) -> dict[str, Any]:
+def render(
+    meta: dict[str, Any], state_id: uuid.UUID, sealed: dict[str, Any], url: str | None
+) -> dict[str, Any]:
     """The confirmation card, with fewer sample items until it fits."""
     preview = list(sealed["preview"])
     while True:
-        body = _card_body(state, sealed, preview, url)
+        body = _card_body(meta, state_id, sealed, preview, url)
         if confirm._bytes(body) <= confirm.CARD_BYTES_MAX or not preview:
             return body
         preview = preview[: len(preview) // 2]
 
 
+def fits(meta: dict[str, Any], sealed: dict[str, Any]) -> bool:
+    """Whether the batch can be shown on one card at all (with a link as long as a real one)."""
+    body = render(meta, uuid.UUID(int=0), sealed, "https://example.com/" + "x" * 400)
+    return confirm._bytes(body) <= confirm.CARD_BYTES_MAX
+
+
 def _cell(value: Any) -> str:
     text = value if isinstance(value, str) else "" if value is None else _canon(value)
     # 表格软件把 = + - @ 开头的单元格当公式：前面加单引号，打开时只显示文字。
-    return "'" + text if text[:1] in ("=", "+", "-", "@") else text
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
 async def _rows(
@@ -632,7 +703,7 @@ async def _csv_link(
     return object_store(settings, row.backend).url(row)
 
 
-DETAIL_HEADER = ["行号", "对象", "路径参数", "查询参数", "请求体", "修改前（AI 提供）"]
+DETAIL_HEADER = ["序号", "对象", "路径参数", "查询参数", "请求体", "修改前（AI 提供）"]
 
 
 def _detail(seq: int, item: dict[str, Any]) -> list[Any]:
@@ -646,8 +717,12 @@ def _detail(seq: int, item: dict[str, Any]) -> list[Any]:
     ]
 
 
-async def card(session: AsyncSession, cipher: Cipher, state: InteractionState) -> dict[str, Any]:
-    """The confirmation card with a fresh link to every staged item (valid as long as the card)."""
+async def card(
+    session: AsyncSession, cipher: Cipher, state: InteractionState
+) -> dict[str, Any] | None:
+    """The confirmation card with a fresh link to every staged item (valid as long as the card).
+    None when the detail file could not be stored: a card showing only a sample of what it
+    confirms is not sent."""
     rows = await _rows(session, cipher, state.id)
     url = await _csv_link(
         session,
@@ -656,7 +731,15 @@ async def card(session: AsyncSession, cipher: Cipher, state: InteractionState) -
         [_detail(item.seq, request) for item, request in rows],
         expires_at=utcnow() + confirm.TTL,
     )
-    return render(state, _sealed(cipher, state), url)
+    if url is None:
+        return None
+    return render(state.state, state.id, _sealed(cipher, state), url)
+
+
+NO_DETAIL = (
+    "这批 {count} 项写操作的明细文件没能生成，确认卡没有发出，这一批不会执行。"
+    "请稍后再发一条消息，让 AI 员工重新提交。"
+)
 
 
 async def release(
@@ -670,7 +753,24 @@ async def release(
     if not send:
         state.status = "cancelled"
         return False
-    await confirm.send_card(session, state, await card(session, cipher, state), now=utcnow())
+    body = await card(session, cipher, state)
+    if body is None:
+        state.status = "cancelled"
+        await outbox.add(
+            session,
+            bot_id=state.bot_id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"{confirm.card_key(KIND, state.id, 0)}:no-detail",
+            target={"chat_id": state.state["chat_id"]},
+            payload={
+                "card": confirm.notice_card(
+                    "写操作没有执行", NO_DETAIL.format(count=state.state["count"])
+                )
+            },
+        )
+        return False
+    await confirm.send_card(session, state, body, now=utcnow())
     return True
 
 
@@ -717,12 +817,40 @@ def tally(found: Counter[str]) -> str:
     return "，".join(parts)
 
 
+BAR_CELLS = 20
+
+
+def bar(done: int, total: int) -> str:
+    """A text progress bar: plain text renders the same on every client and theme."""
+    share = done / total if total else 1.0
+    filled = min(BAR_CELLS, int(share * BAR_CELLS))
+    return "█" * filled + "░" * (BAR_CELLS - filled) + f" {int(share * 100)}%"
+
+
+def remaining(meta: dict[str, Any], done: int, total: int, now: datetime) -> str:
+    """A rough estimate of the time left from the pace so far; empty before anything is done."""
+    try:
+        started = aware_utc(datetime.fromisoformat(str(meta.get("started_at"))))
+    except ValueError:
+        return ""
+    elapsed = (now - started).total_seconds()
+    if done <= 0 or done >= total or elapsed <= 0:
+        return ""
+    seconds = elapsed / done * (total - done)
+    if seconds < 60:
+        return "预计不到 1 分钟完成。"
+    return f"预计还需约 {round(seconds / 60)} 分钟。"
+
+
 def progress_card(state: InteractionState, found: Counter[str]) -> dict[str, Any]:
     meta = state.state
     total = int(meta["count"])
     done = total - found["pending"] - found["sending"]
     stopping = bool(meta.get(STOP))
-    text = f"已处理 {done} / {total}：{tally(found)}。"
+    text = f"{bar(done, total)}\n已处理 {done} / {total}：{tally(found)}。"
+    left = remaining(meta, done, total, utcnow())
+    if left and not stopping:
+        text += f"\n{left}"
     text += "\n已请求停止，正在处理的这一项完成后停下。" if stopping else ""
     elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "plain_text", "content": text}}
@@ -749,6 +877,17 @@ def _brief(result: dict[str, Any]) -> str:
     return text[:BRIEF_MAX] + ("…" if len(text) > BRIEF_MAX else "")
 
 
+class ItemCrashed(Exception):
+    """Sending one item raised something unexpected. Whether the request left is not known; the
+    caller rolls back, records the item as unknown (`mark_unknown`) and carries on with a fresh
+    task, since the session and everything loaded in it can no longer be trusted."""
+
+    def __init__(self, seq: int, kind: str) -> None:
+        super().__init__(kind)
+        self.seq = seq
+        self.kind = kind
+
+
 class Halt(Exception):
     """Something every remaining item depends on is gone: stop, the rest stays unsent."""
 
@@ -769,6 +908,9 @@ async def checked(pctx: Context, state: InteractionState) -> tuple[Any, Any, dic
         raise Halt(proxy.DENIALS.get(denied, denied))
     if op["risk"] != meta["risk"] or confirm.op_digest(op) != meta["op_digest"]:
         raise Halt("业务系统的操作定义已经变化")
+    # 确认的是「这个地址下的这个操作」：目录里的服务器前缀变了，请求就会发到别处。
+    if "server" in meta and _server(system, loaded) != meta["server"]:
+        raise Halt("业务系统的接口地址已经变化")
     return system, loaded, op
 
 
@@ -790,12 +932,14 @@ async def run_chunk(
     *,
     chunk: int,
     clock: Callable[[], float],
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> str:
     """Run the next items in order, as the asker, in `pctx.session` (which holds `state`).
 
     `DONE` when no item is left or the asker asked to stop, `MORE` when the stretch is used up,
     `WAIT` while an item of an earlier stretch may still be in flight, `SUPERSEDED` when another
-    stretch was queued in this one's place; `Halt` when the rest cannot run."""
+    stretch was queued in this one's place, `CANCELLED` when this run task was cancelled or
+    taken for lost; `Halt` when the rest cannot run, `ItemCrashed` when sending an item raised."""
     session = pctx.session
     now = utcnow()
     # 上一段发出后没写回结果的：过了宽限仍没有结果才记为结果未知，不重发。还在宽限内的可能仍
@@ -825,6 +969,8 @@ async def run_chunk(
     started = clock()
     handled = 0
     while handled < CHUNK_ITEMS and clock() - started < CHUNK_SECONDS:
+        if cancelled():
+            return CANCELLED
         await session.refresh(state)
         if not _current(state, chunk):
             return SUPERSEDED
@@ -854,7 +1000,11 @@ async def run_chunk(
         item.status = "sending"
         item.started_at = utcnow()
         await session.commit()
-        result = await proxy.send(pctx, prepared, key=item.idempotency_key, prefix="confirmed_")
+        seq = item.seq
+        try:
+            result = await proxy.send(pctx, prepared, key=item.idempotency_key, prefix="confirmed_")
+        except Exception as exc:
+            raise ItemCrashed(seq, type(exc).__name__) from exc
         if result.get("error") == "token_unavailable":
             # 令牌没签出来，请求没有发出。
             item.status = "pending"
@@ -901,6 +1051,49 @@ async def next_chunk(session: AsyncSession, state: InteractionState, *, chunk: i
         dedupe_key=f"{locked.state.get('card_key')}:progress:{chunk + 1}",
     )
     return True
+
+
+async def mark_unknown(
+    session: AsyncSession, cipher: Cipher, batch_id: uuid.UUID, seq: int, kind: str
+) -> None:
+    """An item whose sending raised: it may or may not have left, so it is never sent again."""
+    item = await session.get(SystemBatchItem, (batch_id, seq), populate_existing=True)
+    if item is None or item.status != "sending":
+        return
+    item.status = "unknown"
+    item.finished_at = utcnow()
+    item.brief_enc = cipher.encrypt(
+        _canon(
+            {
+                "error": "platform_error",
+                "message": f"平台处理这一项时出错（{kind}），不确定请求有没有发出。",
+            }
+        ),
+        _aad(batch_id, seq),
+    )
+    log.warning("systems_batch_item_crashed", batch_id=str(batch_id), seq=seq, error_type=kind)
+
+
+async def resume(session: AsyncSession, origin: Task, state: InteractionState, note: str) -> None:
+    """Continue the conversation that staged the batch with its outcome (once per batch)."""
+    await tasks.enqueue(
+        session,
+        tasks.NewTask(
+            bot_id=origin.bot_id,
+            kind="chat",
+            user_id=origin.user_id,
+            session_key=origin.session_key,
+            inbound_event_id=origin.inbound_event_id,
+            dedupe_key=f"systems-write:{state.id}:resume",
+            payload={
+                **carried(origin.payload, confirm.RESULT_KEY),
+                confirm.RESULT_KEY: note,
+                "serialize_session": True,
+                # 用户刚点完确认卡，不再问「还要不要做」。
+                "stale_confirmed": True,
+            },
+        ),
+    )
 
 
 RESULT_HEADER = [*DETAIL_HEADER, "结果", "状态码", "摘要"]
@@ -1021,9 +1214,20 @@ async def finish(
     return "\n".join(note)
 
 
+async def _handled(session: AsyncSession, batch_id: uuid.UUID) -> int:
+    done = await session.scalar(
+        select(func.count())
+        .select_from(SystemBatchItem)
+        .where(SystemBatchItem.batch_id == batch_id, SystemBatchItem.status != "pending")
+    )
+    return int(done or 0)
+
+
 async def revive(session: AsyncSession, now: datetime) -> int:
-    """A confirmed batch whose run task is gone (worker lost) without finishing: queue the next
-    chunk. Returns how many were queued."""
+    """A confirmed batch whose run task is gone (worker lost, handler crashed) without finishing:
+    queue the next stretch, which skips everything already handled. After `MAX_REVIVES` in a row
+    with no item handled in between, finish the batch instead (the rest not run) and tell the
+    asker, so it never stays "running" for good. Returns how many batches were handled."""
     running = list(
         await session.scalars(
             select(InteractionState.id).where(
@@ -1033,7 +1237,7 @@ async def revive(session: AsyncSession, now: datetime) -> int:
             )
         )
     )
-    queued = 0
+    handled = 0
     for batch_id in running:
         live = await session.scalar(
             select(func.count())
@@ -1049,18 +1253,43 @@ async def revive(session: AsyncSession, now: datetime) -> int:
         state = await session.get(
             InteractionState, batch_id, with_for_update=True, populate_existing=True
         )
-        revived = int(state.state.get("revived") or 0) if state is not None else 0
-        if (
-            state is None
-            or state.status != "submitted"
-            or state.state.get("finished_at")
-            or revived >= MAX_REVIVES
-        ):
+        if state is None or state.status != "submitted" or state.state.get("finished_at"):
             continue
-        chunk = int(state.state.get("chunk") or 1) + 1
-        state.state = {**state.state, "chunk": chunk, "revived": revived + 1}
+        meta = state.state
+        try:
+            last = aware_utc(datetime.fromisoformat(str(meta.get("revived_at"))))
+        except ValueError:
+            last = None
+        if last is not None and (now - last).total_seconds() < REVIVE_GAP:
+            continue
+        done = await _handled(session, batch_id)
+        # 上次补排之后有进展，就不算连续失败。
+        revived = 0 if done > int(meta.get("revived_done", -1)) else int(meta.get("revived") or 0)
+        chunk = int(meta.get("chunk") or 1) + 1
+        # 段号总要往前走：被判丢失却还活着的那一段据此发现自己已被接手。
+        state.state = {
+            **meta,
+            "chunk": chunk,
+            "revived": revived + 1,
+            "revived_at": now.isoformat(),
+            "revived_done": done,
+        }
+        await session.flush()
+        handled += 1
+        if revived >= MAX_REVIVES:
+            log.warning("systems_batch_gave_up", batch_id=str(batch_id))
+            note = await finish(
+                session,
+                get_settings().build_cipher(),
+                state,
+                "执行任务多次意外中断，已停止",
+                chunk=chunk,
+            )
+            origin = await session.get(Task, int(meta["origin_task_id"]))
+            if note is not None and origin is not None:
+                await resume(session, origin, state, note)
+            continue
         await _enqueue(session, state, chunk)
-        log.warning("systems_batch_revived", batch_id=str(state.id), chunk=chunk)
-        queued += 1
+        log.warning("systems_batch_revived", batch_id=str(batch_id), chunk=chunk)
     await session.commit()
-    return queued
+    return handled

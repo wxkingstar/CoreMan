@@ -70,7 +70,9 @@ def test_a_thousand_items_fit_one_card() -> None:
         "summary": batch.summarize(rows),
         "preview": [[i + 1, rows[i]] for i in batch.pick(rows, seed=7)],
     }
-    card = batch.render(state(len(rows)), sealed, "https://example.com/csv?signature=x")
+    staged = state(len(rows))
+    assert batch.fits(staged.state, sealed)
+    card = batch.render(staged.state, staged.id, sealed, "https://example.com/csv?signature=x")
     size = len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode())
     assert size <= confirm.CARD_BYTES_MAX
     text = card["body"]["elements"][0]["text"]["content"]
@@ -83,3 +85,54 @@ def test_csv_cells_cannot_start_a_formula() -> None:
     assert batch._cell("-1") == "'-1"
     assert batch._cell({"a": 1}) == '{"a": 1}'
     assert batch._cell(None) == ""
+    assert batch._cell("\t=1") == "'\t=1"
+
+
+def test_the_preview_shows_the_real_parameters_beside_the_ai_name() -> None:
+    row = {
+        "path_params": {"listingId": "REAL-999"},
+        "query": {"dryRun": False},
+        "body": {"price": "1.00"},
+        "target": "挂牌 L1001",
+    }
+    staged = state(1)
+    sealed = {"note": {}, "summary": batch.summarize([row]), "preview": [[1, row]]}
+    text = batch.render(staged.state, staged.id, sealed, None)["body"]["elements"][0]["text"][
+        "content"
+    ]
+    assert "1. 挂牌 L1001［listingId=REAL-999，dryRun=false］  price：1.00" in text
+
+
+def test_a_wide_batch_lists_some_fields_and_one_too_wide_does_not_fit() -> None:
+    wide = [{"body": {f"字段{i}": f"值{n}" for i in range(60)}} for n in range(4)]
+    staged = state(len(wide))
+    sealed = {"note": {}, "summary": batch.summarize(wide), "preview": [[1, wide[0]]]}
+    assert batch.fits(staged.state, sealed)
+    lines = batch.stats_lines(sealed["summary"])
+    assert len(lines) == batch.STATS_FIELDS_MAX + 1 and "另有 40 个字段没有列出" in lines[-1]
+
+    huge = {"impact": "x"}
+    staged.state["system_name"] = "名" * 20000
+    assert not batch.fits(staged.state, {**sealed, "note": huge})
+
+
+def test_lines_split_only_at_newlines_and_nan_is_refused() -> None:
+    sep = "\u2028"
+    data = (
+        '{"body": {"a": "x' + sep + 'y"}}\r\n\n{"body": {"a": NaN}}\n{"body": {"a": " z "}}'
+    ).encode()
+    rows, problems, total = batch.parse(data, 10)
+    assert total == 3 and [n for n, _ in rows] == [1, 4]
+    assert rows[0][1].body == {"a": "x" + sep + "y"}
+    assert problems == ["第 3 行：不是合法的 JSON（NaN、Infinity 也不行）"]
+
+
+def test_the_progress_bar_and_the_time_left() -> None:
+    assert batch.bar(0, 40) == "░" * 20 + " 0%"
+    assert batch.bar(10, 40) == "█" * 5 + "░" * 15 + " 25%"
+    assert batch.bar(40, 40) == "█" * 20 + " 100%"
+    now = batch.utcnow()
+    started = (now - batch.timedelta(seconds=120)).isoformat()
+    assert batch.remaining({"started_at": started}, 100, 400, now) == "预计还需约 6 分钟。"
+    assert batch.remaining({"started_at": started}, 0, 400, now) == ""
+    assert batch.remaining({}, 5, 10, now) == ""
