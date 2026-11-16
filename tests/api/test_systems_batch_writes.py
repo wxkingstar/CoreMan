@@ -749,3 +749,166 @@ async def test_cancelling_the_run_task_stops_the_batch_and_a_lost_one_steps_asid
     assert await statuses(db_session) == ["skipped", "skipped"]
     assert "执行被管理员停止" in text_of((await updates(db_session))[-1])
     assert fake.sent == []  # type: ignore[attr-defined]
+
+
+async def confirmed(
+    client: Any, app: Any, db_session: AsyncSession, db_engine: Any, *skus: str
+) -> tuple[Any, Task, InteractionState]:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(*(row(sku) for sku in skus)))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    return bot, task, state
+
+
+async def notices(db_session: AsyncSession) -> list[str]:
+    rows = await db_session.scalars(
+        select(OutboxItem).where(OutboxItem.dedupe_key.like("%:notice:%")).order_by(OutboxItem.id)
+    )
+    return [item.payload["card"]["body"]["elements"][0]["content"] for item in rows]
+
+
+def buttons(card: dict[str, Any]) -> dict[str, str]:
+    """Button label → verb, wherever the buttons sit on the card."""
+    found: dict[str, str] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("tag") == "button":
+                verb = node["behaviors"][0]["value"]["level"].split(":")[0]
+                found[node["text"]["content"]] = verb
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(card)
+    return found
+
+
+async def test_a_large_batch_runs_a_few_items_then_waits_for_the_asker(
+    client, app, db_session, db_engine, fake
+) -> None:
+    skus = [f"S{i}" for i in range(12)]
+    bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).first()
+    assert "先执行前 5 项并暂停" in text_of(card.payload["card"])
+
+    assert await run_all(db_session, db_engine) == 1
+    assert [s["sku"] for s in fake.sent] == skus[:5]  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok"] * 5 + ["pending"] * 7
+    paused = (await updates(db_session))[-1]
+    assert paused["header"]["title"]["content"] == "已试跑 5 项，等你确认"
+    assert "第 5 项" in text_of(paused) and "核对" in text_of(paused)
+    assert buttons(paused) == {"继续执行剩余 7 项": batch.GO, "停止，剩余的不执行": batch.STOP}
+    assert "试跑前 5 项并暂停" in (await notices(db_session))[-1]
+    # Paused: nothing is queued, and the patrol does not queue anything either.
+    async with app.state.session_factory() as session:
+        assert await batch.revive(session, batch.utcnow()) == 0
+    assert await run_all(db_session, db_engine) == 0
+
+    assert await click(db_session, db_engine, bot, task, state.id, batch.GO) == (
+        "systems_batch_resumed"
+    )
+    await run_all(db_session, db_engine)
+    assert [s["sku"] for s in fake.sent] == skus  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok"] * 12
+    assert (await updates(db_session))[-1]["header"]["title"]["content"] == "已完成"
+    # No second trial, and a second "carry on" does nothing.
+    assert await click(db_session, db_engine, bot, task, state.id, batch.GO) == "ignored"
+
+
+async def test_stopping_a_paused_batch_ends_it_and_an_unanswered_pause_ends_too(
+    client, app, db_session, db_engine, fake
+) -> None:
+    skus = [f"S{i}" for i in range(12)]
+    bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)
+    await run_all(db_session, db_engine)
+    assert await click(db_session, db_engine, bot, task, state.id, batch.STOP) == (
+        "systems_batch_stopped"
+    )
+    assert await statuses(db_session) == ["ok"] * 5 + ["skipped"] * 7
+    final = (await updates(db_session))[-1]
+    assert "按发起人的要求停止" in text_of(final)
+    assert buttons(final) == {"继续执行剩余 7 项": batch.CONTINUE}
+    (follow,) = await resumed(db_session)
+    assert "未执行 7" in follow.payload[confirm.RESULT_KEY]
+
+    # 结束后再继续：只做没执行的，做完再续接一轮。
+    assert await click(db_session, db_engine, bot, task, state.id, batch.CONTINUE) == (
+        "systems_batch_resumed"
+    )
+    await run_all(db_session, db_engine)
+    assert [s["sku"] for s in fake.sent] == skus  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok"] * 12
+    assert len(await resumed(db_session)) == 2
+    assert await click(db_session, db_engine, bot, task, state.id, batch.CONTINUE) == "ignored"
+
+
+async def test_a_pause_nobody_answers_ends_the_batch(
+    client, app, db_session, db_engine, fake
+) -> None:
+    await confirmed(client, app, db_session, db_engine, *(f"S{i}" for i in range(12)))
+    await run_all(db_session, db_engine)
+    async with app.state.session_factory() as session:
+        later = batch.utcnow() + batch.PAUSE_TTL + timedelta(seconds=1)
+        assert await batch.revive(session, later) == 1
+    assert await statuses(db_session) == ["ok"] * 5 + ["skipped"] * 7
+    assert "60 分钟没有选择继续" in text_of((await updates(db_session))[-1])
+    assert len(await resumed(db_session)) == 1
+
+
+async def test_ten_failures_in_a_row_pause_the_batch_and_failed_items_can_be_retried(
+    client, app, db_session, db_engine, fake
+) -> None:
+    skus = [f"S{i}" for i in range(5)] + [f"BAD{i}" for i in range(10)] + ["T1", "T2"]
+    bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)
+    await run_all(db_session, db_engine)
+    await click(db_session, db_engine, bot, task, state.id, batch.GO)
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok"] * 5 + ["http_error"] * 10 + ["pending"] * 2
+    paused = (await updates(db_session))[-1]
+    assert paused["header"]["title"]["content"] == "连续 10 项没有成功，已暂停"
+    assert "sku rejected" in text_of(paused)
+    assert "连续 10 项没有成功" in (await notices(db_session))[-1]
+
+    await click(db_session, db_engine, bot, task, state.id, batch.GO)
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok"] * 5 + ["http_error"] * 10 + ["ok"] * 2
+    final = (await updates(db_session))[-1]
+    assert buttons(final) == {"重试失败的 10 项": batch.RETRY}
+
+    # 业务系统恢复后重试：只重发失败的 10 项，用新的幂等键。
+    before = {i.seq: i.idempotency_key for i in await db_session.scalars(select(SystemBatchItem))}
+    fake.routes[("POST", "/api/stock/documents")] = lambda request: httpx.Response(
+        200, json={"code": 0}
+    )
+    sent_before = len(fake.sent)  # type: ignore[attr-defined]
+    assert await click(db_session, db_engine, bot, task, state.id, batch.RETRY) == (
+        "systems_batch_resumed"
+    )
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok"] * 17
+    assert len(fake.sent) == sent_before  # type: ignore[attr-defined]  # 新路由不记到 sent
+    after = {
+        i.seq: i.idempotency_key
+        for i in await db_session.scalars(
+            select(SystemBatchItem).execution_options(populate_existing=True)
+        )
+    }
+    assert all((after[seq] != before[seq]) == (6 <= seq <= 15) for seq in before)
+    assert (await updates(db_session))[-1]["header"]["title"]["content"] == "已完成"
+    assert len(await resumed(db_session)) == 2
+
+
+async def test_a_group_asker_is_mentioned(client, app, db_session, fake) -> None:
+    _, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A")))
+    state = await state_of(db_session)
+    assert state.state["open_id"] == "ou_human"
+    state.state = {**state.state, "chat_type": "group"}
+    await batch.notify(db_session, state, "t", "批量操作已结束")
+    await db_session.commit()
+    assert (await notices(db_session))[-1] == "<at id=ou_human></at> 批量操作已结束"

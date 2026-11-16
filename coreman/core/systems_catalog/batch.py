@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import outbox, tasks
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, InteractionState, SystemBatchItem, Task
+from coreman.core.db.models import Bot, InboundEvent, InteractionState, SystemBatchItem, Task
 from coreman.core.logging import get_logger
 from coreman.core.object_store import object_store
 from coreman.core.systems_catalog import confirm, policy, proxy, uploads
@@ -69,6 +69,20 @@ DONE, MORE, WAIT, SUPERSEDED, CANCELLED = "done", "more", "wait", "superseded", 
 MAX_REVIVES = 3
 REVIVE_GAP = 60.0
 STOP = "stop"
+# Card verbs: carry on after a pause; run the items not run yet, or the failed ones, again.
+GO, CONTINUE, RETRY = "go", "continue", "retry"
+# A batch of more than `TRIAL_OVER` items first runs `TRIAL_ITEMS` and pauses for the asker to
+# check them in the business system.
+TRIAL_ITEMS = 5
+TRIAL_OVER = 10
+# This many items in a row without success pause the batch: the business system is probably down
+# or refusing everything, and the asker decides whether to carry on.
+FAIL_STREAK = 10
+# A paused batch nobody answers is finished after this long, the rest not run.
+PAUSE_TTL = confirm.TTL
+PAUSE_TRIAL, PAUSE_FAILURES = "pause_trial", "pause_failures"
+FAILED = ("http_error", "unreachable")
+NOT_OK = (*FAILED, "unknown")
 LABELS = {
     "ok": "成功",
     "http_error": "失败",
@@ -80,7 +94,8 @@ LABELS = {
 }
 HINT = (
     "已整批暂存，没有执行。本轮结束时平台给提问人发一张确认卡（总数、字段统计、抽样预览和完整"
-    "明细下载），点确认后平台逐项执行。告诉用户需要在卡片上确认，不要说已经完成。"
+    "明细下载），点确认后平台逐项执行；超过 10 项时先执行前 5 项并暂停，等提问人核对后继续。"
+    "告诉用户需要在卡片上确认，不要说已经完成。"
 )
 
 Scalar = proxy.Scalar
@@ -347,6 +362,7 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
     meta = {
         "origin_task_id": member.task_id,
         "user_id": str(member.user.id),
+        "open_id": await _asker_open_id(session, member.task_id),
         "chat_id": chat_id,
         "chat_type": chat_type,
         "system": system.key,
@@ -392,6 +408,17 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
     state.state = {**meta, "enc": cipher.encrypt(_dump(sealed), _aad(state.id))}
     await proxy.record(ctx, system, args.operation_id, op, "batch_proposed")
     return {"status": "pending_confirmation", "count": len(items), "hint": HINT}
+
+
+async def _asker_open_id(session: AsyncSession, task_id: int) -> str:
+    """The asker's Feishu open_id (for mentions), from the message that started the turn."""
+    task = await session.get(Task, task_id)
+    event = (
+        await session.get(InboundEvent, task.inbound_event_id)
+        if task is not None and task.inbound_event_id is not None
+        else None
+    )
+    return str(event.sender_open_id or "") if event is not None else ""
 
 
 def _server(system: Any, loaded: Any) -> str:
@@ -541,6 +568,8 @@ def _card_body(
     intro = f"共 {count} 项。以下按字段统计"
     intro += f"，并抽样预览 {len(preview)} 项" if len(preview) < count else "，并列出全部各项"
     intro += "，完整明细见下载。" if url else "。"
+    if count > TRIAL_OVER:
+        intro += f"\n确认后先执行前 {TRIAL_ITEMS} 项并暂停，你核对无误后再继续其余各项。"
     if destructive:
         intro += "\n⚠️ 删除后无法恢复。"
     lines = [
@@ -782,7 +811,10 @@ async def start(session: AsyncSession, state: InteractionState) -> None:
     state.status = "submitted"
     # 执行中不让清理任务碰它；跑完再给保留期。
     state.expires_at = None
-    state.state = {**state.state, "started_at": utcnow().isoformat(), "chunk": 1}
+    meta = {**state.state, "started_at": utcnow().isoformat(), "started_done": 0, "chunk": 1}
+    if int(meta["count"]) > TRIAL_OVER:
+        meta["trial"] = TRIAL_ITEMS
+    state.state = meta
     await _enqueue(session, state, 1)
 
 
@@ -834,9 +866,11 @@ def remaining(meta: dict[str, Any], done: int, total: int, now: datetime) -> str
     except ValueError:
         return ""
     elapsed = (now - started).total_seconds()
-    if done <= 0 or done >= total or elapsed <= 0:
+    # 暂停、收尾后再继续时重新计速：停着的那段时间不算。
+    paced = done - int(meta.get("started_done") or 0)
+    if paced <= 0 or done >= total or elapsed <= 0:
         return ""
-    seconds = elapsed / done * (total - done)
+    seconds = elapsed / paced * (total - done)
     if seconds < 60:
         return "预计不到 1 分钟完成。"
     return f"预计还需约 {round(seconds / 60)} 分钟。"
@@ -914,13 +948,15 @@ async def checked(pctx: Context, state: InteractionState) -> tuple[Any, Any, dic
     return system, loaded, op
 
 
-def _current(state: InteractionState | None, chunk: int) -> bool:
+def _current(state: InteractionState | None, chunk: int, *, paused_too: bool = False) -> bool:
     """This run task is still the one the batch expects: nobody queued a later stretch in its
-    place (`revive`, after the task was taken for lost) and the batch has not been finished."""
+    place (`revive`, after the task was taken for lost), the batch has not been finished and,
+    unless `paused_too` (finishing a paused batch), it is not waiting for the asker."""
     return (
         state is not None
         and state.status == "submitted"
         and not state.state.get("finished_at")
+        and (paused_too or not state.state.get("paused"))
         and int(state.state.get("chunk") or 0) == chunk
     )
 
@@ -938,8 +974,10 @@ async def run_chunk(
 
     `DONE` when no item is left or the asker asked to stop, `MORE` when the stretch is used up,
     `WAIT` while an item of an earlier stretch may still be in flight, `SUPERSEDED` when another
-    stretch was queued in this one's place, `CANCELLED` when this run task was cancelled or
-    taken for lost; `Halt` when the rest cannot run, `ItemCrashed` when sending an item raised."""
+    stretch was queued in this one's place (or the batch is paused), `CANCELLED` when this run
+    task was cancelled or taken for lost, `PAUSE_TRIAL` after the first items of a large batch,
+    `PAUSE_FAILURES` after `FAIL_STREAK` items in a row without success; `Halt` when the rest
+    cannot run, `ItemCrashed` when sending an item raised."""
     session = pctx.session
     now = utcnow()
     # 上一段发出后没写回结果的：过了宽限仍没有结果才记为结果未知，不重发。还在宽限内的可能仍
@@ -976,6 +1014,9 @@ async def run_chunk(
             return SUPERSEDED
         if state.state.get(STOP):
             return DONE
+        trial = state.state.get("trial")
+        if trial and await _handled(session, state.id) >= int(trial):
+            return PAUSE_TRIAL
         item = await session.scalar(
             select(SystemBatchItem)
             .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status == "pending")
@@ -1022,8 +1063,11 @@ async def run_chunk(
         item.status_code = status if isinstance(status, int) else None
         item.brief_enc = cipher.encrypt(_brief(result), _aad(state.id, item.seq))
         item.finished_at = utcnow()
+        failed = item.status in NOT_OK
         await session.commit()
         handled += 1
+        if failed and await _streak(session, state):
+            return PAUSE_FAILURES
     left = await session.scalar(
         select(func.count())
         .select_from(SystemBatchItem)
@@ -1051,6 +1095,221 @@ async def next_chunk(session: AsyncSession, state: InteractionState, *, chunk: i
         dedupe_key=f"{locked.state.get('card_key')}:progress:{chunk + 1}",
     )
     return True
+
+
+async def _streak(session: AsyncSession, state: InteractionState) -> bool:
+    """The last `FAIL_STREAK` items handled since the batch last (re)started all went wrong,
+    and there is still something left to run."""
+    since = state.state.get("streak_since")
+    stmt = (
+        select(SystemBatchItem.status)
+        .where(
+            SystemBatchItem.batch_id == state.id,
+            SystemBatchItem.status.in_(("ok", *NOT_OK)),
+        )
+        .order_by(SystemBatchItem.finished_at.desc(), SystemBatchItem.seq.desc())
+        .limit(FAIL_STREAK)
+    )
+    if since:
+        stmt = stmt.where(SystemBatchItem.finished_at > datetime.fromisoformat(str(since)))
+    last = list(await session.scalars(stmt))
+    if len(last) < FAIL_STREAK or any(status == "ok" for status in last):
+        return False
+    left = await session.scalar(
+        select(func.count())
+        .select_from(SystemBatchItem)
+        .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status == "pending")
+    )
+    return bool(left)
+
+
+def _item_line(item: SystemBatchItem, request: dict[str, Any], brief: str) -> str:
+    code = f"（{item.status_code}）" if item.status_code else ""
+    text = f"第 {item.seq} 项{_named(request)}：{LABELS[item.status]}{code}"
+    return text + (" " + confirm._plain(brief, 120) if brief and item.status != "ok" else "")
+
+
+def _decide(origin: int, state_id: uuid.UUID, left: int) -> dict[str, Any]:
+    """The two buttons of a paused batch."""
+    return {
+        "tag": "column_set",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [_button(origin, state_id, f"继续执行剩余 {left} 项", GO, "primary")],
+            },
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [_button(origin, state_id, "停止，剩余的不执行", STOP, "default")],
+            },
+        ],
+    }
+
+
+async def notify(session: AsyncSession, state: InteractionState, tag: str, text: str) -> None:
+    """Tell the asker in the chat that the batch needs them or has ended: a card update alone
+    notifies nobody. In a group the asker is mentioned."""
+    meta = state.state
+    open_id = str(meta.get("open_id") or "")
+    mention = f"<at id={open_id}></at> " if open_id and meta.get("chat_type") == "group" else ""
+    await outbox.add(
+        session,
+        bot_id=state.bot_id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"{confirm.card_key(KIND, state.id, 0)}:notice:{tag}",
+        target={"chat_id": meta["chat_id"]},
+        payload={
+            "card": {
+                "schema": "2.0",
+                "body": {"elements": [{"tag": "markdown", "content": mention + text}]},
+            }
+        },
+    )
+
+
+async def pause(
+    session: AsyncSession, cipher: Cipher, state: InteractionState, reason: str, *, chunk: int
+) -> bool:
+    """Stop queueing stretches until the asker decides: show what happened so far with
+    "carry on" and "stop". False (nothing done) when this run task is no longer current."""
+    locked = await session.get(
+        InteractionState, state.id, with_for_update=True, populate_existing=True
+    )
+    if not _current(locked, chunk):
+        return False
+    assert locked is not None
+    now = utcnow()
+    meta = {**locked.state, "paused": {"reason": reason, "at": now.isoformat()}}
+    meta.pop("trial", None)
+    locked.state = meta
+    rows = await _rows(session, cipher, locked.id)
+    found = Counter(item.status for item, _ in rows)
+    total = int(meta["count"])
+    handled = [(item, request) for item, request in rows if item.status != "pending"]
+
+    def line(item: SystemBatchItem, request: dict[str, Any]) -> str:
+        brief = cipher.decrypt(item.brief_enc, _aad(locked.id, item.seq)) if item.brief_enc else ""
+        return _item_line(item, request, brief)
+
+    if reason == PAUSE_TRIAL:
+        title, template = f"已试跑 {len(handled)} 项，等你确认", "orange"
+        lines = [
+            f"先执行了前 {len(handled)} 项：{tally(found)}。",
+            *(line(item, request) for item, request in handled),
+            "",
+            "请到业务系统核对这几项的实际结果，确认无误后再继续。",
+        ]
+        told = f"批量操作已试跑前 {len(handled)} 项并暂停，请核对后在卡片上选择继续或停止。"
+    else:
+        title, template = f"连续 {FAIL_STREAK} 项没有成功，已暂停", "red"
+        wrong = [(item, request) for item, request in handled if item.status in NOT_OK]
+        lines = [
+            f"{bar(len(handled), total)}",
+            f"已处理 {len(handled)} / {total}：{tally(found)}。",
+            f"最近 {FAIL_STREAK} 项都没有成功，业务系统可能出了问题。最近一项：",
+            *(line(item, request) for item, request in wrong[-1:]),
+        ]
+        told = f"批量操作连续 {FAIL_STREAK} 项没有成功，已暂停，请在卡片上选择继续或停止。"
+    minutes = int(PAUSE_TTL.total_seconds() // 60)
+    lines.append(f"{minutes} 分钟内没有选择会自动结束，剩余各项不执行。")
+    body = {
+        "schema": "2.0",
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": title},
+            "subtitle": {
+                "tag": "plain_text",
+                "content": confirm._plain(f"{meta['system_name']} · {_title(meta)}"),
+            },
+        },
+        "body": {
+            "elements": [
+                {"tag": "div", "text": {"tag": "plain_text", "content": "\n".join(lines)}},
+                _decide(int(meta["origin_task_id"]), locked.id, found["pending"]),
+            ]
+        },
+    }
+    await confirm.update_card(
+        session, locked, body, dedupe_key=f"{meta.get('card_key')}:paused:{chunk}"
+    )
+    await notify(session, locked, f"paused:{chunk}", told)
+    return True
+
+
+async def _restart(session: AsyncSession, state: InteractionState, meta: dict[str, Any]) -> None:
+    """Queue the next stretch of a batch that was paused or finished, pacing from now."""
+    now = utcnow()
+    chunk = int(meta.get("chunk") or 1) + 1
+    for key in (
+        "paused",
+        "finished_at",
+        STOP,
+        "stopped_by",
+        "revived",
+        "revived_at",
+        "revived_done",
+    ):
+        meta.pop(key, None)
+    meta.update(
+        chunk=chunk,
+        started_at=now.isoformat(),
+        started_done=await _handled(session, state.id),
+        # 之前的失败不算进新的连续失败里。
+        streak_since=now.isoformat(),
+    )
+    state.state = meta
+    state.expires_at = None
+    await _enqueue(session, state, chunk)
+
+
+async def go(session: AsyncSession, state: InteractionState) -> bool:
+    """The asker chose to carry on after a pause. `state` is locked by the caller."""
+    if state.status != "submitted" or not state.state.get("paused"):
+        return False
+    await _restart(session, state, dict(state.state))
+    return True
+
+
+async def requeue(session: AsyncSession, state: InteractionState, verb: str, now: datetime) -> int:
+    """After a batch ended: run the items not run yet (`CONTINUE`) or the failed ones (`RETRY`)
+    again, while the batch is kept. Items whose outcome is unknown are never sent again. Returns
+    how many were queued. `state` is locked by the caller."""
+    kept = state.expires_at is not None and aware_utc(state.expires_at) > now
+    if state.status != "submitted" or not state.state.get("finished_at") or not kept:
+        return 0
+    again = ("skipped",) if verb == CONTINUE else FAILED
+    values: dict[str, Any] = {
+        "status": "pending",
+        "status_code": None,
+        "brief_enc": None,
+        "started_at": None,
+        "finished_at": None,
+    }
+    result = await session.execute(
+        update(SystemBatchItem)
+        .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status.in_(again))
+        .values(**values)
+    )
+    count = int(getattr(result, "rowcount", 0) or 0)
+    if not count:
+        return 0
+    if verb == RETRY:
+        # 重试是一次新的请求：换新的幂等键，免得业务系统把上次失败的结果原样返回。
+        # 收尾后没有别的待执行项，这时的 pending 就是刚放回来的这些。
+        retried = await session.scalars(
+            select(SystemBatchItem)
+            .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status == "pending")
+            .execution_options(populate_existing=True)
+        )
+        for item in retried:
+            item.idempotency_key = str(uuid.uuid4())
+    meta = dict(state.state)
+    meta["round"] = int(meta.get("round") or 0) + 1
+    await _restart(session, state, meta)
+    return count
 
 
 async def mark_unknown(
@@ -1084,7 +1343,9 @@ async def resume(session: AsyncSession, origin: Task, state: InteractionState, n
             user_id=origin.user_id,
             session_key=origin.session_key,
             inbound_event_id=origin.inbound_event_id,
-            dedupe_key=f"systems-write:{state.id}:resume",
+            # 结束后又继续、重试的，每次结束各续接一轮。
+            dedupe_key=f"systems-write:{state.id}:resume"
+            + (f":{round_}" if (round_ := int(state.state.get("round") or 0)) else ""),
             payload={
                 **carried(origin.payload, confirm.RESULT_KEY),
                 confirm.RESULT_KEY: note,
@@ -1094,6 +1355,36 @@ async def resume(session: AsyncSession, origin: Task, state: InteractionState, n
             },
         ),
     )
+
+
+def _stopper(meta: dict[str, Any]) -> str:
+    return "管理员在管理台停止了执行" if meta.get("stopped_by") == "admin" else "按发起人的要求停止"
+
+
+def phase(state: InteractionState) -> str:
+    """Where a batch stands, for the console: awaiting (the asker's confirmation), running,
+    paused, finished, not_started (confirmed but refused or never started), cancelled, expired."""
+    if state.status != "submitted":
+        return "awaiting" if state.status == "open" else state.status
+    meta = state.state
+    if meta.get("finished_at"):
+        return "finished"
+    if meta.get("paused"):
+        return "paused"
+    return "running" if "chunk" in meta else "not_started"
+
+
+async def admin_stop(session: AsyncSession, cipher: Cipher, state: InteractionState) -> bool:
+    """A console administrator stops a running or paused batch: the rest is not run and the asker
+    is told who stopped it. `state` is locked by the caller. False when there is nothing to stop."""
+    if phase(state) not in ("running", "paused") or state.state.get(STOP):
+        return False
+    paused = bool(state.state.get("paused"))
+    state.state = {**state.state, STOP: True, "stopped_by": "admin"}
+    if paused:
+        await session.flush()
+        await _give_up(session, state, None, cipher=cipher)
+    return True
 
 
 RESULT_HEADER = [*DETAIL_HEADER, "结果", "状态码", "摘要"]
@@ -1113,7 +1404,7 @@ async def finish(
     locked = await session.get(
         InteractionState, state.id, with_for_update=True, populate_existing=True
     )
-    if not _current(locked, chunk):
+    if not _current(locked, chunk, paused_too=True):
         return None
     assert locked is not None
     await session.execute(
@@ -1158,7 +1449,7 @@ async def finish(
     if halted:
         lines.append(f"中途停下：{halted}。剩下的没有执行。")
     elif stopped:
-        lines.append("按发起人的要求停止，剩下的没有执行。")
+        lines.append(f"{_stopper(meta)}，剩下的没有执行。")
     if found["unknown"]:
         lines.append("结果未知的项可能已经生效，请先到业务系统核对，不要直接重做。")
     for item, request in failed[:FAILURES_ON_CARD]:
@@ -1169,6 +1460,22 @@ async def finish(
         )
     if len(failed) > FAILURES_ON_CARD:
         lines.append(f"…另有 {len(failed) - FAILURES_ON_CARD} 项没有成功，见结果下载")
+    origin_id = int(meta["origin_task_id"])
+    again: list[dict[str, Any]] = []
+    retryable = found["http_error"] + found["unreachable"]
+    if found["skipped"]:
+        label = f"继续执行剩余 {found['skipped']} 项"
+        again.append(_button(origin_id, locked.id, label, CONTINUE, "primary"))
+    if retryable:
+        label = f"重试失败的 {retryable} 项"
+        again.append(_button(origin_id, locked.id, label, RETRY, "default"))
+    if again:
+        lines.append("")
+        lines.append(
+            "下面的按钮 24 小时内有效，只有发起人能点；点了之后平台先复查权限再执行，"
+            "已经成功和结果未知的项不会再做。"
+        )
+    round_ = int(meta.get("round") or 0)
     body = {
         "schema": "2.0",
         "header": {
@@ -1183,12 +1490,38 @@ async def finish(
             "elements": [
                 {"tag": "div", "text": {"tag": "plain_text", "content": "\n".join(lines)}},
                 *_link(url, "下载全部结果（CSV）"),
+                *(
+                    [
+                        {
+                            "tag": "column_set",
+                            "columns": [
+                                {"tag": "column", "width": "auto", "elements": [button]}
+                                for button in again
+                            ],
+                        }
+                    ]
+                    if again
+                    else []
+                ),
             ]
         },
     }
-    await confirm.update_card(session, locked, body, dedupe_key=f"{meta.get('card_key')}:result")
-    locked.state = {**meta, "finished_at": now.isoformat()}
+    await confirm.update_card(
+        session, locked, body, dedupe_key=f"{meta.get('card_key')}:result:{round_}"
+    )
+    meta = {**meta, "finished_at": now.isoformat()}
+    meta.pop("paused", None)
+    meta.pop("trial", None)
+    locked.state = meta
     locked.expires_at = now + confirm.KEEP
+    if meta.get("chat_type") == "group":
+        # 私聊里续接的那一轮回复本身就是提醒；群里点名告诉发起人一声。
+        await notify(
+            session,
+            locked,
+            f"finished:{round_}",
+            f"批量操作已结束，共 {total} 项：{tally(found)}。详情见上面的结果卡片。",
+        )
     note = [
         f"用户已确认，平台按确认内容逐项执行了 {meta['system']}.{meta['operation_id']}，"
         f"共 {total} 项：{tally(found)}。"
@@ -1196,7 +1529,7 @@ async def finish(
     if halted:
         note.append(f"中途停下：{halted}。剩下的没有执行。")
     elif stopped:
-        note.append("用户点了停止，剩下的没有执行。")
+        note.append(f"{_stopper(meta)}，剩下的没有执行。")
     for item, request in failed[:FAILURES_TO_MODEL]:
         note.append(f"第 {item.seq} 项{_named(request)}：{LABELS[item.status]} " + briefs[item.seq])
     if url:
@@ -1221,6 +1554,28 @@ async def _handled(session: AsyncSession, batch_id: uuid.UUID) -> int:
         .where(SystemBatchItem.batch_id == batch_id, SystemBatchItem.status != "pending")
     )
     return int(done or 0)
+
+
+async def _give_up(
+    session: AsyncSession,
+    state: InteractionState,
+    reason: str | None,
+    *,
+    cipher: Cipher | None = None,
+) -> None:
+    """Finish a batch outside a run task (the rest not run) and continue the conversation."""
+    log.warning("systems_batch_gave_up", batch_id=str(state.id))
+    meta = state.state
+    note = await finish(
+        session,
+        cipher or get_settings().build_cipher(),
+        state,
+        reason,
+        chunk=int(meta.get("chunk") or 0),
+    )
+    origin = await session.get(Task, int(meta["origin_task_id"]))
+    if note is not None and origin is not None:
+        await resume(session, origin, state, note)
 
 
 async def revive(session: AsyncSession, now: datetime) -> int:
@@ -1256,6 +1611,16 @@ async def revive(session: AsyncSession, now: datetime) -> int:
         if state is None or state.status != "submitted" or state.state.get("finished_at"):
             continue
         meta = state.state
+        paused = meta.get("paused")
+        if paused:
+            # 等发起人选继续还是停止：不补排；一直没人选就到点结束。
+            since = aware_utc(datetime.fromisoformat(str(paused["at"])))
+            if now - since < PAUSE_TTL:
+                continue
+            minutes = int(PAUSE_TTL.total_seconds() // 60)
+            await _give_up(session, state, f"暂停后 {minutes} 分钟没有选择继续")
+            handled += 1
+            continue
         try:
             last = aware_utc(datetime.fromisoformat(str(meta.get("revived_at"))))
         except ValueError:
@@ -1277,17 +1642,7 @@ async def revive(session: AsyncSession, now: datetime) -> int:
         await session.flush()
         handled += 1
         if revived >= MAX_REVIVES:
-            log.warning("systems_batch_gave_up", batch_id=str(batch_id))
-            note = await finish(
-                session,
-                get_settings().build_cipher(),
-                state,
-                "执行任务多次意外中断，已停止",
-                chunk=chunk,
-            )
-            origin = await session.get(Task, int(meta["origin_task_id"]))
-            if note is not None and origin is not None:
-                await resume(session, origin, state, note)
+            await _give_up(session, state, "执行任务多次意外中断，已停止")
             continue
         await _enqueue(session, state, chunk)
         log.warning("systems_batch_revived", batch_id=str(batch_id), chunk=chunk)

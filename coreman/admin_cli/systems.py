@@ -1,4 +1,4 @@
-"""业务系统：登记、开放范围、操作目录与访问测试。
+"""业务系统：登记、开放范围、操作目录与访问测试，以及经平台代理执行的批量写操作。
 
 给某个 AI 员工授权用 `bots system-grant`；这里管系统本身和「开放给哪些员工」。
 """
@@ -10,9 +10,21 @@ from typing import Any
 
 from coreman.admin_cli import output
 from coreman.admin_cli.base import add_yes, changed, group, leaf, on_off, require_yes
-from coreman.admin_cli.client import AdminClient, CliError
+from coreman.admin_cli.client import AdminClient, CliError, one
 
 SYSTEMS = "/api/admin/systems"
+BATCHES = "/api/admin/system-batches"
+BATCH_PHASES = {
+    "awaiting": "等待确认",
+    "running": "执行中",
+    "paused": "已暂停",
+    "finished": "已结束",
+    "not_started": "未开始",
+    "cancelled": "已取消",
+    "expired": "已过期",
+}
+PAUSE_REASONS = {"pause_trial": "试跑后等待确认", "pause_failures": "连续失败"}
+BATCH_RESULTS = (("成功", "ok"), ("失败", "failed"), ("结果未知", "unknown"), ("未执行", "skipped"))
 # PUT /systems/{key} 是整份替换：取回现值、改动给出的字段、原样回传其余字段。
 SYSTEM_FIELDS = (
     "name",
@@ -96,6 +108,10 @@ def register(sub: Any) -> None:
     leaf(ops, "test", "以自己的身份签一枚测试令牌并访问测试地址", test).add_argument("key")
     p = leaf(ops, "delete", "删除业务系统", delete)
     p.add_argument("key")
+    add_yes(p)
+    leaf(ops, "batches", "列出近期的批量写操作（结束 24 小时后清理）", batches)
+    p = leaf(ops, "batch-stop", "停止一个执行中或已暂停的批量写操作", batch_stop)
+    p.add_argument("id", help="批次 id，可以只写开头几位（见 systems batches）")
     add_yes(p)
 
 
@@ -310,4 +326,70 @@ async def delete(c: AdminClient, args: argparse.Namespace) -> int:
     require_yes(args, f"删除业务系统 {args.key}（连同所有员工的授权）")
     await c.request("DELETE", f"{SYSTEMS}/{args.key}", version=row["version"])
     print(f"已删除业务系统 {args.key}")
+    return 0
+
+
+def batch_operation(row: dict[str, Any]) -> str:
+    system = row.get("system_name") or row.get("system") or "-"
+    return f"{system} · {row.get('operation_summary') or row.get('operation_id') or '-'}"
+
+
+def batch_status(row: dict[str, Any]) -> str:
+    if row.get("stopping"):
+        return "正在停止"
+    label = BATCH_PHASES.get(row["phase"], row["phase"])
+    reason = PAUSE_REASONS.get(row.get("pause_reason") or "")
+    return f"{label}（{reason}）" if row["phase"] == "paused" and reason else label
+
+
+def batch_progress(row: dict[str, Any]) -> str:
+    return f"{row['count'] - row['pending']} / {row['count']}"
+
+
+def batch_result(row: dict[str, Any]) -> str | None:
+    """各结果的项数，为 0 的不列。"""
+    return "、".join(f"{label} {row[key]}" for label, key in BATCH_RESULTS if row[key]) or None
+
+
+async def batches(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.collect(BATCHES)
+    if args.json:
+        output.dump(rows)
+    else:
+        output.table(
+            rows,
+            [
+                ("批次 id", lambda r: r["id"][:8]),
+                ("发起时间", "created_at"),
+                ("AI 员工", "bot_name"),
+                ("发起人", "user_name"),
+                ("系统 · 操作", batch_operation),
+                ("状态", batch_status),
+                ("进度", batch_progress),
+                ("结果", batch_result),
+            ],
+            empty="（没有近期的批量写操作；批次在结束 24 小时后清理）",
+        )
+    return 0
+
+
+async def batch_stop(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.collect(BATCHES)
+    found = [r for r in rows if r["id"] == args.id] or [
+        r for r in rows if r["id"].startswith(args.id)
+    ]
+    row = one(found, args.id, "批量写操作", lambda r: r["id"][:8])
+    short = row["id"][:8]
+    require_yes(
+        args,
+        f"停止批量写操作 {short}（{batch_operation(row)}，还有 {row['pending']} 项未执行）",
+    )
+    data = await c.request("POST", f"{BATCHES}/{row['id']}/stop")
+    if args.json:
+        output.dump(data)
+    elif data["stopping"]:
+        # 执行中的批次要等手上这一项做完才收尾，此刻还没有最终结果。
+        print(f"已请求停止批量写操作 {short}：正在执行的一项结束后收尾，其余不再执行")
+    else:
+        print(f"已停止批量写操作 {short}：{batch_result(data) or '没有执行任何一项'}")
     return 0

@@ -61,6 +61,7 @@ from coreman.api.routers import (
     skill_catalog,
     skill_local,
     statistics,
+    system_batches,
     systems_catalog,
     teams,
     tower_callback,
@@ -185,6 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(bots_extra.router)
     app.include_router(settings_router.router)
     app.include_router(audit_logs.router)
+    app.include_router(system_batches.router)
     app.include_router(chat_logs.router)
     app.include_router(cron_jobs.router)
     app.include_router(self_reminders.router)

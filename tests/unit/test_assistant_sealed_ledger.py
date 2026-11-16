@@ -35,6 +35,8 @@ ENTITY_SELECTS = {
     "coreman/api/routers/infra_push.py": 1,  # 显式还原
     "coreman/api/routers/runtime.py": 2,  # 运维列表，只出元数据
     "coreman/api/routers/self_reminders.py": 1,  # 只读状态
+    # 批量写操作的批次列表：个人助理不开放批量，没有封存的行；只出元数据
+    "coreman/api/routers/system_batches.py": 1,
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 调度单：同一份内容有没有在途的单，session.scalar（自动还原）
     "coreman/core/assistants/approvals/dispatching.py": 1,

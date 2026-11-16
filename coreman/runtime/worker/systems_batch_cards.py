@@ -32,7 +32,15 @@ async def handle(
 ) -> str:
     """The caller proved the card was sent by us to this chat. Staged values stay out of logs."""
     verb, _, raw_id = str(action.get("level") or "").partition(":")
-    if verb not in ("confirm", "cancel", confirm.RESEND, batch.STOP):
+    if verb not in (
+        "confirm",
+        "cancel",
+        confirm.RESEND,
+        batch.STOP,
+        batch.GO,
+        batch.CONTINUE,
+        batch.RETRY,
+    ):
         return "ignored"
     try:
         origin = await session.get(Task, int(str(action["task_id"]).split(":")[1]))
@@ -75,6 +83,15 @@ async def handle(
         if state.status != "submitted" or staged.get("finished_at") or staged.get(batch.STOP):
             return "ignored"
         state.state = {**staged, batch.STOP: True}
+        if staged.get("paused"):
+            # 暂停着没有执行任务在跑：当场收尾，剩余各项记为未执行。
+            await session.flush()
+            note = await batch.finish(
+                session, ctx.cipher, state, None, chunk=int(staged.get("chunk") or 0)
+            )
+            if note is not None:
+                await batch.resume(session, origin, state, note)
+            return "systems_batch_stopped"
         await confirm.update_card(
             session,
             state,
@@ -82,6 +99,22 @@ async def handle(
             **where,
         )
         return "systems_batch_stopping"
+    if verb in (batch.GO, batch.CONTINUE, batch.RETRY):
+        # 暂停后继续、结束后继续剩余项或重试失败项：这里只改状态并排执行任务，权限与操作
+        # 定义由执行任务在每段开头复查，不通过就停下并说明原因。
+        if verb == batch.GO:
+            queued = await batch.go(session, state)
+        else:
+            queued = bool(await batch.requeue(session, state, verb, now))
+        if not queued:
+            return "ignored"
+        await confirm.update_card(
+            session,
+            state,
+            batch.progress_card(state, await batch.counts(session, state.id)),
+            **where,
+        )
+        return "systems_batch_resumed"
     if verb == confirm.RESEND:
         # 过期卡片上的「重新发起」：同一份暂存内容发一张新卡（新的明细链接），确认时照样复查。
         if not confirm.lapsed(state, now):
@@ -214,7 +247,9 @@ class SystemsBatchRunHandler:
                 await session.commit()
                 ctx.log.info("systems_batch_chunk", outcome=outcome)
                 return
-            if outcome == batch.DONE:
+            if outcome in (batch.PAUSE_TRIAL, batch.PAUSE_FAILURES):
+                await batch.pause(session, ctx.cipher, state, outcome, chunk=chunk)
+            elif outcome == batch.DONE:
                 note = await batch.finish(session, ctx.cipher, state, halted, chunk=chunk)
                 if note is not None and origin is not None:
                     await batch.resume(session, origin, state, note)

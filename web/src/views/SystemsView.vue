@@ -11,6 +11,7 @@ import { call, http } from '@/api/client'
 import { systems, type BusinessSystem, type SystemCatalog, type SystemInput, type TokenProvider } from '@/api/infrastructure'
 import { allSkills, type Skill } from '@/api/skills'
 import { formatBytes, formatDateTime } from '@/utils/format'
+import SystemBatchesPanel from '@/views/SystemBatchesPanel.vue'
 import type { BotOut } from '@/api/types'
 
 const { t } = useI18n()
@@ -222,6 +223,7 @@ onMounted(load)
       layout="prev, pager, next"
       @current-change="load"
     />
+    <SystemBatchesPanel />
     <el-dialog
       v-model="visible"
       :close-on-click-modal="false"
