@@ -35,9 +35,10 @@ from tests.integration.test_assistant_platform_turn_handler import queued as cla
 pytestmark = pytest.mark.usefixtures("assistant_master", "runtime_settings")
 
 # 所有者在 Asia/Shanghai：13:30 是默认的摘要时点，23:00 在默认的免打扰时段里。
-AFTERNOON = datetime(2026, 11, 16, 5, 30, tzinfo=UTC)
-NIGHT = datetime(2026, 11, 16, 15, 0, tzinfo=UTC)
-MORNING = datetime(2026, 11, 17, 0, 0, tzinfo=UTC)
+# 时点放在远未来（同为周一）：条目的创建、更新时间取真实当前时间，总早于这些时点。
+AFTERNOON = datetime(2099, 11, 16, 5, 30, tzinfo=UTC)
+NIGHT = datetime(2099, 11, 16, 15, 0, tzinfo=UTC)
+MORNING = datetime(2099, 11, 17, 0, 0, tzinfo=UTC)
 
 
 async def handover_scope(session: AsyncSession, bot: Bot, owner: User) -> Scope:
