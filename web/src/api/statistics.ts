@@ -4,9 +4,9 @@ export const tokenKeys = ['input_tokens', 'output_tokens', 'cache_read_tokens', 
 export type TokenKey = typeof tokenKeys[number]
 export type Aggregate = { messages: number; users: number; bots: number; cost_usd: number | null; cost_usd_measured: number } & Record<TokenKey, number | null> & Record<`${TokenKey}_measured`, number>
 export interface Statistics { start: string; end: string; timezone: string; total: Aggregate; daily: (Aggregate & { day: string })[]; by_bot: (Aggregate & { id: string; name: string })[]; by_user: (Aggregate & { id: string; name: string | null; avatar_url: string | null; tokens: number })[] }
-export interface ModelPrice { provider: Backend; model: string; effective_from: string; input_usd: string | number; output_usd: string | number; cache_read_usd: string | number; cache_write_usd: string | number; version: number }
+export interface ModelPrice { provider: Backend; model: string; effective_from: string; input_usd: string | number; output_usd: string | number; cache_read_usd: string | number; cache_write_usd: string | number; version: number; source: 'builtin' | 'custom' }
 export const statistics = {
   get: (params: { start?: string; end?: string; timezone: string }) => call<Statistics>(http.get('/api/admin/statistics', { params })),
   prices: () => call<ModelPrice[]>(http.get('/api/admin/model-prices')),
-  savePrice: ({ version, ...body }: ModelPrice) => call<ModelPrice>(http.put('/api/admin/model-prices', body, { headers: { 'If-Match': String(version) } })),
+  savePrice: ({ version, provider, model, effective_from, input_usd, output_usd, cache_read_usd, cache_write_usd }: ModelPrice) => call<ModelPrice>(http.put('/api/admin/model-prices', { provider, model, effective_from, input_usd, output_usd, cache_read_usd, cache_write_usd }, { headers: { 'If-Match': String(version) } })),
 }

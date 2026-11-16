@@ -15,8 +15,11 @@ const busy = ref(false), editing = ref(false), saving = ref(false)
 const range = ref<string[]>([]), timezone = ref('Asia/Shanghai')
 const metric = ref<'messages' | 'users' | 'bots'>('messages')
 const ranking = ref('users')
-const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective_from: new Date().toISOString().slice(0, 10), input_usd: '', output_usd: '', cache_read_usd: '', cache_write_usd: '', version: 0 })
+const today = () => new Date().toISOString().slice(0, 10)
+const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective_from: today(), input_usd: '', output_usd: '', cache_read_usd: '', cache_write_usd: '', version: 0, source: 'custom' })
 const price = reactive<ModelPrice>(emptyPrice())
+// 调整内置价 = 为同一模型新增一条自定义价格：模型固定，生效日默认今天。
+const lockModel = ref(false)
 const money = (value: number | null) => value == null ? t('statistics.unknown') : `$${value.toFixed(6)}`
 const number = (value: number | null) => value == null ? t('statistics.unknown') : value.toLocaleString()
 const fail = (e: unknown) => ElMessage.error(errorMessage(e))
@@ -47,7 +50,7 @@ const loadError = ref('')
 const { persist } = useListQuery({ range, timezone, metric }, () => { void load() })
 async function load() { persist(); loadError.value = ''; if (busy.value) return; busy.value = true; try { data.value = await statistics.get({ start: range.value?.[0], end: range.value?.[1], timezone: timezone.value }); range.value = [data.value.start, data.value.end] } catch (e) { loadError.value = errorMessage(e); data.value = null; fail(e) } finally { busy.value = false } }
 async function loadPrices() { try { prices.value = await statistics.prices() } catch (e) { fail(e) } }
-function edit(row?: ModelPrice) { Object.assign(price, row ?? emptyPrice()); editing.value = true }
+function edit(row?: ModelPrice) { const builtin = row?.source === 'builtin'; Object.assign(price, row ?? emptyPrice(), builtin ? { effective_from: today(), version: 0, source: 'custom' } : {}); lockModel.value = builtin || (row?.version ?? 0) > 0; editing.value = true }
 async function save() { saving.value = true; try { await statistics.savePrice(price); editing.value = false; await loadPrices() } catch (e) { fail(e) } finally { saving.value = false } }
 onMounted(async () => { await load(); if (manager.value) await loadPrices() })
 </script>
@@ -303,6 +306,18 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
             prop="effective_from"
             :label="t('statistics.effective')"
           /><el-table-column
+            min-width="100"
+            :label="t('statistics.source')"
+          >
+            <template #default="{ row }">
+              <el-tag
+                size="small"
+                :type="row.source === 'builtin' ? 'info' : 'warning'"
+              >
+                {{ t(`statistics.source_${row.source}`) }}
+              </el-tag>
+            </template>
+          </el-table-column><el-table-column
             min-width="140"
             prop="input_usd"
             :label="t('statistics.input_tokens')"
@@ -321,7 +336,7 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
           /><el-table-column min-width="140">
             <template #default="{ row }">
               <el-button @click="edit(row)">
-                {{ t('common.edit') }}
+                {{ row.source === 'builtin' ? t('statistics.override') : t('common.edit') }}
               </el-button>
             </template>
           </el-table-column>
@@ -338,7 +353,7 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
         <el-form-item :label="t('statistics.provider')">
           <el-radio-group
             v-model="price.provider"
-            :disabled="price.version > 0"
+            :disabled="lockModel"
           >
             <el-radio value="claude">
               Claude
@@ -351,7 +366,7 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
         </el-form-item><el-form-item :label="t('statistics.model')">
           <el-input
             v-model="price.model"
-            :disabled="price.version > 0"
+            :disabled="lockModel"
           />
         </el-form-item><el-form-item :label="t('statistics.effective')">
           <el-date-picker
