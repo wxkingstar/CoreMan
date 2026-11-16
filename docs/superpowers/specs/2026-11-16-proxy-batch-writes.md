@@ -1,6 +1,6 @@
 # 平台代理批量写操作
 
-实现状态：已实现（迁移 `0112`），代码在 `coreman/core/systems_catalog/batch.py` 与 `coreman/runtime/worker/systems_batch_cards.py`，现行行为见 `docs/business-system-catalog.md`「批量写操作」。末尾「待定」的三项本期都没有做。实现后经过一轮审查，下面几处以现行文档为准：确认时先落库再复查；超时记为结果未知而不是失败；执行任务按段号认当前执行者，被接手的一段自行停下；刚发出的项等 120 秒宽限后才记结果未知。
+实现状态：已实现（迁移 `0112`），代码在 `coreman/core/systems_catalog/batch.py` 与 `coreman/runtime/worker/systems_batch_cards.py`，现行行为见 `docs/business-system-catalog.md`「批量写操作」。末尾「待定」的三项本期都没有做。实现后经过一轮审查，下面几处以现行文档为准：确认时先落库再复查；超时记为结果未知而不是失败；执行任务按段号认当前执行者，被接手的一段自行停下；刚发出的项等 120 秒宽限后才记结果未知。第二轮补了进度条、补排用尽后收尾、发送出错兜底、卡片超限预检、预览带真实参数等。
 
 ## 背景
 

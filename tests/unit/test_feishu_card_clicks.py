@@ -29,12 +29,17 @@ def test_event_keys_match_the_cards_that_send_them() -> None:
     from coreman.core.cloud_proxy import confirm as cloud
     from coreman.core.feishu_docs import confirm as docs
     from coreman.core.feishu_personal import inflow
+    from coreman.core.systems_catalog import batch as systems_batch
     from coreman.core.systems_catalog import confirm as systems
     from coreman.runtime.worker import assistant_stop
 
-    assert {docs.CARD_EVENT, batch.CARD_EVENT, cloud.CARD_EVENT, systems.CARD_EVENT} == (
-        rb.WRITE_CARD_EVENTS
-    )
+    assert {
+        docs.CARD_EVENT,
+        batch.CARD_EVENT,
+        cloud.CARD_EVENT,
+        systems.CARD_EVENT,
+        systems_batch.CARD_EVENT,
+    } == rb.WRITE_CARD_EVENTS
     assert systems.RESEND == "resend"
     assert set(rb.TOPIC_EVENTS) == {topics.NEW, topics.FORK}
     assert cold_start.EVENT_KEY == rb.COLD_START_EVENT

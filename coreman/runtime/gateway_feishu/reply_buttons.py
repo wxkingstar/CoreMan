@@ -128,7 +128,7 @@ def _busy_click(message: InboundMessage) -> Outcome | None:
 # 卡片回调 value 里的 event_key。网关不引入这些卡片所在的模块（有的在 worker 里），
 # 写成字面值；测试核对它们与各模块的常量一致。
 WRITE_CARD_EVENTS = frozenset(
-    {"feishu_group_write", "assistant_write", "cloud_write", "systems_write"}
+    {"feishu_group_write", "assistant_write", "cloud_write", "systems_write", "systems_batch"}
 )
 SCHEDULE_EVENT = "personal_schedule"
 TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
