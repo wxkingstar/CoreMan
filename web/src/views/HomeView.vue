@@ -63,7 +63,7 @@ onMounted(load)
       <el-card><span>{{ t('workspace.visibleBots') }}</span><strong>{{ busy ? '—' : count(employees?.total) }}</strong><small>{{ errors.employees || t('workspace.scope') }}</small></el-card>
       <el-card><span>{{ t('workspace.enabledBots') }}</span><strong>{{ busy ? '—' : count(enabled) }}</strong><small>{{ errors.enabled || t('workspace.enabledHint') }}</small></el-card>
       <el-card><span>{{ t('workspace.jobs') }}</span><strong>{{ busy ? '—' : count(jobs?.total) }}</strong><small>{{ errors.jobs || t('workspace.allRecords') }}</small></el-card>
-      <el-card><span>{{ t('statistics.cost') }}</span><strong>{{ busy ? '—' : usage?.total.cost_usd == null ? t('statistics.unknown') : `$${usage.total.cost_usd.toFixed(4)}` }}</strong><small>{{ errors.usage || (usage ? t('statistics.coverage', { n: usage.total.cost_usd_measured, total: usage.total.messages }) : t('workspace.unknown')) }}</small></el-card>
+      <el-card><span>{{ t('statistics.cost') }}</span><strong>{{ busy ? '—' : usage?.total.cost_usd == null ? t('statistics.unknown') : `$${Math.round(usage.total.cost_usd).toLocaleString()}` }}</strong><small>{{ errors.usage || (usage ? t('statistics.coverage', { n: usage.total.cost_usd_measured, total: usage.total.messages }) : t('workspace.unknown')) }}</small></el-card>
     </div>
     <p
       v-if="usage"
