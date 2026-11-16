@@ -18,6 +18,7 @@ from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match
 from coreman.core.audit import record_audit
 from coreman.core.db.models import Bot, ChatLog, ModelPrice, User
+from coreman.core.pricing import Price, backfill_costs, load_schedule
 from coreman.core.relay.models import Backend, backend_of
 
 router = APIRouter(prefix="/api/admin", tags=["statistics"], dependencies=[Depends(verify_csrf)])
@@ -153,17 +154,29 @@ class PriceIn(BaseModel):
         return self
 
 
-def price_out(row: ModelPrice) -> dict[str, Any]:
-    return {"version": row.version, **{key: getattr(row, key) for key in PriceIn.model_fields}}
+def price_out(row: ModelPrice | Price) -> dict[str, Any]:
+    fields = {key: getattr(row, key) for key in PriceIn.model_fields}
+    if isinstance(row, ModelPrice):
+        return {"version": row.version, "source": "custom", **fields}
+    return {"version": 0, "source": row.source, **fields}
 
 
 @router.get("/model-prices")
 async def prices(
     actor: User = Depends(current_user), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    rows = await session.scalars(
-        select(ModelPrice).order_by(ModelPrice.model, ModelPrice.effective_from.desc()).limit(2000)
-    )
+    """全部价格：内置官方价与管理员录入的价格，同一模型同一生效日以录入的为准。"""
+    schedule = await load_schedule(session)
+    custom = {
+        (row.provider, row.model, row.effective_from): row
+        for row in await session.scalars(select(ModelPrice))
+    }
+    rows: list[ModelPrice | Price] = [
+        custom.get((price.provider, price.model, price.effective_from), price)
+        for periods in schedule.values()
+        for price in periods
+    ]
+    rows.sort(key=lambda row: (row.model, -row.effective_from.toordinal()))
     return {"code": 0, "data": [price_out(row) for row in rows]}
 
 
@@ -196,5 +209,7 @@ async def put_price(
         diff={"price": [str(before), str(price_out(row))]},
         ip=client_ip(request),
     )
+    # 新价格对还没有成本的历史记录生效；已有成本的记录保持写入时的快照。
+    await backfill_costs(session)
     await session.commit()
     return {"code": 0, "data": price_out(row)}

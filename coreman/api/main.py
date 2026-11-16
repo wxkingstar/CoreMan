@@ -73,6 +73,7 @@ from coreman.api.routers import (
 )
 from coreman.api.routers import settings as settings_router
 from coreman.api.spa import mount_spa
+from coreman.core import pricing
 from coreman.core.bus.notify import RUNTIME_CHANNELS, Listener, asyncpg_dsn
 from coreman.core.config import Settings, get_settings
 from coreman.core.db.session import make_engine, make_session_factory
@@ -98,6 +99,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.runtime_listener = Listener(asyncpg_dsn(cfg.database_url), RUNTIME_CHANNELS)
         await app.state.runtime_listener.start()
         runtime_transport.configure(app.state.session_factory, app.state.runtime_listener)
+        # 内置价目表随发布更新：启动后给还没有成本的历史记录补算一次。
+        backfill = asyncio.create_task(pricing.backfill_on_startup(app.state.session_factory))
+        background_tasks.add(backfill)
+        backfill.add_done_callback(background_tasks.discard)
         get_logger(__name__).info("api_started", version=__version__)
         try:
             yield

@@ -182,6 +182,7 @@ WRITE_STATEMENTS = {
     # 其余只写状态
     "coreman/core/chat/interactions.py": 5,
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
+    "coreman/core/pricing.py": 1,  # 补算成本：只写 cost_usd
     # 云服务审批的挂起单：新建时没有理由；另一条只写状态。理由经 ORM 写入，flush 钩子封存
     "coreman/core/cloud_proxy/service.py": 2,
     # 个人助理云服务写操作确认：经 ORM 新建与修改，flush 钩子用所有者的数据密钥封存暂存的请求
