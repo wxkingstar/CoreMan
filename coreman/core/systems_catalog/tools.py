@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from coreman.core.auth.system_access import auth_label, auth_mode, token_env_var
 from coreman.core.db.models import BusinessSystem
-from coreman.core.systems_catalog import context, proxy, service, uploads
+from coreman.core.systems_catalog import batch, context, proxy, service, uploads
 from coreman.core.systems_catalog.context import TRUST, Context
 from coreman.core.systems_catalog.search import normalize
 
@@ -221,7 +221,10 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
         if ctx.owner_absent:
             writes = "所有者不在场，不能做"
         elif system.key in ctx.writable:
-            writes = "已开启，提交后由提问人在确认卡上确认才执行，一次最多 50 个"
+            writes = (
+                "已开启，提交后由提问人在确认卡上确认才执行，逐次提交一次最多 50 个；同一个操作"
+                "要做多项时用 batch 整批提交一次（write 最多 1000 项、destructive 最多 50 项）"
+            )
         else:
             writes = "未开启，需管理员开启「允许写入」"
         return (
@@ -607,6 +610,8 @@ def call_template(
         form = (op.get("validate") or {}).get("body") or {}
         if form.get("multipart") and form.get("files") and ctx.settings is not None:
             template["upload"] = uploads.instructions(ctx.settings.public_base_url, form["files"])
+        elif op["risk"] in proxy.CONFIRMED_RISKS and denied is None and ctx.settings is not None:
+            template["batch"] = batch.instructions(ctx.settings.public_base_url, op["risk"])
         return template
     if ctx.anonymous:
         env_var, mode = ctx.token_env, "bearer"

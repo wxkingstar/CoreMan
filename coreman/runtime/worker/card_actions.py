@@ -129,12 +129,14 @@ class CardActionHandler:
                 from coreman.core.assistants.approvals import batch as assistant_writes
                 from coreman.core.cloud_proxy import confirm as cloud_confirm
                 from coreman.core.feishu_docs import confirm
+                from coreman.core.systems_catalog import batch as systems_batch
                 from coreman.core.systems_catalog import confirm as systems_confirm
                 from coreman.runtime.worker import (
                     assistant_stop,
                     assistant_write_cards,
                     cloud_write_cards,
                     cold_start_cards,
+                    systems_batch_cards,
                     systems_write_cards,
                 )
                 from coreman.runtime.worker.group_write_cards import handle as handle_group_write
@@ -145,6 +147,7 @@ class CardActionHandler:
                     inflow.UPGRADE_EVENT: inflow.handle_upgrade,
                     confirm.CARD_EVENT: handle_group_write,
                     systems_confirm.CARD_EVENT: systems_write_cards.handle,
+                    systems_batch.CARD_EVENT: systems_batch_cards.handle,
                     cloud_confirm.CARD_EVENT: cloud_write_cards.handle,
                     assistant_writes.CARD_EVENT: assistant_write_cards.handle,
                     assistant_stop.EVENT_KEY: assistant_stop.handle,

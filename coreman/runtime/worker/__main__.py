@@ -23,6 +23,7 @@ from coreman.runtime.worker.group_observe import GroupObserveHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
 from coreman.runtime.worker.service import WorkerService
 from coreman.runtime.worker.skill_install import SkillInstallHandler
+from coreman.runtime.worker.systems_batch_cards import SystemsBatchRunHandler
 
 asyncio.run(
     WorkerService(
@@ -45,6 +46,7 @@ asyncio.run(
             "assistant_cold_start": AssistantColdStartHandler(),
             "relay_switch": RelaySwitchHandler(),
             "group_observe": GroupObserveHandler(),
+            "systems_batch_run": SystemsBatchRunHandler(),
         }
     ).run()
 )

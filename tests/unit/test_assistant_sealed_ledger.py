@@ -93,6 +93,7 @@ ENTITY_SELECTS = {
     "coreman/runtime/worker/personal_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/skill_install.py": 1,  # session.scalar
     "coreman/runtime/worker/systems_write_cards.py": 1,  # 交互状态，session.scalar
+    "coreman/runtime/worker/systems_batch_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/cloud_write_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/assistant_write_cards.py": 1,  # 交互状态，session.scalar
 }
@@ -186,6 +187,8 @@ WRITE_STATEMENTS = {
     "coreman/core/feishu_docs/confirm.py": 1,  # 群聊写入确认：经 ORM 新建，flush 钩子封存
     # 业务系统写操作确认：经 ORM 新建与修改，flush 钩子封存（暂存的请求另以任务为 AAD 加密）
     "coreman/core/systems_catalog/confirm.py": 1,
+    # 批量写操作的批次：经 ORM 新建与修改（各项在自己的表里按批次和行号加密）；个人助理不开放
+    "coreman/core/systems_catalog/batch.py": 1,
     "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存
     # 已发消息的正文存档，封存；建投递行时没有内容（layout 之后经 ORM 改，由 flush 钩子封存）
     "coreman/runtime/gateway_feishu/transport.py": 2,

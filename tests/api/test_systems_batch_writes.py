@@ -1,0 +1,571 @@
+"""Batch writes: one systems_call stages a whole file of items, one card confirms them, and the
+platform runs them one by one in background tasks, carrying on after a failed item."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import timedelta
+from typing import Any
+
+import httpx
+import pytest
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from coreman.core.bus import tasks
+from coreman.core.db.models import (
+    BotSystemGrant,
+    InboundEvent,
+    InteractionState,
+    OutboxItem,
+    SystemBatchItem,
+    SystemCall,
+    Task,
+)
+from coreman.core.systems_catalog import batch, confirm, proxy
+from coreman.runtime.worker.card_actions import CardActionHandler
+from coreman.runtime.worker.systems_batch_cards import SystemsBatchRunHandler
+from tests.api.test_systems_catalog import bearer, call
+from tests.api.test_systems_proxy_upload import upload
+from tests.api.test_systems_write_confirm import CHATS, turn
+from tests.fakes.business_system import FakeBusinessSystem, install
+from tests.integration.worker_helpers import build_ctx
+
+
+@pytest.fixture
+def fake(monkeypatch: pytest.MonkeyPatch) -> FakeBusinessSystem:
+    system = FakeBusinessSystem()
+    sent: list[dict[str, Any]] = []
+
+    def create(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append({**body, "key": request.headers.get("idempotency-key")})
+        if body["sku"].startswith("BAD"):
+            return httpx.Response(422, json={"code": 422, "message": "sku rejected"})
+        return httpx.Response(200, json={"code": 0, "data": {"sku": body["sku"]}})
+
+    system.routes[("POST", "/api/stock/documents")] = create
+    system.sent = sent  # type: ignore[attr-defined]
+    install(monkeypatch, system)
+    return system
+
+
+@pytest.fixture(autouse=True)
+def storage(app: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    app.state.settings = app.state.settings.model_copy(
+        update={"object_storage_root": str(tmp_path)}
+    )
+    monkeypatch.setattr(proxy, "get_settings", lambda: app.state.settings)
+    monkeypatch.setattr(batch, "get_settings", lambda: app.state.settings)
+
+
+def lines(*rows: dict[str, Any] | str) -> bytes:
+    return "\n".join(r if isinstance(r, str) else json.dumps(r) for r in rows).encode()
+
+
+def row(sku: str, quantity: int = 1, **extra: Any) -> dict[str, Any]:
+    return {"body": {"sku": sku, "quantity": quantity}, **extra}
+
+
+async def submit(
+    client: Any, app: Any, task: Task, user: Any, data: bytes, **extra: Any
+) -> dict[str, Any]:
+    auth = bearer(app, task, user)
+    uploaded = await upload(client, auth, data, "items.jsonl", "application/x-ndjson")
+    assert uploaded.status_code == 200, uploaded.text
+    args = {
+        "system": "stock",
+        "operation_id": "createDraft",
+        "batch": {"upload_id": uploaded.json()["upload_id"]},
+        **extra,
+    }
+    return await call(client, auth, "systems_call", args)
+
+
+async def release(app: Any, task: Task, *, send: bool = True) -> bool:
+    async with app.state.session_factory() as session:
+        sent = await batch.release(
+            session, app.state.cipher, bot_id=task.bot_id, task_id=task.id, send=send
+        )
+        await session.commit()
+    return sent
+
+
+async def state_of(db_session: AsyncSession) -> InteractionState:
+    state = await db_session.scalar(
+        select(InteractionState)
+        .where(InteractionState.kind == batch.KIND)
+        .execution_options(populate_existing=True)
+    )
+    assert state is not None
+    return state
+
+
+async def click(
+    session: AsyncSession, db_engine: Any, bot: Any, original: Task, state_id: uuid.UUID, verb: str
+) -> str:
+    card = await session.scalar(
+        select(OutboxItem).where(OutboxItem.kind == "send").order_by(OutboxItem.id.desc())
+    )
+    assert card is not None
+    card.status = "sent"
+    card.payload = {**card.payload, "_feishu_message_id": "om_card"}
+    chat_id = CHATS["single"]
+    action = {
+        "task_id": f"personal:{original.id}",
+        "event_key": batch.CARD_EVENT,
+        "level": f"{verb}:{state_id}",
+    }
+    event = InboundEvent(
+        bot_id=bot.id,
+        platform="feishu",
+        platform_msg_id=str(uuid.uuid4()),
+        kind="card_action",
+        chat_type="single",
+        chat_id=chat_id,
+        sender_platform_user_id="human",
+        sender_open_id="ou_human",
+        reply_context={"chat_id": chat_id, "message_id": "om_card"},
+        payload={
+            "raw": {
+                "header": {
+                    "event_type": "card.action.trigger",
+                    "app_id": "cli_test",
+                    "tenant_key": "tenant-test",
+                },
+                "event": {
+                    "operator": {"user_id": "human", "open_id": "ou_human"},
+                    "context": {"open_chat_id": chat_id, "open_message_id": "om_card"},
+                    "action": {"value": action},
+                },
+            }
+        },
+    )
+    session.add(event)
+    await session.flush()
+    pressed = await tasks.enqueue(
+        session,
+        tasks.NewTask(
+            bot_id=bot.id,
+            kind="card_action",
+            lane="fast",
+            payload={"card_action": action, "platform_user_id": "human"},
+            session_key=chat_id,
+            inbound_event_id=event.id,
+            dedupe_key=f"click:{event.id}",
+        ),
+    )
+    assert pressed is not None
+    pressed.status = "running"
+    await session.commit()
+    await CardActionHandler().run(build_ctx(db_engine, pressed))
+    done = await session.get(Task, pressed.id, populate_existing=True)
+    assert done is not None and done.result is not None
+    return str(done.result["card"])
+
+
+async def run_next(db_session: AsyncSession, db_engine: Any) -> bool:
+    """Run the oldest queued run task; False when there is none."""
+    task = await db_session.scalar(
+        select(Task)
+        .where(Task.kind == batch.RUN_KIND, Task.status == "queued")
+        .order_by(Task.id)
+        .execution_options(populate_existing=True)
+    )
+    if task is None:
+        return False
+    task.status = "running"
+    await db_session.commit()
+    await SystemsBatchRunHandler().run(build_ctx(db_engine, task))
+    return True
+
+
+async def run_all(db_session: AsyncSession, db_engine: Any) -> int:
+    count = 0
+    while await run_next(db_session, db_engine):
+        count += 1
+    return count
+
+
+async def statuses(db_session: AsyncSession) -> list[str]:
+    rows = await db_session.scalars(
+        select(SystemBatchItem.status)
+        .order_by(SystemBatchItem.seq)
+        .execution_options(populate_existing=True)
+    )
+    return list(rows)
+
+
+async def updates(db_session: AsyncSession) -> list[dict[str, Any]]:
+    rows = await db_session.scalars(
+        select(OutboxItem).where(OutboxItem.kind == "card_update").order_by(OutboxItem.id)
+    )
+    return [item.payload["card"] for item in rows]
+
+
+def text_of(card: dict[str, Any]) -> str:
+    return str(card["body"]["elements"][0]["text"]["content"])
+
+
+async def resumed(db_session: AsyncSession) -> list[Task]:
+    rows = await db_session.scalars(select(Task).where(Task.dedupe_key.like("systems-write:%")))
+    return list(rows)
+
+
+async def test_a_batch_is_confirmed_once_and_runs_past_a_failed_item(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    data = lines(
+        row("SKU-1", target="商品 SKU-1", before={"quantity": 9}),
+        row("BAD-2", 2),
+        row("SKU-3", 3),
+    )
+    out = await submit(client, app, task, user, data, note={"impact": "新建草稿"})
+    assert out["status"] == "pending_confirmation" and out["count"] == 3
+    assert fake.sent == []  # type: ignore[attr-defined]
+    state = await state_of(db_session)
+    # Staged items are sealed; only who, where and how many are readable.
+    assert "SKU-1" not in str(state.state) and state.state["count"] == 3
+    items = list(await db_session.scalars(select(SystemBatchItem)))
+    assert len(items) == 3 and all("SKU" not in i.request_enc for i in items)
+
+    assert await release(app, task)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
+    body = card.payload["card"]
+    assert body["header"]["title"]["content"] == "请确认 3 项操作"
+    text = text_of(body)
+    assert "共 3 项" in text and "【字段统计】" in text and "quantity：" in text
+    assert "1. 商品 SKU-1  sku：SKU-1；quantity：9 → 1" in text
+    assert body["body"]["elements"][1]["content"].startswith("[下载全部明细（CSV）](")
+
+    result = await click(db_session, db_engine, bot, task, state.id, "confirm")
+    assert result == "systems_batch_started"
+    assert (await state_of(db_session)).status == "submitted"
+    assert "已处理 0 / 3" in text_of((await updates(db_session))[-1])
+    assert fake.sent == []  # type: ignore[attr-defined]
+
+    assert await run_all(db_session, db_engine) == 1
+    assert [s["sku"] for s in fake.sent] == ["SKU-1", "BAD-2", "SKU-3"]  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok", "http_error", "ok"]
+    final = (await updates(db_session))[-1]
+    assert final["header"]["title"]["content"] == "没有全部完成"
+    assert "成功 2，失败 1" in text_of(final) and "第 2 项" in text_of(final)
+    assert final["body"]["elements"][1]["content"].startswith("[下载全部结果（CSV）](")
+    (follow,) = await resumed(db_session)
+    note = follow.payload[confirm.RESULT_KEY]
+    assert "成功 2，失败 1" in note and "sku rejected" in note
+    recorded = await db_session.scalars(select(SystemCall.outcome).order_by(SystemCall.id))
+    assert list(recorded) == [
+        "batch_proposed",
+        "confirmed_ok",
+        "confirmed_http_error",
+        "confirmed_ok",
+    ]
+    # The card cannot run twice.
+    assert await click(db_session, db_engine, bot, task, state.id, "confirm") == "expired"
+    assert len(fake.sent) == 3  # type: ignore[attr-defined]
+
+
+async def test_any_bad_line_stages_nothing(client, app, db_session, fake) -> None:
+    _, user, task = await turn(db_session, app)
+    data = lines(row("SKU-1"), "{not json", {"body": {"sku": "X"}}, row("SKU-1"), "")
+    out = await submit(client, app, task, user, data)
+    assert out["error"] == "invalid_batch" and out["problem_count"] == 3
+    joined = "\n".join(out["problems"])
+    assert "第 2 行" in joined and "第 3 行" in joined and "与第 1 行完全相同" in joined
+    assert not await db_session.scalar(select(InteractionState.id))
+
+
+async def test_the_cap_follows_the_risk(client, app, db_session, fake, monkeypatch) -> None:
+    monkeypatch.setitem(batch.MAX_ITEMS, "write", 2)
+    _, user, task = await turn(db_session, app)
+    out = await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    assert out["error"] == "invalid_batch" and "最多 2 项" in out["problems"][0]
+
+
+async def test_one_batch_per_turn_and_writes_only(client, app, db_session, fake) -> None:
+    _, user, task = await turn(db_session, app)
+    assert (await submit(client, app, task, user, lines(row("A"))))["count"] == 1
+    again = await submit(client, app, task, user, lines(row("B")))
+    assert again["error"] == "batch_exists"
+    auth = bearer(app, task, user)
+    uploaded = await upload(client, auth, lines(row("A")), "r.jsonl", "application/x-ndjson")
+    read = await call(
+        client,
+        auth,
+        "systems_call",
+        {
+            "system": "stock",
+            "operation_id": "listDocuments",
+            "batch": {"upload_id": uploaded.json()["upload_id"]},
+        },
+    )
+    assert read["error"] == "batch_read_only"
+
+
+async def test_turns_nobody_can_confirm_stage_nothing(client, app, db_session, fake) -> None:
+    _, user, task = await turn(db_session, app, "group")
+    task.payload = {**task.payload, "origin": "observe"}
+    await db_session.commit()
+    out = await submit(client, app, task, user, lines(row("A")))
+    assert out["error"] == "confirmation_unavailable"
+    assert not await db_session.scalar(select(InteractionState.id))
+
+
+async def test_runs_in_chunks_and_stops_when_asked(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(batch, "CHUNK_ITEMS", 1)
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    assert await run_next(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "pending", "pending"]
+    assert "已处理 1 / 3" in text_of((await updates(db_session))[-1])
+
+    assert await click(db_session, db_engine, bot, task, state.id, batch.STOP) == (
+        "systems_batch_stopping"
+    )
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "skipped", "skipped"]
+    assert len(fake.sent) == 1  # type: ignore[attr-defined]
+    assert "按发起人的要求停止" in text_of((await updates(db_session))[-1])
+
+
+async def test_an_item_left_sending_is_unknown_and_never_sent_again(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    # 模拟上一段发出第 1 项后进程没了。
+    await db_session.execute(
+        update(SystemBatchItem).where(SystemBatchItem.seq == 1).values(status="sending")
+    )
+    await db_session.commit()
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["unknown", "ok"]
+    assert [s["sku"] for s in fake.sent] == ["B"]  # type: ignore[attr-defined]
+
+
+async def test_revoked_write_permission_halts_the_rest(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(batch, "CHUNK_ITEMS", 1)
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    assert await run_next(db_session, db_engine)
+    await db_session.execute(update(BotSystemGrant).values(allow_write=False))
+    await db_session.commit()
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "skipped", "skipped"]
+    assert "中途停下" in text_of((await updates(db_session))[-1])
+    (follow,) = await resumed(db_session)
+    assert "中途停下" in follow.payload[confirm.RESULT_KEY]
+
+
+async def test_a_lost_run_task_is_revived(client, app, db_session, db_engine, fake) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    await db_session.execute(
+        update(Task).where(Task.kind == batch.RUN_KIND).values(status="failed")
+    )
+    await db_session.commit()
+    async with app.state.session_factory() as session:
+        assert await batch.revive(session, batch.utcnow()) == 1
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok"]
+
+
+async def test_cancel_runs_nothing(client, app, db_session, db_engine, fake) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A")))
+    await release(app, task)
+    state = await state_of(db_session)
+    assert await click(db_session, db_engine, bot, task, state.id, "cancel") == (
+        "systems_batch_cancelled"
+    )
+    assert await run_all(db_session, db_engine) == 0
+    assert fake.sent == []  # type: ignore[attr-defined]
+
+
+async def test_cancel_after_confirm_cannot_undo_or_pretend(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    """The confirm click re-checks the operation, which commits and lets go of the row lock: a
+    cancel landing there must find the batch already confirmed, not cancel it on the card while
+    it runs anyway."""
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B")))
+    await release(app, task)
+    state = await state_of(db_session)
+    checked = batch.checked
+    late: list[str] = []
+
+    async def racing(pctx: Any, staged: Any) -> Any:
+        out = await checked(pctx, staged)
+        if not late:
+            late.append("")
+            late[0] = await click(db_session, db_engine, bot, task, state.id, "cancel")
+        return out
+
+    monkeypatch.setattr(batch, "checked", racing)
+    assert await click(db_session, db_engine, bot, task, state.id, "confirm") == (
+        "systems_batch_started"
+    )
+    assert late == ["expired"]
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "ok"]
+    texts = [text_of(card) for card in await updates(db_session)]
+    assert not any("已取消" in text for text in texts)
+    (follow,) = await resumed(db_session)
+    assert "成功 2" in follow.payload[confirm.RESULT_KEY]
+
+
+async def test_a_run_task_taken_for_lost_steps_aside(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    """Its run task was judged lost and another stretch queued in its place, but the first one is
+    still alive: it stops at the next item and neither queues a stretch nor finishes the batch."""
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    send = proxy.send
+    calls = 0
+
+    async def judged_lost_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        out = await send(*args, **kwargs)
+        if calls == 1:
+            async with app.state.session_factory() as session:
+                await session.execute(
+                    update(Task).where(Task.kind == batch.RUN_KIND).values(status="failed")
+                )
+                await session.commit()
+                assert await batch.revive(session, batch.utcnow()) == 1
+        return out
+
+    monkeypatch.setattr(proxy, "send", judged_lost_meanwhile)
+    first = await db_session.scalar(select(Task).where(Task.kind == batch.RUN_KIND))
+    assert first is not None
+    await SystemsBatchRunHandler().run(build_ctx(db_engine, first))
+    assert [s["sku"] for s in fake.sent] == ["A"]  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok", "pending", "pending"]
+    current = await state_of(db_session)
+    assert current.state["chunk"] == 2 and "finished_at" not in current.state
+    assert await resumed(db_session) == []
+
+    # The stretch queued in its place carries on, in order, each item once.
+    assert await run_all(db_session, db_engine) == 1
+    assert [s["sku"] for s in fake.sent] == ["A", "B", "C"]  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok", "ok", "ok"]
+    # A late start of the superseded task does nothing either.
+    first.status = "running"
+    await db_session.commit()
+    await SystemsBatchRunHandler().run(build_ctx(db_engine, first))
+    assert len(fake.sent) == 3  # type: ignore[attr-defined]
+    assert len(await resumed(db_session)) == 1
+
+
+async def test_an_item_possibly_in_flight_is_waited_for(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    # 上一段刚把第 1 项标成正在发送，它的进程可能还活着。
+    await db_session.execute(
+        update(SystemBatchItem)
+        .where(SystemBatchItem.seq == 1)
+        .values(status="sending", started_at=batch.utcnow())
+    )
+    await db_session.commit()
+    assert await run_next(db_session, db_engine)
+    assert await statuses(db_session) == ["sending", "pending"]
+    assert fake.sent == []  # type: ignore[attr-defined]
+    waiting = await db_session.scalar(
+        select(Task).where(Task.kind == batch.RUN_KIND).execution_options(populate_existing=True)
+    )
+    assert waiting is not None and waiting.status == "queued"
+    assert waiting.run_after > batch.utcnow() + timedelta(seconds=batch.SEND_GRACE - 30)
+
+    # 过了宽限仍没有结果：结果未知，不重发，接着做后面的。
+    await db_session.execute(
+        update(SystemBatchItem)
+        .where(SystemBatchItem.seq == 1)
+        .values(started_at=batch.utcnow() - timedelta(seconds=batch.SEND_GRACE + 1))
+    )
+    await db_session.commit()
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["unknown", "ok"]
+    assert [s["sku"] for s in fake.sent] == ["B"]  # type: ignore[attr-defined]
+
+
+async def test_finish_never_calls_a_sending_item_not_run(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    await db_session.execute(
+        update(SystemBatchItem).where(SystemBatchItem.seq == 1).values(status="sending")
+    )
+    await db_session.commit()
+    async with app.state.session_factory() as session:
+        current = await session.get(InteractionState, state.id)
+        assert current is not None
+        note = await batch.finish(session, app.state.cipher, current, "停下", chunk=1)
+        await session.commit()
+    assert await statuses(db_session) == ["unknown", "skipped"]
+    assert note is not None and "结果未知 1" in note and "不要直接重做" in note
+    # A task that is no longer the current one finishes nothing.
+    async with app.state.session_factory() as session:
+        current = await session.get(InteractionState, state.id)
+        assert current is not None
+        assert await batch.finish(session, app.state.cipher, current, None, chunk=1) is None
+
+
+async def test_a_timeout_is_unknown_and_a_refused_connection_is_a_failure(
+    client, app, db_session, db_engine, fake
+) -> None:
+    def create(request: httpx.Request) -> httpx.Response:
+        sku = json.loads(request.content)["sku"]
+        fake.sent.append({"sku": sku})  # type: ignore[attr-defined]
+        if sku == "SLOW":
+            raise httpx.ReadTimeout("no response", request=request)
+        if sku == "DOWN":
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"code": 0})
+
+    fake.routes[("POST", "/api/stock/documents")] = create
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("SLOW"), row("DOWN"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["unknown", "unreachable", "ok"]
+    final = text_of((await updates(db_session))[-1])
+    assert "成功 1，失败 1，结果未知 1" in final and "不要直接重做" in final
+    (follow,) = await resumed(db_session)
+    note = follow.payload[confirm.RESULT_KEY]
+    assert "可能已经处理" in note and "先用读操作逐项核对" in note

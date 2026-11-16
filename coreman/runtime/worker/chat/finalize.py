@@ -646,10 +646,11 @@ class FinalizeStage(ChatStageBase):
         """本轮暂存的业务系统写操作（以及个人助理的云服务写操作）：正常结束就在终稿之后发一张
         确认卡，否则作废。"""
         from coreman.core.cloud_proxy import confirm as cloud_confirm
+        from coreman.core.systems_catalog import batch as systems_batch
         from coreman.core.systems_catalog import confirm as systems_confirm
 
         send = verdict.log_status in ("success", "ask_user")
-        # 三种批次各自一个事务、各自兜住异常：前一个出错不能让后面的不交出去。
+        # 各种批次各自一个事务、各自兜住异常：前一个出错不能让后面的不交出去。
         sent = cloud_sent = False
         try:
             async with ctx.session_factory() as session:
@@ -663,6 +664,19 @@ class FinalizeStage(ChatStageBase):
                 await session.commit()
         except Exception as exc:  # noqa: BLE001 只记类型
             ctx.log.warning("systems_write_release_failed", error=type(exc).__name__)
+        batch_sent = False
+        try:
+            async with ctx.session_factory() as session:
+                batch_sent = await systems_batch.release(
+                    session,
+                    ctx.cipher,
+                    bot_id=pre.intake.bot.id,
+                    task_id=ctx.task.id,
+                    send=send,
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 只记类型
+            ctx.log.warning("systems_batch_release_failed", error=type(exc).__name__)
         try:
             async with ctx.session_factory() as session:
                 cloud_sent = await cloud_confirm.release(
@@ -673,6 +687,8 @@ class FinalizeStage(ChatStageBase):
             ctx.log.warning("cloud_write_release_failed", error=type(exc).__name__)
         if sent:
             ctx.log.info("systems_write_card_queued")
+        if batch_sent:
+            ctx.log.info("systems_batch_card_queued")
         if cloud_sent:
             ctx.log.info("cloud_write_card_queued")
         if pre.intake.bot.kind == "assistant":

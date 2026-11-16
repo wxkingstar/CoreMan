@@ -54,6 +54,7 @@ from coreman.core.logging import get_logger
 from coreman.core.personal_credentials import service as credential_requests
 from coreman.core.settings_schema import SETTING_DEFAULTS
 from coreman.core.settings_store import SettingsStore
+from coreman.core.systems_catalog import batch as systems_batch
 from coreman.core.systems_catalog import confirm as systems_confirm
 
 # worker 每 10 秒写一次任务心跳，60 秒一次都没写上来就当这个 worker 没了。
@@ -558,6 +559,8 @@ async def run_tick(
         "outbox_attempts_recovered": await _run(factory, recover_outbox_attempts, now),
         # 写操作确认卡被飞书拒收：告诉提问人没有执行，并作废那一批。
         "confirm_cards_undelivered": await _run(factory, systems_confirm.undelivered, now),
+        # 批量写操作执行到一半、执行任务没了（worker 掉线）：接着排下一段。
+        "systems_batches_revived": await _run(factory, systems_batch.revive, now),
     }
 
 
