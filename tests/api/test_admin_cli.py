@@ -24,15 +24,18 @@ from coreman.core.db.models import (
     BusinessSystem,
     Department,
     EnvPreset,
+    InteractionState,
     Skill,
     SkillApproval,
     SkillSource,
+    SystemBatchItem,
     Team,
     User,
     UserIdentity,
 )
 from coreman.core.feishu_apps import management, manifest
 from coreman.core.knowledge import installation as installs
+from coreman.core.systems_catalog import batch
 from tests.api.test_feishu_app_management import CIPHER, Feishu
 from tests.integration.worker_helpers import seed_bot
 
@@ -250,6 +253,85 @@ async def test_system_scope_and_grants(cli, db_session):
     assert await db_session.scalar(select(BotSystemGrant)) is None
     code, _, err = await cli("systems", "allow-all", "crm", "--as", "ops")
     assert code == 1 and "--yes" in err
+
+
+async def test_system_batches_list_and_stop(cli, db_session):
+    bot, _, _ = await seed_bot(db_session)
+    await add_user(db_session, "ops", "platform_admin")
+    await add_user(db_session, "bob")
+    code, out, err = await cli("systems", "batches", "--as", "ops")
+    assert code == 0 and "24 小时" in out, err
+
+    creator = await db_session.scalar(select(User).where(User.login_name == "creator"))
+    # 直接落一批「执行中」的数据：已确认、已排过第一段，五项里做完三项。
+    state = InteractionState(
+        bot_id=bot.id,
+        kind=batch.KIND,
+        scope_key="cli-batch",
+        status="submitted",
+        state={
+            "user_id": str(creator.id),
+            "system": "stock",
+            "system_name": "Stock",
+            "operation_id": "createDraft",
+            "summary": "新建草稿",
+            "risk": "write",
+            "count": 5,
+            "chunk": 0,
+        },
+    )
+    db_session.add(state)
+    await db_session.flush()
+    for seq, status in enumerate(["ok", "ok", "http_error", "pending", "pending"]):
+        db_session.add(
+            SystemBatchItem(
+                batch_id=state.id,
+                seq=seq,
+                request_enc="x",
+                idempotency_key=f"k{seq}",
+                status=status,
+            )
+        )
+    await db_session.commit()
+    short = str(state.id)[:8]
+
+    # 普通成员看不到：和管理后台同一条权限判定
+    code, _, err = await cli("systems", "batches", "--as", "bob")
+    assert code == 1 and err.strip()
+    code, out, err = await cli("systems", "batches", "--as", "ops")
+    assert code == 0, err
+    for expected in (
+        short,
+        "销售",
+        "创建者",
+        "Stock · 新建草稿",
+        "执行中",
+        "3 / 5",
+        "成功 2、失败 1",
+    ):
+        assert expected in out, expected
+    assert "结果未知" not in out and "未执行" not in out
+    code, out, _ = await cli("systems", "batches", "--json", "--as", "ops")
+    assert code == 0 and json.loads(out)[0]["id"] == str(state.id)
+
+    code, _, err = await cli("systems", "batch-stop", "ffffffff", "--yes", "--as", "ops")
+    assert code == 1 and "找不到批量写操作" in err
+    code, _, err = await cli("systems", "batch-stop", short, "--as", "ops")
+    assert code == 1 and "--yes" in err and "2 项未执行" in err
+    await db_session.refresh(state)
+    assert batch.STOP not in state.state
+
+    code, out, err = await cli("systems", "batch-stop", short, "--yes", "--as", "ops")
+    assert code == 0 and "已请求停止" in out, err
+    await db_session.refresh(state)
+    assert state.state[batch.STOP] is True
+    audit = await db_session.scalar(select(AuditLog).where(AuditLog.action == "system_batch.stop"))
+    assert audit is not None and audit.target_id == str(state.id)
+    code, out, _ = await cli("systems", "batches", "--as", "ops")
+    assert code == 0 and "正在停止" in out
+    # 已经在停止的批次不能再停一次（服务端规则）
+    code, _, err = await cli("systems", "batch-stop", str(state.id), "--yes", "--as", "ops")
+    assert code == 1 and "已经在停止" in err
 
 
 async def test_teams_and_users(cli, db_session):

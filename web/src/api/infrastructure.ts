@@ -46,6 +46,23 @@ export const systems = {
   grants: (id: string) => call<SystemGrantsOut>(http.get(`/api/admin/bots/${id}/system-grants`)),
   saveGrants: (id: string, keys: string[], version: number, writeKeys: string[]) => call<SystemGrantsOut>(http.put(`/api/admin/bots/${id}/system-grants`, { system_keys: keys, write_keys: writeKeys }, { headers: { 'If-Match': String(version) } })),
 }
+export type SystemBatchPhase = 'awaiting' | 'running' | 'paused' | 'finished' | 'not_started' | 'cancelled' | 'expired'
+/** 一批经平台代理执行的写操作，只有元数据与各状态的项数；每一项的请求与结果不在这里。 */
+export interface SystemBatch {
+  id: string; phase: SystemBatchPhase
+  /** pause_trial：试跑前几项后等提问人确认；pause_failures：连续失败自动暂停。 */
+  pause_reason: 'pause_trial' | 'pause_failures' | null
+  /** 已请求停止、还没收尾。 */
+  stopping: boolean
+  bot_id: string; bot_name: string | null; user_id: string | null; user_name: string | null
+  system: string | null; system_name: string | null; operation_id: string | null; operation_summary: string; risk: string | null
+  count: number; ok: number; failed: number; unknown: number; skipped: number; pending: number
+  created_at: string; started_at: string | null; finished_at: string | null
+}
+export const systemBatches = {
+  list: (page = 1, perPage = 20) => call<Page<SystemBatch>>(http.get('/api/admin/system-batches', { params: { page, per_page: perPage } })),
+  stop: (id: string) => call<SystemBatch>(http.post(`/api/admin/system-batches/${id}/stop`)),
+}
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),
   create: (body: { app_key: string; name: string; scopes: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),

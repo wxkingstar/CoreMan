@@ -5,7 +5,7 @@ import { i18n } from '@/i18n'
 import SystemsView from '@/views/SystemsView.vue'
 import CredentialsView from '@/views/CredentialsView.vue'
 import SystemGrants from '@/components/SystemGrants.vue'
-import { credentials, systems } from '@/api/infrastructure'
+import { credentials, systemBatches, systems } from '@/api/infrastructure'
 import { allSkills } from '@/api/skills'
 
 vi.mock('@/api/admin', () => ({ bots: { list: vi.fn().mockResolvedValue({ items: [], total: 0 }) } }))
@@ -14,6 +14,7 @@ const guide = { id: 'sk1', name: 'lookup-guide', enabled: true, security_level: 
 vi.mock('@/api/infrastructure', () => ({
   systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn(), catalog: vi.fn(), refreshCatalog: vi.fn() },
   credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn() },
+  systemBatches: { list: vi.fn(), stop: vi.fn() },
 }))
 const erp = { key: 'erp', name: 'ERP', description: '', base_url: 'https://erp.example', openapi_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null, version: 1 }
 const page = { page: 1, per_page: 50, total: 1, items: [erp] }
@@ -23,6 +24,7 @@ describe('Infrastructure management', () => {
     vi.clearAllMocks()
     vi.mocked(systems.providers).mockResolvedValue([{ id: 'builtin', max_token_ttl_seconds: null }, { id: 'issuer', max_token_ttl_seconds: 120 }])
     vi.mocked(systems.list).mockResolvedValue(page)
+    vi.mocked(systemBatches.list).mockResolvedValue({ items: [], total: 0, page: 1, per_page: 20 })
     vi.mocked(credentials.clients).mockResolvedValue({ items: [], total: 0, page: 1, per_page: 50 })
     vi.mocked(credentials.keys).mockResolvedValue([])
   })
