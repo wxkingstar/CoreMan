@@ -131,7 +131,9 @@ class S3ObjectStore(LocalObjectStore):
                         ContentLength=size,
                         ContentMD5=base64.b64encode(md5.digest()).decode(),
                         ContentType="application/octet-stream",
-                        Metadata={"coreman_expires_at": str(int(now.timestamp()) + LINK_TTL)},
+                        # 元数据键会成为签名里的 x-amz-meta-* 请求头；阿里云 OSS 丢弃带下划线
+                        # 的请求头，签名对不上（SignatureDoesNotMatch），所以只用连字符。
+                        Metadata={"coreman-expires-at": str(int(now.timestamp()) + LINK_TTL)},
                     )
                     return result
 
