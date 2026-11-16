@@ -38,7 +38,7 @@ TTL = timedelta(minutes=60)
 KEEP = timedelta(hours=24)
 # The confirmation cards that share expiry, resending and purging. Each kind is also its card's
 # `event_key`; its outbox dedupe keys start with the kind spelled with dashes.
-CARD_KINDS = (KIND, "cloud_write", "assistant_write")
+CARD_KINDS = (KIND, "cloud_write", "assistant_write", "systems_batch")
 RESEND = "resend"
 SWEEP_BATCH = 50
 MAX_ITEMS = 50
@@ -720,7 +720,7 @@ UNDELIVERED = (
     "需要的话请再发一条消息，让 AI 员工重新整理后再提交确认。"
 )
 # Batches whose card text is readable here; a personal assistant's sealed batch has its own path.
-UNDELIVERED_KINDS = (KIND, "cloud_write")
+UNDELIVERED_KINDS = (KIND, "cloud_write", "systems_batch")
 
 
 def _undelivered_reason(error: str) -> str:

@@ -102,6 +102,7 @@ from coreman.core.db.models.feishu_personal import (
     FeishuRateUsage,
 )
 from coreman.core.db.models.infrastructure import (
+    BATCH_ITEM_STATUSES,
     CATALOG_STATUSES,
     TOKEN_DELIVERIES,
     TOKEN_ISSUE_PURPOSES,
@@ -110,6 +111,7 @@ from coreman.core.db.models.infrastructure import (
     BusinessSystem,
     BusinessTokenIssue,
     JwtKey,
+    SystemBatchItem,
     SystemCall,
     SystemCatalog,
 )
@@ -202,6 +204,8 @@ __all__ = [
     "CATALOG_STATUSES",
     "SystemCatalog",
     "SystemCall",
+    "SystemBatchItem",
+    "BATCH_ITEM_STATUSES",
     "CLOUD_APPROVAL_STATUSES",
     "CLOUD_OUTCOMES",
     "CLOUD_RISKS",

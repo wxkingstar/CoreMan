@@ -53,6 +53,14 @@ CONFIRMED_RISKS = ("write", "destructive")
 # reaches the business system with the same key.
 IDEMPOTENCY_HEADERS = ("idempotency-key", "x-operation-request-id")
 DATA_TRUST = {"content_trust": "system_returned_data"}
+# Failures that happen before the request leaves: it certainly did not reach the business system.
+NOT_SENT = (
+    fetch.FetchError,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.UnsupportedProtocol,
+)
 _TEXT_TYPES = ("json", "text/", "xml", "yaml", "javascript", "x-www-form-urlencoded")
 
 Scalar = str | int | float | bool
@@ -83,6 +91,11 @@ class Note(BaseModel):
     rollback: str | None = Field(default=None, max_length=300, description="How to undo it")
 
 
+class BatchRef(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+    upload_id: str = Field(min_length=1, max_length=100)
+
+
 class Call(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
     system: str = Field(min_length=1, max_length=50, description="System key, e.g. stock")
@@ -103,6 +116,12 @@ class Call(BaseModel):
         description="Writes only: the object, before/after values, impact and how to undo it, "
         "shown to the member on the confirmation card",
     )
+    batch: BatchRef | None = Field(
+        default=None,
+        description="Writes only: many items of this one operation in one call, read from an "
+        "uploaded JSON Lines file (one item per line, see systems_describe). Replaces "
+        "path_params, query and body; note gives the impact and rollback of the whole batch",
+    )
 
 
 DESCRIPTION = (
@@ -111,7 +130,8 @@ DESCRIPTION = (
     "employee's write permission and only join this turn's confirmation list: when the turn "
     "ends the member gets one card for all of them, and the platform runs them once confirmed. "
     "Financial operations are never proxied. Operations that take files: upload each file first "
-    "as systems_describe shows and pass its upload_id."
+    "as systems_describe shows and pass its upload_id. Many items of one write operation: put "
+    "them in a JSON Lines file, upload it and pass batch, one call for the whole batch."
 )
 
 
@@ -428,11 +448,14 @@ DENIALS = {
 }
 
 
-async def prepare(ctx: Context, args: Call) -> Prepared | dict[str, Any]:
-    """Every check a call passes before it may reach the business system; an error otherwise."""
-    system = ctx.system(args.system)
+async def operation(
+    ctx: Context, system_key: str, operation_id: str
+) -> tuple[BusinessSystem, Any, dict[str, Any]] | dict[str, Any]:
+    """(system, loaded catalog, operation) the member may call through the proxy; an error
+    otherwise. Policy (risk, writes) is checked by the caller."""
+    system = ctx.system(system_key)
     if system is None:
-        return context.no_system(args.system)
+        return context.no_system(system_key)
     if system.token_delivery != "proxy":
         return {
             "error": "not_proxied",
@@ -443,22 +466,48 @@ async def prepare(ctx: Context, args: Call) -> Prepared | dict[str, Any]:
     loaded = await context.catalog(ctx, system)
     if loaded is None:
         return context.unavailable(system)
-    op = loaded.compiled["operations"].get(args.operation_id)
+    op = loaded.compiled["operations"].get(operation_id)
     codes = await context.held(ctx, system, loaded) if op is not None else None
     if op is None or not context.visible(op, codes):
-        return context.operation_not_found(system, args.operation_id)
+        return context.operation_not_found(system, operation_id)
     if "validate" not in op:
         return context.unavailable(system)
+    return system, loaded, op
+
+
+async def denial(
+    ctx: Context, system: BusinessSystem, operation_id: str, op: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The refusal of a call policy does not allow (recorded), or None; `OWNER_APPROVAL` passes."""
     denied = policy_error(ctx, system, op)
-    if denied is not None and denied != OWNER_APPROVAL:
-        await record(ctx, system, args.operation_id, op, "denied")
-        return {
-            "error": denied,
-            "system": system.key,
-            "operation_id": args.operation_id,
-            "risk": op["risk"],
-            "message": DENIALS[denied],
-        }
+    if denied is None or denied == OWNER_APPROVAL:
+        return None
+    await record(ctx, system, operation_id, op, "denied")
+    return {
+        "error": denied,
+        "system": system.key,
+        "operation_id": operation_id,
+        "risk": op["risk"],
+        "message": DENIALS[denied],
+    }
+
+
+async def prepare(ctx: Context, args: Call) -> Prepared | dict[str, Any]:
+    """Every check a call passes before it may reach the business system; an error otherwise."""
+    found = await operation(ctx, args.system, args.operation_id)
+    if isinstance(found, dict):
+        return found
+    system, loaded, op = found
+    refused = await denial(ctx, system, args.operation_id, op)
+    if refused is not None:
+        return refused
+    return await build(ctx, system, loaded, op, args)
+
+
+async def build(
+    ctx: Context, system: BusinessSystem, loaded: Any, op: dict[str, Any], args: Call
+) -> Prepared | dict[str, Any]:
+    """The request of one call to an operation that passed `operation` and the policy."""
     path, pairs, body, problems = build_request(op, loaded.compiled.get("defs") or {}, args)
     if problems:
         return {
@@ -526,7 +575,7 @@ async def send(
                             cut_off = True
                             break
                         await disk_io(partial(spool.write, part))
-        except (fetch.FetchError, httpx.HTTPError, TimeoutError):
+        except (fetch.FetchError, httpx.HTTPError, TimeoutError) as exc:
             elapsed = int((time.monotonic() - started) * 1000)
             await record(
                 ctx,
@@ -537,11 +586,19 @@ async def send(
                 duration_ms=elapsed,
                 token_id=token.token_id,
             )
+            # 连接都没建起来的，请求肯定没发出；其余的（等响应超时、连接中途断开）业务系统可能
+            # 已经收到并处理了，不能当成「没做」。
+            maybe_sent = not isinstance(exc, NOT_SENT)
             return {
                 "error": "system_unreachable",
                 "system": system.key,
-                "message": "业务系统没有响应或连接失败。"
-                "不要换别的方式重试同一个写操作，先告诉用户。",
+                "maybe_sent": maybe_sent,
+                "message": (
+                    "请求已发出但没有等到业务系统的响应（超时或连接中断），业务系统可能已经处理。"
+                    "不要重试：先用读操作核对实际结果，再告诉用户。"
+                    if maybe_sent and op["risk"] != "read"
+                    else "业务系统没有响应或连接失败。不要换别的方式重试同一个写操作，先告诉用户。"
+                ),
             }
         elapsed = int((time.monotonic() - started) * 1000)
         await disk_io(partial(spool.seek, 0))
@@ -609,6 +666,10 @@ async def _stage(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
 
 
 async def call(ctx: Context, args: Call) -> dict[str, Any]:
+    if args.batch is not None:
+        from coreman.core.systems_catalog import batch
+
+        return await batch.submit(ctx, args)
     prepared = await prepare(ctx, args)
     if isinstance(prepared, dict):
         return prepared

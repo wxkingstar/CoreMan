@@ -196,6 +196,40 @@ class SystemCall(Base):
     object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
+BATCH_ITEM_STATUSES = (
+    "pending",
+    "sending",
+    "ok",
+    "http_error",
+    "unreachable",
+    "unknown",
+    "skipped",
+)
+
+
+class SystemBatchItem(Base):
+    """批量写操作里的一项（批次本身是 `interaction_states` 的 `systems_batch`）。
+
+    请求与结果摘要按批次和行号加密；`sending` 是「已经要发出、结果还没写回」，进程中途没了的
+    记为 `unknown`，不再重发。
+    """
+
+    __tablename__ = "system_batch_items"
+    __table_args__ = (CheckConstraint(enum_check("status", BATCH_ITEM_STATUSES), name="status"),)
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("interaction_states.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_enc: Mapped[str] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    # 记为 sending 的时刻：刚发出不久的可能还在途，过了宽限仍没有结果才算结果未知。
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    brief_enc: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ApiClient(TimestampMixin, Base):
     __tablename__ = "api_clients"
     app_key: Mapped[str] = mapped_column(Text, primary_key=True)
