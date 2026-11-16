@@ -8,6 +8,25 @@ from coreman.core.relay.quota import Quota, QuotaWindow, save_quota
 from tests.fakes.runtime_node import add_node, add_node_relay
 
 
+@pytest.mark.parametrize("kind", ["model", "conversation"])
+@pytest.mark.parametrize("code", [None, "model_request_failed"])
+async def test_claude_limit_is_classified_at_ingest(db_session, kind, code):
+    relay = await add_node_relay(db_session)
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(
+            status="down",
+            check_kind=kind,
+            error_code=code,
+            detail="You've hit your limit · resets 6pm (Asia/Shanghai)",
+        ),
+    )
+    await db_session.refresh(relay)
+    assert relay.model_health["error_code"] == "quota_limited"
+    assert relay.last_model_failure["error_code"] == "quota_limited"
+
+
 async def test_driver_success_cannot_overwrite_model_failure(db_session: AsyncSession):
     relay = await add_node_relay(db_session)
     now = datetime.now(UTC)
