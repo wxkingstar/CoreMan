@@ -20,7 +20,7 @@ const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective
 const price = reactive<ModelPrice>(emptyPrice())
 // 调整内置价 = 为同一模型新增一条自定义价格：模型固定，生效日默认今天。
 const lockModel = ref(false)
-const money = (value: number | null) => value == null ? t('statistics.unknown') : `$${value.toFixed(6)}`
+const money = (value: number | null) => value == null ? t('statistics.unknown') : `$${Math.round(value).toLocaleString()}`
 const number = (value: number | null) => value == null ? t('statistics.unknown') : value.toLocaleString()
 const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 const chart = computed(() => {

@@ -25,7 +25,7 @@ it('labels missing costs as unmeasured and hides price management from members',
   await flushPromises()
   expect(wrapper.text()).toContain('未计量')
   expect(wrapper.text()).toContain('已计量 0 / 2 条')
-  expect(wrapper.text()).not.toContain('$0.000000')
+  expect(wrapper.text()).not.toContain('$0')
   expect(statistics.prices).not.toHaveBeenCalled()
   // 用户排行排在第一个并默认展开，显示圆形头像和 Token 合计。
   expect(wrapper.findAll('.el-tabs__item').map(tab => tab.text())).toEqual(['用户排行', 'AI 员工排行'])
