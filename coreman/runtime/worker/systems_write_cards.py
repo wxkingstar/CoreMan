@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy import select
@@ -19,7 +20,7 @@ from coreman.core.auth.system_access import SubjectUnavailable, granted_systems,
 from coreman.core.bus import outbox, tasks
 from coreman.core.db.models import Bot, BotSystemGrant, InboundEvent, InteractionState, Task, User
 from coreman.core.systems_catalog import confirm, proxy, service
-from coreman.core.systems_catalog.context import Context, carried
+from coreman.core.systems_catalog.context import Context
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.personal_cards import card_owner_scope, group_card_scope
@@ -100,30 +101,55 @@ def _brief(result: dict[str, Any]) -> str:
 
 
 async def _run(
-    pctx: Context, items: list[dict[str, Any]], prepared: list[proxy.Prepared]
-) -> tuple[list[str], list[str], bool]:
-    """Run in order, stop at the first failure. (card lines, model notes, all succeeded)."""
-    lines: list[str] = []
-    notes: list[str] = []
-    stopped = False
-    numbered = len(items) > 1
+    session: AsyncSession,
+    pctx: Context,
+    state_id: uuid.UUID,
+    staged: dict[str, Any],
+    items: list[dict[str, Any]],
+    prepared: list[proxy.Prepared],
+    *,
+    cancelled: Callable[[], bool],
+    reload: Callable[[], Awaitable[None]],
+) -> tuple[list[str], dict[int, str]] | None:
+    """Run in order, stop at the first failure. (each item's outcome, bounded responses), or None
+    when this task was taken for lost and the batch has been settled without it.
+
+    Every item's state is saved before and after it is sent (`confirm.RUN`), written from the
+    plain `staged` copy: if this worker dies, `confirm.interrupted` reports what was done."""
+    progress = ["pending"] * len(items)
+    briefs: dict[int, str] = {}
+
+    async def save() -> InteractionState | None:
+        state = await session.get(InteractionState, state_id, populate_existing=True)
+        if state is None or (state.state.get(confirm.RUN) or {}).get("finished"):
+            return None
+        state.state = {**staged, confirm.RUN: {"progress": list(progress)}}
+        await session.commit()
+        return state
+
     for index, (item, p) in enumerate(zip(items, prepared, strict=True), 1):
-        head = confirm.headline(index, item, numbered=numbered)
-        if stopped:
-            lines.append(f"⏸ {head}：没有执行")
-            notes.append(f"{index}. {item['system']}.{item['operation_id']}：未执行")
-            continue
-        result = await proxy.send(pctx, p, key=item["key"], prefix="confirmed_")
+        progress[index - 1] = "sending"
+        # 被判失联后这一批已经按「被打断」收尾并告诉了用户：不能再接着发。
+        if cancelled() or await save() is None:
+            return None
+        try:
+            result = await proxy.send(pctx, p, key=item["key"], prefix="confirmed_")
+        except Exception as exc:  # noqa: BLE001 平台自己出错：请求可能已经发出
+            await session.rollback()
+            await reload()
+            result = {
+                "error": "platform_error",
+                "maybe_sent": True,
+                "message": f"平台处理这一项时出错（{type(exc).__name__}），不确定请求有没有发出。",
+            }
         ok = bool(result.get("ok"))
-        lines.append(f"✅ {head}：已完成" if ok else f"❌ {head}：没有成功")
-        notes.append(
-            f"{index}. {item['system']}.{item['operation_id']}："
-            + ("成功" if ok else "失败")
-            + " "
-            + _brief(result)
-        )
-        stopped = not ok
-    return lines, notes, not stopped
+        progress[index - 1] = "ok" if ok else "unknown" if result.get("maybe_sent") else "failed"
+        briefs[index] = _brief(result)
+        if await save() is None:
+            return None
+        if not ok:
+            break
+    return progress, briefs
 
 
 async def handle(
@@ -216,8 +242,37 @@ async def handle(
             f"确认时第 {index} 项已不能执行：{reason}。整批都没有执行，不要自行重试。",
         )
         return "systems_write_refused"
-    lines, notes, all_ok = await _run(pctx, items, checked)
-    tail = "" if all_ok else "\n遇到失败已停下，AI 员工会接着说明原因。"
+    ids = (state.id, bot.id, inbound.id, origin.id)
+
+    async def reload() -> None:
+        # 回滚让已加载的行都过期：重新取，后面发卡片和续接还要用。
+        for model, identity in zip((InteractionState, Bot, InboundEvent, Task), ids, strict=True):
+            await session.get(model, identity, populate_existing=True)
+
+    ran = await _run(
+        session,
+        pctx,
+        state.id,
+        dict(staged),
+        items,
+        checked,
+        cancelled=ctx.cancel_event.is_set,
+        reload=reload,
+    )
+    if ran is None:
+        return "systems_write_interrupted"
+    progress, briefs = ran
+    all_ok = all(status == "ok" for status in progress)
+    lines = confirm.outcome_lines(items, progress)
+    notes = confirm.outcome_notes(items, progress, briefs)
+    unknown = "unknown" in progress
+    tail = (
+        ""
+        if all_ok
+        else "\n有一项的结果未知，可能已经生效，请先到业务系统核对；AI 员工会接着说明。"
+        if unknown
+        else "\n遇到失败已停下，AI 员工会接着说明原因。"
+    )
     await _update(
         session,
         bot,
@@ -235,31 +290,19 @@ async def handle(
         + (
             "\n读回关键字段核对后如实汇报。"
             if all_ok
+            else "\n结果未知的项可能已经生效：先用读操作核对实际状态，不要直接重做；"
+            "未执行的项不要自行重试，先告诉用户。"
+            if unknown
             else "\n遇到失败已停止，失败和未执行的项不要自行重试，先告诉用户。"
         ),
     )
+    # 与卡片更新、续接同一个事务：记下这一批已经交代完，之后不再按「被打断」处理。
+    state.state = {**staged, confirm.RUN: {"progress": progress, "finished": True}}
     return "systems_write_done" if all_ok else "systems_write_failed"
 
 
 async def _resume(session: AsyncSession, origin: Task, state: InteractionState, note: str) -> None:
-    await tasks.enqueue(
-        session,
-        tasks.NewTask(
-            bot_id=origin.bot_id,
-            kind="chat",
-            user_id=origin.user_id,
-            session_key=origin.session_key,
-            inbound_event_id=origin.inbound_event_id,
-            dedupe_key=f"systems-write:{state.id}:resume",
-            payload={
-                **carried(origin.payload, confirm.RESULT_KEY),
-                confirm.RESULT_KEY: note,
-                "serialize_session": True,
-                # 用户刚点完确认卡，不再问「还要不要做」。
-                "stale_confirmed": True,
-            },
-        ),
-    )
+    await confirm.resume(session, origin, state, note)
 
 
 async def _update(
@@ -278,17 +321,5 @@ async def _update(
         kind="card_update",
         dedupe_key=f"{inbound.id}:card_update",
         target={"chat_id": inbound.chat_id, "message_id": inbound.reply_context.get("message_id")},
-        payload={
-            "card": {
-                "schema": "2.0",
-                "header": {
-                    "template": template,
-                    "title": {"tag": "plain_text", "content": title},
-                },
-                # 结果里可能有业务数据：纯文本，不让其中的标记生效。
-                "body": {
-                    "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]
-                },
-            }
-        },
+        payload={"card": confirm.result_card(title, template, text)},
     )

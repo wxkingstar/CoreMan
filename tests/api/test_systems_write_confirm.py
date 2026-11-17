@@ -467,3 +467,105 @@ async def test_a_refused_card_tells_the_asker_and_voids_the_batch(
     assert await confirm.undelivered(db_session, utcnow()) == 0
     result = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
     assert result in ("expired", "ignored") and posts(fake) == []
+
+
+class WorkerDied(BaseException):
+    """Stands in for the worker process disappearing in the middle of a run."""
+
+
+def click_action(original: Task, state_id: uuid.UUID) -> dict[str, Any]:
+    return {
+        "task_id": f"personal:{original.id}",
+        "event_key": confirm.CARD_EVENT,
+        "level": f"confirm:{state_id}",
+    }
+
+
+async def test_a_run_cut_short_reports_each_item_and_runs_nothing_again(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    from coreman.core.systems_catalog import proxy
+
+    bot, user, task = await turn(db_session, app)
+    await stage(client, app, task, user, draft("SKU-1"), draft("SKU-2"), draft("SKU-3"))
+    await release(app, task)
+    state = await batch(db_session)
+    send = proxy.send
+    calls = 0
+
+    async def dies_on_the_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise WorkerDied
+        return await send(*args, **kwargs)
+
+    monkeypatch.setattr(proxy, "send", dies_on_the_second)
+    pressed = await press(db_session, bot, task, state.id)
+    with pytest.raises(WorkerDied):
+        await CardActionHandler().run(build_ctx(db_engine, pressed))
+    assert posts(fake) == ["/api/stock/documents"]
+    cut = await batch(db_session)
+    assert cut.state[confirm.RUN] == {"progress": ["ok", "sending", "pending"]}
+
+    # 巡检发现执行任务丢了：按每一项的状态收尾，不重新执行。
+    async with app.state.session_factory() as session:
+        assert await confirm.lost_click(session, app.state.cipher, click_action(task, state.id))
+        await session.commit()
+    update = await last_update(db_session)
+    assert update.count("✅") == 1 and "❓" in update and "⏸" in update
+    assert "执行中途被打断" in update
+    (follow,) = await resumed(db_session)
+    note = follow.payload[confirm.RESULT_KEY]
+    assert "1. stock.createDraft：成功" in note and "2. stock.createDraft：结果未知" in note
+    assert "3. stock.createDraft：未执行" in note and "先用读操作核对" in note
+    assert posts(fake) == ["/api/stock/documents"]
+    # 只收尾一次；别的卡片事件不受影响。
+    async with app.state.session_factory() as session:
+        assert not await confirm.lost_click(session, app.state.cipher, click_action(task, state.id))
+        assert not await confirm.lost_click(session, app.state.cipher, {"event_key": "other"})
+
+
+async def test_a_task_taken_for_lost_stops_before_the_next_item(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    from coreman.core.systems_catalog import proxy
+
+    bot, user, task = await turn(db_session, app)
+    await stage(client, app, task, user, draft("SKU-1"), draft("SKU-2"))
+    await release(app, task)
+    state = await batch(db_session)
+    send = proxy.send
+
+    async def settled_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        out = await send(*args, **kwargs)
+        async with app.state.session_factory() as session:
+            assert await confirm.lost_click(session, app.state.cipher, click_action(task, state.id))
+            await session.commit()
+        return out
+
+    monkeypatch.setattr(proxy, "send", settled_meanwhile)
+    result = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
+    assert result == "systems_write_interrupted"
+    assert posts(fake) == ["/api/stock/documents"]
+    assert len(await resumed(db_session)) == 1
+
+
+async def test_no_response_is_an_unknown_outcome_not_a_failure(
+    client, app, db_session, db_engine, fake
+) -> None:
+    def no_answer(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no response", request=request)
+
+    fake.routes[("POST", "/api/stock/documents")] = no_answer
+    bot, user, task = await turn(db_session, app)
+    await stage(client, app, task, user, draft("SKU-1"), draft("SKU-2"))
+    await release(app, task)
+    state = await batch(db_session)
+    result = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
+    assert result == "systems_write_failed"
+    update = await last_update(db_session)
+    assert "❓" in update and "结果未知，可能已经生效" in update and "⏸" in update
+    (follow,) = await resumed(db_session)
+    assert "不要直接重做" in follow.payload[confirm.RESULT_KEY]
+    assert (await batch(db_session)).state[confirm.RUN]["finished"] is True

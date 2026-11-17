@@ -72,3 +72,43 @@ def test_only_an_approved_dispatch_skips_the_card() -> None:
         ("chat", {"allow_write": True}),
     ):
         assert not policy.writes_preapproved(Task(kind=kind, payload=payload))
+
+
+async def test_an_approved_dispatch_never_deletes_and_writes_no_more_than_one_card(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_session: AsyncSession,
+    fake: FakeBusinessSystem,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coreman.core.systems_catalog import proxy
+
+    monkeypatch.setattr(proxy, "PREAPPROVED_WRITES_MAX", 2)
+    bot, member, _ = await proxied_turn(db_session, write=True)
+    approved = bearer(app, await _round(db_session, bot, allow_write=True), member)
+    posted = len([r for r in fake.requests if r.method == "POST"])
+    # 所有者批准的是一句任务描述，没有人逐项确认：删除类操作不在这种轮次里执行。
+    deleted = await call(
+        client,
+        approved,
+        "systems_call",
+        {
+            "system": "stock",
+            "operation_id": "cancelDocument",
+            "path_params": {"id": "D1"},
+            "body": {"reason": "录入错误"},
+        },
+    )
+    assert deleted["error"] == "confirmation_required" and "确认卡" in deleted["message"]
+    for sku in ("SKU-1", "SKU-2"):
+        written = await call(
+            client, approved, "systems_call", {**WRITE, "body": {"sku": sku, "quantity": 1}}
+        )
+        assert written["ok"] is True
+    spent = await call(client, approved, "systems_call", WRITE)
+    assert spent["error"] == "preapproved_writes_exhausted" and spent["stop"] is True
+    assert len([r for r in fake.requests if r.method == "POST"]) == posted + 2
+    # 读不受这个上限影响；另一轮批准的调度重新计数。
+    assert (await call(client, approved, "systems_call", READ))["status"] == 200
+    again = bearer(app, await _round(db_session, bot, allow_write=True), member)
+    assert (await call(client, again, "systems_call", WRITE))["ok"] is True

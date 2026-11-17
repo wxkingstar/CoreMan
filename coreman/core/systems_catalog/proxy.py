@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
 
 from coreman.core.auth.token_providers import TokenProviderError
 from coreman.core.config import get_settings
@@ -49,6 +50,9 @@ LIST_STEPS = (200, 100, 50, 20, 10, 5, 2, 1)
 NEVER_PROXIED = ("financial",)
 # Staged for the member's confirmation instead of running at once.
 CONFIRMED_RISKS = ("write", "destructive")
+# Writes a turn may run without a confirmation card once the owner approved the turn in advance
+# (a personal assistant's dispatch with `allow_write`): as many as one card holds.
+PREAPPROVED_WRITES_MAX = 50
 # Header parameters the platform fills itself. A staged write keeps its value, so running it again
 # reaches the business system with the same key.
 IDEMPOTENCY_HEADERS = ("idempotency-key", "x-operation-request-id")
@@ -433,6 +437,9 @@ def policy_error(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> st
         return "owner_turn_required"
     if op["risk"] in CONFIRMED_RISKS and system.key not in ctx.writable:
         return "write_not_allowed"
+    if op["risk"] == "destructive" and ctx.writes_preapproved:
+        # 所有者批准的是一句任务描述，这一轮没有人逐项确认：删了恢复不了的不在这里做。
+        return "confirmation_required"
     return None
 
 
@@ -443,6 +450,12 @@ DENIALS = {
     "为这个系统开启「允许写入」；在此之前不要尝试其他写入方式。",
     "owner_turn_required": "这一轮是个人助理在所有者不在场时跑的，业务系统只能查询，不能做写操作；"
     "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做。",
+    "confirmation_required": "这一轮是所有者批准后由个人助理调度来的，没有人能逐项确认："
+    "删除后无法恢复的操作（destructive）不在这种轮次里执行。把要做的事写进答复里，"
+    "由所有者在私聊里亲自让助理去做，在确认卡上确认。",
+    "preapproved_writes_exhausted": "这一轮已经执行了 {limit} 个写操作，达到所有者一次批准"
+    "能做的上限。停止写入，把已经完成和还没做的部分如实写进答复里；更多的修改请所有者"
+    "在私聊里让助理去做（走确认卡，可以整批提交）。",
     OWNER_APPROVAL: "这一轮是个人助理在所有者不在场时跑的：写操作调用后不会当场执行，平台自动"
     "提交给所有者审批，批准后按原样执行并把结果交回本会话。不要重试，也不要换别的方式做同一件事。",
 }
@@ -665,6 +678,21 @@ async def _stage(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
     return {"system": p.system.key, "operation_id": p.operation_id, **staged}
 
 
+async def _preapproved_spent(ctx: Context) -> bool:
+    """A turn whose writes the owner approved in advance runs them without a card, so it gets
+    only as many as one card could hold: counted from the calls this task already made."""
+    sent = await ctx.session.scalar(
+        select(func.count())
+        .select_from(SystemCall)
+        .where(
+            SystemCall.task_id == ctx.member.task_id,
+            SystemCall.risk.in_(CONFIRMED_RISKS),
+            SystemCall.outcome.in_(("ok", "http_error", "unreachable")),
+        )
+    )
+    return int(sent or 0) >= PREAPPROVED_WRITES_MAX
+
+
 async def call(ctx: Context, args: Call) -> dict[str, Any]:
     if args.batch is not None:
         from coreman.core.systems_catalog import batch
@@ -688,4 +716,15 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
         from coreman.core.systems_catalog import confirm
 
         return await confirm.propose(ctx, prepared, args)
+    if prepared.op["risk"] in CONFIRMED_RISKS and await _preapproved_spent(ctx):
+        await record(ctx, prepared.system, prepared.operation_id, prepared.op, "denied")
+        return {
+            "error": "preapproved_writes_exhausted",
+            "stop": True,
+            "system": prepared.system.key,
+            "operation_id": prepared.operation_id,
+            "message": DENIALS["preapproved_writes_exhausted"].format(
+                limit=PREAPPROVED_WRITES_MAX
+            ),
+        }
     return await send(ctx, prepared)
