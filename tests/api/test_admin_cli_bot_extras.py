@@ -354,6 +354,13 @@ async def test_human_collaborators_bot_help_and_observe(cli, db_session, monkeyp
     assert code == 0, err
     await db_session.refresh(bot)
     assert bot.group_observe_scope == "库存问题"
+    assert bot.unprompted_system_tokens is False
+    code, _, err = await cli(
+        "bots", "observe-set", "sales_bot", "--unprompted-tokens", "on", "--as", "creator"
+    )
+    assert code == 0, err
+    await db_session.refresh(bot)
+    assert bot.unprompted_system_tokens is True
 
 
 async def test_feishu_app_commands(cli, db_session, monkeypatch, tmp_path):

@@ -31,6 +31,7 @@ from coreman.core.bus.tasks import ACTIVE
 from coreman.core.chat import chat_logs, interactions, liveness
 from coreman.core.chat.card_replies import is_click
 from coreman.core.chat.chat_logs import ChatLogEntry, ChatLogWriter
+from coreman.core.config import get_settings
 from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
     CHAT_TYPES,
@@ -170,6 +171,11 @@ async def reap_lost_tasks(
                         InteractionState.id == state_id, InteractionState.status == "submitted"
                     )
                 )
+        if task.kind == "card_action":
+            # 正在按确认卡执行业务系统写操作时没了：把每一项做到哪一步告诉用户和模型。
+            await systems_confirm.lost_click(
+                session, get_settings().build_cipher(), (task.payload or {}).get("card_action")
+            )
         await _tell_user(session, task, stream, bot)
         if entry is None:
             continue

@@ -13,6 +13,7 @@ from coreman.admin_cli.base import add_yes, changed, group, leaf, on_off, requir
 from coreman.admin_cli.client import AdminClient, CliError, one
 
 SYSTEMS = "/api/admin/systems"
+DELIVERY = "/api/admin/system-delivery"
 BATCHES = "/api/admin/system-batches"
 BATCH_PHASES = {
     "awaiting": "等待确认",
@@ -104,6 +105,8 @@ def register(sub: Any) -> None:
     p = leaf(ops, "allow-all", "开放给全部 AI 员工", allow_all)
     p.add_argument("key")
     add_yes(p)
+    p = leaf(ops, "delivery", "盘点各系统的令牌下发方式和用得到它的 AI 员工", delivery)
+    p.add_argument("--mode", choices=("env", "mcp", "proxy"), help="只看这种下发方式的系统")
     leaf(ops, "refresh", "以自己的身份重新拉取操作目录", refresh).add_argument("key")
     leaf(ops, "test", "以自己的身份签一枚测试令牌并访问测试地址", test).add_argument("key")
     p = leaf(ops, "delete", "删除业务系统", delete)
@@ -189,6 +192,32 @@ async def show(c: AdminClient, args: argparse.Namespace) -> int:
                 ("检查时间", "checked_at"),
             ],
         )
+    return 0
+
+
+async def delivery(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(DELIVERY, mode=args.mode)
+    if args.json:
+        output.dump(rows)
+        return 0
+    output.table(
+        rows,
+        [
+            ("系统", lambda r: f"{r['system_key']}（{r['system_name']}）"),
+            ("令牌下发", "token_delivery"),
+            ("AI 员工", lambda r: f"{r['bot_key']}（{r['bot_name']}）"),
+            ("来源", lambda r: "显式授权" if r["source"] == "grant" else "默认全员"),
+            # 允许写入只对平台代理的系统有意义。
+            (
+                "允许写入",
+                lambda r: r["allow_write"] if r["token_delivery"] == "proxy" else None,
+            ),
+            ("运行时节点", "runtime_node"),
+            ("节点支持目录", "catalog_runtime"),
+            ("没人点名也下发", "unprompted_system_tokens"),
+        ],
+        empty="（没有 AI 员工用得到的业务系统）",
+    )
     return 0
 
 

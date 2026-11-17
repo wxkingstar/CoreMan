@@ -425,6 +425,34 @@ async def test_group_observe_switch_rules(
     assert r.status_code == 200 and r.json()["data"]["group_observe"] == "on"
 
 
+async def test_unprompted_system_tokens_switch_is_off_by_default_and_audited(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _, _ = await _setup(client, db_session)
+    url = f"/api/admin/bots/{bot['id']}"
+    assert bot["unprompted_system_tokens"] is False
+
+    async def patch(value: object) -> httpx.Response:
+        current = (await client.get(url)).json()["data"]
+        return await client.patch(
+            url,
+            json={"unprompted_system_tokens": value},
+            headers={"If-Match": f'"{current["version"]}"'},
+        )
+
+    assert (await patch(None)).status_code == 422
+    r = await patch(True)
+    assert r.status_code == 200 and r.json()["data"]["unprompted_system_tokens"] is True
+    row = await db_session.get(Bot, uuid.UUID(str(bot["id"])), populate_existing=True)
+    assert row is not None and row.unprompted_system_tokens is True
+    diffs = [
+        a.diff
+        for a in (await db_session.execute(select(AuditLog))).scalars()
+        if a.action == "bot.update"
+    ]
+    assert diffs == [{"unprompted_system_tokens": [False, True]}]
+
+
 async def test_routes_hide_someone_elses_assistant_from_managers(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:

@@ -910,6 +910,12 @@ def _register_observe(ops: Any) -> None:
     )
     p.add_argument("--scope", help="旁听时关注的话题范围；空字符串为清除")
     p.add_argument("--role", choices=("member", "dispatcher"), help="群里的角色：成员或调度员")
+    p.add_argument(
+        "--unprompted-tokens",
+        type=on_off,
+        metavar="on|off",
+        help="没人点名的轮次（插话、调度、告警）也下发 env / mcp 系统的令牌；默认 off 更安全",
+    )
     p = leaf(ops, "observe-decisions", "列出群聊旁听的判断记录（新的在前）", observe_decisions)
     _bot_arg(p)
     p.add_argument("--chat", metavar="群 id", help="只看这个群")
@@ -1004,7 +1010,13 @@ async def alert_source_remove(c: AdminClient, args: argparse.Namespace) -> int:
 
 async def observe_set(c: AdminClient, args: argparse.Namespace) -> int:
     body = changed(
-        args, {"mode": "group_observe", "scope": "group_observe_scope", "role": "group_role"}
+        args,
+        {
+            "mode": "group_observe",
+            "scope": "group_observe_scope",
+            "role": "group_role",
+            "unprompted_tokens": "unprompted_system_tokens",
+        },
     )
     if not body:
         raise CliError("没有要修改的字段，见 --help")

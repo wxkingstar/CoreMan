@@ -343,7 +343,7 @@ def record_schedule_configure(monkeypatch):
 
 
 async def _interjection_turn(
-    db_engine, db_session, scenario, monkeypatch, *, interjected_before=False
+    db_engine, db_session, scenario, monkeypatch, *, interjected_before=False, prepare=None
 ):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
@@ -360,6 +360,8 @@ async def _interjection_turn(
         ],
     )
     bot = await observing_bot(db_session)
+    if prepare is not None:
+        await prepare(bot)
     await say(db_session, bot, "om0", "今天中午吃什么", user="u2")
     await say(db_session, bot, "om1", "上周退货率多少？有人知道吗")
     observe = (await tasks_of(db_session, bot, "group_observe"))[-1]

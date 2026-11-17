@@ -467,6 +467,139 @@ def _card(
     }
 
 
+# ---- running a confirmed batch: each item's outcome is kept as it happens, so a run that is cut
+# short (the worker died) can still tell the asker and the model exactly what was and was not done.
+RUN = "run"
+MARKS = {
+    "ok": ("✅", "已完成", "成功"),
+    "failed": ("❌", "没有成功", "失败"),
+    # Sent, but no answer came back: the business system may have done it.
+    "unknown": ("❓", "结果未知，可能已经生效，请先核对", "结果未知，可能已经生效"),
+    "pending": ("⏸", "没有执行", "未执行"),
+}
+INTERRUPTED = (
+    "执行中途被打断（平台进程重启）。上面是打断时每一项的状态；没有执行的不会再自动执行，"
+    "结果未知的请先到业务系统核对。"
+)
+
+
+def settled(progress: list[str]) -> list[str]:
+    """An item still marked as being sent has no known outcome."""
+    return ["unknown" if status == "sending" else status for status in progress]
+
+
+def outcome_lines(items: list[dict[str, Any]], progress: list[str]) -> list[str]:
+    """One line per item for the result card."""
+    numbered = len(items) > 1
+    return [
+        f"{MARKS[status][0]} {headline(index, item, numbered=numbered)}：{MARKS[status][1]}"
+        for index, (item, status) in enumerate(zip(items, settled(progress), strict=True), 1)
+    ]
+
+
+def outcome_notes(
+    items: list[dict[str, Any]], progress: list[str], briefs: dict[int, str] | None = None
+) -> list[str]:
+    """One line per item for the model, with the bounded response where there is one."""
+    return [
+        f"{index}. {item['system']}.{item['operation_id']}：{MARKS[status][2]}"
+        + (f" {briefs[index]}" if briefs and briefs.get(index) else "")
+        for index, (item, status) in enumerate(zip(items, settled(progress), strict=True), 1)
+    ]
+
+
+def result_card(title: str, template: str, text: str) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
+        # 结果里可能有业务数据：纯文本，不让其中的标记生效。
+        "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]},
+    }
+
+
+async def resume(session: AsyncSession, origin: Task, state: InteractionState, note: str) -> None:
+    """Continue the conversation that staged the writes with what became of them."""
+    from coreman.core.bus import tasks
+    from coreman.core.systems_catalog.context import carried
+
+    await tasks.enqueue(
+        session,
+        tasks.NewTask(
+            bot_id=origin.bot_id,
+            kind="chat",
+            user_id=origin.user_id,
+            session_key=origin.session_key,
+            inbound_event_id=origin.inbound_event_id,
+            dedupe_key=f"systems-write:{state.id}:resume",
+            payload={
+                **carried(origin.payload, RESULT_KEY),
+                RESULT_KEY: note,
+                "serialize_session": True,
+                # 用户刚点完确认卡，不再问「还要不要做」。
+                "stale_confirmed": True,
+            },
+        ),
+    )
+
+
+async def interrupted(session: AsyncSession, cipher: Cipher, state_id: uuid.UUID) -> bool:
+    """The task running a confirmed batch is gone before it finished: show each item's state on
+    the card and hand it to the model, so nothing done stays unreported and nothing is assumed
+    done. Nothing is run again. True when a batch was settled this way."""
+    state = await session.get(InteractionState, state_id, with_for_update=True)
+    if state is None or state.kind != KIND or state.status != "submitted":
+        return False
+    staged = dict(state.state)
+    run = staged.get(RUN)
+    if not isinstance(run, dict) or run.get("finished"):
+        return False
+    origin_id = int(staged["origin_task_id"])
+    items = unseal(cipher, origin_id, staged)
+    progress = settled([str(status) for status in run.get("progress") or []])
+    if len(progress) != len(items):
+        return False
+    all_ok = all(status == "ok" for status in progress)
+    lines = outcome_lines(items, progress)
+    await update_card(
+        session,
+        state,
+        result_card(
+            "已完成" if all_ok else "没有全部完成",
+            "green" if all_ok else "red",
+            "\n".join(lines if all_ok else [*lines, "", INTERRUPTED]),
+        ),
+        dedupe_key=f"{staged.get('card_key')}:interrupted",
+    )
+    origin = await session.get(Task, origin_id)
+    if origin is not None:
+        note = "用户已确认，平台按确认内容执行的结果：\n" + "\n".join(
+            outcome_notes(items, progress)
+        )
+        note += (
+            "\n读回关键字段核对后如实汇报。"
+            if all_ok
+            else "\n执行中途被打断。没有执行的项不要自行重试；结果未知的项可能已经生效，"
+            "先用读操作核对实际状态，再告诉用户。"
+        )
+        await resume(session, origin, state, note)
+    state.state = {**staged, RUN: {**run, "progress": progress, "finished": True}}
+    return True
+
+
+async def lost_click(session: AsyncSession, cipher: Cipher, action: Any) -> bool:
+    """A lost card click task: if it was confirming a batch of writes, settle that batch."""
+    if not isinstance(action, dict) or action.get("event_key") != CARD_EVENT:
+        return False
+    verb, _, raw_id = str(action.get("level") or "").partition(":")
+    if verb != "confirm":
+        return False
+    try:
+        state_id = uuid.UUID(raw_id)
+    except ValueError:
+        return False
+    return await interrupted(session, cipher, state_id)
+
+
 async def release(
     session: AsyncSession, cipher: Cipher, *, bot_id: uuid.UUID, task_id: int, send: bool
 ) -> bool:

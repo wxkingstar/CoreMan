@@ -180,6 +180,7 @@ CALL_NOTES = {
     "risk_not_allowed": "不代理",
     "write_not_allowed": "未开启写入",
     "owner_turn_required": "所有者不在场",
+    "confirmation_required": "需所有者当面确认",
     proxy.OWNER_APPROVAL: "需所有者审批",
 }
 # The anonymous catalog keeps its own marker: callers there confirm these with the user themselves.
