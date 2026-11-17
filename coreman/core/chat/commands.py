@@ -6,7 +6,7 @@ import re
 import unicodedata
 from typing import Literal
 
-RESET_WORDS = ("reset", "new", "clear", "重置", "清空")
+RESET_WORDS = ("reset", "new", "clear", "重置", "重置会话", "清空")
 STOP_WORDS = ("stop", "停止", "暂停", "停")
 HELP_WORDS = ("help", "帮助", "?", "？")
 # 群聊旁听：群里 @ 机器人说这些，它在这个群暂时只在被 @ 时说话 / 恢复主动发言。

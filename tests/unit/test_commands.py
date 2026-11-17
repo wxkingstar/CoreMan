@@ -6,7 +6,7 @@ def test_normalize_strips_invisible_and_lowercases() -> None:
 
 
 def test_classify() -> None:
-    for w in ("reset", "NEW", " clear ", "重置", "清空"):
+    for w in ("reset", "NEW", " clear ", "重置", "重置会话", "清空"):
         assert classify_command(w) == "reset"
     for w in ("stop", "停止!", "暂 停", "停。", "STOP"):
         assert classify_command(w) == "stop"
