@@ -283,6 +283,12 @@ class OpenStage(ChatStageBase):
         # 冷启动归纳口吻的那一轮用不到这些，一样都不挂。机器人自己配的静态环境变量不受影响。
         unattended = platform_turns.unattended(ctx.task)
         cold_start = ctx.task.kind == COLD_START_KIND
+        # 没人点名的轮次（旁听插话、调度）由没人确认过的群消息触发，却会以消息作者的身份拿到
+        # 令牌：令牌会进运行环境的系统（env、mcp）这类轮次不签发，平台代理的系统照常（写由服务端
+        # 把住）。员工开了「没人点名时也下发」的照旧。告警轮次不在其内：它以管理员配置的服务用户
+        # 身份运行，又不挂操作目录，停掉令牌就完全查不了业务系统。
+        origin = ctx.task.payload.get("origin")
+        unprompted = origin in ("observe", "dispatch") and not bot.unprompted_system_tokens
         access = await build_system_access(
             session,
             ctx.cipher,
@@ -304,6 +310,9 @@ class OpenStage(ChatStageBase):
             mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
             unattended=unattended,
             withhold=cold_start,
+            unprompted=unprompted,
+            # 调度员只安排不干活，本来就不用这些系统：不必告诉它「本轮不可用」。
+            unprompted_note=origin != "dispatch",
         )
         # 和本轮对话记录同一事务提交：业务系统日志里的 token_id 按它查回这一轮。
         await record_issues(

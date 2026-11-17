@@ -291,6 +291,17 @@ WITHHELD_NOTE = (
 )
 
 
+# 没人点名的一轮（旁听插话、调度、告警）：触发它的是没人确认过的群消息或外部文本，令牌一旦进了
+# 运行环境平台就拦不住调用，所以 env / mcp 系统这一轮不签发。写成「请对方 @ 你再问」而不是
+# 静默不下发：否则模型会以为这些系统本就没配，转去猜账号或换一条路。
+UNPROMPTED_NOTE = (
+    "- 业务系统：这一轮没人点名，是你看到群里的消息后自己开口的，触发它的内容没有人确认过。"
+    "以下系统的令牌本轮**没有**下发（业务系统的 MCP 服务也不挂），本轮不可用：{names}。"
+    "这只影响这些系统：用其他途径能完成的照常完成；确实要用到它们时，说明需要查什么，"
+    "请对方 @ 你再问一次。不要尝试用其他账号、推测的账号或历史凭据代替。"
+)
+
+
 def systems_prompt(
     systems: list[BusinessSystem], *, mounted: bool, mcp_supported: bool = False
 ) -> str:
@@ -354,6 +365,8 @@ async def build_system_access(
     mcp_supported: bool = False,
     unattended: bool = False,
     withhold: bool = False,
+    unprompted: bool = False,
+    unprompted_note: bool = True,
 ) -> SystemAccess:
     """按系统选择签发方；external_key 仅供 builtin，任务预算可由体检等短任务缩小。
 
@@ -363,6 +376,9 @@ async def build_system_access(
     （`OWNER_ABSENT_NOTE`，不带「确认后可写」的那一句）。
     `withhold`：这一轮用不到业务系统：什么都不以发言者的身份签发（令牌、业务系统账号、目录
     凭据），mcp 系统让驱动显式禁用；「业务系统访问」段照旧，本轮块说明这一轮用不了。
+    `unprompted`：没人点名的一轮：只停令牌会进运行环境的系统（env、mcp，后者让驱动显式禁用），
+    不签发也就没有签发记录；平台代理的系统与目录凭据照常，本轮块列出停掉的系统
+    （`UNPROMPTED_NOTE`）；`unprompted_note` 为假时不写这段说明（调度回合本来就不用这些系统）。
     """
     systems = await granted_systems(session, bot.id)
     # 目录工具只挂给能挂载它的运行时，而且至少一个系统配了 OpenAPI 地址：没配的系统挂上也查不到。
@@ -393,6 +409,8 @@ async def build_system_access(
         systems=systems,
         prompt=prompt,
         unattended=unattended,
+        unprompted=unprompted,
+        unprompted_note=unprompted_note,
     )
     if unattended:
         # 不论签没签出来都写上：云签名代理不随业务系统授权，可能照样挂着。
@@ -415,6 +433,8 @@ async def _issue(
     systems: list[BusinessSystem],
     prompt: str,
     unattended: bool,
+    unprompted: bool,
+    unprompted_note: bool,
 ) -> SystemAccess:
     """以发言者的身份签发本轮的令牌与目录凭据；`catalog` 只在能挂上目录时给。"""
     unavailable = SystemAccess(prompt=prompt, note=IDENTITY_UNAVAILABLE_NOTE if systems else "")
@@ -444,6 +464,7 @@ async def _issue(
     failures: list[str] = []
     issued: list[IssuedRecord] = []
     mounts: list[dict[str, str]] = []
+    withheld: list[str] = []
     for system in systems:
         if system.token_delivery == "mcp" and not mcp_supported:
             continue
@@ -460,6 +481,11 @@ async def _issue(
                     "token_delivery": "proxy",
                 }
             )
+            continue
+        if unprompted:
+            withheld.append(system.name)
+            if system.token_delivery == "mcp":
+                mounts.append({"key": system.key, "url": ""})
             continue
         try:
             token = await issue_system_token(
@@ -531,6 +557,8 @@ async def _issue(
             cipher, task_id=catalog.task_id, user_id=user.id, ttl_seconds=catalog.ttl_seconds
         )
     notes = [ISSUE_FAILURE_NOTE, *failures] if failures else []
+    if withheld and unprompted_note:
+        notes.append(UNPROMPTED_NOTE.format(names="、".join(withheld)))
     if not unattended and any(config["token_delivery"] == "env" for config in configs):
         notes.append(ENV_WRITE_REMINDER)
     if (

@@ -123,6 +123,7 @@ export interface BotOut {
   group_observe: GroupObserveMode
   group_observe_scope: string
   group_role: GroupRole
+  unprompted_system_tokens: boolean
   /** 部署配了判断服务（OPENAI_API_KEY）才能开启群聊旁听。 */
   group_observe_ready: boolean
   member_count: number; allowed_user_count: number
@@ -151,6 +152,8 @@ export interface BotIn {
   group_observe?: GroupObserveMode
   group_observe_scope?: string
   group_role?: GroupRole
+  /** 没人点名的轮次（插话、调度、告警）也下发 env / mcp 系统的令牌（只能在编辑时修改）；默认不下发。 */
+  unprompted_system_tokens?: boolean
   enabled: boolean
   /** 扫码创建的飞书应用：凭证由服务端扫码会话交付，credentials 必须为空。 */
   feishu_registration_id?: string | null

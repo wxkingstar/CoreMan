@@ -105,6 +105,7 @@ NON_NULLABLE = (
     "group_observe",
     "group_observe_scope",
     "group_role",
+    "unprompted_system_tokens",
 )
 
 
@@ -210,6 +211,8 @@ class BotPatch(BaseModel):
     group_observe: Literal["off", "shadow", "on"] | None = None
     group_observe_scope: str | None = Field(default=None, max_length=2000)
     group_role: Literal["member", "dispatcher"] | None = None
+    # 没人点名的轮次（旁听插话、调度、告警）也下发 env / mcp 系统的令牌；默认不下发。
+    unprompted_system_tokens: bool | None = None
 
     @field_validator("env_vars")
     @classmethod
@@ -260,6 +263,7 @@ def _public(bot: Bot) -> dict[str, Any]:
         "group_observe": bot.group_observe,
         "group_observe_scope": bot.group_observe_scope,
         "group_role": bot.group_role,
+        "unprompted_system_tokens": bot.unprompted_system_tokens,
     }
 
 
@@ -401,6 +405,7 @@ async def build_out(
         "group_observe": bot.group_observe,
         "group_observe_scope": bot.group_observe_scope,
         "group_role": bot.group_role,
+        "unprompted_system_tokens": bot.unprompted_system_tokens,
         # 部署配了判断服务才能开旁听；管理台据此提示。
         "group_observe_ready": get_settings().decision_ready,
         "member_count": len(member_ids),

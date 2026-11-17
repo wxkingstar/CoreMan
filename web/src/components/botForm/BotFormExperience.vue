@@ -227,6 +227,16 @@ onMounted(() => {
         {{ form.group_role === 'dispatcher' ? t('groupObserve.teamScopeHint') : t('groupObserve.scopeHint') }}
       </div>
     </el-form-item>
+    <el-form-item
+      v-if="form.group_observe !== 'off'"
+      :label="t('groupObserve.unpromptedTokens')"
+      data-test="unprompted-system-tokens"
+    >
+      <el-switch v-model="form.unprompted_system_tokens" />
+      <div class="muted">
+        {{ t('groupObserve.unpromptedTokensHint') }}
+      </div>
+    </el-form-item>
   </template>
 
   <el-form-item

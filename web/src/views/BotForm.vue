@@ -196,6 +196,7 @@ function fillFromBot(b: BotOut): void {
     group_observe: b.group_observe,
     group_observe_scope: b.group_observe_scope,
     group_role: b.group_role,
+    unprompted_system_tokens: b.unprompted_system_tokens,
     // 后端只在 can_view_sensitive 时下发（且是脱敏值）；没下发就按空处理。
     enabled: b.enabled,
   } satisfies BotIn)
@@ -243,6 +244,9 @@ function changedFields(b: BotOut): BotPatch {
   if (p.dev_mode !== b.dev_mode) out.dev_mode = p.dev_mode
   if (p.group_observe !== undefined && p.group_observe !== b.group_observe) out.group_observe = p.group_observe
   if (p.group_role !== undefined && p.group_role !== b.group_role) out.group_role = p.group_role
+  if (p.unprompted_system_tokens !== undefined && p.unprompted_system_tokens !== b.unprompted_system_tokens) {
+    out.unprompted_system_tokens = p.unprompted_system_tokens
+  }
   if (p.group_observe_scope !== undefined && p.group_observe_scope !== b.group_observe_scope) {
     out.group_observe_scope = p.group_observe_scope
   }

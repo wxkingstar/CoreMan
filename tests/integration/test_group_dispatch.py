@@ -47,7 +47,13 @@ def plan(**data):
 
 
 async def _dispatch_turn(
-    db_engine, db_session, monkeypatch, answer: str, mode="shadow", humans: int | None = None
+    db_engine,
+    db_session,
+    monkeypatch,
+    answer: str,
+    mode="shadow",
+    humans: int | None = None,
+    prepare=None,
 ):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
@@ -64,6 +70,8 @@ async def _dispatch_turn(
         ],
     )
     bot = await dispatcher_bot(db_session, mode)
+    if prepare is not None:
+        await prepare(bot)
     # 员工都换成真实存在的机器人，任务的执行员工外键才挂得上。
     staff = []
     for item in STAFF:

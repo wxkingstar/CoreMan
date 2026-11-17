@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,7 @@ from coreman.api.routers.systems_catalog import refresh_as
 from coreman.api.security import verify_csrf
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
-from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
+from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, granted_systems
 from coreman.core.auth.tokens import active_key, public_keys
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import is_bot_admin
@@ -34,10 +34,16 @@ from coreman.core.db.models import (
     BotSystemGrant,
     BusinessSystem,
     JwtKey,
+    RelayServer,
+    RuntimeNode,
     Skill,
+    SystemCatalog,
     User,
 )
 from coreman.core.knowledge import installation as installs
+from coreman.core.relay.models import backend_of
+from coreman.core.systems_catalog import policy as catalog_policy
+from coreman.core.systems_catalog import service as catalog_service
 from coreman.core.systems_catalog.compiler import same_origin
 
 router = APIRouter(
@@ -295,6 +301,121 @@ async def validate_delivery(session: AsyncSession, values: dict[str, Any]) -> No
             raise ApiError(422, 422, problem)
 
 
+async def validate_proxy(
+    session: AsyncSession, values: dict[str, Any], row: BusinessSystem | None
+) -> None:
+    """切到平台代理前确认调得通：代理系统没有可用的操作目录时，AI 员工只会被告知「无法调用」。
+
+    只拦这次保存造成的坏状态（`row` 是保存前的系统，新建时为 None）；改回 env / mcp 不设门槛。
+    """
+    if values["token_delivery"] != "proxy":
+        return
+    if not values.get("openapi_url"):
+        # 保存前就是没有 OpenAPI 地址的代理系统：照常让它改别的字段。
+        if row is not None and row.token_delivery == "proxy" and not row.openapi_url:
+            return
+        raise ApiError(
+            422,
+            422,
+            "平台代理的系统必须填写 OpenAPI 地址：AI 员工只能按操作目录经平台调用，"
+            "没有目录就完全调用不了。请先填写 OpenAPI 地址、确认操作目录拉取成功后再改为平台代理；"
+            "还没有 OpenAPI 描述的系统请保留原来的交付方式",
+        )
+    if row is None or row.token_delivery == "proxy":
+        return
+    # 这次同时改了地址的，目录要保存后才重新拉取，此刻的状态说明不了什么。
+    if (row.base_url, row.openapi_url) != (values.get("base_url"), values["openapi_url"]):
+        return
+    catalog = await session.get(SystemCatalog, row.key)
+    if (
+        catalog is not None
+        and catalog.status == "error"
+        and catalog.error != catalog_service.PENDING
+    ):
+        raise ApiError(
+            409,
+            409,
+            f"操作目录当前不可用（{catalog.error}），改为平台代理后 AI 员工将无法调用这个系统。"
+            "请先让业务系统修好 OpenAPI 描述，在系统页刷新操作目录"
+            f"（或 coreman systems refresh {row.key}），目录可用后再切换",
+        )
+
+
+async def delivery_rows(
+    session: AsyncSession, user: User, mode: str | None
+) -> list[dict[str, Any]]:
+    """系统 × 能用它的 AI 员工（只看已启用的员工）。
+
+    授权口径直接用每轮签发的那一个（`granted_systems`），盘点结果才和实际下发一致。
+    别人的个人助理不列：助理记录只对所有者可见，管理员也不例外。
+    """
+    bots = list(
+        await session.scalars(
+            select(Bot)
+            .where(Bot.enabled, or_(Bot.kind == "standard", Bot.owner_id == user.id))
+            .order_by(Bot.bot_key)
+        )
+    )
+    relays = {
+        relay.id: relay
+        for relay in await session.scalars(
+            select(RelayServer).where(RelayServer.id.in_([bot.relay_server_id for bot in bots]))
+        )
+    }
+    nodes = {
+        node.id: node
+        for node in await session.scalars(
+            select(RuntimeNode).where(
+                RuntimeNode.id.in_([relay.runtime_node_id for relay in relays.values()])
+            )
+        )
+    }
+    writes = {
+        (bot_id, key): allowed
+        for bot_id, key, allowed in await session.execute(
+            select(BotSystemGrant.bot_id, BotSystemGrant.system_key, BotSystemGrant.allow_write)
+        )
+    }
+    found: list[tuple[BusinessSystem, dict[str, Any]]] = []
+    for bot in bots:
+        relay = relays.get(bot.relay_server_id) if bot.relay_server_id else None
+        node = nodes.get(relay.runtime_node_id) if relay and relay.runtime_node_id else None
+        # 与 `catalog_policy.mount_for` 同一判断：节点在用，且该员工的后端声明了目录能力。
+        catalog_runtime = (
+            relay is not None
+            and node is not None
+            and node.is_active
+            and catalog_policy.runtime_supported(
+                node.capabilities, backend_of(bot.model, relay.model_provider)
+            )
+        )
+        for system in await granted_systems(session, bot.id):
+            if mode and system.token_delivery != mode:
+                continue
+            allow_write = writes.get((bot.id, system.key))
+            found.append(
+                (
+                    system,
+                    {
+                        "system_key": system.key,
+                        "system_name": system.name,
+                        "token_delivery": system.token_delivery,
+                        "bot_id": str(bot.id),
+                        "bot_key": bot.bot_key,
+                        "bot_name": bot.name,
+                        # grant：员工的系统权限里显式授权；default：系统默认对全部员工开放。
+                        "source": "default" if allow_write is None else "grant",
+                        "allow_write": bool(allow_write),
+                        "runtime_node": node.name if node else None,
+                        "catalog_runtime": catalog_runtime,
+                        "unprompted_system_tokens": bot.unprompted_system_tokens,
+                    },
+                )
+            )
+    found.sort(key=lambda pair: (pair[0].sort_order, pair[0].key, pair[1]["bot_key"]))
+    return [row for _, row in found]
+
+
 def delivery_audit(values: dict[str, Any]) -> dict[str, Any]:
     skill_id = values.get("companion_skill_id")
     return {
@@ -344,6 +465,7 @@ async def create_system(
     values = body.row_values()
     validate_provider_settings(request, values)
     await validate_delivery(session, values)
+    await validate_proxy(session, values, None)
     row = BusinessSystem(**values)
     session.add(row)
     await persist(session)
@@ -415,6 +537,7 @@ async def update_system(
             values[field] = getattr(row, field)
     validate_provider_settings(request, values, row.token_provider)
     await validate_delivery(session, values)
+    await validate_proxy(session, values, row)
     provider_diff = diff_dict(
         {field: getattr(row, field) for field in provider_fields}
         | delivery_audit({"mcp_url": row.mcp_url, "companion_skill_id": row.companion_skill_id}),
@@ -470,6 +593,16 @@ async def delete_system(
     await audit(session, request, user, "system.delete", "system", key)
     await persist(session, commit=True)
     return {"code": 0, "data": None}
+
+
+@router.get("/system-delivery")
+async def list_delivery(
+    mode: Literal["env", "proxy", "mcp"] | None = None,
+    user: User = Depends(MANAGERS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """盘点各系统的令牌交付方式和用得到它的 AI 员工：切换交付方式前看影响面。"""
+    return {"code": 0, "data": await delivery_rows(session, user, mode)}
 
 
 @router.get("/bots/{bot_id}/system-grants")

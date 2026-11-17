@@ -41,7 +41,7 @@ const editBot: BotOut = {
   workspace_state: 'ready', workspace_error: null,
   verbosity_level: 1, effort_level: null, sse_timeout_seconds: 3600,
   welcome_message: null, rich_cards: true, dev_mode: false, notify_webhook_url: 'ht••••-1',
-  group_observe: 'off', group_observe_scope: '', group_role: 'member', group_observe_ready: false,
+  group_observe: 'off', group_observe_scope: '', group_role: 'member', unprompted_system_tokens: false, group_observe_ready: false,
   member_count: 0, allowed_user_count: 0,
   permissions: {
     role: 'creator', can_view_sensitive: true, can_view_env_full: false, can_edit: true,
@@ -169,6 +169,24 @@ describe('BotForm', () => {
     wrapper.findComponent(FeishuRegistrationDialog).vm.$emit('succeeded', { id: 'reg2', status: 'consumed' })
     await flushPromises()
     expect(radios().map((r) => (r.element as HTMLInputElement).disabled)).toEqual([false, false, false])
+    wrapper.unmount()
+  })
+
+  it('offers the unprompted-token switch only while group observing is on, and patches it', async () => {
+    const quiet: BotOut = { ...editBot, platform: 'feishu', credentials: { app_id: 'cli_1', app_secret: '••••••••' } }
+    const off = mount(BotForm, { props: { mode: 'edit', bot: quiet }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    expect(off.find('[data-test="unprompted-system-tokens"]').exists()).toBe(false)
+    off.unmount()
+    const observing: BotOut = { ...quiet, group_observe: 'on', group_observe_scope: '库存问题' }
+    vi.mocked(bots.patch).mockResolvedValue({ ...observing, unprompted_system_tokens: true, version: 2 })
+    const wrapper = mount(BotForm, { props: { mode: 'edit', bot: observing }, global: { plugins: [ElementPlus, i18n] } })
+    await flushPromises()
+    wrapper.get('[data-test="unprompted-system-tokens"]').findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+    await flushPromises()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+    expect(bots.patch).toHaveBeenCalledWith('b1', { unprompted_system_tokens: true }, 1)
     wrapper.unmount()
   })
 

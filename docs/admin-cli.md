@@ -182,6 +182,7 @@ coreman bots api-alias-remove demo-bot 值班群 --yes
 
 ```bash
 coreman bots observe-set demo-bot --mode shadow --scope "库存与发货问题" [--role member|dispatcher]
+coreman bots observe-set demo-bot --unprompted-tokens on|off   # 没人点名的轮次是否也下发 env / mcp 系统的令牌
 coreman bots observe-decisions demo-bot [--chat 群id] [--would-speak|--silent] [--limit 50] [--before 记录id] [--messages]
 coreman bots observe-review demo-bot 记录id should|should_not|none
 coreman bots alert-source-list demo-bot
@@ -191,6 +192,8 @@ coreman bots alert-source-remove demo-bot 来源id
 ```
 
 开启旁听前须填旁听职责说明，且飞书应用要有「获取群组中所有消息」权限，见下面的 `observe-permission` 与 `feishu-app-scan --observe`。
+
+没人点名的轮次（主动插话、调度；告警触发的轮次不算）由没人确认过的群消息触发，默认不签发令牌下发方式为 `env`、`mcp` 的业务系统令牌，本轮块会告诉 AI 员工这些系统本轮不可用、需要时请对方 @ 它再问；平台代理（`proxy`）的系统不受影响。`--unprompted-tokens on` 让这个员工恢复为照常下发：开启后，没人点名时它也会以消息作者的身份拿到这些系统的令牌，默认关闭更安全。哪些员工开着见 `systems delivery`。
 
 飞书应用管理。名称、描述、图标和机器人菜单改完要发布新版本才生效；斜杠指令即时生效：
 
@@ -285,12 +288,24 @@ coreman systems enable|disable crm
 coreman systems allow crm sales_bot support_bot
 coreman systems disallow crm support_bot   # 同时收回该员工的授权
 coreman systems allow-all crm --yes
+coreman systems delivery [--mode env|mcp|proxy]   # 盘点：各系统的令牌下发方式和用得到它的 AI 员工
 coreman systems refresh crm                # 以自己的身份重新拉取操作目录
 coreman systems test crm                   # 以自己的身份签测试令牌访问测试地址
 coreman systems delete crm --yes
 ```
 
 新登记的系统不开放给任何员工。`refresh` 与 `test` 以 `--as` 成员的身份签发业务令牌，这位成员需要在业务系统里有身份（邮箱前缀能唯一确定）。
+
+改为平台代理（`--delivery proxy`，新建时也一样）要求系统已填 OpenAPI 地址；已有系统从别的方式切过来时，操作目录当前不可用（`systems show` 里目录状态为 `error`）也会被拒绝，先让目录拉取成功再切。否则切过去之后 AI 员工只会被告知这个系统「无法调用」。改回 `env`、`mcp` 没有这些要求。
+
+`delivery` 按「系统 × 用得到它的 AI 员工」列出（只列已启用的系统和员工，授权口径与每轮签发令牌时一致；别人的个人助理不列），切换下发方式前用它看影响面：
+
+- 来源：显式授权（员工的系统权限里勾选的），或默认全员（系统设了新员工默认授权）。
+- 允许写入：只对平台代理的系统有意义，其余显示 `-`。
+- 运行时节点、节点支持目录：员工所在节点是否已升级到能挂载操作目录。显示「否」的员工，系统切成平台代理后就用不了，先升级节点。
+- 没人点名也下发：这个员工是否开了上文的 `--unprompted-tokens`。
+
+`--mode` 只看某一种下发方式的系统，`--json` 输出同样的字段供脚本处理。
 
 AI 员工经平台代理提交的批量写操作，可以在这里查看近期批次并停止其中一个：
 
