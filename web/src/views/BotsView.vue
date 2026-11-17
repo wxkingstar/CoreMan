@@ -6,10 +6,11 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { bots, catalog, relays } from '@/api/admin'
-import type { BotOut, CatalogOut, Platform, RelayOut } from '@/api/types'
+import type { BotOut, CatalogOut, Platform, RelayOut, SwitchRelayOut } from '@/api/types'
 import { usePaged } from '@/composables/usePaged'
 import { useAuthStore } from '@/stores/auth'
 import BotForm from '@/views/BotForm.vue'
+import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
 
 const botFormRef = ref<InstanceType<typeof BotForm>>()
 async function closeForm(done: () => void) { if (!botFormRef.value || await botFormRef.value.confirmDiscard()) done() }
@@ -44,12 +45,14 @@ const catalogRows = ref<CatalogOut[]>([])
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const editingBot = ref<BotOut | null>(null)
+const switchingBot = ref<BotOut | null>(null)
 
 // member 必须先有团队才能建机器人（后端 can_create_bot 同款判定）。
 const canCreate = computed(() => auth.user?.role !== 'member' || !!auth.user?.team_id)
 const hasTeam = computed(() => !!auth.user?.team_id)
 const visibleScopes = computed(() => SCOPES.filter((s) => s !== 'team' || hasTeam.value))
-const modelOptions = computed(() => [...new Set(catalogRows.value.map((r) => r.model))])
+// 筛选只列目录里还在用的模型，已停用的不列。
+const modelOptions = computed(() => [...new Set(catalogRows.value.filter((r) => !r.retired).map((r) => r.model))])
 
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
@@ -80,9 +83,17 @@ function openDetail(row: BotOut): void {
   router.push({ name: 'bot-detail', params: { id: row.id } })
 }
 
-/** 切换 relay 的对话框在详情页，列表这里只负责带着 action 跳过去。 */
+/** 就地弹切换对话框，切完留在列表，不跳详情页。 */
 function openSwitchRelay(row: BotOut): void {
-  router.push({ name: 'bot-detail', params: { id: row.id }, query: { action: 'switch' } })
+  switchingBot.value = row
+}
+
+async function onSwitched(result: SwitchRelayOut): Promise<void> {
+  // 后端可能自动降档/换模型（目标 relay 不支持原模型），把结果说出来。
+  if (result.old_model !== result.new_model) {
+    ElMessage.info(`${t('bots.switch.model')}: ${result.old_model} → ${result.new_model}`)
+  }
+  await paged.load()
 }
 
 async function toggle(row: BotOut): Promise<void> {
@@ -436,6 +447,14 @@ onMounted(async () => {
         @cancel="dialogVisible = false"
       />
     </el-dialog>
+
+    <SwitchRelayDialog
+      v-if="switchingBot"
+      :bot="switchingBot"
+      :visible="!!switchingBot"
+      @update:visible="!$event && (switchingBot = null)"
+      @switched="onSwitched"
+    />
   </div>
 </template>
 
