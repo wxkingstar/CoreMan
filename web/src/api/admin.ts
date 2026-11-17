@@ -1,6 +1,6 @@
 import { call, http } from '@/api/client'
 import type {
-  AllowedUserOut, AnnouncementIn, AnnouncementOut, AuditLogOut, BotIn, BotMemberOut, BotOut, BotPatch, CatalogIn, CatalogOut, CatalogPatch,
+  AllowedUserOut, AnnouncementIn, AnnouncementOut, AuditLogOut, BotIn, BotMemberOut, BotOut, BotPatch, CatalogIn, CatalogOut, CatalogPatch, CatalogReplaceIn, CatalogReplacePlan,
   ChatLogOut, ChatLogStats, DeptNode, DrainIn, FeishuQr, Page, PlatformAppIn, PlatformAppOut, ProbeResult, Providers,
   RelayModels, RelayOut, RuleIn, RuntimeInstance, RuntimeLease, RuntimeOutboxItem, RuntimeQueue,
   RuntimeTask, SettingsDefaults, SettingsOut, SettingsPatch, SwitchJobOut, SwitchRelayIn, SwitchRelayOut, SyncRun, TeamIn,
@@ -52,6 +52,7 @@ export const catalog = {
     call<CatalogOut>(http.patch(`/api/admin/model-catalog/${provider}/${encodeURIComponent(model)}`, body)),
   remove: (provider: string, model: string) =>
     call<null>(http.delete(`/api/admin/model-catalog/${provider}/${encodeURIComponent(model)}`)),
+  replace: (body: CatalogReplaceIn) => call<CatalogReplacePlan>(http.post('/api/admin/model-catalog/replace', body)),
 }
 export const bots = {
   list: (params: Query) => call<Page<BotOut>>(http.get('/api/admin/bots', { params })),

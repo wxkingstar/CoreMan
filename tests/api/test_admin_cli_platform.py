@@ -187,6 +187,29 @@ async def test_models_and_prices(cli, db_session):
     assert float(rows[0]["input_usd"]) == 4 and float(rows[0]["output_usd"]) == 15
 
 
+async def test_models_replace_previews_then_applies(cli, db_session):
+    await add_user(db_session, "ops", "platform_admin")
+    bot, _, _ = await seed_bot(db_session, model="codex/gpt-6.1-sol", effort="max")
+    bot.relay_server_id = None
+    await db_session.commit()
+    args = ("models", "replace", "codex", "codex/gpt-6.2-sol", "--from", "codex/gpt-6.1-sol")
+    code, out, err = await cli(*args, "--max", "off", "--as", "ops")
+    assert code == 0, err
+    assert "以上为预览" in out and "默认模型：codex/gpt-6.1-sol → codex/gpt-6.2-sol" in out
+    assert "思考档位 max → xhigh" in out
+    code, out, _ = await cli("models", "list", "--provider", "codex", "--json", "--as", "ops")
+    assert all(r["model"] != "codex/gpt-6.2-sol" for r in json.loads(out))
+
+    code, out, err = await cli(*args, "--max", "off", "--yes", "--as", "ops")
+    assert code == 0, err
+    assert out.startswith("已用 codex/gpt-6.2-sol（新增到目录） 替换 codex/gpt-6.1-sol")
+    code, out, _ = await cli("models", "list", "--provider", "codex", "--json", "--as", "ops")
+    rows = {r["model"]: r for r in json.loads(out)}
+    assert rows["codex/gpt-6.2-sol"]["is_default"] and rows["codex/gpt-6.1-sol"]["retired"]
+    await db_session.refresh(bot)
+    assert (bot.model, bot.effort_level) == ("codex/gpt-6.2-sol", "xhigh")
+
+
 async def test_platform_apps_keep_secrets_out_of_argv_and_output(
     cli, db_session, tmp_path, monkeypatch
 ):

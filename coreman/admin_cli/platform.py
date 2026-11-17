@@ -265,6 +265,27 @@ def register_models(sub: Any) -> None:
     p.add_argument("provider")
     p.add_argument("model")
     add_yes(p)
+    p = leaf(
+        ops,
+        "replace",
+        "用新版本替换旧模型：旧模型退役，在用的 AI 员工与白名单一起换到新模型（不加 --yes 只预览）",
+        models_replace,
+    )
+    p.add_argument("provider")
+    p.add_argument("new", help="新模型；目录里没有会自动新增")
+    p.add_argument(
+        "--from",
+        dest="old",
+        action="append",
+        required=True,
+        metavar="旧模型",
+        help="被替换的模型，可重复给多个",
+    )
+    p.add_argument("--display-name", help="新模型的显示名称")
+    p.add_argument("--default", action="store_true", help="设为默认（旧模型里有默认时自动设）")
+    p.add_argument("--xhigh", type=on_off, metavar="on|off", help="新模型是否支持 xhigh")
+    p.add_argument("--max", type=on_off, metavar="on|off", help="新模型是否支持 max")
+    add_yes(p)
     p = leaf(ops, "prices", "列出模型价格（美元 / 百万 Token）", prices_list)
     p.add_argument("--model", help="只看这个模型")
     p = leaf(ops, "price-set", "新增或修改某个生效日的模型价格", price_set)
@@ -340,6 +361,45 @@ async def models_delete(c: AdminClient, args: argparse.Namespace) -> int:
     require_yes(args, f"从目录删除模型 {args.provider}/{args.model}")
     await c.request("DELETE", f"{CATALOG}/{args.provider}/{args.model}")
     print(f"已从目录删除模型 {args.provider}/{args.model}")
+    return 0
+
+
+def report_replace(plan: dict[str, Any], *, applied: bool) -> None:
+    old = "、".join(plan["old"])
+    verb = "已" if applied else "将"
+    added = "（新增到目录）" if plan["created"] else ""
+    print(f"{verb}用 {plan['new']}{added} 替换 {old}，旧模型退役")
+    if plan["default_before"] != plan["default_after"]:
+        print(f"默认模型：{plan['default_before']} → {plan['default_after']}")
+    print(f"AI 员工：{len(plan['bots'])} 个")
+    for bot in plan["bots"]:
+        effort = ""
+        if bot["effort_level"] != bot["new_effort_level"]:
+            effort = f"，思考档位 {bot['effort_level']} → {bot['new_effort_level']}"
+        print(f"  {bot['name']}：{bot['model']}{effort}")
+    print(f"白名单运行时：{len(plan['relays'])} 个")
+    for relay in plan["relays"]:
+        print(f"  {relay['name']}：{', '.join(relay['after'])}")
+
+
+async def models_replace(c: AdminClient, args: argparse.Namespace) -> int:
+    body = {
+        "provider": args.provider,
+        "new": args.new,
+        "old": args.old,
+        "make_default": args.default,
+        "dry_run": not args.yes,
+        **changed(
+            args, {"display_name": "display_name", "xhigh": "supports_xhigh", "max": "supports_max"}
+        ),
+    }
+    plan = await c.request("POST", f"{CATALOG}/replace", body=body)
+    if args.json:
+        output.dump(plan)
+    else:
+        report_replace(plan, applied=args.yes)
+        if not args.yes:
+            print("以上为预览，确认无误后加 --yes 执行")
     return 0
 
 

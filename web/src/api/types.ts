@@ -96,6 +96,26 @@ export interface CatalogOut {
 }
 export type CatalogIn = Omit<CatalogOut, 'backend'>
 export type CatalogPatch = Partial<Omit<CatalogOut, 'provider' | 'model' | 'backend'>>
+export interface CatalogReplaceIn {
+  provider: string
+  new: string
+  old: string[]
+  display_name?: string | null
+  supports_xhigh?: boolean
+  supports_max?: boolean
+  make_default?: boolean
+  dry_run?: boolean
+}
+export interface CatalogReplacePlan {
+  provider: string
+  new: string
+  old: string[]
+  created: boolean
+  default_before: string | null
+  default_after: string | null
+  bots: { id: string; name: string; model: string; effort_level: string | null; new_effort_level: string | null }[]
+  relays: { id: string; name: string; before: string[]; after: string[] }[]
+}
 
 export interface BotPermissions {
   role: 'creator' | 'admin' | null
