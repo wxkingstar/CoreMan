@@ -128,6 +128,8 @@ export interface BotOut {
   group_observe_ready: boolean
   member_count: number; allowed_user_count: number
   permissions: BotPermissions; version: number; created_at: string; updated_at: string
+  /** 只有列表接口下发：进行中（claimed / running）的任务数与最近一条的开始时间；没有时为 null。 */
+  active_tasks?: { count: number; latest_started_at: string | null } | null
   // 敏感字段：只有 permissions.can_view_sensitive / can_view_env_full 时后端才下发。
   // notify_webhook_url 也在内（企微群机器人的 key 就在 URL 里），且只回脱敏值。
   system_prompt?: string

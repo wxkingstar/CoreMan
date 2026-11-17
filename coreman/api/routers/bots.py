@@ -68,6 +68,7 @@ from coreman.core.db.models import (
     BotMember,
     RelayServer,
     RuntimeNode,
+    Task,
     Team,
     User,
     WecomBotProvision,
@@ -494,7 +495,27 @@ async def list_bots(
     rows: list[Bot] = page["items"]
     cipher = _cipher(request)
     items = [await build_out(session, cipher, b, user, include_sensitive=False) for b in rows]
+    active = await _active_tasks(session, [b.id for b in rows])
+    for item in items:
+        item["active_tasks"] = active.get(item["id"])
     return {"code": 0, "data": {**page, "items": items}}
+
+
+async def _active_tasks(
+    session: AsyncSession, bot_ids: list[uuid.UUID]
+) -> dict[str, dict[str, Any]]:
+    """本页各员工进行中的任务数与最近一条的开始时间；一条查询，走 tasks_active_session_idx。"""
+    if not bot_ids:
+        return {}
+    since = func.coalesce(Task.started_at, Task.claimed_at)
+    rows = await session.execute(
+        select(Task.bot_id, func.count(), func.max(since))
+        .where(Task.bot_id.in_(bot_ids), Task.status.in_(("claimed", "running")))
+        .group_by(Task.bot_id)
+    )
+    return {
+        str(bot_id): {"count": count, "latest_started_at": latest} for bot_id, count, latest in rows
+    }
 
 
 @router.post("", status_code=201)

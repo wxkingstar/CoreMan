@@ -1,4 +1,5 @@
 import base64
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
@@ -6,7 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.secrets import CREDENTIALS_AAD, ENV_AAD, decrypt_json
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import AuditLog, Bot, BotMember, ModelCatalog, RelayServer, Team
+from coreman.core.db.models import (
+    AuditLog,
+    Bot,
+    BotMember,
+    ModelCatalog,
+    RelayServer,
+    Task,
+    Team,
+)
 from tests.api.conftest import MASTER_KEY, login_as, login_existing
 from tests.fakes.runtime_node import attach_node
 
@@ -375,6 +384,33 @@ async def test_list_scopes_and_filters(client: httpx.AsyncClient, db_session: As
     assert (
         await client.get("/api/admin/bots", params={"scope": "all", "enabled": "false"})
     ).json()["data"]["total"] == 0
+
+
+async def test_list_active_tasks(client: httpx.AsyncClient, db_session: AsyncSession) -> None:
+    team = await _team(db_session)
+    await login_as(client, db_session, role="member", team_id=team.id)
+    for key in ("busy", "idle"):
+        assert (
+            await client.post("/api/admin/bots", json=_bot_body(bot_key=key))
+        ).status_code == 201
+    bots = {b.bot_key: b for b in (await db_session.execute(select(Bot))).scalars()}
+    busy = bots["busy"].id
+    early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
+    db_session.add_all(
+        [
+            Task(bot_id=busy, kind="chat", payload={}, status="running", started_at=early),
+            Task(bot_id=busy, kind="chat", payload={}, status="claimed", claimed_at=late),
+            Task(bot_id=busy, kind="chat", payload={}, status="queued"),
+            Task(bot_id=busy, kind="chat", payload={}, status="succeeded", started_at=late),
+            Task(bot_id=bots["idle"].id, kind="chat", payload={}, status="failed"),
+        ]
+    )
+    await db_session.commit()
+    items = {b["bot_key"]: b for b in (await client.get("/api/admin/bots")).json()["data"]["items"]}
+    assert items["idle"]["active_tasks"] is None
+    active = items["busy"]["active_tasks"]
+    assert active["count"] == 2
+    assert datetime.fromisoformat(active["latest_started_at"]) == late
 
 
 async def test_patch_delete_and_locking(

@@ -54,6 +54,15 @@ const visibleScopes = computed(() => SCOPES.filter((s) => s !== 'team' || hasTea
 // 筛选只列目录里还在用的模型，已停用的不列。
 const modelOptions = computed(() => [...new Set(catalogRows.value.filter((r) => !r.retired).map((r) => r.model))])
 
+// 列表打开时取一次，不轮询；时长按服务端给的开始时间算。
+function activeDuration(since: string | null): string {
+  if (!since) return t('bots.activeJustNow')
+  const minutes = Math.floor((Date.now() - new Date(since).getTime()) / 60000)
+  if (minutes < 1) return t('bots.activeJustNow')
+  if (minutes < 60) return t('bots.activeMinutes', { n: minutes })
+  return t('bots.activeHours', { h: Math.floor(minutes / 60), m: minutes % 60 })
+}
+
 function fail(e: unknown): void {
   ElMessage.error(errorMessage(e))
 }
@@ -369,6 +378,29 @@ onMounted(async () => {
       >
         <template #default="{ row }: { row: BotOut }">
           {{ row.created_by_name ?? '—' }}
+        </template>
+      </el-table-column>
+      <el-table-column
+        min-width="150"
+        :label="t('bots.activeTasks')"
+      >
+        <template #default="{ row }: { row: BotOut }">
+          <template v-if="row.active_tasks">
+            <el-tag
+              :data-test="'active-' + row.id"
+              size="small"
+              type="success"
+            >
+              {{ t('bots.activeCount', { n: row.active_tasks.count }) }}
+            </el-tag>
+            <div class="muted">
+              {{ t('bots.activeLatest', { d: activeDuration(row.active_tasks.latest_started_at) }) }}
+            </div>
+          </template>
+          <span
+            v-else
+            class="muted"
+          >{{ t('bots.activeIdle') }}</span>
         </template>
       </el-table-column>
       <el-table-column
