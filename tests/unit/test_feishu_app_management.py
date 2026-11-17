@@ -170,10 +170,17 @@ async def test_bot_menus_publish_and_commands_use_documented_bodies():
             "i18ns": [{"i18n_key": "zh_cn", "get_started_desc": "直接提问即可"}],
             "bot_menu_enable": True,
             "bot_menus": [
-                {"menu_id": "m1", "default_name": "帮助", "sort": 0, "menu_content_type": 3},
+                {
+                    "menu_id": "m1",
+                    "default_name": "帮助",
+                    "i18n_name": {"zh_cn": "帮助"},
+                    "sort": 0,
+                    "menu_content_type": 3,
+                },
                 {
                     "menu_id": "m2",
                     "default_name": "文档",
+                    "i18n_name": {"zh_cn": "文档"},
                     "sort": 2,
                     "menu_content_type": 1,
                     "parent_menu_id": "m1",
