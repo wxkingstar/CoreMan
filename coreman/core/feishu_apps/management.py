@@ -347,10 +347,12 @@ async def upload_avatar(
     return url
 
 
-def menu_node(menu: dict[str, Any]) -> dict[str, Any]:
+def menu_node(menu: dict[str, Any], language: str) -> dict[str, Any]:
+    # 只给 default_name 时飞书返回 210011（实测），须同时带上应用主语言的 i18n_name。
     node: dict[str, Any] = {
         "menu_id": menu["menu_id"],
         "default_name": menu["name"],
+        "i18n_name": {language: menu["name"]},
         "sort": menu.get("sort", 0),
         "menu_content_type": MENU_TYPES[menu["kind"]],
     }
@@ -382,7 +384,7 @@ async def update_bot(
     if menu_enabled is not None:
         # 飞书规定：开启菜单时菜单不能为空；关闭时一并清空，避免下次开启带出旧菜单。
         bot["bot_menu_enable"] = menu_enabled
-        bot["bot_menus"] = [menu_node(m) for m in menus or []] if menu_enabled else []
+        bot["bot_menus"] = [menu_node(m, language) for m in menus or []] if menu_enabled else []
         if menu_display_strategy:
             bot["bot_menu_display_strategy"] = menu_display_strategy
     await _write(client.call("PATCH", v7(app_id, "ability"), json={"bot": bot}))
