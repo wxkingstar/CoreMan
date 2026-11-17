@@ -577,10 +577,9 @@ async def copy_sessions(
     transfer_id = str(uuid.uuid4())
     try:
         async with asyncio.timeout(SESSION_COPY_TIMEOUT):
-            for relay in (source, target):
-                ping = await call_agent(relay, cipher, "ping")
-                if ping.get(SESSION_CAPABILITY[provider]) != 1:
-                    return set()
+            pings = [await call_agent(relay, cipher, "ping") for relay in (source, target)]
+            if any(ping.get(SESSION_CAPABILITY[provider]) != 1 for ping in pings):
+                return set()
             listing = await call_agent(
                 source,
                 cipher,
@@ -589,6 +588,8 @@ async def copy_sessions(
                     "working_dir": source_dir,
                     "bot_id": str(bot.id),
                     "sessions": [str(row.relay_session_id) for row in rows],
+                    # 开发模式的 Claude 会话记录按 worktree 路径存：目标认得这个区域才导出。
+                    "worktree": pings[1].get("session_worktree") == 1,
                 },
             )
             if listing.get("skipped"):

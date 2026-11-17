@@ -45,6 +45,9 @@ SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 CODEX_ROLLOUT = re.compile(
     r"\d{4}/\d{2}/\d{2}/rollout-[0-9T-]{1,40}-(" + SESSION_ID.pattern + r")\.jsonl"
 )
+# 开发模式每个会话在工作目录的这个子目录里有自己的 worktree（见 worktree.py，那边会反向导入本模块，
+# 这里不 import），Claude 的对话记录按 worktree 路径存。
+WORKTREES = ".coreman-worktrees"
 # OpenCode 的会话 ID，如 ses_e68056cc4ffeIw6ZYIMfdVNORM。
 OPENCODE_SESSION = re.compile(r"ses_[A-Za-z0-9]{10,60}")
 
@@ -431,10 +434,20 @@ class Agent:
         atomic_write(folder / "opencode_import.json", result.stdout.decode(errors="replace"))
         return True
 
+    def worktree_project_dir(self, working_dir: str, sid: str) -> Path:
+        """开发模式下这个会话的 Claude 对话记录目录：按它的 worktree 路径推算（目录不必存在）。"""
+        return self.project_dir_for(self.workspace(working_dir) / WORKTREES / sid)
+
     def session_path(self, working_dir: str, area: object, name: object) -> Path:
-        """会话文件只能是 <会话>.jsonl、<会话>/ 下的普通文件或 Codex 的 rollout，不跟随链接。"""
+        """会话文件只能是 <会话>.jsonl、<会话>/ 下的普通文件或 Codex 的 rollout，不跟随链接。
+
+        area 为 worktree 时是开发模式会话的对话记录，目录按路径里的会话 id 推算。
+        """
         areas = self.session_areas(working_dir)
-        if area not in areas or not isinstance(name, str) or "\x00" in name or "\\" in name:
+        worktree = area == "worktree" and "project" in areas
+        if not (area in areas or worktree) or not isinstance(name, str):
+            raise OperationError("会话文件路径无效")
+        if "\x00" in name or "\\" in name:
             raise OperationError("会话文件路径无效")
         rel = PurePosixPath(name)
         first = rel.parts[0] if rel.parts else ""
@@ -443,13 +456,16 @@ class Agent:
         else:
             valid = (
                 len(rel.parts) == 1
-                and area == "project"
+                and area in ("project", "worktree")
                 and name.endswith(".jsonl")
                 and bool(SESSION_ID.fullmatch(name.removesuffix(".jsonl")))
             ) or (len(rel.parts) > 1 and bool(SESSION_ID.fullmatch(first)))
         if rel.is_absolute() or ".." in rel.parts or str(rel) != name or not valid:
             raise OperationError("会话文件路径无效")
-        base = areas[str(area)]
+        if worktree:
+            base = self.worktree_project_dir(working_dir, first.removesuffix(".jsonl"))
+        else:
+            base = areas[str(area)]
         current = base
         for part in rel.parts:
             current = current / part
@@ -459,8 +475,13 @@ class Agent:
 
     def session_export(self, data: dict) -> dict:
         """列出要带走的会话文件：Claude 的对话记录与子代理记录（Codex 是 thread 的 rollout），
-        以及驱动存的附件、用量基线与 Codex thread 绑定。每项带上所属 relay 会话。"""
+        以及驱动存的附件、用量基线与 Codex thread 绑定。每项带上所属 relay 会话。
+
+        平台确认目标节点认得 worktree 区域时传 worktree=true：开发模式的会话在自己的 worktree 里跑，
+        对话记录按 worktree 路径存，主目录下没有；两处都有时取最近写过的那份。
+        """
         working_dir = str(data.get("working_dir") or "")
+        with_worktree = data.get("worktree") is True
         wanted = data.get("sessions")
         if not isinstance(wanted, list) or len(wanted) > 500:
             raise OperationError("会话列表无效")
@@ -468,6 +489,7 @@ class Agent:
         for sid in wanted:
             if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
                 raise OperationError("会话列表无效")
+            bases = self.session_areas(working_dir)
             if self.provider == "codex":
                 rollout = self.codex_rollout(sid)
                 if rollout is None:
@@ -478,11 +500,23 @@ class Agent:
                     continue
                 candidates = []
             else:
-                project = self.claude_project_dir(working_dir)
-                if not (project / f"{sid}.jsonl").is_file():
+                found = [("project", self.claude_project_dir(working_dir))]
+                if with_worktree:
+                    found.append(("worktree", self.worktree_project_dir(working_dir, sid)))
+                found = [
+                    (area, base)
+                    for area, base in found
+                    if (base / f"{sid}.jsonl").is_file()
+                    and not (base / f"{sid}.jsonl").is_symlink()
+                ]
+                if not found:
                     continue
-                candidates = [("project", project / f"{sid}.jsonl")]
-            for area, base in self.session_areas(working_dir).items():
+                area, base = max(found, key=lambda item: (item[1] / f"{sid}.jsonl").stat().st_mtime)
+                # 子代理记录跟对话记录在同一个项目目录（主目录的或 worktree 的）。
+                del bases["project"]
+                bases[area] = base
+                candidates = [(area, base / f"{sid}.jsonl")]
+            for area, base in bases.items():
                 folder = base / sid
                 if not folder.is_dir() or folder.is_symlink():
                     continue
@@ -510,7 +544,7 @@ class Agent:
                     {
                         "session": sid,
                         "area": area,
-                        "path": path.relative_to(self.session_areas(working_dir)[area]).as_posix(),
+                        "path": path.relative_to(bases[area]).as_posix(),
                         "size": n,
                         "hash": cached_digest(self.digests, path),
                     }
@@ -1307,6 +1341,8 @@ class Agent:
                 # 换机读取只回 base64，不再附原文：平台可按 workspace_chunk 整块读文本文件。
                 "workspace_read_raw": 1,
                 "session_transfer": 1 if self.provider == "claude" else 0,
+                # 开发模式会话按 worktree 路径存的 Claude 对话记录也能导出、导入（area=worktree）。
+                "session_worktree": 1 if self.provider == "claude" else 0,
                 # Codex 会话（thread 的 rollout 与绑定）也能随换机迁移，目标机原生续聊。
                 "session_transfer_codex": 1 if self.provider == "codex" else 0,
                 # OpenCode 会话导出成文件随换机迁移，目标机驱动导入后原生续聊。
