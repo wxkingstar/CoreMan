@@ -404,6 +404,75 @@ def test_claude_session_files_move_to_new_directory(agent):
     assert (moved / sid / "subagents/a.jsonl").exists()
 
 
+def move_sessions(agent, source, target, listing):
+    transfer = str(uuid.uuid4())
+    for item in listing["files"]:
+        base = {"bot_id": "b1", "area": item["area"], "path": item["path"]}
+        chunk = agent.dispatch({"type": "session-read", "working_dir": source, **base})
+        agent.dispatch(
+            {
+                "type": "session-import",
+                "working_dir": target,
+                "transfer_id": transfer,
+                "offset": 0,
+                "size": item["size"],
+                "hash": item["hash"],
+                "data": chunk["data"],
+                **base,
+            }
+        )
+
+
+def test_dev_mode_session_moves_from_its_worktree(agent):
+    """开发模式的会话在 .coreman-worktrees/<会话> 里跑，记录按 worktree 路径存，主目录下没有。"""
+    from runtime_daemon import worktree
+
+    assert agent_module.WORKTREES == worktree.DIRECTORY
+    assert agent.dispatch({"type": "ping"})["session_worktree"] == 1
+    call(agent, "init", "one")
+    call(agent, "init", "two")
+    sid = str(uuid.uuid4())
+    project = agent.project_dir_for(agent.root / "one" / worktree.DIRECTORY / sid)
+    (project / sid / "subagents").mkdir(parents=True)
+    (project / f"{sid}.jsonl").write_text('{"type":"user"}\n')
+    (project / sid / "subagents/a.jsonl").write_text("{}\n")
+    (agent.sessions_dir / sid).mkdir(parents=True)
+    (agent.sessions_dir / sid / "claude_usage.json").write_text('{"input": 1}')
+    request = {"type": "session-export", "working_dir": "one", "bot_id": "b1", "sessions": [sid]}
+    # 平台没说目标认得 worktree 区域（老节点）：不导出，由平台改为文本续接。
+    assert agent.dispatch(request)["files"] == []
+    listing = agent.dispatch({**request, "worktree": True})
+    assert {(f["area"], f["path"]) for f in listing["files"]} == {
+        ("worktree", f"{sid}.jsonl"),
+        ("worktree", f"{sid}/subagents/a.jsonl"),
+        ("relay", f"{sid}/claude_usage.json"),
+    }
+    move_sessions(agent, "one", "two", listing)
+    # 目标上下一轮在 two/.coreman-worktrees/<会话> 里跑，Claude 在这个目录下找得到会话。
+    moved = agent.project_dir_for(agent.root / "two" / worktree.DIRECTORY / sid)
+    assert (moved / f"{sid}.jsonl").read_text() == '{"type":"user"}\n'
+    assert (moved / sid / "subagents/a.jsonl").exists()
+    assert not (agent.claude_project_dir(str(agent.root / "two")) / f"{sid}.jsonl").exists()
+
+
+def test_session_in_both_places_takes_the_newer_record(agent):
+    """开发模式开关过：主目录与 worktree 下都有这个会话，带走最近写过的那份。"""
+    call(agent, "init", "one")
+    sid = str(uuid.uuid4())
+    main = agent.claude_project_dir(str(agent.root / "one"))
+    tree = agent.worktree_project_dir("one", sid)
+    for folder, when in ((main, 1_000_000), (tree, 2_000_000)):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{sid}.jsonl").write_text("{}\n")
+        os.utime(folder / f"{sid}.jsonl", (when, when))
+    request = {"type": "session-export", "working_dir": "one", "bot_id": "b1", "sessions": [sid]}
+    listing = agent.dispatch({**request, "worktree": True})
+    assert [(f["area"], f["path"]) for f in listing["files"]] == [("worktree", f"{sid}.jsonl")]
+    os.utime(main / f"{sid}.jsonl", (3_000_000, 3_000_000))
+    listing = agent.dispatch({**request, "worktree": True})
+    assert [(f["area"], f["path"]) for f in listing["files"]] == [("project", f"{sid}.jsonl")]
+
+
 def test_session_paths_and_hash_are_checked(agent):
     call(agent, "init", "one")
     base = {"working_dir": "one", "bot_id": "b1", "transfer_id": str(uuid.uuid4())}
@@ -412,6 +481,9 @@ def test_session_paths_and_hash_are_checked(agent):
         ("project", "memory/a.md"),
         ("relay", "not-a-session/x"),
         ("other", f"{uuid.uuid4()}.jsonl"),
+        ("worktree", "../x.jsonl"),
+        ("worktree", "memory/a.md"),
+        ("worktree", "not-a-session.jsonl"),
     ]:
         with pytest.raises(OperationError):
             agent.dispatch({"type": "session-read", **base, "area": area, "path": path})
@@ -469,6 +541,7 @@ def test_codex_rollout_paths_are_checked(codex_agent):
         ("codex", f"../2026/10/21/rollout-2026-10-21T08-00-00-{thread}.jsonl"),
         ("codex", "2026/10/21/rollout-2026-10-21T08-00-00-not-a-thread.jsonl"),
         ("project", f"{thread}.jsonl"),
+        ("worktree", f"{thread}.jsonl"),
     ]:
         with pytest.raises(OperationError):
             codex_agent.dispatch({"type": "session-read", **base, "area": area, "path": path})

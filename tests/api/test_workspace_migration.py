@@ -708,6 +708,57 @@ async def test_codex_session_moves_with_its_rollout(db_session, monkeypatch, tmp
     assert (moved.sessions_dir / sids[0] / "codex_usage.json").exists()
 
 
+async def test_dev_mode_claude_session_moves_with_its_worktree_record(
+    db_session, monkeypatch, tmp_path
+):
+    """开发模式的 Claude 会话记录按 worktree 路径存：目标认得 worktree 区域才带走，否则文本续接。"""
+    from coreman.core.bots import workspace_transfer
+    from coreman.core.chat import sessions
+
+    bot, old, target, agents, seen = await _real_agents(db_session, tmp_path, monkeypatch)
+    info = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="u1",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=None,
+    )
+    await db_session.commit()
+    sid = str(info.relay_session_id)
+    record = agents[old.id].worktree_project_dir(bot.working_dir, sid)
+    record.mkdir(parents=True)
+    (record / f"{sid}.jsonl").write_text('{"type":"user"}\n')
+    target_dir = str(tmp_path / "destination" / bot.bot_key)
+    agents[target.id].dispatch(
+        {"type": "workspace-init", "working_dir": target_dir, "bot_id": str(bot.id)}
+    )
+    real = workspace_transfer.call_agent
+
+    async def legacy(relay, cipher, operation, payload=None):
+        result = await real(relay, cipher, operation, payload)
+        if operation == "ping" and relay.id == target.id:
+            result = {k: v for k, v in result.items() if k != "session_worktree"}
+        return result
+
+    monkeypatch.setattr(workspace_transfer, "call_agent", legacy)
+    copied = await workspace_transfer.copy_sessions(
+        db_session, bot, old, target, bot.working_dir, target_dir, None
+    )
+    assert copied == set()
+    monkeypatch.setattr(workspace_transfer, "call_agent", real)
+
+    copied = await workspace_transfer.copy_sessions(
+        db_session, bot, old, target, bot.working_dir, target_dir, None
+    )
+
+    assert copied == {info.relay_session_id}
+    moved = agents[target.id].worktree_project_dir(target_dir, sid)
+    assert (moved / f"{sid}.jsonl").read_text() == '{"type":"user"}\n'
+    exports = [p for op, p in seen if op == "session-export"]
+    assert [p["worktree"] for p in exports] == [False, True]
+
+
 async def test_codex_sessions_stay_text_carried_with_old_runtime(db_session, monkeypatch, tmp_path):
     from coreman.core.bots import workspace_transfer
     from coreman.core.chat import sessions
