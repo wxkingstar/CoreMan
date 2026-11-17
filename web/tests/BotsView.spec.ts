@@ -19,7 +19,7 @@ vi.mock('@/api/admin', () => ({
   catalog: { list: vi.fn().mockResolvedValue([]) },
 }))
 
-import { bots } from '@/api/admin'
+import { bots, catalog } from '@/api/admin'
 import { i18n } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
 import BotsView from '@/views/BotsView.vue'
@@ -38,5 +38,40 @@ describe('BotsView', () => {
     await wrapper.get('[data-test="toggle-b1"]').trigger('click')
     await flushPromises()
     expect(bots.toggle).toHaveBeenCalledWith('b1')
+  })
+
+  it('opens the switch dialog in place, stays on the list and reloads after switching', async () => {
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: BotsView }, { path: '/bots/:id', name: 'bot-detail', component: { template: '<div />' } }] })
+    await router.push('/')
+    const wrapper = mount(BotsView, { global: { plugins: [ElementPlus, i18n, router], stubs: { SwitchRelayDialog: { name: 'SwitchRelayDialog', props: ['bot', 'visible'], template: '<div data-test="switch-dialog" />' } } } })
+    await flushPromises()
+    vi.mocked(bots.list).mockClear()
+    await wrapper.get('[data-test="switch-b1"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
+    const dialog = wrapper.findComponent({ name: 'SwitchRelayDialog' })
+    expect(dialog.props('bot')).toMatchObject({ id: 'b1' })
+    dialog.vm.$emit('switched', { old_relay_id: 'r1', new_relay_id: 'r2', old_model: bot.model, new_model: bot.model, bot })
+    dialog.vm.$emit('update:visible', false)
+    await flushPromises()
+    expect(bots.list).toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(wrapper.find('[data-test="switch-dialog"]').exists()).toBe(false)
+  })
+
+  it('model filter lists only models that are not retired', async () => {
+    vi.mocked(catalog.list).mockResolvedValueOnce([
+      { provider: 'codex', model: 'codex/gpt-6-astra', display_name: null, is_default: false, retired: false, supports_xhigh: false, supports_max: false, sort_order: 1, backend: 'codex' },
+      { provider: 'codex', model: 'codex/gpt-5-old', display_name: null, is_default: false, retired: true, supports_xhigh: false, supports_max: false, sort_order: 2, backend: 'codex' },
+    ])
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: BotsView }, { path: '/bots/:id', name: 'bot-detail', component: { template: '<div />' } }] })
+    const wrapper = mount(BotsView, { attachTo: document.body, global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    const values = wrapper.findAllComponents({ name: 'ElOption' }).map((o) => o.props('value'))
+    expect(values).toContain('codex/gpt-6-astra')
+    expect(values).not.toContain('codex/gpt-5-old')
+    wrapper.unmount()
   })
 })
