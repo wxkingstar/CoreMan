@@ -99,7 +99,27 @@ export interface SettledApproval {
   executed_at: string | null
   locked: boolean
 }
-export interface Attention { today: string; approvals: PendingApproval[]; jobs: AssistantJob[]; followups: Followup[] }
+export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'scheduled'
+export interface BoardItem extends Followup {
+  needs_owner: boolean
+  has_notes: boolean
+  handler: 'assistant' | 'job' | 'person' | 'owner'
+  handler_name: string | null
+  job_id: string | null
+  progress_at: string
+  stage: Exclude<BoardGroup, 'stalled'>
+  stalled: boolean
+  idle_days: number
+  suggestion: string | null
+  job: AssistantJob | null
+}
+export interface Board {
+  today: string
+  counts: Record<BoardGroup, number>
+  approvals: PendingApproval[]
+  approvals_total: number
+  groups: Record<BoardGroup, BoardItem[]>
+}
 
 export interface NoteEntry {
   path: string
@@ -194,7 +214,7 @@ export const PROXIED_TOOLS: Record<string, 'systemsCall' | 'cloudCall'> = {
 const SLOW = { timeout: 60_000 }
 export const myAssistant = {
   overview: () => call<AssistantOverview | AssistantAbsent>(http.get(root)),
-  attention: () => call<Attention>(http.get(`${root}/attention`)),
+  board: () => call<Board>(http.get(`${root}/board`)),
   jobs: () => call<JobList>(http.get(`${root}/jobs`)),
   cancelJob: (id: string) => call<{ id: string; status: string }>(http.post(`${root}/jobs/${id}/cancel`)),
   followups: () => call<FollowupList>(http.get(`${root}/followups`)),

@@ -1,4 +1,4 @@
-"""「我的助理」页的接口：概览、等你出手、子任务、最近落地、设置、停用。
+"""「我的助理」页的接口：概览、总表、子任务、最近落地、设置、停用。
 
 只对所有者本人：要求交互登录会话（机器人令牌 403），助理由登录人推出。读取密文的接口在返回前
 记一次访问（`access_log.record`）。待跟进与知识页在 `me_assistant_followups.py`、
@@ -28,6 +28,7 @@ from coreman.api.routers.me_assistant_common import (
 )
 from coreman.core.assistants import (
     access_log,
+    board,
     cold_start,
     delivery,
     followups,
@@ -205,31 +206,44 @@ async def job_cancel(
     return {"code": 0, "data": data}
 
 
-@router.get("/attention")
-async def attention(
+@router.get("/board")
+async def board_view(
     own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    """等你出手：待批的审批单、被卡住的子任务、今天到期的待跟进。"""
+    """总表：所有未结的待跟进按阶段分组（等你、停滞、在推进、等别人、排期），加上在途审批单。"""
     bot, actor = own.bot, own.actor
     prefs = await assistant_settings.get(session, bot.id)
-    today = assistant_settings.local_today(prefs, utcnow())
+    result = await board.build(session, bot.id, prefs, utcnow())
+    rows = [item.row for items in result.groups.values() for item in items]
+    linked = [item.job for items in result.groups.values() for item in items if item.job]
+    # 核心函数已经还原过；这里按查看者再核一次。
+    await sealed.open_rows(session, [*rows, *linked], viewer=actor.id)
+    names = await owner_view.target_names(session, linked)
     link = owner_view.approval_link()
     pending = await owner_view.approvals(session, bot, actor.id, owner_view.PENDING)
-    blocked = await jobs.list_(session, bot.id, scope="blocked", limit=JOB_LIMIT)
-    due = await followups.due(session, bot.id, today)
-    # 核心函数已经还原过；这里按查看者再核一次。
-    await sealed.open_rows(session, [*blocked, *due], viewer=actor.id)
-    names = await owner_view.target_names(session, blocked)
+
+    def item(entry: board.Item) -> dict[str, Any]:
+        out = followups.view(entry.row, notes=False)
+        out.update(
+            stage=entry.stage,
+            stalled=entry.stalled,
+            idle_days=entry.idle_days,
+            suggestion=board.suggestion(entry.row),
+            job=owner_view.job(entry.job, names) if entry.job else None,
+        )
+        return out
+
     await access_log.record(session, bot.id, actor.id, "approvals.read", "pending")
-    await access_log.record(session, bot.id, actor.id, "jobs.read", "blocked")
-    await access_log.record(session, bot.id, actor.id, "followups.read", "today")
+    await access_log.record(session, bot.id, actor.id, "followups.read", "board")
+    await access_log.record(session, bot.id, actor.id, "jobs.read", "board")
     data = {
-        "today": today.isoformat(),
+        "today": result.today.isoformat(),
+        "counts": result.counts(),
         "approvals": [owner_view.pending_view(row, link) for row in pending],
-        "jobs": [owner_view.job(row, names) for row in blocked],
-        "followups": [followups.view(row) for row in due],
+        "approvals_total": len(pending),
+        "groups": {name: [item(e) for e in entries] for name, entries in result.groups.items()},
     }
-    # 取今天到期的条目会把到了回看日的推后条目改回未结。
+    # 读取会把到了回看日的推后条目改回未结；访问记录与读取同一个事务。
     await session.commit()
     return {"code": 0, "data": data}
 

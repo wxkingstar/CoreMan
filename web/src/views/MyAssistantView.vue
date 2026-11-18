@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantAbsent, type AssistantOverview } from '@/api/myAssistant'
-import AssistantAttention from '@/components/assistant/AssistantAttention.vue'
+import AssistantBoard from '@/components/assistant/AssistantBoard.vue'
 import AssistantFollowups from '@/components/assistant/AssistantFollowups.vue'
 import AssistantJobs from '@/components/assistant/AssistantJobs.vue'
 import AssistantNotes from '@/components/assistant/AssistantNotes.vue'
@@ -16,7 +16,7 @@ import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 const data = ref<AssistantOverview | AssistantAbsent | null>(null)
 const error = ref(''), loading = ref(false)
-const tab = ref('attention')
+const tab = ref('board')
 /** 有助理时的概览；没有助理时是 null。 */
 const mine = computed(() => (data.value?.exists ? data.value : null))
 /** 没有助理时的空状态；有助理时是 null。 */
@@ -203,11 +203,11 @@ defineExpose({ tab, load })
       <!-- lazy：没点开的分区不取数。 -->
       <el-tabs v-model="tab">
         <el-tab-pane
-          :label="t('assistant.page.tabs.attention')"
-          name="attention"
+          :label="t('assistant.page.tabs.board')"
+          name="board"
           lazy
         >
-          <AssistantAttention />
+          <AssistantBoard />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.jobs')"

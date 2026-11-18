@@ -8,7 +8,7 @@ vi.mock('@/api/myAssistant', async (original) => ({
   myAssistant: { overview: vi.fn(), shift: vi.fn() },
 }))
 // 各分区有自己的用例，这里换成只带标记的替身：壳只管概览、空状态与标签页。
-vi.mock('@/components/assistant/AssistantAttention.vue', () => ({ default: { template: '<div data-test="pane-attention" />' } }))
+vi.mock('@/components/assistant/AssistantBoard.vue', () => ({ default: { template: '<div data-test="pane-board" />' } }))
 vi.mock('@/components/assistant/AssistantJobs.vue', () => ({ default: { template: '<div data-test="pane-jobs" />' } }))
 vi.mock('@/components/assistant/AssistantFollowups.vue', () => ({ default: { template: '<div data-test="pane-followups" />' } }))
 vi.mock('@/components/assistant/AssistantRecent.vue', () => ({ default: { template: '<div data-test="pane-recent" />' } }))
@@ -60,7 +60,7 @@ describe('My assistant page', () => {
     expect(empty.text()).toContain(t('assistant.empty.app', { name: '个人助理' }))
     for (const step of absent.how_to.steps) expect(empty.text()).toContain(t(`assistant.empty.steps.${step}`))
     expect(wrapper.find('[data-test="assistant-overview"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="pane-attention"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="pane-board"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -112,8 +112,8 @@ describe('My assistant page', () => {
 
   it('mounts sections lazily and reloads the overview after shutdown starts', async () => {
     const wrapper = render(); await flushPromises()
-    for (const name of ['attention', 'jobs', 'followups', 'recent', 'notes', 'settings']) expect(wrapper.text()).toContain(t(`assistant.page.tabs.${name}`))
-    expect(wrapper.find('[data-test="pane-attention"]').exists()).toBe(true)
+    for (const name of ['board', 'jobs', 'followups', 'recent', 'notes', 'settings']) expect(wrapper.text()).toContain(t(`assistant.page.tabs.${name}`))
+    expect(wrapper.find('[data-test="pane-board"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="pane-settings"]').exists()).toBe(false)
     ;(wrapper.vm as unknown as { tab: string }).tab = 'settings'
     await nextTick(); await flushPromises()

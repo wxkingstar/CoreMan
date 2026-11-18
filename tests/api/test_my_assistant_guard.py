@@ -43,7 +43,7 @@ ARCHIVE = pack({"新页.md": "正文"})
 # （方法，路由模板）→ 一次合法调用的参数；`{job}` 在用例里换成所有者那个子任务的编号。
 CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("GET", ""): {},
-    ("GET", "/attention"): {},
+    ("GET", "/board"): {},
     ("GET", "/jobs"): {},
     ("POST", "/jobs/{job_id}/cancel"): {"path": "/jobs/{job}/cancel"},
     ("GET", "/followups"): {},

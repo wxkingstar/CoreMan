@@ -27,10 +27,10 @@ PAGE = "规则/口吻"
 READS: dict[str, list[tuple[str, str]]] = {
     # 概览只有元数据：状态、运行时、轮次、轮询健康。
     "": [],
-    "/attention": [
+    "/board": [
         ("approvals.read", "pending"),
-        ("jobs.read", "blocked"),
-        ("followups.read", "today"),
+        ("followups.read", "board"),
+        ("jobs.read", "board"),
     ],
     "/jobs": [("jobs.read", "list")],
     "/followups": [("followups.read", "open")],
