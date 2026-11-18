@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type Board, type BoardGroup, type BoardItem } from '@/api/myAssistant'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type Board, type BoardGap, type BoardGroup, type BoardItem } from '@/api/myAssistant'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
-const GROUPS: BoardGroup[] = ['owner', 'stalled', 'working', 'others', 'scheduled']
+const GROUPS: BoardGroup[] = ['owner', 'stalled', 'working', 'others', 'gap', 'scheduled']
 const data = ref<Board | null>(null)
 const error = ref(''), loading = ref(false)
 async function load() {
@@ -25,6 +26,16 @@ function handler(item: BoardItem) {
   }
   if (item.handler === 'person' && (item.locked || !item.handler_name)) return t('assistant.board.handler.colleague')
   return t('assistant.board.handler.' + item.handler, { name: item.handler_name ?? '' })
+}
+async function decline(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.declineConfirm', { name: gap.id }), t('assistant.board.gap.decline'), { type: 'warning' })
+  } catch { return }
+  try {
+    await myAssistant.declineGap(gap.id)
+    ElMessage.success(t('assistant.board.gap.declined'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
 }
 onMounted(load)
 defineExpose({ load })
@@ -103,13 +114,49 @@ defineExpose({ load })
             {{ t('assistant.board.decisions', { n: data.counts.owner }) }}
           </h4>
         </template>
+        <template v-if="g === 'gap'">
+          <p
+            v-if="!data.gaps.length"
+            class="muted"
+          >
+            {{ t('assistant.board.empty.gap') }}
+          </p>
+          <ul v-else>
+            <li
+              v-for="gap in data.gaps"
+              :key="gap.id"
+              :data-test="'gap-' + gap.id"
+            >
+              <strong>{{ gap.id }} {{ t('assistant.board.gap.kinds.' + gap.kind) }} {{ gap.key }}</strong>
+              <span>{{ gap.locked ? t('assistant.page.lockedText') : gap.need }}</span>
+              <span class="muted">{{ gap.followups.length ? t('assistant.board.gap.blocks', { value: gap.followups.join('、') }) : t('assistant.board.gap.none') }}</span>
+              <div class="muted">
+                {{ t('assistant.board.gap.fixes.' + gap.fix, { name: gap.id }) }}
+                <router-link
+                  v-if="gap.fix === 'grant_page'"
+                  :to="'/bots/' + data.bot_id"
+                >
+                  {{ t('assistant.board.gap.grantLink') }}
+                </router-link>
+                <span v-if="gap.fix === 'admin' || gap.fix === 'node_admin'">：{{ gap.key }}</span>
+              </div>
+              <el-button
+                size="small"
+                data-test="gap-decline"
+                @click="decline(gap)"
+              >
+                {{ t('assistant.board.gap.decline') }}
+              </el-button>
+            </li>
+          </ul>
+        </template>
         <p
-          v-if="!data.groups[g].length && !(g === 'owner' && data.approvals.length)"
+          v-if="g !== 'gap' && !data.groups[g].length && !(g === 'owner' && data.approvals.length)"
           class="muted"
         >
           {{ t('assistant.board.empty.' + g) }}
         </p>
-        <ul v-else-if="data.groups[g].length">
+        <ul v-else-if="g !== 'gap' && data.groups[g].length">
           <li
             v-for="item in data.groups[g]"
             :key="item.id"

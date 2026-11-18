@@ -32,6 +32,7 @@ from coreman.core.assistants import (
     cold_start,
     delivery,
     followups,
+    gaps,
     jobs,
     owner_view,
     sealed,
@@ -206,6 +207,27 @@ async def job_cancel(
     return {"code": 0, "data": data}
 
 
+GAP_ERRORS: dict[str, tuple[int, str]] = {
+    "gap_not_found": (404, "这个缺口不存在"),
+    "gap_resolved": (409, "这个缺口已经可以用了"),
+}
+
+
+@router.post("/gaps/{label}/decline")
+async def gap_decline(
+    label: str, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """所有者明确不开这个缺口：不再进总表，助理得知这条路走不通。"""
+    try:
+        row = await gaps.decline(session, own.bot.id, gaps.parse_label(label))
+    except gaps.GapError as exc:
+        await session.rollback()
+        raise refuse(exc.code, GAP_ERRORS) from None
+    data = {"id": gaps.label(row.seq), "status": row.status}
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
 @router.get("/board")
 async def board_view(
     own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
@@ -221,7 +243,9 @@ async def board_view(
     rows = [item.row for items in result.groups.values() for item in items]
     linked = [item.job for items in result.groups.values() for item in items if item.job]
     # 核心函数已经还原过；这里按查看者再核一次。
-    await sealed.open_rows(session, [*rows, *linked, *result.approvals], viewer=actor.id)
+    gap_rows = [entry.row for entry in result.gaps]
+    await sealed.open_rows(session, [*rows, *linked, *result.approvals, *gap_rows], viewer=actor.id)
+    gap_labels = {entry.row.id: gaps.label(entry.row.seq) for entry in result.gaps}
     names = await owner_view.target_names(session, linked)
     link = owner_view.approval_link()
 
@@ -238,6 +262,7 @@ async def board_view(
             idle_days=entry.idle_days,
             suggestion=board.suggestion(entry.row),
             job=owner_view.job(entry.job, names) if entry.job else None,
+            gap=gap_labels.get(entry.row.gap_id) if entry.row.gap_id else None,
         )
         return out
 
@@ -250,6 +275,8 @@ async def board_view(
         "approvals": [approval(row) for row in result.approvals],
         "approvals_total": result.approvals_total,
         "groups": {name: [item(e) for e in entries] for name, entries in result.groups.items()},
+        "bot_id": str(bot.id),
+        "gaps": [gaps.view(entry.row, entry.fix, entry.followups) for entry in result.gaps],
     }
     # 读取会把到了回看日的推后条目改回未结；访问记录与读取同一个事务。
     await session.commit()

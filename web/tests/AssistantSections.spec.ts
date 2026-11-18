@@ -5,7 +5,7 @@ import type { Component } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { board: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
+  myAssistant: { board: vi.fn(), declineGap: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
 }))
 
 import { myAssistant, type AssistantJob, type Board, type BoardItem, type SettledApproval } from '@/api/myAssistant'
@@ -23,11 +23,13 @@ const item = (over: Partial<BoardItem>): BoardItem => ({
   id: 'F001', category: 'decide', status: 'open', title: '选供应商', review_on: null, due_on: null,
   origin_message_id: null, created_at: '2026-11-13T00:00:00Z', needs_owner: false, has_notes: true,
   handler: 'assistant', handler_name: null, job_id: null, progress_at: '2026-11-13T00:00:00Z',
-  stage: 'owner', stalled: false, idle_days: 0, suggestion: '选 A', job: null, ...over,
+  stage: 'owner', stalled: false, idle_days: 0, suggestion: '选 A', job: null, gap: null, ...over,
 })
 const boardData: Board = {
   today: '2026-11-18',
-  counts: { owner: 1, stalled: 1, working: 0, others: 0, scheduled: 0 },
+  counts: { owner: 1, stalled: 1, working: 0, others: 0, gap: 0, scheduled: 0 },
+  bot_id: 'b1',
+  gaps: [],
   approvals: [
     { id: 'a1', tool: 'feishu_im_send_message', summary: '私聊 → 李四', created_at: '2026-11-13T01:00:00Z', link: 'https://tower.example.com' },
     { id: 'a2', tool: 'feishu_doc_update', summary: null, created_at: '2026-11-13T02:00:00Z', link: null },
@@ -36,14 +38,16 @@ const boardData: Board = {
   groups: {
     owner: [item({})],
     stalled: [item({ id: 'F002', category: 'waiting', stage: 'others', stalled: true, idle_days: 6, handler: 'person', handler_name: '赵六', suggestion: null })],
-    working: [], others: [], scheduled: [],
+    working: [], others: [], gap: [], scheduled: [],
   },
 }
 const settled = (over: Partial<SettledApproval>): SettledApproval => ({
   id: 's1', tool: 'feishu_im_send_message', channel: 'p2p', status: 'executed', summary: '私聊 → 李四', reason: null, error: null,
   created_at: '2026-11-12T01:00:00Z', decided_at: '2026-11-12T02:00:00Z', executed_at: '2026-11-12T02:00:05Z', locked: false, ...over,
 })
-const render = (component: Component) => mount(component, { global: { plugins: [ElementPlus, i18n] } })
+const render = (component: Component) => mount(component, {
+  global: { plugins: [ElementPlus, i18n], stubs: { RouterLink: { props: ['to'], template: '<a :href="to"><slot /></a>' } } },
+})
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -54,6 +58,30 @@ beforeEach(() => {
 })
 
 describe('board', () => {
+  it('lists gaps with how to enable them and declines after confirmation', async () => {
+    const gap = { id: 'G003', kind: 'feishu_scope' as const, key: 'im:message', need: '读群消息', status: 'open' as const, fix: 'authorize' as const, hint: '', followups: ['F001'] }
+    const admin = { ...gap, id: 'G004', kind: 'business_system' as const, key: 'orders', fix: 'grant_page' as const, followups: [] }
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      counts: { ...boardData.counts, gap: 1 },
+      groups: { ...boardData.groups, gap: [item({ id: 'F001', stage: 'gap', gap: 'G003' })] },
+      gaps: [gap, admin],
+    })
+    vi.mocked(myAssistant.declineGap).mockResolvedValue({ id: 'G003', status: 'declined' })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = render(AssistantBoard); await flushPromises()
+    const row = wrapper.get('[data-test="gap-G003"]').text()
+    expect(row).toContain('im:message')
+    expect(row).toContain('F001')
+    expect(row).toContain(t('assistant.board.gap.fixes.authorize', { name: 'G003' }))
+    expect(wrapper.get('[data-test="gap-G004"] a').attributes('href')).toBe('/bots/b1')
+    await wrapper.get('[data-test="gap-G003"] [data-test="gap-decline"]').trigger('click'); await flushPromises()
+    expect(confirm).toHaveBeenCalled()
+    expect(myAssistant.declineGap).toHaveBeenCalledWith('G003')
+    expect(myAssistant.board).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
   it('lists approvals with a safe link and decisions under 等你, stalled items with who and how long', async () => {
     const wrapper = render(AssistantBoard); await flushPromises()
     const first = wrapper.get('[data-test="approval-a1"]')
@@ -152,13 +180,15 @@ describe('board', () => {
   it('says so when nothing is waiting', async () => {
     vi.mocked(myAssistant.board).mockResolvedValue({
       today: '2026-11-18',
-      counts: { owner: 0, stalled: 0, working: 0, others: 0, scheduled: 0 },
+      counts: { owner: 0, stalled: 0, working: 0, others: 0, gap: 0, scheduled: 0 },
       approvals: [],
       approvals_total: 0,
-      groups: { owner: [], stalled: [], working: [], others: [], scheduled: [] },
+      groups: { owner: [], stalled: [], working: [], others: [], gap: [], scheduled: [] },
+      bot_id: 'b1',
+      gaps: [],
     })
     const wrapper = render(AssistantBoard); await flushPromises()
-    for (const g of ['owner', 'stalled', 'working', 'others', 'scheduled']) expect(wrapper.text()).toContain(t(`assistant.board.empty.${g}`))
+    for (const g of ['owner', 'stalled', 'working', 'others', 'gap', 'scheduled']) expect(wrapper.text()).toContain(t(`assistant.board.empty.${g}`))
     wrapper.unmount()
   })
 

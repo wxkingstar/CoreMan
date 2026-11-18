@@ -107,7 +107,21 @@ export interface SettledApproval {
   executed_at: string | null
   locked: boolean
 }
-export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'scheduled'
+export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'gap' | 'scheduled'
+export type GapKind = 'feishu_scope' | 'business_system' | 'cloud_product' | 'credential' | 'node_tool' | 'other'
+export type GapFix = 'authorize' | 'credential' | 'grant_page' | 'admin' | 'node_admin' | 'none'
+export interface BoardGap {
+  id: string
+  kind: GapKind
+  key: string
+  need: string | null
+  status: 'open' | 'requested'
+  fix: GapFix
+  /** 卡片用的中文说法；页面按 fix 用本地化文案。 */
+  hint: string
+  followups: string[]
+  locked?: boolean
+}
 export interface BoardItem extends Followup {
   needs_owner: boolean
   has_notes: boolean
@@ -120,6 +134,7 @@ export interface BoardItem extends Followup {
   idle_days: number
   suggestion: string | null
   job: AssistantJob | null
+  gap: string | null
 }
 export interface Board {
   today: string
@@ -127,6 +142,8 @@ export interface Board {
   approvals: PendingApproval[]
   approvals_total: number
   groups: Record<BoardGroup, BoardItem[]>
+  bot_id: string
+  gaps: BoardGap[]
 }
 
 export interface NoteEntry {
@@ -223,6 +240,7 @@ const SLOW = { timeout: 60_000 }
 export const myAssistant = {
   overview: () => call<AssistantOverview | AssistantAbsent>(http.get(root)),
   board: () => call<Board>(http.get(`${root}/board`)),
+  declineGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/decline`)),
   jobs: () => call<JobList>(http.get(`${root}/jobs`)),
   cancelJob: (id: string) => call<{ id: string; status: string }>(http.post(`${root}/jobs/${id}/cancel`)),
   followups: () => call<FollowupList>(http.get(`${root}/followups`)),
