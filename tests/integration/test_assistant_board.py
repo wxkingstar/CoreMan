@@ -67,6 +67,8 @@ async def test_groups_and_stalls(db_session: AsyncSession) -> None:
     # 停滞组按没动的工作日数从多到少：整理合同（上周五起 3 个工作日）在前，过期的等赵六在后。
     assert seqs["stalled"] == [stale.seq, waiting.seq]
     assert set(seqs["working"]) == {fresh.seq, running.seq}
+    # 子任务还在跑：即使很久没动，也不算停滞。
+    assert running.seq not in seqs["stalled"]
     assert seqs["scheduled"] == [later.seq]
     assert result.counts()["owner"] == 1
     assert board.suggestion(result.groups["owner"][0].row) == "选 A"
