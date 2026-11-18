@@ -143,8 +143,8 @@ class ConverseStage(ChatStageBase):
             ctx.log.warning(
                 "task_failed",
                 error=type(exc).__name__,
-                relay_id=str(pre.relay.id),
-                runtime_node_id=str(pre.relay.runtime_node_id),
+                relay_id=str(getattr(pre.relay, "id", None)),
+                runtime_node_id=str(getattr(pre.relay, "runtime_node_id", None)),
                 model=pre.request.model,
                 **exception_details(exc),
             )

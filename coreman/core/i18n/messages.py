@@ -153,6 +153,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_error": "抱歉，AI 连接出现错误（运行时 {relay}），请稍后再试。",
         "runtime_busy": "抱歉，运行时 {relay} 正忙，排队等待超时仍未开始处理，请稍后再试。",
         "runtime_connection_failed": "运行时 {relay} 的连接中断，本轮未确认完成。请稍后重试。",
+        "runtime_request_too_large": (
+            "请求（含附件编码）超过运行时通道 64 MiB 上限，"
+            "请缩小附件或拆分后重试。"
+        ),
+        "runtime_request_invalid": "运行时请求参数无效，本轮未开始处理，请联系管理员检查配置。",
         "runtime_control_lost": (
             "原因：本机运行时已放弃本轮请求（control_lost）。"
             "请检查节点的控制轮询超时、控制租约失效或运行时停止日志。"
@@ -491,8 +496,16 @@ MESSAGES: dict[str, dict[str, str]] = {
             "しばらくしてから再試行してください。"
         ),
         "runtime_connection_failed": (
-            "The connection to runtime {relay} failed. This turn has not been confirmed complete. "
-            "Please try again later."
+            "実行環境 {relay} への接続が切れたため、完了を確認できませんでした。"
+            "しばらくしてから再試行してください。"
+        ),
+        "runtime_request_too_large": (
+            "添付ファイルのエンコードを含むリクエストが実行環境の 64 MiB 上限を超えています。"
+            "ファイルを小さくするか分割して再送信してください。"
+        ),
+        "runtime_request_invalid": (
+            "実行環境のリクエスト引数が無効です。処理は開始されていません。"
+            "管理者に設定の確認を依頼してください。"
         ),
         "runtime_busy": (
             "申し訳ありません。インスタンス {relay} が混み合っており、待機時間内に処理を"

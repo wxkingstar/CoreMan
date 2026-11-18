@@ -72,7 +72,12 @@ class ClassifyStage(ChatStageBase):
                 msg("runtime_busy", locale, relay=pre.relay_label or pre.relay.name),
             )
         if isinstance(out.error, RelayRequestError):
-            return Verdict("error", "failed", out.error.code, str(out.error), str(out.error))
+            key = (
+                "runtime_request_too_large"
+                if out.error.code == "runtime_request_too_large"
+                else "runtime_request_invalid"
+            )
+            return Verdict("error", "failed", out.error.code, str(out.error), msg(key, locale))
         if isinstance(out.error, RelayConnectionError):
             return Verdict(
                 "error",
