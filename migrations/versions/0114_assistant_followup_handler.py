@@ -35,14 +35,12 @@ def upgrade() -> None:
     # 挂着子任务的老条目就是子任务在办。
     op.execute("UPDATE assistant_followups SET handler = 'job' WHERE job_id IS NOT NULL")
     values = ", ".join(f"'{v}'" for v in HANDLERS)
-    op.create_check_constraint(
-        "ck_assistant_followups_handler", "assistant_followups", f"handler IN ({values})"
-    )
+    op.create_check_constraint("handler", "assistant_followups", f"handler IN ({values})")
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.drop_constraint("ck_assistant_followups_handler", "assistant_followups", type_="check")
+    op.drop_constraint("handler", "assistant_followups", type_="check")
     op.drop_column("assistant_followups", "progress_at")
     op.drop_column("assistant_followups", "handler_name_enc")
     op.drop_column("assistant_followups", "handler")
