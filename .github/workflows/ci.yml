@@ -86,7 +86,18 @@ jobs:
 
   python:
     name: Python tests (shard ${{ matrix.shard }}/4)
-    runs-on: ubuntu-24.04
+    # With the repository variable CI_SELF_HOSTED=true, branches of this repository run on the
+    # maintainer's ephemeral runners (scripts/ci-runner/runner-pool.sh). Fork PRs and Dependabot
+    # always stay on GitHub-hosted runners: their code must never reach a self-hosted machine.
+    runs-on: >-
+      ${{
+        vars.CI_SELF_HOSTED == 'true'
+        && github.actor != 'dependabot[bot]'
+        && (github.event_name == 'push'
+            || github.event.pull_request.head.repo.full_name == github.repository)
+        && fromJSON('["self-hosted","coreman-ci"]')
+        || 'ubuntu-24.04'
+      }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -99,15 +110,14 @@ jobs:
           POSTGRES_DB: coreman_test
           POSTGRES_USER: coreman
           POSTGRES_PASSWORD: coreman
+        # A random host port: several self-hosted runners share one VM's network.
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U coreman -d coreman_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-    env:
-      TEST_DATABASE_URL: postgresql+asyncpg://coreman:coreman@127.0.0.1:5432/coreman_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -133,6 +143,8 @@ jobs:
       - name: Pytest
         # One database per xdist worker, created next to TEST_DATABASE_URL (tests/conftest.py).
         # --shard deals the collected tests round-robin across the matrix jobs.
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://coreman:coreman@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/coreman_test
         run: uv run pytest -q -n auto --dist worksteal --durations=15 --shard ${{ matrix.shard }}/4
 
   web:
@@ -187,7 +199,7 @@ jobs:
       - name: ShellCheck
         run: >-
           docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0
-          deploy/coreman runtime_daemon/install.sh scripts/exercise-upgrade
+          deploy/coreman runtime_daemon/install.sh scripts/exercise-upgrade scripts/ci-runner/runner-pool.sh
       - name: Compose config (example env, all profiles)
         env:
           COREMAN_ENV_FILE: .env.example
