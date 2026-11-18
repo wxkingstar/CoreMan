@@ -31,6 +31,7 @@ BUSINESS_TABLES = [
     "assistant_watch",
     "feishu_rate_usage",
     "assistant_followups",
+    "assistant_gaps",
     "assistant_pages",
     "assistant_settings",
     "assistant_lifecycles",
