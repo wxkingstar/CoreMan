@@ -28,3 +28,8 @@ def test_rules_are_stable_text() -> None:
 def test_standard_bot_guidance_does_not_mention_followups() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
     assert "待跟进" not in rules and "followup_" not in rules
+
+
+def test_rules_tell_how_to_report_gaps() -> None:
+    rules = followup_prompt.FOLLOWUP_RULES
+    assert "gap_report" in rules and "你这一轮能用的" in rules and "resolved=true" in rules

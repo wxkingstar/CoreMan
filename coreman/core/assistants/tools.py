@@ -1,8 +1,8 @@
 """个人助理自有工具的总注册表：个人工具 MCP 对助理记录在这里取清单、在这里分派。
 
 普通轮次三组，子任务轮次另有一组：
-- `knowledge`：知识库、待跟进与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权换代之后
-  照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
+- `knowledge`：知识库、待跟进、能力缺口与助理设置。数据在平台自己的库里、不调飞书，所以飞书授权
+  换代之后照常可用（MCP 入口把它排在授权代数判断之前），子任务也可用。
 - `approval`：审批单管理与「处理中」表情，连同写类个人工具的暂存（提交审批）；无人在场时记
   要告诉所有者的话（`assistant_report`，合并进摘要）。
 - `jobs`：派子任务、追问、查看、取消，以及调度公共员工（看可以问谁、把问题交给其中一位）。
@@ -33,6 +33,7 @@ from coreman.core import personal_schedules as schedules
 from coreman.core.assistants import (
     dispatch_tools,
     followup_tools,
+    gap_tools,
     jobs_tools,
     notes_tools,
     report_tools,
@@ -202,6 +203,10 @@ async def _followups(ctx: Context, name: str, arguments: dict[str, Any]) -> dict
     return await followup_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
 
+async def _gaps(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return await gap_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
+
+
 async def _settings(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return await settings_tools.dispatch(ctx.session, ctx.cipher, ctx.scope, name, arguments)
 
@@ -224,6 +229,7 @@ async def _voice(ctx: Context, name: str, arguments: dict[str, Any]) -> dict[str
 
 register("knowledge", lambda: list(notes_tools.DEFINITIONS), _notes)
 register("knowledge", followup_tools.definitions, _followups)
+register("knowledge", gap_tools.definitions, _gaps)
 register("knowledge", lambda: list(settings_tools.DEFINITIONS), _settings)
 register("approval", approval_tools.own_definitions, _approval)
 register("approval", lambda: list(report_tools.DEFINITIONS), _report)
