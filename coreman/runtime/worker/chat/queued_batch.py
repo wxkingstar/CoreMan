@@ -23,7 +23,7 @@ from coreman.core.cloud_proxy import confirm as cloud_confirm
 from coreman.core.db.models import InboundEvent, Task
 from coreman.core.feishu_docs import resume
 from coreman.core.systems_catalog import confirm as systems_confirm
-from coreman.runtime.worker import assistant_shift, assistant_stop
+from coreman.runtime.worker import assistant_board, assistant_shift, assistant_stop
 from coreman.runtime.worker.chat.inbound import joined_text, strip_mention
 from coreman.runtime.worker.chat.models import Intake
 from coreman.runtime.worker.context import TaskContext
@@ -99,10 +99,14 @@ async def gather(
             text = _mergeable_text(task, intake.bot.name)
             if (
                 text is None
-                # 个人助理的停用、上下班命令不能并进给模型的这一轮：留给它自己那一轮去截下。
+                # 个人助理的停用、上下班、看板命令不能并进给模型的这一轮：留给它自己那一轮去截下。
                 or (
                     is_assistant(intake.bot)
-                    and (text in assistant_stop.COMMANDS or text in assistant_shift.RESERVED)
+                    and (
+                        text in assistant_stop.COMMANDS
+                        or text in assistant_shift.RESERVED
+                        or text in assistant_board.COMMANDS
+                    )
                 )
                 or not is_plain(task)
                 or task.payload.get("platform_user_id") != sender

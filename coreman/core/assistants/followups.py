@@ -381,13 +381,12 @@ async def close(
     row.status = "dropped" if dropped else "done"
     row.closed_at = row.updated_at = utcnow()
     await session.flush()
-    if row.needs_owner:
-        await _retire(session, bot_id, [row.seq])
+    await _retire(session, bot_id, [row.seq])
     return row
 
 
 async def _retire(session: AsyncSession, bot_id: uuid.UUID, seqs: list[int]) -> None:
-    """关掉的要当面处理的条目：摘要卡片上它的「现在处理」按钮置灰。"""
+    """关掉的条目：摘要与看板卡片上它的「现在处理」按钮置灰（卡片上没有它就什么都不做）。"""
     # 函数内引入：digest 在模块层引用本模块。
     from coreman.core.assistants import digest
 
@@ -485,28 +484,5 @@ async def close_for_message(
         row.status, row.close_code = "dropped", RECALLED
         row.closed_at = row.updated_at = now
     await session.flush()
-    await _retire(session, bot_id, [row.seq for row in rows if row.needs_owner])
+    await _retire(session, bot_id, [row.seq for row in rows])
     return rows
-
-
-def _owner_waiting(bot_id: uuid.UUID) -> tuple[ColumnElement[bool], ...]:
-    return (
-        AssistantFollowup.bot_id == bot_id,
-        AssistantFollowup.status == "open",
-        AssistantFollowup.needs_owner.is_(True),
-    )
-
-
-async def needs_owner(
-    session: AsyncSession, bot_id: uuid.UUID, today: date, *, limit: int
-) -> list[AssistantFollowup]:
-    """要所有者当面处理、还未结的条目（推后的到了回看日先改回未结），编号小的在前，内容已还原。"""
-    await _wake(session, bot_id, today)
-    return await _rows(session, bot_id, *_owner_waiting(bot_id)[1:], limit=limit)
-
-
-async def needs_owner_count(session: AsyncSession, bot_id: uuid.UUID) -> int:
-    found = await session.scalar(
-        select(func.count()).select_from(AssistantFollowup).where(*_owner_waiting(bot_id))
-    )
-    return int(found or 0)

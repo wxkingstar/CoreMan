@@ -8,12 +8,13 @@
   其余的等摘要时点（`settings.digest_slots`，默认 09:00、13:30、18:00）。
 - 免打扰时段（默认 22:00–08:00）里什么都不发，紧急的也留着；免打扰结束的那一刻本身是一个摘要
   时点，攒下的并成一条。
-- 摘要三节：等你批的（在途审批单，带审批系统的链接）、等你当面处理的（标了 `needs_owner` 的
-  待跟进，每条一个「现在处理」回复按钮）、我处理了这些（攒下的汇报，去重）。三节都空，或自上次
-  摘要以来没有新东西，就不发。
+- 摘要是事项总表（`board`）的简版：计数行、等你（在途审批单带审批系统的链接；要所有者拍板或
+  当面处理的待跟进，每条一个「现在处理」回复按钮）、停滞、我处理了这些（攒下的汇报，去重）；
+  在推进、等别人、排期只进计数行。自上次摘要以来没有新东西就不发，停滞本身不算新东西。
+- 所有者私聊发「看板」时回完整的总表卡片（`send_board`），五组都列。
 - 「现在处理 F012」是回复按钮：只有所有者本人点得动（网关按按钮里的提问人拒绝别人），点了就是
   他在私聊里发了这句话，开一轮他在场的轮次；`now_note` 把那条待跟进附进本轮块。按钮用过由网关
-  置灰；待跟进关闭时 `retire` 把各张摘要卡片上的那一行置灰。
+  置灰；待跟进关闭时 `retire` 把各张摘要与看板卡片上的那一行置灰。
 
 只在平台自己的循环里以元数据挑行；内容在发出前才还原，日志里只有编号与计数。
 """
@@ -38,7 +39,6 @@ from coreman.core.bus import outbox, tasks
 from coreman.core.config import get_settings
 from coreman.core.db.models import (
     AssistantApproval,
-    AssistantFollowup,
     AssistantInbox,
     AssistantReport,
     AssistantSettings,
@@ -66,7 +66,7 @@ URGENT_KEY = "assistant-urgent"
 NOW_PREFIX = "现在处理"
 _NOW = re.compile(rf"^{NOW_PREFIX}\s*[Ff]?(\d{{1,9}})$")
 CLOSED_LABEL = "已关闭，不用处理了"
-# 待跟进关闭时往回找这么久以内的摘要卡片置灰。
+# 待跟进关闭时往回找这么久以内的摘要与看板卡片置灰。
 RETIRE_LOOKBACK = timedelta(days=3)
 TICK_BATCH = 200
 
@@ -231,98 +231,166 @@ def _approval_summary(row: AssistantApproval, items: int = 1) -> str:
     return f"{text} 等，共 {items} 项（一张单）" if items > 1 else text
 
 
-def digest_card(
+def _now_button(seq: int, requester: str) -> dict[str, Any]:
+    label = now_text(seq)
+    return {
+        "tag": "column_set",
+        "element_id": _row(seq),
+        "flex_mode": "flow",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [
+                    {
+                        "tag": "button",
+                        "element_id": _button(seq),
+                        "type": "primary",
+                        "size": "small",
+                        "text": {"tag": "plain_text", "content": label},
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": reply_value(
+                                    label,
+                                    requester=requester,
+                                    row=_row(seq),
+                                    buttons=[_button(seq)],
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+GROUP_TITLES = {
+    "owner": "等你",
+    "stalled": "停滞",
+    "working": "在推进",
+    "others": "等别人",
+    "scheduled": "排期",
+}
+MORE_HINT = "另有 {n} 件，发「看板」或在「我的助理」页看全部"
+
+
+def _who(item: board.Item) -> str:
+    row = item.row
+    if row.handler == "person":
+        return f"{_clean(row.handler_name_enc or '同事')} 在办"
+    if row.handler == "job":
+        return (
+            "公共员工在办" if item.job is not None and item.job.kind == "bot_help" else "子任务在办"
+        )
+    return "你在办" if row.handler == "owner" else "助理在办"
+
+
+def _line(item: board.Item) -> str:
+    parts = [f"{followups.label(item.row.seq)} {_clean(item.row.title_enc or '')}", _who(item)]
+    if item.idle_days > 0 and item.stage in ("working", "others"):
+        parts.append(f"{item.idle_days} 个工作日没动")
+    if item.row.due_on is not None:
+        parts.append(f"期限 {item.row.due_on.isoformat()}")
+    return " · ".join(parts)
+
+
+def _items(
+    elements: list[dict[str, Any]], items: list[board.Item], requester: str, buttons: list[int]
+) -> None:
+    """一组待跟进：每条一行，有建议的下一行灰字；等你的条目带「现在处理」按钮。读不出来的跳过。"""
+    for item in items[:LIST_MAX]:
+        if sealed.is_locked(item.row):
+            continue
+        elements.append(_plain(_line(item)))
+        tip = board.suggestion(item.row)
+        if tip:
+            elements.append(_plain(f"建议：{tip}", "notation"))
+        if item.stage == "owner":
+            elements.append(_now_button(item.row.seq, requester))
+            buttons.append(item.row.seq)
+    if len(items) > LIST_MAX:
+        elements.append(_plain(MORE_HINT.format(n=len(items) - LIST_MAX), "notation"))
+
+
+def board_card(
+    result: board.Board,
     *,
-    approvals: list[AssistantApproval],
-    approvals_total: int,
-    approval_items: dict[uuid.UUID, int] | None = None,
-    owner_items: list[AssistantFollowup],
-    owner_total: int,
-    reports: list[str],
     requester: str,
     link: str | None,
     system: str | None,
-) -> dict[str, Any]:
-    """摘要卡片：等你批的、等你当面处理的、我处理了这些；空的一节不出现。"""
-    elements: list[dict[str, Any]] = []
-    if approvals:
-        elements.append(_heading(f"等你批的（{approvals_total}）"))
-        sizes = approval_items or {}
+    full: bool,
+    reports: list[str] | None = None,
+) -> tuple[dict[str, Any], list[int]]:
+    """总表卡片，连同卡片上「现在处理」按钮对应的编号。
+
+    `full` 是「看板」指令：五组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
+    其余只进计数行。
+    """
+    counts = result.counts()
+    elements: list[dict[str, Any]] = [
+        _plain(
+            "总表："
+            + " · ".join(f"{GROUP_TITLES[g]} {counts[g]}" for g in board.GROUPS)
+            + (f" · 待批 {result.approvals_total}" if result.approvals_total else ""),
+            "notation",
+        )
+    ]
+    buttons: list[int] = []
+    owner = result.groups["owner"]
+    if result.approvals or owner:
+        elements.append(_heading(f"等你（{result.approvals_total + len(owner)}）"))
+    if result.approvals:
+        elements.append(_heading(f"待批的写操作（{result.approvals_total}）"))
+        sizes = result.approval_items
         elements.append(
             _plain(
-                "\n".join(f"· {_approval_summary(row, sizes.get(row.id, 1))}" for row in approvals)
+                "\n".join(f"· {_approval_summary(r, sizes.get(r.id, 1))}" for r in result.approvals)
             )
         )
-        if approvals_total > len(approvals):
-            elements.append(_plain(f"另有 {approvals_total - len(approvals)} 张", "notation"))
+        if result.approvals_total > len(result.approvals):
+            elements.append(
+                _plain(f"另有 {result.approvals_total - len(result.approvals)} 张", "notation")
+            )
         name = system or "审批系统"
         elements.append(
             {"tag": "markdown", "content": f"[去{name}处理]({link})"}
             if link
             else _plain(f"请到{name}里处理", "notation")
         )
-    if owner_items:
-        elements.append(_heading(f"等你当面处理的（{owner_total}）"))
-        for row in owner_items:
-            label = now_text(row.seq)
-            elements.append(_plain(f"{followups.label(row.seq)} {_clean(row.title_enc or '')}"))
-            elements.append(
-                {
-                    "tag": "column_set",
-                    "element_id": _row(row.seq),
-                    "flex_mode": "flow",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "auto",
-                            "elements": [
-                                {
-                                    "tag": "button",
-                                    "element_id": _button(row.seq),
-                                    "type": "primary",
-                                    "size": "small",
-                                    "text": {"tag": "plain_text", "content": label},
-                                    "behaviors": [
-                                        {
-                                            "type": "callback",
-                                            "value": reply_value(
-                                                label,
-                                                requester=requester,
-                                                row=_row(row.seq),
-                                                buttons=[_button(row.seq)],
-                                            ),
-                                        }
-                                    ],
-                                }
-                            ],
-                        }
-                    ],
-                }
-            )
-        if owner_total > len(owner_items):
-            elements.append(
-                _plain(
-                    f"另有 {owner_total - len(owner_items)} 件，在「我的助理」页的待跟进里",
-                    "notation",
-                )
-            )
+    if owner:
+        elements.append(_heading(f"等你拍板或当面处理（{len(owner)}）"))
+        _items(elements, owner, requester, buttons)
+    shown = ["stalled", "working", "others", "scheduled"] if full else ["stalled"]
+    horizon = result.today + timedelta(days=board.SCHEDULE_DAYS)
+    for group in shown:
+        items = result.groups[group]
+        if group == "scheduled":
+            items = [i for i in items if i.row.review_on is None or i.row.review_on <= horizon]
+        if not items:
+            continue
+        elements.append(_heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
+        _items(elements, items, requester, buttons)
     if reports:
         elements.append(_heading("我处理了这些"))
-        shown = reports[:REPORTS_MAX]
-        elements.append(_plain("\n".join(f"· {line}" for line in shown)))
-        if len(reports) > len(shown):
-            elements.append(_plain(f"另有 {len(reports) - len(shown)} 条", "notation"))
-    elements.append(
-        {
-            "tag": "markdown",
-            "content": (
-                "<font color='grey'>不急的事攒到摘要时点一起说；摘要时点与免打扰时段可以在"
-                "「我的助理」页或这里改。</font>"
-            ),
-            "text_size": "notation",
-        }
-    )
-    return _card("助理摘要", "blue", elements)
+        shown_reports = reports[:REPORTS_MAX]
+        elements.append(_plain("\n".join(f"· {line}" for line in shown_reports)))
+        if len(reports) > len(shown_reports):
+            elements.append(_plain(f"另有 {len(reports) - len(shown_reports)} 条", "notation"))
+    if not full:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    "<font color='grey'>不急的事攒到摘要时点一起说；随时发「看板」看全部。"
+                    "摘要时点与免打扰时段可以在「我的助理」页或这里改。</font>"
+                ),
+                "text_size": "notation",
+            }
+        )
+    title = "事项看板" if full else "助理摘要"
+    return _card(title, "blue", elements), buttons
 
 
 def _fallback(card: dict[str, Any]) -> str:
@@ -372,58 +440,65 @@ async def send_digest(
 ) -> bool:
     """到了摘要时点：有新东西就发一条摘要，返回发了没有。调用方提交。
 
-    「新东西」是没发出的汇报、上次摘要之后新提交的审批单、上次摘要之后新记（或改过）的要当面
-    处理的待跟进；只有老的在途审批单与待跟进时不发，免得每个时点重复同样的内容。发的时候三节
-    都列全。
+    「新东西」是没发出的汇报、上次摘要之后新提交的审批单、上次摘要之后新记（或改过）的等你处理
+    的待跟进；只有老的在途审批单与待跟进、或只是有条目停滞时不发，免得每个时点重复同样的内容。
     """
     reports = await _reports(session, bot.id, urgent_only=False)
-    approvals, approvals_total, newest, sizes = await board.pending_approvals(session, bot.id)
-    today = assistant_settings.local_today(prefs, now)
-    owner_items = await followups.needs_owner(session, bot.id, today, limit=LIST_MAX + 1)
-    owner_total = await followups.needs_owner_count(session, bot.id)
+    result = await board.build(session, bot.id, prefs, now)
+    _, _, newest, _ = await board.pending_approvals(session, bot.id)
     lines = _lines(reports)
     since = prefs.digest_sent_at
+    owner = result.groups["owner"] + [i for i in result.groups["stalled"] if i.stage == "owner"]
     fresh = (
         bool(lines)
         or _newer(newest, since)
-        or any(_newer(row.updated_at, since) for row in owner_items)
+        or any(_newer(item.row.updated_at, since) for item in owner)
     )
     if not fresh:
         # 读不出来的汇报照样了结。
         await _mark_sent(session, reports, now)
         return False
-    shown = [row for row in owner_items[:LIST_MAX] if not sealed.is_locked(row)]
     settings = get_settings()
-    card = digest_card(
-        approvals=approvals,
-        approvals_total=approvals_total,
-        approval_items=sizes,
-        owner_items=shown,
-        owner_total=owner_total,
-        reports=lines,
+    card, rows = board_card(
+        result,
         requester=prefs.platform_user_id,
         link=tower.web_url(settings),
         system=(settings.tower_display_name or "").strip() or None,
+        full=False,
+        reports=lines,
     )
     stamp = int(aware_utc(now).timestamp())
-    await _send(
-        session,
-        bot.id,
-        prefs.chat_id,
-        f"{DIGEST_KEY}:{bot.id}:{stamp}",
-        card,
-        [row.seq for row in shown],
-    )
+    await _send(session, bot.id, prefs.chat_id, f"{DIGEST_KEY}:{bot.id}:{stamp}", card, rows)
     await _mark_sent(session, reports, now)
     prefs.digest_sent_at = now
     log.info(
         "assistant_digest_sent",
         bot_id=str(bot.id),
         reports=len(lines),
-        approvals=approvals_total,
-        followups=owner_total,
+        approvals=result.approvals_total,
+        followups=len(owner),
     )
     return True
+
+
+async def send_board(
+    session: AsyncSession, bot: Bot, prefs: AssistantSettings, now: datetime, *, key_suffix: str
+) -> None:
+    """所有者发了「看板」：立刻回一张完整的总表卡片。调用方提交。"""
+    result = await board.build(session, bot.id, prefs, now)
+    settings = get_settings()
+    card, rows = board_card(
+        result,
+        requester=prefs.platform_user_id,
+        link=tower.web_url(settings),
+        system=(settings.tower_display_name or "").strip() or None,
+        full=True,
+    )
+    # 去重键与摘要同一前缀：关闭待跟进时 retire 也能找到这张卡片置灰。
+    await _send(
+        session, bot.id, prefs.chat_id, f"{DIGEST_KEY}:{bot.id}:board-{key_suffix}", card, rows
+    )
+    log.info("assistant_board_sent", bot_id=str(bot.id), **result.counts())
 
 
 async def send_urgent(
@@ -548,7 +623,7 @@ async def tick(factory: async_sessionmaker[AsyncSession], now: datetime) -> dict
 
 
 async def retire(session: AsyncSession, bot_id: uuid.UUID, seqs: Iterable[int]) -> int:
-    """待跟进关闭了：最近几天发出的摘要卡片上它那一行的「现在处理」置灰。调用方提交。
+    """待跟进关闭了：最近几天发出的摘要与看板卡片上它那一行的「现在处理」置灰。调用方提交。
 
     卡片里只认平台写的明文编号（出站载荷的 `_digest_rows`），不读卡片内容。返回排了几次置灰。
     """

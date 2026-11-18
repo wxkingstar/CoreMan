@@ -247,7 +247,9 @@ async def test_the_digest_lists_approvals_owner_items_and_reports(
     owner_item = await followups.add(
         db_session, bot.id, category="decide", title="是否接受新供应商的报价", needs_owner=True
     )
-    await followups.add(db_session, bot.id, category="waiting", title="等赵六回复")
+    waiting = await followups.add(db_session, bot.id, category="waiting", title="等赵六回复")
+    # 时点在远未来：把进展时间挪到时点前一小时，免得它算成停滞而被展开。
+    waiting.progress_at = AFTERNOON - timedelta(hours=1)
     await db_session.commit()
     await finish(db_session, scope)
     # 第一次只算出下一个时点，不发。
@@ -257,11 +259,14 @@ async def test_the_digest_lists_approvals_owner_items_and_reports(
     (item,) = await sent(db_session, bot)
     card = item.payload["card"]
     body = texts(card)
-    assert body.index("等你批的") < body.index("等你当面处理的") < body.index("我处理了这些")
+    assert body.index("总表") < body.index("等你（") < body.index("我处理了这些")
+    assert "待批的写操作（1）" in body and "等你拍板或当面处理（1）" in body
     assert "[去审批台处理](https://tower.example.com/)" in body
     assert "tower-api" not in str(item.payload)
     assert body.count("已回复王五的会议邀请") == 1 and SECRET in body
-    assert "F001 是否接受新供应商的报价" in body and "等赵六回复" not in body
+    assert "F001 是否接受新供应商的报价" in body
+    # 等别人的事不展开，只进计数行。
+    assert "等赵六回复" not in body and "等别人 1" in body
     (button,) = buttons(card)
     assert button["text"]["content"] == "现在处理 F001"
     click = parse_reply(button["behaviors"][0]["value"])
@@ -280,6 +285,39 @@ async def test_the_digest_lists_approvals_owner_items_and_reports(
         "assistant_digests_sent"
     ] == 0
     reset_settings_cache()
+
+
+async def test_a_decision_without_needs_owner_waits_for_the_owner_too(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _owner = await ready(db_session)
+    factory = make_session_factory(db_engine)
+    row = await followups.add(
+        db_session, bot.id, category="decide", title="选哪家物流", notes="建议：选报价低的那家"
+    )
+    await db_session.commit()
+    await due_now(db_session, bot, AFTERNOON)
+    assert (await digest.tick(factory, AFTERNOON))["assistant_digests_sent"] == 1
+    (item,) = await sent(db_session, bot)
+    body = texts(item.payload["card"])
+    assert "等你拍板或当面处理（1）" in body and "F001 选哪家物流" in body
+    assert "建议：选报价低的那家" in body
+    (button,) = buttons(item.payload["card"])
+    assert button["text"]["content"] == "现在处理 F001"
+    assert item.payload["_digest_rows"] == [row.seq]
+
+
+async def test_stalled_items_alone_do_not_trigger_a_digest(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _owner = await ready(db_session)
+    factory = make_session_factory(db_engine)
+    await followups.add(db_session, bot.id, category="promised", title="整理合同")
+    await db_session.commit()
+    await due_now(db_session, bot, AFTERNOON)
+    # 时点在远未来，这一条早已停滞；停滞本身不算新东西。
+    assert (await digest.tick(factory, AFTERNOON))["assistant_digests_sent"] == 0
+    assert await sent(db_session, bot) == []
 
 
 async def test_quiet_hours_hold_everything_until_they_end_in_one_digest(
