@@ -2,11 +2,14 @@
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { systemBatches, type SystemBatch, type SystemBatchPhase } from '@/api/infrastructure'
 import { formatDateTime } from '@/utils/format'
+import SystemBatchItemsDrawer from '@/views/SystemBatchItemsDrawer.vue'
 
+// active：所在的 tab 是否正在显示；切走后不再定时刷新，切回来立即刷新一次。
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
 const { t } = useI18n()
 const PER_PAGE = 20
 const REFRESH_MS = 5000
@@ -19,14 +22,17 @@ const rows = ref<SystemBatch[]>([])
 const page = ref(1), total = ref(0)
 const loading = ref(false), error = ref('')
 const stopping = ref<string | null>(null)
+const detail = ref<SystemBatch | null>(null), detailOpen = ref(false)
+function openItems(row: SystemBatch) { detail.value = row; detailOpen.value = true }
 let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
 let alive = true
 
 function schedule() {
   clearTimeout(timer)
-  if (alive && rows.value.some(row => LIVE.includes(row.phase))) timer = setTimeout(() => { void load(true) }, REFRESH_MS)
+  if (alive && props.active && rows.value.some(row => LIVE.includes(row.phase))) timer = setTimeout(() => { void load(true) }, REFRESH_MS)
 }
+watch(() => props.active, active => { if (active) void load(true); else clearTimeout(timer) })
 
 // quiet：定时刷新不盖加载遮罩，失败也不弹提示（保留上一次的列表，下一轮再试）。
 async function load(quiet = false) {
@@ -47,7 +53,7 @@ async function load(quiet = false) {
 
 const done = (row: SystemBatch) => Math.max(0, row.count - row.pending)
 const percent = (row: SystemBatch) => row.count > 0 ? Math.min(100, Math.round(done(row) / row.count * 100)) : 0
-const canStop = (row: SystemBatch) => (row.phase === 'running' || row.phase === 'paused') && !row.stopping
+const canStop = (row: SystemBatch) => (row.phase === 'running' || row.phase === 'paused') && !row.stopping && row.can_stop !== false
 const phaseTag: Partial<Record<SystemBatchPhase, 'primary' | 'warning' | 'success'>> = { running: 'primary', paused: 'warning', finished: 'success' }
 const statusTag = (row: SystemBatch) => row.stopping ? 'danger' : phaseTag[row.phase] ?? 'info'
 function statusText(row: SystemBatch) {
@@ -93,7 +99,7 @@ onBeforeUnmount(() => { alive = false; clearTimeout(timer) })
 <template>
   <div class="batches-panel">
     <div class="panel-header">
-      <h3>{{ t('systemBatches.title') }}</h3>
+      <span class="panel-hint">{{ t('systemBatches.hint') }}</span>
       <el-button
         data-test="refresh-batches"
         @click="load()"
@@ -196,11 +202,17 @@ onBeforeUnmount(() => { alive = false; clearTimeout(timer) })
         </template>
       </el-table-column>
       <el-table-column
-        width="100"
+        width="140"
         :label="t('common.actions')"
       >
         <template #default="{ row }: { row: SystemBatch }">
           <el-button
+            link
+            :data-test="'batch-items-' + row.id"
+            @click="openItems(row)"
+          >
+            {{ t('systemBatches.items') }}
+          </el-button><el-button
             link
             type="danger"
             :data-test="'stop-batch-' + row.id"
@@ -221,11 +233,15 @@ onBeforeUnmount(() => { alive = false; clearTimeout(timer) })
       hide-on-single-page
       @current-change="load()"
     />
+    <SystemBatchItemsDrawer
+      v-model="detailOpen"
+      :batch="detail"
+    />
   </div>
 </template>
 
 <style scoped>
-.batches-panel { margin-top: 32px; }
-.panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.panel-hint { color: var(--el-text-color-secondary); font-size: 13px; }
 .results { display: flex; flex-wrap: wrap; gap: 4px; }
 </style>

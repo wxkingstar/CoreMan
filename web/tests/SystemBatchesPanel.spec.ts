@@ -2,9 +2,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/api/infrastructure', () => ({ systemBatches: { list: vi.fn(), stop: vi.fn() } }))
+vi.mock('@/api/infrastructure', () => ({ systemBatches: { list: vi.fn(), stop: vi.fn(), items: vi.fn() } }))
 
-import { systemBatches, type SystemBatch } from '@/api/infrastructure'
+import { systemBatches, type SystemBatch, type SystemBatchItem } from '@/api/infrastructure'
 import { i18n } from '@/i18n'
 import SystemBatchesPanel from '@/views/SystemBatchesPanel.vue'
 
@@ -120,6 +120,51 @@ describe('SystemBatchesPanel', () => {
     wrapper.unmount()
     await vi.advanceTimersByTimeAsync(20000)
     expect(systemBatches.list).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not offer stopping to someone who may only watch', async () => {
+    vi.mocked(systemBatches.list).mockResolvedValue(page([{ ...base, can_stop: false }]))
+    const wrapper = mount(SystemBatchesPanel, { global: { plugins } })
+    await flushPromises()
+    expect(wrapper.get('[data-test="stop-batch-b-running"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('opens each item with what was sent and how it went, filtered and paged', async () => {
+    const item: SystemBatchItem = {
+      seq: 2, target: 'SKU-2 stock', path_params: { id: 'SKU-2' }, query: null, body: { quantity: 3 }, before: { quantity: 1 },
+      status: 'http_error', status_code: 409, brief: 'conflict', started_at: null, finished_at: '2026-10-01T00:02:00Z',
+    }
+    vi.mocked(systemBatches.list).mockResolvedValue(page([base]))
+    vi.mocked(systemBatches.items).mockResolvedValue({ items: [item], total: 120, page: 1, per_page: 50 })
+    const wrapper = mount(SystemBatchesPanel, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="batch-items-b-running"]').trigger('click'); await flushPromises()
+    expect(systemBatches.items).toHaveBeenCalledWith('b-running', 1, 50, undefined)
+    const drawer = document.querySelector('[data-test="batch-items-table"]')!.textContent!
+    expect(drawer).toContain('SKU-2 stock')
+    expect(drawer).toContain('"quantity": 3')
+    expect(drawer).toContain('conflict')
+    expect(document.querySelector('[data-test="item-status-2"]')!.textContent).toContain(`${t('systemBatches.itemStatus.http_error')} · 409`)
+    const failed = [...document.querySelectorAll<HTMLElement>('[data-test="batch-items-filter"] label')].find(el => el.textContent?.includes(t('systemBatches.itemFilter.failed')))!
+    failed.click(); await flushPromises()
+    expect(systemBatches.items).toHaveBeenLastCalledWith('b-running', 1, 50, 'failed')
+    wrapper.unmount()
+  })
+
+  it('stops polling while its tab is hidden and refreshes when shown again', async () => {
+    vi.useFakeTimers()
+    vi.mocked(systemBatches.list).mockResolvedValue(page([base]))
+    const wrapper = mount(SystemBatchesPanel, { global: { plugins }, props: { active: true } })
+    await flushPromises()
+    await wrapper.setProps({ active: false })
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(systemBatches.list).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ active: true }); await flushPromises()
+    expect(systemBatches.list).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(systemBatches.list).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
   })
 
   it('does not poll when every batch has ended, and refreshes on demand', async () => {

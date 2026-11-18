@@ -65,7 +65,9 @@ async function copyContractLink() {
   catch (e) { fail(e) }
 }
 const listLoading = ref(false), listError = ref('')
-const { persist: persistQuery } = useListQuery({ page }, () => { void load() })
+// tab 也写进地址栏：刷新或分享链接时停在同一个 tab。
+const tab = ref('systems')
+const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
 async function load() {
   persistQuery(); listLoading.value = true; listError.value = ''
 
@@ -152,86 +154,103 @@ onMounted(load)
         {{ t('common.create') }}
       </el-button>
     </div>
-    <LoadState
-      :loading="listLoading"
-      :error="listError"
-      @retry="load"
-    />
-    <el-table :data="rows">
-      <el-table-column
-        min-width="140"
-        prop="key"
-        :label="t('infra.key')"
-      />
-      <el-table-column
-        min-width="140"
-        prop="name"
-        :label="t('infra.name')"
-      />
-      <el-table-column
-        min-width="140"
-        prop="base_url"
-        :label="t('infra.baseUrl')"
-      />
-      <el-table-column
-        min-width="160"
-        :label="t('infra.botScope')"
+    <el-tabs
+      v-model="tab"
+      data-test="systems-tabs"
+      @tab-change="persistQuery()"
+    >
+      <el-tab-pane
+        name="systems"
+        :label="t('infra.systemsTab')"
       >
-        <template #default="{ row }">
-          <el-tag
-            v-if="row.allowed_bot_ids === null"
-            data-test="open-to-all"
-            type="warning"
+        <LoadState
+          :loading="listLoading"
+          :error="listError"
+          @retry="load"
+        />
+        <el-table :data="rows">
+          <el-table-column
+            min-width="140"
+            prop="key"
+            :label="t('infra.key')"
+          />
+          <el-table-column
+            min-width="140"
+            prop="name"
+            :label="t('infra.name')"
+          />
+          <el-table-column
+            min-width="140"
+            prop="base_url"
+            :label="t('infra.baseUrl')"
+          />
+          <el-table-column
+            min-width="160"
+            :label="t('infra.botScope')"
           >
-            {{ t('infra.openToAllBots') }}
-          </el-tag>
-          <span v-else>{{ t('infra.restrictedCount', { n: row.allowed_bot_ids.length }) }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column
-        min-width="140"
-        :label="t('infra.status')"
+            <template #default="{ row }">
+              <el-tag
+                v-if="row.allowed_bot_ids === null"
+                data-test="open-to-all"
+                type="warning"
+              >
+                {{ t('infra.openToAllBots') }}
+              </el-tag>
+              <span v-else>{{ t('infra.restrictedCount', { n: row.allowed_bot_ids.length }) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            min-width="140"
+            :label="t('infra.status')"
+          >
+            <template #default="{ row }">
+              {{ t(row.enabled ? 'common.enabled' : 'common.disabled') }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            min-width="140"
+            :label="t('common.actions')"
+          >
+            <template #default="{ row }">
+              <el-button
+                link
+                :loading="testing === row.key"
+                :disabled="!row.enabled || !row.base_url || (row.token_provider && row.token_provider !== 'builtin' && !row.access_test_url)"
+                @click="testAccess(row)"
+              >
+                {{ t('infra.testAccess') }}
+              </el-button>
+              <el-button
+                link
+                @click="edit(row)"
+              >
+                {{ t('common.edit') }}
+              </el-button><el-button
+                link
+                type="danger"
+                @click="remove(row)"
+              >
+                {{ t('common.delete') }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination
+          v-model:current-page="page"
+          :total="total"
+          :page-size="50"
+          layout="prev, pager, next"
+          @current-change="load"
+        />
+      </el-tab-pane>
+      <el-tab-pane
+        name="batches"
+        lazy
+        :label="t('systemBatches.title')"
       >
-        <template #default="{ row }">
-          {{ t(row.enabled ? 'common.enabled' : 'common.disabled') }}
-        </template>
-      </el-table-column>
-      <el-table-column
-        min-width="140"
-        :label="t('common.actions')"
-      >
-        <template #default="{ row }">
-          <el-button
-            link
-            :loading="testing === row.key"
-            :disabled="!row.enabled || !row.base_url || (row.token_provider && row.token_provider !== 'builtin' && !row.access_test_url)"
-            @click="testAccess(row)"
-          >
-            {{ t('infra.testAccess') }}
-          </el-button>
-          <el-button
-            link
-            @click="edit(row)"
-          >
-            {{ t('common.edit') }}
-          </el-button><el-button
-            link
-            type="danger"
-            @click="remove(row)"
-          >
-            {{ t('common.delete') }}
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    <el-pagination
-      v-model:current-page="page"
-      :total="total"
-      :page-size="50"
-      layout="prev, pager, next"
-      @current-change="load"
-    />
-    <SystemBatchesPanel />
+        <SystemBatchesPanel :active="tab === 'batches'" />
+      </el-tab-pane>
+    </el-tabs>
     <el-dialog
       v-model="visible"
       :close-on-click-modal="false"

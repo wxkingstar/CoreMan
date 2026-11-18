@@ -60,10 +60,21 @@ export interface SystemBatch {
   system: string | null; system_name: string | null; operation_id: string | null; operation_summary: string; risk: string | null
   count: number; ok: number; failed: number; unknown: number; skipped: number; pending: number
   created_at: string; started_at: string | null; finished_at: string | null
+  /** 当前用户能否停止：管理员和发起人本人。 */
+  can_stop?: boolean
+}
+export type SystemBatchItemFilter = 'ok' | 'failed' | 'unknown' | 'skipped' | 'pending'
+/** 批次里的一项：暂存时的写入参数原样，以及执行状态和结果摘要（最多约 300 字）。 */
+export interface SystemBatchItem {
+  seq: number; target: string | null
+  path_params: Record<string, unknown> | null; query: Record<string, unknown> | null; body: unknown; before: Record<string, unknown> | null
+  status: 'pending' | 'sending' | 'ok' | 'http_error' | 'unreachable' | 'unknown' | 'skipped'
+  status_code: number | null; brief: string | null; started_at: string | null; finished_at: string | null
 }
 export const systemBatches = {
   list: (page = 1, perPage = 20) => call<Page<SystemBatch>>(http.get('/api/admin/system-batches', { params: { page, per_page: perPage } })),
   stop: (id: string) => call<SystemBatch>(http.post(`/api/admin/system-batches/${id}/stop`)),
+  items: (id: string, page = 1, perPage = 50, status?: SystemBatchItemFilter) => call<Page<SystemBatchItem>>(http.get(`/api/admin/system-batches/${id}/items`, { params: { page, per_page: perPage, status } })),
 }
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),

@@ -137,6 +137,11 @@ def _aad(batch_id: uuid.UUID, seq: int | None = None) -> str:
     return f"{AAD}:{batch_id}" + ("" if seq is None else f":{seq}")
 
 
+def item_aad(batch_id: uuid.UUID, seq: int) -> str:
+    """What one item's request and result are sealed to: its batch and line."""
+    return _aad(batch_id, seq)
+
+
 def _canon(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -1507,13 +1512,16 @@ def phase(state: InteractionState) -> str:
     return "running" if "chunk" in meta else "not_started"
 
 
-async def admin_stop(session: AsyncSession, cipher: Cipher, state: InteractionState) -> bool:
-    """A console administrator stops a running or paused batch: the rest is not run and the asker
-    is told who stopped it. `state` is locked by the caller. False when there is nothing to stop."""
+async def admin_stop(
+    session: AsyncSession, cipher: Cipher, state: InteractionState, *, by_asker: bool = False
+) -> bool:
+    """Someone stops a running or paused batch from the console (an administrator, or the asker
+    himself): the rest is not run and the asker is told who stopped it. `state` is locked by the
+    caller. False when there is nothing to stop."""
     if phase(state) not in ("running", "paused") or state.state.get(STOP):
         return False
     paused = bool(state.state.get("paused"))
-    state.state = {**state.state, STOP: True, "stopped_by": "admin"}
+    state.state = {**state.state, STOP: True, "stopped_by": "asker" if by_asker else "admin"}
     if paused:
         await session.flush()
         await _give_up(session, state, None, cipher=cipher)
