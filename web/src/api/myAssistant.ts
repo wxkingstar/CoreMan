@@ -85,7 +85,15 @@ export interface AssistantJob {
 export interface JobList { active: AssistantJob[]; recent: AssistantJob[] }
 
 /** 等所有者批的一张单：正文在审批系统里看，这里只有摘要与入口。 */
-export interface PendingApproval { id: string; tool: string; summary: string | null; created_at: string; link: string | null }
+export interface PendingApproval {
+  id: string
+  tool: string
+  summary: string | null
+  created_at: string
+  link: string | null
+  /** 总表里一轮合成的一张单含几项；只列代表的那一行。 */
+  items?: number
+}
 export interface SettledApproval {
   id: string
   tool: string

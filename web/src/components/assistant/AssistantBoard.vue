@@ -16,7 +16,14 @@ async function load() {
   catch (e) { error.value = errorMessage(e) }
   finally { loading.value = false }
 }
+// 与卡片同一说法：挂着的子任务是调度公共员工的说公共员工在办，子任务找不到了说助理在办；
+// 同事的名字读不出来时说同事在办。
 function handler(item: BoardItem) {
+  if (item.handler === 'job') {
+    if (!item.job) return t('assistant.board.handler.assistant')
+    if (item.job.kind === 'bot_help') return t('assistant.board.handler.botHelp')
+  }
+  if (item.handler === 'person' && (item.locked || !item.handler_name)) return t('assistant.board.handler.colleague')
   return t('assistant.board.handler.' + item.handler, { name: item.handler_name ?? '' })
 }
 onMounted(load)
@@ -53,6 +60,10 @@ defineExpose({ load })
               :data-test="'approval-' + a.id"
             >
               <strong>{{ a.summary ?? t('assistant.page.lockedText') }}</strong>
+              <span
+                v-if="(a.items ?? 1) > 1"
+                class="muted"
+              >{{ t('assistant.board.batchItems', { n: a.items }) }}</span>
               <el-tag
                 v-if="a.tool === DISPATCH_TOOL"
                 size="small"
@@ -81,6 +92,13 @@ defineExpose({ load })
               >{{ t('assistant.attention.noLink') }}</span>
             </li>
           </ul>
+          <p
+            v-if="data.approvals_total > data.approvals.length"
+            class="muted"
+            data-test="approvals-more"
+          >
+            {{ t('assistant.board.moreApprovals', { n: data.approvals_total - data.approvals.length }) }}
+          </p>
           <h4 v-if="data.groups.owner.length">
             {{ t('assistant.board.decisions', { n: data.counts.owner }) }}
           </h4>

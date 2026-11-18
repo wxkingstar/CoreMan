@@ -107,6 +107,7 @@ async def test_board_lists_pending_approvals_linked_jobs_and_followups(
         "summary": ABSTRACT,
         "created_at": pending["created_at"],
         "link": "https://tower.example.com",
+        "items": 1,
     }
     # 过了期限的待跟进挂着被卡住的子任务：子任务在条目的 job 里，不再单独列出。
     [due] = [i for items in data["groups"].values() for i in items if i["id"] == "F001"]
@@ -238,3 +239,22 @@ async def test_a_dispatch_waiting_for_approval_shows_among_the_pending(
     [pending] = response.json()["data"]["approvals"]
     assert pending["tool"] == "assistant_ask_bot" and pending["summary"] == "调度员工 → demo-bot"
     assert BODY_TEXT not in response.text
+
+
+async def test_a_batch_counts_as_one_request_like_on_the_card(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """一轮里合成一张的几项只算一张、只列一行，与「看板」卡片同一口径。"""
+    bot, _owner_row = await _owner(client, db_session)
+    batch, now = uuid.uuid4(), utcnow()
+    first = _approval(bot, "pending", batch_id=batch, created_at=now - timedelta(minutes=3))
+    second = _approval(bot, "pending", batch_id=batch, created_at=now - timedelta(minutes=2))
+    alone = _approval(bot, "pending", created_at=now - timedelta(minutes=1))
+    db_session.add_all([first, second, alone])
+    await db_session.commit()
+    data = (await client.get(BOARD)).json()["data"]
+    assert data["approvals_total"] == 2
+    assert [(a["id"], a["items"]) for a in data["approvals"]] == [
+        (str(first.id), 2),
+        (str(alone.id), 1),
+    ]

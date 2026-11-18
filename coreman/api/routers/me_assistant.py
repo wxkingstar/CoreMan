@@ -38,7 +38,7 @@ from coreman.core.assistants import (
     voice,
 )
 from coreman.core.assistants import settings as assistant_settings
-from coreman.core.db.models import AssistantSettings, User
+from coreman.core.db.models import AssistantApproval, AssistantSettings, User
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(prefix=PREFIX, tags=["my-assistant"], dependencies=DEPENDENCIES)
@@ -210,17 +210,25 @@ async def job_cancel(
 async def board_view(
     own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    """总表：所有未结的待跟进按阶段分组（等你、停滞、在推进、等别人、排期），加上在途审批单。"""
+    """总表：所有未结的待跟进按阶段分组（等你、停滞、在推进、等别人、排期），加上在途审批单。
+
+    审批单与卡片同一口径：一轮里合成的一张单只算一张、只列一行（`items` 是它含几项），早的在前，
+    至多 `board.APPROVALS_MAX` 行；`approvals_total` 是总张数。
+    """
     bot, actor = own.bot, own.actor
     prefs = await assistant_settings.get(session, bot.id)
     result = await board.build(session, bot.id, prefs, utcnow())
     rows = [item.row for items in result.groups.values() for item in items]
     linked = [item.job for items in result.groups.values() for item in items if item.job]
     # 核心函数已经还原过；这里按查看者再核一次。
-    await sealed.open_rows(session, [*rows, *linked], viewer=actor.id)
+    await sealed.open_rows(session, [*rows, *linked, *result.approvals], viewer=actor.id)
     names = await owner_view.target_names(session, linked)
     link = owner_view.approval_link()
-    pending = await owner_view.approvals(session, bot, actor.id, owner_view.PENDING)
+
+    def approval(row: AssistantApproval) -> dict[str, Any]:
+        out = owner_view.pending_view(row, link)
+        out["items"] = result.approval_items.get(row.id, 1)
+        return out
 
     def item(entry: board.Item) -> dict[str, Any]:
         out = followups.view(entry.row, notes=False)
@@ -239,8 +247,8 @@ async def board_view(
     data = {
         "today": result.today.isoformat(),
         "counts": result.counts(),
-        "approvals": [owner_view.pending_view(row, link) for row in pending],
-        "approvals_total": len(pending),
+        "approvals": [approval(row) for row in result.approvals],
+        "approvals_total": result.approvals_total,
         "groups": {name: [item(e) for e in entries] for name, entries in result.groups.items()},
     }
     # 读取会把到了回看日的推后条目改回未结；访问记录与读取同一个事务。

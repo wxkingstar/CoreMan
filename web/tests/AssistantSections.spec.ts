@@ -85,6 +85,39 @@ describe('board', () => {
     wrapper.unmount()
   })
 
+  it('says who is on it the same way the card does', async () => {
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      groups: {
+        ...boardData.groups,
+        working: [
+          item({ id: 'F003', stage: 'working', handler: 'job', job: job({ kind: 'bot_help' }) }),
+          item({ id: 'F004', stage: 'working', handler: 'job', job: job({ id: 'j5' }) }),
+          item({ id: 'F005', stage: 'working', handler: 'job', job: null }),
+        ],
+        others: [item({ id: 'F006', stage: 'others', handler: 'person', handler_name: null, locked: true })],
+      },
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="board-F003"]').text()).toContain(t('assistant.board.handler.botHelp'))
+    expect(wrapper.get('[data-test="board-F004"]').text()).toContain(t('assistant.board.handler.job'))
+    expect(wrapper.get('[data-test="board-F005"]').text()).toContain(t('assistant.board.handler.assistant'))
+    expect(wrapper.get('[data-test="board-F006"]').text()).toContain(t('assistant.board.handler.colleague'))
+    wrapper.unmount()
+  })
+
+  it('shows a batched request once with its item count and how many more are not listed', async () => {
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      approvals: [{ ...boardData.approvals[0], items: 3 }],
+      approvals_total: 12,
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="approval-a1"]').text()).toContain(t('assistant.board.batchItems', { n: 3 }))
+    expect(wrapper.get('[data-test="approvals-more"]').text()).toBe(t('assistant.board.moreApprovals', { n: 11 }))
+    wrapper.unmount()
+  })
+
   it('marks a dispatch that is waiting for approval', async () => {
     vi.mocked(myAssistant.board).mockResolvedValue({
       ...boardData,

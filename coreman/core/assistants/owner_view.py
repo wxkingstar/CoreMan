@@ -35,9 +35,8 @@ from coreman.core.timeutils import utcnow
 
 # 开通的三步，页面按这些代号显示文案：私聊助理应用 → 点卡片上的「开通」→ 完成飞书授权。
 HOW_TO = ("open_private_chat", "accept_offer", "authorize")
-# 「等你出手」与「最近落地」各看哪些状态的审批单。最近落地列全部终态：已执行、被拒、撤回、
-# 失败、过期、内容已过时作废；已批准还没执行完的（`approved`）是途中状态，两边都不列。
-PENDING = ("pending",)
+# 「最近落地」看哪些状态的审批单：全部终态，已执行、被拒、撤回、失败、过期、内容已过时作废；
+# 已批准还没执行完的（`approved`）是途中状态，总表（在途的只看 `pending`）与这里都不列。
 SETTLED = ("executed", "rejected", "withdrawn", "failed", "expired", "stale")
 APPROVAL_LIMIT = 30
 
