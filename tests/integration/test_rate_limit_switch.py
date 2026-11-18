@@ -129,6 +129,11 @@ async def test_codex_rate_limit_offers_codex_target(
     )
     assert st is not None and st.state["target_relay_id"] == str(idle.id)
     assert s.pending_card is not None
+    await db_session.refresh(relay)
+    assert relay.model_health is not None
+    assert relay.model_health["status"] == "down"
+    assert relay.model_health["error_code"] == "quota_limited"
+    assert relay.last_model_failure == relay.model_health
 
 
 async def test_warning_without_limit_and_no_candidate(
