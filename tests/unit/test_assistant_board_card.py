@@ -247,3 +247,20 @@ def test_linked_approval_line_under_item() -> None:
     )
     text = json.dumps(card, ensure_ascii=False)
     assert "待批：私聊 → 李四" in text and "https://tower.example.com" in text
+
+
+def test_batch_under_item_is_one_line_with_its_item_count() -> None:
+    groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    approval = AssistantApproval(
+        id=uuid.uuid4(), tool="feishu_im_send_message", args_enc={"abstract": "私聊 → 李四"}
+    )
+    groups["owner"] = [board.Item(_row(1), "owner", False, 0, None, None, (approval,))]
+    card, _ = digest.board_card(
+        board.Board(TODAY, groups, [], 0, {approval.id: 2}, None),
+        requester="ou_x",
+        link=None,
+        system=None,
+        full=True,
+    )
+    text = json.dumps(card, ensure_ascii=False)
+    assert text.count("待批：") == 1 and "共 2 项" in text

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import followups, gaps, jobs, sealed
@@ -141,26 +141,17 @@ async def pending_approvals(
 ) -> tuple[list[AssistantApproval], int, datetime | None, dict[uuid.UUID, int]]:
     """在途的审批单：每张单一行（早的在前，至多 `APPROVALS_MAX` 张，内容已还原）、总张数、最晚
     一张的提交时刻，以及合单的项数（按代表那张单的行的编号）。一轮里合成一张的几项只算一张。
-    挂在 `exclude` 里那些待跟进下的单不列（它们归到各自的条目下）。"""
+    `exclude` 是已归到条目下的合单（`coalesce(batch_id, id)`）：不列、不计张数；最晚提交时刻仍按全部
+    在途的单算，免得挂在老条目下的新单让摘要显得没有新东西。"""
     pending: tuple[Any, ...] = (
         AssistantApproval.bot_id == bot_id,
         AssistantApproval.status == "pending",
     )
-    if exclude:
-        pending += (
-            or_(
-                AssistantApproval.followup_id.is_(None),
-                AssistantApproval.followup_id.not_in(list(exclude)),
-            ),
-        )
     key = func.coalesce(AssistantApproval.batch_id, AssistantApproval.id)
-    total, newest = (
-        await session.execute(
-            select(func.count(func.distinct(key)), func.max(AssistantApproval.created_at)).where(
-                *pending
-            )
-        )
-    ).one()
+    newest = await session.scalar(select(func.max(AssistantApproval.created_at)).where(*pending))
+    if exclude:
+        pending += (key.not_in(list(exclude)),)
+    total = await session.scalar(select(func.count(func.distinct(key))).where(*pending))
     grouped = (
         await session.execute(
             select(key, func.count())
@@ -189,29 +180,46 @@ async def pending_approvals(
 
 
 async def linked_approvals(
-    session: AsyncSession, bot_id: uuid.UUID, followup_ids: Collection[uuid.UUID]
-) -> dict[uuid.UUID, list[AssistantApproval]]:
-    """挂在这些条目下的在途审批单，按条目分组（早的在前），内容已还原。"""
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    followup_ids: Collection[uuid.UUID],
+    skip: Collection[uuid.UUID] = (),
+) -> tuple[dict[uuid.UUID, list[AssistantApproval]], dict[uuid.UUID, int], set[uuid.UUID]]:
+    """挂在这些条目下的在途审批单：按条目分组的代表行（早的在前，内容已还原）、各合单的项数、
+    已归到条目下的合单键。一轮里合成的一张单按代表行（最早的一行）算：整张单要么归到它挂的条目
+    下，要么留在单独的列表里。挂在 `skip` 里的条目（不会出现在「等你」）下的单不归。"""
     if not followup_ids:
-        return {}
+        return {}, {}, set()
+    key = func.coalesce(AssistantApproval.batch_id, AssistantApproval.id)
+    base = (AssistantApproval.bot_id == bot_id, AssistantApproval.status == "pending")
+    touched = select(key).where(*base, AssistantApproval.followup_id.in_(list(followup_ids)))
     rows = list(
         await session.scalars(
             select(AssistantApproval)
-            .where(
-                AssistantApproval.bot_id == bot_id,
-                AssistantApproval.status == "pending",
-                AssistantApproval.followup_id.in_(list(followup_ids)),
-            )
+            .where(*base, key.in_(touched))
             .order_by(AssistantApproval.created_at, AssistantApproval.id)
             .execution_options(populate_existing=True)
         )
     )
     await sealed.open_rows(session, rows)
-    out: dict[uuid.UUID, list[AssistantApproval]] = {}
+    first: dict[uuid.UUID, AssistantApproval] = {}
+    sizes: dict[uuid.UUID, int] = {}
     for row in rows:
-        assert row.followup_id is not None
-        out.setdefault(row.followup_id, []).append(row)
-    return out
+        group = row.batch_id or row.id
+        first.setdefault(group, row)
+        sizes[group] = sizes.get(group, 0) + 1
+    ids, skipped = set(followup_ids), set(skip)
+    held: dict[uuid.UUID, list[AssistantApproval]] = {}
+    items: dict[uuid.UUID, int] = {}
+    claimed: set[uuid.UUID] = set()
+    for group, rep in first.items():
+        target = rep.followup_id
+        if target is None or target not in ids or target in skipped:
+            continue
+        held.setdefault(target, []).append(rep)
+        items[rep.id] = sizes[group]
+        claimed.add(group)
+    return held, items, claimed
 
 
 def _last(row: AssistantFollowup, job: AssistantJob | None) -> datetime:
@@ -242,7 +250,10 @@ async def build(
         )
         await sealed.open_rows(session, found)
         linked = {job.id: job for job in found}
-    held = await linked_approvals(session, bot_id, [row.id for row in rows])
+    stuck = [row.id for row in rows if row.gap_id in blocked]
+    held, held_items, claimed = await linked_approvals(
+        session, bot_id, [row.id for row in rows], stuck
+    )
     awaiting = frozenset(held)
     groups: dict[str, list[Item]] = {name: [] for name in GROUPS}
     for row in rows:
@@ -258,8 +269,6 @@ async def build(
     groups["owner"].sort(key=lambda i: (i.row.due_on or far, i.row.seq))
     groups["stalled"].sort(key=lambda i: (-i.idle_days, i.row.seq))
     groups["scheduled"].sort(key=lambda i: (i.row.review_on or far, i.row.seq))
-    approvals, total, newest, sizes = await pending_approvals(
-        session, bot_id, exclude=[row.id for row in rows]
-    )
+    approvals, total, newest, sizes = await pending_approvals(session, bot_id, exclude=claimed)
     entries = [Gap(row, await gaps.fix_for(session, bot_id, row), seqs) for row, seqs in live_gaps]
-    return Board(today, groups, approvals, total, sizes, newest, entries)
+    return Board(today, groups, approvals, total, {**sizes, **held_items}, newest, entries)

@@ -349,6 +349,7 @@ def _items(
     buttons: list[int],
     room: _Room,
     link: str | None = None,
+    sizes: dict[uuid.UUID, int] | None = None,
 ) -> None:
     """一组待跟进：每条一行，有建议的下一行灰字；等你的条目带「现在处理」按钮。读不出来的跳过。
     每组最多 `LIST_MAX` 条，卡片放不下了也停；没列出的只说个数。"""
@@ -362,7 +363,9 @@ def _items(
         if tip:
             nodes.append(_plain(f"建议：{tip}", "notation"))
         for approval in item.approvals:
-            line = f"待批：{_approval_summary(approval)}" + (f" [去处理]({link})" if link else "")
+            line = f"待批：{_approval_summary(approval, (sizes or {}).get(approval.id, 1))}" + (
+                f" [去处理]({link})" if link else ""
+            )
             nodes.append({"tag": "markdown", "content": line, "text_size": "notation"})
         if item.stage == "owner":
             nodes.append(_now_button(item.row.seq, requester))
@@ -493,7 +496,7 @@ def board_card(
         )
     if owner:
         room.add(elements, _heading(f"等你拍板或当面处理（{len(owner)}）"))
-        _items(elements, owner, requester, buttons, room, link)
+        _items(elements, owner, requester, buttons, room, link, result.approval_items)
     shown = ["stalled", "working", "others", "gap", "scheduled"] if full else ["stalled"]
     horizon = result.today + timedelta(days=board.SCHEDULE_DAYS)
     for group in shown:
@@ -512,7 +515,7 @@ def board_card(
         if not items:
             continue
         room.add(elements, _heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
-        _items(elements, items, requester, buttons, room, link)
+        _items(elements, items, requester, buttons, room, link, result.approval_items)
     if full and not result.approvals_total and not any(counts.values()) and not result.gaps:
         room.add(elements, _plain(EMPTY_BOARD))
     if reports:

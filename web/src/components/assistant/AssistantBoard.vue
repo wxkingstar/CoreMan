@@ -200,6 +200,9 @@ defineExpose({ load })
               class="muted"
             >
               {{ t('assistant.board.linkedApproval', { value: a.summary ?? t('assistant.page.lockedText') }) }}
+              <template v-if="(a.items ?? 1) > 1">
+                {{ t('assistant.board.batchItems', { n: a.items }) }}
+              </template>
               <a
                 v-if="a.link"
                 :href="a.link"
