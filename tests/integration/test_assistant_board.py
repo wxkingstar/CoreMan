@@ -112,3 +112,32 @@ async def test_a_woken_item_does_not_count_its_snoozed_days_as_idle(
     assert awake.idle_days == 1 and not awake.stalled
     [stalled] = result.groups["stalled"]
     assert stalled.row.seq == parked.seq and stalled.idle_days == 3
+
+
+async def test_followups_stuck_on_a_gap(db_session: AsyncSession) -> None:
+    from coreman.core.assistants import gaps
+
+    bot, _ = await ready(db_session)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    stuck = await followups.add(db_session, bot.id, category="decide", title="选供应商")
+    free = await followups.add(db_session, bot.id, category="promised", title="写周报")
+    row, _ = await gaps.report(
+        db_session,
+        bot.id,
+        kind="credential",
+        key="QUOTE_TOKEN",
+        need="查报价",
+        followup_seqs=[stuck.seq],
+    )
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert [i.row.seq for i in result.groups["gap"]] == [stuck.seq]
+    assert result.groups["gap"][0].gap is not None and result.groups["gap"][0].gap.id == row.id
+    assert [i.row.seq for i in result.groups["working"]] == [free.seq]
+    assert [(g.row.seq, g.fix, g.followups) for g in result.gaps] == [
+        (1, "credential", [stuck.seq])
+    ]
+    await gaps.decline(db_session, bot.id, row.seq)
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert result.gaps == [] and [i.row.seq for i in result.groups["owner"]] == [stuck.seq]

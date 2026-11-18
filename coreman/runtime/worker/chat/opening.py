@@ -413,6 +413,12 @@ class OpenStage(ChatStageBase):
                 handle = await digest.now_note(session, bot.id, intake.text)
                 if handle:
                     ctx.turn_notes.append(handle)
+                # 所有者发来「开通 G003」（看板上的按钮）：附上这个缺口与怎么开。
+                from coreman.core.assistants import gaps
+
+                opening_gap = await gaps.open_note(session, bot.id, intake.text)
+                if opening_gap:
+                    ctx.turn_notes.append(opening_gap)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context

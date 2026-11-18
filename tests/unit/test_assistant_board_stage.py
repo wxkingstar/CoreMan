@@ -76,3 +76,13 @@ def test_idle_counts_from_the_review_day_once_it_has_come() -> None:
     # 回看日还没到、或没有回看日：照最后一次进展。
     assert board.idle_from(MON, row(review_on=THU), WED) == MON
     assert board.idle_from(MON, row(), WED) == MON
+
+
+def test_gap_comes_first() -> None:
+    import uuid
+
+    gap = uuid.uuid4()
+    stuck = row(gap_id=gap, needs_owner=True)
+    assert board.stage(stuck, MON, frozenset({gap})) == "gap"
+    # 缺口已解决或所有者不开（不在 blocked 里）：回到原来的阶段。
+    assert board.stage(stuck, MON, frozenset()) == "owner"

@@ -31,6 +31,9 @@ def _board(per_group: int = 10) -> board.Board:
     stages = {"owner": "owner", "stalled": "working", "working": "working", "others": "others"}
     seq = 0
     for name in board.GROUPS:
+        # 「卡在权限」由 `Board.gaps` 驱动，另有测试；这里只摆原来的几组。
+        if name == "gap":
+            continue
         for _ in range(per_group):
             seq += 1
             if name == "scheduled":
@@ -121,3 +124,97 @@ def test_who_is_on_it() -> None:
     assert who(_row(1, handler="person", handler_name_enc="赵六")) == "赵六 在办"
     assert who(_row(1, handler="person")) == "同事在办"
     assert who(_row(1, handler="owner")) == "你在办"
+
+
+def _ids(node: Any) -> list[str]:
+    """卡片里所有的 element_id，按出现顺序。"""
+    out: list[str] = []
+    if isinstance(node, dict):
+        if isinstance(node.get("element_id"), str):
+            out.append(node["element_id"])
+        for value in node.values():
+            out.extend(_ids(value))
+    elif isinstance(node, list):
+        for value in node:
+            out.extend(_ids(value))
+    return out
+
+
+def test_gap_group_has_hint_and_buttons() -> None:
+    from coreman.core.assistants import gaps
+    from coreman.core.db.models import AssistantGap
+
+    chat = AssistantGap(
+        seq=3, kind="feishu_scope", key="im:message", need_enc="读群消息", status="open"
+    )
+    admin = AssistantGap(seq=4, kind="cloud_product", key="slb", need_enc="改白名单", status="open")
+    groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    groups["gap"] = [board.Item(_row(1), "gap", False, 0, None, chat)]
+    result = board.Board(
+        TODAY,
+        groups,
+        [],
+        0,
+        {},
+        None,
+        [board.Gap(chat, "authorize", [1]), board.Gap(admin, "admin", [])],
+    )
+    card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
+    text = json.dumps(card, ensure_ascii=False)
+    assert "卡在权限（1 件，2 个缺口）" in text
+    assert "G003 缺飞书权限 im:message：读群消息 → 卡住 F001" in text
+    assert gaps.hint(chat, "authorize") in text and gaps.hint(admin, "admin") in text
+    assert "开通 G003" in text and "不开 G003" in text
+    assert "开通 G004" not in text and "不开 G004" in text
+    # 按钮行与按钮的元素编号：网关凭它们置灰；回调里只有所有者能点。
+    ids = _ids(card)
+    assert ["gp3", "go3", "gd3", "gp4", "gd4"] == [i for i in ids if i[:2] in ("gp", "go", "gd")]
+    clicks = [
+        b["behaviors"][0]["value"]
+        for b in _buttons(card)
+        if b["element_id"] in ("go3", "gd3", "gd4")
+    ]
+    assert [(v["text"], v["row"], v["buttons"], v["requester"]) for v in clicks] == [
+        ("开通 G003", "gp3", ["go3", "gd3"], "ou_x"),
+        ("不开 G003", "gp3", ["go3", "gd3"], "ou_x"),
+        ("不开 G004", "gp4", ["gd4"], "ou_x"),
+    ]
+    # 摘要（非看板）只在计数行里带一句。
+    brief, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=False)
+    assert "卡在权限 1" in json.dumps(brief, ensure_ascii=False)
+    assert "G003" not in json.dumps(brief, ensure_ascii=False)
+
+
+def _buttons(node: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        if node.get("tag") == "button":
+            out.append(node)
+        for value in node.values():
+            out.extend(_buttons(value))
+    elif isinstance(node, list):
+        for value in node:
+            out.extend(_buttons(value))
+    return out
+
+
+def test_many_gaps_stay_within_the_card_limit() -> None:
+    from coreman.core.db.models import AssistantGap
+
+    entries = [
+        board.Gap(
+            AssistantGap(
+                seq=n, kind="credential", key=f"TOKEN_{n}", need_enc="要" * 200, status="open"
+            ),
+            "credential",
+            list(range(1, 30)),
+        )
+        for n in range(1, 40)
+    ]
+    full = _board()
+    result = board.Board(
+        TODAY, full.groups, full.approvals, full.approvals_total, {}, None, entries
+    )
+    card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
+    assert _size(card) <= MAX_CARD_BYTES
+    assert "另有" in _texts(card)
