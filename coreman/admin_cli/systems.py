@@ -56,6 +56,10 @@ OPTIONS = {
     "test_url": "access_test_url",
     "sort": "sort_order",
     "default_for_all": "default_for_all_bots",
+    "batch_write_max": "batch_write_max",
+    "batch_destructive_max": "batch_destructive_max",
+    "proxy_calls": "proxy_calls_per_turn",
+    "batch_interval_ms": "batch_interval_ms",
 }
 
 
@@ -79,6 +83,15 @@ def system_options(p: argparse.ArgumentParser, *, create: bool) -> None:
     p.add_argument("--sort", type=int, help="排序")
     p.add_argument(
         "--default-for-all", type=on_off, metavar="on|off", help="新员工默认获得此系统授权"
+    )
+    # 以下只对平台代理（--delivery proxy）生效。
+    p.add_argument("--batch-write-max", type=int, help="write 每批最多项数，1～50000，默认 1000")
+    p.add_argument(
+        "--batch-destructive-max", type=int, help="destructive 每批最多项数，1～500，默认 50"
+    )
+    p.add_argument("--proxy-calls", type=int, help="单轮代理调用次数上限，1～20000，默认 3000")
+    p.add_argument(
+        "--batch-interval-ms", type=int, help="批量执行时每项发出前的间隔（毫秒），0～60000"
     )
 
 
@@ -116,6 +129,12 @@ def register(sub: Any) -> None:
     p = leaf(ops, "batch-stop", "停止一个执行中或已暂停的批量写操作", batch_stop)
     p.add_argument("id", help="批次 id，可以只写开头几位（见 systems batches）")
     add_yes(p)
+
+
+def proxy_batch_text(row: dict[str, Any]) -> str | None:
+    if "batch_write_max" not in row:
+        return None
+    return f"{row['batch_write_max']} / {row['batch_destructive_max']}"
 
 
 def scope_text(row: dict[str, Any]) -> str:
@@ -170,6 +189,9 @@ async def show(c: AdminClient, args: argparse.Namespace) -> int:
             ("令牌受众", "token_audience"),
             ("测试地址", "access_test_url"),
             ("新员工默认授权", "default_for_all_bots"),
+            ("批量上限 write / destructive", proxy_batch_text),
+            ("单轮代理调用上限", "proxy_calls_per_turn"),
+            ("批量间隔（毫秒）", "batch_interval_ms"),
             ("开放给", lambda _: "全部员工" if ids is None else None),
             ("描述", "description"),
         ],

@@ -305,7 +305,7 @@ Tower 不可用时提交失败，写操作不执行。所有者在 Tower 没有�
 
 工具：`followup_add`、`followup_update`、`followup_snooze`、`followup_close`、`followup_list(scope)`（`scope` 也可以是一个编号，返回这一条连同备注）。日期按所有者时区，推后的条目到回看日那天改回未结。分类、状态、日期是明文，按日期查询不需要解密。起因消息被撤回时自动关闭。
 
-**谁在办与进展。** 条目另记 `handler`（assistant 助理自己 / job 子任务 / person 同事 / owner 所有者自己）、同事的名字 `handler_name_enc`（`handler = person` 时填）与 `progress_at`（最近一次有进展的时间，迁移 0114 把老条目回填为 `updated_at`）。工具 `followup_progress(id, note)` 往备注末尾追加一行带日期的进展并刷新 `progress_at`；备注超长时丢掉最早的进展行，保留开头的来龙去脉。
+**谁在办与进展。** 条目另记 `handler`（assistant 助理自己 / job 子任务 / person 同事 / owner 所有者自己）、同事的名字 `handler_name_enc`（`handler = person` 时填）与 `progress_at`（最近一次有进展的时间，迁移 0115 把老条目回填为 `updated_at`）。工具 `followup_progress(id, note)` 往备注末尾追加一行带日期的进展并刷新 `progress_at`；备注超长时丢掉最早的进展行，保留开头的来龙去脉。
 
 **总表阶段（读取时推导，不落库）。** `coreman/core/assistants/board.py` 为每条未结条目算出阶段，命中即停：等你（`needs_owner` 或分类为 `decide`）→ 等别人（分类为 `waiting`，或同事在办）→ 排期（`review_on` 在今天之后）→ 在推进（其余）。**停滞**另算：在推进的条目 2 个工作日没有进展（关联的子任务还在跑则不算）；等别人的条目超过 `due_on`，或 5 个工作日没有进展。工作日按所有者的设置算。页面、私聊「看板」指令与摘要卡片都调用同一个 `board.build`。
 

@@ -13,6 +13,8 @@ export interface BusinessSystem {
   /** 授权给 AI 员工时自动安装的技能，撤销授权时一并卸载。 */
   companion_skill_id?: string | null
   enabled: boolean; sort_order: number; default_for_all_bots: boolean; allowed_bot_ids: string[] | null; version: number
+  /** 平台代理（token_delivery=proxy）的批量与调用上限；旧后端不返回。 */
+  batch_write_max?: number; batch_destructive_max?: number; proxy_calls_per_turn?: number; batch_interval_ms?: number
   /** 只在保存的响应里出现：保存后立即拉取目录的结果，未配置 OpenAPI 地址或地址未改动时为 null。 */
   catalog?: SystemCatalog | CatalogSkipped | null
 }

@@ -25,6 +25,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
 TOKEN_DELIVERIES = ("env", "proxy", "mcp")
+# 平台代理的批量与调用上限：列名 → (默认, 最小, 最大)。管理员只能在这个范围内按系统调整。
+PROXY_LIMITS: dict[str, tuple[int, int, int]] = {
+    "batch_write_max": (1000, 1, 50000),
+    "batch_destructive_max": (50, 1, 500),
+    "proxy_calls_per_turn": (3000, 1, 20000),
+    "batch_interval_ms": (0, 0, 60000),
+}
+
+
+def _limit_checks() -> tuple[CheckConstraint, ...]:
+    return tuple(
+        CheckConstraint(f"{name} BETWEEN {low} AND {high}", name=name)
+        for name, (_default, low, high) in PROXY_LIMITS.items()
+    )
 
 
 class BusinessSystem(TimestampMixin, Base):
@@ -32,6 +46,7 @@ class BusinessSystem(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("key ~ '^[a-z][a-z0-9_]{0,49}$'", name="key_format"),
         CheckConstraint(enum_check("token_delivery", TOKEN_DELIVERIES), name="token_delivery"),
+        *_limit_checks(),
     )
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text)
@@ -56,6 +71,12 @@ class BusinessSystem(TimestampMixin, Base):
     sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     default_for_all_bots: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     allowed_bot_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(Uuid))
+    # 平台代理（token_delivery=proxy）的批量与调用上限，范围见 PROXY_LIMITS。
+    batch_write_max: Mapped[int] = mapped_column(Integer, server_default=text("1000"))
+    batch_destructive_max: Mapped[int] = mapped_column(Integer, server_default=text("50"))
+    proxy_calls_per_turn: Mapped[int] = mapped_column(Integer, server_default=text("3000"))
+    # 批量执行时每项发出前等多久（毫秒），用来给业务系统限速。
+    batch_interval_ms: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     __mapper_args__ = {"version_id_col": version}
 
@@ -215,7 +236,16 @@ class SystemBatchItem(Base):
     """
 
     __tablename__ = "system_batch_items"
-    __table_args__ = (CheckConstraint(enum_check("status", BATCH_ITEM_STATUSES), name="status"),)
+    __table_args__ = (
+        CheckConstraint(enum_check("status", BATCH_ITEM_STATUSES), name="status"),
+        # 取下一个待执行项直接走这里，不随已处理的项数变慢。
+        Index(
+            "system_batch_items_pending_idx",
+            "batch_id",
+            "seq",
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
     batch_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("interaction_states.id", ondelete="CASCADE"), primary_key=True
     )

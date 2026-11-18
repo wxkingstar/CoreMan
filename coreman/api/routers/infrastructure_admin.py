@@ -8,7 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +40,7 @@ from coreman.core.db.models import (
     SystemCatalog,
     User,
 )
+from coreman.core.db.models.infrastructure import PROXY_LIMITS
 from coreman.core.knowledge import installation as installs
 from coreman.core.relay.models import backend_of
 from coreman.core.systems_catalog import policy as catalog_policy
@@ -77,6 +78,19 @@ class SystemIn(BaseModel):
     # 缺省按空白名单处理：bot 管理员能控制提示词与 env，而平台会把发言者令牌注入其 CLI，
     # 新系统不能在没人确认的情况下对所有机器人开放。
     allowed_bot_ids: list[uuid.UUID] | None = Field(default_factory=list, max_length=500)
+    # 平台代理的批量与调用上限，范围见 PROXY_LIMITS；更新时不传沿用库里的值。
+    batch_write_max: int = Field(default=PROXY_LIMITS["batch_write_max"][0])
+    batch_destructive_max: int = Field(default=PROXY_LIMITS["batch_destructive_max"][0])
+    proxy_calls_per_turn: int = Field(default=PROXY_LIMITS["proxy_calls_per_turn"][0])
+    batch_interval_ms: int = Field(default=PROXY_LIMITS["batch_interval_ms"][0])
+
+    @field_validator(*PROXY_LIMITS)
+    @classmethod
+    def within_limits(cls, value: int, info: ValidationInfo) -> int:
+        _default, low, high = PROXY_LIMITS[str(info.field_name)]
+        if not low <= value <= high:
+            raise ValueError(f"须在 {low} 到 {high} 之间")
+        return value
 
     @field_validator(
         "token_audience", "access_test_url", "openapi_url", "sitemap_url", "mcp_url", mode="before"
@@ -191,6 +205,7 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "sort_order",
             "default_for_all_bots",
             "allowed_bot_ids",
+            *PROXY_LIMITS,
             "version",
         )
     } | {"sitemap_url": row.openapi_url}
@@ -531,17 +546,18 @@ async def update_system(
     values = body.row_values()
     catalog_source = (row.base_url, row.openapi_url)
     provider_fields = ("token_provider", "token_delivery", "token_audience", "access_test_url")
-    # 旧管理台不认识 MCP 两项，不传时沿用库里的值。
-    for field in (*provider_fields, "mcp_url", "companion_skill_id"):
+    # 旧管理台不认识 MCP 两项和代理上限，不传时沿用库里的值。
+    for field in (*provider_fields, "mcp_url", "companion_skill_id", *PROXY_LIMITS):
         if field not in body.model_fields_set:
             values[field] = getattr(row, field)
     validate_provider_settings(request, values, row.token_provider)
     await validate_delivery(session, values)
     await validate_proxy(session, values, row)
     provider_diff = diff_dict(
-        {field: getattr(row, field) for field in provider_fields}
+        {field: getattr(row, field) for field in (*provider_fields, *PROXY_LIMITS)}
         | delivery_audit({"mcp_url": row.mcp_url, "companion_skill_id": row.companion_skill_id}),
-        {field: values[field] for field in provider_fields} | delivery_audit(values),
+        {field: values[field] for field in (*provider_fields, *PROXY_LIMITS)}
+        | delivery_audit(values),
     )
     for field, value in values.items():
         setattr(row, field, value)
