@@ -458,7 +458,8 @@ async def test_user_stop_and_superseded(db_engine: AsyncEngine, db_session: Asyn
     t = await chat_task(db_session, bot, "long")
     ctx = build_ctx(db_engine, t, relay_client_factory=lambda _r: fake.client())
     runner = asyncio.create_task(ChatTaskHandler().run(ctx))
-    await asyncio.sleep(0.9)
+    # 等它开了流再停：固定睡眠在慢机器上会让取消抢在开流之前（那是另一条路径）。
+    await _until_dispatched(fake)
     assert await tasks.request_cancel(db_session, t.id, "user_stop") is True
     await db_session.commit()
     await ctx.heartbeat()
@@ -476,11 +477,10 @@ async def test_user_stop_and_superseded(db_engine: AsyncEngine, db_session: Asyn
         and log.output_tokens is None
     )
     old = await chat_task(db_session, bot, "first")
-    old_ctx = build_ctx(
-        db_engine, old, relay_client_factory=lambda _r: FakeRelay("slow", chunk_delay=0.25).client()
-    )
+    old_fake = FakeRelay("slow", chunk_delay=0.25)
+    old_ctx = build_ctx(db_engine, old, relay_client_factory=lambda _r: old_fake.client())
     old_runner = asyncio.create_task(ChatTaskHandler().run(old_ctx))
-    await asyncio.sleep(0.6)
+    await _until_dispatched(old_fake)
     new = await chat_task(db_session, bot, "second")
     new_ctx = build_ctx(
         db_engine, new, relay_client_factory=lambda _r: FakeRelay("normal").client()
@@ -605,6 +605,16 @@ async def test_busy_session_defers_new_message_instead_of_failing(
     row = await tasks.get(db_session, older.id)
     assert row is not None and row.status == "cancelled" and row.error_code == "superseded"
     assert len(fake.requests) == 1 and await stream_count(older.id) == 0
+
+
+async def _until_dispatched(fake: FakeRelay) -> None:
+    """等假 relay 收到对话请求（任务已过开流检查），再留一帧的时间让流真正跑起来。"""
+    for _ in range(500):
+        if fake.requests:
+            break
+        await asyncio.sleep(0.02)
+    assert fake.requests, "10 秒内没有开流"
+    await asyncio.sleep(fake.chunk_delay)
 
 
 async def _pump(ctx) -> None:  # type: ignore[no-untyped-def]

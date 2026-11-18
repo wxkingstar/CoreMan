@@ -239,8 +239,13 @@ async def test_long_precheck_does_not_stall_heartbeats(
 
     from coreman.core.cron import precheck
 
+    beats = [0]
+    during: list[int] = []
+
     def slow(script, ctx, timeout_seconds=30, *, stop=None):  # type: ignore[no-untyped-def]
+        start = beats[0]
         _time.sleep(0.8)  # 纯 CPU/阻塞：放在事件循环上会让下面的心跳一次都写不进去
+        during.append(beats[0] - start)
         return precheck.PrecheckResult(False, reason="slow")
 
     monkeypatch.setattr(precheck, "run_precheck", slow)
@@ -250,18 +255,15 @@ async def test_long_precheck_does_not_stall_heartbeats(
     task = await claim(db_session)
     fake = FakeRelay("normal")
     ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
-    beats = 0
 
     async def beating() -> None:
-        nonlocal beats
         while True:
             await ctx.heartbeat()
-            beats += 1
+            beats[0] += 1
             await asyncio.sleep(0.1)
 
     beat = asyncio.create_task(beating())
     await asyncio.sleep(0)
-    before = beats
     try:
         await CronRunHandler().run(ctx)
     finally:
@@ -269,7 +271,8 @@ async def test_long_precheck_does_not_stall_heartbeats(
         await asyncio.gather(beat, return_exceptions=True)
     run = await db_session.scalar(select(CronRun))
     assert run is not None and run.status == "skipped" and not fake.requests
-    assert beats - before >= 4
+    # 只数预检阻塞的那 0.8 秒：堵在事件循环上恰好是 0，慢机器上整轮跳几次不作数。
+    assert during and during[0] >= 2
 
 
 async def test_cron_relay_error_without_finish_keeps_reason(
