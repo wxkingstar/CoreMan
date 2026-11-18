@@ -29,16 +29,22 @@ from coreman.api.routers.me_assistant_common import (
 from coreman.core.assistants import (
     access_log,
     board,
+    chat_choices,
     cold_start,
     delivery,
     followups,
     jobs,
+    message_range,
     owner_view,
     sealed,
     voice,
+    watch,
 )
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import AssistantApproval, AssistantSettings, User
+from coreman.core.feishu_personal import ratelimit
+from coreman.core.feishu_personal.errors import PersonalError
+from coreman.core.feishu_personal.toolbase import Call
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(prefix=PREFIX, tags=["my-assistant"], dependencies=DEPENDENCIES)
@@ -63,16 +69,25 @@ SETTINGS_ERRORS: dict[str, tuple[int, str]] = {
     "too_many_chats": (
         422,
         f"重点群最多 {assistant_settings.MAX_FOCUS} 个，"
-        f"忽略的会话最多 {assistant_settings.MAX_IGNORED} 个",
+        f"不托管的会话最多 {assistant_settings.MAX_IGNORED} 个，"
+        f"只托管的会话最多 {assistant_settings.MAX_MANAGED} 个",
     ),
-    "chat_in_both_lists": (422, "同一个会话不能既是重点群又被忽略"),
+    "chat_in_both_lists": (422, "同一个会话不能既是重点群又不托管"),
+    "invalid_chat_scope": (422, "托管范围只能是「全部会话」或「只托管名单里的会话」"),
+    "focus_not_managed": (422, "只托管名单里的会话时，重点群必须在托管名单里"),
     "invalid_digest_times": (
         422,
         f"摘要时点要写成 HH:MM，1 到 {assistant_settings.MAX_DIGEST_TIMES} 个，不能重复",
     ),
     "invalid_quiet_hours": (422, "免打扰时段要写成 HH:MM，开始与结束不能相同"),
     "budget_over_platform": (422, "每日轮次预算不能超过平台默认值"),
-    "content_locked": (409, "加密保存的个人内容已不可读取，不能再写入重点群与忽略的会话"),
+    "content_locked": (409, "加密保存的个人内容已不可读取，不能再写入重点群与托管名单"),
+}
+CHATS_ERRORS: dict[str, tuple[int, str]] = {
+    "assistant_unavailable": (409, "个人助理现在不可用，读不了你的会话列表"),
+    "authorization_required": (409, "需要先在私聊里重新完成飞书授权"),
+    "feishu_busy": (429, "飞书接口现在用量紧张，稍后再试"),
+    "feishu_unavailable": (502, "暂时读不了你的会话列表，稍后再试"),
 }
 _ChatId = Annotated[str, StringConstraints(max_length=100)]
 
@@ -91,7 +106,9 @@ class SettingsIn(BaseModel):
     work_end: str | None = Field(default=None, max_length=5)
     workdays: list[StrictInt] | None = Field(default=None, max_length=7)
     focus_chats: list[_ChatId] | None = Field(default=None, max_length=200)
-    ignored_chats: list[_ChatId] | None = Field(default=None, max_length=200)
+    ignored_chats: list[_ChatId] | None = Field(default=None, max_length=400)
+    managed_chats: list[_ChatId] | None = Field(default=None, max_length=400)
+    chat_scope: Literal["all", "listed"] | None = None
     digest_times: list[Annotated[str, StringConstraints(max_length=5)]] | None = Field(
         default=None, max_length=24
     )
@@ -136,6 +153,23 @@ class DeprovisionIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     confirm: StrictBool
+
+
+RANGE_ERRORS: dict[str, tuple[int, str]] = {
+    "authorization_required": (409, "还没有完成飞书授权，先在私聊里完成授权"),
+    "assistant_inactive": (409, "个人助理现在不可用"),
+    "app_message_permission_missing": (409, "助理应用缺少读消息的权限，请联系管理员"),
+    "app_send_permission_missing": (409, "助理应用缺少以本人身份发消息的权限，请联系管理员"),
+    "app_scope_discovery_permission_missing": (409, "助理应用缺少查询自身权限的能力，请联系管理员"),
+    "feishu_busy": (429, "飞书接口现在用量紧张，稍后再试"),
+}
+
+
+class RangeIn(BaseModel):
+    """授权的消息范围：全部会话、只群聊、只单聊。"""
+
+    model_config = ConfigDict(extra="forbid")
+    message_range: Literal["all", "group", "p2p"]
 
 
 class ShiftIn(BaseModel):
@@ -311,6 +345,65 @@ async def settings_patch(
     data = await owner_view.preferences(session, row, now)
     await session.commit()
     return {"code": 0, "data": data}
+
+
+@router.get("/settings/chats")
+async def settings_chats(
+    request: Request,
+    query: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] = Query(""),
+    own: Mine = Depends(mine),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """挑托管范围用的会话清单：最近活跃的会话，给了 `query` 时按名字或成员搜。
+
+    以所有者身份调飞书的会话列表，只回编号、名字与类型，不读消息；不托管的会话也列出来，
+    好让他勾回去。
+    """
+    prefs = await assistant_settings.get(session, own.bot.id)
+    scope, _code = await watch.owner_scope(session, own.bot, prefs)
+    if scope is None or own.bot.assistant_state != "active":
+        await session.rollback()
+        code = "authorization_required" if scope is None else "assistant_unavailable"
+        raise refuse(code, CHATS_ERRORS)
+    try:
+        found = await chat_choices.listing(
+            Call(session, request.app.state.cipher, scope),
+            own_chat=prefs.chat_id,
+            owner_open_id=prefs.open_id,
+            query=query,
+        )
+    except ratelimit.RateLimited:
+        await session.commit()
+        raise refuse("feishu_busy", CHATS_ERRORS) from None
+    except PersonalError as exc:
+        # 刷新过的令牌已经写在授权行上，要落库。
+        await session.commit()
+        code = exc.code if exc.code in CHATS_ERRORS else "feishu_unavailable"
+        raise refuse(code, CHATS_ERRORS) from None
+    await session.commit()
+    return {"code": 0, "data": {"items": [choice.payload() for choice in found]}}
+
+
+@router.post("/message-range")
+async def change_message_range(
+    body: RangeIn,
+    request: Request,
+    own: Mine = Depends(writable),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """改授权的消息范围并重新授权：旧授权当场作废，新链接同时发到私聊。返回授权链接。"""
+    try:
+        url = await message_range.change(
+            session, request.app.state.cipher, own.bot, body.message_range
+        )
+    except ratelimit.RateLimited:
+        await session.rollback()
+        raise refuse("feishu_busy", RANGE_ERRORS) from None
+    except PersonalError as exc:
+        await session.rollback()
+        raise refuse(exc.code, RANGE_ERRORS) from None
+    await session.commit()
+    return {"code": 0, "data": {"authorization_url": url, "message_range": body.message_range}}
 
 
 @router.post("/shift")

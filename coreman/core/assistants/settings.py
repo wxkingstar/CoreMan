@@ -17,8 +17,8 @@ from zoneinfo import ZoneInfo, available_timezones
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import sealed
-from coreman.core.db.models import AssistantSettings
+from coreman.core.assistants import chat_guard, sealed
+from coreman.core.db.models import CHAT_SCOPES, AssistantSettings
 from coreman.core.timeutils import aware_utc, utcnow
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -230,12 +230,38 @@ def next_digest(row: AssistantSettings, now: datetime) -> datetime:
 
 # 重点群每轮直接读历史，计入分钟预算：与 `watch.FOCUS_MAX` 一致。
 MAX_FOCUS = 5
-MAX_IGNORED = 50
+MAX_IGNORED = 200
+MAX_MANAGED = 200
 MAX_FOCUS_PEOPLE = 10
 MAX_DIGEST_TIMES = 6
 _HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _CHAT = re.compile(r"^oc_[A-Za-z0-9_-]{1,80}$")
 _PERSON = re.compile(r"^ou_[A-Za-z0-9_-]{1,80}$")
+
+
+async def _rescope(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    before: chat_guard.Rules,
+    after: chat_guard.Rules,
+    now: datetime,
+) -> None:
+    """托管范围变了：变成不托管的会话作废待交回的条目，变回托管的从这一刻起盯。"""
+    # 函数内引入：watch 在模块层引用本模块。
+    from coreman.core.assistants import watch
+    from coreman.core.assistants import watch_inbox as inbox
+
+    await inbox.void_unmanaged(session, bot_id, after)
+    if before.listed and not after.listed:
+        # 只托管名单之外的会话一个个说不出来：除了原本就托管的，全部从这一刻起盯。
+        await watch.restart_except(session, bot_id, set(before.managed), now)
+        return
+    if before.listed:
+        back = [chat for chat in after.managed if chat not in before.managed]
+    else:
+        back = [chat for chat in before.ignored if not after.denies(chat)]
+    if back:
+        await watch.restart_chats(session, bot_id, back, now)
 
 
 class SettingsError(Exception):
@@ -334,6 +360,8 @@ def view(row: AssistantSettings, now: datetime) -> dict[str, Any]:
         "focus_chats": list(row.focus_chats_enc or []),
         "focus_people": list(row.focus_people_enc or []),
         "ignored_chats": list(row.ignored_chats_enc or []),
+        "managed_chats": list(row.managed_chats_enc or []),
+        "chat_scope": row.chat_scope,
         "on_shift": on_shift(row, now),
         "shift_override": switched,
         "shift_override_until": until.isoformat() if until is not None else None,
@@ -360,6 +388,8 @@ async def update(
     focus_chats: list[str] | None = None,
     focus_people: list[str] | None = None,
     ignored_chats: list[str] | None = None,
+    managed_chats: list[str] | None = None,
+    chat_scope: str | None = None,
     digest_times: list[str] | None = None,
     quiet_enabled: bool | None = None,
     quiet_start: str | None = None,
@@ -369,13 +399,15 @@ async def update(
 
     改了全天候、时区、工作时段或工作日时清掉「上班」「下班」的临时切换：它是按旧的时段算出来的。
     改了时区、摘要时点或免打扰时段时，下一个摘要时点重新算（从这一刻往后找）。
-    从忽略名单里移出的会话，盯消息的游标置为 `now`（会等正在进行的一轮轮询提交）。
+    托管范围（`chat_scope`、不托管与只托管两份名单）变了：变成不托管的会话，还没交回的条目
+    作废；变回托管的会话从 `now` 起盯，不托管期间的消息不补（会等正在进行的一轮轮询提交）。
 
     Raises:
         SettingsError: `nothing_to_update`、`invalid_timezone`、`invalid_work_hours`（格式不对，
             或上班时间不早于下班时间）、`invalid_workdays`、`invalid_chats`、`too_many_chats`、
             `invalid_people`、`too_many_people`、
-            `chat_in_both_lists`、`invalid_digest_times`（1–6 个不重复的 `HH:MM`）、
+            `chat_in_both_lists`、`invalid_chat_scope`、`focus_not_managed`（只托管名单时重点群
+            必须在名单里）、`invalid_digest_times`（1–6 个不重复的 `HH:MM`）、
             `invalid_quiet_hours`（格式不对，或起止相同）、`content_locked`（取不到数据密钥时
             不能写名单）
     """
@@ -388,6 +420,8 @@ async def update(
         focus_chats,
         focus_people,
         ignored_chats,
+        managed_chats,
+        chat_scope,
         digest_times,
         quiet_enabled,
         quiet_start,
@@ -414,12 +448,20 @@ async def update(
     hush = quiet_enabled if quiet_enabled is not None else row.quiet_enabled
     focus = _chats(focus_chats, MAX_FOCUS) if focus_chats is not None else None
     ignored = _chats(ignored_chats, MAX_IGNORED) if ignored_chats is not None else None
+    managed = _chats(managed_chats, MAX_MANAGED) if managed_chats is not None else None
     people = _people(focus_people, MAX_FOCUS_PEOPLE) if focus_people is not None else None
-    if focus is not None or ignored is not None or people is not None:
+    if chat_scope is not None and chat_scope not in CHAT_SCOPES:
+        raise SettingsError("invalid_chat_scope")
+    lists = (focus, ignored, managed, people)
+    if any(value is not None for value in lists) or chat_scope is not None:
         now_focus = focus if focus is not None else list(row.focus_chats_enc or [])
         now_ignored = ignored if ignored is not None else list(row.ignored_chats_enc or [])
+        now_managed = managed if managed is not None else list(row.managed_chats_enc or [])
+        now_scope = chat_scope if chat_scope is not None else row.chat_scope
         if (focus is not None or ignored is not None) and set(now_focus) & set(now_ignored):
             raise SettingsError("chat_in_both_lists")
+        if now_scope == "listed" and not set(now_focus) <= set(now_managed):
+            raise SettingsError("focus_not_managed")
         # 名单是加密列：密钥不可用时写下去会丢内容，宁可拒绝。
         if not await sealed.key_ready(session, bot_id):
             raise SettingsError("content_locked")
@@ -445,15 +487,15 @@ async def update(
         row.focus_chats_enc = focus
     if people is not None:
         row.focus_people_enc = people
-    if ignored is not None:
-        released = [chat for chat in row.ignored_chats_enc or [] if chat not in ignored]
-        row.ignored_chats_enc = ignored
-        if released:
-            # 移出忽略名单的会话从这一刻起盯：忽略期间的消息不补进收件箱。
-            # 函数内引入：watch 在模块层引用本模块。
-            from coreman.core.assistants import watch
-
-            await watch.restart_chats(session, bot_id, released, now)
+    if ignored is not None or managed is not None or chat_scope is not None:
+        before = chat_guard.rules_of(row)
+        if ignored is not None:
+            row.ignored_chats_enc = ignored
+        if managed is not None:
+            row.managed_chats_enc = managed
+        if chat_scope is not None:
+            row.chat_scope = chat_scope
+        await _rescope(session, bot_id, before, chat_guard.rules_of(row), now)
     row.updated_at = utcnow()
     await session.flush()
     return row

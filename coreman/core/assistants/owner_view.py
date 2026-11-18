@@ -14,7 +14,15 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import delivery, eligibility, jobs, lifecycle, runtime, sealed
+from coreman.core.assistants import (
+    delivery,
+    eligibility,
+    jobs,
+    lifecycle,
+    message_range,
+    runtime,
+    sealed,
+)
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.approvals import tower
 from coreman.core.config import get_settings
@@ -25,6 +33,7 @@ from coreman.core.db.models import (
     AssistantSettings,
     AssistantWatch,
     Bot,
+    FeishuPersonalGrant,
     PlatformApp,
     RelayServer,
     RuntimeNode,
@@ -283,9 +292,16 @@ async def preferences(
         "limits": {
             "focus_chats": assistant_settings.MAX_FOCUS,
             "ignored_chats": assistant_settings.MAX_IGNORED,
+            "managed_chats": assistant_settings.MAX_MANAGED,
             "budget_min": delivery.BUDGET_MIN,
         },
         "locked": sealed.is_locked(row),
+        # 授权的消息范围（全部会话、只群聊、只单聊）与飞书侧是否真的按范围收住了。
+        "authorization": message_range.view(
+            await session.scalar(
+                select(FeishuPersonalGrant).where(FeishuPersonalGrant.bot_id == row.bot_id)
+            )
+        ),
     }
 
 

@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 
+from coreman.core.assistants import chat_guard
 from coreman.core.feishu_personal import endpoints, ratelimit, service
 
 SECRET = "机密-片段-7f3a"
@@ -115,7 +116,7 @@ async def test_only_assistant_calls_are_counted(monkeypatch: pytest.MonkeyPatch)
     recorded: list[tuple[str, str]] = []
 
     async def authorize(_s: Any, _c: Any, _scope: Any, method: str, path: str, **_kw: Any) -> Any:
-        row = SimpleNamespace(app_id="cli_example")
+        row = SimpleNamespace(app_id="cli_example", message_range="all")
         return endpoints.match(method, path), row, "secret", {"access_token": "t"}
 
     async def http(_method: str, _url: str, **_kw: Any) -> dict[str, Any]:
@@ -127,6 +128,12 @@ async def test_only_assistant_calls_are_counted(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(service, "_authorize", authorize)
     monkeypatch.setattr(service, "_http", http)
     monkeypatch.setattr(ratelimit.Budget, "record", record)
+
+    async def no_rules(*_: Any) -> None:
+        return None
+
+    # 没有划出不托管的会话：入口不多查任何东西。
+    monkeypatch.setattr(chat_guard, "rules", no_rules)
     for kind in ("standard", "assistant"):
         scope: Any = SimpleNamespace(bot=SimpleNamespace(kind=kind))
         for path in ("/im/v1/chats", "/im/v1/messages", "/im/v1/messages/mget"):

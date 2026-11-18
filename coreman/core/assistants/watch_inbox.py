@@ -159,6 +159,30 @@ async def void_all(session: AsyncSession, bot_id: uuid.UUID, code: str) -> int:
     return _count(result)
 
 
+async def void_unmanaged(session: AsyncSession, bot_id: uuid.UUID, rules: Any) -> int:
+    """落在不托管会话里、还没交回的条目作废（`unmanaged`）。
+
+    Args:
+        rules: `chat_guard.Rules`，按它的 `denies` 判断
+    """
+    found = (
+        await session.execute(
+            select(AssistantInbox.id, AssistantInbox.chat_id).where(
+                *_open(bot_id), AssistantInbox.chat_id.is_not(None)
+            )
+        )
+    ).all()
+    ids = [row.id for row in found if rules.denies(row.chat_id)]
+    if not ids:
+        return 0
+    result = await session.execute(
+        update(AssistantInbox)
+        .where(*_open(bot_id), AssistantInbox.id.in_(ids))
+        .values(status="void", void_code="unmanaged", updated_at=func.now())
+    )
+    return _count(result)
+
+
 async def pending_messages(session: AsyncSession, bot_id: uuid.UUID, limit: int = 20) -> list[str]:
     """还没交回的消息条目（含所有者自己说的话）的消息 id，新的在前：每轮拿它们去查有没有被撤回。"""
     found = await session.scalars(

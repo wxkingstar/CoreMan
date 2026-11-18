@@ -25,10 +25,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
 SEND_STATUSES = ("drafted", "sent")
+# 与 feishu_personal.permissions.MESSAGE_RANGES 一致。
+MESSAGE_RANGES = ("all", "group", "p2p")
 
 
 class FeishuPersonalGrant(TimestampMixin, Base):
     __tablename__ = "feishu_personal_grants"
+    __table_args__ = (
+        CheckConstraint(enum_check("message_range", MESSAGE_RANGES), name="message_range"),
+    )
     bot_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("bots.id", ondelete="CASCADE"), primary_key=True
     )
@@ -56,6 +61,9 @@ class FeishuPersonalGrant(TimestampMixin, Base):
         ARRAY(Text), default=list, server_default="{}"
     )
     remote_revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # 消息范围（permissions.MESSAGE_RANGES）：申请权限时按它去掉另一类会话的补充读权限，
+    # 个人助理另由平台按它拦（chat_guard）。
+    message_range: Mapped[str] = mapped_column(Text, default="all", server_default="all")
     selection_chat_id: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 最近一次完成授权的时刻。飞书要求授权满 365 天重新授权，个人助理据此提前提醒。

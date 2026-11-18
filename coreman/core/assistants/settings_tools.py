@@ -1,5 +1,5 @@
 """助理设置的两个工具：所有者在私聊里说要改全天候、工作时段、时区、摘要时点、免打扰时段、
-重点群、忽略的会话时用。
+重点群、托管范围（不托管或只托管的会话）时用。
 
 登记在助理工具注册表的 `knowledge` 组（不调飞书，授权换代后照常可用），但只在所有者发起的
 轮次里受理：改设置等于改「看哪些群、什么时候看」，交回轮次、审批结果回合与子任务的输入可能
@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +27,7 @@ from coreman.core.timeutils import utcnow
 
 Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)]
 # 名单的上限由 settings.update 给出带数字的错误；这里只挡离谱的长度。
-ChatList = Annotated[list[Short], Field(max_length=200)]
+ChatList = Annotated[list[Short], Field(max_length=400)]
 
 
 class Get(Arguments):
@@ -63,8 +63,19 @@ class Update(Arguments):
     )
     ignored_chats: ChatList | None = Field(
         default=None,
-        description="The whole list of chat ids (oc_…) the owner does not want watched;"
+        description="The whole list of chat ids (oc_…) the owner does not want managed: never"
+        " read or written by you or the platform (used when chat_scope is all);"
         f" replaces the current list. At most {assistant_settings.MAX_IGNORED}",
+    )
+    managed_chats: ChatList | None = Field(
+        default=None,
+        description="The whole list of chat ids (oc_…) to manage when chat_scope is listed;"
+        f" replaces the current list. At most {assistant_settings.MAX_MANAGED}",
+    )
+    chat_scope: Literal["all", "listed"] | None = Field(
+        default=None,
+        description="all = manage every chat except ignored_chats (the default);"
+        " listed = manage only managed_chats",
     )
     digest_times: list[Short] | None = Field(
         default=None,
@@ -89,7 +100,7 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
         Get,
         "Read the owner's assistant settings: time zone, whether it works around the clock,"
         " working hours and days, digest times, quiet hours, focus chats, focus people,"
-        " ignored chats,"
+        " the chat scope with the unmanaged (ignored) and managed chats,"
         " whether the assistant is on shift now and any temporary switch.",
     ),
     "assistant_settings_update": (
