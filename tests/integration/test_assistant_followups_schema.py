@@ -93,3 +93,27 @@ async def test_seq_is_unique_within_one_assistant(db_session: AsyncSession) -> N
     with pytest.raises(IntegrityError):
         await db_session.flush()
     await db_session.rollback()
+
+
+async def test_handler_defaults_and_name_is_sealed(db_session: AsyncSession) -> None:
+    bot, owner = await seed_assistant(db_session)
+    await keys.ensure_key(db_session, sealed.master(), owner.id)
+    row = _row(bot.id, handler="person", handler_name_enc=f"李四 {SECRET}")
+    plain = _row(bot.id, seq=2)
+    db_session.add_all([row, plain])
+    await db_session.commit()
+    assert plain.handler == "assistant" and plain.handler_name_enc is None
+    assert plain.progress_at is not None
+    stored = str(
+        await raw(db_session, "SELECT handler_name_enc FROM assistant_followups WHERE id = :id", id=row.id)
+    )
+    assert SECRET not in stored and "李四" not in stored and stored.startswith("enc:v2:d1:")
+
+
+async def test_handler_must_be_known(db_session: AsyncSession) -> None:
+    bot, owner = await seed_assistant(db_session)
+    await keys.ensure_key(db_session, sealed.master(), owner.id)
+    db_session.add(_row(bot.id, handler="robot"))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
