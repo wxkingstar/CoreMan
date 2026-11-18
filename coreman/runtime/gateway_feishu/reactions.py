@@ -41,7 +41,8 @@ async def typing(transport: FeishuTransport, task_id: int, *, done: bool = False
             if delivery.reaction_done:
                 await transport.call("DELETE", f"{base}/{api_id(delivery.reaction_id)}")
                 delivery.reaction_id = None
-            elif not delivery.reaction_id:
+            elif not delivery.reaction_id and not transport._private:
+                # 个人助理不打「打字中」：所有者的会话里它只在要启动调查时打「处理中」。
                 result = await transport.call(
                     "POST", base, json={"reaction_type": {"emoji_type": "Typing"}}
                 )
