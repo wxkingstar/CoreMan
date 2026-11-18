@@ -266,6 +266,17 @@ describe('Infrastructure management', () => {
     expect(systems.saveGrants).toHaveBeenLastCalledWith('bot1', ['erp'], 4, [])
     wrapper.unmount()
   })
+  it('shows batch writes in their own tab, loaded only when opened', async () => {
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    expect(systemBatches.list).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('ERP')
+    await wrapper.findAll('.el-tabs__item').find(tab => tab.text() === i18n.global.t('systemBatches.title'))!.trigger('click')
+    await flushPromises()
+    expect(systemBatches.list).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain(i18n.global.t('systemBatches.hint'))
+    wrapper.unmount()
+  })
   it('switches a system to proxied token delivery', async () => {
     vi.mocked(systems.update).mockResolvedValue({ ...erp, token_delivery: 'proxy' })
     const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })

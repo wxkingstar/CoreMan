@@ -104,6 +104,8 @@ ENTITY_SELECTS = {
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
+    # 批量任务按发起人过滤：只用留明文的键 user_id
+    "coreman/api/routers/system_batches.py": 1,
     "coreman/core/assistants/delivery_checks.py": 1,  # 盯消息的游标：取值后 open_value
     # 摘要卡片置灰：只按下划线开头的明文键（消息编号、平台写的待跟进编号）过滤与取值
     "coreman/core/assistants/digest.py": 2,

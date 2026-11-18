@@ -295,9 +295,9 @@ async def test_system_batches_list_and_stop(cli, db_session):
     await db_session.commit()
     short = str(state.id)[:8]
 
-    # 普通成员看不到：和管理后台同一条权限判定
-    code, _, err = await cli("systems", "batches", "--as", "bob")
-    assert code == 1 and err.strip()
+    # 和这一批、这个员工都无关的成员看不到：和管理后台同一条权限判定
+    code, out, err = await cli("systems", "batches", "--as", "bob")
+    assert code == 0 and short not in out, err
     code, out, err = await cli("systems", "batches", "--as", "ops")
     assert code == 0, err
     for expected in (
