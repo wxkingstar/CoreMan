@@ -244,3 +244,22 @@ def test_gap_reminders_name_the_followups() -> None:
         and "缺口 G003（business_system orders）已经可以用了：F001、F004 可以继续" in text
     )
     assert "所有者不开这个权限" in text and "F002 这条路走不通" in text
+
+
+def test_gap_rejected_quotes_the_managers_note() -> None:
+    row = message(
+        "gap:3",
+        kind="reminder",
+        summary={
+            "reminder": "gap_rejected",
+            "gap": "G005",
+            "kind": "business_system",
+            "key": "orders",
+            "followups": ["F003"],
+            "note": "【1】先找业务负责人确认",
+        },
+    )
+    text = handover.render([row], ZONE)
+    assert "权限申请被拒绝" in text
+    assert "缺口 G005（business_system orders）的权限申请被平台管理员拒绝，F003 暂时办不成" in text
+    assert "> 〔1〕先找业务负责人确认" in text

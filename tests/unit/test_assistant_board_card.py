@@ -264,3 +264,32 @@ def test_batch_under_item_is_one_line_with_its_item_count() -> None:
     )
     text = json.dumps(card, ensure_ascii=False)
     assert text.count("待批：") == 1 and "共 2 项" in text
+
+
+def test_requested_gap_has_no_open_button() -> None:
+    """已申请、在等管理员的缺口：卡片上不再给「开通」，只留「不开」。"""
+    from coreman.core.assistants import gaps
+    from coreman.core.db.models import AssistantGap
+
+    waiting = AssistantGap(
+        seq=5, kind="business_system", key="orders", need_enc="查订单", status="requested"
+    )
+    fresh = AssistantGap(seq=6, kind="business_system", key="crm", need_enc="查客户", status="open")
+    groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    result = board.Board(
+        TODAY,
+        groups,
+        [],
+        0,
+        {},
+        None,
+        [board.Gap(waiting, "request", []), board.Gap(fresh, "request", [])],
+    )
+    card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
+    text = json.dumps(card, ensure_ascii=False)
+    assert (
+        gaps.hint(waiting, "request") == "已申请，等平台管理员处理"
+        and "已申请，等平台管理员处理" in text
+    )
+    assert "开通 G005" not in text and "不开 G005" in text
+    assert "开通 G006" in text and "不开 G006" in text

@@ -392,7 +392,9 @@ def _gap_buttons(entry: board.Gap, requester: str) -> dict[str, Any]:
     """能在私聊里当面办的给「开通」，都给「不开」。两个都是回复按钮：只有所有者点得动。"""
     seq = entry.row.seq
     row_id = f"gp{seq}"
-    specs = [("go", gaps.open_text(seq), "primary")] if entry.fix in gaps.CHAT_FIXES else []
+    specs = (
+        [("go", gaps.open_text(seq), "primary")] if gaps.offers_open(entry.row, entry.fix) else []
+    )
     specs.append(("gd", gaps.decline_text(seq), "default"))
     ids = [f"{prefix}{seq}" for prefix, _, _ in specs]
     return {

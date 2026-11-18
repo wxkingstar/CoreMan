@@ -39,16 +39,21 @@ KIND_TITLES = {
     "node_tool": "节点工具",
     "other": "其他",
 }
-FIXES = ("authorize", "credential", "grant_page", "admin", "node_admin", "none")
-# 在与助理的私聊里当面办得了的：卡片上给「开通」按钮。
-CHAT_FIXES = ("authorize", "credential")
+FIXES = ("authorize", "credential", "self_grant", "request", "admin", "node_admin", "none")
+# 在与助理的私聊里当面办得了的：卡片上给「开通」按钮（已申请、在等管理员的不给，见 `offers_open`）。
+CHAT_FIXES = ("authorize", "credential", "request")
+REQUESTED_HINT = "已申请，等平台管理员处理"
 _LABEL = re.compile(r"^[Gg]?(\d{1,9})$")
 _KEY = re.compile(r"^[a-z0-9][a-z0-9_.:/\-]{0,99}$")
 _CREDENTIAL = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _HINTS = {
     "authorize": "在与助理的私聊里点「开通 {label}」，再点授权卡片",
     "credential": "在与助理的私聊里点「开通 {label}」，在安全表单里填写（不经聊天）",
-    "grant_page": "你可以自己开：在「AI 员工」里这位助理的「系统权限」中勾选 {key}",
+    "self_grant": (
+        "你可以自己开：在「我的助理」页的这一条上点「开通」，"
+        "或在「AI 员工」里这位助理的「系统权限」中勾选 {key}"
+    ),
+    "request": "{key} 没有对这位助理开放：在「我的助理」页的这一条上点「申请」，由平台管理员审批",
     "admin": "需要平台管理员为这位助理开放{title} {key}",
     "node_admin": "需要节点管理员在运行节点上装好 {key}",
     "none": "助理会在备注里写明要怎么办",
@@ -143,10 +148,19 @@ async def stuck(session: AsyncSession, bot_id: uuid.UUID, gap_id: uuid.UUID) -> 
     )
 
 
-async def _tell(
-    session: AsyncSession, bot_id: uuid.UUID, row: AssistantGap, kind: str, *, level: str
+async def tell(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    row: AssistantGap,
+    kind: str,
+    *,
+    level: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
-    """被它卡住的事刷新进展，并入一条提醒交回助理；没有卡住的事就什么都不做。"""
+    """被它卡住的事刷新进展，并入一条提醒交回助理；没有卡住的事就什么都不做。
+
+    `extra` 合进提醒内容（例如拒绝理由），与平台写的几项同在一块里加密。
+    """
     seqs = await stuck(session, bot_id, row.id)
     if not seqs:
         return
@@ -167,6 +181,7 @@ async def _tell(
             "kind": row.kind,
             "key": row.key,
             "followups": [followups.label(seq) for seq in seqs],
+            **(extra or {}),
         },
     )
 
@@ -178,7 +193,7 @@ async def _resolve_rows(session: AsyncSession, bot_id: uuid.UUID, rows: list[Ass
         row.resolved_at = row.updated_at = now
     await session.flush()
     for row in rows:
-        await _tell(session, bot_id, row, "gap_resolved", level="immediate")
+        await tell(session, bot_id, row, "gap_resolved", level="immediate")
     log.info("assistant_gaps_resolved", bot_id=str(bot_id), gaps=len(rows))
 
 
@@ -345,7 +360,7 @@ async def decline(session: AsyncSession, bot_id: uuid.UUID, seq: int) -> Assista
     row.status = "declined"
     row.declined_at = row.updated_at = now
     await session.flush()
-    await _tell(session, bot_id, row, "gap_declined", level="batch")
+    await tell(session, bot_id, row, "gap_declined", level="batch")
     log.info("assistant_gap_declined", bot_id=str(bot_id), gap=label(row.seq))
     return row
 
@@ -369,8 +384,9 @@ async def listing(
 
 
 async def fix_for(session: AsyncSession, bot_id: uuid.UUID, row: AssistantGap) -> str:
-    """怎么开。业务系统：对这位助理开放的（白名单为空表示全开放）所有者自己就能在系统权限里勾选，
-    其余（没登记、停用、保留标识、白名单里没有它）要平台管理员。"""
+    """怎么开。业务系统：对这位助理开放的（白名单为空表示全开放）所有者自己就能开（self_grant）；
+    已启用但白名单里没有它的，所有者确认后申请、平台管理员审批（request）；没登记、停用、
+    保留标识的要平台管理员（admin）。"""
     if row.kind == "feishu_scope":
         return "authorize"
     if row.kind == "credential":
@@ -387,13 +403,20 @@ async def fix_for(session: AsyncSession, bot_id: uuid.UUID, row: AssistantGap) -
     if system is None or not system.enabled or system.key in RESERVED_SYSTEM_KEYS:
         return "admin"
     if system.allowed_bot_ids is None or bot_id in system.allowed_bot_ids:
-        return "grant_page"
-    return "admin"
+        return "self_grant"
+    return "request"
 
 
 def hint(row: AssistantGap, fix: str) -> str:
     """给所有者看的「怎么开」，一句话。"""
+    if row.status == "requested":
+        return REQUESTED_HINT
     return _HINTS[fix].format(label=label(row.seq), key=row.key, title=KIND_TITLES[row.kind])
+
+
+def offers_open(row: AssistantGap, fix: str) -> bool:
+    """卡片上给不给「开通」：私聊里当面办得了的给；已申请、在等管理员的不给。"""
+    return fix in CHAT_FIXES and row.status != "requested"
 
 
 def view(row: AssistantGap, fix: str, seqs: list[int]) -> dict[str, Any]:
@@ -442,9 +465,14 @@ OPEN_STEPS = {
         "  按个人凭证的规则向他索取 {key}（安全表单，不在聊天里要值）；他提交后平台自动把缺口记为"
         "已解决。"
     ),
-    "grant_page": (
-        "  这个业务系统他自己就能开：请他在「AI 员工」里这位助理的「系统权限」中勾选 {key}，"
-        "保存后平台自动把缺口记为已解决。"
+    "self_grant": (
+        "  这个业务系统他自己就能开：请他在「我的助理」页这一条上点「开通」，"
+        "开通后平台自动记为已解决。"
+    ),
+    "request": (
+        "  这个业务系统没有对你开放，要平台管理员批：和他一起写一句申请理由（会给管理员看，"
+        "写清要查什么、为什么），他当面同意后调用 gap_request 提交；"
+        "或请他在「我的助理」页点「申请」。"
     ),
     "admin": "  这一项只能由平台管理员开：告诉他找管理员开什么（{key}）、用来做什么。",
     "node_admin": "  这一项要节点管理员在运行节点上装好 {key}：告诉他找谁、装什么。",
@@ -489,6 +517,11 @@ async def open_note(session: AsyncSession, bot_id: uuid.UUID, text: str) -> str 
     name = label(row.seq)
     if row.status == "resolved":
         return f"- 所有者要开通缺口 {name}，它已经可以用了：告诉他不用再处理，接着办被它卡住的事。"
+    if row.status == "requested":
+        return (
+            f"- 所有者要开通缺口 {name}，它已经提交过权限申请，{REQUESTED_HINT}：告诉他不用再提交，"
+            "批下来后平台会自动续接被它卡住的事。"
+        )
     if row.status == "declined":
         row.status, row.declined_at, row.updated_at = "open", None, utcnow()
         await session.flush()

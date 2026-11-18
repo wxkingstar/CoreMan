@@ -160,7 +160,7 @@ async def test_fix_for_business_system_follows_the_allowlist(db_session: AsyncSe
             db_session, bot.id, kind="business_system", key=key, need="x", followup_seqs=[]
         )
         fixes[key] = await gaps.fix_for(db_session, bot.id, row)
-    assert fixes == {"open_sys": "grant_page", "closed_sys": "admin", "missing_sys": "admin"}
+    assert fixes == {"open_sys": "self_grant", "closed_sys": "request", "missing_sys": "admin"}
 
 
 async def test_resolve_needs_a_higher_rank_than_at_report_time(db_session: AsyncSession) -> None:
