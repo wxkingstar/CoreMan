@@ -14,9 +14,12 @@ from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import gaps
+from coreman.core.assistants.records import is_assistant
+from coreman.core.auth.token_providers import RESERVED_SYSTEM_KEYS
 from coreman.core.bots.permissions import MANAGER_ROLES
 from coreman.core.bus import outbox
 from coreman.core.db.models import (
@@ -34,6 +37,8 @@ from coreman.core.timeutils import utcnow
 log = get_logger(__name__)
 MAX_REASON = 300
 MAX_NOTE = 300
+STALE_BOT = "批准时这位助理已停用或不在了，申请自动撤回"
+STALE_GAP = "批准时这个缺口已不在等待申请（所有者不开了或已解决），申请自动撤回"
 
 
 class RequestError(Exception):
@@ -114,6 +119,7 @@ async def open_request(
         GapError: gap_not_found
     """
     text = _text(reason, MAX_REASON)
+    await gaps._lock(session, bot.id)
     gap = await gaps.get(session, bot.id, gap_seq, lock=True)
     if gap.kind != "business_system":
         raise RequestError("not_business_system")
@@ -146,12 +152,32 @@ async def open_request(
         requested_by=actor.id,
         created_at=now,
     )
-    session.add(row)
+    try:
+        # 部分唯一索引兜底：查重之后别处抢先建了一张在途的，只回滚这一小段。
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        raise RequestError("already_pending") from None
     gap.status, gap.updated_at = "requested", now
     await session.flush()
     sent = await _notify(session, bot, row, system, actor)
     log.info("system_access_requested", bot_id=str(bot.id), request_id=str(row.id), notified=sent)
     return row
+
+
+# 加锁顺序（与 gaps.py 一致，处处相同）：这位助理的缺口咨询锁 → 申请行 → 缺口行 → 系统行。
+
+
+async def _locked(session: AsyncSession, request_id: uuid.UUID) -> SystemAccessRequest:
+    """先不加锁读出属于哪位助理，拿这位助理的咨询锁，再锁申请行并确认还在途。"""
+    bot_id = await session.scalar(
+        select(SystemAccessRequest.bot_id).where(SystemAccessRequest.id == request_id)
+    )
+    if bot_id is None:
+        raise RequestError("request_not_found")
+    await gaps._lock(session, bot_id)
+    return await _pending(session, request_id)
 
 
 async def _pending(session: AsyncSession, request_id: uuid.UUID) -> SystemAccessRequest:
@@ -165,14 +191,19 @@ async def _pending(session: AsyncSession, request_id: uuid.UUID) -> SystemAccess
     return row
 
 
-async def _reopen(session: AsyncSession, row: SystemAccessRequest) -> AssistantGap | None:
-    """缺口还在「已申请」就回到 open；返回缺口（已经删了时为 None）。"""
+async def _gap(session: AsyncSession, row: SystemAccessRequest) -> AssistantGap | None:
+    """申请挂的缺口，加锁并读最新（缺口删了时为 None）。"""
     if row.gap_id is None:
         return None
-    gap = await session.get(AssistantGap, row.gap_id, with_for_update=True)
-    if gap is not None and gap.status == "requested":
-        gap.status, gap.updated_at = "open", utcnow()
-    return gap
+    return await session.get(AssistantGap, row.gap_id, with_for_update=True, populate_existing=True)
+
+
+def _reopen(gap: AssistantGap | None) -> bool:
+    """缺口还在「已申请」就回到 open；返回是否改了。"""
+    if gap is None or gap.status != "requested":
+        return False
+    gap.status, gap.updated_at = "open", utcnow()
+    return True
 
 
 async def withdraw(session: AsyncSession, bot_id: uuid.UUID, gap_seq: int) -> SystemAccessRequest:
@@ -182,7 +213,8 @@ async def withdraw(session: AsyncSession, bot_id: uuid.UUID, gap_seq: int) -> Sy
         GapError: gap_not_found（不是这位助理的缺口）
         RequestError: request_not_found（这个缺口上没有在途的申请，含非业务系统的缺口）
     """
-    gap = await gaps.get(session, bot_id, gap_seq, lock=True)
+    await gaps._lock(session, bot_id)
+    gap = await gaps.get(session, bot_id, gap_seq)
     found = await session.scalar(
         select(SystemAccessRequest.id).where(
             SystemAccessRequest.bot_id == bot_id,
@@ -194,7 +226,7 @@ async def withdraw(session: AsyncSession, bot_id: uuid.UUID, gap_seq: int) -> Sy
         raise RequestError("request_not_found")
     row = await _pending(session, found)
     row.status, row.decided_at = "withdrawn", utcnow()
-    await _reopen(session, row)
+    _reopen(await _gap(session, row))
     await session.flush()
     log.info("system_access_withdrawn", bot_id=str(bot_id), request_id=str(row.id))
     return row
@@ -205,16 +237,19 @@ async def reject(
 ) -> SystemAccessRequest:
     """拒绝：缺口回到 open，被它卡住的事交回助理（带上拒绝理由）。调用方校验 `actor` 能审批。
 
+    缺口已经不在「已申请」（所有者不开了、已经解决）时只记拒绝，不再交回提醒。
+
     Raises:
         RequestError: invalid_reason / request_not_found / request_decided
     """
     text = _text(note, MAX_NOTE)
-    row = await _pending(session, request_id)
+    row = await _locked(session, request_id)
     row.status, row.decided_by, row.decided_at = "rejected", actor.id, utcnow()
     row.decision_note = text
-    gap = await _reopen(session, row)
+    gap = await _gap(session, row)
+    reopened = _reopen(gap)
     await session.flush()
-    if gap is not None:
+    if reopened and gap is not None:
         await gaps.tell(
             session, row.bot_id, gap, "gap_rejected", level="batch", extra={"note": text}
         )
@@ -225,17 +260,39 @@ async def reject(
 async def mark_approved(
     session: AsyncSession, request_id: uuid.UUID, *, actor: User
 ) -> tuple[SystemAccessRequest, BusinessSystem, bool]:
-    """批准：把助理加进系统白名单（版本号随之加 1），不写授权（由 API 层 `apply_grants` 写）。
+    """批准：把助理加进系统白名单（版本号随之加 1），不写授权（由 API 层 `apply_grants` 写，
+    写完再调 `settle_approved`）。
 
     第三项：这一次是否把助理加进了白名单（原本不含它）。调用方据此记 `system.update` 审计。
     调用方校验 `actor` 能审批。
 
+    批准时重新核对：助理还在（启用中的个人助理），挂的缺口（如果有）还在「已申请」。不再成立时
+    这张申请记为撤回（`decided_by` 是这位管理员，备注写明原因）、不动白名单，并抛
+    `request_stale`——这时行已经 flush，调用方要提交后再把错误告诉管理员。
+
     Raises:
-        RequestError: request_not_found / request_decided / system_not_requestable
+        RequestError: request_not_found / request_decided / request_stale / system_not_requestable
     """
-    row = await _pending(session, request_id)
-    system = await session.get(BusinessSystem, row.system_key, with_for_update=True)
-    if system is None or not system.enabled:
+    row = await _locked(session, request_id)
+    gap = await _gap(session, row)
+    bot = await session.get(Bot, row.bot_id)
+    if bot is None or not bot.enabled or not is_assistant(bot):
+        stale = STALE_BOT
+    elif row.gap_id is not None and (gap is None or gap.status != "requested"):
+        stale = STALE_GAP
+    else:
+        stale = None
+    if stale is not None:
+        row.status, row.decided_by, row.decided_at = "withdrawn", actor.id, utcnow()
+        row.decision_note = stale
+        _reopen(gap)
+        await session.flush()
+        log.info("system_access_stale", bot_id=str(row.bot_id), request_id=str(row.id))
+        raise RequestError("request_stale")
+    system = await session.get(
+        BusinessSystem, row.system_key, with_for_update=True, populate_existing=True
+    )
+    if system is None or not system.enabled or system.key in RESERVED_SYSTEM_KEYS:
         raise RequestError("system_not_requestable")
     added = system.allowed_bot_ids is not None and row.bot_id not in system.allowed_bot_ids
     if added:
@@ -244,6 +301,20 @@ async def mark_approved(
     await session.flush()
     log.info("system_access_approved", bot_id=str(row.bot_id), request_id=str(row.id), added=added)
     return row, system, added
+
+
+async def settle_approved(session: AsyncSession, row: SystemAccessRequest) -> bool:
+    """批准并写完授权（`apply_grants` 按级别解决缺口）之后调：缺口还在「已申请」说明批下来的
+    级别仍不够它（例如报的是要写、批的是只读），把它放回 open 并交回助理，让它自己再核对或
+    重新登记。返回是否放回了。"""
+    await gaps._lock(session, row.bot_id)
+    gap = await _gap(session, row)
+    if not _reopen(gap) or gap is None:
+        return False
+    await session.flush()
+    await gaps.tell(session, row.bot_id, gap, "gap_approved_short", level="batch")
+    log.info("system_access_approved_short", bot_id=str(row.bot_id), request_id=str(row.id))
+    return True
 
 
 async def latest_for(
@@ -256,7 +327,7 @@ async def latest_for(
     rows = await session.scalars(
         select(SystemAccessRequest)
         .where(SystemAccessRequest.gap_id.in_(wanted))
-        .order_by(SystemAccessRequest.created_at)
+        .order_by(SystemAccessRequest.created_at, SystemAccessRequest.id)
     )
     return {row.gap_id: row for row in rows if row.gap_id is not None}
 

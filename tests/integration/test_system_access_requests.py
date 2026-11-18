@@ -211,3 +211,124 @@ async def test_open_note_for_a_requested_gap_has_no_steps(db_session: AsyncSessi
     note = await gaps.open_note(db_session, bot.id, "开通 G001")
     assert note is not None and "等平台管理员处理" in note
     assert "gap_request" not in note and "「申请」" not in note
+
+
+async def test_withdraw_then_decide_returns_clean_codes(db_session: AsyncSession) -> None:
+    """撤回与审批先后落在同一张申请上：后到的一方拿到清楚的错误码，不改状态。"""
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    await db_session.commit()
+    row_id = row.id
+    await ar.withdraw(db_session, bot.id, 1)
+    await db_session.commit()
+    for decide in (
+        ar.reject(db_session, row_id, actor=manager, note="不批"),
+        ar.mark_approved(db_session, row_id, actor=manager),
+    ):
+        with pytest.raises(ar.RequestError) as caught:
+            await decide
+        assert caught.value.code == "request_decided"
+    system = await db_session.get(BusinessSystem, "orders")
+    assert system is not None and system.allowed_bot_ids == []
+    assert await _reminders(db_session, bot.id) == []
+
+
+async def test_reject_then_withdraw(db_session: AsyncSession) -> None:
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    await db_session.commit()
+    await ar.reject(db_session, row.id, actor=manager, note="不批")
+    await db_session.commit()
+    with pytest.raises(ar.RequestError) as caught:
+        await ar.withdraw(db_session, bot.id, 1)
+    assert caught.value.code == "request_not_found"
+
+
+async def test_approving_for_a_disabled_bot_is_stale(db_session: AsyncSession) -> None:
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    bot.enabled = False
+    await db_session.commit()
+    row_id = row.id
+    with pytest.raises(ar.RequestError) as caught:
+        await ar.mark_approved(db_session, row_id, actor=manager)
+    assert caught.value.code == "request_stale"
+    await db_session.commit()
+    done = await db_session.get(ar.SystemAccessRequest, row_id, populate_existing=True)
+    assert done is not None and done.status == "withdrawn"
+    assert done.decided_by == manager.id and done.decision_note == ar.STALE_BOT
+    system = await db_session.get(BusinessSystem, "orders")
+    assert system is not None and system.allowed_bot_ids == []
+
+
+async def test_approving_when_the_gap_moved_on_is_stale(db_session: AsyncSession) -> None:
+    """缺口已经不在「已申请」（这里直接改状态模拟）：批准不动白名单，申请记撤回。"""
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    gap = await gaps.get(db_session, bot.id, 1)
+    gap.status = "resolved"
+    await db_session.commit()
+    row_id = row.id
+    with pytest.raises(ar.RequestError) as caught:
+        await ar.mark_approved(db_session, row_id, actor=manager)
+    assert caught.value.code == "request_stale"
+    await db_session.commit()
+    done = await db_session.get(ar.SystemAccessRequest, row_id, populate_existing=True)
+    assert done is not None and done.status == "withdrawn" and done.decision_note == ar.STALE_GAP
+    system = await db_session.get(BusinessSystem, "orders")
+    assert system is not None and system.allowed_bot_ids == []
+
+
+async def test_declining_a_requested_gap_withdraws_the_request(db_session: AsyncSession) -> None:
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    await db_session.commit()
+    row_id = row.id
+    await gaps.decline(db_session, bot.id, 1)
+    await db_session.commit()
+    done = await db_session.get(ar.SystemAccessRequest, row_id, populate_existing=True)
+    assert done is not None and done.status == "withdrawn" and done.decided_by is None
+    assert (await gaps.get(db_session, bot.id, 1)).status == "declined"
+    with pytest.raises(ar.RequestError) as caught:
+        await ar.mark_approved(db_session, row_id, actor=manager)
+    assert caught.value.code == "request_decided"
+    assert [t["reminder"] for t in await _reminders(db_session, bot.id)] == ["gap_declined"]
+
+
+async def test_rejecting_when_the_gap_moved_on_sends_no_reminder(db_session: AsyncSession) -> None:
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    gap = await gaps.get(db_session, bot.id, 1)
+    gap.status = "resolved"
+    await db_session.commit()
+    done = await ar.reject(db_session, row.id, actor=manager, note="不批")
+    await db_session.commit()
+    assert done.status == "rejected"
+    assert (await gaps.get(db_session, bot.id, 1)).status == "resolved"
+    assert await _reminders(db_session, bot.id) == []
+
+
+async def test_approved_but_still_short_reopens_and_tells(db_session: AsyncSession) -> None:
+    """批了、写完授权，级别仍不够缺口（没被解决）：缺口放回 open，交回一条提醒。"""
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=True, reason="改订单", actor=owner)
+    await db_session.commit()
+    done, _, _ = await ar.mark_approved(db_session, row.id, actor=manager)
+    assert await ar.settle_approved(db_session, done)
+    await db_session.commit()
+    assert (await gaps.get(db_session, bot.id, 1)).status == "open"
+    told = await _reminders(db_session, bot.id)
+    assert [t["reminder"] for t in told] == ["gap_approved_short"]
+    assert told[0]["followups"] == ["F001"]
+
+
+async def test_approved_and_resolved_settles_quietly(db_session: AsyncSession) -> None:
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    await db_session.commit()
+    done, _, _ = await ar.mark_approved(db_session, row.id, actor=manager)
+    await gaps.resolve(db_session, bot.id, "business_system", {"orders": 1})
+    assert not await ar.settle_approved(db_session, done)
+    await db_session.commit()
+    assert (await gaps.get(db_session, bot.id, 1)).status == "resolved"
+    assert [t["reminder"] for t in await _reminders(db_session, bot.id)] == ["gap_resolved"]

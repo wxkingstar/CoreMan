@@ -263,3 +263,20 @@ def test_gap_rejected_quotes_the_managers_note() -> None:
     assert "权限申请被拒绝" in text
     assert "缺口 G005（business_system orders）的权限申请被平台管理员拒绝，F003 暂时办不成" in text
     assert "> 〔1〕先找业务负责人确认" in text
+
+
+def test_gap_approved_short_asks_to_recheck() -> None:
+    row = message(
+        "gap:4",
+        kind="reminder",
+        summary={
+            "reminder": "gap_approved_short",
+            "gap": "G006",
+            "kind": "business_system",
+            "key": "orders",
+            "followups": ["F002"],
+        },
+    )
+    text = handover.render([row], ZONE)
+    assert "权限申请批了，但还不够用" in text
+    assert "缺口 G006（business_system orders）的权限申请批准了" in text and "F002" in text

@@ -20,7 +20,13 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import followups, quoting, sealed
-from coreman.core.db.models import GAP_KINDS, AssistantFollowup, AssistantGap, BusinessSystem
+from coreman.core.db.models import (
+    GAP_KINDS,
+    AssistantFollowup,
+    AssistantGap,
+    BusinessSystem,
+    SystemAccessRequest,
+)
 from coreman.core.logging import get_logger
 from coreman.core.timeutils import utcnow
 
@@ -347,16 +353,33 @@ async def resolve_quietly(
 async def decline(session: AsyncSession, bot_id: uuid.UUID, seq: int) -> AssistantGap:
     """所有者明确不开：不再进总表，被卡住的事回到原来的阶段，助理得知这条路走不通。
 
+    已经提交了权限申请（「已申请」）的，在途的申请随之撤回，不用等管理员。加锁顺序与
+    `access_requests` 相同：咨询锁 → 申请行 → 缺口行。
+
     Raises:
         GapError: gap_not_found / gap_resolved
     """
     await _lock(session, bot_id)
+    found = await get(session, bot_id, seq)
+    pending = list(
+        await session.scalars(
+            select(SystemAccessRequest)
+            .where(
+                SystemAccessRequest.gap_id == found.id,
+                SystemAccessRequest.status == "pending",
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
     row = await get(session, bot_id, seq, lock=True)
     if row.status == "declined":
         return row
     if row.status == "resolved":
         raise GapError("gap_resolved")
     now = utcnow()
+    for request in pending:
+        request.status, request.decided_at = "withdrawn", now
     row.status = "declined"
     row.declined_at = row.updated_at = now
     await session.flush()
