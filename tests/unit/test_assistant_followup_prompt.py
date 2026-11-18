@@ -15,6 +15,8 @@ def test_rules_name_the_tools_categories_and_limits() -> None:
         assert word in text
     for word in ("review_on", "due_on", "today", "outcome=dropped"):
         assert word in text
+    for word in ("handler", "先查", "下一步", "建议：", "待批单"):
+        assert word in text
     assert f"最多 {followups.MAX_OPEN} 条" in text
 
 

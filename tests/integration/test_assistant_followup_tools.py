@@ -198,3 +198,34 @@ async def test_a_destroyed_key_is_reported_not_swallowed(db_session: AsyncSessio
     assert [(item["id"], item["title"], item["locked"]) for item in listed["items"]] == [
         ("F001", "", True)
     ]
+
+
+async def test_progress_tool_appends_and_reports_today(db_session: AsyncSession) -> None:
+    _, _, scope = await assistant_turn(db_session)
+    added = await call(db_session, scope, "followup_add", category="promised", title="报价")
+    label = added["followup"]["id"]
+    out = await call(db_session, scope, "followup_progress", id=label, note="已问过王五")
+    assert out["followup"]["notes"].endswith("] 已问过王五") and "today" in out
+    bad = await call(db_session, scope, "followup_progress", id=label, note="长" * 400)
+    assert bad["error"] == "invalid_tool_or_arguments"
+
+
+async def test_handler_arguments_reach_the_core(db_session: AsyncSession) -> None:
+    _, _, scope = await assistant_turn(db_session)
+    added = await call(
+        db_session,
+        scope,
+        "followup_add",
+        category="waiting",
+        title="等报价",
+        handler="person",
+        handler_name="李四",
+    )
+    label = added["followup"]["id"]
+    assert added["followup"]["handler"] == "person"
+    missing = await call(db_session, scope, "followup_update", id=label, handler="job")
+    assert missing["error"] == "job_not_found" and "hint" in missing
+    bad = await call(db_session, scope, "followup_update", id=label, handler="job", job="x")
+    assert bad["error"] == "job_not_found"
+    nameless = await call(db_session, scope, "followup_update", id=label, handler="person")
+    assert nameless["error"] == "invalid_handler_name" and "hint" in nameless

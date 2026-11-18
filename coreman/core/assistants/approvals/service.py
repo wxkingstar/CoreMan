@@ -1575,7 +1575,8 @@ async def sweep_files(session: AsyncSession, store: attachments.Store | None) ->
 async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
     """scheduler 每轮调用：过期、清理附件、收口执行中断的单。没配审批系统时都不会有数据。
 
-    「有 N 张待批」不再单独私信所有者：在途的单列在助理摘要的「等你批的」里（`digest.py`）。"""
+    「有 N 张待批」不再单独私信所有者：在途的单列在助理摘要与看板卡片「等你」一节的
+    「待批的写操作」里（`digest.py`）。"""
     from coreman.core.assistants.approvals import execute  # execute 依赖本模块，延迟导入
 
     settings = get_settings()

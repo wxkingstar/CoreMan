@@ -5,11 +5,11 @@ import type { Component } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { attention: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
+  myAssistant: { board: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
 }))
 
-import { myAssistant, type AssistantJob, type Attention, type SettledApproval } from '@/api/myAssistant'
-import AssistantAttention from '@/components/assistant/AssistantAttention.vue'
+import { myAssistant, type AssistantJob, type Board, type BoardItem, type SettledApproval } from '@/api/myAssistant'
+import AssistantBoard from '@/components/assistant/AssistantBoard.vue'
 import AssistantJobs from '@/components/assistant/AssistantJobs.vue'
 import AssistantRecent from '@/components/assistant/AssistantRecent.vue'
 import { i18n } from '@/i18n'
@@ -19,14 +19,25 @@ const job = (over: Partial<AssistantJob>): AssistantJob => ({
   id: 'j1', kind: 'subtask', status: 'queued', title: '退货原因', rounds: 1, created_at: '2026-11-13T01:00:00Z',
   finished_at: null, has_result: false, brief: '查一下上季度的退货原因', result: null, blocked_reason: null, ...over,
 })
-const attention: Attention = {
-  today: '2026-11-13',
+const item = (over: Partial<BoardItem>): BoardItem => ({
+  id: 'F001', category: 'decide', status: 'open', title: '选供应商', review_on: null, due_on: null,
+  origin_message_id: null, created_at: '2026-11-13T00:00:00Z', needs_owner: false, has_notes: true,
+  handler: 'assistant', handler_name: null, job_id: null, progress_at: '2026-11-13T00:00:00Z',
+  stage: 'owner', stalled: false, idle_days: 0, suggestion: '选 A', job: null, ...over,
+})
+const boardData: Board = {
+  today: '2026-11-18',
+  counts: { owner: 1, stalled: 1, working: 0, others: 0, scheduled: 0 },
   approvals: [
     { id: 'a1', tool: 'feishu_im_send_message', summary: '私聊 → 李四', created_at: '2026-11-13T01:00:00Z', link: 'https://tower.example.com' },
     { id: 'a2', tool: 'feishu_doc_update', summary: null, created_at: '2026-11-13T02:00:00Z', link: null },
   ],
-  jobs: [job({ id: 'j9', status: 'blocked', title: '合同条款', blocked_reason: '需要你确认范围' })],
-  followups: [{ id: 'F003', category: 'remind', status: 'open', title: '续约', review_on: null, due_on: '2026-11-13', origin_message_id: null, created_at: '2026-11-01T00:00:00Z' }],
+  approvals_total: 2,
+  groups: {
+    owner: [item({})],
+    stalled: [item({ id: 'F002', category: 'waiting', stage: 'others', stalled: true, idle_days: 6, handler: 'person', handler_name: '赵六', suggestion: null })],
+    working: [], others: [], scheduled: [],
+  },
 }
 const settled = (over: Partial<SettledApproval>): SettledApproval => ({
   id: 's1', tool: 'feishu_im_send_message', channel: 'p2p', status: 'executed', summary: '私聊 → 李四', reason: null, error: null,
@@ -36,15 +47,15 @@ const render = (component: Component) => mount(component, { global: { plugins: [
 
 beforeEach(() => {
   vi.restoreAllMocks()
-  vi.mocked(myAssistant.attention).mockReset().mockResolvedValue(attention)
+  vi.mocked(myAssistant.board).mockReset().mockResolvedValue(boardData)
   vi.mocked(myAssistant.jobs).mockReset().mockResolvedValue({ active: [job({})], recent: [job({ id: 'j2', status: 'done', title: '已完成的调查', result: '结论在此', finished_at: '2026-11-12T03:00:00Z', has_result: true })] })
   vi.mocked(myAssistant.cancelJob).mockReset().mockResolvedValue({ id: 'j1', status: 'cancelled' })
   vi.mocked(myAssistant.recentApprovals).mockReset().mockResolvedValue({ items: [settled({}), settled({ id: 's2', status: 'rejected', reason: '语气太硬' }), settled({ id: 's3', status: 'withdrawn', summary: null, locked: true })] })
 })
 
-describe('needs you', () => {
-  it('shows pending approvals with a safe link, blocked sub-tasks and due follow-ups', async () => {
-    const wrapper = render(AssistantAttention); await flushPromises()
+describe('board', () => {
+  it('lists approvals with a safe link and decisions under 等你, stalled items with who and how long', async () => {
+    const wrapper = render(AssistantBoard); await flushPromises()
     const first = wrapper.get('[data-test="approval-a1"]')
     expect(first.text()).toContain('私聊 → 李四')
     const link = first.get('a')
@@ -55,19 +66,64 @@ describe('needs you', () => {
     expect(second.find('a').exists()).toBe(false)
     expect(second.text()).toContain(t('assistant.attention.noLink'))
     expect(second.text()).toContain(t('assistant.page.lockedText'))
-    expect(wrapper.text()).toContain('合同条款')
-    expect(wrapper.text()).toContain('需要你确认范围')
-    expect(wrapper.text()).toContain('F003')
-    expect(wrapper.text()).toContain('续约')
+    expect(wrapper.get('[data-test="board-F001"]').text()).toContain('建议：选 A')
+    const stalled = wrapper.get('[data-test="board-F002"]').text()
+    expect(stalled).toContain('赵六 在办')
+    expect(stalled).toContain('6 个工作日没有进展')
+    expect(stalled).toContain('等别人')
+    expect(wrapper.text()).toContain('没有在推进的事。')
+    wrapper.unmount()
+  })
+
+  it('shows why a linked sub-task is blocked', async () => {
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      groups: { ...boardData.groups, owner: [item({ job: job({ id: 'j9', status: 'blocked', title: '合同条款', blocked_reason: '需要你确认范围' }) })] },
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="board-F001"]').text()).toContain('需要你确认范围')
+    wrapper.unmount()
+  })
+
+  it('says who is on it the same way the card does', async () => {
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      groups: {
+        ...boardData.groups,
+        working: [
+          item({ id: 'F003', stage: 'working', handler: 'job', job: job({ kind: 'bot_help' }) }),
+          item({ id: 'F004', stage: 'working', handler: 'job', job: job({ id: 'j5' }) }),
+          item({ id: 'F005', stage: 'working', handler: 'job', job: null }),
+        ],
+        others: [item({ id: 'F006', stage: 'others', handler: 'person', handler_name: null, locked: true })],
+      },
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="board-F003"]').text()).toContain(t('assistant.board.handler.botHelp'))
+    expect(wrapper.get('[data-test="board-F004"]').text()).toContain(t('assistant.board.handler.job'))
+    expect(wrapper.get('[data-test="board-F005"]').text()).toContain(t('assistant.board.handler.assistant'))
+    expect(wrapper.get('[data-test="board-F006"]').text()).toContain(t('assistant.board.handler.colleague'))
+    wrapper.unmount()
+  })
+
+  it('shows a batched request once with its item count and how many more are not listed', async () => {
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      approvals: [{ ...boardData.approvals[0], items: 3 }],
+      approvals_total: 12,
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="approval-a1"]').text()).toContain(t('assistant.board.batchItems', { n: 3 }))
+    expect(wrapper.get('[data-test="approvals-more"]').text()).toBe(t('assistant.board.moreApprovals', { n: 11 }))
     wrapper.unmount()
   })
 
   it('marks a dispatch that is waiting for approval', async () => {
-    vi.mocked(myAssistant.attention).mockResolvedValue({
-      ...attention,
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
       approvals: [{ id: 'a3', tool: 'assistant_ask_bot', summary: '调度员工 → demo-bot', created_at: '2026-11-13T03:00:00Z', link: null }],
     })
-    const wrapper = render(AssistantAttention); await flushPromises()
+    const wrapper = render(AssistantBoard); await flushPromises()
     const row = wrapper.get('[data-test="approval-a3"]')
     expect(row.text()).toContain(t('assistant.attention.dispatch'))
     expect(row.text()).toContain('调度员工 → demo-bot')
@@ -75,14 +131,14 @@ describe('needs you', () => {
   })
 
   it('labels writes staged while the owner was away with the system and operation', async () => {
-    vi.mocked(myAssistant.attention).mockResolvedValue({
-      ...attention,
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
       approvals: [
         { id: 'a4', tool: 'systems_call', summary: '业务系统 · 库存 · 创建草稿', created_at: '2026-11-13T03:00:00Z', link: null },
         { id: 'a5', tool: 'cloud_call', summary: '云服务 · slb · AddAccessControlListEntry', created_at: '2026-11-13T03:00:00Z', link: null },
       ],
     })
-    const wrapper = render(AssistantAttention); await flushPromises()
+    const wrapper = render(AssistantBoard); await flushPromises()
     const system = wrapper.get('[data-test="approval-a4"]')
     expect(system.text()).toContain(t('assistant.attention.systemsCall'))
     expect(system.text()).toContain('业务系统 · 库存 · 创建草稿')
@@ -94,15 +150,21 @@ describe('needs you', () => {
   })
 
   it('says so when nothing is waiting', async () => {
-    vi.mocked(myAssistant.attention).mockResolvedValue({ today: '2026-11-13', approvals: [], jobs: [], followups: [] })
-    const wrapper = render(AssistantAttention); await flushPromises()
-    for (const key of ['approvalsEmpty', 'jobsEmpty', 'followupsEmpty']) expect(wrapper.text()).toContain(t(`assistant.attention.${key}`))
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      today: '2026-11-18',
+      counts: { owner: 0, stalled: 0, working: 0, others: 0, scheduled: 0 },
+      approvals: [],
+      approvals_total: 0,
+      groups: { owner: [], stalled: [], working: [], others: [], scheduled: [] },
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    for (const g of ['owner', 'stalled', 'working', 'others', 'scheduled']) expect(wrapper.text()).toContain(t(`assistant.board.empty.${g}`))
     wrapper.unmount()
   })
 
   it('shows the error and retries', async () => {
-    vi.mocked(myAssistant.attention).mockRejectedValueOnce(new Error('加载不了'))
-    const wrapper = render(AssistantAttention); await flushPromises()
+    vi.mocked(myAssistant.board).mockRejectedValueOnce(new Error('加载不了'))
+    const wrapper = render(AssistantBoard); await flushPromises()
     expect(wrapper.text()).toContain('加载不了')
     await (wrapper.vm as unknown as { load: () => Promise<void> }).load(); await flushPromises()
     expect(wrapper.text()).toContain('私聊 → 李四')

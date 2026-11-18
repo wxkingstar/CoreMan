@@ -68,7 +68,11 @@ def test_every_content_column_is_registered() -> None:
     assert set(sealed.COLUMNS[AssistantTranscript]) == {"blob_enc"}
     assert set(sealed.COLUMNS[AssistantWatch]) == {"head_enc", "cursor_enc"}
     assert set(sealed.COLUMNS[AssistantInbox]) == {"summary_enc"}
-    assert set(sealed.COLUMNS[AssistantFollowup]) == {"title_enc", "notes_enc"}
+    assert set(sealed.COLUMNS[AssistantFollowup]) == {
+        "title_enc",
+        "notes_enc",
+        "handler_name_enc",
+    }
     assert set(sealed.COLUMNS[AssistantJob]) == {
         "title_enc",
         "brief_enc",

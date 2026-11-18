@@ -448,6 +448,8 @@ class AssistantPage(Base):
 FOLLOWUP_CATEGORIES = ("decide", "promised", "waiting", "remind")
 FOLLOWUP_STATUSES = ("open", "snoozed", "done", "dropped")
 FOLLOWUP_CLOSE_CODES = ("origin_recalled",)
+# 谁在办：助理自己、子任务（含调度公共员工，指向 job_id）、某位同事、所有者自己。
+FOLLOWUP_HANDLERS = ("assistant", "job", "person", "owner")
 JOB_KINDS = ("subtask", "bot_help")
 JOB_ORIGINS = ("assistant", "system")
 JOB_STATUSES = ("queued", "running", "done", "failed", "cancelled", "blocked")
@@ -460,12 +462,14 @@ class AssistantFollowup(Base):
     分类、状态、两个日期、编号是明文，按日期查询不解密。`seq` 在一位助理内递增，显示为 F012。
     `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 只在平台自动关闭时有值。
     `job_id` 指向引出这一条的子任务（`assistant_jobs`），子任务行删掉时置空。
+    `handler_name_enc` 同样登记在 `sealed.COLUMNS`。
     """
 
     __tablename__ = "assistant_followups"
     __table_args__ = (
         CheckConstraint(enum_check("category", FOLLOWUP_CATEGORIES), name="category"),
         CheckConstraint(enum_check("status", FOLLOWUP_STATUSES), name="status"),
+        CheckConstraint(enum_check("handler", FOLLOWUP_HANDLERS), name="handler"),
         CheckConstraint(
             f"close_code IS NULL OR {enum_check('close_code', FOLLOWUP_CLOSE_CODES)}",
             name="close_code",
@@ -487,6 +491,11 @@ class AssistantFollowup(Base):
     # 要所有者在场才办得了（个人凭证、授权、置顶页、无人在场时被拒的写操作……）：摘要里
     # 逐条列出，带「现在处理」按钮。
     needs_owner: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    handler: Mapped[str] = mapped_column(Text, server_default=text("'assistant'"))
+    # handler = person 时的同事称呼；封存方式同标题。
+    handler_name_enc: Mapped[str | None] = mapped_column(Text)
+    # 最近一次进展：新建、改动、followup_progress 时刷新；总表据此判断停滞。
+    progress_at: Mapped[datetime] = _ts(server_default=text("now()"))
     title_enc: Mapped[str] = mapped_column(Text)
     notes_enc: Mapped[str | None] = mapped_column(Text)
     close_code: Mapped[str | None] = mapped_column(Text)

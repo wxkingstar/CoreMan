@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from coreman.core.assistants import digest, sealed, sent
+from coreman.core.assistants import board, digest, sealed, sent
 from coreman.core.assistants.approvals import batch, execute, richtext, service, tower
 from coreman.core.assistants.kinds import APPROVAL_EXECUTE_KIND, APPROVAL_RESULT_KIND
 from coreman.core.bus import tasks
@@ -754,7 +754,7 @@ async def test_unattended_writes_go_out_as_one_approval_listing_every_item(
     assert await service.pending_count(db_session, rows[0].bot_id) == 1
     assert feishu.writes == []
     # 摘要里一张单一行，注明共几项。
-    shown, total, _, sizes = await digest._pending_approvals(db_session, rows[0].bot_id)
+    shown, total, _, sizes = await board.pending_approvals(db_session, rows[0].bot_id)
     assert total == 1 and len(shown) == 1
     assert "共 2 项" in digest._approval_summary(shown[0], sizes[shown[0].id])
     # approval_list 两层：各项带着所在的单与位置。

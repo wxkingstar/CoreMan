@@ -1,4 +1,4 @@
-"""等你出手与最近落地：待批的单只给摘要与链接，落地的单给本人解密后的摘要与理由；别人拿不到。"""
+"""总表与最近落地：待批的单只给摘要与链接，落地的单给本人解密后的摘要与理由；别人拿不到。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from tests.integration.assistant_helpers import SECRET, raw
 from tests.integration.job_helpers import owner_with_key, reloaded, spawned
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
-ATTENTION, RECENT = f"{URL}/attention", f"{URL}/approvals/recent"
+BOARD, RECENT = f"{URL}/board", f"{URL}/approvals/recent"
 ABSTRACT = f"私聊 → 李四 {SECRET}"
 BODY_TEXT = "正文-不该出现在页面接口里-91c2"
 # 「最近落地」列全部终态，新近有动静的在前（种子数据里的时刻就是这个顺序）。
@@ -72,9 +72,14 @@ async def _seed(db_session: AsyncSession, bot: Bot) -> dict[str, AssistantApprov
     blocked = await spawned(db_session, bot, title="合同条款", brief="查一下违约条款")
     blocked = await reloaded(db_session, blocked)
     blocked.status, blocked.blocked_enc = "blocked", f"需要你确认范围 {SECRET}"
-    await spawned(db_session, bot, title="还在跑的", brief="不该出现在等你出手里")
+    await spawned(db_session, bot, title="还在跑的", brief="不该出现在总表里")
     await followups.add(
-        db_session, bot.id, category="remind", title=f"续约 {SECRET}", due_on=date(2000, 1, 1)
+        db_session,
+        bot.id,
+        category="remind",
+        title=f"续约 {SECRET}",
+        due_on=date(2000, 1, 1),
+        job_id=blocked.id,
     )
     await followups.add(
         db_session, bot.id, category="waiting", title="以后的事", due_on=date(2099, 1, 1)
@@ -83,7 +88,7 @@ async def _seed(db_session: AsyncSession, bot: Bot) -> dict[str, AssistantApprov
     return rows
 
 
-async def test_attention_lists_pending_approvals_blocked_jobs_and_due_followups(
+async def test_board_lists_pending_approvals_linked_jobs_and_followups(
     client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TOWER_WEB_URL", "https://tower.example.com")
@@ -91,9 +96,10 @@ async def test_attention_lists_pending_approvals_blocked_jobs_and_due_followups(
     bot, owner = await _owner(client, db_session)
     rows = await _seed(db_session, bot)
     with capture_logs() as logs:
-        response = await client.get(ATTENTION)
+        response = await client.get(BOARD)
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
     data = response.json()["data"]
+    assert data["approvals_total"] == 1
     [pending] = data["approvals"]
     assert pending == {
         "id": str(rows["pending"].id),
@@ -101,22 +107,51 @@ async def test_attention_lists_pending_approvals_blocked_jobs_and_due_followups(
         "summary": ABSTRACT,
         "created_at": pending["created_at"],
         "link": "https://tower.example.com",
+        "items": 1,
     }
-    [job] = data["jobs"]
-    assert job["title"] == "合同条款" and job["status"] == "blocked"
-    assert job["blocked_reason"] == f"需要你确认范围 {SECRET}"
-    [due] = data["followups"]
-    assert due["id"] == "F001" and due["title"] == f"续约 {SECRET}"
+    # 过了期限的待跟进挂着被卡住的子任务：子任务在条目的 job 里，不再单独列出。
+    [due] = [i for items in data["groups"].values() for i in items if i["id"] == "F001"]
+    assert due["title"] == f"续约 {SECRET}" and "notes" not in due
+    assert due["job"]["title"] == "合同条款" and due["job"]["status"] == "blocked"
+    assert due["job"]["blocked_reason"] == f"需要你确认范围 {SECRET}"
+    assert "jobs" not in data and "followups" not in data
+    assert sum(data["counts"].values()) == 2
+    assert data["counts"] == {name: len(items) for name, items in data["groups"].items()}
     # 暂存的参数（要发出的正文）不经这个接口给出：正文在审批系统里看。
     assert BODY_TEXT not in response.text
     assert SECRET not in (await raw(db_session, STORED, bot=bot.id))
     accesses = [entry for entry in logs if entry["event"] == "assistant_content_access"]
     assert sorted((entry["action"], entry["target"]) for entry in accesses) == [
         ("approvals.read", "pending"),
-        ("followups.read", "today"),
-        ("jobs.read", "blocked"),
+        ("followups.read", "board"),
+        ("jobs.read", "board"),
     ]
     assert {entry["actor_id"] for entry in accesses} == {str(owner.id)}
+
+
+async def test_board_groups_and_suggestion(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, owner = await owner_with_key(db_session)
+    await followups.add(
+        db_session, bot.id, category="decide", title="选供应商", notes="背景\n建议：选 A"
+    )
+    await followups.add(
+        db_session,
+        bot.id,
+        category="waiting",
+        title="等赵六",
+        handler="person",
+        handler_name="赵六",
+    )
+    await db_session.commit()
+    await login_existing(client, db_session, owner)
+    body = (await client.get(BOARD)).json()["data"]
+    assert body["counts"]["owner"] == 1 and body["counts"]["others"] == 1
+    (item,) = body["groups"]["owner"]
+    assert item["id"] == "F001" and item["suggestion"] == "选 A" and "notes" not in item
+    assert item["stage"] == "owner" and item["job"] is None
+    assert body["groups"]["others"][0]["handler_name"] == "赵六"
 
 
 async def test_without_a_configured_entry_there_is_no_link(
@@ -124,7 +159,7 @@ async def test_without_a_configured_entry_there_is_no_link(
 ) -> None:
     bot, _owner_row = await _owner(client, db_session)
     await _seed(db_session, bot)
-    [pending] = (await client.get(ATTENTION)).json()["data"]["approvals"]
+    [pending] = (await client.get(BOARD)).json()["data"]["approvals"]
     assert pending["link"] is None and pending["summary"] == ABSTRACT
 
 
@@ -156,14 +191,14 @@ async def test_an_admin_with_their_own_assistant_gets_nothing_of_the_owners(
     admin.role = "platform_admin"
     await db_session.commit()
     await login_existing(client, db_session, admin)
-    attention = await client.get(ATTENTION)
-    assert attention.json()["data"]["approvals"] == []
-    assert attention.json()["data"]["jobs"] == [] and attention.json()["data"]["followups"] == []
+    board_resp = await client.get(BOARD)
+    assert board_resp.json()["data"]["approvals"] == []
+    assert sum(board_resp.json()["data"]["counts"].values()) == 0
     recent = await client.get(RECENT)
     assert recent.json()["data"]["items"] == []
-    assert SECRET not in attention.text + recent.text
+    assert SECRET not in board_resp.text + recent.text
     as_bot_token(client, monkeypatch, owner)
-    assert (await client.get(ATTENTION)).status_code == 403
+    assert (await client.get(BOARD)).status_code == 403
     assert (await client.get(RECENT)).status_code == 403
 
 
@@ -175,11 +210,11 @@ async def test_after_the_key_is_destroyed_only_metadata_is_left(
     await keys.destroy_key(db_session, owner.id)
     await db_session.commit()
     sealed.forget()
-    attention = await client.get(ATTENTION)
+    board_resp = await client.get(BOARD)
     recent = await client.get(RECENT)
-    assert attention.status_code == 200 and recent.status_code == 200
-    assert SECRET not in attention.text + recent.text
-    [pending] = attention.json()["data"]["approvals"]
+    assert board_resp.status_code == 200 and recent.status_code == 200
+    assert SECRET not in board_resp.text + recent.text
+    [pending] = board_resp.json()["data"]["approvals"]
     assert pending["summary"] is None and pending["tool"] == "feishu_im_send_message"
     items = recent.json()["data"]["items"]
     assert [item["status"] for item in items] == FINAL
@@ -200,7 +235,26 @@ async def test_a_dispatch_waiting_for_approval_shows_among_the_pending(
     }
     db_session.add(row)
     await db_session.commit()
-    response = await client.get(ATTENTION)
+    response = await client.get(BOARD)
     [pending] = response.json()["data"]["approvals"]
     assert pending["tool"] == "assistant_ask_bot" and pending["summary"] == "调度员工 → demo-bot"
     assert BODY_TEXT not in response.text
+
+
+async def test_a_batch_counts_as_one_request_like_on_the_card(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """一轮里合成一张的几项只算一张、只列一行，与「看板」卡片同一口径。"""
+    bot, _owner_row = await _owner(client, db_session)
+    batch, now = uuid.uuid4(), utcnow()
+    first = _approval(bot, "pending", batch_id=batch, created_at=now - timedelta(minutes=3))
+    second = _approval(bot, "pending", batch_id=batch, created_at=now - timedelta(minutes=2))
+    alone = _approval(bot, "pending", created_at=now - timedelta(minutes=1))
+    db_session.add_all([first, second, alone])
+    await db_session.commit()
+    data = (await client.get(BOARD)).json()["data"]
+    assert data["approvals_total"] == 2
+    assert [(a["id"], a["items"]) for a in data["approvals"]] == [
+        (str(first.id), 2),
+        (str(alone.id), 1),
+    ]
