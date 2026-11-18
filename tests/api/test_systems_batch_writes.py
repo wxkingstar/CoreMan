@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
     BotSystemGrant,
+    BusinessSystem,
     InboundEvent,
     InteractionState,
     OutboxItem,
@@ -24,6 +25,7 @@ from coreman.core.db.models import (
     Task,
 )
 from coreman.core.systems_catalog import batch, confirm, proxy
+from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.systems_batch_cards import SystemsBatchRunHandler
 from tests.api.test_systems_catalog import bearer, call
@@ -278,11 +280,90 @@ async def test_any_bad_line_stages_nothing(client, app, db_session, fake) -> Non
     assert not await db_session.scalar(select(InteractionState.id))
 
 
-async def test_the_cap_follows_the_risk(client, app, db_session, fake, monkeypatch) -> None:
-    monkeypatch.setitem(batch.MAX_ITEMS, "write", 2)
+async def test_the_cap_is_the_systems_setting_for_the_risk(client, app, db_session, fake) -> None:
     _, user, task = await turn(db_session, app)
+    await db_session.execute(
+        update(BusinessSystem).where(BusinessSystem.key == "stock").values(batch_write_max=2)
+    )
+    await db_session.commit()
+    auth = bearer(app, task, user)
+    described = await call(
+        client, auth, "systems_describe", {"system": "stock", "operation_id": "createDraft"}
+    )
+    assert described["call"]["batch"]["max_items"] == 2
     out = await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
     assert out["error"] == "invalid_batch" and "最多 2 项" in out["problems"][0]
+    out = await submit(client, app, task, user, lines(row("A"), row("B")))
+    assert out["count"] == 2
+
+
+async def test_proxied_calls_are_counted_per_system_without_fingerprints(
+    client, app, db_session, fake
+) -> None:
+    _, user, task = await turn(db_session, app)
+    await db_session.execute(
+        update(BusinessSystem).where(BusinessSystem.key == "stock").values(proxy_calls_per_turn=2)
+    )
+    await db_session.commit()
+    auth = bearer(app, task, user)
+    read = {"system": "stock", "operation_id": "listDocuments", "query": {"status": "confirmed"}}
+    for _ in range(2):
+        assert "error" not in await call(client, auth, "systems_call", read)
+    over = await call(client, auth, "systems_call", read)
+    assert over["error"] == "catalog_budget_exhausted" and "2 次" in over["message"]
+    await db_session.refresh(task)
+    state = task.payload["systems_catalog"]
+    assert state["proxy_calls_by_system"] == {"stock": 3} and not state.get("seen")
+
+
+async def test_items_wait_the_systems_interval(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(batch, "_sleep", record)
+    bot, user, task = await turn(db_session, app)
+    await db_session.execute(
+        update(BusinessSystem).where(BusinessSystem.key == "stock").values(batch_interval_ms=250)
+    )
+    await db_session.commit()
+    await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    await run_all(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "ok", "ok"]
+    # 第一项不等，之后每项发出前等一个间隔。
+    assert waits == [0.25, 0.25]
+
+
+async def test_an_interval_longer_than_the_stretch_queues_the_next_one_later(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(batch, "_sleep", pytest.fail)
+    bot, user, task = await turn(db_session, app)
+    await db_session.execute(
+        update(BusinessSystem).where(BusinessSystem.key == "stock").values(batch_interval_ms=60000)
+    )
+    await db_session.commit()
+    await submit(client, app, task, user, lines(row("A"), row("B")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    assert await run_next(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "pending"]
+    queued = await db_session.scalar(
+        select(Task)
+        .where(Task.kind == batch.RUN_KIND, Task.status == "queued")
+        .execution_options(populate_existing=True)
+    )
+    assert queued is not None
+    assert queued.run_after > utcnow() + timedelta(seconds=50)
+    assert await run_next(db_session, db_engine)
+    assert await statuses(db_session) == ["ok", "ok"]
 
 
 async def test_one_batch_per_turn_and_writes_only(client, app, db_session, fake) -> None:
@@ -314,10 +395,55 @@ async def test_turns_nobody_can_confirm_stage_nothing(client, app, db_session, f
     assert not await db_session.scalar(select(InteractionState.id))
 
 
+async def test_a_quick_small_batch_does_not_refresh_progress_midway(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    # 默认节奏下，几秒内跑完的小批量不在中途刷新进度卡，直接出结果。
+    assert await run_all(db_session, db_engine) == 1
+    texts = [text_of(card) for card in await updates(db_session)]
+    assert not any("已处理 1 / 3" in text or "已处理 2 / 3" in text for text in texts)
+
+
+async def test_progress_shows_within_a_stretch_when_due(
+    client, app, db_session, db_engine, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(batch, "PROGRESS_MIN_SECONDS", 0)
+    bot, user, task = await turn(db_session, app)
+    await submit(client, app, task, user, lines(row("D"), row("E"), row("F")))
+    await release(app, task)
+    state = await state_of(db_session)
+    await click(db_session, db_engine, bot, task, state.id, "confirm")
+    before = len(await updates(db_session))
+    # 不分段也会刷新：每推进 1%（至少 1 项）就到期。
+    assert await run_all(db_session, db_engine) == 1
+    texts = [text_of(card) for card in (await updates(db_session))[before:]]
+    assert any("已处理 1 / 3" in text for text in texts)
+    assert any("已处理 2 / 3" in text for text in texts)
+
+
+def test_progress_is_due_by_time_and_by_one_percent() -> None:
+    start = utcnow()
+    meta = {"count": 50000, "progress_at": start.isoformat(), "progress_done": 1000}
+    at = lambda seconds: start + timedelta(seconds=seconds)  # noqa: E731
+    assert not batch.progress_due(meta, 5000, at(9))
+    assert not batch.progress_due(meta, 1499, at(30))
+    assert batch.progress_due(meta, 1500, at(30))
+    assert batch.progress_due(meta, 1001, at(60))
+    small = {"count": 3, "progress_at": start.isoformat(), "progress_done": 0}
+    assert batch.progress_due(small, 1, at(10)) and not batch.progress_due(small, 0, at(30))
+    assert batch.progress_due({"count": 3}, 0, at(0))
+
+
 async def test_runs_in_chunks_and_stops_when_asked(
     client, app, db_session, db_engine, fake, monkeypatch
 ) -> None:
     monkeypatch.setattr(batch, "CHUNK_ITEMS", 1)
+    monkeypatch.setattr(batch, "PROGRESS_MIN_SECONDS", 0)
     bot, user, task = await turn(db_session, app)
     await submit(client, app, task, user, lines(row("A"), row("B"), row("C")))
     await release(app, task)

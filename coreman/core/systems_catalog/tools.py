@@ -17,13 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from coreman.core.auth.system_access import auth_label, auth_mode, token_env_var
 from coreman.core.db.models import BusinessSystem
+from coreman.core.db.models.infrastructure import PROXY_LIMITS
 from coreman.core.systems_catalog import batch, context, proxy, service, uploads
 from coreman.core.systems_catalog.context import TRUST, Context
 from coreman.core.systems_catalog.search import normalize
 
 MAX_CALLS = 2000
-# Proxied calls have their own, smaller allowance: each one reaches the business system.
-MAX_PROXY_CALLS = 3000
+# Proxied calls are counted per system, against the system's `proxy_calls_per_turn`; a system
+# not (or no longer) in the catalog is held to the default.
+DEFAULT_PROXY_CALLS = PROXY_LIMITS["proxy_calls_per_turn"][0]
 MAX_REPEATS = 2
 BROWSE_PAGE = 20
 MODULE_PAGE = 25
@@ -142,8 +144,39 @@ def _slim(value: Any) -> Any:
     }
 
 
-def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] | None:
-    """Count one call in `state` (the task payload section); the stop result when over budget."""
+def proxied_system(name: str, arguments: Any) -> str | None:
+    """The system a `systems_call` names, for counting it against that system's allowance."""
+    if name != "systems_call" or not isinstance(arguments, dict):
+        return None
+    system = arguments.get("system")
+    return system.strip() if isinstance(system, str) else None
+
+
+def charge(
+    state: dict[str, Any],
+    name: str,
+    arguments: Any,
+    *,
+    proxy_limit: int = DEFAULT_PROXY_CALLS,
+) -> dict[str, Any] | None:
+    """Count one call in `state` (the task payload section); the stop result when over budget.
+
+    `systems_call` counts against its system's `proxy_limit` and keeps no fingerprint: proxied
+    calls may repeat (polling an async job reads the same operation many times), so the
+    fingerprints would only make the payload grow with every call."""
+    if name == "systems_call":
+        system = proxied_system(name, arguments) or ""
+        counts = dict(state.get("proxy_calls_by_system") or {})
+        counts[system] = int(counts.get(system) or 0) + 1
+        state["proxy_calls_by_system"] = counts
+        if counts[system] > proxy_limit:
+            return {
+                "error": "catalog_budget_exhausted",
+                "stop": True,
+                "message": f"本轮对这个系统的代理调用已超过 {proxy_limit} 次。停止调用这个系统，"
+                "用已经拿到的信息完成回复；还没做完的，请用户另发一条消息继续。",
+            }
+        return None
     try:
         canonical: Any = MODELS[name].model_validate(arguments).model_dump()
     except (KeyError, ValidationError):
@@ -154,19 +187,15 @@ def charge(state: dict[str, Any], name: str, arguments: Any) -> dict[str, Any] |
     seen = dict(state.get("seen") or {})
     seen[fingerprint] = seen.get(fingerprint, 0) + 1
     state["seen"] = seen
-    counter, limit = (
-        ("proxy_calls", MAX_PROXY_CALLS) if name == "systems_call" else ("calls", MAX_CALLS)
-    )
-    state[counter] = int(state.get(counter) or 0) + 1
-    if state[counter] > limit:
+    state["calls"] = int(state.get("calls") or 0) + 1
+    if state["calls"] > MAX_CALLS:
         return {
             "error": "catalog_budget_exhausted",
             "stop": True,
-            "message": f"本轮{'代理调用' if counter == 'proxy_calls' else '目录调用'}"
-            f"已超过 {limit} 次。停止调用这些工具，用已经拿到的信息完成回复。",
+            "message": f"本轮目录调用已超过 {MAX_CALLS} 次。"
+            "停止调用这些工具，用已经拿到的信息完成回复。",
         }
-    # Proxied calls may repeat: polling an async job reads the same operation many times.
-    if name != "systems_call" and seen[fingerprint] > MAX_REPEATS:
+    if seen[fingerprint] > MAX_REPEATS:
         return {
             "error": "repeated_call",
             "stop": True,
@@ -224,7 +253,8 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
         elif system.key in ctx.writable:
             writes = (
                 "已开启，提交后由提问人在确认卡上确认才执行，逐次提交一次最多 50 个；同一个操作"
-                "要做多项时用 batch 整批提交一次（write 最多 1000 项、destructive 最多 50 项）"
+                "要做多项时用 batch 整批提交一次（write 最多 "
+                f"{system.batch_write_max} 项、destructive 最多 {system.batch_destructive_max} 项）"
             )
         else:
             writes = "未开启，需管理员开启「允许写入」"
@@ -612,7 +642,7 @@ def call_template(
         if form.get("multipart") and form.get("files") and ctx.settings is not None:
             template["upload"] = uploads.instructions(ctx.settings.public_base_url, form["files"])
         elif op["risk"] in proxy.CONFIRMED_RISKS and denied is None and ctx.settings is not None:
-            template["batch"] = batch.instructions(ctx.settings.public_base_url, op["risk"])
+            template["batch"] = batch.instructions(ctx.settings.public_base_url, system, op["risk"])
         return template
     if ctx.anonymous:
         env_var, mode = ctx.token_env, "bearer"

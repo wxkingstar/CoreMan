@@ -12,9 +12,11 @@ again.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
+import math
 import random
 import uuid
 from collections import Counter
@@ -23,13 +25,20 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.config import get_settings
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, InboundEvent, InteractionState, SystemBatchItem, Task
+from coreman.core.db.models import (
+    Bot,
+    BusinessSystem,
+    InboundEvent,
+    InteractionState,
+    SystemBatchItem,
+    Task,
+)
 from coreman.core.logging import get_logger
 from coreman.core.object_store import object_store
 from coreman.core.systems_catalog import confirm, policy, proxy, uploads
@@ -42,10 +51,14 @@ KIND = "systems_batch"
 CARD_EVENT = "systems_batch"
 RUN_KIND = "systems_batch_run"
 AAD = "systems_batch.v1"
-MAX_ITEMS = {"write": 1000, "destructive": 50}
 PREVIEW_MAX = 50
-# The batch file: checked, sealed and turned into CSV in memory, so it stays small.
-MAX_FILE_BYTES = 5 * 1024 * 1024
+# The batch file: checked, sealed and turned into CSV in memory. As large as any upload, so the
+# largest batch a system allows (`PROXY_LIMITS`) fits at a few hundred bytes a line.
+MAX_FILE_BYTES = uploads.UPLOAD_LIMIT
+# Staged items are inserted this many rows a statement.
+INSERT_ROWS = 1000
+# How a run waits out the system's interval between items (replaced in tests).
+_sleep = asyncio.sleep
 # Fields the card counts values for; the rest are only in the detail file.
 STATS_FIELDS_MAX = 20
 STATS_VALUE_MAX = 40
@@ -57,8 +70,15 @@ FAILURES_ON_CARD = 10
 FAILURES_TO_MODEL = 20
 BRIEF_MAX = 300
 # One run task handles this many items or this many seconds, then queues the next one.
-CHUNK_ITEMS = 20
+CHUNK_ITEMS = 500
 CHUNK_SECONDS = 60.0
+# The progress card is updated at most every `PROGRESS_MIN_SECONDS`, and then only once the batch
+# moved on by `PROGRESS_STEP` of its items or `PROGRESS_MAX_SECONDS` have passed: a small batch
+# shows progress every few seconds, a large one about once a minute, never more than about a
+# hundred updates plus one a minute.
+PROGRESS_MIN_SECONDS = 10.0
+PROGRESS_MAX_SECONDS = 60.0
+PROGRESS_STEP = 0.01
 # An item marked `sending` this recently may still be in flight (its run task was taken for lost
 # but is alive): the next stretch waits this long before calling it unknown. A call may wait up to
 # `proxy.CALL_TIMEOUT` for each read of the response.
@@ -131,6 +151,13 @@ def _error(code: str, message: str, **extra: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- submit
+
+
+def max_items(system: BusinessSystem, risk: str) -> int:
+    """How many items one batch of an operation of `risk` may hold on this system."""
+    return {"write": system.batch_write_max, "destructive": system.batch_destructive_max}.get(
+        risk, 0
+    )
 
 
 def _no_constant(name: str) -> Any:
@@ -314,7 +341,7 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
             "或分成几批、让用户分几条消息提交。",
         )
     data = await uploads.read(ctx.settings or get_settings(), upload)
-    cap = MAX_ITEMS[op["risk"]]
+    cap = max_items(system, op["risk"])
     rows, problems, total = parse(data, cap)
     items: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
@@ -396,14 +423,19 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
     session.add(state)
     await session.flush()
     cipher = ctx.issuance.cipher
-    for seq, item in enumerate(items, 1):
-        session.add(
-            SystemBatchItem(
-                batch_id=state.id,
-                seq=seq,
-                request_enc=cipher.encrypt(_dump(item), _aad(state.id, seq)),
-                idempotency_key=str(uuid.uuid4()),
-            )
+    # 每项按批次和行号加密：密文换了行或换了批都解不开，执行时不会串。
+    for first in range(0, len(items), INSERT_ROWS):
+        await session.execute(
+            insert(SystemBatchItem),
+            [
+                {
+                    "batch_id": state.id,
+                    "seq": seq,
+                    "request_enc": cipher.encrypt(_dump(item), _aad(state.id, seq)),
+                    "idempotency_key": str(uuid.uuid4()),
+                }
+                for seq, item in enumerate(items[first : first + INSERT_ROWS], first + 1)
+            ],
         )
     state.state = {**meta, "enc": cipher.encrypt(_dump(sealed), _aad(state.id))}
     await proxy.record(ctx, system, args.operation_id, op, "batch_proposed")
@@ -426,15 +458,16 @@ def _server(system: Any, loaded: Any) -> str:
     return str(loaded.compiled.get("server") or system.base_url or "")
 
 
-def instructions(public_base_url: str, risk: str) -> dict[str, Any]:
+def instructions(public_base_url: str, system: BusinessSystem, risk: str) -> dict[str, Any]:
     """How to submit many items of a write operation at once (part of systems_describe)."""
     url = public_base_url.rstrip("/") + uploads.UPLOAD_PATH + "?filename=batch.jsonl"
     return {
-        "max_items": MAX_ITEMS.get(risk, 0),
+        "max_items": max_items(system, risk),
         "file": "JSON Lines，UTF-8，每行一项："
         '{"path_params": {...}, "query": {...}, "body": {...}, "target": "对象的业务名称", '
         '"before": {"字段": "修改前的值"}}；path_params、query、body 与单次调用相同，'
-        "target、before 选填，只用于确认卡展示。文件不超过 5 MB，不能有 NaN、Infinity。",
+        "target、before 选填，只用于确认卡展示。"
+        f"文件不超过 {MAX_FILE_BYTES // (1024 * 1024)} MB，不能有 NaN、Infinity。",
         "upload": f'curl -sS -X PUT -H "Authorization: Bearer ${policy.TOKEN_ENV}" '
         f"--data-binary @<本地文件路径> '{url}'",
         "call": 'systems_call(system, operation_id, batch={"upload_id": "..."}, '
@@ -811,14 +844,25 @@ async def start(session: AsyncSession, state: InteractionState) -> None:
     state.status = "submitted"
     # 执行中不让清理任务碰它；跑完再给保留期。
     state.expires_at = None
-    meta = {**state.state, "started_at": utcnow().isoformat(), "started_done": 0, "chunk": 1}
+    now = utcnow().isoformat()
+    # 确认后立刻显示 0 进度：从这一刻起按 progress_due 的节奏更新。
+    meta = {
+        **state.state,
+        "started_at": now,
+        "started_done": 0,
+        "chunk": 1,
+        "progress_at": now,
+        "progress_done": 0,
+    }
     if int(meta["count"]) > TRIAL_OVER:
         meta["trial"] = TRIAL_ITEMS
     state.state = meta
     await _enqueue(session, state, 1)
 
 
-async def _enqueue(session: AsyncSession, state: InteractionState, chunk: int) -> None:
+async def _enqueue(
+    session: AsyncSession, state: InteractionState, chunk: int, *, delay: float = 0.0
+) -> None:
     await tasks.enqueue(
         session,
         tasks.NewTask(
@@ -826,8 +870,15 @@ async def _enqueue(session: AsyncSession, state: InteractionState, chunk: int) -
             kind=RUN_KIND,
             dedupe_key=f"systems-batch:{state.id}:run:{chunk}",
             payload={"batch_id": str(state.id), "chunk": chunk},
+            run_after=utcnow() + timedelta(seconds=delay) if delay > 0 else None,
         ),
     )
+
+
+async def interval(session: AsyncSession, state: InteractionState) -> float:
+    """Seconds to wait before each item of this batch: its system's current setting."""
+    system = await session.get(BusinessSystem, state.state["system"])
+    return (system.batch_interval_ms if system is not None else 0) / 1000
 
 
 async def counts(session: AsyncSession, batch_id: uuid.UUID) -> Counter[str]:
@@ -977,7 +1028,11 @@ async def run_chunk(
     stretch was queued in this one's place (or the batch is paused), `CANCELLED` when this run
     task was cancelled or taken for lost, `PAUSE_TRIAL` after the first items of a large batch,
     `PAUSE_FAILURES` after `FAIL_STREAK` items in a row without success; `Halt` when the rest
-    cannot run, `ItemCrashed` when sending an item raised."""
+    cannot run, `ItemCrashed` when sending an item raised.
+
+    Items after the first of the stretch wait the system's `batch_interval_ms` before they go
+    out; when the stretch has no time left for the wait it ends with `MORE`, and `next_chunk`
+    queues the next stretch that much later (the first item of a stretch waits in the queue)."""
     session = pctx.session
     now = utcnow()
     # 上一段发出后没写回结果的：过了宽限仍没有结果才记为结果未知，不重发。还在宽限内的可能仍
@@ -1004,6 +1059,9 @@ async def run_chunk(
         return WAIT
     system, loaded, op = await checked(pctx, state)
     meta = state.state
+    gap = system.batch_interval_ms / 1000
+    # 这一段开始时已处理的项数：段内的进度按它加上本段处理的项数算，不必每项都去数。
+    done_before = int(meta["count"]) - int(await _pending_count(session, state.id))
     started = clock()
     handled = 0
     while handled < CHUNK_ITEMS and clock() - started < CHUNK_SECONDS:
@@ -1068,12 +1126,89 @@ async def run_chunk(
         handled += 1
         if failed and await _streak(session, state):
             return PAUSE_FAILURES
+        await progress(session, state, chunk=chunk, done=done_before + handled)
+        if gap:
+            # 限速：还有下一项才等；这一段剩下的时间不够等，就交给下一段延后再跑。
+            if not await _pending(session, state.id):
+                return DONE
+            if clock() - started + gap >= CHUNK_SECONDS:
+                break
+            # 等待时不挂着事务。
+            await session.commit()
+            await _sleep(gap)
+    return MORE if await _pending_count(session, state.id) else DONE
+
+
+async def _pending_count(session: AsyncSession, batch_id: uuid.UUID) -> int:
     left = await session.scalar(
         select(func.count())
         .select_from(SystemBatchItem)
-        .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status == "pending")
+        .where(SystemBatchItem.batch_id == batch_id, SystemBatchItem.status == "pending")
     )
-    return MORE if left else DONE
+    return int(left or 0)
+
+
+def progress_due(meta: dict[str, Any], done: int, now: datetime) -> bool:
+    """Whether the progress card is due another update (see `PROGRESS_MIN_SECONDS`)."""
+    try:
+        last = aware_utc(datetime.fromisoformat(str(meta.get("progress_at"))))
+    except ValueError:
+        return True
+    elapsed = (now - last).total_seconds()
+    if elapsed < PROGRESS_MIN_SECONDS:
+        return False
+    if elapsed >= PROGRESS_MAX_SECONDS:
+        return True
+    step = max(1, math.ceil(int(meta["count"]) * PROGRESS_STEP))
+    return done - int(meta.get("progress_done") or 0) >= step
+
+
+async def _show_progress(
+    session: AsyncSession, locked: InteractionState, found: Counter[str], now: datetime
+) -> None:
+    """Update the progress card of `locked` (locked by the caller) and note when."""
+    total = int(locked.state["count"])
+    n = int(locked.state.get("progress_n") or 0) + 1
+    locked.state = {
+        **locked.state,
+        "progress_at": now.isoformat(),
+        "progress_done": total - found["pending"] - found["sending"],
+        "progress_n": n,
+    }
+    await confirm.update_card(
+        session,
+        locked,
+        progress_card(locked, found),
+        # 旧版本按段号用 `:progress:{段号}`：换个前缀，跨发布还在跑的批次不会撞键漏刷。
+        dedupe_key=f"{locked.state.get('card_key')}:progress-n:{n}",
+    )
+
+
+async def progress(
+    session: AsyncSession, state: InteractionState, *, chunk: int, done: int
+) -> None:
+    """Within a stretch: update the progress card when it is due."""
+    now = utcnow()
+    if not progress_due(state.state, done, now):
+        return
+    # 和停止按钮等改同一行：先锁住再改，别把别人刚写的状态覆盖掉。
+    locked = await session.get(
+        InteractionState, state.id, with_for_update=True, populate_existing=True
+    )
+    if _current(locked, chunk):
+        assert locked is not None
+        await _show_progress(session, locked, await counts(session, locked.id), now)
+    await session.commit()
+
+
+async def _pending(session: AsyncSession, batch_id: uuid.UUID) -> bool:
+    return bool(
+        await session.scalar(
+            select(SystemBatchItem.seq)
+            .where(SystemBatchItem.batch_id == batch_id, SystemBatchItem.status == "pending")
+            .limit(1)
+        )
+    )
 
 
 async def next_chunk(session: AsyncSession, state: InteractionState, *, chunk: int) -> bool:
@@ -1086,14 +1221,12 @@ async def next_chunk(session: AsyncSession, state: InteractionState, *, chunk: i
         return False
     assert locked is not None
     locked.state = {**locked.state, "chunk": chunk + 1}
-    await _enqueue(session, locked, chunk + 1)
+    # 限速：下一段的第一项也要和这一段的最后一项隔开。
+    await _enqueue(session, locked, chunk + 1, delay=await interval(session, locked))
     found = await counts(session, locked.id)
-    await confirm.update_card(
-        session,
-        locked,
-        progress_card(locked, found),
-        dedupe_key=f"{locked.state.get('card_key')}:progress:{chunk + 1}",
-    )
+    now = utcnow()
+    if progress_due(locked.state, int(locked.state["count"]) - found["pending"], now):
+        await _show_progress(session, locked, found, now)
     return True
 
 

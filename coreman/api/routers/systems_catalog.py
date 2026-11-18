@@ -154,7 +154,15 @@ async def call_tool(
     task = await session.get(Task, capability.task_id, with_for_update=True, populate_existing=True)
     assert task is not None
     state = dict(task.payload.get(context.BUDGET_KEY) or {})
-    stop = tools.charge(state, name, arguments)
+    key = tools.proxied_system(name, arguments)
+    limit = (
+        None
+        if key is None
+        else await session.scalar(
+            select(BusinessSystem.proxy_calls_per_turn).where(BusinessSystem.key == key)
+        )
+    )
+    stop = tools.charge(state, name, arguments, proxy_limit=limit or tools.DEFAULT_PROXY_CALLS)
     task.payload = {**task.payload, context.BUDGET_KEY: state}
     await session.commit()
     if stop is not None:
