@@ -4,6 +4,7 @@
 # 用法：runner-pool.sh <命令>
 #   up         起虚拟机（不挂载本机任何目录）并拉好 runner 镜像
 #   run        前台守护：每个空位签一份一次性注册配置（JIT），起一个只跑一个 job 的容器
+#   warm       把工作流用到的 action 预先放进缓存卷（run 每小时也会在后台补一次）
 #   status     看虚拟机、runner 容器和 GitHub 上登记的 runner
 #   down       停掉所有 runner 容器、注销离线 runner，再停虚拟机
 #   install    装成 launchd 常驻（登录后自动 run）；代理设置从当前 shell 记下
@@ -39,6 +40,12 @@ PROXY_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all
 # 下几百个包，经代理要十几分钟；uv 自带文件锁，几个 runner 同时用是安全的。
 # 挂载点的上级目录（~/.cache、~/.local）由 Docker 以 root 建出，容器启动时先交还给 runner。
 CACHE_MOUNTS=("${LABEL}-uv-cache:/home/runner/.cache/uv" "${LABEL}-uv-python:/home/runner/.local/share/uv")
+# action 压缩包缓存：runner 下载 `uses:` 的 action 走 codeload.github.com，经代理时常慢到超时，
+# 每个一次性容器又都要重下。runner 先找 ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE 下的
+# `<owner>_<repo>/<sha>.tar.gz`，有就不下载；由 warm 命令按工作流里钉死的 sha 预先放好。
+ACTION_CACHE_DIR=/home/runner/action-archive-cache
+ACTION_VOLUME="${LABEL}-actions"
+CACHE_MOUNTS+=("${ACTION_VOLUME}:${ACTION_CACHE_DIR}")
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
@@ -135,7 +142,8 @@ start_slot() {
     log "空位 ${slot} 签发注册配置失败：${cfg}"
     return 0
   fi
-  local env_args=(-e "PYTEST_XDIST_AUTO_NUM_WORKERS=${WORKERS}") var mount
+  local env_args=(-e "PYTEST_XDIST_AUTO_NUM_WORKERS=${WORKERS}"
+    -e "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=${ACTION_CACHE_DIR}") var mount
   for mount in "${CACHE_MOUNTS[@]}"; do
     env_args+=(-v "$mount")
   done
@@ -155,6 +163,42 @@ start_slot() {
   fi
 }
 
+# 工作流里 `uses: <owner>/<repo>@<40 位 sha>` 用到的 action（默认分支上的版本），逐个看缓存卷里
+# 有没有，没有就在宿主机上用 git 浅拉那个提交、打成 tar.gz 放进去。git 走 github.com，不经
+# codeload；一个 action 慢的时候要两三分钟，但同一个 sha 只拉一次。失败的下一轮再试。
+cmd_warm() {
+  local listing uses action owner_repo sha cached tmp archive
+  if ! listing="$(gh api "repos/$(repo)/contents/.github/workflows" --jq '.[].name' 2>&1)"; then
+    log "读工作流列表失败：${listing}"
+    return 0
+  fi
+  uses="$(for name in $listing; do
+    gh api -H 'Accept: application/vnd.github.raw' "repos/$(repo)/contents/.github/workflows/${name}" 2>/dev/null
+  done | sed -nE 's#^[[:space:]-]*uses:[[:space:]]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40}).*#\1@\2#p' | sort -u)"
+  cached="$("${DOCKER[@]}" run --rm -u runner -v "${ACTION_VOLUME}:/c" --entrypoint find "$IMAGE" \
+    /c -name '*.tar.gz' 2>/dev/null)"
+  for action in $uses; do
+    owner_repo="${action%@*}"
+    sha="${action#*@}"
+    archive="${owner_repo/\//_}/${sha}.tar.gz"
+    grep -qx "/c/${archive}" <<<"$cached" && continue
+    log "预热 action ${owner_repo}@${sha:0:7}"
+    tmp="$(mktemp -d)"
+    # 单引号是有意的：$1 由容器里的 sh 展开。
+    # shellcheck disable=SC2016
+    if git -C "$tmp" init -q \
+      && git -C "$tmp" fetch -q --depth 1 "https://github.com/${owner_repo}" "$sha" \
+      && git -C "$tmp" archive --format=tar.gz --prefix="${owner_repo/\//-}-${sha:0:7}/" FETCH_HEAD \
+        | "${DOCKER[@]}" run --rm -i -u runner -v "${ACTION_VOLUME}:/c" --entrypoint sh "$IMAGE" \
+          -c 'mkdir -p "/c/${1%/*}" && cat >"/c/$1.part" && mv "/c/$1.part" "/c/$1"' _ "$archive"; then
+      log "已缓存 ${archive}"
+    else
+      log "预热 ${owner_repo}@${sha:0:7} 失败，下一轮再试"
+    fi
+    rm -rf "$tmp"
+  done
+}
+
 cmd_run() {
   cmd_up
   local gid round=0 slot
@@ -168,6 +212,8 @@ cmd_run() {
       gid="$(socket_gid)"
     fi
     (( round % 120 == 0 )) && prune_offline
+    # 每小时（720 轮 × 5 秒）在后台补一次 action 缓存：工作流升级 action 后不用手动预热。
+    (( round % 720 == 0 )) && { cmd_warm & }
     for slot in $(seq 1 "$SLOTS"); do
       if [[ -z "$("${DOCKER[@]}" ps -q --filter "label=${LABEL}-slot=${slot}" 2>/dev/null)" ]]; then
         start_slot "$slot" "$gid"
@@ -250,9 +296,10 @@ cmd_uninstall() {
 case "${1:-}" in
   up) cmd_up ;;
   run) cmd_run ;;
+  warm) cmd_up && cmd_warm ;;
   status) cmd_status ;;
   down) cmd_down ;;
   install) cmd_install ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
