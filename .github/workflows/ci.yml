@@ -125,7 +125,9 @@ jobs:
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           python-version: "3.12"
-          enable-cache: true
+          # Self-hosted runners keep uv's cache on a shared volume; restoring the GitHub
+          # cache there only adds a slow download.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - name: Install dependencies
         run: uv sync --frozen --all-groups

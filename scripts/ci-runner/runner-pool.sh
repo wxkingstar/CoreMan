@@ -35,6 +35,10 @@ LABEL="${CI_RUNNER_LABEL:-coreman-ci}"
 PLIST="$HOME/Library/LaunchAgents/com.github.${LABEL}.runner-pool.plist"
 DOCKER=(docker --context "colima-${PROFILE}")
 PROXY_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy)
+# 一次性容器之间共用的缓存卷：uv 的下载缓存和 uv 装的 Python。不共用的话每个 job 都要从零
+# 下几百个包，经代理要十几分钟；uv 自带文件锁，几个 runner 同时用是安全的。
+# 挂载点的上级目录（~/.cache、~/.local）由 Docker 以 root 建出，容器启动时先交还给 runner。
+CACHE_MOUNTS=("${LABEL}-uv-cache:/home/runner/.cache/uv" "${LABEL}-uv-python:/home/runner/.local/share/uv")
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
@@ -99,6 +103,15 @@ cmd_up() {
     log "拉镜像 ${IMAGE}"
     "${DOCKER[@]}" pull -q "$IMAGE" >/dev/null
   fi
+  # 新建的卷属 root；runner 以 runner 用户跑，要先把卷交给它。
+  local mount volume
+  for mount in "${CACHE_MOUNTS[@]}"; do
+    volume="${mount%%:*}"
+    if ! "${DOCKER[@]}" volume inspect "$volume" >/dev/null 2>&1; then
+      "${DOCKER[@]}" volume create "$volume" >/dev/null
+      "${DOCKER[@]}" run --rm -u 0 -v "${volume}:/v" --entrypoint chown "$IMAGE" runner:runner /v
+    fi
+  done
 }
 
 # GitHub 上本标签下已离线的 runner（容器没等到 job 就没了时会留下），逐个注销。
@@ -122,14 +135,20 @@ start_slot() {
     log "空位 ${slot} 签发注册配置失败：${cfg}"
     return 0
   fi
-  local env_args=(-e "PYTEST_XDIST_AUTO_NUM_WORKERS=${WORKERS}") var
+  local env_args=(-e "PYTEST_XDIST_AUTO_NUM_WORKERS=${WORKERS}") var mount
+  for mount in "${CACHE_MOUNTS[@]}"; do
+    env_args+=(-v "$mount")
+  done
   for var in "${PROXY_VARS[@]}"; do
     [[ -n "${!var:-}" ]] && env_args+=(-e "${var}=${!var}")
   done
   # --network host：服务容器（postgres）的端口发布在虚拟机上，job 用 127.0.0.1 就能连到。
+  # 单引号是有意的：$1 由容器里的 bash 展开。
+  # shellcheck disable=SC2016
+  local boot='sudo -n chown runner:runner ~/.cache ~/.local ~/.local/share && exec ./run.sh --jitconfig "$1"'
   if "${DOCKER[@]}" run -d --rm --name "$name" --label "${LABEL}-slot=${slot}" --network host \
     -v /var/run/docker.sock:/var/run/docker.sock --group-add "$gid" "${env_args[@]}" \
-    "$IMAGE" ./run.sh --jitconfig "$cfg" >/dev/null; then
+    --entrypoint bash "$IMAGE" -c "$boot" _ "$cfg" >/dev/null; then
     log "空位 ${slot} 起了 ${name}"
   else
     log "空位 ${slot} 起容器失败"
