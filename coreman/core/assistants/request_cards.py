@@ -154,12 +154,14 @@ async def stage(
     gap, system = await access_requests.requestable(session, bot, gap_seq)
     await session.refresh(gap, ["updated_at"])
     payload = card(cipher, bot.id, task_id, gap, system, text, time.time())
+    digest = hashlib.sha256(text.encode()).hexdigest()
     await outbox.add(
         session,
         bot_id=bot.id,
         platform="feishu",
         kind="send",
-        dedupe_key=f"assistant-gap-request:{task_id}:{gap.id}:{version(gap)}",
+        # 带上理由的摘要：同一轮里改了理由再发的卡片照发，原样重发的只发一张。
+        dedupe_key=f"assistant-gap-request:{task_id}:{gap.id}:{version(gap)}:{digest[:16]}",
         target={"chat_id": chat_id},
         payload={"card": payload},
     )

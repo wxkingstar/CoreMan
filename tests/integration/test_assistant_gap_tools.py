@@ -248,6 +248,17 @@ async def test_gap_request_sends_a_card_and_only_the_owners_click_submits(
     assert [r.status for r in await _requests(db_session)] == ["withdrawn"]
 
 
+async def test_a_revised_card_in_the_same_turn_is_sent(db_session: AsyncSession) -> None:
+    """同一轮里改了理由再发：第二张卡也发出去；理由不变的重发只发一张。"""
+    _, _, scope = await _requestable(db_session)
+    first = await _stage(db_session, scope)
+    again = await _stage(db_session, scope)
+    assert again.id == first.id
+    revised = await _stage(db_session, scope, reason="查客户订单与退款状态")
+    assert revised.id != first.id
+    assert "查客户订单与退款状态" in str(revised.payload["card"])
+
+
 async def test_gap_request_card_expires(db_session: AsyncSession) -> None:
     bot, _, scope = await _requestable(db_session)
     with patch("coreman.core.assistants.request_cards.time.time", return_value=time.time() - 7200):

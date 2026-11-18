@@ -76,6 +76,16 @@ export const systemBatches = {
   stop: (id: string) => call<SystemBatch>(http.post(`/api/admin/system-batches/${id}/stop`)),
   items: (id: string, page = 1, perPage = 50, status?: SystemBatchItemFilter) => call<Page<SystemBatchItem>>(http.get(`/api/admin/system-batches/${id}/items`, { params: { page, per_page: perPage, status } })),
 }
+export interface SystemAccessRequest {
+  id: string; bot_id: string; bot_name: string; system_key: string; system_name: string
+  write: boolean; reason: string; requester: string
+  status: 'pending' | 'approved' | 'rejected' | 'withdrawn'
+  decision_note: string | null; created_at: string; decided_at: string | null
+}
+export const systemAccess = {
+  list: (status: 'pending' | 'all', page = 1) => call<Page<SystemAccessRequest>>(http.get('/api/admin/system-access-requests', { params: { status, page } })),
+  decide: (id: string, decision: 'approve' | 'reject', note = '') => call<{ id: string; status: string }>(http.post(`/api/admin/system-access-requests/${id}/decide`, { decision, note })),
+}
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),
   create: (body: { app_key: string; name: string; scopes: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),

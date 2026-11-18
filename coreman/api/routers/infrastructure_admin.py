@@ -21,7 +21,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
 from coreman.api.routers.systems_catalog import refresh_as
 from coreman.api.security import verify_csrf
-from coreman.api.system_grants import apply_grants, current_grants
+from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, granted_systems
@@ -645,6 +645,8 @@ async def put_grants(
     bot = await load_bot(session, bot_id)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
+    # 先锁机器人行并读回最新版本号再核对 If-Match：读出之后别处改过的，这里能看出来。
+    await lock_bot(session, bot)
     require_if_match(request, bot.version)
     keys, writes = await apply_grants(
         session,

@@ -61,6 +61,7 @@ from coreman.api.routers import (
     skill_catalog,
     skill_local,
     statistics,
+    system_access_admin,
     system_batches,
     systems_catalog,
     teams,
@@ -127,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(objects.router)
     app.include_router(infrastructure_admin.public_router)
     app.include_router(infrastructure_admin.router)
+    app.include_router(system_access_admin.router)
     app.include_router(infra_org.router)
     app.include_router(infra_memories.router)
     from coreman.api.routers import bot_collaboration, bot_collaboration_admin
