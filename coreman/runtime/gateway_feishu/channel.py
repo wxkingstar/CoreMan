@@ -86,6 +86,8 @@ TOASTS: dict[str, dict[str, str]] = {
     "cold_start_answer": {"type": "success", "content": "已提交，正在记下…"},
     "cold_start_skip": {"type": "info", "content": "已跳过这一题"},
     "assistant_stop": {"type": "warning", "content": "正在停用，完成后会通知你"},
+    "gap_request_submit": {"type": "info", "content": "正在提交申请…"},
+    "gap_request_drop": {"type": "info", "content": "好的，不提交"},
     "credential_submit": {"type": "success", "content": "已加密提交"},
     "authorize_link": {"type": "info", "content": "正在生成授权链接…"},
     "choice_submit": {"type": "success", "content": "已提交你的选择"},

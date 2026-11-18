@@ -124,6 +124,8 @@ export interface BoardGap {
   need: string | null
   status: 'open' | 'requested'
   fix: GapFix
+  /** 业务系统缺口要的是写（报的时候已经能读）：开通与申请都按这个级别，由服务端定。 */
+  need_write: boolean
   /** 卡片用的中文说法；页面按 fix 用本地化文案。 */
   hint: string
   followups: string[]
@@ -251,8 +253,8 @@ export const myAssistant = {
   overview: () => call<AssistantOverview | AssistantAbsent>(http.get(root)),
   board: () => call<Board>(http.get(`${root}/board`)),
   declineGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/decline`)),
-  grantGap: (label: string, write: boolean) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/grant`, { write })),
-  requestGap: (label: string, write: boolean, reason: string) => call<{ id: string; status: string; request_id: string }>(http.post(`${root}/gaps/${label}/request`, { write, reason })),
+  grantGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/grant`)),
+  requestGap: (label: string, reason: string) => call<{ id: string; status: string; request_id: string }>(http.post(`${root}/gaps/${label}/request`, { reason })),
   withdrawGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/withdraw`)),
   jobs: () => call<JobList>(http.get(`${root}/jobs`)),
   cancelJob: (id: string) => call<{ id: string; status: string }>(http.post(`${root}/jobs/${id}/cancel`)),

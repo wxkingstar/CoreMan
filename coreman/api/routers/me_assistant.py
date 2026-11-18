@@ -26,11 +26,12 @@ from coreman.api.routers.me_assistant_common import (
     refuse,
     writable,
 )
-from coreman.api.system_grants import apply_grants, current_grants
+from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.core.assistants import (
     access_log,
     access_requests,
     board,
+    capabilities,
     cold_start,
     delivery,
     followups,
@@ -42,7 +43,7 @@ from coreman.core.assistants import (
 )
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.records import is_assistant
-from coreman.core.db.models import AssistantApproval, AssistantSettings, User
+from coreman.core.db.models import AssistantApproval, AssistantSettings, BusinessSystem, User
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(prefix=PREFIX, tags=["my-assistant"], dependencies=DEPENDENCIES)
@@ -222,19 +223,22 @@ GAP_ERRORS: dict[str, tuple[int, str]] = {
     "request_decided": (409, "这张申请已经处理过了"),
     "invalid_reason": (422, f"理由写一两句话，不超过 {access_requests.MAX_REASON} 字"),
     "assistant_not_active": (409, "个人助理现在不可用"),
+    "needs_request": (
+        409,
+        "这个系统没有对你的助理开放，不能直接开通：请点「申请」，由平台管理员审批",
+    ),
+    "grant_not_enough": (
+        409,
+        "开通这个系统也解决不了这个缺口（它要的级别这个系统给不了），请联系平台管理员",
+    ),
 }
 
 
-class GrantIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    write: StrictBool = False
-
-
 class RequestIn(BaseModel):
-    """理由是所有者自己写、给平台管理员看的明文；长度与空白由 `access_requests` 判断。"""
+    """理由是所有者自己写、给平台管理员看的明文；长度与空白由 `access_requests` 判断。
+    只读还是读写不由页面定：按缺口算（`gaps.need_write`）。"""
 
     model_config = ConfigDict(extra="forbid")
-    write: StrictBool = False
     reason: str = Field(max_length=access_requests.MAX_REASON * 4)
 
 
@@ -256,37 +260,48 @@ async def gap_decline(
 @router.post("/gaps/{label}/grant")
 async def gap_grant(
     label: str,
-    body: GrantIn,
     request: Request,
     own: Mine = Depends(writable),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """对这位助理开放的业务系统：所有者是它的机器人管理员，直接在现有授权上加这一个。
 
-    `apply_grants` 自己不查权限：这里只认登录人本人的、启用中的个人助理，且系统白名单已经
-    含它（`fix_for` 是 self_grant，`apply_grants` 锁住系统行后再核一次）；白名单不在这里改。
-    缺口已经提交了申请（之后管理员直接把它加进了白名单）的，在途的申请随之撤回。
+    级别按缺口算：报的时候已经能读的要写（`gaps.need_write`）。开通后级别升不上去（解决不了
+    这个缺口）的拒绝，不写授权、不记审计。`apply_grants` 自己不查权限：这里只认登录人本人的、
+    启用中的个人助理，且系统白名单已经含它（`fix_for` 是 self_grant，`apply_grants` 锁住系统行
+    后再核一次）；白名单不在这里改。缺口已经提交了申请（之后管理员直接把它加进了白名单）的，
+    在途的申请随之撤回。
     """
     bot = own.bot
     if not bot.enabled or not is_assistant(bot) or bot.owner_id != own.actor.id:
         raise refuse("assistant_not_active", GAP_ERRORS)
     try:
         seq = gaps.parse_label(label)
-        # 加锁顺序与 access_requests 相同：咨询锁 → 申请行 → 缺口行 → 系统行。
-        await gaps._lock(session, bot.id)
+        # 加锁顺序与 access_requests 相同：咨询锁 → 申请行 → 缺口行 → 机器人行 → 系统行。
+        await gaps.lock(session, bot.id)
         gap = await gaps.get(session, bot.id, seq)
         if gap.kind != "business_system":
             raise access_requests.RequestError("not_business_system")
         if gap.status not in gaps.LIVE:
             raise access_requests.RequestError("gap_not_open")
-        if await gaps.fix_for(session, bot.id, gap) != "self_grant":
-            raise access_requests.RequestError("system_not_requestable")
+        fix = await gaps.fix_for(session, bot.id, gap)
+        if fix != "self_grant":
+            raise access_requests.RequestError(
+                "needs_request" if fix == "request" else "system_not_requestable"
+            )
+        write = gaps.need_write(gap)
+        system = await session.get(BusinessSystem, gap.key)
+        assert system is not None  # fix_for 已确认登记过
+        if capabilities.grant_rank(system, write) <= gap.seen_rank:
+            raise access_requests.RequestError("grant_not_enough")
         if gap.status == "requested":
             await access_requests.withdraw(session, bot.id, seq)
         gap = await gaps.get(session, bot.id, seq, lock=True)
     except (gaps.GapError, access_requests.RequestError) as exc:
         await session.rollback()
         raise refuse(exc.code, GAP_ERRORS) from None
+    # 先锁机器人行再读现有授权：与管理台改权限互相排队，不会覆盖掉对方刚写的。
+    await lock_bot(session, bot)
     keys, writes = await current_grants(session, bot.id)
     await apply_grants(
         session,
@@ -294,7 +309,7 @@ async def gap_grant(
         own.actor,
         bot,
         keys=[*keys, gap.key],
-        write_keys=[*writes, gap.key] if body.write else writes,
+        write_keys=[*writes, gap.key] if write else writes,
         comment=f"所有者在「我的助理」页开通缺口 {gaps.label(gap.seq)}",
     )
     await session.refresh(gap, ["status"])
@@ -316,8 +331,10 @@ async def gap_request(
         raise refuse("assistant_not_active", GAP_ERRORS)
     try:
         seq = gaps.parse_label(label)
+        await gaps.lock(session, bot.id)
+        write = gaps.need_write(await gaps.get(session, bot.id, seq))
         row = await access_requests.open_request(
-            session, bot, seq, write=body.write, reason=body.reason, actor=own.actor
+            session, bot, seq, write=write, reason=body.reason, actor=own.actor
         )
     except (gaps.GapError, access_requests.RequestError) as exc:
         await session.rollback()

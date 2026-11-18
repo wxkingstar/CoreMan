@@ -29,6 +29,18 @@ async def current_grants(session: AsyncSession, bot_id: uuid.UUID) -> tuple[list
     return [key for key, _ in rows], [key for key, allowed in rows if allowed]
 
 
+async def lock_bot(session: AsyncSession, bot: Bot) -> None:
+    """写授权前先拿这位机器人的缺口咨询锁，再锁机器人行并读回最新版本号。
+
+    顺序与缺口、权限申请一致（咨询锁在最前），管理台改权限与所有者一键开通互相排队：先拿锁
+    再读现有授权，谁也不会覆盖掉对方刚写的。可重入：同一事务里调几次都行。
+    """
+    from coreman.core.assistants import gaps
+
+    await gaps.lock(session, bot.id)
+    await session.refresh(bot, ["version"], with_for_update=True)
+
+
 async def apply_grants(
     session: AsyncSession,
     request: Request,
@@ -39,12 +51,17 @@ async def apply_grants(
     write_keys: list[str] | None,
     comment: str = "",
 ) -> tuple[list[str], list[str]]:
-    """写入授权并返回（授权的系统、允许写的系统）；只 flush，调用方提交。"""
+    """写入授权并返回（授权的系统、允许写的系统）；只 flush，调用方提交。
+
+    不做任何权限判断与 If-Match 核对，由调用方负责。要先读现有授权再改的调用方，读之前先调
+    `lock_bot`。
+    """
     # 函数内引入：这几个辅助函数定义在路由模块里，路由模块又要引用本模块。
     from coreman.api.routers.infrastructure_admin import audit, persist, sync_companions
     from coreman.core.assistants import capabilities, gaps
 
     bot_id = bot.id
+    await lock_bot(session, bot)
     keys = sorted(set(keys))
     if write_keys is not None and not set(write_keys) <= set(keys):
         raise ApiError(422, 422, "允许写入的系统必须在授权列表中")

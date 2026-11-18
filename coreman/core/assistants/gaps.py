@@ -122,6 +122,16 @@ async def _lock(session: AsyncSession, bot_id: uuid.UUID) -> None:
     )
 
 
+async def lock(session: AsyncSession, bot_id: uuid.UUID) -> None:
+    """这位助理的缺口咨询锁（事务级，可重入）：改缺口、权限申请、写授权一律最先拿它。"""
+    await _lock(session, bot_id)
+
+
+def need_write(row: AssistantGap) -> bool:
+    """业务系统缺口要的是写：报的时候已经能读（`seen_rank` ≥ 1）还办不成，缺的就是写。"""
+    return row.kind == "business_system" and row.seen_rank >= 1
+
+
 async def get(
     session: AsyncSession, bot_id: uuid.UUID, seq: int, *, lock: bool = False
 ) -> AssistantGap:
@@ -450,6 +460,7 @@ def view(row: AssistantGap, fix: str, seqs: list[int]) -> dict[str, Any]:
         "need": row.need_enc,
         "status": row.status,
         "fix": fix,
+        "need_write": need_write(row),
         "hint": hint(row, fix),
         "followups": [followups.label(seq) for seq in seqs],
     }
@@ -493,9 +504,9 @@ OPEN_STEPS = {
         "开通后平台自动记为已解决。"
     ),
     "request": (
-        "  这个业务系统没有对你开放，要平台管理员批：和他一起写一句申请理由（会给管理员看，"
-        "写清要查什么、为什么），他当面同意后调用 gap_request 提交；"
-        "或请他在「我的助理」页点「申请」。"
+        "  这个业务系统没有对你开放，要平台管理员批：请他用自己的话说一两句申请理由（会给管理员看，"
+        "写清要查什么、为什么；不要抄上面记下的需要），再调用 gap_request，平台给他发确认卡，"
+        "他点「提交申请」才提交；或请他在「我的助理」页点「申请」。"
     ),
     "admin": "  这一项只能由平台管理员开：告诉他找管理员开什么（{key}）、用来做什么。",
     "node_admin": "  这一项要节点管理员在运行节点上装好 {key}：告诉他找谁、装什么。",

@@ -37,13 +37,16 @@ async function decline(gap: BoardGap) {
     await load()
   } catch (e) { ElMessage.error(errorMessage(e)) }
 }
+const level = (gap: BoardGap) => t('assistant.board.gap.levels.' + (gap.need_write ? 'write' : 'read'))
 async function grant(gap: BoardGap) {
   try {
-    await ElMessageBox.confirm(t('assistant.board.gap.grantConfirm', { name: gap.key }), t('assistant.board.gap.grant'), { type: 'info' })
+    await ElMessageBox.confirm(t('assistant.board.gap.grantConfirm', { name: gap.key, value: level(gap) }), t('assistant.board.gap.grant'), { type: 'info' })
   } catch { return }
   try {
-    await myAssistant.grantGap(gap.id, false)
-    ElMessage.success(t('assistant.board.gap.granted'))
+    const done = await myAssistant.grantGap(gap.id)
+    // 只有缺口真的解决了才说开通了：授权写进去了但级别仍不够时如实说。
+    if (done.status === 'resolved') ElMessage.success(t('assistant.board.gap.granted'))
+    else ElMessage.warning(t('assistant.board.gap.grantIncomplete'))
     await load()
   } catch (e) { ElMessage.error(errorMessage(e)) }
 }
@@ -58,12 +61,15 @@ async function request(gap: BoardGap) {
     reason = value
   } catch { return }
   try {
-    await myAssistant.requestGap(gap.id, false, reason.trim())
+    await myAssistant.requestGap(gap.id, reason.trim())
     ElMessage.success(t('assistant.board.gap.requestSent'))
     await load()
   } catch (e) { ElMessage.error(errorMessage(e)) }
 }
 async function withdraw(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.withdrawConfirm', { name: gap.id }), t('assistant.board.gap.withdraw'), { type: 'warning' })
+  } catch { return }
   try {
     await myAssistant.withdrawGap(gap.id)
     ElMessage.success(t('assistant.board.gap.withdrawn'))
@@ -183,11 +189,18 @@ defineExpose({ load })
                 <span v-if="gap.fix === 'admin' || gap.fix === 'node_admin'">：{{ gap.key }}</span>
               </div>
               <div
+                v-if="gap.kind === 'business_system'"
+                class="muted"
+                data-test="gap-level"
+              >
+                {{ t('assistant.board.gap.needLevel', { value: level(gap) }) }}
+              </div>
+              <div
                 v-if="gap.request?.status === 'rejected'"
                 class="muted"
                 data-test="gap-rejected"
               >
-                {{ t('assistant.board.gap.rejected', { value: gap.request.decision_note ?? '' }) }}
+                {{ gap.request.decision_note ? t('assistant.board.gap.rejected', { value: gap.request.decision_note }) : t('assistant.board.gap.rejectedPlain') }}
               </div>
               <el-button
                 v-if="gap.fix === 'self_grant' && gap.status === 'open'"

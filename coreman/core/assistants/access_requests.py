@@ -56,6 +56,11 @@ def _text(value: str, limit: int) -> str:
     return clean
 
 
+def clean_reason(value: str) -> str:
+    """申请理由按入库的样子整理（空白合并）；空的或超长的抛 invalid_reason。"""
+    return _text(value, MAX_REASON)
+
+
 async def _notify(
     session: AsyncSession, bot: Bot, row: SystemAccessRequest, system: BusinessSystem, owner: User
 ) -> int:
@@ -106,6 +111,32 @@ async def _notify(
     return len(found)
 
 
+async def requestable(
+    session: AsyncSession, bot: Bot, gap_seq: int
+) -> tuple[AssistantGap, BusinessSystem]:
+    """这个缺口现在能不能提交申请：拿咨询锁、锁缺口行后核对，不写任何东西。
+
+    Raises:
+        RequestError: not_business_system / gap_not_open / owner_can_grant /
+            system_not_requestable
+        GapError: gap_not_found
+    """
+    await gaps.lock(session, bot.id)
+    gap = await gaps.get(session, bot.id, gap_seq, lock=True)
+    if gap.kind != "business_system":
+        raise RequestError("not_business_system")
+    if gap.status != "open":
+        raise RequestError("gap_not_open")
+    fix = await gaps.fix_for(session, bot.id, gap)
+    if fix == "self_grant":
+        raise RequestError("owner_can_grant")
+    if fix != "request":
+        raise RequestError("system_not_requestable")
+    system = await session.get(BusinessSystem, gap.key)
+    assert system is not None  # fix_for 已确认登记过
+    return gap, system
+
+
 async def open_request(
     session: AsyncSession, bot: Bot, gap_seq: int, *, write: bool, reason: str, actor: User
 ) -> SystemAccessRequest:
@@ -119,19 +150,7 @@ async def open_request(
         GapError: gap_not_found
     """
     text = _text(reason, MAX_REASON)
-    await gaps._lock(session, bot.id)
-    gap = await gaps.get(session, bot.id, gap_seq, lock=True)
-    if gap.kind != "business_system":
-        raise RequestError("not_business_system")
-    if gap.status != "open":
-        raise RequestError("gap_not_open")
-    fix = await gaps.fix_for(session, bot.id, gap)
-    if fix == "self_grant":
-        raise RequestError("owner_can_grant")
-    if fix != "request":
-        raise RequestError("system_not_requestable")
-    system = await session.get(BusinessSystem, gap.key)
-    assert system is not None  # fix_for 已确认登记过
+    gap, system = await requestable(session, bot, gap_seq)
     live = await session.scalar(
         select(SystemAccessRequest.id).where(
             SystemAccessRequest.bot_id == bot.id,

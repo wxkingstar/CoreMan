@@ -287,6 +287,7 @@ async def test_board_lists_gaps_and_owner_can_decline(
             "need": f"查订单 {SECRET}",
             "status": "open",
             "fix": "admin",
+            "need_write": False,
             "hint": "需要平台管理员为这位助理开放业务系统 orders",
             "followups": ["F001"],
             "request": None,

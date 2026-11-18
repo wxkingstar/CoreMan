@@ -44,6 +44,10 @@ def test_event_keys_match_the_cards_that_send_them() -> None:
     assert set(rb.TOPIC_EVENTS) == {topics.NEW, topics.FORK}
     assert cold_start.EVENT_KEY == rb.COLD_START_EVENT
     assert assistant_stop.EVENT_KEY == rb.STOP_EVENT
+    from coreman.core.assistants import request_cards
+
+    assert request_cards.EVENT_KEY == rb.GAP_REQUEST_EVENT
+    assert {request_cards.SUBMIT, request_cards.DROP} == set(rb.GAP_REQUEST_VERBS)
     assert inflow.UPGRADE_EVENT in rb.AUTHORIZE_EVENTS
 
 
@@ -85,6 +89,8 @@ def test_choice_card_keys_match() -> None:
         ({"event_key": "assistant_cold_start_card", "level": "role.answer.x"}, "cold_start_answer"),
         ({"event_key": "assistant_cold_start_card", "level": "role.skip.x"}, "cold_start_skip"),
         ({"event_key": "assistant_stop", "level": "1.x"}, "assistant_stop"),
+        ({"event_key": "assistant_gap_request", "level": "submit.1.x"}, "gap_request_submit"),
+        ({"event_key": "assistant_gap_request", "level": "drop.1.x"}, "gap_request_drop"),
         ({"card_type": "credential"}, "credential_submit"),
         ({"event_key": "personal_authorize", "level": "all"}, "authorize_link"),
         ({"event_key": "personal_upgrade", "level": "w1"}, "authorize_link"),

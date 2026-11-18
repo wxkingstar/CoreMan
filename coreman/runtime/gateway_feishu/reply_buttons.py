@@ -60,6 +60,8 @@ Outcome = Literal[
     "cold_start_answer",
     "cold_start_skip",
     "assistant_stop",
+    "gap_request_submit",
+    "gap_request_drop",
     "credential_submit",
     "authorize_link",
     "choice_submit",
@@ -134,6 +136,11 @@ SCHEDULE_EVENT = "personal_schedule"
 TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
 COLD_START_EVENT = "assistant_cold_start_card"
 STOP_EVENT = "assistant_stop"
+GAP_REQUEST_EVENT = "assistant_gap_request"
+GAP_REQUEST_VERBS: dict[str, Outcome] = {
+    "submit": "gap_request_submit",
+    "drop": "gap_request_drop",
+}
 AUTHORIZE_EVENTS = frozenset({"personal_authorize", "personal_upgrade"})
 CHOICE_SUBMIT = "submit_choice"
 CHOICE_OTHER = "opt_other"
@@ -167,6 +174,9 @@ def _card_click(message: InboundMessage) -> Outcome | None:
         return "cold_start_skip" if parts[1:2] == ["skip"] else "cold_start_answer"
     if key == STOP_EVENT:
         return "assistant_stop"
+    if key == GAP_REQUEST_EVENT:
+        # 令牌是「submit|drop.到期.签名」。
+        return GAP_REQUEST_VERBS.get(str(action.get("level") or "").partition(".")[0])
     if key in AUTHORIZE_EVENTS:
         return "authorize_link"
     if key == CHOICE_SUBMIT:

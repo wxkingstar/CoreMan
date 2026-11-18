@@ -1,5 +1,6 @@
 """能力缺口工具：助理登记办不成事时卡在哪个权限上（`gap_report`），看已登记的（`gap_list`），
-为白名单外的业务系统提交权限申请（`gap_request`，只在所有者在场、当面同意理由的一轮里）。
+为白名单外的业务系统发起权限申请（`gap_request`：只在所有者在场的一轮里发一张确认卡，所有者
+点了「提交申请」才建单，见 `request_cards`）。
 
 登记在助理工具注册表的 `knowledge` 组：数据在平台自己的库里，子任务也能用。分派只认这一轮核验
 过的助理记录（`scope.bot`）。登记在注册表自己的文件末尾（`tools.py`），这里不导入它。
@@ -12,7 +13,13 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import access_requests, capabilities, followups, gaps
+from coreman.core.assistants import (
+    access_requests,
+    capabilities,
+    followups,
+    gaps,
+    request_cards,
+)
 from coreman.core.assistants.approvals import service as approvals_service
 from coreman.core.assistants.followup_tools import Label
 from coreman.core.assistants.records import is_assistant
@@ -64,10 +71,13 @@ class Request(Arguments):
             strip_whitespace=True, min_length=1, max_length=access_requests.MAX_REASON
         ),
         Field(
-            description="The reason the owner agreed to in this chat; administrators will read it"
+            description=(
+                "One or two sentences in the owner's own words from this chat: what he needs the"
+                " system for. Platform administrators read it. Never copy the recorded need or any"
+                " other private content"
+            )
         ),
     ]
-    write: bool = False
 
 
 OWN: dict[str, tuple[type[Arguments], str]] = {
@@ -84,9 +94,11 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     ),
     "gap_request": (
         Request,
-        "Submit an access request for a business system gap that is not open to you. Only in a turn"
-        " the owner started, and only after he agreed to the reason in this chat; platform"
-        " administrators decide.",
+        "Ask the owner to confirm an access request for a business system gap that is not open to"
+        " you. Only in a turn the owner started. Sends him a confirmation card showing the system,"
+        " read or write (decided by the platform from the gap) and the reason; nothing is"
+        " submitted until he taps Submit, then platform administrators decide. Write the reason"
+        " from the owner's own words; never copy the recorded need or other private content.",
     ),
 }
 STATUSES = {"live": gaps.LIVE, "declined": ("declined",), "all": GAP_STATUSES}
@@ -110,7 +122,8 @@ HINTS = {
 }
 REQUEST_HINTS = {
     "owner_turn_required": (
-        "申请只能在所有者本人在场的一轮里、他当面同意理由后提交；记进待跟进，等他在场时再办。"
+        "申请只能在所有者本人在场的一轮里发起，由他在确认卡上点「提交申请」；记进待跟进，"
+        "等他在场时再办。"
     ),
     "owner_can_grant": (
         "这个系统对你开放，所有者自己就能开：请他在「我的助理」页这一条上点「开通」。"
@@ -120,8 +133,14 @@ REQUEST_HINTS = {
     "gap_not_found": "没有这个缺口；用 gap_list 看现有的。",
     "not_business_system": "只有业务系统的缺口能申请。",
     "system_not_requestable": "这个系统没有登记或已停用，请所有者联系平台管理员。",
-    "invalid_reason": f"reason 写一两句话，不超过 {access_requests.MAX_REASON} 字。",
-    "requested": "已提交，平台管理员处理后会交回给你；告诉所有者已经提交了。",
+    "invalid_reason": (
+        f"reason 用所有者自己的话写一两句，不超过 {access_requests.MAX_REASON} 字；"
+        "不要抄你记下的需要或别的私密内容。"
+    ),
+    "confirmation_sent": (
+        "确认卡已发给所有者：卡上写着系统、级别和理由，他点「提交申请」才会提交，点「不提交」就作废。"
+        "告诉他看一下卡片；不要说已经提交了。"
+    ),
 }
 
 
@@ -135,7 +154,7 @@ def definitions() -> list[dict[str, Any]]:
 async def dispatch(
     session: AsyncSession, cipher: Cipher, scope: Scope, name: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """执行一个缺口工具；调用方（MCP 入口）负责提交。`cipher` 用不上。"""
+    """执行一个缺口工具；调用方（MCP 入口）负责提交。`cipher` 只给 `gap_request` 签确认卡。"""
     found = OWN.get(name)
     if found is None or not is_assistant(scope.bot):
         return {"error": "invalid_tool_or_arguments"}
@@ -145,7 +164,7 @@ async def dispatch(
         return {"error": "invalid_tool_or_arguments", "invalid": approvals_service._problems(exc)}
     bot_id = scope.bot.id
     if name == "gap_request":
-        return await _request(session, scope, args)
+        return await _request(session, cipher, scope, args)
     try:
         if name == "gap_list":
             rows = await gaps.listing(session, bot_id, STATUSES[args.status])
@@ -179,8 +198,10 @@ async def dispatch(
     return result
 
 
-async def _request(session: AsyncSession, scope: Scope, args: Request) -> dict[str, Any]:
-    """所有者在场、当面同意理由后提交申请；平台来源与审批结果的轮次一律不受理。
+async def _request(
+    session: AsyncSession, cipher: Cipher, scope: Scope, args: Request
+) -> dict[str, Any]:
+    """所有者在场时给他发确认卡，不建单；平台来源与审批结果的轮次一律不受理。
 
     `scope` 是这一轮核验过的所有者与他的助理（`scope.user_id` 就是所有者），不另收身份参数。
     """
@@ -190,14 +211,15 @@ async def _request(session: AsyncSession, scope: Scope, args: Request) -> dict[s
     if owner is None or scope.bot.owner_id != owner.id or not scope.bot.enabled:
         return {"error": "owner_turn_required", "hint": REQUEST_HINTS["owner_turn_required"]}
     try:
-        row = await access_requests.open_request(
+        await request_cards.stage(
             session,
-            scope.bot,
-            gaps.parse_label(args.id),
-            write=args.write,
+            cipher,
+            bot=scope.bot,
+            task_id=scope.task.id,
+            chat_id=scope.chat_id,
+            gap_seq=gaps.parse_label(args.id),
             reason=args.reason,
-            actor=owner,
         )
     except (gaps.GapError, access_requests.RequestError) as exc:
         return {"error": exc.code, "hint": REQUEST_HINTS.get(exc.code, "")}
-    return {"status": "requested", "request_id": str(row.id), "hint": REQUEST_HINTS["requested"]}
+    return {"status": "confirmation_sent", "hint": REQUEST_HINTS["confirmation_sent"]}

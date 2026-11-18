@@ -56,11 +56,8 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     },
     ("POST", "/gaps/{label}/decline"): {"path": "/gaps/G001/decline"},
     # 种子缺口是 other 种类：开通与申请都 409、撤回是 404（上面没有在途的申请），一样都不改。
-    ("POST", "/gaps/{label}/grant"): {"path": "/gaps/G001/grant", "json": {"write": False}},
-    ("POST", "/gaps/{label}/request"): {
-        "path": "/gaps/G001/request",
-        "json": {"write": False, "reason": "查订单"},
-    },
+    ("POST", "/gaps/{label}/grant"): {"path": "/gaps/G001/grant"},
+    ("POST", "/gaps/{label}/request"): {"path": "/gaps/G001/request", "json": {"reason": "查订单"}},
     ("POST", "/gaps/{label}/withdraw"): {"path": "/gaps/G001/withdraw"},
     ("GET", "/approvals/recent"): {},
     ("GET", "/notes"): {},
