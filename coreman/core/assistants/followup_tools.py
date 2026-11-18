@@ -93,7 +93,7 @@ class Update(Arguments):
     handler: Handler | None = Field(default=None, description=HANDLER)
     handler_name: HandlerName | None = None
     job: JobRef | None = None
-    approval: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = (
+    approval_id: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = (
         Field(
             default=None,
             description="An approval id (from approval_list) to show under this follow-up",
@@ -262,12 +262,6 @@ async def _run(
             session, bot_id, seq, dropped=args.outcome == "dropped", notes=args.notes
         )
     else:
-        if args.approval is not None:
-            try:
-                approval_id = uuid.UUID(args.approval)
-            except ValueError:
-                raise followups.FollowupError("approval_not_found") from None
-            row = await followups.link_approval(session, bot_id, seq, approval_id)
         changes: dict[str, Any] = {}
         for field in ("category", "title", "notes", "needs_owner"):
             if getattr(args, field) is not None:
@@ -281,10 +275,18 @@ async def _run(
             )
         for field in args.clear:
             changes[field] = None
-        if changes:
-            row = await followups.update(session, bot_id, seq, **changes)
-        elif args.approval is None:
+        if not changes and args.approval_id is None:
             raise followups.FollowupError("nothing_to_update")
+        # 挂单与改字段要么都生效、要么都不生效：后一步报错时前一步的 flush 也撤掉。
+        async with session.begin_nested():
+            if args.approval_id is not None:
+                try:
+                    approval_id = uuid.UUID(args.approval_id)
+                except ValueError:
+                    raise followups.FollowupError("approval_not_found") from None
+                row = await followups.link_approval(session, bot_id, seq, approval_id)
+            if changes:
+                row = await followups.update(session, bot_id, seq, **changes)
     return {"followup": followups.view(row)}
 
 

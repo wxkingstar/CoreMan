@@ -397,13 +397,15 @@ async def link_approval(
 ) -> AssistantFollowup:
     """把这位助理的一张审批单挂到这一条下面（换挂也行）。
 
+    先锁审批单再锁待跟进行，与审批决定（锁单后刷新所挂条目）同序，避免互等。
+
     Raises:
         FollowupError: followup_not_found / followup_closed / approval_not_found
     """
-    row = await _live(session, bot_id, seq)
     found = await session.get(AssistantApproval, approval_id, with_for_update=True)
     if found is None or found.bot_id != bot_id:
         raise FollowupError("approval_not_found")
+    row = await _live(session, bot_id, seq)
     found.followup_id = row.id
     row.updated_at = row.progress_at = utcnow()
     await session.flush()

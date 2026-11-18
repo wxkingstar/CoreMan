@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,13 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.core.assistants import capabilities, followups, gaps, sealed
-from coreman.core.db.models import AssistantInbox, BotSystemGrant, BusinessSystem, User
+from coreman.core.db.models import (
+    AssistantInbox,
+    BotSystemGrant,
+    BusinessSystem,
+    FeishuPersonalGrant,
+    User,
+)
 from tests.integration.assistant_helpers import identified
 from tests.integration.lifecycle_helpers import active_assistant, install
 from tests.integration.shift_helpers import say
@@ -165,3 +172,52 @@ async def test_withheld_turn_resolves_nothing(db_session: AsyncSession) -> None:
         deployment=CONFIGURED,
     )
     assert (await gaps.get(db_session, bot.id, 1)).status == "resolved"
+
+
+async def _feishu_gap_already_granted(session: AsyncSession) -> uuid.UUID:
+    """所有者在「我的飞书」页另行授权过 im:message，之后助理才报这项缺口。"""
+    bot, owner, _ = await active_assistant(session)
+    await session.execute(
+        update(FeishuPersonalGrant)
+        .where(FeishuPersonalGrant.bot_id == bot.id, FeishuPersonalGrant.user_id == owner.id)
+        .values(
+            status="connected",
+            scopes=["offline_access", "im:message"],
+            requested_scopes=["offline_access", "im:message"],
+        )
+    )
+    await _report(session, bot.id, "feishu_scope", "im:message")
+    assert (await gaps.get(session, bot.id, 1)).seen_rank == 0
+    return bot.id
+
+
+async def _turn(session: AsyncSession, bot_id: uuid.UUID, mode: capabilities.Mode) -> None:
+    await capabilities.apply(
+        session,
+        bot_id,
+        mode=mode,
+        mcp_supported=False,
+        mounted=False,
+        cloud_attached=False,
+        deployment=CONFIGURED,
+    )
+
+
+async def test_feishu_gap_already_granted_resolves_on_attended_turn(
+    db_session: AsyncSession,
+) -> None:
+    bot_id = await _feishu_gap_already_granted(db_session)
+    await _turn(db_session, bot_id, "attended")
+    await _turn(db_session, bot_id, "attended")
+    assert (await gaps.get(db_session, bot_id, 1)).status == "resolved"
+    told = [r for r in await _reminders(db_session, bot_id) if r["reminder"] == "gap_resolved"]
+    assert len(told) == 1 and told[0]["gap"] == "G001"
+
+
+@pytest.mark.parametrize("mode", ["unattended", "withheld"])
+async def test_feishu_gap_waits_for_an_attended_turn(
+    db_session: AsyncSession, mode: capabilities.Mode
+) -> None:
+    bot_id = await _feishu_gap_already_granted(db_session)
+    await _turn(db_session, bot_id, mode)
+    assert (await gaps.get(db_session, bot_id, 1)).status == "open"

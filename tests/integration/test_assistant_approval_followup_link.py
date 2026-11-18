@@ -63,7 +63,7 @@ async def test_update_links_an_existing_approval(db_session: AsyncSession) -> No
         None,
         scope,
         "followup_update",
-        {"id": "F001", "approval": str(row.id)},  # type: ignore[arg-type]
+        {"id": "F001", "approval_id": str(row.id)},  # type: ignore[arg-type]
     )
     await db_session.commit()
     assert "error" not in out
@@ -75,9 +75,28 @@ async def test_update_links_an_existing_approval(db_session: AsyncSession) -> No
             None,
             scope,
             "followup_update",
-            {"id": "F001", "approval": bad_id},  # type: ignore[arg-type]
+            {"id": "F001", "approval_id": bad_id},  # type: ignore[arg-type]
         )
         assert bad["error"] == "approval_not_found"
+
+
+async def test_update_error_leaves_the_link_unapplied(db_session: AsyncSession) -> None:
+    bot, _, scope = await assistant_turn(db_session)
+    await followups.add(db_session, bot.id, category="promised", title="回复李四")
+    row = _approval(bot.id)
+    db_session.add(row)
+    await db_session.commit()
+    out = await followup_tools.dispatch(
+        db_session,
+        None,
+        scope,
+        "followup_update",
+        {"id": "F001", "approval_id": str(row.id), "handler": "job", "job": str(uuid.uuid4())},  # type: ignore[arg-type]
+    )
+    assert out["error"] == "job_not_found"
+    await db_session.commit()
+    await db_session.refresh(row)
+    assert row.followup_id is None
 
 
 async def test_decision_moves_the_followup(db_session: AsyncSession) -> None:

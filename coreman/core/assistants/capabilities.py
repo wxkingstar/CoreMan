@@ -21,7 +21,13 @@ from coreman.core.assistants import gaps
 from coreman.core.assistants.gaps import normalize_key
 from coreman.core.cloud_proxy import aliyun
 from coreman.core.cloud_proxy.risk_policy import CloudProxyPolicy
-from coreman.core.db.models import BotSystemGrant, BusinessSystem
+from coreman.core.db.models import (
+    AssistantGap,
+    Bot,
+    BotSystemGrant,
+    BusinessSystem,
+    FeishuPersonalGrant,
+)
 
 Mode = Literal["attended", "unattended", "withheld"]
 Level = Literal["confirm", "approval", "read", "unsupported", "withheld"]
@@ -199,6 +205,42 @@ def note(lines: list[SystemLine], products: list[str], *, mode: Mode, cloud_atta
     return HEAD + "".join(parts)
 
 
+async def _resolve_feishu(session: AsyncSession, bot_id: uuid.UUID) -> None:
+    """所有者另行授权（如在「我的飞书」页）后，按他现在的飞书授权解决已满足的飞书权限缺口。
+
+    没有未解决的飞书缺口时只做一次查询；失败只回滚这一段（`resolve_quietly`），不拖垮这一轮。
+    """
+    pending = await session.scalar(
+        select(AssistantGap.id)
+        .where(
+            AssistantGap.bot_id == bot_id,
+            AssistantGap.kind == "feishu_scope",
+            AssistantGap.status.in_(gaps.LIVE),
+        )
+        .limit(1)
+    )
+    if pending is None:
+        return
+    grant = await session.scalar(
+        select(FeishuPersonalGrant)
+        .join(Bot, Bot.id == FeishuPersonalGrant.bot_id)
+        .where(
+            FeishuPersonalGrant.bot_id == bot_id,
+            FeishuPersonalGrant.user_id == Bot.owner_id,
+            FeishuPersonalGrant.status == "connected",
+        )
+    )
+    if grant is None:
+        return
+    await gaps.resolve_quietly(
+        session,
+        bot_id,
+        "feishu_scope",
+        dict.fromkeys(gaps.feishu_keys(grant), 1),
+        log_event="assistant_gap_resolve_failed_on_turn",
+    )
+
+
 async def apply(
     session: AsyncSession,
     bot_id: uuid.UUID,
@@ -211,7 +253,8 @@ async def apply(
     delivered: frozenset[str] = frozenset(),
 ) -> str:
     """本轮说明；顺带把级别升上去了的业务系统与云产品缺口记为解决（按授权与部署，不看这一轮
-    在不在场）。冷启动、告警这类轮次不比对，等下一个正常的轮次。"""
+    在不在场）。所有者在场的轮次还按他现在的飞书授权解决已满足的飞书权限缺口。冷启动、告警这类
+    轮次不比对，等下一个正常的轮次。"""
     if mode == "withheld":
         return WITHHELD
     lines = await systems(
@@ -225,4 +268,6 @@ async def apply(
     products = cloud_products(deployment)
     await gaps.resolve(session, bot_id, "business_system", await system_ranks(session, bot_id))
     await gaps.resolve(session, bot_id, "cloud_product", dict.fromkeys(products, 1))
+    if mode == "attended":
+        await _resolve_feishu(session, bot_id)
     return note(lines, products, mode=mode, cloud_attached=cloud_attached)

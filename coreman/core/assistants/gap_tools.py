@@ -109,6 +109,8 @@ HINTS = {
     "invalid_key": (
         "key 写代号：飞书权限名或档位、业务系统标识、云产品名、凭证的环境变量名、命令名，"
         "其他用英文短名；只能有字母、数字和 _ . : / -。"
+        "凭证（kind=credential）的 key 必须是环境变量式的名字：大写字母开头，"
+        "只含大写字母、数字和 _（^[A-Z][A-Z0-9_]*$），例如 GIT_TOKEN。"
     ),
     "invalid_need": f"need 写一句话，不超过 {gaps.MAX_NEED} 字。",
     "resolve_not_allowed": (
