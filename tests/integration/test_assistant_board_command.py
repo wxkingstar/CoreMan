@@ -50,10 +50,26 @@ async def test_someone_else_gets_nothing(db_engine: AsyncEngine, db_session: Asy
     assert await last_sent(db_session, bot) is None
 
 
-async def test_board_word_is_not_merged_into_a_running_turn() -> None:
-    from coreman.runtime.worker import assistant_board
-
-    assert "看板" in assistant_board.COMMANDS
+@pytest.mark.parametrize("ready", ["not_active", "not_identified"])
+async def test_not_intercepted_until_the_assistant_is_ready(
+    db_engine: AsyncEngine, db_session: AsyncSession, ready: str
+) -> None:
+    """开通没走完、或设置行还没记下身份：「看板」不截下，交给后面的流程，不回总表卡片。"""
+    bot, _, _ = await active_assistant(db_session)
+    if ready == "not_active":
+        await identified(db_session, bot)
+        bot.assistant_state = "provisioning"
+    await db_session.commit()
+    done, relay = await say(db_engine, db_session, bot, "看板")
+    assert done.result is None
+    if ready == "not_active":
+        # 后面的流程照常拦下没开通好的助理。
+        assert done.error_code == "assistant_paused" and relay.requests == []
+    else:
+        # 当成一句普通的话派给了模型。
+        assert done.status == "succeeded" and len(relay.requests) == 1
+    sent = await last_sent(db_session, bot)
+    assert sent is None or not sent.dedupe_key.startswith(f"assistant-digest:{bot.id}:board-")
 
 
 async def test_closing_an_item_greys_out_its_button_on_the_board(

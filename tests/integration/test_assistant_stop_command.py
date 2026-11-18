@@ -289,9 +289,11 @@ async def test_confirming_an_already_stopped_assistant_does_not_say_stopping(
     assert update is not None and "正在停用" not in str(update.payload)
 
 
+@pytest.mark.parametrize("word", ["停用助理", "看板"])
 async def test_a_queued_stop_command_is_not_merged_into_the_running_turn(
-    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, word: str
 ) -> None:
+    """停用与「看板」都留给它自己那一轮去截下，不并进正在跑的这一轮。"""
     install(monkeypatch)
     bot, _, _ = await active_assistant(db_session)
     kw: dict[str, Any] = {"sender": "owner_pid", "chat_type": "single", "chat_id": "oc_private"}
@@ -301,7 +303,7 @@ async def test_a_queued_stop_command_is_not_merged_into_the_running_turn(
     follow = await chat_task(db_session, bot, "顺便看下日程", **kw)
     follow.status = "running"
     await db_session.commit()
-    stop = await chat_task(db_session, bot, "停用助理", **kw)
+    stop = await chat_task(db_session, bot, word, **kw)
     for row in (follow, stop):
         row.status, row.claimed_by = "queued", None
     await db_session.commit()
@@ -311,4 +313,4 @@ async def test_a_queued_stop_command_is_not_merged_into_the_running_turn(
     assert merged is not None and merged.error_code == "merged"
     waiting = await db_session.get(Task, stop.id, populate_existing=True)
     assert waiting is not None and waiting.status == "queued" and waiting.error_code is None
-    assert "停用助理" not in str(relay.requests)
+    assert word not in str(relay.requests)
