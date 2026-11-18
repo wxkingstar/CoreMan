@@ -541,6 +541,9 @@ class AssistantGap(Base):
     key: Mapped[str] = mapped_column(Text)
     need_enc: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    # 报缺口（或重新打开）时这项能力已有的级别（`capabilities.current_rank`：0 没有、1 能读、
+    # 2 能写）：开轮比对时级别比它高才算开通，免得把报的时候就有的能力当成「刚开通」。
+    seen_rank: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
     resolved_at: Mapped[datetime | None] = _ts()

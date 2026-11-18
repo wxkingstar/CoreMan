@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import followups, gaps
+from coreman.core.assistants import capabilities, followups, gaps
 from coreman.core.assistants.approvals import service as approvals_service
 from coreman.core.assistants.followup_tools import Label
 from coreman.core.assistants.records import is_assistant
@@ -118,6 +118,8 @@ async def dispatch(
                 ]
             }
         seqs = [followups.parse_label(value) for value in args.followups]
+        # 报的时候这项能力已有的级别由平台按授权算，不由助理填：之后升上去才算开通。
+        rank = await capabilities.current_rank(session, bot_id, args.kind, args.key)
         row, outcome = await gaps.report(
             session,
             bot_id,
@@ -126,6 +128,7 @@ async def dispatch(
             need=args.need,
             followup_seqs=seqs,
             resolved=args.resolved,
+            seen_rank=rank,
         )
     except (gaps.GapError, followups.FollowupError) as exc:
         out: dict[str, Any] = {"error": exc.code}

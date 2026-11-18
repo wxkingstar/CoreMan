@@ -232,6 +232,8 @@ class SystemAccess:
     issued: list[IssuedRecord] = field(default_factory=list)
     # 进本轮块的状态：这位发言者本轮拿不到凭据、或某个系统签发失败。
     note: str = ""
+    # 这一轮真正下发了的系统（签出令牌的 env / mcp、配上的代理系统）；没在里面的这一轮用不了。
+    delivered: frozenset[str] = frozenset()
 
 
 # 本轮一个令牌都没有时的说明。写成模型对用户的行动指引，不是错误码：静默不下发会让模型以为
@@ -569,4 +571,11 @@ async def _issue(
     ):
         notes.append(PROXY_WRITE_REMINDER)
     note = "\n".join(notes)
-    return SystemAccess(env, prompt, subject=subject, issued=issued, note=note)
+    return SystemAccess(
+        env,
+        prompt,
+        subject=subject,
+        issued=issued,
+        note=note,
+        delivered=frozenset(str(config["key"]) for config in configs),
+    )

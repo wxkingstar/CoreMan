@@ -37,6 +37,8 @@ def upgrade() -> None:
         sa.Column("key", sa.Text(), nullable=False),
         sa.Column("need_enc", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), server_default=sa.text("'open'"), nullable=False),
+        # 报缺口时这项能力已有的级别（0 没有、1 能读、2 能写）：之后升上去才算开通。
+        sa.Column("seen_rank", sa.SmallInteger(), server_default=sa.text("0"), nullable=False),
         _ts("created_at", server_default=sa.text("now()"), nullable=False),
         _ts("updated_at", server_default=sa.text("now()"), nullable=False),
         _ts("resolved_at", nullable=True),

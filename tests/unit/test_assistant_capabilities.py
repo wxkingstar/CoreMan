@@ -36,22 +36,42 @@ def test_level(
 
 
 @pytest.mark.parametrize(
-    ("delivery", "mcp", "expected"),
+    ("delivery", "mcp", "mounted", "expected"),
     [
-        # 没人点名的一轮：令牌会进运行环境的系统（env、mcp）不下发，标成收起而不是可读写。
-        ("env", False, "withheld"),
-        ("mcp", True, "withheld"),
+        # 这一轮没拿到（没人点名、发言者身份不可用、签发失败、调度回合）：标成没下发，不说可读写。
+        ("env", False, False, "withheld"),
+        ("mcp", True, False, "withheld"),
+        ("proxy", False, True, "withheld"),
         # 运行环境本来就不支持的仍按不支持说。
-        ("mcp", False, "unsupported"),
-        # 平台代理的系统照常。
-        ("proxy", False, "confirm"),
+        ("mcp", False, False, "unsupported"),
+        ("proxy", False, False, "unsupported"),
     ],
 )
-def test_level_tokenless(delivery: str, mcp: bool, expected: str) -> None:
+def test_level_not_delivered(delivery: str, mcp: bool, mounted: bool, expected: str) -> None:
     got = cap.level(
-        system(delivery), True, mode="attended", mcp_supported=mcp, mounted=True, tokenless=True
-    )  # type: ignore[arg-type]
+        system(delivery),  # type: ignore[arg-type]
+        True,
+        mode="attended",
+        mcp_supported=mcp,
+        mounted=mounted,
+        delivered=False,
+    )
     assert got == expected
+
+
+@pytest.mark.parametrize(
+    ("delivery", "write", "openapi", "expected"),
+    [
+        ("proxy", False, "https://orders.example.com/openapi.json", 1),
+        ("proxy", True, "https://orders.example.com/openapi.json", 2),
+        # 没有 OpenAPI 地址的代理系统调不了：和没授权一样。
+        ("proxy", True, None, 0),
+        ("env", False, None, 2),
+        ("mcp", False, None, 2),
+    ],
+)
+def test_grant_rank(delivery: str, write: bool, openapi: str | None, expected: int) -> None:
+    assert cap.grant_rank(system(delivery, openapi), write) == expected  # type: ignore[arg-type]
 
 
 def test_note_lists_systems_and_products() -> None:
@@ -63,15 +83,12 @@ def test_note_lists_systems_and_products() -> None:
     assert text.startswith(cap.HEAD)
     assert "订单系统（orders）只读" in text and "工单（tickets）可读写" in text
     assert "云签名代理：alidns、domain" in text and "确认卡" in text
-    assert cap.usable(lines + [cap.SystemLine("x", "X", "unsupported")]) == {"orders", "tickets"}
 
 
 def test_note_marks_withheld_systems() -> None:
     lines = [cap.SystemLine("crm", "客户系统", "withheld")]
     text = cap.note(lines, [], mode="attended", cloud_attached=False)
     assert "客户系统（crm）本轮没下发" in text and "可读写" not in text
-    # 收起的系统仍是授权了的：缺口照样算解决。
-    assert cap.usable(lines) == {"crm"}
 
 
 def test_note_when_nothing_or_withheld() -> None:

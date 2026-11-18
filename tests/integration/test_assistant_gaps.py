@@ -99,9 +99,9 @@ async def test_resolve_refreshes_and_queues_one_reminder(db_session: AsyncSessio
     await db_session.execute(
         update(AssistantFollowup).where(AssistantFollowup.bot_id == bot.id).values(progress_at=OLD)
     )
-    done = await gaps.resolve(db_session, bot.id, "business_system", ["ORDERS", "other"])
+    done = await gaps.resolve(db_session, bot.id, "business_system", {"ORDERS": 1, "other": 1})
     assert [g.id for g in done] == [row.id]
-    assert await gaps.resolve(db_session, bot.id, "business_system", ["orders"]) == []
+    assert await gaps.resolve(db_session, bot.id, "business_system", {"orders": 2}) == []
     await db_session.commit()
     assert (await gaps.get(db_session, bot.id, row.seq)).status == "resolved"
     told = await _reminders(db_session, bot.id)
@@ -161,3 +161,43 @@ async def test_fix_for_business_system_follows_the_allowlist(db_session: AsyncSe
         )
         fixes[key] = await gaps.fix_for(db_session, bot.id, row)
     assert fixes == {"open_sys": "grant_page", "closed_sys": "admin", "missing_sys": "admin"}
+
+
+async def test_resolve_needs_a_higher_rank_than_at_report_time(db_session: AsyncSession) -> None:
+    """报缺口时已经有的能力不算「开通了」：只有级别升上去才解决；重新打开时按当时的级别记。"""
+    bot, _ = await ready(db_session)
+    await followups.add(db_session, bot.id, category="promised", title="改订单")
+    row, _ = await gaps.report(
+        db_session,
+        bot.id,
+        kind="business_system",
+        key="orders",
+        need="改订单",
+        followup_seqs=[1],
+        seen_rank=1,
+    )
+    assert row.seen_rank == 1
+    assert await gaps.resolve(db_session, bot.id, "business_system", {"orders": 1}) == []
+    assert await gaps.resolve(db_session, bot.id, "business_system", {"orders": 2}) == [row]
+    # 授权又收回，再报：重新打开，按现在的级别记。
+    again, outcome = await gaps.report(
+        db_session,
+        bot.id,
+        kind="business_system",
+        key="orders",
+        need="改订单",
+        followup_seqs=[],
+        seen_rank=2,
+    )
+    assert outcome == "updated" and again.status == "open" and again.seen_rank == 2
+    # 还开着的缺口再报不改：否则级别刚升上去、还没比对就被抹平。
+    await gaps.report(
+        db_session,
+        bot.id,
+        kind="business_system",
+        key="orders",
+        need="改订单",
+        followup_seqs=[],
+        seen_rank=0,
+    )
+    assert again.seen_rank == 2

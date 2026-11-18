@@ -515,8 +515,8 @@ class OpenStage(ChatStageBase):
         )
         if is_assistant(bot):
             # 个人助理：本轮挂了哪些业务系统（读写级别）与云产品写进本轮块，已可用的缺口记为解决。
-            # 告警与冷启动不是替所有者办事的一轮，清单不列；调度回合与没人点名的一轮令牌不进
-            # 运行环境，env / mcp 系统标成本轮没下发。
+            # 告警与冷启动不是替所有者办事的一轮，清单不列、也不比对缺口。级别按这一轮实际下发的
+            # 说（没人点名、身份不可用、签发失败的标成没下发）；调度回合什么都不挂进运行环境。
             from coreman.core.assistants import capabilities
 
             ctx.turn_notes.append(
@@ -534,7 +534,7 @@ class OpenStage(ChatStageBase):
                     and intake.speaker.user_id is not None
                     and not (alert_turn or cold_start or bot_help),
                     deployment=ctx,
-                    tokenless=unprompted or origin == "dispatch",
+                    delivered=frozenset() if origin == "dispatch" else access.delivered,
                 )
             )
         from coreman.core.prompting.rich_cards import with_reply_images

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -191,8 +191,12 @@ async def report(
     need: str,
     followup_seqs: list[int],
     resolved: bool = False,
+    seen_rank: int = 0,
 ) -> tuple[AssistantGap, str]:
     """登记（或补充）一个缺口，把这几条待跟进挂上去；`resolved` 是助理自检后报已解决。
+
+    `seen_rank`：这项能力现在的级别（调用方按授权算，见 `capabilities.current_rank`），新建与
+    重新打开时记下；还开着的缺口再报不改，免得级别刚升上去、还没比对就被抹平。
 
     Returns:
         (缺口, created | updated | declined | resolved)。declined：所有者不开，原样返回，
@@ -250,6 +254,7 @@ async def report(
             key=key,
             need_enc=need_text,
             status="open",
+            seen_rank=seen_rank,
         )
         session.add(row)
         await session.flush()
@@ -258,7 +263,7 @@ async def report(
         row.need_enc = need_text
         if row.status == "resolved":
             # 用过又不行了（授权被收回、系统被撤）：重新打开。
-            row.status, row.resolved_at = "open", None
+            row.status, row.resolved_at, row.seen_rank = "open", None, seen_rank
         row.updated_at = now
         outcome = "updated"
     for item in items:
@@ -269,13 +274,17 @@ async def report(
 
 
 async def resolve(
-    session: AsyncSession, bot_id: uuid.UUID, kind: str, keys: Iterable[str]
+    session: AsyncSession, bot_id: uuid.UUID, kind: str, ranks: Mapping[str, int]
 ) -> list[AssistantGap]:
-    """这些标识现在可用了：这位助理这一种类里对得上的未解决缺口记为已解决，并交回续接。
+    """这些标识现在的级别：比报缺口时（`seen_rank`）高的未解决缺口记为已解决，并交回续接。
 
-    不认识的标识跳过；已经解决或不开的不动。返回这一次解决的缺口。
+    不认识的标识跳过；已经解决或不开的不动；级别没升上去的不动。返回这一次解决的缺口。
     """
-    wanted = _keys(kind, keys)
+    current: dict[str, int] = {}
+    for raw, rank in ranks.items():
+        for key in _keys(kind, [raw]):
+            current[key] = max(rank, current.get(key, 0))
+    wanted = {key for key, rank in current.items() if rank > 0}
     if not wanted:
         return []
     await _lock(session, bot_id)
@@ -293,6 +302,7 @@ async def resolve(
             .execution_options(populate_existing=True)
         )
     )
+    rows = [row for row in rows if current[row.key] > row.seen_rank]
     if not rows:
         return []
     await sealed.open_rows(session, rows)

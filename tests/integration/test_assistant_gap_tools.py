@@ -88,3 +88,36 @@ async def test_errors_carry_hints(db_session: AsyncSession) -> None:
     assert out["error"] == "followup_not_found"
     out = await call(db_session, scope, "gap_report", kind="repo", key="x", need="x")
     assert out["error"] == "invalid_tool_or_arguments"
+
+
+async def test_report_records_the_current_rank_server_side(db_session: AsyncSession) -> None:
+    """工具不收级别参数：平台按这位助理现在的授权记下报缺口时的级别。"""
+    from coreman.core.db.models import BotSystemGrant, BusinessSystem
+
+    bot, _, scope = await assistant_turn(db_session)
+    db_session.add(
+        BusinessSystem(
+            key="orders",
+            name="订单系统",
+            token_delivery="proxy",
+            openapi_url="https://orders.example.com/openapi.json",
+        )
+    )
+    await db_session.flush()
+    db_session.add(BotSystemGrant(bot_id=bot.id, system_key="orders"))
+    await db_session.commit()
+    out = await call(
+        db_session, scope, "gap_report", kind="business_system", key="orders", need="改订单"
+    )
+    assert out["outcome"] == "created"
+    assert (await gaps.get(db_session, bot.id, 1)).seen_rank == 1
+    rejected = await call(
+        db_session,
+        scope,
+        "gap_report",
+        kind="business_system",
+        key="crm",
+        need="x",
+        seen_rank=2,
+    )
+    assert rejected["error"] == "invalid_tool_or_arguments"
