@@ -363,6 +363,7 @@ async def propose(
         "background": staged.meta.background,
         "research": staged.meta.research,
         "topic": staged.meta.topic,
+        "followup": staged.meta.followup,
         "channel": staged.facts[0].channel,
         "chat_id": first["chat_id"],
         "args_hash": staged.args_hash,

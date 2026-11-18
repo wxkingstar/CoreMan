@@ -25,7 +25,7 @@ from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import feedback, platform_turns, sealed, sent
+from coreman.core.assistants import feedback, followups, platform_turns, sealed, sent
 from coreman.core.assistants.approvals import (
     attachments,
     catalog,
@@ -114,6 +114,10 @@ class Meta(Arguments):
     unverified: Annotated[str, StringConstraints(max_length=500)] = Field(
         default="",
         description="Claims in this draft you inferred but did not verify; empty if none",
+    )
+    followup: Annotated[str, StringConstraints(strip_whitespace=True, max_length=12)] = Field(
+        default="",
+        description="The follow-up this write serves, such as F012; listed under it on the board",
     )
     more_recipients: list[Recipient] = Field(
         default_factory=list,
@@ -544,6 +548,7 @@ async def submit(
     if await pending_count(session, bot.id) >= MAX_PENDING:
         return dict(TOO_MANY)
     row_id = uuid.uuid4()
+    followup_id = await followups.approval_target(session, bot.id, staged.meta.followup)
     try:
         # Tower 没收下就连同暂存的行一起回滚：不留一张谁也批不了的单。
         async with session.begin_nested():
@@ -554,6 +559,7 @@ async def submit(
                 external_id=EXTERNAL_PREFIX + row_id.hex,
                 origin_event_id=scope.event.id if scope.event is not None else None,
                 session_key=scope.task.session_key or "",
+                followup_id=followup_id,
             )
             _apply(row, staged, cfg, bot.bot_key)
             session.add(row)
@@ -686,6 +692,10 @@ async def submit_batch(
     requester = str(owner.login_name) if owner is not None and owner.login_name else None
     event_id = staged.get("event_id")
     count = 0
+    targets = {
+        label: await followups.approval_target(session, bot.id, label)
+        for label in {str(item.get("followup") or "") for item in items}
+    }
     for group in groups(items):
         ids = [uuid.uuid4() for _ in group]
         head = ids[0]
@@ -717,6 +727,7 @@ async def submit_batch(
                     expires_at=utcnow() + TTL,
                     has_files=bool(item.get("has_files")),
                     batch_id=batch_id,
+                    followup_id=targets.get(str(item.get("followup") or "")),
                 )
             )
         code: str | None = None
@@ -915,6 +926,10 @@ async def decide(
     when = decided_at or utcnow()
     for item in live:
         item.decided_at = when
+    # 所有者的决定算这件事的进展（执行结果不算）。
+    await followups.touch_ids(
+        session, row.bot_id, [item.followup_id for item in live if item.followup_id is not None]
+    )
     bot = await session.get(Bot, row.bot_id)
     if (
         bot is None

@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum
 import re
 import uuid
+from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
@@ -24,6 +25,7 @@ from coreman.core.assistants import sealed
 from coreman.core.db.models import (
     FOLLOWUP_CATEGORIES,
     FOLLOWUP_HANDLERS,
+    AssistantApproval,
     AssistantFollowup,
     AssistantJob,
 )
@@ -351,6 +353,61 @@ async def touch(session: AsyncSession, bot_id: uuid.UUID, seqs: list[int]) -> No
         )
         .values(progress_at=now, updated_at=now)
     )
+
+
+async def approval_target(
+    session: AsyncSession, bot_id: uuid.UUID, label_text: str | None
+) -> uuid.UUID | None:
+    """写类工具带来的待跟进编号 → 那一条的 id；没给、不认识、已关闭都返回 None（不挡提交）。"""
+    if not label_text:
+        return None
+    try:
+        seq = parse_label(label_text)
+    except FollowupError:
+        return None
+    found: uuid.UUID | None = await session.scalar(
+        select(AssistantFollowup.id).where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.seq == seq,
+            AssistantFollowup.status.in_(LIVE),
+        )
+    )
+    return found
+
+
+async def touch_ids(session: AsyncSession, bot_id: uuid.UUID, ids: Iterable[uuid.UUID]) -> None:
+    """按 id 刷新进展时间（审批单有了决定）；只动未结的，不碰内容列。"""
+    wanted = list(dict.fromkeys(ids))
+    if not wanted:
+        return
+    now = utcnow()
+    await session.execute(
+        sql_update(AssistantFollowup)
+        .where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.id.in_(wanted),
+            AssistantFollowup.status.in_(LIVE),
+        )
+        .values(progress_at=now, updated_at=now)
+    )
+
+
+async def link_approval(
+    session: AsyncSession, bot_id: uuid.UUID, seq: int, approval_id: uuid.UUID
+) -> AssistantFollowup:
+    """把这位助理的一张审批单挂到这一条下面（换挂也行）。
+
+    Raises:
+        FollowupError: followup_not_found / followup_closed / approval_not_found
+    """
+    row = await _live(session, bot_id, seq)
+    found = await session.get(AssistantApproval, approval_id, with_for_update=True)
+    if found is None or found.bot_id != bot_id:
+        raise FollowupError("approval_not_found")
+    found.followup_id = row.id
+    row.updated_at = row.progress_at = utcnow()
+    await session.flush()
+    return row
 
 
 async def snooze(
