@@ -47,8 +47,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/compiling.py": 1,
     # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
     "coreman/core/assistants/delivery.py": 2,
-    # 事项总表：在途的审批单、挂在待跟进上的子任务；都显式还原
-    "coreman/core/assistants/board.py": 2,
+    # 事项总表：在途的审批单、挂在待跟进上的子任务、挂在条目下的在途审批单；都显式还原
+    "coreman/core/assistants/board.py": 3,
     # 摘要：没发出的汇报；显式还原，读不出来的跳过
     "coreman/core/assistants/digest.py": 1,
     "coreman/core/assistants/feedback.py": 1,  # 只读设置行的时区算所有者当地日期，不碰内容列

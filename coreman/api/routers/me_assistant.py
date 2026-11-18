@@ -240,11 +240,15 @@ async def board_view(
     bot, actor = own.bot, own.actor
     prefs = await assistant_settings.get(session, bot.id)
     result = await board.build(session, bot.id, prefs, utcnow())
-    rows = [item.row for items in result.groups.values() for item in items]
-    linked = [item.job for items in result.groups.values() for item in items if item.job]
+    all_items = [item for items in result.groups.values() for item in items]
+    rows = [item.row for item in all_items]
+    linked = [item.job for item in all_items if item.job]
+    held = [a for item in all_items for a in item.approvals]
     # 核心函数已经还原过；这里按查看者再核一次。
     gap_rows = [entry.row for entry in result.gaps]
-    await sealed.open_rows(session, [*rows, *linked, *result.approvals, *gap_rows], viewer=actor.id)
+    await sealed.open_rows(
+        session, [*rows, *linked, *result.approvals, *held, *gap_rows], viewer=actor.id
+    )
     gap_labels = {entry.row.id: gaps.label(entry.row.seq) for entry in result.gaps}
     names = await owner_view.target_names(session, linked)
     link = owner_view.approval_link()
@@ -263,6 +267,7 @@ async def board_view(
             suggestion=board.suggestion(entry.row),
             job=owner_view.job(entry.job, names) if entry.job else None,
             gap=gap_labels.get(entry.row.gap_id) if entry.row.gap_id else None,
+            approvals=[approval(a) for a in entry.approvals],
         )
         return out
 

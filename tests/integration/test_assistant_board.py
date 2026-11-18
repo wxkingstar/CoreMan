@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.assistants import board, followups
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.db.models import AssistantFollowup, AssistantJob
-from tests.integration.approval_helpers import install, pending
+from tests.integration.approval_helpers import install, pending, reply
 from tests.integration.delivery_helpers import ready
 from tests.integration.job_helpers import spawned
 from tests.integration.test_assistant_digest import handover_scope
@@ -141,3 +141,26 @@ async def test_followups_stuck_on_a_gap(db_session: AsyncSession) -> None:
     await db_session.commit()
     result = await board.build(db_session, bot.id, prefs, WED_NOON)
     assert result.gaps == [] and [i.row.seq for i in result.groups["owner"]] == [stuck.seq]
+
+
+async def test_linked_approval_sits_under_its_followup(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner = await ready(db_session)
+    scope = await handover_scope(db_session, bot, owner)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    item = await followups.add(db_session, bot.id, category="promised", title="回复李四")
+    linked = await pending(
+        db_session, scope, {**reply(topic="报价"), "text": "报价已确认", "uuid": "u1"}
+    )
+    loose = await pending(
+        db_session, scope, {**reply(topic="合同"), "text": "合同稍后发", "uuid": "u2"}
+    )
+    linked.followup_id = item.id
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    owner_items = result.groups["owner"]
+    assert [i.row.seq for i in owner_items] == [item.seq]
+    assert [a.id for a in owner_items[0].approvals] == [linked.id]
+    assert [a.id for a in result.approvals] == [loose.id] and result.approvals_total == 1

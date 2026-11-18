@@ -23,7 +23,7 @@ const item = (over: Partial<BoardItem>): BoardItem => ({
   id: 'F001', category: 'decide', status: 'open', title: '选供应商', review_on: null, due_on: null,
   origin_message_id: null, created_at: '2026-11-13T00:00:00Z', needs_owner: false, has_notes: true,
   handler: 'assistant', handler_name: null, job_id: null, progress_at: '2026-11-13T00:00:00Z',
-  stage: 'owner', stalled: false, idle_days: 0, suggestion: '选 A', job: null, gap: null, ...over,
+  stage: 'owner', stalled: false, idle_days: 0, suggestion: '选 A', job: null, gap: null, approvals: [], ...over,
 })
 const boardData: Board = {
   today: '2026-11-18',
@@ -134,6 +134,19 @@ describe('board', () => {
     })
     const wrapper = render(AssistantBoard); await flushPromises()
     expect(wrapper.get('[data-test="board-F001"]').text()).toContain('需要你确认范围')
+    wrapper.unmount()
+  })
+
+  it('shows an approval under the follow-up it belongs to', async () => {
+    const linked = { id: 'a9', tool: 'feishu_im_send_message', summary: '私聊 → 李四', created_at: '2026-11-13T01:00:00Z', link: 'https://tower.example.com' }
+    vi.mocked(myAssistant.board).mockResolvedValue({
+      ...boardData,
+      groups: { ...boardData.groups, owner: [item({ approvals: [linked] })] },
+    })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    const row = wrapper.get('[data-test="board-F001"]')
+    expect(row.text()).toContain(t('assistant.board.linkedApproval', { value: '私聊 → 李四' }))
+    expect(row.get('a').attributes('href')).toBe('https://tower.example.com')
     wrapper.unmount()
   })
 

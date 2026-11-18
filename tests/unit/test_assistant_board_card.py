@@ -230,3 +230,20 @@ def test_many_gaps_stay_within_the_card_limit() -> None:
     shown = texts.count("缺个人凭证")
     tail = texts.split("卡在权限（0 件，39 个缺口）", 1)[1].split("\n**", 1)[0]
     assert digest.MORE_HINT.format(n=len(entries) - shown) in tail
+
+
+def test_linked_approval_line_under_item() -> None:
+    groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    approval = AssistantApproval(
+        id=uuid.uuid4(), tool="feishu_im_send_message", args_enc={"abstract": "私聊 → 李四"}
+    )
+    groups["owner"] = [board.Item(_row(1), "owner", False, 0, None, None, (approval,))]
+    card, _ = digest.board_card(
+        board.Board(TODAY, groups, [], 0, {}, None),
+        requester="ou_x",
+        link="https://tower.example.com",
+        system=None,
+        full=True,
+    )
+    text = json.dumps(card, ensure_ascii=False)
+    assert "待批：私聊 → 李四" in text and "https://tower.example.com" in text

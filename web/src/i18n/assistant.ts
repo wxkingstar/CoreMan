@@ -45,7 +45,7 @@ export const assistantZh = {
     handler: { assistant: '助理在办', job: '子任务在办', botHelp: '公共员工在办', person: '{name} 在办', colleague: '同事在办', owner: '你在办' },
     batchItems: '等，共 {n} 项（一张单）', moreApprovals: '另有 {n} 张',
     idle: '{n} 个工作日没有进展', reviewOn: '{time} 回看', dueOn: '期限 {time}',
-    suggestion: '建议：{value}', stage: { owner: '等你', working: '在推进', others: '等别人', gap: '卡在权限', scheduled: '排期' },
+    linkedApproval: '待批：{value}', suggestion: '建议：{value}', stage: { owner: '等你', working: '在推进', others: '等别人', gap: '卡在权限', scheduled: '排期' },
     gap: {
       kinds: { feishu_scope: '飞书权限', business_system: '业务系统', cloud_product: '云签名代理产品', credential: '个人凭证', node_tool: '节点工具', other: '其他' },
       fixes: {
@@ -222,7 +222,7 @@ export const assistantEn: typeof assistantZh = {
     handler: { assistant: 'Assistant is on it', job: 'Sub-task is on it', botHelp: 'A shared AI employee is on it', person: '{name} is on it', colleague: 'A colleague is on it', owner: 'You are on it' },
     batchItems: 'and more, {n} items in one request', moreApprovals: '{n} more',
     idle: 'No progress for {n} working days', reviewOn: 'Review {time}', dueOn: 'Due {time}',
-    suggestion: 'Suggestion: {value}', stage: { owner: 'Waiting for you', working: 'In progress', others: 'Waiting on others', gap: 'Blocked on access', scheduled: 'Scheduled' },
+    linkedApproval: 'Awaiting approval: {value}', suggestion: 'Suggestion: {value}', stage: { owner: 'Waiting for you', working: 'In progress', others: 'Waiting on others', gap: 'Blocked on access', scheduled: 'Scheduled' },
     gap: {
       kinds: { feishu_scope: 'Feishu permission', business_system: 'Business system', cloud_product: 'Cloud proxy product', credential: 'Personal credential', node_tool: 'Node tool', other: 'Other' },
       fixes: {
@@ -399,7 +399,7 @@ export const assistantJa: typeof assistantZh = {
     handler: { assistant: 'アシスタントが対応中', job: 'サブタスクが対応中', botHelp: '共有の AI 社員が対応中', person: '{name} が対応中', colleague: '同僚が対応中', owner: 'あなたが対応中' },
     batchItems: 'など、計 {n} 件（1 件の申請）', moreApprovals: 'ほか {n} 件',
     idle: '{n} 営業日、進捗がありません', reviewOn: '{time} に再確認', dueOn: '期限 {time}',
-    suggestion: '提案：{value}', stage: { owner: '対応待ち', working: '進行中', others: '相手待ち', gap: '権限待ち', scheduled: '予定' },
+    linkedApproval: '承認待ち：{value}', suggestion: '提案：{value}', stage: { owner: '対応待ち', working: '進行中', others: '相手待ち', gap: '権限待ち', scheduled: '予定' },
     gap: {
       kinds: { feishu_scope: 'Feishu 権限', business_system: '業務システム', cloud_product: 'クラウド代理の製品', credential: '個人の資格情報', node_tool: 'ノードのツール', other: 'その他' },
       fixes: {

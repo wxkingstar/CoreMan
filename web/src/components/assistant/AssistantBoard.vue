@@ -195,6 +195,19 @@ defineExpose({ load })
               {{ t('assistant.board.suggestion', { value: item.suggestion }) }}
             </div>
             <div
+              v-for="a in item.approvals"
+              :key="a.id"
+              class="muted"
+            >
+              {{ t('assistant.board.linkedApproval', { value: a.summary ?? t('assistant.page.lockedText') }) }}
+              <a
+                v-if="a.link"
+                :href="a.link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ t('assistant.attention.open') }}</a>
+            </div>
+            <div
               v-if="item.job?.blocked_reason"
               class="muted"
             >

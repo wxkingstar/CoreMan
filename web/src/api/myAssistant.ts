@@ -135,6 +135,8 @@ export interface BoardItem extends Followup {
   suggestion: string | null
   job: AssistantJob | null
   gap: string | null
+  /** 挂在这一条下面、等所有者批的单。 */
+  approvals: PendingApproval[]
 }
 export interface Board {
   today: string
