@@ -42,6 +42,7 @@ _ENOUGH = {
     "read_messages": ("all", "all_except_send", "messages_readonly"),
     "send_messages": ("all",),
 }
+NEEDS = tuple(_ENOUGH)
 
 
 def satisfied(row: Any, need: str) -> bool:

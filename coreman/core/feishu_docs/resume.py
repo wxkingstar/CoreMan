@@ -103,8 +103,12 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
         # 飞书缺口报时记级别 0，授权满足即升到 1。
         from coreman.core.assistants import gaps
 
-        await gaps.resolve(
-            session, row.bot_id, "feishu_scope", dict.fromkeys(gaps.feishu_keys(grant), 1)
+        await gaps.resolve_quietly(
+            session,
+            row.bot_id,
+            "feishu_scope",
+            dict.fromkeys(gaps.feishu_keys(grant), 1),
+            log_event="assistant_gap_resolve_failed_on_authorization",
         )
         task = await tasks.enqueue(
             session,

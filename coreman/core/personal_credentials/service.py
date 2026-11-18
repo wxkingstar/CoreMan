@@ -327,7 +327,13 @@ async def submit(
         # 凭证缺口报时记级别 0，保存即升到 1。
         from coreman.core.assistants import gaps
 
-        await gaps.resolve(session, bot.id, "credential", dict.fromkeys(keys, 1))
+        await gaps.resolve_quietly(
+            session,
+            bot.id,
+            "credential",
+            dict.fromkeys(keys, 1),
+            log_event="assistant_gap_resolve_failed_on_credential",
+        )
     else:
         keys = sorted(cleaned)
     await record_audit(

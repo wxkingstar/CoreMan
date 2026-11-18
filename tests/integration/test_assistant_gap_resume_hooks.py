@@ -57,3 +57,36 @@ async def test_feishu_authorization_resolves_scope_gaps(db_session: AsyncSession
     assert await resume.tick(db_session, utcnow(), sealed.master()) == 1
     await db_session.commit()
     assert (await gaps.get(db_session, bot.id, 1)).status == "resolved"
+
+
+async def _boom(*args, **kwargs):
+    raise RuntimeError("boom")
+
+
+async def test_failing_gap_resolution_does_not_lose_the_saved_credential(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, user, _, cipher, row = await _opened(db_session)
+    monkeypatch.setattr(gaps, "resolve", _boom)
+    result = await service.submit(db_session, cipher, row.id, actor_id=user.id, values=VALUES)
+    await db_session.commit()
+    assert result.status == "saved"
+
+
+async def test_failing_gap_resolution_does_not_abort_the_resume_tick(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, owner, scope = await assistant_turn(db_session)
+    wait = FeishuAuthWait(
+        bot_id=bot.id,
+        user_id=owner.id,
+        chat_id="oc_assistant",
+        origin_task_id=scope.task.id,
+        need="read_messages",
+        status="waiting",
+        expires_at=utcnow() + timedelta(minutes=30),
+    )
+    db_session.add(wait)
+    await db_session.commit()
+    monkeypatch.setattr(gaps, "resolve", _boom)
+    assert await resume.tick(db_session, utcnow(), sealed.master()) == 1

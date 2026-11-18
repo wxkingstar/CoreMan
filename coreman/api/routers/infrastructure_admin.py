@@ -712,11 +712,12 @@ async def put_grants(
     # （没有缺口时是空查询）。只读授权不会解决报在「能读」级别的缺口。
     from coreman.core.assistants import capabilities, gaps
 
-    await gaps.resolve(
+    await gaps.resolve_quietly(
         session,
         bot.id,
         "business_system",
         {s.key: capabilities.grant_rank(s, s.key in writes) for s in systems},
+        log_event="assistant_gap_resolve_failed_on_grant",
     )
     # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
     diff = diff_dict(

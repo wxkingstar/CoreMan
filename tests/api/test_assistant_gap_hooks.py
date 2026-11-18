@@ -76,3 +76,25 @@ async def test_read_only_grant_does_not_resolve_a_read_level_gap(
     assert r.status_code == 200, r.text
     db_session.expire_all()
     assert (await gaps.get(db_session, bot_id, 1)).status == "open"
+
+
+async def test_failing_gap_resolution_does_not_fail_the_grant(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import BotSystemGrant
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gaps, "resolve", boom)
+    bot_id, version, owner = await _setup(db_session, 0)
+    await login_existing(client, db_session, owner)
+    r = await _put(client, bot_id, version, {"system_keys": ["orders"]})
+    assert r.status_code == 200, r.text
+    db_session.expire_all()
+    granted = list(
+        await db_session.scalars(
+            select(BotSystemGrant.system_key).where(BotSystemGrant.bot_id == bot_id)
+        )
+    )
+    assert granted == ["orders"]

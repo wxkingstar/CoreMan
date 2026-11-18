@@ -310,6 +310,25 @@ async def resolve(
     return rows
 
 
+async def resolve_quietly(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    kind: str,
+    ranks: Mapping[str, int],
+    *,
+    log_event: str,
+) -> None:
+    """给「开通完成」的钩子用：缺口记解决失败（行读不出、数据库出错）不能拖垮触发它的写入。
+
+    放进保存点，失败只回滚这一小段并记一条只带机器人编号的告警，触发它的写入照常继续。
+    """
+    try:
+        async with session.begin_nested():
+            await resolve(session, bot_id, kind, ranks)
+    except Exception:
+        log.warning(log_event, bot_id=str(bot_id))
+
+
 async def decline(session: AsyncSession, bot_id: uuid.UUID, seq: int) -> AssistantGap:
     """所有者明确不开：不再进总表，被卡住的事回到原来的阶段，助理得知这条路走不通。
 
@@ -397,9 +416,6 @@ async def view_of(session: AsyncSession, bot_id: uuid.UUID, row: AssistantGap) -
     return view(row, await fix_for(session, bot_id, row), await stuck(session, bot_id, row.id))
 
 
-NEEDS = ("general", "read_messages", "send_messages")
-
-
 def feishu_keys(grant: Any) -> set[str]:
     """本人飞书授权现在满足的：档位名，加上应用申请过、本人也授予了的权限名。"""
     if grant is None:
@@ -407,7 +423,7 @@ def feishu_keys(grant: Any) -> set[str]:
     # 函数内引入：飞书个人工具的模块依赖面大。
     from coreman.core.feishu_personal import inflow
 
-    found = {need for need in NEEDS if inflow.satisfied(grant, need)}
+    found = {need for need in inflow.NEEDS if inflow.satisfied(grant, need)}
     if grant.status == "connected":
         found |= set(grant.scopes or []) & set(grant.requested_scopes or [])
     return found
