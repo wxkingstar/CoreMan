@@ -1,4 +1,5 @@
-"""能力缺口工具：助理登记办不成事时卡在哪个权限上（`gap_report`），看已登记的（`gap_list`）。
+"""能力缺口工具：助理登记办不成事时卡在哪个权限上（`gap_report`），看已登记的（`gap_list`），
+为白名单外的业务系统提交权限申请（`gap_request`，只在所有者在场、当面同意理由的一轮里）。
 
 登记在助理工具注册表的 `knowledge` 组：数据在平台自己的库里，子任务也能用。分派只认这一轮核验
 过的助理记录（`scope.bot`）。登记在注册表自己的文件末尾（`tools.py`），这里不导入它。
@@ -11,12 +12,12 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import capabilities, followups, gaps
+from coreman.core.assistants import access_requests, capabilities, followups, gaps
 from coreman.core.assistants.approvals import service as approvals_service
 from coreman.core.assistants.followup_tools import Label
 from coreman.core.assistants.records import is_assistant
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import GAP_STATUSES
+from coreman.core.db.models import GAP_STATUSES, User
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.feishu_personal.toolbase import Arguments, input_schema
 
@@ -55,6 +56,20 @@ class Listing(Arguments):
     status: Literal["live", "declined", "all"] = "live"
 
 
+class Request(Arguments):
+    id: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[Gg]?\d{1,9}$")]
+    reason: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=access_requests.MAX_REASON
+        ),
+        Field(
+            description="The reason the owner agreed to in this chat; administrators will read it"
+        ),
+    ]
+    write: bool = False
+
+
 OWN: dict[str, tuple[type[Arguments], str]] = {
     "gap_report": (
         Report,
@@ -66,6 +81,12 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     "gap_list": (
         Listing,
         "List your capability gaps: live (open or requested), declined (owner said no), or all.",
+    ),
+    "gap_request": (
+        Request,
+        "Submit an access request for a business system gap that is not open to you. Only in a turn"
+        " the owner started, and only after he agreed to the reason in this chat; platform"
+        " administrators decide.",
     ),
 }
 STATUSES = {"live": gaps.LIVE, "declined": ("declined",), "all": GAP_STATUSES}
@@ -86,6 +107,21 @@ HINTS = {
     "followup_not_found": "followups 里有不存在的编号；用 followup_list 看现有的。",
     "followup_closed": "followups 里有已关闭的条目，不用再挂。",
     "content_locked": "所有者的数据密钥不可用，现在登记不了；不要重试，如实告诉所有者。",
+}
+REQUEST_HINTS = {
+    "owner_turn_required": (
+        "申请只能在所有者本人在场的一轮里、他当面同意理由后提交；记进待跟进，等他在场时再办。"
+    ),
+    "owner_can_grant": (
+        "这个系统对你开放，所有者自己就能开：请他在「我的助理」页这一条上点「开通」。"
+    ),
+    "already_pending": "已经有一张在途的申请，等平台管理员处理。",
+    "gap_not_open": "这个缺口不是待开通的状态（已申请、已解决或所有者不开）。",
+    "gap_not_found": "没有这个缺口；用 gap_list 看现有的。",
+    "not_business_system": "只有业务系统的缺口能申请。",
+    "system_not_requestable": "这个系统没有登记或已停用，请所有者联系平台管理员。",
+    "invalid_reason": f"reason 写一两句话，不超过 {access_requests.MAX_REASON} 字。",
+    "requested": "已提交，平台管理员处理后会交回给你；告诉所有者已经提交了。",
 }
 
 
@@ -108,6 +144,8 @@ async def dispatch(
     except ValidationError as exc:
         return {"error": "invalid_tool_or_arguments", "invalid": approvals_service._problems(exc)}
     bot_id = scope.bot.id
+    if name == "gap_request":
+        return await _request(session, scope, args)
     try:
         if name == "gap_list":
             rows = await gaps.listing(session, bot_id, STATUSES[args.status])
@@ -139,3 +177,27 @@ async def dispatch(
     if outcome == "declined":
         result["hint"] = DECLINED_HINT
     return result
+
+
+async def _request(session: AsyncSession, scope: Scope, args: Request) -> dict[str, Any]:
+    """所有者在场、当面同意理由后提交申请；平台来源与审批结果的轮次一律不受理。
+
+    `scope` 是这一轮核验过的所有者与他的助理（`scope.user_id` 就是所有者），不另收身份参数。
+    """
+    if scope.unattended:
+        return {"error": "owner_turn_required", "hint": REQUEST_HINTS["owner_turn_required"]}
+    owner = await session.get(User, scope.user_id)
+    if owner is None or scope.bot.owner_id != owner.id or not scope.bot.enabled:
+        return {"error": "owner_turn_required", "hint": REQUEST_HINTS["owner_turn_required"]}
+    try:
+        row = await access_requests.open_request(
+            session,
+            scope.bot,
+            gaps.parse_label(args.id),
+            write=args.write,
+            reason=args.reason,
+            actor=owner,
+        )
+    except (gaps.GapError, access_requests.RequestError) as exc:
+        return {"error": exc.code, "hint": REQUEST_HINTS.get(exc.code, "")}
+    return {"status": "requested", "request_id": str(row.id), "hint": REQUEST_HINTS["requested"]}

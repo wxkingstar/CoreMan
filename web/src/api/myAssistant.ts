@@ -109,7 +109,14 @@ export interface SettledApproval {
 }
 export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'gap' | 'scheduled'
 export type GapKind = 'feishu_scope' | 'business_system' | 'cloud_product' | 'credential' | 'node_tool' | 'other'
-export type GapFix = 'authorize' | 'credential' | 'grant_page' | 'admin' | 'node_admin' | 'none'
+export type GapFix = 'authorize' | 'credential' | 'self_grant' | 'request' | 'admin' | 'node_admin' | 'none'
+/** 这个缺口最近的一张权限申请（不论状态）。理由是所有者写给平台管理员的明文。 */
+export interface GapRequest {
+  status: 'pending' | 'approved' | 'rejected' | 'withdrawn'
+  reason: string
+  decision_note: string | null
+  created_at: string
+}
 export interface BoardGap {
   id: string
   kind: GapKind
@@ -120,6 +127,7 @@ export interface BoardGap {
   /** 卡片用的中文说法；页面按 fix 用本地化文案。 */
   hint: string
   followups: string[]
+  request: GapRequest | null
   locked?: boolean
 }
 export interface BoardItem extends Followup {
@@ -243,6 +251,9 @@ export const myAssistant = {
   overview: () => call<AssistantOverview | AssistantAbsent>(http.get(root)),
   board: () => call<Board>(http.get(`${root}/board`)),
   declineGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/decline`)),
+  grantGap: (label: string, write: boolean) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/grant`, { write })),
+  requestGap: (label: string, write: boolean, reason: string) => call<{ id: string; status: string; request_id: string }>(http.post(`${root}/gaps/${label}/request`, { write, reason })),
+  withdrawGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/withdraw`)),
   jobs: () => call<JobList>(http.get(`${root}/jobs`)),
   cancelJob: (id: string) => call<{ id: string; status: string }>(http.post(`${root}/jobs/${id}/cancel`)),
   followups: () => call<FollowupList>(http.get(`${root}/followups`)),

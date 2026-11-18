@@ -289,6 +289,7 @@ async def test_board_lists_gaps_and_owner_can_decline(
             "fix": "admin",
             "hint": "需要平台管理员为这位助理开放业务系统 orders",
             "followups": ["F001"],
+            "request": None,
         }
     ]
     r = await client.post(f"{URL}/gaps/G001/decline")

@@ -37,6 +37,39 @@ async function decline(gap: BoardGap) {
     await load()
   } catch (e) { ElMessage.error(errorMessage(e)) }
 }
+async function grant(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.grantConfirm', { name: gap.key }), t('assistant.board.gap.grant'), { type: 'info' })
+  } catch { return }
+  try {
+    await myAssistant.grantGap(gap.id, false)
+    ElMessage.success(t('assistant.board.gap.granted'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
+// 理由由所有者自己写（会给平台管理员看）：不预填助理记下的需要，那是只给所有者看的内容。
+const REASON_MAX = 300
+async function request(gap: BoardGap) {
+  let reason: string
+  try {
+    const { value } = await ElMessageBox.prompt(t('assistant.board.gap.reasonPrompt'), t('assistant.board.gap.request'), {
+      inputValidator: (text: string) => (text.trim().length > 0 && text.trim().length <= REASON_MAX) || t('assistant.board.gap.reasonInvalid'),
+    })
+    reason = value
+  } catch { return }
+  try {
+    await myAssistant.requestGap(gap.id, false, reason.trim())
+    ElMessage.success(t('assistant.board.gap.requestSent'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
+async function withdraw(gap: BoardGap) {
+  try {
+    await myAssistant.withdrawGap(gap.id)
+    ElMessage.success(t('assistant.board.gap.withdrawn'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
 onMounted(load)
 defineExpose({ load })
 </script>
@@ -135,16 +168,53 @@ defineExpose({ load })
               <strong>{{ gap.id }} {{ t('assistant.board.gap.kinds.' + gap.kind) }} {{ gap.key }}</strong>
               <span>{{ gap.locked ? t('assistant.page.lockedText') : gap.need }}</span>
               <span class="muted">{{ gap.followups.length ? t('assistant.board.gap.blocks', { value: gap.followups.join('、') }) : t('assistant.board.gap.none') }}</span>
-              <div class="muted">
+              <div
+                v-if="gap.status === 'requested'"
+                class="muted"
+                data-test="gap-requested"
+              >
+                {{ t('assistant.board.gap.requested') }}
+              </div>
+              <div
+                v-else
+                class="muted"
+              >
                 {{ t('assistant.board.gap.fixes.' + gap.fix, { name: gap.id }) }}
-                <router-link
-                  v-if="gap.fix === 'grant_page'"
-                  :to="'/bots/' + data.bot_id"
-                >
-                  {{ t('assistant.board.gap.grantLink') }}
-                </router-link>
                 <span v-if="gap.fix === 'admin' || gap.fix === 'node_admin'">：{{ gap.key }}</span>
               </div>
+              <div
+                v-if="gap.request?.status === 'rejected'"
+                class="muted"
+                data-test="gap-rejected"
+              >
+                {{ t('assistant.board.gap.rejected', { value: gap.request.decision_note ?? '' }) }}
+              </div>
+              <el-button
+                v-if="gap.fix === 'self_grant' && gap.status === 'open'"
+                size="small"
+                type="primary"
+                data-test="gap-grant"
+                @click="grant(gap)"
+              >
+                {{ t('assistant.board.gap.grant') }}
+              </el-button>
+              <el-button
+                v-if="gap.fix === 'request' && gap.status === 'open'"
+                size="small"
+                type="primary"
+                data-test="gap-request"
+                @click="request(gap)"
+              >
+                {{ t('assistant.board.gap.request') }}
+              </el-button>
+              <el-button
+                v-if="gap.status === 'requested'"
+                size="small"
+                data-test="gap-withdraw"
+                @click="withdraw(gap)"
+              >
+                {{ t('assistant.board.gap.withdraw') }}
+              </el-button>
               <el-button
                 size="small"
                 data-test="gap-decline"

@@ -37,7 +37,7 @@ FOLLOWUP_TOOLS = [
     "followup_progress",
     "followup_list",
 ]
-GAP_TOOLS = ["gap_report", "gap_list"]
+GAP_TOOLS = ["gap_report", "gap_list", "gap_request"]
 JOB_TOOLS = [
     "assistant_spawn",
     "assistant_job_message",
