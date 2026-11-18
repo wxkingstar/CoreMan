@@ -47,22 +47,54 @@ repo() {
 
 vm_running() { colima status -p "$PROFILE" >/dev/null 2>&1; }
 
+# colima start/restart 会把默认 docker context 切到这台虚拟机；跑完切回原来的，不影响日常用的 Docker。
+colima_keep_context() {
+  local previous
+  previous="$(docker context show 2>/dev/null || true)"
+  (cd / && colima "$@")
+  [[ -n "$previous" ]] && docker context use "$previous" >/dev/null
+  return 0
+}
+
 # runner 以非 root 用户跑，要加进虚拟机里 docker.sock 的属组才能起服务容器。
 socket_gid() {
   "${DOCKER[@]}" run --rm -v /var/run/docker.sock:/s --entrypoint stat "$IMAGE" -c %g /s
+}
+
+# CI_RUNNER_REGISTRY_MIRRORS（逗号分隔，如 https://mirror.example.com）：Docker Hub 直连不稳时，
+# 服务容器的镜像（postgres 等）每个 job 都要拉一次，写进虚拟机 dockerd 的 registry-mirrors。
+ensure_mirrors() {
+  [[ -n "${CI_RUNNER_REGISTRY_MIRRORS:-}" ]] || return 0
+  local want have
+  want="$(tr ',' '\n' <<<"$CI_RUNNER_REGISTRY_MIRRORS" | sed -E 's#/*$#/#' | sort | paste -sd, -)"
+  have="$("${DOCKER[@]}" info --format '{{range .RegistryConfig.Mirrors}}{{println .}}{{end}}' \
+    | sed '/^$/d' | sort | paste -sd, -)"
+  [[ "$want" == "$have" ]] && return 0
+  log "虚拟机的镜像站改为 ${CI_RUNNER_REGISTRY_MIRRORS}，重启虚拟机"
+  python3 -I - "$HOME/.colima/${PROFILE}/colima.yaml" "$CI_RUNNER_REGISTRY_MIRRORS" <<'PY'
+import sys
+
+path, mirrors = sys.argv[1], [m for m in sys.argv[2].split(",") if m]
+lines = open(path, encoding="utf-8").read().split("\n")
+start = next(i for i, line in enumerate(lines) if line.startswith("docker:"))
+end = start + 1
+while end < len(lines) and (lines[end].startswith((" ", "\t")) or not lines[end].strip()):
+    end += 1
+block = ["docker:", "  registry-mirrors:"] + [f"    - {m}" for m in mirrors] + [""]
+lines[start:end] = block
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+  colima_keep_context restart -p "$PROFILE"
 }
 
 cmd_up() {
   mkdir -p "$STATE" && chmod 700 "$STATE"
   if ! vm_running; then
     log "起虚拟机 ${PROFILE}：${CPUS} 核 / ${MEMORY}G 内存 / ${DISK}G 磁盘，不挂载本机目录"
-    # colima start 会把默认 docker context 切到新虚拟机，起完切回原来的。
-    local previous
-    previous="$(docker context show 2>/dev/null || true)"
-    (cd / && colima start -p "$PROFILE" --cpus "$CPUS" --memory "$MEMORY" --disk "$DISK" \
-      --mount none --runtime docker)
-    [[ -n "$previous" ]] && docker context use "$previous" >/dev/null
+    colima_keep_context start -p "$PROFILE" --cpus "$CPUS" --memory "$MEMORY" --disk "$DISK" \
+      --mount none --runtime docker
   fi
+  ensure_mirrors
   if ! "${DOCKER[@]}" image inspect "$IMAGE" >/dev/null 2>&1; then
     log "拉镜像 ${IMAGE}"
     "${DOCKER[@]}" pull -q "$IMAGE" >/dev/null
@@ -158,6 +190,8 @@ cmd_install() {
   {
     printf 'export PATH=%q\n' "$PATH"
     printf 'export CI_RUNNER_REPO=%q\n' "$(repo)"
+    [[ -n "${CI_RUNNER_REGISTRY_MIRRORS:-}" ]] \
+      && printf 'export CI_RUNNER_REGISTRY_MIRRORS=%q\n' "$CI_RUNNER_REGISTRY_MIRRORS"
     for var in "${PROXY_VARS[@]}"; do
       [[ -n "${!var:-}" ]] && printf 'export %s=%q\n' "$var" "${!var}"
     done
