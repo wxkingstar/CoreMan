@@ -16,6 +16,7 @@ from coreman.core.db.models import (
     SystemAccessRequest,
 )
 from tests.api.conftest import login_as
+from tests.api.my_assistant_helpers import as_bot_token
 from tests.integration.job_helpers import owner_with_key
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
@@ -123,3 +124,60 @@ async def test_others_cannot_see_or_decide(
     assert (await client.get(PATH)).status_code == 403
     r = await client.post(f"{PATH}/{row_id}/decide", json={"decision": "approve", "note": ""})
     assert r.status_code == 403
+
+
+async def test_approving_keeps_existing_grants(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot_id, row_id = await _requested(db_session)
+    db_session.add(BusinessSystem(key="aaa", name="甲", allowed_bot_ids=[bot_id]))
+    await db_session.flush()
+    db_session.add(BotSystemGrant(bot_id=bot_id, system_key="aaa", allow_write=True))
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    r = await client.post(f"{PATH}/{row_id}/decide", json={"decision": "approve", "note": ""})
+    assert r.status_code == 200, r.text
+    db_session.expire_all()
+    grants = {
+        g.system_key: g.allow_write
+        for g in await db_session.scalars(
+            select(BotSystemGrant).where(BotSystemGrant.bot_id == bot_id)
+        )
+    }
+    assert grants == {"aaa": True, "orders": True}
+
+
+async def test_an_existing_grant_no_longer_open_is_named(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot_id, row_id = await _requested(db_session)
+    db_session.add(BusinessSystem(key="aaa", name="甲", allowed_bot_ids=[bot_id], enabled=False))
+    await db_session.flush()
+    db_session.add(BotSystemGrant(bot_id=bot_id, system_key="aaa"))
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    r = await client.post(f"{PATH}/{row_id}/decide", json={"decision": "approve", "note": ""})
+    assert r.status_code == 409 and r.json()["errors"][0]["type"] == "existing_grant_blocked"
+    assert "aaa" in r.json()["message"]
+    db_session.expire_all()
+    # 整个批准回滚：申请仍在途，白名单没动。
+    pending = await db_session.get(SystemAccessRequest, row_id)
+    assert pending is not None and pending.status == "pending"
+    system = await db_session.get(BusinessSystem, "orders")
+    assert system is not None and system.allowed_bot_ids == []
+
+
+async def test_bot_tokens_cannot_decide(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """批准会放宽机器人能用的系统：只认管理员本人的交互登录，机器人令牌一律拒绝。"""
+    _, row_id = await _requested(db_session)
+    manager = await login_as(client, db_session, role="platform_admin")
+    as_bot_token(client, monkeypatch, manager)
+    assert (await client.get(PATH)).status_code == 200
+    for decision, note in (("approve", ""), ("reject", "不行")):
+        r = await client.post(f"{PATH}/{row_id}/decide", json={"decision": decision, "note": note})
+        assert r.status_code == 403, r.text
+    db_session.expire_all()
+    pending = await db_session.get(SystemAccessRequest, row_id)
+    assert pending is not None and pending.status == "pending"

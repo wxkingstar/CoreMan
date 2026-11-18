@@ -7,13 +7,14 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import access_requests as ar
 from coreman.core.assistants import followups, gaps, sealed
 from coreman.core.db.models import (
     AssistantInbox,
+    BotSystemGrant,
     BusinessSystem,
     OutboxItem,
     PlatformApp,
@@ -332,3 +333,42 @@ async def test_approved_and_resolved_settles_quietly(db_session: AsyncSession) -
     await db_session.commit()
     assert (await gaps.get(db_session, bot.id, 1)).status == "resolved"
     assert [t["reminder"] for t in await _reminders(db_session, bot.id)] == ["gap_resolved"]
+
+
+async def test_mark_approved_locks_the_bot_then_systems_in_key_order(
+    db_session: AsyncSession,
+) -> None:
+    """与管理台改权限、一键开通同一顺序：咨询锁 → 申请 → 缺口 → 机器人行 → 系统行（按 key），
+    改白名单之前把写授权要锁的系统都锁好，`apply_grants` 不再新拿锁。"""
+    bot, owner, manager = await _setup(db_session, allowed=[])
+    db_session.add_all(
+        [
+            BusinessSystem(key="aaa", name="甲", allowed_bot_ids=[bot.id]),
+            BusinessSystem(key="zzz", name="乙", allowed_bot_ids=[bot.id]),
+        ]
+    )
+    await db_session.flush()
+    db_session.add_all(
+        [
+            BotSystemGrant(bot_id=bot.id, system_key="zzz"),
+            BotSystemGrant(bot_id=bot.id, system_key="aaa"),
+        ]
+    )
+    row = await ar.open_request(db_session, bot, 1, write=False, reason="查订单", actor=owner)
+    await db_session.commit()
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        if "FOR UPDATE" in statement:
+            seen.append(statement)
+
+    engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await ar.mark_approved(db_session, row.id, actor=manager)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    tables = [s.split("FROM", 1)[1].split()[0] for s in seen]
+    assert tables[-2:] == ["bots", "systems"], tables
+    assert "ORDER BY systems.key" in seen[-1]
+    assert tables.count("systems") == 1

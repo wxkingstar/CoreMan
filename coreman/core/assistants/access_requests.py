@@ -25,6 +25,7 @@ from coreman.core.bus import outbox
 from coreman.core.db.models import (
     AssistantGap,
     Bot,
+    BotSystemGrant,
     BusinessSystem,
     PlatformApp,
     SystemAccessRequest,
@@ -185,7 +186,8 @@ async def open_request(
     return row
 
 
-# 加锁顺序（与 gaps.py 一致，处处相同）：这位助理的缺口咨询锁 → 申请行 → 缺口行 → 系统行。
+# 加锁顺序（与 gaps.py、写授权的 `system_grants.lock_bot` / `apply_grants` 一致，处处相同）：
+# 这位助理的缺口咨询锁 → 申请行 → 缺口行 → 机器人行 → 系统行（按 key 排序，一条语句锁齐）。
 
 
 async def _locked(session: AsyncSession, request_id: uuid.UUID) -> SystemAccessRequest:
@@ -285,6 +287,8 @@ async def mark_approved(
     第三项：这一次是否把助理加进了白名单（原本不含它）。调用方据此记 `system.update` 审计。
     调用方校验 `actor` 能审批。
 
+    加锁见上方顺序：机器人行与写授权要用到的全部系统行（现有授权 + 这个系统）都在这里锁好。
+
     批准时重新核对：助理还在（启用中的个人助理），挂的缺口（如果有）还在「已申请」。不再成立时
     这张申请记为撤回（`decided_by` 是这位管理员，备注写明原因）、不动白名单，并抛
     `request_stale`——这时行已经 flush，调用方要提交后再把错误告诉管理员。
@@ -294,7 +298,7 @@ async def mark_approved(
     """
     row = await _locked(session, request_id)
     gap = await _gap(session, row)
-    bot = await session.get(Bot, row.bot_id)
+    bot = await session.get(Bot, row.bot_id, with_for_update=True, populate_existing=True)
     if bot is None or not bot.enabled or not is_assistant(bot):
         stale = STALE_BOT
     elif row.gap_id is not None and (gap is None or gap.status != "requested"):
@@ -308,9 +312,23 @@ async def mark_approved(
         await session.flush()
         log.info("system_access_stale", bot_id=str(row.bot_id), request_id=str(row.id))
         raise RequestError("request_stale")
-    system = await session.get(
-        BusinessSystem, row.system_key, with_for_update=True, populate_existing=True
+    # 写授权（`apply_grants`）要锁的系统是现有授权加上这个系统：在改白名单之前按 key 一次锁齐，
+    # 之后写授权不再新拿系统锁，不会与别的助理的批准、管理台改权限交叉等待。
+    granted = set(
+        await session.scalars(
+            select(BotSystemGrant.system_key).where(BotSystemGrant.bot_id == row.bot_id)
+        )
     )
+    locked = (
+        await session.scalars(
+            select(BusinessSystem)
+            .where(BusinessSystem.key.in_(granted | {row.system_key}))
+            .order_by(BusinessSystem.key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    system = next((s for s in locked if s.key == row.system_key), None)
     if system is None or not system.enabled or system.key in RESERVED_SYSTEM_KEYS:
         raise RequestError("system_not_requestable")
     added = system.allowed_bot_ids is not None and row.bot_id not in system.allowed_bot_ids

@@ -15,12 +15,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api.deps import get_session
+from coreman.api.errors import ApiError
 from coreman.api.permissions import require_roles
+from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.routers.infrastructure_admin import audit, persist
 from coreman.api.routers.me_assistant_common import refuse
 from coreman.api.security import verify_csrf
 from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.core.assistants import access_requests
+from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS
 from coreman.core.db.models import Bot, BusinessSystem, SystemAccessRequest, User
 
 MANAGERS = require_roles("ai_committee", "platform_admin")
@@ -42,7 +45,23 @@ ERRORS = {
 }
 
 
+async def deciding_manager(request: Request, user: User = Depends(MANAGERS)) -> User:
+    """批准会放宽机器人能用的系统：只认管理员本人的交互登录，机器人令牌、API 令牌一律拒绝。"""
+    return await interactive_user(request, user)
+
+
+def _usable(system: BusinessSystem, bot_id: uuid.UUID) -> bool:
+    """与 `apply_grants` 的放行条件一致：启用、不是保留 key、白名单含这位助理（null 为全开放）。"""
+    return (
+        system.enabled
+        and system.key not in RESERVED_SYSTEM_KEYS
+        and (system.allowed_bot_ids is None or bot_id in system.allowed_bot_ids)
+    )
+
+
 class DecideIn(BaseModel):
+    """`note` 是拒绝理由（拒绝时必填，申请人与助理都会看到）；批准时不用、不保存。"""
+
     model_config = ConfigDict(extra="forbid")
     decision: Literal["approve", "reject"]
     note: str = Field(default="", max_length=access_requests.MAX_NOTE * 4)
@@ -101,6 +120,18 @@ async def _approve(
     # 先锁机器人行再读现有授权：与管理台改权限、所有者一键开通互相排队。
     await lock_bot(session, bot)
     keys, writes = await current_grants(session, bot.id)
+    # 现有授权里已不再对它开放的系统会让整次写入被拒：点名是哪一个，别让管理员以为是申请的系统。
+    # 这些系统行 mark_approved 已经锁过，这里只是从会话里取。
+    existing = await session.scalars(select(BusinessSystem).where(BusinessSystem.key.in_(keys)))
+    blocked = sorted(s.key for s in existing if not _usable(s, bot.id))
+    if blocked:
+        raise ApiError(
+            409,
+            409,
+            f"这位助理现有的授权里有系统已不再对它开放（{'、'.join(blocked)}），"
+            "请先在它的系统权限里去掉，再批准这张申请",
+            [{"type": "existing_grant_blocked"}],
+        )
     await apply_grants(
         session,
         request,
@@ -128,7 +159,7 @@ async def decide(
     request_id: uuid.UUID,
     body: DecideIn,
     request: Request,
-    user: User = Depends(MANAGERS),
+    user: User = Depends(deciding_manager),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """批准或拒绝一张在途的申请。批准时发现申请已失效：撤回先提交，再把原因告诉管理员。"""

@@ -32,7 +32,8 @@ async def current_grants(session: AsyncSession, bot_id: uuid.UUID) -> tuple[list
 async def lock_bot(session: AsyncSession, bot: Bot) -> None:
     """写授权前先拿这位机器人的缺口咨询锁，再锁机器人行并读回最新版本号。
 
-    顺序与缺口、权限申请一致（咨询锁在最前），管理台改权限与所有者一键开通互相排队：先拿锁
+    顺序与缺口、权限申请一致（咨询锁 → …… → 机器人行 → 系统行按 key），管理台改权限、所有者
+    一键开通与管理员批准申请互相排队：先拿锁
     再读现有授权，谁也不会覆盖掉对方刚写的。可重入：同一事务里调几次都行。
     """
     from coreman.core.assistants import gaps
