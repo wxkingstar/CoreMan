@@ -93,6 +93,12 @@ class Update(Arguments):
     handler: Handler | None = Field(default=None, description=HANDLER)
     handler_name: HandlerName | None = None
     job: JobRef | None = None
+    approval_id: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = (
+        Field(
+            default=None,
+            description="An approval id (from approval_list) to show under this follow-up",
+        )
+    )
     clear: list[Literal["notes", "review_on", "due_on"]] = Field(
         default_factory=list, max_length=3, description="Fields to empty"
     )
@@ -173,6 +179,7 @@ HINTS = {
     "snooze_not_future": "until 必须是 today 之后的日期。",
     "too_many_followups": "未结的条目已到上限，先关闭办完的。",
     "invalid_scope": "scope 只能是 today、open、all、四个分类名之一，或一个编号。",
+    "approval_not_found": "没有这张审批单；用 approval_list 查编号。",
     "nothing_to_update": "没有给出要改的项。",
     "invalid_handler_name": "handler=person 时要给 handler_name（同事的称呼，50 字以内）。",
     "job_not_found": (
@@ -268,9 +275,18 @@ async def _run(
             )
         for field in args.clear:
             changes[field] = None
-        if not changes:
+        if not changes and args.approval_id is None:
             raise followups.FollowupError("nothing_to_update")
-        row = await followups.update(session, bot_id, seq, **changes)
+        # 挂单与改字段要么都生效、要么都不生效：后一步报错时前一步的 flush 也撤掉。
+        async with session.begin_nested():
+            if args.approval_id is not None:
+                try:
+                    approval_id = uuid.UUID(args.approval_id)
+                except ValueError:
+                    raise followups.FollowupError("approval_not_found") from None
+                row = await followups.link_approval(session, bot_id, seq, approval_id)
+            if changes:
+                row = await followups.update(session, bot_id, seq, **changes)
     return {"followup": followups.view(row)}
 
 

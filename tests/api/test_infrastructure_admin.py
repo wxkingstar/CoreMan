@@ -326,3 +326,33 @@ async def test_proxy_limits_default_bounded_kept_when_omitted_and_audited(
         .limit(1)
     )
     assert audit is not None and audit.diff["batch_write_max"] == [1000, 50000]
+
+
+async def test_system_grants_if_match_is_checked_against_the_locked_version(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """读出机器人之后、核对 If-Match 之前别处改了版本：按锁住后读到的最新版本核对，拒绝覆盖。"""
+    from coreman.api.routers import infrastructure_admin
+
+    await login_as(client, db_session, role="team_lead")
+    bot = (await client.post("/api/admin/bots", json=_bot_body())).json()["data"]
+    db_session.add(BusinessSystem(key="erp", name="ERP", allowed_bot_ids=None))
+    await db_session.commit()
+    original = infrastructure_admin.load_bot
+
+    async def load_then_bump(session: AsyncSession, bot_id):  # type: ignore[no-untyped-def]
+        row = await original(session, bot_id)
+        await db_session.execute(
+            text("UPDATE bots SET version = version + 1 WHERE id = :id"), {"id": bot_id}
+        )
+        await db_session.commit()
+        return row
+
+    monkeypatch.setattr(infrastructure_admin, "load_bot", load_then_bump)
+    r = await client.put(
+        f"/api/admin/bots/{bot['id']}/system-grants",
+        json={"system_keys": ["erp"]},
+        headers={"If-Match": str(bot["version"])},
+    )
+    assert r.status_code == 409, r.text
+    assert not list((await db_session.execute(select(BotSystemGrant))).scalars())

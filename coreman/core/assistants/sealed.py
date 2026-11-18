@@ -46,6 +46,7 @@ from coreman.core.crypto import PREFIX_V2, Cipher, DecryptError, key_id_of
 from coreman.core.db.models import (
     AssistantApproval,
     AssistantFollowup,
+    AssistantGap,
     AssistantInbox,
     AssistantJob,
     AssistantPage,
@@ -205,6 +206,8 @@ COLUMNS: dict[type, dict[str, Kind]] = {
     },
     # 待跟进：标题与备注。标题非空，读不出来时给空串。
     AssistantFollowup: {"title_enc": Text(""), "notes_enc": Text(), "handler_name_enc": Text()},
+    # 能力缺口：要它做什么。非空，读不出来时给空串。
+    AssistantGap: {"need_enc": Text("")},
     # 子任务：标题、首轮的交代、最近一次追问、结论、卡住的原因。标题与交代非空，读不出来时给空串。
     AssistantJob: {
         "title_enc": Text(""),

@@ -116,6 +116,10 @@ class AssistantApproval(Base):
     # 无人在场的一轮里提交的多个飞书写合成的一张单：各项共用它，取值是第一项的编号（第一项
     # 带着向 Tower 提交的外部编号与令牌）。单独成单的为空。
     batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 引出这张单的待跟进：总表把在途的单列在那一条下面；条目删掉时置空。
+    followup_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_followups.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     # 最近一次改稿的时刻（没改过为空）：改稿时平台重新读过会话，「之后会话动没动过」从它算起。
     revised_at: Mapped[datetime | None] = _ts()
@@ -458,6 +462,9 @@ FOLLOWUP_STATUSES = ("open", "snoozed", "done", "dropped")
 FOLLOWUP_CLOSE_CODES = ("origin_recalled",)
 # 谁在办：助理自己、子任务（含调度公共员工，指向 job_id）、某位同事、所有者自己。
 FOLLOWUP_HANDLERS = ("assistant", "job", "person", "owner")
+# 能力缺口：助理办不成事时卡在哪个权限上（见 coreman/core/assistants/gaps.py）。
+GAP_KINDS = ("feishu_scope", "business_system", "cloud_product", "credential", "node_tool", "other")
+GAP_STATUSES = ("open", "requested", "resolved", "declined")
 JOB_KINDS = ("subtask", "bot_help")
 JOB_ORIGINS = ("assistant", "system")
 JOB_STATUSES = ("queued", "running", "done", "failed", "cancelled", "blocked")
@@ -470,7 +477,7 @@ class AssistantFollowup(Base):
     分类、状态、两个日期、编号是明文，按日期查询不解密。`seq` 在一位助理内递增，显示为 F012。
     `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 只在平台自动关闭时有值。
     `job_id` 指向引出这一条的子任务（`assistant_jobs`），子任务行删掉时置空。
-    `handler_name_enc` 同样登记在 `sealed.COLUMNS`。
+    `handler_name_enc` 同样登记在 `sealed.COLUMNS`。`gap_id` 指向卡住它的能力缺口，缺口删掉时置空。
     """
 
     __tablename__ = "assistant_followups"
@@ -504,6 +511,10 @@ class AssistantFollowup(Base):
     handler_name_enc: Mapped[str | None] = mapped_column(Text)
     # 最近一次进展：新建、改动、followup_progress 时刷新；总表据此判断停滞。
     progress_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    # 卡住它的能力缺口；缺口未解决时总表把它放进「卡在权限」。
+    gap_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_gaps.id", ondelete="SET NULL")
+    )
     title_enc: Mapped[str] = mapped_column(Text)
     notes_enc: Mapped[str | None] = mapped_column(Text)
     close_code: Mapped[str | None] = mapped_column(Text)
@@ -516,6 +527,39 @@ WATCH_STATES = ("idle", "polling", "backoff", "paused", "stopped")
 INBOX_KINDS = ("message", "approval_todo", "reminder", "owner_said")
 INBOX_LEVELS = ("immediate", "batch", "hold")
 INBOX_STATUSES = ("pending", "delivered", "void")
+
+
+class AssistantGap(Base):
+    """助理缺的一项能力：一个飞书权限、一个业务系统、一个云产品、一个凭证、一个节点工具……
+
+    `(bot_id, kind, key)` 唯一：同一个缺口卡住几件事，就有几条待跟进的 `gap_id` 指向它。
+    `need_enc`（要它做什么，一句话）登记在 `sealed.COLUMNS`；种类、标识、状态是明文，标识只是
+    代号（权限名、系统标识、产品名、凭证的环境变量名）。`seq` 在一位助理内递增，显示为 G003。
+    「怎么开」不落库，读取时按种类判定（`gaps.fix_for`）。
+    """
+
+    __tablename__ = "assistant_gaps"
+    __table_args__ = (
+        CheckConstraint(enum_check("kind", GAP_KINDS), name="kind"),
+        CheckConstraint(enum_check("status", GAP_STATUSES), name="status"),
+        UniqueConstraint("bot_id", "kind", "key", name="uq_assistant_gaps_bot_kind_key"),
+        UniqueConstraint("bot_id", "seq", name="uq_assistant_gaps_bot_seq"),
+        Index("assistant_gaps_bot_status_idx", "bot_id", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    seq: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(Text)
+    key: Mapped[str] = mapped_column(Text)
+    need_enc: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    # 报缺口（或重新打开）时这项能力已有的级别（`capabilities.current_rank`：0 没有、1 能读、
+    # 2 能写）：开轮比对时级别比它高才算开通，免得把报的时候就有的能力当成「刚开通」。
+    seen_rank: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    resolved_at: Mapped[datetime | None] = _ts()
+    declined_at: Mapped[datetime | None] = _ts()
 
 
 class AssistantWatch(Base):

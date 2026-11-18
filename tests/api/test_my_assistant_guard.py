@@ -54,6 +54,11 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
         "path": "/followups/F001/snooze",
         "json": {"until": "2099-01-01"},
     },
+    ("POST", "/gaps/{label}/decline"): {"path": "/gaps/G001/decline"},
+    # 种子缺口是 other 种类：开通与申请都 409、撤回是 404（上面没有在途的申请），一样都不改。
+    ("POST", "/gaps/{label}/grant"): {"path": "/gaps/G001/grant"},
+    ("POST", "/gaps/{label}/request"): {"path": "/gaps/G001/request", "json": {"reason": "查订单"}},
+    ("POST", "/gaps/{label}/withdraw"): {"path": "/gaps/G001/withdraw"},
     ("GET", "/approvals/recent"): {},
     ("GET", "/notes"): {},
     # 知识页的路径只放请求体：读与删都是 POST。
@@ -111,6 +116,9 @@ class Seeded:
         prefs = await settings.get(db_session, self.bot.id)
         assert (prefs.timezone, prefs.shift_override) == ("Asia/Shanghai", None)
         assert await tasks_of(db_session, self.bot, COLD_START_KIND) == []
+        from coreman.core.assistants import gaps
+
+        assert (await gaps.get(db_session, self.bot.id, 1)).status == "open"
 
 
 async def _seeded(db_session: AsyncSession) -> Seeded:
@@ -133,6 +141,16 @@ async def _seeded(db_session: AsyncSession) -> Seeded:
             expires_at=utcnow() + timedelta(hours=72),
             status="pending",
         )
+    )
+    from coreman.core.assistants import gaps
+
+    await gaps.report(
+        db_session,
+        bot.id,
+        kind="other",
+        key="repo-access",
+        need=f"读仓库 {SECRET}",
+        followup_seqs=[1],
     )
     job = await spawned(db_session, bot, title=f"退货原因 {SECRET}", brief=f"查一下 {SECRET}")
     await db_session.commit()

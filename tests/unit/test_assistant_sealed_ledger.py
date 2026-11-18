@@ -47,13 +47,15 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/compiling.py": 1,
     # 投递：到点的条目、绑在一轮上的条目；都显式还原，读不出来的跳过
     "coreman/core/assistants/delivery.py": 2,
-    # 事项总表：在途的审批单、挂在待跟进上的子任务；都显式还原
-    "coreman/core/assistants/board.py": 2,
+    # 事项总表：在途的审批单、挂在待跟进上的子任务、挂在条目下的在途审批单；都显式还原
+    "coreman/core/assistants/board.py": 3,
     # 摘要：没发出的汇报；显式还原，读不出来的跳过
     "coreman/core/assistants/digest.py": 1,
     "coreman/core/assistants/feedback.py": 1,  # 只读设置行的时区算所有者当地日期，不碰内容列
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
+    # 缺口：取一条与登记时查重是 session.scalar（自动还原）；解决、列出显式还原
+    "coreman/core/assistants/gaps.py": 4,
     # 子任务：取一条、按结果任务号取一条都是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/jobs.py": 3,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
@@ -165,8 +167,11 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/delivery_checks.py": 2,
     # 调度公共员工：经 ORM 新建一行求助（flush 钩子封存问题与标题）
     "coreman/core/assistants/dispatch.py": 1,
-    # 待跟进：经 ORM 新建（flush 钩子封存）；另一条只把到期的推后条目改回未结
-    "coreman/core/assistants/followups.py": 2,
+    # 待跟进：经 ORM 新建（flush 钩子封存）；另三条只把到期的推后条目改回未结、
+    # 刷新被外部事件推动的条目的进展时间、审批单有了决定时按 id 刷新进展时间
+    "coreman/core/assistants/followups.py": 4,
+    # 缺口：经 ORM 新建（flush 钩子封存要什么）；之后的改动同样经 ORM
+    "coreman/core/assistants/gaps.py": 1,
     # 子任务：经 ORM 新建（flush 钩子封存）；之后的改动同样经 ORM
     "coreman/core/assistants/jobs.py": 1,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM

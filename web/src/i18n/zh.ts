@@ -538,6 +538,14 @@ export default {
   "clearAddress": "移除已保存的地址"
 },
   cron: {"cancelRun": '取消本次执行', "personal": "成员本人任务", "personalHint": "成员在私聊中为自己创建的 AI 定时任务，指令和执行结果仅本人可见；管理员只能停用。", "privateRun": "仅执行者本人可见", "name": "名称", "bot": "AI 员工", "schedule": "触发时间", "timezone": "时区", "scheduleHint": "五项依次为分、时、日、月、周。默认在工作日 09:00 执行；夏令时重复时刻只执行一次。", "next": "下次执行", "lastStatus": "执行状态", "identityHint": "自动执行使用创建者的当前权限；立即运行使用点击者本人。修改执行内容仅限任务创建者。", "prompt": "执行内容", "systemPrompt": "本任务专用提示词（留空沿用AI 员工）", "expires": "到期时间", "recipients": "结果接收方式", "users": "私聊接收人", "groups": "群聊 ID", "emails": "邮件接收人", "perLine": "每行一个，也可用逗号分隔", "webhook": "发送到AI 员工配置的群 Webhook", "precheck": "执行前检查", "precheckHint": "留空时每次执行。支持数据判断、if/for 和有限函数；不支持文件、反射或任意网络请求。测试使用空 ctx，不会调用模型。", "template": "填入模板", "test": "测试检查逻辑", "willRun": "将执行", "willSkip": "将跳过", "history": "执行记录", "run": "立即运行", "queued": "等待触发", "required": "请填写名称、AI 员工和执行内容", "expired": "到期时间必须在未来", "reply": "执行结果", "channel": "通知渠道", "deliveryStatus": "投递状态", "error": "失败原因", "started": "开始时间", "trigger": "触发方式", "scheduled": "自动", "manual": "手动", "tokens": "输入 / 输出 Token", "status": {"running": "运行中", "success": "成功", "failed": "失败", "skipped": "已跳过", "failed_precheck": "检查失败"}},
+  systemAccess: {
+    title: '权限申请', onlyPending: '只看待处理', all: '全部', createdAt: '申请时间', bot: 'AI 员工', system: '系统', level: '读写',
+    read: '只读', write: '读写', reason: '理由', requester: '申请人', status: '状态',
+    statuses: { pending: '待处理', approved: '已批准', rejected: '已拒绝', withdrawn: '已撤回' },
+    approve: '批准', approveConfirm: '批准后会把 {name} 加进这个系统的开放名单并授权，确定吗？',
+    reject: '拒绝', rejectPrompt: '拒绝理由（申请人与助理都会看到）', rejectRequired: '请填写拒绝理由',
+    approved: '已批准', rejected: '已拒绝', empty: '没有权限申请',
+  },
   systemBatches: {
     items: "明细", allItems: "全部", noItems: "没有符合条件的项", seq: "序号", target: "对象", sent: "写入参数", before: "修改前（AI 提供）", brief: "结果摘要", finishedAt: "完成时间",
     itemFilter: {"ok": "成功", "failed": "失败", "unknown": "结果未知", "skipped": "未执行", "pending": "待执行"},

@@ -289,15 +289,8 @@ class OpenStage(ChatStageBase):
         # 身份运行，又不挂操作目录，停掉令牌就完全查不了业务系统。
         origin = ctx.task.payload.get("origin")
         unprompted = origin in ("observe", "dispatch") and not bot.unprompted_system_tokens
-        access = await build_system_access(
-            session,
-            ctx.cipher,
-            bot=bot,
-            speaker=intake.speaker,
-            issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
-            external_key=ctx.external_jwt_key,
-            providers=ctx.business_token_providers,
-            catalog=None
+        catalog_mount = (
+            None
             if alert_turn or cold_start
             else await catalog_policy.mount_for(
                 session,
@@ -306,8 +299,19 @@ class OpenStage(ChatStageBase):
                 task_id=ctx.task.id,
                 public_base_url=ctx.public_base_url,
                 ttl_seconds=bot.sse_timeout_seconds,
-            ),
-            mcp_supported=await mcp_runtime_supported(session, relay=relay, model=bot.model),
+            )
+        )
+        mcp_ok = await mcp_runtime_supported(session, relay=relay, model=bot.model)
+        access = await build_system_access(
+            session,
+            ctx.cipher,
+            bot=bot,
+            speaker=intake.speaker,
+            issuer=str(await ctx.settings_store.get("jwt_issuer", default="coreman")),
+            external_key=ctx.external_jwt_key,
+            providers=ctx.business_token_providers,
+            catalog=catalog_mount,
+            mcp_supported=mcp_ok,
             unattended=unattended,
             withhold=cold_start,
             unprompted=unprompted,
@@ -402,13 +406,26 @@ class OpenStage(ChatStageBase):
             knowledge = await assistant_notes.turn_note(session, ctx, intake, info)
             if knowledge:
                 ctx.turn_notes.append(knowledge)
-            if ctx.task.kind == "chat":
-                # 所有者发来「现在处理 F012」（摘要上的按钮）：附上这条待跟进。
-                from coreman.core.assistants import digest
+            from coreman.core.assistants import digest
 
+            if ctx.task.kind == "chat" and await digest.owner_private_chat(
+                session,
+                bot,
+                user_id=intake.speaker.user_id,
+                chat_type=intake.chat_type,
+                chat_id=intake.chat_id,
+            ):
+                # 所有者在私聊里发来「现在处理 F012」（摘要上的按钮）：附上这条待跟进。
+                # 别人或群里发的同一句话什么都不附：不泄露内容，也不冒充所有者在场。
                 handle = await digest.now_note(session, bot.id, intake.text)
                 if handle:
                     ctx.turn_notes.append(handle)
+                # 所有者发来「开通 G003」（看板上的按钮）：附上这个缺口与怎么开。
+                from coreman.core.assistants import gaps
+
+                opening_gap = await gaps.open_note(session, bot.id, intake.text)
+                if opening_gap:
+                    ctx.turn_notes.append(opening_gap)
         resume_fallback = ""
         if info.inherited_from is not None:
             from coreman.core.chat.session_carry import carried_context
@@ -509,6 +526,30 @@ class OpenStage(ChatStageBase):
             relay_session_id=info.relay_session_id,
             event_id=intake.inbound.id,
         )
+        if is_assistant(bot):
+            # 个人助理：本轮挂了哪些业务系统（读写级别）与云产品写进本轮块，已可用的缺口记为解决。
+            # 告警与冷启动不是替所有者办事的一轮，清单不列、也不比对缺口。级别按这一轮实际下发的
+            # 说（没人点名、身份不可用、签发失败的标成没下发）；调度回合什么都不挂进运行环境。
+            from coreman.core.assistants import capabilities
+
+            ctx.turn_notes.append(
+                await capabilities.apply(
+                    session,
+                    bot.id,
+                    mode="withheld"
+                    if alert_turn or cold_start
+                    else "unattended"
+                    if unattended
+                    else "attended",
+                    mcp_supported=mcp_ok,
+                    mounted=catalog_mount is not None,
+                    cloud_attached=ctx.cloud_proxy_ready
+                    and intake.speaker.user_id is not None
+                    and not (alert_turn or cold_start or bot_help),
+                    deployment=ctx,
+                    delivered=frozenset() if origin == "dispatch" else access.delivered,
+                )
+            )
         from coreman.core.prompting.rich_cards import with_reply_images
 
         # 交给平台解析的回答（helper、个人助理调度来的一轮）不会发到聊天里，图片说明用不上。

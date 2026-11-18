@@ -99,6 +99,17 @@ async def tick(session: AsyncSession, now: datetime, cipher: Cipher) -> int:
         grant = await session.get(FeishuPersonalGrant, (row.bot_id, row.user_id))
         if not inflow.satisfied(grant, row.need):
             continue
+        # 个人助理卡在飞书权限上的缺口：授权已满足的记为已解决（没有缺口时是空查询）。
+        # 飞书缺口报时记级别 0，授权满足即升到 1。
+        from coreman.core.assistants import gaps
+
+        await gaps.resolve_quietly(
+            session,
+            row.bot_id,
+            "feishu_scope",
+            dict.fromkeys(gaps.feishu_keys(grant), 1),
+            log_event="assistant_gap_resolve_failed_on_authorization",
+        )
         task = await tasks.enqueue(
             session,
             tasks.NewTask(

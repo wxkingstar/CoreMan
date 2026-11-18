@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum
 import re
 import uuid
+from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
@@ -24,6 +25,7 @@ from coreman.core.assistants import sealed
 from coreman.core.db.models import (
     FOLLOWUP_CATEGORIES,
     FOLLOWUP_HANDLERS,
+    AssistantApproval,
     AssistantFollowup,
     AssistantJob,
 )
@@ -332,6 +334,79 @@ async def progress(
             raise FollowupError("notes_full")
         del lines[oldest]
     row.notes_enc = "\n".join(lines)
+    row.updated_at = row.progress_at = utcnow()
+    await session.flush()
+    return row
+
+
+async def touch(session: AsyncSession, bot_id: uuid.UUID, seqs: list[int]) -> None:
+    """这几条有了外部进展（卡住它们的缺口解决了、所有者不开了……）：刷新进展时间，不碰内容列。"""
+    if not seqs:
+        return
+    now = utcnow()
+    await session.execute(
+        sql_update(AssistantFollowup)
+        .where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.seq.in_(seqs),
+            AssistantFollowup.status.in_(LIVE),
+        )
+        .values(progress_at=now, updated_at=now)
+    )
+
+
+async def approval_target(
+    session: AsyncSession, bot_id: uuid.UUID, label_text: str | None
+) -> uuid.UUID | None:
+    """写类工具带来的待跟进编号 → 那一条的 id；没给、不认识、已关闭都返回 None（不挡提交）。"""
+    if not label_text:
+        return None
+    try:
+        seq = parse_label(label_text)
+    except FollowupError:
+        return None
+    found: uuid.UUID | None = await session.scalar(
+        select(AssistantFollowup.id).where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.seq == seq,
+            AssistantFollowup.status.in_(LIVE),
+        )
+    )
+    return found
+
+
+async def touch_ids(session: AsyncSession, bot_id: uuid.UUID, ids: Iterable[uuid.UUID]) -> None:
+    """按 id 刷新进展时间（审批单有了决定）；只动未结的，不碰内容列。"""
+    wanted = list(dict.fromkeys(ids))
+    if not wanted:
+        return
+    now = utcnow()
+    await session.execute(
+        sql_update(AssistantFollowup)
+        .where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.id.in_(wanted),
+            AssistantFollowup.status.in_(LIVE),
+        )
+        .values(progress_at=now, updated_at=now)
+    )
+
+
+async def link_approval(
+    session: AsyncSession, bot_id: uuid.UUID, seq: int, approval_id: uuid.UUID
+) -> AssistantFollowup:
+    """把这位助理的一张审批单挂到这一条下面（换挂也行）。
+
+    先锁审批单再锁待跟进行，与审批决定（锁单后刷新所挂条目）同序，避免互等。
+
+    Raises:
+        FollowupError: followup_not_found / followup_closed / approval_not_found
+    """
+    found = await session.get(AssistantApproval, approval_id, with_for_update=True)
+    if found is None or found.bot_id != bot_id:
+        raise FollowupError("approval_not_found")
+    row = await _live(session, bot_id, seq)
+    found.followup_id = row.id
     row.updated_at = row.progress_at = utcnow()
     await session.flush()
     return row

@@ -258,3 +258,42 @@ async def test_a_batch_counts_as_one_request_like_on_the_card(
         (str(first.id), 2),
         (str(alone.id), 1),
     ]
+
+
+async def test_board_lists_gaps_and_owner_can_decline(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from coreman.core.assistants import gaps
+
+    bot, _ = await _owner(client, db_session)
+    await followups.add(db_session, bot.id, category="promised", title="查订单")
+    await gaps.report(
+        db_session,
+        bot.id,
+        kind="business_system",
+        key="orders",
+        need=f"查订单 {SECRET}",
+        followup_seqs=[1],
+    )
+    await db_session.commit()
+    data = (await client.get(BOARD)).json()["data"]
+    assert data["bot_id"] == str(bot.id) and data["counts"]["gap"] == 1
+    assert data["groups"]["gap"][0]["gap"] == "G001"
+    assert data["gaps"] == [
+        {
+            "id": "G001",
+            "kind": "business_system",
+            "key": "orders",
+            "need": f"查订单 {SECRET}",
+            "status": "open",
+            "fix": "admin",
+            "need_write": False,
+            "hint": "需要平台管理员为这位助理开放业务系统 orders",
+            "followups": ["F001"],
+            "request": None,
+        }
+    ]
+    r = await client.post(f"{URL}/gaps/G001/decline")
+    assert r.status_code == 200 and r.json()["data"] == {"id": "G001", "status": "declined"}
+    assert (await client.get(BOARD)).json()["data"]["gaps"] == []
+    assert (await client.post(f"{URL}/gaps/G009/decline")).status_code == 404

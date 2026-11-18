@@ -21,11 +21,11 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.bots import load_bot, member_ids_of
 from coreman.api.routers.systems_catalog import refresh_as
 from coreman.api.security import verify_csrf
+from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, granted_systems
 from coreman.core.auth.tokens import active_key, public_keys
-from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.db.models import (
     ApiClient,
@@ -630,15 +630,7 @@ async def get_grants(
     bot = await load_bot(session, bot_id)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
-    rows = (
-        await session.execute(
-            select(BotSystemGrant.system_key, BotSystemGrant.allow_write)
-            .where(BotSystemGrant.bot_id == bot_id)
-            .order_by(BotSystemGrant.system_key)
-        )
-    ).all()
-    keys = [key for key, _ in rows]
-    writes = [key for key, allowed in rows if allowed]
+    keys, writes = await current_grants(session, bot_id)
     return {"code": 0, "data": {"system_keys": keys, "write_keys": writes, "version": bot.version}}
 
 
@@ -653,73 +645,18 @@ async def put_grants(
     bot = await load_bot(session, bot_id)
     if not is_bot_admin(user, bot, await member_ids_of(session, bot_id)):
         raise forbidden()
+    # 先锁机器人行并读回最新版本号再核对 If-Match：读出之后别处改过的，这里能看出来。
+    await lock_bot(session, bot)
     require_if_match(request, bot.version)
-    keys = sorted(set(body.system_keys))
-    if body.write_keys is not None and not set(body.write_keys) <= set(keys):
-        raise ApiError(422, 422, "允许写入的系统必须在授权列表中")
-    systems = list(
-        (
-            await session.execute(
-                select(BusinessSystem)
-                .where(BusinessSystem.key.in_(keys))
-                .order_by(BusinessSystem.key)
-                .with_for_update()
-            )
-        ).scalars()
-    )
-    # allowed_bot_ids 为 null 的历史行仍按「对全部机器人开放」处理（不做数据迁移），
-    # 管理台会明示这一状态；新建系统缺省是空白名单。
-    if len(systems) != len(keys) or any(
-        not s.enabled
-        or s.key in RESERVED_SYSTEM_KEYS
-        or (s.allowed_bot_ids is not None and bot_id not in s.allowed_bot_ids)
-        for s in systems
-    ):
-        raise ApiError(403, 403, "申请包含未开放给此机器人的系统")
-    previous = (
-        await session.execute(
-            delete(BotSystemGrant)
-            .where(BotSystemGrant.bot_id == bot_id)
-            .returning(BotSystemGrant.system_key, BotSystemGrant.allow_write)
-        )
-    ).all()
-    before = [key for key, _ in previous]
-    writes_before = sorted(key for key, allowed in previous if allowed)
-    writes = sorted(
-        set(body.write_keys) if body.write_keys is not None else set(writes_before) & set(keys)
-    )
-    session.add_all(
-        [
-            BotSystemGrant(
-                bot_id=bot_id, system_key=key, granted_by=user.id, allow_write=key in writes
-            )
-            for key in keys
-        ]
-    )
-    installed, uninstalled = await sync_companions(
+    keys, writes = await apply_grants(
         session,
         request,
         user,
         bot,
-        systems,
-        set(before),
-        set(before) - set(keys),
+        keys=body.system_keys,
+        write_keys=body.write_keys,
+        comment=body.comment,
     )
-    bot.version += 1
-    await persist(session)
-    await notify_bot_changed(session, bot.id)
-    # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
-    diff = diff_dict(
-        {"system_keys": sorted(before), "write_keys": writes_before},
-        {
-            "system_keys": keys,
-            "write_keys": writes,
-            "comment": body.comment or None,
-            "companion_installed": installed or None,
-            "companion_uninstalled": uninstalled or None,
-        },
-    )
-    await audit(session, request, user, "bot.system_grants", "bot", str(bot_id), diff)
     await persist(session, commit=True)
     return {"code": 0, "data": {"system_keys": keys, "write_keys": writes, "version": bot.version}}
 

@@ -98,6 +98,45 @@ class BotSystemGrant(Base):
     )
 
 
+ACCESS_REQUEST_STATUSES = ("pending", "approved", "rejected", "withdrawn")
+
+
+class SystemAccessRequest(Base):
+    """所有者确认后、为他的个人助理申请一个白名单外的业务系统；平台管理员批准或拒绝。
+
+    `reason` 与 `decision_note` 是写给对方看的话，明文存。同一助理同一系统同时只有一张 `pending`。
+    """
+
+    __tablename__ = "system_access_requests"
+    __table_args__ = (
+        CheckConstraint(enum_check("status", ACCESS_REQUEST_STATUSES), name="status"),
+        Index(
+            "system_access_requests_pending_uq",
+            "bot_id",
+            "system_key",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("system_access_requests_status_idx", "status", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    gap_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_gaps.id", ondelete="SET NULL")
+    )
+    system_key: Mapped[str] = mapped_column(Text, ForeignKey("systems.key", ondelete="CASCADE"))
+    write: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    reason: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SystemGrantAudit(Base):
     """已弃用：原先只写不读，现已停止写入，授权变更以 audit_logs 的 bot.system_grants /
     system.update 为准。映射只为让模型与迁移保持一致（alembic check），不从 models 包导出、

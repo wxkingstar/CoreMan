@@ -107,7 +107,31 @@ export interface SettledApproval {
   executed_at: string | null
   locked: boolean
 }
-export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'scheduled'
+export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'gap' | 'scheduled'
+export type GapKind = 'feishu_scope' | 'business_system' | 'cloud_product' | 'credential' | 'node_tool' | 'other'
+export type GapFix = 'authorize' | 'credential' | 'self_grant' | 'request' | 'admin' | 'node_admin' | 'none'
+/** 这个缺口最近的一张权限申请（不论状态）。理由是所有者写给平台管理员的明文。 */
+export interface GapRequest {
+  status: 'pending' | 'approved' | 'rejected' | 'withdrawn'
+  reason: string
+  decision_note: string | null
+  created_at: string
+}
+export interface BoardGap {
+  id: string
+  kind: GapKind
+  key: string
+  need: string | null
+  status: 'open' | 'requested'
+  fix: GapFix
+  /** 业务系统缺口要的是写（报的时候已经能读）：开通与申请都按这个级别，由服务端定。 */
+  need_write: boolean
+  /** 卡片用的中文说法；页面按 fix 用本地化文案。 */
+  hint: string
+  followups: string[]
+  request: GapRequest | null
+  locked?: boolean
+}
 export interface BoardItem extends Followup {
   needs_owner: boolean
   has_notes: boolean
@@ -120,6 +144,9 @@ export interface BoardItem extends Followup {
   idle_days: number
   suggestion: string | null
   job: AssistantJob | null
+  gap: string | null
+  /** 挂在这一条下面、等所有者批的单。 */
+  approvals: PendingApproval[]
 }
 export interface Board {
   today: string
@@ -127,6 +154,8 @@ export interface Board {
   approvals: PendingApproval[]
   approvals_total: number
   groups: Record<BoardGroup, BoardItem[]>
+  bot_id: string
+  gaps: BoardGap[]
 }
 
 export interface NoteEntry {
@@ -233,6 +262,10 @@ const SLOW = { timeout: 60_000 }
 export const myAssistant = {
   overview: () => call<AssistantOverview | AssistantAbsent>(http.get(root)),
   board: () => call<Board>(http.get(`${root}/board`)),
+  declineGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/decline`)),
+  grantGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/grant`)),
+  requestGap: (label: string, reason: string) => call<{ id: string; status: string; request_id: string }>(http.post(`${root}/gaps/${label}/request`, { reason })),
+  withdrawGap: (label: string) => call<{ id: string; status: string }>(http.post(`${root}/gaps/${label}/withdraw`)),
   jobs: () => call<JobList>(http.get(`${root}/jobs`)),
   cancelJob: (id: string) => call<{ id: string; status: string }>(http.post(`${root}/jobs/${id}/cancel`)),
   followups: () => call<FollowupList>(http.get(`${root}/followups`)),

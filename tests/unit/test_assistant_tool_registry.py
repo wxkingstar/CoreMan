@@ -37,6 +37,7 @@ FOLLOWUP_TOOLS = [
     "followup_progress",
     "followup_list",
 ]
+GAP_TOOLS = ["gap_report", "gap_list", "gap_request"]
 JOB_TOOLS = [
     "assistant_spawn",
     "assistant_job_message",
@@ -137,6 +138,7 @@ def test_a_full_turn_lists_staged_writes_and_every_group(demo: Recorder) -> None
     assert names[len(source) :] == [
         *NOTES_TOOLS,
         *FOLLOWUP_TOOLS,
+        *GAP_TOOLS,
         *SETTINGS_TOOLS,
         "notes_demo",
         *APPROVAL_TOOLS,
@@ -158,7 +160,14 @@ def test_a_turn_without_the_approval_group_is_read_only(demo: Recorder) -> None:
     source = base()
     names = [item["name"] for item in tools.definitions(source, groups=("knowledge",))]
     reads = [item["name"] for item in source if not catalog.is_write(item["name"])]
-    assert names == [*reads, *NOTES_TOOLS, *FOLLOWUP_TOOLS, *SETTINGS_TOOLS, "notes_demo"]
+    assert names == [
+        *reads,
+        *NOTES_TOOLS,
+        *FOLLOWUP_TOOLS,
+        *GAP_TOOLS,
+        *SETTINGS_TOOLS,
+        "notes_demo",
+    ]
     assert "feishu_chat_history" in names and "feishu_reply_message" not in names
 
 
@@ -172,6 +181,7 @@ def test_a_subtask_turn_adds_only_the_blocked_tool(demo: Recorder) -> None:
         *reads,
         *NOTES_TOOLS,
         *FOLLOWUP_TOOLS,
+        *GAP_TOOLS,
         *SETTINGS_TOOLS,
         "notes_demo",
         "assistant_job_blocked",

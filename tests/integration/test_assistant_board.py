@@ -8,15 +8,15 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import board, followups
+from coreman.core.assistants import board, digest, followups
 from coreman.core.assistants import settings as assistant_settings
-from coreman.core.db.models import AssistantFollowup, AssistantJob
-from tests.integration.approval_helpers import install, pending
+from coreman.core.db.models import AssistantApproval, AssistantFollowup, AssistantJob
+from tests.integration.approval_helpers import install, pending, reply
 from tests.integration.delivery_helpers import ready
 from tests.integration.job_helpers import spawned
 from tests.integration.test_assistant_digest import handover_scope
 
-pytestmark = pytest.mark.usefixtures("assistant_master")
+pytestmark = pytest.mark.usefixtures("assistant_master", "runtime_settings")
 WED_NOON = datetime(2026, 11, 18, 4, 0, tzinfo=UTC)  # 北京周三 12:00
 LAST_FRI = datetime(2026, 11, 13, 4, 0, tzinfo=UTC)
 
@@ -112,3 +112,136 @@ async def test_a_woken_item_does_not_count_its_snoozed_days_as_idle(
     assert awake.idle_days == 1 and not awake.stalled
     [stalled] = result.groups["stalled"]
     assert stalled.row.seq == parked.seq and stalled.idle_days == 3
+
+
+async def test_followups_stuck_on_a_gap(db_session: AsyncSession) -> None:
+    from coreman.core.assistants import gaps
+
+    bot, _ = await ready(db_session)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    stuck = await followups.add(db_session, bot.id, category="decide", title="选供应商")
+    free = await followups.add(db_session, bot.id, category="promised", title="写周报")
+    row, _ = await gaps.report(
+        db_session,
+        bot.id,
+        kind="credential",
+        key="QUOTE_TOKEN",
+        need="查报价",
+        followup_seqs=[stuck.seq],
+    )
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert [i.row.seq for i in result.groups["gap"]] == [stuck.seq]
+    assert result.groups["gap"][0].gap is not None and result.groups["gap"][0].gap.id == row.id
+    assert [i.row.seq for i in result.groups["working"]] == [free.seq]
+    assert [(g.row.seq, g.fix, g.followups) for g in result.gaps] == [
+        (1, "credential", [stuck.seq])
+    ]
+    await gaps.decline(db_session, bot.id, row.seq)
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert result.gaps == [] and [i.row.seq for i in result.groups["owner"]] == [stuck.seq]
+
+
+async def test_linked_approval_sits_under_its_followup(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner = await ready(db_session)
+    scope = await handover_scope(db_session, bot, owner)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    item = await followups.add(db_session, bot.id, category="promised", title="回复李四")
+    linked = await pending(
+        db_session, scope, {**reply(topic="报价"), "text": "报价已确认", "uuid": "u1"}
+    )
+    loose = await pending(
+        db_session, scope, {**reply(topic="合同"), "text": "合同稍后发", "uuid": "u2"}
+    )
+    linked.followup_id = item.id
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    owner_items = result.groups["owner"]
+    assert [i.row.seq for i in owner_items] == [item.seq]
+    assert [a.id for a in owner_items[0].approvals] == [linked.id]
+    assert [a.id for a in result.approvals] == [loose.id] and result.approvals_total == 1
+
+
+async def test_gap_stuck_item_leaves_its_approval_in_the_loose_list(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.assistants import gaps
+
+    install(monkeypatch)
+    bot, owner = await ready(db_session)
+    scope = await handover_scope(db_session, bot, owner)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    item = await followups.add(db_session, bot.id, category="promised", title="查报价")
+    await gaps.report(
+        db_session,
+        bot.id,
+        kind="credential",
+        key="QUOTE_TOKEN",
+        need="查报价",
+        followup_seqs=[item.seq],
+    )
+    row = await pending(db_session, scope, {**reply(), "text": "报价已确认", "uuid": "u1"})
+    row.followup_id = item.id
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert [i.row.seq for i in result.groups["gap"]] == [item.seq]
+    assert result.groups["gap"][0].approvals == ()
+    assert [a.id for a in result.approvals] == [row.id] and result.approvals_total == 1
+
+
+async def test_a_batch_sits_under_one_item_as_one_line(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner = await ready(db_session)
+    scope = await handover_scope(db_session, bot, owner)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    item = await followups.add(db_session, bot.id, category="promised", title="回复李四")
+    head = await pending(db_session, scope, {**reply(), "text": "一", "uuid": "u1"})
+    member = await pending(db_session, scope, {**reply(), "text": "二", "uuid": "u2"})
+    head.batch_id = head.id
+    member.batch_id = head.id
+    member.followup_id = item.id  # 只有非代表行挂着条目：按代表行算，整张单留在单独的列表里
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    assert result.groups["owner"] == []
+    assert [a.id for a in result.approvals] == [head.id]
+    assert result.approvals_total == 1 and result.approval_items[head.id] == 2
+    head.followup_id = item.id
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    (entry,) = result.groups["owner"]
+    assert [a.id for a in entry.approvals] == [head.id]
+    assert result.approval_items[head.id] == 2
+    assert result.approvals == [] and result.approvals_total == 0
+
+
+async def test_an_approval_linked_to_an_old_item_still_makes_the_digest_fresh(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    bot, owner = await ready(db_session)
+    scope = await handover_scope(db_session, bot, owner)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    item = await followups.add(db_session, bot.id, category="promised", title="回复李四")
+    row = await pending(db_session, scope)
+    row.followup_id = item.id
+    await db_session.execute(
+        update(AssistantFollowup)
+        .where(AssistantFollowup.id == item.id)
+        .values(updated_at=WED_NOON - timedelta(days=3))
+    )
+    await db_session.execute(
+        update(AssistantApproval)
+        .where(AssistantApproval.id == row.id)
+        .values(created_at=WED_NOON + timedelta(hours=1))
+    )
+    prefs.digest_sent_at = WED_NOON
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON + timedelta(hours=2))
+    assert result.approvals_total == 0 and result.approvals_newest is not None
+    assert await digest.send_digest(db_session, bot, prefs, WED_NOON + timedelta(hours=2))

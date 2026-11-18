@@ -12,6 +12,7 @@ import { systems, type BusinessSystem, type SystemCatalog, type SystemInput, typ
 import { allSkills, type Skill } from '@/api/skills'
 import { formatBytes, formatDateTime } from '@/utils/format'
 import SystemBatchesPanel from '@/views/SystemBatchesPanel.vue'
+import SystemAccessRequestsPanel from '@/views/SystemAccessRequestsPanel.vue'
 import type { BotOut } from '@/api/types'
 
 const { t } = useI18n()
@@ -249,6 +250,13 @@ onMounted(load)
         :label="t('systemBatches.title')"
       >
         <SystemBatchesPanel :active="tab === 'batches'" />
+      </el-tab-pane>
+      <el-tab-pane
+        name="access"
+        lazy
+        :label="t('systemAccess.title')"
+      >
+        <SystemAccessRequestsPanel :active="tab === 'access'" />
       </el-tab-pane>
     </el-tabs>
     <el-dialog

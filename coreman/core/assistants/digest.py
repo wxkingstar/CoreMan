@@ -11,7 +11,8 @@
 - 摘要是事项总表（`board`）的简版：计数行、等你（在途审批单带审批系统的链接；要所有者拍板或
   当面处理的待跟进，每条一个「现在处理」回复按钮）、停滞、我处理了这些（攒下的汇报，去重）；
   在推进、等别人、排期只进计数行。自上次摘要以来没有新东西就不发，停滞本身不算新东西。
-- 所有者私聊发「看板」时回完整的总表卡片（`send_board`），五组都列。
+- 所有者私聊发「看板」时回完整的总表卡片（`send_board`），六组都列；「卡在权限」每个缺口一行、
+  怎么开一行，私聊里当面办得了的给「开通 G003」回复按钮，都给「不开 G003」（平台截下）。
 - 「现在处理 F012」是回复按钮：只有所有者本人点得动（网关按按钮里的提问人拒绝别人），点了就是
   他在私聊里发了这句话，开一轮他在场的轮次；`now_note` 把那条待跟进附进本轮块。按钮用过由网关
   置灰；待跟进关闭时 `retire` 把各张摘要与看板卡片上的那一行置灰。
@@ -31,7 +32,7 @@ from typing import Any
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import board, followups, quoting, sealed
+from coreman.core.assistants import board, followups, gaps, quoting, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.approvals import tower
 from coreman.core.assistants.kinds import HANDOVER_KIND
@@ -275,6 +276,7 @@ GROUP_TITLES = {
     "stalled": "停滞",
     "working": "在推进",
     "others": "等别人",
+    "gap": "卡在权限",
     "scheduled": "排期",
 }
 MORE_HINT = "另有 {n} 件，发「看板」或在「我的助理」页看全部"
@@ -346,6 +348,8 @@ def _items(
     requester: str,
     buttons: list[int],
     room: _Room,
+    link: str | None = None,
+    sizes: dict[uuid.UUID, int] | None = None,
 ) -> None:
     """一组待跟进：每条一行，有建议的下一行灰字；等你的条目带「现在处理」按钮。读不出来的跳过。
     每组最多 `LIST_MAX` 条，卡片放不下了也停；没列出的只说个数。"""
@@ -358,6 +362,11 @@ def _items(
         tip = board.suggestion(item.row)
         if tip:
             nodes.append(_plain(f"建议：{tip}", "notation"))
+        for approval in item.approvals:
+            line = f"待批：{_approval_summary(approval, (sizes or {}).get(approval.id, 1))}" + (
+                f" [去处理]({link})" if link else ""
+            )
+            nodes.append({"tag": "markdown", "content": line, "text_size": "notation"})
         if item.stage == "owner":
             nodes.append(_now_button(item.row.seq, requester))
         if not room.fits(sum(_bytes(node) + 1 for node in nodes)):
@@ -368,6 +377,77 @@ def _items(
         done += 1
     if len(items) > done:
         room.add(elements, _plain(MORE_HINT.format(n=len(items) - done), "notation"))
+
+
+def _gap_line(entry: board.Gap) -> str:
+    row = entry.row
+    blocked = "、".join(followups.label(seq) for seq in entry.followups) or "暂未挂事项"
+    return (
+        f"{gaps.label(row.seq)} 缺{gaps.KIND_TITLES[row.kind]} {row.key}："
+        f"{_clean(row.need_enc or '')} → 卡住 {blocked}"
+    )
+
+
+def _gap_buttons(entry: board.Gap, requester: str) -> dict[str, Any]:
+    """能在私聊里当面办的给「开通」，都给「不开」。两个都是回复按钮：只有所有者点得动。"""
+    seq = entry.row.seq
+    row_id = f"gp{seq}"
+    specs = (
+        [("go", gaps.open_text(seq), "primary")] if gaps.offers_open(entry.row, entry.fix) else []
+    )
+    specs.append(("gd", gaps.decline_text(seq), "default"))
+    ids = [f"{prefix}{seq}" for prefix, _, _ in specs]
+    return {
+        "tag": "column_set",
+        "element_id": row_id,
+        "flex_mode": "flow",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "elements": [
+                    {
+                        "tag": "button",
+                        "element_id": f"{prefix}{seq}",
+                        "type": kind,
+                        "size": "small",
+                        "text": {"tag": "plain_text", "content": label},
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": reply_value(
+                                    label, requester=requester, row=row_id, buttons=ids
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+            for prefix, label, kind in specs
+        ],
+    }
+
+
+def _gaps(
+    elements: list[dict[str, Any]], entries: list[board.Gap], requester: str, room: _Room
+) -> None:
+    """「卡在权限」：每个缺口一行、怎么开一行灰字、按钮一行；读不出来的跳过。至多 `LIST_MAX` 个。"""
+    done = 0
+    for entry in entries[:LIST_MAX]:
+        if sealed.is_locked(entry.row):
+            done += 1
+            continue
+        nodes = [
+            _plain(_gap_line(entry)),
+            _plain("怎么开：" + gaps.hint(entry.row, entry.fix), "notation"),
+            _gap_buttons(entry, requester),
+        ]
+        if not room.fits(sum(_bytes(node) + 1 for node in nodes)):
+            break
+        elements.extend(nodes)
+        done += 1
+    if len(entries) > done:
+        room.add(elements, _plain(MORE_HINT.format(n=len(entries) - done), "notation"))
 
 
 def board_card(
@@ -381,7 +461,7 @@ def board_card(
 ) -> tuple[dict[str, Any], list[int]]:
     """总表卡片，连同卡片上「现在处理」按钮对应的编号。
 
-    `full` 是「看板」指令：五组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
+    `full` 是「看板」指令：六组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
     其余只进计数行。拼到 `CARD_BUDGET` 字节为止，放不下的只说个数。
     """
     title = "事项看板" if full else "助理摘要"
@@ -418,18 +498,27 @@ def board_card(
         )
     if owner:
         room.add(elements, _heading(f"等你拍板或当面处理（{len(owner)}）"))
-        _items(elements, owner, requester, buttons, room)
-    shown = ["stalled", "working", "others", "scheduled"] if full else ["stalled"]
+        _items(elements, owner, requester, buttons, room, link, result.approval_items)
+    shown = ["stalled", "working", "others", "gap", "scheduled"] if full else ["stalled"]
     horizon = result.today + timedelta(days=board.SCHEDULE_DAYS)
     for group in shown:
+        if group == "gap":
+            if result.gaps:
+                heading = (
+                    f"{GROUP_TITLES['gap']}（{len(result.groups['gap'])} 件，"
+                    f"{len(result.gaps)} 个缺口）"
+                )
+                room.add(elements, _heading(heading))
+                _gaps(elements, result.gaps, requester, room)
+            continue
         items = result.groups[group]
         if group == "scheduled":
             items = [i for i in items if i.row.review_on is None or i.row.review_on <= horizon]
         if not items:
             continue
         room.add(elements, _heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
-        _items(elements, items, requester, buttons, room)
-    if full and not result.approvals_total and not any(counts.values()):
+        _items(elements, items, requester, buttons, room, link, result.approval_items)
+    if full and not result.approvals_total and not any(counts.values()) and not result.gaps:
         room.add(elements, _plain(EMPTY_BOARD))
     if reports:
         room.add(elements, _heading("我处理了这些"))
@@ -462,6 +551,10 @@ def _fallback(card: dict[str, Any]) -> str:
             continue
         if text:
             out.append(text)
+    if any(str(node.get("element_id", "")).startswith("gp") for node in card["body"]["elements"]):
+        out.append(
+            f"缺口可以发「{gaps.OPEN_PREFIX} G003」或「{gaps.DECLINE_PREFIX} G003」这样的编号。"
+        )
     out.append(f"要现在处理某一件，在这里发「{NOW_PREFIX} F012」这样的编号。")
     return "\n".join(out)
 
@@ -721,16 +814,42 @@ async def retire(session: AsyncSession, bot_id: uuid.UUID, seqs: Iterable[int]) 
     return queued
 
 
+def now_seq(text: str) -> int | None:
+    """「现在处理 F012」里的编号；不是这句话返回 None。"""
+    found = _NOW.match(text.strip())
+    return int(found.group(1)) if found else None
+
+
+async def owner_private_chat(
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    user_id: uuid.UUID | None,
+    chat_type: str,
+    chat_id: str,
+) -> bool:
+    """这句话是所有者在与助理的私聊里发的：发言人是所有者、单聊、就是设置行记下的那个私聊。
+
+    「现在处理 F012」「开通 G003」的说明只在这时附进本轮块：别人私聊、群里（所有者在群里也算）
+    发同样的话，不能借它看到待跟进与缺口的内容，也不能冒充所有者在场。
+    """
+    if chat_type != "single" or user_id is None or user_id != bot.owner_id:
+        return False
+    prefs = await session.get(AssistantSettings, bot.id)
+    return prefs is not None and bool(prefs.chat_id) and prefs.chat_id == chat_id
+
+
 async def now_note(session: AsyncSession, bot_id: uuid.UUID, text: str) -> str | None:
     """所有者发来「现在处理 F012」（多半是点了摘要上的按钮）：把这条待跟进附进本轮块。
 
     不是这句话、没有这一条时返回 None。标题与备注是助理之前写的，可能转述了别人的话：引文给出。
+    调用方先用 `owner_private_chat` 确认是所有者在私聊里发的。
     """
-    found = _NOW.match(text.strip())
-    if found is None:
+    seq = now_seq(text)
+    if seq is None:
         return None
     try:
-        row = await followups.get(session, bot_id, int(found.group(1)))
+        row = await followups.get(session, bot_id, seq)
     except followups.FollowupError:
         return None
     label = followups.label(row.seq)

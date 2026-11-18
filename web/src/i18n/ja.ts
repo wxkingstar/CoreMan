@@ -539,6 +539,14 @@ export default {
   "clearAddress": "保存した URL を削除"
 },
   cron: {"cancelRun": '今回の実行をキャンセル', "personal": "メンバー本人のタスク", "personalHint": "メンバーが個別チャットで自分用に作成した AI 定期タスクです。指示と実行結果は本人のみ閲覧できます。管理者は停止のみ可能です。", "privateRun": "実行者本人のみ閲覧できます", "name": "名前", "bot": "AI スタッフ", "schedule": "実行スケジュール", "timezone": "タイムゾーン", "scheduleHint": "分・時・日・月・曜日の順です。既定は平日 09:00。夏時間の重複時刻は一度だけ実行します。", "next": "次回実行", "lastStatus": "実行状態", "identityHint": "自動実行は作成者、即時実行は操作した本人の現在の権限を使用します。実行内容を編集できるのは作成者のみです。", "prompt": "実行内容", "systemPrompt": "このタスク専用の指示（空欄はAI スタッフの設定を使用）", "expires": "有効期限", "recipients": "結果の送信先", "users": "個人メッセージの宛先", "groups": "グループ ID", "emails": "メールの宛先", "perLine": "1 行に 1 件、またはカンマ区切り", "webhook": "AI スタッフのグループ Webhook に送信", "precheck": "実行前チェック", "precheckHint": "空欄の場合は毎回実行。データ判定、if/for と限定された関数に対応します。ファイル・リフレクション・任意のネットワーク要求は非対応。テストは空の ctx を使用し、モデルを呼び出しません。", "template": "テンプレートを挿入", "test": "ロジックをテスト", "willRun": "実行します", "willSkip": "スキップします", "history": "実行履歴", "run": "今すぐ実行", "queued": "実行待ち", "required": "名前、AI スタッフ、実行内容を入力してください", "expired": "有効期限は未来の日時にしてください", "reply": "実行結果", "channel": "通知先", "deliveryStatus": "配信状態", "error": "エラー", "started": "開始日時", "trigger": "実行方法", "scheduled": "自動", "manual": "手動", "tokens": "入力 / 出力 Token", "status": {"running": "実行中", "success": "成功", "failed": "失敗", "skipped": "スキップ", "failed_precheck": "チェック失敗"}},
+  systemAccess: {
+    title: '権限申請', onlyPending: '未処理のみ', all: 'すべて', createdAt: '申請日時', bot: 'AI 社員', system: 'システム', level: '読み書き',
+    read: '読み取りのみ', write: '読み書き', reason: '理由', requester: '申請者', status: '状態',
+    statuses: { pending: '未処理', approved: '承認済み', rejected: '却下', withdrawn: '取り下げ' },
+    approve: '承認', approveConfirm: '承認すると {name} をこのシステムの公開リストに追加して権限を付与します。よろしいですか？',
+    reject: '却下', rejectPrompt: '却下の理由（申請者とアシスタントに表示されます）', rejectRequired: '理由を入力してください',
+    approved: '承認しました', rejected: '却下しました', empty: '権限申請はありません',
+  },
   systemBatches: {
     items: "明細", allItems: "すべて", noItems: "該当する項目はありません", seq: "番号", target: "対象", sent: "送信内容", before: "変更前（AI 提供）", brief: "結果の要約", finishedAt: "完了時刻",
     itemFilter: {"ok": "成功", "failed": "失敗", "unknown": "結果不明", "skipped": "未実行", "pending": "未処理"},

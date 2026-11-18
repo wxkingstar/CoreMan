@@ -12,6 +12,7 @@ from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantApproval,
     AssistantFollowup,
+    AssistantGap,
     AssistantInbox,
     AssistantJob,
     AssistantPage,
@@ -55,6 +56,7 @@ def test_every_content_column_is_registered() -> None:
         AssistantSettings,
         AssistantPage,
         AssistantFollowup,
+        AssistantGap,
         AssistantJob,
         AssistantInbox,
         AssistantWatch,

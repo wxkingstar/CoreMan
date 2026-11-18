@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type Board, type BoardGroup, type BoardItem } from '@/api/myAssistant'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { DISPATCH_TOOL, PROXIED_TOOLS, myAssistant, type Board, type BoardGap, type BoardGroup, type BoardItem } from '@/api/myAssistant'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
-const GROUPS: BoardGroup[] = ['owner', 'stalled', 'working', 'others', 'scheduled']
+const GROUPS: BoardGroup[] = ['owner', 'stalled', 'working', 'others', 'gap', 'scheduled']
 const data = ref<Board | null>(null)
 const error = ref(''), loading = ref(false)
 async function load() {
@@ -25,6 +26,55 @@ function handler(item: BoardItem) {
   }
   if (item.handler === 'person' && (item.locked || !item.handler_name)) return t('assistant.board.handler.colleague')
   return t('assistant.board.handler.' + item.handler, { name: item.handler_name ?? '' })
+}
+async function decline(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.declineConfirm', { name: gap.id }), t('assistant.board.gap.decline'), { type: 'warning' })
+  } catch { return }
+  try {
+    await myAssistant.declineGap(gap.id)
+    ElMessage.success(t('assistant.board.gap.declined'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
+const level = (gap: BoardGap) => t('assistant.board.gap.levels.' + (gap.need_write ? 'write' : 'read'))
+async function grant(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.grantConfirm', { name: gap.key, value: level(gap) }), t('assistant.board.gap.grant'), { type: 'info' })
+  } catch { return }
+  try {
+    const done = await myAssistant.grantGap(gap.id)
+    // 只有缺口真的解决了才说开通了：授权写进去了但级别仍不够时如实说。
+    if (done.status === 'resolved') ElMessage.success(t('assistant.board.gap.granted'))
+    else ElMessage.warning(t('assistant.board.gap.grantIncomplete'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
+// 理由由所有者自己写（会给平台管理员看）：不预填助理记下的需要，那是只给所有者看的内容。
+const REASON_MAX = 300
+async function request(gap: BoardGap) {
+  let reason: string
+  try {
+    const { value } = await ElMessageBox.prompt(t('assistant.board.gap.reasonPrompt'), t('assistant.board.gap.request'), {
+      inputValidator: (text: string) => (text.trim().length > 0 && text.trim().length <= REASON_MAX) || t('assistant.board.gap.reasonInvalid'),
+    })
+    reason = value
+  } catch { return }
+  try {
+    await myAssistant.requestGap(gap.id, reason.trim())
+    ElMessage.success(t('assistant.board.gap.requestSent'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+}
+async function withdraw(gap: BoardGap) {
+  try {
+    await ElMessageBox.confirm(t('assistant.board.gap.withdrawConfirm', { name: gap.id }), t('assistant.board.gap.withdraw'), { type: 'warning' })
+  } catch { return }
+  try {
+    await myAssistant.withdrawGap(gap.id)
+    ElMessage.success(t('assistant.board.gap.withdrawn'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
 }
 onMounted(load)
 defineExpose({ load })
@@ -50,7 +100,12 @@ defineExpose({ load })
         v-for="g in GROUPS"
         :key="g"
       >
-        <h3>{{ t('assistant.board.groups.' + g) }}（{{ data.counts[g] + (g === 'owner' ? data.approvals_total : 0) }}）</h3>
+        <h3 v-if="g === 'gap'">
+          {{ t('assistant.board.gap.heading', { count: data.counts.gap, n: data.gaps.length }) }}
+        </h3>
+        <h3 v-else>
+          {{ t('assistant.board.groups.' + g) }}（{{ data.counts[g] + (g === 'owner' ? data.approvals_total : 0) }}）
+        </h3>
         <template v-if="g === 'owner' && data.approvals.length">
           <h4>{{ t('assistant.board.approvals', { n: data.approvals_total }) }}</h4>
           <ul>
@@ -103,8 +158,88 @@ defineExpose({ load })
             {{ t('assistant.board.decisions', { n: data.counts.owner }) }}
           </h4>
         </template>
+        <template v-if="g === 'gap'">
+          <p
+            v-if="!data.gaps.length"
+            class="muted"
+          >
+            {{ t('assistant.board.empty.gap') }}
+          </p>
+          <ul v-else>
+            <li
+              v-for="gap in data.gaps"
+              :key="gap.id"
+              :data-test="'gap-' + gap.id"
+            >
+              <strong>{{ gap.id }} {{ t('assistant.board.gap.kinds.' + gap.kind) }} {{ gap.key }}</strong>
+              <span>{{ gap.locked ? t('assistant.page.lockedText') : gap.need }}</span>
+              <span class="muted">{{ gap.followups.length ? t('assistant.board.gap.blocks', { value: gap.followups.join('、') }) : t('assistant.board.gap.none') }}</span>
+              <div
+                v-if="gap.status === 'requested'"
+                class="muted"
+                data-test="gap-requested"
+              >
+                {{ t('assistant.board.gap.requested') }}
+              </div>
+              <div
+                v-else
+                class="muted"
+              >
+                {{ t('assistant.board.gap.fixes.' + gap.fix, { name: gap.id }) }}
+                <span v-if="gap.fix === 'admin' || gap.fix === 'node_admin'">：{{ gap.key }}</span>
+              </div>
+              <div
+                v-if="gap.kind === 'business_system'"
+                class="muted"
+                data-test="gap-level"
+              >
+                {{ t('assistant.board.gap.needLevel', { value: level(gap) }) }}
+              </div>
+              <div
+                v-if="gap.request?.status === 'rejected'"
+                class="muted"
+                data-test="gap-rejected"
+              >
+                {{ gap.request.decision_note ? t('assistant.board.gap.rejected', { value: gap.request.decision_note }) : t('assistant.board.gap.rejectedPlain') }}
+              </div>
+              <el-button
+                v-if="gap.fix === 'self_grant' && gap.status === 'open'"
+                size="small"
+                type="primary"
+                data-test="gap-grant"
+                @click="grant(gap)"
+              >
+                {{ t('assistant.board.gap.grant') }}
+              </el-button>
+              <el-button
+                v-if="gap.fix === 'request' && gap.status === 'open'"
+                size="small"
+                type="primary"
+                data-test="gap-request"
+                @click="request(gap)"
+              >
+                {{ t('assistant.board.gap.request') }}
+              </el-button>
+              <el-button
+                v-if="gap.status === 'requested'"
+                size="small"
+                data-test="gap-withdraw"
+                @click="withdraw(gap)"
+              >
+                {{ t('assistant.board.gap.withdraw') }}
+              </el-button>
+              <el-button
+                size="small"
+                data-test="gap-decline"
+                @click="decline(gap)"
+              >
+                {{ t('assistant.board.gap.decline') }}
+              </el-button>
+            </li>
+          </ul>
+        </template>
         <p
-          v-if="!data.groups[g].length && !(g === 'owner' && data.approvals.length)"
+          v-if="g !== 'gap' && !data.groups[g].length && !(g === 'owner' && data.approvals.length)"
           class="muted"
         >
           {{ t('assistant.board.empty.' + g) }}
@@ -141,6 +276,22 @@ defineExpose({ load })
               class="muted"
             >
               {{ t('assistant.board.suggestion', { value: item.suggestion }) }}
+            </div>
+            <div
+              v-for="a in item.approvals"
+              :key="a.id"
+              class="muted"
+            >
+              {{ t('assistant.board.linkedApproval', { value: a.summary ?? t('assistant.page.lockedText') }) }}
+              <template v-if="(a.items ?? 1) > 1">
+                {{ t('assistant.board.batchItems', { n: a.items }) }}
+              </template>
+              <a
+                v-if="a.link"
+                :href="a.link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ t('assistant.attention.open') }}</a>
             </div>
             <div
               v-if="item.job?.blocked_reason"
