@@ -211,3 +211,36 @@ def test_an_owner_said_item_is_titled_as_his_own_words_and_quoted() -> None:
     assert handover.OWNER_SAID_TITLE in text
     assert "> 周四前我把报价发你" in text
     assert "私聊消息" not in text and "群聊消息" not in text
+
+
+def test_gap_reminders_name_the_followups() -> None:
+    rows = [
+        message(
+            "gap:1",
+            kind="reminder",
+            summary={
+                "reminder": "gap_resolved",
+                "gap": "G003",
+                "kind": "business_system",
+                "key": "orders",
+                "followups": ["F001", "F004"],
+            },
+        ),
+        message(
+            "gap:2",
+            kind="reminder",
+            summary={
+                "reminder": "gap_declined",
+                "gap": "G004",
+                "kind": "cloud_product",
+                "key": "slb",
+                "followups": ["F002"],
+            },
+        ),
+    ]
+    text = handover.render(rows, ZONE)
+    assert (
+        "权限开通了" in text
+        and "缺口 G003（business_system orders）已经可以用了：F001、F004 可以继续" in text
+    )
+    assert "所有者不开这个权限" in text and "F002 这条路走不通" in text

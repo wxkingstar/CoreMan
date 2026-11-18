@@ -337,6 +337,22 @@ async def progress(
     return row
 
 
+async def touch(session: AsyncSession, bot_id: uuid.UUID, seqs: list[int]) -> None:
+    """这几条有了外部进展（卡住它们的缺口解决了、所有者不开了……）：刷新进展时间，不碰内容列。"""
+    if not seqs:
+        return
+    now = utcnow()
+    await session.execute(
+        sql_update(AssistantFollowup)
+        .where(
+            AssistantFollowup.bot_id == bot_id,
+            AssistantFollowup.seq.in_(seqs),
+            AssistantFollowup.status.in_(LIVE),
+        )
+        .values(progress_at=now, updated_at=now)
+    )
+
+
 async def snooze(
     session: AsyncSession, bot_id: uuid.UUID, seq: int, until: date, *, today: date
 ) -> AssistantFollowup:

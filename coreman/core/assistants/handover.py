@@ -37,6 +37,8 @@ REMINDERS = {
     "followup_due": "待跟进到期",
     "morning_brief": "每日例行：今天要留意的事",
     "weekly_review": "每周例行：把待跟进过一遍",
+    "gap_resolved": "权限开通了",
+    "gap_declined": "所有者不开这个权限",
 }
 WITHDRAW_REASONS = {
     "owner_replied": "所有者已经在这个会话里亲自回复",
@@ -116,6 +118,19 @@ def _reminder(data: dict[str, Any]) -> list[str]:
         return [
             f"待跟进 {ident(data.get('label'))}（{ident(data.get('category'))}）今天到期{dates}。",
             quoted(data.get("title")),
+        ]
+    if kind in ("gap_resolved", "gap_declined"):
+        stuck_labels = "、".join(ident(item) for item in data.get("followups") or [] if ident(item))
+        what = f"{ident(data.get('kind'))} {ident(data.get('key'))}"
+        gap = ident(data.get("gap"))
+        if kind == "gap_resolved":
+            return [
+                f"缺口 {gap}（{what}）已经可以用了：{stuck_labels} 可以继续。按各自的备注接着办，"
+                "办到哪用 followup_progress 记下。"
+            ]
+        return [
+            f"所有者明确不开缺口 {gap}（{what}）：{stuck_labels} 这条路走不通。"
+            "换别的办法，或在备注里写明办不成；不要再为它登记缺口或提醒所有者。"
         ]
     if kind in ("morning_brief", "weekly_review"):
         return ["按「交回事项」里对这类条目的说明做。"]
