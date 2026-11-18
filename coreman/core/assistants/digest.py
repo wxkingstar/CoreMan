@@ -805,16 +805,42 @@ async def retire(session: AsyncSession, bot_id: uuid.UUID, seqs: Iterable[int]) 
     return queued
 
 
+def now_seq(text: str) -> int | None:
+    """「现在处理 F012」里的编号；不是这句话返回 None。"""
+    found = _NOW.match(text.strip())
+    return int(found.group(1)) if found else None
+
+
+async def owner_private_chat(
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    user_id: uuid.UUID | None,
+    chat_type: str,
+    chat_id: str,
+) -> bool:
+    """这句话是所有者在与助理的私聊里发的：发言人是所有者、单聊、就是设置行记下的那个私聊。
+
+    「现在处理 F012」「开通 G003」的说明只在这时附进本轮块：别人私聊、群里（所有者在群里也算）
+    发同样的话，不能借它看到待跟进与缺口的内容，也不能冒充所有者在场。
+    """
+    if chat_type != "single" or user_id is None or user_id != bot.owner_id:
+        return False
+    prefs = await session.get(AssistantSettings, bot.id)
+    return prefs is not None and bool(prefs.chat_id) and prefs.chat_id == chat_id
+
+
 async def now_note(session: AsyncSession, bot_id: uuid.UUID, text: str) -> str | None:
     """所有者发来「现在处理 F012」（多半是点了摘要上的按钮）：把这条待跟进附进本轮块。
 
     不是这句话、没有这一条时返回 None。标题与备注是助理之前写的，可能转述了别人的话：引文给出。
+    调用方先用 `owner_private_chat` 确认是所有者在私聊里发的。
     """
-    found = _NOW.match(text.strip())
-    if found is None:
+    seq = now_seq(text)
+    if seq is None:
         return None
     try:
-        row = await followups.get(session, bot_id, int(found.group(1)))
+        row = await followups.get(session, bot_id, seq)
     except followups.FollowupError:
         return None
     label = followups.label(row.seq)

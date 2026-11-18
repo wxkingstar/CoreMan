@@ -99,14 +99,14 @@ async def gather(
             text = _mergeable_text(task, intake.bot.name)
             if (
                 text is None
-                # 个人助理的停用、上下班、看板与不开缺口的命令不能并进给模型的这一轮：
-                # 留给它自己那一轮去截下。
+                # 个人助理的停用、上下班、看板与不开缺口的命令、现在处理与开通的按钮，不能并进
+                # 给模型的这一轮：留给它自己那一轮去截下或附上说明。
                 or (
                     is_assistant(intake.bot)
                     and (
                         text in assistant_stop.COMMANDS
                         or text in assistant_shift.RESERVED
-                        or assistant_board.is_command(text)
+                        or assistant_board.keeps_own_turn(text)
                     )
                 )
                 or not is_plain(task)

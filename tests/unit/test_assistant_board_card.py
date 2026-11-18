@@ -211,10 +211,22 @@ def test_many_gaps_stay_within_the_card_limit() -> None:
         )
         for n in range(1, 40)
     ]
+    # 只有缺口：列满 `LIST_MAX` 个，余下的在本组末尾说个数。
+    alone: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    result = board.Board(TODAY, alone, [], 0, {}, None, entries)
+    card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
+    texts = _texts(card)
+    assert _size(card) <= MAX_CARD_BYTES
+    assert texts.count("缺个人凭证") == digest.LIST_MAX
+    assert texts.endswith(digest.MORE_HINT.format(n=len(entries) - digest.LIST_MAX))
+    # 前面几组已经把卡片占满：缺口一个也放不下，照样说个数，卡片不超限。
     full = _board()
     result = board.Board(
         TODAY, full.groups, full.approvals, full.approvals_total, {}, None, entries
     )
     card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
+    texts = _texts(card)
     assert _size(card) <= MAX_CARD_BYTES
-    assert "另有" in _texts(card)
+    shown = texts.count("缺个人凭证")
+    tail = texts.split("卡在权限（0 件，39 个缺口）", 1)[1].split("\n**", 1)[0]
+    assert digest.MORE_HINT.format(n=len(entries) - shown) in tail

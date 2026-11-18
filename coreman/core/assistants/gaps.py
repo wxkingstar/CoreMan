@@ -462,6 +462,11 @@ def decline_text(seq: int) -> str:
     return f"{DECLINE_PREFIX} {label(seq)}"
 
 
+def open_seq(text: str) -> int | None:
+    found = _OPEN.match(text.strip())
+    return int(found.group(1)) if found else None
+
+
 def decline_seq(text: str) -> int | None:
     found = _DECLINE.match(text.strip())
     return int(found.group(1)) if found else None
@@ -471,13 +476,14 @@ async def open_note(session: AsyncSession, bot_id: uuid.UUID, text: str) -> str 
     """所有者发来「开通 G003」（多半是点了看板上的按钮）：把这个缺口与怎么开附进本轮块。
 
     之前点过「不开」的，这一次算他改了主意：重新打开。不是这句话、没有这个缺口时返回 None。
+    调用方先用 `digest.owner_private_chat` 确认是所有者在私聊里发的。
     """
-    found = _OPEN.match(text.strip())
-    if found is None:
+    seq = open_seq(text)
+    if seq is None:
         return None
     await _lock(session, bot_id)
     try:
-        row = await get(session, bot_id, int(found.group(1)), lock=True)
+        row = await get(session, bot_id, seq, lock=True)
     except GapError:
         return None
     name = label(row.seq)

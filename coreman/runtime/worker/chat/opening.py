@@ -406,10 +406,17 @@ class OpenStage(ChatStageBase):
             knowledge = await assistant_notes.turn_note(session, ctx, intake, info)
             if knowledge:
                 ctx.turn_notes.append(knowledge)
-            if ctx.task.kind == "chat":
-                # 所有者发来「现在处理 F012」（摘要上的按钮）：附上这条待跟进。
-                from coreman.core.assistants import digest
+            from coreman.core.assistants import digest
 
+            if ctx.task.kind == "chat" and await digest.owner_private_chat(
+                session,
+                bot,
+                user_id=intake.speaker.user_id,
+                chat_type=intake.chat_type,
+                chat_id=intake.chat_id,
+            ):
+                # 所有者在私聊里发来「现在处理 F012」（摘要上的按钮）：附上这条待跟进。
+                # 别人或群里发的同一句话什么都不附：不泄露内容，也不冒充所有者在场。
                 handle = await digest.now_note(session, bot.id, intake.text)
                 if handle:
                     ctx.turn_notes.append(handle)

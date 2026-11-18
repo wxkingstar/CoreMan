@@ -31,6 +31,15 @@ def is_command(text: str) -> bool:
     return clean in COMMANDS or gaps.decline_seq(clean) is not None
 
 
+def keeps_own_turn(text: str) -> bool:
+    """排队合并时要留给自己那一轮的：平台截下的命令，加上「现在处理 F012」「开通 G003」
+    （那一轮要附上对应的说明，并进别的轮次就丢了）。"""
+    clean = text.strip()
+    return (
+        is_command(clean) or gaps.open_seq(clean) is not None or digest.now_seq(clean) is not None
+    )
+
+
 async def _decline(
     session: AsyncSession, bot: Bot, prefs: AssistantSettings, seq: int, key: str
 ) -> str:
